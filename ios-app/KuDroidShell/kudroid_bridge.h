@@ -8,6 +8,11 @@ extern "C" {
 /// Returns 0 on success, non-zero on failure.
 int kudroid_self_test(void);
 
+/// Self-test with detailed log output.
+/// Returns a malloc'd string containing step-by-step debug log.
+/// Caller must free() the returned string.
+const char* kudroid_self_test_log(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -27,11 +27,14 @@ struct ContentView: View {
 }
 
 /// Calls into kudroid_core C++ library.
-/// Returns a debug string indicating loader status.
+/// Returns a detailed debug log string.
 func runElfLoaderTest() -> String {
-    let result = kudroid_self_test()
-    let code = Int(result)
-    return code == 0 ? "✅ ELF Loader OK (stub)" : "❌ Error code: \(code)"
+    guard let cString = kudroid_self_test_log() else {
+        return "❌ Error: null result"
+    }
+    let log = String(cString: cString)
+    free(UnsafeMutablePointer(mutating: cString))
+    return log
 }
 
 #Preview {
