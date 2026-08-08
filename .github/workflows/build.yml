@@ -48,6 +48,7 @@ jobs:
 
       - name: Build test .so (ARM64) for bundle
         run: |
+          mkdir -p KuDroidShell.app
           # Cross-compile test .so for ARM64 directly on macOS runner
           clang -target aarch64-linux-gnu -shared -fPIC -o KuDroidShell.app/test_lib.so tests/test_lib.c 2>/dev/null || \
           clang -target arm64-apple-ios15.0 -shared -fPIC -o KuDroidShell.app/test_lib.so tests/test_lib.c 2>/dev/null || \
@@ -56,7 +57,6 @@ jobs:
       - name: Compile Swift app + link kudroid_core (unsigned .app)
         run: |
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-          # mkdir already done above, KuDroidShell.app exists with test_lib.so inside
 
           swiftc -sdk "$SDK" -target arm64-apple-ios15.0 \
             -O -parse-as-library \
