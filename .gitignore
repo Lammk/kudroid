@@ -1,0 +1,33 @@
+# Build artifacts
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+compile_commands.json
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Compiled objects
+*.o
+*.a
+*.so
+*.dylib
+*.out
+
+# Third-party vendored binaries
+third_party/**/*.a
+third_party/**/*.so
+
+</parameter>
+<parameter=filePath>
+/home/kuzei/Documents/Kudroid/.gitignore
+</parameter>
+</invoke>
