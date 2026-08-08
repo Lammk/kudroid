@@ -39,6 +39,15 @@ struct Elf64Phdr {
 
 static const uint8_t ELF_MAGIC[4] = {0x7f, 'E', 'L', 'F'};
 static const uint16_t EM_AARCH64 = 0xB7;
+static const uint16_t EM_X86_64   = 0x3E;
+
+static const char* machine_name(uint16_t machine) {
+    switch (machine) {
+        case EM_AARCH64: return "AArch64";
+        case EM_X86_64:  return "x86-64";
+        default:         return "unknown";
+    }
+}
 
 ElfLoader::ElfLoader(std::string path)
     : path_(std::move(path)) {}
@@ -90,9 +99,12 @@ bool ElfLoader::parse() {
         return false;
     }
 
-    // Must be AArch64
-    if (ehdr.e_machine != EM_AARCH64) {
-        lastError_ = "Not an AArch64 ELF (machine=" + std::to_string(ehdr.e_machine) + ")";
+    // Must be AArch64 or x86-64
+    if (ehdr.e_machine != EM_AARCH64 && ehdr.e_machine != EM_X86_64) {
+        char mbuf[64];
+        snprintf(mbuf, sizeof(mbuf), "Unsupported machine: %s (0x%x)",
+                 machine_name(ehdr.e_machine), ehdr.e_machine);
+        lastError_ = mbuf;
         return false;
     }
 
