@@ -25,6 +25,11 @@ const char* kudroid_load_elf(const char* path);
 ///          Caller must free() the returned string.
 const char* kudroid_execution_test(const char* path);
 
+/// Report whether JIT (executable memory) is available for this process.
+/// @return  A malloc'd string "JIT: Enabled" or "JIT: Disabled".
+///          Caller must free() the returned string.
+const char* kudroid_jit_status(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -6,6 +6,10 @@
 #include <sys/mman.h>
 #include <utility>
 
+#if defined(__APPLE__)
+#include <libkern/OSCacheControl.h>
+#endif
+
 namespace kudroid {
 
 // ELF64 header structures
@@ -236,7 +240,11 @@ bool ElfLoader::map() {
     // the data cache and the stale instruction cache invalidated, or the CPU
     // executes garbage and the process crashes (SIGILL/SIGBUS) with no log.
     char* mapStart = static_cast<char*>(base_);
+#if defined(__APPLE__)
+    sys_icache_invalidate(mapStart, totalSize);
+#else
     __builtin___clear_cache(mapStart, mapStart + totalSize);
+#endif
 
     // Adjust base_ to point to the logical address 0
     // (so base_ + st_value = actual address)

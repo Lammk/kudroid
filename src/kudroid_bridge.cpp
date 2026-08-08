@@ -4,6 +4,48 @@
 #include <cstring>
 #include <string>
 
+#if defined(__APPLE__)
+#include <sys/mman.h>
+#include <unistd.h>
+#include <TargetConditionals.h>
+
+// csops() is a private API but stable; used to read the process' code-signing
+// status. CS_DEBUGGED is set when the JIT (dynamic-codesigning) path is active
+// under LiveContainer / a debugger, which is what lets PROT_EXEC pages run.
+extern "C" int csops(pid_t pid, unsigned int ops, void* useraddr, size_t usersize);
+#ifndef CS_OPS_STATUS
+#define CS_OPS_STATUS 0
+#endif
+#ifndef CS_DEBUGGED
+#define CS_DEBUGGED 0x10000000
+#endif
+
+// Returns 1 if JIT (executable memory) appears usable, 0 otherwise.
+static int kudroid_jit_available(void) {
+    unsigned int flags = 0;
+    if (csops(getpid(), CS_OPS_STATUS, &flags, sizeof(flags)) == 0) {
+        if (flags & CS_DEBUGGED) return 1;
+    }
+    // Fallback probe: try to allocate a W+X page. If the kernel refuses, no JIT.
+    void* p = mmap(nullptr, 4096, PROT_READ | PROT_WRITE | PROT_EXEC,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) return 0;
+    munmap(p, 4096);
+    return 1;
+}
+#else
+static int kudroid_jit_available(void) { return 1; }
+#endif
+
+extern "C" const char* kudroid_jit_status(void) {
+    const char* text = kudroid_jit_available()
+        ? "JIT: Enabled"
+        : "JIT: Disabled";
+    char* result = (char*)malloc(strlen(text) + 1);
+    if (result) memcpy(result, text, strlen(text) + 1);
+    return result;
+}
+
 extern "C" int kudroid_self_test(void) {
     fprintf(stderr, "[kudroid_core] Self-test starting...\n");
     fprintf(stderr, "[kudroid_core] Creating ElfLoader with dummy path '/nonexistent'...\n");

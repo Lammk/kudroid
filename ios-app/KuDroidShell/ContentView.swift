@@ -4,6 +4,7 @@ import UIKit
 struct ContentView: View {
     @State private var fullLog = "KuDroid Core Status"
     @State private var showCopyAlert = false
+    @State private var jitStatus = "JIT: Unknown"
 
     /// Show only first 20 lines for readability.
     private var previewLog: String {
@@ -22,6 +23,10 @@ struct ContentView: View {
             Text("KuDroid v0.1")
                 .font(.title)
                 .fontWeight(.bold)
+
+            Label(jitStatus, systemImage: jitStatus.contains("Enabled") ? "bolt.fill" : "bolt.slash.fill")
+                .font(.subheadline)
+                .foregroundColor(jitStatus.contains("Enabled") ? .green : .red)
 
             ScrollView {
                 Text(previewLog)
@@ -72,7 +77,20 @@ struct ContentView: View {
         } message: {
             Text("Full log (\(fullLog.count) chars) copied to clipboard.")
         }
+        .onAppear {
+            jitStatus = runJitStatus()
+        }
     }
+}
+
+/// Query JIT availability from kudroid_core.
+func runJitStatus() -> String {
+    guard let cString = kudroid_jit_status() else {
+        return "JIT: Unknown"
+    }
+    let status = String(cString: cString)
+    free(UnsafeMutablePointer(mutating: cString))
+    return status
 }
 
 /// Load test_lib.so bundled inside the app.
