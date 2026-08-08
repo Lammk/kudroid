@@ -98,3 +98,29 @@ jobs:
           path: |
             KuDroidShell.ipa
             build-ios/libkudroid_core.a
+
+  build-test-so-arm64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ARM64 cross-compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build test_lib.so (ARM64)
+        run: |
+          aarch64-linux-gnu-gcc -shared -fPIC -o tests/test_lib_arm64.so tests/test_lib.c
+          aarch64-linux-gnu-strip tests/test_lib_arm64.so
+
+      - name: Verify ARM64 ELF
+        run: |
+          file tests/test_lib_arm64.so
+          readelf -h tests/test_lib_arm64.so | grep -E "Class|Machine"
+
+      - name: Upload test .so artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-lib-arm64-so
+          path: tests/test_lib_arm64.so
