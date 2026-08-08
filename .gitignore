@@ -19,6 +19,7 @@ compile_commands.json
 *.o
 *.a
 *.so
+!tests/*.so
 *.dylib
 *.out
 
@@ -32,3 +33,4 @@ third_party/**/*.so
 </parameter>
 </invoke>
 .claude
+test-lib-arm64-so.zip
