@@ -46,17 +46,20 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release
           cmake --build build-ios --parallel
 
-      - name: Build test .so (ARM64) for bundle
-        run: |
-          mkdir -p KuDroidShell.app
-          # Cross-compile test .so for ARM64 directly on macOS runner
-          clang -target aarch64-linux-gnu -shared -fPIC -o KuDroidShell.app/test_lib.so tests/test_lib.c 2>/dev/null || \
-          clang -target arm64-apple-ios15.0 -shared -fPIC -o KuDroidShell.app/test_lib.so tests/test_lib.c 2>/dev/null || \
-          echo "Warning: Could not cross-compile test .so, bundle will be missing test_lib.so"
-
       - name: Compile Swift app + link kudroid_core (unsigned .app)
         run: |
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          mkdir -p KuDroidShell.app
+
+          # Copy pre-built ARM64 test .so from repo into app bundle
+          if [ -f tests/test_lib_arm64.so ]; then
+            cp tests/test_lib_arm64.so KuDroidShell.app/test_lib.so
+            echo "Bundled ARM64 test_lib.so ($(wc -c < KuDroidShell.app/test_lib.so) bytes)"
+          else
+            echo "WARNING: tests/test_lib_arm64.so not found in repo!"
+            echo "Run: gh run download <run-id> -n test-lib-arm64-so -D tests/"
+            echo "Then commit the file and push again."
+          fi
 
           swiftc -sdk "$SDK" -target arm64-apple-ios15.0 \
             -O -parse-as-library \
