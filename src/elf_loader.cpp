@@ -232,6 +232,12 @@ bool ElfLoader::map() {
         }
     }
 
+    // ARM64 has separate I/D caches: freshly written code must be flushed from
+    // the data cache and the stale instruction cache invalidated, or the CPU
+    // executes garbage and the process crashes (SIGILL/SIGBUS) with no log.
+    char* mapStart = static_cast<char*>(base_);
+    __builtin___clear_cache(mapStart, mapStart + totalSize);
+
     // Adjust base_ to point to the logical address 0
     // (so base_ + st_value = actual address)
     base_ = static_cast<char*>(base_) - minVaddr;
