@@ -32,6 +32,72 @@ jobs:
       - name: Build
         run: cmake --build build --parallel
 
+  ios-build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build kudroid_core static library (iOS ARM64)
+        run: |
+          cmake -B build-ios \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-ios --parallel
+
+      - name: Compile Swift app + link kudroid_core (unsigned .app)
+        run: |
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          mkdir -p KuDroidShell.app
+
+          swiftc -sdk "$SDK" -target arm64-apple-ios15.0 \
+            -O -parse-as-library \
+            ios-app/KuDroidShell/KuDroidApp.swift \
+            ios-app/KuDroidShell/ContentView.swift \
+            build-ios/libkudroid_core.a \
+            -o KuDroidShell.app/KuDroidShell
+
+          cat > KuDroidShell.app/Info.plist << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleExecutable</key>
+              <string>KuDroidShell</string>
+              <key>CFBundleIdentifier</key>
+              <string>dev.kuzei13.kudroid</string>
+              <key>CFBundleName</key>
+              <string>KuDroid</string>
+              <key>CFBundleVersion</key>
+              <string>1</string>
+              <key>CFBundleShortVersionString</key>
+              <string>0.1.0</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>UILaunchStoryboardName</key>
+              <string>LaunchScreen</string>
+              <key>UISupportedInterfaceOrientations</key>
+              <array><string>UIInterfaceOrientationPortrait</string></array>
+          </dict>
+          </plist>
+          PLIST
+
+      - name: Package unsigned IPA
+        run: |
+          mkdir -p Payload
+          cp -R KuDroidShell.app Payload/
+          zip -r KuDroidShell.ipa Payload
+          rm -rf Payload
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kudroid-ios-unsigned
+          path: |
+            KuDroidShell.ipa
+            build-ios/libkudroid_core.a
+
 </parameter>
 <parameter=filePath>
 /home/kuzei/Documents/Kudroid/.github/workflows/build.yml
