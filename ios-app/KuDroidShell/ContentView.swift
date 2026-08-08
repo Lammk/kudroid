@@ -7,6 +7,8 @@ struct ContentView: View {
     @State private var showCopyAlert = false
     @State private var soPath = "No file selected"
     @State private var showFilePicker = false
+    /// Hold the security-scoped URL so it stays accessible
+    @State private var selectedURL: URL? = nil
 
     /// Show only first 20 lines for readability.
     private var previewLog: String {
@@ -82,7 +84,7 @@ struct ContentView: View {
         .fileImporter(
             isPresented: $showFilePicker,
             allowedContentTypes: [
-                .item,  // allow all files
+                .item,
                 UTType(filenameExtension: "so") ?? .unixExecutable,
                 .unixExecutable
             ].compactMap { $0 },
@@ -91,18 +93,31 @@ struct ContentView: View {
             switch result {
             case .success(let urls):
                 if let url = urls.first {
-                    // Start accessing security-scoped resource
-                    let didStart = url.startAccessingSecurityScopedResource()
-                    soPath = url.path
-                    // Keep access while we need the file; release after load
-                    // (simplified: path is stored, access released after load)
-                    if didStart {
-                        url.stopAccessingSecurityScopedResource()
-                    }
+                    _ = url.startAccessingSecurityScopedResource()
+                    selectedURL = url
+                    soPath = url.lastPathComponent
                 }
             case .failure(let error):
                 soPath = "Error: \(error.localizedDescription)"
             }
+        }
+    }
+
+    private func loadSO() {
+        guard let url = selectedURL else {
+            fullLog = "❌ No file selected"
+            return
+        }
+        let tmpDir = FileManager.default.temporaryDirectory
+        let tmpURL = tmpDir.appendingPathComponent("loaded.so")
+        do {
+            if FileManager.default.fileExists(atPath: tmpURL.path) {
+                try FileManager.default.removeItem(at: tmpURL)
+            }
+            try FileManager.default.copyItem(at: url, to: tmpURL)
+            fullLog = runLoadElf(path: tmpURL.path)
+        } catch {
+            fullLog = "❌ Failed to copy file: \(error.localizedDescription)"
         }
     }
 }
