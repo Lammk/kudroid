@@ -290,21 +290,37 @@ void* ElfLoader::getSymbolAddress(const char* symbolName) {
     const char* strtab = nullptr;
     size_t strsz = 0;
 
+    // Helper to convert virtual address to file offset using PT_LOAD segments
+    auto vaddrToOffset = [&](uint64_t vaddr) -> uint64_t {
+        for (uint16_t j = 0; j < ehdr->e_phnum; ++j) {
+            if (phdrs[j].p_type == 1) {  // PT_LOAD
+                if (vaddr >= phdrs[j].p_vaddr &&
+                    vaddr < phdrs[j].p_vaddr + phdrs[j].p_filesz) {
+                    return phdrs[j].p_offset + (vaddr - phdrs[j].p_vaddr);
+                }
+            }
+        }
+        return UINT64_MAX;  // not found
+    };
+
     for (size_t i = 0; i < dynCount; ++i) {
         if (dynamic[i].d_tag == DT_NULL) break;
         switch (dynamic[i].d_tag) {
-            case DT_SYMTAB:
-                // d_val is the vaddr of symtab; convert to file offset
-                if (dynamic[i].d_val < fileBuf_.size()) {
+            case DT_SYMTAB: {
+                uint64_t off = vaddrToOffset(dynamic[i].d_val);
+                if (off != UINT64_MAX && off < fileBuf_.size()) {
                     symtab = reinterpret_cast<const Elf64Sym*>(
-                        fileBuf_.data() + dynamic[i].d_val);
+                        fileBuf_.data() + off);
                 }
                 break;
-            case DT_STRTAB:
-                if (dynamic[i].d_val < fileBuf_.size()) {
-                    strtab = fileBuf_.data() + dynamic[i].d_val;
+            }
+            case DT_STRTAB: {
+                uint64_t off = vaddrToOffset(dynamic[i].d_val);
+                if (off != UINT64_MAX && off < fileBuf_.size()) {
+                    strtab = fileBuf_.data() + off;
                 }
                 break;
+            }
             case DT_STRSZ:
                 strsz = dynamic[i].d_val;
                 break;
