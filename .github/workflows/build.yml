@@ -97,9 +97,3 @@ jobs:
           path: |
             KuDroidShell.ipa
             build-ios/libkudroid_core.a
-
-</parameter>
-<parameter=filePath>
-/home/kuzei/Documents/Kudroid/.github/workflows/build.yml
-</parameter>
-</invoke>
