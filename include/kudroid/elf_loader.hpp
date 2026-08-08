@@ -39,12 +39,18 @@ public:
     [[nodiscard]] std::uint64_t entryPoint() const { return entry_; }
     [[nodiscard]] const std::vector<Segment>& segments() const { return segments_; }
     [[nodiscard]] bool isLoaded() const { return base_ != nullptr; }
+    [[nodiscard]] bool isParsed() const { return parsed_; }
+
+    /// Returns the last error message (empty if no error).
+    [[nodiscard]] const char* lastError() const;
 
 private:
     std::string          path_;
     void*                base_     = nullptr;
     std::uint64_t        entry_    = 0;
     std::vector<Segment> segments_;
+    bool                 parsed_   = false;
+    std::string          lastError_;
 };
 
 } // namespace kudroid
