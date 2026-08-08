@@ -53,6 +53,7 @@ jobs:
 
           swiftc -sdk "$SDK" -target arm64-apple-ios15.0 \
             -O -parse-as-library \
+            -import-objc-header ios-app/KuDroidShell/kudroid_bridge.h \
             ios-app/KuDroidShell/KuDroidApp.swift \
             ios-app/KuDroidShell/ContentView.swift \
             build-ios/libkudroid_core.a \
