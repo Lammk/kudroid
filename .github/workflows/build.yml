@@ -46,20 +46,21 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release
           cmake --build build-ios --parallel
 
+      - name: Build test_lib ARM64 .so
+        run: |
+          clang -shared -fPIC -arch arm64 \
+            -o tests/test_lib_arm64.so tests/test_lib.c
+          strip tests/test_lib_arm64.so
+          file tests/test_lib_arm64.so
+
       - name: Compile Swift app + link kudroid_core (unsigned .app)
         run: |
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           mkdir -p KuDroidShell.app
 
-          # Copy pre-built ARM64 test .so from repo into app bundle
-          if [ -f tests/test_lib_arm64.so ]; then
-            cp tests/test_lib_arm64.so KuDroidShell.app/test_lib.so
-            echo "Bundled ARM64 test_lib.so ($(wc -c < KuDroidShell.app/test_lib.so) bytes)"
-          else
-            echo "WARNING: tests/test_lib_arm64.so not found in repo!"
-            echo "Run: gh run download <run-id> -n test-lib-arm64-so -D tests/"
-            echo "Then commit the file and push again."
-          fi
+          # Copy ARM64 test .so into app bundle
+          cp tests/test_lib_arm64.so KuDroidShell.app/test_lib.so
+          echo "Bundled ARM64 test_lib.so ($(wc -c < KuDroidShell.app/test_lib.so) bytes)"
 
           swiftc -sdk "$SDK" -target arm64-apple-ios15.0 \
             -O -parse-as-library \
