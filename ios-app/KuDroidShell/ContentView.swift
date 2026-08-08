@@ -120,13 +120,14 @@ func runExecutionTest() -> String {
         return "❌ test_lib.so not found in bundle"
     }
     let tmpURL = FileManager.default.temporaryDirectory.appendingPathComponent("test_lib.so")
-    // If not already copied, copy it
-    if !FileManager.default.fileExists(atPath: tmpURL.path) {
-        do {
-            try FileManager.default.copyItem(at: bundledURL, to: tmpURL)
-        } catch {
-            return "❌ Failed to copy bundled .so: \(error.localizedDescription)"
+    // Always refresh: LiveContainer keeps tmp across updates, so a stale .so would persist.
+    do {
+        if FileManager.default.fileExists(atPath: tmpURL.path) {
+            try FileManager.default.removeItem(at: tmpURL)
         }
+        try FileManager.default.copyItem(at: bundledURL, to: tmpURL)
+    } catch {
+        return "❌ Failed to copy bundled .so: \(error.localizedDescription)"
     }
 
     guard let cString = kudroid_execution_test(tmpURL.path) else {

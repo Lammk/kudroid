@@ -171,6 +171,7 @@ static const int64_t DT_NULL   = 0;
 static const int64_t DT_SYMTAB = 6;
 static const int64_t DT_STRTAB = 5;
 static const int64_t DT_STRSZ  = 10;
+static const int64_t DT_HASH   = 4;
 
 bool ElfLoader::readFile(std::vector<char>& buf) {
     std::ifstream file(path_, std::ios::binary | std::ios::ate);
@@ -289,6 +290,8 @@ void* ElfLoader::getSymbolAddress(const char* symbolName) {
     const Elf64Sym* symtab = nullptr;
     const char* strtab = nullptr;
     size_t strsz = 0;
+    uint64_t symtabOff = UINT64_MAX;
+    uint64_t strtabOff = UINT64_MAX;
 
     // Helper to convert virtual address to file offset using PT_LOAD segments
     auto vaddrToOffset = [&](uint64_t vaddr) -> uint64_t {
@@ -311,6 +314,7 @@ void* ElfLoader::getSymbolAddress(const char* symbolName) {
                 if (off != UINT64_MAX && off < fileBuf_.size()) {
                     symtab = reinterpret_cast<const Elf64Sym*>(
                         fileBuf_.data() + off);
+                    symtabOff = off;
                 }
                 break;
             }
@@ -318,6 +322,7 @@ void* ElfLoader::getSymbolAddress(const char* symbolName) {
                 uint64_t off = vaddrToOffset(dynamic[i].d_val);
                 if (off != UINT64_MAX && off < fileBuf_.size()) {
                     strtab = fileBuf_.data() + off;
+                    strtabOff = off;
                 }
                 break;
             }
@@ -329,11 +334,21 @@ void* ElfLoader::getSymbolAddress(const char* symbolName) {
 
     if (!symtab || !strtab) return nullptr;
 
+    // Determine the number of .dynsym entries safely. The string table almost
+    // always immediately follows the symbol table, so bound the count by that
+    // gap; otherwise fall back to the file buffer end. Without this bound the
+    // loop reads past the mapped file buffer and crashes.
+    size_t maxSym = 0;
+    if (strtabOff != UINT64_MAX && strtabOff > symtabOff) {
+        maxSym = (strtabOff - symtabOff) / sizeof(Elf64Sym);
+    } else {
+        maxSym = (fileBuf_.size() - symtabOff) / sizeof(Elf64Sym);
+    }
+
     // Iterate over symbol table entries
-    size_t maxSym = strsz > 0 ? (fileBuf_.size() / sizeof(Elf64Sym)) : 0;
     for (size_t i = 0; i < maxSym; ++i) {
         if (symtab[i].st_name == 0) continue;
-        if (symtab[i].st_name >= strsz) continue;
+        if (strsz > 0 && symtab[i].st_name >= strsz) continue;
 
         const char* name = strtab + symtab[i].st_name;
         if (strcmp(name, symbolName) == 0) {
