@@ -1,8 +1,11 @@
 # 2026-08-08 — Execution Test Debug & Fix
 
-## Trạng thái hiện tại
+## Trạng thái hiện tại (2026-08-08 14:30 ICT)
 - ELF parse, mmap, relocate: ✅ OK
-- Execution test: ❌ `Symbol 'kudroid_add' not found in .dynsym`
+- Execution test: ❌ `Symbol 'kudroid_add' not found in .dynsym` (trên IPA cũ)
+- Fix `vaddrToOffset`: ✅ Đã push lên GitHub
+- CI build mới: 🔄 Đang chạy (commit `f921c7a`)
+- Chờ tải IPA mới để test lại
 
 ## Đã làm
 
