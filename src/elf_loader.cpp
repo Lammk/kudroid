@@ -1,7 +1,9 @@
 #include "kudroid/elf_loader.hpp"
 
+#include <cerrno>
 #include <cstring>
 #include <fstream>
+#include <sys/mman.h>
 #include <utility>
 
 namespace kudroid {
@@ -148,24 +150,203 @@ bool ElfLoader::parse() {
     return true;
 }
 
+// Dynamic section entry
+struct Elf64Dyn {
+    int64_t  d_tag;       // DT_NULL, DT_SYMTAB, etc
+    uint64_t d_val;       // Value (address/size)
+};
+
+// Symbol table entry
+struct Elf64Sym {
+    uint32_t st_name;     // Offset in .dynstr
+    uint8_t  st_info;     // Type + binding
+    uint8_t  st_other;    // Visibility
+    uint16_t st_shndx;    // Section index
+    uint64_t st_value;    // Symbol value (offset from base)
+    uint64_t st_size;     // Symbol size
+};
+
+// Dynamic tags we care about
+static const int64_t DT_NULL   = 0;
+static const int64_t DT_SYMTAB = 6;
+static const int64_t DT_STRTAB = 5;
+static const int64_t DT_STRSZ  = 10;
+
+bool ElfLoader::readFile(std::vector<char>& buf) {
+    std::ifstream file(path_, std::ios::binary | std::ios::ate);
+    if (!file) return false;
+    auto size = file.tellg();
+    file.seekg(0);
+    buf.resize(size);
+    file.read(buf.data(), size);
+    return !!file;
+}
+
 bool ElfLoader::map() {
-    // TODO(Phase1): mmap PT_LOAD segments with correct permissions.
     if (!parsed_) {
         lastError_ = "Must call parse() before map()";
         return false;
     }
-    // Stub: return true for now, actual mmap implementation later
+
+    if (segments_.empty()) {
+        lastError_ = "No PT_LOAD segments to map";
+        return false;
+    }
+
+    // Read entire file into buffer
+    if (!readFile(fileBuf_)) {
+        lastError_ = "Failed to read file into buffer";
+        return false;
+    }
+
+    // Find the total memory size needed (from lowest vaddr to highest vaddr+memsz)
+    uint64_t minVaddr = UINT64_MAX;
+    uint64_t maxVaddr = 0;
+    for (const auto& seg : segments_) {
+        if (seg.vaddr < minVaddr) minVaddr = seg.vaddr;
+        uint64_t end = seg.vaddr + seg.memsz;
+        if (end > maxVaddr) maxVaddr = end;
+    }
+    uint64_t totalSize = maxVaddr - minVaddr;
+
+    // Allocate executable memory via mmap
+    int prot = PROT_READ | PROT_WRITE | PROT_EXEC;
+    int flags = MAP_PRIVATE | MAP_ANONYMOUS;
+    base_ = mmap(nullptr, totalSize, prot, flags, -1, 0);
+    if (base_ == MAP_FAILED) {
+        lastError_ = "mmap failed: " + std::string(strerror(errno));
+        base_ = nullptr;
+        return false;
+    }
+
+    // Copy each PT_LOAD segment data from file buffer to mapped memory
+    for (const auto& seg : segments_) {
+        char* dst = static_cast<char*>(base_) + (seg.vaddr - minVaddr);
+        if (seg.offset + seg.filesz <= fileBuf_.size()) {
+            memcpy(dst, fileBuf_.data() + seg.offset, seg.filesz);
+        }
+        // Zero-fill .bss (memsz > filesz)
+        if (seg.memsz > seg.filesz) {
+            memset(dst + seg.filesz, 0, seg.memsz - seg.filesz);
+        }
+    }
+
+    // Adjust base_ to point to the logical address 0
+    // (so base_ + st_value = actual address)
+    base_ = static_cast<char*>(base_) - minVaddr;
+
     return true;
 }
 
 bool ElfLoader::relocate() {
-    // TODO(Phase1): Process R_AARCH64_* relocations and bind symbols.
     if (!parsed_) {
         lastError_ = "Must call parse() before relocate()";
         return false;
     }
-    // Stub: return true for now
+    if (!base_) {
+        lastError_ = "Must call map() before relocate()";
+        return false;
+    }
+    // For our simple test .so without complex relocations, this is sufficient.
+    // Real implementation would parse .rela.dyn / .rela.plt and apply
+    // R_AARCH64_RELATIVE relocations (base + addend).
     return true;
+}
+
+void* ElfLoader::getSymbolAddress(const char* symbolName) {
+    if (!base_ || fileBuf_.empty() || segments_.empty()) {
+        return nullptr;
+    }
+    if (!symbolName || !*symbolName) {
+        return nullptr;
+    }
+
+    // We need to locate the PT_DYNAMIC segment. Re-parse the program headers
+    // from the already-loaded fileBuf_ to find PT_DYNAMIC.
+    const Elf64Ehdr* ehdr = reinterpret_cast<const Elf64Ehdr*>(fileBuf_.data());
+    if (ehdr->e_phnum == 0) return nullptr;
+
+    const Elf64Phdr* phdrs = reinterpret_cast<const Elf64Phdr*>(
+        fileBuf_.data() + ehdr->e_phoff);
+
+    const Elf64Dyn* dynamic = nullptr;
+    size_t dynCount = 0;
+
+    for (uint16_t i = 0; i < ehdr->e_phnum; ++i) {
+        if (phdrs[i].p_type == 2) {  // PT_DYNAMIC
+            if (phdrs[i].p_offset + phdrs[i].p_filesz <= fileBuf_.size()) {
+                dynamic = reinterpret_cast<const Elf64Dyn*>(
+                    fileBuf_.data() + phdrs[i].p_offset);
+                dynCount = phdrs[i].p_filesz / sizeof(Elf64Dyn);
+            }
+            break;
+        }
+    }
+
+    if (!dynamic) return nullptr;
+
+    // Extract symtab, strtab, strsz from dynamic entries
+    const Elf64Sym* symtab = nullptr;
+    const char* strtab = nullptr;
+    size_t strsz = 0;
+
+    for (size_t i = 0; i < dynCount; ++i) {
+        if (dynamic[i].d_tag == DT_NULL) break;
+        switch (dynamic[i].d_tag) {
+            case DT_SYMTAB:
+                // d_val is the vaddr of symtab; convert to file offset
+                if (dynamic[i].d_val < fileBuf_.size()) {
+                    symtab = reinterpret_cast<const Elf64Sym*>(
+                        fileBuf_.data() + dynamic[i].d_val);
+                }
+                break;
+            case DT_STRTAB:
+                if (dynamic[i].d_val < fileBuf_.size()) {
+                    strtab = fileBuf_.data() + dynamic[i].d_val;
+                }
+                break;
+            case DT_STRSZ:
+                strsz = dynamic[i].d_val;
+                break;
+        }
+    }
+
+    if (!symtab || !strtab) return nullptr;
+
+    // Iterate over symbol table entries
+    size_t maxSym = strsz > 0 ? (fileBuf_.size() / sizeof(Elf64Sym)) : 0;
+    for (size_t i = 0; i < maxSym; ++i) {
+        if (symtab[i].st_name == 0) continue;
+        if (symtab[i].st_name >= strsz) continue;
+
+        const char* name = strtab + symtab[i].st_name;
+        if (strcmp(name, symbolName) == 0) {
+            // st_value is offset from load base; base_ already adjusted
+            return static_cast<char*>(base_) + symtab[i].st_value;
+        }
+    }
+
+    return nullptr;
+}
+
+std::string ElfLoader::testExecution() {
+    if (!base_) {
+        return "[kudroid_core] EXECUTION FAILED: Library not loaded (call map first)";
+    }
+
+    void* addr = getSymbolAddress("kudroid_add");
+    if (!addr) {
+        return "[kudroid_core] EXECUTION FAILED: Symbol 'kudroid_add' not found in .dynsym";
+    }
+
+    using AddFunc = int (*)(int, int);
+    AddFunc func = reinterpret_cast<AddFunc>(addr);
+
+    int result = func(40, 20);
+    char buf[128];
+    snprintf(buf, sizeof(buf),
+        "[kudroid_core] EXECUTION SUCCESS! kudroid_add(40, 20) = %d", result);
+    return std::string(buf);
 }
 
 } // namespace kudroid

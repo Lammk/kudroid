@@ -44,13 +44,25 @@ public:
     /// Returns the last error message (empty if no error).
     [[nodiscard]] const char* lastError() const;
 
+    /// Phase 2: Look up a symbol address from .dynsym
+    /// @return  Function pointer (base_ + st_value), or nullptr if not found.
+    void* getSymbolAddress(const char* symbolName);
+
+    /// Phase 2: Test execution – call kudroid_add(40, 20) via dynamic symbol.
+    /// @return  Result string with status and computed value.
+    std::string testExecution();
+
 private:
+    // Internal: read file contents into buffer
+    bool readFile(std::vector<char>& buf);
+
     std::string          path_;
     void*                base_     = nullptr;
     std::uint64_t        entry_    = 0;
     std::vector<Segment> segments_;
     bool                 parsed_   = false;
     std::string          lastError_;
+    std::vector<char>    fileBuf_;  // Raw file bytes for dynamic table parsing
 };
 
 } // namespace kudroid

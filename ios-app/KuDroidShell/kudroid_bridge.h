@@ -19,6 +19,12 @@ const char* kudroid_self_test_log(void);
 ///              Caller must free() the returned string.
 const char* kudroid_load_elf(const char* path);
 
+/// Execute a native function from the loaded .so (Phase 2 test).
+/// Must be called after kudroid_load_elf.
+/// @return  A malloc'd log string with execution result.
+///          Caller must free() the returned string.
+const char* kudroid_execution_test(const char* path);
+
 #ifdef __cplusplus
 }
 #endif

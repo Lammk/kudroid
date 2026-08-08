@@ -48,7 +48,16 @@ struct ContentView: View {
                 .buttonStyle(.bordered)
             }
 
-            // Buttons row 2: Copy
+            // Buttons row 2: Execution Test
+            HStack(spacing: 12) {
+                Button("Execution Test") {
+                    fullLog = runExecutionTest()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.orange)
+            }
+
+            // Buttons row 3: Copy
             HStack(spacing: 12) {
                 Button("Copy Full Log") {
                     UIPasteboard.general.string = fullLog
@@ -98,6 +107,30 @@ func runElfLoaderTest() -> String {
 func runLoadElf(path: String) -> String {
     guard let cString = kudroid_load_elf(path) else {
         return "❌ Error: null result from kudroid_load_elf"
+    }
+    let log = String(cString: cString)
+    free(UnsafeMutablePointer(mutating: cString))
+    return log
+}
+
+/// Run execution test on the already-loaded .so (Phase 2).
+func runExecutionTest() -> String {
+    // First ensure the .so is loaded via the bundled file
+    guard let bundledURL = Bundle.main.url(forResource: "test_lib", withExtension: "so") else {
+        return "❌ test_lib.so not found in bundle"
+    }
+    let tmpURL = FileManager.default.temporaryDirectory.appendingPathComponent("test_lib.so")
+    // If not already copied, copy it
+    if !FileManager.default.fileExists(atPath: tmpURL.path) {
+        do {
+            try FileManager.default.copyItem(at: bundledURL, to: tmpURL)
+        } catch {
+            return "❌ Failed to copy bundled .so: \(error.localizedDescription)"
+        }
+    }
+
+    guard let cString = kudroid_execution_test(tmpURL.path) else {
+        return "❌ Error: null result from kudroid_execution_test"
     }
     let log = String(cString: cString)
     free(UnsafeMutablePointer(mutating: cString))

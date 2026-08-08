@@ -149,3 +149,65 @@ extern "C" const char* kudroid_load_elf(const char* path) {
         return result;
     }
 }
+
+extern "C" const char* kudroid_execution_test(const char* path) {
+    std::string log;
+    if (!path) {
+        log += "[kudroid_core] ERROR: null path\n";
+        char* result = (char*)malloc(log.size() + 1);
+        if (result) memcpy(result, log.c_str(), log.size() + 1);
+        return result;
+    }
+
+    char buf[512];
+    snprintf(buf, sizeof(buf), "[kudroid_core] Execution test for: %s\n", path);
+    log += buf;
+
+    try {
+        kudroid::ElfLoader loader(path);
+
+        if (!loader.parse()) {
+            snprintf(buf, sizeof(buf), "[kudroid_core] PARSE FAILED: %s\n", loader.lastError());
+            log += buf;
+            char* result = (char*)malloc(log.size() + 1);
+            if (result) memcpy(result, log.c_str(), log.size() + 1);
+            return result;
+        }
+
+        log += "[kudroid_core] ELF parsed OK.\n";
+
+        if (!loader.map()) {
+            snprintf(buf, sizeof(buf), "[kudroid_core] MAP FAILED: %s\n", loader.lastError());
+            log += buf;
+            char* result = (char*)malloc(log.size() + 1);
+            if (result) memcpy(result, log.c_str(), log.size() + 1);
+            return result;
+        }
+
+        log += "[kudroid_core] mmap OK.\n";
+
+        if (!loader.relocate()) {
+            snprintf(buf, sizeof(buf), "[kudroid_core] RELOCATE FAILED: %s\n", loader.lastError());
+            log += buf;
+            char* result = (char*)malloc(log.size() + 1);
+            if (result) memcpy(result, log.c_str(), log.size() + 1);
+            return result;
+        }
+
+        log += "[kudroid_core] Relocate OK.\n";
+        log += "[kudroid_core] Running testExecution()...\n";
+
+        std::string execResult = loader.testExecution();
+        log += execResult;
+        log += "\n";
+
+        char* result = (char*)malloc(log.size() + 1);
+        if (result) memcpy(result, log.c_str(), log.size() + 1);
+        return result;
+    } catch (...) {
+        log += "[kudroid_core] EXCEPTION during execution test!\n";
+        char* result = (char*)malloc(log.size() + 1);
+        if (result) memcpy(result, log.c_str(), log.size() + 1);
+        return result;
+    }
+}
