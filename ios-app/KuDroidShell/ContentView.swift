@@ -81,13 +81,24 @@ struct ContentView: View {
         }
         .fileImporter(
             isPresented: $showFilePicker,
-            allowedContentTypes: [.unixExecutable, .data],
+            allowedContentTypes: [
+                .item,  // allow all files
+                UTType(filenameExtension: "so") ?? .unixExecutable,
+                .unixExecutable
+            ].compactMap { $0 },
             allowsMultipleSelection: false
         ) { result in
             switch result {
             case .success(let urls):
                 if let url = urls.first {
+                    // Start accessing security-scoped resource
+                    let didStart = url.startAccessingSecurityScopedResource()
                     soPath = url.path
+                    // Keep access while we need the file; release after load
+                    // (simplified: path is stored, access released after load)
+                    if didStart {
+                        url.stopAccessingSecurityScopedResource()
+                    }
                 }
             case .failure(let error):
                 soPath = "Error: \(error.localizedDescription)"
