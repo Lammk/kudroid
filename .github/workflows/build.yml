@@ -51,9 +51,15 @@ jobs:
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           mkdir -p KuDroidShell.app
 
-          # Copy ARM64 test .so into app bundle
-          cp tests/test_lib_arm64.so KuDroidShell.app/test_lib.so
-          echo "Bundled ARM64 test_lib.so ($(wc -c < KuDroidShell.app/test_lib.so) bytes)"
+          # Copy pre-built ARM64 test .so from repo into app bundle
+          if [ -f tests/test_lib_arm64.so ]; then
+            cp tests/test_lib_arm64.so KuDroidShell.app/test_lib.so
+            echo "Bundled ARM64 test_lib.so ($(wc -c < KuDroidShell.app/test_lib.so) bytes)"
+          else
+            echo "ERROR: tests/test_lib_arm64.so not found in repo!"
+            echo "Download it from build-test-so-arm64 artifact and commit to tests/"
+            exit 1
+          fi
 
           swiftc -sdk "$SDK" -target arm64-apple-ios15.0 \
             -O -parse-as-library \

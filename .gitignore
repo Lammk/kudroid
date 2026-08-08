@@ -34,3 +34,4 @@ third_party/**/*.so
 </invoke>
 .claude
 test-lib-arm64-so.zip
+docs/
