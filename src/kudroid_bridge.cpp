@@ -1,6 +1,7 @@
 #include "kudroid/elf_loader.hpp"
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 
 extern "C" int kudroid_self_test(void) {
