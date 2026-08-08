@@ -78,8 +78,16 @@ struct ContentView: View {
             Text("Full log (\(fullLog.count) chars) copied to clipboard.")
         }
         .onAppear {
+            setupLogDir()
             jitStatus = runJitStatus()
         }
+    }
+}
+
+/// Point kudroid_core at the app's Documents dir for .txt logs + crash dumps.
+func setupLogDir() {
+    if let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+        kudroid_set_log_dir(docs.path)
     }
 }
 

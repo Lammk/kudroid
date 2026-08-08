@@ -2,7 +2,82 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <csignal>
+#include <ctime>
 #include <string>
+#include <fcntl.h>
+#include <unistd.h>
+
+// ── Persistent logging to the app's writable folder ─────────────────────────
+// The app passes a directory (its Documents dir) via kudroid_set_log_dir().
+// Success logs are written as .txt files; crashes (signal-based, so no C++
+// exception fires) are captured by a signal handler that flushes the buffered
+// log to disk using only async-signal-safe calls before re-raising.
+static char g_logDir[1024] = {0};
+static char g_crashBuf[16384];
+static volatile sig_atomic_t g_crashLen = 0;
+
+static void mirrorCrash(const std::string& log) {
+    size_t n = log.size();
+    if (n >= sizeof(g_crashBuf)) n = sizeof(g_crashBuf) - 1;
+    memcpy(g_crashBuf, log.data(), n);
+    g_crashBuf[n] = '\0';
+    g_crashLen = (sig_atomic_t)n;
+}
+
+static void writeLogFile(const char* name, const std::string& content) {
+    if (!g_logDir[0]) return;
+    std::string path = std::string(g_logDir) + "/" + name;
+    FILE* f = fopen(path.c_str(), "w");
+    if (f) {
+        fwrite(content.data(), 1, content.size(), f);
+        fclose(f);
+    }
+}
+
+static void crashHandler(int sig) {
+    if (g_logDir[0]) {
+        // Build "<dir>/kudroid_crash.log" without heap allocation.
+        char path[1200];
+        size_t dl = strlen(g_logDir);
+        if (dl > sizeof(path) - 32) dl = sizeof(path) - 32;
+        memcpy(path, g_logDir, dl);
+        const char* suffix = "/kudroid_crash.log";
+        memcpy(path + dl, suffix, strlen(suffix) + 1);
+
+        int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd >= 0) {
+            const char* hdr = "[kudroid_core] CRASH — fatal signal caught\n";
+            (void)!write(fd, hdr, strlen(hdr));
+            char sigline[64];
+            int m = snprintf(sigline, sizeof(sigline), "signal = %d\n", sig);
+            if (m > 0) (void)!write(fd, sigline, (size_t)m);
+            (void)!write(fd, "--- log up to crash ---\n", 24);
+            (void)!write(fd, g_crashBuf, (size_t)g_crashLen);
+            close(fd);
+        }
+    }
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+static void installCrashHandlers(void) {
+    static bool installed = false;
+    if (installed) return;
+    installed = true;
+    signal(SIGILL,  crashHandler);
+    signal(SIGBUS,  crashHandler);
+    signal(SIGSEGV, crashHandler);
+    signal(SIGTRAP, crashHandler);
+    signal(SIGABRT, crashHandler);
+}
+
+extern "C" void kudroid_set_log_dir(const char* dir) {
+    if (!dir) return;
+    strncpy(g_logDir, dir, sizeof(g_logDir) - 1);
+    g_logDir[sizeof(g_logDir) - 1] = '\0';
+    installCrashHandlers();
+}
 
 #if defined(__APPLE__)
 #include <sys/mman.h>
@@ -23,15 +98,15 @@ extern "C" int csops(pid_t pid, unsigned int ops, void* useraddr, size_t usersiz
 // Returns 1 if JIT (executable memory) appears usable, 0 otherwise.
 static int kudroid_jit_available(void) {
     unsigned int flags = 0;
-    if (csops(getpid(), CS_OPS_STATUS, &flags, sizeof(flags)) == 0) {
-        if (flags & CS_DEBUGGED) return 1;
+    // CS_DEBUGGED is the only reliable signal on iOS: it is set when a debugger
+    // (LiveContainer/debugserver) has enabled dynamic code signing, which is
+    // exactly what permits executing PROT_EXEC pages. An RWX mmap probe is NOT
+    // reliable — the syscall succeeds without JIT, but execution still faults,
+    // giving a false "Enabled".
+    if (csops(getpid(), CS_OPS_STATUS, &flags, sizeof(flags)) != 0) {
+        return 0;
     }
-    // Fallback probe: try to allocate a W+X page. If the kernel refuses, no JIT.
-    void* p = mmap(nullptr, 4096, PROT_READ | PROT_WRITE | PROT_EXEC,
-                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (p == MAP_FAILED) return 0;
-    munmap(p, 4096);
-    return 1;
+    return (flags & CS_DEBUGGED) ? 1 : 0;
 }
 #else
 static int kudroid_jit_available(void) { return 1; }
@@ -100,6 +175,7 @@ extern "C" const char* kudroid_self_test_log(void) {
         log += "[kudroid_core] Self-test PASSED.\n";
         (void)loader;
 
+        writeLogFile("kudroid_selftest.txt", log);
         char* result = (char*)malloc(log.size() + 1);
         if (result) {
             memcpy(result, log.c_str(), log.size() + 1);
@@ -108,6 +184,7 @@ extern "C" const char* kudroid_self_test_log(void) {
     } catch (...) {
         log += "[kudroid_core] Self-test FAILED: exception thrown!\n";
 
+        writeLogFile("kudroid_selftest.txt", log);
         char* result = (char*)malloc(log.size() + 1);
         if (result) {
             memcpy(result, log.c_str(), log.size() + 1);
@@ -181,11 +258,13 @@ extern "C" const char* kudroid_load_elf(const char* path) {
 
         log += "[kudroid_core] Load complete.\n";
 
+        writeLogFile("kudroid_load.txt", log);
         char* result = (char*)malloc(log.size() + 1);
         if (result) memcpy(result, log.c_str(), log.size() + 1);
         return result;
     } catch (...) {
         log += "[kudroid_core] EXCEPTION during load!\n";
+        writeLogFile("kudroid_load.txt", log);
         char* result = (char*)malloc(log.size() + 1);
         if (result) memcpy(result, log.c_str(), log.size() + 1);
         return result;
@@ -205,12 +284,24 @@ extern "C" const char* kudroid_execution_test(const char* path) {
     snprintf(buf, sizeof(buf), "[kudroid_core] Execution test for: %s\n", path);
     log += buf;
 
+    // Refuse to run native code when JIT is off: executing PROT_EXEC pages
+    // without dynamic code signing faults the whole process, and the buffered
+    // log below would never be returned. Fail loudly instead of crashing.
+    if (!kudroid_jit_available()) {
+        log += "[kudroid_core] ABORT: JIT is Disabled — cannot execute native code.\n";
+        log += "[kudroid_core] Enable JIT in LiveContainer and retry.\n";
+        char* result = (char*)malloc(log.size() + 1);
+        if (result) memcpy(result, log.c_str(), log.size() + 1);
+        return result;
+    }
+
     try {
         kudroid::ElfLoader loader(path);
 
         if (!loader.parse()) {
             snprintf(buf, sizeof(buf), "[kudroid_core] PARSE FAILED: %s\n", loader.lastError());
             log += buf;
+            writeLogFile("kudroid_exec.txt", log);
             char* result = (char*)malloc(log.size() + 1);
             if (result) memcpy(result, log.c_str(), log.size() + 1);
             return result;
@@ -221,6 +312,7 @@ extern "C" const char* kudroid_execution_test(const char* path) {
         if (!loader.map()) {
             snprintf(buf, sizeof(buf), "[kudroid_core] MAP FAILED: %s\n", loader.lastError());
             log += buf;
+            writeLogFile("kudroid_exec.txt", log);
             char* result = (char*)malloc(log.size() + 1);
             if (result) memcpy(result, log.c_str(), log.size() + 1);
             return result;
@@ -231,6 +323,7 @@ extern "C" const char* kudroid_execution_test(const char* path) {
         if (!loader.relocate()) {
             snprintf(buf, sizeof(buf), "[kudroid_core] RELOCATE FAILED: %s\n", loader.lastError());
             log += buf;
+            writeLogFile("kudroid_exec.txt", log);
             char* result = (char*)malloc(log.size() + 1);
             if (result) memcpy(result, log.c_str(), log.size() + 1);
             return result;
@@ -239,15 +332,22 @@ extern "C" const char* kudroid_execution_test(const char* path) {
         log += "[kudroid_core] Relocate OK.\n";
         log += "[kudroid_core] Running testExecution()...\n";
 
+        // Snapshot the log for the crash handler: the call below jumps into
+        // JIT'd code and may fault (signal, not exception). If it does, the
+        // handler flushes this buffer to kudroid_crash.log.
+        mirrorCrash(log);
+
         std::string execResult = loader.testExecution();
         log += execResult;
         log += "\n";
 
+        writeLogFile("kudroid_exec.txt", log);
         char* result = (char*)malloc(log.size() + 1);
         if (result) memcpy(result, log.c_str(), log.size() + 1);
         return result;
     } catch (...) {
         log += "[kudroid_core] EXCEPTION during execution test!\n";
+        writeLogFile("kudroid_exec.txt", log);
         char* result = (char*)malloc(log.size() + 1);
         if (result) memcpy(result, log.c_str(), log.size() + 1);
         return result;

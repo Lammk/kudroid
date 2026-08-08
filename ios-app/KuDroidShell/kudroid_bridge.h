@@ -30,6 +30,11 @@ const char* kudroid_execution_test(const char* path);
 ///          Caller must free() the returned string.
 const char* kudroid_jit_status(void);
 
+/// Set the directory where kudroid_core writes .txt logs and crash dumps.
+/// Call once at startup with the app's writable Documents directory.
+/// Also installs signal handlers so a native crash still leaves a log file.
+void kudroid_set_log_dir(const char* dir);
+
 #ifdef __cplusplus
 }
 #endif

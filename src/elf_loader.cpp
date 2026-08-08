@@ -8,6 +8,7 @@
 
 #if defined(__APPLE__)
 #include <libkern/OSCacheControl.h>
+#include <pthread.h>
 #endif
 
 namespace kudroid {
@@ -217,12 +218,29 @@ bool ElfLoader::map() {
     // Allocate executable memory via mmap
     int prot = PROT_READ | PROT_WRITE | PROT_EXEC;
     int flags = MAP_PRIVATE | MAP_ANONYMOUS;
+    [[maybe_unused]] bool usedMapJit = false;
+#if defined(__APPLE__)
+    // Preferred path (hardened runtime): MAP_JIT pages, written only while the
+    // thread's JIT write-protection is toggled off. LiveContainer's debugger
+    // path allows plain RWX instead, so fall back if MAP_JIT is rejected.
+    base_ = mmap(nullptr, totalSize, prot, flags | MAP_JIT, -1, 0);
+    if (base_ != MAP_FAILED) {
+        usedMapJit = true;
+    } else {
+        base_ = mmap(nullptr, totalSize, prot, flags, -1, 0);
+    }
+#else
     base_ = mmap(nullptr, totalSize, prot, flags, -1, 0);
+#endif
     if (base_ == MAP_FAILED) {
-        lastError_ = "mmap failed: " + std::string(strerror(errno));
+        lastError_ = "mmap failed (no JIT?): " + std::string(strerror(errno));
         base_ = nullptr;
         return false;
     }
+
+#if defined(__APPLE__)
+    if (usedMapJit) pthread_jit_write_protect_np(0);
+#endif
 
     // Copy each PT_LOAD segment data from file buffer to mapped memory
     for (const auto& seg : segments_) {
@@ -235,6 +253,10 @@ bool ElfLoader::map() {
             memset(dst + seg.filesz, 0, seg.memsz - seg.filesz);
         }
     }
+
+#if defined(__APPLE__)
+    if (usedMapJit) pthread_jit_write_protect_np(1);
+#endif
 
     // ARM64 has separate I/D caches: freshly written code must be flushed from
     // the data cache and the stale instruction cache invalidated, or the CPU
