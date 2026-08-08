@@ -75,7 +75,28 @@
 
 ---
 
-## 4. 🎯 Next Action Items
+## 4. 📱 How to Test on iPhone (Sideload)
+
+> **Prerequisite:** Apple ID (free) — app expires after 7 days, resign to renew.
+
+**Flow:**
+1. Push code → GitHub Actions (`macos-latest`) builds:
+   - `libkudroid_core.a` (ARM64 iOS static library)
+   - `KuDroidShell.ipa` (unsigned)
+2. Download `kudroid-ios-all` artifact from Actions tab.
+3. **Sideload `.ipa` to iPhone** via one of:
+   - **[AltStore](https://altstore.io/)** (Windows/macOS, needs AltServer running)
+   - **[SideStore](https://sidestore.io/)** (no PC needed after initial setup, uses WireGuard)
+   - **[Sideloadly](https://sideloadly.io/)** (simple, macOS/Windows)
+4. Sign with your Apple ID → app installs → valid for 7 days.
+5. Open KuDroidShell → tap "Test ELF Loader" → see `✅ ELF Loader OK`.
+
+**CI artifact download URL:**  
+`https://github.com/Lammk/kudroid/actions` → latest workflow run → scroll to Artifacts → `kudroid-ios-all`
+
+---
+
+## 5. 🎯 Next Action Items
 
 The next 4-hour session should begin **Phase 1 — ELF Loader implementation**:
 
@@ -87,7 +108,7 @@ The next 4-hour session should begin **Phase 1 — ELF Loader implementation**:
 
 ---
 
-## 5. 💻 Quick Code Boilerplate for Next Session
+## 6. 💻 Quick Code Boilerplate for Next Session
 
 Copy this into `include/kudroid/elf_loader.hpp` to start Phase 1:
 

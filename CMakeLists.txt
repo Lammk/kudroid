@@ -19,6 +19,7 @@ endif()
 
 add_library(kudroid_core STATIC
     src/elf_loader.cpp
+    src/kudroid_bridge.cpp
 )
 
 target_include_directories(kudroid_core PUBLIC
