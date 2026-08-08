@@ -51,6 +51,13 @@ jobs:
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           mkdir -p KuDroidShell.app
 
+          # Copy bundled test .so into app (use ARM64 .so if available, else x86-64)
+          if [ -f tests/test_lib_arm64.so ]; then
+            cp tests/test_lib_arm64.so KuDroidShell.app/test_lib.so
+          elif [ -f tests/libtest_lib.so ]; then
+            cp tests/libtest_lib.so KuDroidShell.app/test_lib.so
+          fi
+
           swiftc -sdk "$SDK" -target arm64-apple-ios15.0 \
             -O -parse-as-library \
             -import-objc-header ios-app/KuDroidShell/kudroid_bridge.h \

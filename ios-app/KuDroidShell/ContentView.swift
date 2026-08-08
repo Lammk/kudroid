@@ -1,14 +1,9 @@
 import SwiftUI
 import UIKit
-import UniformTypeIdentifiers
 
 struct ContentView: View {
     @State private var fullLog = "KuDroid Core Status"
     @State private var showCopyAlert = false
-    @State private var soPath = "No file selected"
-    @State private var showFilePicker = false
-    /// Hold the security-scoped URL so it stays accessible
-    @State private var selectedURL: URL? = nil
 
     /// Show only first 20 lines for readability.
     private var previewLog: String {
@@ -35,39 +30,26 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(8)
             }
-            .frame(maxHeight: 250)
+            .frame(maxHeight: 280)
             .background(Color(.systemGray6))
             .cornerRadius(8)
             .padding(.horizontal)
 
-            // Selected file path display
-            Text(soPath)
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundColor(.secondary)
-                .lineLimit(2)
-                .padding(.horizontal)
-
-            // Buttons row 1: Browse + Load .so
+            // Buttons row 1: Load bundled .so + Self-test
             HStack(spacing: 12) {
-                Button(action: { showFilePicker = true }) {
-                    Label("Browse .so", systemImage: "folder")
-                }
-                .buttonStyle(.bordered)
-
-                Button("Load .so") {
-                    fullLog = runLoadElf(path: soPath)
+                Button("Load Bundled .so") {
+                    fullLog = runLoadBundledSO()
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(soPath == "No file selected")
-            }
 
-            // Buttons row 2: Self-test + Copy
-            HStack(spacing: 12) {
                 Button("Self-Test") {
                     fullLog = runElfLoaderTest()
                 }
                 .buttonStyle(.bordered)
+            }
 
+            // Buttons row 2: Copy
+            HStack(spacing: 12) {
                 Button("Copy Full Log") {
                     UIPasteboard.general.string = fullLog
                     showCopyAlert = true
@@ -81,49 +63,28 @@ struct ContentView: View {
         } message: {
             Text("Full log (\(fullLog.count) chars) copied to clipboard.")
         }
-        .fileImporter(
-            isPresented: $showFilePicker,
-            allowedContentTypes: [
-                .item,
-                UTType(filenameExtension: "so") ?? .unixExecutable,
-                .unixExecutable
-            ].compactMap { $0 },
-            allowsMultipleSelection: false
-        ) { result in
-            switch result {
-            case .success(let urls):
-                if let url = urls.first {
-                    _ = url.startAccessingSecurityScopedResource()
-                    selectedURL = url
-                    soPath = url.lastPathComponent
-                }
-            case .failure(let error):
-                soPath = "Error: \(error.localizedDescription)"
-            }
-        }
-    }
-
-    private func loadSO() {
-        guard let url = selectedURL else {
-            fullLog = "❌ No file selected"
-            return
-        }
-        let tmpDir = FileManager.default.temporaryDirectory
-        let tmpURL = tmpDir.appendingPathComponent("loaded.so")
-        do {
-            if FileManager.default.fileExists(atPath: tmpURL.path) {
-                try FileManager.default.removeItem(at: tmpURL)
-            }
-            try FileManager.default.copyItem(at: url, to: tmpURL)
-            fullLog = runLoadElf(path: tmpURL.path)
-        } catch {
-            fullLog = "❌ Failed to copy file: \(error.localizedDescription)"
-        }
     }
 }
 
-/// Calls into kudroid_core C++ library.
-/// Returns a detailed debug log string.
+/// Load test_lib.so bundled inside the app.
+func runLoadBundledSO() -> String {
+    guard let bundledURL = Bundle.main.url(forResource: "test_lib", withExtension: "so") else {
+        return "❌ test_lib.so not found in bundle"
+    }
+    // Copy to tmp so C++ ifstream can read it
+    let tmpURL = FileManager.default.temporaryDirectory.appendingPathComponent("test_lib.so")
+    do {
+        if FileManager.default.fileExists(atPath: tmpURL.path) {
+            try FileManager.default.removeItem(at: tmpURL)
+        }
+        try FileManager.default.copyItem(at: bundledURL, to: tmpURL)
+    } catch {
+        return "❌ Failed to copy bundled .so: \(error.localizedDescription)"
+    }
+    return runLoadElf(path: tmpURL.path)
+}
+
+/// Calls into kudroid_core C++ library (self-test).
 func runElfLoaderTest() -> String {
     guard let cString = kudroid_self_test_log() else {
         return "❌ Error: null result"
