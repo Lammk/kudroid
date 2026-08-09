@@ -195,6 +195,91 @@ extern "C" const char* kudroid_jit_status(void) {
     return result;
 }
 
+// --- Mock JNI & NativeActivity ---
+struct JNIEnv_;
+struct JavaVM_;
+
+typedef int jint;
+typedef void* jclass;
+typedef void* jmethodID;
+
+struct JNINativeInterface {
+    void* reserved0;
+    void* reserved1;
+    void* reserved2;
+    void* reserved3;
+    void* dummy[300];
+};
+
+struct JNIEnv_ {
+    const struct JNINativeInterface* functions;
+};
+
+struct JNIInvokeInterface {
+    void* reserved0;
+    void* reserved1;
+    void* reserved2;
+    jint (*DestroyJavaVM)(JavaVM_*);
+    jint (*AttachCurrentThread)(JavaVM_*, JNIEnv_**, void*);
+    jint (*DetachCurrentThread)(JavaVM_*);
+    jint (*GetEnv)(JavaVM_*, void**, jint);
+    jint (*AttachCurrentThreadAsDaemon)(JavaVM_*, JNIEnv_**, void*);
+};
+
+struct JavaVM_ {
+    const struct JNIInvokeInterface* functions;
+};
+
+static jint mock_GetEnv(JavaVM_* vm, void** env, jint version) {
+    static JNINativeInterface mock_jni_interface = {};
+    static JNIEnv_ mock_jni_env = { &mock_jni_interface };
+    *env = &mock_jni_env;
+    return 0; // JNI_OK
+}
+
+static JNIInvokeInterface mock_invoke_interface = {
+    nullptr, nullptr, nullptr,
+    nullptr, // DestroyJavaVM
+    nullptr, // AttachCurrentThread
+    nullptr, // DetachCurrentThread
+    mock_GetEnv,
+    nullptr  // AttachCurrentThreadAsDaemon
+};
+
+static JavaVM_ mock_javavm = { &mock_invoke_interface };
+
+struct ANativeActivityCallbacks {
+    void* onStart;
+    void* onResume;
+    void* onSaveInstanceState;
+    void* onPause;
+    void* onStop;
+    void* onDestroy;
+    void* onWindowFocusChanged;
+    void* onNativeWindowCreated;
+    void* onNativeWindowResized;
+    void* onNativeWindowRedrawNeeded;
+    void* onNativeWindowDestroyed;
+    void* onInputQueueCreated;
+    void* onInputQueueDestroyed;
+    void* onContentRectChanged;
+    void* onConfigurationChanged;
+    void* onLowMemory;
+};
+
+struct ANativeActivity {
+    ANativeActivityCallbacks* callbacks;
+    JavaVM_* vm;
+    JNIEnv_* env;
+    jclass clazz;
+    const char* internalDataPath;
+    const char* externalDataPath;
+    int32_t sdkVersion;
+    void* instance;
+    void* assetManager;
+    const char* obbPath;
+};
+
 extern "C" const char* kudroid_run_apk(const char* appName) {
     std::string log;
     appendTestHeader(log, "Run APK Native Libraries", appName);
@@ -239,6 +324,42 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                 
                 log += "[kudroid_core] Total loaded libraries (including dependencies): " + std::to_string(manager.libraries().size()) + "\n";
                 log += "[kudroid_core] Native libraries loaded into memory successfully!\n";
+
+                auto jni_onload = reinterpret_cast<jint (*)(JavaVM_*, void*)>(
+                    manager.resolveGlobalSymbol("JNI_OnLoad")
+                );
+                if (jni_onload) {
+                    log += "[kudroid_core] Found JNI_OnLoad, invoking...\n";
+                    jint version = jni_onload(&mock_javavm, nullptr);
+                    log += "[kudroid_core] JNI_OnLoad returned version: " + std::to_string(version) + "\n";
+                } else {
+                    log += "[kudroid_core] JNI_OnLoad not found.\n";
+                }
+
+                auto native_activity_create = reinterpret_cast<void (*)(ANativeActivity*, void*, size_t)>(
+                    manager.resolveGlobalSymbol("ANativeActivity_onCreate")
+                );
+                if (native_activity_create) {
+                    log += "[kudroid_core] Found ANativeActivity_onCreate, invoking...\n";
+                    static ANativeActivityCallbacks mock_callbacks = {};
+                    static ANativeActivity mock_activity = {
+                        &mock_callbacks,
+                        &mock_javavm,
+                        nullptr, // env
+                        nullptr, // clazz
+                        "/sdcard/Android/data/test", // internalDataPath
+                        "/sdcard/Android/data/test", // externalDataPath
+                        29, // sdkVersion
+                        nullptr, // instance
+                        nullptr, // assetManager
+                        nullptr  // obbPath
+                    };
+                    mock_GetEnv(&mock_javavm, reinterpret_cast<void**>(&mock_activity.env), 0);
+                    native_activity_create(&mock_activity, nullptr, 0);
+                    log += "[kudroid_core] ANativeActivity_onCreate completed.\n";
+                } else {
+                    log += "[kudroid_core] ANativeActivity_onCreate not found.\n";
+                }
             }
         }
     }
