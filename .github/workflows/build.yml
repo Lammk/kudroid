@@ -67,7 +67,7 @@ jobs:
             angle-ios-src-${{ runner.os }}-
 
       - name: Build ANGLE (Vulkan backend, iOS ARM64)
-        if: steps.angle-cache.outputs.cache-hit != 'true'
+        if: false
         env:
           # Limit ninja parallelism to 2 jobs so peak RSS stays under ~7 GB.
           # ANGLE .cc files individually can use 1–2 GB during compilation.
@@ -196,16 +196,18 @@ jobs:
   # and the SwiftUI shell. No more compiling ANGLE in this job.
   # ─────────────────────────────────────────────────────────────────────────────
   ios-build:
-    needs: [build-angle-ios, build-multi-elf-so-arm64]
+    needs: [build-multi-elf-so-arm64]
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download ANGLE pre-built artifact
-        uses: actions/download-artifact@v4
+      - name: Restore ANGLE pre-built artifacts from cache
+        uses: actions/cache/restore@v4
         with:
-          name: angle-ios-arm64
           path: third_party/ANGLE
+          key: angle-ios-arm64-built-macOS-
+          restore-keys: |
+            angle-ios-arm64-built-macOS-
 
       - name: Install MoltenVK (prebuilt release download)
         run: |
@@ -269,6 +271,14 @@ jobs:
           else
             echo "ERROR: Multi-ELF provider/consumer libraries not found in repo!"
             exit 1
+          fi
+
+          # Ensure dylibs exist for -lEGL -lGLESv2
+          if [ -d third_party/ANGLE/lib/ios-arm64/libEGL.framework ] && [ ! -f third_party/ANGLE/lib/ios-arm64/libEGL.dylib ]; then
+            cp third_party/ANGLE/lib/ios-arm64/libEGL.framework/libEGL third_party/ANGLE/lib/ios-arm64/libEGL.dylib
+          fi
+          if [ -d third_party/ANGLE/lib/ios-arm64/libGLESv2.framework ] && [ ! -f third_party/ANGLE/lib/ios-arm64/libGLESv2.dylib ]; then
+            cp third_party/ANGLE/lib/ios-arm64/libGLESv2.framework/libGLESv2 third_party/ANGLE/lib/ios-arm64/libGLESv2.dylib
           fi
 
           swiftc -sdk "$SDK" -target arm64-apple-ios15.0 \
