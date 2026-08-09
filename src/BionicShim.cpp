@@ -223,12 +223,38 @@ extern "C" void bionic_stack_chk_fail() {
     std::abort();
 }
 
+extern "C" void* bionic_dlopen(const char* filename, int flag) {
+    trace("dlopen() dummy fallback");
+    return nullptr;
+}
+
+extern "C" void* bionic_dlsym(void* handle, const char* symbol) {
+    trace("dlsym() dummy fallback");
+    return nullptr;
+}
+
+extern "C" int bionic_dlclose(void* handle) {
+    trace("dlclose() dummy fallback");
+    return -1;
+}
+
+extern "C" char* bionic_dlerror(void) {
+    trace("dlerror() dummy fallback");
+    return const_cast<char*>("dlerror not implemented");
+}
+
 struct SymbolEntry {
     const char* name;
     void* address;
 };
 
 const SymbolEntry kSymbols[] = {
+    {"snprintf", reinterpret_cast<void*>(&std::snprintf)},
+    {"memcpy", reinterpret_cast<void*>(&std::memcpy)},
+    {"dlopen", reinterpret_cast<void*>(&bionic_dlopen)},
+    {"dlsym", reinterpret_cast<void*>(&bionic_dlsym)},
+    {"dlclose", reinterpret_cast<void*>(&bionic_dlclose)},
+    {"dlerror", reinterpret_cast<void*>(&bionic_dlerror)},
     {"malloc", reinterpret_cast<void*>(&bionic_malloc)},
     {"calloc", reinterpret_cast<void*>(&std::calloc)},
     {"realloc", reinterpret_cast<void*>(&std::realloc)},

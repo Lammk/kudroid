@@ -197,6 +197,7 @@ static const int64_t DT_PLTRELSZ = 2;
 static const uint32_t R_AARCH64_RELATIVE = 1027;
 static const uint32_t R_AARCH64_GLOB_DAT = 1025;
 static const uint32_t R_AARCH64_JUMP_SLOT = 1026;
+static const uint32_t R_AARCH64_ABS64 = 257;
 
 bool ElfLoader::readFile(std::vector<char>& buf) {
     std::ifstream file(path_, std::ios::binary | std::ios::ate);
@@ -409,7 +410,7 @@ bool ElfLoader::relocate() {
                 static_cast<char*>(base_) + relocs[i].r_offset);
             if (type == R_AARCH64_RELATIVE) {
                 *target = reinterpret_cast<uintptr_t>(base_) + relocs[i].r_addend;
-            } else if (type == R_AARCH64_GLOB_DAT || type == R_AARCH64_JUMP_SLOT) {
+            } else if (type == R_AARCH64_GLOB_DAT || type == R_AARCH64_JUMP_SLOT || type == R_AARCH64_ABS64) {
                 if (symbolIndex >= symbolCount || symtab[symbolIndex].st_name >= strsz) {
                     lastError_ = "Invalid relocation symbol index";
                     return false;
