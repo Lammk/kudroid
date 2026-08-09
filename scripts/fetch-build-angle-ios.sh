@@ -108,7 +108,8 @@ print(f"Patched {filepath}: added inline Mac display stubs for iOS")
 PYEOF
 fi
 
-rm -rf "$BUILD_DIR"
+# Do not delete $BUILD_DIR to allow incremental builds from cache!
+mkdir -p "$BUILD_DIR"
 gn gen "$BUILD_DIR" --args='target_os="ios"
 target_cpu="arm64"
 target_environment="device"
