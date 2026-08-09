@@ -9,6 +9,7 @@
 #include <limits.h>
 #include <sstream>
 #include <unistd.h>
+#include <vector>
 
 namespace kudroid {
 namespace {
@@ -67,10 +68,30 @@ bool VFSPathRemapper::init_pseudo_files() {
     };
     for (const auto& file : files) {
         const std::filesystem::path path = std::filesystem::path(root) / file.first;
-        if (std::filesystem::exists(path)) continue;
-        std::ofstream output(path, std::ios::binary);
+        std::string current;
+        if (std::ifstream input(path, std::ios::binary); input) {
+            current.assign((std::istreambuf_iterator<char>(input)),
+                           std::istreambuf_iterator<char>());
+        }
+        const std::string required(file.second);
+        if (current.empty()) {
+            current = required;
+        } else {
+            std::istringstream existing(current);
+            std::string line;
+            std::vector<std::string> lines;
+            while (std::getline(existing, line)) lines.push_back(line);
+            std::istringstream defaults(required);
+            while (std::getline(defaults, line)) {
+                if (line.empty() || current.find(line) != std::string::npos) continue;
+                lines.push_back(line);
+            }
+            current.clear();
+            for (const auto& item : lines) current += item + "\n";
+        }
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
         if (!output) return false;
-        output.write(file.second, std::strlen(file.second));
+        output.write(current.data(), static_cast<std::streamsize>(current.size()));
         output.close();
         ::chmod(path.c_str(), 0644);
     }

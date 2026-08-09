@@ -2,6 +2,8 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
+private let apkDocumentType = UTType(filenameExtension: "apk") ?? .data
+
 struct ContentView: View {
     @State private var fullLog = "KuDroid Core Status"
     @State private var showCopyAlert = false
@@ -118,7 +120,7 @@ struct ContentView: View {
             Text("Full log (\(fullLog.count) chars) copied to clipboard.")
         }
         .fileImporter(isPresented: $showAPKImporter,
-                      allowedContentTypes: [.data, .item],
+                      allowedContentTypes: [apkDocumentType, .data],
                       allowsMultipleSelection: false) { result in
             switch result {
             case .success(let urls):
@@ -171,15 +173,22 @@ func installAPK(from sourceURL: URL) -> String {
         if hasAccess { sourceURL.stopAccessingSecurityScopedResource() }
     }
 
-    let destination = FileManager.default.temporaryDirectory
-        .appendingPathComponent(sourceURL.lastPathComponent)
+    guard let documents = FileManager.default.urls(for: .documentDirectory,
+                                                    in: .userDomainMask).first else {
+        return "[kudroid_apk] Documents directory is unavailable"
+    }
+    let downloadDirectory = documents
+        .appendingPathComponent("android_root/sdcard/Download", isDirectory: true)
+    let destination = downloadDirectory.appendingPathComponent(sourceURL.lastPathComponent)
     do {
+        try FileManager.default.createDirectory(at: downloadDirectory,
+                                                withIntermediateDirectories: true)
         if FileManager.default.fileExists(atPath: destination.path) {
             try FileManager.default.removeItem(at: destination)
         }
         try FileManager.default.copyItem(at: sourceURL, to: destination)
     } catch {
-        return "[kudroid_apk] Cannot copy selected APK: \(error.localizedDescription)"
+        return "[kudroid_apk] Cannot copy APK to VFS sdcard: \(error.localizedDescription)"
     }
 
     guard let cString = kudroid_install_apk(destination.path) else {
