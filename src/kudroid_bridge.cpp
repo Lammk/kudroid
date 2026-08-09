@@ -113,6 +113,13 @@ extern "C" void kudroid_set_documents_dir(const char* dir) {
     if (dir) kudroid::VFSPathRemapper::getInstance().setDocumentsDirectory(dir);
 }
 
+// Global metal layer pointer accessible by BionicShim
+void* g_metalLayer = nullptr;
+
+extern "C" void kudroid_set_metal_layer(void* layer) {
+    g_metalLayer = layer;
+}
+
 extern "C" const char* kudroid_vfs_self_test_log(void) {
     const std::string log = kudroid::run_vfs_self_test();
     writeLogFile("kudroid_vfs_selftest.txt", log);
@@ -761,4 +768,80 @@ extern "C" const char* kudroid_multi_elf_test(const char* consumerPath,
     char* result = static_cast<char*>(malloc(log.size() + 1));
     if (result) memcpy(result, log.c_str(), log.size() + 1);
     return result;
+}
+
+extern "C" int kudroid_clear_app_cache(const char* package_name) {
+    if (!package_name) return 0;
+    
+    // Construct the path to the app's cache directory using VFS mapping logic
+    const std::string androidRoot = kudroid::VFSPathRemapper::getInstance().androidRoot();
+    std::filesystem::path cachePath = std::filesystem::path(androidRoot) / "data/data" / package_name / "cache";
+    std::filesystem::path codeCachePath = std::filesystem::path(androidRoot) / "data/data" / package_name / "code_cache";
+    
+    std::error_code ec;
+    int success = 1;
+    if (std::filesystem::exists(cachePath, ec)) {
+        if (std::filesystem::remove_all(cachePath, ec) == static_cast<std::uintmax_t>(-1)) {
+            success = 0;
+        }
+    }
+    if (std::filesystem::exists(codeCachePath, ec)) {
+        if (std::filesystem::remove_all(codeCachePath, ec) == static_cast<std::uintmax_t>(-1)) {
+            success = 0;
+        }
+    }
+    return success;
+}
+
+extern "C" int kudroid_delete_app(const char* package_name) {
+    if (!package_name) return 0;
+    
+    const std::string androidRoot = kudroid::VFSPathRemapper::getInstance().androidRoot();
+    std::filesystem::path appCodePath = std::filesystem::path(androidRoot) / "data/app" / package_name;
+    std::filesystem::path appDataPath = std::filesystem::path(androidRoot) / "data/data" / package_name;
+    
+    std::error_code ec;
+    int success = 1;
+    if (std::filesystem::exists(appCodePath, ec)) {
+        if (std::filesystem::remove_all(appCodePath, ec) == static_cast<std::uintmax_t>(-1)) {
+            success = 0;
+        }
+    }
+    if (std::filesystem::exists(appDataPath, ec)) {
+        if (std::filesystem::remove_all(appDataPath, ec) == static_cast<std::uintmax_t>(-1)) {
+            success = 0;
+        }
+    }
+    return success;
+}
+
+extern "C" const char* kudroid_get_app_info(const char* package_name) {
+    if (!package_name) return strdup("{}");
+    
+    const std::string androidRoot = kudroid::VFSPathRemapper::getInstance().androidRoot();
+    std::filesystem::path appDir = std::filesystem::path(androidRoot) / "data/data" / package_name;
+    
+    uintmax_t totalSize = 0;
+    std::error_code ec;
+    
+    if (std::filesystem::exists(appDir, ec)) {
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(appDir, ec)) {
+            if (!std::filesystem::is_directory(entry.status(ec))) {
+                totalSize += std::filesystem::file_size(entry, ec);
+            }
+        }
+    }
+    
+    char buf[512];
+    std::snprintf(buf, sizeof(buf), 
+        "{\n"
+        "  \"package_name\": \"%s\",\n"
+        "  \"data_size_bytes\": %llu,\n"
+        "  \"installed\": %s\n"
+        "}", 
+        package_name, 
+        static_cast<unsigned long long>(totalSize),
+        std::filesystem::exists(appDir, ec) ? "true" : "false");
+        
+    return strdup(buf);
 }

@@ -70,6 +70,12 @@ private:
     std::string          lastError_;
     std::vector<char>    fileBuf_;  // Raw file bytes for dynamic table parsing
     LibraryManager*      libraryManager_ = nullptr;
+    
+    // TLS
+    std::uint64_t        tls_vaddr_  = 0;
+    std::uint64_t        tls_filesz_ = 0;
+    std::uint64_t        tls_memsz_  = 0;
+    std::uint64_t        tls_align_  = 0;
 };
 
 } // namespace kudroid

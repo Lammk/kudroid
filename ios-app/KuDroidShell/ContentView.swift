@@ -106,6 +106,18 @@ struct AppsView: View {
                             }
                             .padding(.vertical, 4)
                             .listRowBackground(Color(.systemGray6))
+                            .contextMenu {
+                                Button(role: .destructive) {
+                                    clearAppCache(name: appName)
+                                } label: {
+                                    Label("Clear Cache", systemImage: "trash")
+                                }
+                                Button(role: .destructive) {
+                                    deleteApp(name: appName)
+                                } label: {
+                                    Label("Delete App", systemImage: "xmark.bin")
+                                }
+                            }
                         }
                         .onAppear {
                             // Pre-iOS 16 workaround
@@ -143,6 +155,17 @@ struct AppsView: View {
         }
         fullLog = String(cString: cString)
         free(UnsafeMutablePointer(mutating: cString))
+    }
+    
+    private func clearAppCache(name: String) {
+        let success = kudroid_clear_app_cache(name)
+        fullLog = success == 1 ? "Cleared cache for \(name)" : "Failed to clear cache for \(name)"
+    }
+    
+    private func deleteApp(name: String) {
+        let success = kudroid_delete_app(name)
+        fullLog = success == 1 ? "Deleted app \(name)" : "Failed to delete app \(name)"
+        loadInstalledApps()
     }
 }
 

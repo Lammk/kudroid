@@ -1,13 +1,54 @@
 #include "kudroid/BionicShim.h"
 #include "kudroid/VFSPathRemapper.h"
 
+#include <cmath>
+#include <ctime>
+#include <csignal>
+#include <fcntl.h>
+#include <unistd.h>
+#include <dirent.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/time.h>
+#include <sys/uio.h>
+#include <sys/mman.h>
+#include <unwind.h>
+#include <cxxabi.h>
+#include <chrono>
+#include <sys/socket.h>
+#include <condition_variable>
+
+extern "C" void __gxx_personality_v0();
+
+// For Bionic pthread emulation
 #include <cstdarg>
-#include <cstdio>
+#ifdef __APPLE__
+#include <sys/event.h>
+#include <dispatch/dispatch.h>
+#else
+#include <sys/epoll.h>
+#include <sys/eventfd.h>
+#include <sys/timerfd.h>
+#endif
+
+#ifndef EPOLLIN
+#define EPOLLIN 0x001
+#define EPOLLPRI 0x002
+#define EPOLLOUT 0x004
+#define EPOLLERR 0x008
+#define EPOLLHUP 0x010
+#define EPOLL_CTL_ADD 1
+#define EPOLL_CTL_DEL 2
+#define EPOLL_CTL_MOD 3
+#endif
+
+struct android_epoll_event {
+    uint32_t events;
+    uint64_t data;
+} __attribute__((packed));
 #include <cstdlib>
 #include <cstring>
 #include <pthread.h>
-#include <sys/mman.h>
-#include <sys/types.h>
 #include <unordered_map>
 #include <mutex>
 #include <shared_mutex>
@@ -35,18 +76,11 @@ extern "C" int bionic_dummy() {
 }
 
 extern "C" void* bionic_malloc(size_t size) {
-    void* result = std::malloc(size);
-    char message[128];
-    std::snprintf(message, sizeof(message), "malloc(size=%zu) -> %p", size, result);
-    trace(message);
-    return result;
+    return std::malloc(size);
 }
 
-extern "C" void bionic_free(void* pointer) {
-    char message[128];
-    std::snprintf(message, sizeof(message), "free(pointer=%p)", pointer);
-    trace(message);
-    std::free(pointer);
+extern "C" void bionic_free(void* ptr) {
+    std::free(ptr);
 }
 
 void appendUnsigned(std::string& output, uint64_t value, unsigned base) {
@@ -117,14 +151,14 @@ void appendUnsigned(std::string& output, uint64_t value, unsigned base) {
 
 int logAndroidMessage(int priority, const char* tag, const std::string& message) {
     char traceMessage[256];
-    std::snprintf(traceMessage, sizeof(traceMessage),
+    snprintf(traceMessage, sizeof(traceMessage),
                   "__android_log_print(priority=%d, tag=%s)", priority,
                   tag ? tag : "<null>");
     trace(traceMessage);
     gShimTrace += "[BionicShim] android log message: ";
     gShimTrace += message;
     gShimTrace += '\n';
-    std::fprintf(stdout, "[AndroidLog][%s]: %s\n", tag ? tag : "unknown",
+    fprintf(stdout, "[AndroidLog][%s]: %s\n", tag ? tag : "unknown",
                  message.c_str());
     return 0;
 }
@@ -214,7 +248,7 @@ static inline void destroy_sync(void* guest_ptr, int type) {
             if (type == 1) ::pthread_mutex_destroy(static_cast<pthread_mutex_t*>(host_obj));
             else if (type == 2) ::pthread_cond_destroy(static_cast<pthread_cond_t*>(host_obj));
             else if (type == 3) ::pthread_rwlock_destroy(static_cast<pthread_rwlock_t*>(host_obj));
-            std::free(host_obj);
+            free(host_obj);
         }
         gSyncRegistry.erase(it);
     }
@@ -226,7 +260,7 @@ extern "C" int bionic_pthread_mutex_init(void* guestMutex, const void* attr) {
     auto* hostMutex = static_cast<pthread_mutex_t*>(std::malloc(sizeof(pthread_mutex_t)));
     if (!hostMutex) return -1;
     const int result = ::pthread_mutex_init(hostMutex, nullptr);
-    if (result != 0) { std::free(hostMutex); return result; }
+    if (result != 0) { free(hostMutex); return result; }
     
     std::unique_lock<std::shared_mutex> lock(gSyncRegistryLock);
     gSyncRegistry[guestMutex] = hostMutex;
@@ -239,7 +273,7 @@ extern "C" int bionic_pthread_cond_init(void* cond, const void* attr) {
     auto* hostCond = static_cast<pthread_cond_t*>(std::malloc(sizeof(pthread_cond_t)));
     if (!hostCond) return -1;
     const int result = ::pthread_cond_init(hostCond, nullptr);
-    if (result != 0) { std::free(hostCond); return result; }
+    if (result != 0) { free(hostCond); return result; }
     
     std::unique_lock<std::shared_mutex> lock(gSyncRegistryLock);
     gSyncRegistry[cond] = hostCond;
@@ -251,7 +285,7 @@ extern "C" int bionic_pthread_rwlock_init(void* rwlock, const void* attr) {
     auto* hostRwlock = static_cast<pthread_rwlock_t*>(std::malloc(sizeof(pthread_rwlock_t)));
     if (!hostRwlock) return -1;
     const int result = ::pthread_rwlock_init(hostRwlock, nullptr);
-    if (result != 0) { std::free(hostRwlock); return result; }
+    if (result != 0) { free(hostRwlock); return result; }
     
     std::unique_lock<std::shared_mutex> lock(gSyncRegistryLock);
     gSyncRegistry[rwlock] = hostRwlock;
@@ -327,7 +361,7 @@ extern "C" int bionic_pthread_rwlock_unlock(void* rwlock) {
 }
 
 extern "C" void bionic_stack_chk_fail() {
-    std::fprintf(stderr, "Bionic shim: stack check failed\n");
+    fprintf(stderr, "Bionic shim: stack check failed\n");
     std::abort();
 }
 
@@ -373,11 +407,13 @@ extern "C" int bionic_pthread_attr_getstack(void* attr, void** stackaddr, size_t
 extern "C" int bionic_pthread_attr_setdetachstate(void* attr, int state) { (void)attr; (void)state; return 0; }
 extern "C" int bionic_pthread_getattr_np(pthread_t thread, void* attr) { (void)thread; (void)attr; return 0; }
 
-// --- Unity/NDK Dummies ---
+// Global metal layer pointer provided by kudroid_bridge.cpp
+extern void* g_metalLayer;
+
 extern "C" void* bionic_ANativeWindow_fromSurface(void* env, void* surface) {
     (void)env; (void)surface;
-    static int dummyWindow[1024] = {0};
-    return &dummyWindow;
+    // ANGLE on iOS uses CAMetalLayer/UIView as the native window!
+    return g_metalLayer;
 }
 extern "C" int bionic_ANativeWindow_getWidth(void* window) { (void)window; return 1080; }
 extern "C" int bionic_ANativeWindow_getHeight(void* window) { (void)window; return 1920; }
@@ -424,6 +460,95 @@ extern "C" int bionic_ASensorEventQueue_hasEvents(void* queue) {
 extern "C" ssize_t bionic_ASensorEventQueue_getEvents(void* queue, void* events, size_t count) {
     (void)queue; (void)events; (void)count; return 0;
 }
+
+extern "C" int bionic_ioctl(int fd, unsigned long request, ...) {
+    (void)fd; (void)request;
+    return 0; // Success for all dummy fds
+}
+
+#define PR_SET_NAME 15
+
+extern "C" int bionic_prctl(int option, unsigned long arg2, unsigned long arg3, unsigned long arg4, unsigned long arg5) {
+    (void)arg3; (void)arg4; (void)arg5;
+    if (option == PR_SET_NAME) {
+#ifdef __APPLE__
+        return pthread_setname_np(reinterpret_cast<const char*>(arg2));
+#else
+        return pthread_setname_np(pthread_self(), reinterpret_cast<const char*>(arg2));
+#endif
+    }
+    return 0;
+}
+
+#ifndef __APPLE__
+#include <sys/syscall.h>
+#endif
+
+extern "C" pid_t bionic_gettid() {
+#ifdef __APPLE__
+    uint64_t tid;
+    pthread_threadid_np(NULL, &tid);
+    return static_cast<pid_t>(tid);
+#else
+    return ::syscall(SYS_gettid);
+#endif
+}
+
+extern "C" void* bionic_mremap(void *old_address, size_t old_size, size_t new_size, int flags, void *new_address) {
+    (void)new_address;
+    if (flags & 1) { // MREMAP_MAYMOVE
+        void* new_ptr = mmap(NULL, new_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (new_ptr != MAP_FAILED) {
+            std::memcpy(new_ptr, old_address, old_size);
+            munmap(old_address, old_size);
+            return new_ptr;
+        }
+    }
+    return MAP_FAILED;
+}
+
+#define AT_HWCAP 16
+#define HWCAP_NEON (1 << 12)
+#define HWCAP_AES (1 << 3)
+#define HWCAP_PMULL (1 << 4)
+#define HWCAP_SHA1 (1 << 5)
+#define HWCAP_SHA2 (1 << 6)
+#define HWCAP_CRC32 (1 << 7)
+
+extern "C" unsigned long bionic_getauxval(unsigned long type) {
+    if (type == AT_HWCAP) {
+        return HWCAP_NEON | HWCAP_AES | HWCAP_PMULL | HWCAP_SHA1 | HWCAP_SHA2 | HWCAP_CRC32;
+    }
+    return 0;
+}
+
+extern "C" ssize_t bionic_getrandom(void *buf, size_t buflen, unsigned int flags) {
+    (void)flags;
+    int fd = ::open("/dev/urandom", O_RDONLY);
+    if (fd < 0) return -1;
+    ssize_t ret = ::read(fd, buf, buflen);
+    ::close(fd);
+    return ret;
+}
+
+extern "C" int bionic_ashmem_create_region(const char *name, size_t size) {
+    (void)name;
+    char shm_name[64];
+    std::snprintf(shm_name, sizeof(shm_name), "/kudroid_ashmem_%d_%d", ::getpid(), rand());
+    int fd = shm_open(shm_name, O_RDWR | O_CREAT | O_EXCL, 0600);
+    if (fd >= 0) {
+        shm_unlink(shm_name);
+        ::ftruncate(fd, size);
+        return fd;
+    }
+    return -1;
+}
+
+extern "C" int bionic_ashmem_set_prot_region(int fd, int prot) {
+    (void)fd; (void)prot;
+    return 0; // Always allow
+}
+
 extern "C" const char* bionic_ASensor_getName(void* sensor) {
     (void)sensor; return "DummySensor";
 }
@@ -439,6 +564,232 @@ extern "C" float bionic_ASensor_getResolution(void* sensor) {
 extern "C" int bionic_ASensor_getMinDelay(void* sensor) {
     (void)sensor; return 10000;
 }
+
+// --- Linux-Specific Syscalls ---
+
+struct FutexWaitQueue {
+    std::mutex mtx;
+    std::condition_variable cv;
+};
+static std::unordered_map<uint32_t*, FutexWaitQueue> g_futexQueues;
+static std::mutex g_futexGlobalMtx;
+
+extern "C" int bionic_futex(uint32_t *uaddr, int futex_op, uint32_t val, const struct timespec *timeout, uint32_t *uaddr2, uint32_t val3) {
+    (void)uaddr; (void)futex_op; (void)val; (void)timeout; (void)uaddr2; (void)val3;
+    int cmd = futex_op & 127; // remove private flag
+    if (cmd == 0) { // FUTEX_WAIT
+        std::unique_lock<std::mutex> lock(g_futexGlobalMtx);
+        FutexWaitQueue& q = g_futexQueues[uaddr];
+        std::unique_lock<std::mutex> qLock(q.mtx);
+        lock.unlock();
+
+        if (*uaddr != val) return -1;
+
+        if (timeout) {
+            auto duration = std::chrono::seconds(timeout->tv_sec) + std::chrono::nanoseconds(timeout->tv_nsec);
+            if (q.cv.wait_for(qLock, duration) == std::cv_status::timeout) return -1;
+        } else {
+            q.cv.wait(qLock);
+        }
+        return 0;
+    } else if (cmd == 1) { // FUTEX_WAKE
+        std::unique_lock<std::mutex> lock(g_futexGlobalMtx);
+        auto it = g_futexQueues.find(uaddr);
+        if (it != g_futexQueues.end()) {
+            std::unique_lock<std::mutex> qLock(it->second.mtx);
+            lock.unlock();
+            if (val == 1) it->second.cv.notify_one();
+            else it->second.cv.notify_all();
+            return val;
+        }
+        return 0;
+    }
+    return -1;
+}
+
+#ifdef __APPLE__
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <map>
+#include <mutex>
+
+static int create_loopback_udp() {
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return -1;
+    struct sockaddr_in addr;
+    std::memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        ::close(fd); return -1;
+    }
+    socklen_t len = sizeof(addr);
+    getsockname(fd, (struct sockaddr*)&addr, &len);
+    connect(fd, (struct sockaddr*)&addr, len);
+    
+    // Set non-blocking just in case
+    int flags = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    return fd;
+}
+
+// For timerfd, we keep a map of fd to GCD timer
+static std::map<int, dispatch_source_t> g_timerfds;
+static std::mutex g_timerfds_mtx;
+#endif
+
+extern "C" int bionic_eventfd(unsigned int initval, int flags) {
+#ifdef __APPLE__
+    (void)flags;
+    int fd = create_loopback_udp();
+    if (fd >= 0 && initval > 0) {
+        uint64_t val = initval;
+        write(fd, &val, sizeof(val));
+    }
+    return fd;
+#else
+    return ::eventfd(initval, flags);
+#endif
+}
+
+extern "C" int bionic_timerfd_create(int clockid, int flags) {
+#ifdef __APPLE__
+    (void)clockid; (void)flags;
+    return create_loopback_udp();
+#else
+    return ::timerfd_create(clockid, flags);
+#endif
+}
+
+struct bionic_itimerspec {
+    struct timespec it_interval;
+    struct timespec it_value;
+};
+
+extern "C" int bionic_timerfd_settime(int fd, int flags, const struct bionic_itimerspec *new_value, struct bionic_itimerspec *old_value) {
+#ifdef __APPLE__
+    (void)flags; (void)old_value;
+    if (fd < 0 || !new_value) return -1;
+    
+    std::lock_guard<std::mutex> lock(g_timerfds_mtx);
+    if (g_timerfds.count(fd)) {
+        dispatch_source_cancel(g_timerfds[fd]);
+        g_timerfds.erase(fd);
+    }
+    
+    if (new_value->it_value.tv_sec == 0 && new_value->it_value.tv_nsec == 0) {
+        return 0; // disarm
+    }
+    
+    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0));
+    uint64_t start = new_value->it_value.tv_sec * 1000000000ull + new_value->it_value.tv_nsec;
+    uint64_t interval = new_value->it_interval.tv_sec * 1000000000ull + new_value->it_interval.tv_nsec;
+    if (interval == 0) interval = DISPATCH_TIME_FOREVER;
+    
+    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, start), interval, 1000000); // 1ms leeway
+    dispatch_source_set_event_handler(timer, ^{
+        uint64_t exp = 1;
+        write(fd, &exp, sizeof(exp));
+    });
+    dispatch_resume(timer);
+    g_timerfds[fd] = timer;
+    
+    return 0;
+#else
+    return ::timerfd_settime(fd, flags, reinterpret_cast<const struct itimerspec*>(new_value), reinterpret_cast<struct itimerspec*>(old_value));
+#endif
+}
+
+extern "C" int bionic_epoll_create(int size) {
+#ifdef __APPLE__
+    (void)size;
+    return kqueue();
+#else
+    return ::epoll_create(size);
+#endif
+}
+extern "C" int bionic_epoll_create1(int flags) { 
+#ifdef __APPLE__
+    (void)flags; return kqueue(); 
+#else
+    return ::epoll_create1(flags);
+#endif
+}
+
+extern "C" int bionic_epoll_ctl(int epfd, int op, int fd, void *event_ptr) {
+#ifdef __APPLE__
+    if (epfd < 0 || fd < 0) return -1;
+    struct android_epoll_event* event = static_cast<struct android_epoll_event*>(event_ptr);
+    
+    struct kevent changes[2];
+    int num_changes = 0;
+    
+    if (op == EPOLL_CTL_DEL) {
+        EV_SET(&changes[0], fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
+        EV_SET(&changes[1], fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
+        num_changes = 2;
+    } else {
+        uint16_t flags = (op == EPOLL_CTL_ADD) ? EV_ADD : (EV_ADD | EV_RECEIPT);
+        uint32_t ep_events = event->events;
+        void* udata = reinterpret_cast<void*>(event->data);
+        
+        if (ep_events & EPOLLIN) {
+            EV_SET(&changes[num_changes++], fd, EVFILT_READ, flags, 0, 0, udata);
+        } else if (op == EPOLL_CTL_MOD) {
+            EV_SET(&changes[num_changes++], fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
+        }
+        
+        if (ep_events & EPOLLOUT) {
+            EV_SET(&changes[num_changes++], fd, EVFILT_WRITE, flags, 0, 0, udata);
+        } else if (op == EPOLL_CTL_MOD) {
+            EV_SET(&changes[num_changes++], fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
+        }
+    }
+    
+    if (num_changes > 0) {
+        kevent(epfd, changes, num_changes, NULL, 0, NULL);
+    }
+    return 0;
+#else
+    return ::epoll_ctl(epfd, op, fd, reinterpret_cast<struct epoll_event*>(event_ptr));
+#endif
+}
+
+extern "C" int bionic_epoll_wait(int epfd, void *events_ptr, int maxevents, int timeout) {
+#ifdef __APPLE__
+    if (epfd < 0 || maxevents <= 0) return -1;
+    struct android_epoll_event* events = static_cast<struct android_epoll_event*>(events_ptr);
+    
+    struct kevent* evlist = (struct kevent*)std::malloc(sizeof(struct kevent) * maxevents);
+    if (!evlist) return -1;
+    
+    struct timespec ts;
+    struct timespec* ts_ptr = NULL;
+    if (timeout >= 0) {
+        ts.tv_sec = timeout / 1000;
+        ts.tv_nsec = (timeout % 1000) * 1000000;
+        ts_ptr = &ts;
+    }
+    
+    int n = kevent(epfd, NULL, 0, evlist, maxevents, ts_ptr);
+    if (n > 0) {
+        for (int i = 0; i < n; i++) {
+            events[i].events = 0;
+            if (evlist[i].filter == EVFILT_READ) events[i].events |= EPOLLIN;
+            else if (evlist[i].filter == EVFILT_WRITE) events[i].events |= EPOLLOUT;
+            if (evlist[i].flags & EV_ERROR) events[i].events |= EPOLLERR;
+            if (evlist[i].flags & EV_EOF) events[i].events |= EPOLLHUP;
+            events[i].data = reinterpret_cast<uint64_t>(evlist[i].udata);
+        }
+    }
+    std::free(evlist);
+    return n;
+#else
+    return ::epoll_wait(epfd, reinterpret_cast<struct epoll_event*>(events_ptr), maxevents, timeout);
+#endif
+}
+
 extern "C" int bionic_pthread_condattr_init(void* attr) { (void)attr; return 0; }
 extern "C" int bionic_pthread_condattr_destroy(void* attr) { (void)attr; return 0; }
 extern "C" int bionic_pthread_mutexattr_init(void* attr) { (void)attr; return 0; }
@@ -480,14 +831,10 @@ extern "C" int bionic_pthread_once(int* guest_once, void (*init_routine)(void)) 
     return 0;
 }
 
-
-#undef sa_handler
-#undef sa_sigaction
-
 struct android_sigaction {
     union {
-        void (*sa_handler)(int);
-        void (*sa_sigaction)(int, void*, void*);
+        void (*android_sa_handler)(int);
+        void (*android_sa_sigaction)(int, void*, void*);
     };
     uint64_t sa_mask;
     int sa_flags;
@@ -497,22 +844,87 @@ struct android_sigaction {
 #include <signal.h>
 
 extern "C" int bionic_sigaction(int signum, const struct android_sigaction* act, struct android_sigaction* oldact) {
-    (void)act;
-    (void)oldact;
+#ifdef KUDROID_DEBUG
     char buf[128];
     std::snprintf(buf, sizeof(buf), "sigaction(signum=%d)", signum);
     trace(buf);
+#endif
     
-    // For now, just ignore it to prevent it from crashing the host handler,
-    // but returning 0 makes IL2CPP think it succeeded.
-    // If it's SIGSEGV (11), IL2CPP will crash on intentional null deref.
-    return 0;
+    struct sigaction host_act;
+    struct sigaction host_oldact;
+    
+    if (act) {
+        std::memset(&host_act, 0, sizeof(host_act));
+        if (act->sa_flags & 0x00000004) { // Android SA_SIGINFO
+            host_act.sa_sigaction = reinterpret_cast<void (*)(int, siginfo_t*, void*)>(act->android_sa_sigaction);
+            host_act.sa_flags |= SA_SIGINFO; // iOS SA_SIGINFO
+        } else {
+            host_act.sa_handler = act->android_sa_handler;
+        }
+    }
+    
+    int ret = ::sigaction(signum, act ? &host_act : nullptr, oldact ? &host_oldact : nullptr);
+    
+    if (oldact && ret == 0) {
+        std::memset(oldact, 0, sizeof(struct android_sigaction));
+        if (host_oldact.sa_flags & SA_SIGINFO) {
+            oldact->sa_flags |= 0x00000004;
+            oldact->android_sa_sigaction = reinterpret_cast<void (*)(int, void*, void*)>(host_oldact.sa_sigaction);
+        } else {
+            oldact->android_sa_handler = host_oldact.sa_handler;
+        }
+    }
+    
+    return ret;
+}
+
+static pthread_key_t tls_key;
+static pthread_once_t tls_key_once = PTHREAD_ONCE_INIT;
+
+static void tls_destructor(void* tls_base) {
+    if (tls_base) {
+        std::free(tls_base);
+    }
+}
+
+static void init_tls_key() {
+    ::pthread_key_create(&tls_key, tls_destructor);
+}
+
+struct BionicThreadArgs {
+    void* (*start_routine)(void*);
+    void* arg;
+};
+
+static void* bionic_thread_wrapper(void* rawArgs) {
+    BionicThreadArgs* args = static_cast<BionicThreadArgs*>(rawArgs);
+    void* (*start_routine)(void*) = args->start_routine;
+    void* arg = args->arg;
+    delete args;
+
+    ::pthread_once(&tls_key_once, init_tls_key);
+
+    // Allocate 64KB for Android TLS block and set tpidr_el0
+    // Darwin uses tpidrro_el0, so tpidr_el0 is free for us!
+    void* tls_base = std::aligned_alloc(16, 65536); 
+    std::memset(tls_base, 0, 65536);
+    ::pthread_setspecific(tls_key, tls_base);
+
+#if defined(__aarch64__)
+    __asm__ volatile("msr tpidr_el0, %0" : : "r"((char*)tls_base + 32768));
+#endif
+
+    void* result = start_routine(arg);
+
+    // No need to free(tls_base) here, the destructor will handle it automatically
+    // when the thread terminates, even if it terminates via pthread_exit().
+    return result;
 }
 
 extern "C" int bionic_pthread_create(pthread_t* thread, void* attr, void* (*start_routine)(void*), void* arg) {
     (void)attr;
-    // Ignore Android's pthread_attr_t and pass nullptr to iOS's pthread_create
-    return ::pthread_create(thread, nullptr, start_routine, arg);
+    BionicThreadArgs* args = new BionicThreadArgs{start_routine, arg};
+    return ::pthread_create(thread, nullptr, bionic_thread_wrapper, args);
 }
 
 extern "C" int* __error(void);
@@ -553,11 +965,22 @@ const SymbolEntry kSymbols[] = {
     {"pthread_mutexattr_settype", reinterpret_cast<void*>(&bionic_pthread_mutexattr_settype)},
     {"pthread_mutex_trylock", reinterpret_cast<void*>(&bionic_pthread_mutex_trylock)},
     {"pthread_key_create", reinterpret_cast<void*>(&bionic_pthread_key_create)},
-    {"pthread_getspecific", reinterpret_cast<void*>(&bionic_pthread_getspecific)},
     {"pthread_setspecific", reinterpret_cast<void*>(&bionic_pthread_setspecific)},
+    {"pthread_getspecific", reinterpret_cast<void*>(&bionic_pthread_getspecific)},
     {"pthread_key_delete", reinterpret_cast<void*>(&bionic_pthread_key_delete)},
     {"pthread_once", reinterpret_cast<void*>(&bionic_pthread_once)},
     {"sigaction", reinterpret_cast<void*>(&bionic_sigaction)},
+    {"futex", reinterpret_cast<void*>(&bionic_futex)},
+    {"mremap", reinterpret_cast<void*>(&bionic_mremap)},
+    {"gettid", reinterpret_cast<void*>(&bionic_gettid)},
+    {"getauxval", reinterpret_cast<void*>(&bionic_getauxval)},
+    {"timerfd_create", reinterpret_cast<void*>(&bionic_timerfd_create)},
+    {"timerfd_settime", reinterpret_cast<void*>(&bionic_timerfd_settime)},
+    {"eventfd", reinterpret_cast<void*>(&bionic_eventfd)},
+    {"epoll_create", reinterpret_cast<void*>(&bionic_epoll_create)},
+    {"epoll_create1", reinterpret_cast<void*>(&bionic_epoll_create1)},
+    {"epoll_ctl", reinterpret_cast<void*>(&bionic_epoll_ctl)},
+    {"epoll_wait", reinterpret_cast<void*>(&bionic_epoll_wait)},
     {"pthread_cond_init", reinterpret_cast<void*>(&bionic_pthread_cond_init)},
     {"pthread_cond_destroy", reinterpret_cast<void*>(&bionic_pthread_cond_destroy)},
     {"pthread_cond_wait", reinterpret_cast<void*>(&bionic_pthread_cond_wait)},
@@ -571,15 +994,15 @@ const SymbolEntry kSymbols[] = {
     {"pthread_rwlock_unlock", reinterpret_cast<void*>(&bionic_pthread_rwlock_unlock)},
     
     {"__errno", reinterpret_cast<void*>(&__error)},
-    {"snprintf", reinterpret_cast<void*>(&std::snprintf)},
-    {"memcpy", reinterpret_cast<void*>(&std::memcpy)},
+    {"snprintf", reinterpret_cast<void*>(&snprintf)},
+    {"memcpy", reinterpret_cast<void*>(&memcpy)},
     {"dlopen", reinterpret_cast<void*>(&bionic_dlopen)},
     {"dlsym", reinterpret_cast<void*>(&bionic_dlsym)},
     {"dlclose", reinterpret_cast<void*>(&bionic_dlclose)},
     {"dlerror", reinterpret_cast<void*>(&bionic_dlerror)},
     {"malloc", reinterpret_cast<void*>(&bionic_malloc)},
-    {"calloc", reinterpret_cast<void*>(&std::calloc)},
-    {"realloc", reinterpret_cast<void*>(&std::realloc)},
+    {"calloc", reinterpret_cast<void*>(&calloc)},
+    {"realloc", reinterpret_cast<void*>(&realloc)},
     {"free", reinterpret_cast<void*>(&bionic_free)},
     {"mmap", reinterpret_cast<void*>(&::mmap)},
     {"munmap", reinterpret_cast<void*>(&::munmap)},
@@ -600,6 +1023,11 @@ const SymbolEntry kSymbols[] = {
     {"unlink", reinterpret_cast<void*>(&vfs_unlink)},
     {"remove", reinterpret_cast<void*>(&vfs_remove)},
     {"rename", reinterpret_cast<void*>(&vfs_rename)},
+    {"ioctl", reinterpret_cast<void*>(&bionic_ioctl)},
+    {"prctl", reinterpret_cast<void*>(&bionic_prctl)},
+    {"getrandom", reinterpret_cast<void*>(&bionic_getrandom)},
+    {"ashmem_create_region", reinterpret_cast<void*>(&bionic_ashmem_create_region)},
+    {"ashmem_set_prot_region", reinterpret_cast<void*>(&bionic_ashmem_set_prot_region)},
     {"mkdir", reinterpret_cast<void*>(&vfs_mkdir)},
     {"rmdir", reinterpret_cast<void*>(&vfs_rmdir)},
     {"opendir", reinterpret_cast<void*>(&vfs_opendir)},
@@ -624,6 +1052,24 @@ const SymbolEntry kSymbols[] = {
     {"_ITM_registerTMCloneTable", reinterpret_cast<void*>(&bionic_runtime_noop)},
     {"_ITM_deregisterTMCloneTable", reinterpret_cast<void*>(&bionic_runtime_noop)},
     {"__gmon_start__", reinterpret_cast<void*>(&bionic_runtime_noop)},
+
+    // Exceptions and Unwinding
+    {"_Unwind_Resume", reinterpret_cast<void*>(&_Unwind_Resume)},
+    {"_Unwind_RaiseException", reinterpret_cast<void*>(&_Unwind_RaiseException)},
+    {"_Unwind_DeleteException", reinterpret_cast<void*>(&_Unwind_DeleteException)},
+    {"_Unwind_GetLanguageSpecificData", reinterpret_cast<void*>(&_Unwind_GetLanguageSpecificData)},
+    {"_Unwind_GetRegionStart", reinterpret_cast<void*>(&_Unwind_GetRegionStart)},
+    {"_Unwind_SetGR", reinterpret_cast<void*>(&_Unwind_SetGR)},
+    {"_Unwind_SetIP", reinterpret_cast<void*>(&_Unwind_SetIP)},
+    {"_Unwind_GetIP", reinterpret_cast<void*>(&_Unwind_GetIP)},
+    {"_Unwind_GetGR", reinterpret_cast<void*>(&_Unwind_GetGR)},
+    {"_Unwind_Backtrace", reinterpret_cast<void*>(&_Unwind_Backtrace)},
+    {"__cxa_allocate_exception", reinterpret_cast<void*>(&abi::__cxa_allocate_exception)},
+    {"__cxa_free_exception", reinterpret_cast<void*>(&abi::__cxa_free_exception)},
+    {"__cxa_throw", reinterpret_cast<void*>(&abi::__cxa_throw)},
+    {"__cxa_begin_catch", reinterpret_cast<void*>(&abi::__cxa_begin_catch)},
+    {"__cxa_end_catch", reinterpret_cast<void*>(&abi::__cxa_end_catch)},
+    {"__gxx_personality_v0", reinterpret_cast<void*>(&__gxx_personality_v0)},
 };
 
 } // namespace
@@ -636,9 +1082,9 @@ extern "C" uint64_t kudroid_universal_dummy() {
 void* resolve_bionic_symbol(const char* name) {
     if (name) {
         for (const auto& symbol : kSymbols) {
-            if (std::strcmp(name, symbol.name) == 0) {
+            if (strcmp(name, symbol.name) == 0) {
                 char traceMessage[256];
-                std::snprintf(traceMessage, sizeof(traceMessage),
+                snprintf(traceMessage, sizeof(traceMessage),
                               "bound %s -> %p", name, symbol.address);
                 trace(traceMessage);
                 return symbol.address;
@@ -649,20 +1095,20 @@ void* resolve_bionic_symbol(const char* name) {
         void* host_ptr = ::dlsym(RTLD_DEFAULT, name);
         if (host_ptr) {
             char traceMessage[256];
-            std::snprintf(traceMessage, sizeof(traceMessage),
+            snprintf(traceMessage, sizeof(traceMessage),
                           "bound %s -> %p (host)", name, host_ptr);
             trace(traceMessage);
             return host_ptr;
         }
 
-        std::fprintf(stderr, "Missing Bionic symbol: %s\n", name);
+        fprintf(stderr, "Missing Bionic symbol: %s\n", name);
         char traceMessage[256];
-        std::snprintf(traceMessage, sizeof(traceMessage),
+        snprintf(traceMessage, sizeof(traceMessage),
                   "missing %s -> universal dummy", name);
         trace(traceMessage);
         return reinterpret_cast<void*>(&kudroid_universal_dummy);
     } else {
-        std::fprintf(stderr, "Missing Bionic symbol: <null>\n");
+        fprintf(stderr, "Missing Bionic symbol: <null>\n");
         return nullptr;
     }
 }

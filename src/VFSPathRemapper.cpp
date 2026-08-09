@@ -1,4 +1,5 @@
 #include "kudroid/VFSPathRemapper.h"
+#include "kudroid/cacert_data.h"
 
 #include <cerrno>
 #include <cstdlib>
@@ -10,6 +11,8 @@
 #include <sstream>
 #include <unistd.h>
 #include <vector>
+#include <sys/socket.h>
+#include <sys/mman.h>
 
 namespace kudroid {
 namespace {
@@ -18,13 +21,17 @@ void vfsLog(const std::string& message) {
     std::fprintf(stderr, "[kudroid_vfs] %s\n", message.c_str());
 }
 
+void vfsTrace(const std::string& message) {
+#ifdef KUDROID_DEBUG
+    std::fprintf(stderr, "[kudroid_vfs] %s\n", message.c_str());
+#else
+    (void)message;
+#endif
+}
+
 std::string defaultDocumentsDirectory() {
     const char* home = std::getenv("HOME");
     return home ? std::string(home) + "/Documents" : ".";
-}
-
-bool startsWith(const std::string& value, const char* prefix) {
-    return value.rfind(prefix, 0) == 0;
 }
 
 } // namespace
@@ -47,13 +54,29 @@ void VFSPathRemapper::setDocumentsDirectory(const std::string& documentsDirector
 
 bool VFSPathRemapper::initialize() {
     std::error_code error;
-    for (const auto& relative : {"data/data", "sdcard/Download", "system", "proc/self", "sys"}) {
+    // Create base directories
+    for (const auto& relative : {"data/data", "sdcard/Download", "system", "proc/self", "sys", "mnt", "storage/emulated", "etc", "system/etc", "system/etc/security/cacerts", "system/etc/permissions"}) {
         std::filesystem::create_directories(std::filesystem::path(androidRoot_) / relative, error);
         if (error) {
             vfsLog("Failed to create " + androidRoot_ + "/" + relative + ": " + error.message());
             return false;
         }
     }
+    
+    // Create Symlinks
+    auto make_symlink = [&](const char* target, const char* linkpath) {
+        std::error_code ec;
+        std::filesystem::path fullLink = std::filesystem::path(androidRoot_) / linkpath;
+        if (!std::filesystem::exists(fullLink)) {
+            std::filesystem::create_directory_symlink(target, fullLink, ec);
+        }
+    };
+    
+    make_symlink("../sdcard", "mnt/sdcard");
+    make_symlink("../../sdcard", "storage/emulated/0");
+    std::filesystem::remove(std::filesystem::path(androidRoot_) / "etc", error);
+    make_symlink("system/etc", "etc");
+
     return init_pseudo_files();
 }
 
@@ -61,10 +84,21 @@ bool VFSPathRemapper::init_pseudo_files() {
     const std::string root = androidRoot_;
     const std::pair<const char*, const char*> files[] = {
         {"system/build.prop", "ro.build.version.release=14\nro.build.version.sdk=34\nro.product.model=KuDroid iPhone\nro.product.brand=Apple\nro.product.name=kudroid_arm64\nro.product.cpu.abi=arm64-v8a\n"},
-        {"proc/cpuinfo", "Processor : AArch64 Processor rev 0 (aarch64)\nhardware : Apple Silicon ARM64\nFeatures : fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics\nCPU implementer : 0x61\n"},
-        {"proc/meminfo", "MemTotal: 8192000 kB\nMemFree: 4096000 kB\nMemAvailable: 6000000 kB\n"},
+        {"proc/cpuinfo", "Processor\t: AArch64 Processor rev 0 (aarch64)\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm jscvt fcma lrcpc dcpop sha3 sm3 sm4 asimddp sha512 asimdfhm dit uscat ilrcpc flagm ssbs sb paca pacg dcpodp flagm2 frint\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x1\nCPU part\t: 0xd46\nCPU revision\t: 0\n\nHardware\t: Qualcomm Snapdragon 8 Gen 2\n"},
+        {"proc/meminfo", "MemTotal:        8192000 kB\nMemFree:         4096000 kB\nMemAvailable:    6000000 kB\nBuffers:           24576 kB\nCached:          2048000 kB\nSwapCached:            0 kB\nActive:          1024000 kB\nInactive:        1024000 kB\n"},
         {"proc/version", "Linux version 5.15.0-kudroid (clang 17.0.0) #1 SMP PREEMPT 2026\n"},
-        {"proc/self/cmdline", "com.kudroid.app\0"}
+        {"proc/self/cmdline", "com.kudroid.app\0"},
+        {"proc/self/stat", "1 (com.kudroid.app) S 0 1 1 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n"},
+        {"sys/devices/system/cpu/possible", "0-7\n"},
+        {"sys/devices/system/cpu/present", "0-7\n"},
+        {"sys/devices/system/cpu/online", "0-7\n"},
+        {"sys/class/power_supply/battery/capacity", "100\n"},
+        {"sys/class/power_supply/battery/status", "Charging\n"},
+        {"sys/class/thermal/thermal_zone0/temp", "35000\n"},
+        {"sys/class/thermal/thermal_zone0/type", "tsens_tz_sensor\n"},
+        {"system/etc/hosts", "127.0.0.1\tlocalhost\n::1\t\tip6-localhost ip6-loopback\n"},
+        {"system/etc/resolv.conf", "nameserver 8.8.8.8\nnameserver 8.8.4.4\n"},
+        {"system/etc/permissions/handheld_core_hardware.xml", "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<permissions>\n    <feature name=\"android.hardware.camera\" />\n    <feature name=\"android.hardware.location\" />\n    <feature name=\"android.hardware.sensor.accelerometer\" />\n    <feature name=\"android.hardware.sensor.compass\" />\n</permissions>\n"}
     };
     for (const auto& file : files) {
         const std::filesystem::path path = std::filesystem::path(root) / file.first;
@@ -90,45 +124,83 @@ bool VFSPathRemapper::init_pseudo_files() {
             for (const auto& item : lines) current += item + "\n";
         }
         std::ofstream output(path, std::ios::binary | std::ios::trunc);
-        if (!output) return false;
+        if (!output) continue;
         output.write(current.data(), static_cast<std::streamsize>(current.size()));
         output.close();
         ::chmod(path.c_str(), 0644);
     }
+    
+    // Write CA cert bundle
+    std::filesystem::path cacertPath = std::filesystem::path(root) / "system/etc/security/cacerts/cacert.pem";
+    if (!std::filesystem::exists(cacertPath)) {
+        std::ofstream cacertOut(cacertPath, std::ios::binary);
+        if (cacertOut) {
+            cacertOut.write(reinterpret_cast<const char*>(cacert_pem), cacert_pem_len);
+        }
+    }
+    
     return true;
 }
 
 std::string VFSPathRemapper::remap(const char* originalPath) const {
     if (!originalPath) return {};
-    const std::string original(originalPath);
-    std::string prefix;
-    if (startsWith(original, "/data/data/")) prefix = "/data/data/";
-    else if (startsWith(original, "/data/user/0/")) prefix = "/data/user/0/";
-    else if (startsWith(original, "/sdcard/")) prefix = "/sdcard/";
-    else if (startsWith(original, "/storage/emulated/0/")) prefix = "/storage/emulated/0/";
-    else if (startsWith(original, "/mnt/sdcard/")) prefix = "/mnt/sdcard/";
-    else if (startsWith(original, "/storage/")) prefix = "/storage/";
-    else if (startsWith(original, "/system/")) prefix = "/system/";
-    else if (startsWith(original, "/proc/self/")) prefix = "/proc/self/";
-    else if (startsWith(original, "/proc/")) prefix = "/proc/";
-    else if (startsWith(original, "/sys/")) prefix = "/sys/";
-    else return original;
+    std::string_view original(originalPath);
+    
+    // Map host-native /dev/ devices directly to iOS
+    if (original == "/dev/urandom" || original == "/dev/random" || 
+        original == "/dev/null" || original == "/dev/zero") {
+        return std::string(original);
+    }
 
-    std::string rootName = startsWith(prefix, "/data/") ? "data/data/" :
-                           startsWith(prefix, "/system/") ? "system/" :
-                           startsWith(prefix, "/proc/self/") ? "proc/self/" :
-                           startsWith(prefix, "/proc/") ? "proc/" :
-                           startsWith(prefix, "/sys/") ? "sys/" : "sdcard/";
-    const std::string mapped = androidRoot_ + "/" + rootName + original.substr(prefix.size());
-    vfsLog("Remapped: " + original + " -> " + mapped);
+    std::string_view prefix;
+    std::string_view rootName;
+    if (original.find("/data/data/") == 0) { prefix = "/data/data/"; rootName = "data/data/"; }
+    else if (original.find("/data/user/0/") == 0) { prefix = "/data/user/0/"; rootName = "data/data/"; }
+    else if (original.find("/sdcard/") == 0) { prefix = "/sdcard/"; rootName = "sdcard/"; }
+    else if (original.find("/storage/emulated/0/") == 0) { prefix = "/storage/emulated/0/"; rootName = "sdcard/"; }
+    else if (original.find("/mnt/sdcard/") == 0) { prefix = "/mnt/sdcard/"; rootName = "sdcard/"; }
+    else if (original.find("/storage/") == 0) { prefix = "/storage/"; rootName = "sdcard/"; }
+    else if (original.find("/system/") == 0) { prefix = "/system/"; rootName = "system/"; }
+    else if (original.find("/etc/") == 0) { prefix = "/etc/"; rootName = "etc/"; }
+    else if (original.find("/proc/self/") == 0) { prefix = "/proc/self/"; rootName = "proc/self/"; }
+    else if (original.find("/proc/") == 0) { prefix = "/proc/"; rootName = "proc/"; }
+    else if (original.find("/sys/") == 0) { prefix = "/sys/"; rootName = "sys/"; }
+    else return std::string(original);
+
+    std::string mapped = androidRoot_ + "/" + std::string(rootName) + std::string(original.substr(prefix.size()));
+    vfsTrace("Remapped: " + std::string(original) + " -> " + mapped);
     return mapped;
 }
 
 int vfs_open(const char* path, int flags, mode_t mode) {
+    if (path && (std::strcmp(path, "/dev/binder") == 0 || 
+                 std::strcmp(path, "/dev/mali0") == 0 ||
+                 std::strcmp(path, "/dev/kgsl-3d0") == 0 ||
+                 std::strcmp(path, "/dev/pvrsrvkm") == 0)) {
+        int sv[2];
+        if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0) {
+            ::close(sv[1]);
+            vfsTrace(std::string("open mock device (") + path + ") -> " + std::to_string(sv[0]));
+            return sv[0];
+        }
+    }
+    
+    if (path && std::strcmp(path, "/dev/ashmem") == 0) {
+        static int ashmem_counter = 0;
+        char name[64];
+        std::snprintf(name, sizeof(name), "/kudroid_ashmem_%d_%d", ::getpid(), ashmem_counter++);
+        int fd = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
+        if (fd >= 0) {
+            shm_unlink(name);
+            vfsTrace(std::string("open mock ashmem (") + name + ") -> " + std::to_string(fd));
+            return fd;
+        }
+    }
+
     const std::string mapped = VFSPathRemapper::getInstance().remap(path);
     const int result = (flags & O_CREAT) ? ::open(mapped.c_str(), flags, mode)
                                          : ::open(mapped.c_str(), flags);
-    vfsLog("open(" + mapped + ") -> " + std::to_string(result));
+    vfsTrace("open(" + mapped + ") -> " + std::to_string(result));
     return result;
 }
 
@@ -141,12 +213,12 @@ FILE* vfs_fopen(const char* path, const char* mode) {
         std::filesystem::create_directories(std::filesystem::path(mapped).parent_path(), error);
         if (error) {
             errno = EIO;
-            vfsLog("Cannot create parent directory for " + mapped + ": " + error.message());
+            vfsTrace("Cannot create parent directory for " + mapped + ": " + error.message());
             return nullptr;
         }
     }
     FILE* result = std::fopen(mapped.c_str(), mode);
-    vfsLog("fopen(" + mapped + ", " + (mode ? mode : "<null>") + ") -> " +
+    vfsTrace("fopen(" + mapped + ", " + (mode ? mode : "<null>") + ") -> " +
            (result ? "OK" : std::strerror(errno)));
     return result;
 }

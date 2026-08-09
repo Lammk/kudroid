@@ -144,7 +144,7 @@ bool ElfLoader::parse() {
             return false;
         }
 
-        // Only PT_LOAD segments
+        // Only PT_LOAD and PT_TLS segments
         if (phdr.p_type == 1) {  // PT_LOAD
             Segment seg;
             seg.vaddr  = phdr.p_vaddr;
@@ -153,6 +153,12 @@ bool ElfLoader::parse() {
             seg.memsz  = phdr.p_memsz;
             seg.flags  = phdr.p_flags;
             segments_.push_back(seg);
+        } else if (phdr.p_type == 7) { // PT_TLS
+            // TLS initialization template
+            tls_vaddr_ = phdr.p_vaddr;
+            tls_filesz_ = phdr.p_filesz;
+            tls_memsz_  = phdr.p_memsz;
+            tls_align_  = phdr.p_align;
         }
     }
 
