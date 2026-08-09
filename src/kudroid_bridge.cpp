@@ -12,6 +12,7 @@
 #include <string>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/ucontext.h>
 
 // ── Persistent logging to the app's writable folder ─────────────────────────
 // The app passes a directory (its Documents dir) via kudroid_set_log_dir().
@@ -58,12 +59,12 @@ static void appendTestHeader(std::string& log, const char* test, const char* pat
            std::string(kudroid_jit_available() ? "Enabled" : "Disabled") + "\n";
 }
 
-static void crashHandler(int sig) {
+static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
     if (g_logDir[0]) {
         // Build "<dir>/kudroid_crash.log" without heap allocation.
         char path[1200];
         size_t dl = strlen(g_logDir);
-        if (dl > sizeof(path) - 32) dl = sizeof(path) - 32;
+        if (dl >= sizeof(path) - 32) dl = sizeof(path) - 32;
         memcpy(path, g_logDir, dl);
         const char* suffix = "/kudroid_crash.log";
         memcpy(path + dl, suffix, strlen(suffix) + 1);
@@ -72,9 +73,47 @@ static void crashHandler(int sig) {
         if (fd >= 0) {
             const char* hdr = "[kudroid_core] CRASH — fatal signal caught\n";
             (void)!write(fd, hdr, strlen(hdr));
-            char sigline[64];
+            char sigline[256];
             int m = snprintf(sigline, sizeof(sigline), "signal = %d\n", sig);
             if (m > 0) (void)!write(fd, sigline, (size_t)m);
+
+            // Print fault address
+            if (info) {
+                m = snprintf(sigline, sizeof(sigline),
+                    "fault_addr = %p\nsi_code = %d\n",
+                    info->si_addr, info->si_code);
+                if (m > 0) (void)!write(fd, sigline, (size_t)m);
+            }
+
+            // Print PC register (ARM64)
+#if defined(__aarch64__) || defined(__arm64__)
+            if (ucontext) {
+#if defined(__APPLE__)
+                ucontext_t* uc = (ucontext_t*)ucontext;
+                uint64_t pc = uc->uc_mcontext->__ss.__pc;
+                uint64_t lr = uc->uc_mcontext->__ss.__lr;
+                uint64_t sp = uc->uc_mcontext->__ss.__sp;
+                uint64_t x0 = uc->uc_mcontext->__ss.__x[0];
+                uint64_t x1 = uc->uc_mcontext->__ss.__x[1];
+                m = snprintf(sigline, sizeof(sigline),
+                    "pc = 0x%llx\nlr = 0x%llx\nsp = 0x%llx\n"
+                    "x0 = 0x%llx\nx1 = 0x%llx\n",
+                    (unsigned long long)pc, (unsigned long long)lr,
+                    (unsigned long long)sp,
+                    (unsigned long long)x0, (unsigned long long)x1);
+                if (m > 0) (void)!write(fd, sigline, (size_t)m);
+#elif defined(__linux__)
+                ucontext_t* uc = (ucontext_t*)ucontext;
+                uint64_t pc = uc->uc_mcontext.pc;
+                uint64_t lr = uc->uc_mcontext.regs[30];
+                m = snprintf(sigline, sizeof(sigline),
+                    "pc = 0x%llx\nlr = 0x%llx\n",
+                    (unsigned long long)pc, (unsigned long long)lr);
+                if (m > 0) (void)!write(fd, sigline, (size_t)m);
+#endif
+            }
+#endif
+
             (void)!write(fd, "--- log up to crash ---\n", 24);
             (void)!write(fd, g_crashBuf, (size_t)g_crashLen);
             
@@ -95,11 +134,18 @@ static void installCrashHandlers(void) {
     static bool installed = false;
     if (installed) return;
     installed = true;
-    signal(SIGILL,  crashHandler);
-    signal(SIGBUS,  crashHandler);
-    signal(SIGSEGV, crashHandler);
-    signal(SIGTRAP, crashHandler);
-    signal(SIGABRT, crashHandler);
+    
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = crashHandler;
+    sa.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    
+    sigaction(SIGILL,  &sa, nullptr);
+    sigaction(SIGBUS,  &sa, nullptr);
+    sigaction(SIGSEGV, &sa, nullptr);
+    sigaction(SIGTRAP, &sa, nullptr);
+    sigaction(SIGABRT, &sa, nullptr);
 }
 
 extern "C" void kudroid_set_log_dir(const char* dir) {
