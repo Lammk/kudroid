@@ -282,10 +282,14 @@ jobs:
             cp third_party/ANGLE/lib/ios-arm64/libGLESv2.framework/libGLESv2 third_party/ANGLE/lib/ios-arm64/libGLESv2.dylib
           fi
 
-          MINI_JVM_LIB=$(find build-ios -name "libmini_jvm_lib.a" | head -n 1)
+          echo "=== DIAGNOSTICS: ALL .a FILES IN WORKSPACE ==="
+          find . -type f -name "*.a"
+          echo "=== DIAGNOSTICS: ALL FILES MATCHING mini_jvm ==="
+          find . -type f -name "*mini_jvm*"
+          
+          MINI_JVM_LIB=$(find . -name "libmini_jvm_lib.a" | head -n 1)
           if [ -z "$MINI_JVM_LIB" ]; then
             echo "ERROR: libmini_jvm_lib.a not found!"
-            find build-ios -type f -name "*.a"
             exit 1
           fi
           echo "Found miniJVM at: $MINI_JVM_LIB"
