@@ -158,6 +158,13 @@ static jstring JNICALL jni_NewStringUTF(JNIEnv* env, const char* bytes) {
     Runtime* runtime = runtime_create_inl(nullptr);
     runtime->jvm = g_jvm;
     
+    JClass* str_class = classes_load_get_with_clinit_c(nullptr, "java/lang/String", runtime);
+    if (!str_class) {
+        log_jni("ERROR: java/lang/String not found (missing rt.jar?). Cannot create jstring.");
+        runtime_destroy_inl(runtime);
+        return nullptr;
+    }
+    
     Instance* jstr = jstring_create_cstr(bytes, runtime);
     
     runtime_destroy_inl(runtime);
