@@ -26,6 +26,11 @@ compile_commands.json
 # Third-party vendored binaries
 third_party/**/*.a
 third_party/**/*.so
+third_party/downloads/
+third_party/angle-src/
+third_party/build-tools/
+third_party/MoltenVK/
+third_party/ANGLE/
 
 </parameter>
 <parameter=filePath>

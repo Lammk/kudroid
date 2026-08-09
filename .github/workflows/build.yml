@@ -38,6 +38,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Cache ANGLE source and build tools
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/angle-src
+            third_party/build-tools
+            third_party/ANGLE
+          key: angle-ios-arm64-${{ runner.os }}-${{ hashFiles('scripts/fetch-build-angle-ios.sh') }}
+
+      - name: Build ANGLE Vulkan backend and install MoltenVK
+        run: |
+          chmod +x scripts/fetch-build-angle-ios.sh scripts/fetch-moltenvk-ios.sh
+          ./scripts/fetch-moltenvk-ios.sh
+          if [ ! -f third_party/ANGLE/lib/ios-arm64/libEGL.a ] || \
+             [ ! -f third_party/ANGLE/lib/ios-arm64/libGLESv2.a ]; then
+            ./scripts/fetch-build-angle-ios.sh
+          fi
+
       - name: Download Multi-ELF ARM64 artifact
         uses: actions/download-artifact@v4
         with:
@@ -96,7 +114,16 @@ jobs:
             ios-app/KuDroidShell/KuDroidApp.swift \
             ios-app/KuDroidShell/ContentView.swift \
             build-ios/libkudroid_core.a \
+            -Lthird_party/ANGLE/lib/ios-arm64 \
+            -lEGL -lGLESv2 \
+            third_party/MoltenVK/MoltenVK/static/MoltenVK.xcframework/ios-arm64/libMoltenVK.a \
             -lz \
+            -framework Metal \
+            -framework QuartzCore \
+            -framework Foundation \
+            -framework UIKit \
+            -framework CoreGraphics \
+            -framework IOSurface \
             -o KuDroidShell.app/KuDroidShell
 
           cat > KuDroidShell.app/Info.plist << 'PLIST'
