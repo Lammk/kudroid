@@ -248,7 +248,10 @@ struct SymbolEntry {
     void* address;
 };
 
+extern "C" int* __error(void);
+
 const SymbolEntry kSymbols[] = {
+    {"__errno", reinterpret_cast<void*>(&__error)},
     {"snprintf", reinterpret_cast<void*>(&std::snprintf)},
     {"memcpy", reinterpret_cast<void*>(&std::memcpy)},
     {"dlopen", reinterpret_cast<void*>(&bionic_dlopen)},
