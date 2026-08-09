@@ -1,10 +1,12 @@
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @State private var fullLog = "KuDroid Core Status"
     @State private var showCopyAlert = false
     @State private var jitStatus = "JIT: Unknown"
+    @State private var showAPKImporter = false
 
     /// Show only first 20 lines for readability.
     private var previewLog: String {
@@ -84,6 +86,22 @@ struct ContentView: View {
                 .tint(.green)
             }
 
+            HStack(spacing: 12) {
+                Button("VFS Extended Test") {
+                    fullLog = runVFSExtendedTest()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.teal)
+            }
+
+            HStack(spacing: 12) {
+                Button("Install APK") {
+                    showAPKImporter = true
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.indigo)
+            }
+
             // Buttons row 3: Copy
             HStack(spacing: 12) {
                 Button("Copy Full Log") {
@@ -98,6 +116,20 @@ struct ContentView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text("Full log (\(fullLog.count) chars) copied to clipboard.")
+        }
+        .fileImporter(isPresented: $showAPKImporter,
+                      allowedContentTypes: [.data, .item],
+                      allowsMultipleSelection: false) { result in
+            switch result {
+            case .success(let urls):
+                guard let url = urls.first else {
+                    fullLog = "[kudroid_apk] No APK selected"
+                    return
+                }
+                fullLog = installAPK(from: url)
+            case .failure(let error):
+                fullLog = "[kudroid_apk] File picker failed: \(error.localizedDescription)"
+            }
         }
         .onAppear {
             setupLogDir()
@@ -118,6 +150,40 @@ func setupLogDir() {
 func runVFSSelfTest() -> String {
     guard let cString = kudroid_vfs_self_test_log() else {
         return "Error: null result from kudroid_vfs_self_test_log"
+    }
+    let log = String(cString: cString)
+    free(UnsafeMutablePointer(mutating: cString))
+    return log
+}
+
+func runVFSExtendedTest() -> String {
+    guard let cString = kudroid_vfs_extended_test_log() else {
+        return "Error: null result from kudroid_vfs_extended_test_log"
+    }
+    let log = String(cString: cString)
+    free(UnsafeMutablePointer(mutating: cString))
+    return log
+}
+
+func installAPK(from sourceURL: URL) -> String {
+    let hasAccess = sourceURL.startAccessingSecurityScopedResource()
+    defer {
+        if hasAccess { sourceURL.stopAccessingSecurityScopedResource() }
+    }
+
+    let destination = FileManager.default.temporaryDirectory
+        .appendingPathComponent(sourceURL.lastPathComponent)
+    do {
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try FileManager.default.removeItem(at: destination)
+        }
+        try FileManager.default.copyItem(at: sourceURL, to: destination)
+    } catch {
+        return "[kudroid_apk] Cannot copy selected APK: \(error.localizedDescription)"
+    }
+
+    guard let cString = kudroid_install_apk(destination.path) else {
+        return "[kudroid_apk] Native installer returned no log"
     }
     let log = String(cString: cString)
     free(UnsafeMutablePointer(mutating: cString))

@@ -1,11 +1,14 @@
 #include "kudroid/elf_loader.hpp"
 #include "kudroid/BionicShim.h"
 #include "kudroid/VFSPathRemapper.h"
+#include "kudroid/APKExtractor.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <csignal>
 #include <ctime>
+#include <cctype>
+#include <filesystem>
 #include <string>
 #include <fcntl.h>
 #include <unistd.h>
@@ -106,6 +109,45 @@ extern "C" void kudroid_set_documents_dir(const char* dir) {
 extern "C" const char* kudroid_vfs_self_test_log(void) {
     const std::string log = kudroid::run_vfs_self_test();
     writeLogFile("kudroid_vfs_selftest.txt", log);
+    char* result = static_cast<char*>(std::malloc(log.size() + 1));
+    if (result) std::memcpy(result, log.c_str(), log.size() + 1);
+    return result;
+}
+
+extern "C" const char* kudroid_vfs_extended_test_log(void) {
+    const std::string log = kudroid::run_vfs_extended_test();
+    writeLogFile("kudroid_vfs_extended_test.txt", log);
+    char* result = static_cast<char*>(std::malloc(log.size() + 1));
+    if (result) std::memcpy(result, log.c_str(), log.size() + 1);
+    return result;
+}
+
+extern "C" const char* kudroid_install_apk(const char* apkPath) {
+    std::string log = "[kudroid_core] ===== APK Install =====\n";
+    if (!apkPath || !*apkPath) {
+        log += "[kudroid_apk] ERROR: APK path is empty\n";
+    } else {
+        const std::filesystem::path source(apkPath);
+        std::string appName = source.stem().string();
+        if (appName.empty()) appName = "unnamed_apk";
+        for (char& character : appName) {
+            if (!(std::isalnum(static_cast<unsigned char>(character)) || character == '_' || character == '-')) {
+                character = '_';
+            }
+        }
+        auto& remapper = kudroid::VFSPathRemapper::getInstance();
+        const std::filesystem::path target = std::filesystem::path(remapper.androidRoot()) /
+                                             "data/app" / appName / "lib/arm64-v8a";
+        log += "[kudroid_apk] APK: " + source.string() + "\n";
+        log += "[kudroid_apk] Native library target: " + target.string() + "\n";
+        if (kudroid::APKExtractor::extract_native_libs(source.string(), target.string())) {
+            log += "[kudroid_apk] APK native libraries installed successfully\n";
+        } else {
+            log += "[kudroid_apk] INSTALL FAILED: " +
+                   kudroid::APKExtractor::lastError() + "\n";
+        }
+    }
+    writeLogFile("kudroid_apk_install.txt", log);
     char* result = static_cast<char*>(std::malloc(log.size() + 1));
     if (result) std::memcpy(result, log.c_str(), log.size() + 1);
     return result;

@@ -48,6 +48,11 @@ void kudroid_set_documents_dir(const char* dir);
 
 /// Run the VFS redirect and I/O self-test; returns a malloc'd log.
 const char* kudroid_vfs_self_test_log(void);
+const char* kudroid_vfs_extended_test_log(void);
+
+/// Extract and install an APK's arm64-v8a native libraries into android_root.
+/// Returns a malloc'd diagnostic log; caller must free() it.
+const char* kudroid_install_apk(const char* apkPath);
 
 #ifdef __cplusplus
 }
