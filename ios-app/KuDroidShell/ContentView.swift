@@ -1,14 +1,11 @@
 import SwiftUI
 import UIKit
-import UniformTypeIdentifiers
-
-private let apkDocumentType = UTType(filenameExtension: "apk") ?? .data
 
 struct ContentView: View {
     @State private var fullLog = "KuDroid Core Status"
     @State private var showCopyAlert = false
     @State private var jitStatus = "JIT: Unknown"
-    @State private var showAPKImporter = false
+    @State private var showAPKInstaller = false
 
     /// Show only first 20 lines for readability.
     private var previewLog: String {
@@ -98,7 +95,7 @@ struct ContentView: View {
 
             HStack(spacing: 12) {
                 Button("Install APK") {
-                    showAPKImporter = true
+                    showAPKInstaller = true
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.indigo)
@@ -119,18 +116,10 @@ struct ContentView: View {
         } message: {
             Text("Full log (\(fullLog.count) chars) copied to clipboard.")
         }
-        .fileImporter(isPresented: $showAPKImporter,
-                      allowedContentTypes: [apkDocumentType, .data],
-                      allowsMultipleSelection: false) { result in
-            switch result {
-            case .success(let urls):
-                guard let url = urls.first else {
-                    fullLog = "[kudroid_apk] No APK selected"
-                    return
-                }
-                fullLog = installAPK(from: url)
-            case .failure(let error):
-                fullLog = "[kudroid_apk] File picker failed: \(error.localizedDescription)"
+        .sheet(isPresented: $showAPKInstaller) {
+            APKInstallerView { log in
+                fullLog = log
+                showAPKInstaller = false
             }
         }
         .onAppear {
@@ -145,6 +134,9 @@ func setupLogDir() {
     if let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
         kudroid_set_log_dir(docs.path)
         kudroid_set_documents_dir(docs.path)
+        let apkInbox = docs.appendingPathComponent("put_apk_here", isDirectory: true)
+        try? FileManager.default.createDirectory(at: apkInbox,
+                                                 withIntermediateDirectories: true)
     }
 }
 
@@ -167,36 +159,133 @@ func runVFSExtendedTest() -> String {
     return log
 }
 
-func installAPK(from sourceURL: URL) -> String {
-    let hasAccess = sourceURL.startAccessingSecurityScopedResource()
-    defer {
-        if hasAccess { sourceURL.stopAccessingSecurityScopedResource() }
-    }
-
-    guard let documents = FileManager.default.urls(for: .documentDirectory,
-                                                    in: .userDomainMask).first else {
-        return "[kudroid_apk] Documents directory is unavailable"
-    }
-    let downloadDirectory = documents
-        .appendingPathComponent("android_root/sdcard/Download", isDirectory: true)
-    let destination = downloadDirectory.appendingPathComponent(sourceURL.lastPathComponent)
-    do {
-        try FileManager.default.createDirectory(at: downloadDirectory,
-                                                withIntermediateDirectories: true)
-        if FileManager.default.fileExists(atPath: destination.path) {
-            try FileManager.default.removeItem(at: destination)
-        }
-        try FileManager.default.copyItem(at: sourceURL, to: destination)
-    } catch {
-        return "[kudroid_apk] Cannot copy APK to VFS sdcard: \(error.localizedDescription)"
-    }
-
-    guard let cString = kudroid_install_apk(destination.path) else {
+func installAPK(at apkURL: URL) -> String {
+    guard let cString = kudroid_install_apk(apkURL.path) else {
         return "[kudroid_apk] Native installer returned no log"
     }
     let log = String(cString: cString)
     free(UnsafeMutablePointer(mutating: cString))
     return log
+}
+
+struct APKInstallerView: View {
+    let onInstall: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var apkFiles: [URL] = []
+    @State private var selectedAPK: URL?
+    @State private var status = ""
+
+    private var inboxURL: URL? {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("put_apk_here", isDirectory: true)
+    }
+
+    var body: some View {
+        NavigationView {
+            VStack(spacing: 0) {
+                if let inboxURL {
+                    Text(inboxURL.path)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .textSelection(.enabled)
+                        .padding()
+                }
+
+                List(apkFiles, id: \.path) { apk in
+                    Button {
+                        selectedAPK = apk
+                    } label: {
+                        HStack {
+                            Image(systemName: "shippingbox")
+                            VStack(alignment: .leading) {
+                                Text(apk.lastPathComponent)
+                                Text(fileSize(apk))
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            Spacer()
+                            if selectedAPK == apk {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundColor(.green)
+                            }
+                        }
+                    }
+                    .foregroundColor(.primary)
+                }
+                .overlay {
+                    if apkFiles.isEmpty {
+                        VStack(spacing: 8) {
+                            Image(systemName: "folder.badge.plus")
+                                .font(.largeTitle)
+                            Text("Put .apk files in Documents/put_apk_here")
+                                .multilineTextAlignment(.center)
+                            Text("Then tap Refresh")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        .padding()
+                    }
+                }
+
+                if !status.isEmpty {
+                    Text(status)
+                        .font(.caption)
+                        .foregroundColor(.red)
+                        .padding(.horizontal)
+                }
+
+                HStack {
+                    Button("Refresh") { refresh() }
+                        .buttonStyle(.bordered)
+                    Button("Install Selected") {
+                        guard let selectedAPK else { return }
+                        onInstall(installAPK(at: selectedAPK))
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(selectedAPK == nil)
+                }
+                .padding()
+            }
+            .navigationTitle("Install APK")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") { dismiss() }
+                }
+            }
+            .onAppear { refresh() }
+        }
+    }
+
+    private func refresh() {
+        guard let inboxURL else {
+            status = "Documents directory unavailable"
+            return
+        }
+        do {
+            try FileManager.default.createDirectory(at: inboxURL,
+                                                    withIntermediateDirectories: true)
+            apkFiles = try FileManager.default.contentsOfDirectory(
+                at: inboxURL,
+                includingPropertiesForKeys: [.fileSizeKey],
+                options: [.skipsHiddenFiles]
+            )
+            .filter { $0.pathExtension.lowercased() == "apk" }
+            .sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare(
+                $1.lastPathComponent) == .orderedAscending }
+            if let selectedAPK, !apkFiles.contains(selectedAPK) {
+                self.selectedAPK = nil
+            }
+            status = ""
+        } catch {
+            status = "Cannot scan put_apk_here: \(error.localizedDescription)"
+        }
+    }
+
+    private func fileSize(_ url: URL) -> String {
+        let values = try? url.resourceValues(forKeys: [.fileSizeKey])
+        return ByteCountFormatter.string(fromByteCount: Int64(values?.fileSize ?? 0),
+                                         countStyle: .file)
+    }
 }
 
 /// Query JIT availability from kudroid_core.
