@@ -235,6 +235,7 @@ jobs:
             -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
             -DCMAKE_BUILD_TYPE=Release
           cmake --build build-ios --parallel
+          cmake --build build-ios --parallel --target mini_jvm_lib
 
       - name: Compile Swift app + link kudroid_core (unsigned .app)
         run: |
