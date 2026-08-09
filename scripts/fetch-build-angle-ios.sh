@@ -133,13 +133,23 @@ extra_cflags="-Wno-unsafe-buffer-usage"'
 autoninja -C "$BUILD_DIR" libEGL libGLESv2
 
 cp -R include/EGL include/GLES include/GLES2 include/GLES3 include/KHR "$OUTPUT_DIR/include/"
-find "$BUILD_DIR" -type f \( -name 'libEGL.a' -o -name 'libGLESv2.a' \) -exec cp {} "$OUTPUT_DIR/lib/ios-arm64/" \;
+
+# ANGLE on iOS produces .framework bundles
+if [[ -d "$BUILD_DIR/libEGL.framework" ]]; then
+    cp -R "$BUILD_DIR/libEGL.framework" "$OUTPUT_DIR/lib/ios-arm64/"
+fi
+if [[ -d "$BUILD_DIR/libGLESv2.framework" ]]; then
+    cp -R "$BUILD_DIR/libGLESv2.framework" "$OUTPUT_DIR/lib/ios-arm64/"
+fi
+
+# Fallback for static/dynamic libraries just in case
+find "$BUILD_DIR" -maxdepth 1 -type f \( -name 'libEGL.a' -o -name 'libGLESv2.a' -o -name 'libEGL.dylib' -o -name 'libGLESv2.dylib' \) -exec cp {} "$OUTPUT_DIR/lib/ios-arm64/" \;
 popd >/dev/null
 
-if [[ ! -f "$OUTPUT_DIR/lib/ios-arm64/libEGL.a" || ! -f "$OUTPUT_DIR/lib/ios-arm64/libGLESv2.a" ]]; then
-    echo "ERROR: ANGLE build finished but libEGL.a/libGLESv2.a were not found." >&2
+if [[ ! -e "$OUTPUT_DIR/lib/ios-arm64/libEGL.framework" && ! -f "$OUTPUT_DIR/lib/ios-arm64/libEGL.a" && ! -f "$OUTPUT_DIR/lib/ios-arm64/libEGL.dylib" ]]; then
+    echo "ERROR: ANGLE build finished but libEGL/libGLESv2 output was not found." >&2
     exit 1
 fi
 
 echo "ANGLE iOS ARM64 installed at: $OUTPUT_DIR"
-ls -lh "$OUTPUT_DIR/lib/ios-arm64/libEGL.a" "$OUTPUT_DIR/lib/ios-arm64/libGLESv2.a"
+ls -lh "$OUTPUT_DIR/lib/ios-arm64/"
