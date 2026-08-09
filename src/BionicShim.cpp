@@ -965,6 +965,36 @@ extern "C" void bionic_init_main_thread_tls(void) {
 #endif
 }
 
+namespace kudroid {
+bool bionic_handle_tpidr_trap(void* ucontext) {
+#if defined(__APPLE__) && defined(__aarch64__)
+    if (!ucontext) return false;
+    ucontext_t* uc = static_cast<ucontext_t*>(ucontext);
+    uint32_t* pc = reinterpret_cast<uint32_t*>(uc->uc_mcontext->__ss.__pc);
+    uint32_t inst = *pc;
+    
+    // Check if it's our BRK #(0x1000 + N) instruction
+    // BRK encoding: 1101 0100 001i iiii iiii iiii iii0 0000 -> 0xD4200000 | (imm16 << 5)
+    if ((inst & 0xFFE0001F) == 0xD4200000) {
+        uint32_t imm16 = (inst >> 5) & 0xFFFF;
+        if (imm16 >= 0x1000 && imm16 < 0x1020) { // 0x1000 to 0x101F
+            uint32_t reg = imm16 - 0x1000;
+            void* tls_base = ::pthread_getspecific(tls_key);
+            char* tls_ptr = tls_base ? (static_cast<char*>(tls_base) + 32768) : nullptr;
+            
+            // Write the TLS pointer into the faulting thread's register state
+            uc->uc_mcontext->__ss.__x[reg] = reinterpret_cast<uint64_t>(tls_ptr);
+            
+            // Advance PC to skip the BRK instruction
+            uc->uc_mcontext->__ss.__pc += 4;
+            return true;
+        }
+    }
+#endif
+    return false;
+}
+} // namespace kudroid
+
 static void* bionic_thread_wrapper(void* rawArgs) {
     BionicThreadArgs* args = static_cast<BionicThreadArgs*>(rawArgs);
     void* (*start_routine)(void*) = args->start_routine;

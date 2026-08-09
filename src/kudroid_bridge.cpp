@@ -60,6 +60,12 @@ static void appendTestHeader(std::string& log, const char* test, const char* pat
 }
 
 static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
+    if (sig == SIGTRAP) {
+        if (kudroid::bionic_handle_tpidr_trap(ucontext)) {
+            return; // Handled successfully, resume execution!
+        }
+    }
+    
     if (g_logDir[0]) {
         // Build "<dir>/kudroid_crash.log" without heap allocation.
         char path[1200];

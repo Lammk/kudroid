@@ -293,6 +293,25 @@ bool ElfLoader::map() {
     if (usedMapJit) pthread_jit_write_protect_np(1);
 #endif
 
+    // --- AOT Patcher for tpidr_el0 (Kudroid Native Layer) ---
+    // iOS XNU kernel does not context-switch tpidr_el0, so it returns garbage.
+    // mrs xN, tpidr_el0 -> 0xD53BD040 | N
+    // We patch it to BRK #(0x1000 + N) -> 0xD4200000 | ((0x1000 + N) << 5)
+    for (const auto& seg : segments_) {
+        if (seg.flags & 1) { // PROT_EXEC
+            uint32_t* insts = reinterpret_cast<uint32_t*>(static_cast<char*>(base_) + (seg.vaddr - minVaddr));
+            size_t num_insts = seg.filesz / 4;
+            for (size_t i = 0; i < num_insts; i++) {
+                uint32_t inst = insts[i];
+                if ((inst & 0xFFFFFFE0) == 0xD53BD040) {
+                    uint32_t reg = inst & 0x1F;
+                    uint32_t brk_inst = 0xD4200000 | ((0x1000 + reg) << 5);
+                    insts[i] = brk_inst;
+                }
+            }
+        }
+    }
+
     // ARM64 has separate I/D caches: freshly written code must be flushed from
     // the data cache and the stale instruction cache invalidated, or the CPU
     // executes garbage and the process crashes (SIGILL/SIGBUS) with no log.

@@ -24,6 +24,10 @@ void* resolve_bionic_symbol(const char* name);
 void bionic_shim_reset_trace();
 const char* bionic_shim_trace();
 
+/// Handles SIGTRAP caused by the AOT patched mrs x, tpidr_el0 instructions.
+/// Returns true if handled successfully.
+bool bionic_handle_tpidr_trap(void* ucontext);
+
 /// Example use from an ELF relocation/symbol-binding loop:
 ///
 ///     void* address = resolve_bionic_symbol(symbolName);
