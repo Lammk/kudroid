@@ -411,7 +411,11 @@ extern "C" int bionic_pthread_attr_setdetachstate(void* attr, int state) { (void
 extern "C" int bionic_pthread_getattr_np(pthread_t thread, void* attr) { (void)thread; (void)attr; return 0; }
 
 // Global metal layer pointer provided by kudroid_bridge.cpp
+} // namespace
+} // namespace kudroid
 extern void* g_metalLayer;
+namespace kudroid {
+namespace {
 
 extern "C" void* bionic_ANativeWindow_fromSurface(void* env, void* surface) {
     (void)env; (void)surface;
