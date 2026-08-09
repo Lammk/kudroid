@@ -953,11 +953,14 @@ extern "C" void* bionic_ALooper_forThread() {
 }
 
 extern "C" int bionic_ALooper_pollAll(int timeoutMillis, int* outFd, int* outEvents, void** outData) {
-    (void)outFd; (void)outEvents; (void)outData;
+    if (outFd) *outFd = 0;
+    if (outEvents) *outEvents = 0;
+    if (outData) *outData = nullptr;
+    
     if (timeoutMillis > 0) {
         usleep(static_cast<unsigned>(timeoutMillis) * 1000);
     }
-    return 0; // ALOOPER_POLL_TIMEOUT
+    return -3; // ALOOPER_POLL_TIMEOUT
 }
 
 extern "C" int bionic_ALooper_pollOnce(int timeoutMillis, int* outFd, int* outEvents, void** outData) {
@@ -1133,10 +1136,8 @@ static const unsigned short g_bionic_ctype_[257] = {
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 };
 
-// Return pointer to slot 1 (index 0 in table is EOF = -1 slot)
-extern "C" const unsigned short* bionic_ctype_get() {
-    return &g_bionic_ctype_[1];
-}
+// Global pointer as expected by Android binaries for the data symbol
+extern "C" const unsigned short* _ctype_ = &g_bionic_ctype_[1];
 
 // ============================================================================
 // pthread_condattr_setclock — set clock for condition variable
@@ -1326,7 +1327,7 @@ const SymbolEntry kSymbols[] = {
 
     // Character classification
     {"__ctype_get_mb_cur_max", reinterpret_cast<void*>(&bionic_ctype_get_mb_cur_max)},
-    {"_ctype_", reinterpret_cast<void*>(&bionic_ctype_get)},
+    {"_ctype_", reinterpret_cast<void*>(&_ctype_)},
 
     // pthread extensions
     {"pthread_condattr_setclock", reinterpret_cast<void*>(&bionic_pthread_condattr_setclock)},
