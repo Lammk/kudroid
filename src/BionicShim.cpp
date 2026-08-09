@@ -162,11 +162,13 @@ extern "C" void bionic_runtime_noop() {
 }
 
 extern "C" int bionic_pthread_mutex_init(void* guestMutex,
-                                           const pthread_mutexattr_t* attr) {
+                                           const void* attr) {
+    (void)attr;
     trace("pthread_mutex_init()");
     auto* hostMutex = static_cast<pthread_mutex_t*>(std::malloc(sizeof(pthread_mutex_t)));
     if (!hostMutex) return -1;
-    const int result = ::pthread_mutex_init(hostMutex, attr);
+    // Ignore Android's attr to avoid memory layout mismatch crash on iOS
+    const int result = ::pthread_mutex_init(hostMutex, nullptr);
     if (result != 0) {
         std::free(hostMutex);
         return result;
