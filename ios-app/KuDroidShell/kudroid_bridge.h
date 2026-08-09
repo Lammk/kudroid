@@ -29,6 +29,10 @@ const char* kudroid_execution_test(const char* path);
 /// Returns a malloc'd diagnostic log; caller must free() it.
 const char* kudroid_bionic_execution_test(const char* path);
 
+/// Load bundled ELF libraries through LibraryManager and test global resolution.
+/// Returns a malloc'd diagnostic log; caller must free() it.
+const char* kudroid_multi_elf_test(const char* consumerPath, const char* providerPath);
+
 /// Report whether JIT (executable memory) is available for this process.
 /// @return  A malloc'd string "JIT: Enabled" or "JIT: Disabled".
 ///          Caller must free() the returned string.

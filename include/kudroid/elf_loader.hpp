@@ -2,9 +2,13 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
+#include <memory>
 #include <vector>
 
 namespace kudroid {
+
+class LibraryManager;
 
 /// Minimal ELF64 (ARM64) loader surface.
 /// Phase 1 entry point — parsing, mapping, and relocation stubs.
@@ -36,6 +40,8 @@ public:
     /// Apply relocations and resolve dynamic symbols.
     bool relocate();
 
+    void setLibraryManager(LibraryManager* manager) { libraryManager_ = manager; }
+
     [[nodiscard]] std::uint64_t entryPoint() const { return entry_; }
     [[nodiscard]] const std::vector<Segment>& segments() const { return segments_; }
     [[nodiscard]] bool isLoaded() const { return base_ != nullptr; }
@@ -63,6 +69,34 @@ private:
     bool                 parsed_   = false;
     std::string          lastError_;
     std::vector<char>    fileBuf_;  // Raw file bytes for dynamic table parsing
+    LibraryManager*      libraryManager_ = nullptr;
+};
+
+} // namespace kudroid
+
+namespace kudroid {
+
+/// Return DT_NEEDED library names from an ELF64 shared object.
+std::vector<std::string> parse_elf_dependencies(const char* elf_path);
+
+/// Extract lib/arm64-v8a/*.so entries from an APK into outputDirectory.
+bool extract_arm64_libs_from_apk(const char* apkPath, const char* outputDirectory,
+                                 std::string* error = nullptr);
+
+class LibraryManager {
+public:
+    /// Load an ELF and all DT_NEEDED dependencies from its directory.
+    bool loadRecursive(const std::string& path);
+    /// Return a symbol from any loaded ELF, then BionicShim as fallback.
+    void* resolveGlobalSymbol(const char* name) const;
+    [[nodiscard]] const std::unordered_map<std::string, std::unique_ptr<ElfLoader>>& libraries() const {
+        return libraries_;
+    }
+    [[nodiscard]] const std::string& lastError() const { return lastError_; }
+
+private:
+    std::unordered_map<std::string, std::unique_ptr<ElfLoader>> libraries_;
+    std::string lastError_;
 };
 
 } // namespace kudroid

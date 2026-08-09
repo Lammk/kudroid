@@ -68,6 +68,14 @@ struct ContentView: View {
                 .tint(.blue)
             }
 
+            HStack(spacing: 12) {
+                Button("Multi-ELF Test") {
+                    fullLog = runMultiElfTest()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.purple)
+            }
+
             // Buttons row 3: Copy
             HStack(spacing: 12) {
                 Button("Copy Full Log") {
@@ -187,6 +195,36 @@ func runBionicExecutionTest() -> String {
 
     guard let cString = kudroid_bionic_execution_test(tmpURL.path) else {
         return "❌ Error: null result from kudroid_bionic_execution_test"
+    }
+    let log = String(cString: cString)
+    free(UnsafeMutablePointer(mutating: cString))
+    return log
+}
+
+/// Load both bundled ELF files and test dependency/global symbol resolution.
+func runMultiElfTest() -> String {
+        guard let consumer = Bundle.main.url(forResource: "libkudroid_consumer", withExtension: "so"),
+                    let provider = Bundle.main.url(forResource: "libkudroid_provider", withExtension: "so") else {
+                return "❌ Multi-ELF provider/consumer libraries are missing from bundle"
+    }
+
+    let directory = FileManager.default.temporaryDirectory
+    let consumerURL = directory.appendingPathComponent("libkudroid_consumer.so")
+    let providerURL = directory.appendingPathComponent("libkudroid_provider.so")
+    do {
+        for url in [consumerURL, providerURL] {
+            if FileManager.default.fileExists(atPath: url.path) {
+                try FileManager.default.removeItem(at: url)
+            }
+        }
+        try FileManager.default.copyItem(at: consumer, to: consumerURL)
+        try FileManager.default.copyItem(at: provider, to: providerURL)
+    } catch {
+        return "❌ Failed to prepare multi-ELF test: \(error.localizedDescription)"
+    }
+
+    guard let cString = kudroid_multi_elf_test(consumerURL.path, providerURL.path) else {
+        return "❌ Error: null result from kudroid_multi_elf_test"
     }
     let log = String(cString: cString)
     free(UnsafeMutablePointer(mutating: cString))

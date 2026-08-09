@@ -1,4 +1,5 @@
 #include "kudroid/elf_loader.hpp"
+#include "kudroid/BionicShim.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -16,6 +17,7 @@
 static char g_logDir[1024] = {0};
 static char g_crashBuf[16384];
 static volatile sig_atomic_t g_crashLen = 0;
+static int kudroid_jit_available(void);
 
 static void mirrorCrash(const std::string& log) {
     size_t n = log.size();
@@ -33,6 +35,23 @@ static void writeLogFile(const char* name, const std::string& content) {
         fwrite(content.data(), 1, content.size(), f);
         fclose(f);
     }
+}
+
+static void appendTestHeader(std::string& log, const char* test, const char* path) {
+    std::time_t now = std::time(nullptr);
+    char timestamp[64] = {};
+    std::tm localTime = {};
+#if defined(_WIN32)
+    localtime_s(&localTime, &now);
+#else
+    localtime_r(&now, &localTime);
+#endif
+    std::strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &localTime);
+    log += "[kudroid_core] ===== " + std::string(test) + " =====\n";
+    log += "[kudroid_core] Timestamp: " + std::string(timestamp) + "\n";
+    log += "[kudroid_core] Path: " + std::string(path ? path : "<null>") + "\n";
+    log += "[kudroid_core] JIT: " +
+           std::string(kudroid_jit_available() ? "Enabled" : "Disabled") + "\n";
 }
 
 static void crashHandler(int sig) {
@@ -148,7 +167,8 @@ extern "C" int kudroid_self_test(void) {
 
 extern "C" const char* kudroid_self_test_log(void) {
     std::string log;
-    log += "[kudroid_core] Self-test starting...\n";
+    appendTestHeader(log, "Self-Test", "/nonexistent");
+    log += "[kudroid_core] Phase: construct ElfLoader\n";
     log += "[kudroid_core] Creating ElfLoader with dummy path '/nonexistent'...\n";
 
     try {
@@ -166,7 +186,7 @@ extern "C" const char* kudroid_self_test_log(void) {
         snprintf(buf, sizeof(buf), "[kudroid_core] segments count = %zu\n", loader.segments().size());
         log += buf;
 
-        log += "[kudroid_core] Calling parse()...\n";
+        log += "[kudroid_core] Phase: parse()\n";
         bool ok = loader.parse();
 
         snprintf(buf, sizeof(buf), "[kudroid_core] parse() returned %s\n", ok ? "true" : "false");
@@ -195,6 +215,7 @@ extern "C" const char* kudroid_self_test_log(void) {
 
 extern "C" const char* kudroid_load_elf(const char* path) {
     std::string log;
+    appendTestHeader(log, "ELF Load", path);
     if (!path) {
         log += "[kudroid_core] ERROR: null path\n";
         char* result = (char*)malloc(log.size() + 1);
@@ -209,7 +230,7 @@ extern "C" const char* kudroid_load_elf(const char* path) {
     try {
         kudroid::ElfLoader loader(path);
 
-        log += "[kudroid_core] Parsing ELF headers...\n";
+        log += "[kudroid_core] Phase: parse ELF headers\n";
         bool ok = loader.parse();
 
         if (!ok) {
@@ -238,7 +259,7 @@ extern "C" const char* kudroid_load_elf(const char* path) {
             }
 
             // Try map (stub for now)
-            log += "[kudroid_core] Mapping segments...\n";
+            log += "[kudroid_core] Phase: map PT_LOAD segments\n";
             if (loader.map()) {
                 log += "[kudroid_core] Map OK.\n";
             } else {
@@ -247,7 +268,7 @@ extern "C" const char* kudroid_load_elf(const char* path) {
             }
 
             // Try relocate (stub for now)
-            log += "[kudroid_core] Relocating...\n";
+            log += "[kudroid_core] Phase: resolve relocations/imports\n";
             if (loader.relocate()) {
                 log += "[kudroid_core] Relocate OK.\n";
             } else {
@@ -273,6 +294,7 @@ extern "C" const char* kudroid_load_elf(const char* path) {
 
 extern "C" const char* kudroid_execution_test(const char* path) {
     std::string log;
+    appendTestHeader(log, "ELF Execution", path);
     if (!path) {
         log += "[kudroid_core] ERROR: null path\n";
         char* result = (char*)malloc(log.size() + 1);
@@ -307,7 +329,7 @@ extern "C" const char* kudroid_execution_test(const char* path) {
             return result;
         }
 
-        log += "[kudroid_core] ELF parsed OK.\n";
+        log += "[kudroid_core] Phase: parse -> OK\n";
 
         if (!loader.map()) {
             snprintf(buf, sizeof(buf), "[kudroid_core] MAP FAILED: %s\n", loader.lastError());
@@ -318,7 +340,7 @@ extern "C" const char* kudroid_execution_test(const char* path) {
             return result;
         }
 
-        log += "[kudroid_core] mmap OK.\n";
+        log += "[kudroid_core] Phase: map -> OK\n";
 
         if (!loader.relocate()) {
             snprintf(buf, sizeof(buf), "[kudroid_core] RELOCATE FAILED: %s\n", loader.lastError());
@@ -329,8 +351,8 @@ extern "C" const char* kudroid_execution_test(const char* path) {
             return result;
         }
 
-        log += "[kudroid_core] Relocate OK.\n";
-        log += "[kudroid_core] Running testExecution()...\n";
+        log += "[kudroid_core] Phase: relocate/import binding -> OK\n";
+        log += "[kudroid_core] Phase: invoke exported kudroid_add(40, 20)\n";
 
         // Snapshot the log for the crash handler: the call below jumps into
         // JIT'd code and may fault (signal, not exception). If it does, the
@@ -355,7 +377,9 @@ extern "C" const char* kudroid_execution_test(const char* path) {
 }
 
 extern "C" const char* kudroid_bionic_execution_test(const char* path) {
-    std::string log = "[kudroid_core] Bionic shim execution test\n";
+    std::string log;
+    appendTestHeader(log, "Bionic Shim Execution", path);
+    kudroid::bionic_shim_reset_trace();
     if (!path) {
         log += "[kudroid_core] ERROR: null path\n";
     } else if (!kudroid_jit_available()) {
@@ -375,6 +399,11 @@ extern "C" const char* kudroid_bionic_execution_test(const char* path) {
                 log += "[kudroid_core] SYMBOL FAILED: kudroid_bionic_test not found\n";
             } else {
                 log += "[kudroid_core] Running kudroid_bionic_test()...\n";
+                const char* shimTrace = kudroid::bionic_shim_trace();
+                if (shimTrace && *shimTrace) {
+                    log += "[kudroid_core] Bionic trace before call:\n";
+                    log += shimTrace;
+                }
                 mirrorCrash(log);
                 using TestFunction = int (*)();
                 const int result = reinterpret_cast<TestFunction>(address)();
@@ -384,7 +413,101 @@ extern "C" const char* kudroid_bionic_execution_test(const char* path) {
         }
     }
 
+    const char* shimTrace = kudroid::bionic_shim_trace();
+    if (shimTrace && *shimTrace) {
+        log += "[kudroid_core] Bionic trace:\n";
+        log += shimTrace;
+    }
+
     writeLogFile("kudroid_bionic_test.txt", log);
+    char* result = static_cast<char*>(malloc(log.size() + 1));
+    if (result) memcpy(result, log.c_str(), log.size() + 1);
+    return result;
+}
+
+extern "C" const char* kudroid_multi_elf_test(const char* consumerPath,
+                                               const char* providerPath) {
+    std::string log;
+    appendTestHeader(log, "Multi-ELF Dependency Resolution", consumerPath);
+    kudroid::bionic_shim_reset_trace();
+    log += "[kudroid_core] Phase: create LibraryManager\n";
+
+    if (!consumerPath || !providerPath) {
+        log += "[kudroid_core] ERROR: null ELF path\n";
+    } else {
+        kudroid::LibraryManager manager;
+        log += "[kudroid_core] Phase: parse DT_NEEDED\n";
+        const auto dependencies = kudroid::parse_elf_dependencies(consumerPath);
+        log += "[kudroid_core] DT_NEEDED count: " +
+               std::to_string(dependencies.size()) + "\n";
+        for (const auto& dependency : dependencies) {
+            log += "[kudroid_core]   dependency: " + dependency + "\n";
+        }
+
+        log += "[kudroid_core] Phase: load primary ELF recursively\n";
+        if (!manager.loadRecursive(consumerPath)) {
+            log += "[kudroid_core] PRIMARY LOAD FAILED: " +
+                   manager.lastError() + "\n";
+        } else {
+            log += "[kudroid_core] Primary ELF load OK\n";
+        }
+
+        log += "[kudroid_core] Phase: load sibling ELF recursively\n";
+        if (!manager.loadRecursive(providerPath)) {
+            log += "[kudroid_core] SIBLING LOAD FAILED: " +
+                   manager.lastError() + "\n";
+        } else {
+            log += "[kudroid_core] Sibling ELF load OK\n";
+        }
+
+        const std::size_t loadedCount = manager.libraries().size();
+        log += "[kudroid_core] Loaded library count: " +
+               std::to_string(loadedCount) + "\n";
+        for (const auto& library : manager.libraries()) {
+            log += "[kudroid_core]   loaded: " + library.first + "\n";
+        }
+
+        log += "[kudroid_core] Phase: duplicate-load prevention\n";
+        const bool duplicateLoad = manager.loadRecursive(consumerPath);
+        log += duplicateLoad && manager.libraries().size() == loadedCount
+            ? "[kudroid_core] Duplicate load skipped successfully\n"
+            : "[kudroid_core] Duplicate load check failed\n";
+
+        log += "[kudroid_core] Phase: global symbol resolution\n";
+        void* symbol = manager.resolveGlobalSymbol("kudroid_dependency_value");
+        log += symbol
+            ? "[kudroid_core] Global symbol kudroid_dependency_value resolved from provider\n"
+            : "[kudroid_core] Global symbol kudroid_dependency_value NOT resolved\n";
+
+        log += "[kudroid_core] Phase: execute consumer -> provider call\n";
+        void* consumerSymbol = manager.resolveGlobalSymbol("kudroid_multi_elf_test");
+        if (!consumerSymbol) {
+            log += "[kudroid_core] Consumer symbol kudroid_multi_elf_test NOT resolved\n";
+        } else if (!kudroid_jit_available()) {
+            log += "[kudroid_core] Consumer execution skipped: JIT Disabled\n";
+        } else {
+            const char* trace = kudroid::bionic_shim_trace();
+            if (trace && *trace) {
+                log += "[kudroid_core] Import trace before execution:\n";
+                log += trace;
+            }
+            mirrorCrash(log);
+            using MultiElfFunction = int (*)();
+            const int result = reinterpret_cast<MultiElfFunction>(consumerSymbol)();
+            log += "[kudroid_core] Consumer returned: " + std::to_string(result) + "\n";
+            log += result == 42
+                ? "[kudroid_core] MULTI-ELF TEST RESULT: SUCCESS (35 + 7 = 42)\n"
+                : "[kudroid_core] MULTI-ELF TEST RESULT: FAILED (expected 42)\n";
+        }
+    }
+
+    const char* trace = kudroid::bionic_shim_trace();
+    if (trace && *trace) {
+        log += "[kudroid_core] Bionic/global binding trace:\n";
+        log += trace;
+    }
+
+    writeLogFile("kudroid_multi_elf_test.txt", log);
     char* result = static_cast<char*>(malloc(log.size() + 1));
     if (result) memcpy(result, log.c_str(), log.size() + 1);
     return result;

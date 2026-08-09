@@ -33,9 +33,16 @@ jobs:
         run: cmake --build build --parallel
 
   ios-build:
+    needs: build-multi-elf-so-arm64
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+
+      - name: Download Multi-ELF ARM64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: multi-elf-arm64-so
+          path: multi-elf-artifact
 
       - name: Build kudroid_core static library (iOS ARM64)
         run: |
@@ -50,6 +57,10 @@ jobs:
         run: |
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           mkdir -p KuDroidShell.app
+
+          mkdir -p tests
+          cp multi-elf-artifact/libkudroid_provider_arm64.so tests/libkudroid_provider_arm64.so
+          cp multi-elf-artifact/libkudroid_consumer_arm64.so tests/libkudroid_consumer_arm64.so
 
           # Copy pre-built ARM64 test .so from repo into app bundle
           if [ -f tests/test_lib_arm64.so ]; then
@@ -67,6 +78,15 @@ jobs:
           else
             echo "ERROR: tests/test_bionic_lib_arm64.so not found in repo!"
             echo "Download it from test-bionic-lib-arm64-so artifact and commit to tests/"
+            exit 1
+          fi
+
+          if [ -f tests/libkudroid_provider_arm64.so ] && [ -f tests/libkudroid_consumer_arm64.so ]; then
+            cp tests/libkudroid_provider_arm64.so KuDroidShell.app/libkudroid_provider.so
+            cp tests/libkudroid_consumer_arm64.so KuDroidShell.app/libkudroid_consumer.so
+            echo "Bundled Multi-ELF provider and consumer libraries"
+          else
+            echo "ERROR: Multi-ELF provider/consumer libraries not found in repo!"
             exit 1
           fi
 
@@ -171,3 +191,43 @@ jobs:
         with:
           name: test-bionic-lib-arm64-so
           path: tests/test_bionic_lib_arm64.so
+
+  build-multi-elf-so-arm64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ARM64 cross-compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build provider and consumer ELF pair
+        run: |
+          mkdir -p tests/multi-elf-build
+          aarch64-linux-gnu-gcc -shared -fPIC \
+            -Wl,-soname,libkudroid_provider.so \
+            -o tests/multi-elf-build/libkudroid_provider.so \
+            tests/multi_elf_provider.c
+          aarch64-linux-gnu-gcc -shared -fPIC -pthread \
+            -Ltests/multi-elf-build -Wl,-rpath,'$ORIGIN' \
+            -Wl,-soname,libkudroid_consumer.so \
+            -o tests/multi-elf-build/libkudroid_consumer.so \
+            tests/multi_elf_consumer.c -lkudroid_provider
+          aarch64-linux-gnu-strip tests/multi-elf-build/*.so
+          cp tests/multi-elf-build/libkudroid_provider.so tests/libkudroid_provider_arm64.so
+          cp tests/multi-elf-build/libkudroid_consumer.so tests/libkudroid_consumer_arm64.so
+
+      - name: Verify Multi-ELF dependency
+        run: |
+          file tests/libkudroid_provider_arm64.so tests/libkudroid_consumer_arm64.so
+          readelf -d tests/libkudroid_consumer_arm64.so | grep NEEDED
+          readelf --dyn-syms tests/libkudroid_consumer_arm64.so | grep kudroid_dependency_value
+
+      - name: Upload Multi-ELF artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: multi-elf-arm64-so
+          path: |
+            tests/libkudroid_provider_arm64.so
+            tests/libkudroid_consumer_arm64.so

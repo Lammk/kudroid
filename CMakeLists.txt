@@ -20,8 +20,17 @@ endif()
 add_library(kudroid_core STATIC
     src/BionicShim.cpp
     src/elf_loader.cpp
+    src/library_manager.cpp
     src/kudroid_bridge.cpp
 )
+
+find_path(MINIZIP_INCLUDE_DIR minizip/unzip.h)
+find_library(MINIZIP_LIBRARY NAMES minizip)
+if(MINIZIP_INCLUDE_DIR AND MINIZIP_LIBRARY)
+    target_compile_definitions(kudroid_core PRIVATE KUDROID_HAS_MINIZIP=1)
+    target_include_directories(kudroid_core PRIVATE ${MINIZIP_INCLUDE_DIR})
+    target_link_libraries(kudroid_core PRIVATE ${MINIZIP_LIBRARY})
+endif()
 
 target_include_directories(kudroid_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

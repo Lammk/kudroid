@@ -415,9 +415,14 @@ bool ElfLoader::relocate() {
                     return false;
                 }
                 const char* name = strtab + symtab[symbolIndex].st_name;
-                void* address = symtab[symbolIndex].st_shndx != 0
-                    ? static_cast<char*>(base_) + symtab[symbolIndex].st_value
-                    : resolve_bionic_symbol(name);
+                void* address = nullptr;
+                if (symtab[symbolIndex].st_shndx != 0) {
+                    address = static_cast<char*>(base_) + symtab[symbolIndex].st_value;
+                } else if (libraryManager_) {
+                    address = libraryManager_->resolveGlobalSymbol(name);
+                } else {
+                    address = resolve_bionic_symbol(name);
+                }
                 *target = reinterpret_cast<uintptr_t>(address) + relocs[i].r_addend;
             } else {
                 lastError_ = "Unsupported AArch64 relocation type: " +
@@ -530,6 +535,9 @@ void* ElfLoader::getSymbolAddress(const char* symbolName) {
 
         const char* name = strtab + symtab[i].st_name;
         if (strcmp(name, symbolName) == 0) {
+            if (symtab[i].st_shndx == 0) {
+                continue;
+            }
             // st_value is offset from load base; base_ already adjusted
             return static_cast<char*>(base_) + symtab[i].st_value;
         }
