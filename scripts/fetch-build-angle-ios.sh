@@ -54,7 +54,8 @@ angle_enable_wgpu=false
 angle_build_tests=false
 angle_build_capture_replay_tests=false
 use_custom_libcxx=false
-ios_deployment_target="15.0"'
+ios_deployment_target="15.0"
+extra_cflags_c="-DSYSCONFDIR=\"/etc\" -DFALLBACK_CONFIG_DIRS=\"/etc/xdg\" -DFALLBACK_DATA_DIRS=\"/usr/local/share:/usr/share\""'
 
 autoninja -C "$BUILD_DIR" libEGL libGLESv2
 
