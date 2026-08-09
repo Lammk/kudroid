@@ -934,6 +934,224 @@ extern "C" int bionic_pthread_create(pthread_t* thread, void* attr, void* (*star
 
 extern "C" int* __error(void);
 
+// ============================================================================
+// ALooper — Android event loop (minimal shim for Unity)
+// ============================================================================
+struct ALooper_shim {
+    int dummy;
+};
+
+static ALooper_shim g_mainLooper = {0};
+
+extern "C" void* bionic_ALooper_prepare(int opts) {
+    (void)opts;
+    return &g_mainLooper;
+}
+
+extern "C" void* bionic_ALooper_forThread() {
+    return &g_mainLooper;
+}
+
+extern "C" int bionic_ALooper_pollAll(int timeoutMillis, int* outFd, int* outEvents, void** outData) {
+    (void)outFd; (void)outEvents; (void)outData;
+    if (timeoutMillis > 0) {
+        usleep(static_cast<unsigned>(timeoutMillis) * 1000);
+    }
+    return 0; // ALOOPER_POLL_TIMEOUT
+}
+
+extern "C" int bionic_ALooper_pollOnce(int timeoutMillis, int* outFd, int* outEvents, void** outData) {
+    return bionic_ALooper_pollAll(timeoutMillis, outFd, outEvents, outData);
+}
+
+extern "C" int bionic_ALooper_addFd(void* looper, int fd, int ident, int events, void* callback, void* data) {
+    (void)looper; (void)fd; (void)ident; (void)events; (void)callback; (void)data;
+    return 1; // success
+}
+
+extern "C" int bionic_ALooper_removeFd(void* looper, int fd) {
+    (void)looper; (void)fd;
+    return 1; // success
+}
+
+extern "C" void bionic_ALooper_wake(void* looper) {
+    (void)looper;
+}
+
+extern "C" void bionic_ALooper_acquire(void* looper) {
+    (void)looper;
+}
+
+extern "C" void bionic_ALooper_release(void* looper) {
+    (void)looper;
+}
+
+// ============================================================================
+// memalign — aligned memory allocation (CRITICAL for Unity)
+// ============================================================================
+extern "C" void* bionic_memalign(size_t alignment, size_t size) {
+    void* ptr = nullptr;
+    if (alignment < sizeof(void*)) alignment = sizeof(void*);
+    if (::posix_memalign(&ptr, alignment, size) != 0) return nullptr;
+    return ptr;
+}
+
+// ============================================================================
+// __system_property_get — Android property system stub
+// ============================================================================
+extern "C" int bionic_system_property_get(const char* name, char* value) {
+    if (!name || !value) return 0;
+    // Return empty string for all properties, length 0
+    value[0] = '\0';
+
+    // Provide some useful defaults
+    if (std::strcmp(name, "ro.build.version.sdk") == 0) {
+        std::strcpy(value, "29");
+        return 2;
+    }
+    if (std::strcmp(name, "ro.build.version.release") == 0) {
+        std::strcpy(value, "10");
+        return 2;
+    }
+    if (std::strcmp(name, "ro.product.cpu.abi") == 0) {
+        std::strcpy(value, "arm64-v8a");
+        return 9;
+    }
+    if (std::strcmp(name, "ro.debuggable") == 0) {
+        std::strcpy(value, "0");
+        return 1;
+    }
+    if (std::strcmp(name, "persist.sys.timezone") == 0) {
+        std::strcpy(value, "UTC");
+        return 3;
+    }
+    return 0;
+}
+
+extern "C" int bionic_system_property_find(const char* name) {
+    (void)name;
+    return 0; // not found
+}
+
+extern "C" void bionic_system_property_read_callback(
+    void* pi, void (*callback)(void*, const char*, const char*, unsigned), void* cookie) {
+    (void)pi; (void)callback; (void)cookie;
+}
+
+// ============================================================================
+// dl_iterate_phdr — ELF program header iteration stub
+// ============================================================================
+extern "C" int bionic_dl_iterate_phdr(
+    int (*callback)(void* info, size_t size, void* data), void* data) {
+    (void)callback; (void)data;
+    // Return 0 = no ELF headers to iterate (safe stub)
+    return 0;
+}
+
+// ============================================================================
+// lseek64 — 64-bit file seek (on Darwin/iOS lseek is already 64-bit)
+// ============================================================================
+extern "C" off_t bionic_lseek64(int fd, off_t offset, int whence) {
+    return ::lseek(fd, offset, whence);
+}
+
+// ============================================================================
+// __android_log_vprint — variadic log printing
+// ============================================================================
+extern "C" int bionic_android_log_vprint(int prio, const char* tag, const char* fmt, va_list ap) {
+    (void)prio;
+    std::fprintf(stderr, "[%s] ", tag ? tag : "unknown");
+    std::vfprintf(stderr, fmt, ap);
+    std::fprintf(stderr, "\n");
+    return 0;
+}
+
+extern "C" int bionic_android_log_write(int prio, const char* tag, const char* text) {
+    (void)prio;
+    std::fprintf(stderr, "[%s] %s\n", tag ? tag : "unknown", text ? text : "");
+    return 0;
+}
+
+extern "C" int bionic_android_log_buf_write(int bufId, int prio, const char* tag, const char* msg) {
+    (void)bufId;
+    return bionic_android_log_write(prio, tag, msg);
+}
+
+// ============================================================================
+// __ctype_get_mb_cur_max — max bytes per multibyte character
+// ============================================================================
+extern "C" size_t bionic_ctype_get_mb_cur_max() {
+    return 4; // UTF-8
+}
+
+// ============================================================================
+// _ctype_ — character classification table (Bionic-compatible)
+// ============================================================================
+static const unsigned short g_bionic_ctype_[257] = {
+    0, // EOF slot
+    // 0x00-0x08: control chars
+    0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+    // 0x09: tab (control + blank + space)
+    0x20 | 0x01 | 0x40,
+    // 0x0A-0x0D: control + space (newline, vtab, formfeed, carriage return)
+    0x20 | 0x01, 0x20 | 0x01, 0x20 | 0x01, 0x20 | 0x01,
+    // 0x0E-0x1F: control
+    0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+    0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20,
+    // 0x20: space
+    0x01 | 0x40,
+    // 0x21-0x2F: punctuation
+    0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10,
+    // 0x30-0x39: digits
+    0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04,
+    // 0x3A-0x40: punctuation
+    0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x10,
+    // 0x41-0x46: uppercase hex
+    0x02 | 0x80, 0x02 | 0x80, 0x02 | 0x80, 0x02 | 0x80, 0x02 | 0x80, 0x02 | 0x80,
+    // 0x47-0x5A: uppercase
+    0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02,
+    0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02, 0x02,
+    // 0x5B-0x60: punctuation
+    0x10, 0x10, 0x10, 0x10, 0x10, 0x10,
+    // 0x61-0x66: lowercase hex
+    0x08 | 0x80, 0x08 | 0x80, 0x08 | 0x80, 0x08 | 0x80, 0x08 | 0x80, 0x08 | 0x80,
+    // 0x67-0x7A: lowercase
+    0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08,
+    0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08,
+    // 0x7B-0x7E: punctuation
+    0x10, 0x10, 0x10, 0x10,
+    // 0x7F: DEL (control)
+    0x20,
+    // 0x80-0xFF: high bytes (0)
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+};
+
+// Return pointer to slot 1 (index 0 in table is EOF = -1 slot)
+extern "C" const unsigned short* bionic_ctype_get() {
+    return &g_bionic_ctype_[1];
+}
+
+// ============================================================================
+// pthread_condattr_setclock — set clock for condition variable
+// ============================================================================
+extern "C" int bionic_pthread_condattr_setclock(void* attr, int clock_id) {
+    (void)attr; (void)clock_id;
+    return 0; // success, silently ignore (Darwin uses CLOCK_REALTIME always)
+}
+
+// ============================================================================
+// Google internal stubs (used by Bionic internally, safe to no-op)
+// ============================================================================
+extern "C" void bionic_google_potentially_blocking_region_begin() {}
+extern "C" void bionic_google_potentially_blocking_region_end() {}
+
 const SymbolEntry kSymbols[] = {
     {"pthread_create", reinterpret_cast<void*>(&bionic_pthread_create)},
     {"pthread_attr_init", reinterpret_cast<void*>(&bionic_pthread_attr_init)},
@@ -1075,6 +1293,47 @@ const SymbolEntry kSymbols[] = {
     {"__cxa_begin_catch", reinterpret_cast<void*>(&abi::__cxa_begin_catch)},
     {"__cxa_end_catch", reinterpret_cast<void*>(&abi::__cxa_end_catch)},
     {"__gxx_personality_v0", reinterpret_cast<void*>(&__gxx_personality_v0)},
+
+    // ALooper (Android event loop)
+    {"ALooper_prepare", reinterpret_cast<void*>(&bionic_ALooper_prepare)},
+    {"ALooper_forThread", reinterpret_cast<void*>(&bionic_ALooper_forThread)},
+    {"ALooper_pollAll", reinterpret_cast<void*>(&bionic_ALooper_pollAll)},
+    {"ALooper_pollOnce", reinterpret_cast<void*>(&bionic_ALooper_pollOnce)},
+    {"ALooper_addFd", reinterpret_cast<void*>(&bionic_ALooper_addFd)},
+    {"ALooper_removeFd", reinterpret_cast<void*>(&bionic_ALooper_removeFd)},
+    {"ALooper_wake", reinterpret_cast<void*>(&bionic_ALooper_wake)},
+    {"ALooper_acquire", reinterpret_cast<void*>(&bionic_ALooper_acquire)},
+    {"ALooper_release", reinterpret_cast<void*>(&bionic_ALooper_release)},
+
+    // Memory alignment
+    {"memalign", reinterpret_cast<void*>(&bionic_memalign)},
+
+    // Android property system
+    {"__system_property_get", reinterpret_cast<void*>(&bionic_system_property_get)},
+    {"__system_property_find", reinterpret_cast<void*>(&bionic_system_property_find)},
+    {"__system_property_read_callback", reinterpret_cast<void*>(&bionic_system_property_read_callback)},
+
+    // ELF iteration
+    {"dl_iterate_phdr", reinterpret_cast<void*>(&bionic_dl_iterate_phdr)},
+
+    // 64-bit file operations
+    {"lseek64", reinterpret_cast<void*>(&bionic_lseek64)},
+
+    // Logging
+    {"__android_log_vprint", reinterpret_cast<void*>(&bionic_android_log_vprint)},
+    {"__android_log_write", reinterpret_cast<void*>(&bionic_android_log_write)},
+    {"__android_log_buf_write", reinterpret_cast<void*>(&bionic_android_log_buf_write)},
+
+    // Character classification
+    {"__ctype_get_mb_cur_max", reinterpret_cast<void*>(&bionic_ctype_get_mb_cur_max)},
+    {"_ctype_", reinterpret_cast<void*>(&bionic_ctype_get)},
+
+    // pthread extensions
+    {"pthread_condattr_setclock", reinterpret_cast<void*>(&bionic_pthread_condattr_setclock)},
+
+    // Google internal
+    {"__google_potentially_blocking_region_begin", reinterpret_cast<void*>(&bionic_google_potentially_blocking_region_begin)},
+    {"__google_potentially_blocking_region_end", reinterpret_cast<void*>(&bionic_google_potentially_blocking_region_end)},
 };
 
 } // namespace
