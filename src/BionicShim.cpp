@@ -9,6 +9,8 @@
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <unordered_map>
+#include <mutex>
+#include <shared_mutex>
 #include <atomic>
 #include <unistd.h>
 #include <string>
@@ -161,42 +163,25 @@ extern "C" void bionic_runtime_noop() {
 }
 
 
-#define KUDROID_SYNC_MAGIC 0x4B554452
-
-struct InlineGuestSync {
-    std::atomic<uint32_t> magic;
-    uint32_t host_ptr_low;
-    uint32_t host_ptr_high;
-};
-
-static inline void set_host_ptr(InlineGuestSync* sync, void* ptr) {
-    uint64_t val = reinterpret_cast<uint64_t>(ptr);
-    sync->host_ptr_low = static_cast<uint32_t>(val & 0xFFFFFFFF);
-    sync->host_ptr_high = static_cast<uint32_t>(val >> 32);
-}
-
-static inline void* get_host_ptr(InlineGuestSync* sync) {
-    uint64_t val = (static_cast<uint64_t>(sync->host_ptr_high) << 32) | sync->host_ptr_low;
-    return reinterpret_cast<void*>(val);
-}
-
-static std::atomic_flag gSyncInitLock = ATOMIC_FLAG_INIT;
+static std::unordered_map<void*, void*> gSyncRegistry;
+static std::shared_mutex gSyncRegistryLock;
 
 static inline void* get_or_init_sync(void* guest_ptr, int type) {
     if (!guest_ptr) return nullptr;
-    auto* sync = reinterpret_cast<InlineGuestSync*>(guest_ptr);
     
-    if (sync->magic.load(std::memory_order_acquire) == KUDROID_SYNC_MAGIC) {
-        return get_host_ptr(sync);
-    }
-
-    while (gSyncInitLock.test_and_set(std::memory_order_acquire)) {
-        sched_yield();
+    {
+        std::shared_lock<std::shared_mutex> lock(gSyncRegistryLock);
+        auto it = gSyncRegistry.find(guest_ptr);
+        if (it != gSyncRegistry.end()) {
+            return it->second;
+        }
     }
     
-    if (sync->magic.load(std::memory_order_acquire) == KUDROID_SYNC_MAGIC) {
-        gSyncInitLock.clear(std::memory_order_release);
-        return get_host_ptr(sync);
+    std::unique_lock<std::shared_mutex> lock(gSyncRegistryLock);
+    // Double check
+    auto it = gSyncRegistry.find(guest_ptr);
+    if (it != gSyncRegistry.end()) {
+        return it->second;
     }
 
     void* host_obj = nullptr;
@@ -214,24 +199,24 @@ static inline void* get_or_init_sync(void* guest_ptr, int type) {
         host_obj = hostRwlock;
     }
 
-    set_host_ptr(sync, host_obj);
-    sync->magic.store(KUDROID_SYNC_MAGIC, std::memory_order_release);
-    gSyncInitLock.clear(std::memory_order_release);
+    gSyncRegistry[guest_ptr] = host_obj;
     return host_obj;
 }
 
 static inline void destroy_sync(void* guest_ptr, int type) {
     if (!guest_ptr) return;
-    auto* sync = reinterpret_cast<InlineGuestSync*>(guest_ptr);
-    if (sync->magic.load(std::memory_order_acquire) == KUDROID_SYNC_MAGIC) {
-        sync->magic.store(0, std::memory_order_release);
-        void* host_obj = get_host_ptr(sync);
+    
+    std::unique_lock<std::shared_mutex> lock(gSyncRegistryLock);
+    auto it = gSyncRegistry.find(guest_ptr);
+    if (it != gSyncRegistry.end()) {
+        void* host_obj = it->second;
         if (host_obj) {
             if (type == 1) ::pthread_mutex_destroy(static_cast<pthread_mutex_t*>(host_obj));
             else if (type == 2) ::pthread_cond_destroy(static_cast<pthread_cond_t*>(host_obj));
             else if (type == 3) ::pthread_rwlock_destroy(static_cast<pthread_rwlock_t*>(host_obj));
             std::free(host_obj);
         }
+        gSyncRegistry.erase(it);
     }
 }
 
@@ -242,13 +227,12 @@ extern "C" int bionic_pthread_mutex_init(void* guestMutex, const void* attr) {
     if (!hostMutex) return -1;
     const int result = ::pthread_mutex_init(hostMutex, nullptr);
     if (result != 0) { std::free(hostMutex); return result; }
-    auto* sync = reinterpret_cast<InlineGuestSync*>(guestMutex);
-    set_host_ptr(sync, hostMutex);
-    sync->magic.store(KUDROID_SYNC_MAGIC, std::memory_order_release);
+    
+    std::unique_lock<std::shared_mutex> lock(gSyncRegistryLock);
+    gSyncRegistry[guestMutex] = hostMutex;
     trace("pthread_mutex_init() -> 0");
     return 0;
 }
-
 
 extern "C" int bionic_pthread_cond_init(void* cond, const void* attr) {
     (void)attr;
@@ -256,9 +240,9 @@ extern "C" int bionic_pthread_cond_init(void* cond, const void* attr) {
     if (!hostCond) return -1;
     const int result = ::pthread_cond_init(hostCond, nullptr);
     if (result != 0) { std::free(hostCond); return result; }
-    auto* sync = reinterpret_cast<InlineGuestSync*>(cond);
-    set_host_ptr(sync, hostCond);
-    sync->magic.store(KUDROID_SYNC_MAGIC, std::memory_order_release);
+    
+    std::unique_lock<std::shared_mutex> lock(gSyncRegistryLock);
+    gSyncRegistry[cond] = hostCond;
     return 0;
 }
 
@@ -268,9 +252,9 @@ extern "C" int bionic_pthread_rwlock_init(void* rwlock, const void* attr) {
     if (!hostRwlock) return -1;
     const int result = ::pthread_rwlock_init(hostRwlock, nullptr);
     if (result != 0) { std::free(hostRwlock); return result; }
-    auto* sync = reinterpret_cast<InlineGuestSync*>(rwlock);
-    set_host_ptr(sync, hostRwlock);
-    sync->magic.store(KUDROID_SYNC_MAGIC, std::memory_order_release);
+    
+    std::unique_lock<std::shared_mutex> lock(gSyncRegistryLock);
+    gSyncRegistry[rwlock] = hostRwlock;
     return 0;
 }
 
