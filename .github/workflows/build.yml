@@ -287,6 +287,7 @@ jobs:
             ios-app/KuDroidShell/KuDroidApp.swift \
             ios-app/KuDroidShell/ContentView.swift \
             build-ios/libkudroid_core.a \
+            build-ios/third_party/jvm/miniJVM/minijvm/c/libmini_jvm_lib.a \
             -Lthird_party/ANGLE/lib/ios-arm64 \
             -lEGL -lGLESv2 \
             third_party/MoltenVK/MoltenVK/static/MoltenVK.xcframework/ios-arm64/libMoltenVK.a \

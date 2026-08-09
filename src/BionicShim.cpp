@@ -965,6 +965,9 @@ extern "C" void bionic_init_main_thread_tls(void) {
 #endif
 }
 
+} // namespace
+} // namespace kudroid
+
 namespace kudroid {
 bool bionic_handle_tpidr_trap(void* ucontext) {
 #if defined(__APPLE__) && defined(__aarch64__)
@@ -994,6 +997,9 @@ bool bionic_handle_tpidr_trap(void* ucontext) {
     return false;
 }
 } // namespace kudroid
+
+namespace kudroid {
+namespace {
 
 static void* bionic_thread_wrapper(void* rawArgs) {
     BionicThreadArgs* args = static_cast<BionicThreadArgs*>(rawArgs);
