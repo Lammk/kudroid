@@ -424,6 +424,9 @@ extern "C" int bionic_pthread_once(int* guest_once, void (*init_routine)(void)) 
 }
 
 
+#undef sa_handler
+#undef sa_sigaction
+
 struct android_sigaction {
     union {
         void (*sa_handler)(int);
@@ -437,6 +440,8 @@ struct android_sigaction {
 #include <signal.h>
 
 extern "C" int bionic_sigaction(int signum, const struct android_sigaction* act, struct android_sigaction* oldact) {
+    (void)act;
+    (void)oldact;
     char buf[128];
     std::snprintf(buf, sizeof(buf), "sigaction(signum=%d)", signum);
     trace(buf);
