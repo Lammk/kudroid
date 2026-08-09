@@ -27,7 +27,7 @@ add_library(kudroid_core STATIC
     src/kudroid_bridge.cpp
 )
 
-add_subdirectory(third_party/jvm/miniJVM/minijvm/c EXCLUDE_FROM_ALL)
+add_subdirectory(third_party/jvm/miniJVM/minijvm/c)
 target_link_libraries(kudroid_core PRIVATE mini_jvm_lib)
 
 find_package(ZLIB REQUIRED)
