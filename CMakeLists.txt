@@ -18,6 +18,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
 endif()
 
 add_library(kudroid_core STATIC
+    src/BionicShim.cpp
     src/elf_loader.cpp
     src/kudroid_bridge.cpp
 )

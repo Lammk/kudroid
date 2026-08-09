@@ -134,3 +134,31 @@ jobs:
         with:
           name: test-lib-arm64-so
           path: tests/test_lib_arm64.so
+
+  build-bionic-test-so-arm64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ARM64 cross-compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build Bionic shim test .so (ARM64)
+        run: |
+          aarch64-linux-gnu-gcc -shared -fPIC -pthread \
+            -o tests/test_bionic_lib_arm64.so tests/test_bionic_lib.c
+          aarch64-linux-gnu-strip tests/test_bionic_lib_arm64.so
+
+      - name: Verify Bionic test ELF
+        run: |
+          file tests/test_bionic_lib_arm64.so
+          readelf -h tests/test_bionic_lib_arm64.so | grep -E "Class|Machine"
+          readelf --dyn-syms tests/test_bionic_lib_arm64.so | grep -E "kudroid_bionic_test|__android_log_print"
+
+      - name: Upload Bionic test .so artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-bionic-lib-arm64-so
+          path: tests/test_bionic_lib_arm64.so
