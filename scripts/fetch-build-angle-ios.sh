@@ -56,7 +56,9 @@ angle_build_tests=false
 angle_build_capture_replay_tests=false
 use_custom_libcxx=false
 ios_deployment_target="15.0"
-extra_cflags_c="-DSYSCONFDIR=\"/etc\" -DFALLBACK_CONFIG_DIRS=\"/etc/xdg\" -DFALLBACK_DATA_DIRS=\"/usr/local/share:/usr/share\""'
+treat_warnings_as_errors=false
+extra_cflags_c="-DSYSCONFDIR=\"/etc\" -DFALLBACK_CONFIG_DIRS=\"/etc/xdg\" -DFALLBACK_DATA_DIRS=\"/usr/local/share:/usr/share\" -Wno-unsafe-buffer-usage"
+extra_cflags_cc="-Wno-unsafe-buffer-usage"'
 
 autoninja -C "$BUILD_DIR" libEGL libGLESv2
 
