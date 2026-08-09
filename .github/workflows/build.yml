@@ -32,32 +32,188 @@ jobs:
       - name: Build
         run: cmake --build build --parallel
 
-  ios-build:
-    needs: build-multi-elf-so-arm64
+  # ─────────────────────────────────────────────────────────────────────────────
+  # ANGLE iOS ARM64 — built in its own job with aggressive cache.
+  # ANGLE is huge (~1600 CXX files); GitHub Actions free runners only have
+  # ~7 GB RAM and 2-3 cores, so we limit parallelism to avoid OOM kills.
+  # The built libs are uploaded as an artifact and cached across runs.
+  # ─────────────────────────────────────────────────────────────────────────────
+  build-angle-ios:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache ANGLE source and build tools
+      # Cache the final ANGLE static libs + headers so we skip the build entirely
+      # on subsequent runs (as long as the script and pinned commit are unchanged).
+      - name: Cache ANGLE built artifacts
+        id: angle-cache
+        uses: actions/cache@v4
+        with:
+          path: third_party/ANGLE
+          key: angle-ios-arm64-built-${{ runner.os }}-${{ hashFiles('scripts/fetch-build-angle-ios.sh') }}
+
+      # Also cache the massive source checkout + depot_tools to speed up rebuilds.
+      - name: Cache ANGLE source and depot_tools
+        if: steps.angle-cache.outputs.cache-hit != 'true'
         uses: actions/cache@v4
         with:
           path: |
             third_party/angle-src
             third_party/build-tools
-            third_party/ANGLE
-          key: angle-ios-arm64-${{ runner.os }}-${{ hashFiles('scripts/fetch-build-angle-ios.sh') }}-be80ce591a48
+          key: angle-ios-src-${{ runner.os }}-${{ hashFiles('scripts/fetch-build-angle-ios.sh') }}
 
-      - name: Build ANGLE Vulkan backend and install MoltenVK
+      - name: Build ANGLE (Vulkan backend, iOS ARM64)
+        if: steps.angle-cache.outputs.cache-hit != 'true'
+        env:
+          # Limit ninja parallelism to 2 jobs so peak RSS stays under ~7 GB.
+          # ANGLE .cc files individually can use 1–2 GB during compilation.
+          NINJA_JOBS: 2
         run: |
           xcodebuild -version
-          xcrun --sdk macosx --show-sdk-version
           xcrun --sdk iphoneos --show-sdk-version
-          chmod +x scripts/fetch-build-angle-ios.sh scripts/fetch-moltenvk-ios.sh
+          chmod +x scripts/fetch-build-angle-ios.sh
+          # Patch autoninja call to respect our parallelism limit
+          sed -i '' "s|autoninja -C|ninja -j${NINJA_JOBS} -C|g" scripts/fetch-build-angle-ios.sh
+          ./scripts/fetch-build-angle-ios.sh
+
+      - name: Verify ANGLE build output
+        run: |
+          echo "=== ANGLE libs ==="
+          ls -lh third_party/ANGLE/lib/ios-arm64/
+          file third_party/ANGLE/lib/ios-arm64/libEGL.a
+          file third_party/ANGLE/lib/ios-arm64/libGLESv2.a
+
+      - name: Upload ANGLE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: angle-ios-arm64
+          path: third_party/ANGLE
+          retention-days: 90
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Build test .so files (ARM64 cross-compile on Ubuntu — fast & cheap)
+  # ─────────────────────────────────────────────────────────────────────────────
+  build-test-so-arm64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ARM64 cross-compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build test_lib.so (ARM64)
+        run: |
+          aarch64-linux-gnu-gcc -shared -fPIC -o tests/test_lib_arm64.so tests/test_lib.c
+          aarch64-linux-gnu-strip tests/test_lib_arm64.so
+
+      - name: Verify ARM64 ELF
+        run: |
+          file tests/test_lib_arm64.so
+          readelf -h tests/test_lib_arm64.so | grep -E "Class|Machine"
+
+      - name: Upload test .so artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-lib-arm64-so
+          path: tests/test_lib_arm64.so
+
+  build-bionic-test-so-arm64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ARM64 cross-compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build Bionic shim test .so (ARM64)
+        run: |
+          aarch64-linux-gnu-gcc -shared -fPIC -pthread \
+            -o tests/test_bionic_lib_arm64.so tests/test_bionic_lib.c
+          aarch64-linux-gnu-strip tests/test_bionic_lib_arm64.so
+
+      - name: Verify Bionic test ELF
+        run: |
+          file tests/test_bionic_lib_arm64.so
+          readelf -h tests/test_bionic_lib_arm64.so | grep -E "Class|Machine"
+          readelf --dyn-syms tests/test_bionic_lib_arm64.so | grep -E "kudroid_bionic_test|__android_log_print"
+
+      - name: Upload Bionic test .so artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-bionic-lib-arm64-so
+          path: tests/test_bionic_lib_arm64.so
+
+  build-multi-elf-so-arm64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ARM64 cross-compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build provider and consumer ELF pair
+        run: |
+          mkdir -p tests/multi-elf-build
+          aarch64-linux-gnu-gcc -shared -fPIC \
+            -Wl,-soname,libkudroid_provider.so \
+            -o tests/multi-elf-build/libkudroid_provider.so \
+            tests/multi_elf_provider.c
+          aarch64-linux-gnu-gcc -shared -fPIC -pthread \
+            -Ltests/multi-elf-build -Wl,-rpath,'$ORIGIN' \
+            -Wl,-soname,libkudroid_consumer.so \
+            -o tests/multi-elf-build/libkudroid_consumer.so \
+            tests/multi_elf_consumer.c -lkudroid_provider
+          aarch64-linux-gnu-strip tests/multi-elf-build/*.so
+          cp tests/multi-elf-build/libkudroid_provider.so tests/libkudroid_provider_arm64.so
+          cp tests/multi-elf-build/libkudroid_consumer.so tests/libkudroid_consumer_arm64.so
+
+      - name: Verify Multi-ELF dependency
+        run: |
+          file tests/libkudroid_provider_arm64.so tests/libkudroid_consumer_arm64.so
+          readelf -d tests/libkudroid_consumer_arm64.so | grep NEEDED
+          readelf --wide --dyn-syms tests/libkudroid_consumer_arm64.so | grep kudroid_dependency_value
+
+      - name: Upload Multi-ELF artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: multi-elf-arm64-so
+          path: |
+            tests/libkudroid_provider_arm64.so
+            tests/libkudroid_consumer_arm64.so
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # iOS Build — downloads pre-built ANGLE + MoltenVK, compiles only kudroid_core
+  # and the SwiftUI shell. No more compiling ANGLE in this job.
+  # ─────────────────────────────────────────────────────────────────────────────
+  ios-build:
+    needs: [build-angle-ios, build-multi-elf-so-arm64]
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download ANGLE pre-built artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: angle-ios-arm64
+          path: third_party/ANGLE
+
+      - name: Install MoltenVK (prebuilt release download)
+        run: |
+          chmod +x scripts/fetch-moltenvk-ios.sh
           ./scripts/fetch-moltenvk-ios.sh
-          if [ ! -f third_party/ANGLE/lib/ios-arm64/libEGL.a ] || \
-             [ ! -f third_party/ANGLE/lib/ios-arm64/libGLESv2.a ]; then
-            ./scripts/fetch-build-angle-ios.sh
-          fi
+
+      - name: Verify graphics dependencies
+        run: |
+          echo "=== ANGLE ==="
+          ls -lh third_party/ANGLE/lib/ios-arm64/
+          echo "=== MoltenVK ==="
+          ls -lh third_party/MoltenVK/MoltenVK/static/MoltenVK.xcframework/ios-arm64/libMoltenVK.a
 
       - name: Download Multi-ELF ARM64 artifact
         uses: actions/download-artifact@v4
@@ -168,97 +324,3 @@ jobs:
           path: |
             KuDroidShell.ipa
             build-ios/libkudroid_core.a
-
-  build-test-so-arm64:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install ARM64 cross-compiler
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-
-      - name: Build test_lib.so (ARM64)
-        run: |
-          aarch64-linux-gnu-gcc -shared -fPIC -o tests/test_lib_arm64.so tests/test_lib.c
-          aarch64-linux-gnu-strip tests/test_lib_arm64.so
-
-      - name: Verify ARM64 ELF
-        run: |
-          file tests/test_lib_arm64.so
-          readelf -h tests/test_lib_arm64.so | grep -E "Class|Machine"
-
-      - name: Upload test .so artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-lib-arm64-so
-          path: tests/test_lib_arm64.so
-
-  build-bionic-test-so-arm64:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install ARM64 cross-compiler
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-
-      - name: Build Bionic shim test .so (ARM64)
-        run: |
-          aarch64-linux-gnu-gcc -shared -fPIC -pthread \
-            -o tests/test_bionic_lib_arm64.so tests/test_bionic_lib.c
-          aarch64-linux-gnu-strip tests/test_bionic_lib_arm64.so
-
-      - name: Verify Bionic test ELF
-        run: |
-          file tests/test_bionic_lib_arm64.so
-          readelf -h tests/test_bionic_lib_arm64.so | grep -E "Class|Machine"
-          readelf --dyn-syms tests/test_bionic_lib_arm64.so | grep -E "kudroid_bionic_test|__android_log_print"
-
-      - name: Upload Bionic test .so artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-bionic-lib-arm64-so
-          path: tests/test_bionic_lib_arm64.so
-
-  build-multi-elf-so-arm64:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install ARM64 cross-compiler
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-
-      - name: Build provider and consumer ELF pair
-        run: |
-          mkdir -p tests/multi-elf-build
-          aarch64-linux-gnu-gcc -shared -fPIC \
-            -Wl,-soname,libkudroid_provider.so \
-            -o tests/multi-elf-build/libkudroid_provider.so \
-            tests/multi_elf_provider.c
-          aarch64-linux-gnu-gcc -shared -fPIC -pthread \
-            -Ltests/multi-elf-build -Wl,-rpath,'$ORIGIN' \
-            -Wl,-soname,libkudroid_consumer.so \
-            -o tests/multi-elf-build/libkudroid_consumer.so \
-            tests/multi_elf_consumer.c -lkudroid_provider
-          aarch64-linux-gnu-strip tests/multi-elf-build/*.so
-          cp tests/multi-elf-build/libkudroid_provider.so tests/libkudroid_provider_arm64.so
-          cp tests/multi-elf-build/libkudroid_consumer.so tests/libkudroid_consumer_arm64.so
-
-      - name: Verify Multi-ELF dependency
-        run: |
-          file tests/libkudroid_provider_arm64.so tests/libkudroid_consumer_arm64.so
-          readelf -d tests/libkudroid_consumer_arm64.so | grep NEEDED
-          readelf --wide --dyn-syms tests/libkudroid_consumer_arm64.so | grep kudroid_dependency_value
-
-      - name: Upload Multi-ELF artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: multi-elf-arm64-so
-          path: |
-            tests/libkudroid_provider_arm64.so
-            tests/libkudroid_consumer_arm64.so
