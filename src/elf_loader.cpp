@@ -8,7 +8,10 @@
 
 #if defined(__APPLE__)
 #include <libkern/OSCacheControl.h>
+#include <TargetConditionals.h>
+#if TARGET_OS_OSX
 #include <pthread.h>
+#endif
 #endif
 
 namespace kudroid {
@@ -219,10 +222,9 @@ bool ElfLoader::map() {
     int prot = PROT_READ | PROT_WRITE | PROT_EXEC;
     int flags = MAP_PRIVATE | MAP_ANONYMOUS;
     [[maybe_unused]] bool usedMapJit = false;
-#if defined(__APPLE__)
+#if defined(__APPLE__) && TARGET_OS_OSX
     // Preferred path (hardened runtime): MAP_JIT pages, written only while the
-    // thread's JIT write-protection is toggled off. LiveContainer's debugger
-    // path allows plain RWX instead, so fall back if MAP_JIT is rejected.
+    // thread's JIT write-protection is toggled off.
     base_ = mmap(nullptr, totalSize, prot, flags | MAP_JIT, -1, 0);
     if (base_ != MAP_FAILED) {
         usedMapJit = true;
@@ -238,7 +240,7 @@ bool ElfLoader::map() {
         return false;
     }
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) && TARGET_OS_OSX
     if (usedMapJit) pthread_jit_write_protect_np(0);
 #endif
 
@@ -254,7 +256,7 @@ bool ElfLoader::map() {
         }
     }
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) && TARGET_OS_OSX
     if (usedMapJit) pthread_jit_write_protect_np(1);
 #endif
 
