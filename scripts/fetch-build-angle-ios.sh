@@ -37,6 +37,30 @@ git checkout -B pinned-angle "$ANGLE_REF"
 python3 scripts/bootstrap.py
 gclient sync --no-history --shallow
 
+# ── Patch vulkan-loader: define SYSCONFDIR / FALLBACK_*_DIRS ─────────────────
+# ANGLE's GN build does not pass extra_cflags to all third_party targets.
+# The vulkan-loader needs these macros but they are only defined in CMake builds.
+# We inject them directly into the source files that reference them.
+LOADER_PATCH='
+#ifndef SYSCONFDIR
+#define SYSCONFDIR "/etc"
+#endif
+#ifndef FALLBACK_CONFIG_DIRS
+#define FALLBACK_CONFIG_DIRS "/etc/xdg"
+#endif
+#ifndef FALLBACK_DATA_DIRS
+#define FALLBACK_DATA_DIRS "/usr/local/share:/usr/share"
+#endif
+'
+for vkfile in third_party/vulkan-loader/src/loader/loader.c \
+              third_party/vulkan-loader/src/loader/settings.c; do
+    if [[ -f "$vkfile" ]] && ! grep -q 'SYSCONFDIR' <(head -5 "$vkfile"); then
+        echo "Patching $vkfile with SYSCONFDIR/FALLBACK_*_DIRS defines"
+        printf '%s\n' "$LOADER_PATCH" | cat - "$vkfile" > "$vkfile.tmp"
+        mv "$vkfile.tmp" "$vkfile"
+    fi
+done
+
 rm -rf "$BUILD_DIR"
 gn gen "$BUILD_DIR" --args='target_os="ios"
 target_cpu="arm64"
@@ -57,8 +81,7 @@ angle_build_capture_replay_tests=false
 use_custom_libcxx=false
 ios_deployment_target="15.0"
 treat_warnings_as_errors=false
-extra_cflags_c="-DSYSCONFDIR=\"/etc\" -DFALLBACK_CONFIG_DIRS=\"/etc/xdg\" -DFALLBACK_DATA_DIRS=\"/usr/local/share:/usr/share\" -Wno-unsafe-buffer-usage"
-extra_cflags_cc="-Wno-unsafe-buffer-usage"'
+extra_cflags="-Wno-unsafe-buffer-usage"'
 
 autoninja -C "$BUILD_DIR" libEGL libGLESv2
 
