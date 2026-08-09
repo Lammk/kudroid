@@ -46,6 +46,7 @@ public:
     [[nodiscard]] const std::vector<Segment>& segments() const { return segments_; }
     [[nodiscard]] bool isLoaded() const { return base_ != nullptr; }
     [[nodiscard]] bool isParsed() const { return parsed_; }
+    [[nodiscard]] void* baseAddress() const { return base_; }
 
     /// Returns the last error message (empty if no error).
     [[nodiscard]] const char* lastError() const;

@@ -410,6 +410,15 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                 
                 log += "[kudroid_core] Total loaded libraries (including dependencies): " + std::to_string(manager.libraries().size()) + "\n";
                 log += "[kudroid_core] Native libraries loaded into memory successfully!\n";
+                
+                log += "[kudroid_core] --- Memory Map ---\n";
+                for (const auto& pair : manager.libraries()) {
+                    char mapLine[256];
+                    snprintf(mapLine, sizeof(mapLine), "  %s -> %p\n", pair.first.c_str(), pair.second->baseAddress());
+                    log += mapLine;
+                }
+                log += "[kudroid_core] ------------------\n";
+                
                 mirrorCrash(log);
 
                 auto jni_onload = reinterpret_cast<jint (*)(JavaVM_*, void*)>(
