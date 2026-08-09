@@ -96,6 +96,7 @@ jobs:
             ios-app/KuDroidShell/KuDroidApp.swift \
             ios-app/KuDroidShell/ContentView.swift \
             build-ios/libkudroid_core.a \
+            -lz \
             -o KuDroidShell.app/KuDroidShell
 
           cat > KuDroidShell.app/Info.plist << 'PLIST'
