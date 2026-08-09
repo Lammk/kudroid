@@ -10,6 +10,7 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 TOOLS_DIR="${ANGLE_TOOLS_DIR:-$ROOT_DIR/third_party/build-tools}"
 SOURCE_DIR="${ANGLE_SOURCE_DIR:-$ROOT_DIR/third_party/angle-src}"
 OUTPUT_DIR="${ANGLE_OUTPUT_DIR:-$ROOT_DIR/third_party/ANGLE}"
+ANGLE_REF="${ANGLE_REF:-be80ce591a481c12d60c50d6040d40c035b40a2b}"
 DEPOT_TOOLS="$TOOLS_DIR/depot_tools"
 BUILD_DIR="$SOURCE_DIR/out/ios-arm64-vulkan"
 
@@ -25,12 +26,14 @@ if [[ ! -d "$SOURCE_DIR/.git" ]]; then
     pushd "$SOURCE_DIR" >/dev/null
     git init
     git remote add origin https://github.com/google/angle.git
-    git fetch --depth=1 origin main
-    git checkout -B main FETCH_HEAD
     popd >/dev/null
 fi
 
 pushd "$SOURCE_DIR" >/dev/null
+if ! git cat-file -e "$ANGLE_REF^{commit}" 2>/dev/null; then
+    git fetch --depth=1 origin "$ANGLE_REF"
+fi
+git checkout -B pinned-angle "$ANGLE_REF"
 python3 scripts/bootstrap.py
 gclient sync --no-history --shallow
 

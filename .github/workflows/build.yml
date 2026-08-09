@@ -34,7 +34,7 @@ jobs:
 
   ios-build:
     needs: build-multi-elf-so-arm64
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
@@ -45,10 +45,13 @@ jobs:
             third_party/angle-src
             third_party/build-tools
             third_party/ANGLE
-          key: angle-ios-arm64-${{ runner.os }}-${{ hashFiles('scripts/fetch-build-angle-ios.sh') }}
+          key: angle-ios-arm64-${{ runner.os }}-${{ hashFiles('scripts/fetch-build-angle-ios.sh') }}-be80ce591a48
 
       - name: Build ANGLE Vulkan backend and install MoltenVK
         run: |
+          xcodebuild -version
+          xcrun --sdk macosx --show-sdk-version
+          xcrun --sdk iphoneos --show-sdk-version
           chmod +x scripts/fetch-build-angle-ios.sh scripts/fetch-moltenvk-ios.sh
           ./scripts/fetch-moltenvk-ios.sh
           if [ ! -f third_party/ANGLE/lib/ios-arm64/libEGL.a ] || \
