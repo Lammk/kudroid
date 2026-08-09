@@ -164,6 +164,13 @@ int vfs_access(const char* path, int mode) {
 }
 
 
+#undef st_atime
+#undef st_mtime
+#undef st_ctime
+#undef st_atime_nsec
+#undef st_mtime_nsec
+#undef st_ctime_nsec
+
 struct android_stat {
   unsigned long st_dev;
   unsigned long st_ino;
@@ -199,12 +206,22 @@ static void copy_stat(struct android_stat* dst, const struct stat* src) {
     dst->st_size = src->st_size;
     dst->st_blksize = src->st_blksize;
     dst->st_blocks = src->st_blocks;
+    
+#ifdef __APPLE__
     dst->st_atime = src->st_atimespec.tv_sec;
     dst->st_atime_nsec = src->st_atimespec.tv_nsec;
     dst->st_mtime = src->st_mtimespec.tv_sec;
     dst->st_mtime_nsec = src->st_mtimespec.tv_nsec;
     dst->st_ctime = src->st_ctimespec.tv_sec;
     dst->st_ctime_nsec = src->st_ctimespec.tv_nsec;
+#else
+    dst->st_atime = src->st_atim.tv_sec;
+    dst->st_atime_nsec = src->st_atim.tv_nsec;
+    dst->st_mtime = src->st_mtim.tv_sec;
+    dst->st_mtime_nsec = src->st_mtim.tv_nsec;
+    dst->st_ctime = src->st_ctim.tv_sec;
+    dst->st_ctime_nsec = src->st_ctim.tv_nsec;
+#endif
 }
 
 int vfs_stat(const char* path, void* info) {
