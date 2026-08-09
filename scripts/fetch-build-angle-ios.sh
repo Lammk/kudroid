@@ -45,6 +45,7 @@ ios_code_signing_identity=""
 is_component_build=false
 is_debug=false
 angle_enable_vulkan=true
+angle_shared_libvulkan=false
 angle_enable_metal=false
 angle_enable_gl=false
 angle_enable_null=false
