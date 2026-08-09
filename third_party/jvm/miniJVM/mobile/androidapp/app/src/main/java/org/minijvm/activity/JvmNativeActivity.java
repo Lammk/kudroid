@@ -1,0 +1,1732 @@
+package org.minijvm.activity;
+
+import android.Manifest;
+import android.app.Activity;
+import android.app.AlertDialog;
+import android.app.NativeActivity;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.ComponentName;
+import android.content.Context;
+import android.content.DialogInterface;
+import android.content.Intent;
+import android.content.pm.ActivityInfo;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Matrix;
+import android.inputmethodservice.InputMethodService;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Bundle;
+import android.os.Environment;
+import android.os.IBinder;
+import android.provider.MediaStore;
+import android.support.v4.app.ActivityCompat;
+import android.support.v4.content.ContextCompat;
+import android.text.Editable;
+import android.text.TextWatcher;
+import android.util.Log;
+import android.view.KeyEvent;
+import android.view.View;
+import android.view.Window;
+import android.view.WindowInsets;
+import android.view.WindowManager;
+import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputMethodManager;
+import android.widget.Button;
+import android.widget.EditText;
+import android.widget.FrameLayout;
+import android.widget.MediaController;
+import android.widget.TextView;
+import android.widget.Toast;
+import android.widget.VideoView;
+
+import com.alipay.sdk.app.AuthTask;
+import com.alipay.sdk.app.OpenAuthTask;
+import com.alipay.sdk.app.PayTask;
+import com.tencent.mm.opensdk.modelmsg.SendAuth;
+import com.tencent.mm.opensdk.modelpay.PayReq;
+import com.tencent.mm.opensdk.openapi.IWXAPI;
+import com.tencent.mm.opensdk.openapi.WXAPIFactory;
+
+import org.minijvm.activity.bridge.Base64;
+import org.minijvm.activity.bridge.JsonPrinter;
+import org.minijvm.activity.bridge.RMCDescriptor;
+import org.minijvm.activity.bridge.ReflectUtil;
+
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.Map;
+
+/**
+ * 20250616
+ * 因为搜狗输入法导致输入异常，表现为半个键盘无法使用，显示区和按钮区无法对应，应用和键盘均无法正常工作，我寻求多个AI进行解决，但很长时间都没能修正，
+ * 因为这是android相关的问题，最后我通过cursor里的gemini 2.5pro， 在进行各种提示后解决了问题，
+ * 主要引用了IOS键盘需要和UITextInput文本控件进行协议沟通的思想，想法得到了AI的支持，他最终完成了一个自定义文本控件mInputProxy，
+ * 其约束了输入法的行为，最终解决了问题。核心是：
+ * mInputProxy.setImeOptions(EditorInfo.IME_ACTION_DONE | EditorInfo.IME_FLAG_NO_EXTRACT_UI | EditorInfo.IME_FLAG_NO_FULLSCREEN);
+ * 其规定了输入法不能全屏，输入法不能接管应用层的输入内容
+ * <p>
+ * Created by gust on 2018/4/19.
+ */
+
+public class JvmNativeActivity extends NativeActivity {
+    static {
+        System.loadLibrary("minijvm");
+    }
+
+    ClipboardManager mClipboardManager;
+    InputMethodManager inputMethodManager;
+    private final static String TAG = "JvmNativeActivity";
+    private EditText mInputProxy;//极为重要的一个自定义文本控件，否则，可能导致搜狗输入法的键盘无法工作，因为搜狗输入法需要和焦点文本控件进行沟通，以控制输入法的一些行为，早期没有这个控件，导致输入法行为异常，无法输入
+    private String mPreviousText = "";
+    private boolean mClearingProxyText = false;
+
+    // 用于存储等待权限的图片裁剪请求
+    private Bitmap mPendingBitmapToSave = null;
+    private String mPendingFilename = null;
+
+    // 用于存储等待权限的视频保存请求
+    private String mPendingVideoPath = null;
+    private String mPendingVideoFilename = null;
+
+    public static IWXAPI sWxApi;
+    public static String sWxAppId;
+    private static volatile Map<String, String> sWxAuthResult;
+    private static volatile String sWxAuthState;
+    private static volatile Map<String, String> sAlipayAuthResult;
+    private static volatile String sThirdPartyAuthProvider;
+
+    // android:name="android.app.NativeActivity"
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        mClipboardManager = mClipboardManager = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        PHOTO_DIR_SD = new File(getExternalFilesDir("").getAbsolutePath() + "/tmp");
+        PHOTO_DIR_ROOT = new File(getFilesDir().getAbsolutePath() + "/tmp");
+        //requestAudioPermissions();
+
+        // 沉浸式模式
+        Window window = getWindow();
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            window.getAttributes().layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+        }
+        View decorView = window.getDecorView();
+        decorView.setSystemUiVisibility(
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                        | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                        | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_FULLSCREEN);
+
+
+        // 键盘处理，必须设置上SOFT_INPUT_ADJUST_RESIZE，c++才会通过keyboardVisibilityChangedFunc通知到应用层，否则键盘会挡住输入框
+        getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            decorView.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
+                @Override
+                public WindowInsets onApplyWindowInsets(View v, WindowInsets insets) {
+                    boolean isKeyboardVisible;
+                    int keyboardHeight;
+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) { // Android 11+
+                        isKeyboardVisible = insets.isVisible(WindowInsets.Type.ime());
+                        keyboardHeight = insets.getInsets(WindowInsets.Type.ime()).bottom;
+                    } else {
+                        // Fallback for older APIs using deprecated methods
+                        int bottomInset = insets.getSystemWindowInsetBottom();
+                        // A common heuristic: if the bottom inset is larger than the stable inset,
+                        // the keyboard is visible. The stable inset is for permanent system bars.
+                        int stableBottomInset = insets.getStableInsetBottom();
+                        isKeyboardVisible = bottomInset > stableBottomInset;
+                        keyboardHeight = isKeyboardVisible ? bottomInset : 0;
+                    }
+
+                    onKeyboardHeightChanged(isKeyboardVisible, keyboardHeight);
+                    return insets;
+                }
+            });
+        }
+        //test();
+        setupInputProxy();
+    }
+
+    private void setupInputProxy() {
+        final JvmNativeActivity self = this;
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                mInputProxy = new EditText(self);
+                mInputProxy.setFocusable(true);
+                mInputProxy.setFocusableInTouchMode(true);
+                // Make it transparent and tiny
+                mInputProxy.setBackgroundColor(0);
+                mInputProxy.setTextColor(0);
+                mInputProxy.setCursorVisible(false);
+                //全文最重要的参数：IME_FLAG_NO_EXTRACT_UI 提示输入法不要接管输入框，IME_FLAG_NO_FULLSCREEN 提示输入法不要全屏，否则搜狗输入法会将输入框全屏，并接管输入文本，看不见应用层的输入框，处理非常麻烦
+                mInputProxy.setImeOptions(EditorInfo.IME_ACTION_DONE | EditorInfo.IME_FLAG_NO_EXTRACT_UI | EditorInfo.IME_FLAG_NO_FULLSCREEN);
+
+                mInputProxy.setOnKeyListener(new View.OnKeyListener() {
+                    @Override
+                    public boolean onKey(View v, int keyCode, KeyEvent event) {
+                        switch (keyCode) {
+                            case KeyEvent.KEYCODE_DPAD_UP:
+                            case KeyEvent.KEYCODE_DPAD_DOWN:
+                            case KeyEvent.KEYCODE_DPAD_LEFT:
+                            case KeyEvent.KEYCODE_DPAD_RIGHT:
+                            case KeyEvent.KEYCODE_ENTER:
+                            case KeyEvent.KEYCODE_FORWARD_DEL:
+                                // Handle these special keys by forwarding them to the native layer
+                                int action = event.getAction(); // ACTION_DOWN or ACTION_UP
+                                int modifiers = event.getMetaState();
+                                onNativeSpecialKey(keyCode, action, modifiers);
+                                return true; // We've handled this key
+                        }
+                        // Let the system handle other keys (like characters and regular backspace).
+                        // Regular backspace (KEYCODE_DEL) will trigger the TextWatcher.
+                        return false;
+                    }
+                });
+
+                mInputProxy.addTextChangedListener(new TextWatcher() {
+                    @Override
+                    public void beforeTextChanged(CharSequence s, int start, int count, int after) {
+                        if (mClearingProxyText) return;
+                        mPreviousText = s.toString();
+                    }
+
+                    @Override
+                    public void onTextChanged(CharSequence s, int start, int before, int count) {
+                        if (mClearingProxyText) return;
+
+                        String newText = s.toString();
+                        // This logic is simplified. A more robust solution would handle compositions better.
+                        // Here, we calculate diff and send to native.
+
+                        // Deletion
+                        if (before > 0) {
+                            int numCharsToDelete = before;
+                            onNativeKey(KeyEvent.KEYCODE_DEL, numCharsToDelete);
+                        }
+
+                        // Insertion
+                        if (count > 0) {
+                            String inserted = newText.substring(start, start + count);
+                            onStringInput(inserted);
+                        }
+                    }
+
+                    @Override
+                    public void afterTextChanged(Editable s) {
+                        // This logic is no longer needed. Text is cleared explicitly when the keyboard is hidden.
+                    }
+                });
+
+                mInputProxy.setOnEditorActionListener(new TextView.OnEditorActionListener() {
+                    @Override
+                    public boolean onEditorAction(TextView v, int actionId, KeyEvent event) {
+                        if (actionId == EditorInfo.IME_ACTION_DONE) {
+                            hideSoftInput();
+                            return true; // We handled the action
+                        }
+                        return false;
+                    }
+                });
+
+                // Hide it by placing it in a 1x1 layout at 0,0
+                FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(1, 1);
+                addContentView(mInputProxy, params);
+            }
+        });
+    }
+
+    public void showSoftInput() {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                // Temporarily exit immersive sticky mode to allow the keyboard to appear.
+                getWindow().getDecorView().setSystemUiVisibility(
+                        View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN);
+
+                if (mInputProxy.requestFocus()) {
+                    InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+                    if (imm != null) {
+                        imm.showSoftInput(mInputProxy, InputMethodManager.SHOW_FORCED);
+                    }
+                }
+            }
+        });
+    }
+
+    public void hideSoftInput() {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+                if (imm != null) {
+                    imm.hideSoftInputFromWindow(mInputProxy.getWindowToken(), 0);
+                }
+
+                // Clear the text in the proxy view to reset the IME state,
+                // using a flag to prevent the TextWatcher from firing.
+                mClearingProxyText = true;
+                mInputProxy.setText("");
+                mClearingProxyText = false;
+
+                mInputProxy.clearFocus();
+
+                // Re-enter immersive sticky mode.
+                getWindow().getDecorView().setSystemUiVisibility(
+                        View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                                | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                                | View.SYSTEM_UI_FLAG_FULLSCREEN);
+            }
+        });
+    }
+
+    void test() {
+        Window window = getWindow();
+        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
+        View view = window.getDecorView();
+        android.graphics.Rect rect = new android.graphics.Rect();
+        view.getWindowVisibleDisplayFrame(rect);
+
+        Context context = getApplicationContext();
+        InputMethodManager service = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+        service.showSoftInput(view, InputMethodManager.SHOW_FORCED);
+        view.getWindowVisibleDisplayFrame(rect);
+
+        IBinder binder = view.getWindowToken();
+        service.hideSoftInputFromWindow(binder, 0);
+        view.getWindowVisibleDisplayFrame(rect);
+    }
+
+    //============================================= audio record permission==================================================
+    //Requesting run-time permissions
+    //Create placeholder for user's consent to record_audio permission.
+    //This will be used in handling callback
+    private final int MY_PERMISSIONS_RECORD_AUDIO = 1;
+    private final int MY_PERMISSIONS_WRITE_EXTERNAL_STORAGE = 2;
+
+    private void requestAudioPermissions() {
+        if (ContextCompat.checkSelfPermission(this,
+                Manifest.permission.RECORD_AUDIO)
+                != PackageManager.PERMISSION_GRANTED) {
+
+            //When permission is not granted by user, show them message why this permission is needed.
+            if (ActivityCompat.shouldShowRequestPermissionRationale(this,
+                    Manifest.permission.RECORD_AUDIO)) {
+                Toast.makeText(this, "Please grant permissions to record audio", Toast.LENGTH_LONG).show();
+
+                //Give user option to still opt-in the permissions
+                ActivityCompat.requestPermissions(this,
+                        new String[]{Manifest.permission.RECORD_AUDIO},
+                        MY_PERMISSIONS_RECORD_AUDIO);
+
+            } else {
+                // Show user dialog to grant permission to record audio
+                ActivityCompat.requestPermissions(this,
+                        new String[]{Manifest.permission.RECORD_AUDIO},
+                        MY_PERMISSIONS_RECORD_AUDIO);
+            }
+        }
+        //If permission is granted, then go ahead recording audio
+        else if (ContextCompat.checkSelfPermission(this,
+                Manifest.permission.RECORD_AUDIO)
+                == PackageManager.PERMISSION_GRANTED) {
+
+            //Go ahead with recording audio now
+            //recordAudio();
+        }
+    }
+
+    private void requestWriteExternalStoragePermission() {
+        if (ContextCompat.checkSelfPermission(this,
+                Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                != PackageManager.PERMISSION_GRANTED) {
+
+            //When permission is not granted by user, show them message why this permission is needed.
+            if (ActivityCompat.shouldShowRequestPermissionRationale(this,
+                    Manifest.permission.WRITE_EXTERNAL_STORAGE)) {
+                Toast.makeText(this, "需要存储权限来保存图片到相册", Toast.LENGTH_LONG).show();
+
+                //Give user option to still opt-in the permissions
+                ActivityCompat.requestPermissions(this,
+                        new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE},
+                        MY_PERMISSIONS_WRITE_EXTERNAL_STORAGE);
+
+            } else {
+                // Show user dialog to grant permission to write external storage
+                ActivityCompat.requestPermissions(this,
+                        new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE},
+                        MY_PERMISSIONS_WRITE_EXTERNAL_STORAGE);
+            }
+        }
+    }
+
+    private boolean hasWriteExternalStoragePermission() {
+        return ContextCompat.checkSelfPermission(this,
+                Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    //Handling callback
+    @Override
+    public void onRequestPermissionsResult(int requestCode,
+                                           String permissions[], int[] grantResults) {
+        switch (requestCode) {
+            case MY_PERMISSIONS_RECORD_AUDIO: {
+                if (grantResults.length > 0
+                        && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                    // permission was granted, yay!
+                    //recordAudio();
+                } else {
+                    // permission denied, boo! Disable the
+                    // functionality that depends on this permission.
+                    Toast.makeText(this, "Permissions Denied to record audio", Toast.LENGTH_LONG).show();
+                }
+                return;
+            }
+            case MY_PERMISSIONS_WRITE_EXTERNAL_STORAGE: {
+                if (grantResults.length > 0
+                        && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                    // permission was granted, yay!
+                    Toast.makeText(this, "存储权限已授予", Toast.LENGTH_SHORT).show();
+
+                    // 如果有待处理的图片保存请求，现在执行它
+                    if (mPendingBitmapToSave != null) {
+                        boolean saved = saveImageToGalleryLegacy(mPendingBitmapToSave, mPendingFilename);
+                        if (saved) {
+                            Toast.makeText(this, "Photo saved success", Toast.LENGTH_SHORT).show();
+                        } else {
+                            Toast.makeText(this, "保存图片失败", Toast.LENGTH_SHORT).show();
+                        }
+                        // 清除待处理的请求并回收副本bitmap
+                        if (mPendingBitmapToSave != null && !mPendingBitmapToSave.isRecycled()) {
+                            mPendingBitmapToSave.recycle();
+                        }
+                        mPendingBitmapToSave = null;
+                        mPendingFilename = null;
+                    }
+
+                    // 如果有待处理的视频保存请求，现在执行它
+                    if (mPendingVideoPath != null) {
+                        boolean saved = saveVideoToGalleryLegacy(mPendingVideoPath, mPendingVideoFilename);
+                        if (saved) {
+                            Toast.makeText(this, "Video saved success", Toast.LENGTH_SHORT).show();
+                        } else {
+                            Toast.makeText(this, "保存视频失败", Toast.LENGTH_SHORT).show();
+                        }
+                        // 清除待处理的视频请求
+                        mPendingVideoPath = null;
+                        mPendingVideoFilename = null;
+                    }
+                } else {
+                    // permission denied, boo! Disable the
+                    // functionality that depends on this permission.
+                    Toast.makeText(this, "存储权限被拒绝，无法保存图片到相册", Toast.LENGTH_LONG).show();
+                    // 清除待处理的请求并回收副本bitmap
+                    if (mPendingBitmapToSave != null && !mPendingBitmapToSave.isRecycled()) {
+                        mPendingBitmapToSave.recycle();
+                    }
+                    mPendingBitmapToSave = null;
+                    mPendingFilename = null;
+
+                    // 清除待处理的视频请求
+                    mPendingVideoPath = null;
+                    mPendingVideoFilename = null;
+                }
+                return;
+            }
+        }
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        String str = event.getCharacters();
+        if (str != null && !str.isEmpty()) {
+            if (onStringInput(str)) return true;
+        }
+        return super.dispatchKeyEvent(event);
+    }
+
+
+    // Need this for screen rotation to send configuration changed callbacks to native
+    @Override
+    public void onConfigurationChanged(android.content.res.Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        // 清理待处理的bitmap以避免内存泄漏
+        if (mPendingBitmapToSave != null && !mPendingBitmapToSave.isRecycled()) {
+            mPendingBitmapToSave.recycle();
+            mPendingBitmapToSave = null;
+        }
+
+        // 清理待处理的视频请求
+        mPendingVideoPath = null;
+        mPendingVideoFilename = null;
+    }
+
+    public void showKeyboard() {
+        inputMethodManager.showSoftInput(this.getWindow().getDecorView(), InputMethodManager.SHOW_FORCED);
+    }
+
+
+    public void hideKeyboard() {
+        inputMethodManager.hideSoftInputFromWindow(this.getWindow().getDecorView().getWindowToken(), 0);
+    }
+
+    public void setClipBoardContent(String str) {
+        ClipData mClipData;
+        mClipData = ClipData.newPlainText("", str);
+        mClipboardManager.setPrimaryClip(mClipData);
+    }
+
+    public String getClipBoardContent() {
+        ClipData clipData = mClipboardManager.getPrimaryClip();
+        ClipData.Item item = clipData.getItemAt(0);
+        String text = item.getText().toString();
+        return text;
+    }
+
+    public long playVideo(String path, String mimeType) {
+        Intent intent = new Intent(this, JvmNativeActivity.VideoViewPlayActivity.class);
+        intent.putExtra("path", path);
+        intent.putExtra("mimeType", mimeType);
+        startActivity(intent);
+        return 1;
+    }
+
+
+    native boolean onStringInput(String str);
+
+    native void onKeyboardHeightChanged(boolean visible, int height);
+
+    native void onNativeKey(int keyCode, int count);
+
+    native void onNativeSpecialKey(int keyCode, int action, int modifiers);
+
+    //=======================================================================================================
+    private static final int CAMERA_IMAGE_CODE = 0;
+    private static final int CAMERA_VIDEO_CODE = 1;
+    private static final int GALLERY_CODE = 2;
+    private static final int CROP_CODE = 3;
+    private static final int CAPTURE_MEDIA_RESULT_CODE = 4;
+    //用于展示选择的图片
+
+    static final int PARA_REQUEST_UID = 0;
+    static final int PARA_REQUEST_TYPE = 1;
+    int[][] pick_para = new int[5][2];
+    Uri imageUri, videoUri;
+
+    private File PHOTO_DIR_SD;
+    private File PHOTO_DIR_ROOT;
+//    private final File PHOTO_DIR_SD = new File(Environment.getExternalStorageDirectory() + "/DCIM/Camera");
+//    private final File PHOTO_DIR_ROOT = new File(Environment.getRootDirectory() + "/DCIM/Camera");
+
+
+    public static int GLFMPickupTypeNoDef = 0;
+    public static int GLFMPickupTypeImage = 1;
+    public static int GLFMPickupTypeVideo = 2;
+
+    /**
+     * 拍照选择图片
+     */
+    public void pickFromCamera(int uid, int type) {
+        //构建隐式Intent
+
+        Intent takePictureIntent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
+        pick_para[CAMERA_IMAGE_CODE][PARA_REQUEST_UID] = uid;
+        pick_para[CAMERA_IMAGE_CODE][PARA_REQUEST_TYPE] = type;
+//        imageUri = getOutputMediaFileUri(MEDIA_TYPE_IMAGE);
+//        takePictureIntent.putExtra(MediaStore.EXTRA_OUTPUT, imageUri);
+        //takePictureIntent.putExtra("android.intent.extras.CAMERA_FACING", 1);
+
+        Intent takeVideoIntent = new Intent(MediaStore.ACTION_VIDEO_CAPTURE);
+        takeVideoIntent.putExtra(MediaStore.EXTRA_VIDEO_QUALITY, 0);
+        takeVideoIntent.putExtra(MediaStore.EXTRA_DURATION_LIMIT, 30);
+        videoUri = getOutputMediaFileUri(MEDIA_TYPE_VIDEO);
+        takeVideoIntent.putExtra(MediaStore.EXTRA_OUTPUT, videoUri);
+        //takeVideoIntent.putExtra("android.intent.extras.CAMERA_FACING", 1);
+        pick_para[CAMERA_VIDEO_CODE][PARA_REQUEST_UID] = uid;
+        pick_para[CAMERA_VIDEO_CODE][PARA_REQUEST_TYPE] = type;
+
+        Intent chooserIntent = Intent.createChooser(takePictureIntent, "Capture Image or Video");
+        chooserIntent.putExtra(Intent.EXTRA_INITIAL_INTENTS, new Intent[]{takeVideoIntent});
+
+
+        if (type == GLFMPickupTypeImage) {
+            if (takePictureIntent.resolveActivity(getPackageManager()) != null) {
+                startActivityForResult(takePictureIntent, CAMERA_IMAGE_CODE);
+            }
+        } else if (type == GLFMPickupTypeVideo) {
+            if (takePictureIntent.resolveActivity(getPackageManager()) != null) {
+                startActivityForResult(takeVideoIntent, CAMERA_VIDEO_CODE);
+            }
+        } else {
+            if (takePictureIntent.resolveActivity(getPackageManager()) != null) {
+                startActivityForResult(chooserIntent, CAPTURE_MEDIA_RESULT_CODE);
+            }
+        }
+    }
+
+    /**
+     * 从相册选择图片
+     */
+    public void pickFromAlbum(int uid, int type) {
+        //构建一个内容选择的Intent
+        String itype = "";
+        if (type == GLFMPickupTypeImage) {
+            itype = "image/*";
+        } else if (type == GLFMPickupTypeVideo) {
+            itype = "video/*";
+        } else {
+            itype = "*/*";
+        }
+        Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
+        pick_para[GALLERY_CODE][PARA_REQUEST_UID] = uid;
+        pick_para[GALLERY_CODE][PARA_REQUEST_TYPE] = type;
+        intent.setType(itype);
+//        String[] mimetypes = {"image/*", "video/*"};
+//        intent.putExtra(Intent.EXTRA_MIME_TYPES, mimetypes);//android 4.4 api>=19
+        //打开图片选择
+        startActivityForResult(intent, GALLERY_CODE);
+    }
+
+    /**
+     * 将图片保存到相册
+     *
+     * @param bitmap   要保存的图片
+     * @param filename 文件名（可选，为null时自动生成）
+     * @return 是否保存成功
+     */
+    public boolean saveImageToGallery(Bitmap bitmap, String filename) {
+        try {
+            if (filename == null) {
+                String timeStamp = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
+                filename = "IMG_CROP_" + timeStamp + ".jpg";
+            }
+
+            // Android 10 及以上版本使用 MediaStore
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                return saveImageToGalleryQ(bitmap, filename);
+            } else {
+                // Android 10 以下版本需要检查外部存储权限
+                if (!hasWriteExternalStoragePermission()) {
+                    try {
+                        // 创建bitmap的副本来存储待处理的请求，避免原bitmap被回收
+                        mPendingBitmapToSave = bitmap.copy(bitmap.getConfig(), false);
+                        mPendingFilename = filename;
+                        requestWriteExternalStoragePermission();
+                        return false;
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                        Toast.makeText(this, "创建图片副本失败", Toast.LENGTH_SHORT).show();
+                        return false;
+                    }
+                }
+                return saveImageToGalleryLegacy(bitmap, filename);
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * Android 10+ 版本保存图片到相册
+     */
+    @android.annotation.TargetApi(Build.VERSION_CODES.Q)
+    private boolean saveImageToGalleryQ(Bitmap bitmap, String filename) {
+        try {
+            android.content.ContentValues values = new android.content.ContentValues();
+            values.put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, filename);
+            values.put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
+            values.put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, "DCIM/Camera");
+
+            android.content.ContentResolver resolver = getContentResolver();
+            Uri uri = resolver.insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
+
+            if (uri != null) {
+                java.io.OutputStream outputStream = resolver.openOutputStream(uri);
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 90, outputStream);
+                outputStream.close();
+                return true;
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return false;
+    }
+
+    /**
+     * Android 10 以下版本保存图片到相册
+     */
+    private boolean saveImageToGalleryLegacy(Bitmap bitmap, String filename) {
+        try {
+            // 保存到相册目录
+            File galleryDir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM), "Camera");
+            if (!galleryDir.exists()) {
+                galleryDir.mkdirs();
+            }
+
+            File imageFile = new File(galleryDir, filename);
+            FileOutputStream outputStream = new FileOutputStream(imageFile);
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 90, outputStream);
+            outputStream.close();
+
+            // 通知媒体库扫描新文件
+            android.media.MediaScannerConnection.scanFile(this,
+                    new String[]{imageFile.getAbsolutePath()},
+                    new String[]{"image/jpeg"},
+                    null);
+
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return false;
+    }
+
+    /**
+     * 将视频保存到相册
+     *
+     * @param videoPath 视频文件路径
+     * @param filename  文件名（可选，为null时自动生成）
+     * @return 是否保存成功
+     */
+    public boolean saveVideoToGallery(String videoPath, String filename) {
+        try {
+            if (filename == null) {
+                String timeStamp = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
+                filename = "VID_" + timeStamp + ".mp4";
+            }
+
+            // Android 10 及以上版本使用 MediaStore
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                return saveVideoToGalleryQ(videoPath, filename);
+            } else {
+                // Android 10 以下版本需要检查外部存储权限
+                if (!hasWriteExternalStoragePermission()) {
+                    // 存储待处理的视频保存请求
+                    mPendingVideoPath = videoPath;
+                    mPendingVideoFilename = filename;
+                    requestWriteExternalStoragePermission();
+                    return false;
+                }
+                return saveVideoToGalleryLegacy(videoPath, filename);
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * Android 10+ 版本保存视频到相册
+     */
+    @android.annotation.TargetApi(Build.VERSION_CODES.Q)
+    private boolean saveVideoToGalleryQ(String videoPath, String filename) {
+        try {
+            android.content.ContentValues values = new android.content.ContentValues();
+            values.put(android.provider.MediaStore.Video.Media.DISPLAY_NAME, filename);
+            values.put(android.provider.MediaStore.Video.Media.MIME_TYPE, "video/mp4");
+            values.put(android.provider.MediaStore.Video.Media.RELATIVE_PATH, "DCIM/Camera");
+
+            android.content.ContentResolver resolver = getContentResolver();
+            Uri uri = resolver.insert(android.provider.MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values);
+
+            if (uri != null) {
+                java.io.OutputStream outputStream = resolver.openOutputStream(uri);
+                java.io.FileInputStream inputStream = new java.io.FileInputStream(videoPath);
+
+                byte[] buffer = new byte[4096];
+                int bytesRead;
+                while ((bytesRead = inputStream.read(buffer)) != -1) {
+                    outputStream.write(buffer, 0, bytesRead);
+                }
+
+                inputStream.close();
+                outputStream.close();
+                return true;
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return false;
+    }
+
+    /**
+     * Android 10 以下版本保存视频到相册
+     */
+    private boolean saveVideoToGalleryLegacy(String videoPath, String filename) {
+        try {
+            // 保存到相册目录
+            File galleryDir = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM), "Camera");
+            if (!galleryDir.exists()) {
+                galleryDir.mkdirs();
+            }
+
+            File sourceFile = new File(videoPath);
+            File targetFile = new File(galleryDir, filename);
+
+            // 复制文件
+            java.io.FileInputStream inputStream = new java.io.FileInputStream(sourceFile);
+            java.io.FileOutputStream outputStream = new java.io.FileOutputStream(targetFile);
+
+            byte[] buffer = new byte[4096];
+            int bytesRead;
+            while ((bytesRead = inputStream.read(buffer)) != -1) {
+                outputStream.write(buffer, 0, bytesRead);
+            }
+
+            inputStream.close();
+            outputStream.close();
+
+            // 通知媒体库扫描新文件
+            android.media.MediaScannerConnection.scanFile(this,
+                    new String[]{targetFile.getAbsolutePath()},
+                    new String[]{"video/mp4"},
+                    null);
+
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return false;
+    }
+
+    /**
+     * 通过Uri传递图像信息以供裁剪
+     *
+     * @param uris
+     */
+    public void imageCrop(int uid, String uris, int x, int y, int width, int height) {
+        imageCrop(uid, uris, x, y, width, height, true);
+    }
+
+    /**
+     * 通过Uri传递图像信息以供裁剪，可选择是否保存到相册
+     *
+     * @param uid           用户ID
+     * @param uris          图片URI
+     * @param x             裁剪起始X坐标
+     * @param y             裁剪起始Y坐标
+     * @param width         裁剪宽度
+     * @param height        裁剪高度
+     * @param saveToGallery 是否保存到相册
+     */
+    public void imageCrop(int uid, String uris, int x, int y, int width, int height, boolean saveToGallery) {
+        try {
+            // 检查是否为视频文件
+            if (uris.toLowerCase().endsWith(".mp4")) {
+                handleVideoFile(uid, uris, saveToGallery);
+                return;
+            }
+
+            // 不再使用过时的系统裁剪Intent，改为自定义实现
+            Bitmap originalBitmap = loadBitmapFromUri(uris);
+
+            if (originalBitmap == null) {
+                // 如果无法解码图片，直接返回失败
+                onPhotoPicked(uid, null, null);
+                return;
+            }
+
+            // 执行裁剪操作
+            Bitmap croppedBitmap = cropBitmap(originalBitmap, x, y, width, height);
+
+            if (croppedBitmap != null) {
+                // 保存裁剪后的图片到应用目录
+                Uri croppedUri = saveImage(croppedBitmap);
+
+                // 如果需要，同时保存到相册
+                if (saveToGallery) {
+                    boolean savedToGallery = saveImageToGallery(croppedBitmap, null);
+                    if (savedToGallery) {
+                        // 可以显示一个提示消息告诉用户图片已保存到相册
+                        runOnUiThread(new Runnable() {
+                            @Override
+                            public void run() {
+                                Toast.makeText(JvmNativeActivity.this, "Photo saved success", Toast.LENGTH_SHORT).show();
+                            }
+                        });
+                    }
+                }
+
+                onPhotoPicked(uid, croppedUri.getPath(), null);
+
+                // 释放资源
+                if (croppedBitmap != originalBitmap) {
+                    croppedBitmap.recycle();
+                }
+            } else {
+                onPhotoPicked(uid, null, null);
+            }
+
+            originalBitmap.recycle();
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            // 发生异常时回调失败
+            onPhotoPicked(uid, null, null);
+        }
+    }
+
+    /**
+     * 处理视频文件，直接保存到相册而不做裁剪
+     *
+     * @param uid           用户ID
+     * @param videoPath     视频文件路径
+     * @param saveToGallery 是否保存到相册
+     */
+    private void handleVideoFile(int uid, String videoPath, boolean saveToGallery) {
+        try {
+            // 获取实际的文件路径
+            String actualPath = getActualVideoPath(videoPath);
+
+            if (actualPath == null || !new File(actualPath).exists()) {
+                // 文件不存在，返回失败
+                onPhotoPicked(uid, null, null);
+                return;
+            }
+
+            if (saveToGallery) {
+                boolean savedToGallery = saveVideoToGallery(actualPath, null);
+                if (savedToGallery) {
+                    // 显示保存成功提示
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() {
+                            Toast.makeText(JvmNativeActivity.this, "Video saved success", Toast.LENGTH_SHORT).show();
+                        }
+                    });
+                }
+            }
+
+            // 无论是否保存到相册，都返回原始路径
+            onPhotoPicked(uid, actualPath, null);
+
+        } catch (Exception e) {
+            e.printStackTrace();
+            onPhotoPicked(uid, null, null);
+        }
+    }
+
+    /**
+     * 获取视频文件的实际路径
+     *
+     * @param uris URI字符串
+     * @return 实际文件路径
+     */
+    private String getActualVideoPath(String uris) {
+        try {
+            // 首先尝试作为文件路径处理
+            if (uris.startsWith("/")) {
+                // 绝对路径
+                File file = new File(uris);
+                if (file.exists()) {
+                    return uris;
+                }
+            }
+
+            // 尝试作为URI处理
+            Uri uri = Uri.parse(uris);
+            String scheme = uri.getScheme();
+
+            if ("file".equals(scheme)) {
+                // file:// URI
+                String path = uri.getPath();
+                File file = new File(path);
+                if (file.exists()) {
+                    return path;
+                }
+            } else if ("content".equals(scheme)) {
+                // content:// URI需要先复制到临时文件
+                return copyContentUriToTempFile(uri);
+            } else {
+                // 没有scheme，尝试作为文件路径
+                File file = new File(uris);
+                if (file.exists()) {
+                    return uris;
+                }
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+
+    /**
+     * 将content URI的视频复制到临时文件
+     *
+     * @param uri content URI
+     * @return 临时文件路径
+     */
+    private String copyContentUriToTempFile(Uri uri) {
+        try {
+            InputStream inputStream = getContentResolver().openInputStream(uri);
+            if (inputStream == null) {
+                return null;
+            }
+
+            // 创建临时文件
+            String timeStamp = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
+            File tempFile = new File(getPhotoStorage(), "temp_video_" + timeStamp + ".mp4");
+
+            FileOutputStream outputStream = new FileOutputStream(tempFile);
+            byte[] buffer = new byte[4096];
+            int bytesRead;
+            while ((bytesRead = inputStream.read(buffer)) != -1) {
+                outputStream.write(buffer, 0, bytesRead);
+            }
+
+            inputStream.close();
+            outputStream.close();
+
+            return tempFile.getAbsolutePath();
+        } catch (Exception e) {
+            e.printStackTrace();
+            return null;
+        }
+    }
+
+    /**
+     * 从URI加载Bitmap，支持不同格式的URI
+     *
+     * @param uris URI字符串
+     * @return 加载的Bitmap，失败返回null
+     */
+    private Bitmap loadBitmapFromUri(String uris) {
+        try {
+            // 首先尝试作为文件路径处理
+            if (uris.startsWith("/")) {
+                // 绝对路径
+                File file = new File(uris);
+                if (file.exists()) {
+                    return BitmapFactory.decodeFile(uris);
+                }
+            }
+
+            // 尝试作为URI处理
+            Uri uri = Uri.parse(uris);
+            String scheme = uri.getScheme();
+
+            if ("file".equals(scheme)) {
+                // file:// URI
+                String path = uri.getPath();
+                File file = new File(path);
+                if (file.exists()) {
+                    return BitmapFactory.decodeFile(path);
+                }
+            } else if ("content".equals(scheme)) {
+                // content:// URI
+                InputStream is = getContentResolver().openInputStream(uri);
+                Bitmap bitmap = BitmapFactory.decodeStream(is);
+                is.close();
+                return bitmap;
+            } else {
+                // 没有scheme，尝试作为文件路径
+                File file = new File(uris);
+                if (file.exists()) {
+                    return BitmapFactory.decodeFile(uris);
+                }
+            }
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return null;
+    }
+
+    /**
+     * 自定义图片裁剪方法
+     *
+     * @param source 原始图片
+     * @param x      裁剪起始X坐标
+     * @param y      裁剪起始Y坐标
+     * @param width  裁剪宽度
+     * @param height 裁剪高度
+     * @return 裁剪后的图片，如果失败返回null
+     */
+    private Bitmap cropBitmap(Bitmap source, int x, int y, int width, int height) {
+        if (source == null) {
+            return null;
+        }
+
+        int sourceWidth = source.getWidth();
+        int sourceHeight = source.getHeight();
+
+        // 边界检查和修正
+        if (x < 0) x = 0;
+        if (y < 0) y = 0;
+        if (x >= sourceWidth) return null;
+        if (y >= sourceHeight) return null;
+
+        // 修正裁剪区域大小，确保不超出原图边界
+        if (x + width > sourceWidth) {
+            width = sourceWidth - x;
+        }
+        if (y + height > sourceHeight) {
+            height = sourceHeight - y;
+        }
+
+        if (width <= 0 || height <= 0) {
+            return null;
+        }
+
+        try {
+            // 执行裁剪
+            return Bitmap.createBitmap(source, x, y, width, height);
+        } catch (Exception e) {
+            e.printStackTrace();
+            return null;
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent intent) {
+        switch (requestCode) {
+            case CAPTURE_MEDIA_RESULT_CODE: {
+                if (intent == null) {
+                    return;
+                } else {
+                    Uri file = intent.getData();
+
+                    if (file != null && file.getPath().endsWith(".mp4")) {
+                        onActivityResult(CAMERA_VIDEO_CODE, resultCode, intent);
+                    } else {
+                        onActivityResult(CAMERA_IMAGE_CODE, resultCode, intent);
+                    }
+                }
+                break;
+            }
+            case CAMERA_VIDEO_CODE: {
+                try {
+                    int uid = pick_para[CAMERA_VIDEO_CODE][PARA_REQUEST_UID];
+                    Uri uri = intent.getData();
+                    onPhotoPicked(uid, uri.getPath(), null);
+                } catch (Exception io_e) {
+                }
+                break;
+            }
+            case CAMERA_IMAGE_CODE: {
+                //用户点击了取消
+                if (intent == null) {
+                    return;
+                } else {
+                    Bundle extras = intent.getExtras();
+                    if (extras != null) {
+                        //获得拍的照片
+                        Bitmap bm = extras.getParcelable("data");
+                        int uid = pick_para[CAMERA_IMAGE_CODE][PARA_REQUEST_UID];
+                        int type = pick_para[CAMERA_IMAGE_CODE][PARA_REQUEST_TYPE];
+                        bm = resizeImage(bm);
+
+                        //将Bitmap转化为uri
+                        Uri uri = saveImage(bm);
+                        //启动图像裁剪
+                        //imageCrop(uri, uid);
+                        onPhotoPicked(uid, uri.getPath(), null);
+                    }
+                }
+                break;
+            }
+            case GALLERY_CODE: {
+                if (intent == null) {
+                    return;
+                } else {
+                    //用户从图库选择图片后会返回所选图片的Uri
+                    Uri uri;
+                    //获取到用户所选图片的Uri
+                    uri = intent.getData();
+                    int uid = pick_para[GALLERY_CODE][PARA_REQUEST_UID];
+                    int type = pick_para[GALLERY_CODE][PARA_REQUEST_TYPE];
+                    //返回的Uri为content类型的Uri,不能进行复制等操作,需要转换为文件Uri
+                    uri = convertUri(uri);
+                    if (type == 0) {
+                        Bitmap bm = BitmapFactory.decodeFile(uri.getPath());
+                        bm = resizeImage(bm);
+                        uri = saveImage(bm);
+                    }
+                    onPhotoPicked(uid, uri.getPath(), null);
+                }
+                break;
+            }
+            case CROP_CODE: {
+                // CROP_CODE 已不再使用，因为我们改为了自定义裁剪实现
+                // 保留此 case 是为了兼容性，但实际上不会被调用
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
+    static native void onPhotoPicked(int uid, String path, byte[] data);
+
+    /**
+     * 将content类型的Uri转化为文件类型的Uri
+     *
+     * @param uri
+     * @return
+     */
+    private Uri convertUri(Uri uri) {
+        InputStream is;
+        try {
+            //Uri ----> InputStream
+            is = getContentResolver().openInputStream(uri);
+            //InputStream ----> Bitmap
+            Bitmap bm = BitmapFactory.decodeStream(is);
+            //关闭流
+            is.close();
+            return saveImage(bm);
+        } catch (FileNotFoundException e) {
+            e.printStackTrace();
+            return null;
+        } catch (IOException e) {
+            e.printStackTrace();
+            return null;
+        }
+    }
+
+    private Bitmap resizeImage(Bitmap bm) {
+        float iw = bm.getWidth();
+        float ih = bm.getHeight();
+        float ratio = 1024;
+        float scale = iw / ratio > ih / ratio ? (iw / ratio) : (ih / ratio);
+        if (scale > 1) {
+            Matrix matrix = new Matrix();
+            matrix.postScale(1 / scale, 1 / scale);
+            // 得到新的图片
+            Bitmap newbm = Bitmap.createBitmap(bm, 0, 0, (int) iw, (int) ih, matrix, true);
+            return newbm;
+        }
+        return bm;
+    }
+
+    /**
+     * 将Bitmap写入SD卡中的一个文件中,并返回写入文件的Uri
+     *
+     * @param bm
+     * @return
+     */
+    private Uri saveImage(Bitmap bm) {
+
+
+        //新建文件存储裁剪后的图片
+        File img = getOutputMediaFile(MEDIA_TYPE_IMAGE);
+        try {
+            //打开文件输出流
+            FileOutputStream fos = new FileOutputStream(img);
+            //将bitmap压缩后写入输出流(参数依次为图片格式、图片质量和输出流)
+            bm.compress(Bitmap.CompressFormat.JPEG, 75, fos);
+            //刷新输出流
+            fos.flush();
+            //关闭输出流
+            fos.close();
+            //返回File类型的Uri
+            return Uri.fromFile(img);
+        } catch (FileNotFoundException e) {
+            e.printStackTrace();
+            return null;
+        } catch (IOException e) {
+            e.printStackTrace();
+            return null;
+        }
+
+    }
+
+//    private String getImgName() {
+//        SimpleDateFormat sdf = new SimpleDateFormat();
+//        sdf.applyPattern("yyyyMMdd_HHmmsss");
+//        StringBuilder result = new StringBuilder("IMG_");
+//        result.append(sdf.format(new Date())).append("_").append((System.currentTimeMillis() % 1000))
+//                .append(".jpeg");
+//        return result.toString();
+//    }
+
+//    private byte[] getFileData(Uri uri) {
+//        try {
+//            File f = new File(uri.getPath());
+//            if (f.exists()) {
+//                FileInputStream fis = new FileInputStream(f);
+//                byte[] b = new byte[(int) f.length()];
+//                fis.read(b);
+//                return b;
+//            }
+//        } catch (Exception e) {
+//            e.printStackTrace();
+//        }
+//        return null;
+//    }
+
+
+    private File getPhotoStorage() {
+        File dir = null;
+        // showToast(activity, "若添加实时拍摄照片导致重启，请尝试在应用外拍照，再选择从相册中获取进行添加！");
+        String status = Environment.getExternalStorageState();
+        if (status.equals(Environment.MEDIA_MOUNTED)) {// 判断是否有SD卡
+            dir = PHOTO_DIR_SD;
+        } else {
+            dir = PHOTO_DIR_ROOT;
+        }
+        if (!dir.exists()) {
+            dir.mkdirs();// 创建照片的存储目录
+        }
+        return dir;
+    }
+
+    public static final int MEDIA_TYPE_IMAGE = 1;
+    public static final int MEDIA_TYPE_VIDEO = 2;
+
+    /**
+     * Create a file Uri for saving an image or video
+     */
+    private Uri getOutputMediaFileUri(int type) {
+        return Uri.fromFile(getOutputMediaFile(type));
+    }
+
+    /**
+     * Create a File for saving an image or video
+     */
+    private File getOutputMediaFile(int type) {
+        // To be safe, you should check that the SDCard is mounted
+        // using Environment.getExternalStorageState() before doing this.
+
+        File mediaStorageDir = getPhotoStorage();
+        // This location works best if you want the created images to be shared
+        // between applications and persist after your app has been uninstalled.
+
+        // Create the storage directory if it does not exist
+        if (!mediaStorageDir.exists()) {
+            if (!mediaStorageDir.mkdirs()) {
+                Log.d("minipack", "failed to create directory");
+                return null;
+            }
+        }
+
+        // Create a media file name
+        String timeStamp = new SimpleDateFormat("yyyyMMdd_HHmmss").format(new Date());
+        File mediaFile;
+        if (type == MEDIA_TYPE_IMAGE) {
+            mediaFile = new File(mediaStorageDir.getPath() + File.separator +
+                    "IMG_" + timeStamp + ".jpg");
+        } else if (type == MEDIA_TYPE_VIDEO) {
+            mediaFile = new File(mediaStorageDir.getPath() + File.separator +
+                    "VID_" + timeStamp + ".mp4");
+        } else {
+            return null;
+        }
+
+        return mediaFile;
+    }
+
+    //=======================================================================================================
+    //    playback
+    //=======================================================================================================
+    public static class VideoViewPlayActivity extends Activity {
+        public MediaController mc;
+
+        @Override
+        protected void onCreate(Bundle savedInstanceState) {
+            super.onCreate(savedInstanceState);
+
+            Intent intent = getIntent();
+            String path = intent.getStringExtra("path");
+            String mimeType = intent.getStringExtra("mimeType");
+
+
+            setContentView(R.layout.activity_video_view);
+            final VideoView videoView = (VideoView) findViewById(R.id.videoView);
+            final Button closeButton = (Button) findViewById(R.id.closeButton);
+            closeButton.getBackground().setAlpha(0);
+            closeButton.setOnClickListener(new View.OnClickListener() {
+                @Override
+                public void onClick(View arg0) {//实际处理button的click事件的方法
+                    VideoViewPlayActivity.this.finish();
+                }
+            });
+
+            //加载指定的视频文件
+            //String path = "http://vfx.mtime.cn/Video/2019/02/04/mp4/190204084208765161.mp4";//Environment.getExternalStorageDirectory().getPath()+"/20180730.mp4";
+            videoView.setVideoPath(path);
+            videoView.start();
+            //创建MediaController对象
+            MediaController mediaController = new MediaController(this) {
+//                @Override
+//                public void hide() {
+//                    super.show();
+//                }
+            };
+            mediaController.show();
+
+            //VideoView与MediaController建立关联
+            videoView.setMediaController(mediaController);
+            mc = mediaController;
+
+            //让VideoView获取焦点
+            videoView.requestFocus();
+
+
+        }
+    }
+
+
+    //=======================================================================================================
+    //                   open app
+    //=======================================================================================================
+
+    /**
+     * 检查包是否存在
+     *
+     * @param packname
+     * @return
+     */
+    private boolean checkPackInfo(String packname) {
+        PackageInfo packageInfo = null;
+        try {
+            packageInfo = getPackageManager().getPackageInfo(packname, 0);
+        } catch (PackageManager.NameNotFoundException e) {
+            e.printStackTrace();
+        }
+        return packageInfo != null;
+    }
+
+    public int openOtherApp(String urls, String more, int detectAppInstalled) {
+        try {
+
+            if (more != null && more.equals("URL")) {
+                Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(urls));
+                startActivity(intent);
+            } else {
+                if (detectAppInstalled != 0) {
+                    if (!checkPackInfo(urls)) {
+                        return 1;
+                    }
+                }
+                String[] paras = urls.split(" ");
+                String pkgName = paras[0];
+                String activityName = paras[1];
+
+                Intent intent = new Intent(Intent.ACTION_MAIN);
+                ComponentName cmp = new ComponentName(pkgName, activityName);
+                intent.addCategory(Intent.CATEGORY_LAUNCHER);
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                intent.setComponent(cmp);
+                startActivity(intent);
+                return 0;
+            }
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return 1;
+    }
+
+    //=======================================================================================================
+    //                   alipay
+    //=======================================================================================================
+
+
+    /**
+     * 支付宝支付业务示例, 被minijvm的 rmi调用
+     */
+    public Map<String, String> payV2(String orderInfo) {
+        try {
+            String decOrderInfo = new String(Base64.decode(orderInfo), "utf-8");
+            Thread t = new Thread(() -> {
+                PayTask alipay = new PayTask(JvmNativeActivity.this);
+                Map<String, String> result = alipay.payV2(decOrderInfo, true);
+                Log.i("msg", result.toString());
+            });
+            t.start();
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return new HashMap<>();
+
+    }
+
+    /**
+     * 微信支付, 被minijvm的 rmi调用
+     *
+     * @param orderInfo
+     * @return
+     */
+    public Map<String, String> wxPay(String orderInfo) {
+        try {
+            orderInfo = new String(Base64.decode(orderInfo), "utf-8");
+            org.minijvm.activity.bridge.JsonParser<Map> parser = new org.minijvm.activity.bridge.JsonParser<>();
+            Map params = parser.deserial(orderInfo, Map.class);
+            String appId = String.valueOf(params.get("appid"));
+            String partnerId = String.valueOf(params.get("partnerid"));
+            String prepayId = String.valueOf(params.get("prepayid"));
+            String packageValue = String.valueOf(params.get("package"));
+            String nonceStr = String.valueOf(params.get("noncestr"));
+            String timestamp = String.valueOf(params.get("timestamp"));
+            String sign = String.valueOf(params.get("sign"));
+
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    sWxAppId = appId;
+                    sWxApi = WXAPIFactory.createWXAPI(JvmNativeActivity.this, appId, true);
+                    sWxApi.registerApp(appId);
+                    if (!sWxApi.isWXAppInstalled()) {
+                        Toast.makeText(JvmNativeActivity.this, "WeChat not installed", Toast.LENGTH_SHORT).show();
+                    } else {
+                        PayReq req = new PayReq();
+                        req.appId = appId;
+                        req.partnerId = partnerId;
+                        req.prepayId = prepayId;
+                        req.packageValue = packageValue;
+                        req.nonceStr = nonceStr;
+                        req.timeStamp = timestamp;
+                        req.sign = sign;
+                        sWxApi.sendReq(req);
+                    }
+                }
+            });
+
+
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        return new HashMap<>();
+    }
+
+    /**
+     * 支付宝账户授权业务示例
+     */
+    public Map<String, String> authV2(String authInfo) {
+        Thread t = new Thread(() -> {
+            // 构造AuthTask 对象
+            AuthTask authTask = new AuthTask(JvmNativeActivity.this);
+            // 调用授权接口，获取授权结果
+            Map<String, String> result = authTask.authV2(authInfo, true);
+
+        });
+        t.start();
+        return new HashMap<>();
+    }
+
+    /**
+     * 微信/支付宝登录授权。参数是 Passport prepare 接口返回 JSON 的 Base64。
+     * 该方法只启动授权并立即返回，不能跨外部 App 授权过程持续占用 JNI 调用。
+     * 页面通过 thirdPartyAuthResult() 轮询最终结果。
+     */
+    public synchronized Map<String, String> thirdPartyAuth(String requestBase64) {
+        Map<String, String> failed = new HashMap<>();
+        try {
+            String requestJson = new String(Base64.decode(requestBase64), "utf-8");
+            org.minijvm.activity.bridge.JsonParser<Map> parser =
+                    new org.minijvm.activity.bridge.JsonParser<>();
+            Map request = parser.deserial(requestJson, Map.class);
+            String provider = stringValue(request.get("provider"));
+            sThirdPartyAuthProvider = provider;
+            if ("alipay".equals(provider)) {
+                String authUrl = stringValue(request.get("authUrl"));
+                String scheme = stringValue(request.get("alipayScheme"));
+                String state = stringValue(request.get("state"));
+                if (authUrl.length() == 0 || scheme.length() == 0) {
+                    failed.put("resultStatus", "4000");
+                    failed.put("memo", "Missing Alipay minimalist authorization parameters");
+                    return failed;
+                }
+                sAlipayAuthResult = null;
+                Map<String, String> bizParams = new HashMap<>();
+                bizParams.put("url", authUrl);
+                Log.i(TAG, "Starting Alipay account authorization, scheme=" + scheme
+                        + ", stateLength=" + state.length()
+                        + ", thread=" + Thread.currentThread().getName());
+                OpenAuthTask task = new OpenAuthTask(JvmNativeActivity.this);
+                task.execute(scheme, OpenAuthTask.BizType.AccountAuth, bizParams,
+                        (resultCode, resultMessage, resultBundle) -> {
+                            Log.i(TAG, "Alipay account authorization callback, resultCode="
+                                    + resultCode + ", message="
+                                    + (resultMessage == null ? "" : resultMessage));
+                            Map<String, String> result = new HashMap<>();
+                            if (resultBundle != null) {
+                                for (String key : resultBundle.keySet()) {
+                                    result.put(key, stringValue(resultBundle.get(key)));
+                                }
+                            }
+                            result.put("resultStatus", String.valueOf(resultCode));
+                            result.put("memo", resultMessage == null ? "" : resultMessage);
+                            if (!result.containsKey("state")) {
+                                result.put("state", state);
+                            }
+                            sAlipayAuthResult = result;
+                        }, true);
+                return pendingAuthResult();
+            }
+            if ("wechat".equals(provider)) {
+                String appId = stringValue(request.get("appid"));
+                String state = stringValue(request.get("state"));
+                String scope = stringValue(request.get("scope"));
+                if (scope.length() == 0) {
+                    scope = "snsapi_userinfo";
+                }
+                sWxAppId = appId;
+                sWxAuthState = state;
+                sWxAuthResult = null;
+                final String requestScope = scope;
+                runOnUiThread(() -> {
+                    sWxApi = WXAPIFactory.createWXAPI(JvmNativeActivity.this, appId, true);
+                    sWxApi.registerApp(appId);
+                    if (!sWxApi.isWXAppInstalled()) {
+                        Map<String, String> result = new HashMap<>();
+                        result.put("errCode", "-8");
+                        result.put("errStr", "WeChat not installed");
+                        completeWechatAuth(result);
+                        return;
+                    }
+                    SendAuth.Req req = new SendAuth.Req();
+                    req.scope = requestScope;
+                    req.state = state;
+                    if (!sWxApi.sendReq(req)) {
+                        Map<String, String> result = new HashMap<>();
+                        result.put("errCode", "-9");
+                        result.put("errStr", "Unable to start WeChat authorization");
+                        completeWechatAuth(result);
+                    }
+                });
+                return pendingAuthResult();
+            }
+            failed.put("errCode", "-11");
+            failed.put("errStr", "Unsupported authorization provider");
+        } catch (Exception e) {
+            Log.e(TAG, "thirdPartyAuth", e);
+            failed.put("errCode", "-12");
+            failed.put("errStr", e.getMessage() == null ? "Authorization failed" : e.getMessage());
+        }
+        return failed;
+    }
+
+    public synchronized Map<String, String> thirdPartyAuthResult() {
+        Map<String, String> result;
+        if ("alipay".equals(sThirdPartyAuthProvider)) {
+            result = sAlipayAuthResult;
+        } else if ("wechat".equals(sThirdPartyAuthProvider)) {
+            result = sWxAuthResult;
+        } else {
+            result = new HashMap<>();
+            result.put("errCode", "-11");
+            result.put("errStr", "No third-party authorization is pending");
+            return result;
+        }
+        if (result == null) {
+            return pendingAuthResult();
+        }
+        sThirdPartyAuthProvider = null;
+        sAlipayAuthResult = null;
+        sWxAuthResult = null;
+        sWxAuthState = null;
+        return result;
+    }
+
+    private static Map<String, String> pendingAuthResult() {
+        Map<String, String> pending = new HashMap<>();
+        pending.put("nativeAuthPending", "true");
+        return pending;
+    }
+
+    public static void completeWechatAuth(Map<String, String> result) {
+        if (!"wechat".equals(sThirdPartyAuthProvider)) {
+            return;
+        }
+        String state = result.get("state");
+        if ("0".equals(result.get("errCode")) && sWxAuthState != null
+                && !sWxAuthState.equals(state)) {
+            return;
+        }
+        sWxAuthResult = result;
+    }
+
+    private static String stringValue(Object value) {
+        return value == null ? "" : String.valueOf(value);
+    }
+
+    /**
+     * 获取支付宝 SDK 版本号。
+     */
+    public String showSdkVersion() {
+        PayTask payTask = new PayTask(this);
+        String version = payTask.getVersion();
+        return version;
+    }
+
+    private static void showAlert(Context ctx, String info) {
+        showAlert(ctx, info, null);
+    }
+
+    private static void showAlert(Context ctx, String info, DialogInterface.OnDismissListener onDismiss) {
+        new AlertDialog.Builder(ctx)
+                .setMessage(info)
+                .setPositiveButton("OK", null)
+                .setOnDismissListener(onDismiss)
+                .show();
+    }
+
+    public String remoteMethodCall(String jsonStr) {
+
+        //把jsonStr解析成为MethodCallDesc对象
+        RMCDescriptor mcd = ReflectUtil.fromJson(jsonStr);
+
+        Object ret = ReflectUtil.invokeJava(mcd.getClassName(), mcd.getMethodDesc(), mcd.getParaJson(), mcd.getInsJson(), this);
+
+        JsonPrinter jsonPrinter = new JsonPrinter();
+        return jsonPrinter.serial(ret);
+    }
+
+    public void setScreenSaver(final boolean enabled) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                Window window = getWindow();
+                if (window != null) {
+                    if (enabled) {
+                        // enabled=true means allow screen to turn off (default behavior)
+                        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                    } else {
+                        // enabled=false means keep screen on
+                        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                    }
+                }
+            }
+        });
+    }
+
+    public void setScreenBrightness(final float brightness) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                Window window = getWindow();
+                if (window != null) {
+                    WindowManager.LayoutParams params = window.getAttributes();
+                    // brightness value is from 0.0 to 1.0.
+                    // -1f means use system default, but C code clamps it.
+                    params.screenBrightness = brightness;
+                    window.setAttributes(params);
+                }
+            }
+        });
+    }
+}

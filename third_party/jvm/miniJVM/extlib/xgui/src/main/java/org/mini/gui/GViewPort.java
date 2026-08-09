@@ -1,0 +1,518 @@
+/*
+ * To change this license header, choose License Headers in Project Properties.
+ * To change this template file, choose Tools | Templates
+ * and open the template in the editor.
+ */
+package org.mini.gui;
+
+import org.mini.glfm.Glfm;
+import org.mini.glfw.Glfw;
+import org.mini.gui.callback.GCallBack;
+import org.mini.gui.callback.GCmd;
+import org.mini.util.SysLog;
+
+import java.util.TimerTask;
+
+/**
+ * @author Gust
+ */
+public class GViewPort extends GContainer {
+
+    protected float[] viewBoundle = new float[4];//可视窗口边界, 
+    protected float minX, maxX, minY, maxY;
+    protected float scrollx;
+    protected float scrolly;
+
+    protected boolean slideDirectionLimit = false;
+
+    public GViewPort(GForm form) {
+        super(form);
+    }
+
+
+    @Override
+    public void setLocation(float x, float y) {
+        float oldLeft = viewBoundle[LEFT];
+        float oldTop = viewBoundle[TOP];
+        viewBoundle[LEFT] = x;
+        viewBoundle[TOP] = y;
+        reAlign();
+        doLocationChanged(oldLeft, oldTop, x, y);
+    }
+
+    @Override
+    public void setSize(float w, float h) {
+        viewBoundle[WIDTH] = w;
+        viewBoundle[HEIGHT] = h;
+        reAlign();
+    }
+
+    @Override
+    public float getX() {
+        if (parent != null) {
+            return parent.getInnerX() + viewBoundle[LEFT];
+        }
+        return viewBoundle[LEFT];
+    }
+
+    @Override
+    public float getY() {
+        if (parent != null) {
+            return parent.getInnerY() + viewBoundle[TOP];
+        }
+        return viewBoundle[TOP];
+    }
+
+    @Override
+    public float getW() {
+        return viewBoundle[WIDTH];
+    }
+
+    @Override
+    public float getH() {
+        return viewBoundle[HEIGHT];
+    }
+
+    @Override
+    public float[] getBoundle() {
+        return viewBoundle;
+    }
+
+    public float getLocationLeft() {
+        return viewBoundle[LEFT];
+    }
+
+    public float getLocationTop() {
+        return viewBoundle[TOP];
+    }
+
+    @Override
+    public float getInnerX() {
+        return super.getX();
+    }
+
+    @Override
+    public float getInnerY() {
+        return super.getY();
+    }
+
+    @Override
+    public float getInnerW() {
+        return super.getW();
+    }
+
+    @Override
+    public float getInnerH() {
+        return super.getH();
+    }
+
+    @Override
+    public void setInnerLocation(float x, float y) {
+        //super.setLocation(x, y);
+        if (getOutOfViewWidth() > 0) setScrollX(-x / getOutOfViewWidth());
+        if (getOutOfViewHeight() > 0) setScrollY(-y / getOutOfViewHeight());
+    }
+
+    @Override
+    public void setInnerSize(float x, float y) {
+        super.setSize(x, y);
+    }
+
+    @Override
+    public float[] getInnerBoundle() {
+        return super.getBoundle();
+    }
+
+    @Override
+    public void move(float dx, float dy) {
+        boundle[LEFT] += dx;
+        boundle[TOP] += dy;
+        float oldLeft = viewBoundle[LEFT];
+        float oldTop = viewBoundle[TOP];
+        viewBoundle[LEFT] += dx;
+        viewBoundle[TOP] += dy;
+        doLocationChanged(oldLeft, oldTop, viewBoundle[LEFT], viewBoundle[TOP]);
+    }
+
+    @Override
+    public void onAdd(GObject obj) {
+        super.onAdd(obj);
+        reAlign();
+    }
+
+    @Override
+    public void onRemove(GObject obj) {
+        super.onRemove(obj);
+        reAlign();
+    }
+
+    @Override
+    public void reAlign() {
+        float posY = scrolly * (maxY - minY);
+        float posX = scrollx * (maxX - minX);
+
+        minX = 0;
+        minY = 0;
+        maxX = minX + viewBoundle[WIDTH];
+        maxY = minY + viewBoundle[HEIGHT];
+        {
+            for (GObject nko : elements) {
+                float[] bond = null;
+                if (nko instanceof GContainer) {
+                    GContainer con = (GContainer) nko;
+                    bond = con.getBoundle();
+
+                } else {
+                    bond = nko.getBoundle();
+                }
+                if (bond[LEFT] < minX) {
+                    minX = bond[LEFT];
+                }
+                if (bond[LEFT] + bond[WIDTH] > maxX) {
+                    maxX = bond[LEFT] + bond[WIDTH];
+                }
+                if (bond[TOP] < minY) {
+                    minY = bond[TOP];
+                }
+                if (bond[TOP] + bond[HEIGHT] > maxY) {
+                    maxY = bond[TOP] + bond[HEIGHT];
+                }
+            }
+        }
+        this.boundle[WIDTH] = maxX - minX;
+        this.boundle[HEIGHT] = maxY - minY;
+
+        if (boundle[WIDTH] <= viewBoundle[WIDTH]) {
+            boundle[LEFT] = viewBoundle[LEFT];
+        }
+        if (boundle[HEIGHT] <= viewBoundle[HEIGHT]) {
+            boundle[TOP] = viewBoundle[TOP];
+        }
+//        if ((maxY - minY) == 0) {
+//            int debug = 1;
+//        }
+        if (maxY - minY != 0) setScrollY(posY / (maxY - minY));
+        if (maxX - minX != 0) setScrollX(posX / (maxX - minX));
+    }
+
+    boolean touched;
+    static final byte DIR_NODEF = 0, DIR_X = 1, DIR_Y = 2;
+    byte dragDirection = DIR_NODEF;
+
+    @Override
+    public void touchEvent(int touchid, int phase, int x, int y) {
+        switch (phase) {
+            case Glfm.GLFMTouchPhaseBegan: {
+                if (inertiaCmdY != null) {
+                    inertiaCmdY = null;
+                }
+                if (inertiaCmdX != null) {
+                    inertiaCmdX = null;
+                }
+                touched = true;
+                break;
+            }
+            case Glfm.GLFMTouchPhaseEnded: {
+                touched = false;
+                dragDirection = DIR_NODEF;
+                break;
+            }
+        }
+        super.touchEvent(touchid, phase, x, y);
+    }
+
+
+    //初速度加成
+    float addOn = 1.0f;
+    //惯性任务
+
+    GCmd inertiaCmdY;
+    GCmd inertiaCmdX;
+
+    @Override
+    public boolean inertiaEvent(float x1, float y1, float x2, float y2, final long moveTime) {
+        GObject go = findSonByXY(x1, y1);
+        if (go != null) {
+            if (go.inertiaEvent(x1, y1, x2, y2, moveTime)) {
+                return true;
+            }
+        }
+        //
+        final double dx = x2 - x1;
+        final double dy = y2 - y1;
+
+        //---- 公共参数兜底,防止除零/NaN 进入下面的速度计算 ----
+        //getFps()在启动首秒、严重卡顿或后台返回时可能返回0,会导致 inertiaPeriod=Infinity -> speed=Infinity -> 减成 NaN 永久卡死
+        float rawFps = GCallBack.getInstance().getFps();
+        if (!(rawFps > 0) || rawFps < 1) {   // rawFps<=0 或 NaN
+            rawFps = GCallBack.FPS_DEFAULT;
+        }
+        final double inertiaPeriod = 1000d / rawFps;
+        //moveTime(cost)在触屏事件被批量/延迟投递时可能为0,这里兜底为1ms
+        final long mvTime = moveTime <= 0 ? 1 : moveTime;
+        final double perSlice = mvTime / inertiaPeriod;   // 一次切片代表的"帧数"
+
+        //System.out.println("inertia time: " + moveTime + " , count: " + maxMoveCount + " pos: x1,y1,x2,y2 = " + x1 + "," + y1 + "," + x2 + "," + y2);
+        if (Math.abs(dy) > Math.abs(dx) || !isSlideDirectionLimit()) {
+            if (getInnerH() <= getH()) {
+                return false;
+            }
+            if (!(perSlice > 0)) {   // perSlice<=0 或 NaN,放弃本次惯性
+                return false;
+            }
+            final double preSpeedY = dy * addOn / perSlice;
+            if (Double.isInfinite(preSpeedY) || Double.isNaN(preSpeedY)) {
+                return false;   // 拦截非法初速度,避免污染 scrolly/boundle
+            }
+            Runnable task = new Runnable() {
+                //总共做多少次操作
+                final float maxMoveCount = (float) (2000 / inertiaPeriod - 2);
+                //惯性速度
+                double speedY = preSpeedY;
+                //阻力
+                final double resistance = speedY / maxMoveCount;
+                //
+                int count = 0;
+
+                @Override
+                public void run() {
+                    try {
+                        //System.out.println(this + " inertia Y " + speedY + " , " + resistance + " , " + count);
+                        speedY -= resistance;//速度和阻力抵消为0时,退出滑动
+                        count++;
+                        if (count > maxMoveCount || Double.isNaN(speedY) || Double.isInfinite(speedY)) {
+                            inertiaCmdY = null;
+                        } else {
+                            float inh = getOutOfViewHeight();
+                            if (inh > 0) {
+                                float vec = (float) speedY / inh;
+                                movePercentY(vec);
+                                //System.out.println("dy:" + ((float) speedY / dh));
+                            }
+                        }
+                        GForm.flush();
+
+                        GForm.addCmd(inertiaCmdY);
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                    }
+                }
+            };
+
+            inertiaCmdY = new GCmd(task);
+            GForm.addCmd(inertiaCmdY);
+        }
+
+
+        if (Math.abs(dx) > Math.abs(dy) || !isSlideDirectionLimit()) {
+            if (getInnerW() <= getW()) {
+                return false;
+            }
+            if (!(perSlice > 0)) {
+                return false;
+            }
+            final double preSpeedX = dx * addOn / perSlice;
+            if (Double.isInfinite(preSpeedX) || Double.isNaN(preSpeedX)) {
+                return false;
+            }
+            Runnable task = new TimerTask() {
+                //总共做多少次操作
+                final float maxMoveCount = (float) (2000 / inertiaPeriod - 2);
+                //惯性速度
+                double speedX = preSpeedX;
+                //阴力
+                final double resistance = speedX / maxMoveCount;
+                //
+                float count = 0;
+
+                @Override
+                public void run() {
+                    try {
+                        //System.out.println(this + " inertia X " + speedX + " , " + resistance + " , " + count);
+                        speedX -= resistance;//速度和阴力抵消为0时,退出滑动
+                        count++;
+                        if (count > maxMoveCount || Double.isNaN(speedX) || Double.isInfinite(speedX)) {
+                            inertiaCmdX = null;
+                        } else {
+                            float inw = getOutOfViewWidth();   //修正:原误写为 getOutOfViewHeight()
+                            if (inw > 0) {
+                                float vec = (float) speedX / inw;
+                                movePercentX(vec);
+                                //System.out.println("dx:" + ((float) speedX / dw));
+                            }
+                        }
+                        GForm.flush();
+
+                        GForm.addCmd(inertiaCmdX);
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                    }
+                }
+            };
+
+            inertiaCmdX = new GCmd(task);
+            GForm.addCmd(inertiaCmdX);
+        }
+        return true;
+    }
+
+    @Override
+    public boolean scrollEvent(float dx, float dy, float x, float y) {
+        boolean b = super.scrollEvent(dx, dy, x, y);
+        if (b) return b;
+
+        return dragEvent(Glfw.GLFW_MOUSE_BUTTON_1, dx, dy, x, y);
+    }
+
+    @Override
+    public void setFlyable(boolean flyable) {
+        if (flyable) SysLog.warn(this.getClass() + " " + getName() + ", can't dragfly, setting ignored ");
+    }
+
+    @Override
+    public void mouseButtonEvent(int button, boolean pressed, int x, int y) {
+        super.mouseButtonEvent(button, pressed, x, y);
+        if (!pressed) {
+            dragDirection = DIR_NODEF;
+        }
+    }
+
+    @Override
+    public boolean dragEvent(int button, float dx, float dy, float x, float y) {
+        GObject found = findSonByXY(x, y);
+        if (found instanceof GMenu) {
+            return found.dragEvent(button, dx, dy, x, y);
+        }
+
+        if (current == null) {
+            setCurrent(found);
+        }
+        if (current != null && current.dragEvent(button, dx, dy, x, y)) {
+            return true;
+        }
+        //reSize();
+        float dw = getOutOfViewWidth();
+        float dh = getOutOfViewHeight();
+        if (dw == 0 && dh == 0) {
+            return false;
+        }
+        if (dragDirection == DIR_NODEF) {
+            if (Math.abs(dx) > Math.abs(dy) && dw > 0.f) {
+                dragDirection = DIR_X;
+            } else {
+                dragDirection = DIR_Y;
+            }
+        }
+        float odx = (dw == 0) ? 0.f : (float) dx / dw;
+        float ody = (dh == 0) ? 0.f : (float) dy / dh;
+        if (isSlideDirectionLimit()) {
+            if (dragDirection == DIR_X) {
+                return movePercentX(odx);
+            } else if (dragDirection == DIR_Y) {
+                return movePercentY(ody);
+            } else {
+                return false;
+            }
+        } else {
+            boolean rx = movePercentX(odx);
+            boolean ry = movePercentY(ody);
+            return rx || ry;
+        }
+    }
+
+    boolean movePercentY(float dy) {
+        if (getOutOfViewHeight() <= 0) {
+            return false;
+        }
+        //防御 NaN/Infinity:一旦 scrolly 被污染(历史 bug 或外部写入),
+        //这里的所有比较都会失效,导致永久卡死。此处复位为 0,让视口回到顶部。
+        if (Float.isNaN(scrolly) || Float.isInfinite(scrolly)) {
+            scrolly = 0;
+        }
+        if (Float.isNaN(dy) || Float.isInfinite(dy)) {
+            return false;
+        }
+        float tmpy = scrolly;
+        tmpy -= dy;
+        if (tmpy < 0) {
+            tmpy = 0;
+        }
+        if (tmpy > 1) {
+            tmpy = 1;
+        }
+        boundle[TOP] = viewBoundle[TOP] + (-minY) - tmpy * getOutOfViewHeight();
+        if (scrolly != tmpy) {
+            scrolly = tmpy;
+            return true;
+        }
+        return false;
+    }
+
+    boolean movePercentX(float dx) {
+        if (getOutOfViewWidth() <= 0) {
+            return false;
+        }
+        if (Float.isNaN(scrollx) || Float.isInfinite(scrollx)) {
+            scrollx = 0;
+        }
+        if (Float.isNaN(dx) || Float.isInfinite(dx)) {
+            return false;
+        }
+        float tmpx = scrollx;
+        tmpx -= dx;
+        if (tmpx < 0) {
+            tmpx = 0;
+        }
+        if (tmpx > 1) {
+            tmpx = 1;
+        }
+        boundle[LEFT] = viewBoundle[LEFT] + (-minX) - tmpx * getOutOfViewWidth();
+        if (scrollx != tmpx) {
+            scrollx = tmpx;
+            return true;
+        }
+        return false;
+    }
+
+    public void setScrollX(float sx) {
+        //NaN/Infinity 会让下面的比较失效从而漏进来,这里显式拦截
+        if (Float.isNaN(sx) || Float.isInfinite(sx) || sx < 0 || sx > 1 || boundle[WIDTH] <= viewBoundle[WIDTH]) {
+            return;
+        }
+        scrollx = sx;
+        boundle[LEFT] = viewBoundle[LEFT] + (-minX) - scrollx * getOutOfViewWidth();
+    }
+
+    public void setScrollY(float sy) {
+        if (Float.isNaN(sy) || Float.isInfinite(sy) || sy < 0 || sy > 1 || boundle[HEIGHT] <= viewBoundle[HEIGHT]) {
+            return;
+        }
+        scrolly = sy;
+        boundle[TOP] = viewBoundle[TOP] + (-minY) - scrolly * getOutOfViewHeight();
+    }
+
+    public float getScrollY() {
+        return scrolly;
+    }
+
+    public float getScrollX() {
+        return scrollx;
+    }
+
+    float getOutOfViewHeight() {
+        return boundle[HEIGHT] - viewBoundle[HEIGHT];
+    }
+
+    float getOutOfViewWidth() {
+        return boundle[WIDTH] - viewBoundle[WIDTH];
+    }
+
+    public boolean isSlideDirectionLimit() {
+        return slideDirectionLimit;
+    }
+
+    public void setSlideDirectionLimit(boolean slideDirectionLimit) {
+        this.slideDirectionLimit = slideDirectionLimit;
+    }
+
+}

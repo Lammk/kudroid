@@ -1,0 +1,209 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+
+    <!--    https://s01.oss.sonatype.org/-->
+    <!--    mvn clean install deploy -P release-->
+
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>io.github.digitalgust</groupId>
+    <artifactId>glfw_gui</artifactId>
+    <name>${project.groupId}:${project.artifactId}</name>
+    <version>2.1.3</version>
+    <description>miniJVM desktop platform gui library</description>
+    <url>https://github.com/digitalgust/miniJVM</url>
+
+
+    <licenses>
+        <license>
+            <name>MIT</name>
+            <url>https://spdx.org/licenses/MIT.html</url>
+        </license>
+    </licenses>
+    <scm>
+        <connection>https://github.com/digitalgust/miniJVM.git</connection>
+        <url>https://github.com/digitalgust/miniJVM</url>
+    </scm>
+    <developers>
+        <developer>
+            <name>digitalgust</name>
+            <email>digitalgust@163.com</email>
+            <roles>
+                <role>Developer</role>
+            </roles>
+            <timezone>+8</timezone>
+        </developer>
+    </developers>
+
+
+    <profiles>
+        <profile>
+            <id>release</id>
+            <build>
+                <plugins>
+                    <!-- Source -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-source-plugin</artifactId>
+                        <version>2.2.1</version>
+                        <executions>
+                            <execution>
+                                <phase>package</phase>
+                                <goals>
+                                    <goal>jar-no-fork</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <!-- Javadoc -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-javadoc-plugin</artifactId>
+                        <version>2.9.1</version>
+                        <configuration>
+                            <show>private</show>
+                            <nohelp>true</nohelp>
+                            <charset>UTF-8</charset>
+                            <encoding>UTF-8</encoding>
+                            <docencoding>UTF-8</docencoding>
+                            <additionalparam>-Xdoclint:none</additionalparam>
+                            <!-- TODO 临时解决不规范的javadoc生成报错,后面要规范化后把这行去掉 -->
+                        </configuration>
+                        <executions>
+                            <execution>
+                                <phase>package</phase>
+                                <goals>
+                                    <goal>jar</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <!-- GPG -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-gpg-plugin</artifactId>
+                        <version>1.6</version>
+                        <executions>
+                            <execution>
+                                <phase>verify</phase>
+                                <goals>
+                                    <goal>sign</goal>
+                                </goals>
+                            </execution>
+                        </executions>
+                    </plugin>
+                    <!--Compiler -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-compiler-plugin</artifactId>
+                        <version>3.0</version>
+                        <configuration>
+                            <source>1.8</source>
+                            <target>1.8</target>
+                            <fork>true</fork>
+                            <verbose>true</verbose>
+                            <encoding>UTF-8</encoding>
+                        </configuration>
+                    </plugin>
+                    <!--Release -->
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-release-plugin</artifactId>
+                        <version>2.5.3</version>
+                    </plugin>
+                    <plugin>
+                        <groupId>org.sonatype.central</groupId>
+                        <artifactId>central-publishing-maven-plugin</artifactId>
+                        <version>0.8.0</version>
+                        <extensions>true</extensions>
+                        <configuration>
+                            <publishingServerId>central</publishingServerId>
+                            <waitMaxTime>7200</waitMaxTime>
+                            <centralBaseUrl>https://central.sonatype.com</centralBaseUrl>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+
+            <distributionManagement>
+                <snapshotRepository>
+                    <id>central</id>
+                    <url>https://central.sonatype.com/</url>
+                </snapshotRepository>
+                <!--        <repository>-->
+                <!--            <id>ossrh</id>-->
+                <!--            <url>https://s01.oss.sonatype.org/service/local/staging/deploy/maven2/</url>-->
+                <!--        </repository>-->
+            </distributionManagement>
+
+        </profile>
+    </profiles>
+
+
+
+    <packaging>jar</packaging>
+    <properties>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <maven.compiler.source>1.8</maven.compiler.source>
+        <maven.compiler.target>1.8</maven.compiler.target>
+    </properties>
+    
+
+    <dependencies>
+<!--        <dependency>-->
+<!--            <groupId>org.minijvm</groupId>  -->
+<!--            <artifactId>minijvm_rt</artifactId>   -->
+<!--            <version>1.0</version>-->
+<!--            <scope>system</scope> -->
+<!--            <systemPath>${basedir}/../../../binary/lib/minijvm_rt.jar</systemPath> -->
+<!--        </dependency> -->
+        <dependency>
+            <groupId>io.github.digitalgust</groupId>
+            <artifactId>minijvm_rt</artifactId>
+            <version>2.1.3</version>
+        </dependency>
+    </dependencies>
+    
+    <build>
+        <finalName>${project.artifactId}</finalName>
+        <plugins>
+            <plugin>   
+                <artifactId>maven-antrun-plugin</artifactId>
+                <version>1.8</version>
+                <executions>       
+                    <execution>         
+                        <phase>package</phase>        
+                        <goals>            
+                            <goal>run</goal>        
+                        </goals>             
+                        <configuration>       
+                            <tasks>
+                                <!--  copy to binary lib dir -->
+                                <mkdir dir="../../../binary/libex"/>        
+                                <copy todir="../../../binary/libex/" overwrite="true" > 
+                                    <fileset dir="${project.build.directory}" erroronmissingdir="false">
+                                        <include name="${project.artifactId}.jar"/>
+                                    </fileset>
+                                </copy>        
+                            </tasks>        
+                        </configuration>        
+                    </execution>    
+                </executions>  
+            </plugin>   
+        </plugins>
+        
+            
+        <resources>
+            <resource>
+                <directory>src/main/resource</directory>
+                <includes>
+                    <include>**/*.*</include>
+                </includes>
+                <filtering>false</filtering>
+            </resource>
+        </resources>
+
+
+        
+        
+    </build>
+</project>

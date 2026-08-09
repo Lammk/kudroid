@@ -27,6 +27,9 @@ add_library(kudroid_core STATIC
     src/kudroid_bridge.cpp
 )
 
+add_subdirectory(third_party/jvm/miniJVM/minijvm/c EXCLUDE_FROM_ALL)
+target_link_libraries(kudroid_core PRIVATE mini_jvm_lib)
+
 find_package(ZLIB REQUIRED)
 target_link_libraries(kudroid_core PRIVATE ZLIB::ZLIB)
 
@@ -41,6 +44,7 @@ endif()
 target_include_directories(kudroid_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
+    third_party/jvm/miniJVM/minijvm/c/jvm
 )
 
 target_compile_options(kudroid_core PRIVATE

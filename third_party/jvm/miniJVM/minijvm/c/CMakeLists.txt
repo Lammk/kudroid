@@ -1,0 +1,103 @@
+cmake_minimum_required(VERSION 3.6)
+project(mini_jvm C)
+
+enable_language(C)
+
+set(CMAKE_C_STANDARD 99)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+#option(MINI_JVM_BUILD_LIB "Build the mini_jvm library" OFF)
+
+IF (MSVC)
+    add_compile_options("/utf-8")
+ENDIF ()
+
+if (CMAKE_BUILD_TYPE MATCHES "Debug")
+    ADD_DEFINITIONS(-D_DEBUG -D__JVM_DEBUG__)
+    message("this is a debug compile")
+endif ()
+
+
+include_directories(jvm/ utils/ utils/sljit/ utils/https/ utils/https/mbedtls/include utils/mimalloc/include)
+
+aux_source_directory(./jvm SOURCE_JVM)
+aux_source_directory(./utils SOURCE_UTILS)
+aux_source_directory(./utils/https SOURCE_HTTPS)
+aux_source_directory(./utils/https/mbedtls/library SOURCE_TLS)
+set(SOURCE_SLJIT ./utils/sljit/sljitLir.c)
+set(SOURCE_MIMALLOC ./utils/mimalloc/src/static.c)
+
+SET(SOURCE_FILES ${SOURCE_JVM} ${SOURCE_UTILS} ${SOURCE_HTTPS} ${SOURCE_TLS} ${SOURCE_SLJIT} ${SOURCE_MIMALLOC})
+
+MESSAGE(STATUS "platform: ${CMAKE_SYSTEM_NAME}")
+
+
+add_library(mini_jvm_lib STATIC ${SOURCE_FILES})
+
+IF (MSVC)
+ELSE ()
+    TARGET_LINK_LIBRARIES(mini_jvm_lib pthread m)
+ENDIF ()
+
+
+IF (APPLE)
+ELSEIF (UNIX)
+    TARGET_LINK_LIBRARIES(mini_jvm_lib dl)
+ELSEIF (MINGW)
+    TARGET_LINK_LIBRARIES(mini_jvm_lib ws2_32)
+    IF (CMAKE_SIZEOF_VOID_P EQUAL 4)
+    elseif (CMAKE_SIZEOF_VOID_P EQUAL 8)
+    endif ()
+ENDIF ()
+
+
+# add_executable(mini_jvm ${SOURCE_FILES} main.c)
+# 
+# IF (MSVC)
+# ELSE ()
+#     TARGET_LINK_LIBRARIES(mini_jvm pthread m)
+# ENDIF ()
+
+#Set link library.
+IF (APPLE)
+    if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
+        set(MAC_BIN_DIR mac_arm64)
+    elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|i[3-6]86)$")
+        set(MAC_BIN_DIR mac_x64)
+    else ()
+        message(WARNING "Unknown macOS processor '${CMAKE_SYSTEM_PROCESSOR}', defaulting to mac_x64")
+        set(MAC_BIN_DIR mac_x64)
+    endif ()
+    SET(EXECUTABLE_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/../../binary/${MAC_BIN_DIR})
+    SET(LIBRARY_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/../../binary/${MAC_BIN_DIR})
+ELSEIF (UNIX)
+#    TARGET_LINK_LIBRARIES(mini_jvm dl)
+    SET(EXECUTABLE_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/../../binary/centos_x64)
+ELSEIF (MINGW)
+#    TARGET_LINK_LIBRARIES(mini_jvm ws2_32)
+    IF (CMAKE_SIZEOF_VOID_P EQUAL 4)
+        SET(EXECUTABLE_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/../../binary/win32)
+    elseif (CMAKE_SIZEOF_VOID_P EQUAL 8)
+        SET(EXECUTABLE_OUTPUT_PATH ${PROJECT_SOURCE_DIR}/../../binary/win_x64)
+    endif ()
+ENDIF ()
+
+SET(EXECUTABLE_TMP_PATH ${PROJECT_SOURCE_DIR}/../../binary/tmp)
+#add_custom_command(TARGET mini_jvm COMMAND ${CMAKE_COMMAND} -E make_directory ${EXECUTABLE_TMP_PATH})
+
+
+function(copyfile pathsrc pathtgt)
+    if (EXISTS "${pathsrc}")
+        #message("copy src:${pathsrc}   to :${pathtgt}")
+        configure_file(${pathsrc} ${pathtgt} COPYONLY)
+    endif ()
+endfunction()
+
+#copyfile("${PROJECT_SOURCE_DIR}/../java/target/minijvm_rt.jar" "${PROJECT_SOURCE_DIR}/../../binary/lib/minijvm_rt.jar")
+#copyfile("${PROJECT_SOURCE_DIR}/../java/target/minijvm_rt.jar" "${PROJECT_SOURCE_DIR}/../../mobile/assets/resfiles/minijvm_rt.jar")
+#copyfile("${PROJECT_SOURCE_DIR}/../../extlib/jni_gui/java/dist/glfw_gui.jar" "${PROJECT_SOURCE_DIR}/../../binary/libex/glfw_gui.jar")
+#copyfile("${PROJECT_SOURCE_DIR}/../../extlib/luaj/dist/luaj.jar" "${PROJECT_SOURCE_DIR}/../../binary/libex/luaj.jar")
+#copyfile("${PROJECT_SOURCE_DIR}/../../test/minijvm_test/target/minijvm_test.jar" "${PROJECT_SOURCE_DIR}/../../binary/libex/minijvm_test.jar")
+
+
+

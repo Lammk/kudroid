@@ -224,6 +224,9 @@ struct DebugView: View {
                             }
                             .buttonStyle(.bordered)
                             
+                            Button("Test JNI JVM") { fullLog = runJniJvmTest() }
+                                .buttonStyle(.bordered)
+                            
                             Button("Bionic Test") { fullLog = runBionicExecutionTest() }
                                 .buttonStyle(.bordered)
                             Button("Multi-ELF") { fullLog = runMultiElfTest() }
@@ -255,6 +258,13 @@ func setupLogDir() {
         let apkInbox = docs.appendingPathComponent("put_apk_here", isDirectory: true)
         try? FileManager.default.createDirectory(at: apkInbox, withIntermediateDirectories: true)
     }
+}
+
+func runJniJvmTest() -> String {
+    guard let cString = kudroid_test_jvm() else { return "Error: null result" }
+    let log = String(cString: cString)
+    free(UnsafeMutablePointer(mutating: cString))
+    return log
 }
 
 func runVFSSelfTest() -> String {

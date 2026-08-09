@@ -1,0 +1,10 @@
+.gradle/
+.idea/
+.DS_Store
+build/
+captures/
+.externalNativeBuild
+app/.cxx
+app/build
+app/target
+app/debug

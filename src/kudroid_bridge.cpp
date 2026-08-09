@@ -300,12 +300,33 @@ static void* mock_jni_dummy(...) {
     return nullptr;
 }
 
+extern "C" {
+    // Forward declarations for miniJVM APIs
+    void jvm_init_mem_alloc(void);
+    void jvm_destroy_mem_alloc(void);
+    struct _MiniJVM;
+    typedef struct _MiniJVM MiniJVM;
+    MiniJVM* jvm_create(void);
+    int jvm_init(MiniJVM* jvm, const char* bootcp, const char* cp);
+    void jvm_destroy(MiniJVM* jvm);
+}
+
+// Global miniJVM instance
+static MiniJVM* g_kudroid_jvm = nullptr;
+
 static jint mock_GetEnv(JavaVM_* vm, void** env, jint version) {
     (void)vm;
     (void)version;
     static JNINativeInterface mock_jni_interface;
     static bool initialized = false;
     if (!initialized) {
+        // Initialize miniJVM
+        jvm_init_mem_alloc();
+        g_kudroid_jvm = jvm_create();
+        if (g_kudroid_jvm) {
+            jvm_init(g_kudroid_jvm, "", "");
+        }
+        
         for (int i = 0; i < 300; ++i) {
             mock_jni_interface.dummy[i] = reinterpret_cast<void*>(mock_jni_dummy);
         }
@@ -373,6 +394,43 @@ struct ANativeActivity {
     void* assetManager;
     const char* obbPath;
 };
+
+
+
+extern "C" char* kudroid_test_jvm(void) {
+    std::string log;
+    appendTestHeader(log, "JVM Integration Test", "N/A");
+    installCrashHandlers();
+    
+    log += "[kudroid_core] Phase: init JVM memory allocator\n";
+    jvm_init_mem_alloc();
+    
+    log += "[kudroid_core] Phase: create JVM instance\n";
+    MiniJVM *jvm = jvm_create();
+    
+    if (jvm != NULL) {
+        log += "[kudroid_core] JVM instance created successfully.\n";
+        
+        // Just dummy paths for now
+        int ret = jvm_init(jvm, "", "");
+        if (ret) {
+            log += "[kudroid_core] JVM init returned an error (expected if rt.jar is missing).\n";
+        } else {
+            log += "[kudroid_core] JVM init SUCCESS!\n";
+        }
+        
+        log += "[kudroid_core] Phase: destroy JVM\n";
+        jvm_destroy(jvm);
+    } else {
+        log += "[kudroid_core] ERROR: JVM creation FAILED!\n";
+    }
+    
+    jvm_destroy_mem_alloc();
+    
+    log += "[kudroid_core] JVM test completed.\n";
+    
+    return strdup(log.c_str());
+}
 
 extern "C" const char* kudroid_run_apk(const char* appName) {
     std::string log;
