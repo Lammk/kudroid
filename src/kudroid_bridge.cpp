@@ -2,6 +2,7 @@
 #include "kudroid/BionicShim.h"
 #include "kudroid/VFSPathRemapper.h"
 #include "kudroid/APKExtractor.h"
+#include "kudroid/library_manager.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -192,6 +193,66 @@ extern "C" const char* kudroid_jit_status(void) {
         : "JIT: Disabled";
     char* result = (char*)malloc(strlen(text) + 1);
     if (result) memcpy(result, text, strlen(text) + 1);
+    return result;
+}
+
+extern "C" const char* kudroid_run_apk(const char* appName) {
+    std::string log;
+    appendTestHeader(log, "Run APK Native Libraries", appName);
+    kudroid::bionic_shim_reset_trace();
+    log += "[kudroid_core] Phase: init LibraryManager\n";
+
+    if (!appName || !*appName) {
+        log += "[kudroid_core] ERROR: null or empty app name\n";
+    } else {
+        auto& remapper = kudroid::VFSPathRemapper::getInstance();
+        const std::filesystem::path libDir = std::filesystem::path(remapper.androidRoot()) /
+                                             "data/app" / appName / "lib/arm64-v8a";
+        
+        log += "[kudroid_core] Scanning library directory: " + libDir.string() + "\n";
+        
+        if (!std::filesystem::exists(libDir)) {
+            log += "[kudroid_core] ERROR: Library directory does not exist. Did you install the APK?\n";
+        } else {
+            kudroid::LibraryManager manager;
+            int loadedCount = 0;
+            
+            // Collect all .so files to load
+            std::vector<std::string> soFiles;
+            for (const auto& entry : std::filesystem::directory_iterator(libDir)) {
+                if (entry.path().extension() == ".so") {
+                    soFiles.push_back(entry.path().string());
+                }
+            }
+            
+            if (soFiles.empty()) {
+                log += "[kudroid_core] WARNING: No .so files found in the APK library directory.\n";
+            } else {
+                for (const auto& soPath : soFiles) {
+                    log += "[kudroid_core] Attempting to load: " + soPath + "\n";
+                    if (!manager.loadRecursive(soPath.c_str())) {
+                        log += "[kudroid_core] LOAD FAILED for " + soPath + ": " + manager.lastError() + "\n";
+                    } else {
+                        log += "[kudroid_core] LOAD SUCCESS for " + soPath + "\n";
+                        loadedCount++;
+                    }
+                }
+                
+                log += "[kudroid_core] Total loaded libraries (including dependencies): " + std::to_string(manager.libraries().size()) + "\n";
+                log += "[kudroid_core] Native libraries loaded into memory successfully!\n";
+            }
+        }
+    }
+
+    const char* trace = kudroid::bionic_shim_trace();
+    if (trace && *trace) {
+        log += "[kudroid_core] Bionic/global binding trace:\n";
+        log += trace;
+    }
+
+    writeLogFile("kudroid_run_apk.txt", log);
+    char* result = static_cast<char*>(malloc(log.size() + 1));
+    if (result) memcpy(result, log.c_str(), log.size() + 1);
     return result;
 }
 

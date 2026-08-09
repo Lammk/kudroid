@@ -54,6 +54,10 @@ const char* kudroid_vfs_extended_test_log(void);
 /// Returns a malloc'd diagnostic log; caller must free() it.
 const char* kudroid_install_apk(const char* apkPath);
 
+/// Scan the installed APK's library directory and load all its native libraries (.so).
+/// Returns a malloc'd diagnostic log; caller must free() it.
+const char* kudroid_run_apk(const char* appName);
+
 #ifdef __cplusplus
 }
 #endif
