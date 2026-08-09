@@ -299,6 +299,15 @@ jobs:
             -framework IOSurface \
             -o KuDroidShell.app/KuDroidShell
 
+          # Embed ANGLE dynamic frameworks into the app bundle so dyld finds them at runtime
+          mkdir -p KuDroidShell.app/Frameworks
+          if [ -d third_party/ANGLE/lib/ios-arm64/libEGL.framework ]; then
+            cp -R third_party/ANGLE/lib/ios-arm64/libEGL.framework KuDroidShell.app/Frameworks/
+          fi
+          if [ -d third_party/ANGLE/lib/ios-arm64/libGLESv2.framework ]; then
+            cp -R third_party/ANGLE/lib/ios-arm64/libGLESv2.framework KuDroidShell.app/Frameworks/
+          fi
+
           cat > KuDroidShell.app/Info.plist << 'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
