@@ -4,6 +4,10 @@
 #include "kudroid/APKExtractor.h"
 #include <cstdio>
 #include <cstdlib>
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <iomanip>
 #include <cstring>
 #include <csignal>
 #include <ctime>
