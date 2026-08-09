@@ -23,6 +23,8 @@ extern "C" void __gxx_personality_v0();
 // For Bionic pthread emulation
 #include <cstdarg>
 #ifdef __APPLE__
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <sys/event.h>
 #include <dispatch/dispatch.h>
 #else
@@ -538,7 +540,9 @@ extern "C" int bionic_ashmem_create_region(const char *name, size_t size) {
     int fd = shm_open(shm_name, O_RDWR | O_CREAT | O_EXCL, 0600);
     if (fd >= 0) {
         shm_unlink(shm_name);
-        ::ftruncate(fd, size);
+        if (::ftruncate(fd, size) < 0) {
+            // Ignored, just for suppressing warning
+        }
         return fd;
     }
     return -1;
@@ -608,10 +612,6 @@ extern "C" int bionic_futex(uint32_t *uaddr, int futex_op, uint32_t val, const s
 }
 
 #ifdef __APPLE__
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <map>
-#include <mutex>
 
 static int create_loopback_udp() {
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
