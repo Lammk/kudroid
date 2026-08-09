@@ -4,6 +4,7 @@
 #include <cstring>
 #include <fstream>
 #include <sys/mman.h>
+#include <unistd.h>
 #include <utility>
 
 #if defined(__APPLE__)
@@ -216,10 +217,19 @@ bool ElfLoader::map() {
         uint64_t end = seg.vaddr + seg.memsz;
         if (end > maxVaddr) maxVaddr = end;
     }
+    const long pageSizeValue = sysconf(_SC_PAGESIZE);
+    if (pageSizeValue <= 0) {
+        lastError_ = "Failed to determine page size";
+        return false;
+    }
+    const uint64_t pageSize = static_cast<uint64_t>(pageSizeValue);
     uint64_t totalSize = maxVaddr - minVaddr;
+    totalSize = (totalSize + pageSize - 1) & ~(pageSize - 1);
 
-    // Allocate executable memory via mmap
-    int prot = PROT_READ | PROT_WRITE | PROT_EXEC;
+    // Map writable first, then apply final ELF permissions after copying.
+    // On iOS an RWX mmap may succeed but still fault with SIGBUS on instruction
+    // fetch; the RW -> RX transition is the supported debugger-JIT path.
+    int prot = PROT_READ | PROT_WRITE;
     int flags = MAP_PRIVATE | MAP_ANONYMOUS;
     [[maybe_unused]] bool usedMapJit = false;
 #if defined(__APPLE__) && TARGET_OS_OSX
@@ -269,6 +279,27 @@ bool ElfLoader::map() {
 #else
     __builtin___clear_cache(mapStart, mapStart + totalSize);
 #endif
+
+    for (const auto& seg : segments_) {
+        const uint64_t segmentStart = seg.vaddr - minVaddr;
+        const uint64_t protectedStart = segmentStart & ~(pageSize - 1);
+        const uint64_t segmentEnd = segmentStart + seg.memsz;
+        const uint64_t protectedEnd = (segmentEnd + pageSize - 1) & ~(pageSize - 1);
+
+        int segmentProt = 0;
+        if (seg.flags & 4) segmentProt |= PROT_READ;
+        if (seg.flags & 2) segmentProt |= PROT_WRITE;
+        if (seg.flags & 1) segmentProt |= PROT_EXEC;
+
+        if (mprotect(mapStart + protectedStart,
+                     protectedEnd - protectedStart, segmentProt) != 0) {
+            lastError_ = "mprotect failed (no JIT?): " +
+                         std::string(strerror(errno));
+            munmap(mapStart, totalSize);
+            base_ = nullptr;
+            return false;
+        }
+    }
 
     // Adjust base_ to point to the logical address 0
     // (so base_ + st_value = actual address)
