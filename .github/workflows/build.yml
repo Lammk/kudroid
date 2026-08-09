@@ -222,7 +222,7 @@ jobs:
         run: |
           file tests/libkudroid_provider_arm64.so tests/libkudroid_consumer_arm64.so
           readelf -d tests/libkudroid_consumer_arm64.so | grep NEEDED
-          readelf --dyn-syms tests/libkudroid_consumer_arm64.so | grep kudroid_dependency_value
+          readelf --wide --dyn-syms tests/libkudroid_consumer_arm64.so | grep kudroid_dependency_value
 
       - name: Upload Multi-ELF artifact
         uses: actions/upload-artifact@v4
