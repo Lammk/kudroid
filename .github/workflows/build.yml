@@ -51,6 +51,8 @@ jobs:
         with:
           path: third_party/ANGLE
           key: angle-ios-arm64-built-${{ runner.os }}-${{ hashFiles('scripts/fetch-build-angle-ios.sh') }}
+          restore-keys: |
+            angle-ios-arm64-built-${{ runner.os }}-
 
       # Also cache the massive source checkout + depot_tools to speed up rebuilds.
       - name: Cache ANGLE source and depot_tools
@@ -61,6 +63,8 @@ jobs:
             third_party/angle-src
             third_party/build-tools
           key: angle-ios-src-${{ runner.os }}-${{ hashFiles('scripts/fetch-build-angle-ios.sh') }}
+          restore-keys: |
+            angle-ios-src-${{ runner.os }}-
 
       - name: Build ANGLE (Vulkan backend, iOS ARM64)
         if: steps.angle-cache.outputs.cache-hit != 'true'
