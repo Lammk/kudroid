@@ -427,6 +427,9 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                 if (jni_onload) {
                     log += "[kudroid_core] Found JNI_OnLoad, invoking...\n";
                     mirrorCrash(log);
+                    
+                    bionic_init_main_thread_tls();
+                    
                     jint version = jni_onload(&mock_javavm, nullptr);
                     log += "[kudroid_core] JNI_OnLoad returned version: " + std::to_string(version) + "\n";
                     mirrorCrash(log);

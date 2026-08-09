@@ -1,5 +1,16 @@
 #pragma once
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+// Main thread TLS initialization for Android compatibility
+void bionic_init_main_thread_tls(void);
+
+#ifdef __cplusplus
+}
+#endif
+
 #include <cstddef>
 #include <cstdint>
 

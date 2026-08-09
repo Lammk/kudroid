@@ -727,33 +727,45 @@ extern "C" int bionic_epoll_ctl(int epfd, int op, int fd, void *event_ptr) {
     if (epfd < 0 || fd < 0) return -1;
     struct android_epoll_event* event = static_cast<struct android_epoll_event*>(event_ptr);
     
+    if (op == EPOLL_CTL_DEL) {
+        struct kevent changes[2];
+        EV_SET(&changes[0], fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
+        EV_SET(&changes[1], fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
+        // Execute individually to safely ignore ENOENT (filter not found)
+        kevent(epfd, &changes[0], 1, NULL, 0, NULL);
+        kevent(epfd, &changes[1], 1, NULL, 0, NULL);
+        return 0;
+    } 
+    
+    uint16_t base_flags = EV_ADD;
+    uint32_t ep_events = event->events;
+    void* udata = reinterpret_cast<void*>(event->data);
+    
+    // Android defines: EPOLLET = (1U << 31), EPOLLONESHOT = (1U << 30)
+    if (ep_events & (1U << 31)) base_flags |= EV_CLEAR;
+    if (ep_events & (1U << 30)) base_flags |= EV_ONESHOT;
+
+    if (op == EPOLL_CTL_MOD) {
+        // Blindly delete both first
+        struct kevent del_changes[2];
+        EV_SET(&del_changes[0], fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
+        EV_SET(&del_changes[1], fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
+        kevent(epfd, &del_changes[0], 1, NULL, 0, NULL);
+        kevent(epfd, &del_changes[1], 1, NULL, 0, NULL);
+    }
+    
     struct kevent changes[2];
     int num_changes = 0;
     
-    if (op == EPOLL_CTL_DEL) {
-        EV_SET(&changes[0], fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
-        EV_SET(&changes[1], fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
-        num_changes = 2;
-    } else {
-        uint16_t flags = (op == EPOLL_CTL_ADD) ? EV_ADD : (EV_ADD | EV_RECEIPT);
-        uint32_t ep_events = event->events;
-        void* udata = reinterpret_cast<void*>(event->data);
-        
-        if (ep_events & EPOLLIN) {
-            EV_SET(&changes[num_changes++], fd, EVFILT_READ, flags, 0, 0, udata);
-        } else if (op == EPOLL_CTL_MOD) {
-            EV_SET(&changes[num_changes++], fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
-        }
-        
-        if (ep_events & EPOLLOUT) {
-            EV_SET(&changes[num_changes++], fd, EVFILT_WRITE, flags, 0, 0, udata);
-        } else if (op == EPOLL_CTL_MOD) {
-            EV_SET(&changes[num_changes++], fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
-        }
+    if (ep_events & EPOLLIN) {
+        EV_SET(&changes[num_changes++], fd, EVFILT_READ, base_flags, 0, 0, udata);
+    }
+    if (ep_events & EPOLLOUT) {
+        EV_SET(&changes[num_changes++], fd, EVFILT_WRITE, base_flags, 0, 0, udata);
     }
     
     if (num_changes > 0) {
-        kevent(epfd, changes, num_changes, NULL, 0, NULL);
+        if (kevent(epfd, changes, num_changes, NULL, 0, NULL) == -1) return -1;
     }
     return 0;
 #else
@@ -766,7 +778,8 @@ extern "C" int bionic_epoll_wait(int epfd, void *events_ptr, int maxevents, int 
     if (epfd < 0 || maxevents <= 0) return -1;
     struct android_epoll_event* events = static_cast<struct android_epoll_event*>(events_ptr);
     
-    struct kevent* evlist = (struct kevent*)std::malloc(sizeof(struct kevent) * maxevents);
+    // We fetch maxevents * 2 because read and write events for the same FD are separated in kqueue
+    struct kevent* evlist = (struct kevent*)std::malloc(sizeof(struct kevent) * maxevents * 2);
     if (!evlist) return -1;
     
     struct timespec ts;
@@ -777,19 +790,30 @@ extern "C" int bionic_epoll_wait(int epfd, void *events_ptr, int maxevents, int 
         ts_ptr = &ts;
     }
     
-    int n = kevent(epfd, NULL, 0, evlist, maxevents, ts_ptr);
+    int n = kevent(epfd, NULL, 0, evlist, maxevents * 2, ts_ptr);
+    int unique_events = 0;
+    
     if (n > 0) {
+        std::unordered_map<uint64_t, uint32_t> coalesced;
         for (int i = 0; i < n; i++) {
-            events[i].events = 0;
-            if (evlist[i].filter == EVFILT_READ) events[i].events |= EPOLLIN;
-            else if (evlist[i].filter == EVFILT_WRITE) events[i].events |= EPOLLOUT;
-            if (evlist[i].flags & EV_ERROR) events[i].events |= EPOLLERR;
-            if (evlist[i].flags & EV_EOF) events[i].events |= EPOLLHUP;
-            events[i].data = reinterpret_cast<uint64_t>(evlist[i].udata);
+            uint64_t udata = reinterpret_cast<uint64_t>(evlist[i].udata);
+            uint32_t flags = 0;
+            if (evlist[i].filter == EVFILT_READ) flags |= EPOLLIN;
+            else if (evlist[i].filter == EVFILT_WRITE) flags |= EPOLLOUT;
+            if (evlist[i].flags & EV_ERROR) flags |= EPOLLERR;
+            if (evlist[i].flags & EV_EOF) flags |= EPOLLHUP;
+            coalesced[udata] |= flags;
+        }
+        
+        for (auto const& [udata, flags] : coalesced) {
+            if (unique_events >= maxevents) break;
+            events[unique_events].events = flags;
+            events[unique_events].data = udata;
+            unique_events++;
         }
     }
     std::free(evlist);
-    return n;
+    return n >= 0 ? unique_events : -1;
 #else
     return ::epoll_wait(epfd, reinterpret_cast<struct epoll_event*>(events_ptr), maxevents, timeout);
 #endif
@@ -901,6 +925,24 @@ struct BionicThreadArgs {
     void* arg;
 };
 
+static void* bionic_thread_wrapper(void* rawArgs);
+
+extern "C" void bionic_init_main_thread_tls(void) {
+    ::pthread_once(&tls_key_once, init_tls_key);
+    void* tls_base = std::aligned_alloc(16, 65536); 
+    std::memset(tls_base, 0, 65536);
+    
+    // Set a dummy stack guard cookie at Slot 5 (offset 40)
+    uint64_t* stack_guard_ptr = reinterpret_cast<uint64_t*>(reinterpret_cast<char*>(tls_base) + 32768 + 40);
+    *stack_guard_ptr = 0x1337BEEFCAFECAFE;
+    
+    ::pthread_setspecific(tls_key, tls_base);
+
+#if defined(__aarch64__)
+    __asm__ volatile("msr tpidr_el0, %0" : : "r"((char*)tls_base + 32768));
+#endif
+}
+
 static void* bionic_thread_wrapper(void* rawArgs) {
     BionicThreadArgs* args = static_cast<BionicThreadArgs*>(rawArgs);
     void* (*start_routine)(void*) = args->start_routine;
@@ -914,6 +956,10 @@ static void* bionic_thread_wrapper(void* rawArgs) {
     void* tls_base = std::aligned_alloc(16, 65536); 
     std::memset(tls_base, 0, 65536);
     ::pthread_setspecific(tls_key, tls_base);
+
+    // Set a dummy stack guard cookie at Slot 5 (offset 40)
+    uint64_t* stack_guard_ptr = reinterpret_cast<uint64_t*>(reinterpret_cast<char*>(tls_base) + 32768 + 40);
+    *stack_guard_ptr = 0x1337BEEFCAFECAFE;
 
 #if defined(__aarch64__)
     __asm__ volatile("msr tpidr_el0, %0" : : "r"((char*)tls_base + 32768));
