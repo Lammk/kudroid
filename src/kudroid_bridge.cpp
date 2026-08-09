@@ -77,6 +77,13 @@ static void crashHandler(int sig) {
             if (m > 0) (void)!write(fd, sigline, (size_t)m);
             (void)!write(fd, "--- log up to crash ---\n", 24);
             (void)!write(fd, g_crashBuf, (size_t)g_crashLen);
+            
+            const char* traceStr = kudroid::bionic_shim_trace();
+            if (traceStr && *traceStr) {
+                (void)!write(fd, "\n--- bionic shim trace ---\n", 27);
+                (void)!write(fd, traceStr, strlen(traceStr));
+            }
+            
             close(fd);
         }
     }
@@ -324,16 +331,20 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                 
                 log += "[kudroid_core] Total loaded libraries (including dependencies): " + std::to_string(manager.libraries().size()) + "\n";
                 log += "[kudroid_core] Native libraries loaded into memory successfully!\n";
+                mirrorCrash(log);
 
                 auto jni_onload = reinterpret_cast<jint (*)(JavaVM_*, void*)>(
                     manager.resolveGlobalSymbol("JNI_OnLoad")
                 );
                 if (jni_onload) {
                     log += "[kudroid_core] Found JNI_OnLoad, invoking...\n";
+                    mirrorCrash(log);
                     jint version = jni_onload(&mock_javavm, nullptr);
                     log += "[kudroid_core] JNI_OnLoad returned version: " + std::to_string(version) + "\n";
+                    mirrorCrash(log);
                 } else {
                     log += "[kudroid_core] JNI_OnLoad not found.\n";
+                    mirrorCrash(log);
                 }
 
                 auto native_activity_create = reinterpret_cast<void (*)(ANativeActivity*, void*, size_t)>(
@@ -341,6 +352,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                 );
                 if (native_activity_create) {
                     log += "[kudroid_core] Found ANativeActivity_onCreate, invoking...\n";
+                    mirrorCrash(log);
                     static ANativeActivityCallbacks mock_callbacks = {};
                     static ANativeActivity mock_activity = {
                         &mock_callbacks,
@@ -357,8 +369,10 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                     mock_GetEnv(&mock_javavm, reinterpret_cast<void**>(&mock_activity.env), 0);
                     native_activity_create(&mock_activity, nullptr, 0);
                     log += "[kudroid_core] ANativeActivity_onCreate completed.\n";
+                    mirrorCrash(log);
                 } else {
                     log += "[kudroid_core] ANativeActivity_onCreate not found.\n";
+                    mirrorCrash(log);
                 }
             }
         }
