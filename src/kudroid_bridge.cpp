@@ -244,22 +244,48 @@ struct JavaVM_ {
     const struct JNIInvokeInterface* functions;
 };
 
+static void* mock_jni_dummy(...) {
+    return nullptr;
+}
+
 static jint mock_GetEnv(JavaVM_* vm, void** env, jint version) {
     (void)vm;
     (void)version;
-    static JNINativeInterface mock_jni_interface = {};
+    static JNINativeInterface mock_jni_interface;
+    static bool initialized = false;
+    if (!initialized) {
+        for (int i = 0; i < 300; ++i) {
+            mock_jni_interface.dummy[i] = reinterpret_cast<void*>(mock_jni_dummy);
+        }
+        initialized = true;
+    }
     static JNIEnv_ mock_jni_env = { &mock_jni_interface };
     *env = &mock_jni_env;
     return 0; // JNI_OK
 }
 
+static jint mock_AttachCurrentThread(JavaVM_* vm, JNIEnv_** env, void* args) {
+    (void)args;
+    return mock_GetEnv(vm, reinterpret_cast<void**>(env), 0);
+}
+
+static jint mock_DetachCurrentThread(JavaVM_* vm) {
+    (void)vm;
+    return 0; // JNI_OK
+}
+
+static jint mock_DestroyJavaVM(JavaVM_* vm) {
+    (void)vm;
+    return 0; // JNI_OK
+}
+
 static JNIInvokeInterface mock_invoke_interface = {
     nullptr, nullptr, nullptr,
-    nullptr, // DestroyJavaVM
-    nullptr, // AttachCurrentThread
-    nullptr, // DetachCurrentThread
+    mock_DestroyJavaVM,
+    mock_AttachCurrentThread,
+    mock_DetachCurrentThread,
     mock_GetEnv,
-    nullptr  // AttachCurrentThreadAsDaemon
+    mock_AttachCurrentThread // AttachCurrentThreadAsDaemon
 };
 
 static JavaVM_ mock_javavm = { &mock_invoke_interface };
