@@ -107,7 +107,10 @@ struct AppsView: View {
                             .padding(.vertical, 4)
                             .listRowBackground(Color(.systemGray6))
                         }
-                        .scrollContentBackground(.hidden)
+                        .onAppear {
+                            // Pre-iOS 16 workaround
+                            UITableView.appearance().backgroundColor = .clear
+                        }
                     }
                 }
             }
@@ -296,7 +299,10 @@ struct APKInstallerView: View {
                         }
                         .listRowBackground(Color(.systemGray6))
                     }
-                    .scrollContentBackground(.hidden)
+                    .onAppear {
+                        // Pre-iOS 16 workaround
+                        UITableView.appearance().backgroundColor = .clear
+                    }
                     .overlay {
                         if apkFiles.isEmpty {
                             VStack(spacing: 8) {
