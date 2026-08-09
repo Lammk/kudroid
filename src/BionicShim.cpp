@@ -304,6 +304,13 @@ const SymbolEntry kSymbols[] = {
 
 } // namespace
 
+#include <dlfcn.h>
+
+extern "C" uint64_t kudroid_universal_dummy() {
+    trace("WARNING: kudroid_universal_dummy called!");
+    return 0;
+}
+
 void* resolve_bionic_symbol(const char* name) {
     if (name) {
         for (const auto& symbol : kSymbols) {
@@ -316,16 +323,26 @@ void* resolve_bionic_symbol(const char* name) {
             }
         }
 
+        // Try host dlsym
+        void* host_ptr = ::dlsym(RTLD_DEFAULT, name);
+        if (host_ptr) {
+            char traceMessage[256];
+            std::snprintf(traceMessage, sizeof(traceMessage),
+                          "bound %s -> %p (host)", name, host_ptr);
+            trace(traceMessage);
+            return host_ptr;
+        }
+
         std::fprintf(stderr, "Missing Bionic symbol: %s\n", name);
         char traceMessage[256];
         std::snprintf(traceMessage, sizeof(traceMessage),
-                  "missing %s -> dummy fallback", name);
+                  "missing %s -> universal dummy", name);
         trace(traceMessage);
+        return reinterpret_cast<void*>(&kudroid_universal_dummy);
     } else {
         std::fprintf(stderr, "Missing Bionic symbol: <null>\n");
+        return nullptr;
     }
-
-    return reinterpret_cast<void*>(&bionic_dummy);
 }
 
 void bionic_shim_reset_trace() {
