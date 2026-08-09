@@ -371,6 +371,74 @@ extern "C" int bionic_pthread_attr_destroy(void* attr) { (void)attr; return 0; }
 extern "C" int bionic_pthread_attr_setstacksize(void* attr, size_t stacksize) { (void)attr; (void)stacksize; return 0; }
 extern "C" int bionic_pthread_attr_getstack(void* attr, void** stackaddr, size_t* stacksize) { (void)attr; (void)stackaddr; (void)stacksize; return 0; }
 extern "C" int bionic_pthread_attr_setdetachstate(void* attr, int state) { (void)attr; (void)state; return 0; }
+extern "C" int bionic_pthread_getattr_np(pthread_t thread, void* attr) { (void)thread; (void)attr; return 0; }
+
+// --- Unity/NDK Dummies ---
+extern "C" void* bionic_ANativeWindow_fromSurface(void* env, void* surface) {
+    (void)env; (void)surface;
+    static int dummyWindow[1024] = {0};
+    return &dummyWindow;
+}
+extern "C" int bionic_ANativeWindow_getWidth(void* window) { (void)window; return 1080; }
+extern "C" int bionic_ANativeWindow_getHeight(void* window) { (void)window; return 1920; }
+extern "C" int bionic_ANativeWindow_setBuffersGeometry(void* window, int width, int height, int format) {
+    (void)window; (void)width; (void)height; (void)format; return 0;
+}
+extern "C" void bionic_ANativeWindow_release(void* window) { (void)window; }
+extern "C" void bionic_ANativeWindow_acquire(void* window) { (void)window; }
+
+extern "C" void* bionic_ASensorManager_getInstance() {
+    static int dummyManager = 1;
+    return &dummyManager;
+}
+extern "C" void* bionic_ASensorManager_createEventQueue(void* manager, void* looper, int ident, void* callback, void* data) {
+    (void)manager; (void)looper; (void)ident; (void)callback; (void)data;
+    static int dummyQueue = 1;
+    return &dummyQueue;
+}
+extern "C" int bionic_ASensorManager_destroyEventQueue(void* manager, void* queue) {
+    (void)manager; (void)queue; return 0;
+}
+extern "C" int bionic_ASensorManager_getSensorList(void* manager, void** list) {
+    (void)manager; (void)list; return 0; // 0 sensors
+}
+extern "C" void* bionic_ASensorManager_getDefaultSensor(void* manager, int type) {
+    (void)manager; (void)type;
+    static int dummySensor = 1;
+    return &dummySensor;
+}
+extern "C" int bionic_ASensorEventQueue_enableSensor(void* queue, void* sensor) {
+    (void)queue; (void)sensor;
+    return 0;
+}
+extern "C" int bionic_ASensorEventQueue_disableSensor(void* queue, void* sensor) {
+    (void)queue; (void)sensor; return 0;
+}
+extern "C" int bionic_ASensorEventQueue_setEventRate(void* queue, void* sensor, int32_t usec) {
+    (void)queue; (void)sensor; (void)usec;
+    return 0;
+}
+extern "C" int bionic_ASensorEventQueue_hasEvents(void* queue) {
+    (void)queue; return 0;
+}
+extern "C" ssize_t bionic_ASensorEventQueue_getEvents(void* queue, void* events, size_t count) {
+    (void)queue; (void)events; (void)count; return 0;
+}
+extern "C" const char* bionic_ASensor_getName(void* sensor) {
+    (void)sensor; return "DummySensor";
+}
+extern "C" const char* bionic_ASensor_getVendor(void* sensor) {
+    (void)sensor; return "Kudroid";
+}
+extern "C" int bionic_ASensor_getType(void* sensor) {
+    (void)sensor; return 1; // ASENSOR_TYPE_ACCELEROMETER
+}
+extern "C" float bionic_ASensor_getResolution(void* sensor) {
+    (void)sensor; return 1.0f;
+}
+extern "C" int bionic_ASensor_getMinDelay(void* sensor) {
+    (void)sensor; return 10000;
+}
 extern "C" int bionic_pthread_condattr_init(void* attr) { (void)attr; return 0; }
 extern "C" int bionic_pthread_condattr_destroy(void* attr) { (void)attr; return 0; }
 extern "C" int bionic_pthread_mutexattr_init(void* attr) { (void)attr; return 0; }
@@ -456,6 +524,28 @@ const SymbolEntry kSymbols[] = {
     {"pthread_attr_setstacksize", reinterpret_cast<void*>(&bionic_pthread_attr_setstacksize)},
     {"pthread_attr_getstack", reinterpret_cast<void*>(&bionic_pthread_attr_getstack)},
     {"pthread_attr_setdetachstate", reinterpret_cast<void*>(&bionic_pthread_attr_setdetachstate)},
+    {"pthread_getattr_np", reinterpret_cast<void*>(&bionic_pthread_getattr_np)},
+    {"ANativeWindow_fromSurface", reinterpret_cast<void*>(&bionic_ANativeWindow_fromSurface)},
+    {"ANativeWindow_getWidth", reinterpret_cast<void*>(&bionic_ANativeWindow_getWidth)},
+    {"ANativeWindow_getHeight", reinterpret_cast<void*>(&bionic_ANativeWindow_getHeight)},
+    {"ANativeWindow_setBuffersGeometry", reinterpret_cast<void*>(&bionic_ANativeWindow_setBuffersGeometry)},
+    {"ANativeWindow_release", reinterpret_cast<void*>(&bionic_ANativeWindow_release)},
+    {"ANativeWindow_acquire", reinterpret_cast<void*>(&bionic_ANativeWindow_acquire)},
+    {"ASensorManager_getInstance", reinterpret_cast<void*>(&bionic_ASensorManager_getInstance)},
+    {"ASensorManager_createEventQueue", reinterpret_cast<void*>(&bionic_ASensorManager_createEventQueue)},
+    {"ASensorManager_destroyEventQueue", reinterpret_cast<void*>(&bionic_ASensorManager_destroyEventQueue)},
+    {"ASensorManager_getSensorList", reinterpret_cast<void*>(&bionic_ASensorManager_getSensorList)},
+    {"ASensorManager_getDefaultSensor", reinterpret_cast<void*>(&bionic_ASensorManager_getDefaultSensor)},
+    {"ASensorEventQueue_enableSensor", reinterpret_cast<void*>(&bionic_ASensorEventQueue_enableSensor)},
+    {"ASensorEventQueue_disableSensor", reinterpret_cast<void*>(&bionic_ASensorEventQueue_disableSensor)},
+    {"ASensorEventQueue_setEventRate", reinterpret_cast<void*>(&bionic_ASensorEventQueue_setEventRate)},
+    {"ASensorEventQueue_hasEvents", reinterpret_cast<void*>(&bionic_ASensorEventQueue_hasEvents)},
+    {"ASensorEventQueue_getEvents", reinterpret_cast<void*>(&bionic_ASensorEventQueue_getEvents)},
+    {"ASensor_getName", reinterpret_cast<void*>(&bionic_ASensor_getName)},
+    {"ASensor_getVendor", reinterpret_cast<void*>(&bionic_ASensor_getVendor)},
+    {"ASensor_getType", reinterpret_cast<void*>(&bionic_ASensor_getType)},
+    {"ASensor_getResolution", reinterpret_cast<void*>(&bionic_ASensor_getResolution)},
+    {"ASensor_getMinDelay", reinterpret_cast<void*>(&bionic_ASensor_getMinDelay)},
     {"pthread_condattr_init", reinterpret_cast<void*>(&bionic_pthread_condattr_init)},
     {"pthread_condattr_destroy", reinterpret_cast<void*>(&bionic_pthread_condattr_destroy)},
     {"pthread_mutexattr_init", reinterpret_cast<void*>(&bionic_pthread_mutexattr_init)},
