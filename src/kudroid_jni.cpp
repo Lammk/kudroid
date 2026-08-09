@@ -22,7 +22,6 @@ static JNIInvokeInterface_ g_invoke_interface;
 static JNIEnv_ g_jni_env = { &g_jni_interface };
 static JavaVM_ g_java_vm = { &g_invoke_interface };
 static std::mutex g_jvm_mutex;
-
 // Helper for detailed logging
 static void log_jni(const char* fmt, ...) {
     fprintf(stderr, "[kudroid_jni] ");

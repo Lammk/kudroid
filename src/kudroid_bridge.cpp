@@ -43,20 +43,20 @@ static void writeLogFile(const char* name, const std::string& content) {
 }
 
 static void appendTestHeader(std::string& log, const char* test, const char* path) {
-    std::time_t now = std::time(nullptr);
-    char timestamp[64] = {};
-    std::tm localTime = {};
-#if defined(_WIN32)
-    localtime_s(&localTime, &now);
-#else
-    localtime_r(&now, &localTime);
-#endif
-    std::strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &localTime);
+    auto t = std::time(nullptr);
+    auto tm = *std::localtime(&t);
+    std::ostringstream oss;
+    oss << std::put_time(&tm, "%Y-%m-%d %H:%M:%S");
+
     log += "[kudroid_core] ===== " + std::string(test) + " =====\n";
-    log += "[kudroid_core] Timestamp: " + std::string(timestamp) + "\n";
-    log += "[kudroid_core] Path: " + std::string(path ? path : "<null>") + "\n";
+    log += "[kudroid_core] Timestamp: " + oss.str() + "\n";
+    if (path && std::strcmp(path, "N/A") != 0) {
+        log += "[kudroid_core] Path: " + std::string(path) + "\n";
+    }
+#if defined(__APPLE__)
     log += "[kudroid_core] JIT: " +
            std::string(kudroid_jit_available() ? "Enabled" : "Disabled") + "\n";
+#endif
 }
 
 static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
@@ -304,6 +304,8 @@ extern "C" char* kudroid_test_jvm(void) {
     installCrashHandlers();
     
     log += "[kudroid_core] Phase: init JVM via JNI Bridge\n";
+    kudroid::bionic_shim_reset_trace();
+
     kudroid_jni_init_jvm("", "");
     
     JavaVM* vm = kudroid_jni_get_javavm();

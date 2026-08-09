@@ -374,7 +374,8 @@ jobs:
             "$MINI_JVM_LIB" \
             -Lthird_party/ANGLE/lib/ios-arm64 \
             -lEGL -lGLESv2 \
-            third_party/MoltenVK/MoltenVK/static/MoltenVK.xcframework/ios-arm64/libMoltenVK.a \
+            -Fthird_party/MoltenVK/MoltenVK/dynamic/MoltenVK.xcframework/ios-arm64 \
+            -framework MoltenVK \
             -lz \
             -framework Metal \
             -framework QuartzCore \
@@ -391,6 +392,9 @@ jobs:
           fi
           if [ -d third_party/ANGLE/lib/ios-arm64/libGLESv2.framework ]; then
             cp -R third_party/ANGLE/lib/ios-arm64/libGLESv2.framework KuDroidShell.app/Frameworks/
+          fi
+          if [ -d third_party/MoltenVK/MoltenVK/dynamic/MoltenVK.xcframework/ios-arm64/MoltenVK.framework ]; then
+            cp -R third_party/MoltenVK/MoltenVK/dynamic/MoltenVK.xcframework/ios-arm64/MoltenVK.framework KuDroidShell.app/Frameworks/
           fi
 
           cat > KuDroidShell.app/Info.plist << 'PLIST'
