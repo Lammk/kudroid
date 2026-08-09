@@ -178,6 +178,33 @@ extern "C" int bionic_pthread_mutex_init(void* guestMutex,
     return 0;
 }
 
+static std::unordered_map<void*, pthread_cond_t*> gGuestConds;
+static std::unordered_map<void*, pthread_rwlock_t*> gGuestRwlocks;
+
+extern "C" int bionic_pthread_cond_init(void* cond, const void* attr) {
+    (void)attr;
+    auto* hostCond = static_cast<pthread_cond_t*>(std::malloc(sizeof(pthread_cond_t)));
+    if (!hostCond) return -1;
+    const int result = ::pthread_cond_init(hostCond, nullptr);
+    if (result != 0) { std::free(hostCond); return result; }
+    ::pthread_mutex_lock(&gMutexRegistryLock);
+    gGuestConds[cond] = hostCond;
+    ::pthread_mutex_unlock(&gMutexRegistryLock);
+    return 0;
+}
+
+extern "C" int bionic_pthread_rwlock_init(void* rwlock, const void* attr) {
+    (void)attr;
+    auto* hostRwlock = static_cast<pthread_rwlock_t*>(std::malloc(sizeof(pthread_rwlock_t)));
+    if (!hostRwlock) return -1;
+    const int result = ::pthread_rwlock_init(hostRwlock, nullptr);
+    if (result != 0) { std::free(hostRwlock); return result; }
+    ::pthread_mutex_lock(&gMutexRegistryLock);
+    gGuestRwlocks[rwlock] = hostRwlock;
+    ::pthread_mutex_unlock(&gMutexRegistryLock);
+    return 0;
+}
+
 pthread_mutex_t* findGuestMutex(void* guestMutex) {
     ::pthread_mutex_lock(&gMutexRegistryLock);
     auto it = gGuestMutexes.find(guestMutex);
@@ -219,6 +246,86 @@ extern "C" int bionic_pthread_mutex_destroy(void* guestMutex) {
     return result;
 }
 
+// --- Cond and Rwlock Wrappers ---
+extern "C" int bionic_pthread_cond_destroy(void* cond) {
+    ::pthread_mutex_lock(&gMutexRegistryLock);
+    auto it = gGuestConds.find(cond);
+    if (it == gGuestConds.end()) { ::pthread_mutex_unlock(&gMutexRegistryLock); return -1; }
+    pthread_cond_t* hostCond = it->second;
+    gGuestConds.erase(it);
+    ::pthread_mutex_unlock(&gMutexRegistryLock);
+    int res = ::pthread_cond_destroy(hostCond);
+    std::free(hostCond);
+    return res;
+}
+extern "C" int bionic_pthread_cond_wait(void* cond, void* mutex) {
+    ::pthread_mutex_lock(&gMutexRegistryLock);
+    auto itC = gGuestConds.find(cond);
+    auto itM = gGuestMutexes.find(mutex);
+    pthread_cond_t* hostCond = itC != gGuestConds.end() ? itC->second : nullptr;
+    pthread_mutex_t* hostMutex = itM != gGuestMutexes.end() ? itM->second : nullptr;
+    ::pthread_mutex_unlock(&gMutexRegistryLock);
+    if (!hostCond || !hostMutex) return -1;
+    return ::pthread_cond_wait(hostCond, hostMutex);
+}
+extern "C" int bionic_pthread_cond_timedwait(void* cond, void* mutex, const struct timespec* abstime) {
+    ::pthread_mutex_lock(&gMutexRegistryLock);
+    auto itC = gGuestConds.find(cond);
+    auto itM = gGuestMutexes.find(mutex);
+    pthread_cond_t* hostCond = itC != gGuestConds.end() ? itC->second : nullptr;
+    pthread_mutex_t* hostMutex = itM != gGuestMutexes.end() ? itM->second : nullptr;
+    ::pthread_mutex_unlock(&gMutexRegistryLock);
+    if (!hostCond || !hostMutex) return -1;
+    return ::pthread_cond_timedwait(hostCond, hostMutex, abstime);
+}
+extern "C" int bionic_pthread_cond_signal(void* cond) {
+    ::pthread_mutex_lock(&gMutexRegistryLock);
+    auto it = gGuestConds.find(cond);
+    pthread_cond_t* hostCond = it != gGuestConds.end() ? it->second : nullptr;
+    ::pthread_mutex_unlock(&gMutexRegistryLock);
+    return hostCond ? ::pthread_cond_signal(hostCond) : -1;
+}
+extern "C" int bionic_pthread_cond_broadcast(void* cond) {
+    ::pthread_mutex_lock(&gMutexRegistryLock);
+    auto it = gGuestConds.find(cond);
+    pthread_cond_t* hostCond = it != gGuestConds.end() ? it->second : nullptr;
+    ::pthread_mutex_unlock(&gMutexRegistryLock);
+    return hostCond ? ::pthread_cond_broadcast(hostCond) : -1;
+}
+
+extern "C" int bionic_pthread_rwlock_destroy(void* rwlock) {
+    ::pthread_mutex_lock(&gMutexRegistryLock);
+    auto it = gGuestRwlocks.find(rwlock);
+    if (it == gGuestRwlocks.end()) { ::pthread_mutex_unlock(&gMutexRegistryLock); return -1; }
+    pthread_rwlock_t* hostRwlock = it->second;
+    gGuestRwlocks.erase(it);
+    ::pthread_mutex_unlock(&gMutexRegistryLock);
+    int res = ::pthread_rwlock_destroy(hostRwlock);
+    std::free(hostRwlock);
+    return res;
+}
+extern "C" int bionic_pthread_rwlock_rdlock(void* rwlock) {
+    ::pthread_mutex_lock(&gMutexRegistryLock);
+    auto it = gGuestRwlocks.find(rwlock);
+    pthread_rwlock_t* hostRwlock = it != gGuestRwlocks.end() ? it->second : nullptr;
+    ::pthread_mutex_unlock(&gMutexRegistryLock);
+    return hostRwlock ? ::pthread_rwlock_rdlock(hostRwlock) : -1;
+}
+extern "C" int bionic_pthread_rwlock_wrlock(void* rwlock) {
+    ::pthread_mutex_lock(&gMutexRegistryLock);
+    auto it = gGuestRwlocks.find(rwlock);
+    pthread_rwlock_t* hostRwlock = it != gGuestRwlocks.end() ? it->second : nullptr;
+    ::pthread_mutex_unlock(&gMutexRegistryLock);
+    return hostRwlock ? ::pthread_rwlock_wrlock(hostRwlock) : -1;
+}
+extern "C" int bionic_pthread_rwlock_unlock(void* rwlock) {
+    ::pthread_mutex_lock(&gMutexRegistryLock);
+    auto it = gGuestRwlocks.find(rwlock);
+    pthread_rwlock_t* hostRwlock = it != gGuestRwlocks.end() ? it->second : nullptr;
+    ::pthread_mutex_unlock(&gMutexRegistryLock);
+    return hostRwlock ? ::pthread_rwlock_unlock(hostRwlock) : -1;
+}
+
 extern "C" void bionic_stack_chk_fail() {
     std::fprintf(stderr, "Bionic shim: stack check failed\n");
     std::abort();
@@ -254,9 +361,49 @@ struct SymbolEntry {
     void* address;
 };
 
+// --- Pthread Overrides ---
+extern "C" int bionic_pthread_attr_init(void* attr) { (void)attr; return 0; }
+extern "C" int bionic_pthread_attr_destroy(void* attr) { (void)attr; return 0; }
+extern "C" int bionic_pthread_attr_setstacksize(void* attr, size_t stacksize) { (void)attr; (void)stacksize; return 0; }
+extern "C" int bionic_pthread_attr_getstack(void* attr, void** stackaddr, size_t* stacksize) { (void)attr; (void)stackaddr; (void)stacksize; return 0; }
+extern "C" int bionic_pthread_attr_setdetachstate(void* attr, int state) { (void)attr; (void)state; return 0; }
+extern "C" int bionic_pthread_condattr_init(void* attr) { (void)attr; return 0; }
+extern "C" int bionic_pthread_condattr_destroy(void* attr) { (void)attr; return 0; }
+extern "C" int bionic_pthread_mutexattr_init(void* attr) { (void)attr; return 0; }
+extern "C" int bionic_pthread_mutexattr_destroy(void* attr) { (void)attr; return 0; }
+extern "C" int bionic_pthread_mutexattr_settype(void* attr, int type) { (void)attr; (void)type; return 0; }
+
+extern "C" int bionic_pthread_create(pthread_t* thread, void* attr, void* (*start_routine)(void*), void* arg) {
+    (void)attr;
+    // Ignore Android's pthread_attr_t and pass nullptr to iOS's pthread_create
+    return ::pthread_create(thread, nullptr, start_routine, arg);
+}
+
 extern "C" int* __error(void);
 
 const SymbolEntry kSymbols[] = {
+    {"pthread_create", reinterpret_cast<void*>(&bionic_pthread_create)},
+    {"pthread_attr_init", reinterpret_cast<void*>(&bionic_pthread_attr_init)},
+    {"pthread_attr_destroy", reinterpret_cast<void*>(&bionic_pthread_attr_destroy)},
+    {"pthread_attr_setstacksize", reinterpret_cast<void*>(&bionic_pthread_attr_setstacksize)},
+    {"pthread_attr_getstack", reinterpret_cast<void*>(&bionic_pthread_attr_getstack)},
+    {"pthread_attr_setdetachstate", reinterpret_cast<void*>(&bionic_pthread_attr_setdetachstate)},
+    {"pthread_condattr_init", reinterpret_cast<void*>(&bionic_pthread_condattr_init)},
+    {"pthread_condattr_destroy", reinterpret_cast<void*>(&bionic_pthread_condattr_destroy)},
+    {"pthread_mutexattr_init", reinterpret_cast<void*>(&bionic_pthread_mutexattr_init)},
+    {"pthread_mutexattr_destroy", reinterpret_cast<void*>(&bionic_pthread_mutexattr_destroy)},
+    {"pthread_cond_init", reinterpret_cast<void*>(&bionic_pthread_cond_init)},
+    {"pthread_cond_destroy", reinterpret_cast<void*>(&bionic_pthread_cond_destroy)},
+    {"pthread_cond_wait", reinterpret_cast<void*>(&bionic_pthread_cond_wait)},
+    {"pthread_cond_timedwait", reinterpret_cast<void*>(&bionic_pthread_cond_timedwait)},
+    {"pthread_cond_signal", reinterpret_cast<void*>(&bionic_pthread_cond_signal)},
+    {"pthread_cond_broadcast", reinterpret_cast<void*>(&bionic_pthread_cond_broadcast)},
+    {"pthread_rwlock_init", reinterpret_cast<void*>(&bionic_pthread_rwlock_init)},
+    {"pthread_rwlock_destroy", reinterpret_cast<void*>(&bionic_pthread_rwlock_destroy)},
+    {"pthread_rwlock_rdlock", reinterpret_cast<void*>(&bionic_pthread_rwlock_rdlock)},
+    {"pthread_rwlock_wrlock", reinterpret_cast<void*>(&bionic_pthread_rwlock_wrlock)},
+    {"pthread_rwlock_unlock", reinterpret_cast<void*>(&bionic_pthread_rwlock_unlock)},
+    
     {"__errno", reinterpret_cast<void*>(&__error)},
     {"snprintf", reinterpret_cast<void*>(&std::snprintf)},
     {"memcpy", reinterpret_cast<void*>(&std::memcpy)},
