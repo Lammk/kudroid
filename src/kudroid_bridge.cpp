@@ -231,6 +231,8 @@ struct JavaVM_ {
 };
 
 static jint mock_GetEnv(JavaVM_* vm, void** env, jint version) {
+    (void)vm;
+    (void)version;
     static JNINativeInterface mock_jni_interface = {};
     static JNIEnv_ mock_jni_env = { &mock_jni_interface };
     *env = &mock_jni_env;
@@ -299,7 +301,6 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
             log += "[kudroid_core] ERROR: Library directory does not exist. Did you install the APK?\n";
         } else {
             kudroid::LibraryManager manager;
-            int loadedCount = 0;
             
             // Collect all .so files to load
             std::vector<std::string> soFiles;
@@ -318,7 +319,6 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                         log += "[kudroid_core] LOAD FAILED for " + soPath + ": " + manager.lastError() + "\n";
                     } else {
                         log += "[kudroid_core] LOAD SUCCESS for " + soPath + "\n";
-                        loadedCount++;
                     }
                 }
                 

@@ -12,6 +12,7 @@
 #include <unistd.h>
 #include <string>
 #include <array>
+#include <dlfcn.h>
 
 namespace kudroid {
 namespace {
@@ -224,16 +225,21 @@ extern "C" void bionic_stack_chk_fail() {
 }
 
 extern "C" void* bionic_dlopen(const char* filename, int flag) {
+    (void)filename;
+    (void)flag;
     trace("dlopen() dummy fallback");
     return nullptr;
 }
 
 extern "C" void* bionic_dlsym(void* handle, const char* symbol) {
+    (void)handle;
+    (void)symbol;
     trace("dlsym() dummy fallback");
     return nullptr;
 }
 
 extern "C" int bionic_dlclose(void* handle) {
+    (void)handle;
     trace("dlclose() dummy fallback");
     return -1;
 }
@@ -306,8 +312,6 @@ const SymbolEntry kSymbols[] = {
 };
 
 } // namespace
-
-#include <dlfcn.h>
 
 extern "C" uint64_t kudroid_universal_dummy() {
     trace("WARNING: kudroid_universal_dummy called!");
