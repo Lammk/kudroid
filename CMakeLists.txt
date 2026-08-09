@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(KuDroid LANGUAGES CXX)
+project(KuDroid LANGUAGES CXX ASM)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -19,6 +19,7 @@ endif()
 
 add_library(kudroid_core STATIC
     src/BionicShim.cpp
+    src/bionic_log_trampoline.S
     src/elf_loader.cpp
     src/library_manager.cpp
     src/kudroid_bridge.cpp

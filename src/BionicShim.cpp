@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <unistd.h>
 #include <string>
+#include <array>
 
 namespace kudroid {
 namespace {
@@ -45,31 +46,117 @@ extern "C" void bionic_free(void* pointer) {
     std::free(pointer);
 }
 
-extern "C" int bionic_android_log_print(int priority, const char* tag,
-                                          const char* format, ...) {
+void appendUnsigned(std::string& output, uint64_t value, unsigned base) {
+    char buffer[32];
+    const char* digits = "0123456789abcdef";
+    char* cursor = buffer + sizeof(buffer);
+    do {
+        *--cursor = digits[value % base];
+        value /= base;
+    } while (value != 0);
+    output.append(cursor, buffer + sizeof(buffer));
+}
+
+[[maybe_unused]] std::string formatGuestLog(const char* format,
+                                            const uint64_t* arguments,
+                                            const uint64_t* stackArguments) {
+    std::string output;
+    if (!format) return output;
+    std::size_t argumentIndex = 0;
+    auto nextArgument = [&]() -> uint64_t {
+        return argumentIndex < 5 ? arguments[argumentIndex++]
+                                 : stackArguments[argumentIndex++ - 5];
+    };
+    for (const char* cursor = format; *cursor; ++cursor) {
+        if (*cursor != '%') {
+            output += *cursor;
+            continue;
+        }
+        ++cursor;
+        if (*cursor == '%') {
+            output += '%';
+            continue;
+        }
+        while (*cursor == 'l' || *cursor == 'z') ++cursor;
+        const uint64_t value = nextArgument();
+        switch (*cursor) {
+            case 'd':
+            case 'i': {
+                const auto signedValue = static_cast<int64_t>(value);
+                if (signedValue < 0) {
+                    output += '-';
+                    appendUnsigned(output, static_cast<uint64_t>(-signedValue), 10);
+                } else {
+                    appendUnsigned(output, static_cast<uint64_t>(signedValue), 10);
+                }
+                break;
+            }
+            case 'u': appendUnsigned(output, value, 10); break;
+            case 'x': appendUnsigned(output, value, 16); break;
+            case 'p':
+                output += "0x";
+                appendUnsigned(output, value, 16);
+                break;
+            case 's': {
+                const char* stringValue = reinterpret_cast<const char*>(value);
+                output += stringValue ? stringValue : "<null>";
+                break;
+            }
+            default:
+                output += "<unsupported:%";
+                output += *cursor ? *cursor : '?';
+                output += '>';
+                break;
+        }
+    }
+    return output;
+}
+
+int logAndroidMessage(int priority, const char* tag, const std::string& message) {
     char traceMessage[256];
     std::snprintf(traceMessage, sizeof(traceMessage),
                   "__android_log_print(priority=%d, tag=%s)", priority,
                   tag ? tag : "<null>");
     trace(traceMessage);
-    std::fprintf(stdout, "[AndroidLog][%s]: ", tag ? tag : " unknown");
+    gShimTrace += "[BionicShim] android log message: ";
+    gShimTrace += message;
+    gShimTrace += '\n';
+    std::fprintf(stdout, "[AndroidLog][%s]: %s\n", tag ? tag : "unknown",
+                 message.c_str());
+    return 0;
+}
+
+#if defined(__aarch64__)
+extern "C" int kudroid_android_log_print_trampoline();
+
+extern "C" int kudroid_android_log_print_from_registers(const uint64_t* registers) {
+    const int priority = static_cast<int>(registers[0]);
+    const char* tag = reinterpret_cast<const char*>(registers[1]);
+    const char* format = reinterpret_cast<const char*>(registers[2]);
+    const auto* stackArguments = reinterpret_cast<const uint64_t*>(registers[8]);
+    return logAndroidMessage(priority, tag,
+                             formatGuestLog(format, registers + 3, stackArguments));
+}
+#else
+extern "C" int bionic_android_log_print(int priority, const char* tag,
+                                          const char* format, ...) {
 
     va_list args;
     va_start(args, format);
-    va_list traceArgs;
-    va_copy(traceArgs, args);
     char formattedMessage[512];
     std::vsnprintf(formattedMessage, sizeof(formattedMessage),
-                   format ? format : "", traceArgs);
-    va_end(traceArgs);
-    gShimTrace += "[BionicShim] android log message: ";
-    gShimTrace += formattedMessage;
-    gShimTrace += '\n';
-    std::vfprintf(stdout, format ? format : "", args);
+                   format ? format : "", args);
     va_end(args);
+    return logAndroidMessage(priority, tag, formattedMessage);
+}
+#endif
 
-    std::fputc('\n', stdout);
-    return 0;
+extern "C" void bionic_cxa_finalize(void*) {
+    trace("__cxa_finalize() -> no-op");
+}
+
+extern "C" void bionic_runtime_noop() {
+    trace("weak compiler runtime hook -> no-op");
 }
 
 extern "C" int bionic_pthread_mutex_init(void* guestMutex,
@@ -155,7 +242,15 @@ const SymbolEntry kSymbols[] = {
     {"pthread_mutex_destroy", reinterpret_cast<void*>(&bionic_pthread_mutex_destroy)},
     {"__stack_chk_guard", reinterpret_cast<void*>(&gStackCheckGuard)},
     {"__stack_chk_fail", reinterpret_cast<void*>(&bionic_stack_chk_fail)},
+#if defined(__aarch64__)
+    {"__android_log_print", reinterpret_cast<void*>(&kudroid_android_log_print_trampoline)},
+#else
     {"__android_log_print", reinterpret_cast<void*>(&bionic_android_log_print)},
+#endif
+    {"__cxa_finalize", reinterpret_cast<void*>(&bionic_cxa_finalize)},
+    {"_ITM_registerTMCloneTable", reinterpret_cast<void*>(&bionic_runtime_noop)},
+    {"_ITM_deregisterTMCloneTable", reinterpret_cast<void*>(&bionic_runtime_noop)},
+    {"__gmon_start__", reinterpret_cast<void*>(&bionic_runtime_noop)},
 };
 
 } // namespace
