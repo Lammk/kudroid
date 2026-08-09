@@ -303,25 +303,44 @@ bool ElfLoader::map() {
     __builtin___clear_cache(mapStart, mapStart + totalSize);
 #endif
 
+    const size_t numPages = totalSize / pageSize;
+    std::vector<int> pageProts(numPages, 0);
+
     for (const auto& seg : segments_) {
         const uint64_t segmentStart = seg.vaddr - minVaddr;
-        const uint64_t protectedStart = segmentStart & ~(pageSize - 1);
         const uint64_t segmentEnd = segmentStart + seg.memsz;
-        const uint64_t protectedEnd = (segmentEnd + pageSize - 1) & ~(pageSize - 1);
-
+        
         int segmentProt = 0;
         if (seg.flags & 4) segmentProt |= PROT_READ;
         if (seg.flags & 2) segmentProt |= PROT_WRITE;
         if (seg.flags & 1) segmentProt |= PROT_EXEC;
 
-        if (mprotect(mapStart + protectedStart,
-                     protectedEnd - protectedStart, segmentProt) != 0) {
-            lastError_ = "mprotect failed (no JIT?): " +
-                         std::string(strerror(errno));
-            munmap(mapStart, totalSize);
-            base_ = nullptr;
-            return false;
+        size_t startPage = segmentStart / pageSize;
+        size_t endPage = (segmentEnd + pageSize - 1) / pageSize;
+        for (size_t i = startPage; i < endPage && i < numPages; ++i) {
+            pageProts[i] |= segmentProt;
         }
+    }
+
+    size_t groupStart = 0;
+    while (groupStart < numPages) {
+        int currentProt = pageProts[groupStart];
+        size_t groupEnd = groupStart + 1;
+        while (groupEnd < numPages && pageProts[groupEnd] == currentProt) {
+            groupEnd++;
+        }
+
+        if (currentProt != 0) {
+            if (mprotect(mapStart + (groupStart * pageSize),
+                         (groupEnd - groupStart) * pageSize, currentProt) != 0) {
+                lastError_ = "mprotect failed (no JIT?): " +
+                             std::string(strerror(errno));
+                munmap(mapStart, totalSize);
+                base_ = nullptr;
+                return false;
+            }
+        }
+        groupStart = groupEnd;
     }
 
     // Adjust base_ to point to the logical address 0
