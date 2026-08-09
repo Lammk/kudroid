@@ -229,6 +229,10 @@ struct DebugView: View {
                             
                             Button("Test GPU Native") { fullLog = runGpuTest() }
                                 .buttonStyle(.bordered)
+                            Button("GPU Vulkan .so") { fullLog = runGpuVulkanSoTest() }
+                                .buttonStyle(.bordered)
+                            Button("GPU OpenGL .so") { fullLog = runGpuOpenglSoTest() }
+                                .buttonStyle(.bordered)
                             
                             Button("Bionic Test") { fullLog = runBionicExecutionTest() }
                                 .buttonStyle(.bordered)
@@ -454,6 +458,40 @@ func runMultiElfTest() -> String {
         return "❌ Failed to prepare multi-ELF test: \(error.localizedDescription)"
     }
     guard let cString = kudroid_multi_elf_test(consumerURL.path, providerURL.path) else { return "❌ Error: null result" }
+    let log = String(cString: cString)
+    free(UnsafeMutablePointer(mutating: cString))
+    return log
+}
+
+func runGpuVulkanSoTest() -> String {
+    guard let bundledURL = Bundle.main.url(forResource: "test_gpu_vulkan", withExtension: "so") else {
+        return "❌ test_gpu_vulkan.so not found in bundle"
+    }
+    let tmpURL = FileManager.default.temporaryDirectory.appendingPathComponent("test_gpu_vulkan.so")
+    do {
+        if FileManager.default.fileExists(atPath: tmpURL.path) { try FileManager.default.removeItem(at: tmpURL) }
+        try FileManager.default.copyItem(at: bundledURL, to: tmpURL)
+    } catch {
+        return "❌ Failed to copy test_gpu_vulkan.so: \(error.localizedDescription)"
+    }
+    guard let cString = kudroid_gpu_vulkan_so_test(tmpURL.path) else { return "❌ Error: null result" }
+    let log = String(cString: cString)
+    free(UnsafeMutablePointer(mutating: cString))
+    return log
+}
+
+func runGpuOpenglSoTest() -> String {
+    guard let bundledURL = Bundle.main.url(forResource: "test_gpu_opengl", withExtension: "so") else {
+        return "❌ test_gpu_opengl.so not found in bundle"
+    }
+    let tmpURL = FileManager.default.temporaryDirectory.appendingPathComponent("test_gpu_opengl.so")
+    do {
+        if FileManager.default.fileExists(atPath: tmpURL.path) { try FileManager.default.removeItem(at: tmpURL) }
+        try FileManager.default.copyItem(at: bundledURL, to: tmpURL)
+    } catch {
+        return "❌ Failed to copy test_gpu_opengl.so: \(error.localizedDescription)"
+    }
+    guard let cString = kudroid_gpu_opengl_so_test(tmpURL.path) else { return "❌ Error: null result" }
     let log = String(cString: cString)
     free(UnsafeMutablePointer(mutating: cString))
     return log

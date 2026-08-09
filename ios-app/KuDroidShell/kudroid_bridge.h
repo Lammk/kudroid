@@ -58,6 +58,14 @@ const char* kudroid_vfs_extended_test_log(void);
 char* kudroid_test_jvm(void);
 char* kudroid_test_gpu(void);
 
+/// Load a GPU test ARM64 .so file and execute its Vulkan test via BionicShim intercept.
+/// Returns a malloc'd diagnostic log; caller must free() it.
+const char* kudroid_gpu_vulkan_so_test(const char* path);
+
+/// Load a GPU test ARM64 .so file and execute its OpenGL+EGL test via BionicShim intercept.
+/// Returns a malloc'd diagnostic log; caller must free() it.
+const char* kudroid_gpu_opengl_so_test(const char* path);
+
 /// Extract and install an APK's arm64-v8a native libraries into android_root.
 /// Returns a malloc'd diagnostic log; caller must free() it.
 const char* kudroid_install_apk(const char* apkPath);

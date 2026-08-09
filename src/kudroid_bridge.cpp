@@ -905,3 +905,95 @@ extern "C" const char* kudroid_get_app_info(const char* package_name) {
         
     return strdup(buf);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GPU .so Execution Tests — loads the ARM64 ELF test .so through the ELF
+// loader, which calls dlopen/dlsym for GPU libs. BionicShim intercepts those
+// and maps them directly to iOS native (MoltenVK / ANGLE).
+// ─────────────────────────────────────────────────────────────────────────────
+
+extern "C" const char* kudroid_gpu_vulkan_so_test(const char* path) {
+    std::string log;
+    appendTestHeader(log, "GPU Vulkan .so Intercept Test", path);
+    kudroid::bionic_shim_reset_trace();
+    if (!path) {
+        log += "[kudroid_gpu] ERROR: null path\n";
+    } else if (!kudroid_jit_available()) {
+        log += "[kudroid_gpu] ABORT: JIT is Disabled — cannot execute ARM64 ELF\n";
+    } else {
+        kudroid::ElfLoader loader(path);
+        if (!loader.parse()) {
+            log += "[kudroid_gpu] PARSE FAILED: " + std::string(loader.lastError()) + "\n";
+        } else if (!loader.map()) {
+            log += "[kudroid_gpu] MAP FAILED: " + std::string(loader.lastError()) + "\n";
+        } else if (!loader.relocate()) {
+            log += "[kudroid_gpu] RELOCATE FAILED: " + std::string(loader.lastError()) + "\n";
+        } else {
+            log += "[kudroid_gpu] ELF mapped and Bionic imports bound.\n";
+            void* address = loader.getSymbolAddress("kudroid_gpu_vulkan_test");
+            if (!address) {
+                log += "[kudroid_gpu] SYMBOL FAILED: kudroid_gpu_vulkan_test not found\n";
+            } else {
+                log += "[kudroid_gpu] Running kudroid_gpu_vulkan_test()...\n";
+                mirrorCrash(log);
+                using VkTestFn = int (*)(uint32_t*);
+                uint32_t ext_count = 0;
+                const int result = reinterpret_cast<VkTestFn>(address)(&ext_count);
+                log += "[kudroid_gpu] VULKAN TEST RESULT: " +
+                       std::to_string(result) + (result == 0 ? " (SUCCESS)" : " (FAILED)") + "\n";
+                log += "[kudroid_gpu] Vulkan extensions found: " + std::to_string(ext_count) + "\n";
+            }
+        }
+    }
+
+    const char* shimTrace = kudroid::bionic_shim_trace();
+    if (shimTrace && *shimTrace) {
+        log += "[kudroid_gpu] Bionic shim trace:\n";
+        log += shimTrace;
+    }
+
+    writeLogFile("kudroid_gpu_vulkan_test.txt", log);
+    return strdup(log.c_str());
+}
+
+extern "C" const char* kudroid_gpu_opengl_so_test(const char* path) {
+    std::string log;
+    appendTestHeader(log, "GPU OpenGL+EGL .so Intercept Test", path);
+    kudroid::bionic_shim_reset_trace();
+    if (!path) {
+        log += "[kudroid_gpu] ERROR: null path\n";
+    } else if (!kudroid_jit_available()) {
+        log += "[kudroid_gpu] ABORT: JIT is Disabled — cannot execute ARM64 ELF\n";
+    } else {
+        kudroid::ElfLoader loader(path);
+        if (!loader.parse()) {
+            log += "[kudroid_gpu] PARSE FAILED: " + std::string(loader.lastError()) + "\n";
+        } else if (!loader.map()) {
+            log += "[kudroid_gpu] MAP FAILED: " + std::string(loader.lastError()) + "\n";
+        } else if (!loader.relocate()) {
+            log += "[kudroid_gpu] RELOCATE FAILED: " + std::string(loader.lastError()) + "\n";
+        } else {
+            log += "[kudroid_gpu] ELF mapped and Bionic imports bound.\n";
+            void* address = loader.getSymbolAddress("kudroid_gpu_opengl_test");
+            if (!address) {
+                log += "[kudroid_gpu] SYMBOL FAILED: kudroid_gpu_opengl_test not found\n";
+            } else {
+                log += "[kudroid_gpu] Running kudroid_gpu_opengl_test()...\n";
+                mirrorCrash(log);
+                using GlTestFn = int (*)();
+                const int result = reinterpret_cast<GlTestFn>(address)();
+                log += "[kudroid_gpu] OPENGL+EGL TEST RESULT: " +
+                       std::to_string(result) + (result == 0 ? " (SUCCESS)" : " (FAILED)") + "\n";
+            }
+        }
+    }
+
+    const char* shimTrace = kudroid::bionic_shim_trace();
+    if (shimTrace && *shimTrace) {
+        log += "[kudroid_gpu] Bionic shim trace:\n";
+        log += shimTrace;
+    }
+
+    writeLogFile("kudroid_gpu_opengl_test.txt", log);
+    return strdup(log.c_str());
+}

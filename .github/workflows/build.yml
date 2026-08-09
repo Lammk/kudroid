@@ -201,12 +201,46 @@ jobs:
             tests/libkudroid_provider_arm64.so
             tests/libkudroid_consumer_arm64.so
 
+  build-gpu-test-so-arm64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ARM64 cross-compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build GPU test .so files (ARM64)
+        run: |
+          aarch64-linux-gnu-gcc -shared -fPIC -ldl \
+            -o tests/test_gpu_vulkan_arm64.so tests/test_gpu_vulkan.c
+          aarch64-linux-gnu-gcc -shared -fPIC -ldl \
+            -o tests/test_gpu_opengl_arm64.so tests/test_gpu_opengl.c
+          aarch64-linux-gnu-strip tests/test_gpu_vulkan_arm64.so
+          aarch64-linux-gnu-strip tests/test_gpu_opengl_arm64.so
+
+      - name: Verify GPU test ELFs
+        run: |
+          file tests/test_gpu_vulkan_arm64.so tests/test_gpu_opengl_arm64.so
+          readelf -h tests/test_gpu_vulkan_arm64.so | grep -E "Class|Machine"
+          readelf --dyn-syms tests/test_gpu_vulkan_arm64.so | grep -E "kudroid_gpu_vulkan_test|dlopen|dlsym"
+          readelf --dyn-syms tests/test_gpu_opengl_arm64.so | grep -E "kudroid_gpu_opengl_test|dlopen|dlsym"
+
+      - name: Upload GPU test .so artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-test-arm64-so
+          path: |
+            tests/test_gpu_vulkan_arm64.so
+            tests/test_gpu_opengl_arm64.so
+
   # ─────────────────────────────────────────────────────────────────────────────
   # iOS Build — downloads pre-built ANGLE + MoltenVK, compiles only kudroid_core
-  # and the SwiftUI shell. No more compiling ANGLE in this job.
+  # and the SwiftUI shell.
   # ─────────────────────────────────────────────────────────────────────────────
   ios-build:
-    needs: [build-multi-elf-so-arm64]
+    needs: [build-multi-elf-so-arm64, build-gpu-test-so-arm64]
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -236,6 +270,12 @@ jobs:
         with:
           name: multi-elf-arm64-so
           path: multi-elf-artifact
+
+      - name: Download GPU test ARM64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: gpu-test-arm64-so
+          path: gpu-test-artifact
 
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
@@ -291,6 +331,20 @@ jobs:
           else
             echo "ERROR: Multi-ELF provider/consumer libraries not found in repo!"
             exit 1
+          fi
+
+          # Bundle GPU test .so files
+          if [ -f gpu-test-artifact/test_gpu_vulkan_arm64.so ]; then
+            cp gpu-test-artifact/test_gpu_vulkan_arm64.so KuDroidShell.app/test_gpu_vulkan.so
+            echo "Bundled test_gpu_vulkan.so ($(wc -c < KuDroidShell.app/test_gpu_vulkan.so) bytes)"
+          else
+            echo "WARNING: test_gpu_vulkan_arm64.so not found, skipping"
+          fi
+          if [ -f gpu-test-artifact/test_gpu_opengl_arm64.so ]; then
+            cp gpu-test-artifact/test_gpu_opengl_arm64.so KuDroidShell.app/test_gpu_opengl.so
+            echo "Bundled test_gpu_opengl.so ($(wc -c < KuDroidShell.app/test_gpu_opengl.so) bytes)"
+          else
+            echo "WARNING: test_gpu_opengl_arm64.so not found, skipping"
           fi
 
           # Ensure dylibs exist for -lEGL -lGLESv2
