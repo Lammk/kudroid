@@ -341,7 +341,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                 mirrorCrash(log);
 
                 auto jni_onload = reinterpret_cast<jint (*)(JavaVM_*, void*)>(
-                    manager.resolveGlobalSymbol("JNI_OnLoad")
+                    manager.resolveAppSymbol("JNI_OnLoad")
                 );
                 if (jni_onload) {
                     log += "[kudroid_core] Found JNI_OnLoad, invoking...\n";
@@ -355,7 +355,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                 }
 
                 auto native_activity_create = reinterpret_cast<void (*)(ANativeActivity*, void*, size_t)>(
-                    manager.resolveGlobalSymbol("ANativeActivity_onCreate")
+                    manager.resolveAppSymbol("ANativeActivity_onCreate")
                 );
                 if (native_activity_create) {
                     log += "[kudroid_core] Found ANativeActivity_onCreate, invoking...\n";

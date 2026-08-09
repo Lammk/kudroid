@@ -95,6 +95,8 @@ public:
     bool loadRecursive(const std::string& path);
     /// Return a symbol from any loaded ELF, then BionicShim as fallback.
     void* resolveGlobalSymbol(const char* name) const;
+    /// Return a symbol specifically from the main application library.
+    void* resolveAppSymbol(const char* name);
     [[nodiscard]] const std::unordered_map<std::string, std::unique_ptr<ElfLoader>>& libraries() const {
         return libraries_;
     }

@@ -193,6 +193,19 @@ void* LibraryManager::resolveGlobalSymbol(const char* name) const {
     return resolve_bionic_symbol(name);
 }
 
+void* LibraryManager::resolveAppSymbol(const char* name) {
+    if (!name || !*name) return nullptr;
+    for (const auto& entry : libraries_) {
+        void* address = entry.second->getSymbolAddress(name);
+        if (address) {
+            std::fprintf(stderr, "[kudroid_core] App symbol %s resolved from %s -> %p\n",
+                         name, entry.first.c_str(), address);
+            return address;
+        }
+    }
+    return nullptr;
+}
+
 bool extract_arm64_libs_from_apk(const char* apkPath, const char* outputDirectory,
                                  std::string* error) {
 #if !defined(KUDROID_HAS_MINIZIP)
