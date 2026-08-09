@@ -61,6 +61,44 @@ for vkfile in third_party/vulkan-loader/src/loader/loader.c \
     fi
 done
 
+# ── Patch: stub Mac-only Vulkan display symbols for iOS ──────────────────────
+# Display.cpp references rx::IsVulkanMacDisplayAvailable() and
+# rx::CreateVulkanMacDisplay() which are only compiled for macOS.
+# On iOS these symbols are undefined → linker error at libGLESv2.
+# We provide stub implementations that report Mac display as unavailable.
+STUB_FILE="src/libANGLE/DisplayVkMac_ios_stub.cpp"
+if [[ ! -f "$STUB_FILE" ]]; then
+    cat > "$STUB_FILE" << 'STUBEOF'
+// KuDroid: stub for Mac-only Vulkan display symbols on iOS
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#if TARGET_OS_IOS || TARGET_OS_SIMULATOR
+namespace egl { class DisplayState; }
+namespace rx {
+class DisplayImpl;
+bool IsVulkanMacDisplayAvailable() { return false; }
+DisplayImpl *CreateVulkanMacDisplay(const egl::DisplayState &) { return nullptr; }
+}  // namespace rx
+#endif  // TARGET_OS_IOS
+#endif  // __APPLE__
+STUBEOF
+    echo "Created Mac Vulkan display stub: $STUB_FILE"
+
+    # Inject stub into libANGLE source list in BUILD.gn so it gets compiled
+    GN_FILE=$(grep -rl '"Display\.cpp"' src/libANGLE/ --include='*.gn' --include='*.gni' 2>/dev/null | head -1)
+    if [[ -z "$GN_FILE" ]]; then
+        GN_FILE=$(grep -rl '"Display\.cpp"' src/ --include='*.gn' --include='*.gni' 2>/dev/null | head -1)
+    fi
+    if [[ -n "$GN_FILE" ]] && ! grep -q 'DisplayVkMac_ios_stub' "$GN_FILE"; then
+        sed -i '' '/"Display\.cpp",/a\
+            "DisplayVkMac_ios_stub.cpp",
+' "$GN_FILE"
+        echo "Patched $GN_FILE to include Mac display stub"
+    else
+        echo "WARNING: Could not find BUILD.gn with Display.cpp — stub may not be linked"
+    fi
+fi
+
 rm -rf "$BUILD_DIR"
 gn gen "$BUILD_DIR" --args='target_os="ios"
 target_cpu="arm64"
