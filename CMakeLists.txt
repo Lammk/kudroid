@@ -25,6 +25,8 @@ add_library(kudroid_core STATIC
     src/elf_loader.cpp
     src/library_manager.cpp
     src/kudroid_bridge.cpp
+    src/kudroid_jni.cpp
+    src/gpu_test.cpp
 )
 
 add_subdirectory(third_party/jvm/miniJVM/minijvm/c)

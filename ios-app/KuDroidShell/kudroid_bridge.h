@@ -56,6 +56,7 @@ const char* kudroid_vfs_extended_test_log(void);
 /// Test the JVM integration.
 /// Returns a malloc'd diagnostic log; caller must free() it.
 char* kudroid_test_jvm(void);
+char* kudroid_test_gpu(void);
 
 /// Extract and install an APK's arm64-v8a native libraries into android_root.
 /// Returns a malloc'd diagnostic log; caller must free() it.

@@ -369,16 +369,50 @@ extern "C" void bionic_stack_chk_fail() {
 }
 
 extern "C" void* bionic_dlopen(const char* filename, int flag) {
-    (void)filename;
     (void)flag;
-    trace("dlopen() dummy fallback");
+    if (filename) {
+        if (strstr(filename, "libvulkan.so")) {
+            trace("dlopen: Intercepted libvulkan.so! Returning VULKAN handle.");
+            return (void*)0x8888;
+        }
+        if (strstr(filename, "libGLESv2.so") || strstr(filename, "libEGL.so") || strstr(filename, "libOpenSLES.so")) {
+            trace("dlopen: Intercepted Graphics/Audio! Returning NATIVE handle.");
+            return (void*)0x9999;
+        }
+        char msg[256];
+        snprintf(msg, sizeof(msg), "dlopen() dummy fallback for: %s", filename);
+        trace(msg);
+    } else {
+        trace("dlopen() dummy fallback for NULL");
+    }
     return nullptr;
 }
 
 extern "C" void* bionic_dlsym(void* handle, const char* symbol) {
-    (void)handle;
-    (void)symbol;
-    trace("dlsym() dummy fallback");
+    if (handle == (void*)0x8888 || handle == (void*)0x9999) {
+        if (symbol) {
+            void* host_ptr = ::dlsym(RTLD_DEFAULT, symbol);
+            if (host_ptr) {
+                char msg[256];
+                snprintf(msg, sizeof(msg), "dlsym: Resolved %s natively", symbol);
+                trace(msg);
+                return host_ptr;
+            } else {
+                char msg[256];
+                snprintf(msg, sizeof(msg), "dlsym: Native symbol %s not found!", symbol);
+                trace(msg);
+            }
+        }
+        return nullptr;
+    }
+    
+    if (symbol) {
+        char msg[256];
+        snprintf(msg, sizeof(msg), "dlsym() dummy fallback for: %s", symbol);
+        trace(msg);
+    } else {
+        trace("dlsym() dummy fallback for NULL");
+    }
     return nullptr;
 }
 

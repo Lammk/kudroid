@@ -227,6 +227,9 @@ struct DebugView: View {
                             Button("Test JNI JVM") { fullLog = runJniJvmTest() }
                                 .buttonStyle(.bordered)
                             
+                            Button("Test GPU Native") { fullLog = runGpuTest() }
+                                .buttonStyle(.bordered)
+                            
                             Button("Bionic Test") { fullLog = runBionicExecutionTest() }
                                 .buttonStyle(.bordered)
                             Button("Multi-ELF") { fullLog = runMultiElfTest() }
@@ -262,6 +265,14 @@ func setupLogDir() {
 
 func runJniJvmTest() -> String {
     guard let cString = kudroid_test_jvm() else { return "Error: null result" }
+    let log = String(cString: cString)
+    free(UnsafeMutablePointer(mutating: cString))
+    return log
+}
+
+func runGpuTest() -> String {
+    // Note: ensure kudroid_test_gpu is declared in the bridging header
+    guard let cString = kudroid_test_gpu() else { return "Error: null result" }
     let log = String(cString: cString)
     free(UnsafeMutablePointer(mutating: cString))
     return log

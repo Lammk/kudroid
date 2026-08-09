@@ -261,107 +261,9 @@ extern "C" const char* kudroid_jit_status(void) {
     return result;
 }
 
-// --- Mock JNI & NativeActivity ---
-struct JNIEnv_;
-struct JavaVM_;
+#include "kudroid/kudroid_jni.h"
 
-typedef int jint;
-typedef void* jclass;
-typedef void* jmethodID;
-
-struct JNINativeInterface {
-    void* reserved0;
-    void* reserved1;
-    void* reserved2;
-    void* reserved3;
-    void* dummy[300];
-};
-
-struct JNIEnv_ {
-    const struct JNINativeInterface* functions;
-};
-
-struct JNIInvokeInterface {
-    void* reserved0;
-    void* reserved1;
-    void* reserved2;
-    jint (*DestroyJavaVM)(JavaVM_*);
-    jint (*AttachCurrentThread)(JavaVM_*, JNIEnv_**, void*);
-    jint (*DetachCurrentThread)(JavaVM_*);
-    jint (*GetEnv)(JavaVM_*, void**, jint);
-    jint (*AttachCurrentThreadAsDaemon)(JavaVM_*, JNIEnv_**, void*);
-};
-
-struct JavaVM_ {
-    const struct JNIInvokeInterface* functions;
-};
-
-static void* mock_jni_dummy(...) {
-    return nullptr;
-}
-
-extern "C" {
-    // Forward declarations for miniJVM APIs
-    void jvm_init_mem_alloc(void);
-    void jvm_destroy_mem_alloc(void);
-    struct _MiniJVM;
-    typedef struct _MiniJVM MiniJVM;
-    MiniJVM* jvm_create(void);
-    int jvm_init(MiniJVM* jvm, const char* bootcp, const char* cp);
-    void jvm_destroy(MiniJVM* jvm);
-}
-
-// Global miniJVM instance
-static MiniJVM* g_kudroid_jvm = nullptr;
-
-static jint mock_GetEnv(JavaVM_* vm, void** env, jint version) {
-    (void)vm;
-    (void)version;
-    static JNINativeInterface mock_jni_interface;
-    static bool initialized = false;
-    if (!initialized) {
-        // Initialize miniJVM
-        jvm_init_mem_alloc();
-        g_kudroid_jvm = jvm_create();
-        if (g_kudroid_jvm) {
-            jvm_init(g_kudroid_jvm, "", "");
-        }
-        
-        for (int i = 0; i < 300; ++i) {
-            mock_jni_interface.dummy[i] = reinterpret_cast<void*>(mock_jni_dummy);
-        }
-        initialized = true;
-    }
-    static JNIEnv_ mock_jni_env = { &mock_jni_interface };
-    *env = &mock_jni_env;
-    return 0; // JNI_OK
-}
-
-static jint mock_AttachCurrentThread(JavaVM_* vm, JNIEnv_** env, void* args) {
-    (void)args;
-    return mock_GetEnv(vm, reinterpret_cast<void**>(env), 0);
-}
-
-static jint mock_DetachCurrentThread(JavaVM_* vm) {
-    (void)vm;
-    return 0; // JNI_OK
-}
-
-static jint mock_DestroyJavaVM(JavaVM_* vm) {
-    (void)vm;
-    return 0; // JNI_OK
-}
-
-static JNIInvokeInterface mock_invoke_interface = {
-    nullptr, nullptr, nullptr,
-    mock_DestroyJavaVM,
-    mock_AttachCurrentThread,
-    mock_DetachCurrentThread,
-    mock_GetEnv,
-    mock_AttachCurrentThread // AttachCurrentThreadAsDaemon
-};
-
-static JavaVM_ mock_javavm = { &mock_invoke_interface };
+// --- NativeActivity Definitions ---
 
 struct ANativeActivityCallbacks {
     void* onStart;
@@ -384,8 +286,8 @@ struct ANativeActivityCallbacks {
 
 struct ANativeActivity {
     ANativeActivityCallbacks* callbacks;
-    JavaVM_* vm;
-    JNIEnv_* env;
+    JavaVM* vm;
+    JNIEnv* env;
     jclass clazz;
     const char* internalDataPath;
     const char* externalDataPath;
@@ -396,36 +298,46 @@ struct ANativeActivity {
 };
 
 
-
 extern "C" char* kudroid_test_jvm(void) {
     std::string log;
     appendTestHeader(log, "JVM Integration Test", "N/A");
     installCrashHandlers();
     
-    log += "[kudroid_core] Phase: init JVM memory allocator\n";
-    jvm_init_mem_alloc();
+    log += "[kudroid_core] Phase: init JVM via JNI Bridge\n";
+    kudroid_jni_init_jvm("", "");
     
-    log += "[kudroid_core] Phase: create JVM instance\n";
-    MiniJVM *jvm = jvm_create();
-    
-    if (jvm != NULL) {
-        log += "[kudroid_core] JVM instance created successfully.\n";
-        
-        // Just dummy paths for now
-        int ret = jvm_init(jvm, "", "");
-        if (ret) {
-            log += "[kudroid_core] JVM init returned an error (expected if rt.jar is missing).\n";
-        } else {
-            log += "[kudroid_core] JVM init SUCCESS!\n";
-        }
-        
-        log += "[kudroid_core] Phase: destroy JVM\n";
-        jvm_destroy(jvm);
-    } else {
-        log += "[kudroid_core] ERROR: JVM creation FAILED!\n";
+    JavaVM* vm = kudroid_jni_get_javavm();
+    if (!vm) {
+        log += "[kudroid_core] ERROR: JavaVM is null!\n";
+        return strdup(log.c_str());
     }
     
-    jvm_destroy_mem_alloc();
+    JNIEnv* env = nullptr;
+    kudroid_jni_get_env(vm, reinterpret_cast<void**>(&env), 0);
+    
+    if (env) {
+        log += "[kudroid_core] Phase: testing JNI FindClass\n";
+        jclass strClass = env->functions->FindClass(env, "java/lang/String");
+        if (strClass) {
+            log += "[kudroid_core] SUCCESS: Found java/lang/String class via JNI!\n";
+        } else {
+            log += "[kudroid_core] WARNING: java/lang/String class not found (expected if rt.jar is missing)\n";
+        }
+        
+        jstring testStr = env->functions->NewStringUTF(env, "Hello JNI");
+        if (testStr) {
+            const char* utf = env->functions->GetStringUTFChars(env, testStr, nullptr);
+            log += "[kudroid_core] SUCCESS: Created JNI string: ";
+            log += utf ? utf : "null";
+            log += "\n";
+            env->functions->ReleaseStringUTFChars(env, testStr, utf);
+        }
+    } else {
+        log += "[kudroid_core] ERROR: Failed to get JNIEnv!\n";
+    }
+    
+    log += "[kudroid_core] Phase: destroy JVM\n";
+    kudroid_jni_destroy_jvm();
     
     log += "[kudroid_core] JVM test completed.\n";
     
@@ -485,7 +397,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                 
                 mirrorCrash(log);
 
-                auto jni_onload = reinterpret_cast<jint (*)(JavaVM_*, void*)>(
+                auto jni_onload = reinterpret_cast<jint (*)(JavaVM*, void*)>(
                     manager.resolveAppSymbol("JNI_OnLoad")
                 );
                 if (jni_onload) {
@@ -494,7 +406,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                     
                     bionic_init_main_thread_tls();
                     
-                    jint version = jni_onload(&mock_javavm, nullptr);
+                    jint version = jni_onload(kudroid_jni_get_javavm(), nullptr);
                     log += "[kudroid_core] JNI_OnLoad returned version: " + std::to_string(version) + "\n";
                     mirrorCrash(log);
                 } else {
@@ -511,7 +423,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                     static ANativeActivityCallbacks mock_callbacks = {};
                     static ANativeActivity mock_activity = {
                         &mock_callbacks,
-                        &mock_javavm,
+                        kudroid_jni_get_javavm(),
                         nullptr, // env
                         nullptr, // clazz
                         "/sdcard/Android/data/test", // internalDataPath
@@ -521,7 +433,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                         nullptr, // assetManager
                         nullptr  // obbPath
                     };
-                    mock_GetEnv(&mock_javavm, reinterpret_cast<void**>(&mock_activity.env), 0);
+                    kudroid_jni_get_env(kudroid_jni_get_javavm(), reinterpret_cast<void**>(&mock_activity.env), 0);
                     native_activity_create(&mock_activity, nullptr, 0);
                     log += "[kudroid_core] ANativeActivity_onCreate completed.\n";
                     mirrorCrash(log);

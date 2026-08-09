@@ -76,6 +76,7 @@ bool VFSPathRemapper::initialize() {
     make_symlink("../../sdcard", "storage/emulated/0");
     std::filesystem::remove(std::filesystem::path(androidRoot_) / "etc", error);
     make_symlink("system/etc", "etc");
+    make_symlink("/dev/fd", "proc/self/fd");
 
     return init_pseudo_files();
 }
@@ -194,6 +195,28 @@ int vfs_open(const char* path, int flags, mode_t mode) {
             shm_unlink(name);
             vfsTrace(std::string("open mock ashmem (") + name + ") -> " + std::to_string(fd));
             return fd;
+        }
+    }
+
+    if (path && std::strcmp(path, "/proc/self/maps") == 0) {
+        std::string mapsPath = VFSPathRemapper::getInstance().remap("/proc/self/maps");
+        std::ofstream mapsFile(mapsPath, std::ios::trunc);
+        if (mapsFile) {
+            // Write a dummy maps layout that satisfies basic checks
+            mapsFile << "5500000000-5500100000 r-xp 00000000 103:02 12345 /system/bin/app_process64\n";
+            mapsFile << "5500100000-5500110000 r--p 00100000 103:02 12345 /system/bin/app_process64\n";
+            mapsFile << "5500110000-5500120000 rw-p 00110000 103:02 12345 /system/bin/app_process64\n";
+            mapsFile << "7f00000000-7f00100000 rw-p 00000000 00:00 0 [stack]\n";
+            mapsFile.close();
+        }
+    }
+
+    if (path && std::strcmp(path, "/dev/__properties__") == 0) {
+        std::string propPath = VFSPathRemapper::getInstance().remap("/dev/__properties__");
+        if (!std::filesystem::exists(propPath)) {
+            std::ofstream propFile(propPath, std::ios::trunc);
+            propFile << "ro.build.version.sdk=34\nro.product.cpu.abi=arm64-v8a\n";
+            propFile.close();
         }
     }
 
