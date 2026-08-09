@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -7,12 +10,16 @@ extern "C" {
 // Main thread TLS initialization for Android compatibility
 void bionic_init_main_thread_tls(void);
 
+// Direct intercept for Android dlopen — GPU libs (libvulkan.so, libGLESv2.so,
+// libEGL.so) return a fake handle and resolve symbols straight to iOS native.
+void* bionic_dlopen(const char* filename, int flags);
+void* bionic_dlsym(void* handle, const char* symbol);
+
 #ifdef __cplusplus
 }
 #endif
 
-#include <cstddef>
-#include <cstdint>
+#ifdef __cplusplus
 
 namespace kudroid {
 
@@ -28,12 +35,7 @@ const char* bionic_shim_trace();
 /// Returns true if handled successfully.
 bool bionic_handle_tpidr_trap(void* ucontext);
 
-/// Example use from an ELF relocation/symbol-binding loop:
-///
-///     void* address = resolve_bionic_symbol(symbolName);
-///     *relocationTarget = reinterpret_cast<std::uintptr_t>(address);
-///
-/// For symbols implemented by the loaded ELF itself, try getSymbolAddress()
-/// first; use this resolver for imported Bionic/liblog symbols.
-
 } // namespace kudroid
+
+#endif
+

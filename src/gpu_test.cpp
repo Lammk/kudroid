@@ -9,10 +9,10 @@ extern "C" const char* kudroid_test_gpu(void) {
 
     // Test Vulkan Direct Intercept
     log += "[kudroid_gpu] Calling bionic_dlopen(\"libvulkan.so\")...\n";
-    void* vkHandle = kudroid::bionic_dlopen("libvulkan.so", 0);
+    void* vkHandle = bionic_dlopen("libvulkan.so", 0);
     if (vkHandle) {
         log += "[kudroid_gpu] SUCCESS: Got fake handle for libvulkan.so: " + std::to_string(reinterpret_cast<uintptr_t>(vkHandle)) + "\n";
-        void* vkCreateInstance = kudroid::bionic_dlsym(vkHandle, "vkCreateInstance");
+        void* vkCreateInstance = bionic_dlsym(vkHandle, "vkCreateInstance");
         if (vkCreateInstance) {
             log += "[kudroid_gpu] SUCCESS: Resolved vkCreateInstance directly to iOS native address: " + std::to_string(reinterpret_cast<uintptr_t>(vkCreateInstance)) + "\n";
         } else {
@@ -24,10 +24,10 @@ extern "C" const char* kudroid_test_gpu(void) {
 
     // Test OpenGL ES Direct Intercept
     log += "[kudroid_gpu] Calling bionic_dlopen(\"libGLESv2.so\")...\n";
-    void* glesHandle = kudroid::bionic_dlopen("libGLESv2.so", 0);
+    void* glesHandle = bionic_dlopen("libGLESv2.so", 0);
     if (glesHandle) {
         log += "[kudroid_gpu] SUCCESS: Got fake handle for libGLESv2.so: " + std::to_string(reinterpret_cast<uintptr_t>(glesHandle)) + "\n";
-        void* glGetString = kudroid::bionic_dlsym(glesHandle, "glGetString");
+        void* glGetString = bionic_dlsym(glesHandle, "glGetString");
         if (glGetString) {
             log += "[kudroid_gpu] SUCCESS: Resolved glGetString directly to iOS native address: " + std::to_string(reinterpret_cast<uintptr_t>(glGetString)) + "\n";
         } else {
