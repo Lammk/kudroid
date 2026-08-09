@@ -932,14 +932,36 @@ extern "C" void bionic_init_main_thread_tls(void) {
     void* tls_base = std::aligned_alloc(16, 65536); 
     std::memset(tls_base, 0, 65536);
     
+    char* tls_ptr = (char*)tls_base + 32768;
+    
     // Set a dummy stack guard cookie at Slot 5 (offset 40)
-    uint64_t* stack_guard_ptr = reinterpret_cast<uint64_t*>(reinterpret_cast<char*>(tls_base) + 32768 + 40);
+    uint64_t* stack_guard_ptr = reinterpret_cast<uint64_t*>(tls_ptr + 40);
     *stack_guard_ptr = 0x1337BEEFCAFECAFE;
     
     ::pthread_setspecific(tls_key, tls_base);
 
 #if defined(__aarch64__)
-    __asm__ volatile("msr tpidr_el0, %0" : : "r"((char*)tls_base + 32768));
+    // Read BEFORE
+    uint64_t old_tpidr = 0;
+    __asm__ volatile("mrs %0, tpidr_el0" : "=r"(old_tpidr));
+    
+    // Write new value
+    __asm__ volatile("msr tpidr_el0, %0" : : "r"(tls_ptr));
+    
+    // Read AFTER to verify
+    uint64_t new_tpidr = 0;
+    __asm__ volatile("mrs %0, tpidr_el0" : "=r"(new_tpidr));
+    
+    // Check the stack guard is readable at offset 40
+    uint64_t guard_check = *reinterpret_cast<uint64_t*>(new_tpidr + 40);
+    
+    fprintf(stderr, "[TLS_DIAG] tls_base=%p tls_ptr=%p\n", tls_base, tls_ptr);
+    fprintf(stderr, "[TLS_DIAG] tpidr_el0 BEFORE=0x%llx AFTER=0x%llx\n", 
+            (unsigned long long)old_tpidr, (unsigned long long)new_tpidr);
+    fprintf(stderr, "[TLS_DIAG] stack_guard@offset40=0x%llx (expect 0x1337BEEFCAFECAFE)\n",
+            (unsigned long long)guard_check);
+    fprintf(stderr, "[TLS_DIAG] write %s\n", 
+            (new_tpidr == (uint64_t)tls_ptr) ? "SUCCESS" : "FAILED");
 #endif
 }
 
