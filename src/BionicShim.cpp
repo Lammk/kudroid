@@ -366,13 +366,6 @@ struct SymbolEntry {
 };
 
 // --- Pthread Overrides ---
-extern "C" int vfs_mkdir(const char* path, mode_t mode);
-extern "C" int vfs_rmdir(const char* path);
-extern "C" DIR* vfs_opendir(const char* name);
-extern "C" struct dirent* vfs_readdir(DIR* dirp);
-extern "C" int vfs_closedir(DIR* dirp);
-extern "C" ssize_t vfs_readlink(const char* path, char* buf, size_t bufsiz);
-extern "C" char* vfs_realpath(const char* path, char* resolved_path);
 extern "C" int vfs_fstat(int fd, void* info);
 extern "C" int vfs_fstat64(int fd, void* info);
 
