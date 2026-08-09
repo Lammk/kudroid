@@ -36,6 +36,7 @@ gclient sync --no-history --shallow
 
 gn gen "$BUILD_DIR" --args='target_os="ios"
 target_cpu="arm64"
+target_environment="device"
 is_component_build=false
 is_debug=false
 angle_enable_vulkan=true
