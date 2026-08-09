@@ -61,6 +61,15 @@ jobs:
             exit 1
           fi
 
+          if [ -f tests/test_bionic_lib_arm64.so ]; then
+            cp tests/test_bionic_lib_arm64.so KuDroidShell.app/test_bionic_lib.so
+            echo "Bundled ARM64 test_bionic_lib.so ($(wc -c < KuDroidShell.app/test_bionic_lib.so) bytes)"
+          else
+            echo "ERROR: tests/test_bionic_lib_arm64.so not found in repo!"
+            echo "Download it from test-bionic-lib-arm64-so artifact and commit to tests/"
+            exit 1
+          fi
+
           swiftc -sdk "$SDK" -target arm64-apple-ios15.0 \
             -O -parse-as-library \
             -import-objc-header ios-app/KuDroidShell/kudroid_bridge.h \

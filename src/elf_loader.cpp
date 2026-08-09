@@ -1,4 +1,5 @@
 #include "kudroid/elf_loader.hpp"
+#include "kudroid/BionicShim.h"
 
 #include <cerrno>
 #include <cstring>
@@ -175,12 +176,27 @@ struct Elf64Sym {
     uint64_t st_size;     // Symbol size
 };
 
+struct Elf64Rela {
+    uint64_t r_offset;
+    uint64_t r_info;
+    int64_t  r_addend;
+};
+
 // Dynamic tags we care about
 static const int64_t DT_NULL   = 0;
 static const int64_t DT_SYMTAB = 6;
 static const int64_t DT_STRTAB = 5;
 static const int64_t DT_STRSZ  = 10;
 static const int64_t DT_HASH   = 4;
+static const int64_t DT_RELA   = 7;
+static const int64_t DT_RELASZ = 8;
+static const int64_t DT_RELAENT = 9;
+static const int64_t DT_JMPREL = 23;
+static const int64_t DT_PLTRELSZ = 2;
+
+static const uint32_t R_AARCH64_RELATIVE = 1027;
+static const uint32_t R_AARCH64_GLOB_DAT = 1025;
+static const uint32_t R_AARCH64_JUMP_SLOT = 1026;
 
 bool ElfLoader::readFile(std::vector<char>& buf) {
     std::ifstream file(path_, std::ios::binary | std::ios::ate);
@@ -317,10 +333,103 @@ bool ElfLoader::relocate() {
         lastError_ = "Must call map() before relocate()";
         return false;
     }
-    // For our simple test .so without complex relocations, this is sufficient.
-    // Real implementation would parse .rela.dyn / .rela.plt and apply
-    // R_AARCH64_RELATIVE relocations (base + addend).
-    return true;
+    const auto* ehdr = reinterpret_cast<const Elf64Ehdr*>(fileBuf_.data());
+    const auto* phdrs = reinterpret_cast<const Elf64Phdr*>(
+        fileBuf_.data() + ehdr->e_phoff);
+    const Elf64Dyn* dynamic = nullptr;
+    size_t dynamicCount = 0;
+    for (uint16_t i = 0; i < ehdr->e_phnum; ++i) {
+        if (phdrs[i].p_type == 2 &&
+            phdrs[i].p_offset + phdrs[i].p_filesz <= fileBuf_.size()) {
+            dynamic = reinterpret_cast<const Elf64Dyn*>(
+                fileBuf_.data() + phdrs[i].p_offset);
+            dynamicCount = phdrs[i].p_filesz / sizeof(Elf64Dyn);
+            break;
+        }
+    }
+    if (!dynamic) {
+        lastError_ = "Missing PT_DYNAMIC";
+        return false;
+    }
+
+    uint64_t relaVaddr = 0, relaSize = 0, relaEnt = sizeof(Elf64Rela);
+    uint64_t jmpRelVaddr = 0, jmpRelSize = 0;
+    uint64_t symtabVaddr = 0, strtabVaddr = 0, strsz = 0;
+    for (size_t i = 0; i < dynamicCount && dynamic[i].d_tag != DT_NULL; ++i) {
+        switch (dynamic[i].d_tag) {
+            case DT_RELA: relaVaddr = dynamic[i].d_val; break;
+            case DT_RELASZ: relaSize = dynamic[i].d_val; break;
+            case DT_RELAENT: relaEnt = dynamic[i].d_val; break;
+            case DT_JMPREL: jmpRelVaddr = dynamic[i].d_val; break;
+            case DT_PLTRELSZ: jmpRelSize = dynamic[i].d_val; break;
+            case DT_SYMTAB: symtabVaddr = dynamic[i].d_val; break;
+            case DT_STRTAB: strtabVaddr = dynamic[i].d_val; break;
+            case DT_STRSZ: strsz = dynamic[i].d_val; break;
+            default: break;
+        }
+    }
+
+    auto vaddrToFileOffset = [&](uint64_t vaddr) -> uint64_t {
+        for (uint16_t i = 0; i < ehdr->e_phnum; ++i) {
+            const auto& phdr = phdrs[i];
+            if (phdr.p_type == 1 && vaddr >= phdr.p_vaddr &&
+                vaddr - phdr.p_vaddr < phdr.p_filesz) {
+                return phdr.p_offset + (vaddr - phdr.p_vaddr);
+            }
+        }
+        return UINT64_MAX;
+    };
+
+    const uint64_t symtabOffset = vaddrToFileOffset(symtabVaddr);
+    const uint64_t strtabOffset = vaddrToFileOffset(strtabVaddr);
+    if (symtabOffset == UINT64_MAX || strtabOffset == UINT64_MAX ||
+        strtabOffset <= symtabOffset || strsz > fileBuf_.size() - strtabOffset) {
+        lastError_ = "Invalid dynamic symbol tables";
+        return false;
+    }
+    const auto* symtab = reinterpret_cast<const Elf64Sym*>(
+        fileBuf_.data() + symtabOffset);
+    const char* strtab = fileBuf_.data() + strtabOffset;
+    const size_t symbolCount = (strtabOffset - symtabOffset) / sizeof(Elf64Sym);
+
+    auto applyRelocations = [&](uint64_t vaddr, uint64_t size) -> bool {
+        if (size == 0) return true;
+        const uint64_t offset = vaddrToFileOffset(vaddr);
+        if (offset == UINT64_MAX || relaEnt != sizeof(Elf64Rela) ||
+            size % relaEnt != 0 || size > fileBuf_.size() - offset) {
+            lastError_ = "Invalid relocation table";
+            return false;
+        }
+        const auto* relocs = reinterpret_cast<const Elf64Rela*>(
+            fileBuf_.data() + offset);
+        for (uint64_t i = 0; i < size / relaEnt; ++i) {
+            const uint32_t type = static_cast<uint32_t>(relocs[i].r_info & 0xffffffffu);
+            const uint32_t symbolIndex = static_cast<uint32_t>(relocs[i].r_info >> 32);
+            auto* target = reinterpret_cast<uint64_t*>(
+                static_cast<char*>(base_) + relocs[i].r_offset);
+            if (type == R_AARCH64_RELATIVE) {
+                *target = reinterpret_cast<uintptr_t>(base_) + relocs[i].r_addend;
+            } else if (type == R_AARCH64_GLOB_DAT || type == R_AARCH64_JUMP_SLOT) {
+                if (symbolIndex >= symbolCount || symtab[symbolIndex].st_name >= strsz) {
+                    lastError_ = "Invalid relocation symbol index";
+                    return false;
+                }
+                const char* name = strtab + symtab[symbolIndex].st_name;
+                void* address = symtab[symbolIndex].st_shndx != 0
+                    ? static_cast<char*>(base_) + symtab[symbolIndex].st_value
+                    : resolve_bionic_symbol(name);
+                *target = reinterpret_cast<uintptr_t>(address) + relocs[i].r_addend;
+            } else {
+                lastError_ = "Unsupported AArch64 relocation type: " +
+                             std::to_string(type);
+                return false;
+            }
+        }
+        return true;
+    };
+
+    return applyRelocations(relaVaddr, relaSize) &&
+           applyRelocations(jmpRelVaddr, jmpRelSize);
 }
 
 void* ElfLoader::getSymbolAddress(const char* symbolName) {

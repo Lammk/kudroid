@@ -60,6 +60,12 @@ struct ContentView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.orange)
+
+                Button("Bionic Test") {
+                    fullLog = runBionicExecutionTest()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.blue)
             }
 
             // Buttons row 3: Copy
@@ -158,6 +164,29 @@ func runExecutionTest() -> String {
 
     guard let cString = kudroid_execution_test(tmpURL.path) else {
         return "❌ Error: null result from kudroid_execution_test"
+    }
+    let log = String(cString: cString)
+    free(UnsafeMutablePointer(mutating: cString))
+    return log
+}
+
+/// Run the bundled ARM64 library that imports Bionic libc/liblog symbols.
+func runBionicExecutionTest() -> String {
+    guard let bundledURL = Bundle.main.url(forResource: "test_bionic_lib", withExtension: "so") else {
+        return "❌ test_bionic_lib.so not found in bundle"
+    }
+    let tmpURL = FileManager.default.temporaryDirectory.appendingPathComponent("test_bionic_lib.so")
+    do {
+        if FileManager.default.fileExists(atPath: tmpURL.path) {
+            try FileManager.default.removeItem(at: tmpURL)
+        }
+        try FileManager.default.copyItem(at: bundledURL, to: tmpURL)
+    } catch {
+        return "❌ Failed to copy bundled Bionic .so: \(error.localizedDescription)"
+    }
+
+    guard let cString = kudroid_bionic_execution_test(tmpURL.path) else {
+        return "❌ Error: null result from kudroid_bionic_execution_test"
     }
     let log = String(cString: cString)
     free(UnsafeMutablePointer(mutating: cString))

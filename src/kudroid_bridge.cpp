@@ -353,3 +353,39 @@ extern "C" const char* kudroid_execution_test(const char* path) {
         return result;
     }
 }
+
+extern "C" const char* kudroid_bionic_execution_test(const char* path) {
+    std::string log = "[kudroid_core] Bionic shim execution test\n";
+    if (!path) {
+        log += "[kudroid_core] ERROR: null path\n";
+    } else if (!kudroid_jit_available()) {
+        log += "[kudroid_core] ABORT: JIT is Disabled\n";
+    } else {
+        kudroid::ElfLoader loader(path);
+        if (!loader.parse()) {
+            log += "[kudroid_core] PARSE FAILED: " + std::string(loader.lastError()) + "\n";
+        } else if (!loader.map()) {
+            log += "[kudroid_core] MAP FAILED: " + std::string(loader.lastError()) + "\n";
+        } else if (!loader.relocate()) {
+            log += "[kudroid_core] RELOCATE FAILED: " + std::string(loader.lastError()) + "\n";
+        } else {
+            log += "[kudroid_core] ELF mapped and Bionic imports bound.\n";
+            void* address = loader.getSymbolAddress("kudroid_bionic_test");
+            if (!address) {
+                log += "[kudroid_core] SYMBOL FAILED: kudroid_bionic_test not found\n";
+            } else {
+                log += "[kudroid_core] Running kudroid_bionic_test()...\n";
+                mirrorCrash(log);
+                using TestFunction = int (*)();
+                const int result = reinterpret_cast<TestFunction>(address)();
+                log += "[kudroid_core] BIONIC TEST RESULT: " +
+                       std::to_string(result) + (result == 0 ? " (SUCCESS)\n" : " (FAILED)\n");
+            }
+        }
+    }
+
+    writeLogFile("kudroid_bionic_test.txt", log);
+    char* result = static_cast<char*>(malloc(log.size() + 1));
+    if (result) memcpy(result, log.c_str(), log.size() + 1);
+    return result;
+}
