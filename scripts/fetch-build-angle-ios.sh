@@ -61,42 +61,51 @@ for vkfile in third_party/vulkan-loader/src/loader/loader.c \
     fi
 done
 
-# ── Patch: stub Mac-only Vulkan display symbols for iOS ──────────────────────
+# ── Patch: inline-stub Mac-only Vulkan display symbols for iOS ────────────────
 # Display.cpp references rx::IsVulkanMacDisplayAvailable() and
-# rx::CreateVulkanMacDisplay() which are only compiled for macOS.
-# On iOS these symbols are undefined → linker error at libGLESv2.
-# We provide stub implementations that report Mac display as unavailable.
-STUB_FILE="src/libANGLE/DisplayVkMac_ios_stub.cpp"
-if [[ ! -f "$STUB_FILE" ]]; then
-    cat > "$STUB_FILE" << 'STUBEOF'
-// KuDroid: stub for Mac-only Vulkan display symbols on iOS
-#if defined(__APPLE__)
-#include <TargetConditionals.h>
-#if TARGET_OS_IOS || TARGET_OS_SIMULATOR
-namespace egl { class DisplayState; }
-namespace rx {
-class DisplayImpl;
-bool IsVulkanMacDisplayAvailable() { return false; }
-DisplayImpl *CreateVulkanMacDisplay(const egl::DisplayState &) { return nullptr; }
-}  // namespace rx
-#endif  // TARGET_OS_IOS
-#endif  // __APPLE__
-STUBEOF
-    echo "Created Mac Vulkan display stub: $STUB_FILE"
+# rx::CreateVulkanMacDisplay() which are only compiled on macOS.
+# On iOS these symbols are undefined → linker error at libGLESv2 SOLINK step.
+# Fix: inject inline definitions directly into Display.cpp so the compiler
+# resolves them locally without needing external symbols.
+DISPLAY_FILE="src/libANGLE/Display.cpp"
+if [[ -f "$DISPLAY_FILE" ]] && ! grep -q 'KuDroid' "$DISPLAY_FILE"; then
+    python3 << 'PYEOF'
+filepath = "src/libANGLE/Display.cpp"
+with open(filepath, "r") as f:
+    lines = f.readlines()
 
-    # Inject stub into libANGLE source list in BUILD.gn so it gets compiled
-    GN_FILE=$(grep -rl '"Display\.cpp"' src/libANGLE/ --include='*.gn' --include='*.gni' 2>/dev/null | head -1)
-    if [[ -z "$GN_FILE" ]]; then
-        GN_FILE=$(grep -rl '"Display\.cpp"' src/ --include='*.gn' --include='*.gni' 2>/dev/null | head -1)
-    fi
-    if [[ -n "$GN_FILE" ]] && ! grep -q 'DisplayVkMac_ios_stub' "$GN_FILE"; then
-        sed -i '' '/"Display\.cpp",/a\
-            "DisplayVkMac_ios_stub.cpp",
-' "$GN_FILE"
-        echo "Patched $GN_FILE to include Mac display stub"
-    else
-        echo "WARNING: Could not find BUILD.gn with Display.cpp — stub may not be linked"
-    fi
+stub = [
+    "\n",
+    "// ── KuDroid: inline stubs for Mac-only Vulkan display on iOS ────────────\n",
+    "#if defined(__APPLE__)\n",
+    "#include <TargetConditionals.h>\n",
+    "#if TARGET_OS_IOS || TARGET_OS_SIMULATOR\n",
+    "namespace rx {\n",
+    "class DisplayImpl;\n",
+    "inline bool IsVulkanMacDisplayAvailable() { return false; }\n",
+    "inline DisplayImpl *CreateVulkanMacDisplay(const egl::DisplayState &) {\n",
+    "    return nullptr;\n",
+    "}\n",
+    "}  // namespace rx\n",
+    "#endif  // TARGET_OS_IOS\n",
+    "#endif  // __APPLE__\n",
+    "// ── End KuDroid patch ────────────────────────────────────────────────────\n",
+    "\n",
+]
+
+# Find insertion point: after the last #include line
+insert_after = 0
+for i, line in enumerate(lines):
+    if line.strip().startswith("#include"):
+        insert_after = i + 1
+
+lines[insert_after:insert_after] = stub
+
+with open(filepath, "w") as f:
+    f.writelines(lines)
+
+print(f"Patched {filepath}: added inline Mac display stubs for iOS")
+PYEOF
 fi
 
 rm -rf "$BUILD_DIR"
