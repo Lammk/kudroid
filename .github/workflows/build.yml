@@ -281,13 +281,21 @@ jobs:
             cp third_party/ANGLE/lib/ios-arm64/libGLESv2.framework/libGLESv2 third_party/ANGLE/lib/ios-arm64/libGLESv2.dylib
           fi
 
+          MINI_JVM_LIB=$(find build-ios -name "libmini_jvm_lib.a" | head -n 1)
+          if [ -z "$MINI_JVM_LIB" ]; then
+            echo "ERROR: libmini_jvm_lib.a not found!"
+            find build-ios -type f -name "*.a"
+            exit 1
+          fi
+          echo "Found miniJVM at: $MINI_JVM_LIB"
+
           swiftc -sdk "$SDK" -target arm64-apple-ios15.0 \
             -O -parse-as-library \
             -import-objc-header ios-app/KuDroidShell/kudroid_bridge.h \
             ios-app/KuDroidShell/KuDroidApp.swift \
             ios-app/KuDroidShell/ContentView.swift \
             build-ios/libkudroid_core.a \
-            build-ios/third_party/jvm/miniJVM/minijvm/c/libmini_jvm_lib.a \
+            "$MINI_JVM_LIB" \
             -Lthird_party/ANGLE/lib/ios-arm64 \
             -lEGL -lGLESv2 \
             third_party/MoltenVK/MoltenVK/static/MoltenVK.xcframework/ios-arm64/libMoltenVK.a \
