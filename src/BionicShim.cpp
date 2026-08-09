@@ -364,6 +364,17 @@ struct SymbolEntry {
 };
 
 // --- Pthread Overrides ---
+extern "C" int vfs_mkdir(const char* path, mode_t mode);
+extern "C" int vfs_rmdir(const char* path);
+extern "C" DIR* vfs_opendir(const char* name);
+extern "C" struct dirent* vfs_readdir(DIR* dirp);
+extern "C" int vfs_closedir(DIR* dirp);
+extern "C" ssize_t vfs_readlink(const char* path, char* buf, size_t bufsiz);
+extern "C" char* vfs_realpath(const char* path, char* resolved_path);
+extern "C" int vfs_fstat(int fd, void* info);
+extern "C" int vfs_fstat64(int fd, void* info);
+
+// Dummy fallback functions
 extern "C" int bionic_pthread_attr_init(void* attr) { (void)attr; return 0; }
 extern "C" int bionic_pthread_attr_destroy(void* attr) { (void)attr; return 0; }
 extern "C" int bionic_pthread_attr_setstacksize(void* attr, size_t stacksize) { (void)attr; (void)stacksize; return 0; }
@@ -410,6 +421,30 @@ extern "C" int bionic_pthread_once(int* guest_once, void (*init_routine)(void)) 
     return 0;
 }
 
+
+struct android_sigaction {
+    union {
+        void (*sa_handler)(int);
+        void (*sa_sigaction)(int, void*, void*);
+    };
+    uint64_t sa_mask;
+    int sa_flags;
+    void (*sa_restorer)(void);
+};
+
+#include <signal.h>
+
+extern "C" int bionic_sigaction(int signum, const struct android_sigaction* act, struct android_sigaction* oldact) {
+    char buf[128];
+    std::snprintf(buf, sizeof(buf), "sigaction(signum=%d)", signum);
+    trace(buf);
+    
+    // For now, just ignore it to prevent it from crashing the host handler,
+    // but returning 0 makes IL2CPP think it succeeded.
+    // If it's SIGSEGV (11), IL2CPP will crash on intentional null deref.
+    return 0;
+}
+
 extern "C" int bionic_pthread_create(pthread_t* thread, void* attr, void* (*start_routine)(void*), void* arg) {
     (void)attr;
     // Ignore Android's pthread_attr_t and pass nullptr to iOS's pthread_create
@@ -436,6 +471,7 @@ const SymbolEntry kSymbols[] = {
     {"pthread_setspecific", reinterpret_cast<void*>(&bionic_pthread_setspecific)},
     {"pthread_key_delete", reinterpret_cast<void*>(&bionic_pthread_key_delete)},
     {"pthread_once", reinterpret_cast<void*>(&bionic_pthread_once)},
+    {"sigaction", reinterpret_cast<void*>(&bionic_sigaction)},
     {"pthread_cond_init", reinterpret_cast<void*>(&bionic_pthread_cond_init)},
     {"pthread_cond_destroy", reinterpret_cast<void*>(&bionic_pthread_cond_destroy)},
     {"pthread_cond_wait", reinterpret_cast<void*>(&bionic_pthread_cond_wait)},
@@ -471,6 +507,8 @@ const SymbolEntry kSymbols[] = {
     {"stat64", reinterpret_cast<void*>(&vfs_stat64)},
     {"lstat", reinterpret_cast<void*>(&vfs_lstat)},
     {"lstat64", reinterpret_cast<void*>(&vfs_lstat64)},
+    {"fstat", reinterpret_cast<void*>(&vfs_fstat)},
+    {"fstat64", reinterpret_cast<void*>(&vfs_fstat64)},
     {"chmod", reinterpret_cast<void*>(&vfs_chmod)},
     {"chown", reinterpret_cast<void*>(&vfs_chown)},
     {"unlink", reinterpret_cast<void*>(&vfs_unlink)},
