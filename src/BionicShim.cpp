@@ -52,6 +52,7 @@ struct android_epoll_event {
 #include <cstring>
 #include <pthread.h>
 #include <unordered_map>
+#include <map>
 #include <mutex>
 #include <shared_mutex>
 #include <atomic>
