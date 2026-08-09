@@ -302,6 +302,9 @@ struct ANativeActivity {
 };
 
 
+// Declare the external setter
+extern "C" void kudroid_jni_set_log_callback(void (*cb)(const char*));
+
 extern "C" char* kudroid_test_jvm(void) {
     std::string log;
     appendTestHeader(log, "JVM Integration Test", "N/A");
@@ -309,6 +312,18 @@ extern "C" char* kudroid_test_jvm(void) {
     
     log += "[kudroid_core] Phase: init JVM via JNI Bridge\n";
     kudroid::bionic_shim_reset_trace();
+
+    // Global variable to hold log reference for C callback
+    static std::string* g_jvm_test_log = &log;
+    g_jvm_test_log = &log;
+    
+    kudroid_jni_set_log_callback([](const char* msg) {
+        if (g_jvm_test_log) {
+            *g_jvm_test_log += "[kudroid_jni] ";
+            *g_jvm_test_log += msg;
+            *g_jvm_test_log += "\n";
+        }
+    });
 
     kudroid_jni_init_jvm("", "");
     
@@ -345,6 +360,9 @@ extern "C" char* kudroid_test_jvm(void) {
     log += "[kudroid_core] Phase: destroy JVM\n";
     kudroid_jni_destroy_jvm();
     
+    kudroid_jni_set_log_callback(nullptr);
+    g_jvm_test_log = nullptr;
+
     log += "[kudroid_core] JVM test completed.\n";
     
     return strdup(log.c_str());

@@ -22,14 +22,32 @@ static JNIInvokeInterface_ g_invoke_interface;
 static JNIEnv_ g_jni_env = { &g_jni_interface };
 static JavaVM_ g_java_vm = { &g_invoke_interface };
 static std::mutex g_jvm_mutex;
+#include <functional>
+#include <vector>
+
+static std::function<void(const char*)> g_jni_log_callback;
+
+extern "C" void kudroid_jni_set_log_callback(void (*cb)(const char*)) {
+    if (cb) {
+        g_jni_log_callback = [cb](const char* msg) { cb(msg); };
+    } else {
+        g_jni_log_callback = nullptr;
+    }
+}
+
 // Helper for detailed logging
 static void log_jni(const char* fmt, ...) {
-    fprintf(stderr, "[kudroid_jni] ");
+    char buffer[1024];
     va_list args;
     va_start(args, fmt);
-    vfprintf(stderr, fmt, args);
+    vsnprintf(buffer, sizeof(buffer), fmt, args);
     va_end(args);
-    fprintf(stderr, "\n");
+
+    fprintf(stderr, "[kudroid_jni] %s\n", buffer);
+
+    if (g_jni_log_callback) {
+        g_jni_log_callback(buffer);
+    }
 }
 
 // ----------------------------------------------------------------------------
