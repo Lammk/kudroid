@@ -76,6 +76,14 @@ struct ContentView: View {
                 .tint(.purple)
             }
 
+            HStack(spacing: 12) {
+                Button("Run VFS Self-Test") {
+                    fullLog = runVFSSelfTest()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.green)
+            }
+
             // Buttons row 3: Copy
             HStack(spacing: 12) {
                 Button("Copy Full Log") {
@@ -102,7 +110,18 @@ struct ContentView: View {
 func setupLogDir() {
     if let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
         kudroid_set_log_dir(docs.path)
+        kudroid_set_documents_dir(docs.path)
     }
+}
+
+/// Run VFS path remapping and redirected file I/O checks.
+func runVFSSelfTest() -> String {
+    guard let cString = kudroid_vfs_self_test_log() else {
+        return "Error: null result from kudroid_vfs_self_test_log"
+    }
+    let log = String(cString: cString)
+    free(UnsafeMutablePointer(mutating: cString))
+    return log
 }
 
 /// Query JIT availability from kudroid_core.

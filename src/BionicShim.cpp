@@ -1,4 +1,5 @@
 #include "kudroid/BionicShim.h"
+#include "kudroid/VFSPathRemapper.h"
 
 #include <cstdarg>
 #include <cstdio>
@@ -234,6 +235,12 @@ const SymbolEntry kSymbols[] = {
     {"free", reinterpret_cast<void*>(&bionic_free)},
     {"mmap", reinterpret_cast<void*>(&::mmap)},
     {"munmap", reinterpret_cast<void*>(&::munmap)},
+    {"open", reinterpret_cast<void*>(&vfs_open)},
+    {"fopen", reinterpret_cast<void*>(&vfs_fopen)},
+    {"access", reinterpret_cast<void*>(&vfs_access)},
+    {"stat", reinterpret_cast<void*>(&vfs_stat)},
+    {"mkdir", reinterpret_cast<void*>(&vfs_mkdir)},
+    {"opendir", reinterpret_cast<void*>(&vfs_opendir)},
     {"pthread_create", reinterpret_cast<void*>(&::pthread_create)},
     {"pthread_join", reinterpret_cast<void*>(&::pthread_join)},
     {"pthread_mutex_init", reinterpret_cast<void*>(&bionic_pthread_mutex_init)},

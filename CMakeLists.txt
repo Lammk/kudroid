@@ -18,12 +18,17 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
 endif()
 
 add_library(kudroid_core STATIC
+    src/APKExtractor.cpp
     src/BionicShim.cpp
+    src/VFSPathRemapper.cpp
     src/bionic_log_trampoline.S
     src/elf_loader.cpp
     src/library_manager.cpp
     src/kudroid_bridge.cpp
 )
+
+find_package(ZLIB REQUIRED)
+target_link_libraries(kudroid_core PRIVATE ZLIB::ZLIB)
 
 find_path(MINIZIP_INCLUDE_DIR minizip/unzip.h)
 find_library(MINIZIP_LIBRARY NAMES minizip)

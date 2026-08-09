@@ -43,6 +43,12 @@ const char* kudroid_jit_status(void);
 /// Also installs signal handlers so a native crash still leaves a log file.
 void kudroid_set_log_dir(const char* dir);
 
+/// Set the Documents directory used by VFSPathRemapper.
+void kudroid_set_documents_dir(const char* dir);
+
+/// Run the VFS redirect and I/O self-test; returns a malloc'd log.
+const char* kudroid_vfs_self_test_log(void);
+
 #ifdef __cplusplus
 }
 #endif

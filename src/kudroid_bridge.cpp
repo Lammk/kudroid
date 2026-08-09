@@ -1,5 +1,6 @@
 #include "kudroid/elf_loader.hpp"
 #include "kudroid/BionicShim.h"
+#include "kudroid/VFSPathRemapper.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -96,6 +97,18 @@ extern "C" void kudroid_set_log_dir(const char* dir) {
     strncpy(g_logDir, dir, sizeof(g_logDir) - 1);
     g_logDir[sizeof(g_logDir) - 1] = '\0';
     installCrashHandlers();
+}
+
+extern "C" void kudroid_set_documents_dir(const char* dir) {
+    if (dir) kudroid::VFSPathRemapper::getInstance().setDocumentsDirectory(dir);
+}
+
+extern "C" const char* kudroid_vfs_self_test_log(void) {
+    const std::string log = kudroid::run_vfs_self_test();
+    writeLogFile("kudroid_vfs_selftest.txt", log);
+    char* result = static_cast<char*>(std::malloc(log.size() + 1));
+    if (result) std::memcpy(result, log.c_str(), log.size() + 1);
+    return result;
 }
 
 #if defined(__APPLE__)
