@@ -142,8 +142,17 @@ if [[ -d "$BUILD_DIR/libGLESv2.framework" ]]; then
     cp -R "$BUILD_DIR/libGLESv2.framework" "$OUTPUT_DIR/lib/ios-arm64/"
 fi
 
-# Fallback for static/dynamic libraries just in case
-find "$BUILD_DIR" -maxdepth 1 -type f \( -name 'libEGL.a' -o -name 'libGLESv2.a' -o -name 'libEGL.dylib' -o -name 'libGLESv2.dylib' \) -exec cp {} "$OUTPUT_DIR/lib/ios-arm64/" \;
+# Also search recursively for any libEGL/libGLESv2 .a or .dylib files
+find "$BUILD_DIR" -type f \( -name 'libEGL.a' -o -name 'libGLESv2.a' -o -name 'libEGL.dylib' -o -name 'libGLESv2.dylib' \) -exec cp {} "$OUTPUT_DIR/lib/ios-arm64/" \;
+
+# If framework binaries exist, make sure libEGL.dylib and libGLESv2.dylib exist for -lEGL / -lGLESv2 linker flags
+if [[ -f "$OUTPUT_DIR/lib/ios-arm64/libEGL.framework/libEGL" && ! -f "$OUTPUT_DIR/lib/ios-arm64/libEGL.dylib" && ! -f "$OUTPUT_DIR/lib/ios-arm64/libEGL.a" ]]; then
+    cp "$OUTPUT_DIR/lib/ios-arm64/libEGL.framework/libEGL" "$OUTPUT_DIR/lib/ios-arm64/libEGL.dylib"
+fi
+if [[ -f "$OUTPUT_DIR/lib/ios-arm64/libGLESv2.framework/libGLESv2" && ! -f "$OUTPUT_DIR/lib/ios-arm64/libGLESv2.dylib" && ! -f "$OUTPUT_DIR/lib/ios-arm64/libGLESv2.a" ]]; then
+    cp "$OUTPUT_DIR/lib/ios-arm64/libGLESv2.framework/libGLESv2" "$OUTPUT_DIR/lib/ios-arm64/libGLESv2.dylib"
+fi
+
 popd >/dev/null
 
 if [[ ! -e "$OUTPUT_DIR/lib/ios-arm64/libEGL.framework" && ! -f "$OUTPUT_DIR/lib/ios-arm64/libEGL.a" && ! -f "$OUTPUT_DIR/lib/ios-arm64/libEGL.dylib" ]]; then
@@ -152,4 +161,4 @@ if [[ ! -e "$OUTPUT_DIR/lib/ios-arm64/libEGL.framework" && ! -f "$OUTPUT_DIR/lib
 fi
 
 echo "ANGLE iOS ARM64 installed at: $OUTPUT_DIR"
-ls -lh "$OUTPUT_DIR/lib/ios-arm64/"
+ls -la "$OUTPUT_DIR/lib/ios-arm64/"
