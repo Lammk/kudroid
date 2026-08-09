@@ -2,7 +2,6 @@
 #include "kudroid/BionicShim.h"
 #include "kudroid/VFSPathRemapper.h"
 #include "kudroid/APKExtractor.h"
-#include "kudroid/library_manager.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>

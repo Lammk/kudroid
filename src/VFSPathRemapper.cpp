@@ -225,7 +225,9 @@ bool writeAndRead(const char* virtualPath, const char* expected, std::string& de
         return false;
     }
     char buffer[256] = {};
-    std::fgets(buffer, sizeof(buffer), input);
+    if (!std::fgets(buffer, sizeof(buffer), input)) {
+        buffer[0] = '\0';
+    }
     std::fclose(input);
     if (std::string(buffer) != expected) {
         detail = "content mismatch: " + std::string(buffer);

@@ -187,7 +187,7 @@ static const int64_t DT_NULL   = 0;
 static const int64_t DT_SYMTAB = 6;
 static const int64_t DT_STRTAB = 5;
 static const int64_t DT_STRSZ  = 10;
-static const int64_t DT_HASH   = 4;
+
 static const int64_t DT_RELA   = 7;
 static const int64_t DT_RELASZ = 8;
 static const int64_t DT_RELAENT = 9;
