@@ -74,7 +74,12 @@ def generate_bridge():
         fmt_str = []
         for decl, name in zip(arg_decls, arg_names):
             if name != '...':
-                if 'jfloat' in decl or 'jdouble' in decl:
+                is_ptr = '*' in decl or 'Array' in decl or 'jobject' in decl or 'jclass' in decl or 'jstring' in decl or 'jthrowable' in decl
+                
+                if is_ptr:
+                    fmt_str.append(f"{name}=%p")
+                    fmt_args.append(f"(void*){name}")
+                elif 'jfloat' in decl or 'jdouble' in decl:
                     fmt_str.append(f"{name}=%f")
                     fmt_args.append(f"(double){name}")
                 elif 'jlong' in decl:

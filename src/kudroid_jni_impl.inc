@@ -2,7 +2,7 @@
 // DO NOT EDIT DIRECTLY
 
 static jclass JNICALL jni_DefineClass(JNIEnv *env, const char *name, jobject loader, const jbyte *buf, jsize len) {
-    log_jni("[AUTO] DefineClass(" "env=%p, name=%p, loader=%p, buf=%d, len=%d "")", (void*)env, (void*)name, (void*)loader, (int)buf, (int)len);
+    log_jni("[AUTO] DefineClass(" "env=%p, name=%p, loader=%p, buf=%p, len=%d "")", (void*)env, (void*)name, (void*)loader, (void*)buf, (int)len);
     return nullptr;
 }
 
@@ -777,7 +777,7 @@ static void JNICALL jni_SetStaticDoubleField(JNIEnv *env, jclass clazz, jfieldID
 }
 
 static jstring JNICALL jni_NewString(JNIEnv *env, const jchar *unicode, jsize len) {
-    log_jni("[AUTO] NewString(" "env=%p, unicode=%d, len=%d "")", (void*)env, (int)unicode, (int)len);
+    log_jni("[AUTO] NewString(" "env=%p, unicode=%p, len=%d "")", (void*)env, (void*)unicode, (int)len);
     return nullptr;
 }
 
@@ -787,12 +787,12 @@ static jsize JNICALL jni_GetStringLength(JNIEnv *env, jstring str) {
 }
 
 static const jchar * JNICALL jni_GetStringChars(JNIEnv *env, jstring str, jboolean *isCopy) {
-    log_jni("[AUTO] GetStringChars(" "env=%p, str=%p, isCopy=%d "")", (void*)env, (void*)str, (int)isCopy);
+    log_jni("[AUTO] GetStringChars(" "env=%p, str=%p, isCopy=%p "")", (void*)env, (void*)str, (void*)isCopy);
     return nullptr;
 }
 
 static void JNICALL jni_ReleaseStringChars(JNIEnv *env, jstring str, const jchar *chars) {
-    log_jni("[AUTO] ReleaseStringChars(" "env=%p, str=%p, chars=%d "")", (void*)env, (void*)str, (int)chars);
+    log_jni("[AUTO] ReleaseStringChars(" "env=%p, str=%p, chars=%p "")", (void*)env, (void*)str, (void*)chars);
     return;
 }
 
@@ -857,162 +857,162 @@ static jdoubleArray JNICALL jni_NewDoubleArray(JNIEnv *env, jsize len) {
 }
 
 static jboolean * JNICALL jni_GetBooleanArrayElements(JNIEnv *env, jbooleanArray array, jboolean *isCopy) {
-    log_jni("[AUTO] GetBooleanArrayElements(" "env=%p, array=%d, isCopy=%d "")", (void*)env, (int)array, (int)isCopy);
+    log_jni("[AUTO] GetBooleanArrayElements(" "env=%p, array=%p, isCopy=%p "")", (void*)env, (void*)array, (void*)isCopy);
     return nullptr;
 }
 
 static jbyte * JNICALL jni_GetByteArrayElements(JNIEnv *env, jbyteArray array, jboolean *isCopy) {
-    log_jni("[AUTO] GetByteArrayElements(" "env=%p, array=%d, isCopy=%d "")", (void*)env, (int)array, (int)isCopy);
+    log_jni("[AUTO] GetByteArrayElements(" "env=%p, array=%p, isCopy=%p "")", (void*)env, (void*)array, (void*)isCopy);
     return nullptr;
 }
 
 static jchar * JNICALL jni_GetCharArrayElements(JNIEnv *env, jcharArray array, jboolean *isCopy) {
-    log_jni("[AUTO] GetCharArrayElements(" "env=%p, array=%d, isCopy=%d "")", (void*)env, (int)array, (int)isCopy);
+    log_jni("[AUTO] GetCharArrayElements(" "env=%p, array=%p, isCopy=%p "")", (void*)env, (void*)array, (void*)isCopy);
     return nullptr;
 }
 
 static jshort * JNICALL jni_GetShortArrayElements(JNIEnv *env, jshortArray array, jboolean *isCopy) {
-    log_jni("[AUTO] GetShortArrayElements(" "env=%p, array=%d, isCopy=%d "")", (void*)env, (int)array, (int)isCopy);
+    log_jni("[AUTO] GetShortArrayElements(" "env=%p, array=%p, isCopy=%p "")", (void*)env, (void*)array, (void*)isCopy);
     return nullptr;
 }
 
 static jint * JNICALL jni_GetIntArrayElements(JNIEnv *env, jintArray array, jboolean *isCopy) {
-    log_jni("[AUTO] GetIntArrayElements(" "env=%p, array=%d, isCopy=%d "")", (void*)env, (int)array, (int)isCopy);
+    log_jni("[AUTO] GetIntArrayElements(" "env=%p, array=%p, isCopy=%p "")", (void*)env, (void*)array, (void*)isCopy);
     return nullptr;
 }
 
 static jlong * JNICALL jni_GetLongArrayElements(JNIEnv *env, jlongArray array, jboolean *isCopy) {
-    log_jni("[AUTO] GetLongArrayElements(" "env=%p, array=%lld, isCopy=%d "")", (void*)env, (long long)array, (int)isCopy);
+    log_jni("[AUTO] GetLongArrayElements(" "env=%p, array=%p, isCopy=%p "")", (void*)env, (void*)array, (void*)isCopy);
     return nullptr;
 }
 
 static jfloat * JNICALL jni_GetFloatArrayElements(JNIEnv *env, jfloatArray array, jboolean *isCopy) {
-    log_jni("[AUTO] GetFloatArrayElements(" "env=%p, array=%f, isCopy=%d "")", (void*)env, (double)array, (int)isCopy);
+    log_jni("[AUTO] GetFloatArrayElements(" "env=%p, array=%p, isCopy=%p "")", (void*)env, (void*)array, (void*)isCopy);
     return nullptr;
 }
 
 static jdouble * JNICALL jni_GetDoubleArrayElements(JNIEnv *env, jdoubleArray array, jboolean *isCopy) {
-    log_jni("[AUTO] GetDoubleArrayElements(" "env=%p, array=%f, isCopy=%d "")", (void*)env, (double)array, (int)isCopy);
+    log_jni("[AUTO] GetDoubleArrayElements(" "env=%p, array=%p, isCopy=%p "")", (void*)env, (void*)array, (void*)isCopy);
     return nullptr;
 }
 
 static void JNICALL jni_ReleaseBooleanArrayElements(JNIEnv *env, jbooleanArray array, jboolean *elems, jint mode) {
-    log_jni("[AUTO] ReleaseBooleanArrayElements(" "env=%p, array=%d, elems=%d, mode=%d "")", (void*)env, (int)array, (int)elems, (int)mode);
+    log_jni("[AUTO] ReleaseBooleanArrayElements(" "env=%p, array=%p, elems=%p, mode=%d "")", (void*)env, (void*)array, (void*)elems, (int)mode);
     return;
 }
 
 static void JNICALL jni_ReleaseByteArrayElements(JNIEnv *env, jbyteArray array, jbyte *elems, jint mode) {
-    log_jni("[AUTO] ReleaseByteArrayElements(" "env=%p, array=%d, elems=%d, mode=%d "")", (void*)env, (int)array, (int)elems, (int)mode);
+    log_jni("[AUTO] ReleaseByteArrayElements(" "env=%p, array=%p, elems=%p, mode=%d "")", (void*)env, (void*)array, (void*)elems, (int)mode);
     return;
 }
 
 static void JNICALL jni_ReleaseCharArrayElements(JNIEnv *env, jcharArray array, jchar *elems, jint mode) {
-    log_jni("[AUTO] ReleaseCharArrayElements(" "env=%p, array=%d, elems=%d, mode=%d "")", (void*)env, (int)array, (int)elems, (int)mode);
+    log_jni("[AUTO] ReleaseCharArrayElements(" "env=%p, array=%p, elems=%p, mode=%d "")", (void*)env, (void*)array, (void*)elems, (int)mode);
     return;
 }
 
 static void JNICALL jni_ReleaseShortArrayElements(JNIEnv *env, jshortArray array, jshort *elems, jint mode) {
-    log_jni("[AUTO] ReleaseShortArrayElements(" "env=%p, array=%d, elems=%d, mode=%d "")", (void*)env, (int)array, (int)elems, (int)mode);
+    log_jni("[AUTO] ReleaseShortArrayElements(" "env=%p, array=%p, elems=%p, mode=%d "")", (void*)env, (void*)array, (void*)elems, (int)mode);
     return;
 }
 
 static void JNICALL jni_ReleaseIntArrayElements(JNIEnv *env, jintArray array, jint *elems, jint mode) {
-    log_jni("[AUTO] ReleaseIntArrayElements(" "env=%p, array=%d, elems=%d, mode=%d "")", (void*)env, (int)array, (int)elems, (int)mode);
+    log_jni("[AUTO] ReleaseIntArrayElements(" "env=%p, array=%p, elems=%p, mode=%d "")", (void*)env, (void*)array, (void*)elems, (int)mode);
     return;
 }
 
 static void JNICALL jni_ReleaseLongArrayElements(JNIEnv *env, jlongArray array, jlong *elems, jint mode) {
-    log_jni("[AUTO] ReleaseLongArrayElements(" "env=%p, array=%lld, elems=%lld, mode=%d "")", (void*)env, (long long)array, (long long)elems, (int)mode);
+    log_jni("[AUTO] ReleaseLongArrayElements(" "env=%p, array=%p, elems=%p, mode=%d "")", (void*)env, (void*)array, (void*)elems, (int)mode);
     return;
 }
 
 static void JNICALL jni_ReleaseFloatArrayElements(JNIEnv *env, jfloatArray array, jfloat *elems, jint mode) {
-    log_jni("[AUTO] ReleaseFloatArrayElements(" "env=%p, array=%f, elems=%f, mode=%d "")", (void*)env, (double)array, (double)elems, (int)mode);
+    log_jni("[AUTO] ReleaseFloatArrayElements(" "env=%p, array=%p, elems=%p, mode=%d "")", (void*)env, (void*)array, (void*)elems, (int)mode);
     return;
 }
 
 static void JNICALL jni_ReleaseDoubleArrayElements(JNIEnv *env, jdoubleArray array, jdouble *elems, jint mode) {
-    log_jni("[AUTO] ReleaseDoubleArrayElements(" "env=%p, array=%f, elems=%f, mode=%d "")", (void*)env, (double)array, (double)elems, (int)mode);
+    log_jni("[AUTO] ReleaseDoubleArrayElements(" "env=%p, array=%p, elems=%p, mode=%d "")", (void*)env, (void*)array, (void*)elems, (int)mode);
     return;
 }
 
 static void JNICALL jni_GetBooleanArrayRegion(JNIEnv *env, jbooleanArray array, jsize start, jsize l, jboolean *buf) {
-    log_jni("[AUTO] GetBooleanArrayRegion(" "env=%p, array=%d, start=%d, l=%d, buf=%d "")", (void*)env, (int)array, (int)start, (int)l, (int)buf);
+    log_jni("[AUTO] GetBooleanArrayRegion(" "env=%p, array=%p, start=%d, l=%d, buf=%p "")", (void*)env, (void*)array, (int)start, (int)l, (void*)buf);
     return;
 }
 
 static void JNICALL jni_GetByteArrayRegion(JNIEnv *env, jbyteArray array, jsize start, jsize len, jbyte *buf) {
-    log_jni("[AUTO] GetByteArrayRegion(" "env=%p, array=%d, start=%d, len=%d, buf=%d "")", (void*)env, (int)array, (int)start, (int)len, (int)buf);
+    log_jni("[AUTO] GetByteArrayRegion(" "env=%p, array=%p, start=%d, len=%d, buf=%p "")", (void*)env, (void*)array, (int)start, (int)len, (void*)buf);
     return;
 }
 
 static void JNICALL jni_GetCharArrayRegion(JNIEnv *env, jcharArray array, jsize start, jsize len, jchar *buf) {
-    log_jni("[AUTO] GetCharArrayRegion(" "env=%p, array=%d, start=%d, len=%d, buf=%d "")", (void*)env, (int)array, (int)start, (int)len, (int)buf);
+    log_jni("[AUTO] GetCharArrayRegion(" "env=%p, array=%p, start=%d, len=%d, buf=%p "")", (void*)env, (void*)array, (int)start, (int)len, (void*)buf);
     return;
 }
 
 static void JNICALL jni_GetShortArrayRegion(JNIEnv *env, jshortArray array, jsize start, jsize len, jshort *buf) {
-    log_jni("[AUTO] GetShortArrayRegion(" "env=%p, array=%d, start=%d, len=%d, buf=%d "")", (void*)env, (int)array, (int)start, (int)len, (int)buf);
+    log_jni("[AUTO] GetShortArrayRegion(" "env=%p, array=%p, start=%d, len=%d, buf=%p "")", (void*)env, (void*)array, (int)start, (int)len, (void*)buf);
     return;
 }
 
 static void JNICALL jni_GetIntArrayRegion(JNIEnv *env, jintArray array, jsize start, jsize len, jint *buf) {
-    log_jni("[AUTO] GetIntArrayRegion(" "env=%p, array=%d, start=%d, len=%d, buf=%d "")", (void*)env, (int)array, (int)start, (int)len, (int)buf);
+    log_jni("[AUTO] GetIntArrayRegion(" "env=%p, array=%p, start=%d, len=%d, buf=%p "")", (void*)env, (void*)array, (int)start, (int)len, (void*)buf);
     return;
 }
 
 static void JNICALL jni_GetLongArrayRegion(JNIEnv *env, jlongArray array, jsize start, jsize len, jlong *buf) {
-    log_jni("[AUTO] GetLongArrayRegion(" "env=%p, array=%lld, start=%d, len=%d, buf=%lld "")", (void*)env, (long long)array, (int)start, (int)len, (long long)buf);
+    log_jni("[AUTO] GetLongArrayRegion(" "env=%p, array=%p, start=%d, len=%d, buf=%p "")", (void*)env, (void*)array, (int)start, (int)len, (void*)buf);
     return;
 }
 
 static void JNICALL jni_GetFloatArrayRegion(JNIEnv *env, jfloatArray array, jsize start, jsize len, jfloat *buf) {
-    log_jni("[AUTO] GetFloatArrayRegion(" "env=%p, array=%f, start=%d, len=%d, buf=%f "")", (void*)env, (double)array, (int)start, (int)len, (double)buf);
+    log_jni("[AUTO] GetFloatArrayRegion(" "env=%p, array=%p, start=%d, len=%d, buf=%p "")", (void*)env, (void*)array, (int)start, (int)len, (void*)buf);
     return;
 }
 
 static void JNICALL jni_GetDoubleArrayRegion(JNIEnv *env, jdoubleArray array, jsize start, jsize len, jdouble *buf) {
-    log_jni("[AUTO] GetDoubleArrayRegion(" "env=%p, array=%f, start=%d, len=%d, buf=%f "")", (void*)env, (double)array, (int)start, (int)len, (double)buf);
+    log_jni("[AUTO] GetDoubleArrayRegion(" "env=%p, array=%p, start=%d, len=%d, buf=%p "")", (void*)env, (void*)array, (int)start, (int)len, (void*)buf);
     return;
 }
 
 static void JNICALL jni_SetBooleanArrayRegion(JNIEnv *env, jbooleanArray array, jsize start, jsize l, const jboolean *buf) {
-    log_jni("[AUTO] SetBooleanArrayRegion(" "env=%p, array=%d, start=%d, l=%d, buf=%d "")", (void*)env, (int)array, (int)start, (int)l, (int)buf);
+    log_jni("[AUTO] SetBooleanArrayRegion(" "env=%p, array=%p, start=%d, l=%d, buf=%p "")", (void*)env, (void*)array, (int)start, (int)l, (void*)buf);
     return;
 }
 
 static void JNICALL jni_SetByteArrayRegion(JNIEnv *env, jbyteArray array, jsize start, jsize len, const jbyte *buf) {
-    log_jni("[AUTO] SetByteArrayRegion(" "env=%p, array=%d, start=%d, len=%d, buf=%d "")", (void*)env, (int)array, (int)start, (int)len, (int)buf);
+    log_jni("[AUTO] SetByteArrayRegion(" "env=%p, array=%p, start=%d, len=%d, buf=%p "")", (void*)env, (void*)array, (int)start, (int)len, (void*)buf);
     return;
 }
 
 static void JNICALL jni_SetCharArrayRegion(JNIEnv *env, jcharArray array, jsize start, jsize len, const jchar *buf) {
-    log_jni("[AUTO] SetCharArrayRegion(" "env=%p, array=%d, start=%d, len=%d, buf=%d "")", (void*)env, (int)array, (int)start, (int)len, (int)buf);
+    log_jni("[AUTO] SetCharArrayRegion(" "env=%p, array=%p, start=%d, len=%d, buf=%p "")", (void*)env, (void*)array, (int)start, (int)len, (void*)buf);
     return;
 }
 
 static void JNICALL jni_SetShortArrayRegion(JNIEnv *env, jshortArray array, jsize start, jsize len, const jshort *buf) {
-    log_jni("[AUTO] SetShortArrayRegion(" "env=%p, array=%d, start=%d, len=%d, buf=%d "")", (void*)env, (int)array, (int)start, (int)len, (int)buf);
+    log_jni("[AUTO] SetShortArrayRegion(" "env=%p, array=%p, start=%d, len=%d, buf=%p "")", (void*)env, (void*)array, (int)start, (int)len, (void*)buf);
     return;
 }
 
 static void JNICALL jni_SetIntArrayRegion(JNIEnv *env, jintArray array, jsize start, jsize len, const jint *buf) {
-    log_jni("[AUTO] SetIntArrayRegion(" "env=%p, array=%d, start=%d, len=%d, buf=%d "")", (void*)env, (int)array, (int)start, (int)len, (int)buf);
+    log_jni("[AUTO] SetIntArrayRegion(" "env=%p, array=%p, start=%d, len=%d, buf=%p "")", (void*)env, (void*)array, (int)start, (int)len, (void*)buf);
     return;
 }
 
 static void JNICALL jni_SetLongArrayRegion(JNIEnv *env, jlongArray array, jsize start, jsize len, const jlong *buf) {
-    log_jni("[AUTO] SetLongArrayRegion(" "env=%p, array=%lld, start=%d, len=%d, buf=%lld "")", (void*)env, (long long)array, (int)start, (int)len, (long long)buf);
+    log_jni("[AUTO] SetLongArrayRegion(" "env=%p, array=%p, start=%d, len=%d, buf=%p "")", (void*)env, (void*)array, (int)start, (int)len, (void*)buf);
     return;
 }
 
 static void JNICALL jni_SetFloatArrayRegion(JNIEnv *env, jfloatArray array, jsize start, jsize len, const jfloat *buf) {
-    log_jni("[AUTO] SetFloatArrayRegion(" "env=%p, array=%f, start=%d, len=%d, buf=%f "")", (void*)env, (double)array, (int)start, (int)len, (double)buf);
+    log_jni("[AUTO] SetFloatArrayRegion(" "env=%p, array=%p, start=%d, len=%d, buf=%p "")", (void*)env, (void*)array, (int)start, (int)len, (void*)buf);
     return;
 }
 
 static void JNICALL jni_SetDoubleArrayRegion(JNIEnv *env, jdoubleArray array, jsize start, jsize len, const jdouble *buf) {
-    log_jni("[AUTO] SetDoubleArrayRegion(" "env=%p, array=%f, start=%d, len=%d, buf=%f "")", (void*)env, (double)array, (int)start, (int)len, (double)buf);
+    log_jni("[AUTO] SetDoubleArrayRegion(" "env=%p, array=%p, start=%d, len=%d, buf=%p "")", (void*)env, (void*)array, (int)start, (int)len, (void*)buf);
     return;
 }
 
@@ -1037,7 +1037,7 @@ static jint JNICALL jni_GetJavaVM(JNIEnv *env, JavaVM **vm) {
 }
 
 static void JNICALL jni_GetStringRegion(JNIEnv *env, jstring str, jsize start, jsize len, jchar *buf) {
-    log_jni("[AUTO] GetStringRegion(" "env=%p, str=%p, start=%d, len=%d, buf=%d "")", (void*)env, (void*)str, (int)start, (int)len, (int)buf);
+    log_jni("[AUTO] GetStringRegion(" "env=%p, str=%p, start=%d, len=%d, buf=%p "")", (void*)env, (void*)str, (int)start, (int)len, (void*)buf);
     return;
 }
 
@@ -1047,7 +1047,7 @@ static void JNICALL jni_GetStringUTFRegion(JNIEnv *env, jstring str, jsize start
 }
 
 static void * JNICALL jni_GetPrimitiveArrayCritical(JNIEnv *env, jarray array, jboolean *isCopy) {
-    log_jni("[AUTO] GetPrimitiveArrayCritical(" "env=%p, array=%p, isCopy=%d "")", (void*)env, (void*)array, (int)isCopy);
+    log_jni("[AUTO] GetPrimitiveArrayCritical(" "env=%p, array=%p, isCopy=%p "")", (void*)env, (void*)array, (void*)isCopy);
     return nullptr;
 }
 
@@ -1057,12 +1057,12 @@ static void JNICALL jni_ReleasePrimitiveArrayCritical(JNIEnv *env, jarray array,
 }
 
 static const jchar * JNICALL jni_GetStringCritical(JNIEnv *env, jstring string, jboolean *isCopy) {
-    log_jni("[AUTO] GetStringCritical(" "env=%p, string=%p, isCopy=%d "")", (void*)env, (void*)string, (int)isCopy);
+    log_jni("[AUTO] GetStringCritical(" "env=%p, string=%p, isCopy=%p "")", (void*)env, (void*)string, (void*)isCopy);
     return nullptr;
 }
 
 static void JNICALL jni_ReleaseStringCritical(JNIEnv *env, jstring string, const jchar *cstring) {
-    log_jni("[AUTO] ReleaseStringCritical(" "env=%p, string=%p, cstring=%d "")", (void*)env, (void*)string, (int)cstring);
+    log_jni("[AUTO] ReleaseStringCritical(" "env=%p, string=%p, cstring=%p "")", (void*)env, (void*)string, (void*)cstring);
     return;
 }
 

@@ -115,7 +115,7 @@ jobs:
       - name: Install ARM64 cross-compiler
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
       - name: Build test_lib.so (ARM64)
         run: |
@@ -141,7 +141,7 @@ jobs:
       - name: Install ARM64 cross-compiler
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
       - name: Build Bionic shim test .so (ARM64)
         run: |
@@ -169,7 +169,7 @@ jobs:
       - name: Install ARM64 cross-compiler
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
       - name: Build provider and consumer ELF pair
         run: |
@@ -209,7 +209,7 @@ jobs:
       - name: Install ARM64 cross-compiler
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
       - name: Build GPU test .so files (ARM64)
         run: |
