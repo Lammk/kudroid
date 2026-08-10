@@ -32,19 +32,48 @@ typedef void* EGLDisplay;
 typedef void* EGLNativeDisplayType;
 typedef int EGLint;
 typedef EGLDisplay (*PFN_eglGetPlatformDisplayEXT)(EGLint platform, void* native_display, const EGLint* attrib_list);
+typedef void* (*PFN_eglGetProcAddress)(const char* procname);
+
+extern "C" void* bionic_eglGetProcAddress(const char* procname) {
+    if (!procname) return nullptr;
+    fprintf(stdout, "[KuDroidGPU] eglGetProcAddress: requested %s\n", procname);
+    auto host_func = (PFN_eglGetProcAddress) ::dlsym(RTLD_DEFAULT, "eglGetProcAddress");
+    if (host_func) {
+        void* addr = host_func(procname);
+        fprintf(stdout, "[KuDroidGPU] eglGetProcAddress: %s returned %s\n", procname, addr ? "VALID" : "NULL");
+        return addr;
+    }
+    fprintf(stdout, "[KuDroidGPU] eglGetProcAddress: host function not found in RTLD_DEFAULT\n");
+    return nullptr;
+}
+
+static void* get_egl_func(const char* name) {
+    void* func = ::dlsym(RTLD_DEFAULT, name);
+    if (!func) {
+        fprintf(stdout, "[KuDroidGPU] get_egl_func: %s not found via dlsym, trying eglGetProcAddress\n", name);
+        auto host_get_proc = (PFN_eglGetProcAddress) ::dlsym(RTLD_DEFAULT, "eglGetProcAddress");
+        if (host_get_proc) {
+            func = host_get_proc(name);
+        }
+    }
+    return func;
+}
 
 extern "C" EGLDisplay bionic_eglGetPlatformDisplayEXT(EGLint platform, void* native_display, const EGLint* attrib_list) {
-    auto host_func = (PFN_eglGetPlatformDisplayEXT) ::dlsym(RTLD_DEFAULT, "eglGetPlatformDisplayEXT");
+    fprintf(stdout, "[KuDroidGPU] bionic_eglGetPlatformDisplayEXT called\n");
+    auto host_func = (PFN_eglGetPlatformDisplayEXT) get_egl_func("eglGetPlatformDisplayEXT");
     if (host_func) {
-        return host_func(platform, native_display, attrib_list);
+        EGLDisplay dpy = host_func(platform, native_display, attrib_list);
+        fprintf(stdout, "[KuDroidGPU] bionic_eglGetPlatformDisplayEXT returned %s\n", dpy ? "VALID" : "NULL");
+        return dpy;
     }
+    fprintf(stdout, "[KuDroidGPU] bionic_eglGetPlatformDisplayEXT: not found in host\n");
     return nullptr;
 }
 
 extern "C" EGLDisplay bionic_eglGetDisplay(EGLNativeDisplayType display_id) {
-    // Android apps often call eglGetDisplay(EGL_DEFAULT_DISPLAY).
-    // On iOS with ANGLE, we must use eglGetPlatformDisplayEXT to specify the backend.
-    auto host_func = (PFN_eglGetPlatformDisplayEXT) ::dlsym(RTLD_DEFAULT, "eglGetPlatformDisplayEXT");
+    fprintf(stdout, "[KuDroidGPU] bionic_eglGetDisplay called\n");
+    auto host_func = (PFN_eglGetPlatformDisplayEXT) get_egl_func("eglGetPlatformDisplayEXT");
     if (host_func) {
         #define EGL_PLATFORM_ANGLE_ANGLE 0x3202
         #define EGL_PLATFORM_ANGLE_TYPE_ANGLE 0x3203
@@ -66,18 +95,22 @@ extern "C" EGLDisplay bionic_eglGetDisplay(EGLNativeDisplayType display_id) {
             };
             EGLDisplay dpy = host_func(EGL_PLATFORM_ANGLE_ANGLE, display_id, attribs);
             if (dpy != nullptr) {
+                fprintf(stdout, "[KuDroidGPU] bionic_eglGetDisplay: successfully got display via eglGetPlatformDisplayEXT\n");
                 return dpy;
             }
         }
     }
     
-    // Fallback to host eglGetDisplay if extension is missing (unlikely on ANGLE)
+    fprintf(stdout, "[KuDroidGPU] bionic_eglGetDisplay: falling back to eglGetDisplay\n");
     typedef EGLDisplay (*PFN_eglGetDisplay)(EGLNativeDisplayType);
-    auto host_get_display = (PFN_eglGetDisplay) ::dlsym(RTLD_DEFAULT, "eglGetDisplay");
+    auto host_get_display = (PFN_eglGetDisplay) get_egl_func("eglGetDisplay");
     if (host_get_display) {
-        return host_get_display(display_id);
+        EGLDisplay dpy = host_get_display(display_id);
+        fprintf(stdout, "[KuDroidGPU] bionic_eglGetDisplay: fallback returned %s\n", dpy ? "VALID" : "NULL");
+        return dpy;
     }
     
+    fprintf(stdout, "[KuDroidGPU] bionic_eglGetDisplay: completely failed to find eglGetDisplay\n");
     return nullptr;
 }
 
@@ -90,6 +123,7 @@ const SymbolEntry kGraphicsSymbols[] = {
     {"ANativeWindow_acquire", reinterpret_cast<void*>(&bionic_ANativeWindow_acquire)},
     {"eglGetDisplay", reinterpret_cast<void*>(&bionic_eglGetDisplay)},
     {"eglGetPlatformDisplayEXT", reinterpret_cast<void*>(&bionic_eglGetPlatformDisplayEXT)},
+    {"eglGetProcAddress", reinterpret_cast<void*>(&bionic_eglGetProcAddress)},
 };
 
 } // namespace

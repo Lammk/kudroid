@@ -615,23 +615,41 @@ extern "C" int bionic_futex(uint32_t *uaddr, int futex_op, uint32_t val, const s
 // --- Dynamic Loading (dlfcn) ---
 extern "C" void* bionic_dlopen(const char* filename, int flags) {
     (void)flags;
-    // Android apps expect system libraries to always be present. On iOS these
-    // Android .so paths do not exist, so instead of returning NULL (which the
-    // guest treats as a hard failure) we hand back RTLD_DEFAULT. dlsym on that
-    // handle is routed through our shim symbol tables, then the host image
-    // (ANGLE / MoltenVK statically linked into the process).
+    logAndroidMessage(4, "KuDroidSyscall", std::string("bionic_dlopen: requested ") + (filename ? filename : "NULL"));
+
     if (!filename) {
+        return RTLD_DEFAULT;
+    }
+
+    // iOS doesn't link dynamic frameworks if they aren't directly referenced.
+    // Proactively dlopen ANGLE frameworks into the process with RTLD_GLOBAL 
+    // so dlsym(RTLD_DEFAULT) can find them later.
+    if (strstr(filename, "libEGL.so") || strstr(filename, "libGLESv2.so") || strstr(filename, "libGLESv1_CM.so") || strstr(filename, "libGLESv3.so")) {
+        void* egl_fw = ::dlopen("Frameworks/libEGL.framework/libEGL", RTLD_NOW | RTLD_GLOBAL);
+        if (egl_fw) {
+            logAndroidMessage(4, "KuDroidGPU", "Successfully loaded libEGL.framework into RTLD_GLOBAL");
+        } else {
+            logAndroidMessage(5, "KuDroidGPU", std::string("Failed to load libEGL.framework: ") + ::dlerror());
+        }
+        
+        void* gles_fw = ::dlopen("Frameworks/libGLESv2.framework/libGLESv2", RTLD_NOW | RTLD_GLOBAL);
+        if (gles_fw) {
+            logAndroidMessage(4, "KuDroidGPU", "Successfully loaded libGLESv2.framework into RTLD_GLOBAL");
+        } else {
+            logAndroidMessage(5, "KuDroidGPU", std::string("Failed to load libGLESv2.framework: ") + ::dlerror());
+        }
         return RTLD_DEFAULT;
     }
 
     // Try a real host dlopen first for anything that might genuinely exist.
     void* real = ::dlopen(filename, flags ? flags : RTLD_NOW);
     if (real) {
+        logAndroidMessage(4, "KuDroidSyscall", std::string("bionic_dlopen: resolved to real host handle for ") + filename);
         return real;
     }
 
     // Emulate the Android linker: pretend the requested library resolved.
-    // Symbol lookups then flow through bionic_dlsym.
+    logAndroidMessage(4, "KuDroidSyscall", std::string("bionic_dlopen: fallback returning RTLD_DEFAULT for ") + filename);
     return RTLD_DEFAULT;
 }
 
@@ -641,6 +659,7 @@ extern "C" void* bionic_dlsym(void* handle, const char* symbol) {
     // For a real host handle, prefer its own symbols first.
     if (handle && handle != RTLD_DEFAULT) {
         if (void* real = ::dlsym(handle, symbol)) {
+            logAndroidMessage(2, "KuDroidSyscall", std::string("bionic_dlsym: [") + symbol + "] found in real handle");
             return real;
         }
     }
@@ -649,19 +668,34 @@ extern "C" void* bionic_dlsym(void* handle, const char* symbol) {
     size_t count = 0;
     const SymbolEntry* symbols = get_syscall_symbols(&count);
     for (size_t i = 0; i < count; ++i) {
-        if (strcmp(symbols[i].name, symbol) == 0) return symbols[i].address;
+        if (strcmp(symbols[i].name, symbol) == 0) {
+            logAndroidMessage(2, "KuDroidSyscall", std::string("bionic_dlsym: [") + symbol + "] resolved via SyscallShim");
+            return symbols[i].address;
+        }
     }
     symbols = get_graphics_symbols(&count);
     for (size_t i = 0; i < count; ++i) {
-        if (strcmp(symbols[i].name, symbol) == 0) return symbols[i].address;
+        if (strcmp(symbols[i].name, symbol) == 0) {
+            logAndroidMessage(2, "KuDroidSyscall", std::string("bionic_dlsym: [") + symbol + "] resolved via GraphicsShim");
+            return symbols[i].address;
+        }
     }
     symbols = get_input_symbols(&count);
     for (size_t i = 0; i < count; ++i) {
-        if (strcmp(symbols[i].name, symbol) == 0) return symbols[i].address;
+        if (strcmp(symbols[i].name, symbol) == 0) {
+            logAndroidMessage(2, "KuDroidSyscall", std::string("bionic_dlsym: [") + symbol + "] resolved via InputShim");
+            return symbols[i].address;
+        }
     }
 
     // Fall back to the host process image (ANGLE, MoltenVK, libc, ...).
-    return ::dlsym(RTLD_DEFAULT, symbol);
+    void* fallback = ::dlsym(RTLD_DEFAULT, symbol);
+    if (fallback) {
+        logAndroidMessage(2, "KuDroidSyscall", std::string("bionic_dlsym: [") + symbol + "] resolved via RTLD_DEFAULT fallback");
+    } else {
+        logAndroidMessage(5, "KuDroidSyscall", std::string("bionic_dlsym: [") + symbol + "] NOT FOUND");
+    }
+    return fallback;
 }
 
 extern "C" void* bionic_android_dlopen_ext(const char* filename, int flags, const void* extinfo) {
