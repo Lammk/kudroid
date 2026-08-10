@@ -456,6 +456,27 @@ extern "C" int bionic_madvise(void *addr, size_t length, int advice) {
 #endif
 }
 
+extern "C" int bionic_clock_gettime(int clock_id, struct timespec *tp) {
+    int darwin_clock_id = clock_id;
+#ifdef __APPLE__
+    switch(clock_id) {
+        case 0: darwin_clock_id = 0; break; // CLOCK_REALTIME
+        case 1: darwin_clock_id = 6; break; // CLOCK_MONOTONIC (Darwin 6)
+        case 2: darwin_clock_id = 12; break; // CLOCK_PROCESS_CPUTIME_ID
+        case 3: darwin_clock_id = 16; break; // CLOCK_THREAD_CPUTIME_ID
+        case 4: darwin_clock_id = 4; break; // CLOCK_MONOTONIC_RAW
+        case 7: darwin_clock_id = 6; break; // CLOCK_BOOTTIME -> MONOTONIC
+        case 5: darwin_clock_id = 0; break; // CLOCK_REALTIME_COARSE -> REALTIME
+        case 6: darwin_clock_id = 6; break; // CLOCK_MONOTONIC_COARSE -> MONOTONIC
+    }
+#endif
+    return ::clock_gettime(static_cast<clockid_t>(darwin_clock_id), tp);
+}
+
+extern "C" int bionic_clock_gettime64(int clock_id, struct timespec *tp) {
+    return bionic_clock_gettime(clock_id, tp);
+}
+
 extern "C" int bionic_sigaltstack(const stack_t *ss, stack_t *oss) {
     return ::sigaltstack(ss, oss);
 }
@@ -1250,9 +1271,9 @@ const SymbolEntry kSyscallSymbols[] = {
     {"ioctl", reinterpret_cast<void*>(&bionic_ioctl)},
     {"prctl", reinterpret_cast<void*>(&bionic_prctl)},
     {"getrandom", reinterpret_cast<void*>(&bionic_getrandom)},
-    {"clock_gettime", reinterpret_cast<void*>(&::clock_gettime)},
-    {"__clock_gettime", reinterpret_cast<void*>(&::clock_gettime)},
-    {"clock_gettime64", reinterpret_cast<void*>(&::clock_gettime)},
+    {"clock_gettime", reinterpret_cast<void*>(&bionic_clock_gettime)},
+    {"__clock_gettime", reinterpret_cast<void*>(&bionic_clock_gettime)},
+    {"clock_gettime64", reinterpret_cast<void*>(&bionic_clock_gettime64)},
     {"gettimeofday", reinterpret_cast<void*>(&::gettimeofday)},
     {"ashmem_create_region", reinterpret_cast<void*>(&bionic_ashmem_create_region)},
     {"ashmem_set_prot_region", reinterpret_cast<void*>(&bionic_ashmem_set_prot_region)},
