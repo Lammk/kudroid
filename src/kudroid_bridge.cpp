@@ -209,11 +209,11 @@ extern "C" const char* kudroid_install_apk(const char* apkPath) {
         }
         auto& remapper = kudroid::VFSPathRemapper::getInstance();
         const std::filesystem::path target = std::filesystem::path(remapper.androidRoot()) /
-                                             "data/app" / appName / "lib/arm64-v8a";
+                                             "data/app" / appName;
         log += "[kudroid_apk] APK: " + source.string() + "\n";
-        log += "[kudroid_apk] Native library target: " + target.string() + "\n";
+        log += "[kudroid_apk] Target extraction directory: " + target.string() + "\n";
         if (kudroid::APKExtractor::extract_apk(source.string(), target.string())) {
-            log += "[kudroid_apk] APK native libraries installed successfully\n";
+            log += "[kudroid_apk] APK extracted successfully\n";
         } else {
             log += "[kudroid_apk] INSTALL FAILED: " +
                    kudroid::APKExtractor::lastError() + "\n";
