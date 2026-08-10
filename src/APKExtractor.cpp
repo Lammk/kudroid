@@ -35,7 +35,7 @@ bool inflateRaw(const std::uint8_t* input, std::size_t inputSize, std::vector<st
 
 const std::string& APKExtractor::lastError() { return gLastError; }
 
-bool APKExtractor::extract_native_libs(const std::string& apkPath, const std::string& targetDirectory) {
+bool APKExtractor::extract_apk(const std::string& apkPath, const std::string& targetDirectory) {
     gLastError.clear();
     std::ifstream apk(apkPath, std::ios::binary);
     if (!apk) { gLastError = "Cannot open APK: " + apkPath; apkLog(gLastError); return false; }
@@ -71,8 +71,16 @@ bool APKExtractor::extract_native_libs(const std::string& apkPath, const std::st
         if (!hasBytes(data, centralOffset + 46, nameLength)) { gLastError = "Invalid ZIP entry name"; return false; }
         const std::string entry(reinterpret_cast<const char*>(data.data() + centralOffset + 46), nameLength);
         centralOffset += 46 + nameLength + extraLength + commentLength;
-        constexpr const char* prefix = "lib/arm64-v8a/";
-        if (entry.rfind(prefix, 0) != 0 || entry.size() < 3 || entry.compare(entry.size() - 3, 3, ".so") != 0) continue;
+        
+        bool shouldExtract = false;
+        if (entry.rfind("lib/arm64-v8a/", 0) == 0 && entry.size() >= 3 && entry.compare(entry.size() - 3, 3, ".so") == 0) shouldExtract = true;
+        else if (entry.size() >= 4 && entry.compare(entry.size() - 4, 4, ".dex") == 0) shouldExtract = true;
+        else if (entry.rfind("assets/", 0) == 0) shouldExtract = true;
+        else if (entry == "AndroidManifest.xml") shouldExtract = true;
+        
+        if (!shouldExtract) continue;
+        if (entry.empty() || entry.back() == '/') continue; // Skip directories
+        
         found = true;
         if (!hasBytes(data, localOffset, 30) || read32(data, localOffset) != 0x04034b50) { gLastError = "Invalid local header: " + entry; return false; }
         const std::size_t contentOffset = localOffset + 30 + read16(data, localOffset + 26) + read16(data, localOffset + 28);
@@ -83,14 +91,17 @@ bool APKExtractor::extract_native_libs(const std::string& apkPath, const std::st
         } else if (compression == 8) {
             if (!inflateRaw(data.data() + contentOffset, compressedSize, output)) { gLastError = "Deflate failed: " + entry; return false; }
         } else { gLastError = "Unsupported compression for: " + entry; return false; }
-        const auto destination = std::filesystem::path(targetDirectory) / std::filesystem::path(entry).filename();
+        
+        const auto destination = std::filesystem::path(targetDirectory) / entry;
+        std::filesystem::create_directories(destination.parent_path(), error);
+        
         std::ofstream extracted(destination, std::ios::binary);
         extracted.write(reinterpret_cast<const char*>(output.data()), output.size());
         extracted.close();
         if (!extracted || ::chmod(destination.c_str(), 0755) != 0) { gLastError = "Cannot write/chmod: " + destination.string(); return false; }
         apkLog("Extracting: " + entry + " -> " + destination.string() + " (OK)");
     }
-    if (!found) { gLastError = "No lib/arm64-v8a/*.so entries found"; apkLog(gLastError); return false; }
+    if (!found) { gLastError = "No expected entries found in APK"; apkLog(gLastError); return false; }
     return true;
 }
 } // namespace kudroid

@@ -1,2 +1,0 @@
-giữ app để có option như create home shortcut,delete app,info
-tự khởi tạo vfs nếu lần đầu cài và boot mở

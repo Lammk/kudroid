@@ -176,6 +176,10 @@ bool LibraryManager::loadRecursive(const std::string& path) {
         std::fprintf(stderr, "[kudroid_core] %s\n", lastError_.c_str());
         return false;
     }
+    
+    current->registerEhFrame();
+    current->executeInit();
+    
     std::fprintf(stderr, "[kudroid_core] Loaded ELF successfully: %s\n", key.c_str());
     return true;
 }

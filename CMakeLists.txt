@@ -27,6 +27,7 @@ add_library(kudroid_core STATIC
     src/kudroid_bridge.cpp
     src/kudroid_jni.cpp
     src/gpu_test.cpp
+    src/DexManager.cpp
 )
 
 add_subdirectory(third_party/jvm/miniJVM/minijvm/c)

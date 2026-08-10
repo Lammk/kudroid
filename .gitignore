@@ -40,3 +40,17 @@ third_party/ANGLE/
 .claude
 test-lib-arm64-so.zip
 docs/
+# Auto-generated python scripts
+/*.py
+
+# Root test files
+/test_*.c
+/test_*.cpp
+/test_unwind
+/a.out
+
+# Zip files
+*.zip
+
+# Other temporary lists
+list.txt

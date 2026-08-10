@@ -212,7 +212,7 @@ extern "C" const char* kudroid_install_apk(const char* apkPath) {
                                              "data/app" / appName / "lib/arm64-v8a";
         log += "[kudroid_apk] APK: " + source.string() + "\n";
         log += "[kudroid_apk] Native library target: " + target.string() + "\n";
-        if (kudroid::APKExtractor::extract_native_libs(source.string(), target.string())) {
+        if (kudroid::APKExtractor::extract_apk(source.string(), target.string())) {
             log += "[kudroid_apk] APK native libraries installed successfully\n";
         } else {
             log += "[kudroid_apk] INSTALL FAILED: " +
@@ -1129,4 +1129,65 @@ extern "C" const char* kudroid_gpu_opengl_so_test(const char* path) {
 
     writeLogFile("kudroid_gpu_opengl_test.txt", log);
     return strdup(log.c_str());
+}
+
+#include "kudroid/APKExtractor.h"
+#include "kudroid/DexManager.h"
+
+extern "C" const char* kudroid_load_apk(const char* apkPath) {
+    static std::string log;
+    log.clear();
+    appendTestHeader(log, "APK Loader execution", apkPath);
+    
+    if (!apkPath) {
+        log += "[kudroid_apk] ERROR: APK path is null\n";
+        return log.c_str();
+    }
+    
+    std::string apkStr(apkPath);
+    std::string targetDir = std::string(g_logDir) + "/extracted_apk";
+    
+    log += "[kudroid_apk] Initializing VFS...\n";
+    kudroid::VFSPathRemapper::getInstance().setDocumentsDirectory(g_logDir);
+    
+    log += "[kudroid_apk] Extracting APK to: " + targetDir + "\n";
+    if (!kudroid::APKExtractor::extract_apk(apkStr, targetDir)) {
+        log += "[kudroid_apk] ERROR: Extraction failed - " + kudroid::APKExtractor::lastError() + "\n";
+        return log.c_str();
+    }
+    log += "[kudroid_apk] Extracted successfully.\n";
+    
+    log += "[kudroid_apk] Loading DEX files...\n";
+    kudroid::DexManager::getInstance().loadDirectory(targetDir);
+    
+    log += "[kudroid_apk] Scanning for native libraries (.so)...\n";
+    kudroid::LibraryManager libManager;
+    std::string libDir = targetDir + "/lib/arm64-v8a";
+    
+    if (std::filesystem::exists(libDir)) {
+        for (const auto& entry : std::filesystem::directory_iterator(libDir)) {
+            if (entry.is_regular_file() && entry.path().extension() == ".so") {
+                log += "[kudroid_apk] Loading library: " + entry.path().filename().string() + "\n";
+                if (!libManager.loadRecursive(entry.path().string())) {
+                    log += "[kudroid_apk] WARNING: Failed to load " + entry.path().filename().string() + "\n";
+                } else {
+                    log += "[kudroid_apk] Loaded successfully.\n";
+                    // Attempt to call JNI_OnLoad
+                    void* jniOnLoadAddr = libManager.resolveGlobalSymbol("JNI_OnLoad");
+                    if (jniOnLoadAddr) {
+                        log += "[kudroid_apk] Found JNI_OnLoad in library, executing...\n";
+                        using JNI_OnLoad_t = jint (*)(JavaVM*, void*);
+                        JNI_OnLoad_t jniOnLoad = reinterpret_cast<JNI_OnLoad_t>(jniOnLoadAddr);
+                        jint version = jniOnLoad(kudroid_jni_get_javavm(), nullptr);
+                        log += "[kudroid_apk] JNI_OnLoad returned version: 0x" + std::to_string(version) + "\n";
+                    }
+                }
+            }
+        }
+    } else {
+        log += "[kudroid_apk] No native libraries found in " + libDir + "\n";
+    }
+    
+    log += "[kudroid_apk] APK Load Complete.\n";
+    return log.c_str();
 }
