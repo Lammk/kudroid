@@ -939,8 +939,8 @@ extern "C" const char* kudroid_syscall_so_test(const char* path) {
     } else if (!kudroid_jit_available()) {
         log += "[kudroid_syscall] ABORT: JIT is Disabled — cannot execute ARM64 ELF\n";
     } else {
-        kudroid::ElfLoader loader;
-        if (!loader.parse(path)) {
+        kudroid::ElfLoader loader(path);
+        if (!loader.parse()) {
             log += "[kudroid_syscall] PARSE FAILED: " + std::string(loader.lastError()) + "\n";
         } else if (!loader.map()) {
             log += "[kudroid_syscall] MAP FAILED: " + std::string(loader.lastError()) + "\n";
@@ -956,7 +956,7 @@ extern "C" const char* kudroid_syscall_so_test(const char* path) {
                 int (*test_func)() = reinterpret_cast<int (*)()>(address);
                 
                 // Clear BionicShim trace buffer
-                BionicShim::clearTraceLog();
+                kudroid::bionic_shim_reset_trace();
                 
                 int result = test_func();
                 log += "[kudroid_syscall] SYSCALL TEST RESULT: " +
@@ -964,9 +964,9 @@ extern "C" const char* kudroid_syscall_so_test(const char* path) {
             }
         }
         log += "[kudroid_syscall] Bionic shim trace:\n";
-        for (const auto& msg : BionicShim::getTraceLog()) {
-            log += "[BionicShim] " + msg + "\n";
-        }
+        log += "[BionicShim] ";
+        log += kudroid::bionic_shim_trace();
+        log += "\n";
     }
     writeLogFile("kudroid_syscall_test.txt", log);
     static std::string result_str;
@@ -982,8 +982,8 @@ extern "C" const char* kudroid_jni_massive_so_test(const char* path) {
     } else if (!kudroid_jit_available()) {
         log += "[kudroid_jni] ABORT: JIT is Disabled — cannot execute ARM64 ELF\n";
     } else {
-        kudroid::ElfLoader loader;
-        if (!loader.parse(path)) {
+        kudroid::ElfLoader loader(path);
+        if (!loader.parse()) {
             log += "[kudroid_jni] PARSE FAILED: " + std::string(loader.lastError()) + "\n";
         } else if (!loader.map()) {
             log += "[kudroid_jni] MAP FAILED: " + std::string(loader.lastError()) + "\n";

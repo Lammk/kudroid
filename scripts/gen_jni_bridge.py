@@ -72,10 +72,20 @@ def generate_bridge():
         # log_jni
         fmt_args = []
         fmt_str = []
-        for name in arg_names:
+        for decl, name in zip(arg_decls, arg_names):
             if name != '...':
-                fmt_str.append(f"{name}=%p")
-                fmt_args.append(f"(void*){name}")
+                if 'jfloat' in decl or 'jdouble' in decl:
+                    fmt_str.append(f"{name}=%f")
+                    fmt_args.append(f"(double){name}")
+                elif 'jlong' in decl:
+                    fmt_str.append(f"{name}=%lld")
+                    fmt_args.append(f"(long long){name}")
+                elif 'jboolean' in decl or 'jbyte' in decl or 'jchar' in decl or 'jshort' in decl or 'jint' in decl or 'jsize' in decl:
+                    fmt_str.append(f"{name}=%d")
+                    fmt_args.append(f"(int){name}")
+                else:
+                    fmt_str.append(f"{name}=%p")
+                    fmt_args.append(f"(void*){name}")
                 
         if fmt_str:
             out_lines.append(f'    log_jni("[AUTO] {func_name}(" "{ ", ".join(fmt_str)} "")", {", ".join(fmt_args)});')
@@ -85,6 +95,8 @@ def generate_bridge():
         # return dummy
         if ret_type == "void":
             out_lines.append("    return;")
+        elif ret_type == "jobjectRefType":
+            out_lines.append("    return JNIInvalidRefType;")
         elif ret_type.endswith("*") or ret_type in ["jobject", "jclass", "jstring", "jarray", "jthrowable", "jmethodID", "jfieldID"]:
             out_lines.append("    return nullptr;")
         elif ret_type == "jboolean":

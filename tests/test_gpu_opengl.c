@@ -20,6 +20,8 @@ typedef unsigned int GLenum;
 typedef unsigned char GLubyte;
 typedef float GLclampf;
 typedef unsigned int GLbitfield;
+typedef int EGLint;
+typedef unsigned int EGLenum;
 
 #define GL_VENDOR     0x1F00
 #define GL_RENDERER   0x1F01
