@@ -32,11 +32,9 @@ third_party/build-tools/
 third_party/MoltenVK/
 third_party/ANGLE/
 
-</parameter>
-<parameter=filePath>
-/home/kuzei/Documents/Kudroid/.gitignore
-</parameter>
-</invoke>
+# Gitignore itself
+.gitignore
+
 .claude
 test-lib-arm64-so.zip
 docs/
