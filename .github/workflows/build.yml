@@ -441,6 +441,7 @@ jobs:
             -framework UIKit \
             -framework CoreGraphics \
             -framework IOSurface \
+            -Xlinker -rpath -Xlinker @executable_path/Frameworks \
             -o KuDroidShell.app/KuDroidShell
 
           # Embed ANGLE dynamic frameworks into the app bundle so dyld finds them at runtime
