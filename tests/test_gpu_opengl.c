@@ -121,12 +121,27 @@ int kudroid_gpu_opengl_test(void) {
         #define EGL_PLATFORM_ANGLE_ANGLE 0x3202
         #define EGL_PLATFORM_ANGLE_TYPE_ANGLE 0x3203
         #define EGL_PLATFORM_ANGLE_TYPE_VULKAN_ANGLE 0x3450
-        const EGLint displayAttribs[] = {
-            EGL_PLATFORM_ANGLE_TYPE_ANGLE, EGL_PLATFORM_ANGLE_TYPE_VULKAN_ANGLE,
-            EGL_NONE
+        #define EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE 0x3489
+        #define EGL_PLATFORM_ANGLE_TYPE_DEFAULT_ANGLE 0x3204
+        
+        EGLint backends[] = {
+            EGL_PLATFORM_ANGLE_TYPE_VULKAN_ANGLE,
+            EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE,
+            EGL_PLATFORM_ANGLE_TYPE_DEFAULT_ANGLE
         };
-        display = getPlatformDisplayEXT(EGL_PLATFORM_ANGLE_ANGLE, EGL_DEFAULT_DISPLAY, displayAttribs);
-        __android_log_print(ANDROID_LOG_INFO, "KuDroidGPU", "GL TEST: eglGetPlatformDisplayEXT returned %p.", display);
+        const char* backendNames[] = {"VULKAN", "METAL", "DEFAULT"};
+
+        for (int i = 0; i < 3; i++) {
+            const EGLint displayAttribs[] = {
+                EGL_PLATFORM_ANGLE_TYPE_ANGLE, backends[i],
+                EGL_NONE
+            };
+            display = getPlatformDisplayEXT(EGL_PLATFORM_ANGLE_ANGLE, EGL_DEFAULT_DISPLAY, displayAttribs);
+            __android_log_print(ANDROID_LOG_INFO, "KuDroidGPU", "GL TEST: eglGetPlatformDisplayEXT(%s) returned %p.", backendNames[i], display);
+            if (display != EGL_NO_DISPLAY) {
+                break;
+            }
+        }
     }
     
     if (display == EGL_NO_DISPLAY && getDisplay) {
@@ -135,7 +150,7 @@ int kudroid_gpu_opengl_test(void) {
     }
 
     if (display == EGL_NO_DISPLAY) {
-        __android_log_print(ANDROID_LOG_INFO, "KuDroidGPU", "GL TEST: eglGetDisplay / eglGetPlatformDisplayEXT failed.");
+        __android_log_print(ANDROID_LOG_INFO, "KuDroidGPU", "GL TEST: ALL eglGetDisplay / eglGetPlatformDisplayEXT failed.");
         return -5;
     }
 
