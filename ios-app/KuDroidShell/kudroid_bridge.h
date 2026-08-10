@@ -55,7 +55,7 @@ const char* kudroid_vfs_extended_test_log(void);
 
 /// Test the JVM integration.
 /// Returns a malloc'd diagnostic log; caller must free() it.
-char* kudroid_test_jvm(void);
+char* kudroid_test_jvm(const char* rt_jar_path);
 char* kudroid_test_gpu(void);
 
 /// Load a GPU test ARM64 .so file and execute its Vulkan test via BionicShim intercept.

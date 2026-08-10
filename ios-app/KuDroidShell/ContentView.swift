@@ -268,7 +268,8 @@ func setupLogDir() {
 }
 
 func runJniJvmTest() -> String {
-    guard let cString = kudroid_test_jvm() else { return "Error: null result" }
+    let rtJarPath = Bundle.main.path(forResource: "minijvm_rt", ofType: "jar") ?? ""
+    guard let cString = kudroid_test_jvm(rtJarPath) else { return "Error: null result" }
     let log = String(cString: cString)
     free(UnsafeMutablePointer(mutating: cString))
     return log

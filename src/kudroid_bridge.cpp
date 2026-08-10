@@ -305,7 +305,7 @@ struct ANativeActivity {
 // Declare the external setter
 extern "C" void kudroid_jni_set_log_callback(void (*cb)(const char*));
 
-extern "C" char* kudroid_test_jvm(void) {
+extern "C" char* kudroid_test_jvm(const char* rt_jar_path) {
     std::string log;
     appendTestHeader(log, "JVM Integration Test", "N/A");
     installCrashHandlers();
@@ -325,7 +325,7 @@ extern "C" char* kudroid_test_jvm(void) {
         }
     });
 
-    kudroid_jni_init_jvm("", "");
+    kudroid_jni_init_jvm(rt_jar_path ? rt_jar_path : "", "");
     
     JavaVM* vm = kudroid_jni_get_javavm();
     if (!vm) {
