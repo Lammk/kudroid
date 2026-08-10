@@ -974,6 +974,56 @@ extern "C" const char* kudroid_syscall_so_test(const char* path) {
     return result_str.c_str();
 }
 
+extern "C" const char* kudroid_jni_massive_so_test(const char* path) {
+    std::string log;
+    appendTestHeader(log, "Massive JNI 200+ Functions Test", path);
+    if (!path) {
+        log += "[kudroid_jni] ERROR: null path\n";
+    } else if (!kudroid_jit_available()) {
+        log += "[kudroid_jni] ABORT: JIT is Disabled — cannot execute ARM64 ELF\n";
+    } else {
+        kudroid::ElfLoader loader;
+        if (!loader.parse(path)) {
+            log += "[kudroid_jni] PARSE FAILED: " + std::string(loader.lastError()) + "\n";
+        } else if (!loader.map()) {
+            log += "[kudroid_jni] MAP FAILED: " + std::string(loader.lastError()) + "\n";
+        } else if (!loader.relocate()) {
+            log += "[kudroid_jni] RELOCATE FAILED: " + std::string(loader.lastError()) + "\n";
+        } else {
+            log += "[kudroid_jni] ELF mapped and Bionic imports bound.\n";
+            void* address = loader.getSymbolAddress("kudroid_jni_massive_test");
+            if (!address) {
+                log += "[kudroid_jni] SYMBOL FAILED: kudroid_jni_massive_test not found\n";
+            } else {
+                log += "[kudroid_jni] Running kudroid_jni_massive_test()...\n";
+                int (*test_func)(void*) = reinterpret_cast<int (*)(void*)>(address);
+                
+                // Set up callback
+                static std::string* g_jni_test_log = &log;
+                g_jni_test_log = &log;
+                kudroid_jni_set_log_callback([](const char* msg) {
+                    if (g_jni_test_log) {
+                        *g_jni_test_log += "[kudroid_jni] ";
+                        *g_jni_test_log += msg;
+                        *g_jni_test_log += "\n";
+                    }
+                });
+
+                kudroid_jni_init_jvm("", ""); // Make sure it's init
+                void* vm = kudroid_jni_get_javavm();
+                
+                int result = test_func(vm);
+                log += "[kudroid_jni] TEST RESULT: " +
+                       (result == 0 ? std::string("0 (SUCCESS)") : std::to_string(result) + " (FAILED)") + "\n";
+            }
+        }
+    }
+    writeLogFile("kudroid_jni_massive_test.txt", log);
+    static std::string result_str;
+    result_str = log;
+    return result_str.c_str();
+}
+
 // GPU .so Execution Tests — loads the ARM64 ELF test .so through the ELF
 // loader, which calls dlopen/dlsym for GPU libs. BionicShim intercepts those
 // and maps them directly to iOS native (MoltenVK / ANGLE).

@@ -261,14 +261,12 @@ static jint JNICALL jni_RegisterNatives(JNIEnv* env, jclass clazz, const JNINati
 // Initialization
 // ----------------------------------------------------------------------------
 
+#include "kudroid_jni_impl.inc"
+
 __attribute__((constructor))
 static void kudroid_jni_init_tables() {
-    // 1. Fill JNINativeInterface with dummy pointers
-    void** ptr = reinterpret_cast<void**>(&g_jni_interface);
-    // 233 is roughly the number of JNI functions in JNIEnv
-    for (size_t i = 4; i < 233; ++i) {
-        ptr[i] = reinterpret_cast<void*>(kudroid_jni_dummy);
-    }
+    // 1. Initialize all standard 230+ JNI functions from auto-generated bridge
+    init_generated_jni_interface(&g_jni_interface);
     
     // 2. Map implemented functions
     g_jni_interface.GetVersion = jni_GetVersion;

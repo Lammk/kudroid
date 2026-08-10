@@ -219,9 +219,12 @@ jobs:
             -o tests/test_gpu_opengl_arm64.so tests/test_gpu_opengl.c
           aarch64-linux-gnu-gcc -shared -fPIC -ldl \
             -o tests/test_syscalls_arm64.so tests/test_syscalls.c
+          aarch64-linux-gnu-g++ -shared -fPIC -ldl -Iinclude \
+            -o tests/test_jni_massive_arm64.so tests/test_jni_massive.cpp
           aarch64-linux-gnu-strip tests/test_gpu_vulkan_arm64.so
           aarch64-linux-gnu-strip tests/test_gpu_opengl_arm64.so
           aarch64-linux-gnu-strip tests/test_syscalls_arm64.so
+          aarch64-linux-gnu-strip tests/test_jni_massive_arm64.so
 
       - name: Verify GPU test ELFs
         run: |
@@ -239,6 +242,7 @@ jobs:
             tests/test_gpu_vulkan_arm64.so
             tests/test_gpu_opengl_arm64.so
             tests/test_syscalls_arm64.so
+            tests/test_jni_massive_arm64.so
 
   build-minijvm-rt:
     runs-on: ubuntu-latest
@@ -382,6 +386,12 @@ jobs:
             echo "Bundled test_syscalls.so ($(wc -c < KuDroidShell.app/test_syscalls.so) bytes)"
           else
             echo "WARNING: test_syscalls_arm64.so not found, skipping"
+          fi
+          if [ -f gpu-test-artifact/test_jni_massive_arm64.so ]; then
+            cp gpu-test-artifact/test_jni_massive_arm64.so KuDroidShell.app/test_jni_massive.so
+            echo "Bundled test_jni_massive.so ($(wc -c < KuDroidShell.app/test_jni_massive.so) bytes)"
+          else
+            echo "WARNING: test_jni_massive_arm64.so not found, skipping"
           fi
 
           # Ensure dylibs exist for -lEGL -lGLESv2

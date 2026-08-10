@@ -235,6 +235,9 @@ struct DebugView: View {
                                 .buttonStyle(.bordered)
                             Button("Syscall Traps .so") { fullLog = runSyscallSoTest() }
                                 .buttonStyle(.bordered)
+                            Button("JNI Massive 200+ .so") { fullLog = runJniMassiveTest() }
+                                .buttonStyle(.borderedProminent)
+                                .tint(.red)
                             
                             Button("Bionic Test") { fullLog = runBionicExecutionTest() }
                                 .buttonStyle(.bordered)
@@ -512,6 +515,23 @@ func runSyscallSoTest() -> String {
         return "❌ Failed to copy test_syscalls.so: \(error.localizedDescription)"
     }
     guard let cString = kudroid_syscall_so_test(tmpURL.path) else { return "❌ Error: null result" }
+    let log = String(cString: cString)
+    free(UnsafeMutablePointer(mutating: cString))
+    return log
+}
+
+func runJniMassiveTest() -> String {
+    guard let bundledURL = Bundle.main.url(forResource: "test_jni_massive", withExtension: "so") else {
+        return "❌ test_jni_massive.so not found in bundle"
+    }
+    let tmpURL = FileManager.default.temporaryDirectory.appendingPathComponent("test_jni_massive.so")
+    do {
+        if FileManager.default.fileExists(atPath: tmpURL.path) { try FileManager.default.removeItem(at: tmpURL) }
+        try FileManager.default.copyItem(at: bundledURL, to: tmpURL)
+    } catch {
+        return "❌ Failed to copy test_jni_massive.so: \(error.localizedDescription)"
+    }
+    guard let cString = kudroid_jni_massive_so_test(tmpURL.path) else { return "❌ Error: null result" }
     let log = String(cString: cString)
     free(UnsafeMutablePointer(mutating: cString))
     return log
