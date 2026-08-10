@@ -135,15 +135,13 @@ struct AppsView: View {
                     showAPKInstaller = false
                 }
             }
-        }
-        .overlay {
-            if let appName = runningApp {
-                AndroidAppView(appName: appName)
-                    .transition(.identity) // Instant transition, no pop-up animation
-                    .zIndex(1)
+            .fullScreenCover(item: Binding<IdentifiableString?>(
+                get: { runningApp.map { IdentifiableString(value: $0) } },
+                set: { runningApp = $0?.value }
+            )) { app in
+                AndroidAppView(appName: app.value)
             }
         }
-    }
     
     struct IdentifiableString: Identifiable {
         let id = UUID()
