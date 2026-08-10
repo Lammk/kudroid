@@ -431,9 +431,25 @@ extern "C" int bionic_prctl(int option, unsigned long arg2, unsigned long arg3, 
 // Memory mapping wrappers to strip Linux specific flags
 extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
 #ifdef __APPLE__
-    // Strip MAP_POPULATE (0x8000) and other Linux flags not present in Darwin
-    int darwin_flags = flags & ~(0x8000 | 0x4000); 
-    return ::mmap(addr, length, prot, darwin_flags, fd, offset);
+    // Android/Linux and Darwin use different numeric values for mmap flags.
+    // Translate them explicitly instead of forwarding the raw Linux bits.
+    // Linux: MAP_SHARED=0x01 MAP_PRIVATE=0x02 MAP_FIXED=0x10 MAP_ANONYMOUS=0x20
+    constexpr int LINUX_MAP_SHARED    = 0x01;
+    constexpr int LINUX_MAP_PRIVATE   = 0x02;
+    constexpr int LINUX_MAP_FIXED     = 0x10;
+    constexpr int LINUX_MAP_ANONYMOUS = 0x20;
+
+    int darwin_flags = 0;
+    if (flags & LINUX_MAP_SHARED)  darwin_flags |= MAP_SHARED;
+    if (flags & LINUX_MAP_PRIVATE) darwin_flags |= MAP_PRIVATE;
+    if (flags & LINUX_MAP_FIXED)   darwin_flags |= MAP_FIXED;
+
+    int darwin_fd = fd;
+    if (flags & LINUX_MAP_ANONYMOUS) {
+        darwin_flags |= MAP_ANON;
+        darwin_fd = -1;  // Darwin requires fd == -1 for anonymous mappings
+    }
+    return ::mmap(addr, length, prot, darwin_flags, darwin_fd, offset);
 #else
     return ::mmap(addr, length, prot, flags, fd, offset);
 #endif
@@ -598,18 +614,38 @@ extern "C" int bionic_futex(uint32_t *uaddr, int futex_op, uint32_t val, const s
 
 // --- Dynamic Loading (dlfcn) ---
 extern "C" void* bionic_dlopen(const char* filename, int flags) {
-    if (!filename) return ::dlopen(filename, flags);
-    std::string name(filename);
-    
-    // Intercept GPU libraries and redirect to the host executable which has them linked
-    if (name.find("libEGL") != std::string::npos || name.find("libGLES") != std::string::npos || name.find("libvulkan") != std::string::npos || name.find("vulkan") != std::string::npos) {
+    (void)flags;
+    // Android apps expect system libraries to always be present. On iOS these
+    // Android .so paths do not exist, so instead of returning NULL (which the
+    // guest treats as a hard failure) we hand back RTLD_DEFAULT. dlsym on that
+    // handle is routed through our shim symbol tables, then the host image
+    // (ANGLE / MoltenVK statically linked into the process).
+    if (!filename) {
         return RTLD_DEFAULT;
     }
-    
-    return ::dlopen(filename, flags);
+
+    // Try a real host dlopen first for anything that might genuinely exist.
+    void* real = ::dlopen(filename, flags ? flags : RTLD_NOW);
+    if (real) {
+        return real;
+    }
+
+    // Emulate the Android linker: pretend the requested library resolved.
+    // Symbol lookups then flow through bionic_dlsym.
+    return RTLD_DEFAULT;
 }
 
 extern "C" void* bionic_dlsym(void* handle, const char* symbol) {
+    if (!symbol) return nullptr;
+
+    // For a real host handle, prefer its own symbols first.
+    if (handle && handle != RTLD_DEFAULT) {
+        if (void* real = ::dlsym(handle, symbol)) {
+            return real;
+        }
+    }
+
+    // Route through the shim symbol tables (syscall/graphics/input).
     size_t count = 0;
     const SymbolEntry* symbols = get_syscall_symbols(&count);
     for (size_t i = 0; i < count; ++i) {
@@ -623,21 +659,25 @@ extern "C" void* bionic_dlsym(void* handle, const char* symbol) {
     for (size_t i = 0; i < count; ++i) {
         if (strcmp(symbols[i].name, symbol) == 0) return symbols[i].address;
     }
-    
-    if (handle == RTLD_DEFAULT) {
-        return ::dlsym(RTLD_DEFAULT, symbol);
-    }
-    return ::dlsym(handle, symbol);
+
+    // Fall back to the host process image (ANGLE, MoltenVK, libc, ...).
+    return ::dlsym(RTLD_DEFAULT, symbol);
+}
+
+extern "C" void* bionic_android_dlopen_ext(const char* filename, int flags, const void* extinfo) {
+    (void)extinfo;
+    return bionic_dlopen(filename, flags);
 }
 
 extern "C" int bionic_dlclose(void* handle) {
-    if (handle == RTLD_DEFAULT) return 0;
+    if (!handle || handle == RTLD_DEFAULT) return 0;
     return ::dlclose(handle);
 }
 
 extern "C" char* bionic_dlerror() {
     return ::dlerror();
 }
+
 
 #ifdef __APPLE__
 
@@ -1378,6 +1418,14 @@ const SymbolEntry kSyscallSymbols[] = {
 
     // ELF iteration
     {"dl_iterate_phdr", reinterpret_cast<void*>(&bionic_dl_iterate_phdr)},
+
+    // Dynamic loader (dlfcn) — must route through the shim so the guest never
+    // calls the real host dlopen with a nonexistent Android .so path.
+    {"dlopen", reinterpret_cast<void*>(&bionic_dlopen)},
+    {"dlsym", reinterpret_cast<void*>(&bionic_dlsym)},
+    {"dlclose", reinterpret_cast<void*>(&bionic_dlclose)},
+    {"dlerror", reinterpret_cast<void*>(&bionic_dlerror)},
+    {"android_dlopen_ext", reinterpret_cast<void*>(&bionic_android_dlopen_ext)},
 
     // 64-bit file operations
     {"lseek64", reinterpret_cast<void*>(&bionic_lseek64)},
