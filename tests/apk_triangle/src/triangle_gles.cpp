@@ -127,8 +127,9 @@ static void* render_loop(void* arg) {
     auto p_glClearColor = (void (*)(GLclampf, GLclampf, GLclampf, GLclampf)) dlsym(libGLES, "glClearColor");
     auto p_glClear = (void (*)(GLbitfield)) dlsym(libGLES, "glClear");
     auto p_glDrawArrays = (void (*)(GLenum, GLint, GLsizei)) dlsym(libGLES, "glDrawArrays");
+    auto p_glViewport = (void (*)(GLint, GLint, GLsizei, GLsizei)) dlsym(libGLES, "glViewport");
 
-    if (!p_glCreateShader || !p_glClearColor) {
+    if (!p_glCreateShader || !p_glClearColor || !p_glViewport) {
         LOGE("Failed to load GL functions");
         return nullptr;
     }
@@ -168,6 +169,7 @@ static void* render_loop(void* arg) {
     LOGI("Render loop starting.");
     render_running = true;
     while (render_running) {
+        p_glViewport(0, 0, 1080, 1920); // TODO: get real width/height
         p_glClearColor(0.2f, 0.2f, 0.2f, 1.0f);
         p_glClear(GL_COLOR_BUFFER_BIT);
         p_glDrawArrays(GL_TRIANGLES, 0, 3);
