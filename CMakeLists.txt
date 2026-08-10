@@ -46,13 +46,16 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
         BUILD_WITH_INSTALL_RPATH TRUE
     )
 
-    # Link against dynamic frameworks so iOS dyld loads them automatically
+    # Provide framework search paths
     target_link_options(kudroid_core PRIVATE
         "-F${CMAKE_CURRENT_SOURCE_DIR}/third_party/ANGLE/lib/ios-arm64"
         "-F${CMAKE_CURRENT_SOURCE_DIR}/third_party/MoltenVK/MoltenVK/dynamic/MoltenVK.xcframework/ios-arm64"
-        "-framework" "libEGL"
-        "-framework" "libGLESv2"
-        "-framework" "MoltenVK"
+    )
+    # Link against dynamic frameworks so iOS dyld loads them automatically
+    target_link_libraries(kudroid_core PRIVATE
+        "-framework libEGL"
+        "-framework libGLESv2"
+        "-framework MoltenVK"
     )
 endif()
 
