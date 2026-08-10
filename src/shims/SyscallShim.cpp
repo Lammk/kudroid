@@ -628,14 +628,34 @@ extern "C" void* bionic_dlopen(const char* filename, int flags) {
         return real;
     }
 
-    // iOS doesn't link dynamic frameworks if they aren't directly referenced.
-    // However, KuDroidCore.framework now dynamically links to ANGLE and MoltenVK
-    // at build time, so dyld loads them automatically on app launch.
-    // We just return RTLD_DEFAULT so bionic_dlsym can resolve symbols globally.
+    // Map Android GPU library requests directly to the embedded iOS frameworks.
+    // We return the EXACT handle from iOS dlopen so that bionic_dlsym can search 
+    // exactly within that framework's namespace, completely bypassing RTLD_DEFAULT issues.
     if (strstr(filename, "libEGL.so") || strstr(filename, "libGLESv2.so") || 
-        strstr(filename, "libGLESv1_CM.so") || strstr(filename, "libGLESv3.so") || 
-        strstr(filename, "libvulkan.so")) {
-        return RTLD_DEFAULT;
+        strstr(filename, "libGLESv1_CM.so") || strstr(filename, "libGLESv3.so")) {
+        // EGL and GLES are combined in the ANGLE frameworks, usually we'd load both, 
+        // but EGL is enough for eglGetProcAddress, or we can just load the specific one requested.
+        const char* fw_path = strstr(filename, "libEGL") ? 
+            "@executable_path/Frameworks/libEGL.framework/libEGL" : 
+            "@executable_path/Frameworks/libGLESv2.framework/libGLESv2";
+        
+        void* handle = ::dlopen(fw_path, RTLD_NOW | RTLD_LOCAL);
+        if (handle) {
+            logAndroidMessage(4, "KuDroidGPU", std::string("Successfully loaded ") + fw_path);
+            return handle;
+        } else {
+            logAndroidMessage(5, "KuDroidGPU", std::string("Failed to load ") + fw_path + ": " + ::dlerror());
+        }
+    }
+    
+    if (strstr(filename, "libvulkan.so")) {
+        void* handle = ::dlopen("@executable_path/Frameworks/MoltenVK.framework/MoltenVK", RTLD_NOW | RTLD_LOCAL);
+        if (handle) {
+            logAndroidMessage(4, "KuDroidGPU", "Successfully loaded MoltenVK.framework");
+            return handle;
+        } else {
+            logAndroidMessage(5, "KuDroidGPU", std::string("Failed to load MoltenVK: ") + ::dlerror());
+        }
     }
 
     // Emulate the Android linker: pretend the requested library resolved.

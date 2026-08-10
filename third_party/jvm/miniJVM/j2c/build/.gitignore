@@ -1,0 +1,9 @@
+.DS_Store
+.idea
+csource.txt
+Thumbs.db
+*.exe
+app
+tools
+
+cmake*
