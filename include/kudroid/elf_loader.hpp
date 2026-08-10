@@ -59,6 +59,16 @@ public:
     /// @return  Result string with status and computed value.
     std::string testExecution();
 
+    /// Execute constructors (DT_INIT and DT_INIT_ARRAY).
+    void executeInit();
+
+    /// Execute destructors (DT_FINI and DT_FINI_ARRAY).
+    void executeFini();
+
+    /// Register .eh_frame for C++ exceptions
+    void registerEhFrame();
+    void deregisterEhFrame();
+
 private:
     // Internal: read file contents into buffer
     bool readFile(std::vector<char>& buf);
@@ -77,6 +87,18 @@ private:
     std::uint64_t        tls_filesz_ = 0;
     std::uint64_t        tls_memsz_  = 0;
     std::uint64_t        tls_align_  = 0;
+
+    // Constructors / Destructors
+    std::uint64_t        init_func_  = 0;
+    std::uint64_t        init_array_ = 0;
+    std::uint64_t        init_arraysz_ = 0;
+    std::uint64_t        fini_func_  = 0;
+    std::uint64_t        fini_array_ = 0;
+    std::uint64_t        fini_arraysz_ = 0;
+
+    // Exception Handling (.eh_frame_hdr / PT_GNU_EH_FRAME)
+    std::uint64_t        eh_frame_vaddr_ = 0;
+    std::uint64_t        eh_frame_memsz_ = 0;
 };
 
 } // namespace kudroid

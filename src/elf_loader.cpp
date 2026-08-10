@@ -5,6 +5,26 @@
 #include <cstring>
 #include <fstream>
 #include <sys/mman.h>
+
+#ifndef DT_INIT
+#define DT_INIT 12
+#endif
+#ifndef DT_FINI
+#define DT_FINI 13
+#endif
+#ifndef DT_INIT_ARRAY
+#define DT_INIT_ARRAY 25
+#endif
+#ifndef DT_FINI_ARRAY
+#define DT_FINI_ARRAY 26
+#endif
+#ifndef DT_INIT_ARRAYSZ
+#define DT_INIT_ARRAYSZ 27
+#endif
+#ifndef DT_FINI_ARRAYSZ
+#define DT_FINI_ARRAYSZ 28
+#endif
+
 #include <unistd.h>
 #include <utility>
 
@@ -159,6 +179,9 @@ bool ElfLoader::parse() {
             tls_filesz_ = phdr.p_filesz;
             tls_memsz_  = phdr.p_memsz;
             tls_align_  = phdr.p_align;
+        } else if (phdr.p_type == 0x6474e550) { // PT_GNU_EH_FRAME
+            eh_frame_vaddr_ = phdr.p_vaddr;
+            eh_frame_memsz_ = phdr.p_memsz;
         }
     }
 
@@ -410,6 +433,12 @@ bool ElfLoader::relocate() {
             case DT_SYMTAB: symtabVaddr = dynamic[i].d_val; break;
             case DT_STRTAB: strtabVaddr = dynamic[i].d_val; break;
             case DT_STRSZ: strsz = dynamic[i].d_val; break;
+            case DT_INIT: init_func_ = dynamic[i].d_val; break;
+            case DT_INIT_ARRAY: init_array_ = dynamic[i].d_val; break;
+            case DT_INIT_ARRAYSZ: init_arraysz_ = dynamic[i].d_val; break;
+            case DT_FINI: fini_func_ = dynamic[i].d_val; break;
+            case DT_FINI_ARRAY: fini_array_ = dynamic[i].d_val; break;
+            case DT_FINI_ARRAYSZ: fini_arraysz_ = dynamic[i].d_val; break;
             default: break;
         }
     }
@@ -437,6 +466,19 @@ bool ElfLoader::relocate() {
     const char* strtab = fileBuf_.data() + strtabOffset;
     const size_t symbolCount = (strtabOffset - symtabOffset) / sizeof(Elf64Sym);
 
+#ifndef R_AARCH64_COPY
+#define R_AARCH64_COPY 1024
+#endif
+#ifndef R_AARCH64_TLS_DTPMOD64
+#define R_AARCH64_TLS_DTPMOD64 1028
+#endif
+#ifndef R_AARCH64_TLS_DTPREL64
+#define R_AARCH64_TLS_DTPREL64 1029
+#endif
+#ifndef R_AARCH64_TLS_TPREL64
+#define R_AARCH64_TLS_TPREL64 1030
+#endif
+
     auto applyRelocations = [&](uint64_t vaddr, uint64_t size) -> bool {
         if (size == 0) return true;
         const uint64_t offset = vaddrToFileOffset(vaddr);
@@ -454,7 +496,7 @@ bool ElfLoader::relocate() {
                 static_cast<char*>(base_) + relocs[i].r_offset);
             if (type == R_AARCH64_RELATIVE) {
                 *target = reinterpret_cast<uintptr_t>(base_) + relocs[i].r_addend;
-            } else if (type == R_AARCH64_GLOB_DAT || type == R_AARCH64_JUMP_SLOT || type == R_AARCH64_ABS64) {
+            } else if (type == R_AARCH64_GLOB_DAT || type == R_AARCH64_JUMP_SLOT || type == R_AARCH64_ABS64 || type == R_AARCH64_COPY) {
                 if (symbolIndex >= symbolCount || symtab[symbolIndex].st_name >= strsz) {
                     lastError_ = "Invalid relocation symbol index";
                     return false;
@@ -468,7 +510,23 @@ bool ElfLoader::relocate() {
                 } else {
                     address = resolve_bionic_symbol(name);
                 }
-                *target = reinterpret_cast<uintptr_t>(address) + relocs[i].r_addend;
+                
+                if (type == R_AARCH64_COPY) {
+                    if (address) {
+                        memcpy(target, address, symtab[symbolIndex].st_size);
+                    }
+                } else {
+                    *target = reinterpret_cast<uintptr_t>(address) + relocs[i].r_addend;
+                }
+            } else if (type == R_AARCH64_TLS_DTPMOD64) {
+                *target = 1; // Module ID (1 for main library)
+            } else if (type == R_AARCH64_TLS_DTPREL64 || type == R_AARCH64_TLS_TPREL64) {
+                // For now, resolve TLS offset directly. Proper TLS block setup requires more complex runtime management.
+                if (symbolIndex != 0) {
+                    *target = symtab[symbolIndex].st_value + relocs[i].r_addend;
+                } else {
+                    *target = relocs[i].r_addend;
+                }
             } else {
                 lastError_ = "Unsupported AArch64 relocation type: " +
                              std::to_string(type);
@@ -598,17 +656,106 @@ std::string ElfLoader::testExecution() {
 
     void* addr = getSymbolAddress("kudroid_add");
     if (!addr) {
-        return "[kudroid_core] EXECUTION FAILED: Symbol 'kudroid_add' not found in .dynsym";
+        return "[kudroid_core] EXECUTION FAILED: Symbol 'kudroid_add' not found";
     }
 
-    using AddFunc = int (*)(int, int);
-    AddFunc func = reinterpret_cast<AddFunc>(addr);
+    // signature: int kudroid_add(int, int)
+    int (*add_func)(int, int) = reinterpret_cast<int (*)(int, int)>(addr);
+    int result = add_func(40, 20);
 
-    int result = func(40, 20);
-    char buf[128];
-    snprintf(buf, sizeof(buf),
-        "[kudroid_core] EXECUTION SUCCESS! kudroid_add(40, 20) = %d", result);
-    return std::string(buf);
+    return "[kudroid_core] EXECUTION SUCCESS: kudroid_add(40, 20) = " +
+           std::to_string(result);
+}
+
+void ElfLoader::executeInit() {
+    if (!base_) return;
+
+    // Execute DT_INIT if present
+    if (init_func_ != 0) {
+        void (*init)() = reinterpret_cast<void (*)()>(
+            static_cast<char*>(base_) + init_func_);
+        init();
+    }
+
+    // Execute DT_INIT_ARRAY if present
+    if (init_array_ != 0 && init_arraysz_ > 0) {
+        auto** array = reinterpret_cast<void (**)()>(
+            static_cast<char*>(base_) + init_array_);
+        size_t count = init_arraysz_ / sizeof(void*);
+        for (size_t i = 0; i < count; ++i) {
+            if (array[i]) {
+                array[i]();
+            }
+        }
+    }
+}
+
+void ElfLoader::executeFini() {
+    if (!base_) return;
+
+    // Execute DT_FINI_ARRAY if present (in reverse order per ELF spec)
+    if (fini_array_ != 0 && fini_arraysz_ > 0) {
+        auto** array = reinterpret_cast<void (**)()>(
+            static_cast<char*>(base_) + fini_array_);
+        size_t count = fini_arraysz_ / sizeof(void*);
+        for (size_t i = count; i > 0; --i) {
+            if (array[i - 1]) {
+                array[i - 1]();
+            }
+        }
+    }
+
+    // Execute DT_FINI if present
+    if (fini_func_ != 0) {
+        void (*fini)() = reinterpret_cast<void (*)()>(
+            static_cast<char*>(base_) + fini_func_);
+        fini();
+    }
+}
+
+extern "C" void __register_frame(void*);
+extern "C" void __deregister_frame(void*);
+
+void ElfLoader::registerEhFrame() {
+    if (!base_ || eh_frame_vaddr_ == 0) return;
+
+    // eh_frame_vaddr_ points to .eh_frame_hdr (PT_GNU_EH_FRAME)
+    auto* hdr = reinterpret_cast<const uint8_t*>(static_cast<char*>(base_) + eh_frame_vaddr_);
+    
+    // Header format:
+    // uint8_t version; (must be 1)
+    // uint8_t eh_frame_ptr_enc;
+    // uint8_t fde_count_enc;
+    // uint8_t table_enc;
+    
+    if (hdr[0] != 1) return; // Unknown version
+    
+    // DW_EH_PE_pcrel | DW_EH_PE_sdata4 (0x1B) is most common
+    if (hdr[1] == 0x1B) {
+        // The pointer is a 32-bit signed offset from the pointer's address
+        const int32_t* ptr_addr = reinterpret_cast<const int32_t*>(hdr + 4);
+        int32_t offset = *ptr_addr;
+        void* eh_frame_actual = reinterpret_cast<void*>(
+            reinterpret_cast<uintptr_t>(ptr_addr) + offset);
+        
+        __register_frame(eh_frame_actual);
+    }
+}
+
+void ElfLoader::deregisterEhFrame() {
+    if (!base_ || eh_frame_vaddr_ == 0) return;
+
+    auto* hdr = reinterpret_cast<const uint8_t*>(static_cast<char*>(base_) + eh_frame_vaddr_);
+    if (hdr[0] != 1) return;
+    
+    if (hdr[1] == 0x1B) {
+        const int32_t* ptr_addr = reinterpret_cast<const int32_t*>(hdr + 4);
+        int32_t offset = *ptr_addr;
+        void* eh_frame_actual = reinterpret_cast<void*>(
+            reinterpret_cast<uintptr_t>(ptr_addr) + offset);
+        
+        __deregister_frame(eh_frame_actual);
+    }
 }
 
 } // namespace kudroid

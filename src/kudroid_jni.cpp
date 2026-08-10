@@ -87,7 +87,7 @@ void kudroid_jni_destroy_jvm(void) {
     }
 }
 
-JavaVM* kudroid_jni_get_javavm(void) {
+extern "C" JavaVM* kudroid_jni_get_javavm(void) {
     return &g_java_vm;
 }
 

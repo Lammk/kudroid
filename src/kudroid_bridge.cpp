@@ -18,6 +18,8 @@
 #include <unistd.h>
 #include <sys/ucontext.h>
 
+extern "C" struct JavaVM_* kudroid_jni_get_javavm(void);
+
 // ── Persistent logging to the app's writable folder ─────────────────────────
 // The app passes a directory (its Documents dir) via kudroid_set_log_dir().
 // Success logs are written as .txt files; crashes (signal-based, so no C++
@@ -990,7 +992,21 @@ extern "C" const char* kudroid_jni_massive_so_test(const char* path) {
         } else if (!loader.relocate()) {
             log += "[kudroid_jni] RELOCATE FAILED: " + std::string(loader.lastError()) + "\n";
         } else {
-            log += "[kudroid_jni] ELF mapped and Bionic imports bound.\n";
+            loader.registerEhFrame();
+            loader.executeInit();
+            log += "[kudroid_jni] ELF mapped, relocated, and initialized.\n";
+            
+            // Execute JNI_OnLoad if present
+            void* jniOnLoadAddr = loader.getSymbolAddress("JNI_OnLoad");
+            if (jniOnLoadAddr) {
+                log += "[kudroid_jni] Found JNI_OnLoad, executing...\n";
+                // Get the JVM from the bridge
+                using JNI_OnLoad_t = jint (*)(JavaVM*, void*);
+                JNI_OnLoad_t jniOnLoad = reinterpret_cast<JNI_OnLoad_t>(jniOnLoadAddr);
+                jint version = jniOnLoad(kudroid_jni_get_javavm(), nullptr);
+                log += "[kudroid_jni] JNI_OnLoad returned version: 0x" + std::to_string(version) + "\n";
+            }
+            
             void* address = loader.getSymbolAddress("kudroid_jni_massive_test");
             if (!address) {
                 log += "[kudroid_jni] SYMBOL FAILED: kudroid_jni_massive_test not found\n";
