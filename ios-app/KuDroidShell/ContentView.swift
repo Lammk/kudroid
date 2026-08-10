@@ -142,6 +142,7 @@ struct AppsView: View {
                 AndroidAppView(appName: app.value)
             }
         }
+    }
     
     struct IdentifiableString: Identifiable {
         let id = UUID()
