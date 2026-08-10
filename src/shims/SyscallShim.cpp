@@ -594,6 +594,39 @@ extern "C" int bionic_futex(uint32_t *uaddr, int futex_op, uint32_t val, const s
     return -1;
 }
 
+// --- Dynamic Loading (dlfcn) ---
+extern "C" void* bionic_dlopen(const char* filename, int flags) {
+    if (!filename) return ::dlopen(filename, flags);
+    std::string name(filename);
+    
+    // Intercept GPU libraries and redirect to the host executable which has them linked
+    if (name.find("libEGL") != std::string::npos || name.find("libGLES") != std::string::npos || name.find("libvulkan") != std::string::npos || name.find("vulkan") != std::string::npos) {
+        return RTLD_DEFAULT;
+    }
+    
+    return ::dlopen(filename, flags);
+}
+
+extern "C" void* bionic_dlsym(void* handle, const char* symbol) {
+    auto it = gGlobalSymbols.find(symbol);
+    if (it != gGlobalSymbols.end()) {
+        return it->second;
+    }
+    if (handle == RTLD_DEFAULT) {
+        return ::dlsym(RTLD_DEFAULT, symbol);
+    }
+    return ::dlsym(handle, symbol);
+}
+
+extern "C" int bionic_dlclose(void* handle) {
+    if (handle == RTLD_DEFAULT) return 0;
+    return ::dlclose(handle);
+}
+
+extern "C" char* bionic_dlerror() {
+    return ::dlerror();
+}
+
 #ifdef __APPLE__
 
 static int create_loopback_udp() {
