@@ -173,9 +173,13 @@ extern "C" void kudroid_set_documents_dir(const char* dir) {
 
 // Global metal layer pointer accessible by BionicShim
 void* g_metalLayer = nullptr;
+int g_metalLayerWidth = 1080;
+int g_metalLayerHeight = 1920;
 
-extern "C" void kudroid_set_metal_layer(void* layer) {
+extern "C" void kudroid_set_metal_layer(void* layer, int width, int height) {
     g_metalLayer = layer;
+    g_metalLayerWidth = width;
+    g_metalLayerHeight = height;
 }
 
 extern "C" const char* kudroid_vfs_self_test_log(void) {

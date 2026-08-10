@@ -1,20 +1,26 @@
 #include "kudroid/shims/GraphicsShim.h"
 #include <dlfcn.h>
+#include <cstdio>
 namespace kudroid {
 
 // This comes from kudroid_bridge.cpp
 extern void* g_metalLayer;
+extern int g_metalLayerWidth;
+extern int g_metalLayerHeight;
 
 namespace {
 
 extern "C" void* bionic_ANativeWindow_fromSurface(void* env, void* surface) {
     (void)env; (void)surface;
     // ANGLE on iOS uses CAMetalLayer/UIView as the native window!
+    if (!g_metalLayer) {
+        fprintf(stderr, "[GraphicsShim] ERROR: ANativeWindow_fromSurface called but g_metalLayer is NULL!\n");
+    }
     return g_metalLayer;
 }
 
-extern "C" int bionic_ANativeWindow_getWidth(void* window) { (void)window; return 1080; }
-extern "C" int bionic_ANativeWindow_getHeight(void* window) { (void)window; return 1920; }
+extern "C" int bionic_ANativeWindow_getWidth(void* window) { (void)window; return g_metalLayerWidth; }
+extern "C" int bionic_ANativeWindow_getHeight(void* window) { (void)window; return g_metalLayerHeight; }
 extern "C" int bionic_ANativeWindow_setBuffersGeometry(void* window, int width, int height, int format) {
     (void)window; (void)width; (void)height; (void)format; return 0;
 }

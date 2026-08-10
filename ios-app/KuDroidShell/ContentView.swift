@@ -579,9 +579,13 @@ struct MetalView: UIViewRepresentable {
         let view = NativeMetalView()
         context.coordinator.metalView = view
         
-        // Pass the CAMetalLayer to Kudroid
+        // Pass the CAMetalLayer and bounds to Kudroid
+        let bounds = UIScreen.main.bounds
+        let scale = UIScreen.main.scale
+        let width = Int32(bounds.width * scale)
+        let height = Int32(bounds.height * scale)
         let unmanaged = Unmanaged.passUnretained(view.layer)
-        kudroid_set_metal_layer(unmanaged.toOpaque())
+        kudroid_set_metal_layer(unmanaged.toOpaque(), width, height)
         
         // Run APK in background so it doesn't block iOS UI
         DispatchQueue.global(qos: .userInitiated).async {
