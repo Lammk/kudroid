@@ -977,9 +977,7 @@ extern "C" const char* kudroid_syscall_so_test(const char* path) {
         log += "\n";
     }
     writeLogFile("kudroid_syscall_test.txt", log);
-    static std::string result_str;
-    result_str = log;
-    return result_str.c_str();
+    return strdup(log.c_str());
 }
 
 extern "C" const char* kudroid_jni_massive_so_test(const char* path) {
@@ -1041,9 +1039,7 @@ extern "C" const char* kudroid_jni_massive_so_test(const char* path) {
         }
     }
     writeLogFile("kudroid_jni_massive_test.txt", log);
-    static std::string result_str;
-    result_str = log;
-    return result_str.c_str();
+    return strdup(log.c_str());
 }
 
 // GPU .so Execution Tests — loads the ARM64 ELF test .so through the ELF

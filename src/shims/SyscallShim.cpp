@@ -658,16 +658,18 @@ extern "C" void* bionic_dlopen(const char* filename, int flags) {
         }
     }
 
+#define DUMMY_HANDLE ((void*)0xDEADBEEF)
+
     // Emulate the Android linker: pretend the requested library resolved.
-    logAndroidMessage(4, "KuDroidSyscall", std::string("bionic_dlopen: fallback returning RTLD_DEFAULT for ") + filename);
-    return RTLD_DEFAULT;
+    logAndroidMessage(4, "KuDroidSyscall", std::string("bionic_dlopen: fallback returning DUMMY_HANDLE for ") + filename);
+    return DUMMY_HANDLE;
 }
 
 extern "C" void* bionic_dlsym(void* handle, const char* symbol) {
     if (!symbol) return nullptr;
 
     // For a real host handle, prefer its own symbols first.
-    if (handle && handle != RTLD_DEFAULT) {
+    if (handle && handle != RTLD_DEFAULT && handle != DUMMY_HANDLE) {
         if (void* real = ::dlsym(handle, symbol)) {
             logAndroidMessage(2, "KuDroidSyscall", std::string("bionic_dlsym: [") + symbol + "] found in real handle");
             return real;
@@ -696,6 +698,12 @@ extern "C" void* bionic_dlsym(void* handle, const char* symbol) {
             logAndroidMessage(2, "KuDroidSyscall", std::string("bionic_dlsym: [") + symbol + "] resolved via InputShim");
             return symbols[i].address;
         }
+    }
+
+    // If it was a dummy handle, do NOT search RTLD_DEFAULT globally.
+    if (handle == DUMMY_HANDLE) {
+        logAndroidMessage(5, "KuDroidSyscall", std::string("bionic_dlsym: [") + symbol + "] NOT FOUND (in dummy handle)");
+        return nullptr;
     }
 
     // Fall back to the host process image (ANGLE, MoltenVK, libc, ...).

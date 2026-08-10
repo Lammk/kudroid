@@ -47,7 +47,7 @@ void kudroid_set_log_dir(const char* dir);
 void kudroid_set_documents_dir(const char* dir);
 
 /// Set the CAMetalLayer or UIView pointer used for ANativeWindow surface bindings.
-void kudroid_set_metal_layer(void* layer);
+void kudroid_set_metal_layer(void* layer, int width, int height);
 
 /// Run the VFS redirect and I/O self-test; returns a malloc'd log.
 const char* kudroid_vfs_self_test_log(void);
