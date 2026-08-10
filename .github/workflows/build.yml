@@ -235,12 +235,34 @@ jobs:
             tests/test_gpu_vulkan_arm64.so
             tests/test_gpu_opengl_arm64.so
 
+  build-minijvm-rt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 8
+        uses: actions/setup-java@v4
+        with:
+          java-version: '8'
+          distribution: 'temurin'
+
+      - name: Build minijvm_rt.jar
+        run: |
+          cd third_party/jvm/miniJVM/binary
+          ./build_jar.sh
+
+      - name: Upload minijvm_rt.jar artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: minijvm-rt-jar
+          path: third_party/jvm/miniJVM/binary/lib/minijvm_rt.jar
+
   # ─────────────────────────────────────────────────────────────────────────────
   # iOS Build — downloads pre-built ANGLE + MoltenVK, compiles only kudroid_core
   # and the SwiftUI shell.
   # ─────────────────────────────────────────────────────────────────────────────
   ios-build:
-    needs: [build-multi-elf-so-arm64, build-gpu-test-so-arm64]
+    needs: [build-multi-elf-so-arm64, build-gpu-test-so-arm64, build-minijvm-rt]
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -276,6 +298,12 @@ jobs:
         with:
           name: gpu-test-arm64-so
           path: gpu-test-artifact
+
+      - name: Download minijvm_rt.jar
+        uses: actions/download-artifact@v4
+        with:
+          name: minijvm-rt-jar
+          path: minijvm-rt-artifact
 
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
@@ -396,6 +424,9 @@ jobs:
           if [ -d third_party/MoltenVK/MoltenVK/dynamic/MoltenVK.xcframework/ios-arm64/MoltenVK.framework ]; then
             cp -R third_party/MoltenVK/MoltenVK/dynamic/MoltenVK.xcframework/ios-arm64/MoltenVK.framework KuDroidShell.app/Frameworks/
           fi
+          
+          # Copy minijvm_rt.jar
+          cp minijvm-rt-artifact/minijvm_rt.jar KuDroidShell.app/
 
           cat > KuDroidShell.app/Info.plist << 'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
