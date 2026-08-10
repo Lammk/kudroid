@@ -5,6 +5,7 @@
 #include <android/native_window.h>
 #include <dlfcn.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <pthread.h>
 #include <unistd.h>
 
