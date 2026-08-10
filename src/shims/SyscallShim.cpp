@@ -621,41 +621,21 @@ extern "C" void* bionic_dlopen(const char* filename, int flags) {
         return RTLD_DEFAULT;
     }
 
-    // iOS doesn't link dynamic frameworks if they aren't directly referenced.
-    // Proactively dlopen ANGLE/MoltenVK frameworks into the process with RTLD_GLOBAL 
-    // so dlsym(RTLD_DEFAULT) can find them later.
-    if (strstr(filename, "libEGL.so") || strstr(filename, "libGLESv2.so") || strstr(filename, "libGLESv1_CM.so") || strstr(filename, "libGLESv3.so")) {
-        void* egl_fw = ::dlopen("@executable_path/Frameworks/libEGL.framework/libEGL", RTLD_NOW | RTLD_GLOBAL);
-        if (egl_fw) {
-            logAndroidMessage(4, "KuDroidGPU", "Successfully loaded libEGL.framework into RTLD_GLOBAL");
-        } else {
-            logAndroidMessage(5, "KuDroidGPU", std::string("Failed to load libEGL.framework: ") + ::dlerror());
-        }
-        
-        void* gles_fw = ::dlopen("@executable_path/Frameworks/libGLESv2.framework/libGLESv2", RTLD_NOW | RTLD_GLOBAL);
-        if (gles_fw) {
-            logAndroidMessage(4, "KuDroidGPU", "Successfully loaded libGLESv2.framework into RTLD_GLOBAL");
-        } else {
-            logAndroidMessage(5, "KuDroidGPU", std::string("Failed to load libGLESv2.framework: ") + ::dlerror());
-        }
-        return RTLD_DEFAULT;
-    }
-    
-    if (strstr(filename, "libvulkan.so")) {
-        void* mvk_fw = ::dlopen("@executable_path/Frameworks/MoltenVK.framework/MoltenVK", RTLD_NOW | RTLD_GLOBAL);
-        if (mvk_fw) {
-            logAndroidMessage(4, "KuDroidGPU", "Successfully loaded MoltenVK.framework into RTLD_GLOBAL");
-        } else {
-            logAndroidMessage(5, "KuDroidGPU", std::string("Failed to load MoltenVK.framework: ") + ::dlerror());
-        }
-        return RTLD_DEFAULT;
-    }
-
     // Try a real host dlopen first for anything that might genuinely exist.
     void* real = ::dlopen(filename, flags ? flags : RTLD_NOW);
     if (real) {
         logAndroidMessage(4, "KuDroidSyscall", std::string("bionic_dlopen: resolved to real host handle for ") + filename);
         return real;
+    }
+
+    // iOS doesn't link dynamic frameworks if they aren't directly referenced.
+    // However, KuDroidCore.framework now dynamically links to ANGLE and MoltenVK
+    // at build time, so dyld loads them automatically on app launch.
+    // We just return RTLD_DEFAULT so bionic_dlsym can resolve symbols globally.
+    if (strstr(filename, "libEGL.so") || strstr(filename, "libGLESv2.so") || 
+        strstr(filename, "libGLESv1_CM.so") || strstr(filename, "libGLESv3.so") || 
+        strstr(filename, "libvulkan.so")) {
+        return RTLD_DEFAULT;
     }
 
     // Emulate the Android linker: pretend the requested library resolved.

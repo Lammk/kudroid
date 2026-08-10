@@ -428,12 +428,8 @@ jobs:
             -import-objc-header ios-app/KuDroidShell/kudroid_bridge.h \
             ios-app/KuDroidShell/KuDroidApp.swift \
             ios-app/KuDroidShell/ContentView.swift \
-            build-ios/libkudroid_core.a \
-            "$MINI_JVM_LIB" \
-            -Lthird_party/ANGLE/lib/ios-arm64 \
-            -lEGL -lGLESv2 \
-            -Fthird_party/MoltenVK/MoltenVK/dynamic/MoltenVK.xcframework/ios-arm64 \
-            -framework MoltenVK \
+            -Fbuild-ios \
+            -framework kudroid_core \
             -lz \
             -framework Metal \
             -framework QuartzCore \
@@ -444,8 +440,11 @@ jobs:
             -Xlinker -rpath -Xlinker @executable_path/Frameworks \
             -o KuDroidShell.app/KuDroidShell
 
-          # Embed ANGLE dynamic frameworks into the app bundle so dyld finds them at runtime
+          # Embed ALL dynamic frameworks into the app bundle so dyld finds them at runtime
           mkdir -p KuDroidShell.app/Frameworks
+          if [ -d build-ios/kudroid_core.framework ]; then
+            cp -R build-ios/kudroid_core.framework KuDroidShell.app/Frameworks/
+          fi
           if [ -d third_party/ANGLE/lib/ios-arm64/libEGL.framework ]; then
             cp -R third_party/ANGLE/lib/ios-arm64/libEGL.framework KuDroidShell.app/Frameworks/
           fi

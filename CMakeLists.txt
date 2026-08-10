@@ -10,6 +10,8 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 # ARM64 iOS cross-compile settings (when targeting iOS device/simulator)
 # Usage: cmake -B build -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
@@ -17,7 +19,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     set(CMAKE_OSX_DEPLOYMENT_TARGET "15.0" CACHE STRING "Minimum iOS deployment target")
 endif()
 
-add_library(kudroid_core STATIC
+add_library(kudroid_core SHARED
     src/APKExtractor.cpp
     src/BionicShim.cpp
     src/VFSPathRemapper.cpp
@@ -32,6 +34,27 @@ add_library(kudroid_core STATIC
     src/gpu_test.cpp
     src/DexManager.cpp
 )
+
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    set_target_properties(kudroid_core PROPERTIES
+        FRAMEWORK TRUE
+        FRAMEWORK_VERSION A
+        MACOSX_FRAMEWORK_IDENTIFIER dev.kuzei13.kudroidcore
+        VERSION 1.0.0
+        SOVERSION 1.0.0
+        INSTALL_RPATH "@executable_path/Frameworks"
+        BUILD_WITH_INSTALL_RPATH TRUE
+    )
+
+    # Link against dynamic frameworks so iOS dyld loads them automatically
+    target_link_options(kudroid_core PRIVATE
+        "-F${CMAKE_CURRENT_SOURCE_DIR}/third_party/ANGLE/lib/ios-arm64"
+        "-F${CMAKE_CURRENT_SOURCE_DIR}/third_party/MoltenVK/MoltenVK/dynamic/MoltenVK.xcframework/ios-arm64"
+        "-framework" "libEGL"
+        "-framework" "libGLESv2"
+        "-framework" "MoltenVK"
+    )
+endif()
 
 add_subdirectory(third_party/jvm/miniJVM/minijvm/c)
 target_link_libraries(kudroid_core PRIVATE mini_jvm_lib)
