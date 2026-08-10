@@ -120,9 +120,9 @@ int kudroid_gpu_opengl_test(void) {
     if (getPlatformDisplayEXT) {
         #define EGL_PLATFORM_ANGLE_ANGLE 0x3202
         #define EGL_PLATFORM_ANGLE_TYPE_ANGLE 0x3203
-        #define EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE 0x3489
+        #define EGL_PLATFORM_ANGLE_TYPE_VULKAN_ANGLE 0x3450
         const EGLint displayAttribs[] = {
-            EGL_PLATFORM_ANGLE_TYPE_ANGLE, EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE,
+            EGL_PLATFORM_ANGLE_TYPE_ANGLE, EGL_PLATFORM_ANGLE_TYPE_VULKAN_ANGLE,
             EGL_NONE
         };
         display = getPlatformDisplayEXT(EGL_PLATFORM_ANGLE_ANGLE, EGL_DEFAULT_DISPLAY, displayAttribs);
