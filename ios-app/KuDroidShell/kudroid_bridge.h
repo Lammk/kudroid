@@ -56,6 +56,12 @@ void kudroid_set_documents_dir(const char* dir);
 /// Set the CAMetalLayer or UIView pointer used for ANativeWindow surface bindings.
 void kudroid_set_metal_layer(void* layer, int width, int height);
 
+/// Inject a touch event into the native Android application
+/// @param x The X coordinate of the touch
+/// @param y The Y coordinate of the touch
+/// @param action 0=Down, 1=Up, 2=Move (Mapped to Android AMOTION_EVENT_ACTION)
+void kudroid_inject_touch_event(float x, float y, int action);
+
 /// Run the VFS redirect and I/O self-test; returns a malloc'd log.
 const char* kudroid_vfs_self_test_log(void);
 const char* kudroid_vfs_extended_test_log(void);

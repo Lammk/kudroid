@@ -605,6 +605,30 @@ class NativeMetalView: UIView {
     override class var layerClass: AnyClass {
         return NSClassFromString("CAMetalLayer") ?? CALayer.self
     }
+
+    private func injectTouch(_ touches: Set<UITouch>, action: Int32) {
+        guard let touch = touches.first else { return }
+        let location = touch.location(in: self)
+        let scale = UIScreen.main.scale
+        // action mapping: 0=DOWN, 1=UP, 2=MOVE (based on Android AMotionEvent)
+        kudroid_inject_touch_event(Float(location.x * scale), Float(location.y * scale), action)
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        injectTouch(touches, action: 0)
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        injectTouch(touches, action: 2)
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        injectTouch(touches, action: 1)
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        injectTouch(touches, action: 1) // Treat cancel as UP for safety
+    }
 }
 
 #Preview {
