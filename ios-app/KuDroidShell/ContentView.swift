@@ -135,11 +135,12 @@ struct AppsView: View {
                     showAPKInstaller = false
                 }
             }
-            .fullScreenCover(item: Binding<IdentifiableString?>(
-                get: { runningApp.map { IdentifiableString(value: $0) } },
-                set: { runningApp = $0?.value }
-            )) { app in
-                AndroidAppView(appName: app.value)
+        }
+        .overlay {
+            if let appName = runningApp {
+                AndroidAppView(appName: appName)
+                    .transition(.identity) // Instant transition, no pop-up animation
+                    .zIndex(1)
             }
         }
     }
