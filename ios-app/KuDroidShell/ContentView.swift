@@ -31,6 +31,7 @@ struct AppsView: View {
     @Binding var fullLog: String
     @State private var installedApps: [String] = []
     @State private var showAPKInstaller = false
+    @State private var runningApp: String?
     
     private var androidRootAppsURL: URL? {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
@@ -92,7 +93,7 @@ struct AppsView: View {
                                 Spacer()
                                 
                                 Button(action: {
-                                    runApp(name: appName)
+                                    runningApp = appName
                                 }) {
                                     Text("RUN")
                                         .font(.caption)
@@ -134,7 +135,18 @@ struct AppsView: View {
                     showAPKInstaller = false
                 }
             }
+            .fullScreenCover(item: Binding<IdentifiableString?>(
+                get: { runningApp.map { IdentifiableString(value: $0) } },
+                set: { runningApp = $0?.value }
+            )) { app in
+                AndroidAppView(appName: app.value)
+            }
         }
+    }
+    
+    struct IdentifiableString: Identifiable {
+        let id = UUID()
+        let value: String
     }
     
     private func loadInstalledApps() {
@@ -535,6 +547,79 @@ func runJniMassiveTest() -> String {
     let log = String(cString: cString)
     free(UnsafeMutablePointer(mutating: cString))
     return log
+}
+
+// MARK: - Android App Rendering
+struct AndroidAppView: View {
+    let appName: String
+    @Environment(\.presentationMode) var presentationMode
+    
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            
+            MetalView(appName: appName)
+                .ignoresSafeArea()
+            
+            VStack {
+                HStack {
+                    Spacer()
+                    Button(action: {
+                        // TODO: Implement graceful shutdown for thread. For now just close UI.
+                        presentationMode.wrappedValue.dismiss()
+                    }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 30))
+                            .foregroundColor(.white)
+                            .padding()
+                            .background(Color.black.opacity(0.4))
+                            .clipShape(Circle())
+                    }
+                    .padding()
+                }
+                Spacer()
+            }
+        }
+    }
+}
+
+struct MetalView: UIViewRepresentable {
+    let appName: String
+
+    class Coordinator: NSObject {
+        var metalView: UIView?
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = NativeMetalView()
+        context.coordinator.metalView = view
+        
+        // Pass the CAMetalLayer to Kudroid
+        let unmanaged = Unmanaged.passUnretained(view.layer)
+        kudroid_set_metal_layer(unmanaged.toOpaque())
+        
+        // Run APK in background so it doesn't block iOS UI
+        DispatchQueue.global(qos: .userInitiated).async {
+            if let cString = kudroid_run_apk(appName) {
+                print("App exited with log:\n\(String(cString: cString))")
+                free(UnsafeMutablePointer(mutating: cString))
+            }
+        }
+        
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {}
+}
+
+class NativeMetalView: UIView {
+    override class var layerClass: AnyClass {
+        return NSClassFromString("CAMetalLayer") ?? CALayer.self
+    }
 }
 
 #Preview {
