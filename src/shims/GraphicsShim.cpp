@@ -1,12 +1,12 @@
 #include "kudroid/shims/GraphicsShim.h"
 #include <dlfcn.h>
 #include <cstdio>
-namespace kudroid {
-
 // This comes from kudroid_bridge.cpp
 extern void* g_metalLayer;
 extern int g_metalLayerWidth;
 extern int g_metalLayerHeight;
+
+namespace kudroid {
 
 namespace {
 
