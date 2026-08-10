@@ -1,5 +1,7 @@
 #include "kudroid/BionicShim.h"
 #include "kudroid/shims/SyscallShim.h"
+#include "kudroid/shims/GraphicsShim.h"
+#include "kudroid/shims/InputShim.h"
 #include "kudroid/VFSPathRemapper.h"
 
 #include <cmath>
@@ -608,10 +610,20 @@ extern "C" void* bionic_dlopen(const char* filename, int flags) {
 }
 
 extern "C" void* bionic_dlsym(void* handle, const char* symbol) {
-    auto it = gGlobalSymbols.find(symbol);
-    if (it != gGlobalSymbols.end()) {
-        return it->second;
+    size_t count = 0;
+    const SymbolEntry* symbols = get_syscall_symbols(&count);
+    for (size_t i = 0; i < count; ++i) {
+        if (strcmp(symbols[i].name, symbol) == 0) return symbols[i].address;
     }
+    symbols = get_graphics_symbols(&count);
+    for (size_t i = 0; i < count; ++i) {
+        if (strcmp(symbols[i].name, symbol) == 0) return symbols[i].address;
+    }
+    symbols = get_input_symbols(&count);
+    for (size_t i = 0; i < count; ++i) {
+        if (strcmp(symbols[i].name, symbol) == 0) return symbols[i].address;
+    }
+    
     if (handle == RTLD_DEFAULT) {
         return ::dlsym(RTLD_DEFAULT, symbol);
     }
@@ -966,7 +978,7 @@ extern "C" void bionic_init_main_thread_tls(void) {
     // Check the stack guard is readable at offset 40
     uint64_t guard_check = *reinterpret_cast<uint64_t*>(new_tpidr + 40);
     
-    fprintf(stderr, "[TLS_DIAG] tls_base=%p tls_ptr=%p\n", tls_base, tls_ptr);
+    fprintf(stderr, "[TLS_DIAG] tls_base=%p tls_ptr=%p\n", reinterpret_cast<void*>(tls_base), reinterpret_cast<void*>(tls_ptr));
     fprintf(stderr, "[TLS_DIAG] tpidr_el0 BEFORE=0x%llx AFTER=0x%llx\n", 
             (unsigned long long)old_tpidr, (unsigned long long)new_tpidr);
     fprintf(stderr, "[TLS_DIAG] stack_guard@offset40=0x%llx (expect 0x1337BEEFCAFECAFE)\n",
