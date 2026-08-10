@@ -94,6 +94,9 @@ int kudroid_gpu_opengl_test(void) {
     }
 
     PFN_eglGetDisplay getDisplay = (PFN_eglGetDisplay)dlsym(egl, "eglGetDisplay");
+    typedef EGLDisplay (*PFN_eglGetPlatformDisplayEXT)(EGLenum platform, void *native_display, const EGLint *attrib_list);
+    PFN_eglGetPlatformDisplayEXT getPlatformDisplayEXT = (PFN_eglGetPlatformDisplayEXT)dlsym(egl, "eglGetPlatformDisplayEXT");
+
     PFN_eglInitialize initialize = (PFN_eglInitialize)dlsym(egl, "eglInitialize");
     PFN_eglChooseConfig chooseConfig = (PFN_eglChooseConfig)dlsym(egl, "eglChooseConfig");
     PFN_eglCreatePbufferSurface createPbufferSurface = (PFN_eglCreatePbufferSurface)dlsym(egl, "eglCreatePbufferSurface");
@@ -106,14 +109,31 @@ int kudroid_gpu_opengl_test(void) {
     PFN_eglDestroyContext destroyContext = (PFN_eglDestroyContext)dlsym(egl, "eglDestroyContext");
     PFN_eglTerminate terminate = (PFN_eglTerminate)dlsym(egl, "eglTerminate");
 
-    if (!getDisplay || !initialize || !chooseConfig || !createContext || !makeCurrent) {
+    if (!initialize || !chooseConfig || !createContext || !makeCurrent) {
         __android_log_print(ANDROID_LOG_INFO, "KuDroidGPU", "GL TEST: Missing core EGL functions!");
         return GPU_EGL_NO_GETDISPLAY;
     }
 
-    EGLDisplay display = getDisplay(EGL_DEFAULT_DISPLAY);
+    EGLDisplay display = EGL_NO_DISPLAY;
+    if (getPlatformDisplayEXT) {
+        #define EGL_PLATFORM_ANGLE_ANGLE 0x3202
+        #define EGL_PLATFORM_ANGLE_TYPE_ANGLE 0x3203
+        #define EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE 0x3489
+        const EGLint displayAttribs[] = {
+            EGL_PLATFORM_ANGLE_TYPE_ANGLE, EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE,
+            EGL_NONE
+        };
+        display = getPlatformDisplayEXT(EGL_PLATFORM_ANGLE_ANGLE, EGL_DEFAULT_DISPLAY, displayAttribs);
+        __android_log_print(ANDROID_LOG_INFO, "KuDroidGPU", "GL TEST: eglGetPlatformDisplayEXT returned %p.", display);
+    }
+    
+    if (display == EGL_NO_DISPLAY && getDisplay) {
+        display = getDisplay(EGL_DEFAULT_DISPLAY);
+        __android_log_print(ANDROID_LOG_INFO, "KuDroidGPU", "GL TEST: eglGetDisplay returned %p.", display);
+    }
+
     if (display == EGL_NO_DISPLAY) {
-        __android_log_print(ANDROID_LOG_INFO, "KuDroidGPU", "GL TEST: eglGetDisplay failed.");
+        __android_log_print(ANDROID_LOG_INFO, "KuDroidGPU", "GL TEST: eglGetDisplay / eglGetPlatformDisplayEXT failed.");
         return -5;
     }
 
