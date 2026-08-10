@@ -24,6 +24,9 @@ add_library(kudroid_core STATIC
     src/bionic_log_trampoline.S
     src/elf_loader.cpp
     src/library_manager.cpp
+    src/shims/SyscallShim.cpp
+    src/shims/GraphicsShim.cpp
+    src/shims/InputShim.cpp
     src/kudroid_bridge.cpp
     src/kudroid_jni.cpp
     src/gpu_test.cpp
