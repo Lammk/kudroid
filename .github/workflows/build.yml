@@ -253,34 +253,14 @@ jobs:
             tests/test_syscalls_arm64.so
             tests/test_jni_massive_arm64.so
 
-  build-minijvm-rt:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
 
-      - name: Set up JDK 8
-        uses: actions/setup-java@v4
-        with:
-          java-version: '8'
-          distribution: 'temurin'
-
-      - name: Build minijvm_rt.jar
-        run: |
-          cd third_party/jvm/miniJVM/binary
-          ./build_jar.sh
-
-      - name: Upload minijvm_rt.jar artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: minijvm-rt-jar
-          path: third_party/jvm/miniJVM/binary/lib/minijvm_rt.jar
 
   # ─────────────────────────────────────────────────────────────────────────────
   # iOS Build — downloads pre-built ANGLE + MoltenVK, compiles only kudroid_core
   # and the SwiftUI shell.
   # ─────────────────────────────────────────────────────────────────────────────
   ios-build:
-    needs: [build-multi-elf-so-arm64, build-gpu-test-so-arm64, build-minijvm-rt]
+    needs: [build-multi-elf-so-arm64, build-gpu-test-so-arm64]
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -338,7 +318,6 @@ jobs:
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           cmake --build build-ios --parallel
-          cmake --build build-ios --parallel --target mini_jvm_lib
 
           # Move the built testing libraries so we can embed them after Xcode build
           mkdir -p tests
@@ -395,9 +374,6 @@ jobs:
             cp -R third_party/MoltenVK/MoltenVK/dynamic/MoltenVK.xcframework/ios-arm64/MoltenVK.framework KuDroidShell.app/Frameworks/
           fi
           
-          # Copy minijvm_rt.jar
-          cp minijvm-rt-artifact/minijvm_rt.jar KuDroidShell.app/
-
 
 
       - name: Add App Icon
