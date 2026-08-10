@@ -508,6 +508,7 @@ extern "C" int bionic_ioctl(int fd, unsigned long request, ...) {
 }
 
 #define PR_SET_NAME 15
+#define PR_SET_VMA  0x53564d41
 
 extern "C" int bionic_prctl(int option, unsigned long arg2, unsigned long arg3, unsigned long arg4, unsigned long arg5) {
     (void)arg3; (void)arg4; (void)arg5;
@@ -517,8 +518,45 @@ extern "C" int bionic_prctl(int option, unsigned long arg2, unsigned long arg3, 
 #else
         return pthread_setname_np(pthread_self(), reinterpret_cast<const char*>(arg2));
 #endif
+    } else if (option == PR_SET_VMA) {
+        // Just fake it for PR_SET_VMA_ANON_NAME to prevent crashes
+        return 0;
     }
     return 0;
+}
+
+// Memory mapping wrappers to strip Linux specific flags
+extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
+#ifdef __APPLE__
+    // Strip MAP_POPULATE (0x8000) and other Linux flags not present in Darwin
+    int darwin_flags = flags & ~(0x8000 | 0x4000); 
+    return ::mmap(addr, length, prot, darwin_flags, fd, offset);
+#else
+    return ::mmap(addr, length, prot, flags, fd, offset);
+#endif
+}
+
+extern "C" void* bionic_mmap64(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
+    return bionic_mmap(addr, length, prot, flags, fd, offset);
+}
+
+extern "C" int bionic_mprotect(void *addr, size_t len, int prot) {
+    return ::mprotect(addr, len, prot);
+}
+
+extern "C" int bionic_madvise(void *addr, size_t length, int advice) {
+#ifdef __APPLE__
+    // MADV_DONTNEED in Linux is 4, in Darwin it is 4 as well, but others might differ.
+    // For safety in emulation, we return 0 for unsupported advice.
+    if (advice > 10) return 0;
+    return ::madvise(addr, length, advice);
+#else
+    return ::madvise(addr, length, advice);
+#endif
+}
+
+extern "C" int bionic_sigaltstack(const stack_t *ss, stack_t *oss) {
+    return ::sigaltstack(ss, oss);
 }
 
 #ifndef __APPLE__
@@ -1332,6 +1370,7 @@ const SymbolEntry kSymbols[] = {
     {"pthread_key_delete", reinterpret_cast<void*>(&bionic_pthread_key_delete)},
     {"pthread_once", reinterpret_cast<void*>(&bionic_pthread_once)},
     {"sigaction", reinterpret_cast<void*>(&bionic_sigaction)},
+    {"sigaltstack", reinterpret_cast<void*>(&bionic_sigaltstack)},
     {"futex", reinterpret_cast<void*>(&bionic_futex)},
     {"mremap", reinterpret_cast<void*>(&bionic_mremap)},
     {"gettid", reinterpret_cast<void*>(&bionic_gettid)},
@@ -1366,7 +1405,10 @@ const SymbolEntry kSymbols[] = {
     {"calloc", reinterpret_cast<void*>(&calloc)},
     {"realloc", reinterpret_cast<void*>(&realloc)},
     {"free", reinterpret_cast<void*>(&bionic_free)},
-    {"mmap", reinterpret_cast<void*>(&::mmap)},
+    {"mmap", reinterpret_cast<void*>(&bionic_mmap)},
+    {"mmap64", reinterpret_cast<void*>(&bionic_mmap64)},
+    {"mprotect", reinterpret_cast<void*>(&bionic_mprotect)},
+    {"madvise", reinterpret_cast<void*>(&bionic_madvise)},
     {"munmap", reinterpret_cast<void*>(&::munmap)},
     {"open", reinterpret_cast<void*>(&vfs_open)},
     {"open64", reinterpret_cast<void*>(&vfs_open64)},

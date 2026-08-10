@@ -931,6 +931,49 @@ extern "C" const char* kudroid_get_app_info(const char* package_name) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+extern "C" const char* kudroid_syscall_so_test(const char* path) {
+    std::string log;
+    appendTestHeader(log, "Syscall Traps (ARM64 .so) Test", path);
+    if (!path) {
+        log += "[kudroid_syscall] ERROR: null path\n";
+    } else if (!kudroid_jit_available()) {
+        log += "[kudroid_syscall] ABORT: JIT is Disabled — cannot execute ARM64 ELF\n";
+    } else {
+        kudroid::ElfLoader loader;
+        if (!loader.parse(path)) {
+            log += "[kudroid_syscall] PARSE FAILED: " + std::string(loader.lastError()) + "\n";
+        } else if (!loader.map()) {
+            log += "[kudroid_syscall] MAP FAILED: " + std::string(loader.lastError()) + "\n";
+        } else if (!loader.relocate()) {
+            log += "[kudroid_syscall] RELOCATE FAILED: " + std::string(loader.lastError()) + "\n";
+        } else {
+            log += "[kudroid_syscall] ELF mapped and Bionic imports bound.\n";
+            void* address = loader.getSymbolAddress("kudroid_syscall_test");
+            if (!address) {
+                log += "[kudroid_syscall] SYMBOL FAILED: kudroid_syscall_test not found\n";
+            } else {
+                log += "[kudroid_syscall] Running kudroid_syscall_test()...\n";
+                int (*test_func)() = reinterpret_cast<int (*)()>(address);
+                
+                // Clear BionicShim trace buffer
+                BionicShim::clearTraceLog();
+                
+                int result = test_func();
+                log += "[kudroid_syscall] SYSCALL TEST RESULT: " +
+                       (result == 0 ? std::string("0 (SUCCESS)") : std::to_string(result) + " (FAILED)") + "\n";
+            }
+        }
+        log += "[kudroid_syscall] Bionic shim trace:\n";
+        for (const auto& msg : BionicShim::getTraceLog()) {
+            log += "[BionicShim] " + msg + "\n";
+        }
+    }
+    writeLogFile("kudroid_syscall_test.txt", log);
+    static std::string result_str;
+    result_str = log;
+    return result_str.c_str();
+}
+
 // GPU .so Execution Tests — loads the ARM64 ELF test .so through the ELF
 // loader, which calls dlopen/dlsym for GPU libs. BionicShim intercepts those
 // and maps them directly to iOS native (MoltenVK / ANGLE).

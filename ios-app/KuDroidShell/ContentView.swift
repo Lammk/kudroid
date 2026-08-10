@@ -233,6 +233,8 @@ struct DebugView: View {
                                 .buttonStyle(.bordered)
                             Button("GPU OpenGL .so") { fullLog = runGpuOpenglSoTest() }
                                 .buttonStyle(.bordered)
+                            Button("Syscall Traps .so") { fullLog = runSyscallSoTest() }
+                                .buttonStyle(.bordered)
                             
                             Button("Bionic Test") { fullLog = runBionicExecutionTest() }
                                 .buttonStyle(.bordered)
@@ -493,6 +495,23 @@ func runGpuOpenglSoTest() -> String {
         return "❌ Failed to copy test_gpu_opengl.so: \(error.localizedDescription)"
     }
     guard let cString = kudroid_gpu_opengl_so_test(tmpURL.path) else { return "❌ Error: null result" }
+    let log = String(cString: cString)
+    free(UnsafeMutablePointer(mutating: cString))
+    return log
+}
+
+func runSyscallSoTest() -> String {
+    guard let bundledURL = Bundle.main.url(forResource: "test_syscalls", withExtension: "so") else {
+        return "❌ test_syscalls.so not found in bundle"
+    }
+    let tmpURL = FileManager.default.temporaryDirectory.appendingPathComponent("test_syscalls.so")
+    do {
+        if FileManager.default.fileExists(atPath: tmpURL.path) { try FileManager.default.removeItem(at: tmpURL) }
+        try FileManager.default.copyItem(at: bundledURL, to: tmpURL)
+    } catch {
+        return "❌ Failed to copy test_syscalls.so: \(error.localizedDescription)"
+    }
+    guard let cString = kudroid_syscall_so_test(tmpURL.path) else { return "❌ Error: null result" }
     let log = String(cString: cString)
     free(UnsafeMutablePointer(mutating: cString))
     return log

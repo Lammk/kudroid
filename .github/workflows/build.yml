@@ -217,15 +217,19 @@ jobs:
             -o tests/test_gpu_vulkan_arm64.so tests/test_gpu_vulkan.c
           aarch64-linux-gnu-gcc -shared -fPIC -ldl \
             -o tests/test_gpu_opengl_arm64.so tests/test_gpu_opengl.c
+          aarch64-linux-gnu-gcc -shared -fPIC -ldl \
+            -o tests/test_syscalls_arm64.so tests/test_syscalls.c
           aarch64-linux-gnu-strip tests/test_gpu_vulkan_arm64.so
           aarch64-linux-gnu-strip tests/test_gpu_opengl_arm64.so
+          aarch64-linux-gnu-strip tests/test_syscalls_arm64.so
 
       - name: Verify GPU test ELFs
         run: |
-          file tests/test_gpu_vulkan_arm64.so tests/test_gpu_opengl_arm64.so
+          file tests/test_gpu_vulkan_arm64.so tests/test_gpu_opengl_arm64.so tests/test_syscalls_arm64.so
           readelf -h tests/test_gpu_vulkan_arm64.so | grep -E "Class|Machine"
           readelf --dyn-syms tests/test_gpu_vulkan_arm64.so | grep -E "kudroid_gpu_vulkan_test|dlopen|dlsym"
           readelf --dyn-syms tests/test_gpu_opengl_arm64.so | grep -E "kudroid_gpu_opengl_test|dlopen|dlsym"
+          readelf --dyn-syms tests/test_syscalls_arm64.so | grep -E "kudroid_syscall_test"
 
       - name: Upload GPU test .so artifact
         uses: actions/upload-artifact@v4
@@ -234,6 +238,7 @@ jobs:
           path: |
             tests/test_gpu_vulkan_arm64.so
             tests/test_gpu_opengl_arm64.so
+            tests/test_syscalls_arm64.so
 
   build-minijvm-rt:
     runs-on: ubuntu-latest
@@ -371,6 +376,12 @@ jobs:
             echo "Bundled test_gpu_opengl.so ($(wc -c < KuDroidShell.app/test_gpu_opengl.so) bytes)"
           else
             echo "WARNING: test_gpu_opengl_arm64.so not found, skipping"
+          fi
+          if [ -f gpu-test-artifact/test_syscalls_arm64.so ]; then
+            cp gpu-test-artifact/test_syscalls_arm64.so KuDroidShell.app/test_syscalls.so
+            echo "Bundled test_syscalls.so ($(wc -c < KuDroidShell.app/test_syscalls.so) bytes)"
+          else
+            echo "WARNING: test_syscalls_arm64.so not found, skipping"
           fi
 
           # Ensure dylibs exist for -lEGL -lGLESv2
