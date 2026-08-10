@@ -1329,7 +1329,18 @@ extern "C" int bionic_pthread_condattr_setclock(void* attr, int clock_id) {
 extern "C" void bionic_google_potentially_blocking_region_begin() {}
 extern "C" void bionic_google_potentially_blocking_region_end() {}
 
+// Dummy for __register_atfork
+extern "C" int bionic_register_atfork(void (*prepare)(void), void (*parent)(void), void (*child)(void), void* dso_handle) {
+    (void)dso_handle;
+#ifdef __APPLE__
+    return pthread_atfork(prepare, parent, child);
+#else
+    return 0; // iOS does not really support fork(), so just return success
+#endif
+}
+
 const SymbolEntry kSymbols[] = {
+    {"__register_atfork", reinterpret_cast<void*>(&bionic_register_atfork)},
     {"pthread_create", reinterpret_cast<void*>(&bionic_pthread_create)},
     {"pthread_attr_init", reinterpret_cast<void*>(&bionic_pthread_attr_init)},
     {"pthread_attr_destroy", reinterpret_cast<void*>(&bionic_pthread_attr_destroy)},
