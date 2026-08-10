@@ -560,25 +560,6 @@ struct AndroidAppView: View {
             
             MetalView(appName: appName)
                 .ignoresSafeArea()
-            
-            VStack {
-                HStack {
-                    Spacer()
-                    Button(action: {
-                        // TODO: Implement graceful shutdown for thread. For now just close UI.
-                        presentationMode.wrappedValue.dismiss()
-                    }) {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 30))
-                            .foregroundColor(.white)
-                            .padding()
-                            .background(Color.black.opacity(0.4))
-                            .clipShape(Circle())
-                    }
-                    .padding()
-                }
-                Spacer()
-            }
         }
     }
 }
