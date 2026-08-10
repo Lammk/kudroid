@@ -59,10 +59,11 @@ struct android_epoll_event {
 #include <mutex>
 #include <shared_mutex>
 #include <atomic>
-#include <unistd.h>
 #include <string>
 #include <array>
 #include <dlfcn.h>
+
+extern const char* g_kudroid_log_dir_ptr;
 
 namespace kudroid {
 namespace {
@@ -169,10 +170,9 @@ int logAndroidMessage(int priority, const char* tag, const std::string& message)
     fprintf(stdout, "[AndroidLog][%s]: %s\n", tag ? tag : "unknown", message.c_str());
     
     // Also append to a file in Documents for the user to easily read
-    extern const char* g_kudroid_log_dir_ptr;
-    if (g_kudroid_log_dir_ptr && g_kudroid_log_dir_ptr[0] != '\0') {
+    if (::g_kudroid_log_dir_ptr && ::g_kudroid_log_dir_ptr[0] != '\0') {
         char log_path[1024];
-        snprintf(log_path, sizeof(log_path), "%s/kudroid_android_logs.txt", g_kudroid_log_dir_ptr);
+        snprintf(log_path, sizeof(log_path), "%s/kudroid_android_logs.txt", ::g_kudroid_log_dir_ptr);
         FILE* fp = fopen(log_path, "a");
         if (fp) {
             fprintf(fp, "[%s] %s\n", tag ? tag : "unknown", message.c_str());

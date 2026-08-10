@@ -26,7 +26,7 @@ extern "C" struct JavaVM_* kudroid_jni_get_javavm(void);
 // exception fires) are captured by a signal handler that flushes the buffered
 // log to disk using only async-signal-safe calls before re-raising.
 static char g_logDir[1024] = {0};
-extern const char* g_kudroid_log_dir_ptr = g_logDir;
+const char* g_kudroid_log_dir_ptr = g_logDir;
 
 static char g_crashBuf[16384];
 static volatile sig_atomic_t g_crashLen = 0;
