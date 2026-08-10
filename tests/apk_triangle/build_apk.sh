@@ -4,17 +4,32 @@ set -e
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$DIR"
 
-if ! command -v aarch64-linux-gnu-g++ &> /dev/null; then
-    echo "[!] Error: aarch64-linux-gnu-g++ not found."
-    echo "[!] Please install gcc-aarch64-linux-gnu to compile Android ELF binaries."
+# Find Android NDK compiler
+CXX="aarch64-linux-android29-clang++"
+if [ -n "$ANDROID_NDK_LATEST_HOME" ]; then
+    CXX="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang++"
+elif [ -n "$ANDROID_NDK_HOME" ]; then
+    # Try linux first, then darwin (macOS)
+    if [ -d "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64" ]; then
+        CXX="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang++"
+    elif [ -d "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/darwin-x86_64" ]; then
+        CXX="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android29-clang++"
+    fi
+fi
+
+if ! command -v "$CXX" &> /dev/null; then
+    echo "[!] Error: Android NDK clang++ not found at $CXX"
+    echo "[!] Please set ANDROID_NDK_HOME or ANDROID_NDK_LATEST_HOME to your NDK path."
     exit 1
 fi
 
+echo "[*] Using compiler: $CXX"
+
 echo "[*] Building TriangleGLES..."
-aarch64-linux-gnu-g++ -shared -fPIC -o libtriangle_gles.so src/triangle_gles.cpp -ldl
+"$CXX" -shared -fPIC -o libtriangle_gles.so src/triangle_gles.cpp -ldl -llog
 
 echo "[*] Building TriangleVulkan..."
-aarch64-linux-gnu-g++ -shared -fPIC -o libtriangle_vulkan.so src/triangle_vulkan.cpp -ldl
+"$CXX" -shared -fPIC -o libtriangle_vulkan.so src/triangle_vulkan.cpp -ldl -llog
 
 echo "[*] Packaging APK..."
 mkdir -p apk_root/lib/arm64-v8a
