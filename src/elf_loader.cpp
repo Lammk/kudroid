@@ -5,6 +5,9 @@
 #include <cstring>
 #include <fstream>
 #include <sys/mman.h>
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 
 #ifndef DT_INIT
 #define DT_INIT 12
@@ -304,7 +307,7 @@ bool ElfLoader::map() {
         return false;
     }
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) && TARGET_OS_OSX
     if (usedMapJit) pthread_jit_write_protect_np(0);
 #endif
 
@@ -320,7 +323,7 @@ bool ElfLoader::map() {
         }
     }
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) && TARGET_OS_OSX
     if (usedMapJit) pthread_jit_write_protect_np(1);
 #endif
 
