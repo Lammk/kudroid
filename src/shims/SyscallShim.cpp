@@ -232,11 +232,6 @@ extern "C" int bionic_cxa_atexit(void (*)(void*), void*, void*) {
     return 0;
 }
 
-extern "C" int bionic_register_atfork(void (*)(void), void (*)(void), void (*)(void), void*) {
-    trace("__register_atfork() -> no-op");
-    return 0;
-}
-
 extern "C" void bionic_runtime_noop() {
     trace("weak compiler runtime hook -> no-op");
 }
@@ -1851,7 +1846,6 @@ const SymbolEntry kSyscallSymbols[] = {
 #endif
     {"__cxa_finalize", reinterpret_cast<void*>(&bionic_cxa_finalize)},
     {"__cxa_atexit", reinterpret_cast<void*>(&bionic_cxa_atexit)},
-    {"__register_atfork", reinterpret_cast<void*>(&bionic_register_atfork)},
     {"_ITM_registerTMCloneTable", reinterpret_cast<void*>(&bionic_runtime_noop)},
     {"_ITM_deregisterTMCloneTable", reinterpret_cast<void*>(&bionic_runtime_noop)},
     {"__gmon_start__", reinterpret_cast<void*>(&bionic_runtime_noop)},
