@@ -30,7 +30,7 @@ const char* kudroid_execution_test(const char* path);
 /// @return  A malloc'd log string with execution result.
 ///          Caller must free() the returned string.
 const char* kudroid_syscall_so_test(const char* path);
-char* kudroid_jni_massive_so_test(const char* path);
+const char* kudroid_jni_massive_so_test(const char* path);
 
 /// Load the Bionic shim test library and execute kudroid_bionic_test().
 /// Returns a malloc'd diagnostic log; caller must free() it.
