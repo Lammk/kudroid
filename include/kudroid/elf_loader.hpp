@@ -75,6 +75,10 @@ private:
 
     std::string          path_;
     void*                base_     = nullptr;
+    // Gốc của vùng mmap ban đầu (trước khi base_ được điều chỉnh bởi -minVaddr),
+    // để destructor có thể munmap an toàn.
+    void*                allocBase_ = nullptr;
+    std::size_t          allocSize_ = 0;
     std::uint64_t        entry_    = 0;
     std::vector<Segment> segments_;
     bool                 parsed_   = false;

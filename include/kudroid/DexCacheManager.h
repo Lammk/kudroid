@@ -60,6 +60,11 @@ public:
     /// tính toán mã băm hex sha-256 của một tệp. trả về chuỗi rỗng nếu có lỗi.
     static std::string sha256File(const std::string& path);
 
+    /// tính toán mã băm hex sha-256 của nhiều tệp (băm nội dung nối tiếp theo
+    /// thứ tự đầu vào — dùng cho classes.dex + classes2.dex...). trả về chuỗi
+    /// rỗng nếu bất kỳ tệp nào không đọc được.
+    static std::string sha256Files(const std::vector<std::string>& paths);
+
 private:
     DexCacheManager() = default;
 

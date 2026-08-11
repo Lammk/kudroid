@@ -10,6 +10,7 @@
 // Declared in SyscallShim.cpp.
 extern "C" int bionic_ALooper_addFd(void* looper, int fd, int ident, int events,
                                     void* callback, void* data);
+extern "C" void bionic_ALooper_markInputPipe(void* looper, int fd);
 
 namespace kudroid {
 namespace {
@@ -51,7 +52,11 @@ struct BionicInputQueue {
 static BionicInputQueue g_inputQueue;
 
 // Ensure the wake pipe exists (lazily created on first use).
+// Lock nội bộ: kudroid_inject_touch_event (thread Swift) và attachLooper
+// (thread game) có thể chạy đồng thời — không lock thì pipe() chạy 2 lần,
+// leak một cặp fd.
 static void ensure_wake_pipe(BionicInputQueue* q) {
+    std::lock_guard<std::mutex> lock(q->mtx);
     if (q->pipeReady) return;
     if (::pipe(q->wakePipe) == 0) {
         // Set read end non-blocking.
@@ -59,6 +64,12 @@ static void ensure_wake_pipe(BionicInputQueue* q) {
         ::fcntl(q->wakePipe[0], F_SETFL, flags | O_NONBLOCK);
         q->pipeReady = true;
     }
+}
+
+// Exported cho kudroid_bridge: con trỏ AInputQueue dùng để truyền vào
+// callback onInputQueueCreated của ANativeActivity.
+extern "C" void* kudroid_get_input_queue(void) {
+    return &g_inputQueue;
 }
 
 // Exported for Swift to inject touch events
@@ -80,7 +91,7 @@ extern "C" void kudroid_inject_touch_event(float x, float y, int32_t action) {
     }
 
     // Wake the looper so it processes the new event.
-    ensure_wake_pipe(&g_inputQueue);
+    ensure_wake_pipe(&g_inputQueue); // tự khóa nội bộ — an toàn thread
     if (g_inputQueue.pipeReady) {
         uint8_t byte = 1;
         ssize_t unused = ::write(g_inputQueue.wakePipe[1], &byte, 1);
@@ -138,6 +149,9 @@ extern "C" void bionic_AInputQueue_attachLooper(void* queue, void* looper, int i
     if (q->pipeReady && looper) {
         bionic_ALooper_addFd(looper, q->wakePipe[0], ident, 0x0001 /* ALOOPER_EVENT_INPUT */,
                              callback, data);
+        // Đánh dấu fd này là wake pipe của AInputQueue để ALooper_pollAll drain
+        // nước mỗi khi nó readable — nếu không pipe sẽ luôn ready -> busy loop.
+        bionic_ALooper_markInputPipe(looper, q->wakePipe[0]);
     }
 }
 

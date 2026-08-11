@@ -161,6 +161,27 @@ std::string DexCacheManager::sha256File(const std::string& path) {
     return toHex(digest, 32);
 }
 
+std::string DexCacheManager::sha256Files(const std::vector<std::string>& paths) {
+    Sha256Ctx ctx;
+    sha256_init(ctx);
+    char buffer[65536];
+    for (const auto& path : paths) {
+        std::ifstream file(path, std::ios::binary);
+        if (!file) return {};
+        while (file) {
+            file.read(buffer, sizeof(buffer));
+            const std::streamsize n = file.gcount();
+            if (n > 0) {
+                sha256_update(ctx, reinterpret_cast<const uint8_t*>(buffer),
+                              static_cast<size_t>(n));
+            }
+        }
+    }
+    uint8_t digest[32];
+    sha256_final(ctx, digest);
+    return toHex(digest, 32);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // trình quản lý bộ nhớ đệm
 // ─────────────────────────────────────────────────────────────────────────────

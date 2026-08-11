@@ -6,6 +6,7 @@
 #include <mutex>
 #include <string>
 #include <functional>
+#include <pthread.h>
 
 // ─────────────────────────────────────────────────────────────────────────────
 // bộ nối jni kudroid — hiện được hỗ trợ bởi jvm avian.
@@ -24,11 +25,95 @@
 // chúng ta không cần bao gồm các tiêu đề nội bộ của avian (kéo theo rất nhiều thứ).
 extern "C" jint JNI_CreateJavaVM(JavaVM** p_vm, void** p_env, void* vm_args);
 
+// Forward về pipeline log chuẩn của kudroid (định nghĩa trong SyscallShim.cpp).
+extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
+
+// Kích thước màn hình thật do Swift bắn qua kudroid_set_metal_layer
+// (định nghĩa trong kudroid_bridge.cpp).
+extern "C" int g_metalLayerWidth;
+extern "C" int g_metalLayerHeight;
+extern "C" float g_metalLayerDensity;
+
+// Đẩy số liệu màn hình vào DisplayMetrics (định nghĩa cuối file này).
+extern "C" void kudroid_jni_update_display_metrics(void);
+
+// log_jni được định nghĩa phía dưới trong file này.
+static void log_jni(const char* fmt, ...);
+
 // trạng thái toàn cục
 static JavaVM* g_vm = nullptr;
 static JNIEnv* g_env = nullptr;
 static std::mutex g_jvm_mutex;
 static std::mutex g_log_mutex;
+
+// pthread_key để DetachCurrentThread khi thread (do host tạo) kết thúc.
+static pthread_key_t g_jni_attach_key;
+static pthread_once_t g_jni_attach_once = PTHREAD_ONCE_INIT;
+
+static void jni_detach_destructor(void* /*marker*/) {
+    // Chạy khi thread kết thúc; g_vm có thể đã bị hủy (nullptr) -> bỏ qua.
+    JavaVM* vm = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_jvm_mutex);
+        vm = g_vm;
+    }
+    if (vm) {
+        vm->DetachCurrentThread();
+    }
+}
+
+static void init_jni_attach_key() {
+    ::pthread_key_create(&g_jni_attach_key, jni_detach_destructor);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// android.util.Log.println_native
+//
+// Framework khai báo native method này nhưng trước đây KHÔNG có registration nào
+// (không có symbol mangled Java_/Avian_, không RegisterNatives) → UnsatisfiedLinkError
+// ở lần gọi Log.* đầu tiên từ Java (Toast, glue Unity/Godot/SDL). Forward sang
+// kudroid_android_log_message để log rơi vào đúng pipeline (stdout + file + crash buffer).
+// ─────────────────────────────────────────────────────────────────────────────
+static jint java_android_util_Log_println_native(JNIEnv* env, jclass /*clazz*/,
+                                                 jint priority, jstring tag, jstring msg) {
+    const char* tagC = tag ? env->GetStringUTFChars(tag, nullptr) : nullptr;
+    const char* msgC = msg ? env->GetStringUTFChars(msg, nullptr) : nullptr;
+    const int result = kudroid_android_log_message(
+        static_cast<int>(priority),
+        tagC ? tagC : "Java",
+        msgC ? msgC : "");
+    if (tagC) env->ReleaseStringUTFChars(tag, tagC);
+    if (msgC) env->ReleaseStringUTFChars(msg, msgC);
+    return result;
+}
+
+// Đăng ký println_native ngay sau khi JVM được tạo — trước khi bất kỳ lớp Java nào
+// (kể cả glue của game) gọi Log.*.
+static void register_android_util_log_natives(JNIEnv* env) {
+    jclass clazz = env->FindClass("android/util/Log");
+    if (!clazz) {
+        // ĐỪNG bỏ qua im lặng: nếu framework jar không có Log trong boot classpath,
+        // Java gọi Log.* sẽ UnsatisfiedLinkError sập JVM. Báo lỗi rõ ràng.
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        log_jni("ERROR: FindClass(android/util/Log) failed — framework classes missing "
+                "from boot classpath (re-run framework/build.sh + avian make)");
+        return;
+    }
+    // Avian's JNINativeMethod uses char* (not const char*); cast the literals.
+    static const JNINativeMethod methods[] = {
+        {const_cast<char*>("println_native"),
+         const_cast<char*>("(ILjava/lang/String;Ljava/lang/String;)I"),
+         reinterpret_cast<void*>(&java_android_util_Log_println_native)},
+    };
+    if (env->RegisterNatives(clazz, methods, 1) != JNI_OK) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        log_jni("ERROR: RegisterNatives(android/util/Log.println_native) failed — "
+                "Java calls to Log.* will throw UnsatisfiedLinkError");
+        return;
+    }
+    log_jni("Registered android/util/Log.println_native -> C++ log pipeline");
+    env->DeleteLocalRef(clazz);
+}
 
 static std::function<void(const char*)> g_jni_log_callback;
 
@@ -133,6 +218,15 @@ void kudroid_jni_init_jvm(const char* bootclasspath, const char* classpath) {
     g_env = static_cast<JNIEnv*>(env);
     log_jni("Avian JVM initialized successfully (JavaVM=%p, JNIEnv=%p)",
             (void*)g_vm, (void*)g_env);
+
+    // Đăng ký native method của framework ngay tại đây — nếu bỏ lỡ, Java gọi
+    // Log.* sẽ UnsatisfiedLinkError (issue đã tìm thấy khi rà framework).
+    register_android_util_log_natives(g_env);
+
+    // Đẩy kích thước màn hình thật (từ UIScreen qua kudroid_set_metal_layer)
+    // vào DisplayMetrics — game đọc Resources.getDisplayMetrics() sẽ thấy số
+    // liệu chuẩn xác tới từng pixel thay vì hardcode 1080x1920.
+    kudroid_jni_update_display_metrics();
 }
 
 void kudroid_jni_destroy_jvm(void) {
@@ -175,6 +269,9 @@ jint kudroid_jni_get_env(JavaVM* vm, void** env, jint version) {
         status = g_vm->AttachCurrentThread(reinterpret_cast<void**>(&threadEnv), nullptr);
         if (status == JNI_OK && threadEnv) {
             log_jni("kudroid_jni_get_env: Thread attached successfully, env=%p", (void*)threadEnv);
+            // Nhớ DetachCurrentThread khi thread kết thúc (chỉ cho thread do TA gắn).
+            ::pthread_once(&g_jni_attach_once, init_jni_attach_key);
+            ::pthread_setspecific(g_jni_attach_key, reinterpret_cast<void*>(1));
             *env = threadEnv;
             return JNI_OK;
         } else {
@@ -183,11 +280,31 @@ jint kudroid_jni_get_env(JavaVM* vm, void** env, jint version) {
     } else {
         log_jni("ERROR: kudroid_jni_get_env: GetEnv failed with code %d", status);
     }
-    // quay lại môi trường chính (nỗ lực tốt nhất).
-    if (g_env) {
-        log_jni("WARNING: kudroid_jni_get_env: Falling back to main thread env=%p", (void*)g_env);
-        *env = g_env;
-        return JNI_OK;
-    }
+    // KHÔNG fallback về env của thread chính — dùng JNIEnv của thread khác là
+    // hành vi không xác định trong JNI, có thể crash JVM.
     return JNI_ERR;
+}
+
+// Cập nhật DisplayMetrics trong Java với số liệu màn hình thật. Chỉ gọi khi
+// đang ở trên một thread đã attach (init_jvm gọi ngay sau khi tạo VM).
+extern "C" void kudroid_jni_update_display_metrics(void) {
+    if (!g_vm || !g_env) return;
+    jclass clazz = g_env->FindClass("android/util/DisplayMetrics");
+    if (!clazz) {
+        if (g_env->ExceptionCheck()) g_env->ExceptionClear();
+        log_jni("WARNING: FindClass(android/util/DisplayMetrics) failed");
+        return;
+    }
+    jmethodID update = g_env->GetStaticMethodID(clazz, "updateFromNative", "(IIF)V");
+    if (update) {
+        g_env->CallStaticVoidMethod(clazz, update,
+                                    g_metalLayerWidth, g_metalLayerHeight,
+                                    g_metalLayerDensity);
+        log_jni("DisplayMetrics updated: %dx%d density=%.2f",
+                g_metalLayerWidth, g_metalLayerHeight, g_metalLayerDensity);
+    } else {
+        log_jni("WARNING: updateFromNative(IIIF)V not found in DisplayMetrics");
+    }
+    if (g_env->ExceptionCheck()) g_env->ExceptionClear();
+    g_env->DeleteLocalRef(clazz);
 }

@@ -7,6 +7,15 @@ package android.util;
  * từ độ phân giải màn hình ios thực tế thông qua cầu nối gốc.
  */
 public class DisplayMetrics {
+    /**
+     * Kích thước màn hình thật của máy iOS đang chạy — được bắn từ Swift
+     * (UIScreen.main.bounds) xuyên qua C++ (kudroid_set_metal_layer →
+     * kudroid_jni_update_display_metrics lúc JVM khởi tạo) vào đây.
+     */
+    public static int sWidthPixels = 1080;
+    public static int sHeightPixels = 1920;
+    public static float sDensity = 3.0f;
+
     /** chiều rộng tuyệt đối của màn hình tính bằng pixel. */
     public int widthPixels;
     /** chiều cao tuyệt đối của màn hình tính bằng pixel. */
@@ -23,14 +32,17 @@ public class DisplayMetrics {
     public float scaledDensity;
 
     public DisplayMetrics() {
-        // Defaults; the native bridge updates these from the real screen.
-        widthPixels = 1080;
-        heightPixels = 1920;
-        density = 3.0f;
-        densityDpi = 420;
-        xdpi = 420.0f;
-        ydpi = 420.0f;
-        scaledDensity = 3.0f;
+        // Đọc từ statics (đã được native cập nhật) thay vì hardcode.
+        setTo(sWidthPixels, sHeightPixels, sDensity);
+    }
+
+    /**
+     * Được gọi từ native (kudroid_jni.cpp) với số liệu thật của UIScreen.
+     */
+    public static void updateFromNative(int width, int height, float densityValue) {
+        sWidthPixels = width;
+        sHeightPixels = height;
+        sDensity = densityValue;
     }
 
     /**

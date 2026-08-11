@@ -15,6 +15,15 @@ void bionic_init_main_thread_tls(void);
 void* bionic_dlopen(const char* filename, int flags);
 void* bionic_dlsym(void* handle, const char* symbol);
 
+// Đăng ký template PT_TLS của module guest (từ elf_loader sau khi map) để
+// các khối TLS per-thread có thể sao chép nó vào đúng vị trí.
+void kudroid_tls_set_template(const void* tls_template, size_t tls_filesz);
+
+// Khoảng cách (so với thread pointer của guest) nơi template TLS module được đặt
+// trong khối TLS per-thread. Cùng giá trị này được elf_loader dùng làm bias
+// cho relocations R_AARCH64_TLS_TPREL64 / TLS_DTPREL64.
+size_t kudroid_tls_module_offset(void);
+
 #ifdef __cplusplus
 }
 #endif

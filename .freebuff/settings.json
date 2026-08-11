@@ -1,0 +1,16 @@
+{
+  "preloadedSkills": [
+    "agent-browser",
+    "writing-plans",
+    "brainstorming",
+    "verification-before-completion",
+    "executing-plans",
+    "planning-with-files",
+    "frontend-design",
+    "extract-design-system",
+    "tailwind-design-system",
+    "performance",
+    "improve-codebase-architecture",
+    "github-actions-docs"
+  ]
+}

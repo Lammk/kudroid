@@ -4,6 +4,7 @@
 #include "kudroid/shims/GraphicsShim.h"
 #include "kudroid/shims/InputShim.h"
 #include "kudroid/shims/AudioShim.h"
+#include "kudroid/shims/AssetShim.h"
 
 #include <string>
 #include <unordered_map>
@@ -93,6 +94,11 @@ void* resolve_bionic_symbol(const char* name) {
         if (!resolved) {
             const SymbolEntry* audio = get_audio_symbols(&count);
             resolved = resolve_from_list(audio, count, name);
+        }
+
+        if (!resolved) {
+            const SymbolEntry* assets = get_asset_symbols(&count);
+            resolved = resolve_from_list(assets, count, name);
         }
 
         if (!resolved) {

@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Intercepting eglGetDisplay — KuDroid GPU shim (commit 7b067f4)</title>
+<style>
+  :root{
+    --bg:#0d1117; --bg2:#161b22; --bg3:#1c2330;
+    --panel:#12171f; --panel2:#171d28;
+    --line:#2a3242; --line2:#39435a;
+    --txt:#e6edf3; --dim:#9aa7b8; --faint:#6b7686;
+    --green:#3fb950; --green-bg:rgba(63,185,80,.12);
+    --red:#f85149; --red-bg:rgba(248,81,73,.12);
+    --amber:#d29922; --amber-bg:rgba(210,153,34,.12);
+    --blue:#58a6ff; --blue-bg:rgba(88,166,255,.12);
+    --purple:#bc8cff; --purple-bg:rgba(188,140,255,.12);
+    --cyan:#39c5cf; --cyan-bg:rgba(57,197,207,.12);
+    --mono:ui-monospace,"SF Mono","Cascadia Code","JetBrains Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --radius:10px;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--txt);font-family:var(--sans);line-height:1.55;font-size:15.5px}
+  .wrap{max-width:1080px;margin:0 auto;padding:32px 22px 90px}
+  a{color:var(--blue)}
+  h1{font-size:27px;line-height:1.25;margin:0 0 6px;letter-spacing:-.02em}
+  h2{font-size:20px;margin:44px 0 12px;letter-spacing:-.01em;scroll-margin-top:20px}
+  h2 .n{color:var(--faint);font-family:var(--mono);font-size:14px;margin-right:8px}
+  h3{font-size:15.5px;margin:20px 0 8px}
+  p{margin:8px 0}
+  .sub{color:var(--dim);font-size:15px;max-width:75ch}
+  code{font-family:var(--mono);font-size:12.8px;background:var(--bg2);border:1px solid var(--line);border-radius:5px;padding:1px 5px;color:#c9d6e8}
+  pre{font-family:var(--mono);font-size:12.6px;background:#0a0e14;border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px;overflow-x:auto;line-height:1.5}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px 18px;margin:14px 0}
+  .grid{display:grid;gap:14px}
+  .g2{grid-template-columns:1fr 1fr}
+  .g3{grid-template-columns:repeat(3,1fr)}
+  @media(max-width:820px){.g2,.g3{grid-template-columns:1fr}}
+  .tag{display:inline-block;font-family:var(--mono);font-size:11px;letter-spacing:.06em;text-transform:uppercase;padding:2px 8px;border-radius:20px;border:1px solid var(--line2);color:var(--dim);background:var(--bg2);margin-right:6px;white-space:nowrap}
+  .tag.g{color:var(--green);border-color:rgba(63,185,80,.4);background:var(--green-bg)}
+  .tag.r{color:var(--red);border-color:rgba(248,81,73,.4);background:var(--red-bg)}
+  .tag.b{color:var(--blue);border-color:rgba(88,166,255,.4);background:var(--blue-bg)}
+  .tag.a{color:var(--amber);border-color:rgba(210,153,34,.4);background:var(--amber-bg)}
+  .tag.p{color:var(--purple);border-color:rgba(188,140,255,.4);background:var(--purple-bg)}
+  .tag.c{color:var(--cyan);border-color:rgba(57,197,207,.4);background:var(--cyan-bg)}
+  .muted{color:var(--dim)} .faint{color:var(--faint)}
+  hr{border:none;border-top:1px solid var(--line);margin:40px 0}
+
+  /* hero */
+  .hero{border:1px solid var(--line2);border-radius:14px;background:linear-gradient(180deg,#141b26,#0f141d);padding:24px 24px 20px}
+  .hero .meta{display:flex;flex-wrap:wrap;gap:8px 14px;margin:14px 0 4px;color:var(--dim);font-size:13px;font-family:var(--mono)}
+  .hero .hash{color:var(--amber);font-weight:600}
+  .one-liner{font-size:16px;color:var(--txt);background:var(--green-bg);border:1px solid rgba(63,185,80,.35);border-left:4px solid var(--green);border-radius:8px;padding:12px 14px;margin:16px 0 0;font-weight:500}
+  .facts{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+
+  /* callouts */
+  .callout{border-radius:8px;padding:12px 14px;margin:14px 0;border:1px solid}
+  .callout .t{font-weight:700;font-size:13px;letter-spacing:.04em;text-transform:uppercase;margin-bottom:4px}
+  .callout.warn{border-color:rgba(210,153,34,.4);background:var(--amber-bg)}
+  .callout.warn .t{color:var(--amber)}
+  .callout.info{border-color:rgba(88,166,255,.4);background:var(--blue-bg)}
+  .callout.info .t{color:var(--blue)}
+  .callout.ok{border-color:rgba(63,185,80,.4);background:var(--green-bg)}
+  .callout.ok .t{color:var(--green)}
+  .callout.err{border-color:rgba(248,81,73,.4);background:var(--red-bg)}
+  .callout.err .t{color:var(--red)}
+  .callout p{margin:2px 0}
+
+  /* diff */
+  .diff{font-family:var(--mono);font-size:12.8px;background:#0a0e14;border:1px solid var(--line);border-radius:var(--radius);overflow-x:auto;margin:8px 0}
+  .diff .l{display:flex;padding:0 12px;line-height:1.9;white-space:pre}
+  .diff .l .ln{color:var(--faint);min-width:34px;text-align:right;margin-right:14px;user-select:none}
+  .diff .add{background:var(--green-bg);color:#a5d6a7}
+  .diff .add .mark{color:var(--green)}
+  .diff .ctx{color:#c9d6e8}
+  .diff .sep{color:var(--faint);background:var(--bg2)}
+  .diff .file{background:var(--bg2);border-bottom:1px solid var(--line);padding:6px 12px;color:var(--blue);font-size:12.2px;font-weight:600}
+
+  /* pipeline */
+  .pipe{display:flex;flex-direction:column;gap:0}
+  .step{display:flex;align-items:flex-start;gap:12px;position:relative}
+  .step .idx{flex:0 0 26px;height:26px;border-radius:50%;background:var(--bg3);border:1px solid var(--line2);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:12px;color:var(--dim);margin-top:10px;transition:all .25s}
+  .step .body{flex:1;background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:9px 13px;margin:6px 0}
+  .step .body .fn{font-family:var(--mono);font-size:13px;font-weight:600}
+  .step .body .desc{color:var(--dim);font-size:13.4px;margin-top:2px}
+  .step .arrow{color:var(--faint);font-size:16px;margin-left:8px;line-height:1;font-weight:700}
+  .step::before{content:"";position:absolute;left:12px;top:44px;bottom:-6px;width:2px;background:var(--line)}
+  .step:last-child::before{display:none}
+  .step.hit .idx{background:var(--green);border-color:var(--green);color:#06130a;font-weight:700}
+  .step.hit .body{border-color:rgba(63,185,80,.55);background:linear-gradient(90deg,var(--green-bg),var(--panel2) 45%)}
+  .step.miss .idx{background:var(--amber);border-color:var(--amber);color:#1a1204}
+  .step.grayed .body{opacity:.45}
+  .step.new .body{border-color:rgba(88,166,255,.6)}
+  .step.new .body .fn{color:var(--blue)}
+  .step.new .idx{background:var(--blue);border-color:var(--blue);color:#04121f}
+  .step.result .body{background:var(--bg3);border-color:var(--line2)}
+  .step .out{display:inline-block;font-family:var(--mono);font-size:11.5px;margin-top:6px;padding:2px 9px;border-radius:14px}
+  .out.ok{background:var(--green-bg);color:var(--green);border:1px solid rgba(63,185,80,.4)}
+  .out.bad{background:var(--red-bg);color:var(--red);border:1px solid rgba(248,81,73,.4)}
+  .out.skipped{background:var(--bg3);color:var(--faint);border:1px solid var(--line2)}
+
+  .pipelabel{font-family:var(--mono);font-size:11.5px;color:var(--faint);letter-spacing:.08em;text-transform:uppercase;margin:18px 0 6px;display:flex;align-items:center;gap:8px}
+  .pipelabel::after{content:"";flex:1;height:1px;background:var(--line)}
+
+  /* before/after switch */
+  .switch{display:flex;gap:6px;margin:10px 0}
+  .switch button{font-family:var(--mono);font-size:12.5px;padding:6px 16px;border-radius:8px;border:1px solid var(--line2);background:var(--bg2);color:var(--dim);cursor:pointer;transition:all .15s}
+  .switch button[aria-pressed="true"]{background:var(--blue-bg);color:var(--blue);border-color:rgba(88,166,255,.55);font-weight:700}
+  .panel{display:none}
+  .panel.on{display:block;animation:fadein .3s ease}
+  @keyframes fadein{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+
+  /* backend chain */
+  .chain{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:12px 0}
+  .chain .node{border:1px solid var(--line2);background:var(--bg2);border-radius:9px;padding:8px 14px;font-family:var(--mono);font-size:12.6px;color:var(--dim)}
+  .chain .node.cur{border-color:rgba(63,185,80,.6);background:var(--green-bg);color:var(--green);font-weight:700}
+  .chain .node.dead{border-color:rgba(248,81,73,.45);background:var(--red-bg);color:var(--red)}
+  .chain .arrowch{color:var(--faint);font-weight:700}
+  .chain .xd{color:var(--red);font-weight:700}
+
+  /* table */
+  table{width:100%;border-collapse:collapse;margin:12px 0;font-size:13.6px}
+  th{text-align:left;font-size:11.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--faint);border-bottom:2px solid var(--line2);padding:8px 10px;font-family:var(--mono)}
+  td{border-bottom:1px solid var(--line);padding:9px 10px;vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  td code{white-space:nowrap}
+  .row-good td:first-child{color:var(--green);font-weight:600}
+  .row-bad td:first-child{color:var(--red);font-weight:600}
+
+  /* arch stack */
+  .stack{display:flex;flex-direction:column;gap:0;margin:14px 0}
+  .layer{border:1px solid var(--line2);border-radius:9px;padding:11px 14px;display:flex;align-items:center;gap:12px}
+  .layer .lname{font-family:var(--mono);font-size:13.5px;font-weight:700;min-width:190px}
+  .layer .ldesc{color:var(--dim);font-size:13px}
+  .layer .file{font-family:var(--mono);font-size:11px;color:var(--faint)}
+  .conn{display:flex;justify-content:center;color:var(--faint);font-size:15px;font-weight:700;padding:1px 0;user-select:none}
+
+  .foot{margin-top:46px;color:var(--faint);font-size:12.8px;border-top:1px solid var(--line);padding-top:16px}
+  details{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:10px 16px;margin:12px 0}
+  summary{cursor:pointer;font-weight:600;color:var(--dim);font-size:14px}
+  details[open] summary{margin-bottom:8px}
+  ul{margin:6px 0;padding-left:22px} li{margin:4px 0}
+  .big{font-size:15px}
+  .kbd{font-family:var(--mono);border:1px solid var(--line2);border-bottom-width:2px;border-radius:5px;padding:0 6px;background:var(--bg2);font-size:11.5px;color:var(--dim)}
+  .highlight{background:linear-gradient(transparent 62%, rgba(210,153,34,.35) 62%);padding:0 2px}
+  @media (prefers-reduced-motion: reduce){
+    *{animation:none!important;transition:none!important}
+    html{scroll-behavior:auto}
+  }
+  .visscroll{opacity:0;transform:translateY(10px);transition:opacity .5s ease,transform .5s ease}
+  .visscroll.in{opacity:1;transform:none}
+  @media (prefers-reduced-motion: reduce){.visscroll{opacity:1;transform:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- ============ HERO ============ -->
+  <header class="hero">
+    <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+      <span class="tag c">explain</span>
+      <span class="tag b">GraphicsShim</span>
+      <span class="tag a">commit 7b067f4</span>
+      <span class="tag">Kudroid · master</span>
+    </div>
+    <h1 style="margin-top:14px">How KuDroid hijacks <code style="font-size:20px">eglGetDisplay</code> on iOS</h1>
+    <p class="sub">A visual walkthrough of the latest GPU-shim commit: making Android games get <em>our</em> EGL display function — no matter which of the two lookup APIs they use to ask for it.</p>
+    <div class="meta">
+      <span>📦 <code>src/shims/GraphicsShim.cpp</code> · <code>src/shims/SyscallShim.cpp</code></span>
+      <span>＋12 lines / 2 files</span>
+      <span>author Kuzei · 2026-08-11</span>
+    </div>
+    <div class="one-liner">
+      ✅ <strong>The fix in one sentence:</strong> a game can obtain <code>eglGetDisplay</code> either via <code>dlsym</code> or via <code>eglGetProcAddress</code>.
+      Before, <em>both</em> roads usually returned ANGLE's real function and skipped KuDroid's shim. This commit intercepts both roads — a shim-priority entry in <code>bionic_dlsym</code> and a symbol-table scan at the top of <code>bionic_eglGetProcAddress</code>.
+    </div>
+    <div class="facts">
+      <span class="tag">⚠️ JIT required</span>
+      <span class="tag">not an emulator — a translation layer</span>
+      <span class="tag">ANGLE = EGL/GLES → Metal</span>
+      <span class="tag">MoltenVK = Vulkan → Metal</span>
+      <span class="tag">window handle = CAMetalLayer</span>
+    </div>
+  </header>
+
+  <!-- ============ 1. BIG PICTURE ============ -->
+  <section class="visscroll">
+  <h2><span class="n">01</span>Context: where this code lives</h2>
+  <p class="sub">KuDroid loads an Android app's native <code>.so</code> (an ARM64 ELF built against bionic) with a custom loader, then answers every bionic entry point the binary touches with a shim that translates Android API calls into iOS-native calls. The GPU shim is one table of such translations.</p>
+
+  <div class="stack">
+    <div class="layer"><span class="lname" style="color:var(--purple)">Android game .so</span><span class="ldesc">ARM64 ELF, linked against bionic — calls <code>dlopen("libEGL.so")</code>, <code>dlsym</code>, <code>eglGetProcAddress</code>, pthread, mmap…</span></div>
+    <div class="conn">↓ loaded &amp; bound by</div>
+    <div class="layer"><span class="lname" style="color:var(--blue)">KuDroid core</span><span class="ldesc"><code>elf_loader.cpp</code> parses/maps/relocates the ELF · <code>BionicShim.cpp</code> binds unresolved symbols to shim tables</span></div>
+    <div class="conn">↓ answers</div>
+    <div class="layer"><span class="lname" style="color:var(--green)">Shim tables</span><span class="ldesc"><span style="white-space:nowrap"><code>SyscallShim</code> dlopen/dlsym/pthread/mmap/futex/epoll</span> · <code style="color:var(--green)">GraphicsShim</code> ANativeWindow·EGL·Vulkan · <code>InputShim</code> · <code>AudioShim</code></span></div>
+    <div class="conn">↓ translates to</div>
+    <div class="layer"><span class="lname" style="color:var(--amber)">Host frameworks</span><span class="ldesc"><code>libEGL.framework</code> (ANGLE: EGL/GLES on Metal) · <code>MoltenVK.framework</code> (Vulkan on Metal)</span></div>
+    <div class="conn">↓ renders through</div>
+    <div class="layer"><span class="lname" style="color:var(--red)">Metal</span><span class="ldesc"><code>CAMetalLayer</code> = the "screen" the app draws to, hosted by the SwiftUI shell</span></div>
+  </div>
+
+  <div class="callout info"><div class="t">This commit is one cell in that middle layer</div>
+    <p>The shim's job for EGL display functions: <strong>take the Android game's EGL calls and make them valid for ANGLE-on-Metal</strong>. The interception must happen at the moment the game <em>resolves</em> the function pointer — that's the part this commit hardens.</p>
+  </div>
+  </section>
+
+  <!-- ============ 2. THE PROBLEM ============ -->
+  <section class="visscroll">
+  <h2><span class="n">02</span>The problem: two roads to the same function</h2>
+  <p class="sub">Android games resolve EGL entry points through two different APIs. KuDroid must intercept <em>both</em>, or the game gets ANGLE's raw function and the shim's translation logic never runs.</p>
+
+  <div class="grid g2">
+    <div class="card">
+      <h3>🛣️ Road A — <code>dlsym</code></h3>
+      <p class="muted">The game calls <code>dlsym(libEGL_handle, "eglGetDisplay")</code>. KuDroid intercepts this as <code>bionic_dlsym</code> (SyscallShim).</p>
+      <p class="muted">Before the fix: <code>bionic_dlopen("libEGL.so")</code> returns a <em>real</em> ANGLE handle, so the "look in the real handle" step usually succeeded and returned <strong>ANGLE's real</strong> <code>eglGetDisplay</code> — the shim's version was only found later, as a fallback that was rarely reached.</p>
+    </div>
+    <div class="card">
+      <h3>🛣️ Road B — <code>eglGetProcAddress</code></h3>
+      <p class="muted">The game calls <code>eglGetProcAddress("eglGetDisplay")</code>. KuDroid intercepts this as <code>bionic_eglGetProcAddress</code> (GraphicsShim).</p>
+      <p class="muted">Before the fix: the shim <em>never even looked at its own symbol table</em> — it forwarded the request straight to ANGLE's <code>eglGetProcAddress</code> and returned whatever ANGLE answered. <strong>Zero interception on this road.</strong></p>
+    </div>
+  </div>
+
+  <table>
+    <tr><th>Lookup route</th><th>Before 7b067f4</th><th>After 7b067f4</th></tr>
+    <tr class="row-bad"><td><code>dlsym</code> on a real ANGLE handle</td><td>real-handle step wins → ANGLE's function returned <span class="out bad">interception skipped</span></td><td>priority list answers first → <span class="out ok">shim wins</span></td></tr>
+    <tr><td><code>dlsym</code> fallback tables</td><td>GraphicsShim table found it — but only if the real-handle step failed first</td><td>now redundant for these two symbols (priority already answered)</td></tr>
+    <tr class="row-bad"><td><code>eglGetProcAddress</code></td><td>forwarded to ANGLE → real function returned <span class="out bad">never intercepted</span></td><td>shim table scanned first → <span class="out ok">shim wins</span></td></tr>
+  </table>
+
+  <div class="callout warn"><div class="t">Why "usually" matters — the failure was silent</div>
+    <p>Nothing crashed at load time. The game just received a <em>different function</em> than KuDroid intended: a raw ANGLE function that knows nothing about Android display semantics. The symptoms show up later as a blank screen, a failed <code>eglGetDisplay</code>, or a wrong rendering backend — exactly the kind of bug that's hard to trace back to symbol resolution.</p>
+  </div>
+  </section>
+
+  <!-- ============ 3. THE DIFF ============ -->
+  <section class="visscroll">
+  <h2><span class="n">03</span>The change, line by line</h2>
+
+  <div class="diff">
+    <div class="file">src/shims/SyscallShim.cpp · <code>bionic_dlsym</code> — the <code>kShimPriority</code> list (+2)</div>
+    <div class="l sep"><span class="ln"></span><span>@@ — the "must intercept before the real handle" list</span></div>
+    <div class="l ctx"><span class="ln"></span><span>        "vkGetInstanceProcAddr",</span></div>
+    <div class="l ctx"><span class="ln"></span><span>        "vkEnumerateInstanceExtensionProperties",</span></div>
+    <div class="l ctx"><span class="ln"></span><span>        "vkCreateAndroidSurfaceKHR",</span></div>
+    <div class="l ctx"><span class="ln"></span><span>        "eglCreateWindowSurface",</span></div>
+    <div class="l add"><span class="ln"></span><span class="mark">+</span><span>        "eglGetDisplay",</span></div>
+    <div class="l add"><span class="ln"></span><span class="mark">+</span><span>        "eglGetPlatformDisplayEXT",</span></div>
+  </div>
+
+  <div class="diff">
+    <div class="file">src/shims/GraphicsShim.cpp · <code>bionic_eglGetProcAddress</code> — shim-table scan first (+10)</div>
+    <div class="l ctx"><span class="ln"></span><span>extern "C" void* bionic_eglGetProcAddress(const char* procname) {</span></div>
+    <div class="l ctx"><span class="ln"></span><span>    if (!procname) return nullptr;</span></div>
+    <div class="l ctx"><span class="ln"></span><span>    fprintf(stdout, "[KuDroidGPU] eglGetProcAddress: requested %s\n", procname);</span></div>
+    <div class="l add"><span class="ln"></span><span class="mark">+</span><span>    // NEW: check the shim's OWN symbol table FIRST.</span></div>
+    <div class="l add"><span class="ln"></span><span class="mark">+</span><span>    size_t count = 0;</span></div>
+    <div class="l add"><span class="ln"></span><span class="mark">+</span><span>    const kudroid::SymbolEntry* symbols = kudroid::get_graphics_symbols(&count);</span></div>
+    <div class="l add"><span class="ln"></span><span class="mark">+</span><span>    for (size_t i = 0; i &lt; count; ++i) {</span></div>
+    <div class="l add"><span class="ln"></span><span class="mark">+</span><span>        if (strcmp(symbols[i].name, procname) == 0) {</span></div>
+    <div class="l add"><span class="ln"></span><span class="mark">+</span><span>            return symbols[i].address;   // ← shim wins</span></div>
+    <div class="l add"><span class="ln"></span><span class="mark">+</span><span>        }</span></div>
+    <div class="l add"><span class="ln"></span><span class="mark">+</span><span>    }</span></div>
+    <div class="l ctx"><span class="ln"></span><span>    // Resolve from the ANGLE handle directly (loaded RTLD_LOCAL).</span></div>
+    <div class="l ctx"><span class="ln"></span><span>    … forward to ANGLE's eglGetProcAddress / RTLD_DEFAULT fallback …</span></div>
+  </div>
+
+  <div class="callout ok"><div class="t">Two files, one idea</div>
+    <p>Both hunks do the same thing for the two different lookup APIs: <strong>consult the GraphicsShim symbol table before any real ANGLE resolution happens</strong>. The shim's <code>kGraphicsSymbols</code> table already contained <code>eglGetDisplay</code> and <code>eglGetPlatformDisplayEXT</code> entries — this commit just makes sure they're actually the ones returned.</p>
+  </div>
+  </section>
+
+  <!-- ============ 4. PIPELINES ============ -->
+  <section class="visscroll">
+  <h2><span class="n">04</span>The two resolution pipelines, before → after</h2>
+  <p class="sub">Toggle each pipeline to see where the resolution lands before and after the commit. Green = shim wins. Gray = the search that used to answer first.</p>
+
+  <!-- Pipeline A -->
+  <div class="pipelabel">Road A · <code>bionic_dlsym(handle, "eglGetDisplay")</code></div>
+  <div class="switch" data-t="a" role="group" aria-label="dlsym pipeline before/after">
+    <button data-t="a" data-p="before" aria-pressed="true">Before</button>
+    <button data-t="a" data-p="after" aria-pressed="false">After</button>
+  </div>
+
+  <div class="panel on" data-t="a" data-p="before">
+    <div class="pipe">
+      <div class="step hit"><div class="idx">1</div><div class="body"><div class="fn">eglCreateWindowSurface… no match</div><div class="desc">Priority list holds Vulkan funcs + <code>eglCreateWindowSurface</code> — <code>eglGetDisplay</code> is <em>not</em> in it.</div></div></div>
+      <div class="step hit"><div class="idx">2</div><div class="body"><div class="fn">dlsym on the real ANGLE handle</div><div class="desc">The handle from <code>bionic_dlopen("libEGL.so")</code> <em>is</em> real ANGLE → ANGLE's own <code>eglGetDisplay</code> found.</div><span class="out bad">ANGLE wins — shim skipped</span></div></div>
+      <div class="step grayed"><div class="idx">3</div><div class="body"><div class="fn">Shim tables (syscall → graphics → input → audio)</div><div class="desc">Would have found the shim — but only if step 2 had missed.</div><span class="out skipped">never reached</span></div></div>
+    </div>
+  </div>
+
+  <div class="panel" data-t="a" data-p="after">
+    <div class="pipe">
+      <div class="step new hit"><div class="idx">1</div><div class="body"><div class="fn">kShimPriority — now includes <code>eglGetDisplay</code> / <code>eglGetPlatformDisplayEXT</code> <span class="tag b">new</span></div><div class="desc">Match → return <code>kGraphicsSymbols["eglGetDisplay"]</code> = <code>bionic_eglGetDisplay</code>.</div><span class="out ok">shim wins</span></div></div>
+      <div class="step grayed"><div class="idx">2</div><div class="body"><div class="fn">dlsym on the real ANGLE handle</div><div class="desc">Never consulted for these symbols anymore.</div><span class="out skipped">never reached</span></div></div>
+      <div class="step grayed"><div class="idx">3</div><div class="body"><div class="fn">Shim tables / RTLD_DEFAULT</div><div class="desc">Unchanged fallbacks.</div><span class="out skipped">never reached</span></div></div>
+    </div>
+  </div>
+
+  <!-- Pipeline B -->
+  <div class="pipelabel">Road B · <code>bionic_eglGetProcAddress("eglGetDisplay")</code></div>
+  <div class="switch" data-t="b" role="group" aria-label="eglGetProcAddress pipeline before/after">
+    <button data-t="b" data-p="before" aria-pressed="true">Before</button>
+    <button data-t="b" data-p="after" aria-pressed="false">After</button>
+  </div>
+
+  <div class="panel on" data-t="b" data-p="before">
+    <div class="pipe">
+      <div class="step hit"><div class="idx">1</div><div class="body"><div class="fn">Forward to ANGLE's <code>eglGetProcAddress</code></div><div class="desc">dlopen <code>libEGL.framework</code>, <code>dlsym("eglGetProcAddress")</code>, call it with the name.</div><span class="out bad">ANGLE wins — zero interception</span></div></div>
+      <div class="step grayed"><div class="idx">2</div><div class="body"><div class="fn">RTLD_DEFAULT <code>eglGetProcAddress</code> fallback</div><div class="desc">Only if step 1 found no host function at all.</div><span class="out skipped">usually never reached</span></div></div>
+    </div>
+  </div>
+
+  <div class="panel" data-t="b" data-p="after">
+    <div class="pipe">
+      <div class="step new hit"><div class="idx">1</div><div class="body"><div class="fn">Scan <code>kGraphicsSymbols</code> (shim's own table) <span class="tag b">new</span></div><div class="desc"><code>strcmp(name, procname)</code> across all 15 entries → <code>eglGetDisplay</code> matches → return <code>bionic_eglGetDisplay</code>.</div><span class="out ok">shim wins</span></div></div>
+      <div class="step grayed"><div class="idx">2</div><div class="body"><div class="fn">Forward to ANGLE's <code>eglGetProcAddress</code></div><div class="desc">Only for functions the shim doesn't intercept (e.g. <code>glDrawArrays</code>).</div><span class="out skipped">pass-through for the rest</span></div></div>
+    </div>
+  </div>
+
+  <div class="callout info"><div class="t">Same policy, both roads</div>
+    <p>After this commit, the two pipelines share the same policy: <strong>shim table first, ANGLE second, RTLD_DEFAULT last</strong>. Games that resolve everything through <code>eglGetProcAddress</code> (common with extension-heavy engines) and games that use plain <code>dlsym</code> now both receive <code>bionic_eglGetDisplay</code>.</p>
+  </div>
+  </section>
+
+  <!-- ============ 5. WHY IT MATTERS ============ -->
+  <section class="visscroll">
+  <h2><span class="n">05</span>Why <code>eglGetDisplay</code> must be intercepted at all</h2>
+  <p class="sub">The interception isn't cosmetic — <code>bionic_eglGetDisplay</code> performs <strong>three Android→iOS translations</strong> that ANGLE's real function knows nothing about.</p>
+
+  <div class="grid g3">
+    <div class="card">
+      <h3>1 · Kill the display argument</h3>
+      <p class="muted">On Android, <code>eglGetDisplay(display_id)</code> accepts a real display pointer. On iOS there <em>is no such display</em> — ANGLE wants <code>EGL_DEFAULT_DISPLAY</code> (0).</p>
+      <p class="muted">The shim does <code>(void)display_id;</code> — the game's argument is <strong>discarded</strong>, and ANGLE always receives <code>0</code>.</p>
+    </div>
+    <div class="card">
+      <h3>2 · Pick the right backend</h3>
+      <p class="muted">ANGLE's real <code>eglGetDisplay</code> picks a default backend. The shim instead routes through <code>eglGetPlatformDisplayEXT</code> with an explicit attribute list that <strong>forces the Metal backend and Metal device type</strong>.</p>
+    </div>
+    <div class="card">
+      <h3>3 · Keep CAMetalLayer for surfaces only</h3>
+      <p class="muted">The "window" (<code>ANativeWindow</code> → <code>CAMetalLayer</code>) belongs to <code>eglCreateWindowSurface</code> — never to the display. The shim enforces that separation: display = 0, layer = surface.</p>
+    </div>
+  </div>
+
+  <h3>The backend fallback chain inside <code>bionic_eglGetDisplay</code></h3>
+  <div class="chain">
+    <span class="node cur">EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE (0x3489)</span>
+    <span class="arrowch">← try first</span>
+    <span class="node">EGL_PLATFORM_ANGLE_TYPE_VULKAN_ANGLE (0x3450)</span>
+    <span class="arrowch">← if null</span>
+    <span class="node">EGL_PLATFORM_ANGLE_TYPE_DEFAULT_ANGLE (0x3204)</span>
+    <span class="arrowch">← if null</span>
+    <span class="node">real <code>eglGetDisplay</code> fallback</span>
+    <span class="arrowch">← if null</span>
+    <span class="node dead">return nullptr</span>
+  </div>
+  <p class="muted" style="font-size:13px">All three attempts pass <code>EGL_PLATFORM_ANGLE_ANGLE</code> (0x3202) as the platform and <code>native_display = 0</code>, with the device type pinned to <code>EGL_PLATFORM_ANGLE_DEVICE_TYPE_METAL_ANGLE</code> (0x348A). Metal-first, because that's ANGLE's supported path on iOS.</p>
+
+  <h3>The EGL lifecycle — where each piece of the shim plugs in</h3>
+  <div class="card" style="overflow-x:auto">
+    <pre style="border:none;padding:4px 0;margin:0">game:  eglGetDisplay(android_display)        → bionic_eglGetDisplay    ← forces 0 + Metal backend   [this commit's target]
+       eglInitialize(dpy, …)                  → ANGLE pass-through
+       eglChooseConfig(dpy, …)                → ANGLE pass-through
+       eglCreateWindowSurface(dpy, cfg,
+           ANativeWindow, …)                  → bionic_eglCreateWindowSurface ← swaps in g_metalLayer (CAMetalLayer)
+       eglMakeCurrent(dpy, surface, …)        → ANGLE pass-through
+       …glDrawArrays / glClear…               → ANGLE/GLES pass-through
+       eglSwapBuffers(dpy, surface)           → ANGLE pass-through  (renders the CAMetalLayer)</pre>
+  </div>
+
+  <div class="callout err"><div class="t">What went wrong before the fix (in practice)</div>
+    <ul style="margin:6px 0 2px">
+      <li><strong>Real display pointer forwarded:</strong> a game that passes its own display value straight to ANGLE's real <code>eglGetDisplay</code> → invalid display on iOS → <code>EGL_NO_DISPLAY</code> or a crash.</li>
+      <li><strong>Wrong backend chosen:</strong> ANGLE's default backend on the device may not be the Metal one the shim pins → no surfaces, black screen.</li>
+      <li><strong>Silent symptom split:</strong> the dlsym road and the eglGetProcAddress road returned <em>different</em> functions for the same name — a Heisenbug that depended on which engine the game used.</li>
+    </ul>
+  </div>
+  </section>
+
+  <!-- ============ 6. SYMBOL MAP ============ -->
+  <section class="visscroll">
+  <h2><span class="n">06</span>Symbol map &amp; source reference</h2>
+  <table>
+    <tr><th>Shim function</th><th>Intercepts (name)</th><th>Translates</th><th>File</th></tr>
+    <tr><td><code>bionic_dlsym</code></td><td><code>dlsym</code></td><td>Routes lookups: priority → real handle → shim tables → RTLD_DEFAULT</td><td><code>SyscallShim.cpp</code> :753</td></tr>
+    <tr><td><code>bionic_dlopen</code></td><td><code>dlopen</code></td><td><code>libEGL.so</code> → ANGLE framework · <code>libvulkan.so</code> → MoltenVK · else dummy handle</td><td><code>SyscallShim.cpp</code> :701</td></tr>
+    <tr><td><code>bionic_eglGetProcAddress</code></td><td><code>eglGetProcAddress</code></td><td>Shim table first, then ANGLE's own resolver</td><td><code>GraphicsShim.cpp</code> :72</td></tr>
+    <tr><td><code>bionic_eglGetDisplay</code></td><td><code>eglGetDisplay</code></td><td>Discard display arg · force EGL_DEFAULT_DISPLAY · Metal backend chain</td><td><code>GraphicsShim.cpp</code> :149</td></tr>
+    <tr><td><code>bionic_eglGetPlatformDisplayEXT</code></td><td><code>eglGetPlatformDisplayEXT</code></td><td>Force <code>native_display = 0</code>, forward to ANGLE</td><td><code>GraphicsShim.cpp</code> :133</td></tr>
+    <tr><td><code>bionic_eglCreateWindowSurface</code></td><td><code>eglCreateWindowSurface</code></td><td><code>ANativeWindow</code> → <code>g_metalLayer</code> (CAMetalLayer)</td><td><code>GraphicsShim.cpp</code> :376</td></tr>
+    <tr><td><code>bionic_ANativeWindow_fromSurface</code></td><td><code>ANativeWindow_fromSurface</code></td><td>Returns <code>g_metalLayer</code> — so "window" pointers <em>are</em> CAMetalLayers</td><td><code>GraphicsShim.cpp</code> :20</td></tr>
+    <tr><td><code>bionic_vkGetInstanceProcAddr</code> · <code>bionic_vkEnumerateInstanceExtensionProperties</code></td><td>Vulkan entry points</td><td><code>vkCreateAndroidSurfaceKHR</code> → <code>vkCreateMetalSurfaceEXT</code>; inject <code>VK_KHR_android_surface</code>, mask <code>VK_EXT_metal_surface</code></td><td><code>GraphicsShim.cpp</code> :218+</td></tr>
+  </table>
+
+  <details>
+    <summary>Why the Vulkan entries were already "priority" but EGL display wasn't</summary>
+    <p>The <code>kShimPriority</code> list existed before this commit, but it only covered <strong>surface translation</strong>: Vulkan's <code>vkCreateAndroidSurfaceKHR</code> and EGL's <code>eglCreateWindowSurface</code> — functions where receiving ANGLE/MoltenVK's real version would immediately break surface creation. <code>eglGetDisplay</code> was assumed to be harmless pass-through, so it lived only in the fallback table. This commit recognized that display creation is <em>also</em> semantic-laden on iOS (backend selection + display-id discard), so it promoted both display functions to priority status and mirrored the policy into <code>eglGetProcAddress</code>.</p>
+  </details>
+  </section>
+
+  <!-- ============ 7. VERIFICATION / TAKEAWAY ============ -->
+  <section class="visscroll">
+  <h2><span class="n">07</span>Takeaways</h2>
+  <div class="grid g3">
+    <div class="card"><h3>💡 Interception is a <em>resolution-time</em> problem</h3><p class="muted">A shim only works if the game is handed your function <em>when it looks the symbol up</em>. Every lookup API the game can use is a separate hole.</p></div>
+    <div class="card"><h3>🔁 Two roads must agree</h3><p class="muted">If <code>dlsym</code> returns the shim but <code>eglGetProcAddress</code> returns ANGLE's function, the same call behaves differently depending on the engine — the worst kind of bug.</p></div>
+    <div class="card"><h3>🧭 Display ≠ window on iOS</h3><p class="muted">Android's display object is meaningless under ANGLE/Metal; only the CAMetalLayer (a surface concept) is real. The shim is what enforces that.</p></div>
+  </div>
+  </section>
+
+  <div class="foot">
+    Facts verified against <code>git show 7b067f4</code> and the current files at <code>src/shims/GraphicsShim.cpp</code> and <code>src/shims/SyscallShim.cpp</code> (master @ 7b067f4, 2026-08-11). Line numbers refer to that revision. The pre-commit behavior was confirmed by inspecting <code>HEAD~1</code> of both files.
+  </div>
+</div>
+
+<script>
+  // scroll reveal
+  const io = new IntersectionObserver((es)=>{es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target)}})},{threshold:.08});
+  document.querySelectorAll('.visscroll').forEach(el=>io.observe(el));
+
+  // before/after toggles
+  document.querySelectorAll('.switch').forEach(sw=>{
+    const t = sw.dataset.t;
+    sw.querySelectorAll('button').forEach(btn=>{
+      btn.addEventListener('click',()=>{
+        sw.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed', b===btn));
+        document.querySelectorAll(`.panel[data-t="${t}"]`).forEach(p=>p.classList.toggle('on', p.dataset.p===btn.dataset.p));
+      });
+    });
+  });
+</script>
+</body>
+</html>

@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import AVFAudio
 
 // mark: - giao diện chính
 struct ContentView: View {
@@ -22,6 +23,7 @@ struct ContentView: View {
         .onAppear {
             setupLogDir()
             jitStatus = runJitStatus()
+            activateAudioSession()
         }
     }
 }
@@ -275,6 +277,14 @@ struct DebugView: View {
 
 // mark: - các hàm hỗ trợ bộ nối gốc
 
+/// Bật audio session playback để CoreAudio (AudioQueue trong AudioShim) phát
+/// được âm thanh — không có session hoạt động thì iOS im lặng.
+func activateAudioSession() {
+    let session = AVAudioSession.sharedInstance()
+    try? session.setCategory(.playback, mode: .default)
+    try? session.setActive(true)
+}
+
 func setupLogDir() {
     if let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
         kudroid_set_log_dir(docs.path)
@@ -416,9 +426,11 @@ struct APKInstallerView: View {
         }
         do {
             try FileManager.default.createDirectory(at: inboxURL, withIntermediateDirectories: true)
+            // Hỗ trợ APK thường lẫn container split-APK: .apk / .apkm / .xapk / .apks
+            let supportedExtensions = ["apk", "apkm", "xapk", "apks"]
             apkFiles = try FileManager.default.contentsOfDirectory(
                 at: inboxURL, includingPropertiesForKeys: [.fileSizeKey], options: [.skipsHiddenFiles]
-            ).filter { $0.pathExtension.lowercased() == "apk" }
+            ).filter { supportedExtensions.contains($0.pathExtension.lowercased()) }
              .sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
             if let selectedAPK, !apkFiles.contains(selectedAPK) { self.selectedAPK = nil }
             status = ""
@@ -523,7 +535,8 @@ struct MetalView: UIViewRepresentable {
         let width = Int32(bounds.width * scale)
         let height = Int32(bounds.height * scale)
         let unmanaged = Unmanaged.passUnretained(view.layer)
-        kudroid_set_metal_layer(unmanaged.toOpaque(), width, height)
+        // density = scale (3.0 cho @3x) — khớp khái niệm density của Android
+        kudroid_set_metal_layer(unmanaged.toOpaque(), width, height, Float(scale))
         
         // chạy apk trong nền để không chặn giao diện người dùng ios
         DispatchQueue.global(qos: .userInitiated).async {

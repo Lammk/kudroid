@@ -54,7 +54,9 @@ void kudroid_set_log_dir(const char* dir);
 void kudroid_set_documents_dir(const char* dir);
 
 /// đặt con trỏ cametallayer hoặc uiview được sử dụng cho các ràng buộc bề mặt anativewindow.
-void kudroid_set_metal_layer(void* layer, int width, int height);
+/// width/height là kích thước pixel thật (UIScreen.bounds * scale); density = scale
+/// (3.0 cho @3x) — được đẩy tiếp vào DisplayMetrics của Java lúc JVM khởi tạo.
+void kudroid_set_metal_layer(void* layer, int width, int height, float density);
 
 /// chèn một sự kiện chạm vào ứng dụng android gốc
 /// @param x tọa độ x của lần chạm

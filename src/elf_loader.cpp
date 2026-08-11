@@ -24,6 +24,16 @@
 #ifndef DT_FINI_ARRAYSZ
 #define DT_FINI_ARRAYSZ 28
 #endif
+// DT_RELR (packed relative relocations, NDK r23+ default for arm64)
+#ifndef DT_RELR
+#define DT_RELR 36
+#endif
+#ifndef DT_RELRSZ
+#define DT_RELRSZ 35
+#endif
+#ifndef DT_RELRENT
+#define DT_RELRENT 37
+#endif
 
 #include <unistd.h>
 #include <utility>
@@ -84,10 +94,74 @@ static const char* machine_name(uint16_t machine) {
 ElfLoader::ElfLoader(std::string path)
     : path_(std::move(path)) {}
 
-ElfLoader::~ElfLoader() = default;
+ElfLoader::~ElfLoader() {
+    if (allocBase_) {
+        ::munmap(allocBase_, allocSize_);
+    }
+}
 
-ElfLoader::ElfLoader(ElfLoader&&) noexcept = default;
-ElfLoader& ElfLoader::operator=(ElfLoader&&) noexcept = default;
+ElfLoader::ElfLoader(ElfLoader&& other) noexcept
+    : path_(std::move(other.path_)),
+      base_(other.base_),
+      allocBase_(other.allocBase_),
+      allocSize_(other.allocSize_),
+      entry_(other.entry_),
+      segments_(std::move(other.segments_)),
+      parsed_(other.parsed_),
+      lastError_(std::move(other.lastError_)),
+      fileBuf_(std::move(other.fileBuf_)),
+      libraryManager_(other.libraryManager_),
+      tls_vaddr_(other.tls_vaddr_),
+      tls_filesz_(other.tls_filesz_),
+      tls_memsz_(other.tls_memsz_),
+      tls_align_(other.tls_align_),
+      init_func_(other.init_func_),
+      init_array_(other.init_array_),
+      init_arraysz_(other.init_arraysz_),
+      fini_func_(other.fini_func_),
+      fini_array_(other.fini_array_),
+      fini_arraysz_(other.fini_arraysz_),
+      eh_frame_vaddr_(other.eh_frame_vaddr_),
+      eh_frame_memsz_(other.eh_frame_memsz_) {
+    // Chuyển quyền sở hữu vùng mmap; nguồn không được munmap lại.
+    other.allocBase_ = nullptr;
+    other.allocSize_ = 0;
+    other.base_ = nullptr;
+}
+
+ElfLoader& ElfLoader::operator=(ElfLoader&& other) noexcept {
+    if (this != &other) {
+        if (allocBase_) {
+            ::munmap(allocBase_, allocSize_);
+        }
+        path_ = std::move(other.path_);
+        base_ = other.base_;
+        allocBase_ = other.allocBase_;
+        allocSize_ = other.allocSize_;
+        entry_ = other.entry_;
+        segments_ = std::move(other.segments_);
+        parsed_ = other.parsed_;
+        lastError_ = std::move(other.lastError_);
+        fileBuf_ = std::move(other.fileBuf_);
+        libraryManager_ = other.libraryManager_;
+        tls_vaddr_ = other.tls_vaddr_;
+        tls_filesz_ = other.tls_filesz_;
+        tls_memsz_ = other.tls_memsz_;
+        tls_align_ = other.tls_align_;
+        init_func_ = other.init_func_;
+        init_array_ = other.init_array_;
+        init_arraysz_ = other.init_arraysz_;
+        fini_func_ = other.fini_func_;
+        fini_array_ = other.fini_array_;
+        fini_arraysz_ = other.fini_arraysz_;
+        eh_frame_vaddr_ = other.eh_frame_vaddr_;
+        eh_frame_memsz_ = other.eh_frame_memsz_;
+        other.allocBase_ = nullptr;
+        other.allocSize_ = 0;
+        other.base_ = nullptr;
+    }
+    return *this;
+}
 
 const char* ElfLoader::lastError() const {
     return lastError_.c_str();
@@ -294,6 +368,10 @@ bool ElfLoader::map() {
         base_ = nullptr;
         return false;
     }
+    // Lưu gốc vùng cấp phát ban đầu để destructor munmap an toàn (base_ bị
+    // điều chỉnh về phía sau bởi -minVaddr ở cuối hàm này).
+    allocBase_ = base_;
+    allocSize_ = totalSize;
 
 #if defined(__APPLE__) && TARGET_OS_OSX
     if (usedMapJit) pthread_jit_write_protect_np(0);
@@ -314,14 +392,14 @@ bool ElfLoader::map() {
         }
     }
 
-#if defined(__APPLE__) && TARGET_OS_OSX
-    if (usedMapJit) pthread_jit_write_protect_np(1);
-#endif
-
     // --- trình vá aot cho tpidr_el0 (lớp gốc kudroid) ---
     // hạt nhân xnu của ios không chuyển đổi ngữ cảnh cho tpidr_el0, nên nó trả về rác.
     // mrs xn, tpidr_el0 -> 0xd53bd040 | n
     // chúng tôi vá nó thành brk #(0x1000 + n) -> 0xd4200000 | ((0x1000 + n) << 5)
+    //
+    // QUAN TRỌNG: vòng lặp này phải chạy TRƯỚC khi pthread_jit_write_protect_np(1)
+    // được bật lại (macOS MAP_JIT) — nếu không, việc ghi vào trang JIT đang bị
+    // khóa sẽ gây fault. Khóa lại được thực hiện ngay sau vòng lặp.
     for (const auto& seg : segments_) {
         if (seg.flags & 1) { // PROT_EXEC
             uint32_t* insts = reinterpret_cast<uint32_t*>(static_cast<char*>(base_) + (seg.vaddr - minVaddr));
@@ -336,6 +414,10 @@ bool ElfLoader::map() {
             }
         }
     }
+
+#if defined(__APPLE__) && TARGET_OS_OSX
+    if (usedMapJit) pthread_jit_write_protect_np(1);
+#endif
 
     // arm64 có bộ đệm i/d riêng biệt: mã mới ghi phải được xóa khỏi
     // bộ đệm dữ liệu và bộ đệm lệnh cũ phải bị vô hiệu hóa, nếu không cpu
@@ -381,6 +463,8 @@ bool ElfLoader::map() {
                              std::string(strerror(errno));
                 munmap(mapStart, totalSize);
                 base_ = nullptr;
+                allocBase_ = nullptr;
+                allocSize_ = 0;
                 return false;
             }
         }
@@ -390,6 +474,12 @@ bool ElfLoader::map() {
     // điều chỉnh base_ để trỏ đến địa chỉ logic 0
     // (để base_ + st_value = địa chỉ thực)
     base_ = static_cast<char*>(base_) - minVaddr;
+
+    // Đăng ký template TLS của module để các khối TLS per-thread của runtime
+    // có thể sao chép nó vào vị trí tprel tương ứng (xem kudroid_tls_module_offset).
+    if (tls_vaddr_ != 0 && tls_filesz_ > 0 && tls_filesz_ <= tls_memsz_) {
+        kudroid_tls_set_template(static_cast<char*>(base_) + tls_vaddr_, tls_filesz_);
+    }
 
     return true;
 }
@@ -403,6 +493,12 @@ bool ElfLoader::relocate() {
         lastError_ = "Must call map() before relocate()";
         return false;
     }
+#if defined(__APPLE__) && TARGET_OS_OSX
+    // map() đã bật lại pthread_jit_write_protect_np(1) (MAP_JIT) — ghi vào vùng
+    // ánh xạ lúc này sẽ fault. Relocate ghi addend/symbol vào .got/.data trong
+    // vùng JIT, nên phải tạm tắt write-protect trong suốt quá trình này.
+    pthread_jit_write_protect_np(0);
+#endif
     const auto* ehdr = reinterpret_cast<const Elf64Ehdr*>(fileBuf_.data());
     const auto* phdrs = reinterpret_cast<const Elf64Phdr*>(
         fileBuf_.data() + ehdr->e_phoff);
@@ -424,6 +520,7 @@ bool ElfLoader::relocate() {
 
     uint64_t relaVaddr = 0, relaSize = 0, relaEnt = sizeof(Elf64Rela);
     uint64_t jmpRelVaddr = 0, jmpRelSize = 0;
+    uint64_t relrVaddr = 0, relrSize = 0;
     uint64_t symtabVaddr = 0, strtabVaddr = 0, strsz = 0;
     for (size_t i = 0; i < dynamicCount && dynamic[i].d_tag != DT_NULL; ++i) {
         switch (dynamic[i].d_tag) {
@@ -432,6 +529,8 @@ bool ElfLoader::relocate() {
             case DT_RELAENT: relaEnt = dynamic[i].d_val; break;
             case DT_JMPREL: jmpRelVaddr = dynamic[i].d_val; break;
             case DT_PLTRELSZ: jmpRelSize = dynamic[i].d_val; break;
+            case DT_RELR: relrVaddr = dynamic[i].d_val; break;
+            case DT_RELRSZ: relrSize = dynamic[i].d_val; break;
             case DT_SYMTAB: symtabVaddr = dynamic[i].d_val; break;
             case DT_STRTAB: strtabVaddr = dynamic[i].d_val; break;
             case DT_STRSZ: strsz = dynamic[i].d_val; break;
@@ -527,11 +626,13 @@ bool ElfLoader::relocate() {
             } else if (type == R_AARCH64_TLS_DTPMOD64) {
                 *target = 1; // id mô-đun (1 cho thư viện chính)
             } else if (type == R_AARCH64_TLS_DTPREL64 || type == R_AARCH64_TLS_TPREL64) {
-                // hiện tại, giải quyết độ dời tls trực tiếp. việc thiết lập khối tls đúng cách đòi hỏi quản lý thời gian chạy phức tạp hơn.
+                // Bias = vị trí template TLS của module so với thread pointer guest
+                // (giá trị này được kudroid_tls_set_template đặt trong khối TLS).
+                const uint64_t tlsBias = kudroid_tls_module_offset();
                 if (symbolIndex != 0) {
-                    *target = symtab[symbolIndex].st_value + relocs[i].r_addend;
+                    *target = symtab[symbolIndex].st_value + relocs[i].r_addend + tlsBias;
                 } else {
-                    *target = relocs[i].r_addend;
+                    *target = relocs[i].r_addend + tlsBias;
                 }
             } else {
                 lastError_ = "Unsupported AArch64 relocation type: " +
@@ -542,8 +643,60 @@ bool ElfLoader::relocate() {
         return true;
     };
 
-    return applyRelocations(relaVaddr, relaSize) &&
-           applyRelocations(jmpRelVaddr, jmpRelSize);
+    // DT_RELR — packed relative relocations (NDK r23+ default for arm64).
+    //
+    // Định dạng: mỗi entry 8 byte.
+    //  - bit 0 = 0: entry là MỘT địa chỉ tương đối cần reloc (r_offset).
+    //  - bit 0 = 1: bitmap — địa chỉ CƠ SỞ lấy từ entry (địa chỉ đơn) trước đó;
+    //    các bit 1..63 đánh dấu các địa chỉ liên tiếp (base + bit*8) cần reloc.
+    //    Bitmap liên tiếp: base kế tiếp = base + 63*8.
+    //
+    // Khác với RELA, addend của RELR nằm SẴN trong nội dung tệp tại vị trí reloc
+    // (không nằm trong entry), nên cách áp dụng là CỘNG load bias vào giá trị hiện
+    // có — đúng như glibc/musl/Android linker (*(addr) += load_bias).
+    auto applyRelr = [&]() -> bool {
+        if (relrVaddr == 0 || relrSize == 0) return true;
+        const uint64_t offset = vaddrToFileOffset(relrVaddr);
+        if (offset == UINT64_MAX || relrSize > fileBuf_.size() - offset || relrSize % 8 != 0) {
+            lastError_ = "Invalid RELR table";
+            return false;
+        }
+        const auto* relrs = reinterpret_cast<const uint64_t*>(fileBuf_.data() + offset);
+        const uintptr_t bias = reinterpret_cast<uintptr_t>(base_);
+        uint64_t lastAddr = 0;
+        for (uint64_t i = 0; i < relrSize / 8; ++i) {
+            const uint64_t entry = relrs[i];
+            // Entry đầu tiên của bảng RELR PHẢI là entry đơn (bit 0 = 0) làm base
+            // cho các bitmap — spec không định nghĩa bitmap ở vị trí đầu.
+            if (i == 0 && (entry & 1ULL)) {
+                lastError_ = "Invalid RELR table: first entry is a bitmap";
+                return false;
+            }
+            if (entry & 1ULL) {
+                const uint64_t base = lastAddr; // base = địa chỉ entry đơn trước đó
+                for (uint64_t bit = 1; bit < 64; ++bit) {
+                    if (entry & (1ULL << bit)) {
+                        const uint64_t vaddr = base + bit * 8;
+                        *reinterpret_cast<uint64_t*>(static_cast<char*>(base_) + vaddr) += bias;
+                    }
+                }
+                lastAddr = base + 63 * 8;
+            } else {
+                const uint64_t vaddr = entry;
+                *reinterpret_cast<uint64_t*>(static_cast<char*>(base_) + vaddr) += bias;
+                lastAddr = vaddr;
+            }
+        }
+        return true;
+    };
+
+    const bool ok = applyRelocations(relaVaddr, relaSize) &&
+                    applyRelocations(jmpRelVaddr, jmpRelSize) &&
+                    applyRelr();
+#if defined(__APPLE__) && TARGET_OS_OSX
+    pthread_jit_write_protect_np(1);
+#endif
+    return ok;
 }
 
 void* ElfLoader::getSymbolAddress(const char* symbolName) {
@@ -727,6 +880,8 @@ void ElfLoader::registerEhFrame() {
 
     // eh_frame_vaddr_ trỏ tới .eh_frame_hdr (pt_gnu_eh_frame)
     auto* hdr = reinterpret_cast<const uint8_t*>(static_cast<char*>(base_) + eh_frame_vaddr_);
+    // Bounds check: đọc tối thiểu 8 byte (version+3 enc + con trỏ 4 byte).
+    if (eh_frame_memsz_ < 8) return;
     
     // định dạng phần đầu:
     // uint8_t version; (phải là 1)
@@ -752,6 +907,7 @@ void ElfLoader::deregisterEhFrame() {
     if (!base_ || eh_frame_vaddr_ == 0) return;
 
     auto* hdr = reinterpret_cast<const uint8_t*>(static_cast<char*>(base_) + eh_frame_vaddr_);
+    if (eh_frame_memsz_ < 8) return;
     if (hdr[0] != 1) return;
     
     if (hdr[1] == 0x1B) {

@@ -30,6 +30,7 @@ add_library(kudroid_core STATIC
     src/shims/AudioShim.cpp
     src/shims/GraphicsShim.cpp
     src/shims/SyscallShim.cpp
+    src/shims/AssetShim.cpp
     src/kudroid_bridge.cpp
     src/kudroid_jni.cpp
     src/kudroid_java_activity_bridge.cpp
@@ -37,6 +38,7 @@ add_library(kudroid_core STATIC
     src/DexManager.cpp
     src/DexCacheManager.cpp
     src/DexToJar.cpp
+    src/DexAotCache.cpp
 )
 
 find_package(ZLIB REQUIRED)

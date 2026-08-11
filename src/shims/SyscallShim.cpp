@@ -20,13 +20,23 @@
 #include <unwind.h>
 #include <cxxabi.h>
 #include <chrono>
+#include <algorithm>
 #include <sys/socket.h>
 #include <condition_variable>
+#include <limits.h>
 
 extern "C" void __gxx_personality_v0();
 
+// Mirror một dòng log vào crash buffer (kudroid_bridge.cpp) để kudroid_crash.log
+// chứa log của game ngay trước khi crash — trước đây chỉ có log của kudroid_core.
+extern "C" void kudroid_append_crash_log(const char* text, size_t len);
+
+// Lưu abort message (android_set_abort_message) — crash handler in nó ra.
+extern "C" void kudroid_store_abort_message(const char* msg);
+
 // For Bionic pthread emulation
 #include <cstdarg>
+#include <semaphore.h>
 #ifdef __APPLE__
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -67,6 +77,7 @@ struct android_epoll_event {
 } __attribute__((packed));
 #include <cstdlib>
 #include <cstring>
+#include <cerrno>
 #include <pthread.h>
 #include <unordered_map>
 #include <map>
@@ -194,7 +205,17 @@ int logAndroidMessage(int priority, const char* tag, const std::string& message)
             fclose(fp);
         }
     }
-    
+
+    // Mirror into the crash buffer so kudroid_crash.log shows the game's own
+    // log up to the crash (trước đây phần "log up to crash" luôn trống).
+    {
+        std::string full;
+        if (tag) { full += '['; full += tag; full += "] "; }
+        full += message;
+        full += '\n';
+        kudroid_append_crash_log(full.data(), full.size());
+    }
+
     return 0;
 }
 
@@ -321,11 +342,29 @@ static inline void destroy_sync(void* guest_ptr, int type) {
 }
 
 extern "C" int bionic_pthread_mutex_init(void* guestMutex, const void* attr) {
-    (void)attr;
     trace("pthread_mutex_init()");
+
+    // Bionic pthread_mutexattr_t: kiểu (PTHREAD_MUTEX_RECURSIVE=1, ERRORCHECK=2)
+    // nằm ở 2 bit thấp của từ 4 byte đầu (little-endian). Nếu game tạo mutex
+    // recursive mà host dùng mutex thường → tự khóa chính nó → deadlock treo.
+    int type = 0;
+    if (attr) type = (*static_cast<const uint32_t*>(attr)) & 0x3;
+
     void* hostMutex = create_sync_obj(SYNC_MUTEX);
     if (!hostMutex) return -1;
-    
+    if (type == 1 || type == 2) { // RECURSIVE hoặc ERRORCHECK
+        pthread_mutexattr_t ma;
+        ::pthread_mutexattr_init(&ma);
+        ::pthread_mutexattr_settype(&ma, type == 1 ? PTHREAD_MUTEX_RECURSIVE
+                                                   : PTHREAD_MUTEX_ERRORCHECK);
+        const int rc = ::pthread_mutex_init(static_cast<pthread_mutex_t*>(hostMutex), &ma);
+        ::pthread_mutexattr_destroy(&ma);
+        if (rc != 0) {
+            std::free(hostMutex);
+            return rc;
+        }
+    }
+
     std::unique_lock<std::shared_mutex> lock(gSyncRegistryLock);
     gSyncRegistry[guestMutex] = hostMutex;
     trace("pthread_mutex_init() -> 0");
@@ -431,13 +470,69 @@ extern "C" void bionic_stack_chk_fail() {
 extern "C" int vfs_fstat(int fd, void* info);
 extern "C" int vfs_fstat64(int fd, void* info);
 
-// Dummy fallback functions
-extern "C" int bionic_pthread_attr_init(void* attr) { (void)attr; return 0; }
+// Bionic pthread_attr_t (arm64) — thứ tự các trường theo bionic bits/pthread_types.h.
+struct BionicPthreadAttr {
+    uint32_t flags;        // bit 0 = PTHREAD_ATTR_FLAG_DETACHED
+    uint32_t pad0;
+    void* stack_base;
+    size_t stack_size;
+    size_t guard_size;
+    int32_t sched_policy;
+    int32_t sched_priority;
+};
+
+// THẬT (trước đây là dummy trả 0 không ghi gì): bionic_pthread_create đọc
+// stack_size từ attr này — nếu không init, game đọc stack_size rác →
+// pthread_attr_setstacksize(host, rác) → pthread_create fail EINVAL → game
+// không tạo được thread (treo/crash).
+extern "C" int bionic_pthread_attr_init(void* attr) {
+    auto* a = static_cast<BionicPthreadAttr*>(attr);
+    if (!a) return -1;
+    std::memset(a, 0, sizeof(BionicPthreadAttr));
+    a->guard_size = 4096;   // default bionic
+    a->sched_policy = -1;
+    a->sched_priority = -1;
+    return 0;
+}
 extern "C" int bionic_pthread_attr_destroy(void* attr) { (void)attr; return 0; }
-extern "C" int bionic_pthread_attr_setstacksize(void* attr, size_t stacksize) { (void)attr; (void)stacksize; return 0; }
-extern "C" int bionic_pthread_attr_getstack(void* attr, void** stackaddr, size_t* stacksize) { (void)attr; (void)stackaddr; (void)stacksize; return 0; }
-extern "C" int bionic_pthread_attr_setdetachstate(void* attr, int state) { (void)attr; (void)state; return 0; }
-extern "C" int bionic_pthread_getattr_np(pthread_t thread, void* attr) { (void)thread; (void)attr; return 0; }
+extern "C" int bionic_pthread_attr_setstacksize(void* attr, size_t stacksize) {
+    auto* a = static_cast<BionicPthreadAttr*>(attr);
+    if (!a) return -1;
+    a->stack_size = stacksize;
+    return 0;
+}
+extern "C" int bionic_pthread_attr_getstack(void* attr, void** stackaddr, size_t* stacksize) {
+    auto* a = static_cast<BionicPthreadAttr*>(attr);
+    if (!a) return -1;
+    // GHI output — dummy cũ không ghi gì, game đọc stackaddr/stacksize rác.
+    if (stackaddr) *stackaddr = a->stack_base;
+    if (stacksize) *stacksize = a->stack_size;
+    return 0;
+}
+extern "C" int bionic_pthread_attr_setdetachstate(void* attr, int state) {
+    auto* a = static_cast<BionicPthreadAttr*>(attr);
+    if (!a) return -1;
+    if (state == 1) a->flags |= 0x1;      // PTHREAD_CREATE_DETACHED
+    else a->flags &= ~0x1;
+    return 0;
+}
+extern "C" int bionic_pthread_getattr_np(pthread_t thread, void* attr) {
+    auto* a = static_cast<BionicPthreadAttr*>(attr);
+    if (!a) return -1;
+    bionic_pthread_attr_init(attr);
+    // Lấy stack size thật của thread host (guest thường gọi để tự quyết độ sâu stack).
+    pthread_attr_t hostAttr;
+    if (::pthread_getattr_np(thread, &hostAttr) == 0) {
+        void* saddr = nullptr;
+        size_t ssize = 0;
+        if (::pthread_attr_getstack(&hostAttr, &saddr, &ssize) == 0) {
+            a->stack_base = saddr;
+            a->stack_size = ssize;
+        }
+        ::pthread_attr_destroy(&hostAttr);
+    }
+    return 0;
+}
 
 } // namespace
 } // namespace kudroid
@@ -447,7 +542,11 @@ namespace {
 
 extern "C" int bionic_ioctl(int fd, unsigned long request, ...) {
     (void)fd; (void)request;
-    return 0; // Success for all dummy fds
+    // Không có ioctl nào được mô phỏng. Trả lỗi rõ ràng thay vì giả vờ thành công
+    // với 0 — game query kích thước màn hình/display sẽ đọc rác từ buffer nếu
+    // ta trả 0 mà không ghi gì.
+    errno = ENOTTY;
+    return -1;
 }
 
 #define PR_SET_NAME 15
@@ -468,8 +567,17 @@ extern "C" int bionic_prctl(int option, unsigned long arg2, unsigned long arg3, 
     return 0;
 }
 
+// Kiểm tra trong bionic_mmap: fd ashmem chỉ map được với prot đã được cấp
+// (định nghĩa ở khối ashmem phía dưới).
+static bool ashmem_prot_allows(int fd, int prot);
+
 // Memory mapping wrappers to strip Linux specific flags
 extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
+    // ashmem fd: chỉ map được với prot đã cấp (bionic_ashmem_set_prot_region).
+    if (!ashmem_prot_allows(fd, prot)) {
+        errno = EACCES;
+        return MAP_FAILED;
+    }
     if (prot & PROT_EXEC) {
         logAndroidMessage(4, "KuDroidSyscall", "bionic_mmap: allocating executable memory (JIT/library), length=" + std::to_string(length));
     }
@@ -481,17 +589,37 @@ extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int
     constexpr int LINUX_MAP_PRIVATE   = 0x02;
     constexpr int LINUX_MAP_FIXED     = 0x10;
     constexpr int LINUX_MAP_ANONYMOUS = 0x20;
+    constexpr int LINUX_MAP_SHARED_VALIDATE = 0x03;
+
+    // Flags that only exist on Linux; forwarding them raw to Darwin causes
+    // EINVAL (e.g. MAP_NORESERVE=0x4000 collides with a reserved Darwin bit)
+    // or misparsing. Strip them before calling host mmap.
+    constexpr int LINUX_ONLY_MAP_FLAGS =
+        0x0100    | // MAP_GROWSDOWN
+        0x0800    | // MAP_DENYWRITE
+        0x1000    | // MAP_EXECUTABLE (collides with Darwin MAP_ANON bit)
+        0x4000    | // MAP_NORESERVE
+        0x8000    | // MAP_POPULATE
+        0x10000   | // MAP_NONBLOCK
+        0x20000   | // MAP_STACK
+        0x40000   | // MAP_HUGETLB
+        0x80000   | // MAP_SYNC
+        0x100000  | // MAP_FIXED_NOREPLACE
+        0x40000000; // MAP_UNINITIALIZED
 
     int darwin_flags = 0;
-    if (flags & LINUX_MAP_SHARED)  darwin_flags |= MAP_SHARED;
-    if (flags & LINUX_MAP_PRIVATE) darwin_flags |= MAP_PRIVATE;
-    if (flags & LINUX_MAP_FIXED)   darwin_flags |= MAP_FIXED;
+    if (flags & LINUX_MAP_SHARED)          darwin_flags |= MAP_SHARED;
+    if (flags & LINUX_MAP_PRIVATE)         darwin_flags |= MAP_PRIVATE;
+    if (flags & LINUX_MAP_FIXED)           darwin_flags |= MAP_FIXED;
+    if (flags & LINUX_MAP_SHARED_VALIDATE) darwin_flags |= MAP_SHARED;
 
     int darwin_fd = fd;
     if (flags & LINUX_MAP_ANONYMOUS) {
         darwin_flags |= MAP_ANON;
         darwin_fd = -1;  // Darwin requires fd == -1 for anonymous mappings
     }
+    // Drop Linux-only flags and the MAP_HUGE_* size bits (bits 26-31).
+    darwin_flags &= ~(LINUX_ONLY_MAP_FLAGS | 0xFC000000);
     return ::mmap(addr, length, prot, darwin_flags, darwin_fd, offset);
 #else
     return ::mmap(addr, length, prot, flags, fd, offset);
@@ -564,15 +692,19 @@ extern "C" void* bionic_mremap(void *old_address, size_t old_size, size_t new_si
     if (flags & 1) { // MREMAP_MAYMOVE
         void* new_ptr = mmap(NULL, new_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (new_ptr != MAP_FAILED) {
-            std::memcpy(new_ptr, old_address, old_size);
+            // Chỉ copy min(old,new) — copy old_size khi new_size nhỏ hơn sẽ tràn
+            // mapping mới (corruption/crash).
+            std::memcpy(new_ptr, old_address, std::min(old_size, new_size));
             munmap(old_address, old_size);
             return new_ptr;
         }
     }
+    errno = ENOMEM; // không maymove mà cần mở rộng / mmap fail → ENOMEM như Linux
     return MAP_FAILED;
 }
 
 #define AT_HWCAP 16
+#define AT_PAGESZ 6
 #define HWCAP_NEON (1 << 12)
 #define HWCAP_AES (1 << 3)
 #define HWCAP_PMULL (1 << 4)
@@ -583,6 +715,11 @@ extern "C" void* bionic_mremap(void *old_address, size_t old_size, size_t new_si
 extern "C" unsigned long bionic_getauxval(unsigned long type) {
     if (type == AT_HWCAP) {
         return HWCAP_NEON | HWCAP_AES | HWCAP_PMULL | HWCAP_SHA1 | HWCAP_SHA2 | HWCAP_CRC32;
+    }
+    if (type == AT_PAGESZ) {
+        // Trả kích thước trang thật của host — tránh engine đọc pagesize=0.
+        long pagesize = ::sysconf(_SC_PAGESIZE);
+        return pagesize > 0 ? static_cast<unsigned long>(pagesize) : 0;
     }
     return 0;
 }
@@ -603,7 +740,13 @@ extern "C" ssize_t bionic_getrandom(void *buf, size_t buflen, unsigned int flags
 #endif
 }
 
-extern "C" int bionic_ashmem_create_region(const char *name, size_t size) {
+// ── ashmem (Android shared memory) ──
+// iOS không có ashmem — fake bằng POSIX shm (shm_open + ftruncate + shm_unlink
+// ngay để vô danh nhưng fd vẫn dùng được với mmap), đúng ý tưởng user đề xuất.
+static std::mutex g_ashmem_mtx;
+static std::unordered_map<int, int> g_ashmem_prot; // fd -> prot cho phép
+
+extern "C" int bionic_ashmem_create_region(const char* name, size_t size) {
     (void)name;
     static std::atomic<uint32_t> counter{0};
     char shm_name[64];
@@ -611,17 +754,33 @@ extern "C" int bionic_ashmem_create_region(const char *name, size_t size) {
     int fd = shm_open(shm_name, O_RDWR | O_CREAT | O_EXCL, 0600);
     if (fd >= 0) {
         shm_unlink(shm_name);
-        if (::ftruncate(fd, size) < 0) {
-            // Ignored, just for suppressing warning
+        if (::ftruncate(fd, static_cast<off_t>(size)) != 0) {
+            // Bỏ qua — fd vẫn hợp lệ, mmap sau đó sẽ lỗi nếu size vượt quá.
         }
+        std::lock_guard<std::mutex> lock(g_ashmem_mtx);
+        g_ashmem_prot[fd] = PROT_READ | PROT_WRITE; // bionic mặc định rw
         return fd;
     }
     return -1;
 }
 
+extern "C" int bionic_ashmem_set_name(int fd, const char* name) {
+    (void)fd; (void)name;
+    return 0; // tên chỉ để debug — không cần lưu
+}
+
 extern "C" int bionic_ashmem_set_prot_region(int fd, int prot) {
-    (void)fd; (void)prot;
-    return 0; // Always allow
+    std::lock_guard<std::mutex> lock(g_ashmem_mtx);
+    g_ashmem_prot[fd] = prot;
+    return 0;
+}
+
+static bool ashmem_prot_allows(int fd, int prot) {
+    if (fd < 0) return true;
+    std::lock_guard<std::mutex> lock(g_ashmem_mtx);
+    auto it = g_ashmem_prot.find(fd);
+    if (it == g_ashmem_prot.end()) return true; // không phải ashmem fd
+    return (prot & ~it->second) == 0;
 }
 
 // --- Linux-Specific Syscalls ---
@@ -650,18 +809,33 @@ extern "C" int bionic_futex(uint32_t *uaddr, int futex_op, uint32_t val, const s
 
     if (cmd == FUTEX_WAIT || cmd == FUTEX_WAIT_BITSET) {
         // FUTEX_WAIT_BITSET with a bitset of 0 is invalid.
-        if (cmd == FUTEX_WAIT_BITSET && val3 == 0) return -1;
+        if (cmd == FUTEX_WAIT_BITSET && val3 == 0) { errno = EINVAL; return -1; }
 
         std::unique_lock<std::mutex> lock(g_futexGlobalMtx);
         FutexWaitQueue& q = g_futexQueues[uaddr];
         std::unique_lock<std::mutex> qLock(q.mtx);
         lock.unlock();
 
-        if (*uaddr != val) return -1;
+        // Linux: nếu *uaddr != val khi vào wait → EAGAIN ngay.
+        if (*uaddr != val) { errno = EAGAIN; return -1; }
 
         if (timeout) {
-            auto duration = std::chrono::seconds(timeout->tv_sec) + std::chrono::nanoseconds(timeout->tv_nsec);
-            if (q.cv.wait_for(qLock, duration) == std::cv_status::timeout) return -1;
+            // Linux timeout là TUYỆT ĐỐI: CLOCK_MONOTONIC (FUTEX_WAIT) hoặc
+            // CLOCK_REALTIME (có cờ FUTEX_CLOCK_REALTIME). Tính phần còn lại.
+            const bool realtime = (futex_op & FUTEX_CLOCK_REALTIME) != 0;
+            struct timespec now;
+            ::clock_gettime(realtime ? CLOCK_REALTIME : CLOCK_MONOTONIC, &now);
+            int64_t remSec = int64_t(timeout->tv_sec) - int64_t(now.tv_sec);
+            int64_t remNs  = int64_t(timeout->tv_nsec) - int64_t(now.tv_nsec);
+            if (remNs < 0) { remSec -= 1; remNs += 1000000000; }
+            if (remSec < 0) { errno = ETIMEDOUT; return -1; }
+            if (remSec > 86400) remSec = 86400; // cap 24h tránh overflow duration
+            const auto duration = std::chrono::seconds(remSec) +
+                                  std::chrono::nanoseconds(remNs);
+            if (q.cv.wait_for(qLock, duration) == std::cv_status::timeout) {
+                errno = ETIMEDOUT;
+                return -1;
+            }
         } else {
             q.cv.wait(qLock);
         }
@@ -674,20 +848,13 @@ extern "C" int bionic_futex(uint32_t *uaddr, int futex_op, uint32_t val, const s
             lock.unlock();
             if (val == 1) it->second.cv.notify_one();
             else it->second.cv.notify_all();
-            // Clean up the queue entry if no waiters remain (prevents leak).
-            // We can't easily count waiters with condition_variable, so we
-            // keep the entry but it's bounded by the number of distinct
-            // futex addresses the app uses (typically small).
             return val;
         }
         return 0;
     } else if (cmd == FUTEX_REQUEUE || cmd == FUTEX_CMP_REQUEUE) {
         // FUTEX_CMP_REQUEUE requires *uaddr == val3 before requeueing.
-        if (cmd == FUTEX_CMP_REQUEUE && *uaddr != val3) return -1;
+        if (cmd == FUTEX_CMP_REQUEUE && *uaddr != val3) { errno = EAGAIN; return -1; }
 
-        // Wake up to `val` waiters on uaddr, requeue up to `val2` (passed via
-        // the high bits of futex_op on some ABIs; here we approximate by
-        // waking all and requeueing none — sufficient for most games).
         std::unique_lock<std::mutex> lock(g_futexGlobalMtx);
         auto it = g_futexQueues.find(uaddr);
         if (it != g_futexQueues.end()) {
@@ -699,6 +866,7 @@ extern "C" int bionic_futex(uint32_t *uaddr, int futex_op, uint32_t val, const s
         }
         return 0;
     }
+    errno = ENOSYS;
     return -1;
 }
 
@@ -844,7 +1012,9 @@ extern "C" void* bionic_android_dlopen_ext(const char* filename, int flags, cons
 }
 
 extern "C" int bionic_dlclose(void* handle) {
-    if (!handle || handle == RTLD_DEFAULT) return 0;
+    // DUMMY_HANDLE là handle giả cho các lib Android không tồn tại trên host
+    // (xem bionic_dlopen) — gọi ::dlclose với nó sẽ dereference con trỏ rác.
+    if (!handle || handle == RTLD_DEFAULT || handle == DUMMY_HANDLE) return 0;
     return ::dlclose(handle);
 }
 
@@ -972,6 +1142,12 @@ extern "C" int bionic_close(int fd) {
         }
     }
 #endif
+    // Dọn entry prot của ashmem fd — không dọn thì fd number tái sử dụng bị
+    // prot cũ khóa (leak + hành vi sai).
+    {
+        std::lock_guard<std::mutex> lock(g_ashmem_mtx);
+        g_ashmem_prot.erase(fd);
+    }
     return ::close(fd);
 }
 
@@ -1054,21 +1230,30 @@ extern "C" int bionic_epoll_wait(int epfd, void *events_ptr, int maxevents, int 
     int unique_events = 0;
     
     if (n > 0) {
-        std::unordered_map<uint64_t, uint32_t> coalesced;
+        // Gộp theo FD (kevent.ident), không theo udata: hai fd khác nhau có thể
+        // dùng chung data (vd ident 0) — gộp theo udata sẽ làm mất một event.
+        // Còn một fd đọc+ghi được gộp thành một event EPOLLIN|EPOLLOUT như epoll.
+        std::vector<uint64_t> order;
+        std::unordered_map<uint64_t, std::pair<uint32_t, uint64_t>> coalesced;
         for (int i = 0; i < n; i++) {
-            uint64_t udata = reinterpret_cast<uint64_t>(evlist[i].udata);
+            const uint64_t fd = static_cast<uint64_t>(evlist[i].ident);
             uint32_t flags = 0;
             if (evlist[i].filter == EVFILT_READ) flags |= EPOLLIN;
             else if (evlist[i].filter == EVFILT_WRITE) flags |= EPOLLOUT;
             if (evlist[i].flags & EV_ERROR) flags |= EPOLLERR;
             if (evlist[i].flags & EV_EOF) flags |= EPOLLHUP;
-            coalesced[udata] |= flags;
+            auto& entry = coalesced[fd];
+            if (std::find(order.begin(), order.end(), fd) == order.end()) {
+                order.push_back(fd); // giữ thứ tự xuất hiện đầu tiên
+            }
+            entry.first |= flags;
+            entry.second = reinterpret_cast<uint64_t>(evlist[i].udata);
         }
         
-        for (auto const& [udata, flags] : coalesced) {
+        for (const uint64_t fd : order) {
             if (unique_events >= maxevents) break;
-            events[unique_events].events = flags;
-            events[unique_events].data = udata;
+            events[unique_events].events = coalesced[fd].first;
+            events[unique_events].data = coalesced[fd].second;
             unique_events++;
         }
     }
@@ -1082,7 +1267,14 @@ extern "C" int bionic_pthread_condattr_init(void* attr) { (void)attr; return 0; 
 extern "C" int bionic_pthread_condattr_destroy(void* attr) { (void)attr; return 0; }
 extern "C" int bionic_pthread_mutexattr_init(void* attr) { (void)attr; return 0; }
 extern "C" int bionic_pthread_mutexattr_destroy(void* attr) { (void)attr; return 0; }
-extern "C" int bionic_pthread_mutexattr_settype(void* attr, int type) { (void)attr; (void)type; return 0; }
+extern "C" int bionic_pthread_mutexattr_settype(void* attr, int type) {
+    // GHI kiểu vào attr guest (2 bit thấp từ đầu) — dummy cũ không ghi gì nên
+    // pthread_mutex_init không bao giờ biết mutex là recursive.
+    auto* p = static_cast<uint32_t*>(attr);
+    if (!p) return -1;
+    *p = (*p & ~0x3u) | (static_cast<uint32_t>(type) & 0x3u);
+    return 0;
+}
 
 
 extern "C" int bionic_pthread_mutex_trylock(void* guestMutex) {
@@ -1095,8 +1287,10 @@ extern "C" int bionic_pthread_key_create(void* guestKey, void (*destructor)(void
     pthread_key_t hostKey;
     int res = ::pthread_key_create(&hostKey, destructor);
     if (res == 0) {
-        // Bionic pthread_key_t is an int; the guest passes a pointer to it.
-        std::memcpy(guestKey, &hostKey, sizeof(pthread_key_t));
+        // Bionic pthread_key_t is a 32-bit int, while Darwin's pthread_key_t is
+        // 64-bit. memcpy(sizeof(pthread_key_t)) would overflow the guest's
+        // 4-byte key slot. Darwin keys are small integers, so truncation is safe.
+        *static_cast<int*>(guestKey) = static_cast<int>(hostKey);
     }
     return res;
 }
@@ -1195,6 +1389,51 @@ static void init_tls_key() {
     ::pthread_key_create(&tls_key, tls_destructor);
 }
 
+// Kích thước khối TLS guest và các offset chuẩn bionic (arm64).
+// Thread pointer (tpidr_el0) trỏ vào vùng slot; slot N ở tpidr + N*8.
+constexpr size_t kTlsBlockSize    = 65536;
+constexpr size_t kTlsSlotOffset   = 32768; // TP = tls_base + kTlsSlotOffset
+constexpr size_t kTlsModuleOffset = 4096;  // template TLS module, tương đối với TP
+constexpr size_t kTlsStackGuardSlotOffset = 40; // slot 5
+
+// Template TLS của module guest (PT_TLS), do elf_loader đăng ký sau khi map.
+static const void* g_tls_template = nullptr;
+static size_t g_tls_template_size = 0;
+static std::mutex g_tls_template_mtx;
+
+extern "C" void kudroid_tls_set_template(const void* tls_template, size_t tls_filesz) {
+    std::lock_guard<std::mutex> lock(g_tls_template_mtx);
+    g_tls_template = tls_template;
+    g_tls_template_size = tls_filesz;
+}
+
+extern "C" size_t kudroid_tls_module_offset(void) {
+    return kTlsModuleOffset;
+}
+
+// Cấp phát một khối TLS guest đầy đủ: zero hóa, copy template TLS module vào
+// vị trí tprel, đặt stack-guard cookie. Dùng chung cho main thread, thread mới
+// và lazy-allocation trong bionic_handle_tpidr_trap.
+static void* alloc_guest_tls_block(void) {
+    void* tls_base = std::aligned_alloc(16, kTlsBlockSize);
+    if (!tls_base) return nullptr;
+    std::memset(tls_base, 0, kTlsBlockSize);
+
+    {
+        std::lock_guard<std::mutex> lock(g_tls_template_mtx);
+        if (g_tls_template && g_tls_template_size > 0 &&
+            g_tls_template_size <= kTlsBlockSize - kTlsSlotOffset - kTlsModuleOffset) {
+            std::memcpy(static_cast<char*>(tls_base) + kTlsSlotOffset + kTlsModuleOffset,
+                        g_tls_template, g_tls_template_size);
+        }
+    }
+
+    // Stack guard cookie tại slot 5 (offset 40 tính từ TP).
+    *reinterpret_cast<uint64_t*>(static_cast<char*>(tls_base) + kTlsSlotOffset + kTlsStackGuardSlotOffset) =
+        0x1337BEEFCAFECAFE;
+    return tls_base;
+}
+
 struct BionicThreadArgs {
     void* (*start_routine)(void*);
     void* arg;
@@ -1204,14 +1443,12 @@ static void* bionic_thread_wrapper(void* rawArgs);
 
 extern "C" void bionic_init_main_thread_tls(void) {
     ::pthread_once(&tls_key_once, init_tls_key);
-    void* tls_base = std::aligned_alloc(16, 65536); 
-    std::memset(tls_base, 0, 65536);
+    if (::pthread_getspecific(tls_key)) return; // đã có khối TLS
+    void* tls_base = alloc_guest_tls_block();
+    if (!tls_base) return;
     
-    char* tls_ptr = (char*)tls_base + 32768;
-    
-    // Set a dummy stack guard cookie at Slot 5 (offset 40)
-    uint64_t* stack_guard_ptr = reinterpret_cast<uint64_t*>(tls_ptr + 40);
-    *stack_guard_ptr = 0x1337BEEFCAFECAFE;
+    char* tls_ptr = static_cast<char*>(tls_base) + kTlsSlotOffset;
+    (void)tls_ptr;
     
     ::pthread_setspecific(tls_key, tls_base);
 
@@ -1258,8 +1495,21 @@ bool bionic_handle_tpidr_trap(void* ucontext) {
         uint32_t imm16 = (inst >> 5) & 0xFFFF;
         if (imm16 >= 0x1000 && imm16 < 0x1020) { // 0x1000 to 0x101F
             uint32_t reg = imm16 - 0x1000;
+
+            ::pthread_once(&tls_key_once, init_tls_key);
             void* tls_base = ::pthread_getspecific(tls_key);
-            char* tls_ptr = tls_base ? (static_cast<char*>(tls_base) + 32768) : nullptr;
+            if (!tls_base) {
+                // Lazy allocation: thread do host tạo (JVM/Swift) chạy guest code
+                // chưa có khối TLS. Cấp phát ngay để guest không đọc địa chỉ 0.
+                // Đây là trap đồng bộ (BRK do guest thực thi) nên malloc ở đây
+                // an toàn trong thực tế; khối được tls_destructor giải phóng khi
+                // thread kết thúc.
+                tls_base = alloc_guest_tls_block();
+                if (tls_base) {
+                    ::pthread_setspecific(tls_key, tls_base);
+                }
+            }
+            char* tls_ptr = tls_base ? (static_cast<char*>(tls_base) + kTlsSlotOffset) : nullptr;
             
             // Write the TLS pointer into the faulting thread's register state
             uc->uc_mcontext->__ss.__x[reg] = reinterpret_cast<uint64_t>(tls_ptr);
@@ -1287,16 +1537,12 @@ static void* bionic_thread_wrapper(void* rawArgs) {
 
     // Allocate 64KB for Android TLS block and set tpidr_el0
     // Darwin uses tpidrro_el0, so tpidr_el0 is free for us!
-    void* tls_base = std::aligned_alloc(16, 65536); 
-    std::memset(tls_base, 0, 65536);
+    void* tls_base = alloc_guest_tls_block();
+    if (!tls_base) tls_base = std::aligned_alloc(16, kTlsBlockSize);
     ::pthread_setspecific(tls_key, tls_base);
 
-    // Set a dummy stack guard cookie at Slot 5 (offset 40)
-    uint64_t* stack_guard_ptr = reinterpret_cast<uint64_t*>(reinterpret_cast<char*>(tls_base) + 32768 + 40);
-    *stack_guard_ptr = 0x1337BEEFCAFECAFE;
-
 #if defined(__aarch64__)
-    __asm__ volatile("msr tpidr_el0, %0" : : "r"((char*)tls_base + 32768));
+    __asm__ volatile("msr tpidr_el0, %0" : : "r"((char*)tls_base + kTlsSlotOffset));
 #endif
 
     void* result = start_routine(arg);
@@ -1307,9 +1553,27 @@ static void* bionic_thread_wrapper(void* rawArgs) {
 }
 
 extern "C" int bionic_pthread_create(pthread_t* thread, void* attr, void* (*start_routine)(void*), void* arg) {
-    (void)attr;
     BionicThreadArgs* args = new BionicThreadArgs{start_routine, arg};
-    return ::pthread_create(thread, nullptr, bionic_thread_wrapper, args);
+    if (!attr) {
+        const int res = ::pthread_create(thread, nullptr, bionic_thread_wrapper, args);
+        if (res != 0) delete args;
+        return res;
+    }
+
+    // Truyền stack size + detach state từ attr guest (nếu có) sang pthread_create host.
+    const auto* a = static_cast<const BionicPthreadAttr*>(attr);
+    pthread_attr_t hostAttr;
+    ::pthread_attr_init(&hostAttr);
+    if (a->stack_size != 0) {
+        ::pthread_attr_setstacksize(&hostAttr, a->stack_size);
+    }
+    if (a->flags & 0x1) { // PTHREAD_CREATE_DETACHED
+        ::pthread_attr_setdetachstate(&hostAttr, PTHREAD_CREATE_DETACHED);
+    }
+    const int res = ::pthread_create(thread, &hostAttr, bionic_thread_wrapper, args);
+    ::pthread_attr_destroy(&hostAttr);
+    if (res != 0) delete args;
+    return res;
 }
 
 extern "C" int* __error(void);
@@ -1557,11 +1821,82 @@ extern "C" int bionic_prlimit64(pid_t pid, int resource, const void* new_limit, 
     return 0;
 }
 
-// statx — extended stat (fallback to vfs_stat).
+// statx — extended stat. Trước đây trả thành công mà KHÔNG fill statxbuf → game
+// đọc struct statx chưa init (rác). Fill cấu trúc statx chuẩn Linux UAPI từ stat().
+struct GuestStatxTimestamp {
+    int64_t tv_sec;
+    uint32_t tv_nsec;
+    int32_t __reserved;
+};
+struct GuestStatx {
+    uint32_t stx_mask;
+    uint32_t stx_blksize;
+    uint64_t stx_attributes;
+    uint32_t stx_nlink;
+    uint32_t stx_uid;
+    uint32_t stx_gid;
+    uint16_t stx_mode;
+    uint16_t __spare0[1];
+    uint64_t stx_ino;
+    uint64_t stx_size;
+    uint64_t stx_blocks;
+    uint64_t stx_attributes_mask;
+    GuestStatxTimestamp stx_atime, stx_btime, stx_ctime, stx_mtime;
+    uint32_t stx_rdev_major, stx_rdev_minor;
+    uint32_t stx_dev_major, stx_dev_minor;
+    uint64_t stx_mnt_id;
+    uint32_t stx_dio_mem_align;
+    uint32_t stx_dio_offset_align;
+    uint64_t __spare3[12];
+};
+static_assert(sizeof(GuestStatx) == 256, "statx layout must be 256 bytes (Linux UAPI)");
+
+static void fill_statx_from_stat(struct GuestStatx* sx, const struct stat& st) {
+    std::memset(sx, 0, sizeof(*sx));
+    sx->stx_mask = 0x7ff; // STATX_BASIC_STATS
+    sx->stx_blksize = uint32_t(st.st_blksize);
+    sx->stx_nlink = uint32_t(st.st_nlink);
+    sx->stx_uid = st.st_uid;
+    sx->stx_gid = st.st_gid;
+    sx->stx_mode = uint16_t(st.st_mode);
+    sx->stx_ino = uint64_t(st.st_ino);
+    sx->stx_size = uint64_t(st.st_size);
+    sx->stx_blocks = uint64_t(st.st_blocks);
+#ifdef __APPLE__
+    sx->stx_atime = {st.st_atimespec.tv_sec, uint32_t(st.st_atimespec.tv_nsec), 0};
+    sx->stx_ctime = {st.st_ctimespec.tv_sec, uint32_t(st.st_ctimespec.tv_nsec), 0};
+    sx->stx_mtime = {st.st_mtimespec.tv_sec, uint32_t(st.st_mtimespec.tv_nsec), 0};
+#else
+    sx->stx_atime = {st.st_atim.tv_sec, uint32_t(st.st_atim.tv_nsec), 0};
+    sx->stx_ctime = {st.st_ctim.tv_sec, uint32_t(st.st_ctim.tv_nsec), 0};
+    sx->stx_mtime = {st.st_mtim.tv_sec, uint32_t(st.st_mtim.tv_nsec), 0};
+#endif
+    sx->stx_dev_major = uint32_t(st.st_dev >> 8);
+    sx->stx_dev_minor = uint32_t(st.st_dev & 0xff);
+}
+
 extern "C" int bionic_statx(int dirfd, const char* pathname, int flags, unsigned mask, void* statxbuf) {
-    (void)dirfd; (void)flags; (void)mask; (void)statxbuf;
-    // Minimal: just check the file exists via access().
-    return ::access(pathname ? pathname : "", F_OK);
+    (void)mask;
+    if (!pathname || !statxbuf) { errno = EFAULT; return -1; }
+    struct stat st;
+    std::string path = pathname;
+    if (dirfd != AT_FDCWD && pathname[0] != '/') {
+        // Đường dẫn tương đối theo dirfd — xử lý best-effort qua /proc/self/fd.
+        char link[64];
+        std::snprintf(link, sizeof(link), "/proc/self/fd/%d", dirfd);
+        char resolved[PATH_MAX];
+        const ssize_t n = ::readlink(link, resolved, sizeof(resolved) - 1);
+        if (n > 0) {
+            resolved[n] = '\0';
+            path = std::string(resolved) + "/" + pathname;
+        }
+    }
+    const int rc = (flags & AT_SYMLINK_NOFOLLOW)
+                       ? ::lstat(path.c_str(), &st)
+                       : ::stat(path.c_str(), &st);
+    if (rc != 0) return -1; // errno đã set
+    fill_statx_from_stat(static_cast<GuestStatx*>(statxbuf), st);
+    return 0;
 }
 
 // ============================================================================
@@ -1585,6 +1920,7 @@ struct ALooperFd {
     int events;
     void* callback; // ALooper_callbackFunc
     void* data;
+    bool isInputPipe; // fd là wake pipe của AInputQueue (cần drain khi readable)
 };
 
 struct ALooper {
@@ -1651,8 +1987,24 @@ extern "C" int bionic_ALooper_addFd(void* looper, int fd, int ident, int events,
     nf.events = events;
     nf.callback = callback;
     nf.data = data;
+    nf.isInputPipe = false;
     l->fds.push_back(nf);
     return 1;
+}
+
+// Đánh dấu một fd là wake pipe của AInputQueue — bionic_AInputQueue_attachLooper
+// gọi hàm này sau khi đăng ký pipe với looper, để pollAll biết cần drain nó
+// (nước không bao giờ được đọc nếu không, looper sẽ trả ready mãi mãi -> busy loop).
+extern "C" void bionic_ALooper_markInputPipe(void* looper, int fd) {
+    if (!looper || fd < 0) return;
+    ALooper* l = static_cast<ALooper*>(looper);
+    std::lock_guard<std::mutex> lock(l->mtx);
+    for (auto& f : l->fds) {
+        if (f.fd == fd) {
+            f.isInputPipe = true;
+            return;
+        }
+    }
 }
 
 extern "C" int bionic_ALooper_removeFd(void* looper, int fd) {
@@ -1681,7 +2033,11 @@ extern "C" int bionic_ALooper_pollOnce(int timeoutMillis, int* outFd, int* outEv
 }
 
 extern "C" int bionic_ALooper_pollAll(int timeoutMillis, int* outFd, int* outEvents, void** outData) {
-    ALooper* l = g_mainLooper;
+    ALooper* l;
+    {
+        std::lock_guard<std::mutex> lock(g_looperMtx);
+        l = g_mainLooper;
+    }
     if (!l) return -1;
 
     // Build pollfd array.
@@ -1718,22 +2074,224 @@ extern "C" int bionic_ALooper_pollAll(int timeoutMillis, int* outFd, int* outEve
 
     // Find the first ready fd.
     for (size_t i = 0; i < pfds.size(); ++i) {
-        if (pfds[i].revents != 0) {
-            if (outFd) *outFd = pfds[i].fd;
-            if (outEvents) {
-                int ev = 0;
-                if (pfds[i].revents & POLLIN) ev |= ALOOPER_EVENT_INPUT;
-                if (pfds[i].revents & POLLOUT) ev |= ALOOPER_EVENT_OUTPUT;
-                if (pfds[i].revents & POLLERR) ev |= ALOOPER_EVENT_ERROR;
-                if (pfds[i].revents & POLLHUP) ev |= ALOOPER_EVENT_HANGUP;
-                if (pfds[i].revents & POLLNVAL) ev |= ALOOPER_EVENT_INVALID;
-                *outEvents = ev;
+        if (pfds[i].revents == 0) continue;
+
+        const int ev = [&]() {
+            int e = 0;
+            if (pfds[i].revents & POLLIN) e |= ALOOPER_EVENT_INPUT;
+            if (pfds[i].revents & POLLOUT) e |= ALOOPER_EVENT_OUTPUT;
+            if (pfds[i].revents & POLLERR) e |= ALOOPER_EVENT_ERROR;
+            if (pfds[i].revents & POLLHUP) e |= ALOOPER_EVENT_HANGUP;
+            if (pfds[i].revents & POLLNVAL) e |= ALOOPER_EVENT_INVALID;
+            return e;
+        }();
+
+        // Drain wake pipe của AInputQueue: nếu không đọc, pipe luôn readable
+        // và pollAll trả ngay lập tức mãi mãi (busy loop).
+        // Pipe này do InputShim tạo với O_NONBLOCK (xem ensure_wake_pipe) nên
+        // read() trả EAGAIN khi cạn — drain cho tới khi EAGAIN. Cap rất cao chỉ
+        // để phòng thủ fd không non-blocking (không thể xảy ra với pipe của ta).
+        if (snapshot[i].isInputPipe && (pfds[i].revents & (POLLIN | POLLHUP))) {
+            char drainBuf[4096];
+            for (int drainIters = 0; drainIters < (1 << 20); ++drainIters) {
+                const ssize_t n = ::read(snapshot[i].fd, drainBuf, sizeof(drainBuf));
+                if (n <= 0) break; // EAGAIN hoặc đã cạn
             }
-            if (outData) *outData = snapshot[i].data;
-            return snapshot[i].ident;
         }
+
+        // Thực thi callback nếu có (giống ALooper thật). callback trả 0 = gỡ fd.
+        if (snapshot[i].callback) {
+            const int keep = reinterpret_cast<int (*)(int, int, void*)>(snapshot[i].callback)(
+                snapshot[i].fd, ev, snapshot[i].data);
+            if (keep == 0) {
+                std::lock_guard<std::mutex> lock(l->mtx);
+                for (size_t k = 0; k < l->fds.size(); ++k) {
+                    if (l->fds[k].fd == snapshot[i].fd) {
+                        l->fds.erase(l->fds.begin() + k);
+                        break;
+                    }
+                }
+            }
+            return -4; // ALOOPER_POLL_CALLBACK
+        }
+
+        if (outFd) *outFd = pfds[i].fd;
+        if (outEvents) *outEvents = ev;
+        if (outData) *outData = snapshot[i].data;
+        return snapshot[i].ident;
     }
     return -2; // ALOOPER_POLL_TIMEOUT
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bionic symbols game .so commonly import that the host cannot provide via
+// dlsym(RTLD_DEFAULT). Trước đây chúng bị bind vào kudroid_universal_dummy
+// (trả 0) — sincos trả rác, sem_timedwait trả 0 tức thì (mất đồng bộ thread),
+// __strlen_chk trả 0 (sai độ dài buffer). Giờ là implementation thật.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// bionic: void sincos(double x, double* s, double* c)
+extern "C" void bionic_sincos(double x, double* s, double* c) {
+    if (s) *s = ::sin(x);
+    if (c) *c = ::cos(x);
+}
+
+// bionic: void sincosf(float x, float* s, float* c)
+extern "C" void bionic_sincosf(float x, float* s, float* c) {
+    if (s) *s = ::sinf(x);
+    if (c) *c = ::cosf(x);
+}
+
+// bionic: size_t __strlen_chk(const char* s, size_t s_len)
+// Fortify: s_len là kích thước object; bionic abort nếu strlen >= s_len. Ở đây
+// trả strlen thật (đúng kết quả game cần) và chỉ cảnh báo — không abort để game
+// không chết vì giới hạn kích thước tính từ layout bionic khác host.
+extern "C" size_t bionic___strlen_chk(const char* s, size_t s_len) {
+    const size_t len = ::strlen(s ? s : "");
+    if (len >= s_len) {
+        trace("__strlen_chk: string exceeds declared buffer size (fortify)");
+    }
+    return len;
+}
+
+// bionic: void __FD_SET_chk(int fd, fd_set* set, size_t set_size)
+// set_size là kích thước byte của fd_set; fd hợp lệ nếu fd < set_size*8.
+extern "C" void bionic___FD_SET_chk(int fd, fd_set* set, size_t set_size) {
+    if (!set) return;
+    if (fd < 0 || static_cast<size_t>(fd) >= set_size * 8) {
+        trace("__FD_SET_chk: fd out of range for fd_set (fortify)");
+        return;
+    }
+    FD_SET(fd, set);
+}
+
+// bionic: int sem_timedwait(sem_t* sem, const struct timespec* abs_timeout)
+// abs_timeout là thời điểm tuyệt đối (CLOCK_REALTIME). Host iOS có sem_timedwait
+// nhưng không export qua dlsym(RTLD_DEFAULT), nên giả lập bằng sem_trywait + sleep.
+extern "C" int bionic_sem_timedwait(sem_t* sem, const struct timespec* abs_timeout) {
+    if (!sem || !abs_timeout) {
+        errno = EINVAL;
+        return -1;
+    }
+    for (;;) {
+        if (::sem_trywait(sem) == 0) return 0;
+        const int err = errno;
+        if (err != EAGAIN) return -1; // EINTR / EINVAL
+
+        struct timespec now;
+        ::clock_gettime(CLOCK_REALTIME, &now);
+        if (now.tv_sec > abs_timeout->tv_sec ||
+            (now.tv_sec == abs_timeout->tv_sec && now.tv_nsec >= abs_timeout->tv_nsec)) {
+            errno = ETIMEDOUT;
+            return -1;
+        }
+
+        struct timespec slp = {0, 1000000}; // 1ms
+        ::nanosleep(&slp, nullptr);
+    }
+}
+
+// Bản ngoài "C" cho kudroid_jni.cpp: android.util.Log.println_native forward về
+// pipeline log chuẩn của kudroid (stdout + file + crash buffer).
+extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message) {
+    return logAndroidMessage(priority, tag, std::string(message ? message : ""));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Họ fortify (__*_chk) — game build với _FORTIFY_SOURCE (NDK mặc định cho
+// release) import rất nhiều hàm này. Trước đây rơi vào dummy (trả 0, không làm
+// gì) — __memcpy_chk không copy, __read_chk không đọc... → dữ liệu hỏng âm thầm.
+// Giờ là bản thật; khi vi phạm kích thước thì log cảnh báo thay vì abort.
+// ─────────────────────────────────────────────────────────────────────────────
+
+extern "C" void* bionic___memcpy_chk(void* dst, const void* src, size_t n, size_t dst_len) {
+    if (n > dst_len) trace("__memcpy_chk: destination overflow (fortify)");
+    return ::memcpy(dst, src, n);
+}
+
+extern "C" void* bionic___memmove_chk(void* dst, const void* src, size_t n, size_t dst_len) {
+    if (n > dst_len) trace("__memmove_chk: destination overflow (fortify)");
+    return ::memmove(dst, src, n);
+}
+
+extern "C" void* bionic___memset_chk(void* s, int c, size_t n, size_t s_len) {
+    if (n > s_len) trace("__memset_chk: destination overflow (fortify)");
+    return ::memset(s, c, n);
+}
+
+extern "C" ssize_t bionic___read_chk(int fd, void* buf, size_t nbytes, size_t buflen) {
+    (void)buflen;
+    return ::read(fd, buf, nbytes);
+}
+
+extern "C" ssize_t bionic___write_chk(int fd, const void* buf, size_t count, size_t buflen) {
+    (void)buflen;
+    return ::write(fd, buf, count);
+}
+
+extern "C" int bionic___snprintf_chk(char* s, size_t maxlen, int flag, size_t slen,
+                                     const char* format, ...) {
+    (void)flag; (void)slen;
+    va_list args;
+    va_start(args, format);
+    const int r = ::vsnprintf(s, maxlen, format, args);
+    va_end(args);
+    return r;
+}
+
+extern "C" int bionic___vsnprintf_chk(char* s, size_t maxlen, int flag, size_t slen,
+                                      const char* format, va_list ap) {
+    (void)flag; (void)slen;
+    return ::vsnprintf(s, maxlen, format, ap);
+}
+
+extern "C" int bionic___sprintf_chk(char* s, int flag, size_t slen, const char* format, ...) {
+    (void)flag;
+    va_list args;
+    va_start(args, format);
+    const int r = ::vsnprintf(s, slen, format, args);
+    va_end(args);
+    return r;
+}
+
+extern "C" char* bionic___strncpy_chk(char* dst, const char* src, size_t n, size_t dst_len) {
+    if (n > dst_len) {
+        trace("__strncpy_chk: destination overflow (fortify)");
+        n = dst_len; // clamp để không ghi tràn
+    }
+    return ::strncpy(dst, src, n);
+}
+
+extern "C" char* bionic___strcpy_chk(char* dst, const char* src, size_t dst_len) {
+    if (::strlen(src) >= dst_len) trace("__strcpy_chk: destination overflow (fortify)");
+    return ::strcpy(dst, src);
+}
+
+extern "C" char* bionic___strcat_chk(char* dst, const char* src, size_t dst_len) {
+    if (::strlen(dst) + ::strlen(src) >= dst_len) {
+        trace("__strcat_chk: destination overflow (fortify)");
+    }
+    return ::strcat(dst, src);
+}
+
+extern "C" unsigned long bionic___fdelt_chk(unsigned long fd) {
+    if (fd >= FD_SETSIZE) {
+        trace("__fdelt_chk: fd exceeds FD_SETSIZE (fortify)");
+    }
+    return fd / (8UL * sizeof(unsigned long));
+}
+
+// bionic: void android_set_abort_message(const char* msg)
+// Bionic lưu msg để tombstone. Ở đây lưu lại để crash handler in ra — thường chứa
+// lý do Unity abort (ví dụ "FATAL: ..."), rất giá trị khi chẩn đoán.
+extern "C" void bionic_android_set_abort_message(const char* msg) {
+    if (msg && *msg) {
+        kudroid_store_abort_message(msg);
+        char traceMessage[256];
+        snprintf(traceMessage, sizeof(traceMessage),
+                 "android_set_abort_message: %.200s", msg);
+        trace(traceMessage);
+    }
 }
 
 const SymbolEntry kSyscallSymbols[] = {
@@ -1824,6 +2382,7 @@ const SymbolEntry kSyscallSymbols[] = {
     {"gettimeofday", reinterpret_cast<void*>(&::gettimeofday)},
     {"ashmem_create_region", reinterpret_cast<void*>(&bionic_ashmem_create_region)},
     {"ashmem_set_prot_region", reinterpret_cast<void*>(&bionic_ashmem_set_prot_region)},
+    {"ashmem_set_name", reinterpret_cast<void*>(&bionic_ashmem_set_name)},
     {"mkdir", reinterpret_cast<void*>(&vfs_mkdir)},
     {"rmdir", reinterpret_cast<void*>(&vfs_rmdir)},
     {"opendir", reinterpret_cast<void*>(&vfs_opendir)},
@@ -1831,7 +2390,6 @@ const SymbolEntry kSyscallSymbols[] = {
     {"closedir", reinterpret_cast<void*>(&vfs_closedir)},
     {"readlink", reinterpret_cast<void*>(&vfs_readlink)},
     {"realpath", reinterpret_cast<void*>(&vfs_realpath)},
-    {"pthread_create", reinterpret_cast<void*>(&::pthread_create)},
     {"pthread_join", reinterpret_cast<void*>(&::pthread_join)},
     {"pthread_mutex_init", reinterpret_cast<void*>(&bionic_pthread_mutex_init)},
     {"pthread_mutex_lock", reinterpret_cast<void*>(&bionic_pthread_mutex_lock)},
@@ -1910,6 +2468,26 @@ const SymbolEntry kSyscallSymbols[] = {
     // Character classification
     {"__ctype_get_mb_cur_max", reinterpret_cast<void*>(&bionic_ctype_get_mb_cur_max)},
     {"_ctype_", reinterpret_cast<void*>(&g_ctype_ptr)},
+
+    // Bionic libm / fortify / sync symbols the host cannot dlsym
+    {"sincos", reinterpret_cast<void*>(&bionic_sincos)},
+    {"sincosf", reinterpret_cast<void*>(&bionic_sincosf)},
+    {"__strlen_chk", reinterpret_cast<void*>(&bionic___strlen_chk)},
+    {"__FD_SET_chk", reinterpret_cast<void*>(&bionic___FD_SET_chk)},
+    {"sem_timedwait", reinterpret_cast<void*>(&bionic_sem_timedwait)},
+    {"android_set_abort_message", reinterpret_cast<void*>(&bionic_android_set_abort_message)},
+    {"__memcpy_chk", reinterpret_cast<void*>(&bionic___memcpy_chk)},
+    {"__memmove_chk", reinterpret_cast<void*>(&bionic___memmove_chk)},
+    {"__memset_chk", reinterpret_cast<void*>(&bionic___memset_chk)},
+    {"__read_chk", reinterpret_cast<void*>(&bionic___read_chk)},
+    {"__write_chk", reinterpret_cast<void*>(&bionic___write_chk)},
+    {"__snprintf_chk", reinterpret_cast<void*>(&bionic___snprintf_chk)},
+    {"__vsnprintf_chk", reinterpret_cast<void*>(&bionic___vsnprintf_chk)},
+    {"__sprintf_chk", reinterpret_cast<void*>(&bionic___sprintf_chk)},
+    {"__strncpy_chk", reinterpret_cast<void*>(&bionic___strncpy_chk)},
+    {"__strcpy_chk", reinterpret_cast<void*>(&bionic___strcpy_chk)},
+    {"__strcat_chk", reinterpret_cast<void*>(&bionic___strcat_chk)},
+    {"__fdelt_chk", reinterpret_cast<void*>(&bionic___fdelt_chk)},
 
     // pthread extensions
     {"pthread_condattr_setclock", reinterpret_cast<void*>(&bionic_pthread_condattr_setclock)},

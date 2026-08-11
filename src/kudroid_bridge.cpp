@@ -3,6 +3,9 @@
 #include "kudroid/VFSPathRemapper.h"
 #include "kudroid/APKExtractor.h"
 #include "kudroid/DexCacheManager.h"
+#include "kudroid/DexAotCache.h"
+#include "kudroid/shims/InputShim.h"
+#include "kudroid/shims/AssetShim.h"
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
@@ -18,6 +21,9 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/ucontext.h>
+#include <dlfcn.h>
+#include <unwind.h>
+#include <mutex>
 
 extern "C" struct JavaVM_* kudroid_jni_get_javavm(void);
 
@@ -31,9 +37,79 @@ const char* g_kudroid_log_dir_ptr = g_logDir;
 
 static char g_crashBuf[16384];
 static volatile sig_atomic_t g_crashLen = 0;
+static std::mutex g_crashBufMtx;
+static char g_abortMessage[1024] = {0};
 static int kudroid_jit_available(void);
 
+// Game logs (bionic_android_log_print) mirror vào đây để file crash chứa log
+// của game ngay trước khi crash. Ring buffer — giữ phần mới nhất.
+extern "C" void kudroid_append_crash_log(const char* text, size_t len) {
+    if (!text || len == 0) return;
+    if (len > 8192) len = 8192; // giới hạn một dòng
+    std::lock_guard<std::mutex> lock(g_crashBufMtx);
+    size_t cur = static_cast<size_t>(g_crashLen);
+    const size_t cap = sizeof(g_crashBuf) - 1;
+    if (len > cap - cur) {
+        const size_t drop = len - (cap - cur);
+        if (drop < cur) {
+            memmove(g_crashBuf, g_crashBuf + drop, cur - drop);
+            cur -= drop;
+        } else {
+            cur = 0;
+        }
+    }
+    memcpy(g_crashBuf + cur, text, len);
+    cur += len;
+    g_crashBuf[cur] = '\0';
+    g_crashLen = static_cast<sig_atomic_t>(cur);
+}
+
+// android_set_abort_message (từ game): lưu lại để crash handler in ra.
+extern "C" void kudroid_store_abort_message(const char* msg) {
+    if (!msg) return;
+    strncpy(g_abortMessage, msg, sizeof(g_abortMessage) - 1);
+    g_abortMessage[sizeof(g_abortMessage) - 1] = '\0';
+}
+
+// Unwind bằng _Unwind_Backtrace (không dùng heap) + dladdr (best effort).
+struct UnwindContext {
+    int fd;
+    int count;
+};
+
+static _Unwind_Reason_Code unwindCallback(struct _Unwind_Context* ctx, void* arg) {
+    UnwindContext* u = static_cast<UnwindContext*>(arg);
+    if (u->count >= 20) return _URC_END_OF_STACK;
+    const uintptr_t pc = _Unwind_GetIP(ctx);
+    if (pc != 0) {
+        char line[512];
+        Dl_info info;
+        int m;
+        if (dladdr(reinterpret_cast<void*>(pc), &info) != 0 && info.dli_fname) {
+            m = snprintf(line, sizeof(line), "  #%02d pc 0x%llx  %s%s%s\n",
+                         u->count, (unsigned long long)pc,
+                         info.dli_fname,
+                         info.dli_sname ? " " : "",
+                         info.dli_sname ? info.dli_sname : "");
+        } else {
+            m = snprintf(line, sizeof(line), "  #%02d pc 0x%llx\n",
+                         u->count, (unsigned long long)pc);
+        }
+        if (m > 0) (void)!write(u->fd, line, (size_t)m);
+    }
+    u->count++;
+    return _URC_NO_REASON;
+}
+
+static void writeBacktrace(int fd) {
+    UnwindContext ctx = {fd, 0};
+    _Unwind_Backtrace(unwindCallback, &ctx);
+}
+
 static void mirrorCrash(const std::string& log) {
+    // Cùng mutex với kudroid_append_crash_log — ghi đè không lock là data race
+    // với luồng game đang log (có thể làm hỏng g_crashLen/g_crashBuf).
+    std::lock_guard<std::mutex> lock(g_crashBufMtx);
     size_t n = log.size();
     if (n >= sizeof(g_crashBuf)) n = sizeof(g_crashBuf) - 1;
     memcpy(g_crashBuf, log.data(), n);
@@ -141,7 +217,16 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
             }
 #endif
 
-            (void)!write(fd, "--- log up to crash ---\n", 24);
+            (void)!write(fd, "\n--- backtrace ---\n", 19);
+            writeBacktrace(fd);
+
+            if (g_abortMessage[0]) {
+                (void)!write(fd, "\n--- abort message ---\n", 23);
+                (void)!write(fd, g_abortMessage, strlen(g_abortMessage));
+                (void)!write(fd, "\n", 1);
+            }
+
+            (void)!write(fd, "\n--- log up to crash ---\n", 25);
             (void)!write(fd, g_crashBuf, (size_t)g_crashLen);
             
             const char* traceStr = kudroid::bionic_shim_trace();
@@ -173,6 +258,12 @@ static void installCrashHandlers(void) {
     sigaction(SIGSEGV, &sa, nullptr);
     sigaction(SIGTRAP, &sa, nullptr);
     sigaction(SIGABRT, &sa, nullptr);
+
+    // Android/bionic mặc định IGNORE SIGPIPE (write vào pipe/socket đã đóng trả
+    // EPIPE thay vì giết process). Game .so tin vào hành vi này — nếu host giữ
+    // SIGPIPE mặc định, chỉ cần game ghi log vào một pipe đã đóng là app chết
+    // ngay mà không có crash log.
+    ::signal(SIGPIPE, SIG_IGN);
 }
 
 extern "C" void kudroid_set_log_dir(const char* dir) {
@@ -190,11 +281,13 @@ extern "C" void kudroid_set_documents_dir(const char* dir) {
 void* g_metalLayer = nullptr;
 int g_metalLayerWidth = 1080;
 int g_metalLayerHeight = 1920;
+float g_metalLayerDensity = 3.0f;
 
-extern "C" void kudroid_set_metal_layer(void* layer, int width, int height) {
+extern "C" void kudroid_set_metal_layer(void* layer, int width, int height, float density) {
     g_metalLayer = layer;
     g_metalLayerWidth = width;
     g_metalLayerHeight = height;
+    g_metalLayerDensity = density > 0.0f ? density : g_metalLayerDensity;
 }
 
 extern "C" const char* kudroid_vfs_self_test_log(void) {
@@ -231,7 +324,14 @@ extern "C" const char* kudroid_install_apk(const char* apkPath) {
                                              "data/app" / appName;
         log += "[kudroid_apk] APK: " + source.string() + "\n";
         log += "[kudroid_apk] Target extraction directory: " + target.string() + "\n";
-        if (kudroid::APKExtractor::extract_apk(source.string(), target.string())) {
+        bool extractedOk = false;
+        if (kudroid::APKExtractor::is_bundle_container(source.string())) {
+            log += "[kudroid_apk] Split-APK bundle detected (.xapk/.apks/.apkm), merging splits...\n";
+            extractedOk = kudroid::APKExtractor::extract_bundle(source.string(), target.string());
+        } else {
+            extractedOk = kudroid::APKExtractor::extract_apk(source.string(), target.string());
+        }
+        if (extractedOk) {
             log += "[kudroid_apk] APK extracted successfully\n";
         } else {
             log += "[kudroid_apk] INSTALL FAILED: " +
@@ -401,6 +501,12 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
         auto& remapper = kudroid::VFSPathRemapper::getInstance();
         const std::filesystem::path libDir = std::filesystem::path(remapper.androidRoot()) /
                                              "data/app" / appName / "lib/arm64-v8a";
+        // Cho AAssetManager shim biết nơi chứa assets đã extract (APKExtractor giữ
+        // nguyên cây thư mục assets/ của APK). Game gọi AAssetManager_open với
+        // đường dẫn tương đối — nếu thiếu, mọi truy cập asset trả NULL.
+        const std::filesystem::path assetsDir = std::filesystem::path(remapper.androidRoot()) /
+                                                "data/app" / appName / "assets";
+        kudroid_set_assets_dir(assetsDir.string().c_str());
         
         log += "[kudroid_core] Scanning library directory: " + libDir.string() + "\n";
         
@@ -442,9 +548,34 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                 
                 mirrorCrash(log);
 
+                // ── PIPELINE DEX→JAR AOT CACHING ───────────────────────────
+                // Avian không hiểu .dex: dịch toàn bộ classes*.dex của APK đã
+                // extract thành classes.jar (qua d2j-dex2jar.sh, fallback bằng
+                // trình dịch nhúng DexToJar), cache tại
+                //   <android_root>/data/dalvik-cache/<appName>/
+                // khóa bằng SHA-256 của classes*.dex (cache.hash). Jar cache
+                // được đưa vào boot classpath của JVM lúc khởi tạo.
+                const std::filesystem::path appDir =
+                    std::filesystem::path(remapper.androidRoot()) / "data/app" / appName;
+                const std::filesystem::path aotCacheDir =
+                    std::filesystem::path(remapper.androidRoot()) /
+                    "data/dalvik-cache" / appName;
+                std::string aotError;
+                const std::string classesJar = kudroid::DexAotCache::translate_dex_if_needed(
+                    appDir.string(), aotCacheDir.string(), &aotError);
+
                 // đảm bảo jvm avian được khởi tạo trước khi gọi jni_onload.
                 // tệp boot jar (các lớp khung) được nhúng trong tệp nhị phân.
-                kudroid_jni_init_jvm("", "");
+                if (!classesJar.empty()) {
+                    log += "[kudroid_core] DEX→JAR AOT ready: " + classesJar + "\n";
+                    mirrorCrash(log);
+                    kudroid_jni_init_jvm("", classesJar.c_str());
+                } else {
+                    log += "[kudroid_core] WARNING: DEX→JAR AOT skipped (" +
+                           aotError + "); JVM chạy không có classpath ứng dụng.\n";
+                    mirrorCrash(log);
+                    kudroid_jni_init_jvm("", "");
+                }
                 JavaVM* jvm = kudroid_jni_get_javavm();
                 if (!jvm) {
                     log += "[kudroid_core] ERROR: Avian JVM failed to initialize. "
@@ -498,6 +629,38 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                         };
                         kudroid_jni_get_env(jvm, reinterpret_cast<void**>(&mock_activity.env), 0);
 
+                        // assetManager phải là object Java thật (lớp framework
+                        // android/content/res/AssetManager) — game gọi
+                        // AAssetManager_fromJava(env, activity->assetManager); nếu
+                        // nullptr, nhiều engine (Unity) bỏ qua mọi asset.
+                        if (mock_activity.env) {
+                            JNIEnv* env = mock_activity.env;
+                            // mock_activity là static — chạy APK lần 2 (hoặc chạy
+                            // lại game) sẽ ghi đè assetManager. GlobalRef cũ phải
+                            // được thả, nếu không rò rỉ ref mỗi lần chạy (đến giới
+                            // hạn GlobalRef table là JVM abort). KHÔNG thả ngay sau
+                            // run_apk: game có thể còn giữ jobject này (activity
+                            // sống hết vòng đời) nên chỉ thả ref cũ trước khi tạo mới.
+                            if (mock_activity.assetManager) {
+                                env->DeleteGlobalRef(static_cast<jobject>(mock_activity.assetManager));
+                                mock_activity.assetManager = nullptr;
+                            }
+                            jclass assetCls = env->FindClass("android/content/res/AssetManager");
+                            if (assetCls && !env->ExceptionCheck()) {
+                                jmethodID ctor = env->GetMethodID(assetCls, "<init>", "()V");
+                                jobject am = ctor ? env->NewObject(assetCls, ctor) : nullptr;
+                                if (am) {
+                                    mock_activity.assetManager = env->NewGlobalRef(am);
+                                    env->DeleteLocalRef(am);
+                                    log += "[kudroid_core] AssetManager jobject created.\n";
+                                }
+                                if (env->ExceptionCheck()) env->ExceptionClear();
+                                env->DeleteLocalRef(assetCls);
+                            } else {
+                                if (env->ExceptionCheck()) env->ExceptionClear();
+                            }
+                        }
+
                         // gọi oncreate. trò chơi lưu trữ trạng thái của nó trong
                         // activity->instance và đăng ký các lệnh gọi lại của nó.
                         native_activity_create(&mock_activity, nullptr, 0);
@@ -507,19 +670,34 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                         // điều khiển vòng đời để trò chơi bắt đầu kết xuất:
                         // onstart -> onresume -> onwindowfocuschanged(true)
                         // -> onnativewindowcreated -> oninputqueuecreated.
-                        auto call = [&](const char* name, void* fn) {
-                            if (fn) {
-                                log += std::string("[kudroid_core] Calling ") + name + "\n";
-                                mirrorCrash(log);
-                                // tất cả các lệnh gọi lại đều nhận (anativeactivity*, ...).
-                                reinterpret_cast<void (*)(ANativeActivity*)>(fn)(&mock_activity);
-                            }
+                        //
+                        // QUAN TRỌNG: mỗi callback có signature riêng trong NDK.
+                        // Trước đây tất cả bị cast về void(*)(ANativeActivity*) và gọi
+                        // với 1 tham số — game đọc tham số 2 (window/focus/queue) từ
+                        // register rác. Truyền đúng số tham số cho từng loại.
+                        auto call1 = [&](const char* name, void* fn) {
+                            if (!fn) return;
+                            log += std::string("[kudroid_core] Calling ") + name + "\n";
+                            mirrorCrash(log);
+                            reinterpret_cast<void (*)(ANativeActivity*)>(fn)(&mock_activity);
                         };
-                        call("onStart", mock_callbacks.onStart);
-                        call("onResume", mock_callbacks.onResume);
-                        call("onWindowFocusChanged", mock_callbacks.onWindowFocusChanged);
-                        call("onNativeWindowCreated", mock_callbacks.onNativeWindowCreated);
-                        call("onInputQueueCreated", mock_callbacks.onInputQueueCreated);
+                        auto call2 = [&](const char* name, void* fn, void* arg2) {
+                            if (!fn) return;
+                            log += std::string("[kudroid_core] Calling ") + name + "\n";
+                            mirrorCrash(log);
+                            reinterpret_cast<void (*)(ANativeActivity*, void*)>(fn)(&mock_activity, arg2);
+                        };
+                        call1("onStart", mock_callbacks.onStart);
+                        call1("onResume", mock_callbacks.onResume);
+                        // onWindowFocusChanged(activity, hasFocus)
+                        call2("onWindowFocusChanged", mock_callbacks.onWindowFocusChanged,
+                              reinterpret_cast<void*>(1));
+                        // onNativeWindowCreated(activity, ANativeWindow*)
+                        call2("onNativeWindowCreated", mock_callbacks.onNativeWindowCreated,
+                              g_metalLayer);
+                        // onInputQueueCreated(activity, AInputQueue*)
+                        call2("onInputQueueCreated", mock_callbacks.onInputQueueCreated,
+                              kudroid_get_input_queue());
                         log += "[kudroid_core] Lifecycle callbacks invoked.\n";
                         mirrorCrash(log);
                     } else {
@@ -1191,13 +1369,14 @@ extern "C" const char* kudroid_gpu_opengl_so_test(const char* path) {
 #include "kudroid/DexManager.h"
 
 extern "C" const char* kudroid_load_apk(const char* apkPath) {
-    static std::string log;
-    log.clear();
+    // Dùng biến cục bộ + strdup (không phải static): hàm trước đó trả con trỏ vào
+    // static std::string bị clear ở lần gọi sau — không thread-safe và dễ sai.
+    std::string log;
     appendTestHeader(log, "APK Loader execution", apkPath);
     
     if (!apkPath) {
         log += "[kudroid_apk] ERROR: APK path is null\n";
-        return log.c_str();
+        return strdup(log.c_str());
     }
     
     std::string apkStr(apkPath);
@@ -1207,18 +1386,44 @@ extern "C" const char* kudroid_load_apk(const char* apkPath) {
     kudroid::VFSPathRemapper::getInstance().setDocumentsDirectory(g_logDir);
     
     log += "[kudroid_apk] Extracting APK to: " + targetDir + "\n";
-    if (!kudroid::APKExtractor::extract_apk(apkStr, targetDir)) {
+    bool extractedOk = false;
+    if (kudroid::APKExtractor::is_bundle_container(apkStr)) {
+        log += "[kudroid_apk] Split-APK bundle detected (.xapk/.apks/.apkm), merging splits...\n";
+        extractedOk = kudroid::APKExtractor::extract_bundle(apkStr, targetDir);
+    } else {
+        extractedOk = kudroid::APKExtractor::extract_apk(apkStr, targetDir);
+    }
+    if (!extractedOk) {
         log += "[kudroid_apk] ERROR: Extraction failed - " + kudroid::APKExtractor::lastError() + "\n";
-        return log.c_str();
+        return strdup(log.c_str());
     }
     log += "[kudroid_apk] Extracted successfully.\n";
-    
+
+    // Cho AAssetManager shim biết nơi chứa assets đã extract của APK này.
+    kudroid_set_assets_dir((targetDir + "/assets").c_str());
+
     log += "[kudroid_apk] Loading DEX files...\n";
     kudroid::DexManager::getInstance().loadDirectory(targetDir);
     
     log += "[kudroid_apk] Scanning for native libraries (.so)...\n";
     kudroid::LibraryManager libManager;
     std::string libDir = targetDir + "/lib/arm64-v8a";
+
+    // ── PIPELINE DEX→JAR AOT CACHING ───────────────────────────────────────
+    // Avian không hiểu .dex: dịch classes*.dex → classes.jar cache tại
+    //   <g_logDir>/data/dalvik-cache/<appName>/   (appName = tên file APK)
+    // khóa bằng SHA-256 (cache.hash); jar cache đưa vào boot classpath lúc init.
+    const std::string aotAppName = std::filesystem::path(apkStr).stem().string();
+    const std::filesystem::path aotCacheDir =
+        std::filesystem::path(g_logDir) / "data/dalvik-cache" / aotAppName;
+    std::string aotError;
+    const std::string aotClassesJar = kudroid::DexAotCache::translate_dex_if_needed(
+        targetDir, aotCacheDir.string(), &aotError);
+    if (!aotClassesJar.empty()) {
+        log += "[kudroid_apk] DEX→JAR AOT ready: " + aotClassesJar + "\n";
+    } else {
+        log += "[kudroid_apk] WARNING: DEX→JAR AOT skipped (" + aotError + ")\n";
+    }
     
     if (std::filesystem::exists(libDir)) {
         for (const auto& entry : std::filesystem::directory_iterator(libDir)) {
@@ -1228,14 +1433,25 @@ extern "C" const char* kudroid_load_apk(const char* apkPath) {
                     log += "[kudroid_apk] WARNING: Failed to load " + entry.path().filename().string() + "\n";
                 } else {
                     log += "[kudroid_apk] Loaded successfully.\n";
-                    // cố gắng gọi jni_onload
-                    void* jniOnLoadAddr = libManager.resolveGlobalSymbol("JNI_OnLoad");
-                    if (jniOnLoadAddr) {
-                        log += "[kudroid_apk] Found JNI_OnLoad in library, executing...\n";
-                        using JNI_OnLoad_t = jint (*)(JavaVM*, void*);
-                        JNI_OnLoad_t jniOnLoad = reinterpret_cast<JNI_OnLoad_t>(jniOnLoadAddr);
-                        jint version = jniOnLoad(kudroid_jni_get_javavm(), nullptr);
-                        log += "[kudroid_apk] JNI_OnLoad returned version: 0x" + std::to_string(version) + "\n";
+                    // cố gắng gọi jni_onload — JVM phải được khởi tạo TRƯỚC, nếu
+                    // không kudroid_jni_get_javavm() trả nullptr và JNI_OnLoad crash.
+                    if (!aotClassesJar.empty()) {
+                        kudroid_jni_init_jvm("", aotClassesJar.c_str());
+                    } else {
+                        kudroid_jni_init_jvm("", "");
+                    }
+                    JavaVM* jvm = kudroid_jni_get_javavm();
+                    if (!jvm) {
+                        log += "[kudroid_apk] ERROR: Avian JVM failed to initialize, skipping JNI_OnLoad\n";
+                    } else {
+                        void* jniOnLoadAddr = libManager.resolveGlobalSymbol("JNI_OnLoad");
+                        if (jniOnLoadAddr) {
+                            log += "[kudroid_apk] Found JNI_OnLoad in library, executing...\n";
+                            using JNI_OnLoad_t = jint (*)(JavaVM*, void*);
+                            JNI_OnLoad_t jniOnLoad = reinterpret_cast<JNI_OnLoad_t>(jniOnLoadAddr);
+                            jint version = jniOnLoad(jvm, nullptr);
+                            log += "[kudroid_apk] JNI_OnLoad returned version: 0x" + std::to_string(version) + "\n";
+                        }
                     }
                 }
             }
@@ -1245,7 +1461,7 @@ extern "C" const char* kudroid_load_apk(const char* apkPath) {
     }
     
     log += "[kudroid_apk] APK Load Complete.\n";
-    return log.c_str();
+    return strdup(log.c_str());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

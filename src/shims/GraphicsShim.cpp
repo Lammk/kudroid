@@ -47,12 +47,25 @@ extern "C" int bionic_ANativeWindow_lock(void* window, ANativeWindow_Buffer* out
                                          void* inOutDirtyRect) {
     (void)window; (void)inOutDirtyRect;
     if (!outBuffer) return -1;
-    static uint32_t dummyPixel = 0;
+    // Trước đây trả con trỏ tới 1 uint32_t static — game vẽ vào "buffer" đó sẽ
+    // ghi tràn 4 byte → heap/static corruption → crash. Cấp buffer thật đủ
+    // width*height*4 (RGBA8888), grow theo nhu cầu.
+    static void* bits = nullptr;
+    static size_t bitsSize = 0;
+    const size_t needed = static_cast<size_t>(g_metalLayerWidth) *
+                          static_cast<size_t>(g_metalLayerHeight) * 4;
+    if (!bits || needed > bitsSize) {
+        void* nb = std::realloc(bits, needed);
+        if (!nb) return -1;
+        bits = nb;
+        bitsSize = needed;
+        std::memset(bits, 0, needed);
+    }
     outBuffer->width = g_metalLayerWidth;
     outBuffer->height = g_metalLayerHeight;
     outBuffer->stride = g_metalLayerWidth;
     outBuffer->format = 1; // WINDOW_FORMAT_RGBA_8888
-    outBuffer->bits = &dummyPixel;
+    outBuffer->bits = bits;
     return 0;
 }
 
@@ -343,22 +356,29 @@ extern "C" VkResult bionic_vkEnumerateInstanceExtensionProperties(const char* pL
         return VK_SUCCESS;
     }
 
+    // Trước đây ghi tới `total` entry KHÔNG quan tâm *pPropertyCount — game gọi
+    // với count nhỏ hơn (vd count = số extension thật, chưa biết extension mới
+    // được inject) → ghi tràn buffer của game → crash. Clamp theo capacity.
+    const uint32_t capacity = *pPropertyCount;
+
     // Copy real properties, skipping VK_EXT_metal_surface.
     uint32_t out = 0;
-    VkExtensionProperties* tmp = (VkExtensionProperties*)malloc(sizeof(VkExtensionProperties) * realCount);
-    if (!tmp) return -1;
-    real(pLayerName, &realCount, tmp);
+    if (realCount > 0) {
+        VkExtensionProperties* tmp = (VkExtensionProperties*)malloc(sizeof(VkExtensionProperties) * realCount);
+        if (!tmp) return -1;
+        real(pLayerName, &realCount, tmp);
 
-    for (uint32_t i = 0; i < realCount && out < total; ++i) {
-        if (strcmp(tmp[i].extensionName, "VK_EXT_metal_surface") == 0) {
-            continue; // mask it
+        for (uint32_t i = 0; i < realCount && out < capacity; ++i) {
+            if (strcmp(tmp[i].extensionName, "VK_EXT_metal_surface") == 0) {
+                continue; // mask it
+            }
+            pProperties[out++] = tmp[i];
         }
-        pProperties[out++] = tmp[i];
+        free(tmp);
     }
-    free(tmp);
 
-    // Inject VK_KHR_android_surface.
-    if (out < total) {
+    // Inject VK_KHR_android_surface (chỉ nếu còn chỗ).
+    if (out < capacity) {
         strncpy(pProperties[out].extensionName, "VK_KHR_android_surface", sizeof(pProperties[out].extensionName) - 1);
         pProperties[out].extensionName[sizeof(pProperties[out].extensionName) - 1] = 0;
         pProperties[out].specVersion = 1;
