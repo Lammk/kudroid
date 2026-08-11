@@ -14,6 +14,10 @@
 #include <cstdio>
 #include <mutex>
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+
 namespace kudroid {
 namespace {
 
@@ -335,13 +339,17 @@ std::string DexAotCache::translate_dex_if_needed(const std::string& apk_extracte
     if (ec) return fail("[kudroid_aot] Cannot create cache dir: " + cache_dir);
 
     bool built = false;
-    const std::string d2j = dex2jar_command();
 
     // (3a) Ưu tiên dex2jar (tool chuẩn của dex2jar project) qua system():
     //   single dex → dịch thẳng; nhiều dex → dịch từng cái rồi merge.
     //   GHI ATOMIC: dex2jar xuất ra <jar>.tmp rồi rename — nếu process crash
     //   giữa chừng, classes.jar ở đường dẫn cuối không bao giờ bị nửa-dở
     //   (rename là atomic trên POSIX); cache.hash chỉ ghi sau khi rename xong.
+    //
+    //   std::system() bị Apple đánh dấu UNAVAILABLE trên iOS SDK (app không
+    //   được fork/exec) — nhánh này chỉ biên dịch trên desktop/macOS.
+#if !defined(__APPLE__) || !TARGET_OS_IPHONE
+    const std::string d2j = dex2jar_command();
     if (dexes.size() == 1) {
         const std::string tmpJar = jarPath + ".tmp";
         const std::string cmd = d2j + " --force -o " + shell_quote(tmpJar) + " " + shell_quote(dexes[0]);
@@ -391,9 +399,11 @@ std::string DexAotCache::translate_dex_if_needed(const std::string& apk_extracte
         for (const auto& tmp : tmpJars) std::filesystem::remove(tmp, ec);
         built = ok;
     }
+#endif // !defined(__APPLE__) || !TARGET_OS_IPHONE
 
-    // (3b) Fallback nội bộ: d2j-dex2jar.sh cần JRE ngoài — trên iOS không có,
-    // dùng trình dịch DEX→JAR nhúng (DexToJar) để không chặn khởi động JVM.
+    // (3b) Fallback nội bộ: d2j-dex2jar.sh cần JRE ngoài — trên iOS không có
+    // (và std::system không compile được), dùng trình dịch DEX→JAR nhúng
+    // (DexToJar) để không chặn khởi động JVM.
     if (!built) {
         std::vector<std::string> tmpJars;
         bool ok = true;
