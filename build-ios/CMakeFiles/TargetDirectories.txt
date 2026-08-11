@@ -1,6 +1,0 @@
-/home/kuzei/Documents/Kudroid/build-ios/CMakeFiles/kudroid_core.dir
-/home/kuzei/Documents/Kudroid/build-ios/CMakeFiles/edit_cache.dir
-/home/kuzei/Documents/Kudroid/build-ios/CMakeFiles/rebuild_cache.dir
-/home/kuzei/Documents/Kudroid/build-ios/third_party/jvm/miniJVM/minijvm/c/CMakeFiles/mini_jvm_lib.dir
-/home/kuzei/Documents/Kudroid/build-ios/third_party/jvm/miniJVM/minijvm/c/CMakeFiles/edit_cache.dir
-/home/kuzei/Documents/Kudroid/build-ios/third_party/jvm/miniJVM/minijvm/c/CMakeFiles/rebuild_cache.dir

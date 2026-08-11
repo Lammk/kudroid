@@ -20,6 +20,9 @@ jobs:
         with:
           key: ${{ runner.os }}-build-linux
 
+      - name: Clean stale CMake cache
+        run: rm -rf build build-ios build-test
+
       - name: Configure
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
@@ -44,6 +47,9 @@ jobs:
         uses: hendrikmuhs/ccache-action@v1.2
         with:
           key: ${{ runner.os }}-build-macos-arm64
+
+      - name: Clean stale CMake cache
+        run: rm -rf build build-ios build-test
 
       - name: Configure (ARM64)
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
@@ -260,7 +266,7 @@ jobs:
   # and the SwiftUI shell.
   # ─────────────────────────────────────────────────────────────────────────────
   ios-build:
-    needs: [build-multi-elf-so-arm64, build-gpu-test-so-arm64]
+    needs: [build-test-so-arm64, build-bionic-test-so-arm64, build-multi-elf-so-arm64, build-gpu-test-so-arm64]
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -297,16 +303,25 @@ jobs:
           name: gpu-test-arm64-so
           path: gpu-test-artifact
 
-      - name: Download minijvm_rt.jar
+      - name: Download test_lib ARM64 artifact
         uses: actions/download-artifact@v4
         with:
-          name: minijvm-rt-jar
-          path: minijvm-rt-artifact
+          name: test-lib-arm64-so
+          path: test-lib-artifact
+
+      - name: Download Bionic test ARM64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: test-bionic-lib-arm64-so
+          path: test-bionic-artifact
 
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
           key: ${{ runner.os }}-ios-build
+
+      - name: Clean stale CMake cache
+        run: rm -rf build build-ios build-test
 
       - name: Build kudroid_core static library (iOS ARM64)
         run: |
@@ -324,22 +339,20 @@ jobs:
           cp multi-elf-artifact/libkudroid_provider_arm64.so tests/libkudroid_provider_arm64.so
           cp multi-elf-artifact/libkudroid_consumer_arm64.so tests/libkudroid_consumer_arm64.so
 
-          # Copy pre-built ARM64 test .so from repo into app bundle
-          if [ -f tests/test_lib_arm64.so ]; then
-            cp tests/test_lib_arm64.so KuDroidShell.app/test_lib.so
+          # Copy pre-built ARM64 test .so from downloaded artifacts into app bundle
+          if [ -f test-lib-artifact/test_lib_arm64.so ]; then
+            cp test-lib-artifact/test_lib_arm64.so KuDroidShell.app/test_lib.so
             echo "Bundled ARM64 test_lib.so ($(wc -c < KuDroidShell.app/test_lib.so) bytes)"
           else
-            echo "ERROR: tests/test_lib_arm64.so not found in repo!"
-            echo "Download it from build-test-so-arm64 artifact and commit to tests/"
+            echo "ERROR: test_lib_arm64.so not found in artifact!"
             exit 1
           fi
 
-          if [ -f tests/test_bionic_lib_arm64.so ]; then
-            cp tests/test_bionic_lib_arm64.so KuDroidShell.app/test_bionic_lib.so
+          if [ -f test-bionic-artifact/test_bionic_lib_arm64.so ]; then
+            cp test-bionic-artifact/test_bionic_lib_arm64.so KuDroidShell.app/test_bionic_lib.so
             echo "Bundled ARM64 test_bionic_lib.so ($(wc -c < KuDroidShell.app/test_bionic_lib.so) bytes)"
           else
-            echo "ERROR: tests/test_bionic_lib_arm64.so not found in repo!"
-            echo "Download it from test-bionic-lib-arm64-so artifact and commit to tests/"
+            echo "ERROR: test_bionic_lib_arm64.so not found in artifact!"
             exit 1
           fi
 

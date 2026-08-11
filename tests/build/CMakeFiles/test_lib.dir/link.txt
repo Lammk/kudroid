@@ -1,1 +1,0 @@
-/usr/bin/cc -fPIC -O3 -DNDEBUG -shared -Wl,--dependency-file=CMakeFiles/test_lib.dir/link.d -Wl,-soname,libtest_lib.so -o /home/kuzei/Documents/Kudroid/tests/libtest_lib.so CMakeFiles/test_lib.dir/test_lib.c.o
