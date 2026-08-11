@@ -1,0 +1,129 @@
+package android.graphics;
+
+/**
+ * Minimal android.graphics.Paint implementation.
+ *
+ * Holds style and color information for drawing. For KuDroid's minimal
+ * framework, this stores basic paint properties.
+ */
+public class Paint {
+    /** Paint style: fill. */
+    public static final int STYLE_FILL = 0;
+    /** Paint style: stroke. */
+    public static final int STYLE_STROKE = 1;
+    /** Paint style: fill and stroke. */
+    public static final int STYLE_FILL_AND_STROKE = 2;
+
+    /** Align: left. */
+    public static final int ALIGN_LEFT = 0;
+    /** Align: center. */
+    public static final int ALIGN_CENTER = 1;
+    /** Align: right. */
+    public static final int ALIGN_RIGHT = 2;
+
+    private int mColor = 0xFF000000;
+    private int mStyle = STYLE_FILL;
+    private float mStrokeWidth = 0.0f;
+    private float mTextSize = 12.0f;
+    private int mTextAlign = ALIGN_LEFT;
+    private boolean mAntiAlias = false;
+    private Typeface mTypeface = null;
+    private ColorFilter mColorFilter = null;
+
+    public Paint() {
+    }
+
+    public Paint(int flags) {
+    }
+
+    public Paint(Paint paint) {
+        if (paint != null) {
+            mColor = paint.mColor;
+            mStyle = paint.mStyle;
+            mStrokeWidth = paint.mStrokeWidth;
+            mTextSize = paint.mTextSize;
+            mTextAlign = paint.mTextAlign;
+            mAntiAlias = paint.mAntiAlias;
+            mTypeface = paint.mTypeface;
+            mColorFilter = paint.mColorFilter;
+        }
+    }
+
+    public void setColor(int color) {
+        mColor = color;
+    }
+
+    public int getColor() {
+        return mColor;
+    }
+
+    public void setStyle(int style) {
+        mStyle = style;
+    }
+
+    public int getStyle() {
+        return mStyle;
+    }
+
+    public void setStrokeWidth(float width) {
+        mStrokeWidth = width;
+    }
+
+    public float getStrokeWidth() {
+        return mStrokeWidth;
+    }
+
+    public void setTextSize(float textSize) {
+        mTextSize = textSize;
+    }
+
+    public float getTextSize() {
+        return mTextSize;
+    }
+
+    public void setTextAlign(int align) {
+        mTextAlign = align;
+    }
+
+    public int getTextAlign() {
+        return mTextAlign;
+    }
+
+    public void setAntiAlias(boolean aa) {
+        mAntiAlias = aa;
+    }
+
+    public boolean isAntiAlias() {
+        return mAntiAlias;
+    }
+
+    public void setTypeface(Typeface typeface) {
+        mTypeface = typeface;
+    }
+
+    public Typeface getTypeface() {
+        return mTypeface;
+    }
+
+    public void setColorFilter(ColorFilter colorFilter) {
+        mColorFilter = colorFilter;
+    }
+
+    public ColorFilter getColorFilter() {
+        return mColorFilter;
+    }
+
+    /**
+     * Return the width of the given text.
+     */
+    public float measureText(String text) {
+        return text != null ? text.length() * mTextSize * 0.5f : 0.0f;
+    }
+
+    /**
+     * Return the font metrics.
+     */
+    public float getFontMetrics() {
+        return mTextSize;
+    }
+}

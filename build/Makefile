@@ -130,17 +130,17 @@ kudroid_core/fast:
 .PHONY : kudroid_core/fast
 
 #=============================================================================
-# Target rules for targets named mini_jvm_lib
+# Target rules for targets named test_dex_to_jar
 
 # Build rule for target.
-mini_jvm_lib: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 mini_jvm_lib
-.PHONY : mini_jvm_lib
+test_dex_to_jar: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_dex_to_jar
+.PHONY : test_dex_to_jar
 
 # fast build rule for target.
-mini_jvm_lib/fast:
-	$(MAKE) $(MAKESILENT) -f third_party/jvm/miniJVM/minijvm/c/CMakeFiles/mini_jvm_lib.dir/build.make third_party/jvm/miniJVM/minijvm/c/CMakeFiles/mini_jvm_lib.dir/build
-.PHONY : mini_jvm_lib/fast
+test_dex_to_jar/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_dex_to_jar.dir/build.make CMakeFiles/test_dex_to_jar.dir/build
+.PHONY : test_dex_to_jar/fast
 
 src/APKExtractor.o: src/APKExtractor.cpp.o
 .PHONY : src/APKExtractor.o
@@ -190,6 +190,30 @@ src/BionicShim.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/kudroid_core.dir/build.make CMakeFiles/kudroid_core.dir/src/BionicShim.cpp.s
 .PHONY : src/BionicShim.cpp.s
 
+src/DexCacheManager.o: src/DexCacheManager.cpp.o
+.PHONY : src/DexCacheManager.o
+
+# target to build an object file
+src/DexCacheManager.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/kudroid_core.dir/build.make CMakeFiles/kudroid_core.dir/src/DexCacheManager.cpp.o
+.PHONY : src/DexCacheManager.cpp.o
+
+src/DexCacheManager.i: src/DexCacheManager.cpp.i
+.PHONY : src/DexCacheManager.i
+
+# target to preprocess a source file
+src/DexCacheManager.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/kudroid_core.dir/build.make CMakeFiles/kudroid_core.dir/src/DexCacheManager.cpp.i
+.PHONY : src/DexCacheManager.cpp.i
+
+src/DexCacheManager.s: src/DexCacheManager.cpp.s
+.PHONY : src/DexCacheManager.s
+
+# target to generate assembly for a file
+src/DexCacheManager.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/kudroid_core.dir/build.make CMakeFiles/kudroid_core.dir/src/DexCacheManager.cpp.s
+.PHONY : src/DexCacheManager.cpp.s
+
 src/DexManager.o: src/DexManager.cpp.o
 .PHONY : src/DexManager.o
 
@@ -213,6 +237,30 @@ src/DexManager.s: src/DexManager.cpp.s
 src/DexManager.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/kudroid_core.dir/build.make CMakeFiles/kudroid_core.dir/src/DexManager.cpp.s
 .PHONY : src/DexManager.cpp.s
+
+src/DexToJar.o: src/DexToJar.cpp.o
+.PHONY : src/DexToJar.o
+
+# target to build an object file
+src/DexToJar.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/kudroid_core.dir/build.make CMakeFiles/kudroid_core.dir/src/DexToJar.cpp.o
+.PHONY : src/DexToJar.cpp.o
+
+src/DexToJar.i: src/DexToJar.cpp.i
+.PHONY : src/DexToJar.i
+
+# target to preprocess a source file
+src/DexToJar.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/kudroid_core.dir/build.make CMakeFiles/kudroid_core.dir/src/DexToJar.cpp.i
+.PHONY : src/DexToJar.cpp.i
+
+src/DexToJar.s: src/DexToJar.cpp.s
+.PHONY : src/DexToJar.s
+
+# target to generate assembly for a file
+src/DexToJar.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/kudroid_core.dir/build.make CMakeFiles/kudroid_core.dir/src/DexToJar.cpp.s
+.PHONY : src/DexToJar.cpp.s
 
 src/VFSPathRemapper.o: src/VFSPathRemapper.cpp.o
 .PHONY : src/VFSPathRemapper.o
@@ -342,53 +390,29 @@ src/kudroid_jni.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/kudroid_core.dir/build.make CMakeFiles/kudroid_core.dir/src/kudroid_jni.cpp.s
 .PHONY : src/kudroid_jni.cpp.s
 
-src/library_manager.o: src/library_manager.cpp.o
-.PHONY : src/library_manager.o
+src/shims/AudioShim.o: src/shims/AudioShim.cpp.o
+.PHONY : src/shims/AudioShim.o
 
 # target to build an object file
-src/library_manager.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/kudroid_core.dir/build.make CMakeFiles/kudroid_core.dir/src/library_manager.cpp.o
-.PHONY : src/library_manager.cpp.o
+src/shims/AudioShim.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/kudroid_core.dir/build.make CMakeFiles/kudroid_core.dir/src/shims/AudioShim.cpp.o
+.PHONY : src/shims/AudioShim.cpp.o
 
-src/library_manager.i: src/library_manager.cpp.i
-.PHONY : src/library_manager.i
-
-# target to preprocess a source file
-src/library_manager.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/kudroid_core.dir/build.make CMakeFiles/kudroid_core.dir/src/library_manager.cpp.i
-.PHONY : src/library_manager.cpp.i
-
-src/library_manager.s: src/library_manager.cpp.s
-.PHONY : src/library_manager.s
-
-# target to generate assembly for a file
-src/library_manager.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/kudroid_core.dir/build.make CMakeFiles/kudroid_core.dir/src/library_manager.cpp.s
-.PHONY : src/library_manager.cpp.s
-
-src/shims/GraphicsShim.o: src/shims/GraphicsShim.cpp.o
-.PHONY : src/shims/GraphicsShim.o
-
-# target to build an object file
-src/shims/GraphicsShim.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/kudroid_core.dir/build.make CMakeFiles/kudroid_core.dir/src/shims/GraphicsShim.cpp.o
-.PHONY : src/shims/GraphicsShim.cpp.o
-
-src/shims/GraphicsShim.i: src/shims/GraphicsShim.cpp.i
-.PHONY : src/shims/GraphicsShim.i
+src/shims/AudioShim.i: src/shims/AudioShim.cpp.i
+.PHONY : src/shims/AudioShim.i
 
 # target to preprocess a source file
-src/shims/GraphicsShim.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/kudroid_core.dir/build.make CMakeFiles/kudroid_core.dir/src/shims/GraphicsShim.cpp.i
-.PHONY : src/shims/GraphicsShim.cpp.i
+src/shims/AudioShim.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/kudroid_core.dir/build.make CMakeFiles/kudroid_core.dir/src/shims/AudioShim.cpp.i
+.PHONY : src/shims/AudioShim.cpp.i
 
-src/shims/GraphicsShim.s: src/shims/GraphicsShim.cpp.s
-.PHONY : src/shims/GraphicsShim.s
+src/shims/AudioShim.s: src/shims/AudioShim.cpp.s
+.PHONY : src/shims/AudioShim.s
 
 # target to generate assembly for a file
-src/shims/GraphicsShim.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/kudroid_core.dir/build.make CMakeFiles/kudroid_core.dir/src/shims/GraphicsShim.cpp.s
-.PHONY : src/shims/GraphicsShim.cpp.s
+src/shims/AudioShim.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/kudroid_core.dir/build.make CMakeFiles/kudroid_core.dir/src/shims/AudioShim.cpp.s
+.PHONY : src/shims/AudioShim.cpp.s
 
 src/shims/InputShim.o: src/shims/InputShim.cpp.o
 .PHONY : src/shims/InputShim.o
@@ -414,29 +438,29 @@ src/shims/InputShim.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/kudroid_core.dir/build.make CMakeFiles/kudroid_core.dir/src/shims/InputShim.cpp.s
 .PHONY : src/shims/InputShim.cpp.s
 
-src/shims/SyscallShim.o: src/shims/SyscallShim.cpp.o
-.PHONY : src/shims/SyscallShim.o
+tests/test_dex_to_jar.o: tests/test_dex_to_jar.cpp.o
+.PHONY : tests/test_dex_to_jar.o
 
 # target to build an object file
-src/shims/SyscallShim.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/kudroid_core.dir/build.make CMakeFiles/kudroid_core.dir/src/shims/SyscallShim.cpp.o
-.PHONY : src/shims/SyscallShim.cpp.o
+tests/test_dex_to_jar.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_dex_to_jar.dir/build.make CMakeFiles/test_dex_to_jar.dir/tests/test_dex_to_jar.cpp.o
+.PHONY : tests/test_dex_to_jar.cpp.o
 
-src/shims/SyscallShim.i: src/shims/SyscallShim.cpp.i
-.PHONY : src/shims/SyscallShim.i
+tests/test_dex_to_jar.i: tests/test_dex_to_jar.cpp.i
+.PHONY : tests/test_dex_to_jar.i
 
 # target to preprocess a source file
-src/shims/SyscallShim.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/kudroid_core.dir/build.make CMakeFiles/kudroid_core.dir/src/shims/SyscallShim.cpp.i
-.PHONY : src/shims/SyscallShim.cpp.i
+tests/test_dex_to_jar.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_dex_to_jar.dir/build.make CMakeFiles/test_dex_to_jar.dir/tests/test_dex_to_jar.cpp.i
+.PHONY : tests/test_dex_to_jar.cpp.i
 
-src/shims/SyscallShim.s: src/shims/SyscallShim.cpp.s
-.PHONY : src/shims/SyscallShim.s
+tests/test_dex_to_jar.s: tests/test_dex_to_jar.cpp.s
+.PHONY : tests/test_dex_to_jar.s
 
 # target to generate assembly for a file
-src/shims/SyscallShim.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/kudroid_core.dir/build.make CMakeFiles/kudroid_core.dir/src/shims/SyscallShim.cpp.s
-.PHONY : src/shims/SyscallShim.cpp.s
+tests/test_dex_to_jar.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_dex_to_jar.dir/build.make CMakeFiles/test_dex_to_jar.dir/tests/test_dex_to_jar.cpp.s
+.PHONY : tests/test_dex_to_jar.cpp.s
 
 # Help Target
 help:
@@ -447,16 +471,22 @@ help:
 	@echo "... edit_cache"
 	@echo "... rebuild_cache"
 	@echo "... kudroid_core"
-	@echo "... mini_jvm_lib"
+	@echo "... test_dex_to_jar"
 	@echo "... src/APKExtractor.o"
 	@echo "... src/APKExtractor.i"
 	@echo "... src/APKExtractor.s"
 	@echo "... src/BionicShim.o"
 	@echo "... src/BionicShim.i"
 	@echo "... src/BionicShim.s"
+	@echo "... src/DexCacheManager.o"
+	@echo "... src/DexCacheManager.i"
+	@echo "... src/DexCacheManager.s"
 	@echo "... src/DexManager.o"
 	@echo "... src/DexManager.i"
 	@echo "... src/DexManager.s"
+	@echo "... src/DexToJar.o"
+	@echo "... src/DexToJar.i"
+	@echo "... src/DexToJar.s"
 	@echo "... src/VFSPathRemapper.o"
 	@echo "... src/VFSPathRemapper.i"
 	@echo "... src/VFSPathRemapper.s"
@@ -473,18 +503,15 @@ help:
 	@echo "... src/kudroid_jni.o"
 	@echo "... src/kudroid_jni.i"
 	@echo "... src/kudroid_jni.s"
-	@echo "... src/library_manager.o"
-	@echo "... src/library_manager.i"
-	@echo "... src/library_manager.s"
-	@echo "... src/shims/GraphicsShim.o"
-	@echo "... src/shims/GraphicsShim.i"
-	@echo "... src/shims/GraphicsShim.s"
+	@echo "... src/shims/AudioShim.o"
+	@echo "... src/shims/AudioShim.i"
+	@echo "... src/shims/AudioShim.s"
 	@echo "... src/shims/InputShim.o"
 	@echo "... src/shims/InputShim.i"
 	@echo "... src/shims/InputShim.s"
-	@echo "... src/shims/SyscallShim.o"
-	@echo "... src/shims/SyscallShim.i"
-	@echo "... src/shims/SyscallShim.s"
+	@echo "... tests/test_dex_to_jar.o"
+	@echo "... tests/test_dex_to_jar.i"
+	@echo "... tests/test_dex_to_jar.s"
 .PHONY : help
 
 

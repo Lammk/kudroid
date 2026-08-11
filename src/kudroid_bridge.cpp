@@ -2,6 +2,7 @@
 #include "kudroid/BionicShim.h"
 #include "kudroid/VFSPathRemapper.h"
 #include "kudroid/APKExtractor.h"
+#include "kudroid/DexCacheManager.h"
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
@@ -429,49 +430,90 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                 
                 mirrorCrash(log);
 
-                auto jni_onload = reinterpret_cast<jint (*)(JavaVM*, void*)>(
-                    manager.resolveAppSymbol("JNI_OnLoad")
-                );
-                if (jni_onload) {
-                    log += "[kudroid_core] Found JNI_OnLoad, invoking...\n";
-                    mirrorCrash(log);
-                    
-                    bionic_init_main_thread_tls();
-                    
-                    jint version = jni_onload(kudroid_jni_get_javavm(), nullptr);
-                    log += "[kudroid_core] JNI_OnLoad returned version: " + std::to_string(version) + "\n";
+                // Ensure the Avian JVM is initialized before invoking JNI_OnLoad.
+                // The boot jar (framework classes) is embedded in the binary.
+                kudroid_jni_init_jvm("", "");
+                JavaVM* jvm = kudroid_jni_get_javavm();
+                if (!jvm) {
+                    log += "[kudroid_core] ERROR: Avian JVM failed to initialize. "
+                           "JNI_OnLoad will not be invoked.\n";
                     mirrorCrash(log);
                 } else {
-                    log += "[kudroid_core] JNI_OnLoad not found.\n";
-                    mirrorCrash(log);
-                }
+                    char jvmLine[128];
+                    snprintf(jvmLine, sizeof(jvmLine),
+                             "[kudroid_core] Avian JVM ready (JavaVM=%p).\n", (void*)jvm);
+                    log += jvmLine;
 
-                auto native_activity_create = reinterpret_cast<void (*)(ANativeActivity*, void*, size_t)>(
-                    manager.resolveAppSymbol("ANativeActivity_onCreate")
-                );
-                if (native_activity_create) {
-                    log += "[kudroid_core] Found ANativeActivity_onCreate, invoking...\n";
-                    mirrorCrash(log);
-                    static ANativeActivityCallbacks mock_callbacks = {};
-                    static ANativeActivity mock_activity = {
-                        &mock_callbacks,
-                        kudroid_jni_get_javavm(),
-                        nullptr, // env
-                        nullptr, // clazz
-                        "/sdcard/Android/data/test", // internalDataPath
-                        "/sdcard/Android/data/test", // externalDataPath
-                        29, // sdkVersion
-                        nullptr, // instance
-                        nullptr, // assetManager
-                        nullptr  // obbPath
-                    };
-                    kudroid_jni_get_env(kudroid_jni_get_javavm(), reinterpret_cast<void**>(&mock_activity.env), 0);
-                    native_activity_create(&mock_activity, nullptr, 0);
-                    log += "[kudroid_core] ANativeActivity_onCreate completed.\n";
-                    mirrorCrash(log);
-                } else {
-                    log += "[kudroid_core] ANativeActivity_onCreate not found.\n";
-                    mirrorCrash(log);
+                    auto jni_onload = reinterpret_cast<jint (*)(JavaVM*, void*)>(
+                        manager.resolveAppSymbol("JNI_OnLoad")
+                    );
+                    if (jni_onload) {
+                        log += "[kudroid_core] Found JNI_OnLoad, invoking...\n";
+                        mirrorCrash(log);
+
+                        bionic_init_main_thread_tls();
+
+                        jint version = jni_onload(jvm, nullptr);
+                        log += "[kudroid_core] JNI_OnLoad returned version: " + std::to_string(version) + "\n";
+                        mirrorCrash(log);
+                    } else {
+                        log += "[kudroid_core] JNI_OnLoad not found.\n";
+                        mirrorCrash(log);
+                    }
+
+                    auto native_activity_create = reinterpret_cast<void (*)(ANativeActivity*, void*, size_t)>(
+                        manager.resolveAppSymbol("ANativeActivity_onCreate")
+                    );
+                    if (native_activity_create) {
+                        log += "[kudroid_core] Found ANativeActivity_onCreate, invoking...\n";
+                        mirrorCrash(log);
+
+                        // Set up the activity callbacks so the game can start
+                        // rendering and receiving input. These are the hooks
+                        // the game registers handlers for.
+                        static ANativeActivityCallbacks mock_callbacks = {};
+                        static ANativeActivity mock_activity = {
+                            &mock_callbacks,
+                            jvm,
+                            nullptr, // env
+                            nullptr, // clazz
+                            "/sdcard/Android/data/test", // internalDataPath
+                            "/sdcard/Android/data/test", // externalDataPath
+                            29, // sdkVersion
+                            nullptr, // instance
+                            nullptr, // assetManager
+                            nullptr  // obbPath
+                        };
+                        kudroid_jni_get_env(jvm, reinterpret_cast<void**>(&mock_activity.env), 0);
+
+                        // Invoke onCreate. The game stores its state in
+                        // activity->instance and registers its callbacks.
+                        native_activity_create(&mock_activity, nullptr, 0);
+                        log += "[kudroid_core] ANativeActivity_onCreate completed.\n";
+                        mirrorCrash(log);
+
+                        // Drive the lifecycle so the game starts rendering:
+                        // onStart -> onResume -> onWindowFocusChanged(true)
+                        // -> onNativeWindowCreated -> onInputQueueCreated.
+                        auto call = [&](const char* name, void* fn) {
+                            if (fn) {
+                                log += std::string("[kudroid_core] Calling ") + name + "\n";
+                                mirrorCrash(log);
+                                // All callbacks take (ANativeActivity*, ...).
+                                reinterpret_cast<void (*)(ANativeActivity*)>(fn)(&mock_activity);
+                            }
+                        };
+                        call("onStart", mock_callbacks.onStart);
+                        call("onResume", mock_callbacks.onResume);
+                        call("onWindowFocusChanged", mock_callbacks.onWindowFocusChanged);
+                        call("onNativeWindowCreated", mock_callbacks.onNativeWindowCreated);
+                        call("onInputQueueCreated", mock_callbacks.onInputQueueCreated);
+                        log += "[kudroid_core] Lifecycle callbacks invoked.\n";
+                        mirrorCrash(log);
+                    } else {
+                        log += "[kudroid_core] ANativeActivity_onCreate not found.\n";
+                        mirrorCrash(log);
+                    }
                 }
             }
         }
@@ -1192,4 +1234,56 @@ extern "C" const char* kudroid_load_apk(const char* apkPath) {
     
     log += "[kudroid_apk] APK Load Complete.\n";
     return log.c_str();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DEX → JAR translation (with cache)
+//
+// Translates a DEX file into a JAR of class stubs (via DexToJar), using the
+// DexCacheManager to cache the result keyed by DEX hash + tool version.
+// Returns a malloc'd log string; caller must free() it.
+// ─────────────────────────────────────────────────────────────────────────────
+extern "C" const char* kudroid_translate_dex(const char* dexPath) {
+    if (!dexPath || !*dexPath) {
+        return strdup("[kudroid_dex] ERROR: null DEX path\n");
+    }
+
+    // Tool version — bump this when the translator logic changes.
+    const int kDexToolVersion = 1;
+
+    std::string log;
+    log += "[kudroid_dex] Translating DEX: " + std::string(dexPath) + "\n";
+
+    auto& cache = kudroid::DexCacheManager::getInstance();
+    if (cache.cacheDirectory().empty()) {
+        // Default cache dir: Documents/android_cache (set via kudroid_set_log_dir).
+        if (g_logDir[0]) {
+            cache.setCacheDirectory(std::string(g_logDir) + "/android_cache");
+        }
+    }
+
+    std::vector<uint8_t> jar;
+    std::string error;
+    if (!cache.translateAndCache(dexPath, kDexToolVersion, jar, &error)) {
+        log += "[kudroid_dex] TRANSLATE FAILED: " + error + "\n";
+        writeLogFile("kudroid_dex_translate.txt", log);
+        return strdup(log.c_str());
+    }
+
+    log += "[kudroid_dex] Translation OK: " + std::to_string(jar.size()) + " bytes JAR\n";
+    log += "[kudroid_dex] Cache dir: " + cache.cacheDirectory() + "\n";
+
+    // Write the JAR to disk so Avian can load it as a classpath.
+    std::string jarPath = std::string(g_logDir) + "/translated_classes.jar";
+    FILE* f = std::fopen(jarPath.c_str(), "wb");
+    if (f) {
+        std::fwrite(jar.data(), 1, jar.size(), f);
+        std::fclose(f);
+        log += "[kudroid_dex] Wrote JAR: " + jarPath + "\n";
+    } else {
+        log += "[kudroid_dex] WARNING: cannot write JAR to " + jarPath + "\n";
+    }
+
+    writeLogFile("kudroid_dex_translate.txt", log);
+    return strdup(log.c_str());
 }

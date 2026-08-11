@@ -9,12 +9,9 @@ set(CMAKE_MAKEFILE_DEPENDS
   "CMakeCache.txt"
   "/home/kuzei/Documents/Kudroid/CMakeLists.txt"
   "CMakeFiles/4.3.0/CMakeASMCompiler.cmake"
-  "CMakeFiles/4.3.0/CMakeCCompiler.cmake"
   "CMakeFiles/4.3.0/CMakeCXXCompiler.cmake"
   "CMakeFiles/4.3.0/CMakeSystem.cmake"
-  "/home/kuzei/Documents/Kudroid/third_party/jvm/miniJVM/minijvm/c/CMakeLists.txt"
   "/usr/share/cmake/Modules/CMakeASMInformation.cmake"
-  "/usr/share/cmake/Modules/CMakeCInformation.cmake"
   "/usr/share/cmake/Modules/CMakeCXXInformation.cmake"
   "/usr/share/cmake/Modules/CMakeCommonLanguageInclude.cmake"
   "/usr/share/cmake/Modules/CMakeGenericSystem.cmake"
@@ -24,26 +21,21 @@ set(CMAKE_MAKEFILE_DEPENDS
   "/usr/share/cmake/Modules/CMakeSystemSpecificInitialize.cmake"
   "/usr/share/cmake/Modules/Compiler/CMakeCommonCompilerMacros.cmake"
   "/usr/share/cmake/Modules/Compiler/GNU-ASM.cmake"
-  "/usr/share/cmake/Modules/Compiler/GNU-C.cmake"
   "/usr/share/cmake/Modules/Compiler/GNU-CXX.cmake"
   "/usr/share/cmake/Modules/Compiler/GNU.cmake"
   "/usr/share/cmake/Modules/FindPackageHandleStandardArgs.cmake"
   "/usr/share/cmake/Modules/FindPackageMessage.cmake"
   "/usr/share/cmake/Modules/FindZLIB.cmake"
   "/usr/share/cmake/Modules/Internal/CMakeASMLinkerInformation.cmake"
-  "/usr/share/cmake/Modules/Internal/CMakeCLinkerInformation.cmake"
   "/usr/share/cmake/Modules/Internal/CMakeCXXLinkerInformation.cmake"
   "/usr/share/cmake/Modules/Internal/CMakeCommonLinkerInformation.cmake"
-  "/usr/share/cmake/Modules/Linker/GNU-C.cmake"
   "/usr/share/cmake/Modules/Linker/GNU-CXX.cmake"
   "/usr/share/cmake/Modules/Linker/GNU.cmake"
   "/usr/share/cmake/Modules/Platform/Linker/GNU.cmake"
   "/usr/share/cmake/Modules/Platform/Linker/Linux-ASM.cmake"
   "/usr/share/cmake/Modules/Platform/Linker/Linux-GNU-ASM.cmake"
-  "/usr/share/cmake/Modules/Platform/Linker/Linux-GNU-C.cmake"
   "/usr/share/cmake/Modules/Platform/Linker/Linux-GNU-CXX.cmake"
   "/usr/share/cmake/Modules/Platform/Linker/Linux-GNU.cmake"
-  "/usr/share/cmake/Modules/Platform/Linux-GNU-C.cmake"
   "/usr/share/cmake/Modules/Platform/Linux-GNU-CXX.cmake"
   "/usr/share/cmake/Modules/Platform/Linux-GNU.cmake"
   "/usr/share/cmake/Modules/Platform/Linux-Initialize.cmake"
@@ -61,11 +53,10 @@ set(CMAKE_MAKEFILE_OUTPUTS
 # Byproducts of CMake generate step:
 set(CMAKE_MAKEFILE_PRODUCTS
   "CMakeFiles/CMakeDirectoryInformation.cmake"
-  "third_party/jvm/miniJVM/minijvm/c/CMakeFiles/CMakeDirectoryInformation.cmake"
   )
 
 # Dependency information for all targets:
 set(CMAKE_DEPEND_INFO_FILES
   "CMakeFiles/kudroid_core.dir/DependInfo.cmake"
-  "third_party/jvm/miniJVM/minijvm/c/CMakeFiles/mini_jvm_lib.dir/DependInfo.cmake"
+  "CMakeFiles/test_dex_to_jar.dir/DependInfo.cmake"
   )

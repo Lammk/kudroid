@@ -27,6 +27,38 @@ extern "C" int bionic_ANativeWindow_setBuffersGeometry(void* window, int width, 
 extern "C" void bionic_ANativeWindow_release(void* window) { (void)window; }
 extern "C" void bionic_ANativeWindow_acquire(void* window) { (void)window; }
 
+// ANativeWindow_Buffer — describes a locked buffer.
+struct ANativeWindow_Buffer {
+    int32_t width;
+    int32_t height;
+    int32_t stride;
+    int32_t format;
+    void* bits;
+};
+
+// ANativeWindow_lock — lock the window's buffer for drawing.
+// For KuDroid, we return a dummy buffer so apps that draw via
+// ANativeWindow_lock don't crash. Real blitting to Metal is a future
+// enhancement (games typically use EGL/GLES instead).
+extern "C" int bionic_ANativeWindow_lock(void* window, ANativeWindow_Buffer* outBuffer,
+                                         void* inOutDirtyRect) {
+    (void)window; (void)inOutDirtyRect;
+    if (!outBuffer) return -1;
+    static uint32_t dummyPixel = 0;
+    outBuffer->width = g_metalLayerWidth;
+    outBuffer->height = g_metalLayerHeight;
+    outBuffer->stride = g_metalLayerWidth;
+    outBuffer->format = 1; // WINDOW_FORMAT_RGBA_8888
+    outBuffer->bits = &dummyPixel;
+    return 0;
+}
+
+// ANativeWindow_unlockAndPost — unlock the buffer and post it.
+extern "C" int bionic_ANativeWindow_unlockAndPost(void* window) {
+    (void)window;
+    return 0;
+}
+
 // --- EGL Overrides ---
 typedef void* EGLDisplay;
 typedef void* EGLNativeDisplayType;
@@ -121,6 +153,8 @@ const SymbolEntry kGraphicsSymbols[] = {
     {"ANativeWindow_setBuffersGeometry", reinterpret_cast<void*>(&bionic_ANativeWindow_setBuffersGeometry)},
     {"ANativeWindow_release", reinterpret_cast<void*>(&bionic_ANativeWindow_release)},
     {"ANativeWindow_acquire", reinterpret_cast<void*>(&bionic_ANativeWindow_acquire)},
+    {"ANativeWindow_lock", reinterpret_cast<void*>(&bionic_ANativeWindow_lock)},
+    {"ANativeWindow_unlockAndPost", reinterpret_cast<void*>(&bionic_ANativeWindow_unlockAndPost)},
     {"eglGetDisplay", reinterpret_cast<void*>(&bionic_eglGetDisplay)},
     {"eglGetPlatformDisplayEXT", reinterpret_cast<void*>(&bionic_eglGetPlatformDisplayEXT)},
     {"eglGetProcAddress", reinterpret_cast<void*>(&bionic_eglGetProcAddress)},

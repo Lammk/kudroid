@@ -141,52 +141,10 @@ CMakeFiles/kudroid_core.dir/src/elf_loader.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/kudroid_core.dir/src/elf_loader.cpp.s"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/kuzei/Documents/Kudroid/src/elf_loader.cpp -o CMakeFiles/kudroid_core.dir/src/elf_loader.cpp.s
 
-CMakeFiles/kudroid_core.dir/src/library_manager.cpp.o: CMakeFiles/kudroid_core.dir/flags.make
-CMakeFiles/kudroid_core.dir/src/library_manager.cpp.o: /home/kuzei/Documents/Kudroid/src/library_manager.cpp
-CMakeFiles/kudroid_core.dir/src/library_manager.cpp.o: CMakeFiles/kudroid_core.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/kuzei/Documents/Kudroid/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_6) "Building CXX object CMakeFiles/kudroid_core.dir/src/library_manager.cpp.o"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/kudroid_core.dir/src/library_manager.cpp.o -MF CMakeFiles/kudroid_core.dir/src/library_manager.cpp.o.d -o CMakeFiles/kudroid_core.dir/src/library_manager.cpp.o -c /home/kuzei/Documents/Kudroid/src/library_manager.cpp
-
-CMakeFiles/kudroid_core.dir/src/library_manager.cpp.i: cmake_force
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/kudroid_core.dir/src/library_manager.cpp.i"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/kuzei/Documents/Kudroid/src/library_manager.cpp > CMakeFiles/kudroid_core.dir/src/library_manager.cpp.i
-
-CMakeFiles/kudroid_core.dir/src/library_manager.cpp.s: cmake_force
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/kudroid_core.dir/src/library_manager.cpp.s"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/kuzei/Documents/Kudroid/src/library_manager.cpp -o CMakeFiles/kudroid_core.dir/src/library_manager.cpp.s
-
-CMakeFiles/kudroid_core.dir/src/shims/SyscallShim.cpp.o: CMakeFiles/kudroid_core.dir/flags.make
-CMakeFiles/kudroid_core.dir/src/shims/SyscallShim.cpp.o: /home/kuzei/Documents/Kudroid/src/shims/SyscallShim.cpp
-CMakeFiles/kudroid_core.dir/src/shims/SyscallShim.cpp.o: CMakeFiles/kudroid_core.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/kuzei/Documents/Kudroid/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_7) "Building CXX object CMakeFiles/kudroid_core.dir/src/shims/SyscallShim.cpp.o"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/kudroid_core.dir/src/shims/SyscallShim.cpp.o -MF CMakeFiles/kudroid_core.dir/src/shims/SyscallShim.cpp.o.d -o CMakeFiles/kudroid_core.dir/src/shims/SyscallShim.cpp.o -c /home/kuzei/Documents/Kudroid/src/shims/SyscallShim.cpp
-
-CMakeFiles/kudroid_core.dir/src/shims/SyscallShim.cpp.i: cmake_force
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/kudroid_core.dir/src/shims/SyscallShim.cpp.i"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/kuzei/Documents/Kudroid/src/shims/SyscallShim.cpp > CMakeFiles/kudroid_core.dir/src/shims/SyscallShim.cpp.i
-
-CMakeFiles/kudroid_core.dir/src/shims/SyscallShim.cpp.s: cmake_force
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/kudroid_core.dir/src/shims/SyscallShim.cpp.s"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/kuzei/Documents/Kudroid/src/shims/SyscallShim.cpp -o CMakeFiles/kudroid_core.dir/src/shims/SyscallShim.cpp.s
-
-CMakeFiles/kudroid_core.dir/src/shims/GraphicsShim.cpp.o: CMakeFiles/kudroid_core.dir/flags.make
-CMakeFiles/kudroid_core.dir/src/shims/GraphicsShim.cpp.o: /home/kuzei/Documents/Kudroid/src/shims/GraphicsShim.cpp
-CMakeFiles/kudroid_core.dir/src/shims/GraphicsShim.cpp.o: CMakeFiles/kudroid_core.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/kuzei/Documents/Kudroid/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_8) "Building CXX object CMakeFiles/kudroid_core.dir/src/shims/GraphicsShim.cpp.o"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/kudroid_core.dir/src/shims/GraphicsShim.cpp.o -MF CMakeFiles/kudroid_core.dir/src/shims/GraphicsShim.cpp.o.d -o CMakeFiles/kudroid_core.dir/src/shims/GraphicsShim.cpp.o -c /home/kuzei/Documents/Kudroid/src/shims/GraphicsShim.cpp
-
-CMakeFiles/kudroid_core.dir/src/shims/GraphicsShim.cpp.i: cmake_force
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/kudroid_core.dir/src/shims/GraphicsShim.cpp.i"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/kuzei/Documents/Kudroid/src/shims/GraphicsShim.cpp > CMakeFiles/kudroid_core.dir/src/shims/GraphicsShim.cpp.i
-
-CMakeFiles/kudroid_core.dir/src/shims/GraphicsShim.cpp.s: cmake_force
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/kudroid_core.dir/src/shims/GraphicsShim.cpp.s"
-	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/kuzei/Documents/Kudroid/src/shims/GraphicsShim.cpp -o CMakeFiles/kudroid_core.dir/src/shims/GraphicsShim.cpp.s
-
 CMakeFiles/kudroid_core.dir/src/shims/InputShim.cpp.o: CMakeFiles/kudroid_core.dir/flags.make
 CMakeFiles/kudroid_core.dir/src/shims/InputShim.cpp.o: /home/kuzei/Documents/Kudroid/src/shims/InputShim.cpp
 CMakeFiles/kudroid_core.dir/src/shims/InputShim.cpp.o: CMakeFiles/kudroid_core.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/kuzei/Documents/Kudroid/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_9) "Building CXX object CMakeFiles/kudroid_core.dir/src/shims/InputShim.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/kuzei/Documents/Kudroid/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_6) "Building CXX object CMakeFiles/kudroid_core.dir/src/shims/InputShim.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/kudroid_core.dir/src/shims/InputShim.cpp.o -MF CMakeFiles/kudroid_core.dir/src/shims/InputShim.cpp.o.d -o CMakeFiles/kudroid_core.dir/src/shims/InputShim.cpp.o -c /home/kuzei/Documents/Kudroid/src/shims/InputShim.cpp
 
 CMakeFiles/kudroid_core.dir/src/shims/InputShim.cpp.i: cmake_force
@@ -197,10 +155,24 @@ CMakeFiles/kudroid_core.dir/src/shims/InputShim.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/kudroid_core.dir/src/shims/InputShim.cpp.s"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/kuzei/Documents/Kudroid/src/shims/InputShim.cpp -o CMakeFiles/kudroid_core.dir/src/shims/InputShim.cpp.s
 
+CMakeFiles/kudroid_core.dir/src/shims/AudioShim.cpp.o: CMakeFiles/kudroid_core.dir/flags.make
+CMakeFiles/kudroid_core.dir/src/shims/AudioShim.cpp.o: /home/kuzei/Documents/Kudroid/src/shims/AudioShim.cpp
+CMakeFiles/kudroid_core.dir/src/shims/AudioShim.cpp.o: CMakeFiles/kudroid_core.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/kuzei/Documents/Kudroid/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_7) "Building CXX object CMakeFiles/kudroid_core.dir/src/shims/AudioShim.cpp.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/kudroid_core.dir/src/shims/AudioShim.cpp.o -MF CMakeFiles/kudroid_core.dir/src/shims/AudioShim.cpp.o.d -o CMakeFiles/kudroid_core.dir/src/shims/AudioShim.cpp.o -c /home/kuzei/Documents/Kudroid/src/shims/AudioShim.cpp
+
+CMakeFiles/kudroid_core.dir/src/shims/AudioShim.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/kudroid_core.dir/src/shims/AudioShim.cpp.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/kuzei/Documents/Kudroid/src/shims/AudioShim.cpp > CMakeFiles/kudroid_core.dir/src/shims/AudioShim.cpp.i
+
+CMakeFiles/kudroid_core.dir/src/shims/AudioShim.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/kudroid_core.dir/src/shims/AudioShim.cpp.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/kuzei/Documents/Kudroid/src/shims/AudioShim.cpp -o CMakeFiles/kudroid_core.dir/src/shims/AudioShim.cpp.s
+
 CMakeFiles/kudroid_core.dir/src/kudroid_bridge.cpp.o: CMakeFiles/kudroid_core.dir/flags.make
 CMakeFiles/kudroid_core.dir/src/kudroid_bridge.cpp.o: /home/kuzei/Documents/Kudroid/src/kudroid_bridge.cpp
 CMakeFiles/kudroid_core.dir/src/kudroid_bridge.cpp.o: CMakeFiles/kudroid_core.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/kuzei/Documents/Kudroid/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_10) "Building CXX object CMakeFiles/kudroid_core.dir/src/kudroid_bridge.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/kuzei/Documents/Kudroid/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_8) "Building CXX object CMakeFiles/kudroid_core.dir/src/kudroid_bridge.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/kudroid_core.dir/src/kudroid_bridge.cpp.o -MF CMakeFiles/kudroid_core.dir/src/kudroid_bridge.cpp.o.d -o CMakeFiles/kudroid_core.dir/src/kudroid_bridge.cpp.o -c /home/kuzei/Documents/Kudroid/src/kudroid_bridge.cpp
 
 CMakeFiles/kudroid_core.dir/src/kudroid_bridge.cpp.i: cmake_force
@@ -214,7 +186,7 @@ CMakeFiles/kudroid_core.dir/src/kudroid_bridge.cpp.s: cmake_force
 CMakeFiles/kudroid_core.dir/src/kudroid_jni.cpp.o: CMakeFiles/kudroid_core.dir/flags.make
 CMakeFiles/kudroid_core.dir/src/kudroid_jni.cpp.o: /home/kuzei/Documents/Kudroid/src/kudroid_jni.cpp
 CMakeFiles/kudroid_core.dir/src/kudroid_jni.cpp.o: CMakeFiles/kudroid_core.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/kuzei/Documents/Kudroid/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_11) "Building CXX object CMakeFiles/kudroid_core.dir/src/kudroid_jni.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/kuzei/Documents/Kudroid/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_9) "Building CXX object CMakeFiles/kudroid_core.dir/src/kudroid_jni.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/kudroid_core.dir/src/kudroid_jni.cpp.o -MF CMakeFiles/kudroid_core.dir/src/kudroid_jni.cpp.o.d -o CMakeFiles/kudroid_core.dir/src/kudroid_jni.cpp.o -c /home/kuzei/Documents/Kudroid/src/kudroid_jni.cpp
 
 CMakeFiles/kudroid_core.dir/src/kudroid_jni.cpp.i: cmake_force
@@ -228,7 +200,7 @@ CMakeFiles/kudroid_core.dir/src/kudroid_jni.cpp.s: cmake_force
 CMakeFiles/kudroid_core.dir/src/gpu_test.cpp.o: CMakeFiles/kudroid_core.dir/flags.make
 CMakeFiles/kudroid_core.dir/src/gpu_test.cpp.o: /home/kuzei/Documents/Kudroid/src/gpu_test.cpp
 CMakeFiles/kudroid_core.dir/src/gpu_test.cpp.o: CMakeFiles/kudroid_core.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/kuzei/Documents/Kudroid/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_12) "Building CXX object CMakeFiles/kudroid_core.dir/src/gpu_test.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/kuzei/Documents/Kudroid/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_10) "Building CXX object CMakeFiles/kudroid_core.dir/src/gpu_test.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/kudroid_core.dir/src/gpu_test.cpp.o -MF CMakeFiles/kudroid_core.dir/src/gpu_test.cpp.o.d -o CMakeFiles/kudroid_core.dir/src/gpu_test.cpp.o -c /home/kuzei/Documents/Kudroid/src/gpu_test.cpp
 
 CMakeFiles/kudroid_core.dir/src/gpu_test.cpp.i: cmake_force
@@ -242,7 +214,7 @@ CMakeFiles/kudroid_core.dir/src/gpu_test.cpp.s: cmake_force
 CMakeFiles/kudroid_core.dir/src/DexManager.cpp.o: CMakeFiles/kudroid_core.dir/flags.make
 CMakeFiles/kudroid_core.dir/src/DexManager.cpp.o: /home/kuzei/Documents/Kudroid/src/DexManager.cpp
 CMakeFiles/kudroid_core.dir/src/DexManager.cpp.o: CMakeFiles/kudroid_core.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/kuzei/Documents/Kudroid/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_13) "Building CXX object CMakeFiles/kudroid_core.dir/src/DexManager.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/kuzei/Documents/Kudroid/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_11) "Building CXX object CMakeFiles/kudroid_core.dir/src/DexManager.cpp.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/kudroid_core.dir/src/DexManager.cpp.o -MF CMakeFiles/kudroid_core.dir/src/DexManager.cpp.o.d -o CMakeFiles/kudroid_core.dir/src/DexManager.cpp.o -c /home/kuzei/Documents/Kudroid/src/DexManager.cpp
 
 CMakeFiles/kudroid_core.dir/src/DexManager.cpp.i: cmake_force
@@ -253,6 +225,34 @@ CMakeFiles/kudroid_core.dir/src/DexManager.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/kudroid_core.dir/src/DexManager.cpp.s"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/kuzei/Documents/Kudroid/src/DexManager.cpp -o CMakeFiles/kudroid_core.dir/src/DexManager.cpp.s
 
+CMakeFiles/kudroid_core.dir/src/DexCacheManager.cpp.o: CMakeFiles/kudroid_core.dir/flags.make
+CMakeFiles/kudroid_core.dir/src/DexCacheManager.cpp.o: /home/kuzei/Documents/Kudroid/src/DexCacheManager.cpp
+CMakeFiles/kudroid_core.dir/src/DexCacheManager.cpp.o: CMakeFiles/kudroid_core.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/kuzei/Documents/Kudroid/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_12) "Building CXX object CMakeFiles/kudroid_core.dir/src/DexCacheManager.cpp.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/kudroid_core.dir/src/DexCacheManager.cpp.o -MF CMakeFiles/kudroid_core.dir/src/DexCacheManager.cpp.o.d -o CMakeFiles/kudroid_core.dir/src/DexCacheManager.cpp.o -c /home/kuzei/Documents/Kudroid/src/DexCacheManager.cpp
+
+CMakeFiles/kudroid_core.dir/src/DexCacheManager.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/kudroid_core.dir/src/DexCacheManager.cpp.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/kuzei/Documents/Kudroid/src/DexCacheManager.cpp > CMakeFiles/kudroid_core.dir/src/DexCacheManager.cpp.i
+
+CMakeFiles/kudroid_core.dir/src/DexCacheManager.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/kudroid_core.dir/src/DexCacheManager.cpp.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/kuzei/Documents/Kudroid/src/DexCacheManager.cpp -o CMakeFiles/kudroid_core.dir/src/DexCacheManager.cpp.s
+
+CMakeFiles/kudroid_core.dir/src/DexToJar.cpp.o: CMakeFiles/kudroid_core.dir/flags.make
+CMakeFiles/kudroid_core.dir/src/DexToJar.cpp.o: /home/kuzei/Documents/Kudroid/src/DexToJar.cpp
+CMakeFiles/kudroid_core.dir/src/DexToJar.cpp.o: CMakeFiles/kudroid_core.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/kuzei/Documents/Kudroid/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_13) "Building CXX object CMakeFiles/kudroid_core.dir/src/DexToJar.cpp.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/kudroid_core.dir/src/DexToJar.cpp.o -MF CMakeFiles/kudroid_core.dir/src/DexToJar.cpp.o.d -o CMakeFiles/kudroid_core.dir/src/DexToJar.cpp.o -c /home/kuzei/Documents/Kudroid/src/DexToJar.cpp
+
+CMakeFiles/kudroid_core.dir/src/DexToJar.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/kudroid_core.dir/src/DexToJar.cpp.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/kuzei/Documents/Kudroid/src/DexToJar.cpp > CMakeFiles/kudroid_core.dir/src/DexToJar.cpp.i
+
+CMakeFiles/kudroid_core.dir/src/DexToJar.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/kudroid_core.dir/src/DexToJar.cpp.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/kuzei/Documents/Kudroid/src/DexToJar.cpp -o CMakeFiles/kudroid_core.dir/src/DexToJar.cpp.s
+
 # Object files for target kudroid_core
 kudroid_core_OBJECTS = \
 "CMakeFiles/kudroid_core.dir/src/APKExtractor.cpp.o" \
@@ -260,41 +260,39 @@ kudroid_core_OBJECTS = \
 "CMakeFiles/kudroid_core.dir/src/VFSPathRemapper.cpp.o" \
 "CMakeFiles/kudroid_core.dir/src/bionic_log_trampoline.S.o" \
 "CMakeFiles/kudroid_core.dir/src/elf_loader.cpp.o" \
-"CMakeFiles/kudroid_core.dir/src/library_manager.cpp.o" \
-"CMakeFiles/kudroid_core.dir/src/shims/SyscallShim.cpp.o" \
-"CMakeFiles/kudroid_core.dir/src/shims/GraphicsShim.cpp.o" \
 "CMakeFiles/kudroid_core.dir/src/shims/InputShim.cpp.o" \
+"CMakeFiles/kudroid_core.dir/src/shims/AudioShim.cpp.o" \
 "CMakeFiles/kudroid_core.dir/src/kudroid_bridge.cpp.o" \
 "CMakeFiles/kudroid_core.dir/src/kudroid_jni.cpp.o" \
 "CMakeFiles/kudroid_core.dir/src/gpu_test.cpp.o" \
-"CMakeFiles/kudroid_core.dir/src/DexManager.cpp.o"
+"CMakeFiles/kudroid_core.dir/src/DexManager.cpp.o" \
+"CMakeFiles/kudroid_core.dir/src/DexCacheManager.cpp.o" \
+"CMakeFiles/kudroid_core.dir/src/DexToJar.cpp.o"
 
 # External object files for target kudroid_core
 kudroid_core_EXTERNAL_OBJECTS =
 
-libkudroid_core.so: CMakeFiles/kudroid_core.dir/src/APKExtractor.cpp.o
-libkudroid_core.so: CMakeFiles/kudroid_core.dir/src/BionicShim.cpp.o
-libkudroid_core.so: CMakeFiles/kudroid_core.dir/src/VFSPathRemapper.cpp.o
-libkudroid_core.so: CMakeFiles/kudroid_core.dir/src/bionic_log_trampoline.S.o
-libkudroid_core.so: CMakeFiles/kudroid_core.dir/src/elf_loader.cpp.o
-libkudroid_core.so: CMakeFiles/kudroid_core.dir/src/library_manager.cpp.o
-libkudroid_core.so: CMakeFiles/kudroid_core.dir/src/shims/SyscallShim.cpp.o
-libkudroid_core.so: CMakeFiles/kudroid_core.dir/src/shims/GraphicsShim.cpp.o
-libkudroid_core.so: CMakeFiles/kudroid_core.dir/src/shims/InputShim.cpp.o
-libkudroid_core.so: CMakeFiles/kudroid_core.dir/src/kudroid_bridge.cpp.o
-libkudroid_core.so: CMakeFiles/kudroid_core.dir/src/kudroid_jni.cpp.o
-libkudroid_core.so: CMakeFiles/kudroid_core.dir/src/gpu_test.cpp.o
-libkudroid_core.so: CMakeFiles/kudroid_core.dir/src/DexManager.cpp.o
-libkudroid_core.so: CMakeFiles/kudroid_core.dir/build.make
-libkudroid_core.so: CMakeFiles/kudroid_core.dir/compiler_depend.ts
-libkudroid_core.so: third_party/jvm/miniJVM/minijvm/c/libmini_jvm_lib.a
-libkudroid_core.so: /usr/lib64/libz.so
-libkudroid_core.so: CMakeFiles/kudroid_core.dir/link.txt
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/kuzei/Documents/Kudroid/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_14) "Linking CXX shared library libkudroid_core.so"
+libkudroid_core.a: CMakeFiles/kudroid_core.dir/src/APKExtractor.cpp.o
+libkudroid_core.a: CMakeFiles/kudroid_core.dir/src/BionicShim.cpp.o
+libkudroid_core.a: CMakeFiles/kudroid_core.dir/src/VFSPathRemapper.cpp.o
+libkudroid_core.a: CMakeFiles/kudroid_core.dir/src/bionic_log_trampoline.S.o
+libkudroid_core.a: CMakeFiles/kudroid_core.dir/src/elf_loader.cpp.o
+libkudroid_core.a: CMakeFiles/kudroid_core.dir/src/shims/InputShim.cpp.o
+libkudroid_core.a: CMakeFiles/kudroid_core.dir/src/shims/AudioShim.cpp.o
+libkudroid_core.a: CMakeFiles/kudroid_core.dir/src/kudroid_bridge.cpp.o
+libkudroid_core.a: CMakeFiles/kudroid_core.dir/src/kudroid_jni.cpp.o
+libkudroid_core.a: CMakeFiles/kudroid_core.dir/src/gpu_test.cpp.o
+libkudroid_core.a: CMakeFiles/kudroid_core.dir/src/DexManager.cpp.o
+libkudroid_core.a: CMakeFiles/kudroid_core.dir/src/DexCacheManager.cpp.o
+libkudroid_core.a: CMakeFiles/kudroid_core.dir/src/DexToJar.cpp.o
+libkudroid_core.a: CMakeFiles/kudroid_core.dir/build.make
+libkudroid_core.a: CMakeFiles/kudroid_core.dir/link.txt
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/kuzei/Documents/Kudroid/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_14) "Linking CXX static library libkudroid_core.a"
+	$(CMAKE_COMMAND) -P CMakeFiles/kudroid_core.dir/cmake_clean_target.cmake
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/kudroid_core.dir/link.txt --verbose=$(VERBOSE)
 
 # Rule to build all files generated by this target.
-CMakeFiles/kudroid_core.dir/build: libkudroid_core.so
+CMakeFiles/kudroid_core.dir/build: libkudroid_core.a
 .PHONY : CMakeFiles/kudroid_core.dir/build
 
 CMakeFiles/kudroid_core.dir/clean:

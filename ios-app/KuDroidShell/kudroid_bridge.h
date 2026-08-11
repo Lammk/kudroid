@@ -62,6 +62,10 @@ void kudroid_set_metal_layer(void* layer, int width, int height);
 /// @param action 0=Down, 1=Up, 2=Move (Mapped to Android AMOTION_EVENT_ACTION)
 void kudroid_inject_touch_event(float x, float y, int action);
 
+/// Translate a DEX file into a JAR of class stubs (with caching).
+/// Returns a malloc'd diagnostic log; caller must free() it.
+const char* kudroid_translate_dex(const char* dexPath);
+
 /// Run the VFS redirect and I/O self-test; returns a malloc'd log.
 const char* kudroid_vfs_self_test_log(void);
 const char* kudroid_vfs_extended_test_log(void);

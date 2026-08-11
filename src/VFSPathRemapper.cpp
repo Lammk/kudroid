@@ -54,8 +54,13 @@ void VFSPathRemapper::setDocumentsDirectory(const std::string& documentsDirector
 
 bool VFSPathRemapper::initialize() {
     std::error_code error;
-    // Create base directories
-    for (const auto& relative : {"data/data", "sdcard/Download", "system", "proc/self", "sys", "mnt", "storage/emulated", "etc", "system/etc", "system/etc/security/cacerts", "system/etc/permissions"}) {
+    // Create base directories (Android-like layout).
+    for (const auto& relative : {
+        "data/data", "data/app", "data/local/tmp", "data/cache",
+        "sdcard/Download", "sdcard/Android/data", "sdcard/Android/obb",
+        "system", "proc/self", "sys", "mnt", "storage/emulated", "dev",
+        "etc", "system/etc", "system/etc/security/cacerts", "system/etc/permissions"
+    }) {
         std::filesystem::create_directories(std::filesystem::path(androidRoot_) / relative, error);
         if (error) {
             vfsLog("Failed to create " + androidRoot_ + "/" + relative + ": " + error.message());
@@ -157,6 +162,7 @@ std::string VFSPathRemapper::remap(const char* originalPath) const {
     std::string_view rootName;
     if (original.find("/data/data/") == 0) { prefix = "/data/data/"; rootName = "data/data/"; }
     else if (original.find("/data/user/0/") == 0) { prefix = "/data/user/0/"; rootName = "data/data/"; }
+    else if (original.find("/data/user_de/0/") == 0) { prefix = "/data/user_de/0/"; rootName = "data/data/"; }
     else if (original.find("/sdcard/") == 0) { prefix = "/sdcard/"; rootName = "sdcard/"; }
     else if (original.find("/storage/emulated/0/") == 0) { prefix = "/storage/emulated/0/"; rootName = "sdcard/"; }
     else if (original.find("/mnt/sdcard/") == 0) { prefix = "/mnt/sdcard/"; rootName = "sdcard/"; }
@@ -166,6 +172,10 @@ std::string VFSPathRemapper::remap(const char* originalPath) const {
     else if (original.find("/proc/self/") == 0) { prefix = "/proc/self/"; rootName = "proc/self/"; }
     else if (original.find("/proc/") == 0) { prefix = "/proc/"; rootName = "proc/"; }
     else if (original.find("/sys/") == 0) { prefix = "/sys/"; rootName = "sys/"; }
+    else if (original.find("/data/app/") == 0) { prefix = "/data/app/"; rootName = "data/app/"; }
+    else if (original.find("/data/local/tmp/") == 0) { prefix = "/data/local/tmp/"; rootName = "data/local/tmp/"; }
+    else if (original.find("/cache/") == 0) { prefix = "/cache/"; rootName = "data/cache/"; }
+    else if (original.find("/dev/") == 0) { prefix = "/dev/"; rootName = "dev/"; }
     else return std::string(original);
 
     std::string mapped = androidRoot_ + "/" + std::string(rootName) + std::string(original.substr(prefix.size()));
@@ -221,6 +231,11 @@ int vfs_open(const char* path, int flags, mode_t mode) {
     }
 
     const std::string mapped = VFSPathRemapper::getInstance().remap(path);
+    // For O_CREAT, ensure the parent directory exists (avoids ENOENT crashes).
+    if (flags & O_CREAT) {
+        std::error_code ec;
+        std::filesystem::create_directories(std::filesystem::path(mapped).parent_path(), ec);
+    }
     const int result = (flags & O_CREAT) ? ::open(mapped.c_str(), flags, mode)
                                          : ::open(mapped.c_str(), flags);
     vfsTrace("open(" + mapped + ") -> " + std::to_string(result));
@@ -320,6 +335,20 @@ static void copy_stat(struct android_stat* dst, const struct stat* src) {
 }
 
 int vfs_stat(const char* path, void* info) {
+    // Ensure pseudo-files exist before stat (e.g. /proc/self/maps).
+    if (path && std::strcmp(path, "/proc/self/maps") == 0) {
+        std::string mapsPath = VFSPathRemapper::getInstance().remap("/proc/self/maps");
+        if (!std::filesystem::exists(mapsPath)) {
+            std::ofstream mapsFile(mapsPath, std::ios::trunc);
+            if (mapsFile) {
+                mapsFile << "5500000000-5500100000 r-xp 00000000 103:02 12345 /system/bin/app_process64\n";
+                mapsFile << "5500100000-5500110000 r--p 00100000 103:02 12345 /system/bin/app_process64\n";
+                mapsFile << "5500110000-5500120000 rw-p 00110000 103:02 12345 /system/bin/app_process64\n";
+                mapsFile << "7f00000000-7f00100000 rw-p 00000000 00:00 0 [stack]\n";
+                mapsFile.close();
+            }
+        }
+    }
     const std::string mapped = VFSPathRemapper::getInstance().remap(path);
     struct stat host_st;
     int res = ::stat(mapped.c_str(), &host_st);

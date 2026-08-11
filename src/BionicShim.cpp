@@ -3,6 +3,7 @@
 #include "kudroid/shims/SyscallShim.h"
 #include "kudroid/shims/GraphicsShim.h"
 #include "kudroid/shims/InputShim.h"
+#include "kudroid/shims/AudioShim.h"
 
 #include <string>
 #include <unordered_map>
@@ -47,6 +48,7 @@ void* resolve_from_list(const SymbolEntry* list, size_t count, const char* name)
 
 void print_bound_symbols() {
     trace("Bionic/global binding trace:");
+    std::shared_lock<std::shared_mutex> lock(resolveMutex);
     for (const auto& pair : boundSymbols) {
         char msg[256];
         snprintf(msg, sizeof(msg), "bound %s -> %p%s",
@@ -86,6 +88,11 @@ void* resolve_bionic_symbol(const char* name) {
         if (!resolved) {
             const SymbolEntry* input = get_input_symbols(&count);
             resolved = resolve_from_list(input, count, name);
+        }
+
+        if (!resolved) {
+            const SymbolEntry* audio = get_audio_symbols(&count);
+            resolved = resolve_from_list(audio, count, name);
         }
 
         if (!resolved) {

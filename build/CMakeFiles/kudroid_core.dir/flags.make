@@ -3,15 +3,15 @@
 
 # compile ASM with /usr/bin/c++
 # compile CXX with /usr/bin/c++
-ASM_DEFINES = -Dkudroid_core_EXPORTS
+ASM_DEFINES = 
 
-ASM_INCLUDES = -I/home/kuzei/Documents/Kudroid/include -I/home/kuzei/Documents/Kudroid/third_party/jvm/miniJVM/minijvm/c/jvm -isystem /usr/include
+ASM_INCLUDES = -I/home/kuzei/Documents/Kudroid/include -I/home/kuzei/Documents/Kudroid/third_party/jvm/avian/include -isystem /usr/include
 
-ASM_FLAGS = -g -fPIC -Wall -Wextra -Wpedantic -O0 -g
+ASM_FLAGS = -O3 -DNDEBUG -fPIC -Wall -Wextra -Wpedantic -O3
 
-CXX_DEFINES = -Dkudroid_core_EXPORTS
+CXX_DEFINES = 
 
-CXX_INCLUDES = -I/home/kuzei/Documents/Kudroid/include -I/home/kuzei/Documents/Kudroid/third_party/jvm/miniJVM/minijvm/c/jvm
+CXX_INCLUDES = -I/home/kuzei/Documents/Kudroid/include -I/home/kuzei/Documents/Kudroid/third_party/jvm/avian/include
 
-CXX_FLAGS = -g -std=c++17 -fPIC -Wall -Wextra -Wpedantic -O0 -g
+CXX_FLAGS = -O3 -DNDEBUG -std=c++17 -fPIC -Wall -Wextra -Wpedantic -O3
 

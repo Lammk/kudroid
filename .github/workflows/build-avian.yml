@@ -1,0 +1,75 @@
+name: Build Avian JVM (iOS)
+
+# Builds the Avian JVM for iOS ARM64 and uploads the static library +
+# bootimage as an artifact. This replaces the miniJVM dependency.
+#
+# Avian uses its own Makefile (not CMake). It needs:
+#   - macOS runner (has Xcode + iPhoneOS SDK)
+#   - A JDK (JAVA_HOME) to build the bootimage (javac/jar)
+#
+# Usage: make platform=ios arch=arm64 use-clang=true
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'third_party/jvm/avian/**'
+      - '.github/workflows/build-avian.yml'
+
+jobs:
+  build-avian-ios:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '11'
+
+      - name: Verify toolchain
+        run: |
+          echo "=== Xcode ==="
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          echo "=== JDK ==="
+          java -version
+          echo "JAVA_HOME=$JAVA_HOME"
+
+      - name: Cache Avian build
+        id: avian-cache
+        uses: actions/cache@v4
+        with:
+          path: third_party/jvm/avian/build
+          key: avian-ios-arm64-${{ runner.os }}-${{ hashFiles('third_party/jvm/avian/makefile') }}
+          restore-keys: |
+            avian-ios-arm64-${{ runner.os }}-
+
+      - name: Build Avian for iOS ARM64
+        working-directory: third_party/jvm/avian
+        run: |
+          # Build the JVM static library + bootimage for iOS device (arm64).
+          # use-clang=true is required on macOS/iOS.
+          # mode=fast is the default (optimized).
+          make platform=ios arch=arm64 use-clang=true
+
+      - name: Verify Avian build output
+        run: |
+          echo "=== Avian build dir ==="
+          ls -lh third_party/jvm/avian/build/
+          echo "=== Static library ==="
+          find third_party/jvm/avian/build -name '*.a' -exec file {} \;
+          echo "=== Bootimage ==="
+          find third_party/jvm/avian/build -name 'bootimage*' -o -name '*.bin' | head -20
+
+      - name: Upload Avian iOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: avian-ios-arm64
+          path: |
+            third_party/jvm/avian/build/
+            third_party/jvm/avian/include/
+          retention-days: 90

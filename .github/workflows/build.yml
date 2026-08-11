@@ -382,6 +382,13 @@ jobs:
           cp icon.png KuDroidShell.app/AppIcon60x60@3x.png
           cp icon.png KuDroidShell.app/AppIcon.png
 
+      - name: Embed JIT entitlements for sideload
+        run: |
+          # Copy the entitlements into the app bundle so sideload tools
+          # (e.g. ldid, Sideloadly, AltStore) can sign with them.
+          cp ios-app/entitlements.plist KuDroidShell.app/entitlements.plist
+          echo "Embedded entitlements.plist into app bundle"
+
       - name: Package unsigned IPA
         run: |
           mkdir -p Payload
