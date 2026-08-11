@@ -387,6 +387,10 @@ jobs:
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           cmake --build build-ios --config Release --parallel
 
+          # The Xcode generator build already produced the app bundle.
+          # Move it to the expected location FIRST so we can bundle .so files.
+          mv build-ios/Release-iphoneos/KuDroidShell.app KuDroidShell.app
+
           # Move the built testing libraries so we can embed them after Xcode build
           mkdir -p tests
           cp multi-elf-artifact/libkudroid_provider_arm64.so tests/libkudroid_provider_arm64.so
@@ -421,10 +425,6 @@ jobs:
           if [ -f gpu-test-artifact/test_jni_massive_arm64.so ]; then
             cp gpu-test-artifact/test_jni_massive_arm64.so tests/test_jni_massive.so
           fi
-
-          # The Xcode generator build already produced the app bundle.
-          # Move it to the expected location.
-          mv build-ios/Release-iphoneos/KuDroidShell.app KuDroidShell.app
 
           # Embed ALL dynamic frameworks into the app bundle so dyld finds them at runtime
           mkdir -p KuDroidShell.app/Frameworks
