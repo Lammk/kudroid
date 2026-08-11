@@ -113,17 +113,22 @@ extern "C" EGLDisplay bionic_eglGetDisplay(EGLNativeDisplayType display_id) {
         #define EGL_PLATFORM_ANGLE_TYPE_VULKAN_ANGLE 0x3450
         #define EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE 0x3489
         #define EGL_PLATFORM_ANGLE_TYPE_DEFAULT_ANGLE 0x3204
+        #define EGL_PLATFORM_ANGLE_DEVICE_TYPE_ANGLE 0x3205
+        #define EGL_PLATFORM_ANGLE_DEVICE_TYPE_METAL_ANGLE 0x348A
         #define EGL_NONE 0x3038
         
+        // On iOS, ANGLE uses the Metal backend. Try Metal first with the
+        // device type explicitly set.
         EGLint backends[] = {
-            EGL_PLATFORM_ANGLE_TYPE_VULKAN_ANGLE,
             EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE,
+            EGL_PLATFORM_ANGLE_TYPE_VULKAN_ANGLE,
             EGL_PLATFORM_ANGLE_TYPE_DEFAULT_ANGLE
         };
         
         for (int i = 0; i < 3; i++) {
             const EGLint attribs[] = {
                 EGL_PLATFORM_ANGLE_TYPE_ANGLE, backends[i],
+                EGL_PLATFORM_ANGLE_DEVICE_TYPE_ANGLE, EGL_PLATFORM_ANGLE_DEVICE_TYPE_METAL_ANGLE,
                 EGL_NONE
             };
             EGLDisplay dpy = host_func(EGL_PLATFORM_ANGLE_ANGLE, display_id, attribs);

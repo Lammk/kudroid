@@ -142,22 +142,16 @@ int kudroid_gpu_vulkan_test(uint32_t* ext_count_out) {
     createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     createInfo.pApplicationInfo = &appInfo;
     
-    // Enable portability enumeration on macOS/iOS for MoltenVK
-    const char* extensions[] = { "VK_KHR_portability_enumeration" };
-    createInfo.enabledExtensionCount = 1;
-    createInfo.ppEnabledExtensionNames = extensions;
-    createInfo.flags = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+    // MoltenVK on iOS does NOT need the portability enumeration bit/extension.
+    // Enabling it causes vkCreateInstance to fail. Keep flags=0 and no extensions.
+    createInfo.enabledExtensionCount = 0;
+    createInfo.ppEnabledExtensionNames = NULL;
+    createInfo.flags = 0;
 
     VkInstance instance;
     if (vkCreateInstance(&createInfo, NULL, &instance) != VK_SUCCESS) {
-        __android_log_print(ANDROID_LOG_INFO, "KuDroidGPU", "VK TEST: vkCreateInstance failed! Attempting without portability bit...");
-        // Fallback without portability
-        createInfo.enabledExtensionCount = 0;
-        createInfo.flags = 0;
-        if (vkCreateInstance(&createInfo, NULL, &instance) != VK_SUCCESS) {
-            __android_log_print(ANDROID_LOG_INFO, "KuDroidGPU", "VK TEST: vkCreateInstance failed again.");
-            return -3;
-        }
+        __android_log_print(ANDROID_LOG_INFO, "KuDroidGPU", "VK TEST: vkCreateInstance failed.");
+        return -3;
     }
     __android_log_print(ANDROID_LOG_INFO, "KuDroidGPU", "VK TEST: vkCreateInstance OK.");
 
@@ -196,31 +190,25 @@ int kudroid_gpu_vulkan_test(uint32_t* ext_count_out) {
     queueCreateInfo.queueCount = 1;
     queueCreateInfo.pQueuePriorities = &queuePriority;
 
-    const char* deviceExtensions[] = { "VK_KHR_portability_subset" };
-    
+    // MoltenVK on iOS does NOT need VK_KHR_portability_subset. Requesting it
+    // can fail device creation. Keep no device extensions.
     VkDeviceCreateInfo deviceCreateInfo = {0};
     deviceCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     deviceCreateInfo.pQueueCreateInfos = &queueCreateInfo;
     deviceCreateInfo.queueCreateInfoCount = 1;
-    deviceCreateInfo.enabledExtensionCount = 1;
-    deviceCreateInfo.ppEnabledExtensionNames = deviceExtensions;
+    deviceCreateInfo.enabledExtensionCount = 0;
+    deviceCreateInfo.ppEnabledExtensionNames = NULL;
 
     VkDevice device;
     if (vkCreateDevice(physicalDevice, &deviceCreateInfo, NULL, &device) != VK_SUCCESS) {
-        __android_log_print(ANDROID_LOG_INFO, "KuDroidGPU", "VK TEST: vkCreateDevice failed! Trying without extensions.");
-        deviceCreateInfo.enabledExtensionCount = 0;
-        if (vkCreateDevice(physicalDevice, &deviceCreateInfo, NULL, &device) == VK_SUCCESS) {
-            __android_log_print(ANDROID_LOG_INFO, "KuDroidGPU", "VK TEST: vkCreateDevice OK (without portability subset).");
-        } else {
-             __android_log_print(ANDROID_LOG_INFO, "KuDroidGPU", "VK TEST: vkCreateDevice totally failed.");
-        }
-    } else {
-        __android_log_print(ANDROID_LOG_INFO, "KuDroidGPU", "VK TEST: vkCreateDevice OK.");
-        if (vkGetDeviceQueue) {
-            VkQueue queue;
-            vkGetDeviceQueue(device, 0, 0, &queue);
-            __android_log_print(ANDROID_LOG_INFO, "KuDroidGPU", "VK TEST: vkGetDeviceQueue OK.");
-        }
+        __android_log_print(ANDROID_LOG_INFO, "KuDroidGPU", "VK TEST: vkCreateDevice failed.");
+        return -6;
+    }
+    __android_log_print(ANDROID_LOG_INFO, "KuDroidGPU", "VK TEST: vkCreateDevice OK.");
+    if (vkGetDeviceQueue) {
+        VkQueue queue;
+        vkGetDeviceQueue(device, 0, 0, &queue);
+        __android_log_print(ANDROID_LOG_INFO, "KuDroidGPU", "VK TEST: vkGetDeviceQueue OK.");
     }
     
     if (device && vkDestroyDevice) {

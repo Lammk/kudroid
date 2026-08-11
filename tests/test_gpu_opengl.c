@@ -123,17 +123,22 @@ int kudroid_gpu_opengl_test(void) {
         #define EGL_PLATFORM_ANGLE_TYPE_VULKAN_ANGLE 0x3450
         #define EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE 0x3489
         #define EGL_PLATFORM_ANGLE_TYPE_DEFAULT_ANGLE 0x3204
+        #define EGL_PLATFORM_ANGLE_DEVICE_TYPE_ANGLE 0x3205
+        #define EGL_PLATFORM_ANGLE_DEVICE_TYPE_METAL_ANGLE 0x348A
         
+        // On iOS, ANGLE uses the Metal backend. Try Metal first with the
+        // device type explicitly set, then fall back to other backends.
         EGLint backends[] = {
-            EGL_PLATFORM_ANGLE_TYPE_VULKAN_ANGLE,
             EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE,
+            EGL_PLATFORM_ANGLE_TYPE_VULKAN_ANGLE,
             EGL_PLATFORM_ANGLE_TYPE_DEFAULT_ANGLE
         };
-        const char* backendNames[] = {"VULKAN", "METAL", "DEFAULT"};
+        const char* backendNames[] = {"METAL", "VULKAN", "DEFAULT"};
 
         for (int i = 0; i < 3; i++) {
             const EGLint displayAttribs[] = {
                 EGL_PLATFORM_ANGLE_TYPE_ANGLE, backends[i],
+                EGL_PLATFORM_ANGLE_DEVICE_TYPE_ANGLE, EGL_PLATFORM_ANGLE_DEVICE_TYPE_METAL_ANGLE,
                 EGL_NONE
             };
             display = getPlatformDisplayEXT(EGL_PLATFORM_ANGLE_ANGLE, EGL_DEFAULT_DISPLAY, displayAttribs);

@@ -205,6 +205,12 @@ struct Elf64Sym {
     uint64_t st_size;     // Symbol size
 };
 
+// ELF symbol binding helpers (ELF64_ST_BIND / STB_WEAK)
+#define ELF64_ST_BIND(i) ((i) >> 4)
+#define STB_LOCAL  0
+#define STB_GLOBAL 1
+#define STB_WEAK   2
+
 struct Elf64Rela {
     uint64_t r_offset;
     uint64_t r_info;
@@ -509,6 +515,15 @@ bool ElfLoader::relocate() {
                     address = libraryManager_->resolveGlobalSymbol(name);
                 } else {
                     address = resolve_bionic_symbol(name);
+                }
+
+                // Weak undefined symbols (e.g. __gmon_start__, _ITM_*,
+                // __cxa_finalize) may legitimately resolve to nothing. Do NOT
+                // fall back to the universal dummy for them — calling the dummy
+                // with the wrong signature crashes. Leave the slot NULL.
+                const unsigned char bind = ELF64_ST_BIND(symtab[symbolIndex].st_info);
+                if (!address && bind == STB_WEAK) {
+                    address = nullptr;
                 }
                 
                 if (type == R_AARCH64_COPY) {

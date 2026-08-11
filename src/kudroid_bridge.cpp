@@ -511,7 +511,9 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                         log += "[kudroid_core] Lifecycle callbacks invoked.\n";
                         mirrorCrash(log);
                     } else {
-                        log += "[kudroid_core] ANativeActivity_onCreate not found.\n";
+                        log += "[kudroid_core] ANativeActivity_onCreate not found. ";
+                        log += "App has no activity entry point; JNI_OnLoad was already invoked ";
+                        log += "(games that spawn their render thread in JNI_OnLoad will still run).\n";
                         mirrorCrash(log);
                     }
                 }
