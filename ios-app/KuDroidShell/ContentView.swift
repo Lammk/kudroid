@@ -441,7 +441,7 @@ func runJitStatus() -> String {
     return status
 }
 
-func runNativeTest(soName: String, testFunction: (String) -> UnsafePointer<CChar>?) -> String {
+func runNativeTest(soName: String, testFunction: (UnsafePointer<CChar>?) -> UnsafePointer<CChar>?) -> String {
     guard let bundledURL = Bundle.main.url(forResource: soName, withExtension: "so") else {
         return "❌ \(soName).so not found in bundle"
     }
@@ -452,7 +452,7 @@ func runNativeTest(soName: String, testFunction: (String) -> UnsafePointer<CChar
     } catch {
         return "❌ failed to copy \(soName).so: \(error.localizedDescription)"
     }
-    guard let cString = testFunction(tmpURL.path) else { return "❌ error: null result" }
+    guard let cString = tmpURL.path.withCString({ testFunction($0) }) else { return "❌ error: null result" }
     let log = String(cString: cString)
     free(UnsafeMutablePointer(mutating: cString))
     return log
