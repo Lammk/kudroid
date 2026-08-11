@@ -747,6 +747,29 @@ extern "C" void* bionic_dlopen(const char* filename, int flags) {
 extern "C" void* bionic_dlsym(void* handle, const char* symbol) {
     if (!symbol) return nullptr;
 
+    // For Vulkan/EGL surface translation, our GraphicsShim MUST intercept
+    // these symbols BEFORE the real MoltenVK/ANGLE handle is consulted,
+    // otherwise the game gets the real vkGetInstanceProcAddr and never sees
+    // vkCreateAndroidSurfaceKHR.
+    static const char* kShimPriority[] = {
+        "vkGetInstanceProcAddr",
+        "vkEnumerateInstanceExtensionProperties",
+        "vkCreateAndroidSurfaceKHR",
+        "eglCreateWindowSurface",
+    };
+    for (const char* prio : kShimPriority) {
+        if (strcmp(symbol, prio) == 0) {
+            size_t count = 0;
+            const SymbolEntry* symbols = get_graphics_symbols(&count);
+            for (size_t i = 0; i < count; ++i) {
+                if (strcmp(symbols[i].name, symbol) == 0) {
+                    logAndroidMessage(2, "KuDroidSyscall", std::string("bionic_dlsym: [") + symbol + "] resolved via GraphicsShim (priority)");
+                    return symbols[i].address;
+                }
+            }
+        }
+    }
+
     // For a real host handle, prefer its own symbols first.
     if (handle && handle != RTLD_DEFAULT && handle != DUMMY_HANDLE) {
         if (void* real = ::dlsym(handle, symbol)) {

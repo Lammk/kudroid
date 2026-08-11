@@ -2,6 +2,8 @@
 #include <dlfcn.h>
 #include <cstdio>
 #include <cstdint>
+#include <cstring>
+#include <cstdlib>
 // This comes from kudroid_bridge.cpp
 extern void* g_metalLayer;
 extern int g_metalLayerWidth;
@@ -152,6 +154,197 @@ extern "C" EGLDisplay bionic_eglGetDisplay(EGLNativeDisplayType display_id) {
     return nullptr;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Vulkan ↔ MoltenVK translation
+//
+// Android games request the Android-specific surface extension
+// (VK_KHR_android_surface / vkCreateAndroidSurfaceKHR). MoltenVK on iOS only
+// provides VK_EXT_metal_surface / vkCreateMetalSurfaceEXT. We intercept
+// vkGetInstanceProcAddr and translate the surface creation call.
+//
+// Because bionic_ANativeWindow_fromSurface returns g_metalLayer (a CAMetalLayer)
+// directly, the "window" pointer the game passes IS the CAMetalLayer — no
+// struct unwrapping needed.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Minimal Vulkan types (opaque handles + result codes).
+typedef uint32_t VkResult;
+typedef uint32_t VkFlags;
+typedef void* VkInstance;
+typedef void* VkSurfaceKHR;
+typedef void* VkAllocationCallbacks;
+typedef void* PFN_vkVoidFunction;
+
+#define VK_SUCCESS 0
+#define VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT 1000217000
+#define VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR 1000008000
+
+typedef struct VkAndroidSurfaceCreateInfoKHR {
+    uint32_t sType;
+    const void* pNext;
+    VkFlags flags;
+    void* window; // ANativeWindow* — actually our CAMetalLayer
+} VkAndroidSurfaceCreateInfoKHR;
+
+typedef struct VkMetalSurfaceCreateInfoEXT {
+    uint32_t sType;
+    const void* pNext;
+    VkFlags flags;
+    void* pLayer; // CAMetalLayer*
+} VkMetalSurfaceCreateInfoEXT;
+
+typedef VkResult (*PFN_vkCreateMetalSurfaceEXT)(VkInstance, const VkMetalSurfaceCreateInfoEXT*, const VkAllocationCallbacks*, VkSurfaceKHR*);
+typedef PFN_vkVoidFunction (*PFN_vkGetInstanceProcAddr)(VkInstance, const char*);
+
+// Real MoltenVK vkGetInstanceProcAddr (resolved lazily).
+static PFN_vkGetInstanceProcAddr real_vkGetInstanceProcAddr = nullptr;
+
+static PFN_vkGetInstanceProcAddr get_real_vkGetInstanceProcAddr() {
+    if (!real_vkGetInstanceProcAddr) {
+        void* mvk = ::dlopen("@executable_path/Frameworks/MoltenVK.framework/MoltenVK", RTLD_NOW | RTLD_LOCAL);
+        if (mvk) {
+            real_vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)::dlsym(mvk, "vkGetInstanceProcAddr");
+        }
+    }
+    return real_vkGetInstanceProcAddr;
+}
+
+// Translate vkCreateAndroidSurfaceKHR → vkCreateMetalSurfaceEXT.
+extern "C" VkResult bionic_vkCreateAndroidSurfaceKHR(VkInstance instance,
+                                                     const VkAndroidSurfaceCreateInfoKHR* pCreateInfo,
+                                                     const VkAllocationCallbacks* pAllocator,
+                                                     VkSurfaceKHR* pSurface) {
+    fprintf(stdout, "[KuDroidGPU] vkCreateAndroidSurfaceKHR → vkCreateMetalSurfaceEXT\n");
+    if (!pCreateInfo || !pSurface) return -1; // VK_ERROR_INITIALIZATION_FAILED
+
+    auto real = get_real_vkGetInstanceProcAddr();
+    if (!real) {
+        fprintf(stderr, "[KuDroidGPU] ERROR: MoltenVK vkGetInstanceProcAddr not found\n");
+        return -1;
+    }
+    auto createMetalSurface = (PFN_vkCreateMetalSurfaceEXT)real(instance, "vkCreateMetalSurfaceEXT");
+    if (!createMetalSurface) {
+        fprintf(stderr, "[KuDroidGPU] ERROR: vkCreateMetalSurfaceEXT not found in MoltenVK\n");
+        return -1;
+    }
+
+    VkMetalSurfaceCreateInfoEXT metalInfo = {};
+    metalInfo.sType = VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT;
+    metalInfo.pNext = nullptr;
+    metalInfo.flags = 0;
+    metalInfo.pLayer = pCreateInfo->window; // window IS the CAMetalLayer
+
+    VkResult r = createMetalSurface(instance, &metalInfo, pAllocator, pSurface);
+    fprintf(stdout, "[KuDroidGPU] vkCreateMetalSurfaceEXT returned %d (surface=%p)\n", (int)r, (void*)*pSurface);
+    return r;
+}
+
+// Intercept vkGetInstanceProcAddr: translate Android surface calls, forward
+// everything else to MoltenVK.
+extern "C" PFN_vkVoidFunction bionic_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
+    if (!pName) return nullptr;
+    if (strcmp(pName, "vkCreateAndroidSurfaceKHR") == 0) {
+        return (PFN_vkVoidFunction)&bionic_vkCreateAndroidSurfaceKHR;
+    }
+    auto real = get_real_vkGetInstanceProcAddr();
+    if (real) {
+        return real(instance, pName);
+    }
+    return nullptr;
+}
+
+// Intercept vkEnumerateInstanceExtensionProperties: inject
+// VK_KHR_android_surface and mask VK_EXT_metal_surface so the game sees the
+// Android surface extension it expects.
+typedef VkResult (*PFN_vkEnumerateInstanceExtensionProperties)(const char*, uint32_t*, void*);
+
+typedef struct VkExtensionProperties {
+    char extensionName[256];
+    uint32_t specVersion;
+} VkExtensionProperties;
+
+extern "C" VkResult bionic_vkEnumerateInstanceExtensionProperties(const char* pLayerName,
+                                                                  uint32_t* pPropertyCount,
+                                                                  VkExtensionProperties* pProperties) {
+    // Resolve the real function directly from the MoltenVK handle.
+    static PFN_vkEnumerateInstanceExtensionProperties real = nullptr;
+    if (!real) {
+        void* mvk = ::dlopen("@executable_path/Frameworks/MoltenVK.framework/MoltenVK", RTLD_NOW | RTLD_LOCAL);
+        if (mvk) {
+            real = (PFN_vkEnumerateInstanceExtensionProperties)::dlsym(mvk, "vkEnumerateInstanceExtensionProperties");
+        }
+    }
+    if (!real) return -1;
+
+    // First call: get the real count.
+    uint32_t realCount = 0;
+    VkResult r = real(pLayerName, &realCount, nullptr);
+    if (r != VK_SUCCESS) return r;
+
+    // We add VK_KHR_android_surface (and keep VK_EXT_metal_surface masked out).
+    const uint32_t added = 1;
+    uint32_t total = realCount + added;
+
+    if (!pProperties) {
+        *pPropertyCount = total;
+        return VK_SUCCESS;
+    }
+
+    // Copy real properties, skipping VK_EXT_metal_surface.
+    uint32_t out = 0;
+    VkExtensionProperties* tmp = (VkExtensionProperties*)malloc(sizeof(VkExtensionProperties) * realCount);
+    if (!tmp) return -1;
+    real(pLayerName, &realCount, tmp);
+
+    for (uint32_t i = 0; i < realCount && out < total; ++i) {
+        if (strcmp(tmp[i].extensionName, "VK_EXT_metal_surface") == 0) {
+            continue; // mask it
+        }
+        pProperties[out++] = tmp[i];
+    }
+    free(tmp);
+
+    // Inject VK_KHR_android_surface.
+    if (out < total) {
+        strncpy(pProperties[out].extensionName, "VK_KHR_android_surface", sizeof(pProperties[out].extensionName) - 1);
+        pProperties[out].extensionName[sizeof(pProperties[out].extensionName) - 1] = 0;
+        pProperties[out].specVersion = 1;
+        out++;
+    }
+
+    *pPropertyCount = out;
+    return VK_SUCCESS;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EGL ↔ ANGLE translation
+//
+// ANGLE on iOS expects a CAMetalLayer/UIView as the native window. Because
+// bionic_ANativeWindow_fromSurface returns g_metalLayer directly, the window
+// pointer IS the CAMetalLayer — pass it straight through.
+// ─────────────────────────────────────────────────────────────────────────────
+
+typedef void* EGLSurface;
+typedef void* EGLConfig;
+typedef void* EGLContext;
+typedef void* EGLNativeWindowType;
+typedef EGLSurface (*PFN_eglCreateWindowSurface)(EGLDisplay, EGLConfig, EGLNativeWindowType, const EGLint*);
+
+extern "C" EGLSurface bionic_eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
+                                                    EGLNativeWindowType win,
+                                                    const EGLint* attrib_list) {
+    fprintf(stdout, "[KuDroidGPU] eglCreateWindowSurface: window=%p (CAMetalLayer)\n", (void*)win);
+    auto host_func = (PFN_eglCreateWindowSurface)get_egl_func("eglCreateWindowSurface");
+    if (host_func) {
+        // win IS the CAMetalLayer (from ANativeWindow_fromSurface).
+        EGLSurface s = host_func(dpy, config, win, attrib_list);
+        fprintf(stdout, "[KuDroidGPU] eglCreateWindowSurface returned %p\n", (void*)s);
+        return s;
+    }
+    fprintf(stdout, "[KuDroidGPU] eglCreateWindowSurface: not found in host\n");
+    return nullptr;
+}
+
 const SymbolEntry kGraphicsSymbols[] = {
     {"ANativeWindow_fromSurface", reinterpret_cast<void*>(&bionic_ANativeWindow_fromSurface)},
     {"ANativeWindow_getWidth", reinterpret_cast<void*>(&bionic_ANativeWindow_getWidth)},
@@ -164,6 +357,10 @@ const SymbolEntry kGraphicsSymbols[] = {
     {"eglGetDisplay", reinterpret_cast<void*>(&bionic_eglGetDisplay)},
     {"eglGetPlatformDisplayEXT", reinterpret_cast<void*>(&bionic_eglGetPlatformDisplayEXT)},
     {"eglGetProcAddress", reinterpret_cast<void*>(&bionic_eglGetProcAddress)},
+    {"eglCreateWindowSurface", reinterpret_cast<void*>(&bionic_eglCreateWindowSurface)},
+    {"vkGetInstanceProcAddr", reinterpret_cast<void*>(&bionic_vkGetInstanceProcAddr)},
+    {"vkCreateAndroidSurfaceKHR", reinterpret_cast<void*>(&bionic_vkCreateAndroidSurfaceKHR)},
+    {"vkEnumerateInstanceExtensionProperties", reinterpret_cast<void*>(&bionic_vkEnumerateInstanceExtensionProperties)},
 };
 
 } // namespace
