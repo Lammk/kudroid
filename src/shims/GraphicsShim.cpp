@@ -122,10 +122,10 @@ extern "C" EGLDisplay bionic_eglGetPlatformDisplayEXT(EGLint platform, void* nat
     fprintf(stdout, "[KuDroidGPU] bionic_eglGetPlatformDisplayEXT called\n");
     auto host_func = (PFN_eglGetPlatformDisplayEXT) get_egl_func("eglGetPlatformDisplayEXT");
     if (host_func) {
-        // ANGLE on iOS needs a CAMetalLayer as the native display. If the game
-        // passed NULL (EGL_DEFAULT_DISPLAY), substitute our g_metalLayer.
-        void* display = native_display ? native_display : g_metalLayer;
-        EGLDisplay dpy = host_func(platform, display, attrib_list);
+        // IMPORTANT: eglGetDisplay/eglGetPlatformDisplayEXT must ALWAYS use
+        // EGL_DEFAULT_DISPLAY (0). CAMetalLayer is ONLY for eglCreateWindowSurface.
+        // Force native_display to 0 regardless of what the Android game passed.
+        EGLDisplay dpy = host_func(platform, (void*)0, attrib_list);
         fprintf(stdout, "[KuDroidGPU] bionic_eglGetPlatformDisplayEXT returned %s\n", dpy ? "VALID" : "NULL");
         return dpy;
     }
@@ -147,9 +147,8 @@ extern "C" EGLDisplay bionic_eglGetDisplay(EGLNativeDisplayType display_id) {
         #define EGL_NONE 0x3038
         
         // On iOS, ANGLE uses the Metal backend. Try Metal first with the
-        // device type explicitly set. Use g_metalLayer as the native display
-        // (ANGLE needs a CAMetalLayer, not NULL).
-        void* nativeDisplay = display_id ? display_id : g_metalLayer;
+        // device type explicitly set. IMPORTANT: always pass EGL_DEFAULT_DISPLAY
+        // (0) here — CAMetalLayer is ONLY for eglCreateWindowSurface.
         EGLint backends[] = {
             EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE,
             EGL_PLATFORM_ANGLE_TYPE_VULKAN_ANGLE,
@@ -162,7 +161,7 @@ extern "C" EGLDisplay bionic_eglGetDisplay(EGLNativeDisplayType display_id) {
                 EGL_PLATFORM_ANGLE_DEVICE_TYPE_ANGLE, EGL_PLATFORM_ANGLE_DEVICE_TYPE_METAL_ANGLE,
                 EGL_NONE
             };
-            EGLDisplay dpy = host_func(EGL_PLATFORM_ANGLE_ANGLE, nativeDisplay, attribs);
+            EGLDisplay dpy = host_func(EGL_PLATFORM_ANGLE_ANGLE, (void*)0, attribs);
             if (dpy != nullptr) {
                 fprintf(stdout, "[KuDroidGPU] bionic_eglGetDisplay: successfully got display via eglGetPlatformDisplayEXT\n");
                 return dpy;
@@ -174,9 +173,8 @@ extern "C" EGLDisplay bionic_eglGetDisplay(EGLNativeDisplayType display_id) {
     typedef EGLDisplay (*PFN_eglGetDisplay)(EGLNativeDisplayType);
     auto host_get_display = (PFN_eglGetDisplay) get_egl_func("eglGetDisplay");
     if (host_get_display) {
-        // Pass g_metalLayer as the native display for ANGLE.
-        void* nativeDisplay = display_id ? display_id : g_metalLayer;
-        EGLDisplay dpy = host_get_display(nativeDisplay);
+        // Always pass EGL_DEFAULT_DISPLAY (0) — CAMetalLayer is only for surfaces.
+        EGLDisplay dpy = host_get_display((EGLNativeDisplayType)0);
         fprintf(stdout, "[KuDroidGPU] bionic_eglGetDisplay: fallback returned %s\n", dpy ? "VALID" : "NULL");
         return dpy;
     }
@@ -364,11 +362,15 @@ typedef EGLSurface (*PFN_eglCreateWindowSurface)(EGLDisplay, EGLConfig, EGLNativ
 extern "C" EGLSurface bionic_eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
                                                     EGLNativeWindowType win,
                                                     const EGLint* attrib_list) {
-    fprintf(stdout, "[KuDroidGPU] eglCreateWindowSurface: window=%p (CAMetalLayer)\n", (void*)win);
+    fprintf(stdout, "[KuDroidGPU] eglCreateWindowSurface: window=%p\n", (void*)win);
     auto host_func = (PFN_eglCreateWindowSurface)get_egl_func("eglCreateWindowSurface");
     if (host_func) {
-        // win IS the CAMetalLayer (from ANativeWindow_fromSurface).
-        EGLSurface s = host_func(dpy, config, win, attrib_list);
+        // IMPORTANT: ANGLE on iOS expects a CAMetalLayer as the native window.
+        // The Android game passes an ANativeWindow (which our
+        // ANativeWindow_fromSurface already maps to g_metalLayer). Force the
+        // window to g_metalLayer so ANGLE gets the CAMetalLayer it needs.
+        EGLNativeWindowType nativeWin = (EGLNativeWindowType)g_metalLayer;
+        EGLSurface s = host_func(dpy, config, nativeWin, attrib_list);
         fprintf(stdout, "[KuDroidGPU] eglCreateWindowSurface returned %p\n", (void*)s);
         return s;
     }
