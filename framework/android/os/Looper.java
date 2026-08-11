@@ -50,9 +50,12 @@ public final class Looper {
     /**
      * chạy vòng lặp thông báo. chặn cho đến khi quit() được gọi.
      */
-    public void loop() {
+    public static void loop() {
+        final Looper me = myLooper();
+        if (me == null) return;
+        final MessageQueue queue = me.mQueue;
         for (;;) {
-            Message msg = mQueue.next();
+            Message msg = queue.next();
             if (msg == null) {
                 return; // queue quit
             }
