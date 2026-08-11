@@ -41,15 +41,16 @@ echo "Using jar:   $JAR"
 rm -rf "$BUILD_DIR"
 mkdir -p "$CLASSES_DIR"
 
-# Collect all .java files.
-mapfile -t JAVA_FILES < <(find "$SRC_DIR" -name '*.java' | sort)
-if [[ ${#JAVA_FILES[@]} -eq 0 ]]; then
+# Collect all .java files (avoid mapfile; macOS default bash is 3.2).
+JAVA_FILES=$(find "$SRC_DIR" -name '*.java' | sort)
+if [[ -z "$JAVA_FILES" ]]; then
     echo "ERROR: No .java files found under $SRC_DIR" >&2
     exit 1
 fi
 
-echo "Compiling ${#JAVA_FILES[@]} Java files..."
-"$JAVAC" -encoding UTF-8 -d "$CLASSES_DIR" "${JAVA_FILES[@]}"
+echo "Compiling $(echo "$JAVA_FILES" | wc -l | tr -d ' ') Java files..."
+# shellcheck disable=SC2086
+"$JAVAC" -encoding UTF-8 -d "$CLASSES_DIR" $JAVA_FILES
 
 echo "Creating $JAR_PATH..."
 (cd "$CLASSES_DIR" && "$JAR" cf "$JAR_PATH" .)
