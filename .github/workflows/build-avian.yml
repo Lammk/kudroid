@@ -51,10 +51,16 @@ jobs:
           restore-keys: |
             avian-ios-arm64-${{ runner.os }}-
 
+      - name: Build KuDroid framework jar
+        run: |
+          bash framework/build.sh
+          ls -lh framework/build/framework.jar
+
       - name: Build Avian for iOS ARM64
         working-directory: third_party/jvm/avian
         run: |
-          # Patch makefile + boot.cpp for iOS (binaryToObject fails on macho).
+          # Patch makefile for iOS (binaryToObject fails on macho; embed the
+          # classpath jar via .incbin and merge the framework classes in).
           python3 "$GITHUB_WORKSPACE/scripts/patch-avian-ios.py"
           make platform=ios arch=arm64 use-clang=true
 

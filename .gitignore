@@ -3,7 +3,7 @@
 /build-ios/
 /build-test/
 /tests/build/
-
+docs/
 # CMake
 CMakeCache.txt
 CMakeFiles/

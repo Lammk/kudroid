@@ -278,10 +278,16 @@ jobs:
           distribution: 'zulu'
           java-version: '8'
 
+      - name: Build KuDroid framework jar
+        run: |
+          bash framework/build.sh
+          ls -lh framework/build/framework.jar
+
       - name: Build Avian for iOS ARM64
         working-directory: third_party/jvm/avian
         run: |
-          # Patch makefile + boot.cpp for iOS (binaryToObject fails on macho).
+          # Patch makefile for iOS (binaryToObject fails on macho; embed the
+          # classpath jar via .incbin and merge the framework classes in).
           python3 "$GITHUB_WORKSPACE/scripts/patch-avian-ios.py"
           make platform=ios arch=arm64 use-clang=true
 
@@ -360,9 +366,6 @@ jobs:
           mkdir -p third_party/jvm/avian/build
           find avian-artifact -name 'libavian.a' -exec cp {} third_party/jvm/avian/build/libavian.a \;
           ls -lh third_party/jvm/avian/build/libavian.a
-          # Also copy the boot jar object if present (for embedding).
-          find avian-artifact -name 'boot-jar.o' -exec cp {} third_party/jvm/avian/build/boot-jar.o \;
-          ls -lh third_party/jvm/avian/build/
 
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
