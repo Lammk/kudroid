@@ -106,6 +106,7 @@ jobs:
           ./scripts/fetch-build-angle-ios.sh
 
       - name: Verify ANGLE build output
+        if: steps.angle-cache.outputs.cache-hit != 'true'
         run: |
           echo "=== ANGLE libs ==="
           ls -lh third_party/ANGLE/lib/ios-arm64/ || { echo "ANGLE libs missing — cache miss and build skipped"; exit 1; }
