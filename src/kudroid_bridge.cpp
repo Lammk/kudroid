@@ -21,11 +21,11 @@
 
 extern "C" struct JavaVM_* kudroid_jni_get_javavm(void);
 
-// ── Persistent logging to the app's writable folder ─────────────────────────
-// The app passes a directory (its Documents dir) via kudroid_set_log_dir().
-// Success logs are written as .txt files; crashes (signal-based, so no C++
-// exception fires) are captured by a signal handler that flushes the buffered
-// log to disk using only async-signal-safe calls before re-raising.
+// ── ghi nhật ký liên tục vào thư mục có thể ghi của ứng dụng ─────────────────────────
+// ứng dụng truyền một thư mục (thư mục documents của nó) thông qua kudroid_set_log_dir().
+// nhật ký thành công được ghi dưới dạng tệp .txt; các sự cố (dựa trên tín hiệu, do đó không có ngoại lệ
+// c++ nào được kích hoạt) được trình xử lý tín hiệu bắt, bộ đệm nhật ký được đẩy
+// vào đĩa chỉ bằng các lệnh gọi an toàn tín hiệu bất đồng bộ trước khi kích hoạt lại.
 static char g_logDir[1024] = {0};
 const char* g_kudroid_log_dir_ptr = g_logDir;
 
@@ -71,12 +71,12 @@ static void appendTestHeader(std::string& log, const char* test, const char* pat
 static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
     if (sig == SIGTRAP) {
         if (kudroid::bionic_handle_tpidr_trap(ucontext)) {
-            return; // Handled successfully, resume execution!
+            return; // đã xử lý thành công, tiếp tục thực thi!
         }
     }
     
     if (g_logDir[0]) {
-        // Build "<dir>/kudroid_crash.log" without heap allocation.
+        // xây dựng "<dir>/kudroid_crash.log" mà không cấp phát vùng nhớ heap.
         char path[1200];
         size_t dl = strlen(g_logDir);
         if (dl >= sizeof(path) - 32) dl = sizeof(path) - 32;
@@ -92,7 +92,7 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
             int m = snprintf(sigline, sizeof(sigline), "signal = %d\n", sig);
             if (m > 0) (void)!write(fd, sigline, (size_t)m);
 
-            // Print fault address
+            // in địa chỉ lỗi
             if (info) {
                 m = snprintf(sigline, sizeof(sigline),
                     "fault_addr = %p\nsi_code = %d\n",
@@ -100,7 +100,7 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
                 if (m > 0) (void)!write(fd, sigline, (size_t)m);
             }
 
-            // Print PC register (ARM64)
+            // in thanh ghi pc (arm64)
 #if defined(__aarch64__) || defined(__arm64__)
             if (ucontext) {
 #if defined(__APPLE__)
@@ -174,7 +174,7 @@ extern "C" void kudroid_set_documents_dir(const char* dir) {
     if (dir) kudroid::VFSPathRemapper::getInstance().setDocumentsDirectory(dir);
 }
 
-// Global metal layer pointer accessible by BionicShim
+// con trỏ lớp metal toàn cục có thể truy cập bằng bionicshim
 void* g_metalLayer = nullptr;
 int g_metalLayerWidth = 1080;
 int g_metalLayerHeight = 1920;
@@ -236,11 +236,10 @@ extern "C" const char* kudroid_install_apk(const char* apkPath) {
 #include <sys/mman.h>
 #include <unistd.h>
 #include <TargetConditionals.h>
-#include <libkern/OSCacheControl.h>
 
-// csops() is a private API but stable; used to read the process' code-signing
-// status. CS_DEBUGGED is set when a debugger (stikdebug/debugserver) has
-// enabled dynamic code signing, which is what lets PROT_EXEC pages run.
+// csops() là một api riêng tư nhưng ổn định; được sử dụng để đọc trạng thái chữ ký mã của quá trình.
+// cs_debugged được đặt khi đường dẫn jit (ký mã động) hoạt động
+// dưới livecontainer / trình gỡ lỗi, điều này cho phép các trang prot_exec chạy.
 extern "C" int csops(pid_t pid, unsigned int ops, void* useraddr, size_t usersize);
 #ifndef CS_OPS_STATUS
 #define CS_OPS_STATUS 0
@@ -249,54 +248,18 @@ extern "C" int csops(pid_t pid, unsigned int ops, void* useraddr, size_t usersiz
 #define CS_DEBUGGED 0x10000000
 #endif
 
-// Probe executable memory by actually executing a tiny function from an
-// mmap'd PROT_EXEC page. This is the most reliable signal: on a hardened
-// runtime without JIT, the mmap/mprotect may succeed but the call faults
-// (SIGBUS/SIGILL). If the call returns, executable memory genuinely works.
-// This covers TrollStore (permanent signing) and sideloads signed with
-// com.apple.security.cs.allow-jit, not just debugger-attached processes.
-static int probe_executable_memory(void) {
-    // AArch64: mov w0, #1; ret  => 0x52800020, 0xD65F03C0
-    // x86_64:  mov eax, 1; ret  => 0xB8 0x01 0x00 0x00 0x00, 0xC3
-#if defined(__aarch64__)
-    static const uint32_t code[] = { 0x52800020, 0xD65F03C0 };
-    const size_t len = sizeof(code);
-#else
-    static const uint8_t code[] = { 0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3 };
-    const size_t len = sizeof(code);
-#endif
-
-    void* page = mmap(nullptr, 4096, PROT_READ | PROT_WRITE,
-                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (page == MAP_FAILED) return 0;
-    memcpy(page, code, len);
-    if (mprotect(page, 4096, PROT_READ | PROT_EXEC) != 0) {
-        munmap(page, 4096);
+// trả về 1 nếu jit (bộ nhớ có thể thực thi) có vẻ khả dụng, ngược lại trả về 0.
+static int kudroid_jit_available(void) {
+    unsigned int flags = 0;
+    // cs_debugged là tín hiệu đáng tin cậy duy nhất trên ios: nó được đặt khi trình gỡ lỗi
+    // (livecontainer/debugserver) đã bật ký mã động, điều này
+    // chính xác cho phép thực thi các trang prot_exec. thăm dò rwx mmap không
+    // đáng tin cậy — lời gọi hệ thống thành công mà không cần jit, nhưng quá trình thực thi vẫn bị lỗi,
+    // đưa ra kết quả sai "enabled".
+    if (csops(getpid(), CS_OPS_STATUS, &flags, sizeof(flags)) != 0) {
         return 0;
     }
-    sys_icache_invalidate(page, len);
-
-    // Call the probe function. If executable memory is not permitted, this
-    // faults (SIGBUS/SIGILL) — our crash handler may catch it, but the common
-    // case on a hardened runtime is that the call simply never returns.
-    int (*fn)(void) = reinterpret_cast<int (*)(void)>(page);
-    int result = fn();
-    munmap(page, 4096);
-    return result == 1 ? 1 : 0;
-}
-
-// Returns 1 if JIT (executable memory) appears usable, 0 otherwise.
-static int kudroid_jit_available(void) {
-    // Fast path: a debugger (stikdebug/debugserver) has enabled dynamic code
-    // signing, which definitely permits PROT_EXEC pages.
-    unsigned int flags = 0;
-    if (csops(getpid(), CS_OPS_STATUS, &flags, sizeof(flags)) == 0 &&
-        (flags & CS_DEBUGGED)) {
-        return 1;
-    }
-    // Otherwise, actually probe executable memory. This covers TrollStore and
-    // sideloads signed with allow-jit / allow-unsigned-executable-memory.
-    return probe_executable_memory();
+    return (flags & CS_DEBUGGED) ? 1 : 0;
 }
 #else
 static int kudroid_jit_available(void) { return 1; }
@@ -313,7 +276,7 @@ extern "C" const char* kudroid_jit_status(void) {
 
 #include "kudroid/kudroid_jni.h"
 
-// --- NativeActivity Definitions ---
+// --- định nghĩa nativeactivity ---
 
 struct ANativeActivityCallbacks {
     void* onStart;
@@ -348,7 +311,7 @@ struct ANativeActivity {
 };
 
 
-// Declare the external setter
+// khai báo setter bên ngoài
 extern "C" void kudroid_jni_set_log_callback(void (*cb)(const char*));
 
 extern "C" char* kudroid_test_jvm(const char* rt_jar_path) {
@@ -359,7 +322,7 @@ extern "C" char* kudroid_test_jvm(const char* rt_jar_path) {
     log += "[kudroid_core] Phase: init JVM via JNI Bridge\n";
     kudroid::bionic_shim_reset_trace();
 
-    // Global variable to hold log reference for C callback
+    // biến toàn cục để giữ tham chiếu nhật ký cho lệnh gọi lại c
     static std::string* g_jvm_test_log = &log;
     g_jvm_test_log = &log;
     
@@ -434,7 +397,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
         } else {
             kudroid::LibraryManager manager;
             
-            // Collect all .so files to load
+            // thu thập tất cả các tệp .so để tải
             std::vector<std::string> soFiles;
             for (const auto& entry : std::filesystem::directory_iterator(libDir)) {
                 if (entry.path().extension() == ".so") {
@@ -467,8 +430,8 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                 
                 mirrorCrash(log);
 
-                // Ensure the Avian JVM is initialized before invoking JNI_OnLoad.
-                // The boot jar (framework classes) is embedded in the binary.
+                // đảm bảo jvm avian được khởi tạo trước khi gọi jni_onload.
+                // tệp boot jar (các lớp khung) được nhúng trong tệp nhị phân.
                 kudroid_jni_init_jvm("", "");
                 JavaVM* jvm = kudroid_jni_get_javavm();
                 if (!jvm) {
@@ -489,7 +452,6 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                         mirrorCrash(log);
 
                         bionic_init_main_thread_tls();
-                        log += "[kudroid_core] Main thread TLS initialized.\n";
 
                         jint version = jni_onload(jvm, nullptr);
                         log += "[kudroid_core] JNI_OnLoad returned version: " + std::to_string(version) + "\n";
@@ -506,9 +468,9 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                         log += "[kudroid_core] Found ANativeActivity_onCreate, invoking...\n";
                         mirrorCrash(log);
 
-                        // Set up the activity callbacks so the game can start
-                        // rendering and receiving input. These are the hooks
-                        // the game registers handlers for.
+                        // thiết lập các lệnh gọi lại hoạt động để trò chơi có thể bắt đầu
+                        // kết xuất và nhận đầu vào. đây là các hook
+                        // mà trò chơi đăng ký các trình xử lý.
                         static ANativeActivityCallbacks mock_callbacks = {};
                         static ANativeActivity mock_activity = {
                             &mock_callbacks,
@@ -523,31 +485,22 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                             nullptr  // obbPath
                         };
                         kudroid_jni_get_env(jvm, reinterpret_cast<void**>(&mock_activity.env), 0);
-                        {
-                            char envBuf[128];
-                            snprintf(envBuf, sizeof(envBuf), "[kudroid_core] Activity env attached (JNIEnv=%p).\n", (void*)mock_activity.env);
-                            log += envBuf;
-                        }
-                        mirrorCrash(log);
 
-                        // Invoke onCreate. The game stores its state in
-                        // activity->instance and registers its callbacks.
+                        // gọi oncreate. trò chơi lưu trữ trạng thái của nó trong
+                        // activity->instance và đăng ký các lệnh gọi lại của nó.
                         native_activity_create(&mock_activity, nullptr, 0);
                         log += "[kudroid_core] ANativeActivity_onCreate completed.\n";
                         mirrorCrash(log);
 
-                        // Drive the lifecycle so the game starts rendering:
-                        // onStart -> onResume -> onWindowFocusChanged(true)
-                        // -> onNativeWindowCreated -> onInputQueueCreated.
+                        // điều khiển vòng đời để trò chơi bắt đầu kết xuất:
+                        // onstart -> onresume -> onwindowfocuschanged(true)
+                        // -> onnativewindowcreated -> oninputqueuecreated.
                         auto call = [&](const char* name, void* fn) {
                             if (fn) {
                                 log += std::string("[kudroid_core] Calling ") + name + "\n";
                                 mirrorCrash(log);
-                                // All callbacks take (ANativeActivity*, ...).
+                                // tất cả các lệnh gọi lại đều nhận (anativeactivity*, ...).
                                 reinterpret_cast<void (*)(ANativeActivity*)>(fn)(&mock_activity);
-                                log += std::string("[kudroid_core] ") + name + " returned.\n";
-                            } else {
-                                log += std::string("[kudroid_core] ") + name + " not registered (null).\n";
                             }
                         };
                         call("onStart", mock_callbacks.onStart);
@@ -558,9 +511,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                         log += "[kudroid_core] Lifecycle callbacks invoked.\n";
                         mirrorCrash(log);
                     } else {
-                        log += "[kudroid_core] ANativeActivity_onCreate not found. ";
-                        log += "App has no activity entry point; JNI_OnLoad was already invoked ";
-                        log += "(games that spawn their render thread in JNI_OnLoad will still run).\n";
+                        log += "[kudroid_core] ANativeActivity_onCreate not found.\n";
                         mirrorCrash(log);
                     }
                 }
@@ -698,7 +649,7 @@ extern "C" const char* kudroid_load_elf(const char* path) {
                 log += buf;
             }
 
-            // Try map (stub for now)
+            // thử ánh xạ (hiện tại là hàm giả)
             log += "[kudroid_core] Phase: map PT_LOAD segments\n";
             if (loader.map()) {
                 log += "[kudroid_core] Map OK.\n";
@@ -707,7 +658,7 @@ extern "C" const char* kudroid_load_elf(const char* path) {
                 log += buf;
             }
 
-            // Try relocate (stub for now)
+            // thử định vị lại (hiện tại là hàm giả)
             log += "[kudroid_core] Phase: resolve relocations/imports\n";
             if (loader.relocate()) {
                 log += "[kudroid_core] Relocate OK.\n";
@@ -746,12 +697,12 @@ extern "C" const char* kudroid_execution_test(const char* path) {
     snprintf(buf, sizeof(buf), "[kudroid_core] Execution test for: %s\n", path);
     log += buf;
 
-    // Refuse to run native code when JIT is off: executing PROT_EXEC pages
-    // without dynamic code signing faults the whole process, and the buffered
-    // log below would never be returned. Fail loudly instead of crashing.
+    // từ chối chạy mã gốc khi jit bị tắt: việc thực thi các trang prot_exec
+    // mà không có ký mã động sẽ làm lỗi toàn bộ quá trình và nhật ký
+    // được đệm bên dưới sẽ không bao giờ được trả về. hãy thất bại lớn tiếng thay vì gặp sự cố.
     if (!kudroid_jit_available()) {
         log += "[kudroid_core] ABORT: JIT is Disabled — cannot execute native code.\n";
-        log += "[kudroid_core] Enable JIT (stikdebug/debugger) or re-sign with allow-jit, then retry.\n";
+        log += "[kudroid_core] Enable JIT in LiveContainer and retry.\n";
         char* result = (char*)malloc(log.size() + 1);
         if (result) memcpy(result, log.c_str(), log.size() + 1);
         return result;
@@ -794,9 +745,9 @@ extern "C" const char* kudroid_execution_test(const char* path) {
         log += "[kudroid_core] Phase: relocate/import binding -> OK\n";
         log += "[kudroid_core] Phase: invoke exported kudroid_add(40, 20)\n";
 
-        // Snapshot the log for the crash handler: the call below jumps into
-        // JIT'd code and may fault (signal, not exception). If it does, the
-        // handler flushes this buffer to kudroid_crash.log.
+        // chụp nhanh nhật ký cho trình xử lý sự cố: lời gọi bên dưới nhảy vào
+        // mã đã được jit và có thể bị lỗi (tín hiệu, không phải ngoại lệ). nếu có,
+        // trình xử lý sẽ đẩy bộ đệm này vào kudroid_crash.log.
         mirrorCrash(log);
 
         std::string execResult = loader.testExecution();
@@ -826,42 +777,29 @@ extern "C" const char* kudroid_bionic_execution_test(const char* path) {
         log += "[kudroid_core] ABORT: JIT is Disabled\n";
     } else {
         kudroid::ElfLoader loader(path);
-        log += "[kudroid_core] Phase: parse ELF...\n";
         if (!loader.parse()) {
             log += "[kudroid_core] PARSE FAILED: " + std::string(loader.lastError()) + "\n";
+        } else if (!loader.map()) {
+            log += "[kudroid_core] MAP FAILED: " + std::string(loader.lastError()) + "\n";
+        } else if (!loader.relocate()) {
+            log += "[kudroid_core] RELOCATE FAILED: " + std::string(loader.lastError()) + "\n";
         } else {
-            log += "[kudroid_core] Phase: parse -> OK\n";
-            log += "[kudroid_core] Phase: map segments...\n";
-            if (!loader.map()) {
-                log += "[kudroid_core] MAP FAILED: " + std::string(loader.lastError()) + "\n";
+            log += "[kudroid_core] ELF mapped and Bionic imports bound.\n";
+            void* address = loader.getSymbolAddress("kudroid_bionic_test");
+            if (!address) {
+                log += "[kudroid_core] SYMBOL FAILED: kudroid_bionic_test not found\n";
             } else {
-                log += "[kudroid_core] Phase: map -> OK\n";
-                log += "[kudroid_core] Phase: relocate + bind imports...\n";
-                if (!loader.relocate()) {
-                    log += "[kudroid_core] RELOCATE FAILED: " + std::string(loader.lastError()) + "\n";
-                } else {
-                    log += "[kudroid_core] Phase: relocate -> OK\n";
-                    log += "[kudroid_core] ELF mapped and Bionic imports bound.\n";
-                    void* address = loader.getSymbolAddress("kudroid_bionic_test");
-                    if (!address) {
-                        log += "[kudroid_core] SYMBOL FAILED: kudroid_bionic_test not found\n";
-                    } else {
-                        char symBuf[128];
-                        snprintf(symBuf, sizeof(symBuf), "[kudroid_core] Found kudroid_bionic_test at %p\n", address);
-                        log += symBuf;
-                        log += "[kudroid_core] Running kudroid_bionic_test()...\n";
-                        const char* shimTrace = kudroid::bionic_shim_trace();
-                        if (shimTrace && *shimTrace) {
-                            log += "[kudroid_core] Bionic trace before call:\n";
-                            log += shimTrace;
-                        }
-                        mirrorCrash(log);
-                        using TestFunction = int (*)();
-                        const int result = reinterpret_cast<TestFunction>(address)();
-                        log += "[kudroid_core] BIONIC TEST RESULT: " +
-                               std::to_string(result) + (result == 0 ? " (SUCCESS)\n" : " (FAILED)\n");
-                    }
+                log += "[kudroid_core] Running kudroid_bionic_test()...\n";
+                const char* shimTrace = kudroid::bionic_shim_trace();
+                if (shimTrace && *shimTrace) {
+                    log += "[kudroid_core] Bionic trace before call:\n";
+                    log += shimTrace;
                 }
+                mirrorCrash(log);
+                using TestFunction = int (*)();
+                const int result = reinterpret_cast<TestFunction>(address)();
+                log += "[kudroid_core] BIONIC TEST RESULT: " +
+                       std::to_string(result) + (result == 0 ? " (SUCCESS)\n" : " (FAILED)\n");
             }
         }
     }
@@ -969,7 +907,7 @@ extern "C" const char* kudroid_multi_elf_test(const char* consumerPath,
 extern "C" int kudroid_clear_app_cache(const char* package_name) {
     if (!package_name) return 0;
     
-    // Construct the path to the app's cache directory using VFS mapping logic
+    // xây dựng đường dẫn đến thư mục bộ đệm của ứng dụng bằng logic ánh xạ vfs
     const std::string androidRoot = kudroid::VFSPathRemapper::getInstance().androidRoot();
     std::filesystem::path cachePath = std::filesystem::path(androidRoot) / "data/data" / package_name / "cache";
     std::filesystem::path codeCachePath = std::filesystem::path(androidRoot) / "data/data" / package_name / "code_cache";
@@ -1067,7 +1005,7 @@ extern "C" const char* kudroid_syscall_so_test(const char* path) {
                 log += "[kudroid_syscall] Running kudroid_syscall_test()...\n";
                 int (*test_func)() = reinterpret_cast<int (*)()>(address);
                 
-                // Clear BionicShim trace buffer
+                // xóa bộ đệm theo dõi bionicshim
                 kudroid::bionic_shim_reset_trace();
                 
                 int result = test_func();
@@ -1093,65 +1031,52 @@ extern "C" const char* kudroid_jni_massive_so_test(const char* path) {
         log += "[kudroid_jni] ABORT: JIT is Disabled — cannot execute ARM64 ELF\n";
     } else {
         kudroid::ElfLoader loader(path);
-        log += "[kudroid_jni] Phase: parse ELF...\n";
         if (!loader.parse()) {
             log += "[kudroid_jni] PARSE FAILED: " + std::string(loader.lastError()) + "\n";
+        } else if (!loader.map()) {
+            log += "[kudroid_jni] MAP FAILED: " + std::string(loader.lastError()) + "\n";
+        } else if (!loader.relocate()) {
+            log += "[kudroid_jni] RELOCATE FAILED: " + std::string(loader.lastError()) + "\n";
         } else {
-            log += "[kudroid_jni] Phase: parse -> OK\n";
-            log += "[kudroid_jni] Phase: map segments...\n";
-            if (!loader.map()) {
-                log += "[kudroid_jni] MAP FAILED: " + std::string(loader.lastError()) + "\n";
+            loader.registerEhFrame();
+            loader.executeInit();
+            log += "[kudroid_jni] ELF mapped, relocated, and initialized.\n";
+            
+            // thực thi jni_onload nếu có
+            void* jniOnLoadAddr = loader.getSymbolAddress("JNI_OnLoad");
+            if (jniOnLoadAddr) {
+                log += "[kudroid_jni] Found JNI_OnLoad, executing...\n";
+                // lấy jvm từ bộ nối
+                using JNI_OnLoad_t = jint (*)(JavaVM*, void*);
+                JNI_OnLoad_t jniOnLoad = reinterpret_cast<JNI_OnLoad_t>(jniOnLoadAddr);
+                jint version = jniOnLoad(kudroid_jni_get_javavm(), nullptr);
+                log += "[kudroid_jni] JNI_OnLoad returned version: 0x" + std::to_string(version) + "\n";
+            }
+            
+            void* address = loader.getSymbolAddress("kudroid_jni_massive_test");
+            if (!address) {
+                log += "[kudroid_jni] SYMBOL FAILED: kudroid_jni_massive_test not found\n";
             } else {
-                log += "[kudroid_jni] Phase: map -> OK\n";
-                log += "[kudroid_jni] Phase: relocate + bind imports...\n";
-                if (!loader.relocate()) {
-                    log += "[kudroid_jni] RELOCATE FAILED: " + std::string(loader.lastError()) + "\n";
-                } else {
-                    log += "[kudroid_jni] Phase: relocate -> OK\n";
-                    loader.registerEhFrame();
-                    loader.executeInit();
-                    log += "[kudroid_jni] ELF mapped, relocated, and initialized.\n";
-                    
-                    // Execute JNI_OnLoad if present
-                    void* jniOnLoadAddr = loader.getSymbolAddress("JNI_OnLoad");
-                    if (jniOnLoadAddr) {
-                        log += "[kudroid_jni] Found JNI_OnLoad, executing...\n";
-                        // Get the JVM from the bridge
-                        using JNI_OnLoad_t = jint (*)(JavaVM*, void*);
-                        JNI_OnLoad_t jniOnLoad = reinterpret_cast<JNI_OnLoad_t>(jniOnLoadAddr);
-                        jint version = jniOnLoad(kudroid_jni_get_javavm(), nullptr);
-                        log += "[kudroid_jni] JNI_OnLoad returned version: 0x" + std::to_string(version) + "\n";
-                    }
-                    
-                    void* address = loader.getSymbolAddress("kudroid_jni_massive_test");
-                    if (!address) {
-                        log += "[kudroid_jni] SYMBOL FAILED: kudroid_jni_massive_test not found\n";
-                    } else {
-                        char symBuf[128];
-                        snprintf(symBuf, sizeof(symBuf), "[kudroid_jni] Found kudroid_jni_massive_test at %p\n", address);
-                        log += symBuf;
-                        log += "[kudroid_jni] Running kudroid_jni_massive_test()...\n";
-                        int (*test_func)(void*) = reinterpret_cast<int (*)(void*)>(address);
-                        
-                        // Set up callback
-                        static std::string* g_jni_test_log = &log;
-                        g_jni_test_log = &log;
-                        kudroid_jni_set_log_callback([](const char* msg) {
-                            if (g_jni_test_log) {
-                                *g_jni_test_log += "[kudroid_jni] ";
+                log += "[kudroid_jni] Running kudroid_jni_massive_test()...\n";
+                int (*test_func)(void*) = reinterpret_cast<int (*)(void*)>(address);
+                
+                // thiết lập lệnh gọi lại
+                static std::string* g_jni_test_log = &log;
+                g_jni_test_log = &log;
+                kudroid_jni_set_log_callback([](const char* msg) {
+                    if (g_jni_test_log) {
+                        *g_jni_test_log += "[kudroid_jni] ";
                         *g_jni_test_log += msg;
                         *g_jni_test_log += "\n";
                     }
                 });
 
-                kudroid_jni_init_jvm("", ""); // Make sure it's init
+                kudroid_jni_init_jvm("", ""); // đảm bảo nó được khởi tạo
                 void* vm = kudroid_jni_get_javavm();
                 
                 int result = test_func(vm);
                 log += "[kudroid_jni] TEST RESULT: " +
                        (result == 0 ? std::string("0 (SUCCESS)") : std::to_string(result) + " (FAILED)") + "\n";
-                    }
-                }
             }
         }
     }
@@ -1159,9 +1084,9 @@ extern "C" const char* kudroid_jni_massive_so_test(const char* path) {
     return strdup(log.c_str());
 }
 
-// GPU .so Execution Tests — loads the ARM64 ELF test .so through the ELF
-// loader, which calls dlopen/dlsym for GPU libs. BionicShim intercepts those
-// and maps them directly to iOS native (MoltenVK / ANGLE).
+// các bài kiểm tra thực thi gpu .so — tải tệp .so kiểm tra elf arm64 thông qua trình
+// tải elf, trình này gọi dlopen/dlsym cho các thư viện gpu. bionicshim chặn các lời gọi đó
+// và ánh xạ chúng trực tiếp tới gốc ios (moltenvk / angle).
 // ─────────────────────────────────────────────────────────────────────────────
 
 extern "C" const char* kudroid_gpu_vulkan_so_test(const char* path) {
@@ -1174,39 +1099,26 @@ extern "C" const char* kudroid_gpu_vulkan_so_test(const char* path) {
         log += "[kudroid_gpu] ABORT: JIT is Disabled — cannot execute ARM64 ELF\n";
     } else {
         kudroid::ElfLoader loader(path);
-        log += "[kudroid_gpu] Phase: parse ELF...\n";
         if (!loader.parse()) {
             log += "[kudroid_gpu] PARSE FAILED: " + std::string(loader.lastError()) + "\n";
+        } else if (!loader.map()) {
+            log += "[kudroid_gpu] MAP FAILED: " + std::string(loader.lastError()) + "\n";
+        } else if (!loader.relocate()) {
+            log += "[kudroid_gpu] RELOCATE FAILED: " + std::string(loader.lastError()) + "\n";
         } else {
-            log += "[kudroid_gpu] Phase: parse -> OK\n";
-            log += "[kudroid_gpu] Phase: map segments...\n";
-            if (!loader.map()) {
-                log += "[kudroid_gpu] MAP FAILED: " + std::string(loader.lastError()) + "\n";
+            log += "[kudroid_gpu] ELF mapped and Bionic imports bound.\n";
+            void* address = loader.getSymbolAddress("kudroid_gpu_vulkan_test");
+            if (!address) {
+                log += "[kudroid_gpu] SYMBOL FAILED: kudroid_gpu_vulkan_test not found\n";
             } else {
-                log += "[kudroid_gpu] Phase: map -> OK\n";
-                log += "[kudroid_gpu] Phase: relocate + bind imports...\n";
-                if (!loader.relocate()) {
-                    log += "[kudroid_gpu] RELOCATE FAILED: " + std::string(loader.lastError()) + "\n";
-                } else {
-                    log += "[kudroid_gpu] Phase: relocate -> OK\n";
-                    log += "[kudroid_gpu] ELF mapped and Bionic imports bound.\n";
-                    void* address = loader.getSymbolAddress("kudroid_gpu_vulkan_test");
-                    if (!address) {
-                        log += "[kudroid_gpu] SYMBOL FAILED: kudroid_gpu_vulkan_test not found\n";
-                    } else {
-                        char symBuf[128];
-                        snprintf(symBuf, sizeof(symBuf), "[kudroid_gpu] Found kudroid_gpu_vulkan_test at %p\n", address);
-                        log += symBuf;
-                        log += "[kudroid_gpu] Running kudroid_gpu_vulkan_test()...\n";
-                        mirrorCrash(log);
-                        using VkTestFn = int (*)(uint32_t*);
-                        uint32_t ext_count = 0;
-                        const int result = reinterpret_cast<VkTestFn>(address)(&ext_count);
-                        log += "[kudroid_gpu] VULKAN TEST RESULT: " +
-                               std::to_string(result) + (result == 0 ? " (SUCCESS)" : " (FAILED)") + "\n";
-                        log += "[kudroid_gpu] Vulkan extensions found: " + std::to_string(ext_count) + "\n";
-                    }
-                }
+                log += "[kudroid_gpu] Running kudroid_gpu_vulkan_test()...\n";
+                mirrorCrash(log);
+                using VkTestFn = int (*)(uint32_t*);
+                uint32_t ext_count = 0;
+                const int result = reinterpret_cast<VkTestFn>(address)(&ext_count);
+                log += "[kudroid_gpu] VULKAN TEST RESULT: " +
+                       std::to_string(result) + (result == 0 ? " (SUCCESS)" : " (FAILED)") + "\n";
+                log += "[kudroid_gpu] Vulkan extensions found: " + std::to_string(ext_count) + "\n";
             }
         }
     }
@@ -1231,37 +1143,24 @@ extern "C" const char* kudroid_gpu_opengl_so_test(const char* path) {
         log += "[kudroid_gpu] ABORT: JIT is Disabled — cannot execute ARM64 ELF\n";
     } else {
         kudroid::ElfLoader loader(path);
-        log += "[kudroid_gpu] Phase: parse ELF...\n";
         if (!loader.parse()) {
             log += "[kudroid_gpu] PARSE FAILED: " + std::string(loader.lastError()) + "\n";
+        } else if (!loader.map()) {
+            log += "[kudroid_gpu] MAP FAILED: " + std::string(loader.lastError()) + "\n";
+        } else if (!loader.relocate()) {
+            log += "[kudroid_gpu] RELOCATE FAILED: " + std::string(loader.lastError()) + "\n";
         } else {
-            log += "[kudroid_gpu] Phase: parse -> OK\n";
-            log += "[kudroid_gpu] Phase: map segments...\n";
-            if (!loader.map()) {
-                log += "[kudroid_gpu] MAP FAILED: " + std::string(loader.lastError()) + "\n";
+            log += "[kudroid_gpu] ELF mapped and Bionic imports bound.\n";
+            void* address = loader.getSymbolAddress("kudroid_gpu_opengl_test");
+            if (!address) {
+                log += "[kudroid_gpu] SYMBOL FAILED: kudroid_gpu_opengl_test not found\n";
             } else {
-                log += "[kudroid_gpu] Phase: map -> OK\n";
-                log += "[kudroid_gpu] Phase: relocate + bind imports...\n";
-                if (!loader.relocate()) {
-                    log += "[kudroid_gpu] RELOCATE FAILED: " + std::string(loader.lastError()) + "\n";
-                } else {
-                    log += "[kudroid_gpu] Phase: relocate -> OK\n";
-                    log += "[kudroid_gpu] ELF mapped and Bionic imports bound.\n";
-                    void* address = loader.getSymbolAddress("kudroid_gpu_opengl_test");
-                    if (!address) {
-                        log += "[kudroid_gpu] SYMBOL FAILED: kudroid_gpu_opengl_test not found\n";
-                    } else {
-                        char symBuf[128];
-                        snprintf(symBuf, sizeof(symBuf), "[kudroid_gpu] Found kudroid_gpu_opengl_test at %p\n", address);
-                        log += symBuf;
-                        log += "[kudroid_gpu] Running kudroid_gpu_opengl_test()...\n";
-                        mirrorCrash(log);
-                        using GlTestFn = int (*)();
-                        const int result = reinterpret_cast<GlTestFn>(address)();
-                        log += "[kudroid_gpu] OPENGL+EGL TEST RESULT: " +
-                               std::to_string(result) + (result == 0 ? " (SUCCESS)" : " (FAILED)") + "\n";
-                    }
-                }
+                log += "[kudroid_gpu] Running kudroid_gpu_opengl_test()...\n";
+                mirrorCrash(log);
+                using GlTestFn = int (*)();
+                const int result = reinterpret_cast<GlTestFn>(address)();
+                log += "[kudroid_gpu] OPENGL+EGL TEST RESULT: " +
+                       std::to_string(result) + (result == 0 ? " (SUCCESS)" : " (FAILED)") + "\n";
             }
         }
     }
@@ -1317,7 +1216,7 @@ extern "C" const char* kudroid_load_apk(const char* apkPath) {
                     log += "[kudroid_apk] WARNING: Failed to load " + entry.path().filename().string() + "\n";
                 } else {
                     log += "[kudroid_apk] Loaded successfully.\n";
-                    // Attempt to call JNI_OnLoad
+                    // cố gắng gọi jni_onload
                     void* jniOnLoadAddr = libManager.resolveGlobalSymbol("JNI_OnLoad");
                     if (jniOnLoadAddr) {
                         log += "[kudroid_apk] Found JNI_OnLoad in library, executing...\n";
@@ -1338,18 +1237,18 @@ extern "C" const char* kudroid_load_apk(const char* apkPath) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DEX → JAR translation (with cache)
+// dịch dex → jar (có bộ đệm)
 //
-// Translates a DEX file into a JAR of class stubs (via DexToJar), using the
-// DexCacheManager to cache the result keyed by DEX hash + tool version.
-// Returns a malloc'd log string; caller must free() it.
+// dịch một tệp dex thành một tệp jar của các lớp giả (thông qua dextojar), sử dụng
+// dexcachemanager để lưu trữ kết quả được khóa bằng mã băm dex + phiên bản công cụ.
+// trả về một chuỗi nhật ký được malloc; người gọi phải giải phóng nó bằng free().
 // ─────────────────────────────────────────────────────────────────────────────
 extern "C" const char* kudroid_translate_dex(const char* dexPath) {
     if (!dexPath || !*dexPath) {
         return strdup("[kudroid_dex] ERROR: null DEX path\n");
     }
 
-    // Tool version — bump this when the translator logic changes.
+    // phiên bản công cụ — tăng số này khi logic trình biên dịch thay đổi.
     const int kDexToolVersion = 1;
 
     std::string log;
@@ -1357,7 +1256,7 @@ extern "C" const char* kudroid_translate_dex(const char* dexPath) {
 
     auto& cache = kudroid::DexCacheManager::getInstance();
     if (cache.cacheDirectory().empty()) {
-        // Default cache dir: Documents/android_cache (set via kudroid_set_log_dir).
+        // thư mục bộ đệm mặc định: documents/android_cache (được thiết lập thông qua kudroid_set_log_dir).
         if (g_logDir[0]) {
             cache.setCacheDirectory(std::string(g_logDir) + "/android_cache");
         }
@@ -1374,7 +1273,7 @@ extern "C" const char* kudroid_translate_dex(const char* dexPath) {
     log += "[kudroid_dex] Translation OK: " + std::to_string(jar.size()) + " bytes JAR\n";
     log += "[kudroid_dex] Cache dir: " + cache.cacheDirectory() + "\n";
 
-    // Write the JAR to disk so Avian can load it as a classpath.
+    // ghi tệp jar vào đĩa để avian có thể tải nó dưới dạng đường dẫn lớp.
     std::string jarPath = std::string(g_logDir) + "/translated_classes.jar";
     FILE* f = std::fopen(jarPath.c_str(), "wb");
     if (f) {

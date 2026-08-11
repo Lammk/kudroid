@@ -1,31 +1,31 @@
 package android.content.res;
 
 /**
- * Minimal android.content.res.AssetManager implementation.
+ * triển khai android.content.res.assetmanager tối thiểu.
  *
- * Provides access to the app's bundled assets. For KuDroid's minimal framework,
- * this is a stub that returns null/empty for asset lookups.
+ * cung cấp quyền truy cập vào các tài sản được đóng gói của ứng dụng. đối với khuôn khổ tối thiểu của kudroid,
+ * đây là một mô phỏng trả về null/trống cho các tra cứu tài sản.
  */
 public final class AssetManager {
     public AssetManager() {
     }
 
     /**
-     * Open an asset file. Returns null (not found) for now.
+     * mở một tệp nội dung. hiện tại trả về null (không tìm thấy).
      */
     public java.io.InputStream open(String fileName) throws java.io.IOException {
         throw new java.io.FileNotFoundException("Asset not found: " + fileName);
     }
 
     /**
-     * Open an asset file with access mode. Returns null for now.
+     * mở một tệp nội dung với chế độ truy cập. hiện tại trả về null.
      */
     public java.io.InputStream open(String fileName, int accessMode) throws java.io.IOException {
         return open(fileName);
     }
 
     /**
-     * List the assets in a directory. Returns empty array for now.
+     * liệt kê các tài sản trong một thư mục. hiện tại trả về mảng trống.
      */
     public String[] list(String path) {
         return new String[0];

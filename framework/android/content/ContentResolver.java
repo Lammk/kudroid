@@ -1,10 +1,10 @@
 package android.content;
 
 /**
- * Minimal android.content.ContentResolver implementation.
+ * triển khai android.content.contentresolver tối thiểu.
  *
- * Provides access to content providers. For KuDroid's minimal framework, this
- * is a stub that returns null/defaults.
+ * cung cấp quyền truy cập vào các nhà cung cấp nội dung. đối với khuôn khổ tối thiểu của kudroid,
+ * đây là một mô phỏng trả về null/mặc định.
  */
 public class ContentResolver {
     private final Context mContext;
@@ -14,14 +14,14 @@ public class ContentResolver {
     }
 
     /**
-     * Return the context this resolver was created with.
+     * trả về bối cảnh mà trình phân giải này được tạo ra.
      */
     public Context getContext() {
         return mContext;
     }
 
     /**
-     * Query a content URI. Returns null for now.
+     * truy vấn một uri nội dung. hiện tại trả về null.
      */
     public android.database.Cursor query(android.net.Uri uri, String[] projection,
                                          String selection, String[] selectionArgs,
@@ -30,21 +30,21 @@ public class ContentResolver {
     }
 
     /**
-     * Insert a row. Returns null for now.
+     * chèn một hàng. hiện tại trả về null.
      */
     public android.net.Uri insert(android.net.Uri url, android.content.ContentValues values) {
         return null;
     }
 
     /**
-     * Delete rows. Returns 0 for now.
+     * xóa các hàng. hiện tại trả về 0.
      */
     public int delete(android.net.Uri url, String where, String[] selectionArgs) {
         return 0;
     }
 
     /**
-     * Update rows. Returns 0 for now.
+     * cập nhật các hàng. hiện tại trả về 0.
      */
     public int update(android.net.Uri uri, android.content.ContentValues values,
                       String where, String[] selectionArgs) {

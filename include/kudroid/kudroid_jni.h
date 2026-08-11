@@ -7,17 +7,17 @@
 extern "C" {
 #endif
 
-// Initializes the JVM mapping and returns the global JavaVM pointer.
-// If the JVM is not initialized, it will be initialized here.
+// khởi tạo ánh xạ jvm và trả về con trỏ javavm toàn cục.
+// nếu jvm chưa được khởi tạo, nó sẽ được khởi tạo ở đây.
 jint kudroid_jni_get_env(JavaVM* vm, void** env, jint version);
 
-// Creates and initializes the Avian JVM instance if it hasn't been already.
+// tạo và khởi tạo phiên bản minijvm nếu nó chưa được thực hiện.
 void kudroid_jni_init_jvm(const char* bootclasspath, const char* classpath);
 
-// Destroys the Avian JVM instance and cleans up.
+// phá hủy phiên bản minijvm và dọn dẹp.
 void kudroid_jni_destroy_jvm(void);
 
-// Retrieves the global JavaVM instance used by kudroid.
+// lấy phiên bản javavm giả toàn cục được kudroid sử dụng.
 JavaVM* kudroid_jni_get_javavm(void);
 
 #ifdef __cplusplus

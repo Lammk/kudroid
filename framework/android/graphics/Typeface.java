@@ -1,18 +1,18 @@
 package android.graphics;
 
 /**
- * Minimal android.graphics.Typeface implementation.
+ * triển khai android.graphics.typeface tối thiểu.
  *
- * Represents a font. For KuDroid's minimal framework, this is a stub.
+ * đại diện cho một phông chữ. đối với khuôn khổ tối thiểu của kudroid, đây là một mô phỏng.
  */
 public class Typeface {
-    /** Default sans-serif typeface. */
+    /** phông chữ sans-serif mặc định. */
     public static final Typeface DEFAULT = new Typeface("sans-serif");
-    /** Default bold typeface. */
+    /** phông chữ đậm mặc định. */
     public static final Typeface DEFAULT_BOLD = new Typeface("sans-serif-bold");
-    /** Monospace typeface. */
+    /** phông chữ monospace. */
     public static final Typeface MONOSPACE = new Typeface("monospace");
-    /** Serif typeface. */
+    /** phông chữ serif. */
     public static final Typeface SERIF = new Typeface("serif");
 
     private final String mFamily;
@@ -22,28 +22,28 @@ public class Typeface {
     }
 
     /**
-     * Create a typeface from a family and style.
+     * tạo một phông chữ từ một họ và kiểu.
      */
     public static Typeface create(String familyName, int style) {
         return new Typeface(familyName);
     }
 
     /**
-     * Create a typeface from an existing one and a style.
+     * tạo một phông chữ từ một phông chữ hiện có và một kiểu.
      */
     public static Typeface create(Typeface family, int style) {
         return family != null ? family : DEFAULT;
     }
 
     /**
-     * Return the typeface family name.
+     * trả về tên họ phông chữ.
      */
     public String getFamily() {
         return mFamily;
     }
 
     /**
-     * Return the typeface style.
+     * trả về kiểu phông chữ.
      */
     public int getStyle() {
         return 0;

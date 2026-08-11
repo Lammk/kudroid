@@ -1,9 +1,9 @@
 package android.os;
 
 /**
- * Stub android.os.Vibrator.
+ * mô phỏng android.os.vibrator.
  *
- * Non-critical for app startup/rendering. Vibration is a no-op on iOS.
+ * không quan trọng đối với khởi động/kết xuất ứng dụng. rung là một thao tác không hoạt động (no-op) trên ios.
  */
 public class Vibrator {
     public Vibrator() {

@@ -5,24 +5,24 @@ import android.graphics.Canvas;
 import android.graphics.Rect;
 
 /**
- * Minimal android.view.View implementation.
+ * triển khai android.view.view tối thiểu.
  *
- * The base class for all UI widgets. For KuDroid's minimal framework, this
- * provides basic layout/draw stubs.
+ * lớp cơ sở cho tất cả các tiện ích ui. đối với khuôn khổ tối thiểu của kudroid, điều này
+ * cung cấp các mô phỏng bố cục/vẽ cơ bản.
  */
 public class View {
-    /** View visibility: visible. */
+    /** khả năng hiển thị của view: hiển thị. */
     public static final int VISIBLE = 0;
-    /** View visibility: invisible. */
+    /** khả năng hiển thị của view: vô hình. */
     public static final int INVISIBLE = 4;
-    /** View visibility: gone. */
+    /** khả năng hiển thị của view: biến mất. */
     public static final int GONE = 8;
 
-    /** Measure spec mode: unspecified. */
+    /** chế độ đặc tả đo lường: không được chỉ định. */
     public static final int UNSPECIFIED = 0;
-    /** Measure spec mode: exactly. */
+    /** chế độ đặc tả đo lường: chính xác. */
     public static final int EXACTLY = 1;
-    /** Measure spec mode: at most. */
+    /** chế độ đặc tả đo lường: nhiều nhất. */
     public static final int AT_MOST = 2;
 
     protected final Context mContext;
@@ -36,7 +36,7 @@ public class View {
     private OnClickListener mOnClickListener;
 
     /**
-     * Interface for click callbacks.
+     * giao diện cho các cuộc gọi lại nhấp chuột.
      */
     public interface OnClickListener {
         void onClick(View v);
@@ -47,70 +47,70 @@ public class View {
     }
 
     /**
-     * Return the context this view was created with.
+     * trả về ngữ cảnh mà view này được tạo với.
      */
     public Context getContext() {
         return mContext;
     }
 
     /**
-     * Return the view's id.
+     * trả về id của view.
      */
     public int getId() {
         return mId;
     }
 
     /**
-     * Set the view's id.
+     * thiết lập id của view.
      */
     public void setId(int id) {
         mId = id;
     }
 
     /**
-     * Return the view's left position.
+     * trả về vị trí bên trái của view.
      */
     public int getLeft() {
         return mLeft;
     }
 
     /**
-     * Return the view's top position.
+     * trả về vị trí trên cùng của view.
      */
     public int getTop() {
         return mTop;
     }
 
     /**
-     * Return the view's right position.
+     * trả về vị trí bên phải của view.
      */
     public int getRight() {
         return mRight;
     }
 
     /**
-     * Return the view's bottom position.
+     * trả về vị trí dưới cùng của view.
      */
     public int getBottom() {
         return mBottom;
     }
 
     /**
-     * Return the view's width.
+     * trả về chiều rộng của view.
      */
     public int getWidth() {
         return mRight - mLeft;
     }
 
     /**
-     * Return the view's height.
+     * trả về chiều cao của view.
      */
     public int getHeight() {
         return mBottom - mTop;
     }
 
     /**
-     * Set the view's layout bounds.
+     * thiết lập ranh giới bố cục của view.
      */
     public void layout(int l, int t, int r, int b) {
         mLeft = l;
@@ -120,42 +120,42 @@ public class View {
     }
 
     /**
-     * Return the view's visibility.
+     * trả về khả năng hiển thị của view.
      */
     public int getVisibility() {
         return mVisibility;
     }
 
     /**
-     * Set the view's visibility.
+     * thiết lập khả năng hiển thị của view.
      */
     public void setVisibility(int visibility) {
         mVisibility = visibility;
     }
 
     /**
-     * Return the view's parent.
+     * trả về cha của view.
      */
     public ViewGroup getParent() {
         return mParent;
     }
 
     /**
-     * Set the view's parent.
+     * thiết lập cha của view.
      */
     public void setParent(ViewGroup parent) {
         mParent = parent;
     }
 
     /**
-     * Set the click listener.
+     * thiết lập trình nghe nhấp chuột.
      */
     public void setOnClickListener(OnClickListener l) {
         mOnClickListener = l;
     }
 
     /**
-     * Perform a click.
+     * thực hiện một cú nhấp chuột.
      */
     public boolean performClick() {
         if (mOnClickListener != null) {
@@ -166,71 +166,71 @@ public class View {
     }
 
     /**
-     * Measure the view.
+     * đo view.
      */
     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
     }
 
     /**
-     * Measure the view (invoked by parent).
+     * đo view (được gọi bởi cha).
      */
     public void measure(int widthMeasureSpec, int heightMeasureSpec) {
         onMeasure(widthMeasureSpec, heightMeasureSpec);
     }
 
     /**
-     * Draw the view.
+     * vẽ view.
      */
     protected void onDraw(Canvas canvas) {
     }
 
     /**
-     * Draw the view (invoked by parent).
+     * vẽ view (được gọi bởi cha).
      */
     public void draw(Canvas canvas) {
         onDraw(canvas);
     }
 
     /**
-     * Return the view's visibility state.
+     * trả về trạng thái hiển thị của view.
      */
     public boolean isShown() {
         return mVisibility == VISIBLE;
     }
 
     /**
-     * Return the view's background.
+     * trả về nền của view.
      */
     public android.graphics.drawable.Drawable getBackground() {
         return null;
     }
 
     /**
-     * Set the view's background.
+     * thiết lập nền của view.
      */
     public void setBackgroundColor(int color) {
     }
 
     /**
-     * Set the view's background drawable.
+     * thiết lập drawable nền của view.
      */
     public void setBackgroundDrawable(android.graphics.drawable.Drawable background) {
     }
 
     /**
-     * Set the view's padding.
+     * thiết lập phần đệm của view.
      */
     public void setPadding(int left, int top, int right, int bottom) {
     }
 
     /**
-     * Invalidate the view.
+     * làm mất hiệu lực view.
      */
     public void invalidate() {
     }
 
     /**
-     * Post a runnable to the UI thread.
+     * đăng một runnable lên luồng ui.
      */
     public boolean post(Runnable action) {
         action.run();
@@ -238,14 +238,14 @@ public class View {
     }
 
     /**
-     * Return the view's tag.
+     * trả về thẻ (tag) của view.
      */
     public Object getTag() {
         return null;
     }
 
     /**
-     * Set the view's tag.
+     * thiết lập thẻ (tag) của view.
      */
     public void setTag(Object tag) {
     }

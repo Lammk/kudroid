@@ -1,7 +1,7 @@
 import SwiftUI
 import UIKit
 
-// MARK: - Core View
+// mark: - giao diện chính
 struct ContentView: View {
     @State private var fullLog = "KuDroid Core Status"
     @State private var jitStatus = "JIT: Unknown"
@@ -26,7 +26,7 @@ struct ContentView: View {
     }
 }
 
-// MARK: - Apps Tab
+// mark: - tab ứng dụng
 struct AppsView: View {
     @Binding var fullLog: String
     @State private var installedApps: [String] = []
@@ -44,7 +44,7 @@ struct AppsView: View {
                 Color.black.ignoresSafeArea()
                 
                 VStack(spacing: 0) {
-                    // Header
+                    // tiêu đề
                     HStack {
                         Image(systemName: "cpu")
                             .font(.title)
@@ -121,7 +121,7 @@ struct AppsView: View {
                             }
                         }
                         .onAppear {
-                            // Pre-iOS 16 workaround
+                            // cách khắc phục tạm thời cho các phiên bản trước ios 16
                             UITableView.appearance().backgroundColor = .clear
                         }
                     }
@@ -181,7 +181,7 @@ struct AppsView: View {
     }
 }
 
-// MARK: - Debug Tab
+// mark: - tab gỡ lỗi
 struct DebugView: View {
     @Binding var fullLog: String
     @Binding var jitStatus: String
@@ -227,7 +227,7 @@ struct DebugView: View {
                     .cornerRadius(12)
                     .padding(.horizontal)
                     
-                    // Buttons
+                    // các nút
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
                             Button("Copy Log") {
@@ -273,7 +273,7 @@ struct DebugView: View {
     }
 }
 
-// MARK: - Native Bridge Helpers
+// mark: - các hàm hỗ trợ bộ nối gốc
 
 func setupLogDir() {
     if let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
@@ -293,7 +293,7 @@ func runJniJvmTest() -> String {
 }
 
 func runGpuTest() -> String {
-    // Note: ensure kudroid_test_gpu is declared in the bridging header
+    // lưu ý: đảm bảo kudroid_test_gpu được khai báo trong tiêu đề kết nối
     guard let cString = kudroid_test_gpu() else { return "Error: null result" }
     let log = String(cString: cString)
     free(UnsafeMutablePointer(mutating: cString))
@@ -321,7 +321,7 @@ func installAPK(at apkURL: URL) -> String {
     return log
 }
 
-// MARK: - APK Installer View
+// mark: - giao diện cài đặt apk
 struct APKInstallerView: View {
     let onInstall: (String) -> Void
     @Environment(\.dismiss) private var dismiss
@@ -366,7 +366,7 @@ struct APKInstallerView: View {
                         .listRowBackground(Color(.systemGray6))
                     }
                     .onAppear {
-                        // Pre-iOS 16 workaround
+                        // cách khắc phục tạm thời cho các phiên bản trước ios 16
                         UITableView.appearance().backgroundColor = .clear
                     }
                     .overlay {
@@ -433,7 +433,7 @@ struct APKInstallerView: View {
     }
 }
 
-// MARK: - Other Native Helpers
+// mark: - các hàm hỗ trợ gốc khác
 func runJitStatus() -> String {
     guard let cString = kudroid_jit_status() else { return "JIT: Unknown" }
     let status = String(cString: cString)
@@ -487,7 +487,7 @@ func runMultiElfTest() -> String {
     return log
 }
 
-// MARK: - Android App Rendering
+// mark: - kết xuất ứng dụng android
 struct AndroidAppView: View {
     let appName: String
     @Environment(\.presentationMode) var presentationMode
@@ -517,7 +517,7 @@ struct MetalView: UIViewRepresentable {
         let view = NativeMetalView()
         context.coordinator.metalView = view
         
-        // Pass the CAMetalLayer and bounds to Kudroid
+        // truyền cametallayer và ranh giới cho kudroid
         let bounds = UIScreen.main.bounds
         let scale = UIScreen.main.scale
         let width = Int32(bounds.width * scale)
@@ -525,7 +525,7 @@ struct MetalView: UIViewRepresentable {
         let unmanaged = Unmanaged.passUnretained(view.layer)
         kudroid_set_metal_layer(unmanaged.toOpaque(), width, height)
         
-        // Run APK in background so it doesn't block iOS UI
+        // chạy apk trong nền để không chặn giao diện người dùng ios
         DispatchQueue.global(qos: .userInitiated).async {
             if let cString = kudroid_run_apk(appName) {
                 print("App exited with log:\n\(String(cString: cString))")
@@ -548,7 +548,7 @@ class NativeMetalView: UIView {
         guard let touch = touches.first else { return }
         let location = touch.location(in: self)
         let scale = UIScreen.main.scale
-        // action mapping: 0=DOWN, 1=UP, 2=MOVE (based on Android AMotionEvent)
+        // ánh xạ hành động: 0=down, 1=up, 2=move (dựa trên amotionevent của android)
         kudroid_inject_touch_event(Float(location.x * scale), Float(location.y * scale), action)
     }
 
@@ -565,7 +565,7 @@ class NativeMetalView: UIView {
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-        injectTouch(touches, action: 1) // Treat cancel as UP for safety
+        injectTouch(touches, action: 1) // coi thao tác hủy là up để an toàn
     }
 }
 

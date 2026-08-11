@@ -1,17 +1,17 @@
 package android.view.inputmethod;
 
 /**
- * Stub android.view.inputmethod.InputMethodManager.
+ * mô phỏng android.view.inputmethod.inputmethodmanager.
  *
- * Manages the input method (keyboard). For KuDroid's minimal framework, this
- * is a stub.
+ * quản lý phương thức nhập (bàn phím). đối với khuôn khổ tối thiểu của kudroid, đây
+ * là một mô phỏng.
  */
 public class InputMethodManager {
-    /** Result: success. */
+    /** kết quả: thành công. */
     public static final int RESULT_SUCCESS = 0;
-    /** Result: shown. */
+    /** kết quả: được hiển thị. */
     public static final int RESULT_SHOWN = 1;
-    /** Result: hidden. */
+    /** kết quả: bị ẩn. */
     public static final int RESULT_HIDDEN = 2;
 
     public InputMethodManager() {

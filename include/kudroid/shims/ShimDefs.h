@@ -9,7 +9,7 @@ struct SymbolEntry {
     void* address;
 };
 
-// Common trace function for shims
+// chức năng theo dõi chung cho các lớp đệm
 void trace_shim(const char* message);
 
 } // namespace kudroid

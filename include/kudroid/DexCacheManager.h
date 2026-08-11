@@ -6,67 +6,67 @@
 
 namespace kudroid {
 
-/// CacheManager for translated DEX files.
+/// cachemanager cho các tệp dex đã dịch.
 ///
-/// Translates a DEX file into an iOS-understandable form (currently a JAR for
-/// the Avian JVM) and caches the result keyed by:
-///   - the SHA-256 hash of the ORIGINAL DEX file (detects APK updates)
-///   - a tool version integer (detects translator upgrades)
+/// dịch một tệp dex sang dạng mà ios có thể hiểu được (hiện tại là jar cho
+/// jvm avian) và lưu trữ kết quả được khóa bằng:
+///   - hàm băm sha-256 của tệp dex gốc (phát hiện cập nhật apk)
+///   - số nguyên phiên bản công cụ (phát hiện nâng cấp trình biên dịch)
 ///
-/// If either the hash or the version changes, the cache is considered stale
-/// and the DEX is re-translated. This mirrors ART's .oat/.odex cache pattern.
+/// nếu hàm băm hoặc phiên bản thay đổi, bộ đệm được coi là cũ
+/// và dex được dịch lại. điều này mô phỏng mô hình bộ đệm .oat/.odex của art.
 ///
-/// Cache layout:
-///   <cacheDir>/<dex_sha256>_v<version>.bin        — translated data
-///   <cacheDir>/<dex_sha256>_v<version>.meta.json  — metadata (hash, version)
+/// bố cục bộ đệm:
+///   <cachedir>/<dex_sha256>_v<version>.bin        — dữ liệu đã dịch
+///   <cachedir>/<dex_sha256>_v<version>.meta.json  — siêu dữ liệu (hàm băm, phiên bản)
 class DexCacheManager {
 public:
     static DexCacheManager& getInstance();
 
-    /// Set the cache directory (e.g. Documents/android_cache).
+    /// đặt thư mục bộ đệm (ví dụ: documents/android_cache).
     void setCacheDirectory(const std::string& dir);
 
-    /// Return the current cache directory.
+    /// trả về thư mục bộ đệm hiện tại.
     const std::string& cacheDirectory() const { return cacheDir_; }
 
-    /// Check whether a valid cache entry exists for the given DEX + tool version.
-    /// Returns true only if BOTH the DEX hash matches AND the version matches.
+    /// kiểm tra xem mục bộ đệm hợp lệ có tồn tại cho phiên bản dex + công cụ đã cho hay không.
+    /// chỉ trả về true nếu cả hàm băm dex và phiên bản đều khớp.
     bool hasValidCache(const std::string& dexPath, int toolVersion);
 
-    /// Load the cached translated data for the given DEX + version.
-    /// Returns true and fills `out` on success.
+    /// tải dữ liệu đã dịch được lưu trong bộ đệm cho dex + phiên bản đã cho.
+    /// trả về true và điền vào `out` nếu thành công.
     bool loadCache(const std::string& dexPath, int toolVersion,
                    std::vector<uint8_t>& out);
 
-    /// Save translated data to the cache for the given DEX + version.
-    /// Writes atomically (tmp file + rename) to avoid corruption on crash.
+    /// lưu dữ liệu đã dịch vào bộ đệm cho dex + phiên bản đã cho.
+    /// ghi nguyên tử (tệp tmp + đổi tên) để tránh hỏng dữ liệu khi gặp sự cố.
     bool saveCache(const std::string& dexPath, int toolVersion,
                    const std::vector<uint8_t>& data);
 
-    /// Translate a DEX file to a JAR (via DexToJar), using the cache.
+    /// dịch một tệp dex thành một tệp jar (thông qua dextojar), sử dụng bộ đệm.
     ///
-    /// If a valid cache entry exists (hash + version match), the cached JAR is
-    /// loaded. Otherwise the DEX is translated, cached, and returned.
-    /// Returns true and fills `outJar` on success.
+    /// nếu một mục bộ đệm hợp lệ tồn tại (hàm băm + phiên bản khớp), tệp jar trong bộ đệm sẽ được
+    /// tải. ngược lại dex được dịch, lưu vào bộ đệm và trả về.
+    /// trả về true và điền vào `outjar` nếu thành công.
     bool translateAndCache(const std::string& dexPath, int toolVersion,
                            std::vector<uint8_t>& outJar, std::string* error = nullptr);
 
-    /// Remove all cache entries for the given DEX (all versions).
+    /// xóa tất cả các mục bộ đệm cho dex đã cho (tất cả các phiên bản).
     void clearCacheForDex(const std::string& dexPath);
 
-    /// Remove the entire cache directory contents.
+    /// xóa toàn bộ nội dung thư mục bộ đệm.
     void clearCache();
 
-    /// Compute the SHA-256 hex digest of a file. Returns empty string on error.
+    /// tính toán mã băm hex sha-256 của một tệp. trả về chuỗi rỗng nếu có lỗi.
     static std::string sha256File(const std::string& path);
 
 private:
     DexCacheManager() = default;
 
-    /// Compute the cache file path (without extension) for a DEX + version.
+    /// tính toán đường dẫn tệp bộ đệm (không có phần mở rộng) cho một dex + phiên bản.
     std::string cacheBasePath(const std::string& dexPath, int version) const;
 
-    /// Compute the SHA-256 hex digest of a byte buffer.
+    /// tính toán mã băm hex sha-256 của một bộ đệm byte.
     static std::string sha256(const uint8_t* data, size_t len);
 
     std::string cacheDir_;

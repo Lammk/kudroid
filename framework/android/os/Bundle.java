@@ -5,11 +5,11 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Minimal android.os.Bundle implementation.
+ * triển khai android.os.bundle tối thiểu.
  *
- * A mapping from String keys to various typed values. Used to pass data
- * between Activities and Intents. For KuDroid's minimal framework, we back it
- * with a HashMap.
+ * ánh xạ từ các khóa chuỗi đến các giá trị được định kiểu khác nhau. được sử dụng để truyền dữ liệu
+ * giữa các activity và intent. đối với khuôn khổ tối thiểu của kudroid, chúng tôi hỗ trợ nó
+ * bằng một hashmap.
  */
 public final class Bundle {
     private Map<String, Object> mMap;
@@ -109,7 +109,7 @@ public final class Bundle {
     }
 
     /**
-     * Copy all mappings from the given bundle into this bundle.
+     * sao chép tất cả các ánh xạ từ bundle đã cho vào bundle này.
      */
     public void putAll(Bundle bundle) {
         if (bundle != null && bundle.mMap != null) {

@@ -3,39 +3,39 @@ package android.content;
 import android.os.Bundle;
 
 /**
- * Minimal android.content.Context implementation.
+ * triển khai android.content.context tối thiểu.
  *
- * Provides access to application resources, shared preferences, and other
- * system services. For KuDroid's minimal framework, most methods return
- * defaults or null so apps don't crash during startup.
+ * cung cấp quyền truy cập vào các tài nguyên ứng dụng, tùy chọn chia sẻ và các dịch vụ
+ * hệ thống khác. đối với khuôn khổ tối thiểu của kudroid, hầu hết các phương thức trả về
+ * giá trị mặc định hoặc null để ứng dụng không gặp sự cố trong quá trình khởi động.
  */
 public abstract class Context {
-    /** File mode: world-readable. */
+    /** chế độ tệp: world-readable. */
     public static final int MODE_WORLD_READABLE = 0x00000001;
-    /** File mode: world-writable. */
+    /** chế độ tệp: world-writable. */
     public static final int MODE_WORLD_WRITEABLE = 0x00000002;
-    /** File mode: append. */
+    /** chế độ tệp: append. */
     public static final int MODE_APPEND = 0x00008000;
-    /** File mode: private. */
+    /** chế độ tệp: private. */
     public static final int MODE_PRIVATE = 0x00000000;
 
     /**
-     * Return the application context.
+     * trả về bối cảnh ứng dụng.
      */
     public abstract Context getApplicationContext();
 
     /**
-     * Return the package name.
+     * trả về tên gói.
      */
     public abstract String getPackageName();
 
     /**
-     * Return the application's shared preferences.
+     * trả về các tùy chọn chia sẻ của ứng dụng.
      */
     public abstract SharedPreferences getSharedPreferences(String name, int mode);
 
     /**
-     * Return a system service by name.
+     * trả về một dịch vụ hệ thống theo tên.
      */
     public Object getSystemService(String name) {
         if (name == null) return null;
@@ -58,111 +58,111 @@ public abstract class Context {
     }
 
     /**
-     * Return a string resource.
+     * trả về một tài nguyên chuỗi.
      */
     public String getString(int resId) {
         return "";
     }
 
     /**
-     * Return a string resource with format args.
+     * trả về một tài nguyên chuỗi với các đối số định dạng.
      */
     public String getString(int resId, Object... formatArgs) {
         return "";
     }
 
     /**
-     * Start an activity.
+     * bắt đầu một hoạt động.
      */
     public void startActivity(Intent intent) {
     }
 
     /**
-     * Return the application's assets.
+     * trả về các tài sản của ứng dụng.
      */
     public android.content.res.AssetManager getAssets() {
         return new android.content.res.AssetManager();
     }
 
     /**
-     * Return the application's resources.
+     * trả về các tài nguyên của ứng dụng.
      */
     public android.content.res.Resources getResources() {
         return new android.content.res.Resources();
     }
 
     /**
-     * Return the content resolver.
+     * trả về trình phân giải nội dung.
      */
     public android.content.ContentResolver getContentResolver() {
         return new android.content.ContentResolver(this);
     }
 
     /**
-     * Return the main looper.
+     * trả về trình lặp chính.
      */
     public android.os.Looper getMainLooper() {
         return android.os.Looper.getMainLooper();
     }
 
     /**
-     * Return the package manager.
+     * trả về trình quản lý gói.
      */
     public android.content.pm.PackageManager getPackageManager() {
         return new android.content.pm.PackageManager();
     }
 
     /**
-     * Return the application info.
+     * trả về thông tin ứng dụng.
      */
     public android.content.pm.ApplicationInfo getApplicationInfo() {
         return new android.content.pm.ApplicationInfo();
     }
 
     /**
-     * Return the class loader.
+     * trả về trình tải lớp.
      */
     public ClassLoader getClassLoader() {
         return Context.class.getClassLoader();
     }
 
     /**
-     * Return the application's files directory.
+     * trả về thư mục tệp của ứng dụng.
      */
     public java.io.File getFilesDir() {
         return new java.io.File("/data/data/" + getPackageName() + "/files");
     }
 
     /**
-     * Return the application's cache directory.
+     * trả về thư mục bộ nhớ cache của ứng dụng.
      */
     public java.io.File getCacheDir() {
         return new java.io.File("/data/data/" + getPackageName() + "/cache");
     }
 
     /**
-     * Return the application's external files directory.
+     * trả về thư mục tệp bên ngoài của ứng dụng.
      */
     public java.io.File getExternalFilesDir(String type) {
         return new java.io.File("/sdcard/Android/data/" + getPackageName() + "/files");
     }
 
     /**
-     * Return the application's database path.
+     * trả về đường dẫn cơ sở dữ liệu của ứng dụng.
      */
     public java.io.File getDatabasePath(String name) {
         return new java.io.File("/data/data/" + getPackageName() + "/databases/" + name);
     }
 
     /**
-     * Return the application's shared preferences directory.
+     * trả về thư mục các tùy chọn chia sẻ của ứng dụng.
      */
     public java.io.File getSharedPrefsFile(String name) {
         return new java.io.File("/data/data/" + getPackageName() + "/shared_prefs/" + name + ".xml");
     }
 
     /**
-     * Return the application's obb directory.
+     * trả về thư mục obb của ứng dụng.
      */
     public java.io.File getObbDir() {
         return new java.io.File("/sdcard/Android/obb/" + getPackageName());

@@ -1,30 +1,30 @@
 package android.net.wifi;
 
 /**
- * Stub android.net.wifi.WifiConfiguration.
+ * mô phỏng android.net.wifi.wificonfiguration.
  *
- * Describes a WiFi network configuration. For KuDroid's minimal framework,
- * this is a stub.
+ * mô tả cấu hình mạng wifi. đối với khuôn khổ tối thiểu của kudroid,
+ * đây là một mô phỏng.
  */
 public class WifiConfiguration {
-    /** Security: open. */
+    /** bảo mật: mở. */
     public static final int SECURITY_OPEN = 0;
-    /** Security: WEP. */
+    /** bảo mật: wep. */
     public static final int SECURITY_WEP = 1;
-    /** Security: WPA. */
+    /** bảo mật: wpa. */
     public static final int SECURITY_WPA = 2;
 
-    /** The network id. */
+    /** id mạng. */
     public int networkId = -1;
-    /** The SSID. */
+    /** ssid. */
     public String SSID = "";
-    /** The BSSID. */
+    /** bssid. */
     public String BSSID = "";
-    /** The pre-shared key. */
+    /** khóa chia sẻ trước (pre-shared key). */
     public String preSharedKey = "";
-    /** The password. */
+    /** mật khẩu. */
     public String password = "";
-    /** The security type. */
+    /** loại bảo mật. */
     public int security = SECURITY_OPEN;
 
     public WifiConfiguration() {

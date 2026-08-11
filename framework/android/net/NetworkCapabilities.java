@@ -1,17 +1,17 @@
 package android.net;
 
 /**
- * Stub android.net.NetworkCapabilities.
+ * mô phỏng android.net.networkcapabilities.
  *
- * Describes the capabilities of a network. For KuDroid's minimal framework,
- * this is a stub.
+ * mô tả các khả năng của một mạng. đối với khuôn khổ tối thiểu của kudroid,
+ * đây là một mô phỏng.
  */
 public class NetworkCapabilities {
-    /** Network capability: internet. */
+    /** khả năng mạng: internet. */
     public static final int NET_CAPABILITY_INTERNET = 12;
-    /** Network capability: validated. */
+    /** khả năng mạng: đã xác thực. */
     public static final int NET_CAPABILITY_VALIDATED = 16;
-    /** Network capability: not metered. */
+    /** khả năng mạng: không đo lường. */
     public static final int NET_CAPABILITY_NOT_METERED = 11;
 
     private int mCapabilities = 0;

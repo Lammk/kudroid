@@ -1,10 +1,10 @@
 package android.graphics;
 
 /**
- * Minimal android.graphics.Canvas implementation.
+ * triển khai android.graphics.canvas tối thiểu.
  *
- * Provides a drawing surface. For KuDroid's minimal framework, this is a stub
- * that records draw operations (to be bridged to Metal/ANGLE later).
+ * cung cấp một bề mặt vẽ. đối với khuôn khổ tối thiểu của kudroid, đây là một mô phỏng
+ * ghi lại các thao tác vẽ (để được kết nối với metal/angle sau này).
  */
 public class Canvas {
     private Bitmap mBitmap;
@@ -23,107 +23,107 @@ public class Canvas {
     }
 
     /**
-     * Return the canvas width.
+     * trả về chiều rộng canvas.
      */
     public int getWidth() {
         return mWidth;
     }
 
     /**
-     * Return the canvas height.
+     * trả về chiều cao canvas.
      */
     public int getHeight() {
         return mHeight;
     }
 
     /**
-     * Draw a color.
+     * vẽ một màu.
      */
     public void drawColor(int color) {
     }
 
     /**
-     * Draw a color with a Porter-Duff mode.
+     * vẽ một màu với chế độ porter-duff.
      */
     public void drawColor(int color, PorterDuff.Mode mode) {
     }
 
     /**
-     * Draw a bitmap.
+     * vẽ một bitmap.
      */
     public void drawBitmap(Bitmap bitmap, float left, float top, Paint paint) {
     }
 
     /**
-     * Draw a rect.
+     * vẽ một hình chữ nhật.
      */
     public void drawRect(float left, float top, float right, float bottom, Paint paint) {
     }
 
     /**
-     * Draw a rect.
+     * vẽ một hình chữ nhật.
      */
     public void drawRect(Rect rect, Paint paint) {
     }
 
     /**
-     * Draw a circle.
+     * vẽ một hình tròn.
      */
     public void drawCircle(float cx, float cy, float radius, Paint paint) {
     }
 
     /**
-     * Draw a line.
+     * vẽ một đường thẳng.
      */
     public void drawLine(float startX, float startY, float stopX, float stopY, Paint paint) {
     }
 
     /**
-     * Draw text.
+     * vẽ văn bản.
      */
     public void drawText(String text, float x, float y, Paint paint) {
     }
 
     /**
-     * Save the canvas state.
+     * lưu trạng thái canvas.
      */
     public int save() {
         return 0;
     }
 
     /**
-     * Restore the canvas state.
+     * khôi phục trạng thái canvas.
      */
     public void restore() {
     }
 
     /**
-     * Translate the canvas.
+     * dịch chuyển canvas.
      */
     public void translate(float dx, float dy) {
     }
 
     /**
-     * Scale the canvas.
+     * chia tỷ lệ canvas.
      */
     public void scale(float sx, float sy) {
     }
 
     /**
-     * Rotate the canvas.
+     * xoay canvas.
      */
     public void rotate(float degrees) {
     }
 
     /**
-     * Clip to a rect.
+     * cắt theo một hình chữ nhật.
      */
     public boolean clipRect(float left, float top, float right, float bottom) {
         return true;
     }
 
     /**
-     * Return the canvas bitmap.
+     * trả về bitmap của canvas.
      */
     public Bitmap getBitmap() {
         return mBitmap;

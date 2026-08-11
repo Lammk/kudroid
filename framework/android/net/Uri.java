@@ -1,10 +1,10 @@
 package android.net;
 
 /**
- * Minimal android.net.Uri implementation.
+ * triển khai android.net.uri tối thiểu.
  *
- * Represents a URI. For KuDroid's minimal framework, we store the string form
- * and provide basic parsing helpers.
+ * đại diện cho một uri. đối với khuôn khổ tối thiểu của kudroid, chúng tôi lưu trữ dạng chuỗi
+ * và cung cấp các trình trợ giúp phân tích cú pháp cơ bản.
  */
 public final class Uri {
     private final String mString;
@@ -14,21 +14,21 @@ public final class Uri {
     }
 
     /**
-     * Parse a URI from a string.
+     * phân tích cú pháp một uri từ một chuỗi.
      */
     public static Uri parse(String uriString) {
         return new Uri(uriString);
     }
 
     /**
-     * Return the string form of this URI.
+     * trả về dạng chuỗi của uri này.
      */
     public String toString() {
         return mString;
     }
 
     /**
-     * Return the scheme (e.g. "http", "content").
+     * trả về giao thức (ví dụ: "http", "content").
      */
     public String getScheme() {
         if (mString == null) return null;
@@ -37,7 +37,7 @@ public final class Uri {
     }
 
     /**
-     * Return the path portion.
+     * trả về phần đường dẫn.
      */
     public String getPath() {
         if (mString == null) return null;
@@ -49,7 +49,7 @@ public final class Uri {
     }
 
     /**
-     * Return the query portion (without '?').
+     * trả về phần truy vấn (không có '?').
      */
     public String getQuery() {
         if (mString == null) return null;

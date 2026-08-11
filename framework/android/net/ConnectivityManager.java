@@ -1,17 +1,17 @@
 package android.net;
 
 /**
- * Stub android.net.ConnectivityManager.
+ * mô phỏng android.net.connectivitymanager.
  *
- * Non-critical for app startup/rendering. Returns defaults so apps don't
- * crash when they query network state.
+ * không quan trọng đối với khởi động/kết xuất ứng dụng. trả về giá trị mặc định để các ứng dụng
+ * không gặp sự cố khi chúng truy vấn trạng thái mạng.
  */
 public class ConnectivityManager {
-    /** Network type: none. */
+    /** loại mạng: không có. */
     public static final int TYPE_NONE = -1;
-    /** Network type: mobile. */
+    /** loại mạng: di động. */
     public static final int TYPE_MOBILE = 0;
-    /** Network type: wifi. */
+    /** loại mạng: wifi. */
     public static final int TYPE_WIFI = 1;
 
     public ConnectivityManager() {
@@ -44,7 +44,7 @@ public class ConnectivityManager {
     }
 
     /**
-     * Stub NetworkCallback.
+     * mô phỏng networkcallback.
      */
     public static class NetworkCallback {
         public void onAvailable(Network network) {

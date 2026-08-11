@@ -1,10 +1,10 @@
 package android.graphics;
 
 /**
- * Minimal android.graphics.Color implementation.
+ * triển khai android.graphics.color tối thiểu.
  *
- * Provides color constants and conversion helpers. For KuDroid's minimal
- * framework, implements the common ARGB helpers.
+ * cung cấp các hằng số màu và trình trợ giúp chuyển đổi. đối với khuôn khổ
+ * tối thiểu của kudroid, triển khai các trình trợ giúp argb phổ biến.
  */
 public class Color {
     public static final int BLACK = 0xFF000000;
@@ -24,49 +24,49 @@ public class Color {
     }
 
     /**
-     * Return the alpha component of a color.
+     * trả về thành phần alpha của một màu.
      */
     public static int alpha(int color) {
         return color >>> 24;
     }
 
     /**
-     * Return the red component of a color.
+     * trả về thành phần màu đỏ của một màu.
      */
     public static int red(int color) {
         return (color >> 16) & 0xFF;
     }
 
     /**
-     * Return the green component of a color.
+     * trả về thành phần màu xanh lá cây của một màu.
      */
     public static int green(int color) {
         return (color >> 8) & 0xFF;
     }
 
     /**
-     * Return the blue component of a color.
+     * trả về thành phần màu xanh dương của một màu.
      */
     public static int blue(int color) {
         return color & 0xFF;
     }
 
     /**
-     * Return a color from ARGB components.
+     * trả về một màu từ các thành phần argb.
      */
     public static int argb(int alpha, int red, int green, int blue) {
         return (alpha << 24) | (red << 16) | (green << 8) | blue;
     }
 
     /**
-     * Return a color from RGB components (opaque).
+     * trả về một màu từ các thành phần rgb (đục).
      */
     public static int rgb(int red, int green, int blue) {
         return (0xFF << 24) | (red << 16) | (green << 8) | blue;
     }
 
     /**
-     * Parse a color from a string (e.g. "#RRGGBB" or "#AARRGGBB").
+     * phân tích cú pháp một màu từ một chuỗi (ví dụ: "#rrggbb" hoặc "#aarrggbb").
      */
     public static int parseColor(String colorString) {
         if (colorString == null) return BLACK;

@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
-"""Patch Avian's makefile for iOS ARM64 builds.
+"""vá makefile của avian cho các bản dựng ios arm64.
 
-Avian's `binaryToObject` converter emits an object with architecture 'unknown'
-on iOS/Mach-O, which fails at link time. It is used to embed two jars
-(classpath.jar and javahome.jar) as byte arrays. We replace both converter
-rules with a tiny assembly stub that embeds the jar via `.incbin` and exposes
-the same symbols Avian already references
+trình chuyển đổi `binarytoobject` của avian tạo ra một đối tượng với kiến trúc 'không xác định'
+trên ios/mach-o, gây lỗi tại thời điểm liên kết. nó được sử dụng để nhúng hai tệp jar
+(classpath.jar và javahome.jar) dưới dạng mảng byte. chúng tôi thay thế cả hai quy tắc
+trình chuyển đổi bằng một phần mô phỏng hợp ngữ nhỏ nhúng tệp jar qua `.incbin` và hiển thị
+cùng các ký hiệu mà avian đã tham chiếu
 (`_binary_<name>_jar_start` / `_binary_<name>_jar_end`).
 
-At the Mach-O asm level, a C symbol like `_binary_classpath_jar_start` gains an
-extra leading underscore, hence `__binary_..._jar_start` in the stub. Because
-the symbol names are unchanged, no C++ source needs modification. Using
-assembly labels (rather than `ld -sectcreate`) also avoids Mach-O's 16-char
-section-name limit.
+ở cấp độ mach-o asm, một ký hiệu c như `_binary_classpath_jar_start` có thêm một
+dấu gạch dưới ở đầu, do đó là `__binary_..._jar_start` trong phần mô phỏng. bởi vì
+tên ký hiệu không thay đổi, không cần sửa đổi nguồn c++. việc sử dụng
+các nhãn hợp ngữ (thay vì `ld -sectcreate`) cũng tránh được giới hạn 16 ký tự
+tên phần của mach-o.
 
-Run from the Avian source directory (third_party/jvm/avian).
+chạy từ thư mục nguồn avian (third_party/jvm/avian).
 """
 import sys
 
 
 def converter_rule(target_var, jar_var, sym):
-    """Original converter-based rule text for a given jar/symbol."""
+    """văn bản quy tắc dựa trên trình chuyển đổi ban đầu cho một tệp jar/ký hiệu nhất định."""
     return (
         f"{target_var}: {jar_var} $(converter)\n"
         "\t@echo \"creating $(@)\"\n"
@@ -30,7 +30,7 @@ def converter_rule(target_var, jar_var, sym):
 
 
 def incbin_rule(target_var, jar_var, sym):
-    """Replacement rule that embeds the jar via a .incbin assembly stub."""
+    """quy tắc thay thế nhúng tệp jar qua một phần mô phỏng hợp ngữ .incbin."""
     return (
         f"{target_var}: {jar_var}\n"
         "\t@echo \"creating $(@) via .incbin stub\"\n"
@@ -52,9 +52,9 @@ PATCHES = [
      "makefile (javahome-jar.o)"),
 ]
 
-# Patch the classpath.jar rule to also merge the KuDroid framework classes
-# (framework/build/framework.jar) into the jar, so android.* classes are on
-# the boot classpath at runtime.
+# vá quy tắc classpath.jar để cũng hợp nhất các lớp khuôn khổ kudroid
+# (framework/build/framework.jar) vào tệp jar, để các lớp android.* nằm trên
+# classpath khởi động khi chạy.
 CLASSPATH_JAR_OLD = (
     "$(build)/classpath.jar: $(classpath-dep) $(classpath-jar-dep)\n"
     "\t@echo \"creating $(@)\"\n"

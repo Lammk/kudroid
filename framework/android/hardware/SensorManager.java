@@ -1,40 +1,40 @@
 package android.hardware;
 
 /**
- * Stub android.hardware.SensorManager.
+ * mô phỏng android.hardware.sensormanager.
  *
- * Non-critical for app startup/rendering. Returns 0 sensors so apps don't
- * crash when they query sensors.
+ * không quan trọng đối với khởi động/kết xuất ứng dụng. trả về 0 cảm biến để các ứng dụng
+ * không gặp sự cố khi chúng truy vấn các cảm biến.
  */
 public class SensorManager {
-    /** Sensor type: accelerometer. */
+    /** loại cảm biến: gia tốc kế. */
     public static final int TYPE_ACCELEROMETER = 1;
-    /** Sensor type: magnetic field. */
+    /** loại cảm biến: từ trường. */
     public static final int TYPE_MAGNETIC_FIELD = 2;
-    /** Sensor type: orientation. */
+    /** loại cảm biến: hướng. */
     public static final int TYPE_ORIENTATION = 3;
-    /** Sensor type: gyroscope. */
+    /** loại cảm biến: con quay hồi chuyển. */
     public static final int TYPE_GYROSCOPE = 4;
-    /** Sensor type: light. */
+    /** loại cảm biến: ánh sáng. */
     public static final int TYPE_LIGHT = 5;
-    /** Sensor type: pressure. */
+    /** loại cảm biến: áp suất. */
     public static final int TYPE_PRESSURE = 6;
-    /** Sensor type: proximity. */
+    /** loại cảm biến: tiệm cận. */
     public static final int TYPE_PROXIMITY = 8;
-    /** Sensor type: gravity. */
+    /** loại cảm biến: trọng lực. */
     public static final int TYPE_GRAVITY = 9;
-    /** Sensor type: linear acceleration. */
+    /** loại cảm biến: gia tốc tuyến tính. */
     public static final int TYPE_LINEAR_ACCELERATION = 10;
-    /** Sensor type: rotation vector. */
+    /** loại cảm biến: véc tơ quay. */
     public static final int TYPE_ROTATION_VECTOR = 11;
 
-    /** Sensor delay: normal. */
+    /** độ trễ của cảm biến: bình thường. */
     public static final int SENSOR_DELAY_NORMAL = 3;
-    /** Sensor delay: UI. */
+    /** độ trễ của cảm biến: ui. */
     public static final int SENSOR_DELAY_UI = 2;
-    /** Sensor delay: game. */
+    /** độ trễ của cảm biến: trò chơi. */
     public static final int SENSOR_DELAY_GAME = 1;
-    /** Sensor delay: fastest. */
+    /** độ trễ của cảm biến: nhanh nhất. */
     public static final int SENSOR_DELAY_FASTEST = 0;
 
     public SensorManager() {
@@ -64,7 +64,7 @@ public class SensorManager {
     }
 
     /**
-     * Listener for sensor events.
+     * trình nghe cho các sự kiện cảm biến.
      */
     public interface SensorEventListener {
         void onSensorChanged(SensorEvent event);

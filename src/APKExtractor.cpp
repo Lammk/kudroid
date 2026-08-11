@@ -79,7 +79,7 @@ bool APKExtractor::extract_apk(const std::string& apkPath, const std::string& ta
         else if (entry == "AndroidManifest.xml") shouldExtract = true;
         
         if (!shouldExtract) continue;
-        if (entry.empty() || entry.back() == '/') continue; // Skip directories
+        if (entry.empty() || entry.back() == '/') continue; // bỏ qua thư mục
         
         found = true;
         if (!hasBytes(data, localOffset, 30) || read32(data, localOffset) != 0x04034b50) { gLastError = "Invalid local header: " + entry; return false; }

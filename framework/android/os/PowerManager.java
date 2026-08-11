@@ -1,19 +1,19 @@
 package android.os;
 
 /**
- * Stub android.os.PowerManager.
+ * mô phỏng android.os.powermanager.
  *
- * Non-critical for app startup/rendering. Returns defaults so apps don't
- * crash when they query power state.
+ * không quan trọng đối với khởi động/kết xuất ứng dụng. trả về giá trị mặc định để các ứng dụng
+ * không gặp sự cố khi chúng truy vấn trạng thái nguồn.
  */
 public class PowerManager {
-    /** Wake lock flag: partial. */
+    /** cờ khóa thức: một phần. */
     public static final int PARTIAL_WAKE_LOCK = 1;
-    /** Wake lock flag: screen dim. */
+    /** cờ khóa thức: màn hình mờ. */
     public static final int SCREEN_DIM_WAKE_LOCK = 6;
-    /** Wake lock flag: screen bright. */
+    /** cờ khóa thức: màn hình sáng. */
     public static final int SCREEN_BRIGHT_WAKE_LOCK = 10;
-    /** Wake lock flag: full. */
+    /** cờ khóa thức: đầy đủ. */
     public static final int FULL_WAKE_LOCK = 26;
 
     public PowerManager() {
@@ -38,7 +38,7 @@ public class PowerManager {
     }
 
     /**
-     * Stub WakeLock.
+     * mô phỏng wakelock.
      */
     public static class WakeLock {
         public void acquire() {

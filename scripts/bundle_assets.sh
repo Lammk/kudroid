@@ -3,12 +3,12 @@ set -e
 
 echo "Bundling assets into KuDroidShell.app..."
 
-# Move the built testing libraries so we can embed them after Xcode build
+# di chuyển các thư viện kiểm tra đã xây dựng để chúng ta có thể nhúng chúng sau khi xây dựng xcode
 mkdir -p tests
 cp multi-elf-artifact/libkudroid_provider_arm64.so tests/libkudroid_provider_arm64.so
 cp multi-elf-artifact/libkudroid_consumer_arm64.so tests/libkudroid_consumer_arm64.so
 
-# Copy pre-built ARM64 test .so from downloaded artifacts into app bundle
+# sao chép test .so arm64 được tạo sẵn từ các tạo tác đã tải xuống vào gói ứng dụng
 if [ -f test-lib-artifact/test_lib_arm64.so ]; then
   cp test-lib-artifact/test_lib_arm64.so KuDroidShell.app/test_lib.so
   echo "Bundled ARM64 test_lib.so ($(wc -c < KuDroidShell.app/test_lib.so) bytes)"
@@ -34,8 +34,8 @@ else
   exit 1
 fi
 
-# Bundle GPU/syscall/JNI test .so files into the app bundle so the
-# Debug tab buttons can find them via Bundle.main.
+# đóng gói các tệp .so kiểm tra gpu/syscall/jni vào gói ứng dụng để
+# các nút tab gỡ lỗi có thể tìm thấy chúng qua bundle.main.
 if [ -f gpu-test-artifact/test_gpu_vulkan_arm64.so ]; then
   cp gpu-test-artifact/test_gpu_vulkan_arm64.so KuDroidShell.app/test_gpu_vulkan.so
   echo "Bundled test_gpu_vulkan.so"
@@ -68,7 +68,7 @@ else
   exit 1
 fi
 
-# Embed ALL dynamic frameworks into the app bundle so dyld finds them at runtime
+# nhúng tất cả các framework động vào gói ứng dụng để dyld tìm thấy chúng khi chạy
 mkdir -p KuDroidShell.app/Frameworks
 if [ -d third_party/ANGLE/lib/ios-arm64/libEGL.framework ]; then
   cp -R third_party/ANGLE/lib/ios-arm64/libEGL.framework KuDroidShell.app/Frameworks/

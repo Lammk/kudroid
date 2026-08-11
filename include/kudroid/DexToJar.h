@@ -6,45 +6,45 @@
 
 namespace kudroid {
 
-/// Convert a DEX file into a JAR containing class stubs.
+/// chuyển đổi một tệp dex thành một tệp jar chứa các lớp giả.
 ///
-/// This parses the DEX structure (classes, methods, fields) and produces a
-/// JAR with one .class file per class. Each class has:
-///   - a default constructor
-///   - all methods declared in the DEX, with correct signatures but EMPTY
-///     bodies (returning default values)
+/// điều này phân tích cấu trúc dex (lớp, phương thức, trường) và tạo ra một
+/// tệp jar có một tệp .class cho mỗi lớp. mỗi lớp có:
+///   - một hàm tạo mặc định
+///   - tất cả các phương thức được khai báo trong dex, với chữ ký chính xác nhưng thân
+///     trống (trả về giá trị mặc định)
 ///
-/// This is enough for apps to load Java at startup without crashing (the
-/// classes and methods resolve), while the actual method logic is left empty
-/// until real bytecode translation is implemented (driven by GitHub issues).
+/// điều này đủ để các ứng dụng tải java khi khởi động mà không gặp sự cố (các
+/// lớp và phương thức được phân giải), trong khi logic phương thức thực tế bị để trống
+/// cho đến khi bản dịch mã byte thực sự được triển khai (do các vấn đề github thúc đẩy).
 ///
-/// The output is a JAR (ZIP) that can be fed to the Avian JVM as a classpath.
+/// đầu ra là một tệp jar (zip) có thể được cung cấp cho jvm avian dưới dạng đường dẫn lớp.
 class DexToJar {
 public:
-    /// Parsed class data.
+    /// dữ liệu lớp đã phân tích.
     struct ClassInfo {
-        std::string name;          // JVM internal name, e.g. "com/foo/Bar"
-        std::string superName;     // JVM internal name of superclass
+        std::string name;          // tên nội bộ jvm, ví dụ "com/foo/bar"
+        std::string superName;     // tên nội bộ jvm của lớp cha
         uint32_t accessFlags;
-        std::vector<std::string> interfaces; // JVM internal names
-        // Methods: {name, descriptor}
+        std::vector<std::string> interfaces; // tên nội bộ jvm
+        // phương thức: {tên, bộ mô tả}
         std::vector<std::pair<std::string, std::string>> methods;
-        // Fields: {name, descriptor}
+        // trường: {tên, bộ mô tả}
         std::vector<std::pair<std::string, std::string>> fields;
     };
 
-    /// Convert a DEX file to a JAR. Returns true on success.
-    /// On success, `outJar` is filled with the JAR bytes.
+    /// chuyển đổi tệp dex thành tệp jar. trả về true nếu thành công.
+    /// nếu thành công, `outjar` chứa các byte của tệp jar.
     static bool convert(const std::string& dexPath, std::vector<uint8_t>& outJar,
                         std::string* error = nullptr);
 
-    /// Convert DEX bytes to a JAR. Returns true on success.
+    /// chuyển đổi các byte dex thành một tệp jar. trả về true nếu thành công.
     static bool convertBytes(const std::vector<uint8_t>& dexBytes,
                              std::vector<uint8_t>& outJar,
                              std::string* error = nullptr);
 
 private:
-    // Internal helpers (implemented in DexToJar.cpp)
+    // các hàm trợ giúp nội bộ (được triển khai trong dextojar.cpp)
     static bool parseDex(const std::vector<uint8_t>& dex, std::vector<ClassInfo>& classes,
                          std::string* error);
     static bool buildJar(const std::vector<ClassInfo>& classes,

@@ -4,30 +4,30 @@ import android.content.Context;
 import android.content.Intent;
 
 /**
- * Stub android.app.Notification.
+ * mô phỏng android.app.notification.
  *
- * Represents a notification. For KuDroid's minimal framework, this is a stub
- * that stores basic fields.
+ * đại diện cho một thông báo. đối với khuôn khổ tối thiểu của kudroid, đây là một mô phỏng
+ * lưu trữ các trường cơ bản.
  */
 public class Notification {
-    /** Notification priority: default. */
+    /** độ ưu tiên thông báo: mặc định. */
     public static final int PRIORITY_DEFAULT = 0;
-    /** Notification priority: low. */
+    /** độ ưu tiên thông báo: thấp. */
     public static final int PRIORITY_LOW = -1;
-    /** Notification priority: high. */
+    /** độ ưu tiên thông báo: cao. */
     public static final int PRIORITY_HIGH = 1;
 
-    /** The notification icon. */
+    /** biểu tượng thông báo. */
     public int icon;
-    /** The notification text. */
+    /** văn bản thông báo. */
     public CharSequence tickerText;
-    /** The notification content title. */
+    /** tiêu đề nội dung thông báo. */
     public CharSequence contentTitle;
-    /** The notification content text. */
+    /** văn bản nội dung thông báo. */
     public CharSequence contentText;
-    /** The notification content intent. */
+    /** intent nội dung thông báo. */
     public PendingIntent contentIntent;
-    /** The notification priority. */
+    /** độ ưu tiên thông báo. */
     public int priority = PRIORITY_DEFAULT;
 
     public Notification() {
@@ -39,7 +39,7 @@ public class Notification {
     }
 
     /**
-     * Builder for creating a Notification.
+     * trình tạo để tạo notification.
      */
     public static class Builder {
         private final Context mContext;

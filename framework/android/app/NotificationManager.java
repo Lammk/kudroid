@@ -3,55 +3,55 @@ package android.app;
 import android.app.Notification;
 
 /**
- * Stub android.app.NotificationManager.
+ * mô phỏng android.app.notificationmanager.
  *
- * Non-critical for app startup/rendering. Notifications are no-ops on iOS.
+ * không quan trọng đối với việc khởi động/hiển thị ứng dụng. thông báo là no-op trên ios.
  */
 public class NotificationManager {
-    /** Importance: none. */
+    /** tầm quan trọng: không có. */
     public static final int IMPORTANCE_NONE = 0;
-    /** Importance: low. */
+    /** tầm quan trọng: thấp. */
     public static final int IMPORTANCE_LOW = 2;
-    /** Importance: default. */
+    /** tầm quan trọng: mặc định. */
     public static final int IMPORTANCE_DEFAULT = 3;
-    /** Importance: high. */
+    /** tầm quan trọng: cao. */
     public static final int IMPORTANCE_HIGH = 4;
 
     public NotificationManager() {
     }
 
     /**
-     * Post a notification (no-op).
+     * đăng một thông báo (no-op).
      */
     public void notify(int id, Notification notification) {
     }
 
     /**
-     * Post a notification with a tag (no-op).
+     * đăng một thông báo có thẻ (no-op).
      */
     public void notify(String tag, int id, Notification notification) {
     }
 
     /**
-     * Cancel a notification (no-op).
+     * hủy một thông báo (no-op).
      */
     public void cancel(int id) {
     }
 
     /**
-     * Cancel a notification with a tag (no-op).
+     * hủy một thông báo có thẻ (no-op).
      */
     public void cancel(String tag, int id) {
     }
 
     /**
-     * Cancel all notifications (no-op).
+     * hủy tất cả thông báo (no-op).
      */
     public void cancelAll() {
     }
 
     /**
-     * Return the current importance (no-op).
+     * trả về tầm quan trọng hiện tại (no-op).
      */
     public int getImportance() {
         return IMPORTANCE_NONE;

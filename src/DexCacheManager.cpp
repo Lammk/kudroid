@@ -11,7 +11,7 @@
 namespace kudroid {
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Minimal SHA-256 implementation (no external dependency).
+// cài đặt mã băm sha-256 tối giản (không phụ thuộc bên ngoài).
 // ─────────────────────────────────────────────────────────────────────────────
 
 namespace {
@@ -162,7 +162,7 @@ std::string DexCacheManager::sha256File(const std::string& path) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CacheManager
+// trình quản lý bộ nhớ đệm
 // ─────────────────────────────────────────────────────────────────────────────
 
 DexCacheManager& DexCacheManager::getInstance() {
@@ -189,7 +189,7 @@ bool DexCacheManager::hasValidCache(const std::string& dexPath,
     std::string base = cacheBasePath(dexPath, toolVersion);
     if (base.empty()) return false;
 
-    // Both the .bin data file AND the .meta.json must exist.
+    // cả tệp dữ liệu .bin và .meta.json đều phải tồn tại.
     std::string binPath = base + ".bin";
     std::string metaPath = base + ".meta.json";
     return std::filesystem::exists(binPath) && std::filesystem::exists(metaPath);
@@ -219,7 +219,7 @@ bool DexCacheManager::saveCache(const std::string& dexPath, int toolVersion,
     std::error_code ec;
     std::filesystem::create_directories(cacheDir_, ec);
 
-    // Atomic write: write to a temp file, then rename.
+    // ghi nguyên tử: ghi vào tệp tạm, sau đó đổi tên.
     std::string tmpBin = base + ".bin.tmp";
     {
         std::ofstream out(tmpBin, std::ios::binary | std::ios::trunc);
@@ -232,7 +232,7 @@ bool DexCacheManager::saveCache(const std::string& dexPath, int toolVersion,
     std::filesystem::rename(tmpBin, base + ".bin", ec);
     if (ec) return false;
 
-    // Write metadata.
+    // ghi siêu dữ liệu.
     std::string hash = sha256File(dexPath);
     std::string meta = "{\n"
         "  \"dex_hash\": \"" + hash + "\",\n"
@@ -274,20 +274,20 @@ void DexCacheManager::clearCache() {
 bool DexCacheManager::translateAndCache(const std::string& dexPath, int toolVersion,
                                         std::vector<uint8_t>& outJar,
                                         std::string* error) {
-    // 1. Try the cache first.
+    // 1. thử bộ nhớ đệm trước.
     if (hasValidCache(dexPath, toolVersion)) {
         if (loadCache(dexPath, toolVersion, outJar)) {
             return true;
         }
-        // Cache exists but failed to load — fall through and re-translate.
+        // bộ nhớ đệm tồn tại nhưng tải thất bại — bỏ qua và dịch lại.
     }
 
-    // 2. Translate the DEX to a JAR.
+    // 2. dịch tệp dex sang tệp jar.
     if (!DexToJar::convert(dexPath, outJar, error)) {
         return false;
     }
 
-    // 3. Save to cache (best-effort; failure to cache is not fatal).
+    // 3. lưu vào bộ nhớ đệm (cố gắng hết sức; lỗi lưu không nghiêm trọng).
     if (!cacheDir_.empty()) {
         saveCache(dexPath, toolVersion, outJar);
     }

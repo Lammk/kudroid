@@ -1,44 +1,44 @@
 package android.util;
 
 /**
- * Minimal android.util.AttributeSet implementation.
+ * triển khai android.util.attributeset tối thiểu.
  *
- * A collection of XML attributes. For KuDroid's minimal framework, this is a
- * stub that returns defaults.
+ * một bộ sưu tập các thuộc tính xml. đối với khuôn khổ tối thiểu của kudroid, đây là một
+ * mô phỏng trả về các giá trị mặc định.
  */
 public interface AttributeSet {
     /**
-     * Return the number of attributes.
+     * trả về số lượng các thuộc tính.
      */
     int getAttributeCount();
 
     /**
-     * Return an attribute name.
+     * trả về tên thuộc tính.
      */
     String getAttributeName(int index);
 
     /**
-     * Return an attribute value.
+     * trả về giá trị thuộc tính.
      */
     String getAttributeValue(int index);
 
     /**
-     * Return an attribute value by name.
+     * trả về giá trị thuộc tính theo tên.
      */
     String getAttributeValue(String namespace, String name);
 
     /**
-     * Return an int attribute.
+     * trả về một thuộc tính số nguyên (int).
      */
     int getAttributeIntValue(String namespace, String name, int defaultValue);
 
     /**
-     * Return a boolean attribute.
+     * trả về một thuộc tính boolean.
      */
     boolean getAttributeBooleanValue(String namespace, String name, boolean defaultValue);
 
     /**
-     * Return a float attribute.
+     * trả về một thuộc tính float.
      */
     float getAttributeFloatValue(String namespace, String name, float defaultValue);
 }

@@ -3,50 +3,50 @@ package android.content;
 import java.util.Map;
 
 /**
- * Minimal android.content.SharedPreferences implementation.
+ * triển khai android.content.sharedpreferences tối thiểu.
  *
- * Provides a simple in-memory key-value store. For KuDroid's minimal framework,
- * data is not persisted to disk (returns defaults on restart).
+ * cung cấp một kho lưu trữ khóa-giá trị đơn giản trong bộ nhớ. đối với khuôn khổ tối thiểu của kudroid,
+ * dữ liệu không được lưu vào đĩa (trả về giá trị mặc định khi khởi động lại).
  */
 public interface SharedPreferences {
 
     /**
-     * Retrieve a String value.
+     * lấy một giá trị chuỗi.
      */
     String getString(String key, String defValue);
 
     /**
-     * Retrieve an int value.
+     * lấy một giá trị số nguyên.
      */
     int getInt(String key, int defValue);
 
     /**
-     * Retrieve a long value.
+     * lấy một giá trị long.
      */
     long getLong(String key, long defValue);
 
     /**
-     * Retrieve a float value.
+     * lấy một giá trị float.
      */
     float getFloat(String key, float defValue);
 
     /**
-     * Retrieve a boolean value.
+     * lấy một giá trị boolean.
      */
     boolean getBoolean(String key, boolean defValue);
 
     /**
-     * Check whether the preferences contain a key.
+     * kiểm tra xem các tùy chọn có chứa một khóa hay không.
      */
     boolean contains(String key);
 
     /**
-     * Return an editor for modifying the preferences.
+     * trả về một trình chỉnh sửa để sửa đổi các tùy chọn.
      */
     Editor edit();
 
     /**
-     * Interface for modifying values in a SharedPreferences object.
+     * giao diện để sửa đổi các giá trị trong đối tượng sharedpreferences.
      */
     interface Editor {
         Editor putString(String key, String value);

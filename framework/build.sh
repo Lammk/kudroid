@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# Build the KuDroid Android framework classes into a JAR.
+# xây dựng các lớp khuôn khổ kudroid android thành một tệp jar.
 #
-# The framework is Java code that provides the minimal android.* classes that
-# apps need to load Java at startup (before switching to native .so code).
+# khuôn khổ này là mã java cung cấp các lớp android.* tối thiểu mà
+# các ứng dụng cần để tải java khi khởi động (trước khi chuyển sang mã .so gốc).
 #
-# Usage:
-#   ./build.sh                 # compile to framework/build/classes + framework/build/framework.jar
-#   ./build.sh --bootimage     # also produce a boot.jar for Avian embedding
+# cách sử dụng:
+#   ./build.sh                 # biên dịch thành framework/build/classes + framework/build/framework.jar
+#   ./build.sh --bootimage     # cũng tạo ra boot.jar để nhúng avian
 #
-# Requires: a JDK (javac + jar) on PATH or JAVA_HOME.
+# yêu cầu: jdk (javac + jar) trên path hoặc java_home.
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -20,7 +20,7 @@ BUILD_DIR="$FRAMEWORK_DIR/build"
 CLASSES_DIR="$BUILD_DIR/classes"
 JAR_PATH="$BUILD_DIR/framework.jar"
 
-# Locate javac/jar.
+# xác định vị trí javac/jar.
 if [[ -n "${JAVA_HOME:-}" ]]; then
     JAVAC="$JAVA_HOME/bin/javac"
     JAR="$JAVA_HOME/bin/jar"
@@ -37,11 +37,11 @@ fi
 echo "Using javac: $JAVAC"
 echo "Using jar:   $JAR"
 
-# Clean and recreate build dirs.
+# dọn dẹp và tạo lại các thư mục xây dựng.
 rm -rf "$BUILD_DIR"
 mkdir -p "$CLASSES_DIR"
 
-# Collect all .java files (avoid mapfile; macOS default bash is 3.2).
+# thu thập tất cả các tệp .java (tránh mapfile; bash mặc định của macos là 3.2).
 JAVA_FILES=$(find "$SRC_DIR" -name '*.java' | sort)
 if [[ -z "$JAVA_FILES" ]]; then
     echo "ERROR: No .java files found under $SRC_DIR" >&2
@@ -58,7 +58,7 @@ echo "Creating $JAR_PATH..."
 echo "Framework JAR built: $JAR_PATH"
 ls -lh "$JAR_PATH"
 
-# Optional: produce a boot.jar for Avian embedding.
+# tùy chọn: tạo ra boot.jar để nhúng avian.
 if [[ "${1:-}" == "--bootimage" ]]; then
     BOOT_JAR="$BUILD_DIR/boot.jar"
     cp "$JAR_PATH" "$BOOT_JAR"

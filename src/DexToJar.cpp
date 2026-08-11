@@ -8,12 +8,12 @@
 namespace kudroid {
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DEX parsing structures
+// cấu trúc phân tích dex
 // ─────────────────────────────────────────────────────────────────────────────
 
 namespace {
 
-// DEX header (little-endian).
+// phần đầu dex (little-endian).
 struct DexHeader {
     uint8_t  magic[8];
     uint32_t checksum;
@@ -54,7 +54,7 @@ inline uint32_t rd32(const uint8_t* p) {
     return p[0] | (p[1] << 8) | (p[2] << 16) | (p[3] << 24);
 }
 
-// Read a ULEB128 value.
+// đọc giá trị uleb128.
 inline uint32_t readUleb128(const uint8_t*& p) {
     uint32_t result = 0;
     int shift = 0;
@@ -67,9 +67,9 @@ inline uint32_t readUleb128(const uint8_t*& p) {
     return result;
 }
 
-// Read a MUTF-8 string from a string_data_item.
+// đọc chuỗi mutf-8 từ string_data_item.
 std::string readMutf8(const uint8_t* p) {
-    // Skip uleb128 utf16_size.
+    // bỏ qua uleb128 utf16_size.
     readUleb128(p);
     std::string result;
     while (*p != 0) {
@@ -84,7 +84,7 @@ std::string readMutf8(const uint8_t* p) {
             uint8_t b2 = *p++;
             result += (char)(((b0 & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F));
         } else {
-            // 4-byte (surrogate pair) — approximate.
+            // 4-byte (cặp thay thế) — xấp xỉ.
             uint8_t b1 = *p++;
             uint8_t b2 = *p++;
             uint8_t b3 = *p++;
@@ -95,17 +95,17 @@ std::string readMutf8(const uint8_t* p) {
     return result;
 }
 
-// Convert a DEX type descriptor (e.g. "Lcom/foo/Bar;") to a JVM internal name
-// (e.g. "com/foo/Bar").
+// chuyển đổi mô tả kiểu dex (ví dụ "lcom/foo/bar;") sang tên nội bộ jvm
+// (ví dụ "com/foo/bar").
 std::string typeToInternal(const std::string& desc) {
     if (!desc.empty() && desc[0] == 'L' && desc.back() == ';') {
         return desc.substr(1, desc.size() - 2);
     }
-    return desc; // primitives and arrays stay as-is
+    return desc; // kiểu nguyên thuỷ và mảng giữ nguyên
 }
 
-// Convert a DEX method signature (proto) to a JVM descriptor.
-// DEX proto return_type_idx + parameters_off (type_list) → JVM descriptor.
+// chuyển đổi chữ ký phương thức dex (proto) sang mô tả jvm.
+// dex proto return_type_idx + parameters_off (type_list) → mô tả jvm.
 std::string buildMethodDescriptor(const std::vector<std::string>& paramTypes,
                                   const std::string& returnType) {
     std::string desc = "(";
@@ -118,7 +118,7 @@ std::string buildMethodDescriptor(const std::vector<std::string>& paramTypes,
 } // namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DEX parser
+// bộ phân tích dex
 // ─────────────────────────────────────────────────────────────────────────────
 
 bool DexToJar::parseDex(const std::vector<uint8_t>& dex,
@@ -130,13 +130,13 @@ bool DexToJar::parseDex(const std::vector<uint8_t>& dex,
     const uint8_t* base = dex.data();
     const DexHeader* hdr = reinterpret_cast<const DexHeader*>(base);
 
-    // Validate magic.
+    // xác thực magic.
     if (memcmp(hdr->magic, "dex\n", 4) != 0) {
         if (error) *error = "Not a DEX file (bad magic)";
         return false;
     }
 
-    // Helper to read a string by index.
+    // hàm hỗ trợ đọc chuỗi theo chỉ mục.
     auto getString = [&](uint32_t idx) -> std::string {
         if (idx >= hdr->stringIdsSize) return "";
         uint32_t off = rd32(base + hdr->stringIdsOff + idx * 4);
@@ -144,14 +144,14 @@ bool DexToJar::parseDex(const std::vector<uint8_t>& dex,
         return readMutf8(base + off);
     };
 
-    // Helper to read a type descriptor by index.
+    // hàm hỗ trợ đọc mô tả kiểu theo chỉ mục.
     auto getType = [&](uint32_t idx) -> std::string {
         if (idx >= hdr->typeIdsSize) return "";
         uint32_t descIdx = rd32(base + hdr->typeIdsOff + idx * 4);
         return getString(descIdx);
     };
 
-    // Parse proto_ids → {returnType, paramTypes}.
+    // phân tích proto_ids → {returntype, paramtypes}.
     struct ProtoInfo {
         std::string returnType;
         std::vector<std::string> params;
@@ -174,7 +174,7 @@ bool DexToJar::parseDex(const std::vector<uint8_t>& dex,
         protos.push_back(pi);
     }
 
-    // Parse method_ids → {classIdx, protoIdx, name}.
+    // phân tích method_ids → {classidx, protoidx, name}.
     struct MethodId {
         uint32_t classIdx;
         uint32_t protoIdx;
@@ -191,7 +191,7 @@ bool DexToJar::parseDex(const std::vector<uint8_t>& dex,
         methodIds.push_back(m);
     }
 
-    // Parse field_ids → {classIdx, typeIdx, name}.
+    // phân tích field_ids → {classidx, typeidx, name}.
     struct FieldId {
         uint32_t classIdx;
         std::string type;
@@ -208,7 +208,7 @@ bool DexToJar::parseDex(const std::vector<uint8_t>& dex,
         fieldIds.push_back(f);
     }
 
-    // Parse class_defs.
+    // phân tích class_defs.
     classes.reserve(hdr->classDefsSize);
     for (uint32_t i = 0; i < hdr->classDefsSize; ++i) {
         const uint8_t* p = base + hdr->classDefsOff + i * 32;
@@ -225,7 +225,7 @@ bool DexToJar::parseDex(const std::vector<uint8_t>& dex,
                            : typeToInternal(getType(superclassIdx));
         ci.accessFlags = accessFlags;
 
-        // Interfaces.
+        // giao diện.
         if (interfacesOff != 0 && interfacesOff < dex.size()) {
             uint32_t size = rd32(base + interfacesOff);
             for (uint32_t j = 0; j < size; ++j) {
@@ -234,7 +234,7 @@ bool DexToJar::parseDex(const std::vector<uint8_t>& dex,
             }
         }
 
-        // Class data: methods + fields.
+        // dữ liệu lớp: phương thức + trường.
         if (classDataOff != 0 && classDataOff < dex.size()) {
             const uint8_t* cd = base + classDataOff;
             uint32_t staticFieldsSize = readUleb128(cd);
@@ -242,7 +242,7 @@ bool DexToJar::parseDex(const std::vector<uint8_t>& dex,
             uint32_t directMethodsSize = readUleb128(cd);
             uint32_t virtualMethodsSize = readUleb128(cd);
 
-            // Fields (static + instance).
+            // trường (tĩnh + thể hiện).
             uint32_t fieldIdx = 0;
             for (uint32_t j = 0; j < staticFieldsSize + instanceFieldsSize; ++j) {
                 fieldIdx += readUleb128(cd);
@@ -253,7 +253,7 @@ bool DexToJar::parseDex(const std::vector<uint8_t>& dex,
                 }
             }
 
-            // Methods (direct + virtual).
+            // phương thức (trực tiếp + ảo).
             uint32_t methodIdx = 0;
             for (uint32_t j = 0; j < directMethodsSize + virtualMethodsSize; ++j) {
                 methodIdx += readUleb128(cd);
@@ -277,12 +277,12 @@ bool DexToJar::parseDex(const std::vector<uint8_t>& dex,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// JVM .class file writer
+// trình ghi tệp .class jvm
 // ─────────────────────────────────────────────────────────────────────────────
 
 namespace {
 
-// Simple byte buffer writer.
+// trình ghi bộ đệm byte đơn giản.
 class ByteWriter {
 public:
     std::vector<uint8_t> data;
@@ -295,7 +295,7 @@ public:
         data.push_back((v >> 8) & 0xff);
         data.push_back(v & 0xff);
     }
-    // Little-endian variants (for ZIP/JAR format).
+    // các biến thể little-endian (cho định dạng zip/jar).
     void u2le(uint16_t v) { data.push_back(v & 0xff); data.push_back(v >> 8); }
     void u4le(uint32_t v) {
         data.push_back(v & 0xff);
@@ -306,10 +306,10 @@ public:
     void bytes(const uint8_t* p, size_t n) { data.insert(data.end(), p, p + n); }
 };
 
-// Constant pool builder.
+// bộ xây dựng nhóm hằng số.
 class ConstantPool {
 public:
-    // Returns the constant pool index (1-based).
+    // trả về chỉ mục nhóm hằng số (bắt đầu từ 1).
     uint16_t addUtf8(const std::string& s) {
         auto it = utf8Map.find(s);
         if (it != utf8Map.end()) return it->second;
@@ -362,7 +362,7 @@ public:
         return idx;
     }
 
-    // Write the constant pool to the class file.
+    // ghi nhóm hằng số vào tệp lớp.
     void write(ByteWriter& w) {
         w.u2(static_cast<uint16_t>(entries.size() + 1)); // count = entries + 1
         for (const auto& e : entries) {
@@ -405,9 +405,9 @@ private:
     std::map<std::string, uint16_t> fieldrefMap;
 };
 
-// Determine the default return instruction for a method descriptor.
-// Returns the bytecode for "return default" (iconst_0/aconst_null/lconst_0/etc).
-// Also returns the number of stack slots pushed.
+// xác định lệnh trả về mặc định cho mô tả phương thức.
+// trả về mã byte cho "return default" (iconst_0/aconst_null/lconst_0/v.v.).
+// cũng trả về số khe ngăn xếp được đẩy.
 void emitDefaultReturn(ByteWriter& code, const std::string& desc, uint16_t& maxStack) {
     // desc = "(params)returnType"
     size_t close = desc.rfind(')');
@@ -432,19 +432,19 @@ void emitDefaultReturn(ByteWriter& code, const std::string& desc, uint16_t& maxS
         code.u1(0xAF); // dreturn
         maxStack = std::max<uint16_t>(maxStack, 2);
     } else {
-        // Object/array → aconst_null + areturn
+        // đối tượng/mảng → aconst_null + areturn
         code.u1(0x01); // aconst_null
         code.u1(0xB0); // areturn
         maxStack = std::max<uint16_t>(maxStack, 1);
     }
 }
 
-// Build a .class file for a class stub.
+// xây dựng tệp .class cho lớp giả.
 std::vector<uint8_t> buildClassFile(const DexToJar::ClassInfo& ci) {
     ByteWriter w;
     ConstantPool cp;
 
-    // Magic + version (Java 8 = 52.0).
+    // magic + phiên bản (java 8 = 52.0).
     w.u4(0xCAFEBABE);
     w.u2(0); // minor
     w.u2(52); // major
@@ -453,13 +453,13 @@ std::vector<uint8_t> buildClassFile(const DexToJar::ClassInfo& ci) {
     uint16_t thisClassIdx = cp.addClass(ci.name);
     uint16_t superClassIdx = cp.addClass(ci.superName);
 
-    // Interfaces.
+    // giao diện.
     std::vector<uint16_t> interfaceIdx;
     for (const auto& iface : ci.interfaces) {
         interfaceIdx.push_back(cp.addClass(iface));
     }
 
-    // Fields.
+    // trường.
     struct FieldEntry {
         uint16_t nameIdx;
         uint16_t descIdx;
@@ -474,7 +474,7 @@ std::vector<uint8_t> buildClassFile(const DexToJar::ClassInfo& ci) {
         fields.push_back(fe);
     }
 
-    // Methods: default constructor + all declared methods.
+    // phương thức: hàm tạo mặc định + tất cả các phương thức được khai báo.
     struct MethodEntry {
         uint16_t nameIdx;
         uint16_t descIdx;
@@ -485,7 +485,7 @@ std::vector<uint8_t> buildClassFile(const DexToJar::ClassInfo& ci) {
     };
     std::vector<MethodEntry> methods;
 
-    // Default constructor: <init>()V → aload_0; invokespecial Object.<init>; return.
+    // hàm tạo mặc định: <init>()v → aload_0; invokespecial object.<init>; return.
     {
         MethodEntry me;
         me.nameIdx = cp.addUtf8("<init>");
@@ -503,9 +503,9 @@ std::vector<uint8_t> buildClassFile(const DexToJar::ClassInfo& ci) {
         methods.push_back(me);
     }
 
-    // Declared methods (empty bodies).
+    // các phương thức được khai báo (phần thân trống).
     for (const auto& m : ci.methods) {
-        // Skip <clinit> (static initializer) — we don't emit it.
+        // bỏ qua <clinit> (khởi tạo tĩnh) — chúng ta không phát ra nó.
         if (m.first == "<clinit>") continue;
 
         MethodEntry me;
@@ -517,7 +517,7 @@ std::vector<uint8_t> buildClassFile(const DexToJar::ClassInfo& ci) {
         emitDefaultReturn(code, m.second, maxStack);
         me.code = code.data;
         me.maxStack = maxStack;
-        // maxLocals = 1 (this) + params.
+        // maxlocals = 1 (this) + params.
         size_t close = m.second.rfind(')');
         std::string params = (close != std::string::npos) ? m.second.substr(1, close - 1) : "";
         uint16_t locals = 1;
@@ -542,20 +542,20 @@ std::vector<uint8_t> buildClassFile(const DexToJar::ClassInfo& ci) {
         methods.push_back(me);
     }
 
-    // Write constant pool.
+    // ghi nhóm hằng số.
     uint16_t codeNameIdx = cp.addUtf8("Code");
     cp.write(w);
 
-    // Access flags (ACC_PUBLIC | ACC_SUPER).
+    // cờ truy cập (acc_public | acc_super).
     w.u2(0x0021);
     w.u2(thisClassIdx);
     w.u2(superClassIdx);
 
-    // Interfaces.
+    // giao diện.
     w.u2(static_cast<uint16_t>(interfaceIdx.size()));
     for (uint16_t idx : interfaceIdx) w.u2(idx);
 
-    // Fields.
+    // trường.
     w.u2(static_cast<uint16_t>(fields.size()));
     for (const auto& f : fields) {
         w.u2(f.access);
@@ -564,14 +564,14 @@ std::vector<uint8_t> buildClassFile(const DexToJar::ClassInfo& ci) {
         w.u2(0); // no attributes
     }
 
-    // Methods.
+    // phương thức.
     w.u2(static_cast<uint16_t>(methods.size()));
     for (const auto& m : methods) {
         w.u2(m.access);
         w.u2(m.nameIdx);
         w.u2(m.descIdx);
-        w.u2(1); // one attribute: Code
-        // Code attribute: name_index, length, max_stack, max_locals,
+        w.u2(1); // một thuộc tính: code
+        // thuộc tính code: name_index, length, max_stack, max_locals,
         // code_length, code, exception_table_length, attributes_count.
         uint32_t codeLen = static_cast<uint32_t>(m.code.size());
         uint32_t attrLen = 2 + 2 + 4 + codeLen + 2 + 2; // max_stack+max_locals+code_length+code+exc+attrs
@@ -581,18 +581,18 @@ std::vector<uint8_t> buildClassFile(const DexToJar::ClassInfo& ci) {
         w.u2(m.maxLocals);
         w.u4(codeLen);
         w.bytes(m.code.data(), m.code.size());
-        w.u2(0); // exception_table_length
-        w.u2(0); // attributes_count
+        w.u2(0); // độ dài bảng ngoại lệ
+        w.u2(0); // số lượng thuộc tính
     }
 
-    // Class attributes.
+    // thuộc tính lớp.
     w.u2(0);
 
     return w.data;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ZIP (JAR) writer — minimal, no compression (stored entries).
+// trình ghi zip (jar) — tối giản, không nén (các mục được lưu).
 // ─────────────────────────────────────────────────────────────────────────────
 
 uint32_t crc32(const uint8_t* data, size_t len) {
@@ -608,18 +608,18 @@ uint32_t crc32(const uint8_t* data, size_t len) {
 }
 
 void writeZipEntry(ByteWriter& out, const std::string& name, const std::vector<uint8_t>& data) {
-    // Local file header (little-endian).
+    // phần đầu tệp cục bộ (little-endian).
     out.u4le(0x04034b50);
-    out.u2le(20); // version needed
-    out.u2le(0);  // flags
-    out.u2le(0);  // compression method (stored)
-    out.u2le(0);  // mod time
-    out.u2le(0);  // mod date
+    out.u2le(20); // phiên bản cần thiết
+    out.u2le(0);  // cờ
+    out.u2le(0);  // phương pháp nén (được lưu)
+    out.u2le(0);  // thời gian sửa
+    out.u2le(0);  // ngày sửa
     out.u4le(crc32(data.data(), data.size()));
-    out.u4le(static_cast<uint32_t>(data.size())); // compressed size
-    out.u4le(static_cast<uint32_t>(data.size())); // uncompressed size
+    out.u4le(static_cast<uint32_t>(data.size())); // kích thước nén
+    out.u4le(static_cast<uint32_t>(data.size())); // kích thước không nén
     out.u2le(static_cast<uint16_t>(name.size()));
-    out.u2le(0); // extra length
+    out.u2le(0); // độ dài thêm
     out.bytes(reinterpret_cast<const uint8_t*>(name.data()), name.size());
     out.bytes(data.data(), data.size());
 }
@@ -627,21 +627,21 @@ void writeZipEntry(ByteWriter& out, const std::string& name, const std::vector<u
 void writeCentralDir(ByteWriter& out, const std::string& name, const std::vector<uint8_t>& data,
                      uint32_t localOffset) {
     out.u4le(0x02014b50);
-    out.u2le(20); // version made by
-    out.u2le(20); // version needed
-    out.u2le(0);  // flags
-    out.u2le(0);  // method
-    out.u2le(0);  // mod time
-    out.u2le(0);  // mod date
+    out.u2le(20); // phiên bản tạo bởi
+    out.u2le(20); // phiên bản cần thiết
+    out.u2le(0);  // cờ
+    out.u2le(0);  // phương pháp
+    out.u2le(0);  // thời gian sửa
+    out.u2le(0);  // ngày sửa
     out.u4le(crc32(data.data(), data.size()));
     out.u4le(static_cast<uint32_t>(data.size()));
     out.u4le(static_cast<uint32_t>(data.size()));
     out.u2le(static_cast<uint16_t>(name.size()));
-    out.u2le(0); // extra
-    out.u2le(0); // comment
-    out.u2le(0); // disk number
-    out.u2le(0); // internal attrs
-    out.u4le(0); // external attrs
+    out.u2le(0); // thêm
+    out.u2le(0); // bình luận
+    out.u2le(0); // số đĩa
+    out.u2le(0); // thuộc tính nội bộ
+    out.u4le(0); // thuộc tính bên ngoài
     out.u4le(localOffset);
     out.bytes(reinterpret_cast<const uint8_t*>(name.data()), name.size());
 }
@@ -649,7 +649,7 @@ void writeCentralDir(ByteWriter& out, const std::string& name, const std::vector
 } // namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
-// JAR builder
+// bộ xây dựng jar
 // ─────────────────────────────────────────────────────────────────────────────
 
 bool DexToJar::buildJar(const std::vector<ClassInfo>& classes,
@@ -660,7 +660,7 @@ bool DexToJar::buildJar(const std::vector<ClassInfo>& classes,
     std::vector<std::string> entryNames;
     std::vector<std::vector<uint8_t>> entryData;
 
-    // Build each class file.
+    // xây dựng từng tệp lớp.
     for (const auto& ci : classes) {
         std::vector<uint8_t> classFile = buildClassFile(ci);
         std::string entryName = ci.name + ".class";
@@ -668,35 +668,35 @@ bool DexToJar::buildJar(const std::vector<ClassInfo>& classes,
         entryData.push_back(classFile);
     }
 
-    // Write local headers + data.
+    // ghi tiêu đề cục bộ + dữ liệu.
     for (size_t i = 0; i < entryNames.size(); ++i) {
         centralOffsets.push_back(static_cast<uint32_t>(jar.data.size()));
         writeZipEntry(jar, entryNames[i], entryData[i]);
     }
 
-    // Write central directory.
+    // ghi thư mục trung tâm.
     uint32_t centralStart = static_cast<uint32_t>(jar.data.size());
     for (size_t i = 0; i < entryNames.size(); ++i) {
         writeCentralDir(jar, entryNames[i], entryData[i], centralOffsets[i]);
     }
     uint32_t centralSize = static_cast<uint32_t>(jar.data.size()) - centralStart;
 
-    // End of central directory.
+    // kết thúc thư mục trung tâm.
     jar.u4le(0x06054b50);
-    jar.u2le(0); // disk number
-    jar.u2le(0); // central dir disk
+    jar.u2le(0); // số đĩa
+    jar.u2le(0); // đĩa thư mục trung tâm
     jar.u2le(static_cast<uint16_t>(entryNames.size()));
     jar.u2le(static_cast<uint16_t>(entryNames.size()));
     jar.u4le(centralSize);
     jar.u4le(centralStart);
-    jar.u2le(0); // comment length
+    jar.u2le(0); // độ dài bình luận
 
     outJar = jar.data;
     return true;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Public API
+// api công khai
 // ─────────────────────────────────────────────────────────────────────────────
 
 bool DexToJar::convert(const std::string& dexPath, std::vector<uint8_t>& outJar,

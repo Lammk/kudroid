@@ -54,7 +54,7 @@ void VFSPathRemapper::setDocumentsDirectory(const std::string& documentsDirector
 
 bool VFSPathRemapper::initialize() {
     std::error_code error;
-    // Create base directories (Android-like layout).
+    // tạo các thư mục cơ sở (bố cục giống android).
     for (const auto& relative : {
         "data/data", "data/app", "data/local/tmp", "data/cache",
         "sdcard/Download", "sdcard/Android/data", "sdcard/Android/obb",
@@ -68,7 +68,7 @@ bool VFSPathRemapper::initialize() {
         }
     }
     
-    // Create Symlinks
+    // tạo liên kết mềm
     auto make_symlink = [&](const char* target, const char* linkpath) {
         std::error_code ec;
         std::filesystem::path fullLink = std::filesystem::path(androidRoot_) / linkpath;
@@ -136,7 +136,7 @@ bool VFSPathRemapper::init_pseudo_files() {
         ::chmod(path.c_str(), 0644);
     }
     
-    // Write CA cert bundle
+    // ghi gói chứng chỉ ca
     std::filesystem::path cacertPath = std::filesystem::path(root) / "system/etc/security/cacerts/cacert.pem";
     if (!std::filesystem::exists(cacertPath)) {
         std::ofstream cacertOut(cacertPath, std::ios::binary);
@@ -152,7 +152,7 @@ std::string VFSPathRemapper::remap(const char* originalPath) const {
     if (!originalPath) return {};
     std::string_view original(originalPath);
     
-    // Map host-native /dev/ devices directly to iOS
+    // ánh xạ trực tiếp các thiết bị /dev/ gốc của máy chủ sang ios
     if (original == "/dev/urandom" || original == "/dev/random" || 
         original == "/dev/null" || original == "/dev/zero") {
         return std::string(original);
@@ -212,7 +212,7 @@ int vfs_open(const char* path, int flags, mode_t mode) {
         std::string mapsPath = VFSPathRemapper::getInstance().remap("/proc/self/maps");
         std::ofstream mapsFile(mapsPath, std::ios::trunc);
         if (mapsFile) {
-            // Write a dummy maps layout that satisfies basic checks
+            // ghi bố cục bản đồ giả thỏa mãn các kiểm tra cơ bản
             mapsFile << "5500000000-5500100000 r-xp 00000000 103:02 12345 /system/bin/app_process64\n";
             mapsFile << "5500100000-5500110000 r--p 00100000 103:02 12345 /system/bin/app_process64\n";
             mapsFile << "5500110000-5500120000 rw-p 00110000 103:02 12345 /system/bin/app_process64\n";
@@ -231,7 +231,7 @@ int vfs_open(const char* path, int flags, mode_t mode) {
     }
 
     const std::string mapped = VFSPathRemapper::getInstance().remap(path);
-    // For O_CREAT, ensure the parent directory exists (avoids ENOENT crashes).
+    // đối với o_creat, đảm bảo thư mục gốc tồn tại (tránh sự cố enoent).
     if (flags & O_CREAT) {
         std::error_code ec;
         std::filesystem::create_directories(std::filesystem::path(mapped).parent_path(), ec);
@@ -335,7 +335,7 @@ static void copy_stat(struct android_stat* dst, const struct stat* src) {
 }
 
 int vfs_stat(const char* path, void* info) {
-    // Ensure pseudo-files exist before stat (e.g. /proc/self/maps).
+    // đảm bảo các tệp giả tồn tại trước khi stat (ví dụ: /proc/self/maps).
     if (path && std::strcmp(path, "/proc/self/maps") == 0) {
         std::string mapsPath = VFSPathRemapper::getInstance().remap("/proc/self/maps");
         if (!std::filesystem::exists(mapsPath)) {

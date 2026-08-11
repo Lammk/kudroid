@@ -1,24 +1,24 @@
 package android.provider;
 
 /**
- * Stub android.provider.Settings.
+ * mô phỏng android.provider.settings.
  *
- * Non-critical for app startup/rendering. Returns defaults so apps don't
- * crash when they query system settings.
+ * không quan trọng đối với khởi động/kết xuất ứng dụng. trả về mặc định để các ứng dụng không
+ * gặp sự cố khi chúng truy vấn các cài đặt hệ thống.
  */
 public final class Settings {
     private Settings() {
     }
 
     /**
-     * System settings.
+     * các cài đặt hệ thống.
      */
     public static final class System {
-        /** Screen brightness. */
+        /** độ sáng màn hình. */
         public static final String SCREEN_BRIGHTNESS = "screen_brightness";
-        /** Screen off timeout. */
+        /** thời gian chờ tắt màn hình. */
         public static final String SCREEN_OFF_TIMEOUT = "screen_off_timeout";
-        /** Accelerometer rotation. */
+        /** xoay gia tốc kế. */
         public static final String ACCELEROMETER_ROTATION = "accelerometer_rotation";
 
         private System() {
@@ -70,10 +70,10 @@ public final class Settings {
     }
 
     /**
-     * Global settings.
+     * các cài đặt toàn cầu.
      */
     public static final class Global {
-        /** Airplane mode on. */
+        /** chế độ máy bay bật. */
         public static final String AIRPLANE_MODE_ON = "airplane_mode_on";
 
         private Global() {
@@ -101,10 +101,10 @@ public final class Settings {
     }
 
     /**
-     * Secure settings.
+     * các cài đặt an toàn.
      */
     public static final class Secure {
-        /** Android ID. */
+        /** id android. */
         public static final String ANDROID_ID = "android_id";
 
         private Secure() {

@@ -1,10 +1,10 @@
 package android.location;
 
 /**
- * Stub android.location.Location.
+ * mô phỏng android.location.location.
  *
- * Represents a geographic location. For KuDroid's minimal framework, this is
- * a stub with default values.
+ * đại diện cho một vị trí địa lý. đối với khuôn khổ tối thiểu của kudroid, đây là
+ * một mô phỏng với các giá trị mặc định.
  */
 public class Location {
     private double mLatitude = 0.0;

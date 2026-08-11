@@ -1,10 +1,10 @@
 package android.os;
 
 /**
- * Minimal android.os.Handler implementation.
+ * triển khai android.os.handler tối thiểu.
  *
- * Allows posting Runnable/Message to a Looper. For KuDroid's minimal framework,
- * messages are dispatched synchronously when the looper runs.
+ * cho phép đăng runnable/message lên một looper. đối với khuôn khổ tối thiểu của kudroid,
+ * các tin nhắn được gửi đồng bộ khi looper chạy.
  */
 public class Handler {
     private final Looper mLooper;
@@ -12,35 +12,35 @@ public class Handler {
     private final Callback mCallback;
 
     /**
-     * Callback interface for handling messages.
+     * giao diện cuộc gọi lại để xử lý tin nhắn.
      */
     public interface Callback {
         boolean handleMessage(Message msg);
     }
 
     /**
-     * Default constructor — uses the main looper.
+     * hàm tạo mặc định - sử dụng trình lặp chính.
      */
     public Handler() {
         this(Looper.getMainLooper(), null);
     }
 
     /**
-     * Constructor with a callback.
+     * hàm tạo với một cuộc gọi lại.
      */
     public Handler(Callback callback) {
         this(Looper.getMainLooper(), callback);
     }
 
     /**
-     * Constructor with an explicit looper.
+     * hàm tạo với một trình lặp rõ ràng.
      */
     public Handler(Looper looper) {
         this(looper, null);
     }
 
     /**
-     * Constructor with an explicit looper and callback.
+     * hàm tạo với một trình lặp và cuộc gọi lại rõ ràng.
      */
     public Handler(Looper looper, Callback callback) {
         mLooper = looper;
@@ -49,13 +49,13 @@ public class Handler {
     }
 
     /**
-     * Handle a message. Subclasses override this.
+     * xử lý một tin nhắn. các lớp con ghi đè điều này.
      */
     public void handleMessage(Message msg) {
     }
 
     /**
-     * Dispatch a message to the callback or handleMessage.
+     * gửi một tin nhắn đến cuộc gọi lại hoặc handlemessage.
      */
     public void dispatchMessage(Message msg) {
         if (mCallback != null && mCallback.handleMessage(msg)) {
@@ -65,21 +65,21 @@ public class Handler {
     }
 
     /**
-     * Post a Runnable to the queue.
+     * đăng một runnable vào hàng đợi.
      */
     public final boolean post(Runnable r) {
         return sendMessageDelayed(obtainMessage(0, r), 0);
     }
 
     /**
-     * Post a Runnable to the queue with a delay.
+     * đăng một runnable vào hàng đợi với một độ trễ.
      */
     public final boolean postDelayed(Runnable r, long delayMillis) {
         return sendMessageDelayed(obtainMessage(0, r), delayMillis);
     }
 
     /**
-     * Obtain a Message with a Runnable as the obj.
+     * lấy một message với một runnable làm obj.
      */
     public final Message obtainMessage(int what, Object obj) {
         Message m = Message.obtain();
@@ -90,14 +90,14 @@ public class Handler {
     }
 
     /**
-     * Send a message immediately.
+     * gửi một tin nhắn ngay lập tức.
      */
     public final boolean sendMessage(Message msg) {
         return sendMessageDelayed(msg, 0);
     }
 
     /**
-     * Send a message with a delay.
+     * gửi một tin nhắn với một độ trễ.
      */
     public final boolean sendMessageDelayed(Message msg, long delayMillis) {
         if (msg.target == null) {
@@ -107,7 +107,7 @@ public class Handler {
     }
 
     /**
-     * Remove any pending posts of Runnable r.
+     * xóa bất kỳ bài đăng nào đang chờ xử lý của runnable r.
      */
     public final void removeCallbacks(Runnable r) {
         // Minimal: no-op for now.

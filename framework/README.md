@@ -1,54 +1,54 @@
-# KuDroid Android Framework
+# khuôn khổ kudroid android
 
-A minimal Android framework (Java) that provides the `android.*` classes apps
-need to load Java at startup, before switching to native `.so` code.
+một khuôn khổ android tối thiểu (java) cung cấp các lớp `android.*` mà các ứng dụng
+cần để tải java khi khởi động, trước khi chuyển sang mã `.so` gốc.
 
-## Purpose
+## mục đích
 
-Most native games (Unity IL2CPP, Godot, SDL) only touch Java briefly at
-startup (`JNI_OnLoad`, `ANativeActivity_onCreate`), then run entirely through
-C/C++ `.so` libraries. This framework provides just enough `android.*` classes
-so those apps don't crash while loading Java.
+hầu hết các trò chơi gốc (unity il2cpp, godot, sdl) chỉ chạm vào java một thời gian ngắn lúc
+khởi động (`jni_onload`, `anativeactivity_oncreate`), sau đó chạy hoàn toàn thông qua
+các thư viện `.so` c/c++. khuôn khổ này cung cấp vừa đủ các lớp `android.*`
+để các ứng dụng đó không gặp sự cố khi tải java.
 
-## What's included
+## những gì được bao gồm
 
-**Real implementations** (affect app behavior):
-- `android.util.Log` → maps to `__android_log_print`
-- `android.os.Handler` / `Looper` / `MessageQueue` / `Message` / `Bundle`
-- `android.app.Activity` / `Application` / `Dialog` / `AlertDialog`
-- `android.content.Context` / `ContextWrapper` / `Intent` / `SharedPreferences`
-- `android.view.View` / `ViewGroup` / `MotionEvent` / `Window`
-- `android.widget.TextView` / `Button` / `LinearLayout` / `Toast`
-- `android.graphics.*` (Canvas, Paint, Bitmap, Color, Rect, ...)
+**triển khai thực tế** (ảnh hưởng đến hành vi của ứng dụng):
+- `android.util.log` → maps to `__android_log_print`
+- `android.os.handler` / `looper` / `messagequeue` / `message` / `bundle`
+- `android.app.activity` / `application` / `dialog` / `alertdialog`
+- `android.content.context` / `contextwrapper` / `intent` / `sharedpreferences`
+- `android.view.view` / `viewgroup` / `motionevent` / `window`
+- `android.widget.textview` / `button` / `linearlayout` / `toast`
+- `android.graphics.*` (canvas, paint, bitmap, color, rect, ...)
 
-**Stubs** (return defaults so apps don't crash):
-- `android.telephony.TelephonyManager`
-- `android.bluetooth.BluetoothAdapter`
-- `android.app.NotificationManager` / `Notification`
-- `android.location.LocationManager`
-- `android.net.wifi.WifiManager`
-- `android.hardware.SensorManager`
-- `android.media.AudioManager`
-- `android.os.Vibrator` / `PowerManager`
-- `android.net.ConnectivityManager`
-- `android.provider.Settings`
+**mô phỏng** (trả về các giá trị mặc định để các ứng dụng không bị sự cố):
+- `android.telephony.telephonymanager`
+- `android.bluetooth.bluetoothadapter`
+- `android.app.notificationmanager` / `notification`
+- `android.location.locationmanager`
+- `android.net.wifi.wifimanager`
+- `android.hardware.sensormanager`
+- `android.media.audiomanager`
+- `android.os.vibrator` / `powermanager`
+- `android.net.connectivitymanager`
+- `android.provider.settings`
 
-## Building
+## xây dựng
 
 ```bash
-# Requires a JDK (javac + jar)
-./build.sh                 # produces framework/build/framework.jar
-./build.sh --bootimage     # also produces framework/build/boot.jar for Avian
+# yêu cầu jdk (javac + jar)
+./build.sh                 # tạo ra framework/build/framework.jar
+./build.sh --bootimage     # cũng tạo ra framework/build/boot.jar cho avian
 ```
 
-## Adding classes
+## thêm lớp
 
-1. Create the `.java` file under `framework/android/<package>/`.
-2. Run `./build.sh` to recompile.
-3. The JAR is embedded into the KuDroid binary as the Avian boot classpath.
+1. tạo tệp `.java` dưới `framework/android/<package>/`.
+2. chạy `./build.sh` để biên dịch lại.
+3. tệp jar được nhúng vào tệp nhị phân kudroid dưới dạng classpath khởi động avian.
 
-## Contributing
+## đóng góp
 
-This framework is intentionally minimal. If an app needs a class that's
-missing, add it (or open an issue). The goal is to grow it based on real app
-needs, not to replicate the full Android SDK.
+khuôn khổ này cố tình tối thiểu. nếu một ứng dụng cần một lớp
+bị thiếu, hãy thêm nó (hoặc mở một vấn đề). mục tiêu là phát triển nó dựa trên nhu cầu thực tế của ứng dụng,
+không phải để sao chép toàn bộ android sdk.

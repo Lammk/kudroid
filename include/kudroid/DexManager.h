@@ -6,7 +6,7 @@
 
 namespace kudroid {
 
-// Basic DexHeader structure (simplified)
+// cấu trúc dexheader cơ bản (được đơn giản hóa)
 struct DexHeader {
     uint8_t  magic[8];
     uint32_t checksum;
@@ -53,10 +53,10 @@ class DexManager {
 public:
     static DexManager& getInstance();
     
-    // Scan a directory for .dex files and load them
+    // quét thư mục để tìm các tệp .dex và tải chúng
     bool loadDirectory(const std::string& dirPath);
     
-    // Map a single .dex file into executable memory
+    // ánh xạ một tệp .dex vào bộ nhớ có thể thực thi
     bool mapDexFile(const std::string& path);
     
     const std::vector<DexFile*>& getLoadedDexFiles() const { return dexFiles_; }
@@ -68,7 +68,7 @@ private:
     std::vector<DexFile*> dexFiles_;
 };
 
-// Dummy API for JIT translation in the future
+// api giả cho bản dịch jit trong tương lai
 extern "C" void kudroid_dex_jit_compile(DexFile* dexFile);
 
 } // namespace kudroid

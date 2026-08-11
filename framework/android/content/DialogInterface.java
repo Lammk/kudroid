@@ -1,47 +1,47 @@
 package android.content;
 
 /**
- * Minimal android.content.DialogInterface implementation.
+ * triển khai android.content.dialoginterface tối thiểu.
  *
- * Interface for dialogs. For KuDroid's minimal framework, provides the button
- * constants and click listener.
+ * giao diện cho các hộp thoại. đối với khuôn khổ tối thiểu của kudroid, cung cấp hằng số
+ * nút và trình lắng nghe nhấp chuột.
  */
 public interface DialogInterface {
-    /** Button: positive. */
+    /** nút: tích cực. */
     public static final int BUTTON_POSITIVE = -1;
-    /** Button: negative. */
+    /** nút: tiêu cực. */
     public static final int BUTTON_NEGATIVE = -2;
-    /** Button: neutral. */
+    /** nút: trung lập. */
     public static final int BUTTON_NEUTRAL = -3;
 
     /**
-     * Interface for click callbacks.
+     * giao diện cho các cuộc gọi lại khi nhấp chuột.
      */
     public interface OnClickListener {
         void onClick(DialogInterface dialog, int which);
     }
 
     /**
-     * Interface for dismiss callbacks.
+     * giao diện cho các cuộc gọi lại khi bỏ qua.
      */
     public interface OnDismissListener {
         void onDismiss(DialogInterface dialog);
     }
 
     /**
-     * Interface for cancel callbacks.
+     * giao diện cho các cuộc gọi lại khi hủy.
      */
     public interface OnCancelListener {
         void onCancel(DialogInterface dialog);
     }
 
     /**
-     * Dismiss the dialog.
+     * bỏ qua hộp thoại.
      */
     void dismiss();
 
     /**
-     * Cancel the dialog.
+     * hủy hộp thoại.
      */
     void cancel();
 }

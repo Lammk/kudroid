@@ -1,31 +1,31 @@
 package android.os;
 
 /**
- * Stub android.os.VibrationEffect.
+ * mô phỏng android.os.vibrationeffect.
  *
- * Describes a vibration effect. For KuDroid's minimal framework, this is a
- * stub.
+ * mô tả một hiệu ứng rung. đối với khuôn khổ tối thiểu của kudroid, đây là một
+ * mô phỏng.
  */
 public abstract class VibrationEffect {
-    /** Default amplitude. */
+    /** biên độ mặc định. */
     public static final int DEFAULT_AMPLITUDE = -1;
 
     /**
-     * Create a one-shot vibration effect.
+     * tạo một hiệu ứng rung một lần.
      */
     public static VibrationEffect createOneShot(long milliseconds, int amplitude) {
         return new OneShot(milliseconds, amplitude);
     }
 
     /**
-     * Create a waveform vibration effect.
+     * tạo một hiệu ứng rung dạng sóng.
      */
     public static VibrationEffect createWaveform(long[] timings, int repeat) {
         return new Waveform(timings, repeat);
     }
 
     /**
-     * A one-shot vibration effect.
+     * một hiệu ứng rung một lần.
      */
     public static class OneShot extends VibrationEffect {
         public final long milliseconds;
@@ -38,7 +38,7 @@ public abstract class VibrationEffect {
     }
 
     /**
-     * A waveform vibration effect.
+     * một hiệu ứng rung dạng sóng.
      */
     public static class Waveform extends VibrationEffect {
         public final long[] timings;

@@ -5,10 +5,10 @@ import android.content.Intent;
 import android.os.Bundle;
 
 /**
- * Minimal android.app.Activity implementation.
+ * triển khai android.app.activity tối thiểu.
  *
- * Provides the lifecycle callbacks that native games expect. For KuDroid's
- * minimal framework, the lifecycle methods are no-ops that apps can override.
+ * cung cấp các lệnh gọi lại vòng đời mà các trò chơi gốc mong đợi. đối với khuôn khổ
+ * tối thiểu của kudroid, các phương thức vòng đời là no-op mà các ứng dụng có thể ghi đè.
  */
 public class Activity extends ContextThemeWrapper {
     private boolean mCreated = false;
@@ -19,61 +19,61 @@ public class Activity extends ContextThemeWrapper {
     }
 
     /**
-     * Called when the activity is first created.
+     * được gọi khi hoạt động được tạo lần đầu tiên.
      */
     protected void onCreate(Bundle savedInstanceState) {
     }
 
     /**
-     * Called when the activity is about to become visible.
+     * được gọi khi hoạt động chuẩn bị hiển thị.
      */
     protected void onStart() {
     }
 
     /**
-     * Called when the activity has become visible.
+     * được gọi khi hoạt động đã hiển thị.
      */
     protected void onResume() {
     }
 
     /**
-     * Called when the activity is about to be paused.
+     * được gọi khi hoạt động chuẩn bị bị tạm dừng.
      */
     protected void onPause() {
     }
 
     /**
-     * Called when the activity is no longer visible.
+     * được gọi khi hoạt động không còn hiển thị nữa.
      */
     protected void onStop() {
     }
 
     /**
-     * Called before the activity is destroyed.
+     * được gọi trước khi hoạt động bị phá hủy.
      */
     protected void onDestroy() {
     }
 
     /**
-     * Called when the activity is restarted.
+     * được gọi khi hoạt động được khởi động lại.
      */
     protected void onRestart() {
     }
 
     /**
-     * Called when the activity result is available.
+     * được gọi khi kết quả hoạt động có sẵn.
      */
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
     }
 
     /**
-     * Called when a new intent is delivered.
+     * được gọi khi một intent mới được chuyển đến.
      */
     protected void onNewIntent(Intent intent) {
     }
 
     /**
-     * Called when the activity is created (invoked by the framework).
+     * được gọi khi hoạt động được tạo (được gọi bởi khuôn khổ).
      */
     public void performCreate(Bundle savedInstanceState) {
         mCreated = true;
@@ -81,7 +81,7 @@ public class Activity extends ContextThemeWrapper {
     }
 
     /**
-     * Called when the activity is started (invoked by the framework).
+     * được gọi khi hoạt động được bắt đầu (được gọi bởi khuôn khổ).
      */
     public void performStart() {
         mStarted = true;
@@ -89,7 +89,7 @@ public class Activity extends ContextThemeWrapper {
     }
 
     /**
-     * Called when the activity is resumed (invoked by the framework).
+     * được gọi khi hoạt động được tiếp tục (được gọi bởi khuôn khổ).
      */
     public void performResume() {
         mResumed = true;
@@ -97,7 +97,7 @@ public class Activity extends ContextThemeWrapper {
     }
 
     /**
-     * Called when the activity is paused (invoked by the framework).
+     * được gọi khi hoạt động bị tạm dừng (được gọi bởi khuôn khổ).
      */
     public void performPause() {
         mResumed = false;
@@ -105,7 +105,7 @@ public class Activity extends ContextThemeWrapper {
     }
 
     /**
-     * Called when the activity is stopped (invoked by the framework).
+     * được gọi khi hoạt động bị dừng (được gọi bởi khuôn khổ).
      */
     public void performStop() {
         mStarted = false;
@@ -113,7 +113,7 @@ public class Activity extends ContextThemeWrapper {
     }
 
     /**
-     * Called when the activity is destroyed (invoked by the framework).
+     * được gọi khi hoạt động bị phá hủy (được gọi bởi khuôn khổ).
      */
     public void performDestroy() {
         mCreated = false;
@@ -121,79 +121,79 @@ public class Activity extends ContextThemeWrapper {
     }
 
     /**
-     * Return whether the activity has been created.
+     * trả về việc hoạt động đã được tạo hay chưa.
      */
     public boolean isCreated() {
         return mCreated;
     }
 
     /**
-     * Return whether the activity has been started.
+     * trả về việc hoạt động đã được bắt đầu hay chưa.
      */
     public boolean isStarted() {
         return mStarted;
     }
 
     /**
-     * Return whether the activity has been resumed.
+     * trả về việc hoạt động đã được tiếp tục hay chưa.
      */
     public boolean isResumed() {
         return mResumed;
     }
 
     /**
-     * Finish the activity.
+     * kết thúc hoạt động.
      */
     public void finish() {
     }
 
     /**
-     * Return the intent that started this activity.
+     * trả về intent đã bắt đầu hoạt động này.
      */
     public Intent getIntent() {
         return new Intent();
     }
 
     /**
-     * Set the result of this activity.
+     * đặt kết quả của hoạt động này.
      */
     public void setResult(int resultCode) {
     }
 
     /**
-     * Set the result of this activity with data.
+     * đặt kết quả của hoạt động này kèm theo dữ liệu.
      */
     public void setResult(int resultCode, Intent data) {
     }
 
     /**
-     * Return the window.
+     * trả về cửa sổ.
      */
     public android.view.Window getWindow() {
         return new android.view.Window(this);
     }
 
     /**
-     * Set the content view from a layout resource.
+     * đặt chế độ xem nội dung từ một tài nguyên bố cục.
      */
     public void setContentView(int layoutResID) {
     }
 
     /**
-     * Set the content view to a view.
+     * đặt chế độ xem nội dung thành một dạng xem.
      */
     public void setContentView(android.view.View view) {
     }
 
     /**
-     * Find a view by id.
+     * tìm một dạng xem theo id.
      */
     public android.view.View findViewById(int id) {
         return null;
     }
 
     /**
-     * Run on the UI thread.
+     * chạy trên luồng giao diện người dùng.
      */
     public void runOnUiThread(Runnable action) {
         action.run();

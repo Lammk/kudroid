@@ -44,7 +44,7 @@ def compile_dex_to_jar(apk_path, cache_dir):
         
     print(f"[*] Found {len(dex_files)} DEX files. Translating to JAR using d2j-dex2jar...")
     
-    # Require d2j-dex2jar installed on the host system
+    # yêu cầu d2j-dex2jar được cài đặt trên hệ thống máy chủ
     dex2jar_cmd = ["d2j-dex2jar", "-f", "-o", out_jar] + dex_files
     
     try:

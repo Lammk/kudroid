@@ -10,34 +10,34 @@ namespace kudroid {
 
 class LibraryManager;
 
-/// Minimal ELF64 (ARM64) loader surface.
-/// Phase 1 entry point — parsing, mapping, and relocation stubs.
+/// bề mặt trình tải elf64 (arm64) tối thiểu.
+/// điểm vào giai đoạn 1 — phân tích, ánh xạ và các hàm giả định vị lại.
 class ElfLoader {
 public:
     struct Segment {
-        std::uint64_t vaddr  = 0;   ///< Target virtual address
-        std::uint64_t offset = 0;   ///< File offset of PT_LOAD data
-        std::uint64_t filesz = 0;   ///< Bytes in file
-        std::uint64_t memsz  = 0;   ///< Bytes in memory (>= filesz)
-        std::uint32_t flags  = 0;   ///< PF_R | PF_W | PF_X
+        std::uint64_t vaddr  = 0;   ///< địa chỉ ảo mục tiêu
+        std::uint64_t offset = 0;   ///< phần bù tệp của dữ liệu pt_load
+        std::uint64_t filesz = 0;   ///< số byte trong tệp
+        std::uint64_t memsz  = 0;   ///< số byte trong bộ nhớ (>= filesz)
+        std::uint32_t flags  = 0;   ///< pf_r | pf_w | pf_x
     };
 
     explicit ElfLoader(std::string path);
     ~ElfLoader();
 
-    // Non-copyable, movable
+    // không thể sao chép, có thể di chuyển
     ElfLoader(const ElfLoader&) = delete;
     ElfLoader& operator=(const ElfLoader&) = delete;
     ElfLoader(ElfLoader&&) noexcept;
     ElfLoader& operator=(ElfLoader&&) noexcept;
 
-    /// Parse ELF64 headers and populate segment list.
+    /// phân tích các tiêu đề elf64 và điền vào danh sách phân đoạn.
     bool parse();
 
-    /// Map PT_LOAD segments into executable memory.
+    /// ánh xạ các phân đoạn pt_load vào bộ nhớ có thể thực thi.
     bool map();
 
-    /// Apply relocations and resolve dynamic symbols.
+    /// áp dụng các định vị lại và phân giải các ký hiệu động.
     bool relocate();
 
     void setLibraryManager(LibraryManager* manager) { libraryManager_ = manager; }
@@ -48,29 +48,29 @@ public:
     [[nodiscard]] bool isParsed() const { return parsed_; }
     [[nodiscard]] void* baseAddress() const { return base_; }
 
-    /// Returns the last error message (empty if no error).
+    /// trả về thông báo lỗi cuối cùng (trống nếu không có lỗi).
     [[nodiscard]] const char* lastError() const;
 
-    /// Phase 2: Look up a symbol address from .dynsym
-    /// @return  Function pointer (base_ + st_value), or nullptr if not found.
+    /// giai đoạn 2: tra cứu địa chỉ ký hiệu từ .dynsym
+    /// @return  con trỏ hàm (base_ + st_value), hoặc nullptr nếu không tìm thấy.
     void* getSymbolAddress(const char* symbolName);
 
-    /// Phase 2: Test execution – call kudroid_add(40, 20) via dynamic symbol.
-    /// @return  Result string with status and computed value.
+    /// giai đoạn 2: kiểm tra thực thi – gọi kudroid_add(40, 20) qua ký hiệu động.
+    /// @return  chuỗi kết quả với trạng thái và giá trị được tính toán.
     std::string testExecution();
 
-    /// Execute constructors (DT_INIT and DT_INIT_ARRAY).
+    /// thực thi các hàm tạo (dt_init và dt_init_array).
     void executeInit();
 
-    /// Execute destructors (DT_FINI and DT_FINI_ARRAY).
+    /// thực thi các hàm hủy (dt_fini và dt_fini_array).
     void executeFini();
 
-    /// Register .eh_frame for C++ exceptions
+    /// đăng ký .eh_frame cho các ngoại lệ c++
     void registerEhFrame();
     void deregisterEhFrame();
 
 private:
-    // Internal: read file contents into buffer
+    // nội bộ: đọc nội dung tệp vào bộ đệm
     bool readFile(std::vector<char>& buf);
 
     std::string          path_;
@@ -79,16 +79,16 @@ private:
     std::vector<Segment> segments_;
     bool                 parsed_   = false;
     std::string          lastError_;
-    std::vector<char>    fileBuf_;  // Raw file bytes for dynamic table parsing
+    std::vector<char>    fileBuf_;  // byte tệp thô để phân tích bảng động
     LibraryManager*      libraryManager_ = nullptr;
     
-    // TLS
+    // tls
     std::uint64_t        tls_vaddr_  = 0;
     std::uint64_t        tls_filesz_ = 0;
     std::uint64_t        tls_memsz_  = 0;
     std::uint64_t        tls_align_  = 0;
 
-    // Constructors / Destructors
+    // hàm tạo / hàm hủy
     std::uint64_t        init_func_  = 0;
     std::uint64_t        init_array_ = 0;
     std::uint64_t        init_arraysz_ = 0;
@@ -96,7 +96,7 @@ private:
     std::uint64_t        fini_array_ = 0;
     std::uint64_t        fini_arraysz_ = 0;
 
-    // Exception Handling (.eh_frame_hdr / PT_GNU_EH_FRAME)
+    // xử lý ngoại lệ (.eh_frame_hdr / pt_gnu_eh_frame)
     std::uint64_t        eh_frame_vaddr_ = 0;
     std::uint64_t        eh_frame_memsz_ = 0;
 };
@@ -105,20 +105,20 @@ private:
 
 namespace kudroid {
 
-/// Return DT_NEEDED library names from an ELF64 shared object.
+/// trả về tên các thư viện dt_needed từ một đối tượng chia sẻ elf64.
 std::vector<std::string> parse_elf_dependencies(const char* elf_path);
 
-/// Extract lib/arm64-v8a/*.so entries from an APK into outputDirectory.
+/// trích xuất các mục lib/arm64-v8a/*.so từ một tệp apk vào outputdirectory.
 bool extract_arm64_libs_from_apk(const char* apkPath, const char* outputDirectory,
                                  std::string* error = nullptr);
 
 class LibraryManager {
 public:
-    /// Load an ELF and all DT_NEEDED dependencies from its directory.
+    /// tải một elf và tất cả các phụ thuộc dt_needed từ thư mục của nó.
     bool loadRecursive(const std::string& path);
-    /// Return a symbol from any loaded ELF, then BionicShim as fallback.
+    /// trả về một ký hiệu từ bất kỳ elf nào được tải, sau đó bionicshim làm dự phòng.
     void* resolveGlobalSymbol(const char* name) const;
-    /// Return a symbol specifically from the main application library.
+    /// trả về một ký hiệu cụ thể từ thư viện ứng dụng chính.
     void* resolveAppSymbol(const char* name);
     [[nodiscard]] const std::unordered_map<std::string, std::unique_ptr<ElfLoader>>& libraries() const {
         return libraries_;

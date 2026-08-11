@@ -4,103 +4,106 @@
 extern "C" {
 #endif
 
-/// Self-test entry point for the kudroid_core library.
-/// Returns 0 on success, non-zero on failure.
+/// điểm vào tự kiểm tra cho thư viện kudroid_core.
+/// trả về 0 nếu thành công, khác 0 nếu thất bại.
 int kudroid_self_test(void);
 
-/// Self-test with detailed log output.
-/// Returns a malloc'd string containing step-by-step debug log.
-/// Caller must free() the returned string.
+/// tự kiểm tra với đầu ra nhật ký chi tiết.
+/// trả về một chuỗi được malloc chứa nhật ký gỡ lỗi từng bước.
+/// người gọi phải giải phóng chuỗi được trả về bằng free().
 const char* kudroid_self_test_log(void);
 
-/// Load an ELF shared object (.so) file.
-/// @param path  Absolute path to the .so file.
-/// @return      A malloc'd log string with parse results.
-///              Caller must free() the returned string.
+/// tải một tệp đối tượng chia sẻ elf (.so).
+/// @param path  đường dẫn tuyệt đối đến tệp .so.
+/// @return      chuỗi nhật ký được malloc chứa kết quả phân tích.
+///              người gọi phải giải phóng chuỗi được trả về bằng free().
 const char* kudroid_load_elf(const char* path);
 
-/// Execute a native function from the loaded .so (Phase 2 test).
-/// Must be called after kudroid_load_elf.
-/// @return  A malloc'd log string with execution result.
-///          Caller must free() the returned string.
+/// thực thi một hàm gốc từ tệp .so được tải (kiểm tra giai đoạn 2).
+/// phải được gọi sau kudroid_load_elf.
+/// @return  chuỗi nhật ký được malloc chứa kết quả thực thi.
+///          người gọi phải giải phóng chuỗi được trả về bằng free().
 const char* kudroid_execution_test(const char* path);
 
-/// Execute a native function from the loaded .so (Phase 2 test).
-/// Must be called after kudroid_load_elf.
-/// @return  A malloc'd log string with execution result.
-///          Caller must free() the returned string.
+/// thực thi một hàm gốc từ tệp .so được tải (kiểm tra giai đoạn 2).
+/// phải được gọi sau kudroid_load_elf.
+/// @return  chuỗi nhật ký được malloc chứa kết quả thực thi.
+///          người gọi phải giải phóng chuỗi được trả về bằng free().
 const char* kudroid_syscall_so_test(const char* path);
 const char* kudroid_jni_massive_so_test(const char* path);
 
-/// Load the Bionic shim test library and execute kudroid_bionic_test().
-/// Returns a malloc'd diagnostic log; caller must free() it.
+/// tải thư viện kiểm tra bionic shim và thực thi kudroid_bionic_test().
+/// trả về một nhật ký chẩn đoán được malloc; người gọi phải giải phóng nó bằng free().
 const char* kudroid_bionic_execution_test(const char* path);
 
-/// Load bundled ELF libraries through LibraryManager and test global resolution.
-/// Returns a malloc'd diagnostic log; caller must free() it.
+/// tải các thư viện elf được đóng gói thông qua librarymanager và kiểm tra phân giải toàn cục.
+/// trả về một nhật ký chẩn đoán được malloc; người gọi phải giải phóng nó bằng free().
 const char* kudroid_multi_elf_test(const char* consumerPath, const char* providerPath);
 
-/// Report whether JIT (executable memory) is available for this process.
-/// @return  A malloc'd string "JIT: Enabled" or "JIT: Disabled".
-///          Caller must free() the returned string.
+/// báo cáo xem jit (bộ nhớ có thể thực thi) có sẵn cho quá trình này hay không.
+/// @return  một chuỗi được malloc "jit: enabled" hoặc "jit: disabled".
+///          người gọi phải giải phóng chuỗi được trả về bằng free().
 const char* kudroid_jit_status(void);
 
-/// Set the directory where kudroid_core writes .txt logs and crash dumps.
-/// Call once at startup with the app's writable Documents directory.
-/// Also installs signal handlers so a native crash still leaves a log file.
+/// đặt thư mục nơi kudroid_core ghi các tệp nhật ký .txt và bãi chứa sự cố.
+/// gọi một lần lúc khởi động với thư mục documents có thể ghi của ứng dụng.
+/// cũng cài đặt các trình xử lý tín hiệu để một sự cố gốc vẫn để lại tệp nhật ký.
 void kudroid_set_log_dir(const char* dir);
 
-/// Set the Documents directory used by VFSPathRemapper.
+/// đặt thư mục documents được vfspathremapper sử dụng.
 void kudroid_set_documents_dir(const char* dir);
 
-/// Set the CAMetalLayer or UIView pointer used for ANativeWindow surface bindings.
+/// đặt con trỏ cametallayer hoặc uiview được sử dụng cho các ràng buộc bề mặt anativewindow.
 void kudroid_set_metal_layer(void* layer, int width, int height);
 
-/// Inject a touch event into the native Android application
-/// @param x The X coordinate of the touch
-/// @param y The Y coordinate of the touch
-/// @param action 0=Down, 1=Up, 2=Move (Mapped to Android AMOTION_EVENT_ACTION)
+/// chèn một sự kiện chạm vào ứng dụng android gốc
+/// @param x tọa độ x của lần chạm
+/// @param y tọa độ y của lần chạm
+/// @param action 0=down, 1=up, 2=move (được ánh xạ tới amotion_event_action của android)
 void kudroid_inject_touch_event(float x, float y, int action);
 
-/// Translate a DEX file into a JAR of class stubs (with caching).
-/// Returns a malloc'd diagnostic log; caller must free() it.
+/// gửi sự kiện vòng đời ứng dụng java (101=pause, 102=resume) vào luồng ui
+void kudroid_send_lifecycle_event(int eventType);
+
+/// dịch một tệp dex thành một tệp jar của các lớp giả (có bộ đệm).
+/// trả về một nhật ký chẩn đoán được malloc; người gọi phải giải phóng nó bằng free().
 const char* kudroid_translate_dex(const char* dexPath);
 
-/// Run the VFS redirect and I/O self-test; returns a malloc'd log.
+/// chạy kiểm tra tự động chuyển hướng vfs và i/o; trả về một nhật ký được malloc.
 const char* kudroid_vfs_self_test_log(void);
 const char* kudroid_vfs_extended_test_log(void);
 
-/// Test the JVM integration.
-/// Returns a malloc'd diagnostic log; caller must free() it.
+/// kiểm tra tích hợp jvm.
+/// trả về một nhật ký chẩn đoán được malloc; người gọi phải giải phóng nó bằng free().
 char* kudroid_test_jvm(const char* rt_jar_path);
 char* kudroid_test_gpu(void);
 
-/// Load a GPU test ARM64 .so file and execute its Vulkan test via BionicShim intercept.
-/// Returns a malloc'd diagnostic log; caller must free() it.
+/// tải tệp .so kiểm tra gpu arm64 và thực thi kiểm tra vulkan của nó thông qua tính năng chặn bionicshim.
+/// trả về một nhật ký chẩn đoán được malloc; người gọi phải giải phóng nó bằng free().
 const char* kudroid_gpu_vulkan_so_test(const char* path);
 
-/// Load a GPU test ARM64 .so file and execute its OpenGL+EGL test via BionicShim intercept.
-/// Returns a malloc'd diagnostic log; caller must free() it.
+/// tải tệp .so kiểm tra gpu arm64 và thực thi kiểm tra opengl+egl của nó thông qua tính năng chặn bionicshim.
+/// trả về một nhật ký chẩn đoán được malloc; người gọi phải giải phóng nó bằng free().
 const char* kudroid_gpu_opengl_so_test(const char* path);
 
-/// Extract and install an APK's arm64-v8a native libraries into android_root.
-/// Returns a malloc'd diagnostic log; caller must free() it.
+/// trích xuất và cài đặt các thư viện gốc arm64-v8a của apk vào android_root.
+/// trả về một nhật ký chẩn đoán được malloc; người gọi phải giải phóng nó bằng free().
 const char* kudroid_install_apk(const char* apkPath);
 
-/// Scan the installed APK's library directory and load all its native libraries (.so).
-/// Returns a malloc'd diagnostic log; caller must free() it.
+/// quét thư mục thư viện của apk đã cài đặt và tải tất cả các thư viện gốc (.so) của nó.
+/// trả về một nhật ký chẩn đoán được malloc; người gọi phải giải phóng nó bằng free().
 const char* kudroid_run_apk(const char* appName);
 
-/// Clear an application's internal cache directories.
-/// Returns 1 on success, 0 on failure.
+/// xóa các thư mục bộ đệm nội bộ của một ứng dụng.
+/// trả về 1 nếu thành công, 0 nếu thất bại.
 int kudroid_clear_app_cache(const char* package_name);
 
-/// Completely delete an installed application and its data.
-/// Returns 1 on success, 0 on failure.
+/// xóa hoàn toàn một ứng dụng đã cài đặt và dữ liệu của nó.
+/// trả về 1 nếu thành công, 0 nếu thất bại.
 int kudroid_delete_app(const char* package_name);
 
-/// Get basic info about an installed application.
-/// Returns a malloc'd string (e.g., JSON or formatted text); caller must free() it.
+/// lấy thông tin cơ bản về một ứng dụng đã cài đặt.
+/// trả về một chuỗi được malloc (ví dụ: json hoặc văn bản được định dạng); người gọi phải giải phóng nó bằng free().
 const char* kudroid_get_app_info(const char* package_name);
 
 #ifdef __cplusplus

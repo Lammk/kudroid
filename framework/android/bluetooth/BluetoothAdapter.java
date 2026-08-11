@@ -1,15 +1,15 @@
 package android.bluetooth;
 
 /**
- * Stub android.bluetooth.BluetoothAdapter.
+ * mô phỏng android.bluetooth.bluetoothadapter.
  *
- * Non-critical for app startup/rendering. Returns null/defaults so apps don't
- * crash when they check Bluetooth availability.
+ * không quan trọng đối với việc khởi động/hiển thị ứng dụng. trả về null/mặc định để ứng dụng không
+ * gặp sự cố khi kiểm tra tính khả dụng của bluetooth.
  */
 public final class BluetoothAdapter {
-    /** State: off. */
+    /** trạng thái: tắt. */
     public static final int STATE_OFF = 10;
-    /** State: on. */
+    /** trạng thái: bật. */
     public static final int STATE_ON = 12;
 
     private static final BluetoothAdapter sInstance = new BluetoothAdapter();
@@ -18,7 +18,7 @@ public final class BluetoothAdapter {
     }
 
     /**
-     * Return the default adapter. Returns null (no Bluetooth on iOS).
+     * trả về bộ điều hợp mặc định. trả về null (không có bluetooth trên ios).
      */
     public static BluetoothAdapter getDefaultAdapter() {
         return null;

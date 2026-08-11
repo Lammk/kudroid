@@ -6,9 +6,9 @@ import android.graphics.Paint;
 import android.view.View;
 
 /**
- * Minimal android.widget.TextView implementation.
+ * triển khai android.widget.textview tối thiểu.
  *
- * Displays text. For KuDroid's minimal framework, stores text and paint.
+ * hiển thị văn bản. đối với khuôn khổ tối thiểu của kudroid, lưu trữ văn bản và paint.
  */
 public class TextView extends View {
     private CharSequence mText = "";
@@ -25,28 +25,28 @@ public class TextView extends View {
     }
 
     /**
-     * Return the text.
+     * trả về văn bản.
      */
     public CharSequence getText() {
         return mText;
     }
 
     /**
-     * Set the text.
+     * thiết lập văn bản.
      */
     public void setText(CharSequence text) {
         mText = text != null ? text : "";
     }
 
     /**
-     * Set the text from a resource id.
+     * thiết lập văn bản từ một id tài nguyên.
      */
     public void setText(int resId) {
         mText = "";
     }
 
     /**
-     * Set the text color.
+     * thiết lập màu văn bản.
      */
     public void setTextColor(int color) {
         mTextColor = color;
@@ -54,7 +54,7 @@ public class TextView extends View {
     }
 
     /**
-     * Set the text size.
+     * thiết lập kích thước văn bản.
      */
     public void setTextSize(float size) {
         mTextSize = size;
@@ -62,28 +62,28 @@ public class TextView extends View {
     }
 
     /**
-     * Set the gravity.
+     * thiết lập trọng lực (gravity).
      */
     public void setGravity(int gravity) {
         mGravity = gravity;
     }
 
     /**
-     * Return the gravity.
+     * trả về trọng lực (gravity).
      */
     public int getGravity() {
         return mGravity;
     }
 
     /**
-     * Return the text color.
+     * trả về màu văn bản.
      */
     public int getCurrentTextColor() {
         return mTextColor;
     }
 
     /**
-     * Return the text size.
+     * trả về kích thước văn bản.
      */
     public float getTextSize() {
         return mTextSize;

@@ -37,10 +37,10 @@ git checkout -B pinned-angle "$ANGLE_REF"
 python3 scripts/bootstrap.py
 gclient sync --no-history --shallow
 
-# ── Patch vulkan-loader: define SYSCONFDIR / FALLBACK_*_DIRS ─────────────────
-# ANGLE's GN build does not pass extra_cflags to all third_party targets.
-# The vulkan-loader needs these macros but they are only defined in CMake builds.
-# We inject them directly into the source files that reference them.
+# ── vá lỗi vulkan-loader: định nghĩa sysconfdir / fallback_*_dirs ─────────────────
+# bản dựng gn của angle không truyền extra_cflags cho tất cả các mục tiêu third_party.
+# vulkan-loader cần các macro này nhưng chúng chỉ được xác định trong các bản dựng cmake.
+# chúng tôi đưa chúng trực tiếp vào các tệp nguồn tham chiếu đến chúng.
 LOADER_PATCH='
 #ifndef SYSCONFDIR
 #define SYSCONFDIR "/etc"
@@ -61,12 +61,12 @@ for vkfile in third_party/vulkan-loader/src/loader/loader.c \
     fi
 done
 
-# ── Patch: inline-stub Mac-only Vulkan display symbols for iOS ────────────────
-# Display.cpp references rx::IsVulkanMacDisplayAvailable() and
-# rx::CreateVulkanMacDisplay() which are only compiled on macOS.
-# On iOS these symbols are undefined → linker error at libGLESv2 SOLINK step.
-# Fix: inject inline definitions directly into Display.cpp so the compiler
-# resolves them locally without needing external symbols.
+# ── bản vá: inline-stub mac-only các ký hiệu hiển thị vulkan cho ios ────────────────
+# display.cpp tham chiếu rx::isvulkanmacdisplayavailable() và
+# rx::createvulkanmacdisplay() chỉ được biên dịch trên macos.
+# trên ios, các ký hiệu này không được xác định → lỗi trình liên kết ở bước solink libglesv2.
+# sửa lỗi: đưa các định nghĩa nội tuyến trực tiếp vào display.cpp để trình biên dịch
+# phân giải chúng cục bộ mà không cần các ký hiệu bên ngoài.
 DISPLAY_FILE="src/libANGLE/Display.cpp"
 if [[ -f "$DISPLAY_FILE" ]] && ! grep -q 'KuDroid' "$DISPLAY_FILE"; then
     python3 << 'PYEOF'
@@ -76,7 +76,7 @@ with open(filepath, "r") as f:
 
 stub = [
     "\n",
-    "// ── KuDroid: inline stubs for Mac-only Vulkan display on iOS ────────────\n",
+    "// ── kudroid: inline stubs for mac-only vulkan display on ios ────────────\n",
     "#if defined(__APPLE__)\n",
     "#include <TargetConditionals.h>\n",
     "#if TARGET_OS_IOS || TARGET_OS_SIMULATOR\n",
@@ -89,11 +89,11 @@ stub = [
     "}  // namespace rx\n",
     "#endif  // TARGET_OS_IOS\n",
     "#endif  // __APPLE__\n",
-    "// ── End KuDroid patch ────────────────────────────────────────────────────\n",
+    "// ── end kudroid patch ────────────────────────────────────────────────────\n",
     "\n",
 ]
 
-# Find insertion point: after the last #include line
+# tìm điểm chèn: sau dòng #include cuối cùng
 insert_after = 0
 for i, line in enumerate(lines):
     if line.strip().startswith("#include"):
@@ -108,7 +108,7 @@ print(f"Patched {filepath}: added inline Mac display stubs for iOS")
 PYEOF
 fi
 
-# Do not delete $BUILD_DIR to allow incremental builds from cache!
+# không xóa $build_dir để cho phép các bản dựng tăng dần từ bộ đệm!
 mkdir -p "$BUILD_DIR"
 gn gen "$BUILD_DIR" --args='target_os="ios"
 target_cpu="arm64"
@@ -135,7 +135,7 @@ autoninja -C "$BUILD_DIR" libEGL libGLESv2
 
 cp -R include/EGL include/GLES include/GLES2 include/GLES3 include/KHR "$OUTPUT_DIR/include/"
 
-# ANGLE on iOS produces .framework bundles
+# angle trên ios tạo ra các gói .framework
 if [[ -d "$BUILD_DIR/libEGL.framework" ]]; then
     cp -R "$BUILD_DIR/libEGL.framework" "$OUTPUT_DIR/lib/ios-arm64/"
 fi
@@ -143,10 +143,10 @@ if [[ -d "$BUILD_DIR/libGLESv2.framework" ]]; then
     cp -R "$BUILD_DIR/libGLESv2.framework" "$OUTPUT_DIR/lib/ios-arm64/"
 fi
 
-# Also search recursively for any libEGL/libGLESv2 .a or .dylib files
+# cũng tìm kiếm đệ quy bất kỳ tệp .a hoặc .dylib libegl/libglesv2 nào
 find "$BUILD_DIR" -type f \( -name 'libEGL.a' -o -name 'libGLESv2.a' -o -name 'libEGL.dylib' -o -name 'libGLESv2.dylib' \) -exec cp {} "$OUTPUT_DIR/lib/ios-arm64/" \;
 
-# If framework binaries exist, make sure libEGL.dylib and libGLESv2.dylib exist for -lEGL / -lGLESv2 linker flags
+# nếu các tệp nhị phân framework tồn tại, hãy đảm bảo libegl.dylib và libglesv2.dylib tồn tại cho các cờ trình liên kết -legl / -lglesv2
 if [[ -f "$OUTPUT_DIR/lib/ios-arm64/libEGL.framework/libEGL" && ! -f "$OUTPUT_DIR/lib/ios-arm64/libEGL.dylib" && ! -f "$OUTPUT_DIR/lib/ios-arm64/libEGL.a" ]]; then
     cp "$OUTPUT_DIR/lib/ios-arm64/libEGL.framework/libEGL" "$OUTPUT_DIR/lib/ios-arm64/libEGL.dylib"
 fi

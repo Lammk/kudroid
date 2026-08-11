@@ -1,18 +1,18 @@
 package android.hardware;
 
 /**
- * Stub android.hardware.SensorEvent.
+ * mô phỏng android.hardware.sensorevent.
  *
- * Represents a sensor event. For KuDroid's minimal framework, this is a stub.
+ * đại diện cho một sự kiện cảm biến. đối với khuôn khổ tối thiểu của kudroid, đây là một mô phỏng.
  */
 public class SensorEvent {
-    /** The sensor that generated this event. */
+    /** cảm biến đã tạo ra sự kiện này. */
     public final Sensor sensor;
-    /** The length of the values array. */
+    /** độ dài của mảng các giá trị. */
     public final int accuracy;
-    /** The event timestamp. */
+    /** dấu thời gian của sự kiện. */
     public final long timestamp;
-    /** The sensor values. */
+    /** các giá trị của cảm biến. */
     public final float[] values;
 
     public SensorEvent(Sensor sensor, int accuracy, long timestamp, float[] values) {

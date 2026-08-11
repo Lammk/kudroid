@@ -1,9 +1,9 @@
 package android.content;
 
 /**
- * Stub android.content.ClipboardManager.
+ * mô phỏng android.content.clipboardmanager.
  *
- * Manages the clipboard. For KuDroid's minimal framework, this is a stub.
+ * quản lý khay nhớ tạm. đối với khuôn khổ tối thiểu của kudroid, đây là một mô phỏng.
  */
 public class ClipboardManager {
     private CharSequence mText;

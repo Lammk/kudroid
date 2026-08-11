@@ -1,9 +1,9 @@
 package android.net;
 
 /**
- * Stub android.net.Network.
+ * mô phỏng android.net.network.
  *
- * Represents a network. For KuDroid's minimal framework, this is a stub.
+ * đại diện cho một mạng. đối với khuôn khổ tối thiểu của kudroid, đây là một mô phỏng.
  */
 public class Network {
     private final int mNetId;

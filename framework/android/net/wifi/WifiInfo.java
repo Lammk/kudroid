@@ -1,10 +1,10 @@
 package android.net.wifi;
 
 /**
- * Stub android.net.wifi.WifiInfo.
+ * mô phỏng android.net.wifi.wifiinfo.
  *
- * Describes the state of a WiFi connection. For KuDroid's minimal framework,
- * this is a stub with defaults.
+ * mô tả trạng thái của kết nối wifi. đối với khuôn khổ tối thiểu của kudroid,
+ * đây là một mô phỏng có các giá trị mặc định.
  */
 public class WifiInfo {
     private String mSSID = "";

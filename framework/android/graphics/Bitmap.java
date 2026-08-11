@@ -1,17 +1,17 @@
 package android.graphics;
 
 /**
- * Minimal android.graphics.Bitmap implementation.
+ * triển khai android.graphics.bitmap tối thiểu.
  *
- * Represents a bitmap image. For KuDroid's minimal framework, this stores
- * width/height and a pixel buffer.
+ * đại diện cho một hình ảnh bitmap. đối với khuôn khổ tối thiểu của kudroid, nó lưu trữ
+ * chiều rộng/chiều cao và bộ đệm pixel.
  */
 public final class Bitmap {
-    /** Bitmap config: ARGB_8888. */
+    /** cấu hình bitmap: argb_8888. */
     public static final int ARGB_8888 = 0;
-    /** Bitmap config: RGB_565. */
+    /** cấu hình bitmap: rgb_565. */
     public static final int RGB_565 = 1;
-    /** Bitmap config: ALPHA_8. */
+    /** cấu hình bitmap: alpha_8. */
     public static final int ALPHA_8 = 2;
 
     private final int mWidth;
@@ -27,14 +27,14 @@ public final class Bitmap {
     }
 
     /**
-     * Create a bitmap.
+     * tạo một bitmap.
      */
     public static Bitmap createBitmap(int width, int height, int config) {
         return new Bitmap(width, height, config);
     }
 
     /**
-     * Create a bitmap from a pixel array.
+     * tạo một bitmap từ một mảng pixel.
      */
     public static Bitmap createBitmap(int[] colors, int width, int height, int config) {
         Bitmap b = new Bitmap(width, height, config);
@@ -45,28 +45,28 @@ public final class Bitmap {
     }
 
     /**
-     * Return the bitmap width.
+     * trả về chiều rộng bitmap.
      */
     public int getWidth() {
         return mWidth;
     }
 
     /**
-     * Return the bitmap height.
+     * trả về chiều cao bitmap.
      */
     public int getHeight() {
         return mHeight;
     }
 
     /**
-     * Return the bitmap config.
+     * trả về cấu hình bitmap.
      */
     public int getConfig() {
         return mConfig;
     }
 
     /**
-     * Return the pixel at (x, y).
+     * trả về pixel tại (x, y).
      */
     public int getPixel(int x, int y) {
         if (x < 0 || y < 0 || x >= mWidth || y >= mHeight) return 0;
@@ -74,7 +74,7 @@ public final class Bitmap {
     }
 
     /**
-     * Set the pixel at (x, y).
+     * thiết lập pixel tại (x, y).
      */
     public void setPixel(int x, int y, int color) {
         if (x < 0 || y < 0 || x >= mWidth || y >= mHeight) return;
@@ -82,7 +82,7 @@ public final class Bitmap {
     }
 
     /**
-     * Copy pixels into an array.
+     * sao chép các pixel vào một mảng.
      */
     public void getPixels(int[] pixels, int offset, int stride, int x, int y,
                           int width, int height) {
@@ -98,7 +98,7 @@ public final class Bitmap {
     }
 
     /**
-     * Set pixels from an array.
+     * thiết lập các pixel từ một mảng.
      */
     public void setPixels(int[] pixels, int offset, int stride, int x, int y,
                           int width, int height) {
@@ -114,14 +114,14 @@ public final class Bitmap {
     }
 
     /**
-     * Recycle the bitmap.
+     * tái chế bitmap.
      */
     public void recycle() {
         mPixels = null;
     }
 
     /**
-     * Return whether the bitmap has been recycled.
+     * trả về việc bitmap đã được tái chế hay chưa.
      */
     public boolean isRecycled() {
         return mPixels == null;

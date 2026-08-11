@@ -1,25 +1,25 @@
 package android.util;
 
 /**
- * Minimal android.util.DisplayMetrics implementation.
+ * triển khai android.util.displaymetrics tối thiểu.
  *
- * Describes the display's size and density. For KuDroid, the values are set
- * from the actual iOS screen resolution via the native bridge.
+ * mô tả kích thước và mật độ của màn hình. đối với kudroid, các giá trị được đặt
+ * từ độ phân giải màn hình ios thực tế thông qua cầu nối gốc.
  */
 public class DisplayMetrics {
-    /** The absolute width of the display in pixels. */
+    /** chiều rộng tuyệt đối của màn hình tính bằng pixel. */
     public int widthPixels;
-    /** The absolute height of the display in pixels. */
+    /** chiều cao tuyệt đối của màn hình tính bằng pixel. */
     public int heightPixels;
-    /** The logical density of the display. */
+    /** mật độ logic của màn hình. */
     public float density;
-    /** The screen density expressed as dots-per-inch. */
+    /** mật độ màn hình được biểu thị bằng số chấm trên inch. */
     public int densityDpi;
-    /** The exact physical pixels per inch of the screen in the X dimension. */
+    /** số pixel vật lý chính xác trên mỗi inch của màn hình theo chiều x. */
     public float xdpi;
-    /** The exact physical pixels per inch of the screen in the Y dimension. */
+    /** số pixel vật lý chính xác trên mỗi inch của màn hình theo chiều y. */
     public float ydpi;
-    /** The reported display density prior to any scaling. */
+    /** mật độ màn hình được báo cáo trước khi chia tỷ lệ. */
     public float scaledDensity;
 
     public DisplayMetrics() {
@@ -34,7 +34,7 @@ public class DisplayMetrics {
     }
 
     /**
-     * Set the display metrics from the native bridge.
+     * thiết lập các số liệu hiển thị từ cầu nối gốc.
      */
     public void setTo(int width, int height, float densityValue) {
         widthPixels = width;

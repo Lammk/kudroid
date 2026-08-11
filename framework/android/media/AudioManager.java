@@ -1,35 +1,35 @@
 package android.media;
 
 /**
- * Stub android.media.AudioManager.
+ * mô phỏng android.media.audiomanager.
  *
- * Non-critical for app startup/rendering. Returns defaults so apps don't
- * crash when they query audio state.
+ * không quan trọng đối với khởi động/kết xuất ứng dụng. trả về mặc định để các ứng dụng không
+ * gặp sự cố khi chúng truy vấn trạng thái âm thanh.
  */
 public class AudioManager {
-    /** Stream type: music. */
+    /** loại luồng: âm nhạc. */
     public static final int STREAM_MUSIC = 3;
-    /** Stream type: system. */
+    /** loại luồng: hệ thống. */
     public static final int STREAM_SYSTEM = 1;
-    /** Stream type: voice call. */
+    /** loại luồng: cuộc gọi thoại. */
     public static final int STREAM_VOICE_CALL = 0;
-    /** Stream type: alarm. */
+    /** loại luồng: báo thức. */
     public static final int STREAM_ALARM = 4;
-    /** Stream type: notification. */
+    /** loại luồng: thông báo. */
     public static final int STREAM_NOTIFICATION = 5;
 
-    /** Audio mode: normal. */
+    /** chế độ âm thanh: bình thường. */
     public static final int MODE_NORMAL = 0;
-    /** Audio mode: ringtone. */
+    /** chế độ âm thanh: nhạc chuông. */
     public static final int MODE_RINGTONE = 1;
-    /** Audio mode: in call. */
+    /** chế độ âm thanh: trong cuộc gọi. */
     public static final int MODE_IN_CALL = 2;
 
-    /** Ringer mode: normal. */
+    /** chế độ chuông: bình thường. */
     public static final int RINGER_MODE_NORMAL = 2;
-    /** Ringer mode: silent. */
+    /** chế độ chuông: im lặng. */
     public static final int RINGER_MODE_SILENT = 0;
-    /** Ringer mode: vibrate. */
+    /** chế độ chuông: rung. */
     public static final int RINGER_MODE_VIBRATE = 1;
 
     public AudioManager() {
@@ -99,7 +99,7 @@ public class AudioManager {
     }
 
     /**
-     * Listener for audio focus changes.
+     * trình nghe cho các thay đổi tiêu điểm âm thanh.
      */
     public interface OnAudioFocusChangeListener {
         void onAudioFocusChange(int focusChange);

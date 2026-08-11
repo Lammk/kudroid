@@ -8,23 +8,23 @@
 #include <functional>
 
 // ─────────────────────────────────────────────────────────────────────────────
-// KuDroid JNI bridge — now backed by the Avian JVM.
+// bộ nối jni kudroid — hiện được hỗ trợ bởi jvm avian.
 //
-// Avian provides a real, complete JNI implementation. We create the VM via the
-// standard JNI_CreateJavaVM entry point (exported by the Avian static library)
-// and hand the resulting JavaVM*/JNIEnv* straight to the Android .so libraries.
+// avian cung cấp một triển khai jni thực sự, hoàn chỉnh. chúng tôi tạo máy ảo thông qua
+// điểm vào jni_createjavavm tiêu chuẩn (được xuất bởi thư viện tĩnh avian)
+// và trao javavm*/jnienv* kết quả trực tiếp cho các thư viện .so của android.
 //
-// The boot classpath is provided by an embedded classpath jar (see the
-// "Embedded boot classpath" section below), which is compiled into the Avian
-// static library by the build system. The framework classes (android.*) are
-// merged into that jar.
+// đường dẫn lớp khởi động được cung cấp bởi một tệp jar đường dẫn lớp được nhúng (xem
+// phần "đường dẫn lớp khởi động được nhúng" bên dưới), được biên dịch thành thư viện
+// tĩnh avian bởi hệ thống xây dựng. các lớp khung (android.*) được
+// hợp nhất vào tệp jar đó.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// JNI_CreateJavaVM is exported by the Avian static library. Declare it here so
-// we don't need to include Avian's internal headers (which pull in a lot).
+// jni_createjavavm được xuất bởi thư viện tĩnh avian. khai báo nó ở đây để
+// chúng ta không cần bao gồm các tiêu đề nội bộ của avian (kéo theo rất nhiều thứ).
 extern "C" jint JNI_CreateJavaVM(JavaVM** p_vm, void** p_env, void* vm_args);
 
-// Global state
+// trạng thái toàn cục
 static JavaVM* g_vm = nullptr;
 static JNIEnv* g_env = nullptr;
 static std::mutex g_jvm_mutex;
@@ -41,7 +41,7 @@ extern "C" void kudroid_jni_set_log_callback(void (*cb)(const char*)) {
     }
 }
 
-// Helper for detailed logging (thread-safe).
+// hàm hỗ trợ để ghi nhật ký chi tiết (an toàn luồng).
 static void log_jni(const char* fmt, ...) {
     char buffer[1024];
     va_list args;
@@ -58,16 +58,16 @@ static void log_jni(const char* fmt, ...) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Embedded boot classpath
+// đường dẫn lớp khởi động được nhúng
 //
-// The Avian boot classpath is provided as an embedded jar. Avian's default
-// build (no bootimage) embeds the classpath jar via the `classpath-jar.o`
-// object (built from an .incbin assembly stub by scripts/patch-avian-ios.py)
-// and exposes it through the `classpathJar()` symbol in boot.cpp. We select it
-// with the "-Xbootclasspath:[classpathJar]" option.
+// đường dẫn lớp khởi động avian được cung cấp dưới dạng một tệp jar được nhúng. bản dựng mặc định
+// của avian (không có hình ảnh khởi động) nhúng tệp jar đường dẫn lớp thông qua đối tượng `classpath-jar.o`
+// (được xây dựng từ một đoạn mã hợp ngữ .incbin bởi scripts/patch-avian-ios.py)
+// và hiển thị nó thông qua ký hiệu `classpathjar()` trong boot.cpp. chúng tôi chọn nó
+// với tùy chọn "-xbootclasspath:[classpathjar]".
 //
-// The framework classes (android.*) are merged into that same classpath jar by
-// the patched Avian makefile, so they are available on the boot classpath.
+// các lớp khung (android.*) được hợp nhất vào cùng tệp jar đường dẫn lớp đó bởi
+// tệp makefile avian đã được vá, vì vậy chúng có sẵn trên đường dẫn lớp khởi động.
 // ─────────────────────────────────────────────────────────────────────────────
 
 #if (defined __MINGW32__) || (defined _MSC_VER)
@@ -79,32 +79,32 @@ static void log_jni(const char* fmt, ...) {
 extern "C" void __cxa_pure_virtual(void) { abort(); }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// JVM Lifecycle Methods
+// phương thức vòng đời jvm
 // ─────────────────────────────────────────────────────────────────────────────
 
 void kudroid_jni_init_jvm(const char* bootclasspath, const char* classpath) {
-    (void)bootclasspath; // Avian always uses the embedded classpath jar
+    (void)bootclasspath; // avian luôn sử dụng tệp jar đường dẫn lớp được nhúng
     std::lock_guard<std::mutex> lock(g_jvm_mutex);
     if (g_vm) {
-        return; // Already initialized
+        return; // đã được khởi tạo
     }
 
     log_jni("Initializing Avian JVM...");
 
-    // Build the VM arguments. We always use the embedded classpath jar as the
-    // boot classpath. The caller-provided classpath is appended as an
-    // additional classpath entry (for app classes loaded at runtime).
+    // xây dựng các đối số máy ảo. chúng tôi luôn sử dụng tệp jar đường dẫn lớp được nhúng làm
+    // đường dẫn lớp khởi động. đường dẫn lớp do người gọi cung cấp được thêm vào như một
+    // mục nhập đường dẫn lớp bổ sung (đối với các lớp ứng dụng được tải trong thời gian chạy).
     std::string bootOption = "-Xbootclasspath:[classpathJar]";
     std::string classpathOption;
     if (classpath && classpath[0] != '\0') {
         classpathOption = std::string("-Xbootclasspath/a:") + classpath;
     }
 
-    // Limit the heap to a reasonable size for iOS (avoids memory pressure).
-    // Avian accepts -Xmx<N>m.
+    // giới hạn vùng nhớ heap ở một kích thước hợp lý cho ios (tránh áp lực bộ nhớ).
+    // avian chấp nhận -xmx<n>m.
     std::string heapOption = "-Xmx256m";
 
-    // Count options: classpath jar + heap are always present; classpath is optional.
+    // đếm số tùy chọn: tệp jar đường dẫn lớp + vùng nhớ heap luôn hiện diện; đường dẫn lớp là tùy chọn.
     int nOptions = 2;
     if (!classpathOption.empty()) nOptions++;
 
@@ -153,15 +153,15 @@ extern "C" JavaVM* kudroid_jni_get_javavm(void) {
 jint kudroid_jni_get_env(JavaVM* vm, void** env, jint version) {
     (void)vm;
     (void)version;
-    kudroid_jni_init_jvm("", ""); // Init if not already
+    kudroid_jni_init_jvm("", ""); // khởi tạo nếu chưa có
 
     std::lock_guard<std::mutex> lock(g_jvm_mutex);
     if (!g_vm || !env) {
         return JNI_ERR;
     }
 
-    // JNIEnv is per-thread in a real JVM. If the calling thread is not the
-    // thread that created the VM, attach it to get its own JNIEnv.
+    // jnienv là trên mỗi luồng trong một jvm thực. nếu luồng đang gọi không phải là
+    // luồng đã tạo máy ảo, hãy gắn nó để lấy jnienv của riêng nó.
     JNIEnv* threadEnv = nullptr;
     jint status = g_vm->GetEnv(reinterpret_cast<void**>(&threadEnv), JNI_VERSION_1_6);
     if (status == JNI_OK && threadEnv) {
@@ -169,14 +169,14 @@ jint kudroid_jni_get_env(JavaVM* vm, void** env, jint version) {
         return JNI_OK;
     }
     if (status == JNI_EDETACHED) {
-        // Attach this thread to the VM.
+        // đính kèm luồng này vào máy ảo.
         status = g_vm->AttachCurrentThread(reinterpret_cast<void**>(&threadEnv), nullptr);
         if (status == JNI_OK && threadEnv) {
             *env = threadEnv;
             return JNI_OK;
         }
     }
-    // Fall back to the main env (best effort).
+    // quay lại môi trường chính (nỗ lực tốt nhất).
     if (g_env) {
         *env = g_env;
         return JNI_OK;

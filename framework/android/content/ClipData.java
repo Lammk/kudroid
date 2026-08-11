@@ -1,9 +1,9 @@
 package android.content;
 
 /**
- * Stub android.content.ClipData.
+ * mô phỏng android.content.clipdata.
  *
- * Represents clipboard data. For KuDroid's minimal framework, this is a stub.
+ * đại diện cho dữ liệu khay nhớ tạm. đối với khuôn khổ tối thiểu của kudroid, đây là một mô phỏng.
  */
 public class ClipData {
     private final Item[] mItems;
@@ -22,7 +22,7 @@ public class ClipData {
     }
 
     /**
-     * A single item of clipboard data.
+     * một mục duy nhất của dữ liệu khay nhớ tạm.
      */
     public static class Item {
         private final CharSequence mText;

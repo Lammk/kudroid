@@ -5,10 +5,10 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Minimal android.content.ContentValues implementation.
+ * triển khai android.content.contentvalues tối thiểu.
  *
- * A map of column names to values, used with ContentResolver. For KuDroid's
- * minimal framework, backed by a HashMap.
+ * bản đồ của tên cột với giá trị, được sử dụng cùng contentresolver. đối với khuôn khổ
+ * tối thiểu của kudroid, được hỗ trợ bởi một hashmap.
  */
 public final class ContentValues {
     private final Map<String, Object> mValues = new HashMap<String, Object>();

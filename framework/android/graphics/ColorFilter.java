@@ -1,9 +1,9 @@
 package android.graphics;
 
 /**
- * Minimal android.graphics.ColorFilter implementation.
+ * triển khai android.graphics.colorfilter tối thiểu.
  *
- * A color filter for drawing. For KuDroid's minimal framework, this is a stub.
+ * một bộ lọc màu để vẽ. đối với khuôn khổ tối thiểu của kudroid, đây là một mô phỏng.
  */
 public class ColorFilter {
     public ColorFilter() {

@@ -4,11 +4,11 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * In-memory implementation of SharedPreferences.
+ * triển khai trong bộ nhớ của sharedpreferences.
  *
- * For KuDroid's minimal framework, values are kept in memory only and are not
- * persisted to disk. This is sufficient for apps that read preferences at
- * startup and don't require them to survive restarts.
+ * đối với khuôn khổ tối thiểu của kudroid, các giá trị chỉ được giữ trong bộ nhớ và không
+ * được lưu vào đĩa. điều này đủ cho các ứng dụng đọc tùy chọn lúc
+ * khởi động và không yêu cầu chúng tồn tại sau khi khởi động lại.
  */
 public class SharedPreferencesImpl implements SharedPreferences {
     private final Map<String, Object> mMap = new HashMap<String, Object>();

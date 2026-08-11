@@ -1,22 +1,22 @@
 package android.os;
 
 /**
- * Minimal android.os.Message implementation.
+ * triển khai android.os.message tối thiểu.
  *
- * Represents a message to be dispatched to a Handler. For KuDroid's minimal
- * framework, we keep it simple: a target Handler, an int arg, an Object obj,
- * and a what code.
+ * đại diện cho một thông báo được gửi đến một handler. đối với khuôn khổ tối thiểu của kudroid,
+ * chúng tôi giữ nó đơn giản: một handler đích, một đối số int, một đối tượng obj,
+ * và một mã what.
  */
 public final class Message {
-    /** User-defined message code. */
+    /** mã thông báo do người dùng xác định. */
     public int what;
-    /** First user-defined argument. */
+    /** đối số do người dùng xác định đầu tiên. */
     public int arg1;
-    /** Second user-defined argument. */
+    /** đối số do người dùng xác định thứ hai. */
     public int arg2;
-    /** Arbitrary object to send to the target. */
+    /** đối tượng tùy ý để gửi đến đích. */
     public Object obj;
-    /** The Handler that will process this message. */
+    /** handler sẽ xử lý thông báo này. */
     public Handler target;
 
     private static final Object sPoolSync = new Object();
@@ -29,7 +29,7 @@ public final class Message {
     private Message() {}
 
     /**
-     * Obtain a Message from the global pool.
+     * lấy một message từ nhóm chung.
      */
     public static Message obtain() {
         synchronized (sPoolSync) {
@@ -45,7 +45,7 @@ public final class Message {
     }
 
     /**
-     * Obtain a Message with a target Handler.
+     * lấy một message với một handler đích.
      */
     public static Message obtain(Handler h) {
         Message m = obtain();
@@ -54,7 +54,7 @@ public final class Message {
     }
 
     /**
-     * Obtain a Message with a target Handler and what code.
+     * lấy một message với một handler đích và mã what.
      */
     public static Message obtain(Handler h, int what) {
         Message m = obtain();
@@ -64,7 +64,7 @@ public final class Message {
     }
 
     /**
-     * Return this Message to the pool.
+     * trả lại message này cho nhóm.
      */
     public void recycle() {
         this.what = 0;
@@ -82,7 +82,7 @@ public final class Message {
     }
 
     /**
-     * Return a string representation of this message.
+     * trả về một biểu diễn chuỗi của thông báo này.
      */
     @Override
     public String toString() {

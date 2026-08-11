@@ -40,8 +40,8 @@ bool DexFile::load() {
         return false;
     }
 
-    // Map into memory with PROT_READ | PROT_EXEC to simulate JIT executable area later
-    // In a real JIT, the parsed output would be PROT_EXEC. For now, we map the DEX read-only.
+    // ánh xạ vào bộ nhớ với prot_read | prot_exec để mô phỏng vùng thực thi jit sau này
+    // trong môi trường jit thực tế, kết quả phân tích sẽ là prot_exec. hiện tại, chúng ta chỉ ánh xạ dex ở chế độ chỉ đọc.
     baseAddr_ = mmap(nullptr, size_, PROT_READ, MAP_PRIVATE, fd, 0);
     close(fd);
 
@@ -59,7 +59,7 @@ bool DexFile::load() {
     std::fprintf(stderr, "[kudroid_dex] Loaded %s (size: %zu bytes, classes: %u)\n", 
                  path_.c_str(), size_, header->classDefsSize);
 
-    // Call dummy JIT hook
+    // gọi hook jit giả
     kudroid_dex_jit_compile(this);
 
     return true;
@@ -115,10 +115,10 @@ bool DexManager::mapDexFile(const std::string& path) {
 }
 
 extern "C" void kudroid_dex_jit_compile(DexFile* dexFile) {
-    // Dummy JIT compilation hook
+    // hook biên dịch jit giả
     std::fprintf(stderr, "[kudroid_jit] JIT hook called for DEX: %s (Simulating AOT/JIT parsing...)\n", 
                  dexFile->getPath().c_str());
-    // ... future implementation ...
+    // ... sẽ được triển khai trong tương lai ...
 }
 
 } // namespace kudroid

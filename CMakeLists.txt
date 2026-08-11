@@ -32,6 +32,7 @@ add_library(kudroid_core STATIC
     src/shims/SyscallShim.cpp
     src/kudroid_bridge.cpp
     src/kudroid_jni.cpp
+    src/kudroid_java_activity_bridge.cpp
     src/gpu_test.cpp
     src/DexManager.cpp
     src/DexCacheManager.cpp

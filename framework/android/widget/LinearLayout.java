@@ -5,15 +5,15 @@ import android.view.View;
 import android.view.ViewGroup;
 
 /**
- * Minimal android.widget.LinearLayout implementation.
+ * triển khai android.widget.linearlayout tối thiểu.
  *
- * Arranges children in a single row or column. For KuDroid's minimal
- * framework, provides basic layout.
+ * sắp xếp các view con trong một hàng hoặc cột duy nhất. đối với khuôn khổ
+ * tối thiểu của kudroid, cung cấp bố cục cơ bản.
  */
 public class LinearLayout extends ViewGroup {
-    /** Horizontal orientation. */
+    /** hướng ngang. */
     public static final int HORIZONTAL = 0;
-    /** Vertical orientation. */
+    /** hướng dọc. */
     public static final int VERTICAL = 1;
 
     private int mOrientation = VERTICAL;
@@ -32,28 +32,28 @@ public class LinearLayout extends ViewGroup {
     }
 
     /**
-     * Set the orientation.
+     * thiết lập hướng.
      */
     public void setOrientation(int orientation) {
         mOrientation = orientation;
     }
 
     /**
-     * Return the orientation.
+     * trả về hướng.
      */
     public int getOrientation() {
         return mOrientation;
     }
 
     /**
-     * Set the gravity.
+     * thiết lập trọng lực (gravity).
      */
     public void setGravity(int gravity) {
         mGravity = gravity;
     }
 
     /**
-     * Return the gravity.
+     * trả về trọng lực (gravity).
      */
     public int getGravity() {
         return mGravity;

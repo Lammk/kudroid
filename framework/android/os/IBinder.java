@@ -1,24 +1,24 @@
 package android.os;
 
 /**
- * Stub android.os.IBinder.
+ * mô phỏng android.os.ibinder.
  *
- * A basic interface for a remote object. For KuDroid's minimal framework,
- * this is a stub.
+ * một giao diện cơ bản cho một đối tượng từ xa. đối với khuôn khổ tối thiểu của kudroid,
+ * đây là một mô phỏng.
  */
 public interface IBinder {
     /**
-     * Return a string representation of the binder.
+     * trả về một biểu diễn chuỗi của binder.
      */
     String getInterfaceDescriptor();
 
     /**
-     * Return whether the binder is alive.
+     * trả về việc binder còn sống hay không.
      */
     boolean isBinderAlive();
 
     /**
-     * Return whether the binder is transacting.
+     * trả về việc binder có đang giao dịch hay không.
      */
     boolean pingBinder();
 }

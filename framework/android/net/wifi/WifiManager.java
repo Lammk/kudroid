@@ -1,15 +1,15 @@
 package android.net.wifi;
 
 /**
- * Stub android.net.wifi.WifiManager.
+ * mô phỏng android.net.wifi.wifimanager.
  *
- * Non-critical for app startup/rendering. Returns null/defaults so apps don't
- * crash when they query WiFi state.
+ * không quan trọng đối với khởi động/kết xuất ứng dụng. trả về rỗng/mặc định để các ứng dụng
+ * không gặp sự cố khi chúng truy vấn trạng thái wifi.
  */
 public class WifiManager {
-    /** WiFi state: disabled. */
+    /** trạng thái wifi: bị vô hiệu hóa. */
     public static final int WIFI_STATE_DISABLED = 1;
-    /** WiFi state: enabled. */
+    /** trạng thái wifi: được kích hoạt. */
     public static final int WIFI_STATE_ENABLED = 3;
 
     public WifiManager() {

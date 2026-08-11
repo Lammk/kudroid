@@ -3,15 +3,15 @@ package android.widget;
 import android.content.Context;
 
 /**
- * Minimal android.widget.Toast implementation.
+ * triển khai android.widget.toast tối thiểu.
  *
- * Shows a brief message. For KuDroid's minimal framework, this logs the
- * message and does not display a UI.
+ * hiển thị một thông báo ngắn gọn. đối với khuôn khổ tối thiểu của kudroid, điều này ghi nhật ký
+ * thông báo và không hiển thị ui.
  */
 public class Toast {
-    /** Show for a short duration. */
+    /** hiển thị trong thời gian ngắn. */
     public static final int LENGTH_SHORT = 0;
-    /** Show for a long duration. */
+    /** hiển thị trong thời gian dài. */
     public static final int LENGTH_LONG = 1;
 
     private final Context mContext;
@@ -23,7 +23,7 @@ public class Toast {
     }
 
     /**
-     * Make a toast.
+     * tạo một toast.
      */
     public static Toast makeText(Context context, CharSequence text, int duration) {
         Toast toast = new Toast(context);
@@ -33,14 +33,14 @@ public class Toast {
     }
 
     /**
-     * Make a toast from a resource id.
+     * tạo một toast từ một id tài nguyên.
      */
     public static Toast makeText(Context context, int resId, int duration) {
         return makeText(context, "", duration);
     }
 
     /**
-     * Show the toast.
+     * hiển thị toast.
      */
     public void show() {
         // Log the message; no UI for now.
@@ -48,14 +48,14 @@ public class Toast {
     }
 
     /**
-     * Set the text.
+     * thiết lập văn bản.
      */
     public void setText(CharSequence s) {
         mText = s;
     }
 
     /**
-     * Set the duration.
+     * thiết lập khoảng thời gian.
      */
     public void setDuration(int duration) {
         mDuration = duration;

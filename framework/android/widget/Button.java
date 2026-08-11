@@ -3,9 +3,9 @@ package android.widget;
 import android.content.Context;
 
 /**
- * Minimal android.widget.Button implementation.
+ * triển khai android.widget.button tối thiểu.
  *
- * A clickable button. For KuDroid's minimal framework, extends TextView.
+ * một nút có thể nhấp. đối với khuôn khổ tối thiểu của kudroid, mở rộng textview.
  */
 public class Button extends TextView {
     public Button(Context context) {

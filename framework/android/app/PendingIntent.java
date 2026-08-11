@@ -4,19 +4,19 @@ import android.content.Context;
 import android.content.Intent;
 
 /**
- * Stub android.app.PendingIntent.
+ * mô phỏng android.app.pendingintent.
  *
- * A token that grants another app permission to perform an operation. For
- * KuDroid's minimal framework, this is a stub.
+ * một mã thông báo cấp cho ứng dụng khác quyền thực hiện một thao tác. đối với
+ * khuôn khổ tối thiểu của kudroid, đây là một mô phỏng.
  */
 public final class PendingIntent {
-    /** Flag: one shot. */
+    /** cờ: một lần. */
     public static final int FLAG_ONE_SHOT = 1;
-    /** Flag: no create. */
+    /** cờ: không tạo. */
     public static final int FLAG_NO_CREATE = 2;
-    /** Flag: cancel current. */
+    /** cờ: hủy hiện tại. */
     public static final int FLAG_CANCEL_CURRENT = 4;
-    /** Flag: update current. */
+    /** cờ: cập nhật hiện tại. */
     public static final int FLAG_UPDATE_CURRENT = 8;
 
     private final Intent mIntent;
@@ -26,7 +26,7 @@ public final class PendingIntent {
     }
 
     /**
-     * Get an activity pending intent.
+     * nhận intent chờ xử lý của hoạt động.
      */
     public static PendingIntent getActivity(Context context, int requestCode,
                                             Intent intent, int flags) {
@@ -34,7 +34,7 @@ public final class PendingIntent {
     }
 
     /**
-     * Get a broadcast pending intent.
+     * nhận intent chờ xử lý của chương trình phát sóng.
      */
     public static PendingIntent getBroadcast(Context context, int requestCode,
                                              Intent intent, int flags) {
@@ -42,7 +42,7 @@ public final class PendingIntent {
     }
 
     /**
-     * Get a service pending intent.
+     * nhận intent chờ xử lý của dịch vụ.
      */
     public static PendingIntent getService(Context context, int requestCode,
                                            Intent intent, int flags) {
@@ -50,14 +50,14 @@ public final class PendingIntent {
     }
 
     /**
-     * Return the wrapped intent.
+     * trả về intent được bọc.
      */
     public Intent getIntent() {
         return mIntent;
     }
 
     /**
-     * Send the pending intent (no-op).
+     * gửi intent chờ xử lý (no-op).
      */
     public void send() {
     }

@@ -1,16 +1,16 @@
 package android.hardware;
 
 /**
- * Stub android.hardware.Sensor.
+ * mô phỏng android.hardware.sensor.
  *
- * Represents a sensor. For KuDroid's minimal framework, this is a stub.
+ * đại diện cho một cảm biến. đối với khuôn khổ tối thiểu của kudroid, đây là một mô phỏng.
  */
 public class Sensor {
-    /** Report mode: continuous. */
+    /** chế độ báo cáo: liên tục. */
     public static final int REPORTING_MODE_CONTINUOUS = 0;
-    /** Report mode: on change. */
+    /** chế độ báo cáo: khi thay đổi. */
     public static final int REPORTING_MODE_ON_CHANGE = 1;
-    /** Report mode: one shot. */
+    /** chế độ báo cáo: một lần. */
     public static final int REPORTING_MODE_ONE_SHOT = 2;
 
     private final int mType;

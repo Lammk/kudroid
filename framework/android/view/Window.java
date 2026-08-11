@@ -3,10 +3,10 @@ package android.view;
 import android.content.Context;
 
 /**
- * Minimal android.view.Window implementation.
+ * triển khai android.view.window tối thiểu.
  *
- * Represents a window. For KuDroid's minimal framework, this is a stub that
- * provides basic window management.
+ * đại diện cho một cửa sổ. đối với khuôn khổ tối thiểu của kudroid, đây là một mô phỏng
+ * cung cấp quản lý cửa sổ cơ bản.
  */
 public class Window {
     private final Context mContext;
@@ -18,68 +18,68 @@ public class Window {
     }
 
     /**
-     * Return the context this window was created with.
+     * trả về ngữ cảnh mà cửa sổ này được tạo với.
      */
     public Context getContext() {
         return mContext;
     }
 
     /**
-     * Set the content view.
+     * thiết lập view nội dung.
      */
     public void setContentView(int layoutResID) {
     }
 
     /**
-     * Set the content view to a view.
+     * thiết lập view nội dung thành một view.
      */
     public void setContentView(View view) {
         mDecorView = view;
     }
 
     /**
-     * Return the decor view.
+     * trả về view trang trí (decor view).
      */
     public View getDecorView() {
         return mDecorView;
     }
 
     /**
-     * Set a window flag.
+     * thiết lập cờ cửa sổ.
      */
     public void setFlags(int flags, int mask) {
         mFlags = (mFlags & ~mask) | (flags & mask);
     }
 
     /**
-     * Add a window flag.
+     * thêm một cờ cửa sổ.
      */
     public void addFlags(int flags) {
         mFlags |= flags;
     }
 
     /**
-     * Clear a window flag.
+     * xóa một cờ cửa sổ.
      */
     public void clearFlags(int flags) {
         mFlags &= ~flags;
     }
 
     /**
-     * Return the current window flags.
+     * trả về các cờ cửa sổ hiện tại.
      */
     public int getFlags() {
         return mFlags;
     }
 
     /**
-     * Set the window background.
+     * thiết lập nền cửa sổ.
      */
     public void setBackgroundDrawable(android.graphics.drawable.Drawable drawable) {
     }
 
     /**
-     * Set the window title.
+     * thiết lập tiêu đề cửa sổ.
      */
     public void setTitle(CharSequence title) {
     }

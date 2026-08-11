@@ -1,10 +1,10 @@
 package android.os;
 
 /**
- * Minimal android.os.MessageQueue implementation.
+ * triển khai android.os.messagequeue tối thiểu.
  *
- * A simple FIFO of Messages. For KuDroid's minimal framework, messages are
- * processed synchronously in order (no timing/barriers).
+ * một fifo đơn giản của các messages. đối với khuôn khổ tối thiểu của kudroid, các thông báo được
+ * xử lý đồng bộ theo thứ tự (không có định thời/rào cản).
  */
 public final class MessageQueue {
     private Message mMessages; // head of the queue
@@ -13,7 +13,7 @@ public final class MessageQueue {
     MessageQueue() {}
 
     /**
-     * Enqueue a message. Returns true on success.
+     * xếp hàng một thông báo. trả về true nếu thành công.
      */
     boolean enqueueMessage(Message msg, long when) {
         if (msg.target == null) {
@@ -39,7 +39,7 @@ public final class MessageQueue {
     }
 
     /**
-     * Return the next message, or null if the queue is quitting.
+     * trả về thông báo tiếp theo, hoặc rỗng nếu hàng đợi đang thoát.
      */
     Message next() {
         synchronized (this) {
@@ -56,7 +56,7 @@ public final class MessageQueue {
     }
 
     /**
-     * Quit the queue.
+     * thoát hàng đợi.
      */
     void quit() {
         synchronized (this) {
