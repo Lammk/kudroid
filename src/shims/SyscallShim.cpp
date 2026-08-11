@@ -521,6 +521,14 @@ extern "C" int bionic_pthread_getattr_np(pthread_t thread, void* attr) {
     if (!a) return -1;
     bionic_pthread_attr_init(attr);
     // Lấy stack size thật của thread host (guest thường gọi để tự quyết độ sâu stack).
+    // pthread_getattr_np là API glibc/Linux — KHÔNG tồn tại trên macOS, dùng
+    // pthread_get_stackaddr_np/get_stacksize_np (Apple) thay thế.
+#ifdef __APPLE__
+    void* saddr = ::pthread_get_stackaddr_np(thread);
+    const size_t ssize = ::pthread_get_stacksize_np(thread);
+    if (saddr) a->stack_base = saddr;
+    if (ssize > 0) a->stack_size = ssize;
+#else
     pthread_attr_t hostAttr;
     if (::pthread_getattr_np(thread, &hostAttr) == 0) {
         void* saddr = nullptr;
@@ -531,6 +539,7 @@ extern "C" int bionic_pthread_getattr_np(pthread_t thread, void* attr) {
         }
         ::pthread_attr_destroy(&hostAttr);
     }
+#endif
     return 0;
 }
 

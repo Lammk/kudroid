@@ -193,6 +193,7 @@ static bool enqueue_pcm(AudioPlayer* p, const void* data, uint32_t size) {
 
 #endif // __APPLE__
 
+#if !defined(__APPLE__)
 // Worker fallback (non-Apple): tiêu thụ buffer giả lập rồi gọi callback.
 static void audio_worker(std::shared_ptr<AudioPlayer> p, void* iface) {
     for (;;) {
@@ -218,6 +219,7 @@ static void audio_worker(std::shared_ptr<AudioPlayer> p, void* iface) {
         }
     }
 }
+#endif // !defined(__APPLE__)
 
 // Engine create — entry point chính mà game gọi.
 extern "C" SLresult bionic_slCreateEngine(SLObjectItf* pEngine, uint32_t numOptions,
