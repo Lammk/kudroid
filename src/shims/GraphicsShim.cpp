@@ -122,7 +122,10 @@ extern "C" EGLDisplay bionic_eglGetPlatformDisplayEXT(EGLint platform, void* nat
     fprintf(stdout, "[KuDroidGPU] bionic_eglGetPlatformDisplayEXT called\n");
     auto host_func = (PFN_eglGetPlatformDisplayEXT) get_egl_func("eglGetPlatformDisplayEXT");
     if (host_func) {
-        EGLDisplay dpy = host_func(platform, native_display, attrib_list);
+        // ANGLE on iOS needs a CAMetalLayer as the native display. If the game
+        // passed NULL (EGL_DEFAULT_DISPLAY), substitute our g_metalLayer.
+        void* display = native_display ? native_display : g_metalLayer;
+        EGLDisplay dpy = host_func(platform, display, attrib_list);
         fprintf(stdout, "[KuDroidGPU] bionic_eglGetPlatformDisplayEXT returned %s\n", dpy ? "VALID" : "NULL");
         return dpy;
     }
@@ -144,7 +147,9 @@ extern "C" EGLDisplay bionic_eglGetDisplay(EGLNativeDisplayType display_id) {
         #define EGL_NONE 0x3038
         
         // On iOS, ANGLE uses the Metal backend. Try Metal first with the
-        // device type explicitly set.
+        // device type explicitly set. Use g_metalLayer as the native display
+        // (ANGLE needs a CAMetalLayer, not NULL).
+        void* nativeDisplay = display_id ? display_id : g_metalLayer;
         EGLint backends[] = {
             EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE,
             EGL_PLATFORM_ANGLE_TYPE_VULKAN_ANGLE,
@@ -157,7 +162,7 @@ extern "C" EGLDisplay bionic_eglGetDisplay(EGLNativeDisplayType display_id) {
                 EGL_PLATFORM_ANGLE_DEVICE_TYPE_ANGLE, EGL_PLATFORM_ANGLE_DEVICE_TYPE_METAL_ANGLE,
                 EGL_NONE
             };
-            EGLDisplay dpy = host_func(EGL_PLATFORM_ANGLE_ANGLE, display_id, attribs);
+            EGLDisplay dpy = host_func(EGL_PLATFORM_ANGLE_ANGLE, nativeDisplay, attribs);
             if (dpy != nullptr) {
                 fprintf(stdout, "[KuDroidGPU] bionic_eglGetDisplay: successfully got display via eglGetPlatformDisplayEXT\n");
                 return dpy;
@@ -169,7 +174,9 @@ extern "C" EGLDisplay bionic_eglGetDisplay(EGLNativeDisplayType display_id) {
     typedef EGLDisplay (*PFN_eglGetDisplay)(EGLNativeDisplayType);
     auto host_get_display = (PFN_eglGetDisplay) get_egl_func("eglGetDisplay");
     if (host_get_display) {
-        EGLDisplay dpy = host_get_display(display_id);
+        // Pass g_metalLayer as the native display for ANGLE.
+        void* nativeDisplay = display_id ? display_id : g_metalLayer;
+        EGLDisplay dpy = host_get_display(nativeDisplay);
         fprintf(stdout, "[KuDroidGPU] bionic_eglGetDisplay: fallback returned %s\n", dpy ? "VALID" : "NULL");
         return dpy;
     }
