@@ -35,7 +35,7 @@ if ! git cat-file -e "$ANGLE_REF^{commit}" 2>/dev/null; then
 fi
 git checkout -B pinned-angle "$ANGLE_REF"
 python3 scripts/bootstrap.py
-gclient sync --no-history --shallow
+gclient sync --no-history --shallow --reset --force
 
 # ── vá lỗi vulkan-loader: định nghĩa sysconfdir / fallback_*_dirs ─────────────────
 # bản dựng gn của angle không truyền extra_cflags cho tất cả các mục tiêu third_party.
