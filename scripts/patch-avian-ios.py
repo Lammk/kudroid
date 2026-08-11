@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-"""Patch Avian's makefile + boot.cpp for iOS ARM64 builds.
+"""Patch Avian's makefile for iOS ARM64 builds.
 
-binaryToObject produces an object with architecture 'unknown' on iOS/macho,
-which fails at link time. We replace it with `ld -r -sectcreate` and switch
-boot.cpp to read the embedded jar via getsectdata() (the Apple API).
+Avian's `binaryToObject` converter emits an object with architecture 'unknown'
+on iOS/Mach-O, which fails at link time. We replace the `classpath-object` rule
+with a tiny assembly stub that embeds the classpath jar via `.incbin` and
+exposes the exact symbols Avian's original boot.cpp already references
+(`_binary_classpath_jar_start` / `_binary_classpath_jar_end`).
+
+At the Mach-O asm level, the C symbol `_binary_classpath_jar_start` gains an
+extra leading underscore, hence `__binary_classpath_jar_start` in the stub.
+Because the symbol names are unchanged, boot.cpp needs no modification.
 
 Run from the Avian source directory (third_party/jvm/avian).
 """
@@ -18,45 +24,16 @@ MAKEFILE_OLD = (
 
 MAKEFILE_NEW = (
     "$(classpath-object): $(build)/classpath.jar\n"
-    "\t@echo \"creating $(@) via ld -r -sectcreate\"\n"
-    "\tld -r -sectcreate __TEXT __kudroid_classpath $(<) -o $(@) -arch $(arch)"
+    "\t@echo \"creating $(@) via .incbin stub\"\n"
+    "\t@printf '.global __binary_classpath_jar_start\\n"
+    ".global __binary_classpath_jar_end\\n"
+    ".section __DATA,__const\\n"
+    ".balign 8\\n"
+    "__binary_classpath_jar_start:\\n"
+    ".incbin \"$(<)\"\\n"
+    "__binary_classpath_jar_end:\\n' > $(build)/classpath-jar.s\n"
+    "\t$(cc) $(asmflags) -c $(build)/classpath-jar.s -o $(@)"
 )
-
-BOOT_OLD = """extern "C" {
-extern const uint8_t SYMBOL(start)[];
-extern const uint8_t SYMBOL(end)[];
-
-AVIAN_EXPORT const uint8_t* classpathJar(size_t* size)
-{
-  *size = SYMBOL(end) - SYMBOL(start);
-  return SYMBOL(start);
-}
-}"""
-
-BOOT_NEW = """#if defined(__APPLE__)
-#include <mach-o/getsect.h>
-extern "C" {
-AVIAN_EXPORT const uint8_t* classpathJar(size_t* size)
-{
-  unsigned long s = 0;
-  const uint8_t* p =
-    reinterpret_cast<const uint8_t*>(getsectdata("__TEXT", "__kudroid_classpath", &s));
-  if (size) *size = s;
-  return p;
-}
-}
-#else
-extern "C" {
-extern const uint8_t SYMBOL(start)[];
-extern const uint8_t SYMBOL(end)[];
-
-AVIAN_EXPORT const uint8_t* classpathJar(size_t* size)
-{
-  *size = SYMBOL(end) - SYMBOL(start);
-  return SYMBOL(start);
-}
-}
-#endif"""
 
 
 def patch(path, old, new, label):
@@ -76,7 +53,6 @@ def patch(path, old, new, label):
 
 def main():
     patch("makefile", MAKEFILE_OLD, MAKEFILE_NEW, "makefile (classpath-jar.o)")
-    patch("src/boot.cpp", BOOT_OLD, BOOT_NEW, "boot.cpp (classpathJar)")
 
 
 if __name__ == "__main__":
