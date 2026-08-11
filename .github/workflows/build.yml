@@ -92,7 +92,7 @@ jobs:
             angle-ios-src-${{ runner.os }}-
 
       - name: Build ANGLE (Vulkan backend, iOS ARM64)
-        if: false
+        if: steps.angle-cache.outputs.cache-hit != 'true'
         env:
           # Limit ninja parallelism to 2 jobs so peak RSS stays under ~7 GB.
           # ANGLE .cc files individually can use 1–2 GB during compilation.
@@ -108,11 +108,12 @@ jobs:
       - name: Verify ANGLE build output
         run: |
           echo "=== ANGLE libs ==="
-          ls -lh third_party/ANGLE/lib/ios-arm64/
+          ls -lh third_party/ANGLE/lib/ios-arm64/ || { echo "ANGLE libs missing — cache miss and build skipped"; exit 1; }
           file third_party/ANGLE/lib/ios-arm64/libEGL.a
           file third_party/ANGLE/lib/ios-arm64/libGLESv2.a
 
       - name: Upload ANGLE artifact
+        if: steps.angle-cache.outputs.cache-hit != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: angle-ios-arm64
@@ -305,18 +306,28 @@ jobs:
   # and the SwiftUI shell.
   # ─────────────────────────────────────────────────────────────────────────────
   ios-build:
-    needs: [build-avian-ios, build-test-so-arm64, build-bionic-test-so-arm64, build-multi-elf-so-arm64, build-gpu-test-so-arm64]
+    needs: [build-angle-ios, build-avian-ios, build-test-so-arm64, build-bionic-test-so-arm64, build-multi-elf-so-arm64, build-gpu-test-so-arm64]
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
       - name: Restore ANGLE pre-built artifacts from cache
+        id: angle-cache-restore
         uses: actions/cache/restore@v4
         with:
           path: third_party/ANGLE
           key: angle-ios-arm64-built-macOS-
           restore-keys: |
             angle-ios-arm64-built-macOS-
+
+      # Fallback: if the ANGLE cache missed, download the artifact built by
+      # build-angle-ios so the iOS build always has ANGLE available.
+      - name: Download ANGLE artifact (cache fallback)
+        if: steps.angle-cache-restore.outputs.cache-hit != 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: angle-ios-arm64
+          path: third_party/ANGLE
 
       - name: Install MoltenVK (prebuilt release download)
         run: |
