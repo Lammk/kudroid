@@ -762,6 +762,8 @@ extern "C" void* bionic_dlsym(void* handle, const char* symbol) {
         "vkEnumerateInstanceExtensionProperties",
         "vkCreateAndroidSurfaceKHR",
         "eglCreateWindowSurface",
+        "eglGetDisplay",
+        "eglGetPlatformDisplayEXT",
     };
     for (const char* prio : kShimPriority) {
         if (strcmp(symbol, prio) == 0) {

@@ -72,6 +72,16 @@ typedef void* (*PFN_eglGetProcAddress)(const char* procname);
 extern "C" void* bionic_eglGetProcAddress(const char* procname) {
     if (!procname) return nullptr;
     fprintf(stdout, "[KuDroidGPU] eglGetProcAddress: requested %s\n", procname);
+    
+    size_t count = 0;
+    const kudroid::SymbolEntry* symbols = kudroid::get_graphics_symbols(&count);
+    for (size_t i = 0; i < count; ++i) {
+        if (strcmp(symbols[i].name, procname) == 0) {
+            fprintf(stdout, "[KuDroidGPU] eglGetProcAddress: %s intercepted by GraphicsShim\n", procname);
+            return symbols[i].address;
+        }
+    }
+
     // Resolve from the ANGLE handle directly (loaded RTLD_LOCAL).
     static void* egl_handle = nullptr;
     if (!egl_handle) {
