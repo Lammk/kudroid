@@ -39,7 +39,8 @@ extern "C" {
 AVIAN_EXPORT const uint8_t* classpathJar(size_t* size)
 {
   unsigned long s = 0;
-  const uint8_t* p = getsectdata("__TEXT", "__kudroid_classpath", &s);
+  const uint8_t* p =
+    reinterpret_cast<const uint8_t*>(getsectdata("__TEXT", "__kudroid_classpath", &s));
   if (size) *size = s;
   return p;
 }
