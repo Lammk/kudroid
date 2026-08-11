@@ -104,6 +104,9 @@ void* resolve_bionic_symbol(const char* name) {
         }
 
         if (!resolved) {
+            char msg[256];
+            snprintf(msg, sizeof(msg), "missing symbol bound to dummy: %s", name);
+            trace_shim(msg);
             resolved = reinterpret_cast<void*>(&kudroid_universal_dummy);
         }
 
