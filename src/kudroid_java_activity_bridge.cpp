@@ -3,6 +3,7 @@
 
 // khởi chạy activity thông qua activitythread để có looper xử lý vòng đời
 extern "C" void kudroid_launch_java_activity(JavaVM* vm, const char* activityName) {
+    fprintf(stdout, "[KuDroidApp] kudroid_launch_java_activity: requesting launch for %s\n", activityName ? activityName : "NULL");
     if (!vm || !activityName) return;
 
     JNIEnv* env = nullptr;
@@ -43,8 +44,12 @@ extern "C" void kudroid_launch_java_activity(JavaVM* vm, const char* activityNam
 
 // gửi sự kiện vòng đời (pause, resume) vào luồng ui
 extern "C" void kudroid_send_lifecycle_event(int eventType) {
+    fprintf(stdout, "[KuDroidApp] kudroid_send_lifecycle_event: preparing to send event=%d\n", eventType);
     JavaVM* vm = kudroid_jni_get_javavm();
-    if (!vm) return;
+    if (!vm) {
+        fprintf(stdout, "[KuDroidApp] kudroid_send_lifecycle_event: ERROR no JVM found!\n");
+        return;
+    }
     
     JNIEnv* env = nullptr;
     bool attached = false;
@@ -57,8 +62,13 @@ extern "C" void kudroid_send_lifecycle_event(int eventType) {
     if (atClass) {
         jmethodID postMethod = env->GetStaticMethodID(atClass, "postLifecycleEvent", "(ILjava/lang/String;)V");
         if (postMethod) {
+            fprintf(stdout, "[KuDroidApp] kudroid_send_lifecycle_event: successfully calling postLifecycleEvent(%d)\n", eventType);
             env->CallStaticVoidMethod(atClass, postMethod, eventType, nullptr);
+        } else {
+            fprintf(stdout, "[KuDroidApp] kudroid_send_lifecycle_event: ERROR could not find postLifecycleEvent method\n");
         }
+    } else {
+        fprintf(stdout, "[KuDroidApp] kudroid_send_lifecycle_event: ERROR could not find ActivityThread class\n");
     }
     
     if (attached) {

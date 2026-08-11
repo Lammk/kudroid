@@ -465,6 +465,9 @@ extern "C" int bionic_prctl(int option, unsigned long arg2, unsigned long arg3, 
 
 // Memory mapping wrappers to strip Linux specific flags
 extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
+    if (prot & PROT_EXEC) {
+        logAndroidMessage(4, "KuDroidSyscall", "bionic_mmap: allocating executable memory (JIT/library), length=" + std::to_string(length));
+    }
 #ifdef __APPLE__
     // Android/Linux and Darwin use different numeric values for mmap flags.
     // Translate them explicitly instead of forwarding the raw Linux bits.
@@ -495,6 +498,9 @@ extern "C" void* bionic_mmap64(void *addr, size_t length, int prot, int flags, i
 }
 
 extern "C" int bionic_mprotect(void *addr, size_t len, int prot) {
+    if (prot & PROT_EXEC) {
+        logAndroidMessage(4, "KuDroidSyscall", "bionic_mprotect: setting PROT_EXEC on memory at " + std::to_string((uintptr_t)addr) + " len=" + std::to_string(len));
+    }
     return ::mprotect(addr, len, prot);
 }
 

@@ -165,19 +165,27 @@ jint kudroid_jni_get_env(JavaVM* vm, void** env, jint version) {
     JNIEnv* threadEnv = nullptr;
     jint status = g_vm->GetEnv(reinterpret_cast<void**>(&threadEnv), JNI_VERSION_1_6);
     if (status == JNI_OK && threadEnv) {
+        log_jni("kudroid_jni_get_env: Thread already attached, returning env=%p", (void*)threadEnv);
         *env = threadEnv;
         return JNI_OK;
     }
     if (status == JNI_EDETACHED) {
+        log_jni("kudroid_jni_get_env: Thread detached, attempting to AttachCurrentThread...");
         // đính kèm luồng này vào máy ảo.
         status = g_vm->AttachCurrentThread(reinterpret_cast<void**>(&threadEnv), nullptr);
         if (status == JNI_OK && threadEnv) {
+            log_jni("kudroid_jni_get_env: Thread attached successfully, env=%p", (void*)threadEnv);
             *env = threadEnv;
             return JNI_OK;
+        } else {
+            log_jni("ERROR: kudroid_jni_get_env: AttachCurrentThread failed with code %d", status);
         }
+    } else {
+        log_jni("ERROR: kudroid_jni_get_env: GetEnv failed with code %d", status);
     }
     // quay lại môi trường chính (nỗ lực tốt nhất).
     if (g_env) {
+        log_jni("WARNING: kudroid_jni_get_env: Falling back to main thread env=%p", (void*)g_env);
         *env = g_env;
         return JNI_OK;
     }

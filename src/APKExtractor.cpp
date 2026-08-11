@@ -78,8 +78,13 @@ bool APKExtractor::extract_apk(const std::string& apkPath, const std::string& ta
         else if (entry.rfind("assets/", 0) == 0) shouldExtract = true;
         else if (entry == "AndroidManifest.xml") shouldExtract = true;
         
-        if (!shouldExtract) continue;
-        if (entry.empty() || entry.back() == '/') continue; // bỏ qua thư mục
+        if (!shouldExtract) {
+            continue;
+        }
+        if (entry.empty() || entry.back() == '/') {
+            continue; // bỏ qua thư mục
+        }
+        apkLog("Extracting: " + entry);
         
         found = true;
         if (!hasBytes(data, localOffset, 30) || read32(data, localOffset) != 0x04034b50) { gLastError = "Invalid local header: " + entry; return false; }
@@ -98,6 +103,7 @@ bool APKExtractor::extract_apk(const std::string& apkPath, const std::string& ta
         std::ofstream extracted(destination, std::ios::binary);
         extracted.write(reinterpret_cast<const char*>(output.data()), output.size());
         extracted.close();
+        apkLog("  -> Saved to " + destination.string() + " (" + std::to_string(output.size()) + " bytes)");
         if (!extracted || ::chmod(destination.c_str(), 0755) != 0) { gLastError = "Cannot write/chmod: " + destination.string(); return false; }
         apkLog("Extracting: " + entry + " -> " + destination.string() + " (OK)");
     }
