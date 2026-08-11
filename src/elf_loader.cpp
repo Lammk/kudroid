@@ -273,7 +273,7 @@ bool ElfLoader::map() {
     totalSize = (totalSize + pageSize - 1) & ~(pageSize - 1);
 
     // phân bổ một khối bộ nhớ liền kề (với map_jit trên apple silicon)
-    fprintf(stderr, "[KuDroidELF] Mapping ELF segments for %s (size: %zu)\n", name_.c_str(), totalSize);
+    fprintf(stderr, "[KuDroidELF] Mapping ELF segments for %s (size: %zu)\n", path_.c_str(), (size_t)totalSize);
     int prot = PROT_READ | PROT_WRITE;
     int flags = MAP_PRIVATE | MAP_ANONYMOUS;
     [[maybe_unused]] bool usedMapJit = false;
@@ -301,7 +301,9 @@ bool ElfLoader::map() {
 
     // sao chép dữ liệu của mỗi phân đoạn pt_load từ bộ đệm tệp vào bộ nhớ đã ánh xạ
     for (const auto& seg : segments_) {
-        fprintf(stderr, "[KuDroidELF] Segment: vaddr=0x%lx, offset=0x%lx, filesz=0x%lx, memsz=0x%lx, flags=%d\n", seg.vaddr, seg.offset, seg.filesz, seg.memsz, seg.flags);
+        fprintf(stderr, "[KuDroidELF] Segment: vaddr=0x%llx, offset=0x%llx, filesz=0x%llx, memsz=0x%llx, flags=%d\n",
+                (unsigned long long)seg.vaddr, (unsigned long long)seg.offset,
+                (unsigned long long)seg.filesz, (unsigned long long)seg.memsz, seg.flags);
         char* dst = static_cast<char*>(base_) + (seg.vaddr - minVaddr);
         if (seg.offset + seg.filesz <= fileBuf_.size()) {
             memcpy(dst, fileBuf_.data() + seg.offset, seg.filesz);
@@ -512,7 +514,7 @@ bool ElfLoader::relocate() {
                 }
                 
                 if (!address && (symtab[symbolIndex].st_info >> 4) == 1 && (symtab[symbolIndex].st_info & 0xf) != 0) { // STB_GLOBAL & not STT_NOTYPE
-                    fprintf(stderr, "[KuDroidELF] WARNING: Unresolved global symbol '%s' in %s\n", name, name_.c_str());
+                    fprintf(stderr, "[KuDroidELF] WARNING: Unresolved global symbol '%s' in %s\n", name, path_.c_str());
                 }
                 
                 if (type == R_AARCH64_COPY) {

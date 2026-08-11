@@ -1472,7 +1472,7 @@ extern "C" void bionic_google_potentially_blocking_region_end() {}
 
 // Dummy for __register_atfork
 extern "C" int bionic_register_atfork(void (*prepare)(void), void (*parent)(void), void (*child)(void), void* dso_handle) {
-    (void)dso_handle;
+    (void)prepare; (void)parent; (void)child; (void)dso_handle;
 #ifdef __APPLE__
     return pthread_atfork(prepare, parent, child);
 #else
