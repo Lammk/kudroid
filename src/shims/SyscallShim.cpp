@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <poll.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -48,6 +49,18 @@ extern "C" void __gxx_personality_v0();
 #define EPOLL_CTL_MOD 3
 #endif
 
+// POLLERR/POLLHUP/POLLNVAL are bionic-specific names; define them if the host
+// poll.h does not (e.g. glibc uses POLL_ERR/POLL_HUP).
+#ifndef POLLERR
+#define POLLERR 0x001
+#endif
+#ifndef POLLHUP
+#define POLLHUP 0x002
+#endif
+#ifndef POLLNVAL
+#define POLLNVAL 0x020
+#endif
+
 struct android_epoll_event {
     uint32_t events;
     uint64_t data;
@@ -60,6 +73,7 @@ struct android_epoll_event {
 #include <mutex>
 #include <shared_mutex>
 #include <atomic>
+#include <vector>
 #include <string>
 #include <array>
 #include <dlfcn.h>
@@ -1624,6 +1638,7 @@ extern "C" void bionic_ALooper_wake(void* looper) {
 
 // Poll for events. Returns the ident of the first ready fd, or ALOOPER_POLL_TIMEOUT (-2)
 // on timeout, ALOOPER_POLL_ERROR (-1) on error, ALOOPER_POLL_WAKE (-3) on wake.
+extern "C" int bionic_ALooper_pollAll(int timeoutMillis, int* outFd, int* outEvents, void** outData);
 extern "C" int bionic_ALooper_pollOnce(int timeoutMillis, int* outFd, int* outEvents, void** outData) {
     return bionic_ALooper_pollAll(timeoutMillis, outFd, outEvents, outData);
 }

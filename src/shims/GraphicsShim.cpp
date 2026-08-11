@@ -1,6 +1,7 @@
 #include "kudroid/shims/GraphicsShim.h"
 #include <dlfcn.h>
 #include <cstdio>
+#include <cstdint>
 // This comes from kudroid_bridge.cpp
 extern void* g_metalLayer;
 extern int g_metalLayerWidth;
