@@ -266,7 +266,7 @@ jobs:
   # and the SwiftUI shell.
   # ─────────────────────────────────────────────────────────────────────────────
   ios-build:
-    needs: [build-test-so-arm64, build-bionic-test-so-arm64, build-multi-elf-so-arm64, build-gpu-test-so-arm64]
+    needs: [build-avian-ios, build-test-so-arm64, build-bionic-test-so-arm64, build-multi-elf-so-arm64, build-gpu-test-so-arm64]
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -315,6 +315,22 @@ jobs:
           name: test-bionic-lib-arm64-so
           path: test-bionic-artifact
 
+      - name: Download Avian iOS artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: avian-ios-arm64
+          path: avian-artifact
+
+      - name: Install Avian static library
+        run: |
+          # Copy libavian.a to where CMake expects it.
+          mkdir -p third_party/jvm/avian/build
+          find avian-artifact -name 'libavian.a' -exec cp {} third_party/jvm/avian/build/libavian.a \;
+          ls -lh third_party/jvm/avian/build/libavian.a
+          # Also copy the boot jar object if present (for embedding).
+          find avian-artifact -name 'boot-jar.o' -exec cp {} third_party/jvm/avian/build/boot-jar.o \;
+          ls -lh third_party/jvm/avian/build/
+
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
@@ -325,14 +341,15 @@ jobs:
 
       - name: Build kudroid_core static library (iOS ARM64)
         run: |
-          cmake -B build-ios \
+          # Use the Xcode generator so Swift (KuDroidShell app) is supported.
+          cmake -B build-ios -G Xcode \
             -DCMAKE_SYSTEM_NAME=iOS \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-          cmake --build build-ios --parallel
+          cmake --build build-ios --config Release --parallel
 
           # Move the built testing libraries so we can embed them after Xcode build
           mkdir -p tests
@@ -369,10 +386,8 @@ jobs:
             cp gpu-test-artifact/test_jni_massive_arm64.so tests/test_jni_massive.so
           fi
 
-          # Build the iOS App Native Xcode project using xcodebuild
-          xcodebuild -project build-ios/KuDroid.xcodeproj -scheme KuDroidShell -configuration Release -sdk iphoneos -allowProvisioningUpdates || exit 1
-          
-          # Move the built app to the expected location
+          # The Xcode generator build already produced the app bundle.
+          # Move it to the expected location.
           mv build-ios/Release-iphoneos/KuDroidShell.app KuDroidShell.app
 
           # Embed ALL dynamic frameworks into the app bundle so dyld finds them at runtime
@@ -415,4 +430,4 @@ jobs:
           name: kudroid-ios-unsigned
           path: |
             KuDroidShell.ipa
-            build-ios/libkudroid_core.a
+            build-ios/Release-iphoneos/libkudroid_core.a

@@ -25,12 +25,13 @@ jobs:
           submodules: recursive
 
       - name: Set up JDK 8
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
-          distribution: 'temurin'
+          distribution: 'zulu'
           java-version: '8'
           # Avian's classpath build uses `javac -source 1` which was removed
           # in JDK 9+. JDK 8 is required to build the bootimage/classpath.
+          # Zulu provides JDK 8 for macOS ARM64 (Temurin does not).
 
       - name: Verify toolchain
         run: |
