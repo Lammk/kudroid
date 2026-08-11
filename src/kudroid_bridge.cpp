@@ -236,10 +236,11 @@ extern "C" const char* kudroid_install_apk(const char* apkPath) {
 #include <sys/mman.h>
 #include <unistd.h>
 #include <TargetConditionals.h>
+#include <libkern/OSCacheControl.h>
 
 // csops() is a private API but stable; used to read the process' code-signing
-// status. CS_DEBUGGED is set when the JIT (dynamic-codesigning) path is active
-// under LiveContainer / a debugger, which is what lets PROT_EXEC pages run.
+// status. CS_DEBUGGED is set when a debugger (stikdebug/debugserver) has
+// enabled dynamic code signing, which is what lets PROT_EXEC pages run.
 extern "C" int csops(pid_t pid, unsigned int ops, void* useraddr, size_t usersize);
 #ifndef CS_OPS_STATUS
 #define CS_OPS_STATUS 0
@@ -248,18 +249,54 @@ extern "C" int csops(pid_t pid, unsigned int ops, void* useraddr, size_t usersiz
 #define CS_DEBUGGED 0x10000000
 #endif
 
-// Returns 1 if JIT (executable memory) appears usable, 0 otherwise.
-static int kudroid_jit_available(void) {
-    unsigned int flags = 0;
-    // CS_DEBUGGED is the only reliable signal on iOS: it is set when a debugger
-    // (LiveContainer/debugserver) has enabled dynamic code signing, which is
-    // exactly what permits executing PROT_EXEC pages. An RWX mmap probe is NOT
-    // reliable — the syscall succeeds without JIT, but execution still faults,
-    // giving a false "Enabled".
-    if (csops(getpid(), CS_OPS_STATUS, &flags, sizeof(flags)) != 0) {
+// Probe executable memory by actually executing a tiny function from an
+// mmap'd PROT_EXEC page. This is the most reliable signal: on a hardened
+// runtime without JIT, the mmap/mprotect may succeed but the call faults
+// (SIGBUS/SIGILL). If the call returns, executable memory genuinely works.
+// This covers TrollStore (permanent signing) and sideloads signed with
+// com.apple.security.cs.allow-jit, not just debugger-attached processes.
+static int probe_executable_memory(void) {
+    // AArch64: mov w0, #1; ret  => 0x52800020, 0xD65F03C0
+    // x86_64:  mov eax, 1; ret  => 0xB8 0x01 0x00 0x00 0x00, 0xC3
+#if defined(__aarch64__)
+    static const uint32_t code[] = { 0x52800020, 0xD65F03C0 };
+    const size_t len = sizeof(code);
+#else
+    static const uint8_t code[] = { 0xB8, 0x01, 0x00, 0x00, 0x00, 0xC3 };
+    const size_t len = sizeof(code);
+#endif
+
+    void* page = mmap(nullptr, 4096, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (page == MAP_FAILED) return 0;
+    memcpy(page, code, len);
+    if (mprotect(page, 4096, PROT_READ | PROT_EXEC) != 0) {
+        munmap(page, 4096);
         return 0;
     }
-    return (flags & CS_DEBUGGED) ? 1 : 0;
+    sys_icache_invalidate(page, len);
+
+    // Call the probe function. If executable memory is not permitted, this
+    // faults (SIGBUS/SIGILL) — our crash handler may catch it, but the common
+    // case on a hardened runtime is that the call simply never returns.
+    int (*fn)(void) = reinterpret_cast<int (*)(void)>(page);
+    int result = fn();
+    munmap(page, 4096);
+    return result == 1 ? 1 : 0;
+}
+
+// Returns 1 if JIT (executable memory) appears usable, 0 otherwise.
+static int kudroid_jit_available(void) {
+    // Fast path: a debugger (stikdebug/debugserver) has enabled dynamic code
+    // signing, which definitely permits PROT_EXEC pages.
+    unsigned int flags = 0;
+    if (csops(getpid(), CS_OPS_STATUS, &flags, sizeof(flags)) == 0 &&
+        (flags & CS_DEBUGGED)) {
+        return 1;
+    }
+    // Otherwise, actually probe executable memory. This covers TrollStore and
+    // sideloads signed with allow-jit / allow-unsigned-executable-memory.
+    return probe_executable_memory();
 }
 #else
 static int kudroid_jit_available(void) { return 1; }
@@ -704,7 +741,7 @@ extern "C" const char* kudroid_execution_test(const char* path) {
     // log below would never be returned. Fail loudly instead of crashing.
     if (!kudroid_jit_available()) {
         log += "[kudroid_core] ABORT: JIT is Disabled — cannot execute native code.\n";
-        log += "[kudroid_core] Enable JIT in LiveContainer and retry.\n";
+        log += "[kudroid_core] Enable JIT (stikdebug/debugger) or re-sign with allow-jit, then retry.\n";
         char* result = (char*)malloc(log.size() + 1);
         if (result) memcpy(result, log.c_str(), log.size() + 1);
         return result;

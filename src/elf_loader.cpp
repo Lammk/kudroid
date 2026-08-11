@@ -284,9 +284,11 @@ bool ElfLoader::map() {
     int prot = PROT_READ | PROT_WRITE;
     int flags = MAP_PRIVATE | MAP_ANONYMOUS;
     [[maybe_unused]] bool usedMapJit = false;
-#if defined(__APPLE__) && TARGET_OS_OSX
+#if defined(__APPLE__)
     // Preferred path (hardened runtime): MAP_JIT pages, written only while the
-    // thread's JIT write-protection is toggled off.
+    // thread's JIT write-protection is toggled off. This works on both macOS
+    // and iOS when the app is signed with com.apple.security.cs.allow-jit
+    // (iloader/AltStore sideloads) or running under TrollStore.
     base_ = mmap(nullptr, totalSize, prot, flags | MAP_JIT, -1, 0);
     if (base_ != MAP_FAILED) {
         usedMapJit = true;
@@ -302,7 +304,7 @@ bool ElfLoader::map() {
         return false;
     }
 
-#if defined(__APPLE__) && TARGET_OS_OSX
+#if defined(__APPLE__)
     if (usedMapJit) pthread_jit_write_protect_np(0);
 #endif
 
@@ -318,7 +320,7 @@ bool ElfLoader::map() {
         }
     }
 
-#if defined(__APPLE__) && TARGET_OS_OSX
+#if defined(__APPLE__)
     if (usedMapJit) pthread_jit_write_protect_np(1);
 #endif
 
