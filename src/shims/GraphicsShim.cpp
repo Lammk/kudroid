@@ -103,16 +103,16 @@ static void* get_egl_func(const char* name) {
     if (!egl_handle) {
         egl_handle = ::dlopen("@executable_path/Frameworks/libEGL.framework/libEGL", RTLD_NOW | RTLD_LOCAL);
         if (!egl_handle) {
-            __android_log_print(ANDROID_LOG_ERROR, "KuDroidGPU", "FATAL: dlopen libEGL failed: %s", dlerror());
+            fprintf(stderr, "[KuDroidGPU] FATAL: dlopen libEGL failed: %s\n", dlerror());
             // Try alternative path without @executable_path
             egl_handle = ::dlopen("Frameworks/libEGL.framework/libEGL", RTLD_NOW | RTLD_LOCAL);
             if (!egl_handle) {
-                __android_log_print(ANDROID_LOG_ERROR, "KuDroidGPU", "FATAL: alternative dlopen also failed: %s", dlerror());
+                fprintf(stderr, "[KuDroidGPU] FATAL: alternative dlopen also failed: %s\n", dlerror());
             } else {
-                __android_log_print(ANDROID_LOG_INFO, "KuDroidGPU", "SUCCESS: alternative dlopen loaded libEGL");
+                fprintf(stderr, "[KuDroidGPU] SUCCESS: alternative dlopen loaded libEGL\n");
             }
         } else {
-            __android_log_print(ANDROID_LOG_INFO, "KuDroidGPU", "SUCCESS: dlopen loaded libEGL");
+            fprintf(stderr, "[KuDroidGPU] SUCCESS: dlopen loaded libEGL\n");
         }
     }
     if (egl_handle) {
@@ -131,6 +131,7 @@ static void* get_egl_func(const char* name) {
 }
 
 extern "C" EGLDisplay bionic_eglGetPlatformDisplayEXT(EGLint platform, void* native_display, const EGLint* attrib_list) {
+    (void)native_display;
     fprintf(stdout, "[KuDroidGPU] bionic_eglGetPlatformDisplayEXT called\n");
     auto host_func = (PFN_eglGetPlatformDisplayEXT) get_egl_func("eglGetPlatformDisplayEXT");
     if (host_func) {
@@ -146,6 +147,7 @@ extern "C" EGLDisplay bionic_eglGetPlatformDisplayEXT(EGLint platform, void* nat
 }
 
 extern "C" EGLDisplay bionic_eglGetDisplay(EGLNativeDisplayType display_id) {
+    (void)display_id;
     fprintf(stdout, "[KuDroidGPU] bionic_eglGetDisplay called\n");
     auto host_func = (PFN_eglGetPlatformDisplayEXT) get_egl_func("eglGetPlatformDisplayEXT");
     if (host_func) {

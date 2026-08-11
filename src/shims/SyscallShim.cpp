@@ -1238,6 +1238,7 @@ extern "C" void bionic_init_main_thread_tls(void) {
 
 namespace kudroid {
 bool bionic_handle_tpidr_trap(void* ucontext) {
+    (void)ucontext;
 #if defined(__APPLE__) && defined(__aarch64__)
     if (!ucontext) return false;
     ucontext_t* uc = static_cast<ucontext_t*>(ucontext);
@@ -1454,7 +1455,7 @@ static const unsigned short g_bionic_ctype_[257] = {
 };
 
 // Global pointer as expected by Android binaries for the data symbol
-extern "C" const unsigned short* _ctype_ = &g_bionic_ctype_[1];
+const unsigned short* g_ctype_ptr = &g_bionic_ctype_[1];
 
 // ============================================================================
 // pthread_condattr_setclock — set clock for condition variable
@@ -1900,7 +1901,7 @@ const SymbolEntry kSyscallSymbols[] = {
 
     // Character classification
     {"__ctype_get_mb_cur_max", reinterpret_cast<void*>(&bionic_ctype_get_mb_cur_max)},
-    {"_ctype_", reinterpret_cast<void*>(&_ctype_)},
+    {"_ctype_", reinterpret_cast<void*>(&g_ctype_ptr)},
 
     // pthread extensions
     {"pthread_condattr_setclock", reinterpret_cast<void*>(&bionic_pthread_condattr_setclock)},
