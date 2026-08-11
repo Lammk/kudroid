@@ -281,11 +281,14 @@ struct DebugView: View {
 /// được âm thanh — không có session hoạt động thì iOS im lặng.
 func activateAudioSession() {
     let session = AVAudioSession.sharedInstance()
-    // Dùng tên enum đầy đủ + options: [] tường minh — build chạy với -swift-version 4,
-    // implicit member (.playback/.default) bị overload resolution resolve nhầm sang
-    // biến thể setCategory nhận String (deprecated) → "type 'String' has no member 'playback'"
-    try? session.setCategory(AVAudioSession.Category.playback,
-                             mode: AVAudioSession.Mode.default,
+    // Build chạy với -swift-version 4 (mặc định của CMake khi enable_language(Swift)).
+    // Ở mode này NS_TYPED_EXTENSIBLE_ENUM của ObjC (AVAudioSession.Category / Mode)
+    // bị import thành raw NSString typealias → không có member .playback/.default,
+    // param chỉ nhận String. Dùng raw constant string (đúng giá trị ObjC) —
+    // compile được trong Swift 4 mode; nếu sau này nâng lên Swift 5 thì đổi về
+    // AVAudioSession.Category.playback / AVAudioSession.Mode.default.
+    try? session.setCategory("AVAudioSessionCategoryPlayback",
+                             mode: "AVAudioSessionModeDefault",
                              options: [])
     try? session.setActive(true)
 }
