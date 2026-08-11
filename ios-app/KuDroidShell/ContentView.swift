@@ -441,27 +441,33 @@ func runJitStatus() -> String {
     return status
 }
 
-func runBionicExecutionTest() -> String {
-    guard let bundledURL = Bundle.main.url(forResource: "test_bionic_lib", withExtension: "so") else {
-        return "❌ test_bionic_lib.so not found in bundle"
+func runNativeTest(soName: String, testFunction: (String) -> UnsafePointer<CChar>?) -> String {
+    guard let bundledURL = Bundle.main.url(forResource: soName, withExtension: "so") else {
+        return "❌ \(soName).so not found in bundle"
     }
-    let tmpURL = FileManager.default.temporaryDirectory.appendingPathComponent("test_bionic_lib.so")
+    let tmpURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(soName).so")
     do {
         if FileManager.default.fileExists(atPath: tmpURL.path) { try FileManager.default.removeItem(at: tmpURL) }
         try FileManager.default.copyItem(at: bundledURL, to: tmpURL)
     } catch {
-        return "❌ Failed to copy bundled Bionic .so: \(error.localizedDescription)"
+        return "❌ failed to copy \(soName).so: \(error.localizedDescription)"
     }
-    guard let cString = kudroid_bionic_execution_test(tmpURL.path) else { return "❌ Error: null result" }
+    guard let cString = testFunction(tmpURL.path) else { return "❌ error: null result" }
     let log = String(cString: cString)
     free(UnsafeMutablePointer(mutating: cString))
     return log
 }
 
+func runBionicExecutionTest() -> String { return runNativeTest(soName: "test_bionic_lib", testFunction: kudroid_bionic_execution_test) }
+func runGpuVulkanSoTest() -> String { return runNativeTest(soName: "test_gpu_vulkan", testFunction: kudroid_gpu_vulkan_so_test) }
+func runGpuOpenglSoTest() -> String { return runNativeTest(soName: "test_gpu_opengl", testFunction: kudroid_gpu_opengl_so_test) }
+func runSyscallSoTest() -> String { return runNativeTest(soName: "test_syscalls", testFunction: kudroid_syscall_so_test) }
+func runJniMassiveTest() -> String { return runNativeTest(soName: "test_jni_massive", testFunction: kudroid_jni_massive_so_test) }
+
 func runMultiElfTest() -> String {
     guard let consumer = Bundle.main.url(forResource: "libkudroid_consumer", withExtension: "so"),
           let provider = Bundle.main.url(forResource: "libkudroid_provider", withExtension: "so") else {
-        return "❌ Multi-ELF provider/consumer libraries are missing from bundle"
+        return "❌ multi-elf provider/consumer libraries are missing from bundle"
     }
     let directory = FileManager.default.temporaryDirectory
     let consumerURL = directory.appendingPathComponent("libkudroid_consumer.so")
@@ -473,77 +479,9 @@ func runMultiElfTest() -> String {
         try FileManager.default.copyItem(at: consumer, to: consumerURL)
         try FileManager.default.copyItem(at: provider, to: providerURL)
     } catch {
-        return "❌ Failed to prepare multi-ELF test: \(error.localizedDescription)"
+        return "❌ failed to prepare multi-elf test: \(error.localizedDescription)"
     }
-    guard let cString = kudroid_multi_elf_test(consumerURL.path, providerURL.path) else { return "❌ Error: null result" }
-    let log = String(cString: cString)
-    free(UnsafeMutablePointer(mutating: cString))
-    return log
-}
-
-func runGpuVulkanSoTest() -> String {
-    guard let bundledURL = Bundle.main.url(forResource: "test_gpu_vulkan", withExtension: "so") else {
-        return "❌ test_gpu_vulkan.so not found in bundle"
-    }
-    let tmpURL = FileManager.default.temporaryDirectory.appendingPathComponent("test_gpu_vulkan.so")
-    do {
-        if FileManager.default.fileExists(atPath: tmpURL.path) { try FileManager.default.removeItem(at: tmpURL) }
-        try FileManager.default.copyItem(at: bundledURL, to: tmpURL)
-    } catch {
-        return "❌ Failed to copy test_gpu_vulkan.so: \(error.localizedDescription)"
-    }
-    guard let cString = kudroid_gpu_vulkan_so_test(tmpURL.path) else { return "❌ Error: null result" }
-    let log = String(cString: cString)
-    free(UnsafeMutablePointer(mutating: cString))
-    return log
-}
-
-func runGpuOpenglSoTest() -> String {
-    guard let bundledURL = Bundle.main.url(forResource: "test_gpu_opengl", withExtension: "so") else {
-        return "❌ test_gpu_opengl.so not found in bundle"
-    }
-    let tmpURL = FileManager.default.temporaryDirectory.appendingPathComponent("test_gpu_opengl.so")
-    do {
-        if FileManager.default.fileExists(atPath: tmpURL.path) { try FileManager.default.removeItem(at: tmpURL) }
-        try FileManager.default.copyItem(at: bundledURL, to: tmpURL)
-    } catch {
-        return "❌ Failed to copy test_gpu_opengl.so: \(error.localizedDescription)"
-    }
-    guard let cString = kudroid_gpu_opengl_so_test(tmpURL.path) else { return "❌ Error: null result" }
-    let log = String(cString: cString)
-    free(UnsafeMutablePointer(mutating: cString))
-    return log
-}
-
-func runSyscallSoTest() -> String {
-    guard let bundledURL = Bundle.main.url(forResource: "test_syscalls", withExtension: "so") else {
-        return "❌ test_syscalls.so not found in bundle"
-    }
-    let tmpURL = FileManager.default.temporaryDirectory.appendingPathComponent("test_syscalls.so")
-    do {
-        if FileManager.default.fileExists(atPath: tmpURL.path) { try FileManager.default.removeItem(at: tmpURL) }
-        try FileManager.default.copyItem(at: bundledURL, to: tmpURL)
-    } catch {
-        return "❌ Failed to copy test_syscalls.so: \(error.localizedDescription)"
-    }
-    guard let cString = kudroid_syscall_so_test(tmpURL.path) else { return "❌ Error: null result" }
-    let log = String(cString: cString)
-    free(UnsafeMutablePointer(mutating: cString))
-    return log
-}
-
-func runJniMassiveTest() -> String {
-    guard let bundledURL = Bundle.main.url(forResource: "test_jni_massive", withExtension: "so") else {
-        return "❌ test_jni_massive.so not found in bundle"
-    }
-    let tmpURL = FileManager.default.temporaryDirectory.appendingPathComponent("test_jni_massive.so")
-    do {
-        if FileManager.default.fileExists(atPath: tmpURL.path) { try FileManager.default.removeItem(at: tmpURL) }
-        try FileManager.default.copyItem(at: bundledURL, to: tmpURL)
-    } catch {
-        return "❌ Failed to copy test_jni_massive.so: \(error.localizedDescription)"
-    }
-    guard let cString = kudroid_jni_massive_so_test(tmpURL.path) else { return "❌ Error: null result" }
+    guard let cString = kudroid_multi_elf_test(consumerURL.path, providerURL.path) else { return "❌ error: null result" }
     let log = String(cString: cString)
     free(UnsafeMutablePointer(mutating: cString))
     return log
