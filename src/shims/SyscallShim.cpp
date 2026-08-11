@@ -2077,7 +2077,11 @@ extern "C" int bionic_ALooper_pollAll(int timeoutMillis, int* outFd, int* outEve
         return -2; // ALOOPER_POLL_TIMEOUT
     }
 
-    int ret = ::poll(pfds.data(), pfds.size(), timeoutMillis);
+    // nfds_t là unsigned int trên Darwin — clamp tránh truncate khi pfds quá lớn.
+    const nfds_t nfds = pfds.size() > static_cast<size_t>(INT_MAX)
+                           ? static_cast<nfds_t>(INT_MAX)
+                           : static_cast<nfds_t>(pfds.size());
+    int ret = ::poll(pfds.data(), nfds, timeoutMillis);
     if (ret < 0) return -1; // ALOOPER_POLL_ERROR
     if (ret == 0) return -2; // ALOOPER_POLL_TIMEOUT
 
