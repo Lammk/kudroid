@@ -72,24 +72,48 @@ typedef void* (*PFN_eglGetProcAddress)(const char* procname);
 extern "C" void* bionic_eglGetProcAddress(const char* procname) {
     if (!procname) return nullptr;
     fprintf(stdout, "[KuDroidGPU] eglGetProcAddress: requested %s\n", procname);
+    // Resolve from the ANGLE handle directly (loaded RTLD_LOCAL).
+    static void* egl_handle = nullptr;
+    if (!egl_handle) {
+        egl_handle = ::dlopen("@executable_path/Frameworks/libEGL.framework/libEGL", RTLD_NOW | RTLD_LOCAL);
+    }
+    if (egl_handle) {
+        auto host_func = (PFN_eglGetProcAddress) ::dlsym(egl_handle, "eglGetProcAddress");
+        if (host_func) {
+            void* addr = host_func(procname);
+            fprintf(stdout, "[KuDroidGPU] eglGetProcAddress: %s returned %s\n", procname, addr ? "VALID" : "NULL");
+            return addr;
+        }
+    }
+    // Fallback to RTLD_DEFAULT.
     auto host_func = (PFN_eglGetProcAddress) ::dlsym(RTLD_DEFAULT, "eglGetProcAddress");
     if (host_func) {
         void* addr = host_func(procname);
         fprintf(stdout, "[KuDroidGPU] eglGetProcAddress: %s returned %s\n", procname, addr ? "VALID" : "NULL");
         return addr;
     }
-    fprintf(stdout, "[KuDroidGPU] eglGetProcAddress: host function not found in RTLD_DEFAULT\n");
+    fprintf(stdout, "[KuDroidGPU] eglGetProcAddress: host function not found\n");
     return nullptr;
 }
 
 static void* get_egl_func(const char* name) {
+    // ANGLE is loaded with RTLD_LOCAL, so its symbols are NOT in RTLD_DEFAULT.
+    // Resolve directly from the ANGLE framework handle instead.
+    static void* egl_handle = nullptr;
+    if (!egl_handle) {
+        egl_handle = ::dlopen("@executable_path/Frameworks/libEGL.framework/libEGL", RTLD_NOW | RTLD_LOCAL);
+    }
+    if (egl_handle) {
+        void* func = ::dlsym(egl_handle, name);
+        if (func) return func;
+    }
+    // Fallback: try RTLD_DEFAULT (works if ANGLE was loaded RTLD_GLOBAL).
     void* func = ::dlsym(RTLD_DEFAULT, name);
-    if (!func) {
-        fprintf(stdout, "[KuDroidGPU] get_egl_func: %s not found via dlsym, trying eglGetProcAddress\n", name);
-        auto host_get_proc = (PFN_eglGetProcAddress) ::dlsym(RTLD_DEFAULT, "eglGetProcAddress");
-        if (host_get_proc) {
-            func = host_get_proc(name);
-        }
+    if (func) return func;
+    // Last resort: eglGetProcAddress.
+    auto host_get_proc = (PFN_eglGetProcAddress) ::dlsym(RTLD_DEFAULT, "eglGetProcAddress");
+    if (host_get_proc) {
+        func = host_get_proc(name);
     }
     return func;
 }

@@ -489,6 +489,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                         mirrorCrash(log);
 
                         bionic_init_main_thread_tls();
+                        log += "[kudroid_core] Main thread TLS initialized.\n";
 
                         jint version = jni_onload(jvm, nullptr);
                         log += "[kudroid_core] JNI_OnLoad returned version: " + std::to_string(version) + "\n";
@@ -522,6 +523,12 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                             nullptr  // obbPath
                         };
                         kudroid_jni_get_env(jvm, reinterpret_cast<void**>(&mock_activity.env), 0);
+                        {
+                            char envBuf[128];
+                            snprintf(envBuf, sizeof(envBuf), "[kudroid_core] Activity env attached (JNIEnv=%p).\n", (void*)mock_activity.env);
+                            log += envBuf;
+                        }
+                        mirrorCrash(log);
 
                         // Invoke onCreate. The game stores its state in
                         // activity->instance and registers its callbacks.
@@ -538,6 +545,9 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                 mirrorCrash(log);
                                 // All callbacks take (ANativeActivity*, ...).
                                 reinterpret_cast<void (*)(ANativeActivity*)>(fn)(&mock_activity);
+                                log += std::string("[kudroid_core] ") + name + " returned.\n";
+                            } else {
+                                log += std::string("[kudroid_core] ") + name + " not registered (null).\n";
                             }
                         };
                         call("onStart", mock_callbacks.onStart);
@@ -816,29 +826,42 @@ extern "C" const char* kudroid_bionic_execution_test(const char* path) {
         log += "[kudroid_core] ABORT: JIT is Disabled\n";
     } else {
         kudroid::ElfLoader loader(path);
+        log += "[kudroid_core] Phase: parse ELF...\n";
         if (!loader.parse()) {
             log += "[kudroid_core] PARSE FAILED: " + std::string(loader.lastError()) + "\n";
-        } else if (!loader.map()) {
-            log += "[kudroid_core] MAP FAILED: " + std::string(loader.lastError()) + "\n";
-        } else if (!loader.relocate()) {
-            log += "[kudroid_core] RELOCATE FAILED: " + std::string(loader.lastError()) + "\n";
         } else {
-            log += "[kudroid_core] ELF mapped and Bionic imports bound.\n";
-            void* address = loader.getSymbolAddress("kudroid_bionic_test");
-            if (!address) {
-                log += "[kudroid_core] SYMBOL FAILED: kudroid_bionic_test not found\n";
+            log += "[kudroid_core] Phase: parse -> OK\n";
+            log += "[kudroid_core] Phase: map segments...\n";
+            if (!loader.map()) {
+                log += "[kudroid_core] MAP FAILED: " + std::string(loader.lastError()) + "\n";
             } else {
-                log += "[kudroid_core] Running kudroid_bionic_test()...\n";
-                const char* shimTrace = kudroid::bionic_shim_trace();
-                if (shimTrace && *shimTrace) {
-                    log += "[kudroid_core] Bionic trace before call:\n";
-                    log += shimTrace;
+                log += "[kudroid_core] Phase: map -> OK\n";
+                log += "[kudroid_core] Phase: relocate + bind imports...\n";
+                if (!loader.relocate()) {
+                    log += "[kudroid_core] RELOCATE FAILED: " + std::string(loader.lastError()) + "\n";
+                } else {
+                    log += "[kudroid_core] Phase: relocate -> OK\n";
+                    log += "[kudroid_core] ELF mapped and Bionic imports bound.\n";
+                    void* address = loader.getSymbolAddress("kudroid_bionic_test");
+                    if (!address) {
+                        log += "[kudroid_core] SYMBOL FAILED: kudroid_bionic_test not found\n";
+                    } else {
+                        char symBuf[128];
+                        snprintf(symBuf, sizeof(symBuf), "[kudroid_core] Found kudroid_bionic_test at %p\n", address);
+                        log += symBuf;
+                        log += "[kudroid_core] Running kudroid_bionic_test()...\n";
+                        const char* shimTrace = kudroid::bionic_shim_trace();
+                        if (shimTrace && *shimTrace) {
+                            log += "[kudroid_core] Bionic trace before call:\n";
+                            log += shimTrace;
+                        }
+                        mirrorCrash(log);
+                        using TestFunction = int (*)();
+                        const int result = reinterpret_cast<TestFunction>(address)();
+                        log += "[kudroid_core] BIONIC TEST RESULT: " +
+                               std::to_string(result) + (result == 0 ? " (SUCCESS)\n" : " (FAILED)\n");
+                    }
                 }
-                mirrorCrash(log);
-                using TestFunction = int (*)();
-                const int result = reinterpret_cast<TestFunction>(address)();
-                log += "[kudroid_core] BIONIC TEST RESULT: " +
-                       std::to_string(result) + (result == 0 ? " (SUCCESS)\n" : " (FAILED)\n");
             }
         }
     }
@@ -1070,41 +1093,52 @@ extern "C" const char* kudroid_jni_massive_so_test(const char* path) {
         log += "[kudroid_jni] ABORT: JIT is Disabled — cannot execute ARM64 ELF\n";
     } else {
         kudroid::ElfLoader loader(path);
+        log += "[kudroid_jni] Phase: parse ELF...\n";
         if (!loader.parse()) {
             log += "[kudroid_jni] PARSE FAILED: " + std::string(loader.lastError()) + "\n";
-        } else if (!loader.map()) {
-            log += "[kudroid_jni] MAP FAILED: " + std::string(loader.lastError()) + "\n";
-        } else if (!loader.relocate()) {
-            log += "[kudroid_jni] RELOCATE FAILED: " + std::string(loader.lastError()) + "\n";
         } else {
-            loader.registerEhFrame();
-            loader.executeInit();
-            log += "[kudroid_jni] ELF mapped, relocated, and initialized.\n";
-            
-            // Execute JNI_OnLoad if present
-            void* jniOnLoadAddr = loader.getSymbolAddress("JNI_OnLoad");
-            if (jniOnLoadAddr) {
-                log += "[kudroid_jni] Found JNI_OnLoad, executing...\n";
-                // Get the JVM from the bridge
-                using JNI_OnLoad_t = jint (*)(JavaVM*, void*);
-                JNI_OnLoad_t jniOnLoad = reinterpret_cast<JNI_OnLoad_t>(jniOnLoadAddr);
-                jint version = jniOnLoad(kudroid_jni_get_javavm(), nullptr);
-                log += "[kudroid_jni] JNI_OnLoad returned version: 0x" + std::to_string(version) + "\n";
-            }
-            
-            void* address = loader.getSymbolAddress("kudroid_jni_massive_test");
-            if (!address) {
-                log += "[kudroid_jni] SYMBOL FAILED: kudroid_jni_massive_test not found\n";
+            log += "[kudroid_jni] Phase: parse -> OK\n";
+            log += "[kudroid_jni] Phase: map segments...\n";
+            if (!loader.map()) {
+                log += "[kudroid_jni] MAP FAILED: " + std::string(loader.lastError()) + "\n";
             } else {
-                log += "[kudroid_jni] Running kudroid_jni_massive_test()...\n";
-                int (*test_func)(void*) = reinterpret_cast<int (*)(void*)>(address);
-                
-                // Set up callback
-                static std::string* g_jni_test_log = &log;
-                g_jni_test_log = &log;
-                kudroid_jni_set_log_callback([](const char* msg) {
-                    if (g_jni_test_log) {
-                        *g_jni_test_log += "[kudroid_jni] ";
+                log += "[kudroid_jni] Phase: map -> OK\n";
+                log += "[kudroid_jni] Phase: relocate + bind imports...\n";
+                if (!loader.relocate()) {
+                    log += "[kudroid_jni] RELOCATE FAILED: " + std::string(loader.lastError()) + "\n";
+                } else {
+                    log += "[kudroid_jni] Phase: relocate -> OK\n";
+                    loader.registerEhFrame();
+                    loader.executeInit();
+                    log += "[kudroid_jni] ELF mapped, relocated, and initialized.\n";
+                    
+                    // Execute JNI_OnLoad if present
+                    void* jniOnLoadAddr = loader.getSymbolAddress("JNI_OnLoad");
+                    if (jniOnLoadAddr) {
+                        log += "[kudroid_jni] Found JNI_OnLoad, executing...\n";
+                        // Get the JVM from the bridge
+                        using JNI_OnLoad_t = jint (*)(JavaVM*, void*);
+                        JNI_OnLoad_t jniOnLoad = reinterpret_cast<JNI_OnLoad_t>(jniOnLoadAddr);
+                        jint version = jniOnLoad(kudroid_jni_get_javavm(), nullptr);
+                        log += "[kudroid_jni] JNI_OnLoad returned version: 0x" + std::to_string(version) + "\n";
+                    }
+                    
+                    void* address = loader.getSymbolAddress("kudroid_jni_massive_test");
+                    if (!address) {
+                        log += "[kudroid_jni] SYMBOL FAILED: kudroid_jni_massive_test not found\n";
+                    } else {
+                        char symBuf[128];
+                        snprintf(symBuf, sizeof(symBuf), "[kudroid_jni] Found kudroid_jni_massive_test at %p\n", address);
+                        log += symBuf;
+                        log += "[kudroid_jni] Running kudroid_jni_massive_test()...\n";
+                        int (*test_func)(void*) = reinterpret_cast<int (*)(void*)>(address);
+                        
+                        // Set up callback
+                        static std::string* g_jni_test_log = &log;
+                        g_jni_test_log = &log;
+                        kudroid_jni_set_log_callback([](const char* msg) {
+                            if (g_jni_test_log) {
+                                *g_jni_test_log += "[kudroid_jni] ";
                         *g_jni_test_log += msg;
                         *g_jni_test_log += "\n";
                     }
@@ -1116,6 +1150,8 @@ extern "C" const char* kudroid_jni_massive_so_test(const char* path) {
                 int result = test_func(vm);
                 log += "[kudroid_jni] TEST RESULT: " +
                        (result == 0 ? std::string("0 (SUCCESS)") : std::to_string(result) + " (FAILED)") + "\n";
+                    }
+                }
             }
         }
     }
@@ -1138,26 +1174,39 @@ extern "C" const char* kudroid_gpu_vulkan_so_test(const char* path) {
         log += "[kudroid_gpu] ABORT: JIT is Disabled — cannot execute ARM64 ELF\n";
     } else {
         kudroid::ElfLoader loader(path);
+        log += "[kudroid_gpu] Phase: parse ELF...\n";
         if (!loader.parse()) {
             log += "[kudroid_gpu] PARSE FAILED: " + std::string(loader.lastError()) + "\n";
-        } else if (!loader.map()) {
-            log += "[kudroid_gpu] MAP FAILED: " + std::string(loader.lastError()) + "\n";
-        } else if (!loader.relocate()) {
-            log += "[kudroid_gpu] RELOCATE FAILED: " + std::string(loader.lastError()) + "\n";
         } else {
-            log += "[kudroid_gpu] ELF mapped and Bionic imports bound.\n";
-            void* address = loader.getSymbolAddress("kudroid_gpu_vulkan_test");
-            if (!address) {
-                log += "[kudroid_gpu] SYMBOL FAILED: kudroid_gpu_vulkan_test not found\n";
+            log += "[kudroid_gpu] Phase: parse -> OK\n";
+            log += "[kudroid_gpu] Phase: map segments...\n";
+            if (!loader.map()) {
+                log += "[kudroid_gpu] MAP FAILED: " + std::string(loader.lastError()) + "\n";
             } else {
-                log += "[kudroid_gpu] Running kudroid_gpu_vulkan_test()...\n";
-                mirrorCrash(log);
-                using VkTestFn = int (*)(uint32_t*);
-                uint32_t ext_count = 0;
-                const int result = reinterpret_cast<VkTestFn>(address)(&ext_count);
-                log += "[kudroid_gpu] VULKAN TEST RESULT: " +
-                       std::to_string(result) + (result == 0 ? " (SUCCESS)" : " (FAILED)") + "\n";
-                log += "[kudroid_gpu] Vulkan extensions found: " + std::to_string(ext_count) + "\n";
+                log += "[kudroid_gpu] Phase: map -> OK\n";
+                log += "[kudroid_gpu] Phase: relocate + bind imports...\n";
+                if (!loader.relocate()) {
+                    log += "[kudroid_gpu] RELOCATE FAILED: " + std::string(loader.lastError()) + "\n";
+                } else {
+                    log += "[kudroid_gpu] Phase: relocate -> OK\n";
+                    log += "[kudroid_gpu] ELF mapped and Bionic imports bound.\n";
+                    void* address = loader.getSymbolAddress("kudroid_gpu_vulkan_test");
+                    if (!address) {
+                        log += "[kudroid_gpu] SYMBOL FAILED: kudroid_gpu_vulkan_test not found\n";
+                    } else {
+                        char symBuf[128];
+                        snprintf(symBuf, sizeof(symBuf), "[kudroid_gpu] Found kudroid_gpu_vulkan_test at %p\n", address);
+                        log += symBuf;
+                        log += "[kudroid_gpu] Running kudroid_gpu_vulkan_test()...\n";
+                        mirrorCrash(log);
+                        using VkTestFn = int (*)(uint32_t*);
+                        uint32_t ext_count = 0;
+                        const int result = reinterpret_cast<VkTestFn>(address)(&ext_count);
+                        log += "[kudroid_gpu] VULKAN TEST RESULT: " +
+                               std::to_string(result) + (result == 0 ? " (SUCCESS)" : " (FAILED)") + "\n";
+                        log += "[kudroid_gpu] Vulkan extensions found: " + std::to_string(ext_count) + "\n";
+                    }
+                }
             }
         }
     }
@@ -1182,24 +1231,37 @@ extern "C" const char* kudroid_gpu_opengl_so_test(const char* path) {
         log += "[kudroid_gpu] ABORT: JIT is Disabled — cannot execute ARM64 ELF\n";
     } else {
         kudroid::ElfLoader loader(path);
+        log += "[kudroid_gpu] Phase: parse ELF...\n";
         if (!loader.parse()) {
             log += "[kudroid_gpu] PARSE FAILED: " + std::string(loader.lastError()) + "\n";
-        } else if (!loader.map()) {
-            log += "[kudroid_gpu] MAP FAILED: " + std::string(loader.lastError()) + "\n";
-        } else if (!loader.relocate()) {
-            log += "[kudroid_gpu] RELOCATE FAILED: " + std::string(loader.lastError()) + "\n";
         } else {
-            log += "[kudroid_gpu] ELF mapped and Bionic imports bound.\n";
-            void* address = loader.getSymbolAddress("kudroid_gpu_opengl_test");
-            if (!address) {
-                log += "[kudroid_gpu] SYMBOL FAILED: kudroid_gpu_opengl_test not found\n";
+            log += "[kudroid_gpu] Phase: parse -> OK\n";
+            log += "[kudroid_gpu] Phase: map segments...\n";
+            if (!loader.map()) {
+                log += "[kudroid_gpu] MAP FAILED: " + std::string(loader.lastError()) + "\n";
             } else {
-                log += "[kudroid_gpu] Running kudroid_gpu_opengl_test()...\n";
-                mirrorCrash(log);
-                using GlTestFn = int (*)();
-                const int result = reinterpret_cast<GlTestFn>(address)();
-                log += "[kudroid_gpu] OPENGL+EGL TEST RESULT: " +
-                       std::to_string(result) + (result == 0 ? " (SUCCESS)" : " (FAILED)") + "\n";
+                log += "[kudroid_gpu] Phase: map -> OK\n";
+                log += "[kudroid_gpu] Phase: relocate + bind imports...\n";
+                if (!loader.relocate()) {
+                    log += "[kudroid_gpu] RELOCATE FAILED: " + std::string(loader.lastError()) + "\n";
+                } else {
+                    log += "[kudroid_gpu] Phase: relocate -> OK\n";
+                    log += "[kudroid_gpu] ELF mapped and Bionic imports bound.\n";
+                    void* address = loader.getSymbolAddress("kudroid_gpu_opengl_test");
+                    if (!address) {
+                        log += "[kudroid_gpu] SYMBOL FAILED: kudroid_gpu_opengl_test not found\n";
+                    } else {
+                        char symBuf[128];
+                        snprintf(symBuf, sizeof(symBuf), "[kudroid_gpu] Found kudroid_gpu_opengl_test at %p\n", address);
+                        log += symBuf;
+                        log += "[kudroid_gpu] Running kudroid_gpu_opengl_test()...\n";
+                        mirrorCrash(log);
+                        using GlTestFn = int (*)();
+                        const int result = reinterpret_cast<GlTestFn>(address)();
+                        log += "[kudroid_gpu] OPENGL+EGL TEST RESULT: " +
+                               std::to_string(result) + (result == 0 ? " (SUCCESS)" : " (FAILED)") + "\n";
+                    }
+                }
             }
         }
     }
