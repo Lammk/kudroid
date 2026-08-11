@@ -113,7 +113,6 @@ jobs:
           file third_party/ANGLE/lib/ios-arm64/libGLESv2.a
 
       - name: Upload ANGLE artifact
-        if: steps.angle-cache.outputs.cache-hit != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: angle-ios-arm64
@@ -311,19 +310,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Restore ANGLE pre-built artifacts from cache
-        id: angle-cache-restore
-        uses: actions/cache/restore@v4
-        with:
-          path: third_party/ANGLE
-          key: angle-ios-arm64-built-macOS-
-          restore-keys: |
-            angle-ios-arm64-built-macOS-
-
-      # Fallback: if the ANGLE cache missed, download the artifact built by
-      # build-angle-ios so the iOS build always has ANGLE available.
-      - name: Download ANGLE artifact (cache fallback)
-        if: steps.angle-cache-restore.outputs.cache-hit != 'true'
+      # Always download the ANGLE artifact built by build-angle-ios so the iOS
+      # build always has ANGLE available (independent of cache state).
+      - name: Download ANGLE artifact
         uses: actions/download-artifact@v4
         with:
           name: angle-ios-arm64
