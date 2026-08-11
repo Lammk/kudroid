@@ -102,6 +102,18 @@ static void* get_egl_func(const char* name) {
     static void* egl_handle = nullptr;
     if (!egl_handle) {
         egl_handle = ::dlopen("@executable_path/Frameworks/libEGL.framework/libEGL", RTLD_NOW | RTLD_LOCAL);
+        if (!egl_handle) {
+            __android_log_print(ANDROID_LOG_ERROR, "KuDroidGPU", "FATAL: dlopen libEGL failed: %s", dlerror());
+            // Try alternative path without @executable_path
+            egl_handle = ::dlopen("Frameworks/libEGL.framework/libEGL", RTLD_NOW | RTLD_LOCAL);
+            if (!egl_handle) {
+                __android_log_print(ANDROID_LOG_ERROR, "KuDroidGPU", "FATAL: alternative dlopen also failed: %s", dlerror());
+            } else {
+                __android_log_print(ANDROID_LOG_INFO, "KuDroidGPU", "SUCCESS: alternative dlopen loaded libEGL");
+            }
+        } else {
+            __android_log_print(ANDROID_LOG_INFO, "KuDroidGPU", "SUCCESS: dlopen loaded libEGL");
+        }
     }
     if (egl_handle) {
         void* func = ::dlsym(egl_handle, name);
