@@ -5,6 +5,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdarg>
+#include <string>
 // This comes from kudroid_bridge.cpp
 extern void* g_metalLayer;
 extern int g_metalLayerWidth;
@@ -14,22 +15,45 @@ namespace kudroid {
 
 namespace {
 
+// Log GPU qua pipeline chuẩn (stdout + file + crash buffer) để lần crash sau
+// "log up to crash" không còn trống. Forward declaration để mọi hàm dùng được.
+extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
+static void gpuLog(const char* fmt, ...) {
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    kudroid_android_log_message(2, "KuDroidGPU", buf);
+}
+
 extern "C" void* bionic_ANativeWindow_fromSurface(void* env, void* surface) {
     (void)env; (void)surface;
     // ANGLE on iOS uses CAMetalLayer/UIView as the native window!
     if (!g_metalLayer) {
-        fprintf(stderr, "[GraphicsShim] ERROR: ANativeWindow_fromSurface called but g_metalLayer is NULL!\n");
+        gpuLog("ANativeWindow_fromSurface: g_metalLayer is NULL!");
     }
+    gpuLog("ANativeWindow_fromSurface -> %p", (void*)g_metalLayer);
     return g_metalLayer;
 }
 
-extern "C" int bionic_ANativeWindow_getWidth(void* window) { (void)window; return g_metalLayerWidth; }
-extern "C" int bionic_ANativeWindow_getHeight(void* window) { (void)window; return g_metalLayerHeight; }
-extern "C" int bionic_ANativeWindow_setBuffersGeometry(void* window, int width, int height, int format) {
-    (void)window; (void)width; (void)height; (void)format; return 0;
+extern "C" int bionic_ANativeWindow_getWidth(void* window) {
+    (void)window; return g_metalLayerWidth;
 }
-extern "C" void bionic_ANativeWindow_release(void* window) { (void)window; }
-extern "C" void bionic_ANativeWindow_acquire(void* window) { (void)window; }
+extern "C" int bionic_ANativeWindow_getHeight(void* window) {
+    (void)window; return g_metalLayerHeight;
+}
+extern "C" int bionic_ANativeWindow_setBuffersGeometry(void* window, int width, int height, int format) {
+    (void)window;
+    gpuLog("ANativeWindow_setBuffersGeometry(%dx%d format=%d) -> 0", width, height, format);
+    return 0;
+}
+extern "C" void bionic_ANativeWindow_release(void* window) {
+    (void)window; gpuLog("ANativeWindow_release(%p)", (void*)window);
+}
+extern "C" void bionic_ANativeWindow_acquire(void* window) {
+    (void)window; gpuLog("ANativeWindow_acquire(%p)", (void*)window);
+}
 
 // ANativeWindow_Buffer — describes a locked buffer.
 struct ANativeWindow_Buffer {
@@ -46,8 +70,13 @@ struct ANativeWindow_Buffer {
 // enhancement (games typically use EGL/GLES instead).
 extern "C" int bionic_ANativeWindow_lock(void* window, ANativeWindow_Buffer* outBuffer,
                                          void* inOutDirtyRect) {
-    (void)window; (void)inOutDirtyRect;
-    if (!outBuffer) return -1;
+    (void)inOutDirtyRect;
+    gpuLog("ANativeWindow_lock(window=%p, size=%dx%d)", (void*)window,
+           g_metalLayerWidth, g_metalLayerHeight);
+    if (!outBuffer) {
+        gpuLog("ANativeWindow_lock -> -1 (outBuffer NULL)");
+        return -1;
+    }
     // Trước đây trả con trỏ tới 1 uint32_t static — game vẽ vào "buffer" đó sẽ
     // ghi tràn 4 byte → heap/static corruption → crash. Cấp buffer thật đủ
     // width*height*4 (RGBA8888), grow theo nhu cầu.
@@ -156,23 +185,23 @@ static void* get_egl_func(const char* name) {
 
 extern "C" EGLDisplay bionic_eglGetPlatformDisplayEXT(EGLint platform, void* native_display, const EGLint* attrib_list) {
     (void)native_display;
-    fprintf(stdout, "[KuDroidGPU] bionic_eglGetPlatformDisplayEXT called\n");
+    gpuLog("eglGetPlatformDisplayEXT(platform=0x%x)", (unsigned)platform);
     auto host_func = (PFN_eglGetPlatformDisplayEXT) get_egl_func("eglGetPlatformDisplayEXT");
     if (host_func) {
         // IMPORTANT: eglGetDisplay/eglGetPlatformDisplayEXT must ALWAYS use
         // EGL_DEFAULT_DISPLAY (0). CAMetalLayer is ONLY for eglCreateWindowSurface.
         // Force native_display to 0 regardless of what the Android game passed.
         EGLDisplay dpy = host_func(platform, (void*)0, attrib_list);
-        fprintf(stdout, "[KuDroidGPU] bionic_eglGetPlatformDisplayEXT returned %s\n", dpy ? "VALID" : "NULL");
+        gpuLog("eglGetPlatformDisplayEXT -> %s (%p)", dpy ? "VALID" : "NULL", (void*)dpy);
         return dpy;
     }
-    fprintf(stdout, "[KuDroidGPU] bionic_eglGetPlatformDisplayEXT: not found in host\n");
+    gpuLog("eglGetPlatformDisplayEXT: not found in host");
     return nullptr;
 }
 
 extern "C" EGLDisplay bionic_eglGetDisplay(EGLNativeDisplayType display_id) {
     (void)display_id;
-    fprintf(stdout, "[KuDroidGPU] bionic_eglGetDisplay called\n");
+    gpuLog("eglGetDisplay(display_id=%p)", (void*)display_id);
     auto host_func = (PFN_eglGetPlatformDisplayEXT) get_egl_func("eglGetPlatformDisplayEXT");
     if (host_func) {
         #define EGL_PLATFORM_ANGLE_ANGLE 0x3202
@@ -200,24 +229,26 @@ extern "C" EGLDisplay bionic_eglGetDisplay(EGLNativeDisplayType display_id) {
                 EGL_NONE
             };
             EGLDisplay dpy = host_func(EGL_PLATFORM_ANGLE_ANGLE, (void*)0, attribs);
+            gpuLog("eglGetDisplay: backend[%d]=0x%x -> %s", i, (unsigned)backends[i],
+                   dpy ? "VALID" : "NULL");
             if (dpy != nullptr) {
-                fprintf(stdout, "[KuDroidGPU] bionic_eglGetDisplay: successfully got display via eglGetPlatformDisplayEXT\n");
+                gpuLog("eglGetDisplay: got display via eglGetPlatformDisplayEXT");
                 return dpy;
             }
         }
     }
     
-    fprintf(stdout, "[KuDroidGPU] bionic_eglGetDisplay: falling back to eglGetDisplay\n");
+    gpuLog("eglGetDisplay: falling back to eglGetDisplay");
     typedef EGLDisplay (*PFN_eglGetDisplay)(EGLNativeDisplayType);
     auto host_get_display = (PFN_eglGetDisplay) get_egl_func("eglGetDisplay");
     if (host_get_display) {
         // Always pass EGL_DEFAULT_DISPLAY (0) — CAMetalLayer is only for surfaces.
         EGLDisplay dpy = host_get_display((EGLNativeDisplayType)0);
-        fprintf(stdout, "[KuDroidGPU] bionic_eglGetDisplay: fallback returned %s\n", dpy ? "VALID" : "NULL");
+        gpuLog("eglGetDisplay: fallback -> %s (%p)", dpy ? "VALID" : "NULL", (void*)dpy);
         return dpy;
     }
     
-    fprintf(stdout, "[KuDroidGPU] bionic_eglGetDisplay: completely failed to find eglGetDisplay\n");
+    gpuLog("eglGetDisplay: completely failed to find eglGetDisplay");
     return nullptr;
 }
 
@@ -420,17 +451,6 @@ typedef unsigned int EGLenum;
 
 typedef EGLSurface (*PFN_eglCreateWindowSurface)(EGLDisplay, EGLConfig, EGLNativeWindowType, const EGLint*);
 
-// Log GPU qua pipeline chuẩn (stdout + file + crash buffer) để lần crash sau
-// "log up to crash" không còn trống.
-extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
-static void gpuLog(const char* fmt, ...) {
-    char buf[512];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(buf, sizeof(buf), fmt, ap);
-    va_end(ap);
-    kudroid_android_log_message(2, "KuDroidGPU", buf);
-}
 
 extern "C" EGLSurface bionic_eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
                                                     EGLNativeWindowType win,
@@ -469,7 +489,9 @@ extern "C" EGLBoolean bionic_eglTerminate(EGLDisplay dpy) {
     typedef EGLBoolean (*PFN)(EGLDisplay);
     auto f = (PFN)get_egl_func("eglTerminate");
     if (!f) { EGL_FORWARD_ERR("eglTerminate", ""); return EGL_FALSE; }
-    return f(dpy);
+    EGLBoolean r = f(dpy);
+    gpuLog("eglTerminate -> %s", r ? "true" : "false");
+    return r;
 }
 
 extern "C" EGLBoolean bionic_eglChooseConfig(EGLDisplay dpy, const EGLint* attrib_list,
@@ -489,7 +511,11 @@ extern "C" EGLBoolean bionic_eglGetConfigAttrib(EGLDisplay dpy, EGLConfig config
     typedef EGLBoolean (*PFN)(EGLDisplay, EGLConfig, EGLint, EGLint*);
     auto f = (PFN)get_egl_func("eglGetConfigAttrib");
     if (!f) { EGL_FORWARD_ERR("eglGetConfigAttrib", ""); return EGL_FALSE; }
-    return f(dpy, config, attribute, value);
+    EGLBoolean r = f(dpy, config, attribute, value);
+    gpuLog("eglGetConfigAttrib(attr=0x%x) -> %s%s%s", (unsigned)attribute,
+           r ? "true" : "false", r ? " value=" : "",
+           (r && value) ? std::to_string(*value).c_str() : "");
+    return r;
 }
 
 extern "C" EGLBoolean bionic_eglGetConfigs(EGLDisplay dpy, EGLConfig* configs,
@@ -497,7 +523,10 @@ extern "C" EGLBoolean bionic_eglGetConfigs(EGLDisplay dpy, EGLConfig* configs,
     typedef EGLBoolean (*PFN)(EGLDisplay, EGLConfig*, EGLint, EGLint*);
     auto f = (PFN)get_egl_func("eglGetConfigs");
     if (!f) { EGL_FORWARD_ERR("eglGetConfigs", ""); return EGL_FALSE; }
-    return f(dpy, configs, config_size, num_config);
+    EGLBoolean r = f(dpy, configs, config_size, num_config);
+    gpuLog("eglGetConfigs(size=%d) -> %s (num=%d)", config_size, r ? "true" : "false",
+           num_config ? *num_config : -1);
+    return r;
 }
 
 extern "C" EGLContext bionic_eglCreateContext(EGLDisplay dpy, EGLConfig config,
@@ -515,7 +544,9 @@ extern "C" EGLBoolean bionic_eglDestroyContext(EGLDisplay dpy, EGLContext ctx) {
     typedef EGLBoolean (*PFN)(EGLDisplay, EGLContext);
     auto f = (PFN)get_egl_func("eglDestroyContext");
     if (!f) { EGL_FORWARD_ERR("eglDestroyContext", ""); return EGL_FALSE; }
-    return f(dpy, ctx);
+    EGLBoolean r = f(dpy, ctx);
+    gpuLog("eglDestroyContext(%p) -> %s", (void*)ctx, r ? "true" : "false");
+    return r;
 }
 
 extern "C" EGLSurface bionic_eglCreatePbufferSurface(EGLDisplay dpy, EGLConfig config,
@@ -532,7 +563,9 @@ extern "C" EGLBoolean bionic_eglDestroySurface(EGLDisplay dpy, EGLSurface surfac
     typedef EGLBoolean (*PFN)(EGLDisplay, EGLSurface);
     auto f = (PFN)get_egl_func("eglDestroySurface");
     if (!f) { EGL_FORWARD_ERR("eglDestroySurface", ""); return EGL_FALSE; }
-    return f(dpy, surface);
+    EGLBoolean r = f(dpy, surface);
+    gpuLog("eglDestroySurface(%p) -> %s", (void*)surface, r ? "true" : "false");
+    return r;
 }
 
 extern "C" EGLBoolean bionic_eglMakeCurrent(EGLDisplay dpy, EGLSurface draw,
@@ -550,35 +583,45 @@ extern "C" EGLContext bionic_eglGetCurrentContext(void) {
     typedef EGLContext (*PFN)(void);
     auto f = (PFN)get_egl_func("eglGetCurrentContext");
     if (!f) { EGL_FORWARD_ERR("eglGetCurrentContext", ""); return EGL_NO_CONTEXT; }
-    return f();
+    EGLContext c = f();
+    gpuLog("eglGetCurrentContext -> %p", (void*)c);
+    return c;
 }
 
 extern "C" EGLSurface bionic_eglGetCurrentSurface(EGLint readdraw) {
     typedef EGLSurface (*PFN)(EGLint);
     auto f = (PFN)get_egl_func("eglGetCurrentSurface");
     if (!f) { EGL_FORWARD_ERR("eglGetCurrentSurface", ""); return EGL_NO_SURFACE; }
-    return f(readdraw);
+    EGLSurface s = f(readdraw);
+    gpuLog("eglGetCurrentSurface(0x%x) -> %p", (unsigned)readdraw, (void*)s);
+    return s;
 }
 
 extern "C" EGLDisplay bionic_eglGetCurrentDisplay(void) {
     typedef EGLDisplay (*PFN)(void);
     auto f = (PFN)get_egl_func("eglGetCurrentDisplay");
     if (!f) { EGL_FORWARD_ERR("eglGetCurrentDisplay", ""); return EGL_NO_DISPLAY; }
-    return f();
+    EGLDisplay d = f();
+    gpuLog("eglGetCurrentDisplay -> %p", (void*)d);
+    return d;
 }
 
 extern "C" EGLBoolean bionic_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     typedef EGLBoolean (*PFN)(EGLDisplay, EGLSurface);
     auto f = (PFN)get_egl_func("eglSwapBuffers");
     if (!f) { EGL_FORWARD_ERR("eglSwapBuffers", ""); return EGL_FALSE; }
-    return f(dpy, surface);
+    EGLBoolean r = f(dpy, surface);
+    gpuLog("eglSwapBuffers(surface=%p) -> %s", (void*)surface, r ? "true" : "false");
+    return r;
 }
 
 extern "C" EGLBoolean bionic_eglSwapInterval(EGLDisplay dpy, EGLint interval) {
     typedef EGLBoolean (*PFN)(EGLDisplay, EGLint);
     auto f = (PFN)get_egl_func("eglSwapInterval");
     if (!f) { EGL_FORWARD_ERR("eglSwapInterval", ""); return EGL_FALSE; }
-    return f(dpy, interval);
+    EGLBoolean r = f(dpy, interval);
+    gpuLog("eglSwapInterval(%d) -> %s", interval, r ? "true" : "false");
+    return r;
 }
 
 extern "C" const char* bionic_eglQueryString(EGLDisplay dpy, EGLint name) {
@@ -595,7 +638,11 @@ extern "C" EGLBoolean bionic_eglQuerySurface(EGLDisplay dpy, EGLSurface surface,
     typedef EGLBoolean (*PFN)(EGLDisplay, EGLSurface, EGLint, EGLint*);
     auto f = (PFN)get_egl_func("eglQuerySurface");
     if (!f) { EGL_FORWARD_ERR("eglQuerySurface", ""); return EGL_FALSE; }
-    return f(dpy, surface, attribute, value);
+    EGLBoolean r = f(dpy, surface, attribute, value);
+    gpuLog("eglQuerySurface(attr=0x%x) -> %s%s%s", (unsigned)attribute,
+           r ? "true" : "false", r ? " value=" : "",
+           (r && value) ? std::to_string(*value).c_str() : "");
+    return r;
 }
 
 extern "C" EGLint bionic_eglGetError(void) {
@@ -603,7 +650,7 @@ extern "C" EGLint bionic_eglGetError(void) {
     auto f = (PFN)get_egl_func("eglGetError");
     if (!f) { EGL_FORWARD_ERR("eglGetError", ""); return EGL_SUCCESS; }
     EGLint e = f();
-    if (e != EGL_SUCCESS) gpuLog("eglGetError -> 0x%x", (unsigned)e);
+    gpuLog("eglGetError -> %s (0x%x)", e == EGL_SUCCESS ? "EGL_SUCCESS" : "ERROR", (unsigned)e);
     return e;
 }
 
@@ -612,28 +659,37 @@ extern "C" EGLBoolean bionic_eglSurfaceAttrib(EGLDisplay dpy, EGLSurface surface
     typedef EGLBoolean (*PFN)(EGLDisplay, EGLSurface, EGLint, EGLint);
     auto f = (PFN)get_egl_func("eglSurfaceAttrib");
     if (!f) { EGL_FORWARD_ERR("eglSurfaceAttrib", ""); return EGL_FALSE; }
-    return f(dpy, surface, attribute, value);
+    EGLBoolean r = f(dpy, surface, attribute, value);
+    gpuLog("eglSurfaceAttrib(attr=0x%x val=%d) -> %s", (unsigned)attribute, value,
+           r ? "true" : "false");
+    return r;
 }
 
 extern "C" EGLBoolean bionic_eglReleaseThread(void) {
     typedef EGLBoolean (*PFN)(void);
     auto f = (PFN)get_egl_func("eglReleaseThread");
     if (!f) { EGL_FORWARD_ERR("eglReleaseThread", ""); return EGL_TRUE; }
-    return f();
+    EGLBoolean r = f();
+    gpuLog("eglReleaseThread -> %s", r ? "true" : "false");
+    return r;
 }
 
 extern "C" EGLBoolean bionic_eglBindAPI(EGLenum api) {
     typedef EGLBoolean (*PFN)(EGLenum);
     auto f = (PFN)get_egl_func("eglBindAPI");
     if (!f) { EGL_FORWARD_ERR("eglBindAPI", ""); return EGL_FALSE; }
-    return f(api);
+    EGLBoolean r = f(api);
+    gpuLog("eglBindAPI(0x%x) -> %s", (unsigned)api, r ? "true" : "false");
+    return r;
 }
 
 extern "C" EGLenum bionic_eglQueryAPI(void) {
     typedef EGLenum (*PFN)(void);
     auto f = (PFN)get_egl_func("eglQueryAPI");
     if (!f) { EGL_FORWARD_ERR("eglQueryAPI", ""); return 0; }
-    return f();
+    EGLenum e = f();
+    gpuLog("eglQueryAPI -> 0x%x", (unsigned)e);
+    return e;
 }
 
 extern "C" EGLDisplay bionic_eglGetPlatformDisplay(EGLenum platform, void* native_display,
@@ -653,28 +709,38 @@ extern "C" EGLBoolean bionic_eglBindTexImage(EGLDisplay dpy, EGLSurface surface,
     typedef EGLBoolean (*PFN)(EGLDisplay, EGLSurface, EGLint);
     auto f = (PFN)get_egl_func("eglBindTexImage");
     if (!f) { EGL_FORWARD_ERR("eglBindTexImage", ""); return EGL_FALSE; }
-    return f(dpy, surface, buffer);
+    EGLBoolean r = f(dpy, surface, buffer);
+    gpuLog("eglBindTexImage(surface=%p buffer=%d) -> %s", (void*)surface, buffer,
+           r ? "true" : "false");
+    return r;
 }
 
 extern "C" EGLBoolean bionic_eglReleaseTexImage(EGLDisplay dpy, EGLSurface surface, EGLint buffer) {
     typedef EGLBoolean (*PFN)(EGLDisplay, EGLSurface, EGLint);
     auto f = (PFN)get_egl_func("eglReleaseTexImage");
     if (!f) { EGL_FORWARD_ERR("eglReleaseTexImage", ""); return EGL_FALSE; }
-    return f(dpy, surface, buffer);
+    EGLBoolean r = f(dpy, surface, buffer);
+    gpuLog("eglReleaseTexImage(surface=%p buffer=%d) -> %s", (void*)surface, buffer,
+           r ? "true" : "false");
+    return r;
 }
 
 extern "C" EGLBoolean bionic_eglWaitGL(void) {
     typedef EGLBoolean (*PFN)(void);
     auto f = (PFN)get_egl_func("eglWaitGL");
     if (!f) { EGL_FORWARD_ERR("eglWaitGL", ""); return EGL_TRUE; }
-    return f();
+    EGLBoolean r = f();
+    gpuLog("eglWaitGL -> %s", r ? "true" : "false");
+    return r;
 }
 
 extern "C" EGLBoolean bionic_eglWaitNative(EGLint engine) {
     typedef EGLBoolean (*PFN)(EGLint);
     auto f = (PFN)get_egl_func("eglWaitNative");
     if (!f) { EGL_FORWARD_ERR("eglWaitNative", ""); return EGL_TRUE; }
-    return f(engine);
+    EGLBoolean r = f(engine);
+    gpuLog("eglWaitNative(%d) -> %s", engine, r ? "true" : "false");
+    return r;
 }
 
 const SymbolEntry kGraphicsSymbols[] = {

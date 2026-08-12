@@ -40,6 +40,12 @@ void* resolve_bionic_symbol(const char* name);
 void bionic_shim_reset_trace();
 const char* bionic_shim_trace();
 
+/// thêm một dòng vào bộ đệm trace dùng chung (thread_local duy nhất).
+/// mọi shim (kể cả SyscallShim/AudioShim/...) phải gọi hàm này thay vì
+/// duy trì biến gShimTrace riêng — nếu không bionic_shim_trace() đọc
+/// biến khác và kết quả luôn trống.
+void trace_shim(const char* message);
+
 /// xử lý sigtrap do các lệnh mrs x, tpidr_el0 được vá aot gây ra.
 /// trả về true nếu xử lý thành công.
 bool bionic_handle_tpidr_trap(void* ucontext);

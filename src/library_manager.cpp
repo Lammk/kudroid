@@ -184,13 +184,24 @@ bool LibraryManager::loadRecursive(const std::string& path) {
     return true;
 }
 
+// libraries_ là unordered_map — iteration order KHÔNG xác định. Hàm này trả
+// danh sách key đã sắp xếp để mọi thứ (resolve symbol, lặp thư viện) chạy theo
+// thứ tự ổn định giữa các lần chạy.
+static std::vector<std::string> sortedLibraryKeys(const std::unordered_map<std::string, std::unique_ptr<kudroid::ElfLoader>>& libs) {
+    std::vector<std::string> keys;
+    keys.reserve(libs.size());
+    for (const auto& entry : libs) keys.push_back(entry.first);
+    std::sort(keys.begin(), keys.end());
+    return keys;
+}
+
 void* LibraryManager::resolveGlobalSymbol(const char* name) const {
     if (!name || !*name) return nullptr;
-    for (const auto& entry : libraries_) {
-        void* address = entry.second->getSymbolAddress(name);
+    for (const auto& key : sortedLibraryKeys(libraries_)) {
+        void* address = libraries_.at(key)->getSymbolAddress(name);
         if (address) {
             std::fprintf(stderr, "[kudroid_core] Global symbol %s resolved from %s -> %p\n",
-                         name, entry.first.c_str(), address);
+                         name, key.c_str(), address);
             return address;
         }
     }
@@ -199,15 +210,29 @@ void* LibraryManager::resolveGlobalSymbol(const char* name) const {
 
 void* LibraryManager::resolveAppSymbol(const char* name) {
     if (!name || !*name) return nullptr;
-    for (const auto& entry : libraries_) {
-        void* address = entry.second->getSymbolAddress(name);
+    for (const auto& key : sortedLibraryKeys(libraries_)) {
+        void* address = libraries_.at(key)->getSymbolAddress(name);
         if (address) {
             std::fprintf(stderr, "[kudroid_core] App symbol %s resolved from %s -> %p\n",
-                         name, entry.first.c_str(), address);
+                         name, key.c_str(), address);
             return address;
         }
     }
     return nullptr;
+}
+
+std::vector<std::pair<std::string, void*>> LibraryManager::resolveAllSymbols(const char* name) const {
+    std::vector<std::pair<std::string, void*>> result;
+    if (!name || !*name) return result;
+    for (const auto& key : sortedLibraryKeys(libraries_)) {
+        void* address = libraries_.at(key)->getSymbolAddress(name);
+        if (address) {
+            std::fprintf(stderr, "[kudroid_core] Symbol %s resolved from %s -> %p\n",
+                         name, key.c_str(), address);
+            result.emplace_back(key, address);
+        }
+    }
+    return result;
 }
 
 bool extract_arm64_libs_from_apk(const char* apkPath, const char* outputDirectory,

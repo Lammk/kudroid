@@ -17,6 +17,9 @@
 #include <sys/time.h>
 #include <sys/uio.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
+#include <sys/inotify.h>
+#include <sys/signalfd.h>
 #include <unwind.h>
 #include <cxxabi.h>
 #include <chrono>
@@ -81,6 +84,7 @@ struct android_epoll_event {
 #include <pthread.h>
 #include <unordered_map>
 #include <map>
+#include <set>
 #include <mutex>
 #include <shared_mutex>
 #include <atomic>
@@ -95,13 +99,10 @@ namespace kudroid {
 namespace {
 
 uintptr_t gStackCheckGuard = 0x4b7544726f696421ULL;
-thread_local std::string gShimTrace;
 
-void trace(const char* message) {
-    gShimTrace += "[BionicShim] ";
-    gShimTrace += message;
-    gShimTrace += '\n';
-}
+// Trace dùng chung với BionicShim.cpp — KHÔNG khai báo gShimTrace riêng ở đây
+// (trước đây có 2 thread_local khác nhau → bionic_shim_trace() luôn trống).
+void trace(const char* message) { trace_shim(message); }
 
 extern "C" int bionic_dummy() {
     trace("dummy fallback invoked -> 0");
@@ -147,7 +148,18 @@ void appendUnsigned(std::string& output, uint64_t value, unsigned base) {
             output += '%';
             continue;
         }
-        while (*cursor == 'l' || *cursor == 'z') ++cursor;
+        // Bỏ qua cờ/flags/precision (vd %.9ld, %-5d, %+d) — game thường dùng
+        // %lld, %d, %s, %p, %x, %.9ld... Không parse chính xác 100% nhưng đủ để
+        // log không hỏng.
+        while (*cursor == '-' || *cursor == '+' || *cursor == ' ' ||
+               *cursor == '#' || *cursor == '0' || *cursor == '\'') ++cursor;
+        while (*cursor == '.') {
+            ++cursor;
+            while (*cursor >= '0' && *cursor <= '9') ++cursor;
+            if (*cursor == '*') ++cursor;
+        }
+        while (*cursor == 'l' || *cursor == 'z' || *cursor == 'j' ||
+               *cursor == 't' || *cursor == 'h') ++cursor;
         const uint64_t value = nextArgument();
         switch (*cursor) {
             case 'd':
@@ -188,9 +200,11 @@ int logAndroidMessage(int priority, const char* tag, const std::string& message)
                   "__android_log_print(priority=%d, tag=%s)", priority,
                   tag ? tag : "<null>");
     trace(traceMessage);
-    gShimTrace += "[BionicShim] android log message: ";
-    gShimTrace += message;
-    gShimTrace += '\n';
+    {
+        std::string full = "android log message: ";
+        full += message;
+        trace_shim(full.c_str());
+    }
     
     // Dump to standard output (Xcode/syslog)
     fprintf(stdout, "[AndroidLog][%s]: %s\n", tag ? tag : "unknown", message.c_str());
@@ -564,21 +578,32 @@ extern "C" int bionic_ioctl(int fd, unsigned long request, ...) {
 extern "C" int bionic_prctl(int option, unsigned long arg2, unsigned long arg3, unsigned long arg4, unsigned long arg5) {
     (void)arg3; (void)arg4; (void)arg5;
     if (option == PR_SET_NAME) {
+        const int r =
 #ifdef __APPLE__
-        return pthread_setname_np(reinterpret_cast<const char*>(arg2));
+            pthread_setname_np(reinterpret_cast<const char*>(arg2));
 #else
-        return pthread_setname_np(pthread_self(), reinterpret_cast<const char*>(arg2));
+            pthread_setname_np(pthread_self(), reinterpret_cast<const char*>(arg2));
 #endif
+        logAndroidMessage(4, "KuDroidSyscall", "prctl(PR_SET_NAME, \"" +
+                          std::string(arg2 ? reinterpret_cast<const char*>(arg2) : "<null>") +
+                          "\") -> " + (r == 0 ? "0" : std::to_string(r) + " errno=" + std::to_string(errno)));
+        return r;
     } else if (option == PR_SET_VMA) {
         // Just fake it for PR_SET_VMA_ANON_NAME to prevent crashes
+        logAndroidMessage(4, "KuDroidSyscall", "prctl(PR_SET_VMA) faked -> 0");
         return 0;
     }
+    logAndroidMessage(4, "KuDroidSyscall", "prctl(option=0x" +
+                      std::to_string((unsigned)option) + ") faked -> 0");
     return 0;
 }
 
 // Kiểm tra trong bionic_mmap: fd ashmem chỉ map được với prot đã được cấp
 // (định nghĩa ở khối ashmem phía dưới).
 static bool ashmem_prot_allows(int fd, int prot);
+// Fake ashmem fd (iOS fallback): trả vùng nhớ đã cấp hoặc nullptr nếu không
+// phải fake fd (định nghĩa ở khối ashmem phía dưới).
+extern "C" void* bionic_ashmem_mmap_fd(int fd, size_t length);
 
 // Memory mapping wrappers to strip Linux specific flags
 extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
@@ -590,6 +615,21 @@ extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int
     if (prot & PROT_EXEC) {
         logAndroidMessage(4, "KuDroidSyscall", "bionic_mmap: allocating executable memory (JIT/library), length=" + std::to_string(length));
     }
+    logAndroidMessage(3, "KuDroidSyscall", "mmap(addr=" + (addr ? std::to_string((uintptr_t)addr) : std::string("NULL")) +
+                      ", len=" + std::to_string(length) + ", prot=0x" +
+                      [](int p){ char b[16]; snprintf(b, sizeof(b), "%x", p); return std::string(b); }(prot) +
+                      ", flags=0x" +
+                      [](int f){ char b[16]; snprintf(b, sizeof(b), "%x", f); return std::string(b); }(flags) +
+                      ", fd=" + std::to_string(fd) + ")");
+
+    // ashmem fake fd (fallback iOS): trả lại vùng nhớ đã cấp — không cần
+    // dịch flags, vùng là anonymous rồi.
+    if (void* region = bionic_ashmem_mmap_fd(fd, length)) {
+        logAndroidMessage(3, "KuDroidSyscall", "mmap -> ashmem region " +
+                          std::to_string(reinterpret_cast<uintptr_t>(region)) + " (fake fd)");
+        return region;
+    }
+
 #ifdef __APPLE__
     // Android/Linux and Darwin use different numeric values for mmap flags.
     // Translate them explicitly instead of forwarding the raw Linux bits.
@@ -616,19 +656,24 @@ extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int
         0x100000  | // MAP_FIXED_NOREPLACE
         0x40000000; // MAP_UNINITIALIZED
 
+    // QUAN TRỌNG: strip Linux-only flags từ INPUT (flags) TRƯỚC, không strip
+    // darwin_flags SAU khi đã set — vì LINUX_ONLY_MAP_FLAGS chứa bit 0x1000
+    // (MAP_EXECUTABLE) mà Darwin MAP_ANON cũng dùng bit 0x1000 → strip sau
+    // sẽ xóa luôn MAP_ANON vừa set → mmap anonymous mất MAP_ANON với fd=-1
+    // → EINVAL → MAP_FAILED (bug đã gặp trong syscall test).
+    const int clean_flags = flags & ~(LINUX_ONLY_MAP_FLAGS | 0xFC000000);
+
     int darwin_flags = 0;
-    if (flags & LINUX_MAP_SHARED)          darwin_flags |= MAP_SHARED;
-    if (flags & LINUX_MAP_PRIVATE)         darwin_flags |= MAP_PRIVATE;
-    if (flags & LINUX_MAP_FIXED)           darwin_flags |= MAP_FIXED;
-    if (flags & LINUX_MAP_SHARED_VALIDATE) darwin_flags |= MAP_SHARED;
+    if (clean_flags & LINUX_MAP_SHARED)          darwin_flags |= MAP_SHARED;
+    if (clean_flags & LINUX_MAP_PRIVATE)         darwin_flags |= MAP_PRIVATE;
+    if (clean_flags & LINUX_MAP_FIXED)           darwin_flags |= MAP_FIXED;
+    if (clean_flags & LINUX_MAP_SHARED_VALIDATE) darwin_flags |= MAP_SHARED;
 
     int darwin_fd = fd;
-    if (flags & LINUX_MAP_ANONYMOUS) {
+    if (clean_flags & LINUX_MAP_ANONYMOUS) {
         darwin_flags |= MAP_ANON;
         darwin_fd = -1;  // Darwin requires fd == -1 for anonymous mappings
     }
-    // Drop Linux-only flags and the MAP_HUGE_* size bits (bits 26-31).
-    darwin_flags &= ~(LINUX_ONLY_MAP_FLAGS | 0xFC000000);
     return ::mmap(addr, length, prot, darwin_flags, darwin_fd, offset);
 #else
     return ::mmap(addr, length, prot, flags, fd, offset);
@@ -643,7 +688,12 @@ extern "C" int bionic_mprotect(void *addr, size_t len, int prot) {
     if (prot & PROT_EXEC) {
         logAndroidMessage(4, "KuDroidSyscall", "bionic_mprotect: setting PROT_EXEC on memory at " + std::to_string((uintptr_t)addr) + " len=" + std::to_string(len));
     }
-    return ::mprotect(addr, len, prot);
+    const int r = ::mprotect(addr, len, prot);
+    logAndroidMessage(3, "KuDroidSyscall", "mprotect(addr=" + std::to_string((uintptr_t)addr) +
+                      ", len=" + std::to_string(len) + ", prot=0x" +
+                      [](int p){ char b[16]; snprintf(b, sizeof(b), "%x", p); return std::string(b); }(prot) +
+                      ") -> " + (r == 0 ? "0" : "-1 errno=" + std::to_string(errno)));
+    return r;
 }
 
 extern "C" int bionic_madvise(void *addr, size_t length, int advice) {
@@ -659,6 +709,7 @@ extern "C" int bionic_madvise(void *addr, size_t length, int advice) {
 
 extern "C" int bionic_clock_gettime(int clock_id, struct timespec *tp) {
     int darwin_clock_id = clock_id;
+    logAndroidMessage(3, "KuDroidSyscall", "clock_gettime(clock_id=" + std::to_string(clock_id) + ")");
 #ifdef __APPLE__
     switch(clock_id) {
         case 0: darwin_clock_id = 0; break; // CLOCK_REALTIME
@@ -679,7 +730,15 @@ extern "C" int bionic_clock_gettime64(int clock_id, struct timespec *tp) {
 }
 
 extern "C" int bionic_sigaltstack(const stack_t *ss, stack_t *oss) {
-    return ::sigaltstack(ss, oss);
+    const int r = ::sigaltstack(ss, oss);
+    if (r != 0) {
+        // iOS có thể từ chối (thread đang dùng altstack, size lạ, v.v.) —
+        // fake success để game không chết vì thiếu altstack; vẫn log để debug.
+        logAndroidMessage(4, "KuDroidSyscall", "sigaltstack() -> -1 errno=" +
+                          std::to_string(errno) + " (faked to 0)");
+        return 0;
+    }
+    return 0;
 }
 
 #ifndef __APPLE__
@@ -750,13 +809,32 @@ extern "C" ssize_t bionic_getrandom(void *buf, size_t buflen, unsigned int flags
 }
 
 // ── ashmem (Android shared memory) ──
-// iOS không có ashmem — fake bằng POSIX shm (shm_open + ftruncate + shm_unlink
-// ngay để vô danh nhưng fd vẫn dùng được với mmap), đúng ý tưởng user đề xuất.
+// iOS không có ashmem. Trước đây fake bằng POSIX shm (shm_open) nhưng shm_open
+// KHÔNG tồn tại trên iOS (POSIX shm là macOS-only; iOS trả -1/ENOSYS) →
+// ashmem_create_region luôn fail. Fix: cấp phát anonymous mmap thật làm vùng
+// nhớ chung + trả về fake fd; bionic_mmap trả lại chính vùng đó khi gặp fake fd.
+// Trên macOS vẫn thử shm_open trước (fd thật, mmap thật) rồi mới fallback.
 static std::mutex g_ashmem_mtx;
-static std::unordered_map<int, int> g_ashmem_prot; // fd -> prot cho phép
+static std::unordered_map<int, int> g_ashmem_prot;      // fd -> prot cho phép
+static std::unordered_map<int, void*> g_ashmem_region;  // fake fd -> vùng nhớ
+static std::unordered_map<int, size_t> g_ashmem_size;   // fake fd -> kích thước
+static std::atomic<int> g_ashmem_fake_fd{0x40000000};   // fake fd bắt đầu cao tránh fd thật
+
+static void ashmem_forget(int fd) {
+    std::lock_guard<std::mutex> lock(g_ashmem_mtx);
+    g_ashmem_prot.erase(fd);
+    auto it = g_ashmem_region.find(fd);
+    if (it != g_ashmem_region.end()) {
+        ::munmap(it->second, g_ashmem_size[fd]);
+        g_ashmem_region.erase(it);
+        g_ashmem_size.erase(fd);
+    }
+}
 
 extern "C" int bionic_ashmem_create_region(const char* name, size_t size) {
     (void)name;
+    if (size == 0) size = 1;
+    // 1) Thử POSIX shm (hoạt động trên macOS).
     static std::atomic<uint32_t> counter{0};
     char shm_name[64];
     std::snprintf(shm_name, sizeof(shm_name), "/kudroid_ashmem_%d_%u", ::getpid(), counter.fetch_add(1));
@@ -764,13 +842,28 @@ extern "C" int bionic_ashmem_create_region(const char* name, size_t size) {
     if (fd >= 0) {
         shm_unlink(shm_name);
         if (::ftruncate(fd, static_cast<off_t>(size)) != 0) {
-            // Bỏ qua — fd vẫn hợp lệ, mmap sau đó sẽ lỗi nếu size vượt quá.
+            // fd vẫn hợp lệ; mmap sau sẽ lỗi nếu size vượt quá.
         }
         std::lock_guard<std::mutex> lock(g_ashmem_mtx);
-        g_ashmem_prot[fd] = PROT_READ | PROT_WRITE; // bionic mặc định rw
+        g_ashmem_prot[fd] = PROT_READ | PROT_WRITE;
         return fd;
     }
-    return -1;
+
+    // 2) Fallback (iOS): anonymous mmap làm region thật + fake fd.
+    void* base = ::mmap(nullptr, size, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (base == MAP_FAILED) return -1;
+    std::memset(base, 0, size);
+    const int fake = g_ashmem_fake_fd.fetch_add(1);
+    {
+        std::lock_guard<std::mutex> lock(g_ashmem_mtx);
+        g_ashmem_prot[fake] = PROT_READ | PROT_WRITE;
+        g_ashmem_region[fake] = base;
+        g_ashmem_size[fake] = size;
+    }
+    logAndroidMessage(4, "KuDroidSyscall", "ashmem_create_region fallback: fake fd=" +
+                      std::to_string(fake) + " size=" + std::to_string(size));
+    return fake;
 }
 
 extern "C" int bionic_ashmem_set_name(int fd, const char* name) {
@@ -790,6 +883,18 @@ static bool ashmem_prot_allows(int fd, int prot) {
     auto it = g_ashmem_prot.find(fd);
     if (it == g_ashmem_prot.end()) return true; // không phải ashmem fd
     return (prot & ~it->second) == 0;
+}
+
+// bionic_mmap gọi: với fake ashmem fd trả lại chính region đã cấp.
+extern "C" void* bionic_ashmem_mmap_fd(int fd, size_t length) {
+    std::lock_guard<std::mutex> lock(g_ashmem_mtx);
+    auto it = g_ashmem_region.find(fd);
+    if (it == g_ashmem_region.end()) return nullptr;
+    if (length > g_ashmem_size[fd]) {
+        errno = EINVAL;
+        return MAP_FAILED;
+    }
+    return it->second;
 }
 
 // --- Linux-Specific Syscalls ---
@@ -1060,6 +1165,12 @@ static std::map<int, dispatch_source_t> g_timerfds;
 static std::mutex g_timerfds_mtx;
 #endif
 
+// FDs giả (inotify/signalfd emulate bằng loopback UDP) — bionic_close phải đóng
+// đúng, không để rò fd.
+static std::set<int> g_fakefds;
+static std::mutex g_fakefds_mtx;
+
+
 extern "C" int bionic_eventfd(unsigned int initval, int flags) {
 #ifdef __APPLE__
     (void)flags;
@@ -1151,11 +1262,22 @@ extern "C" int bionic_close(int fd) {
         }
     }
 #endif
-    // Dọn entry prot của ashmem fd — không dọn thì fd number tái sử dụng bị
-    // prot cũ khóa (leak + hành vi sai).
+    // Dọn entry prot + region của ashmem fd — không dọn thì fd number tái sử
+    // dụng bị prot cũ khóa (leak + hành vi sai). Fake fd (iOS fallback) còn phải
+    // munmap vùng nhớ.
     {
         std::lock_guard<std::mutex> lock(g_ashmem_mtx);
+        const bool is_fake = g_ashmem_region.find(fd) != g_ashmem_region.end();
+        if (is_fake) {
+            ashmem_forget(fd);
+            return 0; // fake fd không phải fd thật — đừng close fd number thật
+        }
         g_ashmem_prot.erase(fd);
+    }
+    {
+        // inotify/signalfd fd giả — đóng socket thật qua ::close.
+        std::lock_guard<std::mutex> lock(g_fakefds_mtx);
+        g_fakefds.erase(fd);
     }
     return ::close(fd);
 }
@@ -1811,30 +1933,62 @@ extern "C" int bionic_sched_setaffinity(pid_t pid, size_t cpusetsize, const void
     return 0;
 }
 
-// inotify_init1 — create an inotify instance.
-// On iOS there is no inotify; we return a dummy fd (-1) so apps fail cleanly.
+// ── inotify / signalfd — không tồn tại trên iOS → emulate ────────────────
+// Trước đây trả -1 → game (Unity hay dùng inotify để theo dõi asset) fail ngay.
+// Giờ trả fd thật (loopback UDP — poll được, không bao giờ có event = "không có
+// file thay đổi", đúng ngữ nghĩa khi không có ai ghi file). inotify_add_watch
+// trả watch descriptor giả > 0 để game tin rằng watch đã được đăng ký.
+
+// inotify_init1 — create an inotify instance (emulated: fd poll-able, never fires).
 extern "C" int bionic_inotify_init1(int flags) {
     (void)flags;
-    return -1;
+#ifdef __APPLE__
+    const int fd = create_loopback_udp();
+#else
+    const int fd = ::inotify_init1(flags);
+#endif
+    if (fd >= 0) {
+        std::lock_guard<std::mutex> lock(g_fakefds_mtx);
+        g_fakefds.insert(fd);
+    }
+    logAndroidMessage(4, "KuDroidSyscall", "inotify_init1 -> fd=" + std::to_string(fd) + " (emulated)");
+    return fd;
 }
 
-// inotify_add_watch — add a watch (no-op, returns -1).
+// inotify_add_watch — register a watch (emulated: trả wd giả dương).
 extern "C" int bionic_inotify_add_watch(int fd, const char* pathname, uint32_t mask) {
     (void)fd; (void)pathname; (void)mask;
-    return -1;
+    static int s_next_wd = 1;
+    const int wd = s_next_wd++;
+    logAndroidMessage(4, "KuDroidSyscall", "inotify_add_watch(\"" +
+                      std::string(pathname ? pathname : "<null>") + "\", mask=0x" +
+                      [](uint32_t m){ char b[16]; snprintf(b, sizeof(b), "%x", (unsigned)m); return std::string(b); }(mask) +
+                      ") -> wd=" + std::to_string(wd) + " (emulated)");
+    return wd;
 }
 
-// inotify_rm_watch — remove a watch (no-op).
+// inotify_rm_watch — remove a watch (emulated success).
 extern "C" int bionic_inotify_rm_watch(int fd, int wd) {
     (void)fd; (void)wd;
-    return -1;
+    return 0;
 }
 
-// signalfd — create a file descriptor for signal delivery.
-// On iOS there is no signalfd; return -1 so apps fail cleanly.
+// signalfd — create a file descriptor for signal delivery (emulated: fd poll-able,
+// không bao giờ có signal — game poll không treo, chỉ không nhận signal hiếm).
 extern "C" int bionic_signalfd(int fd, const void* mask, int flags) {
-    (void)fd; (void)mask; (void)flags;
-    return -1;
+    (void)mask; (void)flags;
+    if (fd >= 0) return fd; // signalfd(fd,...) với fd có sẵn — tái dùng
+#ifdef __APPLE__
+    const int newfd = create_loopback_udp();
+#else
+    const int newfd = ::signalfd(-1, reinterpret_cast<const sigset_t*>(mask), flags);
+#endif
+    if (newfd >= 0) {
+        std::lock_guard<std::mutex> lock(g_fakefds_mtx);
+        g_fakefds.insert(newfd);
+    }
+    logAndroidMessage(4, "KuDroidSyscall", "signalfd -> fd=" + std::to_string(newfd) + " (emulated)");
+    return newfd;
 }
 
 // eventfd2 — same as eventfd (already implemented as bionic_eventfd).
@@ -1842,9 +1996,52 @@ extern "C" int bionic_eventfd2(unsigned int initval, int flags) {
     return bionic_eventfd(initval, flags);
 }
 
-// prlimit64 — get/set process resource limits (no-op success).
+// prlimit64 — get/set process resource limits.
+// Trước đây trả 0 KHÔNG fill old_limit → game đọc struct rlimit rác (giống bug
+// statx cũ). Fill từ getrlimit thật, map chỉ số RLIMIT_* Linux → Darwin.
+struct GuestRlimit64 { uint64_t rlim_cur; uint64_t rlim_max; }; // Linux rlimit64
 extern "C" int bionic_prlimit64(pid_t pid, int resource, const void* new_limit, void* old_limit) {
-    (void)pid; (void)resource; (void)new_limit; (void)old_limit;
+    (void)pid;
+#ifdef __APPLE__
+    // Linux RLIMIT_* → Darwin RLIMIT_* (chỉ số khác nhau!)
+    // Linux: CPU=0 FSIZE=1 DATA=2 STACK=3 CORE=4 RSS=5 NPROC=6 NOFILE=7
+    //        MEMLOCK=8 AS=9 LOCKS=10 SIGPENDING=11 MSGQUEUE=12 NICE=13 RTPRIO=14
+    // Darwin: CPU=0 FSIZE=1 DATA=2 STACK=3 CORE=4 AS=5 MEMLOCK=6 NPROC=7 NOFILE=8
+    int darwin_resource = -1;
+    switch (resource) {
+        case 0: darwin_resource = RLIMIT_CPU; break;      // 0 == 0
+        case 1: darwin_resource = RLIMIT_FSIZE; break;    // 1 == 1
+        case 2: darwin_resource = RLIMIT_DATA; break;     // 2 == 2
+        case 3: darwin_resource = RLIMIT_STACK; break;    // 3 == 3
+        case 4: darwin_resource = RLIMIT_CORE; break;     // 4 == 4
+        case 6: darwin_resource = RLIMIT_NPROC; break;    // 6 -> 7
+        case 7: darwin_resource = RLIMIT_NOFILE; break;   // 7 -> 8
+        case 8: darwin_resource = RLIMIT_MEMLOCK; break;  // 8 -> 6
+        case 9: darwin_resource = RLIMIT_AS; break;       // 9 -> 5
+        default: darwin_resource = -1; break;             // RSS/LOCKS/... không có
+    }
+#else
+    const int darwin_resource = resource;
+#endif
+    struct rlimit host;
+    if (darwin_resource < 0 || ::getrlimit(darwin_resource, &host) != 0) {
+        if (old_limit) {
+            auto* out = static_cast<GuestRlimit64*>(old_limit);
+            out->rlim_cur = out->rlim_max = 0;
+        }
+        return 0; // không map được — vẫn trả 0 để game không chết
+    }
+    if (new_limit) {
+        const auto* in = static_cast<const GuestRlimit64*>(new_limit);
+        host.rlim_cur = static_cast<rlim_t>(in->rlim_cur);
+        host.rlim_max = static_cast<rlim_t>(in->rlim_max);
+        ::setrlimit(darwin_resource, &host);
+    }
+    if (old_limit) {
+        auto* out = static_cast<GuestRlimit64*>(old_limit);
+        out->rlim_cur = static_cast<uint64_t>(host.rlim_cur);
+        out->rlim_max = static_cast<uint64_t>(host.rlim_max);
+    }
     return 0;
 }
 

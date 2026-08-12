@@ -19,6 +19,7 @@ thread_local std::string gShimTrace;
 } // namespace
 
 void trace_shim(const char* message) {
+    if (!message) return;
     gShimTrace += "[BionicShim] ";
     gShimTrace += message;
     gShimTrace += '\n';

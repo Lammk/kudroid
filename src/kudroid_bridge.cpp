@@ -17,6 +17,7 @@
 #include <ctime>
 #include <cctype>
 #include <filesystem>
+#include <set>
 #include <string>
 #include <fcntl.h>
 #include <unistd.h>
@@ -125,6 +126,30 @@ static void writeLogFile(const char* name, const std::string& content) {
         fwrite(content.data(), 1, content.size(), f);
         fclose(f);
     }
+}
+
+// Snapshot nội dung crash buffer (log gần nhất từ game/shim) — có lock để đọc
+// an toàn với luồng game đang log. Dùng để file test chứa log chi tiết của
+// shim (trước đây chỉ nằm trong crash buffer, mất khi test thành công).
+extern "C" const char* kudroid_crash_log_snapshot(void) {
+    std::lock_guard<std::mutex> lock(g_crashBufMtx);
+    const size_t n = static_cast<size_t>(g_crashLen);
+    char* out = static_cast<char*>(std::malloc(n + 1));
+    if (!out) return nullptr;
+    std::memcpy(out, g_crashBuf, n);
+    out[n] = '\0';
+    return out;
+}
+
+// Append snapshot crash buffer vào cuối log test (phần "log up to test").
+static void appendCrashSnapshot(std::string& log, const char* sectionName) {
+    const char* snap = kudroid_crash_log_snapshot();
+    if (!snap) return;
+    if (*snap) {
+        log += std::string("\n--- ") + sectionName + " ---\n";
+        log += snap;
+    }
+    std::free(const_cast<char*>(snap));
 }
 
 static void appendTestHeader(std::string& log, const char* test, const char* path) {
@@ -649,18 +674,22 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                              "[kudroid_core] Avian JVM ready (JavaVM=%p).\n", (void*)jvm);
                     log += jvmLine;
 
-                    auto jni_onload = reinterpret_cast<jint (*)(JavaVM*, void*)>(
-                        manager.resolveAppSymbol("JNI_OnLoad")
-                    );
-                    if (jni_onload) {
-                        log += "[kudroid_core] Found JNI_OnLoad, invoking...\n";
-                        mirrorCrash(log);
-
+                    // Android gọi JNI_OnLoad cho TỪNG thư viện được loadLibrary.
+                    // libraries_ là unordered_map (thứ tự ngẫu nhiên) nên dùng
+                    // resolveAllSymbols (đã sắp xếp) và gọi cho mọi lib có export
+                    // — nếu chỉ gọi 1 lib tùy ý, lib vẽ thật (vd libtriangle_gles)
+                    // có thể không bao giờ được khởi tạo.
+                    auto jniOnLoads = manager.resolveAllSymbols("JNI_OnLoad");
+                    if (!jniOnLoads.empty()) {
                         bionic_init_main_thread_tls();
-
-                        jint version = jni_onload(jvm, nullptr);
-                        log += "[kudroid_core] JNI_OnLoad returned version: " + std::to_string(version) + "\n";
-                        mirrorCrash(log);
+                        for (const auto& [libName, addr] : jniOnLoads) {
+                            auto jni_onload = reinterpret_cast<jint (*)(JavaVM*, void*)>(addr);
+                            log += "[kudroid_core] Found JNI_OnLoad in " + libName + ", invoking...\n";
+                            mirrorCrash(log);
+                            jint version = jni_onload(jvm, nullptr);
+                            log += "[kudroid_core] JNI_OnLoad(" + libName + ") returned version: " + std::to_string(version) + "\n";
+                            mirrorCrash(log);
+                        }
                     } else {
                         log += "[kudroid_core] JNI_OnLoad not found.\n";
                         mirrorCrash(log);
@@ -1270,6 +1299,7 @@ extern "C" const char* kudroid_syscall_so_test(const char* path) {
         log += kudroid::bionic_shim_trace();
         log += "\n";
     }
+    appendCrashSnapshot(log, "log up to test end");
     writeLogFile("kudroid_syscall_test.txt", log);
     return strdup(log.c_str());
 }
@@ -1375,6 +1405,8 @@ extern "C" const char* kudroid_gpu_vulkan_so_test(const char* path) {
         }
     }
 
+    appendCrashSnapshot(log, "log up to test end");
+
     const char* shimTrace = kudroid::bionic_shim_trace();
     if (shimTrace && *shimTrace) {
         log += "[kudroid_gpu] Bionic shim trace:\n";
@@ -1416,6 +1448,8 @@ extern "C" const char* kudroid_gpu_opengl_so_test(const char* path) {
             }
         }
     }
+
+    appendCrashSnapshot(log, "log up to test end");
 
     const char* shimTrace = kudroid::bionic_shim_trace();
     if (shimTrace && *shimTrace) {
@@ -1488,6 +1522,10 @@ extern "C" const char* kudroid_load_apk(const char* apkPath) {
     }
     
     if (std::filesystem::exists(libDir)) {
+        // Android gọi JNI_OnLoad cho TỪNG lib được loadLibrary — theo dõi lib
+        // nào đã gọi để mỗi lib chỉ khởi tạo một lần (resolveGlobalSymbol cũ trả
+        // 1 lib tùy ý theo thứ tự unordered_map — có thể bỏ sót lib vẽ thật).
+        std::set<std::string> onLoadCalled;
         for (const auto& entry : std::filesystem::directory_iterator(libDir)) {
             if (entry.is_regular_file() && entry.path().extension() == ".so") {
                 log += "[kudroid_apk] Loading library: " + entry.path().filename().string() + "\n";
@@ -1506,13 +1544,13 @@ extern "C" const char* kudroid_load_apk(const char* apkPath) {
                     if (!jvm) {
                         log += "[kudroid_apk] ERROR: Avian JVM failed to initialize, skipping JNI_OnLoad\n";
                     } else {
-                        void* jniOnLoadAddr = libManager.resolveGlobalSymbol("JNI_OnLoad");
-                        if (jniOnLoadAddr) {
-                            log += "[kudroid_apk] Found JNI_OnLoad in library, executing...\n";
+                        for (const auto& [libKey, addr] : libManager.resolveAllSymbols("JNI_OnLoad")) {
+                            if (!onLoadCalled.insert(libKey).second) continue; // đã gọi rồi
+                            log += "[kudroid_apk] Found JNI_OnLoad in " + libKey + ", executing...\n";
                             using JNI_OnLoad_t = jint (*)(JavaVM*, void*);
-                            JNI_OnLoad_t jniOnLoad = reinterpret_cast<JNI_OnLoad_t>(jniOnLoadAddr);
+                            JNI_OnLoad_t jniOnLoad = reinterpret_cast<JNI_OnLoad_t>(addr);
                             jint version = jniOnLoad(jvm, nullptr);
-                            log += "[kudroid_apk] JNI_OnLoad returned version: 0x" + std::to_string(version) + "\n";
+                            log += "[kudroid_apk] JNI_OnLoad(" + libKey + ") returned version: 0x" + std::to_string(version) + "\n";
                         }
                     }
                 }

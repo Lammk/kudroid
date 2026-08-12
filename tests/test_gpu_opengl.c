@@ -209,10 +209,26 @@ int kudroid_gpu_opengl_test(void) {
     __android_log_print(ANDROID_LOG_INFO, "KuDroidGPU", "GL TEST: GL_VENDOR = %s", glGetString ? (const char*)glGetString(GL_VENDOR) : "NULL");
     __android_log_print(ANDROID_LOG_INFO, "KuDroidGPU", "GL TEST: GL_RENDERER = %s", glGetString ? (const char*)glGetString(GL_RENDERER) : "NULL");
 
+    /* EGL_VERSION + EGL_EXTENSIONS giúp xác định backend đang dùng */
+    PFN_eglQueryString queryString = (PFN_eglQueryString)dlsym(egl, "eglQueryString");
+    if (queryString) {
+        const char* ver = queryString(display, 0x3054 /* EGL_VERSION */);
+        const char* ext = queryString(display, 0x3055 /* EGL_EXTENSIONS */);
+        __android_log_print(ANDROID_LOG_INFO, "KuDroidGPU", "GL TEST: EGL_VERSION = %s", ver ? ver : "(null)");
+        __android_log_print(ANDROID_LOG_INFO, "KuDroidGPU", "GL TEST: EGL_EXTENSIONS = %s", ext ? ext : "(null)");
+    }
+
     if (glClearColor && glClear) {
         glClearColor(1.0f, 0.0f, 0.0f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         __android_log_print(ANDROID_LOG_INFO, "KuDroidGPU", "GL TEST: glClear executed successfully.");
+    }
+
+    /* glGetError cuối để bắt lỗi render */
+    typedef unsigned int (*PFN_glGetError)(void);
+    PFN_glGetError glGetErr = (PFN_glGetError)dlsym(gles, "glGetError");
+    if (glGetErr) {
+        __android_log_print(ANDROID_LOG_INFO, "KuDroidGPU", "GL TEST: glGetError after clear = 0x%x (0x0 = no error)", glGetErr());
     }
 
     destroySurface(display, surface);

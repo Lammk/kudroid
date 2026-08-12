@@ -132,8 +132,12 @@ public:
     bool loadRecursive(const std::string& path);
     /// trả về một ký hiệu từ bất kỳ elf nào được tải, sau đó bionicshim làm dự phòng.
     void* resolveGlobalSymbol(const char* name) const;
-    /// trả về một ký hiệu cụ thể từ thư viện ứng dụng chính.
+    /// trả về một ký hiệu cụ thể từ thư viện ứng dụng chính (thứ tự ổn định).
     void* resolveAppSymbol(const char* name);
+    /// trả về ký hiệu từ MỌI elf được tải (đã sắp xếp theo tên để ổn định) —
+    /// Android gọi JNI_OnLoad cho từng thư viện được loadLibrary, nên runner
+    /// phải gọi cho tất cả thư viện có export, không chỉ lib đầu tiên tùy ý.
+    std::vector<std::pair<std::string, void*>> resolveAllSymbols(const char* name) const;
     [[nodiscard]] const std::unordered_map<std::string, std::unique_ptr<ElfLoader>>& libraries() const {
         return libraries_;
     }
