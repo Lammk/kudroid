@@ -1039,30 +1039,33 @@ extern "C" void* bionic_dlopen(const char* filename, int flags) {
     return DUMMY_HANDLE;
 }
 
+// GraphicsShim MUST intercept Vulkan/EGL surface symbols BEFORE the real
+// MoltenVK/ANGLE handle is consulted, otherwise the game gets the real
+// vkGetInstanceProcAddr and never sees vkCreateAndroidSurfaceKHR. Every
+// egl*/ANativeWindow* entry also goes through the shim: the wrappers forward
+// to ANGLE internally but add NULL-guards and detailed logging (e.g.
+// TriangleGLES calls eglInitialize(display, 0, 0) with NULL out-params which
+// some ANGLE builds dereference). Anything not in the shim table falls
+// through to the real handle below.
+static bool isShimPriority(const char* s) {
+    if (!s) return false;
+    if (strncmp(s, "egl", 3) == 0) return true;
+    if (strncmp(s, "ANativeWindow", 13) == 0) return true;
+    return strcmp(s, "vkGetInstanceProcAddr") == 0 ||
+           strcmp(s, "vkEnumerateInstanceExtensionProperties") == 0 ||
+           strcmp(s, "vkCreateAndroidSurfaceKHR") == 0;
+}
+
 extern "C" void* bionic_dlsym(void* handle, const char* symbol) {
     if (!symbol) return nullptr;
 
-    // For Vulkan/EGL surface translation, our GraphicsShim MUST intercept
-    // these symbols BEFORE the real MoltenVK/ANGLE handle is consulted,
-    // otherwise the game gets the real vkGetInstanceProcAddr and never sees
-    // vkCreateAndroidSurfaceKHR.
-    static const char* kShimPriority[] = {
-        "vkGetInstanceProcAddr",
-        "vkEnumerateInstanceExtensionProperties",
-        "vkCreateAndroidSurfaceKHR",
-        "eglCreateWindowSurface",
-        "eglGetDisplay",
-        "eglGetPlatformDisplayEXT",
-    };
-    for (const char* prio : kShimPriority) {
-        if (strcmp(symbol, prio) == 0) {
-            size_t count = 0;
-            const SymbolEntry* symbols = get_graphics_symbols(&count);
-            for (size_t i = 0; i < count; ++i) {
-                if (strcmp(symbols[i].name, symbol) == 0) {
-                    logAndroidMessage(2, "KuDroidSyscall", std::string("bionic_dlsym: [") + symbol + "] resolved via GraphicsShim (priority)");
-                    return symbols[i].address;
-                }
+    if (isShimPriority(symbol)) {
+        size_t count = 0;
+        const SymbolEntry* symbols = get_graphics_symbols(&count);
+        for (size_t i = 0; i < count; ++i) {
+            if (strcmp(symbols[i].name, symbol) == 0) {
+                logAndroidMessage(2, "KuDroidSyscall", std::string("bionic_dlsym: [") + symbol + "] resolved via GraphicsShim (priority)");
+                return symbols[i].address;
             }
         }
     }

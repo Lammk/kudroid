@@ -479,9 +479,13 @@ extern "C" EGLBoolean bionic_eglInitialize(EGLDisplay dpy, EGLint* major, EGLint
     typedef EGLBoolean (*PFN)(EGLDisplay, EGLint*, EGLint*);
     auto f = (PFN)get_egl_func("eglInitialize");
     if (!f) { EGL_FORWARD_ERR("eglInitialize", ""); return EGL_FALSE; }
-    EGLBoolean r = f(dpy, major, minor);
+    // Guest (vd TriangleGLES gọi eglInitialize(display, 0, 0)) có thể truyền
+    // NULL out-params — spec EGL cho phép, nhưng vài bản ANGLE dereference
+    // chúng → abort. Forward với buffer địa phương rồi copy kết quả về.
+    EGLint localMajor = 0, localMinor = 0;
+    const EGLBoolean r = f(dpy, major ? major : &localMajor, minor ? minor : &localMinor);
     gpuLog("eglInitialize -> %s (major=%d minor=%d)", r ? "true" : "false",
-           major ? *major : -1, minor ? *minor : -1);
+           major ? *major : localMajor, minor ? *minor : localMinor);
     return r;
 }
 
