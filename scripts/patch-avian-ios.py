@@ -130,5 +130,44 @@ def main():
         f.write(content)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# src/codegen/compiler.cpp — UB fix: saveState gọi `c->saved->count()` khi
+# `c->saved` có thể NULL (saved==0 nghĩa là danh sách rỗng). Gọi member function
+# trên con trỏ NULL là UB — clang -O2/-O3 (cả AppleClang trên iOS) được phép
+# giả định `this != NULL` và bỏ null check → deref 0x8 → SIGSEGV/abort khi Avian
+# JIT compile class đầu tiên từ boot classpath nhúng. -O0 che giấu bug nên build
+# debug chạy được, build fast (mode=fast, -O3) crash. Null-guard giữ nguyên ý
+# định (đếm 0 khi list rỗng).
+# ─────────────────────────────────────────────────────────────────────────────
+
+COMPILER_CPP_OLD = (
+    "  unsigned elementCount = frameFootprint(c, c->stack) + c->saved->count();"
+)
+
+COMPILER_CPP_NEW = (
+    "  unsigned elementCount = frameFootprint(c, c->stack)\n"
+    "      + (c->saved ? c->saved->count() : 0);  // saved==0 == empty list; "
+    "null-guard (UB otherwise — clang -O3 removes the check)"
+)
+
+
+def patch_compiler_cpp():
+    path = "src/codegen/compiler.cpp"
+    with open(path, "r") as f:
+        content = f.read()
+    if COMPILER_CPP_NEW.split("\n")[0] in content and COMPILER_CPP_OLD not in content:
+        print("compiler.cpp (saveState null-guard): already patched, skipping")
+        return
+    if COMPILER_CPP_OLD not in content:
+        print("WARNING: compiler.cpp (saveState null-guard): pattern not found, skipping")
+        return
+    content = content.replace(COMPILER_CPP_OLD, COMPILER_CPP_NEW)
+    with open(path, "w") as f:
+        f.write(content)
+    print("Patched compiler.cpp (saveState null-guard)")
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
+    patch_compiler_cpp()
+    sys.exit(0)
