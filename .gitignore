@@ -4,6 +4,7 @@
 /build-test/
 /tests/build/
 docs/
+.freebuff/
 # CMake
 CMakeCache.txt
 CMakeFiles/
