@@ -463,6 +463,7 @@ extern "C" EGLSurface bionic_eglCreateWindowSurface(EGLDisplay dpy, EGLConfig co
         // ANativeWindow_fromSurface already maps to g_metalLayer). Force the
         // window to g_metalLayer so ANGLE gets the CAMetalLayer it needs.
         EGLNativeWindowType nativeWin = (EGLNativeWindowType)g_metalLayer;
+        gpuLog("eglCreateWindowSurface: calling ANGLE with window=%p...", (void*)nativeWin);
         EGLSurface s = host_func(dpy, config, nativeWin, attrib_list);
         gpuLog("eglCreateWindowSurface returned %p", (void*)s);
         return s;
@@ -483,6 +484,8 @@ extern "C" EGLBoolean bionic_eglInitialize(EGLDisplay dpy, EGLint* major, EGLint
     // NULL out-params — spec EGL cho phép, nhưng vài bản ANGLE dereference
     // chúng → abort. Forward với buffer địa phương rồi copy kết quả về.
     EGLint localMajor = 0, localMinor = 0;
+    gpuLog("eglInitialize: calling ANGLE eglInitialize(dpy=%p, major=%s, minor=%s)...",
+           (void*)dpy, major ? "ptr" : "NULL", minor ? "ptr" : "NULL");
     const EGLBoolean r = f(dpy, major ? major : &localMajor, minor ? minor : &localMinor);
     gpuLog("eglInitialize -> %s (major=%d minor=%d)", r ? "true" : "false",
            major ? *major : localMajor, minor ? *minor : localMinor);
@@ -504,6 +507,7 @@ extern "C" EGLBoolean bionic_eglChooseConfig(EGLDisplay dpy, const EGLint* attri
     typedef EGLBoolean (*PFN)(EGLDisplay, const EGLint*, EGLConfig*, EGLint, EGLint*);
     auto f = (PFN)get_egl_func("eglChooseConfig");
     if (!f) { EGL_FORWARD_ERR("eglChooseConfig", ""); return EGL_FALSE; }
+    gpuLog("eglChooseConfig: calling ANGLE...");
     EGLBoolean r = f(dpy, attrib_list, configs, config_size, num_config);
     gpuLog("eglChooseConfig -> %s (num=%d)", r ? "true" : "false",
            num_config ? *num_config : -1);
@@ -539,6 +543,7 @@ extern "C" EGLContext bionic_eglCreateContext(EGLDisplay dpy, EGLConfig config,
     typedef EGLContext (*PFN)(EGLDisplay, EGLConfig, EGLContext, const EGLint*);
     auto f = (PFN)get_egl_func("eglCreateContext");
     if (!f) { EGL_FORWARD_ERR("eglCreateContext", ""); return EGL_NO_CONTEXT; }
+    gpuLog("eglCreateContext: calling ANGLE...");
     EGLContext ctx = f(dpy, config, share_context, attrib_list);
     gpuLog("eglCreateContext -> %p", (void*)ctx);
     return ctx;
@@ -577,6 +582,7 @@ extern "C" EGLBoolean bionic_eglMakeCurrent(EGLDisplay dpy, EGLSurface draw,
     typedef EGLBoolean (*PFN)(EGLDisplay, EGLSurface, EGLSurface, EGLContext);
     auto f = (PFN)get_egl_func("eglMakeCurrent");
     if (!f) { EGL_FORWARD_ERR("eglMakeCurrent", ""); return EGL_FALSE; }
+    gpuLog("eglMakeCurrent: calling ANGLE...");
     EGLBoolean r = f(dpy, draw, read, ctx);
     gpuLog("eglMakeCurrent(ctx=%p, draw=%p) -> %s", (void*)ctx, (void*)draw,
            r ? "true" : "false");
@@ -614,6 +620,7 @@ extern "C" EGLBoolean bionic_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) 
     typedef EGLBoolean (*PFN)(EGLDisplay, EGLSurface);
     auto f = (PFN)get_egl_func("eglSwapBuffers");
     if (!f) { EGL_FORWARD_ERR("eglSwapBuffers", ""); return EGL_FALSE; }
+    gpuLog("eglSwapBuffers: calling ANGLE...");
     EGLBoolean r = f(dpy, surface);
     gpuLog("eglSwapBuffers(surface=%p) -> %s", (void*)surface, r ? "true" : "false");
     return r;

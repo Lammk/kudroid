@@ -117,6 +117,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
         "-framework UIKit"
         "-framework CoreGraphics"
         "-framework IOSurface"
+        # Avian khởi tạo boot classpath qua `-Xbootclasspath:[classpathJar]`:
+        # BuiltinElement gọi dlsym(main_executable, "classpathJar"). Symbol này do
+        # boot.o (classpathJar()) + classpath-jar.o (jar nhúng) cung cấp và được
+        # kéo vào app nhờ tham chiếu từ kudroid_jni.cpp — nhưng Mach-O không export
+        # symbol từ static lib vào main executable mặc định. Flag này đưa classpathJar
+        # vào dynamic symbol table để dlsym tìm thấy (giống Avian dùng -Wl,-export_dynamic
+        # cho executable của chính nó).
+        "-Wl,-exported_symbol,_classpathJar"
     )
 
     # Note: Copying of MoltenVK and ANGLE frameworks into KuDroidShell.app/Frameworks 

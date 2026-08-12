@@ -29,6 +29,9 @@
 #include <sys/socket.h>
 #include <condition_variable>
 #include <limits.h>
+#if defined(__APPLE__)
+#include <objc/objc-autoreleasepool.h>
+#endif
 
 extern "C" void __gxx_personality_v0();
 
@@ -150,11 +153,13 @@ void appendUnsigned(std::string& output, uint64_t value, unsigned base) {
             output += '%';
             continue;
         }
-        // Bỏ qua cờ/flags/precision (vd %.9ld, %-5d, %+d) — game thường dùng
-        // %lld, %d, %s, %p, %x, %.9ld... Không parse chính xác 100% nhưng đủ để
-        // log không hỏng.
+        // Bỏ qua cờ/flags/width/precision (vd %.9ld, %-5d, %+d, %08x, %8x) —
+        // game thường dùng %lld, %d, %s, %p, %x, %.9ld... Không parse chính xác
+        // 100% nhưng đủ để log không hỏng.
         while (*cursor == '-' || *cursor == '+' || *cursor == ' ' ||
                *cursor == '#' || *cursor == '0' || *cursor == '\'') ++cursor;
+        // width (vd %8x, %08x — chữ số đứng sau flags, trước precision)
+        while (*cursor >= '0' && *cursor <= '9') ++cursor;
         while (*cursor == '.') {
             ++cursor;
             while (*cursor >= '0' && *cursor <= '9') ++cursor;
@@ -1681,7 +1686,18 @@ static void* bionic_thread_wrapper(void* rawArgs) {
     __asm__ volatile("msr tpidr_el0, %0" : : "r"((char*)tls_base + kTlsSlotOffset));
 #endif
 
+    // iOS: ANGLE/Metal/ObjC require an autorelease pool on EVERY thread that
+    // touches them. Guest render threads (TriangleGLES render thread, Unity's
+    // render thread...) are raw pthreads with NO pool — GPU test passes because
+    // it runs on the main/GCD thread (pool có sẵn). Không có pool → abort()
+    // ngay trong ANGLE eglInitialize (Metal device/queue creation).
+#if defined(__APPLE__)
+    void* pool = objc_autoreleasePoolPush();
+#endif
     void* result = start_routine(arg);
+#if defined(__APPLE__)
+    objc_autoreleasePoolPop(pool);
+#endif
 
     // No need to free(tls_base) here, the destructor will handle it automatically
     // when the thread terminates, even if it terminates via pthread_exit().

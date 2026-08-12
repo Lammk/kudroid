@@ -75,6 +75,21 @@ CLASSPATH_JAR_NEW = (
     "\t $(jar) c0f \"$$($(native-path) \"$${wd}/$(@)\")\" .)"
 )
 
+# vá quy tắc thư viện tĩnh để libavian.a chứa cả boot.o (hàm classpathJar)
+# và classpath-jar.o (jar nhúng). mặc định avian chỉ đưa 2 object này vào
+# executable/dynamic-library, nhưng kudroid chỉ link libavian.a -> dlsym("classpathJar")
+# trả NULL -> boot classpath rỗng -> FindClass trả NULL (JNI test abort).
+STATIC_LIBRARY_OLD = (
+    "$(static-library): $(vm-objects) $(classpath-objects) $(vm-heapwalk-objects) \\\n"
+    "\t\t$(javahome-object) $(boot-javahome-object) $(lzma-decode-objects)"
+)
+
+STATIC_LIBRARY_NEW = (
+    "$(static-library): $(vm-objects) $(classpath-objects) $(vm-heapwalk-objects) \\\n"
+    "\t\t$(boot-object) $(vm-classpath-objects) \\\n"
+    "\t\t$(javahome-object) $(boot-javahome-object) $(lzma-decode-objects)"
+)
+
 
 def patch_rule(content, target_var, jar_var, sym, label):
     old = converter_rule(target_var, jar_var, sym)
@@ -102,6 +117,14 @@ def main():
     else:
         content = content.replace(CLASSPATH_JAR_OLD, CLASSPATH_JAR_NEW)
         print("Patched makefile (classpath.jar merge)")
+
+    if STATIC_LIBRARY_NEW in content and STATIC_LIBRARY_OLD not in content:
+        print("makefile (static-library): already patched, skipping")
+    elif STATIC_LIBRARY_OLD not in content:
+        print("WARNING: makefile (static-library): pattern not found, skipping")
+    else:
+        content = content.replace(STATIC_LIBRARY_OLD, STATIC_LIBRARY_NEW)
+        print("Patched makefile (static-library): boot.o + classpath-jar.o into libavian.a")
 
     with open("makefile", "w") as f:
         f.write(content)

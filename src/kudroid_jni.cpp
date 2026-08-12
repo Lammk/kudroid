@@ -25,6 +25,14 @@
 // chúng ta không cần bao gồm các tiêu đề nội bộ của avian (kéo theo rất nhiều thứ).
 extern "C" jint JNI_CreateJavaVM(JavaVM** p_vm, void** p_env, void* vm_args);
 
+// classpathJar() (định nghĩa trong boot.cpp của avian) trả về boot classpath jar
+// được nhúng trong libavian.a qua classpath-jar.o. Gọi nó một lần khi khởi tạo JVM
+// vừa để log kích thước jar (debug), vừa TẠO LINK-TIME REFERENCE ép linker kéo
+// boot.o + classpath-jar.o vào app — nếu không, 2 object này nằm trong archive
+// nhưng không được kéo (classpathJar chỉ được gọi qua dlsym runtime) → boot
+// classpath rỗng → FindClass('java/lang/String') trả NULL → GetSuperclass(NULL) crash.
+extern "C" const uint8_t* classpathJar(size_t* size);
+
 // Forward về pipeline log chuẩn của kudroid (định nghĩa trong SyscallShim.cpp).
 extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
 
@@ -161,7 +169,9 @@ static void log_jni(const char* fmt, ...) {
 #  define KUDROID_EXPORT __attribute__ ((visibility("default"))) __attribute__ ((used))
 #endif
 
-extern "C" void __cxa_pure_virtual(void) { abort(); }
+// Lưu ý: không định nghĩa __cxa_pure_virtual ở đây — boot.cpp của avian (được link
+// qua libavian.a) đã định nghĩa nó. Nếu khai báo trùng ở đây sẽ báo duplicate symbol
+// khi linker kéo boot.o vào (do tham chiếu classpathJar).
 
 // ─────────────────────────────────────────────────────────────────────────────
 // phương thức vòng đời jvm
@@ -175,6 +185,16 @@ void kudroid_jni_init_jvm(const char* bootclasspath, const char* classpath) {
     }
 
     log_jni("Initializing Avian JVM...");
+
+    // Ép linker giữ boot.o + classpath-jar.o và log kích thước boot jar nhúng
+    // (classpathJar được định nghĩa trong boot.cpp của avian).
+    {
+        size_t bootJarSize = 0;
+        const uint8_t* bootJarData = classpathJar(&bootJarSize);
+        log_jni("Embedded boot classpath jar: %zu bytes (%s)",
+                bootJarSize,
+                (bootJarData && bootJarSize) ? "OK" : "MISSING/EMPTY");
+    }
 
     // xây dựng các đối số máy ảo. chúng tôi luôn sử dụng tệp jar đường dẫn lớp được nhúng làm
     // đường dẫn lớp khởi động. đường dẫn lớp do người gọi cung cấp được thêm vào như một
