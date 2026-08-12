@@ -144,12 +144,47 @@ static void appendTestHeader(std::string& log, const char* test, const char* pat
 #endif
 }
 
+// Nhãn build: để phân biệt bản IPA đang chạy có phải bản mới nhất hay không.
+// Khi user nghi ngờ "iPhone vẫn chạy app cũ" — so stamp này trong
+// kudroid_crash.log với stamp của bản build mới nhất trên CI.
+extern "C" const char* kudroid_build_stamp(void) {
+    static const char kStamp[] =
+        "kudroid_core v0.1.5 " __DATE__ " " __TIME__ " "
+#ifdef KUDROID_GIT_HASH
+        KUDROID_GIT_HASH
+#else
+        "(no-git-hash)"
+#endif
+        ;
+    return kStamp;
+}
+
+#if defined(__aarch64__) || defined(__arm64__)
+static void symbolicateAddr(uintptr_t pc, char* out, size_t outSize) {
+    Dl_info info;
+    if (dladdr(reinterpret_cast<void*>(pc), &info) != 0 && info.dli_fname) {
+        snprintf(out, outSize, "0x%llx %s%s%s", (unsigned long long)pc,
+                 info.dli_fname,
+                 info.dli_sname ? " " : "",
+                 info.dli_sname ? info.dli_sname : "");
+    } else {
+        snprintf(out, outSize, "0x%llx (no symbol)", (unsigned long long)pc);
+    }
+}
+#endif
+
 static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
     if (sig == SIGTRAP) {
         if (kudroid::bionic_handle_tpidr_trap(ucontext)) {
             return; // đã xử lý thành công, tiếp tục thực thi!
         }
     }
+
+    // Xả bộ đệm stdout/stderr — các log [KuDroidGPU]/[AndroidLog] đang nằm trong
+    // buffer (block-buffered khi redirect) sẽ mất nếu không flush trước khi chết.
+    // (không async-signal-safe hoàn hảo nhưng là crash handler chẩn đoán, chấp nhận được)
+    fflush(stdout);
+    fflush(stderr);
     
     if (g_logDir[0]) {
         // xây dựng "<dir>/kudroid_crash.log" mà không cấp phát vùng nhớ heap.
@@ -164,6 +199,10 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
         if (fd >= 0) {
             const char* hdr = "[kudroid_core] CRASH — fatal signal caught\n";
             (void)!write(fd, hdr, strlen(hdr));
+            const char* stamp = kudroid_build_stamp();
+            char stampLine[512];
+            int sm = snprintf(stampLine, sizeof(stampLine), "build: %s\n", stamp);
+            if (sm > 0) (void)!write(fd, stampLine, (size_t)sm);
             char sigline[256];
             int m = snprintf(sigline, sizeof(sigline), "signal = %d\n", sig);
             if (m > 0) (void)!write(fd, sigline, (size_t)m);
@@ -205,6 +244,13 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
                     (unsigned long long)x3, (unsigned long long)x4, (unsigned long long)x5,
                     (unsigned long long)x6, (unsigned long long)x7, (unsigned long long)x8);
                 if (m > 0) (void)!write(fd, sigline, (size_t)m);
+
+                // Symbolicate pc/lr để log có ý nghĩa (file + hàm gần nhất).
+                char symPc[512], symLr[512];
+                symbolicateAddr((uintptr_t)pc, symPc, sizeof(symPc));
+                symbolicateAddr((uintptr_t)lr, symLr, sizeof(symLr));
+                m = snprintf(sigline, sizeof(sigline), "pc_sym: %s\nlr_sym: %s\n", symPc, symLr);
+                if (m > 0) (void)!write(fd, sigline, (size_t)m);
 #elif defined(__linux__)
                 ucontext_t* uc = (ucontext_t*)ucontext;
                 uint64_t pc = uc->uc_mcontext.pc;
@@ -212,6 +258,12 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
                 m = snprintf(sigline, sizeof(sigline),
                     "pc = 0x%llx\nlr = 0x%llx\n",
                     (unsigned long long)pc, (unsigned long long)lr);
+                if (m > 0) (void)!write(fd, sigline, (size_t)m);
+
+                char symPc[512], symLr[512];
+                symbolicateAddr((uintptr_t)pc, symPc, sizeof(symPc));
+                symbolicateAddr((uintptr_t)lr, symLr, sizeof(symLr));
+                m = snprintf(sigline, sizeof(sigline), "pc_sym: %s\nlr_sym: %s\n", symPc, symLr);
                 if (m > 0) (void)!write(fd, sigline, (size_t)m);
 #endif
             }
@@ -271,6 +323,11 @@ extern "C" void kudroid_set_log_dir(const char* dir) {
     strncpy(g_logDir, dir, sizeof(g_logDir) - 1);
     g_logDir[sizeof(g_logDir) - 1] = '\0';
     installCrashHandlers();
+
+    // Ghi stamp build ra file để user kiểm tra app đang chạy có phải bản mới
+    // nhất không (trả lời "iPhone vẫn chạy app cũ?").
+    const char* stamp = kudroid_build_stamp();
+    writeLogFile("kudroid_version.txt", std::string(stamp) + "\n");
 }
 
 extern "C" void kudroid_set_documents_dir(const char* dir) {

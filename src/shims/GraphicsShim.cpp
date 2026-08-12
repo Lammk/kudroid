@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
+#include <cstdarg>
 // This comes from kudroid_bridge.cpp
 extern void* g_metalLayer;
 extern int g_metalLayerWidth;
@@ -395,18 +396,46 @@ extern "C" VkResult bionic_vkEnumerateInstanceExtensionProperties(const char* pL
 // ANGLE on iOS expects a CAMetalLayer/UIView as the native window. Because
 // bionic_ANativeWindow_fromSurface returns g_metalLayer directly, the window
 // pointer IS the CAMetalLayer — pass it straight through.
+//
+// QUAN TRỌNG: phải export ĐỦ toàn bộ entry point EGL, không chỉ 4-5 hàm. ELF
+// loader resolve import của game qua BionicShim (bảng shim + RTLD_DEFAULT) —
+// ANGLE load RTLD_LOCAL nên không nằm trong RTLD_DEFAULT. Trước đây 17 hàm
+// egl* còn lại (eglInitialize, eglChooseConfig, eglCreateContext, eglMakeCurrent,
+// eglSwapBuffers...) rơi vào dummy trả 0 → Unity nhận eglCreateContext=NULL →
+// crash NULL+0x50. Giờ mỗi hàm forward thẳng sang ANGLE qua get_egl_func().
 // ─────────────────────────────────────────────────────────────────────────────
 
 typedef void* EGLSurface;
 typedef void* EGLConfig;
 typedef void* EGLContext;
 typedef void* EGLNativeWindowType;
+typedef unsigned int EGLBoolean;
+typedef unsigned int EGLenum;
+#define EGL_TRUE 1
+#define EGL_FALSE 0
+#define EGL_SUCCESS 0x3000
+#define EGL_NO_DISPLAY ((EGLDisplay)0)
+#define EGL_NO_CONTEXT ((EGLContext)0)
+#define EGL_NO_SURFACE ((EGLSurface)0)
+
 typedef EGLSurface (*PFN_eglCreateWindowSurface)(EGLDisplay, EGLConfig, EGLNativeWindowType, const EGLint*);
+
+// Log GPU qua pipeline chuẩn (stdout + file + crash buffer) để lần crash sau
+// "log up to crash" không còn trống.
+extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
+static void gpuLog(const char* fmt, ...) {
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    kudroid_android_log_message(2, "KuDroidGPU", buf);
+}
 
 extern "C" EGLSurface bionic_eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
                                                     EGLNativeWindowType win,
                                                     const EGLint* attrib_list) {
-    fprintf(stdout, "[KuDroidGPU] eglCreateWindowSurface: window=%p\n", (void*)win);
+    gpuLog("eglCreateWindowSurface: window=%p", (void*)win);
     auto host_func = (PFN_eglCreateWindowSurface)get_egl_func("eglCreateWindowSurface");
     if (host_func) {
         // IMPORTANT: ANGLE on iOS expects a CAMetalLayer as the native window.
@@ -415,11 +444,237 @@ extern "C" EGLSurface bionic_eglCreateWindowSurface(EGLDisplay dpy, EGLConfig co
         // window to g_metalLayer so ANGLE gets the CAMetalLayer it needs.
         EGLNativeWindowType nativeWin = (EGLNativeWindowType)g_metalLayer;
         EGLSurface s = host_func(dpy, config, nativeWin, attrib_list);
-        fprintf(stdout, "[KuDroidGPU] eglCreateWindowSurface returned %p\n", (void*)s);
+        gpuLog("eglCreateWindowSurface returned %p", (void*)s);
         return s;
     }
-    fprintf(stdout, "[KuDroidGPU] eglCreateWindowSurface: not found in host\n");
+    gpuLog("eglCreateWindowSurface: not found in host");
     return nullptr;
+}
+
+// ── EGL 1.x entry points còn thiếu — forward thẳng sang ANGLE ────────────────
+
+#define EGL_FORWARD_ERR(name, what) gpuLog("%s: ANGLE %s not available", name, what)
+
+extern "C" EGLBoolean bionic_eglInitialize(EGLDisplay dpy, EGLint* major, EGLint* minor) {
+    typedef EGLBoolean (*PFN)(EGLDisplay, EGLint*, EGLint*);
+    auto f = (PFN)get_egl_func("eglInitialize");
+    if (!f) { EGL_FORWARD_ERR("eglInitialize", ""); return EGL_FALSE; }
+    EGLBoolean r = f(dpy, major, minor);
+    gpuLog("eglInitialize -> %s (major=%d minor=%d)", r ? "true" : "false",
+           major ? *major : -1, minor ? *minor : -1);
+    return r;
+}
+
+extern "C" EGLBoolean bionic_eglTerminate(EGLDisplay dpy) {
+    typedef EGLBoolean (*PFN)(EGLDisplay);
+    auto f = (PFN)get_egl_func("eglTerminate");
+    if (!f) { EGL_FORWARD_ERR("eglTerminate", ""); return EGL_FALSE; }
+    return f(dpy);
+}
+
+extern "C" EGLBoolean bionic_eglChooseConfig(EGLDisplay dpy, const EGLint* attrib_list,
+                                             EGLConfig* configs, EGLint config_size,
+                                             EGLint* num_config) {
+    typedef EGLBoolean (*PFN)(EGLDisplay, const EGLint*, EGLConfig*, EGLint, EGLint*);
+    auto f = (PFN)get_egl_func("eglChooseConfig");
+    if (!f) { EGL_FORWARD_ERR("eglChooseConfig", ""); return EGL_FALSE; }
+    EGLBoolean r = f(dpy, attrib_list, configs, config_size, num_config);
+    gpuLog("eglChooseConfig -> %s (num=%d)", r ? "true" : "false",
+           num_config ? *num_config : -1);
+    return r;
+}
+
+extern "C" EGLBoolean bionic_eglGetConfigAttrib(EGLDisplay dpy, EGLConfig config,
+                                                EGLint attribute, EGLint* value) {
+    typedef EGLBoolean (*PFN)(EGLDisplay, EGLConfig, EGLint, EGLint*);
+    auto f = (PFN)get_egl_func("eglGetConfigAttrib");
+    if (!f) { EGL_FORWARD_ERR("eglGetConfigAttrib", ""); return EGL_FALSE; }
+    return f(dpy, config, attribute, value);
+}
+
+extern "C" EGLBoolean bionic_eglGetConfigs(EGLDisplay dpy, EGLConfig* configs,
+                                           EGLint config_size, EGLint* num_config) {
+    typedef EGLBoolean (*PFN)(EGLDisplay, EGLConfig*, EGLint, EGLint*);
+    auto f = (PFN)get_egl_func("eglGetConfigs");
+    if (!f) { EGL_FORWARD_ERR("eglGetConfigs", ""); return EGL_FALSE; }
+    return f(dpy, configs, config_size, num_config);
+}
+
+extern "C" EGLContext bionic_eglCreateContext(EGLDisplay dpy, EGLConfig config,
+                                              EGLContext share_context,
+                                              const EGLint* attrib_list) {
+    typedef EGLContext (*PFN)(EGLDisplay, EGLConfig, EGLContext, const EGLint*);
+    auto f = (PFN)get_egl_func("eglCreateContext");
+    if (!f) { EGL_FORWARD_ERR("eglCreateContext", ""); return EGL_NO_CONTEXT; }
+    EGLContext ctx = f(dpy, config, share_context, attrib_list);
+    gpuLog("eglCreateContext -> %p", (void*)ctx);
+    return ctx;
+}
+
+extern "C" EGLBoolean bionic_eglDestroyContext(EGLDisplay dpy, EGLContext ctx) {
+    typedef EGLBoolean (*PFN)(EGLDisplay, EGLContext);
+    auto f = (PFN)get_egl_func("eglDestroyContext");
+    if (!f) { EGL_FORWARD_ERR("eglDestroyContext", ""); return EGL_FALSE; }
+    return f(dpy, ctx);
+}
+
+extern "C" EGLSurface bionic_eglCreatePbufferSurface(EGLDisplay dpy, EGLConfig config,
+                                                     const EGLint* attrib_list) {
+    typedef EGLSurface (*PFN)(EGLDisplay, EGLConfig, const EGLint*);
+    auto f = (PFN)get_egl_func("eglCreatePbufferSurface");
+    if (!f) { EGL_FORWARD_ERR("eglCreatePbufferSurface", ""); return EGL_NO_SURFACE; }
+    EGLSurface s = f(dpy, config, attrib_list);
+    gpuLog("eglCreatePbufferSurface -> %p", (void*)s);
+    return s;
+}
+
+extern "C" EGLBoolean bionic_eglDestroySurface(EGLDisplay dpy, EGLSurface surface) {
+    typedef EGLBoolean (*PFN)(EGLDisplay, EGLSurface);
+    auto f = (PFN)get_egl_func("eglDestroySurface");
+    if (!f) { EGL_FORWARD_ERR("eglDestroySurface", ""); return EGL_FALSE; }
+    return f(dpy, surface);
+}
+
+extern "C" EGLBoolean bionic_eglMakeCurrent(EGLDisplay dpy, EGLSurface draw,
+                                            EGLSurface read, EGLContext ctx) {
+    typedef EGLBoolean (*PFN)(EGLDisplay, EGLSurface, EGLSurface, EGLContext);
+    auto f = (PFN)get_egl_func("eglMakeCurrent");
+    if (!f) { EGL_FORWARD_ERR("eglMakeCurrent", ""); return EGL_FALSE; }
+    EGLBoolean r = f(dpy, draw, read, ctx);
+    gpuLog("eglMakeCurrent(ctx=%p, draw=%p) -> %s", (void*)ctx, (void*)draw,
+           r ? "true" : "false");
+    return r;
+}
+
+extern "C" EGLContext bionic_eglGetCurrentContext(void) {
+    typedef EGLContext (*PFN)(void);
+    auto f = (PFN)get_egl_func("eglGetCurrentContext");
+    if (!f) { EGL_FORWARD_ERR("eglGetCurrentContext", ""); return EGL_NO_CONTEXT; }
+    return f();
+}
+
+extern "C" EGLSurface bionic_eglGetCurrentSurface(EGLint readdraw) {
+    typedef EGLSurface (*PFN)(EGLint);
+    auto f = (PFN)get_egl_func("eglGetCurrentSurface");
+    if (!f) { EGL_FORWARD_ERR("eglGetCurrentSurface", ""); return EGL_NO_SURFACE; }
+    return f(readdraw);
+}
+
+extern "C" EGLDisplay bionic_eglGetCurrentDisplay(void) {
+    typedef EGLDisplay (*PFN)(void);
+    auto f = (PFN)get_egl_func("eglGetCurrentDisplay");
+    if (!f) { EGL_FORWARD_ERR("eglGetCurrentDisplay", ""); return EGL_NO_DISPLAY; }
+    return f();
+}
+
+extern "C" EGLBoolean bionic_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
+    typedef EGLBoolean (*PFN)(EGLDisplay, EGLSurface);
+    auto f = (PFN)get_egl_func("eglSwapBuffers");
+    if (!f) { EGL_FORWARD_ERR("eglSwapBuffers", ""); return EGL_FALSE; }
+    return f(dpy, surface);
+}
+
+extern "C" EGLBoolean bionic_eglSwapInterval(EGLDisplay dpy, EGLint interval) {
+    typedef EGLBoolean (*PFN)(EGLDisplay, EGLint);
+    auto f = (PFN)get_egl_func("eglSwapInterval");
+    if (!f) { EGL_FORWARD_ERR("eglSwapInterval", ""); return EGL_FALSE; }
+    return f(dpy, interval);
+}
+
+extern "C" const char* bionic_eglQueryString(EGLDisplay dpy, EGLint name) {
+    typedef const char* (*PFN)(EGLDisplay, EGLint);
+    auto f = (PFN)get_egl_func("eglQueryString");
+    if (!f) { EGL_FORWARD_ERR("eglQueryString", ""); return nullptr; }
+    const char* s = f(dpy, name);
+    gpuLog("eglQueryString(name=%d) -> %s", name, s ? s : "(null)");
+    return s;
+}
+
+extern "C" EGLBoolean bionic_eglQuerySurface(EGLDisplay dpy, EGLSurface surface,
+                                             EGLint attribute, EGLint* value) {
+    typedef EGLBoolean (*PFN)(EGLDisplay, EGLSurface, EGLint, EGLint*);
+    auto f = (PFN)get_egl_func("eglQuerySurface");
+    if (!f) { EGL_FORWARD_ERR("eglQuerySurface", ""); return EGL_FALSE; }
+    return f(dpy, surface, attribute, value);
+}
+
+extern "C" EGLint bionic_eglGetError(void) {
+    typedef EGLint (*PFN)(void);
+    auto f = (PFN)get_egl_func("eglGetError");
+    if (!f) { EGL_FORWARD_ERR("eglGetError", ""); return EGL_SUCCESS; }
+    EGLint e = f();
+    if (e != EGL_SUCCESS) gpuLog("eglGetError -> 0x%x", (unsigned)e);
+    return e;
+}
+
+extern "C" EGLBoolean bionic_eglSurfaceAttrib(EGLDisplay dpy, EGLSurface surface,
+                                              EGLint attribute, EGLint value) {
+    typedef EGLBoolean (*PFN)(EGLDisplay, EGLSurface, EGLint, EGLint);
+    auto f = (PFN)get_egl_func("eglSurfaceAttrib");
+    if (!f) { EGL_FORWARD_ERR("eglSurfaceAttrib", ""); return EGL_FALSE; }
+    return f(dpy, surface, attribute, value);
+}
+
+extern "C" EGLBoolean bionic_eglReleaseThread(void) {
+    typedef EGLBoolean (*PFN)(void);
+    auto f = (PFN)get_egl_func("eglReleaseThread");
+    if (!f) { EGL_FORWARD_ERR("eglReleaseThread", ""); return EGL_TRUE; }
+    return f();
+}
+
+extern "C" EGLBoolean bionic_eglBindAPI(EGLenum api) {
+    typedef EGLBoolean (*PFN)(EGLenum);
+    auto f = (PFN)get_egl_func("eglBindAPI");
+    if (!f) { EGL_FORWARD_ERR("eglBindAPI", ""); return EGL_FALSE; }
+    return f(api);
+}
+
+extern "C" EGLenum bionic_eglQueryAPI(void) {
+    typedef EGLenum (*PFN)(void);
+    auto f = (PFN)get_egl_func("eglQueryAPI");
+    if (!f) { EGL_FORWARD_ERR("eglQueryAPI", ""); return 0; }
+    return f();
+}
+
+extern "C" EGLDisplay bionic_eglGetPlatformDisplay(EGLenum platform, void* native_display,
+                                                   const EGLint* attrib_list) {
+    (void)native_display;
+    typedef EGLDisplay (*PFN)(EGLenum, void*, const EGLint*);
+    auto f = (PFN)get_egl_func("eglGetPlatformDisplay");
+    if (!f) { EGL_FORWARD_ERR("eglGetPlatformDisplay", ""); return EGL_NO_DISPLAY; }
+    // Same as EXT variant: native display phải là 0 (EGL_DEFAULT_DISPLAY),
+    // CAMetalLayer chỉ dùng cho eglCreateWindowSurface.
+    EGLDisplay d = f(platform, (void*)0, attrib_list);
+    gpuLog("eglGetPlatformDisplay -> %p", (void*)d);
+    return d;
+}
+
+extern "C" EGLBoolean bionic_eglBindTexImage(EGLDisplay dpy, EGLSurface surface, EGLint buffer) {
+    typedef EGLBoolean (*PFN)(EGLDisplay, EGLSurface, EGLint);
+    auto f = (PFN)get_egl_func("eglBindTexImage");
+    if (!f) { EGL_FORWARD_ERR("eglBindTexImage", ""); return EGL_FALSE; }
+    return f(dpy, surface, buffer);
+}
+
+extern "C" EGLBoolean bionic_eglReleaseTexImage(EGLDisplay dpy, EGLSurface surface, EGLint buffer) {
+    typedef EGLBoolean (*PFN)(EGLDisplay, EGLSurface, EGLint);
+    auto f = (PFN)get_egl_func("eglReleaseTexImage");
+    if (!f) { EGL_FORWARD_ERR("eglReleaseTexImage", ""); return EGL_FALSE; }
+    return f(dpy, surface, buffer);
+}
+
+extern "C" EGLBoolean bionic_eglWaitGL(void) {
+    typedef EGLBoolean (*PFN)(void);
+    auto f = (PFN)get_egl_func("eglWaitGL");
+    if (!f) { EGL_FORWARD_ERR("eglWaitGL", ""); return EGL_TRUE; }
+    return f();
+}
+
+extern "C" EGLBoolean bionic_eglWaitNative(EGLint engine) {
+    typedef EGLBoolean (*PFN)(EGLint);
+    auto f = (PFN)get_egl_func("eglWaitNative");
+    if (!f) { EGL_FORWARD_ERR("eglWaitNative", ""); return EGL_TRUE; }
+    return f(engine);
 }
 
 const SymbolEntry kGraphicsSymbols[] = {
@@ -433,8 +688,35 @@ const SymbolEntry kGraphicsSymbols[] = {
     {"ANativeWindow_unlockAndPost", reinterpret_cast<void*>(&bionic_ANativeWindow_unlockAndPost)},
     {"eglGetDisplay", reinterpret_cast<void*>(&bionic_eglGetDisplay)},
     {"eglGetPlatformDisplayEXT", reinterpret_cast<void*>(&bionic_eglGetPlatformDisplayEXT)},
+    {"eglGetPlatformDisplay", reinterpret_cast<void*>(&bionic_eglGetPlatformDisplay)},
     {"eglGetProcAddress", reinterpret_cast<void*>(&bionic_eglGetProcAddress)},
     {"eglCreateWindowSurface", reinterpret_cast<void*>(&bionic_eglCreateWindowSurface)},
+    {"eglInitialize", reinterpret_cast<void*>(&bionic_eglInitialize)},
+    {"eglTerminate", reinterpret_cast<void*>(&bionic_eglTerminate)},
+    {"eglChooseConfig", reinterpret_cast<void*>(&bionic_eglChooseConfig)},
+    {"eglGetConfigAttrib", reinterpret_cast<void*>(&bionic_eglGetConfigAttrib)},
+    {"eglGetConfigs", reinterpret_cast<void*>(&bionic_eglGetConfigs)},
+    {"eglCreateContext", reinterpret_cast<void*>(&bionic_eglCreateContext)},
+    {"eglDestroyContext", reinterpret_cast<void*>(&bionic_eglDestroyContext)},
+    {"eglCreatePbufferSurface", reinterpret_cast<void*>(&bionic_eglCreatePbufferSurface)},
+    {"eglDestroySurface", reinterpret_cast<void*>(&bionic_eglDestroySurface)},
+    {"eglMakeCurrent", reinterpret_cast<void*>(&bionic_eglMakeCurrent)},
+    {"eglGetCurrentContext", reinterpret_cast<void*>(&bionic_eglGetCurrentContext)},
+    {"eglGetCurrentSurface", reinterpret_cast<void*>(&bionic_eglGetCurrentSurface)},
+    {"eglGetCurrentDisplay", reinterpret_cast<void*>(&bionic_eglGetCurrentDisplay)},
+    {"eglSwapBuffers", reinterpret_cast<void*>(&bionic_eglSwapBuffers)},
+    {"eglSwapInterval", reinterpret_cast<void*>(&bionic_eglSwapInterval)},
+    {"eglQueryString", reinterpret_cast<void*>(&bionic_eglQueryString)},
+    {"eglQuerySurface", reinterpret_cast<void*>(&bionic_eglQuerySurface)},
+    {"eglGetError", reinterpret_cast<void*>(&bionic_eglGetError)},
+    {"eglSurfaceAttrib", reinterpret_cast<void*>(&bionic_eglSurfaceAttrib)},
+    {"eglReleaseThread", reinterpret_cast<void*>(&bionic_eglReleaseThread)},
+    {"eglBindAPI", reinterpret_cast<void*>(&bionic_eglBindAPI)},
+    {"eglQueryAPI", reinterpret_cast<void*>(&bionic_eglQueryAPI)},
+    {"eglBindTexImage", reinterpret_cast<void*>(&bionic_eglBindTexImage)},
+    {"eglReleaseTexImage", reinterpret_cast<void*>(&bionic_eglReleaseTexImage)},
+    {"eglWaitGL", reinterpret_cast<void*>(&bionic_eglWaitGL)},
+    {"eglWaitNative", reinterpret_cast<void*>(&bionic_eglWaitNative)},
     {"vkGetInstanceProcAddr", reinterpret_cast<void*>(&bionic_vkGetInstanceProcAddr)},
     {"vkCreateAndroidSurfaceKHR", reinterpret_cast<void*>(&bionic_vkCreateAndroidSurfaceKHR)},
     {"vkEnumerateInstanceExtensionProperties", reinterpret_cast<void*>(&bionic_vkEnumerateInstanceExtensionProperties)},

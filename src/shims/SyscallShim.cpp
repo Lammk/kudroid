@@ -1598,45 +1598,63 @@ extern "C" void* bionic_memalign(size_t alignment, size_t size) {
 }
 
 // ============================================================================
-// __system_property_get — Android property system stub
+// __system_property_* — Android property system
 // ============================================================================
+// Bionic ABI: prop_info là con trỏ không trong suốt — game nhận từ
+// __system_property_find rồi truyền lại cho __system_property_read/
+// _read_callback. Ta lưu bảng property tĩnh và dùng con trỏ tới entry như
+// prop_info*. Trước đây find trả 0 (not found) và read_callback là no-op —
+// Unity đọc trực tiếp __system_property_read sẽ thấy rác.
+namespace {
+struct KudroidProp {
+    const char* name;
+    const char* value;
+};
+const KudroidProp kKnownProps[] = {
+    {"ro.build.version.sdk", "29"},
+    {"ro.build.version.release", "10"},
+    {"ro.product.cpu.abi", "arm64-v8a"},
+    {"ro.debuggable", "0"},
+    {"persist.sys.timezone", "UTC"},
+};
+constexpr size_t kKnownPropsCount = sizeof(kKnownProps) / sizeof(kKnownProps[0]);
+
+const KudroidProp* findProp(const char* name) {
+    if (!name) return nullptr;
+    for (size_t i = 0; i < kKnownPropsCount; ++i) {
+        if (std::strcmp(kKnownProps[i].name, name) == 0) return &kKnownProps[i];
+    }
+    return nullptr;
+}
+} // namespace
+
 extern "C" int bionic_system_property_get(const char* name, char* value) {
     if (!name || !value) return 0;
-    // Return empty string for all properties, length 0
     value[0] = '\0';
-
-    // Provide some useful defaults
-    if (std::strcmp(name, "ro.build.version.sdk") == 0) {
-        std::strcpy(value, "29");
-        return 2;
-    }
-    if (std::strcmp(name, "ro.build.version.release") == 0) {
-        std::strcpy(value, "10");
-        return 2;
-    }
-    if (std::strcmp(name, "ro.product.cpu.abi") == 0) {
-        std::strcpy(value, "arm64-v8a");
-        return 9;
-    }
-    if (std::strcmp(name, "ro.debuggable") == 0) {
-        std::strcpy(value, "0");
-        return 1;
-    }
-    if (std::strcmp(name, "persist.sys.timezone") == 0) {
-        std::strcpy(value, "UTC");
-        return 3;
-    }
-    return 0;
+    const KudroidProp* p = findProp(name);
+    if (!p) return 0;
+    std::strcpy(value, p->value);
+    return static_cast<int>(std::strlen(p->value));
 }
 
-extern "C" int bionic_system_property_find(const char* name) {
-    (void)name;
-    return 0; // not found
+extern "C" const void* bionic_system_property_find(const char* name) {
+    return findProp(name); // prop_info* — nullptr nếu không có
+}
+
+// int __system_property_read(const prop_info* pi, char* name, char* value)
+extern "C" int bionic_system_property_read(const void* pi, char* name, char* value) {
+    if (!pi) return 0;
+    const KudroidProp* p = static_cast<const KudroidProp*>(pi);
+    if (name) std::strcpy(name, p->name);
+    if (value) std::strcpy(value, p->value);
+    return static_cast<int>(std::strlen(p->value));
 }
 
 extern "C" void bionic_system_property_read_callback(
     void* pi, void (*callback)(void*, const char*, const char*, unsigned), void* cookie) {
-    (void)pi; (void)callback; (void)cookie;
+    if (!pi || !callback) return;
+    const KudroidProp* p = static_cast<const KudroidProp*>(pi);
+    callback(cookie, p->name, p->value, 0u);
 }
 
 // ============================================================================
@@ -2178,6 +2196,18 @@ extern "C" void bionic___FD_SET_chk(int fd, fd_set* set, size_t set_size) {
     FD_SET(fd, set);
 }
 
+// bionic: int __FD_ISSET_chk(int fd, const fd_set* set, size_t set_size)
+// Trả về nonzero nếu fd có mặt trong set; dummy trước đây trả 0 khiến game
+// tưởng fd không sẵn sàng → poll loop treo/đọc sai.
+extern "C" int bionic___FD_ISSET_chk(int fd, const fd_set* set, size_t set_size) {
+    if (!set) return 0;
+    if (fd < 0 || static_cast<size_t>(fd) >= set_size * 8) {
+        trace("__FD_ISSET_chk: fd out of range for fd_set (fortify)");
+        return 0;
+    }
+    return FD_ISSET(fd, set) ? 1 : 0;
+}
+
 // bionic: int sem_timedwait(sem_t* sem, const struct timespec* abs_timeout)
 // abs_timeout là thời điểm tuyệt đối (CLOCK_REALTIME). Host iOS có sem_timedwait
 // nhưng không export qua dlsym(RTLD_DEFAULT), nên giả lập bằng sem_trywait + sleep.
@@ -2457,6 +2487,7 @@ const SymbolEntry kSyscallSymbols[] = {
     // Android property system
     {"__system_property_get", reinterpret_cast<void*>(&bionic_system_property_get)},
     {"__system_property_find", reinterpret_cast<void*>(&bionic_system_property_find)},
+    {"__system_property_read", reinterpret_cast<void*>(&bionic_system_property_read)},
     {"__system_property_read_callback", reinterpret_cast<void*>(&bionic_system_property_read_callback)},
 
     // ELF iteration
@@ -2487,6 +2518,7 @@ const SymbolEntry kSyscallSymbols[] = {
     {"sincosf", reinterpret_cast<void*>(&bionic_sincosf)},
     {"__strlen_chk", reinterpret_cast<void*>(&bionic___strlen_chk)},
     {"__FD_SET_chk", reinterpret_cast<void*>(&bionic___FD_SET_chk)},
+    {"__FD_ISSET_chk", reinterpret_cast<void*>(&bionic___FD_ISSET_chk)},
     {"sem_timedwait", reinterpret_cast<void*>(&bionic_sem_timedwait)},
     {"android_set_abort_message", reinterpret_cast<void*>(&bionic_android_set_abort_message)},
     {"__memcpy_chk", reinterpret_cast<void*>(&bionic___memcpy_chk)},

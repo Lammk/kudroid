@@ -54,6 +54,12 @@ struct AppsView: View {
                         Text("KuDroid")
                             .font(.title2)
                             .fontWeight(.black)
+                        // Hiển thị version ngay trên màn hình — phân biệt bản cũ/mới
+                        // khi nghi ngờ iPhone đang chạy IPA lỗi thời.
+                        Text("v" + appVersion())
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundColor(.green.opacity(0.8))
                         Spacer()
                         Button(action: { showAPKInstaller = true }) {
                             Image(systemName: "plus.circle.fill")
@@ -291,6 +297,14 @@ func activateAudioSession() {
                              mode: "AVAudioSessionModeDefault",
                              options: [])
     try? session.setActive(true)
+}
+
+/// Đọc CFBundleShortVersionString từ Info.plist (0.1.5).
+func appVersion() -> String {
+    if let v = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String {
+        return v
+    }
+    return "0.0.0"
 }
 
 func setupLogDir() {

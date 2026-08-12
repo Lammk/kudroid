@@ -95,7 +95,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
 
     set_target_properties(KuDroidShell PROPERTIES
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/ios-app/Info.plist.in"
-        MACOSX_BUNDLE_BUNDLE_NAME "KuDroidShell"
+        MACOSX_BUNDLE_BUNDLE_NAME "KuDroid"
         MACOSX_BUNDLE_GUI_IDENTIFIER "com.kudroid.shell"
         XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "com.kudroid.shell"
         XCODE_ATTRIBUTE_ENABLE_BITCODE "NO"
