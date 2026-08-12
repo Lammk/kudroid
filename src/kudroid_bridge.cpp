@@ -161,6 +161,11 @@ extern "C" const char* kudroid_build_stamp(void) {
 
 #if defined(__aarch64__) || defined(__arm64__)
 static void symbolicateAddr(uintptr_t pc, char* out, size_t outSize) {
+    // Ưu tiên registry guest (region do ELF loader mmap — dladdr không biết),
+    // sau đó mới fallback dladdr cho symbol host.
+    if (kudroid_lookup_guest_module(reinterpret_cast<void*>(pc), out, outSize)) {
+        return;
+    }
     Dl_info info;
     if (dladdr(reinterpret_cast<void*>(pc), &info) != 0 && info.dli_fname) {
         snprintf(out, outSize, "0x%llx %s%s%s", (unsigned long long)pc,

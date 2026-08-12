@@ -22,6 +22,9 @@ typedef void (*PropReadCbFn)(void*, void (*cb)(void*, const char*, const char*, 
 typedef int (*FdIssetChkFn)(int, const void*, size_t);
 typedef void (*FdSetChkFn)(int, void*, size_t);
 
+extern "C" void kudroid_register_guest_module(void*, std::size_t, const char*);
+extern "C" bool kudroid_lookup_guest_module(void*, char*, std::size_t);
+
 int failures = 0;
 static void check(bool cond, const char* what) {
     if (cond) {
@@ -127,6 +130,22 @@ int main() {
     check(issetFn(7, set, sizeof(set)) == 0, "FD_ISSET_chk fd 7 not set");
     check(issetFn(500, set, sizeof(set)) == 0, "FD_ISSET_chk out-of-range fd -> 0 (no crash)");
     check(issetFn(-1, set, sizeof(set)) == 0, "FD_ISSET_chk negative fd -> 0");
+
+    std::printf("=== guest module registry ===\n");
+    void* modBase = (void*)0x40000000;   // fake guest base
+    kudroid_register_guest_module(modBase, 0x10000, "/data/app/com.foo/lib/arm64/libunity.so");
+    char sym[512] = {0};
+    check(kudroid_lookup_guest_module((void*)0x40001234, sym, sizeof(sym)),
+          "lookup finds address inside registered range");
+    check(std::strstr(sym, "libunity.so+0x1234") != nullptr,
+          "lookup renders path+offset");
+    check(!kudroid_lookup_guest_module((void*)0x50001234, sym, sizeof(sym)),
+          "lookup misses address outside range");
+    kudroid_register_guest_module(modBase, 0x20000, "/data/app/com.foo/lib/arm64/libunity.so");  // update
+    check(kudroid_lookup_guest_module((void*)0x4001abcd, sym, sizeof(sym)),
+          "re-register same base updates range");
+    check(kudroid_lookup_guest_module(nullptr, sym, sizeof(sym)) == false,
+          "lookup(nullptr) -> false");
 
     std::printf("\n%s (%d failures)\n", failures == 0 ? "ALL PASS" : "FAILED", failures);
     return failures == 0 ? 0 : 1;

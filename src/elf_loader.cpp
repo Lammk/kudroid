@@ -2,8 +2,10 @@
 #include "kudroid/BionicShim.h"
 
 #include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <mutex>
 #include <sys/mman.h>
 
 #ifndef DT_INIT
@@ -481,6 +483,11 @@ bool ElfLoader::map() {
         kudroid_tls_set_template(static_cast<char*>(base_) + tls_vaddr_, tls_filesz_);
     }
 
+    // Đăng ký module guest (base_..base_+minVaddr+totalSize) để crash handler
+    // symbolicate được pc nằm trong .so này — dladdr không biết region do
+    // ELF loader mmap nên trước đây in "no symbol".
+    kudroid_register_guest_module(base_, minVaddr + totalSize, path_.c_str());
+
     return true;
 }
 
@@ -918,6 +925,59 @@ void ElfLoader::deregisterEhFrame() {
         
         __deregister_frame(eh_frame_actual);
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Registry module guest — crash handler symbolicate.
+//
+// Các region do ELF loader mmap không nằm trong dyld image list nên dladdr
+// không biết; registry này ánh xạ base → (size, path) để crash handler in ra
+// "<path>+0x<offset>" thay vì "(no symbol)".
+//
+// Ghi xảy ra lúc load (đơn luồng khởi động, có lock để an toàn nếu 2 luồng
+// load cùng lúc). Đọc xảy ra trong crash handler (có thể trên luồng bất kỳ)
+// và KHÔNG lock — tránh deadlock nếu crash xảy ra ngay khi luồng khác đang
+// giữ mutex. Sau khi load xong registry gần như bất biến nên đọc không lock
+// là chấp nhận được (best effort như mọi phần khác của crash handler).
+namespace {
+struct GuestModule {
+    std::uintptr_t base;
+    std::size_t    size;
+    std::string    path;
+};
+std::mutex g_guestMtx;
+std::vector<GuestModule> g_guestModules;
+} // namespace
+
+extern "C" void kudroid_register_guest_module(void* base, std::size_t size,
+                                              const char* path) {
+    if (!base || size == 0 || !path) return;
+    std::lock_guard<std::mutex> lock(g_guestMtx);
+    const auto addr = reinterpret_cast<std::uintptr_t>(base);
+    for (auto& m : g_guestModules) {
+        if (m.base == addr) {  // reload cùng module: cập nhật thay vì thêm trùng
+            m.size = size;
+            m.path = path;
+            return;
+        }
+    }
+    g_guestModules.push_back({addr, size, std::string(path)});
+}
+
+extern "C" bool kudroid_lookup_guest_module(void* addr, char* out, std::size_t outSize) {
+    if (!addr || !out || outSize == 0) return false;
+    const auto a = reinterpret_cast<std::uintptr_t>(addr);
+    // Đọc không lock (xem ghi chú phía trên) — vector chỉ bị sửa lúc load.
+    for (const auto& m : g_guestModules) {
+        if (a >= m.base && a < m.base + m.size) {
+            const auto off = a - m.base;
+            const int n = snprintf(out, outSize, "0x%llx %s+0x%llx",
+                                   (unsigned long long)a, m.path.c_str(),
+                                   (unsigned long long)off);
+            return n > 0 && static_cast<std::size_t>(n) < outSize;
+        }
+    }
+    return false;
 }
 
 } // namespace kudroid

@@ -8,6 +8,16 @@
 
 namespace kudroid {
 
+/// đăng ký module elf guest đã map (base/size/path) để crash handler
+/// symbolicate được pc nằm trong guest .so (dladdr không biết region do
+/// ELF loader mmap nên trước đây in "no symbol"). An toàn gọi nhiều lần.
+extern "C" void kudroid_register_guest_module(void* base, std::size_t size,
+                                              const char* path);
+
+/// tìm module guest chứa địa chỉ addr; ghi "path+0x<offset>" vào out nếu tìm thấy.
+/// trả về true nếu tìm thấy. Dùng trong crash handler (chỉ đọc, không lock).
+extern "C" bool kudroid_lookup_guest_module(void* addr, char* out, std::size_t outSize);
+
 class LibraryManager;
 
 /// bề mặt trình tải elf64 (arm64) tối thiểu.
