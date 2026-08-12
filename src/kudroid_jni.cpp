@@ -144,6 +144,13 @@ static void log_jni(const char* fmt, ...) {
 
     fprintf(stderr, "[kudroid_jni] %s\n", buffer);
 
+    // Mirror REAL-TIME vào crash buffer (qua kudroid_android_log_message —
+    // pipeline chuẩn: stdout + kudroid_android_logs.txt + crash buffer). Trước
+    // đây log_jni chỉ ghi stderr + callback (callback chỉ append vào string test,
+    // không mirror) → crash giữa JVM init (vd JNI_CreateJavaVM) làm "log up to
+    // crash" dừng trước "Initializing Avian JVM..." dù code đã chạy tới đó.
+    kudroid_android_log_message(2, "kudroid_jni", buffer);
+
     std::lock_guard<std::mutex> lock(g_log_mutex);
     if (g_jni_log_callback) {
         g_jni_log_callback(buffer);

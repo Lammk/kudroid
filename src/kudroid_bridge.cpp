@@ -21,6 +21,7 @@
 #include <string>
 #include <fcntl.h>
 #include <unistd.h>
+#include <pthread.h>
 #include <sys/ucontext.h>
 #include <dlfcn.h>
 #include <unwind.h>
@@ -72,6 +73,45 @@ extern "C" void kudroid_store_abort_message(const char* msg) {
     g_abortMessage[sizeof(g_abortMessage) - 1] = '\0';
 }
 
+// ── Bắt abort message phía HOST (không phải từ game) ─────────────────────────
+// SIGABRT thường là abort() sau một exception/assert không bắt được. Trước đây
+// chỉ có android_set_abort_message (từ guest) mới lưu được message → crash log
+// thiếu lý do. Hai handler dưới đây bắt lý do trước khi abort:
+//  1. ObjC exception chưa bắt (NSException — ANGLE/Metal/UIKit hay ném) → reason
+//  2. C++ exception chưa bắt (std::terminate) → what()
+#if defined(__APPLE__)
+#include <exception>
+extern "C" {
+extern void* objc_msgSend(void* self, void* op, ...);
+extern void* sel_registerName(const char* name);
+extern void NSSetUncaughtExceptionHandler(void (*handler)(void* exception));
+}
+
+static void kudroid_uncaught_objc_handler(void* exception) {
+    // exception là NSException* — [exception reason] → NSString* → UTF8String.
+    if (!exception) return;
+    void* reason = objc_msgSend(exception, sel_registerName("reason"));
+    if (reason) {
+        const char* utf8 = static_cast<const char*>(
+            objc_msgSend(reason, sel_registerName("UTF8String")));
+        if (utf8) kudroid_store_abort_message(utf8);
+    }
+}
+
+static void kudroid_terminate_handler() {
+    if (std::current_exception()) {
+        try {
+            std::rethrow_exception(std::current_exception());
+        } catch (const std::exception& e) {
+            if (e.what() && e.what()[0]) kudroid_store_abort_message(e.what());
+        } catch (...) {
+            kudroid_store_abort_message("uncaught non-std C++ exception");
+        }
+    }
+    std::abort();
+}
+#endif
+
 // Unwind bằng _Unwind_Backtrace (không dùng heap) + dladdr (best effort).
 struct UnwindContext {
     int fd;
@@ -87,14 +127,28 @@ static _Unwind_Reason_Code unwindCallback(struct _Unwind_Context* ctx, void* arg
         Dl_info info;
         int m;
         if (dladdr(reinterpret_cast<void*>(pc), &info) != 0 && info.dli_fname) {
-            m = snprintf(line, sizeof(line), "  #%02d pc 0x%llx  %s%s%s\n",
-                         u->count, (unsigned long long)pc,
-                         info.dli_fname,
-                         info.dli_sname ? " " : "",
-                         info.dli_sname ? info.dli_sname : "");
+            if (info.dli_sname) {
+                const long offset = (long)(pc - (uintptr_t)info.dli_saddr);
+                m = snprintf(line, sizeof(line), "  #%02d pc 0x%llx  %s+0x%lx (%s)\n",
+                             u->count, (unsigned long long)pc, info.dli_sname,
+                             offset, info.dli_fname);
+            } else {
+                const long offset = (long)(pc - (uintptr_t)info.dli_fbase);
+                m = snprintf(line, sizeof(line),
+                             "  #%02d pc 0x%llx  +0x%lx (%s)\n",
+                             u->count, (unsigned long long)pc, offset,
+                             info.dli_fname);
+            }
         } else {
-            m = snprintf(line, sizeof(line), "  #%02d pc 0x%llx\n",
-                         u->count, (unsigned long long)pc);
+            char guest[512];
+            if (kudroid::kudroid_lookup_guest_module(
+                    reinterpret_cast<void*>(pc), guest, sizeof(guest))) {
+                m = snprintf(line, sizeof(line), "  #%02d pc 0x%llx  %s\n",
+                             u->count, (unsigned long long)pc, guest);
+            } else {
+                m = snprintf(line, sizeof(line), "  #%02d pc 0x%llx\n",
+                             u->count, (unsigned long long)pc);
+            }
         }
         if (m > 0) (void)!write(u->fd, line, (size_t)m);
     }
@@ -185,18 +239,25 @@ extern "C" const char* kudroid_build_stamp(void) {
 }
 
 #if defined(__aarch64__) || defined(__arm64__)
+// Symbolicate một địa chỉ thành "tên hàm+offset (module)" hoặc "module+offset" —
+// để nhìn pc là biết chính xác chết trong hàm nào, không còn (no symbol) mù mờ.
+// Ưu tiên registry guest (region do ELF loader mmap — dladdr không biết), sau đó
+// dladdr cho symbol host, cuối cùng in raw + module base offset.
 static void symbolicateAddr(uintptr_t pc, char* out, size_t outSize) {
-    // Ưu tiên registry guest (region do ELF loader mmap — dladdr không biết),
-    // sau đó mới fallback dladdr cho symbol host.
     if (kudroid::kudroid_lookup_guest_module(reinterpret_cast<void*>(pc), out, outSize)) {
         return;
     }
     Dl_info info;
     if (dladdr(reinterpret_cast<void*>(pc), &info) != 0 && info.dli_fname) {
-        snprintf(out, outSize, "0x%llx %s%s%s", (unsigned long long)pc,
-                 info.dli_fname,
-                 info.dli_sname ? " " : "",
-                 info.dli_sname ? info.dli_sname : "");
+        if (info.dli_sname) {
+            const long offset = (long)(pc - (uintptr_t)info.dli_saddr);
+            snprintf(out, outSize, "%s+0x%lx (%s)", info.dli_sname, offset,
+                     info.dli_fname);
+        } else {
+            const long offset = (long)(pc - (uintptr_t)info.dli_fbase);
+            snprintf(out, outSize, "0x%llx+0x%lx (%s)",
+                     (unsigned long long)pc, offset, info.dli_fname);
+        }
     } else {
         snprintf(out, outSize, "0x%llx (no symbol)", (unsigned long long)pc);
     }
@@ -236,6 +297,22 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
             char sigline[256];
             int m = snprintf(sigline, sizeof(sigline), "signal = %d\n", sig);
             if (m > 0) (void)!write(fd, sigline, (size_t)m);
+
+            // Ghi tên thread đang crash (game chạy nhiều thread — biết thread nào
+            // chết là một nửa chẩn đoán). pthread_getname_np không hoàn toàn
+            // async-signal-safe nhưng là crash handler chẩn đoán, chấp nhận được.
+            {
+                char tname[64] = "?";
+#if defined(__APPLE__)
+                pthread_getname_np(pthread_self(), tname, sizeof(tname));
+#else
+                (void)pthread_getname_np(pthread_self(), tname, sizeof(tname));
+#endif
+                m = snprintf(sigline, sizeof(sigline), "thread = %s (0x%llx)\n",
+                             tname[0] ? tname : "?",
+                             (unsigned long long)(uintptr_t)pthread_self());
+                if (m > 0) (void)!write(fd, sigline, (size_t)m);
+            }
 
             // in địa chỉ lỗi
             if (info) {
@@ -346,6 +423,12 @@ static void installCrashHandlers(void) {
     // SIGPIPE mặc định, chỉ cần game ghi log vào một pipe đã đóng là app chết
     // ngay mà không có crash log.
     ::signal(SIGPIPE, SIG_IGN);
+
+#if defined(__APPLE__)
+    // Bắt lý do abort trước khi nó xảy ra: ObjC exception chưa bắt + C++ terminate.
+    NSSetUncaughtExceptionHandler(&kudroid_uncaught_objc_handler);
+    std::set_terminate(&kudroid_terminate_handler);
+#endif
 }
 
 extern "C" void kudroid_set_log_dir(const char* dir) {
