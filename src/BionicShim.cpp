@@ -12,6 +12,8 @@
 #include <shared_mutex>
 #include <dlfcn.h>
 #include <cstring>
+#include <cstdlib>
+#include <cxxabi.h>
 
 namespace kudroid {
 namespace {
@@ -107,6 +109,56 @@ void* resolve_bionic_symbol(const char* name) {
             if (host_ptr) {
                 resolved = host_ptr;
                 is_host = true;
+            }
+        }
+
+        // C++-mangled reference to a C function (guest .so compiled as C++
+        // without extern "C", e.g. `extern int __android_log_print(...)` in
+        // tests/test_jni_massive.cpp). Demangle, extract the plain function
+        // name, and resolve THAT through the same tables — otherwise every log
+        // call silently becomes a no-op dummy and crashes show no log.
+        if (!resolved && name[0] == '_' && name[1] == 'Z') {
+            int status = 0;
+            char* demangled = abi::__cxa_demangle(name, nullptr, nullptr, &status);
+            if (demangled && status == 0) {
+                const std::string full(demangled);
+                std::free(demangled);
+                const auto paren = full.find('(');
+                const auto space = paren == std::string::npos
+                                       ? full.rfind(' ')
+                                       : full.rfind(' ', paren);
+                std::string fnName = paren == std::string::npos
+                                         ? full
+                                         : full.substr(space == std::string::npos ? 0 : space + 1,
+                                                       paren - (space == std::string::npos ? 0 : space + 1));
+                const auto colons = fnName.rfind("::");
+                if (colons != std::string::npos) fnName = fnName.substr(colons + 2);
+
+                const SymbolEntry* syscalls2 = get_syscall_symbols(&count);
+                resolved = resolve_from_list(syscalls2, count, fnName.c_str());
+                if (!resolved) {
+                    const SymbolEntry* graphics2 = get_graphics_symbols(&count);
+                    resolved = resolve_from_list(graphics2, count, fnName.c_str());
+                }
+                if (!resolved) {
+                    const SymbolEntry* input2 = get_input_symbols(&count);
+                    resolved = resolve_from_list(input2, count, fnName.c_str());
+                }
+                if (!resolved) {
+                    const SymbolEntry* audio2 = get_audio_symbols(&count);
+                    resolved = resolve_from_list(audio2, count, fnName.c_str());
+                }
+                if (!resolved) {
+                    const SymbolEntry* assets2 = get_asset_symbols(&count);
+                    resolved = resolve_from_list(assets2, count, fnName.c_str());
+                }
+                if (resolved) {
+                    char msg[256];
+                    snprintf(msg, sizeof(msg),
+                             "mangled %s demangled to %s, bound to shim implementation",
+                             name, fnName.c_str());
+                    trace_shim(msg);
+                }
             }
         }
 

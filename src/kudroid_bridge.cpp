@@ -1279,6 +1279,7 @@ extern "C" const char* kudroid_syscall_so_test(const char* path) {
             log += "[kudroid_syscall] RELOCATE FAILED: " + std::string(loader.lastError()) + "\n";
         } else {
             log += "[kudroid_syscall] ELF mapped and Bionic imports bound.\n";
+            mirrorCrash(log);
             void* address = loader.getSymbolAddress("kudroid_syscall_test");
             if (!address) {
                 log += "[kudroid_syscall] SYMBOL FAILED: kudroid_syscall_test not found\n";
@@ -1288,6 +1289,7 @@ extern "C" const char* kudroid_syscall_so_test(const char* path) {
                 
                 // xóa bộ đệm theo dõi bionicshim
                 kudroid::bionic_shim_reset_trace();
+                mirrorCrash(log);
                 
                 int result = test_func();
                 log += "[kudroid_syscall] SYSCALL TEST RESULT: " +
@@ -1323,16 +1325,19 @@ extern "C" const char* kudroid_jni_massive_so_test(const char* path) {
             loader.registerEhFrame();
             loader.executeInit();
             log += "[kudroid_jni] ELF mapped, relocated, and initialized.\n";
+            mirrorCrash(log);
             
             // thực thi jni_onload nếu có
             void* jniOnLoadAddr = loader.getSymbolAddress("JNI_OnLoad");
             if (jniOnLoadAddr) {
                 log += "[kudroid_jni] Found JNI_OnLoad, executing...\n";
+                mirrorCrash(log);
                 // lấy jvm từ bộ nối
                 using JNI_OnLoad_t = jint (*)(JavaVM*, void*);
                 JNI_OnLoad_t jniOnLoad = reinterpret_cast<JNI_OnLoad_t>(jniOnLoadAddr);
                 jint version = jniOnLoad(kudroid_jni_get_javavm(), nullptr);
                 log += "[kudroid_jni] JNI_OnLoad returned version: 0x" + std::to_string(version) + "\n";
+                mirrorCrash(log);
             }
             
             void* address = loader.getSymbolAddress("kudroid_jni_massive_test");
@@ -1340,6 +1345,7 @@ extern "C" const char* kudroid_jni_massive_so_test(const char* path) {
                 log += "[kudroid_jni] SYMBOL FAILED: kudroid_jni_massive_test not found\n";
             } else {
                 log += "[kudroid_jni] Running kudroid_jni_massive_test()...\n";
+                mirrorCrash(log);
                 int (*test_func)(void*) = reinterpret_cast<int (*)(void*)>(address);
                 
                 // thiết lập lệnh gọi lại
@@ -1354,9 +1360,13 @@ extern "C" const char* kudroid_jni_massive_so_test(const char* path) {
                 });
 
                 kudroid_jni_init_jvm("", ""); // đảm bảo nó được khởi tạo
+                mirrorCrash(log);
                 void* vm = kudroid_jni_get_javavm();
                 
                 int result = test_func(vm);
+                log += "[kudroid_jni] TEST RESULT: " +
+                       (result == 0 ? std::string("0 (SUCCESS)") : std::to_string(result) + " (FAILED)") + "\n";
+                mirrorCrash(log);
                 log += "[kudroid_jni] TEST RESULT: " +
                        (result == 0 ? std::string("0 (SUCCESS)") : std::to_string(result) + " (FAILED)") + "\n";
             }
@@ -1389,6 +1399,7 @@ extern "C" const char* kudroid_gpu_vulkan_so_test(const char* path) {
             log += "[kudroid_gpu] RELOCATE FAILED: " + std::string(loader.lastError()) + "\n";
         } else {
             log += "[kudroid_gpu] ELF mapped and Bionic imports bound.\n";
+            mirrorCrash(log);
             void* address = loader.getSymbolAddress("kudroid_gpu_vulkan_test");
             if (!address) {
                 log += "[kudroid_gpu] SYMBOL FAILED: kudroid_gpu_vulkan_test not found\n";
@@ -1435,6 +1446,7 @@ extern "C" const char* kudroid_gpu_opengl_so_test(const char* path) {
             log += "[kudroid_gpu] RELOCATE FAILED: " + std::string(loader.lastError()) + "\n";
         } else {
             log += "[kudroid_gpu] ELF mapped and Bionic imports bound.\n";
+            mirrorCrash(log);
             void* address = loader.getSymbolAddress("kudroid_gpu_opengl_test");
             if (!address) {
                 log += "[kudroid_gpu] SYMBOL FAILED: kudroid_gpu_opengl_test not found\n";

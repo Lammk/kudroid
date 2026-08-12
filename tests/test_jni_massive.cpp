@@ -8,8 +8,14 @@
 #define ANDROID_LOG_INFO 4
 #endif
 
-// Bionic shim provides this
-extern int __android_log_print(int priority, const char* tag, const char* format, ...);
+// Bionic shim provides this. MUST be extern "C" — compiled as C++ here, and a
+// plain declaration would mangle the symbol (_Z19__android_log_printiPKcS0_z)
+// so the shim couldn't resolve it and every log call silently became a dummy.
+extern "C" int __android_log_print(int priority, const char* tag, const char* format, ...);
+
+// Dummy native method for RegisterNatives — passing NULL fnPtr can make the
+// VM abort ("JNI error: native method not found"), so use a real address.
+static void jni_massive_dummy_native() {}
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "KuDroidJNI_Massive", __VA_ARGS__)
 
@@ -91,13 +97,23 @@ extern "C" int kudroid_jni_massive_test(JavaVM* vm) {
     LOGI("Testing GetFieldID()...");
     jfieldID fid = env->GetFieldID(strCls, "value", "I");
     LOGI("GetFieldID() returned: %p", fid);
+    if (!fid) {
+        // wrong signature leaves NoSuchFieldError pending — clear it so the
+        // next JNI call isn't skipped/fatal
+        LOGI("GetFieldID failed (expected for wrong sig), clearing exception...");
+        env->ExceptionClear();
+    }
 
     LOGI("Testing GetIntField()...");
-    jint intField = env->GetIntField(obj1, fid);
-    LOGI("GetIntField() returned: %d", intField);
+    if (fid) {
+        jint intField = env->GetIntField(obj1, fid);
+        LOGI("GetIntField() returned: %d", intField);
 
-    LOGI("Testing SetIntField()...");
-    env->SetIntField(obj1, fid, 42);
+        LOGI("Testing SetIntField()...");
+        env->SetIntField(obj1, fid, 42);
+    } else {
+        LOGI("GetIntField/SetIntField skipped (no field id)");
+    }
 
     LOGI("Testing GetStaticMethodID()...");
     jmethodID staticMid = env->GetStaticMethodID(strCls, "valueOf", "(I)Ljava/lang/String;");
@@ -143,7 +159,7 @@ extern "C" int kudroid_jni_massive_test(JavaVM* vm) {
 
     LOGI("Testing RegisterNatives()...");
     JNINativeMethod methods[] = {
-        {"dummyMethod", "()V", (void*)NULL}
+        {"dummyMethod", "()V", (void*)&jni_massive_dummy_native}
     };
     jint regRet = env->RegisterNatives(strCls, methods, 1);
     LOGI("RegisterNatives() returned: %d", regRet);
