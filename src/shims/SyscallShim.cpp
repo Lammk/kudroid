@@ -18,8 +18,10 @@
 #include <sys/uio.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
+#if defined(__linux__)
 #include <sys/inotify.h>
 #include <sys/signalfd.h>
+#endif
 #include <unwind.h>
 #include <cxxabi.h>
 #include <chrono>

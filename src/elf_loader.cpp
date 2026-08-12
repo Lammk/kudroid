@@ -701,11 +701,11 @@ bool ElfLoader::relocate() {
                     applyRelocations(jmpRelVaddr, jmpRelSize) &&
                     applyRelr();
     fprintf(stderr,
-            "[KuDroidELF] relocate(%s): RELA=%zu entries, JMPREL=%zu, RELR=%zu bytes, symtab=%s\n",
+            "[KuDroidELF] relocate(%s): RELA=%llu entries, JMPREL=%llu, RELR=%llu bytes, symtab=%s\n",
             path_.c_str(),
-            relaSize / relaEnt,
-            relaEnt ? jmpRelSize / relaEnt : 0,
-            (size_t)relrSize,
+            static_cast<unsigned long long>(relaSize / relaEnt),
+            static_cast<unsigned long long>(relaEnt ? jmpRelSize / relaEnt : 0),
+            static_cast<unsigned long long>(relrSize),
             symtabVaddr != 0 ? "present" : "absent");
 #if defined(__APPLE__) && TARGET_OS_OSX
     pthread_jit_write_protect_np(1);
