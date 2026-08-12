@@ -30,7 +30,12 @@
 #include <condition_variable>
 #include <limits.h>
 #if defined(__APPLE__)
-#include <objc/objc-autoreleasepool.h>
+// Khai báo trực tiếp 2 hàm autorelease pool của libobjc thay vì include
+// <objc/objc-autoreleasepool.h> — header này không nằm trong search path của
+// SDK trên một số runner macOS, còn 2 symbol này là ABI public (ARC dựa vào
+// chúng) nên khai báo extern "C" là an toàn trên cả iOS lẫn macOS.
+extern "C" void* objc_autoreleasePoolPush(void);
+extern "C" void objc_autoreleasePoolPop(void* pool);
 #endif
 
 extern "C" void __gxx_personality_v0();
