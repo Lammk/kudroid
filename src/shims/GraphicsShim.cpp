@@ -77,23 +77,38 @@ extern "C" int bionic_ANativeWindow_lock(void* window, ANativeWindow_Buffer* out
         gpuLog("ANativeWindow_lock -> -1 (outBuffer NULL)");
         return -1;
     }
+    // Validate kích thước: phải dương và có giới hạn trên để (size_t)w*h*4
+    // không tràn. Nếu Swift set sai (0/âm/cực lớn) thì dùng default 1080x1920
+    // thay vì tạo buffer vô nghĩa — game vẽ vào buffer sai kích thước → ghi
+    // tràn → corrupt heap → lần realloc sau abort trong glibc.
+    int w = g_metalLayerWidth;
+    int h = g_metalLayerHeight;
+    constexpr int kMaxBufferDim = 8192;
+    if (w <= 0 || w > kMaxBufferDim || h <= 0 || h > kMaxBufferDim) {
+        gpuLog("ANativeWindow_lock: invalid size %dx%d, using default 1080x1920",
+               w, h);
+        w = 1080;
+        h = 1920;
+    }
     // Trước đây trả con trỏ tới 1 uint32_t static — game vẽ vào "buffer" đó sẽ
     // ghi tràn 4 byte → heap/static corruption → crash. Cấp buffer thật đủ
     // width*height*4 (RGBA8888), grow theo nhu cầu.
     static void* bits = nullptr;
     static size_t bitsSize = 0;
-    const size_t needed = static_cast<size_t>(g_metalLayerWidth) *
-                          static_cast<size_t>(g_metalLayerHeight) * 4;
+    const size_t needed = static_cast<size_t>(w) *
+                          static_cast<size_t>(h) * 4;
     if (!bits || needed > bitsSize) {
         void* nb = std::realloc(bits, needed);
         if (!nb) return -1;
         bits = nb;
         bitsSize = needed;
         std::memset(bits, 0, needed);
+        gpuLog("ANativeWindow_lock: buffer grown to %zu bytes (size=%dx%d)",
+               needed, w, h);
     }
-    outBuffer->width = g_metalLayerWidth;
-    outBuffer->height = g_metalLayerHeight;
-    outBuffer->stride = g_metalLayerWidth;
+    outBuffer->width = w;
+    outBuffer->height = h;
+    outBuffer->stride = w;
     outBuffer->format = 1; // WINDOW_FORMAT_RGBA_8888
     outBuffer->bits = bits;
     return 0;

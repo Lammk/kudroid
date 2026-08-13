@@ -504,11 +504,23 @@ int g_metalLayerWidth = 1080;
 int g_metalLayerHeight = 1920;
 float g_metalLayerDensity = 3.0f;
 
+// Đi qua pipeline log chuẩn (stdout + kudroid_android_logs.txt + crash buffer)
+// — định nghĩa trong SyscallShim.cpp, dùng chung với GraphicsShim.
+extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
+
 extern "C" void kudroid_set_metal_layer(void* layer, int width, int height, float density) {
     g_metalLayer = layer;
     g_metalLayerWidth = width;
     g_metalLayerHeight = height;
     g_metalLayerDensity = density > 0.0f ? density : g_metalLayerDensity;
+    // Log kích thước nhận từ Swift — trước đây không log gì nên width/height
+    // sai (0/âm) chỉ lộ ra ở ANativeWindow_lock (hoặc không bao giờ nếu game
+    // không dùng lock).
+    char buf[192];
+    std::snprintf(buf, sizeof(buf),
+                  "kudroid_set_metal_layer(layer=%p, size=%dx%d, density=%.2f)",
+                  layer, width, height, density);
+    kudroid_android_log_message(2, "KuDroidGPU", buf);
 }
 
 extern "C" const char* kudroid_vfs_self_test_log(void) {
