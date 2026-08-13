@@ -101,6 +101,7 @@ struct android_epoll_event {
 #include <vector>
 #include <string>
 #include <array>
+#include <memory>
 #include <dlfcn.h>
 
 extern const char* g_kudroid_log_dir_ptr;
@@ -144,9 +145,20 @@ void appendUnsigned(std::string& output, uint64_t value, unsigned base) {
     std::string output;
     if (!format) return output;
     std::size_t argumentIndex = 0;
+    // Giới hạn số argument đọc từ guest: 5 register (arguments) + tối đa 11 từ
+    // stack. Format có nhiều specifier hơn argument (format lỗi/không khớp) sẽ
+    // không đọc quá đà vào stack guest (trước đây đọc vô hạn → có thể chạm
+    // vùng nhớ không map gây crash). Ngoài giới hạn trả 0 an toàn.
+    constexpr std::size_t kMaxLogArguments = 16;
     auto nextArgument = [&]() -> uint64_t {
-        return argumentIndex < 5 ? arguments[argumentIndex++]
-                                 : stackArguments[argumentIndex++ - 5];
+        if (argumentIndex >= kMaxLogArguments ||
+            (argumentIndex >= 5 && !stackArguments)) {
+            return 0;
+        }
+        const uint64_t value = argumentIndex < 5 ? arguments[argumentIndex]
+                                                 : stackArguments[argumentIndex - 5];
+        ++argumentIndex;
+        return value;
     };
     for (const char* cursor = format; *cursor; ++cursor) {
         if (*cursor != '%') {
@@ -767,9 +779,21 @@ extern "C" pid_t bionic_gettid() {
 #endif
 }
 
+// Linux MREMAP flags (asm-generic/mman.h)
+#define MREMAP_MAYMOVE 1
+#define MREMAP_FIXED 2
+
 extern "C" void* bionic_mremap(void *old_address, size_t old_size, size_t new_size, int flags, void *new_address) {
+#ifndef __APPLE__
+    // Linux host: delegate thẳng tới syscall thật. mremap trên Linux mở rộng/
+    // thu hẹp tại chỗ được khi vùng liền kề còn trống — không cần MAYMOVE
+    // (trước đây luôn trả ENOMEM khi không có bit MAYMOVE).
+    return ::mremap(old_address, old_size, new_size, flags, new_address);
+#else
     (void)new_address;
-    if (flags & 1) { // MREMAP_MAYMOVE
+    // Không có mremap trên Darwin. Mô phỏng sát ngữ nghĩa Linux:
+    if (new_size == old_size) return old_address; // no-op
+    if (flags & (MREMAP_MAYMOVE | MREMAP_FIXED)) {
         void* new_ptr = mmap(NULL, new_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (new_ptr != MAP_FAILED) {
             // Chỉ copy min(old,new) — copy old_size khi new_size nhỏ hơn sẽ tràn
@@ -778,9 +802,17 @@ extern "C" void* bionic_mremap(void *old_address, size_t old_size, size_t new_si
             munmap(old_address, old_size);
             return new_ptr;
         }
+        errno = ENOMEM;
+        return MAP_FAILED;
     }
-    errno = ENOMEM; // không maymove mà cần mở rộng / mmap fail → ENOMEM như Linux
+    // Không MAYMOVE: Linux chỉ mở rộng tại chỗ nếu vùng liền kề trống; thu
+    // hẹp luôn thành công tại chỗ. Thu hẹp: giữ mapping cũ (phần dư không dùng
+    // nữa — harmless), không thể làm đúng hơn trên Darwin. Mở rộng không MAYMOVE
+    // → ENOMEM như nhánh "không giãn được tại chỗ" của Linux.
+    if (new_size < old_size) return old_address;
+    errno = ENOMEM;
     return MAP_FAILED;
+#endif
 }
 
 #define AT_HWCAP 16
@@ -914,9 +946,26 @@ extern "C" void* bionic_ashmem_mmap_fd(int fd, size_t length) {
 struct FutexWaitQueue {
     std::mutex mtx;
     std::condition_variable cv;
+    int waiters = 0; // guarded by g_futexGlobalMtx
 };
-static std::unordered_map<uint32_t*, FutexWaitQueue> g_futexQueues;
+// shared_ptr để thread đang nằm trong cv.wait (hoặc giữa find và lock queue)
+// không bao giờ thấy queue bị destroy khi entry bị erase.
+static std::unordered_map<uint32_t*, std::shared_ptr<FutexWaitQueue>> g_futexQueues;
 static std::mutex g_futexGlobalMtx;
+
+// Giảm số waiter; nếu không còn ai (và entry vẫn là queue của chúng ta) thì
+// xóa khỏi map — trước đây map không bao giờ được dọn, leak vô hạn mỗi uaddr
+// mới. Phải gọi với g_futexGlobalMtx KHÔNG được giữ (thứ tự khóa: global
+// trước queue-mtx, không bao giờ ngược lại).
+static void futex_leave(uint32_t* uaddr, const std::shared_ptr<FutexWaitQueue>& q) {
+    std::unique_lock<std::mutex> lock(g_futexGlobalMtx);
+    if (--q->waiters <= 0) {
+        auto it = g_futexQueues.find(uaddr);
+        if (it != g_futexQueues.end() && it->second == q) {
+            g_futexQueues.erase(it);
+        }
+    }
+}
 
 // Futex command constants (Linux).
 #define FUTEX_WAIT           0
@@ -937,13 +986,24 @@ extern "C" int bionic_futex(uint32_t *uaddr, int futex_op, uint32_t val, const s
         // FUTEX_WAIT_BITSET with a bitset of 0 is invalid.
         if (cmd == FUTEX_WAIT_BITSET && val3 == 0) { errno = EINVAL; return -1; }
 
-        std::unique_lock<std::mutex> lock(g_futexGlobalMtx);
-        FutexWaitQueue& q = g_futexQueues[uaddr];
-        std::unique_lock<std::mutex> qLock(q.mtx);
-        lock.unlock();
+        std::shared_ptr<FutexWaitQueue> q;
+        {
+            std::unique_lock<std::mutex> lock(g_futexGlobalMtx);
+            auto& slot = g_futexQueues[uaddr];
+            if (!slot) slot = std::make_shared<FutexWaitQueue>();
+            q = slot;
+            q->waiters++;
+        }
+
+        std::unique_lock<std::mutex> qLock(q->mtx);
 
         // Linux: nếu *uaddr != val khi vào wait → EAGAIN ngay.
-        if (*uaddr != val) { errno = EAGAIN; return -1; }
+        if (*uaddr != val) {
+            qLock.unlock(); // thả queue-mtx trước khi lấy global (thứ tự khóa)
+            futex_leave(uaddr, q);
+            errno = EAGAIN;
+            return -1;
+        }
 
         if (timeout) {
             // Linux timeout là TUYỆT ĐỐI: CLOCK_MONOTONIC (FUTEX_WAIT) hoặc
@@ -954,26 +1014,35 @@ extern "C" int bionic_futex(uint32_t *uaddr, int futex_op, uint32_t val, const s
             int64_t remSec = int64_t(timeout->tv_sec) - int64_t(now.tv_sec);
             int64_t remNs  = int64_t(timeout->tv_nsec) - int64_t(now.tv_nsec);
             if (remNs < 0) { remSec -= 1; remNs += 1000000000; }
-            if (remSec < 0) { errno = ETIMEDOUT; return -1; }
+            if (remSec < 0) {
+                qLock.unlock();
+                futex_leave(uaddr, q);
+                errno = ETIMEDOUT;
+                return -1;
+            }
             if (remSec > 86400) remSec = 86400; // cap 24h tránh overflow duration
             const auto duration = std::chrono::seconds(remSec) +
                                   std::chrono::nanoseconds(remNs);
-            if (q.cv.wait_for(qLock, duration) == std::cv_status::timeout) {
+            if (q->cv.wait_for(qLock, duration) == std::cv_status::timeout) {
+                qLock.unlock();
+                futex_leave(uaddr, q);
                 errno = ETIMEDOUT;
                 return -1;
             }
         } else {
-            q.cv.wait(qLock);
+            q->cv.wait(qLock);
         }
+        qLock.unlock();
+        futex_leave(uaddr, q);
         return 0;
     } else if (cmd == FUTEX_WAKE || cmd == FUTEX_WAKE_BITSET) {
         std::unique_lock<std::mutex> lock(g_futexGlobalMtx);
         auto it = g_futexQueues.find(uaddr);
         if (it != g_futexQueues.end()) {
-            std::unique_lock<std::mutex> qLock(it->second.mtx);
+            std::unique_lock<std::mutex> qLock(it->second->mtx);
             lock.unlock();
-            if (val == 1) it->second.cv.notify_one();
-            else it->second.cv.notify_all();
+            if (val == 1) it->second->cv.notify_one();
+            else it->second->cv.notify_all();
             return val;
         }
         return 0;
@@ -984,10 +1053,10 @@ extern "C" int bionic_futex(uint32_t *uaddr, int futex_op, uint32_t val, const s
         std::unique_lock<std::mutex> lock(g_futexGlobalMtx);
         auto it = g_futexQueues.find(uaddr);
         if (it != g_futexQueues.end()) {
-            std::unique_lock<std::mutex> qLock(it->second.mtx);
+            std::unique_lock<std::mutex> qLock(it->second->mtx);
             lock.unlock();
-            if (val == 1) it->second.cv.notify_one();
-            else it->second.cv.notify_all();
+            if (val == 1) it->second->cv.notify_one();
+            else it->second->cv.notify_all();
             return val;
         }
         return 0;
@@ -1194,6 +1263,11 @@ extern "C" int bionic_eventfd(unsigned int initval, int flags) {
         uint64_t val = initval;
         write(fd, &val, sizeof(val));
     }
+    if (fd >= 0) {
+        // Emulated fd (loopback UDP) — đăng ký để bionic_close bookkeeping đầy đủ.
+        std::lock_guard<std::mutex> lock(g_fakefds_mtx);
+        g_fakefds.insert(fd);
+    }
     return fd;
 #else
     return ::eventfd(initval, flags);
@@ -1203,7 +1277,14 @@ extern "C" int bionic_eventfd(unsigned int initval, int flags) {
 extern "C" int bionic_timerfd_create(int clockid, int flags) {
 #ifdef __APPLE__
     (void)clockid; (void)flags;
-    return create_loopback_udp();
+    const int fd = create_loopback_udp();
+    if (fd >= 0) {
+        // Emulated fd (loopback UDP + GCD timer) — đăng ký để bionic_close
+        // bookkeeping đầy đủ (giống inotify/signalfd).
+        std::lock_guard<std::mutex> lock(g_fakefds_mtx);
+        g_fakefds.insert(fd);
+    }
+    return fd;
 #else
     return ::timerfd_create(clockid, flags);
 #endif
@@ -1450,14 +1531,67 @@ extern "C" int bionic_pthread_key_delete(int guestKey) {
     return ::pthread_key_delete(static_cast<pthread_key_t>(guestKey));
 }
 
+// Bionic pthread_once_t: int 32-bit với 3 trạng thái — 0 = chưa chạy,
+// 1 = đang chạy init_routine, 2 = đã xong. Control word nằm trong bộ nhớ
+// guest nên ta dùng atomic trên chính guest_once (fast path không cần mutex).
+//
+// Trước đây dùng MỘT global mutex giữ trong suốt init_routine() → init gọi
+// pthread_once trên control word khác sẽ tự khóa chính mình → deadlock. Giờ
+// mỗi control word có mutex/cv riêng (map dùng shared_ptr để thread đang đợi
+// không bị destroy khi entry bị xóa), đúng như pthread_once thật của bionic
+// cho phép nested once trên control word khác nhau.
+struct BionicOnceControl {
+    std::mutex mtx;
+    std::condition_variable cv;
+};
+static std::mutex g_once_map_mtx;
+static std::unordered_map<int*, std::shared_ptr<BionicOnceControl>> g_once_controls;
+
+static int once_state_load(int* guest_once) {
+    return __atomic_load_n(guest_once, __ATOMIC_ACQUIRE);
+}
+
+static void once_state_store(int* guest_once, int state) {
+    __atomic_store_n(guest_once, state, __ATOMIC_RELEASE);
+}
+
 extern "C" int bionic_pthread_once(int* guest_once, void (*init_routine)(void)) {
-    static pthread_mutex_t once_lock = PTHREAD_MUTEX_INITIALIZER;
-    ::pthread_mutex_lock(&once_lock);
-    if (*guest_once == 0) {
-        *guest_once = 1;
-        init_routine();
+    if (!guest_once || !init_routine) return -1;
+
+    // Fast path: đã chạy xong rồi.
+    if (once_state_load(guest_once) == 2) return 0;
+
+    std::shared_ptr<BionicOnceControl> ctl;
+    {
+        std::lock_guard<std::mutex> lock(g_once_map_mtx);
+        auto& slot = g_once_controls[guest_once];
+        if (!slot) slot = std::make_shared<BionicOnceControl>();
+        ctl = slot;
     }
-    ::pthread_mutex_unlock(&once_lock);
+
+    std::unique_lock<std::mutex> lock(ctl->mtx);
+    // Một thread khác đang chạy init_routine cho control word này → chờ.
+    while (once_state_load(guest_once) == 1) {
+        ctl->cv.wait(lock);
+    }
+    // Thread khác vừa chạy xong trong lúc ta chờ.
+    if (once_state_load(guest_once) == 2) return 0;
+
+    // Ta là thread đầu tiên: đánh dấu IN_PROGRESS rồi chạy init. Mutex được
+    // giữ suốt init_routine, nhưng chỉ với control word NÀY — init gọi
+    // pthread_once trên control word khác sẽ dùng mutex khác, không deadlock.
+    once_state_store(guest_once, 1);
+    init_routine();
+    once_state_store(guest_once, 2);
+    ctl->cv.notify_all();
+
+    // Best-effort dọn map: entry không còn ai tham chiếu (thread đang đợi giữ
+    // shared_ptr riêng nên vẫn sống). Fast path thường chặn các lần gọi sau.
+    std::lock_guard<std::mutex> mapLock(g_once_map_mtx);
+    auto it = g_once_controls.find(guest_once);
+    if (it != g_once_controls.end() && it->second == ctl) {
+        g_once_controls.erase(it);
+    }
     return 0;
 }
 
@@ -1473,6 +1607,53 @@ struct android_sigaction {
 
 #include <signal.h>
 
+// Bionic/Linux sa_flags (asm-generic/signal.h) — guest truyền giá trị Linux.
+constexpr int LINUX_SA_NOCLDSTOP = 0x00000001;
+constexpr int LINUX_SA_NOCLDWAIT = 0x00000002;
+constexpr int LINUX_SA_SIGINFO   = 0x00000004;
+constexpr int LINUX_SA_ONSTACK   = 0x08000000;
+constexpr int LINUX_SA_RESTART   = 0x10000000;
+constexpr int LINUX_SA_NODEFER   = 0x40000000;
+constexpr int LINUX_SA_RESETHAND = 0x80000000;
+
+// Dịch sa_flags guest (Linux) → host. Trước đây chỉ bit SA_SIGINFO (0x4) được
+// dịch sang Darwin, còn SA_RESTART/NODEFER/RESETHAND/ONSTACK/NOCLD* bị drop im
+// lặng → game cần SA_RESTART (đa số game đặt nó) không được restart syscall.
+static int sa_flags_guest_to_host(int flags) {
+#ifdef __APPLE__
+    int out = 0;
+    if (flags & LINUX_SA_SIGINFO)   out |= SA_SIGINFO;
+    if (flags & LINUX_SA_ONSTACK)   out |= SA_ONSTACK;
+    if (flags & LINUX_SA_RESTART)   out |= SA_RESTART;
+    if (flags & LINUX_SA_NODEFER)   out |= SA_NODEFER;
+    if (flags & LINUX_SA_RESETHAND) out |= SA_RESETHAND;
+    if (flags & LINUX_SA_NOCLDSTOP) out |= SA_NOCLDSTOP;
+    if (flags & LINUX_SA_NOCLDWAIT) out |= SA_NOCLDWAIT;
+    return out;
+#else
+    (void)flags;
+    // Linux host: giá trị giống hệt, truyền thẳng.
+    return flags;
+#endif
+}
+
+static int sa_flags_host_to_guest(int flags) {
+#ifdef __APPLE__
+    int out = 0;
+    if (flags & SA_SIGINFO)   out |= LINUX_SA_SIGINFO;
+    if (flags & SA_ONSTACK)   out |= LINUX_SA_ONSTACK;
+    if (flags & SA_RESTART)   out |= LINUX_SA_RESTART;
+    if (flags & SA_NODEFER)   out |= LINUX_SA_NODEFER;
+    if (flags & SA_RESETHAND) out |= LINUX_SA_RESETHAND;
+    if (flags & SA_NOCLDSTOP) out |= LINUX_SA_NOCLDSTOP;
+    if (flags & SA_NOCLDWAIT) out |= LINUX_SA_NOCLDWAIT;
+    return out;
+#else
+    (void)flags;
+    return flags;
+#endif
+}
+
 extern "C" int bionic_sigaction(int signum, const struct android_sigaction* act, struct android_sigaction* oldact) {
 #ifdef KUDROID_DEBUG
     char buf[128];
@@ -1485,12 +1666,13 @@ extern "C" int bionic_sigaction(int signum, const struct android_sigaction* act,
     
     if (act) {
         std::memset(&host_act, 0, sizeof(host_act));
-        if (act->sa_flags & 0x00000004) { // Android SA_SIGINFO
+        const int host_flags = sa_flags_guest_to_host(act->sa_flags);
+        if (host_flags & SA_SIGINFO) {
             host_act.sa_sigaction = reinterpret_cast<void (*)(int, siginfo_t*, void*)>(act->android_sa_sigaction);
-            host_act.sa_flags |= SA_SIGINFO; // iOS SA_SIGINFO
         } else {
             host_act.sa_handler = act->android_sa_handler;
         }
+        host_act.sa_flags = host_flags;
         // Copy the signal mask (Android sa_mask is a 64-bit bitmask).
         sigemptyset(&host_act.sa_mask);
         for (int sig = 1; sig < 64; ++sig) {
@@ -1504,8 +1686,8 @@ extern "C" int bionic_sigaction(int signum, const struct android_sigaction* act,
     
     if (oldact && ret == 0) {
         std::memset(oldact, 0, sizeof(struct android_sigaction));
+        oldact->sa_flags = sa_flags_host_to_guest(host_oldact.sa_flags);
         if (host_oldact.sa_flags & SA_SIGINFO) {
-            oldact->sa_flags |= 0x00000004;
             oldact->android_sa_sigaction = reinterpret_cast<void (*)(int, void*, void*)>(host_oldact.sa_sigaction);
         } else {
             oldact->android_sa_handler = host_oldact.sa_handler;
@@ -1683,13 +1865,16 @@ static void* bionic_thread_wrapper(void* rawArgs) {
 
     // Allocate 64KB for Android TLS block and set tpidr_el0
     // Darwin uses tpidrro_el0, so tpidr_el0 is free for us!
+    // KHÔNG fallback sang aligned_alloc trần: khối như vậy không có template
+    // TLS module và không có stack-guard cookie → guest đọc rác. alloc_guest_tls_block
+    // dùng chính allocator/kích thước đó; nếu nó OOM thì fallback cũng OOM.
     void* tls_base = alloc_guest_tls_block();
-    if (!tls_base) tls_base = std::aligned_alloc(16, kTlsBlockSize);
-    ::pthread_setspecific(tls_key, tls_base);
-
+    if (tls_base) {
+        ::pthread_setspecific(tls_key, tls_base);
 #if defined(__aarch64__)
-    __asm__ volatile("msr tpidr_el0, %0" : : "r"((char*)tls_base + kTlsSlotOffset));
+        __asm__ volatile("msr tpidr_el0, %0" : : "r"((char*)tls_base + kTlsSlotOffset));
 #endif
+    }
 
     // iOS: ANGLE/Metal/ObjC require an autorelease pool on EVERY thread that
     // touches them. Guest render threads (TriangleGLES render thread, Unity's
@@ -1733,7 +1918,14 @@ extern "C" int bionic_pthread_create(pthread_t* thread, void* attr, void* (*star
     return res;
 }
 
+// errno accessor: Darwin exports `__error`, glibc/musl export `__errno_location`.
+// Guarded so SyscallShim.o actually links on a Linux host (previously any host
+// consumer that pulled this object failed with an undefined `__error`).
+#ifdef __APPLE__
 extern "C" int* __error(void);
+#else
+extern "C" int* __errno_location(void);
+#endif
 
 // ============================================================================
 // memalign — aligned memory allocation (CRITICAL for Unity)
@@ -2608,7 +2800,11 @@ const SymbolEntry kSyscallSymbols[] = {
     {"pthread_rwlock_wrlock", reinterpret_cast<void*>(&bionic_pthread_rwlock_wrlock)},
     {"pthread_rwlock_unlock", reinterpret_cast<void*>(&bionic_pthread_rwlock_unlock)},
     
+#ifdef __APPLE__
     {"__errno", reinterpret_cast<void*>(&__error)},
+#else
+    {"__errno", reinterpret_cast<void*>(&__errno_location)},
+#endif
     {"snprintf", reinterpret_cast<void*>(&snprintf)},
     {"memcpy", reinterpret_cast<void*>(&memcpy)},
 

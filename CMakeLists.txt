@@ -138,4 +138,11 @@ else()
     )
     target_link_libraries(test_dex_to_jar PRIVATE kudroid_core)
     target_include_directories(test_dex_to_jar PRIVATE include)
+
+    # Host-side regression tests for the guest syscall shims (SyscallShim.cpp).
+    add_executable(test_shims
+        tests/test_shims.cpp
+    )
+    target_link_libraries(test_shims PRIVATE kudroid_core)
+    target_include_directories(test_shims PRIVATE include)
 endif()
