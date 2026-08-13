@@ -372,6 +372,27 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
                 symbolicateAddr((uintptr_t)lr, symLr, sizeof(symLr));
                 m = snprintf(sigline, sizeof(sigline), "pc_sym: %s\nlr_sym: %s\n", symPc, symLr);
                 crashWriteLine(fd, sigline, m, sizeof(sigline));
+
+                // Raw stack dump từ faulting sp. Tại thời điểm abort, sp đang ở
+                // trong abort()/pthread_kill; frame phía trên (vùng nhớ cao hơn)
+                // chứa frame của caller — vd __cxa_guard_acquire (prologue
+                // `stp x29,x30,[sp,#-64]!` + `stp x20,x19,[sp,#48]`) lưu guard
+                // pointer tại [fp+56] và caller LR tại [fp+8]. Dump thô để có
+                // thể decode guard + caller khi debug crash.
+                (void)!write(fd, "\n--- stack from sp ---\n", 22);
+                {
+                    const uint64_t* stack = reinterpret_cast<const uint64_t*>(sp);
+                    for (int i = 0; i < 128; i += 4) {
+                        int n = snprintf(sigline, sizeof(sigline),
+                            "sp%+04d: %016llx  %016llx  %016llx  %016llx\n",
+                            i * 8,
+                            (unsigned long long)stack[i],
+                            (unsigned long long)stack[i + 1],
+                            (unsigned long long)stack[i + 2],
+                            (unsigned long long)stack[i + 3]);
+                        crashWriteLine(fd, sigline, n, sizeof(sigline));
+                    }
+                }
 #elif defined(__linux__)
                 ucontext_t* uc = (ucontext_t*)ucontext;
                 uint64_t pc = uc->uc_mcontext.pc;

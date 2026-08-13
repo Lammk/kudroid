@@ -910,6 +910,59 @@ static long emulate_futex_syscall(va_list ap) {
     return static_cast<long>(bionic_futex(uaddr, futex_op, val, timeout, uaddr2, val3));
 }
 
+// DIAGNOSTIC TEMP (điều tra "__cxa_guard_acquire recursive initialization"):
+// libc++abi guard_acquire (libc++_shared.so, prologue `stp x29,x30,[sp,#-64]!`
+// + `stp x20,x19,[sp,#48]`) lấy tid bằng syscall(178) — tức khi bionic_syscall
+// nhận gettid thì frame dưới (hoặc frame dưới nữa) LÀ guard_acquire:
+//   [ga_fp + 8]  = x30 saved = caller của guard_acquire (hàm guest đang init)
+//   [ga_fp + 56] = x19 saved = guard pointer (guard nào đang bị re-enter)
+// Dump 2 cấp frame để xác định guard + caller — decode offline. Log mọi gettid
+// (số lượng nhỏ, chấp nhận được cho một vòng chẩn đoán).
+#if defined(__aarch64__)
+extern "C" bool kudroid_lookup_guest_module(void* addr, char* out, std::size_t outSize);
+static void log_guard_acquire_diag(long tid) {
+    void* lr0 = __builtin_return_address(0);
+    // Chỉ log khi lr0 nằm trong __cxa_guard_acquire của libc++abi
+    // (libc++_shared.so offset 0x9f00c..0x9f138) — chính là 2 chỗ gọi gettid
+    // trong guard_acquire. Lọc theo offset resolve được từ registry guest
+    // module (cùng cơ chế crash handler symbolicate).
+    char resolved[256] = {0};
+    bool inGuardAcquire = false;
+    if (kudroid_lookup_guest_module(lr0, resolved, sizeof(resolved))) {
+        const char* plus = std::strrchr(resolved, '+');
+        if (plus && plus[1] == '0' && (plus[2] == 'x' || plus[2] == 'X')) {
+            const uintptr_t off = static_cast<uintptr_t>(
+                std::strtoull(plus + 2, nullptr, 16));
+            inGuardAcquire = (off >= 0x9f000 && off <= 0x9f200);
+        }
+    }
+    if (!inGuardAcquire) return;
+
+    uintptr_t fp0 = 0;
+    asm volatile("mov %0, x29" : "=r"(fp0));
+    // fp0 = frame của bionic_syscall (nếu có frame) hoặc guard_acquire (nếu
+    // shim được compile frameless). fp1 = frame phía trên fp0.
+    auto rd = [](uintptr_t p) -> uintptr_t {
+        return *reinterpret_cast<const uintptr_t*>(p); // stack của chính mình
+    };
+    const uintptr_t p0 = fp0;
+    const uintptr_t fp1 = rd(p0);
+    char msg[768];
+    snprintf(msg, sizeof(msg),
+             "guard_acquire_diag tid=%ld lr0=0x%llx (%s) fp0=0x%llx "
+             "fp0[0]=0x%llx fp0[8]=0x%llx fp0[48]=0x%llx fp0[56]=0x%llx "
+             "fp1[0]=0x%llx fp1[8]=0x%llx fp1[48]=0x%llx fp1[56]=0x%llx",
+             tid, (unsigned long long)(uintptr_t)lr0, resolved, (unsigned long long)fp0,
+             (unsigned long long)rd(p0), (unsigned long long)rd(p0 + 8),
+             (unsigned long long)rd(p0 + 48), (unsigned long long)rd(p0 + 56),
+             (unsigned long long)rd(fp1), (unsigned long long)rd(fp1 + 8),
+             (unsigned long long)rd(fp1 + 48), (unsigned long long)rd(fp1 + 56));
+    logAndroidMessage(4, "KuDroidSyscall", msg);
+}
+#else
+static void log_guard_acquire_diag(long tid) { (void)tid; }
+#endif
+
 extern "C" long bionic_syscall(long number, ...) {
     if (number == KUDROID_SYS_gettid) {
         // macOS không có gettid — pthread_threadid_np cho thread-id duy nhất,
@@ -922,6 +975,7 @@ extern "C" long bionic_syscall(long number, ...) {
         const long result = static_cast<long>(::syscall(SYS_gettid));
 #endif
         tid_registry_record(result);
+        log_guard_acquire_diag(result);
         return result;
     }
     if (number == KUDROID_SYS_getpid) {
