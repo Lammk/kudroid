@@ -31,6 +31,7 @@
 #include <limits.h>
 #if defined(__APPLE__)
 #include <mach/mach.h>
+#include <mach/vm_region.h>
 #endif
 #if defined(__APPLE__)
 // Khai báo trực tiếp 2 hàm autorelease pool của libobjc thay vì include
@@ -830,12 +831,15 @@ static bool range_is_mapped(uintptr_t addr, size_t len) {
     vm_address_t region_addr = static_cast<vm_address_t>(addr);
     while (true) {
         vm_size_t region_size = 0;
-        mach_msg_type_number_t count = VM_REGION_BASIC_INFO_64;
-        vm_region_basic_info_data_64 info;
+        // Ta chỉ cần RANGE (region_addr/region_size) — nội dung info bỏ qua.
+        // Dùng buffer thô đúng cỡ VM_REGION_BASIC_INFO_64 thay vì tên struct
+        // (tên struct đổi theo SDK; buffer integer thì luôn tồn tại).
+        integer_t info[VM_REGION_BASIC_INFO_COUNT_64];
+        mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
         mach_port_t object_name = MACH_PORT_NULL;
         const kern_return_t kr = vm_region_64(mach_task_self(), &region_addr, &region_size,
                                               VM_REGION_BASIC_INFO_64,
-                                              reinterpret_cast<vm_region_info_t>(&info),
+                                              reinterpret_cast<vm_region_info_t>(info),
                                               &count, &object_name);
         if (kr != KERN_SUCCESS) return false;
         const uintptr_t rstart = static_cast<uintptr_t>(region_addr);
