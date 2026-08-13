@@ -58,6 +58,21 @@ target_include_directories(kudroid_core PUBLIC
     third_party/jvm/avian/include
 )
 
+# kudroid_core uses Apple frameworks (AudioQueue -> AudioToolbox,
+# kCFRunLoopCommonModes -> CoreFoundation, NSException/objc runtime ->
+# Foundation + libobjc). Declared PUBLIC so every consumer — the iOS app AND
+# host-side test executables on macOS — gets them. The iOS app previously only
+# linked them itself; host tests (test_shims) pull SyscallShim.o/kudroid_bridge.o
+# which reference these symbols.
+if(APPLE)
+    target_link_libraries(kudroid_core PUBLIC
+        "-framework AudioToolbox"
+        "-framework CoreFoundation"
+        "-framework Foundation"
+        "-lobjc"
+    )
+endif()
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Avian JVM — built separately via its own Makefile (make platform=ios
 # arch=arm64 use-clang=true). We link the resulting static library here.

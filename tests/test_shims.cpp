@@ -67,6 +67,13 @@ extern "C" const uint8_t* classpathJar(size_t* size) {
 #define FUTEX_PRIVATE_FLAG   128
 #define MREMAP_MAYMOVE 1
 
+// Guest-visible sa_flags are ALWAYS Linux values (asm-generic/signal.h) — the
+// shim translates them to/from Darwin on Apple. Use the Linux constants here
+// instead of the host's SA_* macros so the test is correct on both hosts.
+#define LINUX_SA_RESTART   0x10000000
+#define LINUX_SA_NODEFER   0x40000000
+#define LINUX_SA_RESETHAND 0x80000000
+
 static int g_failures = 0;
 static int g_checks = 0;
 
@@ -269,9 +276,9 @@ static void test_sigaction_flag_roundtrip() {
     struct android_sigaction act;
     std::memset(&act, 0, sizeof(act));
     act.android_sa_handler = SIG_IGN;
-    // Linux host values are identical to the Linux guest values; the shim
-    // passes them straight through. On Apple these get translated.
-    act.sa_flags = SA_RESTART | SA_NODEFER | SA_RESETHAND;
+    // Guest-visible flags are Linux values regardless of host: on Linux they
+    // pass straight through, on Apple the shim translates them.
+    act.sa_flags = LINUX_SA_RESTART | LINUX_SA_NODEFER | LINUX_SA_RESETHAND;
     if (::bionic_sigaction(SIGUSR1, &act, nullptr) != 0) {
         std::printf("  FAIL: bionic_sigaction set failed errno=%d\n", errno);
         ++g_failures;
@@ -282,9 +289,9 @@ static void test_sigaction_flag_roundtrip() {
     std::memset(&old, 0, sizeof(old));
     CHECK(::bionic_sigaction(SIGUSR1, nullptr, &old) == 0,
           "query succeeds");
-    CHECK((old.sa_flags & SA_RESTART) != 0, "SA_RESTART preserved");
-    CHECK((old.sa_flags & SA_NODEFER) != 0, "SA_NODEFER preserved");
-    CHECK((old.sa_flags & SA_RESETHAND) != 0, "SA_RESETHAND preserved");
+    CHECK((old.sa_flags & LINUX_SA_RESTART) != 0, "SA_RESTART preserved");
+    CHECK((old.sa_flags & LINUX_SA_NODEFER) != 0, "SA_NODEFER preserved");
+    CHECK((old.sa_flags & LINUX_SA_RESETHAND) != 0, "SA_RESETHAND preserved");
 
     // Restore default so we don't leave the process in a weird state.
     struct android_sigaction dfl;
