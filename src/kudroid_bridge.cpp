@@ -37,7 +37,11 @@ extern "C" struct JavaVM_* kudroid_jni_get_javavm(void);
 static char g_logDir[1024] = {0};
 const char* g_kudroid_log_dir_ptr = g_logDir;
 
-static char g_crashBuf[16384];
+// 16KB trước đây quá nhỏ: đống dòng ELF-loading/`[kudroid_core]` lấp đầy buffer
+// và đẩy phần quan trọng (eglGetDisplay/eglInitialize ngay trước crash) ra
+// ngoài — log bị cắt đúng chỗ quan trọng. 256KB, static nên an toàn trong
+// signal handler (không cấp phát heap).
+static char g_crashBuf[262144];
 static volatile sig_atomic_t g_crashLen = 0;
 static std::mutex g_crashBufMtx;
 static char g_abortMessage[1024] = {0};
