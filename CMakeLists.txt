@@ -12,6 +12,19 @@ endif()
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# Embed the git commit into the build stamp so we can tell which commit an
+# IPA on a device actually contains ("no-git-hash" was making it impossible to
+# tell stale builds apart). Falls back to UNKNOWN when not in a git repo.
+execute_process(
+    COMMAND git -C ${CMAKE_CURRENT_SOURCE_DIR} rev-parse --short HEAD
+    OUTPUT_VARIABLE KUDROID_GIT_HASH
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET
+)
+if(NOT KUDROID_GIT_HASH)
+    set(KUDROID_GIT_HASH "UNKNOWN")
+endif()
+
 # ARM64 iOS cross-compile settings (when targeting iOS device/simulator)
 # Usage: cmake -B build -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
@@ -43,6 +56,10 @@ add_library(kudroid_core STATIC
 
 find_package(ZLIB REQUIRED)
 target_link_libraries(kudroid_core PRIVATE ZLIB::ZLIB)
+
+target_compile_definitions(kudroid_core PRIVATE
+    KUDROID_GIT_HASH="${KUDROID_GIT_HASH}"
+)
 
 find_path(MINIZIP_INCLUDE_DIR minizip/unzip.h)
 find_library(MINIZIP_LIBRARY NAMES minizip)
