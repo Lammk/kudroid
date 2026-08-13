@@ -900,6 +900,13 @@ extern "C" long bionic_process_vm_readv(pid_t pid, const struct iovec* local_iov
 extern "C" int bionic_futex(uint32_t* uaddr, int futex_op, uint32_t val,
                              const struct timespec* timeout, uint32_t* uaddr2, uint32_t val3);
 
+// Khai báo ở namespace scope — `extern "C"` KHÔNG hợp lệ trong thân hàm
+// (linkage spec chỉ cho phép ở scope ngoài), CI macOS arm64 sẽ báo
+// "expected unqualified-id".
+#if defined(__aarch64__)
+extern "C" bool kudroid_lookup_guest_module(void* addr, char* out, std::size_t outSize);
+#endif
+
 static long emulate_futex_syscall(va_list ap) {
     uint32_t* uaddr = va_arg(ap, uint32_t*);
     const int futex_op = va_arg(ap, int);
@@ -913,7 +920,6 @@ static long emulate_futex_syscall(va_list ap) {
 #if defined(__aarch64__)
     const int cmd = futex_op & 127;
     if (cmd == 0 /* FUTEX_WAIT */ || cmd == 9 /* FUTEX_WAIT_BITSET */) {
-        extern "C" bool kudroid_lookup_guest_module(void* addr, char* out, std::size_t outSize);
         static void* s_seen[16];
         static int s_seenN = 0;
         bool dup = false;
