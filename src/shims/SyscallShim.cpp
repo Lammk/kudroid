@@ -1066,7 +1066,14 @@ extern "C" int bionic_futex(uint32_t *uaddr, int futex_op, uint32_t val, const s
 }
 
 // --- Dynamic Loading (dlfcn) ---
+// Serialize ANGLE/MoltenVK framework loads: cả hai chạy module initializer
+// (khởi tạo Metal) bên trong ::dlopen. Guest chạy render thread (dlopen
+// libEGL) SONG SONG với Vulkan JNI_OnLoad (dlopen libvulkan) → Metal init
+// đồng thời → abort (SIGABRT không message — khớp crash log triangle).
+// Mutex này đảm bảo mỗi framework được load + init xong trước khi cái kia
+// bắt đầu.
 extern "C" void* bionic_dlopen(const char* filename, int flags) {
+    static std::mutex g_gpuFrameworkMtx;
     (void)flags;
     logAndroidMessage(4, "KuDroidSyscall", std::string("bionic_dlopen: requested ") + (filename ? filename : "NULL"));
 
@@ -1092,6 +1099,7 @@ extern "C" void* bionic_dlopen(const char* filename, int flags) {
             "@executable_path/Frameworks/libEGL.framework/libEGL" : 
             "@executable_path/Frameworks/libGLESv2.framework/libGLESv2";
         
+        std::lock_guard<std::mutex> gpuLock(g_gpuFrameworkMtx);
         void* handle = ::dlopen(fw_path, RTLD_NOW | RTLD_LOCAL);
         if (handle) {
             logAndroidMessage(4, "KuDroidGPU", std::string("Successfully loaded ") + fw_path);
@@ -1102,6 +1110,7 @@ extern "C" void* bionic_dlopen(const char* filename, int flags) {
     }
     
     if (strstr(filename, "libvulkan.so")) {
+        std::lock_guard<std::mutex> gpuLock(g_gpuFrameworkMtx);
         void* handle = ::dlopen("@executable_path/Frameworks/MoltenVK.framework/MoltenVK", RTLD_NOW | RTLD_LOCAL);
         if (handle) {
             logAndroidMessage(4, "KuDroidGPU", "Successfully loaded MoltenVK.framework");

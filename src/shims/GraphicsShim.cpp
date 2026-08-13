@@ -282,12 +282,21 @@ extern "C" EGLDisplay bionic_eglGetDisplay(EGLNativeDisplayType display_id) {
 
     }
     
-    // KHÔNG fallback sang eglGetDisplay(EGL_DEFAULT_DISPLAY): display đó trả
-    // về "VALID" nhưng không có backend thật — eglInitialize() kế tiếp abort
-    // bên trong ANGLE (SIGABRT, đúng crash log). Trả EGL_NO_DISPLAY để guest
-    // thất bại nhẹ nhàng thay vì crash.
-    
-    gpuLog("eglGetDisplay: all platform display attempts failed — returning EGL_NO_DISPLAY");
+    // Fallback eglGetDisplay(EGL_DEFAULT_DISPLAY): build ANGLE này trả NULL cho
+    // MỌI eglGetPlatformDisplayEXT kèm attribs (đã thử đủ tổ hợp trên máy thật),
+    // NHƯNG eglGetDisplay(0) tạo được display thật — GL TEST (pbuffer) dùng đúng
+    // đường này chạy tốt: EGL 1.5, "ANGLE Metal Renderer", glClear OK. Bỏ
+    // fallback này = mất đường EGL duy nhất hoạt động trên iOS.
+    typedef EGLDisplay (*PFN_eglGetDisplay)(EGLNativeDisplayType);
+    auto host_get_display = (PFN_eglGetDisplay) get_egl_func("eglGetDisplay");
+    if (host_get_display) {
+        // Luôn EGL_DEFAULT_DISPLAY (0) — CAMetalLayer chỉ dùng cho surface.
+        EGLDisplay dpy = host_get_display((EGLNativeDisplayType)0);
+        gpuLog("eglGetDisplay: fallback -> %s (%p)", dpy ? "VALID" : "NULL", (void*)dpy);
+        return dpy;
+    }
+
+    gpuLog("eglGetDisplay: no eglGetDisplay entry point available");
     return nullptr;
 }
 
