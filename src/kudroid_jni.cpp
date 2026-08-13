@@ -314,7 +314,33 @@ jint kudroid_jni_get_env(JavaVM* vm, void** env, jint version) {
 
 // Cập nhật DisplayMetrics trong Java với số liệu màn hình thật. Chỉ gọi khi
 // đang ở trên một thread đã attach (init_jvm gọi ngay sau khi tạo VM).
+//
+// ═══ CHẨN ĐOÁN 2026-08-12 — BỆNH ĐÃ XÁC ĐỊNH ═══════════════════════════════
+// Cả test_jni_massive lẫn test_triangle crash SIGABRT tại ĐÚNG điểm này: log
+// dừng sau "Registered android/util/Log.println_native" (bước kế tiếp duy nhất
+// là hàm này).
+//
+// Nguyên nhân: DisplayMetrics là class Java ĐẦU TIÊN dùng FLOAT được JIT-compile
+// trên arm64 — <clinit> có float statics (sDensity=3.0f...), updateFromNative(IIF)V
+// có param float. arm64 codegen của Avian abort() câm (không in lý do) khi gặp
+// op float — cùng họ bug UB/unsupported-op với c->saved->count() đã fix, nhưng
+// lần này nằm trong target arm64.
+//
+// Bằng chứng: (1) JVM init OK — String/Object/Log (không float) compile tốt;
+// (2) repro Linux x86_64 chạy ĐÚNG chuỗi JNI này (FindClass+CallStaticVoidMethod
+// trên cùng jar 1100849 bytes) qua CẢ GCC lẫn clang ở -O3 JIT mode → chỉ arm64
+// chết; (3) abort câm (x6=0xffffffff, không abort message) = expect()/abort(c)
+// trong compiler, không phải exception bắt được.
+//
+// FIX tạm: bỏ qua bước này — game test (triangle) không đọc DisplayMetrics.
+// Khi arm64 codegen của Avian được fix (patch qua scripts/patch-avian-ios.py),
+// xóa khối #if 0 này để đẩy số liệu màn hình thật vào Java lại.
+// ════════════════════════════════════════════════════════════════════════════
 extern "C" void kudroid_jni_update_display_metrics(void) {
+    log_jni("DisplayMetrics update DISABLED: arm64 JIT float codegen aborts on this "
+            "class (see comment above); screen dims left at defaults");
+    return;
+#if 0  // bị vô hiệu hóa tạm thời — xem comment chẩn đoán phía trên
     if (!g_vm || !g_env) return;
     jclass clazz = g_env->FindClass("android/util/DisplayMetrics");
     if (!clazz) {
@@ -334,4 +360,5 @@ extern "C" void kudroid_jni_update_display_metrics(void) {
     }
     if (g_env->ExceptionCheck()) g_env->ExceptionClear();
     g_env->DeleteLocalRef(clazz);
+#endif  // #if 0 — DisplayMetrics update bị vô hiệu hóa tạm thời
 }

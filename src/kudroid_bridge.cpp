@@ -387,6 +387,37 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
 
             (void)!write(fd, "\n--- log up to crash ---\n", 25);
             (void)!write(fd, g_crashBuf, (size_t)g_crashLen);
+
+            // Dump đuôi stderr (lý do abort/fatal của avian — thường in ra đây
+            // nhưng bị mất vì iOS không hiển thị stderr). open/lseek/read/write
+            // đều async-signal-safe nên gọi được trong signal handler.
+            {
+                char errPath[1200];
+                size_t dl = strlen(g_logDir);
+                if (dl < sizeof(errPath) - 32) {
+                    memcpy(errPath, g_logDir, dl);
+                    memcpy(errPath + dl, "/stderr.log", 12);
+                    int errFd = open(errPath, O_RDONLY);
+                    if (errFd >= 0) {
+                        const char* stderrHdr = "\n--- stderr tail (avian abort reason) ---\n";
+                        (void)!write(fd, stderrHdr, strlen(stderrHdr));
+                        off_t errSize = lseek(errFd, 0, SEEK_END);
+                        const off_t maxTail = 4096;
+                        if (errSize > maxTail) {
+                            lseek(errFd, -maxTail, SEEK_END);
+                        } else {
+                            lseek(errFd, 0, SEEK_SET);
+                        }
+                        char errBuf[512];
+                        ssize_t errN;
+                        while ((errN = read(errFd, errBuf, sizeof(errBuf))) > 0) {
+                            (void)!write(fd, errBuf, (size_t)errN);
+                        }
+                        (void)!write(fd, "\n", 1);
+                        close(errFd);
+                    }
+                }
+            }
             
             const char* traceStr = kudroid::bionic_shim_trace();
             if (traceStr && *traceStr) {
@@ -441,6 +472,26 @@ extern "C" void kudroid_set_log_dir(const char* dir) {
     // nhất không (trả lời "iPhone vẫn chạy app cũ?").
     const char* stamp = kudroid_build_stamp();
     writeLogFile("kudroid_version.txt", std::string(stamp) + "\n");
+
+#if defined(__APPLE__)
+    // Redirect stderr (fd 2) vào file — Avian (JVM nhúng) in lý do abort/fatal
+    // ra stderr (vd expect()/abort(c) trong compiler kèm op không hỗ trợ) nhưng
+    // iOS không hiển thị stderr đâu cả → lý do crash trước đây bị mất hoàn toàn.
+    // Crash handler sẽ dump đuôi file này vào kudroid_crash.log.
+    {
+        char errPath[1200];
+        size_t dl = strlen(g_logDir);
+        if (dl < sizeof(errPath) - 32) {
+            memcpy(errPath, g_logDir, dl);
+            memcpy(errPath + dl, "/stderr.log", 12);
+            int errFd = open(errPath, O_WRONLY | O_CREAT | O_APPEND, 0644);
+            if (errFd >= 0) {
+                dup2(errFd, STDERR_FILENO);
+                close(errFd);
+            }
+        }
+    }
+#endif
 }
 
 extern "C" void kudroid_set_documents_dir(const char* dir) {
