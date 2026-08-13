@@ -779,6 +779,59 @@ extern "C" pid_t bionic_gettid() {
 #endif
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// bionic: long syscall(long number, ...)
+// Guest libc/libc++ gọi syscall() TRỰC TIẾP với SỐ HIỆU LINUX. Trước đây
+// `syscall` không có trong shim table → resolve qua dlsym(RTLD_DEFAULT) →
+// syscall macOS chạy với số Linux → KÊU NHẦM syscall kernel (vd Linux 178 =
+// SYS_gettid, nhưng macOS 178 = setrlimit!). Hệ quả nghiêm trọng: libc++abi
+// (trong libc++_shared.so của Discord) lấy thread-id cho guard static bằng
+// syscall(SYS_gettid) → trả rác/giá trị giống nhau cho MỌI thread →
+// __cxa_guard_acquire thấy guard "đang init dở bởi chính thread này" → abort
+// "recursive initialization" dù không hề đệ quy.
+// Fix: map số Linux sang hành vi host đúng. Số chưa biết → ENOSYS (an toàn
+// hơn chạy nhầm syscall macOS với arg guest).
+// ─────────────────────────────────────────────────────────────────────────────
+#ifndef SYS_gettid
+#define SYS_gettid 178 // Linux arm64/x86_64 gettid
+#endif
+#ifndef SYS_getpid
+#define SYS_getpid 39 // Linux getpid
+#endif
+
+extern "C" long bionic_syscall(long number, ...) {
+    if (number == SYS_gettid) {
+        // macOS không có gettid — pthread_threadid_np cho thread-id duy nhất,
+        // ổn định (libc++abi chỉ cần so sánh bằng same-thread).
+#ifdef __APPLE__
+        uint64_t tid = 0;
+        pthread_threadid_np(NULL, &tid);
+        return static_cast<long>(tid);
+#else
+        return static_cast<long>(::syscall(SYS_gettid));
+#endif
+    }
+    if (number == SYS_getpid) {
+        return static_cast<long>(::getpid());
+    }
+    // Chưa map — log 1 lần mỗi số rồi ENOSYS (không chạy syscall macOS sai số).
+    static long s_unknownSeen[64];
+    static int s_unknownCount = 0;
+    bool known = false;
+    for (int i = 0; i < s_unknownCount; ++i) {
+        if (s_unknownSeen[i] == number) { known = true; break; }
+    }
+    if (!known && s_unknownCount < 64) {
+        s_unknownSeen[s_unknownCount++] = number;
+        char msg[128];
+        snprintf(msg, sizeof(msg),
+                 "bionic_syscall: unhandled Linux syscall %ld -> ENOSYS", number);
+        logAndroidMessage(4, "KuDroidSyscall", msg);
+    }
+    errno = ENOSYS;
+    return -1;
+}
+
 // Linux MREMAP flags (asm-generic/mman.h)
 #define MREMAP_MAYMOVE 1
 #define MREMAP_FIXED 2
@@ -2789,6 +2842,7 @@ const SymbolEntry kSyscallSymbols[] = {
     {"__futex_time64", reinterpret_cast<void*>(&bionic_futex)},
     {"mremap", reinterpret_cast<void*>(&bionic_mremap)},
     {"gettid", reinterpret_cast<void*>(&bionic_gettid)},
+    {"syscall", reinterpret_cast<void*>(&bionic_syscall)},
     {"getauxval", reinterpret_cast<void*>(&bionic_getauxval)},
     {"timerfd_create", reinterpret_cast<void*>(&bionic_timerfd_create)},
     {"timerfd_settime", reinterpret_cast<void*>(&bionic_timerfd_settime)},
