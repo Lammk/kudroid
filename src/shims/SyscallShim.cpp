@@ -30,6 +30,9 @@
 #include <condition_variable>
 #include <limits.h>
 #if defined(__APPLE__)
+#include <mach/mach.h>
+#endif
+#if defined(__APPLE__)
 // Khai báo trực tiếp 2 hàm autorelease pool của libobjc thay vì include
 // <objc/objc-autoreleasepool.h> — header này không nằm trong search path của
 // SDK trên một số runner macOS, còn 2 symbol này là ABI public (ARC dựa vào
@@ -769,16 +772,6 @@ extern "C" int bionic_sigaltstack(const stack_t *ss, stack_t *oss) {
 #include <sys/syscall.h>
 #endif
 
-extern "C" pid_t bionic_gettid() {
-#ifdef __APPLE__
-    uint64_t tid;
-    pthread_threadid_np(NULL, &tid);
-    return static_cast<pid_t>(tid);
-#else
-    return ::syscall(SYS_gettid);
-#endif
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // bionic: long syscall(long number, ...)
 // Guest libc/libc++ gọi syscall() TRỰC TIẾP với SỐ HIỆU LINUX. Trước đây
@@ -792,27 +785,162 @@ extern "C" pid_t bionic_gettid() {
 // Fix: map số Linux sang hành vi host đúng. Số chưa biết → ENOSYS (an toàn
 // hơn chạy nhầm syscall macOS với arg guest).
 // ─────────────────────────────────────────────────────────────────────────────
-#ifndef SYS_gettid
-#define SYS_gettid 178 // Linux arm64/x86_64 gettid
+// Guest luôn là Linux ARM64 → số syscall truyền vào syscall() là hằng số ARM64
+// (gettid=178, getpid=39, futex=98, process_vm_readv=270). KHÔNG dùng SYS_*
+// của host: x86_64 Linux dùng 186/39/202/310 khác hẳn — so nhầm là ENOSYS.
+#define KUDROID_SYS_gettid 178
+#define KUDROID_SYS_getpid 39
+#define KUDROID_SYS_futex 98
+#define KUDROID_SYS_process_vm_readv 270
+
+// Registry tid -> pthread_t: guest gọi tgkill với tid lấy từ gettid() của ta
+// (pthread_threadid_np). Giữ bảng để tgkill tìm được pthread_t thật của host.
+static std::mutex g_tidRegistryMtx;
+static std::unordered_map<long, pthread_t> g_tidRegistry;
+
+static void tid_registry_record(long tid) {
+    if (tid <= 0) return;
+    pthread_t self = pthread_self();
+    std::lock_guard<std::mutex> lock(g_tidRegistryMtx);
+    g_tidRegistry[tid] = self;
+}
+
+extern "C" pid_t bionic_gettid() {
+#ifdef __APPLE__
+    uint64_t tid = 0;
+    pthread_threadid_np(NULL, &tid);
+    const pid_t result = static_cast<pid_t>(tid);
+    tid_registry_record(static_cast<long>(result));
+    return result;
+#else
+    const pid_t result = static_cast<pid_t>(::syscall(SYS_gettid));
+    tid_registry_record(static_cast<long>(result));
+    return result;
 #endif
-#ifndef SYS_getpid
-#define SYS_getpid 39 // Linux getpid
+}
+
+#ifdef __APPLE__
+// Kiểm tra dãy [addr, addr+len) nằm trong vùng đã map của process này. Dùng
+// vm_region_64 (trả vùng CHỨA hoặc SAU addr) — loop tới khi tìm thấy vùng chứa
+// hoặc xác nhận addr không được map. Tránh memcpy vào địa chỉ lạ → SIGSEGV
+// giết cả app (chính là thứ guest probe để tránh).
+static bool range_is_mapped(uintptr_t addr, size_t len) {
+    if (len == 0) return true;
+    if (addr > static_cast<uintptr_t>(-1) - len) return false;
+    vm_address_t region_addr = static_cast<vm_address_t>(addr);
+    while (true) {
+        vm_size_t region_size = 0;
+        mach_msg_type_number_t count = VM_REGION_BASIC_INFO_64;
+        vm_region_basic_info_data_64 info;
+        mach_port_t object_name = MACH_PORT_NULL;
+        const kern_return_t kr = vm_region_64(mach_task_self(), &region_addr, &region_size,
+                                              VM_REGION_BASIC_INFO_64,
+                                              reinterpret_cast<vm_region_info_t>(&info),
+                                              &count, &object_name);
+        if (kr != KERN_SUCCESS) return false;
+        const uintptr_t rstart = static_cast<uintptr_t>(region_addr);
+        const uintptr_t rend = rstart + region_size;
+        if (region_size == 0 || rend <= rstart) return false; // overflow
+        if (addr >= rstart && addr + len <= rend) return true;
+        if (addr < rstart) return false; // addr dưới vùng kế → không map
+        region_addr = rend;
+    }
+}
 #endif
 
+// Linux: read bộ nhớ của process khác qua kernel. Ở đây mọi guest lib đều chạy
+// trong CÙNG address space host (guest heap/code = host memory) nên pid==self
+// là trường hợp duy nhất có nghĩa — và là trường hợp fbjni/Hermes dùng để probe
+// "địa chỉ này có đọc an toàn không" (đọc 8 byte rồi so magic). ENOSYS trước đây
+// khiến probe fail → guest đi nhánh khác → lỗi khó hiểu (guard abort).
+extern "C" long bionic_process_vm_readv(pid_t pid, const struct iovec* local_iov, unsigned long liovcnt,
+                                         const struct iovec* remote_iov, unsigned long riovcnt,
+                                         unsigned long flags) {
+#ifdef __linux__
+    // Host Linux có syscall thật — xử lý đúng mọi pid, an toàn (kernel check).
+    return static_cast<long>(::syscall(SYS_process_vm_readv, pid, local_iov, liovcnt,
+                                       remote_iov, riovcnt, flags));
+#else
+    (void)riovcnt;
+    if (flags != 0) { errno = EINVAL; return -1; }
+    if (pid != static_cast<pid_t>(::getpid())) {
+        errno = pid < 1 ? ESRCH : EPERM;
+        return -1;
+    }
+    if (liovcnt == 0) return 0;
+    if (liovcnt > 1024 || riovcnt > 1024) { errno = EINVAL; return -1; }
+    long total = 0;
+    for (unsigned long i = 0; i < liovcnt && i < riovcnt; ++i) {
+        const uint8_t* src = static_cast<const uint8_t*>(remote_iov[i].iov_base);
+        uint8_t* dst = static_cast<uint8_t*>(local_iov[i].iov_base);
+        const size_t n = std::min(remote_iov[i].iov_len, local_iov[i].iov_len);
+        if (n == 0) continue;
+        // Trước khi memcpy (SIGSEGV chết cả app), kiểm tra vùng đã map bằng
+        // vm_region_64 — đúng tinh thần "safe probe" mà guest đang dùng.
+        if (!src || !dst ||
+            !range_is_mapped(reinterpret_cast<uintptr_t>(src), n)) {
+            if (total == 0) { errno = EFAULT; return -1; }
+            return total;
+        }
+        std::memcpy(dst, src, n);
+        total += static_cast<long>(n);
+    }
+    return total;
+#endif
+}
+
+// futex qua syscall() thô: libc++ gọi syscall(98, ...) cho __libcpp_atomic_wait
+// (std::atomic wait/notify) — trước đây ENOSYS → busy-spin/vô hiệu hoá đồng bộ.
+// Nối thẳng vào bionic_futex (pthread condvar-based) đã có sẵn (định nghĩa ở
+// phần "Linux-Specific Syscalls" phía dưới).
+extern "C" int bionic_futex(uint32_t* uaddr, int futex_op, uint32_t val,
+                             const struct timespec* timeout, uint32_t* uaddr2, uint32_t val3);
+
+static long emulate_futex_syscall(va_list ap) {
+    uint32_t* uaddr = va_arg(ap, uint32_t*);
+    const int futex_op = va_arg(ap, int);
+    const uint32_t val = static_cast<uint32_t>(va_arg(ap, unsigned int));
+    const struct timespec* timeout = va_arg(ap, const struct timespec*);
+    uint32_t* uaddr2 = va_arg(ap, uint32_t*);
+    const uint32_t val3 = static_cast<uint32_t>(va_arg(ap, unsigned int));
+    return static_cast<long>(bionic_futex(uaddr, futex_op, val, timeout, uaddr2, val3));
+}
+
 extern "C" long bionic_syscall(long number, ...) {
-    if (number == SYS_gettid) {
+    if (number == KUDROID_SYS_gettid) {
         // macOS không có gettid — pthread_threadid_np cho thread-id duy nhất,
         // ổn định (libc++abi chỉ cần so sánh bằng same-thread).
 #ifdef __APPLE__
         uint64_t tid = 0;
         pthread_threadid_np(NULL, &tid);
-        return static_cast<long>(tid);
+        const long result = static_cast<long>(tid);
 #else
-        return static_cast<long>(::syscall(SYS_gettid));
+        const long result = static_cast<long>(::syscall(SYS_gettid));
 #endif
+        tid_registry_record(result);
+        return result;
     }
-    if (number == SYS_getpid) {
+    if (number == KUDROID_SYS_getpid) {
         return static_cast<long>(::getpid());
+    }
+    if (number == KUDROID_SYS_futex) {
+        va_list ap;
+        va_start(ap, number);
+        const long result = emulate_futex_syscall(ap);
+        va_end(ap);
+        return result;
+    }
+    if (number == KUDROID_SYS_process_vm_readv) {
+        va_list ap;
+        va_start(ap, number);
+        const pid_t pid = static_cast<pid_t>(va_arg(ap, int));
+        const struct iovec* local_iov = va_arg(ap, const struct iovec*);
+        const unsigned long liovcnt = va_arg(ap, unsigned long);
+        const struct iovec* remote_iov = va_arg(ap, const struct iovec*);
+        const unsigned long riovcnt = va_arg(ap, unsigned long);
+        const unsigned long flags = va_arg(ap, unsigned long);
+        va_end(ap);
+        return bionic_process_vm_readv(pid, local_iov, liovcnt, remote_iov, riovcnt, flags);
     }
     // Chưa map — log 1 lần mỗi số rồi ENOSYS (không chạy syscall macOS sai số).
     static long s_unknownSeen[64];
@@ -830,6 +958,155 @@ extern "C" long bionic_syscall(long number, ...) {
     }
     errno = ENOSYS;
     return -1;
+}
+
+// ── Wrapper syscall phổ biến bị bind dummy trước đây (log "missing symbol
+// bound to dummy"). Trên arm64 Linux, pread64/pwrite64/ftruncate64 chính là
+// pread/pwrite/ftruncate (off_t 64-bit) — host macOS có sẵn cùng signature. ──
+extern "C" ssize_t bionic_pread64(int fd, void* buf, size_t count, off_t offset) {
+    return ::pread(fd, buf, count, offset);
+}
+extern "C" ssize_t bionic_pwrite64(int fd, const void* buf, size_t count, off_t offset) {
+    return ::pwrite(fd, buf, count, offset);
+}
+extern "C" int bionic_ftruncate64(int fd, off_t length) {
+    return ::ftruncate(fd, length);
+}
+
+// pipe2: macOS không có — pipe() + fcntl đặt cờ. Linux O_NONBLOCK=0x800,
+// O_CLOEXEC=0x80000 (asm-generic/fcntl.h — đúng cho cả arm64/x86_64).
+extern "C" int bionic_pipe2(int pipefd[2], int flags) {
+#ifdef __linux__
+    return ::pipe2(pipefd, flags);
+#else
+    if (::pipe(pipefd) != 0) return -1;
+    if (flags & 0x800) { // O_NONBLOCK
+        for (int i = 0; i < 2; ++i) {
+            const int fl = ::fcntl(pipefd[i], F_GETFL);
+            if (fl < 0 || ::fcntl(pipefd[i], F_SETFL, fl | O_NONBLOCK) != 0) {
+                const int saved = errno;
+                ::close(pipefd[0]); ::close(pipefd[1]);
+                errno = saved;
+                return -1;
+            }
+        }
+    }
+    if (flags & 0x80000) { // O_CLOEXEC
+        for (int i = 0; i < 2; ++i) {
+            const int fl = ::fcntl(pipefd[i], F_GETFD);
+            if (fl < 0 || ::fcntl(pipefd[i], F_SETFD, fl | FD_CLOEXEC) != 0) {
+                const int saved = errno;
+                ::close(pipefd[0]); ::close(pipefd[1]);
+                errno = saved;
+                return -1;
+            }
+        }
+    }
+    return 0;
+#endif
+}
+
+// clock_nanosleep: flags bit0 = TIMER_ABSTIME. macOS chỉ có nanosleep (realtime
+// relative) — đủ cho cả REALTIME/MONOTONIC vì ta chỉ cần độ dài tương đối.
+extern "C" int bionic_clock_nanosleep(int clock_id, int flags, const struct timespec* req,
+                                       struct timespec* rem) {
+    (void)clock_id;
+    if (!req) { errno = EFAULT; return -1; }
+    struct timespec r = *req;
+    if (flags & 1) { // TIMER_ABSTIME
+        struct timespec now;
+        ::clock_gettime(CLOCK_REALTIME, &now);
+        r.tv_sec -= now.tv_sec;
+        r.tv_nsec -= now.tv_nsec;
+        if (r.tv_nsec < 0) { r.tv_sec -= 1; r.tv_nsec += 1000000000; }
+        if (r.tv_sec < 0) { r.tv_sec = 0; r.tv_nsec = 0; }
+    }
+#ifdef __linux__
+    return ::clock_nanosleep(static_cast<clockid_t>(clock_id), 0, &r, rem);
+#else
+    return ::nanosleep(&r, rem);
+#endif
+}
+
+// tgkill(pid, tid, sig): dựa registry tid->pthread_t (được ghi khi guest gọi
+// gettid/syscall(178)). Trước đây dummy — abort/assert của guest bị nuốt im.
+extern "C" int bionic_tgkill(int pid, int tid, int sig) {
+    if (pid != static_cast<int>(::getpid())) { errno = ESRCH; return -1; }
+    pthread_t target;
+    {
+        std::lock_guard<std::mutex> lock(g_tidRegistryMtx);
+        auto it = g_tidRegistry.find(static_cast<long>(tid));
+        if (it == g_tidRegistry.end()) { errno = ESRCH; return -1; }
+        target = it->second;
+    }
+    if (sig == 0) return 0; // kiểm tra thread tồn tại
+    return ::pthread_kill(target, sig) == 0 ? 0 : -1;
+}
+
+// sendfile: macOS signature khác hẳn Linux — emulate bằng pread/write loop.
+extern "C" ssize_t bionic_sendfile(int out_fd, int in_fd, off_t* offset, size_t count) {
+    off_t pos = offset ? *offset : ::lseek(in_fd, 0, SEEK_CUR);
+    if (pos < 0) return -1;
+    char buf[65536];
+    size_t total = 0;
+    while (total < count) {
+        const size_t chunk = std::min(sizeof(buf), count - total);
+        const ssize_t n = ::pread(in_fd, buf, chunk, pos);
+        if (n <= 0) break;
+        const ssize_t w = ::write(out_fd, buf, static_cast<size_t>(n));
+        if (w <= 0) break;
+        pos += w;
+        total += static_cast<size_t>(w);
+        if (static_cast<size_t>(w) != static_cast<size_t>(n)) break;
+    }
+    if (offset) *offset = pos;
+    return static_cast<ssize_t>(total);
+}
+
+extern "C" int bionic_sched_getscheduler(pid_t pid) {
+    (void)pid;
+    return 0; // SCHED_OTHER
+}
+
+extern "C" int bionic_omp_in_parallel() {
+    return 0; // chưa có OpenMP runtime — "ngoài vùng parallel"
+}
+
+extern "C" char* bionic___strchr_chk(const char* s, int c, size_t dst_len) {
+    if (!s) return nullptr;
+    for (size_t i = 0; i < dst_len; ++i) {
+        if (s[i] == static_cast<char>(c)) return const_cast<char*>(&s[i]);
+        if (s[i] == '\0') return nullptr;
+    }
+    return nullptr;
+}
+
+// bionic __strncpy_chk2(dst, src, n, dst_len, src_len): copy tối đa n ký tự,
+// không đọc quá src_len, không ghi quá dst_len (fortify).
+extern "C" char* bionic___strncpy_chk2(char* dst, const char* src, size_t n,
+                                       size_t dst_len, size_t src_len) {
+    if (!dst || !src) return dst;
+    size_t copy = n;
+    if (copy > dst_len) { copy = dst_len; }
+    if (src_len < copy) { copy = src_len; }
+    if (copy > 0) std::memcpy(dst, src, copy);
+    // strncpy pad phần còn lại bằng 0 nếu còn chỗ.
+    if (n > copy && dst_len > copy) std::memset(dst + copy, 0, std::min(n - copy, dst_len - copy));
+    return dst;
+}
+
+extern "C" void bionic___FD_CLR_chk(int fd, fd_set* set) {
+    if (fd < 0 || fd >= FD_SETSIZE || !set) {
+        trace("__FD_CLR_chk: fd out of range");
+        return;
+    }
+    FD_CLR(fd, set);
+}
+
+extern "C" struct cmsghdr* bionic___cmsg_nxthdr(struct msghdr* mhdr, struct cmsghdr* cmsg) {
+    // msghdr/cmsghdr layout Linux và macOS giống nhau (msg_control@40,
+    // msg_controllen@48; cmsghdr: len/level/type) nên CMSG_NXTHDR host đọc đúng.
+    return CMSG_NXTHDR(mhdr, cmsg);
 }
 
 // Linux MREMAP flags (asm-generic/mman.h)
@@ -2985,6 +3262,19 @@ const SymbolEntry kSyscallSymbols[] = {
 
     // 64-bit file operations
     {"lseek64", reinterpret_cast<void*>(&bionic_lseek64)},
+    {"pread64", reinterpret_cast<void*>(&bionic_pread64)},
+    {"pwrite64", reinterpret_cast<void*>(&bionic_pwrite64)},
+    {"ftruncate64", reinterpret_cast<void*>(&bionic_ftruncate64)},
+    {"pipe2", reinterpret_cast<void*>(&bionic_pipe2)},
+    {"clock_nanosleep", reinterpret_cast<void*>(&bionic_clock_nanosleep)},
+    {"tgkill", reinterpret_cast<void*>(&bionic_tgkill)},
+    {"sendfile", reinterpret_cast<void*>(&bionic_sendfile)},
+    {"sched_getscheduler", reinterpret_cast<void*>(&bionic_sched_getscheduler)},
+    {"omp_in_parallel", reinterpret_cast<void*>(&bionic_omp_in_parallel)},
+    {"__strchr_chk", reinterpret_cast<void*>(&bionic___strchr_chk)},
+    {"__strncpy_chk2", reinterpret_cast<void*>(&bionic___strncpy_chk2)},
+    {"__FD_CLR_chk", reinterpret_cast<void*>(&bionic___FD_CLR_chk)},
+    {"__cmsg_nxthdr", reinterpret_cast<void*>(&bionic___cmsg_nxthdr)},
 
     // Logging
     {"__android_log_vprint", reinterpret_cast<void*>(&bionic_android_log_vprint)},

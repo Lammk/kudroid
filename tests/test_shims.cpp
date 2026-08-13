@@ -22,10 +22,12 @@
 #include <thread>
 
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
 #include <sys/mman.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 // ─── Shims under test (extern "C", defined in SyscallShim.cpp) ──────────────
@@ -37,6 +39,9 @@ extern "C" void* bionic_mremap(void* old_address, size_t old_size,
                                size_t new_size, int flags, void* new_address);
 extern "C" int bionic_sigaction(int signum, const struct android_sigaction* act,
                                 struct android_sigaction* oldact);
+extern "C" long bionic_syscall(long number, ...);
+extern "C" int bionic_tgkill(int pid, int tid, int sig);
+extern "C" int bionic_pipe2(int pipefd[2], int flags);
 
 // Mirror of the guest android_sigaction layout from SyscallShim.cpp.
 struct android_sigaction {
@@ -301,6 +306,74 @@ static void test_sigaction_flag_roundtrip() {
     ::bionic_sigaction(SIGUSR1, &dfl, nullptr);
 }
 
+// ─── syscall() mappings: bionic_syscall phải hiểu SỐ ARM64 cố định, không
+// phải số của host arch (x86_64 Linux: gettid=186/futex=202/pvm=310). ───────
+// Guest luôn dùng số syscall Linux ARM64.
+#define GUEST_SYS_gettid 178
+#define GUEST_SYS_futex 98
+#define GUEST_SYS_process_vm_readv 270
+#define FUTEX_WAIT_PRIVATE 128
+#define FUTEX_WAKE_PRIVATE 129
+
+static void test_syscall_mappings() {
+    std::printf("[syscall] raw Linux-arm64 numbers routed correctly\n");
+
+    // gettid(178): unique per thread (guard static của libc++abi phụ thuộc).
+    const long mainTid = bionic_syscall(GUEST_SYS_gettid);
+    CHECK(mainTid > 0, "gettid(178) > 0");
+    long otherTid = 0;
+    std::thread t([&] { otherTid = bionic_syscall(GUEST_SYS_gettid); });
+    t.join();
+    CHECK(otherTid != mainTid, "gettid(178) unique per thread");
+
+    // tgkill: registry tid -> pthread_t (ghi khi gettid) phải tìm được.
+    CHECK(bionic_tgkill(::getpid(), static_cast<int>(mainTid), 0) == 0,
+          "tgkill(pid, self tid, 0) == 0");
+
+    // process_vm_readv(270) self-read: fbjni probe đọc 8 byte rồi so magic.
+    uint64_t magic = 0x1122334455667788ULL;
+    uint64_t local = 0;
+    struct iovec local_iov = { &local, sizeof(local) };
+    struct iovec remote_iov = { &magic, sizeof(magic) };
+    const long nread = bionic_syscall(GUEST_SYS_process_vm_readv,
+                                      static_cast<int>(::getpid()),
+                                      &local_iov, 1UL, &remote_iov, 1UL, 0UL);
+    CHECK(nread == 8 && local == magic, "process_vm_readv(270) self: 8 bytes");
+    errno = 0;
+    CHECK(bionic_syscall(GUEST_SYS_process_vm_readv,
+                         static_cast<int>(::getpid()) + 12345,
+                         &local_iov, 1UL, &remote_iov, 1UL, 0UL) == -1,
+          "process_vm_readv(270) foreign pid -> error");
+
+    // futex qua syscall(98) thô (libc++ __libcpp_atomic_wait dùng đường này).
+    static uint32_t futex_word = 0;
+    std::atomic<bool> waiter_ready{false};
+    std::atomic<bool> waiter_done{false};
+    std::thread waiter([&] {
+        waiter_ready = true;
+        bionic_syscall(GUEST_SYS_futex, &futex_word, FUTEX_WAIT_PRIVATE, 0U,
+                       (void*)nullptr, (void*)nullptr, 0U);
+        waiter_done = true;
+    });
+    while (!waiter_ready) std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    futex_word = 1;
+    const long woken = bionic_syscall(GUEST_SYS_futex, &futex_word,
+                                      FUTEX_WAKE_PRIVATE, 1U,
+                                      (void*)nullptr, (void*)nullptr, 0U);
+    waiter.join();
+    CHECK(woken == 1, "futex(98) wake returns 1");
+    CHECK(waiter_done.load(), "futex(98) wait returned after wake");
+
+    // pipe2 (macOS không có; emulation bằng pipe + fcntl).
+    int fds[2] = {-1, -1};
+    CHECK(bionic_pipe2(fds, 0x80000 /*O_CLOEXEC*/) == 0, "pipe2 O_CLOEXEC ok");
+    if (fds[0] >= 0) {
+        CHECK((::fcntl(fds[0], F_GETFD) & FD_CLOEXEC) != 0, "pipe2 set CLOEXEC");
+        ::close(fds[0]); ::close(fds[1]);
+    }
+}
+
 // ─── main ────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -312,6 +385,7 @@ int main() {
     test_futex_etimedout();
     test_futex_cmp_requeue_precond();
     test_futex_wait_wake_cycles();
+    test_syscall_mappings();
     test_mremap_shrink_in_place();
     test_mremap_grow_with_maymove();
     test_sigaction_flag_roundtrip();
