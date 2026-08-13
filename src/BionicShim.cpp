@@ -11,9 +11,14 @@
 #include <mutex>
 #include <shared_mutex>
 #include <dlfcn.h>
+#include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <cxxabi.h>
+
+// Pipeline log chuẩn (stdout + kudroid_android_logs.txt + crash buffer) — định
+// nghĩa trong SyscallShim.cpp, dùng chung với GraphicsShim/kudroid_jni.
+extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
 
 namespace kudroid {
 namespace {
@@ -162,10 +167,29 @@ void* resolve_bionic_symbol(const char* name) {
             }
         }
 
+        // stderr/stdout/stdin là BIẾN toàn cục (FILE*), không phải hàm — bind
+        // dummy (địa chỉ code) khiến guest dereference code-as-FILE* → SEGV.
+        // Trả địa chỉ biến host thật để fprintf(stderr, ...) của guest chạy đúng
+        // (và log của guest đổ vào stderr.log mà crash handler đọc).
+        if (!resolved && std::strcmp(name, "stderr") == 0) {
+            resolved = reinterpret_cast<void*>(&::stderr);
+            is_host = true;
+        } else if (!resolved && std::strcmp(name, "stdout") == 0) {
+            resolved = reinterpret_cast<void*>(&::stdout);
+            is_host = true;
+        } else if (!resolved && std::strcmp(name, "stdin") == 0) {
+            resolved = reinterpret_cast<void*>(&::stdin);
+            is_host = true;
+        }
+
         if (!resolved) {
             char msg[256];
             snprintf(msg, sizeof(msg), "missing symbol bound to dummy: %s", name);
             trace_shim(msg);
+            // Mirror vào log chuẩn (android_logs.txt + crash buffer) — trước đây
+            // chỉ nằm trong shim trace nên biến mất khi cần tìm relocation
+            // unresolved (chính là nghi phạm SIGILL của Discord trong init).
+            kudroid_android_log_message(2, "BionicShim", msg);
             resolved = reinterpret_cast<void*>(&kudroid_universal_dummy);
         }
 

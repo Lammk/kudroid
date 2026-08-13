@@ -116,6 +116,16 @@ static void kudroid_terminate_handler() {
 }
 #endif
 
+// snprintf trả về độ dài "sẽ ghi" (có thể LỚN HƠN buffer khi bị cắt) — ghi đủ
+// m byte từ buffer nhỏ là đọc tràn stack → đống rác nhị phân trong crash log
+// (chính là vụ pc_sym của Discord bị cắt cụt + garbage). Clamp trước khi write.
+static void crashWriteLine(int fd, const char* buf, int len, size_t bufSize) {
+    if (len <= 0 || !buf) return;
+    size_t n = (size_t)len;
+    if (n >= bufSize) n = bufSize - 1;
+    (void)!write(fd, buf, n);
+}
+
 // Unwind bằng _Unwind_Backtrace (không dùng heap) + dladdr (best effort).
 struct UnwindContext {
     int fd;
@@ -154,7 +164,7 @@ static _Unwind_Reason_Code unwindCallback(struct _Unwind_Context* ctx, void* arg
                              u->count, (unsigned long long)pc);
             }
         }
-        if (m > 0) (void)!write(u->fd, line, (size_t)m);
+        crashWriteLine(u->fd, line, m, sizeof(line));
     }
     u->count++;
     return _URC_NO_REASON;
@@ -297,10 +307,10 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
             const char* stamp = kudroid_build_stamp();
             char stampLine[512];
             int sm = snprintf(stampLine, sizeof(stampLine), "build: %s\n", stamp);
-            if (sm > 0) (void)!write(fd, stampLine, (size_t)sm);
-            char sigline[256];
+            crashWriteLine(fd, stampLine, sm, sizeof(stampLine));
+            char sigline[2048];
             int m = snprintf(sigline, sizeof(sigline), "signal = %d\n", sig);
-            if (m > 0) (void)!write(fd, sigline, (size_t)m);
+            crashWriteLine(fd, sigline, m, sizeof(sigline));
 
             // Ghi tên thread đang crash (game chạy nhiều thread — biết thread nào
             // chết là một nửa chẩn đoán). pthread_getname_np không hoàn toàn
@@ -315,7 +325,7 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
                 m = snprintf(sigline, sizeof(sigline), "thread = %s (0x%llx)\n",
                              tname[0] ? tname : "?",
                              (unsigned long long)(uintptr_t)pthread_self());
-                if (m > 0) (void)!write(fd, sigline, (size_t)m);
+                crashWriteLine(fd, sigline, m, sizeof(sigline));
             }
 
             // in địa chỉ lỗi
@@ -323,7 +333,7 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
                 m = snprintf(sigline, sizeof(sigline),
                     "fault_addr = %p\nsi_code = %d\n",
                     info->si_addr, info->si_code);
-                if (m > 0) (void)!write(fd, sigline, (size_t)m);
+                crashWriteLine(fd, sigline, m, sizeof(sigline));
             }
 
             // in thanh ghi pc (arm64)
@@ -354,14 +364,14 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
                     (unsigned long long)x0, (unsigned long long)x1, (unsigned long long)x2,
                     (unsigned long long)x3, (unsigned long long)x4, (unsigned long long)x5,
                     (unsigned long long)x6, (unsigned long long)x7, (unsigned long long)x8);
-                if (m > 0) (void)!write(fd, sigline, (size_t)m);
+                crashWriteLine(fd, sigline, m, sizeof(sigline));
 
                 // Symbolicate pc/lr để log có ý nghĩa (file + hàm gần nhất).
                 char symPc[512], symLr[512];
                 symbolicateAddr((uintptr_t)pc, symPc, sizeof(symPc));
                 symbolicateAddr((uintptr_t)lr, symLr, sizeof(symLr));
                 m = snprintf(sigline, sizeof(sigline), "pc_sym: %s\nlr_sym: %s\n", symPc, symLr);
-                if (m > 0) (void)!write(fd, sigline, (size_t)m);
+                crashWriteLine(fd, sigline, m, sizeof(sigline));
 #elif defined(__linux__)
                 ucontext_t* uc = (ucontext_t*)ucontext;
                 uint64_t pc = uc->uc_mcontext.pc;
@@ -369,13 +379,13 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
                 m = snprintf(sigline, sizeof(sigline),
                     "pc = 0x%llx\nlr = 0x%llx\n",
                     (unsigned long long)pc, (unsigned long long)lr);
-                if (m > 0) (void)!write(fd, sigline, (size_t)m);
+                crashWriteLine(fd, sigline, m, sizeof(sigline));
 
                 char symPc[512], symLr[512];
                 symbolicateAddr((uintptr_t)pc, symPc, sizeof(symPc));
                 symbolicateAddr((uintptr_t)lr, symLr, sizeof(symLr));
                 m = snprintf(sigline, sizeof(sigline), "pc_sym: %s\nlr_sym: %s\n", symPc, symLr);
-                if (m > 0) (void)!write(fd, sigline, (size_t)m);
+                crashWriteLine(fd, sigline, m, sizeof(sigline));
 #endif
             }
 #endif

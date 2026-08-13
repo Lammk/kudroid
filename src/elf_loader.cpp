@@ -619,8 +619,16 @@ bool ElfLoader::relocate() {
                     address = resolve_bionic_symbol(name);
                 }
                 
-                if (!address && (symtab[symbolIndex].st_info >> 4) == 1 && (symtab[symbolIndex].st_info & 0xf) != 0) { // STB_GLOBAL & not STT_NOTYPE
-                    fprintf(stderr, "[KuDroidELF] WARNING: Unresolved global symbol '%s' in %s\n", name, path_.c_str());
+                if (!address) {
+                    // Mọi symbol không resolve được — không chỉ STB_GLOBAL — vì GOT
+                    // slot lúc đó = 0 + addend (có thể là địa chỉ rác trong data),
+                    // guest gọi qua slot này → SIGILL/SIGSEGV (nghi phạm vụ Discord).
+                    // In type + r_offset để biết chính xác slot nào trong module hỏng.
+                    fprintf(stderr,
+                            "[KuDroidELF] WARNING: Unresolved symbol '%s' in %s (type=%u, offset=0x%llx, addend=0x%llx)\n",
+                            name, path_.c_str(), type,
+                            (unsigned long long)relocs[i].r_offset,
+                            (unsigned long long)relocs[i].r_addend);
                 }
                 
                 if (type == R_AARCH64_COPY) {
