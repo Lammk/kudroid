@@ -213,42 +213,66 @@ extern "C" EGLDisplay bionic_eglGetDisplay(EGLNativeDisplayType display_id) {
         #define EGL_PLATFORM_ANGLE_DEVICE_TYPE_METAL_ANGLE 0x348A
         #define EGL_NONE 0x3038
         
-        // On iOS, ANGLE uses the Metal backend. Try Metal first with the
-        // device type explicitly set. IMPORTANT: always pass EGL_DEFAULT_DISPLAY
-        // (0) here — CAMetalLayer is ONLY for eglCreateWindowSurface.
-        EGLint backends[] = {
-            EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE,
-            EGL_PLATFORM_ANGLE_TYPE_VULKAN_ANGLE,
-            EGL_PLATFORM_ANGLE_TYPE_DEFAULT_ANGLE
-        };
-        
-        for (int i = 0; i < 3; i++) {
+        // Trên iOS, ANGLE chỉ có Metal backend khả dụng: build này patch
+        // IsVulkanMacDisplayAvailable()=false ngay trong Display.cpp nên
+        // TYPE_VULKAN và DEFAULT (ưu tiên Vulkan) luôn trả NULL — không probe.
+        // Probe nhiều tổ hợp attrib, ưu tiên KHÔNG có device-type: nếu bản
+        // ANGLE pin không biết enum EGL_PLATFORM_ANGLE_DEVICE_TYPE_METAL_ANGLE
+        // (0x348A) thì toàn bộ attribs bị coi là EGL_BAD_ATTRIBUTE →
+        // EGL_NO_DISPLAY (đúng log "backend[0..2] -> NULL" trước đây).
+        // IMPORTANT: luôn truyền EGL_DEFAULT_DISPLAY (0) — CAMetalLayer chỉ
+        // dùng cho eglCreateWindowSurface.
+
+        // 1) Metal, không device-type (tổ hợp tối giản, ít rủi ro nhất)
+        {
             const EGLint attribs[] = {
-                EGL_PLATFORM_ANGLE_TYPE_ANGLE, backends[i],
+                EGL_PLATFORM_ANGLE_TYPE_ANGLE, EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE,
+                EGL_NONE
+            };
+            EGLDisplay dpy = host_func(EGL_PLATFORM_ANGLE_ANGLE, (void*)0, attribs);
+            gpuLog("eglGetDisplay: Metal (no device-type) -> %s", dpy ? "VALID" : "NULL");
+            if (dpy != nullptr) {
+                gpuLog("eglGetDisplay: got display via eglGetPlatformDisplayEXT (Metal)");
+                return dpy;
+            }
+        }
+        // 2) Metal + device-type METAL (cho bản ANGLE mới có enum 0x348A)
+        {
+            const EGLint attribs[] = {
+                EGL_PLATFORM_ANGLE_TYPE_ANGLE, EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE,
                 EGL_PLATFORM_ANGLE_DEVICE_TYPE_ANGLE, EGL_PLATFORM_ANGLE_DEVICE_TYPE_METAL_ANGLE,
                 EGL_NONE
             };
             EGLDisplay dpy = host_func(EGL_PLATFORM_ANGLE_ANGLE, (void*)0, attribs);
-            gpuLog("eglGetDisplay: backend[%d]=0x%x -> %s", i, (unsigned)backends[i],
-                   dpy ? "VALID" : "NULL");
+            gpuLog("eglGetDisplay: Metal (device-type) -> %s", dpy ? "VALID" : "NULL");
             if (dpy != nullptr) {
-                gpuLog("eglGetDisplay: got display via eglGetPlatformDisplayEXT");
+                gpuLog("eglGetDisplay: got display via eglGetPlatformDisplayEXT (Metal+device)");
                 return dpy;
             }
         }
+        // 3) DEFAULT, không device-type
+        {
+            const EGLint attribs[] = {
+                EGL_PLATFORM_ANGLE_TYPE_ANGLE, EGL_PLATFORM_ANGLE_TYPE_DEFAULT_ANGLE,
+                EGL_NONE
+            };
+            EGLDisplay dpy = host_func(EGL_PLATFORM_ANGLE_ANGLE, (void*)0, attribs);
+            gpuLog("eglGetDisplay: Default (no device-type) -> %s", dpy ? "VALID" : "NULL");
+            if (dpy != nullptr) {
+                gpuLog("eglGetDisplay: got display via eglGetPlatformDisplayEXT (Default)");
+                return dpy;
+            }
+        }
+        
+
     }
     
-    gpuLog("eglGetDisplay: falling back to eglGetDisplay");
-    typedef EGLDisplay (*PFN_eglGetDisplay)(EGLNativeDisplayType);
-    auto host_get_display = (PFN_eglGetDisplay) get_egl_func("eglGetDisplay");
-    if (host_get_display) {
-        // Always pass EGL_DEFAULT_DISPLAY (0) — CAMetalLayer is only for surfaces.
-        EGLDisplay dpy = host_get_display((EGLNativeDisplayType)0);
-        gpuLog("eglGetDisplay: fallback -> %s (%p)", dpy ? "VALID" : "NULL", (void*)dpy);
-        return dpy;
-    }
+    // KHÔNG fallback sang eglGetDisplay(EGL_DEFAULT_DISPLAY): display đó trả
+    // về "VALID" nhưng không có backend thật — eglInitialize() kế tiếp abort
+    // bên trong ANGLE (SIGABRT, đúng crash log). Trả EGL_NO_DISPLAY để guest
+    // thất bại nhẹ nhàng thay vì crash.
     
-    gpuLog("eglGetDisplay: completely failed to find eglGetDisplay");
+    gpuLog("eglGetDisplay: all platform display attempts failed — returning EGL_NO_DISPLAY");
     return nullptr;
 }
 
