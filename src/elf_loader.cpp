@@ -36,6 +36,12 @@
 #ifndef DT_RELRENT
 #define DT_RELRENT 37
 #endif
+#ifndef DT_HASH
+#define DT_HASH 4
+#endif
+#ifndef DT_GNU_HASH
+#define DT_GNU_HASH 0x6ffffef5
+#endif
 
 #include <unistd.h>
 #include <utility>
@@ -303,6 +309,98 @@ static const uint32_t R_AARCH64_RELATIVE = 1027;
 static const uint32_t R_AARCH64_GLOB_DAT = 1025;
 static const uint32_t R_AARCH64_JUMP_SLOT = 1026;
 static const uint32_t R_AARCH64_ABS64 = 257;
+
+// Đếm số symbol THẬT trong .dynsym bằng hash table (DT_HASH nchain hoặc
+// DT_GNU_HASH chains), thay vì khoảng cách (strtabOff - symtabOff)/24.
+//
+// .dynstr KHÔNG nằm ngay sau .dynsym trong .so NDK — giữa chúng có
+// .gnu.hash/.hash, nên khoảng cách cho con số quá lớn → quét nhầm entry rác
+// (st_name tình cờ trỏ đúng chuỗi, st_shndx != 0) → getSymbolAddress trả
+// base+st_value của RÁC → GOT slot trỏ vào vùng header ELF → SIGILL khi gọi.
+// Chính là vụ Discord: "__cxa_atexit resolved from libreactnative.so ->
+// 0x112ab5080" (= base+0x1080, pc crash).
+static size_t countDynsymSymbols(const std::vector<char>& fileBuf,
+                                 const Elf64Ehdr* ehdr,
+                                 const Elf64Phdr* phdrs) {
+    const Elf64Dyn* dynamic = nullptr;
+    size_t dynCount = 0;
+    for (uint16_t i = 0; i < ehdr->e_phnum; ++i) {
+        if (phdrs[i].p_type == 2 &&
+            phdrs[i].p_offset + phdrs[i].p_filesz <= fileBuf.size()) {
+            dynamic = reinterpret_cast<const Elf64Dyn*>(
+                fileBuf.data() + phdrs[i].p_offset);
+            dynCount = phdrs[i].p_filesz / sizeof(Elf64Dyn);
+            break;
+        }
+    }
+    if (!dynamic) return 0;
+
+    auto vaddrToOffset = [&](uint64_t vaddr) -> uint64_t {
+        for (uint16_t i = 0; i < ehdr->e_phnum; ++i) {
+            if (phdrs[i].p_type == 1 && vaddr >= phdrs[i].p_vaddr &&
+                vaddr < phdrs[i].p_vaddr + phdrs[i].p_filesz) {
+                return phdrs[i].p_offset + (vaddr - phdrs[i].p_vaddr);
+            }
+        }
+        return UINT64_MAX;
+    };
+
+    uint64_t hashOff = UINT64_MAX;      // DT_HASH (sysv)
+    uint64_t gnuHashOff = UINT64_MAX;   // DT_GNU_HASH
+    for (size_t i = 0; i < dynCount && dynamic[i].d_tag != 0; ++i) {
+        if (dynamic[i].d_tag == DT_HASH) {
+            hashOff = vaddrToOffset(dynamic[i].d_val);
+        } else if (dynamic[i].d_tag == DT_GNU_HASH) {
+            gnuHashOff = vaddrToOffset(dynamic[i].d_val);
+        }
+    }
+
+    // DT_HASH: { nbucket, nchain, buckets[], chains[] } — nchain = số symbol.
+    if (hashOff != UINT64_MAX && hashOff + 8 <= fileBuf.size()) {
+        const uint32_t* h =
+            reinterpret_cast<const uint32_t*>(fileBuf.data() + hashOff);
+        const uint32_t nchain = h[1];
+        if (nchain > 0 && nchain < 10000000) return nchain;
+    }
+
+    // DT_GNU_HASH: { nbuckets, symoffset, bloom_size, bloom_shift, bloom[],
+    // buckets[], chains[] }. Số symbol = symoffset + max(chain index). Walk
+    // từng chain (bit 0 = entry cuối) để tìm index lớn nhất.
+    if (gnuHashOff != UINT64_MAX && gnuHashOff + 16 <= fileBuf.size()) {
+        const uint32_t* g =
+            reinterpret_cast<const uint32_t*>(fileBuf.data() + gnuHashOff);
+        const uint32_t nbuckets = g[0];
+        const uint32_t symoffset = g[1];
+        const uint32_t bloomSize = g[2];
+        if (nbuckets < 1000000 && symoffset < 10000000) {
+            uint64_t pos = gnuHashOff + 16;
+            pos += (uint64_t)bloomSize * 8; // bloom words (64-bit)
+            if (pos + (uint64_t)nbuckets * 4 <= fileBuf.size()) {
+                const uint32_t* buckets =
+                    reinterpret_cast<const uint32_t*>(fileBuf.data() + pos);
+                pos += (uint64_t)nbuckets * 4;
+                uint32_t maxIdx = 0;
+                for (uint32_t b = 0; b < nbuckets; ++b) {
+                    uint32_t idx = buckets[b];
+                    if (idx < symoffset) continue;
+                    for (;;) {
+                        const uint64_t off =
+                            pos + (uint64_t)(idx - symoffset) * 4;
+                        if (off + 4 > fileBuf.size()) break;
+                        const uint32_t chain = *reinterpret_cast<const uint32_t*>(
+                            fileBuf.data() + off);
+                        if (idx > maxIdx) maxIdx = idx;
+                        if (chain & 1) break;
+                        ++idx;
+                    }
+                }
+                if (maxIdx > 0) return (size_t)maxIdx + 1;
+            }
+        }
+    }
+
+    return 0; // không có hash table → caller fallback về khoảng cách
+}
 
 bool ElfLoader::readFile(std::vector<char>& buf) {
     std::ifstream file(path_, std::ios::binary | std::ios::ate);
@@ -572,7 +670,13 @@ bool ElfLoader::relocate() {
     const auto* symtab = reinterpret_cast<const Elf64Sym*>(
         fileBuf_.data() + symtabOffset);
     const char* strtab = fileBuf_.data() + strtabOffset;
-    const size_t symbolCount = (strtabOffset - symtabOffset) / sizeof(Elf64Sym);
+    // Số symbol THẬT từ hash table — khoảng cách symtab→strtab quá lớn khi
+    // .gnu.hash/.hash nằm giữa → symbolIndex hợp lệ vẫn nằm ngoài giới hạn này
+    // hoặc bị coi là rác (tương tự bug getSymbolAddress → SIGILL Discord).
+    size_t symbolCount = countDynsymSymbols(fileBuf_, ehdr, phdrs);
+    if (symbolCount == 0) {
+        symbolCount = (strtabOffset - symtabOffset) / sizeof(Elf64Sym);
+    }
 
 #ifndef R_AARCH64_COPY
 #define R_AARCH64_COPY 1024
@@ -801,15 +905,18 @@ void* ElfLoader::getSymbolAddress(const char* symbolName) {
 
     if (!symtab || !strtab) return nullptr;
 
-    // xác định số lượng mục .dynsym một cách an toàn. bảng chuỗi hầu như
-    // luôn theo sau bảng ký hiệu ngay lập tức, vì vậy hãy giới hạn số lượng bằng khoảng cách đó;
-    // nếu không hãy quay lại cuối bộ đệm tệp. nếu không có giới hạn này, vòng lặp
-    // sẽ đọc qua bộ đệm tệp đã ánh xạ và gặp sự cố.
-    size_t maxSym = 0;
-    if (strtabOff != UINT64_MAX && strtabOff > symtabOff) {
-        maxSym = (strtabOff - symtabOff) / sizeof(Elf64Sym);
-    } else {
-        maxSym = (fileBuf_.size() - symtabOff) / sizeof(Elf64Sym);
+    // Số symbol THẬT từ hash table (DT_HASH nchain / DT_GNU_HASH). Không dùng
+    // khoảng cách symtab→strtab vì .dynstr không nằm ngay sau .dynsym (có
+    // .gnu.hash/.hash ở giữa) → quét quá → match entry rác → GOT slot trỏ vào
+    // header ELF → SIGILL (vụ Discord __cxa_atexit -> base+0x1080).
+    size_t maxSym = countDynsymSymbols(fileBuf_, ehdr, phdrs);
+    if (maxSym == 0) {
+        // fallback an toàn: chỉ quét trong vùng symtab→strtab thật
+        if (strtabOff != UINT64_MAX && strtabOff > symtabOff) {
+            maxSym = (strtabOff - symtabOff) / sizeof(Elf64Sym);
+        } else {
+            maxSym = (fileBuf_.size() - symtabOff) / sizeof(Elf64Sym);
+        }
     }
 
     // lặp qua các mục bảng ký hiệu
