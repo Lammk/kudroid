@@ -393,6 +393,39 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
                         crashWriteLine(fd, sigline, n, sizeof(sigline));
                     }
                 }
+
+                // Walk frame chain từ faulting fp (ucontext) — tìm frame của
+                // __cxa_guard_acquire (layout cố định `stp x20,x19,[sp,#48]`):
+                // [fp+8] = saved LR (caller), [fp+56] = x19 = guard pointer.
+                // Chỉ đọc các frame đã qua kiểm tra dải (savedFp > f, delta hữu
+                // hạn) để không double-fault trong signal handler. Không deref
+                // slot56 (guard) — chỉ dump raw, decode offline.
+                (void)!write(fd, "\n--- fp chain ---\n", 17);
+                {
+                    uint64_t f = fp;
+                    for (int i = 0; i < 32; ++i) {
+                        if (!(f > 0x1000 && f < 0x7fffffffffffULL)) break;
+                        const uint64_t* p = reinterpret_cast<const uint64_t*>(f);
+                        const uint64_t savedFp = p[0];
+                        const uint64_t savedLr = p[1];
+                        const uint64_t slot56  = p[7]; // [fp+56]
+                        char lrMod[256] = {0};
+                        const bool inGuest =
+                            kudroid::kudroid_lookup_guest_module(
+                                reinterpret_cast<void*>(savedLr), lrMod, sizeof(lrMod));
+                        const bool guardLike =
+                            slot56 > 0x100000000ULL && slot56 < 0x7fffffffffffULL;
+                        int n2 = snprintf(sigline, sizeof(sigline),
+                            "fp%02d: f=0x%llx lr=0x%llx%s slot56=0x%llx%s\n",
+                            i, (unsigned long long)f, (unsigned long long)savedLr,
+                            inGuest ? lrMod : "?", (unsigned long long)slot56,
+                            guardLike ? " <-- guard?" : "");
+                        crashWriteLine(fd, sigline, n2, sizeof(sigline));
+                        // Chain hợp lệ: frame kế cao hơn, delta ≤ 64KB.
+                        if (!(savedFp > f && savedFp - f < 0x10000)) break;
+                        f = savedFp;
+                    }
+                }
 #elif defined(__linux__)
                 ucontext_t* uc = (ucontext_t*)ucontext;
                 uint64_t pc = uc->uc_mcontext.pc;

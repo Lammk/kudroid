@@ -938,34 +938,33 @@ static long emulate_futex_syscall(va_list ap) {
 // guard_acquire (cả bản libc++_shared 0x9f004 lẫn bản static trong
 // libapng-drawable 0x76064 — bản mọi consumer resolve về) gọi syscall(178)
 // để lấy tid. Lúc bionic_syscall nhận gettid thì:
-//   - x19 (callee-saved, chưa bị clobber bởi shim) = guard pointer
+//   - x19 LÚC ENTRY (bắt ngay đầu bionic_syscall, qua PLT stub `br` frameless
+//     không đổi) = guard pointer
 //   - __builtin_return_address(1) = call site syscall@plt trong guard_acquire
 //     (PLT stub dùng `br`, không đổi LR — nên LR bionic_syscall trả về chính
 //     là lệnh kế sau `bl syscall`)
-//   - [x29] (saved x29 của bionic_syscall) = frame guard_acquire (stub
-//     frameless) → [frame+8] = caller của guard_acquire (hàm guest đang init)
-// Chỉ log case in-progress (byte1 bit1 set): đó là hoặc (a) SAME_TID_RECURSION
-// = cú re-enter chí mạng, hoặc (b) thread khác đang chờ guard. Claim mới
-// (byte1 chưa set) là nhiễu — bỏ qua. Guard addr resolve ra module → biết
-// ngay static nào đang bị init dở.
+//   - frame guard_acquire (layout cố định `stp x20,x19,[sp,#48]`) → [fp+56]
+//     = x19 saved = guard, [fp+8] = caller của guard_acquire (hàm guest đang
+//     init static)
+// Chỉ log case in-progress (byte1 bit1 set): hoặc (a) SAME_TID_RECURSION =
+// cú re-enter chí mạng, hoặc (b) thread khác đang chờ guard. Claim mới là
+// nhiễu — bỏ qua. Guard addr resolve ra module (gồm .bss) → biết static nào.
 #if defined(__aarch64__)
 extern "C" bool kudroid_lookup_guest_module(void* addr, char* out, std::size_t outSize);
 __attribute__((noinline))
-static void log_guard_acquire_diag(long tid) {
-    uintptr_t x19 = 0, x29v = 0;
-    asm volatile("mov %0, x19" : "=r"(x19));
+static void log_guard_acquire_diag(long tid, uintptr_t guard) {
+    uintptr_t x29v = 0;
     asm volatile("mov %0, x29" : "=r"(x29v));
-    const uintptr_t guard = x19;
-    // x29v = frame của chính hàm này (sau prologue). Frame guard_acquire là
-    // cấp có [fp+56] (x19 saved) == guard — walk tối đa 6 cấp để anchor, chịu
-    // được cả trường hợp bionic_syscall/diag frameless hay không.
+    // Walk frame từ frame của chính hàm này. Frame guard_acquire là cấp có
+    // [fp+56] == guard — nhưng compiler cũng save x19 (== guard!) vào frame
+    // diag/bionic_syscall ở offset tuỳ ý → giữ MATCH CUỐI (sâu nhất = cấp lâu
+    // đời nhất = guard_acquire), không break.
     uintptr_t gaCaller = 0;
     uintptr_t fp = x29v;
     for (int i = 0; i < 6 && fp > 0x1000 && fp < 0x7fffffffffffULL; ++i) {
         const uintptr_t candGuard = *reinterpret_cast<const uintptr_t*>(fp + 56);
         if (candGuard == guard) {
             gaCaller = *reinterpret_cast<const uintptr_t*>(fp + 8);
-            break;
         }
         fp = *reinterpret_cast<const uintptr_t*>(fp); // next frame up
     }
@@ -994,10 +993,18 @@ static void log_guard_acquire_diag(long tid) {
     logAndroidMessage(4, "KuDroidSyscall", msg);
 }
 #else
-static void log_guard_acquire_diag(long tid) { (void)tid; }
+static void log_guard_acquire_diag(long tid, uintptr_t guard) { (void)tid; (void)guard; }
 #endif
 
 extern "C" long bionic_syscall(long number, ...) {
+    // DIAG: x19 LÚC ENTRY = guard pointer của guard_acquire đang gọi gettid
+    // (callee-saved; qua PLT stub `br` frameless không đổi). Bắt NGAY đầu hàm
+    // — sau các call (pthread_threadid_np, tid_registry_record) x19 có thể đã
+    // bị compiler dùng làm scratch.
+    uintptr_t entryX19 = 0;
+#if defined(__aarch64__)
+    asm volatile("mov %0, x19" : "=r"(entryX19));
+#endif
     if (number == KUDROID_SYS_gettid) {
         // macOS không có gettid — pthread_threadid_np cho thread-id duy nhất,
         // ổn định (libc++abi chỉ cần so sánh bằng same-thread).
@@ -1009,7 +1016,7 @@ extern "C" long bionic_syscall(long number, ...) {
         const long result = static_cast<long>(::syscall(SYS_gettid));
 #endif
         tid_registry_record(result);
-        log_guard_acquire_diag(result);
+        log_guard_acquire_diag(result, entryX19);
         return result;
     }
     if (number == KUDROID_SYS_getpid) {
