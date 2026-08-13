@@ -907,56 +907,90 @@ static long emulate_futex_syscall(va_list ap) {
     const struct timespec* timeout = va_arg(ap, const struct timespec*);
     uint32_t* uaddr2 = va_arg(ap, uint32_t*);
     const uint32_t val3 = static_cast<uint32_t>(va_arg(ap, unsigned int));
+    // DIAGNOSTIC: ai đang gọi syscall(98) FUTEX_WAIT — địa chỉ nào, trong module
+    // nào (có thể là __libcpp_atomic_wait của std::atomic, hoặc guard wait nếu
+    // bản guard dùng futex). Dedup 16 địa chỉ đầu để khỏi tràn log.
+#if defined(__aarch64__)
+    const int cmd = futex_op & 127;
+    if (cmd == 0 /* FUTEX_WAIT */ || cmd == 9 /* FUTEX_WAIT_BITSET */) {
+        extern "C" bool kudroid_lookup_guest_module(void* addr, char* out, std::size_t outSize);
+        static void* s_seen[16];
+        static int s_seenN = 0;
+        bool dup = false;
+        for (int i = 0; i < s_seenN; ++i) {
+            if (s_seen[i] == uaddr) { dup = true; break; }
+        }
+        if (!dup && s_seenN < 16) {
+            s_seen[s_seenN++] = uaddr;
+            char mod[256] = {0};
+            kudroid_lookup_guest_module(uaddr, mod, sizeof(mod));
+            char msg[320];
+            snprintf(msg, sizeof(msg), "futex_wait uaddr=0x%llx [%s] val=%u op=%d",
+                     (unsigned long long)(uintptr_t)uaddr, mod, val, futex_op);
+            logAndroidMessage(4, "KuDroidSyscall", msg);
+        }
+    }
+#endif
     return static_cast<long>(bionic_futex(uaddr, futex_op, val, timeout, uaddr2, val3));
 }
 
 // DIAGNOSTIC TEMP (điều tra "__cxa_guard_acquire recursive initialization"):
-// libc++abi guard_acquire (libc++_shared.so, prologue `stp x29,x30,[sp,#-64]!`
-// + `stp x20,x19,[sp,#48]`) lấy tid bằng syscall(178) — tức khi bionic_syscall
-// nhận gettid thì frame dưới (hoặc frame dưới nữa) LÀ guard_acquire:
-//   [ga_fp + 8]  = x30 saved = caller của guard_acquire (hàm guest đang init)
-//   [ga_fp + 56] = x19 saved = guard pointer (guard nào đang bị re-enter)
-// Dump 2 cấp frame để xác định guard + caller — decode offline. Log mọi gettid
-// (số lượng nhỏ, chấp nhận được cho một vòng chẩn đoán).
+// guard_acquire (cả bản libc++_shared 0x9f004 lẫn bản static trong
+// libapng-drawable 0x76064 — bản mọi consumer resolve về) gọi syscall(178)
+// để lấy tid. Lúc bionic_syscall nhận gettid thì:
+//   - x19 (callee-saved, chưa bị clobber bởi shim) = guard pointer
+//   - __builtin_return_address(1) = call site syscall@plt trong guard_acquire
+//     (PLT stub dùng `br`, không đổi LR — nên LR bionic_syscall trả về chính
+//     là lệnh kế sau `bl syscall`)
+//   - [x29] (saved x29 của bionic_syscall) = frame guard_acquire (stub
+//     frameless) → [frame+8] = caller của guard_acquire (hàm guest đang init)
+// Chỉ log case in-progress (byte1 bit1 set): đó là hoặc (a) SAME_TID_RECURSION
+// = cú re-enter chí mạng, hoặc (b) thread khác đang chờ guard. Claim mới
+// (byte1 chưa set) là nhiễu — bỏ qua. Guard addr resolve ra module → biết
+// ngay static nào đang bị init dở.
 #if defined(__aarch64__)
 extern "C" bool kudroid_lookup_guest_module(void* addr, char* out, std::size_t outSize);
+__attribute__((noinline))
 static void log_guard_acquire_diag(long tid) {
-    void* lr0 = __builtin_return_address(0);
-    // Chỉ log khi lr0 nằm trong __cxa_guard_acquire của libc++abi
-    // (libc++_shared.so offset 0x9f00c..0x9f138) — chính là 2 chỗ gọi gettid
-    // trong guard_acquire. Lọc theo offset resolve được từ registry guest
-    // module (cùng cơ chế crash handler symbolicate).
-    char resolved[256] = {0};
-    bool inGuardAcquire = false;
-    if (kudroid_lookup_guest_module(lr0, resolved, sizeof(resolved))) {
-        const char* plus = std::strrchr(resolved, '+');
-        if (plus && plus[1] == '0' && (plus[2] == 'x' || plus[2] == 'X')) {
-            const uintptr_t off = static_cast<uintptr_t>(
-                std::strtoull(plus + 2, nullptr, 16));
-            inGuardAcquire = (off >= 0x9f000 && off <= 0x9f200);
+    uintptr_t x19 = 0, x29v = 0;
+    asm volatile("mov %0, x19" : "=r"(x19));
+    asm volatile("mov %0, x29" : "=r"(x29v));
+    const uintptr_t guard = x19;
+    // x29v = frame của chính hàm này (sau prologue). Frame guard_acquire là
+    // cấp có [fp+56] (x19 saved) == guard — walk tối đa 6 cấp để anchor, chịu
+    // được cả trường hợp bionic_syscall/diag frameless hay không.
+    uintptr_t gaCaller = 0;
+    uintptr_t fp = x29v;
+    for (int i = 0; i < 6 && fp > 0x1000 && fp < 0x7fffffffffffULL; ++i) {
+        const uintptr_t candGuard = *reinterpret_cast<const uintptr_t*>(fp + 56);
+        if (candGuard == guard) {
+            gaCaller = *reinterpret_cast<const uintptr_t*>(fp + 8);
+            break;
         }
+        fp = *reinterpret_cast<const uintptr_t*>(fp); // next frame up
     }
-    if (!inGuardAcquire) return;
-
-    uintptr_t fp0 = 0;
-    asm volatile("mov %0, x29" : "=r"(fp0));
-    // fp0 = frame của bionic_syscall (nếu có frame) hoặc guard_acquire (nếu
-    // shim được compile frameless). fp1 = frame phía trên fp0.
-    auto rd = [](uintptr_t p) -> uintptr_t {
-        return *reinterpret_cast<const uintptr_t*>(p); // stack của chính mình
-    };
-    const uintptr_t p0 = fp0;
-    const uintptr_t fp1 = rd(p0);
-    char msg[768];
+    char guardMod[256] = {0}, callerMod[256] = {0};
+    kudroid_lookup_guest_module(reinterpret_cast<void*>(guard), guardMod, sizeof(guardMod));
+    kudroid_lookup_guest_module(reinterpret_cast<void*>(gaCaller), callerMod, sizeof(callerMod));
+    unsigned b0 = 0, b1 = 0, storedTid = 0, inProgress = 0, sameTid = 0;
+    // Guard nằm trong guest .bss (0x100000000+) — deref an toàn theo dải.
+    if (guard > 0x100000000ULL && guard < 0x7fffffffffffULL) {
+        const volatile uint8_t* g = reinterpret_cast<const volatile uint8_t*>(guard);
+        b0 = g[0];
+        b1 = g[1];
+        storedTid = *reinterpret_cast<const volatile uint32_t*>(guard + 4);
+        inProgress = (b1 & 0x2) != 0;
+        sameTid = inProgress && (static_cast<long>(storedTid) == tid);
+    }
+    if (!inProgress) return; // claim mới — không phải case đang điều tra
+    char msg[640];
     snprintf(msg, sizeof(msg),
-             "guard_acquire_diag tid=%ld lr0=0x%llx (%s) fp0=0x%llx "
-             "fp0[0]=0x%llx fp0[8]=0x%llx fp0[48]=0x%llx fp0[56]=0x%llx "
-             "fp1[0]=0x%llx fp1[8]=0x%llx fp1[48]=0x%llx fp1[56]=0x%llx",
-             tid, (unsigned long long)(uintptr_t)lr0, resolved, (unsigned long long)fp0,
-             (unsigned long long)rd(p0), (unsigned long long)rd(p0 + 8),
-             (unsigned long long)rd(p0 + 48), (unsigned long long)rd(p0 + 56),
-             (unsigned long long)rd(fp1), (unsigned long long)rd(fp1 + 8),
-             (unsigned long long)rd(fp1 + 48), (unsigned long long)rd(fp1 + 56));
+             "guard_diag %s tid=%ld guard=0x%llx [%s] b0=%u b1=%u stored_tid=%u "
+             "call_site=0x%llx caller=0x%llx [%s]",
+             sameTid ? "SAME_TID_RECURSION" : "waiting",
+             tid, (unsigned long long)guard, guardMod, b0, b1, storedTid,
+             (unsigned long long)(uintptr_t)__builtin_return_address(1),
+             (unsigned long long)gaCaller, callerMod);
     logAndroidMessage(4, "KuDroidSyscall", msg);
 }
 #else
