@@ -227,9 +227,20 @@ void kudroid_jni_init_jvm(const char* bootclasspath, const char* classpath) {
     // đường dẫn lớp khởi động. đường dẫn lớp do người gọi cung cấp được thêm vào như một
     // mục nhập đường dẫn lớp bổ sung (đối với các lớp ứng dụng được tải trong thời gian chạy).
     std::string bootOption = "-Xbootclasspath:[classpathJar]";
+    // App classes PHẢI nằm trên app classpath (-Djava.class.path): JNI
+    // FindClass resolve qua appLoader (jnienv.cpp findClass → appLoader),
+    // KHÔNG phải boot loader. Trên device, nối vào -Xbootclasspath/a: một
+    // mình KHÔNG đủ — SELFTEST NOT FOUND dù jar exists + option đúng (boot
+    // finder với placeholder [classpathJar] + append không cho FindClass
+    // native thấy class, trong khi test Linux cùng libavian.a chứng minh
+    // -Djava.class.path= cho FOUND). Trên Android thật, dex app nằm trên
+    // app classpath. Giữ cả hai: java.class.path cho app loader (bắt buộc,
+    // đã chứng minh), bootclasspath/a cho resolve qua boot/system loader.
     std::string classpathOption;
+    std::string bootAppendOption;
     if (classpath && classpath[0] != '\0') {
-        classpathOption = std::string("-Xbootclasspath/a:") + classpath;
+        classpathOption = std::string("-Djava.class.path=") + classpath;
+        bootAppendOption = std::string("-Xbootclasspath/a:") + classpath;
         // DIAG: jar app có tồn tại + đọc được không? Avian bỏ im lặng token
         // classpath khi stat() thất bại (finder.cpp add()) → thiếu class →
         // chính xác chuỗi lỗi fbjni populateWhat đang gặp.
@@ -242,22 +253,29 @@ void kudroid_jni_init_jvm(const char* bootclasspath, const char* classpath) {
                     "im lặng token này, mọi app-class FindClass sẽ fail!", classpath);
         }
     }
-    log_jni("JVM options: %s%s", bootOption.c_str(),
-            classpathOption.empty() ? "" : (" " + classpathOption).c_str());
+    log_jni("JVM options: %s%s%s", bootOption.c_str(),
+            classpathOption.empty() ? "" : (" " + classpathOption).c_str(),
+            bootAppendOption.empty() ? "" : (" " + bootAppendOption).c_str());
 
     // giới hạn vùng nhớ heap ở một kích thước hợp lý cho ios (tránh áp lực bộ nhớ).
     // avian chấp nhận -xmx<n>m.
     std::string heapOption = "-Xmx256m";
 
-    // đếm số tùy chọn: tệp jar đường dẫn lớp + vùng nhớ heap luôn hiện diện; đường dẫn lớp là tùy chọn.
+    // đếm số tùy chọn: tệp jar đường dẫn lớp + vùng nhớ heap luôn hiện diện;
+    // java.class.path và bootclasspath/a là tùy chọn (có khi có AOT jar).
     int nOptions = 2;
     if (!classpathOption.empty()) nOptions++;
+    if (!bootAppendOption.empty()) nOptions++;
 
-    JavaVMOption options[3];
+    JavaVMOption options[4];
     options[0].optionString = const_cast<char*>(bootOption.c_str());
     options[1].optionString = const_cast<char*>(heapOption.c_str());
+    int oi = 2;
     if (!classpathOption.empty()) {
-        options[2].optionString = const_cast<char*>(classpathOption.c_str());
+        options[oi++].optionString = const_cast<char*>(classpathOption.c_str());
+    }
+    if (!bootAppendOption.empty()) {
+        options[oi++].optionString = const_cast<char*>(bootAppendOption.c_str());
     }
 
     JavaVMInitArgs vmArgs;
