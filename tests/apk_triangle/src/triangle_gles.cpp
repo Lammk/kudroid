@@ -94,9 +94,10 @@ static void* render_loop(void* arg) {
     EGLint numConfigs;
     eglChooseConfig(display, attribs, &config, 1, &numConfigs);
     
-    // ANGLE on iOS actually wants the UIView, but accepts CALayer. 
-    // Sleep a tiny bit to allow iOS UI layout to finish.
-    usleep(500000); 
+    // Bỏ usleep(500000): trên kudroid crash ngay trong sleep (giữa eglChooseConfig
+    // và eglCreateWindowSurface, trước cả log "window=") — chưa rõ vì sao
+    // (usleep không có shim), nhưng nó chỉ là "chờ UI layout" — bỏ đi để lộ
+    // lớp lỗi tiếp theo (eglCreateWindowSurface/ANGLE) với log đầy đủ.
 
     EGLSurface surface = eglCreateWindowSurface(display, config, window, nullptr);
     if (surface == EGL_NO_SURFACE) {
