@@ -287,17 +287,16 @@ extern "C" int bionic_android_log_print(int priority, const char* tag,
 }
 #endif
 
+// Không trace: __cxa_finalize/atexit và các no-op chạy với tần suất cực cao
+// (mỗi .so unload) — trace từng lần làm log thành hàng trăm dòng rác.
 extern "C" void bionic_cxa_finalize(void*) {
-    trace("__cxa_finalize() -> no-op");
 }
 
 extern "C" int bionic_cxa_atexit(void (*)(void*), void*, void*) {
-    trace("__cxa_atexit() -> no-op");
     return 0;
 }
 
 extern "C" void bionic_runtime_noop() {
-    trace("weak compiler runtime hook -> no-op");
 }
 
 
@@ -385,7 +384,6 @@ static inline void destroy_sync(void* guest_ptr, int type) {
 }
 
 extern "C" int bionic_pthread_mutex_init(void* guestMutex, const void* attr) {
-    trace("pthread_mutex_init()");
 
     // Bionic pthread_mutexattr_t: kiểu (PTHREAD_MUTEX_RECURSIVE=1, ERRORCHECK=2)
     // nằm ở 2 bit thấp của từ 4 byte đầu (little-endian). Nếu game tạo mutex
@@ -410,7 +408,6 @@ extern "C" int bionic_pthread_mutex_init(void* guestMutex, const void* attr) {
 
     std::unique_lock<std::shared_mutex> lock(gSyncRegistryLock);
     gSyncRegistry[guestMutex] = hostMutex;
-    trace("pthread_mutex_init() -> 0");
     return 0;
 }
 
@@ -436,26 +433,23 @@ extern "C" int bionic_pthread_rwlock_init(void* rwlock, const void* attr) {
 
 
 
+// Không trace mutex lock/unlock: mỗi call 2 dòng trace, game lock hàng chục
+// nghìn lần/giây — nguồn rác lớn nhất trong log. Chỉ giữ trace cho sự kiện
+// hiếm/có giá trị (fortify overflow, dummy, missing symbol).
 extern "C" int bionic_pthread_mutex_lock(void* guestMutex) {
-    trace("pthread_mutex_lock()");
     pthread_mutex_t* hostMutex = static_cast<pthread_mutex_t*>(get_or_init_sync(guestMutex, SYNC_MUTEX));
     const int result = hostMutex ? ::pthread_mutex_lock(hostMutex) : -1;
-    trace(result == 0 ? "pthread_mutex_lock() -> 0" : "pthread_mutex_lock() -> error");
     return result;
 }
 
 extern "C" int bionic_pthread_mutex_unlock(void* guestMutex) {
-    trace("pthread_mutex_unlock()");
     pthread_mutex_t* hostMutex = static_cast<pthread_mutex_t*>(get_or_init_sync(guestMutex, SYNC_MUTEX));
     const int result = hostMutex ? ::pthread_mutex_unlock(hostMutex) : -1;
-    trace(result == 0 ? "pthread_mutex_unlock() -> 0" : "pthread_mutex_unlock() -> error");
     return result;
 }
 
 extern "C" int bionic_pthread_mutex_destroy(void* guestMutex) {
-    trace("pthread_mutex_destroy()");
     destroy_sync(guestMutex, SYNC_MUTEX);
-    trace("pthread_mutex_destroy() -> 0");
     return 0;
 }
 
@@ -2363,13 +2357,16 @@ extern "C" void bionic_init_main_thread_tls(void) {
     // Check the stack guard is readable at offset 40
     uint64_t guard_check = *reinterpret_cast<uint64_t*>(new_tpidr + 40);
     
-    fprintf(stderr, "[TLS_DIAG] tls_base=%p tls_ptr=%p\n", reinterpret_cast<void*>(tls_base), reinterpret_cast<void*>(tls_ptr));
-    fprintf(stderr, "[TLS_DIAG] tpidr_el0 BEFORE=0x%llx AFTER=0x%llx\n", 
-            (unsigned long long)old_tpidr, (unsigned long long)new_tpidr);
-    fprintf(stderr, "[TLS_DIAG] stack_guard@offset40=0x%llx (expect 0x1337BEEFCAFECAFE)\n",
-            (unsigned long long)guard_check);
-    fprintf(stderr, "[TLS_DIAG] write %s\n", 
-            (new_tpidr == (uint64_t)tls_ptr) ? "SUCCESS" : "FAILED");
+    // DIAGNOSTIC (gate): chạy mỗi thread mới — chỉ log khi điều tra TLS.
+    if (guard_diag_enabled()) {
+        fprintf(stderr, "[TLS_DIAG] tls_base=%p tls_ptr=%p\n", reinterpret_cast<void*>(tls_base), reinterpret_cast<void*>(tls_ptr));
+        fprintf(stderr, "[TLS_DIAG] tpidr_el0 BEFORE=0x%llx AFTER=0x%llx\n", 
+                (unsigned long long)old_tpidr, (unsigned long long)new_tpidr);
+        fprintf(stderr, "[TLS_DIAG] stack_guard@offset40=0x%llx (expect 0x1337BEEFCAFECAFE)\n",
+                (unsigned long long)guard_check);
+        fprintf(stderr, "[TLS_DIAG] write %s\n", 
+                (new_tpidr == (uint64_t)tls_ptr) ? "SUCCESS" : "FAILED");
+    }
 #endif
 }
 
