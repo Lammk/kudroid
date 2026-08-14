@@ -4,6 +4,7 @@
 #include <cstring>
 #include <cstdarg>
 #include <mutex>
+#include <sys/stat.h>
 #include <string>
 #include <functional>
 #include <pthread.h>
@@ -184,12 +185,31 @@ static void log_jni(const char* fmt, ...) {
 // phương thức vòng đời jvm
 // ─────────────────────────────────────────────────────────────────────────────
 
+// classpath ứng dụng đã áp dụng cho VM hiện tại (so sánh để biết có cần
+// re-init khi AOT jar khác — Avian không có append classpath lúc runtime).
+static std::string g_appClasspath;
+
 void kudroid_jni_init_jvm(const char* bootclasspath, const char* classpath) {
     (void)bootclasspath; // avian luôn sử dụng tệp jar đường dẫn lớp được nhúng
     std::lock_guard<std::mutex> lock(g_jvm_mutex);
+
     if (g_vm) {
-        return; // đã được khởi tạo
+        // VM đã tồn tại (có thể từ run trước trong cùng process, init với
+        // classpath rỗng vì AOT chưa sẵn). Nếu run này có app classpath KHÁC
+        // thì phá VM tạo lại — nếu không, mọi FindClass class ứng dụng fail
+        // → fbjni ném JniException → populateWhat đệ quy → crash/hang.
+        if (classpath && classpath[0] != '\0' && g_appClasspath != classpath) {
+            log_jni("Re-initializing JVM with app classpath: %s", classpath);
+            if (g_vm->DestroyJavaVM() != 0) {
+                log_jni("WARNING: DestroyJavaVM returned non-zero");
+            }
+            g_vm = nullptr;
+            g_env = nullptr;
+        } else {
+            return; // đã được khởi tạo với classpath phù hợp
+        }
     }
+    g_appClasspath = classpath ? classpath : "";
 
     log_jni("Initializing Avian JVM...");
 
@@ -210,7 +230,20 @@ void kudroid_jni_init_jvm(const char* bootclasspath, const char* classpath) {
     std::string classpathOption;
     if (classpath && classpath[0] != '\0') {
         classpathOption = std::string("-Xbootclasspath/a:") + classpath;
+        // DIAG: jar app có tồn tại + đọc được không? Avian bỏ im lặng token
+        // classpath khi stat() thất bại (finder.cpp add()) → thiếu class →
+        // chính xác chuỗi lỗi fbjni populateWhat đang gặp.
+        struct stat st;
+        if (::stat(classpath, &st) == 0) {
+            log_jni("App classpath jar exists: %s (%lld bytes)", classpath,
+                    (long long)st.st_size);
+        } else {
+            log_jni("ERROR: App classpath jar MISSING/UNREADABLE: %s — Avian sẽ bỏ "
+                    "im lặng token này, mọi app-class FindClass sẽ fail!", classpath);
+        }
     }
+    log_jni("JVM options: %s%s", bootOption.c_str(),
+            classpathOption.empty() ? "" : (" " + classpathOption).c_str());
 
     // giới hạn vùng nhớ heap ở một kích thước hợp lý cho ios (tránh áp lực bộ nhớ).
     // avian chấp nhận -xmx<n>m.
@@ -245,6 +278,24 @@ void kudroid_jni_init_jvm(const char* bootclasspath, const char* classpath) {
     g_env = static_cast<JNIEnv*>(env);
     log_jni("Avian JVM initialized successfully (JavaVM=%p, JNIEnv=%p)",
             (void*)g_vm, (void*)g_env);
+
+    // SELF-TEST quyết định: class ứng dụng có thực sự load được từ AOT jar
+    // không? fbjni cần com/facebook/jni/ExceptionHelper khi ném JniException
+    // (populateWhat FindClass nó) — thiếu → đệ quy → crash/hang. Dòng này nói
+    // chính xác classpath có hiệu lực hay không, hết đoán.
+    if (!classpathOption.empty() && g_env) {
+        JNIEnv* e = g_env;
+        jclass eh = e->FindClass("com/facebook/jni/ExceptionHelper");
+        if (eh) {
+            log_jni("SELFTEST: FindClass(com/facebook/jni/ExceptionHelper) FOUND — "
+                    "app classpath OK");
+            e->DeleteLocalRef(eh);
+        } else {
+            log_jni("SELFTEST: FindClass(com/facebook/jni/ExceptionHelper) NOT FOUND — "
+                    "app classes không vào classpath (fbjni sẽ crash/hang khi ném exception)!");
+            if (e->ExceptionCheck()) e->ExceptionClear();
+        }
+    }
 
     // Đăng ký native method của framework ngay tại đây — nếu bỏ lỡ, Java gọi
     // Log.* sẽ UnsatisfiedLinkError (issue đã tìm thấy khi rà framework).

@@ -1028,6 +1028,21 @@ static void log_guard_acquire_diag(long tid, uintptr_t guard) { (void)tid; (void
 // ─────────────────────────────────────────────────────────────────────────────
 static std::mutex g_guardMtx;
 
+// Đếm tổng số lần same-tid recursion trên MỖI guard (từ đầu process). Nếu
+// init cứ thất bại đệ quy (vd FindClass của fbjni populateWhat fail vì class
+// không trên classpath → ném exception → tạo JniException mới → populateWhat
+// lại...), clear+return 1 sẽ re-init mãi mãi → HANG. Sau N lần: return 0
+// (pretend done) để caller đi tiếp — thay vì hang vô hạn, nó tiếp tục với
+// static chưa init (null) → thường ném/bỏ qua → có thể là lỗi tiếp theo thay vì
+// treo.
+static constexpr int kGuardMaxRecursions = 8;
+static std::unordered_map<uintptr_t, int> g_guardRecursions;
+
+static int guard_recursion_count(uintptr_t g) {
+    int& n = g_guardRecursions[g];
+    return ++n;
+}
+
 extern "C" int bionic___cxa_guard_acquire(uint64_t* g) {
     if (!g) return 1;
     // Fast path: đã done → không cần lock (benign race như libc++abi).
@@ -1043,6 +1058,18 @@ extern "C" int bionic___cxa_guard_acquire(uint64_t* g) {
             const uint32_t stored = *reinterpret_cast<volatile uint32_t*>(b0 + 4);
             if (stored == static_cast<uint32_t>(tid)) {
                 // CÙNG THREAD re-enter → thay vì abort: clear + return 1.
+                const int rec = guard_recursion_count(reinterpret_cast<uintptr_t>(g));
+                if (rec > kGuardMaxRecursions) {
+                    // Loop-cut: guard này init đệ quy quá nhiều lần (class thiếu
+                    // trên classpath) — trả 0 (pretend done) để thoát vòng lặp.
+                    char msg[256];
+                    snprintf(msg, sizeof(msg),
+                             "guard_recursion_loop_cut guard=0x%llx tid=%ld "
+                             "rec=%d -> return 0 (pretend done)",
+                             (unsigned long long)(uintptr_t)g, tid, rec);
+                    logAndroidMessage(4, "KuDroidSyscall", msg);
+                    return 0;
+                }
                 b0[1] &= static_cast<uint8_t>(~0x6);
                 *reinterpret_cast<volatile uint32_t*>(b0 + 4) = 0;
                 lock.unlock();

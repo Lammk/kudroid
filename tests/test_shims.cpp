@@ -421,6 +421,25 @@ static void test_guard_same_tid_recursion_tolerated() {
     bionic___cxa_guard_release(&g2);
 }
 
+static void test_guard_recursion_loop_cut() {
+    // Init đệ quy mãi mãi (class thiếu trên classpath) → sau 8 lần shim phải
+    // trả 0 (pretend done) thay vì re-init vô hạn (hang). Guard dùng static để
+    // địa chỉ ổn định (không dính stack-slot reuse của test trước).
+    static uint64_t s_guard = 0;
+    uint64_t& guard = s_guard;
+    int first = -1, ninth = -1;
+    for (int i = 1; i <= 12; ++i) {
+        const int r = bionic___cxa_guard_acquire(&guard); // claim (in-progress)
+        if (first < 0) first = r;
+        const int r2 = bionic___cxa_guard_acquire(&guard); // same-tid recursion
+        if (i == 9) ninth = r2;
+        bionic___cxa_guard_abort(&guard); // init fail → sạch guard cho vòng sau
+        if (r2 == 0) break; // loop cut
+    }
+    CHECK(first == 1, "guard-cut: first claim");
+    CHECK(ninth == 0, "guard-cut: recursion #9 returns 0 (loop cut, no hang)");
+}
+
 static void test_guard_cross_thread_wait() {
     // Thread A claim giữ guard; thread B chờ (spin) tới khi A release → B thấy done.
     uint64_t guard = 0;
@@ -457,6 +476,7 @@ int main() {
     test_guard_acquire_release();
     test_guard_same_tid_recursion_tolerated();
     test_guard_cross_thread_wait();
+    test_guard_recursion_loop_cut();
     std::printf("=== %d checks, %d failures ===\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }
