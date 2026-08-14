@@ -164,6 +164,29 @@ extern "C" void* bionic_eglGetProcAddress(const char* procname) {
     return nullptr;
 }
 
+static void* get_gl_func(const char* name) {
+    // gl* nằm trong libGLESv2.framework (ANGLE), load RTLD_LOCAL — resolve
+    // trực tiếp từ handle như get_egl_func, không qua RTLD_DEFAULT.
+    static void* gl_handle = nullptr;
+    if (!gl_handle) {
+        gl_handle = ::dlopen("@executable_path/Frameworks/libGLESv2.framework/libGLESv2", RTLD_NOW | RTLD_LOCAL);
+        if (!gl_handle) {
+            gl_handle = ::dlopen("Frameworks/libGLESv2.framework/libGLESv2", RTLD_NOW | RTLD_LOCAL);
+        }
+    }
+    if (gl_handle) {
+        void* func = ::dlsym(gl_handle, name);
+        if (func) return func;
+    }
+    void* func = ::dlsym(RTLD_DEFAULT, name);
+    if (func) return func;
+    auto host_get_proc = (PFN_eglGetProcAddress) ::dlsym(RTLD_DEFAULT, "eglGetProcAddress");
+    if (host_get_proc) {
+        func = host_get_proc(name);
+    }
+    return func;
+}
+
 static void* get_egl_func(const char* name) {
     // ANGLE is loaded with RTLD_LOCAL, so its symbols are NOT in RTLD_DEFAULT.
     // Resolve directly from the ANGLE framework handle instead.
@@ -769,6 +792,50 @@ extern "C" EGLBoolean bionic_eglWaitNative(EGLint engine) {
     return r;
 }
 
+// ── Hàm EGL/GLES từng bị ELF loader bind dummy (log Discord: "missing symbol
+// bound to dummy: ...") vì thiếu trong bảng shim + ANGLE load RTLD_LOCAL.
+// Forward thật sang ANGLE — dummy trả 0 làm game nhận giá trị sai → crash. ──
+
+extern "C" unsigned int bionic_eglQueryContext(void* dpy, void* ctx, unsigned int attribute,
+                                                int* value) {
+    typedef unsigned int (*PFN)(void*, void*, unsigned int, int*);
+    auto f = (PFN)get_egl_func("eglQueryContext");
+    if (!f) { EGL_FORWARD_ERR("eglQueryContext", ""); return 0; }
+    unsigned int r = f(dpy, ctx, attribute, value);
+    gpuLog("eglQueryContext(attr=0x%x) -> %s%s%s", attribute,
+           r ? "true" : "false", r ? " value=" : "",
+           (r && value) ? std::to_string(*value).c_str() : "");
+    return r;
+}
+
+extern "C" void bionic_glMemoryBarrier(unsigned int barriers) {
+    typedef void (*PFN)(unsigned int);
+    auto f = (PFN)get_gl_func("glMemoryBarrier");
+    if (!f) { EGL_FORWARD_ERR("glMemoryBarrier", ""); return; }
+    gpuLog("glMemoryBarrier(barriers=0x%x)", barriers);
+    f(barriers);
+}
+
+extern "C" void bionic_glBindImageTexture(unsigned int unit, unsigned int texture, int level,
+                                          unsigned char layered, int layer,
+                                          unsigned int access, unsigned int format) {
+    typedef void (*PFN)(unsigned int, unsigned int, int, unsigned char, int,
+                        unsigned int, unsigned int);
+    auto f = (PFN)get_gl_func("glBindImageTexture");
+    if (!f) { EGL_FORWARD_ERR("glBindImageTexture", ""); return; }
+    gpuLog("glBindImageTexture(unit=%u texture=%u level=%d layered=%u layer=%d)",
+           unit, texture, level, layered, layer);
+    f(unit, texture, level, layered, layer, access, format);
+}
+
+extern "C" void bionic_glFramebufferParameteri(unsigned int target, unsigned int pname, int param) {
+    typedef void (*PFN)(unsigned int, unsigned int, int);
+    auto f = (PFN)get_gl_func("glFramebufferParameteri");
+    if (!f) { EGL_FORWARD_ERR("glFramebufferParameteri", ""); return; }
+    gpuLog("glFramebufferParameteri(target=0x%x pname=0x%x param=%d)", target, pname, param);
+    f(target, pname, param);
+}
+
 const SymbolEntry kGraphicsSymbols[] = {
     {"ANativeWindow_fromSurface", reinterpret_cast<void*>(&bionic_ANativeWindow_fromSurface)},
     {"ANativeWindow_getWidth", reinterpret_cast<void*>(&bionic_ANativeWindow_getWidth)},
@@ -809,6 +876,10 @@ const SymbolEntry kGraphicsSymbols[] = {
     {"eglReleaseTexImage", reinterpret_cast<void*>(&bionic_eglReleaseTexImage)},
     {"eglWaitGL", reinterpret_cast<void*>(&bionic_eglWaitGL)},
     {"eglWaitNative", reinterpret_cast<void*>(&bionic_eglWaitNative)},
+    {"eglQueryContext", reinterpret_cast<void*>(&bionic_eglQueryContext)},
+    {"glMemoryBarrier", reinterpret_cast<void*>(&bionic_glMemoryBarrier)},
+    {"glBindImageTexture", reinterpret_cast<void*>(&bionic_glBindImageTexture)},
+    {"glFramebufferParameteri", reinterpret_cast<void*>(&bionic_glFramebufferParameteri)},
     {"vkGetInstanceProcAddr", reinterpret_cast<void*>(&bionic_vkGetInstanceProcAddr)},
     {"vkCreateAndroidSurfaceKHR", reinterpret_cast<void*>(&bionic_vkCreateAndroidSurfaceKHR)},
     {"vkEnumerateInstanceExtensionProperties", reinterpret_cast<void*>(&bionic_vkEnumerateInstanceExtensionProperties)},
