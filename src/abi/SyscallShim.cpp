@@ -1,8 +1,8 @@
 #include "kudroid/BionicShim.h"
-#include "kudroid/shims/SyscallShim.h"
-#include "kudroid/shims/GraphicsShim.h"
-#include "kudroid/shims/InputShim.h"
-#include "kudroid/shims/AudioShim.h"
+#include "kudroid/abi/SyscallShim.h"
+#include "kudroid/platform/GraphicsShim.h"
+#include "kudroid/platform/InputShim.h"
+#include "kudroid/platform/AudioShim.h"
 #include "kudroid/VFSPathRemapper.h"
 
 #include <cmath>

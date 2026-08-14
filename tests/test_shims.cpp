@@ -1,5 +1,5 @@
 // test_shims.cpp — host-side regression tests for the guest syscall shims in
-// src/shims/SyscallShim.cpp. Every function here is `extern "C"` and compiles
+// src/abi/SyscallShim.cpp. Every function here is `extern "C"` and compiles
 // on the Linux host (the Apple-only #ifdef branches are verified by the
 // build-macos CI job instead).
 //

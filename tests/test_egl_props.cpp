@@ -1,7 +1,7 @@
 // Verification: EGL symbol coverage, __system_property_read, __FD_ISSET_chk.
 // Build like test_dex_to_jar: link against kudroid_core.
 #include "kudroid/BionicShim.h"
-#include "kudroid/shims/GraphicsShim.h"
+#include "kudroid/platform/GraphicsShim.h"
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>

@@ -1,4 +1,4 @@
-#include "kudroid/shims/GraphicsShim.h"
+#include "kudroid/platform/GraphicsShim.h"
 #include "kudroid/Log.h"
 #include <dlfcn.h>
 #include <cstdio>

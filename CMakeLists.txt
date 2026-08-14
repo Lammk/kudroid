@@ -39,11 +39,11 @@ add_library(kudroid_core STATIC
     src/bionic_log_trampoline.S
     src/elf_loader.cpp
     src/library_manager.cpp
-    src/shims/InputShim.cpp
-    src/shims/AudioShim.cpp
-    src/shims/GraphicsShim.cpp
-    src/shims/SyscallShim.cpp
-    src/shims/AssetShim.cpp
+    src/platform/InputShim.cpp
+    src/platform/AudioShim.cpp
+    src/platform/GraphicsShim.cpp
+    src/abi/SyscallShim.cpp
+    src/platform/AssetShim.cpp
     src/kudroid_bridge.cpp
     src/kudroid_jni.cpp
     src/kudroid_java_activity_bridge.cpp
@@ -52,7 +52,7 @@ add_library(kudroid_core STATIC
     src/DexCacheManager.cpp
     src/DexToJar.cpp
     src/DexAotCache.cpp
-    src/Log.cpp
+    src/debug/Log.cpp
 )
 
 find_package(ZLIB REQUIRED)

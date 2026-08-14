@@ -1,5 +1,5 @@
-#include "kudroid/shims/AssetShim.h"
-#include "kudroid/shims/ShimDefs.h"
+#include "kudroid/platform/AssetShim.h"
+#include "kudroid/platform/ShimDefs.h"
 
 #include <cstdio>
 #include <cstdlib>

@@ -1,4 +1,4 @@
-#include "kudroid/shims/InputShim.h"
+#include "kudroid/platform/InputShim.h"
 #include <cstdint>
 #include <unistd.h>
 #include <fcntl.h>

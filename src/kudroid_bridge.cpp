@@ -4,8 +4,8 @@
 #include "kudroid/APKExtractor.h"
 #include "kudroid/DexCacheManager.h"
 #include "kudroid/DexAotCache.h"
-#include "kudroid/shims/InputShim.h"
-#include "kudroid/shims/AssetShim.h"
+#include "kudroid/platform/InputShim.h"
+#include "kudroid/platform/AssetShim.h"
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
