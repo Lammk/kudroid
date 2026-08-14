@@ -214,6 +214,35 @@ extern "C" EGLDisplay bionic_eglGetPlatformDisplayEXT(EGLint platform, void* nat
     return nullptr;
 }
 
+// ANGLE first-touch phải xảy ra trên MAIN thread. Bằng chứng log máy thật:
+// GL TEST (chạy từ C++ kudroid, main thread) init ANGLE hoàn toàn OK
+// (eglInitialize v1.5 -> pbuffer -> context -> glClear -> GL_RENDERER=
+// "ANGLE Metal Renderer: Apple A13 GPU"), còn triangle guest first-touch ANGLE
+// TRÊN RENDER PTHREAD -> abort ngay sau eglGetDisplay trả VALID, trước cả
+// eglInitialize (stack crash có chuỗi guard "(pretend done)" — static init của
+// ANGLE bị guard shim chặn khi chạy lần đầu trên thread mới). Warm-up để mọi
+// static init chạy trên main thread trước khi guest đụng tới.
+extern "C" void kudroid_gpu_warmup_egl(void) {
+    typedef unsigned int (*PFN_eglInitialize)(EGLDisplay, EGLint*, EGLint*);
+    typedef EGLDisplay (*PFN_eglGetDisplay)(EGLNativeDisplayType);
+    auto get_display = (PFN_eglGetDisplay) get_egl_func("eglGetDisplay");
+    auto init = (PFN_eglInitialize) get_egl_func("eglInitialize");
+    if (!get_display || !init) {
+        gpuLog("warmup: egl entry points missing (get_display=%p init=%p)",
+               (void*)get_display, (void*)init);
+        return;
+    }
+    EGLDisplay dpy = get_display((EGLNativeDisplayType)0);
+    if (!dpy) {
+        gpuLog("warmup: eglGetDisplay -> NULL");
+        return;
+    }
+    EGLint major = 0, minor = 0;
+    unsigned int ok = init(dpy, &major, &minor);
+    gpuLog("warmup: eglInitialize -> %s (major=%d minor=%d)",
+           ok ? "true" : "false", major, minor);
+}
+
 extern "C" EGLDisplay bionic_eglGetDisplay(EGLNativeDisplayType display_id) {
     (void)display_id;
     gpuLog("eglGetDisplay(display_id=%p)", (void*)display_id);

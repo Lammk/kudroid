@@ -576,6 +576,10 @@ float g_metalLayerDensity = 3.0f;
 // — định nghĩa trong SyscallShim.cpp, dùng chung với GraphicsShim.
 extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
 
+// GraphicsShim.cpp — ANGLE first-touch phải trên main thread (xem comment ở
+// kudroid_set_metal_layer).
+extern "C" void kudroid_gpu_warmup_egl(void);
+
 extern "C" void kudroid_set_metal_layer(void* layer, int width, int height, float density) {
     g_metalLayer = layer;
     g_metalLayerWidth = width;
@@ -589,6 +593,10 @@ extern "C" void kudroid_set_metal_layer(void* layer, int width, int height, floa
                   "kudroid_set_metal_layer(layer=%p, size=%dx%d, density=%.2f)",
                   layer, width, height, density);
     kudroid_android_log_message(2, "KuDroidGPU", buf);
+
+    // ANGLE first-touch phải trên main thread (GL TEST chứng minh OK; triangle
+    // first-touch trên render pthread -> abort trong static init ANGLE).
+    kudroid_gpu_warmup_egl();
 }
 
 extern "C" const char* kudroid_vfs_self_test_log(void) {
