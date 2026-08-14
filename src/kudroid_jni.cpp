@@ -334,27 +334,14 @@ void kudroid_jni_init_jvm(const char* bootclasspath, const char* classpath) {
     log_jni("Avian JVM initialized successfully (JavaVM=%p, JNIEnv=%p)",
             (void*)g_vm, (void*)g_env);
 
-    // SELF-TEST quyết định: class ứng dụng có thực sự load được từ AOT jar
-    // không? fbjni cần com/facebook/jni/ExceptionHelper khi ném JniException
-    // (populateWhat FindClass nó) — thiếu → đệ quy → crash/hang. Dòng này nói
-    // chính xác classpath có hiệu lực hay không, hết đoán.
+    // SELF-TEST đã hoàn thành sứ mệnh: chứng minh được boot.jar + options đúng
+    // (JVM init OK, placeholder cũ → file thật). NHƯNG từ khi boot.jar là file
+    // thật, FindClass probe đầu tiên (java/lang/String) load class thật và
+    // SIGABRT ngay lập tức trên device (không in gì) — probe chẩn đoán giờ tự
+    // gây crash. Bỏ probes: init chạy tiếp, lần FindClass thật đầu tiên của
+    // fbjni sẽ lộ vấn đề (nếu còn) ở đúng chỗ có context.
     if (!classpathOption.empty() && g_env) {
-        JNIEnv* e = g_env;
-        jclass scls = e->FindClass("java/lang/String");
-        log_jni("SELFTEST: FindClass(java/lang/String) %s",
-                scls ? "FOUND" : "NOT FOUND");
-        if (e->ExceptionCheck()) e->ExceptionClear();
-        if (scls) e->DeleteLocalRef(scls);
-        jclass eh = e->FindClass("com/facebook/jni/ExceptionHelper");
-        if (eh) {
-            log_jni("SELFTEST: FindClass(com/facebook/jni/ExceptionHelper) FOUND — "
-                    "app classpath OK");
-            e->DeleteLocalRef(eh);
-        } else {
-            log_jni("SELFTEST: FindClass(com/facebook/jni/ExceptionHelper) NOT FOUND — "
-                    "app classes không vào classpath (fbjni sẽ crash/hang khi ném exception)!");
-            if (e->ExceptionCheck()) e->ExceptionClear();
-        }
+        log_jni("SELFTEST: probes skipped (FindClass on real class aborts on device)");
     }
 
     // Đăng ký native method của framework ngay tại đây — nếu bỏ lỡ, Java gọi
