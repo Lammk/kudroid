@@ -217,76 +217,14 @@ extern "C" EGLDisplay bionic_eglGetPlatformDisplayEXT(EGLint platform, void* nat
 extern "C" EGLDisplay bionic_eglGetDisplay(EGLNativeDisplayType display_id) {
     (void)display_id;
     gpuLog("eglGetDisplay(display_id=%p)", (void*)display_id);
-    auto host_func = (PFN_eglGetPlatformDisplayEXT) get_egl_func("eglGetPlatformDisplayEXT");
-    if (host_func) {
-        #define EGL_PLATFORM_ANGLE_ANGLE 0x3202
-        #define EGL_PLATFORM_ANGLE_TYPE_ANGLE 0x3203
-        #define EGL_PLATFORM_ANGLE_TYPE_VULKAN_ANGLE 0x3450
-        #define EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE 0x3489
-        #define EGL_PLATFORM_ANGLE_TYPE_DEFAULT_ANGLE 0x3204
-        #define EGL_PLATFORM_ANGLE_DEVICE_TYPE_ANGLE 0x3205
-        #define EGL_PLATFORM_ANGLE_DEVICE_TYPE_METAL_ANGLE 0x348A
-        #define EGL_NONE 0x3038
-        
-        // Trên iOS, ANGLE chỉ có Metal backend khả dụng: build này patch
-        // IsVulkanMacDisplayAvailable()=false ngay trong Display.cpp nên
-        // TYPE_VULKAN và DEFAULT (ưu tiên Vulkan) luôn trả NULL — không probe.
-        // Probe nhiều tổ hợp attrib, ưu tiên KHÔNG có device-type: nếu bản
-        // ANGLE pin không biết enum EGL_PLATFORM_ANGLE_DEVICE_TYPE_METAL_ANGLE
-        // (0x348A) thì toàn bộ attribs bị coi là EGL_BAD_ATTRIBUTE →
-        // EGL_NO_DISPLAY (đúng log "backend[0..2] -> NULL" trước đây).
-        // IMPORTANT: luôn truyền EGL_DEFAULT_DISPLAY (0) — CAMetalLayer chỉ
-        // dùng cho eglCreateWindowSurface.
-
-        // 1) Metal, không device-type (tổ hợp tối giản, ít rủi ro nhất)
-        {
-            const EGLint attribs[] = {
-                EGL_PLATFORM_ANGLE_TYPE_ANGLE, EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE,
-                EGL_NONE
-            };
-            EGLDisplay dpy = host_func(EGL_PLATFORM_ANGLE_ANGLE, (void*)0, attribs);
-            gpuLog("eglGetDisplay: Metal (no device-type) -> %s", dpy ? "VALID" : "NULL");
-            if (dpy != nullptr) {
-                gpuLog("eglGetDisplay: got display via eglGetPlatformDisplayEXT (Metal)");
-                return dpy;
-            }
-        }
-        // 2) Metal + device-type METAL (cho bản ANGLE mới có enum 0x348A)
-        {
-            const EGLint attribs[] = {
-                EGL_PLATFORM_ANGLE_TYPE_ANGLE, EGL_PLATFORM_ANGLE_TYPE_METAL_ANGLE,
-                EGL_PLATFORM_ANGLE_DEVICE_TYPE_ANGLE, EGL_PLATFORM_ANGLE_DEVICE_TYPE_METAL_ANGLE,
-                EGL_NONE
-            };
-            EGLDisplay dpy = host_func(EGL_PLATFORM_ANGLE_ANGLE, (void*)0, attribs);
-            gpuLog("eglGetDisplay: Metal (device-type) -> %s", dpy ? "VALID" : "NULL");
-            if (dpy != nullptr) {
-                gpuLog("eglGetDisplay: got display via eglGetPlatformDisplayEXT (Metal+device)");
-                return dpy;
-            }
-        }
-        // 3) DEFAULT, không device-type
-        {
-            const EGLint attribs[] = {
-                EGL_PLATFORM_ANGLE_TYPE_ANGLE, EGL_PLATFORM_ANGLE_TYPE_DEFAULT_ANGLE,
-                EGL_NONE
-            };
-            EGLDisplay dpy = host_func(EGL_PLATFORM_ANGLE_ANGLE, (void*)0, attribs);
-            gpuLog("eglGetDisplay: Default (no device-type) -> %s", dpy ? "VALID" : "NULL");
-            if (dpy != nullptr) {
-                gpuLog("eglGetDisplay: got display via eglGetPlatformDisplayEXT (Default)");
-                return dpy;
-            }
-        }
-        
-
-    }
-    
-    // Fallback eglGetDisplay(EGL_DEFAULT_DISPLAY): build ANGLE này trả NULL cho
-    // MỌI eglGetPlatformDisplayEXT kèm attribs (đã thử đủ tổ hợp trên máy thật),
-    // NHƯNG eglGetDisplay(0) tạo được display thật — GL TEST (pbuffer) dùng đúng
-    // đường này chạy tốt: EGL 1.5, "ANGLE Metal Renderer", glClear OK. Bỏ
-    // fallback này = mất đường EGL duy nhất hoạt động trên iOS.
+    // QUA QUA (bằng chứng log máy thật, không phải đoán): display trả từ
+    // eglGetPlatformDisplayEXT(Metal) — dù "VALID" — làm process ABORT ngay
+    // khi dùng (triangle: crash libtriangle_gles ngay sau eglGetDisplay, trước
+    // cả log eglInitialize). Còn eglGetDisplay(0) fallback CHẠY TỐT TOÀN BỘ:
+    // eglInitialize v1.5 → pbuffer surface → context → glClear OK →
+    // GL_RENDERER="ANGLE Metal Renderer: Apple A13 GPU" → glGetError=0.
+    // Cả hai đều là ANGLE Metal backend — fallback không mất gì, và là đường
+    // duy nhất đã chứng minh hoạt động. Bỏ probe, dùng thẳng fallback.
     typedef EGLDisplay (*PFN_eglGetDisplay)(EGLNativeDisplayType);
     auto host_get_display = (PFN_eglGetDisplay) get_egl_func("eglGetDisplay");
     if (host_get_display) {
