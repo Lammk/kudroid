@@ -903,12 +903,31 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                     // có thể không bao giờ được khởi tạo.
                     auto jniOnLoads = manager.resolveAllSymbols("JNI_OnLoad");
                     if (!jniOnLoads.empty()) {
+                        // Log qua pipeline (android_logs.txt) chứ không chỉ buffer —
+                        // run 21/08 chết giữa "Symbol JNI_OnLoad resolved" và
+                        // "Found JNI_OnLoad" mà không có crash.log (không qua
+                        // handler) → cần marker granular để biết chết đúng chỗ.
+                        extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
+                        kudroid_android_log_message(4, "kudroid_core",
+                                                    "run_apk: init main thread TLS before JNI_OnLoad");
                         bionic_init_main_thread_tls();
+                        kudroid_android_log_message(4, "kudroid_core",
+                                                    "run_apk: TLS done, invoking JNI_OnLoad");
                         for (const auto& [libName, addr] : jniOnLoads) {
                             auto jni_onload = reinterpret_cast<jint (*)(JavaVM*, void*)>(addr);
+                            char invokeMsg[512];
+                            snprintf(invokeMsg, sizeof(invokeMsg),
+                                     "run_apk: invoking JNI_OnLoad in %s (addr=%p)",
+                                     libName.c_str(), (void*)addr);
+                            kudroid_android_log_message(4, "kudroid_core", invokeMsg);
+                            jint version = jni_onload(jvm, nullptr);
+                            char retMsg[512];
+                            snprintf(retMsg, sizeof(retMsg),
+                                     "run_apk: JNI_OnLoad(%s) returned %d",
+                                     libName.c_str(), (int)version);
+                            kudroid_android_log_message(4, "kudroid_core", retMsg);
                             log += "[kudroid_core] Found JNI_OnLoad in " + libName + ", invoking...\n";
                             mirrorCrash(log);
-                            jint version = jni_onload(jvm, nullptr);
                             log += "[kudroid_core] JNI_OnLoad(" + libName + ") returned version: " + std::to_string(version) + "\n";
                             mirrorCrash(log);
                         }
