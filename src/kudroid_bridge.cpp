@@ -798,6 +798,21 @@ extern "C" char* kudroid_test_jvm(const char* rt_jar_path) {
     return strdup(log.c_str());
 }
 
+// Guest .so mappings PHẢI sống bằng tuổi process — đúng ngữ nghĩa dlopen trên
+// Android (libs ở lại trong process cho tới khi app chết). Bằng chứng log máy
+// thật: mọi crash triangle từ đầu đều là SIGABRT trong libtriangle_gles.so+
+// 0x4xxx NGAY SAU khi run_apk in dòng cuối "ANativeActivity_onCreate not found"
+// — render thread guest chạy SONG SONG với run_apk (spawn từ JNI_OnLoad), còn
+// manager trước đây là biến LOCAL nên khi run_apk return, destructor ElfLoader
+// munmap toàn bộ guest .so trong lúc render thread vẫn đang thực thi bên trong
+// → thực thi vùng nhớ đã unmap → abort. Warm-up ANGLE các vòng trước chỉ làm
+// render thread tới xa hơn TRƯỚC khi munmap (race) nên crash dời dần — không
+// phải fix gốc.
+static kudroid::LibraryManager& globalLibraryManager() {
+    static kudroid::LibraryManager instance;
+    return instance;
+}
+
 extern "C" const char* kudroid_run_apk(const char* appName) {
     std::string log;
     appendTestHeader(log, "Run APK Native Libraries", appName);
@@ -822,7 +837,9 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
         if (!std::filesystem::exists(libDir)) {
             log += "[kudroid_core] ERROR: Library directory does not exist. Did you install the APK?\n";
         } else {
-            kudroid::LibraryManager manager;
+            // Process-lifetime (xem globalLibraryManager) — render thread guest
+            // còn sống sau khi run_apk return, mappings phải ở lại.
+            kudroid::LibraryManager& manager = globalLibraryManager();
             
             // thu thập tất cả các tệp .so để tải
             std::vector<std::string> soFiles;
@@ -1754,7 +1771,9 @@ extern "C" const char* kudroid_load_apk(const char* apkPath) {
     kudroid::DexManager::getInstance().loadDirectory(targetDir);
     
     log += "[kudroid_apk] Scanning for native libraries (.so)...\n";
-    kudroid::LibraryManager libManager;
+    // Process-lifetime (xem globalLibraryManager) — JNI_OnLoad dưới đây spawn
+    // render thread guest; mappings phải ở lại sau khi hàm này return.
+    kudroid::LibraryManager& libManager = globalLibraryManager();
     std::string libDir = targetDir + "/lib/arm64-v8a";
 
     // ── PIPELINE DEX→JAR AOT CACHING ───────────────────────────────────────
