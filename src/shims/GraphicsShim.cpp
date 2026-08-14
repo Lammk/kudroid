@@ -1,4 +1,5 @@
 #include "kudroid/shims/GraphicsShim.h"
+#include "kudroid/Log.h"
 #include <dlfcn.h>
 #include <cstdio>
 #include <cstdint>
@@ -15,16 +16,15 @@ namespace kudroid {
 
 namespace {
 
-// Log GPU qua pipeline chuẩn (stdout + file + crash buffer) để lần crash sau
-// "log up to crash" không còn trống. Forward declaration để mọi hàm dùng được.
-extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
+// Log GPU qua pipeline chuẩn (KLOG → stdout + file + crash buffer) để lần
+// crash sau "log up to crash" không còn trống. Giữ cùng text/priority (debug).
 static void gpuLog(const char* fmt, ...) {
     char buf[512];
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
-    kudroid_android_log_message(2, "KuDroidGPU", buf);
+    ::kudroid::log::write(::kudroid::log::kDebug, "KuDroidGPU", "%s", buf);
 }
 
 extern "C" void* bionic_ANativeWindow_fromSurface(void* env, void* surface) {
@@ -129,13 +129,13 @@ typedef void* (*PFN_eglGetProcAddress)(const char* procname);
 
 extern "C" void* bionic_eglGetProcAddress(const char* procname) {
     if (!procname) return nullptr;
-    fprintf(stdout, "[KuDroidGPU] eglGetProcAddress: requested %s\n", procname);
+    KLOG(kDebug, "KuDroidGPU", "eglGetProcAddress: requested %s", procname);
     
     size_t count = 0;
     const kudroid::SymbolEntry* symbols = kudroid::get_graphics_symbols(&count);
     for (size_t i = 0; i < count; ++i) {
         if (strcmp(symbols[i].name, procname) == 0) {
-            fprintf(stdout, "[KuDroidGPU] eglGetProcAddress: %s intercepted by GraphicsShim\n", procname);
+            KLOG(kDebug, "KuDroidGPU", "eglGetProcAddress: %s intercepted by GraphicsShim", procname);
             return symbols[i].address;
         }
     }
@@ -149,7 +149,7 @@ extern "C" void* bionic_eglGetProcAddress(const char* procname) {
         auto host_func = (PFN_eglGetProcAddress) ::dlsym(egl_handle, "eglGetProcAddress");
         if (host_func) {
             void* addr = host_func(procname);
-            fprintf(stdout, "[KuDroidGPU] eglGetProcAddress: %s returned %s\n", procname, addr ? "VALID" : "NULL");
+            KLOG(kDebug, "KuDroidGPU", "eglGetProcAddress: %s returned %s", procname, addr ? "VALID" : "NULL");
             return addr;
         }
     }
@@ -157,10 +157,10 @@ extern "C" void* bionic_eglGetProcAddress(const char* procname) {
     auto host_func = (PFN_eglGetProcAddress) ::dlsym(RTLD_DEFAULT, "eglGetProcAddress");
     if (host_func) {
         void* addr = host_func(procname);
-        fprintf(stdout, "[KuDroidGPU] eglGetProcAddress: %s returned %s\n", procname, addr ? "VALID" : "NULL");
+        KLOG(kDebug, "KuDroidGPU", "eglGetProcAddress: %s returned %s", procname, addr ? "VALID" : "NULL");
         return addr;
     }
-    fprintf(stdout, "[KuDroidGPU] eglGetProcAddress: host function not found\n");
+    KLOG(kDebug, "KuDroidGPU", "eglGetProcAddress: host function not found");
     return nullptr;
 }
 
@@ -194,16 +194,16 @@ static void* get_egl_func(const char* name) {
     if (!egl_handle) {
         egl_handle = ::dlopen("@executable_path/Frameworks/libEGL.framework/libEGL", RTLD_NOW | RTLD_LOCAL);
         if (!egl_handle) {
-            fprintf(stderr, "[KuDroidGPU] FATAL: dlopen libEGL failed: %s\n", dlerror());
+            KLOG(kError, "KuDroidGPU", "FATAL: dlopen libEGL failed: %s", dlerror());
             // Try alternative path without @executable_path
             egl_handle = ::dlopen("Frameworks/libEGL.framework/libEGL", RTLD_NOW | RTLD_LOCAL);
             if (!egl_handle) {
-                fprintf(stderr, "[KuDroidGPU] FATAL: alternative dlopen also failed: %s\n", dlerror());
+                KLOG(kError, "KuDroidGPU", "FATAL: alternative dlopen also failed: %s", dlerror());
             } else {
-                fprintf(stderr, "[KuDroidGPU] SUCCESS: alternative dlopen loaded libEGL\n");
+                KLOG(kInfo, "KuDroidGPU", "SUCCESS: alternative dlopen loaded libEGL");
             }
         } else {
-            fprintf(stderr, "[KuDroidGPU] SUCCESS: dlopen loaded libEGL\n");
+            KLOG(kInfo, "KuDroidGPU", "SUCCESS: dlopen loaded libEGL");
         }
     }
     if (egl_handle) {
@@ -350,17 +350,17 @@ extern "C" VkResult bionic_vkCreateAndroidSurfaceKHR(VkInstance instance,
                                                      const VkAndroidSurfaceCreateInfoKHR* pCreateInfo,
                                                      const VkAllocationCallbacks* pAllocator,
                                                      VkSurfaceKHR* pSurface) {
-    fprintf(stdout, "[KuDroidGPU] vkCreateAndroidSurfaceKHR → vkCreateMetalSurfaceEXT\n");
+    KLOG(kDebug, "KuDroidGPU", "vkCreateAndroidSurfaceKHR → vkCreateMetalSurfaceEXT");
     if (!pCreateInfo || !pSurface) return -1; // VK_ERROR_INITIALIZATION_FAILED
 
     auto real = get_real_vkGetInstanceProcAddr();
     if (!real) {
-        fprintf(stderr, "[KuDroidGPU] ERROR: MoltenVK vkGetInstanceProcAddr not found\n");
+        KLOG(kError, "KuDroidGPU", "ERROR: MoltenVK vkGetInstanceProcAddr not found");
         return -1;
     }
     auto createMetalSurface = (PFN_vkCreateMetalSurfaceEXT)real(instance, "vkCreateMetalSurfaceEXT");
     if (!createMetalSurface) {
-        fprintf(stderr, "[KuDroidGPU] ERROR: vkCreateMetalSurfaceEXT not found in MoltenVK\n");
+        KLOG(kError, "KuDroidGPU", "ERROR: vkCreateMetalSurfaceEXT not found in MoltenVK");
         return -1;
     }
 
@@ -371,7 +371,7 @@ extern "C" VkResult bionic_vkCreateAndroidSurfaceKHR(VkInstance instance,
     metalInfo.pLayer = pCreateInfo->window; // window IS the CAMetalLayer
 
     VkResult r = createMetalSurface(instance, &metalInfo, pAllocator, pSurface);
-    fprintf(stdout, "[KuDroidGPU] vkCreateMetalSurfaceEXT returned %d (surface=%p)\n", (int)r, (void*)*pSurface);
+    KLOG(kDebug, "KuDroidGPU", "vkCreateMetalSurfaceEXT returned %d (surface=%p)", (int)r, (void*)*pSurface);
     return r;
 }
 

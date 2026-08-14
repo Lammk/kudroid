@@ -52,6 +52,7 @@ add_library(kudroid_core STATIC
     src/DexCacheManager.cpp
     src/DexToJar.cpp
     src/DexAotCache.cpp
+    src/Log.cpp
 )
 
 find_package(ZLIB REQUIRED)
