@@ -907,7 +907,6 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                         // run 21/08 chết giữa "Symbol JNI_OnLoad resolved" và
                         // "Found JNI_OnLoad" mà không có crash.log (không qua
                         // handler) → cần marker granular để biết chết đúng chỗ.
-                        extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
                         kudroid_android_log_message(4, "kudroid_core",
                                                     "run_apk: init main thread TLS before JNI_OnLoad");
                         bionic_init_main_thread_tls();
