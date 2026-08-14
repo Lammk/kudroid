@@ -42,6 +42,9 @@ extern "C" int bionic_sigaction(int signum, const struct android_sigaction* act,
 extern "C" long bionic_syscall(long number, ...);
 extern "C" int bionic_tgkill(int pid, int tid, int sig);
 extern "C" int bionic_pipe2(int pipefd[2], int flags);
+extern "C" int bionic___cxa_guard_acquire(uint64_t* g);
+extern "C" void bionic___cxa_guard_release(uint64_t* g);
+extern "C" void bionic___cxa_guard_abort(uint64_t* g);
 
 // Mirror of the guest android_sigaction layout from SyscallShim.cpp.
 struct android_sigaction {
@@ -374,6 +377,68 @@ static void test_syscall_mappings() {
     }
 }
 
+// ─── __cxa_guard shim (recursion-tolerant) ──────────────────────────────────
+
+static void test_guard_acquire_release() {
+    uint64_t guard = 0;
+    CHECK(bionic___cxa_guard_acquire(&guard) == 1, "guard: first acquire claims (returns 1)");
+    const uint8_t* g = reinterpret_cast<const uint8_t*>(&guard);
+    CHECK((g[0] & 0x1) == 0, "guard: done bit clear while in-progress");
+    CHECK((g[1] & 0x2) != 0, "guard: in-progress bit set after claim");
+    CHECK(*reinterpret_cast<const uint32_t*>(g + 4) != 0, "guard: tid stored");
+    bionic___cxa_guard_release(&guard);
+    CHECK((g[0] & 0x1) != 0, "guard: done bit set after release");
+    CHECK((g[1] & 0x2) == 0, "guard: in-progress cleared after release");
+    CHECK(bionic___cxa_guard_acquire(&guard) == 0, "guard: acquire after done returns 0");
+}
+
+static void test_guard_same_tid_recursion_tolerated() {
+    // Diễn lại crash Discord: cùng thread re-enter guard đang in-progress.
+    // Shim phải KHÔNG abort — clear + return 1 (re-init).
+    uint64_t guard = 0;
+    CHECK(bionic___cxa_guard_acquire(&guard) == 1, "guard-rec: outer claim");
+    const uint8_t* g = reinterpret_cast<const uint8_t*>(&guard);
+    CHECK((g[1] & 0x2) != 0, "guard-rec: in-progress before recursion");
+
+    // Cú re-enter chí mạng — trước đây abort("recursive initialization").
+    const int inner = bionic___cxa_guard_acquire(&guard);
+    CHECK(inner == 1, "guard-rec: same-tid re-enter returns 1 (no abort)");
+    CHECK((g[1] & 0x2) == 0, "guard-rec: in-progress cleared before re-claim");
+    CHECK(*reinterpret_cast<const uint32_t*>(g + 4) == 0, "guard-rec: tid cleared");
+
+    // Inner claim lại (re-init) rồi release → done.
+    CHECK(bionic___cxa_guard_acquire(&guard) == 1, "guard-rec: inner re-claim");
+    bionic___cxa_guard_release(&guard);
+    CHECK((g[0] & 0x1) != 0, "guard-rec: done after inner release");
+
+    // Nếu inner init FAIL (guard_abort) thì state sạch, ai đó retry được.
+    uint64_t g2 = 0;
+    CHECK(bionic___cxa_guard_acquire(&g2) == 1, "guard-rec: claim g2");
+    CHECK(bionic___cxa_guard_acquire(&g2) == 1, "guard-rec: recursion on g2 tolerated");
+    bionic___cxa_guard_abort(&g2);
+    CHECK((g2 & 0xff) == 0, "guard-rec: abort clears in-progress+tid, done stays 0");
+    CHECK(bionic___cxa_guard_acquire(&g2) == 1, "guard-rec: retry after abort claims again");
+    bionic___cxa_guard_release(&g2);
+}
+
+static void test_guard_cross_thread_wait() {
+    // Thread A claim giữ guard; thread B chờ (spin) tới khi A release → B thấy done.
+    uint64_t guard = 0;
+    std::atomic<bool> b_ready{false}, b_done{false};
+    CHECK(bionic___cxa_guard_acquire(&guard) == 1, "guard-wait: A claims");
+    std::thread t([&] {
+        b_ready = true;
+        const int r = bionic___cxa_guard_acquire(&guard);
+        b_done = (r == 0); // B chỉ đi tiếp khi done
+    });
+    while (!b_ready.load()) std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    CHECK(!b_done.load(), "guard-wait: B blocked while A holds");
+    bionic___cxa_guard_release(&guard);
+    t.join();
+    CHECK(b_done.load(), "guard-wait: B unblocked after release (returns 0 = done)");
+}
+
 // ─── main ────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -389,6 +454,9 @@ int main() {
     test_mremap_shrink_in_place();
     test_mremap_grow_with_maymove();
     test_sigaction_flag_roundtrip();
+    test_guard_acquire_release();
+    test_guard_same_tid_recursion_tolerated();
+    test_guard_cross_thread_wait();
     std::printf("=== %d checks, %d failures ===\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

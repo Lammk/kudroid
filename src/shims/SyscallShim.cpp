@@ -12,6 +12,7 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <poll.h>
+#include <sched.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -1001,6 +1002,87 @@ static void log_guard_acquire_diag(long tid, uintptr_t guard) {
 #else
 static void log_guard_acquire_diag(long tid, uintptr_t guard) { (void)tid; (void)guard; }
 #endif
+
+// ─────────────────────────────────────────────────────────────────────────────
+// __cxa_guard_acquire / release / abort — shim XỬ LÝ recursion.
+//
+// Libc++abi (cả bản libc++_shared lẫn bản static trong libapng-drawable mà mọi
+// consumer resolve về) ABORT khi CÙNG THREAD re-enter một guard đang in-progress
+// ("recursive initialization"). Discord: NitroModules JNI_OnLoad →
+// fbjni::initialize → lambda → findClassLocal → FindClass → Avian load class →
+// <clinit> chạy → native → fbjni populateWhat (guard đang in-progress bởi chính
+// thread này) → SAME_TID → abort. Crash ổn định mọi build (diag đã xác nhận:
+// guard=libfbjni+0x32cf8, tid khớp). Trên Android thật thứ tự init class khác
+// nên sequence này không xảy ra; ở đây Avian load class theo thứ tự khác.
+//
+// Fix: thay vì abort, clear in-progress + tid rồi return 1 → caller trong
+// (inner) claim lại và tự init lại. Init thành công → done; thất bại →
+// exception unwind bình thường (guard_abort). Không deadlock (cùng thread),
+// không loop vô hạn (Avian không chạy lại <clinit> khi class đang mid-init).
+//
+// Byte layout guard giống hệt libc++abi: byte0 bit0 = done, byte1 bit1 =
+// in-progress, byte1 bit2 = waiting, [g+4] = tid (u32). Chỉ tác động guard
+// memory; wait dùng spin + sched_yield (không condvar nội bộ) → không xung
+// đột với condvar của bản apng nếu cùng guard bị chạm bởi hai implementation
+// (không xảy ra: guard của module nào thì module đó sở hữu).
+// ─────────────────────────────────────────────────────────────────────────────
+static std::mutex g_guardMtx;
+
+extern "C" int bionic___cxa_guard_acquire(uint64_t* g) {
+    if (!g) return 1;
+    // Fast path: đã done → không cần lock (benign race như libc++abi).
+    if (reinterpret_cast<const volatile uint8_t*>(g)[0] & 0x1) return 0;
+    // Lấy tid TRƯỚC khi lock g_guardMtx — bionic_gettid lock g_tidRegistryMtx,
+    // giữ thứ tự lock nhất quán (guardMtx → tidRegistryMtx).
+    const long tid = static_cast<long>(bionic_gettid());
+    std::unique_lock<std::mutex> lock(g_guardMtx);
+    for (;;) {
+        volatile uint8_t* b0 = reinterpret_cast<volatile uint8_t*>(g);
+        if (b0[0] & 0x1) return 0; // đã init xong
+        if (b0[1] & 0x2) {          // đang init dở
+            const uint32_t stored = *reinterpret_cast<volatile uint32_t*>(b0 + 4);
+            if (stored == static_cast<uint32_t>(tid)) {
+                // CÙNG THREAD re-enter → thay vì abort: clear + return 1.
+                b0[1] &= static_cast<uint8_t>(~0x6);
+                *reinterpret_cast<volatile uint32_t*>(b0 + 4) = 0;
+                lock.unlock();
+                char msg[224];
+                snprintf(msg, sizeof(msg),
+                         "guard_recursion_tolerated guard=0x%llx tid=%ld -> re-init",
+                         (unsigned long long)(uintptr_t)g, tid);
+                logAndroidMessage(4, "KuDroidSyscall", msg);
+                return 1;
+            }
+            // Thread khác đang init → đánh dấu waiting, nhường CPU, thử lại.
+            b0[1] |= 0x4;
+            lock.unlock();
+            ::sched_yield();
+            lock.lock();
+            continue;
+        }
+        // Claim: đánh dấu in-progress + ghi tid của mình.
+        b0[1] |= 0x2;
+        *reinterpret_cast<volatile uint32_t*>(b0 + 4) = static_cast<uint32_t>(tid);
+        return 1;
+    }
+}
+
+extern "C" void bionic___cxa_guard_release(uint64_t* g) {
+    if (!g) return;
+    std::lock_guard<std::mutex> lock(g_guardMtx);
+    volatile uint8_t* b0 = reinterpret_cast<volatile uint8_t*>(g);
+    b0[0] |= 0x1;                                    // done
+    b0[1] &= static_cast<uint8_t>(~0x6);             // clear in-progress + waiting
+    // Waiter spin re-check dưới lock — không cần signal.
+}
+
+extern "C" void bionic___cxa_guard_abort(uint64_t* g) {
+    if (!g) return;
+    std::lock_guard<std::mutex> lock(g_guardMtx);
+    volatile uint8_t* b0 = reinterpret_cast<volatile uint8_t*>(g);
+    b0[1] &= static_cast<uint8_t>(~0x6);
+    *reinterpret_cast<volatile uint32_t*>(b0 + 4) = 0;
+}
 
 extern "C" long bionic_syscall(long number, ...) {
     // DIAG: x19 LÚC ENTRY = guard pointer của guard_acquire đang gọi gettid
@@ -3311,6 +3393,9 @@ const SymbolEntry kSyscallSymbols[] = {
 #endif
     {"__cxa_finalize", reinterpret_cast<void*>(&bionic_cxa_finalize)},
     {"__cxa_atexit", reinterpret_cast<void*>(&bionic_cxa_atexit)},
+    {"__cxa_guard_acquire", reinterpret_cast<void*>(&bionic___cxa_guard_acquire)},
+    {"__cxa_guard_release", reinterpret_cast<void*>(&bionic___cxa_guard_release)},
+    {"__cxa_guard_abort", reinterpret_cast<void*>(&bionic___cxa_guard_abort)},
     {"_ITM_registerTMCloneTable", reinterpret_cast<void*>(&bionic_runtime_noop)},
     {"_ITM_deregisterTMCloneTable", reinterpret_cast<void*>(&bionic_runtime_noop)},
     {"__gmon_start__", reinterpret_cast<void*>(&bionic_runtime_noop)},

@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <cstring>
 
 #if defined(KUDROID_HAS_MINIZIP)
 #include <minizip/unzip.h>
@@ -195,8 +196,22 @@ static std::vector<std::string> sortedLibraryKeys(const std::unordered_map<std::
     return keys;
 }
 
+// libapng-drawable static-link một bản libc++abi riêng và EXPORT __cxa_guard_*
+// → mọi module resolve về bản đó (log "resolved from libapng-drawable.so").
+// Shim guard của ta (xử lý same-tid recursion thay vì abort) phải thắng —
+// special-case đúng 3 symbol này, mọi thứ khác giữ nguyên thứ tự cũ.
+static bool isGuardShimSymbol(const char* name) {
+    return strcmp(name, "__cxa_guard_acquire") == 0 ||
+           strcmp(name, "__cxa_guard_release") == 0 ||
+           strcmp(name, "__cxa_guard_abort") == 0;
+}
+
 void* LibraryManager::resolveGlobalSymbol(const char* name) const {
     if (!name || !*name) return nullptr;
+    if (isGuardShimSymbol(name)) {
+        void* shim = resolve_bionic_symbol(name);
+        if (shim) return shim;
+    }
     for (const auto& key : sortedLibraryKeys(libraries_)) {
         void* address = libraries_.at(key)->getSymbolAddress(name);
         if (address) {
