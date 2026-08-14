@@ -223,10 +223,47 @@ void kudroid_jni_init_jvm(const char* bootclasspath, const char* classpath) {
                 (bootJarData && bootJarSize) ? "OK" : "MISSING/EMPTY");
     }
 
-    // xây dựng các đối số máy ảo. chúng tôi luôn sử dụng tệp jar đường dẫn lớp được nhúng làm
-    // đường dẫn lớp khởi động. đường dẫn lớp do người gọi cung cấp được thêm vào như một
-    // mục nhập đường dẫn lớp bổ sung (đối với các lớp ứng dụng được tải trong thời gian chạy).
+    // xây dựng các đối số máy ảo. boot classpath được nhúng (classpathJar()),
+    // NHƯNG phải được dùng dưới dạng FILE THẬT — không phải placeholder
+    // "-Xbootclasspath:[classpathJar]". Placeholder được Avian xử lý như
+    // BuiltinElement: dlopen(main executable) + dlsym("classpathJar"). Nếu
+    // symbol không resolve được trên máy thật → boot finder RỖNG →
+    // java/lang/Object NOT FOUND → MỌI class load fail (kể cả class trong
+    // app jar dù -Djava.class.path đúng). Tái hiện + chứng minh trên Linux:
+    //   placeholder+cp  → String/T/Object NOT FOUND  ✗
+    //   bootJAR file+cp → String/T/Object FOUND      ✓
+    // Vì vậy: ghi embedded boot jar ra file thật (cạnh classes.jar) và dùng
+    // đường dẫn đó.
     std::string bootOption = "-Xbootclasspath:[classpathJar]";
+    if (classpath && classpath[0] != '\0') {
+        const char* lastSlash = strrchr(classpath, '/');
+        const std::string dir = lastSlash
+            ? std::string(classpath, (size_t)(lastSlash - classpath + 1))
+            : std::string();
+        const std::string bootJarFile = dir + "boot.jar";
+        size_t bootJarSize = 0;
+        const uint8_t* bootJarData = classpathJar(&bootJarSize);
+        if (bootJarData && bootJarSize) {
+            FILE* f = fopen(bootJarFile.c_str(), "wb");
+            if (f) {
+                size_t written = fwrite(bootJarData, 1, bootJarSize, f);
+                fclose(f);
+                if (written == bootJarSize) {
+                    log_jni("Boot classpath jar materialized: %s (%zu bytes)",
+                            bootJarFile.c_str(), bootJarSize);
+                    bootOption = "-Xbootclasspath:" + bootJarFile;
+                } else {
+                    log_jni("WARNING: write boot.jar short (%zu/%zu); falling back to placeholder",
+                            written, bootJarSize);
+                }
+            } else {
+                log_jni("WARNING: cannot create %s; falling back to placeholder",
+                        bootJarFile.c_str());
+            }
+        } else {
+            log_jni("WARNING: embedded boot classpath jar empty; falling back to placeholder");
+        }
+    }
     // App classes PHẢI nằm trên app classpath (-Djava.class.path): JNI
     // FindClass resolve qua appLoader (jnienv.cpp findClass → appLoader),
     // KHÔNG phải boot loader. Trên device, nối vào -Xbootclasspath/a: một
@@ -303,6 +340,11 @@ void kudroid_jni_init_jvm(const char* bootclasspath, const char* classpath) {
     // chính xác classpath có hiệu lực hay không, hết đoán.
     if (!classpathOption.empty() && g_env) {
         JNIEnv* e = g_env;
+        jclass scls = e->FindClass("java/lang/String");
+        log_jni("SELFTEST: FindClass(java/lang/String) %s",
+                scls ? "FOUND" : "NOT FOUND");
+        if (e->ExceptionCheck()) e->ExceptionClear();
+        if (scls) e->DeleteLocalRef(scls);
         jclass eh = e->FindClass("com/facebook/jni/ExceptionHelper");
         if (eh) {
             log_jni("SELFTEST: FindClass(com/facebook/jni/ExceptionHelper) FOUND — "
