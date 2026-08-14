@@ -1251,6 +1251,14 @@ extern "C" int bionic_clock_nanosleep(int clock_id, int flags, const struct time
 #endif
 }
 
+// usleep: POSIX/bionic thật — forward thẳng host (iOS/macOS libSystem có
+// usleep, deprecated nhưng hoạt động). Trước đây thiếu shim → resolve qua
+// RTLD_DEFAULT không chắc chắn (game gọi usleep rơi vào khoảng crash giữa
+// eglChooseConfig và eglCreateWindowSurface).
+extern "C" int bionic_usleep(unsigned int usecs) {
+    return ::usleep(usecs);
+}
+
 // tgkill(pid, tid, sig): dựa registry tid->pthread_t (được ghi khi guest gọi
 // gettid/syscall(178)). Trước đây dummy — abort/assert của guest bị nuốt im.
 extern "C" int bionic_tgkill(int pid, int tid, int sig) {
@@ -3496,6 +3504,7 @@ const SymbolEntry kSyscallSymbols[] = {
     {"ftruncate64", reinterpret_cast<void*>(&bionic_ftruncate64)},
     {"pipe2", reinterpret_cast<void*>(&bionic_pipe2)},
     {"clock_nanosleep", reinterpret_cast<void*>(&bionic_clock_nanosleep)},
+    {"usleep", reinterpret_cast<void*>(&bionic_usleep)},
     {"tgkill", reinterpret_cast<void*>(&bionic_tgkill)},
     {"sendfile", reinterpret_cast<void*>(&bionic_sendfile)},
     {"sched_getscheduler", reinterpret_cast<void*>(&bionic_sched_getscheduler)},
