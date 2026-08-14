@@ -908,6 +908,18 @@ extern "C" int bionic_futex(uint32_t* uaddr, int futex_op, uint32_t val,
 extern "C" bool kudroid_lookup_guest_module(void* addr, char* out, std::size_t outSize);
 #endif
 
+// DIAG gate: log_guard_acquire_diag + futex diag chỉ chạy khi điều tra (env
+// KUDROID_GUARD_DIAG=1). Mặc định TẮT — frame-walk mỗi gettid + lookup module
+// là chi phí runtime thật trên mọi guard_acquire, không còn giá trị khi fix
+// guard đã hoạt động.
+static bool guard_diag_enabled() {
+    static const int enabled = []() {
+        const char* v = std::getenv("KUDROID_GUARD_DIAG");
+        return v && v[0] == '1';
+    }();
+    return enabled != 0;
+}
+
 static long emulate_futex_syscall(va_list ap) {
     uint32_t* uaddr = va_arg(ap, uint32_t*);
     const int futex_op = va_arg(ap, int);
@@ -915,26 +927,27 @@ static long emulate_futex_syscall(va_list ap) {
     const struct timespec* timeout = va_arg(ap, const struct timespec*);
     uint32_t* uaddr2 = va_arg(ap, uint32_t*);
     const uint32_t val3 = static_cast<uint32_t>(va_arg(ap, unsigned int));
-    // DIAGNOSTIC: ai đang gọi syscall(98) FUTEX_WAIT — địa chỉ nào, trong module
-    // nào (có thể là __libcpp_atomic_wait của std::atomic, hoặc guard wait nếu
-    // bản guard dùng futex). Dedup 16 địa chỉ đầu để khỏi tràn log.
+    // DIAGNOSTIC (gate): ai đang gọi syscall(98) FUTEX_WAIT — địa chỉ nào, trong
+    // module nào. Dedup 16 địa chỉ đầu để khỏi tràn log.
 #if defined(__aarch64__)
-    const int cmd = futex_op & 127;
-    if (cmd == 0 /* FUTEX_WAIT */ || cmd == 9 /* FUTEX_WAIT_BITSET */) {
-        static void* s_seen[16];
-        static int s_seenN = 0;
-        bool dup = false;
-        for (int i = 0; i < s_seenN; ++i) {
-            if (s_seen[i] == uaddr) { dup = true; break; }
-        }
-        if (!dup && s_seenN < 16) {
-            s_seen[s_seenN++] = uaddr;
-            char mod[256] = {0};
-            kudroid_lookup_guest_module(uaddr, mod, sizeof(mod));
-            char msg[320];
-            snprintf(msg, sizeof(msg), "futex_wait uaddr=0x%llx [%s] val=%u op=%d",
-                     (unsigned long long)(uintptr_t)uaddr, mod, val, futex_op);
-            logAndroidMessage(4, "KuDroidSyscall", msg);
+    if (guard_diag_enabled()) {
+        const int cmd = futex_op & 127;
+        if (cmd == 0 /* FUTEX_WAIT */ || cmd == 9 /* FUTEX_WAIT_BITSET */) {
+            static void* s_seen[16];
+            static int s_seenN = 0;
+            bool dup = false;
+            for (int i = 0; i < s_seenN; ++i) {
+                if (s_seen[i] == uaddr) { dup = true; break; }
+            }
+            if (!dup && s_seenN < 16) {
+                s_seen[s_seenN++] = uaddr;
+                char mod[256] = {0};
+                kudroid_lookup_guest_module(uaddr, mod, sizeof(mod));
+                char msg[320];
+                snprintf(msg, sizeof(msg), "futex_wait uaddr=0x%llx [%s] val=%u op=%d",
+                         (unsigned long long)(uintptr_t)uaddr, mod, val, futex_op);
+                logAndroidMessage(4, "KuDroidSyscall", msg);
+            }
         }
     }
 #endif
@@ -1118,7 +1131,9 @@ extern "C" long bionic_syscall(long number, ...) {
     // bị compiler dùng làm scratch.
     uintptr_t entryX19 = 0;
 #if defined(__aarch64__)
-    asm volatile("mov %0, x19" : "=r"(entryX19));
+    // Chỉ bắt x19 khi diag bật — bản thân lệnh mov nhẹ, nhưng tránh chạy
+    // không cần thiết trên hot path.
+    if (guard_diag_enabled()) asm volatile("mov %0, x19" : "=r"(entryX19));
 #endif
     if (number == KUDROID_SYS_gettid) {
         // macOS không có gettid — pthread_threadid_np cho thread-id duy nhất,
@@ -1131,7 +1146,7 @@ extern "C" long bionic_syscall(long number, ...) {
         const long result = static_cast<long>(::syscall(SYS_gettid));
 #endif
         tid_registry_record(result);
-        log_guard_acquire_diag(result, entryX19);
+        if (guard_diag_enabled()) log_guard_acquire_diag(result, entryX19);
         return result;
     }
     if (number == KUDROID_SYS_getpid) {
