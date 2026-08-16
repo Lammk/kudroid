@@ -11,6 +11,14 @@
 #if defined(__APPLE__)
 extern "C" void* objc_autoreleasePoolPush(void);
 extern "C" void objc_autoreleasePoolPop(void* pool);
+// Thread-local autorelease pool for ANGLE Metal.
+// ANGLE internally creates @autoreleased ObjC objects (MTLCommandBuffer,
+// MTLRenderPipelineState, MTLLibrary, etc.) during GL calls such as
+// glCreateShader, glCompileShader, glDrawArrays, etc. Without a thread-local
+// autorelease pool, these objects have no pool to drain into, causing SIGABRT.
+// We push a pool when eglMakeCurrent binds a context to the thread, and
+// drain+re-push on every eglSwapBuffers to keep memory bounded.
+static thread_local void* tls_autorelease_pool = nullptr;
 #endif
 
 // This comes from kudroid_bridge.cpp
@@ -733,6 +741,27 @@ extern "C" EGLBoolean bionic_eglMakeCurrent(EGLDisplay dpy, EGLSurface draw,
     EGLBoolean r = f(dpy, draw, read, ctx);
     gpuLog("eglMakeCurrent(ctx=%p, draw=%p) -> %s", (void*)ctx, (void*)draw,
            r ? "true" : "false");
+#if defined(__APPLE__)
+    // Manage thread-local autorelease pool for ANGLE Metal.
+    // When a context is bound, push a pool so all subsequent GL calls
+    // (glCreateShader, glCompileShader, glDrawArrays, etc.) have a valid
+    // autorelease pool for ANGLE Metal's internal ObjC allocations.
+    // When the context is unbound (ctx==nullptr), pop the pool.
+    if (r) {
+        if (ctx) {
+            if (!tls_autorelease_pool) {
+                tls_autorelease_pool = objc_autoreleasePoolPush();
+                gpuLog("eglMakeCurrent: pushed thread-local autorelease pool");
+            }
+        } else {
+            if (tls_autorelease_pool) {
+                objc_autoreleasePoolPop(tls_autorelease_pool);
+                tls_autorelease_pool = nullptr;
+                gpuLog("eglMakeCurrent: popped thread-local autorelease pool (ctx=NULL)");
+            }
+        }
+    }
+#endif
     return r;
 }
 
@@ -764,14 +793,19 @@ extern "C" EGLBoolean bionic_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) 
     auto f = eglFn<EGLBoolean(EGLDisplay, EGLSurface)>("eglSwapBuffers");
     if (!f) { EGL_FORWARD_ERR("eglSwapBuffers", ""); return EGL_FALSE; }
 #if defined(__APPLE__)
-    void* pool = objc_autoreleasePoolPush();
+    // Drain and re-push the thread-local autorelease pool every frame.
+    // This releases all autoreleased ObjC objects accumulated during
+    // the GL calls in this frame (glClear, glDrawArrays, shader compile, etc.)
+    // keeping Metal memory bounded. Then push a fresh pool for the next frame.
+    if (tls_autorelease_pool) {
+        objc_autoreleasePoolPop(tls_autorelease_pool);
+        tls_autorelease_pool = nullptr;
+    }
+    tls_autorelease_pool = objc_autoreleasePoolPush();
 #endif
     gpuLog("eglSwapBuffers: calling ANGLE...");
     EGLBoolean r = f(dpy, surface);
     gpuLog("eglSwapBuffers(surface=%p) -> %s", (void*)surface, r ? "true" : "false");
-#if defined(__APPLE__)
-    objc_autoreleasePoolPop(pool);
-#endif
     return r;
 }
 
