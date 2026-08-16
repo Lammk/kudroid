@@ -136,12 +136,23 @@ static void* render_loop(void* arg) {
 
     auto loadShaderFn = [&](GLenum type, const char* code) -> GLuint {
         GLuint shader = p_glCreateShader(type);
-        p_glShaderSource(shader, 1, &code, nullptr);
+        const char* src = code;
+        p_glShaderSource(shader, 1, &src, nullptr);
         p_glCompileShader(shader);
-        GLint compiled;
+        GLint compiled = 0;
         p_glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
         if (!compiled) {
-            LOGE("Shader compile error");
+            GLint infoLen = 0;
+            p_glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &infoLen);
+            if (infoLen > 1) {
+                char* infoLog = (char*)malloc(infoLen);
+                p_glGetShaderInfoLog(shader, infoLen, nullptr, infoLog);
+                LOGE("Shader compile error:\n%s", infoLog);
+                free(infoLog);
+            } else {
+                LOGE("Shader compile error (no log)");
+            }
+            return 0;
         }
         return shader;
     };
@@ -149,22 +160,43 @@ static void* render_loop(void* arg) {
     GLuint vertexShader = loadShaderFn(GL_VERTEX_SHADER, vertexShaderCode);
     GLuint fragmentShader = loadShaderFn(GL_FRAGMENT_SHADER, fragmentShaderCode);
 
+    if (!vertexShader || !fragmentShader) {
+        LOGE("Failed to compile shaders!");
+        return nullptr;
+    }
+
     GLuint program = p_glCreateProgram();
     p_glAttachShader(program, vertexShader);
     p_glAttachShader(program, fragmentShader);
     p_glLinkProgram(program);
+
+    GLint linked = 0;
+    p_glGetProgramiv(program, GL_LINK_STATUS, &linked);
+    if (!linked) {
+        LOGE("Program linking failed!");
+        return nullptr;
+    }
+
     p_glUseProgram(program);
 
-    GLfloat vertices[] = { 0.0f, 0.5f, 0.0f, -0.5f, -0.5f, 0.0f, 0.5f, -0.5f, 0.0f };
-    GLfloat colors[] = { 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f };
+    static const GLfloat vertices[] = { 0.0f, 0.5f, 0.0f, -0.5f, -0.5f, 0.0f, 0.5f, -0.5f, 0.0f };
+    static const GLfloat colors[] = { 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f };
 
-    GLuint positionHandle = p_glGetAttribLocation(program, "vPosition");
-    p_glEnableVertexAttribArray(positionHandle);
-    p_glVertexAttribPointer(positionHandle, 3, GL_FLOAT, GL_FALSE, 0, vertices);
+    GLint positionHandle = p_glGetAttribLocation(program, "vPosition");
+    if (positionHandle >= 0) {
+        p_glEnableVertexAttribArray((GLuint)positionHandle);
+        p_glVertexAttribPointer((GLuint)positionHandle, 3, GL_FLOAT, GL_FALSE, 0, vertices);
+    } else {
+        LOGE("vPosition attrib not found");
+    }
 
-    GLuint colorHandle = p_glGetAttribLocation(program, "vColor");
-    p_glEnableVertexAttribArray(colorHandle);
-    p_glVertexAttribPointer(colorHandle, 4, GL_FLOAT, GL_FALSE, 0, colors);
+    GLint colorHandle = p_glGetAttribLocation(program, "vColor");
+    if (colorHandle >= 0) {
+        p_glEnableVertexAttribArray((GLuint)colorHandle);
+        p_glVertexAttribPointer((GLuint)colorHandle, 4, GL_FLOAT, GL_FALSE, 0, colors);
+    } else {
+        LOGE("vColor attrib not found");
+    }
 
     LOGI("Render loop starting.");
     render_running = true;
