@@ -529,7 +529,6 @@ class NativeMetalViewController: UIViewController {
     let onExit: () -> Void
     private var isStarted = false
     private var metalView: NativeMetalView!
-    private var floatingExitButton: UIButton!
 
     init(appName: String, onExit: @escaping () -> Void) {
         self.appName = appName
@@ -549,31 +548,6 @@ class NativeMetalViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         self.view.backgroundColor = .black
-
-        // Nút HUD Thoát bán trong suốt ở góc trên bên phải
-        floatingExitButton = UIButton(type: .system)
-        floatingExitButton.setTitle("✕ Exit", for: .normal)
-        floatingExitButton.setTitleColor(.white, for: .normal)
-        floatingExitButton.titleLabel?.font = .systemFont(ofSize: 13, weight: .bold)
-        floatingExitButton.backgroundColor = UIColor.black.withAlphaComponent(0.6)
-        floatingExitButton.layer.cornerRadius = 15
-        floatingExitButton.layer.borderWidth = 1
-        floatingExitButton.layer.borderColor = UIColor.white.withAlphaComponent(0.3).cgColor
-        floatingExitButton.translatesAutoresizingMaskIntoConstraints = false
-        floatingExitButton.addTarget(self, action: #selector(confirmExit), for: .touchUpInside)
-        view.addSubview(floatingExitButton)
-
-        NSLayoutConstraint.activate([
-            floatingExitButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
-            floatingExitButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
-            floatingExitButton.widthAnchor.constraint(equalToConstant: 75),
-            floatingExitButton.heightAnchor.constraint(equalToConstant: 30)
-        ])
-
-        // Cử chỉ chạm 3 ngón tay bất kỳ đâu để hiện menu thoát
-        let tripleTap = UITapGestureRecognizer(target: self, action: #selector(confirmExit))
-        tripleTap.numberOfTouchesRequired = 3
-        view.addGestureRecognizer(tripleTap)
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -605,16 +579,10 @@ class NativeMetalViewController: UIViewController {
                 print("App exited with log:\n\(String(cString: cString))")
                 free(UnsafeMutablePointer(mutating: cString))
             }
+            DispatchQueue.main.async {
+                self.onExit()
+            }
         }
-    }
-
-    @objc private func confirmExit() {
-        let alert = UIAlertController(title: "KuDroid Container", message: "Thoát ứng dụng Android về KuDroid Launcher?", preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "Thoát", style: .destructive) { [weak self] _ in
-            self?.onExit()
-        })
-        alert.addAction(UIAlertAction(title: "Tiếp tục", style: .cancel))
-        present(alert, animated: true)
     }
 }
 
