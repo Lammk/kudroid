@@ -24,15 +24,45 @@ std::uint32_t read32(const std::vector<std::uint8_t>& d, std::size_t o) {
 }
 bool hasBytes(const std::vector<std::uint8_t>& d, std::size_t o, std::size_t n) { return o <= d.size() && n <= d.size() - o; }
 bool inflateRaw(const std::uint8_t* input, std::size_t inputSize, std::vector<std::uint8_t>& output) {
+    if (output.empty()) return true;
+
+    // First try raw deflate (-MAX_WBITS = -15, standard for ZIP)
     z_stream stream = {};
     stream.next_in = const_cast<Bytef*>(input);
     stream.avail_in = static_cast<uInt>(inputSize);
     stream.next_out = output.data();
     stream.avail_out = static_cast<uInt>(output.size());
-    if (inflateInit2(&stream, -MAX_WBITS) != Z_OK) return false;
-    const int result = inflate(&stream, Z_FINISH);
-    inflateEnd(&stream);
-    return result == Z_STREAM_END && stream.total_out == output.size();
+    if (inflateInit2(&stream, -MAX_WBITS) == Z_OK) {
+        const int result = inflate(&stream, Z_FINISH);
+        inflateEnd(&stream);
+        if (result == Z_STREAM_END || stream.total_out == output.size()) return true;
+    }
+
+    // Fallback 1: Try auto-detect (32 + MAX_WBITS) for gzip/zlib header
+    std::memset(&stream, 0, sizeof(stream));
+    stream.next_in = const_cast<Bytef*>(input);
+    stream.avail_in = static_cast<uInt>(inputSize);
+    stream.next_out = output.data();
+    stream.avail_out = static_cast<uInt>(output.size());
+    if (inflateInit2(&stream, 32 + MAX_WBITS) == Z_OK) {
+        const int result = inflate(&stream, Z_FINISH);
+        inflateEnd(&stream);
+        if (result == Z_STREAM_END || stream.total_out == output.size()) return true;
+    }
+
+    // Fallback 2: Try standard zlib (MAX_WBITS = 15)
+    std::memset(&stream, 0, sizeof(stream));
+    stream.next_in = const_cast<Bytef*>(input);
+    stream.avail_in = static_cast<uInt>(inputSize);
+    stream.next_out = output.data();
+    stream.avail_out = static_cast<uInt>(output.size());
+    if (inflateInit2(&stream, MAX_WBITS) == Z_OK) {
+        const int result = inflate(&stream, Z_FINISH);
+        inflateEnd(&stream);
+        if (result == Z_STREAM_END || stream.total_out == output.size()) return true;
+    }
+
+    return false;
 }
 
 // Streaming helpers (is_bundle_container / extract_bundle read big containers
