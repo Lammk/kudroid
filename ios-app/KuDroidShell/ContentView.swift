@@ -774,9 +774,10 @@ func runMultiElfTest() -> String {
 struct DedicatedAppRunnerView: UIViewControllerRepresentable {
     let appName: String
     let onExit: () -> Void
+    let onCrash: (String, String) -> Void
 
     func makeUIViewController(context: Context) -> NativeMetalViewController {
-        NativeMetalViewController(appName: appName, onExit: onExit)
+        NativeMetalViewController(appName: appName, onExit: onExit, onCrash: onCrash)
     }
 
     func updateUIViewController(_ uiViewController: NativeMetalViewController, context: Context) {}
@@ -785,12 +786,15 @@ struct DedicatedAppRunnerView: UIViewControllerRepresentable {
 class NativeMetalViewController: UIViewController {
     let appName: String
     let onExit: () -> Void
+    let onCrash: (String, String) -> Void
     private var isStarted = false
     private var metalView: NativeMetalView!
+    private var crashCheckTimer: Timer?
 
-    init(appName: String, onExit: @escaping () -> Void) {
+    init(appName: String, onExit: @escaping () -> Void, onCrash: @escaping (String, String) -> Void) {
         self.appName = appName
         self.onExit = onExit
+        self.onCrash = onCrash
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -811,10 +815,15 @@ class NativeMetalViewController: UIViewController {
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        if let metalLayer = view.layer as? CAMetalLayer {
+        // Khóa drawableSize: Chỉ khởi tạo hoặc cập nhật nếu app chưa chạy.
+        // Tuyệt đối không can thiệp layer khi background render thread đang swap buffer.
+        if !isStarted, let metalLayer = view.layer as? CAMetalLayer {
             let scale = UIScreen.main.scale
             let bounds = view.bounds.size.width > 0 ? view.bounds : UIScreen.main.bounds
-            metalLayer.drawableSize = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+            let targetSize = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+            if metalLayer.drawableSize != targetSize {
+                metalLayer.drawableSize = targetSize
+            }
         }
     }
 
@@ -845,13 +854,49 @@ class NativeMetalViewController: UIViewController {
         let unmanaged = Unmanaged.passUnretained(view.layer)
         kudroid_set_metal_layer(unmanaged.toOpaque(), width, height, Float(scale))
 
-        // Chạy APK Android với độ ưu tiên cao nhất của Interactive UI
-        DispatchQueue.global(qos: .userInteractive).async {
-            if let cString = kudroid_run_apk(self.appName) {
-                print("App exited with log:\n\(String(cString: cString))")
-                free(UnsafeMutablePointer(mutating: cString))
+        // Timer quét trạng thái crash định kỳ từ C++ bridge (đặc biệt khi crash xảy ra trên background render thread)
+        crashCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] timer in
+            guard let self = self else { return }
+            if kudroid_has_crashed() != 0 {
+                timer.invalidate()
+                self.handleCrash()
             }
         }
+
+        // Chạy APK Android với độ ưu tiên cao nhất của Interactive UI
+        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+            guard let self = self else { return }
+            let cString = kudroid_run_apk(self.appName)
+            var logOutput = ""
+            if let cString = cString {
+                logOutput = String(cString: cString)
+                free(UnsafeMutablePointer(mutating: cString))
+            }
+            DispatchQueue.main.async {
+                self.crashCheckTimer?.invalidate()
+                if kudroid_has_crashed() != 0 {
+                    self.handleCrash(fallbackLog: logOutput)
+                } else {
+                    self.onExit()
+                }
+            }
+        }
+    }
+
+    private func handleCrash(fallbackLog: String = "") {
+        var tailLog = ""
+        if let cTail = kudroid_get_last_crash_tail() {
+            tailLog = String(cString: cTail)
+            free(UnsafeMutablePointer(mutating: cTail))
+        }
+        kudroid_clear_crash_state()
+        let finalLog = tailLog.isEmpty || tailLog == "No recent crash detected." ? fallbackLog : tailLog
+        onCrash(appName, finalLog)
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        crashCheckTimer?.invalidate()
     }
 }
 
@@ -904,6 +949,104 @@ class NativeMetalView: UIView {
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         injectTouch(touches, action: 1)
+    }
+}
+
+// mark: - Modal thông báo Gentle Crash
+struct CrashAlertView: View {
+    let crashInfo: CrashInfo
+    let onDismiss: () -> Void
+    @State private var copied = false
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.85).ignoresSafeArea()
+            
+            VStack(spacing: 16) {
+                // Header Icon & Title
+                VStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 44))
+                        .foregroundColor(.yellow)
+                    
+                    Text("Whoops, the app crashed")
+                        .font(.title2.bold())
+                        .foregroundColor(.white)
+                    
+                    Text("App '\(crashInfo.appName)' encountered an unexpected error.")
+                        .font(.subheadline)
+                        .foregroundColor(.gray)
+                        .multilineTextAlignment(.center)
+                }
+                .padding(.top, 8)
+
+                // Log Container (Tail 30 lines)
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Label("Recent Crash Logs (Tail 30 Lines)", systemImage: "terminal")
+                            .font(.caption.bold())
+                            .foregroundColor(.green)
+                        Spacer()
+                        Button(action: {
+                            UIPasteboard.general.string = crashInfo.tailLog
+                            copied = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                                copied = false
+                            }
+                        }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                                Text(copied ? "Copied" : "Copy")
+                            }
+                            .font(.caption.weight(.semibold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .background(Color.white.opacity(0.15))
+                            .cornerRadius(6)
+                        }
+                    }
+
+                    ScrollView(.vertical, showsIndicators: true) {
+                        Text(crashInfo.tailLog.isEmpty ? "No detailed logs available." : crashInfo.tailLog)
+                            .font(.system(size: 11, weight: .regular, design: .monospaced))
+                            .foregroundColor(.green.opacity(0.9))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(10)
+                    }
+                    .frame(maxHeight: 280)
+                    .background(Color.black.opacity(0.7))
+                    .cornerRadius(8)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                    )
+                }
+                .padding(.horizontal)
+
+                // Close Button
+                Button(action: onDismiss) {
+                    Text("Dismiss")
+                        .font(.headline)
+                        .foregroundColor(.black)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(Color.green)
+                        .cornerRadius(10)
+                }
+                .padding(.horizontal)
+                .padding(.bottom, 8)
+            }
+            .padding(.vertical, 16)
+            .background(Color(UIColor.secondarySystemBackground).opacity(0.3))
+            .background(.ultraThinMaterial)
+            .cornerRadius(20)
+            .overlay(
+                RoundedRectangle(cornerRadius: 20)
+                    .stroke(Color.white.opacity(0.2), lineWidth: 1)
+            )
+            .padding(.horizontal, 20)
+        }
     }
 }
 

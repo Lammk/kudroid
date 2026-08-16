@@ -214,35 +214,34 @@ static void* render_loop(void* arg) {
     if (h <= 0) h = 1920;
 
     LOGI("Render loop starting with viewport %dx%d.", w, h);
+    p_glViewport(0, 0, w, h);
+    p_glUseProgram(program);
+
+    if (positionHandle >= 0) {
+        p_glEnableVertexAttribArray((GLuint)positionHandle);
+        if (vbo[0] != 0) {
+            p_glBindBuffer(GL_ARRAY_BUFFER, vbo[0]);
+            p_glVertexAttribPointer((GLuint)positionHandle, 3, GL_FLOAT, GL_FALSE, 0, (const void*)0);
+        } else {
+            p_glVertexAttribPointer((GLuint)positionHandle, 3, GL_FLOAT, GL_FALSE, 0, vertices);
+        }
+    }
+
+    if (colorHandle >= 0) {
+        p_glEnableVertexAttribArray((GLuint)colorHandle);
+        if (vbo[1] != 0) {
+            p_glBindBuffer(GL_ARRAY_BUFFER, vbo[1]);
+            p_glVertexAttribPointer((GLuint)colorHandle, 4, GL_FLOAT, GL_FALSE, 0, (const void*)0);
+        } else {
+            p_glVertexAttribPointer((GLuint)colorHandle, 4, GL_FLOAT, GL_FALSE, 0, colors);
+        }
+    }
+
     render_running = true;
     while (render_running) {
-        p_glViewport(0, 0, w, h);
-        
-        // Nền xanh Navy đẹp mắt
+        // Nền xanh Navy rực rỡ
         p_glClearColor(0.08f, 0.12f, 0.24f, 1.0f);
         p_glClear(GL_COLOR_BUFFER_BIT);
-
-        p_glUseProgram(program);
-
-        if (positionHandle >= 0) {
-            p_glEnableVertexAttribArray((GLuint)positionHandle);
-            if (vbo[0] != 0) {
-                p_glBindBuffer(GL_ARRAY_BUFFER, vbo[0]);
-                p_glVertexAttribPointer((GLuint)positionHandle, 3, GL_FLOAT, GL_FALSE, 0, (const void*)0);
-            } else {
-                p_glVertexAttribPointer((GLuint)positionHandle, 3, GL_FLOAT, GL_FALSE, 0, vertices);
-            }
-        }
-
-        if (colorHandle >= 0) {
-            p_glEnableVertexAttribArray((GLuint)colorHandle);
-            if (vbo[1] != 0) {
-                p_glBindBuffer(GL_ARRAY_BUFFER, vbo[1]);
-                p_glVertexAttribPointer((GLuint)colorHandle, 4, GL_FLOAT, GL_FALSE, 0, (const void*)0);
-            } else {
-                p_glVertexAttribPointer((GLuint)colorHandle, 4, GL_FLOAT, GL_FALSE, 0, colors);
-            }
-        }
 
         p_glDrawArrays(GL_TRIANGLES, 0, 3);
         

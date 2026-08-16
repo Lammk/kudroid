@@ -73,6 +73,17 @@ int kudroid_delete_app(const char* package_name);
 /// trả về một chuỗi được malloc (ví dụ: json hoặc văn bản được định dạng); người gọi phải giải phóng nó bằng free().
 const char* kudroid_get_app_info(const char* package_name);
 
+/// kiểm tra xem ứng dụng khách có bị sập (gentle crash) trong phiên chạy vừa qua hay không.
+/// trả về 1 nếu có crash, 0 nếu bình thường.
+int kudroid_has_crashed(void);
+
+/// xóa trạng thái crash sau khi giao diện đã hiển thị thông báo.
+void kudroid_clear_crash_state(void);
+
+/// trích xuất tối đa 30 dòng log cuối cùng trước khi crash.
+/// trả về chuỗi malloc; người gọi phải giải phóng bằng free().
+const char* kudroid_get_last_crash_tail(void);
+
 #ifdef __cplusplus
 }
 #endif

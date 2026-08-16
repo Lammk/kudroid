@@ -26,8 +26,10 @@
 #include <dlfcn.h>
 #include <unwind.h>
 #include <mutex>
+#include <atomic>
 
 extern "C" struct JavaVM_* kudroid_jni_get_javavm(void);
+extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
 
 // ── ghi nhật ký liên tục vào thư mục có thể ghi của ứng dụng ─────────────────────────
 // ứng dụng truyền một thư mục (thư mục documents của nó) thông qua kudroid_set_log_dir().
@@ -46,6 +48,37 @@ static volatile sig_atomic_t g_crashLen = 0;
 static std::mutex g_crashBufMtx;
 static char g_abortMessage[1024] = {0};
 static int kudroid_jit_available(void);
+
+// Gentle crash variables:
+static std::atomic<bool> g_hasCrashed{false};
+static char g_lastCrashTail[16384] = {0};
+static pthread_t g_mainThread = 0;
+
+static void extractLastLines(const char* src, size_t srcLen, char* dst, size_t dstCap, int maxLines = 30) {
+    if (!src || srcLen == 0 || dstCap == 0) {
+        if (dstCap > 0) dst[0] = '\0';
+        return;
+    }
+    int lineCount = 0;
+    const char* p = src + srcLen - 1;
+    while (p >= src && (*p == '\n' || *p == '\r')) p--;
+    const char* end = p + 1;
+    while (p >= src) {
+        if (*p == '\n') {
+            lineCount++;
+            if (lineCount >= maxLines) {
+                p++;
+                break;
+            }
+        }
+        p--;
+    }
+    if (p < src) p = src;
+    size_t len = static_cast<size_t>(end - p);
+    if (len >= dstCap) len = dstCap - 1;
+    memcpy(dst, p, len);
+    dst[len] = '\0';
+}
 
 // Game logs (bionic_android_log_print) mirror vào đây để file crash chứa log
 // của game ngay trước khi crash. Ring buffer — giữ phần mới nhất.
@@ -496,8 +529,41 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
             close(fd);
         }
     }
-    signal(sig, SIG_DFL);
-    raise(sig);
+
+    // --- GENTLE CRASH SYSTEM ---
+    // Đánh dấu trạng thái crash và trích xuất tối đa 30 dòng log cuối cùng
+    // để UI Swift hiển thị cảnh báo "Whoops, the app crashed" mà không đóng app.
+    g_hasCrashed.store(true);
+    
+    // Thu thập 30 dòng log cuối cùng từ g_crashBuf
+    extractLastLines(g_crashBuf, (size_t)g_crashLen, g_lastCrashTail, sizeof(g_lastCrashTail), 30);
+    
+    // Nếu g_lastCrashTail quá ngắn, ghép thêm thông tin signal và PC
+    if (strlen(g_lastCrashTail) < 30) {
+        char fallbackSummary[512];
+        snprintf(fallbackSummary, sizeof(fallbackSummary),
+                 "[Crash Signal: %d] Fault at %p (Thread 0x%llx)",
+                 sig, info ? info->si_addr : nullptr, (unsigned long long)(uintptr_t)pthread_self());
+        strncat(g_lastCrashTail, fallbackSummary, sizeof(g_lastCrashTail) - strlen(g_lastCrashTail) - 1);
+    }
+
+    // Nếu crash xảy ra trên background thread (render thread, game thread, worker thread):
+    // Thay vì gọi raise(sig) làm sập toàn bộ tiến trình KuDroid Shell trên iOS,
+    // chúng ta kết thúc êm ái luồng lỗi này (pthread_exit) để giao diện Launcher
+    // tự động phát hiện và quay về màn hình chính!
+#if defined(__APPLE__)
+    const bool isBackground = !pthread_main_np();
+#else
+    const bool isBackground = g_mainThread != 0 && !pthread_equal(pthread_self(), g_mainThread);
+#endif
+    if (isBackground) {
+        kudroid_android_log_message(5, "KuDroidCrash", "Gentle crash: background thread terminated cleanly without killing launcher.");
+        pthread_exit(nullptr);
+    } else {
+        // Nếu crash ngay trên main thread, ghi nhận và kết thúc an toàn
+        signal(sig, SIG_DFL);
+        raise(sig);
+    }
 }
 
 static void installCrashHandlers(void) {
@@ -532,6 +598,7 @@ static void installCrashHandlers(void) {
 
 extern "C" void kudroid_set_log_dir(const char* dir) {
     if (!dir) return;
+    g_mainThread = pthread_self();
     strncpy(g_logDir, dir, sizeof(g_logDir) - 1);
     g_logDir[sizeof(g_logDir) - 1] = '\0';
     installCrashHandlers();
@@ -1933,4 +2000,23 @@ extern "C" const char* kudroid_translate_dex(const char* dexPath) {
 
     writeLogFile("kudroid_dex_translate.txt", log);
     return strdup(log.c_str());
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Gentle Crash API
+// ─────────────────────────────────────────────────────────────────────────────
+extern "C" int kudroid_has_crashed(void) {
+    return g_hasCrashed.load() ? 1 : 0;
+}
+
+extern "C" void kudroid_clear_crash_state(void) {
+    g_hasCrashed.store(false);
+    g_lastCrashTail[0] = '\0';
+}
+
+extern "C" const char* kudroid_get_last_crash_tail(void) {
+    if (g_lastCrashTail[0] == '\0') {
+        return strdup("No recent crash detected.");
+    }
+    return strdup(g_lastCrashTail);
 }
