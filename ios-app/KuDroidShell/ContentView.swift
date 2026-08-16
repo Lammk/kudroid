@@ -203,7 +203,8 @@ struct AppsView: View {
                 // Đọc app_info.json nếu có
                 let infoURL = folder.appendingPathComponent("app_info.json")
                 if let infoData = try? Data(contentsOf: infoURL),
-                   let json = try? JSONSerialization.jsonObject(with: infoData) as? [String: Any] {
+                   let rawObj = try? JSONSerialization.jsonObject(with: infoData),
+                   let json = rawObj as? [String: Any] {
                     if let label = json["label"] as? String, !label.isEmpty {
                         displayName = prettifyAppName(label)
                     }
