@@ -190,6 +190,20 @@ struct AppsView: View {
         }
     }
     
+    private func extractVersionFromFolderName(_ name: String) -> String? {
+        let pattern = #"(\d+[\.\-_]\d+([\.\-_]\d+)*)"#
+        if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
+            let nsString = name as NSString
+            let results = regex.matches(in: name, options: [], range: NSRange(location: 0, length: nsString.length))
+            if let lastMatch = results.last {
+                let matchString = nsString.substring(with: lastMatch.range)
+                let cleaned = matchString.replacingOccurrences(of: "_", with: ".").replacingOccurrences(of: "-", with: ".")
+                return cleaned
+            }
+        }
+        return nil
+    }
+
     private func loadInstalledApps() {
         guard let url = androidRootAppsURL else { return }
         do {
@@ -198,7 +212,7 @@ struct AppsView: View {
             for folder in contents.filter({ $0.hasDirectoryPath }) {
                 let folderName = folder.lastPathComponent
                 var displayName = prettifyAppName(folderName)
-                var version = "1.0.0"
+                var version = extractVersionFromFolderName(folderName) ?? "1.0.0"
                 
                 // Đọc app_info.json nếu có
                 let infoURL = folder.appendingPathComponent("app_info.json")
@@ -208,7 +222,7 @@ struct AppsView: View {
                     if let label = json["label"] as? String, !label.isEmpty {
                         displayName = prettifyAppName(label)
                     }
-                    if let ver = json["version"] as? String, !ver.isEmpty {
+                    if let ver = json["version"] as? String, !ver.isEmpty && ver != "1.0.0" {
                         version = ver
                     }
                 }
@@ -245,18 +259,33 @@ struct AppsView: View {
             s = String(s.dropLast(4))
         }
 
-        // 3. Tách các version số ở đuôi (ví dụ: "rolling-sky-5-5-8" -> "rolling-sky")
-        let components = s.split(whereSeparator: { $0 == "-" || $0 == "_" })
-        var nameParts: [String] = []
+        let lower = s.lowercased()
+        if lower.contains("ultrakill") { return "ULTRAKILL" }
+        if lower.contains("discord") { return "Discord" }
+        if lower.contains("rolling") && lower.contains("sky") { return "Rolling Sky" }
+        if lower.contains("triangle") { return "Triangle Test" }
+
+        // 3. Tách các tiền tố/hậu tố rác thường gặp trong tên file APK mod/port
+        let junkWords: Set<String> = [
+            "apk", "arm64", "arm64v8a", "v8a", "vulkan", "gles", "mod",
+            "signed", "release", "debug", "beta", "alpha", "jakitomzed"
+        ]
+        
+        let components = s.split(whereSeparator: { $0 == "-" || $0 == "_" || $0 == " " })
+        var validWords: [String] = []
         for comp in components {
             let str = String(comp)
+            let wLower = str.lowercased()
+            if junkWords.contains(wLower) { continue }
+            // Bỏ qua version thuần số ví dụ "5.5.8" hoặc "v202"
             if str.allSatisfy({ $0.isNumber || $0 == "." }) || (str.hasPrefix("v") && str.dropFirst().allSatisfy({ $0.isNumber || $0 == "." })) {
                 continue
             }
-            nameParts.append(str)
+            validWords.append(str)
         }
-        if !nameParts.isEmpty {
-            s = nameParts.joined(separator: " ")
+        
+        if !validWords.isEmpty {
+            s = validWords.joined(separator: " ")
         } else {
             s = s.replacingOccurrences(of: "-", with: " ").replacingOccurrences(of: "_", with: " ")
         }

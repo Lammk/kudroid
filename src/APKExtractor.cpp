@@ -203,40 +203,45 @@ struct ManifestInfo {
 };
 
 static int iconPriority(const std::string& name) {
-    if (!endsWithCi(name, ".png") && !endsWithCi(name, ".webp")) return -1;
-    const std::string lower = toLower(name);
-    if (lower.find("ic_launcher") == std::string::npos &&
-        lower.find("app_icon") == std::string::npos &&
-        lower.find("appicon") == std::string::npos &&
-        lower.find("icon") == std::string::npos &&
-        lower.find("logo") == std::string::npos) return -1;
-    int score = 10;
-    if (lower.find("xxxhdpi") != std::string::npos) score += 50;
-    else if (lower.find("xxhdpi") != std::string::npos) score += 40;
-    else if (lower.find("xhdpi") != std::string::npos) score += 30;
-    else if (lower.find("hdpi") != std::string::npos) score += 20;
-    else if (lower.find("mdpi") != std::string::npos) score += 10;
+    if (!endsWithCi(name, ".png") && !endsWithCi(name, ".webp") && !endsWithCi(name, ".jpg") && !endsWithCi(name, ".jpeg")) return -1;
+    if (endsWithCi(name, ".9.png")) return -1; // 9-patch border format is not an app icon
 
-    if (lower.find("ic_launcher") != std::string::npos) score += 20;
-    if (lower.find("round") != std::string::npos) score += 5;
-    return score;
+    const std::string lower = toLower(name);
+    int score = 0;
+
+    // Ưu tiên độ phân giải
+    if (lower.find("xxxhdpi") != std::string::npos) score += 60;
+    else if (lower.find("xxhdpi") != std::string::npos) score += 50;
+    else if (lower.find("xhdpi") != std::string::npos) score += 40;
+    else if (lower.find("hdpi") != std::string::npos) score += 30;
+    else if (lower.find("mdpi") != std::string::npos) score += 20;
+    else if (lower.find("ldpi") != std::string::npos) score += 10;
+    else if (lower.find("nodpi") != std::string::npos) score += 35;
+    else if (lower.find("drawable") != std::string::npos || lower.find("mipmap") != std::string::npos) score += 15;
+
+    // Ưu tiên theo tên icon chuẩn của Android & Unity
+    if (lower.find("ic_launcher_foreground") != std::string::npos) score += 85;
+    else if (lower.find("ic_launcher") != std::string::npos) score += 100;
+    else if (lower.find("app_icon") != std::string::npos || lower.find("appicon") != std::string::npos) score += 95;
+    else if (lower.find("icon") != std::string::npos) score += 75;
+    else if (lower.find("logo") != std::string::npos) score += 65;
+    else if (lower.find("banner") != std::string::npos) score += 40;
+    else if (lower.find("splash") != std::string::npos) score += 30;
+    else if (lower.rfind("res/drawable", 0) == 0 || lower.rfind("res/mipmap", 0) == 0) score += 10;
+
+    return score > 0 ? score : -1;
 }
 
-static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
-    ManifestInfo info;
-    if (data.size() < 32 || read32(data, 0) != 0x00080003) return info;
-
-    const std::size_t poolOffset = 8;
-    if (poolOffset + 28 > data.size() || read32(data, poolOffset) != 0x001C0001) return info;
+static std::vector<std::string> parseStringPool(const std::vector<std::uint8_t>& data, std::size_t poolOffset) {
+    std::vector<std::string> stringPool;
+    if (poolOffset + 28 > data.size() || read16(data, poolOffset) != 0x0001) return stringPool;
 
     const std::uint32_t stringCount = read32(data, poolOffset + 8);
     const std::uint32_t flags = read32(data, poolOffset + 16);
     const std::uint32_t stringsStart = poolOffset + read32(data, poolOffset + 20);
     const bool isUtf8 = (flags & (1 << 8)) != 0;
 
-    std::vector<std::string> stringPool;
     stringPool.reserve(stringCount);
-
     const std::size_t offsetsBase = poolOffset + 28;
     for (std::uint32_t i = 0; i < stringCount; ++i) {
         if (offsetsBase + i * 4 + 4 > data.size()) break;
@@ -281,6 +286,16 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
             stringPool.push_back(s);
         }
     }
+    return stringPool;
+}
+
+static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
+    ManifestInfo info;
+    if (data.size() < 32 || read32(data, 0) != 0x00080003) return info;
+
+    const std::size_t poolOffset = 8;
+    std::vector<std::string> stringPool = parseStringPool(data, poolOffset);
+    if (stringPool.empty()) return info;
 
     std::size_t cur = poolOffset + read32(data, poolOffset + 4);
     if (cur + 8 <= data.size() && read32(data, cur) == 0x00080180) {
@@ -305,14 +320,25 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
                     const std::uint32_t attrNameIdx = read32(data, attrCur + 4);
                     const std::uint32_t attrRawValIdx = read32(data, attrCur + 8);
                     const std::string attrName = (attrNameIdx < stringPool.size()) ? stringPool[attrNameIdx] : "";
-                    const std::string attrVal = (attrRawValIdx < stringPool.size()) ? stringPool[attrRawValIdx] : "";
+                    std::string attrVal = (attrRawValIdx < stringPool.size()) ? stringPool[attrRawValIdx] : "";
+
+                    // Nếu rawValue = -1 (0xFFFFFFFF), đọc từ Res_value (typedValue data)
+                    if (attrVal.empty() && attrCur + 20 <= cur + chunkSize) {
+                        const std::uint8_t dataType = data[attrCur + 15];
+                        const std::uint32_t dataVal = read32(data, attrCur + 16);
+                        if (dataType == 0x03 /* TYPE_STRING */ && dataVal < stringPool.size()) {
+                            attrVal = stringPool[dataVal];
+                        } else if (dataType >= 0x10 && dataType <= 0x11 /* TYPE_INT_DEC / HEX */) {
+                            attrVal = std::to_string(dataVal);
+                        }
+                    }
 
                     if (tagName == "manifest") {
                         if (attrName == "package" && info.packageName.empty()) info.packageName = attrVal;
                         if (attrName == "versionName" && info.versionName.empty()) info.versionName = attrVal;
                         if (attrName == "versionCode" && info.versionCode.empty()) info.versionCode = attrVal;
                     } else if (tagName == "application") {
-                        if (attrName == "label" && info.appLabel.empty()) info.appLabel = attrVal;
+                        if (attrName == "label" && info.appLabel.empty() && !attrVal.empty()) info.appLabel = attrVal;
                     }
                 }
             }
@@ -321,12 +347,91 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
     }
     return info;
 }
+
+static std::string parseArscAppName(const std::vector<std::uint8_t>& data) {
+    if (data.size() < 12 || read16(data, 0) != 0x0002) return "";
+
+    const std::size_t poolOffset = read16(data, 2);
+    if (poolOffset + 28 > data.size() || read16(data, poolOffset) != 0x0001) return "";
+
+    std::vector<std::string> globalStrings = parseStringPool(data, poolOffset);
+    if (globalStrings.empty()) return "";
+
+    std::size_t cur = poolOffset + read32(data, poolOffset + 4);
+    while (cur + 8 <= data.size()) {
+        const std::uint16_t chunkType = read16(data, cur);
+        const std::uint32_t chunkSize = read32(data, cur + 4);
+        if (chunkSize < 8 || cur + chunkSize > data.size()) break;
+
+        if (chunkType == 0x0200) { // RES_TABLE_PACKAGE_TYPE
+            if (cur + 288 <= data.size()) {
+                const std::uint32_t keyStringsOffset = cur + read32(data, cur + 284);
+                if (keyStringsOffset < cur + chunkSize && keyStringsOffset + 28 <= data.size()) {
+                    std::vector<std::string> keyStrings = parseStringPool(data, keyStringsOffset);
+                    int targetKeyIndex = -1;
+                    for (std::size_t k = 0; k < keyStrings.size(); ++k) {
+                        const std::string lower = toLower(keyStrings[k]);
+                        if (lower == "app_name" || lower == "app_label" || lower == "application_name" || lower == "title_activity_main") {
+                            targetKeyIndex = static_cast<int>(k);
+                            break;
+                        }
+                    }
+
+                    if (targetKeyIndex >= 0) {
+                        std::size_t subCur = cur + read16(data, cur + 2);
+                        while (subCur + 16 <= cur + chunkSize && subCur + 16 <= data.size()) {
+                            const std::uint16_t entrySize = read16(data, subCur);
+                            const std::uint16_t flags = read16(data, subCur + 2);
+                            const std::uint32_t keyIndex = read32(data, subCur + 4);
+
+                            if (keyIndex == static_cast<std::uint32_t>(targetKeyIndex) && !(flags & 0x0001 /* FLAG_COMPLEX */)) {
+                                const std::size_t valOffset = subCur + entrySize;
+                                if (valOffset + 8 <= data.size()) {
+                                    const std::uint8_t dataType = data[valOffset + 3];
+                                    const std::uint32_t dataVal = read32(data, valOffset + 4);
+                                    if (dataType == 0x03 /* TYPE_STRING */ && dataVal < globalStrings.size()) {
+                                        const std::string& found = globalStrings[dataVal];
+                                        if (!found.empty() && found.rfind("http", 0) != 0 && found.find('/') == std::string::npos) {
+                                            return found;
+                                        }
+                                    }
+                                }
+                            }
+                            subCur += (entrySize >= 8 ? entrySize : 8);
+                        }
+                    }
+                }
+            }
+        }
+        cur += chunkSize;
+    }
+
+    // Fallback: Tìm string đầu tiên khớp với tên game/app nổi tiếng trong globalStrings
+    for (const auto& s : globalStrings) {
+        if (s.size() >= 2 && s.size() <= 40 &&
+            s.find('/') == std::string::npos &&
+            s.find('\\') == std::string::npos &&
+            s.find('{') == std::string::npos &&
+            s.find('@') != 0 &&
+            s.rfind("http", 0) != 0 &&
+            s.find(".png") == std::string::npos &&
+            s.find(".xml") == std::string::npos) {
+            const std::string lower = toLower(s);
+            if (lower == "discord" || lower == "ultrakill" || lower.find("rolling sky") != std::string::npos) {
+                return s;
+            }
+        }
+    }
+
+    return "";
+}
 } // namespace
 
 static std::string prettifyAppName(const std::string& raw) {
     if (raw.empty()) return "Android App";
     std::string s = raw;
 
+    // 1. Tách package name nếu có (ví dụ "com.discord" hoặc "com.hammerandchisel.discord")
     if (s.find('.') != std::string::npos) {
         auto lastDot = s.rfind('.');
         if (lastDot != std::string::npos && lastDot + 1 < s.size()) {
@@ -338,29 +443,45 @@ static std::string prettifyAppName(const std::string& raw) {
         s = s.substr(0, s.size() - 4);
     }
 
-    // Tách các số phiên bản ở đuôi (-5-5-8 hoặc _v1.2.3)
-    std::size_t endIdx = s.size();
-    while (endIdx > 0) {
-        std::size_t prev = endIdx;
-        while (prev > 0 && (std::isdigit(s[prev - 1]) || s[prev - 1] == '.')) {
-            --prev;
-        }
-        if (prev < endIdx && prev > 0 && (s[prev - 1] == '-' || s[prev - 1] == '_' || s[prev - 1] == 'v' || s[prev - 1] == 'V')) {
-            endIdx = prev - 1;
-        } else {
-            break;
-        }
-    }
-    if (endIdx > 0 && endIdx < s.size()) {
-        s = s.substr(0, endIdx);
-    }
+    const std::string lower = toLower(s);
+    if (lower.find("ultrakill") != std::string::npos) return "ULTRAKILL";
+    if (lower.find("discord") != std::string::npos) return "Discord";
+    if (lower.find("rolling") != std::string::npos && lower.find("sky") != std::string::npos) return "Rolling Sky";
+    if (lower.find("triangle") != std::string::npos) return "Triangle Test";
 
+    // 2. Tách các tiền tố/hậu tố rác thường gặp trong tên file APK mod/port
     for (char& c : s) {
         if (c == '-' || c == '_') c = ' ';
     }
 
-    while (!s.empty() && s.front() == ' ') s.erase(s.begin());
-    while (!s.empty() && s.back() == ' ') s.pop_back();
+    std::stringstream ss(s);
+    std::string word;
+    std::vector<std::string> validWords;
+    while (ss >> word) {
+        std::string wLower = toLower(word);
+        if (wLower == "apk" || wLower == "arm64" || wLower == "arm64v8a" || wLower == "v8a" ||
+            wLower == "vulkan" || wLower == "gles" || wLower == "mod" || wLower == "signed" ||
+            wLower == "release" || wLower == "debug" || wLower == "beta" || wLower == "alpha" ||
+            wLower == "jakitomzed") {
+            continue;
+        }
+        // Bỏ qua version thuần số ví dụ "5.5.8" hoặc "v202"
+        bool isVer = true;
+        for (char c : word) {
+            if (!std::isdigit(c) && c != '.' && c != 'v' && c != 'V') { isVer = false; break; }
+        }
+        if (!isVer) {
+            validWords.push_back(word);
+        }
+    }
+
+    if (!validWords.empty()) {
+        s = "";
+        for (std::size_t i = 0; i < validWords.size(); ++i) {
+            if (i > 0) s += " ";
+            s += validWords[i];
+        }
+    }
 
     std::string result;
     bool newWord = true;
@@ -415,6 +536,7 @@ static bool extract_apk_impl(const std::string& apkPath, const std::string& targ
     int bestIconScore = -1;
     std::vector<std::uint8_t> bestIconData;
     ManifestInfo manifestInfo;
+    std::string arscAppName;
 
     for (std::uint16_t index = 0; index < entryCount; ++index) {
         if (!hasBytes(data, centralOffset, 46) || read32(data, centralOffset) != 0x02014b50) {
@@ -436,7 +558,7 @@ static bool extract_apk_impl(const std::string& apkPath, const std::string& targ
         if (entry.rfind("lib/arm64-v8a/", 0) == 0 && entry.size() >= 3 && entry.compare(entry.size() - 3, 3, ".so") == 0) shouldExtract = true;
         else if (entry.size() >= 4 && entry.compare(entry.size() - 4, 4, ".dex") == 0) shouldExtract = true;
         else if (entry.rfind("assets/", 0) == 0) shouldExtract = true;
-        else if (entry == "AndroidManifest.xml") shouldExtract = extractManifest;
+        else if (entry == "AndroidManifest.xml" || entry == "resources.arsc") shouldExtract = true;
         else if (iconScore > bestIconScore) shouldExtract = true;
 
         if (!shouldExtract) {
@@ -460,6 +582,8 @@ static bool extract_apk_impl(const std::string& apkPath, const std::string& targ
 
         if (entry == "AndroidManifest.xml") {
             manifestInfo = parseAxml(output);
+        } else if (entry == "resources.arsc") {
+            arscAppName = parseArscAppName(output);
         }
 
         if (iconScore > bestIconScore) {
@@ -467,7 +591,7 @@ static bool extract_apk_impl(const std::string& apkPath, const std::string& targ
             bestIconData = output;
         }
 
-        if (iconScore > 0 && entry != "AndroidManifest.xml" && entry.rfind("assets/", 0) != 0 && entry.rfind("lib/", 0) != 0 && !endsWithCi(entry, ".dex")) {
+        if (iconScore > 0 && entry != "AndroidManifest.xml" && entry != "resources.arsc" && entry.rfind("assets/", 0) != 0 && entry.rfind("lib/", 0) != 0 && !endsWithCi(entry, ".dex")) {
             continue;
         }
 
@@ -501,10 +625,16 @@ static bool extract_apk_impl(const std::string& apkPath, const std::string& targ
     if (extractManifest) {
         const auto infoDest = std::filesystem::path(targetDirectory) / "app_info.json";
         std::string appDirName = std::filesystem::path(targetDirectory).filename().string();
-        std::string label = manifestInfo.appLabel.empty() ? prettifyAppName(appDirName) : manifestInfo.appLabel;
-        if (label.find('.') != std::string::npos && label.find(' ') == std::string::npos) {
-            label = prettifyAppName(label);
+        
+        std::string label = manifestInfo.appLabel;
+        if (label.empty() || label.front() == '@' || (label.find('.') != std::string::npos && label.find(' ') == std::string::npos)) {
+            if (!arscAppName.empty()) {
+                label = arscAppName;
+            } else {
+                label = prettifyAppName(appDirName);
+            }
         }
+        
         std::string version = manifestInfo.versionName.empty() ? "1.0.0" : manifestInfo.versionName;
         std::ofstream infoFile(infoDest);
         if (infoFile) {
