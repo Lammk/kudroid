@@ -454,7 +454,7 @@ extern "C" VkResult bionic_vkCreateAndroidSurfaceKHR(VkInstance instance,
     metalInfo.sType = VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT;
     metalInfo.pNext = nullptr;
     metalInfo.flags = 0;
-    metalInfo.pLayer = pCreateInfo->window; // window IS the CAMetalLayer
+    metalInfo.pLayer = (pCreateInfo->window && pCreateInfo->window != (void*)1) ? pCreateInfo->window : g_metalLayer;
 
     VkResult r = createMetalSurface(instance, &metalInfo, pAllocator, pSurface);
     KLOG(kDebug, "KuDroidGPU", "vkCreateMetalSurfaceEXT returned %d (surface=%p)", (int)r, (void*)*pSurface);
@@ -612,7 +612,7 @@ extern "C" EGLSurface bionic_eglCreateWindowSurface(EGLDisplay dpy, EGLConfig co
         // The Android game passes an ANativeWindow (which our
         // ANativeWindow_fromSurface already maps to g_metalLayer). Force the
         // window to g_metalLayer so ANGLE gets the CAMetalLayer it needs.
-        EGLNativeWindowType nativeWin = (EGLNativeWindowType)g_metalLayer;
+        EGLNativeWindowType nativeWin = (EGLNativeWindowType)(g_metalLayer ? g_metalLayer : win);
         gpuLog("eglCreateWindowSurface: calling ANGLE with window=%p...", (void*)nativeWin);
         EGLSurface s = host_func(dpy, config, nativeWin, attrib_list);
         gpuLog("eglCreateWindowSurface returned %p", (void*)s);
