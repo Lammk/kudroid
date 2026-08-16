@@ -114,7 +114,8 @@ extern const char* g_kudroid_log_dir_ptr;
 namespace kudroid {
 namespace {
 
-uintptr_t gStackCheckGuard = 0x4b7544726f696421ULL;
+constexpr uintptr_t kStackGuardCookie = 0x1337BEEFCAFECAFEULL;
+uintptr_t gStackCheckGuard = kStackGuardCookie;
 
 // Trace dùng chung với BionicShim.cpp — KHÔNG khai báo gShimTrace riêng ở đây
 // (trước đây có 2 thread_local khác nhau → bionic_shim_trace() luôn trống).
@@ -223,7 +224,10 @@ void appendUnsigned(std::string& output, uint64_t value, unsigned base) {
     return output;
 }
 
+static std::mutex g_logAndroidMutex;
+
 int logAndroidMessage(int priority, const char* tag, const std::string& message) {
+    std::lock_guard<std::mutex> lock(g_logAndroidMutex);
     char traceMessage[256];
     snprintf(traceMessage, sizeof(traceMessage),
                   "__android_log_print(priority=%d, tag=%s)", priority,
@@ -497,7 +501,8 @@ extern "C" int bionic_pthread_rwlock_unlock(void* rwlock) {
 }
 
 extern "C" void bionic_stack_chk_fail() {
-    fprintf(stderr, "Bionic shim: stack check failed\n");
+    fprintf(stderr, "[BionicShim] FATAL: stack check failed (__stack_chk_fail)\n");
+    kudroid_store_abort_message("Bionic shim: stack check failed (__stack_chk_fail)");
     std::abort();
 }
 
@@ -2328,7 +2333,7 @@ static void* alloc_guest_tls_block(void) {
 
     // Stack guard cookie tại slot 5 (offset 40 tính từ TP).
     *reinterpret_cast<uint64_t*>(static_cast<char*>(tls_base) + kTlsSlotOffset + kTlsStackGuardSlotOffset) =
-        0x1337BEEFCAFECAFE;
+        kStackGuardCookie;
     return tls_base;
 }
 
