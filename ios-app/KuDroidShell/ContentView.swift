@@ -494,16 +494,25 @@ struct APKInstallerView: View {
     @State private var apkFiles: [URL] = []
     @State private var selectedAPK: URL?
     @State private var status = ""
+    @State private var isInstalling = false
+    @State private var installStep = ""
+    @State private var installedPackages: Set<String> = []
 
     private var inboxURL: URL? {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
             .appendingPathComponent("put_apk_here", isDirectory: true)
     }
 
+    private var androidRootAppsURL: URL? {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("android_root/data/app", isDirectory: true)
+    }
+
     var body: some View {
         NavigationView {
             ZStack {
                 Color.black.ignoresSafeArea()
+                
                 VStack(spacing: 0) {
                     if let inboxURL {
                         Text(inboxURL.path)
@@ -515,24 +524,46 @@ struct APKInstallerView: View {
 
                     List(apkFiles, id: \.path) { apk in
                         Button {
-                            selectedAPK = apk
+                            if !isInstalling { selectedAPK = apk }
                         } label: {
                             HStack {
-                                Image(systemName: "shippingbox")
-                                VStack(alignment: .leading) {
-                                    Text(apk.lastPathComponent).foregroundColor(.white)
-                                    Text(fileSize(apk)).font(.caption).foregroundColor(.secondary)
+                                Image(systemName: "shippingbox.fill")
+                                    .font(.title2)
+                                    .foregroundColor(.green)
+                                    .padding(.trailing, 4)
+                                
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(apk.lastPathComponent)
+                                        .foregroundColor(.white)
+                                        .lineLimit(1)
+                                    
+                                    HStack(spacing: 6) {
+                                        Text(fileSize(apk))
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                        
+                                        if isUpdate(apk) {
+                                            Text("UPDATE AVAILABLE")
+                                                .font(.system(size: 9, weight: .black))
+                                                .padding(.horizontal, 6)
+                                                .padding(.vertical, 2)
+                                                .background(Color.orange.opacity(0.25))
+                                                .foregroundColor(.orange)
+                                                .cornerRadius(4)
+                                        }
+                                    }
                                 }
                                 Spacer()
                                 if selectedAPK == apk {
-                                    Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundColor(.green)
                                 }
                             }
                         }
                         .listRowBackground(Color(.systemGray6))
+                        .disabled(isInstalling)
                     }
                     .onAppear {
-                        // cách khắc phục tạm thời cho các phiên bản trước ios 16
                         UITableView.appearance().backgroundColor = .clear
                     }
                     .overlay {
@@ -546,20 +577,60 @@ struct APKInstallerView: View {
                         }
                     }
 
-                    if !status.isEmpty {
+                    // Khung animation trạng thái cài đặt
+                    if isInstalling {
+                        VStack(spacing: 12) {
+                            ProgressView()
+                                .progressViewStyle(CircularProgressViewStyle(tint: .green))
+                                .scaleEffect(1.3)
+                            
+                            Text(installStep)
+                                .font(.subheadline)
+                                .fontWeight(.semibold)
+                                .foregroundColor(.green)
+                            
+                            Text("Decompressing assets, compiling DEX & extracting ARM64 libraries...")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.center)
+                        }
+                        .padding()
+                        .frame(maxWidth: .infinity)
+                        .background(Color(.systemGray6).opacity(0.8))
+                        .cornerRadius(12)
+                        .padding(.horizontal)
+                        .transition(.opacity.combined(with: .scale))
+                    }
+
+                    if !status.isEmpty && !isInstalling {
                         Text(status).font(.caption).foregroundColor(.red).padding(.horizontal)
                     }
 
-                    HStack {
+                    HStack(spacing: 16) {
                         Button("Refresh") { refresh() }
                             .buttonStyle(.bordered)
-                        Button("Install Selected") {
-                            guard let selectedAPK else { return }
-                            onInstall(installAPK(at: selectedAPK))
+                            .disabled(isInstalling)
+                        
+                        Button(action: startInstall) {
+                            HStack {
+                                if isInstalling {
+                                    ProgressView()
+                                        .progressViewStyle(CircularProgressViewStyle(tint: .black))
+                                        .padding(.trailing, 4)
+                                    Text("Installing...")
+                                } else if let selectedAPK, isUpdate(selectedAPK) {
+                                    Image(systemName: "arrow.triangle.2.circlepath")
+                                    Text("Update App")
+                                } else {
+                                    Image(systemName: "arrow.down.circle.fill")
+                                    Text("Install Selected")
+                                }
+                            }
+                            .fontWeight(.bold)
                         }
                         .buttonStyle(.borderedProminent)
-                        .tint(.green)
-                        .disabled(selectedAPK == nil)
+                        .tint(selectedAPK != nil && isUpdate(selectedAPK!) ? .orange : .green)
+                        .disabled(selectedAPK == nil || isInstalling)
                     }
                     .padding()
                 }
@@ -568,10 +639,41 @@ struct APKInstallerView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") { dismiss() }.foregroundColor(.green)
+                    Button("Close") { dismiss() }
+                        .foregroundColor(.green)
+                        .disabled(isInstalling)
                 }
             }
             .onAppear { refresh() }
+        }
+    }
+
+    private func isUpdate(_ url: URL) -> Bool {
+        let name = url.deletingPathExtension().lastPathComponent.lowercased()
+        for installed in installedPackages {
+            let lower = installed.lowercased()
+            if lower == name || name.contains(lower) || lower.contains(name) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func startInstall() {
+        guard let selectedAPK else { return }
+        withAnimation {
+            isInstalling = true
+            installStep = "Installing \(selectedAPK.lastPathComponent)..."
+        }
+        
+        DispatchQueue.global(qos: .userInitiated).async {
+            let log = installAPK(at: selectedAPK)
+            DispatchQueue.main.async {
+                withAnimation {
+                    self.isInstalling = false
+                    self.onInstall(log)
+                }
+            }
         }
     }
 
@@ -582,13 +684,19 @@ struct APKInstallerView: View {
         }
         do {
             try FileManager.default.createDirectory(at: inboxURL, withIntermediateDirectories: true)
-            // Hỗ trợ APK thường lẫn container split-APK: .apk / .apkm / .xapk / .apks
             let supportedExtensions = ["apk", "apkm", "xapk", "apks"]
             apkFiles = try FileManager.default.contentsOfDirectory(
                 at: inboxURL, includingPropertiesForKeys: [.fileSizeKey], options: [.skipsHiddenFiles]
             ).filter { supportedExtensions.contains($0.pathExtension.lowercased()) }
              .sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
             if let selectedAPK, !apkFiles.contains(selectedAPK) { self.selectedAPK = nil }
+            
+            // Tải danh sách app đã cài để check update
+            if let root = androidRootAppsURL,
+               let folders = try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) {
+                installedPackages = Set(folders.map { $0.lastPathComponent })
+            }
+            
             status = ""
         } catch {
             status = "Cannot scan put_apk_here: \(error.localizedDescription)"

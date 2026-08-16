@@ -242,7 +242,7 @@ static void appendTestHeader(std::string& log, const char* test, const char* pat
 // kudroid_crash.log với stamp của bản build mới nhất trên CI.
 extern "C" const char* kudroid_build_stamp(void) {
     static const char kStamp[] =
-        "kudroid_core v0.1.5 " __DATE__ " " __TIME__ " "
+        "kudroid_core v0.2.0 " __DATE__ " " __TIME__ " "
 #ifdef KUDROID_GIT_HASH
         KUDROID_GIT_HASH
 #else
