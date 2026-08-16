@@ -30,11 +30,18 @@ struct ContentView: View {
     }
 }
 
+struct AppItem: Identifiable {
+    let id: String // folder name (e.g. "rolling-sky-5-5-8")
+    let displayName: String // display name (e.g. "Rolling Sky")
+    let version: String // version (e.g. "5.5.8")
+    let iconImage: UIImage?
+}
+
 // mark: - tab ứng dụng
 struct AppsView: View {
     @EnvironmentObject private var session: AppSession
     @Binding var fullLog: String
-    @State private var installedApps: [String] = []
+    @State private var installedApps: [AppItem] = []
     @State private var showAPKInstaller = false
     
     private var androidRootAppsURL: URL? {
@@ -85,32 +92,67 @@ struct AppsView: View {
                             Spacer()
                         }
                     } else {
-                        List(installedApps, id: \.self) { appName in
-                            HStack {
-                                Image(systemName: "app.dashed")
-                                    .font(.title)
-                                    .foregroundColor(.green)
-                                    .padding(.trailing, 8)
-                                 
-                                VStack(alignment: .leading) {
-                                    Text(appName)
+                        List(installedApps) { app in
+                            HStack(spacing: 12) {
+                                if let icon = app.iconImage {
+                                    Image(uiImage: icon)
+                                        .resizable()
+                                        .aspectRatio(contentMode: .fill)
+                                        .frame(width: 48, height: 48)
+                                        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                                .stroke(Color.white.opacity(0.15), lineWidth: 0.5)
+                                        )
+                                        .shadow(color: .black.opacity(0.3), radius: 4, x: 0, y: 2)
+                                } else {
+                                    ZStack {
+                                        RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                            .fill(LinearGradient(colors: [Color.green.opacity(0.3), Color.teal.opacity(0.2)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                                            .frame(width: 48, height: 48)
+                                            .overlay(
+                                                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                                    .stroke(Color.green.opacity(0.3), lineWidth: 1)
+                                            )
+                                        Image(systemName: "cube.fill")
+                                            .font(.system(size: 22))
+                                            .foregroundColor(.green)
+                                    }
+                                }
+                                
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(app.displayName)
                                         .font(.headline)
-                                    Text("Native Arm64 Libraries")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
+                                        .foregroundColor(.white)
+                                        .lineLimit(1)
+                                    
+                                    HStack(spacing: 6) {
+                                        Text("v\(app.version)")
+                                            .font(.caption2)
+                                            .fontWeight(.bold)
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(Color.green.opacity(0.2))
+                                            .foregroundColor(.green)
+                                            .cornerRadius(6)
+                                        
+                                        Text("ARM64 Native")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
                                 }
                                 
                                 Spacer()
                                 
                                 Button(action: {
-                                    session.activeGuestApp = appName
+                                    session.activeGuestApp = app.id
                                 }) {
                                     Text("RUN")
                                         .font(.caption)
                                         .fontWeight(.bold)
                                         .padding(.horizontal, 16)
                                         .padding(.vertical, 8)
-                                        .background(Color.green.opacity(0.2))
+                                        .background(Color.green.opacity(0.25))
                                         .foregroundColor(.green)
                                         .cornerRadius(16)
                                 }
@@ -119,12 +161,12 @@ struct AppsView: View {
                             .listRowBackground(Color(.systemGray6))
                             .contextMenu {
                                 Button(role: .destructive) {
-                                    clearAppCache(name: appName)
+                                    clearAppCache(name: app.id)
                                 } label: {
                                     Label("Clear Cache", systemImage: "trash")
                                 }
                                 Button(role: .destructive) {
-                                    deleteApp(name: appName)
+                                    deleteApp(name: app.id)
                                 } label: {
                                     Label("Delete App", systemImage: "xmark.bin")
                                 }
@@ -152,7 +194,34 @@ struct AppsView: View {
         guard let url = androidRootAppsURL else { return }
         do {
             let contents = try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey])
-            installedApps = contents.filter { $0.hasDirectoryPath }.map { $0.lastPathComponent }.sorted()
+            var items: [AppItem] = []
+            for folder in contents.filter({ $0.hasDirectoryPath }) {
+                let folderName = folder.lastPathComponent
+                var displayName = folderName
+                var version = "1.0.0"
+                
+                // Đọc app_info.json nếu có
+                let infoURL = folder.appendingPathComponent("app_info.json")
+                if let infoData = try? Data(contentsOf: infoURL),
+                   let json = try? JSONSerialization.jsonObject(with: infoData) as? [String: Any] {
+                    if let label = json["label"] as? String, !label.isEmpty {
+                        displayName = label
+                    }
+                    if let ver = json["version"] as? String, !ver.isEmpty {
+                        version = ver
+                    }
+                }
+                
+                // Đọc app_icon.png nếu có
+                var iconImg: UIImage? = nil
+                let iconURL = folder.appendingPathComponent("app_icon.png")
+                if FileManager.default.fileExists(atPath: iconURL.path) {
+                    iconImg = UIImage(contentsOfFile: iconURL.path)
+                }
+                
+                items.append(AppItem(id: folderName, displayName: displayName, version: version, iconImage: iconImg))
+            }
+            installedApps = items.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
         } catch {
             print("Failed to load apps: \(error)")
             installedApps = []

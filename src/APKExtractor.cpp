@@ -194,6 +194,133 @@ std::string toLower(const std::string& s) {
     for (char& c : r) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return r;
 }
+
+struct ManifestInfo {
+    std::string packageName;
+    std::string versionName;
+    std::string versionCode;
+    std::string appLabel;
+};
+
+static int iconPriority(const std::string& name) {
+    if (!endsWithCi(name, ".png") && !endsWithCi(name, ".webp")) return -1;
+    const std::string lower = toLower(name);
+    if (lower.find("ic_launcher") == std::string::npos &&
+        lower.find("app_icon") == std::string::npos &&
+        lower.find("appicon") == std::string::npos &&
+        lower.find("icon") == std::string::npos &&
+        lower.find("logo") == std::string::npos) return -1;
+    int score = 10;
+    if (lower.find("xxxhdpi") != std::string::npos) score += 50;
+    else if (lower.find("xxhdpi") != std::string::npos) score += 40;
+    else if (lower.find("xhdpi") != std::string::npos) score += 30;
+    else if (lower.find("hdpi") != std::string::npos) score += 20;
+    else if (lower.find("mdpi") != std::string::npos) score += 10;
+
+    if (lower.find("ic_launcher") != std::string::npos) score += 20;
+    if (lower.find("round") != std::string::npos) score += 5;
+    return score;
+}
+
+static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
+    ManifestInfo info;
+    if (data.size() < 32 || read32(data, 0) != 0x00080003) return info;
+
+    const std::size_t poolOffset = 8;
+    if (poolOffset + 28 > data.size() || read32(data, poolOffset) != 0x001C0001) return info;
+
+    const std::uint32_t stringCount = read32(data, poolOffset + 8);
+    const std::uint32_t flags = read32(data, poolOffset + 16);
+    const std::uint32_t stringsStart = poolOffset + read32(data, poolOffset + 20);
+    const bool isUtf8 = (flags & (1 << 8)) != 0;
+
+    std::vector<std::string> stringPool;
+    stringPool.reserve(stringCount);
+
+    const std::size_t offsetsBase = poolOffset + 28;
+    for (std::uint32_t i = 0; i < stringCount; ++i) {
+        if (offsetsBase + i * 4 + 4 > data.size()) break;
+        const std::uint32_t strOffset = stringsStart + read32(data, offsetsBase + i * 4);
+        if (strOffset >= data.size()) { stringPool.push_back(""); continue; }
+
+        if (isUtf8) {
+            std::size_t cur = strOffset;
+            if (cur >= data.size()) { stringPool.push_back(""); continue; }
+            if (data[cur] & 0x80) cur += 2; else cur += 1;
+            if (cur >= data.size()) { stringPool.push_back(""); continue; }
+            std::size_t byteLen = 0;
+            if (data[cur] & 0x80) {
+                if (cur + 1 >= data.size()) { stringPool.push_back(""); continue; }
+                byteLen = ((data[cur] & 0x7F) << 8) | data[cur + 1];
+                cur += 2;
+            } else {
+                byteLen = data[cur];
+                cur += 1;
+            }
+            if (cur + byteLen <= data.size()) {
+                stringPool.emplace_back(reinterpret_cast<const char*>(data.data() + cur), byteLen);
+            } else {
+                stringPool.push_back("");
+            }
+        } else {
+            std::size_t cur = strOffset;
+            if (cur + 2 > data.size()) { stringPool.push_back(""); continue; }
+            std::uint16_t charLen = data[cur] | (data[cur + 1] << 8);
+            cur += 2;
+            if (charLen & 0x8000) {
+                if (cur + 2 > data.size()) { stringPool.push_back(""); continue; }
+                charLen = ((charLen & 0x7FFF) << 16) | (data[cur] | (data[cur + 1] << 8));
+                cur += 2;
+            }
+            std::string s;
+            for (std::uint32_t c = 0; c < charLen && cur + 2 <= data.size(); ++c, cur += 2) {
+                std::uint16_t ch = data[cur] | (data[cur + 1] << 8);
+                if (ch < 128) s.push_back(static_cast<char>(ch));
+                else s.push_back('?');
+            }
+            stringPool.push_back(s);
+        }
+    }
+
+    std::size_t cur = poolOffset + read32(data, poolOffset + 4);
+    if (cur + 8 <= data.size() && read32(data, cur) == 0x00080180) {
+        cur += read32(data, cur + 4);
+    }
+
+    while (cur + 8 <= data.size()) {
+        const std::uint32_t chunkType = read32(data, cur);
+        const std::uint32_t chunkSize = read32(data, cur + 4);
+        if (chunkSize < 8 || cur + chunkSize > data.size()) break;
+
+        if (chunkType == 0x00100102) { // RES_XML_START_ELEMENT_TYPE
+            if (cur + 36 <= data.size()) {
+                const std::uint32_t nameIdx = read32(data, cur + 20);
+                const std::string tagName = (nameIdx < stringPool.size()) ? stringPool[nameIdx] : "";
+                const std::uint16_t attrStart = read16(data, cur + 24);
+                const std::uint16_t attrSize = read16(data, cur + 26);
+                const std::uint16_t attrCount = read16(data, cur + 28);
+
+                std::size_t attrCur = cur + attrStart;
+                for (std::uint16_t a = 0; a < attrCount && attrCur + attrSize <= cur + chunkSize; ++a, attrCur += attrSize) {
+                    const std::uint32_t attrNameIdx = read32(data, attrCur + 4);
+                    const std::uint32_t attrRawValIdx = read32(data, attrCur + 8);
+                    const std::string attrName = (attrNameIdx < stringPool.size()) ? stringPool[attrNameIdx] : "";
+                    const std::string attrVal = (attrRawValIdx < stringPool.size()) ? stringPool[attrRawValIdx] : "";
+
+                    if (tagName == "manifest") {
+                        if (attrName == "package" && info.packageName.empty()) info.packageName = attrVal;
+                        if (attrName == "versionName" && info.versionName.empty()) info.versionName = attrVal;
+                        if (attrName == "versionCode" && info.versionCode.empty()) info.versionCode = attrVal;
+                    } else if (tagName == "application") {
+                        if (attrName == "label" && info.appLabel.empty()) info.appLabel = attrVal;
+                    }
+                }
+            }
+        }
+        cur += chunkSize;
+    }
+    return info;
+}
 } // namespace
 
 const std::string& APKExtractor::lastError() { return gLastError; }
@@ -222,6 +349,10 @@ static bool extract_apk_impl(const std::string& apkPath, const std::string& targ
     if (error) { gLastError = "Cannot create target directory: " + error.message(); apkLog(gLastError); return false; }
 
     bool found = false;
+    int bestIconScore = -1;
+    std::vector<std::uint8_t> bestIconData;
+    ManifestInfo manifestInfo;
+
     for (std::uint16_t index = 0; index < entryCount; ++index) {
         if (!hasBytes(data, centralOffset, 46) || read32(data, centralOffset) != 0x02014b50) {
             gLastError = "Invalid ZIP central-directory entry"; apkLog(gLastError); return false;
@@ -236,13 +367,15 @@ static bool extract_apk_impl(const std::string& apkPath, const std::string& targ
         if (!hasBytes(data, centralOffset + 46, nameLength)) { gLastError = "Invalid ZIP entry name"; return false; }
         const std::string entry(reinterpret_cast<const char*>(data.data() + centralOffset + 46), nameLength);
         centralOffset += 46 + nameLength + extraLength + commentLength;
-        
+
+        const int iconScore = iconPriority(entry);
         bool shouldExtract = false;
         if (entry.rfind("lib/arm64-v8a/", 0) == 0 && entry.size() >= 3 && entry.compare(entry.size() - 3, 3, ".so") == 0) shouldExtract = true;
         else if (entry.size() >= 4 && entry.compare(entry.size() - 4, 4, ".dex") == 0) shouldExtract = true;
         else if (entry.rfind("assets/", 0) == 0) shouldExtract = true;
         else if (entry == "AndroidManifest.xml") shouldExtract = extractManifest;
-        
+        else if (iconScore > bestIconScore) shouldExtract = true;
+
         if (!shouldExtract) {
             continue;
         }
@@ -250,7 +383,7 @@ static bool extract_apk_impl(const std::string& apkPath, const std::string& targ
             continue; // bỏ qua thư mục
         }
         apkLog("Extracting: " + entry);
-        
+
         found = true;
         if (!hasBytes(data, localOffset, 30) || read32(data, localOffset) != 0x04034b50) { gLastError = "Invalid local header: " + entry; return false; }
         const std::size_t contentOffset = localOffset + 30 + read16(data, localOffset + 26) + read16(data, localOffset + 28);
@@ -261,21 +394,66 @@ static bool extract_apk_impl(const std::string& apkPath, const std::string& targ
         } else if (compression == 8) {
             if (!inflateRaw(data.data() + contentOffset, compressedSize, output)) { gLastError = "Deflate failed: " + entry; return false; }
         } else { gLastError = "Unsupported compression for: " + entry; return false; }
-        
+
+        if (entry == "AndroidManifest.xml") {
+            manifestInfo = parseAxml(output);
+        }
+
+        if (iconScore > bestIconScore) {
+            bestIconScore = iconScore;
+            bestIconData = output;
+        }
+
+        if (iconScore > 0 && entry != "AndroidManifest.xml" && entry.rfind("assets/", 0) != 0 && entry.rfind("lib/", 0) != 0 && !endsWithCi(entry, ".dex")) {
+            // Đây là file icon nội bộ — chỉ lưu bản đẹp nhất vào app_icon.png, không spam đĩa
+            continue;
+        }
+
         const auto destination = std::filesystem::path(targetDirectory) / entry;
         std::filesystem::create_directories(destination.parent_path(), error);
-        
+
         std::ofstream extracted(destination, std::ios::binary);
         extracted.write(reinterpret_cast<const char*>(output.data()), output.size());
         extracted.close();
         apkLog("  -> Saved to " + destination.string() + " (" + std::to_string(output.size()) + " bytes)");
         if (!extracted || ::chmod(destination.c_str(), 0755) != 0) { gLastError = "Cannot write/chmod: " + destination.string(); return false; }
-        apkLog("Extracting: " + entry + " -> " + destination.string() + " (OK)");
     }
+
     if (!found) {
         if (!requireEntries) return true; // split chỉ chứa res/ — không có gì để lấy, không lỗi
         gLastError = "No expected entries found in APK"; apkLog(gLastError); return false;
     }
+
+    // Lưu app_icon.png nếu tìm thấy
+    if (!bestIconData.empty()) {
+        const auto iconDest = std::filesystem::path(targetDirectory) / "app_icon.png";
+        std::ofstream iconFile(iconDest, std::ios::binary);
+        if (iconFile) {
+            iconFile.write(reinterpret_cast<const char*>(bestIconData.data()), bestIconData.size());
+            iconFile.close();
+            apkLog("  -> Saved app icon to " + iconDest.string());
+        }
+    }
+
+    // Lưu app_info.json (metadata: version, label, package)
+    if (extractManifest) {
+        const auto infoDest = std::filesystem::path(targetDirectory) / "app_info.json";
+        std::string appDirName = std::filesystem::path(targetDirectory).filename().string();
+        std::string label = manifestInfo.appLabel.empty() ? appDirName : manifestInfo.appLabel;
+        std::string version = manifestInfo.versionName.empty() ? "1.0.0" : manifestInfo.versionName;
+        std::ofstream infoFile(infoDest);
+        if (infoFile) {
+            infoFile << "{\n";
+            infoFile << "  \"name\": \"" << appDirName << "\",\n";
+            infoFile << "  \"label\": \"" << label << "\",\n";
+            infoFile << "  \"version\": \"" << version << "\",\n";
+            infoFile << "  \"package\": \"" << manifestInfo.packageName << "\"\n";
+            infoFile << "}\n";
+            infoFile.close();
+            apkLog("  -> Saved app info (v" + version + ", " + label + ") to " + infoDest.string());
+        }
+    }
+
     return true;
 }
 
