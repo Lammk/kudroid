@@ -61,13 +61,11 @@ struct AppsView: View {
                             .font(.title)
                             .foregroundColor(.green)
                         Text("KuDroid")
-                            .font(.title2)
-                            .fontWeight(.black)
+                            .font(.title2.bold())
                         // Hiển thị version ngay trên màn hình — phân biệt bản cũ/mới
                         // khi nghi ngờ iPhone đang chạy IPA lỗi thời.
                         Text("v" + appVersion())
-                            .font(.caption)
-                            .fontWeight(.semibold)
+                            .font(.caption.weight(.semibold))
                             .foregroundColor(.green.opacity(0.8))
                         Spacer()
                         Button(action: { showAPKInstaller = true }) {
@@ -128,8 +126,7 @@ struct AppsView: View {
                                     
                                     HStack(spacing: 6) {
                                         Text("v\(app.version)")
-                                            .font(.caption2)
-                                            .fontWeight(.bold)
+                                            .font(.caption2.bold())
                                             .padding(.horizontal, 6)
                                             .padding(.vertical, 2)
                                             .background(Color.green.opacity(0.2))
@@ -148,8 +145,7 @@ struct AppsView: View {
                                     session.activeGuestApp = app.id
                                 }) {
                                     Text("RUN")
-                                        .font(.caption)
-                                        .fontWeight(.bold)
+                                        .font(.caption.bold())
                                         .padding(.horizontal, 16)
                                         .padding(.vertical, 8)
                                         .background(Color.green.opacity(0.25))
@@ -585,8 +581,7 @@ struct APKInstallerView: View {
                                 .scaleEffect(1.3)
                             
                             Text(installStep)
-                                .font(.subheadline)
-                                .fontWeight(.semibold)
+                                .font(.subheadline.weight(.semibold))
                                 .foregroundColor(.green)
                             
                             Text("Decompressing assets, compiling DEX & extracting ARM64 libraries...")
@@ -626,7 +621,7 @@ struct APKInstallerView: View {
                                     Text("Install Selected")
                                 }
                             }
-                            .fontWeight(.bold)
+                            .font(.body.bold())
                         }
                         .buttonStyle(.borderedProminent)
                         .tint(selectedAPK != nil && isUpdate(selectedAPK!) ? .orange : .green)
