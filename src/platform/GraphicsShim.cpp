@@ -7,6 +7,12 @@
 #include <cstdlib>
 #include <cstdarg>
 #include <string>
+
+#if defined(__APPLE__)
+extern "C" void* objc_autoreleasePoolPush(void);
+extern "C" void objc_autoreleasePoolPop(void* pool);
+#endif
+
 // This comes from kudroid_bridge.cpp
 extern void* g_metalLayer;
 extern int g_metalLayerWidth;
@@ -730,9 +736,15 @@ extern "C" EGLDisplay bionic_eglGetCurrentDisplay(void) {
 extern "C" EGLBoolean bionic_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     auto f = eglFn<EGLBoolean(EGLDisplay, EGLSurface)>("eglSwapBuffers");
     if (!f) { EGL_FORWARD_ERR("eglSwapBuffers", ""); return EGL_FALSE; }
+#if defined(__APPLE__)
+    void* pool = objc_autoreleasePoolPush();
+#endif
     gpuLog("eglSwapBuffers: calling ANGLE...");
     EGLBoolean r = f(dpy, surface);
     gpuLog("eglSwapBuffers(surface=%p) -> %s", (void*)surface, r ? "true" : "false");
+#if defined(__APPLE__)
+    objc_autoreleasePoolPop(pool);
+#endif
     return r;
 }
 
