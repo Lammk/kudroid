@@ -9,6 +9,7 @@
 #include <iterator>
 #include <algorithm>
 #include <sys/stat.h>
+#include <sstream>
 #include <vector>
 #include <zlib.h>
 
