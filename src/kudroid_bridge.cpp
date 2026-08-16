@@ -624,24 +624,55 @@ extern "C" const char* kudroid_install_apk(const char* apkPath) {
         std::string appName = source.stem().string();
         if (appName.empty()) appName = "unnamed_apk";
         for (char& character : appName) {
-            if (!(std::isalnum(static_cast<unsigned char>(character)) || character == '_' || character == '-')) {
+            if (!(std::isalnum(static_cast<unsigned char>(character)) || character == '_' || character == '-' || character == '.')) {
                 character = '_';
             }
         }
         auto& remapper = kudroid::VFSPathRemapper::getInstance();
-        const std::filesystem::path target = std::filesystem::path(remapper.androidRoot()) /
-                                             "data/app" / appName;
+        const std::filesystem::path tempTarget = std::filesystem::path(remapper.androidRoot()) /
+                                                 "data/app" / appName;
         log += "[kudroid_apk] APK: " + source.string() + "\n";
-        log += "[kudroid_apk] Target extraction directory: " + target.string() + "\n";
+        log += "[kudroid_apk] Target extraction directory: " + tempTarget.string() + "\n";
         bool extractedOk = false;
         if (kudroid::APKExtractor::is_bundle_container(source.string())) {
             log += "[kudroid_apk] Split-APK bundle detected (.xapk/.apks/.apkm), merging splits...\n";
-            extractedOk = kudroid::APKExtractor::extract_bundle(source.string(), target.string());
+            extractedOk = kudroid::APKExtractor::extract_bundle(source.string(), tempTarget.string());
         } else {
-            extractedOk = kudroid::APKExtractor::extract_apk(source.string(), target.string());
+            extractedOk = kudroid::APKExtractor::extract_apk(source.string(), tempTarget.string());
         }
         if (extractedOk) {
             log += "[kudroid_apk] APK extracted successfully\n";
+            
+            // Đọc app_info.json để lấy package ID chuẩn của Android (ví dụ: com.jakitomzed.ultrakill, com.discord)
+            std::filesystem::path infoPath = tempTarget / "app_info.json";
+            std::string pkgId;
+            if (std::filesystem::exists(infoPath)) {
+                std::ifstream f(infoPath);
+                std::string line;
+                while (std::getline(f, line)) {
+                    auto pos = line.find("\"package\": \"");
+                    if (pos != std::string::npos) {
+                        auto start = pos + 12;
+                        auto end = line.find("\"", start);
+                        if (end != std::string::npos) {
+                            pkgId = line.substr(start, end - start);
+                        }
+                    }
+                }
+            }
+            // Nếu có package ID chuẩn, chuyển thư mục về đúng package ID để mọi lần cài / update
+            // đều ghi đè và nâng cấp cùng một app thay vì tạo app riêng rẽ do tên file khác nhau.
+            if (!pkgId.empty() && pkgId != appName) {
+                std::filesystem::path finalTarget = std::filesystem::path(remapper.androidRoot()) / "data/app" / pkgId;
+                std::error_code ec;
+                if (std::filesystem::exists(finalTarget)) {
+                    std::filesystem::remove_all(finalTarget, ec);
+                }
+                std::filesystem::rename(tempTarget, finalTarget, ec);
+                if (!ec) {
+                    log += "[kudroid_apk] Consolidated app directory to Android Package ID: " + pkgId + "\n";
+                }
+            }
         } else {
             log += "[kudroid_apk] INSTALL FAILED: " +
                    kudroid::APKExtractor::lastError() + "\n";

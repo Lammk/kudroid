@@ -805,7 +805,8 @@ class NativeMetalViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        self.view.backgroundColor = .black
+        self.view.backgroundColor = .clear
+        metalView.backgroundColor = .clear
     }
 
     override func viewDidLayoutSubviews() {
@@ -833,6 +834,10 @@ class NativeMetalViewController: UIViewController {
             }
             metalLayer.pixelFormat = .bgra8Unorm
             metalLayer.framebufferOnly = false
+            metalLayer.allowsNextDrawableTimeout = false
+            metalLayer.maximumDrawableCount = 3
+            metalLayer.presentsWithTransaction = false
+            metalLayer.isOpaque = true
             metalLayer.contentsScale = scale
             metalLayer.drawableSize = CGSize(width: Double(width), height: Double(height))
         }
