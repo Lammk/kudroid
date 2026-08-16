@@ -177,15 +177,30 @@ static void* render_loop(void* arg) {
         return nullptr;
     }
 
+    auto p_glGenBuffers = (void (*)(GLsizei, GLuint*)) dlsym(libGLES, "glGenBuffers");
+    auto p_glBindBuffer = (void (*)(GLenum, GLuint)) dlsym(libGLES, "glBindBuffer");
+    auto p_glBufferData = (void (*)(GLenum, GLsizeiptr, const void*, GLenum)) dlsym(libGLES, "glBufferData");
+
     p_glUseProgram(program);
 
     static const GLfloat vertices[] = { 0.0f, 0.5f, 0.0f, -0.5f, -0.5f, 0.0f, 0.5f, -0.5f, 0.0f };
     static const GLfloat colors[] = { 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f };
 
+    GLuint vbo[2] = {0, 0};
+    if (p_glGenBuffers && p_glBindBuffer && p_glBufferData) {
+        p_glGenBuffers(2, vbo);
+    }
+
     GLint positionHandle = p_glGetAttribLocation(program, "vPosition");
     if (positionHandle >= 0) {
         p_glEnableVertexAttribArray((GLuint)positionHandle);
-        p_glVertexAttribPointer((GLuint)positionHandle, 3, GL_FLOAT, GL_FALSE, 0, vertices);
+        if (vbo[0] != 0) {
+            p_glBindBuffer(GL_ARRAY_BUFFER, vbo[0]);
+            p_glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+            p_glVertexAttribPointer((GLuint)positionHandle, 3, GL_FLOAT, GL_FALSE, 0, (const void*)0);
+        } else {
+            p_glVertexAttribPointer((GLuint)positionHandle, 3, GL_FLOAT, GL_FALSE, 0, vertices);
+        }
     } else {
         LOGE("vPosition attrib not found");
     }
@@ -193,7 +208,13 @@ static void* render_loop(void* arg) {
     GLint colorHandle = p_glGetAttribLocation(program, "vColor");
     if (colorHandle >= 0) {
         p_glEnableVertexAttribArray((GLuint)colorHandle);
-        p_glVertexAttribPointer((GLuint)colorHandle, 4, GL_FLOAT, GL_FALSE, 0, colors);
+        if (vbo[1] != 0) {
+            p_glBindBuffer(GL_ARRAY_BUFFER, vbo[1]);
+            p_glBufferData(GL_ARRAY_BUFFER, sizeof(colors), colors, GL_STATIC_DRAW);
+            p_glVertexAttribPointer((GLuint)colorHandle, 4, GL_FLOAT, GL_FALSE, 0, (const void*)0);
+        } else {
+            p_glVertexAttribPointer((GLuint)colorHandle, 4, GL_FLOAT, GL_FALSE, 0, colors);
+        }
     } else {
         LOGE("vColor attrib not found");
     }

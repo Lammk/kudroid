@@ -541,7 +541,7 @@ class NativeMetalViewController: UIViewController {
     }
 
     override func loadView() {
-        metalView = NativeMetalView()
+        metalView = NativeMetalView(frame: UIScreen.main.bounds)
         self.view = metalView
     }
 
@@ -550,13 +550,22 @@ class NativeMetalViewController: UIViewController {
         self.view.backgroundColor = .black
     }
 
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        if let metalLayer = view.layer as? CAMetalLayer {
+            let scale = UIScreen.main.scale
+            let bounds = view.bounds.size.width > 0 ? view.bounds : UIScreen.main.bounds
+            metalLayer.drawableSize = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+        }
+    }
+
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         guard !isStarted else { return }
         isStarted = true
 
         let scale = UIScreen.main.scale
-        let bounds = view.bounds
+        let bounds = view.bounds.size.width > 0 ? view.bounds : UIScreen.main.bounds
         let width = Int32(bounds.width * scale)
         let height = Int32(bounds.height * scale)
 
