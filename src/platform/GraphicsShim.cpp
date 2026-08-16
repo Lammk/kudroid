@@ -170,14 +170,15 @@ extern "C" void* bionic_eglGetProcAddress(const char* procname) {
     return nullptr;
 }
 
-static void* get_gl_func(const char* name) {
-    // gl* nằm trong libGLESv2.framework (ANGLE), load RTLD_LOCAL — resolve
-    // trực tiếp từ handle như get_egl_func, không qua RTLD_DEFAULT.
+} // namespace
+
+void* get_gl_func(const char* name) {
+    if (!name) return nullptr;
     static void* gl_handle = nullptr;
     if (!gl_handle) {
-        gl_handle = ::dlopen("@executable_path/Frameworks/libGLESv2.framework/libGLESv2", RTLD_NOW | RTLD_LOCAL);
+        gl_handle = ::dlopen("@executable_path/Frameworks/libGLESv2.framework/libGLESv2", RTLD_NOW | RTLD_GLOBAL);
         if (!gl_handle) {
-            gl_handle = ::dlopen("Frameworks/libGLESv2.framework/libGLESv2", RTLD_NOW | RTLD_LOCAL);
+            gl_handle = ::dlopen("Frameworks/libGLESv2.framework/libGLESv2", RTLD_NOW | RTLD_GLOBAL);
         }
     }
     if (gl_handle) {
@@ -193,16 +194,14 @@ static void* get_gl_func(const char* name) {
     return func;
 }
 
-static void* get_egl_func(const char* name) {
-    // ANGLE is loaded with RTLD_LOCAL, so its symbols are NOT in RTLD_DEFAULT.
-    // Resolve directly from the ANGLE framework handle instead.
+void* get_egl_func(const char* name) {
+    if (!name) return nullptr;
     static void* egl_handle = nullptr;
     if (!egl_handle) {
-        egl_handle = ::dlopen("@executable_path/Frameworks/libEGL.framework/libEGL", RTLD_NOW | RTLD_LOCAL);
+        egl_handle = ::dlopen("@executable_path/Frameworks/libEGL.framework/libEGL", RTLD_NOW | RTLD_GLOBAL);
         if (!egl_handle) {
             KLOG(kError, "KuDroidGPU", "FATAL: dlopen libEGL failed: %s", dlerror());
-            // Try alternative path without @executable_path
-            egl_handle = ::dlopen("Frameworks/libEGL.framework/libEGL", RTLD_NOW | RTLD_LOCAL);
+            egl_handle = ::dlopen("Frameworks/libEGL.framework/libEGL", RTLD_NOW | RTLD_GLOBAL);
             if (!egl_handle) {
                 KLOG(kError, "KuDroidGPU", "FATAL: alternative dlopen also failed: %s", dlerror());
             } else {
@@ -216,16 +215,16 @@ static void* get_egl_func(const char* name) {
         void* func = ::dlsym(egl_handle, name);
         if (func) return func;
     }
-    // Fallback: try RTLD_DEFAULT (works if ANGLE was loaded RTLD_GLOBAL).
     void* func = ::dlsym(RTLD_DEFAULT, name);
     if (func) return func;
-    // Last resort: eglGetProcAddress.
     auto host_get_proc = (PFN_eglGetProcAddress) ::dlsym(RTLD_DEFAULT, "eglGetProcAddress");
     if (host_get_proc) {
         func = host_get_proc(name);
     }
     return func;
 }
+
+namespace {
 
 extern "C" EGLDisplay bionic_eglGetPlatformDisplayEXT(EGLint platform, void* native_display, const EGLint* attrib_list) {
     (void)native_display;
@@ -422,7 +421,7 @@ static PFN_vkGetInstanceProcAddr real_vkGetInstanceProcAddr = nullptr;
 
 static PFN_vkGetInstanceProcAddr get_real_vkGetInstanceProcAddr() {
     if (!real_vkGetInstanceProcAddr) {
-        void* mvk = ::dlopen("@executable_path/Frameworks/MoltenVK.framework/MoltenVK", RTLD_NOW | RTLD_LOCAL);
+        void* mvk = ::dlopen("@executable_path/Frameworks/MoltenVK.framework/MoltenVK", RTLD_NOW | RTLD_GLOBAL);
         if (mvk) {
             real_vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)::dlsym(mvk, "vkGetInstanceProcAddr");
         }
@@ -490,7 +489,7 @@ extern "C" VkResult bionic_vkEnumerateInstanceExtensionProperties(const char* pL
     // Resolve the real function directly from the MoltenVK handle.
     static PFN_vkEnumerateInstanceExtensionProperties real = nullptr;
     if (!real) {
-        void* mvk = ::dlopen("@executable_path/Frameworks/MoltenVK.framework/MoltenVK", RTLD_NOW | RTLD_LOCAL);
+        void* mvk = ::dlopen("@executable_path/Frameworks/MoltenVK.framework/MoltenVK", RTLD_NOW | RTLD_GLOBAL);
         if (mvk) {
             real = (PFN_vkEnumerateInstanceExtensionProperties)::dlsym(mvk, "vkEnumerateInstanceExtensionProperties");
         }
@@ -511,9 +510,7 @@ extern "C" VkResult bionic_vkEnumerateInstanceExtensionProperties(const char* pL
         return VK_SUCCESS;
     }
 
-    // Trước đây ghi tới `total` entry KHÔNG quan tâm *pPropertyCount — game gọi
-    // với count nhỏ hơn (vd count = số extension thật, chưa biết extension mới
-    // được inject) → ghi tràn buffer của game → crash. Clamp theo capacity.
+    // Clamp theo capacity.
     const uint32_t capacity = *pPropertyCount;
 
     // Copy real properties, skipping VK_EXT_metal_surface.
@@ -543,6 +540,34 @@ extern "C" VkResult bionic_vkEnumerateInstanceExtensionProperties(const char* pL
     *pPropertyCount = out;
     return VK_SUCCESS;
 }
+
+} // namespace
+
+void* get_vk_func(const char* name) {
+    if (!name) return nullptr;
+    if (strcmp(name, "vkGetInstanceProcAddr") == 0) {
+        return (void*)&bionic_vkGetInstanceProcAddr;
+    }
+    if (strcmp(name, "vkCreateAndroidSurfaceKHR") == 0) {
+        return (void*)&bionic_vkCreateAndroidSurfaceKHR;
+    }
+    if (strcmp(name, "vkEnumerateInstanceExtensionProperties") == 0) {
+        return (void*)&bionic_vkEnumerateInstanceExtensionProperties;
+    }
+    auto real = get_real_vkGetInstanceProcAddr();
+    if (real) {
+        void* f = (void*)real(nullptr, name);
+        if (f) return f;
+    }
+    void* mvk = ::dlopen("@executable_path/Frameworks/MoltenVK.framework/MoltenVK", RTLD_NOW | RTLD_GLOBAL);
+    if (mvk) {
+        void* f = ::dlsym(mvk, name);
+        if (f) return f;
+    }
+    return ::dlsym(RTLD_DEFAULT, name);
+}
+
+namespace {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // EGL ↔ ANGLE translation

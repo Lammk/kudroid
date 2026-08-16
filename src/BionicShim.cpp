@@ -109,6 +109,20 @@ void* resolve_bionic_symbol(const char* name) {
             resolved = resolve_from_list(assets, count, name);
         }
 
+        // Direct routing for graphics API prefixes (OpenGL ES, EGL, Vulkan)
+        if (!resolved && name[0] == 'g' && name[1] == 'l') {
+            resolved = get_gl_func(name);
+            if (resolved) is_host = true;
+        }
+        if (!resolved && name[0] == 'e' && name[1] == 'g' && name[2] == 'l') {
+            resolved = get_egl_func(name);
+            if (resolved) is_host = true;
+        }
+        if (!resolved && name[0] == 'v' && name[1] == 'k') {
+            resolved = get_vk_func(name);
+            if (resolved) is_host = true;
+        }
+
         if (!resolved) {
             void* host_ptr = ::dlsym(RTLD_DEFAULT, name);
             if (host_ptr) {

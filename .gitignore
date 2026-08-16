@@ -38,3 +38,4 @@ kudroid_*.txt
 
 # OS
 .DS_Store
+logs/

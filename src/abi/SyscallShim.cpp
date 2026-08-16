@@ -1666,7 +1666,7 @@ extern "C" void* bionic_dlopen(const char* filename, int flags) {
             "@executable_path/Frameworks/libGLESv2.framework/libGLESv2";
         
         std::lock_guard<std::mutex> gpuLock(g_gpuFrameworkMtx);
-        void* handle = ::dlopen(fw_path, RTLD_NOW | RTLD_LOCAL);
+        void* handle = ::dlopen(fw_path, RTLD_NOW | RTLD_GLOBAL);
         if (handle) {
             logAndroidMessage(4, "KuDroidGPU", std::string("Successfully loaded ") + fw_path);
             return handle;
@@ -1677,7 +1677,7 @@ extern "C" void* bionic_dlopen(const char* filename, int flags) {
     
     if (strstr(filename, "libvulkan.so")) {
         std::lock_guard<std::mutex> gpuLock(g_gpuFrameworkMtx);
-        void* handle = ::dlopen("@executable_path/Frameworks/MoltenVK.framework/MoltenVK", RTLD_NOW | RTLD_LOCAL);
+        void* handle = ::dlopen("@executable_path/Frameworks/MoltenVK.framework/MoltenVK", RTLD_NOW | RTLD_GLOBAL);
         if (handle) {
             logAndroidMessage(4, "KuDroidGPU", "Successfully loaded MoltenVK.framework");
             return handle;
@@ -1724,6 +1724,26 @@ extern "C" void* bionic_dlsym(void* handle, const char* symbol) {
         }
     }
 
+    // Direct routing for graphics API prefixes
+    if (symbol[0] == 'g' && symbol[1] == 'l') {
+        if (void* f = kudroid::get_gl_func(symbol)) {
+            logAndroidMessage(2, "KuDroidSyscall", std::string("bionic_dlsym: [") + symbol + "] resolved via GraphicsShim (gl)");
+            return f;
+        }
+    }
+    if (symbol[0] == 'e' && symbol[1] == 'g' && symbol[2] == 'l') {
+        if (void* f = kudroid::get_egl_func(symbol)) {
+            logAndroidMessage(2, "KuDroidSyscall", std::string("bionic_dlsym: [") + symbol + "] resolved via GraphicsShim (egl)");
+            return f;
+        }
+    }
+    if (symbol[0] == 'v' && symbol[1] == 'k') {
+        if (void* f = kudroid::get_vk_func(symbol)) {
+            logAndroidMessage(2, "KuDroidSyscall", std::string("bionic_dlsym: [") + symbol + "] resolved via GraphicsShim (vk)");
+            return f;
+        }
+    }
+
     // For a real host handle, prefer its own symbols first.
     if (handle && handle != RTLD_DEFAULT && handle != DUMMY_HANDLE) {
         if (void* real = ::dlsym(handle, symbol)) {
@@ -1732,7 +1752,7 @@ extern "C" void* bionic_dlsym(void* handle, const char* symbol) {
         }
     }
 
-    // Route through the shim symbol tables (syscall/graphics/input).
+    // Route through the shim symbol tables (syscall/graphics/input/audio).
     size_t count = 0;
     const SymbolEntry* symbols = get_syscall_symbols(&count);
     for (size_t i = 0; i < count; ++i) {
