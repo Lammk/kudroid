@@ -197,7 +197,7 @@ struct AppsView: View {
             var items: [AppItem] = []
             for folder in contents.filter({ $0.hasDirectoryPath }) {
                 let folderName = folder.lastPathComponent
-                var displayName = folderName
+                var displayName = prettifyAppName(folderName)
                 var version = "1.0.0"
                 
                 // Đọc app_info.json nếu có
@@ -205,7 +205,7 @@ struct AppsView: View {
                 if let infoData = try? Data(contentsOf: infoURL),
                    let json = try? JSONSerialization.jsonObject(with: infoData) as? [String: Any] {
                     if let label = json["label"] as? String, !label.isEmpty {
-                        displayName = label
+                        displayName = prettifyAppName(label)
                     }
                     if let ver = json["version"] as? String, !ver.isEmpty {
                         version = ver
@@ -226,6 +226,50 @@ struct AppsView: View {
             print("Failed to load apps: \(error)")
             installedApps = []
         }
+    }
+    
+    private func prettifyAppName(_ raw: String) -> String {
+        if raw.isEmpty { return "Android App" }
+        var s = raw
+
+        // 1. Tách package name nếu có (ví dụ "com.discord" -> "discord")
+        if s.contains(".") {
+            if let last = s.split(separator: ".").last {
+                s = String(last)
+            }
+        }
+
+        // 2. Bỏ đuôi .apk
+        if s.lowercased().hasSuffix(".apk") {
+            s = String(s.dropLast(4))
+        }
+
+        // 3. Tách các version số ở đuôi (ví dụ: "rolling-sky-5-5-8" -> "rolling-sky")
+        let components = s.split(whereSeparator: { $0 == "-" || $0 == "_" })
+        var nameParts: [String] = []
+        for comp in components {
+            let str = String(comp)
+            if str.allSatisfy({ $0.isNumber || $0 == "." }) || (str.hasPrefix("v") && str.dropFirst().allSatisfy({ $0.isNumber || $0 == "." })) {
+                continue
+            }
+            nameParts.append(str)
+        }
+        if !nameParts.isEmpty {
+            s = nameParts.joined(separator: " ")
+        } else {
+            s = s.replacingOccurrences(of: "-", with: " ").replacingOccurrences(of: "_", with: " ")
+        }
+
+        // 4. Viết hoa chữ cái đầu và tách CamelCase (ví dụ: "rollingsky" -> "Rolling Sky", "Discord" -> "Discord")
+        var result = ""
+        for (i, char) in s.enumerated() {
+            if i > 0 && char.isUppercase && s[s.index(s.startIndex, offsetBy: i - 1)].isLowercase && !result.hasSuffix(" ") {
+                result += " "
+            }
+            result.append(char)
+        }
+
+        return result.capitalized
     }
     
     private func runApp(name: String) {

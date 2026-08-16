@@ -323,6 +323,69 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
 }
 } // namespace
 
+static std::string prettifyAppName(const std::string& raw) {
+    if (raw.empty()) return "Android App";
+    std::string s = raw;
+
+    if (s.find('.') != std::string::npos) {
+        auto lastDot = s.rfind('.');
+        if (lastDot != std::string::npos && lastDot + 1 < s.size()) {
+            s = s.substr(lastDot + 1);
+        }
+    }
+
+    if (s.size() > 4 && s.compare(s.size() - 4, 4, ".apk") == 0) {
+        s = s.substr(0, s.size() - 4);
+    }
+
+    // Tách các số phiên bản ở đuôi (-5-5-8 hoặc _v1.2.3)
+    std::size_t endIdx = s.size();
+    while (endIdx > 0) {
+        std::size_t prev = endIdx;
+        while (prev > 0 && (std::isdigit(s[prev - 1]) || s[prev - 1] == '.')) {
+            --prev;
+        }
+        if (prev < endIdx && prev > 0 && (s[prev - 1] == '-' || s[prev - 1] == '_' || s[prev - 1] == 'v' || s[prev - 1] == 'V')) {
+            endIdx = prev - 1;
+        } else {
+            break;
+        }
+    }
+    if (endIdx > 0 && endIdx < s.size()) {
+        s = s.substr(0, endIdx);
+    }
+
+    for (char& c : s) {
+        if (c == '-' || c == '_') c = ' ';
+    }
+
+    while (!s.empty() && s.front() == ' ') s.erase(s.begin());
+    while (!s.empty() && s.back() == ' ') s.pop_back();
+
+    std::string result;
+    bool newWord = true;
+    for (std::size_t i = 0; i < s.size(); ++i) {
+        char c = s[i];
+        if (c == ' ') {
+            if (!result.empty() && result.back() != ' ') result += ' ';
+            newWord = true;
+        } else {
+            if (i > 0 && std::islower(s[i - 1]) && std::isupper(c) && !result.empty() && result.back() != ' ') {
+                result += ' ';
+                newWord = false;
+            }
+            if (newWord) {
+                result += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                newWord = false;
+            } else {
+                result += c;
+            }
+        }
+    }
+
+    return result.empty() ? raw : result;
+}
+
 const std::string& APKExtractor::lastError() { return gLastError; }
 
 // Phần thân chung cho extract_apk / extract_split.
@@ -405,7 +468,6 @@ static bool extract_apk_impl(const std::string& apkPath, const std::string& targ
         }
 
         if (iconScore > 0 && entry != "AndroidManifest.xml" && entry.rfind("assets/", 0) != 0 && entry.rfind("lib/", 0) != 0 && !endsWithCi(entry, ".dex")) {
-            // Đây là file icon nội bộ — chỉ lưu bản đẹp nhất vào app_icon.png, không spam đĩa
             continue;
         }
 
@@ -439,7 +501,10 @@ static bool extract_apk_impl(const std::string& apkPath, const std::string& targ
     if (extractManifest) {
         const auto infoDest = std::filesystem::path(targetDirectory) / "app_info.json";
         std::string appDirName = std::filesystem::path(targetDirectory).filename().string();
-        std::string label = manifestInfo.appLabel.empty() ? appDirName : manifestInfo.appLabel;
+        std::string label = manifestInfo.appLabel.empty() ? prettifyAppName(appDirName) : manifestInfo.appLabel;
+        if (label.find('.') != std::string::npos && label.find(' ') == std::string::npos) {
+            label = prettifyAppName(label);
+        }
         std::string version = manifestInfo.versionName.empty() ? "1.0.0" : manifestInfo.versionName;
         std::ofstream infoFile(infoDest);
         if (infoFile) {
