@@ -185,20 +185,6 @@ struct AppsView: View {
             }
         }
     }
-    
-    private func extractVersionFromFolderName(_ name: String) -> String? {
-        let pattern = #"(\d+[\.\-_]\d+([\.\-_]\d+)*)"#
-        if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
-            let nsString = name as NSString
-            let results = regex.matches(in: name, options: [], range: NSRange(location: 0, length: nsString.length))
-            if let lastMatch = results.last {
-                let matchString = nsString.substring(with: lastMatch.range)
-                let cleaned = matchString.replacingOccurrences(of: "_", with: ".").replacingOccurrences(of: "-", with: ".")
-                return cleaned
-            }
-        }
-        return nil
-    }
 
     private func loadInstalledApps() {
         guard let url = androidRootAppsURL else { return }
@@ -481,6 +467,20 @@ func installAPK(at apkURL: URL) -> String {
     let log = String(cString: cString)
     free(UnsafeMutablePointer(mutating: cString))
     return log
+}
+
+func extractVersionFromFolderName(_ name: String) -> String? {
+    let pattern = #"(\d+[\.\-_]\d+([\.\-_]\d+)*)"#
+    if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
+        let nsString = name as NSString
+        let results = regex.matches(in: name, options: [], range: NSRange(location: 0, length: nsString.length))
+        if let lastMatch = results.last {
+            let matchString = nsString.substring(with: lastMatch.range)
+            let cleaned = matchString.replacingOccurrences(of: "_", with: ".").replacingOccurrences(of: "-", with: ".")
+            return cleaned
+        }
+    }
+    return nil
 }
 
 // mark: - giao diện cài đặt apk
