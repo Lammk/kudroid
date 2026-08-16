@@ -579,9 +579,6 @@ class NativeMetalViewController: UIViewController {
                 print("App exited with log:\n\(String(cString: cString))")
                 free(UnsafeMutablePointer(mutating: cString))
             }
-            DispatchQueue.main.async {
-                self.onExit()
-            }
         }
     }
 }
