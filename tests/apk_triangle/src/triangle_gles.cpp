@@ -17,43 +17,21 @@ static volatile bool render_running = false;
 
 // Vertex Shader
 static const char* vertexShaderCode =
-    "attribute vec4 vPosition;"
-    "attribute vec4 vColor;"
-    "varying vec4 fColor;"
-    "void main() {"
-    "  gl_Position = vPosition;"
-    "  fColor = vColor;"
-    "}";
+    "attribute vec4 vPosition;\n"
+    "attribute vec4 vColor;\n"
+    "varying vec4 fColor;\n"
+    "void main() {\n"
+    "  gl_Position = vPosition;\n"
+    "  fColor = vColor;\n"
+    "}\n";
 
 // Fragment Shader
 static const char* fragmentShaderCode =
-    "precision mediump float;"
-    "varying vec4 fColor;"
-    "void main() {"
-    "  gl_FragColor = fColor;"
-    "}";
-
-static GLuint loadShader(GLenum type, const char* shaderCode) {
-    GLuint shader = glCreateShader(type);
-    glShaderSource(shader, 1, &shaderCode, NULL);
-    glCompileShader(shader);
-    
-    GLint compiled;
-    glGetShaderiv(shader, GL_COMPILE_STATUS, &compiled);
-    if (!compiled) {
-        GLint infoLen = 0;
-        glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &infoLen);
-        if (infoLen > 1) {
-            char* infoLog = (char*)malloc(sizeof(char) * infoLen);
-            glGetShaderInfoLog(shader, infoLen, NULL, infoLog);
-            LOGE("Error compiling shader:\n%s", infoLog);
-            free(infoLog);
-        }
-        glDeleteShader(shader);
-        return 0;
-    }
-    return shader;
-}
+    "precision mediump float;\n"
+    "varying vec4 fColor;\n"
+    "void main() {\n"
+    "  gl_FragColor = fColor;\n"
+    "}\n";
 
 static void* render_loop(void* arg) {
     LOGI("Render thread started.");
@@ -73,6 +51,11 @@ static void* render_loop(void* arg) {
     }
 
     void* libEGL = dlopen("libEGL.so", RTLD_NOW);
+    if (!libEGL) {
+        LOGE("Failed to dlopen libEGL.so");
+        return nullptr;
+    }
+
     auto eglGetDisplay = (EGLDisplay (*)(EGLNativeDisplayType)) dlsym(libEGL, "eglGetDisplay");
     auto eglInitialize = (EGLBoolean (*)(EGLDisplay, EGLint*, EGLint*)) dlsym(libEGL, "eglInitialize");
     auto eglChooseConfig = (EGLBoolean (*)(EGLDisplay, const EGLint*, EGLConfig*, EGLint, EGLint*)) dlsym(libEGL, "eglChooseConfig");
@@ -82,22 +65,28 @@ static void* render_loop(void* arg) {
     auto eglSwapBuffers = (EGLBoolean (*)(EGLDisplay, EGLSurface)) dlsym(libEGL, "eglSwapBuffers");
     auto eglSwapInterval = (EGLBoolean (*)(EGLDisplay, EGLint)) dlsym(libEGL, "eglSwapInterval");
 
-    EGLDisplay display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-    eglInitialize(display, 0, 0);
+    EGLDisplay display = eglGetDisplay ? eglGetDisplay(EGL_DEFAULT_DISPLAY) : EGL_NO_DISPLAY;
+    if (display == EGL_NO_DISPLAY) {
+        LOGE("eglGetDisplay failed!");
+        return nullptr;
+    }
+
+    EGLint major = 0, minor = 0;
+    eglInitialize(display, &major, &minor);
 
     const EGLint attribs[] = {
         EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
+        EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
         EGL_BLUE_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_RED_SIZE, 8,
         EGL_NONE
     };
 
     EGLConfig config;
-    EGLint numConfigs;
+    EGLint numConfigs = 0;
     eglChooseConfig(display, attribs, &config, 1, &numConfigs);
     
-    // ANGLE on iOS actually wants the UIView, but accepts CALayer.
-    // Sleep a tiny bit to allow iOS UI layout to finish (usleep có shim rồi).
-    usleep(500000);
+    // Đợi UI layout hoàn tất
+    usleep(200000);
 
     EGLSurface surface = eglCreateWindowSurface(display, config, window, nullptr);
     if (surface == EGL_NO_SURFACE) {
@@ -107,6 +96,11 @@ static void* render_loop(void* arg) {
 
     const EGLint contextAttribs[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
     EGLContext context = eglCreateContext(display, config, nullptr, contextAttribs);
+    if (!context) {
+        LOGE("eglCreateContext failed!");
+        return nullptr;
+    }
+
     eglMakeCurrent(display, surface, surface, context);
     if (eglSwapInterval) {
         eglSwapInterval(display, 1);
@@ -114,6 +108,10 @@ static void* render_loop(void* arg) {
 
     LOGI("EGL Setup Complete! Loading GL functions...");
     void* libGLES = dlopen("libGLESv2.so", RTLD_NOW);
+    if (!libGLES) {
+        LOGE("Failed to dlopen libGLESv2.so");
+        return nullptr;
+    }
     
     auto p_glCreateShader = (GLuint (*)(GLenum)) dlsym(libGLES, "glCreateShader");
     auto p_glShaderSource = (void (*)(GLuint, GLsizei, const GLchar**, const GLint*)) dlsym(libGLES, "glShaderSource");
@@ -132,9 +130,12 @@ static void* render_loop(void* arg) {
     auto p_glClear = (void (*)(GLbitfield)) dlsym(libGLES, "glClear");
     auto p_glDrawArrays = (void (*)(GLenum, GLint, GLsizei)) dlsym(libGLES, "glDrawArrays");
     auto p_glViewport = (void (*)(GLint, GLint, GLsizei, GLsizei)) dlsym(libGLES, "glViewport");
+    auto p_glGenBuffers = (void (*)(GLsizei, GLuint*)) dlsym(libGLES, "glGenBuffers");
+    auto p_glBindBuffer = (void (*)(GLenum, GLuint)) dlsym(libGLES, "glBindBuffer");
+    auto p_glBufferData = (void (*)(GLenum, GLsizeiptr, const void*, GLenum)) dlsym(libGLES, "glBufferData");
 
-    if (!p_glCreateShader || !p_glClearColor || !p_glViewport) {
-        LOGE("Failed to load GL functions");
+    if (!p_glCreateShader || !p_glClearColor || !p_glViewport || !p_glDrawArrays) {
+        LOGE("Failed to load essential GL functions");
         return nullptr;
     }
 
@@ -153,8 +154,6 @@ static void* render_loop(void* arg) {
                 p_glGetShaderInfoLog(shader, infoLen, nullptr, infoLog);
                 LOGE("Shader compile error:\n%s", infoLog);
                 free(infoLog);
-            } else {
-                LOGE("Shader compile error (no log)");
             }
             return 0;
         }
@@ -181,47 +180,30 @@ static void* render_loop(void* arg) {
         return nullptr;
     }
 
-    auto p_glGenBuffers = (void (*)(GLsizei, GLuint*)) dlsym(libGLES, "glGenBuffers");
-    auto p_glBindBuffer = (void (*)(GLenum, GLuint)) dlsym(libGLES, "glBindBuffer");
-    auto p_glBufferData = (void (*)(GLenum, GLsizeiptr, const void*, GLenum)) dlsym(libGLES, "glBufferData");
-
-    p_glUseProgram(program);
-
-    static const GLfloat vertices[] = { 0.0f, 0.5f, 0.0f, -0.5f, -0.5f, 0.0f, 0.5f, -0.5f, 0.0f };
-    static const GLfloat colors[] = { 1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 1.0f };
+    static const GLfloat vertices[] = {
+        0.0f,  0.6f, 0.0f,
+       -0.6f, -0.6f, 0.0f,
+        0.6f, -0.6f, 0.0f
+    };
+    static const GLfloat colors[] = {
+        1.0f, 0.2f, 0.2f, 1.0f, // Red
+        0.2f, 1.0f, 0.2f, 1.0f, // Green
+        0.2f, 0.4f, 1.0f, 1.0f  // Blue
+    };
 
     GLuint vbo[2] = {0, 0};
     if (p_glGenBuffers && p_glBindBuffer && p_glBufferData) {
         p_glGenBuffers(2, vbo);
+        p_glBindBuffer(GL_ARRAY_BUFFER, vbo[0]);
+        p_glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+        p_glBindBuffer(GL_ARRAY_BUFFER, vbo[1]);
+        p_glBufferData(GL_ARRAY_BUFFER, sizeof(colors), colors, GL_STATIC_DRAW);
+        p_glBindBuffer(GL_ARRAY_BUFFER, 0);
+        LOGI("VBO created successfully (%u, %u)", vbo[0], vbo[1]);
     }
 
     GLint positionHandle = p_glGetAttribLocation(program, "vPosition");
-    if (positionHandle >= 0) {
-        p_glEnableVertexAttribArray((GLuint)positionHandle);
-        if (vbo[0] != 0) {
-            p_glBindBuffer(GL_ARRAY_BUFFER, vbo[0]);
-            p_glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
-            p_glVertexAttribPointer((GLuint)positionHandle, 3, GL_FLOAT, GL_FALSE, 0, (const void*)0);
-        } else {
-            p_glVertexAttribPointer((GLuint)positionHandle, 3, GL_FLOAT, GL_FALSE, 0, vertices);
-        }
-    } else {
-        LOGE("vPosition attrib not found");
-    }
-
     GLint colorHandle = p_glGetAttribLocation(program, "vColor");
-    if (colorHandle >= 0) {
-        p_glEnableVertexAttribArray((GLuint)colorHandle);
-        if (vbo[1] != 0) {
-            p_glBindBuffer(GL_ARRAY_BUFFER, vbo[1]);
-            p_glBufferData(GL_ARRAY_BUFFER, sizeof(colors), colors, GL_STATIC_DRAW);
-            p_glVertexAttribPointer((GLuint)colorHandle, 4, GL_FLOAT, GL_FALSE, 0, (const void*)0);
-        } else {
-            p_glVertexAttribPointer((GLuint)colorHandle, 4, GL_FLOAT, GL_FALSE, 0, colors);
-        }
-    } else {
-        LOGE("vColor attrib not found");
-    }
 
     typedef int (*ANativeWindow_getDim_t)(ANativeWindow*);
     auto kudroid_ANativeWindow_getWidth = (ANativeWindow_getDim_t) dlsym(RTLD_DEFAULT, "ANativeWindow_getWidth");
@@ -235,11 +217,40 @@ static void* render_loop(void* arg) {
     render_running = true;
     while (render_running) {
         p_glViewport(0, 0, w, h);
-        p_glClearColor(0.2f, 0.2f, 0.2f, 1.0f);
+        
+        // Nền xanh Navy đẹp mắt
+        p_glClearColor(0.08f, 0.12f, 0.24f, 1.0f);
         p_glClear(GL_COLOR_BUFFER_BIT);
+
+        p_glUseProgram(program);
+
+        if (positionHandle >= 0) {
+            p_glEnableVertexAttribArray((GLuint)positionHandle);
+            if (vbo[0] != 0) {
+                p_glBindBuffer(GL_ARRAY_BUFFER, vbo[0]);
+                p_glVertexAttribPointer((GLuint)positionHandle, 3, GL_FLOAT, GL_FALSE, 0, (const void*)0);
+            } else {
+                p_glVertexAttribPointer((GLuint)positionHandle, 3, GL_FLOAT, GL_FALSE, 0, vertices);
+            }
+        }
+
+        if (colorHandle >= 0) {
+            p_glEnableVertexAttribArray((GLuint)colorHandle);
+            if (vbo[1] != 0) {
+                p_glBindBuffer(GL_ARRAY_BUFFER, vbo[1]);
+                p_glVertexAttribPointer((GLuint)colorHandle, 4, GL_FLOAT, GL_FALSE, 0, (const void*)0);
+            } else {
+                p_glVertexAttribPointer((GLuint)colorHandle, 4, GL_FLOAT, GL_FALSE, 0, colors);
+            }
+        }
+
         p_glDrawArrays(GL_TRIANGLES, 0, 3);
-        eglSwapBuffers(display, surface);
-        usleep(16000);
+        
+        if (!eglSwapBuffers(display, surface)) {
+            LOGE("eglSwapBuffers failed!");
+            break;
+        }
+        usleep(16666);
     }
     
     LOGI("Render thread exiting.");
