@@ -538,13 +538,13 @@ struct APKInstallerView: View {
                                             .font(.caption)
                                             .foregroundColor(.secondary)
                                         
-                                        if isUpdate(apk) {
-                                            Text("UPDATE AVAILABLE")
+                                        if let badge = apkStatusBadge(for: apk) {
+                                            Text(badge.text)
                                                 .font(.system(size: 9, weight: .black))
                                                 .padding(.horizontal, 6)
                                                 .padding(.vertical, 2)
-                                                .background(Color.orange.opacity(0.25))
-                                                .foregroundColor(.orange)
+                                                .background(badge.isUpdate ? Color.orange.opacity(0.25) : Color.green.opacity(0.25))
+                                                .foregroundColor(badge.isUpdate ? .orange : .green)
                                                 .cornerRadius(4)
                                         }
                                     }
@@ -613,9 +613,9 @@ struct APKInstallerView: View {
                                         .progressViewStyle(CircularProgressViewStyle(tint: .black))
                                         .padding(.trailing, 4)
                                     Text("Installing...")
-                                } else if let selectedAPK, isUpdate(selectedAPK) {
-                                    Image(systemName: "arrow.triangle.2.circlepath")
-                                    Text("Update App")
+                                } else if let selectedAPK, let badge = apkStatusBadge(for: selectedAPK) {
+                                    Image(systemName: badge.isUpdate ? "arrow.triangle.2.circlepath" : "arrow.clockwise.circle.fill")
+                                    Text(badge.isUpdate ? "Update App" : "Reinstall App")
                                 } else {
                                     Image(systemName: "arrow.down.circle.fill")
                                     Text("Install Selected")
@@ -624,7 +624,7 @@ struct APKInstallerView: View {
                             .font(.body.bold())
                         }
                         .buttonStyle(.borderedProminent)
-                        .tint(selectedAPK != nil && isUpdate(selectedAPK!) ? .orange : .green)
+                        .tint(selectedAPK != nil && (apkStatusBadge(for: selectedAPK!)?.isUpdate ?? false) ? .orange : .green)
                         .disabled(selectedAPK == nil || isInstalling)
                     }
                     .padding()
@@ -643,15 +643,27 @@ struct APKInstallerView: View {
         }
     }
 
-    private func isUpdate(_ url: URL) -> Bool {
+    private func getInstalledPackage(for url: URL) -> String? {
         let name = url.deletingPathExtension().lastPathComponent.lowercased()
         for installed in installedPackages {
             let lower = installed.lowercased()
             if lower == name || name.contains(lower) || lower.contains(name) {
-                return true
+                return installed
             }
         }
-        return false
+        return nil
+    }
+
+    private func apkStatusBadge(for url: URL) -> (text: String, isUpdate: Bool)? {
+        guard let installed = getInstalledPackage(for: url) else { return nil }
+        
+        let apkVer = extractVersionFromFolderName(url.lastPathComponent)
+        let installedVer = extractVersionFromFolderName(installed)
+        
+        if let av = apkVer, let iv = installedVer, av != iv {
+            return ("UPDATE v\(av)", true)
+        }
+        return ("INSTALLED", false)
     }
 
     private func startInstall() {
@@ -860,6 +872,9 @@ class NativeMetalView: UIView {
         }
         metalLayer.pixelFormat = .bgra8Unorm
         metalLayer.framebufferOnly = false
+        metalLayer.allowsNextDrawableTimeout = false
+        metalLayer.maximumDrawableCount = 3
+        metalLayer.presentsWithTransaction = false
         metalLayer.contentsScale = UIScreen.main.scale
     }
 

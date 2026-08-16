@@ -80,6 +80,7 @@ static void* render_loop(void* arg) {
     auto eglCreateContext = (EGLContext (*)(EGLDisplay, EGLConfig, EGLContext, const EGLint*)) dlsym(libEGL, "eglCreateContext");
     auto eglMakeCurrent = (EGLBoolean (*)(EGLDisplay, EGLSurface, EGLSurface, EGLContext)) dlsym(libEGL, "eglMakeCurrent");
     auto eglSwapBuffers = (EGLBoolean (*)(EGLDisplay, EGLSurface)) dlsym(libEGL, "eglSwapBuffers");
+    auto eglSwapInterval = (EGLBoolean (*)(EGLDisplay, EGLint)) dlsym(libEGL, "eglSwapInterval");
 
     EGLDisplay display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     eglInitialize(display, 0, 0);
@@ -107,6 +108,9 @@ static void* render_loop(void* arg) {
     const EGLint contextAttribs[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
     EGLContext context = eglCreateContext(display, config, nullptr, contextAttribs);
     eglMakeCurrent(display, surface, surface, context);
+    if (eglSwapInterval) {
+        eglSwapInterval(display, 1);
+    }
 
     LOGI("EGL Setup Complete! Loading GL functions...");
     void* libGLES = dlopen("libGLESv2.so", RTLD_NOW);

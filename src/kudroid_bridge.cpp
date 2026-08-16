@@ -959,6 +959,23 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                         log += "[kudroid_core] Found ANativeActivity_onCreate, invoking...\n";
                         mirrorCrash(log);
 
+                        // Thiết lập đường dẫn dữ liệu riêng biệt cho app trong VFS:
+                        // - internalDataPath: /data/data/<appName>
+                        // - externalDataPath: /sdcard/Android/data/<appName>
+                        // - obbPath: /sdcard/Android/obb/<appName>
+                        static std::string s_internalDataPath;
+                        static std::string s_externalDataPath;
+                        static std::string s_obbPath;
+                        s_internalDataPath = "/data/data/" + std::string(appName);
+                        s_externalDataPath = "/sdcard/Android/data/" + std::string(appName);
+                        s_obbPath = "/sdcard/Android/obb/" + std::string(appName);
+
+                        // Tự động tạo sẵn cấu trúc thư mục lưu dữ liệu trong VFS
+                        std::error_code vfsEc;
+                        std::filesystem::create_directories(std::filesystem::path(remapper.androidRoot()) / "data/data" / appName, vfsEc);
+                        std::filesystem::create_directories(std::filesystem::path(remapper.androidRoot()) / "sdcard/Android/data" / appName, vfsEc);
+                        std::filesystem::create_directories(std::filesystem::path(remapper.androidRoot()) / "sdcard/Android/obb" / appName, vfsEc);
+
                         // thiết lập các lệnh gọi lại hoạt động để trò chơi có thể bắt đầu
                         // kết xuất và nhận đầu vào. đây là các hook
                         // mà trò chơi đăng ký các trình xử lý.
@@ -968,12 +985,12 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                             jvm,
                             nullptr, // env
                             nullptr, // clazz
-                            "/sdcard/Android/data/test", // internalDataPath
-                            "/sdcard/Android/data/test", // externalDataPath
-                            29, // sdkVersion
+                            s_internalDataPath.c_str(), // internalDataPath
+                            s_externalDataPath.c_str(), // externalDataPath
+                            29, // sdkVersion (Android 10)
                             nullptr, // instance
                             nullptr, // assetManager
-                            nullptr  // obbPath
+                            s_obbPath.c_str() // obbPath
                         };
                         kudroid_jni_get_env(jvm, reinterpret_cast<void**>(&mock_activity.env), 0);
 
