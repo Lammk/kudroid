@@ -340,6 +340,8 @@ extern "C" void kudroid_gpu_warmup_egl(void) {
     gpuLog("warmup: eglMakeCurrent -> true");
     gl_clear(0x4000 /* GL_COLOR_BUFFER_BIT */);
     gpuLog("warmup: glClear OK");
+    make_current(dpy, (EGLSurface)0, (EGLSurface)0, (EGLContext)0);
+    gpuLog("warmup: context released from main thread");
     #undef W_EGL_SURFACE_TYPE
     #undef W_EGL_PBUFFER_BIT
     #undef W_EGL_RENDERABLE_TYPE
