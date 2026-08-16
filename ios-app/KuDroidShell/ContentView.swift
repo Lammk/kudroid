@@ -32,10 +32,10 @@ struct ContentView: View {
 
 // mark: - tab ứng dụng
 struct AppsView: View {
+    @EnvironmentObject private var session: AppSession
     @Binding var fullLog: String
     @State private var installedApps: [String] = []
     @State private var showAPKInstaller = false
-    @AppStorage("active_guest_app") private var activeGuestApp: String = ""
     
     private var androidRootAppsURL: URL? {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
@@ -91,7 +91,7 @@ struct AppsView: View {
                                     .font(.title)
                                     .foregroundColor(.green)
                                     .padding(.trailing, 8)
-                                
+                                 
                                 VStack(alignment: .leading) {
                                     Text(appName)
                                         .font(.headline)
@@ -103,7 +103,7 @@ struct AppsView: View {
                                 Spacer()
                                 
                                 Button(action: {
-                                    activeGuestApp = appName
+                                    session.activeGuestApp = appName
                                 }) {
                                     Text("RUN")
                                         .font(.caption)
