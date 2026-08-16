@@ -1,6 +1,8 @@
 import SwiftUI
 import UIKit
 import AVFAudio
+import Metal
+import QuartzCore
 
 // mark: - giao diện chính
 struct ContentView: View {
@@ -33,7 +35,7 @@ struct AppsView: View {
     @Binding var fullLog: String
     @State private var installedApps: [String] = []
     @State private var showAPKInstaller = false
-    @State private var runningApp: String?
+    @AppStorage("active_guest_app") private var activeGuestApp: String = ""
     
     private var androidRootAppsURL: URL? {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
@@ -101,7 +103,7 @@ struct AppsView: View {
                                 Spacer()
                                 
                                 Button(action: {
-                                    runningApp = appName
+                                    activeGuestApp = appName
                                 }) {
                                     Text("RUN")
                                         .font(.caption)
@@ -143,18 +145,7 @@ struct AppsView: View {
                     showAPKInstaller = false
                 }
             }
-            .fullScreenCover(item: Binding<IdentifiableString?>(
-                get: { runningApp.map { IdentifiableString(value: $0) } },
-                set: { runningApp = $0?.value }
-            )) { app in
-                AndroidAppView(appName: app.value)
-            }
         }
-    }
-    
-    struct IdentifiableString: Identifiable {
-        let id = UUID()
-        let value: String
     }
     
     private func loadInstalledApps() {
@@ -521,69 +512,141 @@ func runMultiElfTest() -> String {
     return log
 }
 
-// mark: - kết xuất ứng dụng android
-struct AndroidAppView: View {
+// mark: - Bộ thực thi độc quyền toàn màn hình (Dedicated Clean Container)
+struct DedicatedAppRunnerView: UIViewControllerRepresentable {
     let appName: String
-    @Environment(\.presentationMode) var presentationMode
-    
-    var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
-            
-            MetalView(appName: appName)
-                .ignoresSafeArea()
-        }
+    let onExit: () -> Void
+
+    func makeUIViewController(context: Context) -> NativeMetalViewController {
+        NativeMetalViewController(appName: appName, onExit: onExit)
     }
+
+    func updateUIViewController(_ uiViewController: NativeMetalViewController, context: Context) {}
 }
 
-struct MetalView: UIViewRepresentable {
+class NativeMetalViewController: UIViewController {
     let appName: String
+    let onExit: () -> Void
+    private var isStarted = false
+    private var metalView: NativeMetalView!
+    private var floatingExitButton: UIButton!
 
-    class Coordinator: NSObject {
-        var metalView: UIView?
+    init(appName: String, onExit: @escaping () -> Void) {
+        self.appName = appName
+        self.onExit = onExit
+        super.init(nibName: nil, bundle: nil)
     }
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator()
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
     }
 
-    func makeUIView(context: Context) -> UIView {
-        let view = NativeMetalView()
-        context.coordinator.metalView = view
-        
-        // truyền cametallayer và ranh giới cho kudroid
-        let bounds = UIScreen.main.bounds
+    override func loadView() {
+        metalView = NativeMetalView()
+        self.view = metalView
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        self.view.backgroundColor = .black
+
+        // Nút HUD Thoát bán trong suốt ở góc trên bên phải
+        floatingExitButton = UIButton(type: .system)
+        floatingExitButton.setTitle("✕ Exit", for: .normal)
+        floatingExitButton.setTitleColor(.white, for: .normal)
+        floatingExitButton.titleLabel?.font = .systemFont(ofSize: 13, weight: .bold)
+        floatingExitButton.backgroundColor = UIColor.black.withAlphaComponent(0.6)
+        floatingExitButton.layer.cornerRadius = 15
+        floatingExitButton.layer.borderWidth = 1
+        floatingExitButton.layer.borderColor = UIColor.white.withAlphaComponent(0.3).cgColor
+        floatingExitButton.translatesAutoresizingMaskIntoConstraints = false
+        floatingExitButton.addTarget(self, action: #selector(confirmExit), for: .touchUpInside)
+        view.addSubview(floatingExitButton)
+
+        NSLayoutConstraint.activate([
+            floatingExitButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
+            floatingExitButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+            floatingExitButton.widthAnchor.constraint(equalToConstant: 75),
+            floatingExitButton.heightAnchor.constraint(equalToConstant: 30)
+        ])
+
+        // Cử chỉ chạm 3 ngón tay bất kỳ đâu để hiện menu thoát
+        let tripleTap = UITapGestureRecognizer(target: self, action: #selector(confirmExit))
+        tripleTap.numberOfTouchesRequired = 3
+        view.addGestureRecognizer(tripleTap)
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        guard !isStarted else { return }
+        isStarted = true
+
         let scale = UIScreen.main.scale
+        let bounds = view.bounds
         let width = Int32(bounds.width * scale)
         let height = Int32(bounds.height * scale)
+
+        if let metalLayer = view.layer as? CAMetalLayer {
+            if metalLayer.device == nil {
+                metalLayer.device = MTLCreateSystemDefaultDevice()
+            }
+            metalLayer.pixelFormat = .bgra8Unorm
+            metalLayer.framebufferOnly = false
+            metalLayer.contentsScale = scale
+            metalLayer.drawableSize = CGSize(width: Double(width), height: Double(height))
+        }
+
         let unmanaged = Unmanaged.passUnretained(view.layer)
-        // density = scale (3.0 cho @3x) — khớp khái niệm density của Android
         kudroid_set_metal_layer(unmanaged.toOpaque(), width, height, Float(scale))
-        
-        // chạy apk trong nền để không chặn giao diện người dùng ios
-        DispatchQueue.global(qos: .userInitiated).async {
-            if let cString = kudroid_run_apk(appName) {
+
+        // Chạy APK Android với độ ưu tiên cao nhất của Interactive UI
+        DispatchQueue.global(qos: .userInteractive).async {
+            if let cString = kudroid_run_apk(self.appName) {
                 print("App exited with log:\n\(String(cString: cString))")
                 free(UnsafeMutablePointer(mutating: cString))
             }
         }
-        
-        return view
     }
 
-    func updateUIView(_ uiView: UIView, context: Context) {}
+    @objc private func confirmExit() {
+        let alert = UIAlertController(title: "KuDroid Container", message: "Thoát ứng dụng Android về KuDroid Launcher?", preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "Thoát", style: .destructive) { [weak self] _ in
+            self?.onExit()
+        })
+        alert.addAction(UIAlertAction(title: "Tiếp tục", style: .cancel))
+        present(alert, animated: true)
+    }
 }
 
 class NativeMetalView: UIView {
     override class var layerClass: AnyClass {
-        return NSClassFromString("CAMetalLayer") ?? CALayer.self
+        return CAMetalLayer.self
+    }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        setupLayer()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setupLayer()
+    }
+
+    private func setupLayer() {
+        guard let metalLayer = self.layer as? CAMetalLayer else { return }
+        if metalLayer.device == nil {
+            metalLayer.device = MTLCreateSystemDefaultDevice()
+        }
+        metalLayer.pixelFormat = .bgra8Unorm
+        metalLayer.framebufferOnly = false
+        metalLayer.contentsScale = UIScreen.main.scale
     }
 
     private func injectTouch(_ touches: Set<UITouch>, action: Int32) {
         guard let touch = touches.first else { return }
         let location = touch.location(in: self)
         let scale = UIScreen.main.scale
-        // ánh xạ hành động: 0=down, 1=up, 2=move (dựa trên amotionevent của android)
         kudroid_inject_touch_event(Float(location.x * scale), Float(location.y * scale), action)
     }
 
@@ -600,7 +663,7 @@ class NativeMetalView: UIView {
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-        injectTouch(touches, action: 1) // coi thao tác hủy là up để an toàn
+        injectTouch(touches, action: 1)
     }
 }
 

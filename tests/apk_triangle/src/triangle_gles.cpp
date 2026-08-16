@@ -198,10 +198,18 @@ static void* render_loop(void* arg) {
         LOGE("vColor attrib not found");
     }
 
-    LOGI("Render loop starting.");
+    typedef int (*ANativeWindow_getDim_t)(ANativeWindow*);
+    auto kudroid_ANativeWindow_getWidth = (ANativeWindow_getDim_t) dlsym(RTLD_DEFAULT, "ANativeWindow_getWidth");
+    auto kudroid_ANativeWindow_getHeight = (ANativeWindow_getDim_t) dlsym(RTLD_DEFAULT, "ANativeWindow_getHeight");
+    int w = kudroid_ANativeWindow_getWidth ? kudroid_ANativeWindow_getWidth(window) : 1080;
+    int h = kudroid_ANativeWindow_getHeight ? kudroid_ANativeWindow_getHeight(window) : 1920;
+    if (w <= 0) w = 1080;
+    if (h <= 0) h = 1920;
+
+    LOGI("Render loop starting with viewport %dx%d.", w, h);
     render_running = true;
     while (render_running) {
-        p_glViewport(0, 0, 1080, 1920); // TODO: get real width/height
+        p_glViewport(0, 0, w, h);
         p_glClearColor(0.2f, 0.2f, 0.2f, 1.0f);
         p_glClear(GL_COLOR_BUFFER_BIT);
         p_glDrawArrays(GL_TRIANGLES, 0, 3);
