@@ -775,10 +775,18 @@ extern "C" int bionic_clock_gettime64(int clock_id, struct timespec *tp) {
 }
 
 extern "C" int bionic_sigaltstack(const stack_t *ss, stack_t *oss) {
-    const int r = ::sigaltstack(ss, oss);
+    if (!ss) {
+        return ::sigaltstack(nullptr, oss);
+    }
+    stack_t host_ss = *ss;
+#if defined(__APPLE__)
+    // Darwin kernel yêu cầu ss_size tối thiểu ít nhất 32KB
+    if (!(host_ss.ss_flags & SS_DISABLE) && host_ss.ss_size < 32768) {
+        host_ss.ss_size = 32768;
+    }
+#endif
+    const int r = ::sigaltstack(&host_ss, oss);
     if (r != 0) {
-        // iOS có thể từ chối (thread đang dùng altstack, size lạ, v.v.) —
-        // fake success để game không chết vì thiếu altstack; vẫn log để debug.
         logAndroidMessage(4, "KuDroidSyscall", "sigaltstack() -> -1 errno=" +
                           std::to_string(errno) + " (faked to 0)");
         return 0;

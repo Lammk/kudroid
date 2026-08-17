@@ -73,48 +73,98 @@ extern "C" const char* kudroid_test_gpu(void) {
     }
     log += "✔ EGL Pbuffer Surface & Context active on Host thread\n";
 
-    // Host-Native Shader Code (Pure C++ Literal)
+    // Host-Native Shader Code (GLES 2.0 Compatible - Universal across all EGL configs)
     const char* vShaderSource =
-        "#version 300 es\n"
-        "layout(location = 0) in vec4 vPosition;\n"
+        "attribute vec4 vPosition;\n"
         "void main() {\n"
         "  gl_Position = vPosition;\n"
         "}\n";
 
-    log += "⏳ Creating Shader (GL_VERTEX_SHADER = 0x8B31)...\n";
-    unsigned int shader = gl_create_shader(0x8B31);
-    if (shader == 0) {
-        log += "❌ ERROR: glCreateShader returned 0\n";
+    const char* fShaderSource =
+        "precision mediump float;\n"
+        "void main() {\n"
+        "  gl_FragColor = vec4(0.0, 1.0, 0.0, 1.0);\n"
+        "}\n";
+
+    auto gl_get_error = (unsigned int (*)(void)) kudroid::get_gl_func("glGetError");
+    auto gl_create_program = (unsigned int (*)(void)) kudroid::get_gl_func("glCreateProgram");
+    auto gl_attach_shader = (void (*)(unsigned int, unsigned int)) kudroid::get_gl_func("glAttachShader");
+    auto gl_link_program = (void (*)(unsigned int)) kudroid::get_gl_func("glLinkProgram");
+    auto gl_get_programiv = (void (*)(unsigned int, unsigned int, int*)) kudroid::get_gl_func("glGetProgramiv");
+    auto gl_get_program_info_log = (void (*)(unsigned int, int, int*, char*)) kudroid::get_gl_func("glGetProgramInfoLog");
+    auto gl_delete_program = (void (*)(unsigned int)) kudroid::get_gl_func("glDeleteProgram");
+
+    log += "⏳ Creating Vertex Shader (GL_VERTEX_SHADER = 0x8B31)...\n";
+    unsigned int vShader = gl_create_shader(0x8B31);
+    if (vShader == 0) {
+        log += "❌ ERROR: glCreateShader(VERTEX) returned 0\n";
         return strdup(log.c_str());
     }
-    log += "✔ glCreateShader returned shader ID: " + std::to_string(shader) + "\n";
+    log += "✔ glCreateShader(VERTEX) returned ID: " + std::to_string(vShader) + "\n";
 
-    log += "⏳ Passing shader source to ANGLE Metal...\n";
-    const char* srcPtrs[] = { vShaderSource };
-    int srcLens[] = { static_cast<int>(strlen(vShaderSource)) };
-    gl_shader_source(shader, 1, srcPtrs, srcLens);
-    log += "✔ glShaderSource completed without abort!\n";
-
-    log += "⏳ Compiling shader with ANGLE Metal compiler...\n";
-    gl_compile_shader(shader);
-    log += "✔ glCompileShader completed without abort!\n";
-
-    int compileStatus = 0;
-    gl_get_shaderiv(shader, 0x8B81 /* GL_COMPILE_STATUS */, &compileStatus);
-
-    char infoLog[1024] = {0};
-    int infoLen = 0;
-    if (gl_get_shader_info_log) {
-        gl_get_shader_info_log(shader, sizeof(infoLog), &infoLen, infoLog);
-    }
-
-    if (compileStatus) {
-        log += "🎉 SUCCESS: ANGLE Metal Shader Compiler works 100% on this iOS device!\n";
+    log += "⏳ Passing Vertex Shader source to ANGLE Metal...\n";
+    const char* vSrcPtrs[] = { vShaderSource };
+    int vSrcLens[] = { static_cast<int>(strlen(vShaderSource)) };
+    gl_shader_source(vShader, 1, vSrcPtrs, vSrcLens);
+    unsigned int err = gl_get_error ? gl_get_error() : 0;
+    if (err != 0) {
+        log += "❌ ERROR: glShaderSource set error: " + std::to_string(err) + "\n";
     } else {
-        log += "⚠ Shader Compilation Failed! InfoLog: " + std::string(infoLog) + "\n";
+        log += "✔ glShaderSource completed clean (no error)!\n";
     }
 
-    if (gl_delete_shader) gl_delete_shader(shader);
+    log += "⏳ Compiling Vertex Shader with ANGLE Metal compiler...\n";
+    gl_compile_shader(vShader);
+    int vCompileStatus = 0;
+    gl_get_shaderiv(vShader, 0x8B81 /* GL_COMPILE_STATUS */, &vCompileStatus);
+    char vInfoLog[1024] = {0};
+    int vInfoLen = 0;
+    if (gl_get_shader_info_log) gl_get_shader_info_log(vShader, sizeof(vInfoLog), &vInfoLen, vInfoLog);
+
+    if (vCompileStatus) {
+        log += "✔ Vertex Shader compiled successfully!\n";
+    } else {
+        log += "❌ Vertex Shader compilation FAILED! InfoLog: " + std::string(vInfoLog) + "\n";
+    }
+
+    // Fragment Shader
+    unsigned int fShader = gl_create_shader(0x8B30 /* GL_FRAGMENT_SHADER */);
+    const char* fSrcPtrs[] = { fShaderSource };
+    int fSrcLens[] = { static_cast<int>(strlen(fShaderSource)) };
+    gl_shader_source(fShader, 1, fSrcPtrs, fSrcLens);
+    gl_compile_shader(fShader);
+    int fCompileStatus = 0;
+    gl_get_shaderiv(fShader, 0x8B81, &fCompileStatus);
+    if (fCompileStatus) {
+        log += "✔ Fragment Shader compiled successfully!\n";
+    }
+
+    // Program Linking Test
+    if (gl_create_program && gl_attach_shader && gl_link_program && gl_get_programiv) {
+        log += "⏳ Linking GL Program with ANGLE Metal backend...\n";
+        unsigned int program = gl_create_program();
+        gl_attach_shader(program, vShader);
+        gl_attach_shader(program, fShader);
+        gl_link_program(program);
+
+        int linkStatus = 0;
+        gl_get_programiv(program, 0x8B82 /* GL_LINK_STATUS */, &linkStatus);
+        char pInfoLog[1024] = {0};
+        int pInfoLen = 0;
+        if (gl_get_program_info_log) gl_get_program_info_log(program, sizeof(pInfoLog), &pInfoLen, pInfoLog);
+
+        if (linkStatus) {
+            log += "🎉 SUCCESS: Full ANGLE Metal Pipeline (Shader Compiler + Program Linker) works 100%!\n";
+        } else {
+            log += "❌ Program Link FAILED! InfoLog: " + std::string(pInfoLog) + "\n";
+        }
+        if (gl_delete_program) gl_delete_program(program);
+    }
+
+    if (gl_delete_shader) {
+        gl_delete_shader(vShader);
+        gl_delete_shader(fShader);
+    }
     make_current(dpy, nullptr, nullptr, nullptr);
 
     return strdup(log.c_str());
