@@ -123,6 +123,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     add_executable(KuDroidShell MACOSX_BUNDLE
         ios-app/KuDroidShell/KuDroidApp.swift
         ios-app/KuDroidShell/ContentView.swift
+        ios-app/KuDroidShell/RemoteDebugClient.swift
         ios-app/KuDroidShell/kudroid_bridge.h
     )
 
