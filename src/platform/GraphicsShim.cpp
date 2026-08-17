@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstdarg>
 #include <string>
+#include <vector>
 #include <atomic>
 
 #if defined(__APPLE__)
@@ -1030,13 +1031,7 @@ extern "C" unsigned int bionic_glCreateShader(unsigned int type) {
     auto f = (PFN)get_gl_func("glCreateShader");
     if (!f) { EGL_FORWARD_ERR("glCreateShader", ""); return 0; }
     gpuLog("glCreateShader(type=0x%x): calling ANGLE...", type);
-#if defined(__APPLE__)
-    void* pool = objc_autoreleasePoolPush();
     unsigned int s = f(type);
-    objc_autoreleasePoolPop(pool);
-#else
-    unsigned int s = f(type);
-#endif
     gpuLog("glCreateShader -> %u", s);
     return s;
 }
@@ -1045,20 +1040,45 @@ extern "C" void bionic_glShaderSource(unsigned int shader, int count, const char
     typedef void (*PFN)(unsigned int, int, const char* const*, const int*);
     auto f = (PFN)get_gl_func("glShaderSource");
     if (!f) { EGL_FORWARD_ERR("glShaderSource", ""); return; }
-    gpuLog("glShaderSource(shader=%u count=%d): calling ANGLE...", shader, count);
-    if (string && count > 0 && string[0]) {
-        int len = (length && length[0] > 0) ? length[0] : (int)strlen(string[0]);
-        char snippet[64] = {0};
-        strncpy(snippet, string[0], 40);
-        gpuLog("glShaderSource(shader=%u): len=%d snippet='%s...'", shader, len, snippet);
+
+    gpuLog("glShaderSource(shader=%u count=%d): marshalling guest memory to host buffer...", shader, count);
+    if (!string || count <= 0) {
+        f(shader, count, string, length);
+        return;
     }
-#if defined(__APPLE__)
-    void* pool = objc_autoreleasePoolPush();
-    f(shader, count, string, length);
-    objc_autoreleasePoolPop(pool);
-#else
-    f(shader, count, string, length);
-#endif
+
+    // Sao chép an toàn toàn bộ chuỗi shader từ vùng nhớ Guest (ELF/Stack) sang Host C++ heap
+    std::vector<std::string> hostStrings;
+    std::vector<const char*> hostPtrs;
+    std::vector<int> hostLens;
+    hostStrings.reserve(count);
+    hostPtrs.reserve(count);
+    hostLens.reserve(count);
+
+    for (int i = 0; i < count; ++i) {
+        if (string[i]) {
+            int len = (length && length[i] > 0) ? length[i] : static_cast<int>(strlen(string[i]));
+            hostStrings.emplace_back(string[i], len);
+            hostLens.push_back(len);
+        } else {
+            hostStrings.emplace_back("");
+            hostLens.push_back(0);
+        }
+    }
+
+    for (size_t i = 0; i < hostStrings.size(); ++i) {
+        hostPtrs.push_back(hostStrings[i].c_str());
+    }
+
+    if (!hostStrings.empty()) {
+        char snippet[64] = {0};
+        strncpy(snippet, hostStrings[0].c_str(), 40);
+        gpuLog("glShaderSource(shader=%u): marshalled len=%zu snippet='%s...'",
+               shader, hostStrings[0].size(), snippet);
+    }
+
+    // Truyền mảng con trỏ Host an toàn 100% xuống ANGLE
+    f(shader, count, hostPtrs.data(), hostLens.data());
     gpuLog("glShaderSource(shader=%u) -> OK", shader);
 }
 
@@ -1067,13 +1087,7 @@ extern "C" void bionic_glCompileShader(unsigned int shader) {
     auto f = (PFN)get_gl_func("glCompileShader");
     if (!f) { EGL_FORWARD_ERR("glCompileShader", ""); return; }
     gpuLog("glCompileShader(shader=%u): calling ANGLE...", shader);
-#if defined(__APPLE__)
-    void* pool = objc_autoreleasePoolPush();
     f(shader);
-    objc_autoreleasePoolPop(pool);
-#else
-    f(shader);
-#endif
     gpuLog("glCompileShader(shader=%u) -> OK", shader);
 }
 
@@ -1098,13 +1112,7 @@ extern "C" unsigned int bionic_glCreateProgram(void) {
     auto f = (PFN)get_gl_func("glCreateProgram");
     if (!f) { EGL_FORWARD_ERR("glCreateProgram", ""); return 0; }
     gpuLog("glCreateProgram: calling ANGLE...");
-#if defined(__APPLE__)
-    void* pool = objc_autoreleasePoolPush();
     unsigned int p = f();
-    objc_autoreleasePoolPop(pool);
-#else
-    unsigned int p = f();
-#endif
     gpuLog("glCreateProgram -> %u", p);
     return p;
 }
