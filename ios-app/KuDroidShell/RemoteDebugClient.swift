@@ -151,9 +151,52 @@ class RemoteDebugClient: NSObject {
             let target = json["target"] as? String ?? "all"
             handleClearCommand(target: target)
 
+        case "dump":
+            let file = json["file"] as? String ?? "kudroid_crash"
+            handleDumpCommand(targetFile: file)
+
         default:
             break
         }
+    }
+
+    private func handleDumpCommand(targetFile: String) {
+        guard let docURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            sendResponse(["success": false, "error": "Cannot access Documents directory"])
+            return
+        }
+
+        let candidates = [
+            targetFile,
+            "\(targetFile).log",
+            "\(targetFile).txt",
+            targetFile.replacingOccurrences(of: "kudroid_android", with: "kudroid_android_logs.txt"),
+            targetFile.replacingOccurrences(of: "kudroid_crash", with: "kudroid_crash.log"),
+            targetFile.replacingOccurrences(of: "stderr", with: "stderr.log")
+        ]
+
+        var foundURL: URL? = nil
+        for name in candidates {
+            let u = docURL.appendingPathComponent(name)
+            if FileManager.default.fileExists(atPath: u.path) {
+                foundURL = u
+                break
+            }
+        }
+
+        guard let targetURL = foundURL, let data = try? Data(contentsOf: targetURL) else {
+            sendResponse(["success": false, "file": targetFile, "error": "File not found in Documents directory: \(targetFile)"])
+            return
+        }
+
+        let textContent = String(data: data, encoding: .utf8) ?? ""
+        sendResponse([
+            "success": true,
+            "file": targetURL.lastPathComponent,
+            "size": data.count,
+            "content": textContent,
+            "dataBase64": data.base64EncodedString()
+        ])
     }
 
     private func handleListCommand() {
