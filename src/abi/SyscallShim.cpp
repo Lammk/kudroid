@@ -1321,6 +1321,52 @@ extern "C" int bionic_sched_getscheduler(pid_t pid) {
     return 0; // SCHED_OTHER
 }
 
+extern "C" void bionic___assert2(const char* file, int line, const char* function, const char* message) {
+    char buf[512];
+    snprintf(buf, sizeof(buf), "ASSERTION FAILED in %s (%s:%d): %s",
+             function ? function : "?", file ? file : "?", line, message ? message : "");
+    logAndroidMessage(6, "KuDroidAssert", buf);
+    fprintf(stderr, "[KuDroidAssert] %s\n", buf);
+    abort();
+}
+
+extern "C" void bionic___android_log_assert(const char* cond, const char* tag, const char* fmt, ...) {
+    char buf[512];
+    if (fmt) {
+        va_list ap;
+        va_start(ap, fmt);
+        vsnprintf(buf, sizeof(buf), fmt, ap);
+        va_end(ap);
+    } else {
+        snprintf(buf, sizeof(buf), "assertion failed: %s", cond ? cond : "unknown");
+    }
+    logAndroidMessage(6, tag ? tag : "KuDroidAssert", buf);
+    fprintf(stderr, "[KuDroidAssert][%s] %s\n", tag ? tag : "assert", buf);
+    abort();
+}
+
+extern "C" ssize_t bionic_splice(int fd_in, off_t* off_in, int fd_out, off_t* off_out, size_t len, unsigned int flags) {
+    (void)flags;
+    char buf[16384];
+    size_t total = 0;
+    while (total < len) {
+        size_t chunk = std::min(sizeof(buf), len - total);
+        ssize_t n = off_in ? ::pread(fd_in, buf, chunk, *off_in) : ::read(fd_in, buf, chunk);
+        if (n <= 0) break;
+        if (off_in) *off_in += n;
+        ssize_t w = off_out ? ::pwrite(fd_out, buf, n, *off_out) : ::write(fd_out, buf, n);
+        if (w <= 0) break;
+        if (off_out) *off_out += w;
+        total += w;
+        if (w != n) break;
+    }
+    return total > 0 ? static_cast<ssize_t>(total) : -1;
+}
+
+extern "C" ssize_t bionic_copy_file_range(int fd_in, off_t* off_in, int fd_out, off_t* off_out, size_t len, unsigned int flags) {
+    return bionic_splice(fd_in, off_in, fd_out, off_out, len, flags);
+}
+
 extern "C" int bionic_omp_in_parallel() {
     return 0; // chưa có OpenMP runtime — "ngoài vùng parallel"
 }
@@ -1737,6 +1783,7 @@ extern "C" void* bionic_dlopen(const char* filename, int flags) {
 static bool isShimPriority(const char* s) {
     if (!s) return false;
     if (strncmp(s, "egl", 3) == 0) return true;
+    if (strncmp(s, "gl", 2) == 0) return true;
     if (strncmp(s, "ANativeWindow", 13) == 0) return true;
     return strcmp(s, "vkGetInstanceProcAddr") == 0 ||
            strcmp(s, "vkEnumerateInstanceExtensionProperties") == 0 ||
@@ -3592,7 +3639,10 @@ const SymbolEntry kSyscallSymbols[] = {
     {"__FD_CLR_chk", reinterpret_cast<void*>(&bionic___FD_CLR_chk)},
     {"__cmsg_nxthdr", reinterpret_cast<void*>(&bionic___cmsg_nxthdr)},
 
-    // Logging
+    {"splice", reinterpret_cast<void*>(&bionic_splice)},
+    {"copy_file_range", reinterpret_cast<void*>(&bionic_copy_file_range)},
+    {"__assert2", reinterpret_cast<void*>(&bionic___assert2)},
+    {"__android_log_assert", reinterpret_cast<void*>(&bionic___android_log_assert)},
     {"__android_log_vprint", reinterpret_cast<void*>(&bionic_android_log_vprint)},
     {"__android_log_write", reinterpret_cast<void*>(&bionic_android_log_write)},
     {"__android_log_buf_write", reinterpret_cast<void*>(&bionic_android_log_buf_write)},

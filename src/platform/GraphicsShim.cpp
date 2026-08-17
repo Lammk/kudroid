@@ -1028,6 +1028,208 @@ extern "C" void bionic_glFramebufferParameteri(unsigned int target, unsigned int
     f(target, pname, param);
 }
 
+extern "C" unsigned int bionic_glCreateShader(unsigned int type) {
+    typedef unsigned int (*PFN)(unsigned int);
+    auto f = (PFN)get_gl_func("glCreateShader");
+    if (!f) { EGL_FORWARD_ERR("glCreateShader", ""); return 0; }
+    gpuLog("glCreateShader(type=0x%x): calling ANGLE...", type);
+#if defined(__APPLE__)
+    void* pool = objc_autoreleasePoolPush();
+    unsigned int s = f(type);
+    objc_autoreleasePoolPop(pool);
+#else
+    unsigned int s = f(type);
+#endif
+    gpuLog("glCreateShader -> %u", s);
+    return s;
+}
+
+extern "C" void bionic_glShaderSource(unsigned int shader, int count, const char* const* string, const int* length) {
+    typedef void (*PFN)(unsigned int, int, const char* const*, const int*);
+    auto f = (PFN)get_gl_func("glShaderSource");
+    if (!f) { EGL_FORWARD_ERR("glShaderSource", ""); return; }
+    gpuLog("glShaderSource(shader=%u count=%d): calling ANGLE...", shader, count);
+#if defined(__APPLE__)
+    void* pool = objc_autoreleasePoolPush();
+    f(shader, count, string, length);
+    objc_autoreleasePoolPop(pool);
+#else
+    f(shader, count, string, length);
+#endif
+    gpuLog("glShaderSource(shader=%u) -> OK", shader);
+}
+
+extern "C" void bionic_glCompileShader(unsigned int shader) {
+    typedef void (*PFN)(unsigned int);
+    auto f = (PFN)get_gl_func("glCompileShader");
+    if (!f) { EGL_FORWARD_ERR("glCompileShader", ""); return; }
+    gpuLog("glCompileShader(shader=%u): calling ANGLE...", shader);
+#if defined(__APPLE__)
+    void* pool = objc_autoreleasePoolPush();
+    f(shader);
+    objc_autoreleasePoolPop(pool);
+#else
+    f(shader);
+#endif
+    gpuLog("glCompileShader(shader=%u) -> OK", shader);
+}
+
+extern "C" void bionic_glGetShaderiv(unsigned int shader, unsigned int pname, int* params) {
+    typedef void (*PFN)(unsigned int, unsigned int, int*);
+    auto f = (PFN)get_gl_func("glGetShaderiv");
+    if (!f) { EGL_FORWARD_ERR("glGetShaderiv", ""); return; }
+    f(shader, pname, params);
+    gpuLog("glGetShaderiv(shader=%u pname=0x%x param=%d)", shader, pname, params ? *params : 0);
+}
+
+extern "C" void bionic_glGetShaderInfoLog(unsigned int shader, int maxLength, int* length, char* infoLog) {
+    typedef void (*PFN)(unsigned int, int, int*, char*);
+    auto f = (PFN)get_gl_func("glGetShaderInfoLog");
+    if (!f) { EGL_FORWARD_ERR("glGetShaderInfoLog", ""); return; }
+    f(shader, maxLength, length, infoLog);
+    gpuLog("glGetShaderInfoLog(shader=%u log='%s')", shader, infoLog ? infoLog : "");
+}
+
+extern "C" unsigned int bionic_glCreateProgram(void) {
+    typedef unsigned int (*PFN)(void);
+    auto f = (PFN)get_gl_func("glCreateProgram");
+    if (!f) { EGL_FORWARD_ERR("glCreateProgram", ""); return 0; }
+    gpuLog("glCreateProgram: calling ANGLE...");
+#if defined(__APPLE__)
+    void* pool = objc_autoreleasePoolPush();
+    unsigned int p = f();
+    objc_autoreleasePoolPop(pool);
+#else
+    unsigned int p = f();
+#endif
+    gpuLog("glCreateProgram -> %u", p);
+    return p;
+}
+
+extern "C" void bionic_glAttachShader(unsigned int program, unsigned int shader) {
+    typedef void (*PFN)(unsigned int, unsigned int);
+    auto f = (PFN)get_gl_func("glAttachShader");
+    if (!f) { EGL_FORWARD_ERR("glAttachShader", ""); return; }
+    gpuLog("glAttachShader(prog=%u, shader=%u)", program, shader);
+    f(program, shader);
+}
+
+extern "C" void bionic_glLinkProgram(unsigned int program) {
+    typedef void (*PFN)(unsigned int);
+    auto f = (PFN)get_gl_func("glLinkProgram");
+    if (!f) { EGL_FORWARD_ERR("glLinkProgram", ""); return; }
+    gpuLog("glLinkProgram(program=%u): calling ANGLE...", program);
+#if defined(__APPLE__)
+    void* pool = objc_autoreleasePoolPush();
+    f(program);
+    objc_autoreleasePoolPop(pool);
+#else
+    f(program);
+#endif
+    gpuLog("glLinkProgram(program=%u) -> OK", program);
+}
+
+extern "C" void bionic_glGetProgramiv(unsigned int program, unsigned int pname, int* params) {
+    typedef void (*PFN)(unsigned int, unsigned int, int*);
+    auto f = (PFN)get_gl_func("glGetProgramiv");
+    if (!f) { EGL_FORWARD_ERR("glGetProgramiv", ""); return; }
+    f(program, pname, params);
+    gpuLog("glGetProgramiv(prog=%u pname=0x%x param=%d)", program, pname, params ? *params : 0);
+}
+
+extern "C" void bionic_glUseProgram(unsigned int program) {
+    typedef void (*PFN)(unsigned int);
+    auto f = (PFN)get_gl_func("glUseProgram");
+    if (!f) { EGL_FORWARD_ERR("glUseProgram", ""); return; }
+    gpuLog("glUseProgram(prog=%u)", program);
+    f(program);
+}
+
+extern "C" int bionic_glGetAttribLocation(unsigned int program, const char* name) {
+    typedef int (*PFN)(unsigned int, const char*);
+    auto f = (PFN)get_gl_func("glGetAttribLocation");
+    if (!f) { EGL_FORWARD_ERR("glGetAttribLocation", ""); return -1; }
+    int loc = f(program, name);
+    gpuLog("glGetAttribLocation(prog=%u name='%s') -> %d", program, name ? name : "", loc);
+    return loc;
+}
+
+extern "C" void bionic_glEnableVertexAttribArray(unsigned int index) {
+    typedef void (*PFN)(unsigned int);
+    auto f = (PFN)get_gl_func("glEnableVertexAttribArray");
+    if (!f) { EGL_FORWARD_ERR("glEnableVertexAttribArray", ""); return; }
+    f(index);
+}
+
+extern "C" void bionic_glVertexAttribPointer(unsigned int index, int size, unsigned int type, unsigned char normalized, int stride, const void* pointer) {
+    typedef void (*PFN)(unsigned int, int, unsigned int, unsigned char, int, const void*);
+    auto f = (PFN)get_gl_func("glVertexAttribPointer");
+    if (!f) { EGL_FORWARD_ERR("glVertexAttribPointer", ""); return; }
+    gpuLog("glVertexAttribPointer(index=%u size=%d stride=%d ptr=%p)", index, size, stride, pointer);
+    f(index, size, type, normalized, stride, pointer);
+}
+
+extern "C" void bionic_glClearColor(float red, float green, float blue, float alpha) {
+    typedef void (*PFN)(float, float, float, float);
+    auto f = (PFN)get_gl_func("glClearColor");
+    if (!f) { EGL_FORWARD_ERR("glClearColor", ""); return; }
+    f(red, green, blue, alpha);
+}
+
+extern "C" void bionic_glClear(unsigned int mask) {
+    typedef void (*PFN)(unsigned int);
+    auto f = (PFN)get_gl_func("glClear");
+    if (!f) { EGL_FORWARD_ERR("glClear", ""); return; }
+    f(mask);
+}
+
+extern "C" void bionic_glDrawArrays(unsigned int mode, int first, int count) {
+    typedef void (*PFN)(unsigned int, int, int);
+    auto f = (PFN)get_gl_func("glDrawArrays");
+    if (!f) { EGL_FORWARD_ERR("glDrawArrays", ""); return; }
+    gpuLog("glDrawArrays(mode=0x%x first=%d count=%d): calling ANGLE...", mode, first, count);
+#if defined(__APPLE__)
+    void* pool = objc_autoreleasePoolPush();
+    f(mode, first, count);
+    objc_autoreleasePoolPop(pool);
+#else
+    f(mode, first, count);
+#endif
+    gpuLog("glDrawArrays -> OK");
+}
+
+extern "C" void bionic_glViewport(int x, int y, int width, int height) {
+    typedef void (*PFN)(int, int, int, int);
+    auto f = (PFN)get_gl_func("glViewport");
+    if (!f) { EGL_FORWARD_ERR("glViewport", ""); return; }
+    gpuLog("glViewport(%d, %d, %d, %d)", x, y, width, height);
+    f(x, y, width, height);
+}
+
+extern "C" void bionic_glGenBuffers(int n, unsigned int* buffers) {
+    typedef void (*PFN)(int, unsigned int*);
+    auto f = (PFN)get_gl_func("glGenBuffers");
+    if (!f) { EGL_FORWARD_ERR("glGenBuffers", ""); return; }
+    f(n, buffers);
+    gpuLog("glGenBuffers(n=%d) -> buf=%u", n, (buffers && n > 0) ? buffers[0] : 0);
+}
+
+extern "C" void bionic_glBindBuffer(unsigned int target, unsigned int buffer) {
+    typedef void (*PFN)(unsigned int, unsigned int);
+    auto f = (PFN)get_gl_func("glBindBuffer");
+    if (!f) { EGL_FORWARD_ERR("glBindBuffer", ""); return; }
+    gpuLog("glBindBuffer(target=0x%x buf=%u)", target, buffer);
+    f(target, buffer);
+}
+
+extern "C" void bionic_glBufferData(unsigned int target, long size, const void* data, unsigned int usage) {
+    typedef void (*PFN)(unsigned int, long, const void*, unsigned int);
+    auto f = (PFN)get_gl_func("glBufferData");
+    if (!f) { EGL_FORWARD_ERR("glBufferData", ""); return; }
+    gpuLog("glBufferData(target=0x%x size=%ld usage=0x%x)", target, size, usage);
+    f(target, size, data, usage);
+}
+
 const SymbolEntry kGraphicsSymbols[] = {
     {"ANativeWindow_fromSurface", reinterpret_cast<void*>(&bionic_ANativeWindow_fromSurface)},
     {"ANativeWindow_getWidth", reinterpret_cast<void*>(&bionic_ANativeWindow_getWidth)},
@@ -1072,6 +1274,26 @@ const SymbolEntry kGraphicsSymbols[] = {
     {"glMemoryBarrier", reinterpret_cast<void*>(&bionic_glMemoryBarrier)},
     {"glBindImageTexture", reinterpret_cast<void*>(&bionic_glBindImageTexture)},
     {"glFramebufferParameteri", reinterpret_cast<void*>(&bionic_glFramebufferParameteri)},
+    {"glCreateShader", reinterpret_cast<void*>(&bionic_glCreateShader)},
+    {"glShaderSource", reinterpret_cast<void*>(&bionic_glShaderSource)},
+    {"glCompileShader", reinterpret_cast<void*>(&bionic_glCompileShader)},
+    {"glGetShaderiv", reinterpret_cast<void*>(&bionic_glGetShaderiv)},
+    {"glGetShaderInfoLog", reinterpret_cast<void*>(&bionic_glGetShaderInfoLog)},
+    {"glCreateProgram", reinterpret_cast<void*>(&bionic_glCreateProgram)},
+    {"glAttachShader", reinterpret_cast<void*>(&bionic_glAttachShader)},
+    {"glLinkProgram", reinterpret_cast<void*>(&bionic_glLinkProgram)},
+    {"glGetProgramiv", reinterpret_cast<void*>(&bionic_glGetProgramiv)},
+    {"glUseProgram", reinterpret_cast<void*>(&bionic_glUseProgram)},
+    {"glGetAttribLocation", reinterpret_cast<void*>(&bionic_glGetAttribLocation)},
+    {"glEnableVertexAttribArray", reinterpret_cast<void*>(&bionic_glEnableVertexAttribArray)},
+    {"glVertexAttribPointer", reinterpret_cast<void*>(&bionic_glVertexAttribPointer)},
+    {"glClearColor", reinterpret_cast<void*>(&bionic_glClearColor)},
+    {"glClear", reinterpret_cast<void*>(&bionic_glClear)},
+    {"glDrawArrays", reinterpret_cast<void*>(&bionic_glDrawArrays)},
+    {"glViewport", reinterpret_cast<void*>(&bionic_glViewport)},
+    {"glGenBuffers", reinterpret_cast<void*>(&bionic_glGenBuffers)},
+    {"glBindBuffer", reinterpret_cast<void*>(&bionic_glBindBuffer)},
+    {"glBufferData", reinterpret_cast<void*>(&bionic_glBufferData)},
     {"vkGetInstanceProcAddr", reinterpret_cast<void*>(&bionic_vkGetInstanceProcAddr)},
     {"vkCreateAndroidSurfaceKHR", reinterpret_cast<void*>(&bionic_vkCreateAndroidSurfaceKHR)},
     {"vkEnumerateInstanceExtensionProperties", reinterpret_cast<void*>(&bionic_vkEnumerateInstanceExtensionProperties)},
