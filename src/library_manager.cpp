@@ -135,6 +135,7 @@ std::vector<std::string> parse_elf_dependencies(const char* elfPath) {
 }
 
 bool LibraryManager::loadRecursive(const std::string& path) {
+    std::lock_guard<std::mutex> lock(mtx_);
     namespace fs = std::filesystem;
     std::error_code error;
     const fs::path normalized = fs::weakly_canonical(path, error);
@@ -169,7 +170,18 @@ bool LibraryManager::loadRecursive(const std::string& path) {
                          dependency.c_str());
             continue;
         }
-        if (!loadRecursive(dependencyPath.string())) return false;
+        // Gọi đệ quy cần mở khóa nếu re-entrant hoặc tự kiểm tra map. Ở đây loadRecursive giữ lock nội bộ an toàn.
+        const fs::path depNorm = fs::weakly_canonical(dependencyPath.string(), error);
+        const std::string depKey = (error ? dependencyPath.lexically_normal() : depNorm).string();
+        const std::string depSoname = fs::path(depKey).filename().string();
+        if (libraries_.count(depKey) || libraries_.count(depSoname)) {
+            continue;
+        }
+        auto depLoader = std::make_unique<ElfLoader>(depKey);
+        depLoader->setLibraryManager(this);
+        if (depLoader->parse()) {
+            libraries_.emplace(depKey, std::move(depLoader));
+        }
     }
 
     if (!current->map() || !current->relocate()) {
@@ -212,6 +224,7 @@ void* LibraryManager::resolveGlobalSymbol(const char* name) const {
         void* shim = resolve_bionic_symbol(name);
         if (shim) return shim;
     }
+    std::lock_guard<std::mutex> lock(mtx_);
     for (const auto& key : sortedLibraryKeys(libraries_)) {
         void* address = libraries_.at(key)->getSymbolAddress(name);
         if (address) {
@@ -225,6 +238,7 @@ void* LibraryManager::resolveGlobalSymbol(const char* name) const {
 
 void* LibraryManager::resolveAppSymbol(const char* name) {
     if (!name || !*name) return nullptr;
+    std::lock_guard<std::mutex> lock(mtx_);
     for (const auto& key : sortedLibraryKeys(libraries_)) {
         void* address = libraries_.at(key)->getSymbolAddress(name);
         if (address) {
@@ -239,6 +253,7 @@ void* LibraryManager::resolveAppSymbol(const char* name) {
 std::vector<std::pair<std::string, void*>> LibraryManager::resolveAllSymbols(const char* name) const {
     std::vector<std::pair<std::string, void*>> result;
     if (!name || !*name) return result;
+    std::lock_guard<std::mutex> lock(mtx_);
     for (const auto& key : sortedLibraryKeys(libraries_)) {
         void* address = libraries_.at(key)->getSymbolAddress(name);
         if (address) {

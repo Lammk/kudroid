@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include <memory>
 #include <vector>
+#include <mutex>
 
 namespace kudroid {
 
@@ -144,6 +145,7 @@ public:
     [[nodiscard]] const std::string& lastError() const { return lastError_; }
 
 private:
+    mutable std::mutex mtx_;
     std::unordered_map<std::string, std::unique_ptr<ElfLoader>> libraries_;
     std::string lastError_;
 };
