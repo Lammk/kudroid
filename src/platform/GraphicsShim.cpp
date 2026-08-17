@@ -169,14 +169,14 @@ extern "C" int bionic_ANativeWindow_lock(void* window, ANativeWindow_Buffer* out
 }
 
 #if defined(__APPLE__)
-extern "C" void kudroid_blit_canvas_to_layer(void* layer, const void* bits, int width, int height);
+extern "C" __attribute__((weak)) void kudroid_blit_canvas_to_layer(void* layer, const void* bits, int width, int height);
 #endif
 
 extern "C" int bionic_ANativeWindow_unlockAndPost(void* window) {
     (void)window;
     if (!s_canvasBits || s_canvasWidth <= 0 || s_canvasHeight <= 0) return 0;
 #if defined(__APPLE__)
-    if (g_metalLayer) {
+    if (g_metalLayer && kudroid_blit_canvas_to_layer) {
         kudroid_blit_canvas_to_layer(g_metalLayer, s_canvasBits, s_canvasWidth, s_canvasHeight);
     }
 #endif
