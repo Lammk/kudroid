@@ -727,8 +727,8 @@ extern "C" const char* kudroid_install_apk(const char* apkPath) {
                     }
                 }
             }
-            // Nếu có package ID chuẩn, chuyển thư mục về đúng package ID để mọi lần cài / update
-            // đều ghi đè và nâng cấp cùng một app thay vì tạo app riêng rẽ do tên file khác nhau.
+            std::filesystem::path appDir = tempTarget;
+            std::string effectiveAppName = appName;
             if (!pkgId.empty() && pkgId != appName) {
                 std::filesystem::path finalTarget = std::filesystem::path(remapper.androidRoot()) / "data/app" / pkgId;
                 std::error_code ec;
@@ -738,7 +738,22 @@ extern "C" const char* kudroid_install_apk(const char* apkPath) {
                 std::filesystem::rename(tempTarget, finalTarget, ec);
                 if (!ec) {
                     log += "[kudroid_apk] Consolidated app directory to Android Package ID: " + pkgId + "\n";
+                    appDir = finalTarget;
+                    effectiveAppName = pkgId;
                 }
+            }
+
+            // Dịch DEX sang JAR ngay trong lúc cài đặt APK (AOT Compilation)
+            log += "[kudroid_apk] Compiling DEX files (DEX to JAR AOT)...\n";
+            const std::filesystem::path aotCacheDir =
+                std::filesystem::path(remapper.androidRoot()) / "data/dalvik-cache" / effectiveAppName;
+            std::string aotError;
+            const std::string classesJar = kudroid::DexAotCache::translate_dex_if_needed(
+                appDir.string(), aotCacheDir.string(), &aotError);
+            if (!classesJar.empty()) {
+                log += "[kudroid_apk] DEX compiled to JAR successfully: " + classesJar + "\n";
+            } else {
+                log += "[kudroid_apk] DEX compilation notice: " + aotError + "\n";
             }
         } else {
             log += "[kudroid_apk] INSTALL FAILED: " +

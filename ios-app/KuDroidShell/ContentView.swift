@@ -584,7 +584,20 @@ struct APKInstallerView: View {
                                 .font(.subheadline.weight(.semibold))
                                 .foregroundColor(.green)
                             
-                            Text("Decompressing assets, compiling DEX & extracting ARM64 libraries...")
+                            HStack(spacing: 6) {
+                                Image(systemName: "cpu")
+                                    .font(.caption)
+                                    .foregroundColor(.green)
+                                Text("Compiling DEX file (DEX→JAR AOT)")
+                                    .font(.caption.weight(.medium))
+                                    .foregroundColor(.white)
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .background(Color.green.opacity(0.15))
+                            .cornerRadius(6)
+                            
+                            Text("Extracting assets, translating DEX bytecode & linking native ARM64 libraries...")
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
                                 .multilineTextAlignment(.center)
@@ -670,7 +683,7 @@ struct APKInstallerView: View {
         guard let selectedAPK else { return }
         withAnimation {
             isInstalling = true
-            installStep = "Installing \(selectedAPK.lastPathComponent)..."
+            installStep = "Compiling DEX file & installing \(selectedAPK.lastPathComponent)..."
         }
         
         DispatchQueue.global(qos: .userInitiated).async {
