@@ -197,7 +197,7 @@ class RemoteDebugClient: NSObject {
             NSLog("[KDBClient] Saved incoming APK to %@. Triggering native extraction...", tempURL.path)
             
             DispatchQueue.global(qos: .userInteractive).async {
-                let cString = kudroid_install_apk(tempURL.path)
+                let cString = tempURL.path.withCString { kudroid_install_apk($0) }
                 var log = ""
                 if let cString = cString {
                     log = String(cString: cString)
