@@ -39,3 +39,4 @@ kudroid_*.txt
 # OS
 .DS_Store
 logs/
+HANDOVER_FOR_CLAUDE_OPUS.md
