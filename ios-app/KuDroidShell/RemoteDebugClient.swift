@@ -116,7 +116,8 @@ class RemoteDebugClient: NSObject {
 
     private func handleCommand(_ text: String) {
         guard let data = text.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rawObj = try? JSONSerialization.jsonObject(with: data, options: []),
+              let json = rawObj as? [String: Any],
               let action = json["action"] as? String else {
             return
         }
