@@ -817,6 +817,76 @@ func runMultiElfTest() -> String {
     return log
 }
 
+func saveTestLog(filename: String, content: String) {
+    if let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+        let fileURL = docs.appendingPathComponent(filename)
+        try? content.write(to: fileURL, atomically: true, encoding: .utf8)
+    }
+}
+
+func executeKuDroidTest(name: String) -> (success: Bool, log: String, logFilename: String) {
+    let lower = name.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+    var log = ""
+    var logFile = "test_\(lower).log"
+
+    switch lower {
+    case "gpu", "gpu_native", "shader":
+        log = runGpuTest()
+        logFile = "test_gpu.log"
+
+    case "bionic":
+        log = runBionicExecutionTest()
+        logFile = "test_bionic.log"
+
+    case "jni", "jni_massive":
+        log = runJniMassiveTest()
+        logFile = "test_jni.log"
+
+    case "jvm", "jni_jvm":
+        log = runJniJvmTest()
+        logFile = "test_jvm.log"
+
+    case "syscall", "syscalls":
+        log = runSyscallSoTest()
+        logFile = "test_syscall.log"
+
+    case "multi_elf", "linker":
+        log = runMultiElfTest()
+        logFile = "test_multi_elf.log"
+
+    case "opengl_so", "opengl":
+        log = runGpuOpenglSoTest()
+        logFile = "test_opengl_so.log"
+
+    case "vulkan_so", "vulkan":
+        log = runGpuVulkanSoTest()
+        logFile = "test_vulkan_so.log"
+
+    case "vfs":
+        log = runVFSExtendedTest()
+        logFile = "test_vfs.log"
+
+    case "all":
+        var combined = "=== RUNNING ALL KUDROID ISOLATED SUBSYSTEM TESTS ===\n\n"
+        let tests = ["gpu", "bionic", "syscall", "vfs", "multi_elf", "jvm", "jni"]
+        for t in tests {
+            combined += "--- TEST: \(t.uppercased()) ---\n"
+            let res = executeKuDroidTest(name: t)
+            combined += res.log + "\n\n"
+        }
+        log = combined
+        logFile = "test_all.log"
+
+    default:
+        log = "❌ Unknown test: '\(name)'. Available: gpu, bionic, jni, jvm, syscall, multi_elf, opengl_so, vulkan_so, vfs, all"
+        logFile = "test_error.log"
+    }
+
+    saveTestLog(filename: logFile, content: log)
+    let isSuccess = !log.contains("❌") && !log.contains("ERROR") && !log.contains("Failed")
+    return (isSuccess, log, logFile)
+}
+
 // mark: - Bộ thực thi độc quyền toàn màn hình (Dedicated Clean Container)
 struct DedicatedAppRunnerView: UIViewControllerRepresentable {
     let appName: String

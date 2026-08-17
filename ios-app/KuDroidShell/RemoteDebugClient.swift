@@ -155,8 +155,24 @@ class RemoteDebugClient: NSObject {
             let file = json["file"] as? String ?? "kudroid_crash"
             handleDumpCommand(targetFile: file)
 
+        case "test":
+            let name = json["name"] as? String ?? "gpu"
+            handleTestCommand(testName: name)
+
         default:
             break
+        }
+    }
+
+    private func handleTestCommand(testName: String) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let res = executeKuDroidTest(name: testName)
+            self?.sendResponse([
+                "success": res.success,
+                "test": testName,
+                "file": res.logFilename,
+                "log": res.log
+            ])
         }
     }
 
