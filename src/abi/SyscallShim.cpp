@@ -2551,9 +2551,29 @@ struct KudroidProp {
 const KudroidProp kKnownProps[] = {
     {"ro.build.version.sdk", "29"},
     {"ro.build.version.release", "10"},
+    {"ro.build.version.codename", "REL"},
+    {"ro.build.version.incremental", "6000000"},
+    {"ro.build.type", "user"},
+    {"ro.build.tags", "release-keys"},
+    {"ro.build.fingerprint", "google/kudroid/kudroid:10/QP1A.190711.020/6000000:user/release-keys"},
+    {"ro.product.model", "KuDroid Pixel"},
+    {"ro.product.manufacturer", "Google"},
+    {"ro.product.brand", "google"},
+    {"ro.product.device", "kudroid_arm64"},
+    {"ro.product.name", "kudroid"},
     {"ro.product.cpu.abi", "arm64-v8a"},
+    {"ro.product.cpu.abilist", "arm64-v8a"},
+    {"ro.product.cpu.abilist64", "arm64-v8a"},
+    {"ro.hardware", "kudroid"},
+    {"ro.board.platform", "kudroid"},
+    {"ro.boot.hardware", "kudroid"},
+    {"ro.sf.lcd_density", "480"},
+    {"ro.opengles.version", "196610"}, // OpenGL ES 3.2 (0x00030002)
     {"ro.debuggable", "0"},
     {"persist.sys.timezone", "UTC"},
+    {"persist.sys.locale", "en-US"},
+    {"sys.boot_completed", "1"},
+    {"gsm.version.baseband", "1.0"},
 };
 constexpr size_t kKnownPropsCount = sizeof(kKnownProps) / sizeof(kKnownProps[0]);
 

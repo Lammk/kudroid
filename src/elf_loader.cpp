@@ -309,6 +309,7 @@ static const uint32_t R_AARCH64_RELATIVE = 1027;
 static const uint32_t R_AARCH64_GLOB_DAT = 1025;
 static const uint32_t R_AARCH64_JUMP_SLOT = 1026;
 static const uint32_t R_AARCH64_ABS64 = 257;
+static const uint32_t R_AARCH64_IRELATIVE = 1032;
 
 // Đếm số symbol THẬT trong .dynsym bằng hash table (DT_HASH nchain hoặc
 // DT_GNU_HASH chains), thay vì khoảng cách (strtabOff - symtabOff)/24.
@@ -708,6 +709,11 @@ bool ElfLoader::relocate() {
                 static_cast<char*>(base_) + relocs[i].r_offset);
             if (type == R_AARCH64_RELATIVE) {
                 *target = reinterpret_cast<uintptr_t>(base_) + relocs[i].r_addend;
+            } else if (type == R_AARCH64_IRELATIVE) {
+                typedef uintptr_t (*ifunc_resolver_t)(void);
+                auto resolver = reinterpret_cast<ifunc_resolver_t>(
+                    static_cast<char*>(base_) + relocs[i].r_addend);
+                *target = resolver ? resolver() : 0;
             } else if (type == R_AARCH64_GLOB_DAT || type == R_AARCH64_JUMP_SLOT || type == R_AARCH64_ABS64 || type == R_AARCH64_COPY) {
                 if (symbolIndex >= symbolCount || symtab[symbolIndex].st_name >= strsz) {
                     lastError_ = "Invalid relocation symbol index";
@@ -740,7 +746,10 @@ bool ElfLoader::relocate() {
                         memcpy(target, address, symtab[symbolIndex].st_size);
                     }
                 } else {
-                    *target = reinterpret_cast<uintptr_t>(address) + relocs[i].r_addend;
+                    // QUAN TRỌNG: Nếu address == nullptr (weak symbol không tìm thấy),
+                    // gán đúng 0 (NULL). Không cộng addend vào NULL vì sẽ tạo ra địa chỉ
+                    // rác nhỏ (vd 0x18/0x20) làm app tưởng con trỏ hợp lệ rồi crash SIGSEGV.
+                    *target = address ? (reinterpret_cast<uintptr_t>(address) + relocs[i].r_addend) : 0;
                 }
             } else if (type == R_AARCH64_TLS_DTPMOD64) {
                 *target = 1; // id mô-đun (1 cho thư viện chính)
