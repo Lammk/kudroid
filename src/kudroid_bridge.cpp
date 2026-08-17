@@ -548,17 +548,16 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
     }
 
     // Nếu crash xảy ra trên background thread (render thread, game thread, worker thread):
-    // Thay vì gọi raise(sig) làm sập toàn bộ tiến trình KuDroid Shell trên iOS,
-    // chúng ta kết thúc êm ái luồng lỗi này (pthread_exit) để giao diện Launcher
-    // tự động phát hiện và quay về màn hình chính!
+    // Không gọi hàm lock mutex trong signal handler để tránh deadlock/freeze!
 #if defined(__APPLE__)
     const bool isBackground = !pthread_main_np();
 #else
     const bool isBackground = g_mainThread != 0 && !pthread_equal(pthread_self(), g_mainThread);
 #endif
     if (isBackground) {
-        kudroid_android_log_message(5, "KuDroidCrash", "Gentle crash: background thread terminated cleanly without killing launcher.");
-        pthread_exit(nullptr);
+        // Luồng background bị crash: giải phóng và tạm dừng luồng này để Swift timer phát hiện crash
+        // và tự động hiển thị Gentle Crash modal mà không làm freeze/treo launcher.
+        pause();
     } else {
         // Nếu crash ngay trên main thread, ghi nhận và kết thúc an toàn
         signal(sig, SIG_DFL);

@@ -824,6 +824,27 @@ class NativeMetalViewController: UIViewController {
         super.viewDidLoad()
         self.view.backgroundColor = .clear
         metalView.backgroundColor = .clear
+
+        // Nút đóng nổi (Floating Exit Button) để người dùng quay về Launcher bất cứ lúc nào
+        let closeButton = UIButton(type: .system)
+        let config = UIImage.SymbolConfiguration(pointSize: 22, weight: .bold)
+        closeButton.setImage(UIImage(systemName: "xmark.circle.fill", withConfiguration: config), for: .normal)
+        closeButton.tintColor = UIColor.white.withAlphaComponent(0.7)
+        closeButton.translatesAutoresizingMaskIntoConstraints = false
+        closeButton.addTarget(self, action: #selector(handleExitButton), for: .touchUpInside)
+        view.addSubview(closeButton)
+
+        NSLayoutConstraint.activate([
+            closeButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 10),
+            closeButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+            closeButton.widthAnchor.constraint(equalToConstant: 40),
+            closeButton.heightAnchor.constraint(equalToConstant: 40)
+        ])
+    }
+
+    @objc private func handleExitButton() {
+        crashCheckTimer?.invalidate()
+        onExit()
     }
 
     override func viewDidLayoutSubviews() {
@@ -886,12 +907,11 @@ class NativeMetalViewController: UIViewController {
                 free(UnsafeMutablePointer(mutating: cString))
             }
             DispatchQueue.main.async {
-                self.crashCheckTimer?.invalidate()
                 if kudroid_has_crashed() != 0 {
+                    self.crashCheckTimer?.invalidate()
                     self.handleCrash(fallbackLog: logOutput)
-                } else {
-                    self.onExit()
                 }
+                // Giữ container hoạt động liên tục cho luồng game/render tiếp tục chạy
             }
         }
     }

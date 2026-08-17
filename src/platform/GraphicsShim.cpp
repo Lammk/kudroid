@@ -616,6 +616,9 @@ extern "C" EGLSurface bionic_eglCreateWindowSurface(EGLDisplay dpy, EGLConfig co
     gpuLog("eglCreateWindowSurface: window=%p", (void*)win);
     auto host_func = (PFN_eglCreateWindowSurface)get_egl_func("eglCreateWindowSurface");
     if (host_func) {
+#if defined(__APPLE__)
+        void* pool = objc_autoreleasePoolPush();
+#endif
         // IMPORTANT: ANGLE on iOS expects a CAMetalLayer as the native window.
         // The Android game passes an ANativeWindow (which our
         // ANativeWindow_fromSurface already maps to g_metalLayer). Force the
@@ -624,6 +627,9 @@ extern "C" EGLSurface bionic_eglCreateWindowSurface(EGLDisplay dpy, EGLConfig co
         gpuLog("eglCreateWindowSurface: calling ANGLE with window=%p...", (void*)nativeWin);
         EGLSurface s = host_func(dpy, config, nativeWin, attrib_list);
         gpuLog("eglCreateWindowSurface returned %p", (void*)s);
+#if defined(__APPLE__)
+        objc_autoreleasePoolPop(pool);
+#endif
         return s;
     }
     gpuLog("eglCreateWindowSurface: not found in host");
