@@ -679,18 +679,9 @@ extern "C" EGLSurface bionic_eglCreateWindowSurface(EGLDisplay dpy, EGLConfig co
         EGLNativeWindowType nativeWin = (EGLNativeWindowType)(resolvedLayer ? resolvedLayer : g_metalLayer);
         gpuLog("eglCreateWindowSurface: calling ANGLE with layer=%p...", (void*)nativeWin);
 #if defined(__APPLE__)
-        __block EGLSurface s = EGL_NO_SURFACE;
-        if (pthread_main_np()) {
-            void* pool = objc_autoreleasePoolPush();
-            s = host_func(dpy, config, nativeWin, attrib_list);
-            objc_autoreleasePoolPop(pool);
-        } else {
-            dispatch_sync(dispatch_get_main_queue(), ^{
-                void* pool = objc_autoreleasePoolPush();
-                s = host_func(dpy, config, nativeWin, attrib_list);
-                objc_autoreleasePoolPop(pool);
-            });
-        }
+        void* pool = objc_autoreleasePoolPush();
+        EGLSurface s = host_func(dpy, config, nativeWin, attrib_list);
+        objc_autoreleasePoolPop(pool);
         gpuLog("eglCreateWindowSurface returned %p", (void*)s);
         return s;
 #else
@@ -871,23 +862,11 @@ extern "C" EGLBoolean bionic_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) 
         tls_autorelease_pool = nullptr;
     }
     tls_autorelease_pool = objc_autoreleasePoolPush();
-
-    __block EGLBoolean r = EGL_FALSE;
-    if (pthread_main_np()) {
-        r = f(dpy, surface);
-    } else {
-        dispatch_sync(dispatch_get_main_queue(), ^{
-            r = f(dpy, surface);
-        });
-    }
-    gpuLog("eglSwapBuffers(surface=%p) -> %s", (void*)surface, r ? "true" : "false");
-    return r;
-#else
+#endif
     gpuLog("eglSwapBuffers: calling ANGLE...");
     EGLBoolean r = f(dpy, surface);
     gpuLog("eglSwapBuffers(surface=%p) -> %s", (void*)surface, r ? "true" : "false");
     return r;
-#endif
 }
 
 extern "C" EGLBoolean bionic_eglSwapInterval(EGLDisplay dpy, EGLint interval) {

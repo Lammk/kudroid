@@ -1032,7 +1032,21 @@ class NativeMetalView: UIView {
         metalLayer.allowsNextDrawableTimeout = false
         metalLayer.maximumDrawableCount = 3
         metalLayer.presentsWithTransaction = false
-        metalLayer.contentsScale = UIScreen.main.scale
+        metalLayer.isOpaque = true
+        let scale = UIScreen.main.scale
+        metalLayer.contentsScale = scale
+        let bounds = self.bounds.size.width > 0 ? self.bounds : UIScreen.main.bounds
+        metalLayer.drawableSize = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard let metalLayer = self.layer as? CAMetalLayer else { return }
+        let scale = UIScreen.main.scale
+        let sz = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+        if sz.width > 0 && sz.height > 0 && metalLayer.drawableSize != sz {
+            metalLayer.drawableSize = sz
+        }
     }
 
     private func injectTouch(_ touches: Set<UITouch>, action: Int32) {
