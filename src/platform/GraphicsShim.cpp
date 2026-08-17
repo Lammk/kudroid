@@ -131,6 +131,11 @@ struct ANativeWindow_Buffer {
     void* bits;
 };
 
+static void* s_canvasBits = nullptr;
+static size_t s_canvasBitsSize = 0;
+static int s_canvasWidth = 1080;
+static int s_canvasHeight = 1920;
+
 extern "C" int bionic_ANativeWindow_lock(void* window, ANativeWindow_Buffer* outBuffer,
                                          void* inOutDirtyRect) {
     (void)inOutDirtyRect;
@@ -145,26 +150,36 @@ extern "C" int bionic_ANativeWindow_lock(void* window, ANativeWindow_Buffer* out
         w = 1080;
         h = 1920;
     }
-    static void* bits = nullptr;
-    static size_t bitsSize = 0;
+    s_canvasWidth = w;
+    s_canvasHeight = h;
     const size_t needed = static_cast<size_t>(w) * static_cast<size_t>(h) * 4;
-    if (!bits || needed > bitsSize) {
-        void* nb = std::realloc(bits, needed);
+    if (!s_canvasBits || needed > s_canvasBitsSize) {
+        void* nb = std::realloc(s_canvasBits, needed);
         if (!nb) return -1;
-        bits = nb;
-        bitsSize = needed;
-        std::memset(bits, 0, needed);
+        s_canvasBits = nb;
+        s_canvasBitsSize = needed;
+        std::memset(s_canvasBits, 0, needed);
     }
     outBuffer->width = w;
     outBuffer->height = h;
     outBuffer->stride = w;
     outBuffer->format = bionic_ANativeWindow_getFormat(window);
-    outBuffer->bits = bits;
+    outBuffer->bits = s_canvasBits;
     return 0;
 }
 
+#if defined(__APPLE__)
+extern "C" void kudroid_blit_canvas_to_layer(void* layer, const void* bits, int width, int height);
+#endif
+
 extern "C" int bionic_ANativeWindow_unlockAndPost(void* window) {
     (void)window;
+    if (!s_canvasBits || s_canvasWidth <= 0 || s_canvasHeight <= 0) return 0;
+#if defined(__APPLE__)
+    if (g_metalLayer) {
+        kudroid_blit_canvas_to_layer(g_metalLayer, s_canvasBits, s_canvasWidth, s_canvasHeight);
+    }
+#endif
     return 0;
 }
 

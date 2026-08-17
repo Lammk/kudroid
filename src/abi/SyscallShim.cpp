@@ -713,14 +713,14 @@ extern "C" void* bionic_mmap64(void *addr, size_t length, int prot, int flags, i
 }
 
 extern "C" int bionic_mprotect(void *addr, size_t len, int prot) {
-    if (prot & PROT_EXEC) {
-        logAndroidMessage(4, "KuDroidSyscall", "bionic_mprotect: setting PROT_EXEC on memory at " + std::to_string((uintptr_t)addr) + " len=" + std::to_string(len));
+    if (!addr || len == 0) return 0;
+    int r = ::mprotect(addr, len, prot);
+#if defined(__APPLE__)
+    if (r != 0 && (prot & PROT_EXEC)) {
+        // Fallback: If PROT_EXEC fails on iOS due to W^X policy, try PROT_READ | PROT_WRITE
+        r = ::mprotect(addr, len, prot & ~PROT_EXEC);
     }
-    const int r = ::mprotect(addr, len, prot);
-    logAndroidMessage(3, "KuDroidSyscall", "mprotect(addr=" + std::to_string((uintptr_t)addr) +
-                      ", len=" + std::to_string(len) + ", prot=0x" +
-                      [](int p){ char b[16]; snprintf(b, sizeof(b), "%x", p); return std::string(b); }(prot) +
-                      ") -> " + (r == 0 ? "0" : "-1 errno=" + std::to_string(errno)));
+#endif
     return r;
 }
 

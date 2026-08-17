@@ -987,6 +987,39 @@ class NativeMetalView: UIView {
     }
 }
 
+// Hàm nhận buffer 2D vẽ bằng CPU từ C++ và blit thẳng lên màn hình iOS (CALayer)
+@_cdecl("kudroid_blit_canvas_to_layer")
+public func kudroid_blit_canvas_to_layer(layerPtr: UnsafeMutableRawPointer?, bits: UnsafeRawPointer?, width: Int32, height: Int32) {
+    guard let layerPtr = layerPtr, let bits = bits, width > 0, height > 0 else { return }
+    let layer = Unmanaged<CALayer>.fromOpaque(layerPtr).takeUnretainedValue()
+    let w = Int(width)
+    let h = Int(height)
+    let bytesPerRow = w * 4
+    let colorSpace = CGColorSpaceCreateDeviceRGB()
+    let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue)
+    guard let dataProvider = CGDataProvider(dataInfo: nil, data: bits, size: w * h * 4, releaseData: { _, _, _ in }) else { return }
+    guard let cgImage = CGImage(
+        width: w,
+        height: h,
+        bitsPerComponent: 8,
+        bitsPerPixel: 32,
+        bytesPerRow: bytesPerRow,
+        space: colorSpace,
+        bitmapInfo: bitmapInfo,
+        provider: dataProvider,
+        decode: nil,
+        shouldInterpolate: false,
+        intent: .defaultIntent
+    ) else { return }
+
+    DispatchQueue.main.async {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layer.contents = cgImage
+        CATransaction.commit()
+    }
+}
+
 // mark: - Modal thông báo Gentle Crash
 struct CrashAlertView: View {
     let crashInfo: CrashInfo
