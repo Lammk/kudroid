@@ -145,7 +145,7 @@ public:
     [[nodiscard]] const std::string& lastError() const { return lastError_; }
 
 private:
-    mutable std::mutex mtx_;
+    mutable std::recursive_mutex mtx_;
     std::unordered_map<std::string, std::unique_ptr<ElfLoader>> libraries_;
     std::string lastError_;
 };

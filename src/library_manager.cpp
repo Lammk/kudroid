@@ -135,7 +135,7 @@ std::vector<std::string> parse_elf_dependencies(const char* elfPath) {
 }
 
 bool LibraryManager::loadRecursive(const std::string& path) {
-    std::lock_guard<std::mutex> lock(mtx_);
+    std::lock_guard<std::recursive_mutex> lock(mtx_);
     namespace fs = std::filesystem;
     std::error_code error;
     const fs::path normalized = fs::weakly_canonical(path, error);
@@ -224,7 +224,7 @@ void* LibraryManager::resolveGlobalSymbol(const char* name) const {
         void* shim = resolve_bionic_symbol(name);
         if (shim) return shim;
     }
-    std::lock_guard<std::mutex> lock(mtx_);
+    std::lock_guard<std::recursive_mutex> lock(mtx_);
     for (const auto& key : sortedLibraryKeys(libraries_)) {
         void* address = libraries_.at(key)->getSymbolAddress(name);
         if (address) {
@@ -238,7 +238,7 @@ void* LibraryManager::resolveGlobalSymbol(const char* name) const {
 
 void* LibraryManager::resolveAppSymbol(const char* name) {
     if (!name || !*name) return nullptr;
-    std::lock_guard<std::mutex> lock(mtx_);
+    std::lock_guard<std::recursive_mutex> lock(mtx_);
     for (const auto& key : sortedLibraryKeys(libraries_)) {
         void* address = libraries_.at(key)->getSymbolAddress(name);
         if (address) {
@@ -253,7 +253,7 @@ void* LibraryManager::resolveAppSymbol(const char* name) {
 std::vector<std::pair<std::string, void*>> LibraryManager::resolveAllSymbols(const char* name) const {
     std::vector<std::pair<std::string, void*>> result;
     if (!name || !*name) return result;
-    std::lock_guard<std::mutex> lock(mtx_);
+    std::lock_guard<std::recursive_mutex> lock(mtx_);
     for (const auto& key : sortedLibraryKeys(libraries_)) {
         void* address = libraries_.at(key)->getSymbolAddress(name);
         if (address) {
