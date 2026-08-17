@@ -790,10 +790,15 @@ struct DedicatedAppRunnerView: UIViewControllerRepresentable {
     let onCrash: (String, String) -> Void
 
     func makeUIViewController(context: Context) -> NativeMetalViewController {
-        NativeMetalViewController(appName: appName, onExit: onExit, onCrash: onCrash)
+        let vc = NativeMetalViewController(appName: appName, onExit: onExit, onCrash: onCrash)
+        return vc
     }
 
-    func updateUIViewController(_ uiViewController: NativeMetalViewController, context: Context) {}
+    func updateUIViewController(_ uiViewController: NativeMetalViewController, context: Context) {
+        DispatchQueue.main.async {
+            uiViewController.startAppIfNeeded()
+        }
+    }
 }
 
 class NativeMetalViewController: UIViewController {
@@ -803,6 +808,7 @@ class NativeMetalViewController: UIViewController {
     private var isStarted = false
     private var metalView: NativeMetalView!
     private var crashCheckTimer: Timer?
+    private var statusLabel: UILabel!
 
     init(appName: String, onExit: @escaping () -> Void, onCrash: @escaping (String, String) -> Void) {
         self.appName = appName
@@ -819,8 +825,6 @@ class NativeMetalViewController: UIViewController {
         metalView = NativeMetalView(frame: UIScreen.main.bounds)
         self.view = metalView
     }
-
-    private var statusLabel: UILabel!
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -866,6 +870,8 @@ class NativeMetalViewController: UIViewController {
                 self?.statusLabel.alpha = 0.0
             }
         }
+
+        startAppIfNeeded()
     }
 
     @objc private func handleExitButton() {
@@ -875,8 +881,6 @@ class NativeMetalViewController: UIViewController {
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        // Khóa drawableSize: Chỉ khởi tạo hoặc cập nhật nếu app chưa chạy.
-        // Tuyệt đối không can thiệp layer khi background render thread đang swap buffer.
         if !isStarted, let metalLayer = view.layer as? CAMetalLayer {
             let scale = UIScreen.main.scale
             let bounds = view.bounds.size.width > 0 ? view.bounds : UIScreen.main.bounds
@@ -885,12 +889,19 @@ class NativeMetalViewController: UIViewController {
                 metalLayer.drawableSize = targetSize
             }
         }
+        startAppIfNeeded()
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        startAppIfNeeded()
+    }
+
+    func startAppIfNeeded() {
         guard !isStarted else { return }
         isStarted = true
+
+        NSLog("[KuDroid] >>> Launching guest app: %@ <<<", appName)
 
         let scale = UIScreen.main.scale
         let bounds = view.bounds.size.width > 0 ? view.bounds : UIScreen.main.bounds
@@ -914,7 +925,7 @@ class NativeMetalViewController: UIViewController {
         let unmanaged = Unmanaged.passUnretained(view.layer)
         kudroid_set_metal_layer(unmanaged.toOpaque(), width, height, Float(scale))
 
-        // Timer quét trạng thái crash định kỳ từ C++ bridge (đặc biệt khi crash xảy ra trên background render thread)
+        // Timer quét trạng thái crash định kỳ từ C++ bridge
         crashCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] timer in
             guard let self = self else { return }
             if kudroid_has_crashed() != 0 {
@@ -926,18 +937,19 @@ class NativeMetalViewController: UIViewController {
         // Chạy APK Android với độ ưu tiên cao nhất của Interactive UI
         DispatchQueue.global(qos: .userInteractive).async { [weak self] in
             guard let self = self else { return }
+            NSLog("[KuDroid] Starting kudroid_run_apk(%@)...", self.appName)
             let cString = kudroid_run_apk(self.appName)
             var logOutput = ""
             if let cString = cString {
                 logOutput = String(cString: cString)
                 free(UnsafeMutablePointer(mutating: cString))
             }
+            NSLog("[KuDroid] Finished kudroid_run_apk(%@). Log chars: %ld", self.appName, logOutput.count)
             DispatchQueue.main.async {
                 if kudroid_has_crashed() != 0 {
                     self.crashCheckTimer?.invalidate()
                     self.handleCrash(fallbackLog: logOutput)
                 }
-                // Giữ container hoạt động liên tục cho luồng game/render tiếp tục chạy
             }
         }
     }
