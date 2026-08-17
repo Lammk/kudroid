@@ -169,7 +169,9 @@ extern "C" int bionic_ANativeWindow_lock(void* window, ANativeWindow_Buffer* out
 }
 
 #if defined(__APPLE__)
-extern "C" __attribute__((weak)) void kudroid_blit_canvas_to_layer(void* layer, const void* bits, int width, int height);
+extern "C" __attribute__((weak)) void kudroid_blit_canvas_to_layer(void* layer, const void* bits, int width, int height) {
+    (void)layer; (void)bits; (void)width; (void)height;
+}
 #endif
 
 extern "C" int bionic_ANativeWindow_unlockAndPost(void* window) {
