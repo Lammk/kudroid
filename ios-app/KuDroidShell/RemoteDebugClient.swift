@@ -3,15 +3,15 @@ import UIKit
 
 // mark: - C-Bridge Function để C++ đẩy log sang Swift
 @_cdecl("kudroid_remote_log_broadcast")
-public func kudroid_remote_log_broadcast(level: Int32, tag: UnsafePointer<CChar>?, message: UnsafePointer<CChar>?) {
+func kudroid_remote_log_broadcast(level: Int32, tag: UnsafePointer<CChar>?, message: UnsafePointer<CChar>?) {
     let tagStr = tag != nil ? String(cString: tag!) : "KuDroid"
     let msgStr = message != nil ? String(cString: message!) : ""
     RemoteDebugClient.shared.broadcastLog(level: Int(level), tag: tagStr, message: msgStr)
 }
 
 // mark: - Client WebSocket KDB trên iOS
-public class RemoteDebugClient: NSObject {
-    public static let shared = RemoteDebugClient()
+class RemoteDebugClient: NSObject {
+    static let shared = RemoteDebugClient()
 
     private var webSocketTask: URLSessionWebSocketTask?
     private var isConnected = false
@@ -19,17 +19,17 @@ public class RemoteDebugClient: NSObject {
     private var pingTimer: Timer?
     private var appSession: AppSession?
 
-    public var onConnectionStatusChanged: ((Bool) -> Void)?
+    var onConnectionStatusChanged: ((Bool) -> Void)?
 
     private override init() {
         super.init()
     }
 
-    public func configure(session: AppSession) {
+    func configure(session: AppSession) {
         self.appSession = session
     }
 
-    public func connect(host: String) {
+    func connect(host: String) {
         disconnect()
         let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -47,7 +47,7 @@ public class RemoteDebugClient: NSObject {
         startPingTimer()
     }
 
-    public func disconnect() {
+    func disconnect() {
         pingTimer?.invalidate()
         pingTimer = nil
         webSocketTask?.cancel(with: .goingAway, reason: nil)
@@ -222,7 +222,7 @@ public class RemoteDebugClient: NSObject {
         }
     }
 
-    public func broadcastLog(level: Int, tag: String, message: String) {
+    func broadcastLog(level: Int, tag: String, message: String) {
         guard isConnected else { return }
         let payload: [String: Any] = [
             "type": "log",
