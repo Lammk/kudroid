@@ -820,10 +820,24 @@ class NativeMetalViewController: UIViewController {
         self.view = metalView
     }
 
+    private var statusLabel: UILabel!
+
     override func viewDidLoad() {
         super.viewDidLoad()
-        self.view.backgroundColor = .clear
-        metalView.backgroundColor = .clear
+        self.view.backgroundColor = .black
+        metalView.backgroundColor = .black
+
+        // Nhãn chẩn đoán trạng thái tức thời trên màn hình
+        statusLabel = UILabel()
+        statusLabel.text = "KuDroid: Initializing \(appName)..."
+        statusLabel.textColor = UIColor.green.withAlphaComponent(0.8)
+        statusLabel.font = UIFont.monospacedSystemFont(ofSize: 12, weight: .semibold)
+        statusLabel.backgroundColor = UIColor.black.withAlphaComponent(0.6)
+        statusLabel.layer.cornerRadius = 8
+        statusLabel.layer.masksToBounds = true
+        statusLabel.textAlignment = .center
+        statusLabel.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(statusLabel)
 
         // Nút đóng nổi (Floating Exit Button) để người dùng quay về Launcher bất cứ lúc nào
         let closeButton = UIButton(type: .system)
@@ -835,11 +849,23 @@ class NativeMetalViewController: UIViewController {
         view.addSubview(closeButton)
 
         NSLayoutConstraint.activate([
+            statusLabel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 10),
+            statusLabel.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 16),
+            statusLabel.heightAnchor.constraint(equalToConstant: 28),
+            statusLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 180),
+
             closeButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 10),
             closeButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
             closeButton.widthAnchor.constraint(equalToConstant: 40),
             closeButton.heightAnchor.constraint(equalToConstant: 40)
         ])
+
+        // Tự động làm mờ nhãn trạng thái sau 3 giây
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
+            UIView.animate(withDuration: 0.5) {
+                self?.statusLabel.alpha = 0.0
+            }
+        }
     }
 
     @objc private func handleExitButton() {
