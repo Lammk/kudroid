@@ -227,7 +227,9 @@ void appendUnsigned(std::string& output, uint64_t value, unsigned base) {
 static std::mutex g_logAndroidMutex;
 
 #if defined(__APPLE__)
-extern "C" __attribute__((weak)) void kudroid_remote_log_broadcast(int level, const char* tag, const char* message);
+extern "C" __attribute__((weak)) void kudroid_remote_log_broadcast(int level, const char* tag, const char* message) {
+    (void)level; (void)tag; (void)message;
+}
 #endif
 
 int logAndroidMessage(int priority, const char* tag, const std::string& message) {
