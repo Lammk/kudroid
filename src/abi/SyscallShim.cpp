@@ -736,8 +736,11 @@ extern "C" int bionic_madvise(void *addr, size_t length, int advice) {
 }
 
 extern "C" int bionic_clock_gettime(int clock_id, struct timespec *tp) {
+    if (!tp) {
+        errno = EFAULT;
+        return -1;
+    }
     int darwin_clock_id = clock_id;
-    logAndroidMessage(3, "KuDroidSyscall", "clock_gettime(clock_id=" + std::to_string(clock_id) + ")");
 #ifdef __APPLE__
     switch(clock_id) {
         case 0: darwin_clock_id = 0; break; // CLOCK_REALTIME
@@ -748,6 +751,7 @@ extern "C" int bionic_clock_gettime(int clock_id, struct timespec *tp) {
         case 7: darwin_clock_id = 6; break; // CLOCK_BOOTTIME -> MONOTONIC
         case 5: darwin_clock_id = 0; break; // CLOCK_REALTIME_COARSE -> REALTIME
         case 6: darwin_clock_id = 6; break; // CLOCK_MONOTONIC_COARSE -> MONOTONIC
+        default: darwin_clock_id = 6; break; // Default fallback to MONOTONIC
     }
 #endif
     return ::clock_gettime(static_cast<clockid_t>(darwin_clock_id), tp);
@@ -1383,21 +1387,37 @@ extern "C" void* bionic_mremap(void *old_address, size_t old_size, size_t new_si
 
 #define AT_HWCAP 16
 #define AT_PAGESZ 6
-#define HWCAP_NEON (1 << 12)
+#define AT_RANDOM 25
+#define AT_HWCAP2 26
+
+#define HWCAP_FP (1 << 0)
+#define HWCAP_ASIMD (1 << 1)
+#define HWCAP_EVTSTRM (1 << 2)
 #define HWCAP_AES (1 << 3)
 #define HWCAP_PMULL (1 << 4)
 #define HWCAP_SHA1 (1 << 5)
 #define HWCAP_SHA2 (1 << 6)
 #define HWCAP_CRC32 (1 << 7)
 
+static const uint8_t g_kudroid_random_aux[16] = {
+    0x4b, 0x75, 0x64, 0x72, 0x6f, 0x69, 0x64, 0x53,
+    0x65, 0x63, 0x75, 0x72, 0x69, 0x74, 0x79, 0x21
+};
+
 extern "C" unsigned long bionic_getauxval(unsigned long type) {
     if (type == AT_HWCAP) {
-        return HWCAP_NEON | HWCAP_AES | HWCAP_PMULL | HWCAP_SHA1 | HWCAP_SHA2 | HWCAP_CRC32;
+        return HWCAP_FP | HWCAP_ASIMD | HWCAP_EVTSTRM | HWCAP_AES | HWCAP_PMULL | HWCAP_SHA1 | HWCAP_SHA2 | HWCAP_CRC32;
+    }
+    if (type == AT_HWCAP2) {
+        return 0x00000fff; // ATOMICS, FPHP, ASIMDHP, FLAGM, JSCVT, FCMA, LRCPC, DCPOP, SHA3, SM3, SM4, ASIMDDP
     }
     if (type == AT_PAGESZ) {
         // Trả kích thước trang thật của host — tránh engine đọc pagesize=0.
         long pagesize = ::sysconf(_SC_PAGESIZE);
-        return pagesize > 0 ? static_cast<unsigned long>(pagesize) : 0;
+        return pagesize > 0 ? static_cast<unsigned long>(pagesize) : 4096;
+    }
+    if (type == AT_RANDOM) {
+        return reinterpret_cast<unsigned long>(g_kudroid_random_aux);
     }
     return 0;
 }

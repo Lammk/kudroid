@@ -155,7 +155,7 @@ static bool ensure_audio_queue(AudioPlayer* p) {
     }
 
     const OSStatus st = AudioQueueNewOutput(&asbd, audio_queue_output_cb, p->aqUserData,
-                                            nullptr, kCFRunLoopCommonModes, 0, &p->aq);
+                                            nullptr, nullptr, 0, &p->aq);
     if (st != noErr || !p->aq) {
         delete static_cast<std::shared_ptr<AudioPlayer>*>(p->aqUserData);
         p->aqUserData = nullptr;
