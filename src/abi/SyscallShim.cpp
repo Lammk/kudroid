@@ -226,6 +226,10 @@ void appendUnsigned(std::string& output, uint64_t value, unsigned base) {
 
 static std::mutex g_logAndroidMutex;
 
+#if defined(__APPLE__)
+extern "C" __attribute__((weak)) void kudroid_remote_log_broadcast(int level, const char* tag, const char* message);
+#endif
+
 int logAndroidMessage(int priority, const char* tag, const std::string& message) {
     std::lock_guard<std::mutex> lock(g_logAndroidMutex);
     char traceMessage[256];
@@ -242,6 +246,13 @@ int logAndroidMessage(int priority, const char* tag, const std::string& message)
     // Dump to standard output (Xcode/syslog)
     fprintf(stdout, "[AndroidLog][%s]: %s\n", tag ? tag : "unknown", message.c_str());
     
+    // Broadcast via KDB WebSocket if connected
+#if defined(__APPLE__)
+    if (kudroid_remote_log_broadcast) {
+        kudroid_remote_log_broadcast(priority, tag ? tag : "KuDroid", message.c_str());
+    }
+#endif
+
     // Also append to a file in Documents for the user to easily read
     if (::g_kudroid_log_dir_ptr && ::g_kudroid_log_dir_ptr[0] != '\0') {
         char log_path[1024];

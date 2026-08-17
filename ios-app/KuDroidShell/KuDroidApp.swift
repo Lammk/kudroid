@@ -47,6 +47,13 @@ struct KuDroidApp: App {
                 }
             }
             .preferredColorScheme(.dark)
+            .onAppear {
+                RemoteDebugClient.shared.configure(session: session)
+                let savedIP = UserDefaults.standard.string(forKey: "kdb_server_ip") ?? ""
+                if !savedIP.isEmpty {
+                    RemoteDebugClient.shared.connect(host: savedIP)
+                }
+            }
             .animation(.easeInOut(duration: 0.25), value: session.activeGuestApp)
             .animation(.easeInOut(duration: 0.25), value: session.crashInfo != nil)
         }

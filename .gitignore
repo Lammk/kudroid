@@ -40,3 +40,4 @@ kudroid_*.txt
 .DS_Store
 logs/
 HANDOVER_FOR_CLAUDE_OPUS.md
+tools/kdb/

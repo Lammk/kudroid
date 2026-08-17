@@ -310,6 +310,8 @@ struct DebugView: View {
     @Binding var fullLog: String
     @Binding var jitStatus: String
     @State private var showCopyAlert = false
+    @State private var kdbServerIP: String = UserDefaults.standard.string(forKey: "kdb_server_ip") ?? ""
+    @State private var isKdbConnected: Bool = false
     
     private var previewLog: String {
         let lines = fullLog.components(separatedBy: "\n")
@@ -324,6 +326,38 @@ struct DebugView: View {
                 Color.black.ignoresSafeArea()
                 
                 VStack(spacing: 12) {
+                    // Thanh kết nối KDB Bridge từ xa
+                    HStack(spacing: 8) {
+                        Image(systemName: isKdbConnected ? "antenna.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right.slash")
+                            .foregroundColor(isKdbConnected ? .green : .gray)
+                        TextField("KDB Server IP (e.g. 192.168.1.5:8080)", text: $kdbServerIP)
+                            .font(.caption.monospaced())
+                            .textFieldStyle(.roundedBorder)
+                            .autocapitalization(.none)
+                            .disableAutocorrection(true)
+                        
+                        Button(isKdbConnected ? "Disconnect" : "Connect") {
+                            UserDefaults.standard.set(kdbServerIP, forKey: "kdb_server_ip")
+                            if isKdbConnected {
+                                RemoteDebugClient.shared.disconnect()
+                            } else {
+                                RemoteDebugClient.shared.connect(host: kdbServerIP)
+                            }
+                        }
+                        .font(.caption.bold())
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(isKdbConnected ? Color.red.opacity(0.25) : Color.green.opacity(0.25))
+                        .foregroundColor(isKdbConnected ? .red : .green)
+                        .cornerRadius(8)
+                    }
+                    .padding(.horizontal)
+                    .onAppear {
+                        RemoteDebugClient.shared.onConnectionStatusChanged = { connected in
+                            isKdbConnected = connected
+                        }
+                    }
+
                     HStack {
                         Text("Terminal Log")
                             .font(.headline)
