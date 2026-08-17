@@ -645,6 +645,7 @@ extern "C" int kudroid_android_log_message(int priority, const char* tag, const 
 // GraphicsShim.cpp — ANGLE first-touch phải trên main thread (xem comment ở
 // kudroid_set_metal_layer).
 extern "C" void kudroid_gpu_warmup_egl(void);
+extern "C" void* bionic_ANativeWindow_fromSurface(void* env, void* surface);
 
 extern "C" void kudroid_set_metal_layer(void* layer, int width, int height, float density) {
     g_metalLayer = layer;
@@ -1171,7 +1172,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                               reinterpret_cast<void*>(1));
                         // onNativeWindowCreated(activity, ANativeWindow*)
                         call2("onNativeWindowCreated", mock_callbacks.onNativeWindowCreated,
-                              g_metalLayer);
+                              bionic_ANativeWindow_fromSurface(nullptr, nullptr));
                         // onInputQueueCreated(activity, AInputQueue*)
                         call2("onInputQueueCreated", mock_callbacks.onInputQueueCreated,
                               kudroid_get_input_queue());

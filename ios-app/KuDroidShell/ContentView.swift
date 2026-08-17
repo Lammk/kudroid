@@ -949,6 +949,8 @@ class NativeMetalView: UIView {
     }
 
     private func setupLayer() {
+        self.isMultipleTouchEnabled = true
+        self.isUserInteractionEnabled = true
         guard let metalLayer = self.layer as? CAMetalLayer else { return }
         if metalLayer.device == nil {
             metalLayer.device = MTLCreateSystemDefaultDevice()

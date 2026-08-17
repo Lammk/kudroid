@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstdarg>
 #include <string>
+#include <atomic>
 
 #if defined(__APPLE__)
 extern "C" void* objc_autoreleasePoolPush(void);
@@ -41,32 +42,84 @@ static void gpuLog(const char* fmt, ...) {
     ::kudroid::log::write(::kudroid::log::kDebug, "KuDroidGPU", "%s", buf);
 }
 
+// Cấu trúc ANativeWindow chuẩn cho KuDroid
+struct KuDroidNativeWindow {
+    uint32_t magic;
+    void* layer;
+    int32_t width;
+    int32_t height;
+    int32_t format;
+    std::atomic<int32_t> refCount;
+
+    KuDroidNativeWindow() : magic(0x4B554457), layer(nullptr), width(1080), height(1920), format(1), refCount(1) {}
+};
+
+static KuDroidNativeWindow g_nativeWindowInstance;
+
 extern "C" void* bionic_ANativeWindow_fromSurface(void* env, void* surface) {
     (void)env; (void)surface;
-    // ANGLE on iOS uses CAMetalLayer/UIView as the native window!
-    if (!g_metalLayer) {
-        gpuLog("ANativeWindow_fromSurface: g_metalLayer is NULL!");
-    }
-    gpuLog("ANativeWindow_fromSurface -> %p", (void*)g_metalLayer);
-    return g_metalLayer;
+    g_nativeWindowInstance.layer = g_metalLayer;
+    g_nativeWindowInstance.width = g_metalLayerWidth > 0 ? g_metalLayerWidth : 1080;
+    g_nativeWindowInstance.height = g_metalLayerHeight > 0 ? g_metalLayerHeight : 1920;
+    gpuLog("ANativeWindow_fromSurface -> %p (layer=%p, size=%dx%d)",
+           (void*)&g_nativeWindowInstance, g_nativeWindowInstance.layer,
+           g_nativeWindowInstance.width, g_nativeWindowInstance.height);
+    return &g_nativeWindowInstance;
 }
 
 extern "C" int bionic_ANativeWindow_getWidth(void* window) {
-    (void)window; return g_metalLayerWidth;
+    if (window) {
+        auto* nw = static_cast<KuDroidNativeWindow*>(window);
+        if (nw->magic == 0x4B554457) return nw->width > 0 ? nw->width : 1080;
+    }
+    return g_metalLayerWidth > 0 ? g_metalLayerWidth : 1080;
 }
+
 extern "C" int bionic_ANativeWindow_getHeight(void* window) {
-    (void)window; return g_metalLayerHeight;
+    if (window) {
+        auto* nw = static_cast<KuDroidNativeWindow*>(window);
+        if (nw->magic == 0x4B554457) return nw->height > 0 ? nw->height : 1920;
+    }
+    return g_metalLayerHeight > 0 ? g_metalLayerHeight : 1920;
 }
+
+extern "C" int bionic_ANativeWindow_getFormat(void* window) {
+    if (window) {
+        auto* nw = static_cast<KuDroidNativeWindow*>(window);
+        if (nw->magic == 0x4B554457) return nw->format;
+    }
+    return 1; // WINDOW_FORMAT_RGBA_8888
+}
+
 extern "C" int bionic_ANativeWindow_setBuffersGeometry(void* window, int width, int height, int format) {
-    (void)window;
+    if (window) {
+        auto* nw = static_cast<KuDroidNativeWindow*>(window);
+        if (nw->magic == 0x4B554457) {
+            if (width > 0) nw->width = width;
+            if (height > 0) nw->height = height;
+            if (format > 0) nw->format = format;
+        }
+    }
     gpuLog("ANativeWindow_setBuffersGeometry(%dx%d format=%d) -> 0", width, height, format);
     return 0;
 }
+
 extern "C" void bionic_ANativeWindow_release(void* window) {
-    (void)window; gpuLog("ANativeWindow_release(%p)", (void*)window);
+    if (!window) return;
+    auto* nw = static_cast<KuDroidNativeWindow*>(window);
+    if (nw->magic == 0x4B554457) {
+        nw->refCount.fetch_sub(1);
+    }
+    gpuLog("ANativeWindow_release(%p)", window);
 }
+
 extern "C" void bionic_ANativeWindow_acquire(void* window) {
-    (void)window; gpuLog("ANativeWindow_acquire(%p)", (void*)window);
+    if (!window) return;
+    auto* nw = static_cast<KuDroidNativeWindow*>(window);
+    if (nw->magic == 0x4B554457) {
+        nw->refCount.fetch_add(1);
+    }
+    gpuLog("ANativeWindow_acquire(%p)", window);
 }
 
 // ANativeWindow_Buffer — describes a locked buffer.
@@ -78,57 +131,38 @@ struct ANativeWindow_Buffer {
     void* bits;
 };
 
-// ANativeWindow_lock — lock the window's buffer for drawing.
-// For KuDroid, we return a dummy buffer so apps that draw via
-// ANativeWindow_lock don't crash. Real blitting to Metal is a future
-// enhancement (games typically use EGL/GLES instead).
 extern "C" int bionic_ANativeWindow_lock(void* window, ANativeWindow_Buffer* outBuffer,
                                          void* inOutDirtyRect) {
     (void)inOutDirtyRect;
-    gpuLog("ANativeWindow_lock(window=%p, size=%dx%d)", (void*)window,
-           g_metalLayerWidth, g_metalLayerHeight);
     if (!outBuffer) {
         gpuLog("ANativeWindow_lock -> -1 (outBuffer NULL)");
         return -1;
     }
-    // Validate kích thước: phải dương và có giới hạn trên để (size_t)w*h*4
-    // không tràn. Nếu Swift set sai (0/âm/cực lớn) thì dùng default 1080x1920
-    // thay vì tạo buffer vô nghĩa — game vẽ vào buffer sai kích thước → ghi
-    // tràn → corrupt heap → lần realloc sau abort trong glibc.
-    int w = g_metalLayerWidth;
-    int h = g_metalLayerHeight;
+    int w = bionic_ANativeWindow_getWidth(window);
+    int h = bionic_ANativeWindow_getHeight(window);
     constexpr int kMaxBufferDim = 8192;
     if (w <= 0 || w > kMaxBufferDim || h <= 0 || h > kMaxBufferDim) {
-        gpuLog("ANativeWindow_lock: invalid size %dx%d, using default 1080x1920",
-               w, h);
         w = 1080;
         h = 1920;
     }
-    // Trước đây trả con trỏ tới 1 uint32_t static — game vẽ vào "buffer" đó sẽ
-    // ghi tràn 4 byte → heap/static corruption → crash. Cấp buffer thật đủ
-    // width*height*4 (RGBA8888), grow theo nhu cầu.
     static void* bits = nullptr;
     static size_t bitsSize = 0;
-    const size_t needed = static_cast<size_t>(w) *
-                          static_cast<size_t>(h) * 4;
+    const size_t needed = static_cast<size_t>(w) * static_cast<size_t>(h) * 4;
     if (!bits || needed > bitsSize) {
         void* nb = std::realloc(bits, needed);
         if (!nb) return -1;
         bits = nb;
         bitsSize = needed;
         std::memset(bits, 0, needed);
-        gpuLog("ANativeWindow_lock: buffer grown to %zu bytes (size=%dx%d)",
-               needed, w, h);
     }
     outBuffer->width = w;
     outBuffer->height = h;
     outBuffer->stride = w;
-    outBuffer->format = 1; // WINDOW_FORMAT_RGBA_8888
+    outBuffer->format = bionic_ANativeWindow_getFormat(window);
     outBuffer->bits = bits;
     return 0;
 }
 
-// ANativeWindow_unlockAndPost — unlock the buffer and post it.
 extern "C" int bionic_ANativeWindow_unlockAndPost(void* window) {
     (void)window;
     return 0;
@@ -619,12 +653,15 @@ extern "C" EGLSurface bionic_eglCreateWindowSurface(EGLDisplay dpy, EGLConfig co
 #if defined(__APPLE__)
         void* pool = objc_autoreleasePoolPush();
 #endif
-        // IMPORTANT: ANGLE on iOS expects a CAMetalLayer as the native window.
-        // The Android game passes an ANativeWindow (which our
-        // ANativeWindow_fromSurface already maps to g_metalLayer). Force the
-        // window to g_metalLayer so ANGLE gets the CAMetalLayer it needs.
-        EGLNativeWindowType nativeWin = (EGLNativeWindowType)(g_metalLayer ? g_metalLayer : win);
-        gpuLog("eglCreateWindowSurface: calling ANGLE with window=%p...", (void*)nativeWin);
+        void* resolvedLayer = g_metalLayer;
+        if (win) {
+            auto* nw = static_cast<KuDroidNativeWindow*>(win);
+            if (nw->magic == 0x4B554457 && nw->layer) {
+                resolvedLayer = nw->layer;
+            }
+        }
+        EGLNativeWindowType nativeWin = (EGLNativeWindowType)(resolvedLayer ? resolvedLayer : g_metalLayer);
+        gpuLog("eglCreateWindowSurface: calling ANGLE with layer=%p...", (void*)nativeWin);
         EGLSurface s = host_func(dpy, config, nativeWin, attrib_list);
         gpuLog("eglCreateWindowSurface returned %p", (void*)s);
 #if defined(__APPLE__)

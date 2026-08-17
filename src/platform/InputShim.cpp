@@ -207,6 +207,24 @@ extern "C" float bionic_AMotionEvent_getY(const void* event, size_t pointer_inde
     return static_cast<const BionicInputEvent*>(event)->y;
 }
 
+extern "C" float bionic_AMotionEvent_getXByIndex(const void* event, size_t pointer_index) {
+    return bionic_AMotionEvent_getX(event, pointer_index);
+}
+
+extern "C" float bionic_AMotionEvent_getYByIndex(const void* event, size_t pointer_index) {
+    return bionic_AMotionEvent_getY(event, pointer_index);
+}
+
+extern "C" float bionic_AMotionEvent_getPressure(const void* event, size_t pointer_index) {
+    (void)event; (void)pointer_index;
+    return 1.0f;
+}
+
+extern "C" float bionic_AMotionEvent_getPressureByIndex(const void* event, size_t pointer_index) {
+    (void)event; (void)pointer_index;
+    return 1.0f;
+}
+
 extern "C" size_t bionic_AMotionEvent_getPointerCount(const void* event) {
     if (!event) return 0;
     return static_cast<const BionicInputEvent*>(event)->pointerCount;
@@ -214,8 +232,7 @@ extern "C" size_t bionic_AMotionEvent_getPointerCount(const void* event) {
 
 extern "C" int32_t bionic_AMotionEvent_getPointerId(const void* event, size_t pointer_index) {
     (void)event;
-    (void)pointer_index;
-    return 0;
+    return static_cast<int32_t>(pointer_index);
 }
 
 extern "C" float bionic_AMotionEvent_getRawX(const void* event, size_t pointer_index) {
@@ -232,6 +249,64 @@ extern "C" int64_t bionic_AMotionEvent_getDownTime(const void* event) {
 }
 
 extern "C" int64_t bionic_AMotionEvent_getEventTime(const void* event) {
+    if (!event) return 0;
+    return static_cast<const BionicInputEvent*>(event)->eventTime;
+}
+
+extern "C" size_t bionic_AMotionEvent_getHistorySize(const void* event) {
+    (void)event; return 0;
+}
+
+extern "C" int64_t bionic_AMotionEvent_getHistoricalEventTime(const void* event, size_t history_index) {
+    (void)history_index;
+    return bionic_AMotionEvent_getEventTime(event);
+}
+
+extern "C" float bionic_AMotionEvent_getHistoricalX(const void* event, size_t pointer_index, size_t history_index) {
+    (void)history_index;
+    return bionic_AMotionEvent_getX(event, pointer_index);
+}
+
+extern "C" float bionic_AMotionEvent_getHistoricalY(const void* event, size_t pointer_index, size_t history_index) {
+    (void)history_index;
+    return bionic_AMotionEvent_getY(event, pointer_index);
+}
+
+extern "C" float bionic_AMotionEvent_getHistoricalPressure(const void* event, size_t pointer_index, size_t history_index) {
+    (void)event; (void)pointer_index; (void)history_index;
+    return 1.0f;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AKeyEvent shims
+// ─────────────────────────────────────────────────────────────────────────────
+extern "C" int32_t bionic_AKeyEvent_getAction(const void* event) {
+    if (!event) return 0;
+    return static_cast<const BionicInputEvent*>(event)->action;
+}
+
+extern "C" int32_t bionic_AKeyEvent_getKeyCode(const void* event) {
+    (void)event; return 0;
+}
+
+extern "C" int32_t bionic_AKeyEvent_getScanCode(const void* event) {
+    (void)event; return 0;
+}
+
+extern "C" int32_t bionic_AKeyEvent_getMetaState(const void* event) {
+    (void)event; return 0;
+}
+
+extern "C" int32_t bionic_AKeyEvent_getRepeatCount(const void* event) {
+    (void)event; return 0;
+}
+
+extern "C" int64_t bionic_AKeyEvent_getDownTime(const void* event) {
+    if (!event) return 0;
+    return static_cast<const BionicInputEvent*>(event)->eventTime;
+}
+
+extern "C" int64_t bionic_AKeyEvent_getEventTime(const void* event) {
     if (!event) return 0;
     return static_cast<const BionicInputEvent*>(event)->eventTime;
 }
@@ -312,11 +387,28 @@ const SymbolEntry kInputSymbols[] = {
     {"AMotionEvent_getX", reinterpret_cast<void*>(&bionic_AMotionEvent_getX)},
     {"AMotionEvent_getY", reinterpret_cast<void*>(&bionic_AMotionEvent_getY)},
     {"AMotionEvent_getPointerCount", reinterpret_cast<void*>(&bionic_AMotionEvent_getPointerCount)},
-    {"AMotionEvent_getPointerId", reinterpret_cast<void*>(&bionic_AMotionEvent_getPointerId)},
+    {"AMotionEvent_getXByIndex", reinterpret_cast<void*>(&bionic_AMotionEvent_getXByIndex)},
+    {"AMotionEvent_getYByIndex", reinterpret_cast<void*>(&bionic_AMotionEvent_getYByIndex)},
+    {"AMotionEvent_getPressure", reinterpret_cast<void*>(&bionic_AMotionEvent_getPressure)},
+    {"AMotionEvent_getPressureByIndex", reinterpret_cast<void*>(&bionic_AMotionEvent_getPressureByIndex)},
     {"AMotionEvent_getRawX", reinterpret_cast<void*>(&bionic_AMotionEvent_getRawX)},
     {"AMotionEvent_getRawY", reinterpret_cast<void*>(&bionic_AMotionEvent_getRawY)},
     {"AMotionEvent_getDownTime", reinterpret_cast<void*>(&bionic_AMotionEvent_getDownTime)},
     {"AMotionEvent_getEventTime", reinterpret_cast<void*>(&bionic_AMotionEvent_getEventTime)},
+    {"AMotionEvent_getHistorySize", reinterpret_cast<void*>(&bionic_AMotionEvent_getHistorySize)},
+    {"AMotionEvent_getHistoricalEventTime", reinterpret_cast<void*>(&bionic_AMotionEvent_getHistoricalEventTime)},
+    {"AMotionEvent_getHistoricalX", reinterpret_cast<void*>(&bionic_AMotionEvent_getHistoricalX)},
+    {"AMotionEvent_getHistoricalY", reinterpret_cast<void*>(&bionic_AMotionEvent_getHistoricalY)},
+    {"AMotionEvent_getHistoricalPressure", reinterpret_cast<void*>(&bionic_AMotionEvent_getHistoricalPressure)},
+
+    // KeyEvent Symbols
+    {"AKeyEvent_getAction", reinterpret_cast<void*>(&bionic_AKeyEvent_getAction)},
+    {"AKeyEvent_getKeyCode", reinterpret_cast<void*>(&bionic_AKeyEvent_getKeyCode)},
+    {"AKeyEvent_getScanCode", reinterpret_cast<void*>(&bionic_AKeyEvent_getScanCode)},
+    {"AKeyEvent_getMetaState", reinterpret_cast<void*>(&bionic_AKeyEvent_getMetaState)},
+    {"AKeyEvent_getRepeatCount", reinterpret_cast<void*>(&bionic_AKeyEvent_getRepeatCount)},
+    {"AKeyEvent_getDownTime", reinterpret_cast<void*>(&bionic_AKeyEvent_getDownTime)},
+    {"AKeyEvent_getEventTime", reinterpret_cast<void*>(&bionic_AKeyEvent_getEventTime)},
 };
 
 } // namespace
