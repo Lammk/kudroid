@@ -180,26 +180,22 @@ static void* render_loop(void* arg) {
         return nullptr;
     }
 
-    static const GLfloat vertices[] = {
-        0.0f,  0.6f, 0.0f,
-       -0.6f, -0.6f, 0.0f,
-        0.6f, -0.6f, 0.0f
+    struct Vertex {
+        float x, y, z;
+        float r, g, b, a;
     };
-    static const GLfloat colors[] = {
-        1.0f, 0.2f, 0.2f, 1.0f, // Red
-        0.2f, 1.0f, 0.2f, 1.0f, // Green
-        0.2f, 0.4f, 1.0f, 1.0f  // Blue
+    static const Vertex triangleData[] = {
+        {  0.0f,  0.6f, 0.0f,  1.0f, 0.2f, 0.2f, 1.0f }, // Đỉnh trên: Đỏ
+        { -0.6f, -0.6f, 0.0f,  0.2f, 1.0f, 0.2f, 1.0f }, // Đỉnh trái: Xanh lá
+        {  0.6f, -0.6f, 0.0f,  0.2f, 0.4f, 1.0f, 1.0f }  // Đỉnh phải: Xanh dương
     };
 
-    GLuint vbo[2] = {0, 0};
+    GLuint vbo = 0;
     if (p_glGenBuffers && p_glBindBuffer && p_glBufferData) {
-        p_glGenBuffers(2, vbo);
-        p_glBindBuffer(GL_ARRAY_BUFFER, vbo[0]);
-        p_glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
-        p_glBindBuffer(GL_ARRAY_BUFFER, vbo[1]);
-        p_glBufferData(GL_ARRAY_BUFFER, sizeof(colors), colors, GL_STATIC_DRAW);
-        p_glBindBuffer(GL_ARRAY_BUFFER, 0);
-        LOGI("VBO created successfully (%u, %u)", vbo[0], vbo[1]);
+        p_glGenBuffers(1, &vbo);
+        p_glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        p_glBufferData(GL_ARRAY_BUFFER, sizeof(triangleData), triangleData, GL_STATIC_DRAW);
+        LOGI("Interleaved VBO created successfully (vbo=%u)", vbo);
     }
 
     GLint positionHandle = p_glGetAttribLocation(program, "vPosition");
@@ -217,23 +213,24 @@ static void* render_loop(void* arg) {
     p_glViewport(0, 0, w, h);
     p_glUseProgram(program);
 
-    if (positionHandle >= 0) {
-        p_glEnableVertexAttribArray((GLuint)positionHandle);
-        if (vbo[0] != 0) {
-            p_glBindBuffer(GL_ARRAY_BUFFER, vbo[0]);
-            p_glVertexAttribPointer((GLuint)positionHandle, 3, GL_FLOAT, GL_FALSE, 0, (const void*)0);
-        } else {
-            p_glVertexAttribPointer((GLuint)positionHandle, 3, GL_FLOAT, GL_FALSE, 0, vertices);
+    if (vbo != 0) {
+        p_glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        if (positionHandle >= 0) {
+            p_glEnableVertexAttribArray((GLuint)positionHandle);
+            p_glVertexAttribPointer((GLuint)positionHandle, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (const void*)0);
         }
-    }
-
-    if (colorHandle >= 0) {
-        p_glEnableVertexAttribArray((GLuint)colorHandle);
-        if (vbo[1] != 0) {
-            p_glBindBuffer(GL_ARRAY_BUFFER, vbo[1]);
-            p_glVertexAttribPointer((GLuint)colorHandle, 4, GL_FLOAT, GL_FALSE, 0, (const void*)0);
-        } else {
-            p_glVertexAttribPointer((GLuint)colorHandle, 4, GL_FLOAT, GL_FALSE, 0, colors);
+        if (colorHandle >= 0) {
+            p_glEnableVertexAttribArray((GLuint)colorHandle);
+            p_glVertexAttribPointer((GLuint)colorHandle, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), (const void*)(3 * sizeof(float)));
+        }
+    } else {
+        if (positionHandle >= 0) {
+            p_glEnableVertexAttribArray((GLuint)positionHandle);
+            p_glVertexAttribPointer((GLuint)positionHandle, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), &triangleData[0].x);
+        }
+        if (colorHandle >= 0) {
+            p_glEnableVertexAttribArray((GLuint)colorHandle);
+            p_glVertexAttribPointer((GLuint)colorHandle, 4, GL_FLOAT, GL_FALSE, sizeof(Vertex), &triangleData[0].r);
         }
     }
 
@@ -243,6 +240,9 @@ static void* render_loop(void* arg) {
         p_glClearColor(0.08f, 0.12f, 0.24f, 1.0f);
         p_glClear(GL_COLOR_BUFFER_BIT);
 
+        if (vbo != 0) {
+            p_glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        }
         p_glDrawArrays(GL_TRIANGLES, 0, 3);
         
         if (!eglSwapBuffers(display, surface)) {
