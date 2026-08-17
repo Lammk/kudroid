@@ -721,11 +721,8 @@ extern "C" EGLBoolean bionic_eglInitialize(EGLDisplay dpy, EGLint* major, EGLint
 }
 
 extern "C" EGLBoolean bionic_eglTerminate(EGLDisplay dpy) {
-    auto f = eglFn<EGLBoolean(EGLDisplay)>("eglTerminate");
-    if (!f) { EGL_FORWARD_ERR("eglTerminate", ""); return EGL_FALSE; }
-    EGLBoolean r = f(dpy);
-    gpuLog("eglTerminate -> %s", r ? "true" : "false");
-    return r;
+    gpuLog("eglTerminate(dpy=%p) intercepted -> NO-OP (preserving display for app lifetime)", (void*)dpy);
+    return EGL_TRUE;
 }
 
 extern "C" EGLBoolean bionic_eglChooseConfig(EGLDisplay dpy, const EGLint* attrib_list,
@@ -1049,6 +1046,12 @@ extern "C" void bionic_glShaderSource(unsigned int shader, int count, const char
     auto f = (PFN)get_gl_func("glShaderSource");
     if (!f) { EGL_FORWARD_ERR("glShaderSource", ""); return; }
     gpuLog("glShaderSource(shader=%u count=%d): calling ANGLE...", shader, count);
+    if (string && count > 0 && string[0]) {
+        int len = (length && length[0] > 0) ? length[0] : (int)strlen(string[0]);
+        char snippet[64] = {0};
+        strncpy(snippet, string[0], 40);
+        gpuLog("glShaderSource(shader=%u): len=%d snippet='%s...'", shader, len, snippet);
+    }
 #if defined(__APPLE__)
     void* pool = objc_autoreleasePoolPush();
     f(shader, count, string, length);

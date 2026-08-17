@@ -661,9 +661,8 @@ extern "C" void kudroid_set_metal_layer(void* layer, int width, int height, floa
                   layer, width, height, density);
     kudroid_android_log_message(2, "KuDroidGPU", buf);
 
-    // ANGLE first-touch phải trên main thread (GL TEST chứng minh OK; triangle
-    // first-touch trên render pthread -> abort trong static init ANGLE).
-    kudroid_gpu_warmup_egl();
+    // Để render thread tự khởi tạo EGL display sạch sẽ từ đầu
+    // kudroid_gpu_warmup_egl();
 }
 
 extern "C" const char* kudroid_vfs_self_test_log(void) {
