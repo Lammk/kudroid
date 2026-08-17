@@ -866,9 +866,15 @@ func executeKuDroidTest(name: String) -> (success: Bool, log: String, logFilenam
         log = runVFSExtendedTest()
         logFile = "test_vfs.log"
 
+    case "audio", "sound":
+        guard let cString = kudroid_test_audio() else { return (false, "❌ error: null result", "test_audio.log") }
+        log = String(cString: cString)
+        free(UnsafeMutablePointer(mutating: cString))
+        logFile = "test_audio.log"
+
     case "all":
         var combined = "=== RUNNING ALL KUDROID ISOLATED SUBSYSTEM TESTS ===\n\n"
-        let tests = ["gpu", "bionic", "syscall", "vfs", "multi_elf", "jvm", "jni"]
+        let tests = ["gpu", "audio", "bionic", "syscall", "vfs", "multi_elf", "jvm", "jni"]
         for t in tests {
             combined += "--- TEST: \(t.uppercased()) ---\n"
             let res = executeKuDroidTest(name: t)

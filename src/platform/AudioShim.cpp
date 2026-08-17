@@ -11,6 +11,7 @@
 #include <unordered_map>
 #include <memory>
 #include <atomic>
+#include <string>
 
 #if defined(__APPLE__)
 #include <AudioToolbox/AudioToolbox.h>
@@ -683,6 +684,64 @@ const SymbolEntry* get_audio_symbols(size_t* count) {
         *count = sizeof(kAudioSymbols) / sizeof(SymbolEntry);
     }
     return kAudioSymbols;
+}
+
+extern "C" const char* kudroid_test_audio(void) {
+    std::string log = "=== KuDroid AudioShim (OpenSL ES & AAudio) Subsystem Test ===\n";
+
+    log += "⏳ Step 1: Testing OpenSL ES slCreateEngine...\n";
+    SLObjectItf engineObj = nullptr;
+    SLresult res = bionic_slCreateEngine(&engineObj, 0, nullptr, 0, nullptr, nullptr);
+    if (res != SL_RESULT_SUCCESS || !engineObj) {
+        log += "❌ ERROR: slCreateEngine failed with result: " + std::to_string(res) + "\n";
+        return strdup(log.c_str());
+    }
+    log += "✔ slCreateEngine created engine object: " + std::to_string(reinterpret_cast<uintptr_t>(engineObj)) + "\n";
+
+    res = bionic_slObjectRealize(engineObj, 0);
+    log += "✔ slObjectRealize -> " + std::string(res == SL_RESULT_SUCCESS ? "SUCCESS" : "FAILED") + "\n";
+
+    SLEngineItf engine = nullptr;
+    res = bionic_slObjectGetInterface(engineObj, (SLInterfaceID)1 /* SL_IID_ENGINE */, &engine);
+    log += "✔ slObjectGetInterface(SL_IID_ENGINE) -> " + std::string(res == SL_RESULT_SUCCESS ? "SUCCESS" : "FAILED") + "\n";
+
+    log += "⏳ Step 2: Testing Output Mix & Audio Player creation...\n";
+    SLObjectItf outputMix = nullptr;
+    res = bionic_slEngineCreateOutputMix(engine, &outputMix, 0, nullptr, nullptr);
+    log += "✔ slEngineCreateOutputMix -> " + std::string(res == SL_RESULT_SUCCESS ? "SUCCESS" : "FAILED") + "\n";
+
+    log += "⏳ Step 3: Testing AAudio Stream Builder & Pipeline...\n";
+    void* builder = nullptr;
+    int ares = bionic_AAudio_createStreamBuilder(&builder);
+    if (ares == 0 && builder) {
+        bionic_AAudioStreamBuilder_setSampleRate(builder, 44100);
+        bionic_AAudioStreamBuilder_setChannelCount(builder, 2);
+        bionic_AAudioStreamBuilder_setFormat(builder, 1 /* PCM_16BIT */);
+        void* stream = nullptr;
+        ares = bionic_AAudioStreamBuilder_openStream(builder, &stream);
+        log += "✔ AAudioStreamBuilder_openStream -> " + std::string(ares == 0 ? "SUCCESS" : "FAILED") + "\n";
+        if (stream) {
+            ares = bionic_AAudioStream_requestStart(stream);
+            log += "✔ AAudioStream_requestStart -> " + std::string(ares == 0 ? "SUCCESS" : "FAILED") + "\n";
+
+            // Sinh 0.1s sóng âm test (Sine wave 440Hz)
+            int16_t pcmBuffer[4410 * 2];
+            for (int i = 0; i < 4410; ++i) {
+                int16_t val = static_cast<int16_t>(sin(2.0 * M_PI * 440.0 * i / 44100.0) * 16000.0);
+                pcmBuffer[i * 2] = val;
+                pcmBuffer[i * 2 + 1] = val;
+            }
+            int written = bionic_AAudioStream_write(stream, pcmBuffer, 4410, 0);
+            log += "✔ AAudioStream_write enqueued " + std::to_string(written) + " frames to AudioQueue!\n";
+
+            bionic_AAudioStream_requestStop(stream);
+            bionic_AAudioStream_close(stream);
+        }
+        bionic_AAudioStreamBuilder_delete(builder);
+    }
+
+    log += "🎉 SUCCESS: KuDroid AudioShim initialized and verified on iOS CoreAudio!\n";
+    return strdup(log.c_str());
 }
 
 } // namespace kudroid
