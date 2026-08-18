@@ -302,6 +302,7 @@ class RemoteDebugClient: NSObject {
 
     private func executeSoFile(targetURL: URL, entrypoint: String) {
         DispatchQueue.main.async { [weak self] in
+            activateAudioSession()
             guard let cString = kudroid_run_so_test(targetURL.path, entrypoint.isEmpty ? nil : entrypoint) else {
                 self?.sendResponse(["success": false, "error": "Native runner returned null"])
                 return
