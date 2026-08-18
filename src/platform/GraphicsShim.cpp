@@ -544,20 +544,29 @@ typedef VkResult (*PFN_vkCreateInstance)(const VkInstanceCreateInfo*, const VkAl
 typedef VkResult (*PFN_vkCreateMetalSurfaceEXT)(VkInstance, const VkMetalSurfaceCreateInfoEXT*, const VkAllocationCallbacks*, VkSurfaceKHR*);
 typedef PFN_vkVoidFunction (*PFN_vkGetInstanceProcAddr)(VkInstance, const char*);
 
-// Real MoltenVK vkGetInstanceProcAddr (resolved lazily).
-static PFN_vkGetInstanceProcAddr real_vkGetInstanceProcAddr = nullptr;
-
-static PFN_vkGetInstanceProcAddr get_real_vkGetInstanceProcAddr() {
-    if (!real_vkGetInstanceProcAddr) {
-        void* mvk = ::dlopen("@executable_path/Frameworks/MoltenVK.framework/MoltenVK", RTLD_NOW | RTLD_GLOBAL);
+static void* get_mvk_handle() {
+    static void* mvk = nullptr;
+    if (!mvk) {
+        mvk = ::dlopen("@executable_path/Frameworks/MoltenVK.framework/MoltenVK", RTLD_NOW | RTLD_GLOBAL);
         if (!mvk) {
             mvk = ::dlopen("Frameworks/MoltenVK.framework/MoltenVK", RTLD_NOW | RTLD_GLOBAL);
         }
+    }
+    return mvk;
+}
+
+static PFN_vkGetInstanceProcAddr get_real_vkGetInstanceProcAddr() {
+    static PFN_vkGetInstanceProcAddr real_gipa = nullptr;
+    if (!real_gipa) {
+        void* mvk = get_mvk_handle();
         if (mvk) {
-            real_vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)::dlsym(mvk, "vkGetInstanceProcAddr");
+            real_gipa = (PFN_vkGetInstanceProcAddr)::dlsym(mvk, "vkGetInstanceProcAddr");
+        }
+        if (!real_gipa) {
+            real_gipa = (PFN_vkGetInstanceProcAddr)::dlsym(RTLD_DEFAULT, "vkGetInstanceProcAddr");
         }
     }
-    return real_vkGetInstanceProcAddr;
+    return real_gipa;
 }
 
 // Intercept vkCreateInstance: translate Android surface extension to iOS Metal surface extension
@@ -565,13 +574,22 @@ extern "C" VkResult bionic_vkCreateInstance(const VkInstanceCreateInfo* pCreateI
                                             const VkAllocationCallbacks* pAllocator,
                                             VkInstance* pInstance) {
     if (!pCreateInfo || !pInstance) return -3; // VK_ERROR_INITIALIZATION_FAILED
-    auto real_gipa = get_real_vkGetInstanceProcAddr();
-    if (!real_gipa) {
-        KLOG(kError, "KuDroidGPU", "MoltenVK not loaded for vkCreateInstance");
+    
+    void* mvk = get_mvk_handle();
+    PFN_vkCreateInstance real_create = nullptr;
+    if (mvk) {
+        real_create = (PFN_vkCreateInstance)::dlsym(mvk, "vkCreateInstance");
+    }
+    if (!real_create) {
+        auto gipa = get_real_vkGetInstanceProcAddr();
+        if (gipa) {
+            real_create = (PFN_vkCreateInstance)gipa(VK_NULL_HANDLE, "vkCreateInstance");
+        }
+    }
+    if (!real_create) {
+        KLOG(kError, "KuDroidGPU", "MoltenVK vkCreateInstance entry point not found");
         return -3;
     }
-    auto real_create = (PFN_vkCreateInstance)real_gipa(VK_NULL_HANDLE, "vkCreateInstance");
-    if (!real_create) return -3;
 
     std::vector<const char*> extList;
     if (pCreateInfo->ppEnabledExtensionNames && pCreateInfo->enabledExtensionCount > 0) {
