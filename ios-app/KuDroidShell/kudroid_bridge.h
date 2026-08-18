@@ -63,6 +63,7 @@ void kudroid_set_metal_layer(void* layer, int width, int height, float density);
 /// @param y tọa độ y của lần chạm
 /// @param action 0=down, 1=up, 2=move (được ánh xạ tới amotion_event_action của android)
 void kudroid_inject_touch_event(float x, float y, int action);
+void kudroid_inject_touch_event_multi(float x, float y, int action, int pointerId, int pointerCount);
 
 /// gửi sự kiện vòng đời ứng dụng java (101=pause, 102=resume) vào luồng ui
 void kudroid_send_lifecycle_event(int eventType);
