@@ -536,10 +536,21 @@ typedef struct VkExtensionProperties {
     uint32_t specVersion;
 } VkExtensionProperties;
 
+#define VK_STRUCTURE_TYPE_IOS_SURFACE_CREATE_INFO_MVK 1000122000
+#define VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT 1000217000
+
+typedef struct VkIOSSurfaceCreateInfoMVK {
+    uint32_t sType;
+    const void* pNext;
+    uint32_t flags;
+    const void* pView;
+} VkIOSSurfaceCreateInfoMVK;
+
 typedef VkResult (*PFN_vkCreateInstance)(const VkInstanceCreateInfo*, const VkAllocationCallbacks*, VkInstance*);
-typedef VkResult (*PFN_vkCreateMetalSurfaceEXT)(VkInstance, const VkMetalSurfaceCreateInfoEXT*, const VkAllocationCallbacks*, VkSurfaceKHR*);
 typedef PFN_vkVoidFunction (*PFN_vkGetInstanceProcAddr)(VkInstance, const char*);
 typedef VkResult (*PFN_vkEnumerateInstanceExtensionProperties)(const char*, uint32_t*, void*);
+typedef VkResult (*PFN_vkCreateIOSSurfaceMVK)(VkInstance, const VkIOSSurfaceCreateInfoMVK*, const VkAllocationCallbacks*, VkSurfaceKHR*);
+typedef VkResult (*PFN_vkCreateMetalSurfaceEXT)(VkInstance, const VkMetalSurfaceCreateInfoEXT*, const VkAllocationCallbacks*, VkSurfaceKHR*);
 
 extern "C" VkResult bionic_vkEnumerateInstanceExtensionProperties(const char* pLayerName,
                                                                   uint32_t* pPropertyCount,
@@ -570,7 +581,7 @@ static PFN_vkGetInstanceProcAddr get_real_vkGetInstanceProcAddr() {
     return real_gipa;
 }
 
-// Intercept vkCreateInstance: translate Android surface extension to iOS Metal surface extension
+// Intercept vkCreateInstance: translate Android surface extension to iOS MoltenVK surface extension
 extern "C" VkResult bionic_vkCreateInstance(const VkInstanceCreateInfo* pCreateInfo,
                                             const VkAllocationCallbacks* pAllocator,
                                             VkInstance* pInstance) {
@@ -591,41 +602,29 @@ extern "C" VkResult bionic_vkCreateInstance(const VkInstanceCreateInfo* pCreateI
         for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; ++i) {
             const char* ext = pCreateInfo->ppEnabledExtensionNames[i];
             if (strcmp(ext, "VK_KHR_android_surface") == 0) {
-                extList.push_back("VK_EXT_metal_surface");
+                // Translate to MoltenVK iOS surface extension
+                extList.push_back("VK_MVK_ios_surface");
             } else {
                 extList.push_back(ext);
             }
         }
     }
 
-    // MoltenVK on iOS requires VK_KHR_portability_enumeration extension for enumeration flag
-    bool hasPortability = false;
-    for (const char* ext : extList) {
-        if (strcmp(ext, "VK_KHR_portability_enumeration") == 0) {
-            hasPortability = true;
-            break;
-        }
-    }
-    if (!hasPortability) {
-        extList.push_back("VK_KHR_portability_enumeration");
-    }
-
     VkInstanceCreateInfo filteredInfo = *pCreateInfo;
     filteredInfo.enabledExtensionCount = static_cast<uint32_t>(extList.size());
     filteredInfo.ppEnabledExtensionNames = extList.data();
-    filteredInfo.flags |= 0x00000001; // VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR
 
     VkResult res = real_create(&filteredInfo, pAllocator, pInstance);
     KLOG(kInfo, "KuDroidGPU", "bionic_vkCreateInstance returned %d (instance=%p)", (int)res, (void*)*pInstance);
     return res;
 }
 
-// Translate vkCreateAndroidSurfaceKHR → vkCreateMetalSurfaceEXT.
+// Translate vkCreateAndroidSurfaceKHR → vkCreateIOSSurfaceMVK / vkCreateMetalSurfaceEXT
 extern "C" VkResult bionic_vkCreateAndroidSurfaceKHR(VkInstance instance,
                                                      const VkAndroidSurfaceCreateInfoKHR* pCreateInfo,
                                                      const VkAllocationCallbacks* pAllocator,
                                                      VkSurfaceKHR* pSurface) {
-    KLOG(kDebug, "KuDroidGPU", "vkCreateAndroidSurfaceKHR → vkCreateMetalSurfaceEXT");
+    KLOG(kDebug, "KuDroidGPU", "vkCreateAndroidSurfaceKHR → vkCreateIOSSurfaceMVK translation");
     if (!pCreateInfo || !pSurface) return -1; // VK_ERROR_INITIALIZATION_FAILED
 
     auto real = get_real_vkGetInstanceProcAddr();
@@ -633,21 +632,39 @@ extern "C" VkResult bionic_vkCreateAndroidSurfaceKHR(VkInstance instance,
         KLOG(kError, "KuDroidGPU", "ERROR: MoltenVK vkGetInstanceProcAddr not found");
         return -1;
     }
-    auto createMetalSurface = (PFN_vkCreateMetalSurfaceEXT)real(instance, "vkCreateMetalSurfaceEXT");
-    if (!createMetalSurface) {
-        KLOG(kError, "KuDroidGPU", "ERROR: vkCreateMetalSurfaceEXT not found in MoltenVK");
-        return -1;
+
+    void* targetLayerOrView = (pCreateInfo->window && pCreateInfo->window != (void*)1) ? pCreateInfo->window : g_metalLayer;
+
+    // 1. Thử hàm iOS chuẩn của MoltenVK: vkCreateIOSSurfaceMVK
+    auto createIOSSurface = (PFN_vkCreateIOSSurfaceMVK)real(instance, "vkCreateIOSSurfaceMVK");
+    if (createIOSSurface) {
+        VkIOSSurfaceCreateInfoMVK iosInfo = {};
+        iosInfo.sType = VK_STRUCTURE_TYPE_IOS_SURFACE_CREATE_INFO_MVK;
+        iosInfo.pNext = nullptr;
+        iosInfo.flags = 0;
+        iosInfo.pView = targetLayerOrView;
+
+        VkResult r = createIOSSurface(instance, &iosInfo, pAllocator, pSurface);
+        KLOG(kInfo, "KuDroidGPU", "vkCreateIOSSurfaceMVK returned %d (surface=%p)", (int)r, (void*)*pSurface);
+        return r;
     }
 
-    VkMetalSurfaceCreateInfoEXT metalInfo = {};
-    metalInfo.sType = VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT;
-    metalInfo.pNext = nullptr;
-    metalInfo.flags = 0;
-    metalInfo.pLayer = (pCreateInfo->window && pCreateInfo->window != (void*)1) ? pCreateInfo->window : g_metalLayer;
+    // 2. Fallback: vkCreateMetalSurfaceEXT
+    auto createMetalSurface = (PFN_vkCreateMetalSurfaceEXT)real(instance, "vkCreateMetalSurfaceEXT");
+    if (createMetalSurface) {
+        VkMetalSurfaceCreateInfoEXT metalInfo = {};
+        metalInfo.sType = VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT;
+        metalInfo.pNext = nullptr;
+        metalInfo.flags = 0;
+        metalInfo.pLayer = targetLayerOrView;
 
-    VkResult r = createMetalSurface(instance, &metalInfo, pAllocator, pSurface);
-    KLOG(kDebug, "KuDroidGPU", "vkCreateMetalSurfaceEXT returned %d (surface=%p)", (int)r, (void*)*pSurface);
-    return r;
+        VkResult r = createMetalSurface(instance, &metalInfo, pAllocator, pSurface);
+        KLOG(kInfo, "KuDroidGPU", "vkCreateMetalSurfaceEXT returned %d (surface=%p)", (int)r, (void*)*pSurface);
+        return r;
+    }
+
+    KLOG(kError, "KuDroidGPU", "ERROR: Neither vkCreateIOSSurfaceMVK nor vkCreateMetalSurfaceEXT found");
+    return -1;
 }
 
 // Intercept vkGetInstanceProcAddr: translate Android surface calls, forward
