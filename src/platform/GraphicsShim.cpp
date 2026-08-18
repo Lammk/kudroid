@@ -545,18 +545,6 @@ extern "C" VkResult bionic_vkEnumerateInstanceExtensionProperties(const char* pL
                                                                   uint32_t* pPropertyCount,
                                                                   VkExtensionProperties* pProperties);
 
-// Direct externs to MoltenVK static symbols linked into app
-extern "C" VkResult vkCreateInstance(const VkInstanceCreateInfo* pCreateInfo,
-                                     const VkAllocationCallbacks* pAllocator,
-                                     VkInstance* pInstance) __attribute__((weak));
-
-extern "C" PFN_vkVoidFunction vkGetInstanceProcAddr(VkInstance instance,
-                                                    const char* pName) __attribute__((weak));
-
-extern "C" VkResult vkEnumerateInstanceExtensionProperties(const char* pLayerName,
-                                                           uint32_t* pPropertyCount,
-                                                           VkExtensionProperties* pProperties) __attribute__((weak));
-
 static void* get_mvk_handle() {
     static void* mvk = nullptr;
     if (!mvk) {
@@ -564,19 +552,22 @@ static void* get_mvk_handle() {
         if (!mvk) {
             mvk = ::dlopen("Frameworks/MoltenVK.framework/MoltenVK", RTLD_NOW | RTLD_GLOBAL);
         }
+        if (!mvk) {
+            mvk = ::dlopen("MoltenVK.framework/MoltenVK", RTLD_NOW | RTLD_GLOBAL);
+        }
     }
     return mvk;
 }
 
 static PFN_vkGetInstanceProcAddr get_real_vkGetInstanceProcAddr() {
-    if (&vkGetInstanceProcAddr) {
-        return &vkGetInstanceProcAddr;
+    static PFN_vkGetInstanceProcAddr real_gipa = nullptr;
+    if (!real_gipa) {
+        void* mvk = get_mvk_handle();
+        if (mvk) {
+            real_gipa = (PFN_vkGetInstanceProcAddr)::dlsym(mvk, "vkGetInstanceProcAddr");
+        }
     }
-    void* mvk = get_mvk_handle();
-    if (mvk) {
-        return (PFN_vkGetInstanceProcAddr)::dlsym(mvk, "vkGetInstanceProcAddr");
-    }
-    return nullptr;
+    return real_gipa;
 }
 
 // Intercept vkCreateInstance: translate Android surface extension to iOS Metal surface extension
@@ -585,15 +576,13 @@ extern "C" VkResult bionic_vkCreateInstance(const VkInstanceCreateInfo* pCreateI
                                             VkInstance* pInstance) {
     if (!pCreateInfo || !pInstance) return -3; // VK_ERROR_INITIALIZATION_FAILED
     
+    void* mvk = get_mvk_handle();
     PFN_vkCreateInstance real_create = nullptr;
-    if (&vkCreateInstance) {
-        real_create = &vkCreateInstance;
-    } else {
-        void* mvk = get_mvk_handle();
-        if (mvk) real_create = (PFN_vkCreateInstance)::dlsym(mvk, "vkCreateInstance");
+    if (mvk) {
+        real_create = (PFN_vkCreateInstance)::dlsym(mvk, "vkCreateInstance");
     }
     if (!real_create) {
-        KLOG(kError, "KuDroidGPU", "MoltenVK vkCreateInstance entry point not found");
+        KLOG(kError, "KuDroidGPU", "MoltenVK vkCreateInstance entry point not found in MoltenVK.framework");
         return -3;
     }
 
@@ -677,12 +666,10 @@ typedef VkResult (*PFN_vkEnumerateInstanceExtensionProperties)(const char*, uint
 extern "C" VkResult bionic_vkEnumerateInstanceExtensionProperties(const char* pLayerName,
                                                                   uint32_t* pPropertyCount,
                                                                   VkExtensionProperties* pProperties) {
+    void* mvk = get_mvk_handle();
     PFN_vkEnumerateInstanceExtensionProperties real = nullptr;
-    if (&vkEnumerateInstanceExtensionProperties) {
-        real = (PFN_vkEnumerateInstanceExtensionProperties)&vkEnumerateInstanceExtensionProperties;
-    } else {
-        void* mvk = get_mvk_handle();
-        if (mvk) real = (PFN_vkEnumerateInstanceExtensionProperties)::dlsym(mvk, "vkEnumerateInstanceExtensionProperties");
+    if (mvk) {
+        real = (PFN_vkEnumerateInstanceExtensionProperties)::dlsym(mvk, "vkEnumerateInstanceExtensionProperties");
     }
     if (!real) return -1;
 
