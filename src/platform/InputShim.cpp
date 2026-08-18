@@ -73,7 +73,8 @@ extern "C" void* kudroid_get_input_queue(void) {
 }
 
 // Exported for Swift to inject touch events
-extern "C" void kudroid_inject_touch_event(float x, float y, int32_t action) {
+extern "C" void kudroid_inject_touch_event_multi(float x, float y, int32_t action, int32_t pointerId, int32_t pointerCount) {
+    (void)pointerId;
     BionicInputEvent ev;
     ev.type = 2; // AINPUT_EVENT_TYPE_MOTION
     ev.action = action;
@@ -81,7 +82,7 @@ extern "C" void kudroid_inject_touch_event(float x, float y, int32_t action) {
     ev.y = y;
     ev.eventTime = static_cast<int64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count());
-    ev.pointerCount = 1;
+    ev.pointerCount = pointerCount > 0 ? pointerCount : 1;
     ev.source = 0x0002; // AINPUT_SOURCE_TOUCHSCREEN
     ev.flags = 0;
 
@@ -97,6 +98,10 @@ extern "C" void kudroid_inject_touch_event(float x, float y, int32_t action) {
         ssize_t unused = ::write(g_inputQueue.wakePipe[1], &byte, 1);
         (void)unused;
     }
+}
+
+extern "C" void kudroid_inject_touch_event(float x, float y, int32_t action) {
+    kudroid_inject_touch_event_multi(x, y, action, 0, 1);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

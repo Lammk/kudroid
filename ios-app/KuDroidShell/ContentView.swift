@@ -1126,26 +1126,30 @@ class NativeMetalView: UIView {
     }
 
     private func injectTouch(_ touches: Set<UITouch>, action: Int32) {
-        guard let touch = touches.first else { return }
-        let location = touch.location(in: self)
         let scale = UIScreen.main.scale
-        kudroid_inject_touch_event(Float(location.x * scale), Float(location.y * scale), action)
+        let totalCount = Int32(touches.count)
+        var pointerIdx: Int32 = 0
+        for touch in touches {
+            let location = touch.location(in: self)
+            kudroid_inject_touch_event_multi(Float(location.x * scale), Float(location.y * scale), action, pointerIdx, totalCount)
+            pointerIdx += 1
+        }
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        injectTouch(touches, action: 0)
+        injectTouch(touches, action: 0) // ACTION_DOWN
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-        injectTouch(touches, action: 2)
+        injectTouch(touches, action: 2) // ACTION_MOVE
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        injectTouch(touches, action: 1)
+        injectTouch(touches, action: 1) // ACTION_UP
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-        injectTouch(touches, action: 1)
+        injectTouch(touches, action: 3) // ACTION_CANCEL
     }
 }
 
