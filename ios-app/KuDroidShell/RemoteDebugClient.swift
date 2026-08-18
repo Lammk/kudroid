@@ -159,8 +159,56 @@ class RemoteDebugClient: NSObject {
             let name = json["name"] as? String ?? "gpu"
             handleTestCommand(testName: name)
 
+        case "run_so":
+            if let filename = json["filename"] as? String,
+               let dataBase64 = json["dataBase64"] as? String,
+               let soData = Data(base64Encoded: dataBase64) {
+                let entry = json["entrypoint"] as? String ?? ""
+                handleRunSoCommand(filename: filename, data: soData, entrypoint: entry)
+            } else {
+                sendResponse(["success": false, "error": "Invalid run_so payload"])
+            }
+
         default:
             break
+        }
+    }
+
+    private func handleRunSoCommand(filename: String, data: Data, entrypoint: String) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let docURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+                self?.sendResponse(["success": false, "error": "Cannot access Documents directory"])
+                return
+            }
+
+            let microDir = docURL.appendingPathComponent("micro_tests", isDirectory: true)
+            try? FileManager.default.createDirectory(at: microDir, withIntermediateDirectories: true)
+
+            let targetURL = microDir.appendingPathComponent(filename)
+            do {
+                try data.write(to: targetURL)
+            } catch {
+                self?.sendResponse(["success": false, "error": "Failed to write SO: \(error.localizedDescription)"])
+                return
+            }
+
+            guard let cString = kudroid_run_so_test(targetURL.path, entrypoint.isEmpty ? nil : entrypoint) else {
+                self?.sendResponse(["success": false, "error": "Native runner returned null"])
+                return
+            }
+
+            let log = String(cString: cString)
+            free(UnsafeMutablePointer(mutating: cString))
+
+            // Lưu log
+            saveTestLog(filename: "test_so.log", content: log)
+
+            let isSuccess = !log.contains("❌") && !log.contains("FAILED")
+            self?.sendResponse([
+                "success": isSuccess,
+                "file": "test_so.log",
+                "log": log
+            ])
         }
     }
 

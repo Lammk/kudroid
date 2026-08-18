@@ -1485,6 +1485,87 @@ extern "C" const char* kudroid_multi_elf_test(const char* consumerPath,
     return result;
 }
 
+extern "C" const char* kudroid_run_so_test(const char* soPath, const char* entrypoint) {
+    std::string log;
+    appendTestHeader(log, "Dynamic Remote .so Test Execution", soPath);
+    kudroid::bionic_shim_reset_trace();
+
+    if (!soPath) {
+        log += "❌ ERROR: null SO path provided\n";
+        return strdup(log.c_str());
+    }
+
+    log += "[kudroid_runner] Loading library: " + std::string(soPath) + "\n";
+    kudroid::LibraryManager manager;
+
+    if (!manager.loadRecursive(soPath)) {
+        log += "❌ LOAD FAILED: " + manager.lastError() + "\n";
+        const char* trace = kudroid::bionic_shim_trace();
+        if (trace && *trace) {
+            log += "\n[kudroid_runner] Binding trace during failure:\n";
+            log += trace;
+        }
+        return strdup(log.c_str());
+    }
+    log += "✔ Library loaded successfully with " + std::to_string(manager.libraries().size()) + " dependencies resolved\n";
+
+    // Tìm entrypoint
+    std::vector<std::string> candidateNames;
+    if (entrypoint && strlen(entrypoint) > 0) {
+        candidateNames.push_back(entrypoint);
+    }
+    candidateNames.push_back("kudroid_test_main");
+    candidateNames.push_back("kudroid_main");
+    candidateNames.push_back("test_main");
+    candidateNames.push_back("main");
+
+    void* symbol = nullptr;
+    std::string foundName;
+    for (const auto& name : candidateNames) {
+        symbol = manager.resolveGlobalSymbol(name.c_str());
+        if (symbol) {
+            foundName = name;
+            break;
+        }
+    }
+
+    if (!symbol) {
+        log += "❌ ERROR: No recognized entrypoint symbol found! Candidates tried:\n";
+        for (const auto& name : candidateNames) log += "  - " + name + "\n";
+        return strdup(log.c_str());
+    }
+    log += "✔ Entrypoint resolved: '" + foundName + "' at " + std::to_string(reinterpret_cast<uintptr_t>(symbol)) + "\n";
+
+    log += "🚀 Executing test function in sandbox...\n\n";
+    mirrorCrash(log);
+
+    // Hỗ trợ 2 kiểu chữ ký: const char* (*)() hoặc int (*)()
+    typedef int (*IntTestFn)();
+    const char* outputStr = nullptr;
+    
+    // Thử gọi an toàn
+    const int retInt = reinterpret_cast<IntTestFn>(symbol)();
+
+    // Nếu trả về con trỏ chuỗi hợp lệ (> 4096)
+    if (static_cast<uintptr_t>(retInt) > 0x10000) {
+        outputStr = reinterpret_cast<const char*>(static_cast<uintptr_t>(retInt));
+        log += "=== OUTPUT FROM TEST .SO ===\n";
+        log += std::string(outputStr ? outputStr : "(null string)") + "\n";
+    } else {
+        log += "=== TEST STATUS RETURNED ===\n";
+        log += "Exit Code: " + std::to_string(retInt) + (retInt == 0 ? " (SUCCESS ✔)\n" : " (FAILED ❌)\n");
+    }
+
+    const char* trace = kudroid::bionic_shim_trace();
+    if (trace && *trace) {
+        log += "\n[kudroid_runner] Bionic runtime shim trace:\n";
+        log += trace;
+    }
+
+    log += "\n🎉 Test execution finished.\n";
+    return strdup(log.c_str());
+}
+
 extern "C" int kudroid_clear_app_cache(const char* package_name) {
     if (!package_name) return 0;
     

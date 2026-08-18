@@ -80,6 +80,7 @@ const char* kudroid_vfs_extended_test_log(void);
 char* kudroid_test_jvm(const char* rt_jar_path);
 char* kudroid_test_gpu(void);
 char* kudroid_test_audio(void);
+const char* kudroid_run_so_test(const char* soPath, const char* entrypoint);
 
 /// tải tệp .so kiểm tra gpu arm64 và thực thi kiểm tra vulkan của nó thông qua tính năng chặn bionicshim.
 /// trả về một nhật ký chẩn đoán được malloc; người gọi phải giải phóng nó bằng free().
