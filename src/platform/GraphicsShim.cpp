@@ -598,6 +598,18 @@ extern "C" VkResult bionic_vkCreateInstance(const VkInstanceCreateInfo* pCreateI
         }
     }
 
+    // MoltenVK on iOS requires VK_KHR_portability_enumeration extension for enumeration flag
+    bool hasPortability = false;
+    for (const char* ext : extList) {
+        if (strcmp(ext, "VK_KHR_portability_enumeration") == 0) {
+            hasPortability = true;
+            break;
+        }
+    }
+    if (!hasPortability) {
+        extList.push_back("VK_KHR_portability_enumeration");
+    }
+
     VkInstanceCreateInfo filteredInfo = *pCreateInfo;
     filteredInfo.enabledExtensionCount = static_cast<uint32_t>(extList.size());
     filteredInfo.ppEnabledExtensionNames = extList.data();
@@ -725,20 +737,23 @@ void* get_vk_func(const char* name) {
     if (strcmp(name, "vkGetInstanceProcAddr") == 0) {
         return (void*)&bionic_vkGetInstanceProcAddr;
     }
+    if (strcmp(name, "vkCreateInstance") == 0) {
+        return (void*)&bionic_vkCreateInstance;
+    }
     if (strcmp(name, "vkCreateAndroidSurfaceKHR") == 0) {
         return (void*)&bionic_vkCreateAndroidSurfaceKHR;
     }
     if (strcmp(name, "vkEnumerateInstanceExtensionProperties") == 0) {
         return (void*)&bionic_vkEnumerateInstanceExtensionProperties;
     }
+    void* mvk = get_mvk_handle();
+    if (mvk) {
+        void* f = ::dlsym(mvk, name);
+        if (f) return f;
+    }
     auto real = get_real_vkGetInstanceProcAddr();
     if (real) {
         void* f = (void*)real(nullptr, name);
-        if (f) return f;
-    }
-    void* mvk = ::dlopen("@executable_path/Frameworks/MoltenVK.framework/MoltenVK", RTLD_NOW | RTLD_GLOBAL);
-    if (mvk) {
-        void* f = ::dlsym(mvk, name);
         if (f) return f;
     }
     return ::dlsym(RTLD_DEFAULT, name);
