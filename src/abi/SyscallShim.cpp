@@ -52,6 +52,11 @@ extern "C" void kudroid_append_crash_log(const char* text, size_t len);
 // Lưu abort message (android_set_abort_message) — crash handler in nó ra.
 extern "C" void kudroid_store_abort_message(const char* msg);
 
+// JNI & JVM Runtime declarations
+extern "C" void* kudroid_jni_get_javavm(void);
+extern "C" int JNI_GetCreatedJavaVMs(void** vmBuf, size_t bufLen, size_t* nVMs);
+extern "C" int JNI_CreateJavaVM(void** p_vm, void** p_env, void* vm_args);
+
 // For Bionic pthread emulation
 #include <cstdarg>
 #include <semaphore.h>
@@ -3785,6 +3790,11 @@ const SymbolEntry kSyscallSymbols[] = {
     {"eventfd2", reinterpret_cast<void*>(&bionic_eventfd2)},
     {"prlimit64", reinterpret_cast<void*>(&bionic_prlimit64)},
     {"statx", reinterpret_cast<void*>(&bionic_statx)},
+
+    // JNI and JVM Runtime Bridge
+    {"kudroid_jni_get_javavm", reinterpret_cast<void*>(&kudroid_jni_get_javavm)},
+    {"JNI_GetCreatedJavaVMs", reinterpret_cast<void*>(&JNI_GetCreatedJavaVMs)},
+    {"JNI_CreateJavaVM", reinterpret_cast<void*>(&JNI_CreateJavaVM)},
 };
 
 } // namespace

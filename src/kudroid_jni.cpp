@@ -365,8 +365,19 @@ void kudroid_jni_destroy_jvm(void) {
 }
 
 extern "C" JavaVM* kudroid_jni_get_javavm(void) {
+    kudroid_jni_init_jvm("", "");
     std::lock_guard<std::mutex> lock(g_jvm_mutex);
     return g_vm;
+}
+
+extern "C" jint JNI_GetCreatedJavaVMs(JavaVM** vmBuf, jsize bufLen, jsize* nVMs) {
+    JavaVM* vm = kudroid_jni_get_javavm();
+    if (nVMs) *nVMs = vm ? 1 : 0;
+    if (vmBuf && bufLen > 0 && vm) {
+        vmBuf[0] = vm;
+        return JNI_OK;
+    }
+    return JNI_OK;
 }
 
 jint kudroid_jni_get_env(JavaVM* vm, void** env, jint version) {
