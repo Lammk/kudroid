@@ -409,6 +409,7 @@ const SymbolEntry kInputSymbols[] = {
     {"AKeyEvent_getRepeatCount", reinterpret_cast<void*>(&bionic_AKeyEvent_getRepeatCount)},
     {"AKeyEvent_getDownTime", reinterpret_cast<void*>(&bionic_AKeyEvent_getDownTime)},
     {"AKeyEvent_getEventTime", reinterpret_cast<void*>(&bionic_AKeyEvent_getEventTime)},
+    {"kudroid_inject_touch_event", reinterpret_cast<void*>(&kudroid_inject_touch_event)},
 };
 
 } // namespace
