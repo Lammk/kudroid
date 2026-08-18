@@ -175,13 +175,17 @@ class RemoteDebugClient: NSObject {
             handleTestCommand(testName: name)
 
         case "run_so":
-            if let filename = json["filename"] as? String,
-               let dataBase64 = json["dataBase64"] as? String,
-               let soData = Data(base64Encoded: dataBase64) {
-                let entry = json["entrypoint"] as? String ?? ""
+            let filename = json["filename"] as? String ?? "test.so"
+            let entry = json["entrypoint"] as? String ?? ""
+
+            if let urlString = json["url"] as? String, let remoteURL = URL(string: urlString) {
+                // Tải trực tiếp siêu tốc qua HTTP LAN Server (không giới hạn dung lượng)
+                handleDownloadAndRunSo(filename: filename, url: remoteURL, entrypoint: entry)
+            } else if let dataBase64 = json["dataBase64"] as? String,
+                      let soData = Data(base64Encoded: dataBase64) {
                 handleRunSoCommand(filename: filename, data: soData, entrypoint: entry)
             } else {
-                sendResponse(["success": false, "error": "Invalid run_so payload"])
+                sendResponse(["success": false, "error": "Invalid run_so payload (no url or dataBase64)"])
             }
 
         case "version":
@@ -193,6 +197,38 @@ class RemoteDebugClient: NSObject {
         default:
             break
         }
+    }
+
+    private func handleDownloadAndRunSo(filename: String, url: URL, entrypoint: String) {
+        guard let docURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            sendResponse(["success": false, "error": "Cannot access Documents directory"])
+            return
+        }
+
+        let microDir = docURL.appendingPathComponent("micro_tests", isDirectory: true)
+        try? FileManager.default.createDirectory(at: microDir, withIntermediateDirectories: true)
+        let targetURL = microDir.appendingPathComponent(filename)
+
+        let task = URLSession.shared.downloadTask(with: url) { [weak self] (tempURL, _, error) in
+            if let error = error {
+                self?.sendResponse(["success": false, "error": "LAN HTTP download failed: \(error.localizedDescription)"])
+                return
+            }
+            guard let tempURL = tempURL else {
+                self?.sendResponse(["success": false, "error": "Downloaded temp file is missing"])
+                return
+            }
+            do {
+                if FileManager.default.fileExists(atPath: targetURL.path) {
+                    try FileManager.default.removeItem(at: targetURL)
+                }
+                try FileManager.default.moveItem(at: tempURL, to: targetURL)
+                self?.executeSoFile(targetURL: targetURL, entrypoint: entrypoint)
+            } catch {
+                self?.sendResponse(["success": false, "error": "Failed to move downloaded SO: \(error.localizedDescription)"])
+            }
+        }
+        task.resume()
     }
 
     private func handleRunSoCommand(filename: String, data: Data, entrypoint: String) {
@@ -208,11 +244,16 @@ class RemoteDebugClient: NSObject {
             let targetURL = microDir.appendingPathComponent(filename)
             do {
                 try data.write(to: targetURL)
+                self?.executeSoFile(targetURL: targetURL, entrypoint: entrypoint)
             } catch {
                 self?.sendResponse(["success": false, "error": "Failed to write SO: \(error.localizedDescription)"])
                 return
             }
+        }
+    }
 
+    private func executeSoFile(targetURL: URL, entrypoint: String) {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let cString = kudroid_run_so_test(targetURL.path, entrypoint.isEmpty ? nil : entrypoint) else {
                 self?.sendResponse(["success": false, "error": "Native runner returned null"])
                 return
