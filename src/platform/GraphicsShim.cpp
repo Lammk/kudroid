@@ -1690,6 +1690,206 @@ extern "C" void bionic_glDetachShader(unsigned int program, unsigned int shader)
     if (f) f(program, shader);
 }
 
+// ── GLES 3.0/3.1 Advanced: Instancing ───────────────────────────────────────
+extern "C" void bionic_glDrawArraysInstanced(unsigned int mode, int first, int count, int instancecount) {
+    typedef void (*PFN)(unsigned int, int, int, int);
+    auto f = (PFN)get_gl_func("glDrawArraysInstanced");
+    if (!f) f = (PFN)get_gl_func("glDrawArraysInstancedANGLE");
+    if (f) f(mode, first, count, instancecount);
+}
+extern "C" void bionic_glDrawElementsInstanced(unsigned int mode, int count, unsigned int type, const void* indices, int instancecount) {
+    typedef void (*PFN)(unsigned int, int, unsigned int, const void*, int);
+    auto f = (PFN)get_gl_func("glDrawElementsInstanced");
+    if (!f) f = (PFN)get_gl_func("glDrawElementsInstancedANGLE");
+    if (f) f(mode, count, type, indices, instancecount);
+}
+extern "C" void bionic_glVertexAttribDivisor(unsigned int index, unsigned int divisor) {
+    typedef void (*PFN)(unsigned int, unsigned int);
+    auto f = (PFN)get_gl_func("glVertexAttribDivisor");
+    if (!f) f = (PFN)get_gl_func("glVertexAttribDivisorANGLE");
+    if (f) f(index, divisor);
+}
+
+// ── GLES 3.0: Buffer Mapping ────────────────────────────────────────────────
+extern "C" void* bionic_glMapBufferRange(unsigned int target, long offset, long length, unsigned int access) {
+    typedef void* (*PFN)(unsigned int, long, long, unsigned int);
+    auto f = (PFN)get_gl_func("glMapBufferRange");
+    if (f) return f(target, offset, length, access);
+    return nullptr;
+}
+extern "C" unsigned char bionic_glUnmapBuffer(unsigned int target) {
+    typedef unsigned char (*PFN)(unsigned int);
+    auto f = (PFN)get_gl_func("glUnmapBuffer");
+    if (f) return f(target);
+    return 0;
+}
+extern "C" void bionic_glFlushMappedBufferRange(unsigned int target, long offset, long length) {
+    typedef void (*PFN)(unsigned int, long, long);
+    auto f = (PFN)get_gl_func("glFlushMappedBufferRange");
+    if (f) f(target, offset, length);
+}
+
+// ── GLES 3.0: 3D Textures & Immutable Storage & Samplers ────────────────────
+extern "C" void bionic_glTexImage3D(unsigned int target, int level, int internalformat, int width, int height, int depth, int border, unsigned int format, unsigned int type, const void* pixels) {
+    typedef void (*PFN)(unsigned int, int, int, int, int, int, int, unsigned int, unsigned int, const void*);
+    auto f = (PFN)get_gl_func("glTexImage3D");
+    if (f) f(target, level, internalformat, width, height, depth, border, format, type, pixels);
+}
+extern "C" void bionic_glTexSubImage3D(unsigned int target, int level, int xoffset, int yoffset, int zoffset, int width, int height, int depth, unsigned int format, unsigned int type, const void* pixels) {
+    typedef void (*PFN)(unsigned int, int, int, int, int, int, int, int, unsigned int, unsigned int, const void*);
+    auto f = (PFN)get_gl_func("glTexSubImage3D");
+    if (f) f(target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels);
+}
+extern "C" void bionic_glTexStorage2D(unsigned int target, int levels, unsigned int internalformat, int width, int height) {
+    typedef void (*PFN)(unsigned int, int, unsigned int, int, int);
+    auto f = (PFN)get_gl_func("glTexStorage2D");
+    if (f) f(target, levels, internalformat, width, height);
+}
+extern "C" void bionic_glTexStorage3D(unsigned int target, int levels, unsigned int internalformat, int width, int height, int depth) {
+    typedef void (*PFN)(unsigned int, int, unsigned int, int, int, int);
+    auto f = (PFN)get_gl_func("glTexStorage3D");
+    if (f) f(target, levels, internalformat, width, height, depth);
+}
+extern "C" void bionic_glGenSamplers(int count, unsigned int* samplers) {
+    typedef void (*PFN)(int, unsigned int*);
+    auto f = (PFN)get_gl_func("glGenSamplers");
+    if (f) f(count, samplers);
+}
+extern "C" void bionic_glBindSampler(unsigned int unit, unsigned int sampler) {
+    typedef void (*PFN)(unsigned int, unsigned int);
+    auto f = (PFN)get_gl_func("glBindSampler");
+    if (f) f(unit, sampler);
+}
+extern "C" void bionic_glDeleteSamplers(int count, const unsigned int* samplers) {
+    typedef void (*PFN)(int, const unsigned int*);
+    auto f = (PFN)get_gl_func("glDeleteSamplers");
+    if (f) f(count, samplers);
+}
+extern "C" void bionic_glSamplerParameteri(unsigned int sampler, unsigned int pname, int param) {
+    typedef void (*PFN)(unsigned int, unsigned int, int);
+    auto f = (PFN)get_gl_func("glSamplerParameteri");
+    if (f) f(sampler, pname, param);
+}
+extern "C" void bionic_glSamplerParameterf(unsigned int sampler, unsigned int pname, float param) {
+    typedef void (*PFN)(unsigned int, unsigned int, float);
+    auto f = (PFN)get_gl_func("glSamplerParameterf");
+    if (f) f(sampler, pname, param);
+}
+
+// ── GLES 3.0: Sync Objects & Fences ─────────────────────────────────────────
+extern "C" void* bionic_glFenceSync(unsigned int condition, unsigned int flags) {
+    typedef void* (*PFN)(unsigned int, unsigned int);
+    auto f = (PFN)get_gl_func("glFenceSync");
+    if (f) return f(condition, flags);
+    return nullptr;
+}
+extern "C" unsigned int bionic_glClientWaitSync(void* sync, unsigned int flags, uint64_t timeout) {
+    typedef unsigned int (*PFN)(void*, unsigned int, uint64_t);
+    auto f = (PFN)get_gl_func("glClientWaitSync");
+    if (f) return f(sync, flags, timeout);
+    return 0;
+}
+extern "C" void bionic_glWaitSync(void* sync, unsigned int flags, uint64_t timeout) {
+    typedef void (*PFN)(void*, unsigned int, uint64_t);
+    auto f = (PFN)get_gl_func("glWaitSync");
+    if (f) f(sync, flags, timeout);
+}
+extern "C" void bionic_glDeleteSync(void* sync) {
+    typedef void (*PFN)(void*);
+    auto f = (PFN)get_gl_func("glDeleteSync");
+    if (f) f(sync);
+}
+extern "C" unsigned char bionic_glIsSync(void* sync) {
+    typedef unsigned char (*PFN)(void*);
+    auto f = (PFN)get_gl_func("glIsSync");
+    if (f) return f(sync);
+    return 0;
+}
+
+// ── GLES 3.0: MRT & Blit Framebuffer ────────────────────────────────────────
+extern "C" void bionic_glDrawBuffers(int n, const unsigned int* bufs) {
+    typedef void (*PFN)(int, const unsigned int*);
+    auto f = (PFN)get_gl_func("glDrawBuffers");
+    if (f) f(n, bufs);
+}
+extern "C" void bionic_glReadBuffer(unsigned int src) {
+    typedef void (*PFN)(unsigned int);
+    auto f = (PFN)get_gl_func("glReadBuffer");
+    if (f) f(src);
+}
+extern "C" void bionic_glBlitFramebuffer(int srcX0, int srcY0, int srcX1, int srcY1, int dstX0, int dstY0, int dstX1, int dstY1, unsigned int mask, unsigned int filter) {
+    typedef void (*PFN)(int, int, int, int, int, int, int, int, unsigned int, unsigned int);
+    auto f = (PFN)get_gl_func("glBlitFramebuffer");
+    if (f) f(srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter);
+}
+extern "C" void bionic_glRenderbufferStorageMultisample(unsigned int target, int samples, unsigned int internalformat, int width, int height) {
+    typedef void (*PFN)(unsigned int, int, unsigned int, int, int);
+    auto f = (PFN)get_gl_func("glRenderbufferStorageMultisample");
+    if (f) f(target, samples, internalformat, width, height);
+}
+
+// ── GLES 3.0/3.1: Uniform Buffer Objects (UBO) & SSBO ───────────────────────
+extern "C" unsigned int bionic_glGetUniformBlockIndex(unsigned int program, const char* uniformBlockName) {
+    typedef unsigned int (*PFN)(unsigned int, const char*);
+    auto f = (PFN)get_gl_func("glGetUniformBlockIndex");
+    if (f) return f(program, uniformBlockName);
+    return 0xFFFFFFFF;
+}
+extern "C" void bionic_glUniformBlockBinding(unsigned int program, unsigned int uniformBlockIndex, unsigned int uniformBlockBinding) {
+    typedef void (*PFN)(unsigned int, unsigned int, unsigned int);
+    auto f = (PFN)get_gl_func("glUniformBlockBinding");
+    if (f) f(program, uniformBlockIndex, uniformBlockBinding);
+}
+extern "C" void bionic_glBindBufferBase(unsigned int target, unsigned int index, unsigned int buffer) {
+    typedef void (*PFN)(unsigned int, unsigned int, unsigned int);
+    auto f = (PFN)get_gl_func("glBindBufferBase");
+    if (f) f(target, index, buffer);
+}
+extern "C" void bionic_glBindBufferRange(unsigned int target, unsigned int index, unsigned int buffer, long offset, long size) {
+    typedef void (*PFN)(unsigned int, unsigned int, unsigned int, long, long);
+    auto f = (PFN)get_gl_func("glBindBufferRange");
+    if (f) f(target, index, buffer, offset, size);
+}
+
+// ── GLES 3.1: Compute Shaders ───────────────────────────────────────────────
+extern "C" void bionic_glDispatchCompute(unsigned int num_groups_x, unsigned int num_groups_y, unsigned int num_groups_z) {
+    typedef void (*PFN)(unsigned int, unsigned int, unsigned int);
+    auto f = (PFN)get_gl_func("glDispatchCompute");
+    if (f) f(num_groups_x, num_groups_y, num_groups_z);
+}
+extern "C" void bionic_glDispatchComputeIndirect(long indirect) {
+    typedef void (*PFN)(long);
+    auto f = (PFN)get_gl_func("glDispatchComputeIndirect");
+    if (f) f(indirect);
+}
+
+// ── GLES 3.0: Transform Feedback ────────────────────────────────────────────
+extern "C" void bionic_glGenTransformFeedbacks(int n, unsigned int* ids) {
+    typedef void (*PFN)(int, unsigned int*);
+    auto f = (PFN)get_gl_func("glGenTransformFeedbacks");
+    if (f) f(n, ids);
+}
+extern "C" void bionic_glBindTransformFeedback(unsigned int target, unsigned int id) {
+    typedef void (*PFN)(unsigned int, unsigned int);
+    auto f = (PFN)get_gl_func("glBindTransformFeedback");
+    if (f) f(target, id);
+}
+extern "C" void bionic_glDeleteTransformFeedbacks(int n, const unsigned int* ids) {
+    typedef void (*PFN)(int, const unsigned int*);
+    auto f = (PFN)get_gl_func("glDeleteTransformFeedbacks");
+    if (f) f(n, ids);
+}
+extern "C" void bionic_glBeginTransformFeedback(unsigned int primitiveMode) {
+    typedef void (*PFN)(unsigned int);
+    auto f = (PFN)get_gl_func("glBeginTransformFeedback");
+    if (f) f(primitiveMode);
+}
+extern "C" void bionic_glEndTransformFeedback(void) {
+    typedef void (*PFN)(void);
+    auto f = (PFN)get_gl_func("glEndTransformFeedback");
+    if (f) f();
+}
+
 const SymbolEntry kGraphicsSymbols[] = {
     {"ANativeWindow_fromSurface", reinterpret_cast<void*>(&bionic_ANativeWindow_fromSurface)},
     {"ANativeWindow_getWidth", reinterpret_cast<void*>(&bionic_ANativeWindow_getWidth)},
@@ -1832,6 +2032,41 @@ const SymbolEntry kGraphicsSymbols[] = {
     {"glDeleteShader", reinterpret_cast<void*>(&bionic_glDeleteShader)},
     {"glDeleteProgram", reinterpret_cast<void*>(&bionic_glDeleteProgram)},
     {"glDetachShader", reinterpret_cast<void*>(&bionic_glDetachShader)},
+    {"glDrawArraysInstanced", reinterpret_cast<void*>(&bionic_glDrawArraysInstanced)},
+    {"glDrawElementsInstanced", reinterpret_cast<void*>(&bionic_glDrawElementsInstanced)},
+    {"glVertexAttribDivisor", reinterpret_cast<void*>(&bionic_glVertexAttribDivisor)},
+    {"glMapBufferRange", reinterpret_cast<void*>(&bionic_glMapBufferRange)},
+    {"glUnmapBuffer", reinterpret_cast<void*>(&bionic_glUnmapBuffer)},
+    {"glFlushMappedBufferRange", reinterpret_cast<void*>(&bionic_glFlushMappedBufferRange)},
+    {"glTexImage3D", reinterpret_cast<void*>(&bionic_glTexImage3D)},
+    {"glTexSubImage3D", reinterpret_cast<void*>(&bionic_glTexSubImage3D)},
+    {"glTexStorage2D", reinterpret_cast<void*>(&bionic_glTexStorage2D)},
+    {"glTexStorage3D", reinterpret_cast<void*>(&bionic_glTexStorage3D)},
+    {"glGenSamplers", reinterpret_cast<void*>(&bionic_glGenSamplers)},
+    {"glBindSampler", reinterpret_cast<void*>(&bionic_glBindSampler)},
+    {"glDeleteSamplers", reinterpret_cast<void*>(&bionic_glDeleteSamplers)},
+    {"glSamplerParameteri", reinterpret_cast<void*>(&bionic_glSamplerParameteri)},
+    {"glSamplerParameterf", reinterpret_cast<void*>(&bionic_glSamplerParameterf)},
+    {"glFenceSync", reinterpret_cast<void*>(&bionic_glFenceSync)},
+    {"glClientWaitSync", reinterpret_cast<void*>(&bionic_glClientWaitSync)},
+    {"glWaitSync", reinterpret_cast<void*>(&bionic_glWaitSync)},
+    {"glDeleteSync", reinterpret_cast<void*>(&bionic_glDeleteSync)},
+    {"glIsSync", reinterpret_cast<void*>(&bionic_glIsSync)},
+    {"glDrawBuffers", reinterpret_cast<void*>(&bionic_glDrawBuffers)},
+    {"glReadBuffer", reinterpret_cast<void*>(&bionic_glReadBuffer)},
+    {"glBlitFramebuffer", reinterpret_cast<void*>(&bionic_glBlitFramebuffer)},
+    {"glRenderbufferStorageMultisample", reinterpret_cast<void*>(&bionic_glRenderbufferStorageMultisample)},
+    {"glGetUniformBlockIndex", reinterpret_cast<void*>(&bionic_glGetUniformBlockIndex)},
+    {"glUniformBlockBinding", reinterpret_cast<void*>(&bionic_glUniformBlockBinding)},
+    {"glBindBufferBase", reinterpret_cast<void*>(&bionic_glBindBufferBase)},
+    {"glBindBufferRange", reinterpret_cast<void*>(&bionic_glBindBufferRange)},
+    {"glDispatchCompute", reinterpret_cast<void*>(&bionic_glDispatchCompute)},
+    {"glDispatchComputeIndirect", reinterpret_cast<void*>(&bionic_glDispatchComputeIndirect)},
+    {"glGenTransformFeedbacks", reinterpret_cast<void*>(&bionic_glGenTransformFeedbacks)},
+    {"glBindTransformFeedback", reinterpret_cast<void*>(&bionic_glBindTransformFeedback)},
+    {"glDeleteTransformFeedbacks", reinterpret_cast<void*>(&bionic_glDeleteTransformFeedbacks)},
+    {"glBeginTransformFeedback", reinterpret_cast<void*>(&bionic_glBeginTransformFeedback)},
+    {"glEndTransformFeedback", reinterpret_cast<void*>(&bionic_glEndTransformFeedback)},
     {"vkGetInstanceProcAddr", reinterpret_cast<void*>(&bionic_vkGetInstanceProcAddr)},
     {"vkCreateAndroidSurfaceKHR", reinterpret_cast<void*>(&bionic_vkCreateAndroidSurfaceKHR)},
     {"vkEnumerateInstanceExtensionProperties", reinterpret_cast<void*>(&bionic_vkEnumerateInstanceExtensionProperties)},
