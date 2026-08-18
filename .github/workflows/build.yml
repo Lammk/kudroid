@@ -118,6 +118,43 @@ jobs:
         with:
           name: angle-ios-arm64
           path: third_party/ANGLE
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Avian JVM — build for iOS ARM64 (needed by kudroid_core).
+  # Uses JDK 8 (Zulu) because Avian's classpath build uses `javac -source 1`.
+  # ─────────────────────────────────────────────────────────────────────────────
+  build-avian-ios:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up JDK 8
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'zulu'
+          java-version: '8'
+
+      - name: Build KuDroid framework jar
+        run: |
+          bash framework/build.sh
+          ls -lh framework/build/framework.jar
+
+      - name: Build Avian for iOS ARM64
+        working-directory: third_party/jvm/avian
+        run: |
+          # Patch makefile for iOS (binaryToObject fails on macho; embed the
+          # classpath jar via .incbin and merge the framework classes in).
+          python3 "$GITHUB_WORKSPACE/scripts/patch-avian-ios.py"
+          make platform=ios arch=arm64 use-clang=true
+
+      - name: Upload Avian iOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: avian-ios-arm64
+          path: |
+            third_party/jvm/avian/build/
+            third_party/jvm/avian/include/
           retention-days: 90
 
   # ─────────────────────────────────────────────────────────────────────────────
