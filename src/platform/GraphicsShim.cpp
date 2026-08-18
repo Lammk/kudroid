@@ -518,6 +518,29 @@ typedef struct VkMetalSurfaceCreateInfoEXT {
     void* pLayer; // CAMetalLayer*
 } VkMetalSurfaceCreateInfoEXT;
 
+typedef struct VkInstanceCreateInfo {
+    uint32_t sType;
+    const void* pNext;
+    VkFlags flags;
+    const void* pApplicationInfo;
+    uint32_t enabledLayerCount;
+    const char* const* ppEnabledLayerNames;
+    uint32_t enabledExtensionCount;
+    const char* const* ppEnabledExtensionNames;
+} VkInstanceCreateInfo;
+
+#define VK_NULL_HANDLE nullptr
+
+typedef struct VkExtensionProperties {
+    char extensionName[256];
+    uint32_t specVersion;
+} VkExtensionProperties;
+
+extern "C" VkResult bionic_vkEnumerateInstanceExtensionProperties(const char* pLayerName,
+                                                                  uint32_t* pPropertyCount,
+                                                                  VkExtensionProperties* pProperties);
+
+typedef VkResult (*PFN_vkCreateInstance)(const VkInstanceCreateInfo*, const VkAllocationCallbacks*, VkInstance*);
 typedef VkResult (*PFN_vkCreateMetalSurfaceEXT)(VkInstance, const VkMetalSurfaceCreateInfoEXT*, const VkAllocationCallbacks*, VkSurfaceKHR*);
 typedef PFN_vkVoidFunction (*PFN_vkGetInstanceProcAddr)(VkInstance, const char*);
 
@@ -527,11 +550,48 @@ static PFN_vkGetInstanceProcAddr real_vkGetInstanceProcAddr = nullptr;
 static PFN_vkGetInstanceProcAddr get_real_vkGetInstanceProcAddr() {
     if (!real_vkGetInstanceProcAddr) {
         void* mvk = ::dlopen("@executable_path/Frameworks/MoltenVK.framework/MoltenVK", RTLD_NOW | RTLD_GLOBAL);
+        if (!mvk) {
+            mvk = ::dlopen("Frameworks/MoltenVK.framework/MoltenVK", RTLD_NOW | RTLD_GLOBAL);
+        }
         if (mvk) {
             real_vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)::dlsym(mvk, "vkGetInstanceProcAddr");
         }
     }
     return real_vkGetInstanceProcAddr;
+}
+
+// Intercept vkCreateInstance: translate Android surface extension to iOS Metal surface extension
+extern "C" VkResult bionic_vkCreateInstance(const VkInstanceCreateInfo* pCreateInfo,
+                                            const VkAllocationCallbacks* pAllocator,
+                                            VkInstance* pInstance) {
+    if (!pCreateInfo || !pInstance) return -3; // VK_ERROR_INITIALIZATION_FAILED
+    auto real_gipa = get_real_vkGetInstanceProcAddr();
+    if (!real_gipa) {
+        KLOG(kError, "KuDroidGPU", "MoltenVK not loaded for vkCreateInstance");
+        return -3;
+    }
+    auto real_create = (PFN_vkCreateInstance)real_gipa(VK_NULL_HANDLE, "vkCreateInstance");
+    if (!real_create) return -3;
+
+    std::vector<const char*> extList;
+    if (pCreateInfo->ppEnabledExtensionNames && pCreateInfo->enabledExtensionCount > 0) {
+        for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; ++i) {
+            const char* ext = pCreateInfo->ppEnabledExtensionNames[i];
+            if (strcmp(ext, "VK_KHR_android_surface") == 0) {
+                extList.push_back("VK_EXT_metal_surface");
+            } else {
+                extList.push_back(ext);
+            }
+        }
+    }
+
+    VkInstanceCreateInfo filteredInfo = *pCreateInfo;
+    filteredInfo.enabledExtensionCount = static_cast<uint32_t>(extList.size());
+    filteredInfo.ppEnabledExtensionNames = extList.data();
+
+    VkResult res = real_create(&filteredInfo, pAllocator, pInstance);
+    KLOG(kInfo, "KuDroidGPU", "bionic_vkCreateInstance returned %d (instance=%p)", (int)res, (void*)*pInstance);
+    return res;
 }
 
 // Translate vkCreateAndroidSurfaceKHR → vkCreateMetalSurfaceEXT.
@@ -568,8 +628,14 @@ extern "C" VkResult bionic_vkCreateAndroidSurfaceKHR(VkInstance instance,
 // everything else to MoltenVK.
 extern "C" PFN_vkVoidFunction bionic_vkGetInstanceProcAddr(VkInstance instance, const char* pName) {
     if (!pName) return nullptr;
+    if (strcmp(pName, "vkCreateInstance") == 0) {
+        return (PFN_vkVoidFunction)&bionic_vkCreateInstance;
+    }
     if (strcmp(pName, "vkCreateAndroidSurfaceKHR") == 0) {
         return (PFN_vkVoidFunction)&bionic_vkCreateAndroidSurfaceKHR;
+    }
+    if (strcmp(pName, "vkEnumerateInstanceExtensionProperties") == 0) {
+        return (PFN_vkVoidFunction)&bionic_vkEnumerateInstanceExtensionProperties;
     }
     auto real = get_real_vkGetInstanceProcAddr();
     if (real) {
@@ -582,11 +648,6 @@ extern "C" PFN_vkVoidFunction bionic_vkGetInstanceProcAddr(VkInstance instance, 
 // VK_KHR_android_surface and mask VK_EXT_metal_surface so the game sees the
 // Android surface extension it expects.
 typedef VkResult (*PFN_vkEnumerateInstanceExtensionProperties)(const char*, uint32_t*, void*);
-
-typedef struct VkExtensionProperties {
-    char extensionName[256];
-    uint32_t specVersion;
-} VkExtensionProperties;
 
 extern "C" VkResult bionic_vkEnumerateInstanceExtensionProperties(const char* pLayerName,
                                                                   uint32_t* pPropertyCount,
@@ -2068,6 +2129,7 @@ const SymbolEntry kGraphicsSymbols[] = {
     {"glBeginTransformFeedback", reinterpret_cast<void*>(&bionic_glBeginTransformFeedback)},
     {"glEndTransformFeedback", reinterpret_cast<void*>(&bionic_glEndTransformFeedback)},
     {"vkGetInstanceProcAddr", reinterpret_cast<void*>(&bionic_vkGetInstanceProcAddr)},
+    {"vkCreateInstance", reinterpret_cast<void*>(&bionic_vkCreateInstance)},
     {"vkCreateAndroidSurfaceKHR", reinterpret_cast<void*>(&bionic_vkCreateAndroidSurfaceKHR)},
     {"vkEnumerateInstanceExtensionProperties", reinterpret_cast<void*>(&bionic_vkEnumerateInstanceExtensionProperties)},
 };
