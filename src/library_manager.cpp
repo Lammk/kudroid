@@ -170,17 +170,14 @@ bool LibraryManager::loadRecursive(const std::string& path) {
                          dependency.c_str());
             continue;
         }
-        // Gọi đệ quy cần mở khóa nếu re-entrant hoặc tự kiểm tra map. Ở đây loadRecursive giữ lock nội bộ an toàn.
         const fs::path depNorm = fs::weakly_canonical(dependencyPath.string(), error);
         const std::string depKey = (error ? dependencyPath.lexically_normal() : depNorm).string();
         const std::string depSoname = fs::path(depKey).filename().string();
         if (libraries_.count(depKey) || libraries_.count(depSoname)) {
             continue;
         }
-        auto depLoader = std::make_unique<ElfLoader>(depKey);
-        depLoader->setLibraryManager(this);
-        if (depLoader->parse()) {
-            libraries_.emplace(depKey, std::move(depLoader));
+        if (!loadRecursive(depKey)) {
+            std::fprintf(stderr, "[kudroid_core] Warning: failed to load dependency: %s\n", depKey.c_str());
         }
     }
 
