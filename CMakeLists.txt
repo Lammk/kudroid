@@ -167,16 +167,20 @@ else()
     # ─────────────────────────────────────────────────────────────────────────
     # Host-side tests (not built for iOS)
     # ─────────────────────────────────────────────────────────────────────────
-    add_executable(test_dex_to_jar
-        tests/test_dex_to_jar.cpp
-    )
-    target_link_libraries(test_dex_to_jar PRIVATE kudroid_core)
-    target_include_directories(test_dex_to_jar PRIVATE include)
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_dex_to_jar.cpp")
+        add_executable(test_dex_to_jar
+            tests/test_dex_to_jar.cpp
+        )
+        target_link_libraries(test_dex_to_jar PRIVATE kudroid_core)
+        target_include_directories(test_dex_to_jar PRIVATE include)
+    endif()
 
     # Host-side regression tests for the guest syscall shims (SyscallShim.cpp).
-    add_executable(test_shims
-        tests/test_shims.cpp
-    )
-    target_link_libraries(test_shims PRIVATE kudroid_core)
-    target_include_directories(test_shims PRIVATE include)
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_shims.cpp")
+        add_executable(test_shims
+            tests/test_shims.cpp
+        )
+        target_link_libraries(test_shims PRIVATE kudroid_core)
+        target_include_directories(test_shims PRIVATE include)
+    endif()
 endif()
