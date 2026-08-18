@@ -183,13 +183,17 @@ function handleDisconnect() {
     }
 }
 
+let clientBuildInfo = null;
+
 // ── LOG & EVENT PROCESSOR ───────────────────────────────────────────────────
 function handleIncomingMessage(text) {
     try {
         const msg = JSON.parse(text);
         if (msg.type === 'handshake') {
             clientDeviceInfo = msg.device;
-            console.log(`\n${C.cyan}[KDB] Device handshake: ${C.bold}${msg.device.name || 'iOS Device'} (iOS ${msg.device.osVersion || 'Unknown'})${C.reset}`);
+            clientBuildInfo = msg.buildInfo || null;
+            const bInfo = clientBuildInfo ? ` | Build: ${C.yellow}${clientBuildInfo.short_commit || 'unknown'}${C.cyan} (${clientBuildInfo.build_time || 'N/A'})` : '';
+            console.log(`\n${C.cyan}[KDB] Device handshake: ${C.bold}${msg.device.name || 'iOS Device'} (iOS ${msg.device.osVersion || 'Unknown'})${bInfo}${C.reset}`);
             prompt();
         } else if (msg.type === 'log') {
             const line = msg.message;
@@ -295,6 +299,11 @@ rl.on('line', async (line) => {
             }
             break;
 
+        case 'version':
+        case 'ver':
+            await handleVersion();
+            break;
+
         case 'dump':
             await handleDump(args[0] || 'kudroid_crash');
             break;
@@ -336,6 +345,7 @@ function printHelp() {
 ${C.bold}${C.cyan}=== KuDroid Debug Bridge (KDB) Commands ===${C.reset}
 
   ${C.green}help${C.reset}                     Hiển thị bảng hướng dẫn này
+  ${C.green}version / ver${C.reset}            Kiểm tra hash commit / phiên bản build của app trên iPhone
   ${C.green}so <path_to_so> [entry]${C.reset}  🚀 Gửi và chạy trực tiếp file .so test từ PC sang iPhone (${C.yellow}Hot-Reload, không cần cài lại IPA!${C.reset})
   ${C.green}test [name]${C.reset}              Chạy trực tiếp các bài test cô lập có sẵn trên iPhone
                            (ví dụ: ${C.yellow}test gpu${C.reset}, ${C.yellow}test audio${C.reset}, ${C.yellow}test bionic${C.reset}, ${C.yellow}test jni${C.reset}, ${C.yellow}test syscall${C.reset}, ${C.yellow}test vfs${C.reset}, ${C.yellow}test all${C.reset})
@@ -349,6 +359,39 @@ ${C.bold}${C.cyan}=== KuDroid Debug Bridge (KDB) Commands ===${C.reset}
   ${C.green}clear <cache|all>${C.reset}        Xóa bộ nhớ đệm / dalvik-cache trên iPhone
   ${C.green}exit / quit${C.reset}              Thoát KDB
 `);
+}
+
+async function handleVersion() {
+    if (!connectedSocket) {
+        console.log(`${C.red}❌ No iPhone connected. Connect iPhone to KDB first.${C.reset}`);
+        return;
+    }
+
+    let localCommit = 'unknown';
+    let localShort = 'unknown';
+    try {
+        const { execSync } = require('child_process');
+        localCommit = execSync('git rev-parse HEAD', { encoding: 'utf8' }).trim();
+        localShort = execSync('git rev-parse --short HEAD', { encoding: 'utf8' }).trim();
+    } catch (e) {}
+
+    console.log(`\n${C.cyan}🔍 Querying build version from iPhone...${C.reset}`);
+    const res = await sendCommandWithTimeout({ action: 'version' }, 5000);
+    const bInfo = (res && res.buildInfo) ? res.buildInfo : (clientBuildInfo || {});
+
+    console.log(`\n${C.bold}=== KuDroid App Version & Build Status ===${C.reset}`);
+    console.log(`  📱 ${C.bold}iPhone Build Hash${C.reset}  : ${C.yellow}${bInfo.short_commit || 'unknown'}${C.reset} (${bInfo.commit || 'unknown'})`);
+    console.log(`  🕒 ${C.bold}Build Timestamp${C.reset}    : ${bInfo.build_time || 'N/A'}`);
+    console.log(`  💬 ${C.bold}Commit Message${C.reset}     : "${bInfo.message || 'N/A'}"`);
+    console.log(`  💻 ${C.bold}Local PC Git Hash${C.reset}  : ${C.cyan}${localShort}${C.reset} (${localCommit})\n`);
+
+    if (bInfo.short_commit && localShort && bInfo.short_commit !== 'unknown' && localShort !== 'unknown') {
+        if (bInfo.short_commit === localShort) {
+            console.log(`  ${C.green}✔ PERFECT MATCH: iPhone is running the exact latest build!${C.reset}\n`);
+        } else {
+            console.log(`  ${C.yellow}⚠ MISMATCH: iPhone build (${bInfo.short_commit}) differs from local commit (${localShort}).${C.reset}\n`);
+        }
+    }
 }
 
 async function handleRunSo(filePath, entrypoint) {

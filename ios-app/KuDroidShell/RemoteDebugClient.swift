@@ -72,6 +72,20 @@ class RemoteDebugClient: NSObject {
         }
     }
 
+    private func getBuildInfo() -> [String: Any] {
+        if let url = Bundle.main.url(forResource: "build_info", withExtension: "json"),
+           let data = try? Data(contentsOf: url),
+           let json = (try? JSONSerialization.jsonObject(with: data, options: [])) as? [String: Any] {
+            return json
+        }
+        return [
+            "short_commit": "legacy/manual",
+            "commit": "unknown",
+            "message": "N/A",
+            "build_time": "N/A"
+        ]
+    }
+
     private func sendHandshake() {
         let device = [
             "name": UIDevice.current.name,
@@ -81,7 +95,8 @@ class RemoteDebugClient: NSObject {
         ]
         let payload: [String: Any] = [
             "type": "handshake",
-            "device": device
+            "device": device,
+            "buildInfo": getBuildInfo()
         ]
         sendJson(payload)
         isConnected = true
@@ -168,6 +183,12 @@ class RemoteDebugClient: NSObject {
             } else {
                 sendResponse(["success": false, "error": "Invalid run_so payload"])
             }
+
+        case "version":
+            sendResponse([
+                "success": true,
+                "buildInfo": getBuildInfo()
+            ])
 
         default:
             break

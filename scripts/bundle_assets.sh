@@ -76,8 +76,20 @@ fi
 if [ -d third_party/ANGLE/lib/ios-arm64/libGLESv2.framework ]; then
   cp -R third_party/ANGLE/lib/ios-arm64/libGLESv2.framework KuDroidShell.app/Frameworks/
 fi
-if [ -d third_party/MoltenVK/MoltenVK/dynamic/MoltenVK.xcframework/ios-arm64/MoltenVK.framework ]; then
-  cp -R third_party/MoltenVK/MoltenVK/dynamic/MoltenVK.xcframework/ios-arm64/MoltenVK.framework KuDroidShell.app/Frameworks/
-fi
+# Ghi metadata phiên bản build vào KuDroidShell.app
+COMMIT_HASH=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+SHORT_HASH=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+COMMIT_MSG=$(git log -1 --pretty=%s 2>/dev/null || echo "local build")
+BUILD_TIME=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+
+cat <<EOF > KuDroidShell.app/build_info.json
+{
+  "commit": "$COMMIT_HASH",
+  "short_commit": "$SHORT_HASH",
+  "message": "$COMMIT_MSG",
+  "build_time": "$BUILD_TIME"
+}
+EOF
+echo "Generated build_info.json (Commit: $SHORT_HASH, Time: $BUILD_TIME)"
 
 echo "Asset bundling complete."
