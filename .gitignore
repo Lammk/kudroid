@@ -27,17 +27,9 @@ third_party/jvm/avian/build/
 # Framework build output
 framework/build/
 
-# Test artifacts
-tests/*.so
-tests/*.jar
-tests/*.dex
-
-# Logs
-*.log
-kudroid_*.txt
-
-# OS
-.DS_Store
+# Test and tool folders (local development & micro-debug only)
+tests/
+tools/
 logs/
 HANDOVER_FOR_CLAUDE_OPUS.md
-tools/kdb/
+
