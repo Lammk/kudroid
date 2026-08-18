@@ -1,4 +1,5 @@
 #include "kudroid/kudroid_jni.h"
+#include "kudroid/VFSPathRemapper.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -232,37 +233,43 @@ void kudroid_jni_init_jvm(const char* bootclasspath, const char* classpath) {
     // app jar dù -Djava.class.path đúng). Tái hiện + chứng minh trên Linux:
     //   placeholder+cp  → String/T/Object NOT FOUND  ✗
     //   bootJAR file+cp → String/T/Object FOUND      ✓
-    // Vì vậy: ghi embedded boot jar ra file thật (cạnh classes.jar) và dùng
-    // đường dẫn đó.
+    // Vì vậy: ghi embedded boot jar ra file thật và dùng đường dẫn đó để boot finder luôn có file thật.
     std::string bootOption = "-Xbootclasspath:[classpathJar]";
+    std::string bootJarFile;
     if (classpath && classpath[0] != '\0') {
         const char* lastSlash = strrchr(classpath, '/');
         const std::string dir = lastSlash
             ? std::string(classpath, (size_t)(lastSlash - classpath + 1))
             : std::string();
-        const std::string bootJarFile = dir + "boot.jar";
-        size_t bootJarSize = 0;
-        const uint8_t* bootJarData = classpathJar(&bootJarSize);
-        if (bootJarData && bootJarSize) {
-            FILE* f = fopen(bootJarFile.c_str(), "wb");
-            if (f) {
-                size_t written = fwrite(bootJarData, 1, bootJarSize, f);
-                fclose(f);
-                if (written == bootJarSize) {
-                    log_jni("Boot classpath jar materialized: %s (%zu bytes)",
-                            bootJarFile.c_str(), bootJarSize);
-                    bootOption = "-Xbootclasspath:" + bootJarFile;
-                } else {
-                    log_jni("WARNING: write boot.jar short (%zu/%zu); falling back to placeholder",
-                            written, bootJarSize);
-                }
+        bootJarFile = dir + "boot.jar";
+    } else {
+        auto& remapper = kudroid::VFSPathRemapper::getInstance();
+        std::string root = remapper.androidRoot();
+        if (root.empty()) root = "/tmp";
+        bootJarFile = root + "/boot.jar";
+    }
+
+    size_t bootJarSize = 0;
+    const uint8_t* bootJarData = classpathJar(&bootJarSize);
+    if (bootJarData && bootJarSize && !bootJarFile.empty()) {
+        FILE* f = fopen(bootJarFile.c_str(), "wb");
+        if (f) {
+            size_t written = fwrite(bootJarData, 1, bootJarSize, f);
+            fclose(f);
+            if (written == bootJarSize) {
+                log_jni("Boot classpath jar materialized: %s (%zu bytes)",
+                        bootJarFile.c_str(), bootJarSize);
+                bootOption = "-Xbootclasspath:" + bootJarFile;
             } else {
-                log_jni("WARNING: cannot create %s; falling back to placeholder",
-                        bootJarFile.c_str());
+                log_jni("WARNING: write boot.jar short (%zu/%zu); falling back to placeholder",
+                        written, bootJarSize);
             }
         } else {
-            log_jni("WARNING: embedded boot classpath jar empty; falling back to placeholder");
+            log_jni("WARNING: cannot create %s; falling back to placeholder",
+                    bootJarFile.c_str());
         }
+    } else {
+        log_jni("WARNING: embedded boot classpath jar empty; falling back to placeholder");
     }
     // App classes PHẢI nằm trên app classpath (-Djava.class.path): JNI
     // FindClass resolve qua appLoader (jnienv.cpp findClass → appLoader),
