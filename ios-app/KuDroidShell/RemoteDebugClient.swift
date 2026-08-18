@@ -303,8 +303,16 @@ class RemoteDebugClient: NSObject {
     private func executeSoFile(targetURL: URL, entrypoint: String) {
         DispatchQueue.main.async { [weak self] in
             activateAudioSession()
+            self?.session?.isSoRunning = true
+            self?.session?.soRunningTitle = targetURL.lastPathComponent
+        }
+
+        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
             guard let cString = kudroid_run_so_test(targetURL.path, entrypoint.isEmpty ? nil : entrypoint) else {
-                self?.sendResponse(["success": false, "error": "Native runner returned null"])
+                DispatchQueue.main.async {
+                    self?.session?.isSoRunning = false
+                    self?.sendResponse(["success": false, "error": "Native runner returned null"])
+                }
                 return
             }
 
@@ -315,11 +323,14 @@ class RemoteDebugClient: NSObject {
             saveTestLog(filename: "test_so.log", content: log)
 
             let isSuccess = !log.contains("❌") && !log.contains("FAILED")
-            self?.sendResponse([
-                "success": isSuccess,
-                "file": "test_so.log",
-                "log": log
-            ])
+            DispatchQueue.main.async {
+                self?.session?.isSoRunning = false
+                self?.sendResponse([
+                    "success": isSuccess,
+                    "file": "test_so.log",
+                    "log": log
+                ])
+            }
         }
     }
 

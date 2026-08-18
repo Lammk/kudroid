@@ -10,13 +10,16 @@ struct CrashInfo: Identifiable {
 class AppSession: ObservableObject {
     @Published var activeGuestApp: String = ""
     @Published var crashInfo: CrashInfo? = nil
+    @Published var isSoRunning: Bool = false
+    @Published var soRunningTitle: String = ""
 }
 
 struct GlobalMetalViewRepresentable: UIViewRepresentable {
     func makeUIView(context: Context) -> GlobalMetalView {
         let view = GlobalMetalView()
-        view.backgroundColor = .clear
-        view.isUserInteractionEnabled = false
+        view.backgroundColor = .black
+        view.isMultipleTouchEnabled = true
+        view.isUserInteractionEnabled = true
         if let metalLayer = view.layer as? CAMetalLayer {
             metalLayer.device = MTLCreateSystemDefaultDevice()
             metalLayer.pixelFormat = .bgra8Unorm
@@ -39,6 +42,45 @@ struct GlobalMetalViewRepresentable: UIViewRepresentable {
 class GlobalMetalView: UIView {
     override class var layerClass: AnyClass {
         return CAMetalLayer.self
+    }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        self.isMultipleTouchEnabled = true
+        self.isUserInteractionEnabled = true
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        self.isMultipleTouchEnabled = true
+        self.isUserInteractionEnabled = true
+    }
+
+    private func injectTouch(_ touches: Set<UITouch>, action: Int32) {
+        let scale = UIScreen.main.scale
+        let totalCount = Int32(touches.count)
+        var pointerIdx: Int32 = 0
+        for touch in touches {
+            let location = touch.location(in: self)
+            kudroid_inject_touch_event_multi(Float(location.x * scale), Float(location.y * scale), action, pointerIdx, totalCount)
+            pointerIdx += 1
+        }
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        injectTouch(touches, action: 0) // ACTION_DOWN
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        injectTouch(touches, action: 2) // ACTION_MOVE
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        injectTouch(touches, action: 1) // ACTION_UP
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        injectTouch(touches, action: 3) // ACTION_CANCEL
     }
 }
 
@@ -66,6 +108,25 @@ struct KuDroidApp: App {
                     .ignoresSafeArea()
                     .preferredColorScheme(.dark)
                     .environmentObject(session)
+                } else if session.isSoRunning {
+                    ZStack {
+                        Color.black.ignoresSafeArea()
+                        GlobalMetalViewRepresentable()
+                            .ignoresSafeArea()
+                        VStack {
+                            HStack(spacing: 8) {
+                                Circle().fill(Color.green).frame(width: 8, height: 8)
+                                Text(session.soRunningTitle.isEmpty ? "KuDroid Native Sandbox Active" : session.soRunningTitle)
+                                    .font(.caption.monospaced())
+                                    .foregroundColor(.green)
+                                Spacer()
+                            }
+                            .padding()
+                            Spacer()
+                        }
+                    }
+                    .transition(.opacity)
+                    .zIndex(50)
                 } else {
                     ContentView()
                         .environmentObject(session)
@@ -88,6 +149,7 @@ struct KuDroidApp: App {
                 }
             }
             .animation(.easeInOut(duration: 0.25), value: session.activeGuestApp)
+            .animation(.easeInOut(duration: 0.25), value: session.isSoRunning)
             .animation(.easeInOut(duration: 0.25), value: session.crashInfo != nil)
         }
     }
