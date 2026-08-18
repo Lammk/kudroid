@@ -137,6 +137,96 @@ extern "C" void kudroid_jni_set_log_callback(void (*cb)(const char*)) {
 }
 
 // hàm hỗ trợ để ghi nhật ký chi tiết (an toàn luồng).
+#include <unordered_map>
+
+static struct JNINativeInterface_ g_interposedJniFunctions;
+static bool g_interposedFunctionsInitialized = false;
+
+struct DirectBufferEntry {
+    void* address;
+    jlong capacity;
+};
+static std::unordered_map<void*, DirectBufferEntry> g_directBuffers;
+static std::mutex g_directBufferMutex;
+
+static jobject JNICALL kudroid_shim_NewDirectByteBuffer(JNIEnv* env, void* address, jlong capacity) {
+    if (!env) return nullptr;
+    jbyteArray arr = env->NewByteArray((jsize)(capacity > 0 ? 1 : 0));
+    if (!arr) return nullptr;
+    jobject gref = env->NewGlobalRef(arr);
+    env->DeleteLocalRef(arr);
+
+    std::lock_guard<std::mutex> lock(g_directBufferMutex);
+    g_directBuffers[gref] = { address, capacity };
+    return gref;
+}
+
+static void* JNICALL kudroid_shim_GetDirectBufferAddress(JNIEnv* env, jobject buf) {
+    (void)env;
+    if (!buf) return nullptr;
+    std::lock_guard<std::mutex> lock(g_directBufferMutex);
+    auto it = g_directBuffers.find(buf);
+    if (it != g_directBuffers.end()) {
+        return it->second.address;
+    }
+    return nullptr;
+}
+
+static jlong JNICALL kudroid_shim_GetDirectBufferCapacity(JNIEnv* env, jobject buf) {
+    (void)env;
+    if (!buf) return 0;
+    std::lock_guard<std::mutex> lock(g_directBufferMutex);
+    auto it = g_directBuffers.find(buf);
+    if (it != g_directBuffers.end()) {
+        return it->second.capacity;
+    }
+    return 0;
+}
+
+static void patch_jnienv_vtable(JNIEnv* env) {
+    if (!env || !env->functions) return;
+    if (!g_interposedFunctionsInitialized) {
+        g_interposedJniFunctions = *(env->functions);
+        g_interposedJniFunctions.NewDirectByteBuffer = kudroid_shim_NewDirectByteBuffer;
+        g_interposedJniFunctions.GetDirectBufferAddress = kudroid_shim_GetDirectBufferAddress;
+        g_interposedJniFunctions.GetDirectBufferCapacity = kudroid_shim_GetDirectBufferCapacity;
+        g_interposedFunctionsInitialized = true;
+    }
+    const_cast<struct JNINativeInterface_*&>(env->functions) = &g_interposedJniFunctions;
+}
+
+static struct JNIInvokeInterface_ g_interposedVmFunctions;
+static bool g_interposedVmInitialized = false;
+
+static jint JNICALL kudroid_shim_AttachCurrentThread(JavaVM* vm, void** penv, void* args) {
+    if (!vm) return JNI_ERR;
+    jint res = g_interposedVmFunctions.AttachCurrentThread(vm, penv, args);
+    if (res == JNI_OK && penv && *penv) {
+        patch_jnienv_vtable(static_cast<JNIEnv*>(*penv));
+    }
+    return res;
+}
+
+static jint JNICALL kudroid_shim_GetEnv(JavaVM* vm, void** penv, jint version) {
+    if (!vm) return JNI_ERR;
+    jint res = g_interposedVmFunctions.GetEnv(vm, penv, version);
+    if (res == JNI_OK && penv && *penv) {
+        patch_jnienv_vtable(static_cast<JNIEnv*>(*penv));
+    }
+    return res;
+}
+
+static void patch_javavm_vtable(JavaVM* vm) {
+    if (!vm || !vm->functions) return;
+    if (!g_interposedVmInitialized) {
+        g_interposedVmFunctions = *(vm->functions);
+        g_interposedVmFunctions.AttachCurrentThread = kudroid_shim_AttachCurrentThread;
+        g_interposedVmFunctions.GetEnv = kudroid_shim_GetEnv;
+        g_interposedVmInitialized = true;
+    }
+    const_cast<struct JNIInvokeInterface_*&>(vm->functions) = &g_interposedVmFunctions;
+}
+
 static void log_jni(const char* fmt, ...) {
     char buffer[1024];
     va_list args;
@@ -338,6 +428,8 @@ void kudroid_jni_init_jvm(const char* bootclasspath, const char* classpath) {
     }
 
     g_env = static_cast<JNIEnv*>(env);
+    patch_jnienv_vtable(g_env);
+    patch_javavm_vtable(g_vm);
     log_jni("Avian JVM initialized successfully (JavaVM=%p, JNIEnv=%p)",
             (void*)g_vm, (void*)g_env);
 
