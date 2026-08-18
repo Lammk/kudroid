@@ -211,7 +211,14 @@ void appendUnsigned(std::string& output, uint64_t value, unsigned base) {
                 break;
             case 's': {
                 const char* stringValue = reinterpret_cast<const char*>(value);
-                output += stringValue ? stringValue : "<null>";
+                if (stringValue) {
+                    // Safe bounded length to avoid scanning into guard pages
+                    size_t len = 0;
+                    while (len < 1024 && stringValue[len] != '\0') ++len;
+                    output.append(stringValue, len);
+                } else {
+                    output += "<null>";
+                }
                 break;
             }
             default:

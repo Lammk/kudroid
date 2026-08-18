@@ -730,15 +730,18 @@ extern "C" VkResult bionic_vkEnumerateInstanceExtensionProperties(const char* pL
             if (strcmp(tmp[i].extensionName, "VK_EXT_metal_surface") == 0) {
                 continue; // mask it
             }
-            pProperties[out++] = tmp[i];
+            memcpy(&pProperties[out], &tmp[i], sizeof(VkExtensionProperties));
+            pProperties[out].extensionName[255] = '\0';
+            out++;
         }
         free(tmp);
     }
 
     // Inject VK_KHR_android_surface (chỉ nếu còn chỗ).
     if (out < capacity) {
+        memset(&pProperties[out], 0, sizeof(VkExtensionProperties));
         strncpy(pProperties[out].extensionName, "VK_KHR_android_surface", sizeof(pProperties[out].extensionName) - 1);
-        pProperties[out].extensionName[sizeof(pProperties[out].extensionName) - 1] = 0;
+        pProperties[out].extensionName[sizeof(pProperties[out].extensionName) - 1] = '\0';
         pProperties[out].specVersion = 1;
         out++;
     }
