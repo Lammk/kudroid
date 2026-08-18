@@ -29,15 +29,6 @@ jobs:
       - name: Build Kudroid
         run: cmake --build build --parallel
 
-      - name: Build Triangle Test APK
-        run: ./tests/apk_triangle/build_apk.sh
-
-      - name: Upload Triangle APK Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: test_triangle_apk
-          path: tests/apk_triangle/test_triangle.apk
-
   build-macos-arm64:
     runs-on: macos-14
     steps:
