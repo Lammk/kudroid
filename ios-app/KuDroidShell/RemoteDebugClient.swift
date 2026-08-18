@@ -54,6 +54,7 @@ class RemoteDebugClient: NSObject {
         webSocketTask = nil
         isConnected = false
         DispatchQueue.main.async { [weak self] in
+            self?.appSession?.isSoRunning = false
             self?.onConnectionStatusChanged?(false)
         }
     }

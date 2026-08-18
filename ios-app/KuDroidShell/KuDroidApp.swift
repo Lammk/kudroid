@@ -120,6 +120,20 @@ struct KuDroidApp: App {
                                     .font(.caption.monospaced())
                                     .foregroundColor(.green)
                                 Spacer()
+                                Button(action: {
+                                    session.isSoRunning = false
+                                }) {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "xmark.circle.fill")
+                                        Text("Exit")
+                                    }
+                                    .font(.caption.bold())
+                                    .foregroundColor(.white)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 5)
+                                    .background(Color.white.opacity(0.2))
+                                    .cornerRadius(12)
+                                }
                             }
                             .padding()
                             Spacer()
