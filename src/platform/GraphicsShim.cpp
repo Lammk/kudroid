@@ -45,6 +45,43 @@ static void gpuLog(const char* fmt, ...) {
     ::kudroid::log::write(::kudroid::log::kDebug, "KuDroidGPU", "%s", buf);
 }
 
+#if defined(__APPLE__)
+#include <objc/runtime.h>
+#include <objc/message.h>
+
+static void* get_or_create_fallback_metal_layer() {
+    if (g_metalLayer) return g_metalLayer;
+    static void* s_fallbackLayer = nullptr;
+    if (s_fallbackLayer) return s_fallbackLayer;
+
+    Class clsLayer = objc_getClass("CAMetalLayer");
+    if (!clsLayer) return nullptr;
+
+    typedef id (*AllocFn)(id, SEL);
+    typedef id (*InitFn)(id, SEL);
+    typedef void (*SetDevFn)(id, SEL, id);
+
+    auto allocFn = reinterpret_cast<AllocFn>(objc_msgSend);
+    auto initFn = reinterpret_cast<InitFn>(objc_msgSend);
+    auto setDevFn = reinterpret_cast<SetDevFn>(objc_msgSend);
+
+    id layerInstance = initFn(allocFn(reinterpret_cast<id>(clsLayer), sel_registerName("alloc")), sel_registerName("init"));
+    if (!layerInstance) return nullptr;
+
+    typedef void* (*MTLDevFn)();
+    auto mtlDevFn = reinterpret_cast<MTLDevFn>(::dlsym(RTLD_DEFAULT, "MTLCreateSystemDefaultDevice"));
+    if (mtlDevFn) {
+        void* dev = mtlDevFn();
+        if (dev) {
+            setDevFn(layerInstance, sel_registerName("setDevice:"), reinterpret_cast<id>(dev));
+        }
+    }
+    s_fallbackLayer = reinterpret_cast<void*>(layerInstance);
+    gpuLog("Created fallback headless CAMetalLayer: %p", s_fallbackLayer);
+    return s_fallbackLayer;
+}
+#endif
+
 // Cấu trúc ANativeWindow chuẩn cho KuDroid
 struct KuDroidNativeWindow {
     uint32_t magic;
@@ -61,7 +98,11 @@ static KuDroidNativeWindow g_nativeWindowInstance;
 
 extern "C" void* bionic_ANativeWindow_fromSurface(void* env, void* surface) {
     (void)env; (void)surface;
+#if defined(__APPLE__)
+    g_nativeWindowInstance.layer = g_metalLayer ? g_metalLayer : get_or_create_fallback_metal_layer();
+#else
     g_nativeWindowInstance.layer = g_metalLayer;
+#endif
     g_nativeWindowInstance.width = g_metalLayerWidth > 0 ? g_metalLayerWidth : 1080;
     g_nativeWindowInstance.height = g_metalLayerHeight > 0 ? g_metalLayerHeight : 1920;
     gpuLog("ANativeWindow_fromSurface -> %p (layer=%p, size=%dx%d)",
@@ -677,7 +718,12 @@ extern "C" EGLSurface bionic_eglCreateWindowSurface(EGLDisplay dpy, EGLConfig co
                 resolvedLayer = nw->layer;
             }
         }
-        EGLNativeWindowType nativeWin = (EGLNativeWindowType)(resolvedLayer ? resolvedLayer : g_metalLayer);
+#if defined(__APPLE__)
+        if (!resolvedLayer) {
+            resolvedLayer = get_or_create_fallback_metal_layer();
+        }
+#endif
+        EGLNativeWindowType nativeWin = (EGLNativeWindowType)resolvedLayer;
         gpuLog("eglCreateWindowSurface: calling ANGLE with layer=%p...", (void*)nativeWin);
 #if defined(__APPLE__)
         void* pool = objc_autoreleasePoolPush();
@@ -1241,6 +1287,409 @@ extern "C" void bionic_glBufferData(unsigned int target, long size, const void* 
     f(target, size, data, usage);
 }
 
+// ── Textures ────────────────────────────────────────────────────────────────
+extern "C" void bionic_glGenTextures(int n, unsigned int* textures) {
+    typedef void (*PFN)(int, unsigned int*);
+    auto f = (PFN)get_gl_func("glGenTextures");
+    if (f) f(n, textures);
+}
+extern "C" void bionic_glBindTexture(unsigned int target, unsigned int texture) {
+    typedef void (*PFN)(unsigned int, unsigned int);
+    auto f = (PFN)get_gl_func("glBindTexture");
+    if (f) f(target, texture);
+}
+extern "C" void bionic_glDeleteTextures(int n, const unsigned int* textures) {
+    typedef void (*PFN)(int, const unsigned int*);
+    auto f = (PFN)get_gl_func("glDeleteTextures");
+    if (f) f(n, textures);
+}
+extern "C" void bionic_glTexImage2D(unsigned int target, int level, int internalformat, int width, int height, int border, unsigned int format, unsigned int type, const void* pixels) {
+    typedef void (*PFN)(unsigned int, int, int, int, int, int, unsigned int, unsigned int, const void*);
+    auto f = (PFN)get_gl_func("glTexImage2D");
+    if (f) f(target, level, internalformat, width, height, border, format, type, pixels);
+}
+extern "C" void bionic_glTexSubImage2D(unsigned int target, int level, int xoffset, int yoffset, int width, int height, unsigned int format, unsigned int type, const void* pixels) {
+    typedef void (*PFN)(unsigned int, int, int, int, int, int, unsigned int, unsigned int, const void*);
+    auto f = (PFN)get_gl_func("glTexSubImage2D");
+    if (f) f(target, level, xoffset, yoffset, width, height, format, type, pixels);
+}
+extern "C" void bionic_glTexParameteri(unsigned int target, unsigned int pname, int param) {
+    typedef void (*PFN)(unsigned int, unsigned int, int);
+    auto f = (PFN)get_gl_func("glTexParameteri");
+    if (f) f(target, pname, param);
+}
+extern "C" void bionic_glTexParameterf(unsigned int target, unsigned int pname, float param) {
+    typedef void (*PFN)(unsigned int, unsigned int, float);
+    auto f = (PFN)get_gl_func("glTexParameterf");
+    if (f) f(target, pname, param);
+}
+extern "C" void bionic_glTexParameteriv(unsigned int target, unsigned int pname, const int* params) {
+    typedef void (*PFN)(unsigned int, unsigned int, const int*);
+    auto f = (PFN)get_gl_func("glTexParameteriv");
+    if (f) f(target, pname, params);
+}
+extern "C" void bionic_glTexParameterfv(unsigned int target, unsigned int pname, const float* params) {
+    typedef void (*PFN)(unsigned int, unsigned int, const float*);
+    auto f = (PFN)get_gl_func("glTexParameterfv");
+    if (f) f(target, pname, params);
+}
+extern "C" void bionic_glActiveTexture(unsigned int texture) {
+    typedef void (*PFN)(unsigned int);
+    auto f = (PFN)get_gl_func("glActiveTexture");
+    if (f) f(texture);
+}
+extern "C" void bionic_glGenerateMipmap(unsigned int target) {
+    typedef void (*PFN)(unsigned int);
+    auto f = (PFN)get_gl_func("glGenerateMipmap");
+    if (f) f(target);
+}
+extern "C" void bionic_glPixelStorei(unsigned int pname, int param) {
+    typedef void (*PFN)(unsigned int, int);
+    auto f = (PFN)get_gl_func("glPixelStorei");
+    if (f) f(pname, param);
+}
+extern "C" void bionic_glCompressedTexImage2D(unsigned int target, int level, unsigned int internalformat, int width, int height, int border, int imageSize, const void* data) {
+    typedef void (*PFN)(unsigned int, int, unsigned int, int, int, int, int, const void*);
+    auto f = (PFN)get_gl_func("glCompressedTexImage2D");
+    if (f) f(target, level, internalformat, width, height, border, imageSize, data);
+}
+
+// ── Buffers & Elements ──────────────────────────────────────────────────────
+extern "C" void bionic_glDeleteBuffers(int n, const unsigned int* buffers) {
+    typedef void (*PFN)(int, const unsigned int*);
+    auto f = (PFN)get_gl_func("glDeleteBuffers");
+    if (f) f(n, buffers);
+}
+extern "C" void bionic_glBufferSubData(unsigned int target, long offset, long size, const void* data) {
+    typedef void (*PFN)(unsigned int, long, long, const void*);
+    auto f = (PFN)get_gl_func("glBufferSubData");
+    if (f) f(target, offset, size, data);
+}
+extern "C" void bionic_glDrawElements(unsigned int mode, int count, unsigned int type, const void* indices) {
+    typedef void (*PFN)(unsigned int, int, unsigned int, const void*);
+    auto f = (PFN)get_gl_func("glDrawElements");
+    if (!f) return;
+#if defined(__APPLE__)
+    void* pool = objc_autoreleasePoolPush();
+    f(mode, count, type, indices);
+    objc_autoreleasePoolPop(pool);
+#else
+    f(mode, count, type, indices);
+#endif
+}
+extern "C" void bionic_glDisableVertexAttribArray(unsigned int index) {
+    typedef void (*PFN)(unsigned int);
+    auto f = (PFN)get_gl_func("glDisableVertexAttribArray");
+    if (f) f(index);
+}
+
+// ── Vertex Array Objects (VAO) ──────────────────────────────────────────────
+extern "C" void bionic_glGenVertexArrays(int n, unsigned int* arrays) {
+    typedef void (*PFN)(int, unsigned int*);
+    auto f = (PFN)get_gl_func("glGenVertexArrays");
+    if (!f) f = (PFN)get_gl_func("glGenVertexArraysOES");
+    if (f) f(n, arrays);
+}
+extern "C" void bionic_glBindVertexArray(unsigned int array) {
+    typedef void (*PFN)(unsigned int);
+    auto f = (PFN)get_gl_func("glBindVertexArray");
+    if (!f) f = (PFN)get_gl_func("glBindVertexArrayOES");
+    if (f) f(array);
+}
+extern "C" void bionic_glDeleteVertexArrays(int n, const unsigned int* arrays) {
+    typedef void (*PFN)(int, const unsigned int*);
+    auto f = (PFN)get_gl_func("glDeleteVertexArrays");
+    if (!f) f = (PFN)get_gl_func("glDeleteVertexArraysOES");
+    if (f) f(n, arrays);
+}
+
+// ── Framebuffers & Renderbuffers ────────────────────────────────────────────
+extern "C" void bionic_glGenFramebuffers(int n, unsigned int* framebuffers) {
+    typedef void (*PFN)(int, unsigned int*);
+    auto f = (PFN)get_gl_func("glGenFramebuffers");
+    if (f) f(n, framebuffers);
+}
+extern "C" void bionic_glBindFramebuffer(unsigned int target, unsigned int framebuffer) {
+    typedef void (*PFN)(unsigned int, unsigned int);
+    auto f = (PFN)get_gl_func("glBindFramebuffer");
+    if (f) f(target, framebuffer);
+}
+extern "C" void bionic_glDeleteFramebuffers(int n, const unsigned int* framebuffers) {
+    typedef void (*PFN)(int, const unsigned int*);
+    auto f = (PFN)get_gl_func("glDeleteFramebuffers");
+    if (f) f(n, framebuffers);
+}
+extern "C" void bionic_glFramebufferTexture2D(unsigned int target, unsigned int attachment, unsigned int textarget, unsigned int texture, int level) {
+    typedef void (*PFN)(unsigned int, unsigned int, unsigned int, unsigned int, int);
+    auto f = (PFN)get_gl_func("glFramebufferTexture2D");
+    if (f) f(target, attachment, textarget, texture, level);
+}
+extern "C" unsigned int bionic_glCheckFramebufferStatus(unsigned int target) {
+    typedef unsigned int (*PFN)(unsigned int);
+    auto f = (PFN)get_gl_func("glCheckFramebufferStatus");
+    if (f) return f(target);
+    return 0;
+}
+extern "C" void bionic_glGenRenderbuffers(int n, unsigned int* renderbuffers) {
+    typedef void (*PFN)(int, unsigned int*);
+    auto f = (PFN)get_gl_func("glGenRenderbuffers");
+    if (f) f(n, renderbuffers);
+}
+extern "C" void bionic_glBindRenderbuffer(unsigned int target, unsigned int renderbuffer) {
+    typedef void (*PFN)(unsigned int, unsigned int);
+    auto f = (PFN)get_gl_func("glBindRenderbuffer");
+    if (f) f(target, renderbuffer);
+}
+extern "C" void bionic_glDeleteRenderbuffers(int n, const unsigned int* renderbuffers) {
+    typedef void (*PFN)(int, const unsigned int*);
+    auto f = (PFN)get_gl_func("glDeleteRenderbuffers");
+    if (f) f(n, renderbuffers);
+}
+extern "C" void bionic_glRenderbufferStorage(unsigned int target, unsigned int internalformat, int width, int height) {
+    typedef void (*PFN)(unsigned int, unsigned int, int, int);
+    auto f = (PFN)get_gl_func("glRenderbufferStorage");
+    if (f) f(target, internalformat, width, height);
+}
+extern "C" void bionic_glFramebufferRenderbuffer(unsigned int target, unsigned int attachment, unsigned int renderbuffertarget, unsigned int renderbuffer) {
+    typedef void (*PFN)(unsigned int, unsigned int, unsigned int, unsigned int);
+    auto f = (PFN)get_gl_func("glFramebufferRenderbuffer");
+    if (f) f(target, attachment, renderbuffertarget, renderbuffer);
+}
+
+// ── Uniforms ────────────────────────────────────────────────────────────────
+extern "C" int bionic_glGetUniformLocation(unsigned int program, const char* name) {
+    typedef int (*PFN)(unsigned int, const char*);
+    auto f = (PFN)get_gl_func("glGetUniformLocation");
+    if (f) return f(program, name);
+    return -1;
+}
+extern "C" void bionic_glUniform1f(int location, float v0) {
+    typedef void (*PFN)(int, float);
+    auto f = (PFN)get_gl_func("glUniform1f");
+    if (f) f(location, v0);
+}
+extern "C" void bionic_glUniform2f(int location, float v0, float v1) {
+    typedef void (*PFN)(int, float, float);
+    auto f = (PFN)get_gl_func("glUniform2f");
+    if (f) f(location, v0, v1);
+}
+extern "C" void bionic_glUniform3f(int location, float v0, float v1, float v2) {
+    typedef void (*PFN)(int, float, float, float);
+    auto f = (PFN)get_gl_func("glUniform3f");
+    if (f) f(location, v0, v1, v2);
+}
+extern "C" void bionic_glUniform4f(int location, float v0, float v1, float v2, float v3) {
+    typedef void (*PFN)(int, float, float, float, float);
+    auto f = (PFN)get_gl_func("glUniform4f");
+    if (f) f(location, v0, v1, v2, v3);
+}
+extern "C" void bionic_glUniform1i(int location, int v0) {
+    typedef void (*PFN)(int, int);
+    auto f = (PFN)get_gl_func("glUniform1i");
+    if (f) f(location, v0);
+}
+extern "C" void bionic_glUniform2i(int location, int v0, int v1) {
+    typedef void (*PFN)(int, int, int);
+    auto f = (PFN)get_gl_func("glUniform2i");
+    if (f) f(location, v0, v1);
+}
+extern "C" void bionic_glUniform3i(int location, int v0, int v1, int v2) {
+    typedef void (*PFN)(int, int, int, int);
+    auto f = (PFN)get_gl_func("glUniform3i");
+    if (f) f(location, v0, v1, v2);
+}
+extern "C" void bionic_glUniform4i(int location, int v0, int v1, int v2, int v3) {
+    typedef void (*PFN)(int, int, int, int, int);
+    auto f = (PFN)get_gl_func("glUniform4i");
+    if (f) f(location, v0, v1, v2, v3);
+}
+extern "C" void bionic_glUniform1fv(int location, int count, const float* value) {
+    typedef void (*PFN)(int, int, const float*);
+    auto f = (PFN)get_gl_func("glUniform1fv");
+    if (f) f(location, count, value);
+}
+extern "C" void bionic_glUniform2fv(int location, int count, const float* value) {
+    typedef void (*PFN)(int, int, const float*);
+    auto f = (PFN)get_gl_func("glUniform2fv");
+    if (f) f(location, count, value);
+}
+extern "C" void bionic_glUniform3fv(int location, int count, const float* value) {
+    typedef void (*PFN)(int, int, const float*);
+    auto f = (PFN)get_gl_func("glUniform3fv");
+    if (f) f(location, count, value);
+}
+extern "C" void bionic_glUniform4fv(int location, int count, const float* value) {
+    typedef void (*PFN)(int, int, const float*);
+    auto f = (PFN)get_gl_func("glUniform4fv");
+    if (f) f(location, count, value);
+}
+extern "C" void bionic_glUniform1iv(int location, int count, const int* value) {
+    typedef void (*PFN)(int, int, const int*);
+    auto f = (PFN)get_gl_func("glUniform1iv");
+    if (f) f(location, count, value);
+}
+extern "C" void bionic_glUniform2iv(int location, int count, const int* value) {
+    typedef void (*PFN)(int, int, const int*);
+    auto f = (PFN)get_gl_func("glUniform2iv");
+    if (f) f(location, count, value);
+}
+extern "C" void bionic_glUniform3iv(int location, int count, const int* value) {
+    typedef void (*PFN)(int, int, const int*);
+    auto f = (PFN)get_gl_func("glUniform3iv");
+    if (f) f(location, count, value);
+}
+extern "C" void bionic_glUniform4iv(int location, int count, const int* value) {
+    typedef void (*PFN)(int, int, const int*);
+    auto f = (PFN)get_gl_func("glUniform4iv");
+    if (f) f(location, count, value);
+}
+extern "C" void bionic_glUniformMatrix2fv(int location, int count, unsigned char transpose, const float* value) {
+    typedef void (*PFN)(int, int, unsigned char, const float*);
+    auto f = (PFN)get_gl_func("glUniformMatrix2fv");
+    if (f) f(location, count, transpose, value);
+}
+extern "C" void bionic_glUniformMatrix3fv(int location, int count, unsigned char transpose, const float* value) {
+    typedef void (*PFN)(int, int, unsigned char, const float*);
+    auto f = (PFN)get_gl_func("glUniformMatrix3fv");
+    if (f) f(location, count, transpose, value);
+}
+extern "C" void bionic_glUniformMatrix4fv(int location, int count, unsigned char transpose, const float* value) {
+    typedef void (*PFN)(int, int, unsigned char, const float*);
+    auto f = (PFN)get_gl_func("glUniformMatrix4fv");
+    if (f) f(location, count, transpose, value);
+}
+
+// ── Render States & Capabilities ────────────────────────────────────────────
+extern "C" void bionic_glEnable(unsigned int cap) {
+    typedef void (*PFN)(unsigned int);
+    auto f = (PFN)get_gl_func("glEnable");
+    if (f) f(cap);
+}
+extern "C" void bionic_glDisable(unsigned int cap) {
+    typedef void (*PFN)(unsigned int);
+    auto f = (PFN)get_gl_func("glDisable");
+    if (f) f(cap);
+}
+extern "C" unsigned char bionic_glIsEnabled(unsigned int cap) {
+    typedef unsigned char (*PFN)(unsigned int);
+    auto f = (PFN)get_gl_func("glIsEnabled");
+    if (f) return f(cap);
+    return 0;
+}
+extern "C" void bionic_glBlendFunc(unsigned int sfactor, unsigned int dfactor) {
+    typedef void (*PFN)(unsigned int, unsigned int);
+    auto f = (PFN)get_gl_func("glBlendFunc");
+    if (f) f(sfactor, dfactor);
+}
+extern "C" void bionic_glBlendFuncSeparate(unsigned int srcRGB, unsigned int dstRGB, unsigned int srcAlpha, unsigned int dstAlpha) {
+    typedef void (*PFN)(unsigned int, unsigned int, unsigned int, unsigned int);
+    auto f = (PFN)get_gl_func("glBlendFuncSeparate");
+    if (f) f(srcRGB, dstRGB, srcAlpha, dstAlpha);
+}
+extern "C" void bionic_glBlendEquation(unsigned int mode) {
+    typedef void (*PFN)(unsigned int);
+    auto f = (PFN)get_gl_func("glBlendEquation");
+    if (f) f(mode);
+}
+extern "C" void bionic_glBlendEquationSeparate(unsigned int modeRGB, unsigned int modeAlpha) {
+    typedef void (*PFN)(unsigned int, unsigned int);
+    auto f = (PFN)get_gl_func("glBlendEquationSeparate");
+    if (f) f(modeRGB, modeAlpha);
+}
+extern "C" void bionic_glDepthFunc(unsigned int func) {
+    typedef void (*PFN)(unsigned int);
+    auto f = (PFN)get_gl_func("glDepthFunc");
+    if (f) f(func);
+}
+extern "C" void bionic_glDepthMask(unsigned char flag) {
+    typedef void (*PFN)(unsigned char);
+    auto f = (PFN)get_gl_func("glDepthMask");
+    if (f) f(flag);
+}
+extern "C" void bionic_glCullFace(unsigned int mode) {
+    typedef void (*PFN)(unsigned int);
+    auto f = (PFN)get_gl_func("glCullFace");
+    if (f) f(mode);
+}
+extern "C" void bionic_glFrontFace(unsigned int mode) {
+    typedef void (*PFN)(unsigned int);
+    auto f = (PFN)get_gl_func("glFrontFace");
+    if (f) f(mode);
+}
+extern "C" void bionic_glScissor(int x, int y, int width, int height) {
+    typedef void (*PFN)(int, int, int, int);
+    auto f = (PFN)get_gl_func("glScissor");
+    if (f) f(x, y, width, height);
+}
+extern "C" void bionic_glColorMask(unsigned char red, unsigned char green, unsigned char blue, unsigned char alpha) {
+    typedef void (*PFN)(unsigned char, unsigned char, unsigned char, unsigned char);
+    auto f = (PFN)get_gl_func("glColorMask");
+    if (f) f(red, green, blue, alpha);
+}
+extern "C" void bionic_glFlush(void) {
+    typedef void (*PFN)(void);
+    auto f = (PFN)get_gl_func("glFlush");
+    if (f) f();
+}
+extern "C" void bionic_glFinish(void) {
+    typedef void (*PFN)(void);
+    auto f = (PFN)get_gl_func("glFinish");
+    if (f) f();
+}
+extern "C" void bionic_glGetIntegerv(unsigned int pname, int* params) {
+    typedef void (*PFN)(unsigned int, int*);
+    auto f = (PFN)get_gl_func("glGetIntegerv");
+    if (f) f(pname, params);
+}
+extern "C" void bionic_glGetFloatv(unsigned int pname, float* params) {
+    typedef void (*PFN)(unsigned int, float*);
+    auto f = (PFN)get_gl_func("glGetFloatv");
+    if (f) f(pname, params);
+}
+extern "C" void bionic_glGetBooleanv(unsigned int pname, unsigned char* params) {
+    typedef void (*PFN)(unsigned int, unsigned char*);
+    auto f = (PFN)get_gl_func("glGetBooleanv");
+    if (f) f(pname, params);
+}
+extern "C" const char* bionic_glGetString(unsigned int name) {
+    typedef const char* (*PFN)(unsigned int);
+    auto f = (PFN)get_gl_func("glGetString");
+    if (f) return f(name);
+    return "";
+}
+extern "C" const char* bionic_glGetStringi(unsigned int name, unsigned int index) {
+    typedef const char* (*PFN)(unsigned int, unsigned int);
+    auto f = (PFN)get_gl_func("glGetStringi");
+    if (f) return f(name, index);
+    return "";
+}
+extern "C" unsigned int bionic_glGetError(void) {
+    typedef unsigned int (*PFN)(void);
+    auto f = (PFN)get_gl_func("glGetError");
+    if (f) return f();
+    return 0;
+}
+extern "C" void bionic_glReadPixels(int x, int y, int width, int height, unsigned int format, unsigned int type, void* pixels) {
+    typedef void (*PFN)(int, int, int, int, unsigned int, unsigned int, void*);
+    auto f = (PFN)get_gl_func("glReadPixels");
+    if (f) f(x, y, width, height, format, type, pixels);
+}
+extern "C" void bionic_glDeleteShader(unsigned int shader) {
+    typedef void (*PFN)(unsigned int);
+    auto f = (PFN)get_gl_func("glDeleteShader");
+    if (f) f(shader);
+}
+extern "C" void bionic_glDeleteProgram(unsigned int program) {
+    typedef void (*PFN)(unsigned int);
+    auto f = (PFN)get_gl_func("glDeleteProgram");
+    if (f) f(program);
+}
+extern "C" void bionic_glDetachShader(unsigned int program, unsigned int shader) {
+    typedef void (*PFN)(unsigned int, unsigned int);
+    auto f = (PFN)get_gl_func("glDetachShader");
+    if (f) f(program, shader);
+}
+
 const SymbolEntry kGraphicsSymbols[] = {
     {"ANativeWindow_fromSurface", reinterpret_cast<void*>(&bionic_ANativeWindow_fromSurface)},
     {"ANativeWindow_getWidth", reinterpret_cast<void*>(&bionic_ANativeWindow_getWidth)},
@@ -1305,6 +1754,84 @@ const SymbolEntry kGraphicsSymbols[] = {
     {"glGenBuffers", reinterpret_cast<void*>(&bionic_glGenBuffers)},
     {"glBindBuffer", reinterpret_cast<void*>(&bionic_glBindBuffer)},
     {"glBufferData", reinterpret_cast<void*>(&bionic_glBufferData)},
+    {"glDeleteBuffers", reinterpret_cast<void*>(&bionic_glDeleteBuffers)},
+    {"glBufferSubData", reinterpret_cast<void*>(&bionic_glBufferSubData)},
+    {"glDrawElements", reinterpret_cast<void*>(&bionic_glDrawElements)},
+    {"glDisableVertexAttribArray", reinterpret_cast<void*>(&bionic_glDisableVertexAttribArray)},
+    {"glGenTextures", reinterpret_cast<void*>(&bionic_glGenTextures)},
+    {"glBindTexture", reinterpret_cast<void*>(&bionic_glBindTexture)},
+    {"glDeleteTextures", reinterpret_cast<void*>(&bionic_glDeleteTextures)},
+    {"glTexImage2D", reinterpret_cast<void*>(&bionic_glTexImage2D)},
+    {"glTexSubImage2D", reinterpret_cast<void*>(&bionic_glTexSubImage2D)},
+    {"glTexParameteri", reinterpret_cast<void*>(&bionic_glTexParameteri)},
+    {"glTexParameterf", reinterpret_cast<void*>(&bionic_glTexParameterf)},
+    {"glTexParameteriv", reinterpret_cast<void*>(&bionic_glTexParameteriv)},
+    {"glTexParameterfv", reinterpret_cast<void*>(&bionic_glTexParameterfv)},
+    {"glActiveTexture", reinterpret_cast<void*>(&bionic_glActiveTexture)},
+    {"glGenerateMipmap", reinterpret_cast<void*>(&bionic_glGenerateMipmap)},
+    {"glPixelStorei", reinterpret_cast<void*>(&bionic_glPixelStorei)},
+    {"glCompressedTexImage2D", reinterpret_cast<void*>(&bionic_glCompressedTexImage2D)},
+    {"glGenVertexArrays", reinterpret_cast<void*>(&bionic_glGenVertexArrays)},
+    {"glBindVertexArray", reinterpret_cast<void*>(&bionic_glBindVertexArray)},
+    {"glDeleteVertexArrays", reinterpret_cast<void*>(&bionic_glDeleteVertexArrays)},
+    {"glGenVertexArraysOES", reinterpret_cast<void*>(&bionic_glGenVertexArrays)},
+    {"glBindVertexArrayOES", reinterpret_cast<void*>(&bionic_glBindVertexArray)},
+    {"glDeleteVertexArraysOES", reinterpret_cast<void*>(&bionic_glDeleteVertexArrays)},
+    {"glGenFramebuffers", reinterpret_cast<void*>(&bionic_glGenFramebuffers)},
+    {"glBindFramebuffer", reinterpret_cast<void*>(&bionic_glBindFramebuffer)},
+    {"glDeleteFramebuffers", reinterpret_cast<void*>(&bionic_glDeleteFramebuffers)},
+    {"glFramebufferTexture2D", reinterpret_cast<void*>(&bionic_glFramebufferTexture2D)},
+    {"glCheckFramebufferStatus", reinterpret_cast<void*>(&bionic_glCheckFramebufferStatus)},
+    {"glGenRenderbuffers", reinterpret_cast<void*>(&bionic_glGenRenderbuffers)},
+    {"glBindRenderbuffer", reinterpret_cast<void*>(&bionic_glBindRenderbuffer)},
+    {"glDeleteRenderbuffers", reinterpret_cast<void*>(&bionic_glDeleteRenderbuffers)},
+    {"glRenderbufferStorage", reinterpret_cast<void*>(&bionic_glRenderbufferStorage)},
+    {"glFramebufferRenderbuffer", reinterpret_cast<void*>(&bionic_glFramebufferRenderbuffer)},
+    {"glGetUniformLocation", reinterpret_cast<void*>(&bionic_glGetUniformLocation)},
+    {"glUniform1f", reinterpret_cast<void*>(&bionic_glUniform1f)},
+    {"glUniform2f", reinterpret_cast<void*>(&bionic_glUniform2f)},
+    {"glUniform3f", reinterpret_cast<void*>(&bionic_glUniform3f)},
+    {"glUniform4f", reinterpret_cast<void*>(&bionic_glUniform4f)},
+    {"glUniform1i", reinterpret_cast<void*>(&bionic_glUniform1i)},
+    {"glUniform2i", reinterpret_cast<void*>(&bionic_glUniform2i)},
+    {"glUniform3i", reinterpret_cast<void*>(&bionic_glUniform3i)},
+    {"glUniform4i", reinterpret_cast<void*>(&bionic_glUniform4i)},
+    {"glUniform1fv", reinterpret_cast<void*>(&bionic_glUniform1fv)},
+    {"glUniform2fv", reinterpret_cast<void*>(&bionic_glUniform2fv)},
+    {"glUniform3fv", reinterpret_cast<void*>(&bionic_glUniform3fv)},
+    {"glUniform4fv", reinterpret_cast<void*>(&bionic_glUniform4fv)},
+    {"glUniform1iv", reinterpret_cast<void*>(&bionic_glUniform1iv)},
+    {"glUniform2iv", reinterpret_cast<void*>(&bionic_glUniform2iv)},
+    {"glUniform3iv", reinterpret_cast<void*>(&bionic_glUniform3iv)},
+    {"glUniform4iv", reinterpret_cast<void*>(&bionic_glUniform4iv)},
+    {"glUniformMatrix2fv", reinterpret_cast<void*>(&bionic_glUniformMatrix2fv)},
+    {"glUniformMatrix3fv", reinterpret_cast<void*>(&bionic_glUniformMatrix3fv)},
+    {"glUniformMatrix4fv", reinterpret_cast<void*>(&bionic_glUniformMatrix4fv)},
+    {"glEnable", reinterpret_cast<void*>(&bionic_glEnable)},
+    {"glDisable", reinterpret_cast<void*>(&bionic_glDisable)},
+    {"glIsEnabled", reinterpret_cast<void*>(&bionic_glIsEnabled)},
+    {"glBlendFunc", reinterpret_cast<void*>(&bionic_glBlendFunc)},
+    {"glBlendFuncSeparate", reinterpret_cast<void*>(&bionic_glBlendFuncSeparate)},
+    {"glBlendEquation", reinterpret_cast<void*>(&bionic_glBlendEquation)},
+    {"glBlendEquationSeparate", reinterpret_cast<void*>(&bionic_glBlendEquationSeparate)},
+    {"glDepthFunc", reinterpret_cast<void*>(&bionic_glDepthFunc)},
+    {"glDepthMask", reinterpret_cast<void*>(&bionic_glDepthMask)},
+    {"glCullFace", reinterpret_cast<void*>(&bionic_glCullFace)},
+    {"glFrontFace", reinterpret_cast<void*>(&bionic_glFrontFace)},
+    {"glScissor", reinterpret_cast<void*>(&bionic_glScissor)},
+    {"glColorMask", reinterpret_cast<void*>(&bionic_glColorMask)},
+    {"glFlush", reinterpret_cast<void*>(&bionic_glFlush)},
+    {"glFinish", reinterpret_cast<void*>(&bionic_glFinish)},
+    {"glGetIntegerv", reinterpret_cast<void*>(&bionic_glGetIntegerv)},
+    {"glGetFloatv", reinterpret_cast<void*>(&bionic_glGetFloatv)},
+    {"glGetBooleanv", reinterpret_cast<void*>(&bionic_glGetBooleanv)},
+    {"glGetString", reinterpret_cast<void*>(&bionic_glGetString)},
+    {"glGetStringi", reinterpret_cast<void*>(&bionic_glGetStringi)},
+    {"glGetError", reinterpret_cast<void*>(&bionic_glGetError)},
+    {"glReadPixels", reinterpret_cast<void*>(&bionic_glReadPixels)},
+    {"glDeleteShader", reinterpret_cast<void*>(&bionic_glDeleteShader)},
+    {"glDeleteProgram", reinterpret_cast<void*>(&bionic_glDeleteProgram)},
+    {"glDetachShader", reinterpret_cast<void*>(&bionic_glDetachShader)},
     {"vkGetInstanceProcAddr", reinterpret_cast<void*>(&bionic_vkGetInstanceProcAddr)},
     {"vkCreateAndroidSurfaceKHR", reinterpret_cast<void*>(&bionic_vkCreateAndroidSurfaceKHR)},
     {"vkEnumerateInstanceExtensionProperties", reinterpret_cast<void*>(&bionic_vkEnumerateInstanceExtensionProperties)},

@@ -12,6 +12,36 @@ class AppSession: ObservableObject {
     @Published var crashInfo: CrashInfo? = nil
 }
 
+struct GlobalMetalViewRepresentable: UIViewRepresentable {
+    func makeUIView(context: Context) -> GlobalMetalView {
+        let view = GlobalMetalView()
+        view.backgroundColor = .clear
+        view.isUserInteractionEnabled = false
+        if let metalLayer = view.layer as? CAMetalLayer {
+            metalLayer.device = MTLCreateSystemDefaultDevice()
+            metalLayer.pixelFormat = .bgra8Unorm
+            metalLayer.framebufferOnly = false
+            metalLayer.allowsNextDrawableTimeout = false
+            metalLayer.maximumDrawableCount = 3
+            let scale = UIScreen.main.scale
+            let bounds = UIScreen.main.bounds
+            let w = Int(bounds.width * scale)
+            let h = Int(bounds.height * scale)
+            metalLayer.drawableSize = CGSize(width: w, height: h)
+            kudroid_set_metal_layer(Unmanaged.passUnretained(metalLayer).toOpaque(), Int32(w), Int32(h), Float(scale))
+        }
+        return view
+    }
+
+    func updateUIView(_ uiView: GlobalMetalView, context: Context) {}
+}
+
+class GlobalMetalView: UIView {
+    override class var layerClass: AnyClass {
+        return CAMetalLayer.self
+    }
+}
+
 @main
 struct KuDroidApp: App {
     @StateObject private var session = AppSession()
@@ -19,6 +49,9 @@ struct KuDroidApp: App {
     var body: some Scene {
         WindowGroup {
             ZStack {
+                GlobalMetalViewRepresentable()
+                    .ignoresSafeArea()
+
                 if !session.activeGuestApp.isEmpty {
                     DedicatedAppRunnerView(
                         appName: session.activeGuestApp,

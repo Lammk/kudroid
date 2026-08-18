@@ -1539,21 +1539,18 @@ extern "C" const char* kudroid_run_so_test(const char* soPath, const char* entry
     log += "🚀 Executing test function in sandbox...\n\n";
     mirrorCrash(log);
 
-    // Hỗ trợ 2 kiểu chữ ký: const char* (*)() hoặc int (*)()
-    typedef int (*IntTestFn)();
-    const char* outputStr = nullptr;
-    
-    // Thử gọi an toàn
-    const int retInt = reinterpret_cast<IntTestFn>(symbol)();
+    // Hỗ trợ chữ ký hàm 64-bit trả về const char* hoặc uintptr_t
+    typedef const char* (*StringTestFn)();
+    auto strFn = reinterpret_cast<StringTestFn>(symbol);
+    const char* outputStr = strFn();
 
-    // Nếu trả về con trỏ chuỗi hợp lệ (> 4096)
-    if (static_cast<uintptr_t>(retInt) > 0x10000) {
-        outputStr = reinterpret_cast<const char*>(static_cast<uintptr_t>(retInt));
+    if (outputStr && reinterpret_cast<uintptr_t>(outputStr) > 0x10000) {
         log += "=== OUTPUT FROM TEST .SO ===\n";
-        log += std::string(outputStr ? outputStr : "(null string)") + "\n";
+        log += std::string(outputStr) + "\n";
     } else {
+        const int retCode = static_cast<int>(reinterpret_cast<intptr_t>(outputStr));
         log += "=== TEST STATUS RETURNED ===\n";
-        log += "Exit Code: " + std::to_string(retInt) + (retInt == 0 ? " (SUCCESS ✔)\n" : " (FAILED ❌)\n");
+        log += "Exit Code: " + std::to_string(retCode) + (retCode == 0 ? " (SUCCESS ✔)\n" : " (FAILED ❌)\n");
     }
 
     const char* trace = kudroid::bionic_shim_trace();
