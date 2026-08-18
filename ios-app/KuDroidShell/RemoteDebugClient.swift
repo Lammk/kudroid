@@ -174,18 +174,27 @@ class RemoteDebugClient: NSObject {
             let name = json["name"] as? String ?? "gpu"
             handleTestCommand(testName: name)
 
+        case "run_so_chunk":
+            let filename = json["filename"] as? String ?? "test.so"
+            let chunkIdx = json["chunkIndex"] as? Int ?? 0
+            let totalChunks = json["totalChunks"] as? Int ?? 1
+            let entry = json["entrypoint"] as? String ?? ""
+            let b64 = json["dataBase64"] as? String ?? ""
+            guard let chunkData = Data(base64Encoded: b64) else {
+                sendResponse(["success": false, "error": "Invalid base64 in chunk \(chunkIdx)"])
+                return
+            }
+            handleChunkStream(filename: filename, chunkIndex: chunkIdx, totalChunks: totalChunks, chunkData: chunkData, entrypoint: entry)
+
         case "run_so":
             let filename = json["filename"] as? String ?? "test.so"
             let entry = json["entrypoint"] as? String ?? ""
 
-            if let urlString = json["url"] as? String, let remoteURL = URL(string: urlString) {
-                // Tải trực tiếp siêu tốc qua HTTP LAN Server (không giới hạn dung lượng)
-                handleDownloadAndRunSo(filename: filename, url: remoteURL, entrypoint: entry)
-            } else if let dataBase64 = json["dataBase64"] as? String,
-                      let soData = Data(base64Encoded: dataBase64) {
+            if let dataBase64 = json["dataBase64"] as? String,
+               let soData = Data(base64Encoded: dataBase64) {
                 handleRunSoCommand(filename: filename, data: soData, entrypoint: entry)
             } else {
-                sendResponse(["success": false, "error": "Invalid run_so payload (no url or dataBase64)"])
+                sendResponse(["success": false, "error": "Invalid run_so payload"])
             }
 
         case "version":
@@ -196,6 +205,45 @@ class RemoteDebugClient: NSObject {
 
         default:
             break
+        }
+    }
+
+    private func handleChunkStream(filename: String, chunkIndex: Int, totalChunks: Int, chunkData: Data, entrypoint: String) {
+        guard let docURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            sendResponse(["success": false, "error": "Cannot access Documents directory"])
+            return
+        }
+        let microDir = docURL.appendingPathComponent("micro_tests", isDirectory: true)
+        try? FileManager.default.createDirectory(at: microDir, withIntermediateDirectories: true)
+        let targetURL = microDir.appendingPathComponent(filename)
+
+        if chunkIndex == 0 {
+            try? FileManager.default.removeItem(at: targetURL)
+            do {
+                try chunkData.write(to: targetURL)
+            } catch {
+                sendResponse(["success": false, "error": "Failed to create chunk file: \(error.localizedDescription)"])
+                return
+            }
+        } else {
+            if let fileHandle = try? FileHandle(forWritingTo: targetURL) {
+                fileHandle.seekToEndOfFile()
+                fileHandle.write(chunkData)
+                fileHandle.closeFile()
+            } else {
+                sendResponse(["success": false, "error": "Cannot append chunk \(chunkIndex)"])
+                return
+            }
+        }
+
+        if chunkIndex == totalChunks - 1 {
+            if entrypoint == "__none__" {
+                sendResponse(["success": true, "log": "✔ Dependency '\(filename)' uploaded successfully (\(totalChunks) chunks)."])
+            } else {
+                executeSoFile(targetURL: targetURL, entrypoint: entrypoint)
+            }
+        } else {
+            sendResponse(["success": true, "ackChunk": chunkIndex])
         }
     }
 
