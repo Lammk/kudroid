@@ -619,13 +619,38 @@ extern "C" VkResult bionic_vkCreateInstance(const VkInstanceCreateInfo* pCreateI
     return res;
 }
 
+#if defined(__APPLE__)
+static id kudroid_calayer_self_layer(id self, SEL _cmd) {
+    (void)_cmd;
+    return self;
+}
+
+static void kudroid_ensure_calayer_layer_compat() {
+    static bool s_done = false;
+    if (!s_done) {
+        s_done = true;
+        Class clsCALayer = objc_getClass("CALayer");
+        if (clsCALayer) {
+            SEL selLayer = sel_registerName("layer");
+            if (!class_getInstanceMethod(clsCALayer, selLayer)) {
+                class_addMethod(clsCALayer, selLayer, (IMP)kudroid_calayer_self_layer, "@@:");
+            }
+        }
+    }
+}
+#endif
+
 // Translate vkCreateAndroidSurfaceKHR → vkCreateIOSSurfaceMVK / vkCreateMetalSurfaceEXT
 extern "C" VkResult bionic_vkCreateAndroidSurfaceKHR(VkInstance instance,
                                                      const VkAndroidSurfaceCreateInfoKHR* pCreateInfo,
                                                      const VkAllocationCallbacks* pAllocator,
                                                      VkSurfaceKHR* pSurface) {
-    KLOG(kDebug, "KuDroidGPU", "vkCreateAndroidSurfaceKHR → vkCreateIOSSurfaceMVK translation");
+    KLOG(kDebug, "KuDroidGPU", "vkCreateAndroidSurfaceKHR translation");
     if (!pCreateInfo || !pSurface) return -1; // VK_ERROR_INITIALIZATION_FAILED
+
+#if defined(__APPLE__)
+    kudroid_ensure_calayer_layer_compat();
+#endif
 
     auto real = get_real_vkGetInstanceProcAddr();
     if (!real) {
@@ -633,37 +658,52 @@ extern "C" VkResult bionic_vkCreateAndroidSurfaceKHR(VkInstance instance,
         return -1;
     }
 
-    void* targetLayerOrView = (pCreateInfo->window && pCreateInfo->window != (void*)1) ? pCreateInfo->window : g_metalLayer;
-
-    // 1. Thử hàm iOS chuẩn của MoltenVK: vkCreateIOSSurfaceMVK
-    auto createIOSSurface = (PFN_vkCreateIOSSurfaceMVK)real(instance, "vkCreateIOSSurfaceMVK");
-    if (createIOSSurface) {
-        VkIOSSurfaceCreateInfoMVK iosInfo = {};
-        iosInfo.sType = VK_STRUCTURE_TYPE_IOS_SURFACE_CREATE_INFO_MVK;
-        iosInfo.pNext = nullptr;
-        iosInfo.flags = 0;
-        iosInfo.pView = targetLayerOrView;
-
-        VkResult r = createIOSSurface(instance, &iosInfo, pAllocator, pSurface);
-        KLOG(kInfo, "KuDroidGPU", "vkCreateIOSSurfaceMVK returned %d (surface=%p)", (int)r, (void*)*pSurface);
-        return r;
+    void* actualLayer = g_metalLayer;
+    if (pCreateInfo->window && pCreateInfo->window != (void*)1) {
+        auto* nw = static_cast<KuDroidNativeWindow*>(pCreateInfo->window);
+        if (nw->magic == 0x4B554457 && nw->layer) {
+            actualLayer = nw->layer;
+        } else {
+            actualLayer = pCreateInfo->window;
+        }
     }
+#if defined(__APPLE__)
+    if (!actualLayer) {
+        actualLayer = get_or_create_fallback_metal_layer();
+    }
+#endif
 
-    // 2. Fallback: vkCreateMetalSurfaceEXT
+    KLOG(kDebug, "KuDroidGPU", "Resolved CAMetalLayer pointer for Vulkan Surface: %p", actualLayer);
+
+    // 1. Thử hàm chuẩn vkCreateMetalSurfaceEXT trước (yêu cầu CAMetalLayer)
     auto createMetalSurface = (PFN_vkCreateMetalSurfaceEXT)real(instance, "vkCreateMetalSurfaceEXT");
     if (createMetalSurface) {
         VkMetalSurfaceCreateInfoEXT metalInfo = {};
         metalInfo.sType = VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT;
         metalInfo.pNext = nullptr;
         metalInfo.flags = 0;
-        metalInfo.pLayer = targetLayerOrView;
+        metalInfo.pLayer = actualLayer;
 
         VkResult r = createMetalSurface(instance, &metalInfo, pAllocator, pSurface);
         KLOG(kInfo, "KuDroidGPU", "vkCreateMetalSurfaceEXT returned %d (surface=%p)", (int)r, (void*)*pSurface);
-        return r;
+        if (r == VK_SUCCESS) return r;
     }
 
-    KLOG(kError, "KuDroidGPU", "ERROR: Neither vkCreateIOSSurfaceMVK nor vkCreateMetalSurfaceEXT found");
+    // 2. Thử hàm iOS của MoltenVK: vkCreateIOSSurfaceMVK
+    auto createIOSSurface = (PFN_vkCreateIOSSurfaceMVK)real(instance, "vkCreateIOSSurfaceMVK");
+    if (createIOSSurface) {
+        VkIOSSurfaceCreateInfoMVK iosInfo = {};
+        iosInfo.sType = VK_STRUCTURE_TYPE_IOS_SURFACE_CREATE_INFO_MVK;
+        iosInfo.pNext = nullptr;
+        iosInfo.flags = 0;
+        iosInfo.pView = actualLayer;
+
+        VkResult r = createIOSSurface(instance, &iosInfo, pAllocator, pSurface);
+        KLOG(kInfo, "KuDroidGPU", "vkCreateIOSSurfaceMVK returned %d (surface=%p)", (int)r, (void*)*pSurface);
+        if (r == VK_SUCCESS) return r;
+    }
+
+    KLOG(kError, "KuDroidGPU", "ERROR: Neither vkCreateMetalSurfaceEXT nor vkCreateIOSSurfaceMVK succeeded");
     return -1;
 }
 
