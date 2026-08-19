@@ -67,6 +67,11 @@ public class View {
         mId = id;
     }
 
+    public View findViewById(int id) {
+        if (mId == id) return this;
+        return null;
+    }
+
     /**
      * trả về vị trí bên trái của view.
      */
@@ -178,6 +183,8 @@ public class View {
         onMeasure(widthMeasureSpec, heightMeasureSpec);
     }
 
+    private int mBackgroundColor = 0;
+
     /**
      * vẽ view.
      */
@@ -188,6 +195,12 @@ public class View {
      * vẽ view (được gọi bởi cha).
      */
     public void draw(Canvas canvas) {
+        if (mVisibility != VISIBLE || canvas == null) return;
+        if (mBackgroundColor != 0) {
+            android.graphics.Paint p = new android.graphics.Paint();
+            p.setColor(mBackgroundColor);
+            canvas.drawRect(mLeft, mTop, mRight, mBottom, p);
+        }
         onDraw(canvas);
     }
 
@@ -209,6 +222,8 @@ public class View {
      * thiết lập nền của view.
      */
     public void setBackgroundColor(int color) {
+        mBackgroundColor = color;
+        invalidate();
     }
 
     /**

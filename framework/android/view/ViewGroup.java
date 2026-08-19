@@ -98,6 +98,21 @@ public abstract class ViewGroup extends View {
      */
     protected abstract void onLayout(boolean changed, int l, int t, int r, int b);
 
+    @Override
+    public void draw(android.graphics.Canvas canvas) {
+        super.draw(canvas);
+        dispatchDraw(canvas);
+    }
+
+    protected void dispatchDraw(android.graphics.Canvas canvas) {
+        for (int i = 0; i < mChildCount; i++) {
+            View child = mChildren[i];
+            if (child != null && child.isShown()) {
+                child.draw(canvas);
+            }
+        }
+    }
+
     /**
      * thông số bố cục cho một view.
      */

@@ -126,4 +126,8 @@ public final class Bitmap {
     public boolean isRecycled() {
         return mPixels == null;
     }
+
+    public int[] getPixels() {
+        return mPixels;
+    }
 }

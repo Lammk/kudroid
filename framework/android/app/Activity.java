@@ -173,6 +173,8 @@ public class Activity extends ContextThemeWrapper {
         return new android.view.Window(this);
     }
 
+    private android.view.View mContentView;
+
     /**
      * đặt chế độ xem nội dung từ một tài nguyên bố cục.
      */
@@ -183,20 +185,45 @@ public class Activity extends ContextThemeWrapper {
      * đặt chế độ xem nội dung thành một dạng xem.
      */
     public void setContentView(android.view.View view) {
+        mContentView = view;
+        renderViewHierarchy();
     }
 
     /**
      * tìm một dạng xem theo id.
      */
     public android.view.View findViewById(int id) {
+        if (mContentView != null) {
+            return mContentView.findViewById(id);
+        }
         return null;
+    }
+
+    /**
+     * vẽ toàn bộ cây view hierarchy lên màn hình Metal.
+     */
+    public void renderViewHierarchy() {
+        if (mContentView != null) {
+            try {
+                android.graphics.Canvas canvas = new android.graphics.Canvas();
+                canvas.drawColor(0xFF1E1E1E);
+                mContentView.layout(0, 0, canvas.getWidth(), canvas.getHeight());
+                mContentView.draw(canvas);
+                canvas.flush();
+            } catch (Throwable t) {
+                t.printStackTrace();
+            }
+        }
     }
 
     /**
      * chạy trên luồng giao diện người dùng.
      */
     public void runOnUiThread(Runnable action) {
-        action.run();
+        if (action != null) {
+            action.run();
+            renderViewHierarchy();
+        }
     }
 
     /**

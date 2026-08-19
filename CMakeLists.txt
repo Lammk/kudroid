@@ -44,6 +44,7 @@ add_library(kudroid_core STATIC
     src/platform/GraphicsShim.cpp
     src/abi/SyscallShim.cpp
     src/platform/AssetShim.cpp
+    src/platform/JavaCanvasRenderer.cpp
     src/kudroid_bridge.cpp
     src/kudroid_jni.cpp
     src/kudroid_java_activity_bridge.cpp

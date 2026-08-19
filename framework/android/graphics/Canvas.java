@@ -1,15 +1,21 @@
 package android.graphics;
 
 /**
- * triển khai android.graphics.canvas tối thiểu.
- *
- * cung cấp một bề mặt vẽ. đối với khuôn khổ tối thiểu của kudroid, đây là một mô phỏng
- * ghi lại các thao tác vẽ (để được kết nối với metal/angle sau này).
+ * Triển khai android.graphics.Canvas với kết nối trực tiếp C++ Metal Native Canvas.
  */
 public class Canvas {
     private Bitmap mBitmap;
-    private int mWidth;
-    private int mHeight;
+    private int mWidth = 1080;
+    private int mHeight = 1920;
+    private float mTranslateX = 0.0f;
+    private float mTranslateY = 0.0f;
+
+    // Native JNI methods kết nối sang C++ Metal Pipeline
+    private static native void native_drawColor(int color);
+    private static native void native_drawRect(float left, float top, float right, float bottom, int color);
+    private static native void native_drawText(String text, float x, float y, int color, float textSize);
+    private static native void native_drawBitmap(int[] pixels, int width, int height, float x, float y);
+    private static native void native_flush();
 
     public Canvas() {
     }
@@ -22,109 +28,95 @@ public class Canvas {
         }
     }
 
-    /**
-     * trả về chiều rộng canvas.
-     */
     public int getWidth() {
         return mWidth;
     }
 
-    /**
-     * trả về chiều cao canvas.
-     */
     public int getHeight() {
         return mHeight;
     }
 
-    /**
-     * vẽ một màu.
-     */
     public void drawColor(int color) {
+        try {
+            native_drawColor(color);
+        } catch (Throwable t) {}
     }
 
-    /**
-     * vẽ một màu với chế độ porter-duff.
-     */
     public void drawColor(int color, PorterDuff.Mode mode) {
+        drawColor(color);
     }
 
-    /**
-     * vẽ một bitmap.
-     */
-    public void drawBitmap(Bitmap bitmap, float left, float top, Paint paint) {
-    }
-
-    /**
-     * vẽ một hình chữ nhật.
-     */
     public void drawRect(float left, float top, float right, float bottom, Paint paint) {
+        int color = (paint != null) ? paint.getColor() : 0xFFFFFFFF;
+        try {
+            native_drawRect(left + mTranslateX, top + mTranslateY, right + mTranslateX, bottom + mTranslateY, color);
+        } catch (Throwable t) {}
     }
 
-    /**
-     * vẽ một hình chữ nhật.
-     */
     public void drawRect(Rect rect, Paint paint) {
+        if (rect != null) {
+            drawRect(rect.left, rect.top, rect.right, rect.bottom, paint);
+        }
     }
 
-    /**
-     * vẽ một hình tròn.
-     */
-    public void drawCircle(float cx, float cy, float radius, Paint paint) {
-    }
-
-    /**
-     * vẽ một đường thẳng.
-     */
-    public void drawLine(float startX, float startY, float stopX, float stopY, Paint paint) {
-    }
-
-    /**
-     * vẽ văn bản.
-     */
     public void drawText(String text, float x, float y, Paint paint) {
+        if (text == null || text.isEmpty()) return;
+        int color = (paint != null) ? paint.getColor() : 0xFFFFFFFF;
+        float textSize = (paint != null) ? paint.getTextSize() : 16.0f;
+        try {
+            native_drawText(text, x + mTranslateX, y + mTranslateY, color, textSize);
+        } catch (Throwable t) {}
     }
 
-    /**
-     * lưu trạng thái canvas.
-     */
+    public void drawBitmap(Bitmap bitmap, float left, float top, Paint paint) {
+        if (bitmap == null) return;
+        int[] pixels = bitmap.getPixels();
+        if (pixels != null) {
+            try {
+                native_drawBitmap(pixels, bitmap.getWidth(), bitmap.getHeight(), left + mTranslateX, top + mTranslateY);
+            } catch (Throwable t) {}
+        }
+    }
+
+    public void drawCircle(float cx, float cy, float radius, Paint paint) {
+        // Tạm thời rasterize bounding box
+        drawRect(cx - radius, cy - radius, cx + radius, cy + radius, paint);
+    }
+
+    public void drawLine(float startX, float startY, float stopX, float stopY, Paint paint) {
+        drawRect(startX, startY, stopX, stopY + 1.0f, paint);
+    }
+
     public int save() {
         return 0;
     }
 
-    /**
-     * khôi phục trạng thái canvas.
-     */
     public void restore() {
+        mTranslateX = 0.0f;
+        mTranslateY = 0.0f;
     }
 
-    /**
-     * dịch chuyển canvas.
-     */
     public void translate(float dx, float dy) {
+        mTranslateX += dx;
+        mTranslateY += dy;
     }
 
-    /**
-     * chia tỷ lệ canvas.
-     */
     public void scale(float sx, float sy) {
     }
 
-    /**
-     * xoay canvas.
-     */
     public void rotate(float degrees) {
     }
 
-    /**
-     * cắt theo một hình chữ nhật.
-     */
     public boolean clipRect(float left, float top, float right, float bottom) {
         return true;
     }
 
-    /**
-     * trả về bitmap của canvas.
-     */
+    public void flush() {
+        try {
+            native_flush();
+        } catch (Throwable t) {}
+    }
+
     public Bitmap getBitmap() {
         return mBitmap;
     }

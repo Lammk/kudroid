@@ -125,6 +125,63 @@ static void register_android_util_log_natives(JNIEnv* env) {
     env->DeleteLocalRef(clazz);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// android.graphics.Canvas native methods -> JavaCanvasRenderer
+// ─────────────────────────────────────────────────────────────────────────────
+#include "kudroid/platform/JavaCanvasRenderer.h"
+
+static void java_android_graphics_Canvas_native_drawColor(JNIEnv* /*env*/, jclass /*clazz*/, jint color) {
+    kudroid::JavaCanvasRenderer::getInstance().drawColor(static_cast<uint32_t>(color));
+}
+
+static void java_android_graphics_Canvas_native_drawRect(JNIEnv* /*env*/, jclass /*clazz*/, jfloat left, jfloat top, jfloat right, jfloat bottom, jint color) {
+    kudroid::JavaCanvasRenderer::getInstance().drawRect(left, top, right, bottom, static_cast<uint32_t>(color));
+}
+
+static void java_android_graphics_Canvas_native_drawText(JNIEnv* env, jclass /*clazz*/, jstring text, jfloat x, jfloat y, jint color, jfloat textSize) {
+    if (!text || !env) return;
+    const char* str = env->GetStringUTFChars(text, nullptr);
+    if (str) {
+        kudroid::JavaCanvasRenderer::getInstance().drawText(str, x, y, static_cast<uint32_t>(color), textSize);
+        env->ReleaseStringUTFChars(text, str);
+    }
+}
+
+static void java_android_graphics_Canvas_native_drawBitmap(JNIEnv* env, jclass /*clazz*/, jintArray pixels, jint width, jint height, jfloat x, jfloat y) {
+    if (!pixels || !env || width <= 0 || height <= 0) return;
+    jint* p = env->GetIntArrayElements(pixels, nullptr);
+    if (p) {
+        kudroid::JavaCanvasRenderer::getInstance().drawBitmap(reinterpret_cast<const uint32_t*>(p), width, height, x, y);
+        env->ReleaseIntArrayElements(pixels, p, JNI_ABORT);
+    }
+}
+
+static void java_android_graphics_Canvas_native_flush(JNIEnv* /*env*/, jclass /*clazz*/) {
+    kudroid::JavaCanvasRenderer::getInstance().flush();
+}
+
+static void register_android_graphics_canvas_natives(JNIEnv* env) {
+    jclass clazz = env->FindClass("android/graphics/Canvas");
+    if (!clazz) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return;
+    }
+    static const JNINativeMethod methods[] = {
+        {const_cast<char*>("native_drawColor"), const_cast<char*>("(I)V"), reinterpret_cast<void*>(&java_android_graphics_Canvas_native_drawColor)},
+        {const_cast<char*>("native_drawRect"), const_cast<char*>("(FFFFI)V"), reinterpret_cast<void*>(&java_android_graphics_Canvas_native_drawRect)},
+        {const_cast<char*>("native_drawText"), const_cast<char*>("(Ljava/lang/String;FFIF)V"), reinterpret_cast<void*>(&java_android_graphics_Canvas_native_drawText)},
+        {const_cast<char*>("native_drawBitmap"), const_cast<char*>("([IIIIFF)V"), reinterpret_cast<void*>(&java_android_graphics_Canvas_native_drawBitmap)},
+        {const_cast<char*>("native_flush"), const_cast<char*>("()V"), reinterpret_cast<void*>(&java_android_graphics_Canvas_native_flush)},
+    };
+    if (env->RegisterNatives(clazz, methods, sizeof(methods) / sizeof(methods[0])) != JNI_OK) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        log_jni("ERROR: RegisterNatives(android/graphics/Canvas) failed");
+        return;
+    }
+    log_jni("Registered android/graphics/Canvas -> C++ Metal Canvas pipeline");
+    env->DeleteLocalRef(clazz);
+}
+
 static std::function<void(const char*)> g_jni_log_callback;
 
 extern "C" void kudroid_jni_set_log_callback(void (*cb)(const char*)) {
@@ -455,6 +512,7 @@ void kudroid_jni_init_jvm(const char* bootclasspath, const char* classpath) {
     // Đăng ký native method của framework ngay tại đây — nếu bỏ lỡ, Java gọi
     // Log.* sẽ UnsatisfiedLinkError (issue đã tìm thấy khi rà framework).
     register_android_util_log_natives(g_env);
+    register_android_graphics_canvas_natives(g_env);
 
     // Đẩy kích thước màn hình thật (từ UIScreen qua kudroid_set_metal_layer)
     // vào DisplayMetrics — game đọc Resources.getDisplayMetrics() sẽ thấy số
