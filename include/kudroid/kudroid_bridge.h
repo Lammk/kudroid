@@ -84,6 +84,14 @@ void kudroid_clear_crash_state(void);
 /// trả về chuỗi malloc; người gọi phải giải phóng bằng free().
 const char* kudroid_get_last_crash_tail(void);
 
+// Android Runtime Permission Manager APIs
+int kudroid_check_permission(const char* packageName, const char* permissionName);
+void kudroid_set_group_permission(const char* packageName, const char* groupKey, int granted);
+int kudroid_is_group_granted(const char* packageName, const char* groupKey);
+void kudroid_grant_all_permissions(const char* packageName);
+const char* kudroid_get_app_permissions_json(const char* packageName);
+void kudroid_set_app_permissions_json(const char* packageName, const char* jsonStr);
+
 #ifdef __cplusplus
 }
 #endif

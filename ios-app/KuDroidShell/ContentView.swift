@@ -4,7 +4,6 @@ import AVFAudio
 import Metal
 import QuartzCore
 
-// mark: - giao diện chính
 struct ContentView: View {
     @State private var fullLog = "KuDroid Core Status"
     @State private var jitStatus = "JIT: Unknown"
@@ -14,6 +13,11 @@ struct ContentView: View {
             AppsView(fullLog: $fullLog)
                 .tabItem {
                     Label("Apps", systemImage: "square.grid.2x2.fill")
+                }
+            
+            PermissionsView()
+                .tabItem {
+                    Label("Permissions", systemImage: "lock.shield.fill")
                 }
             
             DebugView(fullLog: $fullLog, jitStatus: $jitStatus)
@@ -307,7 +311,203 @@ struct AppsView: View {
     }
 }
 
-// mark: - tab gỡ lỗi
+// mark: - tab quản lý quyền ứng dụng (PermissionsView)
+struct PermissionGroupItem: Identifiable {
+    var id: String { key }
+    let key: String
+    let displayName: String
+    let description: String
+    var granted: Bool
+}
+
+struct PermissionsView: View {
+    @State private var installedApps: [AppItem] = []
+    @State private var appPermissions: [String: [PermissionGroupItem]] = [:]
+    
+    private var androidRootAppsURL: URL? {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("android_root/data/app", isDirectory: true)
+    }
+
+    var body: some View {
+        NavigationView {
+            ZStack {
+                Color.black.ignoresSafeArea()
+                
+                VStack(spacing: 0) {
+                    HStack {
+                        Image(systemName: "lock.shield.fill")
+                            .font(.title)
+                            .foregroundColor(.green)
+                        Text("App Permissions")
+                            .font(.title2.bold())
+                        Spacer()
+                    }
+                    .padding()
+                    
+                    if installedApps.isEmpty {
+                        VStack(spacing: 16) {
+                            Spacer()
+                            Image(systemName: "shield.slash")
+                                .font(.system(size: 64))
+                                .foregroundColor(.secondary)
+                            Text("No Installed Apps Found")
+                                .font(.headline)
+                            Text("Install apps from the Apps tab to configure permissions.")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.center)
+                                .padding(.horizontal)
+                            Spacer()
+                        }
+                    } else {
+                        List {
+                            ForEach(installedApps) { app in
+                                Section(header: appHeader(app: app)) {
+                                    if let groups = appPermissions[app.id] {
+                                        ForEach(groups) { group in
+                                            Toggle(isOn: Binding(
+                                                get: { group.granted },
+                                                set: { newValue in
+                                                    togglePermission(appId: app.id, groupKey: group.key, granted: newValue)
+                                                }
+                                            )) {
+                                                VStack(alignment: .leading, spacing: 2) {
+                                                    HStack(spacing: 6) {
+                                                        Image(systemName: iconForGroup(group.key))
+                                                            .foregroundColor(.green)
+                                                            .frame(width: 20)
+                                                        Text(group.displayName)
+                                                            .font(.subheadline.bold())
+                                                            .foregroundColor(.white)
+                                                    }
+                                                    Text(group.description)
+                                                        .font(.caption2)
+                                                        .foregroundColor(.secondary)
+                                                }
+                                            }
+                                            .toggleStyle(SwitchToggleStyle(tint: .green))
+                                            .listRowBackground(Color(.systemGray6))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        .listStyle(InsetGroupedListStyle())
+                    }
+                }
+            }
+            .navigationBarHidden(true)
+            .onAppear(perform: loadData)
+        }
+    }
+    
+    private func appHeader(app: AppItem) -> some View {
+        HStack {
+            if let icon = app.iconImage {
+                Image(uiImage: icon)
+                    .resizable()
+                    .frame(width: 22, height: 22)
+                    .clipShape(RoundedRectangle(cornerRadius: 5))
+            } else {
+                Image(systemName: "cube.fill")
+                    .foregroundColor(.green)
+            }
+            Text(app.displayName)
+                .font(.headline)
+                .foregroundColor(.green)
+            Spacer()
+            Button("Grant All") {
+                grantAll(appId: app.id)
+            }
+            .font(.caption.bold())
+            .foregroundColor(.green)
+        }
+    }
+    
+    private func iconForGroup(_ key: String) -> String {
+        switch key {
+        case "storage": return "internaldrive.fill"
+        case "network": return "network"
+        case "camera": return "camera.fill"
+        case "microphone": return "mic.fill"
+        case "location": return "location.fill"
+        case "bluetooth": return "gamecontroller.fill"
+        default: return "checkmark.shield.fill"
+        }
+    }
+    
+    private func loadData() {
+        loadInstalledApps()
+        for app in installedApps {
+            loadPermissionsForApp(appId: app.id)
+        }
+    }
+    
+    private func loadInstalledApps() {
+        guard let url = androidRootAppsURL else { return }
+        do {
+            let contents = try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey])
+            var items: [AppItem] = []
+            for folder in contents.filter({ $0.hasDirectoryPath }) {
+                let folderName = folder.lastPathComponent
+                var displayName = folderName
+                var version = "1.0.0"
+                let infoURL = folder.appendingPathComponent("app_info.json")
+                if let infoData = try? Data(contentsOf: infoURL),
+                   let rawObj = try? JSONSerialization.jsonObject(with: infoData),
+                   let json = rawObj as? [String: Any] {
+                    if let label = json["label"] as? String, !label.isEmpty {
+                        displayName = label
+                    }
+                    if let ver = json["version"] as? String, !ver.isEmpty {
+                        version = ver
+                    }
+                }
+                var iconImg: UIImage? = nil
+                let iconURL = folder.appendingPathComponent("app_icon.png")
+                if FileManager.default.fileExists(atPath: iconURL.path) {
+                    iconImg = UIImage(contentsOfFile: iconURL.path)
+                }
+                items.append(AppItem(id: folderName, displayName: displayName, version: version, iconImage: iconImg))
+            }
+            installedApps = items.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+        } catch {
+            installedApps = []
+        }
+    }
+    
+    private func loadPermissionsForApp(appId: String) {
+        let defaultGroups = [
+            PermissionGroupItem(key: "storage", displayName: "Storage Access", description: "Read & write files, SD card (/sdcard/)", granted: kudroid_is_group_granted(appId, "storage") == 1),
+            PermissionGroupItem(key: "network", displayName: "Internet & Network", description: "Access Wi-Fi and mobile networks", granted: kudroid_is_group_granted(appId, "network") == 1),
+            PermissionGroupItem(key: "camera", displayName: "Camera", description: "Take pictures and record video", granted: kudroid_is_group_granted(appId, "camera") == 1),
+            PermissionGroupItem(key: "microphone", displayName: "Microphone & Audio", description: "Record voice and audio", granted: kudroid_is_group_granted(appId, "microphone") == 1),
+            PermissionGroupItem(key: "location", displayName: "Location", description: "Access GPS and location", granted: kudroid_is_group_granted(appId, "location") == 1),
+            PermissionGroupItem(key: "bluetooth", displayName: "Bluetooth & Gamepads", description: "Connect controllers and gamepads", granted: kudroid_is_group_granted(appId, "bluetooth") == 1)
+        ]
+        appPermissions[appId] = defaultGroups
+    }
+    
+    private func togglePermission(appId: String, groupKey: String, granted: Bool) {
+        kudroid_set_group_permission(appId, groupKey, granted ? 1 : 0)
+        if var list = appPermissions[appId] {
+            for i in 0..<list.count {
+                if list[i].key == groupKey {
+                    list[i].granted = granted
+                }
+            }
+            appPermissions[appId] = list
+        }
+    }
+    
+    private func grantAll(appId: String) {
+        kudroid_grant_all_permissions(appId)
+        loadPermissionsForApp(appId: appId)
+    }
+}
+
+// mark: - tab gỡ lỗi (DebugView rút gọn chỉ giữ KDB & Live Terminal Log)
 struct DebugView: View {
     @Binding var fullLog: String
     @Binding var jitStatus: String
@@ -317,9 +517,8 @@ struct DebugView: View {
     
     private var previewLog: String {
         let lines = fullLog.components(separatedBy: "\n")
-        if lines.count <= 25 { return fullLog }
-        return lines.prefix(25).joined(separator: "\n")
-            + "\n\n... (truncated — tap Copy to get full log)"
+        if lines.count <= 35 { return fullLog }
+        return lines.suffix(35).joined(separator: "\n")
     }
     
     var body: some View {
@@ -361,7 +560,7 @@ struct DebugView: View {
                     }
 
                     HStack {
-                        Text("Terminal Log")
+                        Text("Live Terminal Log")
                             .font(.headline)
                             .foregroundColor(.white)
                         Spacer()
@@ -387,39 +586,40 @@ struct DebugView: View {
                     .cornerRadius(12)
                     .padding(.horizontal)
                     
-                    // các nút
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
-                            Button("Copy Log") {
-                                UIPasteboard.general.string = fullLog
-                                showCopyAlert = true
+                    // Nút thao tác Log (Copy Log & Clear Log)
+                    HStack(spacing: 12) {
+                        Button(action: {
+                            UIPasteboard.general.string = fullLog
+                            showCopyAlert = true
+                        }) {
+                            HStack {
+                                Image(systemName: "doc.on.doc.fill")
+                                Text("Copy Log")
                             }
-                            .buttonStyle(.bordered)
-                            
-                            Button("Test JNI JVM") { fullLog = runJniJvmTest() }
-                                .buttonStyle(.bordered)
-                            
-                            Button("Test GPU Native") { fullLog = runGpuTest() }
-                                .buttonStyle(.bordered)
-                            Button("GPU Vulkan .so") { fullLog = runGpuVulkanSoTest() }
-                                .buttonStyle(.bordered)
-                            Button("GPU OpenGL .so") { fullLog = runGpuOpenglSoTest() }
-                                .buttonStyle(.bordered)
-                            Button("Syscall Traps .so") { fullLog = runSyscallSoTest() }
-                                .buttonStyle(.bordered)
-                            Button("JNI Massive 200+ .so") { fullLog = runJniMassiveTest() }
-                                .buttonStyle(.borderedProminent)
-                                .tint(.red)
-                            
-                            Button("Bionic Test") { fullLog = runBionicExecutionTest() }
-                                .buttonStyle(.bordered)
-                            Button("Multi-ELF") { fullLog = runMultiElfTest() }
-                                .buttonStyle(.bordered)
-                            Button("VFS Test") { fullLog = runVFSExtendedTest() }
-                                .buttonStyle(.bordered)
+                            .font(.subheadline.bold())
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(Color.green.opacity(0.2))
+                            .foregroundColor(.green)
+                            .cornerRadius(10)
                         }
-                        .padding(.horizontal)
+                        
+                        Button(action: {
+                            fullLog = "[kudroid_core] Log cleared."
+                        }) {
+                            HStack {
+                                Image(systemName: "trash.fill")
+                                Text("Clear Log")
+                            }
+                            .font(.subheadline.bold())
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(Color.red.opacity(0.2))
+                            .foregroundColor(.red)
+                            .cornerRadius(10)
+                        }
                     }
+                    .padding(.horizontal)
                     .padding(.bottom, 8)
                 }
             }

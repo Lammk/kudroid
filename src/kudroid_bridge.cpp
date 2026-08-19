@@ -6,6 +6,7 @@
 #include "kudroid/DexAotCache.h"
 #include "kudroid/platform/InputShim.h"
 #include "kudroid/platform/AssetShim.h"
+#include "kudroid/PermissionManager.h"
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
@@ -629,7 +630,10 @@ extern "C" void kudroid_set_log_dir(const char* dir) {
 }
 
 extern "C" void kudroid_set_documents_dir(const char* dir) {
-    if (dir) kudroid::VFSPathRemapper::getInstance().setDocumentsDirectory(dir);
+    if (dir) {
+        kudroid::VFSPathRemapper::getInstance().setDocumentsDirectory(dir);
+        kudroid::PermissionManager::getInstance().init(dir);
+    }
 }
 
 // con trỏ lớp metal toàn cục có thể truy cập bằng bionicshim

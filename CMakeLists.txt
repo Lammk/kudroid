@@ -52,6 +52,7 @@ add_library(kudroid_core STATIC
     src/DexCacheManager.cpp
     src/DexToJar.cpp
     src/DexAotCache.cpp
+    src/framework/PermissionManager.cpp
     src/debug/Log.cpp
 )
 
