@@ -1008,11 +1008,38 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                     auto jniOnLoads = manager.resolveAllSymbols("JNI_OnLoad");
                     if (!jniOnLoads.empty()) {
                         bionic_init_main_thread_tls();
-                        for (const auto& [libName, addr] : jniOnLoads) {
+
+                        // Sắp xếp ưu tiên: Thư viện chính (minecraftpe, main, game, unity, fmod) chạy trước, thư viện phụ chạy sau
+                        std::vector<std::pair<std::string, void*>> sortedLoads;
+                        auto isPriorityLib = [](const std::string& name) {
+                            std::string lower = name;
+                            for (char& c : lower) c = tolower(c);
+                            return lower.find("fmod") != std::string::npos ||
+                                   lower.find("minecraft") != std::string::npos ||
+                                   lower.find("main") != std::string::npos ||
+                                   lower.find("game") != std::string::npos ||
+                                   lower.find("unity") != std::string::npos;
+                        };
+
+                        for (const auto& item : jniOnLoads) {
+                            if (isPriorityLib(item.first)) sortedLoads.insert(sortedLoads.begin(), item);
+                            else sortedLoads.push_back(item);
+                        }
+
+                        for (const auto& [libName, addr] : sortedLoads) {
                             auto jni_onload = reinterpret_cast<jint (*)(JavaVM*, void*)>(addr);
                             appendAndEcho("[kudroid_core] Invoking JNI_OnLoad in " + libName);
+                            
+                            JNIEnv* env = nullptr;
+                            jvm->GetEnv((void**)&env, 0x00010006 /* JNI_VERSION_1_6 */);
+                            
                             jint version = jni_onload(jvm, nullptr);
                             appendAndEcho("[kudroid_core] JNI_OnLoad(" + libName + ") returned version: " + std::to_string(version));
+                            
+                            if (env && env->ExceptionCheck()) {
+                                appendAndEcho("[kudroid_core] Cleared pending Java exception from JNI_OnLoad in " + libName);
+                                env->ExceptionClear();
+                            }
                         }
                     } else {
                         appendAndEcho("[kudroid_core] JNI_OnLoad not found in any library.");
