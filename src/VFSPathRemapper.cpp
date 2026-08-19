@@ -57,7 +57,8 @@ bool VFSPathRemapper::initialize() {
     // tạo các thư mục cơ sở (bố cục giống android).
     for (const auto& relative : {
         "data/data", "data/app", "data/local/tmp", "data/cache",
-        "sdcard/Download", "sdcard/Android/data", "sdcard/Android/obb",
+        "sdcard/Download", "sdcard/Documents", "sdcard/Pictures", "sdcard/DCIM",
+        "sdcard/Music", "sdcard/Movies", "sdcard/Android/data", "sdcard/Android/obb", "sdcard/Android/media",
         "system", "proc/self", "sys", "mnt", "storage/emulated", "dev",
         "etc", "system/etc", "system/etc/security/cacerts", "system/etc/permissions"
     }) {
@@ -79,6 +80,7 @@ bool VFSPathRemapper::initialize() {
     
     make_symlink("../sdcard", "mnt/sdcard");
     make_symlink("../../sdcard", "storage/emulated/0");
+    make_symlink("../../sdcard", "storage/self/primary");
     std::filesystem::remove(std::filesystem::path(androidRoot_) / "etc", error);
     make_symlink("system/etc", "etc");
     make_symlink("/dev/fd", "proc/self/fd");
@@ -98,6 +100,20 @@ bool VFSPathRemapper::init_pseudo_files() {
         {"sys/devices/system/cpu/possible", "0-7\n"},
         {"sys/devices/system/cpu/present", "0-7\n"},
         {"sys/devices/system/cpu/online", "0-7\n"},
+        {"sys/devices/system/cpu/kernel_max", "7\n"},
+        {"sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq", "3200000\n"},
+        {"sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq", "800000\n"},
+        {"sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq", "2400000\n"},
+        {"sys/devices/system/cpu/cpu0/online", "1\n"},
+        {"sys/devices/system/cpu/cpu1/online", "1\n"},
+        {"sys/devices/system/cpu/cpu2/online", "1\n"},
+        {"sys/devices/system/cpu/cpu3/online", "1\n"},
+        {"sys/devices/system/cpu/cpu4/online", "1\n"},
+        {"sys/devices/system/cpu/cpu5/online", "1\n"},
+        {"sys/devices/system/cpu/cpu6/online", "1\n"},
+        {"sys/devices/system/cpu/cpu7/online", "1\n"},
+        {"proc/stat", "cpu  1000 0 1000 50000 0 0 0 0 0 0\ncpu0 125 0 125 6250 0 0 0 0 0 0\ncpu1 125 0 125 6250 0 0 0 0 0 0\ncpu2 125 0 125 6250 0 0 0 0 0 0\ncpu3 125 0 125 6250 0 0 0 0 0 0\ncpu4 125 0 125 6250 0 0 0 0 0 0\ncpu5 125 0 125 6250 0 0 0 0 0 0\ncpu6 125 0 125 6250 0 0 0 0 0 0\ncpu7 125 0 125 6250 0 0 0 0 0 0\nintr 0\nctxt 1000\nbtime 1700000000\nprocesses 100\nprocs_running 1\nprocs_blocked 0\n"},
+        {"proc/mounts", "rootfs / rootfs rw 0 0\n/dev/block/bootdevice/by-name/system /system ext4 ro,seclabel,nodev,relatime 0 0\n/dev/block/bootdevice/by-name/userdata /data ext4 rw,seclabel,nosuid,nodev,noatime 0 0\n/data/media /sdcard fuse rw,nosuid,nodev,noexec,relatime 0 0\n/data/media /storage/emulated/0 fuse rw,nosuid,nodev,noexec,relatime 0 0\ntmpfs /dev tmpfs rw,seclabel,nosuid,relatime,mode=755 0 0\ndevpts /dev/pts devpts rw,seclabel,relatime,mode=600 0 0\nproc /proc proc rw,relatime 0 0\nsysfs /sys sysfs rw,seclabel,relatime 0 0\n"},
         {"sys/class/power_supply/battery/capacity", "100\n"},
         {"sys/class/power_supply/battery/status", "Charging\n"},
         {"sys/class/thermal/thermal_zone0/temp", "35000\n"},
@@ -106,17 +122,26 @@ bool VFSPathRemapper::init_pseudo_files() {
         {"system/etc/resolv.conf", "nameserver 8.8.8.8\nnameserver 8.8.4.4\n"},
         {"system/etc/permissions/handheld_core_hardware.xml", "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<permissions>\n    <feature name=\"android.hardware.camera\" />\n    <feature name=\"android.hardware.location\" />\n    <feature name=\"android.hardware.sensor.accelerometer\" />\n    <feature name=\"android.hardware.sensor.compass\" />\n</permissions>\n"}
     };
-    for (const auto& file : files) {
-        const std::filesystem::path path = std::filesystem::path(root) / file.first;
+
+    for (const auto& [relativePath, content] : files) {
+        std::string path = root + "/" + relativePath;
+        std::filesystem::path parent = std::filesystem::path(path).parent_path();
+        std::error_code ec;
+        std::filesystem::create_directories(parent, ec);
+
         std::string current;
-        if (std::ifstream input(path, std::ios::binary); input) {
-            current.assign((std::istreambuf_iterator<char>(input)),
-                           std::istreambuf_iterator<char>());
+        std::ifstream input(path, std::ios::binary);
+        if (input) {
+            std::stringstream buffer;
+            buffer << input.rdbuf();
+            current = buffer.str();
         }
-        const std::string required(file.second);
+        input.close();
+
         if (current.empty()) {
-            current = required;
-        } else {
+            current = content;
+        } else if (std::string(relativePath) == "proc/mounts") {
+            std::string required = content;
             std::istringstream existing(current);
             std::string line;
             std::vector<std::string> lines;
@@ -158,24 +183,36 @@ std::string VFSPathRemapper::remap(const char* originalPath) const {
         return std::string(original);
     }
 
+    auto matches = [](std::string_view path, std::string_view prefix) -> bool {
+        if (path == prefix) return true;
+        if (path.size() > prefix.size() && path.find(prefix) == 0 && path[prefix.size()] == '/') return true;
+        return false;
+    };
+
     std::string_view prefix;
     std::string_view rootName;
-    if (original.find("/data/data/") == 0) { prefix = "/data/data/"; rootName = "data/data/"; }
-    else if (original.find("/data/user/0/") == 0) { prefix = "/data/user/0/"; rootName = "data/data/"; }
-    else if (original.find("/data/user_de/0/") == 0) { prefix = "/data/user_de/0/"; rootName = "data/data/"; }
-    else if (original.find("/sdcard/") == 0) { prefix = "/sdcard/"; rootName = "sdcard/"; }
-    else if (original.find("/storage/emulated/0/") == 0) { prefix = "/storage/emulated/0/"; rootName = "sdcard/"; }
-    else if (original.find("/mnt/sdcard/") == 0) { prefix = "/mnt/sdcard/"; rootName = "sdcard/"; }
-    else if (original.find("/storage/") == 0) { prefix = "/storage/"; rootName = "sdcard/"; }
-    else if (original.find("/system/") == 0) { prefix = "/system/"; rootName = "system/"; }
-    else if (original.find("/etc/") == 0) { prefix = "/etc/"; rootName = "etc/"; }
-    else if (original.find("/proc/self/") == 0) { prefix = "/proc/self/"; rootName = "proc/self/"; }
-    else if (original.find("/proc/") == 0) { prefix = "/proc/"; rootName = "proc/"; }
-    else if (original.find("/sys/") == 0) { prefix = "/sys/"; rootName = "sys/"; }
-    else if (original.find("/data/app/") == 0) { prefix = "/data/app/"; rootName = "data/app/"; }
-    else if (original.find("/data/local/tmp/") == 0) { prefix = "/data/local/tmp/"; rootName = "data/local/tmp/"; }
-    else if (original.find("/cache/") == 0) { prefix = "/cache/"; rootName = "data/cache/"; }
-    else if (original.find("/dev/") == 0) { prefix = "/dev/"; rootName = "dev/"; }
+
+    if (matches(original, "/data/data")) { prefix = "/data/data"; rootName = "data/data"; }
+    else if (matches(original, "/data/user/0")) { prefix = "/data/user/0"; rootName = "data/data"; }
+    else if (matches(original, "/data/user_de/0")) { prefix = "/data/user_de/0"; rootName = "data/data"; }
+    else if (matches(original, "/data/local/tmp")) { prefix = "/data/local/tmp"; rootName = "data/local/tmp"; }
+    else if (matches(original, "/data/app")) { prefix = "/data/app"; rootName = "data/app"; }
+    else if (matches(original, "/data/cache")) { prefix = "/data/cache"; rootName = "data/cache"; }
+    else if (matches(original, "/data")) { prefix = "/data"; rootName = "data"; }
+    else if (matches(original, "/storage/emulated/0")) { prefix = "/storage/emulated/0"; rootName = "sdcard"; }
+    else if (matches(original, "/storage/emulated")) { prefix = "/storage/emulated"; rootName = "storage/emulated"; }
+    else if (matches(original, "/storage/self/primary")) { prefix = "/storage/self/primary"; rootName = "sdcard"; }
+    else if (matches(original, "/storage")) { prefix = "/storage"; rootName = "storage"; }
+    else if (matches(original, "/sdcard")) { prefix = "/sdcard"; rootName = "sdcard"; }
+    else if (matches(original, "/mnt/sdcard")) { prefix = "/mnt/sdcard"; rootName = "sdcard"; }
+    else if (matches(original, "/mnt")) { prefix = "/mnt"; rootName = "mnt"; }
+    else if (matches(original, "/system")) { prefix = "/system"; rootName = "system"; }
+    else if (matches(original, "/etc")) { prefix = "/etc"; rootName = "etc"; }
+    else if (matches(original, "/proc/self")) { prefix = "/proc/self"; rootName = "proc/self"; }
+    else if (matches(original, "/proc")) { prefix = "/proc"; rootName = "proc"; }
+    else if (matches(original, "/sys")) { prefix = "/sys"; rootName = "sys"; }
+    else if (matches(original, "/cache")) { prefix = "/cache"; rootName = "data/cache"; }
+    else if (matches(original, "/dev")) { prefix = "/dev"; rootName = "dev"; }
     else {
         if (!original.empty() && original[0] != '/') {
             std::string mapped = androidRoot_ + "/data/local/tmp/" + std::string(original);
@@ -185,7 +222,15 @@ std::string VFSPathRemapper::remap(const char* originalPath) const {
         return std::string(original);
     }
 
-    std::string mapped = androidRoot_ + "/" + std::string(rootName) + std::string(original.substr(prefix.size()));
+    std::string remainder = "";
+    if (original.size() > prefix.size()) {
+        remainder = std::string(original.substr(prefix.size()));
+        if (!remainder.empty() && remainder[0] != '/') {
+            remainder = "/" + remainder;
+        }
+    }
+
+    std::string mapped = androidRoot_ + "/" + std::string(rootName) + remainder;
     vfsTrace("Remapped: " + std::string(original) + " -> " + mapped);
     return mapped;
 }
