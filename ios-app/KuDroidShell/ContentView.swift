@@ -215,15 +215,27 @@ struct AppsView: View {
             let contents = try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey])
             var items: [AppItem] = []
             for folder in contents.filter({ $0.hasDirectoryPath }) {
-                let folderName = folder.lastPathComponent
+                var folderName = folder.lastPathComponent
+                var currentFolderURL = folder
+                
+                // Đọc app_info.json nếu có
+                var infoURL = currentFolderURL.appendingPathComponent("app_info.json")
                 var displayName = prettifyAppName(folderName)
                 var version = extractVersionFromFolderName(folderName) ?? "1.0.0"
                 
-                // Đọc app_info.json nếu có
-                let infoURL = folder.appendingPathComponent("app_info.json")
                 if let infoData = try? Data(contentsOf: infoURL),
                    let rawObj = try? JSONSerialization.jsonObject(with: infoData),
                    let json = rawObj as? [String: Any] {
+                    // Tự động chuẩn hóa tên thư mục về đúng Package ID thật của Android (loại bỏ _1.0.10)
+                    if let realPkg = json["package"] as? String, !realPkg.isEmpty && realPkg != folderName {
+                        let targetURL = url.appendingPathComponent(realPkg, isDirectory: true)
+                        if !FileManager.default.fileExists(atPath: targetURL.path) {
+                            try? FileManager.default.moveItem(at: currentFolderURL, to: targetURL)
+                            folderName = realPkg
+                            currentFolderURL = targetURL
+                            infoURL = currentFolderURL.appendingPathComponent("app_info.json")
+                        }
+                    }
                     if let label = json["label"] as? String, !label.isEmpty {
                         displayName = prettifyAppName(label)
                     }
@@ -234,7 +246,7 @@ struct AppsView: View {
                 
                 // Đọc app_icon.png nếu có
                 var iconImg: UIImage? = nil
-                let iconURL = folder.appendingPathComponent("app_icon.png")
+                let iconURL = currentFolderURL.appendingPathComponent("app_icon.png")
                 if FileManager.default.fileExists(atPath: iconURL.path) {
                     iconImg = UIImage(contentsOfFile: iconURL.path)
                 }

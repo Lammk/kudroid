@@ -941,13 +941,49 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
         log += "[kudroid_core] ERROR: null or empty app name\n";
     } else {
         auto& remapper = kudroid::VFSPathRemapper::getInstance();
-        const std::filesystem::path libDir = std::filesystem::path(remapper.androidRoot()) /
-                                             "data/app" / appName / "lib/arm64-v8a";
-        // Cho AAssetManager shim biết nơi chứa assets đã extract (APKExtractor giữ
-        // nguyên cây thư mục assets/ của APK). Game gọi AAssetManager_open với
-        // đường dẫn tương đối — nếu thiếu, mọi truy cập asset trả NULL.
-        const std::filesystem::path assetsDir = std::filesystem::path(remapper.androidRoot()) /
-                                                "data/app" / appName / "assets";
+        std::string resolvedAppName = appName;
+        std::filesystem::path appDir = std::filesystem::path(remapper.androidRoot()) / "data/app" / resolvedAppName;
+
+        // Nếu thư mục mang tên phiên bản (_1.0.10) tồn tại, kiểm tra xem có app_info.json chứa package ID chuẩn không
+        if (std::filesystem::exists(appDir)) {
+            std::filesystem::path infoPath = appDir / "app_info.json";
+            if (std::filesystem::exists(infoPath)) {
+                std::ifstream f(infoPath);
+                std::string line;
+                while (std::getline(f, line)) {
+                    auto pos = line.find("\"package\": \"");
+                    if (pos != std::string::npos) {
+                        auto start = pos + 12;
+                        auto end = line.find("\"", start);
+                        if (end != std::string::npos) {
+                            std::string pkg = line.substr(start, end - start);
+                            if (!pkg.empty() && pkg != resolvedAppName) {
+                                std::filesystem::path cleanTarget = std::filesystem::path(remapper.androidRoot()) / "data/app" / pkg;
+                                std::error_code ec;
+                                std::filesystem::rename(appDir, cleanTarget, ec);
+                                if (!ec) {
+                                    resolvedAppName = pkg;
+                                    appDir = cleanTarget;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            auto uIdx = resolvedAppName.find('_');
+            if (uIdx != std::string::npos) {
+                std::string base = resolvedAppName.substr(0, uIdx);
+                std::filesystem::path baseDir = std::filesystem::path(remapper.androidRoot()) / "data/app" / base;
+                if (std::filesystem::exists(baseDir)) {
+                    resolvedAppName = base;
+                    appDir = baseDir;
+                }
+            }
+        }
+
+        const std::filesystem::path libDir = appDir / "lib/arm64-v8a";
+        const std::filesystem::path assetsDir = appDir / "assets";
         kudroid_set_assets_dir(assetsDir.string().c_str());
         
         auto appendAndEcho = [&](const std::string& line) {
@@ -990,8 +1026,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                     appendAndEcho(mapLine);
                 }
 
-                const std::filesystem::path appDir = std::filesystem::path(remapper.androidRoot()) / "data/app" / appName;
-                const std::filesystem::path aotCacheDir = std::filesystem::path(remapper.androidRoot()) / "data/dalvik-cache" / appName;
+                const std::filesystem::path aotCacheDir = std::filesystem::path(remapper.androidRoot()) / "data/dalvik-cache" / resolvedAppName;
                 std::string aotError;
                 const std::string classesJar = kudroid::DexAotCache::translate_dex_if_needed(appDir.string(), aotCacheDir.string(), &aotError);
 
@@ -1065,14 +1100,14 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                         static std::string s_internalDataPath;
                         static std::string s_externalDataPath;
                         static std::string s_obbPath;
-                        s_internalDataPath = "/data/data/" + std::string(appName);
-                        s_externalDataPath = "/sdcard/Android/data/" + std::string(appName);
-                        s_obbPath = "/sdcard/Android/obb/" + std::string(appName);
+                        s_internalDataPath = "/data/data/" + resolvedAppName;
+                        s_externalDataPath = "/sdcard/Android/data/" + resolvedAppName;
+                        s_obbPath = "/sdcard/Android/obb/" + resolvedAppName;
 
                         std::error_code vfsEc;
-                        std::filesystem::create_directories(std::filesystem::path(remapper.androidRoot()) / "data/data" / appName, vfsEc);
-                        std::filesystem::create_directories(std::filesystem::path(remapper.androidRoot()) / "sdcard/Android/data" / appName, vfsEc);
-                        std::filesystem::create_directories(std::filesystem::path(remapper.androidRoot()) / "sdcard/Android/obb" / appName, vfsEc);
+                        std::filesystem::create_directories(std::filesystem::path(remapper.androidRoot()) / "data/data" / resolvedAppName, vfsEc);
+                        std::filesystem::create_directories(std::filesystem::path(remapper.androidRoot()) / "sdcard/Android/data" / resolvedAppName, vfsEc);
+                        std::filesystem::create_directories(std::filesystem::path(remapper.androidRoot()) / "sdcard/Android/obb" / resolvedAppName, vfsEc);
 
                         static ANativeActivityCallbacks mock_callbacks = {};
                         static ANativeActivity mock_activity = {
