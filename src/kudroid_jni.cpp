@@ -185,6 +185,8 @@ static jlong JNICALL kudroid_shim_GetDirectBufferCapacity(JNIEnv* env, jobject b
 
 static void patch_jnienv_vtable(JNIEnv* env) {
     if (!env || !env->functions) return;
+    if (env->functions == &g_interposedJniFunctions) return;
+
     if (!g_interposedFunctionsInitialized) {
         g_interposedJniFunctions = *(env->functions);
         g_interposedJniFunctions.NewDirectByteBuffer = kudroid_shim_NewDirectByteBuffer;
@@ -197,10 +199,12 @@ static void patch_jnienv_vtable(JNIEnv* env) {
 
 static struct JNIInvokeInterface_ g_interposedVmFunctions;
 static bool g_interposedVmInitialized = false;
+static jint (*g_origAttachCurrentThread)(JavaVM*, void**, void*) = nullptr;
+static jint (*g_origGetEnv)(JavaVM*, void**, jint) = nullptr;
 
 static jint JNICALL kudroid_shim_AttachCurrentThread(JavaVM* vm, void** penv, void* args) {
-    if (!vm) return JNI_ERR;
-    jint res = g_interposedVmFunctions.AttachCurrentThread(vm, penv, args);
+    if (!vm || !g_origAttachCurrentThread) return JNI_ERR;
+    jint res = g_origAttachCurrentThread(vm, penv, args);
     if (res == JNI_OK && penv && *penv) {
         patch_jnienv_vtable(static_cast<JNIEnv*>(*penv));
     }
@@ -208,8 +212,8 @@ static jint JNICALL kudroid_shim_AttachCurrentThread(JavaVM* vm, void** penv, vo
 }
 
 static jint JNICALL kudroid_shim_GetEnv(JavaVM* vm, void** penv, jint version) {
-    if (!vm) return JNI_ERR;
-    jint res = g_interposedVmFunctions.GetEnv(vm, penv, version);
+    if (!vm || !g_origGetEnv) return JNI_ERR;
+    jint res = g_origGetEnv(vm, penv, version);
     if (res == JNI_OK && penv && *penv) {
         patch_jnienv_vtable(static_cast<JNIEnv*>(*penv));
     }
@@ -218,7 +222,12 @@ static jint JNICALL kudroid_shim_GetEnv(JavaVM* vm, void** penv, jint version) {
 
 static void patch_javavm_vtable(JavaVM* vm) {
     if (!vm || !vm->functions) return;
+    if (vm->functions == &g_interposedVmFunctions) return;
+
     if (!g_interposedVmInitialized) {
+        g_origAttachCurrentThread = vm->functions->AttachCurrentThread;
+        g_origGetEnv = vm->functions->GetEnv;
+
         g_interposedVmFunctions = *(vm->functions);
         g_interposedVmFunctions.AttachCurrentThread = kudroid_shim_AttachCurrentThread;
         g_interposedVmFunctions.GetEnv = kudroid_shim_GetEnv;
