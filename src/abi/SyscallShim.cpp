@@ -4,6 +4,7 @@
 #include "kudroid/platform/InputShim.h"
 #include "kudroid/platform/AudioShim.h"
 #include "kudroid/VFSPathRemapper.h"
+#include <filesystem>
 
 #include <cmath>
 #include <ctime>
@@ -685,10 +686,48 @@ extern "C" int bionic_uname(struct bionic_utsname* buf) {
     return 0;
 }
 
+static int translate_linux_open_flags(int flags) {
+#if defined(__APPLE__)
+    int host_flags = 0;
+    int acc = flags & 3;
+    if (acc == 0) host_flags |= O_RDONLY;
+    else if (acc == 1) host_flags |= O_WRONLY;
+    else if (acc == 2) host_flags |= O_RDWR;
+
+    if (flags & 0x40) host_flags |= O_CREAT;
+    if (flags & 0x80) host_flags |= O_EXCL;
+    if (flags & 0x100) host_flags |= O_NOCTTY;
+    if (flags & 0x200) host_flags |= O_TRUNC;
+    if (flags & 0x400) host_flags |= O_APPEND;
+    if (flags & 0x800) host_flags |= O_NONBLOCK;
+#if defined(O_CLOEXEC)
+    if (flags & 0x80000) host_flags |= O_CLOEXEC;
+#endif
+    return host_flags;
+#else
+    return flags;
+#endif
+}
+
+static int translate_linux_dirfd(int dirfd) {
+#if defined(__APPLE__)
+    if (dirfd == -100) { // Linux AT_FDCWD
+        return AT_FDCWD; // Darwin AT_FDCWD (-2)
+    }
+#endif
+    return dirfd;
+}
+
 extern "C" int bionic_openat(int dirfd, const char* pathname, int flags, mode_t mode) {
     if (!pathname) return -1;
     const std::string remapped = kudroid::VFSPathRemapper::getInstance().remap(pathname);
-    return ::openat(dirfd, remapped.c_str(), flags, mode);
+    const int host_dirfd = translate_linux_dirfd(dirfd);
+    const int host_flags = translate_linux_open_flags(flags);
+    if (host_flags & O_CREAT) {
+        std::error_code ec;
+        std::filesystem::create_directories(std::filesystem::path(remapped).parent_path(), ec);
+    }
+    return ::openat(host_dirfd, remapped.c_str(), host_flags, mode);
 }
 
 struct bionic_stat64 {
@@ -719,9 +758,10 @@ extern "C" int bionic_newfstatat(int dirfd, const char* pathname, struct bionic_
     struct stat host_st;
     memset(&host_st, 0, sizeof(host_st));
     int res = 0;
+    const int host_dirfd = translate_linux_dirfd(dirfd);
     if (pathname && *pathname) {
         const std::string remapped = kudroid::VFSPathRemapper::getInstance().remap(pathname);
-        res = ::fstatat(dirfd, remapped.c_str(), &host_st, flags);
+        res = ::fstatat(host_dirfd, remapped.c_str(), &host_st, flags);
     } else {
         res = ::fstat(dirfd, &host_st);
     }
@@ -1300,13 +1340,15 @@ extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_
             const char* path = reinterpret_cast<const char*>(a2);
             if (!path) return -1;
             const std::string remapped = kudroid::VFSPathRemapper::getInstance().remap(path);
-            return ::mkdirat(static_cast<int>(a1), remapped.c_str(), static_cast<mode_t>(a3));
+            const int host_dirfd = translate_linux_dirfd(static_cast<int>(a1));
+            return ::mkdirat(host_dirfd, remapped.c_str(), static_cast<mode_t>(a3));
         }
         case 35: { // unlinkat
             const char* path = reinterpret_cast<const char*>(a2);
             if (!path) return -1;
             const std::string remapped = kudroid::VFSPathRemapper::getInstance().remap(path);
-            return ::unlinkat(static_cast<int>(a1), remapped.c_str(), static_cast<int>(a3));
+            const int host_dirfd = translate_linux_dirfd(static_cast<int>(a1));
+            return ::unlinkat(host_dirfd, remapped.c_str(), static_cast<int>(a3));
         }
         case 46: // ftruncate
             return ::ftruncate(static_cast<int>(a1), static_cast<off_t>(a2));
