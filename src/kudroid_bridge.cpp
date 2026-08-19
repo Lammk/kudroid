@@ -7,6 +7,7 @@
 #include "kudroid/platform/InputShim.h"
 #include "kudroid/platform/AssetShim.h"
 #include "kudroid/PermissionManager.h"
+#include "kudroid/kudroid_jni.h"
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
@@ -49,6 +50,7 @@ static volatile sig_atomic_t g_crashLen = 0;
 static std::mutex g_crashBufMtx;
 static char g_abortMessage[1024] = {0};
 static int kudroid_jit_available(void);
+extern "C" void kudroid_launch_java_activity(JavaVM* vm, const char* activityName);
 
 // Gentle crash variables:
 static std::atomic<bool> g_hasCrashed{false};
@@ -1009,56 +1011,55 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                     snprintf(jvmLine, sizeof(jvmLine), "[kudroid_core] Avian JVM ready (JavaVM=%p).", (void*)jvm);
                     appendAndEcho(jvmLine);
 
-                    auto jniOnLoads = manager.resolveAllSymbols("JNI_OnLoad");
-                    if (!jniOnLoads.empty()) {
-                        bionic_init_main_thread_tls();
-
-                        // Sắp xếp ưu tiên: Thư viện chính (minecraftpe, main, game, unity, fmod) chạy trước, thư viện phụ chạy sau
-                        std::vector<std::pair<std::string, void*>> sortedLoads;
-                        auto isPriorityLib = [](const std::string& name) {
-                            std::string lower = name;
-                            for (char& c : lower) c = tolower(c);
-                            return lower.find("fmod") != std::string::npos ||
-                                   lower.find("minecraft") != std::string::npos ||
-                                   lower.find("main") != std::string::npos ||
-                                   lower.find("game") != std::string::npos ||
-                                   lower.find("unity") != std::string::npos;
-                        };
-
-                        for (const auto& item : jniOnLoads) {
-                            if (isPriorityLib(item.first)) sortedLoads.insert(sortedLoads.begin(), item);
-                            else sortedLoads.push_back(item);
-                        }
-
-                        for (const auto& [libName, addr] : sortedLoads) {
-                            auto jni_onload = reinterpret_cast<jint (*)(JavaVM*, void*)>(addr);
-                            appendAndEcho("[kudroid_core] Invoking JNI_OnLoad in " + libName);
-                            
-                            JNIEnv* env = nullptr;
-                            if (jvm->GetEnv((void**)&env, 0x00010006 /* JNI_VERSION_1_6 */) == JNI_OK && env) {
-                                if (env->ExceptionCheck()) env->ExceptionClear();
-                            }
-                            
-                            try {
-                                jint version = jni_onload(jvm, nullptr);
-                                appendAndEcho("[kudroid_core] JNI_OnLoad(" + libName + ") returned version: " + std::to_string(version));
-                            } catch (...) {
-                                appendAndEcho("[kudroid_core] WARNING: Native exception caught while running JNI_OnLoad in " + libName);
-                            }
-                            
-                            if (env && env->ExceptionCheck()) {
-                                appendAndEcho("[kudroid_core] Cleared pending Java exception from JNI_OnLoad in " + libName);
-                                env->ExceptionClear();
-                            }
-                        }
-                    } else {
-                        appendAndEcho("[kudroid_core] JNI_OnLoad not found in any library.");
-                    }
-
                     auto native_activity_create = reinterpret_cast<void (*)(ANativeActivity*, void*, size_t)>(
                         manager.resolveAppSymbol("ANativeActivity_onCreate")
                     );
                     if (native_activity_create) {
+                        appendAndEcho("[kudroid_core] Native Game Activity detected.");
+                        
+                        auto jniOnLoads = manager.resolveAllSymbols("JNI_OnLoad");
+                        if (!jniOnLoads.empty()) {
+                            bionic_init_main_thread_tls();
+
+                            std::vector<std::pair<std::string, void*>> sortedLoads;
+                            auto isPriorityLib = [](const std::string& name) {
+                                std::string lower = name;
+                                for (char& c : lower) c = tolower(c);
+                                return lower.find("fmod") != std::string::npos ||
+                                       lower.find("minecraft") != std::string::npos ||
+                                       lower.find("main") != std::string::npos ||
+                                       lower.find("game") != std::string::npos ||
+                                       lower.find("unity") != std::string::npos;
+                            };
+
+                            for (const auto& item : jniOnLoads) {
+                                if (isPriorityLib(item.first)) sortedLoads.insert(sortedLoads.begin(), item);
+                                else sortedLoads.push_back(item);
+                            }
+
+                            for (const auto& [libName, addr] : sortedLoads) {
+                                auto jni_onload = reinterpret_cast<jint (*)(JavaVM*, void*)>(addr);
+                                appendAndEcho("[kudroid_core] Invoking JNI_OnLoad in " + libName);
+                                
+                                JNIEnv* env = nullptr;
+                                if (jvm->GetEnv((void**)&env, 0x00010006 /* JNI_VERSION_1_6 */) == JNI_OK && env) {
+                                    if (env->ExceptionCheck()) env->ExceptionClear();
+                                }
+                                
+                                try {
+                                    jint version = jni_onload(jvm, nullptr);
+                                    appendAndEcho("[kudroid_core] JNI_OnLoad(" + libName + ") returned version: " + std::to_string(version));
+                                } catch (...) {
+                                    appendAndEcho("[kudroid_core] WARNING: Native exception caught while running JNI_OnLoad in " + libName);
+                                }
+                                
+                                if (env && env->ExceptionCheck()) {
+                                    appendAndEcho("[kudroid_core] Cleared pending Java exception from JNI_OnLoad in " + libName);
+                                    env->ExceptionClear();
+                                }
+                            }
+                        }
+
                         appendAndEcho("[kudroid_core] Found ANativeActivity_onCreate, invoking...");
 
                         static std::string s_internalDataPath;
@@ -1130,7 +1131,9 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                         call2("onInputQueueCreated", mock_callbacks.onInputQueueCreated, kudroid_get_input_queue());
                         appendAndEcho("[kudroid_core] Lifecycle callbacks invoked successfully!");
                     } else {
-                        appendAndEcho("[kudroid_core] ANativeActivity_onCreate not found.");
+                        appendAndEcho("[kudroid_core] Java APK Application detected (No ANativeActivity_onCreate).");
+                        appendAndEcho("[kudroid_core] Launching Android ActivityThread runtime...");
+                        kudroid_launch_java_activity(jvm, appName);
                     }
                 }
             }
