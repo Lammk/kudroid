@@ -323,10 +323,22 @@ struct PermissionGroupItem: Identifiable {
 struct PermissionsView: View {
     @State private var installedApps: [AppItem] = []
     @State private var appPermissions: [String: [PermissionGroupItem]] = [:]
+    @State private var expandedAppIds: Set<String> = []
+    @State private var searchText: String = ""
     
     private var androidRootAppsURL: URL? {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
             .appendingPathComponent("android_root/data/app", isDirectory: true)
+    }
+
+    private var filteredApps: [AppItem] {
+        if searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return installedApps
+        }
+        return installedApps.filter {
+            $0.displayName.localizedCaseInsensitiveContains(searchText) ||
+            $0.id.localizedCaseInsensitiveContains(searchText)
+        }
     }
 
     var body: some View {
@@ -335,6 +347,7 @@ struct PermissionsView: View {
                 Color.black.ignoresSafeArea()
                 
                 VStack(spacing: 0) {
+                    // Tiêu đề
                     HStack {
                         Image(systemName: "lock.shield.fill")
                             .font(.title)
@@ -343,7 +356,32 @@ struct PermissionsView: View {
                             .font(.title2.bold())
                         Spacer()
                     }
-                    .padding()
+                    .padding(.horizontal)
+                    .padding(.top, 12)
+                    .padding(.bottom, 8)
+                    
+                    // Thanh tìm kiếm
+                    HStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundColor(.secondary)
+                        TextField("Search installed apps...", text: $searchText)
+                            .font(.subheadline)
+                            .foregroundColor(.white)
+                            .autocapitalization(.none)
+                            .disableAutocorrection(true)
+                        
+                        if !searchText.isEmpty {
+                            Button(action: { searchText = "" }) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                    .padding(10)
+                    .background(Color(.systemGray6))
+                    .cornerRadius(10)
+                    .padding(.horizontal)
+                    .padding(.bottom, 8)
                     
                     if installedApps.isEmpty {
                         VStack(spacing: 16) {
@@ -360,40 +398,27 @@ struct PermissionsView: View {
                                 .padding(.horizontal)
                             Spacer()
                         }
+                    } else if filteredApps.isEmpty {
+                        VStack(spacing: 12) {
+                            Spacer()
+                            Image(systemName: "magnifyingglass")
+                                .font(.system(size: 48))
+                                .foregroundColor(.secondary)
+                            Text("No matching apps found")
+                                .font(.headline)
+                                .foregroundColor(.secondary)
+                            Spacer()
+                        }
                     } else {
-                        List {
-                            ForEach(installedApps) { app in
-                                Section(header: appHeader(app: app)) {
-                                    if let groups = appPermissions[app.id] {
-                                        ForEach(groups) { group in
-                                            Toggle(isOn: Binding(
-                                                get: { group.granted },
-                                                set: { newValue in
-                                                    togglePermission(appId: app.id, groupKey: group.key, granted: newValue)
-                                                }
-                                            )) {
-                                                VStack(alignment: .leading, spacing: 2) {
-                                                    HStack(spacing: 6) {
-                                                        Image(systemName: iconForGroup(group.key))
-                                                            .foregroundColor(.green)
-                                                            .frame(width: 20)
-                                                        Text(group.displayName)
-                                                            .font(.subheadline.bold())
-                                                            .foregroundColor(.white)
-                                                    }
-                                                    Text(group.description)
-                                                        .font(.caption2)
-                                                        .foregroundColor(.secondary)
-                                                }
-                                            }
-                                            .toggleStyle(SwitchToggleStyle(tint: .green))
-                                            .listRowBackground(Color(.systemGray6))
-                                        }
-                                    }
+                        ScrollView {
+                            LazyVStack(spacing: 10) {
+                                ForEach(filteredApps) { app in
+                                    appPermissionCard(app: app)
                                 }
                             }
+                            .padding(.horizontal)
+                            .padding(.bottom, 20)
                         }
-                        .listStyle(InsetGroupedListStyle())
                     }
                 }
             }
@@ -402,27 +427,147 @@ struct PermissionsView: View {
         }
     }
     
-    private func appHeader(app: AppItem) -> some View {
-        HStack {
-            if let icon = app.iconImage {
-                Image(uiImage: icon)
-                    .resizable()
-                    .frame(width: 22, height: 22)
-                    .clipShape(RoundedRectangle(cornerRadius: 5))
-            } else {
-                Image(systemName: "cube.fill")
-                    .foregroundColor(.green)
+    private func appPermissionCard(app: AppItem) -> some View {
+        let isExpanded = expandedAppIds.contains(app.id)
+        let groups = appPermissions[app.id] ?? []
+        let grantedCount = groups.filter({ $0.granted }).count
+        
+        return VStack(spacing: 0) {
+            // Header bấm để mở/đóng
+            Button(action: {
+                withAnimation(.easeInOut(duration: 0.22)) {
+                    if isExpanded {
+                        expandedAppIds.remove(app.id)
+                    } else {
+                        expandedAppIds.insert(app.id)
+                    }
+                }
+            }) {
+                HStack(spacing: 12) {
+                    if let icon = app.iconImage {
+                        Image(uiImage: icon)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .frame(width: 40, height: 40)
+                            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    } else {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                .fill(Color.green.opacity(0.2))
+                                .frame(width: 40, height: 40)
+                            Image(systemName: "cube.fill")
+                                .font(.system(size: 18))
+                                .foregroundColor(.green)
+                        }
+                    }
+                    
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(app.displayName)
+                            .font(.headline)
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                        
+                        Text("\(grantedCount)/\(groups.count) permissions granted")
+                            .font(.caption2)
+                            .foregroundColor(grantedCount > 0 ? .green : .secondary)
+                    }
+                    
+                    Spacer()
+                    
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.caption.bold())
+                        .foregroundColor(.secondary)
+                        .padding(6)
+                }
+                .padding(12)
+                .background(Color(.systemGray6))
             }
-            Text(app.displayName)
-                .font(.headline)
-                .foregroundColor(.green)
-            Spacer()
-            Button("Grant All") {
-                grantAll(appId: app.id)
+            .buttonStyle(PlainButtonStyle())
+            
+            // Danh sách permissions (hiện ra khi expanded)
+            if isExpanded {
+                VStack(spacing: 0) {
+                    Divider().background(Color.white.opacity(0.1))
+                    
+                    ForEach(groups) { group in
+                        VStack(spacing: 0) {
+                            HStack {
+                                HStack(spacing: 8) {
+                                    Image(systemName: iconForGroup(group.key))
+                                        .foregroundColor(.green)
+                                        .frame(width: 22)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(group.displayName)
+                                            .font(.subheadline.bold())
+                                            .foregroundColor(.white)
+                                        Text(group.description)
+                                            .font(.caption2)
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
+                                
+                                Spacer()
+                                
+                                Toggle("", isOn: Binding(
+                                    get: { group.granted },
+                                    set: { newValue in
+                                        togglePermission(appId: app.id, groupKey: group.key, granted: newValue)
+                                    }
+                                ))
+                                .labelsHidden()
+                                .toggleStyle(SwitchToggleStyle(tint: .green))
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 10)
+                            
+                            if group.id != groups.last?.id {
+                                Divider()
+                                    .background(Color.white.opacity(0.05))
+                                    .padding(.leading, 44)
+                            }
+                        }
+                    }
+                    
+                    // Nút thao tác nhanh Grant All / Revoke All ở chân Card
+                    HStack {
+                        Button(action: {
+                            revokeAll(appId: app.id)
+                        }) {
+                            Text("Revoke All")
+                                .font(.caption.bold())
+                                .foregroundColor(.red.opacity(0.8))
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(Color.red.opacity(0.15))
+                                .cornerRadius(8)
+                        }
+                        
+                        Spacer()
+                        
+                        Button(action: {
+                            grantAll(appId: app.id)
+                        }) {
+                            Text("Grant All")
+                                .font(.caption.bold())
+                                .foregroundColor(.green)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(Color.green.opacity(0.2))
+                                .cornerRadius(8)
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(Color.white.opacity(0.02))
+                }
+                .background(Color(.systemGray6).opacity(0.6))
             }
-            .font(.caption.bold())
-            .foregroundColor(.green)
         }
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(isExpanded ? Color.green.opacity(0.3) : Color.white.opacity(0.08), lineWidth: 1)
+        )
     }
     
     private func iconForGroup(_ key: String) -> String {
@@ -503,6 +648,14 @@ struct PermissionsView: View {
     
     private func grantAll(appId: String) {
         kudroid_grant_all_permissions(appId)
+        loadPermissionsForApp(appId: appId)
+    }
+
+    private func revokeAll(appId: String) {
+        let groups = appPermissions[appId] ?? []
+        for group in groups {
+            kudroid_set_group_permission(appId, group.key, 0)
+        }
         loadPermissionsForApp(appId: appId)
     }
 }
