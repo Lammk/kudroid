@@ -1035,10 +1035,16 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                             appendAndEcho("[kudroid_core] Invoking JNI_OnLoad in " + libName);
                             
                             JNIEnv* env = nullptr;
-                            jvm->GetEnv((void**)&env, 0x00010006 /* JNI_VERSION_1_6 */);
+                            if (jvm->GetEnv((void**)&env, 0x00010006 /* JNI_VERSION_1_6 */) == JNI_OK && env) {
+                                if (env->ExceptionCheck()) env->ExceptionClear();
+                            }
                             
-                            jint version = jni_onload(jvm, nullptr);
-                            appendAndEcho("[kudroid_core] JNI_OnLoad(" + libName + ") returned version: " + std::to_string(version));
+                            try {
+                                jint version = jni_onload(jvm, nullptr);
+                                appendAndEcho("[kudroid_core] JNI_OnLoad(" + libName + ") returned version: " + std::to_string(version));
+                            } catch (...) {
+                                appendAndEcho("[kudroid_core] WARNING: Native exception caught while running JNI_OnLoad in " + libName);
+                            }
                             
                             if (env && env->ExceptionCheck()) {
                                 appendAndEcho("[kudroid_core] Cleared pending Java exception from JNI_OnLoad in " + libName);

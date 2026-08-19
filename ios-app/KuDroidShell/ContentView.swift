@@ -47,6 +47,9 @@ struct AppsView: View {
     @Binding var fullLog: String
     @State private var installedApps: [AppItem] = []
     @State private var showAPKInstaller = false
+    @State private var showRenameAlert = false
+    @State private var renamingAppId: String = ""
+    @State private var newAppName: String = ""
     
     private var androidRootAppsURL: URL? {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
@@ -75,7 +78,7 @@ struct AppsView: View {
                         Button(action: { showAPKInstaller = true }) {
                             Image(systemName: "plus.circle.fill")
                                 .font(.title2)
-                                .foregroundColor(.green)
+                            .foregroundColor(.green)
                         }
                     }
                     .padding()
@@ -160,6 +163,13 @@ struct AppsView: View {
                             .padding(.vertical, 4)
                             .listRowBackground(Color(.systemGray6))
                             .contextMenu {
+                                Button {
+                                    renamingAppId = app.id
+                                    newAppName = app.displayName
+                                    showRenameAlert = true
+                                } label: {
+                                    Label("Rename", systemImage: "pencil")
+                                }
                                 Button(role: .destructive) {
                                     clearAppCache(name: app.id)
                                 } label: {
@@ -186,6 +196,15 @@ struct AppsView: View {
                     fullLog = log
                     showAPKInstaller = false
                 }
+            }
+            .alert("Rename App", isPresented: $showRenameAlert) {
+                TextField("App Name", text: $newAppName)
+                Button("Cancel", role: .cancel) {}
+                Button("Save") {
+                    renameApp(id: renamingAppId, newName: newAppName)
+                }
+            } message: {
+                Text("Enter a new display name for this app.")
             }
         }
     }
@@ -307,6 +326,23 @@ struct AppsView: View {
     private func deleteApp(name: String) {
         let success = kudroid_delete_app(name)
         fullLog = success == 1 ? "Deleted app \(name)" : "Failed to delete app \(name)"
+        loadInstalledApps()
+    }
+    
+    private func renameApp(id: String, newName: String) {
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let root = androidRootAppsURL else { return }
+        let infoURL = root.appendingPathComponent(id).appendingPathComponent("app_info.json")
+        var json: [String: Any] = [:]
+        if let data = try? Data(contentsOf: infoURL),
+           let rawObj = try? JSONSerialization.jsonObject(with: data),
+           let existing = rawObj as? [String: Any] {
+            json = existing
+        }
+        json["label"] = trimmed
+        if let outData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) {
+            try? outData.write(to: infoURL)
+        }
         loadInstalledApps()
     }
 }
