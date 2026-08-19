@@ -664,7 +664,7 @@ bool ElfLoader::relocate() {
     const uint64_t symtabOffset = vaddrToFileOffset(symtabVaddr);
     const uint64_t strtabOffset = vaddrToFileOffset(strtabVaddr);
     if (symtabOffset == UINT64_MAX || strtabOffset == UINT64_MAX ||
-        strtabOffset <= symtabOffset || strsz > fileBuf_.size() - strtabOffset) {
+        (strsz > 0 && strsz > fileBuf_.size() - strtabOffset)) {
         lastError_ = "Invalid dynamic symbol tables";
         return false;
     }

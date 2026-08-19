@@ -184,6 +184,7 @@ bool LibraryManager::loadRecursive(const std::string& path) {
     if (!current->map() || !current->relocate()) {
         lastError_ = "Load failed for " + key + ": " + current->lastError();
         std::fprintf(stderr, "[kudroid_core] %s\n", lastError_.c_str());
+        libraries_.erase(key);
         return false;
     }
     

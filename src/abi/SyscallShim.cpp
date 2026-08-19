@@ -325,6 +325,10 @@ extern "C" int bionic_cxa_atexit(void (*)(void*), void*, void*) {
     return 0;
 }
 
+extern "C" int bionic___cxa_thread_atexit_impl(void (*)(void*), void*, void*) {
+    return 0;
+}
+
 extern "C" void bionic_runtime_noop() {
 }
 
@@ -3585,6 +3589,7 @@ const SymbolEntry kSyscallSymbols[] = {
 #endif
     {"__cxa_finalize", reinterpret_cast<void*>(&bionic_cxa_finalize)},
     {"__cxa_atexit", reinterpret_cast<void*>(&bionic_cxa_atexit)},
+    {"__cxa_thread_atexit_impl", reinterpret_cast<void*>(&bionic___cxa_thread_atexit_impl)},
     {"__cxa_guard_acquire", reinterpret_cast<void*>(&bionic___cxa_guard_acquire)},
     {"__cxa_guard_release", reinterpret_cast<void*>(&bionic___cxa_guard_release)},
     {"__cxa_guard_abort", reinterpret_cast<void*>(&bionic___cxa_guard_abort)},
