@@ -1132,8 +1132,39 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                         appendAndEcho("[kudroid_core] Lifecycle callbacks invoked successfully!");
                     } else {
                         appendAndEcho("[kudroid_core] Java APK Application detected (No ANativeActivity_onCreate).");
+                        
+                        std::string targetActivity = "";
+                        std::filesystem::path infoPath = appDir / "app_info.json";
+                        if (std::filesystem::exists(infoPath)) {
+                            std::ifstream f(infoPath);
+                            std::string line;
+                            while (std::getline(f, line)) {
+                                auto posAct = line.find("\"main_activity\": \"");
+                                if (posAct != std::string::npos) {
+                                    auto start = posAct + 18;
+                                    auto end = line.find("\"", start);
+                                    if (end != std::string::npos) {
+                                        targetActivity = line.substr(start, end - start);
+                                    }
+                                }
+                                if (targetActivity.empty()) {
+                                    auto posPkg = line.find("\"package\": \"");
+                                    if (posPkg != std::string::npos) {
+                                        auto start = posPkg + 12;
+                                        auto end = line.find("\"", start);
+                                        if (end != std::string::npos) {
+                                            targetActivity = line.substr(start, end - start);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if (targetActivity.empty()) {
+                            targetActivity = appName;
+                        }
+                        appendAndEcho("[kudroid_core] Target Activity: " + targetActivity);
                         appendAndEcho("[kudroid_core] Launching Android ActivityThread runtime...");
-                        kudroid_launch_java_activity(jvm, appName);
+                        kudroid_launch_java_activity(jvm, targetActivity.c_str());
                     }
                 }
             }

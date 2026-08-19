@@ -1447,9 +1447,14 @@ class NativeMetalViewController: UIViewController {
             }
             NSLog("[KuDroid] Finished kudroid_run_apk(%@). Log chars: %ld", self.appName, logOutput.count)
             DispatchQueue.main.async {
+                self.crashCheckTimer?.invalidate()
                 if kudroid_has_crashed() != 0 {
-                    self.crashCheckTimer?.invalidate()
                     self.handleCrash(fallbackLog: logOutput)
+                } else {
+                    // App đã chạy xong mà không crash (hoặc trả về log kết thúc)
+                    self.statusLabel.alpha = 1.0
+                    self.statusLabel.text = "Session ended. Tap ✕ to close."
+                    self.statusLabel.textColor = .yellow
                 }
             }
         }
@@ -1469,6 +1474,7 @@ class NativeMetalViewController: UIViewController {
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         crashCheckTimer?.invalidate()
+        kudroid_clear_crash_state()
     }
 }
 
