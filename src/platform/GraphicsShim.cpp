@@ -721,9 +721,30 @@ extern "C" PFN_vkVoidFunction bionic_vkGetInstanceProcAddr(VkInstance instance, 
     if (strcmp(pName, "vkEnumerateInstanceExtensionProperties") == 0) {
         return (PFN_vkVoidFunction)&bionic_vkEnumerateInstanceExtensionProperties;
     }
+    if (strcmp(pName, "vkGetDeviceProcAddr") == 0) {
+        return (PFN_vkVoidFunction)&bionic_vkGetDeviceProcAddr;
+    }
     auto real = get_real_vkGetInstanceProcAddr();
     if (real) {
         return real(instance, pName);
+    }
+    return nullptr;
+}
+
+extern "C" PFN_vkVoidFunction bionic_vkGetDeviceProcAddr(VkDevice device, const char* pName) {
+    if (!pName) return nullptr;
+    void* mvk = get_mvk_handle();
+    if (mvk) {
+        typedef PFN_vkVoidFunction (*PFN_vkGDPA)(VkDevice, const char*);
+        auto gdpa = (PFN_vkGDPA)::dlsym(mvk, "vkGetDeviceProcAddr");
+        if (gdpa) {
+            PFN_vkVoidFunction f = gdpa(device, pName);
+            if (f) return f;
+        }
+    }
+    auto real = get_real_vkGetInstanceProcAddr();
+    if (real) {
+        return real(nullptr, pName);
     }
     return nullptr;
 }
@@ -797,6 +818,9 @@ void* get_vk_func(const char* name) {
     if (!name) return nullptr;
     if (strcmp(name, "vkGetInstanceProcAddr") == 0) {
         return (void*)&bionic_vkGetInstanceProcAddr;
+    }
+    if (strcmp(name, "vkGetDeviceProcAddr") == 0) {
+        return (void*)&bionic_vkGetDeviceProcAddr;
     }
     if (strcmp(name, "vkCreateInstance") == 0) {
         return (void*)&bionic_vkCreateInstance;
@@ -2216,6 +2240,7 @@ const SymbolEntry kGraphicsSymbols[] = {
     {"glBeginTransformFeedback", reinterpret_cast<void*>(&bionic_glBeginTransformFeedback)},
     {"glEndTransformFeedback", reinterpret_cast<void*>(&bionic_glEndTransformFeedback)},
     {"vkGetInstanceProcAddr", reinterpret_cast<void*>(&bionic_vkGetInstanceProcAddr)},
+    {"vkGetDeviceProcAddr", reinterpret_cast<void*>(&bionic_vkGetDeviceProcAddr)},
     {"vkCreateInstance", reinterpret_cast<void*>(&bionic_vkCreateInstance)},
     {"vkCreateAndroidSurfaceKHR", reinterpret_cast<void*>(&bionic_vkCreateAndroidSurfaceKHR)},
     {"vkEnumerateInstanceExtensionProperties", reinterpret_cast<void*>(&bionic_vkEnumerateInstanceExtensionProperties)},
