@@ -1061,15 +1061,13 @@ static bool guard_diag_enabled() {
     return enabled != 0;
 }
 
-static long emulate_futex_syscall(va_list ap) {
-    uint32_t* uaddr = va_arg(ap, uint32_t*);
-    const int futex_op = va_arg(ap, int);
-    const uint32_t val = static_cast<uint32_t>(va_arg(ap, unsigned int));
-    const struct timespec* timeout = va_arg(ap, const struct timespec*);
-    uint32_t* uaddr2 = va_arg(ap, uint32_t*);
-    const uint32_t val3 = static_cast<uint32_t>(va_arg(ap, unsigned int));
-    // DIAGNOSTIC (gate): ai đang gọi syscall(98) FUTEX_WAIT — địa chỉ nào, trong
-    // module nào. Dedup 16 địa chỉ đầu để khỏi tràn log.
+static long emulate_futex_direct(uintptr_t arg1, uintptr_t arg2, uintptr_t arg3, uintptr_t arg4, uintptr_t arg5, uintptr_t arg6) {
+    uint32_t* uaddr = reinterpret_cast<uint32_t*>(arg1);
+    const int futex_op = static_cast<int>(arg2);
+    const uint32_t val = static_cast<uint32_t>(arg3);
+    const struct timespec* timeout = reinterpret_cast<const struct timespec*>(arg4);
+    uint32_t* uaddr2 = reinterpret_cast<uint32_t*>(arg5);
+    const uint32_t val3 = static_cast<uint32_t>(arg6);
 #if defined(__aarch64__)
     if (guard_diag_enabled()) {
         const int cmd = futex_op & 127;
@@ -1275,200 +1273,108 @@ extern "C" int bionic_mprotect(void *addr, size_t len, int prot);
 extern "C" int bionic_close(int fd);
 extern "C" ssize_t bionic_getrandom(void *buf, size_t buflen, unsigned int flags);
 
-extern "C" long bionic_syscall(long number, ...) {
+extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5, uintptr_t a6) {
     uintptr_t entryX19 = 0;
 #if defined(__aarch64__)
     if (guard_diag_enabled()) asm volatile("mov %0, x19" : "=r"(entryX19));
 #endif
 
-    va_list ap;
-    va_start(ap, number);
-
     switch (number) {
         // Epoll & Descriptors
-        case 20: { // epoll_create1
-            int flags = va_arg(ap, int);
-            va_end(ap);
-            return bionic_epoll_create1(flags);
-        }
-        case 21: { // epoll_ctl
-            int epfd = va_arg(ap, int);
-            int op = va_arg(ap, int);
-            int fd = va_arg(ap, int);
-            void* ev = va_arg(ap, void*);
-            va_end(ap);
-            return bionic_epoll_ctl(epfd, op, fd, ev);
-        }
-        case 22: { // epoll_pwait / epoll_wait
-            int epfd = va_arg(ap, int);
-            void* events = va_arg(ap, void*);
-            int maxevents = va_arg(ap, int);
-            int timeout = va_arg(ap, int);
-            va_end(ap);
-            return bionic_epoll_wait(epfd, events, maxevents, timeout);
-        }
-        case 23: { // dup
-            int oldfd = va_arg(ap, int);
-            va_end(ap);
-            return ::dup(oldfd);
-        }
-        case 24: { // dup3
-            int oldfd = va_arg(ap, int);
-            int newfd = va_arg(ap, int);
-            va_end(ap);
-            return ::dup2(oldfd, newfd);
-        }
+        case 20: // epoll_create1
+            return bionic_epoll_create1(static_cast<int>(a1));
+
+        case 21: // epoll_ctl
+            return bionic_epoll_ctl(static_cast<int>(a1), static_cast<int>(a2), static_cast<int>(a3), reinterpret_cast<void*>(a4));
+
+        case 22: // epoll_pwait / epoll_wait
+            return bionic_epoll_wait(static_cast<int>(a1), reinterpret_cast<void*>(a2), static_cast<int>(a3), static_cast<int>(a4));
+
+        case 23: // dup
+            return ::dup(static_cast<int>(a1));
+
+        case 24: // dup3
+            return ::dup2(static_cast<int>(a1), static_cast<int>(a2));
+
         case 34: { // mkdirat
-            int dirfd = va_arg(ap, int);
-            const char* path = va_arg(ap, const char*);
-            mode_t mode = va_arg(ap, mode_t);
-            va_end(ap);
+            const char* path = reinterpret_cast<const char*>(a2);
             if (!path) return -1;
             const std::string remapped = kudroid::VFSPathRemapper::getInstance().remap(path);
-            return ::mkdirat(dirfd, remapped.c_str(), mode);
+            return ::mkdirat(static_cast<int>(a1), remapped.c_str(), static_cast<mode_t>(a3));
         }
         case 35: { // unlinkat
-            int dirfd = va_arg(ap, int);
-            const char* path = va_arg(ap, const char*);
-            int flags = va_arg(ap, int);
-            va_end(ap);
+            const char* path = reinterpret_cast<const char*>(a2);
             if (!path) return -1;
             const std::string remapped = kudroid::VFSPathRemapper::getInstance().remap(path);
-            return ::unlinkat(dirfd, remapped.c_str(), flags);
+            return ::unlinkat(static_cast<int>(a1), remapped.c_str(), static_cast<int>(a3));
         }
-        case 46: { // ftruncate
-            int fd = va_arg(ap, int);
-            off_t length = va_arg(ap, off_t);
-            va_end(ap);
-            return ::ftruncate(fd, length);
-        }
-        case 56: { // openat
-            int dirfd = va_arg(ap, int);
-            const char* path = va_arg(ap, const char*);
-            int flags = va_arg(ap, int);
-            mode_t mode = va_arg(ap, mode_t);
-            va_end(ap);
-            return bionic_openat(dirfd, path, flags, mode);
-        }
-        case 57: { // close
-            int fd = va_arg(ap, int);
-            va_end(ap);
-            return bionic_close(fd);
-        }
-        case 59: { // pipe2
-            int* pipefd = va_arg(ap, int*);
-            int flags = va_arg(ap, int);
-            va_end(ap);
-            return bionic_pipe2(pipefd, flags);
-        }
-        case 62: { // lseek
-            int fd = va_arg(ap, int);
-            off_t offset = va_arg(ap, off_t);
-            int whence = va_arg(ap, int);
-            va_end(ap);
-            return ::lseek(fd, offset, whence);
-        }
-        case 63: { // read
-            int fd = va_arg(ap, int);
-            void* buf = va_arg(ap, void*);
-            size_t count = va_arg(ap, size_t);
-            va_end(ap);
-            return ::read(fd, buf, count);
-        }
-        case 64: { // write
-            int fd = va_arg(ap, int);
-            const void* buf = va_arg(ap, const void*);
-            size_t count = va_arg(ap, size_t);
-            va_end(ap);
-            return ::write(fd, buf, count);
-        }
-        case 67: { // pread64
-            int fd = va_arg(ap, int);
-            void* buf = va_arg(ap, void*);
-            size_t count = va_arg(ap, size_t);
-            off_t offset = va_arg(ap, off_t);
-            va_end(ap);
-            return ::pread(fd, buf, count, offset);
-        }
-        case 68: { // pwrite64
-            int fd = va_arg(ap, int);
-            const void* buf = va_arg(ap, const void*);
-            size_t count = va_arg(ap, size_t);
-            off_t offset = va_arg(ap, off_t);
-            va_end(ap);
-            return ::pwrite(fd, buf, count, offset);
-        }
-        case 79: { // newfstatat
-            int dirfd = va_arg(ap, int);
-            const char* path = va_arg(ap, const char*);
-            struct bionic_stat64* st = va_arg(ap, struct bionic_stat64*);
-            int flags = va_arg(ap, int);
-            va_end(ap);
-            return bionic_newfstatat(dirfd, path, st, flags);
-        }
-        case 98: { // futex
-            const long result = emulate_futex_syscall(ap);
-            va_end(ap);
-            return result;
-        }
-        case 101: { // nanosleep
-            const struct timespec* req = va_arg(ap, const struct timespec*);
-            struct timespec* rem = va_arg(ap, struct timespec*);
-            va_end(ap);
-            return ::nanosleep(req, rem);
-        }
-        case 113: { // clock_gettime
-            int clock_id = va_arg(ap, int);
-            struct timespec* tp = va_arg(ap, struct timespec*);
-            va_end(ap);
-            return bionic_clock_gettime(clock_id, tp);
-        }
-        case 124: { // sched_yield
-            va_end(ap);
+        case 46: // ftruncate
+            return ::ftruncate(static_cast<int>(a1), static_cast<off_t>(a2));
+
+        case 56: // openat
+            return bionic_openat(static_cast<int>(a1), reinterpret_cast<const char*>(a2), static_cast<int>(a3), static_cast<mode_t>(a4));
+
+        case 57: // close
+            return bionic_close(static_cast<int>(a1));
+
+        case 59: // pipe2
+            return bionic_pipe2(reinterpret_cast<int*>(a1), static_cast<int>(a2));
+
+        case 62: // lseek
+            return ::lseek(static_cast<int>(a1), static_cast<off_t>(a2), static_cast<int>(a3));
+
+        case 63: // read
+            return ::read(static_cast<int>(a1), reinterpret_cast<void*>(a2), static_cast<size_t>(a3));
+
+        case 64: // write
+            return ::write(static_cast<int>(a1), reinterpret_cast<const void*>(a2), static_cast<size_t>(a3));
+
+        case 67: // pread64
+            return ::pread(static_cast<int>(a1), reinterpret_cast<void*>(a2), static_cast<size_t>(a3), static_cast<off_t>(a4));
+
+        case 68: // pwrite64
+            return ::pwrite(static_cast<int>(a1), reinterpret_cast<const void*>(a2), static_cast<size_t>(a3), static_cast<off_t>(a4));
+
+        case 79: // newfstatat
+            return bionic_newfstatat(static_cast<int>(a1), reinterpret_cast<const char*>(a2), reinterpret_cast<struct bionic_stat64*>(a3), static_cast<int>(a4));
+
+        case 98: // futex
+            return emulate_futex_direct(a1, a2, a3, a4, a5, a6);
+
+        case 101: // nanosleep
+            return ::nanosleep(reinterpret_cast<const struct timespec*>(a1), reinterpret_cast<struct timespec*>(a2));
+
+        case 113: // clock_gettime
+            return bionic_clock_gettime(static_cast<int>(a1), reinterpret_cast<struct timespec*>(a2));
+
+        case 124: // sched_yield
             return ::sched_yield();
-        }
-        case 160: { // uname
-            struct bionic_utsname* buf = va_arg(ap, struct bionic_utsname*);
-            va_end(ap);
-            return bionic_uname(buf);
-        }
-        case 167: { // prctl
-            int option = va_arg(ap, int);
-            unsigned long a2 = va_arg(ap, unsigned long);
-            unsigned long a3 = va_arg(ap, unsigned long);
-            unsigned long a4 = va_arg(ap, unsigned long);
-            unsigned long a5 = va_arg(ap, unsigned long);
-            va_end(ap);
-            return bionic_prctl(option, a2, a3, a4, a5);
-        }
-        case 169: { // gettimeofday
-            struct timeval* tv = va_arg(ap, struct timeval*);
-            void* tz = va_arg(ap, void*);
-            va_end(ap);
-            return ::gettimeofday(tv, (struct timezone*)tz);
-        }
-        case 172: { // getpid
-            va_end(ap);
+
+        case 160: // uname
+            return bionic_uname(reinterpret_cast<struct bionic_utsname*>(a1));
+
+        case 167: // prctl
+            return bionic_prctl(static_cast<int>(a1), a2, a3, a4, a5);
+
+        case 169: // gettimeofday
+            return ::gettimeofday(reinterpret_cast<struct timeval*>(a1), reinterpret_cast<struct timezone*>(a2));
+
+        case 172: // getpid
             return static_cast<long>(::getpid());
-        }
-        case 174: { // getuid
-            va_end(ap);
+
+        case 174: // getuid
             return static_cast<long>(::getuid());
-        }
-        case 175: { // geteuid
-            va_end(ap);
+
+        case 175: // geteuid
             return static_cast<long>(::geteuid());
-        }
-        case 176: { // getgid
-            va_end(ap);
+
+        case 176: // getgid
             return static_cast<long>(::getgid());
-        }
-        case 177: { // getegid
-            va_end(ap);
+
+        case 177: // getegid
             return static_cast<long>(::getegid());
-        }
+
         case 178: { // gettid
-            va_end(ap);
 #ifdef __APPLE__
             uint64_t tid = 0;
             pthread_threadid_np(NULL, &tid);
@@ -1480,105 +1386,51 @@ extern "C" long bionic_syscall(long number, ...) {
             if (guard_diag_enabled()) log_guard_acquire_diag(result, entryX19);
             return result;
         }
-        case 198: { // socket
-            int domain = va_arg(ap, int);
-            int type = va_arg(ap, int);
-            int protocol = va_arg(ap, int);
-            va_end(ap);
-            return ::socket(domain, type, protocol);
-        }
-        case 200: { // bind
-            int fd = va_arg(ap, int);
-            const struct sockaddr* addr = va_arg(ap, const struct sockaddr*);
-            socklen_t addrlen = va_arg(ap, socklen_t);
-            va_end(ap);
-            return ::bind(fd, addr, addrlen);
-        }
-        case 203: { // connect
-            int fd = va_arg(ap, int);
-            const struct sockaddr* addr = va_arg(ap, const struct sockaddr*);
-            socklen_t addrlen = va_arg(ap, socklen_t);
-            va_end(ap);
-            return ::connect(fd, addr, addrlen);
-        }
-        case 204: { // getsockname
-            int fd = va_arg(ap, int);
-            struct sockaddr* addr = va_arg(ap, struct sockaddr*);
-            socklen_t* addrlen = va_arg(ap, socklen_t*);
-            va_end(ap);
-            return ::getsockname(fd, addr, addrlen);
-        }
-        case 206: { // sendto
-            int fd = va_arg(ap, int);
-            const void* buf = va_arg(ap, const void*);
-            size_t len = va_arg(ap, size_t);
-            int flags = va_arg(ap, int);
-            const struct sockaddr* addr = va_arg(ap, const struct sockaddr*);
-            socklen_t addrlen = va_arg(ap, socklen_t);
-            va_end(ap);
-            return ::sendto(fd, buf, len, flags, addr, addrlen);
-        }
-        case 207: { // recvfrom
-            int fd = va_arg(ap, int);
-            void* buf = va_arg(ap, void*);
-            size_t len = va_arg(ap, size_t);
-            int flags = va_arg(ap, int);
-            struct sockaddr* addr = va_arg(ap, struct sockaddr*);
-            socklen_t* addrlen = va_arg(ap, socklen_t*);
-            va_end(ap);
-            return ::recvfrom(fd, buf, len, flags, addr, addrlen);
-        }
-        case 215: { // munmap
-            void* addr = va_arg(ap, void*);
-            size_t length = va_arg(ap, size_t);
-            va_end(ap);
-            return ::munmap(addr, length);
-        }
-        case 222: { // mmap
-            void* addr = va_arg(ap, void*);
-            size_t length = va_arg(ap, size_t);
-            int prot = va_arg(ap, int);
-            int flags = va_arg(ap, int);
-            int fd = va_arg(ap, int);
-            off_t offset = va_arg(ap, off_t);
-            va_end(ap);
-            return (long)bionic_mmap(addr, length, prot, flags, fd, offset);
-        }
-        case 226: { // mprotect
-            void* addr = va_arg(ap, void*);
-            size_t len = va_arg(ap, size_t);
-            int prot = va_arg(ap, int);
-            va_end(ap);
-            return bionic_mprotect(addr, len, prot);
-        }
-        case 233: { // madvise
-            void* addr = va_arg(ap, void*);
-            size_t len = va_arg(ap, size_t);
-            int advice = va_arg(ap, int);
-            va_end(ap);
-            return ::madvise(addr, len, advice);
-        }
-        case 278: { // getrandom
-            void* buf = va_arg(ap, void*);
-            size_t buflen = va_arg(ap, size_t);
-            unsigned int flags = va_arg(ap, unsigned int);
-            va_end(ap);
-            return bionic_getrandom(buf, buflen, flags);
-        }
+        case 198: // socket
+            return ::socket(static_cast<int>(a1), static_cast<int>(a2), static_cast<int>(a3));
+
+        case 200: // bind
+            return ::bind(static_cast<int>(a1), reinterpret_cast<const struct sockaddr*>(a2), static_cast<socklen_t>(a3));
+
+        case 203: // connect
+            return ::connect(static_cast<int>(a1), reinterpret_cast<const struct sockaddr*>(a2), static_cast<socklen_t>(a3));
+
+        case 204: // getsockname
+            return ::getsockname(static_cast<int>(a1), reinterpret_cast<struct sockaddr*>(a2), reinterpret_cast<socklen_t*>(a3));
+
+        case 206: // sendto
+            return ::sendto(static_cast<int>(a1), reinterpret_cast<const void*>(a2), static_cast<size_t>(a3), static_cast<int>(a4), reinterpret_cast<const struct sockaddr*>(a5), static_cast<socklen_t>(a6));
+
+        case 207: // recvfrom
+            return ::recvfrom(static_cast<int>(a1), reinterpret_cast<void*>(a2), static_cast<size_t>(a3), static_cast<int>(a4), reinterpret_cast<struct sockaddr*>(a5), reinterpret_cast<socklen_t*>(a6));
+
+        case 215: // munmap
+            return ::munmap(reinterpret_cast<void*>(a1), static_cast<size_t>(a2));
+
+        case 222: // mmap
+            return (long)bionic_mmap(reinterpret_cast<void*>(a1), static_cast<size_t>(a2), static_cast<int>(a3), static_cast<int>(a4), static_cast<int>(a5), static_cast<off_t>(a6));
+
+        case 226: // mprotect
+            return bionic_mprotect(reinterpret_cast<void*>(a1), static_cast<size_t>(a2), static_cast<int>(a3));
+
+        case 233: // madvise
+            return ::madvise(reinterpret_cast<void*>(a1), static_cast<size_t>(a2), static_cast<int>(a3));
+
+        case 278: // getrandom
+            return bionic_getrandom(reinterpret_cast<void*>(a1), static_cast<size_t>(a2), static_cast<unsigned int>(a3));
+
         case KUDROID_SYS_process_vm_readv: {
-            const pid_t pid = static_cast<pid_t>(va_arg(ap, int));
-            const struct iovec* local_iov = va_arg(ap, const struct iovec*);
-            const unsigned long liovcnt = va_arg(ap, unsigned long);
-            const struct iovec* remote_iov = va_arg(ap, const struct iovec*);
-            const unsigned long riovcnt = va_arg(ap, unsigned long);
-            const unsigned long flags = va_arg(ap, unsigned long);
-            va_end(ap);
+            const pid_t pid = static_cast<pid_t>(a1);
+            const struct iovec* local_iov = reinterpret_cast<const struct iovec*>(a2);
+            const unsigned long liovcnt = static_cast<unsigned long>(a3);
+            const struct iovec* remote_iov = reinterpret_cast<const struct iovec*>(a4);
+            const unsigned long riovcnt = static_cast<unsigned long>(a5);
+            const unsigned long flags = static_cast<unsigned long>(a6);
             return bionic_process_vm_readv(pid, local_iov, liovcnt, remote_iov, riovcnt, flags);
         }
         default:
             break;
     }
-    va_end(ap);
 
     // Chưa map — log 1 lần mỗi số rồi ENOSYS (không chạy syscall macOS sai số).
     static long s_unknownSeen[64];
