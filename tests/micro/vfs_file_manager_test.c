@@ -16,7 +16,7 @@ extern int __android_log_print(int priority, const char* tag, const char* fmt, .
 #define LOGI(...) __android_log_print(3, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(6, LOG_TAG, __VA_ARGS__)
 
-// POSIX File APIs (routed via SyscallShim & Bionic)
+// POSIX File APIs (Linux-arm64 ABI)
 struct dirent {
     uint64_t d_ino;
     int64_t  d_off;
@@ -29,17 +29,24 @@ typedef void DIR;
 struct stat {
     uint64_t st_dev;
     uint64_t st_ino;
-    mode_t   st_mode;
+    uint32_t st_mode;
     uint32_t st_nlink;
     uint32_t st_uid;
     uint32_t st_gid;
     uint64_t st_rdev;
-    off_t    st_size;
-    long     st_blksize;
-    long     st_blocks;
-    long     st_atime;
-    long     st_mtime;
-    long     st_ctime;
+    uint64_t __pad1;
+    int64_t  st_size;
+    int32_t  st_blksize;
+    int32_t  __pad2;
+    int64_t  st_blocks;
+    int64_t  st_atime_sec;
+    uint64_t st_atime_nsec;
+    int64_t  st_mtime_sec;
+    uint64_t st_mtime_nsec;
+    int64_t  st_ctime_sec;
+    uint64_t st_ctime_nsec;
+    uint32_t __unused4;
+    uint32_t __unused5;
 };
 
 extern DIR* opendir(const char* name);
@@ -90,6 +97,12 @@ int kudroid_test_main(void) {
     LOGI("📁 [KUDROID VFS FILE MANAGER & ZARCHIVER TEST]");
     LOGI("=================================================");
 
+    // Đảm bảo các thư mục cơ bản tồn tại
+    mkdir("/sdcard", 0755);
+    mkdir("/sdcard/Download", 0755);
+    mkdir("/sdcard/Documents", 0755);
+    mkdir("/sdcard/Android", 0755);
+
     // ──────────────────────────────────────────────
     // 1. STORAGE DIRECTORY SCAN TEST
     // ──────────────────────────────────────────────
@@ -139,7 +152,7 @@ int kudroid_test_main(void) {
     memset(&st, 0, sizeof(st));
     int statRes = stat(filePath, &st);
     TEST_ASSERT(statRes == 0, "stat(/sdcard/Download/...zip) succeeds");
-    TEST_ASSERT(st.st_size == (off_t)headerLen, "stat reports exact file size");
+    TEST_ASSERT(st.st_size == (int64_t)headerLen, "stat reports exact file size");
 
     // ──────────────────────────────────────────────
     // 4. READ VERIFICATION TEST
