@@ -66,14 +66,46 @@ public final class ActivityThread {
     }
 
     private void handleLaunchActivity(String activityClassName) {
-        try {
-            Class<?> clazz = Class.forName(activityClassName);
-            mInitialActivity = (Activity) clazz.newInstance();
-            mInitialActivity.onCreate(null);
-            mInitialActivity.onStart();
-            mInitialActivity.onResume();
-        } catch (Exception e) {
-            e.printStackTrace();
+        Class<?> clazz = null;
+        String baseName = activityClassName;
+        int idx = baseName.indexOf('_');
+        if (idx > 0) {
+            baseName = baseName.substring(0, idx);
+        }
+
+        String[] candidates = new String[] {
+            activityClassName,
+            baseName,
+            baseName + ".ZArchiver",
+            baseName + ".MainActivity",
+            baseName + ".ui.MainActivity",
+            baseName + ".Main",
+            baseName + ".App"
+        };
+
+        for (String name : candidates) {
+            try {
+                clazz = Class.forName(name);
+                if (clazz != null) {
+                    System.out.println("[ActivityThread] Resolved Activity Class: " + name);
+                    break;
+                }
+            } catch (Throwable t) {
+                // Tiếp tục thử ứng viên tiếp theo
+            }
+        }
+
+        if (clazz != null) {
+            try {
+                mInitialActivity = (Activity) clazz.newInstance();
+                mInitialActivity.onCreate(null);
+                mInitialActivity.onStart();
+                mInitialActivity.onResume();
+            } catch (Throwable t) {
+                t.printStackTrace();
+            }
+        } else {
+            System.err.println("[ActivityThread] Could not resolve any valid Activity class for: " + activityClassName);
         }
     }
 

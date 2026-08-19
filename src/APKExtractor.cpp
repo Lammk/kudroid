@@ -201,6 +201,7 @@ struct ManifestInfo {
     std::string versionName;
     std::string versionCode;
     std::string appLabel;
+    std::string mainActivity;
 };
 
 static int iconPriority(const std::string& name) {
@@ -340,11 +341,21 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
                         if (attrName == "versionCode" && info.versionCode.empty()) info.versionCode = attrVal;
                     } else if (tagName == "application") {
                         if (attrName == "label" && info.appLabel.empty() && !attrVal.empty()) info.appLabel = attrVal;
+                    } else if (tagName == "activity") {
+                        if (attrName == "name" && info.mainActivity.empty() && !attrVal.empty()) {
+                            info.mainActivity = attrVal;
+                        }
                     }
                 }
             }
         }
         cur += chunkSize;
+    }
+
+    if (!info.mainActivity.empty() && !info.packageName.empty()) {
+        if (info.mainActivity.front() == '.') {
+            info.mainActivity = info.packageName + info.mainActivity;
+        }
     }
     return info;
 }
@@ -650,7 +661,8 @@ static bool extract_apk_impl(const std::string& apkPath, const std::string& targ
             infoFile << "  \"name\": \"" << appDirName << "\",\n";
             infoFile << "  \"label\": \"" << label << "\",\n";
             infoFile << "  \"version\": \"" << version << "\",\n";
-            infoFile << "  \"package\": \"" << manifestInfo.packageName << "\"\n";
+            infoFile << "  \"package\": \"" << manifestInfo.packageName << "\",\n";
+            infoFile << "  \"main_activity\": \"" << manifestInfo.mainActivity << "\"\n";
             infoFile << "}\n";
             infoFile.close();
             apkLog("  -> Saved app info (v" + version + ", " + label + ") to " + infoDest.string());
