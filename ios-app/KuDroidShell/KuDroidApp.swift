@@ -17,7 +17,7 @@ class AppSession: ObservableObject {
 struct GlobalMetalViewRepresentable: UIViewRepresentable {
     func makeUIView(context: Context) -> GlobalMetalView {
         let view = GlobalMetalView()
-        view.backgroundColor = .black
+        view.backgroundColor = .clear
         view.isMultipleTouchEnabled = true
         view.isUserInteractionEnabled = true
         if let metalLayer = view.layer as? CAMetalLayer {
