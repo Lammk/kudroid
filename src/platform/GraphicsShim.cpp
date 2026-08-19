@@ -939,6 +939,29 @@ extern "C" EGLSurface bionic_eglCreateWindowSurface(EGLDisplay dpy, EGLConfig co
     return nullptr;
 }
 
+extern "C" void kudroid_gpu_cleanup_on_test_exit(void) {
+    typedef EGLBoolean (*PFN_eglMakeCurrent)(EGLDisplay, EGLSurface, EGLSurface, EGLContext);
+    typedef EGLBoolean (*PFN_eglDestroySurface)(EGLDisplay, EGLSurface);
+    auto fnMakeCurrent = (PFN_eglMakeCurrent)get_egl_func("eglMakeCurrent");
+    auto fnDestroySurface = (PFN_eglDestroySurface)get_egl_func("eglDestroySurface");
+    if (fnMakeCurrent) {
+        fnMakeCurrent(s_activeEglDisplay ? s_activeEglDisplay : (EGLDisplay)1, nullptr, nullptr, nullptr);
+    }
+    if (s_activeEglSurface && fnDestroySurface) {
+        gpuLog("kudroid_gpu_cleanup_on_test_exit: destroying stale surface %p", s_activeEglSurface);
+        fnDestroySurface(s_activeEglDisplay ? s_activeEglDisplay : (EGLDisplay)1, s_activeEglSurface);
+        s_activeEglSurface = nullptr;
+        s_activeEglDisplay = nullptr;
+    }
+#if defined(__APPLE__)
+    if (tls_autorelease_pool) {
+        objc_autoreleasePoolPop(tls_autorelease_pool);
+        tls_autorelease_pool = nullptr;
+    }
+#endif
+    gpuLog("kudroid_gpu_cleanup_on_test_exit: GPU state cleaned up successfully");
+}
+
 // ── EGL 1.x entry points còn thiếu — forward thẳng sang ANGLE ────────────────
 
 #define EGL_FORWARD_ERR(name, what) gpuLog("%s: ANGLE %s not available", name, what)

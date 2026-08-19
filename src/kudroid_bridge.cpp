@@ -1512,10 +1512,13 @@ extern "C" const char* kudroid_multi_elf_test(const char* consumerPath,
     return result;
 }
 
+extern "C" void kudroid_gpu_cleanup_on_test_exit(void);
+
 extern "C" const char* kudroid_run_so_test(const char* soPath, const char* entrypoint) {
     std::string log;
     appendTestHeader(log, "Dynamic Remote .so Test Execution", soPath);
     kudroid::bionic_shim_reset_trace();
+    kudroid_gpu_cleanup_on_test_exit();
 
     if (!soPath) {
         log += "❌ ERROR: null SO path provided\n";
@@ -1586,6 +1589,7 @@ extern "C" const char* kudroid_run_so_test(const char* soPath, const char* entry
         log += trace;
     }
 
+    kudroid_gpu_cleanup_on_test_exit();
     log += "\n🎉 Test execution finished.\n";
     return strdup(log.c_str());
 }
