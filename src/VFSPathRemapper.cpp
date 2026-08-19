@@ -453,7 +453,33 @@ DIR* vfs_opendir(const char* path) {
     const std::string mapped = VFSPathRemapper::getInstance().remap(path);
     return ::opendir(mapped.c_str());
 }
-struct dirent* vfs_readdir(DIR* directory) { return ::readdir(directory); }
+
+struct bionic_dirent_layout {
+    uint64_t d_ino;
+    int64_t  d_off;
+    uint16_t d_reclen;
+    uint8_t  d_type;
+    char     d_name[256];
+};
+
+struct dirent* vfs_readdir(DIR* directory) {
+    if (!directory) return nullptr;
+    struct dirent* host_entry = ::readdir(directory);
+    if (!host_entry) return nullptr;
+
+#if defined(__APPLE__)
+    static thread_local bionic_dirent_layout bionic_entry;
+    std::memset(&bionic_entry, 0, sizeof(bionic_entry));
+    bionic_entry.d_ino = static_cast<uint64_t>(host_entry->d_fileno);
+    bionic_entry.d_off = static_cast<int64_t>(host_entry->d_seekoff);
+    bionic_entry.d_reclen = static_cast<uint16_t>(sizeof(bionic_dirent_layout));
+    bionic_entry.d_type = static_cast<uint8_t>(host_entry->d_type);
+    std::strncpy(bionic_entry.d_name, host_entry->d_name, sizeof(bionic_entry.d_name) - 1);
+    return reinterpret_cast<struct dirent*>(&bionic_entry);
+#else
+    return host_entry;
+#endif
+}
 int vfs_closedir(DIR* directory) { return ::closedir(directory); }
 ssize_t vfs_readlink(const char* path, char* buffer, size_t size) {
     return ::readlink(VFSPathRemapper::getInstance().remap(path).c_str(), buffer, size);
