@@ -878,13 +878,16 @@ typedef unsigned int EGLenum;
 #define EGL_NO_SURFACE ((EGLSurface)0)
 
 typedef EGLSurface (*PFN_eglCreateWindowSurface)(EGLDisplay, EGLConfig, EGLNativeWindowType, const EGLint*);
-
+typedef EGLBoolean (*PFN_eglDestroySurface)(EGLDisplay, EGLSurface);
+static EGLSurface s_activeEglSurface = nullptr;
+static EGLDisplay s_activeEglDisplay = nullptr;
 
 extern "C" EGLSurface bionic_eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
                                                     EGLNativeWindowType win,
                                                     const EGLint* attrib_list) {
     gpuLog("eglCreateWindowSurface: window=%p", (void*)win);
     auto host_func = (PFN_eglCreateWindowSurface)get_egl_func("eglCreateWindowSurface");
+    auto host_destroy = (PFN_eglDestroySurface)get_egl_func("eglDestroySurface");
     if (host_func) {
         void* resolvedLayer = g_metalLayer;
         if (win) {
@@ -903,12 +906,32 @@ extern "C" EGLSurface bionic_eglCreateWindowSurface(EGLDisplay dpy, EGLConfig co
 #if defined(__APPLE__)
         void* pool = objc_autoreleasePoolPush();
         EGLSurface s = host_func(dpy, config, nativeWin, attrib_list);
+        if (!s && s_activeEglSurface && host_destroy) {
+            gpuLog("eglCreateWindowSurface failed, auto-recycling stale EGLSurface %p on layer %p...", s_activeEglSurface, (void*)nativeWin);
+            host_destroy(s_activeEglDisplay ? s_activeEglDisplay : dpy, s_activeEglSurface);
+            s_activeEglSurface = nullptr;
+            s = host_func(dpy, config, nativeWin, attrib_list);
+        }
         objc_autoreleasePoolPop(pool);
         gpuLog("eglCreateWindowSurface returned %p", (void*)s);
+        if (s) {
+            s_activeEglSurface = s;
+            s_activeEglDisplay = dpy;
+        }
         return s;
 #else
         EGLSurface s = host_func(dpy, config, nativeWin, attrib_list);
+        if (!s && s_activeEglSurface && host_destroy) {
+            gpuLog("eglCreateWindowSurface failed, auto-recycling stale EGLSurface %p on layer %p...", s_activeEglSurface, (void*)nativeWin);
+            host_destroy(s_activeEglDisplay ? s_activeEglDisplay : dpy, s_activeEglSurface);
+            s_activeEglSurface = nullptr;
+            s = host_func(dpy, config, nativeWin, attrib_list);
+        }
         gpuLog("eglCreateWindowSurface returned %p", (void*)s);
+        if (s) {
+            s_activeEglSurface = s;
+            s_activeEglDisplay = dpy;
+        }
         return s;
 #endif
     }
@@ -1011,6 +1034,10 @@ extern "C" EGLSurface bionic_eglCreatePbufferSurface(EGLDisplay dpy, EGLConfig c
 extern "C" EGLBoolean bionic_eglDestroySurface(EGLDisplay dpy, EGLSurface surface) {
     auto f = eglFn<EGLBoolean(EGLDisplay, EGLSurface)>("eglDestroySurface");
     if (!f) { EGL_FORWARD_ERR("eglDestroySurface", ""); return EGL_FALSE; }
+    if (surface == s_activeEglSurface) {
+        s_activeEglSurface = nullptr;
+        s_activeEglDisplay = nullptr;
+    }
     EGLBoolean r = f(dpy, surface);
     gpuLog("eglDestroySurface(%p) -> %s", (void*)surface, r ? "true" : "false");
     return r;
