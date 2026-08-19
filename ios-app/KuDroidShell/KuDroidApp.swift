@@ -59,16 +59,18 @@ class GlobalMetalView: UIView {
         return CAMetalLayer.self
     }
 
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        self.isMultipleTouchEnabled = true
-        self.isUserInteractionEnabled = true
-    }
-
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        self.isMultipleTouchEnabled = true
-        self.isUserInteractionEnabled = true
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        if let metalLayer = self.layer as? CAMetalLayer {
+            let scale = UIScreen.main.scale
+            metalLayer.contentsScale = scale
+            let w = Int(self.bounds.width * scale)
+            let h = Int(self.bounds.height * scale)
+            if w > 0 && h > 0 {
+                metalLayer.drawableSize = CGSize(width: w, height: h)
+                kudroid_set_metal_layer(Unmanaged.passUnretained(metalLayer).toOpaque(), Int32(w), Int32(h), Float(scale))
+            }
+        }
     }
 
     private func injectTouch(_ touches: Set<UITouch>, action: Int32) {
