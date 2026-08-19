@@ -58,6 +58,13 @@ extern "C" void* kudroid_jni_get_javavm(void);
 extern "C" int JNI_GetCreatedJavaVMs(void** vmBuf, size_t bufLen, size_t* nVMs);
 extern "C" int JNI_CreateJavaVM(void** p_vm, void** p_env, void* vm_args);
 
+extern "C" int kudroid_check_permission(const char* packageName, const char* permissionName);
+extern "C" void kudroid_set_group_permission(const char* packageName, const char* groupKey, int granted);
+extern "C" int kudroid_is_group_granted(const char* packageName, const char* groupKey);
+extern "C" void kudroid_grant_all_permissions(const char* packageName);
+extern "C" const char* kudroid_get_app_permissions_json(const char* packageName);
+extern "C" void kudroid_set_app_permissions_json(const char* packageName, const char* jsonStr);
+
 // For Bionic pthread emulation
 #include <cstdarg>
 #include <semaphore.h>
@@ -4071,6 +4078,14 @@ const SymbolEntry kSyscallSymbols[] = {
     {"kudroid_jni_get_javavm", reinterpret_cast<void*>(&kudroid_jni_get_javavm)},
     {"JNI_GetCreatedJavaVMs", reinterpret_cast<void*>(&JNI_GetCreatedJavaVMs)},
     {"JNI_CreateJavaVM", reinterpret_cast<void*>(&JNI_CreateJavaVM)},
+
+    // Android Runtime Permissions Bridge
+    {"kudroid_check_permission", reinterpret_cast<void*>(&kudroid_check_permission)},
+    {"kudroid_set_group_permission", reinterpret_cast<void*>(&kudroid_set_group_permission)},
+    {"kudroid_is_group_granted", reinterpret_cast<void*>(&kudroid_is_group_granted)},
+    {"kudroid_grant_all_permissions", reinterpret_cast<void*>(&kudroid_grant_all_permissions)},
+    {"kudroid_get_app_permissions_json", reinterpret_cast<void*>(&kudroid_get_app_permissions_json)},
+    {"kudroid_set_app_permissions_json", reinterpret_cast<void*>(&kudroid_set_app_permissions_json)},
 };
 
 } // namespace
