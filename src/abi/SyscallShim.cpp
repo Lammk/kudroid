@@ -3785,6 +3785,26 @@ extern "C" void bionic_android_set_abort_message(const char* msg) {
     }
 }
 
+extern "C" uint64_t bionic_ZSTD_trace_compress_begin(const void* cctx) {
+    (void)cctx;
+    return 0;
+}
+
+extern "C" void bionic_ZSTD_trace_compress_end(uint64_t handle, const void* cctx) {
+    (void)handle;
+    (void)cctx;
+}
+
+extern "C" uint64_t bionic_ZSTD_trace_decompress_begin(const void* dctx) {
+    (void)dctx;
+    return 0;
+}
+
+extern "C" void bionic_ZSTD_trace_decompress_end(uint64_t handle, const void* dctx) {
+    (void)handle;
+    (void)dctx;
+}
+
 const SymbolEntry kSyscallSymbols[] = {
     {"__register_atfork", reinterpret_cast<void*>(&bionic_register_atfork)},
     {"pthread_create", reinterpret_cast<void*>(&bionic_pthread_create)},
@@ -4131,6 +4151,12 @@ const SymbolEntry kSyscallSymbols[] = {
     {"kudroid_grant_all_permissions", reinterpret_cast<void*>(&kudroid_grant_all_permissions)},
     {"kudroid_get_app_permissions_json", reinterpret_cast<void*>(&kudroid_get_app_permissions_json)},
     {"kudroid_set_app_permissions_json", reinterpret_cast<void*>(&kudroid_set_app_permissions_json)},
+
+    // Zstandard Compression Tracing Symbols
+    {"ZSTD_trace_compress_begin", reinterpret_cast<void*>(&bionic_ZSTD_trace_compress_begin)},
+    {"ZSTD_trace_compress_end", reinterpret_cast<void*>(&bionic_ZSTD_trace_compress_end)},
+    {"ZSTD_trace_decompress_begin", reinterpret_cast<void*>(&bionic_ZSTD_trace_decompress_begin)},
+    {"ZSTD_trace_decompress_end", reinterpret_cast<void*>(&bionic_ZSTD_trace_decompress_end)},
 };
 
 } // namespace
