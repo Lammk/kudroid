@@ -418,6 +418,9 @@ static std::string parseArscAppName(const std::vector<std::uint8_t>& data) {
             s.find(".png") == std::string::npos &&
             s.find(".xml") == std::string::npos) {
             const std::string lower = toLower(s);
+            if (lower.find("minecraft") != std::string::npos) {
+                return "Minecraft";
+            }
             if (lower == "discord" || lower == "ultrakill" || lower.find("rolling sky") != std::string::npos) {
                 return s;
             }
@@ -445,6 +448,7 @@ static std::string prettifyAppName(const std::string& raw) {
     }
 
     const std::string lower = toLower(s);
+    if (lower.find("minecraft") != std::string::npos || lower.find("mojang") != std::string::npos) return "Minecraft";
     if (lower.find("ultrakill") != std::string::npos) return "ULTRAKILL";
     if (lower.find("discord") != std::string::npos) return "Discord";
     if (lower.find("rolling") != std::string::npos && lower.find("sky") != std::string::npos) return "Rolling Sky";
@@ -463,7 +467,8 @@ static std::string prettifyAppName(const std::string& raw) {
         if (wLower == "apk" || wLower == "arm64" || wLower == "arm64v8a" || wLower == "v8a" ||
             wLower == "vulkan" || wLower == "gles" || wLower == "mod" || wLower == "signed" ||
             wLower == "release" || wLower == "debug" || wLower == "beta" || wLower == "alpha" ||
-            wLower == "jakitomzed") {
+            wLower == "jakitomzed" || wLower == "bandishare" || wLower == "apkpure" ||
+            wLower == "moddroid" || wLower == "an1" || wLower == "apkmirror") {
             continue;
         }
         // Bỏ qua version thuần số ví dụ "5.5.8" hoặc "v202"
@@ -631,6 +636,8 @@ static bool extract_apk_impl(const std::string& apkPath, const std::string& targ
         if (label.empty() || label.front() == '@' || (label.find('.') != std::string::npos && label.find(' ') == std::string::npos)) {
             if (!arscAppName.empty()) {
                 label = arscAppName;
+            } else if (manifestInfo.packageName.find("minecraft") != std::string::npos || manifestInfo.packageName.find("mojang") != std::string::npos) {
+                label = "Minecraft";
             } else {
                 label = prettifyAppName(appDirName);
             }

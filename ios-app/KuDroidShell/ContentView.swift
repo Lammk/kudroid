@@ -242,6 +242,7 @@ struct AppsView: View {
         }
 
         let lower = s.lowercased()
+        if lower.contains("minecraft") || lower.contains("mojang") { return "Minecraft" }
         if lower.contains("ultrakill") { return "ULTRAKILL" }
         if lower.contains("discord") { return "Discord" }
         if lower.contains("rolling") && lower.contains("sky") { return "Rolling Sky" }
@@ -250,7 +251,8 @@ struct AppsView: View {
         // 3. Tách các tiền tố/hậu tố rác thường gặp trong tên file APK mod/port
         let junkWords: Set<String> = [
             "apk", "arm64", "arm64v8a", "v8a", "vulkan", "gles", "mod",
-            "signed", "release", "debug", "beta", "alpha", "jakitomzed"
+            "signed", "release", "debug", "beta", "alpha", "jakitomzed",
+            "bandishare", "apkpure", "moddroid", "an1", "apkmirror"
         ]
         
         let components = s.split(whereSeparator: { $0 == "-" || $0 == "_" || $0 == " " })
