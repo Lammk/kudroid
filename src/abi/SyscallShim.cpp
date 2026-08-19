@@ -630,6 +630,7 @@ extern "C" int bionic_ioctl(int fd, unsigned long request, ...) {
 }
 
 #define PR_SET_NAME 15
+#define PR_GET_NAME 16
 #define PR_SET_VMA  0x53564d41
 
 extern "C" int bionic_prctl(int option, unsigned long arg2, unsigned long arg3, unsigned long arg4, unsigned long arg5) {
@@ -645,6 +646,15 @@ extern "C" int bionic_prctl(int option, unsigned long arg2, unsigned long arg3, 
                           std::string(arg2 ? reinterpret_cast<const char*>(arg2) : "<null>") +
                           "\") -> " + (r == 0 ? "0" : std::to_string(r) + " errno=" + std::to_string(errno)));
         return r;
+    } else if (option == PR_GET_NAME) {
+        if (arg2) {
+#ifdef __APPLE__
+            pthread_getname_np(pthread_self(), reinterpret_cast<char*>(arg2), 16);
+#else
+            pthread_getname_np(pthread_self(), reinterpret_cast<char*>(arg2), 16);
+#endif
+        }
+        return 0;
     } else if (option == PR_SET_VMA) {
         // Just fake it for PR_SET_VMA_ANON_NAME to prevent crashes
         logAndroidMessage(4, "KuDroidSyscall", "prctl(PR_SET_VMA) faked -> 0");
@@ -652,6 +662,97 @@ extern "C" int bionic_prctl(int option, unsigned long arg2, unsigned long arg3, 
     }
     logAndroidMessage(4, "KuDroidSyscall", "prctl(option=0x" +
                       std::to_string((unsigned)option) + ") faked -> 0");
+    return 0;
+}
+
+struct bionic_utsname {
+    char sysname[65];
+    char nodename[65];
+    char release[65];
+    char version[65];
+    char machine[65];
+    char domainname[65];
+};
+
+extern "C" int bionic_uname(struct bionic_utsname* buf) {
+    if (!buf) return -1;
+    strncpy(buf->sysname, "Linux", sizeof(buf->sysname) - 1);
+    strncpy(buf->nodename, "localhost", sizeof(buf->nodename) - 1);
+    strncpy(buf->release, "5.10.0-kudroid", sizeof(buf->release) - 1);
+    strncpy(buf->version, "#1 SMP PREEMPT 2026", sizeof(buf->version) - 1);
+    strncpy(buf->machine, "aarch64", sizeof(buf->machine) - 1);
+    strncpy(buf->domainname, "(none)", sizeof(buf->domainname) - 1);
+    return 0;
+}
+
+extern "C" int bionic_openat(int dirfd, const char* pathname, int flags, mode_t mode) {
+    if (!pathname) return -1;
+    const std::string remapped = kudroid::VFSPathRemapper::getInstance().remap(pathname);
+    return ::openat(dirfd, remapped.c_str(), flags, mode);
+}
+
+struct bionic_stat64 {
+    uint64_t st_dev;
+    uint64_t st_ino;
+    uint32_t st_mode;
+    uint32_t st_nlink;
+    uint32_t st_uid;
+    uint32_t st_gid;
+    uint64_t st_rdev;
+    uint64_t __pad1;
+    int64_t  st_size;
+    int32_t  st_blksize;
+    int32_t  __pad2;
+    int64_t  st_blocks;
+    int64_t  __st_atime_sec;
+    uint64_t __st_atime_nsec;
+    int64_t  __st_mtime_sec;
+    uint64_t __st_mtime_nsec;
+    int64_t  __st_ctime_sec;
+    uint64_t __st_ctime_nsec;
+    uint32_t __unused4;
+    uint32_t __unused5;
+};
+
+extern "C" int bionic_newfstatat(int dirfd, const char* pathname, struct bionic_stat64* statbuf, int flags) {
+    if (!statbuf) return -1;
+    struct stat host_st;
+    memset(&host_st, 0, sizeof(host_st));
+    int res = 0;
+    if (pathname && *pathname) {
+        const std::string remapped = kudroid::VFSPathRemapper::getInstance().remap(pathname);
+        res = ::fstatat(dirfd, remapped.c_str(), &host_st, flags);
+    } else {
+        res = ::fstat(dirfd, &host_st);
+    }
+    if (res != 0) return res;
+
+    memset(statbuf, 0, sizeof(*statbuf));
+    statbuf->st_dev = static_cast<uint64_t>(host_st.st_dev);
+    statbuf->st_ino = static_cast<uint64_t>(host_st.st_ino);
+    statbuf->st_mode = static_cast<uint32_t>(host_st.st_mode);
+    statbuf->st_nlink = static_cast<uint32_t>(host_st.st_nlink);
+    statbuf->st_uid = static_cast<uint32_t>(host_st.st_uid);
+    statbuf->st_gid = static_cast<uint32_t>(host_st.st_gid);
+    statbuf->st_rdev = static_cast<uint64_t>(host_st.st_rdev);
+    statbuf->st_size = static_cast<int64_t>(host_st.st_size);
+    statbuf->st_blksize = static_cast<int32_t>(host_st.st_blksize);
+    statbuf->st_blocks = static_cast<int64_t>(host_st.st_blocks);
+#if defined(__APPLE__)
+    statbuf->__st_atime_sec = host_st.st_atimespec.tv_sec;
+    statbuf->__st_atime_nsec = host_st.st_atimespec.tv_nsec;
+    statbuf->__st_mtime_sec = host_st.st_mtimespec.tv_sec;
+    statbuf->__st_mtime_nsec = host_st.st_mtimespec.tv_nsec;
+    statbuf->__st_ctime_sec = host_st.st_ctimespec.tv_sec;
+    statbuf->__st_ctime_nsec = host_st.st_ctimespec.tv_nsec;
+#else
+    statbuf->__st_atime_sec = host_st.st_atim.tv_sec;
+    statbuf->__st_atime_nsec = host_st.st_atim.tv_nsec;
+    statbuf->__st_mtime_sec = host_st.st_mtim.tv_sec;
+    statbuf->__st_mtime_nsec = host_st.st_mtim.tv_nsec;
+    statbuf->__st_ctime_sec = host_st.st_ctim.tv_sec;
+    statbuf->__st_ctime_nsec = host_st.st_ctim.tv_nsec;
+#endif
     return 0;
 }
 
@@ -1164,53 +1265,321 @@ extern "C" void bionic___cxa_guard_abort(uint64_t* g) {
     *reinterpret_cast<volatile uint32_t*>(b0 + 4) = 0;
 }
 
+extern "C" int bionic_epoll_create1(int flags);
+extern "C" int bionic_epoll_ctl(int epfd, int op, int fd, void *event_ptr);
+extern "C" int bionic_epoll_wait(int epfd, void *events_ptr, int maxevents, int timeout);
+extern "C" int bionic_pipe2(int pipefd[2], int flags);
+extern "C" int bionic_clock_gettime(int clock_id, struct timespec *tp);
+extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset);
+extern "C" int bionic_mprotect(void *addr, size_t len, int prot);
+extern "C" int bionic_close(int fd);
+extern "C" ssize_t bionic_getrandom(void *buf, size_t buflen, unsigned int flags);
+
 extern "C" long bionic_syscall(long number, ...) {
-    // DIAG: x19 LÚC ENTRY = guard pointer của guard_acquire đang gọi gettid
-    // (callee-saved; qua PLT stub `br` frameless không đổi). Bắt NGAY đầu hàm
-    // — sau các call (pthread_threadid_np, tid_registry_record) x19 có thể đã
-    // bị compiler dùng làm scratch.
     uintptr_t entryX19 = 0;
 #if defined(__aarch64__)
-    // Chỉ bắt x19 khi diag bật — bản thân lệnh mov nhẹ, nhưng tránh chạy
-    // không cần thiết trên hot path.
     if (guard_diag_enabled()) asm volatile("mov %0, x19" : "=r"(entryX19));
 #endif
-    if (number == KUDROID_SYS_gettid) {
-        // macOS không có gettid — pthread_threadid_np cho thread-id duy nhất,
-        // ổn định (libc++abi chỉ cần so sánh bằng same-thread).
+
+    va_list ap;
+    va_start(ap, number);
+
+    switch (number) {
+        // Epoll & Descriptors
+        case 20: { // epoll_create1
+            int flags = va_arg(ap, int);
+            va_end(ap);
+            return bionic_epoll_create1(flags);
+        }
+        case 21: { // epoll_ctl
+            int epfd = va_arg(ap, int);
+            int op = va_arg(ap, int);
+            int fd = va_arg(ap, int);
+            void* ev = va_arg(ap, void*);
+            va_end(ap);
+            return bionic_epoll_ctl(epfd, op, fd, ev);
+        }
+        case 22: { // epoll_pwait / epoll_wait
+            int epfd = va_arg(ap, int);
+            void* events = va_arg(ap, void*);
+            int maxevents = va_arg(ap, int);
+            int timeout = va_arg(ap, int);
+            va_end(ap);
+            return bionic_epoll_wait(epfd, events, maxevents, timeout);
+        }
+        case 23: { // dup
+            int oldfd = va_arg(ap, int);
+            va_end(ap);
+            return ::dup(oldfd);
+        }
+        case 24: { // dup3
+            int oldfd = va_arg(ap, int);
+            int newfd = va_arg(ap, int);
+            va_end(ap);
+            return ::dup2(oldfd, newfd);
+        }
+        case 34: { // mkdirat
+            int dirfd = va_arg(ap, int);
+            const char* path = va_arg(ap, const char*);
+            mode_t mode = va_arg(ap, mode_t);
+            va_end(ap);
+            if (!path) return -1;
+            const std::string remapped = kudroid::VFSPathRemapper::getInstance().remap(path);
+            return ::mkdirat(dirfd, remapped.c_str(), mode);
+        }
+        case 35: { // unlinkat
+            int dirfd = va_arg(ap, int);
+            const char* path = va_arg(ap, const char*);
+            int flags = va_arg(ap, int);
+            va_end(ap);
+            if (!path) return -1;
+            const std::string remapped = kudroid::VFSPathRemapper::getInstance().remap(path);
+            return ::unlinkat(dirfd, remapped.c_str(), flags);
+        }
+        case 46: { // ftruncate
+            int fd = va_arg(ap, int);
+            off_t length = va_arg(ap, off_t);
+            va_end(ap);
+            return ::ftruncate(fd, length);
+        }
+        case 56: { // openat
+            int dirfd = va_arg(ap, int);
+            const char* path = va_arg(ap, const char*);
+            int flags = va_arg(ap, int);
+            mode_t mode = va_arg(ap, mode_t);
+            va_end(ap);
+            return bionic_openat(dirfd, path, flags, mode);
+        }
+        case 57: { // close
+            int fd = va_arg(ap, int);
+            va_end(ap);
+            return bionic_close(fd);
+        }
+        case 59: { // pipe2
+            int* pipefd = va_arg(ap, int*);
+            int flags = va_arg(ap, int);
+            va_end(ap);
+            return bionic_pipe2(pipefd, flags);
+        }
+        case 62: { // lseek
+            int fd = va_arg(ap, int);
+            off_t offset = va_arg(ap, off_t);
+            int whence = va_arg(ap, int);
+            va_end(ap);
+            return ::lseek(fd, offset, whence);
+        }
+        case 63: { // read
+            int fd = va_arg(ap, int);
+            void* buf = va_arg(ap, void*);
+            size_t count = va_arg(ap, size_t);
+            va_end(ap);
+            return ::read(fd, buf, count);
+        }
+        case 64: { // write
+            int fd = va_arg(ap, int);
+            const void* buf = va_arg(ap, const void*);
+            size_t count = va_arg(ap, size_t);
+            va_end(ap);
+            return ::write(fd, buf, count);
+        }
+        case 67: { // pread64
+            int fd = va_arg(ap, int);
+            void* buf = va_arg(ap, void*);
+            size_t count = va_arg(ap, size_t);
+            off_t offset = va_arg(ap, off_t);
+            va_end(ap);
+            return ::pread(fd, buf, count, offset);
+        }
+        case 68: { // pwrite64
+            int fd = va_arg(ap, int);
+            const void* buf = va_arg(ap, const void*);
+            size_t count = va_arg(ap, size_t);
+            off_t offset = va_arg(ap, off_t);
+            va_end(ap);
+            return ::pwrite(fd, buf, count, offset);
+        }
+        case 79: { // newfstatat
+            int dirfd = va_arg(ap, int);
+            const char* path = va_arg(ap, const char*);
+            struct bionic_stat64* st = va_arg(ap, struct bionic_stat64*);
+            int flags = va_arg(ap, int);
+            va_end(ap);
+            return bionic_newfstatat(dirfd, path, st, flags);
+        }
+        case 98: { // futex
+            const long result = emulate_futex_syscall(ap);
+            va_end(ap);
+            return result;
+        }
+        case 101: { // nanosleep
+            const struct timespec* req = va_arg(ap, const struct timespec*);
+            struct timespec* rem = va_arg(ap, struct timespec*);
+            va_end(ap);
+            return ::nanosleep(req, rem);
+        }
+        case 113: { // clock_gettime
+            int clock_id = va_arg(ap, int);
+            struct timespec* tp = va_arg(ap, struct timespec*);
+            va_end(ap);
+            return bionic_clock_gettime(clock_id, tp);
+        }
+        case 124: { // sched_yield
+            va_end(ap);
+            return ::sched_yield();
+        }
+        case 160: { // uname
+            struct bionic_utsname* buf = va_arg(ap, struct bionic_utsname*);
+            va_end(ap);
+            return bionic_uname(buf);
+        }
+        case 167: { // prctl
+            int option = va_arg(ap, int);
+            unsigned long a2 = va_arg(ap, unsigned long);
+            unsigned long a3 = va_arg(ap, unsigned long);
+            unsigned long a4 = va_arg(ap, unsigned long);
+            unsigned long a5 = va_arg(ap, unsigned long);
+            va_end(ap);
+            return bionic_prctl(option, a2, a3, a4, a5);
+        }
+        case 169: { // gettimeofday
+            struct timeval* tv = va_arg(ap, struct timeval*);
+            void* tz = va_arg(ap, void*);
+            va_end(ap);
+            return ::gettimeofday(tv, (struct timezone*)tz);
+        }
+        case 172: { // getpid
+            va_end(ap);
+            return static_cast<long>(::getpid());
+        }
+        case 174: { // getuid
+            va_end(ap);
+            return static_cast<long>(::getuid());
+        }
+        case 175: { // geteuid
+            va_end(ap);
+            return static_cast<long>(::geteuid());
+        }
+        case 176: { // getgid
+            va_end(ap);
+            return static_cast<long>(::getgid());
+        }
+        case 177: { // getegid
+            va_end(ap);
+            return static_cast<long>(::getegid());
+        }
+        case 178: { // gettid
+            va_end(ap);
 #ifdef __APPLE__
-        uint64_t tid = 0;
-        pthread_threadid_np(NULL, &tid);
-        const long result = static_cast<long>(tid);
+            uint64_t tid = 0;
+            pthread_threadid_np(NULL, &tid);
+            const long result = static_cast<long>(tid);
 #else
-        const long result = static_cast<long>(::syscall(SYS_gettid));
+            const long result = static_cast<long>(::syscall(SYS_gettid));
 #endif
-        tid_registry_record(result);
-        if (guard_diag_enabled()) log_guard_acquire_diag(result, entryX19);
-        return result;
+            tid_registry_record(result);
+            if (guard_diag_enabled()) log_guard_acquire_diag(result, entryX19);
+            return result;
+        }
+        case 198: { // socket
+            int domain = va_arg(ap, int);
+            int type = va_arg(ap, int);
+            int protocol = va_arg(ap, int);
+            va_end(ap);
+            return ::socket(domain, type, protocol);
+        }
+        case 200: { // bind
+            int fd = va_arg(ap, int);
+            const struct sockaddr* addr = va_arg(ap, const struct sockaddr*);
+            socklen_t addrlen = va_arg(ap, socklen_t);
+            va_end(ap);
+            return ::bind(fd, addr, addrlen);
+        }
+        case 203: { // connect
+            int fd = va_arg(ap, int);
+            const struct sockaddr* addr = va_arg(ap, const struct sockaddr*);
+            socklen_t addrlen = va_arg(ap, socklen_t);
+            va_end(ap);
+            return ::connect(fd, addr, addrlen);
+        }
+        case 204: { // getsockname
+            int fd = va_arg(ap, int);
+            struct sockaddr* addr = va_arg(ap, struct sockaddr*);
+            socklen_t* addrlen = va_arg(ap, socklen_t*);
+            va_end(ap);
+            return ::getsockname(fd, addr, addrlen);
+        }
+        case 206: { // sendto
+            int fd = va_arg(ap, int);
+            const void* buf = va_arg(ap, const void*);
+            size_t len = va_arg(ap, size_t);
+            int flags = va_arg(ap, int);
+            const struct sockaddr* addr = va_arg(ap, const struct sockaddr*);
+            socklen_t addrlen = va_arg(ap, socklen_t);
+            va_end(ap);
+            return ::sendto(fd, buf, len, flags, addr, addrlen);
+        }
+        case 207: { // recvfrom
+            int fd = va_arg(ap, int);
+            void* buf = va_arg(ap, void*);
+            size_t len = va_arg(ap, size_t);
+            int flags = va_arg(ap, int);
+            struct sockaddr* addr = va_arg(ap, struct sockaddr*);
+            socklen_t* addrlen = va_arg(ap, socklen_t*);
+            va_end(ap);
+            return ::recvfrom(fd, buf, len, flags, addr, addrlen);
+        }
+        case 215: { // munmap
+            void* addr = va_arg(ap, void*);
+            size_t length = va_arg(ap, size_t);
+            va_end(ap);
+            return ::munmap(addr, length);
+        }
+        case 222: { // mmap
+            void* addr = va_arg(ap, void*);
+            size_t length = va_arg(ap, size_t);
+            int prot = va_arg(ap, int);
+            int flags = va_arg(ap, int);
+            int fd = va_arg(ap, int);
+            off_t offset = va_arg(ap, off_t);
+            va_end(ap);
+            return (long)bionic_mmap(addr, length, prot, flags, fd, offset);
+        }
+        case 226: { // mprotect
+            void* addr = va_arg(ap, void*);
+            size_t len = va_arg(ap, size_t);
+            int prot = va_arg(ap, int);
+            va_end(ap);
+            return bionic_mprotect(addr, len, prot);
+        }
+        case 233: { // madvise
+            void* addr = va_arg(ap, void*);
+            size_t len = va_arg(ap, size_t);
+            int advice = va_arg(ap, int);
+            va_end(ap);
+            return ::madvise(addr, len, advice);
+        }
+        case 278: { // getrandom
+            void* buf = va_arg(ap, void*);
+            size_t buflen = va_arg(ap, size_t);
+            unsigned int flags = va_arg(ap, unsigned int);
+            va_end(ap);
+            return bionic_getrandom(buf, buflen, flags);
+        }
+        case KUDROID_SYS_process_vm_readv: {
+            const pid_t pid = static_cast<pid_t>(va_arg(ap, int));
+            const struct iovec* local_iov = va_arg(ap, const struct iovec*);
+            const unsigned long liovcnt = va_arg(ap, unsigned long);
+            const struct iovec* remote_iov = va_arg(ap, const struct iovec*);
+            const unsigned long riovcnt = va_arg(ap, unsigned long);
+            const unsigned long flags = va_arg(ap, unsigned long);
+            va_end(ap);
+            return bionic_process_vm_readv(pid, local_iov, liovcnt, remote_iov, riovcnt, flags);
+        }
+        default:
+            break;
     }
-    if (number == KUDROID_SYS_getpid) {
-        return static_cast<long>(::getpid());
-    }
-    if (number == KUDROID_SYS_futex) {
-        va_list ap;
-        va_start(ap, number);
-        const long result = emulate_futex_syscall(ap);
-        va_end(ap);
-        return result;
-    }
-    if (number == KUDROID_SYS_process_vm_readv) {
-        va_list ap;
-        va_start(ap, number);
-        const pid_t pid = static_cast<pid_t>(va_arg(ap, int));
-        const struct iovec* local_iov = va_arg(ap, const struct iovec*);
-        const unsigned long liovcnt = va_arg(ap, unsigned long);
-        const struct iovec* remote_iov = va_arg(ap, const struct iovec*);
-        const unsigned long riovcnt = va_arg(ap, unsigned long);
-        const unsigned long flags = va_arg(ap, unsigned long);
-        va_end(ap);
-        return bionic_process_vm_readv(pid, local_iov, liovcnt, remote_iov, riovcnt, flags);
-    }
+    va_end(ap);
+
     // Chưa map — log 1 lần mỗi số rồi ENOSYS (không chạy syscall macOS sai số).
     static long s_unknownSeen[64];
     static int s_unknownCount = 0;
@@ -3560,6 +3929,14 @@ const SymbolEntry kSyscallSymbols[] = {
     {"rename", reinterpret_cast<void*>(&vfs_rename)},
     {"ioctl", reinterpret_cast<void*>(&bionic_ioctl)},
     {"prctl", reinterpret_cast<void*>(&bionic_prctl)},
+    {"uname", reinterpret_cast<void*>(&bionic_uname)},
+    {"__uname", reinterpret_cast<void*>(&bionic_uname)},
+    {"pipe2", reinterpret_cast<void*>(&bionic_pipe2)},
+    {"openat", reinterpret_cast<void*>(&bionic_openat)},
+    {"openat64", reinterpret_cast<void*>(&bionic_openat)},
+    {"fstatat", reinterpret_cast<void*>(&bionic_newfstatat)},
+    {"fstatat64", reinterpret_cast<void*>(&bionic_newfstatat)},
+    {"newfstatat", reinterpret_cast<void*>(&bionic_newfstatat)},
     {"getrandom", reinterpret_cast<void*>(&bionic_getrandom)},
     {"clock_gettime", reinterpret_cast<void*>(&bionic_clock_gettime)},
     {"__clock_gettime", reinterpret_cast<void*>(&bionic_clock_gettime)},
