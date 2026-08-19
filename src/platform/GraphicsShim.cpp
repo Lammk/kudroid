@@ -602,8 +602,9 @@ extern "C" VkResult bionic_vkCreateInstance(const VkInstanceCreateInfo* pCreateI
         for (uint32_t i = 0; i < pCreateInfo->enabledExtensionCount; ++i) {
             const char* ext = pCreateInfo->ppEnabledExtensionNames[i];
             if (strcmp(ext, "VK_KHR_android_surface") == 0) {
-                // Translate to MoltenVK iOS surface extension
+                // Translate to MoltenVK iOS surface extensions
                 extList.push_back("VK_MVK_ios_surface");
+                extList.push_back("VK_EXT_metal_surface");
             } else {
                 extList.push_back(ext);
             }
