@@ -176,7 +176,14 @@ std::string VFSPathRemapper::remap(const char* originalPath) const {
     else if (original.find("/data/local/tmp/") == 0) { prefix = "/data/local/tmp/"; rootName = "data/local/tmp/"; }
     else if (original.find("/cache/") == 0) { prefix = "/cache/"; rootName = "data/cache/"; }
     else if (original.find("/dev/") == 0) { prefix = "/dev/"; rootName = "dev/"; }
-    else return std::string(original);
+    else {
+        if (!original.empty() && original[0] != '/') {
+            std::string mapped = androidRoot_ + "/data/local/tmp/" + std::string(original);
+            vfsTrace("Remapped relative path: " + std::string(original) + " -> " + mapped);
+            return mapped;
+        }
+        return std::string(original);
+    }
 
     std::string mapped = androidRoot_ + "/" + std::string(rootName) + std::string(original.substr(prefix.size()));
     vfsTrace("Remapped: " + std::string(original) + " -> " + mapped);
