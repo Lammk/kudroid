@@ -584,6 +584,8 @@ static PFN_vkGetInstanceProcAddr get_real_vkGetInstanceProcAddr() {
     return real_gipa;
 }
 
+static VkInstance s_activeVkInstance = nullptr;
+
 // Intercept vkCreateInstance: translate Android surface extension to iOS MoltenVK surface extension
 extern "C" VkResult bionic_vkCreateInstance(const VkInstanceCreateInfo* pCreateInfo,
                                             const VkAllocationCallbacks* pAllocator,
@@ -619,6 +621,9 @@ extern "C" VkResult bionic_vkCreateInstance(const VkInstanceCreateInfo* pCreateI
     filteredInfo.ppEnabledExtensionNames = extList.data();
 
     VkResult res = real_create(&filteredInfo, pAllocator, pInstance);
+    if (res == VK_SUCCESS && pInstance) {
+        s_activeVkInstance = *pInstance;
+    }
     KLOG(kInfo, "KuDroidGPU", "bionic_vkCreateInstance returned %d (instance=%p)", (int)res, (void*)*pInstance);
     return res;
 }
@@ -841,6 +846,10 @@ void* get_vk_func(const char* name) {
     }
     auto real = get_real_vkGetInstanceProcAddr();
     if (real) {
+        if (s_activeVkInstance) {
+            void* f = (void*)real(s_activeVkInstance, name);
+            if (f) return f;
+        }
         void* f = (void*)real(nullptr, name);
         if (f) return f;
     }
