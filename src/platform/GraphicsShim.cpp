@@ -499,6 +499,9 @@ typedef void* VkInstance;
 typedef void* VkSurfaceKHR;
 typedef void* VkAllocationCallbacks;
 typedef void* PFN_vkVoidFunction;
+typedef void* VkDevice;
+
+extern "C" PFN_vkVoidFunction bionic_vkGetDeviceProcAddr(VkDevice device, const char* pName);
 
 #define VK_SUCCESS 0
 #define VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT 1000217000
