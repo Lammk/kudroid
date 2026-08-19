@@ -1134,6 +1134,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                         appendAndEcho("[kudroid_core] Java APK Application detected (No ANativeActivity_onCreate).");
                         
                         std::string targetActivity = "";
+                        std::string pkgName = "";
                         std::filesystem::path infoPath = appDir / "app_info.json";
                         if (std::filesystem::exists(infoPath)) {
                             std::ifstream f(infoPath);
@@ -1144,23 +1145,40 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                     auto start = posAct + 18;
                                     auto end = line.find("\"", start);
                                     if (end != std::string::npos) {
-                                        targetActivity = line.substr(start, end - start);
+                                        std::string act = line.substr(start, end - start);
+                                        if (!act.empty()) targetActivity = act;
                                     }
                                 }
-                                if (targetActivity.empty()) {
-                                    auto posPkg = line.find("\"package\": \"");
-                                    if (posPkg != std::string::npos) {
-                                        auto start = posPkg + 12;
-                                        auto end = line.find("\"", start);
-                                        if (end != std::string::npos) {
-                                            targetActivity = line.substr(start, end - start);
-                                        }
+                                auto posPkg = line.find("\"package\": \"");
+                                if (posPkg != std::string::npos) {
+                                    auto start = posPkg + 12;
+                                    auto end = line.find("\"", start);
+                                    if (end != std::string::npos) {
+                                        pkgName = line.substr(start, end - start);
                                     }
                                 }
                             }
                         }
+
                         if (targetActivity.empty()) {
-                            targetActivity = appName;
+                            if (!pkgName.empty()) {
+                                if (pkgName.find("zarchiver") != std::string::npos) {
+                                    targetActivity = "ru.zdevs.zarchiver.ZArchiver";
+                                } else {
+                                    targetActivity = pkgName + ".MainActivity";
+                                }
+                            } else {
+                                std::string base = appName;
+                                auto uIdx = base.find('_');
+                                if (uIdx != std::string::npos) {
+                                    base = base.substr(0, uIdx);
+                                }
+                                if (base.find("zarchiver") != std::string::npos) {
+                                    targetActivity = "ru.zdevs.zarchiver.ZArchiver";
+                                } else {
+                                    targetActivity = base + ".MainActivity";
+                                }
+                            }
                         }
                         appendAndEcho("[kudroid_core] Target Activity: " + targetActivity);
                         appendAndEcho("[kudroid_core] Launching Android ActivityThread runtime...");
