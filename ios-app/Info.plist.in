@@ -63,5 +63,13 @@
     <true/>
     <key>LSSupportsOpeningDocumentsInPlace</key>
     <true/>
+    <key>NSCameraUsageDescription</key>
+    <string>KuDroid needs camera access for guest Android applications.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>KuDroid needs microphone access for guest Android applications and audio recording.</string>
+    <key>NSPhotoLibraryUsageDescription</key>
+    <string>KuDroid needs photo library access to import/export media files with Android apps.</string>
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>KuDroid needs Bluetooth access to connect wireless game controllers.</string>
 </dict>
 </plist>

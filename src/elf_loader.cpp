@@ -980,8 +980,9 @@ void ElfLoader::executeInit() {
             static_cast<char*>(base_) + init_array_);
         size_t count = init_arraysz_ / sizeof(void*);
         for (size_t i = 0; i < count; ++i) {
-            if (array[i]) {
-                array[i]();
+            void (*func)() = array[i];
+            if (func != nullptr && func != reinterpret_cast<void(*)()>(-1) && func != reinterpret_cast<void(*)()>(0xffffffffffffffffULL)) {
+                func();
             }
         }
     }
@@ -996,8 +997,9 @@ void ElfLoader::executeFini() {
             static_cast<char*>(base_) + fini_array_);
         size_t count = fini_arraysz_ / sizeof(void*);
         for (size_t i = count; i > 0; --i) {
-            if (array[i - 1]) {
-                array[i - 1]();
+            void (*func)() = array[i - 1];
+            if (func != nullptr && func != reinterpret_cast<void(*)()>(-1) && func != reinterpret_cast<void(*)()>(0xffffffffffffffffULL)) {
+                func();
             }
         }
     }

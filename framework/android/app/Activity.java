@@ -198,4 +198,22 @@ public class Activity extends ContextThemeWrapper {
     public void runOnUiThread(Runnable action) {
         action.run();
     }
+
+    /**
+     * yêu cầu các quyền runtime (Android 6.0+).
+     */
+    public void requestPermissions(String[] permissions, int requestCode) {
+        if (permissions == null) return;
+        int[] grantResults = new int[permissions.length];
+        for (int i = 0; i < permissions.length; ++i) {
+            grantResults[i] = android.content.pm.PackageManager.PERMISSION_GRANTED;
+        }
+        onRequestPermissionsResult(requestCode, permissions, grantResults);
+    }
+
+    /**
+     * nhận kết quả yêu cầu quyền runtime.
+     */
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+    }
 }

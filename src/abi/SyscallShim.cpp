@@ -3615,6 +3615,47 @@ extern "C" int bionic___FD_ISSET_chk(int fd, const fd_set* set, size_t set_size)
     return FD_ISSET(fd, set) ? 1 : 0;
 }
 
+extern "C" int bionic___open_2(const char* path, int flags) {
+    return bionic_openat(AT_FDCWD, path, flags, 0);
+}
+
+extern "C" mode_t bionic___umask_chk(mode_t mask) {
+    return ::umask(mask);
+}
+
+extern "C" char* bionic___strrchr_chk(const char* s, int c, size_t s_len) {
+    (void)s_len;
+    return const_cast<char*>(::strrchr(s, c));
+}
+
+struct bionic_sysinfo_struct {
+    long uptime;
+    unsigned long loads[3];
+    unsigned long totalram;
+    unsigned long freeram;
+    unsigned long sharedram;
+    unsigned long bufferram;
+    unsigned long totalswap;
+    unsigned long freeswap;
+    unsigned short procs;
+    unsigned short pad;
+    unsigned long totalhigh;
+    unsigned long freehigh;
+    unsigned int mem_unit;
+    char _f[8];
+};
+
+extern "C" int bionic_sysinfo(struct bionic_sysinfo_struct* info) {
+    if (!info) return -1;
+    memset(info, 0, sizeof(*info));
+    info->uptime = 3600;
+    info->totalram = 4ULL * 1024 * 1024 * 1024;
+    info->freeram = 2ULL * 1024 * 1024 * 1024;
+    info->procs = 100;
+    info->mem_unit = 1;
+    return 0;
+}
+
 // bionic: int sem_timedwait(sem_t* sem, const struct timespec* abs_timeout)
 // abs_timeout là thời điểm tuyệt đối (CLOCK_REALTIME). Host iOS có sem_timedwait
 // nhưng không export qua dlsym(RTLD_DEFAULT), nên giả lập bằng sem_trywait + sleep.
@@ -4054,6 +4095,10 @@ const SymbolEntry kSyscallSymbols[] = {
     {"__strcpy_chk", reinterpret_cast<void*>(&bionic___strcpy_chk)},
     {"__strcat_chk", reinterpret_cast<void*>(&bionic___strcat_chk)},
     {"__fdelt_chk", reinterpret_cast<void*>(&bionic___fdelt_chk)},
+    {"__open_2", reinterpret_cast<void*>(&bionic___open_2)},
+    {"__umask_chk", reinterpret_cast<void*>(&bionic___umask_chk)},
+    {"__strrchr_chk", reinterpret_cast<void*>(&bionic___strrchr_chk)},
+    {"sysinfo", reinterpret_cast<void*>(&bionic_sysinfo)},
 
     // pthread extensions
     {"pthread_condattr_setclock", reinterpret_cast<void*>(&bionic_pthread_condattr_setclock)},
