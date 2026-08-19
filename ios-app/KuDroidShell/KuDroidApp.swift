@@ -14,9 +14,10 @@ class AppSession: ObservableObject {
     @Published var soRunningTitle: String = ""
 }
 
-struct GlobalMetalViewRepresentable: UIViewRepresentable {
-    func makeUIView(context: Context) -> GlobalMetalView {
-        let view = GlobalMetalView()
+final class SharedMetalContainer {
+    static let shared = SharedMetalContainer()
+    let view = GlobalMetalView()
+    private init() {
         view.backgroundColor = .clear
         view.isMultipleTouchEnabled = true
         view.isUserInteractionEnabled = true
@@ -33,7 +34,21 @@ struct GlobalMetalViewRepresentable: UIViewRepresentable {
             metalLayer.drawableSize = CGSize(width: w, height: h)
             kudroid_set_metal_layer(Unmanaged.passUnretained(metalLayer).toOpaque(), Int32(w), Int32(h), Float(scale))
         }
-        return view
+    }
+}
+
+struct GlobalMetalViewRepresentable: UIViewRepresentable {
+    func makeUIView(context: Context) -> GlobalMetalView {
+        let v = SharedMetalContainer.shared.view
+        if let metalLayer = v.layer as? CAMetalLayer {
+            let scale = UIScreen.main.scale
+            let bounds = UIScreen.main.bounds
+            let w = Int(bounds.width * scale)
+            let h = Int(bounds.height * scale)
+            metalLayer.drawableSize = CGSize(width: w, height: h)
+            kudroid_set_metal_layer(Unmanaged.passUnretained(metalLayer).toOpaque(), Int32(w), Int32(h), Float(scale))
+        }
+        return v
     }
 
     func updateUIView(_ uiView: GlobalMetalView, context: Context) {}
