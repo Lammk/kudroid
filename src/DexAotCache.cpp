@@ -1,6 +1,7 @@
 #include "kudroid/DexAotCache.h"
 #include "kudroid/DexCacheManager.h"
 #include "kudroid/DexToJar.h"
+#include "kudroid/framework_jar_bytes.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -423,19 +424,17 @@ std::string DexAotCache::translate_dex_if_needed(const std::string& apk_extracte
                 tmpJars.push_back(tmp);
             }
         }
+
+        // Gộp framework.jar nhúng sẵn (chứa android.* + androidx.* stubs) vào classes.jar của app
+        const std::string fwTmp = (std::filesystem::path(cache_dir) / ".tmp_framework.jar").string();
+        if (write_bytes_to_file(fwTmp, std::vector<uint8_t>(g_framework_jar_bytes, g_framework_jar_bytes + g_framework_jar_size))) {
+            tmpJars.push_back(fwTmp);
+        }
+
         if (ok) {
-            if (tmpJars.size() == 1) {
-                std::error_code rnec;
-                std::filesystem::rename(tmpJars[0], jarPath, rnec);
-                ok = !rnec;
-                if (!ok && error) {
-                    *error = "[kudroid_aot] Cannot move fallback jar to " + jarPath;
-                }
-            } else {
-                std::string mergeErr;
-                ok = merge_jars(tmpJars, jarPath, &mergeErr);
-                if (!ok && error) *error = "[kudroid_aot] " + mergeErr;
-            }
+            std::string mergeErr;
+            ok = merge_jars(tmpJars, jarPath, &mergeErr);
+            if (!ok && error) *error = "[kudroid_aot] " + mergeErr;
         }
         for (const auto& tmp : tmpJars) std::filesystem::remove(tmp, ec);
         built = ok;
