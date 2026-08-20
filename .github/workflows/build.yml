@@ -12,6 +12,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y cmake g++ ccache zip
 
@@ -33,6 +38,11 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
 
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
@@ -58,6 +68,11 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
 
       # Cache the final ANGLE static libs + headers so we skip the build entirely
       # on subsequent runs (as long as the script and pinned commit are unchanged).
@@ -120,6 +135,11 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
       - name: Set up JDK 8
         uses: actions/setup-java@v5
         with:
@@ -157,6 +177,11 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
 
       # Always download the ANGLE artifact built by build-angle-ios so the iOS
       # build always has ANGLE available (independent of cache state).
