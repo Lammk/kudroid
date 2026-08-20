@@ -376,9 +376,17 @@ void kudroid_jni_init_jvm(const char* bootclasspath, const char* classpath) {
     {
         size_t bootJarSize = 0;
         const uint8_t* bootJarData = classpathJar(&bootJarSize);
-        log_jni("Embedded boot classpath jar: %zu bytes (%s)",
-                bootJarSize,
-                (bootJarData && bootJarSize) ? "OK" : "MISSING/EMPTY");
+        if (bootJarData && bootJarSize >= 4) {
+            log_jni("Embedded boot classpath jar: %zu bytes (header: 0x%02X 0x%02X 0x%02X 0x%02X '%c%c%c%c')",
+                    bootJarSize,
+                    bootJarData[0], bootJarData[1], bootJarData[2], bootJarData[3],
+                    (bootJarData[0] >= 32 && bootJarData[0] < 127) ? bootJarData[0] : '.',
+                    (bootJarData[1] >= 32 && bootJarData[1] < 127) ? bootJarData[1] : '.',
+                    (bootJarData[2] >= 32 && bootJarData[2] < 127) ? bootJarData[2] : '.',
+                    (bootJarData[3] >= 32 && bootJarData[3] < 127) ? bootJarData[3] : '.');
+        } else {
+            log_jni("Embedded boot classpath jar: %zu bytes (MISSING/EMPTY)", bootJarSize);
+        }
     }
 
     // xây dựng các đối số máy ảo. boot classpath được nhúng (classpathJar()),
