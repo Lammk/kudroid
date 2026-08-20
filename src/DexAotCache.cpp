@@ -309,7 +309,7 @@ std::string DexAotCache::translate_dex_if_needed(const std::string& apk_extracte
     if (dexes.empty()) {
         return fail("[kudroid_aot] No classes*.dex found in " + apk_extracted_path);
     }
-    const std::string hash = DexCacheManager::sha256Files(dexes);
+    const std::string hash = DexCacheManager::sha256Files(dexes) + "_v3_fw_embedded";
     if (hash.empty()) {
         return fail("[kudroid_aot] Cannot compute SHA-256 of dex files");
     }
