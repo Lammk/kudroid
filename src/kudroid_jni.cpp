@@ -453,13 +453,8 @@ void kudroid_jni_init_jvm(const char* bootclasspath, const char* classpath) {
         }
     }
 
-    if (!bootJarFile.empty()) {
-        if (!frameworkJarFile.empty()) {
-            bootOption = "-Xbootclasspath:" + bootJarFile + ":" + frameworkJarFile;
-        } else {
-            bootOption = "-Xbootclasspath:" + bootJarFile;
-        }
-    }
+    // Sử dụng trực tiếp built-in boot classpath [classpathJar] đã được link tĩnh vào binary qua symbol _classpathJar
+    bootOption = "-Xbootclasspath:[classpathJar]";
 
     std::string canonicalClasspath = classpath ? classpath : "";
     if (!canonicalClasspath.empty() && ::realpath(canonicalClasspath.c_str(), realBuf)) {
