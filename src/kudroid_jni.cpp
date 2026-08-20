@@ -506,17 +506,18 @@ void kudroid_jni_init_jvm(const char* bootclasspath, const char* classpath) {
     g_env = static_cast<JNIEnv*>(env);
     patch_jnienv_vtable(g_env);
     patch_javavm_vtable(g_vm);
-    log_jni("Avian JVM initialized successfully (JavaVM=%p, JNIEnv=%p)",
-            (void*)g_vm, (void*)g_env);
+    log_jni("Avian JVM initialized successfully (JavaVM=%p, JNIEnv=%p, init_thread=%p)",
+            (void*)g_vm, (void*)g_env, (void*)pthread_self());
 
-    // SELF-TEST đã hoàn thành sứ mệnh: chứng minh được boot.jar + options đúng
-    // (JVM init OK, placeholder cũ → file thật). NHƯNG từ khi boot.jar là file
-    // thật, FindClass probe đầu tiên (java/lang/String) load class thật và
-    // SIGABRT ngay lập tức trên device (không in gì) — probe chẩn đoán giờ tự
-    // gây crash. Bỏ probes: init chạy tiếp, lần FindClass thật đầu tiên của
-    // fbjni sẽ lộ vấn đề (nếu còn) ở đúng chỗ có context.
-    if (!classpathOption.empty() && g_env) {
-        log_jni("SELFTEST: probes skipped (FindClass on real class aborts on device)");
+    // DIRECT PROBE trên đúng thread khởi tạo JVM:
+    log_jni("[DirectProbe] Calling FindClass('java/lang/String') on init_thread %p...", (void*)pthread_self());
+    jclass probeStr = g_env->FindClass("java/lang/String");
+    if (probeStr) {
+        log_jni("[DirectProbe] -> SUCCESS: Found java/lang/String (jclass=%p)", (void*)probeStr);
+        g_env->DeleteLocalRef(probeStr);
+    } else {
+        log_jni("[DirectProbe] -> FAILED: java/lang/String returned NULL!");
+        if (g_env->ExceptionCheck()) g_env->ExceptionClear();
     }
 
     // Đăng ký native method của framework ngay tại đây — nếu bỏ lỡ, Java gọi
@@ -571,12 +572,14 @@ jint kudroid_jni_get_env(JavaVM* vm, void** env, jint version) {
     JNIEnv* threadEnv = nullptr;
     jint status = g_vm->GetEnv(reinterpret_cast<void**>(&threadEnv), JNI_VERSION_1_6);
     if (status == JNI_OK && threadEnv) {
-        log_jni("kudroid_jni_get_env: Thread already attached, returning env=%p", (void*)threadEnv);
+        log_jni("kudroid_jni_get_env: Thread already attached (current_thread=%p), returning env=%p",
+                (void*)pthread_self(), (void*)threadEnv);
         *env = threadEnv;
         return JNI_OK;
     }
     if (status == JNI_EDETACHED) {
-        log_jni("kudroid_jni_get_env: Thread detached, attempting to AttachCurrentThread...");
+        log_jni("kudroid_jni_get_env: Thread detached (current_thread=%p), attempting to AttachCurrentThread...",
+                (void*)pthread_self());
         // đính kèm luồng này vào máy ảo.
         status = g_vm->AttachCurrentThread(reinterpret_cast<void**>(&threadEnv), nullptr);
         if (status == JNI_OK && threadEnv) {
