@@ -99,6 +99,25 @@ public abstract class ViewGroup extends View {
     protected abstract void onLayout(boolean changed, int l, int t, int r, int b);
 
     @Override
+    public boolean dispatchTouchEvent(MotionEvent event) {
+        if (!isShown() || event == null) return false;
+        float x = event.getX();
+        float y = event.getY();
+        for (int i = mChildCount - 1; i >= 0; i--) {
+            View child = mChildren[i];
+            if (child != null && child.isShown()) {
+                if (x >= child.getLeft() && x <= child.getRight() &&
+                    y >= child.getTop() && y <= child.getBottom()) {
+                    if (child.dispatchTouchEvent(event)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return onTouchEvent(event);
+    }
+
+    @Override
     public void draw(android.graphics.Canvas canvas) {
         super.draw(canvas);
         dispatchDraw(canvas);

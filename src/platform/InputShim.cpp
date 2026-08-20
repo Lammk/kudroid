@@ -72,6 +72,27 @@ extern "C" void* kudroid_get_input_queue(void) {
     return &g_inputQueue;
 }
 
+#include "kudroid/kudroid_jni.h"
+
+static void forward_touch_to_java_activity(int action, float x, float y) {
+    JavaVM* vm = kudroid_jni_get_javavm();
+    if (!vm) return;
+    JNIEnv* env = nullptr;
+    if (kudroid_jni_get_env(vm, (void**)&env, JNI_VERSION_1_6) != JNI_OK || !env) return;
+
+    jclass atClass = env->FindClass("android/app/ActivityThread");
+    if (!atClass) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return;
+    }
+    jmethodID postTouch = env->GetStaticMethodID(atClass, "postTouchEvent", "(IFF)V");
+    if (postTouch) {
+        env->CallStaticVoidMethod(atClass, postTouch, static_cast<jint>(action), static_cast<jfloat>(x), static_cast<jfloat>(y));
+        if (env->ExceptionCheck()) env->ExceptionClear();
+    }
+    env->DeleteLocalRef(atClass);
+}
+
 // Exported for Swift to inject touch events
 extern "C" void kudroid_inject_touch_event_multi(float x, float y, int32_t action, int32_t pointerId, int32_t pointerCount) {
     (void)pointerId;
@@ -98,6 +119,9 @@ extern "C" void kudroid_inject_touch_event_multi(float x, float y, int32_t actio
         ssize_t unused = ::write(g_inputQueue.wakePipe[1], &byte, 1);
         (void)unused;
     }
+
+    // Đồng thời đẩy sự kiện chạm vào cây giao diện Java Android
+    forward_touch_to_java_activity(action, x, y);
 }
 
 extern "C" void kudroid_inject_touch_event(float x, float y, int32_t action) {

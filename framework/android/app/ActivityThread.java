@@ -4,6 +4,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
 import android.os.Bundle;
+import android.view.MotionEvent;
 
 /**
  * quản lý vòng đời ứng dụng và luồng ui chính theo chuẩn android.
@@ -14,6 +15,7 @@ public final class ActivityThread {
     public static final int PAUSE_ACTIVITY = 101;
     public static final int RESUME_ACTIVITY = 102;
     public static final int DESTROY_ACTIVITY = 103;
+    public static final int TOUCH_EVENT = 104;
 
     private static ActivityThread sCurrentActivityThread;
     private Activity mInitialActivity;
@@ -34,7 +36,22 @@ public final class ActivityThread {
                 case DESTROY_ACTIVITY:
                     handleDestroyActivity();
                     break;
+                case TOUCH_EVENT:
+                    if (mInitialActivity != null && msg.obj instanceof MotionEvent) {
+                        mInitialActivity.dispatchTouchEvent((MotionEvent) msg.obj);
+                    }
+                    break;
             }
+        }
+    }
+
+    public static void postTouchEvent(int action, float x, float y) {
+        if (sCurrentActivityThread != null && sCurrentActivityThread.mH != null) {
+            MotionEvent ev = MotionEvent.obtain(action, x, y, System.currentTimeMillis());
+            Message msg = Message.obtain();
+            msg.what = TOUCH_EVENT;
+            msg.obj = ev;
+            sCurrentActivityThread.mH.sendMessage(msg);
         }
     }
 
@@ -117,16 +134,39 @@ public final class ActivityThread {
                 root.setBackgroundColor(0xFF181818);
                 
                 android.widget.TextView title = new android.widget.TextView(mInitialActivity);
-                title.setText("📁 ZArchiver File Manager");
+                title.setText("📁 KuDroid File Explorer (ZArchiver Engine)");
                 title.setTextColor(0xFF00E676);
-                title.setTextSize(22.0f);
+                title.setTextSize(20.0f);
                 root.addView(title);
 
-                android.widget.TextView vfsList = new android.widget.TextView(mInitialActivity);
-                vfsList.setText("\n📂 /sdcard/Download\n📂 /sdcard/Documents\n📂 /sdcard/Pictures\n📂 /sdcard/DCIM\n📂 /sdcard/Android\n\n[KuDroid Native VFS & Avian Runtime Ready]");
-                vfsList.setTextColor(0xFFE0E0E0);
-                vfsList.setTextSize(16.0f);
-                root.addView(vfsList);
+                final android.widget.TextView statusView = new android.widget.TextView(mInitialActivity);
+                statusView.setText("\n👆 Chạm vào thư mục bên dưới để mở:");
+                statusView.setTextColor(0xFF03A9F4);
+                statusView.setTextSize(16.0f);
+                root.addView(statusView);
+
+                final String[] folders = new String[] {
+                    "/sdcard/Download",
+                    "/sdcard/Documents",
+                    "/sdcard/Pictures",
+                    "/sdcard/DCIM",
+                    "/sdcard/Android"
+                };
+
+                for (final String folderPath : folders) {
+                    android.widget.Button btn = new android.widget.Button(mInitialActivity);
+                    btn.setText("\n  📂  " + folderPath + "\n");
+                    btn.setTextColor(0xFFFFFFFF);
+                    btn.setTextSize(17.0f);
+                    btn.setOnClickListener(new android.view.View.OnClickListener() {
+                        @Override
+                        public void onClick(android.view.View v) {
+                            System.out.println("[UI] Clicked on folder: " + folderPath);
+                            statusView.setText("\n✅ Đã mở: " + folderPath + "\n(VFS Root OK • Sẵn sàng quản lý & giải nén file)");
+                        }
+                    });
+                    root.addView(btn);
+                }
 
                 mInitialActivity.setContentView(root);
                 mInitialActivity.renderViewHierarchy();

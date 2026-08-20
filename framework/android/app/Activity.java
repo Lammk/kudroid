@@ -199,6 +199,15 @@ public class Activity extends ContextThemeWrapper {
         return null;
     }
 
+    public boolean dispatchTouchEvent(android.view.MotionEvent event) {
+        if (mContentView != null) {
+            boolean handled = mContentView.dispatchTouchEvent(event);
+            renderViewHierarchy();
+            return handled;
+        }
+        return false;
+    }
+
     /**
      * vẽ toàn bộ cây view hierarchy lên màn hình Metal.
      */

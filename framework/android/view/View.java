@@ -159,6 +159,20 @@ public class View {
         mOnClickListener = l;
     }
 
+    public boolean dispatchTouchEvent(MotionEvent event) {
+        if (mVisibility != VISIBLE) return false;
+        return onTouchEvent(event);
+    }
+
+    public boolean onTouchEvent(MotionEvent event) {
+        if (event == null) return false;
+        if (mOnClickListener != null && event.getAction() == MotionEvent.ACTION_UP) {
+            performClick();
+            return true;
+        }
+        return (mOnClickListener != null);
+    }
+
     /**
      * thực hiện một cú nhấp chuột.
      */
