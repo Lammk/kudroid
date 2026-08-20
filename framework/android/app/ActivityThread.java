@@ -39,16 +39,21 @@ public final class ActivityThread {
     }
 
     public static void main(String[] args) {
-        Looper.prepareMainLooper();
-        ActivityThread thread = new ActivityThread();
-        thread.attach();
-        
-        // lấy activity ban đầu từ tham số truyền vào
-        if (args != null && args.length > 0) {
-            postLifecycleEvent(LAUNCH_ACTIVITY, args[0]);
+        try {
+            Looper.prepareMainLooper();
+            ActivityThread thread = new ActivityThread();
+            thread.attach();
+            
+            // lấy activity ban đầu từ tham số truyền vào
+            if (args != null && args.length > 0) {
+                postLifecycleEvent(LAUNCH_ACTIVITY, args[0]);
+            }
+            
+            Looper.loop();
+        } catch (Throwable t) {
+            System.err.println("[ActivityThread] Uncaught exception in main looper loop:");
+            t.printStackTrace();
         }
-        
-        Looper.loop();
     }
 
     private void attach() {

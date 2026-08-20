@@ -59,8 +59,18 @@ public final class Looper {
             if (msg == null) {
                 return; // queue quit
             }
-            msg.target.dispatchMessage(msg);
-            msg.recycle();
+            try {
+                if (msg.target != null) {
+                    msg.target.dispatchMessage(msg);
+                }
+            } catch (Throwable t) {
+                System.err.println("[Looper] Uncaught exception in message dispatch:");
+                t.printStackTrace();
+            } finally {
+                try {
+                    msg.recycle();
+                } catch (Throwable ignored) {}
+            }
         }
     }
 
