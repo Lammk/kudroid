@@ -693,60 +693,35 @@ extern "C" const char* kudroid_install_apk(const char* apkPath) {
         log += "[kudroid_apk] ERROR: APK path is empty\n";
     } else {
         const std::filesystem::path source(apkPath);
-        std::string appName = source.stem().string();
-        if (appName.empty()) appName = "unnamed_apk";
-        for (char& character : appName) {
+        std::string pkgId = kudroid::APKExtractor::get_package_name(source.string());
+        if (pkgId.empty()) {
+            pkgId = source.stem().string();
+            auto uIdx = pkgId.find('_');
+            if (uIdx != std::string::npos) {
+                pkgId = pkgId.substr(0, uIdx);
+            }
+        }
+        for (char& character : pkgId) {
             if (!(std::isalnum(static_cast<unsigned char>(character)) || character == '_' || character == '-' || character == '.')) {
                 character = '_';
             }
         }
         auto& remapper = kudroid::VFSPathRemapper::getInstance();
-        const std::filesystem::path tempTarget = std::filesystem::path(remapper.androidRoot()) /
-                                                 "data/app" / appName;
+        const std::filesystem::path appDir = std::filesystem::path(remapper.androidRoot()) /
+                                             "data/app" / pkgId;
         log += "[kudroid_apk] APK: " + source.string() + "\n";
-        log += "[kudroid_apk] Target extraction directory: " + tempTarget.string() + "\n";
+        log += "[kudroid_apk] Target Android Package: " + pkgId + "\n";
+        log += "[kudroid_apk] Target extraction directory: " + appDir.string() + "\n";
         bool extractedOk = false;
         if (kudroid::APKExtractor::is_bundle_container(source.string())) {
             log += "[kudroid_apk] Split-APK bundle detected (.xapk/.apks/.apkm), merging splits...\n";
-            extractedOk = kudroid::APKExtractor::extract_bundle(source.string(), tempTarget.string());
+            extractedOk = kudroid::APKExtractor::extract_bundle(source.string(), appDir.string());
         } else {
-            extractedOk = kudroid::APKExtractor::extract_apk(source.string(), tempTarget.string());
+            extractedOk = kudroid::APKExtractor::extract_apk(source.string(), appDir.string());
         }
         if (extractedOk) {
-            log += "[kudroid_apk] APK extracted successfully\n";
-            
-            // Đọc app_info.json để lấy package ID chuẩn của Android (ví dụ: com.jakitomzed.ultrakill, com.discord)
-            std::filesystem::path infoPath = tempTarget / "app_info.json";
-            std::string pkgId;
-            if (std::filesystem::exists(infoPath)) {
-                std::ifstream f(infoPath);
-                std::string line;
-                while (std::getline(f, line)) {
-                    auto pos = line.find("\"package\": \"");
-                    if (pos != std::string::npos) {
-                        auto start = pos + 12;
-                        auto end = line.find("\"", start);
-                        if (end != std::string::npos) {
-                            pkgId = line.substr(start, end - start);
-                        }
-                    }
-                }
-            }
-            std::filesystem::path appDir = tempTarget;
-            std::string effectiveAppName = appName;
-            if (!pkgId.empty() && pkgId != appName) {
-                std::filesystem::path finalTarget = std::filesystem::path(remapper.androidRoot()) / "data/app" / pkgId;
-                std::error_code ec;
-                if (std::filesystem::exists(finalTarget)) {
-                    std::filesystem::remove_all(finalTarget, ec);
-                }
-                std::filesystem::rename(tempTarget, finalTarget, ec);
-                if (!ec) {
-                    log += "[kudroid_apk] Consolidated app directory to Android Package ID: " + pkgId + "\n";
-                    appDir = finalTarget;
-                    effectiveAppName = pkgId;
-                }
-            }
+            log += "[kudroid_apk] APK extracted successfully to " + pkgId + "\n";
+            std::string effectiveAppName = pkgId;
 
             // Dịch DEX sang JAR ngay trong lúc cài đặt APK (AOT Compilation)
             log += "[kudroid_apk] Compiling DEX files (DEX to JAR AOT)...\n";

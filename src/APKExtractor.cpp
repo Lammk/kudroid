@@ -811,4 +811,64 @@ bool APKExtractor::extract_bundle(const std::string& containerPath, const std::s
     apkLog("Bundle merged into " + targetDirectory);
     return true;
 }
+
+std::string APKExtractor::get_package_name(const std::string& apkPath) {
+    std::ifstream f(apkPath, std::ios::binary);
+    if (f) {
+        f.seekg(0, std::ios::end);
+        const auto size = f.tellg();
+        f.seekg(0, std::ios::beg);
+        if (size >= 22) {
+            std::vector<ZipEntryInfo> allEntries;
+            if (readZipEntries(f, size, allEntries)) {
+                for (const auto& e : allEntries) {
+                    if (e.name == "AndroidManifest.xml") {
+                        f.seekg(e.localOffset);
+                        char lhdr[30];
+                        if (readExact(f, lhdr, 30) && read32b(lhdr, 0) == 0x04034b50) {
+                            const std::uint16_t nameLen = read16b(lhdr, 26);
+                            const std::uint16_t extraLen = read16b(lhdr, 28);
+                            f.seekg(e.localOffset + 30 + nameLen + extraLen);
+                            std::vector<std::uint8_t> comp(e.compressedSize);
+                            if (readExact(f, comp.data(), e.compressedSize)) {
+                                std::vector<std::uint8_t> uncomp;
+                                if (e.compression == 0) {
+                                    uncomp = std::move(comp);
+                                } else if (e.compression == 8) {
+                                    uncomp.resize(e.compressedSize * 4 + 4096);
+                                    z_stream stream = {};
+                                    stream.next_in = comp.data();
+                                    stream.avail_in = static_cast<uInt>(comp.size());
+                                    stream.next_out = uncomp.data();
+                                    stream.avail_out = static_cast<uInt>(uncomp.size());
+                                    if (inflateInit2(&stream, -MAX_WBITS) == Z_OK) {
+                                        inflate(&stream, Z_FINISH);
+                                        uncomp.resize(stream.total_out);
+                                        inflateEnd(&stream);
+                                    }
+                                }
+                                if (!uncomp.empty()) {
+                                    ManifestInfo info = parseAxml(uncomp);
+                                    if (!info.packageName.empty()) {
+                                        return info.packageName;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: Tự động lọc bỏ phần version _1.0.10 nếu có
+    std::string stem = std::filesystem::path(apkPath).stem().string();
+    auto idx = stem.find('_');
+    if (idx != std::string::npos) {
+        std::string part = stem.substr(0, idx);
+        if (part.find('.') != std::string::npos) return part;
+    }
+    return stem;
+}
+
 } // namespace kudroid

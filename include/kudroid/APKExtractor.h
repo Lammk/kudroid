@@ -27,6 +27,9 @@ public:
     static bool extract_bundle(const std::string& containerPath,
                                const std::string& targetDirectory);
 
+    // Trích xuất Application Package ID chuẩn của Android từ APK/Bundle
+    static std::string get_package_name(const std::string& apkPath);
+
     static const std::string& lastError();
 };
 
