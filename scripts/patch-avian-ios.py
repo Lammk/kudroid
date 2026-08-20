@@ -153,8 +153,12 @@ COMPILER_CPP_NEW = (
 
 def patch_compiler_cpp():
     path = "src/codegen/compiler.cpp"
-    with open(path, "r") as f:
-        content = f.read()
+    try:
+        with open(path, "r") as f:
+            content = f.read()
+    except Exception as e:
+        print(f"WARNING: unable to read {path}: {e}")
+        return
     if COMPILER_CPP_NEW.split("\n")[0] in content and COMPILER_CPP_OLD not in content:
         print("compiler.cpp (saveState null-guard): already patched, skipping")
         return
@@ -167,7 +171,99 @@ def patch_compiler_cpp():
     print("Patched compiler.cpp (saveState null-guard)")
 
 
+def patch_posix_cpp():
+    path = "src/system/posix.cpp"
+    try:
+        with open(path, "r") as f:
+            content = f.read()
+    except Exception as e:
+        print(f"WARNING: unable to read {path}: {e}")
+        return
+
+    # 1. Sửa mmap check (MAP_FAILED == (void*)-1, not 0)
+    old_mmap = "void* data = mmap(0, s.st_size, PROT_READ, MAP_PRIVATE, fd, 0);\n        if (data) {"
+    new_mmap = "void* data = mmap(0, s.st_size, PROT_READ, MAP_PRIVATE, fd, 0);\n        if (data && data != MAP_FAILED) {"
+    if old_mmap in content:
+        content = content.replace(old_mmap, new_mmap)
+        print("Patched posix.cpp (mmap MAP_FAILED check)")
+
+    # 2. Sửa dlopen cho main executable trên iOS (name == 0 -> dlopen(0, ...))
+    old_load = (
+        "    if (isMain) {\n"
+        "      pathOfExecutable(this, &name, &nameLength);\n"
+        "    }\n"
+        "    void* p = dlopen(name, RTLD_LAZY | RTLD_LOCAL);"
+    )
+    new_load = (
+        "    void* p = 0;\n"
+        "    if (isMain) {\n"
+        "      p = dlopen(0, RTLD_LAZY | RTLD_GLOBAL);\n"
+        "    } else {\n"
+        "      p = dlopen(name, RTLD_LAZY | RTLD_LOCAL);\n"
+        "    }"
+    )
+    if old_load in content:
+        content = content.replace(old_load, new_load)
+        print("Patched posix.cpp (dlopen isMain handle)")
+
+    # 3. Sửa resolve để fallback RTLD_DEFAULT và underscore prefix trên Darwin
+    old_resolve = (
+        "    virtual void* resolve(const char* function)\n"
+        "    {\n"
+        "      return dlsym(p, function);\n"
+        "    }"
+    )
+    new_resolve = (
+        "    virtual void* resolve(const char* function)\n"
+        "    {\n"
+        "      void* res = dlsym(p, function);\n"
+        "      if (!res) res = dlsym(RTLD_DEFAULT, function);\n"
+        "      if (!res && function && function[0] != '_') {\n"
+        "        char under[128];\n"
+        "        snprintf(under, sizeof(under), \"_%s\", function);\n"
+        "        res = dlsym(p, under);\n"
+        "        if (!res) res = dlsym(RTLD_DEFAULT, under);\n"
+        "      }\n"
+        "      return res;\n"
+        "    }"
+    )
+    if old_resolve in content:
+        content = content.replace(old_resolve, new_resolve)
+        print("Patched posix.cpp (dlsym fallback + Darwin underscore)")
+
+    with open(path, "w") as f:
+        f.write(content)
+
+
+def patch_finder_cpp():
+    path = "src/finder.cpp"
+    try:
+        with open(path, "r") as f:
+            content = f.read()
+    except Exception as e:
+        print(f"WARNING: unable to read {path}: {e}")
+        return
+
+    # Fallback trực tiếp con trỏ classpathJar nếu dlsym trả NULL
+    old_resolve_call = "void* p = library->resolve(symbolName);"
+    new_resolve_call = (
+        "void* p = library ? library->resolve(symbolName) : 0;\n"
+        "        if (!p && strcmp(symbolName, \"classpathJar\") == 0) {\n"
+        "          extern const uint8_t* classpathJar(size_t*) __attribute__((weak));\n"
+        "          if (classpathJar) p = reinterpret_cast<void*>(classpathJar);\n"
+        "        }"
+    )
+    if old_resolve_call in content:
+        content = content.replace(old_resolve_call, new_resolve_call)
+        print("Patched finder.cpp (direct classpathJar weak fallback)")
+
+    with open(path, "w") as f:
+        f.write(content)
+
+
 if __name__ == "__main__":
     main()
     patch_compiler_cpp()
+    patch_posix_cpp()
+    patch_finder_cpp()
     sys.exit(0)

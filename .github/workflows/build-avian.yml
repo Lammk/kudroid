@@ -52,9 +52,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: third_party/jvm/avian/build
-          key: avian-ios-arm64-${{ runner.os }}-v4-debug-fast-${{ hashFiles('third_party/jvm/avian/**') }}
+          key: avian-ios-arm64-${{ runner.os }}-v5-definitive-${{ hashFiles('scripts/patch-avian-ios.py', 'third_party/jvm/avian/**') }}
           restore-keys: |
-            avian-ios-arm64-${{ runner.os }}-v4-debug-fast-
+            avian-ios-arm64-${{ runner.os }}-v5-definitive-
 
       - name: Build KuDroid framework jar
         run: |
