@@ -420,6 +420,17 @@ void kudroid_jni_init_jvm(const char* bootclasspath, const char* classpath) {
         }
     }
 
+    char realBuf[PATH_MAX];
+    if (::realpath(bootJarFile.c_str(), realBuf)) {
+        bootJarFile = realBuf;
+    }
+    struct stat stBoot;
+    if (::stat(bootJarFile.c_str(), &stBoot) == 0) {
+        log_jni("boot.jar ready (canonical): %s (%lld bytes)", bootJarFile.c_str(), (long long)stBoot.st_size);
+    } else {
+        log_jni("ERROR: boot.jar stat failed: %s (errno=%d)", bootJarFile.c_str(), errno);
+    }
+
     std::string frameworkJarFile;
     if (classpath && classpath[0] != '\0') {
         std::string cp(classpath);
@@ -432,8 +443,13 @@ void kudroid_jni_init_jvm(const char* bootclasspath, const char* classpath) {
         if (ff) {
             fwrite(g_framework_jar_bytes, 1, g_framework_jar_size, ff);
             fclose(ff);
-            log_jni("Framework classpath jar materialized: %s (%zu bytes)",
-                    frameworkJarFile.c_str(), g_framework_jar_size);
+        }
+        if (::realpath(frameworkJarFile.c_str(), realBuf)) {
+            frameworkJarFile = realBuf;
+        }
+        struct stat stFw;
+        if (::stat(frameworkJarFile.c_str(), &stFw) == 0) {
+            log_jni("framework.jar ready (canonical): %s (%lld bytes)", frameworkJarFile.c_str(), (long long)stFw.st_size);
         }
     }
 
@@ -445,22 +461,27 @@ void kudroid_jni_init_jvm(const char* bootclasspath, const char* classpath) {
         }
     }
 
+    std::string canonicalClasspath = classpath ? classpath : "";
+    if (!canonicalClasspath.empty() && ::realpath(canonicalClasspath.c_str(), realBuf)) {
+        canonicalClasspath = realBuf;
+    }
+
     std::string classpathOption;
     std::string bootAppendOption;
-    if (classpath && classpath[0] != '\0') {
+    if (!canonicalClasspath.empty()) {
         if (!frameworkJarFile.empty()) {
-            classpathOption = std::string("-Djava.class.path=") + classpath + ":" + frameworkJarFile;
-            bootAppendOption = std::string("-Xbootclasspath/a:") + frameworkJarFile + ":" + classpath;
+            classpathOption = std::string("-Djava.class.path=") + canonicalClasspath + ":" + frameworkJarFile;
+            bootAppendOption = std::string("-Xbootclasspath/a:") + frameworkJarFile + ":" + canonicalClasspath;
         } else {
-            classpathOption = std::string("-Djava.class.path=") + classpath;
-            bootAppendOption = std::string("-Xbootclasspath/a:") + classpath;
+            classpathOption = std::string("-Djava.class.path=") + canonicalClasspath;
+            bootAppendOption = std::string("-Xbootclasspath/a:") + canonicalClasspath;
         }
         struct stat st;
-        if (::stat(classpath, &st) == 0) {
-            log_jni("App classpath jar exists: %s (%lld bytes)", classpath,
+        if (::stat(canonicalClasspath.c_str(), &st) == 0) {
+            log_jni("App classpath jar exists (canonical): %s (%lld bytes)", canonicalClasspath.c_str(),
                     (long long)st.st_size);
         } else {
-            log_jni("ERROR: App classpath jar MISSING/UNREADABLE: %s", classpath);
+            log_jni("ERROR: App classpath jar MISSING/UNREADABLE: %s", canonicalClasspath.c_str());
         }
     }
     log_jni("JVM options: %s%s%s", bootOption.c_str(),
