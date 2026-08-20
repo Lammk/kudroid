@@ -177,20 +177,32 @@ public final class ActivityThread {
     }
 
     private void handlePauseActivity() {
-        if (mInitialActivity != null) {
-            mInitialActivity.onPause();
+        try {
+            if (mInitialActivity != null) {
+                mInitialActivity.onPause();
+            }
+        } catch (Throwable t) {
+            t.printStackTrace();
         }
     }
 
     private void handleResumeActivity() {
-        if (mInitialActivity != null) {
-            mInitialActivity.onResume();
+        try {
+            if (mInitialActivity != null) {
+                mInitialActivity.onResume();
+            }
+        } catch (Throwable t) {
+            t.printStackTrace();
         }
     }
 
     private void handleDestroyActivity() {
-        if (mInitialActivity != null) {
-            mInitialActivity.onDestroy();
+        try {
+            if (mInitialActivity != null) {
+                mInitialActivity.onDestroy();
+            }
+        } catch (Throwable t) {
+            t.printStackTrace();
         }
     }
 }
