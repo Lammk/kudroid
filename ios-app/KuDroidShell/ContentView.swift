@@ -218,6 +218,23 @@ struct AppsView: View {
                 var folderName = folder.lastPathComponent
                 var currentFolderURL = folder
                 
+                // 1. Tự động chuẩn hóa ngay lập tức nếu tên thư mục có dấu gạch dưới version (ví dụ ru.zdevs.zarchiver_1.0.10)
+                if folderName.contains("_") {
+                    let cleanPkg = String(folderName.split(separator: "_")[0])
+                    if cleanPkg.contains(".") {
+                        let targetURL = url.appendingPathComponent(cleanPkg, isDirectory: true)
+                        if !FileManager.default.fileExists(atPath: targetURL.path) {
+                            try? FileManager.default.moveItem(at: currentFolderURL, to: targetURL)
+                            folderName = cleanPkg
+                            currentFolderURL = targetURL
+                        } else {
+                            try? FileManager.default.removeItem(at: currentFolderURL)
+                            folderName = cleanPkg
+                            currentFolderURL = targetURL
+                        }
+                    }
+                }
+
                 // Đọc app_info.json nếu có
                 var infoURL = currentFolderURL.appendingPathComponent("app_info.json")
                 var displayName = prettifyAppName(folderName)
@@ -226,7 +243,6 @@ struct AppsView: View {
                 if let infoData = try? Data(contentsOf: infoURL),
                    let rawObj = try? JSONSerialization.jsonObject(with: infoData),
                    let json = rawObj as? [String: Any] {
-                    // Tự động chuẩn hóa tên thư mục về đúng Package ID thật của Android (loại bỏ _1.0.10)
                     if let realPkg = json["package"] as? String, !realPkg.isEmpty && realPkg != folderName {
                         let targetURL = url.appendingPathComponent(realPkg, isDirectory: true)
                         if !FileManager.default.fileExists(atPath: targetURL.path) {
