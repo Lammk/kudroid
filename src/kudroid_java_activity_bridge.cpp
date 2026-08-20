@@ -23,6 +23,28 @@ extern "C" void kudroid_launch_java_activity(JavaVM* vm, const char* activityNam
         app_log("ERROR: failed to get JNIEnv!");
         return;
     }
+
+    // Ladder Probes: Kiểm tra từng bậc thang từ class đơn giản đến phức tạp
+    const char* probeClasses[] = {
+        "java/lang/String",
+        "android/os/Looper",
+        "android/os/Message",
+        "android/os/Handler",
+        "android/app/Activity",
+        "android/app/ActivityThread"
+    };
+
+    for (const char* clsName : probeClasses) {
+        app_log("[LadderProbe] FindClass('%s')...", clsName);
+        jclass c = env->FindClass(clsName);
+        if (c) {
+            app_log("[LadderProbe] -> SUCCESS: Found '%s' (jclass=%p)", clsName, (void*)c);
+            env->DeleteLocalRef(c);
+        } else {
+            app_log("[LadderProbe] -> FAILED: '%s'", clsName);
+            if (env->ExceptionCheck()) env->ExceptionClear();
+        }
+    }
     
     jclass atClass = env->FindClass("android/app/ActivityThread");
     if (!atClass) {
