@@ -1,5 +1,6 @@
 #include "kudroid/kudroid_jni.h"
 #include "kudroid/VFSPathRemapper.h"
+#include "kudroid/framework_jar_bytes.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -415,42 +416,51 @@ void kudroid_jni_init_jvm(const char* bootclasspath, const char* classpath) {
             if (written == bootJarSize) {
                 log_jni("Boot classpath jar materialized: %s (%zu bytes)",
                         bootJarFile.c_str(), bootJarSize);
-                bootOption = "-Xbootclasspath:" + bootJarFile;
-            } else {
-                log_jni("WARNING: write boot.jar short (%zu/%zu); falling back to placeholder",
-                        written, bootJarSize);
             }
-        } else {
-            log_jni("WARNING: cannot create %s; falling back to placeholder",
-                    bootJarFile.c_str());
         }
-    } else {
-        log_jni("WARNING: embedded boot classpath jar empty; falling back to placeholder");
     }
-    // App classes PHẢI nằm trên app classpath (-Djava.class.path): JNI
-    // FindClass resolve qua appLoader (jnienv.cpp findClass → appLoader),
-    // KHÔNG phải boot loader. Trên device, nối vào -Xbootclasspath/a: một
-    // mình KHÔNG đủ — SELFTEST NOT FOUND dù jar exists + option đúng (boot
-    // finder với placeholder [classpathJar] + append không cho FindClass
-    // native thấy class, trong khi test Linux cùng libavian.a chứng minh
-    // -Djava.class.path= cho FOUND). Trên Android thật, dex app nằm trên
-    // app classpath. Giữ cả hai: java.class.path cho app loader (bắt buộc,
-    // đã chứng minh), bootclasspath/a cho resolve qua boot/system loader.
+
+    std::string frameworkJarFile;
+    if (classpath && classpath[0] != '\0') {
+        std::string cp(classpath);
+        auto slash = cp.rfind('/');
+        std::string dir = (slash != std::string::npos) ? cp.substr(0, slash + 1) : "";
+        frameworkJarFile = dir + "framework.jar";
+    }
+    if (!frameworkJarFile.empty()) {
+        FILE* ff = fopen(frameworkJarFile.c_str(), "wb");
+        if (ff) {
+            fwrite(g_framework_jar_bytes, 1, g_framework_jar_size, ff);
+            fclose(ff);
+            log_jni("Framework classpath jar materialized: %s (%zu bytes)",
+                    frameworkJarFile.c_str(), g_framework_jar_size);
+        }
+    }
+
+    if (!bootJarFile.empty()) {
+        if (!frameworkJarFile.empty()) {
+            bootOption = "-Xbootclasspath:" + bootJarFile + ":" + frameworkJarFile;
+        } else {
+            bootOption = "-Xbootclasspath:" + bootJarFile;
+        }
+    }
+
     std::string classpathOption;
     std::string bootAppendOption;
     if (classpath && classpath[0] != '\0') {
-        classpathOption = std::string("-Djava.class.path=") + classpath;
-        bootAppendOption = std::string("-Xbootclasspath/a:") + classpath;
-        // DIAG: jar app có tồn tại + đọc được không? Avian bỏ im lặng token
-        // classpath khi stat() thất bại (finder.cpp add()) → thiếu class →
-        // chính xác chuỗi lỗi fbjni populateWhat đang gặp.
+        if (!frameworkJarFile.empty()) {
+            classpathOption = std::string("-Djava.class.path=") + classpath + ":" + frameworkJarFile;
+            bootAppendOption = std::string("-Xbootclasspath/a:") + frameworkJarFile + ":" + classpath;
+        } else {
+            classpathOption = std::string("-Djava.class.path=") + classpath;
+            bootAppendOption = std::string("-Xbootclasspath/a:") + classpath;
+        }
         struct stat st;
         if (::stat(classpath, &st) == 0) {
             log_jni("App classpath jar exists: %s (%lld bytes)", classpath,
                     (long long)st.st_size);
         } else {
-            log_jni("ERROR: App classpath jar MISSING/UNREADABLE: %s — Avian sẽ bỏ "
-                    "im lặng token này, mọi app-class FindClass sẽ fail!", classpath);
+            log_jni("ERROR: App classpath jar MISSING/UNREADABLE: %s", classpath);
         }
     }
     log_jni("JVM options: %s%s%s", bootOption.c_str(),

@@ -1,27 +1,40 @@
 #include "kudroid/kudroid_jni.h"
 #include <cstdio>
+#include <cstdarg>
+
+extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
+
+static void app_log(const char* fmt, ...) {
+    char buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    kudroid_android_log_message(4 /* INFO */, "KuDroidApp", buf);
+}
 
 // khởi chạy activity thông qua activitythread để có looper xử lý vòng đời
 extern "C" void kudroid_launch_java_activity(JavaVM* vm, const char* activityName) {
-    fprintf(stdout, "[KuDroidApp] kudroid_launch_java_activity: requesting launch for %s\n", activityName ? activityName : "NULL");
+    app_log("kudroid_launch_java_activity: requesting launch for %s", activityName ? activityName : "NULL");
     if (!vm || !activityName) return;
 
     JNIEnv* env = nullptr;
     if (kudroid_jni_get_env(vm, (void**)&env, JNI_VERSION_1_6) != JNI_OK || !env) {
-        fprintf(stderr, "[kudroid_bridge] lỗi lấy jnienv\n");
+        app_log("ERROR: failed to get JNIEnv!");
         return;
     }
     
     jclass atClass = env->FindClass("android/app/ActivityThread");
     if (!atClass) {
-        fprintf(stderr, "[kudroid_bridge] không tìm thấy android/app/activitythread\n");
+        app_log("ERROR: could not find android/app/ActivityThread in classpath!");
         if (env->ExceptionCheck()) env->ExceptionClear();
         return;
     }
     
     jmethodID mainMethod = env->GetStaticMethodID(atClass, "main", "([Ljava/lang/String;)V");
     if (!mainMethod) {
-        fprintf(stderr, "[kudroid_bridge] không tìm thấy hàm main trong activitythread\n");
+        app_log("ERROR: could not find main([Ljava/lang/String;)V in ActivityThread!");
+        if (env->ExceptionCheck()) env->ExceptionClear();
         return;
     }
     
@@ -32,11 +45,11 @@ extern "C" void kudroid_launch_java_activity(JavaVM* vm, const char* activityNam
     env->SetObjectArrayElement(args, 0, arg0);
     env->DeleteLocalRef(arg0);
     
-    fprintf(stderr, "[kudroid_bridge] khởi động activitythread.main (sẽ chặn luồng)...\n");
+    app_log("Starting ActivityThread.main (entering UI event loop)...");
     env->CallStaticVoidMethod(atClass, mainMethod, args);
     
     if (env->ExceptionCheck()) {
-        fprintf(stderr, "[kudroid_bridge] ngoại lệ trong looper của activitythread\n");
+        app_log("Uncaught Exception in ActivityThread Looper!");
         env->ExceptionDescribe();
         env->ExceptionClear();
     }
