@@ -57,6 +57,35 @@ public final class ActivityThread {
 
     public static void main(String[] args) {
         try {
+            Thread.setDefaultUncaughtExceptionHandler(new Thread.UncaughtExceptionHandler() {
+                @Override
+                public void uncaughtException(Thread t, Throwable e) {
+                    String threadName = (t != null ? t.getName() : "unknown");
+                    android.util.Log.e("KuDroidCrashHandler", "=== UNCAUGHT JAVA EXCEPTION on thread [" + threadName + "] ===");
+                    if (e != null) {
+                        android.util.Log.e("KuDroidCrashHandler", e.getClass().getName() + ": " + e.getMessage());
+                        StackTraceElement[] trace = e.getStackTrace();
+                        if (trace != null) {
+                            for (StackTraceElement ste : trace) {
+                                android.util.Log.e("KuDroidCrashHandler", "    at " + ste.toString());
+                            }
+                        }
+                        Throwable cause = e.getCause();
+                        while (cause != null) {
+                            android.util.Log.e("KuDroidCrashHandler", "Caused by: " + cause.getClass().getName() + ": " + cause.getMessage());
+                            StackTraceElement[] ctrace = cause.getStackTrace();
+                            if (ctrace != null) {
+                                for (StackTraceElement cste : ctrace) {
+                                    android.util.Log.e("KuDroidCrashHandler", "    at " + cste.toString());
+                                }
+                            }
+                            cause = cause.getCause();
+                        }
+                    }
+                    android.util.Log.e("KuDroidCrashHandler", "=======================================================");
+                }
+            });
+
             Looper.prepareMainLooper();
             ActivityThread thread = new ActivityThread();
             thread.attach();
