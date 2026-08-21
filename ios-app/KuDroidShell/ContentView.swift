@@ -7,6 +7,7 @@ import QuartzCore
 struct ContentView: View {
     @State private var fullLog = "KuDroid Core Status"
     @State private var jitStatus = "JIT: Unknown"
+    @State private var showJitWarning = false
     
     var body: some View {
         TabView {
@@ -30,6 +31,14 @@ struct ContentView: View {
             setupLogDir()
             jitStatus = runJitStatus()
             activateAudioSession()
+            if kudroid_is_jit_enabled() == 0 {
+                showJitWarning = true
+            }
+        }
+        .alert("JIT Required", isPresented: $showJitWarning) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text("To use this application please enable JIT because nothing will work without it,sorry about that but we have no choose left")
         }
     }
 }
@@ -48,6 +57,7 @@ struct AppsView: View {
     @State private var installedApps: [AppItem] = []
     @State private var showAPKInstaller = false
     @State private var showRenameAlert = false
+    @State private var showJitWarning = false
     @State private var renamingAppId: String = ""
     @State private var newAppName: String = ""
     
@@ -149,7 +159,11 @@ struct AppsView: View {
                                 Spacer()
                                 
                                 Button(action: {
-                                    session.activeGuestApp = app.id
+                                    if kudroid_is_jit_enabled() == 0 {
+                                        showJitWarning = true
+                                    } else {
+                                        session.activeGuestApp = app.id
+                                    }
                                 }) {
                                     Text("RUN")
                                         .font(.caption.bold())
@@ -205,6 +219,11 @@ struct AppsView: View {
                 }
             } message: {
                 Text("Enter a new display name for this app.")
+            }
+            .alert("JIT Required", isPresented: $showJitWarning) {
+                Button("OK", role: .cancel) { }
+            } message: {
+                Text("To use this application please enable JIT because nothing will work without it,sorry about that but we have no choose left")
             }
         }
     }

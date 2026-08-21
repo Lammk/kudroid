@@ -46,6 +46,8 @@ void kudroid_set_log_dir(const char* dir);
 /// đặt thư mục documents được vfspathremapper sử dụng.
 void kudroid_set_documents_dir(const char* dir);
 
+int kudroid_is_jit_enabled(void);
+
 /// đặt con trỏ cametallayer hoặc uiview được sử dụng cho các ràng buộc bề mặt anativewindow.
 void kudroid_set_metal_layer(void* layer, int width, int height);
 

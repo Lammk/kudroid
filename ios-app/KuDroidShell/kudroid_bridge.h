@@ -119,8 +119,14 @@ int kudroid_has_crashed(void);
 void kudroid_clear_crash_state(void);
 
 /// trích xuất tối đa 30 dòng log cuối cùng trước khi crash.
-/// trả về chuỗi malloc; người gọi phải giải phóng bằng free().
-const char* kudroid_get_last_crash_tail(void);
+/// trả về trạng thái jit: "JIT: Enabled" hoặc "JIT: Disabled" (được malloc).
+const char* kudroid_jit_status(void);
+
+/// kiểm tra jit bằng cả CS_DEBUGGED và thực thi W^X (TrollStore). Trả về 1 nếu có JIT, 0 nếu không.
+int kudroid_is_jit_enabled(void);
+
+/// ghi lại lỗi khởi động và đặt trạng thái gentle crash
+void kudroid_report_startup_error(const char* title, const char* message);
 
 // Android Runtime Permission Manager APIs
 int kudroid_check_permission(const char* packageName, const char* permissionName);

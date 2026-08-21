@@ -795,26 +795,48 @@ extern "C" int csops(pid_t pid, unsigned int ops, void* useraddr, size_t usersiz
 #ifndef CS_DEBUGGED
 #define CS_DEBUGGED 0x10000000
 #endif
-
-// trả về 1 nếu jit (bộ nhớ có thể thực thi) có vẻ khả dụng, ngược lại trả về 0.
-static int kudroid_jit_available(void) {
-    unsigned int flags = 0;
-    // cs_debugged là tín hiệu đáng tin cậy duy nhất trên ios: nó được đặt khi trình gỡ lỗi
-    // (livecontainer/debugserver) đã bật ký mã động, điều này
-    // chính xác cho phép thực thi các trang prot_exec. thăm dò rwx mmap không
-    // đáng tin cậy — lời gọi hệ thống thành công mà không cần jit, nhưng quá trình thực thi vẫn bị lỗi,
-    // đưa ra kết quả sai "enabled".
-    if (csops(getpid(), CS_OPS_STATUS, &flags, sizeof(flags)) != 0) {
-        return 0;
-    }
-    return (flags & CS_DEBUGGED) ? 1 : 0;
-}
-#else
-static int kudroid_jit_available(void) { return 1; }
 #endif
 
+// trả về 1 nếu jit (bộ nhớ có thể thực thi) có vẻ khả dụng, ngược lại trả về 0.
+extern "C" int kudroid_is_jit_enabled(void) {
+#if defined(__APPLE__)
+    // 1. Kiểm tra CS_DEBUGGED (Trình gỡ lỗi: AltStore, SideStore, Sideloadly, Xcode, StikDebug, Jitterbug)
+    unsigned int flags = 0;
+    if (csops(getpid(), CS_OPS_STATUS, &flags, sizeof(flags)) == 0) {
+        if (flags & CS_DEBUGGED) {
+            return 1;
+        }
+    }
+
+    // 2. Thử nghiệm thực thi W^X (TrollStore / Jailbreak không có CS_DEBUGGED nhưng có quyền JIT trực tiếp)
+    void* ptr = mmap(nullptr, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (ptr != MAP_FAILED) {
+        // Ghi mã máy ARM64: "ret" (0xD65F03C0)
+        uint32_t* code = reinterpret_cast<uint32_t*>(ptr);
+        code[0] = 0xD65F03C0;
+        
+        if (mprotect(ptr, 4096, PROT_READ | PROT_EXEC) == 0) {
+            sys_icache_invalidate(ptr, 4096);
+            typedef void (*TestFunc)();
+            TestFunc fn = reinterpret_cast<TestFunc>(ptr);
+            fn();
+            munmap(ptr, 4096);
+            return 1; // TrollStore JIT khả dụng!
+        }
+        munmap(ptr, 4096);
+    }
+    return 0; // Hoàn toàn không có JIT!
+#else
+    return 1;
+#endif
+}
+
+static int kudroid_jit_available(void) {
+    return kudroid_is_jit_enabled();
+}
+
 extern "C" const char* kudroid_jit_status(void) {
-    const char* text = kudroid_jit_available()
+    const char* text = kudroid_is_jit_enabled()
         ? "JIT: Enabled"
         : "JIT: Disabled";
     char* result = (char*)malloc(strlen(text) + 1);
