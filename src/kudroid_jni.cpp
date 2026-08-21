@@ -766,8 +766,14 @@ jint kudroid_jni_get_env(JavaVM* vm, void** env, jint version) {
     JNIEnv* threadEnv = nullptr;
     jint status = g_vm->GetEnv(reinterpret_cast<void**>(&threadEnv), JNI_VERSION_1_6);
     if (status == JNI_OK && threadEnv) {
-        log_jni("kudroid_jni_get_env: Thread already attached (current_thread=%p), returning env=%p",
-                (void*)pthread_self(), (void*)threadEnv);
+        // Touch/vuốt gọi hàm này ~60 lần/giây (InputShim → postTouchEvent) → log
+        // mỗi lần sẽ nhấn chìm mọi dòng khác. Chỉ log lần đầu trên mỗi thread.
+        static thread_local bool loggedAttached = false;
+        if (!loggedAttached) {
+            loggedAttached = true;
+            log_jni("kudroid_jni_get_env: Thread already attached (current_thread=%p), returning env=%p",
+                    (void*)pthread_self(), (void*)threadEnv);
+        }
         *env = threadEnv;
         return JNI_OK;
     }
