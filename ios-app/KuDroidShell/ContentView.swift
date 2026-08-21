@@ -1455,6 +1455,7 @@ class NativeMetalViewController: UIViewController {
         motionManager.stopAccelerometerUpdates()
         motionManager.stopGyroUpdates()
         crashCheckTimer?.invalidate()
+        kudroid_unbind_metal_layer()
         onExit()
     }
 
@@ -1462,6 +1463,7 @@ class NativeMetalViewController: UIViewController {
         motionManager.stopAccelerometerUpdates()
         motionManager.stopGyroUpdates()
         crashCheckTimer?.invalidate()
+        kudroid_unbind_metal_layer()
     }
 
     override func viewDidLayoutSubviews() {
@@ -1797,4 +1799,23 @@ struct CrashAlertView: View {
 
 #Preview {
     ContentView()
+}
+
+@_cdecl("kudroid_trigger_haptic")
+public func kudroid_trigger_haptic(intensity: Int32) {
+    DispatchQueue.main.async {
+        if intensity == 1 {
+            let generator = UIImpactFeedbackGenerator(style: .light)
+            generator.prepare()
+            generator.impactOccurred()
+        } else if intensity == 2 {
+            let generator = UIImpactFeedbackGenerator(style: .medium)
+            generator.prepare()
+            generator.impactOccurred()
+        } else if intensity >= 3 {
+            let generator = UIImpactFeedbackGenerator(style: .heavy)
+            generator.prepare()
+            generator.impactOccurred()
+        }
+    }
 }

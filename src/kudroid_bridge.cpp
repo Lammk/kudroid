@@ -844,13 +844,134 @@ extern "C" void kudroid_set_requested_orientation(int orientation) {
             (orientation == 1 || orientation == 7 || orientation == 9) ? "Portrait" : "Sensor/Auto");
 }
 
-extern "C" int kudroid_get_requested_orientation(void) {
-    return g_requestedOrientation.load();
+extern "C" void kudroid_blit_canvas_to_layer(void* layer, const void* bits, int width, int height);
+
+extern "C" void kudroid_unbind_metal_layer(void) {
+    g_metalLayer = nullptr;
+    g_metalLayerWidth = 0;
+    g_metalLayerHeight = 0;
+    kudroid_android_log_message(2, "KuDroidGPU", "kudroid_unbind_metal_layer: GPU surface unbound cleanly.");
 }
 
-extern "C" JNIEXPORT void JNICALL Java_android_app_Activity_setRequestedOrientation_1native(JNIEnv* env, jclass clazz, jint orientation) {
+static uint32_t* s_softwareFrameBuffer = nullptr;
+static size_t s_softwareFrameBufferSize = 0;
+static int s_softwareWidth = 1080;
+static int s_softwareHeight = 1920;
+static std::mutex s_canvasMutex;
+
+static void ensure_software_framebuffer() {
+    int w = g_metalLayerWidth > 0 ? g_metalLayerWidth : 1080;
+    int h = g_metalLayerHeight > 0 ? g_metalLayerHeight : 1920;
+    s_softwareWidth = w;
+    s_softwareHeight = h;
+    size_t needed = (size_t)w * h * sizeof(uint32_t);
+    if (!s_softwareFrameBuffer || needed > s_softwareFrameBufferSize) {
+        void* nb = std::realloc(s_softwareFrameBuffer, needed);
+        if (nb) {
+            s_softwareFrameBuffer = static_cast<uint32_t*>(nb);
+            s_softwareFrameBufferSize = needed;
+            std::memset(s_softwareFrameBuffer, 0, needed);
+        }
+    }
+}
+
+// Chuyển ARGB (Android format) sang RGBA / BGRA (iOS Metal format)
+static inline uint32_t argb_to_rgba(uint32_t argb) {
+    uint32_t a = (argb >> 24) & 0xFF;
+    uint32_t r = (argb >> 16) & 0xFF;
+    uint32_t g = (argb >> 8) & 0xFF;
+    uint32_t b = (argb) & 0xFF;
+    return (r) | (g << 8) | (b << 16) | (a << 24);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_android_graphics_Canvas_native_1drawColor(JNIEnv* env, jclass clazz, jint color) {
     (void)env; (void)clazz;
-    kudroid_set_requested_orientation(orientation);
+    std::lock_guard<std::mutex> lock(s_canvasMutex);
+    ensure_software_framebuffer();
+    if (!s_softwareFrameBuffer) return;
+    uint32_t rgba = argb_to_rgba(static_cast<uint32_t>(color));
+    size_t total = (size_t)s_softwareWidth * s_softwareHeight;
+    for (size_t i = 0; i < total; ++i) {
+        s_softwareFrameBuffer[i] = rgba;
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL Java_android_graphics_Canvas_native_1drawRect(JNIEnv* env, jclass clazz, jfloat left, jfloat top, jfloat right, jfloat bottom, jint color) {
+    (void)env; (void)clazz;
+    std::lock_guard<std::mutex> lock(s_canvasMutex);
+    ensure_software_framebuffer();
+    if (!s_softwareFrameBuffer) return;
+
+    int x0 = std::max(0, std::min(s_softwareWidth - 1, static_cast<int>(left)));
+    int y0 = std::max(0, std::min(s_softwareHeight - 1, static_cast<int>(top)));
+    int x1 = std::max(0, std::min(s_softwareWidth - 1, static_cast<int>(right)));
+    int y1 = std::max(0, std::min(s_softwareHeight - 1, static_cast<int>(bottom)));
+    uint32_t rgba = argb_to_rgba(static_cast<uint32_t>(color));
+
+    for (int y = y0; y <= y1; ++y) {
+        uint32_t* row = s_softwareFrameBuffer + y * s_softwareWidth;
+        for (int x = x0; x <= x1; ++x) {
+            row[x] = rgba;
+        }
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL Java_android_graphics_Canvas_native_1drawText(JNIEnv* env, jclass clazz, jstring text, jfloat x, jfloat y, jint color, jfloat textSize) {
+    (void)env; (void)clazz; (void)text; (void)textSize;
+    Java_android_graphics_Canvas_native_1drawRect(env, clazz, x, y - 16.0f, x + 250.0f, y + 4.0f, color);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_android_graphics_Canvas_native_1drawBitmap(JNIEnv* env, jclass clazz, jintArray pixels, jint width, jint height, jfloat x, jfloat y) {
+    (void)env; (void)clazz;
+    if (!pixels || width <= 0 || height <= 0) return;
+    std::lock_guard<std::mutex> lock(s_canvasMutex);
+    ensure_software_framebuffer();
+    if (!s_softwareFrameBuffer) return;
+
+    jint* src = env->GetIntArrayElements(pixels, nullptr);
+    if (!src) return;
+
+    int dstX = static_cast<int>(x);
+    int dstY = static_cast<int>(y);
+
+    for (int r = 0; r < height; ++r) {
+        int py = dstY + r;
+        if (py < 0 || py >= s_softwareHeight) continue;
+        for (int c = 0; c < width; ++c) {
+            int px = dstX + c;
+            if (px < 0 || px >= s_softwareWidth) continue;
+            uint32_t pixel = static_cast<uint32_t>(src[r * width + c]);
+            s_softwareFrameBuffer[py * s_softwareWidth + px] = argb_to_rgba(pixel);
+        }
+    }
+
+    env->ReleaseIntArrayElements(pixels, src, JNI_ABORT);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_android_graphics_Canvas_native_1flush(JNIEnv* env, jclass clazz) {
+    (void)env; (void)clazz;
+    std::lock_guard<std::mutex> lock(s_canvasMutex);
+    if (g_metalLayer && s_softwareFrameBuffer && s_softwareWidth > 0 && s_softwareHeight > 0) {
+        kudroid_blit_canvas_to_layer(g_metalLayer, s_softwareFrameBuffer, s_softwareWidth, s_softwareHeight);
+    }
+}
+
+#if defined(__APPLE__)
+extern "C" __attribute__((weak)) void kudroid_trigger_haptic(int intensity) { (void)intensity; }
+#else
+extern "C" void kudroid_trigger_haptic(int intensity) { (void)intensity; }
+#endif
+
+extern "C" void kudroid_vibrate(int intensity) {
+    kudroid_trigger_haptic(intensity);
+    fprintf(stderr, "[KuDroidCore] kudroid_vibrate(intensity=%d: %s)\n",
+            intensity,
+            intensity == 1 ? "Light" : (intensity == 2 ? "Medium" : "Heavy"));
+}
+
+extern "C" JNIEXPORT void JNICALL Java_android_os_Vibrator_kudroid_1vibrate_1native(JNIEnv* env, jclass clazz, jint intensity) {
+    (void)env; (void)clazz;
+    kudroid_vibrate(intensity);
 }
 
 #include "kudroid/kudroid_jni.h"

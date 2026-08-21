@@ -55,8 +55,12 @@ int kudroid_get_requested_orientation(void);
 /// truyền dữ liệu cảm biến (Accelerometer/Gyroscope/Orientation) từ iOS CoreMotion vào guest app
 void kudroid_inject_sensor_event(int sensorType, float x, float y, float z);
 
+/// kích hoạt rung Haptic Feedback (1=Nhẹ, 2=Vừa, 3=Mạnh)
+void kudroid_vibrate(int intensity);
+
 /// đặt con trỏ cametallayer hoặc uiview được sử dụng cho các ràng buộc bề mặt anativewindow.
 void kudroid_set_metal_layer(void* layer, int width, int height);
+void kudroid_unbind_metal_layer(void);
 
 /// chạy kiểm tra tự động chuyển hướng vfs và i/o; trả về một nhật ký được malloc.
 const char* kudroid_vfs_self_test_log(void);

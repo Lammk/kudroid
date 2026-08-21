@@ -213,7 +213,60 @@ extern "C" int bionic_ANativeWindow_lock(void* window, ANativeWindow_Buffer* out
 }
 
 #if defined(__APPLE__)
-extern "C" __attribute__((weak)) void kudroid_blit_canvas_to_layer(void* layer, const void* bits, int width, int height) {
+#include <CoreGraphics/CoreGraphics.h>
+#include <objc/runtime.h>
+#include <objc/message.h>
+
+extern "C" void kudroid_blit_canvas_to_layer(void* layer, const void* bits, int width, int height) {
+    if (!layer || !bits || width <= 0 || height <= 0) return;
+
+    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+    if (!colorSpace) return;
+
+    CGDataProviderRef provider = CGDataProviderCreateWithData(nullptr, bits, (size_t)width * height * 4, nullptr);
+    if (!provider) {
+        CGColorSpaceRelease(colorSpace);
+        return;
+    }
+
+    CGImageRef image = CGImageCreate(
+        width, height, 8, 32, width * 4,
+        colorSpace,
+        kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big,
+        provider, nullptr, false, kCGRenderingIntentDefault
+    );
+
+    CGDataProviderRelease(provider);
+    CGColorSpaceRelease(colorSpace);
+
+    if (!image) return;
+
+    // Gán trực tiếp CGImage vào CALayer/CAMetalLayer trên Main Thread
+    dispatch_async(dispatch_get_main_thread(), ^{
+        Class clsCATransaction = objc_getClass("CATransaction");
+        if (clsCATransaction) {
+            typedef void (*TransBeginFn)(id, SEL);
+            typedef void (*TransSetBoolFn)(id, SEL, BOOL);
+            typedef void (*TransCommitFn)(id, SEL);
+            
+            auto beginFn = reinterpret_cast<TransBeginFn>(objc_msgSend);
+            auto setBoolFn = reinterpret_cast<TransSetBoolFn>(objc_msgSend);
+            auto commitFn = reinterpret_cast<TransCommitFn>(objc_msgSend);
+
+            beginFn(reinterpret_cast<id>(clsCATransaction), sel_registerName("begin"));
+            setBoolFn(reinterpret_cast<id>(clsCATransaction), sel_registerName("setDisableActions:"), YES);
+
+            typedef void (*SetContentsFn)(id, SEL, id);
+            auto setContents = reinterpret_cast<SetContentsFn>(objc_msgSend);
+            setContents(reinterpret_cast<id>(layer), sel_registerName("setContents:"), (__bridge id)image);
+
+            commitFn(reinterpret_cast<id>(clsCATransaction), sel_registerName("commit"));
+        }
+        CGImageRelease(image);
+    });
+}
+#else
+extern "C" void kudroid_blit_canvas_to_layer(void* layer, const void* bits, int width, int height) {
     (void)layer; (void)bits; (void)width; (void)height;
 }
 #endif
@@ -222,7 +275,7 @@ extern "C" int bionic_ANativeWindow_unlockAndPost(void* window) {
     (void)window;
     if (!s_canvasBits || s_canvasWidth <= 0 || s_canvasHeight <= 0) return 0;
 #if defined(__APPLE__)
-    if (g_metalLayer && kudroid_blit_canvas_to_layer) {
+    if (g_metalLayer) {
         kudroid_blit_canvas_to_layer(g_metalLayer, s_canvasBits, s_canvasWidth, s_canvasHeight);
     }
 #endif

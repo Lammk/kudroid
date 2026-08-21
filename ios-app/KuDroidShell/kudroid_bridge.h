@@ -57,6 +57,7 @@ void kudroid_set_documents_dir(const char* dir);
 /// width/height là kích thước pixel thật (UIScreen.bounds * scale); density = scale
 /// (3.0 cho @3x) — được đẩy tiếp vào DisplayMetrics của Java lúc JVM khởi tạo.
 void kudroid_set_metal_layer(void* layer, int width, int height, float density);
+void kudroid_unbind_metal_layer(void);
 
 /// đặt và lấy hướng màn hình yêu cầu từ Activity (0=Landscape, 1=Portrait, -1=Unspecified)
 void kudroid_set_requested_orientation(int orientation);
@@ -64,6 +65,9 @@ int kudroid_get_requested_orientation(void);
 
 /// truyền dữ liệu cảm biến (Accelerometer/Gyroscope/Orientation) từ iOS CoreMotion vào guest app
 void kudroid_inject_sensor_event(int sensorType, float x, float y, float z);
+
+/// kích hoạt rung Haptic Feedback (1=Nhẹ, 2=Vừa, 3=Mạnh)
+void kudroid_vibrate(int intensity);
 
 /// chèn một sự kiện chạm vào ứng dụng android gốc
 /// @param x tọa độ x của lần chạm
