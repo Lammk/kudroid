@@ -184,42 +184,26 @@ static void register_android_graphics_canvas_natives(JNIEnv* env) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Link-time anchors: ép Linker kéo toàn bộ builtin.o và classpath-avian.o vào app
+// Link-time anchors: ép Linker kéo toàn bộ builtin.o vào app
 // ─────────────────────────────────────────────────────────────────────────────
 extern "C" void Avian_avian_Classes_makeString(void*, void*, void*);
-extern "C" void Avian_avian_Classes_defineClass(void*, void*, void*);
 extern "C" void Avian_avian_Classes_initialize(void*, void*, void*);
-extern "C" void Avian_avian_Classes_getVMClass(void*, void*, void*);
-extern "C" void Avian_avian_Classes_forName(void*, void*, void*);
-extern "C" void Avian_avian_VMClass_getName(void*, void*, void*);
-extern "C" void Avian_avian_VMClass_getSuperclass(void*, void*, void*);
+extern "C" void Avian_avian_Classes_resolveVMClass(void*, void*, void*);
+extern "C" void Avian_avian_Classes_defineVMClass(void*, void*, void*);
+extern "C" void Avian_avian_Classes_toVMClass(void*, void*, void*);
+extern "C" void Avian_avian_Classes_toVMMethod(void*, void*, void*);
 extern "C" void Avian_avian_SystemClassLoader_appLoader(void*, void*, void*);
 extern "C" void Avian_avian_SystemClassLoader_findLoadedVMClass(void*, void*, void*);
-extern "C" void Avian_java_lang_System_arraycopy(void*, void*, void*);
-extern "C" void Avian_java_lang_System_identityHashCode(void*, void*, void*);
-extern "C" void Avian_java_lang_System_currentTimeMillis(void*, void*, void*);
-extern "C" void Avian_java_lang_Throwable_fillInStackTrace(void*, void*, void*);
-extern "C" void Avian_java_lang_Throwable_getStackTrace(void*, void*, void*);
-extern "C" void Avian_java_lang_Thread_currentThread(void*, void*, void*);
-extern "C" void Avian_java_lang_Thread_sleep(void*, void*, void*);
 
 static volatile void* s_avian_force_anchors[] = {
     (void*)&Avian_avian_Classes_makeString,
-    (void*)&Avian_avian_Classes_defineClass,
     (void*)&Avian_avian_Classes_initialize,
-    (void*)&Avian_avian_Classes_getVMClass,
-    (void*)&Avian_avian_Classes_forName,
-    (void*)&Avian_avian_VMClass_getName,
-    (void*)&Avian_avian_VMClass_getSuperclass,
+    (void*)&Avian_avian_Classes_resolveVMClass,
+    (void*)&Avian_avian_Classes_defineVMClass,
+    (void*)&Avian_avian_Classes_toVMClass,
+    (void*)&Avian_avian_Classes_toVMMethod,
     (void*)&Avian_avian_SystemClassLoader_appLoader,
     (void*)&Avian_avian_SystemClassLoader_findLoadedVMClass,
-    (void*)&Avian_java_lang_System_arraycopy,
-    (void*)&Avian_java_lang_System_identityHashCode,
-    (void*)&Avian_java_lang_System_currentTimeMillis,
-    (void*)&Avian_java_lang_Throwable_fillInStackTrace,
-    (void*)&Avian_java_lang_Throwable_getStackTrace,
-    (void*)&Avian_java_lang_Thread_currentThread,
-    (void*)&Avian_java_lang_Thread_sleep,
 };
 
 static std::function<void(const char*)> g_jni_log_callback;
