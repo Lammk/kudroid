@@ -122,8 +122,8 @@ struct ZipEntry {
     size_t sourceIndex;        // file nguồn nào giữ dữ liệu raw
     uint32_t outLocalOffset;   // offset trong output (điền khi ghi)
     uint16_t versionNeeded;
-    uint16_t externalAttrs;
-    uint32_t internalAttrs;
+    uint32_t externalAttrs;
+    uint16_t internalAttrs;
 };
 
 bool collect_zip_entries(const std::string& path, size_t sourceIndex,
@@ -165,8 +165,8 @@ bool collect_zip_entries(const std::string& path, size_t sourceIndex,
         const uint16_t extraLen = rd16(hdr + 30);
         const uint16_t commentLen = rd16(hdr + 32);
         e.localOffset = rd32(hdr + 42);
-        e.externalAttrs = rd16(hdr + 38);
-        e.internalAttrs = rd32(hdr + 36);
+        e.externalAttrs = rd32(hdr + 38);
+        e.internalAttrs = rd16(hdr + 36);
         e.sourceIndex = sourceIndex;
         std::string name(nameLen, '\0');
         f.read(&name[0], nameLen);
@@ -264,8 +264,11 @@ bool merge_jars(const std::vector<std::string>& inputs, const std::string& outpu
         wr16(out, 0);                      // extra len
         wr16(out, 0);                      // comment len
         wr16(out, 0);                      // disk number
-        wr16(out, 0);                      // internal attrs
-        wr16(out, static_cast<uint16_t>(e.externalAttrs));
+        wr16(out, e.internalAttrs);
+        // external attrs là 4 byte theo spec ZIP; ghi 2 byte làm header dài 44
+        // thay vì 46 → mọi field sau lệch, parser nghiêm ngặt (Avian JarIndex)
+        // không đọc được entry nào.
+        wr32(out, e.externalAttrs);
         wr32(out, e.outLocalOffset);
         out.write(e.name.data(), static_cast<std::streamsize>(e.name.size()));
     }
@@ -309,7 +312,7 @@ std::string DexAotCache::translate_dex_if_needed(const std::string& apk_extracte
     if (dexes.empty()) {
         return fail("[kudroid_aot] No classes*.dex found in " + apk_extracted_path);
     }
-    const std::string hash = DexCacheManager::sha256Files(dexes) + "_v12_system_arraycopy_fixed";
+    const std::string hash = DexCacheManager::sha256Files(dexes) + "_v13_zip_central_dir_fixed";
     if (hash.empty()) {
         return fail("[kudroid_aot] Cannot compute SHA-256 of dex files");
     }
