@@ -834,6 +834,25 @@ extern "C" const char* kudroid_jit_status(void) {
     return result;
 }
 
+static std::atomic<int> g_requestedOrientation{-1}; // -1=Unspecified, 0=Landscape, 1=Portrait
+
+extern "C" void kudroid_set_requested_orientation(int orientation) {
+    g_requestedOrientation.store(orientation);
+    fprintf(stderr, "[KuDroidCore] Screen orientation requested: %d (%s)\n",
+            orientation,
+            (orientation == 0 || orientation == 6 || orientation == 8) ? "Landscape" :
+            (orientation == 1 || orientation == 7 || orientation == 9) ? "Portrait" : "Sensor/Auto");
+}
+
+extern "C" int kudroid_get_requested_orientation(void) {
+    return g_requestedOrientation.load();
+}
+
+extern "C" JNIEXPORT void JNICALL Java_android_app_Activity_setRequestedOrientation_1native(JNIEnv* env, jclass clazz, jint orientation) {
+    (void)env; (void)clazz;
+    kudroid_set_requested_orientation(orientation);
+}
+
 #include "kudroid/kudroid_jni.h"
 
 // --- định nghĩa nativeactivity ---

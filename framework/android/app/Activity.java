@@ -11,12 +11,39 @@ import android.os.Bundle;
  * tối thiểu của kudroid, các phương thức vòng đời là no-op mà các ứng dụng có thể ghi đè.
  */
 public class Activity extends ContextThemeWrapper {
+    public static final int SCREEN_ORIENTATION_UNSPECIFIED = -1;
+    public static final int SCREEN_ORIENTATION_LANDSCAPE = 0;
+    public static final int SCREEN_ORIENTATION_PORTRAIT = 1;
+    public static final int SCREEN_ORIENTATION_USER = 2;
+    public static final int SCREEN_ORIENTATION_BEHIND = 3;
+    public static final int SCREEN_ORIENTATION_SENSOR = 4;
+    public static final int SCREEN_ORIENTATION_NOSENSOR = 5;
+    public static final int SCREEN_ORIENTATION_SENSOR_LANDSCAPE = 6;
+    public static final int SCREEN_ORIENTATION_SENSOR_PORTRAIT = 7;
+    public static final int SCREEN_ORIENTATION_REVERSE_LANDSCAPE = 8;
+    public static final int SCREEN_ORIENTATION_REVERSE_PORTRAIT = 9;
+    public static final int SCREEN_ORIENTATION_FULL_SENSOR = 10;
+
+    private int mRequestedOrientation = SCREEN_ORIENTATION_UNSPECIFIED;
     private boolean mCreated = false;
     private boolean mStarted = false;
     private boolean mResumed = false;
 
     public Activity() {
     }
+
+    public void setRequestedOrientation(int requestedOrientation) {
+        mRequestedOrientation = requestedOrientation;
+        try {
+            setRequestedOrientation_native(requestedOrientation);
+        } catch (Throwable ignored) {}
+    }
+
+    public int getRequestedOrientation() {
+        return mRequestedOrientation;
+    }
+
+    private static native void setRequestedOrientation_native(int requestedOrientation);
 
     /**
      * được gọi khi hoạt động được tạo lần đầu tiên.

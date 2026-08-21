@@ -3,6 +3,7 @@ import UIKit
 import AVFAudio
 import Metal
 import QuartzCore
+import CoreMotion
 
 struct ContentView: View {
     @State private var fullLog = "KuDroid Core Status"
@@ -1357,6 +1358,8 @@ class NativeMetalViewController: UIViewController {
     private var metalView: NativeMetalView!
     private var crashCheckTimer: Timer?
     private var statusLabel: UILabel!
+    private let motionManager = CMMotionManager()
+    private var lastRequestedOrientation: Int32 = -1
 
     init(appName: String, onExit: @escaping () -> Void, onCrash: @escaping (String, String) -> Void) {
         self.appName = appName
@@ -1372,6 +1375,16 @@ class NativeMetalViewController: UIViewController {
     override func loadView() {
         metalView = NativeMetalView(frame: UIScreen.main.bounds)
         self.view = metalView
+    }
+
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
+        let req = kudroid_get_requested_orientation()
+        if req == 0 || req == 6 || req == 8 {
+            return .landscape
+        } else if req == 1 || req == 7 || req == 9 {
+            return .portrait
+        }
+        return .allButUpsideDown
     }
 
     override func viewDidLoad() {
@@ -1419,12 +1432,36 @@ class NativeMetalViewController: UIViewController {
             }
         }
 
+        // Khởi động CoreMotion để truyền dữ liệu cảm biến vào KuDroid bridge
+        if motionManager.isAccelerometerAvailable {
+            motionManager.accelerometerUpdateInterval = 0.02 // 50 Hz
+            motionManager.startAccelerometerUpdates(to: .main) { data, _ in
+                guard let data = data else { return }
+                kudroid_inject_sensor_event(1, Float(data.acceleration.x * 9.81), Float(data.acceleration.y * 9.81), Float(data.acceleration.z * 9.81))
+            }
+        }
+        if motionManager.isGyroAvailable {
+            motionManager.gyroUpdateInterval = 0.02
+            motionManager.startGyroUpdates(to: .main) { data, _ in
+                guard let data = data else { return }
+                kudroid_inject_sensor_event(4, Float(data.rotationRate.x), Float(data.rotationRate.y), Float(data.rotationRate.z))
+            }
+        }
+
         startAppIfNeeded()
     }
 
     @objc private func handleExitButton() {
+        motionManager.stopAccelerometerUpdates()
+        motionManager.stopGyroUpdates()
         crashCheckTimer?.invalidate()
         onExit()
+    }
+
+    deinit {
+        motionManager.stopAccelerometerUpdates()
+        motionManager.stopGyroUpdates()
+        crashCheckTimer?.invalidate()
     }
 
     override func viewDidLayoutSubviews() {
@@ -1473,12 +1510,42 @@ class NativeMetalViewController: UIViewController {
         let unmanaged = Unmanaged.passUnretained(view.layer)
         kudroid_set_metal_layer(unmanaged.toOpaque(), width, height, Float(scale))
 
-        // Timer quét trạng thái crash định kỳ từ C++ bridge
+        // Timer quét trạng thái crash và hướng màn hình định kỳ từ C++ bridge
         crashCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] timer in
             guard let self = self else { return }
             if kudroid_has_crashed() != 0 {
                 timer.invalidate()
                 self.handleCrash()
+                return
+            }
+
+            // Quét hướng màn hình yêu cầu từ Android guest app
+            let reqOri = kudroid_get_requested_orientation()
+            if reqOri != self.lastRequestedOrientation {
+                self.lastRequestedOrientation = reqOri
+                if reqOri == 0 || reqOri == 6 || reqOri == 8 {
+                    // Landscape
+                    NSLog("[KuDroid] Guest app requested LANDSCAPE orientation (%d)", reqOri)
+                    if #available(iOS 16.0, *) {
+                        if let windowScene = self.view.window?.windowScene {
+                            let geometryPreferences = UIWindowScene.GeometryPreferences.iOS(interfaceOrientations: .landscape)
+                            windowScene.requestGeometryUpdate(geometryPreferences) { error in
+                                NSLog("[KuDroid] requestGeometryUpdate landscape error: %@", error.localizedDescription)
+                            }
+                        }
+                    }
+                } else if reqOri == 1 || reqOri == 7 || reqOri == 9 {
+                    // Portrait
+                    NSLog("[KuDroid] Guest app requested PORTRAIT orientation (%d)", reqOri)
+                    if #available(iOS 16.0, *) {
+                        if let windowScene = self.view.window?.windowScene {
+                            let geometryPreferences = UIWindowScene.GeometryPreferences.iOS(interfaceOrientations: .portrait)
+                            windowScene.requestGeometryUpdate(geometryPreferences) { error in
+                                NSLog("[KuDroid] requestGeometryUpdate portrait error: %@", error.localizedDescription)
+                            }
+                        }
+                    }
+                }
             }
         }
 

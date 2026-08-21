@@ -48,6 +48,13 @@ void kudroid_set_documents_dir(const char* dir);
 
 int kudroid_is_jit_enabled(void);
 
+/// đặt và lấy hướng màn hình yêu cầu từ Activity (0=Landscape, 1=Portrait, -1=Unspecified)
+void kudroid_set_requested_orientation(int orientation);
+int kudroid_get_requested_orientation(void);
+
+/// truyền dữ liệu cảm biến (Accelerometer/Gyroscope/Orientation) từ iOS CoreMotion vào guest app
+void kudroid_inject_sensor_event(int sensorType, float x, float y, float z);
+
 /// đặt con trỏ cametallayer hoặc uiview được sử dụng cho các ràng buộc bề mặt anativewindow.
 void kudroid_set_metal_layer(void* layer, int width, int height);
 

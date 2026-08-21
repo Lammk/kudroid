@@ -5,6 +5,7 @@
 #include <cstring>
 #include <mutex>
 #include <deque>
+#include <vector>
 #include <chrono>
 
 // Declared in SyscallShim.cpp.
@@ -341,8 +342,66 @@ extern "C" int64_t bionic_AKeyEvent_getEventTime(const void* event) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Bionic ASensorManager shims (unchanged)
+// Bionic ASensorManager shims (Real sensor bridge from iOS CoreMotion)
 // ─────────────────────────────────────────────────────────────────────────────
+
+struct ASensorVector {
+    float x;
+    float y;
+    float z;
+    int8_t status;
+    uint8_t reserved[3];
+};
+
+struct ASensorEvent {
+    int32_t version;
+    int32_t sensor;
+    int32_t type;
+    int32_t reserved0;
+    int64_t timestamp;
+    union {
+        float data[16];
+        ASensorVector vector;
+        ASensorVector acceleration;
+    };
+    int32_t reserved1[4];
+};
+
+struct DummySensor {
+    int type;
+    const char* name;
+    const char* vendor;
+};
+
+static DummySensor g_sensorAccel = {1, "iOS Accelerometer", "Apple"};
+static DummySensor g_sensorGyro = {4, "iOS Gyroscope", "Apple"};
+static DummySensor g_sensorOrient = {3, "iOS Orientation Sensor", "Apple"};
+static DummySensor* g_sensorList[3] = {&g_sensorAccel, &g_sensorGyro, &g_sensorOrient};
+
+static std::mutex g_sensorMutex;
+static std::vector<ASensorEvent> g_sensorEventQueue;
+
+extern "C" void kudroid_inject_sensor_event(int sensorType, float x, float y, float z) {
+    ASensorEvent ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.version = sizeof(ASensorEvent);
+    ev.sensor = sensorType;
+    ev.type = sensorType;
+    ev.timestamp = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    ev.acceleration.x = x;
+    ev.acceleration.y = y;
+    ev.acceleration.z = z;
+    ev.acceleration.status = 3; // SENSOR_STATUS_ACCURACY_HIGH
+
+    {
+        std::lock_guard<std::mutex> lock(g_sensorMutex);
+        if (g_sensorEventQueue.size() < 64) {
+            g_sensorEventQueue.push_back(ev);
+        }
+    }
+}
+
 extern "C" void* bionic_ASensorManager_getInstance() {
     static int dummyManager = 1;
     return &dummyManager;
@@ -359,25 +418,58 @@ extern "C" int bionic_ASensorManager_destroyEventQueue(void* manager, void* queu
 }
 
 extern "C" int bionic_ASensorManager_getSensorList(void* manager, void** list) {
-    (void)manager; (void)list; return 0; // 0 sensors
+    (void)manager;
+    if (list) {
+        *list = g_sensorList;
+    }
+    return 3;
 }
 
 extern "C" void* bionic_ASensorManager_getDefaultSensor(void* manager, int type) {
-    (void)manager; (void)type; return nullptr;
+    (void)manager;
+    if (type == 1) return &g_sensorAccel;
+    if (type == 4) return &g_sensorGyro;
+    if (type == 3) return &g_sensorOrient;
+    return &g_sensorAccel;
 }
 
 extern "C" int bionic_ASensorEventQueue_enableSensor(void* queue, void* sensor) { (void)queue; (void)sensor; return 0; }
 extern "C" int bionic_ASensorEventQueue_disableSensor(void* queue, void* sensor) { (void)queue; (void)sensor; return 0; }
 extern "C" int bionic_ASensorEventQueue_setEventRate(void* queue, void* sensor, int32_t usec) { (void)queue; (void)sensor; (void)usec; return 0; }
-extern "C" int bionic_ASensorEventQueue_hasEvents(void* queue) { (void)queue; return 0; }
-extern "C" ssize_t bionic_ASensorEventQueue_getEvents(void* queue, void* events, size_t count) {
-    (void)queue; (void)events; (void)count;
-    return 0; // Sensors shouldn't return touch events
+extern "C" int bionic_ASensorEventQueue_hasEvents(void* queue) {
+    (void)queue;
+    std::lock_guard<std::mutex> lock(g_sensorMutex);
+    return g_sensorEventQueue.empty() ? 0 : 1;
 }
-extern "C" const char* bionic_ASensor_getName(void* sensor) { (void)sensor; return "DummySensor"; }
-extern "C" const char* bionic_ASensor_getVendor(void* sensor) { (void)sensor; return "Kudroid"; }
-extern "C" int bionic_ASensor_getType(void* sensor) { (void)sensor; return 1; }
-extern "C" float bionic_ASensor_getResolution(void* sensor) { (void)sensor; return 1.0f; }
+
+extern "C" ssize_t bionic_ASensorEventQueue_getEvents(void* queue, void* events, size_t count) {
+    (void)queue;
+    if (!events || count == 0) return 0;
+    std::lock_guard<std::mutex> lock(g_sensorMutex);
+    size_t num = std::min(count, g_sensorEventQueue.size());
+    if (num > 0) {
+        ASensorEvent* dst = static_cast<ASensorEvent*>(events);
+        for (size_t i = 0; i < num; ++i) {
+            dst[i] = g_sensorEventQueue[i];
+        }
+        g_sensorEventQueue.erase(g_sensorEventQueue.begin(), g_sensorEventQueue.begin() + num);
+    }
+    return num;
+}
+
+extern "C" const char* bionic_ASensor_getName(void* sensor) {
+    if (!sensor) return "Unknown";
+    return static_cast<DummySensor*>(sensor)->name;
+}
+extern "C" const char* bionic_ASensor_getVendor(void* sensor) {
+    if (!sensor) return "Apple";
+    return static_cast<DummySensor*>(sensor)->vendor;
+}
+extern "C" int bionic_ASensor_getType(void* sensor) {
+    if (!sensor) return 1;
+    return static_cast<DummySensor*>(sensor)->type;
+}
+extern "C" float bionic_ASensor_getResolution(void* sensor) { (void)sensor; return 0.001f; }
 extern "C" int bionic_ASensor_getMinDelay(void* sensor) { (void)sensor; return 10000; }
 
 const SymbolEntry kInputSymbols[] = {
