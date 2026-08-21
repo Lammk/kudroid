@@ -633,23 +633,28 @@ extern "C" void kudroid_set_log_dir(const char* dir) {
     g_logDir[sizeof(g_logDir) - 1] = '\0';
     installCrashHandlers();
 
+    // Reset android log file mỗi lần mở app để tránh tích tụ hàng trăm MB
+    {
+        char aPath[1200];
+        snprintf(aPath, sizeof(aPath), "%s/kudroid_android_logs.txt", g_logDir);
+        FILE* afp = fopen(aPath, "w");
+        if (afp) fclose(afp);
+    }
+
     // Ghi stamp build ra file để user kiểm tra app đang chạy có phải bản mới
     // nhất không (trả lời "iPhone vẫn chạy app cũ?").
     const char* stamp = kudroid_build_stamp();
     writeLogFile("kudroid_version.txt", std::string(stamp) + "\n");
 
 #if defined(__APPLE__)
-    // Redirect stderr (fd 2) vào file — Avian (JVM nhúng) in lý do abort/fatal
-    // ra stderr (vd expect()/abort(c) trong compiler kèm op không hỗ trợ) nhưng
-    // iOS không hiển thị stderr đâu cả → lý do crash trước đây bị mất hoàn toàn.
-    // Crash handler sẽ dump đuôi file này vào kudroid_crash.log.
+    // Redirect stderr (fd 2) vào file — dùng O_TRUNC để mỗi phiên chạy là log mới toanh, siêu nhẹ
     {
         char errPath[1200];
         size_t dl = strlen(g_logDir);
         if (dl < sizeof(errPath) - 32) {
             memcpy(errPath, g_logDir, dl);
             memcpy(errPath + dl, "/stderr.log", 12);
-            int errFd = open(errPath, O_WRONLY | O_CREAT | O_APPEND, 0644);
+            int errFd = open(errPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
             if (errFd >= 0) {
                 dup2(errFd, STDERR_FILENO);
                 setvbuf(stderr, nullptr, _IONBF, 0);
