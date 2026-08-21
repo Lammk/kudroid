@@ -783,6 +783,7 @@ extern "C" const char* kudroid_install_apk(const char* apkPath) {
 #if defined(__APPLE__)
 #include <sys/mman.h>
 #include <unistd.h>
+#include <libkern/OSCacheControl.h>
 #include <TargetConditionals.h>
 
 // csops() là một api riêng tư nhưng ổn định; được sử dụng để đọc trạng thái chữ ký mã của quá trình.
