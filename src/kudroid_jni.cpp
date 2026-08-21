@@ -183,6 +183,140 @@ static void register_android_graphics_canvas_natives(JNIEnv* env) {
     env->DeleteLocalRef(clazz);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// java.lang.System.arraycopy JNI native implementation
+// ─────────────────────────────────────────────────────────────────────────────
+static void java_lang_System_arraycopy(JNIEnv* env, jclass /*clazz*/,
+                                       jobject src, jint srcPos,
+                                       jobject dst, jint dstPos, jint length) {
+    if (!src || !dst) {
+        jclass npe = env->FindClass("java/lang/NullPointerException");
+        if (npe) env->ThrowNew(npe, "src or dst is null");
+        return;
+    }
+    if (srcPos < 0 || dstPos < 0 || length < 0) {
+        jclass aioobe = env->FindClass("java/lang/IndexOutOfBoundsException");
+        if (aioobe) env->ThrowNew(aioobe, "negative index or length");
+        return;
+    }
+    if (length == 0) return;
+
+    jsize srcLen = env->GetArrayLength(static_cast<jarray>(src));
+    jsize dstLen = env->GetArrayLength(static_cast<jarray>(dst));
+
+    if (srcPos + length > srcLen || dstPos + length > dstLen) {
+        jclass aioobe = env->FindClass("java/lang/IndexOutOfBoundsException");
+        if (aioobe) env->ThrowNew(aioobe, "array index out of bounds");
+        return;
+    }
+
+    jclass srcClass = env->GetObjectClass(src);
+    jclass classClass = srcClass ? env->GetObjectClass(srcClass) : nullptr;
+    jmethodID getNameMid = classClass ? env->GetMethodID(classClass, "getName", "()Ljava/lang/String;") : nullptr;
+    jstring nameStr = (srcClass && getNameMid) ? static_cast<jstring>(env->CallObjectMethod(srcClass, getNameMid)) : nullptr;
+    const char* nameChars = nameStr ? env->GetStringUTFChars(nameStr, nullptr) : nullptr;
+
+    char typeChar = (nameChars && nameChars[0] == '[') ? nameChars[1] : 'L';
+
+    if (typeChar == 'B') { // byte[]
+        jbyte* buf = static_cast<jbyte*>(std::malloc(length * sizeof(jbyte)));
+        if (buf) {
+            env->GetByteArrayRegion(static_cast<jbyteArray>(src), srcPos, length, buf);
+            env->SetByteArrayRegion(static_cast<jbyteArray>(dst), dstPos, length, buf);
+            std::free(buf);
+        }
+    } else if (typeChar == 'C') { // char[]
+        jchar* buf = static_cast<jchar*>(std::malloc(length * sizeof(jchar)));
+        if (buf) {
+            env->GetCharArrayRegion(static_cast<jcharArray>(src), srcPos, length, buf);
+            env->SetCharArrayRegion(static_cast<jcharArray>(dst), dstPos, length, buf);
+            std::free(buf);
+        }
+    } else if (typeChar == 'I') { // int[]
+        jint* buf = static_cast<jint*>(std::malloc(length * sizeof(jint)));
+        if (buf) {
+            env->GetIntArrayRegion(static_cast<jintArray>(src), srcPos, length, buf);
+            env->SetIntArrayRegion(static_cast<jintArray>(dst), dstPos, length, buf);
+            std::free(buf);
+        }
+    } else if (typeChar == 'S') { // short[]
+        jshort* buf = static_cast<jshort*>(std::malloc(length * sizeof(jshort)));
+        if (buf) {
+            env->GetShortArrayRegion(static_cast<jshortArray>(src), srcPos, length, buf);
+            env->SetShortArrayRegion(static_cast<jshortArray>(dst), dstPos, length, buf);
+            std::free(buf);
+        }
+    } else if (typeChar == 'Z') { // boolean[]
+        jboolean* buf = static_cast<jboolean*>(std::malloc(length * sizeof(jboolean)));
+        if (buf) {
+            env->GetBooleanArrayRegion(static_cast<jbooleanArray>(src), srcPos, length, buf);
+            env->SetBooleanArrayRegion(static_cast<jbooleanArray>(dst), dstPos, length, buf);
+            std::free(buf);
+        }
+    } else if (typeChar == 'J') { // long[]
+        jlong* buf = static_cast<jlong*>(std::malloc(length * sizeof(jlong)));
+        if (buf) {
+            env->GetLongArrayRegion(static_cast<jlongArray>(src), srcPos, length, buf);
+            env->SetLongArrayRegion(static_cast<jlongArray>(dst), dstPos, length, buf);
+            std::free(buf);
+        }
+    } else if (typeChar == 'F') { // float[]
+        jfloat* buf = static_cast<jfloat*>(std::malloc(length * sizeof(jfloat)));
+        if (buf) {
+            env->GetFloatArrayRegion(static_cast<jfloatArray>(src), srcPos, length, buf);
+            env->SetFloatArrayRegion(static_cast<jfloatArray>(dst), dstPos, length, buf);
+            std::free(buf);
+        }
+    } else if (typeChar == 'D') { // double[]
+        jdouble* buf = static_cast<jdouble*>(std::malloc(length * sizeof(jdouble)));
+        if (buf) {
+            env->GetDoubleArrayRegion(static_cast<jdoubleArray>(src), srcPos, length, buf);
+            env->SetDoubleArrayRegion(static_cast<jdoubleArray>(dst), dstPos, length, buf);
+            std::free(buf);
+        }
+    } else { // Object[]
+        if (src == dst && srcPos < dstPos) {
+            for (jint i = length - 1; i >= 0; --i) {
+                jobject elem = env->GetObjectArrayElement(static_cast<jobjectArray>(src), srcPos + i);
+                env->SetObjectArrayElement(static_cast<jobjectArray>(dst), dstPos + i, elem);
+                if (elem) env->DeleteLocalRef(elem);
+            }
+        } else {
+            for (jint i = 0; i < length; ++i) {
+                jobject elem = env->GetObjectArrayElement(static_cast<jobjectArray>(src), srcPos + i);
+                env->SetObjectArrayElement(static_cast<jobjectArray>(dst), dstPos + i, elem);
+                if (elem) env->DeleteLocalRef(elem);
+            }
+        }
+    }
+
+    if (nameChars && nameStr) env->ReleaseStringUTFChars(nameStr, nameChars);
+    if (nameStr) env->DeleteLocalRef(nameStr);
+    if (classClass) env->DeleteLocalRef(classClass);
+    if (srcClass) env->DeleteLocalRef(srcClass);
+}
+
+static void register_java_lang_system_natives(JNIEnv* env) {
+    jclass clazz = env->FindClass("java/lang/System");
+    if (!clazz) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        log_jni("ERROR: FindClass(java/lang/System) failed");
+        return;
+    }
+    static const JNINativeMethod methods[] = {
+        {const_cast<char*>("arraycopy"),
+         const_cast<char*>("(Ljava/lang/Object;ILjava/lang/Object;II)V"),
+         reinterpret_cast<void*>(&java_lang_System_arraycopy)},
+    };
+    if (env->RegisterNatives(clazz, methods, 1) != JNI_OK) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        log_jni("ERROR: RegisterNatives(java/lang/System.arraycopy) failed");
+        return;
+    }
+    log_jni("Registered java/lang/System.arraycopy -> JNI native bridge");
+    env->DeleteLocalRef(clazz);
+}
+
 static std::function<void(const char*)> g_jni_log_callback;
 
 extern "C" void kudroid_jni_set_log_callback(void (*cb)(const char*)) {
@@ -545,7 +679,8 @@ void kudroid_jni_init_jvm(const char* bootclasspath, const char* classpath) {
     }
 
     // Đăng ký native method của framework ngay tại đây — nếu bỏ lỡ, Java gọi
-    // Log.* sẽ UnsatisfiedLinkError (issue đã tìm thấy khi rà framework).
+    // Log.* hoặc System.arraycopy sẽ UnsatisfiedLinkError.
+    register_java_lang_system_natives(g_env);
     register_android_util_log_natives(g_env);
     register_android_graphics_canvas_natives(g_env);
 
