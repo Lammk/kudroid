@@ -139,12 +139,23 @@ public final class ActivityThread {
 
         if (clazz != null) {
             try {
+                android.util.Log.i("ActivityThread", "Instantiating Activity: " + clazz.getName());
                 mInitialActivity = (Activity) clazz.newInstance();
+                android.util.Log.i("ActivityThread", "Calling onCreate()...");
                 mInitialActivity.onCreate(null);
+                android.util.Log.i("ActivityThread", "Calling onStart()...");
                 mInitialActivity.onStart();
+                android.util.Log.i("ActivityThread", "Calling onResume()...");
                 mInitialActivity.onResume();
+                android.util.Log.i("ActivityThread", "Activity launch complete! UI is live.");
             } catch (Throwable t) {
-                t.printStackTrace();
+                android.util.Log.e("ActivityThread", "FATAL in Activity lifecycle: " + t.toString());
+                StackTraceElement[] trace = t.getStackTrace();
+                if (trace != null) {
+                    for (StackTraceElement ste : trace) {
+                        android.util.Log.e("ActivityThread", "    at " + ste.toString());
+                    }
+                }
             }
         } else {
             System.err.println("[ActivityThread] Could not resolve Activity class, launching Fallback KuDroid UI...");

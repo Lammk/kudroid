@@ -297,9 +297,96 @@ def patch_memory_cpp():
     )
     if old_extra in content:
         content = content.replace(old_extra, new_extra)
+
+    old_failed = "  if (p == MAP_FAILED) {\n    return util::Slice<uint8_t>(0, 0);"
+    new_failed = (
+        "  if (p == MAP_FAILED) {\n"
+        "#if defined(__APPLE__)\n"
+        "    if (perms & Execute) {\n"
+        "      // Fallback: nếu không có JIT entitlement, allocate RW thông thường để Interpreter vẫn chạy ngon lành!\n"
+        "      p = mmap(0, sizeInBytes, (prot & ~PROT_EXEC), MAP_PRIVATE | MAP_ANON, -1, 0);\n"
+        "    }\n"
+        "#endif\n"
+        "  }\n"
+        "  if (p == MAP_FAILED) {\n"
+        "    return util::Slice<uint8_t>(0, 0);"
+    )
+    if old_failed in content:
+        content = content.replace(old_failed, new_failed)
+
+    with open(path, "w") as f:
+        f.write(content)
+    print("Patched memory.cpp (MAP_JIT flag + non-JIT RW fallback for iOS)")
+
+
+def patch_assert_h():
+    """UNREACHABLE(msg)/ASSERT(that) trong Avian gọi ::abort() TRẦN — không in gì.
+    Đây là một trong các nguồn "abort câm" khiến mọi crash phải đoán mò. Cho nó
+    in file:line + biểu thức ra fd 2 (write, không stdio → không cần flush)."""
+    path = "include/avian/util/assert.h"
+    try:
+        with open(path, "r") as f:
+            content = f.read()
+    except Exception as e:
+        print(f"WARNING: unable to read {path}: {e}")
+        return
+
+    old = (
+        "#define UNREACHABLE_ ::abort()\n"
+        "\n"
+        "// TODO: print msg in debug mode\n"
+        "#define UNREACHABLE(msg) ::abort()"
+    )
+    new = (
+        "// KuDroid: in lý do trước khi abort — abort() trần không in gì và không\n"
+        "// flush stdio, nên lý do chết bị mất hoàn toàn trên iOS.\n"
+        "#define AVIAN_ABORT_MSG(where)                                     \\\n"
+        "  do {                                                             \\\n"
+        "    const char m[] = \"\\n[AVIAN_ABORT] \" where \" at \" __FILE__ \"\\n\"; \\\n"
+        "    (void)!::write(2, m, sizeof(m) - 1);                            \\\n"
+        "  } while (0)\n"
+        "\n"
+        "#define UNREACHABLE_          \\\n"
+        "  do {                        \\\n"
+        "    AVIAN_ABORT_MSG(\"UNREACHABLE\"); \\\n"
+        "    ::abort();                \\\n"
+        "  } while (0)\n"
+        "\n"
+        "#define UNREACHABLE(msg)          \\\n"
+        "  do {                            \\\n"
+        "    AVIAN_ABORT_MSG(\"UNREACHABLE: \" #msg); \\\n"
+        "    ::abort();                    \\\n"
+        "  } while (0)"
+    )
+    if old in content:
+        content = content.replace(old, new)
+        if "#include <unistd.h>" not in content:
+            content = content.replace("#include <stdlib.h>",
+                                      "#include <stdlib.h>\n#include <unistd.h>")
         with open(path, "w") as f:
             f.write(content)
-        print("Patched memory.cpp (MAP_JIT flag for iOS)")
+        print("Patched assert.h (UNREACHABLE/ASSERT now print reason)")
+
+
+def patch_finder_cpp_debug():
+    """DebugFind = false làm BuiltinElement::init() nuốt sạch lỗi resolve
+    [classpathJar]: không load được symbol → index=0 → mọi FindClass fail mà
+    KHÔNG một dòng log nào. Bật lên để lỗi bootclasspath hiện ra ngay."""
+    path = "src/finder.cpp"
+    try:
+        with open(path, "r") as f:
+            content = f.read()
+    except Exception as e:
+        print(f"WARNING: unable to read {path}: {e}")
+        return
+
+    old = "const bool DebugFind = false;"
+    new = "const bool DebugFind = true;  // KuDroid: cần thấy lỗi resolve bootclasspath"
+    if old in content:
+        content = content.replace(old, new)
+        with open(path, "w") as f:
+            f.write(content)
+        print("Patched finder.cpp (DebugFind enabled)")
 
 
 if __name__ == "__main__":
@@ -308,4 +395,6 @@ if __name__ == "__main__":
     patch_posix_cpp()
     patch_crash_cpp()
     patch_memory_cpp()
+    patch_assert_h()
+    patch_finder_cpp_debug()
     sys.exit(0)

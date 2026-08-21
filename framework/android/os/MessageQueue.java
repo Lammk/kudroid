@@ -34,6 +34,7 @@ public final class MessageQueue {
                 }
                 last.next = msg;
             }
+            this.notifyAll();
             return true;
         }
     }
@@ -42,16 +43,21 @@ public final class MessageQueue {
      * trả về thông báo tiếp theo, hoặc rỗng nếu hàng đợi đang thoát.
      */
     Message next() {
-        synchronized (this) {
-            if (mQuitting) {
-                return null;
+        for (;;) {
+            synchronized (this) {
+                if (mQuitting) {
+                    return null;
+                }
+                Message msg = mMessages;
+                if (msg != null) {
+                    mMessages = msg.next;
+                    msg.next = null;
+                    return msg;
+                }
+                try {
+                    this.wait();
+                } catch (InterruptedException ignored) {}
             }
-            Message msg = mMessages;
-            if (msg != null) {
-                mMessages = msg.next;
-                msg.next = null;
-            }
-            return msg;
         }
     }
 

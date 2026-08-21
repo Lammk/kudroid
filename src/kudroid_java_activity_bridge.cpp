@@ -71,9 +71,20 @@ extern "C" void kudroid_launch_java_activity(JavaVM* vm, const char* activityNam
     env->CallStaticVoidMethod(atClass, mainMethod, args);
     
     if (env->ExceptionCheck()) {
-        app_log("Uncaught Exception in ActivityThread Looper!");
-        env->ExceptionDescribe();
+        jthrowable exc = env->ExceptionOccurred();
         env->ExceptionClear();
+        if (exc) {
+            jclass excCls = env->GetObjectClass(exc);
+            jmethodID toStringMid = env->GetMethodID(excCls, "toString", "()Ljava/lang/String;");
+            if (toStringMid) {
+                jstring str = (jstring)env->CallObjectMethod(exc, toStringMid);
+                if (str) {
+                    const char* cstr = env->GetStringUTFChars(str, nullptr);
+                    app_log("UNCAUGHT JAVA EXCEPTION: %s", cstr ? cstr : "unknown");
+                    env->ReleaseStringUTFChars(str, cstr);
+                }
+            }
+        }
     }
 }
 

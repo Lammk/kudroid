@@ -3616,7 +3616,17 @@ extern "C" int bionic___FD_ISSET_chk(int fd, const fd_set* set, size_t set_size)
 }
 
 extern "C" int bionic___open_2(const char* path, int flags) {
+    if (flags & O_CREAT) {
+        return bionic_openat(AT_FDCWD, path, flags, 0666);
+    }
     return bionic_openat(AT_FDCWD, path, flags, 0);
+}
+
+extern "C" int bionic___openat_2(int dirfd, const char* path, int flags) {
+    if (flags & O_CREAT) {
+        return bionic_openat(dirfd, path, flags, 0666);
+    }
+    return bionic_openat(dirfd, path, flags, 0);
 }
 
 extern "C" mode_t bionic___umask_chk(mode_t mask) {
@@ -3654,6 +3664,48 @@ extern "C" int bionic_sysinfo(struct bionic_sysinfo_struct* info) {
     info->procs = 100;
     info->mem_unit = 1;
     return 0;
+}
+
+struct AndroidBitmapInfo {
+    uint32_t width;
+    uint32_t height;
+    uint32_t stride;
+    int32_t  format; // ANDROID_BITMAP_FORMAT_RGBA_8888 = 1
+    uint32_t flags;
+};
+
+extern "C" int bionic_AndroidBitmap_getInfo(void* env, void* jbitmap, AndroidBitmapInfo* info) {
+    if (info) {
+        info->width = 128;
+        info->height = 128;
+        info->stride = 128 * 4;
+        info->format = 1; // RGBA_8888
+        info->flags = 0;
+    }
+    return 0; // ANDROID_BITMAP_RESULT_SUCCESS
+}
+
+static uint32_t s_dummy_bitmap_pixels[1024 * 1024];
+
+extern "C" int bionic_AndroidBitmap_lockPixels(void* env, void* jbitmap, void** addrPtr) {
+    if (addrPtr) {
+        *addrPtr = s_dummy_bitmap_pixels;
+    }
+    return 0;
+}
+
+extern "C" int bionic_AndroidBitmap_unlockPixels(void* env, void* jbitmap) {
+    return 0;
+}
+
+extern "C" char* bionic___gnu_strerror_r(int errnum, char* buf, size_t buflen) {
+    if (!buf || buflen == 0) return const_cast<char*>("");
+    strerror_r(errnum, buf, buflen);
+    return buf;
+}
+
+extern "C" size_t bionic___fwrite_chk(const void* buf, size_t size, size_t count, FILE* stream, size_t buf_size) {
+    return ::fwrite(buf, size, count, stream);
 }
 
 // bionic: int sem_timedwait(sem_t* sem, const struct timespec* abs_timeout)
@@ -4116,6 +4168,7 @@ const SymbolEntry kSyscallSymbols[] = {
     {"__strcat_chk", reinterpret_cast<void*>(&bionic___strcat_chk)},
     {"__fdelt_chk", reinterpret_cast<void*>(&bionic___fdelt_chk)},
     {"__open_2", reinterpret_cast<void*>(&bionic___open_2)},
+    {"__openat_2", reinterpret_cast<void*>(&bionic___openat_2)},
     {"__umask_chk", reinterpret_cast<void*>(&bionic___umask_chk)},
     {"__strrchr_chk", reinterpret_cast<void*>(&bionic___strrchr_chk)},
     {"sysinfo", reinterpret_cast<void*>(&bionic_sysinfo)},
@@ -4157,6 +4210,21 @@ const SymbolEntry kSyscallSymbols[] = {
     {"ZSTD_trace_compress_end", reinterpret_cast<void*>(&bionic_ZSTD_trace_compress_end)},
     {"ZSTD_trace_decompress_begin", reinterpret_cast<void*>(&bionic_ZSTD_trace_decompress_begin)},
     {"ZSTD_trace_decompress_end", reinterpret_cast<void*>(&bionic_ZSTD_trace_decompress_end)},
+
+    // Android NDK Bitmap API
+    {"AndroidBitmap_getInfo", reinterpret_cast<void*>(&bionic_AndroidBitmap_getInfo)},
+    {"AndroidBitmap_lockPixels", reinterpret_cast<void*>(&bionic_AndroidBitmap_lockPixels)},
+    {"AndroidBitmap_unlockPixels", reinterpret_cast<void*>(&bionic_AndroidBitmap_unlockPixels)},
+
+    // Bionic Fortify / String / Assertion Shims
+    {"__gnu_strerror_r", reinterpret_cast<void*>(&bionic___gnu_strerror_r)},
+    {"__fwrite_chk", reinterpret_cast<void*>(&bionic___fwrite_chk)},
+    {"__strchr_chk", reinterpret_cast<void*>(&bionic___strchr_chk)},
+    {"omp_in_parallel", reinterpret_cast<void*>(&bionic_omp_in_parallel)},
+    {"copy_file_range", reinterpret_cast<void*>(&bionic_copy_file_range)},
+    {"splice", reinterpret_cast<void*>(&bionic_splice)},
+    {"__assert2", reinterpret_cast<void*>(&bionic___assert2)},
+    {"__android_log_assert", reinterpret_cast<void*>(&bionic___android_log_assert)},
 };
 
 } // namespace

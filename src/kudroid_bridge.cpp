@@ -449,12 +449,22 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
                         const bool inGuest =
                             kudroid::kudroid_lookup_guest_module(
                                 reinterpret_cast<void*>(savedLr), lrMod, sizeof(lrMod));
+                        // Nếu không thuộc guest ELF thì đây là code HOST — gồm cả
+                        // Avian (link tĩnh vào KuDroidShell). Trước đây chỉ in raw
+                        // "lr=0x104e62934?" nên mọi abort của Avian đều vô danh và
+                        // phải đoán. symbolicateAddr có sẵn symbol table (hàm static
+                        // như crashHandler vẫn ra tên) → in luôn tên hàm ở đây để
+                        // lý do abort hiện ra ngay trong crash log, không cần atos.
+                        char lrSym[512];
+                        if (!inGuest) {
+                            symbolicateAddr((uintptr_t)savedLr, lrSym, sizeof(lrSym));
+                        }
                         const bool guardLike =
                             slot56 > 0x100000000ULL && slot56 < 0x7fffffffffffULL;
                         int n2 = snprintf(sigline, sizeof(sigline),
-                            "fp%02d: f=0x%llx lr=0x%llx%s slot56=0x%llx%s\n",
+                            "fp%02d: f=0x%llx lr=0x%llx %s slot56=0x%llx%s\n",
                             i, (unsigned long long)f, (unsigned long long)savedLr,
-                            inGuest ? lrMod : "?", (unsigned long long)slot56,
+                            inGuest ? lrMod : lrSym, (unsigned long long)slot56,
                             guardLike ? " <-- guard?" : "");
                         crashWriteLine(fd, sigline, n2, sizeof(sigline));
                         // Chain hợp lệ: frame kế cao hơn, delta ≤ 64KB.
@@ -578,7 +588,25 @@ static void installCrashHandlers(void) {
     sa.sa_sigaction = crashHandler;
     sa.sa_flags = SA_SIGINFO;
     sigemptyset(&sa.sa_mask);
-    
+
+    // Chạy handler trên stack riêng: khi crash là stack overflow (hoặc stack của
+    // JVM thread quá nhỏ), handler chạy trên stack đã hỏng sẽ double-fault và
+    // KHÔNG ghi được crash log — đúng triệu chứng "app chết im lặng". Cấp stack
+    // tĩnh (không heap, an toàn trong signal context) rồi bật SA_ONSTACK.
+    {
+        // SIGSTKSZ không còn là hằng biên dịch trên glibc mới → dùng kích thước
+        // cố định (64KB, thừa cho handler này) để mảng static hợp lệ ở mọi libc.
+        static char altStack[64 * 1024];
+        stack_t ss;
+        memset(&ss, 0, sizeof(ss));
+        ss.ss_sp = altStack;
+        ss.ss_size = sizeof(altStack);
+        ss.ss_flags = 0;
+        if (sigaltstack(&ss, nullptr) == 0) {
+            sa.sa_flags |= SA_ONSTACK;
+        }
+    }
+
     sigaction(SIGILL,  &sa, nullptr);
     sigaction(SIGBUS,  &sa, nullptr);
     sigaction(SIGSEGV, &sa, nullptr);
