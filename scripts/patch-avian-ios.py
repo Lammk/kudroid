@@ -263,9 +263,49 @@ def patch_crash_cpp():
         print("Patched crash.cpp (unbuffered crash diagnostic message)")
 
 
+def patch_memory_cpp():
+    path = "src/system/posix/memory.cpp"
+    try:
+        with open(path, "r") as f:
+            content = f.read()
+    except Exception as e:
+        print(f"WARNING: unable to read {path}: {e}")
+        return
+
+    old_extra = (
+        "#ifdef MAP_32BIT\n"
+        "  // map to the lower 32 bits of memory when possible so as to avoid\n"
+        "  // expensive relative jumps\n"
+        "  const unsigned Extra = MAP_32BIT;\n"
+        "#else\n"
+        "  const unsigned Extra = 0;\n"
+        "#endif"
+    )
+    new_extra = (
+        "  unsigned Extra = 0;\n"
+        "#ifdef MAP_32BIT\n"
+        "  Extra |= MAP_32BIT;\n"
+        "#endif\n"
+        "#if defined(__APPLE__)\n"
+        "#ifndef MAP_JIT\n"
+        "#define MAP_JIT 0x0800\n"
+        "#endif\n"
+        "  if (perms & Execute) {\n"
+        "    Extra |= MAP_JIT;\n"
+        "  }\n"
+        "#endif"
+    )
+    if old_extra in content:
+        content = content.replace(old_extra, new_extra)
+        with open(path, "w") as f:
+            f.write(content)
+        print("Patched memory.cpp (MAP_JIT flag for iOS)")
+
+
 if __name__ == "__main__":
     main()
     patch_compiler_cpp()
     patch_posix_cpp()
     patch_crash_cpp()
+    patch_memory_cpp()
     sys.exit(0)

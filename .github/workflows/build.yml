@@ -157,7 +157,7 @@ jobs:
           # Patch makefile for iOS (binaryToObject fails on macho; embed the
           # classpath jar via .incbin and merge the framework classes in).
           python3 "$GITHUB_WORKSPACE/scripts/patch-avian-ios.py"
-          make platform=ios arch=arm64 use-clang=true mode=debug-fast
+          make platform=ios arch=arm64 use-clang=true process=interpret mode=fast
 
       - name: Upload Avian iOS artifact
         uses: actions/upload-artifact@v4
