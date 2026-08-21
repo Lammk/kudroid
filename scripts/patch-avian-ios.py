@@ -235,39 +235,8 @@ def patch_posix_cpp():
         f.write(content)
 
 
-def patch_finder_cpp():
-    path = "src/finder.cpp"
-    try:
-        with open(path, "r") as f:
-            content = f.read()
-    except Exception as e:
-        print(f"WARNING: unable to read {path}: {e}")
-        return
-
-    # Khai báo extern "C" classpathJar ở file scope
-    file_scope_decl = 'extern "C" const uint8_t* classpathJar(size_t*);\n\nnamespace {'
-    if file_scope_decl not in content and 'namespace {' in content:
-        content = content.replace('namespace {', file_scope_decl, 1)
-
-    # Fallback trực tiếp con trỏ classpathJar nếu dlsym trả NULL
-    old_resolve_call = "void* p = library->resolve(symbolName);"
-    new_resolve_call = (
-        "void* p = library ? library->resolve(symbolName) : 0;\n"
-        "        if (!p && strcmp(symbolName, \"classpathJar\") == 0) {\n"
-        "          p = reinterpret_cast<void*>(classpathJar);\n"
-        "        }"
-    )
-    if old_resolve_call in content:
-        content = content.replace(old_resolve_call, new_resolve_call)
-        print("Patched finder.cpp (direct classpathJar fallback)")
-
-    with open(path, "w") as f:
-        f.write(content)
-
-
 if __name__ == "__main__":
     main()
     patch_compiler_cpp()
     patch_posix_cpp()
-    patch_finder_cpp()
     sys.exit(0)
