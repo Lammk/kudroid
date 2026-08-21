@@ -1109,6 +1109,29 @@ static kudroid::LibraryManager& globalLibraryManager() {
 }
 
 extern "C" const char* kudroid_run_apk(const char* appName) {
+    // Reset/truncate logs để mỗi phiên chạy app luôn ghi đè log mới hoàn toàn (không chồng lên nhau)
+    if (g_logDir[0] != '\0') {
+        char aPath[1200];
+        snprintf(aPath, sizeof(aPath), "%s/kudroid_android_logs.txt", g_logDir);
+        FILE* afp = fopen(aPath, "w");
+        if (afp) fclose(afp);
+
+        snprintf(aPath, sizeof(aPath), "%s/kudroid_crash.log", g_logDir);
+        FILE* cfp = fopen(aPath, "w");
+        if (cfp) fclose(cfp);
+
+#if defined(__APPLE__)
+        char errPath[1200];
+        snprintf(errPath, sizeof(errPath), "%s/stderr.log", g_logDir);
+        int errFd = open(errPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (errFd >= 0) {
+            dup2(errFd, STDERR_FILENO);
+            setvbuf(stderr, nullptr, _IONBF, 0);
+            close(errFd);
+        }
+#endif
+    }
+
     std::string log;
     appendTestHeader(log, "Run APK Native Libraries", appName);
     kudroid::bionic_shim_reset_trace();
