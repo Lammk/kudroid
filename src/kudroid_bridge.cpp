@@ -624,6 +624,7 @@ extern "C" void kudroid_set_log_dir(const char* dir) {
             int errFd = open(errPath, O_WRONLY | O_CREAT | O_APPEND, 0644);
             if (errFd >= 0) {
                 dup2(errFd, STDERR_FILENO);
+                setvbuf(stderr, nullptr, _IONBF, 0);
                 close(errFd);
             }
         }

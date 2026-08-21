@@ -235,8 +235,37 @@ def patch_posix_cpp():
         f.write(content)
 
 
+def patch_crash_cpp():
+    path = "src/system/posix/crash.cpp"
+    try:
+        with open(path, "r") as f:
+            content = f.read()
+    except Exception as e:
+        print(f"WARNING: unable to read {path}: {e}")
+        return
+
+    old_crash = "NO_RETURN void crash()\n{\n  abort();\n}"
+    new_crash = (
+        "NO_RETURN void crash()\n"
+        "{\n"
+        '  const char msg[] = "\\n[AVIAN_CRASH] avian::system::crash() called — internal JVM abort!\\n";\n'
+        "  (void)!write(2, msg, sizeof(msg) - 1);\n"
+        "  (void)!write(1, msg, sizeof(msg) - 1);\n"
+        "  abort();\n"
+        "}"
+    )
+    if old_crash in content:
+        content = content.replace(old_crash, new_crash)
+        if '#include <unistd.h>' not in content:
+            content = '#include <unistd.h>\n' + content
+        with open(path, "w") as f:
+            f.write(content)
+        print("Patched crash.cpp (unbuffered crash diagnostic message)")
+
+
 if __name__ == "__main__":
     main()
     patch_compiler_cpp()
     patch_posix_cpp()
+    patch_crash_cpp()
     sys.exit(0)
