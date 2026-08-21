@@ -54,10 +54,11 @@ public final class MessageQueue {
                     msg.next = null;
                     return msg;
                 }
-                try {
-                    this.wait();
-                } catch (InterruptedException ignored) {}
             }
+            // Ngủ ngắn 10ms nếu chưa có message mới để nhường CPU và không bao giờ bị thoát vòng lặp
+            try {
+                Thread.sleep(10);
+            } catch (Throwable ignored) {}
         }
     }
 

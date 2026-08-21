@@ -71,6 +71,7 @@ extern "C" void kudroid_launch_java_activity(JavaVM* vm, const char* activityNam
     env->CallStaticVoidMethod(atClass, mainMethod, args);
     
     if (env->ExceptionCheck()) {
+        env->ExceptionDescribe();
         jthrowable exc = env->ExceptionOccurred();
         env->ExceptionClear();
         if (exc) {

@@ -633,22 +633,17 @@ extern "C" void kudroid_set_log_dir(const char* dir) {
     g_logDir[sizeof(g_logDir) - 1] = '\0';
     installCrashHandlers();
 
-    // Reset android log file mỗi lần mở app để tránh tích tụ hàng trăm MB
-    {
+    static bool s_logDirInitialized = false;
+    if (!s_logDirInitialized) {
+        s_logDirInitialized = true;
+        // Chỉ reset log đúng một lần khi app KuDroid mới mở, giữ nguyên log khi user ấn X / quay lại màn hình chính
         char aPath[1200];
         snprintf(aPath, sizeof(aPath), "%s/kudroid_android_logs.txt", g_logDir);
         FILE* afp = fopen(aPath, "w");
         if (afp) fclose(afp);
-    }
-
-    // Ghi stamp build ra file để user kiểm tra app đang chạy có phải bản mới
-    // nhất không (trả lời "iPhone vẫn chạy app cũ?").
-    const char* stamp = kudroid_build_stamp();
-    writeLogFile("kudroid_version.txt", std::string(stamp) + "\n");
 
 #if defined(__APPLE__)
-    // Redirect stderr (fd 2) vào file — dùng O_TRUNC để mỗi phiên chạy là log mới toanh, siêu nhẹ
-    {
+        // Redirect stderr (fd 2) vào file — dùng O_TRUNC đúng 1 lần khi mở app
         char errPath[1200];
         size_t dl = strlen(g_logDir);
         if (dl < sizeof(errPath) - 32) {
@@ -661,8 +656,13 @@ extern "C" void kudroid_set_log_dir(const char* dir) {
                 close(errFd);
             }
         }
-    }
 #endif
+    }
+
+    // Ghi stamp build ra file để user kiểm tra app đang chạy có phải bản mới
+    // nhất không (trả lời "iPhone vẫn chạy app cũ?").
+    const char* stamp = kudroid_build_stamp();
+    writeLogFile("kudroid_version.txt", std::string(stamp) + "\n");
 }
 
 extern "C" void kudroid_set_documents_dir(const char* dir) {

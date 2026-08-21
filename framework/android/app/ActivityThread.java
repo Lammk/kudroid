@@ -80,9 +80,10 @@ public final class ActivityThread {
         ActivityThread thread = new ActivityThread();
         thread.attach();
         
-        // lấy activity ban đầu từ tham số truyền vào
-        if (args != null && args.length > 0) {
-            postLifecycleEvent(LAUNCH_ACTIVITY, args[0]);
+        // Khởi chạy Activity trực tiếp đồng bộ để render khung hình đầu tiên ngay lập tức
+        if (args != null && args.length > 0 && args[0] != null && !args[0].isEmpty()) {
+            android.util.Log.i("ActivityThread", "Launching target Activity immediately: " + args[0]);
+            thread.handleLaunchActivity(args[0]);
         }
         
         // Vòng lặp sự kiện UI chính — chạy vĩnh cửu, không bao giờ tự thoát
@@ -93,6 +94,9 @@ public final class ActivityThread {
                 android.util.Log.e("ActivityThread", "Handled exception in main looper: " + t.toString());
                 t.printStackTrace();
             }
+            try {
+                Thread.sleep(10);
+            } catch (Throwable ignored) {}
         }
     }
 
