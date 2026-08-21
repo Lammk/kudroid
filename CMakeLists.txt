@@ -153,14 +153,16 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
         "-framework UIKit"
         "-framework CoreGraphics"
         "-framework IOSurface"
-        # Avian khởi tạo boot classpath qua `-Xbootclasspath:[classpathJar]`:
-        # BuiltinElement gọi dlsym(main_executable, "classpathJar"). Symbol này do
-        # boot.o (classpathJar()) + classpath-jar.o (jar nhúng) cung cấp và được
-        # kéo vào app nhờ tham chiếu từ kudroid_jni.cpp — nhưng Mach-O không export
-        # symbol từ static lib vào main executable mặc định. Flag này đưa classpathJar
-        # vào dynamic symbol table để dlsym tìm thấy (giống Avian dùng -Wl,-export_dynamic
-        # cho executable của chính nó).
-        "-Wl,-exported_symbol,_classpathJar"
+        # Avian resolve MỌI native JNI của class library (104 hàm trong
+        # classpath/*.cpp) bằng dlsym(dlopen(0), "Java_..."). Hai điều kiện phải
+        # đúng, nếu thiếu một thì UnsatisfiedLinkError ngay ở System.getProperty:
+        #   1. force_load: object trong .a chỉ được kéo vào khi có tham chiếu
+        #      undefined. Không ai gọi Java_* từ C++ → java-lang.o bị linker bỏ.
+        #   2. export_dynamic: Mach-O không đưa symbol từ static lib vào dynamic
+        #      symbol table. KHÔNG dùng -exported_symbol — flag đó tạo whitelist,
+        #      chỉ export symbol được liệt kê và ẩn tất cả phần còn lại.
+        "-Wl,-force_load,${AVIAN_STATIC_LIB}"
+        "-Wl,-export_dynamic"
     )
 
     # Note: Copying of MoltenVK and ANGLE frameworks into KuDroidShell.app/Frameworks 
