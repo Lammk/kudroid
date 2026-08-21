@@ -537,6 +537,105 @@ def patch_java_net_cpp():
         print("Patched java-net.cpp (jnienv.h include)")
 
 
+def patch_java_lang_cpp():
+    path = "classpath/java-lang.cpp"
+    try:
+        with open(path, "r") as f:
+            content = f.read()
+    except Exception as e:
+        print(f"WARNING: unable to read {path}: {e}")
+        return
+
+    if "Java_java_lang_System_arraycopy" in content:
+        print("java-lang.cpp (arraycopy): already patched, skipping")
+        return
+
+    stub = '''
+extern "C" JNIEXPORT void JNICALL
+Java_java_lang_System_arraycopy(JNIEnv* env, jclass,
+                                jobject src, jint srcPos,
+                                jobject dst, jint dstPos, jint length)
+{
+    if (!src || !dst) {
+        jclass npe = env->FindClass("java/lang/NullPointerException");
+        if (npe) env->ThrowNew(npe, "src or dst is null");
+        return;
+    }
+    if (srcPos < 0 || dstPos < 0 || length < 0) {
+        jclass aioobe = env->FindClass("java/lang/IndexOutOfBoundsException");
+        if (aioobe) env->ThrowNew(aioobe, "negative index or length");
+        return;
+    }
+    if (length == 0) return;
+
+    jsize srcLen = env->GetArrayLength(static_cast<jarray>(src));
+    jsize dstLen = env->GetArrayLength(static_cast<jarray>(dst));
+    if (srcPos + length > srcLen || dstPos + length > dstLen) {
+        jclass aioobe = env->FindClass("java/lang/IndexOutOfBoundsException");
+        if (aioobe) env->ThrowNew(aioobe, "array index out of bounds");
+        return;
+    }
+
+    jclass byteArrCls = env->FindClass("[B");
+    if (byteArrCls && env->IsInstanceOf(src, byteArrCls)) {
+        jbyte* buf = static_cast<jbyte*>(malloc(length * sizeof(jbyte)));
+        if (buf) {
+            env->GetByteArrayRegion(static_cast<jbyteArray>(src), srcPos, length, buf);
+            env->SetByteArrayRegion(static_cast<jbyteArray>(dst), dstPos, length, buf);
+            free(buf);
+        }
+        env->DeleteLocalRef(byteArrCls);
+        return;
+    }
+    if (byteArrCls) env->DeleteLocalRef(byteArrCls);
+
+    jclass charArrCls = env->FindClass("[C");
+    if (charArrCls && env->IsInstanceOf(src, charArrCls)) {
+        jchar* buf = static_cast<jchar*>(malloc(length * sizeof(jchar)));
+        if (buf) {
+            env->GetCharArrayRegion(static_cast<jcharArray>(src), srcPos, length, buf);
+            env->SetCharArrayRegion(static_cast<jcharArray>(dst), dstPos, length, buf);
+            free(buf);
+        }
+        env->DeleteLocalRef(charArrCls);
+        return;
+    }
+    if (charArrCls) env->DeleteLocalRef(charArrCls);
+
+    jclass intArrCls = env->FindClass("[I");
+    if (intArrCls && env->IsInstanceOf(src, intArrCls)) {
+        jint* buf = static_cast<jint*>(malloc(length * sizeof(jint)));
+        if (buf) {
+            env->GetIntArrayRegion(static_cast<jintArray>(src), srcPos, length, buf);
+            env->SetIntArrayRegion(static_cast<jintArray>(dst), dstPos, length, buf);
+            free(buf);
+        }
+        env->DeleteLocalRef(intArrCls);
+        return;
+    }
+    if (intArrCls) env->DeleteLocalRef(intArrCls);
+
+    if (src == dst && srcPos < dstPos) {
+        for (jint i = length - 1; i >= 0; --i) {
+            jobject elem = env->GetObjectArrayElement(static_cast<jobjectArray>(src), srcPos + i);
+            env->SetObjectArrayElement(static_cast<jobjectArray>(dst), dstPos + i, elem);
+            if (elem) env->DeleteLocalRef(elem);
+        }
+    } else {
+        for (jint i = 0; i < length; ++i) {
+            jobject elem = env->GetObjectArrayElement(static_cast<jobjectArray>(src), srcPos + i);
+            env->SetObjectArrayElement(static_cast<jobjectArray>(dst), dstPos + i, elem);
+            if (elem) env->DeleteLocalRef(elem);
+        }
+    }
+}
+'''
+    content += stub
+    with open(path, "w") as f:
+        f.write(content)
+    print("Patched java-lang.cpp (Java_java_lang_System_arraycopy)")
+
+
 if __name__ == "__main__":
     main()
     patch_compiler_cpp()
@@ -548,4 +647,5 @@ if __name__ == "__main__":
     patch_process_cpp()
     patch_cpp20_math_opcodes()
     patch_java_net_cpp()
+    patch_java_lang_cpp()
     sys.exit(0)
