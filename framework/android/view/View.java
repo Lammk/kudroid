@@ -3,6 +3,7 @@ package android.view;
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Rect;
+import android.os.Bundle;
 
 /**
  * triển khai android.view.view tối thiểu.
@@ -34,12 +35,120 @@ public class View {
     private int mId = -1;
     private ViewGroup mParent;
     private OnClickListener mOnClickListener;
+    private OnLongClickListener mOnLongClickListener;
+    private OnTouchListener mOnTouchListener;
+    private OnFocusChangeListener mOnFocusChangeListener;
+    private OnKeyListener mOnKeyListener;
+    private AccessibilityDelegate mAccessibilityDelegate;
+    private ViewTreeObserver mViewTreeObserver;
+    private boolean mHasFocus;
+    private long mTouchDownTime;
+    private boolean mLongClickFired;
+
+    /** Ngưỡng nhấn giữ của Android (ViewConfiguration.getLongPressTimeout). */
+    private static final long LONG_PRESS_TIMEOUT = 500L;
 
     /**
      * giao diện cho các cuộc gọi lại nhấp chuột.
      */
     public interface OnClickListener {
         void onClick(View v);
+    }
+
+    /**
+     * Callback nhấn giữ. Trả true nếu đã xử lý (chặn onClick).
+     */
+    public interface OnLongClickListener {
+        boolean onLongClick(View v);
+    }
+
+    /**
+     * Callback touch thô. Trả true để tiêu thụ sự kiện.
+     */
+    public interface OnTouchListener {
+        boolean onTouch(View v, MotionEvent event);
+    }
+
+    /**
+     * Callback khi view nhận/mất focus.
+     */
+    public interface OnFocusChangeListener {
+        void onFocusChange(View v, boolean hasFocus);
+    }
+
+    /**
+     * Callback kéo-thả. Trả true nếu đã xử lý DragEvent.
+     */
+    public interface OnDragListener {
+        boolean onDrag(View v, Object event);
+    }
+
+    /**
+     * Callback phím cứng gửi tới view đang focus.
+     */
+    public interface OnKeyListener {
+        boolean onKey(View v, int keyCode, KeyEvent event);
+    }
+
+    /**
+     * Callback áp dụng window insets (status bar / notch).
+     */
+    public interface OnApplyWindowInsetsListener {
+        Object onApplyWindowInsets(View v, Object insets);
+    }
+
+    /**
+     * Callback khi view được attach/detach khỏi window.
+     */
+    public interface OnAttachStateChangeListener {
+        void onViewAttachedToWindow(View v);
+
+        void onViewDetachedFromWindow(View v);
+    }
+
+    /**
+     * Cung cấp bitmap bóng khi kéo view. Android: lớp abstract lồng trong View.
+     */
+    public static class DragShadowBuilder {
+        private final View mView;
+
+        public DragShadowBuilder(View view) {
+            mView = view;
+        }
+
+        public DragShadowBuilder() {
+            mView = null;
+        }
+
+        public View getView() {
+            return mView;
+        }
+
+        public void onProvideShadowMetrics(android.graphics.Point outShadowSize,
+                                          android.graphics.Point outShadowTouchPoint) {
+            if (outShadowSize != null && mView != null) {
+                outShadowSize.set(Math.max(1, mView.getWidth()), Math.max(1, mView.getHeight()));
+            }
+            if (outShadowTouchPoint != null && outShadowSize != null) {
+                outShadowTouchPoint.set(outShadowSize.x / 2, outShadowSize.y / 2);
+            }
+        }
+
+        public void onDrawShadow(android.graphics.Canvas canvas) {
+            if (mView != null && canvas != null) mView.draw(canvas);
+        }
+    }
+
+    /**
+     * Chặn/điều hướng sự kiện accessibility. Mọi hàm mặc định uỷ quyền về view.
+     */
+    public static class AccessibilityDelegate {
+        public void sendAccessibilityEvent(View host, int eventType) {
+        }
+
+        public boolean performAccessibilityAction(View host, int action, Bundle args) {
+            return false;
+        }
     }
 
     public View(Context context) {
@@ -159,18 +268,118 @@ public class View {
         mOnClickListener = l;
     }
 
+    public void setOnLongClickListener(OnLongClickListener l) {
+        mOnLongClickListener = l;
+    }
+
+    public void setOnTouchListener(OnTouchListener l) {
+        mOnTouchListener = l;
+    }
+
+    public void setOnFocusChangeListener(OnFocusChangeListener l) {
+        mOnFocusChangeListener = l;
+    }
+
+    public void setOnKeyListener(OnKeyListener l) {
+        mOnKeyListener = l;
+    }
+
+    public boolean isClickable() {
+        return mOnClickListener != null;
+    }
+
+    public boolean isLongClickable() {
+        return mOnLongClickListener != null;
+    }
+
+    public boolean hasFocus() {
+        return mHasFocus;
+    }
+
+    public boolean isFocused() {
+        return mHasFocus;
+    }
+
+    /** Đổi trạng thái focus và bắn callback nếu có thay đổi thật. */
+    public void setFocus(boolean hasFocus) {
+        if (mHasFocus == hasFocus) return;
+        mHasFocus = hasFocus;
+        if (mOnFocusChangeListener != null) {
+            mOnFocusChangeListener.onFocusChange(this, hasFocus);
+        }
+    }
+
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        if (event == null) return false;
+        if (mOnKeyListener != null &&
+            mOnKeyListener.onKey(this, event.getKeyCode(), event)) {
+            return true;
+        }
+        return onKeyDown(event.getKeyCode(), event);
+    }
+
+    public boolean onKeyDown(int keyCode, KeyEvent event) {
+        return false;
+    }
+
+    public boolean onKeyUp(int keyCode, KeyEvent event) {
+        return false;
+    }
+
+    /**
+     * ViewTreeObserver của cây view này (dùng chung với cha nếu đã attach).
+     */
+    public ViewTreeObserver getViewTreeObserver() {
+        if (mParent != null) return mParent.getViewTreeObserver();
+        if (mViewTreeObserver == null) mViewTreeObserver = new ViewTreeObserver();
+        return mViewTreeObserver;
+    }
+
+    public void setAccessibilityDelegate(AccessibilityDelegate delegate) {
+        mAccessibilityDelegate = delegate;
+    }
+
     public boolean dispatchTouchEvent(MotionEvent event) {
         if (mVisibility != VISIBLE) return false;
+        // OnTouchListener chạy TRƯỚC onTouchEvent và có quyền tiêu thụ sự kiện —
+        // thứ tự này là hợp đồng của Android, app dựa vào nó để chặn click.
+        if (mOnTouchListener != null && mOnTouchListener.onTouch(this, event)) {
+            return true;
+        }
         return onTouchEvent(event);
     }
 
     public boolean onTouchEvent(MotionEvent event) {
         if (event == null) return false;
-        if (mOnClickListener != null && event.getAction() == MotionEvent.ACTION_UP) {
-            performClick();
-            return true;
+        final int action = event.getAction();
+        if (action == MotionEvent.ACTION_DOWN) {
+            mTouchDownTime = android.os.SystemClock.uptimeMillis();
+            mLongClickFired = false;
+            return mOnClickListener != null || mOnLongClickListener != null;
         }
-        return (mOnClickListener != null);
+        if (action == MotionEvent.ACTION_MOVE) {
+            if (!mLongClickFired && mOnLongClickListener != null && mTouchDownTime > 0 &&
+                android.os.SystemClock.uptimeMillis() - mTouchDownTime >= LONG_PRESS_TIMEOUT) {
+                mLongClickFired = true;
+                return performLongClick();
+            }
+            return mOnClickListener != null || mOnLongClickListener != null;
+        }
+        if (action == MotionEvent.ACTION_UP) {
+            final long held = mTouchDownTime > 0
+                    ? android.os.SystemClock.uptimeMillis() - mTouchDownTime : 0;
+            mTouchDownTime = 0;
+            if (mLongClickFired) return true;
+            if (mOnLongClickListener != null && held >= LONG_PRESS_TIMEOUT) {
+                return performLongClick();
+            }
+            if (mOnClickListener != null) {
+                performClick();
+                return true;
+            }
+            return mOnLongClickListener != null;
+        }
+        return mOnClickListener != null || mOnLongClickListener != null;
     }
 
     /**
@@ -180,6 +389,13 @@ public class View {
         if (mOnClickListener != null) {
             mOnClickListener.onClick(this);
             return true;
+        }
+        return false;
+    }
+
+    public boolean performLongClick() {
+        if (mOnLongClickListener != null) {
+            return mOnLongClickListener.onLongClick(this);
         }
         return false;
     }

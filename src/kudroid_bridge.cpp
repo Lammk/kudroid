@@ -754,8 +754,40 @@ extern "C" const char* kudroid_install_apk(const char* apkPath) {
             extractedOk = kudroid::APKExtractor::extract_apk(source.string(), appDir.string());
         }
         if (extractedOk) {
-            log += "[kudroid_apk] APK extracted successfully to " + pkgId + "\n";
+            // pkgId phía trên đoán từ tên file APK khi get_package_name() không đọc
+            // được manifest (bundle container: manifest thật nằm trong base APK bên
+            // trong, không ở top level). Sau khi giải nén, app_info.json đã chứa
+            // package thật do parseAxml của base manifest → dùng nó làm nguồn duy
+            // nhất và đổi tên thư mục, để data/app và dalvik-cache luôn theo
+            // package ID chứ không phải tên file APK.
             std::string effectiveAppName = pkgId;
+            std::filesystem::path effectiveAppDir = appDir;
+            {
+                std::ifstream infoFile(appDir / "app_info.json");
+                std::string line;
+                while (std::getline(infoFile, line)) {
+                    const auto pos = line.find("\"package\": \"");
+                    if (pos == std::string::npos) continue;
+                    const auto start = pos + 12;
+                    const auto end = line.find('"', start);
+                    if (end == std::string::npos) break;
+                    const std::string realPkg = line.substr(start, end - start);
+                    if (realPkg.empty() || realPkg == pkgId) break;
+                    const std::filesystem::path target =
+                        std::filesystem::path(remapper.androidRoot()) / "data/app" / realPkg;
+                    std::error_code renameEc;
+                    std::filesystem::remove_all(target, renameEc);
+                    std::filesystem::rename(appDir, target, renameEc);
+                    if (!renameEc) {
+                        effectiveAppName = realPkg;
+                        effectiveAppDir = target;
+                        log += "[kudroid_apk] Normalized install dir to package ID: " + realPkg + "\n";
+                    }
+                    break;
+                }
+            }
+
+            log += "[kudroid_apk] APK extracted successfully to " + effectiveAppName + "\n";
 
             // Dịch DEX sang JAR ngay trong lúc cài đặt APK (AOT Compilation)
             log += "[kudroid_apk] Compiling DEX files (DEX to JAR AOT)...\n";
@@ -763,7 +795,7 @@ extern "C" const char* kudroid_install_apk(const char* apkPath) {
                 std::filesystem::path(remapper.androidRoot()) / "data/dalvik-cache" / effectiveAppName;
             std::string aotError;
             const std::string classesJar = kudroid::DexAotCache::translate_dex_if_needed(
-                appDir.string(), aotCacheDir.string(), &aotError);
+                effectiveAppDir.string(), aotCacheDir.string(), &aotError);
             if (!classesJar.empty()) {
                 log += "[kudroid_apk] DEX compiled to JAR successfully: " + classesJar + "\n";
             } else {
@@ -1931,6 +1963,24 @@ extern "C" int kudroid_delete_app(const char* package_name) {
     if (std::filesystem::exists(appDataPath, ec)) {
         if (std::filesystem::remove_all(appDataPath, ec) == static_cast<std::uintmax_t>(-1)) {
             success = 0;
+        }
+    }
+
+    // dalvik-cache giữ classes.jar + boot.jar sinh từ DEX của app. Không xóa thì
+    // cài lại sẽ HIT cache cũ (cache.hash khớp vì DEX không đổi) → chạy artifact
+    // của bản build trước. install_apk đặt tên thư mục theo package ID còn
+    // run_apk khởi đầu bằng tên file APK, nên cùng một app có thể có cả
+    // "<pkg>" và "<pkg>_<version>" — dọn cả hai dạng.
+    const std::filesystem::path dalvikRoot = std::filesystem::path(androidRoot) / "data/dalvik-cache";
+    if (std::filesystem::is_directory(dalvikRoot, ec)) {
+        const std::string pkg = package_name;
+        for (const auto& entry : std::filesystem::directory_iterator(dalvikRoot, ec)) {
+            const std::string name = entry.path().filename().string();
+            if (name == pkg || name.rfind(pkg + "_", 0) == 0) {
+                if (std::filesystem::remove_all(entry.path(), ec) == static_cast<std::uintmax_t>(-1)) {
+                    success = 0;
+                }
+            }
         }
     }
     return success;

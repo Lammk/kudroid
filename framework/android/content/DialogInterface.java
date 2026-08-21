@@ -36,6 +36,20 @@ public interface DialogInterface {
     }
 
     /**
+     * Callback khi dialog vừa hiện lên.
+     */
+    public interface OnShowListener {
+        void onShow(DialogInterface dialog);
+    }
+
+    /**
+     * Callback phím cứng khi dialog đang hiện. Trả true nếu đã xử lý.
+     */
+    public interface OnKeyListener {
+        boolean onKey(DialogInterface dialog, int keyCode, android.view.KeyEvent event);
+    }
+
+    /**
      * bỏ qua hộp thoại.
      */
     void dismiss();

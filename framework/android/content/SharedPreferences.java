@@ -59,4 +59,11 @@ public interface SharedPreferences {
         boolean commit();
         void apply();
     }
+
+    /**
+     * Callback khi một key bị thay đổi.
+     */
+    interface OnSharedPreferenceChangeListener {
+        void onSharedPreferenceChanged(SharedPreferences sharedPreferences, String key);
+    }
 }

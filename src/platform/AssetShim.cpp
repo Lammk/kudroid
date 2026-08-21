@@ -4,9 +4,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cerrno>
+#include <cstdint>
 #include <mutex>
 #include <string>
+#include <vector>
 #include <filesystem>
+#include <unistd.h>
 
 namespace kudroid {
 namespace {
@@ -50,9 +54,8 @@ struct AAssetImpl {
 };
 
 struct AAssetDirImpl {
-    // Minimal: không liệt kê entry. Game vòng lặp tới khi getNextFileName()
-    // trả nullptr — trả nullptr ngay là hành vi an toàn (thư mục rỗng).
-    int dummy;
+    std::vector<std::string> names;  // tên file (không đệ quy, giống AAssetDir thật)
+    size_t cursor = 0;
 };
 
 static AAssetImpl* open_asset(const char* filename) {
@@ -100,22 +103,59 @@ extern "C" void* bionic_AAssetManager_open(void* /*manager*/, const char* filena
 
 extern "C" void* bionic_AAssetManager_openFd(void* /*manager*/, const char* filename,
                                              void* outStart, void* outLength) {
-    // Không hỗ trợ fd-mode; trả NULL an toàn (game tự fallback sang open()).
-    (void)filename; (void)outStart; (void)outLength;
-    return nullptr;
+    // Asset đã nằm trên đĩa dưới dạng file rời (không đóng gói trong APK), nên
+    // fd trỏ thẳng vào file và offset luôn 0 — đúng hợp đồng của API.
+    auto* asset = open_asset(filename);
+    if (!asset) return nullptr;
+    if (outStart) *static_cast<off_t*>(outStart) = 0;
+    if (outLength) *static_cast<off_t*>(outLength) = asset->length;
+    return asset;
 }
 
-extern "C" void* bionic_AAssetManager_openDir(void* /*manager*/, const char* /*dirName*/) {
-    return new AAssetDirImpl();
+extern "C" int bionic_AAsset_openFileDescriptor(void* asset, void* outStart, void* outLength) {
+    auto* a = static_cast<AAssetImpl*>(asset);
+    if (!a || !a->file) return -1;
+    const int fd = ::dup(::fileno(a->file));
+    if (fd < 0) return -1;
+    if (outStart) *static_cast<off_t*>(outStart) = 0;
+    if (outLength) *static_cast<off_t*>(outLength) = a->length;
+    return fd;
+}
+
+extern "C" int bionic_AAsset_isAllocated(void* asset) {
+    auto* a = static_cast<AAssetImpl*>(asset);
+    return (a && a->buffer) ? 1 : 0;
+}
+
+extern "C" void* bionic_AAssetManager_openDir(void* /*manager*/, const char* dirName) {
+    auto* dir = new AAssetDirImpl();
+    const std::string base = current_assets_dir();
+    if (base.empty()) return dir;
+
+    std::string rel = dirName ? dirName : "";
+    if (rel.rfind("assets/", 0) == 0) rel = rel.substr(7);
+
+    std::error_code ec;
+    const auto full = rel.empty() ? std::filesystem::path(base)
+                                  : std::filesystem::path(base) / rel;
+    if (!std::filesystem::is_directory(full, ec)) return dir;
+    for (const auto& entry : std::filesystem::directory_iterator(full, ec)) {
+        if (entry.is_regular_file(ec)) {
+            dir->names.push_back(entry.path().filename().string());
+        }
+    }
+    return dir;
 }
 
 extern "C" const char* bionic_AAssetDir_getNextFileName(void* dir) {
-    (void)dir;
-    return nullptr; // thư mục rỗng — kết thúc vòng lặp ngay
+    auto* d = static_cast<AAssetDirImpl*>(dir);
+    if (!d || d->cursor >= d->names.size()) return nullptr;
+    return d->names[d->cursor++].c_str();
 }
 
 extern "C" void bionic_AAssetDir_rewind(void* dir) {
-    (void)dir;
+    auto* d = static_cast<AAssetDirImpl*>(dir);
+    if (d) d->cursor = 0;
 }
 
 extern "C" void bionic_AAssetDir_close(void* dir) {
@@ -132,9 +172,19 @@ extern "C" long bionic_AAsset_getLength(void* asset) {
     return a ? a->length : 0;
 }
 
+extern "C" int64_t bionic_AAsset_getLength64(void* asset) {
+    auto* a = static_cast<AAssetImpl*>(asset);
+    return a ? static_cast<int64_t>(a->length) : 0;
+}
+
 extern "C" long bionic_AAsset_getRemainingLength(void* asset) {
     auto* a = static_cast<AAssetImpl*>(asset);
     return a ? (a->length - a->offset) : 0;
+}
+
+extern "C" int64_t bionic_AAsset_getRemainingLength64(void* asset) {
+    auto* a = static_cast<AAssetImpl*>(asset);
+    return a ? static_cast<int64_t>(a->length - a->offset) : 0;
 }
 
 extern "C" int bionic_AAsset_read(void* asset, void* buf, size_t count) {
@@ -151,6 +201,14 @@ extern "C" int bionic_AAsset_seek(void* asset, long offset, int whence) {
     if (std::fseek(a->file, offset, whence) != 0) return -1;
     a->offset = std::ftell(a->file);
     return 0;
+}
+
+extern "C" int64_t bionic_AAsset_seek64(void* asset, int64_t offset, int whence) {
+    auto* a = static_cast<AAssetImpl*>(asset);
+    if (!a) return -1;
+    if (::fseeko(a->file, static_cast<off_t>(offset), whence) != 0) return -1;
+    a->offset = static_cast<long>(::ftello(a->file));
+    return static_cast<int64_t>(a->offset);
 }
 
 extern "C" const void* bionic_AAsset_getBuffer(void* asset) {
@@ -180,6 +238,168 @@ extern "C" void bionic_AAsset_close(void* asset) {
     delete a;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// AConfiguration — cấu hình thiết bị (locale, kích thước/mật độ màn hình,
+// orientation). Game đọc để chọn asset và layout. Trả số thật từ CAMetalLayer
+// và locale của iOS thay vì 0, vì density=0 làm game chia cho 0 hoặc chọn sai
+// mip level.
+// ─────────────────────────────────────────────────────────────────────────────
+
+extern "C" int g_metalLayerWidth;
+extern "C" int g_metalLayerHeight;
+extern "C" float g_metalLayerDensity;
+
+struct AConfigurationImpl {
+    char language[3];   // ISO 639-1, không kết thúc null theo API Android
+    char country[3];    // ISO 3166-1 alpha-2
+    int32_t density;
+    int32_t orientation;
+    int32_t screenWidthDp;
+    int32_t screenHeightDp;
+    int32_t sdkVersion;
+};
+
+static void fill_current_config(AConfigurationImpl* c) {
+    if (!c) return;
+    // AConfiguration_getLanguage/Country trả con trỏ tới 2 char không null-term.
+    std::memcpy(c->language, "en", 2);
+    std::memcpy(c->country, "US", 2);
+    c->language[2] = '\0';
+    c->country[2] = '\0';
+    const char* lang = ::getenv("LANG");
+    if (lang && std::strlen(lang) >= 5 && lang[2] == '_') {
+        c->language[0] = lang[0]; c->language[1] = lang[1];
+        c->country[0] = lang[3];  c->country[1] = lang[4];
+    }
+
+    const int w = g_metalLayerWidth > 0 ? g_metalLayerWidth : 1080;
+    const int h = g_metalLayerHeight > 0 ? g_metalLayerHeight : 1920;
+    const float scale = g_metalLayerDensity > 0.0f ? g_metalLayerDensity : 2.0f;
+    c->density = static_cast<int32_t>(scale * 160.0f);       // ACONFIGURATION_DENSITY_*
+    c->screenWidthDp = static_cast<int32_t>(w / scale);
+    c->screenHeightDp = static_cast<int32_t>(h / scale);
+    c->orientation = (w > h) ? 2 : 1;                        // LAND : PORT
+    c->sdkVersion = 30;
+}
+
+extern "C" void* bionic_AConfiguration_new(void) {
+    auto* c = new AConfigurationImpl();
+    fill_current_config(c);
+    return c;
+}
+
+extern "C" void bionic_AConfiguration_delete(void* config) {
+    delete static_cast<AConfigurationImpl*>(config);
+}
+
+extern "C" void bionic_AConfiguration_fromAssetManager(void* config, void* /*am*/) {
+    fill_current_config(static_cast<AConfigurationImpl*>(config));
+}
+
+extern "C" void bionic_AConfiguration_getLanguage(void* config, char* outLanguage) {
+    auto* c = static_cast<AConfigurationImpl*>(config);
+    if (!outLanguage) return;
+    outLanguage[0] = c ? c->language[0] : 'e';
+    outLanguage[1] = c ? c->language[1] : 'n';
+}
+
+extern "C" void bionic_AConfiguration_getCountry(void* config, char* outCountry) {
+    auto* c = static_cast<AConfigurationImpl*>(config);
+    if (!outCountry) return;
+    outCountry[0] = c ? c->country[0] : 'U';
+    outCountry[1] = c ? c->country[1] : 'S';
+}
+
+extern "C" int32_t bionic_AConfiguration_getDensity(void* config) {
+    auto* c = static_cast<AConfigurationImpl*>(config);
+    return c ? c->density : 320;
+}
+
+extern "C" int32_t bionic_AConfiguration_getOrientation(void* config) {
+    auto* c = static_cast<AConfigurationImpl*>(config);
+    return c ? c->orientation : 1;
+}
+
+extern "C" int32_t bionic_AConfiguration_getScreenWidthDp(void* config) {
+    auto* c = static_cast<AConfigurationImpl*>(config);
+    return c ? c->screenWidthDp : 411;
+}
+
+extern "C" int32_t bionic_AConfiguration_getScreenHeightDp(void* config) {
+    auto* c = static_cast<AConfigurationImpl*>(config);
+    return c ? c->screenHeightDp : 731;
+}
+
+extern "C" int32_t bionic_AConfiguration_getSdkVersion(void* config) {
+    auto* c = static_cast<AConfigurationImpl*>(config);
+    return c ? c->sdkVersion : 30;
+}
+
+extern "C" void bionic_AConfiguration_copy(void* dest, void* src) {
+    auto* d = static_cast<AConfigurationImpl*>(dest);
+    auto* s = static_cast<AConfigurationImpl*>(src);
+    if (d && s) *d = *s;
+}
+
+extern "C" int32_t bionic_AConfiguration_diff(void* a, void* b) {
+    auto* x = static_cast<AConfigurationImpl*>(a);
+    auto* y = static_cast<AConfigurationImpl*>(b);
+    if (!x || !y) return 0;
+    int32_t diff = 0;
+    if (std::memcmp(x->language, y->language, 2) != 0) diff |= 0x0004; // LOCALE
+    if (x->orientation != y->orientation) diff |= 0x0080;              // ORIENTATION
+    if (x->density != y->density) diff |= 0x0100;                      // DENSITY
+    if (x->screenWidthDp != y->screenWidthDp ||
+        x->screenHeightDp != y->screenHeightDp) diff |= 0x0400;        // SCREEN_SIZE
+    return diff;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// APerformanceHint — API 31 hint manager. iOS không có QoS API tương đương ở
+// mức granularity này, nhưng session phải là handle THẬT: game giữ nó, gọi
+// report/update rồi close. Trả dummy 0 làm game deref null hoặc coi như lỗi.
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct APerfManagerImpl { int64_t preferredRateNanos; };
+struct APerfSessionImpl { int64_t targetWorkDurationNanos; };
+
+static APerfManagerImpl g_perfManager{16666666}; // 60 Hz
+
+extern "C" void* bionic_APerformanceHint_getManager(void) {
+    return &g_perfManager;
+}
+
+extern "C" void* bionic_APerformanceHint_createSession(void* /*manager*/,
+                                                       const int32_t* /*threadIds*/,
+                                                       size_t /*size*/,
+                                                       int64_t initialTargetWorkDurationNanos) {
+    auto* s = new APerfSessionImpl();
+    s->targetWorkDurationNanos = initialTargetWorkDurationNanos;
+    return s;
+}
+
+extern "C" int64_t bionic_APerformanceHint_getPreferredUpdateRateNanos(void* /*manager*/) {
+    return g_perfManager.preferredRateNanos;
+}
+
+extern "C" int bionic_APerformanceHint_updateTargetWorkDuration(void* session,
+                                                                int64_t targetDurationNanos) {
+    auto* s = static_cast<APerfSessionImpl*>(session);
+    if (!s || targetDurationNanos <= 0) return -EINVAL;
+    s->targetWorkDurationNanos = targetDurationNanos;
+    return 0;
+}
+
+extern "C" int bionic_APerformanceHint_reportActualWorkDuration(void* session,
+                                                                int64_t actualDurationNanos) {
+    if (!session || actualDurationNanos <= 0) return -EINVAL;
+    return 0; // không có scheduler hint trên iOS — ghi nhận và trả OK
+}
+
+extern "C" void bionic_APerformanceHint_closeSession(void* session) {
+    delete static_cast<APerfSessionImpl*>(session);
+}
+
 const SymbolEntry kAssetSymbols[] = {
     {"AAssetManager_fromJava", reinterpret_cast<void*>(&bionic_AAssetManager_fromJava)},
     {"AAssetManager_open", reinterpret_cast<void*>(&bionic_AAssetManager_open)},
@@ -190,11 +410,39 @@ const SymbolEntry kAssetSymbols[] = {
     {"AAssetDir_close", reinterpret_cast<void*>(&bionic_AAssetDir_close)},
     {"AAsset_getFileName", reinterpret_cast<void*>(&bionic_AAsset_getFileName)},
     {"AAsset_getLength", reinterpret_cast<void*>(&bionic_AAsset_getLength)},
+    {"AAsset_getLength64", reinterpret_cast<void*>(&bionic_AAsset_getLength64)},
     {"AAsset_getRemainingLength", reinterpret_cast<void*>(&bionic_AAsset_getRemainingLength)},
+    {"AAsset_getRemainingLength64", reinterpret_cast<void*>(&bionic_AAsset_getRemainingLength64)},
     {"AAsset_read", reinterpret_cast<void*>(&bionic_AAsset_read)},
     {"AAsset_seek", reinterpret_cast<void*>(&bionic_AAsset_seek)},
+    {"AAsset_seek64", reinterpret_cast<void*>(&bionic_AAsset_seek64)},
     {"AAsset_getBuffer", reinterpret_cast<void*>(&bionic_AAsset_getBuffer)},
     {"AAsset_close", reinterpret_cast<void*>(&bionic_AAsset_close)},
+    {"AAsset_openFileDescriptor", reinterpret_cast<void*>(&bionic_AAsset_openFileDescriptor)},
+    {"AAsset_openFileDescriptor64", reinterpret_cast<void*>(&bionic_AAsset_openFileDescriptor)},
+    {"AAsset_isAllocated", reinterpret_cast<void*>(&bionic_AAsset_isAllocated)},
+
+    // AConfiguration
+    {"AConfiguration_new", reinterpret_cast<void*>(&bionic_AConfiguration_new)},
+    {"AConfiguration_delete", reinterpret_cast<void*>(&bionic_AConfiguration_delete)},
+    {"AConfiguration_fromAssetManager", reinterpret_cast<void*>(&bionic_AConfiguration_fromAssetManager)},
+    {"AConfiguration_getLanguage", reinterpret_cast<void*>(&bionic_AConfiguration_getLanguage)},
+    {"AConfiguration_getCountry", reinterpret_cast<void*>(&bionic_AConfiguration_getCountry)},
+    {"AConfiguration_getDensity", reinterpret_cast<void*>(&bionic_AConfiguration_getDensity)},
+    {"AConfiguration_getOrientation", reinterpret_cast<void*>(&bionic_AConfiguration_getOrientation)},
+    {"AConfiguration_getScreenWidthDp", reinterpret_cast<void*>(&bionic_AConfiguration_getScreenWidthDp)},
+    {"AConfiguration_getScreenHeightDp", reinterpret_cast<void*>(&bionic_AConfiguration_getScreenHeightDp)},
+    {"AConfiguration_getSdkVersion", reinterpret_cast<void*>(&bionic_AConfiguration_getSdkVersion)},
+    {"AConfiguration_copy", reinterpret_cast<void*>(&bionic_AConfiguration_copy)},
+    {"AConfiguration_diff", reinterpret_cast<void*>(&bionic_AConfiguration_diff)},
+
+    // APerformanceHint
+    {"APerformanceHint_getManager", reinterpret_cast<void*>(&bionic_APerformanceHint_getManager)},
+    {"APerformanceHint_createSession", reinterpret_cast<void*>(&bionic_APerformanceHint_createSession)},
+    {"APerformanceHint_getPreferredUpdateRateNanos", reinterpret_cast<void*>(&bionic_APerformanceHint_getPreferredUpdateRateNanos)},
+    {"APerformanceHint_updateTargetWorkDuration", reinterpret_cast<void*>(&bionic_APerformanceHint_updateTargetWorkDuration)},
+    {"APerformanceHint_reportActualWorkDuration", reinterpret_cast<void*>(&bionic_APerformanceHint_reportActualWorkDuration)},
+    {"APerformanceHint_closeSession", reinterpret_cast<void*>(&bionic_APerformanceHint_closeSession)},
 };
 
 } // namespace

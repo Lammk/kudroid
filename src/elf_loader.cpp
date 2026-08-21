@@ -721,15 +721,24 @@ bool ElfLoader::relocate() {
                 }
                 const char* name = strtab + symtab[symbolIndex].st_name;
                 void* address = nullptr;
+                // STB_WEAK + SHN_UNDEF phải resolve về 0: code gọi weak symbol
+                // luôn có `cbz x8, skip` phía trước (feature detection). Bind
+                // dummy làm slot non-null → nhánh skip không chạy → app tin
+                // thao tác đã thành công. Ví dụ thật: _ZTHN6cohtml18tlsLinear-
+                // AllocatorE của libminecraftpe.so là NOTYPE WEAK UND.
+                const bool isWeakUndef = (symtab[symbolIndex].st_shndx == 0) &&
+                                         ((symtab[symbolIndex].st_info >> 4) == 2);
                 if (symtab[symbolIndex].st_shndx != 0) {
                     address = static_cast<char*>(base_) + symtab[symbolIndex].st_value;
+                } else if (isWeakUndef) {
+                    address = nullptr;
                 } else if (libraryManager_) {
                     address = libraryManager_->resolveGlobalSymbol(name);
                 } else {
                     address = resolve_bionic_symbol(name);
                 }
                 
-                if (!address) {
+                if (!address && !isWeakUndef) {
                     // Mọi symbol không resolve được — không chỉ STB_GLOBAL — vì GOT
                     // slot lúc đó = 0 + addend (có thể là địa chỉ rác trong data),
                     // guest gọi qua slot này → SIGILL/SIGSEGV (nghi phạm vụ Discord).

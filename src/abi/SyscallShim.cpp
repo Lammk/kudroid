@@ -34,6 +34,9 @@
 #if defined(__APPLE__)
 #include <mach/mach.h>
 #include <mach/vm_region.h>
+#include <malloc/malloc.h>
+#else
+#include <malloc.h>
 #endif
 #if defined(__APPLE__)
 // Khai báo trực tiếp 2 hàm autorelease pool của libobjc thay vì include
@@ -3863,6 +3866,154 @@ extern "C" void bionic_ZSTD_trace_decompress_end(uint64_t handle, const void* dc
     (void)dctx;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Bionic malloc extensions — iOS libmalloc có sẵn số liệu thật, không cần đoán.
+// ─────────────────────────────────────────────────────────────────────────────
+
+extern "C" size_t bionic_malloc_usable_size(const void* ptr) {
+    if (!ptr) return 0;
+#if defined(__APPLE__)
+    return ::malloc_size(ptr);
+#else
+    return ::malloc_usable_size(const_cast<void*>(ptr));
+#endif
+}
+
+// bionic struct mallinfo — 10 size_t, trả theo giá trị (arm64: qua x8).
+struct BionicMallinfo {
+    size_t arena;     // tổng vùng heap không phải mmap
+    size_t ordblks;   // số block trống
+    size_t smblks;    // luôn 0 trên bionic
+    size_t hblks;     // số vùng mmap
+    size_t hblkhd;    // tổng byte mmap
+    size_t usmblks;   // luôn 0
+    size_t fsmblks;   // luôn 0
+    size_t uordblks;  // tổng byte đang được cấp phát
+    size_t fordblks;  // tổng byte trống
+    size_t keepcost;  // byte có thể trả lại OS
+};
+
+extern "C" BionicMallinfo bionic_mallinfo(void) {
+    BionicMallinfo mi = {};
+#if defined(__APPLE__)
+    malloc_statistics_t st = {};
+    ::malloc_zone_statistics(::malloc_default_zone(), &st);
+    mi.arena = st.size_allocated;
+    mi.hblks = st.blocks_in_use;
+    mi.hblkhd = st.max_size_in_use;
+    mi.uordblks = st.size_in_use;
+    mi.fordblks = st.size_allocated > st.size_in_use
+                      ? st.size_allocated - st.size_in_use : 0;
+    mi.keepcost = mi.fordblks;
+    mi.ordblks = 1;
+#endif
+    return mi;
+}
+
+// jemalloc sized-delete: size là gợi ý tối ưu, free() vẫn đúng ngữ nghĩa.
+extern "C" void bionic_sdallocx(void* ptr, size_t size, int flags) {
+    (void)size;
+    (void)flags;
+    ::free(ptr);
+}
+
+// BoringSSL memory hooks — chỉ là malloc/free có kèm truy vấn kích thước.
+extern "C" void* bionic_OPENSSL_memory_alloc(size_t size) {
+    return ::malloc(size);
+}
+
+extern "C" void bionic_OPENSSL_memory_free(void* ptr) {
+    ::free(ptr);
+}
+
+extern "C" size_t bionic_OPENSSL_memory_get_size(void* ptr) {
+    return bionic_malloc_usable_size(ptr);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// memfd_create — iOS không có syscall này và cấm shm_open trong sandbox. File
+// tạm trong NSTemporaryDirectory rồi unlink ngay cho fd có đúng tính chất mà
+// caller cần: ftruncate được, mmap MAP_SHARED được, tự biến mất khi close.
+// ─────────────────────────────────────────────────────────────────────────────
+
+extern "C" int bionic_memfd_create(const char* name, unsigned int flags) {
+    const char* tmp = ::getenv("TMPDIR");
+    if (!tmp || !*tmp) tmp = "/tmp";
+    char path[PATH_MAX];
+    static std::atomic<unsigned> counter{0};
+    std::snprintf(path, sizeof(path), "%s/kudroid-memfd-%s-%d-%u", tmp,
+                  (name && *name) ? name : "anon", static_cast<int>(::getpid()),
+                  counter.fetch_add(1, std::memory_order_relaxed));
+    const int fd = ::open(path, O_RDWR | O_CREAT | O_EXCL, 0600);
+    if (fd < 0) return -1;
+    ::unlink(path);
+#ifdef FD_CLOEXEC
+    // MFD_CLOEXEC == 1 trong bionic.
+    if (flags & 1u) ::fcntl(fd, F_SETFD, FD_CLOEXEC);
+#endif
+    return fd;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// pthread_gettid_np — tid của MỘT thread cụ thể (không chỉ thread hiện tại).
+// ─────────────────────────────────────────────────────────────────────────────
+
+extern "C" pid_t bionic_pthread_gettid_np(pthread_t thread) {
+#if defined(__APPLE__)
+    uint64_t tid = 0;
+    if (::pthread_threadid_np(thread, &tid) != 0) return -1;
+    return static_cast<pid_t>(tid);
+#else
+    if (::pthread_equal(thread, ::pthread_self())) return bionic_gettid();
+    return -1; // Linux không có API lấy tid của thread khác từ pthread_t
+#endif
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// __pthread_cleanup_push/pop — bionic cài cleanup handler bằng stack per-thread
+// do CALLER cấp (biến trên stack của caller), không cấp phát động.
+// ─────────────────────────────────────────────────────────────────────────────
+
+struct BionicCleanup {
+    BionicCleanup* prev;
+    void (*routine)(void*);
+    void* arg;
+};
+
+static thread_local BionicCleanup* g_cleanupHead = nullptr;
+
+extern "C" void bionic___pthread_cleanup_push(BionicCleanup* c,
+                                              void (*routine)(void*), void* arg) {
+    if (!c) return;
+    c->routine = routine;
+    c->arg = arg;
+    c->prev = g_cleanupHead;
+    g_cleanupHead = c;
+}
+
+extern "C" void bionic___pthread_cleanup_pop(BionicCleanup* c, int execute) {
+    if (!c) return;
+    g_cleanupHead = c->prev;
+    if (execute && c->routine) c->routine(c->arg);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// __fgets_chk — fgets có kiểm tra biên đích (FORTIFY).
+// ─────────────────────────────────────────────────────────────────────────────
+
+extern "C" char* bionic___fgets_chk(char* dst, int supplied_size, FILE* stream,
+                                    size_t dst_len_from_compiler) {
+    if (!dst || !stream || supplied_size <= 0) return nullptr;
+    if (dst_len_from_compiler != static_cast<size_t>(-1) &&
+        static_cast<size_t>(supplied_size) > dst_len_from_compiler) {
+        // Buffer overflow thật sự — abort như bionic thay vì ghi tràn im lặng.
+        bionic___assert2(__FILE__, __LINE__, "__fgets_chk",
+                         "fgets: prevented write past end of buffer");
+        return nullptr;
+    }
+    return ::fgets(dst, supplied_size, stream);
+}
+
 const SymbolEntry kSyscallSymbols[] = {
     {"__register_atfork", reinterpret_cast<void*>(&bionic_register_atfork)},
     {"pthread_create", reinterpret_cast<void*>(&bionic_pthread_create)},
@@ -4237,6 +4388,24 @@ const SymbolEntry kSyscallSymbols[] = {
     {"kudroid_set_requested_orientation", reinterpret_cast<void*>(&kudroid_set_requested_orientation)},
     {"kudroid_get_requested_orientation", reinterpret_cast<void*>(&kudroid_get_requested_orientation)},
     {"kudroid_inject_sensor_event", reinterpret_cast<void*>(&kudroid_inject_sensor_event)},
+
+    // Bionic malloc extensions (jemalloc/BoringSSL)
+    {"malloc_usable_size", reinterpret_cast<void*>(&bionic_malloc_usable_size)},
+    {"mallinfo", reinterpret_cast<void*>(&bionic_mallinfo)},
+    {"sdallocx", reinterpret_cast<void*>(&bionic_sdallocx)},
+    {"OPENSSL_memory_alloc", reinterpret_cast<void*>(&bionic_OPENSSL_memory_alloc)},
+    {"OPENSSL_memory_free", reinterpret_cast<void*>(&bionic_OPENSSL_memory_free)},
+    {"OPENSSL_memory_get_size", reinterpret_cast<void*>(&bionic_OPENSSL_memory_get_size)},
+
+    // Linux-only syscalls emulated on iOS
+    {"memfd_create", reinterpret_cast<void*>(&bionic_memfd_create)},
+
+    // pthread / stdio extensions
+    {"pthread_gettid_np", reinterpret_cast<void*>(&bionic_pthread_gettid_np)},
+    {"__pthread_cleanup_push", reinterpret_cast<void*>(&bionic___pthread_cleanup_push)},
+    {"__pthread_cleanup_pop", reinterpret_cast<void*>(&bionic___pthread_cleanup_pop)},
+    {"__fgets_chk", reinterpret_cast<void*>(&bionic___fgets_chk)},
+    {"freopen64", reinterpret_cast<void*>(&vfs_freopen)},
 };
 
 } // namespace
