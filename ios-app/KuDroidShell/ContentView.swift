@@ -1819,3 +1819,42 @@ public func kudroid_trigger_haptic(intensity: Int32) {
         }
     }
 }
+
+@_cdecl("kudroid_notify_orientation_change")
+public func kudroid_notify_orientation_change(orientation: Int32) {
+    DispatchQueue.main.async {
+        if orientation == 0 || orientation == 6 || orientation == 8 {
+            // Landscape
+            NSLog("[KuDroid] kudroid_notify_orientation_change: LANDSCAPE (%d)", orientation)
+            if #available(iOS 16.0, *) {
+                for scene in UIApplication.shared.connectedScenes {
+                    if let windowScene = scene as? UIWindowScene {
+                        let geometryPreferences = UIWindowScene.GeometryPreferences.iOS(interfaceOrientations: .landscape)
+                        windowScene.requestGeometryUpdate(geometryPreferences) { error in
+                            NSLog("[KuDroid] requestGeometryUpdate landscape error: %@", error.localizedDescription)
+                        }
+                    }
+                }
+            } else {
+                UIDevice.current.setValue(UIInterfaceOrientation.landscapeRight.rawValue, forKey: "orientation")
+                UIViewController.attemptRotationToDeviceOrientation()
+            }
+        } else if orientation == 1 || orientation == 7 || orientation == 9 {
+            // Portrait
+            NSLog("[KuDroid] kudroid_notify_orientation_change: PORTRAIT (%d)", orientation)
+            if #available(iOS 16.0, *) {
+                for scene in UIApplication.shared.connectedScenes {
+                    if let windowScene = scene as? UIWindowScene {
+                        let geometryPreferences = UIWindowScene.GeometryPreferences.iOS(interfaceOrientations: .portrait)
+                        windowScene.requestGeometryUpdate(geometryPreferences) { error in
+                            NSLog("[KuDroid] requestGeometryUpdate portrait error: %@", error.localizedDescription)
+                        }
+                    }
+                }
+            } else {
+                UIDevice.current.setValue(UIInterfaceOrientation.portrait.rawValue, forKey: "orientation")
+                UIViewController.attemptRotationToDeviceOrientation()
+            }
+        }
+    }
+}

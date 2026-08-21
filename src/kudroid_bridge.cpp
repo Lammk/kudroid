@@ -836,8 +836,15 @@ extern "C" const char* kudroid_jit_status(void) {
 
 static std::atomic<int> g_requestedOrientation{-1}; // -1=Unspecified, 0=Landscape, 1=Portrait
 
+#if defined(__APPLE__)
+extern "C" __attribute__((weak)) void kudroid_notify_orientation_change(int orientation) { (void)orientation; }
+#else
+extern "C" void kudroid_notify_orientation_change(int orientation) { (void)orientation; }
+#endif
+
 extern "C" void kudroid_set_requested_orientation(int orientation) {
     g_requestedOrientation.store(orientation);
+    kudroid_notify_orientation_change(orientation);
     fprintf(stderr, "[KuDroidCore] Screen orientation requested: %d (%s)\n",
             orientation,
             (orientation == 0 || orientation == 6 || orientation == 8) ? "Landscape" :

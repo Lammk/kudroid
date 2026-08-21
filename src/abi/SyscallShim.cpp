@@ -58,6 +58,12 @@ extern "C" void* kudroid_jni_get_javavm(void);
 extern "C" int JNI_GetCreatedJavaVMs(void** vmBuf, size_t bufLen, size_t* nVMs);
 extern "C" int JNI_CreateJavaVM(void** p_vm, void** p_env, void* vm_args);
 
+// Orientation, Haptic & Sensor Bridge declarations
+extern "C" void kudroid_vibrate(int intensity);
+extern "C" void kudroid_set_requested_orientation(int orientation);
+extern "C" int kudroid_get_requested_orientation(void);
+extern "C" void kudroid_inject_sensor_event(int sensorType, float x, float y, float z);
+
 extern "C" int kudroid_check_permission(const char* packageName, const char* permissionName);
 extern "C" void kudroid_set_group_permission(const char* packageName, const char* groupKey, int granted);
 extern "C" int kudroid_is_group_granted(const char* packageName, const char* groupKey);
@@ -4225,6 +4231,12 @@ const SymbolEntry kSyscallSymbols[] = {
     {"splice", reinterpret_cast<void*>(&bionic_splice)},
     {"__assert2", reinterpret_cast<void*>(&bionic___assert2)},
     {"__android_log_assert", reinterpret_cast<void*>(&bionic___android_log_assert)},
+
+    // KuDroid Screen Orientation, Haptic Vibrator & Sensor Bridge
+    {"kudroid_vibrate", reinterpret_cast<void*>(&kudroid_vibrate)},
+    {"kudroid_set_requested_orientation", reinterpret_cast<void*>(&kudroid_set_requested_orientation)},
+    {"kudroid_get_requested_orientation", reinterpret_cast<void*>(&kudroid_get_requested_orientation)},
+    {"kudroid_inject_sensor_event", reinterpret_cast<void*>(&kudroid_inject_sensor_event)},
 };
 
 } // namespace
