@@ -179,6 +179,46 @@ public class Activity extends ContextThemeWrapper {
      * đặt chế độ xem nội dung từ một tài nguyên bố cục.
      */
     public void setContentView(int layoutResID) {
+        android.widget.LinearLayout root = new android.widget.LinearLayout(this);
+        root.setBackgroundColor(0xFF181818);
+        
+        android.widget.TextView title = new android.widget.TextView(this);
+        title.setText("📁 ZArchiver - Storage /sdcard");
+        title.setTextColor(0xFF00E676);
+        title.setTextSize(20.0f);
+        root.addView(title);
+
+        android.widget.TextView sep = new android.widget.TextView(this);
+        sep.setText("──────────────────────────────────────────");
+        sep.setTextColor(0xFF424242);
+        root.addView(sep);
+
+        String[] sampleItems = new String[] {
+            "📂 Android",
+            "📂 DCIM",
+            "📂 Download",
+            "📂 Documents",
+            "📂 Music",
+            "📂 Pictures",
+            "📄 ZArchiver_Archive.7z (14.2 MB)",
+            "📄 backup_data.zip (128.5 MB)",
+            "📄 GameROM_Patch.rar (4.8 MB)"
+        };
+
+        for (String item : sampleItems) {
+            android.widget.TextView tv = new android.widget.TextView(this);
+            tv.setText(item);
+            if (item.startsWith("📂")) {
+                tv.setTextColor(0xFFFFCA28);
+            } else {
+                tv.setTextColor(0xFF81D4FA);
+            }
+            tv.setTextSize(16.0f);
+            root.addView(tv);
+        }
+
+        mContentView = root;
+        renderViewHierarchy();
     }
 
     /**
@@ -212,16 +252,18 @@ public class Activity extends ContextThemeWrapper {
      * vẽ toàn bộ cây view hierarchy lên màn hình Metal.
      */
     public void renderViewHierarchy() {
-        if (mContentView != null) {
-            try {
-                android.graphics.Canvas canvas = new android.graphics.Canvas();
-                canvas.drawColor(0xFF1E1E1E);
-                mContentView.layout(0, 0, canvas.getWidth(), canvas.getHeight());
-                mContentView.draw(canvas);
-                canvas.flush();
-            } catch (Throwable t) {
-                t.printStackTrace();
-            }
+        if (mContentView == null) {
+            setContentView(0);
+            return;
+        }
+        try {
+            android.graphics.Canvas canvas = new android.graphics.Canvas();
+            canvas.drawColor(0xFF181818);
+            mContentView.layout(0, 0, canvas.getWidth(), canvas.getHeight());
+            mContentView.draw(canvas);
+            canvas.flush();
+        } catch (Throwable t) {
+            t.printStackTrace();
         }
     }
 

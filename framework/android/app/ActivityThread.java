@@ -147,7 +147,8 @@ public final class ActivityThread {
                 mInitialActivity.onStart();
                 android.util.Log.i("ActivityThread", "Calling onResume()...");
                 mInitialActivity.onResume();
-                android.util.Log.i("ActivityThread", "Activity launch complete! UI is live.");
+                mInitialActivity.renderViewHierarchy();
+                android.util.Log.i("ActivityThread", "Activity launch complete! UI is live and rendered to Metal canvas.");
             } catch (Throwable t) {
                 android.util.Log.e("ActivityThread", "FATAL in Activity lifecycle: " + t.toString());
                 StackTraceElement[] trace = t.getStackTrace();
