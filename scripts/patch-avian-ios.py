@@ -389,6 +389,152 @@ def patch_finder_cpp_debug():
         print("Patched finder.cpp (DebugFind enabled)")
 
 
+def patch_process_cpp():
+    path = "src/process.cpp"
+    try:
+        with open(path, "r") as f:
+            content = f.read()
+    except Exception as e:
+        print(f"WARNING: unable to read {path}: {e}")
+        return
+
+    if "findBuiltinNativeFallback" in content:
+        print("process.cpp: already patched, skipping")
+        return
+
+    if "#if !defined(PLATFORM_WINDOWS)\n#include <dlfcn.h>\n#endif" not in content:
+        content = content.replace(
+            '#include <avian/util/runtime-array.h>',
+            '#include <avian/util/runtime-array.h>\n#if !defined(PLATFORM_WINDOWS)\n#include <dlfcn.h>\n#endif'
+        )
+
+    old_res = (
+        'void* resolveNativeMethod(Thread* t,\n'
+        '                          const char* undecorated,\n'
+        '                          const char* decorated)\n'
+        '{\n'
+        '  for (System::Library* lib = t->m->libraries; lib; lib = lib->next()) {\n'
+        '    void* p = lib->resolve(undecorated);\n'
+        '    if (p) {\n'
+        '      return p;\n'
+        '    } else {\n'
+        '      p = lib->resolve(decorated);\n'
+        '      if (p) {\n'
+        '        return p;\n'
+        '      }\n'
+        '    }\n'
+        '  }\n'
+        '\n'
+        '  return 0;\n'
+        '}'
+    )
+
+    new_res = (
+        'extern "C" AVIAN_EXPORT int64_t JNICALL Avian_avian_Classes_makeString(Thread* t, object, uintptr_t* arguments);\n'
+        'extern "C" AVIAN_EXPORT int64_t JNICALL Avian_avian_Classes_defineClass(Thread* t, object, uintptr_t* arguments);\n'
+        'extern "C" AVIAN_EXPORT void JNICALL Avian_avian_Classes_initialize(Thread* t, object, uintptr_t* arguments);\n'
+        'extern "C" AVIAN_EXPORT int64_t JNICALL Avian_avian_Classes_getVMClass(Thread* t, object, uintptr_t* arguments);\n'
+        'extern "C" AVIAN_EXPORT int64_t JNICALL Avian_avian_Classes_forName(Thread* t, object, uintptr_t* arguments);\n'
+        'extern "C" AVIAN_EXPORT int64_t JNICALL Avian_avian_VMClass_getName(Thread* t, object, uintptr_t* arguments);\n'
+        'extern "C" AVIAN_EXPORT int64_t JNICALL Avian_avian_VMClass_getSuperclass(Thread* t, object, uintptr_t* arguments);\n'
+        'extern "C" AVIAN_EXPORT int64_t JNICALL Avian_avian_SystemClassLoader_appLoader(Thread* t, object, uintptr_t*);\n'
+        'extern "C" AVIAN_EXPORT int64_t JNICALL Avian_avian_SystemClassLoader_findLoadedVMClass(Thread* t, object, uintptr_t* arguments);\n'
+        'extern "C" AVIAN_EXPORT void JNICALL Avian_java_lang_System_arraycopy(Thread* t, object, uintptr_t* arguments);\n'
+        'extern "C" AVIAN_EXPORT int64_t JNICALL Avian_java_lang_System_identityHashCode(Thread* t, object, uintptr_t* arguments);\n'
+        'extern "C" AVIAN_EXPORT int64_t JNICALL Avian_java_lang_System_currentTimeMillis(Thread* t, object, uintptr_t* arguments);\n'
+        'extern "C" AVIAN_EXPORT int64_t JNICALL Avian_java_lang_Throwable_fillInStackTrace(Thread* t, object, uintptr_t* arguments);\n'
+        'extern "C" AVIAN_EXPORT int64_t JNICALL Avian_java_lang_Throwable_getStackTrace(Thread* t, object, uintptr_t* arguments);\n'
+        'extern "C" AVIAN_EXPORT int64_t JNICALL Avian_java_lang_Thread_currentThread(Thread* t, object, uintptr_t* arguments);\n'
+        'extern "C" AVIAN_EXPORT void JNICALL Avian_java_lang_Thread_sleep(Thread* t, object, uintptr_t* arguments);\n\n'
+        'static void* findBuiltinNativeFallback(const char* name) {\n'
+        '    if (!name) return 0;\n'
+        '    if (!strcmp(name, "Avian_avian_Classes_makeString")) return reinterpret_cast<void*>(&Avian_avian_Classes_makeString);\n'
+        '    if (!strcmp(name, "Avian_avian_Classes_defineClass")) return reinterpret_cast<void*>(&Avian_avian_Classes_defineClass);\n'
+        '    if (!strcmp(name, "Avian_avian_Classes_initialize")) return reinterpret_cast<void*>(&Avian_avian_Classes_initialize);\n'
+        '    if (!strcmp(name, "Avian_avian_Classes_getVMClass")) return reinterpret_cast<void*>(&Avian_avian_Classes_getVMClass);\n'
+        '    if (!strcmp(name, "Avian_avian_Classes_forName")) return reinterpret_cast<void*>(&Avian_avian_Classes_forName);\n'
+        '    if (!strcmp(name, "Avian_avian_VMClass_getName")) return reinterpret_cast<void*>(&Avian_avian_VMClass_getName);\n'
+        '    if (!strcmp(name, "Avian_avian_VMClass_getSuperclass")) return reinterpret_cast<void*>(&Avian_avian_VMClass_getSuperclass);\n'
+        '    if (!strcmp(name, "Avian_avian_SystemClassLoader_appLoader")) return reinterpret_cast<void*>(&Avian_avian_SystemClassLoader_appLoader);\n'
+        '    if (!strcmp(name, "Avian_avian_SystemClassLoader_findLoadedVMClass")) return reinterpret_cast<void*>(&Avian_avian_SystemClassLoader_findLoadedVMClass);\n'
+        '    if (!strcmp(name, "Avian_java_lang_System_arraycopy")) return reinterpret_cast<void*>(&Avian_java_lang_System_arraycopy);\n'
+        '    if (!strcmp(name, "Avian_java_lang_System_identityHashCode")) return reinterpret_cast<void*>(&Avian_java_lang_System_identityHashCode);\n'
+        '    if (!strcmp(name, "Avian_java_lang_System_currentTimeMillis")) return reinterpret_cast<void*>(&Avian_java_lang_System_currentTimeMillis);\n'
+        '    if (!strcmp(name, "Avian_java_lang_Throwable_fillInStackTrace")) return reinterpret_cast<void*>(&Avian_java_lang_Throwable_fillInStackTrace);\n'
+        '    if (!strcmp(name, "Avian_java_lang_Throwable_getStackTrace")) return reinterpret_cast<void*>(&Avian_java_lang_Throwable_getStackTrace);\n'
+        '    if (!strcmp(name, "Avian_java_lang_Thread_currentThread")) return reinterpret_cast<void*>(&Avian_java_lang_Thread_currentThread);\n'
+        '    if (!strcmp(name, "Avian_java_lang_Thread_sleep")) return reinterpret_cast<void*>(&Avian_java_lang_Thread_sleep);\n'
+        '    return 0;\n'
+        '}\n\n'
+        'void* resolveNativeMethod(Thread* t,\n'
+        '                          const char* undecorated,\n'
+        '                          const char* decorated)\n'
+        '{\n'
+        '  for (System::Library* lib = t->m->libraries; lib; lib = lib->next()) {\n'
+        '    void* p = lib->resolve(undecorated);\n'
+        '    if (p) {\n'
+        '      return p;\n'
+        '    } else {\n'
+        '      p = lib->resolve(decorated);\n'
+        '      if (p) {\n'
+        '        return p;\n'
+        '      }\n'
+        '    }\n'
+        '  }\n\n'
+        '  void* p = findBuiltinNativeFallback(undecorated);\n'
+        '  if (p) return p;\n'
+        '  p = findBuiltinNativeFallback(decorated);\n'
+        '  if (p) return p;\n\n'
+        '#if !defined(PLATFORM_WINDOWS)\n'
+        '  p = dlsym(RTLD_DEFAULT, undecorated);\n'
+        '  if (p) return p;\n'
+        '  p = dlsym(RTLD_DEFAULT, decorated);\n'
+        '  if (p) return p;\n'
+        '#endif\n\n'
+        '  return 0;\n'
+        '}'
+    )
+
+    if old_res in content:
+        content = content.replace(old_res, new_res)
+        with open(path, "w") as f:
+            f.write(content)
+        print("Patched process.cpp (findBuiltinNativeFallback + dlsym fallback)")
+
+
+def patch_cpp20_math_opcodes():
+    files = ["src/machine.cpp", "src/compile.cpp", "src/debug-util.cpp"]
+    for path in files:
+        try:
+            with open(path, "r") as f:
+                content = f.read()
+        except Exception as e:
+            print(f"WARNING: unable to read {path}: {e}")
+            continue
+
+        for op in ["fadd", "fsub", "fmul", "fdiv"]:
+            content = content.replace(f"case {op}:", f"case vm::{op}:")
+
+        with open(path, "w") as f:
+            f.write(content)
+        print(f"Patched {path} (vm:: opcode namespace for C++20/cmath)")
+
+
+def patch_java_net_cpp():
+    path = "classpath/java-net.cpp"
+    try:
+        with open(path, "r") as f:
+            content = f.read()
+    except Exception as e:
+        print(f"WARNING: unable to read {path}: {e}")
+        return
+    if '#include "jni.h"' in content:
+        content = content.replace('#include "jni.h"', '#include "avian/jnienv.h"')
+        with open(path, "w") as f:
+            f.write(content)
+        print("Patched java-net.cpp (jnienv.h include)")
+
+
 if __name__ == "__main__":
     main()
     patch_compiler_cpp()
@@ -397,4 +543,7 @@ if __name__ == "__main__":
     patch_memory_cpp()
     patch_assert_h()
     patch_finder_cpp_debug()
+    patch_process_cpp()
+    patch_cpp20_math_opcodes()
+    patch_java_net_cpp()
     sys.exit(0)
