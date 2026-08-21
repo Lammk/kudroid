@@ -809,22 +809,11 @@ extern "C" int kudroid_is_jit_enabled(void) {
         }
     }
 
-    // 2. Thử nghiệm thực thi W^X (TrollStore / Jailbreak không có CS_DEBUGGED nhưng có quyền JIT trực tiếp)
-    void* ptr = mmap(nullptr, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (ptr != MAP_FAILED) {
-        // Ghi mã máy ARM64: "ret" (0xD65F03C0)
-        uint32_t* code = reinterpret_cast<uint32_t*>(ptr);
-        code[0] = 0xD65F03C0;
-        
-        if (mprotect(ptr, 4096, PROT_READ | PROT_EXEC) == 0) {
-            sys_icache_invalidate(ptr, 4096);
-            typedef void (*TestFunc)();
-            TestFunc fn = reinterpret_cast<TestFunc>(ptr);
-            fn();
-            munmap(ptr, 4096);
-            return 1; // TrollStore JIT khả dụng!
-        }
-        munmap(ptr, 4096);
+    // 2. Kiểm tra môi trường TrollStore / Jailbreak qua đường dẫn an toàn (không gọi mã máy động để tránh SIGKILL)
+    if (access("/Applications/TrollStore.app", F_OK) == 0 ||
+        access("/var/mobile/Library/TrollStore", F_OK) == 0 ||
+        getenv("TROLLSTORE_ENABLED") != nullptr) {
+        return 1;
     }
     return 0; // Hoàn toàn không có JIT!
 #else

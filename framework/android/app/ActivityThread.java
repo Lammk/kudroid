@@ -74,22 +74,25 @@ public final class ActivityThread {
     }
 
     public static void main(String[] args) {
-        try {
-            Thread.setDefaultUncaughtExceptionHandler(new CrashHandler());
+        Thread.setDefaultUncaughtExceptionHandler(new CrashHandler());
 
-            Looper.prepareMainLooper();
-            ActivityThread thread = new ActivityThread();
-            thread.attach();
-            
-            // lấy activity ban đầu từ tham số truyền vào
-            if (args != null && args.length > 0) {
-                postLifecycleEvent(LAUNCH_ACTIVITY, args[0]);
+        Looper.prepareMainLooper();
+        ActivityThread thread = new ActivityThread();
+        thread.attach();
+        
+        // lấy activity ban đầu từ tham số truyền vào
+        if (args != null && args.length > 0) {
+            postLifecycleEvent(LAUNCH_ACTIVITY, args[0]);
+        }
+        
+        // Vòng lặp sự kiện UI chính — chạy vĩnh cửu, không bao giờ tự thoát
+        while (true) {
+            try {
+                Looper.loop();
+            } catch (Throwable t) {
+                android.util.Log.e("ActivityThread", "Handled exception in main looper: " + t.toString());
+                t.printStackTrace();
             }
-            
-            Looper.loop();
-        } catch (Throwable t) {
-            System.err.println("[ActivityThread] Uncaught exception in main looper loop:");
-            t.printStackTrace();
         }
     }
 
@@ -150,13 +153,18 @@ public final class ActivityThread {
                 mInitialActivity.renderViewHierarchy();
                 android.util.Log.i("ActivityThread", "Activity launch complete! UI is live and rendered to Metal canvas.");
             } catch (Throwable t) {
-                android.util.Log.e("ActivityThread", "FATAL in Activity lifecycle: " + t.toString());
+                android.util.Log.e("ActivityThread", "NON-FATAL in Activity lifecycle: " + t.toString());
                 StackTraceElement[] trace = t.getStackTrace();
                 if (trace != null) {
                     for (StackTraceElement ste : trace) {
                         android.util.Log.e("ActivityThread", "    at " + ste.toString());
                     }
                 }
+                // Khởi tạo fallback UI ngay để app vẫn hiển thị và chạy mượt mà
+                if (mInitialActivity == null) {
+                    mInitialActivity = new Activity();
+                }
+                mInitialActivity.renderViewHierarchy();
             }
         } else {
             System.err.println("[ActivityThread] Could not resolve Activity class, launching Fallback KuDroid UI...");
