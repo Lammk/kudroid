@@ -242,7 +242,7 @@ extern "C" void kudroid_blit_canvas_to_layer(void* layer, const void* bits, int 
     if (!image) return;
 
     // Gán trực tiếp CGImage vào CALayer/CAMetalLayer trên Main Thread
-    dispatch_async(dispatch_get_main_thread(), ^{
+    dispatch_async(dispatch_get_main_queue(), ^{
         Class clsCATransaction = objc_getClass("CATransaction");
         if (clsCATransaction) {
             typedef void (*TransBeginFn)(id, SEL);
@@ -258,7 +258,7 @@ extern "C" void kudroid_blit_canvas_to_layer(void* layer, const void* bits, int 
 
             typedef void (*SetContentsFn)(id, SEL, id);
             auto setContents = reinterpret_cast<SetContentsFn>(objc_msgSend);
-            setContents(reinterpret_cast<id>(layer), sel_registerName("setContents:"), (__bridge id)image);
+            setContents(reinterpret_cast<id>(layer), sel_registerName("setContents:"), reinterpret_cast<id>(const_cast<CGImageRef>(image)));
 
             commitFn(reinterpret_cast<id>(clsCATransaction), sel_registerName("commit"));
         }
