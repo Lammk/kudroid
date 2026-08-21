@@ -119,6 +119,9 @@ int kudroid_has_crashed(void);
 void kudroid_clear_crash_state(void);
 
 /// trích xuất tối đa 30 dòng log cuối cùng trước khi crash.
+/// trả về chuỗi malloc; người gọi phải giải phóng bằng free().
+const char* kudroid_get_last_crash_tail(void);
+
 /// trả về trạng thái jit: "JIT: Enabled" hoặc "JIT: Disabled" (được malloc).
 const char* kudroid_jit_status(void);
 
