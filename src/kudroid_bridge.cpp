@@ -844,6 +844,15 @@ extern "C" void kudroid_set_requested_orientation(int orientation) {
             (orientation == 1 || orientation == 7 || orientation == 9) ? "Portrait" : "Sensor/Auto");
 }
 
+extern "C" int kudroid_get_requested_orientation(void) {
+    return g_requestedOrientation.load();
+}
+
+extern "C" JNIEXPORT void JNICALL Java_android_app_Activity_setRequestedOrientation_1native(JNIEnv* env, jclass clazz, jint orientation) {
+    (void)env; (void)clazz;
+    kudroid_set_requested_orientation(orientation);
+}
+
 extern "C" void kudroid_blit_canvas_to_layer(void* layer, const void* bits, int width, int height);
 
 extern "C" void kudroid_unbind_metal_layer(void) {
