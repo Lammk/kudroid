@@ -21,6 +21,7 @@
 #include <filesystem>
 #include <set>
 #include <string>
+#include <algorithm>
 #include <fcntl.h>
 #include <unistd.h>
 #include <pthread.h>
@@ -1447,11 +1448,19 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                 std::vector<std::uint8_t> axml(
                                     (std::istreambuf_iterator<char>(mf)),
                                     std::istreambuf_iterator<char>());
+                                appendAndEcho("[kudroid_core] Parsing AndroidManifest.xml (" +
+                                              std::to_string(axml.size()) + " bytes)...");
                                 kudroid::ManifestInfo mi =
                                     kudroid::APKExtractor::parse_manifest(axml.data(), axml.size());
+                                appendAndEcho("[kudroid_core] Manifest parse: package='" + mi.packageName +
+                                              "' mainActivity='" + mi.mainActivity + "'");
                                 if (!mi.mainActivity.empty()) targetActivity = mi.mainActivity;
                                 if (!mi.packageName.empty()) pkgName = mi.packageName;
+                            } else {
+                                appendAndEcho("[kudroid_core] WARNING: Cannot open AndroidManifest.xml");
                             }
+                        } else {
+                            appendAndEcho("[kudroid_core] WARNING: AndroidManifest.xml not found in " + appDir.string());
                         }
 
                         // ƯU TIÊN 2: app_info.json do extractor ghi lúc cài đặt.
@@ -1482,7 +1491,54 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                             }
                         }
 
-                        // ƯU TIÊN 3: đoán theo package/tên app — CHỈ khi cả hai
+                        // ƯU TIÊN 3: quét classes.jar (AOT cache) tìm class
+                        // Activity của app — chính xác hơn đoán tên folder vì
+                        // class thật nằm trong jar. Ưu tiên class có tên chứa
+                        // "Activity" và package ngắn nhất (gốc app).
+                        if (targetActivity.empty()) {
+                            const auto aotJar = std::filesystem::path(remapper.androidRoot()) /
+                                                "data/dalvik-cache" / resolvedAppName / "classes.jar";
+                            if (std::filesystem::exists(aotJar)) {
+                                appendAndEcho("[kudroid_core] Scanning classes.jar for app Activity classes...");
+                                const auto classes = kudroid::DexAotCache::list_app_classes(aotJar.string());
+                                appendAndEcho("[kudroid_core] Found " + std::to_string(classes.size()) +
+                                              " non-system classes in classes.jar");
+                                // Chấm điểm: chứa "Activity" +100, ở package gốc
+                                // (ít dấu '/' nhất) +số lượng segment*10.
+                                std::string best;
+                                int bestScore = -1;
+                                for (const auto& cls : classes) {
+                                    const bool isActivity = cls.find("Activity") != std::string::npos;
+                                    const size_t depth = static_cast<size_t>(
+                                        std::count(cls.begin(), cls.end(), '/'));
+                                    int score = (isActivity ? 100 : 0) + static_cast<int>(10 - depth);
+                                    if (isActivity && score > bestScore) {
+                                        bestScore = score;
+                                        best = cls;
+                                    }
+                                }
+                                if (!best.empty()) {
+                                    // Đổi slash → dot cho Class.forName.
+                                    for (char& c : best) if (c == '/') c = '.';
+                                    targetActivity = best;
+                                    appendAndEcho("[kudroid_core] Resolved from classes.jar: " + best);
+                                } else if (!classes.empty()) {
+                                    // Không có class nào tên "Activity" — log vài
+                                    // class đầu để debug, chọn class đầu tiên.
+                                    for (size_t i = 0; i < classes.size() && i < 5; ++i) {
+                                        appendAndEcho("[kudroid_core]   candidate: " + classes[i]);
+                                    }
+                                    std::string first = classes.front();
+                                    for (char& c : first) if (c == '/') c = '.';
+                                    targetActivity = first;
+                                    appendAndEcho("[kudroid_core] No *Activity class found; using first app class: " + first);
+                                }
+                            } else {
+                                appendAndEcho("[kudroid_core] WARNING: classes.jar not found at " + aotJar.string());
+                            }
+                        }
+
+                        // ƯU TIÊN 4: đoán theo package/tên app — CHỈ khi cả ba
                         // nguồn trên thất bại. Lưu ý: đoán "<base>.MainActivity"
                         // hầu như luôn sai với app lớn (package thật khác tên
                         // folder), nhưng vẫn tốt hơn rỗng vì ActivityThread sẽ

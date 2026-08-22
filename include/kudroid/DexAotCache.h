@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 namespace kudroid {
 
@@ -28,6 +29,15 @@ public:
     /// Tên script dex2jar: đọc env KUDROID_DEX2JAR nếu có, nếu không dùng
     /// "d2j-dex2jar.sh" (phải nằm trong PATH).
     static std::string dex2jar_command();
+
+    /// Quét danh sách entry (tên class .class) trong jar và trả về các class
+    /// KHÔNG nằm trong package hệ thống (android/, androidx/, java/, javax/,
+    /// kotlin/...) — tức là class của chính app. Dùng để suy ra launcher
+    /// activity khi AndroidManifest.xml không parse được: class Activity của
+    /// app gần như luôn có tên chứa "Activity" và nằm ở package gốc.
+    /// Trả về tối đa `maxResults` tên dạng "com/example/Foo" (slash-separated).
+    static std::vector<std::string> list_app_classes(const std::string& jar_path,
+                                                     size_t max_results = 500);
 };
 
 } // namespace kudroid

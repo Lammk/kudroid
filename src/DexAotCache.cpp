@@ -458,4 +458,39 @@ std::string DexAotCache::translate_dex_if_needed(const std::string& apk_extracte
     return jarPath;
 }
 
+std::vector<std::string> DexAotCache::list_app_classes(const std::string& jar_path,
+                                                       size_t max_results) {
+    std::vector<std::string> result;
+    std::vector<ZipEntry> entries;
+    std::string err;
+    // collect_zip_entries là static trong anonymous namespace phía trên — dùng
+    // lại được vì cùng translation unit.
+    if (!collect_zip_entries(jar_path, 0, entries, &err)) {
+        std::fprintf(stderr, "[kudroid_aot] list_app_classes: %s\n", err.c_str());
+        return result;
+    }
+    for (const auto& e : entries) {
+        if (result.size() >= max_results) break;
+        // Chỉ quan tâm file .class.
+        if (e.name.size() < 7 || e.name.compare(e.name.size() - 6, 6, ".class") != 0) continue;
+        std::string cls = e.name.substr(0, e.name.size() - 6); // "com/foo/Bar"
+        // Bỏ inner class (chứa '$') — Activity launcher không bao giờ là inner.
+        if (cls.find('$') != std::string::npos) continue;
+
+        // Lọc package hệ thống: android/, androidx/, java/, javax/, kotlin/,
+        // org/ (org có thể là lib của app nhưng không phải entry point).
+        static const char* kSystemPkgs[] = {
+            "android/", "androidx/", "java/", "javax/", "kotlin/", "kotlinx/",
+            "org/", "com/google/", "io/flutter/"
+        };
+        bool isSystem = false;
+        for (const char* p : kSystemPkgs) {
+            if (cls.compare(0, std::strlen(p), p) == 0) { isSystem = true; break; }
+        }
+        if (isSystem) continue;
+        result.push_back(std::move(cls));
+    }
+    return result;
+}
+
 } // namespace kudroid
