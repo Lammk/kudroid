@@ -747,6 +747,35 @@ extern "C" JavaVM* kudroid_jni_get_javavm(void) {
     return g_vm;
 }
 
+// Kiểm tra class có extends android.app.Activity không — dùng JNI IsAssignableFrom
+// nên chính xác kể cả class bị ProGuard obfuscate (a.a.a v.v.). Đây là cách duy
+// nhất đáng tin khi manifest không parse được: tên class không nói lên gì.
+extern "C" int kudroid_class_extends_activity(const char* className) {
+    std::lock_guard<std::mutex> lock(g_jvm_mutex);
+    if (!g_vm || !g_env || !className || !*className) return 0;
+
+    // Đổi dot → slash cho FindClass ("com.foo.Bar" → "com/foo/Bar").
+    std::string slashed(className);
+    for (char& c : slashed) if (c == '.') c = '/';
+
+    jclass activityClass = g_env->FindClass("android/app/Activity");
+    if (!activityClass) {
+        if (g_env->ExceptionCheck()) g_env->ExceptionClear();
+        return 0;
+    }
+    jclass target = g_env->FindClass(slashed.c_str());
+    if (!target) {
+        if (g_env->ExceptionCheck()) g_env->ExceptionClear();
+        g_env->DeleteLocalRef(activityClass);
+        return 0;
+    }
+    const jboolean isActivity =
+        g_env->IsAssignableFrom(target, activityClass);
+    g_env->DeleteLocalRef(target);
+    g_env->DeleteLocalRef(activityClass);
+    return isActivity == JNI_TRUE ? 1 : 0;
+}
+
 extern "C" jint JNI_GetCreatedJavaVMs(JavaVM** vmBuf, jsize bufLen, jsize* nVMs) {
     JavaVM* vm = kudroid_jni_get_javavm();
     if (nVMs) *nVMs = vm ? 1 : 0;

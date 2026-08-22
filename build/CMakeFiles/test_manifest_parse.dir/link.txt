@@ -1,0 +1,1 @@
+/usr/bin/c++ -O3 -DNDEBUG -Wl,--dependency-file=CMakeFiles/test_manifest_parse.dir/link.d CMakeFiles/test_manifest_parse.dir/tests/test_manifest_parse.cpp.o -o test_manifest_parse  libkudroid_core.a /usr/lib64/libz.so

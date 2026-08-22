@@ -20,6 +20,12 @@ void kudroid_jni_destroy_jvm(void);
 // lấy phiên bản javavm giả toàn cục được kudroid sử dụng.
 JavaVM* kudroid_jni_get_javavm(void);
 
+// Kiểm tra class `className` (dạng dot, vd "com.foo.Bar") có THẬT SỰ kế thừa
+// android.app.Activity hay không — dùng JNI AssignableFrom nên chính xác 100%
+// kể cả class bị ProGuard obfuscate thành a.a.a. Trả về 1 nếu đúng, 0 nếu
+// không/không tìm thấy/JVM chưa init.
+int kudroid_class_extends_activity(const char* className);
+
 #ifdef __cplusplus
 }
 #endif

@@ -1,0 +1,34 @@
+file(REMOVE_RECURSE
+  "CMakeFiles/kudroid_core.dir/src/APKExtractor.cpp.o"
+  "CMakeFiles/kudroid_core.dir/src/APKExtractor.cpp.o.d"
+  "CMakeFiles/kudroid_core.dir/src/BionicShim.cpp.o"
+  "CMakeFiles/kudroid_core.dir/src/BionicShim.cpp.o.d"
+  "CMakeFiles/kudroid_core.dir/src/DexManager.cpp.o"
+  "CMakeFiles/kudroid_core.dir/src/DexManager.cpp.o.d"
+  "CMakeFiles/kudroid_core.dir/src/VFSPathRemapper.cpp.o"
+  "CMakeFiles/kudroid_core.dir/src/VFSPathRemapper.cpp.o.d"
+  "CMakeFiles/kudroid_core.dir/src/bionic_log_trampoline.S.o"
+  "CMakeFiles/kudroid_core.dir/src/elf_loader.cpp.o"
+  "CMakeFiles/kudroid_core.dir/src/elf_loader.cpp.o.d"
+  "CMakeFiles/kudroid_core.dir/src/gpu_test.cpp.o"
+  "CMakeFiles/kudroid_core.dir/src/gpu_test.cpp.o.d"
+  "CMakeFiles/kudroid_core.dir/src/kudroid_bridge.cpp.o"
+  "CMakeFiles/kudroid_core.dir/src/kudroid_bridge.cpp.o.d"
+  "CMakeFiles/kudroid_core.dir/src/kudroid_jni.cpp.o"
+  "CMakeFiles/kudroid_core.dir/src/kudroid_jni.cpp.o.d"
+  "CMakeFiles/kudroid_core.dir/src/library_manager.cpp.o"
+  "CMakeFiles/kudroid_core.dir/src/library_manager.cpp.o.d"
+  "CMakeFiles/kudroid_core.dir/src/shims/GraphicsShim.cpp.o"
+  "CMakeFiles/kudroid_core.dir/src/shims/GraphicsShim.cpp.o.d"
+  "CMakeFiles/kudroid_core.dir/src/shims/InputShim.cpp.o"
+  "CMakeFiles/kudroid_core.dir/src/shims/InputShim.cpp.o.d"
+  "CMakeFiles/kudroid_core.dir/src/shims/SyscallShim.cpp.o"
+  "CMakeFiles/kudroid_core.dir/src/shims/SyscallShim.cpp.o.d"
+  "libkudroid_core.a"
+  "libkudroid_core.pdb"
+)
+
+# Per-language clean rules from dependency scanning.
+foreach(lang ASM CXX)
+  include(CMakeFiles/kudroid_core.dir/cmake_clean_${lang}.cmake OPTIONAL)
+endforeach()

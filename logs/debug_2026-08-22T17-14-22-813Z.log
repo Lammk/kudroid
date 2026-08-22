@@ -1,0 +1,88 @@
+kudroid_set_metal_layer(layer=0x1461cee50, size=828x1792, density=2.00)
+[kudroid_core] Scanning library directory: /var/mobile/Containers/Data/Application/A66E28CB-DF3E-4808-896A-F6EC80D1EAF6/Documents/android_root/data/app/Minecraft_PE_26.30_BANDISHARE/lib/arm64-v8a
+[kudroid_core] Attempting to load: /var/mobile/Containers/Data/Application/A66E28CB-DF3E-4808-896A-F6EC80D1EAF6/Documents/android_root/data/app/Minecraft_PE_26.30_BANDISHARE/lib/arm64-v8a/libPlayFabMultiplayer.so
+[kudroid_core] LOAD SUCCESS for /var/mobile/Containers/Data/Application/A66E28CB-DF3E-4808-896A-F6EC80D1EAF6/Documents/android_root/data/app/Minecraft_PE_26.30_BANDISHARE/lib/arm64-v8a/libPlayFabMultiplayer.so
+[kudroid_core] Attempting to load: /var/mobile/Containers/Data/Application/A66E28CB-DF3E-4808-896A-F6EC80D1EAF6/Documents/android_root/data/app/Minecraft_PE_26.30_BANDISHARE/lib/arm64-v8a/libminecraftpe.so
+bionic_dlopen: requested libc.so
+bionic_dlopen: fallback returning DUMMY_HANDLE for libc.so
+bionic_dlsym: [getauxval] resolved via SyscallShim
+missing symbol bound to dummy: _ZTHN11ChunkSource17gPerfIsClientSideE
+missing symbol bound to dummy: _ZTHN6cohtml18tlsLinearAllocatorE
+missing symbol bound to dummy: _ZTHN6cohtml18tlExecuteWorkGuardE
+missing symbol bound to dummy: _ZTHN6cohtml13tlViewContextE
+missing symbol bound to dummy: _ZTHN6cohtml17gTLSExecutionRoleE
+missing symbol bound to dummy: _ZTHN6renoir16tlsTempAllocatorE
+missing symbol bound to dummy: _ZTHN6renoir17tlsFrameAllocatorE
+missing symbol bound to dummy: _ZTHN6renoir20tlsFrontendAllocatorE
+missing symbol bound to dummy: _ZTHN2v88internal12trap_handler21g_thread_in_wasm_codeE
+SUCCESS: dlopen loaded libEGL
+[kudroid_core] LOAD SUCCESS for /var/mobile/Containers/Data/Application/A66E28CB-DF3E-4808-896A-F6EC80D1EAF6/Documents/android_root/data/app/Minecraft_PE_26.30_BANDISHARE/lib/arm64-v8a/libminecraftpe.so
+[kudroid_core] Attempting to load: /var/mobile/Containers/Data/Application/A66E28CB-DF3E-4808-896A-F6EC80D1EAF6/Documents/android_root/data/app/Minecraft_PE_26.30_BANDISHARE/lib/arm64-v8a/libMediaDecoders_Android.so
+[kudroid_core] LOAD SUCCESS for /var/mobile/Containers/Data/Application/A66E28CB-DF3E-4808-896A-F6EC80D1EAF6/Documents/android_root/data/app/Minecraft_PE_26.30_BANDISHARE/lib/arm64-v8a/libMediaDecoders_Android.so
+[kudroid_core] Attempting to load: /var/mobile/Containers/Data/Application/A66E28CB-DF3E-4808-896A-F6EC80D1EAF6/Documents/android_root/data/app/Minecraft_PE_26.30_BANDISHARE/lib/arm64-v8a/libconscrypt_jni.so
+[kudroid_core] LOAD SUCCESS for /var/mobile/Containers/Data/Application/A66E28CB-DF3E-4808-896A-F6EC80D1EAF6/Documents/android_root/data/app/Minecraft_PE_26.30_BANDISHARE/lib/arm64-v8a/libconscrypt_jni.so
+[kudroid_core] Attempting to load: /var/mobile/Containers/Data/Application/A66E28CB-DF3E-4808-896A-F6EC80D1EAF6/Documents/android_root/data/app/Minecraft_PE_26.30_BANDISHARE/lib/arm64-v8a/libHttpClient.Android.so
+[kudroid_core] LOAD SUCCESS for /var/mobile/Containers/Data/Application/A66E28CB-DF3E-4808-896A-F6EC80D1EAF6/Documents/android_root/data/app/Minecraft_PE_26.30_BANDISHARE/lib/arm64-v8a/libHttpClient.Android.so
+[kudroid_core] Attempting to load: /var/mobile/Containers/Data/Application/A66E28CB-DF3E-4808-896A-F6EC80D1EAF6/Documents/android_root/data/app/Minecraft_PE_26.30_BANDISHARE/lib/arm64-v8a/libc++_shared.so
+[kudroid_core] LOAD SUCCESS for /var/mobile/Containers/Data/Application/A66E28CB-DF3E-4808-896A-F6EC80D1EAF6/Documents/android_root/data/app/Minecraft_PE_26.30_BANDISHARE/lib/arm64-v8a/libc++_shared.so
+[kudroid_core] Attempting to load: /var/mobile/Containers/Data/Application/A66E28CB-DF3E-4808-896A-F6EC80D1EAF6/Documents/android_root/data/app/Minecraft_PE_26.30_BANDISHARE/lib/arm64-v8a/libmaesdk.so
+[kudroid_core] LOAD SUCCESS for /var/mobile/Containers/Data/Application/A66E28CB-DF3E-4808-896A-F6EC80D1EAF6/Documents/android_root/data/app/Minecraft_PE_26.30_BANDISHARE/lib/arm64-v8a/libmaesdk.so
+[kudroid_core] Attempting to load: /var/mobile/Containers/Data/Application/A66E28CB-DF3E-4808-896A-F6EC80D1EAF6/Documents/android_root/data/app/Minecraft_PE_26.30_BANDISHARE/lib/arm64-v8a/libfmod.so
+[kudroid_core] LOAD SUCCESS for /var/mobile/Containers/Data/Application/A66E28CB-DF3E-4808-896A-F6EC80D1EAF6/Documents/android_root/data/app/Minecraft_PE_26.30_BANDISHARE/lib/arm64-v8a/libfmod.so
+[kudroid_core] Total loaded libraries: 8
+  /private/var/mobile/Containers/Data/Application/A66E28CB-DF3E-4808-896A-F6EC80D1EAF6/Documents/android_root/data/app/Minecraft_PE_26.30_BANDISHARE/lib/arm64-v8a/libconscrypt_jni.so -> 0x116d28000
+  /private/var/mobile/Containers/Data/Application/A66E28CB-DF3E-4808-896A-F6EC80D1EAF6/Documents/android_root/data/app/Minecraft_PE_26.30_BANDISHARE/lib/arm64-v8a/libMediaDecoders_Android.so -> 0x116ba8000
+  /private/var/mobile/Containers/Data/Application/A66E28CB-DF3E-4808-896A-F6EC80D1EAF6/Documents/android_root/data/app/Minecraft_PE_26.30_BANDISHARE/lib/arm64-v8a/libmaesdk.so -> 0x116460000
+  /private/var/mobile/Containers/Data/Application/A66E28CB-DF3E-4808-896A-F6EC80D1EAF6/Documents/android_root/data/app/Minecraft_PE_26.30_BANDISHARE/lib/arm64-v8a/libHttpClient.Android.so -> 0x115c6c000
+  /private/var/mobile/Containers/Data/Application/A66E28CB-DF3E-4808-896A-F6EC80D1EAF6/Documents/android_root/data/app/Minecraft_PE_26.30_BANDISHARE/lib/arm64-v8a/libfmod.so -> 0x1161b0000
+  /private/var/mobile/Containers/Data/Application/A66E28CB-DF3E-4808-896A-F6EC80D1EAF6/Documents/android_root/data/app/Minecraft_PE_26.30_BANDISHARE/lib/arm64-v8a/libc++_shared.so -> 0x116310000
+  /private/var/mobile/Containers/Data/Application/A66E28CB-DF3E-4808-896A-F6EC80D1EAF6/Documents/android_root/data/app/Minecraft_PE_26.30_BANDISHARE/lib/arm64-v8a/libminecraftpe.so -> 0x14781c000
+  /private/var/mobile/Containers/Data/Application/A66E28CB-DF3E-4808-896A-F6EC80D1EAF6/Documents/android_root/data/app/Minecraft_PE_26.30_BANDISHARE/lib/arm64-v8a/libPlayFabMultiplayer.so -> 0x115d88000
+[kudroid_core] DEX→JAR AOT ready: /var/mobile/Containers/Data/Application/A66E28CB-DF3E-4808-896A-F6EC80D1EAF6/Documents/android_root/data/dalvik-cache/Minecraft_PE_26.30_BANDISHARE/classes.jar
+Build: kudroid_core v0.6.5 Aug 22 2026 17:12:14 bdb9ada
+Initializing Avian JVM...
+Embedded boot classpath jar: 1207220 bytes (header: 0x50 0x4B 0x03 0x04 'PK..')
+Boot classpath jar materialized: /var/mobile/Containers/Data/Application/A66E28CB-DF3E-4808-896A-F6EC80D1EAF6/Documents/android_root/data/dalvik-cache/Minecraft_PE_26.30_BANDISHARE/boot.jar (1207220 bytes)
+boot.jar ready (canonical): /private/var/mobile/Containers/Data/Application/A66E28CB-DF3E-4808-896A-F6EC80D1EAF6/Documents/android_root/data/dalvik-cache/Minecraft_PE_26.30_BANDISHARE/boot.jar (1207220 bytes)
+framework.jar ready (canonical): /private/var/mobile/Containers/Data/Application/A66E28CB-DF3E-4808-896A-F6EC80D1EAF6/Documents/android_root/data/dalvik-cache/Minecraft_PE_26.30_BANDISHARE/framework.jar (139784 bytes)
+App classpath jar exists (canonical): /private/var/mobile/Containers/Data/Application/A66E28CB-DF3E-4808-896A-F6EC80D1EAF6/Documents/android_root/data/dalvik-cache/Minecraft_PE_26.30_BANDISHARE/classes.jar (15418505 bytes)
+JVM options: -Xbootclasspath:[classpathJar] -Djava.class.path=/private/var/mobile/Containers/Data/Application/A66E28CB-DF3E-4808-896A-F6EC80D1EAF6/Documents/android_root/data/dalvik-cache/Minecraft_PE_26.30_BANDISHARE/classes.jar:/private/var/mobile/Containers/Data/Application/A66E28CB-DF3E-4808-896A-F6EC80D1EAF6/Documents/android_root/data/dalvik-cache/Minecraft_PE_26.30_BANDISHARE/framework.jar -Xbootclasspath/a:/private/var/mobile/Containers/Data/Application/A66E28CB-DF3E-4808-896A-F6EC80D1EAF6/Documents/android_root/data/dalvik-cache/Minecraft_PE_26.30_BANDISHARE/framework.jar:/private/var/mobile/Containers/Data/Application/A66E28CB-DF3E-4808-896A-F6EC80D1EAF6/Documents/android_root/data/dalvik-cache/Minecraft_PE_26.30_BANDISHARE/classes.jar
+Avian JVM initialized successfully (JavaVM=0x1462c3000, JNIEnv=0x146b14000, init_thread=0x16b0c3000)
+[DirectProbe] Calling FindClass('java/lang/String') on init_thread 0x16b0c3000...
+[DirectProbe] -> SUCCESS: Found java/lang/String (jclass=0x146b148d8)
+Registered java/lang/System.arraycopy -> JNI native bridge
+Registered android/util/Log.println_native -> C++ log pipeline
+Registered android/graphics/Canvas -> C++ Metal Canvas pipeline
+DisplayMetrics update DISABLED: arm64 JIT float codegen aborts on this class (see comment above); screen dims left at defaults
+[kudroid_core] Avian JVM ready (JavaVM=0x1462c3000).
+[kudroid_core] Java APK Application detected (No ANativeActivity_onCreate).
+[kudroid_core] Parsing AndroidManifest.xml (20420 bytes)...
+[kudroid_core] Manifest parse: package='' mainActivity=''
+[kudroid_core] Scanning classes.jar for app Activity classes...
+[kudroid_core] Found 500 non-system classes in classes.jar
+[kudroid_core] No clean *Activity class; using highest-scored app class: a.a.a
+[kudroid_core] Target Activity: a.a.a
+[kudroid_core] Launching Android ActivityThread runtime...
+kudroid_launch_java_activity: requesting launch for a.a.a
+kudroid_jni_get_env: Thread already attached (current_thread=0x16b0c3000), returning env=0x146b14000
+[LadderProbe] FindClass('java/lang/String')...
+[LadderProbe] -> SUCCESS: Found 'java/lang/String' (jclass=0x146b14918)
+[LadderProbe] FindClass('android/os/Looper')...
+[LadderProbe] -> SUCCESS: Found 'android/os/Looper' (jclass=0x146b14928)
+[LadderProbe] FindClass('android/os/Message')...
+[LadderProbe] -> SUCCESS: Found 'android/os/Message' (jclass=0x146b14938)
+[LadderProbe] FindClass('android/os/Handler')...
+[LadderProbe] -> SUCCESS: Found 'android/os/Handler' (jclass=0x146b14948)
+[LadderProbe] FindClass('android/app/Activity')...
+[LadderProbe] -> SUCCESS: Found 'android/app/Activity' (jclass=0x146b14958)
+[LadderProbe] FindClass('android/app/ActivityThread')...
+[LadderProbe] -> SUCCESS: Found 'android/app/ActivityThread' (jclass=0x146b14968)
+Starting ActivityThread.main (entering UI event loop)...
+Launching target Activity immediately: a.a.a
+Instantiating Activity: a.a.a
+NON-FATAL in Activity lifecycle: java.lang.ClassCastException: a/a/a as android/app/Activity
+    at android.app.ActivityThread.handleLaunchActivity (line 162)
+    at android.app.ActivityThread.main (line 86)
+kudroid_jni_get_env: Thread detached (current_thread=0x1f78e3cc0), attempting to AttachCurrentThread...
+kudroid_jni_get_env: Thread attached successfully, env=0x13c000000
+kudroid_jni_get_env: Thread already attached (current_thread=0x1f78e3cc0), returning env=0x13c000000

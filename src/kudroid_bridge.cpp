@@ -1576,6 +1576,32 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                     targetActivity = first;
                                     appendAndEcho("[kudroid_core] Using first app class as last resort: " + first);
                                 }
+
+                                // ƯU TIÊN 3.5 — JNI VERIFY: tên class KHÔNG nói lên
+                                // gì khi app bị ProGuard obfuscate (a.a.a v.v.).
+                                // Dùng IsAssignableFrom để kiểm tra candidate THẬT
+                                // SỰ extends android.app.Activity. Quét toàn bộ
+                                // danh sách, chọn class Activity đầu tiên tìm thấy.
+                                if (!targetActivity.empty() &&
+                                    kudroid_class_extends_activity(targetActivity.c_str()) != 1) {
+                                    appendAndEcho("[kudroid_core] Candidate '" + targetActivity +
+                                                  "' does NOT extend Activity (obfuscated?). JNI-verifying all classes...");
+                                    targetActivity.clear();
+                                    for (const auto& cls : classes) {
+                                        std::string dotted = cls;
+                                        for (char& c : dotted) if (c == '/') c = '.';
+                                        if (kudroid_class_extends_activity(dotted.c_str()) == 1) {
+                                            targetActivity = dotted;
+                                            appendAndEcho("[kudroid_core] JNI-verified Activity: " + dotted);
+                                            break;
+                                        }
+                                    }
+                                    if (targetActivity.empty()) {
+                                        appendAndEcho("[kudroid_core] WARNING: no class in classes.jar extends android.app.Activity");
+                                    }
+                                } else if (!targetActivity.empty()) {
+                                    appendAndEcho("[kudroid_core] JNI-verified: '" + targetActivity + "' extends Activity ✓");
+                                }
                             } else {
                                 appendAndEcho("[kudroid_core] WARNING: classes.jar not found at " + aotJar.string());
                             }
