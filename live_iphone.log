@@ -1,0 +1,1122 @@
+[connected:00008030-000438A43C51402E]
+Aug 17 15:19:23.383039 KuDroidShell(CoreFoundation)[24084] <Debug>: Using ~iphone resources
+Aug 17 15:19:23.383417 KuDroidShell(CoreFoundation)[24084] <Debug>: main bundle CFBundle 0x102db4cc0 </private/var/containers/Bundle/Application/F9977A35-CD1F-43AF-869A-0C8013A1F1B5/KuDroidShell.app> (executable, loaded) getting handle 0xfffffffffffffffb
+Aug 17 15:19:23.383506 KuDroidShell(CoreFoundation)[24084] <Debug>: setting new value <private> for key <private> in CFPrefsSource<0x102db5800> (Domain: Volatile, User: , ByHost: No, Container: , Contents Need Refresh: No)
+Aug 17 15:19:23.383561 KuDroidShell(CoreFoundation)[24084] <Debug>: setting new value <private> for key <private> in CFPrefsSource<0x102db5800> (Domain: Volatile, User: , ByHost: No, Container: , Contents Need Refresh: No)
+Aug 17 15:19:23.383623 KuDroidShell(CoreFoundation)[24084] <Debug>: setting new value <private> for key <private> in CFPrefsSource<0x102db5800> (Domain: Volatile, User: , ByHost: No, Container: , Contents Need Refresh: No)
+Aug 17 15:19:23.383669 KuDroidShell(CoreFoundation)[24084] <Debug>: setting new value <private> for key <private> in CFPrefsSource<0x102db5800> (Domain: Volatile, User: , ByHost: No, Container: , Contents Need Refresh: No)
+Aug 17 15:19:23.384085 KuDroidShell(libxpc.dylib)[24084] <Notice>: [0x102db6860] activating connection: mach=true listener=false peer=false name=com.apple.cfprefsd.daemon.system
+Aug 17 15:19:23.384359 KuDroidShell(libxpc.dylib)[24084] <Notice>: [0x103888000] activating connection: mach=true listener=false peer=false name=com.apple.cfprefsd.daemon
+Aug 17 15:19:23.386042 KuDroidShell(CoreFoundation)[24084] <Debug>: CFPrefsManagedSource<0x102db51c0> (Domain: com.apple.UIKit, User: kCFPreferencesAnyUser, ByHost: Yes, Container: (null), Contents Need Refresh: No) loaded: an empty base plist and no additional changes from the base plist
+Aug 17 15:19:23.386085 KuDroidShell(CoreFoundation)[24084] <Debug>: CFPrefsPlistSource<0x102db5940> (Domain: com.apple.UIKit, User: kCFPreferencesAnyUser, ByHost: Yes, Container: (null), Contents Need Refresh: No) loaded: an empty base plist and no additional changes from the base plist
+Aug 17 15:19:23.386127 KuDroidShell(CoreFoundation)[24084] <Debug>: CFPrefsPlistSource<0x103870000> (Domain: kCFPreferencesAnyApplication, User: kCFPreferencesAnyUser, ByHost: Yes, Container: (null), Contents Need Refresh: No) loaded: an empty base plist and no additional changes from the base plist
+Aug 17 15:19:23.387093 KuDroidShell(CoreFoundation)[24084] <Debug>: CFPrefsManagedSource<0x102db5140> (Domain: com.apple.UIKit, User: kCFPreferencesCurrentUser, ByHost: Yes, Container: (null), Contents Need Refresh: No) loaded: an empty base plist and no additional changes from the base plist
+Aug 17 15:19:23.387309 KuDroidShell(CoreFoundation)[24084] <Debug>: CFPrefsPlistSource<0x102db5680> (Domain: com.apple.UIKit, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No) loaded: a new base plist and no additional changes from the base plist
+Aug 17 15:19:23.387511 KuDroidShell(CoreFoundation)[24084] <Debug>: CFPrefsManagedSource<0x102db5780> (Domain: kCFPreferencesAnyApplication, User: kCFPreferencesCurrentUser, ByHost: Yes, Container: (null), Contents Need Refresh: No) loaded: a new base plist and no additional changes from the base plist
+Aug 17 15:19:23.387643 KuDroidShell(CoreFoundation)[24084] <Debug>: CFPrefsPlistSource<0x102db5870> (Domain: kCFPreferencesAnyApplication, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No) loaded: a new base plist and no additional changes from the base plist
+Aug 17 15:19:23.387695 KuDroidShell(CoreFoundation)[24084] <Debug>: CFPrefsManagedSource<0x103870180> (Domain: com.kudroid.shell.5L5HW6K48W, User: kCFPreferencesAnyUser, ByHost: Yes, Container: (null), Contents Need Refresh: No) loaded: an empty base plist and no additional changes from the base plist
+Aug 17 15:19:23.387736 KuDroidShell(CoreFoundation)[24084] <Debug>: CFPrefsPlistSource<0x103870300> (Domain: com.kudroid.shell.5L5HW6K48W, User: kCFPreferencesAnyUser, ByHost: Yes, Container: (null), Contents Need Refresh: No) loaded: an empty base plist and no additional changes from the base plist
+Aug 17 15:19:23.387787 KuDroidShell(CoreFoundation)[24084] <Debug>: CFPrefsPlistSource<0x103870000> (Domain: kCFPreferencesAnyApplication, User: kCFPreferencesAnyUser, ByHost: Yes, Container: (null), Contents Need Refresh: No) loaded: an empty base plist and no additional changes from the base plist
+Aug 17 15:19:23.390399 KuDroidShell(CoreFoundation)[24084] <Debug>: Unable to create bundle at URL (<private>): does not exist or not a directory (0)
+Aug 17 15:19:23.390439 KuDroidShell(RunningBoardServices)[24084] <Notice>: Initializing connection
+Aug 17 15:19:23.390480 KuDroidShell(CoreFoundation)[24084] <Debug>: Unable to create bundle at URL (<private>): does not exist or not a directory (0)
+Aug 17 15:19:23.390519 KuDroidShell(RunningBoardServices)[24084] <Notice>: Removing all cached process handles
+Aug 17 15:19:23.390557 KuDroidShell(CoreFoundation)[24084] <Debug>: Unable to create bundle at URL (<private>): does not exist or not a directory (0)
+Aug 17 15:19:23.390944 KuDroidShell(RunningBoardServices)[24084] <Notice>: Sending handshake request attempt #1 to server
+Aug 17 15:19:23.390994 KuDroidShell(RunningBoardServices)[24084] <Notice>: Creating connection to com.apple.runningboard
+Aug 17 15:19:23.391038 KuDroidShell(libxpc.dylib)[24084] <Notice>: [0x103888100] activating connection: mach=true listener=false peer=false name=com.apple.runningboard
+Aug 17 15:19:23.395144 KuDroidShell(libxpc.dylib)[24084] <Notice>: [0x103894000] activating connection: mach=false listener=false peer=false name=(anonymous)
+Aug 17 15:19:23.398717 KuDroidShell(RunningBoardServices)[24084] <Debug>: PERF: (null) Received message from runningboardd: async_didChangeInheritances:completion:
+Aug 17 15:19:23.398764 KuDroidShell(RunningBoardServices)[24084] <Info>: didChangeInheritances
+Aug 17 15:19:23.402632 KuDroidShell(RunningBoardServices)[24084] <Debug>: didChangeInheritances: <RBSInheritanceChangeSet| gained:{(
+    <RBSInheritance| environment:(none) name:com.apple.frontboard.visibility origID:33-34-220135 0>
+)} lost:(null)>
+Aug 17 15:19:23.402674 KuDroidShell(libMobileGestalt.dylib)[24084] <Notice>: Cache loaded with 5922 pre-cached in CacheData and 65 items in CacheExtra.
+Aug 17 15:19:23.402716 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogHIDEventFiltered in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.402760 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogHIDEventIncoming in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.402928 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogBackgroundTask in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.402969 KuDroidShell(UIKitCore)[24084] <Notice>: Creating new assertion because there is no existing background assertion.
+Aug 17 15:19:23.403143 KuDroidShell(UIKitCore)[24084] <Notice>: Creating new background assertion
+Aug 17 15:19:23.403182 KuDroidShell(UIKitCore)[24084] <Notice>: Created new background assertion <BKSProcessAssertion: 0x102dbe970>
+Aug 17 15:19:23.403324 KuDroidShell(RunningBoardServices)[24084] <Info>: Acquiring assertion: <RBSAssertionDescriptor| "Shared Background Assertion 0 for com.kudroid.shell.5L5HW6K48W" ID:(null) target:24084>
+Aug 17 15:19:23.403395 KuDroidShell(RunningBoardServices)[24084] <Notice>: Handshake succeeded
+Aug 17 15:19:23.403670 KuDroidShell(RunningBoardServices)[24084] <Notice>: Identity resolved as app<com.kudroid.shell.5L5HW6K48W(CEED873D-45D3-44EE-9DFC-0A3C4355E35C)>
+Aug 17 15:19:23.404815 KuDroidShell(RunningBoardServices)[24084] <Debug>: Adding assertion 33-24084-220139 to dictionary
+Aug 17 15:19:23.404883 KuDroidShell(UIKitCore)[24084] <Notice>: Incrementing reference count for background assertion <private>
+Aug 17 15:19:23.405107 KuDroidShell(UIKitCore)[24084] <Notice>: Created background task <private>.
+Aug 17 15:19:23.405278 KuDroidShell(FrontBoardServices)[24084] <Notice>: Realizing settings extension _UIApplicationSceneKeyboardSettings on FBSSceneSettings
+Aug 17 15:19:23.405477 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogApplication in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.405728 KuDroidShell(UIKitCore)[24084] <Notice>: Deactivation reason added: 10; deactivation reasons: 0 -> 1024; animating application lifecycle event: 0
+Aug 17 15:19:23.405855 KuDroidShell(BoardServices)[24084] <Notice>: activating monitor for service com.apple.frontboard.open
+Aug 17 15:19:23.405959 KuDroidShell(BoardServices)[24084] <Notice>: activating monitor for service com.apple.frontboard.workspace-service
+Aug 17 15:19:23.406089 KuDroidShell(FrontBoardServices)[24084] <Notice>: FBSWorkspace registering source: <private>
+Aug 17 15:19:23.409557 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.409672 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.409928 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.410057 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.410159 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.410415 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.410530 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.410662 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.410773 KuDroidShell(FrontBoardServices)[24084] <Notice>: Realizing settings extension <_UISceneOcclusionSettings> on FBSSceneSettings
+Aug 17 15:19:23.413145 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.413242 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.413292 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.413397 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.413504 KuDroidShell(FrontBoardServices)[24084] <Notice>: Realizing settings extension <_UISceneInterfaceProtectionSceneSettings> on FBSSceneSettings
+Aug 17 15:19:23.414243 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.414282 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.414381 KuDroidShell(FrontBoardServices)[24084] <Notice>: Realizing settings extension <_UIHomeAffordanceHostSceneSettings> on FBSSceneSettings
+Aug 17 15:19:23.414487 KuDroidShell(FrontBoardServices)[24084] <Notice>: FBSWorkspace connected to endpoint : <private>
+Aug 17 15:19:23.414902 KuDroidShell(FrontBoardServices)[24084] <Notice>: <FBSWorkspaceScenesClient:0x103871d00 <private>> attempting immediate handshake from activate
+Aug 17 15:19:23.415312 KuDroidShell(FrontBoardServices)[24084] <Notice>: <FBSWorkspaceScenesClient:0x103871d00 <private>> sent handshake
+Aug 17 15:19:23.415436 KuDroidShell(RunningBoardServices)[24084] <Notice>: Added observer for process assertions expiration warning: <_RBSExpirationWarningClient: 0x1039c0880>
+Aug 17 15:19:23.415517 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.415598 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.415745 KuDroidShell(FrontBoardServices)[24084] <Notice>: Realizing settings extension _UISystemShellSceneHostingEnvironmentSettings on FBSSceneSettings
+Aug 17 15:19:23.416052 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.416090 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.416130 KuDroidShell(FrontBoardServices)[24084] <Notice>: Realizing settings extension _UISceneRenderingEnvironmentSettings on FBSSceneSettings
+Aug 17 15:19:23.416635 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.416770 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.416902 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.417103 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.417507 KuDroidShell(FrontBoardServices)[24084] <Notice>: Realizing settings extension <_UISceneTransitioningHostSettings> on FBSSceneSettings
+Aug 17 15:19:23.417650 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogUIScreen in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.417779 KuDroidShell(UIKitCore)[24084] <Notice>: Evaluated capturing state as 0 on <UIScreen: 0x103894640> for initial
+Aug 17 15:19:23.417910 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.417993 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.418114 KuDroidShell(UIKitCore)[24084] <Notice>: Evaluated capturing state as 0 on <UIScreen: 0x103894640> for CADisplay KVO
+Aug 17 15:19:23.418204 KuDroidShell(FrontBoardServices)[24084] <Notice>: Realizing settings extension <_UISceneHostingContentSizePreferenceClientSettings> on FBSSceneClientSettings
+Aug 17 15:19:23.418598 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.418648 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.419218 KuDroidShell(FrontBoardServices)[24084] <Notice>: Realizing settings extension _UISceneHostingTraitCollectionPropagationSettings on FBSSceneSettings
+Aug 17 15:19:23.420372 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.420410 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.420460 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.420499 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "setTintColor:" from extension <private> on class "<private>"
+Aug 17 15:19:23.420605 KuDroidShell(FrontBoardServices)[24084] <Notice>: Realizing settings extension <_UISceneHostingSheetPresentationSettings> on FBSSceneSettings
+Aug 17 15:19:23.422121 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.422165 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.422247 KuDroidShell(FrontBoardServices)[24084] <Notice>: Realizing settings extension <_UISceneHostingSheetPresentationClientSettings> on FBSSceneClientSettings
+Aug 17 15:19:23.423206 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.423257 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.423363 KuDroidShell(FrontBoardServices)[24084] <Notice>: Realizing settings extension <_UISceneHostingEventDeferringSettings> on FBSSceneSettings
+Aug 17 15:19:23.423925 KuDroidShell(BaseBoard)[24084] <Debug>: [rdar://100354962] Fixing incorrect property returned by protocol_copyPropertyList2() for "<private>": required --> optional
+Aug 17 15:19:23.424035 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.424073 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.424122 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.424176 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.425398 KuDroidShell(FrontBoardServices)[24084] <Notice>: Realizing settings extension <UIKit__UITypedKeyValueSceneSettings> on FBSSceneSettings
+Aug 17 15:19:23.425492 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.425542 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.425582 KuDroidShell(FrontBoardServices)[24084] <Notice>: Realizing settings extension <UIKit__UITypedKeyValueSceneSettings> on FBSSceneClientSettings
+Aug 17 15:19:23.425622 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.425659 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.425825 KuDroidShell(FrontBoardServices)[24084] <Notice>: Realizing settings extension FBSSceneSettingsCore on FBSSceneSettings
+Aug 17 15:19:23.428445 KuDroidShell(BaseBoard)[24084] <Debug>: [rdar://100354962] Fixing incorrect property returned by protocol_copyPropertyList2() for "<private>": required --> optional
+Aug 17 15:19:23.428658 KuDroidShell(BaseBoard)[24084] <Debug>: [rdar://100354962] Fixing incorrect property returned by protocol_copyPropertyList2() for "<private>": required --> optional
+Aug 17 15:19:23.428724 KuDroidShell(BaseBoard)[24084] <Debug>: [rdar://100354962] Fixing incorrect property returned by protocol_copyPropertyList2() for "<private>": required --> optional
+Aug 17 15:19:23.431110 KuDroidShell(BaseBoard)[24084] <Debug>: [rdar://100354962] Fixing incorrect property returned by protocol_copyPropertyList2() for "<private>": required --> optional
+Aug 17 15:19:23.431743 KuDroidShell(BaseBoard)[24084] <Debug>: [rdar://100354962] Fixing incorrect property returned by protocol_copyPropertyList2() for "<private>": required --> optional
+Aug 17 15:19:23.431822 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.431934 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.432227 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.432282 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.432322 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.432378 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.432417 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.432457 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.432498 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.432538 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.432579 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.432645 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.432690 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.432731 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.432771 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.432811 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.432849 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.432886 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.432923 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.432964 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.433005 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "interfaceOrientation" from extension <private> on class "<private>"
+Aug 17 15:19:23.433065 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.433115 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.433165 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.433203 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.433253 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.433295 KuDroidShell(FrontBoardServices)[24084] <Notice>: Realizing settings extension FBSSceneClientSettingsCore on FBSSceneClientSettings
+Aug 17 15:19:23.433346 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.433384 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.433421 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.433458 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.433502 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.433540 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.433579 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.433620 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.433689 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.433827 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.433910 KuDroidShell(FrontBoardServices)[24084] <Notice>: UIMutableApplicationSceneSettings setting counterpart class: UIApplicationSceneSettings
+Aug 17 15:19:23.433961 KuDroidShell(FrontBoardServices)[24084] <Notice>: UIMutableApplicationSceneClientSettings setting counterpart class: UIApplicationSceneClientSettings
+Aug 17 15:19:23.434001 KuDroidShell(FrontBoardServices)[24084] <Notice>: Realizing settings extension FBSSceneTransitionContextCore on FBSSceneTransitionContext
+Aug 17 15:19:23.438788 KuDroidShell(BaseBoard)[24084] <Debug>: [rdar://100354962] Fixing incorrect property returned by protocol_copyPropertyList2() for "<private>": required --> optional
+Aug 17 15:19:23.438873 KuDroidShell(BaseBoard)[24084] <Debug>: [rdar://100354962] Fixing incorrect property returned by protocol_copyPropertyList2() for "<private>": required --> optional
+Aug 17 15:19:23.438953 KuDroidShell(BaseBoard)[24084] <Debug>: [rdar://100354962] Fixing incorrect property returned by protocol_copyPropertyList2() for "<private>": required --> optional
+Aug 17 15:19:23.439330 KuDroidShell(BaseBoard)[24084] <Debug>: [rdar://100354962] Fixing incorrect property returned by protocol_copyPropertyList2() for "<private>": required --> optional
+Aug 17 15:19:23.439412 KuDroidShell(BaseBoard)[24084] <Debug>: [rdar://100354962] Fixing incorrect property returned by protocol_copyPropertyList2() for "<private>": required --> optional
+Aug 17 15:19:23.439495 KuDroidShell(BaseBoard)[24084] <Debug>: [rdar://100354962] Fixing incorrect property returned by protocol_copyPropertyList2() for "<private>": required --> optional
+Aug 17 15:19:23.439825 KuDroidShell(BaseBoard)[24084] <Debug>: [rdar://100354962] Fixing incorrect property returned by protocol_copyPropertyList2() for "<private>": required --> optional
+Aug 17 15:19:23.439888 KuDroidShell(BaseBoard)[24084] <Debug>: [rdar://100354962] Fixing incorrect property returned by protocol_copyPropertyList2() for "<private>": required --> optional
+Aug 17 15:19:23.439935 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.439997 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.440043 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.440159 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.440268 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.440358 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.440409 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.440453 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.440514 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "animationSettings" from extension <private> on class "<private>"
+Aug 17 15:19:23.440562 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.440617 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.440663 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.440715 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.440764 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.440822 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.440874 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.440949 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.441004 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.441052 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.441106 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.441149 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.441193 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.441250 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.441313 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.441365 KuDroidShell(FrontBoardServices)[24084] <Info>: [FBSScene] [(FBSceneManager):sceneID:com.kudroid.shell.5L5HW6K48W-default] Created client agent: <UIApplicationSceneClientAgent: 0x1039e8040>
+Aug 17 15:19:23.474560 KuDroidShell(CoreFoundation)[24084] <Debug>: CFPrefsManagedSource<0x103870100> (Domain: com.kudroid.shell.5L5HW6K48W, User: kCFPreferencesCurrentUser, ByHost: Yes, Container: (null), Contents Need Refresh: No) loaded: an empty base plist and no additional changes from the base plist
+Aug 17 15:19:23.474622 KuDroidShell(CoreFoundation)[24084] <Debug>: CFPrefsPlistSource<0x103870200> (Domain: com.kudroid.shell.5L5HW6K48W, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No) loaded: a new base plist and no additional changes from the base plist
+Aug 17 15:19:23.474677 KuDroidShell(CoreFoundation)[24084] <Debug>: CFPrefsManagedSource<0x102db5780> (Domain: kCFPreferencesAnyApplication, User: kCFPreferencesCurrentUser, ByHost: Yes, Container: (null), Contents Need Refresh: No) loaded: a new base plist and no additional changes from the base plist
+Aug 17 15:19:23.474729 KuDroidShell(CoreFoundation)[24084] <Debug>: CFPrefsPlistSource<0x102db5870> (Domain: kCFPreferencesAnyApplication, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No) loaded: a new base plist and no additional changes from the base plist
+Aug 17 15:19:23.474782 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key IIOEnableOOP in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.474835 KuDroidShell(CoreFoundation)[24084] <Debug>: looked up value <private> for key AppleLanguages in CFPrefsPlistSource<0x102db5870> (Domain: kCFPreferencesAnyApplication, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No) via CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.474885 KuDroidShell(CoreFoundation)[24084] <Debug>: Language lookup at <private>
+	Localizations : []
+	Dev language  : (null)
+	User prefs    : [vi-VN]
+	Main bundle   : [<null>]
+	Allow mixed   : 0 
+	Result        : []
+Aug 17 15:19:23.474937 KuDroidShell(CoreFoundation)[24084] <Debug>: Language lookup at <private>
+	Localizations : []
+	Dev language  : en_US
+	User prefs    : [vi-VN]
+	Main bundle   : [<null>]
+	Allow mixed   : 0 
+	Result        : []
+Aug 17 15:19:23.474974 KuDroidShell(CoreFoundation)[24084] <Info>: Loading Preferences From User Session CFPrefsD
+Aug 17 15:19:23.475241 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : InfoPlist type: loctable
+	Result        : None
+Aug 17 15:19:23.475302 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : InfoPlist type: strings
+	Result        : None
+Aug 17 15:19:23.475352 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : InfoPlist type: stringsdict
+	Result        : None
+Aug 17 15:19:23.475405 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key _UIEnableLegacyRTL in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.475514 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSTighteningFactorForTruncation in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.475621 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSTighteningFactorForTruncation in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.475672 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSAllowsDefaultTighteningForTruncation in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.475727 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSUsesDefaultHyphenation in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.475778 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSDefaultHyphenationFactor in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.475831 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSUsesOptimalLineBreaking in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.475882 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSUsesOptimalLineBreakingForNonJustifiedAlignments in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.475921 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSForceRightToLeftWritingDirection in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.475971 KuDroidShell(CoreFoundation)[24084] <Debug>: CFPrefsPlistSource<0x103872700> (Domain: com.apple.ImageIO, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No) loaded: an empty base plist and no additional changes from the base plist
+Aug 17 15:19:23.476023 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key IIOEnableOOP in CFPrefsPlistSource<0x103872700> (Domain: com.apple.ImageIO, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.476061 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIPreferredContentSizeCategoryName in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.476106 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read Category Name: domain = com.kudroid.shell.5L5HW6K48W, appID = com.kudroid.shell.5L5HW6K48W value = (null)
+Aug 17 15:19:23.476160 KuDroidShell(libAccessibility.dylib)[24084] <Notice>: Read CategoryName: per-app = 1, category name = (null)
+Aug 17 15:19:23.476199 KuDroidShell(CoreFoundation)[24084] <Debug>: looked up value <private> for key UIPreferredContentSizeCategoryName in CFPrefsPlistSource<0x102db5680> (Domain: com.apple.UIKit, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No) via CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.476241 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read Category Name: domain = /var/mobile/Library/Preferences/com.apple.UIKit, appID = (null) value = UICTContentSizeCategoryL
+Aug 17 15:19:23.476296 KuDroidShell(libAccessibility.dylib)[24084] <Notice>: Read CategoryName: per-app = 0, category name = UICTContentSizeCategoryL
+Aug 17 15:19:23.476334 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UICarPlayPreferredContentSizeCategoryName in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.477015 KuDroidShell(CoreFoundation)[24084] <Debug>: CFPrefsManagedSource<0x103872400> (Domain: com.apple.Accessibility, User: kCFPreferencesAnyUser, ByHost: Yes, Container: (null), Contents Need Refresh: No) loaded: an empty base plist and no additional changes from the base plist
+Aug 17 15:19:23.477071 KuDroidShell(CoreFoundation)[24084] <Debug>: CFPrefsPlistSource<0x103872000> (Domain: com.apple.Accessibility, User: kCFPreferencesAnyUser, ByHost: Yes, Container: (null), Contents Need Refresh: No) loaded: an empty base plist and no additional changes from the base plist
+Aug 17 15:19:23.477208 KuDroidShell(CoreFoundation)[24084] <Debug>: CFPrefsManagedSource<0x103872480> (Domain: com.apple.Accessibility, User: kCFPreferencesCurrentUser, ByHost: Yes, Container: (null), Contents Need Refresh: No) loaded: an empty base plist and no additional changes from the base plist
+Aug 17 15:19:23.477255 KuDroidShell(CoreFoundation)[24084] <Debug>: CFPrefsPlistSource<0x103872380> (Domain: com.apple.Accessibility, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No) loaded: a new base plist and no additional changes from the base plist
+Aug 17 15:19:23.477453 KuDroidShell(CoreFoundation)[24084] <Debug>: looked up value <private> for key EnhancedTextLegibilityEnabled in CFPrefsPlistSource<0x103872380> (Domain: com.apple.Accessibility, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No) via CFPrefsSearchListSource<0x103872500> (Domain: com.apple.Accessibility, Container: (null))
+Aug 17 15:19:23.477524 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read: domain = com.apple.Accessibility, preference = EnhancedTextLegibilityEnabled, appID = (null) result = 0 (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:23.477588 KuDroidShell(CoreFoundation)[24084] <Debug>: looked up value <private> for key DarkenSystemColors in CFPrefsPlistSource<0x103872380> (Domain: com.apple.Accessibility, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No) via CFPrefsSearchListSource<0x103872500> (Domain: com.apple.Accessibility, Container: (null))
+Aug 17 15:19:23.477643 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read: domain = com.apple.Accessibility, preference = DarkenSystemColors, appID = (null) result = 0 (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:23.477779 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UITraitCollectionChangeLoggingEnabled in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.478426 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIStateRestorationDebugLogging in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.478604 KuDroidShell(CoreFoundation)[24084] <Debug>: looked up value <private> for key AccessibilityEnabled in CFPrefsPlistSource<0x103872380> (Domain: com.apple.Accessibility, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No) via CFPrefsSearchListSource<0x103872500> (Domain: com.apple.Accessibility, Container: (null))
+Aug 17 15:19:23.478672 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read: domain = com.apple.Accessibility, preference = AccessibilityEnabled, appID = (null) result = 0 (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:23.478728 KuDroidShell(CoreFoundation)[24084] <Debug>: looked up value <private> for key InvertColorsEnabled in CFPrefsPlistSource<0x103872380> (Domain: com.apple.Accessibility, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No) via CFPrefsSearchListSource<0x103872500> (Domain: com.apple.Accessibility, Container: (null))
+Aug 17 15:19:23.478769 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read: domain = com.apple.Accessibility, preference = InvertColorsEnabled, appID = (null) result = 0 (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:23.478821 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: Read Global: preference = InvertColorsEnabled, result = 0 (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:23.478867 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: Updated cache: preference = InvertColorsEnabled, result = 0 (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:23.478910 KuDroidShell(CoreFoundation)[24084] <Debug>: looked up value <private> for key ApplicationAccessibilityEnabled in CFPrefsPlistSource<0x103872380> (Domain: com.apple.Accessibility, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No) via CFPrefsSearchListSource<0x103872500> (Domain: com.apple.Accessibility, Container: (null))
+Aug 17 15:19:23.478953 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read: domain = com.apple.Accessibility, preference = ApplicationAccessibilityEnabled, appID = (null) result = 0 (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:23.479796 KuDroidShell(XCTTargetBootstrap)[24084] <Notice>: Registering for test daemon availability notify post.
+Aug 17 15:19:23.479992 KuDroidShell(XCTTargetBootstrap)[24084] <Notice>: notify_get_state check indicated test daemon not ready.
+Aug 17 15:19:23.480043 KuDroidShell(XCTTargetBootstrap)[24084] <Notice>: notify_get_state check indicated test daemon not ready.
+Aug 17 15:19:23.480081 KuDroidShell(XCTTargetBootstrap)[24084] <Notice>: notify_get_state check indicated test daemon not ready.
+Aug 17 15:19:23.480546 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIRequireCrimsonLifecycle in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.480638 KuDroidShell(UIKitCore)[24084] <Notice>: Deactivation reason added: 11; deactivation reasons: 1024 -> 3072; animating application lifecycle event: 0
+Aug 17 15:19:23.481466 KuDroidShell(UIKitCore)[24084] <Notice>: Deactivation reason removed: 10; deactivation reasons: 3072 -> 2048; animating application lifecycle event: 0
+Aug 17 15:19:23.481718 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogEventBus in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.481793 KuDroidShell(UIKitCore)[24084] <Notice>: Event Timing Profile for Touch: ok, path="/System/Library/EventTimingProfiles/N104.Touch.plist"
+Aug 17 15:19:23.481848 KuDroidShell(UIKitCore)[24084] <Notice>: Event Timing Profile for Pencil: not found, path="/System/Library/EventTimingProfiles/N104.Pencil.plist"
+Aug 17 15:19:23.481935 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogUpdateScheduler in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.481999 KuDroidShell(UIKitCore)[24084] <Notice>: Selected display: name=LCD (primary), id=1
+Aug 17 15:19:23.482097 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogUpdateCycle in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.482347 KuDroidShell(FrontBoardServices)[24084] <Debug>: [<private>] Adding extension: "_UISceneRelationshipManagementExtension"
+Aug 17 15:19:23.482410 KuDroidShell(FrontBoardServices)[24084] <Debug>: [<private>] Adding extension: "_UIApplicationSceneKeyboardExtension"
+Aug 17 15:19:23.482472 KuDroidShell(FrontBoardServices)[24084] <Debug>: [<private>] Instantiated component: "<private>"
+Aug 17 15:19:23.482535 KuDroidShell(FrontBoardServices)[24084] <Debug>: [<private>] Adding extension: "_UISceneOcclusionExtension"
+Aug 17 15:19:23.482577 KuDroidShell(FrontBoardServices)[24084] <Debug>: [<private>] Adding extension: "_UIApplicationInterfaceProtectionSceneExtension"
+Aug 17 15:19:23.482635 KuDroidShell(FrontBoardServices)[24084] <Debug>: [<private>] Adding extension: "_UISceneMaskingExtension"
+Aug 17 15:19:23.482695 KuDroidShell(FrontBoardServices)[24084] <Debug>: [<private>] Instantiated component: "<private>"
+Aug 17 15:19:23.482738 KuDroidShell(FrontBoardServices)[24084] <Debug>: [<private>] Adding extension: "_UISystemChromeSceneExtension"
+Aug 17 15:19:23.482954 KuDroidShell(FrontBoardServices)[24084] <Debug>: [<private>] Instantiated component: "<private>"
+Aug 17 15:19:23.483023 KuDroidShell(FrontBoardServices)[24084] <Debug>: [<private>] Adding extension: "_UISystemShellSceneHostingEnvironmentExtension"
+Aug 17 15:19:23.483078 KuDroidShell(FrontBoardServices)[24084] <Debug>: [<private>] Instantiated component: "<private>"
+Aug 17 15:19:23.483118 KuDroidShell(FrontBoardServices)[24084] <Debug>: [<private>] Adding extension: "_UISceneRenderingEnvironmentExtension"
+Aug 17 15:19:23.483412 KuDroidShell(FrontBoardServices)[24084] <Debug>: [<private>] Instantiated component: "<private>"
+Aug 17 15:19:23.483442 KuDroidShell(FrontBoardServices)[24084] <Debug>: [<private>] Adding extension: "_UISceneTransitioningExtension"
+Aug 17 15:19:23.483757 KuDroidShell(FrontBoardServices)[24084] <Debug>: [<private>] Instantiated component: "<private>"
+Aug 17 15:19:23.490231 KuDroidShell(UIKitCore)[24084] <Notice>: Will add backgroundTask with taskName: <private>, expirationHandler: <__NSGlobalBlock__: 0x1f9bae3a0>
+Aug 17 15:19:23.490338 KuDroidShell(UIKitCore)[24084] <Notice>: Reusing background assertion <BKSProcessAssertion: 0x102dbe970>
+Aug 17 15:19:23.490405 KuDroidShell(UIKitCore)[24084] <Notice>: Incrementing reference count for background assertion <private>
+Aug 17 15:19:23.490455 KuDroidShell(UIKitCore)[24084] <Notice>: Created background task <private>.
+Aug 17 15:19:23.491155 KuDroidShell(UIKitCore)[24084] <Notice>: Deactivation reason added: 5; deactivation reasons: 2048 -> 2080; animating application lifecycle event: 1
+Aug 17 15:19:23.491278 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogWindow in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.491392 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogInterfaceStyle in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.491455 KuDroidShell(UIKitCore)[24084] <Notice>: Should send trait collection or coordinate space update, interface style 1 -> 1, <UIWindowScene: 0x102dc6990> (74A18C79-D240-461C-B416-558A09494B51)
+Aug 17 15:19:23.491938 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key FullKeyboardAccessEnabled in CFPrefsSearchListSource<0x103872500> (Domain: com.apple.Accessibility, Container: (null))
+Aug 17 15:19:23.492029 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read: domain = com.apple.Accessibility, preference = FullKeyboardAccessEnabled, appID = (null) result = (null) (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:23.492091 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key FullKeyboardAccessEnabled in CFPrefsPlistSource<0x103872380> (Domain: com.apple.Accessibility, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.492185 KuDroidShell(UIKitCore)[24084] <Notice>: Not push traits update to screen for new style 1, <UIWindowScene: 0x102dc6990> (74A18C79-D240-461C-B416-558A09494B51)
+Aug 17 15:19:23.492670 KuDroidShell(UIKitCore)[24084] <Debug>: create BLSBacklightFBSSceneEnvironment (BacklightUIServices) for scene:<private>
+Aug 17 15:19:23.494429 KuDroidShell(BacklightServices)[24084] <Debug>: 0x103a04c90 create environment:<private> for scene:<private>
+Aug 17 15:19:23.494501 KuDroidShell(UIKitCore)[24084] <Debug>: BLSBacklightFBSSceneEnvironment (BacklightUIServices) _settingsDiffActionsForScene
+Aug 17 15:19:23.494566 KuDroidShell(UIKitCore)[24084] <Debug>: create BLSBacklightUISceneEnvironmentDiffAction:<private>
+Aug 17 15:19:23.494617 KuDroidShell(UIKitCore)[24084] <Debug>: BLSBacklightFBSSceneEnvironment (BacklightUIServices) _actionRespondersForScene
+Aug 17 15:19:23.494658 KuDroidShell(UIKitCore)[24084] <Debug>: create BLSBacklightUISceneEnvironmentActionHandler:<private>
+Aug 17 15:19:23.494709 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogHomeAffordanceObservation in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.494763 KuDroidShell(UIKitCore)[24084] <Notice>: Initializing: <_UIHomeAffordanceSceneNotifier: 0x1039d84d0>; with scene: <UIWindowScene: 0x102dc6990>
+Aug 17 15:19:23.494802 KuDroidShell(UIKitCore)[24084] <Debug>: BLSBacklightFBSSceneEnvironment (BacklightUIServices) _settingsDiffActionsForScene
+Aug 17 15:19:23.494840 KuDroidShell(UIKitCore)[24084] <Debug>: create BLSBacklightUISceneEnvironmentDiffAction:<private>
+Aug 17 15:19:23.494893 KuDroidShell(UIKitCore)[24084] <Debug>: BLSBacklightFBSSceneEnvironment (BacklightUIServices) _actionRespondersForScene
+Aug 17 15:19:23.494936 KuDroidShell(UIKitCore)[24084] <Debug>: create BLSBacklightUISceneEnvironmentActionHandler:<private>
+Aug 17 15:19:23.494999 KuDroidShell(BacklightServices)[24084] <Notice>: 0x103a04c90 setDelegate:<0x103a04e70 _UIBacklightEnvironment> hasDelegate:YES for environment:sceneID:com.kudroid.shell.5L5HW6K48W-default
+Aug 17 15:19:23.495060 KuDroidShell(BacklightServices)[24084] <Debug>: 0x103a04c90 setSupportsAlwaysOn:NO for environment:sceneID:com.kudroid.shell.5L5HW6K48W-default
+Aug 17 15:19:23.495118 KuDroidShell(UIKitCore)[24084] <Debug>: BLSBacklightFBSSceneEnvironment (BacklightUIServices) _settingsDiffActionsForScene
+Aug 17 15:19:23.495167 KuDroidShell(UIKitCore)[24084] <Debug>: create BLSBacklightUISceneEnvironmentDiffAction:<private>
+Aug 17 15:19:23.495217 KuDroidShell(UIKitCore)[24084] <Debug>: BLSBacklightFBSSceneEnvironment (BacklightUIServices) _actionRespondersForScene
+Aug 17 15:19:23.495257 KuDroidShell(UIKitCore)[24084] <Debug>: create BLSBacklightUISceneEnvironmentActionHandler:<private>
+Aug 17 15:19:23.495310 KuDroidShell(UIKitCore)[24084] <Notice>: Not push traits update to screen for new style 1, <UIWindowScene: 0x102dc6990> (74A18C79-D240-461C-B416-558A09494B51)
+Aug 17 15:19:23.495353 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogEventDeferring in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.495399 KuDroidShell(UIKitCore)[24084] <Notice>: [0x1039d8460] Initialized with scene: <UIWindowScene: 0x102dc6990>; behavior: <_UIEventDeferringBehavior_iOS: 0x1039c1d00>; availableForProcess: 1, systemShellManagesKeyboardFocus: 1
+Aug 17 15:19:23.495447 KuDroidShell(UIKitCore)[24084] <Debug>: BLSBacklightFBSSceneEnvironment (BacklightUIServices) _settingsDiffActionsForScene
+Aug 17 15:19:23.495489 KuDroidShell(UIKitCore)[24084] <Debug>: create BLSBacklightUISceneEnvironmentDiffAction:<private>
+Aug 17 15:19:23.495527 KuDroidShell(UIKitCore)[24084] <Debug>: BLSBacklightFBSSceneEnvironment (BacklightUIServices) _actionRespondersForScene
+Aug 17 15:19:23.495574 KuDroidShell(UIKitCore)[24084] <Debug>: create BLSBacklightUISceneEnvironmentActionHandler:<private>
+Aug 17 15:19:23.495624 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogKeyWindow in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.495666 KuDroidShell(libxpc.dylib)[24084] <Notice>: [0x103894f00] activating connection: mach=false listener=false peer=false name=(anonymous)
+Aug 17 15:19:23.498912 KuDroidShell(UIKitCore)[24084] <Notice>: Setting default evaluation strategy for UIUserInterfaceIdiomPhone to LastOneWins
+Aug 17 15:19:23.499016 KuDroidShell(UIKitCore)[24084] <Debug>: BLSBacklightFBSSceneEnvironment (BacklightUIServices) _settingsDiffActionsForScene
+Aug 17 15:19:23.499105 KuDroidShell(UIKitCore)[24084] <Debug>: create BLSBacklightUISceneEnvironmentDiffAction:<private>
+Aug 17 15:19:23.499196 KuDroidShell(UIKitCore)[24084] <Debug>: BLSBacklightFBSSceneEnvironment (BacklightUIServices) _actionRespondersForScene
+Aug 17 15:19:23.499318 KuDroidShell(UIKitCore)[24084] <Debug>: create BLSBacklightUISceneEnvironmentActionHandler:<private>
+Aug 17 15:19:23.499443 KuDroidShell(UIKitCore)[24084] <Debug>: BLSBacklightFBSSceneEnvironment (BacklightUIServices) _settingsDiffActionsForScene
+Aug 17 15:19:23.499533 KuDroidShell(UIKitCore)[24084] <Debug>: create BLSBacklightUISceneEnvironmentDiffAction:<private>
+Aug 17 15:19:23.499629 KuDroidShell(UIKitCore)[24084] <Debug>: BLSBacklightFBSSceneEnvironment (BacklightUIServices) _actionRespondersForScene
+Aug 17 15:19:23.499879 KuDroidShell(UIKitCore)[24084] <Debug>: create BLSBacklightUISceneEnvironmentActionHandler:<private>
+Aug 17 15:19:23.500110 KuDroidShell(UIKitCore)[24084] <Notice>: Not push traits update to screen for new style 1, <UIWindowScene: 0x102dc6990> (74A18C79-D240-461C-B416-558A09494B51)
+Aug 17 15:19:23.500162 KuDroidShell(UIKitCore)[24084] <Debug>: BLSBacklightFBSSceneEnvironment (BacklightUIServices) _settingsDiffActionsForScene
+Aug 17 15:19:23.500202 KuDroidShell(UIKitCore)[24084] <Debug>: create BLSBacklightUISceneEnvironmentDiffAction:<private>
+Aug 17 15:19:23.500244 KuDroidShell(UIKitCore)[24084] <Debug>: BLSBacklightFBSSceneEnvironment (BacklightUIServices) _actionRespondersForScene
+Aug 17 15:19:23.500295 KuDroidShell(UIKitCore)[24084] <Debug>: create BLSBacklightUISceneEnvironmentActionHandler:<private>
+Aug 17 15:19:23.500348 KuDroidShell(UIKitCore)[24084] <Debug>: BLSBacklightFBSSceneEnvironment (BacklightUIServices) _settingsDiffActionsForScene
+Aug 17 15:19:23.500399 KuDroidShell(UIKitCore)[24084] <Debug>: create BLSBacklightUISceneEnvironmentDiffAction:<private>
+Aug 17 15:19:23.500438 KuDroidShell(UIKitCore)[24084] <Debug>: BLSBacklightFBSSceneEnvironment (BacklightUIServices) _actionRespondersForScene
+Aug 17 15:19:23.500494 KuDroidShell(UIKitCore)[24084] <Debug>: create BLSBacklightUISceneEnvironmentActionHandler:<private>
+Aug 17 15:19:23.500535 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : InfoPlist type: strings
+	Result        : None
+Aug 17 15:19:23.500581 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : InfoPlist type: stringsdict
+	Result        : None
+Aug 17 15:19:23.500656 KuDroidShell(UIKitCore)[24084] <Debug>: BLSBacklightFBSSceneEnvironment (BacklightUIServices) _settingsDiffActionsForScene
+Aug 17 15:19:23.500707 KuDroidShell(UIKitCore)[24084] <Debug>: create BLSBacklightUISceneEnvironmentDiffAction:<private>
+Aug 17 15:19:23.500757 KuDroidShell(UIKitCore)[24084] <Debug>: BLSBacklightFBSSceneEnvironment (BacklightUIServices) _actionRespondersForScene
+Aug 17 15:19:23.500811 KuDroidShell(UIKitCore)[24084] <Debug>: create BLSBacklightUISceneEnvironmentActionHandler:<private>
+Aug 17 15:19:23.500862 KuDroidShell(UIKitCore)[24084] <Debug>: BLSBacklightFBSSceneEnvironment (BacklightUIServices) _settingsDiffActionsForScene
+Aug 17 15:19:23.500901 KuDroidShell(UIKitCore)[24084] <Debug>: create BLSBacklightUISceneEnvironmentDiffAction:<private>
+Aug 17 15:19:23.500950 KuDroidShell(UIKitCore)[24084] <Debug>: BLSBacklightFBSSceneEnvironment (BacklightUIServices) _actionRespondersForScene
+Aug 17 15:19:23.500989 KuDroidShell(UIKitCore)[24084] <Debug>: create BLSBacklightUISceneEnvironmentActionHandler:<private>
+Aug 17 15:19:23.501030 KuDroidShell(UIKitCore)[24084] <Notice>: Not push traits update to screen for new style 1, <UIWindowScene: 0x102dc6990> (74A18C79-D240-461C-B416-558A09494B51)
+Aug 17 15:19:23.501068 KuDroidShell(UIKitCore)[24084] <Debug>: BLSBacklightFBSSceneEnvironment (BacklightUIServices) _settingsDiffActionsForScene
+Aug 17 15:19:23.501106 KuDroidShell(UIKitCore)[24084] <Debug>: create BLSBacklightUISceneEnvironmentDiffAction:<private>
+Aug 17 15:19:23.501145 KuDroidShell(UIKitCore)[24084] <Debug>: BLSBacklightFBSSceneEnvironment (BacklightUIServices) _actionRespondersForScene
+Aug 17 15:19:23.501185 KuDroidShell(UIKitCore)[24084] <Debug>: create BLSBacklightUISceneEnvironmentActionHandler:<private>
+Aug 17 15:19:23.501222 KuDroidShell(UIKitCore)[24084] <Debug>: BLSBacklightFBSSceneEnvironment (BacklightUIServices) _settingsDiffActionsForScene
+Aug 17 15:19:23.501259 KuDroidShell(UIKitCore)[24084] <Debug>: create BLSBacklightUISceneEnvironmentDiffAction:<private>
+Aug 17 15:19:23.501297 KuDroidShell(UIKitCore)[24084] <Debug>: BLSBacklightFBSSceneEnvironment (BacklightUIServices) _actionRespondersForScene
+Aug 17 15:19:23.501337 KuDroidShell(UIKitCore)[24084] <Debug>: create BLSBacklightUISceneEnvironmentActionHandler:<private>
+Aug 17 15:19:23.501383 KuDroidShell(UIKitCore)[24084] <Debug>: BLSBacklightFBSSceneEnvironment (BacklightUIServices) _settingsDiffActionsForScene
+Aug 17 15:19:23.501433 KuDroidShell(UIKitCore)[24084] <Debug>: create BLSBacklightUISceneEnvironmentDiffAction:<private>
+Aug 17 15:19:23.501492 KuDroidShell(UIKitCore)[24084] <Debug>: BLSBacklightFBSSceneEnvironment (BacklightUIServices) _actionRespondersForScene
+Aug 17 15:19:23.501550 KuDroidShell(UIKitCore)[24084] <Debug>: create BLSBacklightUISceneEnvironmentActionHandler:<private>
+Aug 17 15:19:23.501610 KuDroidShell(UIKitCore)[24084] <Notice>: Not push traits update to screen for new style 1, <UIWindowScene: 0x102dc6990> (74A18C79-D240-461C-B416-558A09494B51)
+Aug 17 15:19:23.501653 KuDroidShell(UIKitCore)[24084] <Debug>: BLSBacklightFBSSceneEnvironment (BacklightUIServices) _settingsDiffActionsForScene
+Aug 17 15:19:23.501708 KuDroidShell(UIKitCore)[24084] <Debug>: create BLSBacklightUISceneEnvironmentDiffAction:<private>
+Aug 17 15:19:23.501753 KuDroidShell(UIKitCore)[24084] <Debug>: BLSBacklightFBSSceneEnvironment (BacklightUIServices) _actionRespondersForScene
+Aug 17 15:19:23.501805 KuDroidShell(UIKitCore)[24084] <Debug>: create BLSBacklightUISceneEnvironmentActionHandler:<private>
+Aug 17 15:19:23.501856 KuDroidShell(UIKitCore)[24084] <Debug>: BLSBacklightFBSSceneEnvironment (BacklightUIServices) _settingsDiffActionsForScene
+Aug 17 15:19:23.501910 KuDroidShell(UIKitCore)[24084] <Debug>: create BLSBacklightUISceneEnvironmentDiffAction:<private>
+Aug 17 15:19:23.501955 KuDroidShell(UIKitCore)[24084] <Debug>: BLSBacklightFBSSceneEnvironment (BacklightUIServices) _actionRespondersForScene
+Aug 17 15:19:23.502001 KuDroidShell(UIKitCore)[24084] <Debug>: create BLSBacklightUISceneEnvironmentActionHandler:<private>
+Aug 17 15:19:23.509068 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIViewLayoutFeedbackLoopDebuggingThreshold in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.509127 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIEngineHostingViewsShouldGuardWantsAutolayoutFlagPropagation in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.509183 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key _UIConstraintBasedLayoutEngageNonLazily in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.509230 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UITraitUsageTrackingLoggingEnabled in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.511595 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIViewUseStaleDelegateContentInsets in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.513773 KuDroidShell(CoreFoundation)[24084] <Debug>: looked up value <private> for key ReduceMotionEnabled in CFPrefsPlistSource<0x103872380> (Domain: com.apple.Accessibility, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No) via CFPrefsSearchListSource<0x103872500> (Domain: com.apple.Accessibility, Container: (null))
+Aug 17 15:19:23.513924 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read: domain = com.apple.Accessibility, preference = ReduceMotionEnabled, appID = (null) result = 0 (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:23.514037 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key _UIConstraintBasedLayout in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.515159 KuDroidShell(CoreFoundation)[24084] <Debug>: CFPrefsManagedSource<0x103a2d000> (Domain: com.apple.SwiftUI, User: kCFPreferencesAnyUser, ByHost: Yes, Container: (null), Contents Need Refresh: No) loaded: an empty base plist and no additional changes from the base plist
+Aug 17 15:19:23.515266 KuDroidShell(CoreFoundation)[24084] <Debug>: CFPrefsPlistSource<0x103a2d200> (Domain: com.apple.SwiftUI, User: kCFPreferencesAnyUser, ByHost: Yes, Container: (null), Contents Need Refresh: No) loaded: an empty base plist and no additional changes from the base plist
+Aug 17 15:19:23.515420 KuDroidShell(CoreFoundation)[24084] <Debug>: CFPrefsManagedSource<0x103a2cb00> (Domain: com.apple.SwiftUI, User: kCFPreferencesCurrentUser, ByHost: Yes, Container: (null), Contents Need Refresh: No) loaded: an empty base plist and no additional changes from the base plist
+Aug 17 15:19:23.515518 KuDroidShell(CoreFoundation)[24084] <Debug>: CFPrefsPlistSource<0x103a2d100> (Domain: com.apple.SwiftUI, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No) loaded: an empty base plist and no additional changes from the base plist
+Aug 17 15:19:23.515558 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIHostingViewDebugOptions in CFPrefsSearchListSource<0x103a2ca00> (Domain: com.apple.SwiftUI, Container: (null))
+Aug 17 15:19:23.515605 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIHostingViewDebugOptions in CFPrefsSearchListSource<0x103a2ca00> (Domain: com.apple.SwiftUI, Container: (null))
+Aug 17 15:19:23.515651 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIBarsApplyChromelessEverywhere in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.515692 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogUIPresentationController in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.515759 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UseSingleSystemColor in CFPrefsSearchListSource<0x103872500> (Domain: com.apple.Accessibility, Container: (null))
+Aug 17 15:19:23.515802 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read: domain = com.apple.Accessibility, preference = UseSingleSystemColor, appID = (null) result = (null) (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:23.515843 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UseSingleSystemColor in CFPrefsPlistSource<0x103872380> (Domain: com.apple.Accessibility, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.515886 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIViewShowAlignmentRects in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.515925 KuDroidShell(FrontBoardServices)[24084] <Notice>: Realizing settings extension <_UIApplicationSceneDisplaySettings> on FBSSceneSettings
+Aug 17 15:19:23.516740 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.516795 KuDroidShell(FrontBoardServices)[24084] <Debug>: registering method "<private>" from extension <private> on class "<private>"
+Aug 17 15:19:23.516898 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIViewLocalizeOverrideLayoutEngine in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.518978 KuDroidShell(CoreFoundation)[24084] <Debug>: Language lookup at <private>
+	Localizations : [en]
+	Dev language  : en
+	User prefs    : [vi-VN]
+	Main bundle   : [en]
+	Allow mixed   : 0 
+	Result        : [en]
+Aug 17 15:19:23.519051 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : Assets type: car
+	Result        : file:///System/Library/PrivateFrameworks/UIKitCore.framework/BoundingPathData.bundle/Assets.car
+Aug 17 15:19:23.520271 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key CUIShowDebugLogs in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.522085 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIViewControllerDetachedInheritsContentOverlayInsetsFromSuperview in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.522169 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key ModernContentOverlayInsetsPropagation in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.522245 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key com.apple.SwiftUI.EnableKeyboardTrackingElement in CFPrefsSearchListSource<0x103a2ca00> (Domain: com.apple.SwiftUI, Container: (null))
+Aug 17 15:19:23.523216 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogStatusBar in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.523341 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogOrientation in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.523555 KuDroidShell(UIKitCore)[24084] <Notice>: <UIWindowScene: 0x102dc6990> (74A18C79-D240-461C-B416-558A09494B51) Scene updated orientation preferences: none -> ( Pu Ll Lr )
+Aug 17 15:19:23.523944 KuDroidShell(UIKitCore)[24084] <Notice>: Key window API is scene-level: YES
+Aug 17 15:19:23.524025 KuDroidShell(UIKitCore)[24084] <Notice>: UIWindowScene: 0x102dc6990: Window became key in scene: UIWindow: 0x102dc6010; contextId: 0xAAF1FED3: reason: UIWindowScene: 0x102dc6990: Window requested to become key in scene: 0x102dc6010
+Aug 17 15:19:23.524081 KuDroidShell(UIKitCore)[24084] <Notice>: Key window needs update: 1; currentKeyWindowScene: 0x0; evaluatedKeyWindowScene: 0x102dc6990; currentApplicationKeyWindow: 0x0; evaluatedApplicationKeyWindow: 0x102dc6010; reason: UIWindowScene: 0x102dc6990: Window requested to become key in scene: 0x102dc6010
+Aug 17 15:19:23.524147 KuDroidShell(UIKitCore)[24084] <Notice>: Window did become application key: UIWindow: 0x102dc6010; contextId: 0xAAF1FED3; scene identity: com.apple.frontboard.systemappservices/FBSceneManager:sceneID%3Acom.kudroid.shell.5L5HW6K48W-default
+Aug 17 15:19:23.524207 KuDroidShell(UIKitCore)[24084] <Notice>: [0x1039d8460] Begin local event deferring requested for token: 0x1038542a0; environments: 1; reason: UIWindowScene: 0x102dc6990: Begin event deferring in keyboardFocus for window: 0x102dc6010
+Aug 17 15:19:23.525073 KuDroidShell(BackBoardServices)[24084] <Debug>: flushing changes: {
+    contentsMask: 0x2; deferringRules: [[24084-1]];
+}
+Aug 17 15:19:23.525596 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogKeyboardFocus in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.525933 KuDroidShell(UIKitCore)[24084] <Notice>: Not push traits update to screen for new style 1, <UIWindowScene: 0x102dc6990> (74A18C79-D240-461C-B416-558A09494B51)
+Aug 17 15:19:23.527285 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogAppLifecycle in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.527382 KuDroidShell(UIKitCore)[24084] <Notice>: sceneOfRecord: sceneID: sceneID:com.kudroid.shell.5L5HW6K48W-default  persistentID: 74A18C79-D240-461C-B416-558A09494B51
+Aug 17 15:19:23.527493 KuDroidShell(UIKitCore)[24084] <Notice>: Ignoring already applied deactivation reason: 5; deactivation reasons: 2080
+Aug 17 15:19:23.527594 KuDroidShell(UIKitCore)[24084] <Debug>: Setting device orientation to 1 and sending notification.
+Aug 17 15:19:23.527675 KuDroidShell(UIKitCore)[24084] <Notice>: Deactivation reason added: 12; deactivation reasons: 2080 -> 6176; animating application lifecycle event: 1
+Aug 17 15:19:23.527773 KuDroidShell(UIKitCore)[24084] <Notice>: Deactivation reason removed: 11; deactivation reasons: 6176 -> 4128; animating application lifecycle event: 1
+Aug 17 15:19:23.528119 KuDroidShell(UIKitCore)[24084] <Notice>: Not push traits update to screen for new style 1, <UIWindowScene: 0x102dc6990> (74A18C79-D240-461C-B416-558A09494B51)
+Aug 17 15:19:23.528167 KuDroidShell(BacklightServices)[24084] <Debug>: 0x103a04c90 environment updated:sceneID:com.kudroid.shell.5L5HW6K48W-default
+  delta:{ visualState:0 date:0 active:0 seed:0 }
+  diff:(null)
+  new:(null) (null)
+  old:(null) (null)
+  new:(null)
+Aug 17 15:19:23.528210 KuDroidShell(UIIntelligenceSupport)[24084] <Notice>: establishing connection to agent
+Aug 17 15:19:23.528798 KuDroidShell(libxpc.dylib)[24084] <Notice>: [0x10398c6e0] Session created.
+Aug 17 15:19:23.528859 KuDroidShell(libxpc.dylib)[24084] <Notice>: [0x10398c6e0] Session created from connection [0x103888200]
+Aug 17 15:19:23.528917 KuDroidShell(libxpc.dylib)[24084] <Notice>: [0x103888200] activating connection: mach=true listener=false peer=false name=com.apple.uiintelligencesupport.agent
+Aug 17 15:19:23.529040 KuDroidShell(libxpc.dylib)[24084] <Notice>: [0x10398c6e0] Session activated
+Aug 17 15:19:23.530974 KuDroidShell(CoreFoundation)[24084] <Debug>: looked up value <private> for key DifferentiateWithoutColor in CFPrefsPlistSource<0x103872380> (Domain: com.apple.Accessibility, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No) via CFPrefsSearchListSource<0x103872500> (Domain: com.apple.Accessibility, Container: (null))
+Aug 17 15:19:23.531080 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read: domain = com.apple.Accessibility, preference = DifferentiateWithoutColor, appID = (null) result = 0 (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:23.531698 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key EnhancedBackgroundContrastEnabled in CFPrefsSearchListSource<0x103872500> (Domain: com.apple.Accessibility, Container: (null))
+Aug 17 15:19:23.531897 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read: domain = com.apple.Accessibility, preference = EnhancedBackgroundContrastEnabled, appID = (null) result = (null) (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:23.532012 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key EnhancedBackgroundContrastEnabled in CFPrefsPlistSource<0x103872380> (Domain: com.apple.Accessibility, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.532261 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key ReduceMotionReduceSlideTransitionsPreference in CFPrefsSearchListSource<0x103872500> (Domain: com.apple.Accessibility, Container: (null))
+Aug 17 15:19:23.532319 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read: domain = com.apple.Accessibility, preference = ReduceMotionReduceSlideTransitionsPreference, appID = (null) result = (null) (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:23.532455 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key ReduceMotionReduceSlideTransitionsPreference in CFPrefsPlistSource<0x103872380> (Domain: com.apple.Accessibility, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.532513 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key ButtonShapesEnabled in CFPrefsSearchListSource<0x103872500> (Domain: com.apple.Accessibility, Container: (null))
+Aug 17 15:19:23.532576 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read: domain = com.apple.Accessibility, preference = ButtonShapesEnabled, appID = (null) result = (null) (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:23.532651 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key ButtonShapesEnabled in CFPrefsPlistSource<0x103872380> (Domain: com.apple.Accessibility, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.532710 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key PhotosensitiveMitigation in CFPrefsSearchListSource<0x103872500> (Domain: com.apple.Accessibility, Container: (null))
+Aug 17 15:19:23.532767 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read: domain = com.apple.Accessibility, preference = PhotosensitiveMitigation, appID = (null) result = (null) (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:23.532807 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key PhotosensitiveMitigation in CFPrefsPlistSource<0x103872380> (Domain: com.apple.Accessibility, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.533445 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key ReduceMotionAutoplayAnimatedImagesEnabled in CFPrefsSearchListSource<0x103872500> (Domain: com.apple.Accessibility, Container: (null))
+Aug 17 15:19:23.533531 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read: domain = com.apple.Accessibility, preference = ReduceMotionAutoplayAnimatedImagesEnabled, appID = (null) result = (null) (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:23.533601 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key ReduceMotionAutoplayAnimatedImagesEnabled in CFPrefsPlistSource<0x103872380> (Domain: com.apple.Accessibility, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.533665 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key VoiceOverTouchEnabled in CFPrefsSearchListSource<0x103872500> (Domain: com.apple.Accessibility, Container: (null))
+Aug 17 15:19:23.533737 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read: domain = com.apple.Accessibility, preference = VoiceOverTouchEnabled, appID = (null) result = (null) (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:23.533776 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key VoiceOverTouchEnabled in CFPrefsPlistSource<0x103872380> (Domain: com.apple.Accessibility, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.533814 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key AssistiveTouchScannerEnabled in CFPrefsSearchListSource<0x103872500> (Domain: com.apple.Accessibility, Container: (null))
+Aug 17 15:19:23.533852 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read: domain = com.apple.Accessibility, preference = AssistiveTouchScannerEnabled, appID = (null) result = (null) (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:23.533890 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key AssistiveTouchScannerEnabled in CFPrefsPlistSource<0x103872380> (Domain: com.apple.Accessibility, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.533927 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key CommandAndControlEnabled in CFPrefsSearchListSource<0x103872500> (Domain: com.apple.Accessibility, Container: (null))
+Aug 17 15:19:23.533966 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read: domain = com.apple.Accessibility, preference = CommandAndControlEnabled, appID = (null) result = (null) (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:23.534004 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key CommandAndControlEnabled in CFPrefsPlistSource<0x103872380> (Domain: com.apple.Accessibility, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.534149 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key HoverTextEnabled in CFPrefsSearchListSource<0x103872500> (Domain: com.apple.Accessibility, Container: (null))
+Aug 17 15:19:23.534249 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read: domain = com.apple.Accessibility, preference = HoverTextEnabled, appID = (null) result = (null) (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:23.534325 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key HoverTextEnabled in CFPrefsPlistSource<0x103872380> (Domain: com.apple.Accessibility, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.534484 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key IncreaseButtonLegibilityEnabled in CFPrefsSearchListSource<0x103872500> (Domain: com.apple.Accessibility, Container: (null))
+Aug 17 15:19:23.534581 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read: domain = com.apple.Accessibility, preference = IncreaseButtonLegibilityEnabled, appID = (null) result = (null) (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:23.534674 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key IncreaseButtonLegibilityEnabled in CFPrefsPlistSource<0x103872380> (Domain: com.apple.Accessibility, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.535107 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key com.apple.SwiftUI.EnableToolbarLogging in CFPrefsSearchListSource<0x103a2ca00> (Domain: com.apple.SwiftUI, Container: (null))
+Aug 17 15:19:23.535994 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSUndoManagerDefaultLevelsOfUndo in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.536717 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIPencilPreferredTapAction in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.536932 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogPencilPreferences in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.536983 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key OpaqueTouchGestures in CFPrefsSearchListSource<0x103872500> (Domain: com.apple.Accessibility, Container: (null))
+Aug 17 15:19:23.537027 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read: domain = com.apple.Accessibility, preference = OpaqueTouchGestures, appID = (null) result = (null) (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:23.537088 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key OpaqueTouchGestures in CFPrefsPlistSource<0x103872380> (Domain: com.apple.Accessibility, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.537131 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIPencilPreferredSqueezeAction in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.537187 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key OpaqueTouchGestures in CFPrefsSearchListSource<0x103872500> (Domain: com.apple.Accessibility, Container: (null))
+Aug 17 15:19:23.537231 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read: domain = com.apple.Accessibility, preference = OpaqueTouchGestures, appID = (null) result = (null) (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:23.537288 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key OpaqueTouchGestures in CFPrefsPlistSource<0x103872380> (Domain: com.apple.Accessibility, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.537346 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIPencilOnlyDrawWithPencilKey in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.537396 KuDroidShell(CoreFoundation)[24084] <Debug>: looked up value <private> for key PKUIPencilHoverPreviewEnabledKey in CFPrefsPlistSource<0x102db5680> (Domain: com.apple.UIKit, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No) via CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.537457 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key PKHasEverShownEduUI in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.537500 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIPencilHasUsedPassivePencilKey in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.537529 KuDroidShell(CoreFoundation)[24084] <Info>: Updating Key-Value Observers Of Preferences
+Aug 17 15:19:23.553983 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key com.apple.SwiftUI.inferredToolbar in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.568882 KuDroidShell(CoreFoundation)[24084] <Debug>: Language lookup at <private>
+	Localizations : [ar, bg, bn, el, gu, he, hi, ja, kk, km, kn, ko, ml, mni, mr, my, or, pa, ru, sat, si, ta, te, th, uk, ur, zh-Hans, zh-Hant, en]
+	Dev language  : en
+	User prefs    : [vi-VN]
+	Main bundle   : [en]
+	Allow mixed   : 0 
+	Result        : [en]
+Aug 17 15:19:23.569034 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : Assets type: car
+	Result        : file:///System/Library/PrivateFrameworks/SFSymbols.framework/CoreGlyphs.bundle/Assets.car
+Aug 17 15:19:23.580469 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSLanguageAwareLineSpacingAdjustmentsON in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.580565 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSTallLocalizedStrings in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.580646 KuDroidShell(CoreFoundation)[24084] <Debug>: looked up value <private> for key AppleLanguages in CFPrefsPlistSource<0x102db5870> (Domain: kCFPreferencesAnyApplication, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No) via CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.584059 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key CGAllowDebuggingDefaults in CFPrefsPlistSource<0x102db5870> (Domain: kCFPreferencesAnyApplication, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.588369 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : Localizable type: loctable
+	Result        : None
+Aug 17 15:19:23.588450 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : Localizable type: strings
+	Result        : None
+Aug 17 15:19:23.588509 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : Localizable type: stringsdict
+	Result        : None
+Aug 17 15:19:23.588562 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSShowNonLocalizedStrings in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.588614 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSDoubleLocalizedStrings in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.588665 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSForceRightToLeftLocalizedStrings in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.588716 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSAccentuateLocalizedStrings in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.588768 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSSurroundLocalizedStrings in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.588819 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSTallLocalizedStrings in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.588871 KuDroidShell(CoreFoundation)[24084] <Debug>: Bundle: <private>, key: <private>, value: (null), table: Localizable, localizationNames: (null), result: <same as key>
+Aug 17 15:19:23.591229 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSPreTigerAttributedStringHash in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.596995 KuDroidShell(CoreFoundation)[24084] <Debug>: Bundle: <private>, key: <private>, value: (null), table: Localizable, localizationNames: (null), result: <same as key>
+Aug 17 15:19:23.598735 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key com.apple.SwiftUI.EnableTabViewLogging in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.600499 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UseFloatingTabBar in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.600564 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key Log_UIVisualStyleRegistry in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.600618 KuDroidShell(UIKitCore)[24084] <Notice>: Warning: no visual style classes have been registered at all.
+Aug 17 15:19:23.600895 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UseTabBarLegacyTVStyle in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.601055 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key BarAppearanceVersion in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.601123 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key BarAppearanceVersion in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.601165 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key BarAppearanceVersionOverride in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.601646 KuDroidShell(PrototypeTools)[24084] <Notice>: Not observing PTDefaults on customer install.
+Aug 17 15:19:23.603262 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key com.apple.SwiftUI.EnableUnifiedLayout in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.606938 KuDroidShell(CoreFoundation)[24084] <Debug>: dyld image path for pointer 0x2363c2848 is /System/Library/PrivateFrameworks/SFSymbols.framework/SFSymbols
+Aug 17 15:19:23.608265 KuDroidShell(CoreFoundation)[24084] <Debug>: dlfcn check load bundle CFBundle 0x103955960 </System/Library/PrivateFrameworks/SFSymbols.framework> (not loaded), dlopen of /System/Library/PrivateFrameworks/SFSymbols.framework/SFSymbols mode 0x115 getting handle 0x33030ca19
+Aug 17 15:19:23.608565 KuDroidShell(CoreFoundation)[24084] <Debug>: Language lookup at <private>
+	Localizations : [de, ur, he, ar, el, ja, mr, en, uk, es_419, gu, kn, pt_PT, pa, es, sl, or, da, it, bg, sk, zh_CN, kk, pt_BR, ms, ta, ml, sv, en_AU, te, cs, ko, no, hu, tr, pl, fr_CA, vi, lt, ru, en_GB, fr, fi, id, nl, th, bn, ro, zh_HK, hr, hi, ca, zh_TW]
+	Dev language  : en
+	User prefs    : [vi-VN]
+	Main bundle   : [en]
+	Allow mixed   : 0 
+	Result        : [en]
+Aug 17 15:19:23.608990 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : CoreGlyphs type: bundle
+	Result        : file:///System/Library/PrivateFrameworks/SFSymbols.framework/CoreGlyphs.bundle/
+Aug 17 15:19:23.616517 KuDroidShell(UIKitCore)[24084] <Notice>: Not push traits update to screen for new style 1, <UIWindowScene: 0x102dc6990> (74A18C79-D240-461C-B416-558A09494B51)
+Aug 17 15:19:23.616980 KuDroidShell(CoreFoundation)[24084] <Debug>: Language lookup at <private>
+	Localizations : [de, ur, he, ar, el, ja, mr, en, uk, es_419, gu, kn, pt_PT, pa, es, sl, or, da, it, bg, sk, zh_CN, kk, ms, ta, ml, sv, en_AU, te, cs, ko, no, hu, tr, pl, fr_CA, vi, lt, ru, en_GB, fr, fi, id, nl, th, pt, bn, ro, zh_HK, hr, hi, ca, zh_TW]
+	Dev language  : en
+	User prefs    : [vi-VN]
+	Main bundle   : [en]
+	Allow mixed   : 0 
+	Result        : [en]
+Aug 17 15:19:23.617464 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : Localizable type: loctable
+	Result        : file:///System/Library/PrivateFrameworks/UIKitCore.framework/Localizable.loctable
+Aug 17 15:19:23.620591 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : Localizable type: strings
+	Result        : None
+Aug 17 15:19:23.620624 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : Localizable type: stringsdict
+	Result        : None
+Aug 17 15:19:23.621217 KuDroidShell(CoreFoundation)[24084] <Debug>: Bundle: <private>, key: More, value: More, table: Localizable, localizationNames: (null), result: More
+Aug 17 15:19:23.621447 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key com.apple.UIKit.UITabCustomization in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.621545 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key com.apple.UIKit.UITabSidebar in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.622925 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key BarUseDynamicType in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.627737 KuDroidShell(CoreFoundation)[24084] <Debug>: looked up value <private> for key AppleLanguages in CFPrefsPlistSource<0x102db5870> (Domain: kCFPreferencesAnyApplication, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No) via CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.630011 KuDroidShell(libxpc.dylib)[24084] <Notice>: [0x103897c00] activating connection: mach=true listener=false peer=false name=com.apple.fontservicesd
+Aug 17 15:19:23.630433 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key DetectTextLayoutIssues in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.631054 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSStringDrawingDefaultRenderers in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.631148 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSTypesetterBehavior in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.631533 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSTypesetterCompatibilityLevel in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.631602 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSStringDrawingTypesetterBehavior in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.631654 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSUsesScreenFonts in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.631706 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSIgnoresViewTransformations in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.631745 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSTextShowsInvisibleCharacters in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.631795 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSTextShowsControlCharacters in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.631846 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSTextAllowsNonContiguousLayout in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.631927 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSTextBackgroundLayoutEnabled in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.632013 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSLayoutManagerForcesShowPackedGlyphs in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.632052 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key _NSCoreTypesetterForcesNonSimpleLayout in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.632094 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key AppleSystemUIFontDefaultTrack in CFPrefsPlistSource<0x102db5870> (Domain: kCFPreferencesAnyApplication, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.636637 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key CGImageMarkAllowTemplateMethodInteger in CFPrefsPlistSource<0x103870300> (Domain: com.kudroid.shell.5L5HW6K48W, User: kCFPreferencesAnyUser, ByHost: Yes, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.636699 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key CGImageMarkAllowTemplateMethodInteger in CFPrefsPlistSource<0x103870200> (Domain: com.kudroid.shell.5L5HW6K48W, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.636758 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key CGImageMarkAllowTemplateMethodInteger in CFPrefsPlistSource<0x102db5870> (Domain: kCFPreferencesAnyApplication, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.636810 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key CGImageMarkAllowTemplateMethodInteger in CFPrefsPlistSource<0x102db5870> (Domain: kCFPreferencesAnyApplication, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.637006 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key GrayscaleDisplay in CFPrefsSearchListSource<0x103872500> (Domain: com.apple.Accessibility, Container: (null))
+Aug 17 15:19:23.637093 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read: domain = com.apple.Accessibility, preference = GrayscaleDisplay, appID = (null) result = (null) (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:23.637155 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key GrayscaleDisplay in CFPrefsPlistSource<0x103872380> (Domain: com.apple.Accessibility, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.637207 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key HighContrastFocusIndicatorsEnabled in CFPrefsSearchListSource<0x103872500> (Domain: com.apple.Accessibility, Container: (null))
+Aug 17 15:19:23.637256 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read: domain = com.apple.Accessibility, preference = HighContrastFocusIndicatorsEnabled, appID = (null) result = (null) (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:23.637308 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key HighContrastFocusIndicatorsEnabled in CFPrefsPlistSource<0x103872380> (Domain: com.apple.Accessibility, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.640917 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogUITabBarController in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.641174 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIHostingViewDebugOptions in CFPrefsSearchListSource<0x103a2ca00> (Domain: com.apple.SwiftUI, Container: (null))
+Aug 17 15:19:23.641230 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIHostingViewDebugOptions in CFPrefsSearchListSource<0x103a2ca00> (Domain: com.apple.SwiftUI, Container: (null))
+Aug 17 15:19:23.641926 KuDroidShell(Foundation)[24084] <Debug>: NSURL parameterString is deprecated and now always returns nil. The path component now includes the part of the URL string which parameterString used to return.
+URL = <private>
+Aug 17 15:19:23.641987 KuDroidShell(CoreFoundation)[24084] <Debug>: CFURLCopyParameterString is deprecated and now always returns NULL. The path component now includes the part of the URL string which CFURLCopyParameterString used to return.
+URL = <private>
+Aug 17 15:19:23.652751 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UseSetNeedsLayoutForUpdates in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.657245 KuDroidShell(libxpc.dylib)[24084] <Notice>: [0x103be1400] activating connection: mach=true listener=false peer=false name=com.apple.audio.AudioSession
+Aug 17 15:19:23.676332 KuDroidShell(AudioSession)[24084] <Notice>:     AVAudioSession_iOS.mm:1141  Created session 0x1039e8880 with ID: 0x685e9
+Aug 17 15:19:23.676553 KuDroidShell(AudioSession)[24084] <Debug>:             SessionMap.mm:95    Adding session 0x1039e8880 with ID 0x685e9
+Aug 17 15:19:23.676641 KuDroidShell(AudioSession)[24084] <Debug>:             SessionMap.mm:101   There are now 1 sessions in the map.
+Aug 17 15:19:23.676723 KuDroidShell(AudioSession)[24084] <Debug>:             SessionMap.mm:118   There are now 1 sessions in the map.
+Aug 17 15:19:23.678274 KuDroidShell(AudioSession)[24084] <Debug>: AVAudioSessionCallbackDispatcher.mm:186   pingClient called for session 0x685e9
+Aug 17 15:19:23.678371 KuDroidShell(AudioSession)[24084] <Debug>:             SessionMap.mm:118   There are now 1 sessions in the map.
+Aug 17 15:19:23.678511 KuDroidShell(AudioSession)[24084] <Info>:     AVAudioSession_iOS.mm:310   Registering to CFNotificationCenter to notify of Observers of MicrophoneInjectionCapabilityChangeNotification
+Aug 17 15:19:23.678659 KuDroidShell(AudioSession)[24084] <Info>: AVAudioSessionClient_Common.mm:153   Handling deferred message, sessionID = 0x685e9, notificationName = ReporterIDsDidChange
+Aug 17 15:19:23.678743 KuDroidShell(AudioSession)[24084] <Debug>: AVAudioSessionCachingUtils.mm:128   Updated Cache for property RoutingContextUUID: value 9FF3A19E-9347-44BE-9999-3527693EBD42
+Aug 17 15:19:23.685517 KuDroidShell(AudioSession)[24084] <Debug>: AVAudioSessionCallbackDispatcher.mm:186   pingClient called for session 0x685e9
+Aug 17 15:19:23.685602 KuDroidShell(AudioSession)[24084] <Debug>:             SessionMap.mm:118   There are now 1 sessions in the map.
+Aug 17 15:19:23.734155 KuDroidShell(AudioSession)[24084] <Notice>:     AVAudioSession_iOS.mm:1928  Activated session 0x685e9
+Aug 17 15:19:23.734332 KuDroidShell(AudioSession)[24084] <Info>: AVAudioSessionClient_Common.mm:153   Handling deferred message, sessionID = 0x685e9, notificationName = AudioCategoryDidChange
+Aug 17 15:19:23.734391 KuDroidShell(CoreFoundation)[24084] <Debug>: Bundle: <private>, key: More, value: More, table: Localizable, localizationNames: (null), result: More
+Aug 17 15:19:23.734443 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIOverrideUISplitViewControllerInTabToCompact in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.734496 KuDroidShell(CoreFoundation)[24084] <Debug>: Bundle: <private>, key: More, value: More, table: Localizable, localizationNames: (null), result: More
+Aug 17 15:19:23.744546 KuDroidShell(AudioSession)[24084] <Debug>: AVAudioSessionCallbackDispatcher.mm:186   pingClient called for session 0x685e9
+Aug 17 15:19:23.749322 KuDroidShell(AudioSession)[24084] <Debug>:             SessionMap.mm:118   There are now 1 sessions in the map.
+Aug 17 15:19:23.750431 KuDroidShell(AudioSession)[24084] <Info>: AVAudioSessionClient_Common.mm:153   Handling deferred message, sessionID = 0x685e9, notificationName = PickableRoutesDidChange
+Aug 17 15:19:23.751166 KuDroidShell(CoreFoundation)[24084] <Debug>: Bundle: <private>, key: More, value: More, table: Localizable, localizationNames: (null), result: More
+Aug 17 15:19:23.751255 KuDroidShell(AudioSession)[24084] <Debug>: AVAudioSessionCachingUtils.mm:178   Removed Cache for property SelectableInputs
+Aug 17 15:19:23.751467 KuDroidShell(AudioSession)[24084] <Info>:     AVAudioSession_iOS.mm:4740  Notifying listeners that pickable routes changed
+Aug 17 15:19:23.751953 KuDroidShell(CoreFoundation)[24084] <Debug>: dyld image path for pointer 0x1b9052fe8 is /System/Library/PrivateFrameworks/CoreMaterial.framework/CoreMaterial
+Aug 17 15:19:23.752101 KuDroidShell(CoreFoundation)[24084] <Debug>: dlfcn check load bundle CFBundle 0x103957100 </System/Library/PrivateFrameworks/CoreMaterial.framework> (not loaded), dlopen of /System/Library/PrivateFrameworks/CoreMaterial.framework/CoreMaterial mode 0x115 getting handle 0x330405409
+Aug 17 15:19:23.752284 KuDroidShell(CoreFoundation)[24084] <Debug>: Language lookup at <private>
+	Localizations : [English]
+	Dev language  : English
+	User prefs    : [vi-VN]
+	Main bundle   : [en]
+	Allow mixed   : 0 
+	Result        : [English]
+Aug 17 15:19:23.752502 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       :  type: materialrecipe
+	Result        : knowledgePlattersDark.materialrecipe -- file:///System/Library/PrivateFrameworks/CoreMaterial.framework/, modulesBackground.materialrecipe -- file:///System/Library/PrivateFrameworks/CoreMaterial.framework/, platters.materialrecipe -- file:///System/Library/PrivateFrameworks/CoreMaterial.framework/, modules.materialrecipe -- file:///System/Library/PrivateFrameworks/CoreMaterial.framework/, platformContentGlass.materialrecipe -- file:///System/Library/PrivateFrameworks/CoreMaterial.framework/, knowledgeBackground.materialrecipe -- file:///System/Library/PrivateFrameworks/CoreMaterial.framework/, platformContentThinDark.materialrecipe -- file:///System/Library/PrivateFrameworks/CoreMaterial.framework/, platformContentUltraThinLight.materialrecipe -- file:///System/Library/PrivateFrameworks/CoreMaterial.framework/, platformContentGlassDarker.materialrecipe -- file:///System/Library/PrivateFrameworks/CoreMaterial.framework/, knowledgeBackgroundDark.materialrecipe -- file<…>
+Aug 17 15:19:23.752797 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       :  type: descendantrecipe
+	Result        : platformContentThickLightShadowed.descendantrecipe -- file:///System/Library/PrivateFrameworks/CoreMaterial.framework/, modulesSheer.descendantrecipe -- file:///System/Library/PrivateFrameworks/CoreMaterial.framework/, modulesBackgroundSheer.descendantrecipe -- file:///System/Library/PrivateFrameworks/CoreMaterial.framework/, platformChromeDarkReduceTransparencyLayer1.descendantrecipe -- file:///System/Library/PrivateFrameworks/CoreMaterial.framework/,
+Aug 17 15:19:23.754034 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : platformChromeDark type: descendantrecipe
+	Result        : None
+Aug 17 15:19:23.754504 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : platformChromeDark type: materialrecipe
+	Result        : file:///System/Library/PrivateFrameworks/CoreMaterial.framework/platformChromeDark.materialrecipe
+Aug 17 15:19:23.756891 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : platformChromeLight type: descendantrecipe
+	Result        : None
+Aug 17 15:19:23.757846 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : platformChromeLight type: materialrecipe
+	Result        : file:///System/Library/PrivateFrameworks/CoreMaterial.framework/platformChromeLight.materialrecipe
+Aug 17 15:19:23.758745 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : platformChromeFillLight type: descendantstyleset
+	Result        : file:///System/Library/PrivateFrameworks/CoreMaterial.framework/platformChromeFillLight.descendantstyleset
+Aug 17 15:19:23.759301 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : platformFillLight type: descendantstyleset
+	Result        : None
+Aug 17 15:19:23.759569 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : platformFillLight type: visualstyleset
+	Result        : file:///System/Library/PrivateFrameworks/CoreMaterial.framework/platformFillLight.visualstyleset
+Aug 17 15:19:23.759732 KuDroidShell(CoreFoundation)[24084] <Debug>: looked up value <private> for key AppleLanguages in CFPrefsPlistSource<0x102db5870> (Domain: kCFPreferencesAnyApplication, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No) via CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.759787 KuDroidShell(CoreFoundation)[24084] <Debug>: looked up value <private> for key AppleLanguages in CFPrefsPlistSource<0x102db5870> (Domain: kCFPreferencesAnyApplication, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No) via CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.760739 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key __NSTextAttachmentAlwaysUsesAttachmentView in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.769549 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : InfoPlist type: strings
+	Result        : None
+Aug 17 15:19:23.769598 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : InfoPlist type: stringsdict
+	Result        : None
+Aug 17 15:19:23.770914 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key _UISplitViewControllerUseSlidingBars in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.771016 KuDroidShell(UIKitCore)[24084] <Notice>: Warning: no visual style classes have been registered at all.
+Aug 17 15:19:23.772209 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key ForceSupportTVSidebar in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.773251 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key FloatingTabBarExtendBarHeight in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.773563 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UILayoutAnchorsDeferTrippingWantsAutolayoutFlagUntilUsed in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.773894 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSConstraintBasedLayoutAriadneTracepoints in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.773980 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSConstraintBasedLayoutTrackAllocation in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.777787 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIForceFluidParallaxEnabled in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.777844 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIForceFluidParallaxEnabled in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.778065 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSConstraintBasedLayoutDebug in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.778134 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSConstraintBasedLayoutAllowUnoptimizedReads in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.778245 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIViewControllerContainersShouldForwardContentScrollView in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.778541 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : platformChromeFillDark type: descendantstyleset
+	Result        : file:///System/Library/PrivateFrameworks/CoreMaterial.framework/platformChromeFillDark.descendantstyleset
+Aug 17 15:19:23.778763 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : platformFillDark type: descendantstyleset
+	Result        : None
+Aug 17 15:19:23.778803 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : platformFillDark type: visualstyleset
+	Result        : file:///System/Library/PrivateFrameworks/CoreMaterial.framework/platformFillDark.visualstyleset
+Aug 17 15:19:23.781915 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSConstraintBasedLayoutDebugEngineConsistency in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.782157 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSConstraintBasedLayoutVariableChangeTransactions in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.782216 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSConstraintBasedLayoutDeferOptimization in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.782395 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key ForceLargeTitlesOn in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.782448 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSConstraintBasedLayoutLogPivotCounts in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.782502 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSConstraintBasedLayoutTrackDirtyObservables in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.782734 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NavigationBarBackButtonShowsContextMenu in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.782819 KuDroidShell(CoreFoundation)[24084] <Debug>: Lazy cache miss for bundle: <private> key: CONTEXT_MENU_LOADING table: Localizable
+Aug 17 15:19:23.783283 KuDroidShell(CoreFoundation)[24084] <Debug>: Bundle: <private>, key: CONTEXT_MENU_LOADING, value: Loading…, table: Localizable, localizationNames: (null), result: Loading…
+Aug 17 15:19:23.783480 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UseDesktopNavigationBar in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.784284 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIStackViewHorizontalBaselineAlignmentAdjustsForAbsentBaselineInformation in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.784413 KuDroidShell(CoreFoundation)[24084] <Debug>: Bundle: <private>, key: CONTEXT_MENU_LOADING, value: Loading…, table: Localizable, localizationNames: (null), result: Loading…
+Aug 17 15:19:23.784480 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UILayoutConstraintDebuggingMaximumLayoutDescriptionLength in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.784561 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSLanguageAwareAdjustmentRatio in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.784655 KuDroidShell(CoreFoundation)[24084] <Debug>: Lazy cache miss for bundle: <private> key: Back table: Localizable
+Aug 17 15:19:23.784702 KuDroidShell(CoreFoundation)[24084] <Debug>: Bundle: <private>, key: Back, value: Back, table: Localizable, localizationNames: (null), result: Back
+Aug 17 15:19:23.785344 KuDroidShell(CoreFoundation)[24084] <Debug>: Bundle: <private>, key: CONTEXT_MENU_LOADING, value: Loading…, table: Localizable, localizationNames: (null), result: Loading…
+Aug 17 15:19:23.785427 KuDroidShell(CoreFoundation)[24084] <Debug>: Bundle: <private>, key: CONTEXT_MENU_LOADING, value: Loading…, table: Localizable, localizationNames: (null), result: Loading…
+Aug 17 15:19:23.785611 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UISplitViewControllerForceAutoHidesColumns in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.785654 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UISplitViewControllerAllowAutoHidesColumns in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.786517 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIHostingViewDebugOptions in CFPrefsSearchListSource<0x103a2ca00> (Domain: com.apple.SwiftUI, Container: (null))
+Aug 17 15:19:23.786574 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIHostingViewDebugOptions in CFPrefsSearchListSource<0x103a2ca00> (Domain: com.apple.SwiftUI, Container: (null))
+Aug 17 15:19:23.787043 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogUINavigationController in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.787243 KuDroidShell(CoreFoundation)[24084] <Debug>: Bundle: <private>, key: CONTEXT_MENU_LOADING, value: Loading…, table: Localizable, localizationNames: (null), result: Loading…
+Aug 17 15:19:23.794674 KuDroidShell(CoreFoundation)[24084] <Debug>: Bundle: <private>, key: <private>, value: (null), table: Localizable, localizationNames: (null), result: <same as key>
+Aug 17 15:19:23.798411 KuDroidShell(CoreFoundation)[24084] <Debug>: Bundle: <private>, key: <private>, value: (null), table: Localizable, localizationNames: (null), result: <same as key>
+Aug 17 15:19:23.801737 KuDroidShell(CoreFoundation)[24084] <Debug>: Bundle: <private>, key: <private>, value: (null), table: Localizable, localizationNames: (null), result: <same as key>
+Aug 17 15:19:23.806010 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key RBAllowDebuggingDefaults in CFPrefsPlistSource<0x102db5870> (Domain: kCFPreferencesAnyApplication, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.806447 KuDroidShell(CoreFoundation)[24084] <Debug>: Bundle: <private>, key: CONTEXT_MENU_LOADING, value: Loading…, table: Localizable, localizationNames: (null), result: Loading…
+Aug 17 15:19:23.806668 KuDroidShell(CoreFoundation)[24084] <Debug>: Bundle: <private>, key: CONTEXT_MENU_LOADING, value: Loading…, table: Localizable, localizationNames: (null), result: Loading…
+Aug 17 15:19:23.806770 KuDroidShell(CoreFoundation)[24084] <Debug>: Bundle: <private>, key: CONTEXT_MENU_LOADING, value: Loading…, table: Localizable, localizationNames: (null), result: Loading…
+Aug 17 15:19:23.807245 KuDroidShell(CoreFoundation)[24084] <Debug>: Bundle: <private>, key: CONTEXT_MENU_LOADING, value: Loading…, table: Localizable, localizationNames: (null), result: Loading…
+Aug 17 15:19:23.807835 KuDroidShell(CoreFoundation)[24084] <Debug>: Bundle: <private>, key: CONTEXT_MENU_LOADING, value: Loading…, table: Localizable, localizationNames: (null), result: Loading…
+Aug 17 15:19:23.821466 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key ImageIO_TrustSystemPathURLs in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.821554 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key ImageIO_TrustSystemPathURLs in CFPrefsPlistSource<0x103872700> (Domain: com.apple.ImageIO, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.827238 KuDroidShell(ImageIO)[24084] <Error>: createImageAtIndex:1974: *** ERROR: createImageAtIndex 3 could not find plugin for image source [37178 bytes] 6B 77 61 69 01 00 00 00... 'kwai....'
+Aug 17 15:19:23.827389 KuDroidShell(ImageIO)[24084] <Error>: createImageAtIndex:2103: *** ERROR: createImageAtIndex[0] - 'n/a ' - failed to create image [-62]
+Aug 17 15:19:23.827455 KuDroidShell(ImageIO)[24084] <Error>: CGImageSourceCreateImageAtIndex:5091: *** ERROR: CGImageSourceCreateImageAtIndex[0] - 'n/a ' - failed to create image [-62]
+Aug 17 15:19:23.836652 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : InfoPlist type: strings
+	Result        : None
+Aug 17 15:19:23.836756 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : InfoPlist type: stringsdict
+	Result        : None
+Aug 17 15:19:23.842500 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIScrollViewForceConvertSafeAreaToContentInsetPreference in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.846213 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogCollectionView in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.846541 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogUICollectionViewCellLifeCycle in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.846628 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogUICollectionView in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.852138 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogUICollectionViewAttrMap in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.855134 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogUICVGrouping in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.860451 KuDroidShell(CoreFoundation)[24084] <Debug>: Bundle: <private>, key: <private>, value: (null), table: Localizable, localizationNames: (null), result: <same as key>
+Aug 17 15:19:23.861376 KuDroidShell(CoreFoundation)[24084] <Debug>: Bundle: <private>, key: <private>, value: (null), table: Localizable, localizationNames: (null), result: <same as key>
+Aug 17 15:19:23.861953 KuDroidShell(CoreFoundation)[24084] <Debug>: setting new value <private> for key <private> in CFPrefsSource<0x102db5800> (Domain: Volatile, User: , ByHost: No, Container: , Contents Need Refresh: No)
+Aug 17 15:19:23.862014 KuDroidShell(CoreFoundation)[24084] <Debug>: setting new value <private> for key <private> in CFPrefsSource<0x102db5800> (Domain: Volatile, User: , ByHost: No, Container: , Contents Need Refresh: No)
+Aug 17 15:19:23.862076 KuDroidShell(CoreFoundation)[24084] <Debug>: setting new value <private> for key <private> in CFPrefsSource<0x102db5800> (Domain: Volatile, User: , ByHost: No, Container: , Contents Need Refresh: No)
+Aug 17 15:19:23.862207 KuDroidShell(CoreFoundation)[24084] <Debug>: looked up value <private> for key NSUsesTextStylesForLineBreaks in CFPrefsSource<0x102db5800> (Domain: Volatile, User: , ByHost: No, Container: , Contents Need Refresh: No) via CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.862278 KuDroidShell(CoreFoundation)[24084] <Debug>: looked up value <private> for key AppleLanguages in CFPrefsPlistSource<0x102db5870> (Domain: kCFPreferencesAnyApplication, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No) via CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.862320 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSUsesTextStylesForLineBreaksInAllLanguages in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.862376 KuDroidShell(CoreFoundation)[24084] <Debug>: looked up value <private> for key NSHyphenatesAsLastResort in CFPrefsSource<0x102db5800> (Domain: Volatile, User: , ByHost: No, Container: , Contents Need Refresh: No) via CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.862449 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSForceHangulWordBreakPriority in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.862679 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key AppleTextBreakLocale in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.865084 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key NSCoreTypesetterDebugBadgesEnabled in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.865940 KuDroidShell(CoreFoundation)[24084] <Debug>: Bundle: <private>, key: <private>, value: (null), table: Localizable, localizationNames: (null), result: <same as key>
+Aug 17 15:19:23.873785 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogUICollectionLayout in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.891557 KuDroidShell(SensorKitHelper)[24084] <Info>: Media events collection is false for <private>
+Aug 17 15:19:23.900433 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key CAEnableDeepFramebuffer in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.900619 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIHostingViewDebugOptions in CFPrefsSearchListSource<0x103a2ca00> (Domain: com.apple.SwiftUI, Container: (null))
+Aug 17 15:19:23.900723 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIHostingViewDebugOptions in CFPrefsSearchListSource<0x103a2ca00> (Domain: com.apple.SwiftUI, Container: (null))
+Aug 17 15:19:23.900780 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIHostingViewDebugOptions in CFPrefsSearchListSource<0x103a2ca00> (Domain: com.apple.SwiftUI, Container: (null))
+Aug 17 15:19:23.901295 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIHostingViewDebugOptions in CFPrefsSearchListSource<0x103a2ca00> (Domain: com.apple.SwiftUI, Container: (null))
+Aug 17 15:19:23.901362 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIHostingViewDebugOptions in CFPrefsSearchListSource<0x103a2ca00> (Domain: com.apple.SwiftUI, Container: (null))
+Aug 17 15:19:23.901483 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIHostingViewDebugOptions in CFPrefsSearchListSource<0x103a2ca00> (Domain: com.apple.SwiftUI, Container: (null))
+Aug 17 15:19:23.901552 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIHostingViewDebugOptions in CFPrefsSearchListSource<0x103a2ca00> (Domain: com.apple.SwiftUI, Container: (null))
+Aug 17 15:19:23.901605 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIHostingViewDebugOptions in CFPrefsSearchListSource<0x103a2ca00> (Domain: com.apple.SwiftUI, Container: (null))
+Aug 17 15:19:23.901647 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIHostingViewDebugOptions in CFPrefsSearchListSource<0x103a2ca00> (Domain: com.apple.SwiftUI, Container: (null))
+Aug 17 15:19:23.901691 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIHostingViewDebugOptions in CFPrefsSearchListSource<0x103a2ca00> (Domain: com.apple.SwiftUI, Container: (null))
+Aug 17 15:19:23.901830 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UIHostingViewDebugOptions in CFPrefsSearchListSource<0x103a2ca00> (Domain: com.apple.SwiftUI, Container: (null))
+Aug 17 15:19:23.903080 KuDroidShell(BaseBoard)[24084] <Debug>: [BSBlockSentinel:<private>] signaled! 1 of 1
+Aug 17 15:19:23.903210 KuDroidShell(BaseBoard)[24084] <Debug>: [BSBlockSentinel:<private>] dealloc
+Aug 17 15:19:23.903920 KuDroidShell(Network)[24084] <Notice>: Create activity from XPC object <nw_activity 50:1 [BA79B7DA-D54B-4CE7-B008-1853457DD0A5] (reporting strategy default)>
+Aug 17 15:19:23.903987 KuDroidShell(Network)[24084] <Notice>: Create activity from XPC object <nw_activity 50:2 [0FE7527A-58F8-4BD8-97AE-937B732E877D] (reporting strategy default)>
+Aug 17 15:19:23.904045 KuDroidShell(Network)[24084] <Notice>: Set activity <nw_activity 50:1 [BA79B7DA-D54B-4CE7-B008-1853457DD0A5] (reporting strategy default)> as the global parent
+Aug 17 15:19:23.904331 KuDroidShell(AggregateDictionary)[24084] <Notice>: AggregateDictionary is deprecated and has been removed. Please migrate to Core Analytics.
+Aug 17 15:19:23.904614 KuDroidShell(UIKitCore)[24084] <Notice>: Ending background task with UIBackgroundTaskIdentifier: 1
+Aug 17 15:19:23.904656 KuDroidShell(UIKitCore)[24084] <Notice>: Ending task with identifier 1 and description: <private>, _expireHandler: (null)
+Aug 17 15:19:23.904713 KuDroidShell(UIKitCore)[24084] <Notice>: Decrementing reference count for assertion <private> (used by background task with identifier 1: <private>)
+Aug 17 15:19:23.905638 KuDroidShell(UIKitCore)[24084] <Notice>: Target list changed: <CADisplay:LCD primary>
+Aug 17 15:19:23.906179 KuDroidShell(UIKitCore)[24084] <Notice>: Not push traits update to screen for new style 1, <UIWindowScene: 0x102dc6990> (74A18C79-D240-461C-B416-558A09494B51)
+Aug 17 15:19:23.909212 KuDroidShell(UIKitCore)[24084] <Notice>: sceneOfRecord: sceneID: sceneID:com.kudroid.shell.5L5HW6K48W-default  persistentID: 74A18C79-D240-461C-B416-558A09494B51
+Aug 17 15:19:23.911448 KuDroidShell(UIKitCore)[24084] <Notice>: Deactivation reason removed: 12; deactivation reasons: 4128 -> 32; animating application lifecycle event: 1
+Aug 17 15:19:23.911854 KuDroidShell(UIKitCore)[24084] <Notice>: Send setDeactivating: N (-DeactivationReason:SuspendedEventsOnly)
+Aug 17 15:19:23.912205 KuDroidShell(RunningBoardServices)[24084] <Debug>: PERF: [app<com.kudroid.shell.5L5HW6K48W(CEED873D-45D3-44EE-9DFC-0A3C4355E35C)>:24084] Received message from runningboardd: async_didChangeInheritances:completion:
+Aug 17 15:19:23.914354 KuDroidShell(RunningBoardServices)[24084] <Info>: didChangeInheritances
+Aug 17 15:19:23.914399 KuDroidShell(UIKitCore)[24084] <Notice>: Deactivation reason removed: 5; deactivation reasons: 32 -> 0; animating application lifecycle event: 0
+Aug 17 15:19:23.914481 KuDroidShell(RunningBoardServices)[24084] <Debug>: didChangeInheritances: <RBSInheritanceChangeSet| gained:{(
+    <RBSInheritance| environment:UIScene:com.apple.frontboard.systemappservices/FBSceneManager:sceneID%3Acom.kudroid.shell.5L5HW6K48W-default name:com.apple.frontboard.visibility origID:33-34-220140 payload 1240204373381891226>
+)} lost:(null)>
+Aug 17 15:19:23.914533 KuDroidShell(HangTracer)[24084] <Debug>: Watchdog monitoring: starting monitor
+Aug 17 15:19:23.914667 KuDroidShell(RunningBoardServices)[24084] <Notice>: Updating configuration of monitor M24084-1
+Aug 17 15:19:23.914710 KuDroidShell(RunningBoardServices)[24084] <Debug>: Successfully synced configuration for monitor M24084-1
+Aug 17 15:19:23.914752 KuDroidShell(RunningBoardServices)[24084] <Debug>: PERF: [app<com.kudroid.shell.5L5HW6K48W(CEED873D-45D3-44EE-9DFC-0A3C4355E35C)>:24084] Received message from runningboardd: async_observedProcessStatesDidChange:completion:
+Aug 17 15:19:23.914798 KuDroidShell(libxpc.dylib)[24084] <Notice>: [0x103888a00] activating connection: mach=true listener=false peer=false name=com.apple.hangtracermonitor
+Aug 17 15:19:23.914828 KuDroidShell(RunningBoardServices)[24084] <Info>: observedProcessStatesDidChange
+Aug 17 15:19:23.914996 KuDroidShell(HangTracer)[24084] <Info>: HTConnectToHTMonitor: htMonitor Connection <xpc object>
+Aug 17 15:19:23.915231 KuDroidShell(RunningBoardServices)[24084] <Debug>: Decoded RBSProcessHandle with IPC ID 1a961b8f00005e14
+Aug 17 15:19:23.915354 KuDroidShell(HangTracer)[24084] <Notice>: Skip setting user action callback for 3rd party apps
+Aug 17 15:19:23.915445 KuDroidShell(RunningBoardServices)[24084] <Notice>: Creating side-channel connection to com.apple.runningboard
+Aug 17 15:19:23.915864 KuDroidShell(HangTracer)[24084] <Info>: HTConnectToHTMonitor: htMonitor message is sent
+Aug 17 15:19:23.915948 KuDroidShell(libxpc.dylib)[24084] <Notice>: [0x103889c00] activating connection: mach=true listener=false peer=false name=com.apple.analyticsd
+Aug 17 15:19:23.916021 KuDroidShell(libxpc.dylib)[24084] <Notice>: [0x103889b00] activating connection: mach=true listener=false peer=false name=com.apple.runningboard
+Aug 17 15:19:23.916252 KuDroidShell(libxpc.dylib)[24084] <Notice>: [0x103888a00] invalidated because the current process cancelled the connection by calling xpc_connection_cancel()
+Aug 17 15:19:23.916306 KuDroidShell(CoreAnalytics)[24084] <Info>: Daemon status changed from 0 to 1
+Aug 17 15:19:23.923679 KuDroidShell(HangTracer)[24084] <Info>: HTPrefs initialization
+Aug 17 15:19:23.926012 KuDroidShell(CoreFoundation)[24084] <Info>: Loading Preferences From User Session CFPrefsD
+Aug 17 15:19:23.926287 KuDroidShell(BacklightServices)[24084] <Debug>: 0x103a04c90 environment updated:sceneID:com.kudroid.shell.5L5HW6K48W-default
+  delta:{ visualState:0 date:0 active:0 seed:0 }
+  diff:<FBSSceneSettingsDiff: 0x103881880; UIApplicationSceneSettings> {
+    subclassSettings = <BSSettingsDiff: 0x103a044e0> {
+        deactivationReasons = ;
+    };
+}
+  new:(null) (null)
+  old:(null) (null)
+  new:(null)
+Aug 17 15:19:23.926399 KuDroidShell(BaseBoard)[24084] <Debug>: [BSBlockSentinel:<private>] signaled! 1 of 2
+Aug 17 15:19:23.926453 KuDroidShell(CoreFoundation)[24084] <Debug>: CFPrefsPlistSource<0x10f60ee80> (Domain: com.apple.da, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No) loaded: a new base plist and no additional changes from the base plist
+Aug 17 15:19:23.926566 KuDroidShell(CoreFoundation)[24084] <Info>: Updating Key-Value Observers Of Preferences
+Aug 17 15:19:23.926688 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key HTEPL.HangTracerEnableCustomerMode in CFPrefsPlistSource<0x10f60ee80> (Domain: com.apple.da, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.926800 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key HTThirdPartyDevSupport.HangTracerEnableCustomerMode in CFPrefsPlistSource<0x10f60ee80> (Domain: com.apple.da, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.926930 KuDroidShell(RunningBoardServices)[24084] <Notice>: Hit the server for a process handle 1a961b8f00005e14 that resolved to: [app<com.kudroid.shell.5L5HW6K48W(CEED873D-45D3-44EE-9DFC-0A3C4355E35C)>:24084]
+Aug 17 15:19:23.927039 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key PLTasking.HangTracerEnableCustomerMode in CFPrefsPlistSource<0x10f60ee80> (Domain: com.apple.da, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.927094 KuDroidShell(RunningBoardServices)[24084] <Notice>: Received state update for 24084 (app<com.kudroid.shell.5L5HW6K48W(CEED873D-45D3-44EE-9DFC-0A3C4355E35C)>, unknown-NotVisible
+Aug 17 15:19:23.927360 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key HangTracerEnableCustomerMode in CFPrefsPlistSource<0x10f60ee80> (Domain: com.apple.da, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.927562 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key PDSEHangTracer.HangTracerEnableCustomerMode in CFPrefsPlistSource<0x10f60ee80> (Domain: com.apple.da, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.927685 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key PDSEHTBadDay.HangTracerEnableCustomerMode in CFPrefsPlistSource<0x10f60ee80> (Domain: com.apple.da, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.927848 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key PDSEHTThirdParty.HangTracerEnableCustomerMode in CFPrefsPlistSource<0x10f60ee80> (Domain: com.apple.da, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.928443 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key PDSEWorkflowResponsiveness.HangTracerEnableCustomerMode in CFPrefsPlistSource<0x10f60ee80> (Domain: com.apple.da, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.928668 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key PDSEHTRateOnly.HangTracerEnableCustomerMode in CFPrefsPlistSource<0x10f60ee80> (Domain: com.apple.da, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.928844 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key PDSESentry.HangTracerEnableCustomerMode in CFPrefsPlistSource<0x10f60ee80> (Domain: com.apple.da, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.929037 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key PDSEAppLaunch.HangTracerEnableCustomerMode in CFPrefsPlistSource<0x10f60ee80> (Domain: com.apple.da, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.929656 KuDroidShell(HangTracer)[24084] <Debug>: HTPrefs: HangTracerEnableCustomerMode was not found in the com.apple.da domain, a profile, by EPL, by PowerLog Tasking domain, by HT Self Enablement or by HT Sentry Enablement
+Aug 17 15:19:23.929945 KuDroidShell(HangTracer)[24084] <Info>: HTPrefs: Refreshing preferences
+Aug 17 15:19:23.930248 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key HTEPL.HangTracerEnableCustomerMode in CFPrefsPlistSource<0x10f60ee80> (Domain: com.apple.da, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.930393 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key HTThirdPartyDevSupport.HangTracerEnableCustomerMode in CFPrefsPlistSource<0x10f60ee80> (Domain: com.apple.da, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.930498 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key PLTasking.HangTracerEnableCustomerMode in CFPrefsPlistSource<0x10f60ee80> (Domain: com.apple.da, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.930689 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key HangTracerEnableCustomerMode in CFPrefsPlistSource<0x10f60ee80> (Domain: com.apple.da, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.930874 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key PDSEHangTracer.HangTracerEnableCustomerMode in CFPrefsPlistSource<0x10f60ee80> (Domain: com.apple.da, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.930961 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key PDSEHTBadDay.HangTracerEnableCustomerMode in CFPrefsPlistSource<0x10f60ee80> (Domain: com.apple.da, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.931002 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key PDSEHTThirdParty.HangTracerEnableCustomerMode in CFPrefsPlistSource<0x10f60ee80> (Domain: com.apple.da, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.931333 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key PDSEWorkflowResponsiveness.HangTracerEnableCustomerMode in CFPrefsPlistSource<0x10f60ee80> (Domain: com.apple.da, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.931398 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key PDSEHTRateOnly.HangTracerEnableCustomerMode in CFPrefsPlistSource<0x10f60ee80> (Domain: com.apple.da, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.931460 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key PDSESentry.HangTracerEnableCustomerMode in CFPrefsPlistSource<0x10f60ee80> (Domain: com.apple.da, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.931531 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key PDSEAppLaunch.HangTracerEnableCustomerMode in CFPrefsPlistSource<0x10f60ee80> (Domain: com.apple.da, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.931585 KuDroidShell(HangTracer)[24084] <Debug>: HTPrefs: HangTracerEnableCustomerMode was not found in the com.apple.da domain, a profile, by EPL, by PowerLog Tasking domain, by HT Self Enablement or by HT Sentry Enablement
+Aug 17 15:19:23.931628 KuDroidShell(RunningBoardServices)[24084] <Debug>: PERF: [app<com.kudroid.shell.5L5HW6K48W(CEED873D-45D3-44EE-9DFC-0A3C4355E35C)>:24084] Received message from runningboardd: async_didChangeInheritances:completion:
+Aug 17 15:19:23.931673 KuDroidShell(HangTracer)[24084] <Debug>: Preparing prefInitList
+Aug 17 15:19:23.931712 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key HTEPL.HangTracerEnabled in CFPrefsPlistSource<0x10f60ee80> (Domain: com.apple.da, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.931757 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key HTThirdPartyDevSupport.HangTracerEnabled in CFPrefsPlistSource<0x10f60ee80> (Domain: com.apple.da, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.931840 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key PLTasking.HangTracerEnabled in CFPrefsPlistSource<0x10f60ee80> (Domain: com.apple.da, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.931962 KuDroidShell(RunningBoardServices)[24084] <Info>: didChangeInheritances
+Aug 17 15:19:23.932059 KuDroidShell(RunningBoardServices)[24084] <Debug>: didChangeInheritances: <RBSInheritanceChangeSet| gained:{(
+    <RBSInheritance| environment:UIScene:com.apple.frontboard.systemappservices/FBSceneManager:sceneID%3Acom.kudroid.shell.5L5HW6K48W-default name:com.apple.frontboard.visibility origID:33-34-220141 payload 371326265208948116>
+)} lost:(null)>
+Aug 17 15:19:23.932172 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key HangTracerEnabled in CFPrefsPlistSource<0x10f60ee80> (Domain: com.apple.da, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.932222 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key PDSEHangTracer.HangTracerEnabled in CFPrefsPlistSource<0x10f60ee80> (Domain: com.apple.da, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.932316 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key PDSEHTBadDay.HangTracerEnabled in CFPrefsPlistSource<0x10f60ee80> (Domain: com.apple.da, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.932532 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key PDSEHTThirdParty.HangTracerEnabled in CFPrefsPlistSource<0x10f60ee80> (Domain: com.apple.da, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.932693 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key PDSEWorkflowResponsiveness.HangTracerEnabled in CFPrefsPlistSource<0x10f60ee80> (Domain: com.apple.da, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.932898 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key PDSEHTRateOnly.HangTracerEnabled in CFPrefsPlistSource<0x10f60ee80> (Domain: com.apple.da, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.933107 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key PDSESentry.HangTracerEnabled in CFPrefsPlistSource<0x10f60ee80> (Domain: com.apple.da, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.933324 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key PDSEAppLaunch.HangTracerEnabled in CFPrefsPlistSource<0x10f60ee80> (Domain: com.apple.da, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:23.933531 KuDroidShell(HangTracer)[24084] <Debug>: HTPrefs: HangTracerEnabled was not found in the com.apple.da domain, a profile, by EPL, by PowerLog Tasking domain, by HT Self Enablement or by HT Sentry Enablement
+Aug 17 15:19:23.933703 KuDroidShell(HangTracer)[24084] <Debug>: HTPrefs: enablementPrefix: (null) -> (null)
+Aug 17 15:19:23.933849 KuDroidShell(HangTracer)[24084] <Info>: Posting notification com.apple.hangtracer.htprefs.refreshed
+Aug 17 15:19:23.934867 KuDroidShell(CoreFoundation)[24084] <Debug>: Bundle: <private>, key: More, value: More, table: Localizable, localizationNames: (null), result: More
+Aug 17 15:19:23.941421 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : InfoPlist type: strings
+	Result        : None
+Aug 17 15:19:23.941985 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : InfoPlist type: stringsdict
+	Result        : None
+Aug 17 15:19:23.947461 KuDroidShell(UserActivity)[24084] <Debug>: CREATING UAUserActivity/initWithTypeIdentifier:<private> type:UserActivity options=(null))
+Aug 17 15:19:23.947694 KuDroidShell(UserActivity)[24084] <Debug>: CREATING UAUserActivity/(com.apple.SwiftUI.stateRestoration-<private> UserActivity options=(null))
+Aug 17 15:19:23.947899 KuDroidShell(UserActivity)[24084] <Info>: initUAUserActivity:<private>-<private> C44A2DF4-BF36-49A7-A910-BA5CBD0F0FD8 UserActivity
+Aug 17 15:19:23.948079 KuDroidShell(UserActivity)[24084] <Info>: - UAUserActivity	v1.0
+Aug 17 15:19:23.948161 KuDroidShell(UserActivity)[24084] <Info>: C44A2DF4-BF36-49A7-A910-BA5CBD0F0FD8 CREATED <private>/(null)
+Aug 17 15:19:23.948243 KuDroidShell(UserActivity)[24084] <Debug>: setDirty:(C44A2DF4-BF36-49A7-A910-BA5CBD0F0FD8) => YES (is currently NO)
+Aug 17 15:19:23.948329 KuDroidShell(UserActivity)[24084] <Info>: C44A2DF4-BF36-49A7-A910-BA5CBD0F0FD8 SET-DIRTY	wasDirty=false force=false informServer=false informIndex=false
+Aug 17 15:19:23.948545 KuDroidShell(UserActivity)[24084] <Debug>: UAUserActivity:C44A2DF4-BF36-49A7-A910-BA5CBD0F0FD8/<private>, updating userInfoChangeCount to 1
+Aug 17 15:19:23.948656 KuDroidShell(UserActivity)[24084] <Info>: C44A2DF4-BF36-49A7-A910-BA5CBD0F0FD8 SET-USERINFO	count=1 false
+Aug 17 15:19:23.948743 KuDroidShell(UserActivity)[24084] <Debug>: setDirty:(C44A2DF4-BF36-49A7-A910-BA5CBD0F0FD8) => YES (is currently YES)
+Aug 17 15:19:23.948862 KuDroidShell(UserActivity)[24084] <Info>: C44A2DF4-BF36-49A7-A910-BA5CBD0F0FD8 SET-DIRTY	wasDirty=true force=false informServer=false informIndex=false
+Aug 17 15:19:23.950272 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : InfoPlist type: strings
+	Result        : None
+Aug 17 15:19:23.950402 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : InfoPlist type: stringsdict
+	Result        : None
+Aug 17 15:19:23.960503 KuDroidShell(HangTracer)[24084] <Debug>: Watchdog monitoring: watchdog enabled, no assertion active
+Aug 17 15:19:23.960585 KuDroidShell(RunningBoardServices)[24084] <Info>: Update delivered for [app<com.kudroid.shell.5L5HW6K48W(CEED873D-45D3-44EE-9DFC-0A3C4355E35C)>:24084] with taskState 0
+Aug 17 15:19:23.960920 KuDroidShell(CoreFoundation)[24084] <Debug>: Bundle: <private>, key: More, value: More, table: Localizable, localizationNames: (null), result: More
+Aug 17 15:19:23.989292 KuDroidShell(BaseBoard)[24084] <Debug>: [BSBlockSentinel:<private>] signaled! 2 of 2
+Aug 17 15:19:23.989334 KuDroidShell(BaseBoard)[24084] <Debug>: [BSBlockSentinel:<private>] dealloc
+Aug 17 15:19:23.992164 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogUpdateCycle.Stalls in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.992778 KuDroidShell(UIKitCore)[24084] <Notice>: startConnection
+Aug 17 15:19:23.993070 KuDroidShell(BackBoardServices)[24084] <Notice>: policyStatus:<BKSHIDEventDeliveryPolicyObserver: 0x10398caf0; token: com.apple.frontboard.systemappservices/FBSceneManager:sceneID%3Acom.kudroid.shell.5L5HW6K48W-default; status: ancestor> was:none
+Aug 17 15:19:23.993344 KuDroidShell(BackBoardServices)[24084] <Notice>: observerPolicyDidChange: 0x10398caf0 -> <_UIKeyWindowSceneObserver: 0x103a04f90>
+Aug 17 15:19:23.993592 KuDroidShell(libxpc.dylib)[24084] <Notice>: [0x10f86f200] activating connection: mach=true listener=false peer=false name=com.apple.UIKit.KeyboardManagement.hosted
+Aug 17 15:19:23.994103 KuDroidShell(UIKitCore)[24084] <Notice>: Scene target of keyboard event deferring environment did change: 1; scene: UIWindowScene: 0x102dc6990; scene identity: com.apple.frontboard.systemappservices/FBSceneManager:sceneID%3Acom.kudroid.shell.5L5HW6K48W-default
+Aug 17 15:19:23.994274 KuDroidShell(UIKitCore)[24084] <Notice>: [0x1039d8460] Scene target of event deferring environments did update: scene: 0x102dc6990; current systemShellManagesKeyboardFocus: 1; systemShellManagesKeyboardFocusForScene: 1; eligibleForRecordRemoval: 1;
+Aug 17 15:19:23.994438 KuDroidShell(UIKitCore)[24084] <Notice>: Scene became target of keyboard event deferring environment: UIWindowScene: 0x102dc6990; scene identity: com.apple.frontboard.systemappservices/FBSceneManager:sceneID%3Acom.kudroid.shell.5L5HW6K48W-default
+Aug 17 15:19:23.994556 KuDroidShell(UIKitCore)[24084] <Notice>: Stack[KeyWindow] 0x103a056b0: Migrate scenes from LastOneWins -> SystemShellManaged
+Aug 17 15:19:23.994679 KuDroidShell(UIKitCore)[24084] <Notice>: Setting default evaluation strategy for UIUserInterfaceIdiomPhone to SystemShellManaged
+Aug 17 15:19:23.994721 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogFirstResponderRestoration in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:23.994762 KuDroidShell(UIKitCore)[24084] <Notice>: sceneOfRecord: sceneID: sceneID:com.kudroid.shell.5L5HW6K48W-default  persistentID: 74A18C79-D240-461C-B416-558A09494B51
+Aug 17 15:19:23.995513 KuDroidShell(BacklightServices)[24084] <Debug>: 0x103a04c90 environment updated:sceneID:com.kudroid.shell.5L5HW6K48W-default
+  delta:{ visualState:0 date:0 active:0 seed:0 }
+  diff:<FBSSceneSettingsDiff: 0x10f66f940; UIApplicationSceneSettings> {
+    subclassSettings = <BSSettingsDiff: 0x10f8647b0> {
+        scenePresenterRenderIdentifierForSnapshotting = 65b2adf1eb55b6fd;
+        hostContextIdentifierForSnapshotting = 2c25c7e7;
+    };
+}
+  new:(null) (null)
+  old:(null) (null)
+  new:(null)
+Aug 17 15:19:23.995615 KuDroidShell(BaseBoard)[24084] <Debug>: [BSBlockSentinel:<private>] signaled! 1 of 2
+Aug 17 15:19:23.995680 KuDroidShell(UIKitCore)[24084] <Notice>: sceneOfRecord: sceneID: sceneID:com.kudroid.shell.5L5HW6K48W-default  persistentID: 74A18C79-D240-461C-B416-558A09494B51
+Aug 17 15:19:23.995725 KuDroidShell(BacklightServices)[24084] <Debug>: 0x103a04c90 environment updated:sceneID:com.kudroid.shell.5L5HW6K48W-default
+  delta:{ visualState:0 date:0 active:0 seed:0 }
+  diff:<FBSSceneSettingsDiff: 0x10f66fb80; UIApplicationSceneSettings> {
+    settings = <BSKeyedSettingsDiff: 0x10f865110> {
+        _UISceneRenderingEnvironmentSettings = <BSKeyedSettingsDiff: 0x10f8651a0> {
+            systemDisplayIdentifier = 64B63E7F-CFFD-492D-8B4D-88DAED30AECF;
+        };
+        _UISystemShellSceneHostingEnvironmentSettings = <BSKeyedSettingsDiff: 0x10f865200> {
+            systemShellHostingSpaceIdentifier = SB-display-<embedded>;
+        };
+    };
+}
+  new:(null) (null)
+  old:(null) (null)
+  new:(null)
+Aug 17 15:19:23.995869 KuDroidShell(BaseBoard)[24084] <Debug>: [BSBlockSentinel:<private>] signaled! 1 of 2
+Aug 17 15:19:23.996251 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key EnhancedTextLegibilityEnabled in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.996345 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read: domain = com.kudroid.shell.5L5HW6K48W, preference = EnhancedTextLegibilityEnabled, appID = com.kudroid.shell.5L5HW6K48W result = (null) (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:23.996481 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key DarkenSystemColors in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.996535 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read: domain = com.kudroid.shell.5L5HW6K48W, preference = DarkenSystemColors, appID = com.kudroid.shell.5L5HW6K48W result = (null) (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:23.996627 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key InvertColorsEnabled in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:23.996708 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read: domain = com.kudroid.shell.5L5HW6K48W, preference = InvertColorsEnabled, appID = com.kudroid.shell.5L5HW6K48W result = (null) (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:23.996838 KuDroidShell(UIKitCore)[24084] <Notice>: sceneOfRecord: sceneID: sceneID:com.kudroid.shell.5L5HW6K48W-default  persistentID: 74A18C79-D240-461C-B416-558A09494B51
+Aug 17 15:19:23.996885 KuDroidShell(BacklightServices)[24084] <Debug>: 0x103a04c90 environment updated:sceneID:com.kudroid.shell.5L5HW6K48W-default
+  delta:{ visualState:0 date:0 active:0 seed:0 }
+  diff:<FBSSceneSettingsDiff: 0x103881880; UIApplicationSceneSettings> {
+    subclassSettings = <BSSettingsDiff: 0x10f865a10> {
+        targetOfEventDeferringEnvironments = keyboardFocus;
+    };
+}
+  new:(null) (null)
+  old:(null) (null)
+  new:(null)
+Aug 17 15:19:23.996928 KuDroidShell(BaseBoard)[24084] <Debug>: [BSBlockSentinel:<private>] signaled! 1 of 2
+Aug 17 15:19:23.997130 KuDroidShell(BaseBoard)[24084] <Debug>: [BSBlockSentinel:<private>] signaled! 2 of 2
+Aug 17 15:19:23.997392 KuDroidShell(UIKitCore)[24084] <Notice>: handleKeyboardChange: set currentKeyboard:N (wasKeyboard:N)
+Aug 17 15:19:23.997444 KuDroidShell(BaseBoard)[24084] <Debug>: [BSBlockSentinel:<private>] dealloc
+Aug 17 15:19:23.997496 KuDroidShell(UIKitCore)[24084] <Notice>: forceReloadInputViews
+Aug 17 15:19:23.998086 KuDroidShell(BaseBoard)[24084] <Debug>: [BSBlockSentinel:<private>] signaled! 2 of 2
+Aug 17 15:19:23.998192 KuDroidShell(UIKitCore)[24084] <Notice>: Reloading input views for: <(null): 0x0; > force: 1
+Aug 17 15:19:23.998319 KuDroidShell(BaseBoard)[24084] <Debug>: [BSBlockSentinel:<private>] dealloc
+Aug 17 15:19:23.998501 KuDroidShell(BaseBoard)[24084] <Debug>: [BSBlockSentinel:<private>] signaled! 2 of 2
+Aug 17 15:19:23.998591 KuDroidShell(BaseBoard)[24084] <Debug>: [BSBlockSentinel:<private>] dealloc
+Aug 17 15:19:23.999128 KuDroidShell(UIKitCore)[24084] <Notice>: isWritingToolsHandlingKeyboardTracking:Y (WT ready:Y, Arbiter ready:Y)
+Aug 17 15:19:23.999250 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogGestureEnvironment in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:24.006049 KuDroidShell(UIKitCore)[24084] <Notice>: Ending background task with UIBackgroundTaskIdentifier: 2
+Aug 17 15:19:24.006143 KuDroidShell(UIKitCore)[24084] <Notice>: Ending task with identifier 2 and description: <private>, _expireHandler: <__NSGlobalBlock__: 0x1f9bae3a0>
+Aug 17 15:19:24.006197 KuDroidShell(UIKitCore)[24084] <Notice>: Decrementing reference count for assertion <private> (used by background task with identifier 2: <private>)
+Aug 17 15:19:24.006238 KuDroidShell(UIKitCore)[24084] <Notice>: Will invalidate assertion: <BKSProcessAssertion: 0x102dbe970> for task identifier: 2
+Aug 17 15:19:24.017863 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key ReduceMotionEnabled in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:24.017916 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read: domain = com.kudroid.shell.5L5HW6K48W, preference = ReduceMotionEnabled, appID = com.kudroid.shell.5L5HW6K48W result = (null) (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:24.027456 KuDroidShell(Network)[24084] <Notice>: <nw_activity 50:1 [BA79B7DA-D54B-4CE7-B008-1853457DD0A5] (global parent) (reporting strategy default) complete (reason success)> complete with reason 2 (success), duration 1248ms
+Aug 17 15:19:24.027508 KuDroidShell(Network)[24084] <Debug>: No threshold for app_launch:app_launch, returning NW_ACTIVITY_DURATION_INVALID
+Aug 17 15:19:24.027586 KuDroidShell(Network)[24084] <Debug>: No threshold for activity <nw_activity 50:1 [BA79B7DA-D54B-4CE7-B008-1853457DD0A5] (global parent) (reporting strategy default) complete (reason success)>
+Aug 17 15:19:24.027818 KuDroidShell(Network)[24084] <Notice>: <nw_activity 50:2 [0FE7527A-58F8-4BD8-97AE-937B732E877D] (reporting strategy default) complete (reason success)> complete with reason 2 (success), duration 1248ms
+Aug 17 15:19:24.027898 KuDroidShell(Network)[24084] <Debug>: No threshold for app_launch:extended_app_launch, returning NW_ACTIVITY_DURATION_INVALID
+Aug 17 15:19:24.027979 KuDroidShell(Network)[24084] <Debug>: No threshold for activity <nw_activity 50:2 [0FE7527A-58F8-4BD8-97AE-937B732E877D] (reporting strategy default) complete (reason success)>
+Aug 17 15:19:24.028060 KuDroidShell(Network)[24084] <Notice>: Unsetting the global parent activity <nw_activity 50:1 [BA79B7DA-D54B-4CE7-B008-1853457DD0A5] (global parent) (reporting strategy default) complete (reason success)>
+Aug 17 15:19:24.028139 KuDroidShell(Network)[24084] <Notice>: Unset the global parent activity
+Aug 17 15:19:24.035588 KuDroidShell(RunningBoardServices)[24084] <Debug>: PERF: [app<com.kudroid.shell.5L5HW6K48W(CEED873D-45D3-44EE-9DFC-0A3C4355E35C)>:24084] Received message from runningboardd: async_didChangeInheritances:completion:
+Aug 17 15:19:24.035701 KuDroidShell(RunningBoardServices)[24084] <Info>: didChangeInheritances
+Aug 17 15:19:24.035813 KuDroidShell(RunningBoardServices)[24084] <Debug>: didChangeInheritances: <RBSInheritanceChangeSet| gained:(null) lost:{(
+    <RBSInheritance| environment:UIScene:com.apple.frontboard.systemappservices/FBSceneManager:sceneID%3Acom.kudroid.shell.5L5HW6K48W-default name:com.apple.frontboard.visibility origID:33-34-220140 payload 1088342953561179546>
+)}>
+Aug 17 15:19:24.048220 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key DifferentiateWithoutColor in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:24.048304 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read: domain = com.kudroid.shell.5L5HW6K48W, preference = DifferentiateWithoutColor, appID = com.kudroid.shell.5L5HW6K48W result = (null) (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:24.048359 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key EnhancedBackgroundContrastEnabled in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:24.048458 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read: domain = com.kudroid.shell.5L5HW6K48W, preference = EnhancedBackgroundContrastEnabled, appID = com.kudroid.shell.5L5HW6K48W result = (null) (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:24.048512 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key ReduceMotionReduceSlideTransitionsPreference in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:24.048571 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read: domain = com.kudroid.shell.5L5HW6K48W, preference = ReduceMotionReduceSlideTransitionsPreference, appID = com.kudroid.shell.5L5HW6K48W result = (null) (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:24.048627 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key ButtonShapesEnabled in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:24.048687 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read: domain = com.kudroid.shell.5L5HW6K48W, preference = ButtonShapesEnabled, appID = com.kudroid.shell.5L5HW6K48W result = (null) (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:24.048737 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key IncreaseButtonLegibilityEnabled in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:24.048798 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read: domain = com.kudroid.shell.5L5HW6K48W, preference = IncreaseButtonLegibilityEnabled, appID = com.kudroid.shell.5L5HW6K48W result = (null) (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:24.457722 KuDroidShell(RunningBoardServices)[24084] <Debug>: PERF: [app<com.kudroid.shell.5L5HW6K48W(CEED873D-45D3-44EE-9DFC-0A3C4355E35C)>:24084] Received message from runningboardd: async_didChangeInheritances:completion:
+Aug 17 15:19:24.457905 KuDroidShell(RunningBoardServices)[24084] <Info>: didChangeInheritances
+Aug 17 15:19:24.457996 KuDroidShell(RunningBoardServices)[24084] <Debug>: didChangeInheritances: <RBSInheritanceChangeSet| gained:{(
+    <RBSInheritance| environment:(none) name:com.apple.frontboard.visibility origID:33-34-220145 0>
+)} lost:(null)>
+Aug 17 15:19:24.460825 KuDroidShell(RunningBoardServices)[24084] <Debug>: PERF: [app<com.kudroid.shell.5L5HW6K48W(CEED873D-45D3-44EE-9DFC-0A3C4355E35C)>:24084] Received message from runningboardd: async_observedProcessStatesDidChange:completion:
+Aug 17 15:19:24.460929 KuDroidShell(RunningBoardServices)[24084] <Info>: observedProcessStatesDidChange
+Aug 17 15:19:24.461163 KuDroidShell(RunningBoardServices)[24084] <Debug>: Decoded RBSProcessHandle with IPC ID 1a961b8f00005e14
+Aug 17 15:19:24.461315 KuDroidShell(RunningBoardServices)[24084] <Notice>: Received state update for 24084 (app<com.kudroid.shell.5L5HW6K48W(CEED873D-45D3-44EE-9DFC-0A3C4355E35C)>, unknown-NotVisible
+Aug 17 15:19:24.462014 KuDroidShell(RunningBoardServices)[24084] <Info>: Update skipped for [app<com.kudroid.shell.5L5HW6K48W(CEED873D-45D3-44EE-9DFC-0A3C4355E35C)>:24084]
+Aug 17 15:19:24.523818 KuDroidShell(RunningBoardServices)[24084] <Debug>: PERF: [app<com.kudroid.shell.5L5HW6K48W(CEED873D-45D3-44EE-9DFC-0A3C4355E35C)>:24084] Received message from runningboardd: async_didChangeInheritances:completion:
+Aug 17 15:19:24.524056 KuDroidShell(RunningBoardServices)[24084] <Info>: didChangeInheritances
+Aug 17 15:19:24.524298 KuDroidShell(RunningBoardServices)[24084] <Debug>: didChangeInheritances: <RBSInheritanceChangeSet| gained:(null) lost:{(
+    <RBSInheritance| environment:(none) name:com.apple.frontboard.visibility origID:33-34-220135 0>
+)}>
+Aug 17 15:19:24.526078 KuDroidShell(RunningBoardServices)[24084] <Debug>: PERF: [app<com.kudroid.shell.5L5HW6K48W(CEED873D-45D3-44EE-9DFC-0A3C4355E35C)>:24084] Received message from runningboardd: async_observedProcessStatesDidChange:completion:
+Aug 17 15:19:24.526161 KuDroidShell(RunningBoardServices)[24084] <Info>: observedProcessStatesDidChange
+Aug 17 15:19:24.526207 KuDroidShell(RunningBoardServices)[24084] <Debug>: Decoded RBSProcessHandle with IPC ID 1a961b8f00005e14
+Aug 17 15:19:24.526254 KuDroidShell(RunningBoardServices)[24084] <Notice>: Received state update for 24084 (app<com.kudroid.shell.5L5HW6K48W(CEED873D-45D3-44EE-9DFC-0A3C4355E35C)>, unknown-NotVisible
+Aug 17 15:19:24.526346 KuDroidShell(RunningBoardServices)[24084] <Info>: Update skipped for [app<com.kudroid.shell.5L5HW6K48W(CEED873D-45D3-44EE-9DFC-0A3C4355E35C)>:24084]
+Aug 17 15:19:24.980121 KuDroidShell(CoreFoundation)[24084] <Debug>: looked up value <private> for key SpeechSettingsDisabledByManagedConfiguration in CFPrefsPlistSource<0x103872380> (Domain: com.apple.Accessibility, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No) via CFPrefsSearchListSource<0x103872500> (Domain: com.apple.Accessibility, Container: (null))
+Aug 17 15:19:24.980407 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read: domain = com.apple.Accessibility, preference = SpeechSettingsDisabledByManagedConfiguration, appID = (null) result = 0 (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:24.980547 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key QuickSpeak in CFPrefsSearchListSource<0x103872500> (Domain: com.apple.Accessibility, Container: (null))
+Aug 17 15:19:24.980685 KuDroidShell(libAccessibility.dylib)[24084] <Debug>: CF Read: domain = com.apple.Accessibility, preference = QuickSpeak, appID = (null) result = (null) (-1 - empty, 0 - false, 1 - true)
+Aug 17 15:19:24.980908 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key QuickSpeak in CFPrefsPlistSource<0x103872380> (Domain: com.apple.Accessibility, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No)
+Aug 17 15:19:26.991288 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogHIDTransformer in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:26.991349 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogGESEventFilter in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:26.997905 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogTouch in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:26.998140 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key com.apple.SwiftUI.EventDebugTriggers in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:26.998615 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogHitTest in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:27.003388 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogGesture in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:27.005746 KuDroidShell(UIKitCore)[24084] <Notice>: TX focusApplication (peekAppEvent) stealKB:Y scene:com.kudroid.shell.5L5HW6K48W-default
+Aug 17 15:19:27.006599 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogEventDispatch in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:27.007303 KuDroidShell(UIKitCore)[24084] <Notice>: Evaluating dispatch of UIEvent: 0x103950d20; type: 0; subtype: 0; backing type: 11; shouldSend: 1; ignoreInteractionEvents: 0, systemGestureStateChange: 0
+Aug 17 15:19:27.007928 KuDroidShell(UIKitCore)[24084] <Notice>: Sending UIEvent type: 0; subtype: 0; to windows: 1
+Aug 17 15:19:27.008170 KuDroidShell(UIKitCore)[24084] <Notice>: Sending UIEvent type: 0; subtype: 0; to window: <UIWindow: 0x102dc6010>; contextId: 0xAAF1FED3
+Aug 17 15:19:27.015214 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogGestureExclusion in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:27.053600 KuDroidShell(UIKitCore)[24084] <Notice>: Evaluating dispatch of UIEvent: 0x103950d20; type: 0; subtype: 0; backing type: 11; shouldSend: 1; ignoreInteractionEvents: 0, systemGestureStateChange: 0
+Aug 17 15:19:27.053750 KuDroidShell(UIKitCore)[24084] <Notice>: Sending UIEvent type: 0; subtype: 0; to windows: 1
+Aug 17 15:19:27.054996 KuDroidShell(UIKitCore)[24084] <Notice>: Sending UIEvent type: 0; subtype: 0; to window: <UIWindow: 0x102dc6010>; contextId: 0xAAF1FED3
+Aug 17 15:19:27.059394 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : InfoPlist type: strings
+	Result        : None
+Aug 17 15:19:27.059631 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : InfoPlist type: stringsdict
+	Result        : None
+Aug 17 15:19:27.071798 KuDroidShell(UIKitCore)[24084] <Notice>: Evaluating dispatch of UIEvent: 0x103950d20; type: 0; subtype: 0; backing type: 11; shouldSend: 0; ignoreInteractionEvents: 0, systemGestureStateChange: 0
+Aug 17 15:19:27.071945 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key LogSystemGestureUpdate in CFPrefsSearchListSource<0x102db50c0> (Domain: com.apple.UIKit, Container: (null))
+Aug 17 15:19:27.072033 KuDroidShell(UIKitCore)[24084] <Notice>: Evaluating dispatch of UIEvent: 0x103950d20; type: 0; subtype: 0; backing type: 11; shouldSend: 0; ignoreInteractionEvents: 0, systemGestureStateChange: 1
+Aug 17 15:19:27.090583 KuDroidShell(CoreFoundation)[24084] <Debug>: setting new value <private> for key <private> in CFPrefsSource<0x102db5800> (Domain: Volatile, User: , ByHost: No, Container: , Contents Need Refresh: No)
+Aug 17 15:19:27.091317 KuDroidShell(CoreFoundation)[24084] <Debug>: looked up value <private> for key METAL_DEVICE_WRAPPER_TYPE in CFPrefsSource<0x102db5800> (Domain: Volatile, User: , ByHost: No, Container: , Contents Need Refresh: No) via CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:27.092628 KuDroidShell(CoreFoundation)[24084] <Debug>: CFPrefsManagedSource<0x10f8d5000> (Domain: com.apple.Metal, User: kCFPreferencesAnyUser, ByHost: Yes, Container: (null), Contents Need Refresh: No) loaded: an empty base plist and no additional changes from the base plist
+Aug 17 15:19:27.092777 KuDroidShell(CoreFoundation)[24084] <Debug>: CFPrefsPlistSource<0x10f8d5280> (Domain: com.apple.Metal, User: kCFPreferencesAnyUser, ByHost: Yes, Container: (null), Contents Need Refresh: No) loaded: an empty base plist and no additional changes from the base plist
+Aug 17 15:19:27.092824 KuDroidShell(CoreFoundation)[24084] <Debug>: CFPrefsManagedSource<0x10f8d5a00> (Domain: com.apple.Metal, User: kCFPreferencesCurrentUser, ByHost: Yes, Container: (null), Contents Need Refresh: No) loaded: an empty base plist and no additional changes from the base plist
+Aug 17 15:19:27.092868 KuDroidShell(CoreFoundation)[24084] <Debug>: CFPrefsPlistSource<0x10f8d5800> (Domain: com.apple.Metal, User: kCFPreferencesCurrentUser, ByHost: No, Container: (null), Contents Need Refresh: No) loaded: an empty base plist and no additional changes from the base plist
+Aug 17 15:19:27.092909 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UseMetalTelemetry in CFPrefsSearchListSource<0x10f8d5a80> (Domain: com.apple.Metal, Container: (null))
+Aug 17 15:19:27.092952 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : InfoPlist type: strings
+	Result        : None
+Aug 17 15:19:27.092997 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : InfoPlist type: stringsdict
+	Result        : None
+Aug 17 15:19:27.093041 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key MetalForceCaptureEnabled in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:27.093084 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : InfoPlist type: strings
+	Result        : None
+Aug 17 15:19:27.093128 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : InfoPlist type: stringsdict
+	Result        : None
+Aug 17 15:19:27.093169 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key MetalForceHudEnabled in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:27.096994 KuDroidShell(CoreFoundation)[24084] <Debug>: dlfcn check load bundle CFBundle 0x10f50b800 </System/Library/Extensions/AGXMetalA13.bundle> (not loaded), dlopen of /System/Library/Extensions/AGXMetalA13.bundle/AGXMetalA13 mode 0x115 no handle
+Aug 17 15:19:27.107836 KuDroidShell(CoreFoundation)[24084] <Debug>: dlfcn load bundle CFBundle 0x10f50b800 </System/Library/Extensions/AGXMetalA13.bundle> (not loaded), dlopen of /System/Library/Extensions/AGXMetalA13.bundle/AGXMetalA13 mode 0x109 returns handle 0x33025b591
+Aug 17 15:19:27.120531 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key VertexInstanceBoundsCheckMode in CFPrefsSearchListSource<0x10f8d5a80> (Domain: com.apple.Metal, Container: (null))
+Aug 17 15:19:27.120663 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key DisableDriverSuballocation in CFPrefsSearchListSource<0x10f8d5a80> (Domain: com.apple.Metal, Container: (null))
+Aug 17 15:19:27.120750 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key CPUMappingForPrivateTexturesMode in CFPrefsSearchListSource<0x10f8d5a80> (Domain: com.apple.Metal, Container: (null))
+Aug 17 15:19:27.120828 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key IOSurfaceCompressedWriteValidation in CFPrefsSearchListSource<0x10f8d5a80> (Domain: com.apple.Metal, Container: (null))
+Aug 17 15:19:27.120911 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key CommandQueueLifetimeTracing in CFPrefsSearchListSource<0x10f8d5a80> (Domain: com.apple.Metal, Container: (null))
+Aug 17 15:19:27.120994 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key UMACalcTracing in CFPrefsSearchListSource<0x10f8d5a80> (Domain: com.apple.Metal, Container: (null))
+Aug 17 15:19:27.122199 KuDroidShell(CoreFoundation)[24084] <Debug>: Language lookup at <private>
+	Localizations : [English]
+	Dev language  : English
+	User prefs    : [vi-VN]
+	Main bundle   : [en]
+	Allow mixed   : 0 
+	Result        : [English]
+Aug 17 15:19:27.122369 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : ds type: g12p
+	Result        : file:///System/Library/Extensions/AGXMetalA13.bundle/ds.g12p
+Aug 17 15:19:27.125216 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : metal_rt type: metallib
+	Result        : file:///System/Library/Extensions/AGXMetalA13.bundle/metal_rt.metallib
+Aug 17 15:19:27.128407 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key FramePacingAggregationWindowInSeconds in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:27.128565 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key FramePacingPerDrawableSignpostsEnabled in CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:27.142502 KuDroidShell(CoreFoundation)[24084] <Debug>: Bundle: <private>, key: More, value: More, table: Localizable, localizationNames: (null), result: More
+Aug 17 15:19:27.268433 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key forceDeviceName in CFPrefsSearchListSource<0x10f8d5a80> (Domain: com.apple.Metal, Container: (null))
+Aug 17 15:19:27.268481 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key forceDeviceName in CFPrefsSearchListSource<0x10f8d5a80> (Domain: com.apple.Metal, Container: (null))
+Aug 17 15:19:27.268548 KuDroidShell(CoreFoundation)[24084] <Debug>: setting new value <private> for key <private> in CFPrefsSource<0x102db5800> (Domain: Volatile, User: , ByHost: No, Container: , Contents Need Refresh: No)
+Aug 17 15:19:27.268806 KuDroidShell(CoreFoundation)[24084] <Debug>: looked up value <private> for key METAL_ERROR_MODE in CFPrefsSource<0x102db5800> (Domain: Volatile, User: , ByHost: No, Container: , Contents Need Refresh: No) via CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:27.268947 KuDroidShell(CoreFoundation)[24084] <Debug>: setting new value <private> for key <private> in CFPrefsSource<0x102db5800> (Domain: Volatile, User: , ByHost: No, Container: , Contents Need Refresh: No)
+Aug 17 15:19:27.269043 KuDroidShell(CoreFoundation)[24084] <Debug>: looked up value <private> for key METAL_DEBUG_ERROR_MODE in CFPrefsSource<0x102db5800> (Domain: Volatile, User: , ByHost: No, Container: , Contents Need Refresh: No) via CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:27.269084 KuDroidShell(CoreFoundation)[24084] <Debug>: setting new value <private> for key <private> in CFPrefsSource<0x102db5800> (Domain: Volatile, User: , ByHost: No, Container: , Contents Need Refresh: No)
+Aug 17 15:19:27.269144 KuDroidShell(CoreFoundation)[24084] <Debug>: looked up value <private> for key METAL_WARNING_MODE in CFPrefsSource<0x102db5800> (Domain: Volatile, User: , ByHost: No, Container: , Contents Need Refresh: No) via CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:27.269201 KuDroidShell(CoreFoundation)[24084] <Debug>: setting new value <private> for key <private> in CFPrefsSource<0x102db5800> (Domain: Volatile, User: , ByHost: No, Container: , Contents Need Refresh: No)
+Aug 17 15:19:27.269260 KuDroidShell(CoreFoundation)[24084] <Debug>: looked up value <private> for key METAL_ERROR_CHECK_EXTENDED_MODE in CFPrefsSource<0x102db5800> (Domain: Volatile, User: , ByHost: No, Container: , Contents Need Refresh: No) via CFPrefsSearchListSource<0x103870080> (Domain: com.kudroid.shell.5L5HW6K48W, Container: (null))
+Aug 17 15:19:27.269305 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key dataBufferCachingOverride in CFPrefsSearchListSource<0x10f8d5a80> (Domain: com.apple.Metal, Container: (null))
+Aug 17 15:19:27.272449 KuDroidShell(CoreFoundation)[24084] <Debug>: Unable to create bundle at URL (<private>): does not exist or not a directory (0)
+Aug 17 15:19:27.272500 KuDroidShell(CoreFoundation)[24084] <Debug>: Unable to create bundle at URL (<private>): does not exist or not a directory (0)
+Aug 17 15:19:27.272567 KuDroidShell(CoreFoundation)[24084] <Debug>: Unable to create bundle at URL (<private>): does not exist or not a directory (0)
+Aug 17 15:19:27.272630 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key forceDeviceName in CFPrefsSearchListSource<0x10f8d5a80> (Domain: com.apple.Metal, Container: (null))
+Aug 17 15:19:27.272691 KuDroidShell(CoreFoundation)[24084] <Debug>: found no value for key DisableDriverUberVariants in CFPrefsSearchListSource<0x10f8d5a80> (Domain: com.apple.Metal, Container: (null))
+Aug 17 15:19:27.272748 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : InfoPlist type: strings
+	Result        : None
+Aug 17 15:19:27.272805 KuDroidShell(CoreFoundation)[24084] <Debug>: Resource lookup at <private>
+	Request       : InfoPlist type: stringsdict
+	Result        : None
+Aug 17 15:19:27.272992 KuDroidShell(CoreAnalytics)[24084] <Debug>: <private> <private>
+Aug 17 15:19:27.288575 KuDroidShell(CoreAnalytics)[24084] <Notice>: Received configuration update from daemon (initial)
+Aug 17 15:19:41.868177 KuDroidShell(RunningBoardServices)[24084] <Debug>: PERF: [app<com.kudroid.shell.5L5HW6K48W(CEED873D-45D3-44EE-9DFC-0A3C4355E35C)>:24084] Received message from runningboardd: async_observedProcessStatesDidChange:completion:
+Aug 17 15:19:41.868288 KuDroidShell(RunningBoardServices)[24084] <Info>: observedProcessStatesDidChange
+Aug 17 15:19:41.868333 KuDroidShell(RunningBoardServices)[24084] <Debug>: Decoded RBSProcessHandle with IPC ID 1a961b8f00005e14
+Aug 17 15:19:41.868459 KuDroidShell(RunningBoardServices)[24084] <Notice>: Received state update for 24084 (app<com.kudroid.shell.5L5HW6K48W(CEED873D-45D3-44EE-9DFC-0A3C4355E35C)>, unknown-NotVisible
+Aug 17 15:19:41.868607 KuDroidShell(RunningBoardServices)[24084] <Info>: Update skipped for [app<com.kudroid.shell.5L5HW6K48W(CEED873D-45D3-44EE-9DFC-0A3C4355E35C)>:24084]
