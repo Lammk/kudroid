@@ -45,6 +45,12 @@ public:
     // MAIN+LAUNCHER, hoặc activity-alias trỏ tới nó).
     static ManifestInfo parse_manifest(const std::uint8_t* data, std::size_t size);
 
+    // Parse AndroidManifest.xml dạng TEXT thuần (APK repack bởi apktool và
+    // tương tự thường chứa manifest text thay vì binary AXML — parser AXML
+    // trả rỗng với những file này). Heuristic quét thẻ <activity>/<activity-
+    // alias> + intent-filter MAIN/LAUNCHER.
+    static ManifestInfo parse_manifest_text(const char* data, std::size_t size);
+
     static const std::string& lastError();
 };
 

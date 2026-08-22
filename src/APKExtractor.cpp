@@ -889,6 +889,130 @@ ManifestInfo APKExtractor::parse_manifest(const std::uint8_t* data, std::size_t 
     return parseAxml(std::vector<std::uint8_t>(data, data + size));
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// parse_manifest_text — AndroidManifest.xml dạng TEXT thuần. APK repack bởi
+// apktool / công cụ mod (BANDISHARE v.v.) thường chứa manifest text thay vì
+// binary AXML; parseAxml trả rỗng với chúng. Heuristic: quét từng thẻ
+// <activity ...> / <activity-alias ...>, gom attribute name=, theo dõi
+// intent-filter con chứa action MAIN + category LAUNCHER.
+// ─────────────────────────────────────────────────────────────────────────────
+
+namespace {
+
+std::string extractXmlAttr(const std::string& tag, const char* attrName) {
+    // Tìm attrName="value" hoặc attrName='value' trong chuỗi tag. Attr có thể
+    // có namespace (android:name=) — chấp nhận cả 2 dạng: " name=" và ":name=".
+    const std::string needle = std::string(attrName) + "=";
+    std::size_t pos = 0;
+    while ((pos = tag.find(needle, pos)) != std::string::npos) {
+        // Ký tự trước attrName phải là space, '<' hoặc ':' (namespace prefix).
+        if (pos > 0) {
+            const char prev = tag[pos - 1];
+            if (!std::isspace(static_cast<unsigned char>(prev)) &&
+                prev != '<' && prev != ':') {
+                pos += needle.size();
+                continue;
+            }
+        }
+        pos += needle.size();
+        if (pos >= tag.size()) break;
+        const char quote = tag[pos];
+        if (quote != '"' && quote != '\'') continue;
+        const std::size_t end = tag.find(quote, pos + 1);
+        if (end == std::string::npos) break;
+        return tag.substr(pos + 1, end - pos - 1);
+    }
+    return "";
+}
+
+} // namespace
+
+ManifestInfo APKExtractor::parse_manifest_text(const char* data, std::size_t size) {
+    ManifestInfo info;
+    if (!data || size == 0) return info;
+    const std::string xml(data, size);
+
+    // package="..." trên thẻ <manifest>.
+    {
+        const std::size_t mpos = xml.find("<manifest");
+        if (mpos != std::string::npos) {
+            const std::size_t close = xml.find('>', mpos);
+            if (close != std::string::npos) {
+                info.packageName = extractXmlAttr(xml.substr(mpos, close - mpos), "package");
+            }
+        }
+    }
+
+    static const char* kActionMain = "android.intent.action.MAIN";
+    static const char* kCategoryLauncher = "android.intent.category.LAUNCHER";
+
+    std::size_t cur = 0;
+    std::string currentActivity;
+    std::string aliasTarget;
+    bool sawActionMain = false;
+    bool sawCategoryLauncher = false;
+    bool inIntentFilter = false;
+
+    auto commit = [&](const std::string& name) {
+        if (info.mainActivity.empty() && !name.empty() && sawActionMain && sawCategoryLauncher) {
+            info.mainActivity = name;
+        }
+    };
+
+    while ((cur = xml.find('<', cur)) != std::string::npos) {
+        const std::size_t end = xml.find('>', cur);
+        if (end == std::string::npos) break;
+        const std::string tag = xml.substr(cur, end - cur + 1);
+        const bool isClose = tag.size() > 1 && tag[1] == '/';
+        const bool isSelfClose = tag.size() > 1 && tag[tag.size() - 2] == '/';
+
+        // Tên thẻ: bỏ '<' hoặc '</' rồi lấy token đầu.
+        std::string tagName;
+        {
+            std::size_t s = 1;
+            while (s < tag.size() && (tag[s] == '/' || std::isspace(static_cast<unsigned char>(tag[s])))) ++s;
+            std::size_t e = s;
+            while (e < tag.size() && !std::isspace(static_cast<unsigned char>(tag[e])) && tag[e] != '/' && tag[e] != '>') ++e;
+            tagName = tag.substr(s, e - s);
+        }
+
+        if (tagName == "activity" || tagName == "activity-alias") {
+            if (!isClose) {
+                currentActivity = extractXmlAttr(tag, "name");
+                aliasTarget = extractXmlAttr(tag, "targetActivity");
+                sawActionMain = false;
+                sawCategoryLauncher = false;
+                inIntentFilter = false;
+                if (tagName == "activity-alias" && isSelfClose) {
+                    commit(!aliasTarget.empty() ? aliasTarget : currentActivity);
+                    currentActivity.clear();
+                }
+            } else {
+                commit(currentActivity);
+                currentActivity.clear();
+                sawActionMain = false;
+                sawCategoryLauncher = false;
+                inIntentFilter = false;
+            }
+        } else if (tagName == "intent-filter") {
+            inIntentFilter = !isClose;
+        } else if (tagName == "action") {
+            if (inIntentFilter && extractXmlAttr(tag, "name") == kActionMain) sawActionMain = true;
+        } else if (tagName == "category") {
+            if (inIntentFilter && extractXmlAttr(tag, "name") == kCategoryLauncher) sawCategoryLauncher = true;
+        }
+
+        cur = end + 1;
+    }
+
+    if (!info.mainActivity.empty() && !info.packageName.empty()) {
+        if (info.mainActivity.front() == '.') {
+            info.mainActivity = info.packageName + info.mainActivity;
+        }
+    }
+    return info;
+}
+
 std::string APKExtractor::get_package_name(const std::string& apkPath) {
     std::ifstream f(apkPath, std::ios::binary);
     if (f) {

@@ -284,7 +284,7 @@ static void appendTestHeader(std::string& log, const char* test, const char* pat
 // kudroid_crash.log với stamp của bản build mới nhất trên CI.
 extern "C" const char* kudroid_build_stamp(void) {
     static const char kStamp[] =
-        "kudroid_core v0.2.0 " __DATE__ " " __TIME__ " "
+        "kudroid_core v0.6.5 " __DATE__ " " __TIME__ " "
 #ifdef KUDROID_GIT_HASH
         KUDROID_GIT_HASH
 #else
@@ -1452,6 +1452,15 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                               std::to_string(axml.size()) + " bytes)...");
                                 kudroid::ManifestInfo mi =
                                     kudroid::APKExtractor::parse_manifest(axml.data(), axml.size());
+                                // APK repack (apktool/BANDISHARE...) thường chứa
+                                // manifest dạng TEXT — AXML parser trả rỗng với
+                                // chúng. Thử parse text trước khi bỏ cuộc.
+                                if (mi.mainActivity.empty() && axml.size() > 4 &&
+                                    axml[0] == '<') {
+                                    appendAndEcho("[kudroid_core] Manifest is TEXT XML, trying text parser...");
+                                    mi = kudroid::APKExtractor::parse_manifest_text(
+                                        reinterpret_cast<const char*>(axml.data()), axml.size());
+                                }
                                 appendAndEcho("[kudroid_core] Manifest parse: package='" + mi.packageName +
                                               "' mainActivity='" + mi.mainActivity + "'");
                                 if (!mi.mainActivity.empty()) targetActivity = mi.mainActivity;
@@ -1503,35 +1512,69 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                 const auto classes = kudroid::DexAotCache::list_app_classes(aotJar.string());
                                 appendAndEcho("[kudroid_core] Found " + std::to_string(classes.size()) +
                                               " non-system classes in classes.jar");
-                                // Chấm điểm: chứa "Activity" +100, ở package gốc
-                                // (ít dấu '/' nhất) +số lượng segment*10.
+                                // Chấm điểm chọn launcher:
+                                //   -1000  Activity của SDK bên thứ ba (push/analytics
+                                //          v.v.) — KHÔNG phải entry point, launch nó
+                                //          chỉ cho màn hình xám (bài học Braze).
+                                //   +100   tên chứa "Activity"
+                                //   +50    package khớp pkgName (từ manifest/app_info)
+                                //   +depth bonus: package càng ngắn (gốc app) càng
+                                //          giống entry point chính.
+                                static const char* kSdkActivityHints[] = {
+                                    "braze", "facebook", "firebase", "google", "admob",
+                                    "unity3d", "appsflyer", "adjust", "amplitude",
+                                    "mixpanel", "crashlytics", "playfab", "microsoft",
+                                    "zarchiver" /* handled riêng ở trên */
+                                };
                                 std::string best;
                                 int bestScore = -1;
+                                std::string bestAny; // fallback nếu không có *Activity nào
+                                int bestAnyScore = -1;
                                 for (const auto& cls : classes) {
                                     const bool isActivity = cls.find("Activity") != std::string::npos;
                                     const size_t depth = static_cast<size_t>(
                                         std::count(cls.begin(), cls.end(), '/'));
                                     int score = (isActivity ? 100 : 0) + static_cast<int>(10 - depth);
+                                    if (!pkgName.empty()) {
+                                        // pkgName dạng a.b.c → prefix "a/b/c/".
+                                        std::string pkgPrefix = pkgName;
+                                        for (char& c : pkgPrefix) if (c == '.') c = '/';
+                                        pkgPrefix += '/';
+                                        if (cls.compare(0, pkgPrefix.size(), pkgPrefix) == 0) score += 50;
+                                    }
+                                    bool sdkOwned = false;
+                                    for (const char* hint : kSdkActivityHints) {
+                                        if (cls.find(hint) != std::string::npos) { sdkOwned = true; break; }
+                                    }
+                                    if (sdkOwned) score -= 1000;
+
                                     if (isActivity && score > bestScore) {
                                         bestScore = score;
                                         best = cls;
                                     }
+                                    if (score > bestAnyScore) {
+                                        bestAnyScore = score;
+                                        bestAny = cls;
+                                    }
                                 }
-                                if (!best.empty()) {
-                                    // Đổi slash → dot cho Class.forName.
+                                if (!best.empty() && bestScore > 0) {
                                     for (char& c : best) if (c == '/') c = '.';
                                     targetActivity = best;
                                     appendAndEcho("[kudroid_core] Resolved from classes.jar: " + best);
+                                } else if (!bestAny.empty() && bestAnyScore > 0) {
+                                    // Không có *Activity "sạch" — dùng class điểm cao nhất.
+                                    for (char& c : bestAny) if (c == '/') c = '.';
+                                    targetActivity = bestAny;
+                                    appendAndEcho("[kudroid_core] No clean *Activity class; using highest-scored app class: " + bestAny);
                                 } else if (!classes.empty()) {
-                                    // Không có class nào tên "Activity" — log vài
-                                    // class đầu để debug, chọn class đầu tiên.
+                                    // Mọi class đều bị trừ điểm SDK — log vài cái để debug.
                                     for (size_t i = 0; i < classes.size() && i < 5; ++i) {
-                                        appendAndEcho("[kudroid_core]   candidate: " + classes[i]);
+                                        appendAndEcho("[kudroid_core]   candidate(all-SDK?): " + classes[i]);
                                     }
                                     std::string first = classes.front();
                                     for (char& c : first) if (c == '/') c = '.';
                                     targetActivity = first;
-                                    appendAndEcho("[kudroid_core] No *Activity class found; using first app class: " + first);
+                                    appendAndEcho("[kudroid_core] Using first app class as last resort: " + first);
                                 }
                             } else {
                                 appendAndEcho("[kudroid_core] WARNING: classes.jar not found at " + aotJar.string());
