@@ -1,1 +1,0 @@
-/usr/bin/c++ -O3 -DNDEBUG -Wl,--dependency-file=CMakeFiles/test_dex_to_jar.dir/link.d CMakeFiles/test_dex_to_jar.dir/tests/test_dex_to_jar.cpp.o -o test_dex_to_jar  libkudroid_core.a /usr/lib64/libz.so

@@ -89,6 +89,12 @@ if(APPLE)
         "-framework AudioToolbox"
         "-framework CoreFoundation"
         "-framework Foundation"
+        # JavaCanvasRenderer (drawText) + GraphicsShim (blit canvas) dùng
+        # CoreGraphics (CGContext*/CGColor*/CGImage*) và CoreText (CTFont*/
+        # CTLine*) — thiếu 2 framework này thì host test test_shims trên
+        # macOS arm64 fail linker "Undefined symbols _CGBitmapContextCreate..."
+        "-framework CoreGraphics"
+        "-framework CoreText"
         "-lobjc"
     )
 endif()
