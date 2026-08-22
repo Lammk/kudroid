@@ -216,6 +216,20 @@ jobs:
           find avian-artifact -name 'libavian.a' -exec cp {} third_party/jvm/avian/build/libavian.a \;
           ls -lh third_party/jvm/avian/build/libavian.a
 
+      # framework.jar tới thiết bị qua HAI đường: boot.jar nhúng trong libavian.a
+      # (job build-avian-ios lo) và framework_jar_bytes.h mà DexAotCache merge vào
+      # classes.jar. Không regenerate header ở đây thì app chạy với framework cũ.
+      - name: Set up JDK 8 (framework jar)
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'zulu'
+          java-version: '8'
+
+      - name: Rebuild and embed framework jar
+        run: |
+          bash framework/build.sh
+          python3 scripts/embed_framework_jar.py
+
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:

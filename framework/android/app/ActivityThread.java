@@ -140,7 +140,19 @@ public final class ActivityThread {
                     break;
                 }
             } catch (Throwable t) {
-                // Tiếp tục thử ứng viên tiếp theo
+                // Thông báo của NoClassDefFoundError CHÍNH LÀ tên class còn thiếu —
+                // nuốt nó đi là mất manh mối duy nhất để biết cần đắp class nào.
+                // Đi hết chuỗi cause vì Avian bọc lỗi load lồng nhiều tầng.
+                StringBuilder chain = new StringBuilder();
+                for (Throwable c = t; c != null; c = c.getCause()) {
+                    if (chain.length() > 0) chain.append(" <- ");
+                    chain.append(c.getClass().getName());
+                    String m = c.getMessage();
+                    if (m != null && m.length() > 0) chain.append(": ").append(m);
+                    if (c.getCause() == c) break;
+                }
+                android.util.Log.e("ActivityThread",
+                        "Candidate '" + name + "' failed: " + chain);
             }
         }
 
@@ -158,6 +170,10 @@ public final class ActivityThread {
                 android.util.Log.i("ActivityThread", "Activity launch complete! UI is live and rendered to Metal canvas.");
             } catch (Throwable t) {
                 android.util.Log.e("ActivityThread", "NON-FATAL in Activity lifecycle: " + t.toString());
+                for (Throwable c = t.getCause(); c != null; c = c.getCause()) {
+                    android.util.Log.e("ActivityThread", "  caused by: " + c.toString());
+                    if (c.getCause() == c) break;
+                }
                 StackTraceElement[] trace = t.getStackTrace();
                 if (trace != null) {
                     for (StackTraceElement ste : trace) {

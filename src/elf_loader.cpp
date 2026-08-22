@@ -721,22 +721,27 @@ bool ElfLoader::relocate() {
                 }
                 const char* name = strtab + symtab[symbolIndex].st_name;
                 void* address = nullptr;
-                // STB_WEAK + SHN_UNDEF phải resolve về 0: code gọi weak symbol
-                // luôn có `cbz x8, skip` phía trước (feature detection). Bind
-                // dummy làm slot non-null → nhánh skip không chạy → app tin
-                // thao tác đã thành công. Ví dụ thật: _ZTHN6cohtml18tlsLinear-
-                // AllocatorE của libminecraftpe.so là NOTYPE WEAK UND.
+                // Weak undefined (STB_WEAK + SHN_UNDEF): Android linker VẪN
+                // bind vào symbol mạnh nếu nó tồn tại trong các lib đã load
+                // (vd strlcpy/strlcat có trong bionic libc). Chỉ khi KHÔNG tìm
+                // thấy ở đâu cả mới giữ 0 — code caller luôn có `cbz x8, skip`
+                // phía trước để xử lý nhánh null (feature detection). Bind cứng
+                // nullptr trước đây khiến slot GOT = 0 dù shim CÓ hàm đó → lời
+                // gọi qua PLT nhảy tới pc=0x0 → SIGSEGV fault_addr=0x0 đúng như
+                // crash Minecraft/libmaesdk (register x0/x1/x2 khớp strlcpy).
                 const bool isWeakUndef = (symtab[symbolIndex].st_shndx == 0) &&
                                          ((symtab[symbolIndex].st_info >> 4) == 2);
                 if (symtab[symbolIndex].st_shndx != 0) {
                     address = static_cast<char*>(base_) + symtab[symbolIndex].st_value;
-                } else if (isWeakUndef) {
-                    address = nullptr;
                 } else if (libraryManager_) {
                     address = libraryManager_->resolveGlobalSymbol(name);
+                    if (!address) address = resolve_bionic_symbol(name);
                 } else {
                     address = resolve_bionic_symbol(name);
                 }
+                // isWeakUndef giờ chỉ dùng để im warning khi symbol thật sự
+                // không tồn tại — hành vi đúng của linker: weak undef không có
+                // đâu cả thì slot = 0, caller tự kiểm tra null.
                 
                 if (!address && !isWeakUndef) {
                     // Mọi symbol không resolve được — không chỉ STB_GLOBAL — vì GOT

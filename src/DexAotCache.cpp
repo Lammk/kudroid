@@ -312,7 +312,10 @@ std::string DexAotCache::translate_dex_if_needed(const std::string& apk_extracte
     if (dexes.empty()) {
         return fail("[kudroid_aot] No classes*.dex found in " + apk_extracted_path);
     }
-    const std::string hash = DexCacheManager::sha256Files(dexes) + "_v13_zip_central_dir_fixed";
+    // Hash gồm cả kích thước framework.jar nhúng: đổi framework mà không đổi
+    // DEX vẫn phải dịch lại, nếu không classes.jar cache sẽ thiếu class mới.
+    const std::string hash = DexCacheManager::sha256Files(dexes) +
+                             "_v14_fw" + std::to_string(g_framework_jar_size);
     if (hash.empty()) {
         return fail("[kudroid_aot] Cannot compute SHA-256 of dex files");
     }

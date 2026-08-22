@@ -53,6 +53,14 @@ extern "C" void __gxx_personality_v0();
 // chứa log của game ngay trước khi crash — trước đây chỉ có log của kudroid_core.
 extern "C" void kudroid_append_crash_log(const char* text, size_t len);
 
+// Hook do kudroid_bridge cài: tra symbol trong các lib guest (.so Android) đã
+// load qua LibraryManager. bionic_dlsym với DUMMY_HANDLE dùng nó thay vì trả
+// nullptr ngay — dlopen("libc.so") là handle giả nhưng dlsym(handle, ...) trên
+// Android thật vẫn resolve được.
+extern "C" {
+void* (*kudroid_guest_symbol_lookup)(const char* name) = nullptr;
+}
+
 // Lưu abort message (android_set_abort_message) — crash handler in nó ra.
 extern "C" void kudroid_store_abort_message(const char* msg);
 
@@ -2167,7 +2175,18 @@ extern "C" void* bionic_dlsym(void* handle, const char* symbol) {
     }
 
     // If it was a dummy handle, do NOT search RTLD_DEFAULT globally.
+    // Nhưng trước khi trả nullptr, hỏi các lib guest (.so Android) đã load qua
+    // LibraryManager — dlopen("libc.so") trả DUMMY_HANDLE vì libc không tồn tại
+    // trên host, còn dlsym(handle, "hàm") trên Android thật thì resolve được
+    // (libc.so là lib thật bên Android). Không có bước này, init code của guest
+    // (vd libmaesdk.so) nhận nullptr rồi gọi → SIGSEGV pc=0x0.
     if (handle == DUMMY_HANDLE) {
+        if (kudroid_guest_symbol_lookup) {
+            if (void* guest = kudroid_guest_symbol_lookup(symbol)) {
+                logAndroidMessage(2, "KuDroidSyscall", std::string("bionic_dlsym: [") + symbol + "] resolved via guest LibraryManager");
+                return guest;
+            }
+        }
         logAndroidMessage(5, "KuDroidSyscall", std::string("bionic_dlsym: [") + symbol + "] NOT FOUND (in dummy handle)");
         return nullptr;
     }
@@ -3955,6 +3974,91 @@ extern "C" int bionic_memfd_create(const char* name, unsigned int flags) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// tkill(tid, sig) — syscall Linux cũ, iOS không có. Giả lập bằng tgkill với
+// pid của process hiện tại (đúng ngữ nghĩa: tkill = tgkill(getpid, tid, sig)).
+// ─────────────────────────────────────────────────────────────────────────────
+
+extern "C" int bionic_tkill(int tid, int sig) {
+    return bionic_tgkill(static_cast<int>(::getpid()), tid, sig);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// pthread_setname_np(pthread_t, const char*) — dạng 2 tham số của bionic.
+// iOS chỉ có pthread_setname_np(const char*) cho thread hiện tại; với thread
+// khác thì bỏ qua (không có API tương đương, chỉ mất tên thread trong log).
+// ─────────────────────────────────────────────────────────────────────────────
+
+extern "C" int bionic_pthread_setname_np2(pthread_t thread, const char* name) {
+#if defined(__APPLE__)
+    // iOS/macOS: pthread_setname_np(const char*) chỉ đặt tên cho thread hiện tại.
+    if (::pthread_equal(thread, ::pthread_self())) {
+        return ::pthread_setname_np(name ? name : "");
+    }
+    return 0;
+#else
+    // Linux host: trùng chữ ký với bionic — map thẳng.
+    return ::pthread_setname_np(thread, name ? name : "");
+#endif
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// mallopt/malloc_info — glibc/bionic malloc tuning. iOS dùng malloc zone của
+// hệ thống, không tune được: mallopt no-op trả 1 (thành công), malloc_info trả
+// -1 với ENOSYS như Android thật (Android cũng không hỗ trợ đầy đủ).
+// ─────────────────────────────────────────────────────────────────────────────
+
+extern "C" int bionic_mallopt(int param, int value) {
+    (void)param; (void)value;
+    return 1;
+}
+
+extern "C" int bionic_malloc_info(int options, FILE* fp) {
+    (void)options;
+    if (!fp) { errno = EINVAL; return -1; }
+    errno = ENOSYS;
+    return -1;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// setprogname/getprogname — iOS có sẵn trong libc; Linux host không. Dùng một
+// buffer tĩnh chung: set ghi vào, get đọc ra (mặc định = basename argv[0]).
+// ─────────────────────────────────────────────────────────────────────────────
+
+static char g_progName[256] = "";
+
+extern "C" void bionic_setprogname(const char* name) {
+#if defined(__APPLE__)
+    ::setprogname(name);
+#else
+    if (name) {
+        std::strncpy(g_progName, name, sizeof(g_progName) - 1);
+        g_progName[sizeof(g_progName) - 1] = '\0';
+    }
+#endif
+}
+
+extern "C" const char* bionic_getprogname() {
+#if defined(__APPLE__)
+    return ::getprogname();
+#else
+    if (g_progName[0]) return g_progName;
+    // Mặc định: basename của argv[0] từ /proc/self/cmdline.
+    static char buf[256] = "unknown";
+    FILE* f = std::fopen("/proc/self/cmdline", "rb");
+    if (f) {
+        size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
+        std::fclose(f);
+        if (n > 0) {
+            buf[n] = '\0';
+            char* slash = std::strrchr(buf, '/');
+            if (slash) std::memmove(buf, slash + 1, std::strlen(slash + 1) + 1);
+        }
+    }
+    return buf;
+#endif
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // pthread_gettid_np — tid của MỘT thread cụ thể (không chỉ thread hiện tại).
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -4406,6 +4510,27 @@ const SymbolEntry kSyscallSymbols[] = {
     {"__pthread_cleanup_pop", reinterpret_cast<void*>(&bionic___pthread_cleanup_pop)},
     {"__fgets_chk", reinterpret_cast<void*>(&bionic___fgets_chk)},
     {"freopen64", reinterpret_cast<void*>(&vfs_freopen)},
+
+    // ── Bổ sung sau crash Minecraft/libmaesdk (pc=0x0) ─────────────────────
+    // strlcpy/strlcat: iOS libc CÓ sẵn (BSD origin) — map thẳng, không cần shim.
+    {"strlcpy", reinterpret_cast<void*>(&::strlcpy)},
+    {"strlcat", reinterpret_cast<void*>(&::strlcat)},
+    // isatty/getpagesize/tkill: iOS có isatty+gethostpagesize; tkill giả lập
+    // qua tgkill(pid hiện tại).
+    {"isatty", reinterpret_cast<void*>(&::isatty)},
+    {"getpagesize", reinterpret_cast<void*>(&::getpagesize)},
+    {"tkill", reinterpret_cast<void*>(&bionic_tkill)},
+    // pthread_setname_np(pthread_t, const char*) — overload 2 tham số của
+    // bionic. iOS chỉ có 1 tham số → wrapper.
+    {"pthread_setname_np", reinterpret_cast<void*>(&bionic_pthread_setname_np2)},
+    // setprogname/getprogname: iOS có — map thẳng. Linux host không có →
+    // wrapper nhỏ dùng chương trình argv[0] (đủ cho guest chỉ đọc tên).
+    {"setprogname", reinterpret_cast<void*>(&bionic_setprogname)},
+    {"getprogname", reinterpret_cast<void*>(&bionic_getprogname)},
+    // mallopt/malloc_info: iOS không có mallopt → no-op trả 1 (thành công);
+    // malloc_info luôn fail như Android (Android cũng trả error cho malloc_info).
+    {"mallopt", reinterpret_cast<void*>(&bionic_mallopt)},
+    {"malloc_info", reinterpret_cast<void*>(&bionic_malloc_info)},
 };
 
 } // namespace

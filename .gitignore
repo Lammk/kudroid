@@ -34,3 +34,11 @@ logs/
 HANDOVER_FOR_CLAUDE_OPUS.md
 
 *.mp3
+
+walkthrough.md
+tomorrow_tasks.md
+live_iphone.log
+
+.gitignore
+
+src/gpu_test.cpp

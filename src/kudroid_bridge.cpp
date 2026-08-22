@@ -1140,6 +1140,12 @@ static kudroid::LibraryManager& globalLibraryManager() {
     return instance;
 }
 
+// Hook tra symbol guest — định nghĩa trong SyscallShim.cpp, bionic_dlsym dùng
+// khi handle là DUMMY_HANDLE (dlopen("libc.so") v.v.).
+extern "C" {
+extern void* (*kudroid_guest_symbol_lookup)(const char* name);
+}
+
 extern "C" const char* kudroid_run_apk(const char* appName) {
     // Reset/truncate logs để mỗi phiên chạy app luôn ghi đè log mới hoàn toàn (không chồng lên nhau)
     if (g_logDir[0] != '\0') {
@@ -1231,7 +1237,15 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
             appendAndEcho("[kudroid_core] ERROR: Library directory does not exist: " + libDir.string());
         } else {
             kudroid::LibraryManager& manager = globalLibraryManager();
-            
+
+            // Cài hook tra symbol guest cho bionic_dlsym(DUMMY_HANDLE, ...):
+            // dlopen("libc.so") trả handle giả nhưng dlsym(handle, "hàm") trên
+            // Android thật vẫn resolve được — không cài hook thì init code của
+            // guest nhận nullptr rồi gọi → SIGSEGV pc=0x0 (crash libmaesdk).
+            kudroid_guest_symbol_lookup = [](const char* name) -> void* {
+                return globalLibraryManager().resolveGlobalSymbol(name);
+            };
+
             std::vector<std::string> soFiles;
             for (const auto& entry : std::filesystem::directory_iterator(libDir)) {
                 if (entry.path().extension() == ".so") {
