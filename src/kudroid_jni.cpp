@@ -11,6 +11,9 @@
 #include <functional>
 #include <pthread.h>
 
+// Build stamp (version + commit hash) — định nghĩa trong kudroid_bridge.cpp.
+extern "C" const char* kudroid_build_stamp(void);
+
 // ─────────────────────────────────────────────────────────────────────────────
 // bộ nối jni kudroid — hiện được hỗ trợ bởi jvm avian.
 //
@@ -538,6 +541,9 @@ void kudroid_jni_init_jvm(const char* bootclasspath, const char* classpath) {
     }
     g_appClasspath = classpath ? classpath : "";
 
+    // Build stamp (commit hash) ở dòng đầu của log JVM — phân biệt bản IPA cũ/mới
+    // ngay cả khi chỉ nhìn đoạn log JVM init.
+    log_jni("Build: %s", kudroid_build_stamp());
     log_jni("Initializing Avian JVM...");
 
     // Ép linker giữ boot.o + classpath-jar.o và log kích thước boot jar nhúng

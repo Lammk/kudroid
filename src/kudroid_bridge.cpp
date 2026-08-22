@@ -51,6 +51,8 @@ static std::mutex g_crashBufMtx;
 static char g_abortMessage[1024] = {0};
 static int kudroid_jit_available(void);
 extern "C" void kudroid_launch_java_activity(JavaVM* vm, const char* activityName);
+// Build stamp — định nghĩa phía dưới file, dùng trong appendTestHeader ở trên nó.
+extern "C" const char* kudroid_build_stamp(void);
 
 // Gentle crash variables:
 static std::atomic<bool> g_hasCrashed{false};
@@ -262,6 +264,9 @@ static void appendTestHeader(std::string& log, const char* test, const char* pat
     std::ostringstream oss;
     oss << std::put_time(&tm, "%Y-%m-%d %H:%M:%S");
 
+    // Build stamp (version + commit hash) ở ĐẦU mỗi log — để phân biệt bản IPA
+    // đang chạy với bản cũ ngay từ dòng đầu tiên của bất kỳ log nào.
+    log += "[kudroid_core] Build: " + std::string(kudroid_build_stamp()) + "\n";
     log += "[kudroid_core] ===== " + std::string(test) + " =====\n";
     log += "[kudroid_core] Timestamp: " + oss.str() + "\n";
     if (path && std::strcmp(path, "N/A") != 0) {
@@ -640,7 +645,12 @@ extern "C" void kudroid_set_log_dir(const char* dir) {
         char aPath[1200];
         snprintf(aPath, sizeof(aPath), "%s/kudroid_android_logs.txt", g_logDir);
         FILE* afp = fopen(aPath, "w");
-        if (afp) fclose(afp);
+        if (afp) {
+            // Dòng ĐẦU TIÊN của log chính luôn là build stamp — nhìn phát biết
+            // ngay IPA đang chạy là commit nào, không cần mở file version riêng.
+            fprintf(afp, "[KuDroidCore] Build: %s\n", kudroid_build_stamp());
+            fclose(afp);
+        }
 
 #if defined(__APPLE__)
         // Redirect stderr (fd 2) vào file — dùng O_TRUNC đúng 1 lần khi mở app
@@ -654,6 +664,9 @@ extern "C" void kudroid_set_log_dir(const char* dir) {
                 dup2(errFd, STDERR_FILENO);
                 setvbuf(stderr, nullptr, _IONBF, 0);
                 close(errFd);
+                // Dòng đầu của stderr.log = build stamp — mọi log file đều
+                // tự nhận diện được commit của bản IPA đang chạy.
+                fprintf(stderr, "[kudroid_core] Build: %s\n", kudroid_build_stamp());
             }
         }
 #endif
@@ -1152,7 +1165,11 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
         char aPath[1200];
         snprintf(aPath, sizeof(aPath), "%s/kudroid_android_logs.txt", g_logDir);
         FILE* afp = fopen(aPath, "w");
-        if (afp) fclose(afp);
+        if (afp) {
+            // Build stamp ở dòng đầu tiên của log phiên chạy APK mới.
+            fprintf(afp, "[KuDroidCore] Build: %s\n", kudroid_build_stamp());
+            fclose(afp);
+        }
 
         snprintf(aPath, sizeof(aPath), "%s/kudroid_crash.log", g_logDir);
         FILE* cfp = fopen(aPath, "w");
@@ -1166,6 +1183,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
             dup2(errFd, STDERR_FILENO);
             setvbuf(stderr, nullptr, _IONBF, 0);
             close(errFd);
+            fprintf(stderr, "[kudroid_core] Build: %s\n", kudroid_build_stamp());
         }
 #endif
     }
