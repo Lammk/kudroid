@@ -40,5 +40,3 @@ tomorrow_tasks.md
 live_iphone.log
 
 .gitignore
-
-src/gpu_test.cpp
