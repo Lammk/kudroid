@@ -1580,23 +1580,95 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                 // ƯU TIÊN 3.5 — JNI VERIFY: tên class KHÔNG nói lên
                                 // gì khi app bị ProGuard obfuscate (a.a.a v.v.).
                                 // Dùng IsAssignableFrom để kiểm tra candidate THẬT
-                                // SỰ extends android.app.Activity. Quét toàn bộ
-                                // danh sách, chọn class Activity đầu tiên tìm thấy.
+                                // SỰ extends android.app.Activity.
+                                //
+                                // BÀI HỌC Braze: vòng verify KHÔNG được lấy Activity
+                                // ĐẦU TIÊN tìm thấy — SDK Activity (push/analytics)
+                                // cũng extends Activity nhưng không render gì → màn
+                                // hình xám. Dùng lại kSdkActivityHints đã khai báo
+                                // ở trên (chấm điểm jar-scan) + chấm điểm như vậy
+                                // rồi chọn điểm cao nhất (loại SDK, ưu tiên package
+                                // ngắn).
+                                auto isSdkOwned = [](const std::string& cls) {
+                                    for (const char* hint : kSdkActivityHints) {
+                                        if (cls.find(hint) != std::string::npos) return true;
+                                    }
+                                    return false;
+                                };
+
                                 if (!targetActivity.empty() &&
                                     kudroid_class_extends_activity(targetActivity.c_str()) != 1) {
                                     appendAndEcho("[kudroid_core] Candidate '" + targetActivity +
                                                   "' does NOT extend Activity (obfuscated?). JNI-verifying all classes...");
                                     targetActivity.clear();
+                                    int verifiedBestScore = -1;
+                                    std::string verifiedBest;
                                     for (const auto& cls : classes) {
                                         std::string dotted = cls;
                                         for (char& c : dotted) if (c == '/') c = '.';
-                                        if (kudroid_class_extends_activity(dotted.c_str()) == 1) {
-                                            targetActivity = dotted;
-                                            appendAndEcho("[kudroid_core] JNI-verified Activity: " + dotted);
-                                            break;
+                                        if (kudroid_class_extends_activity(dotted.c_str()) != 1) continue;
+                                        // Là Activity thật — chấm điểm như trên.
+                                        const size_t depth = static_cast<size_t>(
+                                            std::count(cls.begin(), cls.end(), '/'));
+                                        int score = 100 + static_cast<int>(10 - depth);
+                                        if (!pkgName.empty()) {
+                                            std::string pkgPrefix = pkgName;
+                                            for (char& c : pkgPrefix) if (c == '.') c = '/';
+                                            pkgPrefix += '/';
+                                            if (cls.compare(0, pkgPrefix.size(), pkgPrefix) == 0) score += 50;
+                                        }
+                                        if (isSdkOwned(cls)) score -= 1000;
+                                        appendAndEcho("[kudroid_core]   JNI Activity candidate: " + dotted +
+                                                      " (score=" + std::to_string(score) + ")");
+                                        if (score > verifiedBestScore) {
+                                            verifiedBestScore = score;
+                                            verifiedBest = dotted;
                                         }
                                     }
-                                    if (targetActivity.empty()) {
+                                    if (!verifiedBest.empty() && verifiedBestScore > 0) {
+                                        targetActivity = verifiedBest;
+                                        appendAndEcho("[kudroid_core] JNI-verified best Activity: " + verifiedBest);
+                                    } else if (!verifiedBest.empty()) {
+                                        // Mọi Activity đều thuộc SDK — chọn ít tệ nhất nhưng cảnh báo rõ.
+                                        targetActivity = verifiedBest;
+                                        appendAndEcho("[kudroid_core] WARNING: only SDK Activities found; using least-bad: " + verifiedBest);
+                                    } else {
+                                        appendAndEcho("[kudroid_core] WARNING: no class in classes.jar extends android.app.Activity");
+                                    appendAndEcho("[kudroid_core] Candidate '" + targetActivity +
+                                                  "' does NOT extend Activity (obfuscated?). JNI-verifying all classes...");
+                                    targetActivity.clear();
+                                    int verifiedBestScore = -1;
+                                    std::string verifiedBest;
+                                    for (const auto& cls : classes) {
+                                        std::string dotted = cls;
+                                        for (char& c : dotted) if (c == '/') c = '.';
+                                        if (kudroid_class_extends_activity(dotted.c_str()) != 1) continue;
+                                        // Là Activity thật — chấm điểm như trên.
+                                        const size_t depth = static_cast<size_t>(
+                                            std::count(cls.begin(), cls.end(), '/'));
+                                        int score = 100 + static_cast<int>(10 - depth);
+                                        if (!pkgName.empty()) {
+                                            std::string pkgPrefix = pkgName;
+                                            for (char& c : pkgPrefix) if (c == '.') c = '/';
+                                            pkgPrefix += '/';
+                                            if (cls.compare(0, pkgPrefix.size(), pkgPrefix) == 0) score += 50;
+                                        }
+                                        if (isSdkOwned(cls)) score -= 1000;
+                                        appendAndEcho("[kudroid_core]   JNI Activity candidate: " + dotted +
+                                                      " (score=" + std::to_string(score) + ")");
+                                        if (score > verifiedBestScore) {
+                                            verifiedBestScore = score;
+                                            verifiedBest = dotted;
+                                        }
+                                    }
+                                    if (!verifiedBest.empty() && verifiedBestScore > 0) {
+                                        targetActivity = verifiedBest;
+                                        appendAndEcho("[kudroid_core] JNI-verified best Activity: " + verifiedBest);
+                                    } else if (!verifiedBest.empty()) {
+                                        // Mọi Activity đều thuộc SDK — chọn ít tệ nhất nhưng cảnh báo rõ.
+                                        targetActivity = verifiedBest;
+                                        appendAndEcho("[kudroid_core] WARNING: only SDK Activities found; using least-bad: " + verifiedBest);
+                                    } else {
                                         appendAndEcho("[kudroid_core] WARNING: no class in classes.jar extends android.app.Activity");
                                     }
                                 } else if (!targetActivity.empty()) {
