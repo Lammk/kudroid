@@ -1,0 +1,42 @@
+# Build directories (contain machine-specific CMakeCache paths)
+/build/
+/build-ios/
+/build-test/
+/tests/build/
+docs/
+.freebuff/
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+Makefile
+*.o
+*.a
+*.so
+
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
+build-ios/KuDroid.xcodeproj/
+
+# Avian build output
+third_party/jvm/avian/build/
+
+# Framework build output
+framework/build/
+
+# Test and tool folders (local development & micro-debug only)
+tests/
+tools/
+logs/
+HANDOVER_FOR_CLAUDE_OPUS.md
+
+*.mp3
+
+walkthrough.md
+tomorrow_tasks.md
+live_iphone.log
+
+.gitignore
