@@ -1,8 +1,18 @@
 #pragma once
 
 #include <string>
+#include <cstdint>
 
 namespace kudroid {
+
+// Kết quả parse AndroidManifest.xml (binary AXML).
+struct ManifestInfo {
+    std::string packageName;
+    std::string versionName;
+    std::string versionCode;
+    std::string appLabel;
+    std::string mainActivity; // activity có intent-filter MAIN+LAUNCHER
+};
 
 class APKExtractor {
 public:
@@ -29,6 +39,11 @@ public:
 
     // Trích xuất Application Package ID chuẩn của Android từ APK/Bundle
     static std::string get_package_name(const std::string& apkPath);
+
+    // Parse binary AndroidManifest.xml (AXML) đã giải nén — trả về package,
+    // label, version và LAUNCHER activity (activity có intent-filter
+    // MAIN+LAUNCHER, hoặc activity-alias trỏ tới nó).
+    static ManifestInfo parse_manifest(const std::uint8_t* data, std::size_t size);
 
     static const std::string& lastError();
 };

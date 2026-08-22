@@ -196,13 +196,9 @@ std::string toLower(const std::string& s) {
     return r;
 }
 
-struct ManifestInfo {
-    std::string packageName;
-    std::string versionName;
-    std::string versionCode;
-    std::string appLabel;
-    std::string mainActivity;
-};
+// ManifestInfo giờ là struct public khai báo trong APKExtractor.h — parseAxml
+// điền vào đó, kudroid_bridge gọi parse_manifest() trực tiếp trên AXML đã giải
+// nén để lấy LAUNCHER activity chính xác (thay vì đoán theo tên folder).
 
 static int iconPriority(const std::string& name) {
     if (!endsWithCi(name, ".png") && !endsWithCi(name, ".webp") && !endsWithCi(name, ".jpg") && !endsWithCi(name, ".jpeg")) return -1;
@@ -304,6 +300,30 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
         cur += read32(data, cur + 4);
     }
 
+    // State tìm LAUNCHER activity: manifest chứa NHIỀU <activity>, chỉ
+    // activity (hoặc activity-alias) có <intent-filter> với
+    // <action android:name="android.intent.action.MAIN"> +
+    // <category android:name="android.intent.category.LAUNCHER"> mới là
+    // entry point mà Android launcher mở. Lấy activity đầu tiên như trước
+    // đây là SAI (vd Minecraft: activity đầu tiên không phải launcher).
+    // QUAN TRỌNG: state phải nằm NGOÀI vòng while — AXML chia thành nhiều
+    // chunk (mỗi tag một chunk), khai báo trong loop sẽ reset mỗi chunk.
+    static const char* kActionMain = "android.intent.action.MAIN";
+    static const char* kCategoryLauncher = "android.intent.category.LAUNCHER";
+    std::string currentActivity;   // name của <activity>/<activity-alias> đang duyệt
+    std::string aliasTarget;       // targetActivity của <activity-alias>
+    bool inIntentFilter = false;
+    bool sawActionMain = false;
+    bool sawCategoryLauncher = false;
+    std::string firstActivityName; // fallback khi không có intent-filter nào
+
+    auto commitLauncher = [&](const std::string& name) {
+        if (info.mainActivity.empty() && !name.empty() &&
+            sawActionMain && sawCategoryLauncher) {
+            info.mainActivity = name;
+        }
+    };
+
     while (cur + 8 <= data.size()) {
         const std::uint32_t chunkType = read32(data, cur);
         const std::uint32_t chunkSize = read32(data, cur + 4);
@@ -316,6 +336,19 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
                 const std::uint16_t attrStart = read16(data, cur + 24);
                 const std::uint16_t attrSize = read16(data, cur + 26);
                 const std::uint16_t attrCount = read16(data, cur + 28);
+
+                const bool isActivityTag =
+                    tagName == "activity" || tagName == "activity-alias";
+                if (isActivityTag) {
+                    // Bắt đầu một activity mới — reset state của activity trước.
+                    currentActivity.clear();
+                    aliasTarget.clear();
+                    sawActionMain = false;
+                    sawCategoryLauncher = false;
+                    inIntentFilter = false;
+                } else if (tagName == "intent-filter") {
+                    inIntentFilter = true;
+                }
 
                 std::size_t attrCur = cur + attrStart;
                 for (std::uint16_t a = 0; a < attrCount && attrCur + attrSize <= cur + chunkSize; ++a, attrCur += attrSize) {
@@ -341,15 +374,54 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
                         if (attrName == "versionCode" && info.versionCode.empty()) info.versionCode = attrVal;
                     } else if (tagName == "application") {
                         if (attrName == "label" && info.appLabel.empty() && !attrVal.empty()) info.appLabel = attrVal;
-                    } else if (tagName == "activity") {
-                        if (attrName == "name" && info.mainActivity.empty() && !attrVal.empty()) {
-                            info.mainActivity = attrVal;
+                    } else if (isActivityTag) {
+                        if (attrName == "name" && currentActivity.empty() && !attrVal.empty()) {
+                            currentActivity = attrVal;
+                            if (firstActivityName.empty()) firstActivityName = attrVal;
+                        } else if (tagName == "activity-alias" && attrName == "targetActivity" && !attrVal.empty()) {
+                            aliasTarget = attrVal;
+                        }
+                    } else if (tagName == "action") {
+                        if (inIntentFilter && attrName == "name" && attrVal == kActionMain) {
+                            sawActionMain = true;
+                        }
+                    } else if (tagName == "category") {
+                        if (inIntentFilter && attrName == "name" && attrVal == kCategoryLauncher) {
+                            sawCategoryLauncher = true;
                         }
                     }
+                }
+
+                // Activity-alias trỏ sang activity thật qua targetActivity —
+                // Android launcher mở TARGET, không phải alias.
+                if (tagName == "activity-alias") {
+                    commitLauncher(!aliasTarget.empty() ? aliasTarget : currentActivity);
+                }
+            }
+        } else if (chunkType == 0x00100103) { // RES_XML_END_ELEMENT_TYPE
+            if (cur + 24 <= data.size()) {
+                const std::uint32_t nameIdx = read32(data, cur + 20);
+                const std::string tagName = (nameIdx < stringPool.size()) ? stringPool[nameIdx] : "";
+                if (tagName == "intent-filter") {
+                    inIntentFilter = false;
+                } else if (tagName == "activity" || tagName == "activity-alias") {
+                    // </activity>: nếu intent-filter MAIN+LAUNCHER xuất hiện giữa
+                    // chừng thì đây chính là launcher activity.
+                    commitLauncher(currentActivity);
+                    currentActivity.clear();
+                    sawActionMain = false;
+                    sawCategoryLauncher = false;
+                    inIntentFilter = false;
                 }
             }
         }
         cur += chunkSize;
+    }
+
+    // Fallback: không tìm thấy intent-filter nào (manifest phi chuẩn / obfuscated)
+    // → dùng activity đầu tiên như hành vi cũ, tốt hơn là trả rỗng.
+    if (info.mainActivity.empty() && !firstActivityName.empty()) {
+        info.mainActivity = firstActivityName;
     }
 
     if (!info.mainActivity.empty() && !info.packageName.empty()) {
@@ -810,6 +882,11 @@ bool APKExtractor::extract_bundle(const std::string& containerPath, const std::s
     if (!ok) return false;
     apkLog("Bundle merged into " + targetDirectory);
     return true;
+}
+
+ManifestInfo APKExtractor::parse_manifest(const std::uint8_t* data, std::size_t size) {
+    if (!data || size == 0) return ManifestInfo{};
+    return parseAxml(std::vector<std::uint8_t>(data, data + size));
 }
 
 std::string APKExtractor::get_package_name(const std::string& apkPath) {

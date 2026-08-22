@@ -1416,31 +1416,59 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                         
                         std::string targetActivity = "";
                         std::string pkgName = "";
-                        std::filesystem::path infoPath = appDir / "app_info.json";
-                        if (std::filesystem::exists(infoPath)) {
-                            std::ifstream f(infoPath);
-                            std::string line;
-                            while (std::getline(f, line)) {
-                                auto posAct = line.find("\"main_activity\": \"");
-                                if (posAct != std::string::npos) {
-                                    auto start = posAct + 18;
-                                    auto end = line.find("\"", start);
-                                    if (end != std::string::npos) {
-                                        std::string act = line.substr(start, end - start);
-                                        if (!act.empty()) targetActivity = act;
+
+                        // ƯU TIÊN 1: parse AndroidManifest.xml ĐÃ GIẢI NÉN trong
+                        // appDir — nguồn chính xác duy nhất. Log cũ cho thấy
+                        // app_info.json có thể thiếu/stale (Target Activity bị
+                        // đoán "Minecraft.MainActivity" trong khi package thật
+                        // là com.mojang.minecraftpe) → ClassNotFoundException.
+                        const auto manifestPath = appDir / "AndroidManifest.xml";
+                        if (std::filesystem::exists(manifestPath)) {
+                            std::ifstream mf(manifestPath, std::ios::binary);
+                            if (mf) {
+                                std::vector<std::uint8_t> axml(
+                                    (std::istreambuf_iterator<char>(mf)),
+                                    std::istreambuf_iterator<char>());
+                                kudroid::ManifestInfo mi =
+                                    kudroid::APKExtractor::parse_manifest(axml.data(), axml.size());
+                                if (!mi.mainActivity.empty()) targetActivity = mi.mainActivity;
+                                if (!mi.packageName.empty()) pkgName = mi.packageName;
+                            }
+                        }
+
+                        // ƯU TIÊN 2: app_info.json do extractor ghi lúc cài đặt.
+                        if (targetActivity.empty()) {
+                            std::filesystem::path infoPath = appDir / "app_info.json";
+                            if (std::filesystem::exists(infoPath)) {
+                                std::ifstream f(infoPath);
+                                std::string line;
+                                while (std::getline(f, line)) {
+                                    auto posAct = line.find("\"main_activity\": \"");
+                                    if (posAct != std::string::npos) {
+                                        auto start = posAct + 18;
+                                        auto end = line.find("\"", start);
+                                        if (end != std::string::npos) {
+                                            std::string act = line.substr(start, end - start);
+                                            if (!act.empty()) targetActivity = act;
+                                        }
                                     }
-                                }
-                                auto posPkg = line.find("\"package\": \"");
-                                if (posPkg != std::string::npos) {
-                                    auto start = posPkg + 12;
-                                    auto end = line.find("\"", start);
-                                    if (end != std::string::npos) {
-                                        pkgName = line.substr(start, end - start);
+                                    auto posPkg = line.find("\"package\": \"");
+                                    if (posPkg != std::string::npos) {
+                                        auto start = posPkg + 12;
+                                        auto end = line.find("\"", start);
+                                        if (end != std::string::npos) {
+                                            pkgName = line.substr(start, end - start);
+                                        }
                                     }
                                 }
                             }
                         }
 
+                        // ƯU TIÊN 3: đoán theo package/tên app — CHỈ khi cả hai
+                        // nguồn trên thất bại. Lưu ý: đoán "<base>.MainActivity"
+                        // hầu như luôn sai với app lớn (package thật khác tên
+                        // folder), nhưng vẫn tốt hơn rỗng vì ActivityThread sẽ
+                        // thử chuỗi candidate rồi rơi vào fallback UI.
                         if (targetActivity.empty()) {
                             if (!pkgName.empty()) {
                                 if (pkgName.find("zarchiver") != std::string::npos) {

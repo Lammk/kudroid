@@ -187,4 +187,13 @@ else()
         target_link_libraries(test_shims PRIVATE kudroid_core)
         target_include_directories(test_shims PRIVATE include)
     endif()
+
+    # Host-side test for AndroidManifest.xml (AXML) LAUNCHER-activity parsing.
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_manifest_parse.cpp")
+        add_executable(test_manifest_parse
+            tests/test_manifest_parse.cpp
+        )
+        target_link_libraries(test_manifest_parse PRIVATE kudroid_core)
+        target_include_directories(test_manifest_parse PRIVATE include)
+    endif()
 endif()
