@@ -1339,6 +1339,22 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                 return globalLibraryManager().resolveGlobalSymbol(name);
             };
 
+            // AOT + tạo JVM PHẢI xong trước khi dlopen bất kỳ .so nào: static
+            // initializer của libminecraftpe.so gọi JNI_GetCreatedJavaVMs → JVM
+            // sẽ được tạo với classpath rỗng, và DestroyJavaVM để tạo lại sau đó
+            // treo vĩnh viễn vì thread guest đã attach vào VM.
+            const std::filesystem::path aotCacheDir = std::filesystem::path(remapper.androidRoot()) / "data/dalvik-cache" / resolvedAppName;
+            std::string aotError;
+            const std::string classesJar = kudroid::DexAotCache::translate_dex_if_needed(appDir.string(), aotCacheDir.string(), &aotError);
+
+            if (!classesJar.empty()) {
+                appendAndEcho("[kudroid_core] DEX→JAR AOT ready: " + classesJar);
+                kudroid_jni_init_jvm("", classesJar.c_str());
+            } else {
+                appendAndEcho("[kudroid_core] WARNING: DEX→JAR AOT skipped (" + aotError + "); JVM running without app classpath.");
+                kudroid_jni_init_jvm("", "");
+            }
+
             std::vector<std::string> soFiles;
             for (const auto& entry : std::filesystem::directory_iterator(libDir)) {
                 if (entry.path().extension() == ".so") {
@@ -1365,18 +1381,6 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                     appendAndEcho(mapLine);
                 }
 
-                const std::filesystem::path aotCacheDir = std::filesystem::path(remapper.androidRoot()) / "data/dalvik-cache" / resolvedAppName;
-                std::string aotError;
-                const std::string classesJar = kudroid::DexAotCache::translate_dex_if_needed(appDir.string(), aotCacheDir.string(), &aotError);
-
-                if (!classesJar.empty()) {
-                    appendAndEcho("[kudroid_core] DEX→JAR AOT ready: " + classesJar);
-                    kudroid_jni_init_jvm("", classesJar.c_str());
-                } else {
-                    appendAndEcho("[kudroid_core] WARNING: DEX→JAR AOT skipped (" + aotError + "); JVM running without app classpath.");
-                    kudroid_jni_init_jvm("", "");
-                }
-                
                 JavaVM* jvm = kudroid_jni_get_javavm();
                 if (!jvm) {
                     appendAndEcho("[kudroid_core] ERROR: Avian JVM failed to initialize.");
@@ -1388,9 +1392,11 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                     auto native_activity_create = reinterpret_cast<void (*)(ANativeActivity*, void*, size_t)>(
                         manager.resolveAppSymbol("ANativeActivity_onCreate")
                     );
-                    if (native_activity_create) {
-                        appendAndEcho("[kudroid_core] Native Game Activity detected.");
-                        
+
+                    // JNI_OnLoad là nơi game register native method và khởi tạo
+                    // engine/render thread — phải gọi cho MỌI loại app, kể cả app
+                    // Java Activity, không chỉ NativeActivity.
+                    {
                         auto jniOnLoads = manager.resolveAllSymbols("JNI_OnLoad");
                         if (!jniOnLoads.empty()) {
                             bionic_init_main_thread_tls();
@@ -1414,25 +1420,31 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                             for (const auto& [libName, addr] : sortedLoads) {
                                 auto jni_onload = reinterpret_cast<jint (*)(JavaVM*, void*)>(addr);
                                 appendAndEcho("[kudroid_core] Invoking JNI_OnLoad in " + libName);
-                                
+
                                 JNIEnv* env = nullptr;
                                 if (jvm->GetEnv((void**)&env, 0x00010006 /* JNI_VERSION_1_6 */) == JNI_OK && env) {
                                     if (env->ExceptionCheck()) env->ExceptionClear();
                                 }
-                                
+
                                 try {
                                     jint version = jni_onload(jvm, nullptr);
                                     appendAndEcho("[kudroid_core] JNI_OnLoad(" + libName + ") returned version: " + std::to_string(version));
                                 } catch (...) {
                                     appendAndEcho("[kudroid_core] WARNING: Native exception caught while running JNI_OnLoad in " + libName);
                                 }
-                                
+
                                 if (env && env->ExceptionCheck()) {
                                     appendAndEcho("[kudroid_core] Cleared pending Java exception from JNI_OnLoad in " + libName);
                                     env->ExceptionClear();
                                 }
                             }
+                        } else {
+                            appendAndEcho("[kudroid_core] WARNING: no JNI_OnLoad found in any loaded library.");
                         }
+                    }
+
+                    if (native_activity_create) {
+                        appendAndEcho("[kudroid_core] Native Game Activity detected.");
 
                         appendAndEcho("[kudroid_core] Found ANativeActivity_onCreate, invoking...");
 

@@ -7,6 +7,7 @@
 #include <cstring>
 #include <cstdarg>
 #include <mutex>
+#include <atomic>
 #include <sys/stat.h>
 #include <string>
 #include <functional>
@@ -520,6 +521,11 @@ static void log_jni(const char* fmt, ...) {
 // re-init khi AOT jar khác — Avian không có append classpath lúc runtime).
 static std::string g_appClasspath;
 
+// VM đã được trao cho code guest (JNI_OnLoad / JNI_GetCreatedJavaVMs / attach
+// thread) — từ lúc này DestroyJavaVM sẽ block vĩnh viễn chờ thread guest
+// detach, nên không được re-init nữa.
+static std::atomic<bool> g_vmHandedToGuest{false};
+
 void kudroid_jni_init_jvm(const char* bootclasspath, const char* classpath) {
     (void)bootclasspath; // avian luôn sử dụng tệp jar đường dẫn lớp được nhúng
     std::lock_guard<std::mutex> lock(g_jvm_mutex);
@@ -530,6 +536,13 @@ void kudroid_jni_init_jvm(const char* bootclasspath, const char* classpath) {
         // thì phá VM tạo lại — nếu không, mọi FindClass class ứng dụng fail
         // → fbjni ném JniException → populateWhat đệ quy → crash/hang.
         if (classpath && classpath[0] != '\0' && g_appClasspath != classpath) {
+            if (g_vmHandedToGuest.load()) {
+                log_jni("WARNING: skipping JVM re-init — VM already handed to guest code; "
+                        "DestroyJavaVM would hang waiting for attached guest threads. "
+                        "current classpath='%s' requested='%s'",
+                        g_appClasspath.c_str(), classpath);
+                return;
+            }
             log_jni("Re-initializing JVM with app classpath: %s", classpath);
             if (g_vm->DestroyJavaVM() != 0) {
                 log_jni("WARNING: DestroyJavaVM returned non-zero");
@@ -753,6 +766,7 @@ void kudroid_jni_destroy_jvm(void) {
 extern "C" JavaVM* kudroid_jni_get_javavm(void) {
     kudroid_jni_init_jvm("", "");
     std::lock_guard<std::mutex> lock(g_jvm_mutex);
+    if (g_vm) g_vmHandedToGuest.store(true);
     return g_vm;
 }
 
@@ -811,6 +825,7 @@ jint kudroid_jni_get_env(JavaVM* vm, void** env, jint version) {
     if (!g_vm || !env) {
         return JNI_ERR;
     }
+    g_vmHandedToGuest.store(true);
 
     // jnienv là trên mỗi luồng trong một jvm thực. nếu luồng đang gọi không phải là
     // luồng đã tạo máy ảo, hãy gắn nó để lấy jnienv của riêng nó.
