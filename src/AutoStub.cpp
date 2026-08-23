@@ -48,7 +48,12 @@ void beUtf8(std::vector<std::uint8_t>& v, const char* s) {
 }
 
 bool isAndroidName(const std::string& slash) {
-    return slash.compare(0, 8, "android/") == 0 || slash.compare(0, 9, "androidx/") == 0;
+    return slash.compare(0, 8, "android/") == 0 ||
+           slash.compare(0, 9, "androidx/") == 0 ||
+           slash.compare(0, 6, "javax/") == 0 ||
+           slash.compare(0, 4, "org/") == 0 ||
+           slash.compare(0, 10, "java/util/") == 0 ||
+           slash.compare(0, 14, "java/security/") == 0;
 }
 std::string toDotted(std::string s) {
     for (char& c : s) if (c == '/') c = '.';

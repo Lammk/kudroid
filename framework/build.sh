@@ -42,9 +42,9 @@ rm -rf "$BUILD_DIR"
 mkdir -p "$CLASSES_DIR"
 
 # thu thập tất cả các tệp .java (tránh mapfile; bash mặc định của macos là 3.2).
-JAVA_FILES=$(find "$SRC_DIR" -name '*.java' | sort)
+JAVA_FILES=$(find "$FRAMEWORK_DIR" -name '*.java' -not -path "$BUILD_DIR/*" | sort)
 if [[ -z "$JAVA_FILES" ]]; then
-    echo "ERROR: No .java files found under $SRC_DIR" >&2
+    echo "ERROR: No .java files found under $FRAMEWORK_DIR" >&2
     exit 1
 fi
 
