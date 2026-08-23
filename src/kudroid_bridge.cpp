@@ -1634,42 +1634,6 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                         appendAndEcho("[kudroid_core] WARNING: only SDK Activities found; using least-bad: " + verifiedBest);
                                     } else {
                                         appendAndEcho("[kudroid_core] WARNING: no class in classes.jar extends android.app.Activity");
-                                    appendAndEcho("[kudroid_core] Candidate '" + targetActivity +
-                                                  "' does NOT extend Activity (obfuscated?). JNI-verifying all classes...");
-                                    targetActivity.clear();
-                                    int verifiedBestScore = -1;
-                                    std::string verifiedBest;
-                                    for (const auto& cls : classes) {
-                                        std::string dotted = cls;
-                                        for (char& c : dotted) if (c == '/') c = '.';
-                                        if (kudroid_class_extends_activity(dotted.c_str()) != 1) continue;
-                                        // Là Activity thật — chấm điểm như trên.
-                                        const size_t depth = static_cast<size_t>(
-                                            std::count(cls.begin(), cls.end(), '/'));
-                                        int score = 100 + static_cast<int>(10 - depth);
-                                        if (!pkgName.empty()) {
-                                            std::string pkgPrefix = pkgName;
-                                            for (char& c : pkgPrefix) if (c == '.') c = '/';
-                                            pkgPrefix += '/';
-                                            if (cls.compare(0, pkgPrefix.size(), pkgPrefix) == 0) score += 50;
-                                        }
-                                        if (isSdkOwned(cls)) score -= 1000;
-                                        appendAndEcho("[kudroid_core]   JNI Activity candidate: " + dotted +
-                                                      " (score=" + std::to_string(score) + ")");
-                                        if (score > verifiedBestScore) {
-                                            verifiedBestScore = score;
-                                            verifiedBest = dotted;
-                                        }
-                                    }
-                                    if (!verifiedBest.empty() && verifiedBestScore > 0) {
-                                        targetActivity = verifiedBest;
-                                        appendAndEcho("[kudroid_core] JNI-verified best Activity: " + verifiedBest);
-                                    } else if (!verifiedBest.empty()) {
-                                        // Mọi Activity đều thuộc SDK — chọn ít tệ nhất nhưng cảnh báo rõ.
-                                        targetActivity = verifiedBest;
-                                        appendAndEcho("[kudroid_core] WARNING: only SDK Activities found; using least-bad: " + verifiedBest);
-                                    } else {
-                                        appendAndEcho("[kudroid_core] WARNING: no class in classes.jar extends android.app.Activity");
                                     }
                                 } else if (!targetActivity.empty()) {
                                     appendAndEcho("[kudroid_core] JNI-verified: '" + targetActivity + "' extends Activity ✓");
