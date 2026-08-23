@@ -14,11 +14,50 @@ import android.graphics.Rect;
  */
 public class SurfaceView extends View implements SurfaceHolder.Callback2 {
 
-    private final java.util.ArrayList<SurfaceHolder.Callback> mCallbacks =
-        new java.util.ArrayList<SurfaceHolder.Callback>();
+    private SurfaceHolder mHolder;
 
-    private final SurfaceHolder mHolder = new SurfaceHolder() {
-        private Surface mSurface = new Surface();
+    public SurfaceView(Context context) {
+        super(context);
+        init();
+    }
+
+    private void init() {
+        mHolder = new SimpleSurfaceHolder(this);
+    }
+
+    public SurfaceHolder getHolder() {
+        if (mHolder == null) {
+            mHolder = new SimpleSurfaceHolder(this);
+        }
+        return mHolder;
+    }
+
+    public void setZOrderMediaOverlay(boolean isMediaOverlay) {}
+    public void setZOrderOnTop(boolean onTop) {}
+
+    @Override
+    public void surfaceCreated(SurfaceHolder holder) {}
+
+    @Override
+    public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {}
+
+    @Override
+    public void surfaceDestroyed(SurfaceHolder holder) {}
+
+    @Override
+    public void surfaceRedrawNeeded(SurfaceHolder holder) {}
+
+    @Override
+    protected void onDraw(Canvas canvas) {}
+
+    private static class SimpleSurfaceHolder implements SurfaceHolder {
+        private final View mView;
+        private final Surface mSurface = new Surface();
+        private final java.util.ArrayList<Callback> mCallbacks = new java.util.ArrayList<Callback>();
+
+        public SimpleSurfaceHolder(View view) {
+            mView = view;
+        }
 
         @Override
         public void addCallback(Callback callback) {
@@ -29,14 +68,14 @@ public class SurfaceView extends View implements SurfaceHolder.Callback2 {
                 }
             }
             try {
-                android.util.Log.i("SurfaceView", "dispatching surfaceCreated & surfaceChanged to " + callback.getClass().getName());
+                android.util.Log.i("SurfaceHolder", "addCallback -> dispatching surfaceCreated/Changed to " + callback.getClass().getName());
                 callback.surfaceCreated(this);
                 callback.surfaceChanged(this, 0, 1080, 1920);
                 if (callback instanceof Callback2) {
                     ((Callback2) callback).surfaceRedrawNeeded(this);
                 }
             } catch (Throwable t) {
-                android.util.Log.e("SurfaceView", "Error in surface callback: " + t);
+                android.util.Log.e("SurfaceHolder", "Error in callback dispatch: " + t);
             }
         }
 
@@ -55,130 +94,31 @@ public class SurfaceView extends View implements SurfaceHolder.Callback2 {
 
         @Override
         public Rect getSurfaceFrame() {
-            return new Rect(0, 0, getWidth(), getHeight());
+            int w = mView != null ? mView.getWidth() : 1080;
+            int h = mView != null ? mView.getHeight() : 1920;
+            return new Rect(0, 0, w > 0 ? w : 1080, h > 0 ? h : 1920);
         }
 
         @Override
-        public boolean isCreating() {
-            return false;
-        }
+        public boolean isCreating() { return false; }
+        @Override
+        public void setType(int type) {}
+        @Override
+        public void setFixedSize(int width, int height) {}
+        @Override
+        public void setSizeFromLayout() {}
+        @Override
+        public void setFormat(int format) {}
+        @Override
+        public void setKeepScreenOn(boolean screenOn) {}
 
         @Override
-        public void setType(int type) {
-        }
-
+        public Canvas lockCanvas() { return mSurface.lockCanvas(); }
         @Override
-        public void setFixedSize(int width, int height) {
-        }
-
+        public Canvas lockCanvas(Rect dirty) { return mSurface.lockCanvas(dirty); }
         @Override
-        public void setSizeFromLayout() {
-        }
-
+        public void unlockCanvasAndPost(Canvas canvas) { mSurface.unlockCanvasAndPost(canvas); }
         @Override
-        public void setFormat(int format) {
-        }
-
-        @Override
-        public void setKeepScreenOn(boolean screenOn) {
-        }
-
-        @Override
-        public Canvas lockCanvas() {
-            return mSurface.lockCanvas();
-        }
-
-        @Override
-        public Canvas lockCanvas(Rect dirty) {
-            return mSurface.lockCanvas(dirty);
-        }
-
-        @Override
-        public void unlockCanvasAndPost(Canvas canvas) {
-            mSurface.unlockCanvasAndPost(canvas);
-        }
-
-        @Override
-        public Canvas lockCanvasAndroidOnly(Rect dirty) {
-            return mSurface.lockCanvas(dirty);
-        }
-    };
-
-    public SurfaceView(Context context) {
-        super(context);
-    }
-
-    /** Trả về holder quản lý surface của view này. */
-    public SurfaceHolder getHolder() {
-        return mHolder;
-    }
-
-    /** Điều chỉnh z-order so với window (game overlay). */
-    public void setZOrderMediaOverlay(boolean isMediaOverlay) {
-    }
-
-    public void setZOrderOnTop(boolean onTop) {
-    }
-
-    // ── SurfaceHolder.Callback2 ────────────────────────────────────────────
-    // No-op mặc định; MainActivity override các method này.
-
-    @Override
-    public void surfaceCreated(SurfaceHolder holder) {
-    }
-
-    @Override
-    public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
-    }
-
-    @Override
-    public void surfaceDestroyed(SurfaceHolder holder) {
-    }
-
-    @Override
-    public void surfaceRedrawNeeded(SurfaceHolder holder) {
-    }
-
-    public void dispatchSurfaceCreated() {
-        Object[] cbs;
-        synchronized (mCallbacks) {
-            cbs = mCallbacks.toArray();
-        }
-        for (Object obj : cbs) {
-            if (obj instanceof SurfaceHolder.Callback) {
-                SurfaceHolder.Callback cb = (SurfaceHolder.Callback) obj;
-                try {
-                    cb.surfaceCreated(mHolder);
-                    cb.surfaceChanged(mHolder, 0, 1080, 1920);
-                    if (cb instanceof SurfaceHolder.Callback2) {
-                        ((SurfaceHolder.Callback2) cb).surfaceRedrawNeeded(mHolder);
-                    }
-                } catch (Throwable t) {
-                    android.util.Log.e("SurfaceView", "Error in dispatchSurfaceCreated: " + t);
-                }
-            }
-        }
-    }
-
-    public void dispatchSurfaceChanged(int width, int height) {
-        Object[] cbs;
-        synchronized (mCallbacks) {
-            cbs = mCallbacks.toArray();
-        }
-        for (Object obj : cbs) {
-            if (obj instanceof SurfaceHolder.Callback) {
-                SurfaceHolder.Callback cb = (SurfaceHolder.Callback) obj;
-                try {
-                    cb.surfaceChanged(mHolder, 0, width, height);
-                } catch (Throwable t) {
-                    android.util.Log.e("SurfaceView", "Error in dispatchSurfaceChanged: " + t);
-                }
-            }
-        }
-    }
-
-    @Override
-    protected void onDraw(Canvas canvas) {
-        // Rendering thật do native đảm nhiệm.
+        public Canvas lockCanvasAndroidOnly(Rect dirty) { return mSurface.lockCanvas(dirty); }
     }
 }
