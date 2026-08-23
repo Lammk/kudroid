@@ -391,8 +391,11 @@ int AutoStub::build_stub_jar(const std::string& appJarPath,
     for (const auto& e : entries) {
         if (e.name.size() < 7 || e.name.compare(e.name.size() - 6, 6, ".class") != 0) continue;
         if (isAndroidName(e.name)) {
+            // Ghi nhận là CÓ SẴN, nhưng VẪN PHẢI PARSE tiếp bên dưới:
+            // chính các class framework (Paint, Canvas...) là nơi tham chiếu
+            // những class khác còn thiếu (PorterDuffColorFilter...). Bỏ qua
+            // parse ở đây = mất toàn bộ chuỗi tham chiếu từ framework.
             present.insert(toDotted(e.name.substr(0, e.name.size() - 6)));
-            continue;
         }
         std::vector<std::uint8_t> bytes;
         if (!extractEntry(f, e, bytes)) continue;
