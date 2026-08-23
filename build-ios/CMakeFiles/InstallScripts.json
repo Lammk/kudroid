@@ -1,8 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"/home/kuzei/Documents/Kudroid/build-ios/cmake_install.cmake",
-		"/home/kuzei/Documents/Kudroid/build-ios/third_party/jvm/miniJVM/minijvm/c/cmake_install.cmake"
-	],
-	"Parallel" : false
-}
