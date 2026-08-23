@@ -94,16 +94,6 @@ public class SurfaceView extends View implements SurfaceHolder.Callback2 {
                     mCallbacks.add(callback);
                 }
             }
-            try {
-                android.util.Log.i("SurfaceHolder", "addCallback -> dispatching surfaceCreated/Changed to " + callback.getClass().getName());
-                callback.surfaceCreated(this);
-                callback.surfaceChanged(this, 0, 1080, 1920);
-                if (callback instanceof Callback2) {
-                    ((Callback2) callback).surfaceRedrawNeeded(this);
-                }
-            } catch (Throwable t) {
-                android.util.Log.e("SurfaceHolder", "Error in callback dispatch: " + t);
-            }
         }
 
         @Override
