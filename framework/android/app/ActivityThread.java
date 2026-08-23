@@ -197,7 +197,34 @@ public final class ActivityThread {
                 mInitialActivity.onStart();
                 android.util.Log.i("ActivityThread", "Calling onResume()...");
                 mInitialActivity.onResume();
-                mInitialActivity.renderViewHierarchy();
+
+                // Nếu Activity (như MainActivity của Minecraft) implement SurfaceHolder.Callback:
+                // Tự động kích hoạt chu trình surfaceCreated -> surfaceChanged để engine đồ họa
+                // native (libminecraftpe.so / EGL) bắt đầu vẽ lên ANativeWindow (CAMetalLayer)!
+                if (mInitialActivity instanceof android.view.SurfaceHolder.Callback) {
+                    android.view.SurfaceHolder.Callback cb = (android.view.SurfaceHolder.Callback) mInitialActivity;
+                    android.view.SurfaceHolder holder = null;
+                    if (mInitialActivity.getContentView() instanceof android.view.SurfaceView) {
+                        holder = ((android.view.SurfaceView) mInitialActivity.getContentView()).getHolder();
+                    } else {
+                        android.view.SurfaceView sv = new android.view.SurfaceView(mInitialActivity);
+                        holder = sv.getHolder();
+                    }
+                    android.util.Log.i("ActivityThread", "Activity is SurfaceHolder.Callback -> triggering surfaceCreated & surfaceChanged");
+                    try {
+                        cb.surfaceCreated(holder);
+                        cb.surfaceChanged(holder, 0, 1080, 1920);
+                        if (cb instanceof android.view.SurfaceHolder.Callback2) {
+                            ((android.view.SurfaceHolder.Callback2) cb).surfaceRedrawNeeded(holder);
+                        }
+                    } catch (Throwable t) {
+                        android.util.Log.e("ActivityThread", "Error triggering surface callbacks on Activity: " + t);
+                    }
+                }
+
+                if (mInitialActivity.getContentView() != null) {
+                    mInitialActivity.renderViewHierarchy();
+                }
                 android.util.Log.i("ActivityThread", "Activity launch complete! UI is live and rendered to Metal canvas.");
             } catch (Throwable t) {
                 android.util.Log.e("ActivityThread", "NON-FATAL in Activity lifecycle: " + t.toString());

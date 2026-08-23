@@ -275,17 +275,22 @@ public class Activity extends ContextThemeWrapper {
         return false;
     }
 
+    public android.view.View getContentView() {
+        return mContentView;
+    }
+
     /**
      * vẽ toàn bộ cây view hierarchy lên màn hình Metal.
      */
     public void renderViewHierarchy() {
         if (mContentView == null) {
-            setContentView(0);
             return;
         }
         try {
             android.graphics.Canvas canvas = new android.graphics.Canvas();
-            canvas.drawColor(0xFF181818);
+            if (!(mContentView instanceof android.view.SurfaceView)) {
+                canvas.drawColor(0xFF181818);
+            }
             mContentView.layout(0, 0, canvas.getWidth(), canvas.getHeight());
             mContentView.draw(canvas);
             canvas.flush();

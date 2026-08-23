@@ -14,16 +14,34 @@ import android.graphics.Rect;
  */
 public class SurfaceView extends View implements SurfaceHolder.Callback2 {
 
+    private final java.util.List<SurfaceHolder.Callback> mCallbacks =
+        new java.util.concurrent.CopyOnWriteArrayList<SurfaceHolder.Callback>();
+
     private final SurfaceHolder mHolder = new SurfaceHolder() {
         private Surface mSurface = new Surface();
 
         @Override
         public void addCallback(Callback callback) {
-            // MainActivity tự là Callback — đăng ký lại chính nó là no-op an toàn.
+            if (callback != null && !mCallbacks.contains(callback)) {
+                mCallbacks.add(callback);
+                try {
+                    android.util.Log.i("SurfaceView", "dispatching surfaceCreated & surfaceChanged to " + callback.getClass().getName());
+                    callback.surfaceCreated(this);
+                    callback.surfaceChanged(this, 0, 1080, 1920);
+                    if (callback instanceof Callback2) {
+                        ((Callback2) callback).surfaceRedrawNeeded(this);
+                    }
+                } catch (Throwable t) {
+                    android.util.Log.e("SurfaceView", "Error in surface callback: " + t);
+                }
+            }
         }
 
         @Override
         public void removeCallback(Callback callback) {
+            if (callback != null) {
+                mCallbacks.remove(callback);
+            }
         }
 
         @Override
@@ -115,6 +133,30 @@ public class SurfaceView extends View implements SurfaceHolder.Callback2 {
 
     @Override
     public void surfaceRedrawNeeded(SurfaceHolder holder) {
+    }
+
+    public void dispatchSurfaceCreated() {
+        for (SurfaceHolder.Callback cb : mCallbacks) {
+            try {
+                cb.surfaceCreated(mHolder);
+                cb.surfaceChanged(mHolder, 0, 1080, 1920);
+                if (cb instanceof SurfaceHolder.Callback2) {
+                    ((SurfaceHolder.Callback2) cb).surfaceRedrawNeeded(mHolder);
+                }
+            } catch (Throwable t) {
+                android.util.Log.e("SurfaceView", "Error in dispatchSurfaceCreated: " + t);
+            }
+        }
+    }
+
+    public void dispatchSurfaceChanged(int width, int height) {
+        for (SurfaceHolder.Callback cb : mCallbacks) {
+            try {
+                cb.surfaceChanged(mHolder, 0, width, height);
+            } catch (Throwable t) {
+                android.util.Log.e("SurfaceView", "Error in dispatchSurfaceChanged: " + t);
+            }
+        }
     }
 
     @Override
