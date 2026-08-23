@@ -14,32 +14,36 @@ import android.graphics.Rect;
  */
 public class SurfaceView extends View implements SurfaceHolder.Callback2 {
 
-    private final java.util.List<SurfaceHolder.Callback> mCallbacks =
-        new java.util.concurrent.CopyOnWriteArrayList<SurfaceHolder.Callback>();
+    private final java.util.ArrayList<SurfaceHolder.Callback> mCallbacks =
+        new java.util.ArrayList<SurfaceHolder.Callback>();
 
     private final SurfaceHolder mHolder = new SurfaceHolder() {
         private Surface mSurface = new Surface();
 
         @Override
         public void addCallback(Callback callback) {
-            if (callback != null && !mCallbacks.contains(callback)) {
-                mCallbacks.add(callback);
-                try {
-                    android.util.Log.i("SurfaceView", "dispatching surfaceCreated & surfaceChanged to " + callback.getClass().getName());
-                    callback.surfaceCreated(this);
-                    callback.surfaceChanged(this, 0, 1080, 1920);
-                    if (callback instanceof Callback2) {
-                        ((Callback2) callback).surfaceRedrawNeeded(this);
-                    }
-                } catch (Throwable t) {
-                    android.util.Log.e("SurfaceView", "Error in surface callback: " + t);
+            if (callback == null) return;
+            synchronized (mCallbacks) {
+                if (!mCallbacks.contains(callback)) {
+                    mCallbacks.add(callback);
                 }
+            }
+            try {
+                android.util.Log.i("SurfaceView", "dispatching surfaceCreated & surfaceChanged to " + callback.getClass().getName());
+                callback.surfaceCreated(this);
+                callback.surfaceChanged(this, 0, 1080, 1920);
+                if (callback instanceof Callback2) {
+                    ((Callback2) callback).surfaceRedrawNeeded(this);
+                }
+            } catch (Throwable t) {
+                android.util.Log.e("SurfaceView", "Error in surface callback: " + t);
             }
         }
 
         @Override
         public void removeCallback(Callback callback) {
-            if (callback != null) {
+            if (callback == null) return;
+            synchronized (mCallbacks) {
                 mCallbacks.remove(callback);
             }
         }
@@ -136,25 +140,39 @@ public class SurfaceView extends View implements SurfaceHolder.Callback2 {
     }
 
     public void dispatchSurfaceCreated() {
-        for (SurfaceHolder.Callback cb : mCallbacks) {
-            try {
-                cb.surfaceCreated(mHolder);
-                cb.surfaceChanged(mHolder, 0, 1080, 1920);
-                if (cb instanceof SurfaceHolder.Callback2) {
-                    ((SurfaceHolder.Callback2) cb).surfaceRedrawNeeded(mHolder);
+        Object[] cbs;
+        synchronized (mCallbacks) {
+            cbs = mCallbacks.toArray();
+        }
+        for (Object obj : cbs) {
+            if (obj instanceof SurfaceHolder.Callback) {
+                SurfaceHolder.Callback cb = (SurfaceHolder.Callback) obj;
+                try {
+                    cb.surfaceCreated(mHolder);
+                    cb.surfaceChanged(mHolder, 0, 1080, 1920);
+                    if (cb instanceof SurfaceHolder.Callback2) {
+                        ((SurfaceHolder.Callback2) cb).surfaceRedrawNeeded(mHolder);
+                    }
+                } catch (Throwable t) {
+                    android.util.Log.e("SurfaceView", "Error in dispatchSurfaceCreated: " + t);
                 }
-            } catch (Throwable t) {
-                android.util.Log.e("SurfaceView", "Error in dispatchSurfaceCreated: " + t);
             }
         }
     }
 
     public void dispatchSurfaceChanged(int width, int height) {
-        for (SurfaceHolder.Callback cb : mCallbacks) {
-            try {
-                cb.surfaceChanged(mHolder, 0, width, height);
-            } catch (Throwable t) {
-                android.util.Log.e("SurfaceView", "Error in dispatchSurfaceChanged: " + t);
+        Object[] cbs;
+        synchronized (mCallbacks) {
+            cbs = mCallbacks.toArray();
+        }
+        for (Object obj : cbs) {
+            if (obj instanceof SurfaceHolder.Callback) {
+                SurfaceHolder.Callback cb = (SurfaceHolder.Callback) obj;
+                try {
+                    cb.surfaceChanged(mHolder, 0, width, height);
+                } catch (Throwable t) {
+                    android.util.Log.e("SurfaceView", "Error in dispatchSurfaceChanged: " + t);
+                }
             }
         }
     }
