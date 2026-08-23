@@ -13,8 +13,13 @@ static void app_log(const char* fmt, ...) {
     kudroid_android_log_message(4 /* INFO */, "KuDroidApp", buf);
 }
 
-// khởi chạy activity thông qua activitythread để có looper xử lý vòng đời
-extern "C" void kudroid_launch_java_activity(JavaVM* vm, const char* activityName) {
+// khởi chạy activity thông qua activitythread để có looper xử lý vòng đời.
+// extraCandidates: danh sách tên class dự phòng (đã verify ở tầng C++),
+// ActivityThread sẽ thử lần lượt nếu candidate chính không load được —
+// tổng quát cho mọi app, không hardcode tên riêng.
+extern "C" void kudroid_launch_java_activity(JavaVM* vm, const char* activityName,
+                                             const char* const* extraCandidates,
+                                             int extraCandidateCount) {
     app_log("kudroid_launch_java_activity: requesting launch for %s", activityName ? activityName : "NULL");
     if (!vm || !activityName) return;
 
@@ -60,12 +65,23 @@ extern "C" void kudroid_launch_java_activity(JavaVM* vm, const char* activityNam
         return;
     }
     
-    // truyền tên activity vào mảng tham số cho hàm main
+    // Truyền args cho main(String[]): [0] = candidate chính,
+    // [1..] = fallback candidates (đã verify). Java side tự sinh thêm
+    // biến thể đoán từ package prefix nếu cần.
     jclass stringClass = env->FindClass("java/lang/String");
-    jobjectArray args = env->NewObjectArray(1, stringClass, nullptr);
+    const int totalArgs = 1 + (extraCandidates ? extraCandidateCount : 0);
+    jobjectArray args = env->NewObjectArray(totalArgs, stringClass, nullptr);
     jstring arg0 = env->NewStringUTF(activityName);
     env->SetObjectArrayElement(args, 0, arg0);
     env->DeleteLocalRef(arg0);
+    for (int i = 0; i < extraCandidateCount && extraCandidates && extraCandidates[i]; ++i) {
+        if (!extraCandidates[i][0]) continue;
+        jstring s = env->NewStringUTF(extraCandidates[i]);
+        if (s) {
+            env->SetObjectArrayElement(args, 1 + i, s);
+            env->DeleteLocalRef(s);
+        }
+    }
     
     app_log("Starting ActivityThread.main (entering UI event loop)...");
     env->CallStaticVoidMethod(atClass, mainMethod, args);

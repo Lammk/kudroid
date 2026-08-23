@@ -51,7 +51,12 @@ static volatile sig_atomic_t g_crashLen = 0;
 static std::mutex g_crashBufMtx;
 static char g_abortMessage[1024] = {0};
 static int kudroid_jit_available(void);
-extern "C" void kudroid_launch_java_activity(JavaVM* vm, const char* activityName);
+// Khởi chạy activity qua ActivityThread. extraCandidates là danh sách tên
+// class dự phòng (đã JNI-verify) — ActivityThread sẽ thử lần lượt nếu
+// candidate chính không load được. Truyền nullptr/0 nếu không có.
+extern "C" void kudroid_launch_java_activity(JavaVM* vm, const char* activityName,
+                                             const char* const* extraCandidates,
+                                             int extraCandidateCount);
 // Build stamp — định nghĩa phía dưới file, dùng trong appendTestHeader ở trên nó.
 extern "C" const char* kudroid_build_stamp(void);
 
@@ -1504,6 +1509,10 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                         // Activity của app — chính xác hơn đoán tên folder vì
                         // class thật nằm trong jar. Ưu tiên class có tên chứa
                         // "Activity" và package ngắn nhất (gốc app).
+                        // Danh sách Activity thật tìm được qua JNI verify —
+                        // dùng làm fallback cho ActivityThread, khai báo ở scope
+                        // này để dùng được cả khi khối jar-scan không chạy.
+                        std::vector<std::string> verifiedActivities;
                         if (targetActivity.empty()) {
                             const auto aotJar = std::filesystem::path(remapper.androidRoot()) /
                                                 "data/dalvik-cache" / resolvedAppName / "classes.jar";
@@ -1606,6 +1615,9 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                     int verifiedBestScore = -1;
                                     std::string verifiedBest;
                                     int jniChecked = 0;
+                                    // Thu thập TẤT CẢ Activity thật tìm được (không
+                                    // chỉ cái tốt nhất) — truyền xuống làm fallback
+                                    // cho ActivityThread khi candidate chính fail.
                                     // FindClass/IsAssignableFrom tốn kém (Avian phải
                                     // load từng class) — với jar 10k+ class KHÔNG được
                                     // quét toàn bộ. Pass 0: chỉ class có tên chứa
@@ -1634,6 +1646,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                             if (isSdkOwned(cls)) score -= 1000;
                                             appendAndEcho("[kudroid_core]   JNI Activity candidate: " + dotted +
                                                           " (score=" + std::to_string(score) + ")");
+                                            verifiedActivities.push_back(dotted);
                                             if (score > verifiedBestScore) {
                                                 verifiedBestScore = score;
                                                 verifiedBest = dotted;
@@ -1662,33 +1675,52 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                         }
 
                         // ƯU TIÊN 4: đoán theo package/tên app — CHỈ khi cả ba
-                        // nguồn trên thất bại. Lưu ý: đoán "<base>.MainActivity"
-                        // hầu như luôn sai với app lớn (package thật khác tên
-                        // folder), nhưng vẫn tốt hơn rỗng vì ActivityThread sẽ
-                        // thử chuỗi candidate rồi rơi vào fallback UI.
+                        // nguồn trên thất bại. Hoàn toàn tổng quát: không hardcode
+                        // app cụ thể nào; các biến thể tên được ActivityThread
+                        // thử động từ package prefix (xem ActivityThread.java).
+                        std::string guessBase; // dùng chung cho fallback list
                         if (targetActivity.empty()) {
                             if (!pkgName.empty()) {
-                                if (pkgName.find("zarchiver") != std::string::npos) {
-                                    targetActivity = "ru.zdevs.zarchiver.ZArchiver";
-                                } else {
-                                    targetActivity = pkgName + ".MainActivity";
-                                }
+                                targetActivity = pkgName + ".MainActivity";
                             } else {
                                 std::string base = appName;
                                 auto uIdx = base.find('_');
                                 if (uIdx != std::string::npos) {
                                     base = base.substr(0, uIdx);
                                 }
-                                if (base.find("zarchiver") != std::string::npos) {
-                                    targetActivity = "ru.zdevs.zarchiver.ZArchiver";
-                                } else {
-                                    targetActivity = base + ".MainActivity";
-                                }
+                                targetActivity = base + ".MainActivity";
                             }
+                            appendAndEcho("[kudroid_core] WARNING: guessed Activity '" + targetActivity +
+                                          "' (manifest/jar-scan/JNI đều thất bại)");
                         }
+
+                        // Danh sách fallback cho ActivityThread: các Activity đã
+                        // JNI-verify (trừ candidate chính) + đoán từ package.
+                        // Tổng quát cho mọi app — không có tên riêng nào.
+                        std::vector<std::string> fallbackStorage;
+                        auto addFallback = [&](const std::string& s) {
+                            if (s.empty() || s == targetActivity) return;
+                            for (const auto& f : fallbackStorage)
+                                if (f == s) return;
+                            if (fallbackStorage.size() < 8) fallbackStorage.push_back(s);
+                        };
+                        for (const auto& v : verifiedActivities) addFallback(v);
+                        if (!pkgName.empty()) {
+                            addFallback(pkgName + ".MainActivity");
+                            addFallback(pkgName + ".Main");
+                        }
+                        std::vector<const char*> fallbackPtrs;
+                        for (const auto& f : fallbackStorage) fallbackPtrs.push_back(f.c_str());
+
                         appendAndEcho("[kudroid_core] Target Activity: " + targetActivity);
+                        if (!fallbackPtrs.empty()) {
+                            appendAndEcho("[kudroid_core] Fallback candidates: " +
+                                          std::to_string(fallbackPtrs.size()));
+                        }
                         appendAndEcho("[kudroid_core] Launching Android ActivityThread runtime...");
-                        kudroid_launch_java_activity(jvm, targetActivity.c_str());
+                        kudroid_launch_java_activity(jvm, targetActivity.c_str(),
+                                                     fallbackPtrs.empty() ? nullptr : fallbackPtrs.data(),
+                                                     static_cast<int>(fallbackPtrs.size()));
                     }
                 }
             }

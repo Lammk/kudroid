@@ -105,6 +105,26 @@ public final class ActivityThread {
         mH = new H();
     }
 
+    /**
+     * Trích tên class thiếu từ chuỗi cause của ClassNotFoundException /
+     * NoClassDefFoundError. Avian bọc lỗi load lồng nhiều tầng nên phải đi
+     * hết chain. Trả về null nếu không phải lỗi thiếu class.
+     */
+    private static String extractMissingClassName(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            String msg = c.getMessage();
+            if (msg != null && !msg.isEmpty()) {
+                // Message thường là "com/foo/Bar" hoặc "android/view/Foo$Bar".
+                String m = msg.trim();
+                int space = m.indexOf(' ');
+                if (space > 0) m = m.substring(0, space);
+                if (m.indexOf('/') > 0) return m.replace('/', '.');
+            }
+            if (c.getCause() == c) break;
+        }
+        return null;
+    }
+
     public static void postLifecycleEvent(int eventType, String arg) {
         if (sCurrentActivityThread != null && sCurrentActivityThread.mH != null) {
             Message msg = Message.obtain();
@@ -116,21 +136,25 @@ public final class ActivityThread {
 
     private void handleLaunchActivity(String activityClassName) {
         Class<?> clazz = null;
-        String baseName = activityClassName;
-        int idx = baseName.indexOf('_');
-        if (idx > 0) {
-            baseName = baseName.substring(0, idx);
+        // ── Xây dựng candidate list TỔNG QUÁT ──────────────────────────────
+        // args[0] = candidate chính (manifest/JNI-verify ở tầng C++ chọn),
+        // args[1..] = fallback đã verify. Không hardcode tên app cụ thể nào.
+        java.util.ArrayList<String> candidateList = new java.util.ArrayList<>();
+        if (activityClassName != null && !activityClassName.isEmpty()) {
+            candidateList.add(activityClassName);
         }
-
-        String[] candidates = new String[] {
-            activityClassName,
-            baseName,
-            baseName + ".ZArchiver",
-            baseName + ".MainActivity",
-            baseName + ".ui.MainActivity",
-            baseName + ".Main",
-            baseName + ".App"
-        };
+        // Sinh biến thể đoán từ package prefix của candidate chính:
+        // "com.foo.Bar" → "com.foo.Main", "com.foo.ui.MainActivity", ...
+        // (app thật thường đặt Activity ở package gốc hoặc sub-package ui/app).
+        if (activityClassName != null && activityClassName.lastIndexOf('.') > 0) {
+            String pkg = activityClassName.substring(0, activityClassName.lastIndexOf('.'));
+            for (String suffix : new String[] { ".Main", ".MainActivity", ".ui.MainActivity",
+                                                ".app.MainActivity", ".Home", ".Launcher" }) {
+                String guess = pkg + suffix;
+                if (!candidateList.contains(guess)) candidateList.add(guess);
+            }
+        }
+        String[] candidates = candidateList.toArray(new String[0]);
 
         for (String name : candidates) {
             try {
@@ -140,9 +164,16 @@ public final class ActivityThread {
                     break;
                 }
             } catch (Throwable t) {
-                // Thông báo của NoClassDefFoundError CHÍNH LÀ tên class còn thiếu —
-                // nuốt nó đi là mất manh mối duy nhất để biết cần đắp class nào.
-                // Đi hết chuỗi cause vì Avian bọc lỗi load lồng nhiều tầng.
+                // Phân loại lỗi để debug app mới nhanh:
+                //  - ClassNotFoundException/NoClassDefFoundError với tên
+                //    android/* → THIẾU STUB framework (đắp stub, không phải bug).
+                //  - với tên app/* → candidate sai, thử cái tiếp theo.
+                String missing = extractMissingClassName(t);
+                if (missing != null && missing.startsWith("android/")) {
+                    android.util.Log.e("ActivityThread",
+                            "FRAMEWORK STUB MISSING: " + missing +
+                            " (cần thêm stub vào framework/android/ rồi rebuild)");
+                }
                 StringBuilder chain = new StringBuilder();
                 for (Throwable c = t; c != null; c = c.getCause()) {
                     if (chain.length() > 0) chain.append(" <- ");
