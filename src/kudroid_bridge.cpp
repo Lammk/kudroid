@@ -19,6 +19,7 @@
 #include <ctime>
 #include <cctype>
 #include <cerrno>
+#include <setjmp.h>
 #include <filesystem>
 #include <set>
 #include <string>
@@ -51,6 +52,57 @@ static char g_crashBuf[262144];
 static volatile sig_atomic_t g_crashLen = 0;
 static std::mutex g_crashBufMtx;
 static char g_abortMessage[1024] = {0};
+
+// ── Lá chắn abort() cho JNI_OnLoad ───────────────────────────────────────────
+// Một số thư viện phụ của game (conscrypt, HttpClient, maesdk…) gọi abort()
+// ngay trong JNI_OnLoad khi không tìm được method/field chúng cần. abort() là
+// SIGABRT nên try/catch KHÔNG bắt được → cả process chết. Guard dưới đây cho
+// phép nhảy ngược ra khỏi JNI_OnLoad khi nó abort, bỏ qua thư viện đó và tiếp
+// tục khởi động app. Chỉ bật quanh đúng lời gọi JNI_OnLoad, không bật lúc khác
+// (crash thật vẫn phải ghi log đầy đủ).
+static thread_local sigjmp_buf g_jniGuardJmp;
+static thread_local volatile sig_atomic_t g_jniGuardActive = 0;
+static thread_local int g_jniGuardSignal = 0;
+
+// Stack riêng cho signal handler — để ở file scope vì sau khi siglongjmp ra
+// khỏi handler, kernel/libc vẫn coi alt stack đang "onstack"; phải arm lại nếu
+// không lần crash sau sẽ không chạy được trên stack riêng.
+static char g_altSignalStack[64 * 1024];
+static bool g_altStackArmed = false;
+
+static void armAltSignalStack(void) {
+    stack_t ss;
+    memset(&ss, 0, sizeof(ss));
+    ss.ss_sp = g_altSignalStack;
+    ss.ss_size = sizeof(g_altSignalStack);
+    ss.ss_flags = 0;
+    g_altStackArmed = (sigaltstack(&ss, nullptr) == 0);
+}
+
+// Gọi JNI_OnLoad với lá chắn signal. Đặt sigsetjmp trong một hàm riêng để
+// longjmp không thể clobber biến local của hàm gọi (-Wclobbered).
+// Trả về: 0 = chạy xong bình thường (*outVersion hợp lệ),
+//         -1 = C++ exception, >0 = số signal đã bị chặn.
+__attribute__((noinline))
+static int kudroid_call_jni_onload_guarded(jint (*fn)(JavaVM*, void*),
+                                          JavaVM* vm, jint* outVersion) {
+    if (sigsetjmp(g_jniGuardJmp, 1) != 0) {
+        // Quay lại từ signal handler — arm lại alt stack vì siglongjmp không
+        // rời alt stack một cách bình thường.
+        if (g_altStackArmed) armAltSignalStack();
+        return g_jniGuardSignal > 0 ? g_jniGuardSignal : 1;
+    }
+    g_jniGuardActive = 1;
+    int rc = 0;
+    try {
+        *outVersion = fn(vm, nullptr);
+    } catch (...) {
+        rc = -1;
+    }
+    g_jniGuardActive = 0;
+    return rc;
+}
+
 static int kudroid_jit_available(void);
 // Khởi chạy activity qua ActivityThread. extraCandidates là danh sách tên
 // class dự phòng (đã JNI-verify) — ActivityThread sẽ thử lần lượt nếu
@@ -333,6 +385,16 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
         }
     }
 
+    // Đang ở trong một lời gọi JNI_OnLoad được bọc guard: thư viện đó abort/segfault
+    // thì bỏ qua nó thay vì giết process. Chỉ dùng hàm async-signal-safe ở đây;
+    // việc ghi log để phía gọi làm sau khi siglongjmp trả về.
+    if (g_jniGuardActive && (sig == SIGABRT || sig == SIGSEGV || sig == SIGBUS ||
+                             sig == SIGILL  || sig == SIGTRAP)) {
+        g_jniGuardActive = 0;
+        g_jniGuardSignal = sig;
+        siglongjmp(g_jniGuardJmp, 1);
+    }
+
     // Xả bộ đệm stdout/stderr — các log [KuDroidGPU]/[AndroidLog] đang nằm trong
     // buffer (block-buffered khi redirect) sẽ mất nếu không flush trước khi chết.
     // (không async-signal-safe hoàn hảo nhưng là crash handler chẩn đoán, chấp nhận được)
@@ -608,13 +670,8 @@ static void installCrashHandlers(void) {
     {
         // SIGSTKSZ không còn là hằng biên dịch trên glibc mới → dùng kích thước
         // cố định (64KB, thừa cho handler này) để mảng static hợp lệ ở mọi libc.
-        static char altStack[64 * 1024];
-        stack_t ss;
-        memset(&ss, 0, sizeof(ss));
-        ss.ss_sp = altStack;
-        ss.ss_size = sizeof(altStack);
-        ss.ss_flags = 0;
-        if (sigaltstack(&ss, nullptr) == 0) {
+        armAltSignalStack();
+        if (g_altStackArmed) {
             sa.sa_flags |= SA_ONSTACK;
         }
     }
@@ -1417,7 +1474,33 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                 else sortedLoads.push_back(item);
                             }
 
+                            // Trên Android thật, JNI_OnLoad chỉ chạy khi Java gọi
+                            // System.loadLibrary. KuDroid gọi cho mọi .so đã nạp nên
+                            // các thư viện phụ (conscrypt/analytics/networking) cũng
+                            // chạy — và chúng abort() khi thiếu method Java chúng cần
+                            // (vd libconscrypt_jni.so: "could not find method set" →
+                            // SIGABRT giết cả process). Những lib này không cần cho
+                            // render/audio, bỏ qua luôn.
+                            auto isSkippedLib = [](const std::string& name) {
+                                std::string lower = name;
+                                for (char& c : lower) c = tolower(c);
+                                static const char* kSkip[] = {
+                                    "conscrypt", "httpclient", "maesdk",
+                                    "playfab", "openssl", "crypto"
+                                };
+                                for (const char* s : kSkip) {
+                                    if (lower.find(s) != std::string::npos) return true;
+                                }
+                                return false;
+                            };
+
                             for (const auto& [libName, addr] : sortedLoads) {
+                                if (isSkippedLib(libName)) {
+                                    appendAndEcho("[kudroid_core] Skipping JNI_OnLoad in " + libName +
+                                                  " (optional library known to abort() on missing Java methods)");
+                                    continue;
+                                }
+
                                 auto jni_onload = reinterpret_cast<jint (*)(JavaVM*, void*)>(addr);
                                 appendAndEcho("[kudroid_core] Invoking JNI_OnLoad in " + libName);
 
@@ -1426,11 +1509,20 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                     if (env->ExceptionCheck()) env->ExceptionClear();
                                 }
 
-                                try {
-                                    jint version = jni_onload(jvm, nullptr);
+                                // Guard abort(): nếu lib abort/segfault trong JNI_OnLoad,
+                                // crashHandler siglongjmp về đây thay vì giết process.
+                                jint version = 0;
+                                const int guardRc =
+                                    kudroid_call_jni_onload_guarded(jni_onload, jvm, &version);
+                                if (guardRc == 0) {
                                     appendAndEcho("[kudroid_core] JNI_OnLoad(" + libName + ") returned version: " + std::to_string(version));
-                                } catch (...) {
+                                } else if (guardRc < 0) {
                                     appendAndEcho("[kudroid_core] WARNING: Native exception caught while running JNI_OnLoad in " + libName);
+                                } else {
+                                    appendAndEcho("[kudroid_core] WARNING: JNI_OnLoad in " + libName +
+                                                  " raised fatal signal " + std::to_string(guardRc) +
+                                                  " — library skipped, continuing startup.");
+                                    env = nullptr; // JNIEnv có thể không còn hợp lệ
                                 }
 
                                 if (env && env->ExceptionCheck()) {
