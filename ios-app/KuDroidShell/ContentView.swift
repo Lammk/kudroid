@@ -1065,11 +1065,11 @@ func extractVersionNameFromAxml(_ data: Data) -> String? {
             cur += (bytes[cur] & 0x80) != 0 ? 2 : 1
             var byteLen = 0
             if cur < bytes.count {
-                if (bytes[cur] & 0x80) != 0 {
-                    byteLen = ((bytes[cur] & 0x7F) << 8) | bytes[cur+1]
+                if (bytes[cur] & 0x80) != 0, cur + 1 < bytes.count {
+                    byteLen = (Int(bytes[cur] & 0x7F) << 8) | Int(bytes[cur + 1])
                     cur += 2
                 } else {
-                    byteLen = bytes[cur]
+                    byteLen = Int(bytes[cur])
                     cur += 1
                 }
             }

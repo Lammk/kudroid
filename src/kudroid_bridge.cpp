@@ -2307,8 +2307,7 @@ void removeTreeWithProgress(const std::filesystem::path& p,
                             const char* phase,
                             kudroid_delete_progress_cb cb, void* ud,
                             double basePct, double spanPct,
-                            std::uint64_t totalBytes,
-                            int& ok) {
+                            std::uint64_t totalBytes) {
     std::error_code ec;
     if (!std::filesystem::exists(p, ec)) return;
 
@@ -2374,9 +2373,9 @@ extern "C" int kudroid_delete_app_progress(const char* package_name,
     int success = 1;
     // Chia %: code 0-45, data 45-70, dalvik 70-100.
     removeTreeWithProgress(appCodePath, "Removing app files",
-                           cb, userdata, 0.0, 45.0, total, success);
+                           cb, userdata, 0.0, 45.0, total);
     removeTreeWithProgress(appDataPath, "Removing app data",
-                           cb, userdata, 45.0, 25.0, total, success);
+                           cb, userdata, 45.0, 25.0, total);
 
     // dalvik-cache giữ classes.jar + boot.jar sinh từ DEX của app. Không xóa thì
     // cài lại sẽ HIT cache cũ (cache.hash khớp vì DEX không đổi) → chạy artifact
@@ -2393,7 +2392,7 @@ extern "C" int kudroid_delete_app_progress(const char* package_name,
         }
         for (const auto& m : matches) {
             removeTreeWithProgress(m, "Removing compiled cache",
-                                   cb, userdata, 70.0, 30.0, total, success);
+                                   cb, userdata, 70.0, 30.0, total);
         }
     }
     if (cb) cb("Done", 100, userdata);
