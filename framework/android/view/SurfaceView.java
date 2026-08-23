@@ -47,6 +47,12 @@ public class SurfaceView extends View implements SurfaceHolder.Callback2 {
     @Override
     public void surfaceRedrawNeeded(SurfaceHolder holder) {}
 
+    public void dispatchSurfaceCreated() {
+        if (mHolder instanceof SimpleSurfaceHolder) {
+            ((SimpleSurfaceHolder) mHolder).dispatchSurfaceCreated();
+        }
+    }
+
     @Override
     protected void onDraw(Canvas canvas) {}
 
@@ -57,6 +63,27 @@ public class SurfaceView extends View implements SurfaceHolder.Callback2 {
 
         public SimpleSurfaceHolder(View view) {
             mView = view;
+        }
+
+        public void dispatchSurfaceCreated() {
+            Object[] cbs;
+            synchronized (mCallbacks) {
+                cbs = mCallbacks.toArray();
+            }
+            for (Object obj : cbs) {
+                if (obj instanceof Callback) {
+                    Callback cb = (Callback) obj;
+                    try {
+                        cb.surfaceCreated(this);
+                        cb.surfaceChanged(this, 0, 1080, 1920);
+                        if (cb instanceof Callback2) {
+                            ((Callback2) cb).surfaceRedrawNeeded(this);
+                        }
+                    } catch (Throwable t) {
+                        android.util.Log.e("SurfaceHolder", "Error in dispatchSurfaceCreated: " + t);
+                    }
+                }
+            }
         }
 
         @Override

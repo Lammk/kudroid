@@ -419,6 +419,9 @@ int AutoStub::append_missing_stubs(const std::string& jarPath) {
     // Local entries cũ nằm ở [0, cdOffset) và giữ nguyên vị trí → localOffset
     // trong các CD record cũ vẫn đúng, chỉ cần nối thêm ở sau.
     std::vector<std::uint8_t> newLocal, newCentral;
+    std::string classesLog = "[AutoStub] Total stubbed classes: " + std::to_string(missing.size()) + "\n";
+    classesLog += "[AutoStub] Target JAR: " + jarPath + "\n\n";
+
     int added = 0;
     for (const auto& dotted : missing) {
         std::string slash = dotted;
@@ -430,11 +433,39 @@ int AutoStub::append_missing_stubs(const std::string& jarPath) {
             static_cast<std::uint32_t>(jar.cdOffset + newLocal.size());
         emitStoredEntry(newLocal, newCentral, slash + ".class",
                         buildStubClass(slash, isInterface), offsetInFile);
+
+        char lineBuf[512];
+        std::snprintf(lineBuf, sizeof(lineBuf), "[%03d] %-12s %s\n",
+                      added + 1, isInterface ? "[INTERFACE]" : "[CLASS]", dotted.c_str());
+        classesLog += lineBuf;
+
         if (added < 15) {
             std::fprintf(stderr, "[kudroid_autostub]   + %s%s\n", dotted.c_str(),
                          isInterface ? " (interface)" : "");
         }
         ++added;
+    }
+
+    // Ghi classes.log cạnh file classes.jar
+    size_t lastSlash = jarPath.find_last_of("/\\");
+    if (lastSlash != std::string::npos) {
+        std::string logPath = jarPath.substr(0, lastSlash) + "/classes.log";
+        FILE* flog = fopen(logPath.c_str(), "w");
+        if (flog) {
+            fwrite(classesLog.data(), 1, classesLog.size(), flog);
+            fclose(flog);
+        }
+    }
+
+    // Ghi bản sao classes.log ra Documents directory để dễ dàng dump/view
+    size_t docIdx = jarPath.find("/Documents");
+    if (docIdx != std::string::npos) {
+        std::string docLogPath = jarPath.substr(0, docIdx + 10) + "/classes.log";
+        FILE* flog = fopen(docLogPath.c_str(), "w");
+        if (flog) {
+            fwrite(classesLog.data(), 1, classesLog.size(), flog);
+            fclose(flog);
+        }
     }
 
     const std::uint32_t newCdOffset =

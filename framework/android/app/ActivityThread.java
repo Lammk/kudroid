@@ -198,6 +198,29 @@ public final class ActivityThread {
                 android.util.Log.i("ActivityThread", "Calling onResume()...");
                 mInitialActivity.onResume();
 
+                // Kích hoạt chu trình SurfaceHolder Callback (surfaceCreated -> surfaceChanged)
+                // để Minecraft C++ Native Engine nhận diện Metal Window và bắt đầu render 60fps!
+                try {
+                    if (mInitialActivity instanceof android.view.SurfaceHolder.Callback) {
+                        android.view.SurfaceHolder.Callback cb = (android.view.SurfaceHolder.Callback) mInitialActivity;
+                        android.view.SurfaceView sv = ((Object) mInitialActivity instanceof android.view.SurfaceView) ?
+                            (android.view.SurfaceView) (Object) mInitialActivity : new android.view.SurfaceView(mInitialActivity);
+                        android.view.SurfaceHolder holder = sv.getHolder();
+                        android.util.Log.i("ActivityThread", "Activity implements SurfaceHolder.Callback -> dispatching surfaceCreated & surfaceChanged");
+                        cb.surfaceCreated(holder);
+                        cb.surfaceChanged(holder, 0, 1080, 1920);
+                        if (cb instanceof android.view.SurfaceHolder.Callback2) {
+                            ((android.view.SurfaceHolder.Callback2) cb).surfaceRedrawNeeded(holder);
+                        }
+                    } else if (mInitialActivity.getContentView() instanceof android.view.SurfaceView) {
+                        android.view.SurfaceView sv = (android.view.SurfaceView) mInitialActivity.getContentView();
+                        android.util.Log.i("ActivityThread", "ContentView is SurfaceView -> dispatching surfaceCreated & surfaceChanged");
+                        sv.dispatchSurfaceCreated();
+                    }
+                } catch (Throwable st) {
+                    android.util.Log.e("ActivityThread", "NON-FATAL surface callback: " + st.toString());
+                }
+
                 if (mInitialActivity.getContentView() != null) {
                     mInitialActivity.renderViewHierarchy();
                 }

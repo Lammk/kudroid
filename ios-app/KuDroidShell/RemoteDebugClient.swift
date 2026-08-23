@@ -357,6 +357,7 @@ class RemoteDebugClient: NSObject {
             targetFile,
             "\(targetFile).log",
             "\(targetFile).txt",
+            targetFile.replacingOccurrences(of: "classes", with: "classes.log"),
             targetFile.replacingOccurrences(of: "kudroid_android", with: "kudroid_android_logs.txt"),
             targetFile.replacingOccurrences(of: "kudroid_crash", with: "kudroid_crash.log"),
             targetFile.replacingOccurrences(of: "stderr", with: "stderr.log")
