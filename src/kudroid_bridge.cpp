@@ -1526,6 +1526,21 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                     "mixpanel", "crashlytics", "playfab", "microsoft",
                                     "zarchiver" /* handled riêng ở trên */
                                 };
+                                // Tính sẵn MỘT LẦN thay vì trong vòng lặp từng
+                                // class (jar lớn có thể có 10k+ class).
+                                std::string pkgPrefix;
+                                if (!pkgName.empty()) {
+                                    // pkgName dạng a.b.c → prefix "a/b/c/".
+                                    pkgPrefix = pkgName;
+                                    for (char& c : pkgPrefix) if (c == '.') c = '/';
+                                    pkgPrefix += '/';
+                                }
+                                auto isSdkOwned = [](const std::string& cls) {
+                                    for (const char* hint : kSdkActivityHints) {
+                                        if (cls.find(hint) != std::string::npos) return true;
+                                    }
+                                    return false;
+                                };
                                 std::string best;
                                 int bestScore = -1;
                                 std::string bestAny; // fallback nếu không có *Activity nào
@@ -1535,18 +1550,12 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                     const size_t depth = static_cast<size_t>(
                                         std::count(cls.begin(), cls.end(), '/'));
                                     int score = (isActivity ? 100 : 0) + static_cast<int>(10 - depth);
-                                    if (!pkgName.empty()) {
-                                        // pkgName dạng a.b.c → prefix "a/b/c/".
-                                        std::string pkgPrefix = pkgName;
-                                        for (char& c : pkgPrefix) if (c == '.') c = '/';
-                                        pkgPrefix += '/';
-                                        if (cls.compare(0, pkgPrefix.size(), pkgPrefix) == 0) score += 50;
-                                    }
-                                    bool sdkOwned = false;
-                                    for (const char* hint : kSdkActivityHints) {
-                                        if (cls.find(hint) != std::string::npos) { sdkOwned = true; break; }
-                                    }
-                                    if (sdkOwned) score -= 1000;
+                                    // Launcher activity hầu như luôn tên "...MainActivity".
+                                    if (cls.size() >= 13 &&
+                                        cls.compare(cls.size() - 13, 13, "/MainActivity") == 0) score += 80;
+                                    if (!pkgPrefix.empty() &&
+                                        cls.compare(0, pkgPrefix.size(), pkgPrefix) == 0) score += 50;
+                                    if (isSdkOwned(cls)) score -= 1000;
 
                                     if (isActivity && score > bestScore) {
                                         bestScore = score;
@@ -1585,16 +1594,9 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                 // BÀI HỌC Braze: vòng verify KHÔNG được lấy Activity
                                 // ĐẦU TIÊN tìm thấy — SDK Activity (push/analytics)
                                 // cũng extends Activity nhưng không render gì → màn
-                                // hình xám. Dùng lại kSdkActivityHints đã khai báo
-                                // ở trên (chấm điểm jar-scan) + chấm điểm như vậy
-                                // rồi chọn điểm cao nhất (loại SDK, ưu tiên package
-                                // ngắn).
-                                auto isSdkOwned = [](const std::string& cls) {
-                                    for (const char* hint : kSdkActivityHints) {
-                                        if (cls.find(hint) != std::string::npos) return true;
-                                    }
-                                    return false;
-                                };
+                                // hình xám. Dùng lại kSdkActivityHints + isSdkOwned
+                                // đã khai báo ở trên (chấm điểm như vậy rồi chọn
+                                // điểm cao nhất: loại SDK, ưu tiên package ngắn).
 
                                 if (!targetActivity.empty() &&
                                     kudroid_class_extends_activity(targetActivity.c_str()) != 1) {
@@ -1603,28 +1605,44 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                     targetActivity.clear();
                                     int verifiedBestScore = -1;
                                     std::string verifiedBest;
-                                    for (const auto& cls : classes) {
-                                        std::string dotted = cls;
-                                        for (char& c : dotted) if (c == '/') c = '.';
-                                        if (kudroid_class_extends_activity(dotted.c_str()) != 1) continue;
-                                        // Là Activity thật — chấm điểm như trên.
-                                        const size_t depth = static_cast<size_t>(
-                                            std::count(cls.begin(), cls.end(), '/'));
-                                        int score = 100 + static_cast<int>(10 - depth);
-                                        if (!pkgName.empty()) {
-                                            std::string pkgPrefix = pkgName;
-                                            for (char& c : pkgPrefix) if (c == '.') c = '/';
-                                            pkgPrefix += '/';
-                                            if (cls.compare(0, pkgPrefix.size(), pkgPrefix) == 0) score += 50;
-                                        }
-                                        if (isSdkOwned(cls)) score -= 1000;
-                                        appendAndEcho("[kudroid_core]   JNI Activity candidate: " + dotted +
-                                                      " (score=" + std::to_string(score) + ")");
-                                        if (score > verifiedBestScore) {
-                                            verifiedBestScore = score;
-                                            verifiedBest = dotted;
+                                    int jniChecked = 0;
+                                    // FindClass/IsAssignableFrom tốn kém (Avian phải
+                                    // load từng class) — với jar 10k+ class KHÔNG được
+                                    // quét toàn bộ. Pass 0: chỉ class có tên chứa
+                                    // "Activity" (phủ đại đa số app). Pass 1 (chỉ chạy
+                                    // khi pass 0 không tìm thấy gì — app obfuscate
+                                    // hoàn toàn): phần còn lại, giới hạn 2000 lần kiểm.
+                                    for (int pass = 0; pass < 2 && verifiedBestScore <= 0; ++pass) {
+                                        int checkedThisPass = 0;
+                                        for (const auto& cls : classes) {
+                                            const bool hasName = cls.find("Activity") != std::string::npos;
+                                            if (pass == 0 && !hasName) continue;
+                                            if (pass == 1 && hasName) continue;
+                                            if (++checkedThisPass > (pass == 0 ? 8000 : 2000)) break;
+                                            std::string dotted = cls;
+                                            for (char& c : dotted) if (c == '/') c = '.';
+                                            ++jniChecked;
+                                            if (kudroid_class_extends_activity(dotted.c_str()) != 1) continue;
+                                            // Là Activity thật — chấm điểm như trên.
+                                            const size_t depth = static_cast<size_t>(
+                                                std::count(cls.begin(), cls.end(), '/'));
+                                            int score = 100 + static_cast<int>(10 - depth);
+                                            if (cls.size() >= 13 &&
+                                                cls.compare(cls.size() - 13, 13, "/MainActivity") == 0) score += 80;
+                                            if (!pkgPrefix.empty() &&
+                                                cls.compare(0, pkgPrefix.size(), pkgPrefix) == 0) score += 50;
+                                            if (isSdkOwned(cls)) score -= 1000;
+                                            appendAndEcho("[kudroid_core]   JNI Activity candidate: " + dotted +
+                                                          " (score=" + std::to_string(score) + ")");
+                                            if (score > verifiedBestScore) {
+                                                verifiedBestScore = score;
+                                                verifiedBest = dotted;
+                                            }
+                                            if (verifiedBestScore >= 185) break; // pkg match + MainActivity — đủ chắc
                                         }
                                     }
+                                    appendAndEcho("[kudroid_core] JNI verify done: " +
+                                                  std::to_string(jniChecked) + " classes checked");
                                     if (!verifiedBest.empty() && verifiedBestScore > 0) {
                                         targetActivity = verifiedBest;
                                         appendAndEcho("[kudroid_core] JNI-verified best Activity: " + verifiedBest);

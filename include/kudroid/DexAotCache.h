@@ -31,13 +31,15 @@ public:
     static std::string dex2jar_command();
 
     /// Quét danh sách entry (tên class .class) trong jar và trả về các class
-    /// KHÔNG nằm trong package hệ thống (android/, androidx/, java/, javax/,
-    /// kotlin/...) — tức là class của chính app. Dùng để suy ra launcher
+    /// KHÔNG nằm trong package hệ thống hay SDK bên thứ ba (android/, androidx/,
+    /// braze/, playfab/...) — tức là class của chính app. Dùng để suy ra launcher
     /// activity khi AndroidManifest.xml không parse được: class Activity của
     /// app gần như luôn có tên chứa "Activity" và nằm ở package gốc.
     /// Trả về tối đa `maxResults` tên dạng "com/example/Foo" (slash-separated).
+    /// Lưu ý: mặc định đủ lớn để KHÔNG cắt mất class app của APK lớn (MCPE
+    /// có ~10k class app; cap 500 cũ làm mất com/mojang/* theo thứ tự ZIP).
     static std::vector<std::string> list_app_classes(const std::string& jar_path,
-                                                     size_t max_results = 500);
+                                                     size_t max_results = 20000);
 };
 
 } // namespace kudroid

@@ -754,25 +754,32 @@ extern "C" int kudroid_class_extends_activity(const char* className) {
     std::lock_guard<std::mutex> lock(g_jvm_mutex);
     if (!g_vm || !g_env || !className || !*className) return 0;
 
+    // Cache android/app/Activity bằng GlobalRef — FindClass mỗi lần là một
+    // lookup đầy đủ trong JVM; vòng launcher-verify có thể gọi hàng nghìn
+    // lần liên tiếp. Mutex ở trên đảm bảo init an toàn giữa các thread.
+    static jclass cachedActivity = nullptr;
+    if (!cachedActivity) {
+        jclass local = g_env->FindClass("android/app/Activity");
+        if (!local) {
+            if (g_env->ExceptionCheck()) g_env->ExceptionClear();
+            return 0;
+        }
+        cachedActivity = static_cast<jclass>(g_env->NewGlobalRef(local));
+        g_env->DeleteLocalRef(local);
+    }
+
     // Đổi dot → slash cho FindClass ("com.foo.Bar" → "com/foo/Bar").
     std::string slashed(className);
     for (char& c : slashed) if (c == '.') c = '/';
 
-    jclass activityClass = g_env->FindClass("android/app/Activity");
-    if (!activityClass) {
-        if (g_env->ExceptionCheck()) g_env->ExceptionClear();
-        return 0;
-    }
     jclass target = g_env->FindClass(slashed.c_str());
     if (!target) {
         if (g_env->ExceptionCheck()) g_env->ExceptionClear();
-        g_env->DeleteLocalRef(activityClass);
         return 0;
     }
     const jboolean isActivity =
-        g_env->IsAssignableFrom(target, activityClass);
+        g_env->IsAssignableFrom(target, cachedActivity);
     g_env->DeleteLocalRef(target);
-    g_env->DeleteLocalRef(activityClass);
     return isActivity == JNI_TRUE ? 1 : 0;
 }
 

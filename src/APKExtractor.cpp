@@ -289,11 +289,26 @@ static std::vector<std::string> parseStringPool(const std::vector<std::uint8_t>&
 
 static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
     ManifestInfo info;
-    if (data.size() < 32 || read32(data, 0) != 0x00080003) return info;
+    // Diagnostics: manifest thật của một số APK repack từng parse ra rỗng mà
+    // không có manh mối nào — log đủ để debug từ xa qua logs/.
+    if (data.size() < 32 || read32(data, 0) != 0x00080003) {
+        char magic[64];
+        std::snprintf(magic, sizeof(magic),
+                      "[kudroid_axml] reject: size=%zu magic=0x%02x%02x%02x%02x (expect 0x00080003)",
+                      data.size(),
+                      data.size() > 3 ? data[3] : 0, data.size() > 2 ? data[2] : 0,
+                      data.size() > 1 ? data[1] : 0, data.size() > 0 ? data[0] : 0);
+        apkLog(magic);
+        return info;
+    }
 
     const std::size_t poolOffset = 8;
     std::vector<std::string> stringPool = parseStringPool(data, poolOffset);
-    if (stringPool.empty()) return info;
+    if (stringPool.empty()) {
+        apkLog("[kudroid_axml] string pool EMPTY (type=" +
+               std::to_string(read16(data, poolOffset)) + ")");
+        return info;
+    }
 
     std::size_t cur = poolOffset + read32(data, poolOffset + 4);
     if (cur + 8 <= data.size() && read32(data, cur) == 0x00080180) {
@@ -333,9 +348,15 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
             if (cur + 36 <= data.size()) {
                 const std::uint32_t nameIdx = read32(data, cur + 20);
                 const std::string tagName = (nameIdx < stringPool.size()) ? stringPool[nameIdx] : "";
+                // Spec ResXMLTree_attrExt: attributeStart là offset TÍNH TỪ ĐẦU
+                // struct attrExt (chunk+16), không phải từ đầu chunk. aapt ghi
+                // attrStart=20 → attrs bắt đầu tại chunk+36. Code cũ dùng
+                // cur+attrStart → đọc lệch 16 byte với mọi manifest thật
+                // (synthetic test khớp code cũ nên pass giả).
                 const std::uint16_t attrStart = read16(data, cur + 24);
                 const std::uint16_t attrSize = read16(data, cur + 26);
                 const std::uint16_t attrCount = read16(data, cur + 28);
+                const std::size_t attrsBase = cur + 16 + attrStart;
 
                 const bool isActivityTag =
                     tagName == "activity" || tagName == "activity-alias";
@@ -350,7 +371,7 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
                     inIntentFilter = true;
                 }
 
-                std::size_t attrCur = cur + attrStart;
+                std::size_t attrCur = attrsBase;
                 for (std::uint16_t a = 0; a < attrCount && attrCur + attrSize <= cur + chunkSize; ++a, attrCur += attrSize) {
                     const std::uint32_t attrNameIdx = read32(data, attrCur + 4);
                     const std::uint32_t attrRawValIdx = read32(data, attrCur + 8);

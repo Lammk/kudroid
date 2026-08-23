@@ -477,11 +477,20 @@ std::vector<std::string> DexAotCache::list_app_classes(const std::string& jar_pa
         // Bỏ inner class (chứa '$') — Activity launcher không bao giờ là inner.
         if (cls.find('$') != std::string::npos) continue;
 
-        // Lọc package hệ thống: android/, androidx/, java/, javax/, kotlin/,
-        // org/ (org có thể là lib của app nhưng không phải entry point).
+        // Lọc package hệ thống + SDK bên thứ ba: MCPE có ~10k class app nhưng
+        // hàng chục nghìn class SDK (braze/playfab/fmod...) đứng TRƯỚC
+        // com/mojang/ theo thứ tự ZIP — cap cũ 500 cắt mất toàn bộ class app
+        // → không tìm được MainActivity thật. Lọc SDK giúp list gọn mà không
+        // cần cap thấp; max_results giờ chỉ là giới hạn an toàn cuối cùng.
         static const char* kSystemPkgs[] = {
             "android/", "androidx/", "java/", "javax/", "kotlin/", "kotlinx/",
-            "org/", "com/google/", "io/flutter/"
+            "org/", "com/google/", "io/flutter/",
+            // SDK bên thứ ba phổ biến (không phải entry point của app)
+            "com/braze/", "com/appboy/", "com/facebook/", "com/firebase/",
+            "com/crashlytics/", "io/fabric/", "com/microsoft/appcenter/",
+            "com/playfab/", "com/amazon/", "com/adjust/", "com/appsflyer/",
+            "com/amplitude/", "com/mixpanel/", "com/unity3d/", "com/unity/",
+            "com/bugsnag/", "io/sentry/", "com/newrelic/"
         };
         bool isSystem = false;
         for (const char* p : kSystemPkgs) {
