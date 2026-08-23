@@ -268,6 +268,10 @@ public final class ActivityThread {
                 t.printStackTrace();
             }
         }
+
+        // Bắt đầu vòng lặp sự kiện chính của Android (Main Event Loop)
+        android.util.Log.i("ActivityThread", "Entering Looper.loop() main event loop...");
+        android.os.Looper.loop();
     }
 
     private void handlePauseActivity() {
