@@ -1,4 +1,0 @@
-/home/kuzei/Documents/Kudroid/build-test/CMakeFiles/kudroid_core.dir
-/home/kuzei/Documents/Kudroid/build-test/CMakeFiles/test_dex_to_jar.dir
-/home/kuzei/Documents/Kudroid/build-test/CMakeFiles/edit_cache.dir
-/home/kuzei/Documents/Kudroid/build-test/CMakeFiles/rebuild_cache.dir
