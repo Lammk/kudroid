@@ -1,3 +1,0 @@
-/home/kuzei/Documents/Kudroid/tests/build/CMakeFiles/test_lib.dir
-/home/kuzei/Documents/Kudroid/tests/build/CMakeFiles/edit_cache.dir
-/home/kuzei/Documents/Kudroid/tests/build/CMakeFiles/rebuild_cache.dir
