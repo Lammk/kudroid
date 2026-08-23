@@ -62,6 +62,9 @@ struct AppsView: View {
     @State private var deletingApp: String? = nil
     @State private var deletePhase = ""
     @State private var deletePercent: Double = 0
+    // [DEBUG] đếm callback từ native — watchdog dựa vào đây thay vì percent
+    // (percent giữ nguyên 0 khi xóa nhiều file nhỏ dù native đang chạy).
+    @State private var deleteCbCount = 0
     @State private var showJitWarning = false
     @State private var renamingAppId: String = ""
     @State private var newAppName: String = ""
@@ -434,7 +437,10 @@ struct AppsView: View {
             let ctx = Ctx({ text in
                 DispatchQueue.main.async { self.deletePhase = text }
             }, { v in
-                DispatchQueue.main.async { self.deletePercent = v }
+                DispatchQueue.main.async {
+                    self.deletePercent = v
+                    self.deleteCbCount += 1
+                }
             })
             let cb: @convention(c) (UnsafePointer<CChar>?, Int32, UnsafeMutableRawPointer?) -> Void = {
                 phaseC, percent, ud in
@@ -445,15 +451,13 @@ struct AppsView: View {
             }
             let opaque = Unmanaged.passRetained(ctx).toOpaque()
 
-            // [DEBUG] watchdog: nếu sau 15s vẫn chưa có callback nào (percent
-            // vẫn 0) → gần như chắc chắn luồng native kẹt ở bước đầu (quyền
-            // ghi / iterator). Đánh dấu UI để biết là TREO chứ không phải chậm.
-            var watchdogFired = false
-            DispatchQueue.global().asyncAfter(deadline: .now() + 15) {
-                if self.deletingApp == name && self.deletePercent == 0 && !watchdogFired {
-                    watchdogFired = true
+            // [DEBUG] watchdog: nếu sau 15s CHƯA CÓ callback nào từ native
+            // (không tính percent vì 1% = ~22MB với app lớn) → luồng native
+            // gần như chắc chắn kẹt. Chạy trên main queue để đọc @State an toàn.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 15) {
+                if self.deletingApp == name && self.deleteCbCount == 0 {
                     self.fullLog += "\n[uninstall] ⚠️ WATCHDOG: no callback after 15s — native thread likely STUCK (permission or filesystem)"
-                    self.deletePhase = "Stuck? (>15s at 0%)"
+                    self.deletePhase = "Stuck? (>15s, no activity)"
                 }
             }
 

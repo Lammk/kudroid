@@ -2335,94 +2335,75 @@ std::string describePath(const std::filesystem::path& p) {
     return s;
 }
 
-// Tổng kích thước (bytes) đệ quy của cây thư mục — mốc chia % chính xác.
-std::uint64_t treeSize(const std::filesystem::path& p) {
-    std::error_code ec;
-    if (!std::filesystem::exists(p, ec)) return 0;
-    std::uint64_t total = 0;
-    std::filesystem::recursive_directory_iterator it(p, ec), end;
-    while (it != end) {
-        if (it->is_regular_file(ec)) total += it->file_size(ec);
-        it.increment(ec);
-        if (ec) break;
-    }
-    return total;
-}
-
-// Xóa cây theo từng FILE cấp sâu nhất, cập nhật % theo bytes đã giải phóng.
-// remove_all cả thư mục lớn chỉ báo 1 lần → UI kẹt; xóa từng file + cộng
-// dồn byte → progress chạy mượt từ 0 đến 100.
-// [DEBUG] đếm file removed/failed, giữ lỗi đầu tiên, log mọi bất thường.
+// Xóa cây NHANH theo con cấp 1: mỗi thư mục con được remove_all nguyên khối.
+// Unlink là thao tác metadata — tốc độ gần như KHÔNG phụ thuộc dung lượng,
+// chỉ phụ thuộc số entry — đây là lý do bản cũ "freeze vài giây" là xong.
+// Bản thử progress bằng cách xóa từng file sâu nhất đã đi bộ hàng nghìn
+// entry qua std::filesystem → MCPE 932MB chậm như treo ở 0%. Ở đây:
+//  - Không đếm bytes toàn cây (trước đây tốn >3s chỉ để tính %).
+//  - Progress nhảy theo từng con cấp 1 (lib/, assets/, res/...) — đủ mượt.
+//  - Log thời gian từng con vào trace; con nào ≥2s bị đánh dấu SLOW.
 void removeTreeWithProgress(const std::filesystem::path& p,
                             const char* phase,
                             kudroid_delete_progress_cb cb, void* ud,
                             double basePct, double spanPct,
-                            std::uint64_t totalBytes) {
+                            std::uint64_t /*totalBytes - không dùng nữa*/) {
+    const auto nowMs = [] {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        return static_cast<std::int64_t>(ts.tv_sec) * 1000 + ts.tv_nsec / 1000000;
+    };
     std::error_code ec;
-    uninstallDbg("phase='" + std::string(phase) + "' path=" + describePath(p) +
-                 " totalBytes=" + std::to_string(totalBytes));
+    uninstallDbg("phase='" + std::string(phase) + "' path=" + describePath(p));
     if (!std::filesystem::exists(p, ec)) return;
 
-    // Thư mục rỗng / file đơn.
+    // File đơn (hiếm).
     if (!std::filesystem::is_directory(p, ec)) {
+        const std::int64_t t0 = nowMs();
         std::filesystem::remove(p, ec);
-        uninstallDbg("  single-file remove ec=" +
-                     (ec ? ec.message() : std::string("none")));
+        uninstallDbg("  single-file removed in " + std::to_string(nowMs() - t0) +
+                     "ms ec=" + (ec ? ec.message() : std::string("none")));
         return;
     }
 
-    std::uint64_t freed = 0;
-    int lastReported = -1;
-    int filesRemoved = 0, filesFailed = 0, dirsSeen = 0, cbCalls = 0;
-    std::string firstErr;
-    // Duyệt post-order: xóa file trước, thư mục rỗng sau.
-    std::filesystem::recursive_directory_iterator it(p, ec), end;
-    if (ec) uninstallDbg("  iterator create FAILED: " + ec.message());
-    while (it != end && !ec) {
-        const auto entryPath = it->path();
-        const bool isDir = it->is_directory(ec);
-        if (!isDir) {
-            const auto sz = it->file_size(ec);
-            std::error_code rmEc;
-            std::filesystem::remove(entryPath, rmEc);
-            if (rmEc) {
-                ++filesFailed;
-                if (firstErr.empty())
-                    firstErr = entryPath.string() + ": " + rmEc.message();
-            } else {
-                ++filesRemoved;
-            }
-            freed += sz;
-        } else {
-            ++dirsSeen;
-        }
-        it.increment(ec);
-        if (ec) break;
-        if (!isDir && cb && totalBytes > 0) {
-            const int pct = static_cast<int>(basePct +
-                spanPct * (static_cast<double>(freed) / static_cast<double>(totalBytes)));
-            if (pct != lastReported) { // tránh spam callback
-                lastReported = pct;
-                ++cbCalls;
-                cb(phase, pct, ud);
-            }
+    // Liệt kê con cấp 1 (không đệ quy) — rẻ, chỉ đọc entry thư mục.
+    std::vector<std::filesystem::path> children;
+    for (std::filesystem::directory_iterator cIt(p, ec), cEnd;
+         cIt != cEnd && !ec; cIt.increment(ec)) {
+        children.push_back(cIt->path());
+    }
+    if (ec) uninstallDbg("  listing FAILED: " + ec.message());
+
+    const std::int64_t t0 = nowMs();
+    int idx = 0;
+    bool hadErrors = false;
+    for (const auto& child : children) {
+        const std::int64_t childStart = nowMs();
+        std::error_code rmEc;
+        const auto n = std::filesystem::remove_all(child, rmEc);
+        const std::int64_t ms = nowMs() - childStart;
+        if (rmEc) hadErrors = true;
+        uninstallDbg("  [" + std::to_string(++idx) + "/" +
+                     std::to_string(children.size()) + "] remove_all " +
+                     child.filename().string() + " -> " + std::to_string(n) +
+                     " entries in " + std::to_string(ms) + "ms" +
+                     (rmEc ? " ec=" + rmEc.message() : "") +
+                     (ms >= 2000 ? " \u26a0\ufe0f SLOW" : ""));
+        if (cb && spanPct > 0 && !children.empty()) {
+            const int pct = static_cast<int>(
+                basePct + spanPct * static_cast<double>(idx) /
+                              static_cast<double>(children.size()));
+            cb(phase, pct, ud);
         }
     }
-    if (ec) uninstallDbg("  iterator STOPPED early: " + ec.message());
-    uninstallDbg("  phase done: removed=" + std::to_string(filesRemoved) +
-                 " failed=" + std::to_string(filesFailed) +
-                 " dirs=" + std::to_string(dirsSeen) +
-                 " callbacks=" + std::to_string(cbCalls) +
-                 " lastPct=" + std::to_string(lastReported) +
-                 " freed=" + std::to_string(freed) +
-                 (firstErr.empty() ? "" : " FIRST_ERR: " + firstErr));
-    // Xóa nốt các thư mục rỗng còn lại (sau khi file bên trong đã mất).
+    // Xóa nốt thư mục gốc (giờ đã rỗng).
     std::error_code raEc;
-    const auto removedCount = std::filesystem::remove_all(p, raEc);
-    uninstallDbg("  remove_all -> " + std::to_string(removedCount) +
-                 " ec=" + (raEc ? raEc.message() : std::string("none")) +
+    std::filesystem::remove_all(p, raEc);
+    uninstallDbg("  phase done in " + std::to_string(nowMs() - t0) +
+                 "ms children=" + std::to_string(children.size()) +
                  " residue=" +
-                 (std::filesystem::exists(p, raEc) ? "YES(still-there!)" : "no"));
+                 (std::filesystem::exists(p, raEc) ? "YES(still-there!)" : "no") +
+                 (hadErrors ? " HAD_ERRORS" : ""));
 }
 } // namespace
 
@@ -2450,8 +2431,8 @@ extern "C" int kudroid_delete_app_progress(const char* package_name,
     uninstallDbg("data:   " + describePath(appDataPath));
     uninstallDbg("dalvik: " + describePath(dalvikRoot));
 
-    // Đếm tổng bytes trước để % chính xác trên toàn bộ quá trình.
-    std::uint64_t total = treeSize(appCodePath) + treeSize(appDataPath);
+    // KHÔNG đếm bytes toàn cây nữa — với MCPE 932MB việc đi bộ hết cây mất
+    // >3s trên máy thật chỉ để tính %. Progress giờ chia theo con cấp 1.
     std::error_code ec;
     // dalvik-cache giữ classes.jar + boot.jar sinh từ DEX của app. Không xóa thì
     // cài lại sẽ HIT cache cũ (cache.hash khớp vì DEX không đổi) → chạy artifact
@@ -2460,27 +2441,23 @@ extern "C" int kudroid_delete_app_progress(const char* package_name,
     if (std::filesystem::is_directory(dalvikRoot, ec)) {
         for (const auto& e : std::filesystem::directory_iterator(dalvikRoot, ec)) {
             const std::string name = e.path().filename().string();
-            if (name == package_name || name.rfind(std::string(package_name) + "_", 0) == 0) {
-                total += treeSize(e.path());
+            if (name == package_name || name.rfind(std::string(package_name) + "_", 0) == 0)
                 dalvikMatches.push_back(e.path());
-            }
         }
     }
-    if (total == 0) total = 1; // tránh chia 0
-    uninstallDbg("totalBytes=" + std::to_string(total) +
-                 " dalvikMatches=" + std::to_string(dalvikMatches.size()));
+    uninstallDbg("dalvikMatches=" + std::to_string(dalvikMatches.size()));
 
     int success = 1;
     // Chia %: code 0-45, data 45-70, dalvik 70-100.
     removeTreeWithProgress(appCodePath, "Removing app files",
-                           cb, userdata, 0.0, 45.0, total);
+                           cb, userdata, 0.0, 45.0, 0);
     removeTreeWithProgress(appDataPath, "Removing app data",
-                           cb, userdata, 45.0, 25.0, total);
+                           cb, userdata, 45.0, 25.0, 0);
 
     if (cb) cb("Removing compiled cache", 70, userdata);
     for (const auto& m : dalvikMatches) {
         removeTreeWithProgress(m, "Removing compiled cache",
-                               cb, userdata, 70.0, 30.0, total);
+                               cb, userdata, 70.0, 30.0, 0);
     }
     if (cb) cb("Done", 100, userdata);
     uninstallDbg("=== UNINSTALL DONE success=" + std::to_string(success) + " ===");
