@@ -419,6 +419,12 @@ struct AppsView: View {
         deletingApp = name
         deletePhase = "Preparing…"
         deletePercent = 0
+        // [DEBUG UNINSTALL] đánh dấu thời điểm bắt đầu — watchdog bên dưới
+        // dùng nó để phát hiện việc xóa bị treo (kẹt 0% không callback nào).
+        let start = Date()
+        DispatchQueue.main.async {
+            self.fullLog += "\n[uninstall] START \(name) @ \(start)"
+        }
         DispatchQueue.global(qos: .userInitiated).async {
             final class Ctx {
                 let phase: (String) -> Void
@@ -438,10 +444,34 @@ struct AppsView: View {
                 ctx.pct(Double(percent))
             }
             let opaque = Unmanaged.passRetained(ctx).toOpaque()
+
+            // [DEBUG] watchdog: nếu sau 15s vẫn chưa có callback nào (percent
+            // vẫn 0) → gần như chắc chắn luồng native kẹt ở bước đầu (quyền
+            // ghi / iterator). Đánh dấu UI để biết là TREO chứ không phải chậm.
+            var watchdogFired = false
+            DispatchQueue.global().asyncAfter(deadline: .now() + 15) {
+                if self.deletingApp == name && self.deletePercent == 0 && !watchdogFired {
+                    watchdogFired = true
+                    self.fullLog += "\n[uninstall] ⚠️ WATCHDOG: no callback after 15s — native thread likely STUCK (permission or filesystem)"
+                    self.deletePhase = "Stuck? (>15s at 0%)"
+                }
+            }
+
             let success = kudroid_delete_app_progress(name, cb, opaque)
             Unmanaged.passUnretained(ctx).release()
+            // [DEBUG] kéo toàn bộ trace phía native lên log Swift để xem/copy
+            // ngay trong tab Debug (file kudroid_uninstall_debug.txt trong
+            // Documents cũng chứa nội dung này).
+            if let cTrace = kudroid_uninstall_debug_log() {
+                let trace = String(cString: cTrace)
+                free(UnsafeMutablePointer(mutating: cTrace))
+                DispatchQueue.main.async { self.fullLog += "\n" + trace }
+            }
+            let elapsed = Int(Date().timeIntervalSince(start))
             DispatchQueue.main.async {
-                self.fullLog = success == 1 ? "Deleted app \(name)" : "Failed to delete app \(name)"
+                self.fullLog += success == 1
+                    ? "\n[uninstall] DONE \(name) in \(elapsed)s"
+                    : "\n[uninstall] FAILED \(name) after \(elapsed)s"
                 self.deletingApp = nil
                 self.loadInstalledApps()
             }

@@ -125,6 +125,12 @@ int kudroid_delete_app_progress(const char* package_name,
                                 kudroid_delete_progress_cb cb,
                                 void* userdata);
 
+/// nhật ký debug chi tiết của lần xóa app gần nhất (đường dẫn, quyền ghi,
+/// số file đã xóa/thất bại, lỗi filesystem...). Cũng được ghi ra file
+/// kudroid_uninstall_debug.txt trong Documents. Trả về chuỗi được malloc;
+/// người gọi phải giải phóng bằng free().
+const char* kudroid_uninstall_debug_log(void);
+
 /// lấy thông tin cơ bản về một ứng dụng đã cài đặt.
 /// trả về một chuỗi được malloc (ví dụ: json hoặc văn bản được định dạng); người gọi phải giải phóng nó bằng free().
 const char* kudroid_get_app_info(const char* package_name);

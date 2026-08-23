@@ -18,6 +18,7 @@
 #include <csignal>
 #include <ctime>
 #include <cctype>
+#include <cerrno>
 #include <filesystem>
 #include <set>
 #include <string>
@@ -2286,6 +2287,54 @@ extern "C" int kudroid_delete_app(const char* package_name);
 typedef void (*kudroid_delete_progress_cb)(const char* phase, int percent, void* userdata);
 
 namespace {
+// ── [DEBUG UNINSTALL] ghi vết từng bước xóa app ──────────────────────────
+// Triệu chứng: xóa app trên máy thật kẹt ở 0% không có dấu hiệu gì. Bộ ghi
+// vết này lưu TOÀN BỘ diễn biến (đường dẫn, quyền ghi, số file xóa được/
+// thất bại, lỗi std::filesystem, số lần callback...) vào
+// <Documents>/kudroid_uninstall_debug.txt và trả về Swift qua
+// kudroid_uninstall_debug_log() để xem/copy ngay trong tab Debug.
+// File được ghi LẠI SAU MỖI dòng — kể cả khi tiến trình chết giữa chừng,
+// log vẫn còn đến đúng bước cuối nó đạt được.
+std::string g_uninstallDbg;
+
+void uninstallDbg(const std::string& msg) {
+    struct timespec now;
+    clock_gettime(CLOCK_REALTIME, &now);
+    struct tm tmv;
+    localtime_r(&now.tv_sec, &tmv);
+    char ts[40];
+    std::snprintf(ts, sizeof(ts), "%02d:%02d:%02d.%03ld",
+                  tmv.tm_hour, tmv.tm_min, tmv.tm_sec, now.tv_nsec / 1000000);
+    g_uninstallDbg += std::string("[") + ts + "] " + msg + "\n";
+    if (g_logDir[0]) {
+        const std::string path =
+            std::string(g_logDir) + "/kudroid_uninstall_debug.txt";
+        if (FILE* f = fopen(path.c_str(), "w")) {
+            fwrite(g_uninstallDbg.data(), 1, g_uninstallDbg.size(), f);
+            fclose(f);
+            ::chmod(path.c_str(), 0644); // AFC đọc được như stderr.log
+        }
+    }
+}
+
+// Mô tả ngắn trạng thái 1 đường dẫn: tồn tại? loại? ghi được? — bắt lỗi
+// quyền NGAY TỪ ĐẦU thay vì đoán mò vì sao remove thất bại im lặng.
+std::string describePath(const std::filesystem::path& p) {
+    std::error_code ec;
+    const std::string raw = p.string();
+    std::string s = raw;
+    if (!std::filesystem::exists(p, ec)) {
+        s += ec ? " [exists-err: " + ec.message() + "]" : " [MISSING]";
+    } else {
+        s += std::filesystem::is_directory(p, ec) ? " [dir]" : " [file]";
+    }
+    if (::access(raw.c_str(), W_OK) != 0)
+        s += std::string(" [NOT-WRITABLE errno=") + std::strerror(errno) + "]";
+    else
+        s += " [writable]";
+    return s;
+}
+
 // Tổng kích thước (bytes) đệ quy của cây thư mục — mốc chia % chính xác.
 std::uint64_t treeSize(const std::filesystem::path& p) {
     std::error_code ec;
@@ -2303,31 +2352,49 @@ std::uint64_t treeSize(const std::filesystem::path& p) {
 // Xóa cây theo từng FILE cấp sâu nhất, cập nhật % theo bytes đã giải phóng.
 // remove_all cả thư mục lớn chỉ báo 1 lần → UI kẹt; xóa từng file + cộng
 // dồn byte → progress chạy mượt từ 0 đến 100.
+// [DEBUG] đếm file removed/failed, giữ lỗi đầu tiên, log mọi bất thường.
 void removeTreeWithProgress(const std::filesystem::path& p,
                             const char* phase,
                             kudroid_delete_progress_cb cb, void* ud,
                             double basePct, double spanPct,
                             std::uint64_t totalBytes) {
     std::error_code ec;
+    uninstallDbg("phase='" + std::string(phase) + "' path=" + describePath(p) +
+                 " totalBytes=" + std::to_string(totalBytes));
     if (!std::filesystem::exists(p, ec)) return;
 
     // Thư mục rỗng / file đơn.
     if (!std::filesystem::is_directory(p, ec)) {
         std::filesystem::remove(p, ec);
+        uninstallDbg("  single-file remove ec=" +
+                     (ec ? ec.message() : std::string("none")));
         return;
     }
 
     std::uint64_t freed = 0;
     int lastReported = -1;
+    int filesRemoved = 0, filesFailed = 0, dirsSeen = 0, cbCalls = 0;
+    std::string firstErr;
     // Duyệt post-order: xóa file trước, thư mục rỗng sau.
     std::filesystem::recursive_directory_iterator it(p, ec), end;
+    if (ec) uninstallDbg("  iterator create FAILED: " + ec.message());
     while (it != end && !ec) {
         const auto entryPath = it->path();
         const bool isDir = it->is_directory(ec);
         if (!isDir) {
             const auto sz = it->file_size(ec);
-            std::filesystem::remove(entryPath, ec);
+            std::error_code rmEc;
+            std::filesystem::remove(entryPath, rmEc);
+            if (rmEc) {
+                ++filesFailed;
+                if (firstErr.empty())
+                    firstErr = entryPath.string() + ": " + rmEc.message();
+            } else {
+                ++filesRemoved;
+            }
             freed += sz;
+        } else {
+            ++dirsSeen;
         }
         it.increment(ec);
         if (ec) break;
@@ -2336,39 +2403,72 @@ void removeTreeWithProgress(const std::filesystem::path& p,
                 spanPct * (static_cast<double>(freed) / static_cast<double>(totalBytes)));
             if (pct != lastReported) { // tránh spam callback
                 lastReported = pct;
+                ++cbCalls;
                 cb(phase, pct, ud);
             }
         }
     }
+    if (ec) uninstallDbg("  iterator STOPPED early: " + ec.message());
+    uninstallDbg("  phase done: removed=" + std::to_string(filesRemoved) +
+                 " failed=" + std::to_string(filesFailed) +
+                 " dirs=" + std::to_string(dirsSeen) +
+                 " callbacks=" + std::to_string(cbCalls) +
+                 " lastPct=" + std::to_string(lastReported) +
+                 " freed=" + std::to_string(freed) +
+                 (firstErr.empty() ? "" : " FIRST_ERR: " + firstErr));
     // Xóa nốt các thư mục rỗng còn lại (sau khi file bên trong đã mất).
-    std::filesystem::remove_all(p, ec);
+    std::error_code raEc;
+    const auto removedCount = std::filesystem::remove_all(p, raEc);
+    uninstallDbg("  remove_all -> " + std::to_string(removedCount) +
+                 " ec=" + (raEc ? raEc.message() : std::string("none")) +
+                 " residue=" +
+                 (std::filesystem::exists(p, raEc) ? "YES(still-there!)" : "no"));
 }
 } // namespace
 
 extern "C" int kudroid_delete_app_progress(const char* package_name,
                                            kudroid_delete_progress_cb cb,
                                            void* userdata) {
-    if (!package_name) return 0;
+    g_uninstallDbg.clear();
+    uninstallDbg(std::string("=== UNINSTALL START pkg=") +
+                 (package_name ? package_name : "(null)") +
+                 " cb=" + (cb ? "yes" : "NO") + " ===");
+    if (!package_name) {
+        uninstallDbg("ABORT: package_name null");
+        return 0;
+    }
 
     const std::string androidRoot = kudroid::VFSPathRemapper::getInstance().androidRoot();
+    uninstallDbg("androidRoot=" + androidRoot);
     const std::filesystem::path appCodePath =
         std::filesystem::path(androidRoot) / "data/app" / package_name;
     const std::filesystem::path appDataPath =
         std::filesystem::path(androidRoot) / "data/data" / package_name;
     const std::filesystem::path dalvikRoot =
         std::filesystem::path(androidRoot) / "data/dalvik-cache";
+    uninstallDbg("code:   " + describePath(appCodePath));
+    uninstallDbg("data:   " + describePath(appDataPath));
+    uninstallDbg("dalvik: " + describePath(dalvikRoot));
 
     // Đếm tổng bytes trước để % chính xác trên toàn bộ quá trình.
     std::uint64_t total = treeSize(appCodePath) + treeSize(appDataPath);
     std::error_code ec;
+    // dalvik-cache giữ classes.jar + boot.jar sinh từ DEX của app. Không xóa thì
+    // cài lại sẽ HIT cache cũ (cache.hash khớp vì DEX không đổi) → chạy artifact
+    // của bản build trước. Khớp cả dạng "<pkg>" lẫn "<tên-file-apk>_<ver>" cũ.
+    std::vector<std::filesystem::path> dalvikMatches;
     if (std::filesystem::is_directory(dalvikRoot, ec)) {
         for (const auto& e : std::filesystem::directory_iterator(dalvikRoot, ec)) {
             const std::string name = e.path().filename().string();
-            if (name == package_name || name.rfind(std::string(package_name) + "_", 0) == 0)
+            if (name == package_name || name.rfind(std::string(package_name) + "_", 0) == 0) {
                 total += treeSize(e.path());
+                dalvikMatches.push_back(e.path());
+            }
         }
     }
     if (total == 0) total = 1; // tránh chia 0
+    uninstallDbg("totalBytes=" + std::to_string(total) +
+                 " dalvikMatches=" + std::to_string(dalvikMatches.size()));
 
     int success = 1;
     // Chia %: code 0-45, data 45-70, dalvik 70-100.
@@ -2377,30 +2477,27 @@ extern "C" int kudroid_delete_app_progress(const char* package_name,
     removeTreeWithProgress(appDataPath, "Removing app data",
                            cb, userdata, 45.0, 25.0, total);
 
-    // dalvik-cache giữ classes.jar + boot.jar sinh từ DEX của app. Không xóa thì
-    // cài lại sẽ HIT cache cũ (cache.hash khớp vì DEX không đổi) → chạy artifact
-    // của bản build trước. Khớp cả dạng "<pkg>" lẫn "<tên-file-apk>_<ver>" cũ.
     if (cb) cb("Removing compiled cache", 70, userdata);
-    if (std::filesystem::is_directory(dalvikRoot, ec)) {
-        const std::string pkg = package_name;
-        std::vector<std::filesystem::path> matches;
-        for (const auto& entry : std::filesystem::directory_iterator(dalvikRoot, ec)) {
-            const std::string name = entry.path().filename().string();
-            if (name == pkg || name.rfind(pkg + "_", 0) == 0) {
-                matches.push_back(entry.path());
-            }
-        }
-        for (const auto& m : matches) {
-            removeTreeWithProgress(m, "Removing compiled cache",
-                                   cb, userdata, 70.0, 30.0, total);
-        }
+    for (const auto& m : dalvikMatches) {
+        removeTreeWithProgress(m, "Removing compiled cache",
+                               cb, userdata, 70.0, 30.0, total);
     }
     if (cb) cb("Done", 100, userdata);
+    uninstallDbg("=== UNINSTALL DONE success=" + std::to_string(success) + " ===");
     return success;
 }
 
 extern "C" int kudroid_delete_app(const char* package_name) {
     return kudroid_delete_app_progress(package_name, nullptr, nullptr);
+}
+
+// Nhật ký debug chi tiết của lần uninstall gần nhất — Swift hiển thị/copy
+// ở tab Debug. Chuỗi được malloc; caller phải free().
+extern "C" const char* kudroid_uninstall_debug_log(void) {
+    char* out = static_cast<char*>(std::malloc(g_uninstallDbg.size() + 1));
+    if (!out) return nullptr;
+    std::memcpy(out, g_uninstallDbg.c_str(), g_uninstallDbg.size() + 1);
+    return out;
 }
 
 extern "C" const char* kudroid_get_app_info(const char* package_name) {
