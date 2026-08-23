@@ -415,6 +415,67 @@ static jlong JNICALL kudroid_shim_GetDirectBufferCapacity(JNIEnv* env, jobject b
     return 0;
 }
 
+// ── Chẩn đoán lookup thất bại ────────────────────────────────────────────────
+// Game chỉ in "Failed to initialize JavaClassLoader" rồi trả version 0 — không
+// nói class/method nào thiếu. Bọc FindClass/Get*MethodID/Get*FieldID để mọi
+// lookup trả NULL đều lộ tên ra log. Chỉ bật quanh JNI_OnLoad (bật cả lúc chạy
+// bình thường sẽ ngập log vì code Java dùng FindClass rất nhiều).
+static std::atomic<bool> g_logFailedLookups{false};
+
+extern "C" void kudroid_jni_set_lookup_logging(int enabled) {
+    g_logFailedLookups.store(enabled != 0);
+}
+
+static jclass (*g_origFindClass)(JNIEnv*, const char*) = nullptr;
+static jmethodID (*g_origGetMethodID)(JNIEnv*, jclass, const char*, const char*) = nullptr;
+static jmethodID (*g_origGetStaticMethodID)(JNIEnv*, jclass, const char*, const char*) = nullptr;
+static jfieldID (*g_origGetFieldID)(JNIEnv*, jclass, const char*, const char*) = nullptr;
+static jfieldID (*g_origGetStaticFieldID)(JNIEnv*, jclass, const char*, const char*) = nullptr;
+
+static jclass JNICALL kudroid_shim_FindClass(JNIEnv* env, const char* name) {
+    jclass c = g_origFindClass(env, name);
+    if (!c && g_logFailedLookups.load()) {
+        log_jni("LOOKUP FAILED: FindClass('%s')", name ? name : "(null)");
+    }
+    return c;
+}
+
+static jmethodID JNICALL kudroid_shim_GetMethodID(JNIEnv* env, jclass c,
+                                                 const char* name, const char* sig) {
+    jmethodID m = g_origGetMethodID(env, c, name, sig);
+    if (!m && g_logFailedLookups.load()) {
+        log_jni("LOOKUP FAILED: GetMethodID('%s', '%s')", name ? name : "?", sig ? sig : "?");
+    }
+    return m;
+}
+
+static jmethodID JNICALL kudroid_shim_GetStaticMethodID(JNIEnv* env, jclass c,
+                                                       const char* name, const char* sig) {
+    jmethodID m = g_origGetStaticMethodID(env, c, name, sig);
+    if (!m && g_logFailedLookups.load()) {
+        log_jni("LOOKUP FAILED: GetStaticMethodID('%s', '%s')", name ? name : "?", sig ? sig : "?");
+    }
+    return m;
+}
+
+static jfieldID JNICALL kudroid_shim_GetFieldID(JNIEnv* env, jclass c,
+                                               const char* name, const char* sig) {
+    jfieldID f = g_origGetFieldID(env, c, name, sig);
+    if (!f && g_logFailedLookups.load()) {
+        log_jni("LOOKUP FAILED: GetFieldID('%s', '%s')", name ? name : "?", sig ? sig : "?");
+    }
+    return f;
+}
+
+static jfieldID JNICALL kudroid_shim_GetStaticFieldID(JNIEnv* env, jclass c,
+                                                     const char* name, const char* sig) {
+    jfieldID f = g_origGetStaticFieldID(env, c, name, sig);
+    if (!f && g_logFailedLookups.load()) {
+        log_jni("LOOKUP FAILED: GetStaticFieldID('%s', '%s')", name ? name : "?", sig ? sig : "?");
+    }
+    return f;
+}
+
 static void patch_jnienv_vtable(JNIEnv* env) {
     if (!env || !env->functions) return;
     if (env->functions == &g_interposedJniFunctions) return;
@@ -424,6 +485,18 @@ static void patch_jnienv_vtable(JNIEnv* env) {
         g_interposedJniFunctions.NewDirectByteBuffer = kudroid_shim_NewDirectByteBuffer;
         g_interposedJniFunctions.GetDirectBufferAddress = kudroid_shim_GetDirectBufferAddress;
         g_interposedJniFunctions.GetDirectBufferCapacity = kudroid_shim_GetDirectBufferCapacity;
+
+        g_origFindClass = env->functions->FindClass;
+        g_origGetMethodID = env->functions->GetMethodID;
+        g_origGetStaticMethodID = env->functions->GetStaticMethodID;
+        g_origGetFieldID = env->functions->GetFieldID;
+        g_origGetStaticFieldID = env->functions->GetStaticFieldID;
+        g_interposedJniFunctions.FindClass = kudroid_shim_FindClass;
+        g_interposedJniFunctions.GetMethodID = kudroid_shim_GetMethodID;
+        g_interposedJniFunctions.GetStaticMethodID = kudroid_shim_GetStaticMethodID;
+        g_interposedJniFunctions.GetFieldID = kudroid_shim_GetFieldID;
+        g_interposedJniFunctions.GetStaticFieldID = kudroid_shim_GetStaticFieldID;
+
         g_interposedFunctionsInitialized = true;
     }
     const_cast<struct JNINativeInterface_*&>(env->functions) = &g_interposedJniFunctions;
@@ -662,7 +735,10 @@ void kudroid_jni_init_jvm(const char* bootclasspath, const char* classpath) {
     // gộp thẳng vào classes.jar — không phụ thuộc thứ tự duyệt nhiều jar
     // trên bootclasspath của Avian.
     if (!canonicalClasspath.empty()) {
-        const int stubs = kudroid::AutoStub::append_missing_stubs(canonicalClasspath);
+        std::vector<std::string> bootJars;
+        if (!bootJarFile.empty()) bootJars.push_back(bootJarFile);
+        if (!frameworkJarFile.empty()) bootJars.push_back(frameworkJarFile);
+        const int stubs = kudroid::AutoStub::append_missing_stubs(canonicalClasspath, bootJars);
         log_jni("AutoStub: %d stub classes appended into classes.jar", stubs);
     }
 

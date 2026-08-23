@@ -20,6 +20,9 @@ void kudroid_jni_destroy_jvm(void);
 // lấy phiên bản javavm giả toàn cục được kudroid sử dụng.
 JavaVM* kudroid_jni_get_javavm(void);
 
+/// Bật/tắt log mọi FindClass/GetMethodID/GetFieldID trả NULL.
+void kudroid_jni_set_lookup_logging(int enabled);
+
 // Kiểm tra class `className` (dạng dot, vd "com.foo.Bar") có THẬT SỰ kế thừa
 // android.app.Activity hay không — dùng JNI AssignableFrom nên chính xác 100%
 // kể cả class bị ProGuard obfuscate thành a.a.a. Trả về 1 nếu đúng, 0 nếu

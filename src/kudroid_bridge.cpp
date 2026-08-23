@@ -1512,8 +1512,10 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                 // Guard abort(): nếu lib abort/segfault trong JNI_OnLoad,
                                 // crashHandler siglongjmp về đây thay vì giết process.
                                 jint version = 0;
+                                kudroid_jni_set_lookup_logging(1);
                                 const int guardRc =
                                     kudroid_call_jni_onload_guarded(jni_onload, jvm, &version);
+                                kudroid_jni_set_lookup_logging(0);
                                 if (guardRc == 0) {
                                     appendAndEcho("[kudroid_core] JNI_OnLoad(" + libName + ") returned version: " + std::to_string(version));
                                 } else if (guardRc < 0) {

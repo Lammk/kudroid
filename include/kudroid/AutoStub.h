@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 namespace kudroid {
 
@@ -37,6 +38,11 @@ public:
     /// này (ghi qua file tạm + rename). Trả về số stub đã thêm
     /// (0 = không thiếu gì hoặc không đọc được jar).
     static int append_missing_stubs(const std::string& jarPath);
+
+    /// Nh\u01b0 tr\u00ean, nh\u01b0ng coi c\u00e1c class trong `extraPresentJars` (boot.jar,
+    /// framework.jar) l\u00e0 \u0111\u00e3 c\u00f3 \u2014 kh\u00f4ng \u0111\u1eafp stub r\u1ed7ng \u0111\u00e8 l\u00ean b\u1ea3n th\u1eadt.
+    static int append_missing_stubs(const std::string& jarPath,
+                                    const std::vector<std::string>& extraPresentJars);
 };
 
 } // namespace kudroid

@@ -47,13 +47,13 @@ void beUtf8(std::vector<std::uint8_t>& v, const char* s) {
     v.insert(v.end(), s, s + n);
 }
 
+// CHỈ android/* + androidx/*. Thêm java/*, javax/*, org/* vào đây là tự bắn vào
+// chân: java.util.HashMap/ArrayList/Calendar… nằm trong boot.jar của Avian chứ
+// không nằm trong classes.jar, nên bị coi là "thiếu" và bị đắp stub RỖNG đè lên
+// bản thật → mọi code Java gọi method của chúng đều NoSuchMethodError.
 bool isAndroidName(const std::string& slash) {
     return slash.compare(0, 8, "android/") == 0 ||
-           slash.compare(0, 9, "androidx/") == 0 ||
-           slash.compare(0, 6, "javax/") == 0 ||
-           slash.compare(0, 4, "org/") == 0 ||
-           slash.compare(0, 10, "java/util/") == 0 ||
-           slash.compare(0, 14, "java/security/") == 0;
+           slash.compare(0, 9, "androidx/") == 0;
 }
 std::string toDotted(std::string s) {
     for (char& c : s) if (c == '/') c = '.';
@@ -385,6 +385,11 @@ void emitStoredEntry(std::vector<std::uint8_t>& local, std::vector<std::uint8_t>
 } // namespace
 
 int AutoStub::append_missing_stubs(const std::string& jarPath) {
+    return append_missing_stubs(jarPath, {});
+}
+
+int AutoStub::append_missing_stubs(const std::string& jarPath,
+                                   const std::vector<std::string>& extraPresentJars) {
     JarLayout jar;
     if (!readJar(jarPath, jar)) {
         std::fprintf(stderr, "[kudroid_autostub] cannot read jar: %s\n", jarPath.c_str());
@@ -393,6 +398,19 @@ int AutoStub::append_missing_stubs(const std::string& jarPath) {
 
     ClassRefs refs;
     std::set<std::string> present;
+
+    // Class đã có trong boot classpath vẫn "present" — stub đè lên chúng sẽ
+    // che mất bản thật tùy thứ tự duyệt classpath của JVM.
+    for (const auto& extra : extraPresentJars) {
+        JarLayout other;
+        if (!readJar(extra, other)) continue;
+        for (const auto& e : other.entries) {
+            if (endsWithClass(e.name) && isAndroidName(e.name)) {
+                present.insert(toDotted(e.name.substr(0, e.name.size() - 6)));
+            }
+        }
+    }
+
     std::size_t scanned = 0;
     for (const auto& e : jar.entries) {
         if (!endsWithClass(e.name)) continue;
