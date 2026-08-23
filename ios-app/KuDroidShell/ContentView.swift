@@ -444,7 +444,8 @@ struct AppsView: View {
             })
             let cb: @convention(c) (UnsafePointer<CChar>?, Int32, UnsafeMutableRawPointer?) -> Void = {
                 phaseC, percent, ud in
-                guard let ctx = ud?.assumingMemoryBound(to: Ctx.self).pointee else { return }
+                guard let raw = ud else { return }
+                let ctx = Unmanaged<Ctx>.fromOpaque(raw).takeUnretainedValue()
                 let text = phaseC.map { String(cString: $0) } ?? ""
                 ctx.phase(text)
                 ctx.pct(Double(percent))
@@ -462,7 +463,7 @@ struct AppsView: View {
             }
 
             let success = kudroid_delete_app_progress(name, cb, opaque)
-            Unmanaged.passUnretained(ctx).release()
+            Unmanaged<Ctx>.fromOpaque(opaque).release()
             // [DEBUG] kéo toàn bộ trace phía native lên log Swift để xem/copy
             // ngay trong tab Debug (file kudroid_uninstall_debug.txt trong
             // Documents cũng chứa nội dung này).
