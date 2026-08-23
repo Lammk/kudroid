@@ -83,4 +83,11 @@ public class Window {
      */
     public void setTitle(CharSequence title) {
     }
+
+    public interface Callback {
+    }
+
+    public interface OnFrameMetricsAvailableListener {
+    }
+
 }

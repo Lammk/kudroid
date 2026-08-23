@@ -494,4 +494,24 @@ public class View {
      */
     public void setTag(Object tag) {
     }
+
+    public static class BaseSavedState {
+        public BaseSavedState() {}
+    }
+
+    public interface OnCreateContextMenuListener {
+    }
+
+    public interface OnHoverListener {
+    }
+
+    public interface OnLayoutChangeListener {
+    }
+
+    public interface OnSystemUiVisibilityChangeListener {
+    }
+
+    public interface OnUnhandledKeyEventListener {
+    }
+
 }

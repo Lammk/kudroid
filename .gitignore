@@ -1,0 +1,7 @@
+build/
+framework/build/
+logs/
+tests/
+*.log
+*.tmp
+.DS_Store

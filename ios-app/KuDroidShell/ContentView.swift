@@ -1670,7 +1670,10 @@ class NativeMetalViewController: UIViewController {
         startAppIfNeeded()
     }
 
+    private static var isGlobalAppRunning = false
+
     @objc private func handleExitButton() {
+        NativeMetalViewController.isGlobalAppRunning = false
         motionManager.stopAccelerometerUpdates()
         motionManager.stopGyroUpdates()
         crashCheckTimer?.invalidate()
@@ -1679,6 +1682,7 @@ class NativeMetalViewController: UIViewController {
     }
 
     deinit {
+        NativeMetalViewController.isGlobalAppRunning = false
         motionManager.stopAccelerometerUpdates()
         motionManager.stopGyroUpdates()
         crashCheckTimer?.invalidate()
@@ -1705,6 +1709,8 @@ class NativeMetalViewController: UIViewController {
 
     func startAppIfNeeded() {
         guard !isStarted else { return }
+        if NativeMetalViewController.isGlobalAppRunning { return }
+        NativeMetalViewController.isGlobalAppRunning = true
         isStarted = true
 
         NSLog("[KuDroid] >>> Launching guest app: %@ <<<", appName)

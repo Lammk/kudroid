@@ -38,4 +38,8 @@ public class Application extends ContextWrapper {
     public void attach(Context base) {
         attachBaseContext(base);
     }
+
+    public interface ActivityLifecycleCallbacks {
+    }
+
 }

@@ -69,4 +69,9 @@ public final class Uri {
     public int hashCode() {
         return mString == null ? 0 : mString.hashCode();
     }
+
+    public static class Builder {
+        public Builder() {}
+    }
+
 }

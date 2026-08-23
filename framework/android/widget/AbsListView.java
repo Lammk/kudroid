@@ -146,4 +146,8 @@ public abstract class AbsListView extends AdapterView<ListAdapter> {
             if (child != null) child.draw(canvas);
         }
     }
+
+    public interface SelectionBoundsAdjuster {
+    }
+
 }

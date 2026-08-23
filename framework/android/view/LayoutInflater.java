@@ -39,4 +39,8 @@ public class LayoutInflater {
     public Context getContext() {
         return mContext;
     }
+
+    public interface Factory2 {
+    }
+
 }

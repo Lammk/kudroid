@@ -87,4 +87,33 @@ public class Notification {
             return mNotification;
         }
     }
+
+    public static class Action {
+        public Action() {}
+    }
+
+    public static class BigPictureStyle {
+        public BigPictureStyle() {}
+    }
+
+    public static class BubbleMetadata {
+        public BubbleMetadata() {}
+    }
+
+    public static class CallStyle {
+        public CallStyle() {}
+    }
+
+    public static class MessagingStyle {
+        public MessagingStyle() {}
+    }
+
+    public static class Message {
+        public Message() {}
+    }
+
+    public static class Style {
+        public Style() {}
+    }
+
 }

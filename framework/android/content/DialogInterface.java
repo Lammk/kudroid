@@ -58,4 +58,9 @@ public interface DialogInterface {
      * hủy hộp thoại.
      */
     void cancel();
+
+    public static class OnMultiChoiceClickListener {
+        public OnMultiChoiceClickListener() {}
+    }
+
 }

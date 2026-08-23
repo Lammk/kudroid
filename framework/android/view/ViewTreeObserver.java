@@ -124,4 +124,8 @@ public final class ViewTreeObserver {
         mTouchMode.clear();
         mScroll.clear();
     }
+
+    public interface OnDrawListener {
+    }
+
 }

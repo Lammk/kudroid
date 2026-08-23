@@ -61,4 +61,8 @@ public final class PendingIntent {
      */
     public void send() {
     }
+
+    public interface OnFinished {
+    }
+
 }

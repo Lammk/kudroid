@@ -917,10 +917,13 @@ extern "C" JNIEXPORT void JNICALL Java_android_app_Activity_setRequestedOrientat
 
 extern "C" void kudroid_blit_canvas_to_layer(void* layer, const void* bits, int width, int height);
 
+static std::atomic<bool> s_isApkRunning{false};
+
 extern "C" void kudroid_unbind_metal_layer(void) {
     g_metalLayer = nullptr;
     g_metalLayerWidth = 0;
     g_metalLayerHeight = 0;
+    s_isApkRunning.store(false);
     kudroid_android_log_message(2, "KuDroidGPU", "kudroid_unbind_metal_layer: GPU surface unbound cleanly.");
 }
 
@@ -1170,6 +1173,11 @@ extern void* (*kudroid_guest_symbol_lookup)(const char* name);
 }
 
 extern "C" const char* kudroid_run_apk(const char* appName) {
+    if (s_isApkRunning.exchange(true)) {
+        kudroid_android_log_message(3, "kudroid_core", "kudroid_run_apk: APK is already running in background, ignoring duplicate launch request.");
+        return strdup("[kudroid_core] APK is already running.\n");
+    }
+
     // Reset/truncate logs để mỗi phiên chạy app luôn ghi đè log mới hoàn toàn (không chồng lên nhau)
     if (g_logDir[0] != '\0') {
         char aPath[1200];
@@ -1795,6 +1803,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
     }
 
     writeLogFile("kudroid_run_apk.txt", log);
+    s_isApkRunning.store(false);
     char* result = static_cast<char*>(malloc(log.size() + 1));
     if (result) memcpy(result, log.c_str(), log.size() + 1);
     return result;

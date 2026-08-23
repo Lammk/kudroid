@@ -98,4 +98,9 @@ public class LinearLayout extends ViewGroup {
             }
         }
     }
+
+    public static class LayoutParams {
+        public LayoutParams() {}
+    }
+
 }

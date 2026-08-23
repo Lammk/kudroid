@@ -20,6 +20,10 @@ public class WindowManager {
     public WindowManager() {
     }
 
+    public Display getDefaultDisplay() {
+        return new Display();
+    }
+
     public void addView(View view, WindowManager.LayoutParams params) {
     }
 

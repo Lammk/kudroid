@@ -158,4 +158,8 @@ public abstract class ViewGroup extends View {
             super(width, height);
         }
     }
+
+    public interface OnHierarchyChangeListener {
+    }
+
 }

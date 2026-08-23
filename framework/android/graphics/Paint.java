@@ -126,4 +126,17 @@ public class Paint {
     public float getFontMetrics() {
         return mTextSize;
     }
+
+    public static class Cap {
+        public Cap() {}
+    }
+
+    public static class FontMetricsInt {
+        public FontMetricsInt() {}
+    }
+
+    public static class Join {
+        public Join() {}
+    }
+
 }

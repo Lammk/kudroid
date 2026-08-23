@@ -72,4 +72,9 @@ public class Resources {
     public AssetManager getAssets() {
         return new AssetManager();
     }
+
+    public static class Theme {
+        public Theme() {}
+    }
+
 }

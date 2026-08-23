@@ -54,4 +54,12 @@ public abstract class Drawable {
     public int getOpacity() {
         return android.graphics.PixelFormat.OPAQUE;
     }
+
+    public interface Callback {
+    }
+
+    public static class ConstantState {
+        public ConstantState() {}
+    }
+
 }

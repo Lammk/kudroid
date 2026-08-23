@@ -130,4 +130,9 @@ public final class Bitmap {
     public int[] getPixels() {
         return mPixels;
     }
+
+    public static class Config {
+        public Config() {}
+    }
+
 }
