@@ -1206,7 +1206,62 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
         std::string resolvedAppName = appName;
         std::filesystem::path appDir = std::filesystem::path(remapper.androidRoot()) / "data/app" / resolvedAppName;
 
-        // Nếu thư mục mang tên phiên bản (_1.0.10) tồn tại, kiểm tra xem có app_info.json chứa package ID chuẩn không
+        // ── Chuẩn hóa tên app = package ID thật ───────────────────────────
+        // Thư mục cài đặt thường mang tên FILE APK tải về (vd
+        // "Minecraft_PE_26.30_BANDISHARE") trong khi Android thật định danh
+        // app bằng package ID ("com.mojang.minecraftpe"). Đọc manifest NGAY
+        // TỪ ĐẦU để đổi tên thư mục + di chuyển dalvik-cache sang tên chuẩn:
+        // mọi đường dẫn runtime (dalvik-cache, data/data, sdcard/Android/data)
+        // khớp Android thật và nhất quán dù tải lại APK với tên file khác.
+        {
+            const auto mfPath = appDir / "AndroidManifest.xml";
+            std::string pkgId;
+            if (std::filesystem::exists(mfPath)) {
+                std::ifstream mf(mfPath, std::ios::binary);
+                if (mf) {
+                    std::vector<std::uint8_t> axml(
+                        (std::istreambuf_iterator<char>(mf)),
+                        std::istreambuf_iterator<char>());
+                    kudroid::ManifestInfo mi =
+                        kudroid::APKExtractor::parse_manifest(axml.data(), axml.size());
+                    if (mi.packageName.empty() && axml.size() > 4 && axml[0] == '<') {
+                        mi = kudroid::APKExtractor::parse_manifest_text(
+                            reinterpret_cast<const char*>(axml.data()), axml.size());
+                    }
+                    pkgId = mi.packageName;
+                }
+            }
+
+            if (!pkgId.empty() && pkgId != resolvedAppName) {
+                const auto cleanAppDir =
+                    std::filesystem::path(remapper.androidRoot()) / "data/app" / pkgId;
+                std::error_code renEc;
+                bool movedApp = false;
+                if (!std::filesystem::exists(cleanAppDir)) {
+                    std::filesystem::rename(appDir, cleanAppDir, renEc);
+                    movedApp = !renEc;
+                }
+                // Dalvik-cache cũ (classes.jar 15MB+, dịch mất vài phút trên
+                // máy thật) phải theo tên mới — không thì phải dịch lại từ đầu.
+                const auto oldCache = std::filesystem::path(remapper.androidRoot()) /
+                                      "data/dalvik-cache" / resolvedAppName;
+                const auto newCache = std::filesystem::path(remapper.androidRoot()) /
+                                      "data/dalvik-cache" / pkgId;
+                if (std::filesystem::exists(oldCache) && !std::filesystem::exists(newCache)) {
+                    std::error_code cacheEc;
+                    std::filesystem::rename(oldCache, newCache, cacheEc);
+                }
+                if (movedApp) {
+                    resolvedAppName = pkgId;
+                    appDir = cleanAppDir;
+                } else if (std::filesystem::exists(cleanAppDir)) {
+                    // Đã có thư mục chuẩn từ trước (cài đè) — giữ nguyên bố cục cũ.
+                }
+            }
+        }
+
+        // Fallback cũ: nếu manifest không đọc được, thử app_info.json do
+        // extractor ghi lúc cài đặt (chứa package ID chuẩn).
         if (std::filesystem::exists(appDir)) {
             std::filesystem::path infoPath = appDir / "app_info.json";
             if (std::filesystem::exists(infoPath)) {
@@ -2217,44 +2272,122 @@ extern "C" int kudroid_clear_app_cache(const char* package_name) {
     return success;
 }
 
-extern "C" int kudroid_delete_app(const char* package_name) {
-    if (!package_name) return 0;
-    
-    const std::string androidRoot = kudroid::VFSPathRemapper::getInstance().androidRoot();
-    std::filesystem::path appCodePath = std::filesystem::path(androidRoot) / "data/app" / package_name;
-    std::filesystem::path appDataPath = std::filesystem::path(androidRoot) / "data/data" / package_name;
-    
+extern "C" int kudroid_delete_app(const char* package_name);
+
+// Xóa app với báo cáo tiến trình qua callback (phase UTF-8, percent 0-100).
+// Callback chạy trên thread gọi hàm — Swift side tự dispatch về main thread.
+// Cho phép UI hiển thị progress thay vì freeze vài giây khi remove_all quét
+// hàng nghìn file (classes.jar 15MB, assets...).
+typedef void (*kudroid_delete_progress_cb)(const char* phase, int percent, void* userdata);
+
+namespace {
+// Đếm số entry (file+thư mục) đệ quy — dùng làm mốc phần trăm.
+std::uint64_t countTreeEntries(const std::filesystem::path& p) {
     std::error_code ec;
+    if (!std::filesystem::exists(p, ec)) return 0;
+    std::uint64_t n = 0;
+    std::filesystem::recursive_directory_iterator it(p, ec), end;
+    while (it != end) {
+        ++n;
+        it.increment(ec);
+        if (ec) break;
+    }
+    return n;
+}
+
+// Xóa từng thư mục con cấp 1, báo tiến trình sau mỗi cái.
+void removeTreeWithProgress(const std::filesystem::path& p,
+                            const char* phase,
+                            kudroid_delete_progress_cb cb, void* ud,
+                            double basePct, double spanPct,
+                            int& ok) {
+    std::error_code ec;
+    if (!std::filesystem::exists(p, ec)) return;
+    if (cb) {
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "%s: scanning", phase);
+        cb(buf, static_cast<int>(basePct), ud);
+    }
+    // Đếm trước để chia % đều giữa các con.
+    std::uint64_t total = 0;
+    {
+        std::filesystem::directory_iterator it(p, ec), end;
+        while (it != end) { ++total; it.increment(ec); if (ec) break; }
+    }
+    if (total == 0) {
+        std::filesystem::remove_all(p, ec);
+        return;
+    }
+    std::uint64_t done = 0;
+    std::filesystem::directory_iterator it(p, ec), end;
+    while (it != end && !ec) {
+        std::filesystem::remove_all(it->path(), ec);
+        ++done;
+        if (cb) {
+            char buf[160];
+            std::snprintf(buf, sizeof(buf), "%s: %s", phase,
+                          it->path().filename().string().c_str());
+            const double pct = basePct + spanPct *
+                (static_cast<double>(done) / static_cast<double>(total));
+            cb(buf, static_cast<int>(pct), ud);
+        }
+        it.increment(ec);
+    }
+    std::filesystem::remove_all(p, ec); // xóa chính thư mục cha
+}
+} // namespace
+
+extern "C" int kudroid_delete_app_progress(const char* package_name,
+                                           kudroid_delete_progress_cb cb,
+                                           void* userdata) {
+    if (!package_name) return 0;
+
+    const std::string androidRoot = kudroid::VFSPathRemapper::getInstance().androidRoot();
+    const std::filesystem::path appCodePath =
+        std::filesystem::path(androidRoot) / "data/app" / package_name;
+    const std::filesystem::path appDataPath =
+        std::filesystem::path(androidRoot) / "data/data" / package_name;
+    const std::filesystem::path dalvikRoot =
+        std::filesystem::path(androidRoot) / "data/dalvik-cache";
+
     int success = 1;
-    if (std::filesystem::exists(appCodePath, ec)) {
-        if (std::filesystem::remove_all(appCodePath, ec) == static_cast<std::uintmax_t>(-1)) {
-            success = 0;
-        }
-    }
-    if (std::filesystem::exists(appDataPath, ec)) {
-        if (std::filesystem::remove_all(appDataPath, ec) == static_cast<std::uintmax_t>(-1)) {
-            success = 0;
-        }
-    }
+    // Chia %: code 0-45, data 45-70, dalvik 70-100.
+    removeTreeWithProgress(appCodePath, "Removing app files",
+                           cb, userdata, 0.0, 45.0, success);
+    removeTreeWithProgress(appDataPath, "Removing app data",
+                           cb, userdata, 45.0, 25.0, success);
 
     // dalvik-cache giữ classes.jar + boot.jar sinh từ DEX của app. Không xóa thì
     // cài lại sẽ HIT cache cũ (cache.hash khớp vì DEX không đổi) → chạy artifact
-    // của bản build trước. install_apk đặt tên thư mục theo package ID còn
-    // run_apk khởi đầu bằng tên file APK, nên cùng một app có thể có cả
-    // "<pkg>" và "<pkg>_<version>" — dọn cả hai dạng.
-    const std::filesystem::path dalvikRoot = std::filesystem::path(androidRoot) / "data/dalvik-cache";
+    // của bản build trước. Khớp cả dạng "<pkg>" lẫn "<tên-file-apk>_<ver>" cũ.
+    std::error_code ec;
+    if (cb) cb("Removing compiled cache", 70, userdata);
     if (std::filesystem::is_directory(dalvikRoot, ec)) {
         const std::string pkg = package_name;
+        std::vector<std::filesystem::path> matches;
         for (const auto& entry : std::filesystem::directory_iterator(dalvikRoot, ec)) {
             const std::string name = entry.path().filename().string();
             if (name == pkg || name.rfind(pkg + "_", 0) == 0) {
-                if (std::filesystem::remove_all(entry.path(), ec) == static_cast<std::uintmax_t>(-1)) {
-                    success = 0;
-                }
+                matches.push_back(entry.path());
             }
         }
+        std::uint64_t i = 0;
+        for (const auto& m : matches) {
+            removeTreeWithProgress(m, "Removing compiled cache",
+                                   cb, userdata,
+                                   70.0 + 30.0 * (static_cast<double>(i) /
+                                                  static_cast<double>(matches.size())),
+                                   30.0 / static_cast<double>(matches.size()),
+                                   success);
+            ++i;
+        }
     }
+    if (cb) cb("Done", 100, userdata);
     return success;
+}
+
+extern "C" int kudroid_delete_app(const char* package_name) {
+    return kudroid_delete_app_progress(package_name, nullptr, nullptr);
 }
 
 extern "C" const char* kudroid_get_app_info(const char* package_name) {

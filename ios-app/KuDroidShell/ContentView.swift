@@ -58,6 +58,10 @@ struct AppsView: View {
     @State private var installedApps: [AppItem] = []
     @State private var showAPKInstaller = false
     @State private var showRenameAlert = false
+    // Trạng thái xóa app — hiển thị progress thay vì freeze UI.
+    @State private var deletingApp: String? = nil
+    @State private var deletePhase = ""
+    @State private var deletePercent: Double = 0
     @State private var showJitWarning = false
     @State private var renamingAppId: String = ""
     @State private var newAppName: String = ""
@@ -201,6 +205,37 @@ struct AppsView: View {
                             // cách khắc phục tạm thời cho các phiên bản trước ios 16
                             UITableView.appearance().backgroundColor = .clear
                         }
+                    }
+                }
+
+                // Overlay tiến trình xóa app — chặn tương tác trong lúc xóa
+                // nhưng vẫn hiển thị phase + % thay vì treo màn hình.
+                if let name = deletingApp {
+                    ZStack {
+                        Color.black.opacity(0.65).ignoresSafeArea()
+                        VStack(spacing: 16) {
+                            ProgressView()
+                                .progressViewStyle(.circular)
+                                .scaleEffect(1.4)
+                            Text("Deleting \(name)")
+                                .font(.headline)
+                                .foregroundColor(.white)
+                            Text(deletePhase)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
+                            ProgressView(value: deletePercent, total: 100)
+                                .progressViewStyle(.linear)
+                                .frame(width: 220)
+                            Text("\(Int(deletePercent))%")
+                                .font(.caption2.monospacedDigit())
+                                .foregroundColor(.green)
+                        }
+                        .padding(28)
+                        .background(
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                .fill(Color(.systemGray6).opacity(0.97))
+                        )
                     }
                 }
             }
@@ -372,9 +407,37 @@ struct AppsView: View {
     }
     
     private func deleteApp(name: String) {
-        let success = kudroid_delete_app(name)
-        fullLog = success == 1 ? "Deleted app \(name)" : "Failed to delete app \(name)"
-        loadInstalledApps()
+        guard deletingApp == nil else { return } // đang xóa app khác
+        deletingApp = name
+        deletePhase = "Preparing…"
+        deletePercent = 0
+        DispatchQueue.global(qos: .userInitiated).async {
+            final class Ctx {
+                let phase: (String) -> Void
+                let pct: (Double) -> Void
+                init(_ p: @escaping (String) -> Void, _ q: @escaping (Double) -> Void) { phase = p; pct = q }
+            }
+            let ctx = Ctx({ text in
+                DispatchQueue.main.async { self.deletePhase = text }
+            }, { v in
+                DispatchQueue.main.async { self.deletePercent = v }
+            })
+            let cb: @convention(c) (UnsafePointer<CChar>?, Int32, UnsafeMutableRawPointer?) -> Void = {
+                phaseC, percent, ud in
+                guard let ctx = ud?.assumingMemoryBound(to: Ctx.self).pointee else { return }
+                let text = phaseC.map { String(cString: $0) } ?? ""
+                ctx.phase(text)
+                ctx.pct(Double(percent))
+            }
+            let opaque = Unmanaged.passRetained(ctx).toOpaque()
+            let success = kudroid_delete_app_progress(name, cb, opaque)
+            Unmanaged.passUnretained(ctx).release()
+            DispatchQueue.main.async {
+                self.fullLog = success == 1 ? "Deleted app \(name)" : "Failed to delete app \(name)"
+                self.deletingApp = nil
+                self.loadInstalledApps()
+            }
+        }
     }
     
     private func renameApp(id: String, newName: String) {

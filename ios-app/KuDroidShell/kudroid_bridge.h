@@ -118,6 +118,13 @@ int kudroid_clear_app_cache(const char* package_name);
 /// trả về 1 nếu thành công, 0 nếu thất bại.
 int kudroid_delete_app(const char* package_name);
 
+/// xóa app với báo cáo tiến trình qua callback (phase UTF-8, percent 0-100).
+/// callback chạy trên thread gọi hàm — Swift tự dispatch về main thread.
+typedef void (*kudroid_delete_progress_cb)(const char* phase, int percent, void* userdata);
+int kudroid_delete_app_progress(const char* package_name,
+                                kudroid_delete_progress_cb cb,
+                                void* userdata);
+
 /// lấy thông tin cơ bản về một ứng dụng đã cài đặt.
 /// trả về một chuỗi được malloc (ví dụ: json hoặc văn bản được định dạng); người gọi phải giải phóng nó bằng free().
 const char* kudroid_get_app_info(const char* package_name);
