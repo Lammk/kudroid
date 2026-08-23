@@ -34,6 +34,7 @@ endif()
 
 add_library(kudroid_core STATIC
     src/APKExtractor.cpp
+    src/AutoStub.cpp
     src/BionicShim.cpp
     src/VFSPathRemapper.cpp
     src/bionic_log_trampoline.S
@@ -201,5 +202,14 @@ else()
         )
         target_link_libraries(test_manifest_parse PRIVATE kudroid_core)
         target_include_directories(test_manifest_parse PRIVATE include)
+    endif()
+
+    # Host-side test for AutoStub (tự sinh stub class android/* còn thiếu).
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_autostub.cpp")
+        add_executable(test_autostub
+            tests/test_autostub.cpp
+        )
+        target_link_libraries(test_autostub PRIVATE kudroid_core)
+        target_include_directories(test_autostub PRIVATE include)
     endif()
 endif()

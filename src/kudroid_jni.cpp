@@ -1,5 +1,6 @@
 #include "kudroid/kudroid_jni.h"
 #include "kudroid/VFSPathRemapper.h"
+#include "kudroid/AutoStub.h"
 #include "kudroid/framework_jar_bytes.h"
 #include <cstdio>
 #include <cstdlib>
@@ -644,16 +645,45 @@ void kudroid_jni_init_jvm(const char* bootclasspath, const char* classpath) {
         canonicalClasspath = realBuf;
     }
 
+    // ── AUTO-STUB ─────────────────────────────────────────────────────────
+    // Đọc classes.jar của app, tự tìm mọi class android/* mà app tham chiếu
+    // nhưng framework chưa có, rồi sinh stub.jar. Nhờ vậy KHÔNG cần vá tay
+    // từng class vào framework cho mọi app mới — JVM luôn resolve được
+    // hierarchy. Gọi method thật trên stub → NoSuchMethodError (lỗi rõ, chỉ
+    // ảnh hưởng đúng method thiếu) thay vì ClassNotFoundException chặn cả
+    // Activity.
+    std::string stubJarFile;
+    if (!canonicalClasspath.empty()) {
+        auto slash2 = canonicalClasspath.rfind('/');
+        std::string dir2 = (slash2 != std::string::npos)
+                               ? canonicalClasspath.substr(0, slash2 + 1) : "";
+        const std::string candidate = dir2 + "autostub.jar";
+        const int stubs = kudroid::AutoStub::build_stub_jar(canonicalClasspath, candidate);
+        if (stubs > 0) {
+            if (::realpath(candidate.c_str(), realBuf)) {
+                stubJarFile = realBuf;
+            } else {
+                stubJarFile = candidate;
+            }
+            log_jni("AutoStub: %d generated stub classes -> %s", stubs, stubJarFile.c_str());
+        } else {
+            log_jni("AutoStub: no missing android/* classes (or jar unreadable)");
+        }
+    }
+
     std::string classpathOption;
     std::string bootAppendOption;
     if (!canonicalClasspath.empty()) {
-        if (!frameworkJarFile.empty()) {
-            classpathOption = std::string("-Djava.class.path=") + canonicalClasspath + ":" + frameworkJarFile;
-            bootAppendOption = std::string("-Xbootclasspath/a:") + frameworkJarFile + ":" + canonicalClasspath;
-        } else {
-            classpathOption = std::string("-Djava.class.path=") + canonicalClasspath;
-            bootAppendOption = std::string("-Xbootclasspath/a:") + canonicalClasspath;
-        }
+        // Thứ tự: app jar → framework (stub tay, ưu tiên cao hơn autostub)
+        // → autostub (sinh tự động, chỉ dùng khi hai cái trên không có).
+        std::string extra;
+        if (!frameworkJarFile.empty()) extra += ":" + frameworkJarFile;
+        if (!stubJarFile.empty()) extra += ":" + stubJarFile;
+        classpathOption = std::string("-Djava.class.path=") + canonicalClasspath + extra;
+        std::string bootExtra;
+        if (!frameworkJarFile.empty()) bootExtra += frameworkJarFile + ":";
+        if (!stubJarFile.empty()) bootExtra += stubJarFile + ":";
+        bootAppendOption = std::string("-Xbootclasspath/a:") + bootExtra + canonicalClasspath;
         struct stat st;
         if (::stat(canonicalClasspath.c_str(), &st) == 0) {
             log_jni("App classpath jar exists (canonical): %s (%lld bytes)", canonicalClasspath.c_str(),
