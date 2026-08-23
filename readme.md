@@ -12,7 +12,7 @@ i don't care what you guy did to the source code after forked it,just do whateve
 
 i might still continue updating it whenever i have time
 
-warning: I recommend using this app with JIT enabled,but you still can use without JIT
+warning: Enable JIT before using this app
 
 SPECIAL THANK TO sakayori!!!! (Support me to do many things,if he doesn't help kudroid will take more longer to complete)
 
