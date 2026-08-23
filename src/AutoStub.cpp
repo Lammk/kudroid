@@ -248,6 +248,33 @@ bool analyzeClass(const std::vector<std::uint8_t>& bytes,
         if (isAndroidName(n)) allRefs.insert(toDotted(n));
     }
 
+    // QUAN TRỌNG: tên class còn ẩn trong descriptor Utf8 — kiểu field, tham
+    // số, giá trị trả về ("...Landroid/graphics/PorterDuffColorFilter;...")
+    // KHÔNG sinh CONSTANT_Class entry riêng nếu type chỉ được dùng qua
+    // signature. MCPE tham chiếu PorterDuffColorFilter đúng theo cách này,
+    // scanner chỉ quét Class entry sẽ bỏ sót (bug thật gặp trên máy).
+    for (std::uint16_t i = 1; i < cpCount; ++i) {
+        if (pool[i].tag != 1) continue;
+        const std::string& u = pool[i].utf8;
+        std::size_t pos = 0;
+        while ((pos = u.find('L', pos)) != std::string::npos) {
+            const std::size_t semi = u.find(';', pos);
+            if (semi == std::string::npos) break;
+            const std::string n = u.substr(pos + 1, semi - pos - 1);
+            pos = semi + 1;
+            // Chỉ nhận identifier hợp lệ dạng path (loại "Long", "Label"...).
+            bool valid = !n.empty() && n.find('/') != std::string::npos;
+            for (const char c : n) {
+                if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                      (c >= '0' && c <= '9') || c == '/' || c == '_' || c == '$')) {
+                    valid = false;
+                    break;
+                }
+            }
+            if (valid && isAndroidName(n)) allRefs.insert(toDotted(n));
+        }
+    }
+
     std::uint16_t accessFlags, thisClass, superClass, ifaceCount;
     if (!r.u2(accessFlags) || !r.u2(thisClass) || !r.u2(superClass)) return true;
     std::string sup = classNameAt(superClass);

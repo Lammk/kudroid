@@ -670,6 +670,9 @@ extern "C" void kudroid_set_log_dir(const char* dir) {
                 dup2(errFd, STDERR_FILENO);
                 setvbuf(stderr, nullptr, _IONBF, 0);
                 close(errFd);
+                // AFC (copy file qua USB/Finder) chỉ đọc được file có quyền
+                // read cho other — umask có thể đã mask 0644 thành 0600.
+                ::chmod(errPath, 0644);
                 // Dòng đầu của stderr.log = build stamp — mọi log file đều
                 // tự nhận diện được commit của bản IPA đang chạy.
                 fprintf(stderr, "[kudroid_core] Build: %s\n", kudroid_build_stamp());
@@ -1189,6 +1192,8 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
             dup2(errFd, STDERR_FILENO);
             setvbuf(stderr, nullptr, _IONBF, 0);
             close(errFd);
+            // AFC (kdb dump / Finder) chỉ đọc được file có quyền read-other.
+            ::chmod(errPath, 0644);
             fprintf(stderr, "[kudroid_core] Build: %s\n", kudroid_build_stamp());
         }
 #endif
@@ -2281,59 +2286,63 @@ extern "C" int kudroid_delete_app(const char* package_name);
 typedef void (*kudroid_delete_progress_cb)(const char* phase, int percent, void* userdata);
 
 namespace {
-// Đếm số entry (file+thư mục) đệ quy — dùng làm mốc phần trăm.
-std::uint64_t countTreeEntries(const std::filesystem::path& p) {
+// Tổng kích thước (bytes) đệ quy của cây thư mục — mốc chia % chính xác.
+std::uint64_t treeSize(const std::filesystem::path& p) {
     std::error_code ec;
     if (!std::filesystem::exists(p, ec)) return 0;
-    std::uint64_t n = 0;
+    std::uint64_t total = 0;
     std::filesystem::recursive_directory_iterator it(p, ec), end;
     while (it != end) {
-        ++n;
+        if (it->is_regular_file(ec)) total += it->file_size(ec);
         it.increment(ec);
         if (ec) break;
     }
-    return n;
+    return total;
 }
 
-// Xóa từng thư mục con cấp 1, báo tiến trình sau mỗi cái.
+// Xóa cây theo từng FILE cấp sâu nhất, cập nhật % theo bytes đã giải phóng.
+// remove_all cả thư mục lớn chỉ báo 1 lần → UI kẹt; xóa từng file + cộng
+// dồn byte → progress chạy mượt từ 0 đến 100.
 void removeTreeWithProgress(const std::filesystem::path& p,
                             const char* phase,
                             kudroid_delete_progress_cb cb, void* ud,
                             double basePct, double spanPct,
+                            std::uint64_t totalBytes,
                             int& ok) {
     std::error_code ec;
     if (!std::filesystem::exists(p, ec)) return;
-    if (cb) {
-        char buf[128];
-        std::snprintf(buf, sizeof(buf), "%s: scanning", phase);
-        cb(buf, static_cast<int>(basePct), ud);
-    }
-    // Đếm trước để chia % đều giữa các con.
-    std::uint64_t total = 0;
-    {
-        std::filesystem::directory_iterator it(p, ec), end;
-        while (it != end) { ++total; it.increment(ec); if (ec) break; }
-    }
-    if (total == 0) {
-        std::filesystem::remove_all(p, ec);
+
+    // Thư mục rỗng / file đơn.
+    if (!std::filesystem::is_directory(p, ec)) {
+        std::filesystem::remove(p, ec);
         return;
     }
-    std::uint64_t done = 0;
-    std::filesystem::directory_iterator it(p, ec), end;
+
+    std::uint64_t freed = 0;
+    int lastReported = -1;
+    // Duyệt post-order: xóa file trước, thư mục rỗng sau.
+    std::filesystem::recursive_directory_iterator it(p, ec), end;
     while (it != end && !ec) {
-        std::filesystem::remove_all(it->path(), ec);
-        ++done;
-        if (cb) {
-            char buf[160];
-            std::snprintf(buf, sizeof(buf), "%s: %s", phase,
-                          it->path().filename().string().c_str());
-            const double pct = basePct + spanPct *
-                (static_cast<double>(done) / static_cast<double>(total));
-            cb(buf, static_cast<int>(pct), ud);
+        const auto entryPath = it->path();
+        const bool isDir = it->is_directory(ec);
+        if (!isDir) {
+            const auto sz = it->file_size(ec);
+            std::filesystem::remove(entryPath, ec);
+            freed += sz;
         }
         it.increment(ec);
+        if (ec) break;
+        if (!isDir && cb && totalBytes > 0) {
+            const int pct = static_cast<int>(basePct +
+                spanPct * (static_cast<double>(freed) / static_cast<double>(totalBytes)));
+            if (pct != lastReported) { // tránh spam callback
+                lastReported = pct;
+                cb(phase, pct, ud);
+            }
+        }
     }
-    std::filesystem::remove_all(p, ec); // xóa chính thư mục cha
+    // Xóa nốt các thư mục rỗng còn lại (sau khi file bên trong đã mất).
+    std::filesystem::remove_all(p, ec);
 }
 } // namespace
 
@@ -2350,17 +2359,28 @@ extern "C" int kudroid_delete_app_progress(const char* package_name,
     const std::filesystem::path dalvikRoot =
         std::filesystem::path(androidRoot) / "data/dalvik-cache";
 
+    // Đếm tổng bytes trước để % chính xác trên toàn bộ quá trình.
+    std::uint64_t total = treeSize(appCodePath) + treeSize(appDataPath);
+    std::error_code ec;
+    if (std::filesystem::is_directory(dalvikRoot, ec)) {
+        for (const auto& e : std::filesystem::directory_iterator(dalvikRoot, ec)) {
+            const std::string name = e.path().filename().string();
+            if (name == package_name || name.rfind(std::string(package_name) + "_", 0) == 0)
+                total += treeSize(e.path());
+        }
+    }
+    if (total == 0) total = 1; // tránh chia 0
+
     int success = 1;
     // Chia %: code 0-45, data 45-70, dalvik 70-100.
     removeTreeWithProgress(appCodePath, "Removing app files",
-                           cb, userdata, 0.0, 45.0, success);
+                           cb, userdata, 0.0, 45.0, total, success);
     removeTreeWithProgress(appDataPath, "Removing app data",
-                           cb, userdata, 45.0, 25.0, success);
+                           cb, userdata, 45.0, 25.0, total, success);
 
     // dalvik-cache giữ classes.jar + boot.jar sinh từ DEX của app. Không xóa thì
     // cài lại sẽ HIT cache cũ (cache.hash khớp vì DEX không đổi) → chạy artifact
     // của bản build trước. Khớp cả dạng "<pkg>" lẫn "<tên-file-apk>_<ver>" cũ.
-    std::error_code ec;
     if (cb) cb("Removing compiled cache", 70, userdata);
     if (std::filesystem::is_directory(dalvikRoot, ec)) {
         const std::string pkg = package_name;
@@ -2371,15 +2391,9 @@ extern "C" int kudroid_delete_app_progress(const char* package_name,
                 matches.push_back(entry.path());
             }
         }
-        std::uint64_t i = 0;
         for (const auto& m : matches) {
             removeTreeWithProgress(m, "Removing compiled cache",
-                                   cb, userdata,
-                                   70.0 + 30.0 * (static_cast<double>(i) /
-                                                  static_cast<double>(matches.size())),
-                                   30.0 / static_cast<double>(matches.size()),
-                                   success);
-            ++i;
+                                   cb, userdata, 70.0, 30.0, total, success);
         }
     }
     if (cb) cb("Done", 100, userdata);

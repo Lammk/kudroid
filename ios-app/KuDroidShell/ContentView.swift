@@ -294,7 +294,7 @@ struct AppsView: View {
                 var infoURL = currentFolderURL.appendingPathComponent("app_info.json")
                 var displayName = prettifyAppName(folderName)
                 var version = extractVersionFromFolderName(folderName) ?? "1.0.0"
-                
+
                 if let infoData = try? Data(contentsOf: infoURL),
                    let rawObj = try? JSONSerialization.jsonObject(with: infoData),
                    let json = rawObj as? [String: Any] {
@@ -313,6 +313,14 @@ struct AppsView: View {
                     if let ver = json["version"] as? String, !ver.isEmpty && ver != "1.0.0" {
                         version = ver
                     }
+                }
+
+                // Version từ AndroidManifest.xml là NGUỒN CHUẨN — app_info.json
+                // có thể stale (viết từ bản cũ khi parser AXML còn lỗi → "1.0.0").
+                // Đọc trực tiếp binary manifest mỗi lần list app.
+                if let mfData = try? Data(contentsOf: currentFolderURL.appendingPathComponent("AndroidManifest.xml")),
+                   let mfVer = extractVersionNameFromAxml(mfData), !mfVer.isEmpty {
+                    version = mfVer
                 }
                 
                 // Đọc app_icon.png nếu có
@@ -1015,6 +1023,119 @@ func extractVersionFromFolderName(_ name: String) -> String? {
             let cleaned = matchString.replacingOccurrences(of: "_", with: ".").replacingOccurrences(of: "-", with: ".")
             return cleaned
         }
+    }
+    return nil
+}
+
+/// Đọc versionName từ binary AndroidManifest.xml (AXML).
+/// Nguồn chuẩn cho version hiển thị — app_info.json có thể stale.
+/// Parser tối giản: string pool UTF-16/UTF-8 + tìm attr "versionName" trong
+/// tag START_ELEMENT đầu tiên tên "manifest".
+func extractVersionNameFromAxml(_ data: Data) -> String? {
+    let bytes = [UInt8](data)
+    guard bytes.count > 40 else { return nil }
+
+    func u16(_ o: Int) -> Int { Int(bytes[o]) | (Int(bytes[o+1]) << 8) }
+    func u32(_ o: Int) -> Int {
+        u16(o) | (u16(o+2) << 16)
+    }
+
+    // File header: type=0x0003 | (headerSize<<16), fileSize.
+    guard u32(0) == 0x00080003 else { return nil }
+
+    // String pool tại offset 8: type=0x0001, headerSize=28.
+    let poolOff = 8
+    guard u16(poolOff) == 0x0001 else { return nil }
+    let stringCount = u32(poolOff + 8)
+    let flags = u32(poolOff + 16)
+    let stringsStart = poolOff + u32(poolOff + 20)
+    let isUtf8 = (flags & (1 << 8)) != 0
+
+    var strings: [String] = []
+    strings.reserveCapacity(stringCount)
+    for i in 0..<stringCount {
+        let offEntry = poolOff + 28 + i * 4
+        guard offEntry + 4 <= bytes.count else { break }
+        let strOff = stringsStart + u32(offEntry)
+        guard strOff < bytes.count else { strings.append(""); continue }
+
+        if isUtf8 {
+            var cur = strOff
+            // u8len: 1-2 byte length prefix (số ký tự), sau đó byte-length prefix.
+            cur += (bytes[cur] & 0x80) != 0 ? 2 : 1
+            var byteLen = 0
+            if cur < bytes.count {
+                if (bytes[cur] & 0x80) != 0 {
+                    byteLen = ((bytes[cur] & 0x7F) << 8) | bytes[cur+1]
+                    cur += 2
+                } else {
+                    byteLen = bytes[cur]
+                    cur += 1
+                }
+            }
+            guard cur + byteLen <= bytes.count else { strings.append(""); continue }
+            strings.append(String(decoding: bytes[cur..<(cur+byteLen)], as: UTF8.self))
+        } else {
+            var cur = strOff
+            guard cur + 2 <= bytes.count else { strings.append(""); continue }
+            var charLen = u16(cur)
+            cur += 2
+            if (charLen & 0x8000) != 0 {
+                guard cur + 2 <= bytes.count else { strings.append(""); continue }
+                charLen = ((charLen & 0x7FFF) << 16) | u16(cur)
+                cur += 2
+            }
+            var s = ""
+            for _ in 0..<charLen where cur + 2 <= bytes.count {
+                let ch = u16(cur)
+                cur += 2
+                if let scalar = Unicode.Scalar(ch) { s.unicodeScalars.append(scalar) }
+            }
+            strings.append(s)
+        }
+    }
+
+    // Duyệt chunks tìm START_ELEMENT của tag "manifest", đọc attr versionName.
+    var cur = poolOff + u32(poolOff + 4)
+    // Bỏ qua resource map nếu có (type 0x0180).
+    if cur + 8 <= bytes.count && u32(cur) == 0x00080180 {
+        cur += u32(cur + 4)
+    }
+    while cur + 8 <= bytes.count {
+        let chunkType = u32(cur)
+        let chunkSize = u32(cur + 4)
+        guard chunkSize >= 8, cur + chunkSize <= bytes.count else { break }
+
+        if chunkType == 0x00100102 { // START_ELEMENT
+            let nameIdx = u32(cur + 20)
+            let tagName = nameIdx < strings.count ? strings[nameIdx] : ""
+            if tagName == "manifest" {
+                let attrStart = u16(cur + 24)
+                let attrSize = u16(cur + 26)
+                let attrCount = u16(cur + 28)
+                // attributeStart tính từ đầu struct attrExt (= chunk+16).
+                var a = cur + 16 + attrStart
+                for _ in 0..<attrCount where a + attrSize <= cur + chunkSize {
+                    let attrNameIdx = u32(a + 4)
+                    let rawValIdx = u32(a + 8)
+                    let attrName = attrNameIdx < strings.count ? strings[attrNameIdx] : ""
+                    if attrName == "versionName" {
+                        if rawValIdx != 0xFFFFFFFF && rawValIdx < strings.count {
+                            return strings[rawValIdx]
+                        }
+                        // typed value: dataType ở a+15, data ở a+16.
+                        let dataType = bytes[a + 15]
+                        if dataType == 0x03 { // TYPE_STRING
+                            let dataVal = u32(a + 16)
+                            if dataVal < strings.count { return strings[dataVal] }
+                        }
+                    }
+                    a += attrSize
+                }
+                return nil // manifest là tag đầu tiên — không thấy thì dừng
+            }
+        }
+        cur += chunkSize
     }
     return nil
 }
