@@ -176,7 +176,7 @@ jint DexJniEnv::RegisterNatives(DexClass* klass, const JNINativeMethod* methods,
         if (target == nullptr) target = klass->FindVirtualMethod(m.name, m.signature);
         if (target == nullptr) {
             last_error_ = std::string("RegisterNatives: no method ") + m.name +
-                          m.signature + " trong " + klass->PrettyName();
+                          m.signature + " in " + klass->PrettyName();
             ++failures;
             continue;
         }

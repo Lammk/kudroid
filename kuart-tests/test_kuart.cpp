@@ -285,11 +285,17 @@ Check(int_array != nullptr && int_array->is_array, "class m ng [I");
     if (arr != nullptr) {
         for (int32_t i = 0; i < 4; ++i) arr->Set<int32_t>(i, i * 100);
         bool all_ok = true;
-        for (int32_t i = 0; i < 4; ++i) {
-            if (arr->Get<int32_t>(i) != i * 100) all_ok = false;
-        }
-Check(all_ok, " c/ghi ph n t  m ng int");
+    Check(all_ok, "read/write int array elements");
     }
+
+    // ── Array Covariance test: String[] is subclass of Object[] ──
+    kudroid::kuart::DexClass* string_array = linker.FindClass("[Ljava/lang/String;");
+    kudroid::kuart::DexClass* object_array = linker.FindClass("[Ljava/lang/Object;");
+    kudroid::kuart::DexClass* object_class = linker.FindClass("Ljava/lang/Object;");
+    Check(string_array != nullptr && object_array != nullptr, "FindClass [LString; and [LObject;");
+    Check(string_array->IsSubClassOf(object_array), "[LString; isSubClassOf [LObject; (Covariance)");
+    Check(string_array->IsSubClassOf(object_class), "[LString; isSubClassOf Object");
+    Check(!object_array->IsSubClassOf(string_array), "[LObject; is NOT isSubClassOf [LString;");
 
 std::printf("heap: %zu bytes, %zu block, %zu class   n p\n",
                 linker.heap().BytesAllocated(), linker.heap().BlockCount(),

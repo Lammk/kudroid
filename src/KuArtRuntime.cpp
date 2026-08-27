@@ -131,7 +131,7 @@ bool CallActivityThreadStatic(const char* name, const char* signature,
     g_rt->interpreter->Execute(m, args, num_args);
     if (g_rt->interpreter->HasPendingException()) {
         DexObject* ex = g_rt->interpreter->pending_exception();
-        SetError(std::string("exception trong ActivityThread.") + name + ": " +
+        SetError(std::string("exception in ActivityThread.") + name + ": " +
                  (ex != nullptr && ex->clazz != nullptr ? ex->clazz->PrettyName() : "?") + " (" +
                  g_rt->interpreter->last_error() + ")");
         g_rt->interpreter->ClearPendingException();

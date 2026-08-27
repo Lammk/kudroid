@@ -30,4 +30,3 @@ This project is **vibecoded** by AI, with me leading the architecture, design, a
 
 ### Credits & Acknowledgements
 - **Special thanks to `sakayorii`** for inspiration and foundational knowledge.
-- Powered by the **KuART** engine.
