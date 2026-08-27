@@ -263,6 +263,18 @@ std::vector<std::pair<std::string, void*>> LibraryManager::resolveAllSymbols(con
     return result;
 }
 
+void* LibraryManager::resolveSymbolInLib(const std::string& libPattern, const char* name) const {
+    if (!name || !*name) return nullptr;
+    std::lock_guard<std::recursive_mutex> lock(mtx_);
+    for (const auto& [key, loader] : libraries_) {
+        if (key.find(libPattern) != std::string::npos) {
+            void* address = loader->getSymbolAddress(name);
+            if (address) return address;
+        }
+    }
+    return nullptr;
+}
+
 bool extract_arm64_libs_from_apk(const char* apkPath, const char* outputDirectory,
                                  std::string* error) {
 #if !defined(KUDROID_HAS_MINIZIP)

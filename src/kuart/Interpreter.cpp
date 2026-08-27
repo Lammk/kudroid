@@ -4,6 +4,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <mutex>
 
 #include "dex/code_item_accessors-inl.h"
 #include "dex/dex_file_exception_helpers.h"
@@ -133,7 +134,22 @@ DexMethod* Interpreter::ResolveMethod(const DexMethod* context, uint32_t method_
     const std::string signature = dex_file.GetMethodSignature(method_id).ToString();
 
     if (DexMethod* m = klass->FindDirectMethod(name, signature.c_str())) return m;
-    return klass->FindVirtualMethod(name, signature.c_str());
+    if (DexMethod* m = klass->FindVirtualMethod(name, signature.c_str())) return m;
+
+    if (klass->dex_file == nullptr) {
+        static std::vector<std::unique_ptr<DexMethod>> s_stubMethods;
+        static std::mutex s_stubMethodMtx;
+        std::lock_guard<std::mutex> lock(s_stubMethodMtx);
+        auto stubM = std::make_unique<DexMethod>();
+        stubM->name = name;
+        stubM->declaring_class = klass;
+        stubM->access_flags = art::kAccPublic;
+        stubM->code_item = nullptr;
+        DexMethod* res = stubM.get();
+        s_stubMethods.push_back(std::move(stubM));
+        return res;
+    }
+    return nullptr;
 }
 
 bool Interpreter::InvokeMethod(DexFrame* frame, const art::Instruction* inst, bool is_range,
@@ -267,6 +283,9 @@ DexValue Interpreter::Execute(const DexMethod* method, const DexValue* args, siz
     }
 
     if (method->code_item == nullptr) {
+        if (method->declaring_class != nullptr && method->declaring_class->dex_file == nullptr) {
+            return result;
+        }
         ThrowException("Ljava/lang/AbstractMethodError;",
                        std::string("method without body: ") + (method->name ? method->name : "?"));
         return result;

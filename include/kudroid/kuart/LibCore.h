@@ -26,6 +26,9 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
 // UnsatisfiedLinkError tr c khi th  g i.
 bool LibCoreHasMethod(const DexMethod* method);
 
+using LoadLibraryCallback = int (*)(const char* libname);
+void LibCoreSetLoadLibraryCallback(LoadLibraryCallback cb);
+
 }  // namespace kuart
 }  // namespace kudroid
 

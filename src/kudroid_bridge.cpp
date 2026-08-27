@@ -1474,90 +1474,48 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                         manager.resolveAppSymbol("ANativeActivity_onCreate")
                     );
 
-                    // JNI_OnLoad là nơi game register native method và khởi tạo
-                    // engine/render thread — phải gọi cho MỌI loại app, kể cả app
-                    // Java Activity, không chỉ NativeActivity.
-                    {
-                        auto jniOnLoads = manager.resolveAllSymbols("JNI_OnLoad");
-                        if (!jniOnLoads.empty()) {
+                    kuart_set_load_library_callback([](const char* libname) -> int {
+                        static std::set<std::string> s_loadedJniOnLoads;
+                if (!libname || !*libname) return 0;
+                std::string name = libname;
+                std::string filename = name;
+                if (filename.find(".so") == std::string::npos) {
+                    filename = "lib" + filename + ".so";
+                }
+                kudroid::LibraryManager& manager = globalLibraryManager();
+                void* sym = manager.resolveSymbolInLib(filename, "JNI_OnLoad");
+                if (!sym) sym = manager.resolveSymbolInLib(name, "JNI_OnLoad");
+                if (sym) {
+                    if (s_loadedJniOnLoads.insert(filename).second) {
+                        JavaVM* jvm = kuart_get_javavm();
+                        if (jvm) {
                             bionic_init_main_thread_tls();
+                            char msg[256];
+                            snprintf(msg, sizeof(msg), "[kudroid_core] Invoking JNI_OnLoad in %s (System.loadLibrary)", filename.c_str());
+                            kudroid_android_log_message(4, "kudroid_core", msg);
+                            std::fprintf(stderr, "%s\n", msg);
 
-                            std::vector<std::pair<std::string, void*>> sortedLoads;
-                            auto isPriorityLib = [](const std::string& name) {
-                                std::string lower = name;
-                                for (char& c : lower) c = tolower(c);
-                                return lower.find("fmod") != std::string::npos ||
-                                       lower.find("minecraft") != std::string::npos ||
-                                       lower.find("main") != std::string::npos ||
-                                       lower.find("game") != std::string::npos ||
-                                       lower.find("unity") != std::string::npos;
-                            };
-
-                            for (const auto& item : jniOnLoads) {
-                                if (isPriorityLib(item.first)) sortedLoads.insert(sortedLoads.begin(), item);
-                                else sortedLoads.push_back(item);
+                            auto jni_onload = reinterpret_cast<jint (*)(JavaVM*, void*)>(sym);
+                            jint version = 0;
+                            const int guardRc = kudroid_call_jni_onload_guarded(jni_onload, jvm, &version);
+                            if (guardRc == 0) {
+                                snprintf(msg, sizeof(msg), "[kudroid_core] JNI_OnLoad(%s) returned version: %d", filename.c_str(), version);
+                                kudroid_android_log_message(4, "kudroid_core", msg);
+                                std::fprintf(stderr, "%s\n", msg);
+                            } else if (guardRc < 0) {
+                                snprintf(msg, sizeof(msg), "[kudroid_core] WARNING: Native exception in JNI_OnLoad for %s", filename.c_str());
+                                kudroid_android_log_message(5, "kudroid_core", msg);
+                                std::fprintf(stderr, "%s\n", msg);
+                            } else {
+                                snprintf(msg, sizeof(msg), "[kudroid_core] WARNING: JNI_OnLoad in %s raised fatal signal %d", filename.c_str(), guardRc);
+                                kudroid_android_log_message(5, "kudroid_core", msg);
+                                std::fprintf(stderr, "%s\n", msg);
                             }
-
-                            // Trên Android thật, JNI_OnLoad chỉ chạy khi Java gọi
-                            // System.loadLibrary. KuDroid gọi cho mọi .so đã nạp nên
-                            // các thư viện phụ (conscrypt/analytics/networking) cũng
-                            // chạy — và chúng abort() khi thiếu method Java chúng cần
-                            // (vd libconscrypt_jni.so: "could not find method set" →
-                            // SIGABRT giết cả process). Những lib này không cần cho
-                            // render/audio, bỏ qua luôn.
-                            auto isSkippedLib = [](const std::string& name) {
-                                std::string lower = name;
-                                for (char& c : lower) c = tolower(c);
-                                static const char* kSkip[] = {
-                                    "conscrypt", "httpclient", "maesdk",
-                                    "playfab", "openssl", "crypto"
-                                };
-                                for (const char* s : kSkip) {
-                                    if (lower.find(s) != std::string::npos) return true;
-                                }
-                                return false;
-                            };
-
-                            for (const auto& [libName, addr] : sortedLoads) {
-                                if (isSkippedLib(libName)) {
-                                    appendAndEcho("[kudroid_core] Skipping JNI_OnLoad in " + libName +
-                                                  " (optional library known to abort() on missing Java methods)");
-                                    continue;
-                                }
-
-                                auto jni_onload = reinterpret_cast<jint (*)(JavaVM*, void*)>(addr);
-                                appendAndEcho("[kudroid_core] Invoking JNI_OnLoad in " + libName);
-
-                                JNIEnv* env = nullptr;
-                                if (jvm->GetEnv((void**)&env, 0x00010006 /* JNI_VERSION_1_6 */) == JNI_OK && env) {
-                                    if (env->ExceptionCheck()) env->ExceptionClear();
-                                }
-
-                                // Guard abort(): nếu lib abort/segfault trong JNI_OnLoad,
-                                // crashHandler siglongjmp về đây thay vì giết process.
-                                jint version = 0;
-                                const int guardRc =
-                                    kudroid_call_jni_onload_guarded(jni_onload, jvm, &version);
-                                if (guardRc == 0) {
-                                    appendAndEcho("[kudroid_core] JNI_OnLoad(" + libName + ") returned version: " + std::to_string(version));
-                                } else if (guardRc < 0) {
-                                    appendAndEcho("[kudroid_core] WARNING: Native exception caught while running JNI_OnLoad in " + libName);
-                                } else {
-                                    appendAndEcho("[kudroid_core] WARNING: JNI_OnLoad in " + libName +
-                                                  " raised fatal signal " + std::to_string(guardRc) +
-                                                  " — library skipped, continuing startup.");
-                                    env = nullptr; // JNIEnv có thể không còn hợp lệ
-                                }
-
-                                if (env && env->ExceptionCheck()) {
-                                    appendAndEcho("[kudroid_core] Cleared pending Java exception from JNI_OnLoad in " + libName);
-                                    env->ExceptionClear();
-                                }
-                            }
-                        } else {
-                            appendAndEcho("[kudroid_core] WARNING: no JNI_OnLoad found in any loaded library.");
                         }
                     }
+                }
+                return 1;
+            });
 
                     if (native_activity_create) {
                         appendAndEcho("[kudroid_core] Native Game Activity detected.");
@@ -2917,10 +2875,6 @@ extern "C" const char* kudroid_load_apk(const char* apkPath) {
     }
 
     if (std::filesystem::exists(libDir)) {
-        // Android gọi JNI_OnLoad cho TỪNG lib được loadLibrary — theo dõi lib
-        // nào đã gọi để mỗi lib chỉ khởi tạo một lần (resolveGlobalSymbol cũ trả
-        // 1 lib tùy ý theo thứ tự unordered_map — có thể bỏ sót lib vẽ thật).
-        std::set<std::string> onLoadCalled;
         for (const auto& entry : std::filesystem::directory_iterator(libDir)) {
             if (entry.is_regular_file() && entry.path().extension() == ".so") {
                 log += "[kudroid_apk] Loading library: " + entry.path().filename().string() + "\n";
@@ -2928,19 +2882,6 @@ extern "C" const char* kudroid_load_apk(const char* apkPath) {
                     log += "[kudroid_apk] WARNING: Failed to load " + entry.path().filename().string() + "\n";
                 } else {
                     log += "[kudroid_apk] Loaded successfully.\n";
-                    JavaVM* jvm = kuart_get_javavm();
-                    if (!jvm) {
-                        log += "[kudroid_apk] ERROR: KuART not ready, skipping JNI_OnLoad\n";
-                    } else {
-                        for (const auto& [libKey, addr] : libManager.resolveAllSymbols("JNI_OnLoad")) {
-                            if (!onLoadCalled.insert(libKey).second) continue; // đã gọi rồi
-                            log += "[kudroid_apk] Found JNI_OnLoad in " + libKey + ", executing...\n";
-                            using JNI_OnLoad_t = jint (*)(JavaVM*, void*);
-                            JNI_OnLoad_t jniOnLoad = reinterpret_cast<JNI_OnLoad_t>(addr);
-                            jint version = jniOnLoad(jvm, nullptr);
-                            log += "[kudroid_apk] JNI_OnLoad(" + libKey + ") returned version: 0x" + std::to_string(version) + "\n";
-                        }
-                    }
                 }
             }
         }

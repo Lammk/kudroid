@@ -1,7 +1,12 @@
 #include "kudroid/kuart/DexClassLinker.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
+#include <ctime>
+#include <fstream>
+#include <mutex>
+#include <set>
 
 #include "dex/class_accessor-inl.h"
 #include "dex/code_item_accessors-inl.h"
@@ -130,6 +135,63 @@ DexClass* DexClassLinker::FindClass(const char* descriptor) {
         DexClass* klass = LoadClassFromDexFile(*dex_file, *class_def, descriptor);
         loading_.pop_back();
         return klass;
+    }
+
+    // ── Auto-Stubbing cho class framework / system bị thiếu ──
+    auto isFrameworkDescriptor = [](const char* desc) -> bool {
+        if (!desc || desc[0] != 'L') return false;
+        return (std::strncmp(desc, "Landroid/", 9) == 0 ||
+                std::strncmp(desc, "Ljava/", 6) == 0 ||
+                std::strncmp(desc, "Ljavax/", 7) == 0 ||
+                std::strncmp(desc, "Lcom/android/", 13) == 0 ||
+                std::strncmp(desc, "Lcom/google/", 12) == 0 ||
+                std::strncmp(desc, "Ldalvik/", 8) == 0 ||
+                std::strncmp(desc, "Lorg/", 5) == 0 ||
+                std::strncmp(desc, "Landroidx/", 10) == 0 ||
+                std::strncmp(desc, "Lkotlin/", 8) == 0 ||
+                std::strncmp(desc, "Lsun/", 5) == 0 ||
+                std::strncmp(desc, "Lcom/facebook/", 14) == 0 ||
+                std::strncmp(desc, "Lcom/unity3d/", 13) == 0 ||
+                std::strncmp(desc, "Lcom/mojang/", 12) == 0);
+    };
+
+    const size_t descLen = std::strlen(descriptor);
+    if (isFrameworkDescriptor(descriptor) && descLen > 2 && descriptor[descLen - 1] == ';') {
+        static std::mutex s_log_mtx;
+        static std::set<std::string> s_logged_classes;
+        {
+            std::lock_guard<std::mutex> lock(s_log_mtx);
+            if (s_logged_classes.insert(descriptor).second) {
+                std::string dotted = descriptor;
+                dotted = dotted.substr(1, dotted.size() - 2);
+                std::replace(dotted.begin(), dotted.end(), '/', '.');
+
+                std::fprintf(stderr, "[KuART][AUTO-STUB] ⚠ Auto-stubbed missing framework class: %s (%s) -> logged to classes.log\n",
+                             dotted.c_str(), descriptor);
+
+                std::ofstream logFile("classes.log", std::ios::app);
+                if (logFile.is_open()) {
+                    auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+                    char timeBuf[64];
+                    std::strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
+                    logFile << "[" << timeBuf << "] MISSING_FRAMEWORK_CLASS: " << dotted << " (descriptor: " << descriptor << ")\n";
+                }
+            }
+        }
+
+        auto* stub = heap_.New<DexClass>();
+        if (stub != nullptr) {
+            stub->descriptor = heap_.InternString(descriptor);
+            stub->access_flags = art::kAccPublic;
+            stub->status = DexClass::Status::kInitialized;
+            classes_[descriptor] = stub;
+
+            stub->superclass = FindClass("Ljava/lang/Object;");
+            if (stub->superclass != nullptr) {
+                stub->object_size = stub->superclass->object_size;
+            }
+            return stub;
+        }
     }
 
     last_error_ = std::string("class not found") + descriptor;

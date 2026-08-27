@@ -139,6 +139,7 @@ public:
     // / Android g i JNI_OnLoad cho t ng th  vi n  c loadLibrary, n n runner
     // / ph i g i cho t t c  th  vi n c  export, kh ng ch  lib  u ti n t y  .
     std::vector<std::pair<std::string, void*>> resolveAllSymbols(const char* name) const;
+    void* resolveSymbolInLib(const std::string& libPattern, const char* name) const;
     [[nodiscard]] const std::unordered_map<std::string, std::unique_ptr<ElfLoader>>& libraries() const {
         return libraries_;
     }

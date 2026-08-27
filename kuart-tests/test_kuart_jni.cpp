@@ -7,6 +7,7 @@
 // V n d ng th  thu t build hai l t nh  test_kuart_object: bytecode tham chi u
 // entity b ng index, index ch  ch t sau khi builder sort xong m i b ng.
 #include "kudroid/kuart/DexJniEnv.h"
+#include "kudroid/framework_dex_bytes.h"
 
 #include <cstdio>
 #include <cstring>
@@ -244,12 +245,27 @@ Check(kept != nullptr, "PopLocalFrame gi  l i k t qu ");
 "JavaVM::GetEnv tr  l i  ng JNIEnv");
 
     // Exception.
-Check(env->ExceptionCheck() == JNI_FALSE, "ch a c  exception");
+    Check(env->ExceptionCheck() == JNI_FALSE, "ch a c  exception");
     env->ThrowNew(k, "test");
-Check(env->ExceptionCheck() == JNI_TRUE, "ThrowNew  t exception");
+    Check(env->ExceptionCheck() == JNI_TRUE, "ThrowNew  t exception");
     Check(env->ExceptionOccurred() != nullptr, "ExceptionOccurred");
     env->ExceptionClear();
     Check(env->ExceptionCheck() == JNI_FALSE, "ExceptionClear");
+
+    // DirectByteBuffer (Zero-copy).
+    uint8_t rawBuffer[64] = {0x12, 0x34, 0x56, 0x78};
+    jobject byteBuf = env->NewDirectByteBuffer(rawBuffer, sizeof(rawBuffer));
+    Check(byteBuf != nullptr, "NewDirectByteBuffer");
+    Check(env->GetDirectBufferAddress(byteBuf) == rawBuffer, "GetDirectBufferAddress matches raw pointer");
+    Check(env->GetDirectBufferCapacity(byteBuf) == sizeof(rawBuffer), "GetDirectBufferCapacity matches size");
+
+    // Reflection JNI bridging.
+    jmethodID mid = env->GetMethodID(k, "getValue", "()I");
+    Check(mid != nullptr, "GetMethodID for reflection bridging");
+    jobject refMethod = env->ToReflectedMethod(k, mid, JNI_FALSE);
+    Check(refMethod != nullptr, "ToReflectedMethod creates Method object");
+    jmethodID backMid = env->FromReflectedMethod(refMethod);
+    Check(backMid == mid, "FromReflectedMethod recovers original jmethodID");
 
     return from_java + env->GetIntField(nat, fid);  // 11 + 25
 }
@@ -329,6 +345,10 @@ Check(builder.TypeIndexOf("LNat;") == kNatType, "index  n  nh gi a hai l t build
 
     kudroid::kuart::DexClassLinker linker;
     std::string error;
+    if (!linker.AddDexFile(g_framework_dex_bytes, g_framework_dex_size, "framework.dex", &error)) {
+        std::printf("  FAIL AddDexFile(framework.dex): %s\n=== FAILED ===\n", error.c_str());
+        return 1;
+    }
     if (!linker.AddDexFile(dex.data(), dex.size(), "test.dex", &error)) {
         std::printf("  FAIL AddDexFile: %s\n=== FAILED ===\n", error.c_str());
         return 1;

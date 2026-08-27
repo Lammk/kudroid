@@ -18,6 +18,7 @@
 #include "kudroid/kuart/DexJniEnv.h"
 #include "kudroid/kuart/DexReflect.h"
 #include "kudroid/kuart/Interpreter.h"
+#include "kudroid/kuart/LibCore.h"
 
 namespace {
 
@@ -148,6 +149,10 @@ extern "C" void kuart_set_symbol_lookup(void* (*fn)(const char*)) {
     g_symbol_lookup = fn;
     std::lock_guard<std::mutex> lock(g_mtx);
     if (g_rt != nullptr && g_rt->jni != nullptr) g_rt->jni->set_symbol_lookup(fn);
+}
+
+extern "C" void kuart_set_load_library_callback(int (*cb)(const char*)) {
+    kudroid::kuart::LibCoreSetLoadLibraryCallback(cb);
 }
 
 extern "C" int kuart_init(const char* app_dir) {

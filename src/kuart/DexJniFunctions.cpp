@@ -808,18 +808,113 @@ jint JNICALL GetJavaVM(JNIEnv* env, JavaVM** vm) {
     return JNI_OK;
 }
 
-jobject JNICALL NewDirectByteBuffer(JNIEnv*, void*, jlong) {
-    // Needs java.nio.DirectByteBuffer in framework; not yet.
+jobject JNICALL NewDirectByteBuffer(JNIEnv* env, void* address, jlong capacity) {
+    DexJniEnv* self = Self(env);
+    if (self == nullptr || self->linker() == nullptr) return nullptr;
+    DexClass* dbb_class = self->linker()->FindClass("Ljava/nio/DirectByteBuffer;");
+    if (dbb_class == nullptr) dbb_class = self->linker()->FindClass("Ljava/nio/ByteBuffer;");
+    if (dbb_class == nullptr) return nullptr;
+
+    DexObject* obj = self->linker()->AllocObject(dbb_class);
+    if (obj == nullptr) return nullptr;
+
+    const DexField* f_addr = dbb_class->FindInstanceField("address", "J");
+    if (f_addr != nullptr) {
+        obj->SetField<int64_t>(f_addr->offset_or_slot, reinterpret_cast<int64_t>(address));
+    }
+    const DexField* f_cap = dbb_class->FindInstanceField("capacity", "I");
+    if (f_cap != nullptr) {
+        obj->SetField<int32_t>(f_cap->offset_or_slot, static_cast<int32_t>(capacity));
+    }
+    const DexField* f_lim = dbb_class->FindInstanceField("limit", "I");
+    if (f_lim != nullptr) {
+        obj->SetField<int32_t>(f_lim->offset_or_slot, static_cast<int32_t>(capacity));
+    }
+
+    return self->AddLocalRef(obj);
+}
+
+void* JNICALL GetDirectBufferAddress(JNIEnv*, jobject buf) {
+    DexObject* obj = Obj(buf);
+    if (obj == nullptr || obj->clazz == nullptr) return nullptr;
+
+    const DexField* f_addr = obj->clazz->FindInstanceField("address", "J");
+    if (f_addr != nullptr) {
+        int64_t addr = obj->GetField<int64_t>(f_addr->offset_or_slot);
+        return reinterpret_cast<void*>(addr);
+    }
     return nullptr;
 }
-void* JNICALL GetDirectBufferAddress(JNIEnv*, jobject) { return nullptr; }
-jlong JNICALL GetDirectBufferCapacity(JNIEnv*, jobject) { return -1; }
 
-// Reflection: needs java.lang.reflect.* in the framework, not supported yet.
-jmethodID JNICALL FromReflectedMethod(JNIEnv*, jobject) { return nullptr; }
-jfieldID JNICALL FromReflectedField(JNIEnv*, jobject) { return nullptr; }
-jobject JNICALL ToReflectedMethod(JNIEnv*, jclass, jmethodID, jboolean) { return nullptr; }
-jobject JNICALL ToReflectedField(JNIEnv*, jclass, jfieldID, jboolean) { return nullptr; }
+jlong JNICALL GetDirectBufferCapacity(JNIEnv*, jobject buf) {
+    DexObject* obj = Obj(buf);
+    if (obj == nullptr || obj->clazz == nullptr) return -1;
+
+    const DexField* f_cap = obj->clazz->FindInstanceField("capacity", "I");
+    if (f_cap != nullptr) {
+        return obj->GetField<int32_t>(f_cap->offset_or_slot);
+    }
+    return -1;
+}
+
+jmethodID JNICALL FromReflectedMethod(JNIEnv*, jobject method) {
+    DexObject* obj = Obj(method);
+    if (obj == nullptr || obj->clazz == nullptr) return nullptr;
+    const DexField* f_handle = obj->clazz->FindInstanceField("artMethod", "J");
+    if (f_handle != nullptr) {
+        int64_t m = obj->GetField<int64_t>(f_handle->offset_or_slot);
+        return reinterpret_cast<jmethodID>(m);
+    }
+    return nullptr;
+}
+
+jfieldID JNICALL FromReflectedField(JNIEnv*, jobject field) {
+    DexObject* obj = Obj(field);
+    if (obj == nullptr || obj->clazz == nullptr) return nullptr;
+    const DexField* f_handle = obj->clazz->FindInstanceField("artField", "J");
+    if (f_handle != nullptr) {
+        int64_t f = obj->GetField<int64_t>(f_handle->offset_or_slot);
+        return reinterpret_cast<jfieldID>(f);
+    }
+    return nullptr;
+}
+
+jobject JNICALL ToReflectedMethod(JNIEnv* env, jclass clazz, jmethodID methodID, jboolean /*isStatic*/) {
+    DexJniEnv* self = Self(env);
+    if (self == nullptr || methodID == nullptr) return nullptr;
+    DexClass* method_cls = self->linker()->FindClass("Ljava/lang/reflect/Method;");
+    if (method_cls == nullptr) return nullptr;
+    DexObject* obj = self->linker()->AllocObject(method_cls);
+    if (obj == nullptr) return nullptr;
+    const DexField* f_handle = method_cls->FindInstanceField("artMethod", "J");
+    if (f_handle != nullptr) {
+        obj->SetField<int64_t>(f_handle->offset_or_slot, reinterpret_cast<int64_t>(methodID));
+    }
+    const DexField* f_decl = method_cls->FindInstanceField("declaringClass", "Ljava/lang/Class;");
+    if (f_decl != nullptr && clazz != nullptr) {
+        obj->SetField<DexObject*>(f_decl->offset_or_slot, Obj(clazz));
+    }
+    return self->AddLocalRef(obj);
+}
+
+jobject JNICALL ToReflectedField(JNIEnv* env, jclass clazz, jfieldID fieldID, jboolean /*isStatic*/) {
+    DexJniEnv* self = Self(env);
+    if (self == nullptr || fieldID == nullptr) return nullptr;
+    DexClass* field_cls = self->linker()->FindClass("Ljava/lang/reflect/Field;");
+    if (field_cls == nullptr) return nullptr;
+    DexObject* obj = self->linker()->AllocObject(field_cls);
+    if (obj == nullptr) return nullptr;
+    const DexField* f_handle = field_cls->FindInstanceField("artField", "J");
+    if (f_handle != nullptr) {
+        obj->SetField<int64_t>(f_handle->offset_or_slot, reinterpret_cast<int64_t>(fieldID));
+    }
+    const DexField* f_decl = field_cls->FindInstanceField("declaringClass", "Ljava/lang/Class;");
+    if (f_decl != nullptr && clazz != nullptr) {
+        obj->SetField<DexObject*>(f_decl->offset_or_slot, Obj(clazz));
+    }
+    return self->AddLocalRef(obj);
+}
+
 jobject JNICALL GetModule(JNIEnv*, jclass) { return nullptr; }
 jboolean JNICALL IsVirtualThread(JNIEnv*, jobject) { return JNI_FALSE; }
 jboolean JNICALL HasIdentity(JNIEnv*, jobject) { return JNI_TRUE; }

@@ -16,6 +16,9 @@ void kuart_set_log_callback(void (*cb)(const char* message));
 // Hook to look up guest native symbols for linking native methods.
 void kuart_set_symbol_lookup(void* (*fn)(const char* symbol));
 
+// Hook to load guest native libraries when Java calls System.loadLibrary/Runtime.loadLibrary.
+void kuart_set_load_library_callback(int (*cb)(const char* libname));
+
 // Load embedded framework.dex and all classes*.dex in `app_dir`.
 int kuart_init(const char* app_dir);
 

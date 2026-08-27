@@ -87,6 +87,12 @@ public class Activity extends ContextThemeWrapper {
     protected void onRestart() {
     }
 
+    protected void onSaveInstanceState(Bundle outState) {
+    }
+
+    protected void onRestoreInstanceState(Bundle savedInstanceState) {
+    }
+
     /**
      * is called when the results of the operation are available.
      */

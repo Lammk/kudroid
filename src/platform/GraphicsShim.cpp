@@ -1,5 +1,6 @@
 #include "kudroid/platform/GraphicsShim.h"
 #include "kudroid/Log.h"
+#include <jni.h>
 #include <dlfcn.h>
 #include <cstdio>
 #include <cstdint>
@@ -96,16 +97,51 @@ struct KuDroidNativeWindow {
 
 static KuDroidNativeWindow g_nativeWindowInstance;
 
-extern "C" void* bionic_ANativeWindow_fromSurface(void* env, void* surface) {
-    (void)env; (void)surface;
+extern "C" void* bionic_ANativeWindow_fromSurface(void* env_ptr, void* surface_obj) {
+    void* layer = g_metalLayer;
 #if defined(__APPLE__)
-    g_nativeWindowInstance.layer = g_metalLayer ? g_metalLayer : get_or_create_fallback_metal_layer();
-#else
-    g_nativeWindowInstance.layer = g_metalLayer;
+    if (!layer) layer = get_or_create_fallback_metal_layer();
 #endif
-    g_nativeWindowInstance.width = g_metalLayerWidth > 0 ? g_metalLayerWidth : 1080;
-    g_nativeWindowInstance.height = g_metalLayerHeight > 0 ? g_metalLayerHeight : 1920;
-    gpuLog("ANativeWindow_fromSurface -> %p (layer=%p, size=%dx%d)",
+
+    int width = g_metalLayerWidth > 0 ? g_metalLayerWidth : 1080;
+    int height = g_metalLayerHeight > 0 ? g_metalLayerHeight : 1920;
+
+    if (env_ptr != nullptr && surface_obj != nullptr) {
+        JNIEnv* env = reinterpret_cast<JNIEnv*>(env_ptr);
+        jobject jsurf = reinterpret_cast<jobject>(surface_obj);
+        jclass clazz = env->GetObjectClass(jsurf);
+        if (clazz != nullptr) {
+            jfieldID fid = env->GetFieldID(clazz, "mNativeObject", "J");
+            if (fid != nullptr) {
+                jlong existing = env->GetLongField(jsurf, fid);
+                if (existing != 0) {
+                    auto* nw = reinterpret_cast<KuDroidNativeWindow*>(existing);
+                    if (nw->magic == 0x4B554457) {
+                        nw->layer = layer;
+                        nw->width = width;
+                        nw->height = height;
+                        nw->refCount.fetch_add(1);
+                        gpuLog("ANativeWindow_fromSurface reused %p (layer=%p, size=%dx%d)",
+                               (void*)nw, nw->layer, nw->width, nw->height);
+                        return nw;
+                    }
+                }
+                auto* nw = new KuDroidNativeWindow();
+                nw->layer = layer;
+                nw->width = width;
+                nw->height = height;
+                env->SetLongField(jsurf, fid, reinterpret_cast<jlong>(nw));
+                gpuLog("ANativeWindow_fromSurface allocated %p for Surface %p (layer=%p, size=%dx%d)",
+                       (void*)nw, (void*)jsurf, nw->layer, nw->width, nw->height);
+                return nw;
+            }
+        }
+    }
+
+    g_nativeWindowInstance.layer = layer;
+    g_nativeWindowInstance.width = width;
+    g_nativeWindowInstance.height = height;
+    gpuLog("ANativeWindow_fromSurface fallback -> %p (layer=%p, size=%dx%d)",
            (void*)&g_nativeWindowInstance, g_nativeWindowInstance.layer,
            g_nativeWindowInstance.width, g_nativeWindowInstance.height);
     return &g_nativeWindowInstance;
@@ -152,7 +188,13 @@ extern "C" void bionic_ANativeWindow_release(void* window) {
     if (!window) return;
     auto* nw = static_cast<KuDroidNativeWindow*>(window);
     if (nw->magic == 0x4B554457) {
-        nw->refCount.fetch_sub(1);
+        if (nw != &g_nativeWindowInstance && nw->refCount.fetch_sub(1) == 1) {
+            gpuLog("ANativeWindow_release destroying window %p", window);
+            delete nw;
+            return;
+        } else {
+            nw->refCount.fetch_sub(1);
+        }
     }
     gpuLog("ANativeWindow_release(%p)", window);
 }

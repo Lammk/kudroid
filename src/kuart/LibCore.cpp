@@ -1,5 +1,6 @@
 #include "kudroid/kuart/LibCore.h"
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -1887,6 +1888,8 @@ bool Invoke_keep_screen_on(Interpreter* /*interp*/, const char* name, const DexV
 
 // ─────────────────────────────────────────────────────────────────────────────
 // java.lang.Runtime
+static LoadLibraryCallback g_load_lib_cb = nullptr;
+
 // ─────────────────────────────────────────────────────────────────────────────
 bool Invoke_java_lang_Runtime(Interpreter* interp, const char* name, const DexValue* args,
                               size_t num_args, DexValue* /*result*/) {
@@ -1894,15 +1897,167 @@ bool Invoke_java_lang_Runtime(Interpreter* interp, const char* name, const DexVa
     if (!by_name && std::strcmp(name, "load") != 0) return false;
 
     const char* arg = num_args > 1 ? GetStringUtf8(args[1]) : "";
-    // The guest .so files are already mapped by LibraryManager before bytecode
-    // runs, so this only has to succeed rather than actually load anything.
     if (arg == nullptr || arg[0] == '\0') {
         interp->ThrowException("Ljava/lang/UnsatisfiedLinkError;", "empty library name");
+        return true;
+    }
+    if (g_load_lib_cb != nullptr) {
+        if (!g_load_lib_cb(arg)) {
+            interp->ThrowException("Ljava/lang/UnsatisfiedLinkError;",
+                                   std::string("Couldn't load ") + arg);
+            return true;
+        }
     }
     return true;
 }
 
 }  // namespace
+
+void LibCoreSetLoadLibraryCallback(LoadLibraryCallback cb) {
+    g_load_lib_cb = cb;
+}
+
+bool Invoke_sun_misc_Unsafe(Interpreter* /*interp*/, const char* name, const DexValue* args,
+                            size_t num_args, DexValue* result) {
+    if (std::strcmp(name, "objectFieldOffset") == 0) {
+        DexObject* field_obj = num_args > 1 ? args[1].l : nullptr;
+        if (!field_obj) {
+            *result = DexValue::Long(0);
+            return true;
+        }
+        *result = DexValue::Long(reinterpret_cast<uintptr_t>(field_obj));
+        return true;
+    }
+    if (std::strcmp(name, "arrayBaseOffset") == 0) {
+        *result = DexValue::Int(0);
+        return true;
+    }
+    if (std::strcmp(name, "arrayIndexScale") == 0) {
+        *result = DexValue::Int(1);
+        return true;
+    }
+    if (std::strcmp(name, "compareAndSwapInt") == 0) {
+        DexObject* obj = num_args > 1 ? args[1].l : nullptr;
+        uint64_t offset = num_args > 2 ? static_cast<uint64_t>(args[2].j) : 0;
+        int32_t expected = num_args > 3 ? args[3].i : 0;
+        int32_t new_val = num_args > 4 ? args[4].i : 0;
+        if (obj == nullptr) {
+            *result = DexValue::Int(0);
+            return true;
+        }
+        if (obj->clazz && offset < obj->clazz->object_size) {
+            auto* target = reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(obj) + offset);
+            bool success = __atomic_compare_exchange_n(target, &expected, new_val, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+            *result = DexValue::Int(success ? 1 : 0);
+            return true;
+        }
+        *result = DexValue::Int(1);
+        return true;
+    }
+    if (std::strcmp(name, "compareAndSwapLong") == 0) {
+        DexObject* obj = num_args > 1 ? args[1].l : nullptr;
+        uint64_t offset = num_args > 2 ? static_cast<uint64_t>(args[2].j) : 0;
+        int64_t expected = num_args > 3 ? args[3].j : 0;
+        int64_t new_val = num_args > 4 ? args[4].j : 0;
+        if (obj == nullptr) {
+            *result = DexValue::Int(0);
+            return true;
+        }
+        if (obj->clazz && offset < obj->clazz->object_size) {
+            auto* target = reinterpret_cast<int64_t*>(reinterpret_cast<uint8_t*>(obj) + offset);
+            bool success = __atomic_compare_exchange_n(target, &expected, new_val, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+            *result = DexValue::Int(success ? 1 : 0);
+            return true;
+        }
+        *result = DexValue::Int(1);
+        return true;
+    }
+    if (std::strcmp(name, "compareAndSwapObject") == 0) {
+        DexObject* obj = num_args > 1 ? args[1].l : nullptr;
+        uint64_t offset = num_args > 2 ? static_cast<uint64_t>(args[2].j) : 0;
+        DexObject* expected = num_args > 3 ? args[3].l : nullptr;
+        DexObject* new_val = num_args > 4 ? args[4].l : nullptr;
+        if (obj == nullptr) {
+            *result = DexValue::Int(0);
+            return true;
+        }
+        if (obj->clazz && offset < obj->clazz->object_size) {
+            auto* target = reinterpret_cast<DexObject**>(reinterpret_cast<uint8_t*>(obj) + offset);
+            bool success = __atomic_compare_exchange_n(target, &expected, new_val, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+            *result = DexValue::Int(success ? 1 : 0);
+            return true;
+        }
+        *result = DexValue::Int(1);
+        return true;
+    }
+    if (std::strcmp(name, "getInt") == 0 || std::strcmp(name, "getIntVolatile") == 0) {
+        DexObject* obj = num_args > 1 ? args[1].l : nullptr;
+        uint64_t offset = num_args > 2 ? static_cast<uint64_t>(args[2].j) : 0;
+        if (obj && obj->clazz && offset < obj->clazz->object_size) {
+            int32_t val = *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(obj) + offset);
+            *result = DexValue::Int(val);
+        } else {
+            *result = DexValue::Int(0);
+        }
+        return true;
+    }
+    if (std::strcmp(name, "putInt") == 0 || std::strcmp(name, "putIntVolatile") == 0 ||
+        std::strcmp(name, "putOrderedInt") == 0) {
+        DexObject* obj = num_args > 1 ? args[1].l : nullptr;
+        uint64_t offset = num_args > 2 ? static_cast<uint64_t>(args[2].j) : 0;
+        int32_t val = num_args > 3 ? args[3].i : 0;
+        if (obj && obj->clazz && offset < obj->clazz->object_size) {
+            *reinterpret_cast<int32_t*>(reinterpret_cast<uint8_t*>(obj) + offset) = val;
+        }
+        return true;
+    }
+    if (std::strcmp(name, "getLong") == 0 || std::strcmp(name, "getLongVolatile") == 0) {
+        DexObject* obj = num_args > 1 ? args[1].l : nullptr;
+        uint64_t offset = num_args > 2 ? static_cast<uint64_t>(args[2].j) : 0;
+        if (obj && obj->clazz && offset < obj->clazz->object_size) {
+            int64_t val = *reinterpret_cast<int64_t*>(reinterpret_cast<uint8_t*>(obj) + offset);
+            *result = DexValue::Long(val);
+        } else {
+            *result = DexValue::Long(0);
+        }
+        return true;
+    }
+    if (std::strcmp(name, "putLong") == 0 || std::strcmp(name, "putLongVolatile") == 0 ||
+        std::strcmp(name, "putOrderedLong") == 0) {
+        DexObject* obj = num_args > 1 ? args[1].l : nullptr;
+        uint64_t offset = num_args > 2 ? static_cast<uint64_t>(args[2].j) : 0;
+        int64_t val = num_args > 3 ? args[3].j : 0;
+        if (obj && obj->clazz && offset < obj->clazz->object_size) {
+            *reinterpret_cast<int64_t*>(reinterpret_cast<uint8_t*>(obj) + offset) = val;
+        }
+        return true;
+    }
+    if (std::strcmp(name, "getObject") == 0 || std::strcmp(name, "getObjectVolatile") == 0) {
+        DexObject* obj = num_args > 1 ? args[1].l : nullptr;
+        uint64_t offset = num_args > 2 ? static_cast<uint64_t>(args[2].j) : 0;
+        if (obj && obj->clazz && offset < obj->clazz->object_size) {
+            DexObject* val = *reinterpret_cast<DexObject**>(reinterpret_cast<uint8_t*>(obj) + offset);
+            *result = DexValue::Ref(val);
+        } else {
+            *result = DexValue::Ref(nullptr);
+        }
+        return true;
+    }
+    if (std::strcmp(name, "putObject") == 0 || std::strcmp(name, "putObjectVolatile") == 0 ||
+        std::strcmp(name, "putOrderedObject") == 0) {
+        DexObject* obj = num_args > 1 ? args[1].l : nullptr;
+        uint64_t offset = num_args > 2 ? static_cast<uint64_t>(args[2].j) : 0;
+        DexObject* val = num_args > 3 ? args[3].l : nullptr;
+        if (obj && obj->clazz && offset < obj->clazz->object_size) {
+            *reinterpret_cast<DexObject**>(reinterpret_cast<uint8_t*>(obj) + offset) = val;
+        }
+        return true;
+    }
+    if (std::strcmp(name, "park") == 0 || std::strcmp(name, "unpark") == 0) {
+        return true;
+    }
+    return false;
+}
 
 bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue* args,
                    size_t num_args, DexValue* result) {
@@ -1927,6 +2082,7 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
     if (std::strcmp(desc, "Ljava/io/FileInputStream;") == 0) return Invoke_java_io_FileInputStream(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/io/FileOutputStream;") == 0) return Invoke_java_io_FileOutputStream(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/io/PrintStream;") == 0) return Invoke_java_io_PrintStream(interp, name, args, num_args, result);
+    if (std::strcmp(desc, "Lsun/misc/Unsafe;") == 0) return Invoke_sun_misc_Unsafe(interp, name, args, num_args, result);
 
     if (std::strcmp(desc, "Landroid/util/Log;") == 0) return Invoke_android_util_Log(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Landroid/graphics/Canvas;") == 0) return Invoke_android_graphics_Canvas(interp, name, args, num_args, result);
@@ -1947,6 +2103,7 @@ bool LibCoreHasMethod(const DexMethod* method) {
     if (desc == nullptr) return false;
 
     return (std::strncmp(desc, "Ljava/", 6) == 0 ||
+            std::strcmp(desc, "Lsun/misc/Unsafe;") == 0 ||
             std::strcmp(desc, "Landroid/util/Log;") == 0 ||
             std::strcmp(desc, "Landroid/graphics/Canvas;") == 0 ||
             std::strcmp(desc, "Landroid/app/Activity;") == 0 ||
