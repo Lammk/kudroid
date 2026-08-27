@@ -10,6 +10,7 @@
 #include "dex/dex_instruction-inl.h"
 
 #include "kudroid/kuart/DexJniEnv.h"
+#include "kudroid/kuart/LibCore.h"
 
 namespace kudroid {
 namespace kuart {
@@ -210,6 +211,13 @@ bool Interpreter::InvokeMethod(DexFrame* frame, const art::Instruction* inst, bo
     }
 
     if (target->IsNative()) {
+        // libcore tự viết được gọi thẳng bằng C++, không qua ABI của JNI.
+        DexValue lib_result;
+        if (LibCoreInvoke(this, target, args.data(), args.size(), &lib_result)) {
+            if (HasPendingException()) return false;
+            frame->set_result(lib_result);
+            return true;
+        }
         if (jni_env_ == nullptr || !jni_env_->LinkNativeMethod(target)) {
             ThrowException("Ljava/lang/UnsatisfiedLinkError;",
                            std::string("method native chưa liên kết: ") + target->name);

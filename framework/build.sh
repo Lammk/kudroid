@@ -106,13 +106,18 @@ if [[ -z "$JAVA_FILES" ]]; then
 fi
 echo "Biên dịch $(echo "$JAVA_FILES" | wc -l | tr -d ' ') file Java..."
 
-# d8 chỉ nhận class file tới Java 8 (major 52); JDK mới mặc định sinh cao hơn.
-RELEASE_FLAG=""
-if "$JAVAC" --help 2>&1 | grep -q -- '--release'; then
-    RELEASE_FLAG="--release 8"
-fi
+# framework/java/** là libcore tự viết (java.lang.Object, String, ...). Phải cho
+# javac bỏ hẳn rt.jar của JDK, nếu không nó báo "duplicate class" và mọi tham
+# chiếu java.* sẽ trỏ về JDK chứ không về bản của KuDroid.
+EMPTY_BOOTCLASSPATH="$BUILD_DIR/empty-bootclasspath"
+mkdir -p "$EMPTY_BOOTCLASSPATH"
+
+# -source/-target 8 (không dùng --release: --release ép rt.jar của JDK vào
+# bootclasspath và ghi đè -bootclasspath).
 # shellcheck disable=SC2086
-"$JAVAC" -encoding UTF-8 -nowarn $RELEASE_FLAG -d "$CLASSES_DIR" $JAVA_FILES
+"$JAVAC" -encoding UTF-8 -nowarn -source 8 -target 8 \
+    -bootclasspath "$EMPTY_BOOTCLASSPATH" \
+    -d "$CLASSES_DIR" $JAVA_FILES
 
 # ── .class → .dex ────────────────────────────────────────────────────────────
 CLASS_FILES=$(find "$CLASSES_DIR" -name '*.class' | sort)

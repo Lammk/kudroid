@@ -7,8 +7,9 @@ và KuART cần framework ngay trước khi mount được bất cứ thứ gì.
 import pathlib
 import sys
 
-dex = pathlib.Path('framework/build/framework.dex')
-out = pathlib.Path('include/kudroid/framework_dex_bytes.h')
+root = pathlib.Path(__file__).resolve().parent.parent
+dex = root / 'framework/build/framework.dex'
+out = root / 'include/kudroid/framework_dex_bytes.h'
 
 if not dex.is_file():
     sys.exit(f'ERROR: {dex} không tồn tại — chạy framework/build.sh trước')

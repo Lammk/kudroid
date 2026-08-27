@@ -60,6 +60,10 @@ public:
     // GetStaticFieldID, NewObject) cũng phải bảo đảm class đã khởi tạo.
     bool EnsureInitialized(DexClass* klass);
 
+    // Ném exception theo tên class; dùng cho lỗi runtime của chính interpreter
+    // và cho hiện thực libcore.
+    void ThrowException(const char* descriptor, const std::string& message);
+
 private:
     // Chạy thân method đã có frame nạp sẵn tham số; bắt exception qua try/catch.
     DexValue ExecuteFrame(DexFrame* frame);
@@ -67,9 +71,6 @@ private:
     // Chạy bytecode từ frame->dex_pc() cho tới khi return hoặc có exception.
     // Trước mỗi instruction ghi lại pc vào frame để ExecuteFrame biết chỗ ném.
     DexValue RunBytecode(DexFrame* frame, const art::CodeItemDataAccessor& accessor);
-
-    // Ném exception theo tên class; dùng cho lỗi runtime của chính interpreter.
-    void ThrowException(const char* descriptor, const std::string& message);
 
     // Resolve theo index trong DEX của method đang chạy. Kết quả cache theo
     // (dex_file, index) vì bytecode tham chiếu cùng một index rất nhiều lần.

@@ -61,6 +61,7 @@ add_library(kudroid_core STATIC
     src/kuart/DexJniEnv.cpp
     src/kuart/DexJniFunctions.cpp
     src/kuart/DexReflect.cpp
+    src/kuart/LibCore.cpp
     src/framework/PermissionManager.cpp
     src/debug/Log.cpp
 )

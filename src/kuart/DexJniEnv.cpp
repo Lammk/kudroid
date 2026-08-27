@@ -6,6 +6,8 @@
 #include "dex/dex_file-inl.h"
 #include "dex/modifiers.h"
 
+#include "kudroid/kuart/LibCore.h"
+
 namespace kudroid {
 namespace kuart {
 
@@ -186,6 +188,7 @@ jint DexJniEnv::RegisterNatives(DexClass* klass, const JNINativeMethod* methods,
 bool DexJniEnv::LinkNativeMethod(DexMethod* method) {
     if (method == nullptr) return false;
     if (method->native_fn != nullptr) return true;
+    if (LibCoreHasMethod(method)) return true;
     if (symbol_lookup_ == nullptr || method->declaring_class == nullptr) return false;
 
     const char* descriptor = method->declaring_class->descriptor;
@@ -207,7 +210,11 @@ bool DexJniEnv::LinkNativeMethod(DexMethod* method) {
 
 DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t num_args) {
     DexValue result;
-    if (method == nullptr || method->native_fn == nullptr) return result;
+    if (method == nullptr) return result;
+
+    // libcore tự viết không có native_fn; gọi thẳng bằng C++.
+    if (LibCoreInvoke(interpreter_, method, args, num_args, &result)) return result;
+    if (method->native_fn == nullptr) return result;
 
     const char* shorty = nullptr;
     if (method->dex_file != nullptr) {
