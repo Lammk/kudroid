@@ -492,7 +492,18 @@ public class View {
     /**
      * thiết lập thẻ (tag) của view.
      */
-    public void setTag(Object tag) {
+    private boolean mKeepScreenOn = false;
+    private static native void setKeepScreenOnNative(boolean keepOn);
+
+    public void setKeepScreenOn(boolean keepScreenOn) {
+        mKeepScreenOn = keepScreenOn;
+        try {
+            setKeepScreenOnNative(keepScreenOn);
+        } catch (Throwable ignored) {}
+    }
+
+    public boolean getKeepScreenOn() {
+        return mKeepScreenOn;
     }
 
     public static class BaseSavedState {

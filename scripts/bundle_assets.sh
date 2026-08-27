@@ -34,10 +34,7 @@ if [ -d third_party/MoltenVK/MoltenVK/dynamic/MoltenVK.xcframework/ios-arm64/Mol
   echo "✔ Bundled MoltenVK.framework"
 fi
 
-# Copy Android Framework JAR
-if [ -f framework/build/framework.jar ]; then
-  cp framework/build/framework.jar KuDroidShell.app/framework.jar
-  echo "✔ Bundled framework.jar"
-fi
+# framework.dex đã được nhúng vào binary qua include/kudroid/framework_dex_bytes.h
+# nên KHÔNG cần copy vào bundle — KuART đọc nó từ .rodata, không từ file.
 
 echo "Asset bundling complete."

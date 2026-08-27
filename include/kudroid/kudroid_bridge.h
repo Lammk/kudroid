@@ -58,6 +58,10 @@ void kudroid_inject_sensor_event(int sensorType, float x, float y, float z);
 /// kích hoạt rung Haptic Feedback (1=Nhẹ, 2=Vừa, 3=Mạnh)
 void kudroid_vibrate(int intensity);
 
+/// quản lý cờ giữ màn hình luôn sáng (1=Keep Screen On / No Sleep, 0=Allow Sleep)
+void kudroid_set_keep_screen_on(int keepOn);
+int kudroid_get_keep_screen_on(void);
+
 /// đặt con trỏ cametallayer hoặc uiview được sử dụng cho các ràng buộc bề mặt anativewindow.
 void kudroid_set_metal_layer(void* layer, int width, int height);
 void kudroid_unbind_metal_layer(void);

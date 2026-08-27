@@ -1012,8 +1012,8 @@ func setupLogDir() {
 }
 
 func runJniJvmTest() -> String {
-    let rtJarPath = Bundle.main.path(forResource: "minijvm_rt", ofType: "jar") ?? ""
-    guard let cString = kudroid_test_jvm(rtJarPath) else { return "Error: null result" }
+    // KuART nhúng framework.dex trong binary nên không cần đường dẫn jar nào.
+    guard let cString = kudroid_test_jvm("") else { return "Error: null result" }
     let log = String(cString: cString)
     free(UnsafeMutablePointer(mutating: cString))
     return log
@@ -1280,7 +1280,7 @@ struct APKInstallerView: View {
                                 Image(systemName: "cpu")
                                     .font(.caption)
                                     .foregroundColor(.green)
-                                Text("Compiling DEX file (DEX→JAR AOT)")
+                                Text("Extracting APK")
                                     .font(.caption.weight(.medium))
                                     .foregroundColor(.white)
                             }
@@ -1500,9 +1500,9 @@ func executeKuDroidTest(name: String) -> (success: Bool, log: String, logFilenam
         log = runJniMassiveTest()
         logFile = "test_jni.log"
 
-    case "jvm", "jni_jvm":
+    case "jvm", "jni_jvm", "kuart":
         log = runJniJvmTest()
-        logFile = "test_jvm.log"
+        logFile = "test_kuart.log"
 
     case "syscall", "syscalls":
         log = runSyscallSoTest()
@@ -1542,7 +1542,7 @@ func executeKuDroidTest(name: String) -> (success: Bool, log: String, logFilenam
         logFile = "test_all.log"
 
     default:
-        log = "❌ Unknown test: '\(name)'. Available: gpu, bionic, jni, jvm, syscall, multi_elf, opengl_so, vulkan_so, vfs, all"
+        log = "❌ Unknown test: '\(name)'. Available: gpu, bionic, jni, kuart, syscall, multi_elf, opengl_so, vulkan_so, vfs, all"
         logFile = "test_error.log"
     }
 
@@ -1673,6 +1673,7 @@ class NativeMetalViewController: UIViewController {
     private static var isGlobalAppRunning = false
 
     @objc private func handleExitButton() {
+        UIApplication.shared.isIdleTimerDisabled = false
         NativeMetalViewController.isGlobalAppRunning = false
         motionManager.stopAccelerometerUpdates()
         motionManager.stopGyroUpdates()
@@ -1682,6 +1683,7 @@ class NativeMetalViewController: UIViewController {
     }
 
     deinit {
+        UIApplication.shared.isIdleTimerDisabled = false
         NativeMetalViewController.isGlobalAppRunning = false
         motionManager.stopAccelerometerUpdates()
         motionManager.stopGyroUpdates()
@@ -1713,7 +1715,9 @@ class NativeMetalViewController: UIViewController {
         NativeMetalViewController.isGlobalAppRunning = true
         isStarted = true
 
-        NSLog("[KuDroid] >>> Launching guest app: %@ <<<", appName)
+        // Mặc định bật No Sleep (giữ màn hình luôn sáng khi chơi game)
+        UIApplication.shared.isIdleTimerDisabled = true
+        NSLog("[KuDroid] >>> Launching guest app: %@ (isIdleTimerDisabled = true) <<<", appName)
 
         let scale = UIScreen.main.scale
         let bounds = view.bounds.size.width > 0 ? view.bounds : UIScreen.main.bounds
@@ -1737,13 +1741,20 @@ class NativeMetalViewController: UIViewController {
         let unmanaged = Unmanaged.passUnretained(view.layer)
         kudroid_set_metal_layer(unmanaged.toOpaque(), width, height, Float(scale))
 
-        // Timer quét trạng thái crash và hướng màn hình định kỳ từ C++ bridge
+        // Timer quét trạng thái crash, hướng màn hình và No Sleep định kỳ từ C++ bridge
         crashCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] timer in
             guard let self = self else { return }
             if kudroid_has_crashed() != 0 {
                 timer.invalidate()
                 self.handleCrash()
                 return
+            }
+
+            // Đồng bộ trạng thái No Sleep (Keep Screen On) từ Android app
+            let keepScreenOn = kudroid_get_keep_screen_on() != 0
+            if UIApplication.shared.isIdleTimerDisabled != keepScreenOn {
+                UIApplication.shared.isIdleTimerDisabled = keepScreenOn
+                NSLog("[KuDroid] Synchronized isIdleTimerDisabled = %@", keepScreenOn ? "true" : "false")
             }
 
             // Quét hướng màn hình yêu cầu từ Android guest app

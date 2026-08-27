@@ -32,9 +32,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     set(CMAKE_OSX_DEPLOYMENT_TARGET "15.0" CACHE STRING "Minimum iOS deployment target")
 endif()
 
+# libdexfile của AOSP ART đã cắt gọn (third_party/art_dex) — nền của KuART.
+add_subdirectory(third_party/art_dex)
+
 add_library(kudroid_core STATIC
     src/APKExtractor.cpp
-    src/AutoStub.cpp
     src/BionicShim.cpp
     src/VFSPathRemapper.cpp
     src/bionic_log_trampoline.S
@@ -47,19 +49,25 @@ add_library(kudroid_core STATIC
     src/platform/AssetShim.cpp
     src/platform/JavaCanvasRenderer.cpp
     src/kudroid_bridge.cpp
-    src/kudroid_jni.cpp
-    src/kudroid_java_activity_bridge.cpp
     src/gpu_test.cpp
     src/DexManager.cpp
-    src/DexCacheManager.cpp
-    src/DexToJar.cpp
-    src/DexAotCache.cpp
+    # KuART — micro ART: nạp DEX trực tiếp, không qua dex2jar/JVM.
+    src/KuArtRuntime.cpp
+    src/kuart/DexHeap.cpp
+    src/kuart/DexClass.cpp
+    src/kuart/DexClassLinker.cpp
+    src/kuart/DexFrame.cpp
+    src/kuart/Interpreter.cpp
+    src/kuart/DexJniEnv.cpp
+    src/kuart/DexJniFunctions.cpp
+    src/kuart/DexReflect.cpp
     src/framework/PermissionManager.cpp
     src/debug/Log.cpp
 )
 
 find_package(ZLIB REQUIRED)
 target_link_libraries(kudroid_core PRIVATE ZLIB::ZLIB)
+target_link_libraries(kudroid_core PUBLIC art_dex)
 
 target_compile_definitions(kudroid_core PRIVATE
     KUDROID_GIT_HASH="${KUDROID_GIT_HASH}"
@@ -76,7 +84,6 @@ endif()
 target_include_directories(kudroid_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
-    third_party/jvm/avian/include
 )
 
 # kudroid_core uses Apple frameworks (AudioQueue -> AudioToolbox,
@@ -98,25 +105,6 @@ if(APPLE)
         "-framework CoreText"
         "-lobjc"
     )
-endif()
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Avian JVM — built separately via its own Makefile (make platform=ios
-# arch=arm64 use-clang=true). We link the resulting static library here.
-# The classpath jar (Avian class library + KuDroid framework classes) is
-# embedded inside libavian.a via the classpath-jar.o object (built from an
-# .incbin assembly stub by scripts/patch-avian-ios.py), so no separate
-# boot-jar.o is needed.
-# ─────────────────────────────────────────────────────────────────────────────
-set(AVIAN_BUILD_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/jvm/avian/build")
-set(AVIAN_STATIC_LIB "${AVIAN_BUILD_DIR}/libavian.a")
-
-if(EXISTS "${AVIAN_STATIC_LIB}")
-    target_link_libraries(kudroid_core PRIVATE "${AVIAN_STATIC_LIB}")
-    message(STATUS "Linking Avian JVM: ${AVIAN_STATIC_LIB}")
-else()
-    message(WARNING "Avian static library not found at ${AVIAN_STATIC_LIB}. "
-                    "Build it first: cd third_party/jvm/avian && make platform=ios arch=arm64 use-clang=true")
 endif()
 
 target_compile_options(kudroid_core PRIVATE
@@ -160,15 +148,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
         "-framework UIKit"
         "-framework CoreGraphics"
         "-framework IOSurface"
-        # Avian resolve MỌI native JNI của class library (104 hàm trong
-        # classpath/*.cpp) bằng dlsym(dlopen(0), "Java_..."). Hai điều kiện phải
-        # đúng, nếu thiếu một thì UnsatisfiedLinkError ngay ở System.getProperty:
-        #   1. force_load: object trong .a chỉ được kéo vào khi có tham chiếu
-        #      undefined. Không ai gọi Java_* từ C++ → java-lang.o bị linker bỏ.
-        #   2. export_dynamic: Mach-O không đưa symbol từ static lib vào dynamic
-        #      symbol table. KHÔNG dùng -exported_symbol — flag đó tạo whitelist,
-        #      chỉ export symbol được liệt kê và ẩn tất cả phần còn lại.
-        "-Wl,-force_load,${AVIAN_STATIC_LIB}"
+        # Mã native của guest tra native method của framework bằng
+        # dlsym(dlopen(0), "Java_..."). Mach-O không đưa symbol từ static lib vào
+        # dynamic symbol table nên phải export_dynamic. KHÔNG dùng
+        # -exported_symbol — flag đó tạo whitelist, ẩn mọi symbol còn lại.
         "-Wl,-export_dynamic"
     )
 
@@ -178,13 +161,7 @@ else()
     # ─────────────────────────────────────────────────────────────────────────
     # Host-side tests (not built for iOS)
     # ─────────────────────────────────────────────────────────────────────────
-    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_dex_to_jar.cpp")
-        add_executable(test_dex_to_jar
-            tests/test_dex_to_jar.cpp
-        )
-        target_link_libraries(test_dex_to_jar PRIVATE kudroid_core)
-        target_include_directories(test_dex_to_jar PRIVATE include)
-    endif()
+
 
     # Host-side regression tests for the guest syscall shims (SyscallShim.cpp).
     if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_shims.cpp")
@@ -204,12 +181,33 @@ else()
         target_include_directories(test_manifest_parse PRIVATE include)
     endif()
 
-    # Host-side test for AutoStub (tự sinh stub class android/* còn thiếu).
-    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_autostub.cpp")
-        add_executable(test_autostub
-            tests/test_autostub.cpp
-        )
-        target_link_libraries(test_autostub PRIVATE kudroid_core)
-        target_include_directories(test_autostub PRIVATE include)
+    # Test của KuART nằm ở kuart-tests/ (không phải tests/) vì tests/ bị
+    # .gitignore — CI cần các file này nên chúng phải được commit.
+    #   test_art_dex        parse DEX bằng libdexfile của ART
+    #   test_kuart          class loader: field layout + vtable
+    #   test_kuart_interp   opcode tính toán, biên Java-vs-C++
+    #   test_kuart_object   new/field/array/invoke + dispatch động
+    #   test_kuart_jni      JNIEnv hai chiều Java ⇄ native
+    #   test_kuart_exc      bảng try/catch + <clinit>
+    #   test_kuart_reflect  Class.forName/newInstance/invoke + java.lang.Class
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/test_art_dex.cpp")
+        add_executable(test_art_dex kuart-tests/test_art_dex.cpp)
+        target_link_libraries(test_art_dex PRIVATE art_dex ZLIB::ZLIB)
+        target_include_directories(test_art_dex PRIVATE kuart-tests)
     endif()
+
+    foreach(kuart_test IN ITEMS
+        test_kuart
+        test_kuart_interp
+        test_kuart_object
+        test_kuart_jni
+        test_kuart_exc
+        test_kuart_reflect
+    )
+        if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/${kuart_test}.cpp")
+            add_executable(${kuart_test} kuart-tests/${kuart_test}.cpp)
+            target_link_libraries(${kuart_test} PRIVATE kudroid_core art_dex ZLIB::ZLIB)
+            target_include_directories(${kuart_test} PRIVATE include kuart-tests)
+        endif()
+    endforeach()
 endif()

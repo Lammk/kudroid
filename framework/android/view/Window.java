@@ -44,11 +44,18 @@ public class Window {
         return mDecorView;
     }
 
+    private static native void setKeepScreenOnNative(boolean keepOn);
+
     /**
      * thiết lập cờ cửa sổ.
      */
     public void setFlags(int flags, int mask) {
         mFlags = (mFlags & ~mask) | (flags & mask);
+        if ((mask & WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) != 0) {
+            try {
+                setKeepScreenOnNative((mFlags & WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) != 0);
+            } catch (Throwable ignored) {}
+        }
     }
 
     /**
@@ -56,6 +63,11 @@ public class Window {
      */
     public void addFlags(int flags) {
         mFlags |= flags;
+        if ((flags & WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) != 0) {
+            try {
+                setKeepScreenOnNative(true);
+            } catch (Throwable ignored) {}
+        }
     }
 
     /**
@@ -63,6 +75,11 @@ public class Window {
      */
     public void clearFlags(int flags) {
         mFlags &= ~flags;
+        if ((flags & WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) != 0) {
+            try {
+                setKeepScreenOnNative(false);
+            } catch (Throwable ignored) {}
+        }
     }
 
     /**

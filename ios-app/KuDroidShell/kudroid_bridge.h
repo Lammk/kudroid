@@ -79,7 +79,7 @@ void kudroid_inject_touch_event_multi(float x, float y, int action, int pointerI
 /// gửi sự kiện vòng đời ứng dụng java (101=pause, 102=resume) vào luồng ui
 void kudroid_send_lifecycle_event(int eventType);
 
-/// dịch một tệp dex thành một tệp jar của các lớp giả (có bộ đệm).
+/// nạp DEX bằng KuART và liệt kê class tìm được.
 /// trả về một nhật ký chẩn đoán được malloc; người gọi phải giải phóng nó bằng free().
 const char* kudroid_translate_dex(const char* dexPath);
 
@@ -87,9 +87,9 @@ const char* kudroid_translate_dex(const char* dexPath);
 const char* kudroid_vfs_self_test_log(void);
 const char* kudroid_vfs_extended_test_log(void);
 
-/// kiểm tra tích hợp jvm.
+/// kiểm tra tích hợp KuART. tham số không còn dùng (giữ để tương thích ABI).
 /// trả về một nhật ký chẩn đoán được malloc; người gọi phải giải phóng nó bằng free().
-char* kudroid_test_jvm(const char* rt_jar_path);
+char* kudroid_test_jvm(const char* unused_path);
 char* kudroid_test_gpu(void);
 char* kudroid_test_audio(void);
 const char* kudroid_run_so_test(const char* soPath, const char* entrypoint);

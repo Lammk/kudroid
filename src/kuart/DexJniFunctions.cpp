@@ -1,0 +1,1006 @@
+// Bảng hàm JNINativeInterface_ cho KuART.
+//
+// Tách khỏi DexJniEnv.cpp vì riêng bảng này đã hơn 200 hàm. Mọi hàm đều là
+// static, lấy DexJniEnv qua DexJniEnv::FromEnv(env) rồi uỷ quyền.
+//
+// Quy ước handle (khớp DexJniEnv.h):
+//   jobject/jstring/jarray -> DexObject*   (cast trực tiếp)
+//   jclass                 -> DexClass*    (KHÔNG phải object, không vào ref table)
+//   jmethodID              -> DexMethod*
+//   jfieldID               -> DexField*
+#include "kudroid/kuart/DexJniEnv.h"
+
+#include <cstdlib>
+#include <cstring>
+
+namespace kudroid {
+namespace kuart {
+
+// Namespace lồng trong anonymous namespace: vẫn internal linkage nhưng có tên
+// để qualify được. Cần vì trong InitFunctionTable() tên không qualify sẽ khớp
+// member của DexJniEnv (PushLocalFrame, RegisterNatives, NewObjectA...) trước.
+namespace {
+namespace jnifns {
+
+DexJniEnv* Self(JNIEnv* env) { return DexJniEnv::FromEnv(env); }
+
+DexObject* Obj(jobject o) { return reinterpret_cast<DexObject*>(o); }
+DexClass* Cls(jclass c) { return reinterpret_cast<DexClass*>(c); }
+DexMethod* Mth(jmethodID m) { return reinterpret_cast<DexMethod*>(m); }
+DexField* Fld(jfieldID f) { return reinterpret_cast<DexField*>(f); }
+DexString* Str(jstring s) { return reinterpret_cast<DexString*>(s); }
+DexArray* Arr(jarray a) { return reinterpret_cast<DexArray*>(a); }
+
+jclass ToJClass(DexClass* k) { return reinterpret_cast<jclass>(k); }
+
+// JNI dùng tên kiểu "java/lang/String" còn KuART dùng descriptor
+// "Ljava/lang/String;". Tên mảng ("[I") đã là descriptor nên giữ nguyên.
+std::string ToDescriptor(const char* jni_name) {
+    if (jni_name == nullptr) return std::string();
+    if (jni_name[0] == '[') return jni_name;
+    const size_t len = std::strlen(jni_name);
+    if (len > 1 && jni_name[0] == 'L' && jni_name[len - 1] == ';') return jni_name;
+    std::string d = "L";
+    d += jni_name;
+    d += ';';
+    return d;
+}
+
+// ── phiên bản, class, exception ───────────────────────────────────────────
+
+jint JNICALL GetVersion(JNIEnv*) { return JNI_VERSION_1_6; }
+
+jclass JNICALL FindClass(JNIEnv* env, const char* name) {
+    DexJniEnv* self = Self(env);
+    if (self == nullptr || name == nullptr) return nullptr;
+    const std::string descriptor = ToDescriptor(name);
+    DexClass* klass = self->linker()->FindClass(descriptor.c_str());
+    if (klass == nullptr) {
+        self->set_last_error("FindClass thất bại: " + descriptor);
+        return nullptr;
+    }
+    // JNI FindClass khởi tạo class (theo định nghĩa của JNI spec).
+    if (self->interpreter() != nullptr) self->interpreter()->EnsureInitialized(klass);
+    return ToJClass(klass);
+}
+
+jclass JNICALL DefineClass(JNIEnv* env, const char*, jobject, const jbyte*, jsize) {
+    // KuART không nạp class từ .class bytes; app Android dùng DEX.
+    if (DexJniEnv* self = Self(env)) self->set_last_error("DefineClass không hỗ trợ");
+    return nullptr;
+}
+
+jclass JNICALL GetSuperclass(JNIEnv*, jclass sub) {
+    DexClass* k = Cls(sub);
+    return k != nullptr ? ToJClass(k->superclass) : nullptr;
+}
+
+jboolean JNICALL IsAssignableFrom(JNIEnv*, jclass sub, jclass sup) {
+    DexClass* a = Cls(sub);
+    DexClass* b = Cls(sup);
+    if (a == nullptr || b == nullptr) return JNI_FALSE;
+    return a->IsSubClassOf(b) ? JNI_TRUE : JNI_FALSE;
+}
+
+jclass JNICALL GetObjectClass(JNIEnv*, jobject obj) {
+    DexObject* o = Obj(obj);
+    return o != nullptr ? ToJClass(o->clazz) : nullptr;
+}
+
+jboolean JNICALL IsInstanceOf(JNIEnv*, jobject obj, jclass clazz) {
+    DexObject* o = Obj(obj);
+    DexClass* k = Cls(clazz);
+    if (o == nullptr) return JNI_TRUE;  // null là instance của mọi kiểu
+    if (o->clazz == nullptr || k == nullptr) return JNI_FALSE;
+    return o->clazz->IsSubClassOf(k) ? JNI_TRUE : JNI_FALSE;
+}
+
+jint JNICALL Throw(JNIEnv* env, jthrowable obj) {
+    DexJniEnv* self = Self(env);
+    if (self == nullptr) return JNI_ERR;
+    self->SetPendingException(Obj(obj));
+    return JNI_OK;
+}
+
+jint JNICALL ThrowNew(JNIEnv* env, jclass clazz, const char* msg) {
+    DexJniEnv* self = Self(env);
+    DexClass* k = Cls(clazz);
+    if (self == nullptr || k == nullptr) return JNI_ERR;
+    DexObject* ex = self->linker()->AllocObject(k);
+    if (ex == nullptr) return JNI_ERR;
+    self->SetPendingException(ex);
+    self->set_last_error(k->PrettyName() + ": " + (msg != nullptr ? msg : ""));
+    return JNI_OK;
+}
+
+jthrowable JNICALL ExceptionOccurred(JNIEnv* env) {
+    DexJniEnv* self = Self(env);
+    return self != nullptr ? reinterpret_cast<jthrowable>(self->pending_exception()) : nullptr;
+}
+
+void JNICALL ExceptionDescribe(JNIEnv* env) {
+    DexJniEnv* self = Self(env);
+    if (self == nullptr) return;
+    if (DexObject* ex = self->pending_exception()) {
+        std::fprintf(stderr, "[KuART] exception: %s (%s)\n",
+                     ex->clazz != nullptr ? ex->clazz->PrettyName().c_str() : "?",
+                     self->last_error().c_str());
+    }
+}
+
+void JNICALL ExceptionClear(JNIEnv* env) {
+    if (DexJniEnv* self = Self(env)) self->ClearException();
+}
+
+jboolean JNICALL ExceptionCheck(JNIEnv* env) {
+    DexJniEnv* self = Self(env);
+    return (self != nullptr && self->pending_exception() != nullptr) ? JNI_TRUE : JNI_FALSE;
+}
+
+void JNICALL FatalError(JNIEnv*, const char* msg) {
+    std::fprintf(stderr, "[KuART] FatalError: %s\n", msg != nullptr ? msg : "");
+    std::abort();
+}
+
+// ── reference ─────────────────────────────────────────────────────────────
+
+jint JNICALL PushLocalFrame(JNIEnv* env, jint) {
+    if (DexJniEnv* self = Self(env)) self->PushLocalFrame();
+    return JNI_OK;
+}
+
+jobject JNICALL PopLocalFrame(JNIEnv* env, jobject result) {
+    DexJniEnv* self = Self(env);
+    if (self == nullptr) return nullptr;
+    self->PopLocalFrame();
+    // Kết quả phải sống ở frame CHA nên thêm lại sau khi pop.
+    return result != nullptr ? self->AddLocalRef(Obj(result)) : nullptr;
+}
+
+jobject JNICALL NewGlobalRef(JNIEnv* env, jobject obj) {
+    DexJniEnv* self = Self(env);
+    return self != nullptr ? self->AddGlobalRef(Obj(obj)) : nullptr;
+}
+
+void JNICALL DeleteGlobalRef(JNIEnv* env, jobject ref) {
+    if (DexJniEnv* self = Self(env)) self->DeleteGlobalRef(ref);
+}
+
+void JNICALL DeleteLocalRef(JNIEnv* env, jobject ref) {
+    if (DexJniEnv* self = Self(env)) self->DeleteLocalRef(ref);
+}
+
+jobject JNICALL NewLocalRef(JNIEnv* env, jobject ref) {
+    DexJniEnv* self = Self(env);
+    return self != nullptr ? self->AddLocalRef(Obj(ref)) : nullptr;
+}
+
+jboolean JNICALL IsSameObject(JNIEnv*, jobject a, jobject b) {
+    return Obj(a) == Obj(b) ? JNI_TRUE : JNI_FALSE;
+}
+
+jint JNICALL EnsureLocalCapacity(JNIEnv*, jint) { return JNI_OK; }
+
+jweak JNICALL NewWeakGlobalRef(JNIEnv* env, jobject obj) {
+    // Không có GC nên weak ref hành xử như global ref.
+    DexJniEnv* self = Self(env);
+    return self != nullptr ? reinterpret_cast<jweak>(self->AddGlobalRef(Obj(obj))) : nullptr;
+}
+
+void JNICALL DeleteWeakGlobalRef(JNIEnv* env, jweak ref) {
+    if (DexJniEnv* self = Self(env)) self->DeleteGlobalRef(ref);
+}
+
+jobjectRefType JNICALL GetObjectRefType(JNIEnv* env, jobject obj) {
+    DexJniEnv* self = Self(env);
+    if (self == nullptr || obj == nullptr) return JNIInvalidRefType;
+    return self->IsGlobalRef(Obj(obj)) ? JNIGlobalRefType : JNILocalRefType;
+}
+
+// ── tạo object ────────────────────────────────────────────────────────────
+
+jobject JNICALL AllocObject(JNIEnv* env, jclass clazz) {
+    DexJniEnv* self = Self(env);
+    if (self == nullptr) return nullptr;
+    if (self->interpreter() != nullptr) self->interpreter()->EnsureInitialized(Cls(clazz));
+    return self->AddLocalRef(self->linker()->AllocObject(Cls(clazz)));
+}
+
+jobject JNICALL NewObjectA(JNIEnv* env, jclass clazz, jmethodID methodID, const jvalue* args) {
+    DexJniEnv* self = Self(env);
+    if (self == nullptr) return nullptr;
+    return self->AddLocalRef(self->NewObjectA(Cls(clazz), Mth(methodID), args));
+}
+
+jobject JNICALL NewObjectV(JNIEnv* env, jclass clazz, jmethodID methodID, va_list args) {
+    DexJniEnv* self = Self(env);
+    if (self == nullptr) return nullptr;
+    DexObject* obj = self->linker()->AllocObject(Cls(clazz));
+    if (obj == nullptr) return nullptr;
+    self->CallJavaV(obj, Mth(methodID), args, /*virtual_dispatch=*/false);
+    return self->AddLocalRef(obj);
+}
+
+jobject JNICALL NewObject(JNIEnv* env, jclass clazz, jmethodID methodID, ...) {
+    va_list args;
+    va_start(args, methodID);
+    jobject r = NewObjectV(env, clazz, methodID, args);
+    va_end(args);
+    return r;
+}
+
+// ── method/field ID ───────────────────────────────────────────────────────
+
+jmethodID JNICALL GetMethodID(JNIEnv* env, jclass clazz, const char* name, const char* sig) {
+    DexJniEnv* self = Self(env);
+    DexClass* k = Cls(clazz);
+    if (self == nullptr || k == nullptr || name == nullptr) return nullptr;
+    DexMethod* m = k->FindVirtualMethod(name, sig);
+    if (m == nullptr) m = k->FindDirectMethod(name, sig);
+    if (m == nullptr) {
+        self->set_last_error(std::string("GetMethodID thất bại: ") + k->PrettyName() + "." +
+                             name + (sig != nullptr ? sig : ""));
+    }
+    return reinterpret_cast<jmethodID>(m);
+}
+
+jmethodID JNICALL GetStaticMethodID(JNIEnv* env, jclass clazz, const char* name,
+                                   const char* sig) {
+    DexJniEnv* self = Self(env);
+    DexClass* k = Cls(clazz);
+    if (self == nullptr || k == nullptr || name == nullptr) return nullptr;
+    DexMethod* m = k->FindDirectMethod(name, sig);
+    if (m == nullptr) {
+        self->set_last_error(std::string("GetStaticMethodID thất bại: ") + k->PrettyName() +
+                             "." + name + (sig != nullptr ? sig : ""));
+    }
+    return reinterpret_cast<jmethodID>(m);
+}
+
+jfieldID JNICALL GetFieldID(JNIEnv* env, jclass clazz, const char* name, const char* sig) {
+    DexJniEnv* self = Self(env);
+    DexClass* k = Cls(clazz);
+    if (self == nullptr || k == nullptr || name == nullptr) return nullptr;
+    DexField* f = k->FindInstanceField(name, sig);
+    if (f == nullptr) {
+        self->set_last_error(std::string("GetFieldID thất bại: ") + k->PrettyName() + "." + name);
+    }
+    return reinterpret_cast<jfieldID>(f);
+}
+
+jfieldID JNICALL GetStaticFieldID(JNIEnv* env, jclass clazz, const char* name, const char* sig) {
+    DexJniEnv* self = Self(env);
+    DexClass* k = Cls(clazz);
+    if (self == nullptr || k == nullptr || name == nullptr) return nullptr;
+    DexField* f = k->FindStaticField(name, sig);
+    if (f == nullptr) {
+        self->set_last_error(std::string("GetStaticFieldID thất bại: ") + k->PrettyName() + "." +
+                             name);
+    }
+    return reinterpret_cast<jfieldID>(f);
+}
+
+// ── gọi method instance ───────────────────────────────────────────────────
+// Ba biến thể (…, V, A) của 10 kiểu trả về × 3 nhóm (virtual, nonvirtual,
+// static) = 90 hàm. Macro sinh chúng để tránh 90 khối gần giống nhau.
+
+#define DEXRT_CALL_BODY(RET_TYPE, FIELD, RECEIVER, METHOD, VIRTUAL, ARGS_CALL)      \
+    DexJniEnv* self = Self(env);                                                    \
+    if (self == nullptr) return RET_TYPE();                                          \
+    const DexValue v = ARGS_CALL;                                                    \
+    return static_cast<RET_TYPE>(v.FIELD);
+
+// Nhóm virtual: Call<Type>Method / V / A
+#define DEXRT_DEFINE_CALL(NAME, RET_TYPE, FIELD)                                    \
+    RET_TYPE JNICALL Call##NAME##MethodA(JNIEnv* env, jobject obj, jmethodID mid,   \
+                                        const jvalue* args) {                       \
+        DexJniEnv* self = Self(env);                                                \
+        if (self == nullptr) return RET_TYPE();                                      \
+        return static_cast<RET_TYPE>(self->CallJavaA(Obj(obj), Mth(mid), args, true).FIELD); \
+    }                                                                                \
+    RET_TYPE JNICALL Call##NAME##MethodV(JNIEnv* env, jobject obj, jmethodID mid,   \
+                                        va_list args) {                             \
+        DexJniEnv* self = Self(env);                                                \
+        if (self == nullptr) return RET_TYPE();                                      \
+        return static_cast<RET_TYPE>(self->CallJavaV(Obj(obj), Mth(mid), args, true).FIELD); \
+    }                                                                                \
+    RET_TYPE JNICALL Call##NAME##Method(JNIEnv* env, jobject obj, jmethodID mid, ...) { \
+        va_list args;                                                                \
+        va_start(args, mid);                                                         \
+        RET_TYPE r = Call##NAME##MethodV(env, obj, mid, args);                       \
+        va_end(args);                                                                \
+        return r;                                                                    \
+    }
+
+// Nhóm nonvirtual: gọi đúng method chỉ định, KHÔNG dispatch lại qua receiver.
+#define DEXRT_DEFINE_CALL_NONVIRTUAL(NAME, RET_TYPE, FIELD)                          \
+    RET_TYPE JNICALL CallNonvirtual##NAME##MethodA(JNIEnv* env, jobject obj, jclass, \
+                                                  jmethodID mid, const jvalue* args) { \
+        DexJniEnv* self = Self(env);                                                  \
+        if (self == nullptr) return RET_TYPE();                                        \
+        return static_cast<RET_TYPE>(self->CallJavaA(Obj(obj), Mth(mid), args, false).FIELD); \
+    }                                                                                  \
+    RET_TYPE JNICALL CallNonvirtual##NAME##MethodV(JNIEnv* env, jobject obj, jclass,  \
+                                                  jmethodID mid, va_list args) {      \
+        DexJniEnv* self = Self(env);                                                  \
+        if (self == nullptr) return RET_TYPE();                                        \
+        return static_cast<RET_TYPE>(self->CallJavaV(Obj(obj), Mth(mid), args, false).FIELD); \
+    }                                                                                  \
+    RET_TYPE JNICALL CallNonvirtual##NAME##Method(JNIEnv* env, jobject obj, jclass c, \
+                                                 jmethodID mid, ...) {                \
+        va_list args;                                                                  \
+        va_start(args, mid);                                                           \
+        RET_TYPE r = CallNonvirtual##NAME##MethodV(env, obj, c, mid, args);            \
+        va_end(args);                                                                  \
+        return r;                                                                      \
+    }
+
+// Nhóm static: receiver null.
+#define DEXRT_DEFINE_CALL_STATIC(NAME, RET_TYPE, FIELD)                              \
+    RET_TYPE JNICALL CallStatic##NAME##MethodA(JNIEnv* env, jclass, jmethodID mid,  \
+                                              const jvalue* args) {                  \
+        DexJniEnv* self = Self(env);                                                 \
+        if (self == nullptr) return RET_TYPE();                                       \
+        return static_cast<RET_TYPE>(self->CallJavaA(nullptr, Mth(mid), args, false).FIELD); \
+    }                                                                                 \
+    RET_TYPE JNICALL CallStatic##NAME##MethodV(JNIEnv* env, jclass, jmethodID mid,   \
+                                              va_list args) {                        \
+        DexJniEnv* self = Self(env);                                                 \
+        if (self == nullptr) return RET_TYPE();                                       \
+        return static_cast<RET_TYPE>(self->CallJavaV(nullptr, Mth(mid), args, false).FIELD); \
+    }                                                                                 \
+    RET_TYPE JNICALL CallStatic##NAME##Method(JNIEnv* env, jclass c, jmethodID mid, ...) { \
+        va_list args;                                                                 \
+        va_start(args, mid);                                                          \
+        RET_TYPE r = CallStatic##NAME##MethodV(env, c, mid, args);                    \
+        va_end(args);                                                                 \
+        return r;                                                                     \
+    }
+
+#define DEXRT_DEFINE_ALL_CALLS(NAME, RET_TYPE, FIELD) \
+    DEXRT_DEFINE_CALL(NAME, RET_TYPE, FIELD)          \
+    DEXRT_DEFINE_CALL_NONVIRTUAL(NAME, RET_TYPE, FIELD) \
+    DEXRT_DEFINE_CALL_STATIC(NAME, RET_TYPE, FIELD)
+
+DEXRT_DEFINE_ALL_CALLS(Boolean, jboolean, i)
+DEXRT_DEFINE_ALL_CALLS(Byte, jbyte, i)
+DEXRT_DEFINE_ALL_CALLS(Char, jchar, i)
+DEXRT_DEFINE_ALL_CALLS(Short, jshort, i)
+DEXRT_DEFINE_ALL_CALLS(Int, jint, i)
+DEXRT_DEFINE_ALL_CALLS(Long, jlong, j)
+DEXRT_DEFINE_ALL_CALLS(Float, jfloat, f)
+DEXRT_DEFINE_ALL_CALLS(Double, jdouble, d)
+
+#undef DEXRT_DEFINE_ALL_CALLS
+#undef DEXRT_DEFINE_CALL_STATIC
+#undef DEXRT_DEFINE_CALL_NONVIRTUAL
+#undef DEXRT_DEFINE_CALL
+#undef DEXRT_CALL_BODY
+
+// Object trả về phải thành local ref nên không dùng macro chung được.
+jobject JNICALL CallObjectMethodA(JNIEnv* env, jobject obj, jmethodID mid,
+                                 const jvalue* args) {
+    DexJniEnv* self = Self(env);
+    if (self == nullptr) return nullptr;
+    return self->AddLocalRef(self->CallJavaA(Obj(obj), Mth(mid), args, true).l);
+}
+jobject JNICALL CallObjectMethodV(JNIEnv* env, jobject obj, jmethodID mid, va_list args) {
+    DexJniEnv* self = Self(env);
+    if (self == nullptr) return nullptr;
+    return self->AddLocalRef(self->CallJavaV(Obj(obj), Mth(mid), args, true).l);
+}
+jobject JNICALL CallObjectMethod(JNIEnv* env, jobject obj, jmethodID mid, ...) {
+    va_list args;
+    va_start(args, mid);
+    jobject r = CallObjectMethodV(env, obj, mid, args);
+    va_end(args);
+    return r;
+}
+
+jobject JNICALL CallNonvirtualObjectMethodA(JNIEnv* env, jobject obj, jclass, jmethodID mid,
+                                           const jvalue* args) {
+    DexJniEnv* self = Self(env);
+    if (self == nullptr) return nullptr;
+    return self->AddLocalRef(self->CallJavaA(Obj(obj), Mth(mid), args, false).l);
+}
+jobject JNICALL CallNonvirtualObjectMethodV(JNIEnv* env, jobject obj, jclass, jmethodID mid,
+                                           va_list args) {
+    DexJniEnv* self = Self(env);
+    if (self == nullptr) return nullptr;
+    return self->AddLocalRef(self->CallJavaV(Obj(obj), Mth(mid), args, false).l);
+}
+jobject JNICALL CallNonvirtualObjectMethod(JNIEnv* env, jobject obj, jclass c, jmethodID mid,
+                                          ...) {
+    va_list args;
+    va_start(args, mid);
+    jobject r = CallNonvirtualObjectMethodV(env, obj, c, mid, args);
+    va_end(args);
+    return r;
+}
+
+jobject JNICALL CallStaticObjectMethodA(JNIEnv* env, jclass, jmethodID mid,
+                                       const jvalue* args) {
+    DexJniEnv* self = Self(env);
+    if (self == nullptr) return nullptr;
+    return self->AddLocalRef(self->CallJavaA(nullptr, Mth(mid), args, false).l);
+}
+jobject JNICALL CallStaticObjectMethodV(JNIEnv* env, jclass, jmethodID mid, va_list args) {
+    DexJniEnv* self = Self(env);
+    if (self == nullptr) return nullptr;
+    return self->AddLocalRef(self->CallJavaV(nullptr, Mth(mid), args, false).l);
+}
+jobject JNICALL CallStaticObjectMethod(JNIEnv* env, jclass c, jmethodID mid, ...) {
+    va_list args;
+    va_start(args, mid);
+    jobject r = CallStaticObjectMethodV(env, c, mid, args);
+    va_end(args);
+    return r;
+}
+
+// void không có giá trị trả về nên cũng phải viết tay.
+void JNICALL CallVoidMethodA(JNIEnv* env, jobject obj, jmethodID mid, const jvalue* args) {
+    if (DexJniEnv* self = Self(env)) self->CallJavaA(Obj(obj), Mth(mid), args, true);
+}
+void JNICALL CallVoidMethodV(JNIEnv* env, jobject obj, jmethodID mid, va_list args) {
+    if (DexJniEnv* self = Self(env)) self->CallJavaV(Obj(obj), Mth(mid), args, true);
+}
+void JNICALL CallVoidMethod(JNIEnv* env, jobject obj, jmethodID mid, ...) {
+    va_list args;
+    va_start(args, mid);
+    CallVoidMethodV(env, obj, mid, args);
+    va_end(args);
+}
+
+void JNICALL CallNonvirtualVoidMethodA(JNIEnv* env, jobject obj, jclass, jmethodID mid,
+                                       const jvalue* args) {
+    if (DexJniEnv* self = Self(env)) self->CallJavaA(Obj(obj), Mth(mid), args, false);
+}
+void JNICALL CallNonvirtualVoidMethodV(JNIEnv* env, jobject obj, jclass, jmethodID mid,
+                                       va_list args) {
+    if (DexJniEnv* self = Self(env)) self->CallJavaV(Obj(obj), Mth(mid), args, false);
+}
+void JNICALL CallNonvirtualVoidMethod(JNIEnv* env, jobject obj, jclass c, jmethodID mid, ...) {
+    va_list args;
+    va_start(args, mid);
+    CallNonvirtualVoidMethodV(env, obj, c, mid, args);
+    va_end(args);
+}
+
+void JNICALL CallStaticVoidMethodA(JNIEnv* env, jclass, jmethodID mid, const jvalue* args) {
+    if (DexJniEnv* self = Self(env)) self->CallJavaA(nullptr, Mth(mid), args, false);
+}
+void JNICALL CallStaticVoidMethodV(JNIEnv* env, jclass, jmethodID mid, va_list args) {
+    if (DexJniEnv* self = Self(env)) self->CallJavaV(nullptr, Mth(mid), args, false);
+}
+void JNICALL CallStaticVoidMethod(JNIEnv* env, jclass c, jmethodID mid, ...) {
+    va_list args;
+    va_start(args, mid);
+    CallStaticVoidMethodV(env, c, mid, args);
+    va_end(args);
+}
+
+// ── field instance ────────────────────────────────────────────────────────
+
+#define DEXRT_DEFINE_FIELD(NAME, RET_TYPE, CTYPE)                                   \
+    RET_TYPE JNICALL Get##NAME##Field(JNIEnv*, jobject obj, jfieldID fid) {         \
+        DexObject* o = Obj(obj);                                                    \
+        DexField* f = Fld(fid);                                                     \
+        if (o == nullptr || f == nullptr) return RET_TYPE();                         \
+        return static_cast<RET_TYPE>(o->GetField<CTYPE>(f->offset_or_slot));         \
+    }                                                                                \
+    void JNICALL Set##NAME##Field(JNIEnv*, jobject obj, jfieldID fid, RET_TYPE v) { \
+        DexObject* o = Obj(obj);                                                    \
+        DexField* f = Fld(fid);                                                     \
+        if (o == nullptr || f == nullptr) return;                                     \
+        o->SetField<CTYPE>(f->offset_or_slot, static_cast<CTYPE>(v));                 \
+    }
+
+DEXRT_DEFINE_FIELD(Boolean, jboolean, int8_t)
+DEXRT_DEFINE_FIELD(Byte, jbyte, int8_t)
+DEXRT_DEFINE_FIELD(Char, jchar, uint16_t)
+DEXRT_DEFINE_FIELD(Short, jshort, int16_t)
+DEXRT_DEFINE_FIELD(Int, jint, int32_t)
+DEXRT_DEFINE_FIELD(Long, jlong, int64_t)
+DEXRT_DEFINE_FIELD(Float, jfloat, float)
+DEXRT_DEFINE_FIELD(Double, jdouble, double)
+
+#undef DEXRT_DEFINE_FIELD
+
+jobject JNICALL GetObjectField(JNIEnv* env, jobject obj, jfieldID fid) {
+    DexJniEnv* self = Self(env);
+    DexObject* o = Obj(obj);
+    DexField* f = Fld(fid);
+    if (self == nullptr || o == nullptr || f == nullptr) return nullptr;
+    return self->AddLocalRef(o->GetField<DexObject*>(f->offset_or_slot));
+}
+
+void JNICALL SetObjectField(JNIEnv*, jobject obj, jfieldID fid, jobject v) {
+    DexObject* o = Obj(obj);
+    DexField* f = Fld(fid);
+    if (o == nullptr || f == nullptr) return;
+    o->SetField<DexObject*>(f->offset_or_slot, Obj(v));
+}
+
+// ── field static ──────────────────────────────────────────────────────────
+// Giá trị nằm trong static_values của class KHAI BÁO field, không phải class
+// truyền vào — field kế thừa vẫn đọc đúng chỗ.
+
+DexValue* StaticSlot(jfieldID fid) {
+    DexField* f = Fld(fid);
+    if (f == nullptr || f->declaring_class == nullptr) return nullptr;
+    auto& values = f->declaring_class->static_values;
+    if (f->offset_or_slot >= values.size()) return nullptr;
+    return &values[f->offset_or_slot];
+}
+
+#define DEXRT_DEFINE_STATIC_FIELD(NAME, RET_TYPE, FIELD, MAKE)                       \
+    RET_TYPE JNICALL GetStatic##NAME##Field(JNIEnv*, jclass, jfieldID fid) {         \
+        DexValue* slot = StaticSlot(fid);                                             \
+        return slot != nullptr ? static_cast<RET_TYPE>(slot->FIELD) : RET_TYPE();      \
+    }                                                                                 \
+    void JNICALL SetStatic##NAME##Field(JNIEnv*, jclass, jfieldID fid, RET_TYPE v) { \
+        if (DexValue* slot = StaticSlot(fid)) *slot = MAKE;                           \
+    }
+
+DEXRT_DEFINE_STATIC_FIELD(Boolean, jboolean, i, DexValue::Int(v != 0 ? 1 : 0))
+DEXRT_DEFINE_STATIC_FIELD(Byte, jbyte, i, DexValue::Int(v))
+DEXRT_DEFINE_STATIC_FIELD(Char, jchar, i, DexValue::Int(v))
+DEXRT_DEFINE_STATIC_FIELD(Short, jshort, i, DexValue::Int(v))
+DEXRT_DEFINE_STATIC_FIELD(Int, jint, i, DexValue::Int(v))
+DEXRT_DEFINE_STATIC_FIELD(Long, jlong, j, DexValue::Long(v))
+DEXRT_DEFINE_STATIC_FIELD(Float, jfloat, f, DexValue::Float(v))
+DEXRT_DEFINE_STATIC_FIELD(Double, jdouble, d, DexValue::Double(v))
+
+#undef DEXRT_DEFINE_STATIC_FIELD
+
+jobject JNICALL GetStaticObjectField(JNIEnv* env, jclass, jfieldID fid) {
+    DexJniEnv* self = Self(env);
+    DexValue* slot = StaticSlot(fid);
+    if (self == nullptr || slot == nullptr) return nullptr;
+    return self->AddLocalRef(slot->l);
+}
+
+void JNICALL SetStaticObjectField(JNIEnv*, jclass, jfieldID fid, jobject v) {
+    if (DexValue* slot = StaticSlot(fid)) *slot = DexValue::Ref(Obj(v));
+}
+
+// ── chuỗi ─────────────────────────────────────────────────────────────────
+
+jstring JNICALL NewStringUTF(JNIEnv* env, const char* utf) {
+    DexJniEnv* self = Self(env);
+    if (self == nullptr || utf == nullptr) return nullptr;
+    return reinterpret_cast<jstring>(self->AddLocalRef(self->linker()->NewString(utf)));
+}
+
+jsize JNICALL GetStringUTFLength(JNIEnv*, jstring str) {
+    DexString* s = Str(str);
+    return s != nullptr ? static_cast<jsize>(s->length) : 0;
+}
+
+const char* JNICALL GetStringUTFChars(JNIEnv*, jstring str, jboolean* isCopy) {
+    DexString* s = Str(str);
+    if (isCopy != nullptr) *isCopy = JNI_FALSE;  // trả thẳng buffer của heap
+    return s != nullptr ? s->utf8 : nullptr;
+}
+
+void JNICALL ReleaseStringUTFChars(JNIEnv*, jstring, const char*) {
+    // GetStringUTFChars không copy nên không có gì để giải phóng.
+}
+
+// KuART giữ UTF-8; các hàm UTF-16 chuyển đổi tạm khi native yêu cầu. Chỉ xử lý
+// ASCII vì framework stub và tên class/method của app đều là ASCII.
+jsize JNICALL GetStringLength(JNIEnv*, jstring str) {
+    DexString* s = Str(str);
+    return s != nullptr ? static_cast<jsize>(s->length) : 0;
+}
+
+const jchar* JNICALL GetStringChars(JNIEnv*, jstring str, jboolean* isCopy) {
+    DexString* s = Str(str);
+    if (s == nullptr) return nullptr;
+    auto* buf = static_cast<jchar*>(std::malloc((s->length + 1) * sizeof(jchar)));
+    if (buf == nullptr) return nullptr;
+    for (uint32_t i = 0; i < s->length; ++i) {
+        buf[i] = static_cast<jchar>(static_cast<uint8_t>(s->utf8[i]));
+    }
+    buf[s->length] = 0;
+    if (isCopy != nullptr) *isCopy = JNI_TRUE;
+    return buf;
+}
+
+void JNICALL ReleaseStringChars(JNIEnv*, jstring, const jchar* chars) {
+    std::free(const_cast<jchar*>(chars));
+}
+
+jstring JNICALL NewString(JNIEnv* env, const jchar* unicode, jsize len) {
+    DexJniEnv* self = Self(env);
+    if (self == nullptr || unicode == nullptr || len < 0) return nullptr;
+    std::string utf8;
+    utf8.reserve(static_cast<size_t>(len));
+    for (jsize i = 0; i < len; ++i) utf8 += static_cast<char>(unicode[i] & 0x7F);
+    return reinterpret_cast<jstring>(self->AddLocalRef(self->linker()->NewString(utf8.c_str())));
+}
+
+void JNICALL GetStringRegion(JNIEnv*, jstring str, jsize start, jsize len, jchar* buf) {
+    DexString* s = Str(str);
+    if (s == nullptr || buf == nullptr || start < 0 || len < 0) return;
+    if (static_cast<uint32_t>(start + len) > s->length) return;
+    for (jsize i = 0; i < len; ++i) {
+        buf[i] = static_cast<jchar>(static_cast<uint8_t>(s->utf8[start + i]));
+    }
+}
+
+void JNICALL GetStringUTFRegion(JNIEnv*, jstring str, jsize start, jsize len, char* buf) {
+    DexString* s = Str(str);
+    if (s == nullptr || buf == nullptr || start < 0 || len < 0) return;
+    if (static_cast<uint32_t>(start + len) > s->length) return;
+    std::memcpy(buf, s->utf8 + start, static_cast<size_t>(len));
+    buf[len] = '\0';
+}
+
+const jchar* JNICALL GetStringCritical(JNIEnv* env, jstring str, jboolean* isCopy) {
+    return GetStringChars(env, str, isCopy);
+}
+
+void JNICALL ReleaseStringCritical(JNIEnv* env, jstring str, const jchar* chars) {
+    ReleaseStringChars(env, str, chars);
+}
+
+jlong JNICALL GetStringUTFLengthAsLong(JNIEnv*, jstring str) {
+    DexString* s = Str(str);
+    return s != nullptr ? static_cast<jlong>(s->length) : 0;
+}
+
+// ── mảng ──────────────────────────────────────────────────────────────────
+
+jsize JNICALL GetArrayLength(JNIEnv*, jarray array) {
+    DexArray* a = Arr(array);
+    return a != nullptr ? a->length : 0;
+}
+
+// Mảng nguyên thủy: tên class mảng là descriptor với '[' phía trước.
+jarray NewPrimitiveArray(JNIEnv* env, const char* array_descriptor, jsize len) {
+    DexJniEnv* self = Self(env);
+    if (self == nullptr || len < 0) return nullptr;
+    DexClass* klass = self->linker()->FindClass(array_descriptor);
+    if (klass == nullptr) return nullptr;
+    return reinterpret_cast<jarray>(self->AddLocalRef(self->linker()->AllocArray(klass, len)));
+}
+
+jbooleanArray JNICALL NewBooleanArray(JNIEnv* env, jsize len) {
+    return reinterpret_cast<jbooleanArray>(NewPrimitiveArray(env, "[Z", len));
+}
+jbyteArray JNICALL NewByteArray(JNIEnv* env, jsize len) {
+    return reinterpret_cast<jbyteArray>(NewPrimitiveArray(env, "[B", len));
+}
+jcharArray JNICALL NewCharArray(JNIEnv* env, jsize len) {
+    return reinterpret_cast<jcharArray>(NewPrimitiveArray(env, "[C", len));
+}
+jshortArray JNICALL NewShortArray(JNIEnv* env, jsize len) {
+    return reinterpret_cast<jshortArray>(NewPrimitiveArray(env, "[S", len));
+}
+jintArray JNICALL NewIntArray(JNIEnv* env, jsize len) {
+    return reinterpret_cast<jintArray>(NewPrimitiveArray(env, "[I", len));
+}
+jlongArray JNICALL NewLongArray(JNIEnv* env, jsize len) {
+    return reinterpret_cast<jlongArray>(NewPrimitiveArray(env, "[J", len));
+}
+jfloatArray JNICALL NewFloatArray(JNIEnv* env, jsize len) {
+    return reinterpret_cast<jfloatArray>(NewPrimitiveArray(env, "[F", len));
+}
+jdoubleArray JNICALL NewDoubleArray(JNIEnv* env, jsize len) {
+    return reinterpret_cast<jdoubleArray>(NewPrimitiveArray(env, "[D", len));
+}
+
+jobjectArray JNICALL NewObjectArray(JNIEnv* env, jsize len, jclass clazz, jobject init) {
+    DexJniEnv* self = Self(env);
+    DexClass* component = Cls(clazz);
+    if (self == nullptr || len < 0 || component == nullptr) return nullptr;
+
+    std::string array_descriptor = "[";
+    array_descriptor += component->descriptor;
+    DexClass* array_class = self->linker()->FindClass(array_descriptor.c_str());
+    if (array_class == nullptr) return nullptr;
+
+    DexArray* arr = self->linker()->AllocArray(array_class, len);
+    if (arr == nullptr) return nullptr;
+    if (init != nullptr) {
+        for (jsize i = 0; i < len; ++i) arr->Set<DexObject*>(i, Obj(init));
+    }
+    return reinterpret_cast<jobjectArray>(self->AddLocalRef(arr));
+}
+
+jobject JNICALL GetObjectArrayElement(JNIEnv* env, jobjectArray array, jsize index) {
+    DexJniEnv* self = Self(env);
+    DexArray* a = Arr(array);
+    if (self == nullptr || a == nullptr || index < 0 || index >= a->length) return nullptr;
+    return self->AddLocalRef(a->Get<DexObject*>(index));
+}
+
+void JNICALL SetObjectArrayElement(JNIEnv*, jobjectArray array, jsize index, jobject val) {
+    DexArray* a = Arr(array);
+    if (a == nullptr || index < 0 || index >= a->length) return;
+    a->Set<DexObject*>(index, Obj(val));
+}
+
+// Get<Type>ArrayElements trả con trỏ THẲNG vào mảng (không copy) — hợp lệ vì
+// heap không di chuyển object. Release do đó là no-op.
+#define DEXRT_DEFINE_ARRAY(NAME, ELEM_TYPE, ARRAY_TYPE)                              \
+    ELEM_TYPE* JNICALL Get##NAME##ArrayElements(JNIEnv*, ARRAY_TYPE array,           \
+                                               jboolean* isCopy) {                   \
+        DexArray* a = Arr(array);                                                     \
+        if (a == nullptr) return nullptr;                                             \
+        if (isCopy != nullptr) *isCopy = JNI_FALSE;                                   \
+        return reinterpret_cast<ELEM_TYPE*>(a->Data());                               \
+    }                                                                                 \
+    void JNICALL Release##NAME##ArrayElements(JNIEnv*, ARRAY_TYPE, ELEM_TYPE*, jint) {} \
+    void JNICALL Get##NAME##ArrayRegion(JNIEnv*, ARRAY_TYPE array, jsize start,       \
+                                       jsize len, ELEM_TYPE* buf) {                   \
+        DexArray* a = Arr(array);                                                     \
+        if (a == nullptr || buf == nullptr || start < 0 || len < 0) return;            \
+        if (start + len > a->length) return;                                          \
+        std::memcpy(buf, a->Data() + static_cast<size_t>(start) * sizeof(ELEM_TYPE),  \
+                    static_cast<size_t>(len) * sizeof(ELEM_TYPE));                    \
+    }                                                                                 \
+    void JNICALL Set##NAME##ArrayRegion(JNIEnv*, ARRAY_TYPE array, jsize start,       \
+                                       jsize len, const ELEM_TYPE* buf) {             \
+        DexArray* a = Arr(array);                                                     \
+        if (a == nullptr || buf == nullptr || start < 0 || len < 0) return;            \
+        if (start + len > a->length) return;                                          \
+        std::memcpy(a->Data() + static_cast<size_t>(start) * sizeof(ELEM_TYPE), buf,  \
+                    static_cast<size_t>(len) * sizeof(ELEM_TYPE));                    \
+    }
+
+DEXRT_DEFINE_ARRAY(Boolean, jboolean, jbooleanArray)
+DEXRT_DEFINE_ARRAY(Byte, jbyte, jbyteArray)
+DEXRT_DEFINE_ARRAY(Char, jchar, jcharArray)
+DEXRT_DEFINE_ARRAY(Short, jshort, jshortArray)
+DEXRT_DEFINE_ARRAY(Int, jint, jintArray)
+DEXRT_DEFINE_ARRAY(Long, jlong, jlongArray)
+DEXRT_DEFINE_ARRAY(Float, jfloat, jfloatArray)
+DEXRT_DEFINE_ARRAY(Double, jdouble, jdoubleArray)
+
+#undef DEXRT_DEFINE_ARRAY
+
+void* JNICALL GetPrimitiveArrayCritical(JNIEnv*, jarray array, jboolean* isCopy) {
+    DexArray* a = Arr(array);
+    if (a == nullptr) return nullptr;
+    if (isCopy != nullptr) *isCopy = JNI_FALSE;
+    return a->Data();
+}
+
+void JNICALL ReleasePrimitiveArrayCritical(JNIEnv*, jarray, void*, jint) {}
+
+// ── native method, monitor, VM ────────────────────────────────────────────
+
+jint JNICALL RegisterNatives(JNIEnv* env, jclass clazz, const JNINativeMethod* methods,
+                            jint nMethods) {
+    DexJniEnv* self = Self(env);
+    if (self == nullptr) return JNI_ERR;
+    return self->RegisterNatives(Cls(clazz), methods, nMethods);
+}
+
+jint JNICALL UnregisterNatives(JNIEnv*, jclass clazz) {
+    DexClass* k = Cls(clazz);
+    if (k == nullptr) return JNI_ERR;
+    for (DexMethod& m : k->direct_methods) m.native_fn = nullptr;
+    for (DexMethod& m : k->virtual_methods) m.native_fn = nullptr;
+    return JNI_OK;
+}
+
+jint JNICALL MonitorEnter(JNIEnv*, jobject obj) {
+    DexObject* o = Obj(obj);
+    if (o == nullptr) return JNI_ERR;
+    ++o->lock_count;
+    return JNI_OK;
+}
+
+jint JNICALL MonitorExit(JNIEnv*, jobject obj) {
+    DexObject* o = Obj(obj);
+    if (o == nullptr) return JNI_ERR;
+    if (o->lock_count > 0) --o->lock_count;
+    return JNI_OK;
+}
+
+jint JNICALL GetJavaVM(JNIEnv* env, JavaVM** vm) {
+    DexJniEnv* self = Self(env);
+    if (self == nullptr || vm == nullptr) return JNI_ERR;
+    *vm = self->vm();
+    return JNI_OK;
+}
+
+jobject JNICALL NewDirectByteBuffer(JNIEnv*, void*, jlong) {
+    // Cần java.nio.DirectByteBuffer trong framework; chưa có.
+    return nullptr;
+}
+void* JNICALL GetDirectBufferAddress(JNIEnv*, jobject) { return nullptr; }
+jlong JNICALL GetDirectBufferCapacity(JNIEnv*, jobject) { return -1; }
+
+// Reflection: cần java.lang.reflect.* trong framework, chưa hỗ trợ.
+jmethodID JNICALL FromReflectedMethod(JNIEnv*, jobject) { return nullptr; }
+jfieldID JNICALL FromReflectedField(JNIEnv*, jobject) { return nullptr; }
+jobject JNICALL ToReflectedMethod(JNIEnv*, jclass, jmethodID, jboolean) { return nullptr; }
+jobject JNICALL ToReflectedField(JNIEnv*, jclass, jfieldID, jboolean) { return nullptr; }
+jobject JNICALL GetModule(JNIEnv*, jclass) { return nullptr; }
+jboolean JNICALL IsVirtualThread(JNIEnv*, jobject) { return JNI_FALSE; }
+jboolean JNICALL HasIdentity(JNIEnv*, jobject) { return JNI_TRUE; }
+
+// ── JavaVM ────────────────────────────────────────────────────────────────
+
+jint JNICALL DestroyJavaVM(JavaVM*) { return JNI_OK; }
+
+jint JNICALL AttachCurrentThread(JavaVM* vm, void** penv, void*) {
+    DexJniEnv* self = DexJniEnv::FromVm(vm);
+    if (self == nullptr || penv == nullptr) return JNI_ERR;
+    *penv = self->env();
+    return JNI_OK;
+}
+
+jint JNICALL DetachCurrentThread(JavaVM*) { return JNI_OK; }
+
+jint JNICALL GetEnv(JavaVM* vm, void** penv, jint) {
+    DexJniEnv* self = DexJniEnv::FromVm(vm);
+    if (self == nullptr || penv == nullptr) return JNI_ERR;
+    *penv = self->env();
+    return JNI_OK;
+}
+
+jint JNICALL AttachCurrentThreadAsDaemon(JavaVM* vm, void** penv, void* args) {
+    return AttachCurrentThread(vm, penv, args);
+}
+
+}  // namespace jnifns
+}  // namespace
+
+void DexJniEnv::InitFunctionTable() {
+    // static: bảng dùng chung cho mọi DexJniEnv, chỉ khởi tạo một lần.
+    static JNINativeInterface_ fns = {};
+    static JNIInvokeInterface_ vm_fns = {};
+    static bool initialized = false;
+
+    if (!initialized) {
+        fns.GetVersion = jnifns::GetVersion;
+        fns.DefineClass = jnifns::DefineClass;
+        fns.FindClass = jnifns::FindClass;
+        fns.FromReflectedMethod = jnifns::FromReflectedMethod;
+        fns.FromReflectedField = jnifns::FromReflectedField;
+        fns.ToReflectedMethod = jnifns::ToReflectedMethod;
+        fns.GetSuperclass = jnifns::GetSuperclass;
+        fns.IsAssignableFrom = jnifns::IsAssignableFrom;
+        fns.ToReflectedField = jnifns::ToReflectedField;
+        fns.Throw = jnifns::Throw;
+        fns.ThrowNew = jnifns::ThrowNew;
+        fns.ExceptionOccurred = jnifns::ExceptionOccurred;
+        fns.ExceptionDescribe = jnifns::ExceptionDescribe;
+        fns.ExceptionClear = jnifns::ExceptionClear;
+        fns.FatalError = jnifns::FatalError;
+        fns.PushLocalFrame = jnifns::PushLocalFrame;
+        fns.PopLocalFrame = jnifns::PopLocalFrame;
+        fns.NewGlobalRef = jnifns::NewGlobalRef;
+        fns.DeleteGlobalRef = jnifns::DeleteGlobalRef;
+        fns.DeleteLocalRef = jnifns::DeleteLocalRef;
+        fns.IsSameObject = jnifns::IsSameObject;
+        fns.NewLocalRef = jnifns::NewLocalRef;
+        fns.EnsureLocalCapacity = jnifns::EnsureLocalCapacity;
+        fns.AllocObject = jnifns::AllocObject;
+        fns.NewObject = jnifns::NewObject;
+        fns.NewObjectV = jnifns::NewObjectV;
+        fns.NewObjectA = jnifns::NewObjectA;
+        fns.GetObjectClass = jnifns::GetObjectClass;
+        fns.IsInstanceOf = jnifns::IsInstanceOf;
+        fns.GetMethodID = jnifns::GetMethodID;
+
+#define DEXRT_BIND_CALLS(NAME)                                                      \
+        fns.Call##NAME##Method = jnifns::Call##NAME##Method;                        \
+        fns.Call##NAME##MethodV = jnifns::Call##NAME##MethodV;                      \
+        fns.Call##NAME##MethodA = jnifns::Call##NAME##MethodA;                      \
+        fns.CallNonvirtual##NAME##Method = jnifns::CallNonvirtual##NAME##Method;     \
+        fns.CallNonvirtual##NAME##MethodV = jnifns::CallNonvirtual##NAME##MethodV;   \
+        fns.CallNonvirtual##NAME##MethodA = jnifns::CallNonvirtual##NAME##MethodA;   \
+        fns.CallStatic##NAME##Method = jnifns::CallStatic##NAME##Method;             \
+        fns.CallStatic##NAME##MethodV = jnifns::CallStatic##NAME##MethodV;           \
+        fns.CallStatic##NAME##MethodA = jnifns::CallStatic##NAME##MethodA;
+
+        DEXRT_BIND_CALLS(Object)
+        DEXRT_BIND_CALLS(Boolean)
+        DEXRT_BIND_CALLS(Byte)
+        DEXRT_BIND_CALLS(Char)
+        DEXRT_BIND_CALLS(Short)
+        DEXRT_BIND_CALLS(Int)
+        DEXRT_BIND_CALLS(Long)
+        DEXRT_BIND_CALLS(Float)
+        DEXRT_BIND_CALLS(Double)
+        DEXRT_BIND_CALLS(Void)
+#undef DEXRT_BIND_CALLS
+
+        fns.GetFieldID = jnifns::GetFieldID;
+        fns.GetStaticMethodID = jnifns::GetStaticMethodID;
+        fns.GetStaticFieldID = jnifns::GetStaticFieldID;
+
+#define DEXRT_BIND_FIELD(NAME)                                          \
+        fns.Get##NAME##Field = jnifns::Get##NAME##Field;                \
+        fns.Set##NAME##Field = jnifns::Set##NAME##Field;                 \
+        fns.GetStatic##NAME##Field = jnifns::GetStatic##NAME##Field;     \
+        fns.SetStatic##NAME##Field = jnifns::SetStatic##NAME##Field;
+
+        DEXRT_BIND_FIELD(Object)
+        DEXRT_BIND_FIELD(Boolean)
+        DEXRT_BIND_FIELD(Byte)
+        DEXRT_BIND_FIELD(Char)
+        DEXRT_BIND_FIELD(Short)
+        DEXRT_BIND_FIELD(Int)
+        DEXRT_BIND_FIELD(Long)
+        DEXRT_BIND_FIELD(Float)
+        DEXRT_BIND_FIELD(Double)
+#undef DEXRT_BIND_FIELD
+
+        fns.NewString = jnifns::NewString;
+        fns.GetStringLength = jnifns::GetStringLength;
+        fns.GetStringChars = jnifns::GetStringChars;
+        fns.ReleaseStringChars = jnifns::ReleaseStringChars;
+        fns.NewStringUTF = jnifns::NewStringUTF;
+        fns.GetStringUTFLength = jnifns::GetStringUTFLength;
+        fns.GetStringUTFChars = jnifns::GetStringUTFChars;
+        fns.ReleaseStringUTFChars = jnifns::ReleaseStringUTFChars;
+        fns.GetStringRegion = jnifns::GetStringRegion;
+        fns.GetStringUTFRegion = jnifns::GetStringUTFRegion;
+        fns.GetStringCritical = jnifns::GetStringCritical;
+        fns.ReleaseStringCritical = jnifns::ReleaseStringCritical;
+        fns.GetStringUTFLengthAsLong = jnifns::GetStringUTFLengthAsLong;
+
+        fns.GetArrayLength = jnifns::GetArrayLength;
+        fns.NewObjectArray = jnifns::NewObjectArray;
+        fns.GetObjectArrayElement = jnifns::GetObjectArrayElement;
+        fns.SetObjectArrayElement = jnifns::SetObjectArrayElement;
+
+#define DEXRT_BIND_ARRAY(NAME)                                                          \
+        fns.New##NAME##Array = jnifns::New##NAME##Array;                                \
+        fns.Get##NAME##ArrayElements = jnifns::Get##NAME##ArrayElements;                 \
+        fns.Release##NAME##ArrayElements = jnifns::Release##NAME##ArrayElements;         \
+        fns.Get##NAME##ArrayRegion = jnifns::Get##NAME##ArrayRegion;                     \
+        fns.Set##NAME##ArrayRegion = jnifns::Set##NAME##ArrayRegion;
+
+        DEXRT_BIND_ARRAY(Boolean)
+        DEXRT_BIND_ARRAY(Byte)
+        DEXRT_BIND_ARRAY(Char)
+        DEXRT_BIND_ARRAY(Short)
+        DEXRT_BIND_ARRAY(Int)
+        DEXRT_BIND_ARRAY(Long)
+        DEXRT_BIND_ARRAY(Float)
+        DEXRT_BIND_ARRAY(Double)
+#undef DEXRT_BIND_ARRAY
+
+        fns.RegisterNatives = jnifns::RegisterNatives;
+        fns.UnregisterNatives = jnifns::UnregisterNatives;
+        fns.MonitorEnter = jnifns::MonitorEnter;
+        fns.MonitorExit = jnifns::MonitorExit;
+        fns.GetJavaVM = jnifns::GetJavaVM;
+        fns.GetPrimitiveArrayCritical = jnifns::GetPrimitiveArrayCritical;
+        fns.ReleasePrimitiveArrayCritical = jnifns::ReleasePrimitiveArrayCritical;
+        fns.NewWeakGlobalRef = jnifns::NewWeakGlobalRef;
+        fns.DeleteWeakGlobalRef = jnifns::DeleteWeakGlobalRef;
+        fns.ExceptionCheck = jnifns::ExceptionCheck;
+        fns.NewDirectByteBuffer = jnifns::NewDirectByteBuffer;
+        fns.GetDirectBufferAddress = jnifns::GetDirectBufferAddress;
+        fns.GetDirectBufferCapacity = jnifns::GetDirectBufferCapacity;
+        fns.GetObjectRefType = jnifns::GetObjectRefType;
+        fns.GetModule = jnifns::GetModule;
+        fns.IsVirtualThread = jnifns::IsVirtualThread;
+        fns.HasIdentity = jnifns::HasIdentity;
+
+        vm_fns.DestroyJavaVM = jnifns::DestroyJavaVM;
+        vm_fns.AttachCurrentThread = jnifns::AttachCurrentThread;
+        vm_fns.DetachCurrentThread = jnifns::DetachCurrentThread;
+        vm_fns.GetEnv = jnifns::GetEnv;
+        vm_fns.AttachCurrentThreadAsDaemon = jnifns::AttachCurrentThreadAsDaemon;
+
+        initialized = true;
+    }
+
+    env_storage_.functions = &fns;
+    env_storage_.self = this;
+    vm_storage_.functions = &vm_fns;
+    vm_storage_.self = this;
+}
+
+}  // namespace kuart
+}  // namespace kudroid

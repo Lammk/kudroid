@@ -40,6 +40,11 @@ public class WindowManager {
      * thông số bố cục cho một cửa sổ.
      */
     public static class LayoutParams extends ViewGroup.LayoutParams {
+        public static final int FLAG_NOT_FOCUSABLE = 0x00000008;
+        public static final int FLAG_NOT_TOUCHABLE = 0x00000010;
+        public static final int FLAG_KEEP_SCREEN_ON = 0x00000080;
+        public static final int FLAG_FULLSCREEN = 0x00000400;
+
         public int type;
         public int flags;
         public int gravity;

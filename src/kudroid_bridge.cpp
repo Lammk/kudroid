@@ -2,12 +2,10 @@
 #include "kudroid/BionicShim.h"
 #include "kudroid/VFSPathRemapper.h"
 #include "kudroid/APKExtractor.h"
-#include "kudroid/DexCacheManager.h"
-#include "kudroid/DexAotCache.h"
 #include "kudroid/platform/InputShim.h"
 #include "kudroid/platform/AssetShim.h"
 #include "kudroid/PermissionManager.h"
-#include "kudroid/kudroid_jni.h"
+#include "kudroid/KuArtRuntime.h"
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
@@ -33,7 +31,6 @@
 #include <mutex>
 #include <atomic>
 
-extern "C" struct JavaVM_* kudroid_jni_get_javavm(void);
 extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
 
 // ── ghi nhật ký liên tục vào thư mục có thể ghi của ứng dụng ─────────────────────────
@@ -104,12 +101,6 @@ static int kudroid_call_jni_onload_guarded(jint (*fn)(JavaVM*, void*),
 }
 
 static int kudroid_jit_available(void);
-// Khởi chạy activity qua ActivityThread. extraCandidates là danh sách tên
-// class dự phòng (đã JNI-verify) — ActivityThread sẽ thử lần lượt nếu
-// candidate chính không load được. Truyền nullptr/0 nếu không có.
-extern "C" void kudroid_launch_java_activity(JavaVM* vm, const char* activityName,
-                                             const char* const* extraCandidates,
-                                             int extraCandidateCount);
 // Build stamp — định nghĩa phía dưới file, dùng trong appendTestHeader ở trên nó.
 extern "C" const char* kudroid_build_stamp(void);
 
@@ -868,19 +859,6 @@ extern "C" const char* kudroid_install_apk(const char* apkPath) {
             }
 
             log += "[kudroid_apk] APK extracted successfully to " + effectiveAppName + "\n";
-
-            // Dịch DEX sang JAR ngay trong lúc cài đặt APK (AOT Compilation)
-            log += "[kudroid_apk] Compiling DEX files (DEX to JAR AOT)...\n";
-            const std::filesystem::path aotCacheDir =
-                std::filesystem::path(remapper.androidRoot()) / "data/dalvik-cache" / effectiveAppName;
-            std::string aotError;
-            const std::string classesJar = kudroid::DexAotCache::translate_dex_if_needed(
-                effectiveAppDir.string(), aotCacheDir.string(), &aotError);
-            if (!classesJar.empty()) {
-                log += "[kudroid_apk] DEX compiled to JAR successfully: " + classesJar + "\n";
-            } else {
-                log += "[kudroid_apk] DEX compilation notice: " + aotError + "\n";
-            }
         } else {
             log += "[kudroid_apk] INSTALL FAILED: " +
                    kudroid::APKExtractor::lastError() + "\n";
@@ -1105,7 +1083,33 @@ extern "C" JNIEXPORT void JNICALL Java_android_os_Vibrator_kudroid_1vibrate_1nat
     kudroid_vibrate(intensity);
 }
 
-#include "kudroid/kudroid_jni.h"
+static std::atomic<int> s_keepScreenOn{1}; // Mặc định khi chạy app là 1 (No Sleep)
+
+extern "C" void kudroid_set_keep_screen_on(int keepOn) {
+    s_keepScreenOn.store(keepOn != 0 ? 1 : 0);
+    fprintf(stderr, "[KuDroidCore] kudroid_set_keep_screen_on(%d)\n", keepOn != 0 ? 1 : 0);
+}
+
+extern "C" int kudroid_get_keep_screen_on(void) {
+    return s_keepScreenOn.load();
+}
+
+extern "C" JNIEXPORT void JNICALL Java_android_view_Window_setKeepScreenOnNative(JNIEnv* env, jclass clazz, jboolean keepOn) {
+    (void)env; (void)clazz;
+    kudroid_set_keep_screen_on(keepOn ? 1 : 0);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_android_view_View_setKeepScreenOnNative(JNIEnv* env, jclass clazz, jboolean keepOn) {
+    (void)env; (void)clazz;
+    kudroid_set_keep_screen_on(keepOn ? 1 : 0);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_android_os_PowerManager_00024WakeLock_setKeepScreenOnNative(JNIEnv* env, jclass clazz, jboolean keepOn) {
+    (void)env; (void)clazz;
+    kudroid_set_keep_screen_on(keepOn ? 1 : 0);
+}
+
+#include "kudroid/KuArtRuntime.h"
 
 // --- định nghĩa nativeactivity ---
 
@@ -1142,69 +1146,86 @@ struct ANativeActivity {
 };
 
 
-// khai báo setter bên ngoài
-extern "C" void kudroid_jni_set_log_callback(void (*cb)(const char*));
-
-extern "C" char* kudroid_test_jvm(const char* rt_jar_path) {
+// Tự kiểm tra KuART: nạp framework.dex nhúng rồi thử JNI cả hai chiều. Tham số
+// giữ lại cho tương thích ABI với vỏ Swift (trước là đường dẫn rt.jar của Avian).
+extern "C" char* kudroid_test_jvm(const char* unused_path) {
+    (void)unused_path;
     std::string log;
-    appendTestHeader(log, "JVM Integration Test", "N/A");
+    appendTestHeader(log, "KuART Integration Test", "N/A");
     installCrashHandlers();
-    
-    log += "[kudroid_core] Phase: init JVM via JNI Bridge\n";
+
+    log += "[kudroid_core] Phase: init KuART\n";
     kudroid::bionic_shim_reset_trace();
 
-    // biến toàn cục để giữ tham chiếu nhật ký cho lệnh gọi lại c
-    static std::string* g_jvm_test_log = &log;
-    g_jvm_test_log = &log;
-    
-    kudroid_jni_set_log_callback([](const char* msg) {
-        if (g_jvm_test_log) {
-            *g_jvm_test_log += "[kudroid_jni] ";
-            *g_jvm_test_log += msg;
-            *g_jvm_test_log += "\n";
+    static std::string* g_kuart_test_log = &log;
+    g_kuart_test_log = &log;
+    kuart_set_log_callback([](const char* msg) {
+        if (g_kuart_test_log) {
+            *g_kuart_test_log += "[KuART] ";
+            *g_kuart_test_log += msg;
+            *g_kuart_test_log += "\n";
         }
     });
 
-    kudroid_jni_init_jvm(rt_jar_path ? rt_jar_path : "", "");
-    
-    JavaVM* vm = kudroid_jni_get_javavm();
-    if (!vm) {
-        log += "[kudroid_core] ERROR: JavaVM is null!\n";
+    // app_dir rỗng = chỉ nạp framework.dex nhúng.
+    if (!kuart_init("")) {
+        log += "[kudroid_core] ERROR: kuart_init failed: " + std::string(kuart_last_error()) + "\n";
+        kuart_set_log_callback(nullptr);
+        g_kuart_test_log = nullptr;
         return strdup(log.c_str());
     }
-    
+    log += "[kudroid_core] KuART DEX loaded: " + std::to_string(kuart_num_dex_files()) + "\n";
+
+    JavaVM* vm = kuart_get_javavm();
+    if (!vm) {
+        log += "[kudroid_core] ERROR: JavaVM is null!\n";
+        kuart_set_log_callback(nullptr);
+        g_kuart_test_log = nullptr;
+        return strdup(log.c_str());
+    }
+
     JNIEnv* env = nullptr;
-    kudroid_jni_get_env(vm, reinterpret_cast<void**>(&env), 0);
-    
+    kuart_get_env(vm, reinterpret_cast<void**>(&env), 0);
+
     if (env) {
         log += "[kudroid_core] Phase: testing JNI FindClass\n";
-        jclass strClass = env->functions->FindClass(env, "java/lang/String");
-        if (strClass) {
-            log += "[kudroid_core] SUCCESS: Found java/lang/String class via JNI!\n";
-        } else {
-            log += "[kudroid_core] WARNING: java/lang/String class not found (expected if rt.jar is missing)\n";
+        // ActivityThread là class mà đường khởi động thật sự dùng — nó load được
+        // nghĩa là framework nhúng hợp lệ và class linker chạy đúng.
+        for (const char* name : {"android/app/ActivityThread", "android/app/Activity",
+                                 "android/os/Looper", "android/util/Log"}) {
+            jclass c = env->FindClass(name);
+            log += std::string("[kudroid_core] ") + (c ? "SUCCESS" : "FAILED ") +
+                   ": FindClass(" + name + ")\n";
+            if (env->ExceptionCheck()) env->ExceptionClear();
         }
-        
-        jstring testStr = env->functions->NewStringUTF(env, "Hello JNI");
+
+        jclass at = env->FindClass("android/app/ActivityThread");
+        if (at) {
+            jmethodID main = env->GetStaticMethodID(at, "main", "([Ljava/lang/String;)V");
+            log += std::string("[kudroid_core] ") + (main ? "SUCCESS" : "FAILED ") +
+                   ": GetStaticMethodID(ActivityThread.main)\n";
+        }
+
+        jstring testStr = env->NewStringUTF("Hello KuART");
         if (testStr) {
-            const char* utf = env->functions->GetStringUTFChars(env, testStr, nullptr);
+            const char* utf = env->GetStringUTFChars(testStr, nullptr);
             log += "[kudroid_core] SUCCESS: Created JNI string: ";
             log += utf ? utf : "null";
             log += "\n";
-            env->functions->ReleaseStringUTFChars(env, testStr, utf);
+            env->ReleaseStringUTFChars(testStr, utf);
         }
+        log += "[kudroid_core] classes resolved: " +
+               std::to_string(kuart_num_loaded_classes()) + "\n";
     } else {
         log += "[kudroid_core] ERROR: Failed to get JNIEnv!\n";
     }
-    
-    log += "[kudroid_core] Phase: destroy JVM\n";
-    kudroid_jni_destroy_jvm();
-    
-    kudroid_jni_set_log_callback(nullptr);
-    g_jvm_test_log = nullptr;
 
-    log += "[kudroid_core] JVM test completed.\n";
-    
+    log += "[kudroid_core] Phase: shutdown KuART\n";
+    kuart_shutdown();
+    kuart_set_log_callback(nullptr);
+    g_kuart_test_log = nullptr;
+
+    log += "[kudroid_core] KuART test completed.\n";
     return strdup(log.c_str());
 }
 
@@ -1312,8 +1333,8 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                     std::filesystem::rename(appDir, cleanAppDir, renEc);
                     movedApp = !renEc;
                 }
-                // Dalvik-cache cũ (classes.jar 15MB+, dịch mất vài phút trên
-                // máy thật) phải theo tên mới — không thì phải dịch lại từ đầu.
+                // Dalvik-cache cũ của đường dex2jar phải theo tên mới để bước
+                // dọn dẹp sau này tìm thấy và xóa được.
                 const auto oldCache = std::filesystem::path(remapper.androidRoot()) /
                                       "data/dalvik-cache" / resolvedAppName;
                 const auto newCache = std::filesystem::path(remapper.androidRoot()) /
@@ -1396,20 +1417,23 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                 return globalLibraryManager().resolveGlobalSymbol(name);
             };
 
-            // AOT + tạo JVM PHẢI xong trước khi dlopen bất kỳ .so nào: static
-            // initializer của libminecraftpe.so gọi JNI_GetCreatedJavaVMs → JVM
-            // sẽ được tạo với classpath rỗng, và DestroyJavaVM để tạo lại sau đó
-            // treo vĩnh viễn vì thread guest đã attach vào VM.
-            const std::filesystem::path aotCacheDir = std::filesystem::path(remapper.androidRoot()) / "data/dalvik-cache" / resolvedAppName;
-            std::string aotError;
-            const std::string classesJar = kudroid::DexAotCache::translate_dex_if_needed(appDir.string(), aotCacheDir.string(), &aotError);
+            // KuART phải sẵn sàng TRƯỚC khi dlopen bất kỳ .so nào: static
+            // initializer của libminecraftpe.so gọi JNI_GetCreatedJavaVMs, nếu
+            // chưa có VM thì nó tự dựng state sai rồi không sửa lại được.
+            kuart_set_log_callback([](const char* msg) {
+                kudroid_android_log_message(4, "KuART", msg);
+                std::fprintf(stderr, "[KuART] %s\n", msg);
+            });
+            kuart_set_symbol_lookup([](const char* symbol) -> void* {
+                return globalLibraryManager().resolveGlobalSymbol(symbol);
+            });
 
-            if (!classesJar.empty()) {
-                appendAndEcho("[kudroid_core] DEX→JAR AOT ready: " + classesJar);
-                kudroid_jni_init_jvm("", classesJar.c_str());
+            if (kuart_init(appDir.string().c_str())) {
+                appendAndEcho("[kudroid_core] KuART ready: " +
+                              std::to_string(kuart_num_dex_files()) + " DEX loaded");
             } else {
-                appendAndEcho("[kudroid_core] WARNING: DEX→JAR AOT skipped (" + aotError + "); JVM running without app classpath.");
-                kudroid_jni_init_jvm("", "");
+                appendAndEcho("[kudroid_core] ERROR: KuART init failed: " +
+                              std::string(kuart_last_error()));
             }
 
             std::vector<std::string> soFiles;
@@ -1438,12 +1462,12 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                     appendAndEcho(mapLine);
                 }
 
-                JavaVM* jvm = kudroid_jni_get_javavm();
+                JavaVM* jvm = kuart_get_javavm();
                 if (!jvm) {
-                    appendAndEcho("[kudroid_core] ERROR: Avian JVM failed to initialize.");
+                    appendAndEcho("[kudroid_core] ERROR: KuART failed to initialize.");
                 } else {
                     char jvmLine[128];
-                    snprintf(jvmLine, sizeof(jvmLine), "[kudroid_core] Avian JVM ready (JavaVM=%p).", (void*)jvm);
+                    snprintf(jvmLine, sizeof(jvmLine), "[kudroid_core] KuART ready (JavaVM=%p).", (void*)jvm);
                     appendAndEcho(jvmLine);
 
                     auto native_activity_create = reinterpret_cast<void (*)(ANativeActivity*, void*, size_t)>(
@@ -1512,10 +1536,8 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                 // Guard abort(): nếu lib abort/segfault trong JNI_OnLoad,
                                 // crashHandler siglongjmp về đây thay vì giết process.
                                 jint version = 0;
-                                kudroid_jni_set_lookup_logging(1);
                                 const int guardRc =
                                     kudroid_call_jni_onload_guarded(jni_onload, jvm, &version);
-                                kudroid_jni_set_lookup_logging(0);
                                 if (guardRc == 0) {
                                     appendAndEcho("[kudroid_core] JNI_OnLoad(" + libName + ") returned version: " + std::to_string(version));
                                 } else if (guardRc < 0) {
@@ -1567,7 +1589,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                             nullptr, // assetManager
                             s_obbPath.c_str()
                         };
-                        kudroid_jni_get_env(jvm, reinterpret_cast<void**>(&mock_activity.env), 0);
+                        kuart_get_env(jvm, reinterpret_cast<void**>(&mock_activity.env), 0);
 
                         if (mock_activity.env) {
                             JNIEnv* env = mock_activity.env;
@@ -1680,22 +1702,26 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                             }
                         }
 
-                        // ƯU TIÊN 3: quét classes.jar (AOT cache) tìm class
-                        // Activity của app — chính xác hơn đoán tên folder vì
-                        // class thật nằm trong jar. Ưu tiên class có tên chứa
-                        // "Activity" và package ngắn nhất (gốc app).
-                        // Danh sách Activity thật tìm được qua JNI verify —
-                        // dùng làm fallback cho ActivityThread, khai báo ở scope
-                        // này để dùng được cả khi khối jar-scan không chạy.
+                        // ƯU TIÊN 3: quét class trong DEX của app tìm Activity.
+                        // KuART đọc thẳng classes*.dex nên không cần classes.jar.
+                        // Danh sách Activity thật verify được — dùng làm fallback
+                        // cho ActivityThread, khai báo ở scope này để dùng được cả
+                        // khi khối quét không chạy.
                         std::vector<std::string> verifiedActivities;
                         if (targetActivity.empty()) {
-                            const auto aotJar = std::filesystem::path(remapper.androidRoot()) /
-                                                "data/dalvik-cache" / resolvedAppName / "classes.jar";
-                            if (std::filesystem::exists(aotJar)) {
-                                appendAndEcho("[kudroid_core] Scanning classes.jar for app Activity classes...");
-                                const auto classes = kudroid::DexAotCache::list_app_classes(aotJar.string());
+                            std::vector<std::string> classes;
+                            {
+                                constexpr size_t kMaxClasses = 20000;
+                                std::vector<char*> raw(kMaxClasses, nullptr);
+                                const size_t n = kuart_list_app_classes(raw.data(), kMaxClasses);
+                                classes.reserve(n);
+                                for (size_t i = 0; i < n; ++i) classes.emplace_back(raw[i]);
+                                kuart_free_class_list(raw.data(), n);
+                            }
+                            {
+                                appendAndEcho("[kudroid_core] Scanning app DEX for Activity classes...");
                                 appendAndEcho("[kudroid_core] Found " + std::to_string(classes.size()) +
-                                              " non-system classes in classes.jar");
+                                              " non-system classes in app DEX");
                                 // Chấm điểm chọn launcher:
                                 //   -1000  Activity của SDK bên thứ ba (push/analytics
                                 //          v.v.) — KHÔNG phải entry point, launch nó
@@ -1753,7 +1779,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                 if (!best.empty() && bestScore > 0) {
                                     for (char& c : best) if (c == '/') c = '.';
                                     targetActivity = best;
-                                    appendAndEcho("[kudroid_core] Resolved from classes.jar: " + best);
+                                    appendAndEcho("[kudroid_core] Resolved from app DEX: " + best);
                                 } else if (!bestAny.empty() && bestAnyScore > 0) {
                                     // Không có *Activity "sạch" — dùng class điểm cao nhất.
                                     for (char& c : bestAny) if (c == '/') c = '.';
@@ -1770,35 +1796,34 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                     appendAndEcho("[kudroid_core] Using first app class as last resort: " + first);
                                 }
 
-                                // ƯU TIÊN 3.5 — JNI VERIFY: tên class KHÔNG nói lên
+                                // ƯU TIÊN 3.5 — VERIFY: tên class KHÔNG nói lên
                                 // gì khi app bị ProGuard obfuscate (a.a.a v.v.).
-                                // Dùng IsAssignableFrom để kiểm tra candidate THẬT
-                                // SỰ extends android.app.Activity.
+                                // Kiểm tra candidate THẬT SỰ extends
+                                // android.app.Activity qua chủng loại của KuART.
                                 //
                                 // BÀI HỌC Braze: vòng verify KHÔNG được lấy Activity
                                 // ĐẦU TIÊN tìm thấy — SDK Activity (push/analytics)
                                 // cũng extends Activity nhưng không render gì → màn
                                 // hình xám. Dùng lại kSdkActivityHints + isSdkOwned
-                                // đã khai báo ở trên (chấm điểm như vậy rồi chọn
-                                // điểm cao nhất: loại SDK, ưu tiên package ngắn).
+                                // đã khai báo ở trên (chấm điểm rồi chọn cao nhất).
 
                                 if (!targetActivity.empty() &&
-                                    kudroid_class_extends_activity(targetActivity.c_str()) != 1) {
+                                    kuart_class_extends_activity(targetActivity.c_str()) != 1) {
                                     appendAndEcho("[kudroid_core] Candidate '" + targetActivity +
-                                                  "' does NOT extend Activity (obfuscated?). JNI-verifying all classes...");
+                                                  "' does NOT extend Activity (obfuscated?). Verifying all classes...");
                                     targetActivity.clear();
                                     int verifiedBestScore = -1;
                                     std::string verifiedBest;
-                                    int jniChecked = 0;
+                                    int checked = 0;
                                     // Thu thập TẤT CẢ Activity thật tìm được (không
                                     // chỉ cái tốt nhất) — truyền xuống làm fallback
                                     // cho ActivityThread khi candidate chính fail.
-                                    // FindClass/IsAssignableFrom tốn kém (Avian phải
-                                    // load từng class) — với jar 10k+ class KHÔNG được
-                                    // quét toàn bộ. Pass 0: chỉ class có tên chứa
-                                    // "Activity" (phủ đại đa số app). Pass 1 (chỉ chạy
-                                    // khi pass 0 không tìm thấy gì — app obfuscate
-                                    // hoàn toàn): phần còn lại, giới hạn 2000 lần kiểm.
+                                    // FindClass phải link cả chuỗi kế thừa nên tốn
+                                    // kém; với DEX 10k+ class KHÔNG quét toàn bộ.
+                                    // Pass 0: chỉ class có tên chứa "Activity" (phủ
+                                    // đại đa số app). Pass 1 (chỉ chạy khi pass 0
+                                    // không thấy gì — app obfuscate hoàn toàn): phần
+                                    // còn lại, giới hạn 2000 lần kiểm.
                                     for (int pass = 0; pass < 2 && verifiedBestScore <= 0; ++pass) {
                                         int checkedThisPass = 0;
                                         for (const auto& cls : classes) {
@@ -1808,8 +1833,8 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                             if (++checkedThisPass > (pass == 0 ? 8000 : 2000)) break;
                                             std::string dotted = cls;
                                             for (char& c : dotted) if (c == '/') c = '.';
-                                            ++jniChecked;
-                                            if (kudroid_class_extends_activity(dotted.c_str()) != 1) continue;
+                                            ++checked;
+                                            if (kuart_class_extends_activity(dotted.c_str()) != 1) continue;
                                             // Là Activity thật — chấm điểm như trên.
                                             const size_t depth = static_cast<size_t>(
                                                 std::count(cls.begin(), cls.end(), '/'));
@@ -1819,7 +1844,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                             if (!pkgPrefix.empty() &&
                                                 cls.compare(0, pkgPrefix.size(), pkgPrefix) == 0) score += 50;
                                             if (isSdkOwned(cls)) score -= 1000;
-                                            appendAndEcho("[kudroid_core]   JNI Activity candidate: " + dotted +
+                                            appendAndEcho("[kudroid_core]   Activity candidate: " + dotted +
                                                           " (score=" + std::to_string(score) + ")");
                                             verifiedActivities.push_back(dotted);
                                             if (score > verifiedBestScore) {
@@ -1829,23 +1854,21 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                             if (verifiedBestScore >= 185) break; // pkg match + MainActivity — đủ chắc
                                         }
                                     }
-                                    appendAndEcho("[kudroid_core] JNI verify done: " +
-                                                  std::to_string(jniChecked) + " classes checked");
+                                    appendAndEcho("[kudroid_core] Activity verify done: " +
+                                                  std::to_string(checked) + " classes checked");
                                     if (!verifiedBest.empty() && verifiedBestScore > 0) {
                                         targetActivity = verifiedBest;
-                                        appendAndEcho("[kudroid_core] JNI-verified best Activity: " + verifiedBest);
+                                        appendAndEcho("[kudroid_core] Verified best Activity: " + verifiedBest);
                                     } else if (!verifiedBest.empty()) {
                                         // Mọi Activity đều thuộc SDK — chọn ít tệ nhất nhưng cảnh báo rõ.
                                         targetActivity = verifiedBest;
                                         appendAndEcho("[kudroid_core] WARNING: only SDK Activities found; using least-bad: " + verifiedBest);
                                     } else {
-                                        appendAndEcho("[kudroid_core] WARNING: no class in classes.jar extends android.app.Activity");
+                                        appendAndEcho("[kudroid_core] WARNING: no class in app DEX extends android.app.Activity");
                                     }
                                 } else if (!targetActivity.empty()) {
-                                    appendAndEcho("[kudroid_core] JNI-verified: '" + targetActivity + "' extends Activity ✓");
+                                    appendAndEcho("[kudroid_core] Verified: '" + targetActivity + "' extends Activity ✓");
                                 }
-                            } else {
-                                appendAndEcho("[kudroid_core] WARNING: classes.jar not found at " + aotJar.string());
                             }
                         }
 
@@ -1892,10 +1915,13 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                             appendAndEcho("[kudroid_core] Fallback candidates: " +
                                           std::to_string(fallbackPtrs.size()));
                         }
-                        appendAndEcho("[kudroid_core] Launching Android ActivityThread runtime...");
-                        kudroid_launch_java_activity(jvm, targetActivity.c_str(),
-                                                     fallbackPtrs.empty() ? nullptr : fallbackPtrs.data(),
-                                                     static_cast<int>(fallbackPtrs.size()));
+                        appendAndEcho("[kudroid_core] Launching Android ActivityThread runtime (KuART)...");
+                        if (!kuart_launch_activity(targetActivity.c_str(),
+                                                   fallbackPtrs.empty() ? nullptr : fallbackPtrs.data(),
+                                                   static_cast<int>(fallbackPtrs.size()))) {
+                            appendAndEcho("[kudroid_core] ERROR: ActivityThread.main failed: " +
+                                          std::string(kuart_last_error()));
+                        }
                     }
                 }
             }
@@ -2398,7 +2424,7 @@ extern "C" int kudroid_delete_app(const char* package_name);
 // Xóa app với báo cáo tiến trình qua callback (phase UTF-8, percent 0-100).
 // Callback chạy trên thread gọi hàm — Swift side tự dispatch về main thread.
 // Cho phép UI hiển thị progress thay vì freeze vài giây khi remove_all quét
-// hàng nghìn file (classes.jar 15MB, assets...).
+// hàng nghìn file (assets, DEX, .so...).
 typedef void (*kudroid_delete_progress_cb)(const char* phase, int percent, void* userdata);
 
 namespace {
@@ -2549,9 +2575,8 @@ extern "C" int kudroid_delete_app_progress(const char* package_name,
     // KHÔNG đếm bytes toàn cây nữa — với MCPE 932MB việc đi bộ hết cây mất
     // >3s trên máy thật chỉ để tính %. Progress giờ chia theo con cấp 1.
     std::error_code ec;
-    // dalvik-cache giữ classes.jar + boot.jar sinh từ DEX của app. Không xóa thì
-    // cài lại sẽ HIT cache cũ (cache.hash khớp vì DEX không đổi) → chạy artifact
-    // của bản build trước. Khớp cả dạng "<pkg>" lẫn "<tên-file-apk>_<ver>" cũ.
+    // dalvik-cache là tàn dư của đường dex2jar cũ; vẫn xóa để cài lại không để
+    // lại artifact mục ruỗng. Khớp cả "<pkg>" lẫn "<tên-file-apk>_<ver>".
     std::vector<std::filesystem::path> dalvikMatches;
     if (std::filesystem::is_directory(dalvikRoot, ec)) {
         for (const auto& e : std::filesystem::directory_iterator(dalvikRoot, ec)) {
@@ -2697,7 +2722,7 @@ extern "C" const char* kudroid_jni_massive_so_test(const char* path) {
                 // lấy jvm từ bộ nối
                 using JNI_OnLoad_t = jint (*)(JavaVM*, void*);
                 JNI_OnLoad_t jniOnLoad = reinterpret_cast<JNI_OnLoad_t>(jniOnLoadAddr);
-                jint version = jniOnLoad(kudroid_jni_get_javavm(), nullptr);
+                jint version = jniOnLoad(kuart_get_javavm(), nullptr);
                 log += "[kudroid_jni] JNI_OnLoad returned version: 0x" + std::to_string(version) + "\n";
                 mirrorCrash(log);
             }
@@ -2713,17 +2738,17 @@ extern "C" const char* kudroid_jni_massive_so_test(const char* path) {
                 // thiết lập lệnh gọi lại
                 static std::string* g_jni_test_log = &log;
                 g_jni_test_log = &log;
-                kudroid_jni_set_log_callback([](const char* msg) {
+                kuart_set_log_callback([](const char* msg) {
                     if (g_jni_test_log) {
-                        *g_jni_test_log += "[kudroid_jni] ";
+                        *g_jni_test_log += "[KuART] ";
                         *g_jni_test_log += msg;
                         *g_jni_test_log += "\n";
                     }
                 });
 
-                kudroid_jni_init_jvm("", ""); // đảm bảo nó được khởi tạo
+                kuart_init(""); // framework nhúng là đủ cho test này
                 mirrorCrash(log);
-                void* vm = kudroid_jni_get_javavm();
+                void* vm = kuart_get_javavm();
                 
                 int result = test_func(vm);
                 log += "[kudroid_jni] TEST RESULT: " +
@@ -2881,22 +2906,20 @@ extern "C" const char* kudroid_load_apk(const char* apkPath) {
     kudroid::LibraryManager& libManager = globalLibraryManager();
     std::string libDir = targetDir + "/lib/arm64-v8a";
 
-    // ── PIPELINE DEX→JAR AOT CACHING ───────────────────────────────────────
-    // Avian không hiểu .dex: dịch classes*.dex → classes.jar cache tại
-    //   <g_logDir>/data/dalvik-cache/<appName>/   (appName = tên file APK)
-    // khóa bằng SHA-256 (cache.hash); jar cache đưa vào boot classpath lúc init.
-    const std::string aotAppName = std::filesystem::path(apkStr).stem().string();
-    const std::filesystem::path aotCacheDir =
-        std::filesystem::path(g_logDir) / "data/dalvik-cache" / aotAppName;
-    std::string aotError;
-    const std::string aotClassesJar = kudroid::DexAotCache::translate_dex_if_needed(
-        targetDir, aotCacheDir.string(), &aotError);
-    if (!aotClassesJar.empty()) {
-        log += "[kudroid_apk] DEX→JAR AOT ready: " + aotClassesJar + "\n";
+    // ── KuART ──────────────────────────────────────────────────────────────
+    // Nạp framework.dex nhúng + classes*.dex của APK. Không còn bước dịch
+    // DEX→JAR nào: KuART thông dịch DEX trực tiếp.
+    kuart_set_symbol_lookup([](const char* symbol) -> void* {
+        return globalLibraryManager().resolveGlobalSymbol(symbol);
+    });
+    const bool kuartOk = kuart_init(targetDir.c_str()) != 0;
+    if (kuartOk) {
+        log += "[kudroid_apk] KuART ready: " + std::to_string(kuart_num_dex_files()) +
+               " DEX loaded\n";
     } else {
-        log += "[kudroid_apk] WARNING: DEX→JAR AOT skipped (" + aotError + ")\n";
+        log += "[kudroid_apk] WARNING: KuART init failed (" + std::string(kuart_last_error()) + ")\n";
     }
-    
+
     if (std::filesystem::exists(libDir)) {
         // Android gọi JNI_OnLoad cho TỪNG lib được loadLibrary — theo dõi lib
         // nào đã gọi để mỗi lib chỉ khởi tạo một lần (resolveGlobalSymbol cũ trả
@@ -2909,16 +2932,9 @@ extern "C" const char* kudroid_load_apk(const char* apkPath) {
                     log += "[kudroid_apk] WARNING: Failed to load " + entry.path().filename().string() + "\n";
                 } else {
                     log += "[kudroid_apk] Loaded successfully.\n";
-                    // cố gắng gọi jni_onload — JVM phải được khởi tạo TRƯỚC, nếu
-                    // không kudroid_jni_get_javavm() trả nullptr và JNI_OnLoad crash.
-                    if (!aotClassesJar.empty()) {
-                        kudroid_jni_init_jvm("", aotClassesJar.c_str());
-                    } else {
-                        kudroid_jni_init_jvm("", "");
-                    }
-                    JavaVM* jvm = kudroid_jni_get_javavm();
+                    JavaVM* jvm = kuart_get_javavm();
                     if (!jvm) {
-                        log += "[kudroid_apk] ERROR: Avian JVM failed to initialize, skipping JNI_OnLoad\n";
+                        log += "[kudroid_apk] ERROR: KuART not ready, skipping JNI_OnLoad\n";
                     } else {
                         for (const auto& [libKey, addr] : libManager.resolveAllSymbols("JNI_OnLoad")) {
                             if (!onLoadCalled.insert(libKey).second) continue; // đã gọi rồi
@@ -2941,53 +2957,41 @@ extern "C" const char* kudroid_load_apk(const char* apkPath) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// dịch dex → jar (có bộ đệm)
+// Kiểm tra nạp DEX bằng KuART
 //
-// dịch một tệp dex thành một tệp jar của các lớp giả (thông qua dextojar), sử dụng
-// dexcachemanager để lưu trữ kết quả được khóa bằng mã băm dex + phiên bản công cụ.
-// trả về một chuỗi nhật ký được malloc; người gọi phải giải phóng nó bằng free().
+// Trước đây hàm này dịch DEX → JAR cho Avian. KuART nạp DEX trực tiếp nên giờ nó
+// chỉ parse và báo cáo nội dung — giữ tên cũ để vỏ Swift không phải đổi.
+// Trả chuỗi log đã malloc; caller phải free().
 // ─────────────────────────────────────────────────────────────────────────────
 extern "C" const char* kudroid_translate_dex(const char* dexPath) {
     if (!dexPath || !*dexPath) {
         return strdup("[kudroid_dex] ERROR: null DEX path\n");
     }
 
-    // phiên bản công cụ — tăng số này khi logic trình biên dịch thay đổi.
-    const int kDexToolVersion = 1;
-
     std::string log;
-    log += "[kudroid_dex] Translating DEX: " + std::string(dexPath) + "\n";
+    log += "[kudroid_dex] Loading DEX with KuART: " + std::string(dexPath) + "\n";
 
-    auto& cache = kudroid::DexCacheManager::getInstance();
-    if (cache.cacheDirectory().empty()) {
-        // thư mục bộ đệm mặc định: documents/android_cache (được thiết lập thông qua kudroid_set_log_dir).
-        if (g_logDir[0]) {
-            cache.setCacheDirectory(std::string(g_logDir) + "/android_cache");
-        }
-    }
-
-    std::vector<uint8_t> jar;
-    std::string error;
-    if (!cache.translateAndCache(dexPath, kDexToolVersion, jar, &error)) {
-        log += "[kudroid_dex] TRANSLATE FAILED: " + error + "\n";
+    // Nạp thư mục chứa file DEX — KuART lấy mọi classes*.dex trong đó.
+    const std::string dir = std::filesystem::path(dexPath).parent_path().string();
+    if (!kuart_init(dir.c_str())) {
+        log += "[kudroid_dex] LOAD FAILED: " + std::string(kuart_last_error()) + "\n";
         writeLogFile("kudroid_dex_translate.txt", log);
         return strdup(log.c_str());
     }
 
-    log += "[kudroid_dex] Translation OK: " + std::to_string(jar.size()) + " bytes JAR\n";
-    log += "[kudroid_dex] Cache dir: " + cache.cacheDirectory() + "\n";
+    log += "[kudroid_dex] DEX files loaded: " + std::to_string(kuart_num_dex_files()) + "\n";
 
-    // ghi tệp jar vào đĩa để avian có thể tải nó dưới dạng đường dẫn lớp.
-    std::string jarPath = std::string(g_logDir) + "/translated_classes.jar";
-    FILE* f = std::fopen(jarPath.c_str(), "wb");
-    if (f) {
-        std::fwrite(jar.data(), 1, jar.size(), f);
-        std::fclose(f);
-        log += "[kudroid_dex] Wrote JAR: " + jarPath + "\n";
-    } else {
-        log += "[kudroid_dex] WARNING: cannot write JAR to " + jarPath + "\n";
+    constexpr size_t kMaxList = 20000;
+    std::vector<char*> classes(kMaxList, nullptr);
+    const size_t n = kuart_list_app_classes(classes.data(), kMaxList);
+    log += "[kudroid_dex] App classes found: " + std::to_string(n) + "\n";
+    for (size_t i = 0; i < n && i < 20; ++i) {
+        log += "[kudroid_dex]   " + std::string(classes[i]) + "\n";
     }
+    if (n > 20) log += "[kudroid_dex]   ... (" + std::to_string(n - 20) + " more)\n";
+    kuart_free_class_list(classes.data(), n);
 
+    log += "[kudroid_dex] Classes resolved: " + std::to_string(kuart_num_loaded_classes()) + "\n";
     writeLogFile("kudroid_dex_translate.txt", log);
     return strdup(log.c_str());
 }

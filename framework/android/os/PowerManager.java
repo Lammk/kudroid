@@ -41,20 +41,33 @@ public class PowerManager {
      * mô phỏng wakelock.
      */
     public static class WakeLock {
+        private static native void setKeepScreenOnNative(boolean keepOn);
+        private boolean mHeld = false;
+
         public void acquire() {
+            mHeld = true;
+            try {
+                setKeepScreenOnNative(true);
+            } catch (Throwable ignored) {}
         }
 
         public void acquire(long timeout) {
+            acquire();
         }
 
         public void release() {
+            mHeld = false;
+            try {
+                setKeepScreenOnNative(false);
+            } catch (Throwable ignored) {}
         }
 
         public void release(int flags) {
+            release();
         }
 
         public boolean isHeld() {
-            return false;
+            return mHeld;
         }
 
         public void setReferenceCounted(boolean value) {
