@@ -347,7 +347,8 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
         frame->set_dex_pc(dex_pc);
 
         const Instruction* inst = Instruction::At(insns + dex_pc);
-        const uint32_t next_pc = dex_pc + inst->SizeInCodeUnits();
+        const uint32_t next_pc =
+            dex_pc + static_cast<uint32_t>(inst->SizeInCodeUnits());
 
         switch (inst->Opcode()) {
             case Instruction::NOP:

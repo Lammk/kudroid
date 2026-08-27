@@ -69,6 +69,10 @@ void kudroid_inject_sensor_event(int sensorType, float x, float y, float z);
 /// kích hoạt rung Haptic Feedback (1=Nhẹ, 2=Vừa, 3=Mạnh)
 void kudroid_vibrate(int intensity);
 
+/// quản lý cờ giữ màn hình luôn sáng (1=Keep Screen On / No Sleep, 0=Allow Sleep)
+void kudroid_set_keep_screen_on(int keepOn);
+int kudroid_get_keep_screen_on(void);
+
 /// chèn một sự kiện chạm vào ứng dụng android gốc
 /// @param x tọa độ x của lần chạm
 /// @param y tọa độ y của lần chạm
