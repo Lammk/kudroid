@@ -1029,9 +1029,8 @@ bool Invoke_java_lang_System(Interpreter* interp, const char* name, const DexVal
     }
     if (std::strcmp(name, "exit") == 0) {
         // The guest shares the process with the iOS host, so exiting would kill
-        // KuDroid itself.
-        interp->ThrowException("Ljava/lang/UnsupportedOperationException;",
-                               "System.exit(" + std::to_string(args[0].i) + ") ignored");
+        // KuDroid itself. Ignore gracefully.
+        std::fprintf(stderr, "[KuART][System] System.exit(%d) called -> ignored to prevent app shutdown\n", args[0].i);
         return true;
     }
     return false;

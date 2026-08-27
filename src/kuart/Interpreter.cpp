@@ -86,9 +86,18 @@ thread_local uint64_t Interpreter::instructions_executed_ = 0;
 
 void Interpreter::ThrowException(const char* descriptor, const std::string& message) {
     last_error_ = std::string(descriptor) + ": " + message;
+    std::fprintf(stderr, "[KuART][EXCEPTION] 💥 %s: %s\n", descriptor, message.c_str());
+
     DexClass* klass = linker_ != nullptr ? linker_->FindClass(descriptor) : nullptr;
     if (klass != nullptr) {
         pending_exception_ = linker_->AllocObject(klass);
+        if (pending_exception_ != nullptr && !message.empty()) {
+            const DexField* f_msg = klass->FindInstanceField("message", "Ljava/lang/String;");
+            if (f_msg != nullptr) {
+                DexObject* msgObj = reinterpret_cast<DexObject*>(linker_->NewString(message.c_str()));
+                pending_exception_->SetField<DexObject*>(f_msg->offset_or_slot, msgObj);
+            }
+        }
     }
     if (pending_exception_ == nullptr) {
         // No class exception in classpath (framework not loaded) —
