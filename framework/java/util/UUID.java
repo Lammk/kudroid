@@ -22,7 +22,7 @@ public class UUID {
         Random r = new Random();
         long hi = r.nextLong();
         long lo = r.nextLong();
-        // Đặt version 4 và variant IETF như spec.
+        // Set version 4 and IETF variant as spec.
         hi = (hi & ~0xf000L) | 0x4000L;
         lo = (lo & 0x3fffffffffffffffL) | 0x8000000000000000L;
         return new UUID(hi, lo);

@@ -1,43 +1,43 @@
 package android.content.pm;
 
 /**
- * triển khai android.content.pm.packagemanager tối thiểu.
+ * minimal android.content.pm.packagemanager implementation.
  *
- * cung cấp quyền truy cập vào thông tin gói. đối với khuôn khổ tối thiểu của kudroid,
- * hầu hết các tra cứu đều trả về null/mặc định.
+ * provides access to package information. for kudroid minimal framework,
+ * most lookups return null/default.
  */
 public class PackageManager {
-    /** quyền được cấp. */
+    /** permission granted. */
     public static final int PERMISSION_GRANTED = 0;
-    /** quyền bị từ chối. */
+    /** permission denied. */
     public static final int PERMISSION_DENIED = -1;
 
     public PackageManager() {
     }
 
     /**
-     * kiểm tra xem ứng dụng có quyền hay không. hiện tại trả về đã cấp quyền.
+     * check if the app has permissions or not. currently returns granted.
      */
     public int checkPermission(String permName, String pkgName) {
         return PERMISSION_GRANTED;
     }
 
     /**
-     * trả về thông tin ứng dụng cho một gói. hiện tại trả về null.
+     * returns application information for a package. currently returns null.
      */
     public ApplicationInfo getApplicationInfo(String packageName, int flags) {
         return new ApplicationInfo();
     }
 
     /**
-     * trả về thông tin gói cho một gói. hiện tại trả về null.
+     * returns package information for a package. currently returns null.
      */
     public PackageInfo getPackageInfo(String packageName, int flags) {
         return new PackageInfo();
     }
 
     /**
-     * trả về tên gói đã cài đặt ứng dụng này.
+     * returns the package name that installed this application.
      */
     public String getInstallerPackageName(String packageName) {
         return null;

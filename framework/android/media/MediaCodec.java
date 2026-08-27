@@ -1,6 +1,6 @@
 package android.media;
 
-/** Stub sinh tự động cho android.media.MediaCodec */
+/** Stub automatically generated for android.media.MediaCodec */
 public class MediaCodec {
     public MediaCodec() {}
 }

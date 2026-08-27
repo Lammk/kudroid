@@ -4,7 +4,7 @@ import android.os.Parcel;
 import android.os.Parcelable;
 
 /**
- * android.content.ComponentName — cặp (package, class) định danh một component.
+ * android.content.ComponentName — (package, class) pair identifies a component.
  */
 public class ComponentName implements Parcelable, Cloneable {
     private final String mPackage;
@@ -36,7 +36,7 @@ public class ComponentName implements Parcelable, Cloneable {
         return mClass;
     }
 
-    /** Tên class rút gọn: bỏ tiền tố package nếu class nằm trong package đó. */
+    /** Shortened class name: remove the package prefix if the class is in that package. */
     public String getShortClassName() {
         if (mClass.startsWith(mPackage)) {
             int pn = mPackage.length();

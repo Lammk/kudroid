@@ -2,7 +2,7 @@ package java.io;
 
 public class FileInputStream extends InputStream {
 
-    /** fd của POSIX; -1 = đã đóng. */
+    /** POSIX fd; -1 = closed. */
     private int fd = -1;
 
     public FileInputStream(String name) throws FileNotFoundException {
@@ -24,14 +24,14 @@ public class FileInputStream extends InputStream {
 
     public int read(byte[] b, int off, int len) throws IOException {
         if (fd < 0) {
-            throw new IOException("stream đã đóng");
+            throw new IOException("stream closed");
         }
         return readNative(fd, b, off, len);
     }
 
     public long skip(long n) throws IOException {
         if (fd < 0) {
-            throw new IOException("stream đã đóng");
+            throw new IOException("stream closed");
         }
         return skipNative(fd, n);
     }

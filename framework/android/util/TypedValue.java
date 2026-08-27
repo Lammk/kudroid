@@ -1,6 +1,6 @@
 package android.util;
 
-/** Stub sinh tự động cho android.util.TypedValue */
+/** Stub automatically generated for android.util.TypedValue */
 public class TypedValue {
     public TypedValue() {}
 }

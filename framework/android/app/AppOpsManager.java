@@ -1,6 +1,6 @@
 package android.app;
 
-/** Stub sinh tự động cho android.app.AppOpsManager */
+/** Stub automatically generated for android.app.AppOpsManager */
 public class AppOpsManager {
     public AppOpsManager() {}
 }

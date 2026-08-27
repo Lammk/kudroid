@@ -1,51 +1,51 @@
 package android.graphics;
 
 /**
- * triển khai android.graphics.porterduff tối thiểu.
+ * minimal android.graphics.porterduff implementation.
  *
- * định nghĩa các chế độ tổng hợp. đối với khuôn khổ tối thiểu của kudroid, cung cấp
- * enum mode được sử dụng bởi canvas.drawcolor.
+ * defines aggregation modes. for kudroid minimal framework, provided
+ * enum mode used by canvas.drawcolor.
  */
 public class PorterDuff {
     /**
-     * các chế độ tổng hợp.
+     * synthesis modes.
      */
     public enum Mode {
-        /** xóa đích. */
+        /** delete destination. */
         CLEAR(0),
-        /** vẽ nguồn. */
+        /** draw source. */
         SRC(1),
-        /** vẽ đích. */
+        /** draw target. */
         DST(2),
-        /** vẽ nguồn lên trên đích. */
+        /** draws the source on top of the destination. */
         SRC_OVER(3),
-        /** vẽ đích lên trên nguồn. */
+        /** paints the destination on top of the source. */
         DST_OVER(4),
-        /** giữ nguồn và đích ở nơi chúng chồng lên nhau. */
+        /** holds the source and destination where they overlap. */
         SRC_IN(5),
-        /** giữ đích ở nơi nó chồng lên nguồn. */
+        /** keeps the destination where it overlaps the source. */
         DST_IN(6),
-        /** giữ nguồn ở nơi nó không chồng lên đích. */
+        /** keeps the source where it does not overlap the destination. */
         SRC_OUT(7),
-        /** giữ đích ở nơi nó không chồng lên nguồn. */
+        /** keeps the destination where it does not overlap the source. */
         DST_OUT(8),
-        /** giữ nguồn ở nơi nó chồng lên, và đích ở những nơi khác. */
+        /** keeps the source where it overlaps, and the destination elsewhere. */
         SRC_ATOP(9),
-        /** giữ đích ở nơi nó chồng lên, và nguồn ở những nơi khác. */
+        /** keeps the destination where it overlaps, and the source elsewhere. */
         DST_ATOP(10),
-        /** loại trừ hoặc (xor). */
+        /** exclude or (xor). */
         XOR(11),
-        /** thêm nguồn và đích. */
+        /** adds source and destination. */
         ADD(12),
-        /** nhân nguồn và đích. */
+        /** multiply the source and destination. */
         MULTIPLY(13),
-        /** pha trộn màn hình. */
+        /** screen blending. */
         SCREEN(14),
-        /** pha trộn lớp phủ. */
+        /** overlay blend. */
         OVERLAY(15),
-        /** pha trộn làm tối. */
+        /** darkening blend. */
         DARKEN(16),
-        /** pha trộn làm sáng. */
+        /** brighten blend. */
         LIGHTEN(17);
 
         private final int mValue;

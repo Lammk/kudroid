@@ -1,11 +1,11 @@
 package android.text;
 
 /**
- * android.text.Editable — CharSequence có thể sửa tại chỗ.
+ * android.text.Editable — CharSequence can be edited in place.
  *
- * Android khai báo Editable extends CharSequence, GetChars, Spannable,
- * Appendable. KuDroid chưa có Span nên thu về CharSequence + Appendable —
- * đủ cho app soạn thảo văn bản thuần (ZArchiver rename/password dialog).
+ * Android declares Editable extends CharSequence, GetChars, Spannable,
+ *Appendable. KuDroid doesn't have Span yet so it's CharSequence + Appendable —
+ * enough for plain text editing app (ZArchiver rename/password dialog).
  */
 public interface Editable extends CharSequence, Appendable {
     Editable replace(int st, int en, CharSequence source, int start, int end);
@@ -27,7 +27,7 @@ public interface Editable extends CharSequence, Appendable {
     void clear();
 
     /**
-     * Factory tạo Editable từ nội dung ban đầu.
+     * Factory creates Editable from original content.
      */
     public interface Factory {
         Editable newEditable(CharSequence source);

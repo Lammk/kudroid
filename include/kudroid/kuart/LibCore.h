@@ -1,9 +1,9 @@
-// Hiện thực C++ cho các method native của libcore (framework/java/**).
+// C++ implementation for libcore native methods (framework/java/**).
 //
-// KHÔNG đi qua ABI của JNI: CallNative chỉ truyền được tối đa 6 tham số qua
-// x0-x7 và không xử lý float/double (AAPCS64 dùng v0-v7). Thay vào đó
-// interpreter gọi trực tiếp hàm C++ với mảng DexValue — đúng mọi kiểu, không
-// cần trampoline assembly.
+// KH NG  i qua ABI c a JNI: CallNative ch  truy n  c t i  a 6 tham s  qua
+// x0-x7 v  kh ng x  l  float/double (AAPCS64 d ng v0-v7). Thay v o
+// interpreter g i tr c ti p h m C++ v i m ng DexValue    ng m i ki u, kh ng
+// c n trampoline assembly.
 #ifndef KUDROID_KUART_LIBCORE_H
 #define KUDROID_KUART_LIBCORE_H
 
@@ -17,13 +17,13 @@ namespace kuart {
 
 class Interpreter;
 
-// Gọi hiện thực libcore của `method` nếu có. Trả false nếu method không thuộc
-// libcore (caller phải tự tìm symbol native của app).
+// G i hi n th c libcore c a `method` n u c . Tr  false n u method kh ng thu c
+// libcore (caller ph i t  t m symbol native c a app).
 bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue* args,
                    size_t num_args, DexValue* result);
 
-// Method có hiện thực libcore hay không — dùng để không ném
-// UnsatisfiedLinkError trước khi thử gọi.
+// Method c  hi n th c libcore hay kh ng   d ng   kh ng n m
+// UnsatisfiedLinkError tr c khi th  g i.
 bool LibCoreHasMethod(const DexMethod* method);
 
 }  // namespace kuart

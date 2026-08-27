@@ -1,8 +1,8 @@
 package java.lang;
 
 /**
- * Đối tượng class. KuART cấp phát riêng một DexClassObject cho mỗi class nên
- * class này không có field instance; mọi thông tin lấy qua native.
+ * Class object. KuART allocates a separate DexClassObject for each class
+ * This class does not have field instances; All information is obtained through native.
  */
 public final class Class<T> {
 
@@ -78,7 +78,7 @@ public final class Class<T> {
 
     public T cast(Object obj) {
         if (obj != null && !isInstance(obj)) {
-            throw new ClassCastException(obj.getClass().getName() + " không phải " + getName());
+            throw new ClassCastException(obj.getClass().getName() + " not " + getName());
         }
         return (T) obj;
     }

@@ -1,9 +1,9 @@
 package android.database;
 
 /**
- * android.database.DataSetObserver — nhận thông báo khi dữ liệu của Adapter đổi.
+ * android.database.DataSetObserver — receive notifications when Adapter data changes.
  *
- * Android khai báo abstract class với hai hàm rỗng; lớp con override cái cần.
+ * Android declares an abstract class with two empty functions; The subclass overrides the need.
  */
 public abstract class DataSetObserver {
     public void onChanged() {

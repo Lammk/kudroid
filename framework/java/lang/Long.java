@@ -84,7 +84,7 @@ public final class Long extends Number implements Comparable<Long> {
         }
         int len = s.length();
         if (len == 0) {
-            throw new NumberFormatException("chuỗi rỗng");
+            throw new NumberFormatException("empty string");
         }
         if (radix < 2 || radix > 36) {
             throw new NumberFormatException("radix " + radix);
@@ -101,7 +101,7 @@ public final class Long extends Number implements Comparable<Long> {
         if (i == len) {
             throw new NumberFormatException(s);
         }
-        // Tích luỹ ở phía âm để MIN_VALUE biểu diễn được (phía dương thiếu 1 giá trị).
+        // Accumulate on the negative side so that MIN_VALUE can be represented (the positive side is missing 1 value).
         long result = 0;
         long limit = negative ? MIN_VALUE : -MAX_VALUE;
         long multMin = limit / radix;
@@ -137,7 +137,7 @@ public final class Long extends Number implements Comparable<Long> {
         boolean negative = l < 0;
         char[] buf = new char[65];
         int pos = buf.length;
-        // Chia ở phía âm để MIN_VALUE không tràn khi lấy đối.
+        // Divide on the negative side so that MIN_VALUE does not overflow when comparing.
         long v = negative ? l : -l;
         while (v != 0) {
             int digit = (int) -(v % radix);
@@ -157,7 +157,7 @@ public final class Long extends Number implements Comparable<Long> {
         if (l > 0) {
             return toString(l, radix);
         }
-        // Bit 63 bật: chia trước một lần bằng phép chia không dấu tự làm.
+        // Bit 63 on: pre-divide once using homemade unsigned division.
         long quotient = (l >>> 1) / radix * 2;
         long remainder = l - quotient * radix;
         while (remainder >= radix) {

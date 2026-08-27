@@ -1,35 +1,35 @@
 package android.media;
 
 /**
- * mô phỏng android.media.audiomanager.
+ * emulate android.media.audiomanager.
  *
- * không quan trọng đối với khởi động/kết xuất ứng dụng. trả về mặc định để các ứng dụng không
- * gặp sự cố khi chúng truy vấn trạng thái âm thanh.
+ * is not important for application startup/rendering. Returns default to no applications
+ * crashes when they query audio status.
  */
 public class AudioManager {
-    /** loại luồng: âm nhạc. */
+    /** stream type: music. */
     public static final int STREAM_MUSIC = 3;
-    /** loại luồng: hệ thống. */
+    /** thread type: system. */
     public static final int STREAM_SYSTEM = 1;
-    /** loại luồng: cuộc gọi thoại. */
+    /** stream type: voice call. */
     public static final int STREAM_VOICE_CALL = 0;
-    /** loại luồng: báo thức. */
+    /** stream type: alarm. */
     public static final int STREAM_ALARM = 4;
-    /** loại luồng: thông báo. */
+    /** stream type: message. */
     public static final int STREAM_NOTIFICATION = 5;
 
-    /** chế độ âm thanh: bình thường. */
+    /** sound mode: normal. */
     public static final int MODE_NORMAL = 0;
-    /** chế độ âm thanh: nhạc chuông. */
+    /** sound mode: ringtone. */
     public static final int MODE_RINGTONE = 1;
-    /** chế độ âm thanh: trong cuộc gọi. */
+    /** audio mode: in call. */
     public static final int MODE_IN_CALL = 2;
 
-    /** chế độ chuông: bình thường. */
+    /** ring mode: normal. */
     public static final int RINGER_MODE_NORMAL = 2;
-    /** chế độ chuông: im lặng. */
+    /** ring mode: silent. */
     public static final int RINGER_MODE_SILENT = 0;
-    /** chế độ chuông: rung. */
+    /** ring mode: vibrate. */
     public static final int RINGER_MODE_VIBRATE = 1;
 
     public AudioManager() {
@@ -99,7 +99,7 @@ public class AudioManager {
     }
 
     /**
-     * trình nghe cho các thay đổi tiêu điểm âm thanh.
+     * listener for audio focus changes.
      */
     public interface OnAudioFocusChangeListener {
         void onAudioFocusChange(int focusChange);

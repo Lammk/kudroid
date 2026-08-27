@@ -1,6 +1,6 @@
 package android.util;
 
-/** Stub sinh tự động cho android.util.AtomicFile */
+/** Stub automatically generated for android.util.AtomicFile */
 public class AtomicFile {
     public AtomicFile() {}
 }

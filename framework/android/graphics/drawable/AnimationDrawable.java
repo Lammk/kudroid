@@ -1,6 +1,6 @@
 package android.graphics.drawable;
 
-/** Stub sinh tự động cho android.graphics.drawable.AnimationDrawable */
+/** Stub automatically generated for android.graphics.drawable.AnimationDrawable */
 public class AnimationDrawable {
     public AnimationDrawable() {}
 }

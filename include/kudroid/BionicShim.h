@@ -7,20 +7,20 @@
 extern "C" {
 #endif
 
-// khởi tạo tls luồng chính để tương thích với android
+// initialize main thread tls for android compatibility
 void bionic_init_main_thread_tls(void);
 
-// chặn trực tiếp dlopen của android — các thư viện gpu (libvulkan.so, libglesv2.so,
-// libegl.so) trả về một tay cầm giả và phân giải các ký hiệu thẳng thành gốc ios.
+// directly block android's dlopen — gpu libraries (libvulkan.so, libglesv2.so,
+// libegl.so) returns a pseudo handle and resolves symbols straight to the ios root.
 void* bionic_dlopen(const char* filename, int flags);
 void* bionic_dlsym(void* handle, const char* symbol);
 
-// Đăng ký template PT_TLS của module guest (từ elf_loader sau khi map) để
-// các khối TLS per-thread có thể sao chép nó vào đúng vị trí.
+// Register the guest module's PT_TLS template (from elf_loader after mapping).
+// c c kh i TLS per-thread c  th  sao ch p n  v o  ng v  tr .
 void kudroid_tls_set_template(const void* tls_template, size_t tls_filesz);
 
-// Khoảng cách (so với thread pointer của guest) nơi template TLS module được đặt
-// trong khối TLS per-thread. Cùng giá trị này được elf_loader dùng làm bias
+// The distance (relative to the guest's thread pointer) where the TLS module template is located
+// trong kh i TLS per-thread. C ng gi  tr  n y  c elf_loader d ng l m bias
 // cho relocations R_AARCH64_TLS_TPREL64 / TLS_DTPREL64.
 size_t kudroid_tls_module_offset(void);
 
@@ -32,22 +32,22 @@ size_t kudroid_tls_module_offset(void);
 
 namespace kudroid {
 
-/// phân giải một ký hiệu android/bionic thành một triển khai tương thích ios/posix.
-/// các ký hiệu không xác định trả về một hàm giả khác null và phát ra cảnh báo.
+// / ph n gi i m t k  hi u android/bionic th nh m t tri n khai t ng th ch ios/posix.
+// / c c k  hi u kh ng x c  nh tr  v  m t h m gi  kh c null v  ph t ra c nh b o.
 void* resolve_bionic_symbol(const char* name);
 
-/// xóa và truy xuất các thông báo chẩn đoán được tạo ra bởi lớp đệm.
+// / x a v  truy xu t c c th ng b o ch n  o n  c t o ra b i l p  m.
 void bionic_shim_reset_trace();
 const char* bionic_shim_trace();
 
-/// thêm một dòng vào bộ đệm trace dùng chung (thread_local duy nhất).
-/// mọi shim (kể cả SyscallShim/AudioShim/...) phải gọi hàm này thay vì
-/// duy trì biến gShimTrace riêng — nếu không bionic_shim_trace() đọc
-/// biến khác và kết quả luôn trống.
+// / th m m t d ng v o b   m trace d ng chung (thread_local duy nh t).
+// / m i shim (k  c  SyscallShim/AudioShim/...) ph i g i h m n y thay v
+// / duy tr  bi n gShimTrace ri ng   n u kh ng bionic_shim_trace()  c
+// / bi n kh c v  k t qu  lu n tr ng.
 void trace_shim(const char* message);
 
-/// xử lý sigtrap do các lệnh mrs x, tpidr_el0 được vá aot gây ra.
-/// trả về true nếu xử lý thành công.
+// / x  l  sigtrap do c c l nh mrs x, tpidr_el0  c v  aot g y ra.
+// / tr  v  true n u x  l  succeeded.
 bool bionic_handle_tpidr_trap(void* ucontext);
 
 } // namespace kudroid

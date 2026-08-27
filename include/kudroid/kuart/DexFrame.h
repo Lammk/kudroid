@@ -1,10 +1,10 @@
-// Khung gọi của interpreter: mảng register + vị trí bytecode đang chạy.
+// interpreter call frame: register array + current bytecode PC.
 //
-// Register trong DEX là 32-bit và long/double chiếm một CẶP (vN, vN+1). Ở đây
-// mỗi slot là DexValue 64-bit nên giá trị wide nằm gọn trong slot N, slot N+1
-// bỏ trống. Bytecode hợp lệ không bao giờ đọc riêng nửa sau của một cặp wide
-// (verifier của Android chặn từ lúc build APK), nên cách này an toàn và bỏ
-// được toàn bộ việc ghép/tách 32-bit như ART phải làm.
+// Register trong DEX l  32-bit v  long/double chi m m t C P (vN, vN+1).    y
+// m i slot l  DexValue 64-bit n n gi  tr  wide n m g n trong slot N, slot N+1
+// b  tr ng. Bytecode h p l  kh ng bao gi   c ri ng n a sau c a m t c p wide
+// (verifier c a Android ch n t  l c build APK), n n c ch n y an to n v  b
+// c to n b  vi c gh p/t ch 32-bit nh  ART ph i l m.
 #ifndef KUDROID_KUART_DEXFRAME_H
 #define KUDROID_KUART_DEXFRAME_H
 
@@ -45,7 +45,7 @@ public:
     void SetDouble(uint32_t vreg, double v) { Set(vreg, DexValue::Double(v)); }
     void SetRef(uint32_t vreg, DexObject* v) { Set(vreg, DexValue::Ref(v)); }
 
-    // Tham số nằm ở các register CUỐI cùng của frame (quy ước DEX), gồm cả
+    // Tham s  n m   c c register CU I c ng c a frame (quy  c DEX), g m c
     // `this` cho method instance.
     uint32_t FirstArgRegister() const {
         if (method_ == nullptr) return 0;
@@ -54,20 +54,20 @@ public:
         return regs >= ins ? regs - ins : 0;
     }
 
-    // Nạp tham số vào các register cuối. `args` theo thứ tự khai báo, long/
-    // double tính MỘT phần tử (đã gộp trong DexValue) nhưng chiếm HAI slot.
+    // N p tham s  v o c c register cu i. `args` theo th  t  khai b o, long/
+    // double t nh M T ph n t  (  g p trong DexValue) nh ng chi m HAI slot.
     void LoadArguments(const DexValue* args, size_t count, const char* shorty, bool is_static);
 
-    // Giá trị của move-result / move-result-wide / move-result-object.
+    // Gi  tr  c a move-result / move-result-wide / move-result-object.
     DexValue result() const { return result_; }
     void set_result(DexValue v) { result_ = v; }
 
-    // Vị trí instruction đang chạy. Lưu theo frame (không theo Interpreter) vì
-    // method này có thể đang gọi method khác — mỗi frame có pc riêng.
+    // V  tr  instruction is running. L u theo frame (kh ng theo Interpreter) v
+    // method n y c  th   ang g i method kh c   m i frame c  pc ri ng.
     uint32_t dex_pc() const { return dex_pc_; }
     void set_dex_pc(uint32_t pc) { dex_pc_ = pc; }
 
-    // Exception đã bắt được, chờ move-exception đọc ra.
+    // Exception   b t  c, ch  move-exception  c ra.
     DexObject* caught_exception() const { return caught_exception_; }
     void set_caught_exception(DexObject* ex) { caught_exception_ = ex; }
 

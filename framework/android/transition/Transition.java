@@ -1,6 +1,6 @@
 package android.transition;
 
-/** Stub sinh tự động cho android.transition.Transition */
+/** Stub automatically generated for android.transition.Transition */
 public class Transition {
     public Transition() {}
 

@@ -1,17 +1,17 @@
 package android.view.inputmethod;
 
 /**
- * mô phỏng android.view.inputmethod.inputmethodmanager.
+ * emulate android.view.inputmethod.inputmethodmanager.
  *
- * quản lý phương thức nhập (bàn phím). đối với khuôn khổ tối thiểu của kudroid, đây
- * là một mô phỏng.
+ * manage input methods (keyboard). for kudroid minimal framework, here
+ * is a simulation.
  */
 public class InputMethodManager {
-    /** kết quả: thành công. */
+    /** result: success. */
     public static final int RESULT_SUCCESS = 0;
-    /** kết quả: được hiển thị. */
+    /** result: displayed. */
     public static final int RESULT_SHOWN = 1;
-    /** kết quả: bị ẩn. */
+    /** result: hidden. */
     public static final int RESULT_HIDDEN = 2;
 
     public InputMethodManager() {

@@ -5,8 +5,8 @@
 #include <cstdlib>
 #include <mutex>
 
-// Pipeline chuẩn (stdout + kudroid_android_logs.txt + crash buffer) — định
-// nghĩa trong SyscallShim.cpp, đã là "bản ngoài C" cho kudroid_jni/GraphicsShim.
+// Standard pipeline (stdout + kudroid_android_logs.txt + crash buffer) — defined
+// meaning in SyscallShim.cpp, which is the "C version" for kudroid_jni/GraphicsShim.
 extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
 
 namespace kudroid {
@@ -14,7 +14,7 @@ namespace log {
 
 namespace {
 std::mutex g_mtx;
-bool g_verbose = true;        // đang debug máy thật — bật mặc định
+bool g_verbose = true;        // debugging real machine — enabled by default
 bool g_verbose_initialized = false;
 
 bool env_verbose() {

@@ -1161,13 +1161,13 @@ static long emulate_futex_direct(uintptr_t arg1, uintptr_t arg2, uintptr_t arg3,
 // guard_acquire (cả bản libc++_shared 0x9f004 lẫn bản static trong
 // libapng-drawable 0x76064 — bản mọi consumer resolve về) gọi syscall(178)
 // để lấy tid. Lúc bionic_syscall nhận gettid thì:
-//   - x19 LÚC ENTRY (bắt ngay đầu bionic_syscall, qua PLT stub `br` frameless
-//     không đổi) = guard pointer
+// - x19 LÚC ENTRY (bắt ngay đầu bionic_syscall, qua PLT stub `br` frameless
+// không đổi) = guard pointer
 //   - __builtin_return_address(1) = call site syscall@plt trong guard_acquire
-//     (PLT stub dùng `br`, không đổi LR — nên LR bionic_syscall trả về chính
-//     là lệnh kế sau `bl syscall`)
-//   - frame guard_acquire (layout cố định `stp x20,x19,[sp,#48]`) → [fp+56]
-//     = x19 saved = guard, [fp+8] = caller của guard_acquire (hàm guest đang
+// (PLT stub dùng `br`, không đổi LR — nên LR bionic_syscall trả về chính
+// là lệnh kế sau `bl syscall`)
+// - frame guard_acquire (layout cố định `stp x20,x19,[sp,#48]`) → [fp+56]
+// = x19 saved = guard, [fp+8] = caller của guard_acquire (hàm guest đang
 //     init static)
 // Chỉ log case in-progress (byte1 bit1 set): hoặc (a) SAME_TID_RECURSION =
 // cú re-enter chí mạng, hoặc (b) thread khác đang chờ guard. Claim mới là

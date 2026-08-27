@@ -1,6 +1,6 @@
 package android.content;
 
-/** Stub sinh tự động cho android.content.LocusId */
+/** Stub automatically generated for android.content.LocusId */
 public class LocusId {
     public LocusId() {}
 }

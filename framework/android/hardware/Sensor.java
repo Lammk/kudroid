@@ -1,16 +1,16 @@
 package android.hardware;
 
 /**
- * mô phỏng android.hardware.sensor.
+ * emulate android.hardware.sensor.
  *
- * đại diện cho một cảm biến. đối với khuôn khổ tối thiểu của kudroid, đây là một mô phỏng.
+ * represents a sensor. for kudroid minimal framework, here is an emulation.
  */
 public class Sensor {
-    /** chế độ báo cáo: liên tục. */
+    /** reporting mode: continuous. */
     public static final int REPORTING_MODE_CONTINUOUS = 0;
-    /** chế độ báo cáo: khi thay đổi. */
+    /** report mode: on change. */
     public static final int REPORTING_MODE_ON_CHANGE = 1;
-    /** chế độ báo cáo: một lần. */
+    /** reporting mode: once. */
     public static final int REPORTING_MODE_ONE_SHOT = 2;
 
     private final int mType;

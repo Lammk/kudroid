@@ -1,5 +1,5 @@
 package android.text;
 
-/** Stub sinh tự động cho android.text.InputFilter */
+/** Stub automatically generated for android.text.InputFilter */
 public interface InputFilter {
 }

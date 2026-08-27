@@ -14,9 +14,9 @@ std::string DexReflect::DottedToDescriptor(const char* dotted) {
     for (char& c : s) {
         if (c == '.') c = '/';
     }
-    // Tên mảng đã là descriptor ("[I", "[Ljava/lang/String;").
+    // The array name is already a descriptor ("[I", "[Ljava/lang/String;").
     if (s[0] == '[') return s;
-    // Java cho phép truyền cả descriptor sẵn; đừng bọc hai lần.
+    // Java allows passing built-in descriptors; Don't wrap it twice.
     if (s.size() > 2 && s.front() == 'L' && s.back() == ';') return s;
     return "L" + s + ";";
 }
@@ -25,7 +25,7 @@ std::string DexReflect::DescriptorToDotted(const char* descriptor) {
     if (descriptor == nullptr || descriptor[0] == '\0') return std::string();
 
     std::string s(descriptor);
-    // Mảng: Java trả nguyên descriptor, chỉ đổi '/' thành '.'.
+    // Array: Java returns the descriptor, just changes '/' to '.'.
     if (s[0] != '[' && s.size() > 2 && s.front() == 'L' && s.back() == ';') {
         s = s.substr(1, s.size() - 2);
     }
@@ -44,9 +44,9 @@ DexClass* DexReflect::ForName(const char* dotted_name) {
         last_error_ = std::string("ClassNotFoundException: ") + dotted_name;
         return nullptr;
     }
-    // Class.forName mặc định initialize = true.
+    // Class.forName defaults to initialize = true.
     if (interpreter_ != nullptr && !interpreter_->EnsureInitialized(klass)) {
-        last_error_ = std::string("<clinit> thất bại: ") + dotted_name;
+        last_error_ = std::string("<clinit> failed: ") + dotted_name;
         return nullptr;
     }
     return klass;
@@ -71,8 +71,8 @@ DexObject* DexReflect::NewInstance(DexClass* klass) {
         last_error_ = "NoSuchMethodException: " + klass->PrettyName() + ".<init>()";
         return nullptr;
     }
-    // Constructor tự khai báo nhưng không có thân xảy ra khi framework chỉ có
-    // stub; coi object đã dựng xong (field đã zero) thay vì báo lỗi.
+    // Constructor declares itself but has no body which happens when framework only has
+    // stub; Consider the object to have been constructed (field zero) instead of reporting an error.
     if (ctor->code_item == nullptr && !ctor->IsNative()) return obj;
 
     const DexValue self = DexValue::Ref(obj);
@@ -100,7 +100,7 @@ DexValue DexReflect::Invoke(DexMethod* method, DexObject* receiver, const DexVal
     DexValue result;
     if (method == nullptr) return result;
 
-    // Method.invoke dùng dispatch động: object con override thì gọi bản của con.
+    // Method.invoke uses dynamic dispatch: the override child object calls its version.
     if (!method->IsStatic() && receiver != nullptr && receiver->clazz != nullptr &&
         method->vtable_index != DexMethod::kInvalidVTableIndex) {
         if (DexMethod* found =

@@ -1,6 +1,6 @@
 package android.text.util;
 
-/** Stub sinh tự động cho android.text.util.Linkify */
+/** Stub automatically generated for android.text.util.Linkify */
 public class Linkify {
     public Linkify() {}
 

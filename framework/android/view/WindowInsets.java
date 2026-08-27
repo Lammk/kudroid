@@ -1,6 +1,6 @@
 package android.view;
 
-/** Stub sinh tự động cho android.view.WindowInsets */
+/** Stub automatically generated for android.view.WindowInsets */
 public class WindowInsets {
     public WindowInsets() {}
 

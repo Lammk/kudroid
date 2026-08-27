@@ -1,10 +1,10 @@
 package android.view.animation;
 
 /**
- * android.view.animation.Interpolator — biến đổi tiến độ thời gian của animation.
+ * android.view.animation.Interpolator — transforms the animation's timing.
  *
- * Android: Interpolator extends TimeInterpolator (tách ra từ API 11 để dùng
- * chung với android.animation).
+ * Android: Interpolator extends TimeInterpolator (separated from API 11 for use
+ * common with android.animation).
  */
 public interface Interpolator extends android.animation.TimeInterpolator {
 }

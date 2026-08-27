@@ -1,6 +1,6 @@
 package android.location;
 
-/** Stub sinh tự động cho android.location.GnssStatus */
+/** Stub automatically generated for android.location.GnssStatus */
 public class GnssStatus {
     public GnssStatus() {}
 

@@ -1,6 +1,6 @@
 package android.database;
 
-/** Stub sinh tự động cho android.database.CursorWrapper */
+/** Stub automatically generated for android.database.CursorWrapper */
 public class CursorWrapper {
     public CursorWrapper() {}
 }

@@ -16,8 +16,8 @@
 #include <cstdlib>
 #include <cxxabi.h>
 
-// Pipeline log chuẩn (stdout + kudroid_android_logs.txt + crash buffer) — định
-// nghĩa trong SyscallShim.cpp, dùng chung với GraphicsShim/kudroid_jni.
+// Standard log pipeline (stdout + kudroid_android_logs.txt + crash buffer) — definition
+// meaning in SyscallShim.cpp, shared with GraphicsShim/kudroid_jni.
 extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
 
 namespace kudroid {
@@ -181,10 +181,10 @@ void* resolve_bionic_symbol(const char* name) {
             }
         }
 
-        // stderr/stdout/stdin là BIẾN toàn cục (FILE*), không phải hàm — bind
-        // dummy (địa chỉ code) khiến guest dereference code-as-FILE* → SEGV.
-        // Trả địa chỉ biến host thật để fprintf(stderr, ...) của guest chạy đúng
-        // (và log của guest đổ vào stderr.log mà crash handler đọc).
+        // stderr/stdout/stdin are global VARIABLES (FILE*), not functions — bind
+        // dummy (code address) causes guest to dereference code-as-FILE* → SEGV.
+        // Return the actual host variable address so that guest's fprintf(stderr, ...) runs correctly
+        // (and the guest log is dumped into stderr.log which the crash handler reads).
         if (!resolved && std::strcmp(name, "stderr") == 0) {
             resolved = reinterpret_cast<void*>(&::stderr);
             is_host = true;
@@ -200,9 +200,9 @@ void* resolve_bionic_symbol(const char* name) {
             char msg[256];
             snprintf(msg, sizeof(msg), "missing symbol bound to dummy: %s", name);
             trace_shim(msg);
-            // Mirror vào log chuẩn (android_logs.txt + crash buffer) — trước đây
-            // chỉ nằm trong shim trace nên biến mất khi cần tìm relocation
-            // unresolved (chính là nghi phạm SIGILL của Discord trong init).
+            // Mirror to standard logs (android_logs.txt + crash buffer) — previously
+            // is only in the shim trace so it disappears when looking for relocation
+            // unresolved (which is Discord's SIGILL suspect in init).
             kudroid_android_log_message(2, "BionicShim", msg);
             resolved = reinterpret_cast<void*>(&kudroid_universal_dummy);
         }

@@ -7,8 +7,8 @@ import android.os.Bundle;
 import android.view.MotionEvent;
 
 /**
- * quản lý vòng đời ứng dụng và luồng ui chính theo chuẩn android.
- * sử dụng looper và handler để điều phối an toàn.
+ * manage application lifecycle and main ui flow according to android standards.
+ * use looper and handler for safe coordination.
  */
 public final class ActivityThread {
     public static final int LAUNCH_ACTIVITY = 100;
@@ -80,13 +80,13 @@ public final class ActivityThread {
         ActivityThread thread = new ActivityThread();
         thread.attach();
         
-        // Khởi chạy Activity trực tiếp đồng bộ để render khung hình đầu tiên ngay lập tức
+        // Launch a live Activity synchronously to render the first frame immediately
         if (args != null && args.length > 0 && args[0] != null && !args[0].isEmpty()) {
             android.util.Log.i("ActivityThread", "Launching target Activity immediately: " + args[0]);
             thread.handleLaunchActivity(args[0]);
         }
         
-        // Vòng lặp sự kiện UI chính — chạy vĩnh cửu, không bao giờ tự thoát
+        // Main UI event loop — runs forever, never exits itself
         while (true) {
             try {
                 Looper.loop();
@@ -106,15 +106,15 @@ public final class ActivityThread {
     }
 
     /**
-     * Trích tên class thiếu từ chuỗi cause của ClassNotFoundException /
-     * NoClassDefFoundError. Avian bọc lỗi load lồng nhiều tầng nên phải đi
-     * hết chain. Trả về null nếu không phải lỗi thiếu class.
+     * Extract the missing class name from the cause string of ClassNotFoundException /
+     * NoClassDefFoundError. Avian wrapped the loading error in a multi-layer cage, so it had to go
+     * out of chain. Returns null if not a missing class error.
      */
     private static String extractMissingClassName(Throwable t) {
         for (Throwable c = t; c != null; c = c.getCause()) {
             String msg = c.getMessage();
             if (msg != null && !msg.isEmpty()) {
-                // Message thường là "com/foo/Bar" hoặc "android/view/Foo$Bar".
+                // Message is usually "com/foo/Bar" or "android/view/Foo$Bar".
                 String m = msg.trim();
                 int space = m.indexOf(' ');
                 if (space > 0) m = m.substring(0, space);
@@ -136,16 +136,16 @@ public final class ActivityThread {
 
     private void handleLaunchActivity(String activityClassName) {
         Class<?> clazz = null;
-        // ── Xây dựng candidate list TỔNG QUÁT ──────────────────────────────
-        // args[0] = candidate chính (manifest/JNI-verify ở tầng C++ chọn),
-        // args[1..] = fallback đã verify. Không hardcode tên app cụ thể nào.
+        // ── Build candidate list GENERAL ──────────────────────────────
+        // args[0] = main candidate (manifest/JNI-verify at C++ layer selected),
+        // args[1..] = verified fallback. Do not hardcode any specific app name.
         java.util.ArrayList<String> candidateList = new java.util.ArrayList<>();
         if (activityClassName != null && !activityClassName.isEmpty()) {
             candidateList.add(activityClassName);
         }
-        // Sinh biến thể đoán từ package prefix của candidate chính:
+        // Generate guessed variants from the package prefix of the main candidate:
         // "com.foo.Bar" → "com.foo.Main", "com.foo.ui.MainActivity", ...
-        // (app thật thường đặt Activity ở package gốc hoặc sub-package ui/app).
+        // (Real apps usually put Activity in the root package or sub-package ui/app).
         if (activityClassName != null && activityClassName.lastIndexOf('.') > 0) {
             String pkg = activityClassName.substring(0, activityClassName.lastIndexOf('.'));
             for (String suffix : new String[] { ".Main", ".MainActivity", ".ui.MainActivity",
@@ -164,15 +164,15 @@ public final class ActivityThread {
                     break;
                 }
             } catch (Throwable t) {
-                // Phân loại lỗi để debug app mới nhanh:
-                //  - ClassNotFoundException/NoClassDefFoundError với tên
-                //    android/* → THIẾU STUB framework (đắp stub, không phải bug).
-                //  - với tên app/* → candidate sai, thử cái tiếp theo.
+                // Categorize errors to quickly debug new apps:
+                //  - ClassNotFoundException/NoClassDefFoundError with name
+                //    android/* → MISSING STUB framework (puts a stub, not a bug).
+                //  - with name app/* → candidate is wrong, try the next one.
                 String missing = extractMissingClassName(t);
                 if (missing != null && missing.startsWith("android/")) {
                     android.util.Log.e("ActivityThread",
                             "FRAMEWORK STUB MISSING: " + missing +
-                            " (cần thêm stub vào framework/android/ rồi rebuild)");
+                            " (need to add stub to framework/android/ then rebuild)");
                 }
                 StringBuilder chain = new StringBuilder();
                 for (Throwable c = t; c != null; c = c.getCause()) {
@@ -198,7 +198,7 @@ public final class ActivityThread {
                 android.util.Log.i("ActivityThread", "Calling onResume()...");
                 mInitialActivity.onResume();
 
-                // Kích hoạt chu trình SurfaceHolder Callback bất đồng bộ qua Message Queue (chuẩn Android)
+                // Activate asynchronous SurfaceHolder Callback cycle via Message Queue (Android standard)
                 if (mH != null) {
                     mH.post(new Runnable() {
                         @Override
@@ -243,7 +243,7 @@ public final class ActivityThread {
                         android.util.Log.e("ActivityThread", "    at " + ste.toString());
                     }
                 }
-                // Khởi tạo fallback UI ngay để app vẫn hiển thị và chạy mượt mà
+                // Initiate fallback UI now so the app still displays and runs smoothly
                 if (mInitialActivity == null) {
                     mInitialActivity = new Activity();
                 }
@@ -263,7 +263,7 @@ public final class ActivityThread {
                 root.addView(title);
 
                 final android.widget.TextView statusView = new android.widget.TextView(mInitialActivity);
-                statusView.setText("\n👆 Chạm vào thư mục bên dưới để mở:");
+                statusView.setText("\n👆 Touch the folder below to open:");
                 statusView.setTextColor(0xFF03A9F4);
                 statusView.setTextSize(16.0f);
                 root.addView(statusView);
@@ -285,7 +285,7 @@ public final class ActivityThread {
                         @Override
                         public void onClick(android.view.View v) {
                             System.out.println("[UI] Clicked on folder: " + folderPath);
-                            statusView.setText("\n✅ Đã mở: " + folderPath + "\n(VFS Root OK • Sẵn sàng quản lý & giải nén file)");
+                            statusView.setText("\n✅ Opened: " + folderPath + "\n(VFS Root OK • Ready to manage & extract files)");
                         }
                     });
                     root.addView(btn);
@@ -298,7 +298,7 @@ public final class ActivityThread {
             }
         }
 
-        // Bắt đầu vòng lặp sự kiện chính của Android (Main Event Loop)
+        // Start Android's Main Event Loop
         android.util.Log.i("ActivityThread", "Entering Looper.loop() main event loop...");
         android.os.Looper.loop();
     }

@@ -1,6 +1,6 @@
 package android.graphics;
 
-/** Stub sinh tự động cho android.graphics.Shader */
+/** Stub automatically generated for android.graphics.Shader */
 public class Shader {
     public Shader() {}
 

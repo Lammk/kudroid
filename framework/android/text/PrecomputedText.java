@@ -1,6 +1,6 @@
 package android.text;
 
-/** Stub sinh tự động cho android.text.PrecomputedText */
+/** Stub automatically generated for android.text.PrecomputedText */
 public class PrecomputedText {
     public PrecomputedText() {}
 

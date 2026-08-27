@@ -1,25 +1,25 @@
 package android.content.pm;
 
 /**
- * triển khai android.content.pm.applicationinfo tối thiểu.
+ * minimal android.content.pm.applicationinfo implementation.
  *
- * mô tả một ứng dụng. đối với khuôn khổ tối thiểu của kudroid, cung cấp các trường
- * cơ bản với các giá trị mặc định.
+ * describes an application. for kudroid minimal framework, provide fields
+ * basic with default values.
  */
 public class ApplicationInfo {
-    /** tên gói của ứng dụng này. */
+    /** package name of this application. */
     public String packageName = "";
-    /** đường dẫn đầy đủ đến apk cơ sở cho ứng dụng này. */
+    /** full path to the base apk for this app. */
     public String sourceDir = "";
-    /** đường dẫn đầy đủ đến thư mục nơi apk được cài đặt. */
+    /** full path to the directory where the apk is installed. */
     public String dataDir = "";
-    /** đường dẫn đầy đủ đến thư mục chứa các thư viện gốc. */
+    /** full path to the directory containing the original libraries. */
     public String nativeLibraryDir = "";
-    /** phiên bản sdk tối thiểu bắt buộc. */
+    /** Minimum required sdk version. */
     public int minSdkVersion = 0;
-    /** phiên bản sdk mục tiêu. */
+    /** target sdk version. */
     public int targetSdkVersion = 0;
-    /** nhãn của ứng dụng. */
+    /** application label. */
     public CharSequence loadLabel = "";
 
     public ApplicationInfo() {

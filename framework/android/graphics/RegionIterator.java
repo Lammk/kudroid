@@ -1,6 +1,6 @@
 package android.graphics;
 
-/** Stub sinh tự động cho android.graphics.RegionIterator */
+/** Stub automatically generated for android.graphics.RegionIterator */
 public class RegionIterator {
     public RegionIterator() {}
 }

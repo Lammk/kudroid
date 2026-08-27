@@ -3,10 +3,10 @@ package android.view;
 import android.content.Context;
 
 /**
- * android.view.MenuInflater — dựng Menu từ XML resource.
+ * android.view.MenuInflater — builds Menu from XML resource.
  *
- * KuDroid chưa có resource compiler nên inflate() không thêm mục nào; app tự
- * gọi menu.add() là đường đi hoạt động được.
+ * KuDroid does not have a resource compiler yet, so inflate() does not add any items; app self
+ * calling menu.add() is the path that works.
  */
 public class MenuInflater {
     private final Context mContext;

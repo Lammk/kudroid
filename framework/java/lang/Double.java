@@ -109,9 +109,9 @@ public final class Double extends Number implements Comparable<Double> {
 
     public static native double longBitsToDouble(long bits);
 
-    /** Định dạng bằng snprintf của C — không tự viết Ryu/Grisu. */
+    /** Format using C snprintf — don't write Ryu/Grisu yourself. */
     public static native String toString(double d);
 
-    /** strtod của C. */
+    /** strtod of C. */
     public static native double parseDouble(String s);
 }

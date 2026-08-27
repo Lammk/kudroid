@@ -1,6 +1,6 @@
 package android.content;
 
-/** Stub sinh tự động cho android.content.Loader */
+/** Stub automatically generated for android.content.Loader */
 public class Loader {
     public Loader() {}
 }

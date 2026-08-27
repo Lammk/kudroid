@@ -1,6 +1,6 @@
 package android.net;
 
-/** Stub sinh tự động cho android.net.NetworkRequest */
+/** Stub automatically generated for android.net.NetworkRequest */
 public class NetworkRequest {
     public NetworkRequest() {}
 }

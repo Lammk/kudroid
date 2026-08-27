@@ -1,9 +1,9 @@
 package java.lang;
 
 /**
- * Thay cho java.util.Formatter — chỉ hỗ trợ các directive mà framework/app
- * Android dùng thực tế: %s %d %f %x %X %o %c %b %n %%, có width/precision/flag
- * '-' và '0'.
+ * Instead of java.util.Formatter — only supports directives that framework/app
+ * Android in actual use: %s %d %f %x %X %o %c %b %n %%, with width/precision/flag
+ * '-' and '0'.
  */
 final class Formatter {
 
@@ -166,7 +166,7 @@ final class Formatter {
         for (int i = 0; i < digits; i++) {
             scale *= 10.0;
         }
-        // Làm tròn nửa lên như %f của C.
+        // Round half up like %f of C.
         long scaled = (long) (v * scale + 0.5);
         String all = Long.toString(scaled);
         while (all.length() <= digits) {
@@ -196,7 +196,7 @@ final class Formatter {
             }
             return sb.toString();
         }
-        // Số âm với '0' padding: dấu trừ phải đứng trước dãy số 0.
+        // Negative numbers with '0' padding: the minus sign must precede the 0 sequence.
         if (zeroPad && s.length() > 0 && s.charAt(0) == '-') {
             sb.append('-');
             for (int i = 0; i < missing; i++) {

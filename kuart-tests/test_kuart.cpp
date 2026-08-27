@@ -1,7 +1,7 @@
-// Host test cho KuART: nạp class từ DEX, dựng field layout + vtable.
+// Host test for KuART: n p class t  DEX, build field layout + vtable.
 //
-// Đây là thứ thay thế toàn bộ chuỗi dex2jar → classes.jar → AutoStub → Avian:
-// DEX vào thẳng, ra DexClass dùng được ngay.
+// y l  th  thay th  to n b  chu i dex2jar   classes.jar   AutoStub   Avian:
+// DEX v o th ng, ra DexClass d ng  c ngay.
 #include "kudroid/kuart/DexClassLinker.h"
 
 #include <cstdio>
@@ -21,9 +21,9 @@ void Check(bool ok, const std::string& what) {
 
 using namespace dexbuild;
 
-// Cây class để test: Object <- Base <- Derived, Derived implements Runnable.
+// C y class   test: Object <- Base <- Derived, Derived implements Runnable.
 //
-//   Object  : không field, không method (đứng làm gốc)
+// Object  : kh ng field, kh ng method ( ng l m g c)
 //   Base    : int baseInt; long baseLong; Object baseRef
 //             static int counter
 //             void run()      -> Derived override
@@ -34,7 +34,7 @@ using namespace dexbuild;
 std::vector<ClassSpec> MakeClassTree() {
     ClassSpec object;
     object.descriptor = "Ljava/lang/Object;";
-    object.superclass = "";  // gốc, không superclass
+    object.superclass = "";  // g c, kh ng superclass
     {
         MethodSpec ctor;
         ctor.name = "<init>";
@@ -113,7 +113,7 @@ std::vector<ClassSpec> MakeClassTree() {
         MethodSpec only;
         only.name = "derivedOnly";
         only.return_type = "I";
-        only.params.push_back("J");  // kiểm tra arg_words của long
+        only.params.push_back("J");  // ki m tra arg_words c a long
         only.code = {0x0012, 0x000f};
         only.registers_size = 4;
         only.ins_size = 3;
@@ -126,7 +126,7 @@ std::vector<ClassSpec> MakeClassTree() {
 }  // namespace
 
 int main() {
-    std::printf("=== KuART: nạp class từ DEX (không qua dex2jar/JAR) ===\n");
+std::printf("=== KuART: n p class t  DEX (kh ng qua dex2jar/JAR) ===\n");
 
     DexBuilder builder;
     const std::vector<uint8_t> dex = builder.Build(MakeClassTree());
@@ -139,7 +139,7 @@ int main() {
         std::printf("=== KuART test FAILED ===\n");
         return 1;
     }
-    Check(linker.NumDexFiles() == 1, "mở được 1 DEX");
+Check(linker.NumDexFiles() == 1, "m   c 1 DEX");
 
     // ── resolve ──
     kudroid::kuart::DexClass* derived = linker.FindClass("LDerived;");
@@ -151,104 +151,104 @@ int main() {
     }
 
     Check(derived->PrettyName() == "Derived", "PrettyName == Derived");
-    Check(derived->status == kudroid::kuart::DexClass::Status::kLinked, "trạng thái kLinked");
+Check(derived->status == kudroid::kuart::DexClass::Status::kLinked, "tr ng th i kLinked");
 
-    // ── chuỗi kế thừa ──
+    // chu i k  th a
     kudroid::kuart::DexClass* base = derived->superclass;
     Check(base != nullptr && std::strcmp(base->descriptor, "LBase;") == 0,
-          "superclass của Derived là Base");
+"superclass c a Derived l  Base");
     Check(base != nullptr && base->superclass != nullptr &&
               std::strcmp(base->superclass->descriptor, "Ljava/lang/Object;") == 0,
-          "superclass của Base là Object");
+"superclass c a Base l  Object");
     Check(derived->interfaces.size() == 1 && derived->interfaces[0] != nullptr &&
               std::strcmp(derived->interfaces[0]->descriptor, "Ljava/lang/Runnable;") == 0,
           "Derived implements Runnable");
     Check(derived->IsSubClassOf(base), "IsSubClassOf(Base)");
     Check(derived->IsSubClassOf(derived->interfaces[0]), "IsSubClassOf(Runnable)");
 
-    // ── cache: gọi lại phải trả cùng con trỏ ──
-    Check(linker.FindClass("LDerived;") == derived, "FindClass cache trả cùng con trỏ");
+    // cache: g i l i ph i tr  c ng con tr
+Check(linker.FindClass("LDerived;") == derived, "FindClass cache tr  c ng con tr ");
 
     // ── field layout ──
-    // Base: long 8B trước (offset 0), rồi ref 8B (offset 8), rồi int 4B (16) = 20
+    // Base: long 8B tr c (offset 0), r i ref 8B (offset 8), r i int 4B (16) = 20
     kudroid::kuart::DexField* base_long = base->FindInstanceField("baseLong", "J");
     kudroid::kuart::DexField* base_ref = base->FindInstanceField("baseRef", "Ljava/lang/Object;");
     kudroid::kuart::DexField* base_int = base->FindInstanceField("baseInt", "I");
     Check(base_long != nullptr && base_ref != nullptr && base_int != nullptr,
-          "tìm được 3 field instance của Base");
+"t m  c 3 field instance c a Base");
     if (base_long != nullptr && base_ref != nullptr && base_int != nullptr) {
         std::printf("    Base: baseLong@%u baseRef@%u baseInt@%u object_size=%u\n",
                     base_long->offset_or_slot, base_ref->offset_or_slot,
                     base_int->offset_or_slot, base->object_size);
         Check(base_long->offset_or_slot % 8 == 0, "baseLong align 8");
         Check(base_int->offset_or_slot % 4 == 0, "baseInt align 4");
-        // Field không được chồng nhau.
+        // Field kh ng  c ch ng nhau.
         Check(base_long->offset_or_slot != base_ref->offset_or_slot &&
                   base_ref->offset_or_slot != base_int->offset_or_slot,
-              "field Base không chồng offset");
+"field Base kh ng ch ng offset");
     }
 
-    // Field của Derived phải nằm SAU field của Base.
+    // Field c a Derived ph i n m SAU field c a Base.
     kudroid::kuart::DexField* derived_int = derived->FindInstanceField("derivedInt", "I");
     Check(derived_int != nullptr && derived_int->offset_or_slot >= base->object_size,
-          "field của Derived nằm sau field kế thừa");
-    Check(derived->object_size > base->object_size, "object_size của Derived lớn hơn Base");
+"field c a Derived n m sau field k  th a");
+Check(derived->object_size > base->object_size, "object_size c a Derived l n h n Base");
     std::printf("    Derived: derivedInt@%u object_size=%u\n",
                 derived_int != nullptr ? derived_int->offset_or_slot : 0,
                 derived->object_size);
 
-    // Field kế thừa nhìn thấy được từ subclass, cùng offset.
+    // Field k  th a nh n th y  c t  subclass, c ng offset.
     kudroid::kuart::DexField* inherited = derived->FindInstanceField("baseInt", "I");
-    Check(inherited == base_int, "Derived thấy baseInt kế thừa, cùng offset");
+Check(inherited == base_int, "Derived th y baseInt k  th a, c ng offset");
 
     // ── field static ──
     kudroid::kuart::DexField* counter = base->FindStaticField("counter", "I");
     Check(counter != nullptr && counter->IsStatic(), "field static counter");
-    Check(base->static_values.size() == 1, "static_values có 1 ô");
+Check(base->static_values.size() == 1, "static_values c  1  ");
 
     // ── vtable ──
-    // Base có run + onlyInBase = 2 slot. Derived override run (không thêm slot)
-    // và thêm derivedOnly = 3 slot.
+    // Base c  run + onlyInBase = 2 slot. Derived override run (kh ng th m slot)
+    // v  th m derivedOnly = 3 slot.
     std::printf("    vtable Base=%zu Derived=%zu\n", base->vtable.size(),
                 derived->vtable.size());
-    Check(base->vtable.size() == 2, "vtable Base có 2 slot");
-    Check(derived->vtable.size() == 3, "vtable Derived có 3 slot (override không thêm slot)");
+Check(base->vtable.size() == 2, "vtable Base c  2 slot");
+Check(derived->vtable.size() == 3, "vtable Derived c  3 slot (override kh ng th m slot)");
 
     kudroid::kuart::DexMethod* base_run = base->FindVirtualMethod("run", "()V");
     kudroid::kuart::DexMethod* derived_run = derived->FindVirtualMethod("run", "()V");
-    Check(base_run != nullptr && derived_run != nullptr, "tìm được run() ở cả hai class");
-    Check(base_run != derived_run, "run() của Derived khác của Base");
+Check(base_run != nullptr && derived_run != nullptr, "t m  c run()   c  hai class");
+Check(base_run != derived_run, "run() c a Derived kh c c a Base");
     if (base_run != nullptr && derived_run != nullptr) {
         Check(base_run->vtable_index == derived_run->vtable_index,
-              "override dùng CÙNG vtable slot");
+"override d ng C NG vtable slot");
         Check(derived->vtable[derived_run->vtable_index] == derived_run,
-              "vtable Derived trỏ tới bản override");
+"vtable Derived tr  t i b n override");
     }
 
-    // Method chỉ có ở Base vẫn gọi được qua Derived, giữ nguyên slot.
+    // Method ch  c    Base v n g i  c qua Derived, gi  nguy n slot.
     kudroid::kuart::DexMethod* only_in_base = derived->FindVirtualMethod("onlyInBase", "()I");
-    Check(only_in_base != nullptr, "Derived thấy onlyInBase kế thừa");
+Check(only_in_base != nullptr, "Derived th y onlyInBase k  th a");
     if (only_in_base != nullptr) {
         Check(derived->vtable[only_in_base->vtable_index] == only_in_base,
-              "slot kế thừa giữ nguyên method của Base");
+"slot k  th a gi  nguy n method c a Base");
     }
 
     // ── metadata method ──
     kudroid::kuart::DexMethod* derived_only = derived->FindVirtualMethod("derivedOnly", "(J)I");
-    Check(derived_only != nullptr, "tìm được derivedOnly(J)I");
+Check(derived_only != nullptr, "t m  c derivedOnly(J)I");
     if (derived_only != nullptr) {
         // this(1) + long(2) = 3
-        Check(derived_only->arg_words == 3, "arg_words == 3 (this + long chiếm 2)");
+Check(derived_only->arg_words == 3, "arg_words == 3 (this + long chi m 2)");
         Check(derived_only->registers_size == 4, "registers_size == 4");
-        Check(derived_only->code_item != nullptr, "có code_item");
+Check(derived_only->code_item != nullptr, "c  code_item");
     }
 
     kudroid::kuart::DexMethod* ctor = derived->FindDirectMethod("<init>", "()V");
-    Check(ctor != nullptr && ctor->IsConstructor(), "constructor là direct method");
+Check(ctor != nullptr && ctor->IsConstructor(), "constructor l  direct method");
     Check(ctor != nullptr && ctor->vtable_index == kudroid::kuart::DexMethod::kInvalidVTableIndex,
-          "constructor không vào vtable");
+"constructor kh ng v o vtable");
 
-    // ── cấp phát object ──
+    // c p ph t object
     kudroid::kuart::DexObject* obj = linker.AllocObject(derived);
     Check(obj != nullptr && obj->clazz == derived, "AllocObject(Derived)");
     if (obj != nullptr && base_int != nullptr && base_long != nullptr &&
@@ -257,28 +257,28 @@ int main() {
         obj->SetField<int64_t>(base_long->offset_or_slot, 0x1122334455667788LL);
         obj->SetField<int32_t>(derived_int->offset_or_slot, 0x55667788);
         Check(obj->GetField<int32_t>(base_int->offset_or_slot) == 0x11223344,
-              "đọc/ghi field int kế thừa");
+" c/ghi field int k  th a");
         Check(obj->GetField<int64_t>(base_long->offset_or_slot) == 0x1122334455667788LL,
-              "đọc/ghi field long (không lệch align)");
+" c/ghi field long (kh ng l ch align)");
         Check(obj->GetField<int32_t>(derived_int->offset_or_slot) == 0x55667788,
-              "đọc/ghi field của subclass");
-        // Ghi field này không được đè field kia.
+" c/ghi field c a subclass");
+        // Ghi field n y kh ng  c   field kia.
         Check(obj->GetField<int32_t>(base_int->offset_or_slot) == 0x11223344,
-              "field không đè lẫn nhau");
+"field kh ng   l n nhau");
     }
 
-    // ── class nguyên thủy + mảng ──
+    // class nguy n th y + m ng
     kudroid::kuart::DexClass* int_class = linker.FindClass("I");
-    Check(int_class != nullptr && int_class->is_primitive, "class nguyên thủy I");
+Check(int_class != nullptr && int_class->is_primitive, "class nguy n th y I");
 
     kudroid::kuart::DexClass* int_array = linker.FindClass("[I");
-    Check(int_array != nullptr && int_array->is_array, "class mảng [I");
+Check(int_array != nullptr && int_array->is_array, "class m ng [I");
     Check(int_array != nullptr && int_array->component_type == int_class,
-          "component_type của [I là I");
+"component_type c a [I l  I");
 
     kudroid::kuart::DexClass* nested = linker.FindClass("[[I");
     Check(nested != nullptr && nested->is_array && nested->component_type == int_array,
-          "mảng lồng [[I có component [I");
+"m ng l ng [[I c  component [I");
 
     kudroid::kuart::DexArray* arr = linker.AllocArray(int_array, 4);
     Check(arr != nullptr && arr->length == 4, "AllocArray([I, 4)");
@@ -288,10 +288,10 @@ int main() {
         for (int32_t i = 0; i < 4; ++i) {
             if (arr->Get<int32_t>(i) != i * 100) all_ok = false;
         }
-        Check(all_ok, "đọc/ghi phần tử mảng int");
+Check(all_ok, " c/ghi ph n t  m ng int");
     }
 
-    std::printf("heap: %zu bytes, %zu block, %zu class đã nạp\n",
+std::printf("heap: %zu bytes, %zu block, %zu class   n p\n",
                 linker.heap().BytesAllocated(), linker.heap().BlockCount(),
                 linker.NumLoadedClasses());
 
@@ -299,6 +299,6 @@ int main() {
         std::printf("=== KuART test PASSED ===\n");
         return 0;
     }
-    std::printf("=== KuART test FAILED (%d lỗi) ===\n", g_failures);
+std::printf("=== KuART test FAILED (%d error) ===\n", g_failures);
     return 1;
 }

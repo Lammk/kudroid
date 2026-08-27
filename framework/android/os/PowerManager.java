@@ -1,19 +1,19 @@
 package android.os;
 
 /**
- * mô phỏng android.os.powermanager.
+ * emulate android.os.powermanager.
  *
- * không quan trọng đối với khởi động/kết xuất ứng dụng. trả về giá trị mặc định để các ứng dụng
- * không gặp sự cố khi chúng truy vấn trạng thái nguồn.
+ * is not important for application startup/rendering. Returns default value to the application
+ * don't crash when they query power status.
  */
 public class PowerManager {
-    /** cờ khóa thức: một phần. */
+    /** final key flag: partial. */
     public static final int PARTIAL_WAKE_LOCK = 1;
-    /** cờ khóa thức: màn hình mờ. */
+    /** wake lock flag: dimmed screen. */
     public static final int SCREEN_DIM_WAKE_LOCK = 6;
-    /** cờ khóa thức: màn hình sáng. */
+    /** wake lock flag: bright screen. */
     public static final int SCREEN_BRIGHT_WAKE_LOCK = 10;
-    /** cờ khóa thức: đầy đủ. */
+    /** final key flag: full. */
     public static final int FULL_WAKE_LOCK = 26;
 
     public PowerManager() {
@@ -38,7 +38,7 @@ public class PowerManager {
     }
 
     /**
-     * mô phỏng wakelock.
+     * simulate wakelock.
      */
     public static class WakeLock {
         private static native void setKeepScreenOnNative(boolean keepOn);

@@ -1,10 +1,10 @@
 package android.graphics;
 
 /**
- * triển khai android.graphics.color tối thiểu.
+ * minimal android.graphics.color implementation.
  *
- * cung cấp các hằng số màu và trình trợ giúp chuyển đổi. đối với khuôn khổ
- * tối thiểu của kudroid, triển khai các trình trợ giúp argb phổ biến.
+ * provides color constants and conversion helpers. for framework
+ * kudroid's minimum, implementing common argb helpers.
  */
 public class Color {
     public static final int BLACK = 0xFF000000;
@@ -24,49 +24,49 @@ public class Color {
     }
 
     /**
-     * trả về thành phần alpha của một màu.
+     * returns the alpha component of a color.
      */
     public static int alpha(int color) {
         return color >>> 24;
     }
 
     /**
-     * trả về thành phần màu đỏ của một màu.
+     * returns the red component of a color.
      */
     public static int red(int color) {
         return (color >> 16) & 0xFF;
     }
 
     /**
-     * trả về thành phần màu xanh lá cây của một màu.
+     * returns the green component of a color.
      */
     public static int green(int color) {
         return (color >> 8) & 0xFF;
     }
 
     /**
-     * trả về thành phần màu xanh dương của một màu.
+     * returns the blue component of a color.
      */
     public static int blue(int color) {
         return color & 0xFF;
     }
 
     /**
-     * trả về một màu từ các thành phần argb.
+     * returns a color from argb components.
      */
     public static int argb(int alpha, int red, int green, int blue) {
         return (alpha << 24) | (red << 16) | (green << 8) | blue;
     }
 
     /**
-     * trả về một màu từ các thành phần rgb (đục).
+     * returns a color from rgb (opaque) components.
      */
     public static int rgb(int red, int green, int blue) {
         return (0xFF << 24) | (red << 16) | (green << 8) | blue;
     }
 
     /**
-     * phân tích cú pháp một màu từ một chuỗi (ví dụ: "#rrggbb" hoặc "#aarrggbb").
+     * parse a color from a string (e.g. "#rrggbb" or "#aarrggbb").
      */
     public static int parseColor(String colorString) {
         if (colorString == null) return BLACK;

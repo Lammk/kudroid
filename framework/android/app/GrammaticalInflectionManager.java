@@ -1,6 +1,6 @@
 package android.app;
 
-/** Stub sinh tự động cho android.app.GrammaticalInflectionManager */
+/** Stub automatically generated for android.app.GrammaticalInflectionManager */
 public class GrammaticalInflectionManager {
     public GrammaticalInflectionManager() {}
 }

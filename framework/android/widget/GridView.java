@@ -4,10 +4,10 @@ import android.content.Context;
 import android.view.View;
 
 /**
- * android.widget.GridView — AbsListView xếp con thành lưới.
+ * android.widget.GridView — AbsListView arranged in a grid.
  */
 public class GridView extends AbsListView {
-    /** Số cột tự tính theo chiều rộng khả dụng. */
+    /** The number of columns automatically calculates according to the available width. */
     public static final int AUTO_FIT = -1;
 
     public static final int NO_STRETCH = 0;

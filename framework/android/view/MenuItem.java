@@ -1,10 +1,10 @@
 package android.view;
 
 /**
- * android.view.MenuItem — một mục trong Menu.
+ * android.view.MenuItem — a Menu item.
  */
 public interface MenuItem {
-    /** Không hiện trên action bar. */
+    /** Does not appear on the action bar. */
     public static final int SHOW_AS_ACTION_NEVER = 0;
     public static final int SHOW_AS_ACTION_IF_ROOM = 1;
     public static final int SHOW_AS_ACTION_ALWAYS = 2;
@@ -12,14 +12,14 @@ public interface MenuItem {
     public static final int SHOW_AS_ACTION_COLLAPSE_ACTION_VIEW = 8;
 
     /**
-     * Callback khi mục được chọn. Trả true nếu đã xử lý.
+     * Callback when item is selected. Returns true if processed.
      */
     public interface OnMenuItemClickListener {
         boolean onMenuItemClick(MenuItem item);
     }
 
     /**
-     * Callback khi action view mở/đóng.
+     * Callback when action view opens/closes.
      */
     public interface OnActionExpandListener {
         boolean onMenuItemActionExpand(MenuItem item);

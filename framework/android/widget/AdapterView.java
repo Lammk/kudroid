@@ -5,34 +5,34 @@ import android.view.View;
 import android.view.ViewGroup;
 
 /**
- * android.widget.AdapterView — ViewGroup lấy con từ một Adapter.
+ * android.widget.AdapterView — ViewGroup gets children from an Adapter.
  *
- * Đây là superclass của ListView/GridView/Spinner và là nơi khai báo các
- * listener item click mà app dùng nhiều nhất.
+ * This is the superclass of ListView/GridView/Spinner and is where the functions are declared
+ * listener item click that the app uses the most.
  */
 public abstract class AdapterView<T extends Adapter> extends ViewGroup {
-    /** Trả về khi không có item nào ở vị trí được hỏi. */
+    /** Returns when there is no item at the asked position. */
     public static final int INVALID_POSITION = -1;
     public static final long INVALID_ROW_ID = Long.MIN_VALUE;
     public static final int ITEM_VIEW_TYPE_IGNORE = -1;
     public static final int ITEM_VIEW_TYPE_HEADER_OR_FOOTER = -2;
 
     /**
-     * Callback khi một item được nhấn.
+     * Callback when an item is pressed.
      */
     public interface OnItemClickListener {
         void onItemClick(AdapterView<?> parent, View view, int position, long id);
     }
 
     /**
-     * Callback khi một item được nhấn giữ. Trả true nếu đã xử lý.
+     * Callback when an item is held down. Returns true if processed.
      */
     public interface OnItemLongClickListener {
         boolean onItemLongClick(AdapterView<?> parent, View view, int position, long id);
     }
 
     /**
-     * Callback khi selection đổi (dùng cho Spinner / bàn phím điều hướng).
+     * Callback when selection changes (used for Spinner / keyboard navigation).
      */
     public interface OnItemSelectedListener {
         void onItemSelected(AdapterView<?> parent, View view, int position, long id);
@@ -85,7 +85,7 @@ public abstract class AdapterView<T extends Adapter> extends ViewGroup {
         return false;
     }
 
-    /** Dispatch nhấn giữ; trả false để caller fallback sang click thường. */
+    /** Dispatch hold down; Return false to let the caller fallback to a regular click. */
     public boolean performItemLongClick(View view, int position, long id) {
         if (mOnItemLongClickListener != null) {
             return mOnItemLongClickListener.onItemLongClick(this, view, position, id);

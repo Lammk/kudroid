@@ -37,7 +37,7 @@ JavaCanvasRenderer::~JavaCanvasRenderer() {
     }
 }
 
-// Chuyển ARGB Android sang RGBA cho iOS CoreGraphics & Metal
+// Convert ARGB Android to RGBA for iOS CoreGraphics & Metal
 static inline uint32_t argb_to_rgba(uint32_t argb) {
     uint32_t a = (argb >> 24) & 0xFF;
     uint32_t r = (argb >> 16) & 0xFF;
@@ -60,7 +60,7 @@ void JavaCanvasRenderer::init(int width, int height) {
         }
     }
     if (framebuffer_) {
-        // Nền tối Material Design của Android
+        // Android Material Design dark background
         drawColor(0xFF1E1E1E);
     }
 }
@@ -98,7 +98,7 @@ void JavaCanvasRenderer::drawText(const char* text, float x, float y, uint32_t a
     CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
     if (!colorSpace) return;
 
-    // Tạo CGBitmapContext bọc trực tiếp buffer của chúng ta
+    // Create a CGBitmapContext that directly wraps our buffer
     CGContextRef context = CGBitmapContextCreate(
         framebuffer_,
         width_,
@@ -112,18 +112,18 @@ void JavaCanvasRenderer::drawText(const char* text, float x, float y, uint32_t a
 
     if (!context) return;
 
-    // Thiết lập hệ tọa độ giống Android (Top-Left = 0,0)
+    // Set up Android-like coordinate system (Top-Left = 0.0)
     CGContextTranslateCTM(context, 0, height_);
     CGContextScaleCTM(context, 1.0, -1.0);
 
-    // Chuẩn bị chuỗi UTF-8 sang CFString (hỗ trợ 100% tiếng Việt có dấu và Unicode)
+    // Prepare UTF-8 string to CFString (100% supported Vietnamese with accents and Unicode)
     CFStringRef cfText = CFStringCreateWithCString(kCFAllocatorDefault, text, kCFStringEncodingUTF8);
     if (!cfText) {
         CGContextRelease(context);
         return;
     }
 
-    // Màu sắc từ ARGB
+    // Colors from ARGB
     float a = ((argb >> 24) & 0xFF) / 255.0f;
     float r = ((argb >> 16) & 0xFF) / 255.0f;
     float g = ((argb >> 8) & 0xFF) / 255.0f;
@@ -132,14 +132,14 @@ void JavaCanvasRenderer::drawText(const char* text, float x, float y, uint32_t a
 
     CGColorRef textColor = CGColorCreateGenericRGB(r, g, b, a);
 
-    // Font hệ thống của Apple (San Francisco / SF Pro)
+    // Apple System Font (San Francisco / SF Pro)
     float fontSize = textSize > 0 ? textSize : 16.0f;
     CTFontRef font = CTFontCreateWithName(CFSTR(".SFUI-Regular"), fontSize, nullptr);
     if (!font) {
         font = CTFontCreateWithName(CFSTR("HelveticaNeue"), fontSize, nullptr);
     }
 
-    // Thuộc tính vẽ chữ
+    // Text drawing properties
     CFStringRef keys[] = { kCTFontAttributeName, kCTForegroundColorAttributeName };
     CFTypeRef values[] = { font, textColor };
     CFDictionaryRef attributes = CFDictionaryCreate(
@@ -155,13 +155,13 @@ void JavaCanvasRenderer::drawText(const char* text, float x, float y, uint32_t a
     CTLineRef line = CTLineCreateWithAttributedString(attrString);
 
     if (line) {
-        // Tọa độ vẽ text
+        // Coordinates for drawing text
         CGContextSetTextPosition(context, x, y);
         CTLineDraw(line, context);
         CFRelease(line);
     }
 
-    // Dọn dẹp bộ nhớ CoreGraphics
+    // Clean up CoreGraphics memory
     CFRelease(attrString);
     CFRelease(attributes);
     if (font) CFRelease(font);
@@ -170,7 +170,7 @@ void JavaCanvasRenderer::drawText(const char* text, float x, float y, uint32_t a
     CGContextRelease(context);
 }
 #else
-// Fallback đơn giản cho môi trường Linux test
+// Simple fallback for Linux test environments
 void JavaCanvasRenderer::drawText(const char* text, float x, float y, uint32_t argb, float textSize) {
     (void)text; (void)x; (void)y; (void)argb; (void)textSize;
 }

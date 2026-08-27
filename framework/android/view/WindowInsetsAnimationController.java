@@ -1,6 +1,6 @@
 package android.view;
 
-/** Stub sinh tự động cho android.view.WindowInsetsAnimationController */
+/** Stub automatically generated for android.view.WindowInsetsAnimationController */
 public class WindowInsetsAnimationController {
     public WindowInsetsAnimationController() {}
 }

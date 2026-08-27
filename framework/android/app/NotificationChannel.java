@@ -1,6 +1,6 @@
 package android.app;
 
-/** Stub sinh tự động cho android.app.NotificationChannel */
+/** Stub automatically generated for android.app.NotificationChannel */
 public class NotificationChannel {
     public NotificationChannel() {}
 }

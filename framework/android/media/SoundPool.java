@@ -1,6 +1,6 @@
 package android.media;
 
-/** Stub sinh tự động cho android.media.SoundPool */
+/** Stub automatically generated for android.media.SoundPool */
 public class SoundPool {
     public SoundPool() {}
 }

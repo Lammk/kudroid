@@ -195,9 +195,9 @@ bool LibraryManager::loadRecursive(const std::string& path) {
     return true;
 }
 
-// libraries_ là unordered_map — iteration order KHÔNG xác định. Hàm này trả
-// danh sách key đã sắp xếp để mọi thứ (resolve symbol, lặp thư viện) chạy theo
-// thứ tự ổn định giữa các lần chạy.
+// libraries_ is unordered_map — iteration order is NOT defined. This function returns
+// sorted list of keys for everything (resolve symbols, library iteration) to follow
+// The order is stable between runs.
 static std::vector<std::string> sortedLibraryKeys(const std::unordered_map<std::string, std::unique_ptr<kudroid::ElfLoader>>& libs) {
     std::vector<std::string> keys;
     keys.reserve(libs.size());
@@ -206,10 +206,10 @@ static std::vector<std::string> sortedLibraryKeys(const std::unordered_map<std::
     return keys;
 }
 
-// libapng-drawable static-link một bản libc++abi riêng và EXPORT __cxa_guard_*
-// → mọi module resolve về bản đó (log "resolved from libapng-drawable.so").
-// Shim guard của ta (xử lý same-tid recursion thay vì abort) phải thắng —
-// special-case đúng 3 symbol này, mọi thứ khác giữ nguyên thứ tự cũ.
+// libapng-drawable static-link a separate libc++abi and EXPORT __cxa_guard_*
+// → all modules resolve to that version (log "resolved from libapng-drawable.so").
+// My shim guard (which handles same-tid recursion instead of abort) must win —
+// special-case exactly these 3 symbols, everything else remains in the same order.
 static bool isGuardShimSymbol(const char* name) {
     return strcmp(name, "__cxa_guard_acquire") == 0 ||
            strcmp(name, "__cxa_guard_release") == 0 ||

@@ -1,7 +1,7 @@
 package android.os;
 
 /**
- * android.os.IInterface — gốc của mọi interface AIDL.
+ * android.os.IInterface — the root of all AIDL interfaces.
  */
 public interface IInterface {
     IBinder asBinder();

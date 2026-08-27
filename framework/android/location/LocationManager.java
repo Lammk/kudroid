@@ -1,17 +1,17 @@
 package android.location;
 
 /**
- * mô phỏng android.location.locationmanager.
+ * emulate android.location.locationmanager.
  *
- * không quan trọng đối với khởi động/kết xuất ứng dụng. trả về rỗng/mặc định để các ứng dụng không
- * gặp sự cố khi chúng truy vấn vị trí.
+ * is not important for application startup/rendering. Returns null/default to no applications
+ * crashes when they query for location.
  */
 public class LocationManager {
-    /** nhà cung cấp gps. */
+    /** gps provider. */
     public static final String GPS_PROVIDER = "gps";
-    /** nhà cung cấp mạng. */
+    /** network provider. */
     public static final String NETWORK_PROVIDER = "network";
-    /** nhà cung cấp thụ động. */
+    /** passive provider. */
     public static final String PASSIVE_PROVIDER = "passive";
 
     public LocationManager() {
@@ -45,7 +45,7 @@ public class LocationManager {
     }
 
     /**
-     * trình nghe cho các cập nhật vị trí.
+     * listener for location updates.
      */
     public interface LocationListener {
         void onLocationChanged(Location location);

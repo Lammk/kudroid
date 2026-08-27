@@ -1,18 +1,18 @@
-# khuôn khổ kudroid android
+# khu n kh  kudroid android
 
-một khuôn khổ android tối thiểu (java) cung cấp các lớp `android.*` mà các ứng dụng
-cần để tải java khi khởi động, trước khi chuyển sang mã `.so` gốc.
+m t khu n kh  android t i thi u (java) cung c p c c l p `android.*` m  c c  ng d ng
+c n   t i java khi kh i  ng, tr c khi chuy n sang m  `.so` g c.
 
-## mục đích
+## m c  ch
 
-hầu hết các trò chơi gốc (unity il2cpp, godot, sdl) chỉ chạm vào java một thời gian ngắn lúc
-khởi động (`jni_onload`, `anativeactivity_oncreate`), sau đó chạy hoàn toàn thông qua
-các thư viện `.so` c/c++. khuôn khổ này cung cấp vừa đủ các lớp `android.*`
-để các ứng dụng đó không gặp sự cố khi tải java.
+h u h t c c tr  ch i g c (unity il2cpp, godot, sdl) ch  ch m v o java m t th i gian ng n l c
+kh i  ng (`jni_onload`, `anativeactivity_oncreate`), sau   ch y ho n to n th ng qua
+c c th  vi n `.so` c/c++. khu n kh  n y cung c p v a   c c l p `android.*`
+  c c  ng d ng   kh ng g p s  c  khi t i java.
 
-## những gì được bao gồm
+## nh ng g   c bao g m
 
-**triển khai thực tế** (ảnh hưởng đến hành vi của ứng dụng):
+**tri n khai th c t ** ( nh h ng  n h nh vi c a  ng d ng):
 - `android.util.log` → maps to `__android_log_print`
 - `android.os.handler` / `looper` / `messagequeue` / `message` / `bundle`
 - `android.app.activity` / `application` / `dialog` / `alertdialog`
@@ -21,7 +21,7 @@ các thư viện `.so` c/c++. khuôn khổ này cung cấp vừa đủ các lớ
 - `android.widget.textview` / `button` / `linearlayout` / `toast`
 - `android.graphics.*` (canvas, paint, bitmap, color, rect, ...)
 
-**mô phỏng** (trả về các giá trị mặc định để các ứng dụng không bị sự cố):
+**m  ph ng** (tr  v  c c gi  tr  m c  nh   c c  ng d ng kh ng b  s  c ):
 - `android.telephony.telephonymanager`
 - `android.bluetooth.bluetoothadapter`
 - `android.app.notificationmanager` / `notification`
@@ -33,22 +33,22 @@ các thư viện `.so` c/c++. khuôn khổ này cung cấp vừa đủ các lớ
 - `android.net.connectivitymanager`
 - `android.provider.settings`
 
-## xây dựng
+## x y d ng
 
 ```bash
-# yêu cầu jdk (javac + jar)
-./build.sh                 # tạo ra framework/build/framework.jar
-./build.sh --bootimage     # cũng tạo ra framework/build/boot.jar cho avian
+# y u c u jdk (javac + jar)
+./build.sh                 # t o ra framework/build/framework.jar
+./build.sh --bootimage     # c ng t o ra framework/build/boot.jar cho avian
 ```
 
-## thêm lớp
+## th m l p
 
-1. tạo tệp `.java` dưới `framework/android/<package>/`.
-2. chạy `./build.sh` để biên dịch lại.
-3. tệp jar được nhúng vào tệp nhị phân kudroid dưới dạng classpath khởi động avian.
+1. t o t p `.java` d i `framework/android/<package>/`.
+2. ch y `./build.sh`   bi n d ch l i.
+3. t p jar  c nh ng v o t p nh  ph n kudroid d i d ng classpath kh i  ng avian.
 
-## đóng góp
+##  ng g p
 
-khuôn khổ này cố tình tối thiểu. nếu một ứng dụng cần một lớp
-bị thiếu, hãy thêm nó (hoặc mở một vấn đề). mục tiêu là phát triển nó dựa trên nhu cầu thực tế của ứng dụng,
-không phải để sao chép toàn bộ android sdk.
+khu n kh  n y c  t nh t i thi u. n u m t  ng d ng c n m t l p
+b  thi u, h y th m n  (ho c m  m t v n  ). m c ti u l  ph t tri n n  d a tr n nhu c u th c t  c a  ng d ng,
+kh ng ph i   sao ch p to n b  android sdk.

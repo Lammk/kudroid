@@ -1,6 +1,6 @@
 package android.view;
 
-/** Stub sinh tự động cho android.view.ScaleGestureDetector */
+/** Stub automatically generated for android.view.ScaleGestureDetector */
 public class ScaleGestureDetector {
     public ScaleGestureDetector() {}
 }

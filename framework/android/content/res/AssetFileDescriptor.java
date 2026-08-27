@@ -1,6 +1,6 @@
 package android.content.res;
 
-/** Stub sinh tự động cho android.content.res.AssetFileDescriptor */
+/** Stub automatically generated for android.content.res.AssetFileDescriptor */
 public class AssetFileDescriptor {
     public AssetFileDescriptor() {}
 }

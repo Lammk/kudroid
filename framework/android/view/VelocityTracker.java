@@ -1,6 +1,6 @@
 package android.view;
 
-/** Stub sinh tự động cho android.view.VelocityTracker */
+/** Stub automatically generated for android.view.VelocityTracker */
 public class VelocityTracker {
     public VelocityTracker() {}
 }

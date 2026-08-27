@@ -1,5 +1,5 @@
 package android.animation;
 
-/** Stub sinh tự động cho android.animation.TypeEvaluator */
+/** Stub automatically generated for android.animation.TypeEvaluator */
 public interface TypeEvaluator {
 }

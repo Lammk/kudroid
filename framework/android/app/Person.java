@@ -1,6 +1,6 @@
 package android.app;
 
-/** Stub sinh tự động cho android.app.Person */
+/** Stub automatically generated for android.app.Person */
 public class Person {
     public Person() {}
 }

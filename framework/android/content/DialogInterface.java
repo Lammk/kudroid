@@ -1,61 +1,61 @@
 package android.content;
 
 /**
- * triển khai android.content.dialoginterface tối thiểu.
+ * minimal android.content.dialoginterface implementation.
  *
- * giao diện cho các hộp thoại. đối với khuôn khổ tối thiểu của kudroid, cung cấp hằng số
- * nút và trình lắng nghe nhấp chuột.
+ * interface for dialog boxes. for kudroid minimal framework, provide constant
+ * button and click listener.
  */
 public interface DialogInterface {
-    /** nút: tích cực. */
+    /** node: active. */
     public static final int BUTTON_POSITIVE = -1;
-    /** nút: tiêu cực. */
+    /** node: negative. */
     public static final int BUTTON_NEGATIVE = -2;
-    /** nút: trung lập. */
+    /** node: neutral. */
     public static final int BUTTON_NEUTRAL = -3;
 
     /**
-     * giao diện cho các cuộc gọi lại khi nhấp chuột.
+     * interface for callbacks on click.
      */
     public interface OnClickListener {
         void onClick(DialogInterface dialog, int which);
     }
 
     /**
-     * giao diện cho các cuộc gọi lại khi bỏ qua.
+     * interface for callbacks when ignored.
      */
     public interface OnDismissListener {
         void onDismiss(DialogInterface dialog);
     }
 
     /**
-     * giao diện cho các cuộc gọi lại khi hủy.
+     * interface for callbacks on cancellation.
      */
     public interface OnCancelListener {
         void onCancel(DialogInterface dialog);
     }
 
     /**
-     * Callback khi dialog vừa hiện lên.
+     * Callback when the dialog appears.
      */
     public interface OnShowListener {
         void onShow(DialogInterface dialog);
     }
 
     /**
-     * Callback phím cứng khi dialog đang hiện. Trả true nếu đã xử lý.
+     * Callback hard key when dialog is showing. Returns true if processed.
      */
     public interface OnKeyListener {
         boolean onKey(DialogInterface dialog, int keyCode, android.view.KeyEvent event);
     }
 
     /**
-     * bỏ qua hộp thoại.
+     * skip dialog.
      */
     void dismiss();
 
     /**
-     * hủy hộp thoại.
+     * cancel dialog.
      */
     void cancel();
 

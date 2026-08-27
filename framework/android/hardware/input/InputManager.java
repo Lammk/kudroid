@@ -1,6 +1,6 @@
 package android.hardware.input;
 
-/** Stub sinh tự động cho android.hardware.input.InputManager */
+/** Stub automatically generated for android.hardware.input.InputManager */
 public class InputManager {
     public InputManager() {}
 

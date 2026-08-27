@@ -1,6 +1,6 @@
 package android.animation;
 
-/** Stub sinh tự động cho android.animation.ObjectAnimator */
+/** Stub automatically generated for android.animation.ObjectAnimator */
 public class ObjectAnimator {
     public ObjectAnimator() {}
 }

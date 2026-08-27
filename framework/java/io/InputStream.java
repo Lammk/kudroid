@@ -48,7 +48,7 @@ public abstract class InputStream implements Closeable {
     }
 
     public void reset() throws IOException {
-        throw new IOException("mark/reset không hỗ trợ");
+        throw new IOException("mark/reset not supported");
     }
 
     public boolean markSupported() {

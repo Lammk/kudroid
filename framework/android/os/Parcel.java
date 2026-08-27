@@ -4,12 +4,12 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * android.os.Parcel — container tuần tự hoá phẳng.
+ * android.os.Parcel — flat serialization container.
  *
- * Parcel thật là buffer nhị phân chia sẻ giữa các process qua Binder. KuDroid
- * chạy mọi thứ trong một process nên không cần layout nhị phân tương thích;
- * chỉ cần thứ tự đọc/ghi khớp nhau để writeToParcel/createFromParcel của app
- * round-trip đúng. Dùng danh sách Object với con trỏ đọc tuần tự.
+ * Real parcel is a binary buffer shared between processes via Binder. KuDroid
+ * runs everything in one process so no need for a compatible binary layout;
+ * just need the read/write order to match for the app's writeToParcel/createFromParcel
+ * round-trip correct. Use an Object list with sequential reading pointers.
  */
 public final class Parcel {
     private final List<Object> mItems = new ArrayList<Object>();
@@ -22,7 +22,7 @@ public final class Parcel {
         return new Parcel();
     }
 
-    /** Parcel do KuDroid cấp phát không nằm trong pool nên recycle chỉ reset. */
+    /** Parcel allocated by KuDroid is not in the pool so recycle only resets. */
     public void recycle() {
         mItems.clear();
         mReadPos = 0;

@@ -1,6 +1,6 @@
 package android.os;
 
-/** Stub sinh tự động cho android.os.UserHandle */
+/** Stub automatically generated for android.os.UserHandle */
 public class UserHandle {
     public UserHandle() {}
 }

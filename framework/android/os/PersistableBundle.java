@@ -1,6 +1,6 @@
 package android.os;
 
-/** Stub sinh tự động cho android.os.PersistableBundle */
+/** Stub automatically generated for android.os.PersistableBundle */
 public class PersistableBundle {
     public PersistableBundle() {}
 }

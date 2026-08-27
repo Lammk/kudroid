@@ -79,7 +79,7 @@ static void armAltSignalStack(void) {
 // Gọi JNI_OnLoad với lá chắn signal. Đặt sigsetjmp trong một hàm riêng để
 // longjmp không thể clobber biến local của hàm gọi (-Wclobbered).
 // Trả về: 0 = chạy xong bình thường (*outVersion hợp lệ),
-//         -1 = C++ exception, >0 = số signal đã bị chặn.
+// -1 = C++ exception, >0 = số signal đã bị chặn.
 __attribute__((noinline))
 static int kudroid_call_jni_onload_guarded(jint (*fn)(JavaVM*, void*),
                                           JavaVM* vm, jint* outVersion) {
@@ -169,8 +169,8 @@ extern "C" void kudroid_store_abort_message(const char* msg) {
 // SIGABRT thường là abort() sau một exception/assert không bắt được. Trước đây
 // chỉ có android_set_abort_message (từ guest) mới lưu được message → crash log
 // thiếu lý do. Hai handler dưới đây bắt lý do trước khi abort:
-//  1. ObjC exception chưa bắt (NSException — ANGLE/Metal/UIKit hay ném) → reason
-//  2. C++ exception chưa bắt (std::terminate) → what()
+// 1. ObjC exception chưa bắt (NSException — ANGLE/Metal/UIKit hay ném) → reason
+// 2. C++ exception chưa bắt (std::terminate) → what()
 #if defined(__APPLE__)
 #include <exception>
 extern "C" {
@@ -1723,18 +1723,18 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                 appendAndEcho("[kudroid_core] Found " + std::to_string(classes.size()) +
                                               " non-system classes in app DEX");
                                 // Chấm điểm chọn launcher:
-                                //   -1000  Activity của SDK bên thứ ba (push/analytics
-                                //          v.v.) — KHÔNG phải entry point, launch nó
-                                //          chỉ cho màn hình xám (bài học Braze).
-                                //   +100   tên chứa "Activity"
-                                //   +50    package khớp pkgName (từ manifest/app_info)
-                                //   +depth bonus: package càng ngắn (gốc app) càng
-                                //          giống entry point chính.
+                                // -1000  Activity của SDK bên thứ ba (push/analytics
+                                // v.v.) — KHÔNG phải entry point, launch nó
+                                // chỉ cho màn hình xám (bài học Braze).
+                                // +100   tên chứa "Activity"
+                                // +50    package khớp pkgName (từ manifest/app_info)
+                                // +depth bonus: package càng ngắn (gốc app) càng
+                                // giống entry point chính.
                                 static const char* kSdkActivityHints[] = {
                                     "braze", "facebook", "firebase", "google", "admob",
                                     "unity3d", "appsflyer", "adjust", "amplitude",
                                     "mixpanel", "crashlytics", "playfab", "microsoft",
-                                    "zarchiver" /* handled riêng ở trên */
+"zarchiver" /* handled riêng ở trên */
                                 };
                                 // Tính sẵn MỘT LẦN thay vì trong vòng lặp từng
                                 // class (jar lớn có thể có 10k+ class).
@@ -1889,7 +1889,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                 targetActivity = base + ".MainActivity";
                             }
                             appendAndEcho("[kudroid_core] WARNING: guessed Activity '" + targetActivity +
-                                          "' (manifest/jar-scan/JNI đều thất bại)");
+"' (manifest/jar-scan/JNI đều thất bại)");
                         }
 
                         // Danh sách fallback cho ActivityThread: các Activity đã
@@ -2481,14 +2481,14 @@ std::string describePath(const std::filesystem::path& p) {
 // chỉ phụ thuộc số entry — đây là lý do bản cũ "freeze vài giây" là xong.
 // Bản thử progress bằng cách xóa từng file sâu nhất đã đi bộ hàng nghìn
 // entry qua std::filesystem → MCPE 932MB chậm như treo ở 0%. Ở đây:
-//  - Không đếm bytes toàn cây (trước đây tốn >3s chỉ để tính %).
-//  - Progress nhảy theo từng con cấp 1 (lib/, assets/, res/...) — đủ mượt.
-//  - Log thời gian từng con vào trace; con nào ≥2s bị đánh dấu SLOW.
+// - Không đếm bytes toàn cây (trước đây tốn >3s chỉ để tính %).
+// - Progress nhảy theo từng con cấp 1 (lib/, assets/, res/...) — đủ mượt.
+// - Log thời gian từng con vào trace; con nào ≥2s bị đánh dấu SLOW.
 void removeTreeWithProgress(const std::filesystem::path& p,
                             const char* phase,
                             kudroid_delete_progress_cb cb, void* ud,
                             double basePct, double spanPct,
-                            std::uint64_t /*totalBytes - không dùng nữa*/) {
+std::uint64_t /*totalBytes - không dùng nữa*/) {
     const auto nowMs = [] {
         struct timespec ts;
         clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -2861,7 +2861,6 @@ extern "C" const char* kudroid_gpu_opengl_so_test(const char* path) {
 }
 
 #include "kudroid/APKExtractor.h"
-#include "kudroid/DexManager.h"
 
 extern "C" const char* kudroid_load_apk(const char* apkPath) {
     // Dùng biến cục bộ + strdup (không phải static): hàm trước đó trả con trỏ vào
@@ -2896,9 +2895,6 @@ extern "C" const char* kudroid_load_apk(const char* apkPath) {
 
     // Cho AAssetManager shim biết nơi chứa assets đã extract của APK này.
     kudroid_set_assets_dir((targetDir + "/assets").c_str());
-
-    log += "[kudroid_apk] Loading DEX files...\n";
-    kudroid::DexManager::getInstance().loadDirectory(targetDir);
     
     log += "[kudroid_apk] Scanning for native libraries (.so)...\n";
     // Process-lifetime (xem globalLibraryManager) — JNI_OnLoad dưới đây spawn

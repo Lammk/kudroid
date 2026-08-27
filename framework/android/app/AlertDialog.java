@@ -4,10 +4,10 @@ import android.content.Context;
 import android.content.DialogInterface;
 
 /**
- * triển khai android.app.alertdialog tối thiểu.
+ * minimal android.app.alertdialog implementation.
  *
- * một hộp thoại có tiêu đề, thông báo và các nút. đối với khuôn khổ
- * tối thiểu của kudroid, đây là một mô phỏng lưu trữ cấu hình.
+ * a dialog box with title, message and buttons. for framework
+ * kudroid's minimum, this is a configuration storage emulator.
  */
 public class AlertDialog extends Dialog implements DialogInterface {
     private CharSequence mTitle;
@@ -28,28 +28,28 @@ public class AlertDialog extends Dialog implements DialogInterface {
     }
 
     /**
-     * trả về tiêu đề.
+     * returns title.
      */
     public CharSequence getTitle() {
         return mTitle;
     }
 
     /**
-     * đặt tiêu đề.
+     * set title.
      */
     public void setTitle(CharSequence title) {
         mTitle = title;
     }
 
     /**
-     * đặt thông báo.
+     * set notifications.
      */
     public void setMessage(CharSequence message) {
         mMessage = message;
     }
 
     /**
-     * thiết lập một nút tích cực.
+     * set an active button.
      */
     public void setButton(int whichButton, CharSequence text, OnClickListener listener) {
         if (whichButton == BUTTON_POSITIVE) {
@@ -65,7 +65,7 @@ public class AlertDialog extends Dialog implements DialogInterface {
     }
 
     /**
-     * trình tạo để tạo một alertdialog.
+     * generator to create an alertdialog.
      */
     public static class Builder {
         private final Context mContext;

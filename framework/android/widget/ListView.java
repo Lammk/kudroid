@@ -4,7 +4,7 @@ import android.content.Context;
 import android.view.View;
 
 /**
- * android.widget.ListView — AbsListView xếp con theo chiều dọc.
+ * android.widget.ListView — Vertically stacked AbsListView.
  */
 public class ListView extends AbsListView {
     private int mDividerHeight = 1;
@@ -30,7 +30,7 @@ public class ListView extends AbsListView {
         return mEmptyView;
     }
 
-    /** Header/footer chưa hỗ trợ — thêm như item thường để view vẫn hiện. */
+    /** Header/footer is not supported yet — add it as a regular item so the view will still be visible. */
     public void addHeaderView(View v) {
         if (v != null) super.addView(v);
     }

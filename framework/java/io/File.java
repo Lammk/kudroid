@@ -40,7 +40,7 @@ public class File implements Comparable<File> {
     }
 
     private static String normalize(String p) {
-        // Bỏ dấu '/' thừa ở cuối, giữ nguyên "/" gốc.
+        // Remove the extra '/' at the end, keeping the original "/".
         while (p.length() > 1 && p.charAt(p.length() - 1) == separatorChar) {
             p = p.substring(0, p.length() - 1);
         }

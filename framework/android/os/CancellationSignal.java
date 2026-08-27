@@ -1,6 +1,6 @@
 package android.os;
 
-/** Stub sinh tự động cho android.os.CancellationSignal */
+/** Stub automatically generated for android.os.CancellationSignal */
 public class CancellationSignal {
     public CancellationSignal() {}
 

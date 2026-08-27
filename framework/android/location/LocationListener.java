@@ -1,5 +1,5 @@
 package android.location;
 
-/** Stub sinh tự động cho android.location.LocationListener */
+/** Stub automatically generated for android.location.LocationListener */
 public interface LocationListener {
 }

@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <memory>
 
 #include "dex/code_item_accessors-inl.h"
 #include "dex/dex_file_exception_helpers.h"
@@ -11,6 +12,7 @@
 
 #include "kudroid/kuart/DexJniEnv.h"
 #include "kudroid/kuart/LibCore.h"
+#include "kudroid/kuart/VmLock.h"
 
 namespace kudroid {
 namespace kuart {
@@ -19,8 +21,8 @@ namespace {
 
 using art::Instruction;
 
-// Chia số nguyên trong Java: INT_MIN / -1 tràn (kết quả không biểu diễn được)
-// nhưng Java định nghĩa trả về chính INT_MIN, còn C++ thì UB. Phải chặn riêng.
+// Integer division in Java: INT_MIN / -1 overflows (result not representable)
+// but Java defines return INT_MIN itself, while C++ defines UB. Must block separately.
 int32_t JavaIntDiv(int32_t a, int32_t b) {
     if (b == -1) return -a;
     return a / b;
@@ -38,8 +40,8 @@ int64_t JavaLongRem(int64_t a, int64_t b) {
     return a % b;
 }
 
-// Dịch bit trong Java chỉ dùng 5 bit thấp (int) hoặc 6 bit thấp (long) của
-// operand; C++ để lượng dịch >= độ rộng là UB.
+// Bit shifting in Java only uses the 5 low bits (int) or the low 6 bits (long) of
+// operand; C++ lets the translation amount >= width be UB.
 int32_t JavaShl(int32_t v, int32_t s) { return static_cast<int32_t>(static_cast<uint32_t>(v) << (s & 31)); }
 int32_t JavaShr(int32_t v, int32_t s) { return v >> (s & 31); }
 int32_t JavaUshr(int32_t v, int32_t s) { return static_cast<int32_t>(static_cast<uint32_t>(v) >> (s & 31)); }
@@ -47,8 +49,8 @@ int64_t JavaShlLong(int64_t v, int32_t s) { return static_cast<int64_t>(static_c
 int64_t JavaShrLong(int64_t v, int32_t s) { return v >> (s & 63); }
 int64_t JavaUshrLong(int64_t v, int32_t s) { return static_cast<int64_t>(static_cast<uint64_t>(v) >> (s & 63)); }
 
-// float/double -> int/long: Java bắt saturate về MIN/MAX và NaN -> 0, còn cast
-// của C++ là UB khi giá trị ngoài dải.
+// float/double -> int/long: Java forces saturate to MIN/MAX and NaN -> 0, but cast
+// of C++ is UB when the value is out of range.
 template <typename Int, typename Float>
 Int JavaFloatToInt(Float f) {
     if (std::isnan(f)) return 0;
@@ -59,7 +61,7 @@ Int JavaFloatToInt(Float f) {
     return static_cast<Int>(f);
 }
 
-// cmpl/cmpg: khác nhau ở kết quả khi có NaN (-1 với cmpl, 1 với cmpg).
+// cmpl/cmpg: different results when NaN is present (-1 for cmpl, 1 for cmpg).
 template <typename T>
 int32_t CompareFloat(T a, T b, int32_t nan_result) {
     if (std::isnan(a) || std::isnan(b)) return nan_result;
@@ -77,6 +79,10 @@ int32_t CompareLong(T a, T b) {
 
 }  // namespace
 
+thread_local DexObject* Interpreter::pending_exception_ = nullptr;
+thread_local size_t Interpreter::depth_ = 0;
+thread_local uint64_t Interpreter::instructions_executed_ = 0;
+
 void Interpreter::ThrowException(const char* descriptor, const std::string& message) {
     last_error_ = std::string(descriptor) + ": " + message;
     DexClass* klass = linker_ != nullptr ? linker_->FindClass(descriptor) : nullptr;
@@ -84,8 +90,8 @@ void Interpreter::ThrowException(const char* descriptor, const std::string& mess
         pending_exception_ = linker_->AllocObject(klass);
     }
     if (pending_exception_ == nullptr) {
-        // Không có class exception trong classpath (framework chưa nạp) —
-        // vẫn phải dừng method, dùng object rỗng làm cờ.
+        // No class exception in classpath (framework not loaded) —
+        // You still have to stop the method, using an empty object as a flag.
         static DexObject placeholder;
         pending_exception_ = &placeholder;
     }
@@ -136,12 +142,12 @@ bool Interpreter::InvokeMethod(DexFrame* frame, const art::Instruction* inst, bo
     DexMethod* target = ResolveMethod(frame->method(), method_idx);
     if (target == nullptr) {
         ThrowException("Ljava/lang/NoSuchMethodError;",
-                       "không resolve được method index " + std::to_string(method_idx));
+                       "failed to resolve method index " + std::to_string(method_idx));
         return false;
     }
 
-    // Gom register chứa tham số. Dạng /range dùng dải liên tiếp, dạng thường
-    // dùng danh sách tối đa 5 register rời rạc.
+    // Collect register containing parameters. The /range form uses a continuous range, the normal form
+    // Use a list of up to 5 discrete registers.
     uint32_t arg_regs[art::Instruction::kMaxVarArgRegs];
     uint32_t arg_count;
     uint32_t first_reg = 0;
@@ -155,14 +161,14 @@ bool Interpreter::InvokeMethod(DexFrame* frame, const art::Instruction* inst, bo
     const bool is_static = opcode == Instruction::INVOKE_STATIC ||
                            opcode == Instruction::INVOKE_STATIC_RANGE;
 
-    // Method static là điểm đầu tiên class được dùng nếu app chưa new object.
+    // The static method is the first point the class is used if the app does not have a new object.
     if (is_static) {
         EnsureInitialized(target->declaring_class);
         if (HasPendingException()) return false;
     }
 
-    // Register wide chiếm 2 slot trong danh sách tham số nhưng chỉ là một giá
-    // trị — phải bỏ qua slot thứ hai khi gom.
+    // Register wide takes up 2 slots in the parameter list but is only one price
+    // value — must ignore second slot when collecting.
     const char* shorty = nullptr;
     if (target->dex_file != nullptr) {
         shorty = target->dex_file->GetMethodShorty(
@@ -180,13 +186,13 @@ bool Interpreter::InvokeMethod(DexFrame* frame, const art::Instruction* inst, bo
     DexObject* receiver = nullptr;
     if (!is_static) {
         if (arg_count == 0) {
-            ThrowException("Ljava/lang/VerifyError;", "invoke instance thiếu receiver");
+            ThrowException("Ljava/lang/VerifyError;", "invoke instance missing receiver");
             return false;
         }
         receiver = frame->GetRef(reg_at(0));
         if (receiver == nullptr) {
             ThrowException("Ljava/lang/NullPointerException;",
-                           std::string("gọi ") + target->name + " trên null");
+                           std::string("call ") + target->name + " on null");
             return false;
         }
         args.push_back(DexValue::Ref(receiver));
@@ -200,7 +206,7 @@ bool Interpreter::InvokeMethod(DexFrame* frame, const art::Instruction* inst, bo
         }
     }
 
-    // invoke-virtual/interface: chọn bản override theo class thật của receiver.
+    // invoke-virtual/interface: choose the override version according to the receiver's real class.
     if ((opcode == Instruction::INVOKE_VIRTUAL ||
          opcode == Instruction::INVOKE_VIRTUAL_RANGE ||
          opcode == Instruction::INVOKE_INTERFACE ||
@@ -211,7 +217,7 @@ bool Interpreter::InvokeMethod(DexFrame* frame, const art::Instruction* inst, bo
     }
 
     if (target->IsNative()) {
-        // libcore tự viết được gọi thẳng bằng C++, không qua ABI của JNI.
+        // The self-written libcore is called directly in C++, without going through the JNI ABI.
         DexValue lib_result;
         if (LibCoreInvoke(this, target, args.data(), args.size(), &lib_result)) {
             if (HasPendingException()) return false;
@@ -220,7 +226,7 @@ bool Interpreter::InvokeMethod(DexFrame* frame, const art::Instruction* inst, bo
         }
         if (jni_env_ == nullptr || !jni_env_->LinkNativeMethod(target)) {
             ThrowException("Ljava/lang/UnsatisfiedLinkError;",
-                           std::string("method native chưa liên kết: ") + target->name);
+                           std::string("unbound native method: ") + target->name);
             return false;
         }
         const DexValue native_result = jni_env_->CallNative(target, args.data(), args.size());
@@ -242,12 +248,27 @@ DexValue Interpreter::Execute(const DexMethod* method, const DexValue* args, siz
         return result;
     }
     if (depth_ >= kMaxCallDepth) {
-        ThrowException("Ljava/lang/StackOverflowError;", "vượt độ sâu gọi tối đa");
+        ThrowException("Ljava/lang/StackOverflowError;", "maximum call depth exceeded");
         return result;
     }
+
+    // Native methods have no bytecode. Reflection (Method.invoke) and JNI both
+    // land here, so the native path must be handled before the code_item check.
+    if (method->IsNative()) {
+        auto* target = const_cast<DexMethod*>(method);
+        if (LibCoreInvoke(this, target, args, num_args, &result)) return result;
+        if (jni_env_ != nullptr && jni_env_->LinkNativeMethod(target)) {
+            return jni_env_->CallNative(target, args, num_args);
+        }
+        ThrowException("Ljava/lang/UnsatisfiedLinkError;",
+                       std::string("unbound native method: ") +
+                           (method->name != nullptr ? method->name : "?"));
+        return result;
+    }
+
     if (method->code_item == nullptr) {
         ThrowException("Ljava/lang/AbstractMethodError;",
-                       std::string("method không có thân: ") + (method->name ? method->name : "?"));
+                       std::string("method without body: ") + (method->name ? method->name : "?"));
         return result;
     }
 
@@ -259,9 +280,14 @@ DexValue Interpreter::Execute(const DexMethod* method, const DexValue* args, siz
     }
     frame.LoadArguments(args, num_args, shorty, method->IsStatic());
 
-    // Giới hạn instruction tính cho từng lần gọi tỡ ngoài, không cộng dồn qua
-    // nhiều lần gọi — nếu không một method chạy lâu sẽ làm các lần gọi sau fail oan.
+    // The instruction limit is calculated for each missed call, not cumulative
+    // multiple calls — otherwise a method that runs for a long time will cause subsequent calls to fail.
     if (depth_ == 0) instructions_executed_ = 0;
+
+    // Serialise bytecode across Java threads. Taken only at the outermost call so
+    // nested invokes stay cheap; the mutex is recursive either way.
+    std::unique_ptr<VmLockGuard> vm_lock;
+    if (depth_ == 0) vm_lock = std::make_unique<VmLockGuard>();
 
     ++depth_;
     result = ExecuteFrame(&frame);
@@ -277,14 +303,14 @@ bool Interpreter::FindCatchHandler(const art::CodeItemDataAccessor& accessor,
     DexClass* ex_class = pending_exception_->clazz;
     for (art::CatchHandlerIterator it(accessor, dex_pc); it.HasNext(); it.Next()) {
         const art::dex::TypeIndex type_idx = it.GetHandlerTypeIndex();
-        // kDexNoIndex16 = catch-all (finally), bắt mọi thứ.
+        // kDexNoIndex16 = catch-all (finally), catches everything.
         if (type_idx.index_ == art::DexFile::kDexNoIndex16) {
             *handler_pc = it.GetHandlerAddress();
             return true;
         }
         DexClass* catch_class = ResolveClass(method, type_idx.index_);
-        // Class handler không nạp được thì bỏ qua handler đó, không coi là bắt
-        // được — nếu không exception sẽ bị chặn sai chỗ.
+        // If the class handler cannot be loaded, then that handler is ignored and is not considered captured
+        // Yes — otherwise the exception will be thrown in the wrong place.
         if (catch_class == nullptr) continue;
         if (ex_class != nullptr && ex_class->IsSubClassOf(catch_class)) {
             *handler_pc = it.GetHandlerAddress();
@@ -300,11 +326,11 @@ bool Interpreter::EnsureInitialized(DexClass* klass) {
     if (klass->status == DexClass::Status::kError) return false;
     if (linker_ != nullptr && !linker_->LinkClass(klass)) return false;
 
-    // Đặt kInitialized TRƯỚC khi chạy <clinit>: <clinit> thường tham chiếu
-    // chính class đó (sput vào field static của mình) và sẽ đệ quy vô hạn.
+    // Set kInitialized BEFORE running <clinit>: <clinit> is often referenced
+    // that class itself (sputs into its static field) and will recur infinitely.
     klass->status = DexClass::Status::kInitialized;
 
-    // Cha phải khởi tạo trước con (quy tắc JVM).
+    // The parent must be initialized before the child (JVM rule).
     if (klass->superclass != nullptr) EnsureInitialized(klass->superclass);
 
     DexMethod* clinit = klass->FindDirectMethod("<clinit>", "()V");
@@ -326,8 +352,8 @@ DexValue Interpreter::ExecuteFrame(DexFrame* frame) {
         const DexValue result = RunBytecode(frame, accessor);
         if (!HasPendingException()) return result;
 
-        // Exception ném ra tại frame->dex_pc(); nếu method này có handler phủ
-        // chỗ đó thì bắt tại đây, ngược lại truyền lên caller.
+        // Exception thrown at frame->dex_pc(); if this method has an overlay handler
+        // That place is captured here, otherwise transmitted to the caller.
         uint32_t handler_pc = 0;
         if (!FindCatchHandler(accessor, method, frame->dex_pc(), &handler_pc)) return result;
 
@@ -347,11 +373,11 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
 
     while (dex_pc < insns_size) {
         if (++instructions_executed_ > instruction_limit_) {
-            ThrowException("Ljava/lang/InternalError;", "vượt giới hạn số instruction");
+            ThrowException("Ljava/lang/InternalError;", "instruction number limit exceeded");
             return return_value;
         }
 
-        // Ghi pc trước khi chạy để ExecuteFrame biết instruction nào ném.
+        // Record the computer before running so that ExecuteFrame knows which instructions to throw.
         frame->set_dex_pc(dex_pc);
 
         const Instruction* inst = Instruction::At(insns + dex_pc);
@@ -391,7 +417,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                 frame->Set(inst->VRegA_11x(), frame->result());
                 break;
 
-            // Chỉ hợp lệ ở đầu handler catch; ExecuteFrame đã đặt sẵn.
+            // Only valid at the beginning of the catch handler; ExecuteFrame is already set.
             case Instruction::MOVE_EXCEPTION:
                 frame->SetRef(inst->VRegA_11x(), frame->caught_exception());
                 frame->set_caught_exception(nullptr);
@@ -435,7 +461,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
             case Instruction::RETURN_OBJECT:
                 return frame->Get(inst->VRegA_11x());
 
-            // ── so sánh ──
+            // ── compare ──
             case Instruction::CMPL_FLOAT:
                 frame->SetInt(inst->VRegA_23x(),
                               CompareFloat(frame->GetFloat(inst->VRegB_23x()),
@@ -462,7 +488,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                                           frame->GetLong(inst->VRegC_23x())));
                 break;
 
-            // ── nhảy ──
+            // ── jump ──
             case Instruction::GOTO:
                 dex_pc += inst->VRegA_10t();
                 continue;
@@ -514,7 +540,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                 break;
             }
 
-            // ── một toán hạng ──
+            // ── an operand ──
             case Instruction::NEG_INT:
                 frame->SetInt(inst->VRegA_12x(), -frame->GetInt(inst->VRegB_12x()));
                 break;
@@ -534,7 +560,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                 frame->SetDouble(inst->VRegA_12x(), -frame->GetDouble(inst->VRegB_12x()));
                 break;
 
-            // ── đổi kiểu ──
+            // ── change style ──
             case Instruction::INT_TO_LONG:
                 frame->SetLong(inst->VRegA_12x(), frame->GetInt(inst->VRegB_12x()));
                 break;
@@ -593,7 +619,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                               static_cast<int16_t>(frame->GetInt(inst->VRegB_12x())));
                 break;
 
-            // ── số học int, hai toán hạng (23x) ──
+            // ── int arithmetic, two operands (23x) ──
             case Instruction::ADD_INT:
                 frame->SetInt(inst->VRegA_23x(),
                               static_cast<int32_t>(
@@ -655,7 +681,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                                                           frame->GetInt(inst->VRegC_23x())));
                 break;
 
-            // ── số học long ──
+            // ── long arithmetic ──
             case Instruction::ADD_LONG:
                 frame->SetLong(inst->VRegA_23x(),
                                static_cast<int64_t>(
@@ -717,7 +743,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                                                                frame->GetInt(inst->VRegC_23x())));
                 break;
 
-            // ── số học float/double ──
+            // ── float/double arithmetic ──
             case Instruction::ADD_FLOAT:
                 frame->SetFloat(inst->VRegA_23x(), frame->GetFloat(inst->VRegB_23x()) +
                                                        frame->GetFloat(inst->VRegC_23x()));
@@ -759,7 +785,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                                                               frame->GetDouble(inst->VRegC_23x())));
                 break;
 
-            // ── dạng /2addr: đích cũng là toán hạng thứ nhất ──
+            // ── form /2addr: destination is also the first operand ──
             case Instruction::ADD_INT_2ADDR:
                 frame->SetInt(inst->VRegA_12x(),
                               static_cast<int32_t>(
@@ -921,7 +947,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                                                               frame->GetDouble(inst->VRegB_12x())));
                 break;
 
-            // ── int với hằng ──
+            // ── int with constant ──
             case Instruction::ADD_INT_LIT16:
                 frame->SetInt(inst->VRegA_22s(),
                               static_cast<int32_t>(
@@ -1032,7 +1058,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                               JavaUshr(frame->GetInt(inst->VRegB_22b()), inst->VRegC_22b()));
                 break;
 
-            // ── chuỗi hằng và class hằng ──
+            // ── constant string and constant class ──
             case Instruction::CONST_STRING: {
                 const char* s = method->dex_file->StringDataByIdx(
                     art::dex::StringIndex(inst->VRegB_21c()));
@@ -1055,7 +1081,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                 break;
             }
 
-            // ── tạo object và mảng ──
+            // ── create objects and arrays ──
             case Instruction::NEW_INSTANCE: {
                 DexClass* klass = ResolveClass(method, inst->VRegB_21c());
                 if (klass == nullptr) {
@@ -1095,14 +1121,14 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
             case Instruction::ARRAY_LENGTH: {
                 auto* arr = static_cast<DexArray*>(frame->GetRef(inst->VRegB_12x()));
                 if (arr == nullptr) {
-                    ThrowException("Ljava/lang/NullPointerException;", "array-length trên null");
+                    ThrowException("Ljava/lang/NullPointerException;", "array-length on null");
                     return return_value;
                 }
                 frame->SetInt(inst->VRegA_12x(), arr->length);
                 break;
             }
 
-            // ── kiểm tra kiểu ──
+            // ── check the type ──
             case Instruction::INSTANCE_OF: {
                 DexObject* obj = frame->GetRef(inst->VRegB_22c());
                 DexClass* target = ResolveClass(method, inst->VRegC_22c());
@@ -1113,13 +1139,13 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
             }
             case Instruction::CHECK_CAST: {
                 DexObject* obj = frame->GetRef(inst->VRegA_21c());
-                if (obj == nullptr) break;  // cast null luôn hợp lệ
+                if (obj == nullptr) break;  // cast null is always valid
                 DexClass* target = ResolveClass(method, inst->VRegB_21c());
                 if (target == nullptr || obj->clazz == nullptr ||
                     !obj->clazz->IsSubClassOf(target)) {
                     ThrowException("Ljava/lang/ClassCastException;",
                                    (obj->clazz != nullptr ? obj->clazz->PrettyName() : "?") +
-                                       " không phải " +
+                                       " not " +
                                        (target != nullptr ? target->PrettyName() : "?"));
                     return return_value;
                 }
@@ -1136,7 +1162,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
             case Instruction::IGET_SHORT: {
                 DexObject* obj = frame->GetRef(inst->VRegB_22c());
                 if (obj == nullptr) {
-                    ThrowException("Ljava/lang/NullPointerException;", "iget trên null");
+                    ThrowException("Ljava/lang/NullPointerException;", "iget on null");
                     return return_value;
                 }
                 DexField* field = ResolveField(method, inst->VRegC_22c(), /*is_static=*/false);
@@ -1179,7 +1205,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
             case Instruction::IPUT_SHORT: {
                 DexObject* obj = frame->GetRef(inst->VRegB_22c());
                 if (obj == nullptr) {
-                    ThrowException("Ljava/lang/NullPointerException;", "iput trên null");
+                    ThrowException("Ljava/lang/NullPointerException;", "iput on null");
                     return return_value;
                 }
                 DexField* field = ResolveField(method, inst->VRegC_22c(), /*is_static=*/false);
@@ -1231,7 +1257,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                 auto& values = field->declaring_class->static_values;
                 const uint32_t slot = field->offset_or_slot;
                 if (slot >= values.size()) {
-                    ThrowException("Ljava/lang/NoSuchFieldError;", "sget slot ngoài dải");
+                    ThrowException("Ljava/lang/NoSuchFieldError;", "sget slot out of range");
                     return return_value;
                 }
                 frame->Set(inst->VRegA_21c(), values[slot]);
@@ -1255,14 +1281,14 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                 auto& values = field->declaring_class->static_values;
                 const uint32_t slot = field->offset_or_slot;
                 if (slot >= values.size()) {
-                    ThrowException("Ljava/lang/NoSuchFieldError;", "sput slot ngoài dải");
+                    ThrowException("Ljava/lang/NoSuchFieldError;", "sput slot out of range");
                     return return_value;
                 }
                 values[slot] = frame->Get(inst->VRegA_21c());
                 break;
             }
 
-            // ── phần tử mảng ──
+            // ── array element ──
             case Instruction::AGET:
             case Instruction::AGET_WIDE:
             case Instruction::AGET_OBJECT:
@@ -1272,7 +1298,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
             case Instruction::AGET_SHORT: {
                 auto* arr = static_cast<DexArray*>(frame->GetRef(inst->VRegB_23x()));
                 if (arr == nullptr) {
-                    ThrowException("Ljava/lang/NullPointerException;", "aget trên null");
+                    ThrowException("Ljava/lang/NullPointerException;", "aget on null");
                     return return_value;
                 }
                 const int32_t index = frame->GetInt(inst->VRegC_23x());
@@ -1316,7 +1342,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
             case Instruction::APUT_SHORT: {
                 auto* arr = static_cast<DexArray*>(frame->GetRef(inst->VRegB_23x()));
                 if (arr == nullptr) {
-                    ThrowException("Ljava/lang/NullPointerException;", "aput trên null");
+                    ThrowException("Ljava/lang/NullPointerException;", "aput on null");
                     return return_value;
                 }
                 const int32_t index = frame->GetInt(inst->VRegC_23x());
@@ -1351,7 +1377,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                 break;
             }
 
-            // ── gọi method ──
+            // ── call method ──
             case Instruction::INVOKE_VIRTUAL:
             case Instruction::INVOKE_SUPER:
             case Instruction::INVOKE_DIRECT:
@@ -1406,14 +1432,14 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
             case Instruction::FILL_ARRAY_DATA: {
                 auto* arr = static_cast<DexArray*>(frame->GetRef(inst->VRegA_31t()));
                 if (arr == nullptr) {
-                    ThrowException("Ljava/lang/NullPointerException;", "fill-array-data trên null");
+                    ThrowException("Ljava/lang/NullPointerException;", "fill-array-data on null");
                     return return_value;
                 }
                 const uint16_t* payload = insns + dex_pc + inst->VRegB_31t();
                 const auto* ad = reinterpret_cast<const Instruction::ArrayDataPayload*>(payload);
                 if (static_cast<int32_t>(ad->element_count) > arr->length) {
                     ThrowException("Ljava/lang/ArrayIndexOutOfBoundsException;",
-                                   "fill-array-data dài hơn mảng");
+                                   "fill-array-data is longer than array");
                     return return_value;
                 }
                 std::memcpy(arr->Data(), ad->data,
@@ -1434,38 +1460,42 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                 return return_value;
             }
 
-            // Không có thread thật nên monitor chỉ đếm; đủ cho code single-thread
-            // và không làm sai code đã đúng.
+            // There are no real threads so the monitor only counts; enough for single-thread code
+            // and don't make mistakes, the code is correct.
             case Instruction::MONITOR_ENTER: {
                 DexObject* obj = frame->GetRef(inst->VRegA_11x());
                 if (obj == nullptr) {
-                    ThrowException("Ljava/lang/NullPointerException;", "monitor-enter trên null");
+                    ThrowException("Ljava/lang/NullPointerException;", "monitor-enter on null");
                     return return_value;
                 }
-                ++obj->lock_count;
+                Monitor::Enter(obj);
                 break;
             }
             case Instruction::MONITOR_EXIT: {
                 DexObject* obj = frame->GetRef(inst->VRegA_11x());
                 if (obj == nullptr) {
-                    ThrowException("Ljava/lang/NullPointerException;", "monitor-exit trên null");
+                    ThrowException("Ljava/lang/NullPointerException;", "monitor-exit on null");
                     return return_value;
                 }
-                if (obj->lock_count > 0) --obj->lock_count;
+                if (!Monitor::Exit(obj)) {
+                    ThrowException("Ljava/lang/IllegalMonitorStateException;",
+                                   "monitor-exit without owning the monitor");
+                    return return_value;
+                }
                 break;
             }
 
             default:
                 ThrowException("Ljava/lang/UnsupportedOperationException;",
-                               std::string("opcode chưa hiện thực: ") + inst->Name());
+                               std::string("opcode not yet implemented: ") + inst->Name());
                 return return_value;
         }
         if (HasPendingException()) return return_value;
         dex_pc = next_pc;
     }
 
-    // Rơi ra khỏi cuối method mà không gặp return — bytecode lỗi.
-    ThrowException("Ljava/lang/VerifyError;", "chạy hết bytecode mà không có return");
+    // Falling out of the end of the method without returning — bytecode error.
+    ThrowException("Ljava/lang/VerifyError;", "run out of bytecode without return");
     return return_value;
 }
 

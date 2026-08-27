@@ -1,21 +1,21 @@
 package android.telephony;
 
 /**
- * mô phỏng android.telephony.telephonymanager.
+ * emulate android.telephony.telephonymanager.
  *
- * không quan trọng đối với khởi động/kết xuất ứng dụng. trả về mặc định để các ứng dụng không
- * gặp sự cố khi chúng truy vấn thông tin thiết bị/mạng.
+ * is not important for application startup/rendering. Returns default to no applications
+ * crashes when they query device/network information.
  */
 public class TelephonyManager {
-    /** loại mạng: không xác định. */
+    /** network type: unknown. */
     public static final int NETWORK_TYPE_UNKNOWN = 0;
-    /** loại điện thoại: không có. */
+    /** phone type: none. */
     public static final int PHONE_TYPE_NONE = 0;
-    /** trạng thái sim: không xác định. */
+    /** sim status: unknown. */
     public static final int SIM_STATE_UNKNOWN = 0;
-    /** trạng thái sim: vắng mặt. */
+    /** sim status: absent. */
     public static final int SIM_STATE_ABSENT = 1;
-    /** trạng thái cuộc gọi: nhàn rỗi. */
+    /** call status: idle. */
     public static final int CALL_STATE_IDLE = 0;
 
     public TelephonyManager() {

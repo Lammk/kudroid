@@ -1,6 +1,6 @@
 package android.widget;
 
-/** Stub sinh tự động cho android.widget.CursorAdapter */
+/** Stub automatically generated for android.widget.CursorAdapter */
 public class CursorAdapter {
     public CursorAdapter() {}
 }

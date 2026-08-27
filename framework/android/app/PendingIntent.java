@@ -4,19 +4,19 @@ import android.content.Context;
 import android.content.Intent;
 
 /**
- * mô phỏng android.app.pendingintent.
+ * emulate android.app.pendingintent.
  *
- * một mã thông báo cấp cho ứng dụng khác quyền thực hiện một thao tác. đối với
- * khuôn khổ tối thiểu của kudroid, đây là một mô phỏng.
+ * a token that grants another application permission to perform an operation. for
+ * kudroid minimal framework, this is an emulation.
  */
 public final class PendingIntent {
-    /** cờ: một lần. */
+    /** flag: once. */
     public static final int FLAG_ONE_SHOT = 1;
-    /** cờ: không tạo. */
+    /** flag: do not create. */
     public static final int FLAG_NO_CREATE = 2;
-    /** cờ: hủy hiện tại. */
+    /** flag: cancel current. */
     public static final int FLAG_CANCEL_CURRENT = 4;
-    /** cờ: cập nhật hiện tại. */
+    /** flag: current update. */
     public static final int FLAG_UPDATE_CURRENT = 8;
 
     private final Intent mIntent;
@@ -26,7 +26,7 @@ public final class PendingIntent {
     }
 
     /**
-     * nhận intent chờ xử lý của hoạt động.
+     * get the pending intent of the activity.
      */
     public static PendingIntent getActivity(Context context, int requestCode,
                                             Intent intent, int flags) {
@@ -34,7 +34,7 @@ public final class PendingIntent {
     }
 
     /**
-     * nhận intent chờ xử lý của chương trình phát sóng.
+     * receive the pending intent of the broadcast.
      */
     public static PendingIntent getBroadcast(Context context, int requestCode,
                                              Intent intent, int flags) {
@@ -42,7 +42,7 @@ public final class PendingIntent {
     }
 
     /**
-     * nhận intent chờ xử lý của dịch vụ.
+     * receive the service's pending intent.
      */
     public static PendingIntent getService(Context context, int requestCode,
                                            Intent intent, int flags) {
@@ -50,14 +50,14 @@ public final class PendingIntent {
     }
 
     /**
-     * trả về intent được bọc.
+     * returns the wrapped intent.
      */
     public Intent getIntent() {
         return mIntent;
     }
 
     /**
-     * gửi intent chờ xử lý (no-op).
+     * send pending intent (no-op).
      */
     public void send() {
     }

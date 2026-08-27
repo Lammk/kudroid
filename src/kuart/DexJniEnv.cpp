@@ -13,18 +13,18 @@ namespace kuart {
 
 namespace {
 
-// jobject là handle mờ; KuART dùng thẳng con trỏ DexObject làm handle. Bảng
-// local/global ref chỉ để quản lý thời gian sống, không để dịch địa chỉ — nên
-// Decode chỉ là một cast. Đơn giản hơn ART (dùng indirect reference table) và
-// đủ vì không có GC di chuyển object.
+// jobject is an opaque handle; KuART directly uses the DexObject pointer as a handle. Board
+// local/global refs are only for lifetime management, not for address translation — so
+// Decode ch  l  m t cast.  n gi n h n ART (d ng indirect reference table) v
+// enough because there is no GC to move the object.
 DexObject* AsObject(jobject ref) { return reinterpret_cast<DexObject*>(ref); }
 jobject AsHandle(DexObject* obj) { return reinterpret_cast<jobject>(obj); }
 
-// Mã hoá tên method theo quy ước JNI: Java_<pkg>_<Class>_<method>.
+// Encode method names according to JNI convention: Java_<pkg>_<Class>_<method>.
 // '_' -> "_1", '/' -> '_', ';' -> "_2", '[' -> "_3".
 std::string MangleJniName(const char* descriptor, const char* method_name) {
     std::string out = "Java_";
-    // descriptor dạng "Lcom/foo/Bar;" — bỏ 'L' đầu và ';' cuối.
+    // descriptor of the form "Lcom/foo/Bar;" — remove the leading 'L' and ';' last.
     const size_t len = std::strlen(descriptor);
     size_t start = (len > 0 && descriptor[0] == 'L') ? 1 : 0;
     size_t end = (len > 0 && descriptor[len - 1] == ';') ? len - 1 : len;
@@ -51,12 +51,12 @@ std::string MangleJniName(const char* descriptor, const char* method_name) {
     return out;
 }
 
-// Bản dài có hậu tố chữ ký, dùng khi có nhiều overload cùng tên.
+// The long version has a signature suffix, used when there are multiple overloads with the same name.
 std::string MangleJniNameLong(const char* descriptor, const char* method_name,
                              const char* signature) {
     std::string out = MangleJniName(descriptor, method_name);
     out += "__";
-    // Chỉ phần tham số, bỏ kiểu trả về.
+    // Parameters only, return type omitted.
     for (const char* p = signature; *p != '\0' && *p != ')'; ++p) {
         if (*p == '(') continue;
         if (*p == '/') {
@@ -137,7 +137,7 @@ void DexJniEnv::DeleteGlobalRef(jobject ref) {
 void DexJniEnv::PushLocalFrame() { local_frames_.emplace_back(); }
 
 void DexJniEnv::PopLocalFrame() {
-    // Frame ngoài cùng luôn phải còn để AddLocalRef không cần kiểm tra rỗng.
+    // The outermost frame must always remain so that AddLocalRef does not need to check for nullity.
     if (local_frames_.size() > 1) local_frames_.pop_back();
 }
 
@@ -175,7 +175,7 @@ jint DexJniEnv::RegisterNatives(DexClass* klass, const JNINativeMethod* methods,
         DexMethod* target = klass->FindDirectMethod(m.name, m.signature);
         if (target == nullptr) target = klass->FindVirtualMethod(m.name, m.signature);
         if (target == nullptr) {
-            last_error_ = std::string("RegisterNatives: không có method ") + m.name +
+            last_error_ = std::string("RegisterNatives: no method ") + m.name +
                           m.signature + " trong " + klass->PrettyName();
             ++failures;
             continue;
@@ -192,7 +192,7 @@ bool DexJniEnv::LinkNativeMethod(DexMethod* method) {
     if (symbol_lookup_ == nullptr || method->declaring_class == nullptr) return false;
 
     const char* descriptor = method->declaring_class->descriptor;
-    // Thử tên ngắn trước (không hậu tố chữ ký) như linker JNI của Android.
+    // Try a short name first (no signature suffix) like Android's JNI linker.
     const std::string short_name = MangleJniName(descriptor, method->name);
     if (void* fn = symbol_lookup_(short_name.c_str())) {
         method->native_fn = fn;
@@ -204,7 +204,7 @@ bool DexJniEnv::LinkNativeMethod(DexMethod* method) {
         method->native_fn = fn;
         return true;
     }
-    last_error_ = "không tìm thấy symbol native: " + short_name;
+    last_error_ = "native symbol not found: " + short_name;
     return false;
 }
 
@@ -212,7 +212,7 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
     DexValue result;
     if (method == nullptr) return result;
 
-    // libcore tự viết không có native_fn; gọi thẳng bằng C++.
+    // self-written libcore without native_fn; Call directly in C++.
     if (LibCoreInvoke(interpreter_, method, args, num_args, &result)) return result;
     if (method->native_fn == nullptr) return result;
 
@@ -223,16 +223,16 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
     }
     if (shorty == nullptr) return result;
 
-    // ABI của JNI: (JNIEnv*, jclass|jobject, ...tham số). Chỉ hỗ trợ tới 6
-    // tham số vì đó là số register truyền tham số của AAPCS64 — quá số này
-    // phải đẩy stack, cần assembly riêng.
+    // JNI ABI: (JNIEnv*, jclass|jobject, ...parameters). Only supports up to 6
+    // parameter because that is the number of the AAPCS64 parameter transfer register — beyond this number
+    // have to push stack, need separate assembly.
     const size_t kMaxJniArgs = 6;
     if (num_args > kMaxJniArgs) {
-        last_error_ = std::string("method native quá nhiều tham số: ") + method->name;
+        last_error_ = std::string("native method too many parameters: ") + method->name;
         return result;
     }
 
-    // Tham số đầu sau env là receiver (instance) hoặc jclass (static).
+    // The first parameter after env is receiver (instance) or jclass (static).
     void* self;
     size_t first = 0;
     if (method->IsStatic()) {
@@ -242,8 +242,8 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
         first = 1;
     }
 
-    // Ép sang uintptr_t để mọi kiểu đi qua cùng một chữ ký hàm; float/double
-    // cần đường riêng vì AAPCS64 truyền chúng qua register v0-v7.
+    // Cast to uintptr_t so that all types go through the same function signature; float/double
+    // need separate lines because AAPCS64 transmits them via registers v0-v7.
     uintptr_t raw[kMaxJniArgs] = {0};
     bool has_float = false;
     size_t slot = 0;
@@ -271,7 +271,7 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
     }
 
     if (has_float) {
-        last_error_ = std::string("method native có tham số float/double chưa hỗ trợ: ") +
+        last_error_ = std::string("native method has float/double parameters not yet supported: ") +
                       method->name;
         return result;
     }
@@ -316,8 +316,8 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
             result = DexValue::Ref(reinterpret_cast<DexObject*>(ret));
             break;
         default:
-            // float/double trả về nằm ở register v0, không phải x0 — chưa lấy được.
-            last_error_ = std::string("kiểu trả về float/double chưa hỗ trợ: ") + method->name;
+            // The returned float/double is in register v0, not x0 — not retrieved yet.
+            last_error_ = std::string("float/double return type not supported yet: ") + method->name;
             break;
     }
     return result;
@@ -336,8 +336,8 @@ DexValue DexJniEnv::CallJavaA(DexObject* receiver, DexMethod* method, const jval
     std::vector<DexValue> vals;
     if (!method->IsStatic()) vals.push_back(DexValue::Ref(receiver));
 
-    // jvalue là union 64-bit nên long/double vẫn chỉ chiếm MỘT phần tử args,
-    // khớp quy ước DexValue của interpreter.
+    // jvalue is a 64-bit union so long/double still only takes up ONE args element,
+    // matches the interpreter's DexValue convention.
     const char* shorty = MethodShorty(method);
     if (shorty != nullptr && args != nullptr) {
         size_t i = 0;
@@ -370,7 +370,7 @@ DexValue DexJniEnv::CallJavaV(DexObject* receiver, DexMethod* method, va_list ar
     DexValue result;
     if (method == nullptr) return result;
 
-    // va_arg promote: mọi kiểu nhỏ hơn int lên int, float lên double.
+    // va_arg promote: any type smaller than int to int, float to double.
     std::vector<jvalue> boxed;
     const char* shorty = MethodShorty(method);
     if (shorty != nullptr) {

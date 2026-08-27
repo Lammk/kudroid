@@ -3,18 +3,18 @@ package android.view;
 import android.content.Context;
 
 /**
- * mô phỏng android.view.windowmanager.
+ * emulate android.view.windowmanager.
  *
- * quản lý các cửa sổ. đối với khuôn khổ tối thiểu của kudroid, đây là một mô phỏng.
+ * manage windows. for kudroid minimal framework, here is an emulation.
  */
 public class WindowManager {
-    /** cờ thông số bố cục: không thể tập trung. */
+    /** layout parameter flag: cannot focus. */
     public static final int FLAG_NOT_FOCUSABLE = 0x00000008;
-    /** cờ thông số bố cục: không thể chạm. */
+    /** layout parameter flag: untouchable. */
     public static final int FLAG_NOT_TOUCHABLE = 0x00000010;
-    /** cờ thông số bố cục: giữ màn hình luôn bật. */
+    /** layout parameter flag: keep screen on. */
     public static final int FLAG_KEEP_SCREEN_ON = 0x00000080;
-    /** cờ thông số bố cục: toàn màn hình. */
+    /** layout parameter flag: fullscreen. */
     public static final int FLAG_FULLSCREEN = 0x00000400;
 
     public WindowManager() {
@@ -37,7 +37,7 @@ public class WindowManager {
     }
 
     /**
-     * thông số bố cục cho một cửa sổ.
+     * layout parameters for a window.
      */
     public static class LayoutParams extends ViewGroup.LayoutParams {
         public static final int FLAG_NOT_FOCUSABLE = 0x00000008;

@@ -1,5 +1,5 @@
 package android.text;
 
-/** Stub sinh tự động cho android.text.SpanWatcher */
+/** Stub automatically generated for android.text.SpanWatcher */
 public interface SpanWatcher {
 }

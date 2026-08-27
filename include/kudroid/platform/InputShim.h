@@ -5,8 +5,8 @@
 extern "C" {
 #endif
 
-// Con trỏ AInputQueue dùng chung (do InputShim sở hữu) — truyền vào
-// callback onInputQueueCreated của ANativeActivity.
+// Shared AInputQueue pointer (owned by InputShim) — passed in
+// ANativeActivity's onInputQueueCreated callback.
 void* kudroid_get_input_queue(void);
 
 #ifdef __cplusplus

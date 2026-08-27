@@ -1,6 +1,6 @@
 package android.media;
 
-/** Stub sinh tự động cho android.media.MediaDataSource */
+/** Stub automatically generated for android.media.MediaDataSource */
 public class MediaDataSource {
     public MediaDataSource() {}
 }

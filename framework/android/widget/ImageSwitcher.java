@@ -1,6 +1,6 @@
 package android.widget;
 
-/** Stub sinh tự động cho android.widget.ImageSwitcher */
+/** Stub automatically generated for android.widget.ImageSwitcher */
 public class ImageSwitcher {
     public ImageSwitcher() {}
 }

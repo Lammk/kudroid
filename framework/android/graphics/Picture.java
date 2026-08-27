@@ -1,6 +1,6 @@
 package android.graphics;
 
-/** Stub sinh tự động cho android.graphics.Picture */
+/** Stub automatically generated for android.graphics.Picture */
 public class Picture {
     public Picture() {}
 }

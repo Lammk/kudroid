@@ -1,7 +1,7 @@
 package android.text;
 
 /**
- * android.text.TextWatcher — quan sát thay đổi nội dung của TextView/EditText.
+ * android.text.TextWatcher — watch for TextView/EditText content changes.
  */
 public interface TextWatcher {
     void beforeTextChanged(CharSequence s, int start, int count, int after);

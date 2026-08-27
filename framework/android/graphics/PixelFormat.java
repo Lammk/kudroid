@@ -1,28 +1,28 @@
 package android.graphics;
 
 /**
- * triển khai android.graphics.pixelformat tối thiểu.
+ * minimal android.graphics.pixelformat implementation.
  *
- * định nghĩa các hằng số định dạng pixel. đối với khuôn khổ tối thiểu của kudroid, cung cấp
- * các hằng số độ mờ được sử dụng bởi drawable.
+ * defines pixel format constants. for kudroid minimal framework, provided
+ * opacity constants used by drawable.
  */
 public class PixelFormat {
-    /** đục. */
+    /** opaque. */
     public static final int OPAQUE = -1;
-    /** mờ. */
+    /** blur. */
     public static final int TRANSLUCENT = -3;
-    /** trong suốt. */
+    /** transparent. */
     public static final int TRANSPARENT = -2;
-    /** không xác định. */
+    /** undefined. */
     public static final int UNKNOWN = 0;
 
-    /** định dạng rgba_8888. */
+    /** format rgba_8888. */
     public static final int RGBA_8888 = 1;
-    /** định dạng rgbx_8888. */
+    /** format rgbx_8888. */
     public static final int RGBX_8888 = 2;
-    /** định dạng rgb_888. */
+    /** format rgb_888. */
     public static final int RGB_888 = 3;
-    /** định dạng rgb_565. */
+    /** format rgb_565. */
     public static final int RGB_565 = 4;
 
     private PixelFormat() {

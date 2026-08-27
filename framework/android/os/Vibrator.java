@@ -1,7 +1,7 @@
 package android.os;
 
 /**
- * mô phỏng android.os.vibrator với cầu nối rung Haptic Feedback thực thụ trên iOS Taptic Engine.
+ * simulates android.os.vibrator with real Haptic Feedback vibration bridge on iOS Taptic Engine.
  */
 public class Vibrator {
     public Vibrator() {
@@ -14,11 +14,11 @@ public class Vibrator {
     public void vibrate(long milliseconds) {
         try {
             if (milliseconds <= 50) {
-                kudroid_vibrate_native(1); // Rung nhẹ (Light Impact)
+                kudroid_vibrate_native(1); // Light Impact
             } else if (milliseconds <= 200) {
-                kudroid_vibrate_native(2); // Rung vừa (Medium Impact)
+                kudroid_vibrate_native(2); // Medium Impact
             } else {
-                kudroid_vibrate_native(3); // Rung mạnh (Heavy Impact)
+                kudroid_vibrate_native(3); // Heavy Impact
             }
         } catch (Throwable ignored) {}
     }

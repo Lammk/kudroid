@@ -1,6 +1,6 @@
 package android.view;
 
-/** Stub sinh tự động cho android.view.ContentInfo */
+/** Stub automatically generated for android.view.ContentInfo */
 public class ContentInfo {
     public ContentInfo() {}
 

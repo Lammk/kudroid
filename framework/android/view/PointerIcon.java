@@ -1,6 +1,6 @@
 package android.view;
 
-/** Stub sinh tự động cho android.view.PointerIcon */
+/** Stub automatically generated for android.view.PointerIcon */
 public class PointerIcon {
     public PointerIcon() {}
 }

@@ -1,6 +1,6 @@
 package android.app;
 
-/** Stub sinh tự động cho android.app.RemoteInput */
+/** Stub automatically generated for android.app.RemoteInput */
 public class RemoteInput {
     public RemoteInput() {}
 

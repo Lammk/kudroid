@@ -1,6 +1,6 @@
 package android.net;
 
-/** Stub sinh tự động cho android.net.LinkProperties */
+/** Stub automatically generated for android.net.LinkProperties */
 public class LinkProperties {
     public LinkProperties() {}
 }

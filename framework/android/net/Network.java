@@ -1,9 +1,9 @@
 package android.net;
 
 /**
- * mô phỏng android.net.network.
+ * emulate android.net.network.
  *
- * đại diện cho một mạng. đối với khuôn khổ tối thiểu của kudroid, đây là một mô phỏng.
+ * represents a network. for kudroid minimal framework, here is an emulation.
  */
 public class Network {
     private final int mNetId;

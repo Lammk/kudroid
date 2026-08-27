@@ -1,6 +1,6 @@
 package android.widget;
 
-/** Stub sinh tự động cho android.widget.ScrollView */
+/** Stub automatically generated for android.widget.ScrollView */
 public class ScrollView {
     public ScrollView() {}
 }

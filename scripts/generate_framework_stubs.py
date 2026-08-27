@@ -22,7 +22,7 @@ def main():
         if m:
             kind = m.group(1)
             full_name = m.group(2).strip()
-            # Chỉ tạo stub cho android.* và androidx.*
+            # Ch  t o stub cho android.* v  androidx.*
             if full_name.startswith("android.") or full_name.startswith("androidx."):
                 entries.append((kind, full_name))
 
@@ -90,7 +90,7 @@ def main():
 
         os.makedirs(pkg_path, exist_ok=True)
         java_code = f"package {info['package']};\n\n"
-        java_code += f"/** Stub sinh tự động cho {top_name} */\n"
+java_code += f"/** Stub sinh t   ng cho {top_name} */\n"
         
         if info['kind'] == 'INTERFACE':
             java_code += f"public interface {info['name']} {{\n"

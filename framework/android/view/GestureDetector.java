@@ -1,6 +1,6 @@
 package android.view;
 
-/** Stub sinh tự động cho android.view.GestureDetector */
+/** Stub automatically generated for android.view.GestureDetector */
 public class GestureDetector {
     public GestureDetector() {}
 

@@ -37,10 +37,10 @@ git checkout -B pinned-angle "$ANGLE_REF"
 python3 scripts/bootstrap.py
 gclient sync --no-history --shallow --reset --force
 
-# ── vá lỗi vulkan-loader: định nghĩa sysconfdir / fallback_*_dirs ─────────────────
-# bản dựng gn của angle không truyền extra_cflags cho tất cả các mục tiêu third_party.
-# vulkan-loader cần các macro này nhưng chúng chỉ được xác định trong các bản dựng cmake.
-# chúng tôi đưa chúng trực tiếp vào các tệp nguồn tham chiếu đến chúng.
+# v  error vulkan-loader:  nh ngh a sysconfdir / fallback_*_dirs
+# b n d ng gn c a angle kh ng truy n extra_cflags cho t t c  c c m c ti u third_party.
+# vulkan-loader c n c c macro n y nh ng ch ng ch   c x c  nh trong c c b n d ng cmake.
+# ch ng t i  a ch ng tr c ti p v o c c t p ngu n tham chi u  n ch ng.
 LOADER_PATCH='
 #ifndef SYSCONFDIR
 #define SYSCONFDIR "/etc"
@@ -61,12 +61,12 @@ for vkfile in third_party/vulkan-loader/src/loader/loader.c \
     fi
 done
 
-# ── bản vá: inline-stub mac-only các ký hiệu hiển thị vulkan cho ios ────────────────
-# display.cpp tham chiếu rx::isvulkanmacdisplayavailable() và
-# rx::createvulkanmacdisplay() chỉ được biên dịch trên macos.
-# trên ios, các ký hiệu này không được xác định → lỗi trình liên kết ở bước solink libglesv2.
-# sửa lỗi: đưa các định nghĩa nội tuyến trực tiếp vào display.cpp để trình biên dịch
-# phân giải chúng cục bộ mà không cần các ký hiệu bên ngoài.
+# b n v : inline-stub mac-only c c k  hi u hi n th  vulkan cho ios
+# display.cpp tham chi u rx::isvulkanmacdisplayavailable() v
+# rx::createvulkanmacdisplay() ch   c bi n d ch tr n macos.
+# tr n ios, c c k  hi u n y kh ng  c x c  nh   error tr nh li n k t   b c solink libglesv2.
+# s a error:  a c c  nh ngh a n i tuy n tr c ti p v o display.cpp   tr nh bi n d ch
+# ph n gi i ch ng c c b  m  kh ng c n c c k  hi u b n ngo i.
 DISPLAY_FILE="src/libANGLE/Display.cpp"
 if [[ -f "$DISPLAY_FILE" ]] && ! grep -q 'KuDroid' "$DISPLAY_FILE"; then
     python3 << 'PYEOF'
@@ -93,7 +93,7 @@ stub = [
     "\n",
 ]
 
-# tìm điểm chèn: sau dòng #include cuối cùng
+# t m  i m ch n: sau d ng #include cu i c ng
 insert_after = 0
 for i, line in enumerate(lines):
     if line.strip().startswith("#include"):
@@ -108,7 +108,7 @@ print(f"Patched {filepath}: added inline Mac display stubs for iOS")
 PYEOF
 fi
 
-# không xóa $build_dir để cho phép các bản dựng tăng dần từ bộ đệm!
+# kh ng x a $build_dir   cho ph p c c b n d ng t ng d n t  b   m!
 mkdir -p "$BUILD_DIR"
 gn gen "$BUILD_DIR" --args='target_os="ios"
 target_cpu="arm64"
@@ -135,7 +135,7 @@ autoninja -C "$BUILD_DIR" libEGL libGLESv2
 
 cp -R include/EGL include/GLES include/GLES2 include/GLES3 include/KHR "$OUTPUT_DIR/include/"
 
-# angle trên ios tạo ra các gói .framework
+# angle tr n ios t o ra c c g i .framework
 if [[ -d "$BUILD_DIR/libEGL.framework" ]]; then
     cp -R "$BUILD_DIR/libEGL.framework" "$OUTPUT_DIR/lib/ios-arm64/"
 fi
@@ -143,10 +143,10 @@ if [[ -d "$BUILD_DIR/libGLESv2.framework" ]]; then
     cp -R "$BUILD_DIR/libGLESv2.framework" "$OUTPUT_DIR/lib/ios-arm64/"
 fi
 
-# cũng tìm kiếm đệ quy bất kỳ tệp .a hoặc .dylib libegl/libglesv2 nào
+# c ng t m ki m   quy b t k  t p .a ho c .dylib libegl/libglesv2 n o
 find "$BUILD_DIR" -type f \( -name 'libEGL.a' -o -name 'libGLESv2.a' -o -name 'libEGL.dylib' -o -name 'libGLESv2.dylib' \) -exec cp {} "$OUTPUT_DIR/lib/ios-arm64/" \;
 
-# nếu các tệp nhị phân framework tồn tại, hãy đảm bảo libegl.dylib và libglesv2.dylib tồn tại cho các cờ trình liên kết -legl / -lglesv2
+# n u c c t p nh  ph n framework t n t i, h y  m b o libegl.dylib v  libglesv2.dylib t n t i cho c c c  tr nh li n k t -legl / -lglesv2
 if [[ -f "$OUTPUT_DIR/lib/ios-arm64/libEGL.framework/libEGL" && ! -f "$OUTPUT_DIR/lib/ios-arm64/libEGL.dylib" && ! -f "$OUTPUT_DIR/lib/ios-arm64/libEGL.a" ]]; then
     cp "$OUTPUT_DIR/lib/ios-arm64/libEGL.framework/libEGL" "$OUTPUT_DIR/lib/ios-arm64/libEGL.dylib"
 fi

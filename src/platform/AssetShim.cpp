@@ -16,13 +16,13 @@ namespace kudroid {
 namespace {
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AAssetManager — đọc các file assets đã được APKExtractor giải nén ra đĩa.
+// AAssetManager — reads assets files that have been extracted to disk by APKExtractor.
 //
-// APK được extract tới <android_root>/data/app/<appName>/ với cây thư mục
-// giữ nguyên, nên assets nằm tại <appName>/assets/<path>. Game (Unity/Godot/SDL)
-// gọi AAssetManager_open(manager, "bin/Data/...", mode) — path tương đối với
-// thư mục assets. kudroid_set_assets_dir() được kudroid_run_apk gọi trước khi
-// chạy game để trỏ đúng chỗ.
+// The APK is extracted to <android_root>/data/app/<appName>/ with the directory tree
+// remains the same, so assets are located at <appName>/assets/<path>. Game (Unity/Godot/SDL)
+// call AAssetManager_open(manager, "bin/Data/...", mode) — path relative to
+// assets folder. kudroid_set_assets_dir() is called before kudroid_run_apk
+// Run the game to point at the right place.
 // ─────────────────────────────────────────────────────────────────────────────
 
 static std::string g_assetsDir;
@@ -39,11 +39,11 @@ static std::string current_assets_dir() {
     return g_assetsDir;
 }
 
-// Opaque handles (bionic trả con trỏ không tiết lộ nội dung).
+// Opaque handles (bionic returns cursor without revealing content).
 struct DummyAssetManager { int dummy; };
 static DummyAssetManager g_manager;
 
-// AAsset: mở bằng FILE*; getBuffer đọc toàn bộ vào heap.
+// AAsset: open with FILE*; getBuffer reads the entire thing into the heap.
 struct AAssetImpl {
     FILE* file;
     long length;
@@ -54,7 +54,7 @@ struct AAssetImpl {
 };
 
 struct AAssetDirImpl {
-    std::vector<std::string> names;  // tên file (không đệ quy, giống AAssetDir thật)
+    std::vector<std::string> names;  // filename (not recursive, like real AAssetDir)
     size_t cursor = 0;
 };
 
@@ -65,7 +65,7 @@ static AAssetImpl* open_asset(const char* filename) {
         trace_shim("AAssetManager_open: assets dir not set (kudroid_set_assets_dir)");
         return nullptr;
     }
-    // Bỏ tiền tố "assets/" nếu game truyền nhầm (path phải tương đối).
+    // Remove the "assets/" prefix if the game transmits it incorrectly (path must be relative).
     std::string rel = filename;
     if (rel.rfind("assets/", 0) == 0) rel = rel.substr(7);
 
@@ -103,8 +103,8 @@ extern "C" void* bionic_AAssetManager_open(void* /*manager*/, const char* filena
 
 extern "C" void* bionic_AAssetManager_openFd(void* /*manager*/, const char* filename,
                                              void* outStart, void* outLength) {
-    // Asset đã nằm trên đĩa dưới dạng file rời (không đóng gói trong APK), nên
-    // fd trỏ thẳng vào file và offset luôn 0 — đúng hợp đồng của API.
+    // The asset is already on disk as a separate file (not packaged in an APK), so
+    // fd points directly to the file and the offset is always 0 — in accordance with the API contract.
     auto* asset = open_asset(filename);
     if (!asset) return nullptr;
     if (outStart) *static_cast<off_t*>(outStart) = 0;
@@ -239,9 +239,9 @@ extern "C" void bionic_AAsset_close(void* asset) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AConfiguration — cấu hình thiết bị (locale, kích thước/mật độ màn hình,
-// orientation). Game đọc để chọn asset và layout. Trả số thật từ CAMetalLayer
-// và locale của iOS thay vì 0, vì density=0 làm game chia cho 0 hoặc chọn sai
+// AConfiguration — device configuration (locale, screen size/density,
+// orientation). The game reads to select assets and layout. Returns the actual number from CAMetalLayer
+// and iOS locale instead of 0, because density=0 causes the game to divide by 0 or select incorrectly
 // mip level.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -250,7 +250,7 @@ extern "C" int g_metalLayerHeight;
 extern "C" float g_metalLayerDensity;
 
 struct AConfigurationImpl {
-    char language[3];   // ISO 639-1, không kết thúc null theo API Android
+    char language[3];   // ISO 639-1, not null terminated according to Android API
     char country[3];    // ISO 3166-1 alpha-2
     int32_t density;
     int32_t orientation;
@@ -261,7 +261,7 @@ struct AConfigurationImpl {
 
 static void fill_current_config(AConfigurationImpl* c) {
     if (!c) return;
-    // AConfiguration_getLanguage/Country trả con trỏ tới 2 char không null-term.
+    // AConfiguration_getLanguage/Country returns pointer to 2 char not null-term.
     std::memcpy(c->language, "en", 2);
     std::memcpy(c->country, "US", 2);
     c->language[2] = '\0';
@@ -355,9 +355,9 @@ extern "C" int32_t bionic_AConfiguration_diff(void* a, void* b) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// APerformanceHint — API 31 hint manager. iOS không có QoS API tương đương ở
-// mức granularity này, nhưng session phải là handle THẬT: game giữ nó, gọi
-// report/update rồi close. Trả dummy 0 làm game deref null hoặc coi như lỗi.
+// APerformanceHint — API 31 hint manager. iOS has no equivalent QoS API in
+// this level of granularity, but the session must be a REAL handle: the game keeps it, calls
+// report/update then close. Returning dummy 0 makes the game deref null or considered an error.
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct APerfManagerImpl { int64_t preferredRateNanos; };
@@ -393,7 +393,7 @@ extern "C" int bionic_APerformanceHint_updateTargetWorkDuration(void* session,
 extern "C" int bionic_APerformanceHint_reportActualWorkDuration(void* session,
                                                                 int64_t actualDurationNanos) {
     if (!session || actualDurationNanos <= 0) return -EINVAL;
-    return 0; // không có scheduler hint trên iOS — ghi nhận và trả OK
+    return 0; // There is no scheduler hint on iOS — acknowledge and return OK
 }
 
 extern "C" void bionic_APerformanceHint_closeSession(void* session) {

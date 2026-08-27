@@ -4,21 +4,21 @@ import android.graphics.Canvas;
 import android.graphics.Rect;
 
 /**
- * Stub tối thiểu của android.view.SurfaceHolder cho KuDroid.
+ * Minimum stub of android.view.SurfaceHolder for KuDroid.
  *
- * Game Android cổ điển (MCPE v.v.) khai báo
+ * Classic Android games (MCPE etc.) declared
  *   class MainActivity extends SurfaceView implements SurfaceHolder.Callback2
- * nên JVM bắt buộc phải resolve được interface này khi load class — thiếu nó
- * gây ClassNotFoundException ngay cả trước khi onCreate chạy.
+ * so the JVM is required to resolve this interface when loading the class — missing it
+ * causes ClassNotFoundException even before onCreate runs.
  */
 public interface SurfaceHolder {
-    /** Loại buffer của surface. */
+    /** Surface buffer type. */
     public static final int SURFACE_TYPE_NORMAL = 0;
     public static final int SURFACE_TYPE_HARDWARE = 1;
     public static final int SURFACE_TYPE_GPU = 2;
     public static final int SURFACE_TYPE_PUSH_BUFFERS = 3;
 
-    /** Callback cơ bản: tạo/thay đổi/hủy surface. */
+    /** Basic callback: create/change/destroy surface. */
     public interface Callback {
         void surfaceCreated(SurfaceHolder holder);
         void surfaceChanged(SurfaceHolder holder, int format, int width, int height);
@@ -26,19 +26,19 @@ public interface SurfaceHolder {
     }
 
     /**
-     * Callback2 mở rộng Callback với surfaceRedrawNeeded — Activity dùng
-     * surface làm cửa sổ chính (window takes surface) cần implement cái này.
+     * Callback2 extends Callback with surfaceRedrawNeeded — Activity used
+     * surface as the main window (window takes surface) needs to implement this.
      */
     public interface Callback2 extends Callback {
         void surfaceRedrawNeeded(SurfaceHolder holder);
     }
 
-    /** Thêm callback nhận sự kiện surface. */
+    /** Add callback to receive surface events. */
     void addCallback(Callback callback);
 
     void removeCallback(Callback callback);
 
-    /** Trả về Surface thật backing view này. */
+    /** Returns this Surface backing view. */
     Surface getSurface();
 
     Rect getSurfaceFrame();

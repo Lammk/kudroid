@@ -25,7 +25,7 @@ DexMethod* DexClass::FindVirtualMethod(const char* name, const char* signature) 
             if (NameAndSigMatch(m, name, signature)) return &m;
         }
     }
-    // Default method của interface: chỉ tìm khi cả chuỗi kế thừa không có.
+    // Default method of interface: only found when the entire inheritance chain is absent.
     for (DexClass* k = this; k != nullptr; k = k->superclass) {
         for (DexClass* iface : k->interfaces) {
             if (iface == nullptr) continue;
@@ -59,7 +59,7 @@ DexField* DexClass::FindStaticField(const char* name, const char* type_descripto
             if (FieldMatch(f, name, type_descriptor)) return &f;
         }
     }
-    // Field static khai báo trong interface cũng nhìn thấy được từ class con.
+    // The static field declared in the interface is also visible from the child class.
     for (DexClass* k = this; k != nullptr; k = k->superclass) {
         for (DexClass* iface : k->interfaces) {
             if (iface == nullptr) continue;

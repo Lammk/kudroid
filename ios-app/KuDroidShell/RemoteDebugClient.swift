@@ -1,7 +1,7 @@
 import Foundation
 import UIKit
 
-// mark: - C-Bridge Function để C++ đẩy log sang Swift
+// mark: - C-Bridge Function for C++ to push logs to Swift
 @_cdecl("kudroid_remote_log_broadcast")
 func kudroid_remote_log_broadcast(level: Int32, tag: UnsafePointer<CChar>?, message: UnsafePointer<CChar>?) {
     let tagStr = tag != nil ? String(cString: tag!) : "KuDroid"
@@ -9,7 +9,7 @@ func kudroid_remote_log_broadcast(level: Int32, tag: UnsafePointer<CChar>?, mess
     RemoteDebugClient.shared.broadcastLog(level: Int(level), tag: tagStr, message: msgStr)
 }
 
-// mark: - Client WebSocket KDB trên iOS
+// mark: - WebSocket KDB Client on iOS
 class RemoteDebugClient: NSObject {
     static let shared = RemoteDebugClient()
 
@@ -124,7 +124,7 @@ class RemoteDebugClient: NSObject {
                 @unknown default:
                     break
                 }
-                // Tiếp tục lắng nghe lệnh tiếp theo
+                // Continue listening for the next command
                 self.listenForMessages()
             }
         }
@@ -320,7 +320,7 @@ class RemoteDebugClient: NSObject {
             let log = String(cString: cString)
             free(UnsafeMutablePointer(mutating: cString))
 
-            // Lưu log
+            // Save log
             saveTestLog(filename: "test_so.log", content: log)
 
             let isSuccess = !log.contains("❌") && !log.contains("FAILED")

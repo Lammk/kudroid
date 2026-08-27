@@ -1,6 +1,6 @@
 package android.text;
 
-/** Stub sinh tự động cho android.text.SpannedString */
+/** Stub automatically generated for android.text.SpannedString */
 public class SpannedString {
     public SpannedString() {}
 }

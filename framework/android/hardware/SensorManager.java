@@ -5,7 +5,7 @@ import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
- * mô phỏng android.hardware.sensormanager tích hợp cảm biến xoay thật từ iOS CoreMotion.
+ * emulate android.hardware.sensormanager integrating real rotation sensor from iOS CoreMotion.
  */
 public class SensorManager {
     public static final int TYPE_ACCELEROMETER = 1;
@@ -92,7 +92,7 @@ public class SensorManager {
     }
 
     /**
-     * Được C++ Native Bridge gọi khi iPhone có sự kiện cảm biến từ CoreMotion.
+     * Called by C++ Native Bridge when iPhone has a sensor event from CoreMotion.
      */
     public static void onSensorChanged_from_native(int sensorType, float x, float y, float z) {
         Sensor s = null;
@@ -114,7 +114,7 @@ public class SensorManager {
     }
 
     /**
-     * trình nghe cho các sự kiện cảm biến.
+     * listener for sensor events.
      */
     public interface SensorEventListener {
         void onSensorChanged(SensorEvent event);

@@ -4,40 +4,40 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * android.view.ViewTreeObserver — đăng ký callback vào các mốc của vòng đời
- * layout/draw. Các list được dispatch thật từ ViewGroup khi layout/draw chạy.
+ * android.view.ViewTreeObserver — registers callbacks at lifecycle milestones
+ * layout/draw. The lists are actually dispatched from the ViewGroup when layout/draw runs.
  */
 public final class ViewTreeObserver {
     /**
-     * Gọi trước mỗi lần vẽ. Trả false để hoãn frame hiện tại.
+     * Call before each drawing. Return false to delay the current frame.
      */
     public interface OnPreDrawListener {
         boolean onPreDraw();
     }
 
     /**
-     * Gọi sau khi cây view đã layout xong.
+     * Called after the view tree has been laid out.
      */
     public interface OnGlobalLayoutListener {
         void onGlobalLayout();
     }
 
     /**
-     * Gọi khi chế độ touch của window đổi.
+     * Call when window touch mode changes.
      */
     public interface OnTouchModeChangeListener {
         void onTouchModeChanged(boolean isInTouchMode);
     }
 
     /**
-     * Gọi khi vùng scroll đổi.
+     * Called when the scroll area changes.
      */
     public interface OnScrollChangedListener {
         void onScrollChanged();
     }
 
     /**
-     * Gọi khi cửa sổ nhận/mất focus.
+     * Call when window gets/loses focus.
      */
     public interface OnWindowFocusChangeListener {
         void onWindowFocusChanged(boolean hasFocus);
@@ -65,7 +65,7 @@ public final class ViewTreeObserver {
         mGlobalLayout.remove(l);
     }
 
-    /** Tên cũ trước API 16, vẫn được app gọi. */
+    /** Old name before API 16, still called by the app. */
     public void removeGlobalOnLayoutListener(OnGlobalLayoutListener l) {
         mGlobalLayout.remove(l);
     }
@@ -90,7 +90,7 @@ public final class ViewTreeObserver {
         return mAlive;
     }
 
-    /** Trả false nếu có listener nào hoãn frame. */
+    /** Returns false if any listener delays the frame. */
     public boolean dispatchOnPreDraw() {
         boolean proceed = true;
         for (int i = mPreDraw.size() - 1; i >= 0; --i) {

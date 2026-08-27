@@ -1,6 +1,6 @@
 package android.view;
 
-/** Stub sinh tự động cho android.view.TouchDelegate */
+/** Stub automatically generated for android.view.TouchDelegate */
 public class TouchDelegate {
     public TouchDelegate() {}
 }

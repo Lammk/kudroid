@@ -13,7 +13,7 @@ PermissionManager& PermissionManager::getInstance() {
 }
 
 PermissionManager::PermissionManager() {
-    // Định nghĩa các nhóm quyền Android chuẩn
+    // Defines standard Android permission groups
     groups_ = {
         {
             "storage",
@@ -171,7 +171,7 @@ void PermissionManager::saveConfigLocked() {
 int PermissionManager::checkPermission(const std::string& packageName, const std::string& permissionName) {
     std::lock_guard<std::mutex> lock(mutex_);
     
-    // Tìm trong cấu hình của app
+    // Look in the app's configuration
     auto appIt = appPermissions_.find(packageName);
     if (appIt != appPermissions_.end()) {
         auto permIt = appIt->second.find(permissionName);
@@ -180,7 +180,7 @@ int PermissionManager::checkPermission(const std::string& packageName, const std
         }
     }
 
-    // Nếu chưa cấu hình, kiểm tra mặc định của nhóm quyền
+    // If not configured, check the permission group default
     for (const auto& group : groups_) {
         for (const auto& perm : group.androidPermissions) {
             if (perm == permissionName) {
@@ -189,7 +189,7 @@ int PermissionManager::checkPermission(const std::string& packageName, const std
         }
     }
 
-    // Mặc định cho phép các quyền thông thường
+    // By default, normal permissions are allowed
     return PERMISSION_GRANTED;
 }
 

@@ -1,12 +1,12 @@
 package android.widget;
 
 /**
- * android.widget.CompoundButton — Button có trạng thái checked (CheckBox, Switch,
- * RadioButton). Khai báo listener mà app dùng phổ biến.
+ * android.widget.CompoundButton — Button with checked state (CheckBox, Switch,
+ *RadioButton). Declare the listener that the app commonly uses.
  */
 public class CompoundButton extends Button implements Checkable {
     /**
-     * Callback khi trạng thái checked đổi.
+     * Callback when checked status changes.
      */
     public interface OnCheckedChangeListener {
         void onCheckedChanged(CompoundButton buttonView, boolean isChecked);
@@ -27,7 +27,7 @@ public class CompoundButton extends Button implements Checkable {
     public void setChecked(boolean checked) {
         if (mChecked == checked) return;
         mChecked = checked;
-        // Cờ mBroadcasting chặn vòng lặp vô hạn khi listener gọi lại setChecked.
+        // The mBroadcasting flag prevents an infinite loop when the listener calls setChecked again.
         if (mBroadcasting) return;
         mBroadcasting = true;
         if (mOnCheckedChangeListener != null) {

@@ -1,9 +1,9 @@
-// Cấu trúc C++ thay cho java.lang.Class / Field / Method của libcore.
+// C++ structures replacing java.lang.Class / Field / Method of libcore.
 //
-// AOSP biểu diễn chúng bằng mirror::Class, mirror::ArtField, mirror::ArtMethod —
-// những cấu trúc gắn chặt vào GC và object model của ART. KuDroid không port
-// libcore nên dùng struct thuần, chỉ giữ đúng thứ interpreter cần: layout field,
-// vtable để dispatch virtual, và con trỏ tới code_item trong DEX.
+// AOSP represents them via mirror::Class, mirror::ArtField, mirror::ArtMethod —
+// structures heavily coupled to ART GC and object model. KuDroid does not port
+// libcore, using pure C++ structs holding only what interpreter needs: field layout,
+// vtable for virtual dispatch, and pointer to code_item in DEX.
 #ifndef KUDROID_KUART_DEXCLASS_H
 #define KUDROID_KUART_DEXCLASS_H
 
@@ -30,8 +30,8 @@ struct DexField {
 
     art::Primitive::Type primitive = art::Primitive::kPrimNot;
 
-    // Field instance: offset byte trong phần dữ liệu của DexObject.
-    // Field static: chỉ số trong mảng static_values của class.
+    // Instance field: byte offset within DexObject payload.
+    // Static field: index within static_values array of class.
     uint32_t offset_or_slot = 0;
 
     bool IsStatic() const { return (access_flags & art::kAccStatic) != 0; }
@@ -48,18 +48,17 @@ struct DexMethod {
     const art::dex::CodeItem* code_item = nullptr;
 
     uint16_t registers_size = 0;
-    uint16_t ins_size = 0;   // số register dành cho tham số (gồm `this`)
+    uint16_t ins_size = 0;   // number of parameter registers (including `this`)
     uint16_t outs_size = 0;
 
-    // Số ô DexValue mà tham số chiếm; long/double tính 2 theo quy ước DEX.
+    // Number of DexValue slots occupied by parameters; long/double count as 2.
     uint16_t arg_words = 0;
 
-    // Vị trí trong vtable của class khai báo; kInvalidVTableIndex nếu
-    // direct/static/constructor (không dispatch động).
+    // Slot in vtable of declaring class; kInvalidVTableIndex if direct/static/ctor.
     static constexpr uint16_t kInvalidVTableIndex = 0xFFFF;
     uint16_t vtable_index = kInvalidVTableIndex;
 
-    // Hàm JNI đã liên kết cho method native (RegisterNatives hoặc dlsym).
+    // Linked native function pointer (RegisterNatives or dlsym).
     void* native_fn = nullptr;
 
     bool IsStatic() const { return (access_flags & art::kAccStatic) != 0; }
@@ -75,9 +74,9 @@ class DexClass {
 public:
     enum class Status {
         kNotLoaded,
-        kLoaded,      // đã đọc field/method từ DEX
-        kLinked,      // đã tính layout field + vtable
-        kInitialized, // <clinit> đã chạy
+        kLoaded,      // field/methods parsed from DEX
+        kLinked,      // field layout and vtable computed
+        kInitialized, // <clinit> has executed
         kError,
     };
 
@@ -96,29 +95,28 @@ public:
     std::vector<DexMethod> direct_methods;
     std::vector<DexMethod> virtual_methods;
 
-    // Gộp virtual method của cả chuỗi kế thừa; override ghi đè đúng slot cha.
+    // Combined virtual methods of entire inheritance chain; override overwrites parent slot.
     std::vector<DexMethod*> vtable;
 
-    // Giá trị field static, đánh chỉ số theo DexField::offset_or_slot.
+    // Static field values indexed by DexField::offset_or_slot.
     std::vector<DexValue> static_values;
 
-    // Tổng byte cho field instance, gồm cả phần thừa kế từ superclass.
+    // Total byte size for instance fields, including inherited fields.
     uint32_t object_size = 0;
 
-    // Class cho kiểu nguyên thủy (I, J, F...) hoặc mảng — không có class_def.
+    // Primitive type (I, J, F...) or array class — no class_def.
     bool is_primitive = false;
     bool is_array = false;
     art::Primitive::Type primitive_type = art::Primitive::kPrimNot;
-    DexClass* component_type = nullptr;  // chỉ dùng khi is_array
+    DexClass* component_type = nullptr;  // used when is_array == true
 
-    // Object java.lang.Class tương ứng, tạo lười ở lần đầu cần tới. Cache ở đây
-    // để `Foo.class == Foo.class` cho ra true.
+    // java.lang.Class instance object, lazily created on first access.
     DexObject* class_object = nullptr;
 
     bool IsInterface() const { return (access_flags & art::kAccInterface) != 0; }
     bool IsAbstract() const { return (access_flags & art::kAccAbstract) != 0; }
 
-    // Tìm trong class này rồi lần lên superclass.
+    // Lookup within this class and traverse superclasses.
     DexMethod* FindVirtualMethod(const char* name, const char* signature);
     DexMethod* FindDirectMethod(const char* name, const char* signature);
     DexField* FindInstanceField(const char* name, const char* type_descriptor);
@@ -126,7 +124,7 @@ public:
 
     bool IsSubClassOf(const DexClass* other) const;
 
-    // Tên dạng Java ("com.foo.Bar") để in log/exception.
+    // Java-style name ("com.foo.Bar") for logging/exceptions.
     std::string PrettyName() const;
 };
 

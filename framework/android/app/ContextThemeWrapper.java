@@ -4,10 +4,10 @@ import android.content.Context;
 import android.content.ContextWrapper;
 
 /**
- * triển khai android.app.contextthemewrapper tối thiểu.
+ * minimal android.app.contextthemewrapper implementation.
  *
- * một contextwrapper cho phép sửa đổi chủ đề. đối với khuôn khổ
- * tối thiểu của kudroid, đây là một lớp bọc mỏng xung quanh contextwrapper.
+ * a contextwrapper that allows theme modification. for framework
+ * kudroid's minimum, this is a thin wrapper around the contextwrapper.
  */
 public class ContextThemeWrapper extends ContextWrapper {
     public ContextThemeWrapper() {

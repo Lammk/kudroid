@@ -1,42 +1,42 @@
 package android.database;
 
 /**
- * triển khai android.database.cursor tối thiểu.
+ * minimal android.database.cursor implementation.
  *
- * cung cấp quyền truy cập vào kết quả truy vấn. đối với khuôn khổ tối thiểu của kudroid, đây là
- * một con trỏ trống (không có hàng).
+ * provides access to query results. for kudroid minimal framework, this is
+ * an empty pointer (no rows).
  */
 public interface Cursor {
-    /** trả về số hàng. */
+    /** returns the number of rows. */
     int getCount();
 
-    /** di chuyển đến hàng đầu tiên. */
+    /** move to the first row. */
     boolean moveToFirst();
 
-    /** di chuyển đến hàng tiếp theo. */
+    /** move to the next row. */
     boolean moveToNext();
 
-    /** trả về việc con trỏ đã đóng hay chưa. */
+    /** returns whether the cursor is closed or not. */
     boolean isClosed();
 
-    /** đóng con trỏ. */
+    /** closes the cursor. */
     void close();
 
-    /** trả về một giá trị chuỗi cho cột đã cho. */
+    /** returns a string value for the given column. */
     String getString(int columnIndex);
 
-    /** trả về một giá trị số nguyên cho cột đã cho. */
+    /** returns an integer value for the given column. */
     int getInt(int columnIndex);
 
-    /** trả về một giá trị long cho cột đã cho. */
+    /** returns a long value for the given column. */
     long getLong(int columnIndex);
 
-    /** trả về một giá trị float cho cột đã cho. */
+    /** returns a float value for the given column. */
     float getFloat(int columnIndex);
 
-    /** trả về một giá trị double cho cột đã cho. */
+    /** returns a double value for the given column. */
     double getDouble(int columnIndex);
 
-    /** trả về việc giá trị tại cột đã cho có rỗng hay không. */
+    /** returns whether the value in the given column is empty or not. */
     boolean isNull(int columnIndex);
 }

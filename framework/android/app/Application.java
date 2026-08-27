@@ -4,10 +4,10 @@ import android.content.Context;
 import android.content.ContextWrapper;
 
 /**
- * triển khai android.app.application tối thiểu.
+ * minimal android.app.application implementation.
  *
- * lớp cơ sở cho ứng dụng. đối với khuôn khổ tối thiểu của kudroid, lớp này
- * cung cấp lệnh gọi lại vòng đời oncreate.
+ * base class for the application. for kudroid minimal framework, this class
+ * provides oncreate lifecycle callback.
  */
 public class Application extends ContextWrapper {
     public Application() {
@@ -15,25 +15,25 @@ public class Application extends ContextWrapper {
     }
 
     /**
-     * được gọi khi ứng dụng đang khởi động.
+     * is called when the application is starting.
      */
     public void onCreate() {
     }
 
     /**
-     * được gọi khi ứng dụng sắp hết bộ nhớ.
+     * is called when the application is low on memory.
      */
     public void onLowMemory() {
     }
 
     /**
-     * được gọi khi ứng dụng bị cắt giảm bộ nhớ.
+     * is called when the application is reduced to memory.
      */
     public void onTrimMemory(int level) {
     }
 
     /**
-     * đính kèm bối cảnh cơ sở (được gọi bởi khuôn khổ).
+     * attaches the base context (called by the framework).
      */
     public void attach(Context base) {
         attachBaseContext(base);

@@ -1,8 +1,8 @@
 package java.util.concurrent;
 
 /**
- * Executor một-thread-mỗi-task: đơn giản hoá so với pool thật nhưng đúng ngữ
- * nghĩa với code chỉ cần "chạy nền rồi quên".
+ * One-thread-per-task Executor: simplified compared to real pool but correct language
+ * means the code just needs to "run in the background and forget".
  */
 public class ThreadPoolExecutor implements ExecutorService {
 
@@ -25,7 +25,7 @@ public class ThreadPoolExecutor implements ExecutorService {
             throw new NullPointerException();
         }
         if (shutdown) {
-            throw new RejectedExecutionException("executor đã shutdown");
+            throw new RejectedExecutionException("executor has shut down");
         }
         Thread t = factory != null ? factory.newThread(command) : new Thread(command);
         synchronized (running) {

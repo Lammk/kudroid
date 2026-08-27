@@ -20,14 +20,14 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // AudioShim — OpenSL ES / AAudio.
 //
-// Trên iOS: dịch sang CoreAudio (AudioQueue) — PCM mà game enqueue vào
-// SLAndroidSimpleBufferQueue được đẩy vào AudioQueue thật; khi một buffer phát
-// xong, AudioQueueOutputCallback gọi lại callback của game (đúng ngữ nghĩa
-// SLAndroidSimpleBufferQueueCallback) nên vòng lặp âm thanh của game chạy thật.
-// AAudioStream_write đẩy thẳng vào cùng AudioQueue.
+// On iOS: translate to CoreAudio (AudioQueue) — the PCM that the game enqueues into
+// SLAndroidSimpleBufferQueue is pushed into the real AudioQueue; when a buffer is transmitted
+// finished, AudioQueueOutputCallback calls back the game's callback (correct semantics
+// SLAndroidSimpleBufferQueueCallback) so the game's audio loop runs for real.
+// AAudioStream_write pushes straight into the same AudioQueue.
 //
-// Trên nền tảng khác (test Linux): worker giả tiêu thụ buffer và gọi callback
-// để game không treo (âm thanh câm — không có CoreAudio ở đó).
+// On another platform (test Linux): fake worker consumes buffer and calls callback
+// so the game doesn't freeze (sound is muted — no CoreAudio there).
 // ─────────────────────────────────────────────────────────────────────────────
 
 namespace kudroid {
@@ -48,7 +48,7 @@ typedef void* SLVolumeItf;
 typedef void* SLInterfaceID;
 typedef void* SLboolean;
 
-// Layout thật của SLDataFormat_PCM / SLDataSource (game .so compile với header bionic).
+// Actual layout of SLDataFormat_PCM / SLDataSource (game .so compiled with bionic header).
 struct SLDataFormat_PCM {
     uint32_t formatType;      // SL_DATAFORMAT_PCM = 3
     uint32_t numChannels;
@@ -76,17 +76,17 @@ struct AudioPlayer {
     void* callback = nullptr;   // SLAndroidSimpleBufferQueueCallback
     void* context = nullptr;
     uint32_t playState = SL_PLAYSTATE_STOPPED;
-    void* iface = nullptr;      // interface trả cho game (chính là player pointer)
-    uint32_t pendingCount = 0;  // buffer enqueue nhưng chưa phát xong (GetState)
+    void* iface = nullptr;      // interface for the game (which is the player pointer)
+    uint32_t pendingCount = 0;  // buffer enqueue but not yet played (GetState)
 
     // Fallback worker (non-Apple).
     std::deque<std::pair<const void*, uint32_t>> pending;
 
 #if defined(__APPLE__)
     AudioQueueRef aq = nullptr;
-    // userData truyền cho AudioQueueNewOutput: con trỏ tới một bản copy
-    // shared_ptr — giữ player sống trong lúc callback đang chạy (kể cả khi
-    // game tự hủy player ngay bên trong callback).
+    // userData passed to AudioQueueNewOutput: pointer to a copy
+    // shared_ptr — keeps the player alive while the callback is running (even if
+    // The game self-destructs the player right inside the callback).
     void* aqUserData = nullptr;
     double sampleRate = 44100;
     uint32_t channels = 2;
@@ -105,11 +105,11 @@ static std::shared_ptr<AudioPlayer> find_player(void* iface) {
 
 #if defined(__APPLE__)
 
-// AudioQueue trả lại buffer đã phát xong → gọi callback của game (đúng nghĩa
-// SLAndroidSimpleBufferQueueCallback: "buffer đã tiêu thụ, gửi buffer tiếp đi").
+// AudioQueue returns the buffer that has finished playing → calls the game callback (literally
+// SLAndroidSimpleBufferQueueCallback: "buffer consumed, send buffer again").
 static void audio_queue_output_cb(void* userData, AudioQueueRef aq, AudioQueueBufferRef buffer) {
     const auto ref = static_cast<std::shared_ptr<AudioPlayer>*>(userData);
-    const std::shared_ptr<AudioPlayer> p = *ref; // giữ sống trong suốt callback
+    const std::shared_ptr<AudioPlayer> p = *ref; // kept alive during callback
 
     void* cb = nullptr;
     void* ctx = nullptr;
@@ -127,10 +127,10 @@ static void audio_queue_output_cb(void* userData, AudioQueueRef aq, AudioQueueBu
     AudioQueueFreeBuffer(aq, buffer);
 }
 
-// Tạo AudioQueue lần đầu (lazy) theo format đã lưu từ SLDataFormat_PCM.
-// userData của AudioQueueNewOutput là một bản copy shared_ptr lấy từ g_players
-// — giữ player sống trong lúc output callback đang chạy (kể cả khi game hủy
-// player ngay bên trong callback).
+// Create AudioQueue for the first time (lazy) according to the format saved from SLDataFormat_PCM.
+// userData of AudioQueueNewOutput is a copy of shared_ptr taken from g_players
+// — keeps the player alive while the output callback is running (even if the game cancels
+// player right inside the callback).
 static bool ensure_audio_queue(AudioPlayer* p) {
     if (p->aq) return true;
 
@@ -162,16 +162,16 @@ static bool ensure_audio_queue(AudioPlayer* p) {
         p->aqUserData = nullptr;
         return false;
     }
-    // Queue được tạo lazy ở lần enqueue đầu — nếu game đã set PLAYING trước đó
-    // (slPlaySetPlayState/requestStart xảy ra trước enqueue đầu), phải start ở
-    // đây, nếu không queue đứng im và âm thanh câm dù game đang "phát".
+    // The queue is created lazily on first enqueue — if the game has previously set PLAYING
+    // (slPlaySetPlayState/requestStart occurs before first enqueue), must start at
+    // here, otherwise the queue freezes and the sound is muted even though the game is "playing".
     if (p->playState == SL_PLAYSTATE_PLAYING) {
         AudioQueueStart(p->aq, nullptr);
     }
     return true;
 }
 
-// Đẩy một khối PCM vào AudioQueue (dùng chung cho OpenSL enqueue và AAudio write).
+// Push a PCM block into AudioQueue (common to OpenSL enqueue and AAudio write).
 static bool enqueue_pcm(AudioPlayer* p, const void* data, uint32_t size) {
     std::lock_guard<std::mutex> lock(p->mtx);
     if (p->shutdown) return false;
@@ -195,7 +195,7 @@ static bool enqueue_pcm(AudioPlayer* p, const void* data, uint32_t size) {
 #endif // __APPLE__
 
 #if !defined(__APPLE__)
-// Worker fallback (non-Apple): tiêu thụ buffer giả lập rồi gọi callback.
+// Worker fallback (non-Apple): consumes the simulated buffer and then calls the callback.
 static void audio_worker(std::shared_ptr<AudioPlayer> p, void* iface) {
     for (;;) {
         std::pair<const void*, uint32_t> item;
@@ -222,7 +222,7 @@ static void audio_worker(std::shared_ptr<AudioPlayer> p, void* iface) {
 }
 #endif // !defined(__APPLE__)
 
-// Engine create — entry point chính mà game gọi.
+// Engine create — the main entry point that the game calls.
 extern "C" SLresult bionic_slCreateEngine(SLObjectItf* pEngine, uint32_t numOptions,
                                           const void* pEngineOptions,
                                           uint32_t numInterfaces,
@@ -248,10 +248,10 @@ extern "C" void bionic_slObjectDestroy(SLObjectItf self) {
         }
     }
     if (!player) return;
-    // KHÔNG DEADLOCK: lock chỉ dùng để set cờ shutdown — được thả trước khi
-    // AudioQueueDispose. Nếu dispose nằm trong lock, callback audio
-    // (audio_queue_output_cb, chạy trên thread CoreAudio) đợi p->mtx sẽ không
-    // bao giờ thoát vì Dispose chờ thread đó dừng → deadlock.
+    // NO DEADLOCK: lock is only used to set the shutdown flag — released before
+    // AudioQueueDispose. If dispose is in lock, callback audio
+    // (audio_queue_output_cb, runs on CoreAudio thread) wait p->mtx will not
+    // never exits because Dispose waits for that thread to stop → deadlock.
     {
         std::lock_guard<std::mutex> lock(player->mtx);
         player->shutdown = true;
@@ -268,11 +268,11 @@ extern "C" void bionic_slObjectDestroy(SLObjectItf self) {
         player->aqUserData = nullptr;
     }
     if (aq) {
-        // immediate=true: Dispose đồng bộ dừng queue và chờ thread nội bộ của
-        // AudioQueue xử lý xong trước khi trả về → không còn callback nào chạy
-        // sau điểm này → delete userData (shared_ptr owner) an toàn. Callback
-        // đang chạy dở giữ một bản copy shared_ptr nên player không bị free
-        // giữa chừng.
+        // immediate=true: Dispose synchronously stops the queue and waits for the internal thread
+        // AudioQueue finishes processing before returning → no more callbacks run
+        // after this point → delete userData (shared_ptr owner) is safe. Callback
+        // While running keeps a copy of shared_ptr so the player is not free
+        // midway.
         AudioQueueDispose(aq, true);
         delete static_cast<std::shared_ptr<AudioPlayer>*>(userData);
     }
@@ -284,7 +284,7 @@ extern "C" SLresult bionic_slObjectRealize(SLObjectItf self, SLboolean async) {
     return SL_RESULT_SUCCESS;
 }
 
-// Trả chính object làm interface để các lệnh gọi sau tra cứu theo self.
+// Return the object itself as the interface so that future calls can look up by self.
 extern "C" SLresult bionic_slObjectGetInterface(SLObjectItf self,
                                                 const SLInterfaceID iid,
                                                 void* pInterface) {
@@ -309,12 +309,12 @@ extern "C" SLresult bionic_slEngineCreateAudioPlayer(SLEngineItf self,
     player->iface = player.get();
 
 #if defined(__APPLE__)
-    // Đọc format PCM mà game khai báo trong SLDataSource.
+    // Read the PCM format that the game declares in SLDataSource.
     const auto* src = static_cast<const SLDataSource*>(pSrc);
     if (src && src->pFormat) {
         const auto* fmt = static_cast<const SLDataFormat_PCM*>(src->pFormat);
         if (fmt->numChannels > 0) player->channels = fmt->numChannels;
-        // samplesPerSec tính bằng milliHz trong OpenSL ES (44100 -> 44100000).
+        // samplesPerSec in milliHz in OpenSL ES (44100 -> 44100000).
         if (fmt->samplesPerSec > 1000000) {
             player->sampleRate = static_cast<double>(fmt->samplesPerSec) / 1000.0;
         } else if (fmt->samplesPerSec > 0) {
@@ -436,8 +436,8 @@ extern "C" SLresult bionic_slVolumeSetVolumeLevel(SLVolumeItf self, int32_t mill
 #if defined(__APPLE__)
     std::lock_guard<std::mutex> lock(player->mtx);
     if (player->aq) {
-        // millibel = 100 * dB; 0 mB = unity (1.0). AudioQueue volume là TUYẾN TÍNH
-        // 0..1, không phải dB — đặt thẳng giá trị dB (vd -6) làm volume âm → mute.
+        // millibels = 100 * dB; 0 mB = unity (1.0). AudioQueue volume is LINEAR
+        // 0..1, not dB — set the dB value directly (eg -6) as negative volume → mute.
         const float db = static_cast<float>(millibel) / 100.0f;
         const float linear = (db >= -150.0f) ? std::pow(10.0f, db / 20.0f) : 0.0f;
         AudioQueueSetParameter(player->aq, kAudioQueueParam_Volume, linear);
@@ -453,7 +453,7 @@ extern "C" SLresult bionic_slVolumeGetVolumeLevel(SLVolumeItf self, int32_t* pLe
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AAudio — write model đẩy thẳng vào AudioQueue (như OpenSL enqueue).
+// AAudio — write model pushed directly into AudioQueue (like OpenSL enqueue).
 // ─────────────────────────────────────────────────────────────────────────────
 #define AAUDIO_FORMAT_PCM_I16 1
 #define AAUDIO_FORMAT_PCM_FLOAT 2
@@ -518,7 +518,7 @@ extern "C" int32_t bionic_AAudioStreamBuilder_setFormat(void* builder, int32_t f
 }
 
 extern "C" int32_t bionic_AAudioStreamBuilder_setDataCallback(void* builder, void* callback, void* userData) {
-    // Callback-pull model chưa hỗ trợ — game dùng write model vẫn chạy thật.
+    // The callback-pull model is not yet supported — games using the write model still run.
     (void)builder; (void)callback; (void)userData;
     return 0;
 }
@@ -542,8 +542,8 @@ extern "C" int32_t bionic_AAudioStreamBuilder_openStream(void* builder, void** s
         std::lock_guard<std::mutex> lock(g_streams_mtx);
         g_streams[player.get()] = impl;
     }
-    // Cũng đăng ký vào g_players để ensure_audio_queue tìm thấy (lấy bản copy
-    // shared_ptr làm userData an toàn của AudioQueue).
+    // Also subscribe to g_players so ensure_audio_queue can be found (get a copy
+    // shared_ptr as AudioQueue's safe userData).
     {
         std::lock_guard<std::mutex> lock(g_players_mtx);
         g_players[player.get()] = player;
@@ -637,7 +637,7 @@ extern "C" int32_t bionic_AAudioStream_write(void* stream, const void* buffer,
     return numFrames;
 #else
     (void)buffer;
-    return numFrames; // dummy: chấp nhận toàn bộ
+    return numFrames; // dummy: accept all
 #endif
 }
 
@@ -728,7 +728,7 @@ extern "C" const char* kudroid_test_audio(void) {
             ares = bionic_AAudioStream_requestStart(stream);
             log += "✔ AAudioStream_requestStart -> " + std::string(ares == 0 ? "SUCCESS" : "FAILED") + "\n";
 
-            // Sinh 0.1s sóng âm test (Sine wave 440Hz)
+            // Generate 0.1s test sound wave (Sine wave 440Hz)
             int16_t pcmBuffer[4410 * 2];
             for (int i = 0; i < 4410; ++i) {
                 int16_t val = static_cast<int16_t>(sin(2.0 * M_PI * 440.0 * i / 44100.0) * 16000.0);

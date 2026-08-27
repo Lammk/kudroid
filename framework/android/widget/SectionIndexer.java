@@ -1,7 +1,7 @@
 package android.widget;
 
 /**
- * android.widget.SectionIndexer — cho ListView nhảy nhanh theo section (A-Z).
+ * android.widget.SectionIndexer — for ListView to quickly jump by section (A-Z).
  */
 public interface SectionIndexer {
     Object[] getSections();

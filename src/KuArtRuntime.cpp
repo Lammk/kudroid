@@ -36,12 +36,12 @@ struct Runtime {
     std::unique_ptr<DexJniEnv> jni;
     std::unique_ptr<DexReflect> reflect;
 
-    // Buffer của mỗi DEX phải sống suốt đời runtime: libdexfile chỉ giữ con trỏ
-    // vào đó, không copy.
+    // The buffer of each DEX must live for the lifetime of the runtime: libdexfile only holds pointers
+    // Go there, don't copy.
     std::vector<std::vector<uint8_t>> dex_buffers;
 
-    // Descriptor mọi class có trong DEX của app (không gồm framework nhúng) —
-    // giữ lại để kuart_list_app_classes không phải quét lại.
+    // Descriptor for all classes in the app's DEX (excluding embedded frameworks) —
+    // keep it so kuart_list_app_classes doesn't have to be rescanned.
     std::vector<std::string> app_classes;
 
     bool ready = false;
@@ -73,7 +73,7 @@ void SetError(const std::string& e) {
     Log("ERROR: %s", e.c_str());
 }
 
-// "com.foo.Bar" hoặc "com/foo/Bar" → "Lcom/foo/Bar;"
+// "com.foo.Bar" or "com/foo/Bar" → "Lcom/foo/Bar;"
 std::string ToDescriptor(const char* name) {
     if (name == nullptr || name[0] == '\0') return std::string();
     std::string s(name);
@@ -96,8 +96,8 @@ bool ReadFile(const std::filesystem::path& path, std::vector<uint8_t>* out) {
     return static_cast<bool>(f.read(reinterpret_cast<char*>(out->data()), size));
 }
 
-// Class thuộc framework/SDK, không phải code của app. Dùng để lọc danh sách
-// candidate Activity — cùng bộ tiền tố mà đường Avian cũ dùng.
+// Class belongs to the framework/SDK, not the app's code. Used to filter the list
+// candidate Activity — same prefix used by the old Avian line.
 bool IsSystemOrSdkClass(const std::string& descriptor) {
     static const char* kPrefixes[] = {
         "Landroid/", "Landroidx/", "Ljava/", "Ljavax/", "Ljunit/", "Lkotlin/", "Lkotlinx/",
@@ -113,18 +113,18 @@ bool IsSystemOrSdkClass(const std::string& descriptor) {
     return false;
 }
 
-// Gọi một static method của android/app/ActivityThread.
+// Call a static method of android/app/ActivityThread.
 bool CallActivityThreadStatic(const char* name, const char* signature,
                               const DexValue* args, size_t num_args) {
     if (g_rt == nullptr || !g_rt->ready) return false;
     DexClass* at = g_rt->linker.FindClass("Landroid/app/ActivityThread;");
     if (at == nullptr) {
-        SetError("không tìm thấy android/app/ActivityThread trong framework.dex");
+        SetError("android/app/ActivityThread not found in framework.dex");
         return false;
     }
     DexMethod* m = at->FindDirectMethod(name, signature);
     if (m == nullptr) {
-        SetError(std::string("không tìm thấy ActivityThread.") + name + signature);
+        SetError(std::string("ActivityThread not found.") + name + signature);
         return false;
     }
     g_rt->interpreter->ClearPendingException();
@@ -156,15 +156,15 @@ extern "C" int kuart_init(const char* app_dir) {
 
     auto rt = std::make_unique<Runtime>();
 
-    // framework.dex nhúng phải nạp TRƯỚC DEX của app: FindClass đi theo thứ tự
-    // thêm, nên class của app tham chiếu android/* sẽ tìm thấy framework ngay.
+    // Embedded framework.dex must be loaded BEFORE the app's DEX: FindClass comes in order
+    // Additionally, the class of the app referencing android/* will find the framework immediately.
     std::string error;
     if (!rt->linker.AddDexFile(g_framework_dex_bytes, g_framework_dex_size,
                                "framework.dex", &error)) {
-        SetError("nạp framework.dex nhúng thất bại: " + error);
+        SetError("Failed to load embedded framework.dex: " + error);
         return 0;
     }
-    Log("framework.dex nhúng: %zu bytes", g_framework_dex_size);
+    Log("embedded framework.dex: %zu bytes", g_framework_dex_size);
 
     if (app_dir != nullptr && app_dir[0] != '\0') {
         std::error_code ec;
@@ -178,27 +178,27 @@ extern "C" int kuart_init(const char* app_dir) {
                 dex_paths.push_back(entry.path());
             }
         }
-        // classes.dex trước classes2.dex, classes3.dex... như Android thật.
+        // classes.dex before classes2.dex, classes3.dex... like real Android.
         std::sort(dex_paths.begin(), dex_paths.end());
 
         if (dex_paths.empty()) {
-            Log("WARNING: không có classes*.dex nào trong %s", app_dir);
+            Log("WARNING: no classes*.dex in %s", app_dir);
         }
         for (const auto& p : dex_paths) {
             std::vector<uint8_t> bytes;
             if (!ReadFile(p, &bytes)) {
-                Log("WARNING: đọc %s thất bại, bỏ qua", p.string().c_str());
+                Log("WARNING: reading %s failed, skipped", p.string().c_str());
                 continue;
             }
             rt->dex_buffers.push_back(std::move(bytes));
             const std::vector<uint8_t>& buf = rt->dex_buffers.back();
             if (!rt->linker.AddDexFile(buf.data(), buf.size(), p.string(), &error)) {
-                Log("WARNING: %s không nạp được (%s), bỏ qua", p.filename().string().c_str(),
+                Log("WARNING: %s failed to load (%s), skipped", p.filename().string().c_str(),
                     error.c_str());
                 rt->dex_buffers.pop_back();
                 continue;
             }
-            Log("nạp %s (%zu bytes)", p.filename().string().c_str(), buf.size());
+            Log("load %s (%zu bytes)", p.filename().string().c_str(), buf.size());
         }
     }
 
@@ -212,7 +212,7 @@ extern "C" int kuart_init(const char* app_dir) {
     rt->ready = true;
     g_rt = rt.release();
 
-    Log("KuART sẵn sàng: %zu DEX", g_rt->linker.NumDexFiles());
+    Log("KuART ready: %zu DEX", g_rt->linker.NumDexFiles());
     return 1;
 }
 
@@ -232,8 +232,8 @@ extern "C" JavaVM* kuart_get_javavm(void) {
 extern "C" jint kuart_get_env(JavaVM* vm, void** env, jint version) {
     (void)version;
     if (g_rt == nullptr || g_rt->jni == nullptr || env == nullptr) return JNI_ERR;
-    // Một JNIEnv duy nhất cho mọi thread: KuART chưa có thread Java thật, mọi
-    // bytecode chạy trên thread gọi vào.
+    // A single JNIEnv for every thread: KuART doesn't have a real, universal Java thread yet
+    // bytecode runs on the calling thread.
     (void)vm;
     *env = g_rt->jni->env();
     return JNI_OK;
@@ -260,30 +260,30 @@ extern "C" int kuart_class_extends_activity(const char* class_name) {
 extern "C" size_t kuart_list_app_classes(char** out, size_t max_out) {
     if (g_rt == nullptr || !g_rt->ready || out == nullptr || max_out == 0) return 0;
 
-    // Quét lười: chỉ đi qua class_def của mọi DEX một lần rồi cache.
+    // Lazy scanning: only goes through the class_def of every DEX once and then caches.
     if (g_rt->app_classes.empty()) {
         for (size_t i = 0; i < g_rt->linker.NumDexFiles(); ++i) {
             const art::DexFile* dex = g_rt->linker.DexFileAt(i);
             if (dex == nullptr) continue;
-            // DEX đầu tiên là framework nhúng, bỏ qua.
+            // The first DEX is an embedded, bypass framework.
             if (i == 0) continue;
             for (size_t c = 0; c < dex->NumClassDefs(); ++c) {
                 const char* descriptor = dex->GetClassDescriptor(dex->GetClassDef(c));
                 if (descriptor == nullptr) continue;
                 const std::string d(descriptor);
                 if (IsSystemOrSdkClass(d)) continue;
-                // Inner class không bao giờ là launcher Activity.
+                // Inner class is never an Activity launcher.
                 if (d.find('$') != std::string::npos) continue;
                 g_rt->app_classes.push_back(d);
             }
         }
-        Log("quét được %zu class của app", g_rt->app_classes.size());
+        Log("scanned %zu classes of app", g_rt->app_classes.size());
     }
 
     size_t written = 0;
     for (const std::string& d : g_rt->app_classes) {
         if (written >= max_out) break;
-        // Trả dạng "com/foo/Bar" (bỏ L và ;) cho khớp API cũ.
+        // Returns the form "com/foo/Bar" (omit the L and ;) to match the old API.
         const std::string name = (d.size() > 2 && d.front() == 'L' && d.back() == ';')
                                      ? d.substr(1, d.size() - 2)
                                      : d;
@@ -303,24 +303,24 @@ extern "C" void kuart_free_class_list(char** list, size_t count) {
 extern "C" int kuart_launch_activity(const char* activity_name,
                                      const char* const* extra_candidates, int extra_count) {
     if (g_rt == nullptr || !g_rt->ready) {
-        SetError("kuart_launch_activity: runtime chưa init");
+        SetError("kuart_launch_activity: runtime not init yet");
         return 0;
     }
     if (activity_name == nullptr || activity_name[0] == '\0') {
-        SetError("kuart_launch_activity: tên activity rỗng");
+        SetError("kuart_launch_activity: empty activity name");
         return 0;
     }
 
     DexClass* string_array = g_rt->linker.FindClass("[Ljava/lang/String;");
     if (string_array == nullptr) {
-        SetError("không tạo được [Ljava/lang/String;");
+        SetError("failed to create [Ljava/lang/String;");
         return 0;
     }
 
     const int total = 1 + (extra_candidates != nullptr ? extra_count : 0);
     auto* args_array = g_rt->linker.AllocArray(string_array, total);
     if (args_array == nullptr) {
-        SetError("không cấp phát được mảng args");
+        SetError("args array could not be allocated");
         return 0;
     }
     args_array->Set<DexObject*>(0, g_rt->linker.NewString(activity_name));
@@ -329,7 +329,7 @@ extern "C" int kuart_launch_activity(const char* activity_name,
         args_array->Set<DexObject*>(1 + i, g_rt->linker.NewString(extra_candidates[i]));
     }
 
-    Log("gọi ActivityThread.main(\"%s\") + %d candidate dự phòng", activity_name,
+    Log("call ActivityThread.main(\"%s\") + %d backup candidate", activity_name,
         total - 1);
     const DexValue arg = DexValue::Ref(args_array);
     return CallActivityThreadStatic("main", "([Ljava/lang/String;)V", &arg, 1) ? 1 : 0;
@@ -350,9 +350,9 @@ extern "C" const char* kuart_last_error(void) {
     return g_last_error.c_str();
 }
 
-// ── điểm vào JNI chuẩn mà mã native của guest gọi ────────────────────────────
-// Engine game (Unity, MCPE...) gọi thẳng JNI_GetCreatedJavaVMs từ static
-// initializer để lấy VM. BionicShim map các symbol này vào bảng shim.
+// ── standard JNI entry point that the guest's native code calls ────────────────────────────
+// Game engines (Unity, MCPE...) call JNI_GetCreatedJavaVMs directly from static
+// initializer to get the VM. BionicShim maps these symbols to the shim table.
 
 extern "C" jint JNI_GetCreatedJavaVMs(JavaVM** vm_buf, jsize buf_len, jsize* num_vms) {
     JavaVM* vm = kuart_get_javavm();
@@ -363,18 +363,18 @@ extern "C" jint JNI_GetCreatedJavaVMs(JavaVM** vm_buf, jsize buf_len, jsize* num
 
 extern "C" jint JNI_CreateJavaVM(JavaVM** p_vm, void** p_env, void* vm_args) {
     (void)vm_args;
-    // KuART chỉ có MỘT VM, tạo lúc kuart_init. Guest gọi CreateJavaVM thì trả
-    // VM sẵn có thay vì dựng cái mới — dựng hai VM sẽ chia đôi class linker.
+    // KuART has only ONE VM, created at kuart_init. Guest calls CreateJavaVM and returns
+    // Existing VM instead of building a new one — building two VMs will split the linker class in half.
     if (!kuart_is_ready() && !kuart_init("")) return JNI_ERR;
     if (p_vm != nullptr) *p_vm = kuart_get_javavm();
     if (p_env != nullptr) kuart_get_env(kuart_get_javavm(), p_env, JNI_VERSION_1_6);
     return JNI_OK;
 }
 
-// Tên cũ mà bảng shim của BionicShim tham chiếu.
+// The old name that BionicShim's shim table references.
 extern "C" void* kudroid_jni_get_javavm(void) { return kuart_get_javavm(); }
 
-// Tên cũ mà vỏ Swift (kudroid_bridge.h) tham chiếu.
+// The old name that the Swift shell (kudroid_bridge.h) references.
 extern "C" void kudroid_send_lifecycle_event(int event_type) {
     kuart_send_lifecycle_event(event_type);
 }

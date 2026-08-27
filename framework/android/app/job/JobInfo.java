@@ -1,6 +1,6 @@
 package android.app.job;
 
-/** Stub sinh tự động cho android.app.job.JobInfo */
+/** Stub automatically generated for android.app.job.JobInfo */
 public class JobInfo {
     public JobInfo() {}
 

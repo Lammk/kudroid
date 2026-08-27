@@ -1,6 +1,6 @@
 package android.graphics.drawable;
 
-/** Stub sinh tự động cho android.graphics.drawable.StateListDrawable */
+/** Stub automatically generated for android.graphics.drawable.StateListDrawable */
 public class StateListDrawable {
     public StateListDrawable() {}
 }

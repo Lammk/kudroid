@@ -4,9 +4,9 @@ import android.content.Context;
 import android.content.DialogInterface;
 
 /**
- * triển khai android.app.dialog tối thiểu.
+ * minimal android.app.dialog implementation.
  *
- * lớp cơ sở cho các hộp thoại. đối với khuôn khổ tối thiểu của kudroid, đây là một mô phỏng.
+ * base class for dialogs. for kudroid minimal framework, here is an emulation.
  */
 public class Dialog implements DialogInterface {
     private final Context mContext;
@@ -24,21 +24,21 @@ public class Dialog implements DialogInterface {
     }
 
     /**
-     * trả về bối cảnh mà hộp thoại này được tạo.
+     * returns the context in which this dialog was created.
      */
     public Context getContext() {
         return mContext;
     }
 
     /**
-     * hiển thị hộp thoại.
+     * show dialog box.
      */
     public void show() {
         mShowing = true;
     }
 
     /**
-     * bỏ qua hộp thoại.
+     * skip dialog.
      */
     public void dismiss() {
         mShowing = false;
@@ -48,7 +48,7 @@ public class Dialog implements DialogInterface {
     }
 
     /**
-     * hủy hộp thoại.
+     * cancel dialog.
      */
     public void cancel() {
         mShowing = false;
@@ -58,54 +58,54 @@ public class Dialog implements DialogInterface {
     }
 
     /**
-     * trả về việc hộp thoại có đang hiển thị hay không.
+     * returns whether the dialog is visible or not.
      */
     public boolean isShowing() {
         return mShowing;
     }
 
     /**
-     * thiết lập xem hộp thoại có thể hủy được hay không.
+     * sets whether the dialog is cancelable or not.
      */
     public void setCancelable(boolean flag) {
         mCancelable = flag;
     }
 
     /**
-     * trả về việc hộp thoại có thể hủy được hay không.
+     * returns whether the dialog is cancelable or not.
      */
     public boolean isCancelable() {
         return mCancelable;
     }
 
     /**
-     * thiết lập trình lắng nghe bỏ qua.
+     * set bypass listener.
      */
     public void setOnDismissListener(OnDismissListener listener) {
         mDismissListener = listener;
     }
 
     /**
-     * thiết lập trình lắng nghe hủy.
+     * set cancellation listener.
      */
     public void setOnCancelListener(OnCancelListener listener) {
         mCancelListener = listener;
     }
 
     /**
-     * thiết lập tiêu đề.
+     * set title.
      */
     public void setTitle(CharSequence title) {
     }
 
     /**
-     * thiết lập dạng xem nội dung.
+     * set content view.
      */
     public void setContentView(android.view.View view) {
     }
 
     /**
-     * thiết lập dạng xem nội dung từ tài nguyên bố cục.
+     * set content view from layout resource.
      */
     public void setContentView(int layoutResID) {
     }

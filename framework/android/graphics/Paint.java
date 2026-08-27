@@ -1,24 +1,24 @@
 package android.graphics;
 
 /**
- * triển khai android.graphics.paint tối thiểu.
+ * minimal android.graphics.paint implementation.
  *
- * lưu giữ thông tin kiểu và màu sắc để vẽ. đối với khuôn khổ tối thiểu
- * của kudroid, nó lưu trữ các thuộc tính vẽ cơ bản.
+ * stores style and color information for drawing. for minimal framework
+ * of kudroid, it stores basic drawing properties.
  */
 public class Paint {
-    /** kiểu vẽ: điền vào. */
+    /** drawing style: fill. */
     public static final int STYLE_FILL = 0;
-    /** kiểu vẽ: nét. */
+    /** drawing type: stroke. */
     public static final int STYLE_STROKE = 1;
-    /** kiểu vẽ: điền vào và nét. */
+    /** drawing style: fill and stroke. */
     public static final int STYLE_FILL_AND_STROKE = 2;
 
-    /** căn chỉnh: trái. */
+    /** alignment: left. */
     public static final int ALIGN_LEFT = 0;
-    /** căn chỉnh: giữa. */
+    /** alignment: center. */
     public static final int ALIGN_CENTER = 1;
-    /** căn chỉnh: phải. */
+    /** alignment: right. */
     public static final int ALIGN_RIGHT = 2;
 
     private int mColor = 0xFF000000;
@@ -114,14 +114,14 @@ public class Paint {
     }
 
     /**
-     * trả về chiều rộng của văn bản đã cho.
+     * returns the width of the given text.
      */
     public float measureText(String text) {
         return text != null ? text.length() * mTextSize * 0.5f : 0.0f;
     }
 
     /**
-     * trả về số liệu phông chữ.
+     * returns font metrics.
      */
     public float getFontMetrics() {
         return mTextSize;

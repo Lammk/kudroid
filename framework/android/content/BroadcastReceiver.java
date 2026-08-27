@@ -1,6 +1,6 @@
 package android.content;
 
-/** Stub sinh tự động cho android.content.BroadcastReceiver */
+/** Stub automatically generated for android.content.BroadcastReceiver */
 public class BroadcastReceiver {
     public BroadcastReceiver() {}
 

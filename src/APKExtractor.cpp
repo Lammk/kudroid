@@ -89,7 +89,7 @@ struct ZipEntryInfo {
     std::uint32_t localOffset;
 };
 
-// Đọc end-of-central-directory + toàn bộ central directory (chỉ metadata).
+// Read end-of-central-directory + entire central directory (metadata only).
 bool readZipEntries(std::ifstream& f, std::streamsize fileSize, std::vector<ZipEntryInfo>& entries) {
     entries.clear();
     const std::size_t tailLen = fileSize < 65557 ? static_cast<std::size_t>(fileSize) : 65557;
@@ -128,7 +128,7 @@ bool readZipEntries(std::ifstream& f, std::streamsize fileSize, std::vector<ZipE
     return true;
 }
 
-// Giải nén một entry (stored hoặc deflate) ra file — streaming, không nạp cả entry.
+// Decompress an entry (stored or deflate) to a file — streaming, do not load the entire entry.
 bool extractZipEntryToFile(std::ifstream& f, const ZipEntryInfo& e, const std::string& destPath) {
     f.seekg(e.localOffset);
     char lh[30];
@@ -189,16 +189,16 @@ bool endsWithCi(const std::string& s, const char* suffix) {
     }
     return true;
 }
-// lowercase toàn bộ (dùng để lọc split theo tên).
+// entire lowercase (used to filter split by name).
 std::string toLower(const std::string& s) {
     std::string r = s;
     for (char& c : r) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return r;
 }
 
-// ManifestInfo giờ là struct public khai báo trong APKExtractor.h — parseAxml
-// điền vào đó, kudroid_bridge gọi parse_manifest() trực tiếp trên AXML đã giải
-// nén để lấy LAUNCHER activity chính xác (thay vì đoán theo tên folder).
+// ManifestInfo is now a public struct declared in APKExtractor.h — parseAxml
+// fill it in, kudroid_bridge calls parse_manifest() directly on the resolved AXML
+// compressed to get the correct LAUNCHER activity (instead of guessing by folder name).
 
 static int iconPriority(const std::string& name) {
     if (!endsWithCi(name, ".png") && !endsWithCi(name, ".webp") && !endsWithCi(name, ".jpg") && !endsWithCi(name, ".jpeg")) return -1;
@@ -207,7 +207,7 @@ static int iconPriority(const std::string& name) {
     const std::string lower = toLower(name);
     int score = 0;
 
-    // Ưu tiên độ phân giải
+    // Prioritize resolution
     if (lower.find("xxxhdpi") != std::string::npos) score += 60;
     else if (lower.find("xxhdpi") != std::string::npos) score += 50;
     else if (lower.find("xhdpi") != std::string::npos) score += 40;
@@ -217,7 +217,7 @@ static int iconPriority(const std::string& name) {
     else if (lower.find("nodpi") != std::string::npos) score += 35;
     else if (lower.find("drawable") != std::string::npos || lower.find("mipmap") != std::string::npos) score += 15;
 
-    // Ưu tiên theo tên icon chuẩn của Android & Unity
+    // Priority is given to standard icon names of Android & Unity
     if (lower.find("ic_launcher_foreground") != std::string::npos) score += 85;
     else if (lower.find("ic_launcher") != std::string::npos) score += 100;
     else if (lower.find("app_icon") != std::string::npos || lower.find("appicon") != std::string::npos) score += 95;
@@ -289,8 +289,8 @@ static std::vector<std::string> parseStringPool(const std::vector<std::uint8_t>&
 
 static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
     ManifestInfo info;
-    // Diagnostics: manifest thật của một số APK repack từng parse ra rỗng mà
-    // không có manh mối nào — log đủ để debug từ xa qua logs/.
+    // Diagnostics: The actual manifest of some APK repacks has been parsed and is empty
+    // no clue — log enough for remote debugging via logs/.
     if (data.size() < 32 || read32(data, 0) != 0x00080003) {
         char magic[64];
         std::snprintf(magic, sizeof(magic),
@@ -315,22 +315,22 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
         cur += read32(data, cur + 4);
     }
 
-    // State tìm LAUNCHER activity: manifest chứa NHIỀU <activity>, chỉ
-    // activity (hoặc activity-alias) có <intent-filter> với
+    // State finds LAUNCHER activity: manifest contains MANY <activity>, only
+    // activity (or activity-alias) has <intent-filter> with
     // <action android:name="android.intent.action.MAIN"> +
-    // <category android:name="android.intent.category.LAUNCHER"> mới là
-    // entry point mà Android launcher mở. Lấy activity đầu tiên như trước
-    // đây là SAI (vd Minecraft: activity đầu tiên không phải launcher).
-    // QUAN TRỌNG: state phải nằm NGOÀI vòng while — AXML chia thành nhiều
-    // chunk (mỗi tag một chunk), khai báo trong loop sẽ reset mỗi chunk.
+    // <category android:name="android.intent.category.LAUNCHER"> is
+    // entry point that the Android launcher opens. Get the first activity as before
+    // This is WRONG (e.g. Minecraft: the first activity is not a launcher).
+    // IMPORTANT: state must be OUTSIDE the while loop — AXML splits into multiple
+    // chunk (one chunk per tag), declared in loop will reset each chunk.
     static const char* kActionMain = "android.intent.action.MAIN";
     static const char* kCategoryLauncher = "android.intent.category.LAUNCHER";
-    std::string currentActivity;   // name của <activity>/<activity-alias> đang duyệt
-    std::string aliasTarget;       // targetActivity của <activity-alias>
+    std::string currentActivity;   // name of the <activity>/<activity-alias> being browsed
+    std::string aliasTarget;       // targetActivity of <activity-alias>
     bool inIntentFilter = false;
     bool sawActionMain = false;
     bool sawCategoryLauncher = false;
-    std::string firstActivityName; // fallback khi không có intent-filter nào
+    std::string firstActivityName; // fallback when there is no intent-filter
 
     auto commitLauncher = [&](const std::string& name) {
         if (info.mainActivity.empty() && !name.empty() &&
@@ -348,11 +348,11 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
             if (cur + 36 <= data.size()) {
                 const std::uint32_t nameIdx = read32(data, cur + 20);
                 const std::string tagName = (nameIdx < stringPool.size()) ? stringPool[nameIdx] : "";
-                // Spec ResXMLTree_attrExt: attributeStart là offset TÍNH TỪ ĐẦU
-                // struct attrExt (chunk+16), không phải từ đầu chunk. aapt ghi
-                // attrStart=20 → attrs bắt đầu tại chunk+36. Code cũ dùng
-                // cur+attrStart → đọc lệch 16 byte với mọi manifest thật
-                // (synthetic test khớp code cũ nên pass giả).
+                // Spec ResXMLTree_attrExt: attributeStart is the offset FROM START
+                // struct attrExt (chunk+16), not from the beginning of the chunk. aapt writes
+                // attrStart=20 → attrs starts at chunk+36. Old code used
+                // cur+attrStart → reads 16 bytes off every real manifest
+                // (synthetic test matches the old code so the password is fake).
                 const std::uint16_t attrStart = read16(data, cur + 24);
                 const std::uint16_t attrSize = read16(data, cur + 26);
                 const std::uint16_t attrCount = read16(data, cur + 28);
@@ -361,7 +361,7 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
                 const bool isActivityTag =
                     tagName == "activity" || tagName == "activity-alias";
                 if (isActivityTag) {
-                    // Bắt đầu một activity mới — reset state của activity trước.
+                    // Start a new activity — reset the state of the previous activity.
                     currentActivity.clear();
                     aliasTarget.clear();
                     sawActionMain = false;
@@ -378,7 +378,7 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
                     const std::string attrName = (attrNameIdx < stringPool.size()) ? stringPool[attrNameIdx] : "";
                     std::string attrVal = (attrRawValIdx < stringPool.size()) ? stringPool[attrRawValIdx] : "";
 
-                    // Nếu rawValue = -1 (0xFFFFFFFF), đọc từ Res_value (typedValue data)
+                    // If rawValue = -1 (0xFFFFFFFF), read from Res_value (typedValue data)
                     if (attrVal.empty() && attrCur + 20 <= cur + chunkSize) {
                         const std::uint8_t dataType = data[attrCur + 15];
                         const std::uint32_t dataVal = read32(data, attrCur + 16);
@@ -413,8 +413,8 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
                     }
                 }
 
-                // Activity-alias trỏ sang activity thật qua targetActivity —
-                // Android launcher mở TARGET, không phải alias.
+                // Activity-alias points to the real activity via targetActivity —
+                // Android launcher opens TARGET, not alias.
                 if (tagName == "activity-alias") {
                     commitLauncher(!aliasTarget.empty() ? aliasTarget : currentActivity);
                 }
@@ -426,8 +426,8 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
                 if (tagName == "intent-filter") {
                     inIntentFilter = false;
                 } else if (tagName == "activity" || tagName == "activity-alias") {
-                    // </activity>: nếu intent-filter MAIN+LAUNCHER xuất hiện giữa
-                    // chừng thì đây chính là launcher activity.
+                    // </activity>: if intent-filter MAIN+LAUNCHER appears between
+                    // Apparently this is the launcher activity.
                     commitLauncher(currentActivity);
                     currentActivity.clear();
                     sawActionMain = false;
@@ -439,8 +439,8 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
         cur += chunkSize;
     }
 
-    // Fallback: không tìm thấy intent-filter nào (manifest phi chuẩn / obfuscated)
-    // → dùng activity đầu tiên như hành vi cũ, tốt hơn là trả rỗng.
+    // Fallback: no intent-filter found (non-standard/obfuscated manifest)
+    // → use the first activity as the old behavior, better than empty.
     if (info.mainActivity.empty() && !firstActivityName.empty()) {
         info.mainActivity = firstActivityName;
     }
@@ -511,7 +511,7 @@ static std::string parseArscAppName(const std::vector<std::uint8_t>& data) {
         cur += chunkSize;
     }
 
-    // Fallback: Tìm string đầu tiên khớp với tên game/app nổi tiếng trong globalStrings
+    // Fallback: Find the first string that matches a famous game/app name in globalStrings
     for (const auto& s : globalStrings) {
         if (s.size() >= 2 && s.size() <= 40 &&
             s.find('/') == std::string::npos &&
@@ -539,7 +539,7 @@ static std::string prettifyAppName(const std::string& raw) {
     if (raw.empty()) return "Android App";
     std::string s = raw;
 
-    // 1. Tách package name nếu có (ví dụ "com.discord" hoặc "com.hammerandchisel.discord")
+    // 1. Separate the package name if there is one (for example "com.discord" or "com.hammerandchisel.discord")
     if (s.find('.') != std::string::npos) {
         auto lastDot = s.rfind('.');
         if (lastDot != std::string::npos && lastDot + 1 < s.size()) {
@@ -558,7 +558,7 @@ static std::string prettifyAppName(const std::string& raw) {
     if (lower.find("rolling") != std::string::npos && lower.find("sky") != std::string::npos) return "Rolling Sky";
     if (lower.find("triangle") != std::string::npos) return "Triangle Test";
 
-    // 2. Tách các tiền tố/hậu tố rác thường gặp trong tên file APK mod/port
+    // 2. Separate common junk prefixes/suffixes in mod/port APK file names
     for (char& c : s) {
         if (c == '-' || c == '_') c = ' ';
     }
@@ -575,7 +575,7 @@ static std::string prettifyAppName(const std::string& raw) {
             wLower == "moddroid" || wLower == "an1" || wLower == "apkmirror") {
             continue;
         }
-        // Bỏ qua version thuần số ví dụ "5.5.8" hoặc "v202"
+        // Ignore pure numeric version e.g. "5.5.8" or "v202"
         bool isVer = true;
         for (char c : word) {
             if (!std::isdigit(c) && c != '.' && c != 'v' && c != 'V') { isVer = false; break; }
@@ -619,7 +619,7 @@ static std::string prettifyAppName(const std::string& raw) {
 
 const std::string& APKExtractor::lastError() { return gLastError; }
 
-// Phần thân chung cho extract_apk / extract_split.
+// Generic body for extract_apk / extract_split.
 static bool extract_apk_impl(const std::string& apkPath, const std::string& targetDirectory,
                              bool requireEntries, bool extractManifest) {
     gLastError.clear();
@@ -675,7 +675,7 @@ static bool extract_apk_impl(const std::string& apkPath, const std::string& targ
             continue;
         }
         if (entry.empty() || entry.back() == '/') {
-            continue; // bỏ qua thư mục
+            continue; // skip folder
         }
         apkLog("Extracting: " + entry);
 
@@ -716,11 +716,11 @@ static bool extract_apk_impl(const std::string& apkPath, const std::string& targ
     }
 
     if (!found) {
-        if (!requireEntries) return true; // split chỉ chứa res/ — không có gì để lấy, không lỗi
+        if (!requireEntries) return true; // split contains only res/ — nothing to get, no error
         gLastError = "No expected entries found in APK"; apkLog(gLastError); return false;
     }
 
-    // Lưu app_icon.png nếu tìm thấy
+    // Save app_icon.png if found
     if (!bestIconData.empty()) {
         const auto iconDest = std::filesystem::path(targetDirectory) / "app_icon.png";
         std::ofstream iconFile(iconDest, std::ios::binary);
@@ -731,7 +731,7 @@ static bool extract_apk_impl(const std::string& apkPath, const std::string& targ
         }
     }
 
-    // Lưu app_info.json (metadata: version, label, package)
+    // Save app_info.json (metadata: version, label, package)
     if (extractManifest) {
         const auto infoDest = std::filesystem::path(targetDirectory) / "app_info.json";
         std::string appDirName = std::filesystem::path(targetDirectory).filename().string();
@@ -783,8 +783,8 @@ bool APKExtractor::is_bundle_container(const std::string& path) {
     if (!readZipEntries(f, size, entries)) return false;
     for (const auto& e : entries) {
         if (!endsWithCi(e.name, ".apk")) continue;
-        // Chỉ coi là container nếu .apk nằm ở top-level hoặc dưới splits/ —
-        // tránh nhầm APK bình thường có chứa file .apk trong assets/.
+        // Only considered a container if the .apk is at the top-level or below splits/ —
+        // Avoid mistakenly normal APK containing .apk file in assets/.
         if (e.name.find('/') == std::string::npos || e.name.rfind("splits/", 0) == 0) {
             return true;
         }
@@ -802,8 +802,8 @@ bool APKExtractor::extract_bundle(const std::string& containerPath, const std::s
     std::vector<ZipEntryInfo> allEntries;
     if (!readZipEntries(f, size, allEntries)) return false;
 
-    // Chọn các APK liên quan: base + arm64-v8a + config không phải ABI khác.
-    // Bỏ split ABI khác (armeabi/x86/mips) để khỏi tốn I/O vô ích.
+    // Select related APKs: base + arm64-v8a + other non-ABI config.
+    // Remove other ABI split (armeabi/x86/mips) to avoid wasting useless I/O.
     std::vector<ZipEntryInfo> apks;
     for (const auto& e : allEntries) {
         if (!endsWithCi(e.name, ".apk")) continue;
@@ -814,14 +814,14 @@ bool APKExtractor::extract_bundle(const std::string& containerPath, const std::s
     }
     if (apks.empty()) { gLastError = "Bundle container has no usable APK splits"; apkLog(gLastError); return false; }
 
-    // Xử lý base sau cùng để AndroidManifest.xml thật (của base) ghi đè manifest
-    // wrapper của các split.
+    // Process the base finally so that the actual (base's) AndroidManifest.xml overwrites the manifest
+    // wrapper of the split.
     auto isBaseApk = [](const ZipEntryInfo& e) {
         const std::string lower = toLower(e.name);
         return lower.find("base") != std::string::npos || lower.find("config") == std::string::npos;
     };
     std::stable_sort(apks.begin(), apks.end(), [&](const ZipEntryInfo& a, const ZipEntryInfo& b) {
-        return !isBaseApk(a) && isBaseApk(b); // non-base trước, base cuối
+        return !isBaseApk(a) && isBaseApk(b); // non-base first, base last
     });
 
     const auto splitDir = std::filesystem::path(targetDirectory) / "__bundle_splits__";
@@ -853,24 +853,24 @@ bool APKExtractor::extract_bundle(const std::string& containerPath, const std::s
     }
 
     // ── OBB expansion files ──
-    // .xapk (APKPure) thường chứa "Android/obb/<pkg>/<file>.obb". Game đọc chúng
+    // .xapk (APKPure) usually contains "Android/obb/<pkg>/<file>.obb". The game reads them
     // qua /sdcard/Android/obb/<pkg>/<file> — VFSPathRemapper map /sdcard/ →
-    // <androidRoot>/sdcard/. Vậy trích xuất vào <androidRoot>/sdcard/Android/obb/.
-    // targetDirectory = <androidRoot>/data/app/<appName> → androidRoot ở 3 cấp trên.
+    // <androidRoot>/sdcard/. So extract to <androidRoot>/sdcard/Android/obb/.
+    // targetDirectory = <androidRoot>/data/app/<appName> → androidRoot 3 levels above.
     const auto androidRoot = std::filesystem::path(targetDirectory).parent_path().parent_path().parent_path();
     const std::string appName = std::filesystem::path(targetDirectory).filename().string();
     const auto obbRoot = androidRoot / "sdcard/Android/obb";
 
     for (const auto& e : allEntries) {
         if (!endsWithCi(e.name, ".obb")) continue;
-        // Lấy package từ đường dẫn entry (".../Android/obb/<pkg>/file.obb" hoặc
-        // ".../obb/<pkg>/file.obb" — tìm ở bất kỳ đâu trong path vì một số tool
-        // zip kèm thư mục tiền tố); nếu không có thì fallback sang tên app.
+        // Get the package from the entry path (".../Android/obb/<pkg>/file.obb" or
+        // ".../obb/<pkg>/file.obb" — search anywhere in the path for some tools
+        // zip with prefix directory); If not, fallback to app name.
         std::string pkg = appName;
         std::string rel = e.name;
         auto pos = rel.find("Android/obb/");
         if (pos != std::string::npos) {
-            rel = rel.substr(pos + 12); // cắt tới "<pkg>/file.obb"
+            rel = rel.substr(pos + 12); // cut to "<pkg>/file.obb"
         } else {
             pos = rel.find("obb/");
             if (pos != std::string::npos) rel = rel.substr(pos + 4);
@@ -898,7 +898,7 @@ bool APKExtractor::extract_bundle(const std::string& containerPath, const std::s
         apkLog("OBB extracted -> " + obbDest.string());
     }
 
-    // Dọn temp (kể cả khi lỗi).
+    // Clean up temp (even if there are errors).
     std::filesystem::remove_all(splitDir, error);
     if (!ok) return false;
     apkLog("Bundle merged into " + targetDirectory);
@@ -911,22 +911,22 @@ ManifestInfo APKExtractor::parse_manifest(const std::uint8_t* data, std::size_t 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// parse_manifest_text — AndroidManifest.xml dạng TEXT thuần. APK repack bởi
-// apktool / công cụ mod (BANDISHARE v.v.) thường chứa manifest text thay vì
-// binary AXML; parseAxml trả rỗng với chúng. Heuristic: quét từng thẻ
-// <activity ...> / <activity-alias ...>, gom attribute name=, theo dõi
-// intent-filter con chứa action MAIN + category LAUNCHER.
+// parse_manifest_text — AndroidManifest.xml plain TEXT. APK repack by
+// apktool/mod tools (BANDISHARE etc.) usually contain manifest text instead
+// binary AXML; parseAxml returns empty on them. Heuristic: scan each card
+// <activity ...> / <activity-alias ...>, collect attribute name=, track
+// The child intent-filter contains action MAIN + category LAUNCHER.
 // ─────────────────────────────────────────────────────────────────────────────
 
 namespace {
 
 std::string extractXmlAttr(const std::string& tag, const char* attrName) {
-    // Tìm attrName="value" hoặc attrName='value' trong chuỗi tag. Attr có thể
-    // có namespace (android:name=) — chấp nhận cả 2 dạng: " name=" và ":name=".
+    // Find attrName="value" or attrName='value' in the tag string. Attr can
+    // has namespace (android:name=) — accepts both forms: " name=" and ":name=".
     const std::string needle = std::string(attrName) + "=";
     std::size_t pos = 0;
     while ((pos = tag.find(needle, pos)) != std::string::npos) {
-        // Ký tự trước attrName phải là space, '<' hoặc ':' (namespace prefix).
+        // The character before attrName must be a space, '<' or ':' (namespace prefix).
         if (pos > 0) {
             const char prev = tag[pos - 1];
             if (!std::isspace(static_cast<unsigned char>(prev)) &&
@@ -953,7 +953,7 @@ ManifestInfo APKExtractor::parse_manifest_text(const char* data, std::size_t siz
     if (!data || size == 0) return info;
     const std::string xml(data, size);
 
-    // package="..." trên thẻ <manifest>.
+    // package="..." on the <manifest> tag.
     {
         const std::size_t mpos = xml.find("<manifest");
         if (mpos != std::string::npos) {
@@ -987,7 +987,7 @@ ManifestInfo APKExtractor::parse_manifest_text(const char* data, std::size_t siz
         const bool isClose = tag.size() > 1 && tag[1] == '/';
         const bool isSelfClose = tag.size() > 1 && tag[tag.size() - 2] == '/';
 
-        // Tên thẻ: bỏ '<' hoặc '</' rồi lấy token đầu.
+        // Card name: remove '<' or '</' and take the first token.
         std::string tagName;
         {
             std::size_t s = 1;
@@ -1083,7 +1083,7 @@ std::string APKExtractor::get_package_name(const std::string& apkPath) {
         }
     }
 
-    // Fallback: Tự động lọc bỏ phần version _1.0.10 nếu có
+    // Fallback: Automatically filter out version _1.0.10 if available
     std::string stem = std::filesystem::path(apkPath).stem().string();
     auto idx = stem.find('_');
     if (idx != std::string::npos) {

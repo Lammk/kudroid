@@ -19,7 +19,7 @@ const SymbolEntry* get_asset_symbols(size_t* count);
 extern "C" {
 #endif
 
-// Đặt thư mục chứa assets đã extract (được gọi từ kudroid_run_apk / kudroid_load_apk).
+// Set the directory containing extracted assets (called from kudroid_run_apk / kudroid_load_apk).
 void kudroid_set_assets_dir(const char* dir);
 
 #ifdef __cplusplus

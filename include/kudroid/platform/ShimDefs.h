@@ -9,7 +9,7 @@ struct SymbolEntry {
     void* address;
 };
 
-// chức năng theo dõi chung cho các lớp đệm
+// Generic tracking function for buffer layers
 void trace_shim(const char* message);
 
 } // namespace kudroid

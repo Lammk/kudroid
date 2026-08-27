@@ -1,6 +1,6 @@
 package android.content.pm;
 
-/** Stub sinh tự động cho android.content.pm.ActivityInfo */
+/** Stub automatically generated for android.content.pm.ActivityInfo */
 public class ActivityInfo {
     public ActivityInfo() {}
 }

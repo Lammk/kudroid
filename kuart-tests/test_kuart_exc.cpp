@@ -1,8 +1,8 @@
-// Host test cho KuART bước 5: bảng try/catch + <clinit> tự chạy.
+// Host test for KuART b c 5: try/catch table + auto-executing <clinit>.
 //
-// Vẫn build hai lượt (lượt 1 học index, lượt 2 điền bytecode thật) như các test
-// KuART khác. Offset trong bytecode tính theo CODE UNIT — đếm sai một đơn vị là
-// nhảy vào giữa instruction, nên mỗi khối code dưới đây có chú thích pc.
+// V n build hai l t (l t 1 h c index, l t 2  i n bytecode th t) nh  c c test
+// KuART kh c. Offset trong bytecode t nh theo CODE UNIT    m sai m t  n v  l
+// nh y v o gi a instruction, n n m i kh i code d i  y c  ch  th ch pc.
 #include "kudroid/kuart/DexClassLinker.h"
 #include "kudroid/kuart/Interpreter.h"
 
@@ -90,16 +90,16 @@ struct Specs {
     MethodSpec bad_clinit;
 
     MethodSpec catch_arith;     // try div → catch ArithmeticException
-    MethodSpec catch_two;       // hai handler, handler thứ hai khớp
+    MethodSpec catch_two;       // hai handler, handler th  hai kh p
     MethodSpec catch_all;       // catch-all (finally)
-    MethodSpec catch_check;     // move-exception rồi instance-of
-    MethodSpec no_match;        // handler không khớp → truyền lên
-    MethodSpec uncaught;        // không có try
-    MethodSpec thrower;         // ném để caller bắt
-    MethodSpec caller_catches;  // bắt exception của callee
-    MethodSpec read_c;          // sget → kích hoạt <clinit> của LC
+    MethodSpec catch_check;     // move-exception r i instance-of
+    MethodSpec no_match;        // handler kh ng kh p   truy n l n
+    MethodSpec uncaught;        // kh ng c  try
+    MethodSpec thrower;         // n m   caller b t
+    MethodSpec caller_catches;  // b t exception c a callee
+    MethodSpec read_c;          // sget   k ch ho t <clinit> c a LC
     MethodSpec read_counter;
-    MethodSpec read_bad;        // <clinit> ném exception
+    MethodSpec read_bad;        // <clinit> n m exception
 
     Specs() {
         object_ctor.name = "<init>";
@@ -197,7 +197,7 @@ std::vector<ClassSpec> BuildClasses(const Specs& s) {
 }  // namespace
 
 int main() {
-    std::printf("=== KuART bước 5: try/catch + <clinit> ===\n");
+std::printf("=== KuART b c 5: try/catch + <clinit> ===\n");
 
     Specs probe;
     DexBuilder index_builder;
@@ -227,7 +227,7 @@ int main() {
     s.myex_ctor.ins_size = 1;
 
     // LC.<clinit>: init = 42; Counter.n = Counter.n + 1
-    // Tăng Counter.n để đếm số lần <clinit> thực sự chạy.
+    // T ng Counter.n    m s  l n <clinit> th c s  ch y.
     {
         std::vector<uint16_t> c;
         Op21s(&c, kOpConst16, 0, 42);          // pc 0
@@ -239,7 +239,7 @@ int main() {
         s.c_clinit.code = c;
         s.c_clinit.registers_size = 1;
     }
-    // LBad.<clinit>: x = 1 / 0 → ném ArithmeticException
+    // LBad.<clinit>: x = 1 / 0   n m ArithmeticException
     {
         std::vector<uint16_t> c;
         c.push_back(Op11n(kOpConst4, 0, 1));  // pc 0
@@ -269,7 +269,7 @@ int main() {
         s.catch_arith.tries = {t};
     }
 
-    // LE.catchTwo(a, b): handler đầu (MyEx) không khớp, handler thứ hai khớp.
+    // LE.catchTwo(a, b): handler  u (MyEx) kh ng kh p, handler th  hai kh p.
     {
         std::vector<uint16_t> c;
         Op23x(&c, kOpDivInt, 0, 1, 2);           // pc 0..1
@@ -290,7 +290,7 @@ int main() {
         s.catch_two.tries = {t};
     }
 
-    // LE.catchAll(): try { throw new MyEx(); } catch (mọi thứ) { return 7; }
+    // LE.catchAll(): try { throw new MyEx(); } catch (m i th ) { return 7; }
     {
         std::vector<uint16_t> c;
         Op21c(&c, kOpNewInstance, 0, kTypeMyEx);            // pc 0..1
@@ -305,11 +305,11 @@ int main() {
         TrySpec t;
         t.start_addr = 0;
         t.insn_count = 6;
-        t.handlers = {{"", 6}};  // type rỗng = catch-all
+        t.handlers = {{"", 6}};  // type r ng = catch-all
         s.catch_all.tries = {t};
     }
 
-    // LE.catchCheck(): bắt bằng RuntimeException rồi kiểm tra object đúng là MyEx.
+    // LE.catchCheck(): b t b ng RuntimeException r i ki m tra object  ng l  MyEx.
     {
         std::vector<uint16_t> c;
         Op21c(&c, kOpNewInstance, 0, kTypeMyEx);          // pc 0..1
@@ -328,7 +328,7 @@ int main() {
         s.catch_check.tries = {t};
     }
 
-    // LE.noMatch(a, b): chỉ bắt MyEx nên ArithmeticException phải lọt lên.
+    // LE.noMatch(a, b): ch  b t MyEx n n ArithmeticException ph i l t l n.
     {
         std::vector<uint16_t> c;
         Op23x(&c, kOpDivInt, 0, 1, 2);           // pc 0..1
@@ -346,7 +346,7 @@ int main() {
         s.no_match.tries = {t};
     }
 
-    // LE.uncaught(): ném mà không có try.
+    // LE.uncaught(): n m m  kh ng c  try.
     {
         std::vector<uint16_t> c;
         Op21c(&c, kOpNewInstance, 0, kTypeMyEx);
@@ -357,7 +357,7 @@ int main() {
         s.uncaught.outs_size = 1;
     }
 
-    // LE.thrower(): ném MyEx, không bắt.
+    // LE.thrower(): n m MyEx, kh ng b t.
     {
         std::vector<uint16_t> c;
         Op21c(&c, kOpNewInstance, 0, kTypeMyEx);
@@ -368,7 +368,7 @@ int main() {
         s.thrower.outs_size = 1;
     }
 
-    // LE.callerCatches(): try { thrower(); return 1; } catch (mọi thứ) { return 9; }
+    // LE.callerCatches(): try { thrower(); return 1; } catch (m i th ) { return 9; }
     {
         std::vector<uint16_t> c;
         Op35c(&c, kOpInvokeStatic, kMethodThrower, {});  // pc 0..2
@@ -400,7 +400,7 @@ int main() {
     DexBuilder builder;
     const std::vector<uint8_t> dex = builder.Build(BuildClasses(s));
     std::printf("DEX synthetic: %zu bytes\n", dex.size());
-    Check(builder.TypeIndexOf("LMyEx;") == kTypeMyEx, "index ổn định giữa hai lượt build");
+Check(builder.TypeIndexOf("LMyEx;") == kTypeMyEx, "index  n  nh gi a hai l t build");
 
     kudroid::kuart::DexClassLinker linker;
     std::string error;
@@ -427,7 +427,7 @@ int main() {
         interp.ClearPendingException();
         kudroid::kuart::DexMethod* m = e->FindDirectMethod(name, sig);
         if (m == nullptr) {
-            std::printf("  FAIL không tìm thấy %s%s\n", name, sig);
+std::printf("  FAIL not found %s%s\n", name, sig);
             ++g_failures;
             return r;
         }
@@ -441,67 +441,67 @@ int main() {
     {
         const CallResult ok = call("catchArith", "(II)I",
                                    {DexValue::Int(84), DexValue::Int(2)});
-        Check(!ok.threw && ok.value.i == 42, "try không ném thì chạy bình thường (84/2=42)");
+Check(!ok.threw && ok.value.i == 42, "try kh ng n m th  ch y b nh th ng (84/2=42)");
 
         const CallResult caught = call("catchArith", "(II)I",
                                        {DexValue::Int(84), DexValue::Int(0)});
-        Check(!caught.threw, "chia 0 bị catch, không lọt lên caller");
-        Check(caught.value.i == -1, "handler chạy và trả -1");
+Check(!caught.threw, "chia 0 b  catch, kh ng l t l n caller");
+Check(caught.value.i == -1, "handler ch y v  tr  -1");
     }
     {
         const CallResult r = call("catchTwo", "(II)I",
                                   {DexValue::Int(1), DexValue::Int(0)});
-        Check(!r.threw && r.value.i == 2, "chọn handler khớp kiểu, bỏ qua handler không khớp");
+Check(!r.threw && r.value.i == 2, "ch n handler kh p ki u, b  qua handler kh ng kh p");
     }
     {
         const CallResult r = call("catchAll", "()I", {});
-        Check(!r.threw && r.value.i == 7, "catch-all bắt được throw tường minh");
+Check(!r.threw && r.value.i == 7, "catch-all b t  c throw t ng minh");
     }
     {
         const CallResult r = call("catchCheck", "()I", {});
-        Check(!r.threw, "bắt bằng superclass (RuntimeException bắt MyEx)");
-        Check(r.value.i == 1, "move-exception trả đúng object đã ném");
+Check(!r.threw, "b t b ng superclass (RuntimeException b t MyEx)");
+Check(r.value.i == 1, "move-exception tr   ng object   n m");
     }
     {
         const CallResult r = call("noMatch", "(II)I",
                                   {DexValue::Int(1), DexValue::Int(0)});
-        Check(r.threw, "handler không khớp kiểu → exception truyền lên caller");
+Check(r.threw, "handler kh ng kh p ki u   exception truy n l n caller");
     }
     {
         const CallResult r = call("uncaught", "()I", {});
-        Check(r.threw, "method không có try thì exception truyền lên");
+Check(r.threw, "method kh ng c  try th  exception truy n l n");
     }
     {
         const CallResult r = call("callerCatches", "()I", {});
-        Check(!r.threw, "exception của callee bị caller bắt");
-        Check(r.value.i == 9, "caller chạy handler của mình");
+Check(!r.threw, "exception c a callee b  caller b t");
+Check(r.value.i == 9, "caller ch y handler c a m nh");
     }
 
     // ── <clinit> ──
     {
         kudroid::kuart::DexClass* c = linker.FindClass("LC;");
         Check(c != nullptr && c->status != kudroid::kuart::DexClass::Status::kInitialized,
-              "class chưa được dùng thì chưa khởi tạo");
+"class ch a  c d ng th  ch a initialize");
 
         const CallResult first = call("readC", "()I", {});
-        Check(!first.threw && first.value.i == 42, "sget kích hoạt <clinit>, đọc được 42");
+Check(!first.threw && first.value.i == 42, "sget k ch ho t <clinit>,  c  c 42");
         Check(c->status == kudroid::kuart::DexClass::Status::kInitialized,
-              "class chuyển sang kInitialized");
+"class chuy n sang kInitialized");
 
         const CallResult second = call("readC", "()I", {});
-        Check(!second.threw && second.value.i == 42, "lần đọc thứ hai vẫn đúng");
+Check(!second.threw && second.value.i == 42, "l n  c th  hai v n  ng");
 
         const CallResult count = call("readCounter", "()I", {});
-        Check(!count.threw && count.value.i == 1, "<clinit> chỉ chạy MỘT lần");
+Check(!count.threw && count.value.i == 1, "<clinit> ch  ch y M T l n");
     }
     {
         const CallResult r = call("readBad", "()I", {});
-        Check(r.threw, "<clinit> ném exception thì lan ra chỗ dùng class");
+Check(r.threw, "<clinit> n m exception th  lan ra ch  d ng class");
         kudroid::kuart::DexClass* bad = linker.FindClass("LBad;");
         Check(bad != nullptr && bad->status == kudroid::kuart::DexClass::Status::kError,
-              "class có <clinit> lỗi bị đánh dấu kError");
+"class c  <clinit> error b   nh d u kError");
     }
 
-    std::printf("=== %s (%d lỗi) ===\n", g_failures == 0 ? "PASSED" : "FAILED", g_failures);
+std::printf("=== %s (%d error) ===\n", g_failures == 0 ? "PASSED" : "FAILED", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

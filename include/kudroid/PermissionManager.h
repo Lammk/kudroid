@@ -26,20 +26,20 @@ public:
 
     void init(const std::string& documentsDir);
 
-    // Kiểm tra quyền
+    // Check permissions
     int checkPermission(const std::string& packageName, const std::string& permissionName);
     
-    // Cấp / Thu hồi quyền theo nhóm (e.g. "storage", "internet", "camera")
+    // Grant/Revoke permissions by group (e.g. "storage", "internet", "camera")
     void setGroupPermission(const std::string& packageName, const std::string& groupKey, bool granted);
     bool isGroupGranted(const std::string& packageName, const std::string& groupKey);
 
-    // Cấp / Thu hồi quyền cụ thể
+    // Grant/Revoke specific permissions
     void setPermission(const std::string& packageName, const std::string& permissionName, bool granted);
 
-    // Cấp toàn bộ quyền cho app
+    // Grant full permissions to the app
     void grantAll(const std::string& packageName);
 
-    // Lấy danh sách các nhóm quyền
+    // Get the list of permission groups
     const std::vector<PermissionGroup>& getPermissionGroups() const;
 
     // JSON export cho Swift Shell

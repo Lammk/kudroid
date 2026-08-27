@@ -7,11 +7,11 @@ import android.view.View;
 import android.database.DataSetObserver;
 
 /**
- * android.widget.AbsListView — phần chung của ListView/GridView: giữ adapter,
- * sinh view con từ adapter, dispatch item click theo toạ độ chạm.
+ * android.widget.AbsListView — general part of ListView/GridView: holds adapter,
+ * Generate child view from adapter, dispatch item click according to touch coordinates.
  */
 public abstract class AbsListView extends AdapterView<ListAdapter> {
-    /** Trạng thái scroll: đứng yên. */
+    /** Scroll status: stationary. */
     public static final int SCROLL_STATE_IDLE = 0;
     public static final int SCROLL_STATE_TOUCH_SCROLL = 1;
     public static final int SCROLL_STATE_FLING = 2;
@@ -21,7 +21,7 @@ public abstract class AbsListView extends AdapterView<ListAdapter> {
     public static final int CHOICE_MODE_MULTIPLE = 2;
 
     /**
-     * Callback khi danh sách scroll.
+     * Callback when the list scrolls.
      */
     public interface OnScrollListener {
         int SCROLL_STATE_IDLE = 0;
@@ -35,7 +35,7 @@ public abstract class AbsListView extends AdapterView<ListAdapter> {
     }
 
     /**
-     * Bộ chọn nhiều item ở chế độ ActionMode.
+     * Multi-item selector in ActionMode mode.
      */
     public interface MultiChoiceModeListener extends android.view.ActionMode.Callback {
         void onItemCheckedStateChanged(android.view.ActionMode mode, int position, long id,
@@ -47,7 +47,7 @@ public abstract class AbsListView extends AdapterView<ListAdapter> {
     private int mChoiceMode = CHOICE_MODE_NONE;
     private int mItemHeight = 0;
 
-    /** Layout lại khi adapter báo dữ liệu đổi — không có việc này list sẽ đứng im. */
+    /** Re-layout when the adapter reports data changes — without this, the list will remain static. */
     private final DataSetObserver mObserver = new DataSetObserver() {
         @Override
         public void onChanged() {
@@ -93,7 +93,7 @@ public abstract class AbsListView extends AdapterView<ListAdapter> {
         return mChoiceMode;
     }
 
-    /** Sinh lại toàn bộ view con từ adapter (không có view recycling). */
+    /** Regenerate all child views from the adapter (no view recycling). */
     protected void rebuildChildren() {
         removeAllViews();
         if (mAdapter == null) return;
@@ -117,7 +117,7 @@ public abstract class AbsListView extends AdapterView<ListAdapter> {
                                 mAdapter.getItemId(position));
     }
 
-    /** Tìm index item chứa điểm (x,y); INVALID_POSITION nếu ngoài mọi item. */
+    /** Find index items containing points (x,y); INVALID_POSITION if beyond all items. */
     public int pointToPosition(int x, int y) {
         final int n = getChildCount();
         for (int i = 0; i < n; ++i) {

@@ -16,8 +16,8 @@ void DexFrame::LoadArguments(const DexValue* args, size_t count, const char* sho
         ++reg;
     }
 
-    // shorty[0] là kiểu trả về; tham số bắt đầu từ [1]. Long/double chiếm hai
-    // slot register dù chỉ là một phần tử trong `args`.
+    // shorty[0] is the return type; parameters start from [1]. Long/double takes two
+    // slot register is just an element in `args`.
     if (shorty != nullptr) {
         for (const char* p = shorty + 1; *p != '\0' && arg_index < count; ++p) {
             Set(reg, args[arg_index]);

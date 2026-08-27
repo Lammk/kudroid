@@ -6,13 +6,13 @@ import android.graphics.Paint;
 import android.view.View;
 
 /**
- * triển khai android.widget.textview tối thiểu.
+ * minimal android.widget.textview implementation.
  *
- * hiển thị văn bản. đối với khuôn khổ tối thiểu của kudroid, lưu trữ văn bản và paint.
+ * show text. for kudroid minimal framework, text storage and paint.
  */
 public class TextView extends View {
     /**
-     * Callback khi user nhấn action key trên bàn phím mềm (Done/Search/...).
+     * Callback when the user presses the action key on the soft keyboard (Done/Search/...).
      */
     public interface OnEditorActionListener {
         boolean onEditorAction(TextView v, int actionId, android.view.KeyEvent event);
@@ -46,7 +46,7 @@ public class TextView extends View {
         mOnEditorActionListener = l;
     }
 
-    /** Trả false nếu không có listener nào tiêu thụ action. */
+    /** Returns false if no listener consumes the action. */
     public boolean onEditorAction(int actionCode) {
         if (mOnEditorActionListener != null) {
             return mOnEditorActionListener.onEditorAction(this, actionCode, null);
@@ -55,14 +55,14 @@ public class TextView extends View {
     }
 
     /**
-     * trả về văn bản.
+     * returns text.
      */
     public CharSequence getText() {
         return mText;
     }
 
     /**
-     * thiết lập văn bản.
+     * set text.
      */
     public void setText(CharSequence text) {
         final CharSequence old = mText;
@@ -75,8 +75,8 @@ public class TextView extends View {
         for (int i = mWatchers.size() - 1; i >= 0; --i) {
             mWatchers.get(i).onTextChanged(mText, 0, oldLen, mText.length());
         }
-        // afterTextChanged nhận Editable; chỉ gọi khi text thật là Editable
-        // (EditText), còn TextView thuần thì bỏ qua đúng như Android.
+        // afterTextChanged get Editable; Only called when the actual text is Editable
+        // (EditText), and plain TextView is ignored just like Android.
         if (mText instanceof android.text.Editable) {
             for (int i = mWatchers.size() - 1; i >= 0; --i) {
                 mWatchers.get(i).afterTextChanged((android.text.Editable) mText);
@@ -85,14 +85,14 @@ public class TextView extends View {
     }
 
     /**
-     * thiết lập văn bản từ một id tài nguyên.
+     * set text from a resource id.
      */
     public void setText(int resId) {
         mText = "";
     }
 
     /**
-     * thiết lập màu văn bản.
+     * set text color.
      */
     public void setTextColor(int color) {
         mTextColor = color;
@@ -100,7 +100,7 @@ public class TextView extends View {
     }
 
     /**
-     * thiết lập kích thước văn bản.
+     * set text size.
      */
     public void setTextSize(float size) {
         mTextSize = size;
@@ -108,28 +108,28 @@ public class TextView extends View {
     }
 
     /**
-     * thiết lập trọng lực (gravity).
+     * set gravity.
      */
     public void setGravity(int gravity) {
         mGravity = gravity;
     }
 
     /**
-     * trả về trọng lực (gravity).
+     * returns gravity.
      */
     public int getGravity() {
         return mGravity;
     }
 
     /**
-     * trả về màu văn bản.
+     * returns text color.
      */
     public int getCurrentTextColor() {
         return mTextColor;
     }
 
     /**
-     * trả về kích thước văn bản.
+     * returns the text size.
      */
     public float getTextSize() {
         return mTextSize;

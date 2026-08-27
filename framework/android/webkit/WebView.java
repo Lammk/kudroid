@@ -1,6 +1,6 @@
 package android.webkit;
 
-/** Stub sinh tự động cho android.webkit.WebView */
+/** Stub automatically generated for android.webkit.WebView */
 public class WebView {
     public WebView() {}
 

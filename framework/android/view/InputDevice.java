@@ -1,6 +1,6 @@
 package android.view;
 
-/** Stub sinh tự động cho android.view.InputDevice */
+/** Stub automatically generated for android.view.InputDevice */
 public class InputDevice {
     public InputDevice() {}
 }

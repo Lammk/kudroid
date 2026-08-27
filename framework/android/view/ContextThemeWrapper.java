@@ -1,6 +1,6 @@
 package android.view;
 
-/** Stub sinh tự động cho android.view.ContextThemeWrapper */
+/** Stub automatically generated for android.view.ContextThemeWrapper */
 public class ContextThemeWrapper {
     public ContextThemeWrapper() {}
 }

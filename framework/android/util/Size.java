@@ -1,6 +1,6 @@
 package android.util;
 
-/** Stub sinh tự động cho android.util.Size */
+/** Stub automatically generated for android.util.Size */
 public class Size {
     public Size() {}
 }

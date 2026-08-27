@@ -1,11 +1,11 @@
-// Host test cho DexJniEnv: hai chiều Java ⇄ native.
+// Host test for DexJniEnv: two-way Java <-> native.
 //
-// Chiều 1: bytecode invoke-static gọi method native đã RegisterNatives.
-// Chiều 2: hàm native đó dùng JNIEnv gọi ngược vào bytecode, đọc/ghi field,
-//          tạo string/array, ném exception.
+// Chi u 1: bytecode invoke-static g i method native   RegisterNatives.
+// Chi u 2: h m native   d ng JNIEnv g i ng c v o bytecode,  c/ghi field,
+// t o string/array, n m exception.
 //
-// Vẫn dùng thủ thuật build hai lượt như test_kuart_object: bytecode tham chiếu
-// entity bằng index, index chỉ chốt sau khi builder sort xong mọi bảng.
+// V n d ng th  thu t build hai l t nh  test_kuart_object: bytecode tham chi u
+// entity b ng index, index ch  ch t sau khi builder sort xong m i b ng.
 #include "kudroid/kuart/DexJniEnv.h"
 
 #include <cstdio>
@@ -57,7 +57,7 @@ constexpr uint8_t kOpIput = 0x59;
 constexpr uint8_t kOpInvokeDirect = 0x70;
 constexpr uint8_t kOpInvokeStatic = 0x71;
 
-// ACC_PUBLIC|ACC_STATIC|ACC_NATIVE — method không có code item.
+// ACC_PUBLIC|ACC_STATIC|ACC_NATIVE   method kh ng c  code item.
 constexpr uint32_t kAccPublicStaticNative = 0x1 | 0x8 | 0x100;
 
 struct Specs {
@@ -65,12 +65,12 @@ struct Specs {
     FieldSpec total{"total", "I", 0x9};
 
     MethodSpec nat_ctor;
-    MethodSpec get_value;      // virtual: trả this.value
+    MethodSpec get_value;      // virtual: tr  this.value
     MethodSpec native_add;     // static native (II)I
-    MethodSpec native_probe;   // static native (LNat;)I — gọi ngược vào Java
-    MethodSpec call_native;    // static: gọi nativeAdd
-    MethodSpec call_probe;     // static: gọi nativeProbe
-    MethodSpec make_nat;       // static: new Nat, set value, trả object
+    MethodSpec native_probe;   // static native (LNat;)I   g i ng c v o Java
+    MethodSpec call_native;    // static: g i nativeAdd
+    MethodSpec call_probe;     // static: g i nativeProbe
+    MethodSpec make_nat;       // static: new Nat, set value, tr  object
 
     Specs() {
         nat_ctor.name = "<init>";
@@ -136,60 +136,60 @@ std::vector<ClassSpec> BuildClasses(const Specs& s) {
     return {object, string, nat};
 }
 
-// Runtime dùng chung cho các hàm native bên dưới; chúng chỉ nhận JNIEnv nên
-// mọi thứ khác phải lấy qua env hoặc biến file-scope này.
+// Runtime d ng chung cho c c h m native b n d i; ch ng ch  nh n JNIEnv n n
+// m i th  kh c ph i l y qua env ho c bi n file-scope n y.
 kudroid::kuart::DexClassLinker* g_linker = nullptr;
 
-// ── các hàm native được RegisterNatives ──
+// c c h m native  c RegisterNatives
 
 jint JNICALL NativeAdd(JNIEnv* env, jclass clazz, jint a, jint b) {
-    Check(env != nullptr, "native nhận JNIEnv khác null");
-    Check(clazz != nullptr, "native static nhận jclass khác null");
+Check(env != nullptr, "native nh n JNIEnv kh c null");
+Check(clazz != nullptr, "native static nh n jclass kh c null");
     return a + b;
 }
 
-// Kiểm tra toàn bộ chiều native → Java trong một lần gọi.
+// Ki m tra to n b  chi u native   Java trong m t l n g i.
 jint JNICALL NativeProbe(JNIEnv* env, jclass, jobject nat) {
-    // FindClass nhận tên không có L; — DexJniEnv phải tự bọc thành descriptor.
+    // FindClass nh n t n kh ng c  L;   DexJniEnv ph i t  b c th nh descriptor.
     jclass k = env->FindClass("Nat");
-    Check(k != nullptr, "FindClass(\"Nat\") không cần L;");
+Check(k != nullptr, "FindClass(\"Nat\") kh ng c n L;");
 
     jclass obj_class = env->GetObjectClass(nat);
-    Check(obj_class == k, "GetObjectClass trả đúng class");
+Check(obj_class == k, "GetObjectClass tr   ng class");
     Check(env->IsInstanceOf(nat, k) == JNI_TRUE, "IsInstanceOf");
 
     jclass super = env->GetSuperclass(k);
-    Check(super != nullptr, "GetSuperclass trả java/lang/Object");
+Check(super != nullptr, "GetSuperclass tr  java/lang/Object");
     Check(env->IsAssignableFrom(k, super) == JNI_TRUE, "IsAssignableFrom(Nat, Object)");
 
-    // Gọi ngược vào bytecode.
+    // G i ng c v o bytecode.
     jmethodID get_value = env->GetMethodID(k, "getValue", "()I");
     Check(get_value != nullptr, "GetMethodID(getValue)");
     const jint from_java = env->CallIntMethod(nat, get_value);
-    Check(from_java == 11, "CallIntMethod chạy bytecode, trả 11");
+Check(from_java == 11, "CallIntMethod ch y bytecode, tr  11");
 
     // Field instance.
     jfieldID fid = env->GetFieldID(k, "value", "I");
     Check(fid != nullptr, "GetFieldID(value)");
     Check(env->GetIntField(nat, fid) == 11, "GetIntField");
     env->SetIntField(nat, fid, 25);
-    Check(env->GetIntField(nat, fid) == 25, "SetIntField rồi đọc lại");
-    Check(env->CallIntMethod(nat, get_value) == 25, "bytecode thấy field vừa ghi");
+Check(env->GetIntField(nat, fid) == 25, "SetIntField r i  c l i");
+Check(env->CallIntMethod(nat, get_value) == 25, "bytecode th y field v a ghi");
 
     // Field static.
     jfieldID sfid = env->GetStaticFieldID(k, "total", "I");
     Check(sfid != nullptr, "GetStaticFieldID(total)");
     env->SetStaticIntField(k, sfid, 77);
-    Check(env->GetStaticIntField(k, sfid) == 77, "static field ghi/đọc");
+Check(env->GetStaticIntField(k, sfid) == 77, "static field ghi/ c");
 
-    // Gọi static method của Java (makeNat) rồi kiểm tra object trả về.
+    // G i static method c a Java (makeNat) r i ki m tra object tr  v .
     jmethodID make = env->GetStaticMethodID(k, "makeNat", "(I)LNat;");
     Check(make != nullptr, "GetStaticMethodID(makeNat)");
     jobject made = env->CallStaticObjectMethod(k, make, 99);
-    Check(made != nullptr, "CallStaticObjectMethod trả object");
-    Check(env->GetIntField(made, fid) == 99, "object do bytecode tạo có field đúng");
+Check(made != nullptr, "CallStaticObjectMethod tr  object");
+Check(env->GetIntField(made, fid) == 99, "object do bytecode t o c  field  ng");
 
-    // Chuỗi.
+    // Chu i.
     jstring str = env->NewStringUTF("kudroid");
     Check(str != nullptr, "NewStringUTF");
     Check(env->GetStringUTFLength(str) == 7, "GetStringUTFLength");
@@ -200,7 +200,7 @@ jint JNICALL NativeProbe(JNIEnv* env, jclass, jobject nat) {
     env->GetStringUTFRegion(str, 1, 3, region);
     Check(std::strcmp(region, "udr") == 0, "GetStringUTFRegion");
 
-    // Mảng nguyên thủy.
+    // M ng nguy n th y.
     jintArray arr = env->NewIntArray(4);
     Check(arr != nullptr, "NewIntArray");
     Check(env->GetArrayLength(arr) == 4, "GetArrayLength");
@@ -210,13 +210,13 @@ jint JNICALL NativeProbe(JNIEnv* env, jclass, jobject nat) {
     env->GetIntArrayRegion(arr, 0, 4, dst);
     Check(dst[0] == 5 && dst[3] == 8, "Set/GetIntArrayRegion");
     jint* elems = env->GetIntArrayElements(arr, nullptr);
-    Check(elems != nullptr && elems[2] == 7, "GetIntArrayElements trỏ thẳng vào mảng");
+Check(elems != nullptr && elems[2] == 7, "GetIntArrayElements tr  th ng v o m ng");
     elems[2] = 70;
     env->ReleaseIntArrayElements(arr, elems, 0);
     env->GetIntArrayRegion(arr, 2, 1, dst);
-    Check(dst[0] == 70, "ghi qua GetIntArrayElements có hiệu lực");
+Check(dst[0] == 70, "ghi qua GetIntArrayElements c  hi u l c");
 
-    // Mảng object.
+    // M ng object.
     jclass string_class = env->FindClass("java/lang/String");
     Check(string_class != nullptr, "FindClass(java/lang/String)");
     jobjectArray objs = env->NewObjectArray(2, string_class, nullptr);
@@ -226,14 +226,14 @@ jint JNICALL NativeProbe(JNIEnv* env, jclass, jobject nat) {
 
     // Reference.
     jobject global = env->NewGlobalRef(nat);
-    Check(env->IsSameObject(global, nat) == JNI_TRUE, "NewGlobalRef cùng object");
+Check(env->IsSameObject(global, nat) == JNI_TRUE, "NewGlobalRef c ng object");
     Check(env->GetObjectRefType(global) == JNIGlobalRefType, "GetObjectRefType global");
     env->DeleteGlobalRef(global);
 
     env->PushLocalFrame(8);
     jstring inner = env->NewStringUTF("tmp");
     jobject kept = env->PopLocalFrame(inner);
-    Check(kept != nullptr, "PopLocalFrame giữ lại kết quả");
+Check(kept != nullptr, "PopLocalFrame gi  l i k t qu ");
 
     // JavaVM.
     JavaVM* vm = nullptr;
@@ -241,12 +241,12 @@ jint JNICALL NativeProbe(JNIEnv* env, jclass, jobject nat) {
     JNIEnv* from_vm = nullptr;
     Check(vm->GetEnv(reinterpret_cast<void**>(&from_vm), JNI_VERSION_1_6) == JNI_OK &&
               from_vm == env,
-          "JavaVM::GetEnv trả lại đúng JNIEnv");
+"JavaVM::GetEnv tr  l i  ng JNIEnv");
 
     // Exception.
-    Check(env->ExceptionCheck() == JNI_FALSE, "chưa có exception");
+Check(env->ExceptionCheck() == JNI_FALSE, "ch a c  exception");
     env->ThrowNew(k, "test");
-    Check(env->ExceptionCheck() == JNI_TRUE, "ThrowNew đặt exception");
+Check(env->ExceptionCheck() == JNI_TRUE, "ThrowNew  t exception");
     Check(env->ExceptionOccurred() != nullptr, "ExceptionOccurred");
     env->ExceptionClear();
     Check(env->ExceptionCheck() == JNI_FALSE, "ExceptionClear");
@@ -325,7 +325,7 @@ int main() {
     DexBuilder builder;
     const std::vector<uint8_t> dex = builder.Build(BuildClasses(s));
     std::printf("DEX synthetic: %zu bytes\n", dex.size());
-    Check(builder.TypeIndexOf("LNat;") == kNatType, "index ổn định giữa hai lượt build");
+Check(builder.TypeIndexOf("LNat;") == kNatType, "index  n  nh gi a hai l t build");
 
     kudroid::kuart::DexClassLinker linker;
     std::string error;
@@ -345,19 +345,19 @@ int main() {
     kudroid::kuart::DexJniEnv jni(&linker, &interp);
     interp.set_jni_env(&jni);
 
-    // Method native chưa liên kết thì invoke phải ném UnsatisfiedLinkError.
+    // Method native ch a li n k t th  invoke ph i n m UnsatisfiedLinkError.
     {
         kudroid::kuart::DexMethod* m = nat->FindDirectMethod("callNative", "(II)I");
-        Check(m != nullptr, "tìm được callNative");
+Check(m != nullptr, "t m  c callNative");
         DexValue args[2] = {DexValue::Int(1), DexValue::Int(2)};
         interp.ClearPendingException();
         interp.Execute(m, args, 2);
-        Check(interp.HasPendingException(), "native chưa liên kết → có exception");
+Check(interp.HasPendingException(), "native ch a li n k t   c  exception");
         interp.ClearPendingException();
     }
 
-    // RegisterNatives như JNI_OnLoad của game. JNINativeMethod khai báo char*
-    // (không const) nên tên/chữ ký phải là buffer ghi được.
+    // RegisterNatives nh  JNI_OnLoad c a game. JNINativeMethod khai b o char*
+    // (kh ng const) n n t n/ch  k  ph i l  buffer ghi  c.
     char n1[] = "nativeAdd";
     char s1[] = "(II)I";
     char n2[] = "nativeProbe";
@@ -368,17 +368,17 @@ int main() {
     };
     Check(jni.RegisterNatives(nat, natives, 2) == JNI_OK, "RegisterNatives");
 
-    // Chiều 1: bytecode → native.
+    // Chi u 1: bytecode   native.
     {
         kudroid::kuart::DexMethod* m = nat->FindDirectMethod("callNative", "(II)I");
         DexValue args[2] = {DexValue::Int(20), DexValue::Int(22)};
         interp.ClearPendingException();
         const DexValue r = interp.Execute(m, args, 2);
-        Check(!interp.HasPendingException(), "invoke native không ném exception");
-        Check(r.i == 42, "bytecode gọi native, nhận 42");
+Check(!interp.HasPendingException(), "invoke native kh ng n m exception");
+Check(r.i == 42, "bytecode g i native, nh n 42");
     }
 
-    // RegisterNatives với method không tồn tại phải báo lỗi, không crash.
+    // RegisterNatives v i method kh ng t n t i ph i b o error, kh ng crash.
     {
         char bad_name[] = "khongCo";
         char bad_sig[] = "()V";
@@ -386,40 +386,40 @@ int main() {
         Check(jni.RegisterNatives(nat, bad, 1) == JNI_ERR, "RegisterNatives method sai → ERR");
     }
 
-    // Chiều 2: bytecode → native → bytecode, qua toàn bộ vtable JNIEnv.
+    // Chi u 2: bytecode   native   bytecode, qua to n b  vtable JNIEnv.
     {
         kudroid::kuart::DexMethod* make = nat->FindDirectMethod("makeNat", "(I)LNat;");
-        Check(make != nullptr, "tìm được makeNat");
+Check(make != nullptr, "t m  c makeNat");
         DexValue mk_arg[1] = {DexValue::Int(11)};
         interp.ClearPendingException();
         const DexValue obj = interp.Execute(make, mk_arg, 1);
-        Check(obj.l != nullptr, "makeNat trả object");
+Check(obj.l != nullptr, "makeNat tr  object");
 
         kudroid::kuart::DexMethod* m = nat->FindDirectMethod("callProbe", "(LNat;)I");
         DexValue args[1] = {DexValue::Ref(obj.l)};
         interp.ClearPendingException();
         const DexValue r = interp.Execute(m, args, 1);
-        Check(!interp.HasPendingException(), "nativeProbe không để lại exception");
-        Check(r.i == 36, "nativeProbe trả 11 + 25 = 36");
+Check(!interp.HasPendingException(), "nativeProbe kh ng   l i exception");
+Check(r.i == 36, "nativeProbe tr  11 + 25 = 36");
     }
 
-    // Gọi Java trực tiếp từ host qua CallJavaA (đường mà JNI vtable dùng).
+    // G i Java tr c ti p t  host qua CallJavaA ( ng m  JNI vtable d ng).
     {
         kudroid::kuart::DexMethod* make = nat->FindDirectMethod("makeNat", "(I)LNat;");
         jvalue mk[1];
         mk[0].i = 7;
         const DexValue obj = jni.CallJavaA(nullptr, make, mk, /*virtual_dispatch=*/false);
-        Check(obj.l != nullptr, "CallJavaA static trả object");
+Check(obj.l != nullptr, "CallJavaA static tr  object");
 
         kudroid::kuart::DexMethod* getter = nat->FindVirtualMethod("getValue", "()I");
         const DexValue v = jni.CallJavaA(obj.l, getter, nullptr, /*virtual_dispatch=*/true);
-        Check(v.i == 7, "CallJavaA virtual trả 7");
+Check(v.i == 7, "CallJavaA virtual tr  7");
     }
 
-    // Bảng ref: local tích luỹ trong frame ngoài cùng, global đã xoá hết.
-    Check(jni.NumGlobalRefs() == 0, "global ref đã dọn sạch");
-    Check(jni.NumLocalRefs() > 0, "local ref còn trong frame ngoài cùng");
+    // B ng ref: local t ch lu  trong frame ngo i c ng, global   xo  h t.
+Check(jni.NumGlobalRefs() == 0, "global ref   d n s ch");
+Check(jni.NumLocalRefs() > 0, "local ref c n trong frame ngo i c ng");
 
-    std::printf("=== %s (%d lỗi) ===\n", g_failures == 0 ? "PASSED" : "FAILED", g_failures);
+std::printf("=== %s (%d error) ===\n", g_failures == 0 ? "PASSED" : "FAILED", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

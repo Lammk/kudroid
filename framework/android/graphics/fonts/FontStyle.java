@@ -1,6 +1,6 @@
 package android.graphics.fonts;
 
-/** Stub sinh tự động cho android.graphics.fonts.FontStyle */
+/** Stub automatically generated for android.graphics.fonts.FontStyle */
 public class FontStyle {
     public FontStyle() {}
 }

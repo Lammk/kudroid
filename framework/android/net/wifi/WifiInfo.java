@@ -1,10 +1,10 @@
 package android.net.wifi;
 
 /**
- * mô phỏng android.net.wifi.wifiinfo.
+ * emulate android.net.wifi.wifiinfo.
  *
- * mô tả trạng thái của kết nối wifi. đối với khuôn khổ tối thiểu của kudroid,
- * đây là một mô phỏng có các giá trị mặc định.
+ * describes the status of the wifi connection. for kudroid minimal framework,
+ *this is a simulation with default values.
  */
 public class WifiInfo {
     private String mSSID = "";

@@ -1,6 +1,6 @@
 package android.window;
 
-/** Stub sinh tự động cho android.window.OnBackInvokedDispatcher */
+/** Stub automatically generated for android.window.OnBackInvokedDispatcher */
 public class OnBackInvokedDispatcher {
     public OnBackInvokedDispatcher() {}
 }

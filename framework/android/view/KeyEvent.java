@@ -1,14 +1,14 @@
 package android.view;
 
 /**
- * android.view.KeyEvent — sự kiện bàn phím / phím cứng.
+ * android.view.KeyEvent — keyboard / hard key events.
  */
 public class KeyEvent {
-    /** Hành động: phím được nhấn xuống. */
+    /** Action: key is pressed down. */
     public static final int ACTION_DOWN = 0;
-    /** Hành động: phím được nhả ra. */
+    /** Action: key is released. */
     public static final int ACTION_UP = 1;
-    /** Hành động: nhiều sự kiện gộp. */
+    /** Action: multiple events combined. */
     public static final int ACTION_MULTIPLE = 2;
 
     public static final int KEYCODE_UNKNOWN = 0;

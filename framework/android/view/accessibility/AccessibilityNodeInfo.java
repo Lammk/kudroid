@@ -1,6 +1,6 @@
 package android.view.accessibility;
 
-/** Stub sinh tự động cho android.view.accessibility.AccessibilityNodeInfo */
+/** Stub automatically generated for android.view.accessibility.AccessibilityNodeInfo */
 public class AccessibilityNodeInfo {
     public AccessibilityNodeInfo() {}
 

@@ -306,7 +306,7 @@ public class ArrayList<E> implements List<E>, Cloneable, java.io.Serializable {
 
         public void remove() {
             if (last < 0) {
-                throw new IllegalStateException("chưa gọi next()");
+                throw new IllegalStateException("next() has not been called");
             }
             ArrayList.this.remove(last);
             cursor = last;
@@ -315,7 +315,7 @@ public class ArrayList<E> implements List<E>, Cloneable, java.io.Serializable {
 
         public void set(E e) {
             if (last < 0) {
-                throw new IllegalStateException("chưa gọi next()");
+                throw new IllegalStateException("next() has not been called");
             }
             elements[last] = e;
         }

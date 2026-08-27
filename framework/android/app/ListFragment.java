@@ -1,6 +1,6 @@
 package android.app;
 
-/** Stub sinh tự động cho android.app.ListFragment */
+/** Stub automatically generated for android.app.ListFragment */
 public class ListFragment {
     public ListFragment() {}
 }

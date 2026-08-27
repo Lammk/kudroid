@@ -1,43 +1,43 @@
 package android.util;
 
 /**
- * triển khai android.util.displaymetrics tối thiểu.
+ * minimal android.util.displaymetrics implementation.
  *
- * mô tả kích thước và mật độ của màn hình. đối với kudroid, các giá trị được đặt
- * từ độ phân giải màn hình ios thực tế thông qua cầu nối gốc.
+ * describes the size and density of the screen. for kudroid, the values ​​are set
+ * from actual ios screen resolution via native bridge.
  */
 public class DisplayMetrics {
     /**
-     * Kích thước màn hình thật của máy iOS đang chạy — được bắn từ Swift
-     * (UIScreen.main.bounds) xuyên qua C++ (kudroid_set_metal_layer →
-     * kudroid_jni_update_display_metrics lúc JVM khởi tạo) vào đây.
+     * Actual screen size of running iOS device — shot from Swift
+     * (UIScreen.main.bounds) via C++ (kudroid_set_metal_layer →
+     * kudroid_jni_update_display_metrics at JVM initialization) go here.
      */
     public static int sWidthPixels = 1080;
     public static int sHeightPixels = 1920;
     public static float sDensity = 3.0f;
 
-    /** chiều rộng tuyệt đối của màn hình tính bằng pixel. */
+    /** the absolute width of the screen in pixels. */
     public int widthPixels;
-    /** chiều cao tuyệt đối của màn hình tính bằng pixel. */
+    /** absolute height of the screen in pixels. */
     public int heightPixels;
-    /** mật độ logic của màn hình. */
+    /** logical density of the screen. */
     public float density;
-    /** mật độ màn hình được biểu thị bằng số chấm trên inch. */
+    /** screen density expressed in dots per inch. */
     public int densityDpi;
-    /** số pixel vật lý chính xác trên mỗi inch của màn hình theo chiều x. */
+    /** the exact number of physical pixels per inch of the screen in the x direction. */
     public float xdpi;
-    /** số pixel vật lý chính xác trên mỗi inch của màn hình theo chiều y. */
+    /** the exact number of physical pixels per inch of the screen in the y direction. */
     public float ydpi;
-    /** mật độ màn hình được báo cáo trước khi chia tỷ lệ. */
+    /** reported screen density before scaling. */
     public float scaledDensity;
 
     public DisplayMetrics() {
-        // Đọc từ statics (đã được native cập nhật) thay vì hardcode.
+        // Read from statics (updated by native) instead of hardcode.
         setTo(sWidthPixels, sHeightPixels, sDensity);
     }
 
     /**
-     * Được gọi từ native (kudroid_jni.cpp) với số liệu thật của UIScreen.
+     * Called from native (kudroid_jni.cpp) with actual UIScreen metrics.
      */
     public static void updateFromNative(int width, int height, float densityValue) {
         sWidthPixels = width;
@@ -46,7 +46,7 @@ public class DisplayMetrics {
     }
 
     /**
-     * thiết lập các số liệu hiển thị từ cầu nối gốc.
+     * set the metrics displayed from the root bridge.
      */
     public void setTo(int width, int height, float densityValue) {
         widthPixels = width;

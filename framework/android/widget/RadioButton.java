@@ -1,6 +1,6 @@
 package android.widget;
 
-/** Stub sinh tự động cho android.widget.RadioButton */
+/** Stub automatically generated for android.widget.RadioButton */
 public class RadioButton {
     public RadioButton() {}
 }

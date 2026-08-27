@@ -1,6 +1,6 @@
 package android.graphics;
 
-/** Stub sinh tự động cho android.graphics.PorterDuffXfermode */
+/** Stub automatically generated for android.graphics.PorterDuffXfermode */
 public class PorterDuffXfermode {
     public PorterDuffXfermode() {}
 }

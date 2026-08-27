@@ -1,24 +1,24 @@
 package android.provider;
 
 /**
- * mô phỏng android.provider.settings.
+ * simulate android.provider.settings.
  *
- * không quan trọng đối với khởi động/kết xuất ứng dụng. trả về mặc định để các ứng dụng không
- * gặp sự cố khi chúng truy vấn các cài đặt hệ thống.
+ * is not important for application startup/rendering. Returns default to no applications
+ * crashes when they query system settings.
  */
 public final class Settings {
     private Settings() {
     }
 
     /**
-     * các cài đặt hệ thống.
+     * system settings.
      */
     public static final class System {
-        /** độ sáng màn hình. */
+        /** screen brightness. */
         public static final String SCREEN_BRIGHTNESS = "screen_brightness";
-        /** thời gian chờ tắt màn hình. */
+        /** screen off timeout. */
         public static final String SCREEN_OFF_TIMEOUT = "screen_off_timeout";
-        /** xoay gia tốc kế. */
+        /** rotate the accelerometer. */
         public static final String ACCELEROMETER_ROTATION = "accelerometer_rotation";
 
         private System() {
@@ -70,10 +70,10 @@ public final class Settings {
     }
 
     /**
-     * các cài đặt toàn cầu.
+     * global settings.
      */
     public static final class Global {
-        /** chế độ máy bay bật. */
+        /** airplane mode on. */
         public static final String AIRPLANE_MODE_ON = "airplane_mode_on";
 
         private Global() {
@@ -101,7 +101,7 @@ public final class Settings {
     }
 
     /**
-     * các cài đặt an toàn.
+     * safety settings.
      */
     public static final class Secure {
         /** id android. */

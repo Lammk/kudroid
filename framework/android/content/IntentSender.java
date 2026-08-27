@@ -1,6 +1,6 @@
 package android.content;
 
-/** Stub sinh tự động cho android.content.IntentSender */
+/** Stub automatically generated for android.content.IntentSender */
 public class IntentSender {
     public IntentSender() {}
 

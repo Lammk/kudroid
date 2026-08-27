@@ -1,10 +1,10 @@
 package android.text;
 
 /**
- * android.text.SpannableStringBuilder — Editable dựa trên StringBuilder.
+ * android.text.SpannableStringBuilder — Editable based on StringBuilder.
  *
- * Chưa hỗ trợ span (KuDroid không có text styling), nhưng toàn bộ phần sửa nội
- * dung là thật nên app soạn thảo văn bản chạy đúng.
+ * Doesn't support span yet (KuDroid doesn't have text styling), but all the internals are fixed
+ * The content is real so the text editor app runs properly.
  */
 public class SpannableStringBuilder implements Editable {
     private final StringBuilder mText;

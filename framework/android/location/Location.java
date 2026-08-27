@@ -1,10 +1,10 @@
 package android.location;
 
 /**
- * mô phỏng android.location.location.
+ * emulate android.location.location.
  *
- * đại diện cho một vị trí địa lý. đối với khuôn khổ tối thiểu của kudroid, đây là
- * một mô phỏng với các giá trị mặc định.
+ * represents a geographic location. for kudroid minimal framework, this is
+ * a simulation with default values.
  */
 public class Location {
     private double mLatitude = 0.0;

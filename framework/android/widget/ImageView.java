@@ -1,6 +1,6 @@
 package android.widget;
 
-/** Stub sinh tự động cho android.widget.ImageView */
+/** Stub automatically generated for android.widget.ImageView */
 public class ImageView {
     public ImageView() {}
 

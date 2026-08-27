@@ -4,7 +4,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * android.database.DataSetObservable — danh sách observer + hàm dispatch.
+ * android.database.DataSetObservable — observer list + dispatch function.
  */
 public class DataSetObservable {
     protected final List<DataSetObserver> mObservers = new ArrayList<DataSetObserver>();
@@ -32,7 +32,7 @@ public class DataSetObservable {
         }
     }
 
-    /** Dispatch ngược để observer tự bỏ đăng ký trong callback vẫn an toàn. */
+    /** Reverse dispatch so that the observer unsubscribes itself in the callback is still safe. */
     public void notifyChanged() {
         synchronized (mObservers) {
             for (int i = mObservers.size() - 1; i >= 0; i--) {

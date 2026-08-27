@@ -1,6 +1,6 @@
 package android.media;
 
-/** Stub sinh tự động cho android.media.AudioDeviceCallback */
+/** Stub automatically generated for android.media.AudioDeviceCallback */
 public class AudioDeviceCallback {
     public AudioDeviceCallback() {}
 }

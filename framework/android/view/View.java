@@ -6,24 +6,24 @@ import android.graphics.Rect;
 import android.os.Bundle;
 
 /**
- * triển khai android.view.view tối thiểu.
+ * minimal android.view.view implementation.
  *
- * lớp cơ sở cho tất cả các tiện ích ui. đối với khuôn khổ tối thiểu của kudroid, điều này
- * cung cấp các mô phỏng bố cục/vẽ cơ bản.
+ * base class for all ui widgets. for kudroid minimal framework, this
+ * provides basic layout/drawing simulations.
  */
 public class View {
-    /** khả năng hiển thị của view: hiển thị. */
+    /** view visibility: visible. */
     public static final int VISIBLE = 0;
-    /** khả năng hiển thị của view: vô hình. */
+    /** view visibility: invisible. */
     public static final int INVISIBLE = 4;
-    /** khả năng hiển thị của view: biến mất. */
+    /** view visibility: disappears. */
     public static final int GONE = 8;
 
-    /** chế độ đặc tả đo lường: không được chỉ định. */
+    /** measurement specification mode: not specified. */
     public static final int UNSPECIFIED = 0;
-    /** chế độ đặc tả đo lường: chính xác. */
+    /** measurement specification mode: exact. */
     public static final int EXACTLY = 1;
-    /** chế độ đặc tả đo lường: nhiều nhất. */
+    /** measurement specification mode: most. */
     public static final int AT_MOST = 2;
 
     protected final Context mContext;
@@ -45,60 +45,60 @@ public class View {
     private long mTouchDownTime;
     private boolean mLongClickFired;
 
-    /** Ngưỡng nhấn giữ của Android (ViewConfiguration.getLongPressTimeout). */
+    /** Android long press threshold (ViewConfiguration.getLongPressTimeout). */
     private static final long LONG_PRESS_TIMEOUT = 500L;
 
     /**
-     * giao diện cho các cuộc gọi lại nhấp chuột.
+     * interface for click callbacks.
      */
     public interface OnClickListener {
         void onClick(View v);
     }
 
     /**
-     * Callback nhấn giữ. Trả true nếu đã xử lý (chặn onClick).
+     * Callback long press. Returns true if processed (blocked onClick).
      */
     public interface OnLongClickListener {
         boolean onLongClick(View v);
     }
 
     /**
-     * Callback touch thô. Trả true để tiêu thụ sự kiện.
+     * Raw touch callback. Return true to consume the event.
      */
     public interface OnTouchListener {
         boolean onTouch(View v, MotionEvent event);
     }
 
     /**
-     * Callback khi view nhận/mất focus.
+     * Callback when view receives/loses focus.
      */
     public interface OnFocusChangeListener {
         void onFocusChange(View v, boolean hasFocus);
     }
 
     /**
-     * Callback kéo-thả. Trả true nếu đã xử lý DragEvent.
+     * Drag-and-drop callback. Returns true if DragEvent has been processed.
      */
     public interface OnDragListener {
         boolean onDrag(View v, Object event);
     }
 
     /**
-     * Callback phím cứng gửi tới view đang focus.
+     * Hard key callback sent to the currently focused view.
      */
     public interface OnKeyListener {
         boolean onKey(View v, int keyCode, KeyEvent event);
     }
 
     /**
-     * Callback áp dụng window insets (status bar / notch).
+     * Callback applies window insets (status bar / notch).
      */
     public interface OnApplyWindowInsetsListener {
         Object onApplyWindowInsets(View v, Object insets);
     }
 
     /**
-     * Callback khi view được attach/detach khỏi window.
+     * Callback when view is attached/detached from window.
      */
     public interface OnAttachStateChangeListener {
         void onViewAttachedToWindow(View v);
@@ -107,7 +107,7 @@ public class View {
     }
 
     /**
-     * Cung cấp bitmap bóng khi kéo view. Android: lớp abstract lồng trong View.
+     * Provide shadow bitmap when dragging view. Android: abstract class nested in View.
      */
     public static class DragShadowBuilder {
         private final View mView;
@@ -140,7 +140,7 @@ public class View {
     }
 
     /**
-     * Chặn/điều hướng sự kiện accessibility. Mọi hàm mặc định uỷ quyền về view.
+     * Intercept/direct accessibility events. All default functions delegate to views.
      */
     public static class AccessibilityDelegate {
         public void sendAccessibilityEvent(View host, int eventType) {
@@ -156,21 +156,21 @@ public class View {
     }
 
     /**
-     * trả về ngữ cảnh mà view này được tạo với.
+     * returns the context this view was created with.
      */
     public Context getContext() {
         return mContext;
     }
 
     /**
-     * trả về id của view.
+     * returns the id of the view.
      */
     public int getId() {
         return mId;
     }
 
     /**
-     * thiết lập id của view.
+     * set the id of the view.
      */
     public void setId(int id) {
         mId = id;
@@ -182,49 +182,49 @@ public class View {
     }
 
     /**
-     * trả về vị trí bên trái của view.
+     * returns the left position of the view.
      */
     public int getLeft() {
         return mLeft;
     }
 
     /**
-     * trả về vị trí trên cùng của view.
+     * returns the top position of the view.
      */
     public int getTop() {
         return mTop;
     }
 
     /**
-     * trả về vị trí bên phải của view.
+     * returns the right position of the view.
      */
     public int getRight() {
         return mRight;
     }
 
     /**
-     * trả về vị trí dưới cùng của view.
+     * returns the bottom position of the view.
      */
     public int getBottom() {
         return mBottom;
     }
 
     /**
-     * trả về chiều rộng của view.
+     * returns the width of the view.
      */
     public int getWidth() {
         return mRight - mLeft;
     }
 
     /**
-     * trả về chiều cao của view.
+     * returns the height of the view.
      */
     public int getHeight() {
         return mBottom - mTop;
     }
 
     /**
-     * thiết lập ranh giới bố cục của view.
+     * sets the view's layout boundaries.
      */
     public void layout(int l, int t, int r, int b) {
         mLeft = l;
@@ -234,35 +234,35 @@ public class View {
     }
 
     /**
-     * trả về khả năng hiển thị của view.
+     * returns the view's visibility.
      */
     public int getVisibility() {
         return mVisibility;
     }
 
     /**
-     * thiết lập khả năng hiển thị của view.
+     * set the view's visibility.
      */
     public void setVisibility(int visibility) {
         mVisibility = visibility;
     }
 
     /**
-     * trả về cha của view.
+     * returns the view's parent.
      */
     public ViewGroup getParent() {
         return mParent;
     }
 
     /**
-     * thiết lập cha của view.
+     * set the view's parent.
      */
     public void setParent(ViewGroup parent) {
         mParent = parent;
     }
 
     /**
-     * thiết lập trình nghe nhấp chuột.
+     * set up click listener.
      */
     public void setOnClickListener(OnClickListener l) {
         mOnClickListener = l;
@@ -300,7 +300,7 @@ public class View {
         return mHasFocus;
     }
 
-    /** Đổi trạng thái focus và bắn callback nếu có thay đổi thật. */
+    /** Change focus state and fire callback if there is a real change. */
     public void setFocus(boolean hasFocus) {
         if (mHasFocus == hasFocus) return;
         mHasFocus = hasFocus;
@@ -327,7 +327,7 @@ public class View {
     }
 
     /**
-     * ViewTreeObserver của cây view này (dùng chung với cha nếu đã attach).
+     * ViewTreeObserver of this view tree (shared with parent if attached).
      */
     public ViewTreeObserver getViewTreeObserver() {
         if (mParent != null) return mParent.getViewTreeObserver();
@@ -341,8 +341,8 @@ public class View {
 
     public boolean dispatchTouchEvent(MotionEvent event) {
         if (mVisibility != VISIBLE) return false;
-        // OnTouchListener chạy TRƯỚC onTouchEvent và có quyền tiêu thụ sự kiện —
-        // thứ tự này là hợp đồng của Android, app dựa vào nó để chặn click.
+        // OnTouchListener runs BEFORE onTouchEvent and has event consumption —
+        // This order is Android's contract, the app relies on it to block clicks.
         if (mOnTouchListener != null && mOnTouchListener.onTouch(this, event)) {
             return true;
         }
@@ -383,7 +383,7 @@ public class View {
     }
 
     /**
-     * thực hiện một cú nhấp chuột.
+     * make one click.
      */
     public boolean performClick() {
         if (mOnClickListener != null) {
@@ -401,13 +401,13 @@ public class View {
     }
 
     /**
-     * đo view.
+     * Measure view.
      */
     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
     }
 
     /**
-     * đo view (được gọi bởi cha).
+     * measure view (called by parent).
      */
     public void measure(int widthMeasureSpec, int heightMeasureSpec) {
         onMeasure(widthMeasureSpec, heightMeasureSpec);
@@ -416,13 +416,13 @@ public class View {
     private int mBackgroundColor = 0;
 
     /**
-     * vẽ view.
+     * draw views.
      */
     protected void onDraw(Canvas canvas) {
     }
 
     /**
-     * vẽ view (được gọi bởi cha).
+     * draw view (called by parent).
      */
     public void draw(Canvas canvas) {
         if (mVisibility != VISIBLE || canvas == null) return;
@@ -435,21 +435,21 @@ public class View {
     }
 
     /**
-     * trả về trạng thái hiển thị của view.
+     * returns the display state of the view.
      */
     public boolean isShown() {
         return mVisibility == VISIBLE;
     }
 
     /**
-     * trả về nền của view.
+     * returns the background of the view.
      */
     public android.graphics.drawable.Drawable getBackground() {
         return null;
     }
 
     /**
-     * thiết lập nền của view.
+     * set the background of the view.
      */
     public void setBackgroundColor(int color) {
         mBackgroundColor = color;
@@ -457,25 +457,25 @@ public class View {
     }
 
     /**
-     * thiết lập drawable nền của view.
+     * set the view's background drawable.
      */
     public void setBackgroundDrawable(android.graphics.drawable.Drawable background) {
     }
 
     /**
-     * thiết lập phần đệm của view.
+     * sets the view's padding.
      */
     public void setPadding(int left, int top, int right, int bottom) {
     }
 
     /**
-     * làm mất hiệu lực view.
+     * invalidate the view.
      */
     public void invalidate() {
     }
 
     /**
-     * đăng một runnable lên luồng ui.
+     * post a runnable to the ui stream.
      */
     public boolean post(Runnable action) {
         action.run();
@@ -483,14 +483,14 @@ public class View {
     }
 
     /**
-     * trả về thẻ (tag) của view.
+     * returns the view's tag.
      */
     public Object getTag() {
         return null;
     }
 
     /**
-     * thiết lập thẻ (tag) của view.
+     * set the view's tag.
      */
     private boolean mKeepScreenOn = false;
     private static native void setKeepScreenOnNative(boolean keepOn);

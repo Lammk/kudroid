@@ -7,7 +7,7 @@ public final class Collections {
 
     public static <T> void sort(List<T> list, Comparator<? super T> c) {
         int n = list.size();
-        // Insertion sort: n nhỏ trong mọi trường hợp framework dùng.
+        // Insertion sort: n is small in all cases used by the framework.
         for (int i = 1; i < n; i++) {
             T v = list.get(i);
             int j = i - 1;

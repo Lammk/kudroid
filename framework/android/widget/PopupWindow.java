@@ -1,6 +1,6 @@
 package android.widget;
 
-/** Stub sinh tự động cho android.widget.PopupWindow */
+/** Stub automatically generated for android.widget.PopupWindow */
 public class PopupWindow {
     public PopupWindow() {}
 

@@ -1,9 +1,9 @@
-// Host test cho nhóm opcode tương tác object: new/field/array/invoke/switch.
+// Host test for nh m opcode object interaction: new/field/array/invoke/switch.
 //
-// Bytecode tham chiếu class/field/method bằng INDEX trong DEX, mà index chỉ
-// chốt sau khi builder sort xong mọi bảng. Nên test build HAI LẦN: lần đầu với
-// code rỗng để học index, lần hai với bytecode thật. Cùng bộ spec thì index
-// giống nhau nên cách này tin được.
+// Bytecode tham chi u class/field/method b ng INDEX trong DEX, m  index ch
+// ch t sau khi builder sort xong m i b ng. N n test build HAI L N: l n  u v i
+// code r ng   h c index, l n hai v i bytecode th t. C ng b  spec th  index
+// gi ng nhau n n c ch n y tin  c.
 #include "kudroid/kuart/DexClassLinker.h"
 #include "kudroid/kuart/Interpreter.h"
 
@@ -48,7 +48,7 @@ void Op22b(std::vector<uint16_t>* code, uint8_t op, uint8_t a, uint8_t b, int8_t
     code->push_back(static_cast<uint16_t>(op | (a << 8)));
     code->push_back(static_cast<uint16_t>((b & 0xFF) | ((c & 0xFF) << 8)));
 }
-// invoke 35c: op | argc<<12, idx, rồi các register 4-bit đóng gói
+// invoke 35c: op | argc<<12, idx, r i c c register 4-bit  ng g i
 void Op35c(std::vector<uint16_t>* code, uint8_t op, uint16_t idx,
            const std::vector<uint8_t>& regs) {
     code->push_back(static_cast<uint16_t>(op | (regs.size() << 12)));
@@ -86,7 +86,7 @@ constexpr uint8_t kOpAddInt = 0x90;
 constexpr uint8_t kOpAddIntLit8 = 0xd8;
 constexpr uint8_t kOpConstString = 0x1a;
 
-// Spec dùng chung cho cả hai lần build; chỉ phần code khác nhau.
+// Spec d ng chung cho c  hai l n build; ch  ph n code kh c nhau.
 struct Specs {
     FieldSpec point_x{"x", "I", 0x1};
     FieldSpec point_y{"y", "I", 0x1};
@@ -94,22 +94,22 @@ struct Specs {
 
     MethodSpec point_ctor;
     MethodSpec point_get_x;
-    MethodSpec point_sum;      // virtual, Point trả x+y
-    MethodSpec point3d_sum;    // override, cộng thêm z
+    MethodSpec point_sum;      // virtual, Point tr  x+y
+    MethodSpec point3d_sum;    // override, c ng th m z
     FieldSpec point3d_z{"z", "I", 0x1};
     MethodSpec point3d_ctor;
 
-    MethodSpec make_point;     // static: new Point, set field, trả object
+    MethodSpec make_point;     // static: new Point, set field, tr  object
     MethodSpec read_x;         // static: iget
     MethodSpec array_ops;      // static: new-array + aput + aget + array-length
-    MethodSpec static_ops;     // static: sput rồi sget
-    MethodSpec call_virtual;   // static: gọi sum() qua tham số Point
-    MethodSpec call_static;    // static: gọi addTwo()
+    MethodSpec static_ops;     // static: sput r i sget
+    MethodSpec call_virtual;   // static: g i sum() qua tham s  Point
+    MethodSpec call_static;    // static: g i addTwo()
     MethodSpec add_two;        // static helper
     MethodSpec instance_check; // static: instance-of
-    MethodSpec npe_test;       // static: iget trên null
-    MethodSpec oob_test;       // static: aget ngoài dải
-    MethodSpec string_test;    // static: const-string trả object
+    MethodSpec npe_test;       // static: iget tr n null
+    MethodSpec oob_test;       // static: aget ngo i d i
+    MethodSpec string_test;    // static: const-string tr  object
 
     Specs() {
         point_ctor.name = "<init>";
@@ -231,9 +231,9 @@ std::vector<ClassSpec> BuildClasses(const Specs& s) {
 int main() {
     std::printf("=== KuART Interpreter 3b: object/field/array/invoke ===\n");
 
-    // ── Lượt 1: học index ──
-    // "hello" và "[I" chỉ xuất hiện trong bytecode (const-string, new-array) nên
-    // builder không tự thu thập được — phải khai báo qua spec để chúng vào bảng.
+    // L t 1: h c index
+    // "hello" v  "[I" ch  xu t hi n trong bytecode (const-string, new-array) n n
+    // builder kh ng t  thu th p  c   ph i khai b o qua spec   ch ng v o b ng.
     Specs probe;
     DexBuilder index_builder;
     index_builder.Build(BuildClasses(probe));
@@ -258,7 +258,7 @@ int main() {
     const uint16_t kStringHello =
         static_cast<uint16_t>(index_builder.StringIndexOf("hello"));
 
-    // ── Lượt 2: điền bytecode thật ──
+    // L t 2:  i n bytecode th t
     Specs s;
 
     // Point.<init>()V  { return; }
@@ -275,7 +275,7 @@ int main() {
         s.point_get_x.registers_size = 2;
         s.point_get_x.ins_size = 1;
     }
-    // Point.sum()I  { return this.x + this.y; }  v0,v1 tạm, v2 = this
+    // Point.sum()I  { return this.x + this.y; }  v0,v1 t m, v2 = this
     {
         std::vector<uint16_t> c;
         Op22c(&c, kOpIget, 0, 2, kFieldX);
@@ -306,7 +306,7 @@ int main() {
     }
 
     // T.makePoint(int x, int y) { Point p = new Point(); p.x = x; p.y = y; return p; }
-    // v0 = p, v1 = x, v2 = y  (regs=3, ins=2 → tham số ở v1,v2)
+    // v0 = p, v1 = x, v2 = y  (regs=3, ins=2   tham s    v1,v2)
     {
         std::vector<uint16_t> c;
         Op21c(&c, kOpNewInstance, 0, kPointType);
@@ -328,7 +328,7 @@ int main() {
         s.read_x.ins_size = 1;
     }
     // T.arrayOps(int n) { int[] a = new int[3]; a[1] = n; return a[1] + a.length; }
-    // v0 = a, v1 tạm, v2 tạm, v3 = n
+    // v0 = a, v1 t m, v2 t m, v3 = n
     {
         std::vector<uint16_t> c;
         c.push_back(Op11n(kOpConst4, 1, 3));       // v1 = 3
@@ -430,8 +430,8 @@ int main() {
     const std::vector<uint8_t> dex = builder.Build(BuildClasses(s));
     std::printf("DEX synthetic: %zu bytes\n", dex.size());
 
-    // Index của lượt 2 phải khớp lượt 1, nếu không bytecode trỏ sai entity.
-    Check(builder.TypeIndexOf("LPoint;") == kPointType, "index ổn định giữa hai lượt build");
+    // Index c a l t 2 ph i kh p l t 1, n u kh ng bytecode tr  sai entity.
+Check(builder.TypeIndexOf("LPoint;") == kPointType, "index  n  nh gi a hai l t build");
 
     kudroid::kuart::DexClassLinker linker;
     std::string error;
@@ -455,7 +455,7 @@ int main() {
         interp.ClearPendingException();
         kudroid::kuart::DexMethod* m = t->FindDirectMethod(name, sig);
         if (m == nullptr) {
-            std::printf("  FAIL không tìm thấy %s%s\n", name, sig);
+std::printf("  FAIL not found %s%s\n", name, sig);
             ++g_failures;
             return DexValue();
         }
@@ -464,44 +464,44 @@ int main() {
 
     // ── new-instance + iput + iget ──
     const DexValue p = call("makePoint", "(II)LPoint;", {DexValue::Int(7), DexValue::Int(35)});
-    Check(p.l != nullptr, "makePoint trả object khác null");
-    Check(p.l != nullptr && p.l->clazz == point, "object có class là Point");
-    Check(call("readX", "(LPoint;)I", {p}).i == 7, "readX đọc đúng field đã iput");
+Check(p.l != nullptr, "makePoint tr  object kh c null");
+Check(p.l != nullptr && p.l->clazz == point, "object c  class l  Point");
+Check(call("readX", "(LPoint;)I", {p}).i == 7, "readX  c  ng field   iput");
 
-    // ── invoke-virtual + dispatch động ──
+    // invoke-virtual + dispatch  ng
     Check(call("callVirtual", "(LPoint;)I", {p}).i == 42, "callVirtual(Point) == 7+35 == 42");
 
-    // Point3D override sum() — cùng bytecode gọi, khác kết quả.
+    // Point3D override sum()   c ng bytecode g i, kh c k t qu .
     kudroid::kuart::DexObject* p3 = linker.AllocObject(point3d);
     Check(p3 != nullptr, "AllocObject(Point3D)");
     if (p3 != nullptr) {
         kudroid::kuart::DexField* fx = point3d->FindInstanceField("x", "I");
         kudroid::kuart::DexField* fy = point3d->FindInstanceField("y", "I");
         kudroid::kuart::DexField* fz = point3d->FindInstanceField("z", "I");
-        Check(fx != nullptr && fy != nullptr && fz != nullptr, "Point3D thấy cả x,y kế thừa và z");
+Check(fx != nullptr && fy != nullptr && fz != nullptr, "Point3D th y c  x,y k  th a v  z");
         if (fx != nullptr && fy != nullptr && fz != nullptr) {
             p3->SetField<int32_t>(fx->offset_or_slot, 1);
             p3->SetField<int32_t>(fy->offset_or_slot, 2);
             p3->SetField<int32_t>(fz->offset_or_slot, 4);
             Check(call("callVirtual", "(LPoint;)I", {DexValue::Ref(p3)}).i == 7,
-                  "callVirtual(Point3D) == 1+2+4 == 7 (gọi bản override)");
+"callVirtual(Point3D) == 1+2+4 == 7 (g i b n override)");
         }
     }
 
     // ── invoke-static ──
     Check(call("callStatic", "()I", {}).i == 42, "callStatic() == 20+22 == 42");
 
-    // ── mảng ──
+    // m ng
     Check(call("arrayOps", "(I)I", {DexValue::Int(10)}).i == 13,
           "arrayOps(10) == a[1] + a.length == 10+3 == 13");
 
     // ── field static ──
     Check(call("staticOps", "(I)I", {DexValue::Int(99)}).i == 100,
-          "staticOps(99) == 100 (sput rồi sget)");
-    // Giá trị static phải giữ lại sau khi method kết thúc.
+"staticOps(99) == 100 (sput r i sget)");
+    // Gi  tr  static ph i gi  l i sau khi method finished.
     kudroid::kuart::DexField* counter = point->FindStaticField("counter", "I");
     Check(counter != nullptr && point->static_values[counter->offset_or_slot].i == 99,
-          "field static giữ giá trị sau khi method trả về");
+"field static gi  gi  tr  sau khi method tr  v ");
 
     // ── instance-of ──
     Check(call("instanceCheck", "(LPoint;)I", {p}).i == 0,
@@ -516,10 +516,10 @@ int main() {
         const DexValue str = call("stringTest", "()Ljava/lang/String;", {});
         auto* ds = static_cast<kudroid::kuart::DexString*>(str.l);
         Check(ds != nullptr && ds->utf8 != nullptr && std::strcmp(ds->utf8, "hello") == 0,
-              "const-string trả chuỗi \"hello\"");
-        // Interning: gọi lại phải ra CÙNG object.
+"const-string tr  chu i \"hello\"");
+        // Interning: g i l i ph i ra C NG object.
         const DexValue str2 = call("stringTest", "()Ljava/lang/String;", {});
-        Check(str.l == str2.l, "chuỗi hằng được intern (cùng con trỏ)");
+Check(str.l == str2.l, "chu i h ng  c intern (c ng con tr )");
     }
 
     // ── exception ──
@@ -527,18 +527,18 @@ int main() {
         interp.ClearPendingException();
         kudroid::kuart::DexMethod* m = t->FindDirectMethod("npeTest", "()I");
         interp.Execute(m, nullptr, 0);
-        Check(interp.HasPendingException(), "iget trên null ném exception");
+Check(interp.HasPendingException(), "iget tr n null n m exception");
         Check(interp.last_error().find("NullPointerException") != std::string::npos,
-              "exception là NullPointerException");
+"exception l  NullPointerException");
         interp.ClearPendingException();
     }
     {
         interp.ClearPendingException();
         kudroid::kuart::DexMethod* m = t->FindDirectMethod("oobTest", "()I");
         interp.Execute(m, nullptr, 0);
-        Check(interp.HasPendingException(), "aget ngoài dải ném exception");
+Check(interp.HasPendingException(), "aget ngo i d i n m exception");
         Check(interp.last_error().find("ArrayIndexOutOfBounds") != std::string::npos,
-              "exception là ArrayIndexOutOfBoundsException");
+"exception l  ArrayIndexOutOfBoundsException");
         interp.ClearPendingException();
     }
 
@@ -549,6 +549,6 @@ int main() {
         std::printf("=== KuART Interpreter 3b test PASSED ===\n");
         return 0;
     }
-    std::printf("=== KuART Interpreter 3b test FAILED (%d lỗi) ===\n", g_failures);
+std::printf("=== KuART Interpreter 3b test FAILED (%d error) ===\n", g_failures);
     return 1;
 }

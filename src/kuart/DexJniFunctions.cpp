@@ -1,11 +1,11 @@
-// Bảng hàm JNINativeInterface_ cho KuART.
+// JNINativeInterface_ function table for KuART.
 //
-// Tách khỏi DexJniEnv.cpp vì riêng bảng này đã hơn 200 hàm. Mọi hàm đều là
-// static, lấy DexJniEnv qua DexJniEnv::FromEnv(env) rồi uỷ quyền.
+// Separated from DexJniEnv.cpp because this table alone has more than 200 functions. All functions are
+// static, get DexJniEnv via DexJniEnv::FromEnv(env) and then delegate.
 //
-// Quy ước handle (khớp DexJniEnv.h):
-//   jobject/jstring/jarray -> DexObject*   (cast trực tiếp)
-//   jclass                 -> DexClass*    (KHÔNG phải object, không vào ref table)
+// Handle convention (matches DexJniEnv.h):
+//   jobject/jstring/jarray -> DexObject* (cast directly)
+//   jclass -> DexClass* (NOT an object, not in the ref table)
 //   jmethodID              -> DexMethod*
 //   jfieldID               -> DexField*
 #include "kudroid/kuart/DexJniEnv.h"
@@ -16,9 +16,9 @@
 namespace kudroid {
 namespace kuart {
 
-// Namespace lồng trong anonymous namespace: vẫn internal linkage nhưng có tên
-// để qualify được. Cần vì trong InitFunctionTable() tên không qualify sẽ khớp
-// member của DexJniEnv (PushLocalFrame, RegisterNatives, NewObjectA...) trước.
+// Namespace nested within anonymous namespace: still internal linkage but with name
+// to qualify. Needed because in InitFunctionTable() non-qualified names will match
+// member of DexJniEnv (PushLocalFrame, RegisterNatives, NewObjectA...) first.
 namespace {
 namespace jnifns {
 
@@ -33,8 +33,8 @@ DexArray* Arr(jarray a) { return reinterpret_cast<DexArray*>(a); }
 
 jclass ToJClass(DexClass* k) { return reinterpret_cast<jclass>(k); }
 
-// JNI dùng tên kiểu "java/lang/String" còn KuART dùng descriptor
-// "Ljava/lang/String;". Tên mảng ("[I") đã là descriptor nên giữ nguyên.
+// JNI uses "java/lang/String" type names and KuART uses descriptors
+// "Ljava/lang/String;". The array name ("[I") is already a descriptor so it remains the same.
 std::string ToDescriptor(const char* jni_name) {
     if (jni_name == nullptr) return std::string();
     if (jni_name[0] == '[') return jni_name;
@@ -46,7 +46,7 @@ std::string ToDescriptor(const char* jni_name) {
     return d;
 }
 
-// ── phiên bản, class, exception ───────────────────────────────────────────
+// ── version, class, exception ───────────────────── ──────────────────────
 
 jint JNICALL GetVersion(JNIEnv*) { return JNI_VERSION_1_6; }
 
@@ -56,17 +56,17 @@ jclass JNICALL FindClass(JNIEnv* env, const char* name) {
     const std::string descriptor = ToDescriptor(name);
     DexClass* klass = self->linker()->FindClass(descriptor.c_str());
     if (klass == nullptr) {
-        self->set_last_error("FindClass thất bại: " + descriptor);
+        self->set_last_error("FindClass failed: " + descriptor);
         return nullptr;
     }
-    // JNI FindClass khởi tạo class (theo định nghĩa của JNI spec).
+    // JNI FindClass instantiates the class (as defined by the JNI spec).
     if (self->interpreter() != nullptr) self->interpreter()->EnsureInitialized(klass);
     return ToJClass(klass);
 }
 
 jclass JNICALL DefineClass(JNIEnv* env, const char*, jobject, const jbyte*, jsize) {
-    // KuART không nạp class từ .class bytes; app Android dùng DEX.
-    if (DexJniEnv* self = Self(env)) self->set_last_error("DefineClass không hỗ trợ");
+    // KuART does not load class from .class bytes; Android app uses DEX.
+    if (DexJniEnv* self = Self(env)) self->set_last_error("DefineClass not supported");
     return nullptr;
 }
 
@@ -90,7 +90,7 @@ jclass JNICALL GetObjectClass(JNIEnv*, jobject obj) {
 jboolean JNICALL IsInstanceOf(JNIEnv*, jobject obj, jclass clazz) {
     DexObject* o = Obj(obj);
     DexClass* k = Cls(clazz);
-    if (o == nullptr) return JNI_TRUE;  // null là instance của mọi kiểu
+    if (o == nullptr) return JNI_TRUE;  // null is an instance of every type
     if (o->clazz == nullptr || k == nullptr) return JNI_FALSE;
     return o->clazz->IsSubClassOf(k) ? JNI_TRUE : JNI_FALSE;
 }
@@ -153,7 +153,7 @@ jobject JNICALL PopLocalFrame(JNIEnv* env, jobject result) {
     DexJniEnv* self = Self(env);
     if (self == nullptr) return nullptr;
     self->PopLocalFrame();
-    // Kết quả phải sống ở frame CHA nên thêm lại sau khi pop.
+    // The result must live in the CHA frame so add it again after pop.
     return result != nullptr ? self->AddLocalRef(Obj(result)) : nullptr;
 }
 
@@ -182,7 +182,7 @@ jboolean JNICALL IsSameObject(JNIEnv*, jobject a, jobject b) {
 jint JNICALL EnsureLocalCapacity(JNIEnv*, jint) { return JNI_OK; }
 
 jweak JNICALL NewWeakGlobalRef(JNIEnv* env, jobject obj) {
-    // Không có GC nên weak ref hành xử như global ref.
+    // There is no GC so weak refs behave like global refs.
     DexJniEnv* self = Self(env);
     return self != nullptr ? reinterpret_cast<jweak>(self->AddGlobalRef(Obj(obj))) : nullptr;
 }
@@ -197,7 +197,7 @@ jobjectRefType JNICALL GetObjectRefType(JNIEnv* env, jobject obj) {
     return self->IsGlobalRef(Obj(obj)) ? JNIGlobalRefType : JNILocalRefType;
 }
 
-// ── tạo object ────────────────────────────────────────────────────────────
+// ── create object ────────────────────────────── ──────────────────────────────
 
 jobject JNICALL AllocObject(JNIEnv* env, jclass clazz) {
     DexJniEnv* self = Self(env);
@@ -238,7 +238,7 @@ jmethodID JNICALL GetMethodID(JNIEnv* env, jclass clazz, const char* name, const
     DexMethod* m = k->FindVirtualMethod(name, sig);
     if (m == nullptr) m = k->FindDirectMethod(name, sig);
     if (m == nullptr) {
-        self->set_last_error(std::string("GetMethodID thất bại: ") + k->PrettyName() + "." +
+        self->set_last_error(std::string("GetMethodID failed: ") + k->PrettyName() + "." +
                              name + (sig != nullptr ? sig : ""));
     }
     return reinterpret_cast<jmethodID>(m);
@@ -251,7 +251,7 @@ jmethodID JNICALL GetStaticMethodID(JNIEnv* env, jclass clazz, const char* name,
     if (self == nullptr || k == nullptr || name == nullptr) return nullptr;
     DexMethod* m = k->FindDirectMethod(name, sig);
     if (m == nullptr) {
-        self->set_last_error(std::string("GetStaticMethodID thất bại: ") + k->PrettyName() +
+        self->set_last_error(std::string("GetStaticMethodID failed: ") + k->PrettyName() +
                              "." + name + (sig != nullptr ? sig : ""));
     }
     return reinterpret_cast<jmethodID>(m);
@@ -263,7 +263,7 @@ jfieldID JNICALL GetFieldID(JNIEnv* env, jclass clazz, const char* name, const c
     if (self == nullptr || k == nullptr || name == nullptr) return nullptr;
     DexField* f = k->FindInstanceField(name, sig);
     if (f == nullptr) {
-        self->set_last_error(std::string("GetFieldID thất bại: ") + k->PrettyName() + "." + name);
+        self->set_last_error(std::string("GetFieldID failed: ") + k->PrettyName() + "." + name);
     }
     return reinterpret_cast<jfieldID>(f);
 }
@@ -274,15 +274,15 @@ jfieldID JNICALL GetStaticFieldID(JNIEnv* env, jclass clazz, const char* name, c
     if (self == nullptr || k == nullptr || name == nullptr) return nullptr;
     DexField* f = k->FindStaticField(name, sig);
     if (f == nullptr) {
-        self->set_last_error(std::string("GetStaticFieldID thất bại: ") + k->PrettyName() + "." +
+        self->set_last_error(std::string("GetStaticFieldID failed: ") + k->PrettyName() + "." +
                              name);
     }
     return reinterpret_cast<jfieldID>(f);
 }
 
-// ── gọi method instance ───────────────────────────────────────────────────
-// Ba biến thể (…, V, A) của 10 kiểu trả về × 3 nhóm (virtual, nonvirtual,
-// static) = 90 hàm. Macro sinh chúng để tránh 90 khối gần giống nhau.
+// ── call method instance ───────────────────────── ──────────────────────────
+// Three variants (…, V, A) of 10 return types × 3 groups (virtual, nonvirtual,
+// static) = 90 functions. Macro spawns them to avoid 90 similar blocks.
 
 #define DEXRT_CALL_BODY(RET_TYPE, FIELD, RECEIVER, METHOD, VIRTUAL, ARGS_CALL)      \
     DexJniEnv* self = Self(env);                                                    \
@@ -290,7 +290,7 @@ jfieldID JNICALL GetStaticFieldID(JNIEnv* env, jclass clazz, const char* name, c
     const DexValue v = ARGS_CALL;                                                    \
     return static_cast<RET_TYPE>(v.FIELD);
 
-// Nhóm virtual: Call<Type>Method / V / A
+// Virtual group: Call<Type>Method / V / A
 #define DEXRT_DEFINE_CALL(NAME, RET_TYPE, FIELD)                                    \
     RET_TYPE JNICALL Call##NAME##MethodA(JNIEnv* env, jobject obj, jmethodID mid,   \
                                         const jvalue* args) {                       \
@@ -312,7 +312,7 @@ jfieldID JNICALL GetStaticFieldID(JNIEnv* env, jclass clazz, const char* name, c
         return r;                                                                    \
     }
 
-// Nhóm nonvirtual: gọi đúng method chỉ định, KHÔNG dispatch lại qua receiver.
+// Nonvirtual group: call the specified method, DO NOT dispatch back to the receiver.
 #define DEXRT_DEFINE_CALL_NONVIRTUAL(NAME, RET_TYPE, FIELD)                          \
     RET_TYPE JNICALL CallNonvirtual##NAME##MethodA(JNIEnv* env, jobject obj, jclass, \
                                                   jmethodID mid, const jvalue* args) { \
@@ -335,7 +335,7 @@ jfieldID JNICALL GetStaticFieldID(JNIEnv* env, jclass clazz, const char* name, c
         return r;                                                                      \
     }
 
-// Nhóm static: receiver null.
+// Static group: receiver null.
 #define DEXRT_DEFINE_CALL_STATIC(NAME, RET_TYPE, FIELD)                              \
     RET_TYPE JNICALL CallStatic##NAME##MethodA(JNIEnv* env, jclass, jmethodID mid,  \
                                               const jvalue* args) {                  \
@@ -377,7 +377,7 @@ DEXRT_DEFINE_ALL_CALLS(Double, jdouble, d)
 #undef DEXRT_DEFINE_CALL
 #undef DEXRT_CALL_BODY
 
-// Object trả về phải thành local ref nên không dùng macro chung được.
+// The returned object must be a local ref, so general macros cannot be used.
 jobject JNICALL CallObjectMethodA(JNIEnv* env, jobject obj, jmethodID mid,
                                  const jvalue* args) {
     DexJniEnv* self = Self(env);
@@ -437,7 +437,7 @@ jobject JNICALL CallStaticObjectMethod(JNIEnv* env, jclass c, jmethodID mid, ...
     return r;
 }
 
-// void không có giá trị trả về nên cũng phải viết tay.
+// void has no return value so it must be written by hand.
 void JNICALL CallVoidMethodA(JNIEnv* env, jobject obj, jmethodID mid, const jvalue* args) {
     if (DexJniEnv* self = Self(env)) self->CallJavaA(Obj(obj), Mth(mid), args, true);
 }
@@ -522,8 +522,8 @@ void JNICALL SetObjectField(JNIEnv*, jobject obj, jfieldID fid, jobject v) {
 }
 
 // ── field static ──────────────────────────────────────────────────────────
-// Giá trị nằm trong static_values của class KHAI BÁO field, không phải class
-// truyền vào — field kế thừa vẫn đọc đúng chỗ.
+// The value is in the static_values ​​of the field DECLARE class, not the class
+// passed in — the inherited field is still read in the right place.
 
 DexValue* StaticSlot(jfieldID fid) {
     DexField* f = Fld(fid);
@@ -564,7 +564,7 @@ void JNICALL SetStaticObjectField(JNIEnv*, jclass, jfieldID fid, jobject v) {
     if (DexValue* slot = StaticSlot(fid)) *slot = DexValue::Ref(Obj(v));
 }
 
-// ── chuỗi ─────────────────────────────────────────────────────────────────
+// ── string ──────────────────────────────── ─────────────────────────────────
 
 jstring JNICALL NewStringUTF(JNIEnv* env, const char* utf) {
     DexJniEnv* self = Self(env);
@@ -579,16 +579,16 @@ jsize JNICALL GetStringUTFLength(JNIEnv*, jstring str) {
 
 const char* JNICALL GetStringUTFChars(JNIEnv*, jstring str, jboolean* isCopy) {
     DexString* s = Str(str);
-    if (isCopy != nullptr) *isCopy = JNI_FALSE;  // trả thẳng buffer của heap
+    if (isCopy != nullptr) *isCopy = JNI_FALSE;  // Return the heap buffer directly
     return s != nullptr ? s->utf8 : nullptr;
 }
 
 void JNICALL ReleaseStringUTFChars(JNIEnv*, jstring, const char*) {
-    // GetStringUTFChars không copy nên không có gì để giải phóng.
+    // GetStringUTFChars doesn't copy so there's nothing to free.
 }
 
-// KuART giữ UTF-8; các hàm UTF-16 chuyển đổi tạm khi native yêu cầu. Chỉ xử lý
-// ASCII vì framework stub và tên class/method của app đều là ASCII.
+// KuART keeps UTF-8; UTF-16 functions convert temporarily when required by native. Processing only
+// ASCII because the framework stub and the app's class/method names are all ASCII.
 jsize JNICALL GetStringLength(JNIEnv*, jstring str) {
     DexString* s = Str(str);
     return s != nullptr ? static_cast<jsize>(s->length) : 0;
@@ -650,14 +650,14 @@ jlong JNICALL GetStringUTFLengthAsLong(JNIEnv*, jstring str) {
     return s != nullptr ? static_cast<jlong>(s->length) : 0;
 }
 
-// ── mảng ──────────────────────────────────────────────────────────────────
+// ── array ───────────────────────────────── ─────────────────────────────────
 
 jsize JNICALL GetArrayLength(JNIEnv*, jarray array) {
     DexArray* a = Arr(array);
     return a != nullptr ? a->length : 0;
 }
 
-// Mảng nguyên thủy: tên class mảng là descriptor với '[' phía trước.
+// Primitive array: array class name is descriptor with '[' in front.
 jarray NewPrimitiveArray(JNIEnv* env, const char* array_descriptor, jsize len) {
     DexJniEnv* self = Self(env);
     if (self == nullptr || len < 0) return nullptr;
@@ -722,8 +722,8 @@ void JNICALL SetObjectArrayElement(JNIEnv*, jobjectArray array, jsize index, job
     a->Set<DexObject*>(index, Obj(val));
 }
 
-// Get<Type>ArrayElements trả con trỏ THẲNG vào mảng (không copy) — hợp lệ vì
-// heap không di chuyển object. Release do đó là no-op.
+// Get<Type>ArrayElements returns a STRAIGHT pointer to the array (no copy) — valid because
+// heap does not move objects. Release is therefore a no-op.
 #define DEXRT_DEFINE_ARRAY(NAME, ELEM_TYPE, ARRAY_TYPE)                              \
     ELEM_TYPE* JNICALL Get##NAME##ArrayElements(JNIEnv*, ARRAY_TYPE array,           \
                                                jboolean* isCopy) {                   \
@@ -809,13 +809,13 @@ jint JNICALL GetJavaVM(JNIEnv* env, JavaVM** vm) {
 }
 
 jobject JNICALL NewDirectByteBuffer(JNIEnv*, void*, jlong) {
-    // Cần java.nio.DirectByteBuffer trong framework; chưa có.
+    // Needs java.nio.DirectByteBuffer in framework; not yet.
     return nullptr;
 }
 void* JNICALL GetDirectBufferAddress(JNIEnv*, jobject) { return nullptr; }
 jlong JNICALL GetDirectBufferCapacity(JNIEnv*, jobject) { return -1; }
 
-// Reflection: cần java.lang.reflect.* trong framework, chưa hỗ trợ.
+// Reflection: needs java.lang.reflect.* in the framework, not supported yet.
 jmethodID JNICALL FromReflectedMethod(JNIEnv*, jobject) { return nullptr; }
 jfieldID JNICALL FromReflectedField(JNIEnv*, jobject) { return nullptr; }
 jobject JNICALL ToReflectedMethod(JNIEnv*, jclass, jmethodID, jboolean) { return nullptr; }
@@ -852,7 +852,7 @@ jint JNICALL AttachCurrentThreadAsDaemon(JavaVM* vm, void** penv, void* args) {
 }  // namespace
 
 void DexJniEnv::InitFunctionTable() {
-    // static: bảng dùng chung cho mọi DexJniEnv, chỉ khởi tạo một lần.
+    // static: table shared by all DexJniEnv, initialized only once.
     static JNINativeInterface_ fns = {};
     static JNIInvokeInterface_ vm_fns = {};
     static bool initialized = false;

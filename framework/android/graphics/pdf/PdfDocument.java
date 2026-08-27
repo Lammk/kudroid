@@ -1,6 +1,6 @@
 package android.graphics.pdf;
 
-/** Stub sinh tự động cho android.graphics.pdf.PdfDocument */
+/** Stub automatically generated for android.graphics.pdf.PdfDocument */
 public class PdfDocument {
     public PdfDocument() {}
 

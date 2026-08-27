@@ -1,6 +1,6 @@
 package android.animation;
 
-/** Stub sinh tự động cho android.animation.AnimatorListenerAdapter */
+/** Stub automatically generated for android.animation.AnimatorListenerAdapter */
 public class AnimatorListenerAdapter {
     public AnimatorListenerAdapter() {}
 }

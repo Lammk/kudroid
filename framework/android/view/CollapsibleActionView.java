@@ -1,6 +1,6 @@
 package android.view;
 
-/** Stub sinh tự động cho android.view.CollapsibleActionView */
+/** Stub automatically generated for android.view.CollapsibleActionView */
 public class CollapsibleActionView {
     public CollapsibleActionView() {}
 }

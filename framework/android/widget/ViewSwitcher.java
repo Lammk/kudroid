@@ -1,6 +1,6 @@
 package android.widget;
 
-/** Stub sinh tự động cho android.widget.ViewSwitcher */
+/** Stub automatically generated for android.widget.ViewSwitcher */
 public class ViewSwitcher {
     public ViewSwitcher() {}
 

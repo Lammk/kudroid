@@ -1,17 +1,17 @@
 package android.net;
 
 /**
- * mô phỏng android.net.connectivitymanager.
+ * emulate android.net.connectivitymanager.
  *
- * không quan trọng đối với khởi động/kết xuất ứng dụng. trả về giá trị mặc định để các ứng dụng
- * không gặp sự cố khi chúng truy vấn trạng thái mạng.
+ * is not important for application startup/rendering. Returns default value to the application
+ * do not crash when they query network status.
  */
 public class ConnectivityManager {
-    /** loại mạng: không có. */
+    /** network type: none. */
     public static final int TYPE_NONE = -1;
-    /** loại mạng: di động. */
+    /** network type: mobile. */
     public static final int TYPE_MOBILE = 0;
-    /** loại mạng: wifi. */
+    /** network type: wifi. */
     public static final int TYPE_WIFI = 1;
 
     public ConnectivityManager() {
@@ -44,7 +44,7 @@ public class ConnectivityManager {
     }
 
     /**
-     * mô phỏng networkcallback.
+     * simulate networkcallback.
      */
     public static class NetworkCallback {
         public void onAvailable(Network network) {

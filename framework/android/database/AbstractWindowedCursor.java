@@ -1,6 +1,6 @@
 package android.database;
 
-/** Stub sinh tự động cho android.database.AbstractWindowedCursor */
+/** Stub automatically generated for android.database.AbstractWindowedCursor */
 public class AbstractWindowedCursor {
     public AbstractWindowedCursor() {}
 }

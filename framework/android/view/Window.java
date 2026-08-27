@@ -3,10 +3,10 @@ package android.view;
 import android.content.Context;
 
 /**
- * triển khai android.view.window tối thiểu.
+ * minimal android.view.window implementation.
  *
- * đại diện cho một cửa sổ. đối với khuôn khổ tối thiểu của kudroid, đây là một mô phỏng
- * cung cấp quản lý cửa sổ cơ bản.
+ * represents a window. for kudroid minimal framework, here is an emulation
+ * provides basic window management.
  */
 public class Window {
     private final Context mContext;
@@ -18,27 +18,27 @@ public class Window {
     }
 
     /**
-     * trả về ngữ cảnh mà cửa sổ này được tạo với.
+     * returns the context this window was created with.
      */
     public Context getContext() {
         return mContext;
     }
 
     /**
-     * thiết lập view nội dung.
+     * set content view.
      */
     public void setContentView(int layoutResID) {
     }
 
     /**
-     * thiết lập view nội dung thành một view.
+     * sets the content view to a view.
      */
     public void setContentView(View view) {
         mDecorView = view;
     }
 
     /**
-     * trả về view trang trí (decor view).
+     * returns decoration view.
      */
     public View getDecorView() {
         return mDecorView;
@@ -47,7 +47,7 @@ public class Window {
     private static native void setKeepScreenOnNative(boolean keepOn);
 
     /**
-     * thiết lập cờ cửa sổ.
+     * set window flags.
      */
     public void setFlags(int flags, int mask) {
         mFlags = (mFlags & ~mask) | (flags & mask);
@@ -59,7 +59,7 @@ public class Window {
     }
 
     /**
-     * thêm một cờ cửa sổ.
+     * added a window flag.
      */
     public void addFlags(int flags) {
         mFlags |= flags;
@@ -71,7 +71,7 @@ public class Window {
     }
 
     /**
-     * xóa một cờ cửa sổ.
+     * remove a window flag.
      */
     public void clearFlags(int flags) {
         mFlags &= ~flags;
@@ -83,20 +83,20 @@ public class Window {
     }
 
     /**
-     * trả về các cờ cửa sổ hiện tại.
+* tr  v  c c c  c a s  hi n t i.
      */
     public int getFlags() {
         return mFlags;
     }
 
     /**
-     * thiết lập nền cửa sổ.
+     * set window background.
      */
     public void setBackgroundDrawable(android.graphics.drawable.Drawable drawable) {
     }
 
     /**
-     * thiết lập tiêu đề cửa sổ.
+     * set window title.
      */
     public void setTitle(CharSequence title) {
     }

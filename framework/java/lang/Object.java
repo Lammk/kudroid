@@ -1,8 +1,8 @@
 package java.lang;
 
 /**
- * Gốc của mọi class. KuART cấp phát object theo layout DexObject nên class này
- * không được khai báo field instance nào.
+ * Root of all classes. KuART allocates objects according to the DexObject layout so this class
+ * Do not declare any field instances.
  */
 public class Object {
 

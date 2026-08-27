@@ -8,7 +8,6 @@ import CoreMotion
 struct ContentView: View {
     @State private var fullLog = "KuDroid Core Status"
     @State private var jitStatus = "JIT: Unknown"
-    @State private var showJitWarning = false
     
     var body: some View {
         TabView {
@@ -32,14 +31,6 @@ struct ContentView: View {
             setupLogDir()
             jitStatus = runJitStatus()
             activateAudioSession()
-            if kudroid_is_jit_enabled() == 0 {
-                showJitWarning = true
-            }
-        }
-        .alert("JIT Required", isPresented: $showJitWarning) {
-            Button("OK", role: .cancel) { }
-        } message: {
-            Text("To use this application please enable JIT because nothing will work without it,sorry about that but we have no choose left")
         }
     }
 }
@@ -51,21 +42,20 @@ struct AppItem: Identifiable {
     let iconImage: UIImage?
 }
 
-// mark: - tab ứng dụng
+// mark: - application tab
 struct AppsView: View {
     @EnvironmentObject private var session: AppSession
     @Binding var fullLog: String
     @State private var installedApps: [AppItem] = []
     @State private var showAPKInstaller = false
     @State private var showRenameAlert = false
-    // Trạng thái xóa app — hiển thị progress thay vì freeze UI.
+    // App deletion status — shows progress instead of freeze UI.
     @State private var deletingApp: String? = nil
     @State private var deletePhase = ""
     @State private var deletePercent: Double = 0
-    // [DEBUG] đếm callback từ native — watchdog dựa vào đây thay vì percent
-    // (percent giữ nguyên 0 khi xóa nhiều file nhỏ dù native đang chạy).
+    // [DEBUG] count callbacks from native — watchdog based on this instead of percent
+    // (percent remains 0 when deleting many small files even though native is running).
     @State private var deleteCbCount = 0
-    @State private var showJitWarning = false
     @State private var renamingAppId: String = ""
     @State private var newAppName: String = ""
     
@@ -80,15 +70,15 @@ struct AppsView: View {
                 Color.black.ignoresSafeArea()
                 
                 VStack(spacing: 0) {
-                    // tiêu đề
+                    // title
                     HStack {
                         Image(systemName: "cpu")
                             .font(.title)
                             .foregroundColor(.green)
                         Text("KuDroid")
                             .font(.title2.bold())
-                        // Hiển thị version ngay trên màn hình — phân biệt bản cũ/mới
-                        // khi nghi ngờ iPhone đang chạy IPA lỗi thời.
+                        // Display version right on the screen — distinguish old/new versions
+                        // when you suspect your iPhone is running an outdated IPA.
                         Text("v" + appVersion())
                             .font(.caption.weight(.semibold))
                             .foregroundColor(.green.opacity(0.8))
@@ -167,11 +157,7 @@ struct AppsView: View {
                                 Spacer()
                                 
                                 Button(action: {
-                                    if kudroid_is_jit_enabled() == 0 {
-                                        showJitWarning = true
-                                    } else {
-                                        session.activeGuestApp = app.id
-                                    }
+                                    session.activeGuestApp = app.id
                                 }) {
                                     Text("RUN")
                                         .font(.caption.bold())
@@ -205,14 +191,14 @@ struct AppsView: View {
                             }
                         }
                         .onAppear {
-                            // cách khắc phục tạm thời cho các phiên bản trước ios 16
+                            // temporary fix for versions before ios 16
                             UITableView.appearance().backgroundColor = .clear
                         }
                     }
                 }
 
-                // Overlay tiến trình xóa app — chặn tương tác trong lúc xóa
-                // nhưng vẫn hiển thị phase + % thay vì treo màn hình.
+                // Overlay the app deletion process — block interaction while deleting
+                // but still displays phase + % instead of freezing the screen.
                 if let name = deletingApp {
                     ZStack {
                         Color.black.opacity(0.65).ignoresSafeArea()
@@ -259,11 +245,6 @@ struct AppsView: View {
             } message: {
                 Text("Enter a new display name for this app.")
             }
-            .alert("JIT Required", isPresented: $showJitWarning) {
-                Button("OK", role: .cancel) { }
-            } message: {
-                Text("To use this application please enable JIT because nothing will work without it,sorry about that but we have no choose left")
-            }
         }
     }
 
@@ -276,7 +257,7 @@ struct AppsView: View {
                 var folderName = folder.lastPathComponent
                 var currentFolderURL = folder
                 
-                // 1. Tự động chuẩn hóa ngay lập tức nếu tên thư mục có dấu gạch dưới version (ví dụ ru.zdevs.zarchiver_1.0.10)
+                // 1. Automatically normalize immediately if the directory name has a version underscore (e.g. ru.zdevs.zarchiver_1.0.10)
                 if folderName.contains("_") {
                     let cleanPkg = String(folderName.split(separator: "_")[0])
                     if cleanPkg.contains(".") {
@@ -293,7 +274,7 @@ struct AppsView: View {
                     }
                 }
 
-                // Đọc app_info.json nếu có
+                // Read app_info.json if available
                 var infoURL = currentFolderURL.appendingPathComponent("app_info.json")
                 var displayName = prettifyAppName(folderName)
                 var version = extractVersionFromFolderName(folderName) ?? "1.0.0"
@@ -318,15 +299,15 @@ struct AppsView: View {
                     }
                 }
 
-                // Version từ AndroidManifest.xml là NGUỒN CHUẨN — app_info.json
-                // có thể stale (viết từ bản cũ khi parser AXML còn lỗi → "1.0.0").
-                // Đọc trực tiếp binary manifest mỗi lần list app.
+                // Version from AndroidManifest.xml is STANDARD SOURCE — app_info.json
+                // may be stale (written from an old version when the AXML parser still had errors → "1.0.0").
+                // Read the binary manifest directly each time the app is listed.
                 if let mfData = try? Data(contentsOf: currentFolderURL.appendingPathComponent("AndroidManifest.xml")),
                    let mfVer = extractVersionNameFromAxml(mfData), !mfVer.isEmpty {
                     version = mfVer
                 }
                 
-                // Đọc app_icon.png nếu có
+                // Read app_icon.png if available
                 var iconImg: UIImage? = nil
                 let iconURL = currentFolderURL.appendingPathComponent("app_icon.png")
                 if FileManager.default.fileExists(atPath: iconURL.path) {
@@ -346,14 +327,14 @@ struct AppsView: View {
         if raw.isEmpty { return "Android App" }
         var s = raw
 
-        // 1. Tách package name nếu có (ví dụ "com.discord" -> "discord")
+        // 1. Separate package name if any (eg "com.discord" -> "discord")
         if s.contains(".") {
             if let last = s.split(separator: ".").last {
                 s = String(last)
             }
         }
 
-        // 2. Bỏ đuôi .apk
+        // 2. Remove the .apk extension
         if s.lowercased().hasSuffix(".apk") {
             s = String(s.dropLast(4))
         }
@@ -365,7 +346,7 @@ struct AppsView: View {
         if lower.contains("rolling") && lower.contains("sky") { return "Rolling Sky" }
         if lower.contains("triangle") { return "Triangle Test" }
 
-        // 3. Tách các tiền tố/hậu tố rác thường gặp trong tên file APK mod/port
+        // 3. Separate common junk prefixes/suffixes in mod/port APK file names
         let junkWords: Set<String> = [
             "apk", "arm64", "arm64v8a", "v8a", "vulkan", "gles", "mod",
             "signed", "release", "debug", "beta", "alpha", "jakitomzed",
@@ -378,7 +359,7 @@ struct AppsView: View {
             let str = String(comp)
             let wLower = str.lowercased()
             if junkWords.contains(wLower) { continue }
-            // Bỏ qua version thuần số ví dụ "5.5.8" hoặc "v202"
+            // Ignore pure numeric version e.g. "5.5.8" or "v202"
             if str.allSatisfy({ $0.isNumber || $0 == "." }) || (str.hasPrefix("v") && str.dropFirst().allSatisfy({ $0.isNumber || $0 == "." })) {
                 continue
             }
@@ -391,7 +372,7 @@ struct AppsView: View {
             s = s.replacingOccurrences(of: "-", with: " ").replacingOccurrences(of: "_", with: " ")
         }
 
-        // 4. Viết hoa chữ cái đầu và tách CamelCase (ví dụ: "rollingsky" -> "Rolling Sky", "Discord" -> "Discord")
+        // 4. Capitalize first letter and separate CamelCase (e.g. "rollingsky" -> "Rolling Sky", "Discord" -> "Discord")
         var result = ""
         for (i, char) in s.enumerated() {
             if i > 0 && char.isUppercase && s[s.index(s.startIndex, offsetBy: i - 1)].isLowercase && !result.hasSuffix(" ") {
@@ -418,12 +399,12 @@ struct AppsView: View {
     }
     
     private func deleteApp(name: String) {
-        guard deletingApp == nil else { return } // đang xóa app khác
+        guard deletingApp == nil else { return } // Deleting another app
         deletingApp = name
         deletePhase = "Preparing…"
         deletePercent = 0
-        // [DEBUG UNINSTALL] đánh dấu thời điểm bắt đầu — watchdog bên dưới
-        // dùng nó để phát hiện việc xóa bị treo (kẹt 0% không callback nào).
+        // [DEBUG UNINSTALL] marks the start — watchdog below
+        // Use it to detect frozen deletions (stuck at 0% with no callbacks).
         let start = Date()
         DispatchQueue.main.async {
             self.fullLog += "\n[uninstall] START \(name) @ \(start)"
@@ -452,9 +433,9 @@ struct AppsView: View {
             }
             let opaque = Unmanaged.passRetained(ctx).toOpaque()
 
-            // [DEBUG] watchdog: nếu sau 15s CHƯA CÓ callback nào từ native
-            // (không tính percent vì 1% = ~22MB với app lớn) → luồng native
-            // gần như chắc chắn kẹt. Chạy trên main queue để đọc @State an toàn.
+            // [DEBUG] watchdog: if after 15 seconds there is NO callback from native
+            // (not counting percent because 1% = ~22MB for large apps) → native stream
+            // Almost certainly stuck. Runs on main queue to read @State safely.
             DispatchQueue.main.asyncAfter(deadline: .now() + 15) {
                 if self.deletingApp == name && self.deleteCbCount == 0 {
                     self.fullLog += "\n[uninstall] ⚠️ WATCHDOG: no callback after 15s — native thread likely STUCK (permission or filesystem)"
@@ -464,9 +445,9 @@ struct AppsView: View {
 
             let success = kudroid_delete_app_progress(name, cb, opaque)
             Unmanaged<Ctx>.fromOpaque(opaque).release()
-            // [DEBUG] kéo toàn bộ trace phía native lên log Swift để xem/copy
+            // [DEBUG] drag the entire native side trace to the Swift log to view/copy
             // ngay trong tab Debug (file kudroid_uninstall_debug.txt trong
-            // Documents cũng chứa nội dung này).
+            // Documents also contains this content).
             if let cTrace = kudroid_uninstall_debug_log() {
                 let trace = String(cString: cTrace)
                 free(UnsafeMutablePointer(mutating: cTrace))
@@ -501,7 +482,7 @@ struct AppsView: View {
     }
 }
 
-// mark: - tab quản lý quyền ứng dụng (PermissionsView)
+// mark: - application permission management tab (PermissionsView)
 struct PermissionGroupItem: Identifiable {
     var id: String { key }
     let key: String
@@ -537,7 +518,7 @@ struct PermissionsView: View {
                 Color.black.ignoresSafeArea()
                 
                 VStack(spacing: 0) {
-                    // Tiêu đề
+                    // Title
                     HStack {
                         Image(systemName: "lock.shield.fill")
                             .font(.title)
@@ -550,7 +531,7 @@ struct PermissionsView: View {
                     .padding(.top, 12)
                     .padding(.bottom, 8)
                     
-                    // Thanh tìm kiếm
+                    // Search bar
                     HStack(spacing: 8) {
                         Image(systemName: "magnifyingglass")
                             .foregroundColor(.secondary)
@@ -623,7 +604,7 @@ struct PermissionsView: View {
         let grantedCount = groups.filter({ $0.granted }).count
         
         return VStack(spacing: 0) {
-            // Header bấm để mở/đóng
+            // Header click to open/close
             Button(action: {
                 withAnimation(.easeInOut(duration: 0.22)) {
                     if isExpanded {
@@ -674,7 +655,7 @@ struct PermissionsView: View {
             }
             .buttonStyle(PlainButtonStyle())
             
-            // Danh sách permissions (hiện ra khi expanded)
+            // List of permissions (appears when expanded)
             if isExpanded {
                 VStack(spacing: 0) {
                     Divider().background(Color.white.opacity(0.1))
@@ -718,7 +699,7 @@ struct PermissionsView: View {
                         }
                     }
                     
-                    // Nút thao tác nhanh Grant All / Revoke All ở chân Card
+                    // Quick action button Grant All / Revoke All at the foot of the Card
                     HStack {
                         Button(action: {
                             revokeAll(appId: app.id)
@@ -850,7 +831,7 @@ struct PermissionsView: View {
     }
 }
 
-// mark: - tab gỡ lỗi (DebugView rút gọn chỉ giữ KDB & Live Terminal Log)
+// mark: - debug tab (shortened DebugView keeps only KDB & Live Terminal Log)
 struct DebugView: View {
     @Binding var fullLog: String
     @Binding var jitStatus: String
@@ -870,7 +851,7 @@ struct DebugView: View {
                 Color.black.ignoresSafeArea()
                 
                 VStack(spacing: 12) {
-                    // Thanh kết nối KDB Bridge từ xa
+                    // Remote KDB Bridge connection bar
                     HStack(spacing: 8) {
                         Image(systemName: isKdbConnected ? "antenna.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right.slash")
                             .foregroundColor(isKdbConnected ? .green : .gray)
@@ -929,7 +910,7 @@ struct DebugView: View {
                     .cornerRadius(12)
                     .padding(.horizontal)
                     
-                    // Nút thao tác Log (Copy Log & Clear Log)
+                    // Log operation button (Copy Log & Clear Log)
                     HStack(spacing: 12) {
                         Button(action: {
                             UIPasteboard.general.string = fullLog
@@ -976,17 +957,17 @@ struct DebugView: View {
     }
 }
 
-// mark: - các hàm hỗ trợ bộ nối gốc
+// mark: - native connector support functions
 
-/// Bật audio session playback để CoreAudio (AudioQueue trong AudioShim) phát
-/// được âm thanh — không có session hoạt động thì iOS im lặng.
+/// Turn on audio session playback for CoreAudio (AudioQueue in AudioShim) to play
+/// is audible — without an active session, iOS is silent.
 func activateAudioSession() {
     let session = AVAudioSession.sharedInstance()
-    // Build chạy với -swift-version 4 (mặc định của CMake khi enable_language(Swift)).
-    // Ở mode này NS_TYPED_EXTENSIBLE_ENUM của ObjC (AVAudioSession.Category / Mode)
-    // bị import thành raw NSString typealias → không có member .playback/.default,
-    // param chỉ nhận String. Dùng raw constant string (đúng giá trị ObjC) —
-    // compile được trong Swift 4 mode; nếu sau này nâng lên Swift 5 thì đổi về
+    // Build runs with -swift-version 4 (CMake's default when enable_language(Swift)).
+    // In this mode NS_TYPED_EXTENSIBLE_ENUM of ObjC (AVAudioSession.Category / Mode)
+    // imported as raw NSString typealias → no member .playback/.default,
+    // param only accepts String. Use raw constant string (correct ObjC value) —
+    // compiles in Swift 4 mode; If you later upgrade to Swift 5, change back
     // AVAudioSession.Category.playback / AVAudioSession.Mode.default.
     try? session.setCategory("AVAudioSessionCategoryPlayback",
                              mode: "AVAudioSessionModeDefault",
@@ -994,7 +975,7 @@ func activateAudioSession() {
     try? session.setActive(true)
 }
 
-/// Đọc CFBundleShortVersionString từ Info.plist (0.6.5).
+/// Read CFBundleShortVersionString from Info.plist (0.6.5).
 func appVersion() -> String {
     if let v = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String {
         return v
@@ -1012,7 +993,7 @@ func setupLogDir() {
 }
 
 func runJniJvmTest() -> String {
-    // KuART nhúng framework.dex trong binary nên không cần đường dẫn jar nào.
+    // KuART embeds framework.dex in the binary so no jar path is needed.
     guard let cString = kudroid_test_jvm("") else { return "Error: null result" }
     let log = String(cString: cString)
     free(UnsafeMutablePointer(mutating: cString))
@@ -1020,7 +1001,7 @@ func runJniJvmTest() -> String {
 }
 
 func runGpuTest() -> String {
-    // lưu ý: đảm bảo kudroid_test_gpu được khai báo trong tiêu đề kết nối
+    // note: make sure kudroid_test_gpu is declared in the connection header
     guard let cString = kudroid_test_gpu() else { return "Error: null result" }
     let log = String(cString: cString)
     free(UnsafeMutablePointer(mutating: cString))
@@ -1062,10 +1043,10 @@ func extractVersionFromFolderName(_ name: String) -> String? {
     return nil
 }
 
-/// Đọc versionName từ binary AndroidManifest.xml (AXML).
-/// Nguồn chuẩn cho version hiển thị — app_info.json có thể stale.
-/// Parser tối giản: string pool UTF-16/UTF-8 + tìm attr "versionName" trong
-/// tag START_ELEMENT đầu tiên tên "manifest".
+/// Read versionName from binary AndroidManifest.xml (AXML).
+/// Standard source for display version — app_info.json may be stale.
+/// Minimalist parser: string pool UTF-16/UTF-8 + find attr "versionName" in
+///first START_ELEMENT tag named "manifest".
 func extractVersionNameFromAxml(_ data: Data) -> String? {
     let bytes = [UInt8](data)
     guard bytes.count > 40 else { return nil }
@@ -1078,7 +1059,7 @@ func extractVersionNameFromAxml(_ data: Data) -> String? {
     // File header: type=0x0003 | (headerSize<<16), fileSize.
     guard u32(0) == 0x00080003 else { return nil }
 
-    // String pool tại offset 8: type=0x0001, headerSize=28.
+    // String pool at offset 8: type=0x0001, headerSize=28.
     let poolOff = 8
     guard u16(poolOff) == 0x0001 else { return nil }
     let stringCount = u32(poolOff + 8)
@@ -1096,7 +1077,7 @@ func extractVersionNameFromAxml(_ data: Data) -> String? {
 
         if isUtf8 {
             var cur = strOff
-            // u8len: 1-2 byte length prefix (số ký tự), sau đó byte-length prefix.
+            // u8len: 1-2 byte length prefix (number of characters), then byte-length prefix.
             cur += (bytes[cur] & 0x80) != 0 ? 2 : 1
             var byteLen = 0
             if cur < bytes.count {
@@ -1130,9 +1111,9 @@ func extractVersionNameFromAxml(_ data: Data) -> String? {
         }
     }
 
-    // Duyệt chunks tìm START_ELEMENT của tag "manifest", đọc attr versionName.
+    // Browse chunks to find START_ELEMENT of tag "manifest", read attr versionName.
     var cur = poolOff + u32(poolOff + 4)
-    // Bỏ qua resource map nếu có (type 0x0180).
+    // Ignore resource map if present (type 0x0180).
     if cur + 8 <= bytes.count && u32(cur) == 0x00080180 {
         cur += u32(cur + 4)
     }
@@ -1148,7 +1129,7 @@ func extractVersionNameFromAxml(_ data: Data) -> String? {
                 let attrStart = u16(cur + 24)
                 let attrSize = u16(cur + 26)
                 let attrCount = u16(cur + 28)
-                // attributeStart tính từ đầu struct attrExt (= chunk+16).
+                // attributeStart counts from the beginning of struct attrExt (= chunk+16).
                 var a = cur + 16 + attrStart
                 for _ in 0..<attrCount where a + attrSize <= cur + chunkSize {
                     let attrNameIdx = u32(a + 4)
@@ -1158,7 +1139,7 @@ func extractVersionNameFromAxml(_ data: Data) -> String? {
                         if rawValIdx != 0xFFFFFFFF && rawValIdx < strings.count {
                             return strings[rawValIdx]
                         }
-                        // typed value: dataType ở a+15, data ở a+16.
+                        // typed value: dataType in a+15, data in a+16.
                         let dataType = bytes[a + 15]
                         if dataType == 0x03 { // TYPE_STRING
                             let dataVal = u32(a + 16)
@@ -1167,7 +1148,7 @@ func extractVersionNameFromAxml(_ data: Data) -> String? {
                     }
                     a += attrSize
                 }
-                return nil // manifest là tag đầu tiên — không thấy thì dừng
+                return nil // manifest is the first tag — if you don't see it, stop
             }
         }
         cur += chunkSize
@@ -1175,7 +1156,7 @@ func extractVersionNameFromAxml(_ data: Data) -> String? {
     return nil
 }
 
-// mark: - giao diện cài đặt apk
+// mark: - apk installation interface
 struct APKInstallerView: View {
     let onInstall: (String) -> Void
     @Environment(\.dismiss) private var dismiss
@@ -1265,7 +1246,7 @@ struct APKInstallerView: View {
                         }
                     }
 
-                    // Khung animation trạng thái cài đặt
+                    // Installation status animation frame
                     if isInstalling {
                         VStack(spacing: 12) {
                             ProgressView()
@@ -1403,7 +1384,7 @@ struct APKInstallerView: View {
              .sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
             if let selectedAPK, !apkFiles.contains(selectedAPK) { self.selectedAPK = nil }
             
-            // Tải danh sách app đã cài để check update
+            // Download the list of installed apps to check for updates
             if let root = androidRootAppsURL,
                let folders = try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) {
                 installedPackages = Set(folders.map { $0.lastPathComponent })
@@ -1421,7 +1402,7 @@ struct APKInstallerView: View {
     }
 }
 
-// mark: - các hàm hỗ trợ gốc khác
+// mark: - other native support functions
 func runJitStatus() -> String {
     guard let cString = kudroid_jit_status() else { return "JIT: Unknown" }
     let status = String(cString: cString)
@@ -1551,7 +1532,7 @@ func executeKuDroidTest(name: String) -> (success: Bool, log: String, logFilenam
     return (isSuccess, log, logFile)
 }
 
-// mark: - Bộ thực thi độc quyền toàn màn hình (Dedicated Clean Container)
+// mark: - Full screen exclusive executable (Dedicated Clean Container)
 struct DedicatedAppRunnerView: UIViewControllerRepresentable {
     let appName: String
     let onExit: () -> Void
@@ -1611,7 +1592,7 @@ class NativeMetalViewController: UIViewController {
         self.view.backgroundColor = .black
         metalView.backgroundColor = .black
 
-        // Nhãn chẩn đoán trạng thái tức thời trên màn hình
+        // Nh n ch n  o n tr ng th i t c th i tr n m n h nh
         statusLabel = UILabel()
         statusLabel.text = "KuDroid: Initializing \(appName)..."
         statusLabel.textColor = UIColor.green.withAlphaComponent(0.8)
@@ -1623,7 +1604,7 @@ class NativeMetalViewController: UIViewController {
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(statusLabel)
 
-        // Nút đóng nổi (Floating Exit Button) để người dùng quay về Launcher bất cứ lúc nào
+        // Floating Exit Button allows users to return to Launcher at any time
         let closeButton = UIButton(type: .system)
         let config = UIImage.SymbolConfiguration(pointSize: 22, weight: .bold)
         closeButton.setImage(UIImage(systemName: "xmark.circle.fill", withConfiguration: config), for: .normal)
@@ -1644,14 +1625,14 @@ class NativeMetalViewController: UIViewController {
             closeButton.heightAnchor.constraint(equalToConstant: 40)
         ])
 
-        // Tự động làm mờ nhãn trạng thái sau 3 giây
+        // Automatically dim status labels after 3 seconds
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
             UIView.animate(withDuration: 0.5) {
                 self?.statusLabel.alpha = 0.0
             }
         }
 
-        // Khởi động CoreMotion để truyền dữ liệu cảm biến vào KuDroid bridge
+        // Start CoreMotion to transmit sensor data to the KuDroid bridge
         if motionManager.isAccelerometerAvailable {
             motionManager.accelerometerUpdateInterval = 0.02 // 50 Hz
             motionManager.startAccelerometerUpdates(to: .main) { data, _ in
@@ -1715,7 +1696,7 @@ class NativeMetalViewController: UIViewController {
         NativeMetalViewController.isGlobalAppRunning = true
         isStarted = true
 
-        // Mặc định bật No Sleep (giữ màn hình luôn sáng khi chơi game)
+        // By default, No Sleep is enabled (keeps the screen on when playing games)
         UIApplication.shared.isIdleTimerDisabled = true
         NSLog("[KuDroid] >>> Launching guest app: %@ (isIdleTimerDisabled = true) <<<", appName)
 
@@ -1741,7 +1722,7 @@ class NativeMetalViewController: UIViewController {
         let unmanaged = Unmanaged.passUnretained(view.layer)
         kudroid_set_metal_layer(unmanaged.toOpaque(), width, height, Float(scale))
 
-        // Timer quét trạng thái crash, hướng màn hình và No Sleep định kỳ từ C++ bridge
+        // Timer periodically scans crash status, screen orientation, and No Sleep from the C++ bridge
         crashCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] timer in
             guard let self = self else { return }
             if kudroid_has_crashed() != 0 {
@@ -1750,14 +1731,14 @@ class NativeMetalViewController: UIViewController {
                 return
             }
 
-            // Đồng bộ trạng thái No Sleep (Keep Screen On) từ Android app
+            // ng b  tr ng th i No Sleep (Keep Screen On) t  Android app
             let keepScreenOn = kudroid_get_keep_screen_on() != 0
             if UIApplication.shared.isIdleTimerDisabled != keepScreenOn {
                 UIApplication.shared.isIdleTimerDisabled = keepScreenOn
                 NSLog("[KuDroid] Synchronized isIdleTimerDisabled = %@", keepScreenOn ? "true" : "false")
             }
 
-            // Quét hướng màn hình yêu cầu từ Android guest app
+            // Qu t h ng m n h nh y u c u t  Android guest app
             let reqOri = kudroid_get_requested_orientation()
             if reqOri != self.lastRequestedOrientation {
                 self.lastRequestedOrientation = reqOri
@@ -1787,7 +1768,7 @@ class NativeMetalViewController: UIViewController {
             }
         }
 
-        // Chạy APK Android với độ ưu tiên cao nhất của Interactive UI
+        // Run Android APK with highest Interactive UI priority
         DispatchQueue.global(qos: .userInteractive).async { [weak self] in
             guard let self = self else { return }
             NSLog("[KuDroid] Starting kudroid_run_apk(%@)...", self.appName)
@@ -1803,7 +1784,7 @@ class NativeMetalViewController: UIViewController {
                 if kudroid_has_crashed() != 0 {
                     self.handleCrash(fallbackLog: logOutput)
                 } else {
-                    // App đã chạy xong mà không crash (hoặc trả về log kết thúc)
+                    // App   ch y xong m  kh ng crash (ho c tr  v  log finished)
                     self.statusLabel.alpha = 1.0
                     self.statusLabel.text = "Session ended. Tap ✕ to close."
                     self.statusLabel.textColor = .yellow
@@ -1902,7 +1883,7 @@ class NativeMetalView: UIView {
     }
 }
 
-// Hàm nhận buffer 2D vẽ bằng CPU từ C++ và blit thẳng lên màn hình iOS (CALayer)
+// H m nh n buffer 2D v  b ng CPU t  C++ v  blit th ng l n m n h nh iOS (CALayer)
 @_cdecl("kudroid_blit_canvas_to_layer")
 public func kudroid_blit_canvas_to_layer(layerPtr: UnsafeMutableRawPointer?, bits: UnsafeRawPointer?, width: Int32, height: Int32) {
     guard let layerPtr = layerPtr, let bits = bits, width > 0, height > 0 else { return }
@@ -1935,11 +1916,15 @@ public func kudroid_blit_canvas_to_layer(layerPtr: UnsafeMutableRawPointer?, bit
     }
 }
 
-// mark: - Modal thông báo Gentle Crash
+// mark: - Modal th ng b o Gentle Crash th ng minh (JIT vs Non-JIT)
 struct CrashAlertView: View {
     let crashInfo: CrashInfo
     let onDismiss: () -> Void
     @State private var copied = false
+    
+    private var isJitEnabled: Bool {
+        return kudroid_is_jit_enabled() != 0
+    }
 
     var body: some View {
         ZStack {
@@ -1947,19 +1932,36 @@ struct CrashAlertView: View {
             
             VStack(spacing: 16) {
                 // Header Icon & Title
-                VStack(spacing: 6) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 44))
-                        .foregroundColor(.yellow)
-                    
-                    Text("Whoops, the app crashed")
-                        .font(.title2.bold())
-                        .foregroundColor(.white)
-                    
-                    Text("App '\(crashInfo.appName)' encountered an unexpected error.")
-                        .font(.subheadline)
-                        .foregroundColor(.gray)
-                        .multilineTextAlignment(.center)
+                VStack(spacing: 8) {
+                    if isJitEnabled {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 46))
+                            .foregroundColor(.red)
+                        
+                        Text("App Crashed (JIT Enabled)")
+                            .font(.title3.bold())
+                            .foregroundColor(.white)
+                        
+                        Text("App '\(crashInfo.appName)' stopped unexpectedly even with JIT active. This issue is likely caused by missing Android framework APIs or shims.")
+                            .font(.caption)
+                            .foregroundColor(.gray)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 8)
+                    } else {
+                        Image(systemName: "bolt.slash.trianglebadge.exclamationmark.fill")
+                            .font(.system(size: 46))
+                            .foregroundColor(.orange)
+                        
+                        Text("App Crashed (No JIT)")
+                            .font(.title3.bold())
+                            .foregroundColor(.white)
+                        
+                        Text("App '\(crashInfo.appName)' stopped. KuART ran in standalone Interpreter mode. If this app requires dynamic native code (W^X), try enabling JIT via StikDebug or SideStore.")
+                            .font(.caption)
+                            .foregroundColor(.gray)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 8)
+                    }
                 }
                 .padding(.top, 8)
 
@@ -1997,7 +1999,7 @@ struct CrashAlertView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(10)
                     }
-                    .frame(maxHeight: 280)
+                    .frame(maxHeight: 240)
                     .background(Color.black.opacity(0.7))
                     .cornerRadius(8)
                     .overlay(
@@ -2007,15 +2009,38 @@ struct CrashAlertView: View {
                 }
                 .padding(.horizontal)
 
-                // Close Button
-                Button(action: onDismiss) {
-                    Text("Dismiss")
-                        .font(.headline)
-                        .foregroundColor(.black)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
-                        .background(Color.green)
-                        .cornerRadius(10)
+                // Action Buttons
+                VStack(spacing: 10) {
+                    if isJitEnabled {
+                        Button(action: {
+                            UIPasteboard.general.string = crashInfo.tailLog
+                            copied = true
+                            if let url = URL(string: "https://github.com/Lammk/kudroid/issues/new") {
+                                UIApplication.shared.open(url)
+                            }
+                        }) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "link.badge.plus")
+                                Text("Copy Log & Report on GitHub")
+                            }
+                            .font(.subheadline.bold())
+                            .foregroundColor(.black)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                            .background(Color.yellow)
+                            .cornerRadius(10)
+                        }
+                    }
+
+                    Button(action: onDismiss) {
+                        Text("Dismiss")
+                            .font(.headline)
+                            .foregroundColor(isJitEnabled ? .white : .black)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                            .background(isJitEnabled ? Color.white.opacity(0.2) : Color.green)
+                            .cornerRadius(10)
+                    }
                 }
                 .padding(.horizontal)
                 .padding(.bottom, 8)

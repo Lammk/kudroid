@@ -1,6 +1,6 @@
 package android.widget;
 
-/** Stub sinh tự động cho android.widget.RemoteViews */
+/** Stub automatically generated for android.widget.RemoteViews */
 public class RemoteViews {
     public RemoteViews() {}
 }

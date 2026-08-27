@@ -1,6 +1,6 @@
 package androidx.room;
 
-/** Stub sinh tự động cho androidx.room.DatabaseConfiguration */
+/** Stub automatically generated for androidx.room.DatabaseConfiguration */
 public class DatabaseConfiguration {
     public DatabaseConfiguration() {}
 }

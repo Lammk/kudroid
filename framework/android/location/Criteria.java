@@ -1,26 +1,26 @@
 package android.location;
 
 /**
- * mô phỏng android.location.criteria.
+ * simulate android.location.criteria.
  *
- * mô tả các tiêu chí để chọn nhà cung cấp vị trí. đối với khuôn khổ tối thiểu
- * của kudroid, đây là một mô phỏng.
+ * describes the criteria for selecting a placement provider. for minimal framework
+ * by kudroid, this is a simulation.
  */
 public class Criteria {
-    /** độ chính xác: không có yêu cầu. */
+/**   ch nh x c: kh ng c  y u c u. */
     public static final int NO_REQUIREMENT = 0;
-    /** độ chính xác: thấp. */
+    /** precision: low. */
     public static final int ACCURACY_LOW = 1;
-    /** độ chính xác: trung bình. */
+    /** precision: average. */
     public static final int ACCURACY_MEDIUM = 2;
-    /** độ chính xác: cao. */
+    /** accuracy: high. */
     public static final int ACCURACY_HIGH = 3;
 
-    /** năng lượng: không có yêu cầu. */
+    /** energy: no requests. */
     public static final int POWER_LOW = 1;
-    /** năng lượng: trung bình. */
+    /** energy: average. */
     public static final int POWER_MEDIUM = 2;
-    /** năng lượng: cao. */
+    /** energy: high. */
     public static final int POWER_HIGH = 3;
 
     private int mAccuracy = NO_REQUIREMENT;

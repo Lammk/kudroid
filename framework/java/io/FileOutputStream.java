@@ -29,10 +29,10 @@ public class FileOutputStream extends OutputStream {
 
     public void write(byte[] b, int off, int len) throws IOException {
         if (fd < 0) {
-            throw new IOException("stream đã đóng");
+            throw new IOException("stream closed");
         }
         if (writeNative(fd, b, off, len) < 0) {
-            throw new IOException("ghi thất bại");
+            throw new IOException("write failed");
         }
     }
 

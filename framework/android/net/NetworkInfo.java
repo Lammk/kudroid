@@ -1,21 +1,21 @@
 package android.net;
 
 /**
- * mô phỏng android.net.networkinfo.
+ * emulate android.net.networkinfo.
  *
- * mô tả trạng thái của một mạng. đối với khuôn khổ tối thiểu của kudroid, đây là
- * một mô phỏng.
+ * describes the state of a network. for kudroid minimal framework, this is
+ * a simulation.
  */
 public class NetworkInfo {
-    /** trạng thái: đang kết nối. */
+    /** status: connecting. */
     public static final int STATE_CONNECTING = 0;
-    /** trạng thái: đã kết nối. */
+    /** status: connected. */
     public static final int STATE_CONNECTED = 1;
-    /** trạng thái: bị đình chỉ. */
+    /** status: suspended. */
     public static final int STATE_SUSPENDED = 2;
-    /** trạng thái: đang ngắt kết nối. */
+    /** status: disconnected. */
     public static final int STATE_DISCONNECTING = 3;
-    /** trạng thái: đã ngắt kết nối. */
+    /** status: disconnected. */
     public static final int STATE_DISCONNECTED = 4;
 
     private final int mType;

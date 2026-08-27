@@ -1,6 +1,6 @@
 package android.webkit;
 
-/** Stub sinh tự động cho android.webkit.ConsoleMessage */
+/** Stub automatically generated for android.webkit.ConsoleMessage */
 public class ConsoleMessage {
     public ConsoleMessage() {}
 }

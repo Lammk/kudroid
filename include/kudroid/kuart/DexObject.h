@@ -1,8 +1,8 @@
-// Object của guest Java: header + phần dữ liệu field instance liền sau.
+// Guest Java object: header + instance field data payload.
 //
-// Layout: [DexObject header][field bytes...]. Field offset tính từ đầu phần dữ
-// liệu, nên object của subclass chỉ cần nối field mới vào sau field của cha —
-// con trỏ tới subclass dùng được như con trỏ tới superclass mà không cần dịch.
+// Layout: [DexObject header][field bytes...]. Field offset t nh t   u ph n d
+// li u, n n object c a subclass ch  c n n i field m i v o sau field c a cha
+// con tr  t i subclass d ng  c nh  con tr  t i superclass m  kh ng c n d ch.
 #ifndef KUDROID_KUART_DEXOBJECT_H
 #define KUDROID_KUART_DEXOBJECT_H
 
@@ -20,18 +20,22 @@ class DexObject {
 public:
     DexClass* clazz = nullptr;
 
-    // Monitor cho synchronized: 0 = chưa ai giữ. Đủ cho mô hình đơn giản hiện
-    // tại (đếm số lần vào lại + id thread giữ khoá).
+    // Monitor for synchronized: 0 = unowned. Only touched under the monitor
+    // mutex in VmLock.cpp.
     uint32_t lock_owner_tid = 0;
     uint32_t lock_count = 0;
+
+    // Bumped by notify/notifyAll so a waiter can tell a real notification
+    // from a spurious condition-variable wakeup.
+    uint32_t notify_seq = 0;
 
     uint8_t* FieldData() { return reinterpret_cast<uint8_t*>(this) + sizeof(DexObject); }
     const uint8_t* FieldData() const {
         return reinterpret_cast<const uint8_t*>(this) + sizeof(DexObject);
     }
 
-    // memcpy thay vì cast: field 8 byte không chắc align 8 trong phần dữ liệu,
-    // và deref con trỏ lệch align là UB trên arm64.
+    // memcpy thay v  cast: field 8 byte kh ng ch c align 8 trong ph n d  li u,
+    // v  deref con tr  l ch align l  UB tr n arm64.
     template <typename T>
     T GetField(uint32_t offset) const {
         T v;
@@ -45,8 +49,8 @@ public:
     }
 };
 
-// Mảng Java: độ dài + phần tử liền sau. Phần tử là kiểu nguyên thủy hoặc
-// DexObject*, tuỳ component_type của class.
+// M ng Java:   d i + ph n t  li n sau. Ph n t  l  ki u nguy n th y ho c
+// DexObject*, tu  component_type c a class.
 class DexArray : public DexObject {
 public:
     int32_t length = 0;

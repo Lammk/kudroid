@@ -1,6 +1,6 @@
 package android.widget;
 
-/** Stub sinh tự động cho android.widget.OverScroller */
+/** Stub automatically generated for android.widget.OverScroller */
 public class OverScroller {
     public OverScroller() {}
 }

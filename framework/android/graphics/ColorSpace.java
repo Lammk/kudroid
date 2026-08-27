@@ -1,6 +1,6 @@
 package android.graphics;
 
-/** Stub sinh tự động cho android.graphics.ColorSpace */
+/** Stub automatically generated for android.graphics.ColorSpace */
 public class ColorSpace {
     public ColorSpace() {}
 

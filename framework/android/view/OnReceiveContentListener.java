@@ -1,5 +1,5 @@
 package android.view;
 
-/** Stub sinh tự động cho android.view.OnReceiveContentListener */
+/** Stub automatically generated for android.view.OnReceiveContentListener */
 public interface OnReceiveContentListener {
 }

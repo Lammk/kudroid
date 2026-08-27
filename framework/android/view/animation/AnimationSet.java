@@ -1,6 +1,6 @@
 package android.view.animation;
 
-/** Stub sinh tự động cho android.view.animation.AnimationSet */
+/** Stub automatically generated for android.view.animation.AnimationSet */
 public class AnimationSet {
     public AnimationSet() {}
 }

@@ -1,6 +1,6 @@
 package android.content.pm;
 
-/** Stub sinh tự động cho android.content.pm.ShortcutInfo */
+/** Stub automatically generated for android.content.pm.ShortcutInfo */
 public class ShortcutInfo {
     public ShortcutInfo() {}
 

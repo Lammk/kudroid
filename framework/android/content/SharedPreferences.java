@@ -3,50 +3,50 @@ package android.content;
 import java.util.Map;
 
 /**
- * triển khai android.content.sharedpreferences tối thiểu.
+ * minimal android.content.sharedpreferences implementation.
  *
- * cung cấp một kho lưu trữ khóa-giá trị đơn giản trong bộ nhớ. đối với khuôn khổ tối thiểu của kudroid,
- * dữ liệu không được lưu vào đĩa (trả về giá trị mặc định khi khởi động lại).
+ * provides a simple in-memory key-value store. for kudroid minimal framework,
+ * data is not saved to disk (returns default value on reboot).
  */
 public interface SharedPreferences {
 
     /**
-     * lấy một giá trị chuỗi.
+     * takes a string value.
      */
     String getString(String key, String defValue);
 
     /**
-     * lấy một giá trị số nguyên.
+     * takes an integer value.
      */
     int getInt(String key, int defValue);
 
     /**
-     * lấy một giá trị long.
+     * takes a long value.
      */
     long getLong(String key, long defValue);
 
     /**
-     * lấy một giá trị float.
+     * takes a float value.
      */
     float getFloat(String key, float defValue);
 
     /**
-     * lấy một giá trị boolean.
+     * takes a boolean value.
      */
     boolean getBoolean(String key, boolean defValue);
 
     /**
-     * kiểm tra xem các tùy chọn có chứa một khóa hay không.
+     * checks if options contain a key.
      */
     boolean contains(String key);
 
     /**
-     * trả về một trình chỉnh sửa để sửa đổi các tùy chọn.
+     * returns an editor to modify options.
      */
     Editor edit();
 
     /**
-     * giao diện để sửa đổi các giá trị trong đối tượng sharedpreferences.
+     * interface for modifying values ​​in sharedpreferences object.
      */
     interface Editor {
         Editor putString(String key, String value);
@@ -61,7 +61,7 @@ public interface SharedPreferences {
     }
 
     /**
-     * Callback khi một key bị thay đổi.
+     * Callback when a key is changed.
      */
     interface OnSharedPreferenceChangeListener {
         void onSharedPreferenceChanged(SharedPreferences sharedPreferences, String key);

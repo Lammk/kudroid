@@ -1,6 +1,6 @@
 package android.app;
 
-/** Stub sinh tự động cho android.app.ActivityManager */
+/** Stub automatically generated for android.app.ActivityManager */
 public class ActivityManager {
     public ActivityManager() {}
 }

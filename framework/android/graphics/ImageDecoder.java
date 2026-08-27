@@ -1,6 +1,6 @@
 package android.graphics;
 
-/** Stub sinh tự động cho android.graphics.ImageDecoder */
+/** Stub automatically generated for android.graphics.ImageDecoder */
 public class ImageDecoder {
     public ImageDecoder() {}
 

@@ -27,7 +27,7 @@ public class Random {
 
     public int nextInt(int bound) {
         if (bound <= 0) {
-            throw new IllegalArgumentException("bound phải > 0");
+            throw new IllegalArgumentException("bound must be > 0");
         }
         if ((bound & -bound) == bound) {
             return (int) ((bound * (long) next(31)) >> 31);

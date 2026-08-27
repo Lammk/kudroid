@@ -1,8 +1,8 @@
 package java.util;
 
 /**
- * Set dựa trên ArrayList giữ thứ tự chèn. Bậc O(n) cho contains nhưng framework
- * chỉ dùng set với vài chục phần tử.
+ * Set based on ArrayList keeps insertion order. Order O(n) for contains but framework
+ * Only use sets with a few dozen elements.
  */
 public class HashSet<E> implements Set<E>, Cloneable, java.io.Serializable {
 

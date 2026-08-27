@@ -3,10 +3,10 @@ package android.view;
 import android.content.Context;
 
 /**
- * mô phỏng android.view.layoutinflater.
+ * simulate android.view.layoutinflater.
  *
- * thổi phồng xml bố cục thành các view. đối với khuôn khổ tối thiểu của kudroid, đây là một
- * mô phỏng trả về rỗng.
+ * inflate layout xml into views. for kudroid minimal framework, here is one
+ * simulate returns null.
  */
 public class LayoutInflater {
     private final Context mContext;
@@ -20,21 +20,21 @@ public class LayoutInflater {
     }
 
     /**
-     * thổi phồng một tài nguyên bố cục. hiện tại trả về rỗng.
+     * inflates a layout resource. currently returns empty.
      */
     public View inflate(int resource, ViewGroup root) {
         return null;
     }
 
     /**
-     * thổi phồng một tài nguyên bố cục với attachtoroot.
+     * inflate a layout resource with attachtoroot.
      */
     public View inflate(int resource, ViewGroup root, boolean attachToRoot) {
         return null;
     }
 
     /**
-     * trả về ngữ cảnh.
+     * returns context.
      */
     public Context getContext() {
         return mContext;

@@ -1,6 +1,6 @@
 package java.lang.reflect;
 
-/** Handle tới DexField của KuART; `artField` do native ghi. */
+/** Handle to KuART's DexField; `artField` written by native. */
 public final class Field {
 
     private long artField;

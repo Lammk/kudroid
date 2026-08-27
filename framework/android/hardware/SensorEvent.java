@@ -1,18 +1,18 @@
 package android.hardware;
 
 /**
- * mô phỏng android.hardware.sensorevent.
+ * emulate android.hardware.sensorevent.
  *
- * đại diện cho một sự kiện cảm biến. đối với khuôn khổ tối thiểu của kudroid, đây là một mô phỏng.
+ * represents a sensor event. for kudroid minimal framework, here is an emulation.
  */
 public class SensorEvent {
-    /** cảm biến đã tạo ra sự kiện này. */
+    /** the sensor that generated this event. */
     public final Sensor sensor;
-    /** độ dài của mảng các giá trị. */
+    /** length of array of values. */
     public final int accuracy;
-    /** dấu thời gian của sự kiện. */
+    /** event timestamp. */
     public final long timestamp;
-    /** các giá trị của cảm biến. */
+    /** sensor values. */
     public final float[] values;
 
     public SensorEvent(Sensor sensor, int accuracy, long timestamp, float[] values) {

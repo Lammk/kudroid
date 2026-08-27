@@ -1,6 +1,6 @@
 package android.util;
 
-/** Stub sinh tự động cho android.util.SparseBooleanArray */
+/** Stub automatically generated for android.util.SparseBooleanArray */
 public class SparseBooleanArray {
     public SparseBooleanArray() {}
 }

@@ -1,6 +1,6 @@
 package android.widget;
 
-/** Stub sinh tự động cho android.widget.Filter */
+/** Stub automatically generated for android.widget.Filter */
 public class Filter {
     public Filter() {}
 }

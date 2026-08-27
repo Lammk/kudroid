@@ -1,6 +1,6 @@
 package android.widget;
 
-/** Stub sinh tự động cho android.widget.TabHost */
+/** Stub automatically generated for android.widget.TabHost */
 public class TabHost {
     public TabHost() {}
 

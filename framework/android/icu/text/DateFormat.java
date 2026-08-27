@@ -1,6 +1,6 @@
 package android.icu.text;
 
-/** Stub sinh tự động cho android.icu.text.DateFormat */
+/** Stub automatically generated for android.icu.text.DateFormat */
 public class DateFormat {
     public DateFormat() {}
 

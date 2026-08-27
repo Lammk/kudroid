@@ -1,12 +1,12 @@
-// Cấp phát bộ nhớ cho object/metadata của DEX runtime.
+// Memory allocation for object/metadata c a DEX runtime.
 //
-// KHÔNG CÓ GC: cấp rồi giữ tới khi đóng app. Lý do chấp nhận được — trong
-// KuDroid, code Java chỉ chạy lúc onCreate và khi hứng touch event rồi đẩy
-// xuống C++; game loop nằm hoàn toàn trong libminecraftpe.so. Lượng rác Java
-// sinh ra không đáng kể so với vòng đời một lần chạy app.
+// NO GC: allocated and kept until app exit. L  do ch p nh n  c   trong
+// KuDroid, code Java ch  ch y l c onCreate v  khi h ng touch event r i  y
+// xu ng C++; game loop n m ho n to n trong libminecraftpe.so. L ng r c Java
+// sinh ra kh ng  ng k  so v i v ng  i m t l n ch y app.
 //
-// Cấp theo block lớn rồi bump pointer: nhanh hơn malloc từng object và giữ
-// object của cùng một class gần nhau (locality tốt cho interpreter).
+// C p theo block l n r i bump pointer: nhanh h n malloc t ng object v  gi
+// object c a c ng m t class g n nhau (locality t t cho interpreter).
 #ifndef KUDROID_KUART_DEXHEAP_H
 #define KUDROID_KUART_DEXHEAP_H
 
@@ -25,7 +25,7 @@ public:
     DexHeap(const DexHeap&) = delete;
     DexHeap& operator=(const DexHeap&) = delete;
 
-    // Trả về vùng đã zero-fill, align 8. nullptr nếu hết bộ nhớ.
+    // Tr  v  v ng   zero-fill, align 8. nullptr n u h t b  nh .
     void* Allocate(size_t bytes);
 
     template <typename T>
@@ -34,7 +34,7 @@ public:
         return mem != nullptr ? new (mem) T() : nullptr;
     }
 
-    // Chuỗi cho descriptor/tên — copy vào heap để DexClass giữ con trỏ bền.
+    // Chu i cho descriptor/t n   copy v o heap   DexClass gi  con tr  b n.
     const char* InternString(const char* s);
 
     size_t BytesAllocated() const { return bytes_allocated_; }

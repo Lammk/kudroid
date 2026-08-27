@@ -1,6 +1,6 @@
 package android.widget;
 
-/** Stub sinh tự động cho android.widget.ProgressBar */
+/** Stub automatically generated for android.widget.ProgressBar */
 public class ProgressBar {
     public ProgressBar() {}
 }

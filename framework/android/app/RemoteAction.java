@@ -1,6 +1,6 @@
 package android.app;
 
-/** Stub sinh tự động cho android.app.RemoteAction */
+/** Stub automatically generated for android.app.RemoteAction */
 public class RemoteAction {
     public RemoteAction() {}
 }

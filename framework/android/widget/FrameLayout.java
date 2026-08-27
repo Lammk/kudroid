@@ -1,6 +1,6 @@
 package android.widget;
 
-/** Stub sinh tự động cho android.widget.FrameLayout */
+/** Stub automatically generated for android.widget.FrameLayout */
 public class FrameLayout {
     public FrameLayout() {}
 }

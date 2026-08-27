@@ -1,6 +1,6 @@
 package android.widget;
 
-/** Stub sinh tự động cho android.widget.ImageButton */
+/** Stub automatically generated for android.widget.ImageButton */
 public class ImageButton {
     public ImageButton() {}
 }

@@ -1,6 +1,6 @@
 package android.util;
 
-/** Stub sinh tự động cho android.util.SparseIntArray */
+/** Stub automatically generated for android.util.SparseIntArray */
 public class SparseIntArray {
     public SparseIntArray() {}
 }

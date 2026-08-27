@@ -37,14 +37,14 @@ jobs:
         run: |
           cmake --build build --parallel \
             --target test_art_dex test_kuart test_kuart_interp test_kuart_object \
-                     test_kuart_jni test_kuart_exc test_kuart_reflect
+                     test_kuart_jni test_kuart_exc test_kuart_reflect test_kuart_libcore
 
       - name: Run KuART tests
         working-directory: build
         run: |
           fail=0
           for t in test_art_dex test_kuart test_kuart_interp test_kuart_object \
-                   test_kuart_jni test_kuart_exc test_kuart_reflect; do
+                   test_kuart_jni test_kuart_exc test_kuart_reflect test_kuart_libcore; do
             echo "──────── $t ────────"
             if ./$t; then echo "PASS $t"; else echo "FAIL $t"; fail=1; fi
           done

@@ -1,5 +1,5 @@
 package android.os;
 
-/** Stub sinh tự động cho android.os.OutcomeReceiver */
+/** Stub automatically generated for android.os.OutcomeReceiver */
 public interface OutcomeReceiver {
 }

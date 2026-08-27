@@ -1,7 +1,7 @@
 package android.view;
 
 /**
- * android.view.Menu — tập hợp MenuItem.
+ * android.view.Menu — MenuItem collection.
  */
 public interface Menu {
     public static final int NONE = 0;

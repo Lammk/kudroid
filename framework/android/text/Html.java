@@ -1,6 +1,6 @@
 package android.text;
 
-/** Stub sinh tự động cho android.text.Html */
+/** Stub automatically generated for android.text.Html */
 public class Html {
     public Html() {}
 

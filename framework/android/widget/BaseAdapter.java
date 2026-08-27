@@ -6,8 +6,8 @@ import android.view.View;
 import android.view.ViewGroup;
 
 /**
- * android.widget.BaseAdapter — cài sẵn phần quản lý observer, để lớp con chỉ
- * phải viết getCount/getItem/getItemId/getView.
+ * android.widget.BaseAdapter — built in observer management, let subclass only
+ * must write getCount/getItem/getItemId/getView.
  */
 public abstract class BaseAdapter implements ListAdapter, SpinnerAdapter {
     private final DataSetObservable mDataSetObservable = new DataSetObservable();
@@ -24,7 +24,7 @@ public abstract class BaseAdapter implements ListAdapter, SpinnerAdapter {
         mDataSetObservable.unregisterObserver(observer);
     }
 
-    /** Lớp con gọi sau khi đổi dữ liệu; AdapterView đăng ký observer để layout lại. */
+    /** Subclass called after changing data; AdapterView registers observers for re-layout. */
     public void notifyDataSetChanged() {
         mDataSetObservable.notifyChanged();
     }

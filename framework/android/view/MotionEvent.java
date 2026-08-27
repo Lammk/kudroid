@@ -1,23 +1,23 @@
 package android.view;
 
 /**
- * triển khai android.view.motionevent tối thiểu.
+ * minimal android.view.motionevent implementation.
  *
- * đại diện cho một sự kiện chạm/chuyển động. đối với khuôn khổ tối thiểu của kudroid, lưu trữ
- * hành động, tọa độ và thông tin con trỏ.
+ * represents a touch/motion event. for kudroid minimal framework, archive
+ * actions, coordinates and cursor information.
  */
 public final class MotionEvent {
-    /** hành động: xuống. */
+    /** action: down. */
     public static final int ACTION_DOWN = 0;
-    /** hành động: lên. */
+    /** action: up. */
     public static final int ACTION_UP = 1;
-    /** hành động: di chuyển. */
+    /** action: move. */
     public static final int ACTION_MOVE = 2;
-    /** hành động: hủy bỏ. */
+    /** action: cancel. */
     public static final int ACTION_CANCEL = 3;
-    /** hành động: bên ngoài. */
+    /** action: external. */
     public static final int ACTION_OUTSIDE = 4;
-    /** mặt nạ hành động. */
+    /** action mask. */
     public static final int ACTION_MASK = 0xff;
 
     private final int mAction;
@@ -35,70 +35,70 @@ public final class MotionEvent {
     }
 
     /**
-     * lấy một sự kiện chuyển động.
+     * get a motion event.
      */
     public static MotionEvent obtain(int action, float x, float y, long eventTime) {
         return new MotionEvent(action, x, y, eventTime, 1);
     }
 
     /**
-     * trả về hành động.
+     * returns action.
      */
     public int getAction() {
         return mAction;
     }
 
     /**
-     * trả về tọa độ x.
+     * returns x coordinates.
      */
     public float getX() {
         return mX;
     }
 
     /**
-     * trả về tọa độ x cho một con trỏ.
+     * returns the x coordinate for a pointer.
      */
     public float getX(int pointerIndex) {
         return mX;
     }
 
     /**
-     * trả về tọa độ y.
+     * returns the y coordinate.
      */
     public float getY() {
         return mY;
     }
 
     /**
-     * trả về tọa độ y cho một con trỏ.
+     * returns the y coordinate for a pointer.
      */
     public float getY(int pointerIndex) {
         return mY;
     }
 
     /**
-     * trả về thời gian sự kiện.
+     * returns event time.
      */
     public long getEventTime() {
         return mEventTime;
     }
 
     /**
-     * trả về thời gian xuống.
+     * returns down time.
      */
     public long getDownTime() {
         return mEventTime;
     }
 
     /**
-     * trả về số lượng con trỏ.
+     * returns the number of pointers.
      */
     public int getPointerCount() {
         return mPointerCount;
     }
 
     /**
-     * tái chế sự kiện.
+     * event recycling.
      */
     public void recycle() {
     }

@@ -1,6 +1,6 @@
 package android.app;
 
-/** Stub sinh tự động cho android.app.FragmentManager */
+/** Stub automatically generated for android.app.FragmentManager */
 public class FragmentManager {
     public FragmentManager() {}
 }

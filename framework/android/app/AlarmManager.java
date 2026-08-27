@@ -1,6 +1,6 @@
 package android.app;
 
-/** Stub sinh tự động cho android.app.AlarmManager */
+/** Stub automatically generated for android.app.AlarmManager */
 public class AlarmManager {
     public AlarmManager() {}
 

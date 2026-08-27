@@ -14,12 +14,12 @@ namespace kuart {
 
 namespace {
 
-// Đếm số ô DexValue mà danh sách tham số chiếm. Quy ước DEX: long/double chiếm
-// 2 register, mọi kiểu khác chiếm 1.
+// Count the number of DexValue cells the parameter list occupies. DEX convention: long/double accounts
+// 2 registers, all other types take 1.
 uint16_t CountArgWords(const char* shorty, bool is_static) {
     uint16_t words = is_static ? 0 : 1;  // `this`
     if (shorty == nullptr) return words;
-    // shorty[0] là kiểu trả về, tham số bắt đầu từ [1].
+    // shorty[0] is the return type, parameters start from [1].
     for (const char* p = shorty + 1; *p != '\0'; ++p) {
         words += (*p == 'J' || *p == 'D') ? 2 : 1;
     }
@@ -65,7 +65,7 @@ uint32_t DexClassLinker::FieldSizeForDescriptor(const char* descriptor) {
         case 'C': case 'S': return 2;
         case 'I': case 'F': return 4;
         case 'J': case 'D': return 8;
-        default: return sizeof(DexObject*);  // L... hoặc [...
+        default: return sizeof(DexObject*);  // L... or [...
     }
 }
 
@@ -88,7 +88,7 @@ DexClass* DexClassLinker::CreateArrayClass(const char* descriptor) {
     klass->descriptor = heap_.InternString(descriptor);
     klass->access_flags = art::kAccPublic | art::kAccFinal;
     klass->is_array = true;
-    // Đăng ký trước khi resolve component: mảng lồng ("[[I") sẽ quay lại đây.
+    // Register before resolving the component: the nested array ("[[I") will return here.
     classes_[descriptor] = klass;
 
     klass->component_type = FindClass(descriptor + 1);
@@ -113,9 +113,9 @@ DexClass* DexClassLinker::FindClass(const char* descriptor) {
         return CreateArrayClass(descriptor);
     }
 
-    // Chuỗi superclass có vòng thì dừng, nếu không sẽ đệ quy vô hạn.
+    // If the superclass chain has a loop, it stops, otherwise it will recur indefinitely.
     if (std::find(loading_.begin(), loading_.end(), descriptor) != loading_.end()) {
-        last_error_ = std::string("vòng kế thừa khi nạp ") + descriptor;
+        last_error_ = std::string("inherit loop when loading ") + descriptor;
         return nullptr;
     }
 
@@ -132,7 +132,7 @@ DexClass* DexClassLinker::FindClass(const char* descriptor) {
         return klass;
     }
 
-    last_error_ = std::string("không tìm thấy class ") + descriptor;
+    last_error_ = std::string("class not found") + descriptor;
     return nullptr;
 }
 
@@ -147,18 +147,18 @@ DexClass* DexClassLinker::LoadClassFromDexFile(const art::DexFile& dex_file,
     klass->dex_file = &dex_file;
     klass->class_def = &class_def;
 
-    // Vào cache TRƯỚC khi resolve superclass: class tự tham chiếu chính nó qua
-    // field/method sẽ tìm thấy bản đang nạp thay vì nạp lại lần nữa.
+    // Go to cache BEFORE resolving the superclass: the class references itself
+    // field/method will find the currently loaded version instead of reloading it again.
     classes_[descriptor] = klass;
 
     if (class_def.superclass_idx_.IsValid()) {
         const char* super_descriptor = dex_file.StringByTypeIdx(class_def.superclass_idx_);
         klass->superclass = FindClass(super_descriptor);
         if (klass->superclass == nullptr) {
-            // java/lang/Object thường không có trong DEX của app — chấp nhận
-            // superclass rỗng để class vẫn dùng được, thay vì fail cả class.
-            last_error_ = std::string("thiếu superclass ") + super_descriptor +
-                          " của " + descriptor;
+            // java/lang/Object is usually not included in the app's DEX — accepted
+            // The superclass is empty so the class can still be used, instead of failing the entire class.
+            last_error_ = std::string("missing superclass ") + super_descriptor +
+                          " of " + descriptor;
         }
     }
 
@@ -201,7 +201,7 @@ DexClass* DexClassLinker::LoadClassFromDexFile(const art::DexFile& dex_file,
         field.primitive = IsPrimitiveDescriptor(field.type_descriptor)
                               ? art::Primitive::GetType(field.type_descriptor[0])
                               : art::Primitive::kPrimNot;
-        klass->instance_fields.push_back(field);  // offset tính ở LinkClass
+        klass->instance_fields.push_back(field);  // offset calculated at LinkClass
     }
 
     const auto fill_method = [&](const art::ClassAccessor::Method& m) {
@@ -251,8 +251,8 @@ bool DexClassLinker::LinkClass(DexClass* klass) {
         LinkClass(klass->superclass);
     }
 
-    // Field instance nối tiếp field của cha, xếp field lớn trước để mỗi field
-    // tự nhiên align theo kích thước của nó mà không cần chèn padding.
+    // The field instance follows the parent field, placing the larger field first for each field
+    // naturally align to its size without adding padding.
     uint32_t offset = klass->superclass != nullptr ? klass->superclass->object_size : 0;
 
     for (uint32_t want : {8u, 4u, 2u, 1u}) {
@@ -267,7 +267,7 @@ bool DexClassLinker::LinkClass(DexClass* klass) {
     }
     klass->object_size = offset;
 
-    // vtable: copy của cha rồi ghi đè slot khi trùng name+signature.
+    // vtable: copy from parent and overwrite slot when name+signature overlaps.
     klass->vtable.clear();
     if (klass->superclass != nullptr) {
         klass->vtable = klass->superclass->vtable;
@@ -300,7 +300,21 @@ bool DexClassLinker::LinkClass(DexClass* klass) {
 DexObject* DexClassLinker::AllocObject(DexClass* klass) {
     if (klass == nullptr) return nullptr;
     if (!LinkClass(klass)) return nullptr;
-    void* mem = heap_.Allocate(sizeof(DexObject) + klass->object_size);
+
+    // String and Class instances carry a native payload (DexString::utf8,
+    // DexClassObject::represented) laid out right after the DexObject header.
+    // Their Java classes declare no instance fields, so object_size is 0 and a
+    // plain allocation would be too small for the native code to write into.
+    size_t bytes = sizeof(DexObject) + klass->object_size;
+    if (klass->descriptor != nullptr) {
+        if (std::strcmp(klass->descriptor, "Ljava/lang/String;") == 0) {
+            bytes = std::max(bytes, sizeof(DexString));
+        } else if (std::strcmp(klass->descriptor, "Ljava/lang/Class;") == 0) {
+            bytes = std::max(bytes, sizeof(DexClassObject));
+        }
+    }
+
+    void* mem = heap_.Allocate(bytes);
     if (mem == nullptr) return nullptr;
     auto* obj = new (mem) DexObject();
     obj->clazz = klass;
@@ -339,10 +353,16 @@ DexString* DexClassLinker::NewString(const char* utf8) {
     void* mem = heap_.Allocate(sizeof(DexString));
     if (mem == nullptr) return nullptr;
     auto* str = new (mem) DexString();
-    str->clazz = string_class;  // có thể null nếu framework chưa nạp
+    str->clazz = string_class;  // can be null if the framework is not loaded
     str->utf8 = heap_.InternString(utf8);
-    str->length = static_cast<uint32_t>(std::strlen(utf8));
-    return str;
+    str->length = static_cast<uint32_t>(std::strlen(utf8));    bool ascii = true;
+    for (const char* p = utf8; *p != '\0'; ++p) {
+        if (static_cast<unsigned char>(*p) >= 0x80) {
+            ascii = false;
+            break;
+        }
+    }
+    str->ascii = ascii;    return str;
 }
 
 DexClassObject* DexClassLinker::GetClassObject(DexClass* klass) {
@@ -353,7 +373,7 @@ DexClassObject* DexClassLinker::GetClassObject(DexClass* klass) {
     void* mem = heap_.Allocate(sizeof(DexClassObject));
     if (mem == nullptr) return nullptr;
     auto* obj = new (mem) DexClassObject();
-    obj->clazz = FindClass("Ljava/lang/Class;");  // null nếu framework chưa nạp
+    obj->clazz = FindClass("Ljava/lang/Class;");  // null if the framework is not loaded
     obj->represented = klass;
     klass->class_object = obj;
     class_objects_[obj] = klass;

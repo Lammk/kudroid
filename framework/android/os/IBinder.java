@@ -1,39 +1,39 @@
 package android.os;
 
 /**
- * mô phỏng android.os.ibinder.
+ * emulate android.os.ibinder.
  *
- * một giao diện cơ bản cho một đối tượng từ xa. đối với khuôn khổ tối thiểu của kudroid,
- * đây là một mô phỏng.
+ * a basic interface to a remote object. for kudroid minimal framework,
+ *This is a simulation.
  */
 public interface IBinder {
-    /** Mã transaction đầu tiên dành cho app. */
+    /** First transaction code for app. */
     public static final int FIRST_CALL_TRANSACTION = 0x00000001;
-    /** Mã transaction cuối cùng dành cho app. */
+    /** Final transaction code for app. */
     public static final int LAST_CALL_TRANSACTION = 0x00ffffff;
-    /** Cờ transact: một chiều, không chờ reply. */
+    /** Transact flag: one-way, no reply waiting. */
     public static final int FLAG_ONEWAY = 0x00000001;
 
     /**
-     * Callback khi đầu bên kia chết. Mọi binder của KuDroid nằm cùng process nên
-     * chỉ kích hoạt khi binder bị dispose tường minh.
+     * Callback when the other end dies. All KuDroid binders are in the same process
+     * only fires when the binder is explicitly disposed.
      */
     public interface DeathRecipient {
         void binderDied();
     }
 
     /**
-     * trả về một biểu diễn chuỗi của binder.
+     * returns a string representation of the binder.
      */
     String getInterfaceDescriptor();
 
     /**
-     * trả về việc binder còn sống hay không.
+     * returns whether the binder is alive or not.
      */
     boolean isBinderAlive();
 
     /**
-     * trả về việc binder có đang giao dịch hay không.
+     * returns whether the binder is currently transacting or not.
      */
     boolean pingBinder();
 

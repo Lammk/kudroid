@@ -1,6 +1,6 @@
 package android.print;
 
-/** Stub sinh tự động cho android.print.PageRange */
+/** Stub automatically generated for android.print.PageRange */
 public class PageRange {
     public PageRange() {}
 }

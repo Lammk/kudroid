@@ -1,6 +1,6 @@
 package android.webkit;
 
-/** Stub sinh tự động cho android.webkit.ServiceWorkerWebSettings */
+/** Stub automatically generated for android.webkit.ServiceWorkerWebSettings */
 public class ServiceWorkerWebSettings {
     public ServiceWorkerWebSettings() {}
 }

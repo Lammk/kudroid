@@ -1,10 +1,10 @@
 package android.os;
 
 /**
- * triển khai android.os.messagequeue tối thiểu.
+ * minimal android.os.messagequeue implementation.
  *
- * một fifo đơn giản của các messages. đối với khuôn khổ tối thiểu của kudroid, các thông báo được
- * xử lý đồng bộ theo thứ tự (không có định thời/rào cản).
+ * a simple fifo of messages. for kudroid minimal framework, notifications are
+ * in-order synchronous processing (no timing/barriers).
  */
 public final class MessageQueue {
     private Message mMessages; // head of the queue
@@ -13,7 +13,7 @@ public final class MessageQueue {
     MessageQueue() {}
 
     /**
-     * xếp hàng một thông báo. trả về true nếu thành công.
+     * queue a notification. Returns true if successful.
      */
     boolean enqueueMessage(Message msg, long when) {
         if (msg.target == null) {
@@ -40,7 +40,7 @@ public final class MessageQueue {
     }
 
     /**
-     * trả về thông báo tiếp theo, hoặc rỗng nếu hàng đợi đang thoát.
+     * returns the next message, or null if the queue is exiting.
      */
     Message next() {
         for (;;) {
@@ -55,7 +55,7 @@ public final class MessageQueue {
                     return msg;
                 }
             }
-            // Ngủ ngắn 10ms nếu chưa có message mới để nhường CPU và không bao giờ bị thoát vòng lặp
+            // Sleep for 10ms if there are no new messages to yield to CPU and never exit the loop
             try {
                 Thread.sleep(10);
             } catch (Throwable ignored) {}
@@ -63,7 +63,7 @@ public final class MessageQueue {
     }
 
     /**
-     * thoát hàng đợi.
+     * exit queue.
      */
     void quit() {
         synchronized (this) {

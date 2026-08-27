@@ -1,11 +1,11 @@
 package android.os;
 
 /**
- * triển khai android.os.looper tối thiểu.
+ * minimal android.os.looper implementation.
  *
- * một looper chạy một vòng lặp thông báo trên một luồng. đối với mục đích của kudroid (các trò chơi
- * gốc chỉ chạm vào java một lúc khi khởi động), chúng tôi cung cấp một looper
- * luồng chính đơn giản xử lý các thông báo một cách đồng bộ.
+ * a looper runs a message loop on a thread. for kudroid purposes (games
+ * root only touches java for a while on startup), we provide a looper
+ * the main thread simply processes messages synchronously.
  */
 public final class Looper {
     private static final Looper sMainLooper = new Looper();
@@ -18,7 +18,7 @@ public final class Looper {
     }
 
     /**
-     * chuẩn bị looper chính (được gọi một lần khi khởi động).
+     * prepare main looper (called once on startup).
      */
     public static void prepareMainLooper() {
         if (!sMainLooperPrepared) {
@@ -27,28 +27,28 @@ public final class Looper {
     }
 
     /**
-     * trả về looper chính cho luồng hiện tại.
+     * returns the main looper for the current stream.
      */
     public static Looper getMainLooper() {
         return sMainLooper;
     }
 
     /**
-     * trả về looper cho luồng hiện tại (hiện tại là looper chính).
+     * returns the looper for the current thread (currently the main looper).
      */
     public static Looper myLooper() {
         return sMainLooper;
     }
 
     /**
-     * trả về hàng đợi thông báo được liên kết với looper này.
+     * returns the message queue associated with this looper.
      */
     public MessageQueue getQueue() {
         return mQueue;
     }
 
     /**
-     * chạy vòng lặp thông báo. chặn cho đến khi quit() được gọi.
+     * run notification loop. blocks until quit() is called.
      */
     public static void loop() {
         final Looper me = myLooper();
@@ -75,14 +75,14 @@ public final class Looper {
     }
 
     /**
-     * thoát khỏi looper.
+     * exit looper.
      */
     public void quit() {
         mQueue.quit();
     }
 
     /**
-     * thoát khỏi looper một cách an toàn (sau khi xử lý các thông báo đang chờ xử lý).
+     * exit the looper safely (after processing pending messages).
      */
     public void quitSafely() {
         mQueue.quit();

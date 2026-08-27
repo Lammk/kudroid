@@ -1,6 +1,6 @@
 package java.util;
 
-/** Giữ thứ tự chèn — HashMap.keySet/entrySet dựa vào lớp này. */
+/** Preserve insertion order — HashMap.keySet/entrySet relies on this class. */
 public class LinkedHashSet<E> extends HashSet<E> {
 
     public LinkedHashSet() {

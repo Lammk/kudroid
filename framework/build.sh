@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-# Build các class framework android tối thiểu của KuDroid thành framework.dex.
+# Build KuDroid's minimal android framework classes into framework.dex.
 #
-# KuART nạp DEX trực tiếp (không còn dex2jar/JVM) nên đầu ra là .dex, không phải
-# .jar. Chuỗi build: javac → .class → d8 → framework.dex → nhúng thành header C++.
+# KuART loads DEX directly (no more dex2jar/JVM) so the output is .dex, not
+# .jar. Build chain: javac → .class → d8 → framework.dex → ​​embedded into C++ header.
 #
-# Cách dùng:
-#   ./build.sh            # javac + d8 + nhúng vào include/kudroid/framework_dex_bytes.h
-#   ./build.sh --no-embed # chỉ build framework.dex, không sinh header
+# Use:
+#   ./build.sh # javac + d8 + embed include/kudroid/framework_dex_bytes.h
+#   ./build.sh --no-embed # only builds framework.dex, does not generate headers
 #
-# Yêu cầu: JDK (javac) trên PATH hoặc JAVA_HOME, và d8 từ Android SDK.
-# Không có d8 thì script CẢNH BÁO và giữ header prebuilt (không làm fail build C++).
+# Requirements: JDK (javac) on PATH or JAVA_HOME, and d8 from Android SDK.
+# Without d8, the script WARNS and keeps the prebuilt header (does not fail the C++ build).
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -33,20 +33,20 @@ else
     JAVA="$(command -v java || true)"
 fi
 if [[ -z "$JAVAC" ]]; then
-    echo "ERROR: javac không tìm thấy. Cài JDK hoặc đặt JAVA_HOME." >&2
+    echo "ERROR: javac not found. Install JDK or set JAVA_HOME." >&2
     exit 1
 fi
 echo "javac: $JAVAC"
 
-# ── tìm d8 ───────────────────────────────────────────────────────────────────
-# Ba dạng: (1) script d8 trong build-tools, (2) d8 trên PATH, (3) d8.jar/r8.jar
-# standalone chạy qua `java -cp`. D8_CMD rỗng = không có d8.
+# ── find d8 ───────────────────────────────── ──────────────────────────────────
+# Three forms: (1) d8 script in build-tools, (2) d8 on PATH, (3) d8.jar/r8.jar
+# standalone runs via `java -cp`. D8_CMD is empty = no d8.
 D8_CMD=""
 
 find_d8_in_sdk() {
     local sdk="$1"
     [[ -d "$sdk/build-tools" ]] || return 1
-    # Build-tools phiên bản cao nhất có d8.
+    # Build-tools highest version has d8.
     local candidate
     candidate="$(find "$sdk/build-tools" -maxdepth 2 -name 'd8' -type f 2>/dev/null | sort -V | tail -1)"
     if [[ -n "$candidate" && -x "$candidate" ]]; then
@@ -70,7 +70,7 @@ if [[ -z "$D8_CMD" ]] && command -v d8 > /dev/null 2>&1; then
     D8_CMD="$(command -v d8)"
 fi
 
-# Jar standalone do người dùng tự đặt vào repo.
+# The standalone jar is placed by the user into the repo.
 if [[ -z "$D8_CMD" && -n "$JAVA" ]]; then
     for jar in "$ROOT_DIR/third_party/d8/d8.jar" "$ROOT_DIR/third_party/d8/r8.jar" \
                "$ROOT_DIR/tools/d8.jar" "$ROOT_DIR/tools/r8.jar"; do
@@ -82,38 +82,38 @@ if [[ -z "$D8_CMD" && -n "$JAVA" ]]; then
 fi
 
 if [[ -z "$D8_CMD" ]]; then
-    echo "WARNING: không tìm thấy d8 (đã thử ANDROID_HOME, ANDROID_SDK_ROOT, PATH," >&2
-    echo "         third_party/d8/, tools/). Bỏ qua bước build framework.dex." >&2
+    echo "WARNING: d8 not found (tried ANDROID_HOME, ANDROID_SDK_ROOT, PATH," >&2
+    echo "third_party/d8/, tools/). Skip the step to build framework.dex." >&2
     if [[ -f "$EMBED_HEADER" ]]; then
-        echo "         Giữ header prebuilt: $EMBED_HEADER" >&2
+        echo " Keep prebuilt header: $EMBED_HEADER" >&2
         exit 0
     fi
-    echo "ERROR: cũng không có header prebuilt $EMBED_HEADER — build C++ sẽ fail." >&2
-    echo "       Cài Android SDK build-tools hoặc đặt d8.jar vào third_party/d8/." >&2
+    echo "ERROR: also no prebuilt header $EMBED_HEADER — build C++ will fail." >&2
+    echo " Install Android SDK build-tools or place d8.jar in third_party/d8/." >&2
     exit 1
 fi
 echo "d8: $D8_CMD"
 
-# ── biên dịch ────────────────────────────────────────────────────────────────
+# ── compile ──────────────────────────────── ────────────────────────────────
 rm -rf "$BUILD_DIR"
 mkdir -p "$CLASSES_DIR"
 
-# Tránh mapfile: bash mặc định của macOS là 3.2.
+# Avoid mapfile: macOS's default bash is 3.2.
 JAVA_FILES=$(find "$FRAMEWORK_DIR" -name '*.java' -not -path "$BUILD_DIR/*" | sort)
 if [[ -z "$JAVA_FILES" ]]; then
-    echo "ERROR: không có file .java nào dưới $FRAMEWORK_DIR" >&2
+    echo "ERROR: no .java files under $FRAMEWORK_DIR" >&2
     exit 1
 fi
-echo "Biên dịch $(echo "$JAVA_FILES" | wc -l | tr -d ' ') file Java..."
+echo "Compile $(echo "$JAVA_FILES" | wc -l | tr -d ' ') Java file..."
 
-# framework/java/** là libcore tự viết (java.lang.Object, String, ...). Phải cho
-# javac bỏ hẳn rt.jar của JDK, nếu không nó báo "duplicate class" và mọi tham
-# chiếu java.* sẽ trỏ về JDK chứ không về bản của KuDroid.
+# framework/java/** is the self-written libcore (java.lang.Object, String, ...). Must give
+# javac completely removes the JDK's rt.jar, otherwise it says "duplicate class" and all references
+# The java.* reference will point to the JDK and not to the KuDroid version.
 EMPTY_BOOTCLASSPATH="$BUILD_DIR/empty-bootclasspath"
 mkdir -p "$EMPTY_BOOTCLASSPATH"
 
-# -source/-target 8 (không dùng --release: --release ép rt.jar của JDK vào
-# bootclasspath và ghi đè -bootclasspath).
+# -source/-target 8 (don't use --release: --release forces JDK's rt.jar
+# bootclasspath and override -bootclasspath).
 # shellcheck disable=SC2086
 "$JAVAC" -encoding UTF-8 -nowarn -source 8 -target 8 \
     -bootclasspath "$EMPTY_BOOTCLASSPATH" \
@@ -123,18 +123,18 @@ mkdir -p "$EMPTY_BOOTCLASSPATH"
 CLASS_FILES=$(find "$CLASSES_DIR" -name '*.class' | sort)
 echo "d8: $(echo "$CLASS_FILES" | wc -l | tr -d ' ') class → framework.dex"
 
-# min-api 29 (Android 10, đúng phiên bản ART mà KuART port từ): từ API 24 trở
-# lên d8 KHÔNG desugar default/static interface method nữa, nên không cần --lib
-# trỏ vào JDK — mà truyền --lib với JDK mới lại làm d8 chết vì major version.
+# min-api 29 (Android 10, the exact ART version that KuART ports from): from API 24 and up
+# Up to d8 there is NO desugar default/static interface method anymore, so no need for --lib
+# points to the JDK — but passing --lib to the new JDK causes d8 to die because of the major version.
 # shellcheck disable=SC2086
 $D8_CMD --min-api 29 --output "$BUILD_DIR" $CLASS_FILES
 
-# d8 luôn đặt tên output là classes.dex.
+# d8 always names output classes.dex.
 if [[ ! -f "$DEX_PATH" ]]; then
     if [[ -f "$BUILD_DIR/classes.dex" ]]; then
         mv "$BUILD_DIR/classes.dex" "$DEX_PATH"
     else
-        echo "ERROR: d8 không sinh ra dex nào trong $BUILD_DIR" >&2
+        echo "ERROR: d8 did not generate any dex in $BUILD_DIR" >&2
         exit 1
     fi
 fi
@@ -142,7 +142,7 @@ fi
 echo "Framework DEX: $DEX_PATH"
 ls -lh "$DEX_PATH"
 
-# ── nhúng vào header C++ ─────────────────────────────────────────────────────
+# ── embedded in C++ header ────────────────────────── ───────────────────────────
 if [[ "$EMBED" == "1" ]]; then
     python3 "$ROOT_DIR/scripts/embed_framework_dex.py"
 fi

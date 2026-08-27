@@ -1,8 +1,8 @@
 package java.lang;
 
 /**
- * Lớp cha của mọi enum. javac sinh sẵn values()/valueOf() và mảng $VALUES cho
- * từng enum con nên ở đây chỉ cần name + ordinal.
+ * The parent class of all enums. javac generates values()/valueOf() and the $VALUES array for
+ * each child enum so here only need name + ordinal.
  */
 public abstract class Enum<E extends Enum<E>> implements Comparable<E> {
 
@@ -43,7 +43,7 @@ public abstract class Enum<E extends Enum<E>> implements Comparable<E> {
     }
 
     protected final Object clone() throws CloneNotSupportedException {
-        throw new CloneNotSupportedException("enum không clone được");
+        throw new CloneNotSupportedException("enum cannot be cloned");
     }
 
     public static <T extends Enum<T>> T valueOf(Class<T> enumType, String name) {
@@ -55,6 +55,6 @@ public abstract class Enum<E extends Enum<E>> implements Comparable<E> {
                 }
             }
         }
-        throw new IllegalArgumentException("không có hằng enum " + name);
+        throw new IllegalArgumentException("no enum constant " + name);
     }
 }

@@ -1,7 +1,7 @@
 package android.graphics;
 
 /**
- * android.graphics.Point — cặp toạ độ nguyên.
+ * android.graphics.Point — integer coordinate pairs.
  */
 public class Point {
     public int x;

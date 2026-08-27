@@ -34,8 +34,8 @@ namespace kudroid {
 
 namespace {
 
-// Log GPU qua pipeline chuẩn (KLOG → stdout + file + crash buffer) để lần
-// crash sau "log up to crash" không còn trống. Giữ cùng text/priority (debug).
+// Log the GPU through the standard pipeline (KLOG → stdout + file + crash buffer) to run
+// crash after "log up to crash" is no longer empty. Keep the same text/priority (debug).
 static void gpuLog(const char* fmt, ...) {
     char buf[512];
     va_list ap;
@@ -82,7 +82,7 @@ static void* get_or_create_fallback_metal_layer() {
 }
 #endif
 
-// Cấu trúc ANativeWindow chuẩn cho KuDroid
+// Standard ANativeWindow structure for KuDroid
 struct KuDroidNativeWindow {
     uint32_t magic;
     void* layer;
@@ -241,7 +241,7 @@ extern "C" void kudroid_blit_canvas_to_layer(void* layer, const void* bits, int 
 
     if (!image) return;
 
-    // Gán trực tiếp CGImage vào CALayer/CAMetalLayer trên Main Thread
+    // Assign CGImage directly to CALayer/CAMetalLayer on Main Thread
     dispatch_async(dispatch_get_main_queue(), ^{
         Class clsCATransaction = objc_getClass("CATransaction");
         if (clsCATransaction) {
@@ -398,23 +398,23 @@ extern "C" EGLDisplay bionic_eglGetPlatformDisplayEXT(EGLint platform, void* nat
     return nullptr;
 }
 
-// ANGLE first-touch phải xảy ra trên MAIN thread. Bằng chứng log máy thật:
-// GL TEST (chạy từ C++ kudroid, main thread) init ANGLE hoàn toàn OK
+// ANGLE first-touch must occur on the MAIN thread. Evidence of real machine log:
+// GL TEST (run from C++ kudroid, main thread) init ANGLE is completely OK
 // (eglInitialize v1.5 -> pbuffer -> context -> glClear -> GL_RENDERER=
-// "ANGLE Metal Renderer: Apple A13 GPU"), còn triangle guest first-touch ANGLE
-// TRÊN RENDER PTHREAD -> abort ngay sau eglGetDisplay trả VALID, trước cả
-// eglInitialize (stack crash có chuỗi guard "(pretend done)" — static init của
-// ANGLE bị guard shim chặn khi chạy lần đầu trên thread mới). Warm-up để mọi
-// static init chạy trên main thread trước khi guest đụng tới.
-// Warm-up chạy TRỌN pipeline mà GL TEST đã chứng minh hoạt động 100% trên
+// "ANGLE Metal Renderer: Apple A13 GPU"), also triangle guest first-touch ANGLE
+// ON RENDER PTHREAD -> abort immediately after eglGetDisplay returns VALID, first
+// eglInitialize (stack crash has guard string "(pretend done)" — static init of
+// ANGLE is blocked by guard shim when first run on a new thread). Warm-up to every
+// static init runs on the main thread before the guest touches it.
+// Warm-up runs the FULL pipeline that GL TEST has proven to work 100% on
 // main thread (init v1.5 -> pbuffer -> context -> makeCurrent -> glClear ->
-// GL_RENDERER="ANGLE Metal Renderer: Apple A13 GPU"). Mỗi first-touch ANGLE
-// trên render thread guest đều abort (bằng chứng: warm-up getDisplay+init ->
-// guest chết ở eglInitialize; mở rộng -> guest qua được, chết ở eglMakeCurrent
-// giờ ở +0x4f18). Đẩy hết first-touch (display, device Metal, command queue,
-// context đầu tiên) lên main thread — render thread chỉ dùng lại state đã init.
+// GL_RENDERER="ANGLE Metal Renderer: Apple A13 GPU"). Every first-touch ANGLE
+// on render guest thread all abort (proof: warm-up getDisplay+init ->
+// guest died in eglInitialize; expand -> guest passes, dies at eglMakeCurrent
+// now at +0x4f18). Push all first-touch (display, device Metal, command queue,
+// context) to the main thread — the render thread just reuses the initialized state.
 extern "C" void kudroid_gpu_warmup_egl(void) {
-    // EGL typedefs đầy đủ chưa có ở đây (khai báo sau trong file) — dùng local.
+    // Full EGL typedefs not available here (declared later in file) — use local.
     typedef void* EGLConfig;
     typedef void* EGLSurface;
     typedef void* EGLContext;
@@ -454,7 +454,7 @@ extern "C" void kudroid_gpu_warmup_egl(void) {
     }
     gpuLog("warmup: eglInitialize -> true (major=%d minor=%d)", major, minor);
 
-    // EGL 1.4 constants — giá trị chuẩn, dùng raw vì shim không include egl.h.
+    // EGL 1.4 constants — standard values, use raw because shim does not include egl.h.
     #define W_EGL_SURFACE_TYPE 0x3033
     #define W_EGL_PBUFFER_BIT 0x0001
     #define W_EGL_RENDERABLE_TYPE 0x3040
@@ -511,18 +511,18 @@ extern "C" void kudroid_gpu_warmup_egl(void) {
 extern "C" EGLDisplay bionic_eglGetDisplay(EGLNativeDisplayType display_id) {
     (void)display_id;
     gpuLog("eglGetDisplay(display_id=%p)", (void*)display_id);
-    // QUA QUA (bằng chứng log máy thật, không phải đoán): display trả từ
-    // eglGetPlatformDisplayEXT(Metal) — dù "VALID" — làm process ABORT ngay
-    // khi dùng (triangle: crash libtriangle_gles ngay sau eglGetDisplay, trước
-    // cả log eglInitialize). Còn eglGetDisplay(0) fallback CHẠY TỐT TOÀN BỘ:
+    // PASS QUA (proof of real computer log, not guessing): display returns the word
+    // eglGetPlatformDisplayEXT(Metal) — even "VALID" — make process ABORT now
+    // when using (triangle: crash libtriangle_gles immediately after eglGetDisplay, before
+    // also log eglInitialize). And eglGetDisplay(0) fallback RUNS FULLY FINE:
     // eglInitialize v1.5 → pbuffer surface → context → glClear OK →
     // GL_RENDERER="ANGLE Metal Renderer: Apple A13 GPU" → glGetError=0.
-    // Cả hai đều là ANGLE Metal backend — fallback không mất gì, và là đường
-    // duy nhất đã chứng minh hoạt động. Bỏ probe, dùng thẳng fallback.
+    // Both are ANGLE Metal backends — the fallback costs nothing, and is the way
+    // Only proven to work. Remove probe, use straight fallback.
     typedef EGLDisplay (*PFN_eglGetDisplay)(EGLNativeDisplayType);
     auto host_get_display = (PFN_eglGetDisplay) get_egl_func("eglGetDisplay");
     if (host_get_display) {
-        // Luôn EGL_DEFAULT_DISPLAY (0) — CAMetalLayer chỉ dùng cho surface.
+        // Always EGL_DEFAULT_DISPLAY (0) — CAMetalLayer is only used for surfaces.
         EGLDisplay dpy = host_get_display((EGLNativeDisplayType)0);
         gpuLog("eglGetDisplay: fallback -> %s (%p)", dpy ? "VALID" : "NULL", (void*)dpy);
         return dpy;
@@ -737,7 +737,7 @@ extern "C" VkResult bionic_vkCreateAndroidSurfaceKHR(VkInstance instance,
 
     KLOG(kDebug, "KuDroidGPU", "Resolved CAMetalLayer pointer for Vulkan Surface: %p", actualLayer);
 
-    // 1. Thử hàm chuẩn vkCreateMetalSurfaceEXT trước (yêu cầu CAMetalLayer)
+    // 1. Try the standard function vkCreateMetalSurfaceEXT first (requires CAMetalLayer)
     auto createMetalSurface = (PFN_vkCreateMetalSurfaceEXT)real(instance, "vkCreateMetalSurfaceEXT");
     if (createMetalSurface) {
         VkMetalSurfaceCreateInfoEXT metalInfo = {};
@@ -751,7 +751,7 @@ extern "C" VkResult bionic_vkCreateAndroidSurfaceKHR(VkInstance instance,
         if (r == VK_SUCCESS) return r;
     }
 
-    // 2. Thử hàm iOS của MoltenVK: vkCreateIOSSurfaceMVK
+    // 2. Try MoltenVK's iOS function: vkCreateIOSSurfaceMVK
     auto createIOSSurface = (PFN_vkCreateIOSSurfaceMVK)real(instance, "vkCreateIOSSurfaceMVK");
     if (createIOSSurface) {
         VkIOSSurfaceCreateInfoMVK iosInfo = {};
@@ -860,7 +860,7 @@ extern "C" VkResult bionic_vkEnumerateInstanceExtensionProperties(const char* pL
         free(tmp);
     }
 
-    // Inject VK_KHR_android_surface (chỉ nếu còn chỗ).
+    // Inject VK_KHR_android_surface (only if space is available).
     if (out < capacity) {
         memset(&pProperties[out], 0, sizeof(VkExtensionProperties));
         strncpy(pProperties[out].extensionName, "VK_KHR_android_surface", sizeof(pProperties[out].extensionName) - 1);
@@ -918,12 +918,12 @@ namespace {
 // bionic_ANativeWindow_fromSurface returns g_metalLayer directly, the window
 // pointer IS the CAMetalLayer — pass it straight through.
 //
-// QUAN TRỌNG: phải export ĐỦ toàn bộ entry point EGL, không chỉ 4-5 hàm. ELF
-// loader resolve import của game qua BionicShim (bảng shim + RTLD_DEFAULT) —
-// ANGLE load RTLD_LOCAL nên không nằm trong RTLD_DEFAULT. Trước đây 17 hàm
-// egl* còn lại (eglInitialize, eglChooseConfig, eglCreateContext, eglMakeCurrent,
-// eglSwapBuffers...) rơi vào dummy trả 0 → Unity nhận eglCreateContext=NULL →
-// crash NULL+0x50. Giờ mỗi hàm forward thẳng sang ANGLE qua get_egl_func().
+// IMPORTANT: must export FULL EGL entry points, not just 4-5 functions. ELF
+// loader resolve import of game via BionicShim (shim table + RTLD_DEFAULT) —
+// ANGLE load RTLD_LOCAL should not be in RTLD_DEFAULT. Previously 17 functions
+// egl* remaining (eglInitialize, eglChooseConfig, eglCreateContext, eglMakeCurrent,
+// eglSwapBuffers...) falls into dummy returning 0 → Unity receives eglCreateContext=NULL →
+// crash NULL+0x50. Now each function forwards directly to ANGLE via get_egl_func().
 // ─────────────────────────────────────────────────────────────────────────────
 
 typedef void* EGLSurface;
@@ -1024,12 +1024,12 @@ extern "C" void kudroid_gpu_cleanup_on_test_exit(void) {
     gpuLog("kudroid_gpu_cleanup_on_test_exit: GPU state cleaned up successfully");
 }
 
-// ── EGL 1.x entry points còn thiếu — forward thẳng sang ANGLE ────────────────
+// ── EGL 1.x entry points missing — forward straight to ANGLE ────────────────
 
 #define EGL_FORWARD_ERR(name, what) gpuLog("%s: ANGLE %s not available", name, what)
 
-// Gom phần lấy hàm ANGLE + check NULL: trả con trỏ hàm đúng signature hoặc
-// nullptr (caller tự log lỗi). Bỏ boilerplate typedef PFN mỗi hàm.
+// Collect function get part ANGLE + check NULL: return function pointer with correct signature or
+// nullptr (caller automatically logs errors). Remove the PFN typedef boilerplate from each function.
 template <typename Signature>
 Signature* eglFn(const char* name) {
     return reinterpret_cast<Signature*>(get_egl_func(name));
@@ -1038,9 +1038,9 @@ Signature* eglFn(const char* name) {
 extern "C" EGLBoolean bionic_eglInitialize(EGLDisplay dpy, EGLint* major, EGLint* minor) {
     auto f = eglFn<EGLBoolean(EGLDisplay, EGLint*, EGLint*)>("eglInitialize");
     if (!f) { EGL_FORWARD_ERR("eglInitialize", ""); return EGL_FALSE; }
-    // Guest (vd TriangleGLES gọi eglInitialize(display, 0, 0)) có thể truyền
-    // NULL out-params — spec EGL cho phép, nhưng vài bản ANGLE dereference
-    // chúng → abort. Forward với buffer địa phương rồi copy kết quả về.
+    // Guest (e.g. TriangleGLES calls eglInitialize(display, 0, 0)) can pass
+    // NULL out-params — EGL spec allows, but some ANGLE versions dereference
+    // them → abort. Forward with local buffer then copy the result back.
     EGLint localMajor = 0, localMinor = 0;
     gpuLog("eglInitialize: calling ANGLE eglInitialize(dpy=%p, major=%s, minor=%s)...",
            (void*)dpy, major ? "ptr" : "NULL", minor ? "ptr" : "NULL");
@@ -1274,8 +1274,8 @@ extern "C" EGLDisplay bionic_eglGetPlatformDisplay(EGLenum platform, void* nativ
     (void)native_display;
     auto f = eglFn<EGLDisplay(EGLenum, void*, const EGLint*)>("eglGetPlatformDisplay");
     if (!f) { EGL_FORWARD_ERR("eglGetPlatformDisplay", ""); return EGL_NO_DISPLAY; }
-    // Same as EXT variant: native display phải là 0 (EGL_DEFAULT_DISPLAY),
-    // CAMetalLayer chỉ dùng cho eglCreateWindowSurface.
+    // Same as EXT variant: native display must be 0 (EGL_DEFAULT_DISPLAY),
+    // CAMetalLayer is only used for eglCreateWindowSurface.
     EGLDisplay d = f(platform, (void*)0, attrib_list);
     gpuLog("eglGetPlatformDisplay -> %p", (void*)d);
     return d;
@@ -1315,9 +1315,9 @@ extern "C" EGLBoolean bionic_eglWaitNative(EGLint engine) {
     return r;
 }
 
-// ── Hàm EGL/GLES từng bị ELF loader bind dummy (log Discord: "missing symbol
-// bound to dummy: ...") vì thiếu trong bảng shim + ANGLE load RTLD_LOCAL.
-// Forward thật sang ANGLE — dummy trả 0 làm game nhận giá trị sai → crash. ──
+// ── The EGL/GLES function was once ELF loader bind dummy (Discord log: "missing symbol
+// bound to dummy: ...") because missing in table shim + ANGLE load RTLD_LOCAL.
+// Real forward to ANGLE — dummy returns 0 causing the game to receive the wrong value → crash. ──
 
 extern "C" unsigned int bionic_eglQueryContext(void* dpy, void* ctx, unsigned int attribute,
                                                 int* value) {
@@ -1380,7 +1380,7 @@ extern "C" void bionic_glShaderSource(unsigned int shader, int count, const char
         return;
     }
 
-    // Sao chép an toàn toàn bộ chuỗi shader từ vùng nhớ Guest (ELF/Stack) sang Host C++ heap
+    // Safely copy the entire shader chain from the Guest memory (ELF/Stack) to the Host C++ heap
     std::vector<std::string> hostStrings;
     std::vector<const char*> hostPtrs;
     std::vector<int> hostLens;
@@ -1410,7 +1410,7 @@ extern "C" void bionic_glShaderSource(unsigned int shader, int count, const char
                shader, hostStrings[0].size(), snippet);
     }
 
-    // Truyền mảng con trỏ Host an toàn 100% xuống ANGLE
+    // Passing the Host pointer array is 100% safe down to ANGLE
     f(shader, count, hostPtrs.data(), hostLens.data());
     gpuLog("glShaderSource(shader=%u) -> OK", shader);
 }

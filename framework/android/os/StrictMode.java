@@ -1,6 +1,6 @@
 package android.os;
 
-/** Stub sinh tự động cho android.os.StrictMode */
+/** Stub automatically generated for android.os.StrictMode */
 public class StrictMode {
     public StrictMode() {}
 

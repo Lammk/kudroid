@@ -1,7 +1,7 @@
 package android.widget;
 
 /**
- * android.widget.Checkable — view có trạng thái đã chọn/chưa chọn.
+ * android.widget.Checkable — view with checked/unchecked state.
  */
 public interface Checkable {
     void setChecked(boolean checked);

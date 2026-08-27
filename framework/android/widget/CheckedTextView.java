@@ -1,6 +1,6 @@
 package android.widget;
 
-/** Stub sinh tự động cho android.widget.CheckedTextView */
+/** Stub automatically generated for android.widget.CheckedTextView */
 public class CheckedTextView {
     public CheckedTextView() {}
 }

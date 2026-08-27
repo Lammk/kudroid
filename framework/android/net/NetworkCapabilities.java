@@ -1,17 +1,17 @@
 package android.net;
 
 /**
- * mô phỏng android.net.networkcapabilities.
+ * emulate android.net.networkcapabilities.
  *
- * mô tả các khả năng của một mạng. đối với khuôn khổ tối thiểu của kudroid,
- * đây là một mô phỏng.
+ * describes the capabilities of a network. for kudroid minimal framework,
+ *This is a simulation.
  */
 public class NetworkCapabilities {
-    /** khả năng mạng: internet. */
+    /** network capabilities: internet. */
     public static final int NET_CAPABILITY_INTERNET = 12;
-    /** khả năng mạng: đã xác thực. */
+    /** network capabilities: authenticated. */
     public static final int NET_CAPABILITY_VALIDATED = 16;
-    /** khả năng mạng: không đo lường. */
+    /** network capacity: not measured. */
     public static final int NET_CAPABILITY_NOT_METERED = 11;
 
     private int mCapabilities = 0;

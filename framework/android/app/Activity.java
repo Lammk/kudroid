@@ -5,10 +5,10 @@ import android.content.Intent;
 import android.os.Bundle;
 
 /**
- * triển khai android.app.activity tối thiểu.
+ * minimal android.app.activity implementation.
  *
- * cung cấp các lệnh gọi lại vòng đời mà các trò chơi gốc mong đợi. đối với khuôn khổ
- * tối thiểu của kudroid, các phương thức vòng đời là no-op mà các ứng dụng có thể ghi đè.
+ * provides the lifecycle callbacks expected by the original games. for framework
+ * kudroid's minimum, lifecycle methods are no-op that apps can override.
  */
 public class Activity extends ContextThemeWrapper {
     public static final int SCREEN_ORIENTATION_UNSPECIFIED = -1;
@@ -46,61 +46,61 @@ public class Activity extends ContextThemeWrapper {
     private static native void setRequestedOrientation_native(int requestedOrientation);
 
     /**
-     * được gọi khi hoạt động được tạo lần đầu tiên.
+     * is called when the activity is first created.
      */
     protected void onCreate(Bundle savedInstanceState) {
     }
 
     /**
-     * được gọi khi hoạt động chuẩn bị hiển thị.
+     * is called when the activity is about to become visible.
      */
     protected void onStart() {
     }
 
     /**
-     * được gọi khi hoạt động đã hiển thị.
+     * called when the activity is visible.
      */
     protected void onResume() {
     }
 
     /**
-     * được gọi khi hoạt động chuẩn bị bị tạm dừng.
+     * is called when the prepare operation is paused.
      */
     protected void onPause() {
     }
 
     /**
-     * được gọi khi hoạt động không còn hiển thị nữa.
+     * is called when the activity is no longer visible.
      */
     protected void onStop() {
     }
 
     /**
-     * được gọi trước khi hoạt động bị phá hủy.
+     * is called before the activity is destroyed.
      */
     protected void onDestroy() {
     }
 
     /**
-     * được gọi khi hoạt động được khởi động lại.
+     * is called when the activity is restarted.
      */
     protected void onRestart() {
     }
 
     /**
-     * được gọi khi kết quả hoạt động có sẵn.
+     * is called when the results of the operation are available.
      */
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
     }
 
     /**
-     * được gọi khi một intent mới được chuyển đến.
+     * called when a new intent is delivered.
      */
     protected void onNewIntent(Intent intent) {
     }
 
     /**
-     * được gọi khi hoạt động được tạo (được gọi bởi khuôn khổ).
+     * is called when the activity is created (called by the framework).
      */
     public void performCreate(Bundle savedInstanceState) {
         mCreated = true;
@@ -108,7 +108,7 @@ public class Activity extends ContextThemeWrapper {
     }
 
     /**
-     * được gọi khi hoạt động được bắt đầu (được gọi bởi khuôn khổ).
+     * is called when the activity is started (called by the framework).
      */
     public void performStart() {
         mStarted = true;
@@ -116,7 +116,7 @@ public class Activity extends ContextThemeWrapper {
     }
 
     /**
-     * được gọi khi hoạt động được tiếp tục (được gọi bởi khuôn khổ).
+     * is called when the operation is resumed (called by the framework).
      */
     public void performResume() {
         mResumed = true;
@@ -124,7 +124,7 @@ public class Activity extends ContextThemeWrapper {
     }
 
     /**
-     * được gọi khi hoạt động bị tạm dừng (được gọi bởi khuôn khổ).
+     * is called when the activity is paused (called by the framework).
      */
     public void performPause() {
         mResumed = false;
@@ -132,7 +132,7 @@ public class Activity extends ContextThemeWrapper {
     }
 
     /**
-     * được gọi khi hoạt động bị dừng (được gọi bởi khuôn khổ).
+     * is called when the activity is stopped (called by the framework).
      */
     public void performStop() {
         mStarted = false;
@@ -140,7 +140,7 @@ public class Activity extends ContextThemeWrapper {
     }
 
     /**
-     * được gọi khi hoạt động bị phá hủy (được gọi bởi khuôn khổ).
+     * is called when the activity is destroyed (called by the framework).
      */
     public void performDestroy() {
         mCreated = false;
@@ -148,53 +148,53 @@ public class Activity extends ContextThemeWrapper {
     }
 
     /**
-     * trả về việc hoạt động đã được tạo hay chưa.
+     * returns whether the activity has been created or not.
      */
     public boolean isCreated() {
         return mCreated;
     }
 
     /**
-     * trả về việc hoạt động đã được bắt đầu hay chưa.
+     * returns whether the operation has been started or not.
      */
     public boolean isStarted() {
         return mStarted;
     }
 
     /**
-     * trả về việc hoạt động đã được tiếp tục hay chưa.
+     * returns whether the operation has been continued or not.
      */
     public boolean isResumed() {
         return mResumed;
     }
 
     /**
-     * kết thúc hoạt động.
+     * end of operation.
      */
     public void finish() {
     }
 
     /**
-     * trả về intent đã bắt đầu hoạt động này.
+     * returns the intent that started this activity.
      */
     public Intent getIntent() {
         return new Intent();
     }
 
     /**
-     * đặt kết quả của hoạt động này.
+     * sets the result of this operation.
      */
     public void setResult(int resultCode) {
     }
 
     /**
-     * đặt kết quả của hoạt động này kèm theo dữ liệu.
+     * sets the result of this operation with data.
      */
     public void setResult(int resultCode, Intent data) {
     }
 
     /**
-     * trả về cửa sổ.
+     * returns window.
      */
     public android.view.Window getWindow() {
         return new android.view.Window(this);
@@ -203,7 +203,7 @@ public class Activity extends ContextThemeWrapper {
     private android.view.View mContentView;
 
     /**
-     * đặt chế độ xem nội dung từ một tài nguyên bố cục.
+     * set the content view from a layout resource.
      */
     public void setContentView(int layoutResID) {
         android.widget.LinearLayout root = new android.widget.LinearLayout(this);
@@ -249,7 +249,7 @@ public class Activity extends ContextThemeWrapper {
     }
 
     /**
-     * đặt chế độ xem nội dung thành một dạng xem.
+     * sets the content view to a view.
      */
     public void setContentView(android.view.View view) {
         mContentView = view;
@@ -257,7 +257,7 @@ public class Activity extends ContextThemeWrapper {
     }
 
     /**
-     * tìm một dạng xem theo id.
+     * find a view by id.
      */
     public android.view.View findViewById(int id) {
         if (mContentView != null) {
@@ -280,7 +280,7 @@ public class Activity extends ContextThemeWrapper {
     }
 
     /**
-     * vẽ toàn bộ cây view hierarchy lên màn hình Metal.
+     * Draw the entire view hierarchy on the Metal screen.
      */
     public void renderViewHierarchy() {
         if (mContentView == null) {
@@ -300,7 +300,7 @@ public class Activity extends ContextThemeWrapper {
     }
 
     /**
-     * chạy trên luồng giao diện người dùng.
+     * runs on the UI thread.
      */
     public void runOnUiThread(Runnable action) {
         if (action != null) {
@@ -310,7 +310,7 @@ public class Activity extends ContextThemeWrapper {
     }
 
     /**
-     * yêu cầu các quyền runtime (Android 6.0+).
+     * requires runtime permissions (Android 6.0+).
      */
     public void requestPermissions(String[] permissions, int requestCode) {
         if (permissions == null) return;
@@ -322,7 +322,7 @@ public class Activity extends ContextThemeWrapper {
     }
 
     /**
-     * nhận kết quả yêu cầu quyền runtime.
+     * get runtime permission request results.
      */
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
     }

@@ -1,5 +1,5 @@
 package android.text.method;
 
-/** Stub sinh tự động cho android.text.method.KeyListener */
+/** Stub automatically generated for android.text.method.KeyListener */
 public interface KeyListener {
 }

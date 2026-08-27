@@ -1,6 +1,6 @@
 package java.io;
 
-/** Ghi ra fd của POSIX qua native; fd 1 = stdout, 2 = stderr. */
+/** Write to POSIX fd via native; fd 1 = stdout, 2 = stderr. */
 public class PrintStream extends OutputStream {
 
     private final int fd;

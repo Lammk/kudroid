@@ -3,7 +3,7 @@ package android.widget;
 import android.content.Context;
 
 /**
- * android.widget.EditText — TextView cho phép sửa nội dung.
+ * android.widget.EditText — TextView allows editing content.
  */
 public class EditText extends TextView {
     private CharSequence mHint = "";
@@ -24,7 +24,7 @@ public class EditText extends TextView {
         return mHint;
     }
 
-    /** getText() của EditText trả Editable; bọc nội dung hiện tại. */
+    /** getText() of EditText returns Editable; wrap current content. */
     public android.text.Editable getEditableText() {
         return new android.text.SpannableStringBuilder(getText());
     }

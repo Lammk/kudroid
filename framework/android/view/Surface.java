@@ -4,11 +4,11 @@ import android.graphics.Canvas;
 import android.graphics.Rect;
 
 /**
- * Stub tối thiểu của android.view.Surface cho KuDroid.
+ * Minimum stub of android.view.Surface for KuDroid.
  *
- * Chỉ cung cấp API mà game canvas-based gọi phổ biến. Vẽ thực tế đi qua
- * pipeline Metal Canvas native (android/graphics/Canvas đã bridge sang C++),
- * nên các phương thức ở đây chỉ cần không crash và trả về object hợp lệ.
+ * Only provides APIs commonly called by canvas-based games. Realistic drawing comes through
+ * Metal Canvas native pipeline (android/graphics/Canvas bridged to C++),
+ * so the methods here just need to not crash and return a valid object.
  */
 public class Surface {
     public static final int ROTATION_0 = 0;
@@ -22,7 +22,7 @@ public class Surface {
     public Surface() {
     }
 
-    /** Kiểm tra surface còn hợp lệ để vẽ. */
+    /** Checks that the surface is still valid for drawing. */
     public boolean isValid() {
         return mValid;
     }
@@ -31,32 +31,32 @@ public class Surface {
         mValid = false;
     }
 
-    /** Khóa canvas phần mềm để vẽ 2D. */
+    /** Locks the software canvas for 2D drawing. */
     public Canvas lockCanvas() {
         return lockCanvas(null);
     }
 
     public Canvas lockCanvas(Rect dirty) {
-        // Canvas stub của KuDroid bridge xuống C++ Metal pipeline.
+        // KuDroid's canvas stub bridges down to the C++ Metal pipeline.
         return new Canvas();
     }
 
-    /** Canvas hardware-accelerated — trên KuDroid giống lockCanvas thường. */
+    /** Canvas hardware-accelerated — on KuDroid like regular lockCanvas. */
     public Canvas lockHardwareCanvas() {
         return new Canvas();
     }
 
-    /** Đăng ký canvas đã vẽ lên compositor. */
+    /** Register the drawn canvas to the compositor. */
     public void unlockCanvasAndPost(Canvas canvas) {
-        // no-op: pipeline native tự present qua CAMetalLayer.
+        // no-op: native pipeline presents itself via CAMetalLayer.
     }
 
     @Deprecated
     public void unlockCanvas(Canvas canvas) {
-        // legacy API, giữ để tương thích bytecode cũ.
+        // legacy API, kept for legacy bytecode compatibility.
     }
 
-    /** Kích thước hiện tại của surface (width/height ghi đè bởi native). */
+    /** Current size of the surface (width/height overwritten by native). */
     public int getWidth() {
         return 0;
     }

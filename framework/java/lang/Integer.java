@@ -77,7 +77,7 @@ public final class Integer extends Number implements Comparable<Integer> {
     public static int parseInt(String s, int radix) {
         long v = Long.parseLong(s, radix);
         if (v < MIN_VALUE || v > MAX_VALUE) {
-            throw new NumberFormatException("ngoài dải int: " + s);
+            throw new NumberFormatException("out of int range: " + s);
         }
         return (int) v;
     }

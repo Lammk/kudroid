@@ -1,6 +1,6 @@
 package android.app;
 
-/** Stub sinh tự động cho android.app.ActionBar */
+/** Stub automatically generated for android.app.ActionBar */
 public class ActionBar {
     public ActionBar() {}
 }

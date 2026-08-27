@@ -53,9 +53,9 @@ struct BionicInputQueue {
 static BionicInputQueue g_inputQueue;
 
 // Ensure the wake pipe exists (lazily created on first use).
-// Lock nội bộ: kudroid_inject_touch_event (thread Swift) và attachLooper
-// (thread game) có thể chạy đồng thời — không lock thì pipe() chạy 2 lần,
-// leak một cặp fd.
+// Internal locks: kudroid_inject_touch_event (Swift thread) and attachLooper
+// (game threads) can run concurrently — without a lock, pipe() runs twice,
+// leak a pair of fd.
 static void ensure_wake_pipe(BionicInputQueue* q) {
     std::lock_guard<std::mutex> lock(q->mtx);
     if (q->pipeReady) return;
@@ -67,8 +67,8 @@ static void ensure_wake_pipe(BionicInputQueue* q) {
     }
 }
 
-// Exported cho kudroid_bridge: con trỏ AInputQueue dùng để truyền vào
-// callback onInputQueueCreated của ANativeActivity.
+// Exported for kudroid_bridge: AInputQueue pointer used to pass in
+// ANativeActivity's onInputQueueCreated callback.
 extern "C" void* kudroid_get_input_queue(void) {
     return &g_inputQueue;
 }
@@ -100,14 +100,14 @@ extern "C" void kudroid_inject_touch_event_multi(float x, float y, int32_t actio
     }
 
     // Wake the looper so it processes the new event.
-    ensure_wake_pipe(&g_inputQueue); // tự khóa nội bộ — an toàn thread
+    ensure_wake_pipe(&g_inputQueue); // internal self-locking — thread-safe
     if (g_inputQueue.pipeReady) {
         uint8_t byte = 1;
         ssize_t unused = ::write(g_inputQueue.wakePipe[1], &byte, 1);
         (void)unused;
     }
 
-    // Đồng thời đẩy sự kiện chạm vào cây giao diện Java Android
+    // Also push the touch event to the Android Java interface tree
     forward_touch_to_java_activity(action, x, y);
 }
 
@@ -165,8 +165,8 @@ extern "C" void bionic_AInputQueue_attachLooper(void* queue, void* looper, int i
     if (q->pipeReady && looper) {
         bionic_ALooper_addFd(looper, q->wakePipe[0], ident, 0x0001 /* ALOOPER_EVENT_INPUT */,
                              callback, data);
-        // Đánh dấu fd này là wake pipe của AInputQueue để ALooper_pollAll drain
-        // nước mỗi khi nó readable — nếu không pipe sẽ luôn ready -> busy loop.
+        // Mark this fd as wake pipe of AInputQueue to ALooper_pollAll drain
+        // water every time it is readable — otherwise the pipe will always be ready -> busy loop.
         bionic_ALooper_markInputPipe(looper, q->wakePipe[0]);
     }
 }

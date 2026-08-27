@@ -1,9 +1,9 @@
 package android.graphics;
 
 /**
- * triển khai android.graphics.rect tối thiểu.
+ * minimal android.graphics.rect implementation.
  *
- * đại diện cho một hình chữ nhật. đối với khuôn khổ tối thiểu của kudroid, lưu trữ
+ * represents a rectangle. for kudroid minimal framework, archive
  * left/top/right/bottom.
  */
 public final class Rect {

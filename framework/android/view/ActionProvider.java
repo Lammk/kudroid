@@ -1,6 +1,6 @@
 package android.view;
 
-/** Stub sinh tự động cho android.view.ActionProvider */
+/** Stub automatically generated for android.view.ActionProvider */
 public class ActionProvider {
     public ActionProvider() {}
 

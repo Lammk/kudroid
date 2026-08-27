@@ -1,16 +1,16 @@
 package android.os;
 
 /**
- * android.os.Parcelable — hợp đồng tuần tự hoá.
+ * android.os.Parcelable — serialization contract.
  *
- * Interface này KHÔNG có phần thân trong Android thật; khai báo chính là bản
- * đầy đủ. App implement writeToParcel + CREATOR, framework chỉ cần biết chữ ký.
+ * This interface does NOT have a body in real Android; The declaration is the version
+ * full. App implements writeToParcel + CREATOR, the framework only needs to know the signature.
  */
 public interface Parcelable {
-    /** Cờ writeToParcel: object là giá trị trả về của một hàm. */
+    /** WriteToParcel flag: object is the return value of a function. */
     public static final int PARCELABLE_WRITE_RETURN_VALUE = 0x0001;
 
-    /** describeContents: chứa file descriptor. */
+    /** describeContents: contains file descriptor. */
     public static final int CONTENTS_FILE_DESCRIPTOR = 0x0001;
 
     int describeContents();
@@ -18,7 +18,7 @@ public interface Parcelable {
     void writeToParcel(Parcel dest, int flags);
 
     /**
-     * Factory tái tạo object từ Parcel. App khai báo static field CREATOR.
+     * Factory recreates objects from Parcel. App declares static field CREATOR.
      */
     public interface Creator<T> {
         T createFromParcel(Parcel source);
@@ -27,7 +27,7 @@ public interface Parcelable {
     }
 
     /**
-     * Creator cần ClassLoader (dùng khi object chứa Parcelable lồng nhau).
+     * Creator needs ClassLoader (used when object contains nested Parcelable).
      */
     public interface ClassLoaderCreator<T> extends Creator<T> {
         T createFromParcel(Parcel source, ClassLoader loader);

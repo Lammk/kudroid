@@ -3,10 +3,10 @@ package android.view;
 import android.content.Context;
 
 /**
- * triển khai android.view.viewgroup tối thiểu.
+ * minimal android.view.viewgroup implementation.
  *
- * một view chứa các view khác. đối với khuôn khổ tối thiểu của kudroid, điều này
- * cung cấp quản lý con cơ bản.
+ * a view contains other views. for kudroid minimal framework, this
+ * Provides basic child management.
  */
 public abstract class ViewGroup extends View {
     private View[] mChildren;
@@ -18,7 +18,7 @@ public abstract class ViewGroup extends View {
     }
 
     /**
-     * thêm một view con.
+     * add a child view.
      */
     public void addView(View child) {
         if (mChildCount >= mChildren.length) {
@@ -31,14 +31,14 @@ public abstract class ViewGroup extends View {
     }
 
     /**
-     * thêm một view con với các thông số bố cục.
+     * add a child view with layout parameters.
      */
     public void addView(View child, LayoutParams params) {
         addView(child);
     }
 
     /**
-     * xóa một view con.
+     * delete a child view.
      */
     public void removeView(View view) {
         for (int i = 0; i < mChildCount; i++) {
@@ -52,7 +52,7 @@ public abstract class ViewGroup extends View {
     }
 
     /**
-     * xóa tất cả các view con.
+     * delete all child views.
      */
     public void removeAllViews() {
         for (int i = 0; i < mChildCount; i++) {
@@ -62,14 +62,14 @@ public abstract class ViewGroup extends View {
     }
 
     /**
-     * trả về số lượng các view con.
+     * returns the number of child views.
      */
     public int getChildCount() {
         return mChildCount;
     }
 
     /**
-     * trả về view con ở chỉ mục đã cho.
+     * returns the child view at the given index.
      */
     public View getChildAt(int index) {
         if (index < 0 || index >= mChildCount) return null;
@@ -77,7 +77,7 @@ public abstract class ViewGroup extends View {
     }
 
     /**
-     * tìm một view con theo id.
+     * find a child view by id.
      */
     public View findViewById(int id) {
         if (getId() == id) return this;
@@ -94,7 +94,7 @@ public abstract class ViewGroup extends View {
     }
 
     /**
-     * bố cục các con. các lớp con phải triển khai điều này.
+     * layout of children. subclasses must implement this.
      */
     protected abstract void onLayout(boolean changed, int l, int t, int r, int b);
 
@@ -133,7 +133,7 @@ public abstract class ViewGroup extends View {
     }
 
     /**
-     * thông số bố cục cho một view.
+     * layout parameters for a view.
      */
     public static class LayoutParams {
         public int width;
@@ -146,7 +146,7 @@ public abstract class ViewGroup extends View {
     }
 
     /**
-     * thông số bố cục lề.
+     * margin layout parameters.
      */
     public static class MarginLayoutParams extends LayoutParams {
         public int leftMargin;

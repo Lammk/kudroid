@@ -35,7 +35,7 @@ void* DexHeap::Allocate(size_t bytes) {
         }
     }
 
-    // Object lớn hơn block thì cấp block riêng vừa đủ, không bỏ phí phần dư.
+    // If the object is larger than the block, it will provide enough separate block without wasting the remainder.
     const size_t capacity = need > kBlockSize ? need : kBlockSize;
     auto* memory = static_cast<uint8_t*>(std::calloc(1, capacity));
     if (memory == nullptr) return nullptr;

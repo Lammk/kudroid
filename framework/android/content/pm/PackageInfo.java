@@ -1,19 +1,19 @@
 package android.content.pm;
 
 /**
- * triển khai android.content.pm.packageinfo tối thiểu.
+ * minimal android.content.pm.packageinfo implementation.
  *
- * mô tả một gói. đối với khuôn khổ tối thiểu của kudroid, cung cấp các trường
- * cơ bản với các giá trị mặc định.
+ * describes a package. for kudroid minimal framework, provide fields
+ * basic with default values.
  */
 public class PackageInfo {
-    /** tên của gói. */
+    /** package name. */
     public String packageName = "";
-    /** mã phiên bản. */
+    /** version code. */
     public int versionCode = 0;
-    /** tên phiên bản. */
+    /** version name. */
     public String versionName = "";
-    /** thông tin ứng dụng. */
+    /** application information. */
     public ApplicationInfo applicationInfo = new ApplicationInfo();
 
     public PackageInfo() {

@@ -32,7 +32,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     set(CMAKE_OSX_DEPLOYMENT_TARGET "15.0" CACHE STRING "Minimum iOS deployment target")
 endif()
 
-# libdexfile của AOSP ART đã cắt gọn (third_party/art_dex) — nền của KuART.
+# truncated AOSP ART libdexfile (third_party/art_dex) — KuART base.
 add_subdirectory(third_party/art_dex)
 
 add_library(kudroid_core STATIC
@@ -50,8 +50,7 @@ add_library(kudroid_core STATIC
     src/platform/JavaCanvasRenderer.cpp
     src/kudroid_bridge.cpp
     src/gpu_test.cpp
-    src/DexManager.cpp
-    # KuART — micro ART: nạp DEX trực tiếp, không qua dex2jar/JVM.
+    # KuART — micro ART: load DEX directly, without going through dex2jar/JVM.
     src/KuArtRuntime.cpp
     src/kuart/DexHeap.cpp
     src/kuart/DexClass.cpp
@@ -62,6 +61,7 @@ add_library(kudroid_core STATIC
     src/kuart/DexJniFunctions.cpp
     src/kuart/DexReflect.cpp
     src/kuart/LibCore.cpp
+    src/kuart/VmLock.cpp
     src/framework/PermissionManager.cpp
     src/debug/Log.cpp
 )
@@ -98,9 +98,9 @@ if(APPLE)
         "-framework AudioToolbox"
         "-framework CoreFoundation"
         "-framework Foundation"
-        # JavaCanvasRenderer (drawText) + GraphicsShim (blit canvas) dùng
-        # CoreGraphics (CGContext*/CGColor*/CGImage*) và CoreText (CTFont*/
-        # CTLine*) — thiếu 2 framework này thì host test test_shims trên
+        # JavaCanvasRenderer (drawText) + GraphicsShim (blit canvas) used
+        # CoreGraphics (CGContext*/CGColor*/CGImage*) and CoreText (CTFont*/
+        #CTLine*) — if these two frameworks are missing, host test test_shims above
         # macOS arm64 fail linker "Undefined symbols _CGBitmapContextCreate..."
         "-framework CoreGraphics"
         "-framework CoreText"
@@ -149,10 +149,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
         "-framework UIKit"
         "-framework CoreGraphics"
         "-framework IOSurface"
-        # Mã native của guest tra native method của framework bằng
-        # dlsym(dlopen(0), "Java_..."). Mach-O không đưa symbol từ static lib vào
-        # dynamic symbol table nên phải export_dynamic. KHÔNG dùng
-        # -exported_symbol — flag đó tạo whitelist, ẩn mọi symbol còn lại.
+        # The guest's native code checks the framework's native method with
+        # dlsym(dlopen(0), "Java_..."). Mach-O does not include symbols from static lib
+        # dynamic symbol table so must export_dynamic. DO NOT use
+        # -exported_symbol — that flag creates a whitelist, hiding all remaining symbols.
         "-Wl,-export_dynamic"
     )
 
@@ -182,14 +182,14 @@ else()
         target_include_directories(test_manifest_parse PRIVATE include)
     endif()
 
-    # Test của KuART nằm ở kuart-tests/ (không phải tests/) vì tests/ bị
-    # .gitignore — CI cần các file này nên chúng phải được commit.
-    #   test_art_dex        parse DEX bằng libdexfile của ART
+    # KuART's tests are located in kuart-tests/ (not tests/) because tests/ is broken
+    # .gitignore — CI needs these files so they must be committed.
+    # test_art_dex parse DEX with ART's libdexfile
     #   test_kuart          class loader: field layout + vtable
-    #   test_kuart_interp   opcode tính toán, biên Java-vs-C++
-    #   test_kuart_object   new/field/array/invoke + dispatch động
-    #   test_kuart_jni      JNIEnv hai chiều Java ⇄ native
-    #   test_kuart_exc      bảng try/catch + <clinit>
+    # test_kuart_interp opcode compute, Java-vs-C++ edge
+    # test_kuart_object new/field/array/invoke + dynamic dispatch
+    # test_kuart_jni Java two-way JNIEnv ⇄ native
+    # test_kuart_exc try/catch table + <clinit>
     #   test_kuart_reflect  Class.forName/newInstance/invoke + java.lang.Class
     if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/test_art_dex.cpp")
         add_executable(test_art_dex kuart-tests/test_art_dex.cpp)
@@ -204,6 +204,7 @@ else()
         test_kuart_jni
         test_kuart_exc
         test_kuart_reflect
+        test_kuart_libcore
     )
         if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/${kuart_test}.cpp")
             add_executable(${kuart_test} kuart-tests/${kuart_test}.cpp)

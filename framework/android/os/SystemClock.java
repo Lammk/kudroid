@@ -1,13 +1,13 @@
 package android.os;
 
 /**
- * android.os.SystemClock — đồng hồ đơn điệu của hệ thống.
+ * android.os.SystemClock — system monotonous clock.
  */
 public final class SystemClock {
     private SystemClock() {
     }
 
-    /** Millisecond kể từ khi boot, không bị nhảy khi user đổi giờ hệ thống. */
+    /** Milliseconds since boot, do not jump when the user changes the system time. */
     public static long uptimeMillis() {
         return System.nanoTime() / 1000000L;
     }
@@ -25,7 +25,7 @@ public final class SystemClock {
     }
 
     public static boolean setCurrentTimeMillis(long millis) {
-        return false; // app không có quyền đổi giờ hệ thống
+        return false; // The app does not have the right to change the system time
     }
 
     public static void sleep(long ms) {
@@ -37,7 +37,7 @@ public final class SystemClock {
             try {
                 Thread.sleep(remaining);
             } catch (InterruptedException ignored) {
-                // SystemClock.sleep không bao giờ ném; ngủ tiếp cho đủ thời gian.
+                // SystemClock.sleep never throws; Continue sleeping for enough time.
             }
         }
     }

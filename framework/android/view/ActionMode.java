@@ -1,11 +1,11 @@
 package android.view;
 
 /**
- * android.view.ActionMode — chế độ hành động theo ngữ cảnh (contextual toolbar).
+ * android.view.ActionMode — contextual toolbar action mode.
  */
 public abstract class ActionMode {
     /**
-     * Callback vòng đời của ActionMode.
+     * ActionMode lifecycle callback.
      */
     public interface Callback {
         boolean onCreateActionMode(ActionMode mode, Menu menu);
@@ -18,7 +18,7 @@ public abstract class ActionMode {
     }
 
     /**
-     * Callback API 23+: thêm hook đặt vị trí toolbar.
+     * Callback API 23+: add hook to set toolbar position.
      */
     public interface Callback2 extends Callback {
         void onGetContentRect(ActionMode mode, View view, android.graphics.Rect outRect);

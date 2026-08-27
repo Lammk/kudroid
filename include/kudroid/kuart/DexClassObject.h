@@ -1,12 +1,12 @@
-// Object đại diện java.lang.Class cho bytecode.
+// Object representing java.lang.Class cho bytecode.
 //
-// LƯU Ý phân biệt hai cách biểu diễn class trong KuART:
-//   - `jclass` của JNI = DexClass* cast thẳng (native chỉ dùng làm handle).
-//   - Giá trị Java kiểu java.lang.Class = DexClassObject* (const-class,
-//     Object.getClass(), Class.forName()) — phải là DexObject thật vì bytecode
-//     gọi method trên nó và có thể cất vào field/mảng.
-// Mỗi DexClass có tối đa MỘT DexClassObject (cache ở DexClass::class_object)
-// nên `Foo.class == Foo.class` vẫn đúng.
+// L U   ph n bi t hai c ch bi u di n class trong KuART:
+// - `jclass` c a JNI = DexClass* cast th ng (native ch  d ng l m handle).
+// - Gi  tr  Java ki u java.lang.Class = DexClassObject* (const-class,
+// Object.getClass(), Class.forName())   ph i l  DexObject th t v  bytecode
+// g i method tr n n  v  c  th  c t v o field/m ng.
+// M i DexClass c  t i  a M T DexClassObject (cache   DexClass::class_object)
+// n n `Foo.class == Foo.class` v n  ng.
 #ifndef KUDROID_KUART_DEXCLASSOBJECT_H
 #define KUDROID_KUART_DEXCLASSOBJECT_H
 

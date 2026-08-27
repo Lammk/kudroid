@@ -1,5 +1,5 @@
 package android.widget;
 
-/** Stub sinh tự động cho android.widget.Filterable */
+/** Stub automatically generated for android.widget.Filterable */
 public interface Filterable {
 }

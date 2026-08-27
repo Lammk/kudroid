@@ -1,5 +1,5 @@
 package android.text;
 
-/** Stub sinh tự động cho android.text.Spannable */
+/** Stub automatically generated for android.text.Spannable */
 public interface Spannable {
 }

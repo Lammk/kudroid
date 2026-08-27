@@ -1,29 +1,29 @@
 package android.content.res;
 
 /**
- * triển khai android.content.res.configuration tối thiểu.
+ * minimal android.content.res.configuration implementation.
  *
- * mô tả cấu hình thiết bị (hướng, mật độ, ngôn ngữ). đối với
- * khuôn khổ tối thiểu của kudroid, chúng tôi cung cấp các giá trị mặc định hợp lý.
+ * describes the device configuration (orientation, density, language). for
+ * kudroid minimal framework, we provide reasonable defaults.
  */
 public final class Configuration {
-    /** hướng màn hình: không xác định. */
+    /** screen orientation: undefined. */
     public static final int ORIENTATION_UNDEFINED = 0;
-    /** hướng màn hình: dọc. */
+    /** screen orientation: portrait. */
     public static final int ORIENTATION_PORTRAIT = 1;
-    /** hướng màn hình: ngang. */
+    /** screen orientation: landscape. */
     public static final int ORIENTATION_LANDSCAPE = 2;
 
-    /** hướng màn hình hiện tại. */
+    /** current screen orientation. */
     public int orientation = ORIENTATION_PORTRAIT;
 
-    /** mật độ màn hình hiện tại. */
+    /** current screen density. */
     public int densityDpi = 420;
 
-    /** tỷ lệ phông chữ hiện tại. */
+    /** current font scale. */
     public float fontScale = 1.0f;
 
-    /** ngôn ngữ hiện tại. */
+    /** current language. */
     public java.util.Locale locale = java.util.Locale.getDefault();
 
     public Configuration() {

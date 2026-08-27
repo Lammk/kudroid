@@ -1,6 +1,6 @@
 package android.media;
 
-/** Stub sinh tự động cho android.media.AudioDeviceInfo */
+/** Stub automatically generated for android.media.AudioDeviceInfo */
 public class AudioDeviceInfo {
     public AudioDeviceInfo() {}
 }

@@ -1,6 +1,6 @@
 package android.hardware.fingerprint;
 
-/** Stub sinh tự động cho android.hardware.fingerprint.FingerprintManager */
+/** Stub automatically generated for android.hardware.fingerprint.FingerprintManager */
 public class FingerprintManager {
     public FingerprintManager() {}
 

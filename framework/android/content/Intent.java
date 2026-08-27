@@ -3,18 +3,18 @@ package android.content;
 import android.os.Bundle;
 
 /**
- * triển khai android.content.intent tối thiểu.
+ * minimal android.content.intent implementation.
  *
- * mô tả một thao tác sẽ được thực hiện (ví dụ: bắt đầu một activity). đối với
- * khuôn khổ tối thiểu của kudroid, chúng tôi lưu trữ tên thành phần/lớp và bất kỳ
- * gói bổ sung nào.
+ * describes an operation to be performed (for example, starting an activity). for
+ * kudroid minimal framework, we store component/class names and any
+ * any additional packages.
  */
 public class Intent {
-    /** hành động của hoạt động. */
+    /** activity action. */
     public static final String ACTION_MAIN = "android.intent.action.MAIN";
-    /** hành động xem. */
+    /** view action. */
     public static final String ACTION_VIEW = "android.intent.action.VIEW";
-    /** hành động gửi. */
+    /** send action. */
     public static final String ACTION_SEND = "android.intent.action.SEND";
 
     private String mAction;

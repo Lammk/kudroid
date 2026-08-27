@@ -1,6 +1,6 @@
 package android.view;
 
-/** Stub sinh tự động cho android.view.DragAndDropPermissions */
+/** Stub automatically generated for android.view.DragAndDropPermissions */
 public class DragAndDropPermissions {
     public DragAndDropPermissions() {}
 }

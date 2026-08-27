@@ -1,6 +1,6 @@
 package android.widget;
 
-/** Stub sinh tự động cho android.widget.SeekBar */
+/** Stub automatically generated for android.widget.SeekBar */
 public class SeekBar {
     public SeekBar() {}
 }

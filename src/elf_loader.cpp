@@ -56,7 +56,7 @@
 
 namespace kudroid {
 
-// cấu trúc phần đầu elf64
+// elf64 header structure
 #pragma pack(push, 1)
 struct Elf64Ehdr {
     uint8_t  e_ident[16];   // magic + class/endian/v.v.
@@ -64,12 +64,12 @@ struct Elf64Ehdr {
     uint16_t e_machine;     // em_aarch64 = 0xb7
     uint32_t e_version;
     uint64_t e_entry;
-    uint64_t e_phoff;       // độ dời phần đầu chương trình
-    uint64_t e_shoff;       // độ dời phần đầu phân đoạn
+    uint64_t e_phoff;       // offset of the beginning of the program
+    uint64_t e_shoff;       // displacement of the beginning of the segment
     uint32_t e_flags;
     uint16_t e_ehsize;
-    uint16_t e_phentsize;   // kích thước mỗi mục phần đầu chương trình
-    uint16_t e_phnum;       // số lượng mục phần đầu chương trình
+    uint16_t e_phentsize;   // size of each program header item
+    uint16_t e_phnum;       // number of program header items
     uint16_t e_shentsize;
     uint16_t e_shnum;
     uint16_t e_shstrndx;
@@ -78,12 +78,12 @@ struct Elf64Ehdr {
 struct Elf64Phdr {
     uint32_t p_type;    // pt_load=1, pt_dynamic=2, v.v.
     uint32_t p_flags;   // pf_r=4, pf_w=2, pf_x=1
-    uint64_t p_offset;  // độ dời tệp
-    uint64_t p_vaddr;   // địa chỉ ảo
-    uint64_t p_paddr;   // địa chỉ vật lý (không dùng)
-    uint64_t p_filesz;  // kích thước trong tệp
-    uint64_t p_memsz;   // kích thước trong bộ nhớ
-    uint64_t p_align;   // căn lề
+    uint64_t p_offset;  // file displacement
+    uint64_t p_vaddr;   // virtual address
+    uint64_t p_paddr;   // physical address (not used)
+    uint64_t p_filesz;  // size in file
+    uint64_t p_memsz;   // size in memory
+    uint64_t p_align;   // margin
 };
 #pragma pack(pop)
 
@@ -131,7 +131,7 @@ ElfLoader::ElfLoader(ElfLoader&& other) noexcept
       fini_arraysz_(other.fini_arraysz_),
       eh_frame_vaddr_(other.eh_frame_vaddr_),
       eh_frame_memsz_(other.eh_frame_memsz_) {
-    // Chuyển quyền sở hữu vùng mmap; nguồn không được munmap lại.
+    // Transfer ownership of mmap region; The source cannot be munmaped again.
     other.allocBase_ = nullptr;
     other.allocSize_ = 0;
     other.base_ = nullptr;
@@ -180,14 +180,14 @@ bool ElfLoader::parse() {
     entry_ = 0;
     lastError_.clear();
 
-    // mở tệp
+    // open file
     std::ifstream file(path_, std::ios::binary);
     if (!file) {
         lastError_ = "Cannot open file: " + path_;
         return false;
     }
 
-    // đọc phần đầu elf
+    // Read the first part elf
     Elf64Ehdr ehdr;
     file.read(reinterpret_cast<char*>(&ehdr), sizeof(ehdr));
     if (!file) {
@@ -195,25 +195,25 @@ bool ElfLoader::parse() {
         return false;
     }
 
-    // xác thực magic elf
+    // authentic magic elf
     if (memcmp(ehdr.e_ident, ELF_MAGIC, 4) != 0) {
         lastError_ = "Not an ELF file (bad magic)";
         return false;
     }
 
-    // phải là 64-bit
+    // must be 64-bit
     if (ehdr.e_ident[4] != 2) {  // elfclass64
         lastError_ = "Not a 64-bit ELF";
         return false;
     }
 
-    // phải là little-endian
+    // must be little-endian
     if (ehdr.e_ident[5] != 1) {  // elfdata2lsb
         lastError_ = "Not little-endian ELF";
         return false;
     }
 
-    // phải là aarch64 hoặc x86-64
+    // must be aarch64 or x86-64
     if (ehdr.e_machine != EM_AARCH64 && ehdr.e_machine != EM_X86_64) {
         char mbuf[64];
         snprintf(mbuf, sizeof(mbuf), "Unsupported machine: %s (0x%x)",
@@ -222,7 +222,7 @@ bool ElfLoader::parse() {
         return false;
     }
 
-    // phải là đối tượng chia sẻ (et_dyn=3) hoặc tệp thực thi (et_exec=2)
+    // must be a shared object (et_dyn=3) or executable (et_exec=2)
     if (ehdr.e_type != 2 && ehdr.e_type != 3) {
         lastError_ = "ELF type not ET_EXEC or ET_DYN (type=" + std::to_string(ehdr.e_type) + ")";
         return false;
@@ -230,13 +230,13 @@ bool ElfLoader::parse() {
 
     entry_ = ehdr.e_entry;
 
-    // xác thực số lượng phần đầu chương trình
+    // Verify the number of program headers
     if (ehdr.e_phnum == 0) {
         lastError_ = "No program headers";
         return false;
     }
 
-    // đọc các phần đầu chương trình
+    // Read the first parts of the program
     file.seekg(ehdr.e_phoff);
     for (uint16_t i = 0; i < ehdr.e_phnum; ++i) {
         Elf64Phdr phdr;
@@ -246,7 +246,7 @@ bool ElfLoader::parse() {
             return false;
         }
 
-        // chỉ các phân đoạn pt_load và pt_tls
+        // pt_load and pt_tls segments only
         if (phdr.p_type == 1) {  // pt_load
             Segment seg;
             seg.vaddr  = phdr.p_vaddr;
@@ -256,7 +256,7 @@ bool ElfLoader::parse() {
             seg.flags  = phdr.p_flags;
             segments_.push_back(seg);
         } else if (phdr.p_type == 7) { // pt_tls
-            // khuôn mẫu khởi tạo tls
+            // tls initialization template
             tls_vaddr_ = phdr.p_vaddr;
             tls_filesz_ = phdr.p_filesz;
             tls_memsz_  = phdr.p_memsz;
@@ -271,20 +271,20 @@ bool ElfLoader::parse() {
     return true;
 }
 
-// mục phân đoạn động
+// dynamic segmentation item
 struct Elf64Dyn {
     int64_t  d_tag;       // dt_null, dt_symtab, v.v.
-    uint64_t d_val;       // giá trị (địa chỉ/kích thước)
+    uint64_t d_val;       // value (address/size)
 };
 
-// mục bảng ký hiệu
+// symbol table item
 struct Elf64Sym {
-    uint32_t st_name;     // độ dời trong .dynstr
-    uint8_t  st_info;     // kiểu + liên kết
-    uint8_t  st_other;    // khả năng hiển thị
-    uint16_t st_shndx;    // chỉ mục phân đoạn
-    uint64_t st_value;    // giá trị ký hiệu (độ dời từ gốc)
-    uint64_t st_size;     // kích thước ký hiệu
+    uint32_t st_name;     // displacement in .dynstr
+    uint8_t  st_info;     // style + link
+    uint8_t  st_other;    // visibility
+    uint16_t st_shndx;    // segment index
+    uint64_t st_value;    // symbolic value (displacement from origin)
+    uint64_t st_size;     // symbol size
 };
 
 struct Elf64Rela {
@@ -293,7 +293,7 @@ struct Elf64Rela {
     int64_t  r_addend;
 };
 
-// các thẻ động chúng ta quan tâm
+// the dynamic tags we care about
 static const int64_t DT_NULL   = 0;
 static const int64_t DT_SYMTAB = 6;
 static const int64_t DT_STRTAB = 5;
@@ -311,14 +311,14 @@ static const uint32_t R_AARCH64_JUMP_SLOT = 1026;
 static const uint32_t R_AARCH64_ABS64 = 257;
 static const uint32_t R_AARCH64_IRELATIVE = 1032;
 
-// Đếm số symbol THẬT trong .dynsym bằng hash table (DT_HASH nchain hoặc
-// DT_GNU_HASH chains), thay vì khoảng cách (strtabOff - symtabOff)/24.
+// Count the number of REAL symbols in .dynsym using hash table (DT_HASH nchain or
+// DT_GNU_HASH chains), instead of the distance (strtabOff - symtabOff)/24.
 //
-// .dynstr KHÔNG nằm ngay sau .dynsym trong .so NDK — giữa chúng có
-// .gnu.hash/.hash, nên khoảng cách cho con số quá lớn → quét nhầm entry rác
-// (st_name tình cờ trỏ đúng chuỗi, st_shndx != 0) → getSymbolAddress trả
-// base+st_value của RÁC → GOT slot trỏ vào vùng header ELF → SIGILL khi gọi.
-// Chính là vụ Discord: "__cxa_atexit resolved from libreactnative.so ->
+// .dynstr is NOT right after .dynsym in .so NDK — there is between them
+// .gnu.hash/.hash, so the distance for the number is too large → the wrong junk entry is scanned
+// (st_name happens to point to the correct string, st_shndx != 0) → getSymbolAddress returns
+// base+st_value of GARBAGE → GOT slot points to the ELF → SIGILL header area when called.
+// It's the Discord case: "__cxa_atexit resolved from libreactnative.so ->
 // 0x112ab5080" (= base+0x1080, pc crash).
 static size_t countDynsymSymbols(const std::vector<char>& fileBuf,
                                  const Elf64Ehdr* ehdr,
@@ -356,7 +356,7 @@ static size_t countDynsymSymbols(const std::vector<char>& fileBuf,
         }
     }
 
-    // DT_HASH: { nbucket, nchain, buckets[], chains[] } — nchain = số symbol.
+    // DT_HASH: { nbucket, nchain, buckets[], chains[] } — nchain = number of symbols.
     if (hashOff != UINT64_MAX && hashOff + 8 <= fileBuf.size()) {
         const uint32_t* h =
             reinterpret_cast<const uint32_t*>(fileBuf.data() + hashOff);
@@ -365,8 +365,8 @@ static size_t countDynsymSymbols(const std::vector<char>& fileBuf,
     }
 
     // DT_GNU_HASH: { nbuckets, symoffset, bloom_size, bloom_shift, bloom[],
-    // buckets[], chains[] }. Số symbol = symoffset + max(chain index). Walk
-    // từng chain (bit 0 = entry cuối) để tìm index lớn nhất.
+    // buckets[], chains[] }. Number of symbols = symoffset + max(chain index). Walk
+    // each chain (bit 0 = last entry) to find the largest index.
     if (gnuHashOff != UINT64_MAX && gnuHashOff + 16 <= fileBuf.size()) {
         const uint32_t* g =
             reinterpret_cast<const uint32_t*>(fileBuf.data() + gnuHashOff);
@@ -400,7 +400,7 @@ static size_t countDynsymSymbols(const std::vector<char>& fileBuf,
         }
     }
 
-    return 0; // không có hash table → caller fallback về khoảng cách
+    return 0; // no hash table → caller fallback on distance
 }
 
 bool ElfLoader::readFile(std::vector<char>& buf) {
@@ -424,13 +424,13 @@ bool ElfLoader::map() {
         return false;
     }
 
-    // đọc toàn bộ tệp vào bộ đệm
+    // Read the entire file into the buffer
     if (!readFile(fileBuf_)) {
         lastError_ = "Failed to read file into buffer";
         return false;
     }
 
-    // tìm tổng kích thước bộ nhớ cần thiết (từ địa chỉ ảo thấp nhất đến cao nhất+memsz)
+    // find total memory size needed (from lowest to highest virtual address+memsz)
     uint64_t minVaddr = UINT64_MAX;
     uint64_t maxVaddr = 0;
     for (const auto& seg : segments_) {
@@ -447,14 +447,14 @@ bool ElfLoader::map() {
     uint64_t totalSize = maxVaddr - minVaddr;
     totalSize = (totalSize + pageSize - 1) & ~(pageSize - 1);
 
-    // phân bổ một khối bộ nhớ liền kề (với map_jit trên apple silicon)
+    // allocate a contiguous block of memory (with map_jit on apple silicon)
     fprintf(stderr, "[KuDroidELF] Mapping ELF segments for %s (size: %zu)\n", path_.c_str(), (size_t)totalSize);
     int prot = PROT_READ | PROT_WRITE;
     int flags = MAP_PRIVATE | MAP_ANONYMOUS;
     [[maybe_unused]] bool usedMapJit = false;
 #if defined(__APPLE__) && TARGET_OS_OSX
-    // đường dẫn ưu tiên (hardened runtime): các trang map_jit, chỉ được ghi trong khi
-    // tính năng bảo vệ ghi jit của luồng được tắt.
+    // preferred path (hardened runtime): map_jit pages, written only during
+    // The stream's jit write protection is disabled.
     base_ = mmap(nullptr, totalSize, prot, flags | MAP_JIT, -1, 0);
     if (base_ != MAP_FAILED) {
         usedMapJit = true;
@@ -469,8 +469,8 @@ bool ElfLoader::map() {
         base_ = nullptr;
         return false;
     }
-    // Lưu gốc vùng cấp phát ban đầu để destructor munmap an toàn (base_ bị
-    // điều chỉnh về phía sau bởi -minVaddr ở cuối hàm này).
+    // Save the initial allocated region base to the safe munmap destructor (base_ device
+    // adjusted backwards by -minVaddr at the end of this function).
     allocBase_ = base_;
     allocSize_ = totalSize;
 
@@ -478,7 +478,7 @@ bool ElfLoader::map() {
     if (usedMapJit) pthread_jit_write_protect_np(0);
 #endif
 
-    // sao chép dữ liệu của mỗi phân đoạn pt_load từ bộ đệm tệp vào bộ nhớ đã ánh xạ
+    // copies the data of each pt_load segment from the file buffer into mapped memory
     for (const auto& seg : segments_) {
         fprintf(stderr, "[KuDroidELF] Segment: vaddr=0x%llx, offset=0x%llx, filesz=0x%llx, memsz=0x%llx, flags=%d\n",
                 (unsigned long long)seg.vaddr, (unsigned long long)seg.offset,
@@ -487,20 +487,20 @@ bool ElfLoader::map() {
         if (seg.offset + seg.filesz <= fileBuf_.size()) {
             memcpy(dst, fileBuf_.data() + seg.offset, seg.filesz);
         }
-        // điền số 0 vào .bss (memsz > filesz)
+        // fill .bss with zeros (memsz > filesz)
         if (seg.memsz > seg.filesz) {
             memset(dst + seg.filesz, 0, seg.memsz - seg.filesz);
         }
     }
 
-    // --- trình vá aot cho tpidr_el0 (lớp gốc kudroid) ---
-    // hạt nhân xnu của ios không chuyển đổi ngữ cảnh cho tpidr_el0, nên nó trả về rác.
+    // --- aot patcher for tpidr_el0 (kudroid root class) ---
+    // ios xnu kernel doesn't context switch for tpidr_el0, so it returns garbage.
     // mrs xn, tpidr_el0 -> 0xd53bd040 | n
-    // chúng tôi vá nó thành brk #(0x1000 + n) -> 0xd4200000 | ((0x1000 + n) << 5)
+    // we patch it to brk #(0x1000 + n) -> 0xd4200000 | ((0x1000 + n) << 5)
     //
-    // QUAN TRỌNG: vòng lặp này phải chạy TRƯỚC khi pthread_jit_write_protect_np(1)
-    // được bật lại (macOS MAP_JIT) — nếu không, việc ghi vào trang JIT đang bị
-    // khóa sẽ gây fault. Khóa lại được thực hiện ngay sau vòng lặp.
+    // IMPORTANT: this loop must run BEFORE pthread_jit_write_protect_np(1)
+    // enabled again (macOS MAP_JIT) — otherwise, writing to the JIT page is failing
+    // lock will cause fault. Relocking is performed immediately after the loop.
     for (const auto& seg : segments_) {
         if (seg.flags & 1) { // PROT_EXEC
             uint32_t* insts = reinterpret_cast<uint32_t*>(static_cast<char*>(base_) + (seg.vaddr - minVaddr));
@@ -520,9 +520,9 @@ bool ElfLoader::map() {
     if (usedMapJit) pthread_jit_write_protect_np(1);
 #endif
 
-    // arm64 có bộ đệm i/d riêng biệt: mã mới ghi phải được xóa khỏi
-    // bộ đệm dữ liệu và bộ đệm lệnh cũ phải bị vô hiệu hóa, nếu không cpu
-    // sẽ thực thi rác và quá trình sẽ gặp sự cố (sigill/sigbus) mà không có nhật ký.
+    // arm64 has a separate i/d buffer: newly written code must be flushed from
+    // The old data cache and command cache must be disabled, otherwise cpu
+    // will execute garbage and the process will crash (sigill/sigbus) with no logs.
     char* mapStart = static_cast<char*>(base_);
 #if defined(__APPLE__)
     sys_icache_invalidate(mapStart, totalSize);
@@ -572,19 +572,19 @@ bool ElfLoader::map() {
         groupStart = groupEnd;
     }
 
-    // điều chỉnh base_ để trỏ đến địa chỉ logic 0
-    // (để base_ + st_value = địa chỉ thực)
+    // Adjust base_ to point to logical address 0
+    // (let base_ + st_value = real address)
     base_ = static_cast<char*>(base_) - minVaddr;
 
-    // Đăng ký template TLS của module để các khối TLS per-thread của runtime
-    // có thể sao chép nó vào vị trí tprel tương ứng (xem kudroid_tls_module_offset).
+    // Register the module's TLS template to the runtime's per-thread TLS blocks
+    // can copy it to the corresponding tprel location (see kudroid_tls_module_offset).
     if (tls_vaddr_ != 0 && tls_filesz_ > 0 && tls_filesz_ <= tls_memsz_) {
         kudroid_tls_set_template(static_cast<char*>(base_) + tls_vaddr_, tls_filesz_);
     }
 
-    // Đăng ký module guest (base_..base_+minVaddr+totalSize) để crash handler
-    // symbolicate được pc nằm trong .so này — dladdr không biết region do
-    // ELF loader mmap nên trước đây in "no symbol".
+    // Register the guest module (base_..base_+minVaddr+totalSize) to crash handler
+    // symbolicate is pc located in this .so — dladdr does not know region due
+    // ELF loader mmap should have previously printed "no symbol".
     kudroid_register_guest_module(base_, minVaddr + totalSize, path_.c_str());
 
     return true;
@@ -600,9 +600,9 @@ bool ElfLoader::relocate() {
         return false;
     }
 #if defined(__APPLE__) && TARGET_OS_OSX
-    // map() đã bật lại pthread_jit_write_protect_np(1) (MAP_JIT) — ghi vào vùng
-    // ánh xạ lúc này sẽ fault. Relocate ghi addend/symbol vào .got/.data trong
-    // vùng JIT, nên phải tạm tắt write-protect trong suốt quá trình này.
+    // map() enabled again pthread_jit_write_protect_np(1) (MAP_JIT) — write to zone
+    // The mapping will now fault. Relocate writes addend/symbol to .got/.data in
+    // JIT area, so write-protect must be temporarily disabled during this process.
     pthread_jit_write_protect_np(0);
 #endif
     const auto* ehdr = reinterpret_cast<const Elf64Ehdr*>(fileBuf_.data());
@@ -671,9 +671,9 @@ bool ElfLoader::relocate() {
     const auto* symtab = reinterpret_cast<const Elf64Sym*>(
         fileBuf_.data() + symtabOffset);
     const char* strtab = fileBuf_.data() + strtabOffset;
-    // Số symbol THẬT từ hash table — khoảng cách symtab→strtab quá lớn khi
-    // .gnu.hash/.hash nằm giữa → symbolIndex hợp lệ vẫn nằm ngoài giới hạn này
-    // hoặc bị coi là rác (tương tự bug getSymbolAddress → SIGILL Discord).
+    // TRUE number of symbols from hash table — distance symtab→strtab is too large when
+    // .gnu.hash/.hash is between → valid symbolIndex is still outside this limit
+    // or considered trash (similar to bug getSymbolAddress → SIGILL Discord).
     size_t symbolCount = countDynsymSymbols(fileBuf_, ehdr, phdrs);
     if (symbolCount == 0) {
         symbolCount = (strtabOffset - symtabOffset) / sizeof(Elf64Sym);
@@ -721,14 +721,14 @@ bool ElfLoader::relocate() {
                 }
                 const char* name = strtab + symtab[symbolIndex].st_name;
                 void* address = nullptr;
-                // Weak undefined (STB_WEAK + SHN_UNDEF): Android linker VẪN
-                // bind vào symbol mạnh nếu nó tồn tại trong các lib đã load
-                // (vd strlcpy/strlcat có trong bionic libc). Chỉ khi KHÔNG tìm
-                // thấy ở đâu cả mới giữ 0 — code caller luôn có `cbz x8, skip`
-                // phía trước để xử lý nhánh null (feature detection). Bind cứng
-                // nullptr trước đây khiến slot GOT = 0 dù shim CÓ hàm đó → lời
-                // gọi qua PLT nhảy tới pc=0x0 → SIGSEGV fault_addr=0x0 đúng như
-                // crash Minecraft/libmaesdk (register x0/x1/x2 khớp strlcpy).
+                // Weak undefined (STB_WEAK + SHN_UNDEF): Android linker STILL
+                // bind to the strong symbol if it exists in the loaded libs
+                // (e.g. strlcpy/strlcat is in bionic libc). Only if NOT looking
+                // If you see it anywhere, keep 0 — the caller code always has `cbz x8, skip`
+                // ahead to handle null branches (feature detection). Bind hard
+                // nullptr previously caused slot GOT = 0 even though shim HAS that function → profit
+                // call via PLT jump to pc=0x0 → SIGSEGV fault_addr=0x0 exactly as
+                // crash Minecraft/libmaesdk (register x0/x1/x2 matches strlcpy).
                 const bool isWeakUndef = (symtab[symbolIndex].st_shndx == 0) &&
                                          ((symtab[symbolIndex].st_info >> 4) == 2);
                 if (symtab[symbolIndex].st_shndx != 0) {
@@ -739,15 +739,15 @@ bool ElfLoader::relocate() {
                 } else {
                     address = resolve_bionic_symbol(name);
                 }
-                // isWeakUndef giờ chỉ dùng để im warning khi symbol thật sự
-                // không tồn tại — hành vi đúng của linker: weak undef không có
-                // đâu cả thì slot = 0, caller tự kiểm tra null.
+                // isWeakUndef is now only used to silence the warning when the symbol is real
+                // does not exist — the correct behavior of linker: weak undef does not exist
+                // Wherever slot = 0, the caller automatically checks for null.
                 
                 if (!address && !isWeakUndef) {
-                    // Mọi symbol không resolve được — không chỉ STB_GLOBAL — vì GOT
-                    // slot lúc đó = 0 + addend (có thể là địa chỉ rác trong data),
-                    // guest gọi qua slot này → SIGILL/SIGSEGV (nghi phạm vụ Discord).
-                    // In type + r_offset để biết chính xác slot nào trong module hỏng.
+                    // All symbols cannot be resolved — not just STB_GLOBAL — because of GOT
+                    // slot at that time = 0 + addend (possibly a junk address in the data),
+                    // Guest calls through this slot → SIGILL/SIGSEGV (suspect in Discord case).
+                    // Print type + r_offset to know exactly which slot in the module is broken.
                     fprintf(stderr,
                             "[KuDroidELF] WARNING: Unresolved symbol '%s' in %s (type=%u, offset=0x%llx, addend=0x%llx)\n",
                             name, path_.c_str(), type,
@@ -760,16 +760,16 @@ bool ElfLoader::relocate() {
                         memcpy(target, address, symtab[symbolIndex].st_size);
                     }
                 } else {
-                    // QUAN TRỌNG: Nếu address == nullptr (weak symbol không tìm thấy),
-                    // gán đúng 0 (NULL). Không cộng addend vào NULL vì sẽ tạo ra địa chỉ
-                    // rác nhỏ (vd 0x18/0x20) làm app tưởng con trỏ hợp lệ rồi crash SIGSEGV.
+                    // IMPORTANT: If address == nullptr (weak symbol not found),
+                    // assign true 0 (NULL). Do not add addend to NULL because it will create an address
+                    // Small garbage (eg 0x18/0x20) makes the app think the pointer is valid and then crashes SIGSEGV.
                     *target = address ? (reinterpret_cast<uintptr_t>(address) + relocs[i].r_addend) : 0;
                 }
             } else if (type == R_AARCH64_TLS_DTPMOD64) {
-                *target = 1; // id mô-đun (1 cho thư viện chính)
+                *target = 1; // module id (1 for main library)
             } else if (type == R_AARCH64_TLS_DTPREL64 || type == R_AARCH64_TLS_TPREL64) {
-                // Bias = vị trí template TLS của module so với thread pointer guest
-                // (giá trị này được kudroid_tls_set_template đặt trong khối TLS).
+                // Bias = position of the module's TLS template relative to the guest thread pointer
+                // (this value is set by kudroid_tls_set_template in the TLS block).
                 const uint64_t tlsBias = kudroid_tls_module_offset();
                 if (symbolIndex != 0) {
                     *target = symtab[symbolIndex].st_value + relocs[i].r_addend + tlsBias;
@@ -787,15 +787,15 @@ bool ElfLoader::relocate() {
 
     // DT_RELR — packed relative relocations (NDK r23+ default for arm64).
     //
-    // Định dạng: mỗi entry 8 byte.
-    //  - bit 0 = 0: entry là MỘT địa chỉ tương đối cần reloc (r_offset).
-    //  - bit 0 = 1: bitmap — địa chỉ CƠ SỞ lấy từ entry (địa chỉ đơn) trước đó;
-    //    các bit 1..63 đánh dấu các địa chỉ liên tiếp (base + bit*8) cần reloc.
-    //    Bitmap liên tiếp: base kế tiếp = base + 63*8.
+    // Format: each entry 8 bytes.
+    //  - bit 0 = 0: entry is a relative address that needs reloc (r_offset).
+    //  - bit 0 = 1: bitmap — BASE address taken from previous entry (single address);
+    //    Bits 1..63 mark consecutive addresses (base + bit*8) that need reloc.
+    //    Consecutive bitmap: next base = base + 63*8.
     //
-    // Khác với RELA, addend của RELR nằm SẴN trong nội dung tệp tại vị trí reloc
-    // (không nằm trong entry), nên cách áp dụng là CỘNG load bias vào giá trị hiện
-    // có — đúng như glibc/musl/Android linker (*(addr) += load_bias).
+    // Unlike RELA, the addend of RELR is AVAILABLE in the file content at the reloc location
+    // (not in the entry), so the way to apply is to ADD the load bias to the current value
+    // yes — exactly like glibc/musl/Android linker (*(addr) += load_bias).
     auto applyRelr = [&]() -> bool {
         if (relrVaddr == 0 || relrSize == 0) return true;
         const uint64_t offset = vaddrToFileOffset(relrVaddr);
@@ -808,14 +808,14 @@ bool ElfLoader::relocate() {
         uint64_t lastAddr = 0;
         for (uint64_t i = 0; i < relrSize / 8; ++i) {
             const uint64_t entry = relrs[i];
-            // Entry đầu tiên của bảng RELR PHẢI là entry đơn (bit 0 = 0) làm base
-            // cho các bitmap — spec không định nghĩa bitmap ở vị trí đầu.
+            // The first entry of the RELR table MUST be a single entry (bit 0 = 0) as a base
+            // for bitmaps — the spec does not define bitmaps in the beginning position.
             if (i == 0 && (entry & 1ULL)) {
                 lastError_ = "Invalid RELR table: first entry is a bitmap";
                 return false;
             }
             if (entry & 1ULL) {
-                const uint64_t base = lastAddr; // base = địa chỉ entry đơn trước đó
+                const uint64_t base = lastAddr; // base = address of previous single entry
                 for (uint64_t bit = 1; bit < 64; ++bit) {
                     if (entry & (1ULL << bit)) {
                         const uint64_t vaddr = base + bit * 8;
@@ -856,8 +856,8 @@ void* ElfLoader::getSymbolAddress(const char* symbolName) {
         return nullptr;
     }
 
-    // chúng ta cần xác định vị trí của phân đoạn pt_dynamic. phân tích lại các phần đầu chương trình
-    // từ filebuf_ đã được tải để tìm pt_dynamic.
+    // we need to determine the location of the pt_dynamic segment. Re-analyze the first parts of the program
+    // from the loaded filebuf_ to find pt_dynamic.
     const Elf64Ehdr* ehdr = reinterpret_cast<const Elf64Ehdr*>(fileBuf_.data());
     if (ehdr->e_phnum == 0) return nullptr;
 
@@ -880,14 +880,14 @@ void* ElfLoader::getSymbolAddress(const char* symbolName) {
 
     if (!dynamic) return nullptr;
 
-    // trích xuất symtab, strtab, strsz từ các mục động
+    // extract symtab, strtab, strsz from dynamic entries
     const Elf64Sym* symtab = nullptr;
     const char* strtab = nullptr;
     size_t strsz = 0;
     uint64_t symtabOff = UINT64_MAX;
     uint64_t strtabOff = UINT64_MAX;
 
-    // hàm hỗ trợ chuyển đổi địa chỉ ảo thành độ dời tệp bằng các phân đoạn pt_load
+    // support function that converts virtual addresses to file offsets using pt_load segments
     auto vaddrToOffset = [&](uint64_t vaddr) -> uint64_t {
         for (uint16_t j = 0; j < ehdr->e_phnum; ++j) {
             if (phdrs[j].p_type == 1) {  // PT_LOAD
@@ -897,7 +897,7 @@ void* ElfLoader::getSymbolAddress(const char* symbolName) {
                 }
             }
         }
-        return UINT64_MAX;  // không tìm thấy
+        return UINT64_MAX;  // not found
     };
 
     for (size_t i = 0; i < dynCount; ++i) {
@@ -928,13 +928,13 @@ void* ElfLoader::getSymbolAddress(const char* symbolName) {
 
     if (!symtab || !strtab) return nullptr;
 
-    // Số symbol THẬT từ hash table (DT_HASH nchain / DT_GNU_HASH). Không dùng
-    // khoảng cách symtab→strtab vì .dynstr không nằm ngay sau .dynsym (có
-    // .gnu.hash/.hash ở giữa) → quét quá → match entry rác → GOT slot trỏ vào
-    // header ELF → SIGILL (vụ Discord __cxa_atexit -> base+0x1080).
+    // REAL number of symbols from hash table (DT_HASH nchain / DT_GNU_HASH). Do not use
+    // distance symtab→strtab because .dynstr is not immediately after .dynsym (yes
+    // .gnu.hash/.hash in the middle) → overscan → match junk entry → GOT slot pointing to
+    // header ELF → SIGILL (Discord case __cxa_atexit -> base+0x1080).
     size_t maxSym = countDynsymSymbols(fileBuf_, ehdr, phdrs);
     if (maxSym == 0) {
-        // fallback an toàn: chỉ quét trong vùng symtab→strtab thật
+        // Safe fallback: only scans in the real symtab→strtab area
         if (strtabOff != UINT64_MAX && strtabOff > symtabOff) {
             maxSym = (strtabOff - symtabOff) / sizeof(Elf64Sym);
         } else {
@@ -942,7 +942,7 @@ void* ElfLoader::getSymbolAddress(const char* symbolName) {
         }
     }
 
-    // lặp qua các mục bảng ký hiệu
+    // iterate over symbol table entries
     for (size_t i = 0; i < maxSym; ++i) {
         if (symtab[i].st_name == 0) continue;
         if (strsz > 0 && symtab[i].st_name >= strsz) continue;
@@ -952,7 +952,7 @@ void* ElfLoader::getSymbolAddress(const char* symbolName) {
             if (symtab[i].st_shndx == 0) {
                 continue;
             }
-            // st_value là độ dời từ gốc tải; base_ đã được điều chỉnh
+            // st_value is the displacement from the load origin; base_ has been adjusted
             return static_cast<char*>(base_) + symtab[i].st_value;
         }
     }
@@ -970,7 +970,7 @@ std::string ElfLoader::testExecution() {
         return "[kudroid_core] EXECUTION FAILED: Symbol 'kudroid_add' not found";
     }
 
-    // chữ ký: int kudroid_add(int, int)
+    // signature: int kudroid_add(int, int)
     int (*add_func)(int, int) = reinterpret_cast<int (*)(int, int)>(addr);
     int result = add_func(40, 20);
 
@@ -981,14 +981,14 @@ std::string ElfLoader::testExecution() {
 void ElfLoader::executeInit() {
     if (!base_) return;
 
-    // thực thi dt_init nếu có
+    // execute dt_init if present
     if (init_func_ != 0) {
         void (*init)() = reinterpret_cast<void (*)()>(
             static_cast<char*>(base_) + init_func_);
         init();
     }
 
-    // thực thi dt_init_array nếu có
+    // execute dt_init_array if present
     if (init_array_ != 0 && init_arraysz_ > 0) {
         auto** array = reinterpret_cast<void (**)()>(
             static_cast<char*>(base_) + init_array_);
@@ -1005,7 +1005,7 @@ void ElfLoader::executeInit() {
 void ElfLoader::executeFini() {
     if (!base_) return;
 
-    // thực thi dt_fini_array nếu có (theo thứ tự ngược lại theo đặc tả elf)
+    // execute dt_fini_array if present (in reverse order according to elf specification)
     if (fini_array_ != 0 && fini_arraysz_ > 0) {
         auto** array = reinterpret_cast<void (**)()>(
             static_cast<char*>(base_) + fini_array_);
@@ -1018,7 +1018,7 @@ void ElfLoader::executeFini() {
         }
     }
 
-    // thực thi dt_fini nếu có
+    // execute dt_fini if ​​present
     if (fini_func_ != 0) {
         void (*fini)() = reinterpret_cast<void (*)()>(
             static_cast<char*>(base_) + fini_func_);
@@ -1032,22 +1032,22 @@ extern "C" void __deregister_frame(void*);
 void ElfLoader::registerEhFrame() {
     if (!base_ || eh_frame_vaddr_ == 0) return;
 
-    // eh_frame_vaddr_ trỏ tới .eh_frame_hdr (pt_gnu_eh_frame)
+    // eh_frame_vaddr_ points to .eh_frame_hdr (pt_gnu_eh_frame)
     auto* hdr = reinterpret_cast<const uint8_t*>(static_cast<char*>(base_) + eh_frame_vaddr_);
-    // Bounds check: đọc tối thiểu 8 byte (version+3 enc + con trỏ 4 byte).
+    // Bounds check: read minimum 8 bytes (version+3 enc + 4 byte pointer).
     if (eh_frame_memsz_ < 8) return;
     
-    // định dạng phần đầu:
-    // uint8_t version; (phải là 1)
+    // header format:
+    // uint8_t version; (must be 1)
     // uint8_t eh_frame_ptr_enc;
     // uint8_t fde_count_enc;
     // uint8_t table_enc;
     
-    if (hdr[0] != 1) return; // phiên bản không xác định
+    if (hdr[0] != 1) return; // phi n b n kh ng x c  nh
     
-    // dw_eh_pe_pcrel | dw_eh_pe_sdata4 (0x1b) là phổ biến nhất
+    // dw_eh_pe_pcrel | dw_eh_pe_sdata4 (0x1b) is the most common
     if (hdr[1] == 0x1B) {
-        // con trỏ là độ dời có dấu 32-bit từ địa chỉ của con trỏ
+        // pointer is a 32-bit signed offset from the pointer's address
         const int32_t* ptr_addr = reinterpret_cast<const int32_t*>(hdr + 4);
         int32_t offset = *ptr_addr;
         void* eh_frame_actual = reinterpret_cast<void*>(
@@ -1077,15 +1077,15 @@ void ElfLoader::deregisterEhFrame() {
 // ─────────────────────────────────────────────────────────────────────────────
 // Registry module guest — crash handler symbolicate.
 //
-// Các region do ELF loader mmap không nằm trong dyld image list nên dladdr
-// không biết; registry này ánh xạ base → (size, path) để crash handler in ra
-// "<path>+0x<offset>" thay vì "(no symbol)".
+// C c region do ELF loader mmap kh ng n m trong dyld image list n n dladdr
+// don't know; This registry maps base → (size, path) to the crash handler to print
+// "<path>+0x<offset>" thay v  "(no symbol)".
 //
-// Ghi xảy ra lúc load (đơn luồng khởi động, có lock để an toàn nếu 2 luồng
-// load cùng lúc). Đọc xảy ra trong crash handler (có thể trên luồng bất kỳ)
-// và KHÔNG lock — tránh deadlock nếu crash xảy ra ngay khi luồng khác đang
-// giữ mutex. Sau khi load xong registry gần như bất biến nên đọc không lock
-// là chấp nhận được (best effort như mọi phần khác của crash handler).
+// Ghi x y ra l c load ( n lu ng kh i  ng, c  lock   an to n n u 2 lu ng
+// load at the same time). Read occurs in crash handler (can be on any thread)
+// and NO lock — avoid deadlock if crash occurs while another thread is running
+// gi  mutex. Sau khi load xong registry g n nh  b t bi n n n  c kh ng lock
+// l  ch p nh n  c (best effort nh  m i ph n kh c c a crash handler).
 namespace {
 struct GuestModule {
     std::uintptr_t base;
@@ -1102,7 +1102,7 @@ extern "C" void kudroid_register_guest_module(void* base, std::size_t size,
     std::lock_guard<std::mutex> lock(g_guestMtx);
     const auto addr = reinterpret_cast<std::uintptr_t>(base);
     for (auto& m : g_guestModules) {
-        if (m.base == addr) {  // reload cùng module: cập nhật thay vì thêm trùng
+        if (m.base == addr) {  // reload c ng module: c p nh t thay v  th m tr ng
             m.size = size;
             m.path = path;
             return;
@@ -1114,7 +1114,7 @@ extern "C" void kudroid_register_guest_module(void* base, std::size_t size,
 extern "C" bool kudroid_lookup_guest_module(void* addr, char* out, std::size_t outSize) {
     if (!addr || !out || outSize == 0) return false;
     const auto a = reinterpret_cast<std::uintptr_t>(addr);
-    // Đọc không lock (xem ghi chú phía trên) — vector chỉ bị sửa lúc load.
+    // c kh ng lock (xem ghi ch  ph a tr n)   vector ch  b  s a l c load.
     for (const auto& m : g_guestModules) {
         if (a >= m.base && a < m.base + m.size) {
             const auto off = a - m.base;

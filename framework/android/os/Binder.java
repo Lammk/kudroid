@@ -1,6 +1,6 @@
 package android.os;
 
-/** Stub sinh tự động cho android.os.Binder */
+/** Stub automatically generated for android.os.Binder */
 public class Binder {
     public Binder() {}
 }

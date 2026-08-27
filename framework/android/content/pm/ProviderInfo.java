@@ -1,6 +1,6 @@
 package android.content.pm;
 
-/** Stub sinh tự động cho android.content.pm.ProviderInfo */
+/** Stub automatically generated for android.content.pm.ProviderInfo */
 public class ProviderInfo {
     public ProviderInfo() {}
 }

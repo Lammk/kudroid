@@ -1,6 +1,6 @@
 package android.app;
 
-/** Stub sinh tự động cho android.app.SharedElementCallback */
+/** Stub automatically generated for android.app.SharedElementCallback */
 public class SharedElementCallback {
     public SharedElementCallback() {}
 

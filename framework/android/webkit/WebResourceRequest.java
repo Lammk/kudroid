@@ -1,6 +1,6 @@
 package android.webkit;
 
-/** Stub sinh tự động cho android.webkit.WebResourceRequest */
+/** Stub automatically generated for android.webkit.WebResourceRequest */
 public class WebResourceRequest {
     public WebResourceRequest() {}
 }

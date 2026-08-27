@@ -1,8 +1,8 @@
 package java.lang;
 
 /**
- * Thread thật do KuART tạo bằng pthread. Chỉ hỗ trợ start/join/sleep — không
- * có thread group, priority thật hay interrupt bất đồng bộ.
+ * Real thread created by KuART using pthread. Only start/join/sleep supported — no
+ * has thread group, real priority or asynchronous interrupt.
  */
 public class Thread implements Runnable {
 
@@ -30,7 +30,7 @@ public class Thread implements Runnable {
     private boolean interrupted;
     private UncaughtExceptionHandler handler;
 
-    /** Con trỏ pthread_t do native giữ; 0 = chưa chạy. */
+    /** pthread_t pointer held by native; 0 = not running yet. */
     private long nativePeer;
 
     public Thread() {
@@ -68,7 +68,7 @@ public class Thread implements Runnable {
 
     public synchronized void start() {
         if (started) {
-            throw new IllegalStateException("thread đã start");
+            throw new IllegalStateException("thread has started");
         }
         started = true;
         nativeStart();
@@ -80,7 +80,7 @@ public class Thread implements Runnable {
         }
     }
 
-    /** Điểm vào mà native gọi trên thread mới. */
+    /** Entry point that native calls on the new thread. */
     private void runFromNative() {
         try {
             run();

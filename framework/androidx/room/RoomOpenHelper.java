@@ -1,6 +1,6 @@
 package androidx.room;
 
-/** Stub sinh tự động cho androidx.room.RoomOpenHelper */
+/** Stub automatically generated for androidx.room.RoomOpenHelper */
 public class RoomOpenHelper {
     public RoomOpenHelper() {}
 

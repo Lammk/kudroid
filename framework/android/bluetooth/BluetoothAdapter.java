@@ -1,15 +1,15 @@
 package android.bluetooth;
 
 /**
- * mô phỏng android.bluetooth.bluetoothadapter.
+ * emulate android.bluetooth.bluetoothadapter.
  *
- * không quan trọng đối với việc khởi động/hiển thị ứng dụng. trả về null/mặc định để ứng dụng không
- * gặp sự cố khi kiểm tra tính khả dụng của bluetooth.
+ * is not important for application startup/display. returns null/default so the application doesn't
+ * had trouble checking bluetooth availability.
  */
 public final class BluetoothAdapter {
-    /** trạng thái: tắt. */
+    /** status: off. */
     public static final int STATE_OFF = 10;
-    /** trạng thái: bật. */
+    /** status: enabled. */
     public static final int STATE_ON = 12;
 
     private static final BluetoothAdapter sInstance = new BluetoothAdapter();
@@ -18,7 +18,7 @@ public final class BluetoothAdapter {
     }
 
     /**
-     * trả về bộ điều hợp mặc định. trả về null (không có bluetooth trên ios).
+     * returns default adapter. returns null (no bluetooth on ios).
      */
     public static BluetoothAdapter getDefaultAdapter() {
         return null;

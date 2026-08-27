@@ -1,6 +1,6 @@
 package android.graphics.drawable;
 
-/** Stub sinh tự động cho android.graphics.drawable.Icon */
+/** Stub automatically generated for android.graphics.drawable.Icon */
 public class Icon {
     public Icon() {}
 }

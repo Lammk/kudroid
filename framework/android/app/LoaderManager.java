@@ -1,6 +1,6 @@
 package android.app;
 
-/** Stub sinh tự động cho android.app.LoaderManager */
+/** Stub automatically generated for android.app.LoaderManager */
 public class LoaderManager {
     public LoaderManager() {}
 

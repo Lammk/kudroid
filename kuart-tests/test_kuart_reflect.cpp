@@ -1,7 +1,7 @@
-// Host test cho DexReflect + object java.lang.Class (const-class).
+// Host test for DexReflect + object java.lang.Class (const-class).
 //
-// Kịch bản giống đường ActivityThread dùng thật: Class.forName(tên có dấu chấm)
-// → newInstance() → getMethod() → invoke(), gồm cả dispatch động qua subclass.
+// K ch b n gi ng  ng ActivityThread d ng th t: Class.forName(t n c  d u ch m)
+// newInstance()   getMethod()   invoke(), g m c  dispatch  ng qua subclass.
 #include "kudroid/kuart/DexJniEnv.h"
 #include "kudroid/kuart/DexReflect.h"
 
@@ -56,16 +56,16 @@ struct Specs {
     MethodSpec object_ctor;
     MethodSpec base_ctor;
     MethodSpec base_clinit;
-    MethodSpec base_get;      // virtual: trả v
-    MethodSpec base_set;      // virtual: v = tham số
-    MethodSpec base_twice;    // virtual: trả v*2 (Sub override thành v*3)
-    MethodSpec base_static;   // static: trả 5
+    MethodSpec base_get;      // virtual: tr  v
+    MethodSpec base_set;      // virtual: v = tham s
+    MethodSpec base_twice;    // virtual: tr  v*2 (Sub override th nh v*3)
+    MethodSpec base_static;   // static: tr  5
     MethodSpec sub_ctor;
     MethodSpec sub_twice;
 
-    MethodSpec iface_ctor;    // Abs không dùng nhưng cần cho ClassSpec
+    MethodSpec iface_ctor;    // Abs kh ng d ng nh ng c n cho ClassSpec
 
-    MethodSpec my_class;      // static: const-class LBase; trả object
+    MethodSpec my_class;      // static: const-class LBase; tr  object
 
     Specs() {
         object_ctor.name = "<init>";
@@ -144,7 +144,7 @@ std::vector<ClassSpec> BuildClasses(const Specs& s) {
 }  // namespace
 
 int main() {
-    std::printf("=== KuART bước 5: reflection + java.lang.Class ===\n");
+std::printf("=== KuART b c 5: reflection + java.lang.Class ===\n");
 
     Specs probe;
     DexBuilder index_builder;
@@ -162,7 +162,7 @@ int main() {
     s.object_ctor.registers_size = 1;
     s.object_ctor.ins_size = 1;
 
-    // Base.<init>(): v = 7 để phân biệt object đã qua constructor.
+    // Base.<init>(): v = 7   ph n bi t object   qua constructor.
     {
         std::vector<uint16_t> c;
         Op21s(&c, kOpConst16, 0, 7);
@@ -245,7 +245,7 @@ int main() {
     const std::vector<uint8_t> dex = builder.Build(BuildClasses(s));
     std::printf("DEX synthetic: %zu bytes\n", dex.size());
     Check(builder.TypeIndexOf("Lcom/foo/Base;") == kTypeBase,
-          "index ổn định giữa hai lượt build");
+"index  n  nh gi a hai l t build");
 
     kudroid::kuart::DexClassLinker linker;
     std::string error;
@@ -261,61 +261,61 @@ int main() {
 
     using kudroid::kuart::DexReflect;
 
-    // ── chuyển đổi tên ──
+    // chuy n  i t n
     Check(DexReflect::DottedToDescriptor("com.foo.Base") == "Lcom/foo/Base;",
           "DottedToDescriptor");
     Check(DexReflect::DottedToDescriptor("Lcom/foo/Base;") == "Lcom/foo/Base;",
-          "descriptor truyền vào không bị bọc hai lần");
-    Check(DexReflect::DottedToDescriptor("[I") == "[I", "tên mảng giữ nguyên");
+"descriptor truy n v o kh ng b  b c hai l n");
+Check(DexReflect::DottedToDescriptor("[I") == "[I", "t n m ng gi  nguy n");
     Check(DexReflect::DescriptorToDotted("Lcom/foo/Base;") == "com.foo.Base",
           "DescriptorToDotted");
     Check(DexReflect::DescriptorToDotted("[Ljava/lang/String;") == "[Ljava.lang.String;",
-          "mảng giữ descriptor, chỉ đổi dấu chấm");
+"m ng gi  descriptor, ch   i d u ch m");
 
     // ── Class.forName ──
     {
         kudroid::kuart::DexClass* base = reflect.ForName("com.foo.Base");
-        Check(base != nullptr, "forName với tên có dấu chấm");
+Check(base != nullptr, "forName v i t n c  d u ch m");
         Check(base != nullptr &&
                   base->status == kudroid::kuart::DexClass::Status::kInitialized,
-              "forName chạy <clinit> (initialize = true)");
+"forName ch y <clinit> (initialize = true)");
         if (base != nullptr) {
             kudroid::kuart::DexField* f = base->FindStaticField("inited", "I");
             Check(f != nullptr && base->static_values[f->offset_or_slot].i == 1,
-                  "<clinit> đã đặt inited = 1");
+"<clinit>    t inited = 1");
         }
-        Check(reflect.ForName("com.foo.KhongCo") == nullptr, "forName class không có → null");
-        Check(reflect.GetName(base) == "com.foo.Base", "getName trả tên có dấu chấm");
+Check(reflect.ForName("com.foo.KhongCo") == nullptr, "forName class kh ng c    null");
+Check(reflect.GetName(base) == "com.foo.Base", "getName tr  t n c  d u ch m");
     }
 
     // ── newInstance + invoke ──
     {
         kudroid::kuart::DexClass* base = reflect.ForName("com.foo.Base");
         kudroid::kuart::DexObject* obj = reflect.NewInstance(base);
-        Check(obj != nullptr, "newInstance tạo được object");
-        Check(obj != nullptr && obj->clazz == base, "object có class đúng");
+Check(obj != nullptr, "newInstance t o  c object");
+Check(obj != nullptr && obj->clazz == base, "object c  class  ng");
 
         kudroid::kuart::DexMethod* get = reflect.FindMethod(base, "get", "()I");
         Check(get != nullptr, "getMethod(get)");
         const DexValue self = DexValue::Ref(obj);
         Check(reflect.Invoke(get, obj, &self, 1).i == 7,
-              "invoke thấy giá trị do constructor đặt");
+"invoke th y gi  tr  do constructor  t");
 
         kudroid::kuart::DexMethod* set = reflect.FindMethod(base, "set", "(I)V");
         Check(set != nullptr, "getMethod(set)");
         const DexValue set_args[2] = {DexValue::Ref(obj), DexValue::Int(99)};
         reflect.Invoke(set, obj, set_args, 2);
-        Check(reflect.Invoke(get, obj, &self, 1).i == 99, "invoke method có tham số");
+Check(reflect.Invoke(get, obj, &self, 1).i == 99, "invoke method c  tham s ");
 
         kudroid::kuart::DexMethod* five = reflect.FindMethod(base, "five", "()I");
         Check(five != nullptr, "getMethod(five) static");
         Check(reflect.Invoke(five, nullptr, nullptr, 0).i == 5, "invoke method static");
 
         Check(reflect.FindMethod(base, "khongCo", "()V") == nullptr,
-              "getMethod method không có → null");
+"getMethod method kh ng c    null");
     }
 
-    // ── dispatch động qua reflection ──
+    // dispatch  ng qua reflection
     {
         kudroid::kuart::DexClass* base = reflect.ForName("com.foo.Base");
         kudroid::kuart::DexClass* sub = reflect.ForName("com.foo.Sub");
@@ -327,33 +327,33 @@ int main() {
         const DexValue sub_self = DexValue::Ref(sub_obj);
 
         Check(reflect.Invoke(twice, base_obj, &base_self, 1).i == 20,
-              "invoke trên Base gọi Base.twice");
+"invoke tr n Base g i Base.twice");
         Check(reflect.Invoke(twice, sub_obj, &sub_self, 1).i == 30,
-              "CÙNG Method nhưng receiver Sub gọi Sub.twice (dispatch động)");
+"C NG Method nh ng receiver Sub g i Sub.twice (dispatch  ng)");
     }
 
-    // ── không instantiate được ──
+    // kh ng instantiate  c
     {
         Check(reflect.NewInstance(reflect.ForName("com.foo.Iface")) == nullptr,
-              "newInstance trên interface → null");
+"newInstance tr n interface   null");
         Check(reflect.NewInstance(reflect.ForName("com.foo.Abs")) == nullptr,
-              "newInstance trên abstract class → null");
+"newInstance tr n abstract class   null");
     }
 
-    // ── object java.lang.Class từ const-class ──
+    // object java.lang.Class t  const-class
     {
         kudroid::kuart::DexClass* r = linker.FindClass("LR;");
         kudroid::kuart::DexMethod* m =
             r != nullptr ? r->FindDirectMethod("myClass", "()Ljava/lang/Class;") : nullptr;
-        Check(m != nullptr, "tìm được R.myClass");
+Check(m != nullptr, "t m  c R.myClass");
         interp.ClearPendingException();
         const DexValue cls = interp.Execute(m, nullptr, 0);
         Check(!interp.HasPendingException() && cls.l != nullptr,
-              "const-class trả object khác null");
+"const-class tr  object kh c null");
         Check(linker.ClassFromObject(cls.l) == reflect.ForName("com.foo.Base"),
-              "object Class trỏ đúng DexClass");
+"object Class tr   ng DexClass");
         Check(cls.l->clazz == linker.FindClass("Ljava/lang/Class;"),
-              "object Class có clazz = java.lang.Class");
+"object Class c  clazz = java.lang.Class");
 
         const DexValue again = interp.Execute(m, nullptr, 0);
         Check(again.l == cls.l, "Base.class == Base.class (cache class_object)");
@@ -361,9 +361,9 @@ int main() {
         kudroid::kuart::DexObject* plain =
             linker.AllocObject(linker.FindClass("Lcom/foo/Base;"));
         Check(linker.ClassFromObject(plain) == nullptr,
-              "object thường không bị nhận nhầm là Class");
+"object th ng kh ng b  nh n nh m l  Class");
     }
 
-    std::printf("=== %s (%d lỗi) ===\n", g_failures == 0 ? "PASSED" : "FAILED", g_failures);
+std::printf("=== %s (%d error) ===\n", g_failures == 0 ? "PASSED" : "FAILED", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

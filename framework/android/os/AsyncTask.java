@@ -9,14 +9,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * android.os.AsyncTask — chạy doInBackground trên worker thread, đưa kết quả và
- * progress về main thread qua Handler.
+ * android.os.AsyncTask — runs doInBackground on the worker thread, injects results and
+ * progress on main thread via Handler.
  *
- * Đây là hành vi thật: có thread pool, có post về Looper chính, có trạng thái
- * PENDING/RUNNING/FINISHED và chống gọi execute() hai lần.
+ * This is the real behavior: there is a thread pool, there is a post to the main Looper, there is a state
+ * PENDING/RUNNING/FINISHED and avoid calling execute() twice.
  */
 public abstract class AsyncTask<Params, Progress, Result> {
-    /** Trạng thái vòng đời của task. */
+    /** Task lifecycle status. */
     public enum Status {
         PENDING,
         RUNNING,
@@ -42,7 +42,7 @@ public abstract class AsyncTask<Params, Progress, Result> {
             CORE_POOL_SIZE, MAX_POOL_SIZE, KEEP_ALIVE_SECONDS, TimeUnit.SECONDS,
             new LinkedBlockingQueue<Runnable>(), sThreadFactory);
 
-    /** Pool tuần tự — mặc định của execute() từ API 11. */
+    /** Sequential pool — default of execute() since API 11. */
     public static final Executor SERIAL_EXECUTOR = new ThreadPoolExecutor(
             1, 1, KEEP_ALIVE_SECONDS, TimeUnit.SECONDS,
             new LinkedBlockingQueue<Runnable>(), sThreadFactory);
@@ -120,8 +120,8 @@ public abstract class AsyncTask<Params, Progress, Result> {
                         result = doInBackground(params);
                     }
                 } catch (Throwable t) {
-                    // Exception trong doInBackground phải huỷ task chứ không
-                    // được làm chết worker thread của pool.
+                    // Exception in doInBackground must cancel the task, not
+                    // killed the pool's worker thread.
                     mCancelled.set(true);
                     android.util.Log.e("AsyncTask", "doInBackground threw: " + t);
                 } finally {
@@ -159,7 +159,7 @@ public abstract class AsyncTask<Params, Progress, Result> {
         });
     }
 
-    /** Chặn tới khi task xong. Không được gọi từ main thread (sẽ deadlock). */
+    /** Block until the task is completed. Cannot be called from main thread (will deadlock). */
     public final Result get() throws InterruptedException {
         synchronized (mDoneLock) {
             while (!mDone) {

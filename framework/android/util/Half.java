@@ -1,6 +1,6 @@
 package android.util;
 
-/** Stub sinh tự động cho android.util.Half */
+/** Stub automatically generated for android.util.Half */
 public class Half {
     public Half() {}
 }

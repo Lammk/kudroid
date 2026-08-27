@@ -1,6 +1,6 @@
 package android.widget;
 
-/** Stub sinh tự động cho android.widget.ThemedSpinnerAdapter */
+/** Stub automatically generated for android.widget.ThemedSpinnerAdapter */
 public class ThemedSpinnerAdapter {
     public ThemedSpinnerAdapter() {}
 }

@@ -1,7 +1,7 @@
 package android.view;
 
 /**
- * android.view.SubMenu — Menu lồng dưới một MenuItem.
+ * android.view.SubMenu — Menu nested under a MenuItem.
  */
 public interface SubMenu extends Menu {
     SubMenu setHeaderTitle(CharSequence title);

@@ -165,7 +165,7 @@ extern "C" const char* kudroid_test_gpu(void) {
         int posLoc = gl_get_attrib_location(program, "aPosition");
         log += "  Attrib 'aPosition' Location: " + std::to_string(posLoc) + "\n";
 
-        // Xác nhận không có lỗi GL nào sau khi setup pipeline
+        // Confirm there are no GL errors after pipeline setup
         const unsigned int glErr = gl_get_error();
         log += "  glGetError after pipeline setup: " +
                std::string(glErr == 0 ? "GL_NO_ERROR (0)" : "0x" + [&] {
@@ -186,7 +186,7 @@ extern "C" const char* kudroid_test_gpu(void) {
         gl_draw_arrays(0x0004 /* GL_TRIANGLES */, 0, 3);
         log += "  glDrawArrays(GL_TRIANGLES, count=3) executed\n";
 
-        // Đọc lại pixel tại tâm (32, 32)
+        // Read back pixel at center (32, 32)
         uint8_t pixel[4] = {0, 0, 0, 0};
         gl_read_pixels(32, 32, 1, 1, 0x1908 /* GL_RGBA */, 0x1401 /* GL_UNSIGNED_BYTE */, pixel);
         log += "  Pixel Readback at (32, 32): RGBA=(" +

@@ -1,6 +1,6 @@
 package android.widget;
 
-/** Stub sinh tự động cho android.widget.ArrayAdapter */
+/** Stub automatically generated for android.widget.ArrayAdapter */
 public class ArrayAdapter {
     public ArrayAdapter() {}
 }

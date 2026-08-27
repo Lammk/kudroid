@@ -1,6 +1,6 @@
 package android.view;
 
-/** Stub sinh tự động cho android.view.ViewStructure */
+/** Stub automatically generated for android.view.ViewStructure */
 public class ViewStructure {
     public ViewStructure() {}
 }

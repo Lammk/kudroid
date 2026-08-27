@@ -1,6 +1,6 @@
 #!/bin/bash
-# generate-xcode.sh — tạo xcode project cho kudroidshell ios app
-# chạy trên macos runner của github actions.
+# generate-xcode.sh — generate Xcode project for KuDroidShell iOS app
+# runs on GitHub Actions macOS runner.
 set -euo pipefail
 
 PROJ_DIR="ios-app/KuDroidShell"
@@ -14,15 +14,15 @@ cmake -B "$BUILD_DIR" -G Xcode \
   -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0
 cmake --build "$BUILD_DIR" --config Release --target "$LIB_NAME"
 
-# ── 2. copy static library vào app dir ──
+# 2. copy static library v o app dir
 mkdir -p "$PROJ_DIR/libs"
 cp "$BUILD_DIR/Release-iphoneos/lib${LIB_NAME}.a" "$PROJ_DIR/libs/"
 
-# ── 3. tạo xcode project bằng xcodebuild (manual config) ──
-# vì không thể tạo .xcodeproj từ script dễ dàng, ta tạo build trực tiếp bằng swiftpm
-# hoặc dùng file .xcodeproj template.
+# 3. t o xcode project b ng xcodebuild (manual config)
+# v  kh ng th  t o .xcodeproj t  script d  d ng, ta t o build tr c ti p b ng swiftpm
+# ho c d ng file .xcodeproj template.
 
-# tạo package.swift cho spm
+# t o package.swift cho spm
 cat > "$PROJ_DIR/Package.swift" << 'SWIFTEOF'
 // swift-tools-version: 5.9
 import PackageDescription

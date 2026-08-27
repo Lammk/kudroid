@@ -1,6 +1,6 @@
 package android.view;
 
-/** Stub sinh tự động cho android.view.WindowInsetsAnimation */
+/** Stub automatically generated for android.view.WindowInsetsAnimation */
 public class WindowInsetsAnimation {
     public WindowInsetsAnimation() {}
 

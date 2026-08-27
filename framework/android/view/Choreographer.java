@@ -1,6 +1,6 @@
 package android.view;
 
-/** Stub sinh tự động cho android.view.Choreographer */
+/** Stub automatically generated for android.view.Choreographer */
 public class Choreographer {
     public Choreographer() {}
 

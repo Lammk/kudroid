@@ -5,10 +5,10 @@ import android.view.ViewGroup;
 import android.database.DataSetObserver;
 
 /**
- * android.widget.Adapter — cầu nối giữa dữ liệu và AdapterView.
+ * android.widget.Adapter — bridge between data and AdapterView.
  */
 public interface Adapter {
-    /** Trả về từ getItemViewType khi view không nên được tái sử dụng. */
+    /** Returns from getItemViewType when the view should not be reused. */
     public static final int IGNORE_ITEM_VIEW_TYPE = -1;
     public static final int NO_SELECTION = Integer.MIN_VALUE;
 

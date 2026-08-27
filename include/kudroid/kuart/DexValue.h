@@ -1,9 +1,9 @@
-// Ô giá trị 64-bit của interpreter — thay cho JValue của ART.
+// 64-bit value slot of interpreter — replacing ART JValue.
 //
-// DEX bytecode coi register là 32-bit; long/double chiếm hai register liền kề.
-// Ở đây mỗi ô là 64-bit để long/double vào gọn một ô, còn opcode dạng cặp
-// (v0,v1) chỉ đọc/ghi ô thấp. Cách này đơn giản hơn ART (dùng mảng 32-bit +
-// bitmap tham chiếu) và đủ vì KuDroid chưa có GC cần biết ô nào là con trỏ.
+// DEX bytecode coi register l  32-bit; long/double chi m hai register li n k .
+// y m i   l  64-bit   long/double v o g n m t  , c n opcode d ng c p
+// (v0,v1) ch   c/ghi   th p. C ch n y  n gi n h n ART (d ng m ng 32-bit +
+// bitmap tham chi u) v    v  KuDroid ch a c  GC c n bi t   n o l  con tr .
 #ifndef KUDROID_KUART_DEXVALUE_H
 #define KUDROID_KUART_DEXVALUE_H
 
@@ -54,7 +54,7 @@ union DexValue {
     }
 };
 
-static_assert(sizeof(DexValue) == 8, "DexValue phải đúng 8 byte");
+static_assert(sizeof(DexValue) == 8, "DexValue ph i  ng 8 byte");
 
 }  // namespace kuart
 }  // namespace kudroid

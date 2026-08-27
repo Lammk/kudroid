@@ -1,6 +1,6 @@
 package android.database;
 
-/** Stub sinh tự động cho android.database.Observable */
+/** Stub automatically generated for android.database.Observable */
 public class Observable {
     public Observable() {}
 }

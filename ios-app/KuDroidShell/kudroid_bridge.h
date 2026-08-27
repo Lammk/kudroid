@@ -4,159 +4,159 @@
 extern "C" {
 #endif
 
-/// điểm vào tự kiểm tra cho thư viện kudroid_core.
-/// trả về 0 nếu thành công, khác 0 nếu thất bại.
+///self-test entry point for kudroid_core library.
+/// returns 0 on success, non-zero on failure.
 int kudroid_self_test(void);
 
-/// tự kiểm tra với đầu ra nhật ký chi tiết.
-/// trả về một chuỗi được malloc chứa nhật ký gỡ lỗi từng bước.
-/// người gọi phải giải phóng chuỗi được trả về bằng free().
+///self-test with detailed log output.
+/// returns a malloc string containing the step-by-step debug log.
+/// the caller must free the string returned by free().
 const char* kudroid_self_test_log(void);
 
-/// tải một tệp đối tượng chia sẻ elf (.so).
-/// @param path  đường dẫn tuyệt đối đến tệp .so.
-/// @return      chuỗi nhật ký được malloc chứa kết quả phân tích.
-///              người gọi phải giải phóng chuỗi được trả về bằng free().
+/// loads an elf shared object (.so) file.
+/// @param path absolute path to the .so file.
+/// @return the malloc log string containing the analysis results.
+/// the caller must free the string returned by free().
 const char* kudroid_load_elf(const char* path);
 
-/// thực thi một hàm gốc từ tệp .so được tải (kiểm tra giai đoạn 2).
-/// phải được gọi sau kudroid_load_elf.
-/// @return  chuỗi nhật ký được malloc chứa kết quả thực thi.
-///          người gọi phải giải phóng chuỗi được trả về bằng free().
+/// executes a native function from the loaded .so file (phase 2 test).
+/// must be called after kudroid_load_elf.
+/// @return the malloc log string containing the execution results.
+/// the caller must free the string returned by free().
 const char* kudroid_execution_test(const char* path);
 
-/// thực thi một hàm gốc từ tệp .so được tải (kiểm tra giai đoạn 2).
-/// phải được gọi sau kudroid_load_elf.
-/// @return  chuỗi nhật ký được malloc chứa kết quả thực thi.
-///          người gọi phải giải phóng chuỗi được trả về bằng free().
+/// executes a native function from the loaded .so file (phase 2 test).
+/// must be called after kudroid_load_elf.
+/// @return the malloc log string containing the execution results.
+/// the caller must free the string returned by free().
 const char* kudroid_syscall_so_test(const char* path);
 const char* kudroid_jni_massive_so_test(const char* path);
 
-/// tải thư viện kiểm tra bionic shim và thực thi kudroid_bionic_test().
-/// trả về một nhật ký chẩn đoán được malloc; người gọi phải giải phóng nó bằng free().
+///load the bionic shim test library and execute kudroid_bionic_test().
+///returns a diagnostic log malloc; the caller must release it with free().
 const char* kudroid_bionic_execution_test(const char* path);
 
-/// tải các thư viện elf được đóng gói thông qua librarymanager và kiểm tra phân giải toàn cục.
-/// trả về một nhật ký chẩn đoán được malloc; người gọi phải giải phóng nó bằng free().
+///load packaged elf libraries via librarymanager and check global resolution.
+///returns a diagnostic log malloc; the caller must release it with free().
 const char* kudroid_multi_elf_test(const char* consumerPath, const char* providerPath);
 
-/// báo cáo xem jit (bộ nhớ có thể thực thi) có sẵn cho quá trình này hay không.
-/// @return  một chuỗi được malloc "jit: enabled" hoặc "jit: disabled".
-///          người gọi phải giải phóng chuỗi được trả về bằng free().
+/// reports whether jit (executable memory) is available to this process.
+/// @return a malloc string "jit: enabled" or "jit: disabled".
+/// the caller must free the string returned by free().
 const char* kudroid_jit_status(void);
 
-/// đặt thư mục nơi kudroid_core ghi các tệp nhật ký .txt và bãi chứa sự cố.
-/// gọi một lần lúc khởi động với thư mục documents có thể ghi của ứng dụng.
-/// cũng cài đặt các trình xử lý tín hiệu để một sự cố gốc vẫn để lại tệp nhật ký.
+/// sets the directory where kudroid_core writes .txt log files and crash dumps.
+/// called once at startup against the application's writable documents directory.
+/// also installs signal handlers so that an original crash still leaves a log file.
 void kudroid_set_log_dir(const char* dir);
 
-/// đặt thư mục documents được vfspathremapper sử dụng.
+/// sets the documents directory used by vfspathremapper.
 void kudroid_set_documents_dir(const char* dir);
 
-/// đặt con trỏ cametallayer hoặc uiview được sử dụng cho các ràng buộc bề mặt anativewindow.
-/// width/height là kích thước pixel thật (UIScreen.bounds * scale); density = scale
-/// (3.0 cho @3x) — được đẩy tiếp vào DisplayMetrics của Java lúc JVM khởi tạo.
+///set the cametallayer or uiview cursor used for anativewindow surface constraints.
+///width/height is the actual pixel size (UIScreen.bounds * scale); density = scale
+/// (3.0 for @3x) — pushed to Java's DisplayMetrics at JVM initialization.
 void kudroid_set_metal_layer(void* layer, int width, int height, float density);
 void kudroid_unbind_metal_layer(void);
 
-/// đặt và lấy hướng màn hình yêu cầu từ Activity (0=Landscape, 1=Portrait, -1=Unspecified)
+/// set and get required screen orientation from Activity (0=Landscape, 1=Portrait, -1=Unspecified)
 void kudroid_set_requested_orientation(int orientation);
 int kudroid_get_requested_orientation(void);
 
-/// truyền dữ liệu cảm biến (Accelerometer/Gyroscope/Orientation) từ iOS CoreMotion vào guest app
+///transfer sensor data (Accelerometer/Gyroscope/Orientation) from iOS CoreMotion to guest app
 void kudroid_inject_sensor_event(int sensorType, float x, float y, float z);
 
-/// kích hoạt rung Haptic Feedback (1=Nhẹ, 2=Vừa, 3=Mạnh)
+/// activate Haptic Feedback vibration (1=Light, 2=Moderate, 3=Strong)
 void kudroid_vibrate(int intensity);
 
-/// quản lý cờ giữ màn hình luôn sáng (1=Keep Screen On / No Sleep, 0=Allow Sleep)
+/// manage the keep screen on flag (1=Keep Screen On / No Sleep, 0=Allow Sleep)
 void kudroid_set_keep_screen_on(int keepOn);
 int kudroid_get_keep_screen_on(void);
 
-/// chèn một sự kiện chạm vào ứng dụng android gốc
-/// @param x tọa độ x của lần chạm
-/// @param y tọa độ y của lần chạm
-/// @param action 0=down, 1=up, 2=move (được ánh xạ tới amotion_event_action của android)
+///insert a touch event in the native android app
+/// @param x x coordinate of the touch
+/// @param y y coordinate of the touch
+/// @param action 0=down, 1=up, 2=move (mapped to android's amotion_event_action)
 void kudroid_inject_touch_event(float x, float y, int action);
 void kudroid_inject_touch_event_multi(float x, float y, int action, int pointerId, int pointerCount);
 
-/// gửi sự kiện vòng đời ứng dụng java (101=pause, 102=resume) vào luồng ui
+/// send java application lifecycle events (101=pause, 102=resume) to ui stream
 void kudroid_send_lifecycle_event(int eventType);
 
-/// nạp DEX bằng KuART và liệt kê class tìm được.
-/// trả về một nhật ký chẩn đoán được malloc; người gọi phải giải phóng nó bằng free().
+///load DEX with KuART and list the found classes.
+///returns a diagnostic log malloc; the caller must release it with free().
 const char* kudroid_translate_dex(const char* dexPath);
 
-/// chạy kiểm tra tự động chuyển hướng vfs và i/o; trả về một nhật ký được malloc.
+///run vfs and i/o redirection autotest; returns a malloc log.
 const char* kudroid_vfs_self_test_log(void);
 const char* kudroid_vfs_extended_test_log(void);
 
-/// kiểm tra tích hợp KuART. tham số không còn dùng (giữ để tương thích ABI).
-/// trả về một nhật ký chẩn đoán được malloc; người gọi phải giải phóng nó bằng free().
+///check KuART integration. Deprecated parameter (kept for ABI compatibility).
+///returns a diagnostic log malloc; the caller must release it with free().
 char* kudroid_test_jvm(const char* unused_path);
 char* kudroid_test_gpu(void);
 char* kudroid_test_audio(void);
 const char* kudroid_run_so_test(const char* soPath, const char* entrypoint);
 
-/// tải tệp .so kiểm tra gpu arm64 và thực thi kiểm tra vulkan của nó thông qua tính năng chặn bionicshim.
-/// trả về một nhật ký chẩn đoán được malloc; người gọi phải giải phóng nó bằng free().
+///load the arm64 gpu test .so file and execute its vulkan test via bionicshim blocking.
+///returns a diagnostic log malloc; the caller must release it with free().
 const char* kudroid_gpu_vulkan_so_test(const char* path);
 
-/// tải tệp .so kiểm tra gpu arm64 và thực thi kiểm tra opengl+egl của nó thông qua tính năng chặn bionicshim.
-/// trả về một nhật ký chẩn đoán được malloc; người gọi phải giải phóng nó bằng free().
+///load the arm64 gpu test .so file and execute its opengl+egl test via bionicshim blocking.
+///returns a diagnostic log malloc; the caller must release it with free().
 const char* kudroid_gpu_opengl_so_test(const char* path);
 
-/// trích xuất và cài đặt các thư viện gốc arm64-v8a của apk vào android_root.
-/// trả về một nhật ký chẩn đoán được malloc; người gọi phải giải phóng nó bằng free().
+///extract and install the apk's arm64-v8a root libraries into android_root.
+///returns a diagnostic log malloc; the caller must release it with free().
 const char* kudroid_install_apk(const char* apkPath);
 
-/// quét thư mục thư viện của apk đã cài đặt và tải tất cả các thư viện gốc (.so) của nó.
-/// trả về một nhật ký chẩn đoán được malloc; người gọi phải giải phóng nó bằng free().
+///scans the installed apk's library folder and loads all its native (.so) libraries.
+///returns a diagnostic log malloc; the caller must release it with free().
 const char* kudroid_run_apk(const char* appName);
 
-/// xóa các thư mục bộ đệm nội bộ của một ứng dụng.
-/// trả về 1 nếu thành công, 0 nếu thất bại.
+/// clears an application's internal cache folders.
+/// returns 1 on success, 0 on failure.
 int kudroid_clear_app_cache(const char* package_name);
 
-/// xóa hoàn toàn một ứng dụng đã cài đặt và dữ liệu của nó.
-/// trả về 1 nếu thành công, 0 nếu thất bại.
+/// completely delete an installed app and its data.
+/// returns 1 on success, 0 on failure.
 int kudroid_delete_app(const char* package_name);
 
-/// xóa app với báo cáo tiến trình qua callback (phase UTF-8, percent 0-100).
-/// callback chạy trên thread gọi hàm — Swift tự dispatch về main thread.
+/// delete app with progress report via callback (phase UTF-8, percent 0-100).
+/// callback runs on the thread calling the function — Swift dispatches itself to the main thread.
 typedef void (*kudroid_delete_progress_cb)(const char* phase, int percent, void* userdata);
 int kudroid_delete_app_progress(const char* package_name,
                                 kudroid_delete_progress_cb cb,
                                 void* userdata);
 
-/// nhật ký debug chi tiết của lần xóa app gần nhất (đường dẫn, quyền ghi,
-/// số file đã xóa/thất bại, lỗi filesystem...). Cũng được ghi ra file
-/// kudroid_uninstall_debug.txt trong Documents. Trả về chuỗi được malloc;
-/// người gọi phải giải phóng bằng free().
+/// detailed debug log of the last app deletion (path, write permission,
+/// number of deleted files/failure, filesystem error...). Also written to file
+///kudroid_uninstall_debug.txt in Documents. Returns the malloc string;
+/// the caller must free with free().
 const char* kudroid_uninstall_debug_log(void);
 
-/// lấy thông tin cơ bản về một ứng dụng đã cài đặt.
-/// trả về một chuỗi được malloc (ví dụ: json hoặc văn bản được định dạng); người gọi phải giải phóng nó bằng free().
+///gets basic information about an installed application.
+/// returns a malloc string (e.g. json or formatted text); the caller must release it with free().
 const char* kudroid_get_app_info(const char* package_name);
 
-/// kiểm tra xem ứng dụng khách có bị sập (gentle crash) trong phiên chạy vừa qua hay không.
-/// trả về 1 nếu có crash, 0 nếu bình thường.
+///check if the client application did not crash (gentle crash) during the last session.
+/// returns 1 if there is a crash, 0 if normal.
 int kudroid_has_crashed(void);
 
-/// xóa trạng thái crash sau khi giao diện đã hiển thị thông báo.
+/// clear the crash state after the interface has displayed a notification.
 void kudroid_clear_crash_state(void);
 
-/// trích xuất tối đa 30 dòng log cuối cùng trước khi crash.
-/// trả về chuỗi malloc; người gọi phải giải phóng bằng free().
+/// extract up to 30 last log lines before crash.
+///return string malloc; the caller must free it with free().
 const char* kudroid_get_last_crash_tail(void);
 
-/// trả về trạng thái jit: "JIT: Enabled" hoặc "JIT: Disabled" (được malloc).
+/// returns jit status: "JIT: Enabled" or "JIT: Disabled" (malloced).
 const char* kudroid_jit_status(void);
 
-/// kiểm tra jit bằng cả CS_DEBUGGED và thực thi W^X (TrollStore). Trả về 1 nếu có JIT, 0 nếu không.
+///test jit with both CS_DEBUGGED and W^X (TrollStore) execution. Returns 1 if JIT exists, 0 otherwise.
 int kudroid_is_jit_enabled(void);
 
-/// ghi lại lỗi khởi động và đặt trạng thái gentle crash
+// / ghi l i error kh i  ng v   t tr ng th i gentle crash
 void kudroid_report_startup_error(const char* title, const char* message);
 
 // Android Runtime Permission Manager APIs

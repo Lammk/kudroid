@@ -1,8 +1,8 @@
 package java.lang.reflect;
 
 /**
- * Handle tới DexMethod của KuART. Field `artMethod` do native ghi, Java không
- * được sửa.
+ * Handle to KuART's DexMethod. Field `artMethod` is written by native, not by Java
+ * corrected.
  */
 public final class Method {
 

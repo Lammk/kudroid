@@ -1,9 +1,9 @@
 package android.content;
 
 /**
- * mô phỏng android.content.clipboardmanager.
+ * emulate android.content.clipboardmanager.
  *
- * quản lý khay nhớ tạm. đối với khuôn khổ tối thiểu của kudroid, đây là một mô phỏng.
+ * clipboard management. for kudroid minimal framework, here is an emulation.
  */
 public class ClipboardManager {
     private CharSequence mText;

@@ -1,17 +1,17 @@
-// JNIEnv cho KuART: cầu nối giữa bytecode DEX và mã native ARM64 của game.
+// JNIEnv for KuART: bridge between DEX bytecode and native code ARM64 c a game.
 //
-// Thay cho ~230 hàm vtable mà Avian/ART cung cấp. Đây là phần lớn nhất của
-// KuART: game gọi JNI liên tục (FindClass, GetMethodID, CallVoidMethod,
-// RegisterNatives...) trong khi bytecode chỉ chạy lúc onCreate + touch event.
+// In place of the ~230 vtable functions that Avian/ART provides. This is the biggest part of
+// KuART: game g i JNI li n t c (FindClass, GetMethodID, CallVoidMethod,
+// RegisterNatives...) trong khi bytecode ch  ch y l c onCreate + touch event.
 //
-// Ánh xạ handle JNI sang con trỏ KuART:
-//   jclass    -> DexClass*   (qua bảng local/global ref)
+// nh x  handle JNI sang con tr  KuART:
+// jclass    -> DexClass*   (qua b ng local/global ref)
 //   jobject   -> DexObject*
-//   jmethodID -> DexMethod*  (con trỏ trực tiếp, không qua bảng — ID phải bền)
+// jmethodID -> DexMethod*  (con tr  tr c ti p, kh ng qua b ng   ID ph i b n)
 //   jfieldID  -> DexField*
 //
-// Local ref dùng bảng theo frame để DeleteLocalRef và PopLocalFrame hoạt động
-// đúng; global ref có bảng riêng không bị xoá theo frame.
+// Local ref d ng b ng theo frame   DeleteLocalRef v  PopLocalFrame ho t  ng
+// ng; global ref c  b ng ri ng kh ng b  xo  theo frame.
 #ifndef KUDROID_KUART_DEXJNIENV_H
 #define KUDROID_KUART_DEXJNIENV_H
 
@@ -37,7 +37,7 @@ public:
     DexJniEnv(const DexJniEnv&) = delete;
     DexJniEnv& operator=(const DexJniEnv&) = delete;
 
-    // Con trỏ truyền cho mã native. Layout khớp JNIEnv_ nên native cast được.
+    // Con tr  truy n cho m  native. Layout kh p JNIEnv_ n n native cast  c.
     JNIEnv* env() { return reinterpret_cast<JNIEnv*>(&env_storage_); }
     JavaVM* vm() { return reinterpret_cast<JavaVM*>(&vm_storage_); }
 
@@ -47,7 +47,7 @@ public:
     DexClassLinker* linker() { return linker_; }
     Interpreter* interpreter() { return interpreter_; }
 
-    // ── quản lý reference ──
+    // qu n l  reference
     jobject AddLocalRef(DexObject* obj);
     jobject AddGlobalRef(DexObject* obj);
     void DeleteLocalRef(jobject ref);
@@ -57,25 +57,25 @@ public:
     void PushLocalFrame();
     void PopLocalFrame();
 
-    // ── liên kết method native ──
-    // RegisterNatives từ JNI_OnLoad của game.
+    // li n k t method native
+    // RegisterNatives t  JNI_OnLoad c a game.
     jint RegisterNatives(DexClass* klass, const JNINativeMethod* methods, jint count);
 
-    // Tìm hàm native theo quy ước tên JNI (Java_pkg_Class_method) qua hook do
-    // KuDroid cấp — trỏ tới LibraryManager của guest .so.
+    // T m h m native theo quy  c t n JNI (Java_pkg_Class_method) qua hook do
+    // KuDroid c p   tr  t i LibraryManager c a guest .so.
     using SymbolLookup = void* (*)(const char* symbol);
     void set_symbol_lookup(SymbolLookup fn) { symbol_lookup_ = fn; }
 
-    // Liên kết method native chưa có native_fn. Trả false nếu không tìm thấy.
+    // Li n k t method native ch a c  native_fn. Tr  false n u not found.
     bool LinkNativeMethod(DexMethod* method);
 
-    // Gọi method native đã liên kết. args KHÔNG gồm JNIEnv/jclass — hàm này tự thêm.
+    // G i method native   li n k t. args KH NG g m JNIEnv/jclass   h m n y t  th m.
     DexValue CallNative(DexMethod* method, const DexValue* args, size_t num_args);
 
-    // ── gọi method Java từ native ──
-    // `receiver` null cho method static. `virtual_dispatch` = chọn lại bản
-    // override theo class thật của receiver (Call<Type>Method), tắt cho
-    // CallNonvirtual<Type>Method và CallStatic<Type>Method.
+    // g i method Java t  native
+    // `receiver` null cho method static. `virtual_dispatch` = ch n l i b n
+    // override theo class th t c a receiver (Call<Type>Method), t t cho
+    // CallNonvirtual<Type>Method v  CallStatic<Type>Method.
     DexValue CallJavaA(DexObject* receiver, DexMethod* method, const jvalue* args,
                        bool virtual_dispatch);
     DexValue CallJavaV(DexObject* receiver, DexMethod* method, va_list args,
@@ -86,8 +86,8 @@ public:
     static const char* MethodShorty(const DexMethod* method);
 
     // ── exception ──
-    // Exception do bytecode ném nằm ở Interpreter, do native ném nằm ở đây;
-    // ba hàm này hợp nhất hai nguồn để native chỉ thấy một trạng thái.
+    // Exception do bytecode n m n m   Interpreter, do native n m n m    y;
+    // ba h m n y h p nh t hai ngu n   native ch  th y m t tr ng th i.
     void SetPendingException(DexObject* ex);
     DexObject* pending_exception() const;
     void ClearException();
@@ -102,9 +102,9 @@ public:
 private:
     void InitFunctionTable();
 
-    // Bố cục khớp JNIEnv_ / JavaVM_ ở trường ĐẦU TIÊN (con trỏ bảng hàm) —
-    // native chỉ đọc trường đó. Trường `self` phía sau để FromEnv/FromVm quay
-    // ngược về DexJniEnv mà không cần bảng tra cứu toàn cục.
+    // B  c c kh p JNIEnv_ / JavaVM_   tr ng  U TI N (con tr  b ng h m)
+    // native ch   c tr ng  . Tr ng `self` ph a sau   FromEnv/FromVm quay
+    // ng c v  DexJniEnv m  kh ng c n b ng tra c u to n c c.
     struct EnvStorage {
         const JNINativeInterface_* functions = nullptr;
         DexJniEnv* self = nullptr;
@@ -121,7 +121,7 @@ private:
     Interpreter* interpreter_ = nullptr;
     SymbolLookup symbol_lookup_ = nullptr;
 
-    // Mỗi frame là một tập local ref. Frame ngoài cùng luôn tồn tại.
+    // M i frame l  m t t p local ref. Frame ngo i c ng lu n t n t i.
     std::vector<std::vector<DexObject*>> local_frames_;
     std::unordered_set<DexObject*> global_refs_;
 

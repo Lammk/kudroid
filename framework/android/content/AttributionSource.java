@@ -1,6 +1,6 @@
 package android.content;
 
-/** Stub sinh tự động cho android.content.AttributionSource */
+/** Stub automatically generated for android.content.AttributeSource */
 public class AttributionSource {
     public AttributionSource() {}
 }

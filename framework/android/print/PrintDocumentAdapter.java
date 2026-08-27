@@ -1,6 +1,6 @@
 package android.print;
 
-/** Stub sinh tự động cho android.print.PrintDocumentAdapter */
+/** Stub automatically generated for android.print.PrintDocumentAdapter */
 public class PrintDocumentAdapter {
     public PrintDocumentAdapter() {}
 

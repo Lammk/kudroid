@@ -1,6 +1,6 @@
 package android.view;
 
-/** Stub sinh tự động cho android.view.ViewParent */
+/** Stub automatically generated for android.view.ViewParent */
 public class ViewParent {
     public ViewParent() {}
 }

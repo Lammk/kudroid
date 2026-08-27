@@ -20,7 +20,7 @@ public class LinkedBlockingQueue<E> implements BlockingQueue<E> {
 
     public synchronized boolean add(E e) {
         if (!offer(e)) {
-            throw new IllegalStateException("queue đầy");
+            throw new IllegalStateException("queue full");
         }
         return true;
     }

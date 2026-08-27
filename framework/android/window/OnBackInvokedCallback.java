@@ -1,5 +1,5 @@
 package android.window;
 
-/** Stub sinh tự động cho android.window.OnBackInvokedCallback */
+/** Stub automatically generated for android.window.OnBackInvokedCallback */
 public interface OnBackInvokedCallback {
 }

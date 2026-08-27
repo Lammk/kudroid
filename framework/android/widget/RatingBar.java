@@ -1,6 +1,6 @@
 package android.widget;
 
-/** Stub sinh tự động cho android.widget.RatingBar */
+/** Stub automatically generated for android.widget.RatingBar */
 public class RatingBar {
     public RatingBar() {}
 }

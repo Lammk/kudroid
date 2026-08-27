@@ -1,8 +1,8 @@
 package java.lang;
 
 /**
- * Bộ đệm ký tự cho phép nối chuỗi. javac dịch mọi phép `a + b` trên String
- * thành StringBuilder nên class này phải chạy được sớm nhất.
+ * Character buffer allows string concatenation. javac translates all `a + b` operations on String
+ * into StringBuilder so this class must run as soon as possible.
  */
 public final class StringBuilder implements CharSequence, Appendable {
 

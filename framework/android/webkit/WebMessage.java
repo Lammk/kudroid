@@ -1,6 +1,6 @@
 package android.webkit;
 
-/** Stub sinh tự động cho android.webkit.WebMessage */
+/** Stub automatically generated for android.webkit.WebMessage */
 public class WebMessage {
     public WebMessage() {}
 }

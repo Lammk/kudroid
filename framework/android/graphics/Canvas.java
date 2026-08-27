@@ -1,7 +1,7 @@
 package android.graphics;
 
 /**
- * Triển khai android.graphics.Canvas với kết nối trực tiếp C++ Metal Native Canvas.
+ * Implement android.graphics.Canvas with direct C++ Metal Native Canvas connection.
  */
 public class Canvas {
     private Bitmap mBitmap;
@@ -10,7 +10,7 @@ public class Canvas {
     private float mTranslateX = 0.0f;
     private float mTranslateY = 0.0f;
 
-    // Native JNI methods kết nối sang C++ Metal Pipeline
+    // Native JNI methods connect to C++ Metal Pipeline
     private static native void native_drawColor(int color);
     private static native void native_drawRect(float left, float top, float right, float bottom, int color);
     private static native void native_drawText(String text, float x, float y, int color, float textSize);
@@ -79,7 +79,7 @@ public class Canvas {
     }
 
     public void drawCircle(float cx, float cy, float radius, Paint paint) {
-        // Tạm thời rasterize bounding box
+        // Temporarily rasterize the bounding box
         drawRect(cx - radius, cy - radius, cx + radius, cy + radius, paint);
     }
 

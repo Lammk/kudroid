@@ -1,8 +1,8 @@
 package java.lang;
 
 /**
- * Chuỗi bất biến. Dữ liệu thật nằm trong DexString của KuART (UTF-8 thô) chứ
- * không phải field Java, nên mọi truy cập ký tự đều qua native.
+ * Immutable strings. The real data is in KuART's DexString (raw UTF-8).
+ * is not a Java field, so all character access is via native.
  */
 public final class String implements CharSequence, Comparable<String> {
 
@@ -182,7 +182,7 @@ public final class String implements CharSequence, Comparable<String> {
         return split(regex, 0);
     }
 
-    /** Chỉ tách theo chuỗi cố định — KuART không có regex engine. */
+    /** Split by fixed string only — KuART does not have a regex engine. */
     public String[] split(String separator, int limit) {
         if (separator.length() == 0) {
             return new String[] { this };

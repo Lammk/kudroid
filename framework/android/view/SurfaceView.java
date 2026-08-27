@@ -5,12 +5,12 @@ import android.graphics.Canvas;
 import android.graphics.Rect;
 
 /**
- * Stub tối thiểu của android.view.SurfaceView cho KuDroid.
+ * Minimum stub of android.view.SurfaceView for KuDroid.
  *
- * Pattern chuẩn game Android:
+ * Android game standard pattern:
  *   class MainActivity extends SurfaceView implements SurfaceHolder.Callback2
- * MainActivity của MCPE kế thừa class này nên JVM cần resolve toàn bộ hierarchy
- * khi load. onDraw là no-op vì rendering thật chạy qua native Metal pipeline.
+ * MCPE's MainActivity inherits this class so the JVM needs to resolve the entire hierarchy
+ * when loading. onDraw is a no-op because the actual rendering runs through the native Metal pipeline.
  */
 public class SurfaceView extends View implements SurfaceHolder.Callback2 {
 

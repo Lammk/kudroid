@@ -1,6 +1,6 @@
 package android.text;
 
-/** Stub sinh tự động cho android.text.StaticLayout */
+/** Stub automatically generated for android.text.StaticLayout */
 public class StaticLayout {
     public StaticLayout() {}
 }

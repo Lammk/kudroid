@@ -1,6 +1,6 @@
 package android.window;
 
-/** Stub sinh tự động cho android.window.SplashScreenView */
+/** Stub automatically generated for android.window.SplashScreenView */
 public class SplashScreenView {
     public SplashScreenView() {}
 }

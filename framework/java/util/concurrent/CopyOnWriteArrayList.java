@@ -1,6 +1,6 @@
 package java.util.concurrent;
 
-/** Bản sao khi ghi: iterate không cần khoá, dùng nhiều cho danh sách listener. */
+/** Copy on write: iterate without key, mostly used for listener lists. */
 public class CopyOnWriteArrayList<E> implements java.util.List<E> {
 
     private volatile Object[] elements = new Object[0];

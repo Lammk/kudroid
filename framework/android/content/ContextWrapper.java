@@ -1,10 +1,10 @@
 package android.content;
 
 /**
- * triển khai android.content.contextwrapper tối thiểu.
+ * minimal android.content.contextwrapper implementation.
  *
- * một context ủy quyền tất cả các cuộc gọi cho một context khác (cơ sở). đối với
- * khuôn khổ tối thiểu của kudroid, nó cung cấp mẫu ủy quyền được sử dụng bởi
+ * a context delegates all calls to another context (base). for
+ * kudroid minimal framework, it provides authorization pattern used by
  * activity/application.
  */
 public class ContextWrapper extends Context {
@@ -15,14 +15,14 @@ public class ContextWrapper extends Context {
     }
 
     /**
-     * thiết lập bối cảnh cơ sở.
+     * set the base context.
      */
     protected void attachBaseContext(Context base) {
         mBase = base;
     }
 
     /**
-     * trả về bối cảnh cơ sở.
+     * returns the base context.
      */
     public Context getBaseContext() {
         return mBase;

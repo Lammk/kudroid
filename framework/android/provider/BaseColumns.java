@@ -1,5 +1,5 @@
 package android.provider;
 
-/** Stub sinh tự động cho android.provider.BaseColumns */
+/** Stub automatically generated for android.provider.BaseColumns */
 public interface BaseColumns {
 }

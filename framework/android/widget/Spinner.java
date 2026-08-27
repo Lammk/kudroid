@@ -1,6 +1,6 @@
 package android.widget;
 
-/** Stub sinh tự động cho android.widget.Spinner */
+/** Stub automatically generated for android.widget.Spinner */
 public class Spinner {
     public Spinner() {}
 }
