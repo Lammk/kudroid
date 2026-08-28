@@ -54,6 +54,10 @@ public final class Integer extends Number implements Comparable<Integer> {
         return value;
     }
 
+    public static int hashCode(int value) {
+        return value;
+    }
+
     public boolean equals(Object other) {
         return (other instanceof Integer) && ((Integer) other).value == value;
     }

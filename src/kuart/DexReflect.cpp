@@ -40,7 +40,9 @@ DexClass* DexReflect::ForName(const char* dotted_name) {
 
     const std::string descriptor = DottedToDescriptor(dotted_name);
     DexClass* klass = linker_->FindClass(descriptor.c_str());
-    if (klass == nullptr) {
+    // Auto-stubbed classes are placeholders with no members; treat them as absent
+    // rather than returning something the caller cannot use. See DexClass::is_stub.
+    if (klass == nullptr || klass->is_stub) {
         last_error_ = std::string("ClassNotFoundException: ") + dotted_name;
         return nullptr;
     }
@@ -56,6 +58,11 @@ DexObject* DexReflect::NewInstance(DexClass* klass) {
     if (klass == nullptr || linker_ == nullptr) return nullptr;
     if (klass->IsInterface() || klass->IsAbstract() || klass->is_primitive) {
         last_error_ = "InstantiationException: " + klass->PrettyName();
+        return nullptr;
+    }
+    // Stubs have no members; see DexClass::is_stub.
+    if (klass->is_stub) {
+        last_error_ = "NoClassDefFoundError: " + klass->PrettyName();
         return nullptr;
     }
     if (interpreter_ != nullptr && !interpreter_->EnsureInitialized(klass)) return nullptr;

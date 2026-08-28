@@ -42,7 +42,48 @@ bool IsPrimitiveDescriptor(const char* d) {
     }
 }
 
+// Where to record classes KuDroid failed to resolve. Set by KuArtRuntime to the
+// app's writable directory; scripts/generate_framework_stubs.py reads the file to
+// generate stubs.
+//
+// Absolute path on purpose. This used to open "classes.log" relative to the CWD,
+// which meant every host test run littered whatever directory it happened to be
+// started from — the stale classes.log committed at the repo root came from
+// kuart-tests binaries, not from a real APK launch, which made it look like
+// java.lang.String was missing at runtime when it is present in framework.dex.
+std::mutex g_missing_class_log_mtx;
+std::string g_missing_class_log_path;
+
+void AppendMissingClassLog(const std::string& dotted, const char* descriptor) {
+    std::string path;
+    {
+        std::lock_guard<std::mutex> lock(g_missing_class_log_mtx);
+        path = g_missing_class_log_path;
+    }
+    // No path configured (host tests, or before kuart_init) -> log to stderr only.
+    if (path.empty()) return;
+
+    std::ofstream logFile(path, std::ios::app);
+    if (!logFile.is_open()) return;
+    const auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    char timeBuf[64] = {0};
+    std::tm tm_buf{};
+#if defined(_WIN32)
+    localtime_s(&tm_buf, &now);
+#else
+    localtime_r(&now, &tm_buf);
+#endif
+    std::strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", &tm_buf);
+    logFile << "[" << timeBuf << "] MISSING_FRAMEWORK_CLASS: " << dotted
+            << " (descriptor: " << descriptor << ")\n";
+}
+
 }  // namespace
+
+void DexClassLinker::SetMissingClassLogPath(const char* path) {
+    std::lock_guard<std::mutex> lock(g_missing_class_log_mtx);
+    g_missing_class_log_path = (path != nullptr) ? path : "";
+}
 
 DexClassLinker::DexClassLinker() = default;
 DexClassLinker::~DexClassLinker() = default;
@@ -137,26 +178,35 @@ DexClass* DexClassLinker::FindClass(const char* descriptor) {
         return klass;
     }
 
-    // ── Auto-Stubbing cho class framework / system bị thiếu ──
-    auto isFrameworkDescriptor = [](const char* desc) -> bool {
+    // ── Auto-stubbing for missing BOOT-CLASSPATH classes ──
+    //
+    // Only packages KuDroid is responsible for shipping are stubbed. An app's own
+    // packages must NOT be: a missing app class means either the candidate name is
+    // wrong or a DEX is missing, and both cases have to fail so the caller can
+    // react. ActivityThread.handleLaunchActivity guesses names like
+    // "<pkg>.Main"/"<pkg>.MainActivity" and walks to the next candidate when
+    // Class.forName throws — stubbing those guesses made forName "succeed" for a
+    // class that does not exist, so the cast to Activity blew up with a
+    // ClassCastException and the remaining candidates were never tried.
+    auto isBootClasspathDescriptor = [](const char* desc) -> bool {
         if (!desc || desc[0] != 'L') return false;
         return (std::strncmp(desc, "Landroid/", 9) == 0 ||
+                std::strncmp(desc, "Landroidx/", 10) == 0 ||
                 std::strncmp(desc, "Ljava/", 6) == 0 ||
                 std::strncmp(desc, "Ljavax/", 7) == 0 ||
-                std::strncmp(desc, "Lcom/android/", 13) == 0 ||
-                std::strncmp(desc, "Lcom/google/", 12) == 0 ||
                 std::strncmp(desc, "Ldalvik/", 8) == 0 ||
-                std::strncmp(desc, "Lorg/", 5) == 0 ||
-                std::strncmp(desc, "Landroidx/", 10) == 0 ||
-                std::strncmp(desc, "Lkotlin/", 8) == 0 ||
                 std::strncmp(desc, "Lsun/", 5) == 0 ||
-                std::strncmp(desc, "Lcom/facebook/", 14) == 0 ||
-                std::strncmp(desc, "Lcom/unity3d/", 13) == 0 ||
-                std::strncmp(desc, "Lcom/mojang/", 12) == 0);
+                std::strncmp(desc, "Llibcore/", 9) == 0 ||
+                std::strncmp(desc, "Lcom/android/", 13) == 0 ||
+                std::strncmp(desc, "Lorg/apache/harmony/", 20) == 0 ||
+                std::strncmp(desc, "Lorg/w3c/dom/", 13) == 0 ||
+                std::strncmp(desc, "Lorg/xml/sax/", 13) == 0 ||
+                std::strncmp(desc, "Lorg/xmlpull/", 13) == 0 ||
+                std::strncmp(desc, "Lorg/json/", 10) == 0);
     };
 
     const size_t descLen = std::strlen(descriptor);
-    if (isFrameworkDescriptor(descriptor) && descLen > 2 && descriptor[descLen - 1] == ';') {
+    if (isBootClasspathDescriptor(descriptor) && descLen > 2 && descriptor[descLen - 1] == ';') {
         static std::mutex s_log_mtx;
         static std::set<std::string> s_logged_classes;
         {
@@ -168,14 +218,7 @@ DexClass* DexClassLinker::FindClass(const char* descriptor) {
 
                 std::fprintf(stderr, "[KuART][AUTO-STUB] ⚠ Auto-stubbed missing framework class: %s (%s) -> logged to classes.log\n",
                              dotted.c_str(), descriptor);
-
-                std::ofstream logFile("classes.log", std::ios::app);
-                if (logFile.is_open()) {
-                    auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-                    char timeBuf[64];
-                    std::strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
-                    logFile << "[" << timeBuf << "] MISSING_FRAMEWORK_CLASS: " << dotted << " (descriptor: " << descriptor << ")\n";
-                }
+                AppendMissingClassLog(dotted, descriptor);
             }
         }
 
@@ -183,7 +226,11 @@ DexClass* DexClassLinker::FindClass(const char* descriptor) {
         if (stub != nullptr) {
             stub->descriptor = heap_.InternString(descriptor);
             stub->access_flags = art::kAccPublic;
+            // Marked initialized so that resolving a reference to it does not try
+            // to run a <clinit> it does not have, but flagged as a stub so that
+            // Class.forName and new-instance refuse it. See DexClass::is_stub.
             stub->status = DexClass::Status::kInitialized;
+            stub->is_stub = true;
             classes_[descriptor] = stub;
 
             stub->superclass = FindClass("Ljava/lang/Object;");

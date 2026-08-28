@@ -277,14 +277,14 @@ public final class String implements CharSequence, Comparable<String> {
         return Formatter.format(format, args);
     }
 
-    public static String join(CharSequence delimiter, CharSequence... elements) {
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < elements.length; i++) {
-            if (i > 0) {
-                sb.append(delimiter);
-            }
-            sb.append(elements[i]);
+    public boolean regionMatches(int toffset, String other, int ooffset, int len) {
+        if ((ooffset < 0) || (toffset < 0) || (toffset > (long)length() - len) ||
+            (ooffset > (long)other.length() - len)) {
+            return false;
         }
-        return sb.toString();
+        for (int i = 0; i < len; i++) {
+            if (charAt(toffset + i) != other.charAt(ooffset + i)) return false;
+        }
+        return true;
     }
 }

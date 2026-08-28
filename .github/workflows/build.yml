@@ -17,7 +17,13 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake g++ ccache zlib1g-dev
+        # gcc-aarch64-linux-gnu + qemu-user-static are for the AAPCS64 trampoline
+        # check: the JNI float/double path is register plumbing, so the x86-64
+        # runner only exercises the SysV variant. arm64 is the product target.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ ccache zlib1g-dev \
+            gcc-aarch64-linux-gnu qemu-user-static
 
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
@@ -37,18 +43,26 @@ jobs:
         run: |
           cmake --build build --parallel \
             --target test_art_dex test_kuart test_kuart_interp test_kuart_object \
-                     test_kuart_jni test_kuart_exc test_kuart_reflect test_kuart_libcore
+                     test_kuart_jni test_kuart_exc test_kuart_reflect test_kuart_libcore \
+                     test_kuart_filled_array test_kuart_jni_float test_kuart_stub
 
       - name: Run KuART tests
         working-directory: build
         run: |
           fail=0
           for t in test_art_dex test_kuart test_kuart_interp test_kuart_object \
-                   test_kuart_jni test_kuart_exc test_kuart_reflect test_kuart_libcore; do
+                   test_kuart_jni test_kuart_exc test_kuart_reflect test_kuart_libcore \
+                   test_kuart_filled_array test_kuart_jni_float test_kuart_stub; do
             echo "──────── $t ────────"
             if ./$t; then echo "PASS $t"; else echo "FAIL $t"; fail=1; fi
           done
           exit $fail
+
+      # Cross-compiled + qemu: covers the arm64 half of the JNI float/double ABI,
+      # which the native x86-64 test above cannot reach. Skips itself cleanly if
+      # the cross toolchain is missing.
+      - name: Verify AAPCS64 JNI trampoline (arm64 under qemu)
+        run: ./scripts/test-trampoline-arm64.sh
 
   build-linux:
     runs-on: ubuntu-latest

@@ -43,6 +43,10 @@ public final class Long extends Number implements Comparable<Long> {
     }
 
     public int hashCode() {
+        return hashCode(value);
+    }
+
+    public static int hashCode(long value) {
         return (int) (value ^ (value >>> 32));
     }
 

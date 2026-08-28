@@ -451,7 +451,11 @@ bool Invoke_java_lang_Class(Interpreter* interp, const char* name, const DexValu
             desc += ";";
         }
         DexClass* klass = interp->linker()->FindClass(desc.c_str());
-        if (klass == nullptr) {
+        // A stub is a placeholder for a boot-classpath class KuDroid does not ship
+        // yet; it has no methods or fields, so reporting success here would hand
+        // the caller an unusable Class and surface the real problem much later as
+        // a ClassCastException or a zero-valued field.
+        if (klass == nullptr || klass->is_stub) {
             interp->ThrowException("Ljava/lang/ClassNotFoundException;", class_name);
             return true;
         }
@@ -587,6 +591,11 @@ bool Invoke_java_lang_Class(Interpreter* interp, const char* name, const DexValu
             interp->ThrowException("Ljava/lang/InstantiationException;", klass ? klass->PrettyName() : "null");
             return true;
         }
+        // Stubs have no members; see DexClass::is_stub.
+        if (klass->is_stub) {
+            interp->ThrowException("Ljava/lang/NoClassDefFoundError;", klass->PrettyName());
+            return true;
+        }
         interp->EnsureInitialized(klass);
         DexObject* new_obj = linker->AllocObject(klass);
         if (new_obj == nullptr) {
@@ -718,6 +727,11 @@ bool Invoke_java_lang_reflect_Constructor(Interpreter* interp, const char* name,
     }
     if (std::strcmp(name, "newInstance") == 0) {
         DexClass* klass = ctor->declaring_class;
+        if (klass != nullptr && klass->is_stub) {
+            // Stubs have no members; see DexClass::is_stub.
+            interp->ThrowException("Ljava/lang/NoClassDefFoundError;", klass->PrettyName());
+            return true;
+        }
         if (klass == nullptr || klass->IsInterface() || klass->IsAbstract()) {
             interp->ThrowException("Ljava/lang/InstantiationException;",
                                    klass != nullptr ? klass->PrettyName() : "null");

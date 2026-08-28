@@ -29,6 +29,32 @@
 namespace kudroid {
 namespace kuart {
 
+// Number of argument registers the trampoline below fills. AAPCS64 gives x0-x7
+// and v0-v7; SysV x86-64 gives 6 GP and 8 SSE, so the GP budget is the smaller
+// of the two to keep one call path valid on both (host tests run on x86-64 while
+// the product target is arm64).
+#if defined(__x86_64__)
+constexpr unsigned kJniGpRegs = 6;
+#else
+constexpr unsigned kJniGpRegs = 8;
+#endif
+constexpr unsigned kJniFpRegs = 8;
+
+}  // namespace kuart
+}  // namespace kudroid
+
+extern "C" {
+// Calls `fn` with the given register files. See src/kuart/jni_trampoline.S for
+// the contract; `gp` and `fp` must each have 8 initialised slots. The integer
+// return comes back directly, the float/double return is written to *fp_ret as
+// raw bits (nullptr to discard).
+uint64_t kudroid_jni_call(const void* fn, const uint64_t* gp, unsigned ngp,
+                          const uint64_t* fp, unsigned nfp, uint64_t* fp_ret);
+}
+
+namespace kudroid {
+namespace kuart {
+
 class DexJniEnv {
 public:
     DexJniEnv(DexClassLinker* linker, Interpreter* interpreter);

@@ -69,6 +69,12 @@ public:
 
     static uint32_t ElementSize(const DexClass* component);
 
+    // Absolute path for the MISSING_FRAMEWORK_CLASS log consumed by
+    // scripts/generate_framework_stubs.py. Empty (the default) logs to stderr
+    // only, which is what host tests want — writing a relative "classes.log"
+    // used to pollute whichever directory a test was started from.
+    static void SetMissingClassLogPath(const char* path);
+
 private:
     DexClass* LoadClassFromDexFile(const art::DexFile& dex_file,
                                   const art::dex::ClassDef& class_def,

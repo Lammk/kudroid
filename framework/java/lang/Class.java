@@ -9,6 +9,10 @@ public final class Class<T> {
     private Class() {
     }
 
+    public boolean desiredAssertionStatus() {
+        return false;
+    }
+
     public native String getName();
 
     public native Class<? super T> getSuperclass();

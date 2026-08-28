@@ -266,6 +266,87 @@ bool Interpreter::InvokeMethod(DexFrame* frame, const art::Instruction* inst, bo
     return true;
 }
 
+// filled-new-array vX..vY, type@BBBB   (k35c, up to 5 elements)
+// filled-new-array/range {vX..vY}, type@BBBB  (k3rc, any count)
+//
+// d8 emits this for every `new T[]{a, b, c}` literal, which includes the
+// synthetic `$values()` method it generates for EVERY enum — so without this
+// opcode no enum can run its <clinit> at all.
+//
+// Unlike new-array the result does NOT go into a destination register: it is read
+// back with move-result-object, exactly like an invoke. That is why this writes
+// frame->set_result() instead of frame->SetRef().
+bool Interpreter::FilledNewArray(DexFrame* frame, const art::Instruction* inst, bool is_range) {
+    const DexMethod* method = frame->method();
+
+    // VRegB is the ARRAY type ("[I"), not the element type — take component_type
+    // from the resolved class rather than slicing the descriptor, so that
+    // multi-dimensional arrays ("[[I") stay correct.
+    const uint32_t type_idx = is_range ? inst->VRegB_3rc() : inst->VRegB_35c();
+    DexClass* array_class = ResolveClass(method, type_idx);
+    if (array_class == nullptr || !array_class->is_array) {
+        ThrowException("Ljava/lang/ClassNotFoundException;", "filled-new-array type");
+        return false;
+    }
+
+    uint32_t arg_regs[art::Instruction::kMaxVarArgRegs];
+    uint32_t count;
+    uint32_t first_reg = 0;
+    if (is_range) {
+        count = inst->VRegA_3rc();
+        first_reg = inst->VRegC_3rc();
+    } else {
+        count = inst->GetVarArgs(arg_regs);
+    }
+
+    DexArray* arr = linker_->AllocArray(array_class, static_cast<int32_t>(count));
+    if (arr == nullptr) {
+        ThrowException("Ljava/lang/OutOfMemoryError;", "filled-new-array");
+        return false;
+    }
+
+    // Element width follows component_type, matching DexClassLinker::ElementSize
+    // used by AllocArray — writing a wider type here would run past the allocation.
+    const DexClass* component = array_class->component_type;
+    const char kind = (component != nullptr && component->is_primitive &&
+                       component->descriptor != nullptr)
+                          ? component->descriptor[0]
+                          : 'L';
+
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint32_t vreg = is_range ? first_reg + i : arg_regs[i];
+        const int32_t index = static_cast<int32_t>(i);
+        switch (kind) {
+            case 'Z':
+            case 'B':
+                arr->Set<int8_t>(index, static_cast<int8_t>(frame->GetInt(vreg)));
+                break;
+            case 'C':
+                arr->Set<uint16_t>(index, static_cast<uint16_t>(frame->GetInt(vreg)));
+                break;
+            case 'S':
+                arr->Set<int16_t>(index, static_cast<int16_t>(frame->GetInt(vreg)));
+                break;
+            case 'J':
+            case 'D':
+                // Wide elements: each argument register holds the whole 64-bit
+                // value (KuART's one-slot-per-vreg convention), so no pairing.
+                arr->Set<int64_t>(index, frame->GetLong(vreg));
+                break;
+            case 'I':
+            case 'F':
+                arr->Set<int32_t>(index, frame->GetInt(vreg));
+                break;
+            default:
+                arr->Set<DexObject*>(index, frame->GetRef(vreg));
+                break;
+        }
+    }
+
+    frame->set_result(DexValue::Ref(arr));
+    return true;
+}
+
 DexValue Interpreter::Execute(const DexMethod* method, const DexValue* args, size_t num_args) {
     DexValue result;
     if (method == nullptr) {
@@ -1116,6 +1197,15 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                     ThrowException("Ljava/lang/ClassNotFoundException;", "new-instance");
                     return return_value;
                 }
+                // Instantiating an auto-stub yields an object with no fields and no
+                // methods. Java's own answer for "the class exists as a reference
+                // but has no implementation" is NoClassDefFoundError, and throwing
+                // it here keeps the failure at the point of the missing class
+                // instead of leaking a hollow object into unrelated code.
+                if (klass->is_stub) {
+                    ThrowException("Ljava/lang/NoClassDefFoundError;", klass->PrettyName());
+                    return return_value;
+                }
                 EnsureInitialized(klass);
                 if (HasPendingException()) return return_value;
                 DexObject* obj = linker_->AllocObject(klass);
@@ -1146,6 +1236,16 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                 frame->SetRef(inst->VRegA_22c(), arr);
                 break;
             }
+            case Instruction::FILLED_NEW_ARRAY:
+                if (!FilledNewArray(frame, inst, /*is_range=*/false)) {
+                    return return_value;
+                }
+                break;
+            case Instruction::FILLED_NEW_ARRAY_RANGE:
+                if (!FilledNewArray(frame, inst, /*is_range=*/true)) {
+                    return return_value;
+                }
+                break;
             case Instruction::ARRAY_LENGTH: {
                 auto* arr = static_cast<DexArray*>(frame->GetRef(inst->VRegB_12x()));
                 if (arr == nullptr) {

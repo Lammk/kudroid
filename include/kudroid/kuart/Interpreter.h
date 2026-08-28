@@ -63,6 +63,12 @@ private:
     bool InvokeMethod(DexFrame* frame, const art::Instruction* inst, bool is_range,
                       art::Instruction::Code opcode);
 
+    // filled-new-array{,/range}: allocate an array and fill it from the argument
+    // registers. Result goes to frame->result() (read back by move-result-object)
+    // exactly like an invoke, NOT into a destination register. Returns false when
+    // an exception was thrown.
+    bool FilledNewArray(DexFrame* frame, const art::Instruction* inst, bool is_range);
+
     bool FindCatchHandler(const art::CodeItemDataAccessor& accessor,
                            const DexMethod* method, uint32_t dex_pc,
                            uint32_t* handler_pc);

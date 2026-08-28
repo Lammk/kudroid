@@ -212,6 +212,7 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
     DexValue result;
     if (method == nullptr) return result;
 
+
     // self-written libcore without native_fn; Call directly in C++.
     if (LibCoreInvoke(interpreter_, method, args, num_args, &result)) return result;
     if (method->native_fn == nullptr) return result;
@@ -223,15 +224,6 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
     }
     if (shorty == nullptr) return result;
 
-    // JNI ABI: (JNIEnv*, jclass|jobject, ...parameters). Only supports up to 6
-    // parameter because that is the number of the AAPCS64 parameter transfer register — beyond this number
-    // have to push stack, need separate assembly.
-    const size_t kMaxJniArgs = 6;
-    if (num_args > kMaxJniArgs) {
-        last_error_ = std::string("native method too many parameters: ") + method->name;
-        return result;
-    }
-
     // The first parameter after env is receiver (instance) or jclass (static).
     void* self;
     size_t first = 0;
@@ -242,67 +234,66 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
         first = 1;
     }
 
-    // Cast to uintptr_t so that all types go through the same function signature; float/double
-    // need separate lines because AAPCS64 transmits them via registers v0-v7.
-    uintptr_t raw[kMaxJniArgs] = {0};
-    bool has_float = false;
-    size_t slot = 0;
-    if (shorty[0] != '\0') {
-        size_t arg_index = first;
-        for (const char* p = shorty + 1; *p != '\0' && arg_index < num_args; ++p, ++arg_index) {
-            switch (*p) {
-                case 'F': case 'D':
-                    has_float = true;
-                    std::memcpy(&raw[slot], &args[arg_index].raw, sizeof(uintptr_t));
-                    break;
-                case 'J':
-                    raw[slot] = static_cast<uintptr_t>(args[arg_index].j);
-                    break;
-                case 'L': case '[':
-                    raw[slot] = reinterpret_cast<uintptr_t>(args[arg_index].l);
-                    break;
-                default:
-                    raw[slot] = static_cast<uintptr_t>(
-                        static_cast<uint32_t>(args[arg_index].i));
-                    break;
-            }
-            ++slot;
-        }
-    }
+    // JNI ABI: (JNIEnv*, jclass|jobject, ...parameters). Integer/pointer arguments
+    // travel in the general-purpose registers while float/double travel in the
+    // SEPARATE FP register file — they consume independent budgets, so a method
+    // taking many floats is fine even though it has many parameters.
+    uint64_t gp[kJniGpRegs] = {0};
+    uint64_t fp[kJniFpRegs] = {0};
+    unsigned ngp = 0;
+    unsigned nfp = 0;
 
-    if (has_float) {
-        last_error_ = std::string("native method has float/double parameters not yet supported: ") +
-                      method->name;
+    gp[ngp++] = reinterpret_cast<uint64_t>(env());
+    gp[ngp++] = reinterpret_cast<uint64_t>(self);
+
+    size_t arg_index = first;
+    for (const char* p = shorty + 1; *p != '\0' && arg_index < num_args; ++p, ++arg_index) {
+        switch (*p) {
+            case 'F':
+            case 'D':
+                if (nfp >= kJniFpRegs) goto too_many_args;
+                // A 'F' lives in the low 32 bits of its slot, which is what the
+                // callee reads as s<N>; DexValue::Float already zeroes the rest.
+                fp[nfp++] = args[arg_index].raw;
+                break;
+            case 'J':
+                if (ngp >= kJniGpRegs) goto too_many_args;
+                gp[ngp++] = static_cast<uint64_t>(args[arg_index].j);
+                break;
+            case 'L':
+            case '[':
+                if (ngp >= kJniGpRegs) goto too_many_args;
+                gp[ngp++] = reinterpret_cast<uint64_t>(args[arg_index].l);
+                break;
+            default:
+                if (ngp >= kJniGpRegs) goto too_many_args;
+                // Narrow integer types are passed zero/sign-extended to 32 bits
+                // then widened; the callee only looks at w<N>.
+                gp[ngp++] = static_cast<uint64_t>(
+                    static_cast<uint32_t>(args[arg_index].i));
+                break;
+        }
+        continue;
+    too_many_args:
+        // Deliberately an exception rather than a zero return. Stack-passed
+        // arguments are not implemented (Apple's arm64 ABI packs them at their
+        // natural size instead of uniform 8-byte slots, so guessing corrupts
+        // them silently) — and silently returning 0 is the very failure mode
+        // this call path was rewritten to eliminate.
+        if (interpreter_ != nullptr) {
+            interpreter_->ThrowException(
+                "Ljava/lang/UnsatisfiedLinkError;",
+                std::string("native method needs stack-passed arguments, not supported: ") +
+                    (method->name != nullptr ? method->name : "?"));
+        }
+        last_error_ = std::string("native method needs stack-passed arguments: ") +
+                      (method->name != nullptr ? method->name : "?");
         return result;
     }
 
-    JNIEnv* e = env();
-    using Fn0 = uintptr_t (*)(JNIEnv*, void*);
-    using Fn1 = uintptr_t (*)(JNIEnv*, void*, uintptr_t);
-    using Fn2 = uintptr_t (*)(JNIEnv*, void*, uintptr_t, uintptr_t);
-    using Fn3 = uintptr_t (*)(JNIEnv*, void*, uintptr_t, uintptr_t, uintptr_t);
-    using Fn4 = uintptr_t (*)(JNIEnv*, void*, uintptr_t, uintptr_t, uintptr_t, uintptr_t);
-    using Fn5 = uintptr_t (*)(JNIEnv*, void*, uintptr_t, uintptr_t, uintptr_t, uintptr_t,
-                              uintptr_t);
-    using Fn6 = uintptr_t (*)(JNIEnv*, void*, uintptr_t, uintptr_t, uintptr_t, uintptr_t,
-                              uintptr_t, uintptr_t);
-
-    uintptr_t ret = 0;
-    void* fn = method->native_fn;
-    switch (slot) {
-        case 0: ret = reinterpret_cast<Fn0>(fn)(e, self); break;
-        case 1: ret = reinterpret_cast<Fn1>(fn)(e, self, raw[0]); break;
-        case 2: ret = reinterpret_cast<Fn2>(fn)(e, self, raw[0], raw[1]); break;
-        case 3: ret = reinterpret_cast<Fn3>(fn)(e, self, raw[0], raw[1], raw[2]); break;
-        case 4: ret = reinterpret_cast<Fn4>(fn)(e, self, raw[0], raw[1], raw[2], raw[3]); break;
-        case 5:
-            ret = reinterpret_cast<Fn5>(fn)(e, self, raw[0], raw[1], raw[2], raw[3], raw[4]);
-            break;
-        default:
-            ret = reinterpret_cast<Fn6>(fn)(e, self, raw[0], raw[1], raw[2], raw[3], raw[4],
-                                            raw[5]);
-            break;
-    }
+    uint64_t fp_ret = 0;
+    const uint64_t ret =
+        kudroid_jni_call(method->native_fn, gp, ngp, fp, nfp, &fp_ret);
 
     switch (shorty[0]) {
         case 'V': break;
@@ -312,12 +303,28 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
         case 'S': result = DexValue::Int(static_cast<int16_t>(ret)); break;
         case 'I': result = DexValue::Int(static_cast<int32_t>(ret)); break;
         case 'J': result = DexValue::Long(static_cast<int64_t>(ret)); break;
-        case 'L': case '[':
+        case 'F': {
+            // The FP return arrives in v0/xmm0, captured raw by the trampoline.
+            // A float occupies the low 32 bits of that register.
+            float f;
+            const uint32_t bits = static_cast<uint32_t>(fp_ret);
+            std::memcpy(&f, &bits, sizeof(f));
+            result = DexValue::Float(f);
+            break;
+        }
+        case 'D': {
+            double d;
+            std::memcpy(&d, &fp_ret, sizeof(d));
+            result = DexValue::Double(d);
+            break;
+        }
+        case 'L':
+        case '[':
             result = DexValue::Ref(reinterpret_cast<DexObject*>(ret));
             break;
         default:
-            // The returned float/double is in register v0, not x0 — not retrieved yet.
-            last_error_ = std::string("float/double return type not supported yet: ") + method->name;
+            last_error_ = std::string("unknown return shorty '") + shorty[0] + "' in " +
+                          (method->name != nullptr ? method->name : "?");
             break;
     }
     return result;

@@ -23,6 +23,12 @@ public final class Collections {
         sort(list, new NaturalOrder<T>());
     }
 
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    public static void swap(List<?> list, int i, int j) {
+        final List l = list;
+        l.set(i, l.set(j, l.get(i)));
+    }
+
     public static void reverse(List<?> list) {
         int n = list.size();
         List<Object> l = (List<Object>) list;

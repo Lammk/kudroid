@@ -110,6 +110,14 @@ public final class Arrays {
         return out;
     }
 
+    public static <T, U> T[] copyOf(U[] original, int newLength, Class<? extends T[]> newType) {
+        T[] copy = ((Object)newType == (Object)Object[].class)
+            ? (T[]) new Object[newLength]
+            : (T[]) java.lang.reflect.Array.newInstance(newType.getComponentType(), newLength);
+        System.arraycopy(original, 0, copy, 0, Math.min(original.length, newLength));
+        return copy;
+    }
+
     public static int[] copyOfRange(int[] a, int from, int to) {
         int[] out = new int[to - from];
         System.arraycopy(a, from, out, 0, to - from);
@@ -217,34 +225,6 @@ public final class Arrays {
         return h;
     }
 
-    public static String toString(int[] a) {
-        if (a == null) {
-            return "null";
-        }
-        StringBuilder sb = new StringBuilder("[");
-        for (int i = 0; i < a.length; i++) {
-            if (i > 0) {
-                sb.append(", ");
-            }
-            sb.append(a[i]);
-        }
-        return sb.append(']').toString();
-    }
-
-    public static String toString(Object[] a) {
-        if (a == null) {
-            return "null";
-        }
-        StringBuilder sb = new StringBuilder("[");
-        for (int i = 0; i < a.length; i++) {
-            if (i > 0) {
-                sb.append(", ");
-            }
-            sb.append(a[i]);
-        }
-        return sb.append(']').toString();
-    }
-
     public static void sort(int[] a) {
         insertionSortInt(a, 0, a.length);
     }
@@ -305,6 +285,22 @@ public final class Arrays {
         return -(lo + 1);
     }
 
+    public static int binarySearch(long[] a, long key) {
+        int lo = 0;
+        int hi = a.length - 1;
+        while (lo <= hi) {
+            int mid = (lo + hi) >>> 1;
+            if (a[mid] < key) {
+                lo = mid + 1;
+            } else if (a[mid] > key) {
+                hi = mid - 1;
+            } else {
+                return mid;
+            }
+        }
+        return -(lo + 1);
+    }
+
     private static void insertionSortInt(int[] a, int from, int to) {
         for (int i = from + 1; i < to; i++) {
             int v = a[i];
@@ -315,5 +311,126 @@ public final class Arrays {
             }
             a[j + 1] = v;
         }
+    }
+
+    public static String toString(boolean[] a) {
+        if (a == null) return "null";
+        int iMax = a.length - 1;
+        if (iMax == -1) return "[]";
+        StringBuilder b = new StringBuilder();
+        b.append('[');
+        for (int i = 0; ; i++) {
+            b.append(a[i]);
+            if (i == iMax) return b.append(']').toString();
+            b.append(", ");
+        }
+    }
+
+    public static String toString(byte[] a) {
+        if (a == null) return "null";
+        int iMax = a.length - 1;
+        if (iMax == -1) return "[]";
+        StringBuilder b = new StringBuilder();
+        b.append('[');
+        for (int i = 0; ; i++) {
+            b.append(a[i]);
+            if (i == iMax) return b.append(']').toString();
+            b.append(", ");
+        }
+    }
+
+    public static String toString(char[] a) {
+        if (a == null) return "null";
+        int iMax = a.length - 1;
+        if (iMax == -1) return "[]";
+        StringBuilder b = new StringBuilder();
+        b.append('[');
+        for (int i = 0; ; i++) {
+            b.append(a[i]);
+            if (i == iMax) return b.append(']').toString();
+            b.append(", ");
+        }
+    }
+
+    public static String toString(short[] a) {
+        if (a == null) return "null";
+        int iMax = a.length - 1;
+        if (iMax == -1) return "[]";
+        StringBuilder b = new StringBuilder();
+        b.append('[');
+        for (int i = 0; ; i++) {
+            b.append(a[i]);
+            if (i == iMax) return b.append(']').toString();
+            b.append(", ");
+        }
+    }
+
+    public static String toString(int[] a) {
+        if (a == null) return "null";
+        int iMax = a.length - 1;
+        if (iMax == -1) return "[]";
+        StringBuilder b = new StringBuilder();
+        b.append('[');
+        for (int i = 0; ; i++) {
+            b.append(a[i]);
+            if (i == iMax) return b.append(']').toString();
+            b.append(", ");
+        }
+    }
+
+    public static String toString(long[] a) {
+        if (a == null) return "null";
+        int iMax = a.length - 1;
+        if (iMax == -1) return "[]";
+        StringBuilder b = new StringBuilder();
+        b.append('[');
+        for (int i = 0; ; i++) {
+            b.append(a[i]);
+            if (i == iMax) return b.append(']').toString();
+            b.append(", ");
+        }
+    }
+
+    public static String toString(float[] a) {
+        if (a == null) return "null";
+        int iMax = a.length - 1;
+        if (iMax == -1) return "[]";
+        StringBuilder b = new StringBuilder();
+        b.append('[');
+        for (int i = 0; ; i++) {
+            b.append(a[i]);
+            if (i == iMax) return b.append(']').toString();
+            b.append(", ");
+        }
+    }
+
+    public static String toString(double[] a) {
+        if (a == null) return "null";
+        int iMax = a.length - 1;
+        if (iMax == -1) return "[]";
+        StringBuilder b = new StringBuilder();
+        b.append('[');
+        for (int i = 0; ; i++) {
+            b.append(a[i]);
+            if (i == iMax) return b.append(']').toString();
+            b.append(", ");
+        }
+    }
+
+    public static String toString(Object[] a) {
+        if (a == null) return "null";
+        int iMax = a.length - 1;
+        if (iMax == -1) return "[]";
+        StringBuilder b = new StringBuilder();
+        b.append('[');
+        for (int i = 0; ; i++) {
+            b.append(String.valueOf(a[i]));
+            if (i == iMax) return b.append(']').toString();
+            b.append(", ");
+        }
+    }
+
+    public static String deepToString(Object[] a) {
+        return toString(a);
     }
 }

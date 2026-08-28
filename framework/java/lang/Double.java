@@ -54,6 +54,10 @@ public final class Double extends Number implements Comparable<Double> {
     }
 
     public int hashCode() {
+        return hashCode(value);
+    }
+
+    public static int hashCode(double value) {
         long bits = doubleToLongBits(value);
         return (int) (bits ^ (bits >>> 32));
     }

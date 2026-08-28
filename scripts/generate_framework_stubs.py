@@ -1,116 +1,227 @@
 #!/usr/bin/env python3
+"""Generate empty Java stubs for boot-classpath classes KuART could not resolve.
+
+Input is the classes.log written by DexClassLinker::FindClass when it auto-stubs a
+missing class. On device that file lives next to the app's other logs (pull it with
+`tools/kdb/kdb.js dump classes.log`); the path can also be passed explicitly.
+
+Log format, one line per distinct class:
+
+    [2026-08-27 22:15:16] MISSING_FRAMEWORK_CLASS: android.util.Foo (descriptor: Landroid/util/Foo;)
+
+A generated stub only makes the class resolvable — every method still has to be
+filled in by hand. The point is to turn "app died on a missing class" into "app
+runs and the missing behaviour is visible", one round-trip at a time.
+"""
+import argparse
 import os
 import re
 import sys
 
-def main():
-    log_path = "logs/classes.log"
-    if not os.path.isfile(log_path):
-        print(f"Error: {log_path} not found")
-        sys.exit(1)
+# Packages KuDroid is responsible for shipping. Kept in sync with
+# isBootClasspathDescriptor() in src/kuart/DexClassLinker.cpp — anything the linker
+# will auto-stub is something this script may need to generate.
+BOOT_PACKAGE_PREFIXES = (
+    "android.",
+    "androidx.",
+    "java.",
+    "javax.",
+    "dalvik.",
+    "sun.",
+    "libcore.",
+    "com.android.",
+    "org.apache.harmony.",
+    "org.w3c.dom.",
+    "org.xml.sax.",
+    "org.xmlpull.",
+    "org.json.",
+)
 
-    framework_dir = os.path.abspath("framework")
+DEFAULT_LOG_PATHS = ("logs/classes.log", "classes.log")
 
-    with open(log_path, "r", encoding="utf-8") as f:
-        lines = f.readlines()
+# Both the current runtime format and the older "[n] [CLASS] name" format some
+# saved logs still use.
+LINE_PATTERNS = (
+    re.compile(r"MISSING(?:_FRAMEWORK)?_CLASS:\s*([A-Za-z0-9_$.]+)"),
+    re.compile(r"\[\d+\]\s+\[(?:CLASS|INTERFACE)\]\s+([A-Za-z0-9_$.]+)"),
+)
 
-    pattern = re.compile(r"\[\d+\]\s+\[(CLASS|INTERFACE)\]\s+([a-zA-Z0-9_$.]+)")
+# Descriptors ending in '$' + digits are anonymous classes; a stub cannot stand in
+# for one because only the code that created it ever names it.
+ANONYMOUS_INNER = re.compile(r"\$\d+$")
 
-    entries = []
-    for line in lines:
-        m = pattern.search(line)
-        if m:
-            kind = m.group(1)
-            full_name = m.group(2).strip()
-            # Ch  t o stub cho android.* v  androidx.*
-            if full_name.startswith("android.") or full_name.startswith("androidx."):
-                entries.append((kind, full_name))
 
-    print(f"Filtered {len(entries)} android/androidx entries from {log_path}")
+def find_log(explicit):
+    if explicit:
+        if not os.path.isfile(explicit):
+            sys.exit(f"error: {explicit} not found")
+        return explicit
+    for candidate in DEFAULT_LOG_PATHS:
+        if os.path.isfile(candidate):
+            return candidate
+    sys.exit(
+        "error: no classes.log found. Looked for: "
+        + ", ".join(DEFAULT_LOG_PATHS)
+        + "\n       Pass a path explicitly, or pull one off a device with:\n"
+        + "         node tools/kdb/kdb.js  then  dump classes.log"
+    )
 
-    top_level_map = {}
 
-    for kind, full_name in entries:
-        parts = full_name.split("$")
-        top_name = parts[0]
-        pkg_parts = top_name.split(".")
-        pkg_name = ".".join(pkg_parts[:-1])
-        class_name = pkg_parts[-1]
+def parse_log(log_path):
+    """Return class names in first-seen order, deduplicated."""
+    names = []
+    seen = set()
+    with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            for pattern in LINE_PATTERNS:
+                m = pattern.search(line)
+                if not m:
+                    continue
+                name = m.group(1).strip().strip(".")
+                if name and name not in seen:
+                    seen.add(name)
+                    names.append(name)
+                break
+    return names
 
-        if top_name not in top_level_map:
-            top_level_map[top_name] = {
-                'kind': 'CLASS',
-                'package': pkg_name,
-                'name': class_name,
-                'inners': []
-            }
 
-        if len(parts) == 1:
-            top_level_map[top_name]['kind'] = kind
-        else:
-            inner_name = parts[-1]
-            existing_inners = [in_info['name'] for in_info in top_level_map[top_name]['inners']]
-            if inner_name not in existing_inners:
-                top_level_map[top_name]['inners'].append({
-                    'kind': kind,
-                    'name': inner_name
-                })
-
-    created_count = 0
-    updated_count = 0
-
-    for top_name, info in top_level_map.items():
-        pkg_path = os.path.join(framework_dir, info['package'].replace(".", "/"))
-        file_path = os.path.join(pkg_path, f"{info['name']}.java")
-
-        if os.path.isfile(file_path):
-            with open(file_path, "r", encoding="utf-8") as f:
-                content = f.read()
-
-            inners_to_add = []
-            for inner in info['inners']:
-                if f"class {inner['name']}" not in content and f"interface {inner['name']}" not in content:
-                    inners_to_add.append(inner)
-
-            if inners_to_add:
-                last_brace_idx = content.rfind("}")
-                if last_brace_idx != -1:
-                    inner_code = "\n"
-                    for inner in inners_to_add:
-                        if inner['kind'] == 'INTERFACE':
-                            inner_code += f"    public interface {inner['name']} {{\n    }}\n\n"
-                        else:
-                            inner_code += f"    public static class {inner['name']} {{\n        public {inner['name']}() {{}}\n    }}\n\n"
-
-                    new_content = content[:last_brace_idx] + inner_code + content[last_brace_idx:]
-                    with open(file_path, "w", encoding="utf-8") as f:
-                        f.write(new_content)
-                    updated_count += 1
+def group_by_top_level(names, prefixes):
+    """Group "pkg.Outer$Inner" entries under their top-level class."""
+    groups = {}
+    skipped = []
+    for full_name in names:
+        if not full_name.startswith(prefixes):
+            skipped.append(full_name)
+            continue
+        if ANONYMOUS_INNER.search(full_name):
+            skipped.append(full_name)
             continue
 
-        os.makedirs(pkg_path, exist_ok=True)
-        java_code = f"package {info['package']};\n\n"
-java_code += f"/** Stub sinh t   ng cho {top_name} */\n"
-        
-        if info['kind'] == 'INTERFACE':
-            java_code += f"public interface {info['name']} {{\n"
-        else:
-            java_code += f"public class {info['name']} {{\n"
-            java_code += f"    public {info['name']}() {{}}\n"
+        parts = full_name.split("$")
+        top_name = parts[0]
+        if "." not in top_name:
+            skipped.append(full_name)  # default package: no directory to place it in
+            continue
 
-        for inner in info['inners']:
-            if inner['kind'] == 'INTERFACE':
-                java_code += f"\n    public interface {inner['name']} {{\n    }}\n"
-            else:
-                java_code += f"\n    public static class {inner['name']} {{\n        public {inner['name']}() {{}}\n    }}\n"
+        package, _, class_name = top_name.rpartition(".")
+        entry = groups.setdefault(
+            top_name, {"package": package, "name": class_name, "inners": []}
+        )
+        for inner in parts[1:]:
+            if inner and inner not in entry["inners"]:
+                entry["inners"].append(inner)
+    return groups, skipped
 
-        java_code += "}\n"
 
+def render_inner(name, indent="    "):
+    return (
+        f"{indent}public static class {name} {{\n"
+        f"{indent}    public {name}() {{}}\n"
+        f"{indent}}}\n"
+    )
+
+
+def render_stub(top_name, info):
+    out = [f"package {info['package']};\n\n"]
+    out.append(f"/** Auto-generated stub for {top_name} — methods still need filling in. */\n")
+    out.append(f"public class {info['name']} {{\n")
+    out.append(f"    public {info['name']}() {{}}\n")
+    for inner in info["inners"]:
+        out.append("\n")
+        out.append(render_inner(inner))
+    out.append("}\n")
+    return "".join(out)
+
+
+def add_missing_inners(file_path, info, dry_run):
+    """Append inner classes that an existing file does not declare yet."""
+    with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+        content = f.read()
+
+    missing = [
+        inner
+        for inner in info["inners"]
+        if f"class {inner}" not in content and f"interface {inner}" not in content
+    ]
+    if not missing:
+        return False
+
+    last_brace = content.rfind("}")
+    if last_brace == -1:
+        print(f"  warn: {file_path} has no closing brace, skipped")
+        return False
+
+    addition = "\n" + "\n".join(render_inner(inner) for inner in missing)
+    if dry_run:
+        print(f"  would add to {file_path}: {', '.join(missing)}")
+        return True
+
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write(content[:last_brace] + addition + content[last_brace:])
+    print(f"  updated {file_path}: {', '.join(missing)}")
+    return True
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("log", nargs="?", help="path to classes.log")
+    parser.add_argument("--framework-dir", default="framework",
+                        help="root of the Java framework tree (default: framework)")
+    parser.add_argument("--only", action="append", metavar="PREFIX",
+                        help="restrict to these package prefixes, e.g. --only android. "
+                             "(repeatable; default: every boot-classpath package)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="report what would change without writing files")
+    args = parser.parse_args()
+
+    log_path = find_log(args.log)
+    framework_dir = os.path.abspath(args.framework_dir)
+    if not os.path.isdir(framework_dir):
+        sys.exit(f"error: framework dir not found: {framework_dir}")
+
+    prefixes = tuple(args.only) if args.only else BOOT_PACKAGE_PREFIXES
+
+    names = parse_log(log_path)
+    if not names:
+        print(f"No MISSING_FRAMEWORK_CLASS entries in {log_path} — nothing to do.")
+        return
+
+    groups, skipped = group_by_top_level(names, prefixes)
+    print(f"{log_path}: {len(names)} missing classes, "
+          f"{len(groups)} top-level stubs to consider, {len(skipped)} skipped")
+    if skipped:
+        preview = ", ".join(skipped[:5])
+        more = f" (+{len(skipped) - 5} more)" if len(skipped) > 5 else ""
+        print(f"  skipped (app package, anonymous, or default package): {preview}{more}")
+
+    created = updated = 0
+    for top_name, info in sorted(groups.items()):
+        pkg_dir = os.path.join(framework_dir, info["package"].replace(".", os.sep))
+        file_path = os.path.join(pkg_dir, f"{info['name']}.java")
+
+        if os.path.isfile(file_path):
+            if add_missing_inners(file_path, info, args.dry_run):
+                updated += 1
+            continue
+
+        if args.dry_run:
+            print(f"  would create {file_path}")
+            created += 1
+            continue
+
+        os.makedirs(pkg_dir, exist_ok=True)
         with open(file_path, "w", encoding="utf-8") as f:
-            f.write(java_code)
-        created_count += 1
+            f.write(render_stub(top_name, info))
+        print(f"  created {file_path}")
+        created += 1
 
-    print(f"Successfully generated {created_count} new Java stub files and updated {updated_count} existing files.")
+    verb = "would create" if args.dry_run else "created"
+    print(f"\n{verb} {created} stub file(s), updated {updated} existing file(s).")
+    if created or updated:
+        print("Next: run framework/build.sh to rebuild framework.dex, then fill in the "
+              "method bodies that the app actually needs.")
+
 
 if __name__ == "__main__":
     main()

@@ -59,6 +59,7 @@ add_library(kudroid_core STATIC
     src/kuart/Interpreter.cpp
     src/kuart/DexJniEnv.cpp
     src/kuart/DexJniFunctions.cpp
+    src/kuart/jni_trampoline.S
     src/kuart/DexReflect.cpp
     src/kuart/LibCore.cpp
     src/kuart/VmLock.cpp
@@ -191,6 +192,9 @@ else()
     # test_kuart_jni Java two-way JNIEnv ⇄ native
     # test_kuart_exc try/catch table + <clinit>
     #   test_kuart_reflect  Class.forName/newInstance/invoke + java.lang.Class
+    # test_kuart_filled_array  filled-new-array{,/range}: enum $values(), new T[]{..}
+    # test_kuart_jni_float     JNI float/double ABI (AAPCS64 v0-v7) + >6 args
+    # test_kuart_stub          auto-stub policy: boot classpath only, stubs refuse use
     if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/test_art_dex.cpp")
         add_executable(test_art_dex kuart-tests/test_art_dex.cpp)
         target_link_libraries(test_art_dex PRIVATE art_dex ZLIB::ZLIB)
@@ -205,6 +209,9 @@ else()
         test_kuart_exc
         test_kuart_reflect
         test_kuart_libcore
+        test_kuart_filled_array
+        test_kuart_jni_float
+        test_kuart_stub
     )
         if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/${kuart_test}.cpp")
             add_executable(${kuart_test} kuart-tests/${kuart_test}.cpp)

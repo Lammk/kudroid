@@ -178,12 +178,23 @@ public final class StringBuilder implements CharSequence, Appendable {
         return insert(offset, String.valueOf(c));
     }
 
-    public StringBuilder insert(int offset, int i) {
-        return insert(offset, Integer.toString(i));
+    public StringBuilder insert(int offset, Object obj) {
+        return insert(offset, String.valueOf(obj));
     }
 
-    public StringBuilder insert(int offset, Object obj) {
-        return insert(offset, obj == null ? "null" : obj.toString());
+    public StringBuilder insert(int index, char[] str, int offset, int len) {
+        if (index < 0 || index > count) throw new StringIndexOutOfBoundsException(index);
+        if (offset < 0 || len < 0 || offset > str.length - len) throw new StringIndexOutOfBoundsException();
+        if (len == 0) return this;
+        ensure(count + len);
+        System.arraycopy(buf, index, buf, index + len, count - index);
+        System.arraycopy(str, offset, buf, index, len);
+        count += len;
+        return this;
+    }
+
+    public StringBuilder insert(int offset, int i) {
+        return insert(offset, Integer.toString(i));
     }
 
     public StringBuilder delete(int start, int end) {

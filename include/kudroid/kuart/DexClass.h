@@ -110,6 +110,15 @@ public:
     art::Primitive::Type primitive_type = art::Primitive::kPrimNot;
     DexClass* component_type = nullptr;  // used when is_array == true
 
+    // Synthesised placeholder for a boot-classpath class KuDroid does not ship
+    // yet (see DexClassLinker::FindClass). A stub has no dex_file, no methods and
+    // no fields, so anything that would hand a stub instance to real code must
+    // refuse instead: Class.forName throws ClassNotFoundException and
+    // new-instance throws NoClassDefFoundError. Without this flag a stub looks
+    // like a valid class, and the failure surfaces much later as a
+    // ClassCastException in unrelated code.
+    bool is_stub = false;
+
     // java.lang.Class instance object, lazily created on first access.
     DexObject* class_object = nullptr;
 

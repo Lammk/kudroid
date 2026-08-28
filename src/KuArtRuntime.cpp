@@ -161,6 +161,14 @@ extern "C" int kuart_init(const char* app_dir) {
 
     auto rt = std::make_unique<Runtime>();
 
+    // Record unresolvable framework classes next to the app's other logs, not in
+    // the process CWD (which on iOS is not writable, and in host tests is
+    // wherever the binary was started from).
+    if (app_dir != nullptr && app_dir[0] != '\0') {
+        const std::string log_path = (std::filesystem::path(app_dir) / "classes.log").string();
+        kudroid::kuart::DexClassLinker::SetMissingClassLogPath(log_path.c_str());
+    }
+
     // Embedded framework.dex must be loaded BEFORE the app's DEX: FindClass comes in order
     // Additionally, the class of the app referencing android/* will find the framework immediately.
     std::string error;
