@@ -31,6 +31,7 @@ void Check(bool ok, const std::string& what) {
 
 using kudroid::kuart::DexClass;
 using kudroid::kuart::DexClassLinker;
+using kudroid::kuart::DexField;
 using kudroid::kuart::DexJniEnv;
 using kudroid::kuart::DexMethod;
 using kudroid::kuart::DexObject;
@@ -537,6 +538,122 @@ int main() {
                 }
             }
         }
+    }
+
+    // ── values libraries branch on ──
+    //
+    // These three used to hold placeholders that read as "not Android", and every
+    // library that checks them took its desktop-JVM path. It is not a cosmetic
+    // difference: okhttp's platform detection reads all three, and getting them wrong
+    // left its Platform class permanently in error, which kills every HTTP call for
+    // the rest of the process.
+    {
+        DexValue vmName;
+        if (CallStatic("Ljava/lang/System;", "getProperty",
+                       "(Ljava/lang/String;)Ljava/lang/String;", {Str("java.vm.name")},
+                       &vmName, "System.getProperty(java.vm.name)")) {
+            // Libraries compare this against "Dalvik" to decide they are on Android.
+            Check(std::strcmp(Utf8Of(vmName), "Dalvik") == 0,
+                  std::string("java.vm.name == \"Dalvik\", got \"") + Utf8Of(vmName) + "\"");
+        }
+
+        // Class.getClassLoader() must return a usable loader. The common obfuscator
+        // pattern is Foo.class.getClassLoader().loadClass(name); on null that is an
+        // NPE inside a <clinit>, which poisons the class for the whole process.
+        DexClass* stringClass = linker.FindClass("Ljava/lang/String;");
+        DexClass* classClass = linker.FindClass("Ljava/lang/Class;");
+        if (stringClass != nullptr && classClass != nullptr) {
+            DexObject* classObj =
+                reinterpret_cast<DexObject*>(linker.GetClassObject(stringClass));
+            DexValue loader;
+            if (CallVirtual(classObj, "getClassLoader", "()Ljava/lang/ClassLoader;", {},
+                            &loader, "Class.getClassLoader")) {
+                Check(loader.l != nullptr, "getClassLoader() is not null");
+                if (loader.l != nullptr) {
+                    // And it has to actually resolve: a loader that cannot load is
+                    // the same failure one call later.
+                    DexValue loaded;
+                    if (CallVirtual(loader.l, "loadClass",
+                                    "(Ljava/lang/String;)Ljava/lang/Class;",
+                                    {Str("java.lang.Integer")}, &loaded,
+                                    "ClassLoader.loadClass")) {
+                        Check(loaded.l != nullptr,
+                              "loadClass(\"java.lang.Integer\") resolves");
+                    }
+                }
+            }
+        }
+
+        // Security.getProviders() is indexed without a bounds check by real
+        // libraries — okhttp writes getProviders()[0] verbatim — so an empty list is
+        // an ArrayIndexOutOfBoundsException in their class initialiser.
+        DexValue providers;
+        if (CallStatic("Ljava/security/Security;", "getProviders",
+                       "()[Ljava/security/Provider;", {}, &providers,
+                       "Security.getProviders")) {
+            auto* arr = reinterpret_cast<kudroid::kuart::DexArray*>(providers.l);
+            Check(arr != nullptr && arr->length > 0,
+                  std::string("getProviders() is non-empty, length ") +
+                      std::to_string(arr != nullptr ? arr->length : -1));
+            if (arr != nullptr && arr->length > 0) {
+                DexObject* p = arr->Get<DexObject*>(0);
+                DexValue name;
+                if (p != nullptr && CallVirtual(p, "getName", "()Ljava/lang/String;", {},
+                                                &name, "Provider.getName")) {
+                    Check(std::strcmp(Utf8Of(name), "AndroidOpenSSL") == 0,
+                          std::string("providers[0] is the Android default, got \"") +
+                              Utf8Of(name) + "\"");
+                }
+            }
+        }
+    }
+
+    // ── framework classes whose absence stopped a real launch ──
+    {
+        // ActivityManager.MemoryInfo: reading available memory during startup is
+        // routine, and the nested class was missing because ActivityManager itself
+        // was a generated stub.
+        DexObject* mi = NewObject("Landroid/app/ActivityManager$MemoryInfo;", "()V", {},
+                                  "new ActivityManager.MemoryInfo");
+        if (mi != nullptr) {
+            DexClass* k = mi->clazz;
+            const DexField* avail =
+                k != nullptr ? k->FindInstanceField("availMem", "J") : nullptr;
+            Check(avail != nullptr, "MemoryInfo.availMem field present");
+            if (avail != nullptr) {
+                // Zero would tell an app the device is out of memory, and apps
+                // degrade or refuse to run on that.
+                Check(mi->GetField<int64_t>(avail->offset_or_slot) > 0,
+                      "MemoryInfo.availMem is populated, not zero");
+            }
+        }
+        DexClass* am = linker.FindClass("Landroid/app/ActivityManager;");
+        Check(am != nullptr && !am->is_stub, "ActivityManager is real, not a stub");
+        if (am != nullptr && !am->is_stub) {
+            Check(am->FindVirtualMethod("getMemoryInfo",
+                                        "(Landroid/app/ActivityManager$MemoryInfo;)V") != nullptr,
+                  "ActivityManager.getMemoryInfo exists");
+            Check(am->FindVirtualMethod("getMemoryClass", "()I") != nullptr,
+                  "ActivityManager.getMemoryClass exists");
+        }
+
+        // Messenger(Handler) is the only form apps use; the stub had just a no-arg
+        // constructor, so the call resolved to an auto-stub that did nothing and the
+        // object looked valid while being unusable.
+        DexClass* messenger = linker.FindClass("Landroid/os/Messenger;");
+        Check(messenger != nullptr && !messenger->is_stub, "Messenger is real, not a stub");
+        if (messenger != nullptr && !messenger->is_stub) {
+            Check(messenger->FindDirectMethod("<init>", "(Landroid/os/Handler;)V") != nullptr,
+                  "Messenger(Handler) constructor exists");
+        }
+
+        // RemoteException has to be a Throwable: as a bare stub it could not be
+        // thrown or declared, so every signature mentioning it was unusable.
+        DexClass* remote = linker.FindClass("Landroid/os/RemoteException;");
+        DexClass* throwable = linker.FindClass("Ljava/lang/Throwable;");
+        Check(remote != nullptr && throwable != nullptr && !remote->is_stub &&
+                  remote->IsSubClassOf(throwable),
+              "RemoteException is a Throwable");
     }
 
     std::printf("  executed %llu instructions\n",

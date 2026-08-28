@@ -50,13 +50,50 @@ std::string ToDescriptor(const char* jni_name) {
 
 jint JNICALL GetVersion(JNIEnv*) { return JNI_VERSION_1_6; }
 
+// Raise a Java exception the way the JNI spec requires a failed lookup to.
+//
+// FindClass/GetMethodID/GetFieldID used to record a message in last_error() and
+// return null, with nothing pending. Native code follows the spec instead of
+// checking every return value — the standard shape is
+//
+//     jclass c = env->FindClass("...");
+//     jmethodID m = env->GetMethodID(c, "...", "...");   // c assumed valid
+//     env->CallVoidMethod(obj, m);
+//
+// so a silent null becomes a segfault at a near-null address inside the library,
+// with no indication of which lookup failed. With an exception pending, a library
+// that checks ExceptionCheck() (most do, at least between phases) stops cleanly and
+// the name that could not be resolved is reported.
+void ThrowLookupFailure(DexJniEnv* self, const char* exception_descriptor,
+                        const std::string& what) {
+    if (self == nullptr) return;
+    self->set_last_error(what);
+    if (Interpreter* interp = self->interpreter()) {
+        interp->ThrowException(exception_descriptor, what);
+    }
+}
+
 jclass JNICALL FindClass(JNIEnv* env, const char* name) {
     DexJniEnv* self = Self(env);
-    if (self == nullptr || name == nullptr) return nullptr;
+    if (self == nullptr) return nullptr;
+    if (name == nullptr) {
+        ThrowLookupFailure(self, "Ljava/lang/NoClassDefFoundError;", "FindClass(null)");
+        return nullptr;
+    }
     const std::string descriptor = ToDescriptor(name);
     DexClass* klass = self->linker()->FindClass(descriptor.c_str());
     if (klass == nullptr) {
-        self->set_last_error("FindClass failed: " + descriptor);
+        ThrowLookupFailure(self, "Ljava/lang/NoClassDefFoundError;", name);
+        return nullptr;
+    }
+    // A stub is a placeholder for a class KuDroid does not ship: it has no methods
+    // and no fields, so handing it back would only move the failure to the next
+    // GetMethodID, which returns null and takes the library down with no name
+    // attached. Report the missing class here instead. See DexClass::is_stub.
+    if (klass->is_stub) {
+        ThrowLookupFailure(self, "Ljava/lang/NoClassDefFoundError;",
+                           klass->PrettyName() +
+                               " (class not implemented in KuDroid framework)");
         return nullptr;
     }
     // JNI FindClass instantiates the class (as defined by the JNI spec).
@@ -230,16 +267,26 @@ jobject JNICALL NewObject(JNIEnv* env, jclass clazz, jmethodID methodID, ...) {
 }
 
 // ── method/field ID ───────────────────────────────────────────────────────
+//
+// A failed lookup throws (NoSuchMethodError / NoSuchFieldError) as the JNI spec
+// requires, instead of quietly returning null. Native code overwhelmingly assumes
+// these succeed and passes the result straight to Call*Method, so a silent null
+// crashed the library at a near-null address with no clue which name was missing.
 
 jmethodID JNICALL GetMethodID(JNIEnv* env, jclass clazz, const char* name, const char* sig) {
     DexJniEnv* self = Self(env);
     DexClass* k = Cls(clazz);
-    if (self == nullptr || k == nullptr || name == nullptr) return nullptr;
+    if (self == nullptr) return nullptr;
+    if (k == nullptr || name == nullptr) {
+        ThrowLookupFailure(self, "Ljava/lang/NoSuchMethodError;",
+                           "GetMethodID with null class or name");
+        return nullptr;
+    }
     DexMethod* m = k->FindVirtualMethod(name, sig);
     if (m == nullptr) m = k->FindDirectMethod(name, sig);
     if (m == nullptr) {
-        self->set_last_error(std::string("GetMethodID failed: ") + k->PrettyName() + "." +
-                             name + (sig != nullptr ? sig : ""));
+        ThrowLookupFailure(self, "Ljava/lang/NoSuchMethodError;",
+                           k->PrettyName() + "." + name + (sig != nullptr ? sig : ""));
     }
     return reinterpret_cast<jmethodID>(m);
 }
@@ -248,11 +295,16 @@ jmethodID JNICALL GetStaticMethodID(JNIEnv* env, jclass clazz, const char* name,
                                    const char* sig) {
     DexJniEnv* self = Self(env);
     DexClass* k = Cls(clazz);
-    if (self == nullptr || k == nullptr || name == nullptr) return nullptr;
+    if (self == nullptr) return nullptr;
+    if (k == nullptr || name == nullptr) {
+        ThrowLookupFailure(self, "Ljava/lang/NoSuchMethodError;",
+                           "GetStaticMethodID with null class or name");
+        return nullptr;
+    }
     DexMethod* m = k->FindDirectMethod(name, sig);
     if (m == nullptr) {
-        self->set_last_error(std::string("GetStaticMethodID failed: ") + k->PrettyName() +
-                             "." + name + (sig != nullptr ? sig : ""));
+        ThrowLookupFailure(self, "Ljava/lang/NoSuchMethodError;",
+                           k->PrettyName() + "." + name + (sig != nullptr ? sig : ""));
     }
     return reinterpret_cast<jmethodID>(m);
 }
@@ -260,10 +312,17 @@ jmethodID JNICALL GetStaticMethodID(JNIEnv* env, jclass clazz, const char* name,
 jfieldID JNICALL GetFieldID(JNIEnv* env, jclass clazz, const char* name, const char* sig) {
     DexJniEnv* self = Self(env);
     DexClass* k = Cls(clazz);
-    if (self == nullptr || k == nullptr || name == nullptr) return nullptr;
+    if (self == nullptr) return nullptr;
+    if (k == nullptr || name == nullptr) {
+        ThrowLookupFailure(self, "Ljava/lang/NoSuchFieldError;",
+                           "GetFieldID with null class or name");
+        return nullptr;
+    }
     DexField* f = k->FindInstanceField(name, sig);
     if (f == nullptr) {
-        self->set_last_error(std::string("GetFieldID failed: ") + k->PrettyName() + "." + name);
+        ThrowLookupFailure(self, "Ljava/lang/NoSuchFieldError;",
+                           k->PrettyName() + "." + name + " " +
+                               (sig != nullptr ? sig : ""));
     }
     return reinterpret_cast<jfieldID>(f);
 }
@@ -271,11 +330,17 @@ jfieldID JNICALL GetFieldID(JNIEnv* env, jclass clazz, const char* name, const c
 jfieldID JNICALL GetStaticFieldID(JNIEnv* env, jclass clazz, const char* name, const char* sig) {
     DexJniEnv* self = Self(env);
     DexClass* k = Cls(clazz);
-    if (self == nullptr || k == nullptr || name == nullptr) return nullptr;
+    if (self == nullptr) return nullptr;
+    if (k == nullptr || name == nullptr) {
+        ThrowLookupFailure(self, "Ljava/lang/NoSuchFieldError;",
+                           "GetStaticFieldID with null class or name");
+        return nullptr;
+    }
     DexField* f = k->FindStaticField(name, sig);
     if (f == nullptr) {
-        self->set_last_error(std::string("GetStaticFieldID failed: ") + k->PrettyName() + "." +
-                             name);
+        ThrowLookupFailure(self, "Ljava/lang/NoSuchFieldError;",
+                           k->PrettyName() + "." + name + " " +
+                               (sig != nullptr ? sig : ""));
     }
     return reinterpret_cast<jfieldID>(f);
 }

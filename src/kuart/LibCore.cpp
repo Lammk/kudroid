@@ -430,6 +430,41 @@ bool UnboxValue(Interpreter* interp, const char* descriptor, DexObject* obj, Dex
     return true;
 }
 
+// The process-wide ClassLoader instance.
+//
+// KuART resolves classes through a single DexClassLinker, so there is one loader.
+// It still has to be a real object: app code calls
+// SomeClass.class.getClassLoader().loadClass(name), and a null loader turns that
+// into a NullPointerException inside a <clinit>.
+//
+// Built by calling ClassLoader.getSystemClassLoader() so Java code that asks
+// directly and native code that asks through Class.getClassLoader() get the same
+// instance, exactly as on Android.
+DexObject* SystemClassLoaderObject(Interpreter* interp) {
+    static DexObject* loader = nullptr;
+    if (loader != nullptr) return loader;
+
+    DexClass* klass = interp->linker()->FindClass("Ljava/lang/ClassLoader;");
+    if (klass == nullptr || klass->is_stub) return nullptr;
+    if (!interp->EnsureInitialized(klass)) return nullptr;
+
+    if (DexMethod* get = klass->FindDirectMethod("getSystemClassLoader",
+                                                 "()Ljava/lang/ClassLoader;")) {
+        const DexValue r = interp->Execute(get, nullptr, 0);
+        if (!interp->HasPendingException() && r.l != nullptr) {
+            loader = r.l;
+            return loader;
+        }
+        // A failure here would otherwise be attributed to the caller's own work.
+        interp->ClearPendingException();
+    }
+
+    // Fall back to a bare instance: a loader that resolves through the linker is
+    // still better than null, which crashes the caller outright.
+    loader = interp->linker()->AllocObject(klass);
+    return loader;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // java.lang.Class
 // ─────────────────────────────────────────────────────────────────────────────
@@ -519,9 +554,19 @@ bool Invoke_java_lang_Class(Interpreter* interp, const char* name, const DexValu
         return true;
     }
     if (std::strcmp(name, "getClassLoader") == 0) {
-        // A single implicit loader: KuART resolves every class through one
-        // DexClassLinker, so there is nothing to distinguish.
-        result->l = nullptr;
+        // KuART resolves every class through one DexClassLinker, so there is only
+        // ever one loader — but it must be a real object, not null.
+        //
+        // Returning null used to look harmless because KuDroid's own code never
+        // asks. App code does: the common obfuscator pattern is
+        // SomeClass.class.getClassLoader().loadClass("...") to reach a class by
+        // name, and on null that is an immediate NullPointerException inside a
+        // <clinit>, which poisons the class for the rest of the process. Any app
+        // built with that tooling cannot start.
+        //
+        // The instance comes from ClassLoader.getSystemClassLoader() so there is
+        // exactly one, shared with what Java code obtains directly.
+        result->l = SystemClassLoaderObject(interp);
         return true;
     }
     if (std::strcmp(name, "getComponentType") == 0) {
@@ -1086,15 +1131,40 @@ bool Invoke_java_lang_System(Interpreter* interp, const char* name, const DexVal
         } else if (key == "user.dir" || key == "user.home") {
             value = "/";
         } else if (key == "java.vm.name") {
-            value = "KuART";
+            // Libraries decide which platform they are on by comparing this against
+            // "Dalvik" — okhttp, guava, gRPC and Kotlin's stdlib all do it. KuDroid
+            // reported "KuART", so every one of them took its desktop-JVM branch:
+            // okhttp went looking for Conscrypt/BouncyCastle JSSE providers instead
+            // of using the Android platform, failed, and left its Platform class
+            // permanently in error — which kills all HTTP for the rest of the run.
+            //
+            // Everything else KuDroid reports is already Android (SDK_INT 29,
+            // aarch64), so this is the consistent answer, not a special case.
+            value = "Dalvik";
+        } else if (key == "java.vm.vendor") {
+            value = "The Android Project";
+        } else if (key == "java.vendor") {
+            value = "The Android Project";
+        } else if (key == "java.specification.name") {
+            value = "Dalvik Core Library";
+        } else if (key == "java.vm.specification.name") {
+            value = "Dalvik Virtual Machine Specification";
         } else if (key == "java.vm.version") {
-            value = "1.0";
-        } else if (key == "java.version" || key == "java.specification.version") {
-            value = "1.8.0";
+            value = "2.1.0";
+        } else if (key == "java.version") {
+            value = "0";
+        } else if (key == "java.specification.version") {
+            value = "0.9";
+        } else if (key == "java.runtime.name") {
+            value = "Android Runtime";
+        } else if (key == "java.runtime.version") {
+            value = "0.9";
         } else if (key == "os.name") {
             value = "Linux";
         } else if (key == "os.arch") {
             value = "aarch64";
+        } else if (key == "os.version") {
+            value = "4.14.0";
         } else if (key == "file.encoding") {
             value = "UTF-8";
         }

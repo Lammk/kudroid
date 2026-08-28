@@ -63,6 +63,31 @@ static thread_local sigjmp_buf g_jniGuardJmp;
 static thread_local volatile sig_atomic_t g_jniGuardActive = 0;
 static thread_local int g_jniGuardSignal = 0;
 
+// Machine state captured when the guard swallows a signal.
+//
+// The guard used to siglongjmp straight out of the signal handler, which is before
+// crashHandler writes kudroid_crash.log — so a library that segfaulted inside
+// JNI_OnLoad produced one WARNING line and nothing else: no pc, no fault address,
+// no stack. There was no way to tell what it touched.
+//
+// The handler cannot format or write safely, so it only copies scalars here (all
+// async-signal-safe stores) and the caller reports them after the jump returns.
+struct JniGuardFault {
+    int signal = 0;
+    int si_code = 0;
+    const void* fault_addr = nullptr;
+    uint64_t pc = 0;
+    uint64_t lr = 0;
+    uint64_t sp = 0;
+    uint64_t fp = 0;
+    uint64_t x[9] = {0};
+    // Stack words from sp, copied in the handler because by the time the caller
+    // runs the frame is gone.
+    uint64_t stack[32] = {0};
+    bool have_regs = false;
+};
+static thread_local JniGuardFault g_jniGuardFault;
+
 // Stack riêng cho signal handler — để ở file scope vì sau khi siglongjmp ra
 // khỏi handler, kernel/libc vẫn coi alt stack đang "onstack"; phải arm lại nếu
 // không lần crash sau sẽ không chạy được trên stack riêng.
@@ -92,6 +117,7 @@ static int kudroid_call_jni_onload_guarded(jint (*fn)(JavaVM*, void*),
         return g_jniGuardSignal > 0 ? g_jniGuardSignal : 1;
     }
     g_jniGuardActive = 1;
+    g_jniGuardFault = JniGuardFault{};
     int rc = 0;
     try {
         *outVersion = fn(vm, nullptr);
@@ -371,6 +397,132 @@ static void symbolicateAddr(uintptr_t pc, char* out, size_t outSize) {
 }
 #endif
 
+// Render the state captured when the JNI_OnLoad guard swallowed a signal.
+//
+// The guard jumps out of the signal handler before crashHandler's reporting code
+// runs, so a library that faulted inside JNI_OnLoad produced a single WARNING line
+// and nothing usable. This produces the same information the crash log carries —
+// signal, fault address, pc/lr symbolicated, registers, raw stack — for a fault the
+// process survived.
+static std::string describeJniGuardFault(const std::string& library, int guardRc) {
+    const JniGuardFault& f = g_jniGuardFault;
+    std::string out;
+    char line[1024];
+
+    snprintf(line, sizeof(line),
+             "[kudroid_core] === JNI_OnLoad fault in %s ===\n", library.c_str());
+    out += line;
+    snprintf(line, sizeof(line), "build: %s\n", kudroid_build_stamp());
+    out += line;
+
+    // guardRc > 0 is the signal number; -1 means a C++ exception escaped, which
+    // never reaches the handler and therefore has no register state.
+    if (guardRc < 0) {
+        out += "cause: C++ exception escaped JNI_OnLoad (no signal, no registers)\n";
+        return out;
+    }
+
+    const int sig = f.signal != 0 ? f.signal : guardRc;
+    const char* signame = "?";
+    switch (sig) {
+        case SIGSEGV: signame = "SIGSEGV"; break;
+        case SIGBUS:  signame = "SIGBUS";  break;
+        case SIGABRT: signame = "SIGABRT"; break;
+        case SIGILL:  signame = "SIGILL";  break;
+        case SIGTRAP: signame = "SIGTRAP"; break;
+        default: break;
+    }
+    snprintf(line, sizeof(line), "signal = %d (%s)\nsi_code = %d\nfault_addr = %p\n",
+             sig, signame, f.si_code, f.fault_addr);
+    out += line;
+
+    // A near-null fault address is the signature of dereferencing a JNI handle that
+    // came back null — usually a FindClass/GetMethodID that failed and whose return
+    // value the library never checked.
+    const uintptr_t addr = reinterpret_cast<uintptr_t>(f.fault_addr);
+    if (sig == SIGSEGV && addr < 0x10000) {
+        snprintf(line, sizeof(line),
+                 "note: fault address is near null (offset 0x%llx) — typically a null "
+                 "JNI handle dereferenced without checking the return value\n",
+                 (unsigned long long)addr);
+        out += line;
+    }
+
+    if (!f.have_regs) {
+        out += "registers: unavailable on this platform\n";
+        return out;
+    }
+
+    snprintf(line, sizeof(line), "pc = 0x%llx\nlr = 0x%llx\nsp = 0x%llx\nfp = 0x%llx\n",
+             (unsigned long long)f.pc, (unsigned long long)f.lr,
+             (unsigned long long)f.sp, (unsigned long long)f.fp);
+    out += line;
+
+#if defined(__aarch64__) || defined(__arm64__)
+    {
+        char symPc[512];
+        char symLr[512];
+        symbolicateAddr(static_cast<uintptr_t>(f.pc), symPc, sizeof(symPc));
+        symbolicateAddr(static_cast<uintptr_t>(f.lr), symLr, sizeof(symLr));
+        snprintf(line, sizeof(line), "pc_sym: %s\nlr_sym: %s\n", symPc, symLr);
+        out += line;
+    }
+#endif
+
+    for (int i = 0; i < 9; ++i) {
+        snprintf(line, sizeof(line), "x%d = 0x%llx\n", i, (unsigned long long)f.x[i]);
+        out += line;
+    }
+
+    out += "--- stack from sp ---\n";
+    for (int i = 0; i < 32; i += 4) {
+        snprintf(line, sizeof(line), "sp%+04d: %016llx  %016llx  %016llx  %016llx\n",
+                 i * 8, (unsigned long long)f.stack[i],
+                 (unsigned long long)f.stack[i + 1],
+                 (unsigned long long)f.stack[i + 2],
+                 (unsigned long long)f.stack[i + 3]);
+        out += line;
+    }
+
+#if defined(__aarch64__) || defined(__arm64__)
+    // Walk the frame chain so the caller inside the library is named, not just the
+    // faulting instruction. Range-checked at every step: a bad fp must not turn a
+    // survivable fault into a real crash.
+    out += "--- fp chain ---\n";
+    {
+        uint64_t fp = f.fp;
+        for (int depth = 0; depth < 24; ++depth) {
+            if (!(fp > 0x1000 && fp < 0x7fffffffffffULL)) break;
+            const uint64_t* p = reinterpret_cast<const uint64_t*>(fp);
+            const uint64_t savedFp = p[0];
+            const uint64_t savedLr = p[1];
+            if (savedLr == 0) break;
+            char sym[512];
+            symbolicateAddr(static_cast<uintptr_t>(savedLr), sym, sizeof(sym));
+            snprintf(line, sizeof(line), "  #%02d lr=0x%llx  %s\n", depth,
+                     (unsigned long long)savedLr, sym);
+            out += line;
+            if (!(savedFp > fp && savedFp < 0x7fffffffffffULL)) break;
+            fp = savedFp;
+        }
+    }
+#endif
+
+    return out;
+}
+
+// Append to kudroid_crash.log rather than overwrite: several libraries can fault in
+// one launch, and crashHandler truncates the file for a real crash. Losing the
+// earlier faults would hide the first one, which is usually the informative one.
+static void appendCrashLogFile(const std::string& content) {
+    if (!g_logDir[0]) return;
+    const std::string path = std::string(g_logDir) + "/kudroid_crash.log";
+    FILE* fp = fopen(path.c_str(), "a");
+    if (fp == nullptr) return;
+    fwrite(content.data(), 1, content.size(), fp);
+    fclose(fp);
+}
+
 static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
     if (sig == SIGTRAP) {
         if (kudroid::bionic_handle_tpidr_trap(ucontext)) {
@@ -381,8 +533,39 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
     // Đang ở trong một lời gọi JNI_OnLoad được bọc guard: thư viện đó abort/segfault
     // thì bỏ qua nó thay vì giết process. Chỉ dùng hàm async-signal-safe ở đây;
     // việc ghi log để phía gọi làm sau khi siglongjmp trả về.
+    //
+    // Capture the machine state first. This path never reaches the crash-log code
+    // below, so without this a swallowed fault left no pc, no fault address and no
+    // stack — only a WARNING line saying a signal happened. Copying scalars is
+    // async-signal-safe; formatting and writing are left to the caller.
     if (g_jniGuardActive && (sig == SIGABRT || sig == SIGSEGV || sig == SIGBUS ||
                              sig == SIGILL  || sig == SIGTRAP)) {
+        JniGuardFault& f = g_jniGuardFault;
+        f.signal = sig;
+        if (info != nullptr) {
+            f.si_code = info->si_code;
+            f.fault_addr = info->si_addr;
+        }
+#if (defined(__aarch64__) || defined(__arm64__)) && defined(__APPLE__)
+        if (ucontext != nullptr) {
+            ucontext_t* uc = static_cast<ucontext_t*>(ucontext);
+            f.pc = uc->uc_mcontext->__ss.__pc;
+            f.lr = uc->uc_mcontext->__ss.__lr;
+            f.sp = uc->uc_mcontext->__ss.__sp;
+            f.fp = uc->uc_mcontext->__ss.__fp;
+            for (int i = 0; i < 9; ++i) f.x[i] = uc->uc_mcontext->__ss.__x[i];
+            // Only read the stack when sp looks like a mapped address: a
+            // double fault inside the handler would take down the process for
+            // real, which is exactly what the guard exists to avoid.
+            if (f.sp > 0x1000 && f.sp < 0x7fffffffffffULL) {
+                const uint64_t* stack = reinterpret_cast<const uint64_t*>(f.sp);
+                for (int i = 0; i < 32; ++i) f.stack[i] = stack[i];
+            }
+            f.have_regs = true;
+        }
+#else
+        (void)ucontext;
+#endif
         g_jniGuardActive = 0;
         g_jniGuardSignal = sig;
         siglongjmp(g_jniGuardJmp, 1);
@@ -1523,10 +1706,24 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                 snprintf(msg, sizeof(msg), "[kudroid_core] WARNING: Native exception in JNI_OnLoad for %s", filename.c_str());
                                 kudroid_android_log_message(5, "kudroid_core", msg);
                                 std::fprintf(stderr, "%s\n", msg);
+                                const std::string report =
+                                    describeJniGuardFault(filename, guardRc);
+                                std::fputs(report.c_str(), stderr);
+                                appendCrashLogFile(report);
                             } else {
                                 snprintf(msg, sizeof(msg), "[kudroid_core] WARNING: JNI_OnLoad in %s raised fatal signal %d", filename.c_str(), guardRc);
                                 kudroid_android_log_message(5, "kudroid_core", msg);
                                 std::fprintf(stderr, "%s\n", msg);
+                                // The guard leaves the crash-log path unreached, so
+                                // report the captured state here. Without it a
+                                // swallowed fault was one WARNING line with no pc,
+                                // no fault address and no stack — nothing to work
+                                // from. Goes to kudroid_crash.log as well, where
+                                // every other fault in this process is recorded.
+                                const std::string report =
+                                    describeJniGuardFault(filename, guardRc);
+                                std::fputs(report.c_str(), stderr);
+                                appendCrashLogFile(report);
                             }
 
                             // JNI requires native code to check and clear pending

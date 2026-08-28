@@ -259,6 +259,47 @@ Check(kept != nullptr, "PopLocalFrame gi  l i k t qu ");
     Check(env->GetDirectBufferAddress(byteBuf) == rawBuffer, "GetDirectBufferAddress matches raw pointer");
     Check(env->GetDirectBufferCapacity(byteBuf) == sizeof(rawBuffer), "GetDirectBufferCapacity matches size");
 
+    // Failed lookups must throw, per the JNI spec.
+    //
+    // These used to record a message and return null with nothing pending. Native
+    // code follows the spec instead of checking every return value — the usual shape
+    // is FindClass then GetMethodID then Call*Method, with only the last result
+    // tested — so a silent null became a segfault at a near-null address inside the
+    // library, naming nothing. libminecraftpe.so took SIGSEGV in JNI_OnLoad exactly
+    // this way.
+    Check(env->ExceptionCheck() == JNI_FALSE, "no exception before failed lookups");
+
+    jclass missing = env->FindClass("com/nowhere/DoesNotExist");
+    Check(missing == nullptr, "FindClass on a missing class returns null");
+    Check(env->ExceptionCheck() == JNI_TRUE, "FindClass failure leaves an exception pending");
+    env->ExceptionClear();
+
+    jmethodID noMethod = env->GetMethodID(k, "methodThatIsNotThere", "()V");
+    Check(noMethod == nullptr, "GetMethodID on a missing method returns null");
+    Check(env->ExceptionCheck() == JNI_TRUE, "GetMethodID failure throws NoSuchMethodError");
+    env->ExceptionClear();
+
+    jmethodID noStatic = env->GetStaticMethodID(k, "staticNotThere", "()V");
+    Check(noStatic == nullptr, "GetStaticMethodID on a missing method returns null");
+    Check(env->ExceptionCheck() == JNI_TRUE, "GetStaticMethodID failure throws");
+    env->ExceptionClear();
+
+    jfieldID noField = env->GetFieldID(k, "fieldNotThere", "I");
+    Check(noField == nullptr, "GetFieldID on a missing field returns null");
+    Check(env->ExceptionCheck() == JNI_TRUE, "GetFieldID failure throws NoSuchFieldError");
+    env->ExceptionClear();
+
+    jfieldID noStaticField = env->GetStaticFieldID(k, "staticFieldNotThere", "I");
+    Check(noStaticField == nullptr, "GetStaticFieldID on a missing field returns null");
+    Check(env->ExceptionCheck() == JNI_TRUE, "GetStaticFieldID failure throws");
+    env->ExceptionClear();
+    Check(env->ExceptionCheck() == JNI_FALSE, "cleared before continuing");
+
+    // A successful lookup must not leave anything pending.
+    jmethodID stillWorks = env->GetMethodID(k, "getValue", "()I");
+    Check(stillWorks != nullptr, "GetMethodID still resolves a real method");
+    Check(env->ExceptionCheck() == JNI_FALSE, "successful lookup throws nothing");
+
     // Reflection JNI bridging.
     jmethodID mid = env->GetMethodID(k, "getValue", "()I");
     Check(mid != nullptr, "GetMethodID for reflection bridging");
