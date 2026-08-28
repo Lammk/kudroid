@@ -1,6 +1,7 @@
 package android.widget;
 
-/** Stub automatically generated for android.widget.ImageButton */
-public class ImageButton {
-    public ImageButton() {}
+import android.content.Context;
+
+public class ImageButton extends ImageView {
+    public ImageButton(Context context) { super(context); }
 }

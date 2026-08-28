@@ -1950,9 +1950,16 @@ bool Invoke_android_graphics_Canvas(Interpreter* /*interp*/, const char* name, c
 }
 
 bool Invoke_android_app_Activity(Interpreter* /*interp*/, const char* name, const DexValue* args,
-                                 size_t /*num_args*/, DexValue* /*result*/) {
+                                 size_t num_args, DexValue* /*result*/) {
     if (std::strcmp(name, "setRequestedOrientation_native") == 0) {
         kudroid_set_requested_orientation(args[0].i);
+        return true;
+    }
+    if (std::strcmp(name, "nativeRequestPermissions") == 0) {
+        DexObject* act = num_args > 0 ? args[0].l : nullptr;
+        const char* csv = num_args > 1 ? GetStringUtf8(args[1]) : "";
+        int reqCode = num_args > 2 ? args[2].i : 0;
+        kudroid_prompt_permission_request("", csv, reqCode, act);
         return true;
     }
     return false;

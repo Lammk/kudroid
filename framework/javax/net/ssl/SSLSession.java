@@ -22,6 +22,4 @@ public interface SSLSession {
     String getProtocol();
     String getPeerHost();
     int getPeerPort();
-    int getPacketBufferSize();
-    int getApplicationBufferSize();
 }

@@ -1,3 +1,4 @@
+#include "kudroid/kudroid_bridge.h"
 #include "kudroid/elf_loader.hpp"
 #include "kudroid/BionicShim.h"
 #include "kudroid/VFSPathRemapper.h"
@@ -2998,4 +2999,37 @@ extern "C" const char* kudroid_get_last_crash_tail(void) {
         return strdup("No recent crash detected.");
     }
     return strdup(g_lastCrashTail);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Permission Dialog Prompt Bridge
+// ─────────────────────────────────────────────────────────────────────────────
+static kudroid_permission_prompt_cb g_permission_prompt_cb = nullptr;
+
+extern "C" void kudroid_set_permission_prompt_callback(kudroid_permission_prompt_cb cb) {
+    g_permission_prompt_cb = cb;
+}
+
+extern "C" void kudroid_prompt_permission_request(const char* packageName, const char* permissionsCsv, int requestCode, void* activityHandle) {
+    if (g_permission_prompt_cb != nullptr) {
+        g_permission_prompt_cb(packageName, permissionsCsv, requestCode, activityHandle);
+    } else {
+        kudroid_submit_permission_response(activityHandle, requestCode, permissionsCsv, 1);
+    }
+}
+
+extern "C" void kudroid_submit_permission_response(void* activityHandle, int requestCode, const char* permissionsCsv, int granted) {
+    if (activityHandle == nullptr || permissionsCsv == nullptr) return;
+    std::string csv = permissionsCsv;
+    std::vector<std::string> perms;
+    std::string token;
+    std::istringstream tokenStream(csv);
+    while (std::getline(tokenStream, token, ',')) {
+        if (!token.empty()) perms.push_back(token);
+    }
+    if (perms.empty()) return;
+
+    // Log permission grant result
+    std::fprintf(stderr, "[PermissionManager] Permission response for request %d (%zu perms): %s\n",
+                 requestCode, perms.size(), granted ? "GRANTED" : "DENIED");
 }

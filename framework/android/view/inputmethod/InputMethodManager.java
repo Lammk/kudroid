@@ -1,38 +1,24 @@
 package android.view.inputmethod;
 
-/**
- * emulate android.view.inputmethod.inputmethodmanager.
- *
- * manage input methods (keyboard). for kudroid minimal framework, here
- * is a simulation.
- */
-public class InputMethodManager {
-    /** result: success. */
-    public static final int RESULT_SUCCESS = 0;
-    /** result: displayed. */
-    public static final int RESULT_SHOWN = 1;
-    /** result: hidden. */
-    public static final int RESULT_HIDDEN = 2;
+import android.content.Context;
+import android.os.IBinder;
+import android.os.ResultReceiver;
+import android.view.View;
 
-    public InputMethodManager() {
-    }
+public final class InputMethodManager {
+    public static final int SHOW_IMPLICIT = 0x0001;
+    public static final int SHOW_FORCED = 0x0002;
+    public static final int HIDE_IMPLICIT_ONLY = 0x0001;
+    public static final int HIDE_NOT_ALWAYS = 0x0002;
 
-    public boolean showSoftInput(android.view.View view, int flags) {
-        return false;
-    }
-
-    public boolean hideSoftInputFromWindow(android.os.IBinder windowToken, int flags) {
-        return false;
-    }
-
-    public void toggleSoftInputFromWindow(android.os.IBinder windowToken, int showFlags, int hideFlags) {
-    }
-
-    public boolean isAcceptingText() {
-        return false;
-    }
-
-    public boolean isActive() {
-        return false;
-    }
+    public static InputMethodManager peekInstance() { return new InputMethodManager(); }
+    public boolean isActive(View view) { return true; }
+    public boolean isActive() { return true; }
+    public boolean isAcceptingText() { return true; }
+    public boolean showSoftInput(View view, int flags) { return true; }
+    public boolean showSoftInput(View view, int flags, ResultReceiver resultReceiver) { return true; }
+    public boolean hideSoftInputFromWindow(IBinder windowToken, int flags) { return true; }
+    public boolean hideSoftInputFromWindow(IBinder windowToken, int flags, ResultReceiver resultReceiver) { return true; }
+    public void toggleSoftInput(int showFlags, int hideFlags) {}
+    public void restartInput(View view) {}
 }

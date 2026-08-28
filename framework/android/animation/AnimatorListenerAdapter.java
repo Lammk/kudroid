@@ -1,6 +1,8 @@
 package android.animation;
 
-/** Stub automatically generated for android.animation.AnimatorListenerAdapter */
-public class AnimatorListenerAdapter {
-    public AnimatorListenerAdapter() {}
+public abstract class AnimatorListenerAdapter implements Animator.AnimatorListener {
+    public void onAnimationCancel(Animator animation) {}
+    public void onAnimationEnd(Animator animation) {}
+    public void onAnimationRepeat(Animator animation) {}
+    public void onAnimationStart(Animator animation) {}
 }

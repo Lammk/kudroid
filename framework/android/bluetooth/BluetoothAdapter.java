@@ -1,50 +1,28 @@
 package android.bluetooth;
 
-/**
- * emulate android.bluetooth.bluetoothadapter.
- *
- * is not important for application startup/display. returns null/default so the application doesn't
- * had trouble checking bluetooth availability.
- */
+import java.util.Set;
+import java.util.Collections;
+
 public final class BluetoothAdapter {
-    /** status: off. */
+    public static final String ACTION_STATE_CHANGED = "android.bluetooth.adapter.action.STATE_CHANGED";
     public static final int STATE_OFF = 10;
-    /** status: enabled. */
     public static final int STATE_ON = 12;
 
-    private static final BluetoothAdapter sInstance = new BluetoothAdapter();
+    private static BluetoothAdapter sAdapter;
 
-    private BluetoothAdapter() {
+    private BluetoothAdapter() {}
+    public static synchronized BluetoothAdapter getDefaultAdapter() {
+        if (sAdapter == null) sAdapter = new BluetoothAdapter();
+        return sAdapter;
     }
-
-    /**
-     * returns default adapter. returns null (no bluetooth on ios).
-     */
-    public static BluetoothAdapter getDefaultAdapter() {
-        return null;
-    }
-
-    public boolean isEnabled() {
-        return false;
-    }
-
-    public int getState() {
-        return STATE_OFF;
-    }
-
-    public String getName() {
-        return null;
-    }
-
-    public String getAddress() {
-        return null;
-    }
-
-    public boolean enable() {
-        return false;
-    }
-
-    public boolean disable() {
-        return false;
-    }
+    public boolean isEnabled() { return true; }
+    public int getState() { return STATE_ON; }
+    public String getName() { return "KuDroid Device"; }
+    public String getAddress() { return "02:00:00:00:00:00"; }
+    public Set<BluetoothDevice> getBondedDevices() { return Collections.emptySet(); }
+    public boolean startDiscovery() { return true; }
+    public boolean cancelDiscovery() { return true; }
+    public boolean isDiscovering() { return false; }
+    public BluetoothDevice getRemoteDevice(String address) { return new BluetoothDevice(address); }
+    public BluetoothDevice getRemoteDevice(byte[] address) { return new BluetoothDevice("02:00:00:00:00:00"); }
 }

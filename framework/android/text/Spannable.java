@@ -1,5 +1,6 @@
 package android.text;
 
-/** Stub automatically generated for android.text.Spannable */
-public interface Spannable {
+public interface Spannable extends Spanned {
+    void setSpan(Object what, int start, int end, int flags);
+    void removeSpan(Object what);
 }

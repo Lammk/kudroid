@@ -1,5 +1,5 @@
 package android.animation;
 
-/** Stub automatically generated for android.animation.TypeEvaluator */
-public interface TypeEvaluator {
+public interface TypeEvaluator<T> {
+    T evaluate(float fraction, T startValue, T endValue);
 }

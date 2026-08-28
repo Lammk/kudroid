@@ -63,7 +63,7 @@ void kudroid_set_keep_screen_on(int keepOn);
 int kudroid_get_keep_screen_on(void);
 
 ///set the cametallayer or uiview cursor used for anativewindow surface constraints.
-void kudroid_set_metal_layer(void* layer, int width, int height);
+void kudroid_set_metal_layer(void* layer, int width, int height, float density);
 void kudroid_unbind_metal_layer(void);
 
 ///run vfs and i/o redirection autotest; returns a malloc log.
@@ -108,6 +108,12 @@ int kudroid_is_group_granted(const char* packageName, const char* groupKey);
 void kudroid_grant_all_permissions(const char* packageName);
 const char* kudroid_get_app_permissions_json(const char* packageName);
 void kudroid_set_app_permissions_json(const char* packageName, const char* jsonStr);
+
+// Permission Dialog Prompt Callbacks
+typedef void (*kudroid_permission_prompt_cb)(const char* packageName, const char* permissionsCsv, int requestCode, void* activityHandle);
+void kudroid_set_permission_prompt_callback(kudroid_permission_prompt_cb cb);
+void kudroid_prompt_permission_request(const char* packageName, const char* permissionsCsv, int requestCode, void* activityHandle);
+void kudroid_submit_permission_response(void* activityHandle, int requestCode, const char* permissionsCsv, int granted);
 
 #ifdef __cplusplus
 }

@@ -330,16 +330,27 @@ public class Activity extends ContextThemeWrapper {
         }
     }
 
+    private static native void nativeRequestPermissions(Activity activity, String permissionsCsv, int requestCode);
+
     /**
      * requires runtime permissions (Android 6.0+).
      */
     public void requestPermissions(String[] permissions, int requestCode) {
-        if (permissions == null) return;
-        int[] grantResults = new int[permissions.length];
+        if (permissions == null || permissions.length == 0) return;
+        StringBuilder sb = new StringBuilder();
         for (int i = 0; i < permissions.length; ++i) {
-            grantResults[i] = android.content.pm.PackageManager.PERMISSION_GRANTED;
+            if (i > 0) sb.append(",");
+            sb.append(permissions[i]);
         }
-        onRequestPermissionsResult(requestCode, permissions, grantResults);
+        try {
+            nativeRequestPermissions(this, sb.toString(), requestCode);
+        } catch (Throwable t) {
+            int[] grantResults = new int[permissions.length];
+            for (int i = 0; i < permissions.length; ++i) {
+                grantResults[i] = android.content.pm.PackageManager.PERMISSION_GRANTED;
+            }
+            onRequestPermissionsResult(requestCode, permissions, grantResults);
+        }
     }
 
     /**

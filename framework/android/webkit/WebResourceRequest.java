@@ -1,6 +1,11 @@
 package android.webkit;
 
-/** Stub automatically generated for android.webkit.WebResourceRequest */
-public class WebResourceRequest {
-    public WebResourceRequest() {}
+import java.util.Map;
+
+public interface WebResourceRequest {
+    String getMethod();
+    Map<String, String> getRequestHeaders();
+    boolean isForMainFrame();
+    boolean isRedirect();
+    boolean hasGesture();
 }

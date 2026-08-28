@@ -1646,6 +1646,34 @@ class NativeMetalViewController: UIViewController {
                 guard let data = data else { return }
                 kudroid_inject_sensor_event(4, Float(data.rotationRate.x), Float(data.rotationRate.y), Float(data.rotationRate.z))
             }
+        // Set up Permission Request Dialog Callback
+        kudroid_set_permission_prompt_callback { [weak self] pkgNameC, permsCsvC, reqCode, actHandle in
+            let csv = permsCsvC != nil ? String(cString: permsCsvC!) : ""
+            let appTitle = self?.appName ?? "Android App"
+            DispatchQueue.main.async {
+                let items = csv.split(separator: ",").map { perm -> String in
+                    let p = String(perm)
+                    if p.contains("CAMERA") { return "📷 Camera Access" }
+                    if p.contains("AUDIO") || p.contains("RECORD") { return "🎙️ Microphone & Audio" }
+                    if p.contains("STORAGE") || p.contains("EXTERNAL") { return "📁 Storage & Files (/sdcard)" }
+                    if p.contains("LOCATION") { return "📍 Location (GPS)" }
+                    if p.contains("BLUETOOTH") { return "🎮 Bluetooth & Gamepads" }
+                    return "🔒 " + (p.components(separatedBy: ".").last ?? p)
+                }
+                let listText = items.isEmpty ? "Permissions" : items.joined(separator: "\n")
+                let alert = UIAlertController(
+                    title: "Permission Request",
+                    message: "\(appTitle) requests permission to access:\n\n\(listText)\n\nAllow access?",
+                    preferredStyle: .alert
+                )
+                alert.addAction(UIAlertAction(title: "Deny", style: .destructive) { _ in
+                    kudroid_submit_permission_response(actHandle, reqCode, permsCsvC, 0)
+                })
+                alert.addAction(UIAlertAction(title: "Allow", style: .default) { _ in
+                    kudroid_submit_permission_response(actHandle, reqCode, permsCsvC, 1)
+                })
+                self?.present(alert, animated: true)
+            }
         }
 
         startAppIfNeeded()

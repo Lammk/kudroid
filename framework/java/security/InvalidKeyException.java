@@ -1,7 +1,6 @@
 package java.security;
 
-public class InvalidKeyException extends GeneralSecurityException {
-    private static final long serialVersionUID = 5698479920593359816L;
-    public InvalidKeyException() { super(); }
+public class InvalidKeyException extends KeyException {
+    public InvalidKeyException() {}
     public InvalidKeyException(String msg) { super(msg); }
 }
