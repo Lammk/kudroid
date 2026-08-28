@@ -7,6 +7,15 @@ public final class Array {
 
     public static native Object newInstance(Class<?> componentType, int length);
 
+    /**
+     * Multi-dimensional array creation.
+     *
+     * DEX has no multianewarray opcode, so d8 compiles `new T[a][b]` into a call to
+     * this overload. Without it any multi-dimensional array literal in framework or app
+     * code fails to link with NoSuchMethodError.
+     */
+    public static native Object newInstance(Class<?> componentType, int[] dimensions);
+
     public static native int getLength(Object array);
 
     public static native Object get(Object array, int index);

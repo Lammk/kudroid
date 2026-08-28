@@ -20,6 +20,8 @@ public final class ActivityThread {
     private static ActivityThread sCurrentActivityThread;
     private Activity mInitialActivity;
     private String mInitialActivityName;
+    /** Framework classes the launch attempt found missing; shown in the fallback UI. */
+    private java.util.ArrayList<String> mFrameworkGaps = new java.util.ArrayList<String>();
     private H mH;
 
     private class H extends Handler {
@@ -109,11 +111,6 @@ public final class ActivityThread {
     }
 
     /**
-     * Extract the missing class name from the cause string of ClassNotFoundException /
-     * NoClassDefFoundError. Avian wrapped the loading error in a multi-layer cage, so it had to go
-     * out of chain. Returns null if not a missing class error.
-     */
-    /**
      * True if clazz is android.app.Activity or a subclass of it.
      *
      * Walks the superclass chain rather than using isAssignableFrom so it works even
@@ -130,19 +127,105 @@ public final class ActivityThread {
         return false;
     }
 
+    /** Packages KuDroid itself is responsible for shipping (the boot classpath). */
+    private static final String[] BOOT_PACKAGES = {
+        "java.", "javax.", "android.", "androidx.", "dalvik.", "sun.", "libcore.",
+        "com.android.", "org.json.", "org.xml.sax.", "org.w3c.dom.", "org.xmlpull.",
+        "org.apache.harmony.",
+    };
+
+    private static boolean isBootClasspathClass(String name) {
+        if (name == null) return false;
+        for (int i = 0; i < BOOT_PACKAGES.length; i++) {
+            if (name.startsWith(BOOT_PACKAGES[i])) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Pull the missing class name out of a ClassNotFoundException / NoClassDefFoundError.
+     *
+     * KuART reports these with dotted names, sometimes with a ".method" suffix and a
+     * trailing explanation, e.g.
+     *   "java.util.regex.Pattern.compile (class not implemented in KuDroid framework)"
+     *   "java.text.SimpleDateFormat"
+     * Older messages used '/' separators. Both forms are accepted; the previous version
+     * only accepted '/' and therefore never matched anything KuART actually throws.
+     *
+     * Returns null when the throwable is not a missing-class error.
+     */
     private static String extractMissingClassName(Throwable t) {
         for (Throwable c = t; c != null; c = c.getCause()) {
             String msg = c.getMessage();
             if (msg != null && !msg.isEmpty()) {
-                // Message is usually "com/foo/Bar" or "android/view/Foo$Bar".
                 String m = msg.trim();
                 int space = m.indexOf(' ');
                 if (space > 0) m = m.substring(0, space);
-                if (m.indexOf('/') > 0) return m.replace('/', '.');
+                m = m.replace('/', '.');
+                if (m.indexOf('.') > 0) return stripMethodSuffix(m);
             }
             if (c.getCause() == c) break;
         }
         return null;
+    }
+
+    /**
+     * "java.util.regex.Pattern.compile" -> "java.util.regex.Pattern".
+     *
+     * The class name ends at the first segment that starts with an upper-case letter,
+     * since package segments are lower-case by convention and a trailing method name
+     * follows the class. Fully obfuscated names have no upper-case segment, in which
+     * case the whole string is returned unchanged.
+     */
+    private static String stripMethodSuffix(String dotted) {
+        int start = 0;
+        while (start < dotted.length()) {
+            int dot = dotted.indexOf('.', start);
+            int segEnd = (dot < 0) ? dotted.length() : dot;
+            if (segEnd > start && Character.isUpperCase(dotted.charAt(start))) {
+                return dotted.substring(0, segEnd);
+            }
+            if (dot < 0) break;
+            start = dot + 1;
+        }
+        return dotted;
+    }
+
+    /**
+     * If this failure was caused by a class KuDroid does not ship, return that class
+     * name; otherwise null.
+     *
+     * The distinction decides what to do next, and getting it wrong is what produced a
+     * blank screen: a missing framework class is KuDroid's own gap, so moving on to the
+     * next manifest candidate just lands on some SDK Activity (a billing proxy, an OAuth
+     * browser shim) that renders nothing. A genuinely wrong candidate — an app class that
+     * does not exist — is the only case where trying the next one helps.
+     */
+    private static String frameworkGapOf(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            final String type = c.getClass().getName();
+            if ("java.lang.NoClassDefFoundError".equals(type)
+                    || "java.lang.ClassNotFoundException".equals(type)
+                    || "java.lang.UnsatisfiedLinkError".equals(type)
+                    || "java.lang.AbstractMethodError".equals(type)) {
+                String missing = extractMissingClassName(c);
+                if (isBootClasspathClass(missing)) return missing;
+            }
+            if (c.getCause() == c) break;
+        }
+        return null;
+    }
+
+    private static String describeChain(Throwable t) {
+        StringBuilder chain = new StringBuilder();
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (chain.length() > 0) chain.append(" <- ");
+            chain.append(c.getClass().getName());
+            String m = c.getMessage();
+            if (m != null && m.length() > 0) chain.append(": ").append(m);
+            if (c.getCause() == c) break;
+        }
+        return chain.toString();
     }
 
     public static void postLifecycleEvent(int eventType, String arg) {
@@ -169,6 +252,11 @@ public final class ActivityThread {
             android.util.Log.e("ActivityThread", "No activity candidates supplied");
         }
 
+        // Names of framework classes KuDroid does not ship, collected while trying
+        // candidates. If the FIRST (launcher) candidate fails only because of these,
+        // the app is not at fault and no other candidate will do better.
+        java.util.ArrayList<String> frameworkGaps = new java.util.ArrayList<String>();
+
         for (int i = 0; candidates != null && i < candidates.length; i++) {
             String name = candidates[i];
             if (name == null || name.isEmpty()) continue;
@@ -188,31 +276,40 @@ public final class ActivityThread {
                 android.util.Log.i("ActivityThread", "Resolved Activity Class: " + name);
                 break;
             } catch (Throwable t) {
-                // Categorize errors to quickly debug new apps:
-                //  - ClassNotFoundException/NoClassDefFoundError with name
-                //    android/* → MISSING STUB framework (puts a stub, not a bug).
-                //  - with name app/* → candidate is wrong, try the next one.
-                String missing = extractMissingClassName(t);
-                if (missing != null && missing.startsWith("android/")) {
-                    android.util.Log.e("ActivityThread",
-                            "FRAMEWORK STUB MISSING: " + missing +
-                            " (need to add stub to framework/android/ then rebuild)");
-                }
-                StringBuilder chain = new StringBuilder();
-                for (Throwable c = t; c != null; c = c.getCause()) {
-                    if (chain.length() > 0) chain.append(" <- ");
-                    chain.append(c.getClass().getName());
-                    String m = c.getMessage();
-                    if (m != null && m.length() > 0) chain.append(": ").append(m);
-                    if (c.getCause() == c) break;
-                }
+                final String gap = frameworkGapOf(t);
                 android.util.Log.e("ActivityThread",
-                        "Candidate '" + name + "' failed: " + chain);
+                        "Candidate '" + name + "' failed: " + describeChain(t));
+
+                if (gap == null) {
+                    // A real app class that does not exist: the candidate is simply
+                    // wrong, so the next one is worth a try.
+                    continue;
+                }
+
+                if (!frameworkGaps.contains(gap)) frameworkGaps.add(gap);
+                android.util.Log.e("ActivityThread",
+                        "FRAMEWORK CLASS MISSING: " + gap +
+                        " (add it under framework/ and rebuild framework.dex)");
+
+                // The launcher activity is the one the app is designed to start. When
+                // it fails on a KuDroid gap, walking the rest of the manifest only
+                // reaches SDK activities — billing proxies, OAuth browser shims,
+                // notification trampolines — none of which draw the app's UI. Stopping
+                // here keeps the real cause on screen instead of burying it behind a
+                // blank Activity that happened to load.
+                if (i == 0) {
+                    android.util.Log.e("ActivityThread",
+                            "Launcher activity '" + name + "' needs framework classes KuDroid " +
+                            "does not implement yet; not falling back to other manifest " +
+                            "entries because they are SDK components, not the app UI.");
+                    break;
+                }
             }
         }
         if (resolvedName != null) {
             mInitialActivityName = resolvedName;
         }
+        mFrameworkGaps = frameworkGaps;
 
         if (clazz != null) {
             try {
@@ -271,56 +368,29 @@ public final class ActivityThread {
                         android.util.Log.e("ActivityThread", "    at " + ste.toString());
                     }
                 }
-                // Initiate fallback UI now so the app still displays and runs smoothly
-                if (mInitialActivity == null) {
-                    mInitialActivity = new Activity();
+                final String gap = frameworkGapOf(t);
+                if (gap != null) {
+                    if (!mFrameworkGaps.contains(gap)) mFrameworkGaps.add(gap);
+                    android.util.Log.e("ActivityThread",
+                            "FRAMEWORK CLASS MISSING: " + gap +
+                            " (add it under framework/ and rebuild framework.dex)");
                 }
-                mInitialActivity.renderViewHierarchy();
+                // The Activity exists but could not finish onCreate, so it has no
+                // content view to draw. Show what stopped it rather than an empty screen.
+                if (mInitialActivity == null || mInitialActivity.getContentView() == null) {
+                    mInitialActivity = new Activity();
+                    showDiagnosticScreen(mInitialActivity,
+                            mInitialActivityName != null ? mInitialActivityName : "(unknown)",
+                            t);
+                } else {
+                    mInitialActivity.renderViewHierarchy();
+                }
             }
         } else {
-            System.err.println("[ActivityThread] Could not resolve Activity class, launching Fallback KuDroid UI...");
+            System.err.println("[ActivityThread] Could not resolve any Activity; showing diagnostics.");
             try {
                 mInitialActivity = new Activity();
-                android.widget.LinearLayout root = new android.widget.LinearLayout(mInitialActivity);
-                root.setBackgroundColor(0xFF181818);
-                
-                android.widget.TextView title = new android.widget.TextView(mInitialActivity);
-                title.setText("📁 KuDroid File Explorer (ZArchiver Engine)");
-                title.setTextColor(0xFF00E676);
-                title.setTextSize(20.0f);
-                root.addView(title);
-
-                final android.widget.TextView statusView = new android.widget.TextView(mInitialActivity);
-                statusView.setText("\n👆 Touch the folder below to open:");
-                statusView.setTextColor(0xFF03A9F4);
-                statusView.setTextSize(16.0f);
-                root.addView(statusView);
-
-                final String[] folders = new String[] {
-                    "/sdcard/Download",
-                    "/sdcard/Documents",
-                    "/sdcard/Pictures",
-                    "/sdcard/DCIM",
-                    "/sdcard/Android"
-                };
-
-                for (final String folderPath : folders) {
-                    android.widget.Button btn = new android.widget.Button(mInitialActivity);
-                    btn.setText("\n  📂  " + folderPath + "\n");
-                    btn.setTextColor(0xFFFFFFFF);
-                    btn.setTextSize(17.0f);
-                    btn.setOnClickListener(new android.view.View.OnClickListener() {
-                        @Override
-                        public void onClick(android.view.View v) {
-                            System.out.println("[UI] Clicked on folder: " + folderPath);
-                            statusView.setText("\n✅ Opened: " + folderPath + "\n(VFS Root OK • Ready to manage & extract files)");
-                        }
-                    });
-                    root.addView(btn);
-                }
-
-                mInitialActivity.setContentView(root);
-                mInitialActivity.renderViewHierarchy();
+                showDiagnosticScreen(mInitialActivity, "(none resolved)", null);
             } catch (Throwable t) {
                 t.printStackTrace();
             }
@@ -329,6 +399,70 @@ public final class ActivityThread {
         // Start Android's Main Event Loop
         android.util.Log.i("ActivityThread", "Entering Looper.loop() main event loop...");
         android.os.Looper.loop();
+    }
+
+    /**
+     * On-screen report of why the app did not start.
+     *
+     * This replaces a mock "file explorer" that showed hardcoded folder names: it looked
+     * like something was working while telling nothing about the actual failure. What is
+     * useful on a blank screen is the name of the activity that was tried, the exception
+     * that stopped it, and above all which framework classes KuDroid still has to
+     * implement — that list is exactly the next piece of work.
+     */
+    private void showDiagnosticScreen(Activity host, String attempted, Throwable error) {
+        android.widget.LinearLayout root = new android.widget.LinearLayout(host);
+        root.setBackgroundColor(0xFF101014);
+
+        android.widget.TextView title = new android.widget.TextView(host);
+        title.setText("KuDroid could not start this app");
+        title.setTextColor(0xFFFF7043);
+        title.setTextSize(22.0f);
+        root.addView(title);
+
+        android.widget.TextView act = new android.widget.TextView(host);
+        act.setText("\nActivity tried:\n  " + attempted);
+        act.setTextColor(0xFFB0BEC5);
+        act.setTextSize(14.0f);
+        root.addView(act);
+
+        if (mFrameworkGaps != null && !mFrameworkGaps.isEmpty()) {
+            android.widget.TextView head = new android.widget.TextView(host);
+            head.setText("\nMissing framework classes (" + mFrameworkGaps.size() + "):");
+            head.setTextColor(0xFFFFD54F);
+            head.setTextSize(16.0f);
+            root.addView(head);
+
+            for (int i = 0; i < mFrameworkGaps.size(); i++) {
+                android.widget.TextView item = new android.widget.TextView(host);
+                item.setText("  " + mFrameworkGaps.get(i));
+                item.setTextColor(0xFF81D4FA);
+                item.setTextSize(14.0f);
+                root.addView(item);
+            }
+
+            android.widget.TextView hint = new android.widget.TextView(host);
+            hint.setText("\nAdd these under framework/ then run framework/build.sh");
+            hint.setTextColor(0xFF78909C);
+            hint.setTextSize(13.0f);
+            root.addView(hint);
+        }
+
+        if (error != null) {
+            android.widget.TextView err = new android.widget.TextView(host);
+            err.setText("\nError:\n  " + describeChain(error));
+            err.setTextColor(0xFFEF9A9A);
+            err.setTextSize(13.0f);
+            root.addView(err);
+        }
+
+        android.widget.TextView tail = new android.widget.TextView(host);
+        tail.setText("\nFull detail is in stderr.log and classes.log.");
+        tail.setTextColor(0xFF546E7A);
+        tail.setTextSize(13.0f);
+        root.addView(tail);
+
+        host.setContentView(root);
     }
 
     private void handlePauseActivity() {

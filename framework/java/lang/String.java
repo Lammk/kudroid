@@ -182,8 +182,33 @@ public final class String implements CharSequence, Comparable<String> {
         return split(regex, 0);
     }
 
-    /** Split by fixed string only — KuART does not have a regex engine. */
-    public String[] split(String separator, int limit) {
+    /**
+     * Split on a regular expression, via java.util.regex.
+     *
+     * These four methods used to fake it: matches() compared for equality,
+     * replaceAll() did a literal replace, and split() only handled fixed strings. They
+     * returned wrong answers without throwing, so an app validating input with
+     * matches() silently got the wrong verdict. Now they use the real engine.
+     *
+     * The fast path for a plain single-character separator is kept because split(",")
+     * and split("/") are extremely common and building a Pattern for them is wasted
+     * work. It only triggers when the separator has no regex metacharacter.
+     */
+    public String[] split(String regex, int limit) {
+        if (regex.length() == 1 && !isRegexMeta(regex.charAt(0))) {
+            return splitLiteral(regex, limit);
+        }
+        return java.util.regex.Pattern.compile(regex).split(this, limit);
+    }
+
+    private static boolean isRegexMeta(char c) {
+        return c == '.' || c == '$' || c == '|' || c == '(' || c == ')' || c == '['
+                || c == ']' || c == '{' || c == '}' || c == '*' || c == '+' || c == '?'
+                || c == '\\' || c == '^';
+    }
+
+    /** Split on a literal separator, with java.util.regex's limit semantics. */
+    private String[] splitLiteral(String separator, int limit) {
         if (separator.length() == 0) {
             return new String[] { this };
         }
@@ -214,19 +239,15 @@ public final class String implements CharSequence, Comparable<String> {
     }
 
     public boolean matches(String regex) {
-        return equals(regex);
+        return java.util.regex.Pattern.matches(regex, this);
     }
 
     public String replaceAll(String regex, String replacement) {
-        return replace(regex, replacement);
+        return java.util.regex.Pattern.compile(regex).matcher(this).replaceAll(replacement);
     }
 
     public String replaceFirst(String regex, String replacement) {
-        int idx = indexOf(regex, 0);
-        if (idx < 0) {
-            return this;
-        }
-        return substring(0, idx) + replacement + substring(idx + regex.length());
+        return java.util.regex.Pattern.compile(regex).matcher(this).replaceFirst(replacement);
     }
 
     public static String valueOf(Object obj) {

@@ -19,6 +19,9 @@ void kuart_set_symbol_lookup(void* (*fn)(const char* symbol));
 // Hook to load guest native libraries when Java calls System.loadLibrary/Runtime.loadLibrary.
 void kuart_set_load_library_callback(int (*cb)(const char* libname));
 
+// Set the path to write missing framework classes log (classes.log).
+void kuart_set_missing_class_log_path(const char* path);
+
 // Load embedded framework.dex and all classes*.dex in `app_dir`.
 int kuart_init(const char* app_dir);
 

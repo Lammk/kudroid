@@ -1,54 +1,56 @@
-# khu n kh  kudroid android
+# KuDroid Android Framework (Java)
 
-m t khu n kh  android t i thi u (java) cung c p c c l p `android.*` m  c c  ng d ng
-c n   t i java khi kh i  ng, tr c khi chuy n sang m  `.so` g c.
+A lightweight Android Java framework providing standard `android.*` and core `java.*` runtime classes required by Android applications and game engines (Unity, Unreal Engine, Godot, NativeActivity, Minecraft) during startup and execution on KuART.
 
-## m c  ch
+---
 
-h u h t c c tr  ch i g c (unity il2cpp, godot, sdl) ch  ch m v o java m t th i gian ng n l c
-kh i  ng (`jni_onload`, `anativeactivity_oncreate`), sau   ch y ho n to n th ng qua
-c c th  vi n `.so` c/c++. khu n kh  n y cung c p v a   c c l p `android.*`
-  c c  ng d ng   kh ng g p s  c  khi t i java.
+## 🎯 Purpose
 
-## nh ng g   c bao g m
+Most Android native games and apps only touch the Java layer briefly during initialization (`JNI_OnLoad`, `ANativeActivity_onCreate`, activity lifecycle, asset extraction, surface creation), and then execute primarily in native C/C++ ARM64 `.so` libraries.
 
-**tri n khai th c t ** ( nh h ng  n h nh vi c a  ng d ng):
-- `android.util.log` → maps to `__android_log_print`
-- `android.os.handler` / `looper` / `messagequeue` / `message` / `bundle`
-- `android.app.activity` / `application` / `dialog` / `alertdialog`
-- `android.content.context` / `contextwrapper` / `intent` / `sharedpreferences`
-- `android.view.view` / `viewgroup` / `motionevent` / `window`
-- `android.widget.textview` / `button` / `linearlayout` / `toast`
-- `android.graphics.*` (canvas, paint, bitmap, color, rect, ...)
+This framework provides real working implementations of core data structures, graphics math, regular expressions, text formatting, and Android lifecycle classes, while providing safe stubs for peripheral background services.
 
-**m  ph ng** (tr  v  c c gi  tr  m c  nh   c c  ng d ng kh ng b  s  c ):
-- `android.telephony.telephonymanager`
-- `android.bluetooth.bluetoothadapter`
-- `android.app.notificationmanager` / `notification`
-- `android.location.locationmanager`
-- `android.net.wifi.wifimanager`
-- `android.hardware.sensormanager`
-- `android.media.audiomanager`
-- `android.os.vibrator` / `powermanager`
-- `android.net.connectivitymanager`
-- `android.provider.settings`
+---
 
-## x y d ng
+## 📦 Architecture & License Breakdown
+
+The framework comprises 778 Java source files organized into three tiers based on provenance and license terms:
+
+| Tier | Package Scope | Provenance | License |
+| :--- | :--- | :--- | :--- |
+| **KuDroid Core** | `android.app`, `android.view`, `android.widget`, `android.content`, `java.lang.*` | Custom Written | **MIT** |
+| **AOSP Core** | `android.util.*`, `android.graphics.*`, `android.os.*`, `com.android.internal.*`, `libcore.*` | Android 10 (AOSP `android-10.0.0_r47`) | **Apache-2.0** |
+| **Harmony Core** | `java.math.*`, `java.util.regex.*`, `java.text.*`, `java.util.Calendar`, `org.apache.harmony.*` | Apache Harmony (`libcore/luni`) | **Apache-2.0** |
+| **OpenJDK Core** | `java.util.BitSet`, `java.util.Optional*`, `java.util.PriorityQueue`, `java.util.StringJoiner` | OpenJDK (`libcore/ojluni`) | **GPLv2 + Classpath Exception** |
+
+---
+
+## 🛡️ License Compliance
+
+- **Root License**: KuDroid native C++ core, iOS bridge, and custom Java framework files are licensed under the **MIT License**.
+- **Apache 2.0 Components**: All original headers and copyright notices from the Android Open Source Project (AOSP) and the Apache Software Foundation are preserved verbatim.
+- **GPLv2 + Classpath Exception**: As granted by Oracle's Classpath Exception, compiling or linking OpenJDK utility files into `framework.dex` or embedding them in `include/kudroid/framework_dex_bytes.h` does not subject the surrounding KuDroid codebase or host applications to copyleft restrictions.
+- For complete license texts and attributions, see `NOTICE`, `LICENSE-APACHE-2.0`, and `LICENSE-GPLv2-CPE` at the repository root.
+
+---
+
+## 🔨 Building Framework DEX
+
+Building the framework compiles all Java sources with `javac` (targeting Java 8 bytecode), converts `.class` files into a compact `framework.dex` via `d8/r8`, and generates the embedded C++ byte header `include/kudroid/framework_dex_bytes.h`:
 
 ```bash
-# y u c u jdk (javac + jar)
-./build.sh                 # t o ra framework/build/framework.jar
-./build.sh --bootimage     # c ng t o ra framework/build/boot.jar cho avian
+# Requires JDK (javac) and Python 3
+bash framework/build.sh
 ```
 
-## th m l p
+---
 
-1. t o t p `.java` d i `framework/android/<package>/`.
-2. ch y `./build.sh`   bi n d ch l i.
-3. t p jar  c nh ng v o t p nh  ph n kudroid d i d ng classpath kh i  ng avian.
+## 🧪 Verification
 
-##  ng g p
+All framework classes are verified by the KuART test suite in `kuart-tests/`:
 
-khu n kh  n y c  t nh t i thi u. n u m t  ng d ng c n m t l p
-b  thi u, h y th m n  (ho c m  m t v n  ). m c ti u l  ph t tri n n  d a tr n nhu c u th c t  c a  ng d ng,
-kh ng ph i   sao ch p to n b  android sdk.
+```bash
+# Build and run the framework integration test
+cmake --build build --target test_kuart_framework
+./build/test_kuart_framework
+```

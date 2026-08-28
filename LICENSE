@@ -19,3 +19,19 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+-------------------------------------------------------------------------------
+Third-Party and Framework Components Exception:
+-------------------------------------------------------------------------------
+The above MIT License applies to the core KuDroid C/C++ runtime, iOS bridge,
+tooling, and custom Java framework implementation files.
+
+Certain framework sources under framework/ and the compiled binary artifact
+include/kudroid/framework_dex_bytes.h incorporate third-party components licensed
+under Apache 2.0 (AOSP, Apache Harmony) and GNU GPLv2 with Classpath Exception
+(OpenJDK).
+
+For complete details, attributions, and license texts, please consult:
+- NOTICE
+- LICENSE-APACHE-2.0
+- LICENSE-GPLv2-CPE

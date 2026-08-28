@@ -735,12 +735,20 @@ extern "C" void kudroid_set_log_dir(const char* dir) {
     // nhất không (trả lời "iPhone vẫn chạy app cũ?").
     const char* stamp = kudroid_build_stamp();
     writeLogFile("kudroid_version.txt", std::string(stamp) + "\n");
+
+    // Đảm bảo KuART classes.log luôn ghi vào Documents/ của app iPhone
+    std::string classesLogPath = (std::filesystem::path(g_logDir) / "classes.log").string();
+    kuart_set_missing_class_log_path(classesLogPath.c_str());
 }
 
 extern "C" void kudroid_set_documents_dir(const char* dir) {
-    if (dir) {
+    if (dir && dir[0] != '\0') {
         kudroid::VFSPathRemapper::getInstance().setDocumentsDirectory(dir);
         kudroid::PermissionManager::getInstance().init(dir);
+
+        // Đảm bảo classes.log được ghi vào thư mục Documents của app
+        std::string classesLogPath = (std::filesystem::path(dir) / "classes.log").string();
+        kuart_set_missing_class_log_path(classesLogPath.c_str());
     }
 }
 

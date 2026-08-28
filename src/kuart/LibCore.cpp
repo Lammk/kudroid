@@ -866,18 +866,83 @@ bool Invoke_java_lang_reflect_Field(Interpreter* interp, const char* name,
     return true;
 }
 
-bool Invoke_java_lang_reflect_Array(Interpreter* interp, const char* name,
-                                    const DexValue* args, size_t num_args,
-                                    DexValue* result) {
+// Allocate an n-dimensional array. Recursive: the outer array holds references to
+// arrays one dimension smaller, which is how the JVM represents T[a][b].
+DexArray* AllocMultiArray(Interpreter* interp, const std::string& component_descriptor,
+                          const int32_t* dims, size_t ndims) {
+    DexClassLinker* linker = interp->linker();
+    if (ndims == 0) return nullptr;
+
+    // Descriptor for this level: one '[' per remaining dimension.
+    std::string desc;
+    desc.reserve(ndims + component_descriptor.size());
+    for (size_t i = 0; i < ndims; ++i) desc += '[';
+    desc += component_descriptor;
+
+    DexClass* array_class = linker->FindClass(desc.c_str());
+    if (array_class == nullptr) return nullptr;
+
+    DexArray* arr = linker->AllocArray(array_class, dims[0]);
+    if (arr == nullptr || ndims == 1) return arr;
+
+    for (int32_t i = 0; i < dims[0]; ++i) {
+        DexArray* sub = AllocMultiArray(interp, component_descriptor, dims + 1, ndims - 1);
+        if (sub == nullptr) return nullptr;
+        arr->Set<DexObject*>(i, sub);
+    }
+    return arr;
+}
+
+bool Invoke_java_lang_reflect_Array(Interpreter* interp, const DexMethod* method,
+                                    const char* name, const DexValue* args,
+                                    size_t num_args, DexValue* result) {
     DexClassLinker* linker = interp->linker();
 
     if (std::strcmp(name, "newInstance") == 0) {
         DexClass* component = ClassOf(interp, args[0].l);
-        const int32_t length = num_args > 1 ? args[1].i : 0;
         if (component == nullptr || component->descriptor == nullptr) {
             interp->ThrowException("Ljava/lang/IllegalArgumentException;", "null component type");
             return true;
         }
+
+        // Two overloads share this name. DEX has no multianewarray opcode, so d8
+        // compiles `new T[a][b]` into newInstance(Class, int[]) — dispatch on the
+        // declared signature rather than guessing from the argument value, which
+        // would confuse an int[] handle with an int.
+        const bool multi = method != nullptr && method->signature != nullptr &&
+                           std::strstr(method->signature, "[I)") != nullptr;
+
+        if (multi) {
+            auto* dims_arr = reinterpret_cast<DexArray*>(num_args > 1 ? args[1].l : nullptr);
+            if (dims_arr == nullptr || dims_arr->length <= 0) {
+                interp->ThrowException("Ljava/lang/IllegalArgumentException;",
+                                       "empty dimensions array");
+                return true;
+            }
+            if (dims_arr->length > 255) {
+                interp->ThrowException("Ljava/lang/IllegalArgumentException;",
+                                       "too many dimensions");
+                return true;
+            }
+            std::vector<int32_t> dims(static_cast<size_t>(dims_arr->length));
+            for (int32_t i = 0; i < dims_arr->length; ++i) {
+                dims[static_cast<size_t>(i)] = dims_arr->Get<int32_t>(i);
+                if (dims[static_cast<size_t>(i)] < 0) {
+                    interp->ThrowException("Ljava/lang/NegativeArraySizeException;",
+                                           std::to_string(dims[static_cast<size_t>(i)]));
+                    return true;
+                }
+            }
+            result->l = AllocMultiArray(interp, component->descriptor, dims.data(),
+                                        dims.size());
+            if (result->l == nullptr) {
+                interp->ThrowException("Ljava/lang/OutOfMemoryError;",
+                                       "Array.newInstance multi-dimensional");
+            }
+            return true;
+        }
+
+        const int32_t length = num_args > 1 ? args[1].i : 0;
         if (length < 0) {
             interp->ThrowException("Ljava/lang/NegativeArraySizeException;",
                                    std::to_string(length));
@@ -2151,7 +2216,7 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
     if (std::strcmp(desc, "Ljava/lang/reflect/Method;") == 0) return Invoke_java_lang_reflect_Method(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/lang/reflect/Constructor;") == 0) return Invoke_java_lang_reflect_Constructor(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/lang/reflect/Field;") == 0) return Invoke_java_lang_reflect_Field(interp, name, args, num_args, result);
-    if (std::strcmp(desc, "Ljava/lang/reflect/Array;") == 0) return Invoke_java_lang_reflect_Array(interp, name, args, num_args, result);
+    if (std::strcmp(desc, "Ljava/lang/reflect/Array;") == 0) return Invoke_java_lang_reflect_Array(interp, method, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/io/File;") == 0) return Invoke_java_io_File(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/io/FileInputStream;") == 0) return Invoke_java_io_FileInputStream(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/io/FileOutputStream;") == 0) return Invoke_java_io_FileOutputStream(interp, name, args, num_args, result);

@@ -155,6 +155,10 @@ extern "C" void kuart_set_load_library_callback(int (*cb)(const char*)) {
     kudroid::kuart::LibCoreSetLoadLibraryCallback(cb);
 }
 
+extern "C" void kuart_set_missing_class_log_path(const char* path) {
+    kudroid::kuart::DexClassLinker::SetMissingClassLogPath(path);
+}
+
 extern "C" int kuart_init(const char* app_dir) {
     std::lock_guard<std::mutex> lock(g_mtx);
     if (g_rt != nullptr && g_rt->ready) return 1;

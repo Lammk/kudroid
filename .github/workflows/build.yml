@@ -45,7 +45,7 @@ jobs:
             --target test_art_dex test_kuart test_kuart_interp test_kuart_object \
                      test_kuart_jni test_kuart_exc test_kuart_reflect test_kuart_libcore \
                      test_kuart_filled_array test_kuart_jni_float test_kuart_stub \
-                     test_manifest_parse test_manifest_text
+                     test_kuart_framework test_manifest_parse test_manifest_text
 
       - name: Run KuART tests
         working-directory: build
@@ -54,7 +54,7 @@ jobs:
           for t in test_art_dex test_kuart test_kuart_interp test_kuart_object \
                    test_kuart_jni test_kuart_exc test_kuart_reflect test_kuart_libcore \
                    test_kuart_filled_array test_kuart_jni_float test_kuart_stub \
-                   test_manifest_parse test_manifest_text; do
+                   test_kuart_framework test_manifest_parse test_manifest_text; do
             echo "──────── $t ────────"
             if ./$t; then echo "PASS $t"; else echo "FAIL $t"; fail=1; fi
           done
