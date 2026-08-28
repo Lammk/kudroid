@@ -23,6 +23,14 @@ struct ManifestInfo {
     std::string mainActivity; // activity has intent-filter MAIN+LAUNCHER
     std::string appClass;     // android:name on <application>, if any
 
+    // android:appComponentFactory on <application>. Android instantiates this
+    // class before any component and routes every Application/Activity/Service/
+    // Provider/Receiver instantiation through it. Its <clinit> is therefore the
+    // first guest code that runs, and build tools (AGP resource shrinking,
+    // string-pool obfuscators, DI frameworks) rely on that ordering: an app whose
+    // factory never initialises can find its own static state empty.
+    std::string appComponentFactory;
+
     // Every activity the manifest declares, in declaration order. This is the
     // authoritative list: Android launches what the manifest says, so KuDroid can
     // walk real entries instead of inventing names like "<pkg>.Main".

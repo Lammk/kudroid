@@ -420,6 +420,7 @@ Check(builder.TypeIndexOf("LMyEx;") == kTypeMyEx, "index  n  nh gi a hai l t bui
     struct CallResult {
         DexValue value;
         bool threw = false;
+        std::string trace;
     };
     const auto call = [&](const char* name, const char* sig,
                           std::vector<DexValue> args) -> CallResult {
@@ -433,6 +434,7 @@ std::printf("  FAIL not found %s%s\n", name, sig);
         }
         r.value = interp.Execute(m, args.data(), args.size());
         r.threw = interp.HasPendingException();
+        r.trace = interp.pending_exception_trace();
         interp.ClearPendingException();
         return r;
     };
@@ -500,6 +502,38 @@ Check(r.threw, "<clinit> n m exception th  lan ra ch  d ng class");
         kudroid::kuart::DexClass* bad = linker.FindClass("LBad;");
         Check(bad != nullptr && bad->status == kudroid::kuart::DexClass::Status::kError,
 "class c  <clinit> error b   nh d u kError");
+    }
+
+    // ── stack trace ──
+    //
+    // An exception used to be reported as a bare message with no location, so a
+    // failure deep in guest bytecode could not be traced to the method that caused
+    // it. The frames are captured at throw time because the C++ frames are already
+    // gone by the time a caller reports the exception.
+    {
+        const CallResult r = call("uncaught", "()I", {});
+        Check(r.threw, "uncaught still propagates");
+        Check(r.trace.find("E.uncaught") != std::string::npos,
+              "stack trace names the throwing method");
+        std::printf("  trace:\n%s", r.trace.c_str());
+    }
+    {
+        // Nested: the callee throws, the caller has no handler, so both frames must
+        // appear with the innermost one first.
+        const CallResult r = call("noMatch", "(II)I",
+                                  {DexValue::Int(1), DexValue::Int(0)});
+        Check(r.threw, "noMatch propagates");
+        const size_t inner = r.trace.find("E.noMatch");
+        Check(inner != std::string::npos, "nested trace contains the throwing frame");
+    }
+    {
+        // Caught exceptions leave nothing behind: a stale trace would later be
+        // attributed to an unrelated failure.
+        const CallResult r = call("catchArith", "(II)I",
+                                  {DexValue::Int(1), DexValue::Int(0)});
+        Check(!r.threw, "caught exception does not propagate");
+        Check(interp.pending_exception_trace().empty(),
+              "trace cleared once the exception is handled");
     }
 
 std::printf("=== %s (%d error) ===\n", g_failures == 0 ? "PASSED" : "FAILED", g_failures);

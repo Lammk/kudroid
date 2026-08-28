@@ -13,7 +13,8 @@ int main() {
         "<?xml version='1.0' encoding='utf-8'?>\n"
         "<manifest xmlns:android='http://schemas.android.com/apk/res/android'\n"
         "    package='com.example.app'>\n"
-        "  <application android:name='.MyApp' android:label='Demo'>\n"
+        "  <application android:name='.MyApp' android:label='Demo'\n"
+        "      android:appComponentFactory='androidx.core.app.CoreComponentFactory'>\n"
         "    <activity android:name='.SplashActivity' android:exported='false'/>\n"
         "    <activity android:name='com.example.app.RealMain'>\n"
         "      <intent-filter>\n"
@@ -36,6 +37,10 @@ int main() {
     check(info.mainActivity == "com.example.app.RealMain", "mainActivity", info.mainActivity);
     // android:name on <application> is expanded from ".MyApp".
     check(info.appClass == "com.example.app.MyApp", "appClass", info.appClass);
+    // android:appComponentFactory runs before any component, so it has to survive
+    // parsing; an app whose factory never initialises finds its own statics empty.
+    check(info.appComponentFactory == "androidx.core.app.CoreComponentFactory",
+          "appComponentFactory", info.appComponentFactory);
     check(info.activities.size() == 3, "activities", std::to_string(info.activities.size()));
 
     const auto order = info.launchOrder();

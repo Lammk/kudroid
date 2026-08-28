@@ -328,14 +328,15 @@ extern "C" void kuart_free_class_list(char** list, size_t count) {
     for (size_t i = 0; i < count; ++i) std::free(list[i]);
 }
 
-extern "C" int kuart_launch_activity(const char* activity_name,
-                                     const char* const* extra_candidates, int extra_count) {
+extern "C" int kuart_launch_app(const char* package_name, const char* component_factory,
+                                const char* app_class, const char* activity_name,
+                                const char* const* extra_candidates, int extra_count) {
     if (g_rt == nullptr || !g_rt->ready) {
-        SetError("kuart_launch_activity: runtime not init yet");
+        SetError("kuart_launch_app: runtime not init yet");
         return 0;
     }
     if (activity_name == nullptr || activity_name[0] == '\0') {
-        SetError("kuart_launch_activity: empty activity name");
+        SetError("kuart_launch_app: empty activity name");
         return 0;
     }
 
@@ -345,22 +346,42 @@ extern "C" int kuart_launch_activity(const char* activity_name,
         return 0;
     }
 
-    const int total = 1 + (extra_candidates != nullptr ? extra_count : 0);
+    // Layout must match ActivityThread.main: package, factory, app class, then the
+    // activity candidates. Absent entries are the empty string rather than null so
+    // the Java side never has to null-check before calling isEmpty().
+    const int kHeader = 3;
+    const int total = kHeader + 1 + (extra_candidates != nullptr ? extra_count : 0);
     auto* args_array = g_rt->linker.AllocArray(string_array, total);
     if (args_array == nullptr) {
         SetError("args array could not be allocated");
         return 0;
     }
-    args_array->Set<DexObject*>(0, g_rt->linker.NewString(activity_name));
+    const auto put = [&](int index, const char* value) {
+        args_array->Set<DexObject*>(index,
+                                    g_rt->linker.NewString(value != nullptr ? value : ""));
+    };
+    put(0, package_name);
+    put(1, component_factory);
+    put(2, app_class);
+    put(kHeader, activity_name);
     for (int i = 0; i < extra_count && extra_candidates != nullptr; ++i) {
         if (extra_candidates[i] == nullptr || extra_candidates[i][0] == '\0') continue;
-        args_array->Set<DexObject*>(1 + i, g_rt->linker.NewString(extra_candidates[i]));
+        put(kHeader + 1 + i, extra_candidates[i]);
     }
 
-    Log("call ActivityThread.main(\"%s\") + %d backup candidate", activity_name,
-        total - 1);
+    Log("call ActivityThread.main(pkg=\"%s\" factory=\"%s\" app=\"%s\" activity=\"%s\") + %d backup candidate",
+        package_name != nullptr ? package_name : "",
+        component_factory != nullptr ? component_factory : "",
+        app_class != nullptr ? app_class : "", activity_name,
+        total - kHeader - 1);
     const DexValue arg = DexValue::Ref(args_array);
     return CallActivityThreadStatic("main", "([Ljava/lang/String;)V", &arg, 1) ? 1 : 0;
+}
+
+extern "C" int kuart_launch_activity(const char* activity_name,
+                                     const char* const* extra_candidates, int extra_count) {
+    return kuart_launch_app(nullptr, nullptr, nullptr, activity_name, extra_candidates,
+                            extra_count);
 }
 
 extern "C" void kuart_send_lifecycle_event(int event_type) {
@@ -371,6 +392,24 @@ extern "C" void kuart_send_lifecycle_event(int event_type) {
 extern "C" void kuart_post_touch_event(int action, float x, float y) {
     const DexValue args[3] = {DexValue::Int(action), DexValue::Float(x), DexValue::Float(y)};
     CallActivityThreadStatic("postTouchEvent", "(IFF)V", args, 3);
+}
+
+extern "C" int kuart_take_pending_exception(const char** out) {
+    // Per-thread: the exception itself is per-thread, so the buffer backing the
+    // returned string has to be too, otherwise two threads reporting at once would
+    // read each other's text.
+    static thread_local std::string s_description;
+    if (out != nullptr) *out = "";
+    if (g_rt == nullptr || !g_rt->ready || g_rt->interpreter == nullptr) return 0;
+    if (!g_rt->interpreter->HasPendingException()) return 0;
+
+    s_description = g_rt->interpreter->DescribePendingException();
+    g_rt->interpreter->ClearPendingException();
+    // The JNI env caches its own copy of the pointer, so clearing only the
+    // interpreter would leave ExceptionCheck() returning true forever.
+    if (g_rt->jni != nullptr) g_rt->jni->ClearException();
+    if (out != nullptr) *out = s_description.c_str();
+    return 1;
 }
 
 extern "C" const char* kuart_last_error(void) {

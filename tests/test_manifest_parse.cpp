@@ -117,13 +117,16 @@ int main() {
     // 5 name, 6 com.example.game.SplashActivity (NOT launcher),
     // 7 intent-filter, 8 action, 9 android.intent.action.MAIN,
     // 10 category, 11 android.intent.category.LAUNCHER,
-    // 12 com.example.game.MainActivity (real LAUNCHER)
+    // 12 com.example.game.MainActivity (real LAUNCHER),
+    // 13 appComponentFactory, 14 its value, 15 com.example.game.GameApp
     const std::vector<std::u16string> strings = {
         u"manifest", u"package", u"com.example.game", u"application",
         u"activity", u"name", u"com.example.game.SplashActivity",
         u"intent-filter", u"action", u"android.intent.action.MAIN",
         u"category", u"android.intent.category.LAUNCHER",
         u"com.example.game.MainActivity",
+        u"appComponentFactory", u"androidx.core.app.CoreComponentFactory",
+        u"com.example.game.GameApp",
     };
 
     std::vector<std::uint8_t> doc;
@@ -139,6 +142,8 @@ int main() {
 
     // <manifest package="com.example.game">
     doc = appendChunk(doc, startElement(0, {{1, 2}}));
+    //   <application name="...GameApp" appComponentFactory="androidx...CoreComponentFactory">
+    doc = appendChunk(doc, startElement(3, {{5, 15}, {13, 14}}));
     //   <activity name="...SplashActivity"> </activity> (first, NO launcher)
     doc = appendChunk(doc, startElement(4, {{5, 6}}));
     doc = appendChunk(doc, endElement(4));
@@ -156,6 +161,8 @@ int main() {
     doc = appendChunk(doc, endElement(7));
     //   </activity>
     doc = appendChunk(doc, endElement(4));
+    // </application>
+    doc = appendChunk(doc, endElement(3));
     // </manifest>
     doc = appendChunk(doc, endElement(0));
 
@@ -174,6 +181,12 @@ int main() {
     };
     check(info.packageName == "com.example.game", "packageName", info.packageName);
     check(info.mainActivity == "com.example.game.MainActivity", "mainActivity (LAUNCHER)", info.mainActivity);
+    check(info.appClass == "com.example.game.GameApp", "appClass", info.appClass);
+    // Android instantiates the factory before any component, so its <clinit> runs
+    // before all app code. Losing it here means that initialisation never happens
+    // and whatever the app sets up there is empty when it is later read.
+    check(info.appComponentFactory == "androidx.core.app.CoreComponentFactory",
+          "appComponentFactory", info.appComponentFactory);
 
     // Every declared activity is recorded, not just the launcher. This is what lets
     // the runtime try real manifest entries instead of inventing names such as

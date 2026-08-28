@@ -1528,6 +1528,35 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                 kudroid_android_log_message(5, "kudroid_core", msg);
                                 std::fprintf(stderr, "%s\n", msg);
                             }
+
+                            // JNI requires native code to check and clear pending
+                            // exceptions before returning to Java. Libraries that
+                            // ignore the rule leave one in flight, and the
+                            // interpreter then attributes it to the Java call that
+                            // triggered the load: an exception raised inside a
+                            // JNI_OnLoad callback came back out of
+                            // System.loadLibrary("PlayFabMultiplayer"), which
+                            // Minecraft only guards with
+                            // catch(UnsatisfiedLinkError), so MainActivity.<clinit>
+                            // died on an unrelated ArrayIndexOutOfBoundsException.
+                            //
+                            // Done on every exit path, not just the clean one: a
+                            // library that aborted mid-callback is even more likely
+                            // to have left one behind. The description carries the
+                            // Java stack trace so the discarded exception stays
+                            // diagnosable instead of vanishing.
+                            const char* leaked = nullptr;
+                            if (kuart_take_pending_exception(&leaked)) {
+                                snprintf(msg, sizeof(msg),
+                                         "[kudroid_core] JNI_OnLoad(%s) left a pending Java exception; cleared",
+                                         filename.c_str());
+                                kudroid_android_log_message(5, "kudroid_core", msg);
+                                // The description carries a multi-line stack trace,
+                                // so it goes straight to stderr rather than through
+                                // the fixed-size log buffer that would truncate it.
+                                std::fprintf(stderr, "%s:\n%s\n", msg,
+                                             leaked != nullptr ? leaked : "?");
+                            }
                         }
                     }
                 }
@@ -1617,6 +1646,11 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                         // app actually declares.
                         std::vector<std::string> manifestActivities;
                         std::string manifestAppClass;
+                        // android:appComponentFactory. Android instantiates it before
+                        // any component, so its <clinit> is the first guest code to
+                        // run; skipping it leaves whatever the app initialises there
+                        // empty. Generic: whatever the manifest names, nothing assumed.
+                        std::string manifestComponentFactory;
 
                         // ƯU TIÊN 1: parse AndroidManifest.xml ĐÃ GIẢI NÉN trong
                         // appDir — nguồn chính xác duy nhất. Log cũ cho thấy
@@ -1646,10 +1680,14 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                 appendAndEcho("[kudroid_core] Manifest parse: package='" + mi.packageName +
                                               "' mainActivity='" + mi.mainActivity + "'" +
                                               " activities=" + std::to_string(mi.activities.size()) +
-                                              (mi.appClass.empty() ? "" : " application='" + mi.appClass + "'"));
+                                              (mi.appClass.empty() ? "" : " application='" + mi.appClass + "'") +
+                                              (mi.appComponentFactory.empty()
+                                                   ? ""
+                                                   : " appComponentFactory='" + mi.appComponentFactory + "'"));
                                 if (!mi.mainActivity.empty()) targetActivity = mi.mainActivity;
                                 if (!mi.packageName.empty()) pkgName = mi.packageName;
                                 manifestAppClass = mi.appClass;
+                                manifestComponentFactory = mi.appComponentFactory;
                                 // The manifest is the authoritative list of what this
                                 // app can launch: launcher activities first, then the
                                 // rest. Feeding these to ActivityThread replaces the
@@ -1922,10 +1960,20 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                             appendAndEcho("[kudroid_core] Fallback candidates: " +
                                           std::to_string(fallbackPtrs.size()));
                         }
+                        if (!manifestComponentFactory.empty()) {
+                            appendAndEcho("[kudroid_core] appComponentFactory: " +
+                                          manifestComponentFactory);
+                        }
+                        if (!manifestAppClass.empty()) {
+                            appendAndEcho("[kudroid_core] Application class: " + manifestAppClass);
+                        }
                         appendAndEcho("[kudroid_core] Launching Android ActivityThread runtime (KuART)...");
-                        if (!kuart_launch_activity(targetActivity.c_str(),
-                                                   fallbackPtrs.empty() ? nullptr : fallbackPtrs.data(),
-                                                   static_cast<int>(fallbackPtrs.size()))) {
+                        if (!kuart_launch_app(pkgName.c_str(),
+                                              manifestComponentFactory.c_str(),
+                                              manifestAppClass.c_str(),
+                                              targetActivity.c_str(),
+                                              fallbackPtrs.empty() ? nullptr : fallbackPtrs.data(),
+                                              static_cast<int>(fallbackPtrs.size()))) {
                             appendAndEcho("[kudroid_core] ERROR: ActivityThread.main failed: " +
                                           std::string(kuart_last_error()));
                         }
@@ -2731,6 +2779,15 @@ extern "C" const char* kudroid_jni_massive_so_test(const char* path) {
                 JNI_OnLoad_t jniOnLoad = reinterpret_cast<JNI_OnLoad_t>(jniOnLoadAddr);
                 jint version = jniOnLoad(kuart_get_javavm(), nullptr);
                 log += "[kudroid_jni] JNI_OnLoad returned version: 0x" + std::to_string(version) + "\n";
+                // Same rule as the System.loadLibrary path: a library that left a
+                // Java exception in flight must not have it attributed to whatever
+                // runs next on this thread.
+                const char* leaked = nullptr;
+                if (kuart_take_pending_exception(&leaked)) {
+                    log += "[kudroid_jni] JNI_OnLoad left a pending Java exception; cleared:\n";
+                    log += leaked != nullptr ? leaked : "?";
+                    log += "\n";
+                }
                 mirrorCrash(log);
             }
             

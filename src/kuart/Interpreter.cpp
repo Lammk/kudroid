@@ -1,5 +1,6 @@
 #include "kudroid/kuart/Interpreter.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -86,10 +87,97 @@ int32_t CompareLong(T a, T b) {
 thread_local DexObject* Interpreter::pending_exception_ = nullptr;
 thread_local size_t Interpreter::depth_ = 0;
 thread_local uint64_t Interpreter::instructions_executed_ = 0;
+thread_local std::vector<const DexFrame*> Interpreter::call_stack_;
+thread_local std::string Interpreter::pending_exception_trace_;
+
+namespace {
+
+// "Lcom/foo/Bar;" -> "com.foo.Bar"; leaves anything else untouched.
+std::string DescriptorToDotted(const char* descriptor) {
+    if (descriptor == nullptr) return "?";
+    std::string s(descriptor);
+    if (s.size() > 2 && s.front() == 'L' && s.back() == ';') {
+        s = s.substr(1, s.size() - 2);
+    }
+    std::replace(s.begin(), s.end(), '/', '.');
+    return s;
+}
+
+// One stack frame rendered the way java.lang.Throwable does it. The line number
+// comes from the DEX debug info when present (release APKs usually keep it, and
+// d8 emits it for framework.dex), otherwise the dex_pc is shown instead so the
+// location is still identifiable in a disassembly.
+std::string DescribeFrame(const DexFrame* frame) {
+    if (frame == nullptr) return "    at <null frame>";
+    const DexMethod* method = frame->method();
+    if (method == nullptr) return "    at <null method>";
+
+    std::string cls = method->declaring_class != nullptr
+                          ? method->declaring_class->PrettyName()
+                          : DescriptorToDotted(nullptr);
+    const char* name = method->name != nullptr ? method->name : "?";
+
+    std::string where;
+    const char* source = nullptr;
+    if (method->dex_file != nullptr && method->declaring_class != nullptr &&
+        method->declaring_class->class_def != nullptr) {
+        source = method->dex_file->GetSourceFile(*method->declaring_class->class_def);
+    }
+
+    uint32_t line = 0;
+    bool have_line = false;
+    if (method->dex_file != nullptr && method->code_item != nullptr) {
+        art::CodeItemDebugInfoAccessor accessor(*method->dex_file, method->code_item,
+                                                method->dex_method_index);
+        have_line = accessor.GetLineNumForPc(frame->dex_pc(), &line);
+    }
+
+    if (source != nullptr && have_line) {
+        where = std::string(source) + ":" + std::to_string(line);
+    } else if (source != nullptr) {
+        where = std::string(source) + ":pc=" + std::to_string(frame->dex_pc());
+    } else {
+        where = "pc=" + std::to_string(frame->dex_pc());
+    }
+    return "    at " + cls + "." + name + "(" + where + ")";
+}
+
+}  // namespace
+
+std::string Interpreter::BuildStackTrace() const {
+    std::string out;
+    // Innermost frame first, matching the JVM.
+    for (size_t i = call_stack_.size(); i-- > 0;) {
+        out += DescribeFrame(call_stack_[i]);
+        out += '\n';
+    }
+    return out;
+}
+
+std::string Interpreter::DescribePendingException() const {
+    if (pending_exception_ == nullptr) return {};
+    std::string out = pending_exception_->clazz != nullptr
+                          ? pending_exception_->clazz->PrettyName()
+                          : std::string("<unknown exception>");
+    if (!last_error_.empty()) {
+        out += " (";
+        out += last_error_;
+        out += ")";
+    }
+    if (!pending_exception_trace_.empty()) {
+        out += '\n';
+        out += pending_exception_trace_;
+    }
+    return out;
+}
 
 void Interpreter::ThrowException(const char* descriptor, const std::string& message) {
     last_error_ = std::string(descriptor) + ": " + message;
+    pending_exception_trace_ = BuildStackTrace();
     std::fprintf(stderr, "[KuART][EXCEPTION] 💥 %s: %s\n", descriptor, message.c_str());
+    if (!pending_exception_trace_.empty()) {
+        std::fputs(pending_exception_trace_.c_str(), stderr);
+    }
 
     DexClass* klass = linker_ != nullptr ? linker_->FindClass(descriptor) : nullptr;
     if (klass != nullptr) {
@@ -442,6 +530,16 @@ DexValue Interpreter::Execute(const DexMethod* method, const DexValue* args, siz
     // nested invokes stay cheap; the mutex is recursive either way.
     std::unique_ptr<VmLockGuard> vm_lock;
     if (depth_ == 0) vm_lock = std::make_unique<VmLockGuard>();
+
+    // Publish the frame for BuildStackTrace(). The pop must happen on EVERY exit
+    // path, including a C++ exception escaping a native downcall, or the vector
+    // would keep a pointer to a destroyed stack frame.
+    struct StackEntry {
+        explicit StackEntry(const DexFrame* f) { call_stack_.push_back(f); }
+        ~StackEntry() {
+            if (!call_stack_.empty()) call_stack_.pop_back();
+        }
+    } stack_entry(&frame);
 
     ++depth_;
     result = ExecuteFrame(&frame);
@@ -1630,6 +1728,10 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                 pending_exception_ = ex;
                 last_error_ = std::string("throw ") +
                               (ex->clazz != nullptr ? ex->clazz->PrettyName() : "?");
+                // Guest `throw` skips ThrowException(), so the trace has to be
+                // captured here too or an app-thrown exception would arrive with no
+                // location at all.
+                pending_exception_trace_ = BuildStackTrace();
                 return return_value;
             }
 

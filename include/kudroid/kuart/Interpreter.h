@@ -39,8 +39,15 @@ public:
     // Pending exception management.
     bool HasPendingException() const { return pending_exception_ != nullptr; }
     DexObject* pending_exception() const { return pending_exception_; }
-    void ClearPendingException() { pending_exception_ = nullptr; }
+    void ClearPendingException() {
+        pending_exception_ = nullptr;
+        pending_exception_trace_.clear();
+    }
     void SetPendingException(DexObject* ex) { pending_exception_ = ex; }
+
+    // Stack trace captured when the in-flight exception was thrown. Empty when the
+    // exception came from native code (JNI Throw) rather than from bytecode.
+    const std::string& pending_exception_trace() const { return pending_exception_trace_; }
 
     const std::string& last_error() const { return last_error_; }
     uint64_t instructions_executed() const { return instructions_executed_; }
@@ -51,6 +58,19 @@ public:
 
     // Throw exception by class descriptor.
     void ThrowException(const char* descriptor, const std::string& message);
+
+    // Java-side call stack of the CURRENT thread, innermost frame first, one entry
+    // per line: "    at com.foo.Bar.baz(Bar.java:12)".
+    //
+    // Without this, an exception thrown deep inside guest bytecode is reported as a
+    // bare "ArrayIndexOutOfBoundsException: index 0 length 0" with no indication of
+    // which method produced it — the failure that stopped Minecraft's
+    // MainActivity.<clinit> could not be located from the log at all.
+    std::string BuildStackTrace() const;
+
+    // Description of the in-flight exception including its stack trace, for callers
+    // that have to report an exception they are about to discard (JNI_OnLoad).
+    std::string DescribePendingException() const;
 
 private:
     DexValue ExecuteFrame(DexFrame* frame);
@@ -87,6 +107,16 @@ private:
     static thread_local DexObject* pending_exception_;
     static thread_local size_t depth_;
     static thread_local uint64_t instructions_executed_;
+
+    // Live frames of this thread, outermost first. Frames live on the C++ stack for
+    // the duration of Execute(), so storing raw pointers is safe as long as every
+    // push is matched by a pop — Execute() does that with a scope guard so an early
+    // return or a C++ exception cannot leave a dangling entry.
+    static thread_local std::vector<const DexFrame*> call_stack_;
+
+    // Stack trace captured when the in-flight exception was thrown. Taken at throw
+    // time because by the time a caller reports it the frames are already unwound.
+    static thread_local std::string pending_exception_trace_;
 };
 
 }  // namespace kuart

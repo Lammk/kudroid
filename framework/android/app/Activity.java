@@ -32,6 +32,18 @@ public class Activity extends ContextThemeWrapper {
     public Activity() {
     }
 
+    /**
+     * Give the Activity its base Context.
+     *
+     * Called by ActivityThread right after instantiation, the way Android does it.
+     * ContextWrapper.attachBaseContext is protected and android.app cannot reach it
+     * across the package boundary, so this public entry point exists for the same
+     * reason Application.attach does.
+     */
+    public void attach(Context base) {
+        attachBaseContext(base);
+    }
+
     public void setRequestedOrientation(int requestedOrientation) {
         mRequestedOrientation = requestedOrientation;
         try {

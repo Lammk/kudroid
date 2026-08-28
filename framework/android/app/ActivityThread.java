@@ -24,6 +24,45 @@ public final class ActivityThread {
     private java.util.ArrayList<String> mFrameworkGaps = new java.util.ArrayList<String>();
     private H mH;
 
+    /** The app's AppComponentFactory, when the manifest declares one. */
+    private AppComponentFactory mComponentFactory;
+    /** The app's Application instance, once bootstrapped. */
+    private Application mApplication;
+
+    /**
+     * Package name from AndroidManifest.xml.
+     *
+     * Static because Context implementations need it before any ActivityThread
+     * instance is reachable, and because there is exactly one app per process.
+     */
+    private static String sPackageName = "";
+
+    public static String getPackageName() {
+        return sPackageName;
+    }
+
+    /**
+     * The running ActivityThread, or null before attach().
+     *
+     * Native libraries reach the Application through this static — the JNI pattern
+     * is ActivityThread.currentActivityThread().getApplication() to obtain a Context
+     * without being handed one. It is standard enough that SDKs which never see an
+     * Activity (telemetry, networking, crash reporters) depend on it.
+     */
+    public static ActivityThread currentActivityThread() {
+        return sCurrentActivityThread;
+    }
+
+    /** The Application instance, or null when the app declares none and none was created. */
+    public Application getApplication() {
+        return mApplication;
+    }
+
+    public static Application currentApplication() {
+        ActivityThread t = sCurrentActivityThread;
+        return (t != null) ? t.mApplication : null;
+    }
+
     private class H extends Handler {
         public void handleMessage(Message msg) {
             switch (msg.what) {
@@ -83,14 +122,31 @@ public final class ActivityThread {
         ActivityThread thread = new ActivityThread();
         thread.attach();
 
-        // args are the candidates the C++ layer resolved from AndroidManifest.xml,
-        // in launch order: args[0] is the launcher activity, args[1..] the rest.
-        // Every entry is a class the app really declares.
-        if (args != null && args.length > 0 && args[0] != null && !args[0].isEmpty()) {
-            android.util.Log.i("ActivityThread", "Launching target Activity immediately: " + args[0]);
-            thread.handleLaunchActivity(args);
+        // args carry what the C++ layer read out of AndroidManifest.xml. Nothing is
+        // guessed or hardcoded: entries the manifest does not declare arrive empty.
+        //   args[0]      package name
+        //   args[1]      android:appComponentFactory, or "" if absent
+        //   args[2]      android:name on <application>, or "" if absent
+        //   args[3..]    activity candidates in launch order, args[3] the launcher
+        final String packageName = (args != null && args.length > 0) ? args[0] : "";
+        final String factoryName = (args != null && args.length > 1) ? args[1] : "";
+        final String appClassName = (args != null && args.length > 2) ? args[2] : "";
+
+        String[] candidates = new String[0];
+        if (args != null && args.length > 3) {
+            candidates = new String[args.length - 3];
+            for (int i = 3; i < args.length; i++) candidates[i - 3] = args[i];
         }
-        
+
+        if (packageName != null && !packageName.isEmpty()) sPackageName = packageName;
+
+        thread.bootstrapApplication(factoryName, appClassName);
+
+        if (candidates.length > 0 && candidates[0] != null && !candidates[0].isEmpty()) {
+            android.util.Log.i("ActivityThread", "Launching target Activity immediately: " + candidates[0]);
+            thread.handleLaunchActivity(candidates);
+        }
+
         // Main UI event loop — runs forever, never exits itself
         while (true) {
             try {
@@ -103,6 +159,94 @@ public final class ActivityThread {
                 Thread.sleep(10);
             } catch (Throwable ignored) {}
         }
+    }
+
+    /**
+     * Run the part of app startup that precedes any Activity: create the declared
+     * AppComponentFactory, then the Application, then call Application.onCreate().
+     *
+     * Android does this before it launches a component, and apps rely on the
+     * ordering. Skipping it — which KuDroid used to — means the factory's and the
+     * Application's static initialisers never run, so any state they populate is
+     * empty when app code later reads it. The resulting failure appears in unrelated
+     * code with no reference to the step that was missed.
+     *
+     * Both names come from the manifest and either may be absent. A failure here is
+     * logged and does not stop the launch: an Activity that does not depend on the
+     * missing initialisation can still come up, which is more useful than refusing
+     * to start at all.
+     */
+    private void bootstrapApplication(String factoryName, String appClassName) {
+        if (factoryName != null && !factoryName.isEmpty()) {
+            try {
+                Class<?> fc = Class.forName(factoryName);
+                Object instance = (fc != null) ? fc.newInstance() : null;
+                if (instance instanceof AppComponentFactory) {
+                    mComponentFactory = (AppComponentFactory) instance;
+                    android.util.Log.i("ActivityThread",
+                            "AppComponentFactory ready: " + factoryName);
+                } else if (instance != null) {
+                    // Declared but not a factory: Android would throw. Carrying on
+                    // without it is better than aborting, but say so.
+                    android.util.Log.e("ActivityThread", "appComponentFactory '" + factoryName +
+                            "' is not an android.app.AppComponentFactory; ignoring");
+                }
+            } catch (Throwable t) {
+                noteFrameworkGap(t);
+                android.util.Log.e("ActivityThread",
+                        "appComponentFactory '" + factoryName + "' failed: " + describeChain(t));
+            }
+        }
+
+        // No <application android:name>: Android still creates a plain Application,
+        // and getApplicationContext() has to return something.
+        final String appName = (appClassName != null && !appClassName.isEmpty())
+                ? appClassName : "android.app.Application";
+        try {
+            if (mComponentFactory != null) {
+                mApplication = mComponentFactory.instantiateApplication(
+                        ClassLoader.getSystemClassLoader(), appName);
+            } else {
+                Class<?> ac = Class.forName(appName);
+                Object instance = (ac != null) ? ac.newInstance() : null;
+                mApplication = (instance instanceof Application) ? (Application) instance : null;
+            }
+        } catch (Throwable t) {
+            noteFrameworkGap(t);
+            android.util.Log.e("ActivityThread",
+                    "Application '" + appName + "' could not be created: " + describeChain(t));
+        }
+
+        if (mApplication == null) {
+            try {
+                mApplication = new Application();
+            } catch (Throwable ignored) {}
+        }
+        if (mApplication == null) return;
+
+        try {
+            mApplication.attach(new ApplicationContext());
+        } catch (Throwable t) {
+            android.util.Log.e("ActivityThread", "Application.attach failed: " + t.toString());
+        }
+        try {
+            mApplication.onCreate();
+            android.util.Log.i("ActivityThread", "Application.onCreate() done: " + appName);
+        } catch (Throwable t) {
+            noteFrameworkGap(t);
+            android.util.Log.e("ActivityThread",
+                    "Application.onCreate() failed: " + describeChain(t));
+        }
+    }
+
+    /** Record a missing framework class so the diagnostic screen can list it. */
+    private void noteFrameworkGap(Throwable t) {
+        final String gap = frameworkGapOf(t);
+        if (gap == null) return;
+        if (!mFrameworkGaps.contains(gap)) mFrameworkGaps.add(gap);
+        android.util.Log.e("ActivityThread",
+                "FRAMEWORK CLASS MISSING: " + gap +
+                " (add it under framework/ and rebuild framework.dex)");
     }
 
     private void attach() {
@@ -315,7 +459,20 @@ public final class ActivityThread {
             try {
                 android.util.Log.i("ActivityThread", "Instantiating Activity: " +
                         (mInitialActivityName != null ? mInitialActivityName : clazz.getName()));
-                mInitialActivity = (Activity) clazz.newInstance();
+                // Route through the declared factory when there is one: an app that
+                // ships an AppComponentFactory expects every component to come from
+                // it, and androidx's wraps the instance to install its own state.
+                if (mComponentFactory != null) {
+                    mInitialActivity = mComponentFactory.instantiateActivity(
+                            ClassLoader.getSystemClassLoader(), clazz.getName(), null);
+                } else {
+                    mInitialActivity = (Activity) clazz.newInstance();
+                }
+                // The Activity is a Context and needs the same base as the
+                // Application, or every path it derives points somewhere else.
+                try {
+                    mInitialActivity.attach(new ApplicationContext());
+                } catch (Throwable ignored) {}
                 android.util.Log.i("ActivityThread", "Calling onCreate()...");
                 mInitialActivity.onCreate(null);
                 android.util.Log.i("ActivityThread", "Calling onStart()...");

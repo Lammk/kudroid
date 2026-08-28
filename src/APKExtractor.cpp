@@ -426,6 +426,10 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
                         // android:name on <application> is the custom Application
                         // subclass; Android instantiates it before any Activity.
                         if (attrName == "name" && info.appClass.empty() && !attrVal.empty()) info.appClass = attrVal;
+                        if (attrName == "appComponentFactory" && info.appComponentFactory.empty() &&
+                            !attrVal.empty()) {
+                            info.appComponentFactory = attrVal;
+                        }
                     } else if (isActivityTag) {
                         if (attrName == "name" && currentActivity.empty() && !attrVal.empty()) {
                             currentActivity = attrVal;
@@ -504,6 +508,7 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
     };
     qualify(info.mainActivity);
     qualify(info.appClass);
+    qualify(info.appComponentFactory);
     for (ActivityEntry& e : info.activities) qualify(e.name);
 
     return info;
@@ -1110,6 +1115,9 @@ ManifestInfo APKExtractor::parse_manifest_text(const char* data, std::size_t siz
             if (!isClose && info.appClass.empty()) {
                 info.appClass = extractXmlAttr(tag, "name");
             }
+            if (!isClose && info.appComponentFactory.empty()) {
+                info.appComponentFactory = extractXmlAttr(tag, "appComponentFactory");
+            }
         } else if (tagName == "action") {
             if (inIntentFilter && extractXmlAttr(tag, "name") == kActionMain) sawActionMain = true;
         } else if (tagName == "category") {
@@ -1129,6 +1137,7 @@ ManifestInfo APKExtractor::parse_manifest_text(const char* data, std::size_t siz
     };
     qualify(info.mainActivity);
     qualify(info.appClass);
+    qualify(info.appComponentFactory);
     for (ActivityEntry& e : info.activities) qualify(e.name);
 
     return info;

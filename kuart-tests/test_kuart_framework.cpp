@@ -450,6 +450,95 @@ int main() {
         }
     }
 
+    // ── app bootstrap: AppComponentFactory + Application + package-derived paths ──
+    //
+    // Android runs the declared factory and the Application before any component, so
+    // their static initialisers happen before all app code. KuDroid used to skip
+    // both, which left every app whose setup lives there running with empty state
+    // and failing far away from the cause. None of this is app-specific: the names
+    // come from the manifest and the paths are derived from the package.
+    {
+        DexClass* factory = linker.FindClass("Landroid/app/AppComponentFactory;");
+        Check(factory != nullptr && !factory->is_stub,
+              "android.app.AppComponentFactory present and not a stub");
+
+        // The factory instantiates components by name. An app subclass overrides
+        // these and calls through super, so the base implementation has to work.
+        if (factory != nullptr && !factory->is_stub) {
+            Check(factory->FindVirtualMethod(
+                      "instantiateApplication",
+                      "(Ljava/lang/ClassLoader;Ljava/lang/String;)Landroid/app/Application;") != nullptr,
+                  "AppComponentFactory.instantiateApplication exists");
+            Check(factory->FindVirtualMethod(
+                      "instantiateActivity",
+                      "(Ljava/lang/ClassLoader;Ljava/lang/String;Landroid/content/Intent;)"
+                      "Landroid/app/Activity;") != nullptr,
+                  "AppComponentFactory.instantiateActivity exists");
+
+            DexObject* f = NewObject("Landroid/app/AppComponentFactory;", "()V", {},
+                                     "new AppComponentFactory");
+            if (f != nullptr) {
+                DexValue app;
+                if (CallVirtual(f, "instantiateApplication",
+                                "(Ljava/lang/ClassLoader;Ljava/lang/String;)"
+                                "Landroid/app/Application;",
+                                {DexValue::Ref(nullptr), Str("android.app.Application")},
+                                &app, "instantiateApplication(Application)")) {
+                    Check(app.l != nullptr && app.l->clazz != nullptr &&
+                              app.l->clazz->PrettyName() == "android.app.Application",
+                          "factory built an android.app.Application");
+                }
+            }
+        }
+
+        // ActivityThread must expose the statics native code reaches the Context
+        // through: currentActivityThread().getApplication() is the standard JNI way
+        // for an SDK that never sees an Activity to obtain one.
+        DexClass* at = linker.FindClass("Landroid/app/ActivityThread;");
+        Check(at != nullptr && !at->is_stub, "android.app.ActivityThread present");
+        if (at != nullptr && !at->is_stub) {
+            Check(at->FindDirectMethod("currentActivityThread",
+                                       "()Landroid/app/ActivityThread;") != nullptr,
+                  "ActivityThread.currentActivityThread() exists");
+            Check(at->FindDirectMethod("currentApplication",
+                                       "()Landroid/app/Application;") != nullptr,
+                  "ActivityThread.currentApplication() exists");
+            Check(at->FindVirtualMethod("getApplication",
+                                        "()Landroid/app/Application;") != nullptr,
+                  "ActivityThread.getApplication() exists");
+        }
+
+        // Paths must follow the manifest's package. ContextWrapper falls back to a
+        // fixed "com.kudroid.app" when it has no base context, so anything comparing
+        // getPackageName() with its own identity — license checks, provider
+        // authorities, crash reporters — used to see the wrong app.
+        DexObject* ctx = NewObject("Landroid/app/ApplicationContext;",
+                                   "(Ljava/lang/String;)V", {Str("com.example.probe")},
+                                   "new ApplicationContext(pkg)");
+        if (ctx != nullptr) {
+            DexValue pkg;
+            if (CallVirtual(ctx, "getPackageName", "()Ljava/lang/String;", {}, &pkg,
+                            "getPackageName")) {
+                Check(std::strcmp(Utf8Of(pkg), "com.example.probe") == 0,
+                      std::string("getPackageName() == manifest package, got \"") +
+                          Utf8Of(pkg) + "\"");
+            }
+            DexValue dir;
+            if (CallVirtual(ctx, "getFilesDir", "()Ljava/io/File;", {}, &dir,
+                            "getFilesDir") &&
+                dir.l != nullptr) {
+                DexValue path;
+                if (CallVirtual(dir.l, "getPath", "()Ljava/lang/String;", {}, &path,
+                                "File.getPath")) {
+                    Check(std::strcmp(Utf8Of(path),
+                                      "/data/data/com.example.probe/files") == 0,
+                          std::string("getFilesDir() derived from the package, got \"") +
+                              Utf8Of(path) + "\"");
+                }
+            }
+        }
+    }
+
     std::printf("  executed %llu instructions\n",
                 static_cast<unsigned long long>(interp.instructions_executed()));
 
