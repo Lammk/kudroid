@@ -64,19 +64,52 @@ public class LinearLayout extends ViewGroup {
         int totalWidth = 0;
         int totalHeight = 0;
         int count = getChildCount();
+
+        // Children are offered the space left over along the stacking axis and the
+        // parent's full extent across it. Their reply comes back via
+        // getMeasuredWidth/Height, not getWidth/Height — the latter are only valid
+        // after layout() has positioned them, so reading those here (as this used to)
+        // always saw zero.
+        final int availWidth = MeasureSpec.getSize(widthMeasureSpec);
+        final int availHeight = MeasureSpec.getSize(heightMeasureSpec);
+
         for (int i = 0; i < count; i++) {
             View child = getChildAt(i);
-            if (child.getVisibility() == GONE) continue;
-            child.measure(widthMeasureSpec, heightMeasureSpec);
+            if (child == null || child.getVisibility() == GONE) continue;
+
+            int childWidthSpec;
+            int childHeightSpec;
             if (mOrientation == VERTICAL) {
-                totalHeight += child.getHeight();
-                totalWidth = Math.max(totalWidth, child.getWidth());
+                childWidthSpec = MeasureSpec.makeMeasureSpec(availWidth, MeasureSpec.AT_MOST);
+                int remaining = availHeight - totalHeight;
+                if (remaining < 0) remaining = 0;
+                childHeightSpec = MeasureSpec.makeMeasureSpec(remaining, MeasureSpec.AT_MOST);
             } else {
-                totalWidth += child.getWidth();
-                totalHeight = Math.max(totalHeight, child.getHeight());
+                int remaining = availWidth - totalWidth;
+                if (remaining < 0) remaining = 0;
+                childWidthSpec = MeasureSpec.makeMeasureSpec(remaining, MeasureSpec.AT_MOST);
+                childHeightSpec = MeasureSpec.makeMeasureSpec(availHeight, MeasureSpec.AT_MOST);
+            }
+            child.measure(childWidthSpec, childHeightSpec);
+
+            if (mOrientation == VERTICAL) {
+                totalHeight += child.getMeasuredHeight();
+                totalWidth = Math.max(totalWidth, child.getMeasuredWidth());
+            } else {
+                totalWidth += child.getMeasuredWidth();
+                totalHeight = Math.max(totalHeight, child.getMeasuredHeight());
             }
         }
-        layout(0, 0, totalWidth, totalHeight);
+
+        // A background is only visible where the layout actually extends, so fill the
+        // space the parent gave us rather than shrink-wrapping the children.
+        if (MeasureSpec.getMode(widthMeasureSpec) != MeasureSpec.UNSPECIFIED) {
+            totalWidth = Math.max(totalWidth, availWidth);
+        }
+        if (MeasureSpec.getMode(heightMeasureSpec) != MeasureSpec.UNSPECIFIED) {
+            totalHeight = Math.max(totalHeight, availHeight);
+        }
+        setMeasuredDimension(totalWidth, totalHeight);
     }
 
     @Override
@@ -86,14 +119,19 @@ public class LinearLayout extends ViewGroup {
         int curLeft = l;
         for (int i = 0; i < count; i++) {
             View child = getChildAt(i);
-            if (child.getVisibility() == GONE) continue;
-            int childWidth = child.getWidth();
-            int childHeight = child.getHeight();
+            if (child == null || child.getVisibility() == GONE) continue;
+
+            // Positions come from the MEASURED size. Using getWidth()/getHeight()
+            // here would read the bounds we are about to overwrite, which are still
+            // zero on the first pass.
+            int childWidth = child.getMeasuredWidth();
+            int childHeight = child.getMeasuredHeight();
             if (mOrientation == VERTICAL) {
-                child.layout(curLeft, curTop, curLeft + childWidth, curTop + childHeight);
+                // Stretch across the layout so a child's background spans the row.
+                child.layout(curLeft, curTop, r, curTop + childHeight);
                 curTop += childHeight;
             } else {
-                child.layout(curLeft, curTop, curLeft + childWidth, curTop + childHeight);
+                child.layout(curLeft, curTop, curLeft + childWidth, b);
                 curLeft += childWidth;
             }
         }

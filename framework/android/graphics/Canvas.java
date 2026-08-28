@@ -5,8 +5,8 @@ package android.graphics;
  */
 public class Canvas {
     private Bitmap mBitmap;
-    private int mWidth = 1080;
-    private int mHeight = 1920;
+    private int mWidth;
+    private int mHeight;
     private float mTranslateX = 0.0f;
     private float mTranslateY = 0.0f;
 
@@ -17,10 +17,33 @@ public class Canvas {
     private static native void native_drawBitmap(int[] pixels, int width, int height, float x, float y);
     private static native void native_flush();
 
+    // Real surface size, set by kudroid_set_metal_layer from the CAMetalLayer.
+    // These used to be hardcoded to 1080x1920, so on any other screen the layout was
+    // computed for the wrong extent and everything past the real width was clipped.
+    private static native int native_getSurfaceWidth();
+    private static native int native_getSurfaceHeight();
+
+    /** Fallback used only if the native surface has not been bound yet. */
+    private static final int DEFAULT_WIDTH = 1080;
+    private static final int DEFAULT_HEIGHT = 1920;
+
     public Canvas() {
+        int w = DEFAULT_WIDTH;
+        int h = DEFAULT_HEIGHT;
+        try {
+            int nw = native_getSurfaceWidth();
+            int nh = native_getSurfaceHeight();
+            if (nw > 0 && nh > 0) {
+                w = nw;
+                h = nh;
+            }
+        } catch (Throwable ignored) {}
+        mWidth = w;
+        mHeight = h;
     }
 
     public Canvas(Bitmap bitmap) {
+        this();
         mBitmap = bitmap;
         if (bitmap != null) {
             mWidth = bitmap.getWidth();

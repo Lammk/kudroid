@@ -287,6 +287,11 @@ public class Activity extends ContextThemeWrapper {
 
     /**
      * Draw the entire view hierarchy on the Metal screen.
+     *
+     * Runs the full Android pipeline in order: measure with the real surface size,
+     * layout so every child gets its own bounds, then draw. Skipping measure/layout
+     * (which this used to do) left every child at 0,0,0,0 and drew the whole tree on
+     * top of itself in the top-left corner.
      */
     public void renderViewHierarchy() {
         if (mContentView == null) {
@@ -294,10 +299,20 @@ public class Activity extends ContextThemeWrapper {
         }
         try {
             android.graphics.Canvas canvas = new android.graphics.Canvas();
+            final int width = canvas.getWidth();
+            final int height = canvas.getHeight();
+
             if (!(mContentView instanceof android.view.SurfaceView)) {
                 canvas.drawColor(0xFF181818);
             }
-            mContentView.layout(0, 0, canvas.getWidth(), canvas.getHeight());
+
+            // EXACTLY: the root view gets the whole screen, nothing more or less.
+            mContentView.measure(
+                    android.view.View.MeasureSpec.makeMeasureSpec(
+                            width, android.view.View.MeasureSpec.EXACTLY),
+                    android.view.View.MeasureSpec.makeMeasureSpec(
+                            height, android.view.View.MeasureSpec.EXACTLY));
+            mContentView.layout(0, 0, width, height);
             mContentView.draw(canvas);
             canvas.flush();
         } catch (Throwable t) {

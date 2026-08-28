@@ -3,8 +3,10 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <tuple>
 
 #include "dex/code_item_accessors-inl.h"
 #include "dex/dex_file_exception_helpers.h"
@@ -146,16 +148,29 @@ DexMethod* Interpreter::ResolveMethod(const DexMethod* context, uint32_t method_
     if (DexMethod* m = klass->FindVirtualMethod(name, signature.c_str())) return m;
 
     if (klass->dex_file == nullptr) {
-        static std::vector<std::unique_ptr<DexMethod>> s_stubMethods;
+        // Fabricate a placeholder so resolution succeeds and the failure is reported at
+        // CALL time (Execute throws NoClassDefFoundError naming the class) rather than
+        // as a bare NoSuchMethodError that says nothing about which class is missing.
+        //
+        // Cached per (class, name, signature): this used to append to a vector on every
+        // single resolution, so a method called in a loop leaked one DexMethod per call.
+        static std::map<std::tuple<const DexClass*, std::string, std::string>,
+                        std::unique_ptr<DexMethod>>
+            s_stubMethods;
         static std::mutex s_stubMethodMtx;
         std::lock_guard<std::mutex> lock(s_stubMethodMtx);
+
+        auto key = std::make_tuple(klass, std::string(name), signature);
+        auto it = s_stubMethods.find(key);
+        if (it != s_stubMethods.end()) return it->second.get();
+
         auto stubM = std::make_unique<DexMethod>();
         stubM->name = name;
         stubM->declaring_class = klass;
         stubM->access_flags = art::kAccPublic;
         stubM->code_item = nullptr;
         DexMethod* res = stubM.get();
-        s_stubMethods.push_back(std::move(stubM));
+        s_stubMethods.emplace(std::move(key), std::move(stubM));
         return res;
     }
     return nullptr;
@@ -373,6 +388,17 @@ DexValue Interpreter::Execute(const DexMethod* method, const DexValue* args, siz
     }
 
     if (method->code_item == nullptr) {
+        // A method on an auto-stubbed class has no body. Returning 0/null here — which
+        // is what this used to do — converts "KuDroid does not ship this class" into a
+        // wrong value that surfaces far away as a NullPointerException with no hint of
+        // the real cause. Name the missing class instead so it can be added.
+        if (method->declaring_class != nullptr && method->declaring_class->is_stub) {
+            ThrowException("Ljava/lang/NoClassDefFoundError;",
+                           method->declaring_class->PrettyName() + "." +
+                               (method->name != nullptr ? method->name : "?") +
+                               " (class not implemented in KuDroid framework)");
+            return result;
+        }
         if (method->declaring_class != nullptr && method->declaring_class->dex_file == nullptr) {
             return result;
         }

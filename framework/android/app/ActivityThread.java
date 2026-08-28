@@ -19,13 +19,14 @@ public final class ActivityThread {
 
     private static ActivityThread sCurrentActivityThread;
     private Activity mInitialActivity;
+    private String mInitialActivityName;
     private H mH;
 
     private class H extends Handler {
         public void handleMessage(Message msg) {
             switch (msg.what) {
                 case LAUNCH_ACTIVITY:
-                    handleLaunchActivity((String) msg.obj);
+                    handleLaunchActivity(new String[] { (String) msg.obj });
                     break;
                 case PAUSE_ACTIVITY:
                     handlePauseActivity();
@@ -79,11 +80,13 @@ public final class ActivityThread {
         Looper.prepareMainLooper();
         ActivityThread thread = new ActivityThread();
         thread.attach();
-        
-        // Launch a live Activity synchronously to render the first frame immediately
+
+        // args are the candidates the C++ layer resolved from AndroidManifest.xml,
+        // in launch order: args[0] is the launcher activity, args[1..] the rest.
+        // Every entry is a class the app really declares.
         if (args != null && args.length > 0 && args[0] != null && !args[0].isEmpty()) {
             android.util.Log.i("ActivityThread", "Launching target Activity immediately: " + args[0]);
-            thread.handleLaunchActivity(args[0]);
+            thread.handleLaunchActivity(args);
         }
         
         // Main UI event loop — runs forever, never exits itself
@@ -110,6 +113,23 @@ public final class ActivityThread {
      * NoClassDefFoundError. Avian wrapped the loading error in a multi-layer cage, so it had to go
      * out of chain. Returns null if not a missing class error.
      */
+    /**
+     * True if clazz is android.app.Activity or a subclass of it.
+     *
+     * Walks the superclass chain rather than using isAssignableFrom so it works even
+     * when a candidate's own hierarchy is partly stubbed: a missing intermediate
+     * class stops the walk and the candidate is rejected, instead of throwing from
+     * the middle of a cast.
+     */
+    private static boolean isActivitySubclass(Class<?> clazz) {
+        try {
+            for (Class<?> c = clazz; c != null; c = c.getSuperclass()) {
+                if ("android.app.Activity".equals(c.getName())) return true;
+            }
+        } catch (Throwable ignored) {}
+        return false;
+    }
+
     private static String extractMissingClassName(Throwable t) {
         for (Throwable c = t; c != null; c = c.getCause()) {
             String msg = c.getMessage();
@@ -134,35 +154,39 @@ public final class ActivityThread {
         }
     }
 
-    private void handleLaunchActivity(String activityClassName) {
+    private void handleLaunchActivity(String[] candidates) {
         Class<?> clazz = null;
-        // ── Build candidate list GENERAL ──────────────────────────────
-        // args[0] = main candidate (manifest/JNI-verify at C++ layer selected),
-        // args[1..] = verified fallback. Do not hardcode any specific app name.
-        java.util.ArrayList<String> candidateList = new java.util.ArrayList<>();
-        if (activityClassName != null && !activityClassName.isEmpty()) {
-            candidateList.add(activityClassName);
-        }
-        // Generate guessed variants from the package prefix of the main candidate:
-        // "com.foo.Bar" → "com.foo.Main", "com.foo.ui.MainActivity", ...
-        // (Real apps usually put Activity in the root package or sub-package ui/app).
-        if (activityClassName != null && activityClassName.lastIndexOf('.') > 0) {
-            String pkg = activityClassName.substring(0, activityClassName.lastIndexOf('.'));
-            for (String suffix : new String[] { ".Main", ".MainActivity", ".ui.MainActivity",
-                                                ".app.MainActivity", ".Home", ".Launcher" }) {
-                String guess = pkg + suffix;
-                if (!candidateList.contains(guess)) candidateList.add(guess);
-            }
-        }
-        String[] candidates = candidateList.toArray(new String[0]);
+        String resolvedName = null;
 
-        for (String name : candidates) {
+        // Candidates come from AndroidManifest.xml, resolved by the C++ layer.
+        //
+        // Nothing is guessed here any more. This used to append invented names built
+        // from the package prefix (".Main", ".ui.MainActivity", ".Home"...), which
+        // could only ever succeed by coincidence and otherwise filled the log with
+        // ClassNotFoundException for classes no app ever declared. Android launches
+        // what the manifest declares; so does KuDroid.
+        if (candidates == null || candidates.length == 0) {
+            android.util.Log.e("ActivityThread", "No activity candidates supplied");
+        }
+
+        for (int i = 0; candidates != null && i < candidates.length; i++) {
+            String name = candidates[i];
+            if (name == null || name.isEmpty()) continue;
             try {
-                clazz = Class.forName(name);
-                if (clazz != null) {
-                    System.out.println("[ActivityThread] Resolved Activity Class: " + name);
-                    break;
+                Class<?> found = Class.forName(name);
+                if (found == null) continue;
+                // A manifest can declare non-Activity components, and an obfuscated
+                // app can name anything anything. Checking the type here means a bad
+                // candidate moves to the next one instead of blowing up on the cast.
+                if (!isActivitySubclass(found)) {
+                    android.util.Log.e("ActivityThread",
+                            "Candidate '" + name + "' is not an Activity subclass, skipping");
+                    continue;
                 }
+                clazz = found;
+                resolvedName = name;
+                android.util.Log.i("ActivityThread", "Resolved Activity Class: " + name);
+                break;
             } catch (Throwable t) {
                 // Categorize errors to quickly debug new apps:
                 //  - ClassNotFoundException/NoClassDefFoundError with name
@@ -186,10 +210,14 @@ public final class ActivityThread {
                         "Candidate '" + name + "' failed: " + chain);
             }
         }
+        if (resolvedName != null) {
+            mInitialActivityName = resolvedName;
+        }
 
         if (clazz != null) {
             try {
-                android.util.Log.i("ActivityThread", "Instantiating Activity: " + clazz.getName());
+                android.util.Log.i("ActivityThread", "Instantiating Activity: " +
+                        (mInitialActivityName != null ? mInitialActivityName : clazz.getName()));
                 mInitialActivity = (Activity) clazz.newInstance();
                 android.util.Log.i("ActivityThread", "Calling onCreate()...");
                 mInitialActivity.onCreate(null);

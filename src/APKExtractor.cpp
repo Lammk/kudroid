@@ -330,7 +330,31 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
     bool inIntentFilter = false;
     bool sawActionMain = false;
     bool sawCategoryLauncher = false;
+    bool sawAnyIntentFilter = false;
+    bool currentExported = false;
+    bool currentExportedSet = false;
     std::string firstActivityName; // fallback when there is no intent-filter
+
+    // Record every activity, not just the launcher. Callers can then try real
+    // manifest entries in order instead of guessing names from the package.
+    auto commitActivity = [&](const std::string& name, bool isAlias) {
+        if (name.empty()) return;
+        for (ActivityEntry& e : info.activities) {
+            if (e.name != name) continue;
+            // Same activity seen again (multiple intent-filter blocks): merge.
+            e.isLauncher = e.isLauncher || (sawActionMain && sawCategoryLauncher);
+            e.isExported = e.isExported || currentExported || sawAnyIntentFilter;
+            return;
+        }
+        ActivityEntry e;
+        e.name = name;
+        e.isLauncher = sawActionMain && sawCategoryLauncher;
+        // An activity with an intent-filter is implicitly exported unless it says
+        // otherwise, which is how the launcher can start it.
+        e.isExported = currentExportedSet ? currentExported : sawAnyIntentFilter;
+        e.isAlias = isAlias;
+        info.activities.push_back(e);
+    };
 
     auto commitLauncher = [&](const std::string& name) {
         if (info.mainActivity.empty() && !name.empty() &&
@@ -366,9 +390,13 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
                     aliasTarget.clear();
                     sawActionMain = false;
                     sawCategoryLauncher = false;
+                    sawAnyIntentFilter = false;
+                    currentExported = false;
+                    currentExportedSet = false;
                     inIntentFilter = false;
                 } else if (tagName == "intent-filter") {
                     inIntentFilter = true;
+                    sawAnyIntentFilter = true;
                 }
 
                 std::size_t attrCur = attrsBase;
@@ -395,12 +423,19 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
                         if (attrName == "versionCode" && info.versionCode.empty()) info.versionCode = attrVal;
                     } else if (tagName == "application") {
                         if (attrName == "label" && info.appLabel.empty() && !attrVal.empty()) info.appLabel = attrVal;
+                        // android:name on <application> is the custom Application
+                        // subclass; Android instantiates it before any Activity.
+                        if (attrName == "name" && info.appClass.empty() && !attrVal.empty()) info.appClass = attrVal;
                     } else if (isActivityTag) {
                         if (attrName == "name" && currentActivity.empty() && !attrVal.empty()) {
                             currentActivity = attrVal;
                             if (firstActivityName.empty()) firstActivityName = attrVal;
                         } else if (tagName == "activity-alias" && attrName == "targetActivity" && !attrVal.empty()) {
                             aliasTarget = attrVal;
+                        } else if (attrName == "exported") {
+                            currentExportedSet = true;
+                            // Boolean attributes arrive as "true"/"false" or as an int 0/1.
+                            currentExported = (attrVal == "true" || attrVal == "1");
                         }
                     } else if (tagName == "action") {
                         if (inIntentFilter && attrName == "name" && attrVal == kActionMain) {
@@ -418,6 +453,12 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
                 if (tagName == "activity-alias") {
                     commitLauncher(!aliasTarget.empty() ? aliasTarget : currentActivity);
                 }
+                // Self-closing <activity .../> never produces an end element, so
+                // record it here too; commitActivity dedupes.
+                if (isActivityTag && !currentActivity.empty()) {
+                    commitActivity(!aliasTarget.empty() ? aliasTarget : currentActivity,
+                                   tagName == "activity-alias");
+                }
             }
         } else if (chunkType == 0x00100103) { // RES_XML_END_ELEMENT_TYPE
             if (cur + 24 <= data.size()) {
@@ -429,9 +470,15 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
                     // </activity>: if intent-filter MAIN+LAUNCHER appears between
                     // Apparently this is the launcher activity.
                     commitLauncher(currentActivity);
+                    commitActivity(!aliasTarget.empty() ? aliasTarget : currentActivity,
+                                   tagName == "activity-alias");
                     currentActivity.clear();
+                    aliasTarget.clear();
                     sawActionMain = false;
                     sawCategoryLauncher = false;
+                    sawAnyIntentFilter = false;
+                    currentExported = false;
+                    currentExportedSet = false;
                     inIntentFilter = false;
                 }
             }
@@ -445,11 +492,20 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
         info.mainActivity = firstActivityName;
     }
 
-    if (!info.mainActivity.empty() && !info.packageName.empty()) {
-        if (info.mainActivity.front() == '.') {
-            info.mainActivity = info.packageName + info.mainActivity;
+    // Manifests may write ".MainActivity" or even a bare "MainActivity" relative to
+    // the package; expand both so callers always hold a resolvable class name.
+    auto qualify = [&](std::string& name) {
+        if (name.empty() || info.packageName.empty()) return;
+        if (name.front() == '.') {
+            name = info.packageName + name;
+        } else if (name.find('.') == std::string::npos) {
+            name = info.packageName + "." + name;
         }
-    }
+    };
+    qualify(info.mainActivity);
+    qualify(info.appClass);
+    for (ActivityEntry& e : info.activities) qualify(e.name);
+
     return info;
 }
 
@@ -972,12 +1028,32 @@ ManifestInfo APKExtractor::parse_manifest_text(const char* data, std::size_t siz
     std::string aliasTarget;
     bool sawActionMain = false;
     bool sawCategoryLauncher = false;
+    bool sawAnyIntentFilter = false;
     bool inIntentFilter = false;
+    std::string currentExported;
 
     auto commit = [&](const std::string& name) {
         if (info.mainActivity.empty() && !name.empty() && sawActionMain && sawCategoryLauncher) {
             info.mainActivity = name;
         }
+    };
+
+    // Same as the AXML path: keep every declared activity so callers can walk real
+    // manifest entries rather than guessing names.
+    auto commitActivity = [&](const std::string& name, bool isAlias) {
+        if (name.empty()) return;
+        for (ActivityEntry& e : info.activities) {
+            if (e.name != name) continue;
+            e.isLauncher = e.isLauncher || (sawActionMain && sawCategoryLauncher);
+            e.isExported = e.isExported || (currentExported == "true") || sawAnyIntentFilter;
+            return;
+        }
+        ActivityEntry e;
+        e.name = name;
+        e.isLauncher = sawActionMain && sawCategoryLauncher;
+        e.isExported = currentExported.empty() ? sawAnyIntentFilter : (currentExported == "true");
+        e.isAlias = isAlias;
+        info.activities.push_back(e);
     };
 
     while ((cur = xml.find('<', cur)) != std::string::npos) {
@@ -1001,22 +1077,39 @@ ManifestInfo APKExtractor::parse_manifest_text(const char* data, std::size_t siz
             if (!isClose) {
                 currentActivity = extractXmlAttr(tag, "name");
                 aliasTarget = extractXmlAttr(tag, "targetActivity");
+                currentExported = extractXmlAttr(tag, "exported");
                 sawActionMain = false;
                 sawCategoryLauncher = false;
+                sawAnyIntentFilter = false;
                 inIntentFilter = false;
-                if (tagName == "activity-alias" && isSelfClose) {
+                if (isSelfClose) {
+                    // <activity ... /> has no closing tag, so record it now.
                     commit(!aliasTarget.empty() ? aliasTarget : currentActivity);
+                    commitActivity(!aliasTarget.empty() ? aliasTarget : currentActivity,
+                                   tagName == "activity-alias");
                     currentActivity.clear();
+                    aliasTarget.clear();
+                    currentExported.clear();
                 }
             } else {
                 commit(currentActivity);
+                commitActivity(!aliasTarget.empty() ? aliasTarget : currentActivity,
+                               tagName == "activity-alias");
                 currentActivity.clear();
+                aliasTarget.clear();
+                currentExported.clear();
                 sawActionMain = false;
                 sawCategoryLauncher = false;
+                sawAnyIntentFilter = false;
                 inIntentFilter = false;
             }
         } else if (tagName == "intent-filter") {
             inIntentFilter = !isClose;
+            if (!isClose) sawAnyIntentFilter = true;
+        } else if (tagName == "application") {
+            if (!isClose && info.appClass.empty()) {
+                info.appClass = extractXmlAttr(tag, "name");
+            }
         } else if (tagName == "action") {
             if (inIntentFilter && extractXmlAttr(tag, "name") == kActionMain) sawActionMain = true;
         } else if (tagName == "category") {
@@ -1026,11 +1119,18 @@ ManifestInfo APKExtractor::parse_manifest_text(const char* data, std::size_t siz
         cur = end + 1;
     }
 
-    if (!info.mainActivity.empty() && !info.packageName.empty()) {
-        if (info.mainActivity.front() == '.') {
-            info.mainActivity = info.packageName + info.mainActivity;
+    auto qualify = [&](std::string& name) {
+        if (name.empty() || info.packageName.empty()) return;
+        if (name.front() == '.') {
+            name = info.packageName + name;
+        } else if (name.find('.') == std::string::npos) {
+            name = info.packageName + "." + name;
         }
-    }
+    };
+    qualify(info.mainActivity);
+    qualify(info.appClass);
+    for (ActivityEntry& e : info.activities) qualify(e.name);
+
     return info;
 }
 

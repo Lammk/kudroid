@@ -6,6 +6,7 @@
 #include "kudroid/platform/AssetShim.h"
 #include "kudroid/PermissionManager.h"
 #include "kudroid/KuArtRuntime.h"
+#include "kudroid/platform/JavaCanvasRenderer.h"
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
@@ -771,6 +772,13 @@ extern "C" void kudroid_set_metal_layer(void* layer, int width, int height, floa
                   "kudroid_set_metal_layer(layer=%p, size=%dx%d, density=%.2f)",
                   layer, width, height, density);
     kudroid_android_log_message(2, "KuDroidGPU", buf);
+
+    // Resize the software canvas to the real surface. The Java-side Canvas asks for
+    // these numbers via native_getSurfaceWidth/Height, so layout is computed for the
+    // actual screen instead of the old hardcoded 1080x1920.
+    if (width > 0 && height > 0) {
+        kudroid::JavaCanvasRenderer::getInstance().init(width, height);
+    }
 
     // Để render thread tự khởi tạo EGL display sạch sẽ từ đầu
     // kudroid_gpu_warmup_egl();
@@ -1595,6 +1603,11 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                         
                         std::string targetActivity = "";
                         std::string pkgName = "";
+                        // Everything the manifest declares. Populated below and used
+                        // as the fallback list, so KuDroid only ever tries classes the
+                        // app actually declares.
+                        std::vector<std::string> manifestActivities;
+                        std::string manifestAppClass;
 
                         // ƯU TIÊN 1: parse AndroidManifest.xml ĐÃ GIẢI NÉN trong
                         // appDir — nguồn chính xác duy nhất. Log cũ cho thấy
@@ -1622,9 +1635,24 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                         reinterpret_cast<const char*>(axml.data()), axml.size());
                                 }
                                 appendAndEcho("[kudroid_core] Manifest parse: package='" + mi.packageName +
-                                              "' mainActivity='" + mi.mainActivity + "'");
+                                              "' mainActivity='" + mi.mainActivity + "'" +
+                                              " activities=" + std::to_string(mi.activities.size()) +
+                                              (mi.appClass.empty() ? "" : " application='" + mi.appClass + "'"));
                                 if (!mi.mainActivity.empty()) targetActivity = mi.mainActivity;
                                 if (!mi.packageName.empty()) pkgName = mi.packageName;
+                                manifestAppClass = mi.appClass;
+                                // The manifest is the authoritative list of what this
+                                // app can launch: launcher activities first, then the
+                                // rest. Feeding these to ActivityThread replaces the
+                                // old habit of inventing names like "<pkg>.Main",
+                                // which could never exist unless the app happened to
+                                // use that exact name.
+                                manifestActivities = mi.launchOrder();
+                                for (const auto& a : mi.activities) {
+                                    appendAndEcho(std::string("[kudroid_core]   manifest activity: ") + a.name +
+                                                  (a.isLauncher ? "  [LAUNCHER]" : "") +
+                                                  (a.isAlias ? "  [alias]" : ""));
+                                }
                             } else {
                                 appendAndEcho("[kudroid_core] WARNING: Cannot open AndroidManifest.xml");
                             }
@@ -1835,6 +1863,13 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                         // app cụ thể nào; các biến thể tên được ActivityThread
                         // thử động từ package prefix (xem ActivityThread.java).
                         std::string guessBase; // dùng chung cho fallback list
+                        // Prefer any manifest-declared activity over a guess: the
+                        // manifest is what Android itself reads.
+                        if (targetActivity.empty() && !manifestActivities.empty()) {
+                            targetActivity = manifestActivities.front();
+                            appendAndEcho("[kudroid_core] Using first manifest-declared activity: " +
+                                          targetActivity);
+                        }
                         if (targetActivity.empty()) {
                             if (!pkgName.empty()) {
                                 targetActivity = pkgName + ".MainActivity";
@@ -1850,21 +1885,26 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
 "' (manifest/jar-scan/JNI đều thất bại)");
                         }
 
-                        // Danh sách fallback cho ActivityThread: các Activity đã
-                        // JNI-verify (trừ candidate chính) + đoán từ package.
-                        // Tổng quát cho mọi app — không có tên riêng nào.
+                        // Fallback list for ActivityThread, in descending order of
+                        // authority:
+                        //   1. activities the MANIFEST declares (launcher first),
+                        //   2. classes verified to extend android.app.Activity.
+                        //
+                        // Names are no longer invented from the package. Guessed
+                        // candidates like "<pkg>.Main" only ever produced
+                        // ClassNotFoundException — an app either declares an activity
+                        // in its manifest or it cannot be launched, which is exactly
+                        // how Android decides. The only guess left is the last-resort
+                        // targetActivity above, used when there is no manifest at all.
                         std::vector<std::string> fallbackStorage;
                         auto addFallback = [&](const std::string& s) {
                             if (s.empty() || s == targetActivity) return;
                             for (const auto& f : fallbackStorage)
                                 if (f == s) return;
-                            if (fallbackStorage.size() < 8) fallbackStorage.push_back(s);
+                            if (fallbackStorage.size() < 12) fallbackStorage.push_back(s);
                         };
+                        for (const auto& a : manifestActivities) addFallback(a);
                         for (const auto& v : verifiedActivities) addFallback(v);
-                        if (!pkgName.empty()) {
-                            addFallback(pkgName + ".MainActivity");
-                            addFallback(pkgName + ".Main");
-                        }
                         std::vector<const char*> fallbackPtrs;
                         for (const auto& f : fallbackStorage) fallbackPtrs.push_back(f.c_str());
 

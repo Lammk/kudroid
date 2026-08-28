@@ -44,6 +44,9 @@ public class View {
     private boolean mHasFocus;
     private long mTouchDownTime;
     private boolean mLongClickFired;
+    private boolean mLaidOut;
+    private int mMeasuredWidth;
+    private int mMeasuredHeight;
 
     /** Android long press threshold (ViewConfiguration.getLongPressTimeout). */
     private static final long LONG_PRESS_TIMEOUT = 500L;
@@ -225,12 +228,32 @@ public class View {
 
     /**
      * sets the view's layout boundaries.
+     *
+     * Android's contract: layout() records the bounds and then hands them to
+     * onLayout() so a container can position its children. Only assigning the
+     * fields (which is what this used to do) means ViewGroup.onLayout never runs,
+     * every child keeps its default 0,0,0,0 bounds, and the whole hierarchy draws
+     * on top of itself in the top-left corner.
      */
     public void layout(int l, int t, int r, int b) {
+        final boolean changed = (l != mLeft) || (t != mTop) || (r != mRight) || (b != mBottom);
         mLeft = l;
         mTop = t;
         mRight = r;
         mBottom = b;
+        mLaidOut = true;
+        onLayout(changed, l, t, r, b);
+    }
+
+    /**
+     * Position child views. Leaf views have nothing to do; ViewGroup overrides this.
+     */
+    protected void onLayout(boolean changed, int l, int t, int r, int b) {
+    }
+
+    /** True once layout() has run at least once. */
+    public boolean isLaidOut() {
+        return mLaidOut;
     }
 
     /**
@@ -401,9 +424,12 @@ public class View {
     }
 
     /**
-     * Measure view.
+     * Measure view. Subclasses must call setMeasuredDimension() before returning.
+     * The default reports zero size, matching Android's behaviour for a bare View.
      */
     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+        setMeasuredDimension(getDefaultSize(0, widthMeasureSpec),
+                             getDefaultSize(0, heightMeasureSpec));
     }
 
     /**
@@ -411,6 +437,65 @@ public class View {
      */
     public void measure(int widthMeasureSpec, int heightMeasureSpec) {
         onMeasure(widthMeasureSpec, heightMeasureSpec);
+    }
+
+    /**
+     * Record the size decided by onMeasure. Kept separate from mLeft/mRight because
+     * measuring happens before positioning: the parent needs to know how big a child
+     * wants to be in order to work out where to put it.
+     */
+    protected final void setMeasuredDimension(int measuredWidth, int measuredHeight) {
+        mMeasuredWidth = measuredWidth;
+        mMeasuredHeight = measuredHeight;
+    }
+
+    public final int getMeasuredWidth() {
+        return mMeasuredWidth;
+    }
+
+    public final int getMeasuredHeight() {
+        return mMeasuredHeight;
+    }
+
+    /**
+     * Resolve a measure spec the way Android does: honour an exact or bounded size
+     * from the parent, otherwise fall back to the view's own preference.
+     */
+    public static int getDefaultSize(int size, int measureSpec) {
+        final int specMode = MeasureSpec.getMode(measureSpec);
+        final int specSize = MeasureSpec.getSize(measureSpec);
+        switch (specMode) {
+            case MeasureSpec.AT_MOST:
+            case MeasureSpec.EXACTLY:
+                return specSize;
+            default:
+                return size;
+        }
+    }
+
+    /**
+     * Packs a size and a constraint mode into one int, as Android does, so a parent
+     * can tell a child "you get exactly N" or "at most N" in a single argument.
+     */
+    public static class MeasureSpec {
+        public static final int UNSPECIFIED = 0;
+        public static final int EXACTLY = 1;
+        public static final int AT_MOST = 2;
+
+        private static final int MODE_SHIFT = 30;
+        private static final int MODE_MASK = 0x3 << MODE_SHIFT;
+
+        public static int makeMeasureSpec(int size, int mode) {
+            return (size & ~MODE_MASK) | (mode << MODE_SHIFT);
+        }
+
+        public static int getMode(int measureSpec) {
+            return (measureSpec & MODE_MASK) >>> MODE_SHIFT;
+        }
+
+        public static int getSize(int measureSpec) {
+            return measureSpec & ~MODE_MASK;
+        }
     }
 
     private int mBackgroundColor = 0;
@@ -470,8 +555,28 @@ public class View {
 
     /**
      * invalidate the view.
+     *
+     * Redraw is driven from the top by Activity.renderViewHierarchy(), so this walks
+     * up to the root and asks it to repaint rather than tracking dirty regions.
      */
     public void invalidate() {
+        View root = this;
+        while (root.mParent != null) {
+            root = root.mParent;
+        }
+        if (root != this) {
+            root.invalidate();
+        }
+    }
+
+    /**
+     * Ask for another measure + layout pass. Same top-down model as invalidate().
+     */
+    public void requestLayout() {
+        mLaidOut = false;
+        if (mParent != null) {
+            mParent.requestLayout();
+        }
     }
 
     /**

@@ -1,9 +1,18 @@
 #pragma once
 
 #include <string>
+#include <vector>
 #include <cstdint>
 
 namespace kudroid {
+
+// One <activity> / <activity-alias> declared in AndroidManifest.xml.
+struct ActivityEntry {
+    std::string name;          // fully qualified, leading '.' already expanded
+    bool isLauncher = false;   // has intent-filter MAIN + LAUNCHER
+    bool isExported = false;   // android:exported="true", or implied by a filter
+    bool isAlias = false;      // came from <activity-alias>
+};
 
 // Parsing results AndroidManifest.xml (binary AXML).
 struct ManifestInfo {
@@ -12,6 +21,29 @@ struct ManifestInfo {
     std::string versionCode;
     std::string appLabel;
     std::string mainActivity; // activity has intent-filter MAIN+LAUNCHER
+    std::string appClass;     // android:name on <application>, if any
+
+    // Every activity the manifest declares, in declaration order. This is the
+    // authoritative list: Android launches what the manifest says, so KuDroid can
+    // walk real entries instead of inventing names like "<pkg>.Main".
+    std::vector<ActivityEntry> activities;
+
+    // Launcher activities first, then the rest, all manifest-declared.
+    std::vector<std::string> launchOrder() const {
+        std::vector<std::string> out;
+        for (const ActivityEntry& a : activities) {
+            if (a.isLauncher && !a.name.empty()) out.push_back(a.name);
+        }
+        for (const ActivityEntry& a : activities) {
+            if (a.isLauncher || a.name.empty()) continue;
+            bool dup = false;
+            for (const std::string& s : out) {
+                if (s == a.name) { dup = true; break; }
+            }
+            if (!dup) out.push_back(a.name);
+        }
+        return out;
+    }
 };
 
 class APKExtractor {

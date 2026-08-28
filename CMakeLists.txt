@@ -183,6 +183,15 @@ else()
         target_include_directories(test_manifest_parse PRIVATE include)
     endif()
 
+    # Same, for manifests shipped as plain XML (apktool-repacked APKs).
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_manifest_text.cpp")
+        add_executable(test_manifest_text
+            tests/test_manifest_text.cpp
+        )
+        target_link_libraries(test_manifest_text PRIVATE kudroid_core)
+        target_include_directories(test_manifest_text PRIVATE include)
+    endif()
+
     # KuART's tests are located in kuart-tests/ (not tests/) because tests/ is broken
     # .gitignore — CI needs these files so they must be committed.
     # test_art_dex parse DEX with ART's libdexfile

@@ -8,9 +8,10 @@ import android.content.Context;
  * a view contains other views. for kudroid minimal framework, this
  * Provides basic child management.
  */
-public abstract class ViewGroup extends View {
-    private View[] mChildren;
-    private int mChildCount = 0;
+public class ViewGroup extends View {
+    // protected so subclasses in this package tree can iterate children directly.
+    protected View[] mChildren;
+    protected int mChildCount = 0;
 
     public ViewGroup(Context context) {
         super(context);
@@ -94,9 +95,43 @@ public abstract class ViewGroup extends View {
     }
 
     /**
-     * layout of children. subclasses must implement this.
+     * Measure every child, then report the largest child size. Subclasses that stack
+     * or grid their children override this; the default is the FrameLayout rule of
+     * overlapping everything at the origin.
      */
-    protected abstract void onLayout(boolean changed, int l, int t, int r, int b);
+    @Override
+    protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+        int maxWidth = 0;
+        int maxHeight = 0;
+        for (int i = 0; i < mChildCount; i++) {
+            View child = mChildren[i];
+            if (child == null || child.getVisibility() == GONE) continue;
+            child.measure(widthMeasureSpec, heightMeasureSpec);
+            maxWidth = Math.max(maxWidth, child.getMeasuredWidth());
+            maxHeight = Math.max(maxHeight, child.getMeasuredHeight());
+        }
+        if (MeasureSpec.getMode(widthMeasureSpec) != MeasureSpec.UNSPECIFIED) {
+            maxWidth = Math.max(maxWidth, MeasureSpec.getSize(widthMeasureSpec));
+        }
+        if (MeasureSpec.getMode(heightMeasureSpec) != MeasureSpec.UNSPECIFIED) {
+            maxHeight = Math.max(maxHeight, MeasureSpec.getSize(heightMeasureSpec));
+        }
+        setMeasuredDimension(maxWidth, maxHeight);
+    }
+
+    /**
+     * Position children. Not abstract: View now supplies a no-op default, and forcing
+     * every container to reimplement this was why stub layouts could not extend
+     * ViewGroup at all. The default overlaps children at the group's origin.
+     */
+    @Override
+    protected void onLayout(boolean changed, int l, int t, int r, int b) {
+        for (int i = 0; i < mChildCount; i++) {
+            View child = mChildren[i];
+            if (child == null || child.getVisibility() == GONE) continue;
+            child.layout(l, t, l + child.getMeasuredWidth(), t + child.getMeasuredHeight());
+        }
+    }
 
     @Override
     public boolean dispatchTouchEvent(MotionEvent event) {

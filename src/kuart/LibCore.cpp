@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <dirent.h>
 #include <fcntl.h>
 #include <filesystem>
@@ -1838,7 +1839,7 @@ bool Invoke_android_util_Log(Interpreter* /*interp*/, const char* name, const De
 }
 
 bool Invoke_android_graphics_Canvas(Interpreter* /*interp*/, const char* name, const DexValue* args,
-                                    size_t /*num_args*/, DexValue* /*result*/) {
+                                    size_t /*num_args*/, DexValue* result) {
     if (std::strcmp(name, "native_drawColor") == 0) {
         JavaCanvasRenderer::getInstance().drawColor(static_cast<uint32_t>(args[0].i));
         return true;
@@ -1867,6 +1868,17 @@ bool Invoke_android_graphics_Canvas(Interpreter* /*interp*/, const char* name, c
     }
     if (std::strcmp(name, "native_flush") == 0) {
         JavaCanvasRenderer::getInstance().flush();
+        return true;
+    }
+    // Real surface size. Canvas used to hardcode 1080x1920, so on any other screen
+    // the layout was computed for the wrong extent and drawing fell off the edge
+    // (an 828x1792 device lost everything past ~77% of the width).
+    if (std::strcmp(name, "native_getSurfaceWidth") == 0) {
+        *result = DexValue::Int(JavaCanvasRenderer::getInstance().getWidth());
+        return true;
+    }
+    if (std::strcmp(name, "native_getSurfaceHeight") == 0) {
+        *result = DexValue::Int(JavaCanvasRenderer::getInstance().getHeight());
         return true;
     }
     return false;
@@ -2072,6 +2084,55 @@ bool Invoke_sun_misc_Unsafe(Interpreter* /*interp*/, const char* name, const Dex
     return false;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// java.util.TimeZone
+//
+// There is no zoneinfo database on the device side of KuDroid, so the default zone
+// comes from the host's own UTC offset via localtime(). Enough for formatting and
+// for the getDefault() call apps make at startup.
+bool Invoke_java_util_TimeZone(Interpreter* interp, const char* name,
+                               const DexValue* /*args*/, size_t /*num_args*/,
+                               DexValue* result) {
+    if (std::strcmp(name, "native_getDefaultRawOffset") == 0) {
+        const std::time_t now = std::time(nullptr);
+        std::tm local_tm{};
+        std::tm utc_tm{};
+#if defined(_WIN32)
+        localtime_s(&local_tm, &now);
+        gmtime_s(&utc_tm, &now);
+#else
+        localtime_r(&now, &local_tm);
+        gmtime_r(&now, &utc_tm);
+#endif
+        // Difference in seconds between local wall clock and UTC for this instant.
+        // Computed via mktime on both so day/month rollover is handled.
+        local_tm.tm_isdst = 0;
+        utc_tm.tm_isdst = 0;
+        const double diff = std::difftime(std::mktime(&local_tm), std::mktime(&utc_tm));
+        *result = DexValue::Int(static_cast<int32_t>(diff * 1000.0));
+        return true;
+    }
+    if (std::strcmp(name, "native_getDefaultId") == 0) {
+        const std::time_t now = std::time(nullptr);
+        std::tm local_tm{};
+#if defined(_WIN32)
+        localtime_s(&local_tm, &now);
+#else
+        localtime_r(&now, &local_tm);
+#endif
+        char zone[64] = {0};
+        if (std::strftime(zone, sizeof(zone), "%Z", &local_tm) == 0 || zone[0] == '\0') {
+            std::snprintf(zone, sizeof(zone), "UTC");
+        }
+        // NewString copies into the KuART heap, which owns the result.
+        result->l = (interp != nullptr && interp->linker() != nullptr)
+                        ? reinterpret_cast<DexObject*>(interp->linker()->NewString(zone))
+                        : nullptr;
+        return true;
+    }
+    return false;
+}
+
 bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue* args,
                    size_t num_args, DexValue* result) {
     if (method == nullptr || method->declaring_class == nullptr) return false;
@@ -2095,6 +2156,7 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
     if (std::strcmp(desc, "Ljava/io/FileInputStream;") == 0) return Invoke_java_io_FileInputStream(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/io/FileOutputStream;") == 0) return Invoke_java_io_FileOutputStream(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/io/PrintStream;") == 0) return Invoke_java_io_PrintStream(interp, name, args, num_args, result);
+    if (std::strcmp(desc, "Ljava/util/TimeZone;") == 0) return Invoke_java_util_TimeZone(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Lsun/misc/Unsafe;") == 0) return Invoke_sun_misc_Unsafe(interp, name, args, num_args, result);
 
     if (std::strcmp(desc, "Landroid/util/Log;") == 0) return Invoke_android_util_Log(interp, name, args, num_args, result);

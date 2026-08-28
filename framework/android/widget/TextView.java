@@ -135,11 +135,75 @@ public class TextView extends View {
         return mTextSize;
     }
 
+    /**
+     * Report the space the text needs. Without this every TextView measured to
+     * zero, so a LinearLayout stacked them all at the same y and the lines drew on
+     * top of each other in the corner.
+     *
+     * Height is one line plus a little leading; width comes from Paint.measureText.
+     * Both are then clamped by whatever the parent allows.
+     */
+    @Override
+    protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+        final String text = mText != null ? mText.toString() : "";
+        int wantWidth = (int) Math.ceil(mPaint.measureText(text));
+        int wantHeight = (int) Math.ceil(mTextSize * LINE_SPACING);
+
+        // Multi-line: setText() strings in the fallback UI start with '\n'.
+        int lines = 1;
+        for (int i = 0; i < text.length(); i++) {
+            if (text.charAt(i) == '\n') lines++;
+        }
+        if (lines > 1) {
+            wantHeight = (int) Math.ceil(mTextSize * LINE_SPACING * lines);
+            int widest = 0;
+            int lineStart = 0;
+            for (int i = 0; i <= text.length(); i++) {
+                if (i == text.length() || text.charAt(i) == '\n') {
+                    int w = (int) Math.ceil(mPaint.measureText(text.substring(lineStart, i)));
+                    if (w > widest) widest = w;
+                    lineStart = i + 1;
+                }
+            }
+            wantWidth = widest;
+        }
+
+        setMeasuredDimension(resolveSize(wantWidth, widthMeasureSpec),
+                             resolveSize(wantHeight, heightMeasureSpec));
+    }
+
+    /** Clamp a desired size against the parent's constraint. */
+    private static int resolveSize(int want, int measureSpec) {
+        final int mode = MeasureSpec.getMode(measureSpec);
+        final int size = MeasureSpec.getSize(measureSpec);
+        if (mode == MeasureSpec.EXACTLY) return size;
+        if (mode == MeasureSpec.AT_MOST) return Math.min(want, size);
+        return want;
+    }
+
+    /** Gap between baselines as a multiple of text size, matching Android's default. */
+    private static final float LINE_SPACING = 1.35f;
+
     @Override
     protected void onDraw(Canvas canvas) {
         super.onDraw(canvas);
-        if (mText != null && mText.length() > 0) {
-            canvas.drawText(mText.toString(), getLeft(), getTop() + mTextSize, mPaint);
+        if (mText == null || mText.length() == 0 || canvas == null) return;
+
+        // Draw relative to this view's own bounds, which the parent set during
+        // layout. drawText takes a BASELINE y, so the first line sits one text
+        // size below the top edge rather than at it.
+        final String text = mText.toString();
+        final float lineHeight = mTextSize * LINE_SPACING;
+        float baseline = getTop() + mTextSize;
+        int lineStart = 0;
+        for (int i = 0; i <= text.length(); i++) {
+            if (i == text.length() || text.charAt(i) == '\n') {
+                if (i > lineStart) {
+                    canvas.drawText(text.substring(lineStart, i), getLeft(), baseline, mPaint);
+                }
+                baseline += lineHeight;
+                lineStart = i + 1;
+            }
         }
     }
 }
