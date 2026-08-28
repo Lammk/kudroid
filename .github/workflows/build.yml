@@ -11,7 +11,7 @@ jobs:
   # KuART — micro ART của KuDroid (art_dex + src/kuart). Chạy riêng trên Linux
   # vì đây là code thuần C++ không phụ thuộc iOS; bắt lỗi nhanh hơn chờ job iOS.
   # ─────────────────────────────────────────────────────────────────────────────
-  kuart-tests:
+  build-kuart:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -188,7 +188,7 @@ jobs:
   # and the SwiftUI shell.
   # ─────────────────────────────────────────────────────────────────────────────
   ios-build:
-    needs: [build-angle-ios, kuart-tests]
+    needs: [build-angle-ios, build-kuart]
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4

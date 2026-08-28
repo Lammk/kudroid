@@ -51,6 +51,7 @@ struct Runtime {
 
 Runtime* g_rt = nullptr;
 std::mutex g_mtx;
+std::string g_current_app_dir;
 void (*g_log_cb)(const char*) = nullptr;
 void* (*g_symbol_lookup)(const char*) = nullptr;
 std::string g_last_error;
@@ -161,7 +162,15 @@ extern "C" void kuart_set_missing_class_log_path(const char* path) {
 
 extern "C" int kuart_init(const char* app_dir) {
     std::lock_guard<std::mutex> lock(g_mtx);
-    if (g_rt != nullptr && g_rt->ready) return 1;
+    const std::string requested_dir = (app_dir != nullptr) ? app_dir : "";
+    if (g_rt != nullptr && g_rt->ready) {
+        if (requested_dir.empty() || requested_dir == g_current_app_dir) {
+            return 1;
+        }
+        delete g_rt;
+        g_rt = nullptr;
+        g_current_app_dir.clear();
+    }
 
     auto rt = std::make_unique<Runtime>();
 
@@ -228,6 +237,7 @@ extern "C" int kuart_init(const char* app_dir) {
 
     rt->ready = true;
     g_rt = rt.release();
+    g_current_app_dir = requested_dir;
 
     Log("KuART ready: %zu DEX", g_rt->linker.NumDexFiles());
     return 1;
@@ -237,6 +247,7 @@ extern "C" void kuart_shutdown(void) {
     std::lock_guard<std::mutex> lock(g_mtx);
     delete g_rt;
     g_rt = nullptr;
+    g_current_app_dir.clear();
 }
 
 extern "C" int kuart_is_ready(void) { return (g_rt != nullptr && g_rt->ready) ? 1 : 0; }
