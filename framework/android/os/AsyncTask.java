@@ -1,187 +1,49 @@
 package android.os;
 
 import java.util.concurrent.Executor;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.Executors;
 
-/**
- * android.os.AsyncTask — runs doInBackground on the worker thread, injects results and
- * progress on main thread via Handler.
- *
- * This is the real behavior: there is a thread pool, there is a post to the main Looper, there is a state
- * PENDING/RUNNING/FINISHED and avoid calling execute() twice.
- */
 public abstract class AsyncTask<Params, Progress, Result> {
-    /** Task lifecycle status. */
-    public enum Status {
-        PENDING,
-        RUNNING,
-        FINISHED
-    }
+    public static final Executor THREAD_POOL_EXECUTOR = Executors.newCachedThreadPool();
+    public static final Executor SERIAL_EXECUTOR = Executors.newSingleThreadExecutor();
 
-    private static final int CORE_POOL_SIZE = 2;
-    private static final int MAX_POOL_SIZE = 8;
-    private static final int KEEP_ALIVE_SECONDS = 30;
-
-    private static final ThreadFactory sThreadFactory = new ThreadFactory() {
-        private final AtomicInteger mCount = new AtomicInteger(1);
-
-        public Thread newThread(Runnable r) {
-            Thread t = new Thread(r, "AsyncTask #" + mCount.getAndIncrement());
-            t.setDaemon(true);
-            return t;
-        }
-    };
-
-    /** Pool song song (AsyncTask.THREAD_POOL_EXECUTOR trong Android). */
-    public static final Executor THREAD_POOL_EXECUTOR = new ThreadPoolExecutor(
-            CORE_POOL_SIZE, MAX_POOL_SIZE, KEEP_ALIVE_SECONDS, TimeUnit.SECONDS,
-            new LinkedBlockingQueue<Runnable>(), sThreadFactory);
-
-    /** Sequential pool — default of execute() since API 11. */
-    public static final Executor SERIAL_EXECUTOR = new ThreadPoolExecutor(
-            1, 1, KEEP_ALIVE_SECONDS, TimeUnit.SECONDS,
-            new LinkedBlockingQueue<Runnable>(), sThreadFactory);
-
-    private static Handler sMainHandler;
-
-    private static synchronized Handler mainHandler() {
-        if (sMainHandler == null) {
-            Looper main = Looper.getMainLooper();
-            sMainHandler = (main != null) ? new Handler(main) : new Handler();
-        }
-        return sMainHandler;
-    }
-
+    public enum Status { PENDING, RUNNING, FINISHED }
     private volatile Status mStatus = Status.PENDING;
-    private final AtomicBoolean mCancelled = new AtomicBoolean(false);
-    private final AtomicBoolean mTaskInvoked = new AtomicBoolean(false);
-    private Result mResult;
-    private final Object mDoneLock = new Object();
-    private boolean mDone;
 
+    public AsyncTask() {}
+    public final Status getStatus() { return mStatus; }
+    protected void onPreExecute() {}
+    @SuppressWarnings("unchecked")
     protected abstract Result doInBackground(Params... params);
+    protected void onPostExecute(Result result) {}
+    @SuppressWarnings("unchecked")
+    protected void onProgressUpdate(Progress... values) {}
+    protected void onCancelled(Result result) { onCancelled(); }
+    protected void onCancelled() {}
+    public final boolean isCancelled() { return false; }
+    public final boolean cancel(boolean mayInterruptIfRunning) { return false; }
 
-    protected void onPreExecute() {
-    }
-
-    protected void onPostExecute(Result result) {
-    }
-
-    protected void onProgressUpdate(Progress... values) {
-    }
-
-    protected void onCancelled() {
-    }
-
-    protected void onCancelled(Result result) {
-        onCancelled();
-    }
-
-    public final Status getStatus() {
-        return mStatus;
-    }
-
-    public final boolean isCancelled() {
-        return mCancelled.get();
-    }
-
-    public final boolean cancel(boolean mayInterruptIfRunning) {
-        return mCancelled.compareAndSet(false, true);
-    }
-
+    @SafeVarargs
     public final AsyncTask<Params, Progress, Result> execute(Params... params) {
-        return executeOnExecutor(SERIAL_EXECUTOR, params);
+        return executeOnExecutor(THREAD_POOL_EXECUTOR, params);
     }
 
-    public final AsyncTask<Params, Progress, Result> executeOnExecutor(Executor exec,
-                                                                      final Params... params) {
-        if (mStatus != Status.PENDING) {
-            if (mStatus == Status.RUNNING) {
-                throw new IllegalStateException(
-                        "Cannot execute task: the task is already running.");
-            }
-            throw new IllegalStateException(
-                    "Cannot execute task: the task has already been executed (a task can be executed only once)");
-        }
+    @SafeVarargs
+    public final AsyncTask<Params, Progress, Result> executeOnExecutor(Executor exec, final Params... params) {
         mStatus = Status.RUNNING;
         onPreExecute();
-
         exec.execute(new Runnable() {
             public void run() {
-                mTaskInvoked.set(true);
-                Result result = null;
-                try {
-                    if (!isCancelled()) {
-                        result = doInBackground(params);
-                    }
-                } catch (Throwable t) {
-                    // Exception in doInBackground must cancel the task, not
-                    // killed the pool's worker thread.
-                    mCancelled.set(true);
-                    android.util.Log.e("AsyncTask", "doInBackground threw: " + t);
-                } finally {
-                    postResult(result);
-                }
+                final Result r = doInBackground(params);
+                mStatus = Status.FINISHED;
+                onPostExecute(r);
             }
         });
         return this;
     }
 
-    protected final void publishProgress(final Progress... values) {
-        if (isCancelled()) return;
-        mainHandler().post(new Runnable() {
-            public void run() {
-                onProgressUpdate(values);
-            }
-        });
-    }
-
-    private void postResult(final Result result) {
-        mainHandler().post(new Runnable() {
-            public void run() {
-                mResult = result;
-                if (isCancelled()) {
-                    onCancelled(result);
-                } else {
-                    onPostExecute(result);
-                }
-                mStatus = Status.FINISHED;
-                synchronized (mDoneLock) {
-                    mDone = true;
-                    mDoneLock.notifyAll();
-                }
-            }
-        });
-    }
-
-    /** Block until the task is completed. Cannot be called from main thread (will deadlock). */
-    public final Result get() throws InterruptedException {
-        synchronized (mDoneLock) {
-            while (!mDone) {
-                mDoneLock.wait();
-            }
-        }
-        return mResult;
-    }
-
-    public final Result get(long timeout, TimeUnit unit) throws InterruptedException {
-        final long deadline = System.nanoTime() + unit.toNanos(timeout);
-        synchronized (mDoneLock) {
-            while (!mDone) {
-                long remainingMs = (deadline - System.nanoTime()) / 1000000L;
-                if (remainingMs <= 0) break;
-                mDoneLock.wait(remainingMs);
-            }
-        }
-        return mResult;
-    }
-
-    public static void execute(Runnable runnable) {
-        THREAD_POOL_EXECUTOR.execute(runnable);
+    @SafeVarargs
+    protected final void publishProgress(Progress... values) {
+        onProgressUpdate(values);
     }
 }

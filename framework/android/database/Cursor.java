@@ -1,42 +1,42 @@
 package android.database;
 
-/**
- * minimal android.database.cursor implementation.
- *
- * provides access to query results. for kudroid minimal framework, this is
- * an empty pointer (no rows).
- */
-public interface Cursor {
-    /** returns the number of rows. */
+import java.io.Closeable;
+
+public interface Cursor extends Closeable {
+    int FIELD_TYPE_NULL = 0;
+    int FIELD_TYPE_INTEGER = 1;
+    int FIELD_TYPE_FLOAT = 2;
+    int FIELD_TYPE_STRING = 3;
+    int FIELD_TYPE_BLOB = 4;
+
     int getCount();
-
-    /** move to the first row. */
+    int getPosition();
+    boolean move(int offset);
+    boolean moveToPosition(int position);
     boolean moveToFirst();
-
-    /** move to the next row. */
+    boolean moveToLast();
     boolean moveToNext();
-
-    /** returns whether the cursor is closed or not. */
-    boolean isClosed();
-
-    /** closes the cursor. */
-    void close();
-
-    /** returns a string value for the given column. */
+    boolean moveToPrevious();
+    boolean isFirst();
+    boolean isLast();
+    boolean isBeforeFirst();
+    boolean isAfterLast();
+    int getColumnIndex(String columnName);
+    int getColumnIndexOrThrow(String columnName) throws IllegalArgumentException;
+    String getColumnName(int columnIndex);
+    String[] getColumnNames();
+    int getColumnCount();
+    byte[] getBlob(int columnIndex);
     String getString(int columnIndex);
-
-    /** returns an integer value for the given column. */
+    short getShort(int columnIndex);
     int getInt(int columnIndex);
-
-    /** returns a long value for the given column. */
     long getLong(int columnIndex);
-
-    /** returns a float value for the given column. */
     float getFloat(int columnIndex);
-
-    /** returns a double value for the given column. */
     double getDouble(int columnIndex);
-
-    /** returns whether the value in the given column is empty or not. */
+    int getType(int columnIndex);
     boolean isNull(int columnIndex);
+    void close();
+    boolean isClosed();
+    void registerDataSetObserver(DataSetObserver observer);
+    void unregisterDataSetObserver(DataSetObserver observer);
 }

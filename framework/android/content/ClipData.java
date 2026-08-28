@@ -1,38 +1,24 @@
 package android.content;
 
-/**
- * emulate android.content.clipdata.
- *
- * represents clipboard data. for kudroid minimal framework, here is an emulation.
- */
-public class ClipData {
-    private final Item[] mItems;
+import android.os.Parcel;
+import android.os.Parcelable;
+
+public class ClipData implements Parcelable {
+    private final CharSequence mText;
 
     public ClipData(CharSequence label, String[] mimeTypes, Item item) {
-        mItems = new Item[] { item };
+        mText = (item != null) ? item.getText() : null;
     }
-
-    public int getItemCount() {
-        return mItems != null ? mItems.length : 0;
-    }
-
-    public Item getItemAt(int index) {
-        if (mItems == null || index < 0 || index >= mItems.length) return null;
-        return mItems[index];
-    }
-
-    /**
-     * a single item of clipboard data.
-     */
     public static class Item {
         private final CharSequence mText;
-
-        public Item(CharSequence text) {
-            mText = text;
-        }
-
-        public CharSequence getText() {
-            return mText;
-        }
+        public Item(CharSequence text) { mText = text; }
+        public CharSequence getText() { return mText; }
     }
+    public static ClipData newPlainText(CharSequence label, CharSequence text) {
+        return new ClipData(label, new String[]{"text/plain"}, new Item(text));
+    }
+    public int getItemCount() { return 1; }
+    public Item getItemAt(int index) { return new Item(mText); }
+    public int describeContents() { return 0; }
+    public void writeToParcel(Parcel dest, int flags) {}
 }

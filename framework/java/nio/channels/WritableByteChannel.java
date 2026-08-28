@@ -1,10 +1,8 @@
 package java.nio.channels;
 
 import java.nio.ByteBuffer;
+import java.io.IOException;
 
-/**
- * java.nio.channels.WritableByteChannel — a channel that can be written from a buffer.
- */
 public interface WritableByteChannel extends Channel {
-    int write(ByteBuffer src) throws java.io.IOException;
+    int write(ByteBuffer src) throws IOException;
 }

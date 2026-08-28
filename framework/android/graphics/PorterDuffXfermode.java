@@ -1,6 +1,6 @@
 package android.graphics;
 
-/** Stub automatically generated for android.graphics.PorterDuffXfermode */
 public class PorterDuffXfermode {
-    public PorterDuffXfermode() {}
+    public final PorterDuff.Mode mode;
+    public PorterDuffXfermode(PorterDuff.Mode mode) { this.mode = mode; }
 }

@@ -1,12 +1,9 @@
 package java.nio.channels;
 
 import java.io.Closeable;
+import java.io.IOException;
 
-/**
- * java.nio.channels.Channel — base interface for anything that can be open or closed.
- */
 public interface Channel extends Closeable {
     boolean isOpen();
-
-    void close() throws java.io.IOException;
+    void close() throws IOException;
 }

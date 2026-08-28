@@ -4,79 +4,42 @@ import android.content.Context;
 import android.view.View;
 import android.view.ViewGroup;
 
-/**
- * android.widget.AdapterView — ViewGroup gets children from an Adapter.
- *
- * This is the superclass of ListView/GridView/Spinner and is where the functions are declared
- * listener item click that the app uses the most.
- */
 public abstract class AdapterView<T extends Adapter> extends ViewGroup {
-    /** Returns when there is no item at the asked position. */
     public static final int INVALID_POSITION = -1;
     public static final long INVALID_ROW_ID = Long.MIN_VALUE;
-    public static final int ITEM_VIEW_TYPE_IGNORE = -1;
-    public static final int ITEM_VIEW_TYPE_HEADER_OR_FOOTER = -2;
 
-    /**
-     * Callback when an item is pressed.
-     */
     public interface OnItemClickListener {
         void onItemClick(AdapterView<?> parent, View view, int position, long id);
     }
-
-    /**
-     * Callback when an item is held down. Returns true if processed.
-     */
     public interface OnItemLongClickListener {
         boolean onItemLongClick(AdapterView<?> parent, View view, int position, long id);
     }
-
-    /**
-     * Callback when selection changes (used for Spinner / keyboard navigation).
-     */
     public interface OnItemSelectedListener {
         void onItemSelected(AdapterView<?> parent, View view, int position, long id);
-
         void onNothingSelected(AdapterView<?> parent);
     }
 
     private OnItemClickListener mOnItemClickListener;
     private OnItemLongClickListener mOnItemLongClickListener;
     private OnItemSelectedListener mOnItemSelectedListener;
-    private int mSelectedPosition = INVALID_POSITION;
 
-    public AdapterView(Context context) {
-        super(context);
-    }
-
+    public AdapterView(Context context) { super(context); }
     public abstract T getAdapter();
-
     public abstract void setAdapter(T adapter);
-
-    public void setOnItemClickListener(OnItemClickListener listener) {
-        mOnItemClickListener = listener;
+    public void setOnItemClickListener(OnItemClickListener listener) { mOnItemClickListener = listener; }
+    public final OnItemClickListener getOnItemClickListener() { return mOnItemClickListener; }
+    public void setOnItemLongClickListener(OnItemLongClickListener listener) { mOnItemLongClickListener = listener; }
+    public final OnItemLongClickListener getOnItemLongClickListener() { return mOnItemLongClickListener; }
+    public void setOnItemSelectedListener(OnItemSelectedListener listener) { mOnItemSelectedListener = listener; }
+    public final OnItemSelectedListener getOnItemSelectedListener() { return mOnItemSelectedListener; }
+    public abstract View getSelectedView();
+    public abstract void setSelection(int position);
+    public int getSelectedItemPosition() { return INVALID_POSITION; }
+    public long getSelectedItemId() { return INVALID_ROW_ID; }
+    public int getCount() {
+        T adapter = getAdapter();
+        return adapter != null ? adapter.getCount() : 0;
     }
-
-    public OnItemClickListener getOnItemClickListener() {
-        return mOnItemClickListener;
-    }
-
-    public void setOnItemLongClickListener(OnItemLongClickListener listener) {
-        mOnItemLongClickListener = listener;
-    }
-
-    public OnItemLongClickListener getOnItemLongClickListener() {
-        return mOnItemLongClickListener;
-    }
-
-    public void setOnItemSelectedListener(OnItemSelectedListener listener) {
-        mOnItemSelectedListener = listener;
-    }
-
-    public OnItemSelectedListener getOnItemSelectedListener() {
-        return mOnItemSelectedListener;
-    }
-
     public boolean performItemClick(View view, int position, long id) {
         if (mOnItemClickListener != null) {
             mOnItemClickListener.onItemClick(this, view, position, id);
@@ -84,65 +47,8 @@ public abstract class AdapterView<T extends Adapter> extends ViewGroup {
         }
         return false;
     }
-
-    /** Dispatch hold down; Return false to let the caller fallback to a regular click. */
-    public boolean performItemLongClick(View view, int position, long id) {
-        if (mOnItemLongClickListener != null) {
-            return mOnItemLongClickListener.onItemLongClick(this, view, position, id);
-        }
-        return false;
-    }
-
-    public int getCount() {
-        T adapter = getAdapter();
-        return adapter == null ? 0 : adapter.getCount();
-    }
-
-    public Object getItemAtPosition(int position) {
-        T adapter = getAdapter();
-        return (adapter == null || position < 0 || position >= adapter.getCount())
-                ? null : adapter.getItem(position);
-    }
-
     public long getItemIdAtPosition(int position) {
         T adapter = getAdapter();
-        return (adapter == null || position < 0 || position >= adapter.getCount())
-                ? INVALID_ROW_ID : adapter.getItemId(position);
-    }
-
-    public int getSelectedItemPosition() {
-        return mSelectedPosition;
-    }
-
-    public long getSelectedItemId() {
-        return getItemIdAtPosition(mSelectedPosition);
-    }
-
-    public Object getSelectedItem() {
-        return getItemAtPosition(mSelectedPosition);
-    }
-
-    public void setSelection(int position) {
-        if (mSelectedPosition == position) return;
-        mSelectedPosition = position;
-        if (mOnItemSelectedListener == null) return;
-        if (position == INVALID_POSITION) {
-            mOnItemSelectedListener.onNothingSelected(this);
-        } else {
-            mOnItemSelectedListener.onItemSelected(this, getChildAt(position), position,
-                                                   getItemIdAtPosition(position));
-        }
-    }
-
-    public View getSelectedView() {
-        return mSelectedPosition == INVALID_POSITION ? null : getChildAt(mSelectedPosition);
-    }
-
-    public int getFirstVisiblePosition() {
-        return 0;
-    }
-
-    public int getLastVisiblePosition() {
-        return getCount() - 1;
+        return (adapter != null && position >= 0) ? adapter.getItemId(position) : INVALID_ROW_ID;
     }
 }

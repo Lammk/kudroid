@@ -1,33 +1,25 @@
 package android.content.res;
 
-/**
- * minimal android.content.res.assetmanager implementation.
- *
- * provides access to the application's packaged assets. for kudroid minimal framework,
- * this is a simulation of returning null/empty for property lookups.
- */
-public final class AssetManager {
-    public AssetManager() {
-    }
+import java.io.InputStream;
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
 
-    /**
-     * opens a content file. currently returns null (not found).
-     */
-    public java.io.InputStream open(String fileName) throws java.io.IOException {
-        throw new java.io.FileNotFoundException("Asset not found: " + fileName);
+public final class AssetManager implements AutoCloseable {
+    public AssetManager() {}
+    public InputStream open(String fileName) throws IOException {
+        return new ByteArrayInputStream(new byte[0]);
     }
-
-    /**
-     * opens a content file with accessible mode. currently returns null.
-     */
-    public java.io.InputStream open(String fileName, int accessMode) throws java.io.IOException {
+    public InputStream open(String fileName, int accessMode) throws IOException {
         return open(fileName);
     }
-
-    /**
-     * lists assets in a folder. currently returns empty array.
-     */
-    public String[] list(String path) {
+    public AssetFileDescriptor openFd(String fileName) throws IOException {
+        return null;
+    }
+    public String[] list(String path) throws IOException {
         return new String[0];
     }
+    public String[] getLocales() {
+        return new String[]{"en_US"};
+    }
+    public void close() {}
 }

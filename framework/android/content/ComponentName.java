@@ -2,11 +2,10 @@ package android.content;
 
 import android.os.Parcel;
 import android.os.Parcelable;
+import java.io.Serializable;
 
-/**
- * android.content.ComponentName — (package, class) pair identifies a component.
- */
-public class ComponentName implements Parcelable, Cloneable {
+public final class ComponentName implements Parcelable, Cloneable, Comparable<ComponentName>, Serializable {
+    private static final long serialVersionUID = 1L;
     private final String mPackage;
     private final String mClass;
 
@@ -16,96 +15,39 @@ public class ComponentName implements Parcelable, Cloneable {
         mPackage = pkg;
         mClass = cls;
     }
-
     public ComponentName(Context pkg, String cls) {
-        if (cls == null) throw new NullPointerException("class name is null");
-        mPackage = pkg.getPackageName();
-        mClass = cls;
+        this(pkg.getPackageName(), cls);
     }
-
     public ComponentName(Context pkg, Class<?> cls) {
-        mPackage = pkg.getPackageName();
-        mClass = cls.getName();
+        this(pkg.getPackageName(), cls.getName());
     }
-
-    public String getPackageName() {
-        return mPackage;
-    }
-
-    public String getClassName() {
-        return mClass;
-    }
-
-    /** Shortened class name: remove the package prefix if the class is in that package. */
+    public String getPackageName() { return mPackage; }
+    public String getClassName() { return mClass; }
     public String getShortClassName() {
         if (mClass.startsWith(mPackage)) {
-            int pn = mPackage.length();
-            if (mClass.length() > pn && mClass.charAt(pn) == '.') {
-                return mClass.substring(pn);
+            int PN = mPackage.length();
+            int CN = mClass.length();
+            if (CN > PN && mClass.charAt(PN) == '.') {
+                return mClass.substring(PN);
             }
         }
         return mClass;
     }
-
-    public String flattenToString() {
-        return mPackage + "/" + mClass;
-    }
-
-    public String flattenToShortString() {
-        return mPackage + "/" + getShortClassName();
-    }
-
+    public String flattenToString() { return mPackage + "/" + mClass; }
     public static ComponentName unflattenFromString(String str) {
-        if (str == null) return null;
         int sep = str.indexOf('/');
-        if (sep < 0 || sep + 1 >= str.length()) return null;
-        String pkg = str.substring(0, sep);
-        String cls = str.substring(sep + 1);
-        if (cls.length() > 0 && cls.charAt(0) == '.') {
-            cls = pkg + cls;
-        }
-        return new ComponentName(pkg, cls);
+        if (sep < 0 || (sep + 1) >= str.length()) return null;
+        return new ComponentName(str.substring(0, sep), str.substring(sep + 1));
     }
-
-    @Override
-    public String toString() {
-        return "ComponentInfo{" + mPackage + "/" + mClass + "}";
+    public String toString() { return "ComponentInfo{" + mPackage + "/" + mClass + "}"; }
+    public int compareTo(ComponentName that) {
+        int v = this.mPackage.compareTo(that.mPackage);
+        if (v != 0) return v;
+        return this.mClass.compareTo(that.mClass);
     }
-
-    @Override
-    public boolean equals(Object obj) {
-        if (!(obj instanceof ComponentName)) return false;
-        ComponentName other = (ComponentName) obj;
-        return mPackage.equals(other.mPackage) && mClass.equals(other.mClass);
+    public int describeContents() { return 0; }
+    public void writeToParcel(Parcel out, int flags) {
+        out.writeString(mPackage);
+        out.writeString(mClass);
     }
-
-    @Override
-    public int hashCode() {
-        return mPackage.hashCode() + mClass.hashCode();
-    }
-
-    @Override
-    public ComponentName clone() {
-        return new ComponentName(mPackage, mClass);
-    }
-
-    public int describeContents() {
-        return 0;
-    }
-
-    public void writeToParcel(Parcel dest, int flags) {
-        dest.writeString(mPackage);
-        dest.writeString(mClass);
-    }
-
-    public static final Parcelable.Creator<ComponentName> CREATOR
-            = new Parcelable.Creator<ComponentName>() {
-        public ComponentName createFromParcel(Parcel source) {
-            return new ComponentName(source.readString(), source.readString());
-        }
-
-        public ComponentName[] newArray(int size) {
-            return new ComponentName[size];
-        }
-    };
 }

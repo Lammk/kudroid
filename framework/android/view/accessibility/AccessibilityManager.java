@@ -1,12 +1,10 @@
 package android.view.accessibility;
 
-/** Stub automatically generated for android.view.accessibility.AccessibilityManager */
-public class AccessibilityManager {
+import android.content.Context;
+
+public final class AccessibilityManager {
     public AccessibilityManager() {}
-
-    public interface AccessibilityStateChangeListener {
-    }
-
-    public interface TouchExplorationStateChangeListener {
-    }
+    public static AccessibilityManager getInstance(Context context) { return new AccessibilityManager(); }
+    public boolean isEnabled() { return false; }
+    public boolean isTouchExplorationEnabled() { return false; }
 }

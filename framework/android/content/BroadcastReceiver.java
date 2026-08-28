@@ -1,10 +1,9 @@
 package android.content;
 
-/** Stub automatically generated for android.content.BroadcastReceiver */
-public class BroadcastReceiver {
+public abstract class BroadcastReceiver {
+    private boolean mInitialStickyHint;
     public BroadcastReceiver() {}
-
-    public static class PendingResult {
-        public PendingResult() {}
-    }
+    public abstract void onReceive(Context context, Intent intent);
+    public final void abortBroadcast() {}
+    public final boolean isInitialStickyBroadcast() { return mInitialStickyHint; }
 }

@@ -1,90 +1,52 @@
 package android.os;
 
-/**
- * minimal android.os.looper implementation.
- *
- * a looper runs a message loop on a thread. for kudroid purposes (games
- * root only touches java for a while on startup), we provide a looper
- * the main thread simply processes messages synchronously.
- */
 public final class Looper {
-    private static final Looper sMainLooper = new Looper();
-    private static boolean sMainLooperPrepared = false;
+    private static final ThreadLocal<Looper> sThreadLocal = new ThreadLocal<Looper>();
+    private static Looper sMainLooper;
+    final MessageQueue mQueue;
+    final Thread mThread;
 
-    private final MessageQueue mQueue;
-
-    private Looper() {
+    private Looper(boolean quitAllowed) {
         mQueue = new MessageQueue();
+        mThread = Thread.currentThread();
     }
-
-    /**
-     * prepare main looper (called once on startup).
-     */
+    public static void prepare() {
+        prepare(true);
+    }
+    public static void prepare(boolean quitAllowed) {
+        if (sThreadLocal.get() != null) {
+            throw new RuntimeException("Only one Looper may be created per thread");
+        }
+        sThreadLocal.set(new Looper(quitAllowed));
+    }
     public static void prepareMainLooper() {
-        if (!sMainLooperPrepared) {
-            sMainLooperPrepared = true;
+        prepare(false);
+        synchronized (Looper.class) {
+            if (sMainLooper != null) {
+                throw new IllegalStateException("The main Looper has already been prepared.");
+            }
+            sMainLooper = myLooper();
         }
     }
-
-    /**
-     * returns the main looper for the current stream.
-     */
     public static Looper getMainLooper() {
-        return sMainLooper;
+        synchronized (Looper.class) {
+            return sMainLooper;
+        }
     }
-
-    /**
-     * returns the looper for the current thread (currently the main looper).
-     */
-    public static Looper myLooper() {
-        return sMainLooper;
-    }
-
-    /**
-     * returns the message queue associated with this looper.
-     */
-    public MessageQueue getQueue() {
-        return mQueue;
-    }
-
-    /**
-     * run notification loop. blocks until quit() is called.
-     */
     public static void loop() {
         final Looper me = myLooper();
-        if (me == null) return;
+        if (me == null) throw new RuntimeException("No Looper; Looper.prepare() wasn't called on this thread.");
         final MessageQueue queue = me.mQueue;
         for (;;) {
             Message msg = queue.next();
-            if (msg == null) {
-                return; // queue quit
-            }
-            try {
-                if (msg.target != null) {
-                    msg.target.dispatchMessage(msg);
-                }
-            } catch (Throwable t) {
-                System.err.println("[Looper] Uncaught exception in message dispatch:");
-                t.printStackTrace();
-            } finally {
-                try {
-                    msg.recycle();
-                } catch (Throwable ignored) {}
-            }
+            if (msg == null) return;
+            msg.target.dispatchMessage(msg);
+            msg.recycle();
         }
     }
-
-    /**
-     * exit looper.
-     */
-    public void quit() {
-        mQueue.quit();
-    }
-
-    /**
-     * exit the looper safely (after processing pending messages).
-     */
-    public void quitSafely() {
-        mQueue.quit();
-    }
+    public static Looper myLooper() { return sThreadLocal.get(); }
+    public void quit() { mQueue.quit(); }
+    public void quitSafely() { mQueue.quit(); }
+    public Thread getThread() { return mThread; }
+    public MessageQueue getQueue() { return mQueue; }
 }

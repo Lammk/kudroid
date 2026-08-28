@@ -1,6 +1,7 @@
 package android.widget;
 
-/** Stub automatically generated for android.widget.RadioButton */
-public class RadioButton {
-    public RadioButton() {}
+import android.content.Context;
+
+public class RadioButton extends CompoundButton {
+    public RadioButton(Context context) { super(context); }
 }

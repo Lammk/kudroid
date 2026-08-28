@@ -1,74 +1,23 @@
 package android.net;
 
-/**
- * emulate android.net.networkinfo.
- *
- * describes the state of a network. for kudroid minimal framework, this is
- * a simulation.
- */
-public class NetworkInfo {
-    /** status: connecting. */
-    public static final int STATE_CONNECTING = 0;
-    /** status: connected. */
-    public static final int STATE_CONNECTED = 1;
-    /** status: suspended. */
-    public static final int STATE_SUSPENDED = 2;
-    /** status: disconnected. */
-    public static final int STATE_DISCONNECTING = 3;
-    /** status: disconnected. */
-    public static final int STATE_DISCONNECTED = 4;
+import android.os.Parcel;
+import android.os.Parcelable;
 
-    private final int mType;
-    private final int mSubtype;
-    private final String mTypeName;
-    private final String mSubtypeName;
-    private int mState = STATE_DISCONNECTED;
-    private boolean mAvailable = false;
+public class NetworkInfo implements Parcelable {
+    public enum State { CONNECTING, CONNECTED, SUSPENDED, DISCONNECTING, DISCONNECTED, UNKNOWN }
+    public enum DetailedState { IDLE, SCANNING, CONNECTING, AUTHENTICATING, OBTAINING_IPADDR, CONNECTED, SUSPENDED, DISCONNECTING, DISCONNECTED, FAILED, BLOCKED, VERIFYING_POOR_LINK, CAPTIVE_PORTAL_CHECK }
 
-    public NetworkInfo(int type, int subtype, String typeName, String subtypeName) {
-        mType = type;
-        mSubtype = subtype;
-        mTypeName = typeName;
-        mSubtypeName = subtypeName;
-    }
+    private boolean mIsAvailable = true;
+    private boolean mIsConnected = true;
 
-    public int getType() {
-        return mType;
-    }
-
-    public int getSubtype() {
-        return mSubtype;
-    }
-
-    public String getTypeName() {
-        return mTypeName;
-    }
-
-    public String getSubtypeName() {
-        return mSubtypeName;
-    }
-
-    public int getState() {
-        return mState;
-    }
-
-    public boolean isConnected() {
-        return mState == STATE_CONNECTED;
-    }
-
-    public boolean isConnectedOrConnecting() {
-        return mState == STATE_CONNECTED || mState == STATE_CONNECTING;
-    }
-
-    public boolean isAvailable() {
-        return mAvailable;
-    }
-
-    public boolean isFailover() {
-        return false;
-    }
-
-    public boolean isRoaming() {
-        return false;
-    }
+    public NetworkInfo(int type, int subtype, String typeName, String subtypeName) {}
+    public int getType() { return ConnectivityManager.TYPE_WIFI; }
+    public String getTypeName() { return "WIFI"; }
+    public boolean isConnected() { return mIsConnected; }
+    public boolean isConnectedOrConnecting() { return mIsConnected; }
+    public boolean isAvailable() { return mIsAvailable; }
+    public State getState() { return State.CONNECTED; }
+    public DetailedState getDetailedState() { return DetailedState.CONNECTED; }
+    public int describeContents() { return 0; }
+    public void writeToParcel(Parcel dest, int flags) {}
 }

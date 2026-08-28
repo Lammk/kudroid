@@ -1,10 +1,14 @@
 package android.app;
 
-/** Stub automatically generated for android.app.AlarmManager */
 public class AlarmManager {
-    public AlarmManager() {}
+    public static final int RTC_WAKEUP = 0;
+    public static final int RTC = 1;
+    public static final int ELAPSED_REALTIME_WAKEUP = 2;
+    public static final int ELAPSED_REALTIME = 3;
 
-    public static class AlarmClockInfo {
-        public AlarmClockInfo() {}
-    }
+    public AlarmManager() {}
+    public void set(int type, long triggerAtMillis, PendingIntent operation) {}
+    public void setExact(int type, long triggerAtMillis, PendingIntent operation) {}
+    public void setRepeating(int type, long triggerAtMillis, long intervalMillis, PendingIntent operation) {}
+    public void cancel(PendingIntent operation) {}
 }

@@ -47,6 +47,8 @@ public class View {
     private boolean mLaidOut;
     private int mMeasuredWidth;
     private int mMeasuredHeight;
+    protected int mScrollX = 0;
+    protected int mScrollY = 0;
 
     /** Android long press threshold (ViewConfiguration.getLongPressTimeout). */
     private static final long LONG_PRESS_TIMEOUT = 500L;
@@ -613,6 +615,17 @@ public class View {
 
     public static class BaseSavedState {
         public BaseSavedState() {}
+    }
+
+    public void scrollTo(int x, int y) {
+        if (mScrollX != x || mScrollY != y) {
+            mScrollX = x;
+            mScrollY = y;
+            invalidate();
+        }
+    }
+    public void scrollBy(int x, int y) {
+        scrollTo(mScrollX + x, mScrollY + y);
     }
 
     public interface OnCreateContextMenuListener {

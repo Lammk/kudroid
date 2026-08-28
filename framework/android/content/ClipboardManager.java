@@ -1,39 +1,16 @@
 package android.content;
 
-/**
- * emulate android.content.clipboardmanager.
- *
- * clipboard management. for kudroid minimal framework, here is an emulation.
- */
 public class ClipboardManager {
-    private CharSequence mText;
+    private ClipData mClip;
 
-    public ClipboardManager() {
-    }
-
-    public void setText(CharSequence text) {
-        mText = text;
-    }
-
+    public ClipboardManager() {}
+    public void setPrimaryClip(ClipData clip) { mClip = clip; }
+    public ClipData getPrimaryClip() { return mClip; }
+    public boolean hasPrimaryClip() { return mClip != null; }
     public CharSequence getText() {
-        return mText;
+        return (mClip != null && mClip.getItemCount() > 0) ? mClip.getItemAt(0).getText() : null;
     }
-
-    public boolean hasText() {
-        return mText != null && mText.length() > 0;
-    }
-
-    public void setPrimaryClip(ClipData clip) {
-        if (clip != null && clip.getItemCount() > 0) {
-            mText = clip.getItemAt(0).getText();
-        }
-    }
-
-    public ClipData getPrimaryClip() {
-        return null;
-    }
-
-    public boolean hasPrimaryClip() {
-        return mText != null;
+    public void setText(CharSequence text) {
+        setPrimaryClip(ClipData.newPlainText(null, text));
     }
 }

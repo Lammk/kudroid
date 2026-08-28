@@ -1,30 +1,16 @@
 package android.net;
 
-/**
- * emulate android.net.network.
- *
- * represents a network. for kudroid minimal framework, here is an emulation.
- */
-public class Network {
-    private final int mNetId;
+import android.os.Parcel;
+import android.os.Parcelable;
+import java.net.Socket;
+import java.net.URL;
+import java.net.URLConnection;
+import java.io.IOException;
 
-    public Network(int netId) {
-        mNetId = netId;
-    }
-
-    public int getNetId() {
-        return mNetId;
-    }
-
-    @Override
-    public boolean equals(Object o) {
-        if (this == o) return true;
-        if (!(o instanceof Network)) return false;
-        return mNetId == ((Network) o).mNetId;
-    }
-
-    @Override
-    public int hashCode() {
-        return mNetId;
-    }
+public class Network implements Parcelable {
+    public Network() {}
+    public Socket bindSocket(Socket socket) throws IOException { return socket; }
+    public URLConnection openConnection(URL url) throws IOException { return url.openConnection(); }
+    public int describeContents() { return 0; }
+    public void writeToParcel(Parcel dest, int flags) {}
 }

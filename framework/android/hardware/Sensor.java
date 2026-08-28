@@ -1,57 +1,24 @@
 package android.hardware;
 
-/**
- * emulate android.hardware.sensor.
- *
- * represents a sensor. for kudroid minimal framework, here is an emulation.
- */
-public class Sensor {
-    /** reporting mode: continuous. */
-    public static final int REPORTING_MODE_CONTINUOUS = 0;
-    /** report mode: on change. */
-    public static final int REPORTING_MODE_ON_CHANGE = 1;
-    /** reporting mode: once. */
-    public static final int REPORTING_MODE_ONE_SHOT = 2;
+public final class Sensor {
+    public static final int TYPE_ACCELEROMETER = 1;
+    public static final int TYPE_MAGNETIC_FIELD = 2;
+    public static final int TYPE_ORIENTATION = 3;
+    public static final int TYPE_GYROSCOPE = 4;
+    public static final int TYPE_LIGHT = 5;
+    public static final int TYPE_PRESSURE = 6;
+    public static final int TYPE_PROXIMITY = 8;
+    public static final int TYPE_GRAVITY = 9;
+    public static final int TYPE_LINEAR_ACCELERATION = 10;
+    public static final int TYPE_ROTATION_VECTOR = 11;
 
-    private final int mType;
-    private final String mName;
-    private final String mVendor;
-    private final float mResolution;
-    private final int mMinDelay;
-
-    public Sensor(int type, String name, String vendor, float resolution, int minDelay) {
-        mType = type;
-        mName = name;
-        mVendor = vendor;
-        mResolution = resolution;
-        mMinDelay = minDelay;
-    }
-
-    public int getType() {
-        return mType;
-    }
-
-    public String getName() {
-        return mName;
-    }
-
-    public String getVendor() {
-        return mVendor;
-    }
-
-    public float getResolution() {
-        return mResolution;
-    }
-
-    public int getMinDelay() {
-        return mMinDelay;
-    }
-
-    public float getMaximumRange() {
-        return 0.0f;
-    }
-
-    public int getVersion() {
-        return 1;
-    }
+    private int mType;
+    private String mName;
+    Sensor(int type, String name) { mType = type; mName = name; }
+    public String getName() { return mName; }
+    public int getType() { return mType; }
+    public float getMaximumRange() { return 100.0f; }
+    public float getResolution() { return 0.01f; }
+    public float getPower() { return 0.1f; }
+    public int getMinDelay() { return 10000; }
 }

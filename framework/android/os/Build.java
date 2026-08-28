@@ -2,50 +2,37 @@ package android.os;
 
 public class Build {
     public static final String UNKNOWN = "unknown";
-    public static final String ID = "TQ3A.230901.001";
-    public static final String DISPLAY = "TQ3A.230901.001";
-    public static final String PRODUCT = "kudroid_arm64";
-    public static final String DEVICE = "kudroid";
-    public static final String BOARD = "apple_silicon";
+    public static final String ID = "QP1A.191005.007.A1";
+    public static final String DISPLAY = "QP1A.191005.007.A1";
+    public static final String PRODUCT = "flame";
+    public static final String DEVICE = "flame";
+    public static final String BOARD = "msmnile";
+    public static final String CPU_ABI = "arm64-v8a";
+    public static final String CPU_ABI2 = "armeabi-v7a";
     public static final String MANUFACTURER = "Google";
     public static final String BRAND = "google";
-    public static final String MODEL = "Pixel 8 Pro (KuDroid)";
+    public static final String MODEL = "Pixel 4";
     public static final String BOOTLOADER = "unknown";
-    public static final String RADIO = "unknown";
-    public static final String HARDWARE = "apple_gpu";
+    public static final String HARDWARE = "flame";
     public static final String SERIAL = "unknown";
     public static final String TYPE = "user";
     public static final String TAGS = "release-keys";
-    public static final String FINGERPRINT = "google/husky/husky:14/TQ3A.230901.001/10750766:user/release-keys";
-    public static final long TIME = 1700000000000L;
+    public static final String FINGERPRINT = "google/flame/flame:10/QP1A.191005.007.A1/5914597:user/release-keys";
+    public static final long TIME = 1570233600000L;
     public static final String USER = "android-build";
-    public static final String HOST = "kudroid-host";
-
-    public static final String CPU_ABI = "arm64-v8a";
-    public static final String CPU_ABI2 = "";
-    public static final String[] SUPPORTED_ABIS = new String[] { "arm64-v8a" };
-    public static final String[] SUPPORTED_32_BIT_ABIS = new String[0];
-    public static final String[] SUPPORTED_64_BIT_ABIS = new String[] { "arm64-v8a" };
-
-    public static String getSerial() {
-        return "KUDROID8888";
-    }
-
-    public static String getRadioVersion() {
-        return "unknown";
-    }
+    public static final String HOST = "abfarm-release";
+    public static final String[] SUPPORTED_ABIS = new String[]{"arm64-v8a", "armeabi-v7a", "armeabi"};
+    public static final String[] SUPPORTED_32_BIT_ABIS = new String[]{"armeabi-v7a", "armeabi"};
+    public static final String[] SUPPORTED_64_BIT_ABIS = new String[]{"arm64-v8a"};
 
     public static class VERSION {
-        public static final String INCREMENTAL = "10750766";
-        public static final String RELEASE = "14";
-        public static final String RELEASE_OR_CODENAME = "14";
-        public static final String RELEASE_OR_PREVIEW_DISPLAY = "14";
+        public static final String INCREMENTAL = "5914597";
+        public static final String RELEASE = "10";
         public static final String BASE_OS = "";
-        public static final String SECURITY_PATCH = "2024-03-01";
-        public static final int SDK_INT = 34; // Android 14
+        public static final String SECURITY_PATCH = "2019-10-05";
+        public static final int SDK_INT = 29;
         public static final int PREVIEW_SDK_INT = 0;
         public static final String CODENAME = "REL";
-        public static final int MEDIA_PERFORMANCE_CLASS = 34;
     }
 
     public static class VERSION_CODES {
@@ -78,10 +65,7 @@ public class Build {
         public static final int O_MR1 = 27;
         public static final int P = 28;
         public static final int Q = 29;
-        public static final int R = 30;
-        public static final int S = 31;
-        public static final int S_V2 = 32;
-        public static final int TIRAMISU = 33;
-        public static final int UPSIDE_DOWN_CAKE = 34;
     }
+
+    public static String getSerial() { return SERIAL; }
 }
