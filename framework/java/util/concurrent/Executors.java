@@ -16,7 +16,7 @@ public final class Executors {
 
     public static ExecutorService newCachedThreadPool() {
         return new ThreadPoolExecutor(0, Integer.MAX_VALUE, 60L, TimeUnit.SECONDS,
-                new LinkedBlockingQueue<Runnable>());
+                new SynchronousQueue<Runnable>());
     }
 
     public static ThreadFactory defaultThreadFactory() {

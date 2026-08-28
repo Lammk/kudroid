@@ -52,19 +52,17 @@ bool IsPrimitiveDescriptor(const char* d) {
 // kuart-tests binaries, not from a real APK launch, which made it look like
 // java.lang.String was missing at runtime when it is present in framework.dex.
 std::mutex g_missing_class_log_mtx;
-std::string g_missing_class_log_path;
+std::vector<std::string> g_missing_class_log_paths;
 
 void AppendMissingClassLog(const std::string& dotted, const char* descriptor) {
-    std::string path;
+    std::vector<std::string> paths;
     {
         std::lock_guard<std::mutex> lock(g_missing_class_log_mtx);
-        path = g_missing_class_log_path;
+        paths = g_missing_class_log_paths;
     }
     // No path configured (host tests, or before kuart_init) -> log to stderr only.
-    if (path.empty()) return;
+    if (paths.empty()) return;
 
-    std::ofstream logFile(path, std::ios::app);
-    if (!logFile.is_open()) return;
     const auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
     char timeBuf[64] = {0};
     std::tm tm_buf{};
@@ -74,15 +72,30 @@ void AppendMissingClassLog(const std::string& dotted, const char* descriptor) {
     localtime_r(&now, &tm_buf);
 #endif
     std::strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%d %H:%M:%S", &tm_buf);
-    logFile << "[" << timeBuf << "] MISSING_FRAMEWORK_CLASS: " << dotted
-            << " (descriptor: " << descriptor << ")\n";
+
+    for (const auto& path : paths) {
+        if (path.empty()) continue;
+        std::ofstream logFile(path, std::ios::app);
+        if (logFile.is_open()) {
+            logFile << "[" << timeBuf << "] MISSING_FRAMEWORK_CLASS: " << dotted
+                    << " (descriptor: " << descriptor << ")\n";
+            logFile.flush();
+        }
+    }
 }
 
 }  // namespace
 
 void DexClassLinker::SetMissingClassLogPath(const char* path) {
     std::lock_guard<std::mutex> lock(g_missing_class_log_mtx);
-    g_missing_class_log_path = (path != nullptr) ? path : "";
+    if (path == nullptr || path[0] == '\0') {
+        g_missing_class_log_paths.clear();
+        return;
+    }
+    std::string s(path);
+    if (std::find(g_missing_class_log_paths.begin(), g_missing_class_log_paths.end(), s) == g_missing_class_log_paths.end()) {
+        g_missing_class_log_paths.push_back(s);
+    }
 }
 
 DexClassLinker::DexClassLinker() = default;

@@ -155,7 +155,9 @@ void JavaCanvasRenderer::drawText(const char* text, float x, float y, uint32_t a
     CTLineRef line = CTLineCreateWithAttributedString(attrString);
 
     if (line) {
-        // Coordinates for drawing text
+        // CoreText glyphs draw upside down in a vertically flipped CGContext unless
+        // TextMatrix is also flipped with CGAffineTransformMakeScale(1.0, -1.0).
+        CGContextSetTextMatrix(context, CGAffineTransformMakeScale(1.0, -1.0));
         CGContextSetTextPosition(context, x, y);
         CTLineDraw(line, context);
         CFRelease(line);
