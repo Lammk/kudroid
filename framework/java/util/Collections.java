@@ -51,6 +51,21 @@ public final class Collections {
         return new HashSet<T>(1);
     }
 
+    public static <T> Enumeration<T> emptyEnumeration() {
+        return new Enumeration<T>() {
+            public boolean hasMoreElements() { return false; }
+            public T nextElement() { throw new NoSuchElementException(); }
+        };
+    }
+
+    public static <T> Enumeration<T> enumeration(final Collection<T> c) {
+        return new Enumeration<T>() {
+            private final Iterator<T> i = c.iterator();
+            public boolean hasMoreElements() { return i.hasNext(); }
+            public T nextElement() { return i.next(); }
+        };
+    }
+
     public static <T> List<T> singletonList(T item) {
         ArrayList<T> out = new ArrayList<T>(1);
         out.add(item);
