@@ -871,6 +871,133 @@ int main() {
         }
     }
 
+    // ── fields the app writes directly ──
+    //
+    // A class that is present but missing a field is a worse failure than a missing
+    // class: `new X()` succeeds, then the first field access throws NoSuchFieldError
+    // and there is no auto-stub fallback, because object layout is fixed by
+    // LinkClass. EditorInfo was the case that stopped a launch — GameActivity
+    // constructs one in onCreate and writes inputType, so createSurfaceView() never
+    // finished and no surface existed to draw on.
+    {
+        struct FieldCase {
+            const char* descriptor;
+            const char* ctor_sig;
+            const char* field;
+            const char* type;
+            const char* why;
+        };
+        // Every one of these is written directly by app or library code, so the name
+        // and descriptor have to match AOSP exactly.
+        const FieldCase cases[] = {
+            {"Landroid/view/inputmethod/EditorInfo;", "()V", "inputType", "I",
+             "GameActivity.getImeEditorInfo writes it during onCreate"},
+            {"Landroid/view/inputmethod/EditorInfo;", "()V", "imeOptions", "I", nullptr},
+            {"Landroid/view/inputmethod/EditorInfo;", "()V", "actionId", "I", nullptr},
+            {"Landroid/view/inputmethod/EditorInfo;", "()V", "initialSelStart", "I", nullptr},
+            {"Landroid/graphics/Paint$FontMetricsInt;", "()V", "ascent", "I",
+             "text layout places baselines from these"},
+            {"Landroid/graphics/Paint$FontMetricsInt;", "()V", "descent", "I", nullptr},
+            {"Landroid/graphics/BitmapFactory$Options;", "()V", "inJustDecodeBounds", "Z",
+             "measuring an image before allocating for it"},
+            {"Landroid/graphics/BitmapFactory$Options;", "()V", "outWidth", "I", nullptr},
+            {"Landroid/graphics/BitmapFactory$Options;", "()V", "inSampleSize", "I", nullptr},
+            {"Landroid/content/pm/ActivityInfo;", "()V", "exported", "Z",
+             "read off a resolved component"},
+            {"Landroid/content/pm/ApplicationInfo;", "()V", "minSdkVersion", "I", nullptr},
+        };
+        for (const FieldCase& c : cases) {
+            DexClass* k = linker.FindClass(c.descriptor);
+            if (k == nullptr || k->is_stub) {
+                Check(false, std::string("class present: ") + c.descriptor);
+                continue;
+            }
+            const bool has = k->FindInstanceField(c.field, c.type) != nullptr;
+            Check(has, std::string(c.descriptor) + "." + c.field + " exists" +
+                           (c.why != nullptr ? std::string(" (") + c.why + ")" : ""));
+        }
+
+        // Writing and reading a field back proves the layout works, not just that the
+        // name resolves.
+        DexObject* ei = NewObject("Landroid/view/inputmethod/EditorInfo;", "()V", {},
+                                  "new EditorInfo");
+        if (ei != nullptr && ei->clazz != nullptr) {
+            const DexField* f = ei->clazz->FindInstanceField("inputType", "I");
+            if (f != nullptr) {
+                ei->SetField<int32_t>(f->offset_or_slot, 0x21);
+                Check(ei->GetField<int32_t>(f->offset_or_slot) == 0x21,
+                      "EditorInfo.inputType round-trips a written value");
+            }
+        }
+
+        // Layout sentinels: nearly every programmatic addView() sizes a child with
+        // these, and they were absent.
+        DexClass* lp = linker.FindClass("Landroid/view/ViewGroup$LayoutParams;");
+        Check(lp != nullptr && !lp->is_stub, "ViewGroup$LayoutParams is real");
+        if (lp != nullptr && !lp->is_stub) {
+            const DexField* match = lp->FindStaticField("MATCH_PARENT", "I");
+            const DexField* wrap = lp->FindStaticField("WRAP_CONTENT", "I");
+            Check(match != nullptr && wrap != nullptr,
+                  "MATCH_PARENT and WRAP_CONTENT exist");
+            if (match != nullptr && wrap != nullptr && interp.EnsureInitialized(lp)) {
+                // The values are compared against directly by app code, so they
+                // cannot be renumbered.
+                Check(lp->static_values[match->offset_or_slot].i == -1,
+                      "MATCH_PARENT is -1, as app code expects");
+                Check(lp->static_values[wrap->offset_or_slot].i == -2,
+                      "WRAP_CONTENT is -2, as app code expects");
+            }
+        }
+
+        // WindowManager.LayoutParams: a fullscreen game configures its window through
+        // these, and a missing one aborted setup partway.
+        DexClass* wlp = linker.FindClass("Landroid/view/WindowManager$LayoutParams;");
+        if (wlp != nullptr && !wlp->is_stub) {
+            const char* names[] = {"format", "softInputMode", "layoutInDisplayCutoutMode",
+                                   "windowAnimations", "packageName"};
+            const char* types[] = {"I", "I", "I", "I", "Ljava/lang/String;"};
+            for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
+                Check(wlp->FindInstanceField(names[i], types[i]) != nullptr,
+                      std::string("WindowManager$LayoutParams.") + names[i] + " exists");
+            }
+        }
+
+        // Enum-like constants used as values; an empty stub made every reference throw.
+        DexClass* cfg = linker.FindClass("Landroid/graphics/Bitmap$Config;");
+        if (cfg != nullptr && !cfg->is_stub) {
+            Check(cfg->FindStaticField("ARGB_8888", "Landroid/graphics/Bitmap$Config;") != nullptr,
+                  "Bitmap.Config.ARGB_8888 exists");
+        }
+        DexClass* fmt = linker.FindClass("Landroid/graphics/Bitmap$CompressFormat;");
+        if (fmt != nullptr && !fmt->is_stub) {
+            Check(fmt->FindStaticField("PNG", "Landroid/graphics/Bitmap$CompressFormat;") != nullptr,
+                  "Bitmap.CompressFormat.PNG exists");
+        }
+
+        // okhttp's Android detection looks this up by name; the failed lookup left its
+        // Platform class in error, which kills every later HTTP call.
+        DexClass* ossl = linker.FindClass("Lcom/android/org/conscrypt/OpenSSLSocketImpl;");
+        Check(ossl != nullptr && !ossl->is_stub,
+              "com.android.org.conscrypt.OpenSSLSocketImpl is findable");
+
+        // Methods that were being auto-stubbed, i.e. silently doing nothing.
+        DexClass* logCls = linker.FindClass("Landroid/util/Log;");
+        if (logCls != nullptr) {
+            Check(logCls->FindDirectMethod("isLoggable", "(Ljava/lang/String;I)Z") != nullptr,
+                  "Log.isLoggable exists (libraries gate work on it)");
+        }
+        DexClass* classCls = linker.FindClass("Ljava/lang/Class;");
+        if (classCls != nullptr) {
+            Check(classCls->FindVirtualMethod("getPackage", "()Ljava/lang/Package;") != nullptr,
+                  "Class.getPackage exists");
+        }
+        DexClass* logger = linker.FindClass("Ljava/util/logging/Logger;");
+        if (logger != nullptr) {
+            Check(logger->FindVirtualMethod("setUseParentHandlers", "(Z)V") != nullptr,
+                  "Logger.setUseParentHandlers exists");
+        }
+    }
+
     std::printf("  executed %llu instructions\n",
                 static_cast<unsigned long long>(interp.instructions_executed()));
 

@@ -59,9 +59,14 @@ public final class Bitmap {
     }
 
     /**
-     * returns bitmap configuration.
+     * The int config this Bitmap was created with.
+     *
+     * Not named getConfig(): Android's getConfig() returns Bitmap.Config, and having
+     * an int-returning method under that name meant app code calling the real
+     * signature got a type it could not use. The int form is kept for the existing
+     * KuDroid callers that construct with the int constants.
      */
-    public int getConfig() {
+    public int getConfigInt() {
         return mConfig;
     }
 
@@ -131,8 +136,104 @@ public final class Bitmap {
         return mPixels;
     }
 
-    public static class Config {
-        public Config() {}
+    /**
+     * Pixel format.
+     *
+     * An enum on Android, and apps use the constants as values (passing them to
+     * createBitmap, comparing against getConfig()). It was an empty stub, so
+     * `Bitmap.Config.ARGB_8888` threw NoSuchFieldError. Modelled as final instances
+     * rather than a Java enum so the identity comparisons apps make still work
+     * without pulling in enum machinery.
+     */
+    public static final class Config {
+        public static final Config ALPHA_8 = new Config("ALPHA_8", 1);
+        public static final Config RGB_565 = new Config("RGB_565", 3);
+        public static final Config ARGB_4444 = new Config("ARGB_4444", 4);
+        public static final Config ARGB_8888 = new Config("ARGB_8888", 5);
+        public static final Config RGBA_F16 = new Config("RGBA_F16", 6);
+        public static final Config HARDWARE = new Config("HARDWARE", 7);
+
+        private final String mName;
+        private final int mValue;
+
+        private Config(String name, int value) {
+            mName = name;
+            mValue = value;
+        }
+
+        public int nativeInt() { return mValue; }
+
+        public String name() { return mName; }
+
+        public int ordinal() { return mValue - 1; }
+
+        public static Config valueOf(String name) {
+            if (name == null) return ARGB_8888;
+            if (name.equals("ALPHA_8")) return ALPHA_8;
+            if (name.equals("RGB_565")) return RGB_565;
+            if (name.equals("ARGB_4444")) return ARGB_4444;
+            if (name.equals("RGBA_F16")) return RGBA_F16;
+            if (name.equals("HARDWARE")) return HARDWARE;
+            return ARGB_8888;
+        }
+
+        public static Config[] values() {
+            return new Config[] { ALPHA_8, RGB_565, ARGB_4444, ARGB_8888, RGBA_F16, HARDWARE };
+        }
+
+        @Override
+        public String toString() { return mName; }
+    }
+
+    /** Format for compress(); same reasoning as Config. */
+    public static final class CompressFormat {
+        public static final CompressFormat JPEG = new CompressFormat("JPEG", 0);
+        public static final CompressFormat PNG = new CompressFormat("PNG", 1);
+        public static final CompressFormat WEBP = new CompressFormat("WEBP", 2);
+        public static final CompressFormat WEBP_LOSSY = new CompressFormat("WEBP_LOSSY", 3);
+        public static final CompressFormat WEBP_LOSSLESS =
+                new CompressFormat("WEBP_LOSSLESS", 4);
+
+        private final String mName;
+        private final int mValue;
+
+        private CompressFormat(String name, int value) {
+            mName = name;
+            mValue = value;
+        }
+
+        public int nativeInt() { return mValue; }
+        public String name() { return mName; }
+        public int ordinal() { return mValue; }
+
+        public static CompressFormat[] values() {
+            return new CompressFormat[] { JPEG, PNG, WEBP, WEBP_LOSSY, WEBP_LOSSLESS };
+        }
+
+        @Override
+        public String toString() { return mName; }
+    }
+
+    /**
+     * Android's getConfig(), returning the Config instance.
+     *
+     * Maps the int the Bitmap was built with; anything unrecognised reports
+     * ARGB_8888, the format KuDroid's canvas actually uses.
+     */
+    public Config getConfig() {
+        if (mConfig == RGB_565) return Config.RGB_565;
+        if (mConfig == ALPHA_8) return Config.ALPHA_8;
+        return Config.ARGB_8888;
+    }
+
+    /**
+     * Encode the bitmap.
+     *
+     * KuDroid ships no encoder, so this reports failure rather than writing a
+     * corrupt file — callers check the boolean and a false is a case they handle.
+     */
+    public boolean compress(CompressFormat format, int quality, java.io.OutputStream stream) {
+        return false;
     }
 
 }

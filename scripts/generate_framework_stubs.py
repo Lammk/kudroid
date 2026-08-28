@@ -46,6 +46,19 @@ LINE_PATTERNS = (
     re.compile(r"\[\d+\]\s+\[(?:CLASS|INTERFACE)\]\s+([A-Za-z0-9_$.]+)"),
 )
 
+# Missing FIELDS on classes that already exist.
+#
+# These cannot be stubbed: a field needs storage inside an object whose layout is
+# already fixed, so the runtime has no equivalent of the auto-stub it uses for a
+# missing method. The remedy is always to write the field into the framework source
+# by hand, which makes reporting them the point of this section — a missing field
+# used to surface as "NoSuchFieldError: iput" with no class and no field name.
+#
+# Format: MISSING_FRAMEWORK_FIELD: pkg.Class.name : Descriptor
+FIELD_PATTERN = re.compile(
+    r"MISSING_FRAMEWORK(?:_CLASS)?_FIELD:\s*([A-Za-z0-9_$.]+)\.([A-Za-z0-9_$]+)\s*:\s*(\S+)"
+)
+
 # Descriptors ending in '$' + digits are anonymous classes; a stub cannot stand in
 # for one because only the code that created it ever names it.
 ANONYMOUS_INNER = re.compile(r"\$\d+$")
@@ -83,6 +96,63 @@ def parse_log(log_path):
                     names.append(name)
                 break
     return names
+
+
+def parse_missing_fields(log_path):
+    """Return {class_name: [(field, descriptor), ...]} in first-seen order."""
+    fields = {}
+    seen = set()
+    with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            m = FIELD_PATTERN.search(line)
+            if not m:
+                continue
+            cls, name, desc = (g.strip() for g in m.groups())
+            key = (cls, name, desc)
+            if key in seen:
+                continue
+            seen.add(key)
+            fields.setdefault(cls, []).append((name, desc))
+    return fields
+
+
+def java_type_of(descriptor):
+    """Descriptor -> Java source type, for the suggested field declaration."""
+    arrays = 0
+    while descriptor.startswith("["):
+        arrays += 1
+        descriptor = descriptor[1:]
+    primitives = {
+        "Z": "boolean", "B": "byte", "C": "char", "S": "short",
+        "I": "int", "J": "long", "F": "float", "D": "double", "V": "void",
+    }
+    if descriptor in primitives:
+        base = primitives[descriptor]
+    elif descriptor.startswith("L") and descriptor.endswith(";"):
+        base = descriptor[1:-1].replace("/", ".").replace("$", ".")
+    else:
+        base = descriptor
+    return base + "[]" * arrays
+
+
+def report_missing_fields(fields):
+    """Print the fields to add. Deliberately not automated.
+
+    A field has to go into the right class with the right type, and the surrounding
+    code often needs it initialised to something meaningful — Android's defaults are
+    rarely zero. Generating a bare `public int x;` would compile and still be wrong,
+    so this prints what to add and leaves the judgement to a person.
+    """
+    if not fields:
+        return
+    total = sum(len(v) for v in fields.values())
+    print(f"\n{total} missing field(s) on {len(fields)} existing class(es).")
+    print("These cannot be auto-stubbed: object layout is fixed once a class is "
+          "linked, so\nthe field has to be written into the framework source by hand.")
+    for cls in sorted(fields):
+        print(f"\n  {cls}")
+        for name, desc in sorted(fields[cls]):
+            print(f"      public {java_type_of(desc)} {name};   // {desc}")
 
 
 def group_by_top_level(names, prefixes):
@@ -221,6 +291,8 @@ def main():
     if created or updated:
         print("Next: run framework/build.sh to rebuild framework.dex, then fill in the "
               "method bodies that the app actually needs.")
+
+    report_missing_fields(parse_missing_fields(log_path))
 
 
 if __name__ == "__main__":

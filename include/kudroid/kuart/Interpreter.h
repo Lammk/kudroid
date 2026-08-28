@@ -80,6 +80,18 @@ private:
     DexField* ResolveField(const DexMethod* context, uint32_t field_idx, bool is_static);
     DexMethod* ResolveMethod(const DexMethod* context, uint32_t method_idx);
 
+    // Name an unimplemented field, once per distinct field, in classes.log and on
+    // stderr. Unlike a missing method a field cannot be stubbed — object layout is
+    // fixed by LinkClass — so naming it is the only remedy.
+    void ReportMissingField(const DexClass* klass, const char* name, const char* type,
+                            bool is_static);
+
+    // "iput android.view.inputmethod.EditorInfo.inputType : I" for an exception
+    // message. The message used to be the bare opcode name, which identified
+    // neither the class nor the field.
+    std::string DescribeFieldRef(const DexMethod* context, uint32_t field_idx,
+                                 const char* opcode) const;
+
     bool InvokeMethod(DexFrame* frame, const art::Instruction* inst, bool is_range,
                       art::Instruction::Code opcode);
 

@@ -139,9 +139,30 @@ jboolean JNICALL IsAssignableFrom(JNIEnv* env, jclass sub, jclass sup) {
     return a->IsSubClassOf(b) ? JNI_TRUE : JNI_FALSE;
 }
 
-jclass JNICALL GetObjectClass(JNIEnv*, jobject obj) {
+jclass JNICALL GetObjectClass(JNIEnv* env, jobject obj) {
+    DexJniEnv* self = Self(env);
     DexObject* o = Obj(obj);
-    return o != nullptr ? ToJClass(o->clazz) : nullptr;
+    if (o == nullptr || self == nullptr) return nullptr;
+
+    // A jclass passed where a jobject was expected must not be read as an object.
+    //
+    // Both handles are raw pointers, and DexObject::clazz and DexClass::descriptor
+    // both sit at offset 0 — so reading `o->clazz` off a DexClass yields the
+    // descriptor STRING pointer, which then gets used as a class. That is the fault
+    // KuDroid took inside FindVirtualMethod at address 0x2f657074666172eb: the ASCII
+    // bytes "raftpe/", a fragment of "Lcom/mojang/minecraftpe/MainActivity;".
+    //
+    // Native code does this legitimately: JNI allows GetObjectClass on any jobject,
+    // and a jclass IS a jobject in the JNI object model, so
+    // GetObjectClass(someClass) is expected to return java.lang.Class. Detect that
+    // case and answer with Class rather than misreading memory.
+    if (self->linker()->IsRegisteredClass(reinterpret_cast<const DexClass*>(o))) {
+        return ToJClass(self->linker()->FindClass("Ljava/lang/Class;"));
+    }
+
+    // A java.lang.Class INSTANCE (from Class.forName or a const-class) is likewise a
+    // jobject whose class is java.lang.Class; that already works through o->clazz.
+    return ToJClass(o->clazz);
 }
 
 jboolean JNICALL IsInstanceOf(JNIEnv* env, jobject obj, jclass clazz) {

@@ -49,4 +49,65 @@ public class Logger {
     public void addHandler(Handler handler) { if (handler != null) handlers.add(handler); }
     public void removeHandler(Handler handler) { if (handler != null) handlers.remove(handler); }
     public Handler[] getHandlers() { return handlers.toArray(new Handler[0]); }
+
+    /**
+     * Whether records also go to the parent's handlers.
+     *
+     * Libraries call this right after creating a logger, to stop their output being
+     * duplicated by the root handler. It was auto-stubbed, so the call silently did
+     * nothing; honoured here because a library that asked for no parent handling and
+     * got it anyway prints everything twice.
+     */
+    public void setUseParentHandlers(boolean useParentHandlers) {
+        this.useParentHandlers = useParentHandlers;
+    }
+
+    public boolean getUseParentHandlers() { return useParentHandlers; }
+
+    /**
+     * The parent logger.
+     *
+     * KuDroid keeps no logger hierarchy — getLogger() hands out a fresh instance —
+     * so every logger's parent is the global one, except the global logger itself
+     * which has none. Returning the global logger rather than null matters because
+     * callers walk the chain and a null at the first step ends the walk immediately.
+     */
+    public Logger getParent() {
+        return this == global ? null : global;
+    }
+
+    public void setParent(Logger parent) {}
+
+    public void setFilter(Filter newFilter) { this.filter = newFilter; }
+
+    public Filter getFilter() { return filter; }
+
+    public void logp(Level level, String sourceClass, String sourceMethod, String msg) {
+        log(level, msg);
+    }
+
+    public void logp(Level level, String sourceClass, String sourceMethod, String msg,
+                     Throwable thrown) {
+        log(level, msg, thrown);
+    }
+
+    public void entering(String sourceClass, String sourceMethod) {
+        log(Level.FINER, "ENTRY " + sourceClass + "." + sourceMethod);
+    }
+
+    public void exiting(String sourceClass, String sourceMethod) {
+        log(Level.FINER, "RETURN " + sourceClass + "." + sourceMethod);
+    }
+
+    public void throwing(String sourceClass, String sourceMethod, Throwable thrown) {
+        log(Level.FINER, "THROW " + sourceClass + "." + sourceMethod, thrown);
+    }
+
+    public void log(LogRecord record) {
+        if (record == null) return;
+        log(record.getLevel(), record.getMessage());
+    }
+
+    private boolean useParentHandlers = true;
+    private Filter filter;
 }

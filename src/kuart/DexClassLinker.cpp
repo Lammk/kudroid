@@ -54,7 +54,14 @@ bool IsPrimitiveDescriptor(const char* d) {
 std::mutex g_missing_class_log_mtx;
 std::vector<std::string> g_missing_class_log_paths;
 
-void AppendMissingClassLog(const std::string& dotted, const char* descriptor) {
+// Append one "[timestamp] KIND: detail" line to every configured log.
+//
+// Shared by the missing-class, missing-field and missing-method paths so all three
+// land in the same file with the same shape; scripts/generate_framework_stubs.py
+// parses it. A missing field used to be reported nowhere at all — the interpreter
+// threw NoSuchFieldError with the bare text "iput" — so each one cost a manual
+// debugging round.
+void AppendMissingLog(const char* kind, const std::string& detail) {
     std::vector<std::string> paths;
     {
         std::lock_guard<std::mutex> lock(g_missing_class_log_mtx);
@@ -77,14 +84,22 @@ void AppendMissingClassLog(const std::string& dotted, const char* descriptor) {
         if (path.empty()) continue;
         std::ofstream logFile(path, std::ios::app);
         if (logFile.is_open()) {
-            logFile << "[" << timeBuf << "] MISSING_FRAMEWORK_CLASS: " << dotted
-                    << " (descriptor: " << descriptor << ")\n";
+            logFile << "[" << timeBuf << "] " << kind << ": " << detail << "\n";
             logFile.flush();
         }
     }
 }
 
+void AppendMissingClassLog(const std::string& dotted, const char* descriptor) {
+    AppendMissingLog("MISSING_FRAMEWORK_CLASS",
+                     dotted + " (descriptor: " + descriptor + ")");
+}
+
 }  // namespace
+
+void DexClassLinker::LogMissingMember(const char* kind, const std::string& detail) {
+    AppendMissingLog(kind, detail);
+}
 
 void DexClassLinker::SetMissingClassLogPath(const char* path) {
     std::lock_guard<std::mutex> lock(g_missing_class_log_mtx);
@@ -314,6 +329,69 @@ DexClass* DexClassLinker::LoadClassFromDexFile(const art::DexFile& dex_file,
         klass->static_fields.push_back(field);
     }
     klass->static_values.resize(klass->static_fields.size());
+
+    // Constant initialisers for static fields.
+    //
+    // d8 does NOT emit a <clinit> for `static final int X = -1`; it puts the value in
+    // the class_def's static_values array instead, and the runtime is expected to
+    // apply it. KuDroid only zero-filled, so every compile-time constant read as 0.
+    // That is silent and wrong rather than a crash: ViewGroup.LayoutParams.
+    // MATCH_PARENT came back 0 instead of -1, so a view asking to fill its parent got
+    // a zero-width layout and drew nothing.
+    //
+    // The array is positional — the Nth value initialises the Nth static field — and
+    // may be shorter than the field list, in which case the rest stay zero.
+    if (class_def.static_values_off_ != 0) {
+        art::EncodedStaticFieldValueIterator it(dex_file, class_def);
+        for (size_t slot = 0; it.HasNext() && slot < klass->static_values.size();
+             it.Next(), ++slot) {
+            const jvalue& v = it.GetJavaValue();
+            switch (it.GetValueType()) {
+                case art::EncodedArrayValueIterator::kBoolean:
+                    klass->static_values[slot] = DexValue::Int(v.z != 0 ? 1 : 0);
+                    break;
+                case art::EncodedArrayValueIterator::kByte:
+                    klass->static_values[slot] = DexValue::Int(v.b);
+                    break;
+                case art::EncodedArrayValueIterator::kShort:
+                    klass->static_values[slot] = DexValue::Int(v.s);
+                    break;
+                case art::EncodedArrayValueIterator::kChar:
+                    klass->static_values[slot] = DexValue::Int(v.c);
+                    break;
+                case art::EncodedArrayValueIterator::kInt:
+                    klass->static_values[slot] = DexValue::Int(v.i);
+                    break;
+                case art::EncodedArrayValueIterator::kLong:
+                    klass->static_values[slot] = DexValue::Long(v.j);
+                    break;
+                case art::EncodedArrayValueIterator::kFloat:
+                    klass->static_values[slot] = DexValue::Float(v.f);
+                    break;
+                case art::EncodedArrayValueIterator::kDouble:
+                    klass->static_values[slot] = DexValue::Double(v.d);
+                    break;
+                case art::EncodedArrayValueIterator::kString: {
+                    // The iterator hands back a string index, not a pointer.
+                    const art::dex::StringIndex idx(static_cast<uint32_t>(v.i));
+                    const char* utf8 = dex_file.StringDataByIdx(idx);
+                    klass->static_values[slot] =
+                        DexValue::Ref(reinterpret_cast<DexObject*>(NewString(utf8)));
+                    break;
+                }
+                case art::EncodedArrayValueIterator::kNull:
+                    klass->static_values[slot] = DexValue::Ref(nullptr);
+                    break;
+                default:
+                    // kType/kEnum/kField/kMethod/kArray/kAnnotation: these need a
+                    // resolved object, and resolving one here would recurse into a
+                    // class that is still being loaded. <clinit> assigns them anyway
+                    // for every case KuDroid runs, so leaving the slot zero is
+                    // correct rather than merely convenient.
+                    break;
+            }
+        }
+    }
 
     klass->instance_fields.reserve(accessor.NumInstanceFields());
     for (const art::ClassAccessor::Field& f : accessor.GetInstanceFields()) {

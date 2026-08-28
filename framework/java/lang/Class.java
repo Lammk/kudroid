@@ -72,6 +72,20 @@ public final class Class<T> {
         return dot >= 0 ? name.substring(0, dot) : "";
     }
 
+    /**
+     * The package this class belongs to.
+     *
+     * Was auto-stubbed to null because java.lang.Package did not exist, and the
+     * common idiom getClass().getPackage().getImplementationVersion() then threw a
+     * NullPointerException. Returns null only for a class in the default package,
+     * which is what the JVM does and what callers check for.
+     */
+    public Package getPackage() {
+        String pkg = getPackageName();
+        if (pkg == null || pkg.isEmpty()) return null;
+        return new Package(pkg);
+    }
+
     public boolean isAnnotation() {
         return false;
     }

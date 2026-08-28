@@ -15,6 +15,7 @@
 #include "dex/dex_instruction.h"
 #include "dex/dex_instruction-inl.h"
 
+#include "kudroid/kuart/DexClassLinker.h"
 #include "kudroid/kuart/DexJniEnv.h"
 #include "kudroid/kuart/LibCore.h"
 #include "kudroid/kuart/VmLock.h"
@@ -212,12 +213,76 @@ DexField* Interpreter::ResolveField(const DexMethod* context, uint32_t field_idx
     const art::DexFile& dex_file = *context->dex_file;
     const art::dex::FieldId& field_id = dex_file.GetFieldId(field_idx);
 
-    DexClass* klass = linker_->FindClass(dex_file.GetFieldDeclaringClassDescriptor(field_id));
+    const char* class_descriptor = dex_file.GetFieldDeclaringClassDescriptor(field_id);
+    DexClass* klass = linker_->FindClass(class_descriptor);
     if (klass == nullptr) return nullptr;
 
     const char* name = dex_file.GetFieldName(field_id);
     const char* type = dex_file.GetFieldTypeDescriptor(field_id);
-    return is_static ? klass->FindStaticField(name, type) : klass->FindInstanceField(name, type);
+    DexField* field = is_static ? klass->FindStaticField(name, type)
+                                : klass->FindInstanceField(name, type);
+    if (field == nullptr) {
+        ReportMissingField(klass, name, type, is_static);
+    }
+    return field;
+}
+
+// Name a field KuDroid does not implement, once per distinct field.
+//
+// A missing field cannot be auto-stubbed the way a missing method can: object
+// layout is fixed by LinkClass, so there is nowhere to put the storage. Reporting
+// it precisely is therefore the whole remedy, and it used to be absent — the
+// interpreter threw NoSuchFieldError whose message was the bare opcode name
+// ("iput"), with no class and no field. A real failure looked like this:
+//
+//   NoSuchFieldError: iput
+//       at com.google.androidgamesdk.GameActivity.getImeEditorInfo(...)
+//
+// which says nothing about EditorInfo.inputType being the field at fault. Worse,
+// the class involved is present in framework.dex, so nothing appeared in
+// classes.log either and generate_framework_stubs.py never learned of it.
+void Interpreter::ReportMissingField(const DexClass* klass, const char* name,
+                                     const char* type, bool is_static) {
+    if (klass == nullptr) return;
+    const std::string detail = klass->PrettyName() + "." + (name != nullptr ? name : "?") +
+                               " : " + (type != nullptr ? type : "?") +
+                               (is_static ? " (static)" : "");
+
+    static std::mutex s_mtx;
+    static std::set<std::string> s_reported;
+    {
+        std::lock_guard<std::mutex> lock(s_mtx);
+        if (!s_reported.insert(detail).second) return;
+    }
+
+    // Distinguish the two cases, because the fix differs: a stub class needs the
+    // whole class written, while a real class is merely incomplete.
+    const char* kind = klass->is_stub ? "MISSING_FRAMEWORK_CLASS_FIELD"
+                                      : "MISSING_FRAMEWORK_FIELD";
+    std::fprintf(stderr, "[KuART][MISSING-FIELD] ⚠ %s: %s%s\n", kind, detail.c_str(),
+                 klass->is_stub ? " (declaring class is an auto-stub)" : "");
+    DexClassLinker::LogMissingMember(kind, detail);
+}
+
+// Human-readable "class.field : type" for an unresolvable field reference, used in
+// the exception message so the failure names itself.
+std::string Interpreter::DescribeFieldRef(const DexMethod* context, uint32_t field_idx,
+                                          const char* opcode) const {
+    std::string out = opcode != nullptr ? opcode : "field";
+    if (context == nullptr || context->dex_file == nullptr) return out;
+    const art::DexFile& dex_file = *context->dex_file;
+    const art::dex::FieldId& field_id = dex_file.GetFieldId(field_idx);
+    const char* cls = dex_file.GetFieldDeclaringClassDescriptor(field_id);
+    const char* name = dex_file.GetFieldName(field_id);
+    const char* type = dex_file.GetFieldTypeDescriptor(field_id);
+
+    out += " ";
+    out += DescriptorToDotted(cls);
+    out += ".";
+    out += name != nullptr ? name : "?";
+    out += " : ";
+    out += type != nullptr ? type : "?";
+    return out;
 }
 
 DexMethod* Interpreter::ResolveMethod(const DexMethod* context, uint32_t method_idx) {
@@ -1438,7 +1503,8 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                 }
                 DexField* field = ResolveField(method, inst->VRegC_22c(), /*is_static=*/false);
                 if (field == nullptr) {
-                    ThrowException("Ljava/lang/NoSuchFieldError;", "iget");
+                    ThrowException("Ljava/lang/NoSuchFieldError;",
+                                   DescribeFieldRef(method, inst->VRegC_22c(), "iget"));
                     return return_value;
                 }
                 const uint32_t off = field->offset_or_slot;
@@ -1481,7 +1547,8 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                 }
                 DexField* field = ResolveField(method, inst->VRegC_22c(), /*is_static=*/false);
                 if (field == nullptr) {
-                    ThrowException("Ljava/lang/NoSuchFieldError;", "iput");
+                    ThrowException("Ljava/lang/NoSuchFieldError;",
+                                   DescribeFieldRef(method, inst->VRegC_22c(), "iput"));
                     return return_value;
                 }
                 const uint32_t off = field->offset_or_slot;
@@ -1520,7 +1587,8 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
             case Instruction::SGET_SHORT: {
                 DexField* field = ResolveField(method, inst->VRegB_21c(), /*is_static=*/true);
                 if (field == nullptr || field->declaring_class == nullptr) {
-                    ThrowException("Ljava/lang/NoSuchFieldError;", "sget");
+                    ThrowException("Ljava/lang/NoSuchFieldError;",
+                                   DescribeFieldRef(method, inst->VRegB_21c(), "sget"));
                     return return_value;
                 }
                 EnsureInitialized(field->declaring_class);
@@ -1528,7 +1596,8 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                 auto& values = field->declaring_class->static_values;
                 const uint32_t slot = field->offset_or_slot;
                 if (slot >= values.size()) {
-                    ThrowException("Ljava/lang/NoSuchFieldError;", "sget slot out of range");
+                    ThrowException("Ljava/lang/NoSuchFieldError;",
+                                   DescribeFieldRef(method, inst->VRegB_21c(), "sget slot out of range"));
                     return return_value;
                 }
                 frame->Set(inst->VRegA_21c(), values[slot]);
@@ -1544,7 +1613,8 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
             case Instruction::SPUT_SHORT: {
                 DexField* field = ResolveField(method, inst->VRegB_21c(), /*is_static=*/true);
                 if (field == nullptr || field->declaring_class == nullptr) {
-                    ThrowException("Ljava/lang/NoSuchFieldError;", "sput");
+                    ThrowException("Ljava/lang/NoSuchFieldError;",
+                                   DescribeFieldRef(method, inst->VRegB_21c(), "sput"));
                     return return_value;
                 }
                 EnsureInitialized(field->declaring_class);
@@ -1552,7 +1622,8 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                 auto& values = field->declaring_class->static_values;
                 const uint32_t slot = field->offset_or_slot;
                 if (slot >= values.size()) {
-                    ThrowException("Ljava/lang/NoSuchFieldError;", "sput slot out of range");
+                    ThrowException("Ljava/lang/NoSuchFieldError;",
+                                   DescribeFieldRef(method, inst->VRegB_21c(), "sput slot out of range"));
                     return return_value;
                 }
                 values[slot] = frame->Get(inst->VRegA_21c());

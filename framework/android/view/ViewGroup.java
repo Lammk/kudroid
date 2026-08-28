@@ -171,12 +171,33 @@ public class ViewGroup extends View {
      * layout parameters for a view.
      */
     public static class LayoutParams {
+        /**
+         * Sizing sentinels.
+         *
+         * These were missing, so any app passing MATCH_PARENT/WRAP_CONTENT — which is
+         * how nearly every programmatic addView() call sizes a child — hit
+         * NoSuchFieldError. The values are the AOSP ones and app code compares
+         * against them directly, so they cannot be renumbered.
+         */
+        public static final int FILL_PARENT = -1;
+        public static final int MATCH_PARENT = -1;
+        public static final int WRAP_CONTENT = -2;
+
         public int width;
         public int height;
+
+        public LayoutParams() {
+            this(WRAP_CONTENT, WRAP_CONTENT);
+        }
 
         public LayoutParams(int width, int height) {
             this.width = width;
             this.height = height;
+        }
+
+        public LayoutParams(LayoutParams source) {
+            this.width = source != null ? source.width : WRAP_CONTENT;
+            this.height = source != null ? source.height : WRAP_CONTENT;
         }
     }
 
@@ -189,9 +210,29 @@ public class ViewGroup extends View {
         public int rightMargin;
         public int bottomMargin;
 
+        public MarginLayoutParams() {
+            super();
+        }
+
         public MarginLayoutParams(int width, int height) {
             super(width, height);
         }
+
+        public MarginLayoutParams(LayoutParams source) {
+            super(source);
+        }
+
+        public void setMargins(int left, int top, int right, int bottom) {
+            leftMargin = left;
+            topMargin = top;
+            rightMargin = right;
+            bottomMargin = bottom;
+        }
+
+        public void setMarginStart(int start) { leftMargin = start; }
+        public int getMarginStart() { return leftMargin; }
+        public void setMarginEnd(int end) { rightMargin = end; }
+        public int getMarginEnd() { return rightMargin; }
     }
 
     public interface OnHierarchyChangeListener {

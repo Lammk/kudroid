@@ -349,6 +349,34 @@ Check(kept != nullptr, "PopLocalFrame gi  l i k t qu ");
         Check(env->ExceptionCheck() == JNI_FALSE, "no exception left pending");
     }
 
+    // GetObjectClass on a jclass must not misread it as an object.
+    //
+    // A jclass IS a jobject in the JNI object model, so GetObjectClass(someClass) is
+    // legal and must answer java.lang.Class. Both handles are raw pointers here, and
+    // DexObject::clazz and DexClass::descriptor both sit at offset 0 — so reading the
+    // object field off a class yielded the descriptor STRING pointer, which was then
+    // used as a class. KuDroid faulted inside FindVirtualMethod at
+    // 0x2f657074666172eb: the ASCII bytes "raftpe/", part of a class descriptor. It
+    // is how libminecraftpe.so's getClassLoader lookup failed.
+    {
+        jclass classOfClass = env->GetObjectClass(reinterpret_cast<jobject>(k));
+        Check(classOfClass != nullptr, "GetObjectClass on a jclass returns something");
+        // Whatever comes back must be a usable handle, not a string misread as one.
+        Check(env->GetMethodID(classOfClass, "getName", "()Ljava/lang/String;") != nullptr ||
+                  env->ExceptionCheck() == JNI_TRUE,
+              "the result is a real class handle, not a misread pointer");
+        env->ExceptionClear();
+
+        // The ordinary case is unchanged: an instance still reports its own class.
+        jobject inst = env->AllocObject(k);
+        Check(inst != nullptr, "AllocObject on a valid class works");
+        if (inst != nullptr) {
+            jclass instClass = env->GetObjectClass(inst);
+            Check(instClass == k, "GetObjectClass on an instance returns its class");
+        }
+        Check(env->ExceptionCheck() == JNI_FALSE, "nothing pending after GetObjectClass");
+    }
+
     // Reflection JNI bridging.
     jmethodID mid = env->GetMethodID(k, "getValue", "()I");
     Check(mid != nullptr, "GetMethodID for reflection bridging");

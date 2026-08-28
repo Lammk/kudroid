@@ -33,6 +33,19 @@ struct FieldSpec {
     uint32_t access_flags = 0x1;  // ACC_PUBLIC
 };
 
+// A field_ids entry for a field that is NOT declared anywhere in this DEX.
+//
+// Real APKs are full of these: the app references android.view.inputmethod.
+// EditorInfo.inputType, the field lives in the framework, and the app's DEX only
+// carries the reference. Reproducing that shape is the only way to test what the
+// interpreter does when a referenced field cannot be resolved — which is a case
+// with no auto-stub fallback, unlike a missing method.
+struct FieldRefSpec {
+    std::string owner;  // declaring class descriptor
+    std::string name;
+    std::string type;
+};
+
 struct CatchSpec {
     std::string type;  // descriptor ki u exception; r ng = catch-all (finally)
     uint16_t handler_pc = 0;
@@ -88,6 +101,9 @@ struct ClassSpec {
     // y   ch ng v o b ng string_ids/type_ids.
     std::vector<std::string> extra_strings;
     std::vector<std::string> extra_types;
+
+    // Field references the bytecode uses without the field being declared here.
+    std::vector<FieldRefSpec> extra_field_refs;
 };
 
 class DexBuilder {
@@ -105,6 +121,11 @@ public:
     }
     uint32_t FieldIndexOf(const std::string& class_desc, const FieldSpec& f) const {
         return field_idx_.at(FieldKey{type_idx_.at(class_desc), type_idx_.at(f.type),
+                                     string_idx_.at(f.name)});
+    }
+    // Index of a reference to a field declared elsewhere (see FieldRefSpec).
+    uint32_t FieldRefIndexOf(const FieldRefSpec& f) const {
+        return field_idx_.at(FieldKey{type_idx_.at(f.owner), type_idx_.at(f.type),
                                      string_idx_.at(f.name)});
     }
     uint32_t MethodIndexOf(const std::string& class_desc, const MethodSpec& m) const {
@@ -153,6 +174,11 @@ private:
             for (const std::string& i : c.interfaces) AddType(i);
             for (const std::string& s : c.extra_strings) AddString(s);
             for (const std::string& t : c.extra_types) AddType(t);
+            for (const FieldRefSpec& f : c.extra_field_refs) {
+                AddType(f.owner);
+                AddString(f.name);
+                AddType(f.type);
+            }
 
             for (const auto* list : {&c.static_fields, &c.instance_fields}) {
                 for (const FieldSpec& f : *list) {
@@ -186,6 +212,12 @@ private:
             const uint32_t class_type = type_idx_[c.descriptor];
             for (const FieldSpec& f : c.static_fields) AddFieldKey(class_type, f);
             for (const FieldSpec& f : c.instance_fields) AddFieldKey(class_type, f);
+            // References to fields owned by another class, which this DEX does not
+            // declare. The owner index is that other class, not class_type.
+            for (const FieldRefSpec& f : c.extra_field_refs) {
+                field_set_.insert(FieldKey{type_idx_[f.owner], type_idx_[f.type],
+                                           string_idx_[f.name]});
+            }
             for (const MethodSpec& m : c.direct_methods) AddMethodKey(class_type, m);
             for (const MethodSpec& m : c.virtual_methods) AddMethodKey(class_type, m);
         }

@@ -84,6 +84,16 @@ public:
     // used to pollute whichever directory a test was started from.
     static void SetMissingClassLogPath(const char* path);
 
+    // Record a missing class member in the same log.
+    //
+    // `kind` is the tag the log line carries (MISSING_FRAMEWORK_FIELD,
+    // MISSING_FRAMEWORK_METHOD). A missing field cannot be stubbed the way a
+    // missing method can — object layout is fixed once LinkClass has run, so there
+    // is nowhere to put the storage — which makes reporting it the only remedy. It
+    // used to be reported nowhere, so the resulting NoSuchFieldError carried the
+    // bare text "iput" and every occurrence cost a manual debugging round.
+    static void LogMissingMember(const char* kind, const std::string& detail);
+
 private:
     DexClass* LoadClassFromDexFile(const art::DexFile& dex_file,
                                   const art::dex::ClassDef& class_def,

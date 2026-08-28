@@ -137,8 +137,38 @@ public class LinearLayout extends ViewGroup {
         }
     }
 
-    public static class LayoutParams {
-        public LayoutParams() {}
+    /**
+     * LinearLayout child parameters.
+     *
+     * Was an empty stub extending nothing, so `params.weight` and the inherited
+     * `width`/`height`/margins all threw NoSuchFieldError. Every programmatic
+     * addView() call writes these directly, so they must exist under their AOSP
+     * names and the class must extend MarginLayoutParams to inherit the margins.
+     */
+    public static class LayoutParams extends ViewGroup.MarginLayoutParams {
+        /** Share of the leftover space along the layout axis. */
+        public float weight;
+
+        /** Per-child gravity override, or -1 to inherit the parent's. */
+        public int gravity = -1;
+
+        public LayoutParams() {
+            super(ViewGroup.LayoutParams.MATCH_PARENT,
+                  ViewGroup.LayoutParams.WRAP_CONTENT);
+        }
+
+        public LayoutParams(int width, int height) {
+            super(width, height);
+        }
+
+        public LayoutParams(int width, int height, float weight) {
+            super(width, height);
+            this.weight = weight;
+        }
+
+        public LayoutParams(ViewGroup.LayoutParams source) {
+            super(source);
+        }
     }
 
 }

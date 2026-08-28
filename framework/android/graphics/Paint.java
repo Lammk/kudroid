@@ -127,16 +127,115 @@ public class Paint {
         return mTextSize;
     }
 
-    public static class Cap {
-        public Cap() {}
+    /**
+     * Fill in vertical text extents.
+     *
+     * TextView and every custom text layout uses these to place baselines, so the
+     * numbers have to be self-consistent even though KuDroid has no real font
+     * metrics: ascent above the baseline is negative, descent below is positive, and
+     * top/bottom add the leading. Zeroes here collapse every line onto one baseline.
+     */
+    public int getFontMetricsInt(FontMetricsInt fmi) {
+        if (fmi == null) return (int) mTextSize;
+        // Proportions of a typical sans-serif face; scaled with the text size so
+        // layout still tracks setTextSize().
+        fmi.ascent = -(int) (mTextSize * 0.80f);
+        fmi.descent = (int) (mTextSize * 0.20f);
+        fmi.top = -(int) (mTextSize * 0.93f);
+        fmi.bottom = (int) (mTextSize * 0.25f);
+        fmi.leading = 0;
+        return fmi.descent - fmi.ascent;
     }
 
+    public FontMetricsInt getFontMetricsInt() {
+        FontMetricsInt fmi = new FontMetricsInt();
+        getFontMetricsInt(fmi);
+        return fmi;
+    }
+
+    /** Stroke end style. Enum-like instances so identity comparisons work. */
+    public static final class Cap {
+        public static final Cap BUTT = new Cap("BUTT", 0);
+        public static final Cap ROUND = new Cap("ROUND", 1);
+        public static final Cap SQUARE = new Cap("SQUARE", 2);
+
+        private final String mName;
+        private final int mValue;
+
+        private Cap(String name, int value) {
+            mName = name;
+            mValue = value;
+        }
+
+        public int nativeInt() { return mValue; }
+        public String name() { return mName; }
+        public int ordinal() { return mValue; }
+        public static Cap[] values() { return new Cap[] { BUTT, ROUND, SQUARE }; }
+
+        @Override
+        public String toString() { return mName; }
+    }
+
+    /**
+     * Integer font metrics.
+     *
+     * Was an empty stub, so `fmi.ascent` threw NoSuchFieldError. The fields are
+     * public and written directly by Paint and read directly by layout code, which
+     * is why they must exist under their exact AOSP names.
+     */
     public static class FontMetricsInt {
+        /** Distance above the baseline for the tallest glyph; negative. */
+        public int top;
+        /** Recommended distance above the baseline; negative. */
+        public int ascent;
+        /** Recommended distance below the baseline; positive. */
+        public int descent;
+        /** Distance below the baseline for the lowest glyph; positive. */
+        public int bottom;
+        /** Extra space between lines. */
+        public int leading;
+
         public FontMetricsInt() {}
+
+        @Override
+        public String toString() {
+            return "FontMetricsInt: top=" + top + " ascent=" + ascent +
+                   " descent=" + descent + " bottom=" + bottom + " leading=" + leading;
+        }
     }
 
-    public static class Join {
-        public Join() {}
+    /** Float font metrics; same fields, same reason. */
+    public static class FontMetrics {
+        public float top;
+        public float ascent;
+        public float descent;
+        public float bottom;
+        public float leading;
+
+        public FontMetrics() {}
+    }
+
+    /** Stroke corner style. */
+    public static final class Join {
+        public static final Join MITER = new Join("MITER", 0);
+        public static final Join ROUND = new Join("ROUND", 1);
+        public static final Join BEVEL = new Join("BEVEL", 2);
+
+        private final String mName;
+        private final int mValue;
+
+        private Join(String name, int value) {
+            mName = name;
+            mValue = value;
+        }
+
+        public int nativeInt() { return mValue; }
+        public String name() { return mName; }
+        public int ordinal() { return mValue; }
+        public static Join[] values() { return new Join[] { MITER, ROUND, BEVEL }; }
+
+        @Override
+        public String toString() { return mName; }
     }
 
 }

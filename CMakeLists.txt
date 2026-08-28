@@ -234,6 +234,7 @@ else()
         test_kuart_jni_float
         test_kuart_stub
         test_kuart_framework
+        test_kuart_missing_field
     )
         if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/${kuart_test}.cpp")
             add_executable(${kuart_test} kuart-tests/${kuart_test}.cpp)
