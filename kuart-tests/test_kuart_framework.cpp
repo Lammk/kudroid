@@ -656,6 +656,221 @@ int main() {
               "RemoteException is a Throwable");
     }
 
+    // ── memory figures reach Java from the host ──
+    //
+    // Apps size caches, texture atlases and world chunks from these. Constants are
+    // worse than they look: above what the device can give and the process is killed
+    // mid-load, below it and the app runs degraded on hardware that could do better.
+    {
+        // MemoryInfo populates itself at construction because apps commonly build
+        // one and read the fields without calling getMemoryInfo() first.
+        DexObject* mi = NewObject("Landroid/app/ActivityManager$MemoryInfo;", "()V", {},
+                                  "new ActivityManager.MemoryInfo");
+        if (mi != nullptr && mi->clazz != nullptr) {
+            const DexField* total = mi->clazz->FindInstanceField("totalMem", "J");
+            const DexField* avail = mi->clazz->FindInstanceField("availMem", "J");
+            if (total != nullptr && avail != nullptr) {
+                const int64_t totalMem = mi->GetField<int64_t>(total->offset_or_slot);
+                const int64_t availMem = mi->GetField<int64_t>(avail->offset_or_slot);
+                std::printf("  device totalMem = %lld MiB, availMem = %lld MiB\n",
+                            static_cast<long long>(totalMem >> 20),
+                            static_cast<long long>(availMem >> 20));
+                // Reading zero tells an app the device is out of memory.
+                Check(totalMem > 256LL * 1024 * 1024,
+                      "MemoryInfo.totalMem is the real device size");
+                Check(availMem > 0 && availMem <= totalMem,
+                      "MemoryInfo.availMem is populated and within total");
+            }
+        }
+
+        // getMemoryClass() is the per-app heap budget apps divide to size caches.
+        DexObject* am = NewObject("Landroid/app/ActivityManager;", "()V", {},
+                                  "new ActivityManager");
+        if (am != nullptr) {
+            DexValue cls;
+            if (CallVirtual(am, "getMemoryClass", "()I", {}, &cls, "getMemoryClass")) {
+                std::printf("  memory class = %d MiB\n", cls.i);
+                Check(cls.i >= 32 && cls.i <= 512,
+                      std::string("getMemoryClass() within Android's range, got ") +
+                          std::to_string(cls.i));
+            }
+            DexValue large;
+            if (CallVirtual(am, "getLargeMemoryClass", "()I", {}, &large,
+                            "getLargeMemoryClass")) {
+                // An app opting into largeHeap must not end up with less.
+                Check(large.i >= cls.i, "largeMemoryClass >= memoryClass");
+            }
+        }
+
+        // Runtime's heap figures back the same budget: KuART has no separate managed
+        // heap, so the process budget IS the heap budget.
+        DexClass* runtime = linker.FindClass("Ljava/lang/Runtime;");
+        if (runtime != nullptr && !runtime->is_stub) {
+            DexValue rt;
+            if (CallStatic("Ljava/lang/Runtime;", "getRuntime", "()Ljava/lang/Runtime;",
+                           {}, &rt, "Runtime.getRuntime") && rt.l != nullptr) {
+                DexValue maxMem;
+                DexValue freeMem;
+                DexValue totalHeap;
+                const bool gotMax =
+                    CallVirtual(rt.l, "maxMemory", "()J", {}, &maxMem, "Runtime.maxMemory");
+                const bool gotFree =
+                    CallVirtual(rt.l, "freeMemory", "()J", {}, &freeMem, "Runtime.freeMemory");
+                const bool gotTotal = CallVirtual(rt.l, "totalMemory", "()J", {},
+                                                  &totalHeap, "Runtime.totalMemory");
+                if (gotMax && gotFree && gotTotal) {
+                    std::printf("  Runtime max = %lld MiB, total = %lld MiB, free = %lld MiB\n",
+                                static_cast<long long>(maxMem.j >> 20),
+                                static_cast<long long>(totalHeap.j >> 20),
+                                static_cast<long long>(freeMem.j >> 20));
+                    Check(maxMem.j > 0, "Runtime.maxMemory() is non-zero");
+                    Check(freeMem.j > 0, "Runtime.freeMemory() is non-zero");
+                    // Apps compute headroom as max - total and compare it against an
+                    // allocation, so these must not contradict each other.
+                    Check(totalHeap.j <= maxMem.j, "totalMemory() <= maxMemory()");
+                }
+                DexValue cores;
+                if (CallVirtual(rt.l, "availableProcessors", "()I", {}, &cores,
+                                "Runtime.availableProcessors")) {
+                    // Thread-pool sizes come from this; a fixed 4 either idles cores
+                    // or oversubscribes a smaller device.
+                    Check(cores.i > 0, std::string("availableProcessors() > 0, got ") +
+                                           std::to_string(cores.i));
+                }
+            }
+        }
+
+        // Debug.MemoryInfo is polled to decide when to drop caches; a constant makes
+        // the app believe its footprint never changes and release nothing.
+        DexObject* dbg = NewObject("Landroid/os/Debug$MemoryInfo;", "()V", {},
+                                   "new Debug.MemoryInfo");
+        if (dbg != nullptr) {
+            DexValue pss;
+            if (CallVirtual(dbg, "getTotalPss", "()I", {}, &pss, "Debug getTotalPss")) {
+                Check(pss.i > 0, std::string("Debug.MemoryInfo total PSS is real, got ") +
+                                     std::to_string(pss.i) + " kB");
+            }
+        }
+    }
+
+    // ── theme and styled attributes ──
+    //
+    // Resources$Theme did not exist, so Activity.getTheme() was auto-stubbed to null
+    // and anything chaining off it died. That stopped a real launch in onCreate:
+    // androidx.core.splashscreen calls getTheme().resolveAttribute(...) from
+    // install(), which apps invoke as their first onCreate statement, and every
+    // AppCompat activity calls getTheme().obtainStyledAttributes(...) while
+    // inflating.
+    {
+        DexClass* theme = linker.FindClass("Landroid/content/res/Resources$Theme;");
+        Check(theme != nullptr && !theme->is_stub,
+              "Resources$Theme is real, not a stub");
+        DexClass* typedArray = linker.FindClass("Landroid/content/res/TypedArray;");
+        Check(typedArray != nullptr && !typedArray->is_stub,
+              "TypedArray is real, not a stub");
+
+        // A Context must hand out a theme, never null: callers chain without a null
+        // check because on Android the theme always exists.
+        DexObject* ctx = NewObject("Landroid/app/ApplicationContext;",
+                                   "(Ljava/lang/String;)V", {Str("com.example.theme")},
+                                   "new ApplicationContext for theme");
+        if (ctx != nullptr) {
+            DexValue t;
+            if (CallVirtual(ctx, "getTheme", "()Landroid/content/res/Resources$Theme;", {},
+                            &t, "Context.getTheme")) {
+                Check(t.l != nullptr, "Context.getTheme() is not null");
+
+                if (t.l != nullptr) {
+                    // resolveAttribute must report failure rather than throw: KuDroid
+                    // resolves no attributes, and "not found" is a state callers
+                    // already handle because Android produces it for any attribute
+                    // absent from the current theme.
+                    DexObject* tv = NewObject("Landroid/util/TypedValue;", "()V", {},
+                                              "new TypedValue");
+                    if (tv != nullptr) {
+                        DexValue resolved;
+                        if (CallVirtual(t.l, "resolveAttribute",
+                                        "(ILandroid/util/TypedValue;Z)Z",
+                                        {DexValue::Int(0x7f040001), DexValue::Ref(tv),
+                                         DexValue::Int(1)},
+                                        &resolved, "Theme.resolveAttribute")) {
+                            Check(resolved.i == 0,
+                                  "resolveAttribute() reports not-found instead of throwing");
+                        }
+                    }
+
+                    // obtainStyledAttributes must return a usable TypedArray; the
+                    // inflation idiom is obtain -> read -> recycle with no null check.
+                    DexClass* intArray = linker.FindClass("[I");
+                    if (intArray != nullptr) {
+                        auto* attrs = linker.AllocArray(intArray, 3);
+                        DexValue ta;
+                        if (attrs != nullptr &&
+                            CallVirtual(t.l, "obtainStyledAttributes",
+                                        "([I)Landroid/content/res/TypedArray;",
+                                        {DexValue::Ref(attrs)}, &ta,
+                                        "Theme.obtainStyledAttributes")) {
+                            Check(ta.l != nullptr, "obtainStyledAttributes() is not null");
+                            if (ta.l != nullptr) {
+                                DexValue len;
+                                if (CallVirtual(ta.l, "length", "()I", {}, &len,
+                                                "TypedArray.length")) {
+                                    Check(len.i == 3,
+                                          std::string("TypedArray.length() is the attr count, got ") +
+                                              std::to_string(len.i));
+                                }
+                                // Missing attributes must return the caller's own
+                                // default; those are its considered fallbacks, and
+                                // substituting zero would silently change behaviour.
+                                DexValue got;
+                                if (CallVirtual(ta.l, "getInt", "(II)I",
+                                                {DexValue::Int(0), DexValue::Int(4242)},
+                                                &got, "TypedArray.getInt")) {
+                                    Check(got.i == 4242,
+                                          "getInt() falls back to the caller's default");
+                                }
+                                DexValue has;
+                                if (CallVirtual(ta.l, "hasValue", "(I)Z",
+                                                {DexValue::Int(0)}, &has,
+                                                "TypedArray.hasValue")) {
+                                    Check(has.i == 0, "hasValue() is false when nothing resolved");
+                                }
+                                // recycle() is called in a finally block by every
+                                // obtain site.
+                                CallVirtual(ta.l, "recycle", "()V", {}, nullptr,
+                                            "TypedArray.recycle");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // CopyOnWriteArraySet backs listener registries that are iterated while
+        // callbacks register more; a missing class surfaces inside an unrelated
+        // callback.
+        DexObject* set = NewObject("Ljava/util/concurrent/CopyOnWriteArraySet;", "()V", {},
+                                   "new CopyOnWriteArraySet");
+        if (set != nullptr) {
+            DexValue added;
+            if (CallVirtual(set, "add", "(Ljava/lang/Object;)Z",
+                            {Str("listener")}, &added, "CopyOnWriteArraySet.add")) {
+                Check(added.i != 0, "add() accepts a new element");
+            }
+            // Set semantics: the same element must not be admitted twice.
+            DexValue again;
+            if (CallVirtual(set, "add", "(Ljava/lang/Object;)Z", {Str("listener")}, &again,
+                            "CopyOnWriteArraySet.add duplicate")) {
+                Check(again.i == 0, "add() rejects a duplicate");
+            }
+            DexValue size;
+            if (CallVirtual(set, "size", "()I", {}, &size, "CopyOnWriteArraySet.size")) {
+                Check(size.i == 1, std::string("size() is 1 after a duplicate add, got ") +
+                                       std::to_string(size.i));
+            }
+        }
+    }
+
     std::printf("  executed %llu instructions\n",
                 static_cast<unsigned long long>(interp.instructions_executed()));
 

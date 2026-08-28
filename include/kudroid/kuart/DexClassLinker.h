@@ -8,6 +8,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "dex/dex_file.h"
@@ -53,6 +54,14 @@ public:
     // Reverse lookup: DexClass represented by a java.lang.Class object.
     DexClass* ClassFromObject(DexObject* obj) const;
 
+    // True when `klass` is a class this linker created.
+    //
+    // Exists so the JNI layer can reject a bogus jclass instead of dereferencing
+    // it. Native code hands back whatever it was given, and a wrong handle used to
+    // segfault inside FindVirtualMethod with the faulting address being the bytes
+    // of a string — unreadable as a diagnosis, and fatal.
+    bool IsRegisteredClass(const DexClass* klass) const;
+
     DexHeap& heap() { return heap_; }
     const DexHeap& heap() const { return heap_; }
     const std::vector<std::unique_ptr<const art::DexFile>>& dex_files() const {
@@ -89,6 +98,10 @@ private:
     std::unordered_map<std::string, DexClass*> classes_;
     std::unordered_map<std::string, DexString*> strings_;
     std::unordered_map<DexObject*, DexClass*> class_objects_;
+    // Every DexClass this linker created, for validating handles that came back
+    // from native code. A set of pointers rather than a scan of classes_ because
+    // GetMethodID is on the hot path of JNI-heavy startup.
+    std::unordered_set<const DexClass*> live_classes_;
     std::vector<std::string> loading_;
     std::string last_error_;
 };

@@ -31,6 +31,25 @@ DexField* Fld(jfieldID f) { return reinterpret_cast<DexField*>(f); }
 DexString* Str(jstring s) { return reinterpret_cast<DexString*>(s); }
 DexArray* Arr(jarray a) { return reinterpret_cast<DexArray*>(a); }
 
+// A jclass, validated against the linker before it is dereferenced.
+//
+// jclass is a raw DexClass* by convention (see DexJniEnv.h), so a handle that is
+// not one — a jobject passed where a jclass was expected, a stale value, or a
+// pointer the library derived from something else — used to be dereferenced
+// directly. libminecraftpe.so did exactly that and took SIGSEGV inside
+// FindVirtualMethod at address 0x2f657074666172eb, which is the ASCII bytes
+// "raftpe/": a string pointer used as a class handle. Nothing in the log said which
+// call was at fault.
+//
+// Anything not registered with the linker is rejected here instead, so the caller
+// gets a Java exception naming the operation rather than a crash.
+DexClass* CheckedCls(DexJniEnv* self, jclass c) {
+    DexClass* k = Cls(c);
+    if (k == nullptr || self == nullptr) return nullptr;
+    if (!self->linker()->IsRegisteredClass(k)) return nullptr;
+    return k;
+}
+
 jclass ToJClass(DexClass* k) { return reinterpret_cast<jclass>(k); }
 
 // JNI uses "java/lang/String" type names and KuART uses descriptors
@@ -107,14 +126,15 @@ jclass JNICALL DefineClass(JNIEnv* env, const char*, jobject, const jbyte*, jsiz
     return nullptr;
 }
 
-jclass JNICALL GetSuperclass(JNIEnv*, jclass sub) {
-    DexClass* k = Cls(sub);
+jclass JNICALL GetSuperclass(JNIEnv* env, jclass sub) {
+    DexClass* k = CheckedCls(Self(env), sub);
     return k != nullptr ? ToJClass(k->superclass) : nullptr;
 }
 
-jboolean JNICALL IsAssignableFrom(JNIEnv*, jclass sub, jclass sup) {
-    DexClass* a = Cls(sub);
-    DexClass* b = Cls(sup);
+jboolean JNICALL IsAssignableFrom(JNIEnv* env, jclass sub, jclass sup) {
+    DexJniEnv* self = Self(env);
+    DexClass* a = CheckedCls(self, sub);
+    DexClass* b = CheckedCls(self, sup);
     if (a == nullptr || b == nullptr) return JNI_FALSE;
     return a->IsSubClassOf(b) ? JNI_TRUE : JNI_FALSE;
 }
@@ -124,9 +144,9 @@ jclass JNICALL GetObjectClass(JNIEnv*, jobject obj) {
     return o != nullptr ? ToJClass(o->clazz) : nullptr;
 }
 
-jboolean JNICALL IsInstanceOf(JNIEnv*, jobject obj, jclass clazz) {
+jboolean JNICALL IsInstanceOf(JNIEnv* env, jobject obj, jclass clazz) {
     DexObject* o = Obj(obj);
-    DexClass* k = Cls(clazz);
+    DexClass* k = CheckedCls(Self(env), clazz);
     if (o == nullptr) return JNI_TRUE;  // null is an instance of every type
     if (o->clazz == nullptr || k == nullptr) return JNI_FALSE;
     return o->clazz->IsSubClassOf(k) ? JNI_TRUE : JNI_FALSE;
@@ -141,8 +161,9 @@ jint JNICALL Throw(JNIEnv* env, jthrowable obj) {
 
 jint JNICALL ThrowNew(JNIEnv* env, jclass clazz, const char* msg) {
     DexJniEnv* self = Self(env);
-    DexClass* k = Cls(clazz);
-    if (self == nullptr || k == nullptr) return JNI_ERR;
+    if (self == nullptr) return JNI_ERR;
+    DexClass* k = CheckedCls(self, clazz);
+    if (k == nullptr) return JNI_ERR;
     DexObject* ex = self->linker()->AllocObject(k);
     if (ex == nullptr) return JNI_ERR;
     self->SetPendingException(ex);
@@ -239,20 +260,38 @@ jobjectRefType JNICALL GetObjectRefType(JNIEnv* env, jobject obj) {
 jobject JNICALL AllocObject(JNIEnv* env, jclass clazz) {
     DexJniEnv* self = Self(env);
     if (self == nullptr) return nullptr;
-    if (self->interpreter() != nullptr) self->interpreter()->EnsureInitialized(Cls(clazz));
-    return self->AddLocalRef(self->linker()->AllocObject(Cls(clazz)));
+    DexClass* k = CheckedCls(self, clazz);
+    if (k == nullptr) {
+        ThrowLookupFailure(self, "Ljava/lang/InstantiationException;",
+                           "AllocObject with an invalid class handle");
+        return nullptr;
+    }
+    if (self->interpreter() != nullptr) self->interpreter()->EnsureInitialized(k);
+    return self->AddLocalRef(self->linker()->AllocObject(k));
 }
 
 jobject JNICALL NewObjectA(JNIEnv* env, jclass clazz, jmethodID methodID, const jvalue* args) {
     DexJniEnv* self = Self(env);
     if (self == nullptr) return nullptr;
-    return self->AddLocalRef(self->NewObjectA(Cls(clazz), Mth(methodID), args));
+    DexClass* k = CheckedCls(self, clazz);
+    if (k == nullptr) {
+        ThrowLookupFailure(self, "Ljava/lang/InstantiationException;",
+                           "NewObject with an invalid class handle");
+        return nullptr;
+    }
+    return self->AddLocalRef(self->NewObjectA(k, Mth(methodID), args));
 }
 
 jobject JNICALL NewObjectV(JNIEnv* env, jclass clazz, jmethodID methodID, va_list args) {
     DexJniEnv* self = Self(env);
     if (self == nullptr) return nullptr;
-    DexObject* obj = self->linker()->AllocObject(Cls(clazz));
+    DexClass* k = CheckedCls(self, clazz);
+    if (k == nullptr) {
+        ThrowLookupFailure(self, "Ljava/lang/InstantiationException;",
+                           "NewObject with an invalid class handle");
+        return nullptr;
+    }
+    DexObject* obj = self->linker()->AllocObject(k);
     if (obj == nullptr) return nullptr;
     self->CallJavaV(obj, Mth(methodID), args, /*virtual_dispatch=*/false);
     return self->AddLocalRef(obj);
@@ -275,11 +314,12 @@ jobject JNICALL NewObject(JNIEnv* env, jclass clazz, jmethodID methodID, ...) {
 
 jmethodID JNICALL GetMethodID(JNIEnv* env, jclass clazz, const char* name, const char* sig) {
     DexJniEnv* self = Self(env);
-    DexClass* k = Cls(clazz);
     if (self == nullptr) return nullptr;
+    DexClass* k = CheckedCls(self, clazz);
     if (k == nullptr || name == nullptr) {
         ThrowLookupFailure(self, "Ljava/lang/NoSuchMethodError;",
-                           "GetMethodID with null class or name");
+                           std::string("GetMethodID with an invalid class handle (name=") +
+                               (name != nullptr ? name : "null") + ")");
         return nullptr;
     }
     DexMethod* m = k->FindVirtualMethod(name, sig);
@@ -294,11 +334,12 @@ jmethodID JNICALL GetMethodID(JNIEnv* env, jclass clazz, const char* name, const
 jmethodID JNICALL GetStaticMethodID(JNIEnv* env, jclass clazz, const char* name,
                                    const char* sig) {
     DexJniEnv* self = Self(env);
-    DexClass* k = Cls(clazz);
     if (self == nullptr) return nullptr;
+    DexClass* k = CheckedCls(self, clazz);
     if (k == nullptr || name == nullptr) {
         ThrowLookupFailure(self, "Ljava/lang/NoSuchMethodError;",
-                           "GetStaticMethodID with null class or name");
+                           std::string("GetStaticMethodID with an invalid class handle (name=") +
+                               (name != nullptr ? name : "null") + ")");
         return nullptr;
     }
     DexMethod* m = k->FindDirectMethod(name, sig);
@@ -311,11 +352,12 @@ jmethodID JNICALL GetStaticMethodID(JNIEnv* env, jclass clazz, const char* name,
 
 jfieldID JNICALL GetFieldID(JNIEnv* env, jclass clazz, const char* name, const char* sig) {
     DexJniEnv* self = Self(env);
-    DexClass* k = Cls(clazz);
     if (self == nullptr) return nullptr;
+    DexClass* k = CheckedCls(self, clazz);
     if (k == nullptr || name == nullptr) {
         ThrowLookupFailure(self, "Ljava/lang/NoSuchFieldError;",
-                           "GetFieldID with null class or name");
+                           std::string("GetFieldID with an invalid class handle (name=") +
+                               (name != nullptr ? name : "null") + ")");
         return nullptr;
     }
     DexField* f = k->FindInstanceField(name, sig);
@@ -329,11 +371,12 @@ jfieldID JNICALL GetFieldID(JNIEnv* env, jclass clazz, const char* name, const c
 
 jfieldID JNICALL GetStaticFieldID(JNIEnv* env, jclass clazz, const char* name, const char* sig) {
     DexJniEnv* self = Self(env);
-    DexClass* k = Cls(clazz);
     if (self == nullptr) return nullptr;
+    DexClass* k = CheckedCls(self, clazz);
     if (k == nullptr || name == nullptr) {
         ThrowLookupFailure(self, "Ljava/lang/NoSuchFieldError;",
-                           "GetStaticFieldID with null class or name");
+                           std::string("GetStaticFieldID with an invalid class handle (name=") +
+                               (name != nullptr ? name : "null") + ")");
         return nullptr;
     }
     DexField* f = k->FindStaticField(name, sig);
@@ -758,8 +801,9 @@ jdoubleArray JNICALL NewDoubleArray(JNIEnv* env, jsize len) {
 
 jobjectArray JNICALL NewObjectArray(JNIEnv* env, jsize len, jclass clazz, jobject init) {
     DexJniEnv* self = Self(env);
-    DexClass* component = Cls(clazz);
-    if (self == nullptr || len < 0 || component == nullptr) return nullptr;
+    if (self == nullptr || len < 0) return nullptr;
+    DexClass* component = CheckedCls(self, clazz);
+    if (component == nullptr) return nullptr;
 
     std::string array_descriptor = "[";
     array_descriptor += component->descriptor;
@@ -841,11 +885,20 @@ jint JNICALL RegisterNatives(JNIEnv* env, jclass clazz, const JNINativeMethod* m
                             jint nMethods) {
     DexJniEnv* self = Self(env);
     if (self == nullptr) return JNI_ERR;
-    return self->RegisterNatives(Cls(clazz), methods, nMethods);
+    // A bad handle here would walk the method lists of whatever the pointer
+    // happens to address, and RegisterNatives is called from JNI_OnLoad before
+    // anything else has run — the worst place to corrupt state.
+    DexClass* k = CheckedCls(self, clazz);
+    if (k == nullptr) {
+        ThrowLookupFailure(self, "Ljava/lang/NoClassDefFoundError;",
+                           "RegisterNatives with an invalid class handle");
+        return JNI_ERR;
+    }
+    return self->RegisterNatives(k, methods, nMethods);
 }
 
-jint JNICALL UnregisterNatives(JNIEnv*, jclass clazz) {
-    DexClass* k = Cls(clazz);
+jint JNICALL UnregisterNatives(JNIEnv* env, jclass clazz) {
+    DexClass* k = CheckedCls(Self(env), clazz);
     if (k == nullptr) return JNI_ERR;
     for (DexMethod& m : k->direct_methods) m.native_fn = nullptr;
     for (DexMethod& m : k->virtual_methods) m.native_fn = nullptr;

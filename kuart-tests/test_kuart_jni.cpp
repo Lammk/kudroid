@@ -300,6 +300,55 @@ Check(kept != nullptr, "PopLocalFrame gi  l i k t qu ");
     Check(stillWorks != nullptr, "GetMethodID still resolves a real method");
     Check(env->ExceptionCheck() == JNI_FALSE, "successful lookup throws nothing");
 
+    // An invalid jclass must be rejected, not dereferenced.
+    //
+    // jclass is a raw DexClass* by convention, so a handle that is not one used to be
+    // dereferenced straight away. libminecraftpe.so passed a string pointer where a
+    // jclass was expected and KuDroid took SIGSEGV inside FindVirtualMethod at
+    // address 0x2f657074666172eb — the ASCII bytes "raftpe/". The crash was in
+    // KuDroid, from a value the library supplied, and nothing in the log said which
+    // call was responsible.
+    //
+    // A pointer into a local buffer stands in for that: it is readable memory, so a
+    // null check alone would not catch it, yet it is not a class this linker created.
+    {
+        char notAClass[64];
+        std::memset(notAClass, 0x41, sizeof(notAClass));
+        jclass bogus = reinterpret_cast<jclass>(notAClass);
+
+        jmethodID m = env->GetMethodID(bogus, "getValue", "()I");
+        Check(m == nullptr, "GetMethodID rejects a class handle the linker never made");
+        Check(env->ExceptionCheck() == JNI_TRUE, "invalid class handle throws");
+        env->ExceptionClear();
+
+        jfieldID f = env->GetFieldID(bogus, "value", "I");
+        Check(f == nullptr, "GetFieldID rejects an invalid class handle");
+        env->ExceptionClear();
+
+        jmethodID sm = env->GetStaticMethodID(bogus, "anything", "()V");
+        Check(sm == nullptr, "GetStaticMethodID rejects an invalid class handle");
+        env->ExceptionClear();
+
+        // These return a value rather than throwing, so they are checked separately;
+        // the point is that none of them dereference the handle.
+        Check(env->GetSuperclass(bogus) == nullptr, "GetSuperclass rejects an invalid handle");
+        Check(env->IsAssignableFrom(bogus, k) == JNI_FALSE,
+              "IsAssignableFrom rejects an invalid handle");
+        Check(env->AllocObject(bogus) == nullptr, "AllocObject rejects an invalid handle");
+        env->ExceptionClear();
+        Check(env->NewObjectArray(1, bogus, nullptr) == nullptr,
+              "NewObjectArray rejects an invalid component handle");
+        Check(env->RegisterNatives(bogus, nullptr, 0) == JNI_ERR,
+              "RegisterNatives rejects an invalid handle");
+        env->ExceptionClear();
+
+        // A real handle still works after all that: the check must not be rejecting
+        // everything.
+        Check(env->GetMethodID(k, "getValue", "()I") != nullptr,
+              "a valid class handle still resolves");
+        Check(env->ExceptionCheck() == JNI_FALSE, "no exception left pending");
+    }
+
     // Reflection JNI bridging.
     jmethodID mid = env->GetMethodID(k, "getValue", "()I");
     Check(mid != nullptr, "GetMethodID for reflection bridging");

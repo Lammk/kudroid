@@ -15,21 +15,23 @@ public class Runtime {
 
     public native void load(String pathname);
 
-    public int availableProcessors() {
-        return 4;
-    }
+    public native int availableProcessors();
 
-    public long totalMemory() {
-        return 256L * 1024 * 1024;
-    }
+    /**
+     * Heap figures, read from the host device.
+     *
+     * These were fixed at 256/128/512 MB. Apps divide by maxMemory() to size caches
+     * and bitmap pools, and compare freeMemory() against what they are about to
+     * allocate, so a constant either invites an allocation the device cannot back —
+     * and the process is killed — or holds the app to a fraction of what it could
+     * use. KuART has no separate managed heap, so the process budget IS the heap
+     * budget.
+     */
+    public native long maxMemory();
 
-    public long freeMemory() {
-        return 128L * 1024 * 1024;
-    }
+    public native long totalMemory();
 
-    public long maxMemory() {
-        return 512L * 1024 * 1024;
-    }
+    public native long freeMemory();
 
     public void gc() {
     }

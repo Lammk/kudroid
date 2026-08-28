@@ -48,6 +48,7 @@ add_library(kudroid_core STATIC
     src/abi/SyscallShim.cpp
     src/platform/AssetShim.cpp
     src/platform/JavaCanvasRenderer.cpp
+    src/platform/MemoryInfo.cpp
     src/kudroid_bridge.cpp
     src/gpu_test.cpp
     # KuART — micro ART: load DEX directly, without going through dex2jar/JVM.
@@ -190,6 +191,16 @@ else()
         )
         target_link_libraries(test_manifest_text PRIVATE kudroid_core)
         target_include_directories(test_manifest_text PRIVATE include)
+    endif()
+
+    # Device memory figures: apps size caches from them, so they must be real,
+    # self-consistent and never zero.
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_memory_info.cpp")
+        add_executable(test_memory_info
+            tests/test_memory_info.cpp
+        )
+        target_link_libraries(test_memory_info PRIVATE kudroid_core)
+        target_include_directories(test_memory_info PRIVATE include)
     endif()
 
     # KuART's tests are located in kuart-tests/ (not tests/) because tests/ is broken

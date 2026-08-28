@@ -28,6 +28,7 @@
 #include "kudroid/kuart/DexString.h"
 #include "kudroid/kuart/Interpreter.h"
 #include "kudroid/kuart/VmLock.h"
+#include "kudroid/platform/MemoryInfo.h"
 #include "kudroid/platform/JavaCanvasRenderer.h"
 
 namespace kudroid {
@@ -2054,6 +2055,96 @@ bool Invoke_keep_screen_on(Interpreter* /*interp*/, const char* name, const DexV
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Device memory, read from the host.
+//
+// Apps size caches, texture atlases and world chunks from these numbers. Fixed
+// values are worse than they look: too high and the app allocates past what the
+// device can give and gets killed mid-load; too low and it runs degraded on
+// hardware that could do better. Reading the host makes the answer correct on
+// whatever device KuDroid happens to be on, with no per-app knowledge.
+bool Invoke_kudroid_memory(Interpreter* /*interp*/, const char* name,
+                           const DexValue* /*args*/, size_t /*num_args*/,
+                           DexValue* result) {
+    if (std::strcmp(name, "nativeTotalMemory") == 0) {
+        *result = DexValue::Long(
+            static_cast<int64_t>(kudroid::query_system_memory().total_bytes));
+        return true;
+    }
+    if (std::strcmp(name, "nativeAvailableMemory") == 0) {
+        const kudroid::SystemMemory mem = kudroid::query_system_memory();
+        // Report the per-process headroom when the OS enforces one. On iOS jetsam
+        // kills a process well below system-available memory, so handing back the
+        // system figure invites an app to allocate its way into a kill.
+        const uint64_t value = mem.process_available_bytes > 0
+                                   ? mem.process_available_bytes
+                                   : mem.available_bytes;
+        *result = DexValue::Long(static_cast<int64_t>(value));
+        return true;
+    }
+    if (std::strcmp(name, "nativeSystemAvailableMemory") == 0) {
+        *result = DexValue::Long(
+            static_cast<int64_t>(kudroid::query_system_memory().available_bytes));
+        return true;
+    }
+    if (std::strcmp(name, "nativeProcessResidentMemory") == 0) {
+        *result = DexValue::Long(
+            static_cast<int64_t>(kudroid::query_system_memory().process_resident_bytes));
+        return true;
+    }
+    if (std::strcmp(name, "nativeIsLowMemory") == 0) {
+        *result = DexValue::Int(kudroid::query_system_memory().low_memory ? 1 : 0);
+        return true;
+    }
+    if (std::strcmp(name, "nativeMemoryClass") == 0) {
+        *result = DexValue::Int(kudroid::memory_class_mb());
+        return true;
+    }
+    if (std::strcmp(name, "nativeLargeMemoryClass") == 0) {
+        *result = DexValue::Int(kudroid::large_memory_class_mb());
+        return true;
+    }
+
+    // java.lang.Runtime heap figures.
+    //
+    // KuART has no separate managed heap — objects come from the process allocator —
+    // so the process budget IS the heap budget. Kept consistent so that
+    // total + free == max, which is what callers assume when they compute headroom.
+    if (std::strcmp(name, "maxMemory") == 0) {
+        const kudroid::SystemMemory mem = kudroid::query_system_memory();
+        const uint64_t ceiling = mem.process_available_bytes > 0
+                                     ? mem.process_resident_bytes + mem.process_available_bytes
+                                     : mem.total_bytes;
+        *result = DexValue::Long(static_cast<int64_t>(ceiling));
+        return true;
+    }
+    if (std::strcmp(name, "totalMemory") == 0) {
+        const kudroid::SystemMemory mem = kudroid::query_system_memory();
+        // What the process has taken so far.
+        uint64_t taken = mem.process_resident_bytes;
+        if (taken == 0) taken = mem.total_bytes - mem.available_bytes;
+        *result = DexValue::Long(static_cast<int64_t>(taken));
+        return true;
+    }
+    if (std::strcmp(name, "freeMemory") == 0) {
+        const kudroid::SystemMemory mem = kudroid::query_system_memory();
+        const uint64_t free_bytes = mem.process_available_bytes > 0
+                                        ? mem.process_available_bytes
+                                        : mem.available_bytes;
+        *result = DexValue::Long(static_cast<int64_t>(free_bytes));
+        return true;
+    }
+    if (std::strcmp(name, "availableProcessors") == 0) {
+        // Thread-pool sizes are derived from this; a hardcoded 4 either leaves cores
+        // idle or oversubscribes a smaller device.
+        unsigned cores = std::thread::hardware_concurrency();
+        if (cores == 0) cores = 4;
+        *result = DexValue::Int(static_cast<int32_t>(cores));
+        return true;
+    }
+    return false;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // java.lang.Runtime
 static LoadLibraryCallback g_load_lib_cb = nullptr;
 
@@ -2289,7 +2380,12 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
     if (std::strcmp(desc, "Ljava/lang/Double;") == 0) return Invoke_java_lang_Double(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/lang/String;") == 0) return Invoke_java_lang_String(interp, method, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/lang/Thread;") == 0) return Invoke_java_lang_Thread(interp, name, args, num_args, result);
-    if (std::strcmp(desc, "Ljava/lang/Runtime;") == 0) return Invoke_java_lang_Runtime(interp, name, args, num_args, result);
+    if (std::strcmp(desc, "Ljava/lang/Runtime;") == 0) {
+        // Runtime owns both loadLibrary/load and the heap figures; memory first so
+        // totalMemory/freeMemory report the device rather than a constant.
+        if (Invoke_kudroid_memory(interp, name, args, num_args, result)) return true;
+        return Invoke_java_lang_Runtime(interp, name, args, num_args, result);
+    }
     if (std::strcmp(desc, "Ljava/lang/reflect/Method;") == 0) return Invoke_java_lang_reflect_Method(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/lang/reflect/Constructor;") == 0) return Invoke_java_lang_reflect_Constructor(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/lang/reflect/Field;") == 0) return Invoke_java_lang_reflect_Field(interp, name, args, num_args, result);
@@ -2305,6 +2401,13 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
     if (std::strcmp(desc, "Landroid/graphics/Canvas;") == 0) return Invoke_android_graphics_Canvas(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Landroid/app/Activity;") == 0) return Invoke_android_app_Activity(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Landroid/os/Vibrator;") == 0) return Invoke_android_os_Vibrator(interp, name, args, num_args, result);
+    // Memory figures come from the host device rather than constants: apps size
+    // caches from them, so a wrong value either gets the process killed or makes it
+    // run degraded.
+    if (std::strcmp(desc, "Landroid/app/ActivityManager;") == 0 ||
+        std::strcmp(desc, "Landroid/os/Debug;") == 0) {
+        return Invoke_kudroid_memory(interp, name, args, num_args, result);
+    }
     if (std::strcmp(desc, "Landroid/view/Window;") == 0 ||
         std::strcmp(desc, "Landroid/view/View;") == 0 ||
         std::strcmp(desc, "Landroid/os/PowerManager$WakeLock;") == 0) {
@@ -2324,6 +2427,8 @@ bool LibCoreHasMethod(const DexMethod* method) {
             std::strcmp(desc, "Landroid/util/Log;") == 0 ||
             std::strcmp(desc, "Landroid/graphics/Canvas;") == 0 ||
             std::strcmp(desc, "Landroid/app/Activity;") == 0 ||
+            std::strcmp(desc, "Landroid/app/ActivityManager;") == 0 ||
+            std::strcmp(desc, "Landroid/os/Debug;") == 0 ||
             std::strcmp(desc, "Landroid/os/Vibrator;") == 0 ||
             std::strcmp(desc, "Landroid/view/Window;") == 0 ||
             std::strcmp(desc, "Landroid/view/View;") == 0 ||

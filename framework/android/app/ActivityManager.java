@@ -14,20 +14,36 @@ import java.util.List;
  * available memory is routine in games and in any app that adapts its cache size,
  * so it happens during startup.
  *
- * The numbers reported are deliberately plausible rather than real. KuDroid runs on
- * iOS, where the host does not expose per-process PSS the way Linux does, and an
- * app that sees 0 bytes available concludes the device is out of memory and
- * degrades or refuses to run.
+ * The figures come from the host device via native calls, not from constants. Apps
+ * size caches, texture atlases and world chunks from them, so a fixed number is
+ * either above what the device can give — and the app is killed mid-load — or below
+ * it, and the app runs degraded on hardware that could do better.
  */
 public class ActivityManager {
 
-    /** Reported total device RAM. */
-    private static final long TOTAL_MEM = 4L * 1024 * 1024 * 1024;
-    /** Reported free RAM; kept a large fraction so heuristics do not trip. */
-    private static final long AVAIL_MEM = 2L * 1024 * 1024 * 1024;
-
     public static final int MOVE_TASK_WITH_HOME = 0x00000001;
     public static final int MOVE_TASK_NO_USER_ACTION = 0x00000002;
+
+    /** Physical RAM of the device. */
+    private static native long nativeTotalMemory();
+
+    /**
+     * Memory this process may still use.
+     *
+     * Not the system-wide figure: iOS enforces a per-process limit well below total
+     * RAM, so an app sizing itself from system-available memory allocates its way
+     * into being killed.
+     */
+    private static native long nativeAvailableMemory();
+
+    /** System-wide reclaimable memory, which is what MemoryInfo.availMem means. */
+    private static native long nativeSystemAvailableMemory();
+
+    private static native boolean nativeIsLowMemory();
+
+    private static native int nativeMemoryClass();
+
+    private static native int nativeLargeMemoryClass();
 
     public ActivityManager() {}
 
@@ -35,7 +51,7 @@ public class ActivityManager {
      * Device memory state.
      *
      * Callers pass an instance to getMemoryInfo() and read the fields, so the class
-     * must be constructible and the fields must be present under their exact names.
+     * must be constructible and the fields must carry their exact Android names.
      */
     public static class MemoryInfo implements android.os.Parcelable {
         public long availMem;
@@ -47,11 +63,27 @@ public class ActivityManager {
         public long visibleAppThreshold;
         public long foregroundAppThreshold;
 
+        /**
+         * Populated at construction from the host.
+         *
+         * Apps commonly construct one and read the fields without calling
+         * getMemoryInfo() first — zeroes there read as "no memory left".
+         */
         public MemoryInfo() {
-            availMem = AVAIL_MEM;
-            totalMem = TOTAL_MEM;
-            threshold = 128L * 1024 * 1024;
-            lowMemory = false;
+            refresh(this);
+        }
+
+        static void refresh(MemoryInfo info) {
+            info.totalMem = nativeTotalMemory();
+            info.availMem = nativeSystemAvailableMemory();
+            info.lowMemory = nativeIsLowMemory();
+            // Android's threshold is the level at which it starts killing
+            // background processes; a small fraction of total RAM.
+            info.threshold = info.totalMem / 32;
+            info.hiddenAppThreshold = info.threshold;
+            info.secondaryServerThreshold = info.threshold;
+            info.visibleAppThreshold = info.threshold;
+            info.foregroundAppThreshold = info.threshold;
         }
 
         public int describeContents() { return 0; }
@@ -119,23 +151,23 @@ public class ActivityManager {
 
     public void getMemoryInfo(MemoryInfo outInfo) {
         if (outInfo == null) return;
-        outInfo.availMem = AVAIL_MEM;
-        outInfo.totalMem = TOTAL_MEM;
-        outInfo.threshold = 128L * 1024 * 1024;
-        outInfo.lowMemory = false;
+        MemoryInfo.refresh(outInfo);
     }
 
     /**
      * Per-app heap limit in megabytes.
      *
-     * Apps size their caches from this. Returning 0 makes them allocate nothing;
-     * these are the values a 4 GB Android device reports.
+     * Apps size their caches from this, so it is derived from the device's real
+     * per-process budget rather than a constant.
      */
-    public int getMemoryClass() { return 192; }
+    public int getMemoryClass() { return nativeMemoryClass(); }
 
-    public int getLargeMemoryClass() { return 512; }
+    public int getLargeMemoryClass() { return nativeLargeMemoryClass(); }
 
-    public boolean isLowRamDevice() { return false; }
+    public boolean isLowRamDevice() {
+        // Android's own cutoff for the low-RAM device profile is 1 GB.
+        return nativeTotalMemory() < (1024L * 1024 * 1024);
+    }
 
     public static boolean isUserAMonkey() { return false; }
 

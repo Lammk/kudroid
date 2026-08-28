@@ -35,4 +35,13 @@ public class ContextWrapper extends Context {
     public void startActivity(Intent intent) { if (mBase != null) mBase.startActivity(intent); }
     public void startActivity(Intent intent, Bundle options) { if (mBase != null) mBase.startActivity(intent, options); }
     public Context getApplicationContext() { return mBase != null ? mBase.getApplicationContext() : this; }
+
+    // Theme and styled attributes delegate to the base like everything else, but
+    // fall back to super rather than null: callers chain straight off getTheme().
+    public Resources.Theme getTheme() { return mBase != null ? mBase.getTheme() : super.getTheme(); }
+    public void setTheme(int resid) { if (mBase != null) mBase.setTheme(resid); }
+    public ClassLoader getClassLoader() {
+        return mBase != null ? mBase.getClassLoader() : super.getClassLoader();
+    }
+    public boolean isRestricted() { return mBase != null ? mBase.isRestricted() : false; }
 }

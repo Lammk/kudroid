@@ -77,4 +77,55 @@ public abstract class Context {
     public void startActivity(Intent intent) {}
     public void startActivity(Intent intent, Bundle options) {}
     public Context getApplicationContext() { return this; }
+
+    /**
+     * The theme applied to this Context.
+     *
+     * Never null. Returning null — which happened while Resources.Theme did not
+     * exist — breaks every caller, because the idiom is to chain
+     * {@code getTheme().resolveAttribute(...)} or
+     * {@code getTheme().obtainStyledAttributes(...)} without a null check. Both run
+     * during onCreate on any app built with AppCompat or androidx.core.splashscreen.
+     */
+    public Resources.Theme getTheme() {
+        Resources r = getResources();
+        if (r == null) r = Resources.getSystem();
+        return r.getDefaultTheme();
+    }
+
+    public void setTheme(int resid) {}
+
+    public android.content.res.TypedArray obtainStyledAttributes(int[] attrs) {
+        return getTheme().obtainStyledAttributes(attrs);
+    }
+
+    public android.content.res.TypedArray obtainStyledAttributes(int resid, int[] attrs) {
+        return getTheme().obtainStyledAttributes(resid, attrs);
+    }
+
+    public android.content.res.TypedArray obtainStyledAttributes(
+            android.util.AttributeSet set, int[] attrs) {
+        return getTheme().obtainStyledAttributes(set, attrs, 0, 0);
+    }
+
+    public android.content.res.TypedArray obtainStyledAttributes(
+            android.util.AttributeSet set, int[] attrs, int defStyleAttr, int defStyleRes) {
+        return getTheme().obtainStyledAttributes(set, attrs, defStyleAttr, defStyleRes);
+    }
+
+    public ClassLoader getClassLoader() {
+        return ClassLoader.getSystemClassLoader();
+    }
+
+    public android.graphics.drawable.Drawable getDrawable(int id) {
+        Resources r = getResources();
+        return r != null ? r.getDrawable(id, getTheme()) : null;
+    }
+
+    public int getColor(int id) {
+        Resources r = getResources();
+        return r != null ? r.getColor(id, getTheme()) : 0xFF000000;
+    }
+
+    public boolean isRestricted() { return false; }
 }

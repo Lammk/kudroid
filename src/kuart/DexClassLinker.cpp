@@ -138,6 +138,7 @@ DexClass* DexClassLinker::CreatePrimitiveClass(const char* descriptor,
     klass->primitive_type = type;
     klass->status = DexClass::Status::kInitialized;
     classes_[descriptor] = klass;
+    live_classes_.insert(klass);
     return klass;
 }
 
@@ -149,6 +150,7 @@ DexClass* DexClassLinker::CreateArrayClass(const char* descriptor) {
     klass->is_array = true;
     // Register before resolving the component: the nested array ("[[I") will return here.
     classes_[descriptor] = klass;
+    live_classes_.insert(klass);
 
     klass->component_type = FindClass(descriptor + 1);
     klass->superclass = FindClass("Ljava/lang/Object;");
@@ -245,6 +247,7 @@ DexClass* DexClassLinker::FindClass(const char* descriptor) {
             stub->status = DexClass::Status::kInitialized;
             stub->is_stub = true;
             classes_[descriptor] = stub;
+            live_classes_.insert(stub);
 
             stub->superclass = FindClass("Ljava/lang/Object;");
             if (stub->superclass != nullptr) {
@@ -272,6 +275,7 @@ DexClass* DexClassLinker::LoadClassFromDexFile(const art::DexFile& dex_file,
     // Go to cache BEFORE resolving the superclass: the class references itself
     // field/method will find the currently loaded version instead of reloading it again.
     classes_[descriptor] = klass;
+    live_classes_.insert(klass);
 
     if (class_def.superclass_idx_.IsValid()) {
         const char* super_descriptor = dex_file.StringByTypeIdx(class_def.superclass_idx_);
@@ -506,6 +510,11 @@ DexClass* DexClassLinker::ClassFromObject(DexObject* obj) const {
     if (obj == nullptr) return nullptr;
     auto it = class_objects_.find(obj);
     return it != class_objects_.end() ? it->second : nullptr;
+}
+
+bool DexClassLinker::IsRegisteredClass(const DexClass* klass) const {
+    if (klass == nullptr) return false;
+    return live_classes_.count(klass) != 0;
 }
 
 }  // namespace kuart
