@@ -6,6 +6,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <tuple>
 
 #include "dex/code_item_accessors-inl.h"
@@ -147,18 +148,36 @@ DexMethod* Interpreter::ResolveMethod(const DexMethod* context, uint32_t method_
     if (DexMethod* m = klass->FindDirectMethod(name, signature.c_str())) return m;
     if (DexMethod* m = klass->FindVirtualMethod(name, signature.c_str())) return m;
 
-    if (klass->dex_file == nullptr) {
-        // Fabricate a placeholder so resolution succeeds and the failure is reported at
-        // CALL time (Execute throws NoClassDefFoundError naming the class) rather than
-        // as a bare NoSuchMethodError that says nothing about which class is missing.
-        //
-        // Cached per (class, name, signature): this used to append to a vector on every
-        // single resolution, so a method called in a loop leaked one DexMethod per call.
+    auto isBootClasspathDescriptor = [](const char* desc) -> bool {
+        if (!desc || desc[0] != 'L') return false;
+        return (std::strncmp(desc, "Landroid/", 9) == 0 ||
+                std::strncmp(desc, "Landroidx/", 10) == 0 ||
+                std::strncmp(desc, "Ljava/", 6) == 0 ||
+                std::strncmp(desc, "Ljavax/", 7) == 0 ||
+                std::strncmp(desc, "Ldalvik/", 8) == 0 ||
+                std::strncmp(desc, "Lsun/", 5) == 0 ||
+                std::strncmp(desc, "Llibcore/", 9) == 0 ||
+                std::strncmp(desc, "Lcom/android/", 13) == 0 ||
+                std::strncmp(desc, "Lorg/apache/harmony/", 20) == 0 ||
+                std::strncmp(desc, "Lorg/w3c/dom/", 13) == 0 ||
+                std::strncmp(desc, "Lorg/xml/sax/", 13) == 0 ||
+                std::strncmp(desc, "Lorg/xmlpull/", 13) == 0 ||
+                std::strncmp(desc, "Lorg/json/", 10) == 0);
+    };
+
+    if (klass->dex_file == nullptr || isBootClasspathDescriptor(class_descriptor)) {
         static std::map<std::tuple<const DexClass*, std::string, std::string>,
                         std::unique_ptr<DexMethod>>
             s_stubMethods;
         static std::mutex s_stubMethodMtx;
+        static std::set<std::string> s_loggedMissingMethods;
         std::lock_guard<std::mutex> lock(s_stubMethodMtx);
+
+        std::string methodKey = std::string(class_descriptor) + "->" + name + signature;
+        if (s_loggedMissingMethods.insert(methodKey).second) {
+            std::fprintf(stderr, "[KuART][MISSING-METHOD] Auto-stubbing missing framework method: %s (dex index %u)\n",
+                         methodKey.c_str(), method_idx);
+        }
 
         auto key = std::make_tuple(klass, std::string(name), signature);
         auto it = s_stubMethods.find(key);
@@ -399,7 +418,7 @@ DexValue Interpreter::Execute(const DexMethod* method, const DexValue* args, siz
                                " (class not implemented in KuDroid framework)");
             return result;
         }
-        if (method->declaring_class != nullptr && method->declaring_class->dex_file == nullptr) {
+        if (method->dex_file == nullptr || (method->declaring_class != nullptr && method->declaring_class->dex_file == nullptr)) {
             return result;
         }
         ThrowException("Ljava/lang/AbstractMethodError;",
