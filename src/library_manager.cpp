@@ -159,6 +159,7 @@ bool LibraryManager::loadRecursive(const std::string& path) {
     std::fprintf(stderr, "[kudroid_core] %s has %zu DT_NEEDED entries\n",
                  soname.c_str(), dependencies.size());
     libraries_.emplace(key, std::move(loader));
+    invalidateCaches();
     ElfLoader* current = libraries_.at(key).get();
 
     for (const auto& dependency : dependencies) {
@@ -185,6 +186,7 @@ bool LibraryManager::loadRecursive(const std::string& path) {
         lastError_ = "Load failed for " + key + ": " + current->lastError();
         std::fprintf(stderr, "[kudroid_core] %s\n", lastError_.c_str());
         libraries_.erase(key);
+        invalidateCaches();
         return false;
     }
     
@@ -216,6 +218,23 @@ static bool isGuardShimSymbol(const char* name) {
            strcmp(name, "__cxa_guard_abort") == 0;
 }
 
+const std::vector<std::string>& LibraryManager::sortedKeys() const {
+    if (!sortedKeysValid_) {
+        sortedKeys_ = sortedLibraryKeys(libraries_);
+        sortedKeysValid_ = true;
+    }
+    return sortedKeys_;
+}
+
+void LibraryManager::invalidateCaches() {
+    sortedKeysValid_ = false;
+    sortedKeys_.clear();
+    // A library that has just appeared can supply a symbol that previously resolved
+    // to nothing, so cached misses have to go too.
+    globalSymbolCache_.clear();
+    appSymbolCache_.clear();
+}
+
 void* LibraryManager::resolveGlobalSymbol(const char* name) const {
     if (!name || !*name) return nullptr;
     if (isGuardShimSymbol(name)) {
@@ -223,36 +242,53 @@ void* LibraryManager::resolveGlobalSymbol(const char* name) const {
         if (shim) return shim;
     }
     std::lock_guard<std::recursive_mutex> lock(mtx_);
-    for (const auto& key : sortedLibraryKeys(libraries_)) {
+
+    auto cached = globalSymbolCache_.find(name);
+    if (cached != globalSymbolCache_.end()) return cached->second;
+
+    void* resolved = nullptr;
+    for (const auto& key : sortedKeys()) {
         void* address = libraries_.at(key)->getSymbolAddress(name);
         if (address) {
+            // Logged once per symbol, on the miss that populates the cache. Logging
+            // every hit is what produced 55748 copies of one line.
             std::fprintf(stderr, "[kudroid_core] Global symbol %s resolved from %s -> %p\n",
                          name, key.c_str(), address);
-            return address;
+            resolved = address;
+            break;
         }
     }
-    return resolve_bionic_symbol(name);
+    if (resolved == nullptr) resolved = resolve_bionic_symbol(name);
+    globalSymbolCache_.emplace(name, resolved);
+    return resolved;
 }
 
 void* LibraryManager::resolveAppSymbol(const char* name) {
     if (!name || !*name) return nullptr;
     std::lock_guard<std::recursive_mutex> lock(mtx_);
-    for (const auto& key : sortedLibraryKeys(libraries_)) {
+
+    auto cached = appSymbolCache_.find(name);
+    if (cached != appSymbolCache_.end()) return cached->second;
+
+    void* resolved = nullptr;
+    for (const auto& key : sortedKeys()) {
         void* address = libraries_.at(key)->getSymbolAddress(name);
         if (address) {
             std::fprintf(stderr, "[kudroid_core] App symbol %s resolved from %s -> %p\n",
                          name, key.c_str(), address);
-            return address;
+            resolved = address;
+            break;
         }
     }
-    return nullptr;
+    appSymbolCache_.emplace(name, resolved);
+    return resolved;
 }
 
 std::vector<std::pair<std::string, void*>> LibraryManager::resolveAllSymbols(const char* name) const {
     std::vector<std::pair<std::string, void*>> result;
     if (!name || !*name) return result;
     std::lock_guard<std::recursive_mutex> lock(mtx_);
-    for (const auto& key : sortedLibraryKeys(libraries_)) {
+    for (const auto& key : sortedKeys()) {
         void* address = libraries_.at(key)->getSymbolAddress(name);
         if (address) {
             std::fprintf(stderr, "[kudroid_core] Symbol %s resolved from %s -> %p\n",

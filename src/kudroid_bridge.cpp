@@ -107,13 +107,27 @@ static void armAltSignalStack(void) {
 // longjmp không thể clobber biến local của hàm gọi (-Wclobbered).
 // Trả về: 0 = chạy xong bình thường (*outVersion hợp lệ),
 // -1 = C++ exception, >0 = số signal đã bị chặn.
+//
+// A guarded library often calls back into Java before it faults (RegisterNatives,
+// GetMethodID, an actual Java call), so the interpreter may have live frames when
+// the jump happens. siglongjmp does not unwind, so those frames' scope guards never
+// run and the interpreter is left describing frames that no longer exist — the next
+// exception on this thread then crashes rendering its own stack trace. Snapshot the
+// interpreter's per-thread bookkeeping before the call and put it back after any
+// abnormal return.
 __attribute__((noinline))
 static int kudroid_call_jni_onload_guarded(jint (*fn)(JavaVM*, void*),
                                           JavaVM* vm, jint* outVersion) {
+    // volatile: read after siglongjmp, so it must not live only in a register the
+    // jump restores to its pre-call value.
+    static thread_local volatile size_t kuartState[KUART_THREAD_STATE_WORDS] = {0};
+    kuart_save_thread_state(const_cast<size_t*>(kuartState));
+
     if (sigsetjmp(g_jniGuardJmp, 1) != 0) {
         // Quay lại từ signal handler — arm lại alt stack vì siglongjmp không
         // rời alt stack một cách bình thường.
         if (g_altStackArmed) armAltSignalStack();
+        kuart_restore_thread_state(const_cast<const size_t*>(kuartState));
         return g_jniGuardSignal > 0 ? g_jniGuardSignal : 1;
     }
     g_jniGuardActive = 1;
@@ -125,6 +139,10 @@ static int kudroid_call_jni_onload_guarded(jint (*fn)(JavaVM*, void*),
         rc = -1;
     }
     g_jniGuardActive = 0;
+    // A C++ exception thrown through the guest library unwinds C++ frames but the
+    // interpreter's guards are only on Execute() frames it owns; a library that
+    // throws across a JNI boundary can still skip them.
+    if (rc != 0) kuart_restore_thread_state(const_cast<const size_t*>(kuartState));
     return rc;
 }
 

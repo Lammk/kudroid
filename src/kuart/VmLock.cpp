@@ -47,6 +47,16 @@ VmLockRelease::~VmLockRelease() {
     for (int i = 0; i < depth_; ++i) g_vm_lock.lock();
 }
 
+int VmLockDepth() { return t_vm_lock_depth; }
+
+void VmLockUnwindTo(int depth) {
+    if (depth < 0) depth = 0;
+    while (t_vm_lock_depth > depth) {
+        --t_vm_lock_depth;
+        g_vm_lock.unlock();
+    }
+}
+
 namespace Monitor {
 
 uint32_t SelfThreadId() {

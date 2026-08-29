@@ -595,5 +595,18 @@ bool DexClassLinker::IsRegisteredClass(const DexClass* klass) const {
     return live_classes_.count(klass) != 0;
 }
 
+DexClass* DexClassLinker::ClassOfObject(const DexObject* obj) const {
+    if (obj == nullptr) return nullptr;
+
+    // A DexClass handed in where a DexObject was expected: reading obj->clazz would
+    // read DexClass::descriptor, which shares offset 0. Check before dereferencing.
+    if (live_classes_.count(reinterpret_cast<const DexClass*>(obj)) != 0) return nullptr;
+
+    DexClass* klass = obj->clazz;
+    // Validate what came out: a stale handle can carry any bit pattern, and a
+    // non-null one passes the usual null check only to fault on first use.
+    return IsRegisteredClass(klass) ? klass : nullptr;
+}
+
 }  // namespace kuart
 }  // namespace kudroid

@@ -59,6 +59,19 @@ public:
     // Throw exception by class descriptor.
     void ThrowException(const char* descriptor, const std::string& message);
 
+    // One entry of the per-thread Java call stack.
+    //
+    // The method pointer is recorded alongside the frame rather than read back out
+    // of it later. A DexMethod is owned by its DexClass on the linker heap and lives
+    // as long as the runtime, whereas a DexFrame lives on the C++ stack only for the
+    // duration of one Execute() — so caching the method means a trace can be
+    // rendered without dereferencing frame memory that may already be reclaimed.
+    // The frame is still needed for dex_pc, which changes as the method runs.
+    struct StackSlot {
+        const DexMethod* method = nullptr;
+        const DexFrame* frame = nullptr;
+    };
+
     // Java-side call stack of the CURRENT thread, innermost frame first, one entry
     // per line: "    at com.foo.Bar.baz(Bar.java:12)".
     //
@@ -71,6 +84,36 @@ public:
     // Description of the in-flight exception including its stack trace, for callers
     // that have to report an exception they are about to discard (JNI_OnLoad).
     std::string DescribePendingException() const;
+
+    // Per-thread interpreter bookkeeping, for a caller that is about to leave the
+    // interpreter by a route that does not unwind the C++ stack.
+    //
+    // Execute() maintains depth_ and call_stack_ with a RAII scope guard, which
+    // covers a normal return and a C++ exception. It does NOT cover siglongjmp:
+    // the JNI_OnLoad shield in kudroid_bridge.cpp jumps out of a faulting library
+    // from a signal handler, and no destructor runs on the way. Every Execute()
+    // frame entered underneath the shield therefore leaks its entry, leaving
+    // call_stack_ holding pointers to DexFrame objects whose stack storage has been
+    // reclaimed.
+    //
+    // The consequence was worse than a leak. The next exception thrown on that
+    // thread called BuildStackTrace(), which walked the dead entries and dereferenced
+    // a garbage DexMethod — turning a diagnosable Java exception into SIGSEGV inside
+    // the very code meant to explain it. Minecraft's MainActivity.onCreate died this
+    // way with its real exception never printed.
+    struct ThreadState {
+        size_t depth = 0;
+        size_t frames = 0;
+        // Recursion count of this thread inside the global VM lock. Execute() takes
+        // it at depth 0 through a RAII guard, which siglongjmp skips just like the
+        // others; leaving it held would deadlock every other Java thread.
+        int vm_lock_depth = 0;
+    };
+    static ThreadState CaptureThreadState();
+
+    // Drop anything the interpreter accumulated past `state`. Safe to call when
+    // nothing leaked: it only ever shrinks.
+    static void RestoreThreadState(const ThreadState& state);
 
 private:
     DexValue ExecuteFrame(DexFrame* frame);
@@ -120,11 +163,8 @@ private:
     static thread_local size_t depth_;
     static thread_local uint64_t instructions_executed_;
 
-    // Live frames of this thread, outermost first. Frames live on the C++ stack for
-    // the duration of Execute(), so storing raw pointers is safe as long as every
-    // push is matched by a pop — Execute() does that with a scope guard so an early
-    // return or a C++ exception cannot leave a dangling entry.
-    static thread_local std::vector<const DexFrame*> call_stack_;
+    // Live frames of this thread, outermost first.
+    static thread_local std::vector<StackSlot> call_stack_;
 
     // Stack trace captured when the in-flight exception was thrown. Taken at throw
     // time because by the time a caller reports it the frames are already unwound.

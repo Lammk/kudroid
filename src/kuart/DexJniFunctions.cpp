@@ -161,16 +161,21 @@ jclass JNICALL GetObjectClass(JNIEnv* env, jobject obj) {
     }
 
     // A java.lang.Class INSTANCE (from Class.forName or a const-class) is likewise a
-    // jobject whose class is java.lang.Class; that already works through o->clazz.
-    return ToJClass(o->clazz);
+    // jobject whose class is java.lang.Class. ClassOfObject validates what it finds,
+    // so a stale handle whose clazz is non-null but not a class returns null here
+    // instead of being handed to the caller as a jclass.
+    return ToJClass(self->linker()->ClassOfObject(o));
 }
 
 jboolean JNICALL IsInstanceOf(JNIEnv* env, jobject obj, jclass clazz) {
+    DexJniEnv* self = Self(env);
     DexObject* o = Obj(obj);
-    DexClass* k = CheckedCls(Self(env), clazz);
+    DexClass* k = CheckedCls(self, clazz);
     if (o == nullptr) return JNI_TRUE;  // null is an instance of every type
-    if (o->clazz == nullptr || k == nullptr) return JNI_FALSE;
-    return o->clazz->IsSubClassOf(k) ? JNI_TRUE : JNI_FALSE;
+    if (k == nullptr || self == nullptr) return JNI_FALSE;
+    DexClass* o_class = self->linker()->ClassOfObject(o);
+    if (o_class == nullptr) return JNI_FALSE;
+    return o_class->IsSubClassOf(k) ? JNI_TRUE : JNI_FALSE;
 }
 
 jint JNICALL Throw(JNIEnv* env, jthrowable obj) {

@@ -731,12 +731,15 @@ bool Invoke_java_lang_reflect_Method(Interpreter* interp, const char* name,
             return true;
         }
         // Virtual dispatch: the Method handle may come from a superclass while
-        // the receiver overrides it.
+        // the receiver overrides it. Validate the receiver's class instead of only
+        // null-checking it — a Method.invoke reachable from JNI can be handed a
+        // native-supplied receiver (see DexClassLinker::ClassOfObject).
         DexMethod* target = m;
-        if (!m->IsStatic() && m->vtable_index != DexMethod::kInvalidVTableIndex &&
-            receiver->clazz != nullptr) {
-            if (DexMethod* found = receiver->clazz->FindVirtualMethod(m->name, m->signature)) {
-                target = found;
+        if (!m->IsStatic() && m->vtable_index != DexMethod::kInvalidVTableIndex) {
+            if (DexClass* receiver_class = interp->linker()->ClassOfObject(receiver)) {
+                if (DexMethod* found = receiver_class->FindVirtualMethod(m->name, m->signature)) {
+                    target = found;
+                }
             }
         }
         if (target->IsStatic()) interp->EnsureInitialized(target->declaring_class);

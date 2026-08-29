@@ -62,6 +62,24 @@ public:
     // of a string — unreadable as a diagnosis, and fatal.
     bool IsRegisteredClass(const DexClass* klass) const;
 
+    // The class of `obj`, or nullptr when `obj` is not a usable object.
+    //
+    // Reading obj->clazz directly is only safe once the handle is known to be an
+    // object, and native code routinely breaks that assumption in two ways:
+    //
+    //  - It passes a jclass where a jobject is expected. DexClass::descriptor and
+    //    DexObject::clazz both sit at offset 0, so obj->clazz then yields the
+    //    descriptor STRING pointer, which gets used as a class. That is the crash at
+    //    0x2f657074666172eb — the ASCII bytes "raftpe/" out of
+    //    "Lcom/mojang/minecraftpe/MainActivity;".
+    //  - It passes a stale or fabricated handle, giving a clazz like 0x10 that is
+    //    non-null and so passes an ordinary null check before faulting at a small
+    //    offset (the 0x98 fault from libPlayFabMultiplayer's JNI_OnLoad).
+    //
+    // Both cases resolve to nullptr here, letting the caller raise a Java exception
+    // that names the operation instead of taking a signal in FindVirtualMethod.
+    DexClass* ClassOfObject(const DexObject* obj) const;
+
     DexHeap& heap() { return heap_; }
     const DexHeap& heap() const { return heap_; }
     const std::vector<std::unique_ptr<const art::DexFile>>& dex_files() const {

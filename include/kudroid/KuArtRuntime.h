@@ -87,6 +87,27 @@ void kuart_post_touch_event(int action, float x, float y);
 // on the same thread.
 int kuart_take_pending_exception(const char** out);
 
+// Save/restore the interpreter's per-thread bookkeeping around a call that may
+// leave by a route which does not unwind the C++ stack.
+//
+// The JNI_OnLoad shield in kudroid_bridge.cpp siglongjmps out of a library that
+// faults mid-callback. If that library had called back into Java, the interpreter
+// frames it entered are skipped over without running their destructors, so the
+// interpreter keeps believing they are live: its call-stack vector retains
+// pointers into reclaimed C++ stack, and its depth counter never comes back down.
+//
+// The stale entries are not merely untidy. The next exception on that thread
+// renders a stack trace from them and dereferences freed memory — a SIGSEGV inside
+// the diagnostic path, which is how Minecraft's MainActivity.onCreate failure
+// stayed invisible. Bracket the guarded call with these and the interpreter is
+// consistent again whichever way the call came back.
+//
+// `out_state` is an opaque scratch area owned by the caller; KUART_THREAD_STATE_WORDS
+// is sized with headroom so adding another counter does not change the ABI.
+#define KUART_THREAD_STATE_WORDS 4
+void kuart_save_thread_state(size_t out_state[KUART_THREAD_STATE_WORDS]);
+void kuart_restore_thread_state(const size_t state[KUART_THREAD_STATE_WORDS]);
+
 const char* kuart_last_error(void);
 
 #ifdef __cplusplus

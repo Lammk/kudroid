@@ -216,6 +216,9 @@ else()
     # test_kuart_jni_float     JNI float/double ABI (AAPCS64 v0-v7) + >6 args
     # test_kuart_stub          auto-stub policy: boot classpath only, stubs refuse use
     # test_kuart_framework     runs the real framework.dex: regex, java.text, Calendar
+    # test_kuart_missing_field an unresolvable field must name itself, not say "iput"
+    # test_kuart_thread_state  siglongjmp out of the interpreter: no stale frames, no
+    #                          held VM lock, no leaked depth; untrusted receiver classes
     if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/test_art_dex.cpp")
         add_executable(test_art_dex kuart-tests/test_art_dex.cpp)
         target_link_libraries(test_art_dex PRIVATE art_dex ZLIB::ZLIB)
@@ -235,6 +238,7 @@ else()
         test_kuart_stub
         test_kuart_framework
         test_kuart_missing_field
+        test_kuart_thread_state
     )
         if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/${kuart_test}.cpp")
             add_executable(${kuart_test} kuart-tests/${kuart_test}.cpp)

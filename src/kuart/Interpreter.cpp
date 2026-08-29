@@ -88,7 +88,7 @@ int32_t CompareLong(T a, T b) {
 thread_local DexObject* Interpreter::pending_exception_ = nullptr;
 thread_local size_t Interpreter::depth_ = 0;
 thread_local uint64_t Interpreter::instructions_executed_ = 0;
-thread_local std::vector<const DexFrame*> Interpreter::call_stack_;
+thread_local std::vector<Interpreter::StackSlot> Interpreter::call_stack_;
 thread_local std::string Interpreter::pending_exception_trace_;
 
 namespace {
@@ -108,15 +108,26 @@ std::string DescriptorToDotted(const char* descriptor) {
 // comes from the DEX debug info when present (release APKs usually keep it, and
 // d8 emits it for framework.dex), otherwise the dex_pc is shown instead so the
 // location is still identifiable in a disassembly.
-std::string DescribeFrame(const DexFrame* frame) {
-    if (frame == nullptr) return "    at <null frame>";
-    const DexMethod* method = frame->method();
+//
+// `method` is taken from the call_stack_ slot rather than from frame->method().
+// That distinction is what keeps this function from crashing on a stale entry: a
+// DexMethod lives on the linker heap for the lifetime of the runtime, while the
+// DexFrame lives on the C++ stack only for one Execute() call. Reading the method
+// pointer back out of a reclaimed frame yields garbage, and dereferencing it is
+// exactly how this function used to fault (fault_addr 0x100000015 inside
+// BuildStackTrace). Frame memory is still only read for dex_pc — a uint32_t out of
+// thread stack storage, which stays mapped for the thread's lifetime, so a stale
+// read produces a wrong line number rather than a signal.
+std::string DescribeFrame(const Interpreter::StackSlot& slot) {
+    const DexMethod* method = slot.method;
     if (method == nullptr) return "    at <null method>";
 
     std::string cls = method->declaring_class != nullptr
                           ? method->declaring_class->PrettyName()
                           : DescriptorToDotted(nullptr);
     const char* name = method->name != nullptr ? method->name : "?";
+
+    const uint32_t dex_pc = slot.frame != nullptr ? slot.frame->dex_pc() : 0;
 
     std::string where;
     const char* source = nullptr;
@@ -130,20 +141,30 @@ std::string DescribeFrame(const DexFrame* frame) {
     if (method->dex_file != nullptr && method->code_item != nullptr) {
         art::CodeItemDebugInfoAccessor accessor(*method->dex_file, method->code_item,
                                                 method->dex_method_index);
-        have_line = accessor.GetLineNumForPc(frame->dex_pc(), &line);
+        have_line = accessor.GetLineNumForPc(dex_pc, &line);
     }
 
     if (source != nullptr && have_line) {
         where = std::string(source) + ":" + std::to_string(line);
     } else if (source != nullptr) {
-        where = std::string(source) + ":pc=" + std::to_string(frame->dex_pc());
+        where = std::string(source) + ":pc=" + std::to_string(dex_pc);
     } else {
-        where = "pc=" + std::to_string(frame->dex_pc());
+        where = "pc=" + std::to_string(dex_pc);
     }
     return "    at " + cls + "." + name + "(" + where + ")";
 }
 
 }  // namespace
+
+Interpreter::ThreadState Interpreter::CaptureThreadState() {
+    return ThreadState{depth_, call_stack_.size(), VmLockDepth()};
+}
+
+void Interpreter::RestoreThreadState(const ThreadState& state) {
+    if (call_stack_.size() > state.frames) call_stack_.resize(state.frames);
+    if (depth_ > state.depth) depth_ = state.depth;
+    VmLockUnwindTo(state.vm_lock_depth);
+}
 
 std::string Interpreter::BuildStackTrace() const {
     std::string out;
@@ -419,13 +440,32 @@ bool Interpreter::InvokeMethod(DexFrame* frame, const art::Instruction* inst, bo
     }
 
     // invoke-virtual/interface: choose the override version according to the receiver's real class.
-    if ((opcode == Instruction::INVOKE_VIRTUAL ||
-         opcode == Instruction::INVOKE_VIRTUAL_RANGE ||
-         opcode == Instruction::INVOKE_INTERFACE ||
-         opcode == Instruction::INVOKE_INTERFACE_RANGE) &&
-        receiver != nullptr && receiver->clazz != nullptr) {
-        DexMethod* resolved = receiver->clazz->FindVirtualMethod(target->name, target->signature);
-        if (resolved != nullptr) target = resolved;
+    //
+    // The receiver's class is validated rather than merely null-checked. A receiver
+    // that came from native code can carry a clazz that is non-null yet not a class
+    // at all — libPlayFabMultiplayer's JNI_OnLoad produced clazz == 0x10, which
+    // passed the null check and then faulted at offset 0x98 inside
+    // FindVirtualMethod. An unvalidated pointer here turns a bad JNI handle into a
+    // signal with no Java context; falling back to the statically resolved target
+    // keeps the failure inside the interpreter where it can be reported.
+    if (opcode == Instruction::INVOKE_VIRTUAL ||
+        opcode == Instruction::INVOKE_VIRTUAL_RANGE ||
+        opcode == Instruction::INVOKE_INTERFACE ||
+        opcode == Instruction::INVOKE_INTERFACE_RANGE) {
+        DexClass* receiver_class =
+            linker_ != nullptr ? linker_->ClassOfObject(receiver) : nullptr;
+        if (receiver_class != nullptr) {
+            DexMethod* resolved =
+                receiver_class->FindVirtualMethod(target->name, target->signature);
+            if (resolved != nullptr) target = resolved;
+        } else if (receiver != nullptr) {
+            ThrowException("Ljava/lang/IllegalStateException;",
+                           std::string("invoke ") +
+                               (target->name != nullptr ? target->name : "?") +
+                               " on an object with an invalid class pointer"
+                               " (receiver came from native code)");
+            return false;
+        }
     }
 
     if (target->IsNative()) {
@@ -596,19 +636,31 @@ DexValue Interpreter::Execute(const DexMethod* method, const DexValue* args, siz
     std::unique_ptr<VmLockGuard> vm_lock;
     if (depth_ == 0) vm_lock = std::make_unique<VmLockGuard>();
 
-    // Publish the frame for BuildStackTrace(). The pop must happen on EVERY exit
-    // path, including a C++ exception escaping a native downcall, or the vector
-    // would keep a pointer to a destroyed stack frame.
+    // Publish the frame for BuildStackTrace() and count the call depth. Both must be
+    // undone on EVERY exit path, including a C++ exception escaping a native
+    // downcall, or the vector would keep a pointer to a destroyed stack frame and
+    // depth_ would drift upwards until every call trips the kMaxCallDepth check.
+    //
+    // Unwinding resizes back to the depth seen on entry rather than popping one
+    // entry. Popping assumes the vector is exactly as this frame left it, which is
+    // false after the JNI_OnLoad shield siglongjmps past inner frames: the pop would
+    // then remove some other frame's live entry and leave the dead ones in place.
+    // Resizing makes each frame's own exit repair everything below it.
     struct StackEntry {
-        explicit StackEntry(const DexFrame* f) { call_stack_.push_back(f); }
-        ~StackEntry() {
-            if (!call_stack_.empty()) call_stack_.pop_back();
+        size_t saved_frames;
+        size_t saved_depth;
+        StackEntry(const DexMethod* m, const DexFrame* f)
+            : saved_frames(call_stack_.size()), saved_depth(depth_) {
+            call_stack_.push_back(StackSlot{m, f});
+            ++depth_;
         }
-    } stack_entry(&frame);
+        ~StackEntry() {
+            if (call_stack_.size() > saved_frames) call_stack_.resize(saved_frames);
+            depth_ = saved_depth;
+        }
+    } stack_entry(method, &frame);
 
-    ++depth_;
     result = ExecuteFrame(&frame);
-    --depth_;
     return result;
 }
 

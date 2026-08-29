@@ -108,11 +108,16 @@ DexValue DexReflect::Invoke(DexMethod* method, DexObject* receiver, const DexVal
     if (method == nullptr) return result;
 
     // Method.invoke uses dynamic dispatch: the override child object calls its version.
-    if (!method->IsStatic() && receiver != nullptr && receiver->clazz != nullptr &&
+    // The receiver reaches here from JNI (CallObjectMethod on a reflected Method) as
+    // well as from bytecode, so its class is validated rather than null-checked —
+    // see DexClassLinker::ClassOfObject.
+    if (!method->IsStatic() && receiver != nullptr && linker_ != nullptr &&
         method->vtable_index != DexMethod::kInvalidVTableIndex) {
-        if (DexMethod* found =
-                receiver->clazz->FindVirtualMethod(method->name, method->signature)) {
-            method = found;
+        if (DexClass* receiver_class = linker_->ClassOfObject(receiver)) {
+            if (DexMethod* found =
+                    receiver_class->FindVirtualMethod(method->name, method->signature)) {
+                method = found;
+            }
         }
     }
 

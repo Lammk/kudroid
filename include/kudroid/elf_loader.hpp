@@ -146,9 +146,35 @@ public:
     [[nodiscard]] const std::string& lastError() const { return lastError_; }
 
 private:
+    // Sorted view of libraries_, rebuilt only when the set of libraries changes.
+    //
+    // Symbol resolution is called once per relocation, which for a game the size of
+    // Minecraft is hundreds of thousands of times. Sorting a fresh vector of eight
+    // std::strings on every one of those calls is pure overhead on the startup path.
+    const std::vector<std::string>& sortedKeys() const;
+    void invalidateCaches();
+
     mutable std::recursive_mutex mtx_;
     std::unordered_map<std::string, std::unique_ptr<ElfLoader>> libraries_;
     std::string lastError_;
+
+    mutable std::vector<std::string> sortedKeys_;
+    mutable bool sortedKeysValid_ = false;
+
+    // Resolved symbol addresses, including negative results.
+    //
+    // Repeated lookups of the same symbol are the norm, not the exception: one
+    // startup produced 55748 identical resolutions of
+    // _ZTVN10__cxxabiv120__si_class_type_infoE, each one a full scan of every
+    // loaded ELF plus a log line. That was 30 MB of stderr in which the same five
+    // lines accounted for 111k of 115k total, burying every real diagnostic.
+    //
+    // Caching a miss is as important as caching a hit — a symbol that is absent gets
+    // asked for just as often and costs the same full scan. Both maps are dropped
+    // whenever the library set changes, since a newly loaded ELF can turn a former
+    // miss into a hit.
+    mutable std::unordered_map<std::string, void*> globalSymbolCache_;
+    mutable std::unordered_map<std::string, void*> appSymbolCache_;
 };
 
 } // namespace kudroid

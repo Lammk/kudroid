@@ -417,6 +417,27 @@ extern "C" const char* kuart_last_error(void) {
     return g_last_error.c_str();
 }
 
+// The state is passed as plain words rather than a struct so the header stays free
+// of C++ types: kudroid_bridge.cpp is the only caller and it just needs a scratch
+// area it can hold across a sigsetjmp.
+extern "C" void kuart_save_thread_state(size_t out_state[KUART_THREAD_STATE_WORDS]) {
+    if (out_state == nullptr) return;
+    for (int i = 0; i < KUART_THREAD_STATE_WORDS; ++i) out_state[i] = 0;
+    const Interpreter::ThreadState state = Interpreter::CaptureThreadState();
+    out_state[0] = state.depth;
+    out_state[1] = state.frames;
+    out_state[2] = static_cast<size_t>(state.vm_lock_depth);
+}
+
+extern "C" void kuart_restore_thread_state(const size_t state[KUART_THREAD_STATE_WORDS]) {
+    if (state == nullptr) return;
+    Interpreter::ThreadState restored;
+    restored.depth = state[0];
+    restored.frames = state[1];
+    restored.vm_lock_depth = static_cast<int>(state[2]);
+    Interpreter::RestoreThreadState(restored);
+}
+
 // ── standard JNI entry point that the guest's native code calls ────────────────────────────
 // Game engines (Unity, MCPE...) call JNI_GetCreatedJavaVMs directly from static
 // initializer to get the VM. BionicShim maps these symbols to the shim table.

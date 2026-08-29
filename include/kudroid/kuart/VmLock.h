@@ -38,6 +38,20 @@ private:
     int depth_;
 };
 
+// How many times this thread currently holds the VM lock.
+int VmLockDepth();
+
+// Release the VM lock down to `depth`, for a caller that left the interpreter
+// without unwinding the C++ stack.
+//
+// VmLockGuard is RAII, which siglongjmp skips: the JNI_OnLoad shield jumps out of a
+// faulting library from a signal handler and the guard's destructor never runs, so
+// the lock is never released. The jumping thread does not notice — the mutex is
+// recursive, so it keeps re-entering its own lock — but every OTHER Java thread
+// blocks on it permanently. Nothing in the log would point at the load that caused
+// it, since the library it happened in was skipped and reported as merely a warning.
+void VmLockUnwindTo(int depth);
+
 // Per-object monitor for `synchronized` and wait/notify. State lives in
 // DexObject::lock_owner_tid / lock_count, guarded by an internal mutex.
 //

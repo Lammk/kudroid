@@ -335,9 +335,21 @@ DexValue DexJniEnv::CallJavaA(DexObject* receiver, DexMethod* method, const jval
     DexValue result;
     if (method == nullptr || interpreter_ == nullptr) return result;
 
-    if (virtual_dispatch && receiver != nullptr && receiver->clazz != nullptr) {
-        DexMethod* found = receiver->clazz->FindVirtualMethod(method->name, method->signature);
-        if (found != nullptr) method = found;
+    // Virtual dispatch off a native-supplied receiver.
+    //
+    // receiver->clazz cannot be trusted here: every argument on this path came
+    // straight from a guest .so. A jclass passed as a jobject reads back
+    // DexClass::descriptor (same offset 0) and hands a string pointer to
+    // FindVirtualMethod — the SIGSEGV at 0x2f657074666172eb, the bytes "raftpe/"
+    // from "Lcom/mojang/minecraftpe/MainActivity;", reached through exactly this
+    // line. When the class does not check out, fall back to the method the caller
+    // named: the jmethodID is a separately validated handle, so a non-virtual call
+    // is the conservative interpretation rather than a crash.
+    if (virtual_dispatch && receiver != nullptr && linker_ != nullptr) {
+        if (DexClass* receiver_class = linker_->ClassOfObject(receiver)) {
+            DexMethod* found = receiver_class->FindVirtualMethod(method->name, method->signature);
+            if (found != nullptr) method = found;
+        }
     }
 
     std::vector<DexValue> vals;
