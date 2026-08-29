@@ -43,6 +43,8 @@
 #define DT_GNU_HASH 0x6ffffef5
 #endif
 
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
 
@@ -103,9 +105,21 @@ ElfLoader::ElfLoader(std::string path)
     : path_(std::move(path)) {}
 
 ElfLoader::~ElfLoader() {
+    releaseFileMapping();
     if (allocBase_) {
         ::munmap(allocBase_, allocSize_);
     }
+}
+
+void ElfLoader::releaseFileMapping() {
+    if (fileData_ == nullptr) return;
+    // Build the symbol index first if nobody has: releasing the file without it would
+    // make every later getSymbolAddress fail, and the failure would look like a
+    // missing symbol rather than a missing table.
+    if (!symbolIndexBuilt_) buildSymbolIndex();
+    ::munmap(const_cast<char*>(fileData_), fileSize_);
+    fileData_ = nullptr;
+    fileSize_ = 0;
 }
 
 ElfLoader::ElfLoader(ElfLoader&& other) noexcept
@@ -117,7 +131,10 @@ ElfLoader::ElfLoader(ElfLoader&& other) noexcept
       segments_(std::move(other.segments_)),
       parsed_(other.parsed_),
       lastError_(std::move(other.lastError_)),
-      fileBuf_(std::move(other.fileBuf_)),
+      fileData_(other.fileData_),
+      fileSize_(other.fileSize_),
+      symbolIndex_(std::move(other.symbolIndex_)),
+      symbolIndexBuilt_(other.symbolIndexBuilt_),
       libraryManager_(other.libraryManager_),
       tls_vaddr_(other.tls_vaddr_),
       tls_filesz_(other.tls_filesz_),
@@ -139,6 +156,7 @@ ElfLoader::ElfLoader(ElfLoader&& other) noexcept
 
 ElfLoader& ElfLoader::operator=(ElfLoader&& other) noexcept {
     if (this != &other) {
+        releaseFileMapping();
         if (allocBase_) {
             ::munmap(allocBase_, allocSize_);
         }
@@ -150,7 +168,10 @@ ElfLoader& ElfLoader::operator=(ElfLoader&& other) noexcept {
         segments_ = std::move(other.segments_);
         parsed_ = other.parsed_;
         lastError_ = std::move(other.lastError_);
-        fileBuf_ = std::move(other.fileBuf_);
+        fileData_ = other.fileData_;
+        fileSize_ = other.fileSize_;
+        symbolIndex_ = std::move(other.symbolIndex_);
+        symbolIndexBuilt_ = other.symbolIndexBuilt_;
         libraryManager_ = other.libraryManager_;
         tls_vaddr_ = other.tls_vaddr_;
         tls_filesz_ = other.tls_filesz_;
@@ -167,6 +188,8 @@ ElfLoader& ElfLoader::operator=(ElfLoader&& other) noexcept {
         other.allocBase_ = nullptr;
         other.allocSize_ = 0;
         other.base_ = nullptr;
+        other.fileData_ = nullptr;
+        other.fileSize_ = 0;
     }
     return *this;
 }
@@ -320,16 +343,16 @@ static const uint32_t R_AARCH64_IRELATIVE = 1032;
 // base+st_value of GARBAGE → GOT slot points to the ELF → SIGILL header area when called.
 // It's the Discord case: "__cxa_atexit resolved from libreactnative.so ->
 // 0x112ab5080" (= base+0x1080, pc crash).
-static size_t countDynsymSymbols(const std::vector<char>& fileBuf,
+static size_t countDynsymSymbols(const char* fileData, size_t fileSize,
                                  const Elf64Ehdr* ehdr,
                                  const Elf64Phdr* phdrs) {
     const Elf64Dyn* dynamic = nullptr;
     size_t dynCount = 0;
     for (uint16_t i = 0; i < ehdr->e_phnum; ++i) {
         if (phdrs[i].p_type == 2 &&
-            phdrs[i].p_offset + phdrs[i].p_filesz <= fileBuf.size()) {
+            phdrs[i].p_offset + phdrs[i].p_filesz <= fileSize) {
             dynamic = reinterpret_cast<const Elf64Dyn*>(
-                fileBuf.data() + phdrs[i].p_offset);
+                fileData + phdrs[i].p_offset);
             dynCount = phdrs[i].p_filesz / sizeof(Elf64Dyn);
             break;
         }
@@ -357,9 +380,9 @@ static size_t countDynsymSymbols(const std::vector<char>& fileBuf,
     }
 
     // DT_HASH: { nbucket, nchain, buckets[], chains[] } — nchain = number of symbols.
-    if (hashOff != UINT64_MAX && hashOff + 8 <= fileBuf.size()) {
+    if (hashOff != UINT64_MAX && hashOff + 8 <= fileSize) {
         const uint32_t* h =
-            reinterpret_cast<const uint32_t*>(fileBuf.data() + hashOff);
+            reinterpret_cast<const uint32_t*>(fileData + hashOff);
         const uint32_t nchain = h[1];
         if (nchain > 0 && nchain < 10000000) return nchain;
     }
@@ -367,18 +390,18 @@ static size_t countDynsymSymbols(const std::vector<char>& fileBuf,
     // DT_GNU_HASH: { nbuckets, symoffset, bloom_size, bloom_shift, bloom[],
     // buckets[], chains[] }. Number of symbols = symoffset + max(chain index). Walk
     // each chain (bit 0 = last entry) to find the largest index.
-    if (gnuHashOff != UINT64_MAX && gnuHashOff + 16 <= fileBuf.size()) {
+    if (gnuHashOff != UINT64_MAX && gnuHashOff + 16 <= fileSize) {
         const uint32_t* g =
-            reinterpret_cast<const uint32_t*>(fileBuf.data() + gnuHashOff);
+            reinterpret_cast<const uint32_t*>(fileData + gnuHashOff);
         const uint32_t nbuckets = g[0];
         const uint32_t symoffset = g[1];
         const uint32_t bloomSize = g[2];
         if (nbuckets < 1000000 && symoffset < 10000000) {
             uint64_t pos = gnuHashOff + 16;
             pos += (uint64_t)bloomSize * 8; // bloom words (64-bit)
-            if (pos + (uint64_t)nbuckets * 4 <= fileBuf.size()) {
+            if (pos + (uint64_t)nbuckets * 4 <= fileSize) {
                 const uint32_t* buckets =
-                    reinterpret_cast<const uint32_t*>(fileBuf.data() + pos);
+                    reinterpret_cast<const uint32_t*>(fileData + pos);
                 pos += (uint64_t)nbuckets * 4;
                 uint32_t maxIdx = 0;
                 for (uint32_t b = 0; b < nbuckets; ++b) {
@@ -387,9 +410,9 @@ static size_t countDynsymSymbols(const std::vector<char>& fileBuf,
                     for (;;) {
                         const uint64_t off =
                             pos + (uint64_t)(idx - symoffset) * 4;
-                        if (off + 4 > fileBuf.size()) break;
+                        if (off + 4 > fileSize) break;
                         const uint32_t chain = *reinterpret_cast<const uint32_t*>(
-                            fileBuf.data() + off);
+                            fileData + off);
                         if (idx > maxIdx) maxIdx = idx;
                         if (chain & 1) break;
                         ++idx;
@@ -403,14 +426,134 @@ static size_t countDynsymSymbols(const std::vector<char>& fileBuf,
     return 0; // no hash table → caller fallback on distance
 }
 
-bool ElfLoader::readFile(std::vector<char>& buf) {
-    std::ifstream file(path_, std::ios::binary | std::ios::ate);
-    if (!file) return false;
-    auto size = file.tellg();
-    file.seekg(0);
-    buf.resize(size);
-    file.read(buf.data(), size);
-    return !!file;
+bool ElfLoader::mapFile() {
+    if (fileData_ != nullptr) return true;
+
+    const int fd = ::open(path_.c_str(), O_RDONLY);
+    if (fd < 0) return false;
+    struct stat st = {};
+    if (::fstat(fd, &st) != 0 || st.st_size <= 0) {
+        ::close(fd);
+        return false;
+    }
+    const size_t size = static_cast<size_t>(st.st_size);
+    // PROT_READ MAP_PRIVATE: the pages stay CLEAN, so the kernel can evict them under
+    // memory pressure and read them back from disk. A heap copy (which this replaced)
+    // is dirty and can only be swapped — which iOS does not do, so it counted in full
+    // against the process footprint. libminecraftpe.so is 333 MB; the copy plus the
+    // loaded image put the process over 660 MB before a single frame was drawn, and
+    // jetsam killed it with SIGKILL.
+    void* mapped = ::mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
+    ::close(fd);
+    if (mapped == MAP_FAILED) return false;
+
+    fileData_ = static_cast<const char*>(mapped);
+    fileSize_ = size;
+    return true;
+}
+
+// Copy .dynsym into a hash map so symbol lookup outlives the file mapping.
+//
+// Also a large speed win independent of memory: getSymbolAddress used to re-parse
+// PT_DYNAMIC and then linear-scan the whole symbol table on EVERY call, and symbol
+// resolution runs once per relocation — hundreds of thousands of times for a game this
+// size.
+void ElfLoader::buildSymbolIndex() {
+    symbolIndexBuilt_ = true;
+    if (fileData_ == nullptr || fileSize_ < sizeof(Elf64Ehdr)) return;
+
+    const auto* ehdr = reinterpret_cast<const Elf64Ehdr*>(fileData_);
+    if (ehdr->e_phnum == 0) return;
+    if (ehdr->e_phoff + static_cast<uint64_t>(ehdr->e_phnum) * sizeof(Elf64Phdr) >
+        fileSize_) {
+        return;
+    }
+    const auto* phdrs = reinterpret_cast<const Elf64Phdr*>(fileData_ + ehdr->e_phoff);
+
+    const Elf64Dyn* dynamic = nullptr;
+    size_t dynCount = 0;
+    for (uint16_t i = 0; i < ehdr->e_phnum; ++i) {
+        if (phdrs[i].p_type == 2 && phdrs[i].p_offset + phdrs[i].p_filesz <= fileSize_) {
+            dynamic = reinterpret_cast<const Elf64Dyn*>(fileData_ + phdrs[i].p_offset);
+            dynCount = phdrs[i].p_filesz / sizeof(Elf64Dyn);
+            break;
+        }
+    }
+    if (dynamic == nullptr) return;
+
+    auto vaddrToOffset = [&](uint64_t vaddr) -> uint64_t {
+        for (uint16_t j = 0; j < ehdr->e_phnum; ++j) {
+            if (phdrs[j].p_type == 1 && vaddr >= phdrs[j].p_vaddr &&
+                vaddr < phdrs[j].p_vaddr + phdrs[j].p_filesz) {
+                return phdrs[j].p_offset + (vaddr - phdrs[j].p_vaddr);
+            }
+        }
+        return UINT64_MAX;
+    };
+
+    const Elf64Sym* symtab = nullptr;
+    const char* strtab = nullptr;
+    size_t strsz = 0;
+    uint64_t symtabOff = UINT64_MAX;
+    uint64_t strtabOff = UINT64_MAX;
+    for (size_t i = 0; i < dynCount && dynamic[i].d_tag != DT_NULL; ++i) {
+        switch (dynamic[i].d_tag) {
+            case DT_SYMTAB: {
+                const uint64_t off = vaddrToOffset(dynamic[i].d_val);
+                if (off != UINT64_MAX && off < fileSize_) {
+                    symtab = reinterpret_cast<const Elf64Sym*>(fileData_ + off);
+                    symtabOff = off;
+                }
+                break;
+            }
+            case DT_STRTAB: {
+                const uint64_t off = vaddrToOffset(dynamic[i].d_val);
+                if (off != UINT64_MAX && off < fileSize_) {
+                    strtab = fileData_ + off;
+                    strtabOff = off;
+                }
+                break;
+            }
+            case DT_STRSZ:
+                strsz = dynamic[i].d_val;
+                break;
+            default:
+                break;
+        }
+    }
+    if (symtab == nullptr || strtab == nullptr) return;
+
+    // The real count comes from the hash table, never from the symtab->strtab
+    // distance: .dynstr does not follow .dynsym directly (.gnu.hash sits between), so
+    // the distance overcounts and the scan matches junk entries whose st_name happens
+    // to land on a valid string. That produced base+st_value of garbage — the Discord
+    // SIGILL at base+0x1080.
+    size_t maxSym = countDynsymSymbols(fileData_, fileSize_, ehdr, phdrs);
+    if (maxSym == 0) {
+        if (strtabOff != UINT64_MAX && strtabOff > symtabOff) {
+            maxSym = (strtabOff - symtabOff) / sizeof(Elf64Sym);
+        } else {
+            maxSym = (fileSize_ - symtabOff) / sizeof(Elf64Sym);
+        }
+    }
+    if (symtabOff + maxSym * sizeof(Elf64Sym) > fileSize_) {
+        maxSym = (fileSize_ - symtabOff) / sizeof(Elf64Sym);
+    }
+
+    symbolIndex_.reserve(maxSym);
+    for (size_t i = 0; i < maxSym; ++i) {
+        if (symtab[i].st_name == 0) continue;
+        if (strsz > 0 && symtab[i].st_name >= strsz) continue;
+        // st_shndx == 0 is an UNDEFINED symbol — this library imports it rather than
+        // exporting it, so resolving it here would hand out base+st_value of nothing.
+        if (symtab[i].st_shndx == 0) continue;
+        const char* name = strtab + symtab[i].st_name;
+        if (name[0] == '\0') continue;
+        // First definition wins, matching the previous linear scan's behaviour.
+        symbolIndex_.emplace(name, symtab[i].st_value);
+    }
+    std::fprintf(stderr, "[KuDroidELF] symbol index for %s: %zu exports\n",
+                 path_.c_str(), symbolIndex_.size());
 }
 
 bool ElfLoader::map() {
@@ -424,9 +567,9 @@ bool ElfLoader::map() {
         return false;
     }
 
-    // Read the entire file into the buffer
-    if (!readFile(fileBuf_)) {
-        lastError_ = "Failed to read file into buffer";
+    // Map the file read-only. Clean pages, so nothing here counts as dirty footprint.
+    if (!mapFile()) {
+        lastError_ = "Failed to map file: " + std::string(strerror(errno));
         return false;
     }
 
@@ -484,8 +627,8 @@ bool ElfLoader::map() {
                 (unsigned long long)seg.vaddr, (unsigned long long)seg.offset,
                 (unsigned long long)seg.filesz, (unsigned long long)seg.memsz, seg.flags);
         char* dst = static_cast<char*>(base_) + (seg.vaddr - minVaddr);
-        if (seg.offset + seg.filesz <= fileBuf_.size()) {
-            memcpy(dst, fileBuf_.data() + seg.offset, seg.filesz);
+        if (seg.offset + seg.filesz <= fileSize_) {
+            memcpy(dst, fileData_ + seg.offset, seg.filesz);
         }
         // fill .bss with zeros (memsz > filesz)
         if (seg.memsz > seg.filesz) {
@@ -605,16 +748,16 @@ bool ElfLoader::relocate() {
     // JIT area, so write-protect must be temporarily disabled during this process.
     pthread_jit_write_protect_np(0);
 #endif
-    const auto* ehdr = reinterpret_cast<const Elf64Ehdr*>(fileBuf_.data());
+    const auto* ehdr = reinterpret_cast<const Elf64Ehdr*>(fileData_);
     const auto* phdrs = reinterpret_cast<const Elf64Phdr*>(
-        fileBuf_.data() + ehdr->e_phoff);
+        fileData_ + ehdr->e_phoff);
     const Elf64Dyn* dynamic = nullptr;
     size_t dynamicCount = 0;
     for (uint16_t i = 0; i < ehdr->e_phnum; ++i) {
         if (phdrs[i].p_type == 2 &&
-            phdrs[i].p_offset + phdrs[i].p_filesz <= fileBuf_.size()) {
+            phdrs[i].p_offset + phdrs[i].p_filesz <= fileSize_) {
             dynamic = reinterpret_cast<const Elf64Dyn*>(
-                fileBuf_.data() + phdrs[i].p_offset);
+                fileData_ + phdrs[i].p_offset);
             dynamicCount = phdrs[i].p_filesz / sizeof(Elf64Dyn);
             break;
         }
@@ -664,17 +807,17 @@ bool ElfLoader::relocate() {
     const uint64_t symtabOffset = vaddrToFileOffset(symtabVaddr);
     const uint64_t strtabOffset = vaddrToFileOffset(strtabVaddr);
     if (symtabOffset == UINT64_MAX || strtabOffset == UINT64_MAX ||
-        (strsz > 0 && strsz > fileBuf_.size() - strtabOffset)) {
+        (strsz > 0 && strsz > fileSize_ - strtabOffset)) {
         lastError_ = "Invalid dynamic symbol tables";
         return false;
     }
     const auto* symtab = reinterpret_cast<const Elf64Sym*>(
-        fileBuf_.data() + symtabOffset);
-    const char* strtab = fileBuf_.data() + strtabOffset;
+        fileData_ + symtabOffset);
+    const char* strtab = fileData_ + strtabOffset;
     // TRUE number of symbols from hash table — distance symtab→strtab is too large when
     // .gnu.hash/.hash is between → valid symbolIndex is still outside this limit
     // or considered trash (similar to bug getSymbolAddress → SIGILL Discord).
-    size_t symbolCount = countDynsymSymbols(fileBuf_, ehdr, phdrs);
+    size_t symbolCount = countDynsymSymbols(fileData_, fileSize_, ehdr, phdrs);
     if (symbolCount == 0) {
         symbolCount = (strtabOffset - symtabOffset) / sizeof(Elf64Sym);
     }
@@ -696,12 +839,12 @@ bool ElfLoader::relocate() {
         if (size == 0) return true;
         const uint64_t offset = vaddrToFileOffset(vaddr);
         if (offset == UINT64_MAX || relaEnt != sizeof(Elf64Rela) ||
-            size % relaEnt != 0 || size > fileBuf_.size() - offset) {
+            size % relaEnt != 0 || size > fileSize_ - offset) {
             lastError_ = "Invalid relocation table";
             return false;
         }
         const auto* relocs = reinterpret_cast<const Elf64Rela*>(
-            fileBuf_.data() + offset);
+            fileData_ + offset);
         for (uint64_t i = 0; i < size / relaEnt; ++i) {
             const uint32_t type = static_cast<uint32_t>(relocs[i].r_info & 0xffffffffu);
             const uint32_t symbolIndex = static_cast<uint32_t>(relocs[i].r_info >> 32);
@@ -799,11 +942,11 @@ bool ElfLoader::relocate() {
     auto applyRelr = [&]() -> bool {
         if (relrVaddr == 0 || relrSize == 0) return true;
         const uint64_t offset = vaddrToFileOffset(relrVaddr);
-        if (offset == UINT64_MAX || relrSize > fileBuf_.size() - offset || relrSize % 8 != 0) {
+        if (offset == UINT64_MAX || relrSize > fileSize_ - offset || relrSize % 8 != 0) {
             lastError_ = "Invalid RELR table";
             return false;
         }
-        const auto* relrs = reinterpret_cast<const uint64_t*>(fileBuf_.data() + offset);
+        const auto* relrs = reinterpret_cast<const uint64_t*>(fileData_ + offset);
         const uintptr_t bias = reinterpret_cast<uintptr_t>(base_);
         uint64_t lastAddr = 0;
         for (uint64_t i = 0; i < relrSize / 8; ++i) {
@@ -849,115 +992,20 @@ bool ElfLoader::relocate() {
 }
 
 void* ElfLoader::getSymbolAddress(const char* symbolName) {
-    if (!base_ || fileBuf_.empty() || segments_.empty()) {
+    if (!base_ || symbolName == nullptr || *symbolName == '\0') {
         return nullptr;
     }
-    if (!symbolName || !*symbolName) {
-        return nullptr;
-    }
-
-    // we need to determine the location of the pt_dynamic segment. Re-analyze the first parts of the program
-    // from the loaded filebuf_ to find pt_dynamic.
-    const Elf64Ehdr* ehdr = reinterpret_cast<const Elf64Ehdr*>(fileBuf_.data());
-    if (ehdr->e_phnum == 0) return nullptr;
-
-    const Elf64Phdr* phdrs = reinterpret_cast<const Elf64Phdr*>(
-        fileBuf_.data() + ehdr->e_phoff);
-
-    const Elf64Dyn* dynamic = nullptr;
-    size_t dynCount = 0;
-
-    for (uint16_t i = 0; i < ehdr->e_phnum; ++i) {
-        if (phdrs[i].p_type == 2) {  // PT_DYNAMIC
-            if (phdrs[i].p_offset + phdrs[i].p_filesz <= fileBuf_.size()) {
-                dynamic = reinterpret_cast<const Elf64Dyn*>(
-                    fileBuf_.data() + phdrs[i].p_offset);
-                dynCount = phdrs[i].p_filesz / sizeof(Elf64Dyn);
-            }
-            break;
-        }
-    }
-
-    if (!dynamic) return nullptr;
-
-    // extract symtab, strtab, strsz from dynamic entries
-    const Elf64Sym* symtab = nullptr;
-    const char* strtab = nullptr;
-    size_t strsz = 0;
-    uint64_t symtabOff = UINT64_MAX;
-    uint64_t strtabOff = UINT64_MAX;
-
-    // support function that converts virtual addresses to file offsets using pt_load segments
-    auto vaddrToOffset = [&](uint64_t vaddr) -> uint64_t {
-        for (uint16_t j = 0; j < ehdr->e_phnum; ++j) {
-            if (phdrs[j].p_type == 1) {  // PT_LOAD
-                if (vaddr >= phdrs[j].p_vaddr &&
-                    vaddr < phdrs[j].p_vaddr + phdrs[j].p_filesz) {
-                    return phdrs[j].p_offset + (vaddr - phdrs[j].p_vaddr);
-                }
-            }
-        }
-        return UINT64_MAX;  // not found
-    };
-
-    for (size_t i = 0; i < dynCount; ++i) {
-        if (dynamic[i].d_tag == DT_NULL) break;
-        switch (dynamic[i].d_tag) {
-            case DT_SYMTAB: {
-                uint64_t off = vaddrToOffset(dynamic[i].d_val);
-                if (off != UINT64_MAX && off < fileBuf_.size()) {
-                    symtab = reinterpret_cast<const Elf64Sym*>(
-                        fileBuf_.data() + off);
-                    symtabOff = off;
-                }
-                break;
-            }
-            case DT_STRTAB: {
-                uint64_t off = vaddrToOffset(dynamic[i].d_val);
-                if (off != UINT64_MAX && off < fileBuf_.size()) {
-                    strtab = fileBuf_.data() + off;
-                    strtabOff = off;
-                }
-                break;
-            }
-            case DT_STRSZ:
-                strsz = dynamic[i].d_val;
-                break;
-        }
-    }
-
-    if (!symtab || !strtab) return nullptr;
-
-    // REAL number of symbols from hash table (DT_HASH nchain / DT_GNU_HASH). Do not use
-    // distance symtab→strtab because .dynstr is not immediately after .dynsym (yes
-    // .gnu.hash/.hash in the middle) → overscan → match junk entry → GOT slot pointing to
-    // header ELF → SIGILL (Discord case __cxa_atexit -> base+0x1080).
-    size_t maxSym = countDynsymSymbols(fileBuf_, ehdr, phdrs);
-    if (maxSym == 0) {
-        // Safe fallback: only scans in the real symtab→strtab area
-        if (strtabOff != UINT64_MAX && strtabOff > symtabOff) {
-            maxSym = (strtabOff - symtabOff) / sizeof(Elf64Sym);
-        } else {
-            maxSym = (fileBuf_.size() - symtabOff) / sizeof(Elf64Sym);
-        }
-    }
-
-    // iterate over symbol table entries
-    for (size_t i = 0; i < maxSym; ++i) {
-        if (symtab[i].st_name == 0) continue;
-        if (strsz > 0 && symtab[i].st_name >= strsz) continue;
-
-        const char* name = strtab + symtab[i].st_name;
-        if (strcmp(name, symbolName) == 0) {
-            if (symtab[i].st_shndx == 0) {
-                continue;
-            }
-            // st_value is the displacement from the load origin; base_ has been adjusted
-            return static_cast<char*>(base_) + symtab[i].st_value;
-        }
-    }
-
-    return nullptr;
+    // Answered from the index built at load time, not by re-parsing the file.
+    //
+    // This used to re-read PT_DYNAMIC and then linear-scan .dynsym on every call, which
+    // is why it required the file to still be mapped and why resolution was O(symbols)
+    // per relocation — hundreds of thousands of scans over ~40k symbols for a game the
+    // size of Minecraft.
+    if (!symbolIndexBuilt_) buildSymbolIndex();
+    const auto it = symbolIndex_.find(symbolName);
+    if (it == symbolIndex_.end()) return nullptr;
+    // st_value is an offset from the load origin; base_ was adjusted by -minVaddr.
+    return static_cast<char*>(base_) + it->second;
 }
 
 std::string ElfLoader::testExecution() {

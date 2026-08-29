@@ -550,6 +550,10 @@ std::ostream& operator<<(std::ostream& os, const Instruction::Code& code) {
   return os << Instruction::Name(code);
 }
 
+std::ostream& operator<<(std::ostream& os, const Instruction::Format& format) {
+  return os << static_cast<int>(format);
+}
+
 uint32_t RangeInstructionOperands::GetOperand(size_t operand_index) const {
   DCHECK_LT(operand_index, GetNumberOfOperands());
   return first_operand_ + operand_index;

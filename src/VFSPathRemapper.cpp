@@ -1,5 +1,6 @@
 #include "kudroid/VFSPathRemapper.h"
 #include "kudroid/cacert_data.h"
+#include "kudroid/DeviceProfile.h"
 
 #include <cerrno>
 #include <cstdlib>
@@ -30,8 +31,22 @@ void vfsTrace(const std::string& message) {
 }
 
 std::string defaultDocumentsDirectory() {
+    // HOME, not a computed bundle path.
+    //
+    // This is the fallback for anything that touches the remapper before Swift calls
+    // kudroid_set_documents_dir, and it has to land in the same place that call would.
+    // It does: iOS sets HOME to the app container, and LiveContainer rewrites HOME (and
+    // CFFIXED_USER_HOME, which is what FileManager reads) to the nested per-guest
+    // container before it loads the guest — so both sides agree in either deployment,
+    // and no orphaned android_root is created at a stale path.
     const char* home = std::getenv("HOME");
-    return home ? std::string(home) + "/Documents" : ".";
+    if (home != nullptr && *home != '\0') return std::string(home) + "/Documents";
+    // No HOME at all should not happen on iOS. "." would be the process working
+    // directory, which is "/" and unwritable, so say so rather than failing later with
+    // a permission error on every file the remapper tries to create.
+    vfsLog("HOME is unset; falling back to the working directory, which is not"
+           " writable on iOS. Call kudroid_set_documents_dir before using the VFS.");
+    return ".";
 }
 
 } // namespace
@@ -91,8 +106,21 @@ bool VFSPathRemapper::initialize() {
 bool VFSPathRemapper::init_pseudo_files() {
     const std::string root = androidRoot_;
     const std::pair<const char*, const char*> files[] = {
-        {"system/build.prop", "ro.build.version.release=14\nro.build.version.sdk=34\nro.product.model=KuDroid iPhone\nro.product.brand=Apple\nro.product.name=kudroid_arm64\nro.product.cpu.abi=arm64-v8a\n"},
-        {"proc/cpuinfo", "Processor\t: AArch64 Processor rev 0 (aarch64)\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm jscvt fcma lrcpc dcpop sha3 sm3 sm4 asimddp sha512 asimdfhm dit uscat ilrcpc flagm ssbs sb paca pacg dcpodp flagm2 frint\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x1\nCPU part\t: 0xd46\nCPU revision\t: 0\n\nHardware\t: Qualcomm Snapdragon 8 Gen 2\n"},
+        // Must agree with the property service (SyscallShim kKnownProps) and with
+        // Build.java. It used to say SDK 34 / release 14 while both of those said
+        // 29 / 10, so an app reading build.prop and an app reading
+        // Build.VERSION.SDK_INT disagreed about the platform they were running on.
+        {"system/build.prop",
+         "ro.build.version.release=" KUDROID_ANDROID_RELEASE "\n"
+         "ro.build.version.sdk=" KUDROID_SDK_INT_STR "\n"
+         "ro.product.model=" KUDROID_DEVICE_MODEL "\n"
+         "ro.product.manufacturer=" KUDROID_DEVICE_MANUFACTURER "\n"
+         "ro.product.brand=" KUDROID_DEVICE_BRAND "\n"
+         "ro.product.name=" KUDROID_DEVICE_NAME "\n"
+         "ro.product.device=" KUDROID_DEVICE_BOARD "\n"
+         "ro.product.cpu.abi=" KUDROID_DEVICE_ABI "\n"
+         "ro.product.cpu.abilist=" KUDROID_DEVICE_ABI "\n"},
+        {"proc/cpuinfo", "Processor\t: AArch64 Processor rev 0 (aarch64)\nBogoMIPS\t: 38.40\nFeatures\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm jscvt fcma lrcpc dcpop sha3 sm3 sm4 asimddp sha512 asimdfhm dit uscat ilrcpc flagm ssbs sb paca pacg dcpodp flagm2 frint\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x1\nCPU part\t: 0xd46\nCPU revision\t: 0\n\nHardware\t: KuDroid arm64\n"},
         {"proc/meminfo", "MemTotal:        8192000 kB\nMemFree:         4096000 kB\nMemAvailable:    6000000 kB\nBuffers:           24576 kB\nCached:          2048000 kB\nSwapCached:            0 kB\nActive:          1024000 kB\nInactive:        1024000 kB\n"},
         {"proc/version", "Linux version 5.15.0-kudroid (clang 17.0.0) #1 SMP PREEMPT 2026\n"},
         {"proc/self/cmdline", "com.kudroid.app\0"},
@@ -277,7 +305,8 @@ int vfs_open(const char* path, int flags, mode_t mode) {
         std::string propPath = VFSPathRemapper::getInstance().remap("/dev/__properties__");
         if (!std::filesystem::exists(propPath)) {
             std::ofstream propFile(propPath, std::ios::trunc);
-            propFile << "ro.build.version.sdk=34\nro.product.cpu.abi=arm64-v8a\n";
+            propFile << "ro.build.version.sdk=" KUDROID_SDK_INT_STR "\n"
+                        "ro.product.cpu.abi=" KUDROID_DEVICE_ABI "\n";
             propFile.close();
         }
     }

@@ -9,6 +9,7 @@
 // Methods are invoked directly through the linker rather than from synthesised
 // bytecode: the point is to exercise the framework code, not the call sequence.
 #include "kudroid/framework_dex_bytes.h"
+#include "kudroid/DeviceProfile.h"
 #include "kudroid/kudroid_bridge.h"
 #include "kudroid/kuart/DexClassLinker.h"
 #include "kudroid/kuart/DexJniEnv.h"
@@ -1900,6 +1901,75 @@ int main() {
             }
         }
         fs::remove_all(libDir, ec);
+    }
+
+    // ── one device identity, not four ──
+    //
+    // Every surface an app can read the platform version from has to agree. They did
+    // not: Build.VERSION.SDK_INT said 29, /system/build.prop said 34,
+    // AConfiguration_getSdkVersion() said 30 and ANativeActivity::sdkVersion said 29.
+    // Apps branch on API level constantly — scoped storage, runtime permissions,
+    // notification channels — so one run could take the pre-Q path in Java and the
+    // post-T path in native code, over the same files.
+    {
+        DexClass* build = linker.FindClass("Landroid/os/Build;");
+        Check(build != nullptr && !build->is_stub, "android.os.Build is real");
+
+        DexClass* version = linker.FindClass("Landroid/os/Build$VERSION;");
+        Check(version != nullptr && !version->is_stub, "Build.VERSION is real");
+        if (version != nullptr && interp.EnsureInitialized(version)) {
+            const DexField* f = version->FindStaticField("SDK_INT", "I");
+            Check(f != nullptr, "Build.VERSION.SDK_INT exists");
+            if (f != nullptr) {
+                const int32_t sdk = version->static_values[f->offset_or_slot].i;
+                Check(sdk == KUDROID_SDK_INT,
+                      std::string("Build.VERSION.SDK_INT matches the C++ DeviceProfile (") +
+                          std::to_string(KUDROID_SDK_INT) + "), got " + std::to_string(sdk));
+            }
+        }
+
+        // Levels above what KuDroid reports still have to exist as constants: the
+        // standard shape is `if (SDK_INT >= VERSION_CODES.S)`, and a missing static
+        // field is a NoSuchFieldError at the comparison rather than a false branch.
+        DexClass* codes = linker.FindClass("Landroid/os/Build$VERSION_CODES;");
+        if (codes != nullptr && interp.EnsureInitialized(codes)) {
+            const char* const kNames[] = {"Q", "R", "S", "TIRAMISU", "UPSIDE_DOWN_CAKE"};
+            const int32_t kValues[] = {29, 30, 31, 33, 34};
+            for (size_t i = 0; i < sizeof(kValues) / sizeof(kValues[0]); ++i) {
+                const DexField* c = codes->FindStaticField(kNames[i], "I");
+                Check(c != nullptr && codes->static_values[c->offset_or_slot].i == kValues[i],
+                      std::string("VERSION_CODES.") + kNames[i] + " == " +
+                          std::to_string(kValues[i]));
+            }
+        }
+
+        // 64-bit only. Advertising armeabi-v7a invites an app to pick the 32-bit half
+        // of a fat native library set, which the ELF loader cannot relocate — a failure
+        // that then looks like a missing library rather than an unsupported ABI.
+        if (build != nullptr && interp.EnsureInitialized(build)) {
+            const DexField* abis = build->FindStaticField("SUPPORTED_32_BIT_ABIS",
+                                                         "[Ljava/lang/String;");
+            Check(abis != nullptr, "Build.SUPPORTED_32_BIT_ABIS exists");
+            if (abis != nullptr) {
+                auto* arr = reinterpret_cast<kudroid::kuart::DexArray*>(
+                    build->static_values[abis->offset_or_slot].l);
+                Check(arr != nullptr && arr->length == 0,
+                      "no 32-bit ABI is advertised, since none can be loaded");
+            }
+            // targetSdkVersion is a different question from SDK_INT and must not be a
+            // stale constant that disagrees with it.
+            DexObject* ai = NewObject("Landroid/content/pm/ApplicationInfo;", "()V", {},
+                                      "new ApplicationInfo");
+            if (ai != nullptr) {
+                DexClass* aiCls = linker.FindClass("Landroid/content/pm/ApplicationInfo;");
+                const DexField* tsv =
+                    aiCls != nullptr ? aiCls->FindInstanceField("targetSdkVersion", "I") : nullptr;
+                if (tsv != nullptr) {
+                    Check(ai->GetField<int32_t>(tsv->offset_or_slot) == KUDROID_SDK_INT,
+                          "ApplicationInfo.targetSdkVersion tracks the platform level");
+                }
+            }
+        }
     }
 
     std::printf("  executed %llu instructions\n",

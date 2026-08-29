@@ -1,4 +1,5 @@
 #include "kudroid/APKExtractor.h"
+#include "kudroid/DeviceProfile.h"
 
 #include <cerrno>
 #include <cstdint>
@@ -8,6 +9,7 @@
 #include <fstream>
 #include <iterator>
 #include <algorithm>
+#include <set>
 #include <sys/stat.h>
 #include <sstream>
 #include <vector>
@@ -679,26 +681,15 @@ static std::string parseArscAppName(const std::vector<std::uint8_t>& data) {
         cur += chunkSize;
     }
 
-    // Fallback: Find the first string that matches a famous game/app name in globalStrings
-    for (const auto& s : globalStrings) {
-        if (s.size() >= 2 && s.size() <= 40 &&
-            s.find('/') == std::string::npos &&
-            s.find('\\') == std::string::npos &&
-            s.find('{') == std::string::npos &&
-            s.find('@') != 0 &&
-            s.rfind("http", 0) != 0 &&
-            s.find(".png") == std::string::npos &&
-            s.find(".xml") == std::string::npos) {
-            const std::string lower = toLower(s);
-            if (lower.find("minecraft") != std::string::npos) {
-                return "Minecraft";
-            }
-            if (lower == "discord" || lower == "ultrakill" || lower.find("rolling sky") != std::string::npos) {
-                return s;
-            }
-        }
-    }
-
+    // No app-name resource: report nothing rather than guess.
+    //
+    // This used to scan the whole global string pool for the names of specific apps
+    // ("minecraft", "discord", "ultrakill", "rolling sky") and return a match from
+    // anywhere in the table — a mod-menu label, a server address, a credits line. An
+    // unrelated app that merely mentioned one of those words was relabelled as it.
+    //
+    // The caller (prettifyAppName) derives a name from the package or the file name
+    // when this returns empty, which is correct for every app rather than four.
     return "";
 }
 } // namespace
@@ -719,12 +710,12 @@ static std::string prettifyAppName(const std::string& raw) {
         s = s.substr(0, s.size() - 4);
     }
 
-    const std::string lower = toLower(s);
-    if (lower.find("minecraft") != std::string::npos || lower.find("mojang") != std::string::npos) return "Minecraft";
-    if (lower.find("ultrakill") != std::string::npos) return "ULTRAKILL";
-    if (lower.find("discord") != std::string::npos) return "Discord";
-    if (lower.find("rolling") != std::string::npos && lower.find("sky") != std::string::npos) return "Rolling Sky";
-    if (lower.find("triangle") != std::string::npos) return "Triangle Test";
+    // The cleanup below (strip repacker tags and version numbers, then title-case)
+    // derives a readable name from any package or file name. A table mapping specific
+    // apps to their branded spelling used to sit here — "minecraft"/"mojang" to
+    // "Minecraft", plus Discord, ULTRAKILL and Rolling Sky — which only ever helped
+    // four apps and mislabelled anything whose name happened to contain one of those
+    // words.
 
     // 2. Separate common junk prefixes/suffixes in mod/port APK file names
     for (char& c : s) {
@@ -816,6 +807,16 @@ static bool extract_apk_impl(const std::string& apkPath, const std::string& targ
     ManifestInfo manifestInfo;
     std::string arscAppName;
 
+    // Which ABIs the APK ships, so an unsupported one can be named.
+    //
+    // Only arm64-v8a is extracted, because the ELF loader relocates AArch64 only
+    // (R_AARCH64_*). Without this bookkeeping an armeabi-v7a-only APK extracted zero
+    // .so files and the failure surfaced much later as "Library directory does not
+    // exist" — which reads as a KuDroid bug rather than as an APK this build cannot
+    // run.
+    std::set<std::string> abisSeen;
+    bool extractedArm64Lib = false;
+
     for (std::uint16_t index = 0; index < entryCount; ++index) {
         if (!hasBytes(data, centralOffset, 46) || read32(data, centralOffset) != 0x02014b50) {
             gLastError = "Invalid ZIP central-directory entry"; apkLog(gLastError); return false;
@@ -833,7 +834,17 @@ static bool extract_apk_impl(const std::string& apkPath, const std::string& targ
 
         const int iconScore = iconPriority(entry);
         bool shouldExtract = false;
-        if (entry.rfind("lib/arm64-v8a/", 0) == 0 && entry.size() >= 3 && entry.compare(entry.size() - 3, 3, ".so") == 0) shouldExtract = true;
+        const bool isNativeLib = entry.rfind("lib/", 0) == 0 && entry.size() >= 3 &&
+                                 entry.compare(entry.size() - 3, 3, ".so") == 0;
+        if (isNativeLib) {
+            // lib/<abi>/foo.so — record the ABI whether or not it is usable.
+            const std::size_t abiEnd = entry.find('/', 4);
+            if (abiEnd != std::string::npos) abisSeen.insert(entry.substr(4, abiEnd - 4));
+            if (entry.rfind("lib/" KUDROID_DEVICE_ABI "/", 0) == 0) {
+                shouldExtract = true;
+                extractedArm64Lib = true;
+            }
+        }
         else if (entry.size() >= 4 && entry.compare(entry.size() - 4, 4, ".dex") == 0) shouldExtract = true;
         else if (entry.rfind("assets/", 0) == 0) shouldExtract = true;
         else if (entry == "AndroidManifest.xml" || entry == "resources.arsc") shouldExtract = true;
@@ -888,6 +899,22 @@ static bool extract_apk_impl(const std::string& apkPath, const std::string& targ
         gLastError = "No expected entries found in APK"; apkLog(gLastError); return false;
     }
 
+    // An APK with native code for other ABIs and none for ours cannot run here, and
+    // saying so now is the whole point. The alternative — silently extracting nothing
+    // — sends the loader down the Java-only path, where the first missing symbol looks
+    // like an unrelated defect.
+    if (!abisSeen.empty() && !extractedArm64Lib) {
+        std::string list;
+        for (const std::string& abi : abisSeen) {
+            if (!list.empty()) list += ", ";
+            list += abi;
+        }
+        apkLog("  !! APK ships native libraries for [" + list + "] but not " +
+               KUDROID_DEVICE_ABI + ". KuDroid can only load " + KUDROID_DEVICE_ABI +
+               " (the ELF loader relocates AArch64 only), so this APK's native code"
+               " will be missing.");
+    }
+
     // Save app_icon.png if found
     if (!bestIconData.empty()) {
         const auto iconDest = std::filesystem::path(targetDirectory) / "app_icon.png";
@@ -906,10 +933,13 @@ static bool extract_apk_impl(const std::string& apkPath, const std::string& targ
         
         std::string label = manifestInfo.appLabel;
         if (label.empty() || label.front() == '@' || (label.find('.') != std::string::npos && label.find(' ') == std::string::npos)) {
+            // The manifest's label is a resource reference or missing. Prefer the
+            // resolved app_name resource, then fall back to deriving a name from the
+            // package. A special case for one app used to sit between the two.
             if (!arscAppName.empty()) {
                 label = arscAppName;
-            } else if (manifestInfo.packageName.find("minecraft") != std::string::npos || manifestInfo.packageName.find("mojang") != std::string::npos) {
-                label = "Minecraft";
+            } else if (!manifestInfo.packageName.empty()) {
+                label = prettifyAppName(manifestInfo.packageName);
             } else {
                 label = prettifyAppName(appDirName);
             }
@@ -970,17 +1000,45 @@ bool APKExtractor::extract_bundle(const std::string& containerPath, const std::s
     std::vector<ZipEntryInfo> allEntries;
     if (!readZipEntries(f, size, allEntries)) return false;
 
-    // Select related APKs: base + arm64-v8a + other non-ABI config.
-    // Remove other ABI split (armeabi/x86/mips) to avoid wasting useless I/O.
+    // Select related APKs: the base plus every non-ABI config split, and the ABI
+    // split for this device.
+    //
+    // Other-ABI splits are skipped to avoid pointless I/O — a 32-bit split cannot be
+    // loaded (the ELF loader relocates AArch64 only). Skipping is only safe when
+    // SOMETHING is left, which is the bug this used to have: an armeabi-only bundle
+    // filtered down to zero APKs and reported "no usable APK splits", naming neither
+    // the ABI it found nor the one it wanted.
     std::vector<ZipEntryInfo> apks;
+    std::set<std::string> skippedAbiSplits;
     for (const auto& e : allEntries) {
         if (!endsWithCi(e.name, ".apk")) continue;
         const std::string lower = toLower(e.name);
-        if (lower.find("armeabi") != std::string::npos || lower.find("x86") != std::string::npos ||
-            lower.find("mips") != std::string::npos) continue;
+        const char* otherAbi = nullptr;
+        if (lower.find("armeabi") != std::string::npos) otherAbi = "armeabi-v7a";
+        else if (lower.find("x86_64") != std::string::npos) otherAbi = "x86_64";
+        else if (lower.find("x86") != std::string::npos) otherAbi = "x86";
+        else if (lower.find("mips") != std::string::npos) otherAbi = "mips";
+        if (otherAbi != nullptr) {
+            skippedAbiSplits.insert(otherAbi);
+            continue;
+        }
         apks.push_back(e);
     }
-    if (apks.empty()) { gLastError = "Bundle container has no usable APK splits"; apkLog(gLastError); return false; }
+    if (apks.empty()) {
+        if (!skippedAbiSplits.empty()) {
+            std::string list;
+            for (const std::string& abi : skippedAbiSplits) {
+                if (!list.empty()) list += ", ";
+                list += abi;
+            }
+            gLastError = "Bundle only contains splits for [" + list + "]; KuDroid needs " +
+                         KUDROID_DEVICE_ABI + " (the ELF loader relocates AArch64 only)";
+        } else {
+            gLastError = "Bundle container has no usable APK splits";
+        }
+        apkLog(gLastError);
+        return false;
+    }
 
     // Process the base finally so that the actual (base's) AndroidManifest.xml overwrites the manifest
     // wrapper of the split.

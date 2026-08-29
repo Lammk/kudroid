@@ -1,4 +1,5 @@
 #include "kudroid/kudroid_bridge.h"
+#include "kudroid/DeviceProfile.h"
 #include "kudroid/elf_loader.hpp"
 #include "kudroid/BionicShim.h"
 #include "kudroid/VFSPathRemapper.h"
@@ -337,6 +338,24 @@ static void writeLogFile(const char* name, const std::string& content) {
     }
 }
 
+// Log a line that already carries a "[kudroid_core] " prefix for stderr.
+//
+// logAndroidMessage prepends the TAG, so passing a line that spells the same origin
+// out again produced "[KuDroidCore] [kudroid_core] ..." in kudroid_android_logs.txt
+// and the KDB stream. The prefix is worth keeping on stderr, which has no tag column,
+// so it is stripped here rather than removed from the call sites.
+//
+// One tag for the whole file: it used to be "KuDroidCore" from the loader and
+// "kudroid_core" from the JNI_OnLoad path, so filtering the log by origin missed half
+// the lines.
+static void logCoreLine(int priority, const std::string& line) {
+    static constexpr char kPrefix[] = "[kudroid_core] ";
+    static constexpr size_t kPrefixLen = sizeof(kPrefix) - 1;
+    const char* text = line.c_str();
+    if (line.compare(0, kPrefixLen, kPrefix) == 0) text += kPrefixLen;
+    kudroid_android_log_message(priority, "kudroid_core", text);
+}
+
 // Safely capture crash buffer snapshot under mutex lock to provide
 // comprehensive diagnostic logs for tests.
 extern "C" const char* kudroid_crash_log_snapshot(void) {
@@ -384,7 +403,7 @@ static void appendTestHeader(std::string& log, const char* test, const char* pat
 // the installed build version.
 extern "C" const char* kudroid_build_stamp(void) {
     static const char kStamp[] =
-        "kudroid_core v0.6.5 " __DATE__ " " __TIME__ " "
+        "kudroid_core v0.8.0 " __DATE__ " " __TIME__ " "
 #ifdef KUDROID_GIT_HASH
         KUDROID_GIT_HASH
 #else
@@ -546,11 +565,43 @@ static void appendCrashLogFile(const std::string& content) {
     fclose(fp);
 }
 
+// Handlers that were installed before KuDroid's, per signal.
+//
+// A plain array indexed by signal number, not a map: this is read from a signal
+// handler, where allocating or taking a lock is not allowed. NSIG covers every signal
+// the platform defines.
+static struct sigaction g_previousHandlers[NSIG];
+
+// Hand a fault to whoever had the signal before us.
+//
+// Only reached for faults KuDroid does not own. Restoring the previous disposition and
+// re-raising is what lets a chained handler see the ORIGINAL machine state: calling its
+// function pointer directly would work for an SA_SIGINFO handler but not for a Mach
+// exception port, and re-raising covers both.
+static void chainToPreviousHandler(int sig) {
+    if (sig <= 0 || sig >= NSIG) return;
+    const struct sigaction& previous = g_previousHandlers[sig];
+    const bool hasHandler =
+        (previous.sa_flags & SA_SIGINFO) ? previous.sa_sigaction != nullptr
+                                         : (previous.sa_handler != nullptr &&
+                                            previous.sa_handler != SIG_DFL &&
+                                            previous.sa_handler != SIG_IGN);
+    if (!hasHandler) return;
+    sigaction(sig, &previous, nullptr);
+    raise(sig);
+}
+
 static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
     if (sig == SIGTRAP) {
         if (kudroid::bionic_handle_tpidr_trap(ucontext)) {
             return; // handled successfully, resuming execution!
         }
+        // A SIGTRAP that is not one of KuDroid's TLS breakpoints belongs to whoever
+        // installed a handler before us — a debugger bridge, a crash reporter, or
+        // LiveContainer's own dyld interception, all of which use breakpoints for
+        // their own purposes. Reporting it as a KuDroid crash would both lose their
+        // event and produce a misleading log.
+        chainToPreviousHandler(sig);
     }
 
     // Inside a guarded JNI_OnLoad invocation: if this library aborts/segfaults,
@@ -865,11 +916,34 @@ static void installCrashHandlers(void) {
         }
     }
 
-    sigaction(SIGILL,  &sa, nullptr);
-    sigaction(SIGBUS,  &sa, nullptr);
-    sigaction(SIGSEGV, &sa, nullptr);
-    sigaction(SIGTRAP, &sa, nullptr);
-    sigaction(SIGABRT, &sa, nullptr);
+    // Keep whatever was installed before us, per signal.
+    //
+    // SIGTRAP is load-bearing, not merely diagnostic: guest `mrs xN, tpidr_el0` is
+    // rewritten to `BRK #(0x1000+N)` at load time and the handler supplies the TLS
+    // pointer. If a host (LiveContainer, a debugger bridge, a crash reporter) already
+    // has a handler and we replace it without recording it, its own traps are silently
+    // dropped; if it replaces ours, every guest TLS read becomes a fatal trap.
+    //
+    // Chaining is what makes both survive: bionic_handle_tpidr_trap claims only the
+    // BRK immediates KuDroid itself planted, and anything it does not recognise goes to
+    // the previous handler rather than being reported as a KuDroid crash.
+    const int kSignals[] = {SIGILL, SIGBUS, SIGSEGV, SIGTRAP, SIGABRT};
+    for (int sig : kSignals) {
+        struct sigaction previous;
+        memset(&previous, 0, sizeof(previous));
+        if (sigaction(sig, &sa, &previous) != 0) continue;
+        const bool hadHandler =
+            (previous.sa_flags & SA_SIGINFO) ? previous.sa_sigaction != nullptr
+                                             : (previous.sa_handler != SIG_DFL &&
+                                                previous.sa_handler != SIG_IGN);
+        if (hadHandler) {
+            g_previousHandlers[sig] = previous;
+            fprintf(stderr,
+                    "[kudroid_core] signal %d already had a handler; chaining to it for"
+                    " faults KuDroid does not own\n",
+                    sig);
+        }
+    }
 
     // Android/bionic mc nh IGNORE SIGPIPE (write vo pipe/socket ng tr
     // EPIPE thay v git process). Game .so tin vo hnh vi ny — nu host gi
@@ -926,7 +1000,7 @@ extern "C" void kudroid_set_log_dir(const char* dir) {
             // The FIRST line of the main log is always the build stamp, so which
             // commit the running IPA was built from is visible without opening a
             // separate version file.
-            fprintf(afp, "[KuDroidCore] Build: %s\n", kudroid_build_stamp());
+            fprintf(afp, "[kudroid_core] Build: %s\n", kudroid_build_stamp());
             fclose(afp);
         }
 
@@ -1158,6 +1232,30 @@ extern "C" int csops(pid_t pid, unsigned int ops, void* useraddr, size_t usersiz
 // return 1 nu jit (memory c th execute) c v kh dng, ngc li return 0.
 extern "C" int kudroid_is_jit_enabled(void) {
 #if defined(__APPLE__)
+    // Ask the kernel directly: map a page and try to make it executable.
+    //
+    // This is the only test that answers the question actually being asked. The
+    // indirect checks below it are proxies — CS_DEBUGGED means a debugger is attached,
+    // a TrollStore directory means TrollStore is installed — and both can disagree
+    // with reality in either direction. Under LiveContainer they disagree in the way
+    // that matters most: the guest inherits LiveContainer's code-signing status, so
+    // what KuDroid's own entitlements say is irrelevant, and the /Applications and
+    // /var/mobile probes below cannot see anything through LiveContainer's sandbox.
+    //
+    // Cached, because it is asked repeatedly and the answer cannot change within a
+    // process: code-signing status is fixed at exec.
+    static const int probed = [] {
+        const size_t len = static_cast<size_t>(getpagesize());
+        void* page = ::mmap(nullptr, len, PROT_READ | PROT_WRITE,
+                            MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (page == MAP_FAILED) return -1;  // out of memory, not an answer
+        const int rc = ::mprotect(page, len, PROT_READ | PROT_EXEC);
+        ::munmap(page, len);
+        return rc == 0 ? 1 : 0;
+    }();
+    if (probed >= 0) return probed;
+
+    // The probe could not run. Fall back to the proxies.
     // 1. Kim tra CS_DEBUGGED (Trnh g error: AltStore, SideStore, Sideloadly, Xcode, StikDebug, Jitterbug)
     unsigned int flags = 0;
     if (csops(getpid(), CS_OPS_STATUS, &flags, sizeof(flags)) == 0) {
@@ -1714,7 +1812,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
         FILE* afp = fopen(aPath, "w");
         if (afp) {
             // Build stamp dng u tin ca log phin run APK mi.
-            fprintf(afp, "[KuDroidCore] Build: %s\n", kudroid_build_stamp());
+            fprintf(afp, "[kudroid_core] Build: %s\n", kudroid_build_stamp());
             fclose(afp);
         }
 
@@ -1842,7 +1940,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
             }
         }
 
-        const std::filesystem::path libDir = appDir / "lib/arm64-v8a";
+        const std::filesystem::path libDir = appDir / ("lib/" KUDROID_DEVICE_ABI);
         const std::filesystem::path assetsDir = appDir / "assets";
         kudroid_set_assets_dir(assetsDir.string().c_str());
         kudroid_set_native_lib_dir(libDir.string().c_str());
@@ -1850,11 +1948,34 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
         auto appendAndEcho = [&](const std::string& line) {
             log += line + "\n";
             std::fprintf(stderr, "%s\n", line.c_str());
-            kudroid_android_log_message(2, "KuDroidCore", line.c_str());
+            logCoreLine(2, line);
             mirrorCrash(log);
         };
         
         appendAndEcho("[kudroid_core] Scanning library directory: " + libDir.string());
+
+        // Guest .so files are mapped RW and then mprotect'd to add PROT_EXEC. Without
+        // JIT permission that mprotect fails, so no guest native code can run at all.
+        //
+        // Skip loading them entirely in that case rather than mapping each one and
+        // failing. Mapping is not free: libminecraftpe.so alone is 330 MB of dirty
+        // pages, and doing that for eight libraries only to discard them puts the
+        // process past jetsam's limit — the app then dies with SIGKILL and no crash
+        // log, which reads as a mysterious exit rather than as a missing entitlement.
+        //
+        // The Java side still runs. An app whose UI is Java reaches its Activity and
+        // can report the problem on screen, which is strictly more useful than dying.
+        const bool jitAvailable = kudroid_is_jit_enabled() != 0;
+        if (!jitAvailable) {
+            appendAndEcho("[kudroid_core] WARNING: no JIT permission (not debugged, no"
+                          " allow-jit entitlement). Guest .so files cannot be made"
+                          " executable, so native libraries will NOT be loaded.");
+            appendAndEcho("[kudroid_core]          Under LiveContainer, enable JIT."
+                          " Sideloaded: attach a debugger (StikDebug/SideStore) or"
+                          " install via TrollStore.");
+            appendAndEcho("[kudroid_core]          Continuing with Java only: an app"
+                          " whose UI is Java may still start.");
+        }
         
         if (!std::filesystem::exists(libDir)) {
             appendAndEcho("[kudroid_core] ERROR: Library directory does not exist: " + libDir.string());
@@ -1896,15 +2017,23 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
             }
 
             std::vector<std::string> soFiles;
-            for (const auto& entry : std::filesystem::directory_iterator(libDir)) {
-                if (entry.path().extension() == ".so") {
-                    soFiles.push_back(entry.path().string());
+            if (jitAvailable) {
+                for (const auto& entry : std::filesystem::directory_iterator(libDir)) {
+                    if (entry.path().extension() == ".so") {
+                        soFiles.push_back(entry.path().string());
+                    }
                 }
             }
-            
-            if (soFiles.empty()) {
+
+            if (soFiles.empty() && jitAvailable) {
                 appendAndEcho("[kudroid_core] WARNING: No .so files found in " + libDir.string());
-            } else {
+            }
+            // Not an `else`: everything below — the manifest parse, KuART launch and
+            // ActivityThread.main — has to run even when there are no native libraries
+            // to load. It used to sit in the else branch, so an app with no usable .so
+            // (no JIT permission, or a non-arm64 APK) silently never started its Java
+            // side either. The load loop below is a no-op on an empty list.
+            {
                 for (const auto& soPath : soFiles) {
                     appendAndEcho("[kudroid_core] Attempting to load: " + soPath);
                     if (!manager.loadRecursive(soPath.c_str())) {
@@ -1951,7 +2080,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                             bionic_init_main_thread_tls();
                             char msg[256];
                             snprintf(msg, sizeof(msg), "[kudroid_core] Invoking JNI_OnLoad in %s (System.loadLibrary)", filename.c_str());
-                            kudroid_android_log_message(4, "kudroid_core", msg);
+                            logCoreLine(4, msg);
                             std::fprintf(stderr, "%s\n", msg);
 
                             auto jni_onload = reinterpret_cast<jint (*)(JavaVM*, void*)>(sym);
@@ -1959,11 +2088,11 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                             const int guardRc = kudroid_call_jni_onload_guarded(jni_onload, jvm, &version);
                             if (guardRc == 0) {
                                 snprintf(msg, sizeof(msg), "[kudroid_core] JNI_OnLoad(%s) returned version: %d", filename.c_str(), version);
-                                kudroid_android_log_message(4, "kudroid_core", msg);
+                                logCoreLine(4, msg);
                                 std::fprintf(stderr, "%s\n", msg);
                             } else if (guardRc < 0) {
                                 snprintf(msg, sizeof(msg), "[kudroid_core] WARNING: Native exception in JNI_OnLoad for %s", filename.c_str());
-                                kudroid_android_log_message(5, "kudroid_core", msg);
+                                logCoreLine(5, msg);
                                 std::fprintf(stderr, "%s\n", msg);
                                 const std::string report =
                                     describeJniGuardFault(filename, guardRc);
@@ -1971,7 +2100,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                 appendCrashLogFile(report);
                             } else {
                                 snprintf(msg, sizeof(msg), "[kudroid_core] WARNING: JNI_OnLoad in %s raised fatal signal %d", filename.c_str(), guardRc);
-                                kudroid_android_log_message(5, "kudroid_core", msg);
+                                logCoreLine(5, msg);
                                 std::fprintf(stderr, "%s\n", msg);
                                 // The guard leaves the crash-log path unreached, so
                                 // report the captured state here. Without it a
@@ -2006,7 +2135,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                 snprintf(msg, sizeof(msg),
                                          "[kudroid_core] JNI_OnLoad(%s) left a pending Java exception; cleared",
                                          filename.c_str());
-                                kudroid_android_log_message(5, "kudroid_core", msg);
+                                logCoreLine(5, msg);
                                 // The description carries a multi-line stack trace,
                                 // so it goes straight to stderr rather than through
                                 // the fixed-size log buffer that would truncate it.
@@ -2044,7 +2173,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                             nullptr, // clazz
                             s_internalDataPath.c_str(),
                             s_externalDataPath.c_str(),
-                            29, // sdkVersion (Android 10)
+                            KUDROID_SDK_INT, // must match Build.VERSION.SDK_INT
                             nullptr, // instance
                             nullptr, // assetManager
                             s_obbPath.c_str()
@@ -2234,11 +2363,27 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                 // +100 name contains "Activity"
                                 // +50 package matches pkgName (from manifest/app_info)
                                 // +depth bonus: shorter package (app root) is more likely the main entry point.
-                                static const char* kSdkActivityHints[] = {
-                                    "braze", "facebook", "firebase", "google", "admob",
-                                    "unity3d", "appsflyer", "adjust", "amplitude",
-                                    "mixpanel", "crashlytics", "playfab", "microsoft",
-                                    "zarchiver" /* handled specifically above */
+                                //
+                                // Prefixes, not substrings, and only packages that
+                                // genuinely belong to an embedded SDK.
+                                //
+                                // A substring test rejects any class whose name merely
+                                // CONTAINS one of these, wherever it appears: an app at
+                                // com.google.* lost 1000 points for its own launcher,
+                                // and so did every app with "adjust" or "amplitude"
+                                // anywhere in a class name. Two entries were not SDKs at
+                                // all — "zarchiver" is an app (ru.zdevs.zarchiver), and
+                                // "unity3d" covers com.unity3d.player.UnityPlayerActivity
+                                // which IS the launcher of essentially every Unity game.
+                                static const char* kSdkActivityPrefixes[] = {
+                                    "com/braze/", "com/appboy/", "com/facebook/",
+                                    "com/firebase/", "com/google/firebase/",
+                                    "com/google/android/gms/", "com/google/ads/",
+                                    "com/google/android/play/", "com/appsflyer/",
+                                    "com/adjust/sdk/", "com/amplitude/", "com/mixpanel/",
+                                    "com/crashlytics/", "io/sentry/", "com/playfab/",
+                                    "com/microsoft/appcenter/", "com/android/billingclient/",
+                                    "com/onesignal/", "com/urbanairship/",
                                 };
                                 // Calculate score ONCE instead of inside loop for every
                                 // class (large JARs can have 10k+ classes).
@@ -2249,9 +2394,18 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                     for (char& c : pkgPrefix) if (c == '.') c = '/';
                                     pkgPrefix += '/';
                                 }
-                                auto isSdkOwned = [](const std::string& cls) {
-                                    for (const char* hint : kSdkActivityHints) {
-                                        if (cls.find(hint) != std::string::npos) return true;
+                                // A class inside the app's OWN package is never an
+                                // embedded SDK, whatever it is called. This is what
+                                // keeps an app published under com.google.* — or one
+                                // that vendors an SDK into its own namespace — from
+                                // blacklisting its own launcher.
+                                auto isSdkOwned = [&pkgPrefix](const std::string& cls) {
+                                    if (!pkgPrefix.empty() &&
+                                        cls.compare(0, pkgPrefix.size(), pkgPrefix) == 0) {
+                                        return false;
+                                    }
+                                    for (const char* prefix : kSdkActivityPrefixes) {
+                                        if (cls.rfind(prefix, 0) == 0) return true;
                                     }
                                     return false;
                                 };
@@ -3455,7 +3609,7 @@ extern "C" const char* kudroid_load_apk(const char* apkPath) {
     // Process-lifetime (see globalLibraryManager) — JNI_OnLoad spawns guest render threads;
     // library mappings must persist after this function returns.
     kudroid::LibraryManager& libManager = globalLibraryManager();
-    std::string libDir = targetDir + "/lib/arm64-v8a";
+    std::string libDir = targetDir + "/lib/" KUDROID_DEVICE_ABI;
 
     // ── KuART ──────────────────────────────────────────────────────────────
     // Load embedded framework.dex + APK classes*.dex.

@@ -1,4 +1,5 @@
 #include "kudroid/platform/GraphicsShim.h"
+#include "kudroid/platform/BundledFramework.h"
 #include "kudroid/Log.h"
 #include <jni.h>
 #include <dlfcn.h>
@@ -347,7 +348,8 @@ extern "C" void* bionic_eglGetProcAddress(const char* procname) {
     // Resolve from the ANGLE handle directly (loaded RTLD_LOCAL).
     static void* egl_handle = nullptr;
     if (!egl_handle) {
-        egl_handle = ::dlopen("@executable_path/Frameworks/libEGL.framework/libEGL", RTLD_NOW | RTLD_LOCAL);
+        egl_handle = dlopen_bundled_framework("libEGL.framework/libEGL",
+                                              RTLD_NOW | RTLD_LOCAL);
     }
     if (egl_handle) {
         auto host_func = (PFN_eglGetProcAddress) ::dlsym(egl_handle, "eglGetProcAddress");
@@ -374,10 +376,8 @@ void* get_gl_func(const char* name) {
     if (!name) return nullptr;
     static void* gl_handle = nullptr;
     if (!gl_handle) {
-        gl_handle = ::dlopen("@executable_path/Frameworks/libGLESv2.framework/libGLESv2", RTLD_NOW | RTLD_GLOBAL);
-        if (!gl_handle) {
-            gl_handle = ::dlopen("Frameworks/libGLESv2.framework/libGLESv2", RTLD_NOW | RTLD_GLOBAL);
-        }
+        gl_handle = dlopen_bundled_framework("libGLESv2.framework/libGLESv2",
+                                            RTLD_NOW | RTLD_GLOBAL);
     }
     if (gl_handle) {
         void* func = ::dlsym(gl_handle, name);
@@ -396,18 +396,8 @@ void* get_egl_func(const char* name) {
     if (!name) return nullptr;
     static void* egl_handle = nullptr;
     if (!egl_handle) {
-        egl_handle = ::dlopen("@executable_path/Frameworks/libEGL.framework/libEGL", RTLD_NOW | RTLD_GLOBAL);
-        if (!egl_handle) {
-            KLOG(kError, "KuDroidGPU", "FATAL: dlopen libEGL failed: %s", dlerror());
-            egl_handle = ::dlopen("Frameworks/libEGL.framework/libEGL", RTLD_NOW | RTLD_GLOBAL);
-            if (!egl_handle) {
-                KLOG(kError, "KuDroidGPU", "FATAL: alternative dlopen also failed: %s", dlerror());
-            } else {
-                KLOG(kInfo, "KuDroidGPU", "SUCCESS: alternative dlopen loaded libEGL");
-            }
-        } else {
-            KLOG(kInfo, "KuDroidGPU", "SUCCESS: dlopen loaded libEGL");
-        }
+        egl_handle = dlopen_bundled_framework("libEGL.framework/libEGL",
+                                              RTLD_NOW | RTLD_GLOBAL);
     }
     if (egl_handle) {
         void* func = ::dlsym(egl_handle, name);
@@ -657,13 +647,8 @@ extern "C" VkResult bionic_vkEnumerateInstanceExtensionProperties(const char* pL
 static void* get_mvk_handle() {
     static void* mvk = nullptr;
     if (!mvk) {
-        mvk = ::dlopen("@executable_path/Frameworks/MoltenVK.framework/MoltenVK", RTLD_NOW | RTLD_GLOBAL);
-        if (!mvk) {
-            mvk = ::dlopen("Frameworks/MoltenVK.framework/MoltenVK", RTLD_NOW | RTLD_GLOBAL);
-        }
-        if (!mvk) {
-            mvk = ::dlopen("MoltenVK.framework/MoltenVK", RTLD_NOW | RTLD_GLOBAL);
-        }
+        mvk = dlopen_bundled_framework("MoltenVK.framework/MoltenVK",
+                                       RTLD_NOW | RTLD_GLOBAL);
     }
     return mvk;
 }

@@ -33,6 +33,15 @@ public:
         if (vreg < registers_.size()) registers_[vreg] = v;
     }
 
+    // The register array itself, for compiled code.
+    //
+    // The JIT addresses virtual registers as offsets from this pointer rather than
+    // keeping them in machine registers, which is what lets compiled code and the
+    // interpreter share a frame: either can run at any instruction boundary and see the
+    // state the other left.
+    DexValue* registers() { return registers_.data(); }
+    const DexValue* registers() const { return registers_.data(); }
+
     int32_t GetInt(uint32_t vreg) const { return Get(vreg).i; }
     int64_t GetLong(uint32_t vreg) const { return Get(vreg).j; }
     float GetFloat(uint32_t vreg) const { return Get(vreg).f; }

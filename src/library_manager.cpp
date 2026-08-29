@@ -1,5 +1,6 @@
 #include "kudroid/elf_loader.hpp"
 #include "kudroid/BionicShim.h"
+#include "kudroid/DeviceProfile.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -191,6 +192,16 @@ bool LibraryManager::loadRecursive(const std::string& path) {
     }
     
     current->registerEhFrame();
+
+    // The ELF file is not needed once the image is mapped, relocated and indexed.
+    //
+    // Done BEFORE executeInit(), because a static initialiser can allocate heavily and
+    // this is the moment the footprint is highest: for libminecraftpe.so the mapping is
+    // 333 MB and the loaded image another 330 MB. Holding both across every library's
+    // initialisers put the process past 700 MB and jetsam sent SIGKILL before the first
+    // frame — a kill with no crash log, which is why it read as a mysterious exit.
+    current->releaseFileMapping();
+
     current->executeInit();
     
     std::fprintf(stderr, "[kudroid_core] Loaded ELF successfully: %s\n", key.c_str());
@@ -347,7 +358,7 @@ bool extract_arm64_libs_from_apk(const char* apkPath, const char* outputDirector
                 break;
             }
             const std::string entry(name);
-            constexpr const char* prefix = "lib/arm64-v8a/";
+            constexpr const char* prefix = "lib/" KUDROID_DEVICE_ABI "/";
             if (entry.rfind(prefix, 0) != 0 || entry.size() < 3 ||
                 entry.substr(entry.size() - 3) != ".so") continue;
             if (unzOpenCurrentFile(archive) != UNZ_OK) {

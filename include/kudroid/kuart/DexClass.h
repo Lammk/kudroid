@@ -61,6 +61,26 @@ struct DexMethod {
     // Linked native function pointer (RegisterNatives or dlsym).
     void* native_fn = nullptr;
 
+    // ── JIT state ──
+    //
+    // Kept on the method rather than in a side table because it is read on every call:
+    // a hash lookup per invoke would cost more than the counter saves. Plain integers,
+    // not atomics — a race loses or double-counts a call, which delays or duplicates one
+    // compile attempt and cannot corrupt anything. Making them atomic would put a memory
+    // barrier on the hottest path in the interpreter to protect a heuristic.
+    uint32_t call_count = 0;
+
+    // Compiled entry point, or null. `jit_state` distinguishes "not tried yet" from
+    // "tried and refused", so a method the compiler declined is not re-attempted on
+    // every call — the refusal is a property of the bytecode and will not change.
+    void* jit_code = nullptr;
+    enum class JitState : uint8_t {
+        kNotCompiled = 0,
+        kCompiled = 1,
+        kRefused = 2,
+    };
+    JitState jit_state = JitState::kNotCompiled;
+
     bool IsStatic() const { return (access_flags & art::kAccStatic) != 0; }
     bool IsNative() const { return (access_flags & art::kAccNative) != 0; }
     bool IsAbstract() const { return (access_flags & art::kAccAbstract) != 0; }

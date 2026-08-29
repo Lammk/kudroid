@@ -47,6 +47,7 @@ add_library(kudroid_core STATIC
     src/platform/GraphicsShim.cpp
     src/abi/SyscallShim.cpp
     src/platform/AssetShim.cpp
+    src/platform/BundledFramework.cpp
     src/platform/JavaCanvasRenderer.cpp
     src/platform/MemoryInfo.cpp
     src/kudroid_bridge.cpp
@@ -63,6 +64,9 @@ add_library(kudroid_core STATIC
     src/kuart/jni_trampoline.S
     src/kuart/DexReflect.cpp
     src/kuart/LibCore.cpp
+    src/kuart/JitCache.cpp
+    src/kuart/JitCompiler.cpp
+    src/kuart/OatFile.cpp
     src/kuart/VmLock.cpp
     src/framework/PermissionManager.cpp
     src/debug/Log.cpp
@@ -219,6 +223,11 @@ else()
     # test_kuart_missing_field an unresolvable field must name itself, not say "iput"
     # test_kuart_thread_state  siglongjmp out of the interpreter: no stale frames, no
     #                          held VM lock, no leaked depth; untrusted receiver classes
+    # test_kuart_jit           the arm64 encoder against GNU as byte for byte, the
+    #                          executable-memory cache (including the no-JIT path that
+    #                          stock iOS and LiveContainer JITLess take), and the OAT
+    #                          profile's round trip and staleness checks.
+    #                          scripts/test-jit-arm64.sh runs the generated code.
     if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/test_art_dex.cpp")
         add_executable(test_art_dex kuart-tests/test_art_dex.cpp)
         target_link_libraries(test_art_dex PRIVATE art_dex ZLIB::ZLIB)
@@ -239,6 +248,7 @@ else()
         test_kuart_framework
         test_kuart_missing_field
         test_kuart_thread_state
+        test_kuart_jit
     )
         if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/${kuart_test}.cpp")
             add_executable(${kuart_test} kuart-tests/${kuart_test}.cpp)

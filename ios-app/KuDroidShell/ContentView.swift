@@ -339,12 +339,9 @@ struct AppsView: View {
             s = String(s.dropLast(4))
         }
 
-        let lower = s.lowercased()
-        if lower.contains("minecraft") || lower.contains("mojang") { return "Minecraft" }
-        if lower.contains("ultrakill") { return "ULTRAKILL" }
-        if lower.contains("discord") { return "Discord" }
-        if lower.contains("rolling") && lower.contains("sky") { return "Rolling Sky" }
-        if lower.contains("triangle") { return "Triangle Test" }
+        // The cleanup below derives a readable name from any package or file name. A
+        // table mapping four specific apps to their branded spelling used to sit here,
+        // which mislabelled anything whose name merely contained one of those words.
 
         // 3. Separate common junk prefixes/suffixes in mod/port APK file names
         let junkWords: Set<String> = [
@@ -975,7 +972,7 @@ func activateAudioSession() {
     try? session.setActive(true)
 }
 
-/// Read CFBundleShortVersionString from Info.plist (0.6.5).
+/// Read CFBundleShortVersionString from Info.plist (0.8.0).
 func appVersion() -> String {
     if let v = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String {
         return v
@@ -984,6 +981,14 @@ func appVersion() -> String {
 }
 
 func setupLogDir() {
+    // Resolved through the process's container, never hardcoded.
+    //
+    // This is what makes KuDroid work unchanged inside LiveContainer, which runs a
+    // guest app as a dylib in its own process and rewrites HOME/CFFIXED_USER_HOME to
+    // a nested per-guest container before loading it. `urls(for: .documentDirectory)`
+    // goes through those variables, so it yields the guest's own Documents in both
+    // deployments — and every guest path (android_root, the extracted APK, the .so
+    // files) hangs off this one value.
     if let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
         kudroid_set_log_dir(docs.path)
         kudroid_set_documents_dir(docs.path)

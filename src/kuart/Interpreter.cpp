@@ -1,6 +1,7 @@
 #include "kudroid/kuart/Interpreter.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -306,6 +307,64 @@ std::string Interpreter::DescribeFieldRef(const DexMethod* context, uint32_t fie
     return out;
 }
 
+// Human-readable "class.method(sig)" for a method reference, used so an
+// unresolvable one names itself instead of printing a DEX index.
+std::string Interpreter::DescribeMethodRef(const DexMethod* context,
+                                          uint32_t method_idx) const {
+    if (context == nullptr || context->dex_file == nullptr) {
+        return "method index " + std::to_string(method_idx);
+    }
+    const art::DexFile& dex_file = *context->dex_file;
+    const art::dex::MethodId& method_id = dex_file.GetMethodId(method_idx);
+    const char* cls =
+        dex_file.StringByTypeIdx(art::dex::TypeIndex(method_id.class_idx_.index_));
+    const char* name = dex_file.GetMethodName(method_id);
+    const std::string signature = dex_file.GetMethodSignature(method_id).ToString();
+
+    std::string out = DescriptorToDotted(cls);
+    out += ".";
+    out += name != nullptr ? name : "?";
+    out += signature;
+    return out;
+}
+
+// An unresolvable method reference, named in classes.log so it can be added.
+//
+// The auto-stub path already logs boot-classpath methods it stubs. This is the other
+// half: references that cannot be stubbed and therefore reach the caller as a
+// NoSuchMethodError. GameActivity.onCreate hit one and the only record was the
+// exception text, which carried an index rather than a name.
+void Interpreter::ReportUnresolvableMethod(const DexMethod* context, uint32_t method_idx) {
+    if (context == nullptr || context->dex_file == nullptr) return;
+    const art::DexFile& dex_file = *context->dex_file;
+    const art::dex::MethodId& method_id = dex_file.GetMethodId(method_idx);
+    const char* cls =
+        dex_file.StringByTypeIdx(art::dex::TypeIndex(method_id.class_idx_.index_));
+    const char* name = dex_file.GetMethodName(method_id);
+    const std::string signature = dex_file.GetMethodSignature(method_id).ToString();
+
+    // Whether the CLASS resolved decides what has to be done about it, so say which
+    // case this is. A missing class needs the class written; a present class missing
+    // one method needs only that method.
+    DexClass* klass = linker_ != nullptr ? linker_->FindClass(cls) : nullptr;
+    std::string detail = std::string(cls != nullptr ? cls : "?") + "->" +
+                         (name != nullptr ? name : "?") + signature;
+    if (klass == nullptr) {
+        detail += " (declaring class did not load)";
+    } else if (klass->is_stub) {
+        detail += " (declaring class is an auto-stub)";
+    }
+
+    static std::mutex s_mtx;
+    static std::set<std::string> s_reported;
+    {
+        std::lock_guard<std::mutex> lock(s_mtx);
+        if (!s_reported.insert(detail).second) return;
+    }
+    std::fprintf(stderr, "[KuART][MISSING-METHOD] ⚠ UNRESOLVABLE: %s\n", detail.c_str());
+    DexClassLinker::LogMissingMember("MISSING_FRAMEWORK_METHOD", detail);
+}
+
 DexMethod* Interpreter::ResolveMethod(const DexMethod* context, uint32_t method_idx) {
     if (context == nullptr || context->dex_file == nullptr) return nullptr;
     const art::DexFile& dex_file = *context->dex_file;
@@ -374,8 +433,13 @@ bool Interpreter::InvokeMethod(DexFrame* frame, const art::Instruction* inst, bo
     const uint32_t method_idx = is_range ? inst->VRegB_3rc() : inst->VRegB_35c();
     DexMethod* target = ResolveMethod(frame->method(), method_idx);
     if (target == nullptr) {
+        // Name the method. "failed to resolve method index 45364" is meaningful only
+        // inside one DEX file: GameActivity.onCreate threw it and the message named
+        // neither the class nor the method, so there was nothing to add to the
+        // framework without disassembling the APK first.
+        ReportUnresolvableMethod(frame->method(), method_idx);
         ThrowException("Ljava/lang/NoSuchMethodError;",
-                       "failed to resolve method index " + std::to_string(method_idx));
+                       DescribeMethodRef(frame->method(), method_idx));
         return false;
     }
 
@@ -723,9 +787,126 @@ bool Interpreter::EnsureInitialized(DexClass* klass) {
     return true;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// JIT dispatch
+// ─────────────────────────────────────────────────────────────────────────────
+
+namespace {
+std::atomic<uint64_t> g_jit_compiled_methods{0};
+std::atomic<uint64_t> g_jit_entries{0};
+}  // namespace
+
+uint64_t Interpreter::jit_compiled_methods() { return g_jit_compiled_methods.load(); }
+uint64_t Interpreter::jit_entries() { return g_jit_entries.load(); }
+
+bool Interpreter::TryJit(DexFrame* frame, DexValue* out, uint32_t* resume_pc) {
+    *resume_pc = 0;
+    auto* method = const_cast<DexMethod*>(frame->method());
+    if (method == nullptr) return false;
+
+    // Nothing to do when the platform will not let us execute what we write. Checked
+    // first and cached inside JitCache, so this costs one load on the common path.
+    if (!JitCompiler::IsAvailable()) return false;
+
+    if (method->jit_state == DexMethod::JitState::kRefused) return false;
+
+    if (method->jit_state == DexMethod::JitState::kNotCompiled) {
+        // A profile from the previous run turns a hot method into a first-call compile.
+        // Without it, kJitThreshold calls must be interpreted before the counter trips —
+        // a cost paid again on every launch, which is precisely what an ahead-of-time
+        // cache exists to remove.
+        bool compileNow = false;
+        const uint32_t checksum =
+            method->dex_file != nullptr ? method->dex_file->GetLocationChecksum() : 0;
+        if (oat_profile_ != nullptr && checksum != 0) {
+            switch (oat_profile_->Lookup(checksum, method->dex_method_index)) {
+                case OatFile::MethodState::kHot:
+                    compileNow = true;
+                    break;
+                case OatFile::MethodState::kRefused:
+                    // The compiler declined this bytecode last run and the bytecode has
+                    // not changed (the checksum matched), so it will decline again.
+                    method->jit_state = DexMethod::JitState::kRefused;
+                    return false;
+                case OatFile::MethodState::kUnknown:
+                    break;
+            }
+        }
+
+        if (!compileNow) {
+            // Saturate rather than wrap: a method called four billion times must not
+            // fall back below the threshold and be recompiled.
+            if (method->call_count < kJitThreshold) {
+                ++method->call_count;
+                return false;
+            }
+            compileNow = true;
+        }
+
+        std::string reason;
+        JitEntry entry = JitCompiler::Compile(method, &reason);
+        if (entry == nullptr) {
+            method->jit_state = DexMethod::JitState::kRefused;
+            if (oat_profile_ != nullptr && checksum != 0) {
+                oat_profile_->Note(checksum, method->dex_method_index,
+                                   OatFile::MethodState::kRefused);
+            }
+            // Once per method, and only for methods hot enough to be worth compiling:
+            // this names the opcode to implement next, which is the only actionable
+            // output the JIT produces.
+            std::fprintf(stderr, "[KuART][JIT] not compiled: %s.%s (%s)\n",
+                         method->declaring_class != nullptr
+                             ? method->declaring_class->PrettyName().c_str()
+                             : "?",
+                         method->name != nullptr ? method->name : "?", reason.c_str());
+            return false;
+        }
+        method->jit_code = reinterpret_cast<void*>(entry);
+        method->jit_state = DexMethod::JitState::kCompiled;
+        g_jit_compiled_methods.fetch_add(1);
+        if (oat_profile_ != nullptr && checksum != 0) {
+            oat_profile_->Note(checksum, method->dex_method_index,
+                               OatFile::MethodState::kHot);
+        }
+        std::fprintf(stderr, "[KuART][JIT] compiled %s.%s\n",
+                     method->declaring_class != nullptr
+                         ? method->declaring_class->PrettyName().c_str()
+                         : "?",
+                     method->name != nullptr ? method->name : "?");
+    }
+
+    if (method->jit_code == nullptr) return false;
+
+    // Compiled code reads and writes the frame's register array directly, so the frame
+    // remains authoritative at every instruction boundary. That is what makes the bail
+    // below correct: the interpreter can pick up at any dex_pc and see exactly the state
+    // the compiled code left.
+    auto entry = reinterpret_cast<JitEntry>(method->jit_code);
+    DexValue result;
+    uint32_t bail_pc = 0;
+    g_jit_entries.fetch_add(1);
+    const int32_t rc = entry(frame->registers(), &result, &bail_pc);
+    if (rc >= 0) {
+        *out = result;
+        return true;
+    }
+    *resume_pc = bail_pc;
+    return false;
+}
+
 DexValue Interpreter::ExecuteFrame(DexFrame* frame) {
     const DexMethod* method = frame->method();
     art::CodeItemDataAccessor accessor(*method->dex_file, method->code_item);
+
+    // Compiled code first, if this method has any. A bail sets the dex_pc the
+    // interpreter should continue from — compiled code and the interpreter share the
+    // frame's register array, so resuming mid-method needs no state transfer.
+    {
+        DexValue jitResult;
+        uint32_t resume_pc = 0;
+        if (TryJit(frame, &jitResult, &resume_pc)) return jitResult;
+        if (resume_pc != 0) frame->set_dex_pc(resume_pc);
+    }
 
     for (;;) {
         const DexValue result = RunBytecode(frame, accessor);

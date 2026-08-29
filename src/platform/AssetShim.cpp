@@ -1,5 +1,6 @@
 #include "kudroid/platform/AssetShim.h"
 #include "kudroid/platform/ShimDefs.h"
+#include "kudroid/DeviceProfile.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -279,7 +280,7 @@ static void fill_current_config(AConfigurationImpl* c) {
     c->screenWidthDp = static_cast<int32_t>(w / scale);
     c->screenHeightDp = static_cast<int32_t>(h / scale);
     c->orientation = (w > h) ? 2 : 1;                        // LAND : PORT
-    c->sdkVersion = 30;
+    c->sdkVersion = KUDROID_SDK_INT;
 }
 
 extern "C" void* bionic_AConfiguration_new(void) {
@@ -332,7 +333,7 @@ extern "C" int32_t bionic_AConfiguration_getScreenHeightDp(void* config) {
 
 extern "C" int32_t bionic_AConfiguration_getSdkVersion(void* config) {
     auto* c = static_cast<AConfigurationImpl*>(config);
-    return c ? c->sdkVersion : 30;
+    return c ? c->sdkVersion : KUDROID_SDK_INT;
 }
 
 extern "C" void bionic_AConfiguration_copy(void* dest, void* src) {

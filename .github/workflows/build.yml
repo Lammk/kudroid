@@ -46,7 +46,7 @@ jobs:
                      test_kuart_jni test_kuart_exc test_kuart_reflect test_kuart_libcore \
                      test_kuart_filled_array test_kuart_jni_float test_kuart_stub \
                      test_kuart_framework test_kuart_missing_field \
-                     test_kuart_thread_state \
+                     test_kuart_thread_state test_kuart_jit \
                      test_manifest_parse test_manifest_text test_memory_info
 
       - name: Run KuART tests
@@ -57,7 +57,7 @@ jobs:
                    test_kuart_jni test_kuart_exc test_kuart_reflect test_kuart_libcore \
                    test_kuart_filled_array test_kuart_jni_float test_kuart_stub \
                    test_kuart_framework test_kuart_missing_field \
-                   test_kuart_thread_state \
+                   test_kuart_thread_state test_kuart_jit \
                    test_manifest_parse test_manifest_text test_memory_info; do
             echo "──────── $t ────────"
             if ./$t; then echo "PASS $t"; else echo "FAIL $t"; fail=1; fi
@@ -69,6 +69,12 @@ jobs:
       # the cross toolchain is missing.
       - name: Verify AAPCS64 JNI trampoline (arm64 under qemu)
         run: ./scripts/test-trampoline-arm64.sh
+
+      # The golden-byte test above proves the JIT encoder matches GNU as; this runs the
+      # generated code so a sequence that is validly encoded but computes the wrong
+      # value is caught too. Skips itself cleanly without the cross toolchain.
+      - name: Execute JIT-generated code (arm64 under qemu)
+        run: ./scripts/test-jit-arm64.sh
 
   build-linux:
     runs-on: ubuntu-latest

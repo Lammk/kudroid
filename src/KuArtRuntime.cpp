@@ -19,6 +19,7 @@
 #include "kudroid/kuart/DexReflect.h"
 #include "kudroid/kuart/Interpreter.h"
 #include "kudroid/kuart/LibCore.h"
+#include "kudroid/kuart/OatFile.h"
 
 namespace {
 
@@ -45,6 +46,12 @@ struct Runtime {
     // Descriptor for all classes in the app's DEX (excluding embedded frameworks) —
     // keep it so kuart_list_app_classes doesn't have to be rescanned.
     std::vector<std::string> app_classes;
+
+    // Which methods the previous run found hot, and which the JIT refused. Loaded at
+    // init and written back at shutdown, so a second launch compiles a hot loop on its
+    // first call instead of interpreting it to the threshold again.
+    kudroid::kuart::OatFile oat;
+    std::string oat_path;
 
     bool ready = false;
     std::string last_error;
@@ -100,15 +107,34 @@ bool ReadFile(const std::filesystem::path& path, std::vector<uint8_t>* out) {
 }
 
 // Class belongs to the framework/SDK, not the app's code. Used to filter the list
-// candidate Activity — same prefix used by the old Avian line.
+// of candidate Activities.
+//
+// Only packages that cannot possibly own an app's launcher are listed. This is a
+// stricter bar than it looks: a class excluded here never reaches the scoring pass at
+// all, so it can never be chosen even as a last resort. The list used to carry
+// "Lcom/unity3d/", which owns com.unity3d.player.UnityPlayerActivity — the declared
+// launcher of essentially every Unity game — and a blanket "Lorg/", which removes
+// every app published under org.* (org.videolan.vlc, org.telegram.messenger). Both
+// made the DEX-scan fallback find zero candidates for whole categories of app.
+//
+// Third-party SDK packages are deliberately NOT excluded here. They are handled by
+// the scoring pass in kudroid_bridge.cpp, which can rank them last while still
+// keeping them as a fallback — a soft penalty is right for "probably not the
+// launcher", whereas removal is only right for "cannot be app code".
 bool IsSystemOrSdkClass(const std::string& descriptor) {
     static const char* kPrefixes[] = {
-        "Landroid/", "Landroidx/", "Ljava/", "Ljavax/", "Ljunit/", "Lkotlin/", "Lkotlinx/",
-        "Lorg/", "Lcom/google/", "Lcom/android/", "Lcom/braze/", "Lcom/appboy/",
-        "Lcom/facebook/", "Lcom/firebase/", "Lcom/crashlytics/", "Lcom/unity3d/",
-        "Lcom/appsflyer/", "Lcom/adjust/", "Lcom/amplitude/", "Lcom/mixpanel/",
-        "Lcom/microsoft/", "Lcom/playfab/", "Lcom/squareup/", "Lcom/bumptech/",
+        // The boot classpath. An app cannot declare classes in these.
+        "Landroid/", "Landroidx/", "Ljava/", "Ljavax/", "Ldalvik/", "Llibcore/",
+        "Lsun/", "Lcom/android/",
+        // Language runtimes and test frameworks: never an entry point.
+        "Lkotlin/", "Lkotlinx/", "Ljunit/", "Lorg/junit/", "Lorg/jetbrains/",
+        // Google's own libraries. Note this does NOT include "Lcom/google/" as a
+        // whole, because apps are published under com.google.* too.
+        "Lcom/google/android/gms/", "Lcom/google/firebase/", "Lcom/google/common/",
+        "Lcom/google/gson/", "Lcom/google/protobuf/",
+        // Widely embedded libraries with no launcher of their own.
         "Ldagger/", "Lio/reactivex/", "Lretrofit2/", "Lokhttp3/", "Lokio/",
+        "Lorg/apache/", "Lorg/w3c/", "Lorg/xml/", "Lorg/xmlpull/", "Lorg/json/",
     };
     for (const char* p : kPrefixes) {
         if (descriptor.rfind(p, 0) == 0) return true;
@@ -282,6 +308,16 @@ extern "C" int kuart_init(const char* app_dir) {
                                                rt->jni.get());
     if (g_symbol_lookup != nullptr) rt->jni->set_symbol_lookup(g_symbol_lookup);
 
+    // The JIT profile lives beside the app's DEX, so it is discarded with the app and
+    // cannot be applied to a different one. Absent on first run, which is not an error.
+    if (app_dir != nullptr && app_dir[0] != '\0') {
+        rt->oat_path = (std::filesystem::path(app_dir) / "kuart.oat").string();
+        if (rt->oat.Load(rt->oat_path)) {
+            Log("JIT profile: %zu methods from the previous run", rt->oat.size());
+        }
+        rt->interpreter->set_oat_profile(&rt->oat);
+    }
+
     rt->ready = true;
     g_rt = rt.release();
     g_current_app_dir = requested_dir;
@@ -292,6 +328,18 @@ extern "C" int kuart_init(const char* app_dir) {
 
 extern "C" void kuart_shutdown(void) {
     std::lock_guard<std::mutex> lock(g_mtx);
+    if (g_rt != nullptr && !g_rt->oat_path.empty() && !g_rt->oat.empty()) {
+        // Save what this run learned. A failure is not worth reporting as an error: the
+        // consequence is a slower start next time, not a broken one.
+        if (g_rt->oat.Save(g_rt->oat_path)) {
+            Log("JIT profile saved: %zu methods (%llu compiled, %llu entries this run)",
+                g_rt->oat.size(),
+                static_cast<unsigned long long>(
+                    kudroid::kuart::Interpreter::jit_compiled_methods()),
+                static_cast<unsigned long long>(
+                    kudroid::kuart::Interpreter::jit_entries()));
+        }
+    }
     delete g_rt;
     g_rt = nullptr;
     g_current_app_dir.clear();

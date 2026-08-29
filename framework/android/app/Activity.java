@@ -268,49 +268,29 @@ public class Activity extends ContextThemeWrapper {
     private android.view.View mContentView;
 
     /**
-     * set the content view from a layout resource.
+     * Set the content view from a layout resource.
+     *
+     * KuDroid cannot inflate XML layouts yet — {@link android.view.LayoutInflater} has
+     * no parser, so there is no way to turn a resource id into a view tree. Nothing is
+     * drawn, and {@code findViewById} keeps returning null exactly as it did before the
+     * call.
+     *
+     * This used to build a hardcoded file-browser screen ("ZArchiver - Storage /sdcard"
+     * and a list of invented folders). That is the single most-called method in any
+     * Java-UI app's onCreate, so EVERY app rendered someone else's mock UI instead of
+     * its own — and worse, it looked like the layout system worked, so the real gap
+     * stayed hidden behind a plausible-looking screen.
+     *
+     * Reporting it once per resource id is the useful behaviour: the id is what a
+     * developer needs to find the layout, and repeating it every frame would bury the
+     * rest of the log. Apps that build their views in code go through
+     * {@link #setContentView(android.view.View)} and are unaffected.
      */
     public void setContentView(int layoutResID) {
-        android.widget.LinearLayout root = new android.widget.LinearLayout(this);
-        root.setBackgroundColor(0xFF181818);
-        
-        android.widget.TextView title = new android.widget.TextView(this);
-        title.setText("📁 ZArchiver - Storage /sdcard");
-        title.setTextColor(0xFF00E676);
-        title.setTextSize(20.0f);
-        root.addView(title);
-
-        android.widget.TextView sep = new android.widget.TextView(this);
-        sep.setText("──────────────────────────────────────────");
-        sep.setTextColor(0xFF424242);
-        root.addView(sep);
-
-        String[] sampleItems = new String[] {
-            "📂 Android",
-            "📂 DCIM",
-            "📂 Download",
-            "📂 Documents",
-            "📂 Music",
-            "📂 Pictures",
-            "📄 ZArchiver_Archive.7z (14.2 MB)",
-            "📄 backup_data.zip (128.5 MB)",
-            "📄 GameROM_Patch.rar (4.8 MB)"
-        };
-
-        for (String item : sampleItems) {
-            android.widget.TextView tv = new android.widget.TextView(this);
-            tv.setText(item);
-            if (item.startsWith("📂")) {
-                tv.setTextColor(0xFFFFCA28);
-            } else {
-                tv.setTextColor(0xFF81D4FA);
-            }
-            tv.setTextSize(16.0f);
-            root.addView(tv);
-        }
-
-        mContentView = root;
-        renderViewHierarchy();
+        android.util.Log.w("Activity",
+                "setContentView(0x" + Integer.toHexString(layoutResID) +
+                ") ignored: XML layout inflation is not implemented, so no view tree" +
+                " was created. Views built in code still work.");
     }
 
     /**

@@ -16,6 +16,8 @@
 #include "kudroid/kuart/DexClass.h"
 #include "kudroid/kuart/DexFrame.h"
 #include "kudroid/kuart/DexValue.h"
+#include "kudroid/kuart/JitCompiler.h"
+#include "kudroid/kuart/OatFile.h"
 
 namespace kudroid {
 namespace kuart {
@@ -55,6 +57,32 @@ public:
 
     // Run <clinit> if class is not yet initialized.
     bool EnsureInitialized(DexClass* klass);
+
+    // ── JIT ──
+    //
+    // Compilation is driven by a per-method call counter and is entirely optional: with
+    // no executable memory (stock iOS without a debugger, LiveContainer JITLess) nothing
+    // is ever compiled and every method runs interpreted, which is the correct answer
+    // rather than a degraded one.
+
+    // Reuse the previous run's profile, and record this run's into it.
+    //
+    // The gain is on the cold path: without a profile a hot loop must be interpreted
+    // through kJitThreshold calls before it is compiled, and that cost is paid again on
+    // every launch. Passing null detaches the profile.
+    void set_oat_profile(OatFile* profile) { oat_profile_ = profile; }
+    OatFile* oat_profile() const { return oat_profile_; }
+
+    // Methods compiled, and calls that entered compiled code, this process.
+    static uint64_t jit_compiled_methods();
+    static uint64_t jit_entries();
+
+    // Calls before a method is considered worth compiling.
+    //
+    // Low enough that a loop reaches it during startup, high enough that the thousands
+    // of methods called once or twice — class initialisers, getters, framework glue —
+    // are never compiled. Compiling those costs more than interpreting them.
+    static constexpr uint32_t kJitThreshold = 64;
 
     // Throw exception by class descriptor.
     void ThrowException(const char* descriptor, const std::string& message);
@@ -135,6 +163,24 @@ private:
     std::string DescribeFieldRef(const DexMethod* context, uint32_t field_idx,
                                  const char* opcode) const;
 
+    // "com.google.androidgamesdk.GameActivity.initializeNativeCode(...)" for a method
+    // reference that would not resolve.
+    //
+    // The message used to be "failed to resolve method index 45364", which is a number
+    // only meaningful inside one DEX file — it named neither the class nor the method,
+    // so a NoSuchMethodError could not be acted on without disassembling the APK. The
+    // reference itself carries all three, so there is no reason to print the index.
+    std::string DescribeMethodRef(const DexMethod* context, uint32_t method_idx) const;
+
+    // Record an unresolvable method in classes.log, once per distinct reference.
+    //
+    // Separate from the auto-stub path: a boot-classpath method gets stubbed and
+    // logged as MISSING_FRAMEWORK_METHOD, whereas this covers references that cannot
+    // be stubbed at all — an app class whose method is absent, or a method on a class
+    // that failed to load. Those are the ones that reach the caller as an exception,
+    // and they were reported nowhere.
+    void ReportUnresolvableMethod(const DexMethod* context, uint32_t method_idx);
+
     bool InvokeMethod(DexFrame* frame, const art::Instruction* inst, bool is_range,
                       art::Instruction::Code opcode);
 
@@ -148,12 +194,21 @@ private:
                            const DexMethod* method, uint32_t dex_pc,
                            uint32_t* handler_pc);
 
+    // Run `method` as compiled code if it has any, compiling it when it becomes hot.
+    //
+    // Returns true when compiled code ran to a return, in which case *out holds the
+    // result. Returns false when the method is not compiled, or when compiled code bailed
+    // out at an unsupported instruction — in both cases the caller interprets, starting
+    // from *resume_pc (0 when nothing ran).
+    bool TryJit(DexFrame* frame, DexValue* out, uint32_t* resume_pc);
+
     static constexpr size_t kMaxCallDepth = 512;
 
     DexClassLinker* linker_ = nullptr;
     DexJniEnv* jni_env_ = nullptr;
     std::string last_error_;
     uint64_t instruction_limit_ = 100'000'000;
+    OatFile* oat_profile_ = nullptr;
 
     // Per-thread interpreter state. One Interpreter instance is shared by every
     // Java thread, so call depth, the instruction budget and the in-flight

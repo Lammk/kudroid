@@ -46,6 +46,21 @@ struct FieldRefSpec {
     std::string type;
 };
 
+// A method_ids entry for a method that is NOT declared anywhere in this DEX.
+//
+// The method counterpart of FieldRefSpec, and needed for the same reason: an app's
+// DEX references framework methods it does not declare. The interpreter's behaviour
+// when such a reference will not resolve is only reachable through this shape — a
+// method declared in the same DEX always resolves, so it cannot exercise the path.
+struct MethodRefSpec {
+    std::string owner;  // declaring class descriptor
+    std::string name;
+    std::string return_type = "V";
+    std::vector<std::string> params;
+
+    std::string Shorty() const;
+};
+
 struct CatchSpec {
     std::string type;  // descriptor ki u exception; r ng = catch-all (finally)
     uint16_t handler_pc = 0;
@@ -86,6 +101,13 @@ struct MethodSpec {
     }
 };
 
+inline std::string MethodRefSpec::Shorty() const {
+    std::string s;
+    s += MethodSpec::ShortyChar(return_type);
+    for (const std::string& p : params) s += MethodSpec::ShortyChar(p);
+    return s;
+}
+
 struct ClassSpec {
     std::string descriptor;
     std::string superclass = "Ljava/lang/Object;";
@@ -104,6 +126,9 @@ struct ClassSpec {
 
     // Field references the bytecode uses without the field being declared here.
     std::vector<FieldRefSpec> extra_field_refs;
+
+    // Method references the bytecode uses without the method being declared here.
+    std::vector<MethodRefSpec> extra_method_refs;
 };
 
 class DexBuilder {
@@ -134,6 +159,15 @@ public:
         for (const std::string& p : m.params) key.param_type_idx.push_back(type_idx_.at(p));
         key.shorty = m.Shorty();
         return method_idx_.at(MethodKey{type_idx_.at(class_desc), proto_idx_.at(key),
+                                       string_idx_.at(m.name)});
+    }
+    // Index of a reference to a method declared elsewhere (see MethodRefSpec).
+    uint32_t MethodRefIndexOf(const MethodRefSpec& m) const {
+        ProtoKey key;
+        key.return_type_idx = type_idx_.at(m.return_type);
+        for (const std::string& p : m.params) key.param_type_idx.push_back(type_idx_.at(p));
+        key.shorty = m.Shorty();
+        return method_idx_.at(MethodKey{type_idx_.at(m.owner), proto_idx_.at(key),
                                        string_idx_.at(m.name)});
     }
 
@@ -179,6 +213,13 @@ private:
                 AddString(f.name);
                 AddType(f.type);
             }
+            for (const MethodRefSpec& m : c.extra_method_refs) {
+                AddType(m.owner);
+                AddString(m.name);
+                AddString(m.Shorty());
+                AddType(m.return_type);
+                for (const std::string& p : m.params) AddType(p);
+            }
 
             for (const auto* list : {&c.static_fields, &c.instance_fields}) {
                 for (const FieldSpec& f : *list) {
@@ -220,6 +261,18 @@ private:
             }
             for (const MethodSpec& m : c.direct_methods) AddMethodKey(class_type, m);
             for (const MethodSpec& m : c.virtual_methods) AddMethodKey(class_type, m);
+            // References to methods owned by another class, which this DEX does not
+            // declare. The owner index is that other class, not class_type.
+            for (const MethodRefSpec& m : c.extra_method_refs) {
+                ProtoKey key;
+                key.return_type_idx = type_idx_[m.return_type];
+                for (const std::string& p : m.params) {
+                    key.param_type_idx.push_back(type_idx_[p]);
+                }
+                key.shorty = m.Shorty();
+                proto_set_.insert(key);
+                pending_methods_.push_back({type_idx_[m.owner], key, string_idx_[m.name]});
+            }
         }
 
         idx = 0;

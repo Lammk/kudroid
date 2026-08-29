@@ -66,6 +66,14 @@ public:
     /// @return function pointer (base_ + st_value), or nullptr if not found.
     void* getSymbolAddress(const char* symbolName);
 
+    /// Release the mapping of the ELF FILE, keeping the loaded image.
+    ///
+    /// The file mapping is only needed while parsing, relocating and resolving
+    /// symbols. Holding it for the life of the process doubles the footprint of every
+    /// library — for a 333 MB libminecraftpe.so that is 333 MB of address space kept
+    /// for nothing once the symbol index below has been built.
+    void releaseFileMapping();
+
     ///phase 2: test execution – call kudroid_add(40, 20) via dynamic notation.
     /// @return result string with state and calculated value.
     std::string testExecution();
@@ -81,8 +89,17 @@ public:
     void deregisterEhFrame();
 
 private:
-    // internal: read file content into buffer
-    bool readFile(std::vector<char>& buf);
+    // internal: map the ELF file read-only instead of copying it into the heap.
+    //
+    // A heap copy is dirty memory the kernel can never reclaim; a file mapping is
+    // clean, so under memory pressure iOS evicts the pages and reads them back from
+    // disk rather than killing the process. For libminecraftpe.so that is the
+    // difference between 333 MB of dirty footprint and none.
+    bool mapFile();
+
+    // Build a name -> st_value index from .dynsym, so getSymbolAddress no longer needs
+    // the file. Called once, before the file mapping is released.
+    void buildSymbolIndex();
 
     std::string          path_;
     void*                base_     = nullptr;
@@ -94,7 +111,18 @@ private:
     std::vector<Segment> segments_;
     bool                 parsed_   = false;
     std::string          lastError_;
-    std::vector<char>    fileBuf_;  // byte t p th    ph n t ch b ng  ng
+
+    // The ELF file, mapped PROT_READ MAP_PRIVATE. Valid between mapFile() and
+    // releaseFileMapping().
+    const char*          fileData_ = nullptr;
+    std::size_t          fileSize_ = 0;
+
+    // Exported symbols, captured from .dynsym before the file mapping goes away.
+    // Values are st_value (offsets from the load origin), not final addresses, so the
+    // table stays valid regardless of what base_ ends up being.
+    std::unordered_map<std::string, std::uint64_t> symbolIndex_;
+    bool                 symbolIndexBuilt_ = false;
+
     LibraryManager*      libraryManager_ = nullptr;
     
     // tls

@@ -1,5 +1,7 @@
 #include "kudroid/BionicShim.h"
 #include "kudroid/abi/SyscallShim.h"
+#include "kudroid/DeviceProfile.h"
+#include "kudroid/platform/BundledFramework.h"
 #include "kudroid/platform/GraphicsShim.h"
 #include "kudroid/platform/InputShim.h"
 #include "kudroid/platform/AudioShim.h"
@@ -916,8 +918,30 @@ extern "C" int bionic_mprotect(void *addr, size_t len, int prot) {
     int r = ::mprotect(addr, len, prot);
 #if defined(__APPLE__)
     if (r != 0 && (prot & PROT_EXEC)) {
-        // Fallback: If PROT_EXEC fails on iOS due to W^X policy, try PROT_READ | PROT_WRITE
-        r = ::mprotect(addr, len, prot & ~PROT_EXEC);
+        // PROT_EXEC was refused, which on iOS means this process has no JIT
+        // entitlement and is not being debugged. Report the failure instead of
+        // downgrading to read/write and returning success.
+        //
+        // Silently succeeding is worse than failing here. A guest JIT (V8, Mono,
+        // IL2CPP mixed mode) takes the 0 as permission to write code into the region
+        // and jump to it, and the process then dies with SIGSEGV or SIGBUS at an
+        // address inside that region — no mention of mprotect, nothing to connect it
+        // to the missing entitlement. Under LiveContainer's JITLess mode this is the
+        // normal case, not a rare one.
+        //
+        // The region is left readable and writable (mprotect made no change on
+        // failure), so a caller that checks the return value can fall back to an
+        // interpreter, which is exactly the decision this lets it make.
+        static std::once_flag once;
+        std::call_once(once, [] {
+            logAndroidMessage(6, "KuDroidSyscall",
+                              "mprotect(PROT_EXEC) refused: this process has no JIT"
+                              " permission (no CS_DEBUGGED, no allow-jit entitlement)."
+                              " Guest code that generates machine code at runtime"
+                              " cannot run. Under LiveContainer, enable JIT.");
+        });
+        errno = EPERM;
+        return -1;
     }
 #endif
     return r;
@@ -2056,28 +2080,27 @@ extern "C" void* bionic_dlopen(const char* filename, int flags) {
         strstr(filename, "libGLESv1_CM.so") || strstr(filename, "libGLESv3.so")) {
         // EGL and GLES are combined in the ANGLE frameworks, usually we'd load both, 
         // but EGL is enough for eglGetProcAddress, or we can just load the specific one requested.
-        const char* fw_path = strstr(filename, "libEGL") ? 
-            "@executable_path/Frameworks/libEGL.framework/libEGL" : 
-            "@executable_path/Frameworks/libGLESv2.framework/libGLESv2";
-        
+        const char* fw = strstr(filename, "libEGL") ? "libEGL.framework/libEGL"
+                                                    : "libGLESv2.framework/libGLESv2";
+
         std::lock_guard<std::mutex> gpuLock(g_gpuFrameworkMtx);
-        void* handle = ::dlopen(fw_path, RTLD_NOW | RTLD_GLOBAL);
+        // Goes through the shared loader so @loader_path is tried first: under
+        // LiveContainer the guest runs as a dylib and @executable_path points at
+        // LiveContainer's directory, not at the bundle holding these frameworks.
+        void* handle = kudroid::dlopen_bundled_framework(fw, RTLD_NOW | RTLD_GLOBAL);
         if (handle) {
-            logAndroidMessage(4, "KuDroidGPU", std::string("Successfully loaded ") + fw_path);
+            logAndroidMessage(4, "KuDroidGPU", std::string("Successfully loaded ") + fw);
             return handle;
-        } else {
-            logAndroidMessage(5, "KuDroidGPU", std::string("Failed to load ") + fw_path + ": " + ::dlerror());
         }
     }
     
     if (strstr(filename, "libvulkan.so")) {
         std::lock_guard<std::mutex> gpuLock(g_gpuFrameworkMtx);
-        void* handle = ::dlopen("@executable_path/Frameworks/MoltenVK.framework/MoltenVK", RTLD_NOW | RTLD_GLOBAL);
+        void* handle = kudroid::dlopen_bundled_framework("MoltenVK.framework/MoltenVK",
+                                                         RTLD_NOW | RTLD_GLOBAL);
         if (handle) {
             logAndroidMessage(4, "KuDroidGPU", "Successfully loaded MoltenVK.framework");
             return handle;
-        } else {
-            logAndroidMessage(5, "KuDroidGPU", std::string("Failed to load MoltenVK: ") + ::dlerror());
         }
     }
 
@@ -2998,21 +3021,30 @@ struct KudroidProp {
     const char* value;
 };
 const KudroidProp kKnownProps[] = {
-    {"ro.build.version.sdk", "29"},
-    {"ro.build.version.release", "10"},
+    // Version and identity come from DeviceProfile.h so the property service,
+    // /system/build.prop and Build.java cannot drift apart. They used to: an app
+    // reading a property saw SDK 34 while the same app reading Build.VERSION.SDK_INT
+    // saw 29.
+    {"ro.build.version.sdk", KUDROID_SDK_INT_STR},
+    {"ro.build.version.release", KUDROID_ANDROID_RELEASE},
     {"ro.build.version.codename", "REL"},
     {"ro.build.version.incremental", "6000000"},
     {"ro.build.type", "user"},
     {"ro.build.tags", "release-keys"},
-    {"ro.build.fingerprint", "google/kudroid/kudroid:10/QP1A.190711.020/6000000:user/release-keys"},
-    {"ro.product.model", "KuDroid Pixel"},
-    {"ro.product.manufacturer", "Google"},
-    {"ro.product.brand", "google"},
-    {"ro.product.device", "kudroid_arm64"},
-    {"ro.product.name", "kudroid"},
-    {"ro.product.cpu.abi", "arm64-v8a"},
-    {"ro.product.cpu.abilist", "arm64-v8a"},
-    {"ro.product.cpu.abilist64", "arm64-v8a"},
+    {"ro.build.fingerprint",
+     KUDROID_DEVICE_BRAND "/" KUDROID_DEVICE_NAME "/" KUDROID_DEVICE_BOARD
+     ":" KUDROID_ANDROID_RELEASE "/QP1A.190711.020/6000000:user/release-keys"},
+    // KuDroid, not a spoofed Pixel. Claiming Google hardware invites an app to take
+    // a device-specific path — vendor GPU workarounds, Play-services assumptions —
+    // that this runtime cannot honour, and it made bug reports impossible to read.
+    {"ro.product.model", KUDROID_DEVICE_MODEL},
+    {"ro.product.manufacturer", KUDROID_DEVICE_MANUFACTURER},
+    {"ro.product.brand", KUDROID_DEVICE_BRAND},
+    {"ro.product.device", KUDROID_DEVICE_BOARD},
+    {"ro.product.name", KUDROID_DEVICE_NAME},
+    {"ro.product.cpu.abi", KUDROID_DEVICE_ABI},
+    {"ro.product.cpu.abilist", KUDROID_DEVICE_ABI},
+    {"ro.product.cpu.abilist64", KUDROID_DEVICE_ABI},
     {"ro.hardware", "kudroid"},
     {"ro.board.platform", "kudroid"},
     {"ro.boot.hardware", "kudroid"},

@@ -121,7 +121,7 @@ public class SystemPackageManager extends PackageManager {
         ai.packageName = packageName;
         ai.dataDir = "/data/data/" + packageName;
         ai.sourceDir = "/data/app/" + packageName + "/base.apk";
-        ai.nativeLibraryDir = "/data/app/" + packageName + "/lib/arm64-v8a";
+        ai.nativeLibraryDir = "/data/app/" + packageName + "/lib/" + android.os.Build.CPU_ABI;
         // Android only fills metaData when GET_META_DATA is asked for, but filling it
         // always is harmless and saves an app that forgot the flag — a common mistake
         // whose symptom (metaData present but empty) is indistinguishable from the

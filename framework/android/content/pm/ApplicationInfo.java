@@ -11,9 +11,19 @@ public class ApplicationInfo implements Parcelable {
     public String publicSourceDir;
     public String dataDir;
     public String nativeLibraryDir;
-    public int targetSdkVersion = 29;
+    /**
+     * What the app declared it was built against.
+     *
+     * Defaults to the platform level because the manifest parser does not read
+     * android:targetSdkVersion yet, and the platform level is the closest safe guess:
+     * a value BELOW the real one makes Android enable legacy-compatibility behaviour,
+     * which is the wrong default for a modern app. Not the same question as
+     * Build.VERSION.SDK_INT, which is what the device runs — an app comparing the two
+     * is asking whether it is running on a newer platform than it was built for.
+     */
+    public int targetSdkVersion = android.os.Build.VERSION.SDK_INT;
     public int minSdkVersion = 21;
-    public int compileSdkVersion = 29;
+    public int compileSdkVersion = android.os.Build.VERSION.SDK_INT;
     public int flags = 0;
     public int uid = 10000;
 
