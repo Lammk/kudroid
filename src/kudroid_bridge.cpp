@@ -1569,11 +1569,137 @@ static kudroid::LibraryManager& globalLibraryManager() {
     return instance;
 }
 
+// The directory kudroid_run_apk scanned for guest .so files.
+//
+// Kept because findLibrary() has to answer for a library that exists on disk but was
+// never loaded — a lib listed in android.app.lib_name that failed to map still has a
+// real path, and reporting null for it turns a load failure into a much vaguer
+// "library not found" at the caller.
+static std::mutex g_nativeLibDirMtx;
+static std::string g_nativeLibDir;
+
+extern "C" void kudroid_set_native_lib_dir(const char* dir) {
+    if (dir == nullptr) return;
+    std::lock_guard<std::mutex> lock(g_nativeLibDirMtx);
+    g_nativeLibDir = dir;
+}
+
+extern "C" int kudroid_find_native_library(const char* name, char* out,
+                                           unsigned long out_size) {
+    if (name == nullptr || *name == '\0' || out == nullptr || out_size == 0) return 0;
+
+    // Accept every form a caller might hold. android.app.lib_name gives the bare name
+    // ("minecraftpe"), System.loadLibrary the same, while code that already has a file
+    // name or a full path passes that instead. Normalising here means the Java side
+    // does not have to guess which one it has.
+    std::string base = std::filesystem::path(name).filename().string();
+    if (base.empty()) return 0;
+    std::string filename = base;
+    if (filename.size() < 3 || filename.compare(filename.size() - 3, 3, ".so") != 0) {
+        filename = "lib" + filename + ".so";
+    }
+
+    const auto emit = [&](const std::string& path) -> int {
+        if (path.empty() || path.size() + 1 > out_size) return 0;
+        std::memcpy(out, path.c_str(), path.size() + 1);
+        return 1;
+    };
+
+    // A loaded library is the authoritative answer: its key is the canonical path the
+    // ELF was actually mapped from, so it cannot disagree with reality.
+    {
+        kudroid::LibraryManager& manager = globalLibraryManager();
+        for (const auto& pair : manager.libraries()) {
+            if (std::filesystem::path(pair.first).filename().string() == filename) {
+                return emit(pair.first);
+            }
+        }
+    }
+
+    // Not loaded: fall back to the scanned directory, but only if the file is there.
+    // Returning a constructed path that does not exist would give the caller something
+    // to fail on later rather than a clear miss now.
+    std::string dir;
+    {
+        std::lock_guard<std::mutex> lock(g_nativeLibDirMtx);
+        dir = g_nativeLibDir;
+    }
+    if (!dir.empty()) {
+        std::error_code ec;
+        const std::filesystem::path candidate = std::filesystem::path(dir) / filename;
+        if (std::filesystem::exists(candidate, ec)) return emit(candidate.string());
+    }
+    return 0;
+}
+
 // Hook tra symbol guest — nh ngha trong SyscallShim.cpp, bionic_dlsym dng
 // khi handle l DUMMY_HANDLE (dlopen("libc.so") v.v.).
 extern "C" {
 extern void* (*kudroid_guest_symbol_lookup)(const char* name);
+extern void* (*kudroid_guest_library_open)(const char* filename);
+extern void* (*kudroid_guest_library_symbol)(void* handle, const char* symbol);
+extern int (*kudroid_guest_library_owns)(void* handle);
 }
+
+// dlopen/dlsym/dlclose for guest .so files LibraryManager already mapped.
+//
+// A guest dlopen used to return DUMMY_HANDLE, and dlsym on that scans every loaded
+// library and takes the first match — so a caller that named one library could get
+// another's function whenever both export the same symbol. GameActivity is the caller
+// that makes this concrete: it dlopens the .so from android.app.lib_name and reads its
+// entry points out of that handle alone.
+//
+// The handle IS the ElfLoader pointer, kept in a registry so a pointer arriving from
+// guest code can be validated before it is dereferenced — the same reason the JNI
+// layer validates receivers rather than trusting them.
+namespace {
+
+std::mutex& guestHandleMutex() {
+    static std::mutex m;
+    return m;
+}
+
+std::set<void*>& guestHandles() {
+    static std::set<void*> handles;
+    return handles;
+}
+
+void* guestLibraryOpen(const char* filename) {
+    if (filename == nullptr || *filename == '\0') return nullptr;
+
+    // Match on the file name so every form works: an absolute Android path
+    // (/data/app/<pkg>/lib/arm64-v8a/libfoo.so), a bare "libfoo.so", or the real
+    // container path that findLibrary() hands out.
+    const std::string wanted = std::filesystem::path(filename).filename().string();
+    if (wanted.empty()) return nullptr;
+
+    kudroid::LibraryManager& manager = globalLibraryManager();
+    for (const auto& pair : manager.libraries()) {
+        if (std::filesystem::path(pair.first).filename().string() != wanted) continue;
+        void* handle = pair.second.get();
+        std::lock_guard<std::mutex> lock(guestHandleMutex());
+        guestHandles().insert(handle);
+        return handle;
+    }
+    return nullptr;
+}
+
+void* guestLibrarySymbol(void* handle, const char* symbol) {
+    if (handle == nullptr || symbol == nullptr || *symbol == '\0') return nullptr;
+    {
+        std::lock_guard<std::mutex> lock(guestHandleMutex());
+        if (guestHandles().count(handle) == 0) return nullptr;
+    }
+    return static_cast<kudroid::ElfLoader*>(handle)->getSymbolAddress(symbol);
+}
+
+int guestLibraryOwns(void* handle) {
+    if (handle == nullptr) return 0;
+    std::lock_guard<std::mutex> lock(guestHandleMutex());
+    return guestHandles().count(handle) != 0 ? 1 : 0;
+}
+
+}  // namespace
 
 extern "C" const char* kudroid_run_apk(const char* appName) {
     if (s_isApkRunning.exchange(true)) {
@@ -1719,6 +1845,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
         const std::filesystem::path libDir = appDir / "lib/arm64-v8a";
         const std::filesystem::path assetsDir = appDir / "assets";
         kudroid_set_assets_dir(assetsDir.string().c_str());
+        kudroid_set_native_lib_dir(libDir.string().c_str());
         
         auto appendAndEcho = [&](const std::string& line) {
             log += line + "\n";
@@ -1741,6 +1868,13 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
             kudroid_guest_symbol_lookup = [](const char* name) -> void* {
                 return globalLibraryManager().resolveGlobalSymbol(name);
             };
+
+            // Per-library dlopen/dlsym for the guest's own .so files. Installed here
+            // rather than at load time because it must be live before any guest code
+            // runs, and this is the point where the libraries exist.
+            kudroid_guest_library_open = &guestLibraryOpen;
+            kudroid_guest_library_symbol = &guestLibrarySymbol;
+            kudroid_guest_library_owns = &guestLibraryOwns;
 
             // KuART phi sn sng before khi dlopen bt k .so no: static
             // initializer ca libminecraftpe.so call JNI_GetCreatedJavaVMs, nu

@@ -47,6 +47,21 @@ public final class System {
         Runtime.getRuntime().load(pathname);
     }
 
+    /**
+     * Platform file name for a bare library name: "minecraftpe" to
+     * "libminecraftpe.so".
+     *
+     * Always the Android form, never the host's. KuDroid runs guest code that was
+     * built for Android, so a caller that maps a name and then opens the result must
+     * get "lib*.so" even though the process itself is a Mach-O one. Code that reaches
+     * this is usually about to call findLibrary() or log what it is looking for —
+     * AGDK's GameActivity does both on the way to loading its renderer.
+     */
+    public static String mapLibraryName(String libname) {
+        if (libname == null) throw new NullPointerException("libname == null");
+        return "lib" + libname + ".so";
+    }
+
     public static void setOut(java.io.PrintStream stream) {
     }
 

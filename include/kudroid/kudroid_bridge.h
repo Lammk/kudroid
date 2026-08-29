@@ -157,6 +157,26 @@ void kudroid_dispatch_text_input(const char* utf8);
 /// relative to the cursor rather than inserting, and IME semantics differ.
 void kudroid_dispatch_delete_backward(void);
 
+/// Records the directory the guest's .so files were scanned from, so a later query
+/// can name a library that exists on disk but was never loaded.
+void kudroid_set_native_lib_dir(const char* dir);
+
+/// Absolute host path of the guest native library called `name`, for
+/// BaseDexClassLoader.findLibrary().
+///
+/// `name` may be the bare library name from android.app.lib_name ("minecraftpe"),
+/// a file name ("libminecraftpe.so"), or a path ending in one. The answer is the
+/// real on-device path — under the iOS app container, not the Android
+/// /data/app/... path the guest otherwise sees — because the caller passes it
+/// straight to dlopen.
+///
+/// Writes into `out` (NUL-terminated) and returns 1 on success. Returns 0 and
+/// leaves `out` untouched when there is no such library, when `out_size` is too
+/// small, or on a null argument. Caller-supplied buffer rather than a returned
+/// pointer: this is reachable from any guest thread, and a shared static would
+/// hand out a string another thread is overwriting.
+int kudroid_find_native_library(const char* name, char* out, unsigned long out_size);
+
 #ifdef __cplusplus
 }
 #endif

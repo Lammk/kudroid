@@ -2200,12 +2200,34 @@ bool Invoke_java_lang_Runtime(Interpreter* interp, const char* name, const DexVa
     return true;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// dalvik.system.BaseDexClassLoader
+// ─────────────────────────────────────────────────────────────────────────────
+bool Invoke_dalvik_system_BaseDexClassLoader(Interpreter* interp, const char* name,
+                                            const DexValue* args, size_t num_args,
+                                            DexValue* result) {
+    if (std::strcmp(name, "findLibraryPath") != 0) return false;
+
+    // Static method, so args[0] is the library name rather than a receiver.
+    const char* lib = num_args > 0 ? GetStringUtf8(args[0]) : "";
+    result->l = nullptr;
+    if (lib == nullptr || lib[0] == '\0') return true;
+
+    // PATH_MAX would do, but the buffer is the failure mode this API is most likely
+    // to hit on iOS: a container path is ~110 characters before the app's own
+    // /data/app/<pkg>/lib/arm64-v8a/lib<name>.so is appended.
+    char path[2048];
+    if (kudroid_find_native_library(lib, path, sizeof(path)) != 0) {
+        result->l = reinterpret_cast<DexObject*>(interp->linker()->NewString(path));
+    }
+    return true;
+}
+
 }  // namespace
 
 void LibCoreSetLoadLibraryCallback(LoadLibraryCallback cb) {
     g_load_lib_cb = cb;
 }
-
 bool Invoke_sun_misc_Unsafe(Interpreter* /*interp*/, const char* name, const DexValue* args,
                             size_t num_args, DexValue* result) {
     if (std::strcmp(name, "objectFieldOffset") == 0) {
@@ -2427,6 +2449,9 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
     if (std::strcmp(desc, "Ljava/io/PrintStream;") == 0) return Invoke_java_io_PrintStream(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/util/TimeZone;") == 0) return Invoke_java_util_TimeZone(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Lsun/misc/Unsafe;") == 0) return Invoke_sun_misc_Unsafe(interp, name, args, num_args, result);
+    if (std::strcmp(desc, "Ldalvik/system/BaseDexClassLoader;") == 0) {
+        return Invoke_dalvik_system_BaseDexClassLoader(interp, name, args, num_args, result);
+    }
 
     if (std::strcmp(desc, "Landroid/util/Log;") == 0) return Invoke_android_util_Log(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Landroid/graphics/Canvas;") == 0) return Invoke_android_graphics_Canvas(interp, name, args, num_args, result);
@@ -2459,6 +2484,7 @@ bool LibCoreHasMethod(const DexMethod* method) {
 
     return (std::strncmp(desc, "Ljava/", 6) == 0 ||
             std::strcmp(desc, "Lsun/misc/Unsafe;") == 0 ||
+            std::strcmp(desc, "Ldalvik/system/BaseDexClassLoader;") == 0 ||
             std::strcmp(desc, "Landroid/util/Log;") == 0 ||
             std::strcmp(desc, "Landroid/graphics/Canvas;") == 0 ||
             std::strcmp(desc, "Landroid/app/Activity;") == 0 ||

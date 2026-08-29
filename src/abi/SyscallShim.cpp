@@ -54,6 +54,27 @@ extern "C" void kudroid_append_crash_log(const char* text, size_t len);
 // Allows dummy handles (e.g. dlopen('libc.so')) to resolve exported symbols.
 extern "C" {
 void* (*kudroid_guest_symbol_lookup)(const char* name) = nullptr;
+
+// Per-library handles for guest .so files LibraryManager already mapped.
+//
+// dlopen of a guest library used to fall through to DUMMY_HANDLE, which makes
+// dlsym search every loaded library at once. That is wrong in the way that is
+// hardest to see: two guest libraries exporting the same name resolve to whichever
+// sorts first, so a caller that deliberately opened one gets the other's function.
+// AGDK's GameActivity is the caller that matters — it dlopens the .so named by
+// android.app.lib_name and then dlsyms its entry points out of that handle
+// specifically.
+//
+// `open` returns an opaque handle or null when the name is not a guest library;
+// `symbol` validates the handle against its own registry, so it is safe to call
+// with any pointer and must be consulted BEFORE ::dlsym, which would dereference a
+// handle it does not own.
+void* (*kudroid_guest_library_open)(const char* filename) = nullptr;
+void* (*kudroid_guest_library_symbol)(void* handle, const char* symbol) = nullptr;
+
+// True when `handle` came from kudroid_guest_library_open. Needed because
+// ::dlclose on it would hand the host loader a pointer it never issued.
+int (*kudroid_guest_library_owns)(void* handle) = nullptr;
 }
 
 // Store guest abort message (android_set_abort_message) for crash reporting.
@@ -2062,6 +2083,22 @@ extern "C" void* bionic_dlopen(const char* filename, int flags) {
 
 #define DUMMY_HANDLE ((void*)0x4B5544524F494421ULL) // "KUDROID!" as a handle
 
+    // A guest .so LibraryManager already mapped gets its OWN handle, so a later
+    // dlsym searches that library and nothing else.
+    //
+    // Without this the call fell through to DUMMY_HANDLE, where dlsym scans every
+    // loaded guest library and returns the first match. Two libraries exporting the
+    // same symbol then resolve to whichever sorts first, which is not what a caller
+    // that named one library asked for. GameActivity does exactly that: it dlopens the
+    // .so from android.app.lib_name and pulls its entry points out of that handle.
+    if (kudroid_guest_library_open != nullptr) {
+        if (void* guest = kudroid_guest_library_open(filename)) {
+            logAndroidMessage(4, "KuDroidSyscall",
+                              std::string("bionic_dlopen: resolved to guest library handle for ") + filename);
+            return guest;
+        }
+    }
+
     // Emulate the Android linker: pretend the requested library resolved.
     logAndroidMessage(4, "KuDroidSyscall", std::string("bionic_dlopen: fallback returning DUMMY_HANDLE for ") + filename);
     return DUMMY_HANDLE;
@@ -2119,8 +2156,27 @@ extern "C" void* bionic_dlsym(void* handle, const char* symbol) {
         }
     }
 
-    // For a real host handle, prefer its own symbols first.
+    // A guest library handle before ::dlsym, which would dereference a pointer it
+    // does not own. The lookup validates the handle itself, so an unrelated one
+    // simply returns null here.
+    bool guest_handle = false;
     if (handle && handle != RTLD_DEFAULT && handle != DUMMY_HANDLE) {
+        if (kudroid_guest_library_owns != nullptr && kudroid_guest_library_owns(handle)) {
+            guest_handle = true;
+            if (kudroid_guest_library_symbol != nullptr) {
+                if (void* guest = kudroid_guest_library_symbol(handle, symbol)) {
+                    logAndroidMessage(2, "KuDroidSyscall",
+                                      std::string("bionic_dlsym: [") + symbol + "] found in guest library handle");
+                    return guest;
+                }
+            }
+        }
+    }
+
+    // For a real host handle, prefer its own symbols first. A guest handle is
+    // excluded: it is a LibraryManager pointer, and ::dlsym would dereference it as
+    // one of its own — a SIGSEGV rather than a miss.
+    if (handle && handle != RTLD_DEFAULT && handle != DUMMY_HANDLE && !guest_handle) {
         if (void* real = ::dlsym(handle, symbol)) {
             logAndroidMessage(2, "KuDroidSyscall", std::string("bionic_dlsym: [") + symbol + "] found in real handle");
             return real;
@@ -2194,6 +2250,13 @@ extern "C" int bionic_dlclose(void* handle) {
     // DUMMY_HANDLE l handle gi cho cc lib Android no/not tn ti trn host
     // (xem bionic_dlopen) — call ::dlclose vi n s dereference pointer rc.
     if (!handle || handle == RTLD_DEFAULT || handle == DUMMY_HANDLE) return 0;
+    // A guest library handle is ours, not the host loader's. Guest mappings live for
+    // the life of the process on purpose (unmapping one while another thread executes
+    // inside it is the crash that made LibraryManager a process-wide singleton), so
+    // report success without touching the mapping.
+    if (kudroid_guest_library_owns != nullptr && kudroid_guest_library_owns(handle)) {
+        return 0;
+    }
     return ::dlclose(handle);
 }
 

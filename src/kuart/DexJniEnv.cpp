@@ -5,11 +5,13 @@
 #include <cstring>
 #include <mutex>
 #include <set>
+#include <string>
 
 #include "dex/dex_file-inl.h"
 #include "dex/modifiers.h"
 
 #include "kudroid/kuart/DexClassLinker.h"
+#include "kudroid/kuart/DexClassObject.h"
 #include "kudroid/kuart/LibCore.h"
 
 namespace kudroid {
@@ -349,6 +351,25 @@ DexValue DexJniEnv::CallJavaA(DexObject* receiver, DexMethod* method, const jval
     // line. When the class does not check out, fall back to the method the caller
     // named: the jmethodID is a separately validated handle, so a non-virtual call
     // is the conservative interpretation rather than a crash.
+    if (receiver != nullptr && linker_ != nullptr &&
+        linker_->IsRegisteredClass(reinterpret_cast<const DexClass*>(receiver))) {
+        // A jclass receiver is not a mistake. In the JNI object model a jclass IS the
+        // java.lang.Class instance, so CallObjectMethod(cls, Class.getClassLoader) is
+        // exactly how native code asks a class for its loader — which is what
+        // libminecraftpe does on the way to finding its renderer .so.
+        //
+        // The two are different C++ types here: a DexClass is runtime metadata, the
+        // java.lang.Class object is a DexClassObject on the heap. Substitute the
+        // latter so the receiver is a real object, and both virtual dispatch and any
+        // libcore native that reads it get something valid. Without this the DexClass
+        // reached the callee as `this`, where reading a field meant reading DexClass
+        // internals at that offset.
+        if (DexClassObject* as_object = linker_->GetClassObject(
+                const_cast<DexClass*>(reinterpret_cast<const DexClass*>(receiver)))) {
+            receiver = as_object;
+        }
+    }
+
     if (virtual_dispatch && receiver != nullptr && linker_ != nullptr) {
         if (DexClass* receiver_class = linker_->ClassOfObject(receiver)) {
             DexMethod* found = receiver_class->FindVirtualMethod(method->name, method->signature);
@@ -392,9 +413,58 @@ DexValue DexJniEnv::CallJavaA(DexObject* receiver, DexMethod* method, const jval
                 case 'J': vals.push_back(DexValue::Long(args[i].j)); break;
                 case 'F': vals.push_back(DexValue::Float(args[i].f)); break;
                 case 'D': vals.push_back(DexValue::Double(args[i].d)); break;
-                default:
-                    vals.push_back(DexValue::Ref(AsObject(args[i].l)));
+                default: {
+                    // A reference argument gets the same scrutiny as the receiver.
+                    //
+                    // It arrived from a guest .so and nothing before this point looked
+                    // at it: the old code was a bare reinterpret_cast into a
+                    // DexValue::Ref. libHttpClient.Android.so passed a NATIVE STACK
+                    // address (0x16e0e4750) as the Context for
+                    // NetworkObserver.Initialize, and the failure only surfaced one
+                    // invoke later, as "receiver ... has clazz=0x10" on a
+                    // getSystemService call inside that method — naming the wrong
+                    // object, in the wrong frame, with the culprit library nowhere in
+                    // the message.
+                    //
+                    // Rejecting at the boundary is the difference between a diagnosis
+                    // and a puzzle. It also stops a bad handle reaching code paths that
+                    // do NOT check: check-cast, instance-of and iget all dereference
+                    // obj->clazz behind a null check only, so an argument that is cast
+                    // or field-read before any virtual call takes a SIGSEGV instead.
+                    DexObject* arg = AsObject(args[i].l);
+                    if (arg != nullptr && linker_ != nullptr) {
+                        const DexClassLinker::BadReceiver kind = linker_->ClassifyObject(arg);
+                        if (kind == DexClassLinker::BadReceiver::kIsAClass) {
+                            // Not a mistake: in the JNI object model a jclass IS the
+                            // java.lang.Class instance, so passing one where the
+                            // signature says Class<?> is correct usage. Substitute the
+                            // heap object, exactly as the receiver path does.
+                            if (DexClassObject* as_object = linker_->GetClassObject(
+                                    const_cast<DexClass*>(
+                                        reinterpret_cast<const DexClass*>(arg)))) {
+                                arg = as_object;
+                            }
+                        } else if (kind != DexClassLinker::BadReceiver::kOk) {
+                            if (interpreter_ != nullptr) {
+                                std::string detail = "JNI call to ";
+                                if (method->declaring_class != nullptr) {
+                                    detail += method->declaring_class->PrettyName();
+                                    detail += ".";
+                                }
+                                detail += method->name != nullptr ? method->name : "?";
+                                if (method->signature != nullptr) detail += method->signature;
+                                detail += " — ";
+                                detail += linker_->DescribeBadObject(
+                                    arg, ("argument " + std::to_string(i)).c_str());
+                                interpreter_->ThrowException(
+                                    "Ljava/lang/IllegalArgumentException;", detail);
+                            }
+                            return result;
+                        }
+                    }
+                    vals.push_back(DexValue::Ref(arg));
                     break;
+                }
             }
         }
     }

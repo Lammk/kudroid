@@ -9,6 +9,7 @@
 // Methods are invoked directly through the linker rather than from synthesised
 // bytecode: the point is to exercise the framework code, not the call sequence.
 #include "kudroid/framework_dex_bytes.h"
+#include "kudroid/kudroid_bridge.h"
 #include "kudroid/kuart/DexClassLinker.h"
 #include "kudroid/kuart/DexJniEnv.h"
 #include "kudroid/kuart/DexObject.h"
@@ -17,6 +18,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -1764,6 +1766,140 @@ int main() {
                 }
             }
         }
+    }
+
+    // ── the loader an app is actually running under ──
+    //
+    // GameActivity.onCreate does
+    //
+    //   ((BaseDexClassLoader) getClassLoader()).findLibrary(libname)
+    //
+    // to turn android.app.lib_name into an absolute .so path for its own dlopen.
+    // getSystemClassLoader() used to hand back a bare java.lang.ClassLoader, so the
+    // cast threw ClassCastException inside onCreate and the activity never reached the
+    // point of creating a surface: the app logged "Looking for library
+    // libminecraftpe.so" and stopped.
+    {
+        DexClass* base = linker.FindClass("Ldalvik/system/BaseDexClassLoader;");
+        DexClass* path = linker.FindClass("Ldalvik/system/PathClassLoader;");
+        Check(base != nullptr && !base->is_stub, "BaseDexClassLoader is real, not a stub");
+        Check(path != nullptr && !path->is_stub, "PathClassLoader is real, not a stub");
+
+        DexValue loader;
+        if (CallStatic("Ljava/lang/ClassLoader;", "getSystemClassLoader",
+                       "()Ljava/lang/ClassLoader;", {}, &loader,
+                       "getSystemClassLoader")) {
+            Check(loader.l != nullptr, "getSystemClassLoader() is not null");
+            if (loader.l != nullptr && base != nullptr && path != nullptr) {
+                DexClass* actual = linker.ClassOfObject(loader.l);
+                Check(actual != nullptr && actual->IsSubClassOf(base),
+                      std::string("the system loader IS-A BaseDexClassLoader (the cast"
+                                  " GameActivity makes), got ") +
+                          (actual != nullptr ? actual->PrettyName() : "null"));
+                // Reflection in app code compares the loader's class name against
+                // "dalvik.system.PathClassLoader" to decide it is on Android rather
+                // than a desktop JVM, so the concrete type matters too.
+                Check(actual == path,
+                      "the system loader is exactly a PathClassLoader");
+
+                DexValue same;
+                if (CallStatic("Ljava/lang/ClassLoader;", "getSystemClassLoader",
+                               "()Ljava/lang/ClassLoader;", {}, &same,
+                               "getSystemClassLoader #2")) {
+                    Check(same.l == loader.l, "there is one system loader per process");
+                }
+            }
+        }
+
+        // findLibrary has to report the REAL path. The guest sees Android paths
+        // (/data/app/<pkg>/lib/arm64-v8a) while the file on an iOS device lives under
+        // the app container, and the caller passes the answer straight to dlopen — so
+        // returning the Android path would give it something that cannot be opened.
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        const fs::path libDir = fs::temp_directory_path(ec) / "kudroid_findlib_test";
+        fs::remove_all(libDir, ec);
+        fs::create_directories(libDir, ec);
+        const fs::path soPath = libDir / "libprobe.so";
+        if (std::FILE* f = std::fopen(soPath.string().c_str(), "wb")) {
+            std::fputc(0x7f, f);
+            std::fclose(f);
+        }
+        kudroid_set_native_lib_dir(libDir.string().c_str());
+
+        if (loader.l != nullptr) {
+            DexValue found;
+            // The bare name is what android.app.lib_name holds — "minecraftpe", not
+            // "libminecraftpe.so".
+            if (CallVirtual(loader.l, "findLibrary", "(Ljava/lang/String;)Ljava/lang/String;",
+                            {Str("probe")}, &found, "findLibrary(bare name)")) {
+                Check(found.l != nullptr &&
+                          std::strcmp(Utf8Of(found), soPath.string().c_str()) == 0,
+                      std::string("findLibrary(\"probe\") yields the real path, got \"") +
+                          Utf8Of(found) + "\"");
+            }
+            // Callers that already hold a file name pass that instead; both forms have
+            // to work or the Java side would have to guess which one it has.
+            if (CallVirtual(loader.l, "findLibrary", "(Ljava/lang/String;)Ljava/lang/String;",
+                            {Str("libprobe.so")}, &found, "findLibrary(file name)")) {
+                Check(found.l != nullptr &&
+                          std::strcmp(Utf8Of(found), soPath.string().c_str()) == 0,
+                      "findLibrary accepts the file-name form too");
+            }
+            // A miss is null, not an exception: that is what callers test for, and
+            // GameActivity turns it into an IllegalArgumentException naming the
+            // library, which reads better than anything thrown from here.
+            if (CallVirtual(loader.l, "findLibrary", "(Ljava/lang/String;)Ljava/lang/String;",
+                            {Str("absent")}, &found, "findLibrary(missing)")) {
+                Check(found.l == nullptr, "findLibrary returns null for a library that does not exist");
+            }
+            if (CallVirtual(loader.l, "findLibrary", "(Ljava/lang/String;)Ljava/lang/String;",
+                            {DexValue::Ref(nullptr)}, &found, "findLibrary(null)")) {
+                Check(found.l == nullptr, "findLibrary(null) is null, not a crash");
+            }
+        }
+
+        // A Context hands out the same loader, since that is where an Activity gets it.
+        DexObject* ctx = NewObject("Landroid/app/ApplicationContext;",
+                                   "(Ljava/lang/String;)V", {Str("com.example.probe")},
+                                   "ApplicationContext for getClassLoader");
+        if (ctx != nullptr && loader.l != nullptr) {
+            DexValue fromCtx;
+            if (CallVirtual(ctx, "getClassLoader", "()Ljava/lang/ClassLoader;", {},
+                            &fromCtx, "Context.getClassLoader")) {
+                Check(fromCtx.l == loader.l,
+                      "Context.getClassLoader() is the same PathClassLoader");
+            }
+        }
+
+        // The same question asked over JNI, with a jclass as the receiver.
+        //
+        // This is how libminecraftpe asks: CallObjectMethod(activityClass,
+        // Class.getClassLoader). In the JNI object model a jclass IS the
+        // java.lang.Class instance, so it is a legitimate receiver — but the two are
+        // different C++ types here, and the DexClass used to arrive at the callee as
+        // `this`. The log line was "virtual dispatch skipped for getClassLoader():
+        // receiver is the CLASS ..., not an instance of it", and the loader never
+        // reached the caller.
+        DexClass* probeCls = linker.FindClass("Ljava/lang/String;");
+        DexClass* classCls = linker.FindClass("Ljava/lang/Class;");
+        if (probeCls != nullptr && classCls != nullptr && loader.l != nullptr) {
+            DexMethod* gcl = classCls->FindVirtualMethod("getClassLoader",
+                                                         "()Ljava/lang/ClassLoader;");
+            Check(gcl != nullptr, "Class.getClassLoader is declared");
+            if (gcl != nullptr) {
+                interp.ClearPendingException();
+                const DexValue viaJni = jni.CallJavaA(
+                    reinterpret_cast<DexObject*>(probeCls), gcl, nullptr,
+                    /*virtual_dispatch=*/true);
+                Check(!interp.HasPendingException(),
+                      "getClassLoader on a jclass receiver does not throw");
+                Check(viaJni.l == loader.l,
+                      "a jclass receiver yields the loader, not a skipped dispatch");
+                interp.ClearPendingException();
+            }
+        }
+        fs::remove_all(libDir, ec);
     }
 
     std::printf("  executed %llu instructions\n",

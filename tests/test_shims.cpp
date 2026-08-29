@@ -45,6 +45,14 @@ extern "C" int bionic_pipe2(int pipefd[2], int flags);
 extern "C" int bionic___cxa_guard_acquire(uint64_t* g);
 extern "C" void bionic___cxa_guard_release(uint64_t* g);
 extern "C" void bionic___cxa_guard_abort(uint64_t* g);
+extern "C" void* bionic_dlopen(const char* filename, int flags);
+extern "C" void* bionic_dlsym(void* handle, const char* symbol);
+extern "C" int bionic_dlclose(void* handle);
+
+// Guest library hooks, installed by kudroid_run_apk in production.
+extern "C" void* (*kudroid_guest_library_open)(const char* filename);
+extern "C" void* (*kudroid_guest_library_symbol)(void* handle, const char* symbol);
+extern "C" int (*kudroid_guest_library_owns)(void* handle);
 
 // Mirror of the guest android_sigaction layout from SyscallShim.cpp.
 struct android_sigaction {
@@ -451,6 +459,98 @@ static void test_guard_cross_thread_wait() {
     CHECK(b_done.load(), "guard-wait: B unblocked after release (returns 0 = done)");
 }
 
+// ─── 6. guest library dlopen/dlsym/dlclose ──────────────────────────────────
+//
+// A guest .so LibraryManager already mapped gets its own handle rather than the
+// shared DUMMY_HANDLE. The reason is resolution scope: dlsym on DUMMY_HANDLE
+// searches every loaded guest library and returns the first match, so a caller that
+// deliberately opened one library gets another's function whenever both export the
+// same name. AGDK's GameActivity is that caller — it dlopens the .so named by
+// android.app.lib_name and reads its entry points out of that handle.
+//
+// The hooks are installed by kudroid_run_apk in production; here they are installed
+// directly, because what needs proving is the shim's routing and — above all — that
+// bionic_dlclose does NOT hand a guest handle to ::dlclose. That pointer belongs to
+// LibraryManager, and the host loader would dereference it as its own.
+
+static int g_guest_open_calls = 0;
+static int g_guest_symbol_calls = 0;
+static const char* g_guest_last_open = nullptr;
+
+// Stands in for an ElfLoader. Only its address is used.
+static int g_fake_guest_library = 0;
+#define FAKE_GUEST_HANDLE (static_cast<void*>(&g_fake_guest_library))
+static int g_fake_guest_symbol = 0;
+#define FAKE_GUEST_SYMBOL (static_cast<void*>(&g_fake_guest_symbol))
+
+static void* fake_guest_open(const char* filename) {
+    ++g_guest_open_calls;
+    g_guest_last_open = filename;
+    if (filename != nullptr && std::strstr(filename, "libguestprobe.so") != nullptr) {
+        return FAKE_GUEST_HANDLE;
+    }
+    return nullptr;
+}
+
+static void* fake_guest_symbol(void* handle, const char* symbol) {
+    ++g_guest_symbol_calls;
+    if (handle != FAKE_GUEST_HANDLE) return nullptr;
+    if (symbol != nullptr && std::strcmp(symbol, "guest_only_entry") == 0) {
+        return FAKE_GUEST_SYMBOL;
+    }
+    return nullptr;
+}
+
+static int fake_guest_owns(void* handle) {
+    return handle == FAKE_GUEST_HANDLE ? 1 : 0;
+}
+
+static void test_guest_library_handles() {
+    std::printf("[dlfcn] guest .so gets its own handle\n");
+
+    kudroid_guest_library_open = &fake_guest_open;
+    kudroid_guest_library_symbol = &fake_guest_symbol;
+    kudroid_guest_library_owns = &fake_guest_owns;
+
+    // A guest library resolves to its own handle, not the shared dummy one.
+    void* h = bionic_dlopen("/data/app/com.example/lib/arm64-v8a/libguestprobe.so", 0);
+    CHECK(h == FAKE_GUEST_HANDLE, "dlopen of a guest .so returns its own handle");
+    CHECK(g_guest_open_calls == 1, "the guest open hook was consulted");
+
+    // dlsym on that handle reaches the guest library.
+    CHECK(bionic_dlsym(h, "guest_only_entry") == FAKE_GUEST_SYMBOL,
+          "dlsym on a guest handle resolves within that library");
+
+    // A symbol the guest library does not export must not silently come back from
+    // somewhere else via that handle. "malloc" exists in the host process, so this
+    // is the case that catches a fallthrough: the guest hook returns null and the
+    // host path answers, which is correct for dlsym semantics but must be reached
+    // through the fallback and not attributed to the guest handle.
+    g_guest_symbol_calls = 0;
+    (void)bionic_dlsym(h, "malloc");
+    CHECK(g_guest_symbol_calls == 1,
+          "an unexported symbol asks the guest library first, then falls back");
+
+    // A library that is NOT a loaded guest .so still gets the dummy handle, so the
+    // existing behaviour for libc.so/libm.so is unchanged.
+    void* dummy = bionic_dlopen("libnotaguestlibrary_kudroid.so", 0);
+    CHECK(dummy != nullptr && dummy != FAKE_GUEST_HANDLE,
+          "a non-guest library still resolves to the dummy handle");
+
+    // The one that would crash: ::dlclose on a pointer the host loader never issued.
+    CHECK(bionic_dlclose(FAKE_GUEST_HANDLE) == 0,
+          "dlclose of a guest handle succeeds without reaching the host loader");
+
+    kudroid_guest_library_open = nullptr;
+    kudroid_guest_library_symbol = nullptr;
+    kudroid_guest_library_owns = nullptr;
+
+    // With no hook installed the shim must behave exactly as before.
+    void* before = bionic_dlopen("libguestprobe.so", 0);
+    CHECK(before != FAKE_GUEST_HANDLE,
+          "without the hook a guest name falls back to the dummy handle");
+}
+
 // ─── main ────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -470,6 +570,7 @@ int main() {
     test_guard_same_tid_recursion_tolerated();
     test_guard_cross_thread_wait();
     test_guard_recursion_loop_cut();
+    test_guest_library_handles();
     std::printf("=== %d checks, %d failures ===\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

@@ -51,6 +51,7 @@ constexpr uint8_t kOpReturnVoid = 0x0e;
 constexpr uint8_t kOpReturn = 0x0f;
 constexpr uint8_t kOpMoveResult = 0x0a;
 constexpr uint8_t kOpConst4 = 0x12;
+constexpr uint8_t kOpInstanceOf = 0x20;
 constexpr uint8_t kOpIget = 0x52;
 constexpr uint8_t kOpInvokeVirtual = 0x6e;
 constexpr uint8_t kOpInvokeStatic = 0x71;
@@ -85,6 +86,7 @@ struct Specs {
     MethodSpec call_bail;    // static: invoke bail  (two frames deep)
     MethodSpec outer_bail;   // static: invoke callBail
     MethodSpec call_virtual; // static: invoke-virtual getValue on the argument
+    MethodSpec take_class;   // static: instance-of Class on the argument
     MethodSpec plain;        // static: return 7, nothing unusual
 
     Specs() {
@@ -107,6 +109,14 @@ struct Specs {
         call_virtual.return_type = "I";
         call_virtual.params = {"LT;"};
         call_virtual.access_flags = 0x9;
+
+        // Takes a Class and instance-ofs it, so a jclass argument has to arrive as a
+        // real java.lang.Class object rather than as DexClass metadata: instance-of
+        // dereferences obj->clazz.
+        take_class.name = "takeClass";
+        take_class.return_type = "I";
+        take_class.params = {"Ljava/lang/Class;"};
+        take_class.access_flags = 0x9;
 
         plain.name = "plain";
         plain.return_type = "I";
@@ -146,6 +156,14 @@ std::vector<ClassSpec> BuildClasses(const Specs& s) {
     illegal_state.descriptor = "Ljava/lang/IllegalStateException;";
     illegal_state.superclass = "Ljava/lang/Throwable;";
 
+    ClassSpec illegal_argument;
+    illegal_argument.descriptor = "Ljava/lang/IllegalArgumentException;";
+    illegal_argument.superclass = "Ljava/lang/Throwable;";
+
+    ClassSpec npe;
+    npe.descriptor = "Ljava/lang/NullPointerException;";
+    npe.superclass = "Ljava/lang/Throwable;";
+
     ClassSpec arith;
     arith.descriptor = "Ljava/lang/ArithmeticException;";
     arith.superclass = "Ljava/lang/Throwable;";
@@ -154,11 +172,12 @@ std::vector<ClassSpec> BuildClasses(const Specs& s) {
     t.descriptor = "LT;";
     t.superclass = "Ljava/lang/Object;";
     t.instance_fields = {s.value};
-    t.direct_methods = {s.ctor,         s.bail,  s.call_bail,
-                        s.outer_bail,   s.plain, s.call_virtual};
+    t.direct_methods = {s.ctor,       s.bail,  s.call_bail,
+                        s.outer_bail, s.plain, s.call_virtual, s.take_class};
     t.virtual_methods = {s.get_value};
 
-    return {object, string, class_class, throwable, illegal_state, arith, t};
+    return {object, string,           class_class, throwable,
+            illegal_state, illegal_argument, npe,        arith, t};
 }
 
 // Where the native method jumps back to. A plain sigsetjmp/siglongjmp pair models
@@ -213,6 +232,8 @@ int main() {
         static_cast<uint16_t>(index_builder.MethodIndexOf("LT;", probe.get_value));
     const uint16_t kValueIdx =
         static_cast<uint16_t>(index_builder.FieldIndexOf("LT;", probe.value));
+    const uint16_t kClassTypeIdx =
+        static_cast<uint16_t>(index_builder.TypeIndexOf("Ljava/lang/Class;"));
 
     // int getValue() { return this.value; }
     {
@@ -259,6 +280,19 @@ int main() {
         c.push_back(Op11x(kOpReturn, 0));
         s.plain.code = c;
         s.plain.registers_size = 1;
+    }
+    // int takeClass(Class c) { return (c instanceof Class) ? 1 : 0; }
+    //
+    // instance-of reads obj->clazz, so this only answers 1 when the argument arrived
+    // as a real java.lang.Class object. A raw DexClass would read its descriptor
+    // pointer as a class and fail — the "raftpe/" shape, as an argument.
+    {
+        std::vector<uint16_t> c;
+        Op22c(&c, kOpInstanceOf, 0, 0, kClassTypeIdx);
+        c.push_back(Op11x(kOpReturn, 0));
+        s.take_class.code = c;
+        s.take_class.registers_size = 1;
+        s.take_class.ins_size = 1;
     }
 
     DexBuilder builder;
@@ -494,6 +528,138 @@ int main() {
                 const DexValue v =
                     jni.CallJavaA(good, getter, nullptr, /*virtual_dispatch=*/true);
                 Check(v.i == 5, "CallJavaA still dispatches on a valid receiver");
+            }
+        }
+    }
+
+    // ── reference ARGUMENTS coming in over JNI ──
+    //
+    // A bad receiver was checked; a bad argument was not. The gap is what
+    // libHttpClient.Android.so fell through: during JNI_OnLoad it called the static
+    // NetworkObserver.Initialize(Context) with a NATIVE STACK address as the Context.
+    // Nothing looked at it, so it was written into a register of the callee's frame,
+    // and the failure surfaced one invoke later as
+    //
+    //   IllegalStateException: invoke Context.getSystemService — receiver 0x16e0e4750
+    //   has clazz=0x10 ... (stale or fabricated JNI handle)
+    //
+    // naming the wrong object, in the wrong frame, with the offending library absent
+    // from the message. Checking where the handle ENTERS names the caller instead.
+    if (call_virtual != nullptr) {
+        // callVirtual is static and takes one LT;, then invoke-virtuals on it — the
+        // same shape as Initialize(Context) calling getSystemService.
+
+        // A fabricated handle: readable memory, so a null check waves it through.
+        {
+            char fabricated[64];
+            std::memset(fabricated, 0x41, sizeof(fabricated));
+            jvalue args[1];
+            args[0].l = reinterpret_cast<jobject>(fabricated);
+
+            interp.ClearPendingException();
+            jni.CallJavaA(nullptr, call_virtual, args, /*virtual_dispatch=*/false);
+            Check(interp.HasPendingException(),
+                  "a fabricated object argument is rejected at the JNI boundary");
+            const std::string msg = interp.last_error();
+            Check(msg.find("IllegalArgumentException") != std::string::npos,
+                  "rejected as IllegalArgumentException, not as a receiver fault: " + msg);
+            // The message has to name the callee and WHICH argument, because the
+            // caller is a native library with no Java frame to appear in a trace.
+            Check(msg.find("T.callVirtual") != std::string::npos,
+                  "the message names the method that was called: " + msg);
+            Check(msg.find("argument 0") != std::string::npos,
+                  "the message says which argument was bad: " + msg);
+            Check(msg.find("receiver") == std::string::npos,
+                  "the message does not call an argument a receiver: " + msg);
+            interp.ClearPendingException();
+        }
+
+        // The 0x10 shape, reached as an argument this time.
+        {
+            kudroid::kuart::DexObject* bad = linker.AllocObject(t);
+            if (bad != nullptr) {
+                bad->clazz = reinterpret_cast<kudroid::kuart::DexClass*>(0x10);
+                jvalue args[1];
+                args[0].l = reinterpret_cast<jobject>(bad);
+
+                interp.ClearPendingException();
+                jni.CallJavaA(nullptr, call_virtual, args, /*virtual_dispatch=*/false);
+                Check(interp.HasPendingException(),
+                      "a stale object argument is rejected before it reaches bytecode");
+                const std::string msg = interp.last_error();
+                Check(msg.find("0x10") != std::string::npos,
+                      "the message carries the offending clazz value: " + msg);
+                Check(msg.find("stale or fabricated") != std::string::npos,
+                      "the message says what kind of bad handle it was: " + msg);
+                interp.ClearPendingException();
+            }
+        }
+
+        // An object whose clazz was never set — allocated but not initialised.
+        {
+            kudroid::kuart::DexObject* uninit = linker.AllocObject(t);
+            if (uninit != nullptr) {
+                uninit->clazz = nullptr;
+                jvalue args[1];
+                args[0].l = reinterpret_cast<jobject>(uninit);
+
+                interp.ClearPendingException();
+                jni.CallJavaA(nullptr, call_virtual, args, /*virtual_dispatch=*/false);
+                Check(interp.HasPendingException(),
+                      "an uninitialised object argument is rejected");
+                interp.ClearPendingException();
+            }
+        }
+
+        // null must still be allowed through: a null argument is legal Java, and
+        // rejecting it would break every method with an optional parameter.
+        {
+            jvalue args[1];
+            args[0].l = nullptr;
+            interp.ClearPendingException();
+            jni.CallJavaA(nullptr, call_virtual, args, /*virtual_dispatch=*/false);
+            // callVirtual invoke-virtuals on it, so a NullPointerException from the
+            // BYTECODE is the correct outcome — what matters is that the argument
+            // check did not turn it into an IllegalArgumentException at the boundary.
+            const std::string msg = interp.last_error();
+            Check(msg.find("IllegalArgumentException") == std::string::npos,
+                  "a null argument is not rejected as a bad handle: " + msg);
+            interp.ClearPendingException();
+        }
+
+        // And a valid argument must still work, or the check is rejecting everything.
+        if (good != nullptr) {
+            jvalue args[1];
+            args[0].l = reinterpret_cast<jobject>(good);
+            interp.ClearPendingException();
+            const DexValue r =
+                jni.CallJavaA(nullptr, call_virtual, args, /*virtual_dispatch=*/false);
+            Check(!interp.HasPendingException() && r.i == 5,
+                  "a valid object argument still reaches the method and dispatches");
+            interp.ClearPendingException();
+        }
+
+        // A jclass passed where the signature says an object: legitimate JNI, because
+        // a jclass IS the java.lang.Class instance. It must be substituted rather than
+        // rejected — the same treatment the receiver path gives it.
+        {
+            kudroid::kuart::DexMethod* take_class =
+                t->FindDirectMethod("takeClass", "(Ljava/lang/Class;)I");
+            Check(take_class != nullptr, "takeClass resolved");
+            if (take_class != nullptr) {
+                jvalue args[1];
+                args[0].l = reinterpret_cast<jobject>(t);
+                interp.ClearPendingException();
+                const DexValue r =
+                    jni.CallJavaA(nullptr, take_class, args, /*virtual_dispatch=*/false);
+                const bool threw = interp.HasPendingException();
+                Check(!threw, std::string("a jclass argument is accepted, not rejected") +
+                                  (threw ? ": " + interp.last_error() : ""));
+                // instance-of dereferences obj->clazz, so 1 is only reachable if the
+                // callee got a real java.lang.Class object rather than DexClass
+                // metadata.
+                Check(r.i == 1, "the callee received a usable java.lang.Class object");
+                interp.ClearPendingException();
             }
         }
     }

@@ -622,36 +622,42 @@ DexClassLinker::BadReceiver DexClassLinker::ClassifyObject(const DexObject* obj)
 }
 
 std::string DexClassLinker::DescribeBadReceiver(const DexObject* obj) const {
-    char buf[128];
+    return DescribeBadObject(obj, "receiver");
+}
+
+std::string DexClassLinker::DescribeBadObject(const DexObject* obj, const char* role) const {
+    char buf[192];
+    const char* what = (role != nullptr && *role != '\0') ? role : "object";
     switch (ClassifyObject(obj)) {
         case BadReceiver::kOk:
-            return "the receiver is valid";
+            return std::string("the ") + what + " is valid";
         case BadReceiver::kNull:
-            return "receiver is null";
+            return std::string(what) + " is null";
         case BadReceiver::kIsAClass: {
             // Name the class, since we know exactly which one was passed. This is the
             // "raftpe/" shape: reading clazz off it would have yielded the descriptor.
             const auto* as_class = reinterpret_cast<const DexClass*>(obj);
             std::snprintf(buf, sizeof(buf),
-                          "receiver is the CLASS %s, not an instance of it"
+                          "%s is the CLASS %s, not an instance of it"
                           " (a jclass was passed where a jobject was expected)",
+                          what,
                           as_class->descriptor != nullptr ? as_class->descriptor : "?");
             return buf;
         }
         case BadReceiver::kNullClass:
             std::snprintf(buf, sizeof(buf),
-                          "receiver %p has clazz=null (allocated but never initialised)",
-                          static_cast<const void*>(obj));
+                          "%s %p has clazz=null (allocated but never initialised)",
+                          what, static_cast<const void*>(obj));
             return buf;
         case BadReceiver::kUnknownClass:
             std::snprintf(buf, sizeof(buf),
-                          "receiver %p has clazz=%p, which is not a class this runtime"
+                          "%s %p has clazz=%p, which is not a class this runtime"
                           " created (stale or fabricated JNI handle)",
-                          static_cast<const void*>(obj),
+                          what, static_cast<const void*>(obj),
                           static_cast<const void*>(obj->clazz));
             return buf;
     }
-    return "receiver is unusable";
+    return std::string(what) + " is unusable";
 }
 
 }  // namespace kuart

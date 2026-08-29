@@ -103,6 +103,19 @@ public:
     // message, including the offending pointer value.
     std::string DescribeBadReceiver(const DexObject* obj) const;
 
+    // The same description for a handle that is not a receiver.
+    //
+    // A bad ARGUMENT and a bad receiver need different wording, because they point at
+    // different mistakes: a bad receiver means the object the call was made on is
+    // unusable, a bad argument means the caller passed rubbish while its own receiver
+    // was fine. Reporting the argument case as "receiver is..." sent the reader
+    // looking at the wrong half of the call — the shape of the NetworkObserver
+    // failure, where the Context ARGUMENT was a native stack address and the message
+    // named the receiver of a getSystemService call two steps downstream.
+    //
+    // `role` is the noun used in the message ("receiver", "argument 0").
+    std::string DescribeBadObject(const DexObject* obj, const char* role) const;
+
     DexHeap& heap() { return heap_; }
     const DexHeap& heap() const { return heap_; }
     const std::vector<std::unique_ptr<const art::DexFile>>& dex_files() const {
