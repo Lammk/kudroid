@@ -1715,12 +1715,12 @@ class NativeMetalViewController: UIViewController {
         // iOS can dismiss it on its own (interactive dismiss, scene change), and the
         // guest reads this to lay out around the keyboard.
         NotificationCenter.default.addObserver(
-            forName: UIResponder.keyboardDidShowNotification, object: nil, queue: .main
+            forName: NSNotification.Name(rawValue: "UIKeyboardDidShowNotification"), object: nil, queue: .main
         ) { _ in
             kudroid_set_soft_input_visible(1)
         }
         NotificationCenter.default.addObserver(
-            forName: UIResponder.keyboardDidHideNotification, object: nil, queue: .main
+            forName: NSNotification.Name(rawValue: "UIKeyboardDidHideNotification"), object: nil, queue: .main
         ) { _ in
             kudroid_set_soft_input_visible(0)
         }
