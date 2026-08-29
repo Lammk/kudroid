@@ -46,6 +46,7 @@ add_library(kudroid_core STATIC
     src/platform/AudioShim.cpp
     src/platform/GraphicsShim.cpp
     src/abi/SyscallShim.cpp
+    src/abi/GuestVarargs.cpp
     src/platform/AssetShim.cpp
     src/platform/BundledFramework.cpp
     src/platform/JavaCanvasRenderer.cpp

@@ -1232,43 +1232,39 @@ extern "C" int csops(pid_t pid, unsigned int ops, void* useraddr, size_t usersiz
 // return 1 nu jit (memory c th execute) c v kh dng, ngc li return 0.
 extern "C" int kudroid_is_jit_enabled(void) {
 #if defined(__APPLE__)
-    // Ask the kernel directly: map a page and try to make it executable.
+    // Ask the kernel: map a page and try to make it executable.
     //
-    // This is the only test that answers the question actually being asked, and it
-    // answers it for every route that grants the permission — a TrollStore install
-    // (unrestricted entitlements), an attached debugger (CS_DEBUGGED, so StikDebug /
-    // SideStore / Jitterbug / Xcode), the allow-jit entitlement, or LiveContainer's JIT
-    // mode. All of them end in the same place: mprotect(PROT_EXEC) succeeds.
+    // This is not one signal among several — it is the question itself. Every route that
+    // grants the permission (a TrollStore install, an attached debugger, the allow-jit
+    // entitlement, LiveContainer's JIT mode) ends in the same place: mprotect(PROT_EXEC)
+    // succeeds. And if it fails, the process cannot execute memory it wrote, whatever any
+    // other indicator says.
     //
-    // It also covers the case the indirect checks cannot see. Under LiveContainer the
-    // guest inherits LiveContainer's code-signing status, so KuDroid's own entitlements
-    // say nothing about what it may do, and the /Applications and /var/mobile probes
-    // below are invisible through the sandbox.
+    // So a negative result is returned as-is. An earlier version consulted the proxies
+    // below after a negative probe, on the theory that a false negative would wrongly
+    // refuse to launch. That was backwards: mprotect cannot report a false negative for
+    // the operation it just performed, while the proxies report false POSITIVES readily —
+    // /Applications/TrollStore.app exists whenever TrollStore is installed on the device,
+    // which says nothing about how THIS app was signed. The result was an app sideloaded
+    // without JIT reporting "JIT: Enabled" on a device that happens to have TrollStore.
     //
-    // Cached, because it is asked repeatedly and the answer cannot change within a
-    // process: code-signing status is fixed at exec.
+    // Cached: code-signing status is fixed at exec, and this is asked repeatedly.
     static const int probed = [] {
         const size_t len = static_cast<size_t>(getpagesize());
         void* page = ::mmap(nullptr, len, PROT_READ | PROT_WRITE,
                             MAP_PRIVATE | MAP_ANON, -1, 0);
-        if (page == MAP_FAILED) return -1;  // out of memory, not an answer
+        if (page == MAP_FAILED) return -1;  // out of memory: no answer, not a "no"
         const int rc = ::mprotect(page, len, PROT_READ | PROT_EXEC);
         ::munmap(page, len);
         return rc == 0 ? 1 : 0;
     }();
-    if (probed == 1) return 1;
+    if (probed >= 0) return probed;
 
-    // The probe said no, or could not run. Consult the proxies before answering no.
-    //
-    // A negative from the probe used to be returned directly, which was acceptable
-    // while this only decided whether to map guest .so files. It no longer is: the
-    // launch path now refuses outright on a 0, so a false negative stops a device that
-    // can in fact run the app. The proxies are checked in that direction only — they
-    // can add a yes, never override the kernel's yes — so a genuinely JITLess process
-    // still gets 0 and the cost of being wrong is bounded.
+    // Only reached when the probe could not run at all, which means the process could not
+    // allocate one page. The proxies are guesses, used here because a guess beats nothing.
 
-    // 1. CS_DEBUGGED: a debugger is attached (AltStore, SideStore, Sideloadly, Xcode,
-    //    StikDebug, Jitterbug). This is exactly the state that permits RW -> RX.
+    // CS_DEBUGGED: a debugger is attached (AltStore, SideStore, Sideloadly, Xcode,
+    // StikDebug, Jitterbug) — the state that permits RW -> RX.
     unsigned int flags = 0;
     if (csops(getpid(), CS_OPS_STATUS, &flags, sizeof(flags)) == 0) {
         if (flags & CS_DEBUGGED) {
@@ -1276,10 +1272,10 @@ extern "C" int kudroid_is_jit_enabled(void) {
         }
     }
 
-    // 2. TrollStore / jailbreak, checked through paths that are safe to stat (calling
-    //    into anything privileged here would risk SIGKILL). A TrollStore install is
-    //    signed with unrestricted entitlements, so it holds the permission even when
-    //    the probe above was inconclusive.
+    // TrollStore installs are signed with unrestricted entitlements. Checked through paths
+    // that are safe to stat; anything privileged here would risk SIGKILL. Note this only
+    // establishes that TrollStore exists on the device, so it is deliberately last and
+    // only consulted when the kernel could not be asked.
     if (access("/Applications/TrollStore.app", F_OK) == 0 ||
         access("/var/mobile/Library/TrollStore", F_OK) == 0 ||
         getenv("TROLLSTORE_ENABLED") != nullptr) {
@@ -1296,11 +1292,23 @@ static int kudroid_jit_available(void) {
 }
 
 extern "C" const char* kudroid_jit_status(void) {
-    const char* text = kudroid_is_jit_enabled()
-        ? "JIT: Enabled"
-        : "JIT: Disabled";
-    char* result = (char*)malloc(strlen(text) + 1);
-    if (result) memcpy(result, text, strlen(text) + 1);
+    // Names the route, not just the verdict. "JIT: Disabled" alone left the user with
+    // nothing to act on, and — while the TrollStore proxy could still produce a false
+    // positive — no way to tell a real grant from a bad guess.
+    const char* text = "JIT: Disabled";
+#if defined(__APPLE__)
+    if (kudroid_is_jit_enabled()) {
+        unsigned int flags = 0;
+        const bool debugged = csops(getpid(), CS_OPS_STATUS, &flags, sizeof(flags)) == 0 &&
+                              (flags & CS_DEBUGGED) != 0;
+        text = debugged ? "JIT: Enabled (debugger)" : "JIT: Enabled";
+    }
+#else
+    if (kudroid_is_jit_enabled()) text = "JIT: Enabled";
+#endif
+    const size_t length = strlen(text) + 1;
+    char* result = (char*)malloc(length);
+    if (result) memcpy(result, text, length);
     return result;
 }
 

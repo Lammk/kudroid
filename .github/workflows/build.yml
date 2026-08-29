@@ -70,6 +70,12 @@ jobs:
       - name: Verify AAPCS64 JNI trampoline (arm64 under qemu)
         run: ./scripts/test-trampoline-arm64.sh
 
+      # Guest varargs arrive in x0-x7/v0-v7 under Linux AAPCS64 but on the stack under
+      # Apple's arm64 ABI, so a shimmed snprintf that forwards to the host reads the wrong
+      # place and prints plausible garbage. Nothing on x86-64 can see that.
+      - name: Verify guest vararg trampolines (arm64 under qemu)
+        run: ./scripts/test-vararg-arm64.sh
+
       # The golden-byte test above proves the JIT encoder matches GNU as; this runs the
       # generated code so a sequence that is validly encoded but computes the wrong
       # value is caught too. Skips itself cleanly without the cross toolchain.

@@ -1,5 +1,6 @@
 #include "kudroid/BionicShim.h"
 #include "kudroid/abi/SyscallShim.h"
+#include "kudroid/abi/GuestVarargs.h"
 #include "kudroid/DeviceProfile.h"
 #include "kudroid/platform/BundledFramework.h"
 #include "kudroid/platform/GraphicsShim.h"
@@ -193,92 +194,6 @@ void appendUnsigned(std::string& output, uint64_t value, unsigned base) {
     output.append(cursor, buffer + sizeof(buffer));
 }
 
-[[maybe_unused]] std::string formatGuestLog(const char* format,
-                                            const uint64_t* arguments,
-                                            const uint64_t* stackArguments) {
-    std::string output;
-    if (!format) return output;
-    std::size_t argumentIndex = 0;
-    // Limit arguments read from guest (registers + stack slots) to prevent out-of-bounds reads.
-    // 
-    // 
-    // 
-    constexpr std::size_t kMaxLogArguments = 16;
-    auto nextArgument = [&]() -> uint64_t {
-        if (argumentIndex >= kMaxLogArguments ||
-            (argumentIndex >= 5 && !stackArguments)) {
-            return 0;
-        }
-        const uint64_t value = argumentIndex < 5 ? arguments[argumentIndex]
-                                                 : stackArguments[argumentIndex - 5];
-        ++argumentIndex;
-        return value;
-    };
-    for (const char* cursor = format; *cursor; ++cursor) {
-        if (*cursor != '%') {
-            output += *cursor;
-            continue;
-        }
-        ++cursor;
-        if (*cursor == '%') {
-            output += '%';
-            continue;
-        }
-        // Skip formatting flags, width, and precision modifiers (e.g. %.9ld, %-5d, %08x).
-        // 
-        // 
-        while (*cursor == '-' || *cursor == '+' || *cursor == ' ' ||
-               *cursor == '#' || *cursor == '0' || *cursor == '\'') ++cursor;
-        // Parse width field (e.g. %8x, %08x)
-        while (*cursor >= '0' && *cursor <= '9') ++cursor;
-        while (*cursor == '.') {
-            ++cursor;
-            while (*cursor >= '0' && *cursor <= '9') ++cursor;
-            if (*cursor == '*') ++cursor;
-        }
-        while (*cursor == 'l' || *cursor == 'z' || *cursor == 'j' ||
-               *cursor == 't' || *cursor == 'h') ++cursor;
-        const uint64_t value = nextArgument();
-        switch (*cursor) {
-            case 'd':
-            case 'i': {
-                const auto signedValue = static_cast<int64_t>(value);
-                if (signedValue < 0) {
-                    output += '-';
-                    appendUnsigned(output, static_cast<uint64_t>(-signedValue), 10);
-                } else {
-                    appendUnsigned(output, static_cast<uint64_t>(signedValue), 10);
-                }
-                break;
-            }
-            case 'u': appendUnsigned(output, value, 10); break;
-            case 'x': appendUnsigned(output, value, 16); break;
-            case 'p':
-                output += "0x";
-                appendUnsigned(output, value, 16);
-                break;
-            case 's': {
-                const char* stringValue = reinterpret_cast<const char*>(value);
-                if (stringValue) {
-                    // Safe bounded length to avoid scanning into guard pages
-                    size_t len = 0;
-                    while (len < 1024 && stringValue[len] != '\0') ++len;
-                    output.append(stringValue, len);
-                } else {
-                    output += "<null>";
-                }
-                break;
-            }
-            default:
-                output += "<unsupported:%";
-                output += *cursor ? *cursor : '?';
-                output += '>';
-                break;
-        }
-    }
-    return output;
-}
-
 static std::mutex g_logAndroidMutex;
 
 #if defined(__APPLE__)
@@ -336,14 +251,20 @@ int logAndroidMessage(int priority, const char* tag, const std::string& message)
 
 #if defined(__aarch64__)
 extern "C" int kudroid_android_log_print_trampoline();
+// snprintf/sprintf handlers live in GuestVarargs.cpp, next to the formatter, so the
+// freestanding arm64 test can link them without dragging in this file.
+extern "C" int kudroid_snprintf_trampoline();
+extern "C" int kudroid_sprintf_trampoline();
 
-extern "C" int kudroid_android_log_print_from_registers(const uint64_t* registers) {
-    const int priority = static_cast<int>(registers[0]);
-    const char* tag = reinterpret_cast<const char*>(registers[1]);
-    const char* format = reinterpret_cast<const char*>(registers[2]);
-    const auto* stackArguments = reinterpret_cast<const uint64_t*>(registers[8]);
-    return logAndroidMessage(priority, tag,
-                             formatGuestLog(format, registers + 3, stackArguments));
+extern "C" int kudroid_android_log_print_from_registers(const uint64_t* frame) {
+    const auto* registers = reinterpret_cast<const GuestVarargs*>(frame);
+    const int priority = static_cast<int>(registers->gp[0]);
+    const char* tag = reinterpret_cast<const char*>(registers->gp[1]);
+    const char* format = reinterpret_cast<const char*>(registers->gp[2]);
+    // Varargs begin at the fourth integer register: priority, tag and format took three.
+    char message[1024];
+    FormatGuestVarargs(message, sizeof(message), format, registers, /*firstGpIndex=*/3);
+    return logAndroidMessage(priority, tag, message);
 }
 #else
 extern "C" int bionic_android_log_print(int priority, const char* tag,
@@ -4323,7 +4244,17 @@ const SymbolEntry kSyscallSymbols[] = {
 #else
     {"__errno", reinterpret_cast<void*>(&__errno_location)},
 #endif
+    // Variadic: routed through a register-capturing trampoline on arm64, because a guest
+    // built for Linux AAPCS64 puts varargs in x0-x7/v0-v7 while Apple's arm64 ABI puts
+    // them all on the stack. Forwarding straight to the host's snprintf made it read the
+    // stack and print unrelated data — plausible-looking numbers, never an error.
+#if defined(__aarch64__)
+    {"snprintf", reinterpret_cast<void*>(&kudroid_snprintf_trampoline)},
+    {"sprintf", reinterpret_cast<void*>(&kudroid_sprintf_trampoline)},
+#else
     {"snprintf", reinterpret_cast<void*>(&snprintf)},
+    {"sprintf", reinterpret_cast<void*>(&sprintf)},
+#endif
     {"memcpy", reinterpret_cast<void*>(&memcpy)},
 
     {"malloc", reinterpret_cast<void*>(&bionic_malloc)},

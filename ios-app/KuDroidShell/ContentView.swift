@@ -1378,7 +1378,16 @@ struct APKInstallerView: View {
         }
         do {
             try FileManager.default.createDirectory(at: inboxURL, withIntermediateDirectories: true)
-            let supportedExtensions = ["apk", "apkm", "xapk", "apks"]
+            // Extensions offered by the sites people actually download from. The extractor
+            // does not trust any of them — is_bundle_container reads the zip and looks for
+            // .apk entries at the top level or under splits/ — so this list only decides
+            // what the user is allowed to pick.
+            //
+            // "zip" is here because APKMirror and SAI hand out bundles named
+            // <pkg>.apks.zip or plain .zip. pathExtension returns just "zip" for the
+            // former, so both are covered by the one entry, and extraction already worked
+            // for them; only the picker was refusing to show them.
+            let supportedExtensions = ["apk", "apkm", "xapk", "apks", "zip"]
             apkFiles = try FileManager.default.contentsOfDirectory(
                 at: inboxURL, includingPropertiesForKeys: [.fileSizeKey], options: [.skipsHiddenFiles]
             ).filter { supportedExtensions.contains($0.pathExtension.lowercased()) }
