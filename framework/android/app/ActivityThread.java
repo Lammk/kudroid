@@ -16,6 +16,8 @@ public final class ActivityThread {
     public static final int RESUME_ACTIVITY = 102;
     public static final int DESTROY_ACTIVITY = 103;
     public static final int TOUCH_EVENT = 104;
+    public static final int TEXT_INPUT = 105;
+    public static final int DELETE_BACKWARD = 106;
 
     private static ActivityThread sCurrentActivityThread;
     private Activity mInitialActivity;
@@ -83,7 +85,41 @@ public final class ActivityThread {
                         mInitialActivity.dispatchTouchEvent((MotionEvent) msg.obj);
                     }
                     break;
+                case TEXT_INPUT:
+                    if (msg.obj instanceof String) {
+                        android.view.inputmethod.InputMethodManager.deliverText((String) msg.obj);
+                    }
+                    break;
+                case DELETE_BACKWARD:
+                    android.view.inputmethod.InputMethodManager.deliverDeleteBackward();
+                    break;
             }
+        }
+    }
+
+    /**
+     * Queue text the user typed on the host keyboard.
+     *
+     * Called from the native side (kuart_dispatch_text_input) on whatever thread the
+     * host's keyboard runs on. Going through the Handler puts the edit on the Looper
+     * thread, which is the only thread the app expects its text to change on.
+     */
+    public static void postTextInput(String text) {
+        if (text == null || text.isEmpty()) return;
+        if (sCurrentActivityThread != null && sCurrentActivityThread.mH != null) {
+            Message msg = Message.obtain();
+            msg.what = TEXT_INPUT;
+            msg.obj = text;
+            sCurrentActivityThread.mH.sendMessage(msg);
+        }
+    }
+
+    /** Queue a backspace from the host keyboard. */
+    public static void postDeleteBackward() {
+        if (sCurrentActivityThread != null && sCurrentActivityThread.mH != null) {
+            Message msg = Message.obtain();
+            msg.what = DELETE_BACKWARD;
+            sCurrentActivityThread.mH.sendMessage(msg);
         }
     }
 

@@ -214,8 +214,26 @@ public class Activity extends ContextThemeWrapper {
     /**
      * returns window.
      */
+    private android.view.Window mWindow;
+
+    /**
+     * The Activity's window.
+     *
+     * One instance per Activity, cached. This used to build a fresh Window on every
+     * call, which breaks two things at once: the window has no identity (an app that
+     * stores getWindow() and compares it later sees a different object), and
+     * everything set through it is lost — including the decor view, since
+     * setContentView records it on whichever Window instance happened to be alive.
+     *
+     * The second half is what stopped Minecraft. androidx's
+     * WindowCompat.setDecorFitsSystemWindows does
+     * {@code window.getDecorView().getSystemUiVisibility()}, and getDecorView
+     * answered null on a Window nobody had ever called setContentView on, so onCreate
+     * died with a NullPointerException inside GameActivity.createSurfaceView.
+     */
     public android.view.Window getWindow() {
-        return new android.view.Window(this);
+        if (mWindow == null) mWindow = new android.view.Window(this);
+        return mWindow;
     }
 
     private android.view.View mContentView;
@@ -271,6 +289,10 @@ public class Activity extends ContextThemeWrapper {
      */
     public void setContentView(android.view.View view) {
         mContentView = view;
+        // Mirror it onto the Window so getDecorView() reflects what is on screen.
+        // androidx reads window insets and system-UI flags off the decor view, and an
+        // app that sets its content through the Activity expects the Window to agree.
+        getWindow().setContentView(view);
         renderViewHierarchy();
     }
 

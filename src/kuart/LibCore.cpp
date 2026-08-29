@@ -2057,6 +2057,34 @@ bool Invoke_keep_screen_on(Interpreter* /*interp*/, const char* name, const DexV
     return false;
 }
 
+// InputMethodManager -> host keyboard.
+//
+// KuDroid ships no keyboard, so the guest's request is forwarded to whatever the host
+// registered (on iOS, a view that becomes first responder). The return value tells the
+// guest only whether a host was listening; InputMethodManager reports success to the
+// app either way, because an app told the keyboard cannot be shown disables its own
+// text entry rather than retrying.
+bool Invoke_android_view_inputmethod_InputMethodManager(Interpreter* /*interp*/,
+                                                        const char* name,
+                                                        const DexValue* args,
+                                                        size_t num_args,
+                                                        DexValue* result) {
+    if (std::strcmp(name, "showSoftInputNative") == 0) {
+        const int flags = num_args > 0 ? args[0].i : 0;
+        *result = DexValue::Int(kudroid_show_soft_input(flags) != 0 ? 1 : 0);
+        return true;
+    }
+    if (std::strcmp(name, "hideSoftInputNative") == 0) {
+        *result = DexValue::Int(kudroid_hide_soft_input() != 0 ? 1 : 0);
+        return true;
+    }
+    if (std::strcmp(name, "isSoftInputVisibleNative") == 0) {
+        *result = DexValue::Int(kudroid_is_soft_input_visible() != 0 ? 1 : 0);
+        return true;
+    }
+    return false;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Device memory, read from the host.
 //
@@ -2416,6 +2444,10 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
         std::strcmp(desc, "Landroid/os/PowerManager$WakeLock;") == 0) {
         return Invoke_keep_screen_on(interp, name, args, num_args, result);
     }
+    if (std::strcmp(desc, "Landroid/view/inputmethod/InputMethodManager;") == 0) {
+        return Invoke_android_view_inputmethod_InputMethodManager(interp, name, args,
+                                                                 num_args, result);
+    }
 
     return false;
 }
@@ -2435,6 +2467,7 @@ bool LibCoreHasMethod(const DexMethod* method) {
             std::strcmp(desc, "Landroid/os/Vibrator;") == 0 ||
             std::strcmp(desc, "Landroid/view/Window;") == 0 ||
             std::strcmp(desc, "Landroid/view/View;") == 0 ||
+            std::strcmp(desc, "Landroid/view/inputmethod/InputMethodManager;") == 0 ||
             std::strcmp(desc, "Landroid/os/PowerManager$WakeLock;") == 0);
 }
 

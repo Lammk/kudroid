@@ -351,6 +351,124 @@ public class View {
         return false;
     }
 
+    // ── system UI visibility ────────────────────────────────────────────────
+    //
+    // Deprecated in AOSP since API 30 but still what androidx.core's compat layer
+    // reads on older API levels, and it reaches these through the decor view:
+    //
+    //   WindowCompat.setDecorFitsSystemWindows(window, false)
+    //       -> decorView.getSystemUiVisibility() | SYSTEM_UI_FLAG_LAYOUT_STABLE ...
+    //       -> decorView.setSystemUiVisibility(newFlags)
+    //
+    // That call sits in GameActivity.createSurfaceView, so its absence stopped
+    // Minecraft's onCreate outright. Auto-stubbing the getter would have been worse
+    // than useless here: it returns 0 and the setter discards, so the flags round-trip
+    // as zero and any app that reads back what it set sees the wrong value.
+
+    public static final int SYSTEM_UI_FLAG_VISIBLE = 0;
+    public static final int SYSTEM_UI_FLAG_LOW_PROFILE = 0x00000001;
+    public static final int SYSTEM_UI_FLAG_HIDE_NAVIGATION = 0x00000002;
+    public static final int SYSTEM_UI_FLAG_FULLSCREEN = 0x00000004;
+    public static final int SYSTEM_UI_FLAG_LAYOUT_STABLE = 0x00000100;
+    public static final int SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION = 0x00000200;
+    public static final int SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN = 0x00000400;
+    public static final int SYSTEM_UI_FLAG_IMMERSIVE = 0x00000800;
+    public static final int SYSTEM_UI_FLAG_IMMERSIVE_STICKY = 0x00001000;
+    public static final int SYSTEM_UI_FLAG_LIGHT_STATUS_BAR = 0x00002000;
+    public static final int SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR = 0x00000010;
+
+    private int mSystemUiVisibility = SYSTEM_UI_FLAG_VISIBLE;
+    private OnSystemUiVisibilityChangeListener mOnSystemUiVisibilityChangeListener;
+
+    public int getSystemUiVisibility() {
+        return mSystemUiVisibility;
+    }
+
+    public void setSystemUiVisibility(int visibility) {
+        if (mSystemUiVisibility == visibility) return;
+        mSystemUiVisibility = visibility;
+        if (mOnSystemUiVisibilityChangeListener != null) {
+            mOnSystemUiVisibilityChangeListener.onSystemUiVisibilityChange(visibility);
+        }
+    }
+
+    public void setOnSystemUiVisibilityChangeListener(
+            OnSystemUiVisibilityChangeListener l) {
+        mOnSystemUiVisibilityChangeListener = l;
+    }
+
+    // ── layout params ───────────────────────────────────────────────────────
+    //
+    // A view added to a container carries its own sizing request. Returning null from
+    // getLayoutParams — which had no storage at all before — makes the standard
+    // read-modify-write idiom throw:
+    //
+    //   ViewGroup.LayoutParams lp = view.getLayoutParams();
+    //   lp.height = ...;                 // NPE
+    //
+    private ViewGroup.LayoutParams mLayoutParams;
+
+    public ViewGroup.LayoutParams getLayoutParams() {
+        return mLayoutParams;
+    }
+
+    public void setLayoutParams(ViewGroup.LayoutParams params) {
+        mLayoutParams = params;
+        requestLayout();
+    }
+
+    // ── IME attachment ──────────────────────────────────────────────────────
+
+    /**
+     * Create the InputConnection through which an IME edits this view's text.
+     *
+     * Returning null means "this view does not accept text", which is right for a
+     * plain View. A view that does — an EditText, or a game's own surface — overrides
+     * this and hands back its own connection; Minecraft's GameActivity does exactly
+     * that, which is why BaseInputConnection has to be usable as a superclass.
+     */
+    public android.view.inputmethod.InputConnection onCreateInputConnection(
+            android.view.inputmethod.EditorInfo outAttrs) {
+        return null;
+    }
+
+    /** True when this view wants a soft keyboard. */
+    public boolean onCheckIsTextEditor() {
+        return false;
+    }
+
+    /**
+     * Ask for focus.
+     *
+     * The IME is shown for the focused view, so this is the hook that decides which
+     * InputConnection subsequent text goes to.
+     */
+    public boolean requestFocus() {
+        setFocus(true);
+        return true;
+    }
+
+    public boolean isFocusable() {
+        return true;
+    }
+
+    public void setFocusable(boolean focusable) {
+    }
+
+    public void setFocusableInTouchMode(boolean focusable) {
+    }
+
+    /**
+     * The token identifying the window this view is in.
+     *
+     * Apps pass it to InputMethodManager.hideSoftInputFromWindow. There is one window
+     * under KuDroid, so a per-view token would be meaningless; the root view stands in
+     * for it, which keeps the identity comparison apps make meaningful.
+     */
+    public android.os.IBinder getWindowToken() {
+        return null;
+    }
+
     /**
      * ViewTreeObserver of this view tree (shared with parent if attached).
      */
@@ -638,6 +756,7 @@ public class View {
     }
 
     public interface OnSystemUiVisibilityChangeListener {
+        void onSystemUiVisibilityChange(int visibility);
     }
 
     public interface OnUnhandledKeyEventListener {

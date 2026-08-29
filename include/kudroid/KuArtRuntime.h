@@ -108,6 +108,20 @@ int kuart_take_pending_exception(const char** out);
 void kuart_save_thread_state(size_t out_state[KUART_THREAD_STATE_WORDS]);
 void kuart_restore_thread_state(const size_t state[KUART_THREAD_STATE_WORDS]);
 
+// Dispatch text typed on the host keyboard into the guest's focused
+// InputConnection.
+//
+// Goes through ActivityThread rather than straight into the connection so it lands
+// on the Looper thread: an InputConnection edits the same buffer the app's UI reads,
+// and iOS delivers key input on its own main thread. `utf8` may hold more than one
+// character — autocorrect replacements, paste, and astral-plane emoji all arrive as
+// a single insertion.
+void kuart_dispatch_text_input(const char* utf8);
+
+// Backspace from the host keyboard. Separate from text input because it deletes
+// relative to the cursor rather than inserting.
+void kuart_dispatch_delete_backward(void);
+
 const char* kuart_last_error(void);
 
 #ifdef __cplusplus

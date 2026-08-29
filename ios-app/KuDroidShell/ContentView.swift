@@ -1650,6 +1650,45 @@ class NativeMetalViewController: UIViewController {
 
         NativeMetalViewController.sCurrentRunnerVC = self
 
+        // Soft keyboard: the guest's InputMethodManager reaches these, and they make
+        // the Metal view first responder so iOS shows the system keyboard. Registered
+        // here rather than in the C++ layer because kudroid_core is a static library
+        // and cannot touch UIKit.
+        //
+        // Both hop to the main queue: the guest calls showSoftInput from its Looper
+        // thread, and becomeFirstResponder is main-thread-only.
+        kudroid_set_soft_input_callbacks({ flags in
+            DispatchQueue.main.async {
+                guard let vc = NativeMetalViewController.sCurrentRunnerVC else { return }
+                NSLog("[KuDroid] guest requested soft keyboard (flags=0x%x)", flags)
+                if !vc.metalView.isFirstResponder {
+                    vc.metalView.becomeFirstResponder()
+                }
+                kudroid_set_soft_input_visible(vc.metalView.isFirstResponder ? 1 : 0)
+            }
+        }, {
+            DispatchQueue.main.async {
+                guard let vc = NativeMetalViewController.sCurrentRunnerVC else { return }
+                NSLog("[KuDroid] guest dismissed soft keyboard")
+                vc.metalView.resignFirstResponder()
+                kudroid_set_soft_input_visible(0)
+            }
+        })
+
+        // Track the real keyboard state rather than assuming it followed the request:
+        // iOS can dismiss it on its own (interactive dismiss, scene change), and the
+        // guest reads this to lay out around the keyboard.
+        NotificationCenter.default.addObserver(
+            forName: UIResponder.keyboardDidShowNotification, object: nil, queue: .main
+        ) { _ in
+            kudroid_set_soft_input_visible(1)
+        }
+        NotificationCenter.default.addObserver(
+            forName: UIResponder.keyboardDidHideNotification, object: nil, queue: .main
+        ) { _ in
+            kudroid_set_soft_input_visible(0)
+        }
+
         // Set up Permission Request Dialog Callback
         kudroid_set_permission_prompt_callback { pkgNameC, permsCsvC, reqCode, actHandle in
             let csv = permsCsvC != nil ? String(cString: permsCsvC!) : ""
@@ -1692,6 +1731,12 @@ class NativeMetalViewController: UIViewController {
         motionManager.stopAccelerometerUpdates()
         motionManager.stopGyroUpdates()
         crashCheckTimer?.invalidate()
+        // Clear the keyboard callbacks before the view goes away: they capture the
+        // controller weakly but the C++ side would still call into a dead closure's
+        // main-queue hop on the next guest showSoftInput.
+        kudroid_set_soft_input_callbacks(nil, nil)
+        metalView?.resignFirstResponder()
+        kudroid_set_soft_input_visible(0)
         kudroid_unbind_metal_layer()
         onExit()
     }
@@ -1702,6 +1747,8 @@ class NativeMetalViewController: UIViewController {
         motionManager.stopAccelerometerUpdates()
         motionManager.stopGyroUpdates()
         crashCheckTimer?.invalidate()
+        kudroid_set_soft_input_callbacks(nil, nil)
+        kudroid_set_soft_input_visible(0)
         kudroid_unbind_metal_layer()
     }
 
@@ -1913,6 +1960,61 @@ class NativeMetalView: UIView {
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         injectTouch(touches, action: 3) // ACTION_CANCEL
+    }
+}
+
+// MARK: - Soft keyboard
+//
+// The guest asks for a keyboard through InputMethodManager; iOS shows the system
+// keyboard for whichever view is first responder. NativeMetalView is that view, so it
+// adopts UIKeyInput — the minimal text-input protocol, which is all a game needs: it
+// has its own text rendering and only wants the characters.
+//
+// UITextInput would be the fuller option, but it requires exposing a document model
+// (positions, ranges, tokenizer) that the guest owns rather than the host. UIKeyInput
+// keeps the boundary where it belongs: iOS reports keystrokes, the guest's
+// InputConnection decides what they mean.
+extension NativeMetalView: UIKeyInput {
+    // The keyboard only appears for a first responder, and a plain UIView refuses.
+    override var canBecomeFirstResponder: Bool { true }
+
+    // Always true. Reporting false makes iOS hide the delete key's repeat behaviour
+    // and, on some versions, suppress backspace entirely — and the host cannot know
+    // whether the guest's buffer is empty without asking across the bridge on every
+    // keystroke. Letting the guest ignore a backspace it cannot apply is cheaper.
+    var hasText: Bool { true }
+
+    func insertText(_ text: String) {
+        // Newline arrives as "\n" from the return key. Passed through unchanged: the
+        // guest's InputConnection decides whether that commits a chat line or inserts
+        // a break, which is not the host's business.
+        text.withCString { kudroid_dispatch_text_input($0) }
+    }
+
+    func deleteBackward() {
+        kudroid_dispatch_delete_backward()
+    }
+
+    // Games render their own text, so iOS must not also draw an insertion caret or
+    // selection over the Metal surface.
+    var keyboardType: UIKeyboardType {
+        get { .default }
+        set { }
+    }
+
+    var autocorrectionType: UITextAutocorrectionType {
+        get { .no }
+        set { }
+    }
+
+    var autocapitalizationType: UITextAutocapitalizationType {
+        get { .none }
+        set { }
+    }
+
+    var spellCheckingType: UITextSpellCheckingType {
+        get { .no }
+        set { }
     }
 }
 

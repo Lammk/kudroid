@@ -1236,6 +1236,183 @@ int main() {
         }
     }
 
+    // ── the soft-keyboard round trip ──
+    //
+    // KuDroid has no keyboard; the host's is used, so the guest side is two halves
+    // that have to meet: showSoftInput reaches the host, and text typed there comes
+    // back to whichever InputConnection is registered. Neither half is observable
+    // from the other, so both are driven here.
+    {
+        DexClass* immCls = linker.FindClass("Landroid/view/inputmethod/InputMethodManager;");
+        Check(immCls != nullptr && !immCls->is_stub, "InputMethodManager is real");
+
+        // The host bridge is a native method. If it were auto-stubbed instead, every
+        // showSoftInput would silently do nothing while still reporting success.
+        if (immCls != nullptr) {
+            const char* natives[] = {"showSoftInputNative", "hideSoftInputNative",
+                                     "isSoftInputVisibleNative"};
+            const char* sigs[] = {"(I)Z", "()Z", "()Z"};
+            for (size_t i = 0; i < sizeof(natives) / sizeof(natives[0]); ++i) {
+                DexMethod* m = immCls->FindDirectMethod(natives[i], sigs[i]);
+                Check(m != nullptr && m->IsNative(),
+                      std::string("InputMethodManager.") + natives[i] +
+                          " is declared native (host bridge)");
+            }
+        }
+
+        // A View that accepts text: onCreateInputConnection returning null is right
+        // for a plain View, and is what showSoftInput uses to decide where text goes.
+        DexClass* viewCls = linker.FindClass("Landroid/view/View;");
+        if (viewCls != nullptr) {
+            Check(viewCls->FindVirtualMethod(
+                      "onCreateInputConnection",
+                      "(Landroid/view/inputmethod/EditorInfo;)"
+                      "Landroid/view/inputmethod/InputConnection;") != nullptr,
+                  "View.onCreateInputConnection exists (IME attachment point)");
+            // androidx's WindowCompat reads these off the decor view during onCreate;
+            // their absence is what stopped Minecraft with a NullPointerException.
+            Check(viewCls->FindVirtualMethod("getSystemUiVisibility", "()I") != nullptr,
+                  "View.getSystemUiVisibility exists");
+            Check(viewCls->FindVirtualMethod("setSystemUiVisibility", "(I)V") != nullptr,
+                  "View.setSystemUiVisibility exists");
+        }
+
+        // Flags must round-trip. An auto-stubbed getter returns 0 and the setter
+        // discards, so an app that reads back what it set sees the wrong value — worse
+        // than a missing method, because nothing reports it.
+        DexObject* view = NewObject("Landroid/view/View;", "(Landroid/content/Context;)V",
+                                    {DexValue::Ref(nullptr)}, "new View(null)");
+        if (view != nullptr) {
+            DexValue r;
+            if (CallVirtual(view, "setSystemUiVisibility", "(I)V",
+                            {DexValue::Int(0x00000504)}, &r, "setSystemUiVisibility") &&
+                CallVirtual(view, "getSystemUiVisibility", "()I", {}, &r,
+                            "getSystemUiVisibility")) {
+                Check(r.i == 0x00000504,
+                      std::string("system UI flags round-trip, got ") +
+                          std::to_string(r.i) + " (expected 1284)");
+            }
+            // A plain View accepts no text.
+            if (CallVirtual(view, "onCheckIsTextEditor", "()Z", {}, &r,
+                            "onCheckIsTextEditor")) {
+                Check(r.i == 0, "a plain View is not a text editor");
+            }
+        }
+
+        // Text delivery: register a connection, hand text to the static entry point
+        // ActivityThread uses, and read it back out of the connection. This is the
+        // whole host->guest path minus the host.
+        DexObject* conn2 = NewObject("Landroid/view/inputmethod/BaseInputConnection;",
+                                     "(Landroid/view/View;Z)V",
+                                     {DexValue::Ref(nullptr), DexValue::Int(1)},
+                                     "connection for delivery");
+        if (immCls != nullptr && conn2 != nullptr && interp.EnsureInitialized(immCls)) {
+            DexValue ignored;
+            if (CallStatic("Landroid/view/inputmethod/InputMethodManager;",
+                           "setCurrentInputConnection",
+                           "(Landroid/view/View;Landroid/view/inputmethod/InputConnection;)V",
+                           {DexValue::Ref(nullptr), DexValue::Ref(conn2)}, &ignored,
+                           "setCurrentInputConnection")) {
+                if (CallStatic("Landroid/view/inputmethod/InputMethodManager;",
+                               "deliverText", "(Ljava/lang/String;)V", {Str("kudroid")},
+                               &ignored, "deliverText")) {
+                    DexValue r;
+                    if (CallVirtual(conn2, "getTextBeforeCursor",
+                                    "(II)Ljava/lang/CharSequence;",
+                                    {DexValue::Int(16), DexValue::Int(0)}, &r,
+                                    "read delivered text")) {
+                        DexValue str;
+                        if (r.l != nullptr &&
+                            CallVirtual(r.l, "toString", "()Ljava/lang/String;", {}, &str,
+                                        "toString of delivered text")) {
+                            Check(std::strcmp(Utf8Of(str), "kudroid") == 0,
+                                  std::string("host keystrokes reach the registered"
+                                              " connection, got \"") + Utf8Of(str) + "\"");
+                        }
+                    }
+                }
+                // Backspace takes the other native entry point and must reach the same
+                // connection.
+                if (CallStatic("Landroid/view/inputmethod/InputMethodManager;",
+                               "deliverDeleteBackward", "()V", {}, &ignored,
+                               "deliverDeleteBackward")) {
+                    DexValue r;
+                    if (CallVirtual(conn2, "getTextBeforeCursor",
+                                    "(II)Ljava/lang/CharSequence;",
+                                    {DexValue::Int(16), DexValue::Int(0)}, &r,
+                                    "read after backspace")) {
+                        DexValue str;
+                        if (r.l != nullptr &&
+                            CallVirtual(r.l, "toString", "()Ljava/lang/String;", {}, &str,
+                                        "toString after backspace")) {
+                            Check(std::strcmp(Utf8Of(str), "kudroi") == 0,
+                                  std::string("backspace deletes one char, got \"") +
+                                      Utf8Of(str) + "\"");
+                        }
+                    }
+                }
+            }
+
+            // Nothing focused: text must be dropped, not applied to a stale
+            // connection, and must not throw — the host keeps sending keystrokes
+            // whether or not the guest has an editor.
+            if (CallStatic("Landroid/view/inputmethod/InputMethodManager;",
+                           "setCurrentInputConnection",
+                           "(Landroid/view/View;Landroid/view/inputmethod/InputConnection;)V",
+                           {DexValue::Ref(nullptr), DexValue::Ref(nullptr)}, &ignored,
+                           "clear the current connection")) {
+                const bool ok = CallStatic("Landroid/view/inputmethod/InputMethodManager;",
+                                           "deliverText", "(Ljava/lang/String;)V",
+                                           {Str("dropped")}, &ignored,
+                                           "deliverText with nothing focused");
+                Check(ok, "text with no focused connection is dropped without throwing");
+            }
+        }
+    }
+
+    // ── the decor view exists before anyone sets content ──
+    //
+    // WindowCompat.setDecorFitsSystemWindows chains
+    // window.getDecorView().getSystemUiVisibility() during onCreate, on essentially
+    // every modern app. getDecorView answered null on a Window nobody had called
+    // setContentView on, so Minecraft's onCreate died inside
+    // GameActivity.createSurfaceView with a NullPointerException.
+    {
+        DexObject* activity = NewObject("Landroid/app/Activity;", "()V", {},
+                                       "new Activity");
+        if (activity != nullptr) {
+            DexValue w1, w2;
+            if (CallVirtual(activity, "getWindow", "()Landroid/view/Window;", {}, &w1,
+                            "getWindow #1") &&
+                CallVirtual(activity, "getWindow", "()Landroid/view/Window;", {}, &w2,
+                            "getWindow #2")) {
+                // One Window per Activity. A fresh instance per call loses everything
+                // set through it, including the decor view that setContentView records.
+                Check(w1.l != nullptr && w1.l == w2.l,
+                      "Activity.getWindow() returns the same Window every time");
+
+                if (w1.l != nullptr) {
+                    DexValue decor;
+                    if (CallVirtual(w1.l, "getDecorView", "()Landroid/view/View;", {},
+                                    &decor, "getDecorView before setContentView")) {
+                        Check(decor.l != nullptr,
+                              "getDecorView() is non-null before any setContentView"
+                              " (the WindowCompat chain)");
+                        // And it must be usable, not merely non-null: the next call in
+                        // that chain is getSystemUiVisibility on it.
+                        if (decor.l != nullptr) {
+                            DexValue vis;
+                            const bool ok = CallVirtual(decor.l, "getSystemUiVisibility",
+                                                        "()I", {}, &vis,
+                                                        "decorView.getSystemUiVisibility");
+                            Check(ok, "the full WindowCompat chain runs without throwing");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     std::printf("  executed %llu instructions\n",
                 static_cast<unsigned long long>(interp.instructions_executed()));
 

@@ -173,6 +173,39 @@ void kudroid_set_permission_prompt_callback(kudroid_permission_prompt_cb cb);
 void kudroid_prompt_permission_request(const char* packageName, const char* permissionsCsv, int requestCode, void* activityHandle);
 void kudroid_submit_permission_response(void* activityHandle, int requestCode, const char* permissionsCsv, int granted);
 
+// ── soft keyboard ────────────────────────────────────────────────────────────
+//
+// KuDroid ships no on-screen keyboard, so the guest's InputMethodManager forwards to
+// the host and iOS shows the system keyboard for whichever view is first responder.
+// The callbacks exist because kudroid_core is a static library and cannot reach UIKit:
+// the view that must become first responder lives on the Swift side.
+
+/// Registered by the host. `flags` mirrors InputMethodManager.showSoftInput.
+typedef void (*kudroid_soft_input_show_cb)(int flags);
+typedef void (*kudroid_soft_input_hide_cb)(void);
+
+void kudroid_set_soft_input_callbacks(kudroid_soft_input_show_cb show,
+                                      kudroid_soft_input_hide_cb hide);
+
+/// Called from the guest to raise or dismiss the keyboard. Returns 1 when a host
+/// callback was registered and invoked.
+int kudroid_show_soft_input(int flags);
+int kudroid_hide_soft_input(void);
+
+/// Real keyboard visibility, published by the host. iOS can dismiss the keyboard on
+/// its own, so the guest must read the state rather than assume its request stuck.
+int kudroid_is_soft_input_visible(void);
+void kudroid_set_soft_input_visible(int visible);
+
+/// Text the user typed, delivered to the guest's focused InputConnection. UTF-8, and
+/// may be more than one character: autocorrect, paste and astral-plane emoji all
+/// arrive as a single insertion.
+void kudroid_dispatch_text_input(const char* utf8);
+
+/// Backspace from the host keyboard. Separate from text input because it deletes
+/// relative to the cursor rather than inserting.
+void kudroid_dispatch_delete_backward(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -394,6 +394,25 @@ extern "C" void kuart_post_touch_event(int action, float x, float y) {
     CallActivityThreadStatic("postTouchEvent", "(IFF)V", args, 3);
 }
 
+// Text from the host keyboard.
+//
+// Routed through ActivityThread.postTextInput so it is queued on the Looper thread
+// rather than applied from whatever thread UIKit called on. The InputConnection edits
+// the same buffer the app's UI reads, and there is no lock between them — KuART
+// serialises bytecode with the VM lock, but that does not make an edit ordered with
+// respect to a draw already in progress.
+extern "C" void kuart_dispatch_text_input(const char* utf8) {
+    if (g_rt == nullptr || !g_rt->ready || utf8 == nullptr || utf8[0] == '\0') return;
+    DexObject* text = reinterpret_cast<DexObject*>(g_rt->linker.NewString(utf8));
+    const DexValue arg = DexValue::Ref(text);
+    CallActivityThreadStatic("postTextInput", "(Ljava/lang/String;)V", &arg, 1);
+}
+
+extern "C" void kuart_dispatch_delete_backward(void) {
+    if (g_rt == nullptr || !g_rt->ready) return;
+    CallActivityThreadStatic("postDeleteBackward", "()V", nullptr, 0);
+}
+
 extern "C" int kuart_take_pending_exception(const char** out) {
     // Per-thread: the exception itself is per-thread, so the buffer backing the
     // returned string has to be too, otherwise two threads reporting at once would

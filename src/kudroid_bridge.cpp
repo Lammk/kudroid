@@ -1327,6 +1327,64 @@ extern "C" JNIEXPORT void JNICALL Java_android_os_PowerManager_00024WakeLock_set
     kudroid_set_keep_screen_on(keepOn ? 1 : 0);
 }
 
+// ── soft keyboard ────────────────────────────────────────────────────────────
+//
+// KuDroid has no keyboard of its own; iOS does. The guest's
+// InputMethodManager.showSoftInput reaches kudroid_show_soft_input, which forwards
+// to a callback the Swift side registers — kudroid_core is a static library and
+// cannot touch UIKit, so the view that becomes first responder has to call back in.
+//
+// Text goes the other way, from the host keyboard into the guest's focused
+// InputConnection, through kuart_dispatch_text_input.
+
+static kudroid_soft_input_show_cb s_softInputShow = nullptr;
+static kudroid_soft_input_hide_cb s_softInputHide = nullptr;
+static std::atomic<int> s_softInputVisible{0};
+
+extern "C" void kudroid_set_soft_input_callbacks(kudroid_soft_input_show_cb show,
+                                                kudroid_soft_input_hide_cb hide) {
+    s_softInputShow = show;
+    s_softInputHide = hide;
+    fprintf(stderr, "[KuDroidCore] soft input callbacks %s\n",
+            (show != nullptr || hide != nullptr) ? "registered" : "cleared");
+}
+
+extern "C" int kudroid_show_soft_input(int flags) {
+    fprintf(stderr, "[KuDroidCore] kudroid_show_soft_input(flags=0x%x) host=%s\n",
+            flags, s_softInputShow != nullptr ? "yes" : "none");
+    if (s_softInputShow == nullptr) return 0;
+    s_softInputShow(flags);
+    return 1;
+}
+
+extern "C" int kudroid_hide_soft_input(void) {
+    fprintf(stderr, "[KuDroidCore] kudroid_hide_soft_input() host=%s\n",
+            s_softInputHide != nullptr ? "yes" : "none");
+    if (s_softInputHide == nullptr) return 0;
+    s_softInputHide();
+    return 1;
+}
+
+extern "C" int kudroid_is_soft_input_visible(void) {
+    return s_softInputVisible.load();
+}
+
+extern "C" void kudroid_set_soft_input_visible(int visible) {
+    const int v = visible != 0 ? 1 : 0;
+    if (s_softInputVisible.exchange(v) != v) {
+        fprintf(stderr, "[KuDroidCore] soft input now %s\n", v ? "visible" : "hidden");
+    }
+}
+
+extern "C" void kudroid_dispatch_text_input(const char* utf8) {
+    if (utf8 == nullptr || utf8[0] == '\0') return;
+    kuart_dispatch_text_input(utf8);
+}
+
+extern "C" void kudroid_dispatch_delete_backward(void) {
+    kuart_dispatch_delete_backward();
+}
+
 #include "kudroid/KuArtRuntime.h"
 
 // --- định nghĩa nativeactivity ---
