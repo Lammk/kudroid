@@ -80,6 +80,29 @@ public:
     // that names the operation instead of taking a signal in FindVirtualMethod.
     DexClass* ClassOfObject(const DexObject* obj) const;
 
+    // Why ClassOfObject rejected a handle.
+    //
+    // "invalid class pointer" alone does not say what was wrong, and the three cases
+    // need different fixes: a jclass passed as a jobject is a call-site mistake, a
+    // null clazz means the object was never initialised, and an unregistered pointer
+    // means the handle is stale or was never ours. The 0x10 value that
+    // libPlayFabMultiplayer produced could not be classified from the old message.
+    enum class BadReceiver {
+        kOk,             // the handle is a usable object
+        kNull,           // nullptr
+        kIsAClass,       // a DexClass handed in where a DexObject was expected
+        kNullClass,      // an object whose clazz was never set
+        kUnknownClass,   // clazz is a pointer this linker did not create
+    };
+
+    // Classify `obj` without dereferencing anything unsafe. Returns kOk exactly when
+    // ClassOfObject would return non-null.
+    BadReceiver ClassifyObject(const DexObject* obj) const;
+
+    // "clazz=0x10 is not a class this runtime created" — the detail for an exception
+    // message, including the offending pointer value.
+    std::string DescribeBadReceiver(const DexObject* obj) const;
+
     DexHeap& heap() { return heap_; }
     const DexHeap& heap() const { return heap_; }
     const std::vector<std::unique_ptr<const art::DexFile>>& dex_files() const {

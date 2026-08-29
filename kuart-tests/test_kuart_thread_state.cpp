@@ -409,12 +409,39 @@ int main() {
         auto* class_as_object = reinterpret_cast<kudroid::kuart::DexObject*>(t);
         Check(linker.ClassOfObject(class_as_object) == nullptr,
               "ClassOfObject refuses a jclass passed as a jobject");
+        Check(linker.ClassifyObject(class_as_object) ==
+                  kudroid::kuart::DexClassLinker::BadReceiver::kIsAClass,
+              "classified as kIsAClass");
+
+        // The description must name the class, so the call site can be found. This is
+        // the case that produced an unreadable fault address instead of a name.
+        const std::string why = linker.DescribeBadReceiver(class_as_object);
+        Check(why.find("LT;") != std::string::npos,
+              "the description names the class that was passed: " + why);
 
         // The value it would have produced is the descriptor string, and it must not
         // be mistaken for a class.
         Check(!linker.IsRegisteredClass(
                   reinterpret_cast<const kudroid::kuart::DexClass*>(t->descriptor)),
               "the descriptor pointer is not a registered class");
+    }
+
+    // null and clazz==null are distinct cases and must be told apart: the first is a
+    // caller passing nothing, the second an object that was never initialised.
+    {
+        Check(linker.ClassifyObject(nullptr) ==
+                  kudroid::kuart::DexClassLinker::BadReceiver::kNull,
+              "classified as kNull");
+
+        kudroid::kuart::DexObject* uninit = linker.AllocObject(t);
+        if (uninit != nullptr) {
+            uninit->clazz = nullptr;
+            Check(linker.ClassifyObject(uninit) ==
+                      kudroid::kuart::DexClassLinker::BadReceiver::kNullClass,
+                  "classified as kNullClass");
+            Check(linker.DescribeBadReceiver(uninit).find("clazz=null") != std::string::npos,
+                  "the description says the class was never set");
+        }
     }
 
     // A stale handle: clazz non-null but not a class. libPlayFabMultiplayer produced
@@ -426,15 +453,27 @@ int main() {
             bad->clazz = reinterpret_cast<kudroid::kuart::DexClass*>(0x10);
             Check(linker.ClassOfObject(bad) == nullptr,
                   "ClassOfObject refuses a non-null clazz that is not a class");
+            Check(linker.ClassifyObject(bad) ==
+                      kudroid::kuart::DexClassLinker::BadReceiver::kUnknownClass,
+                  "classified as kUnknownClass");
 
             interp.ClearPendingException();
             DexValue args[1] = {DexValue::Ref(bad)};
             interp.Execute(call_virtual, args, 1);
             Check(interp.HasPendingException(),
                   "invoke-virtual on a corrupted receiver throws instead of faulting");
+
+            // The message has to carry enough to find the origin: which method was
+            // called, and the offending pointer value itself. "invoke getSystemService
+            // on an object with an invalid class pointer" named neither the expected
+            // class nor the bad value, so the source of the 0x10 could not be traced.
             const std::string msg = interp.last_error();
-            Check(msg.find("invalid class pointer") != std::string::npos,
-                  "the exception says what was wrong: " + msg);
+            Check(msg.find("T.getValue") != std::string::npos,
+                  "the message names the method, qualified by its class");
+            Check(msg.find("0x10") != std::string::npos,
+                  "the message includes the offending clazz value");
+            Check(msg.find("stale or fabricated") != std::string::npos,
+                  "the message says what kind of bad handle it was: " + msg);
             interp.ClearPendingException();
         }
     }

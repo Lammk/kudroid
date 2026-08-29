@@ -998,6 +998,244 @@ int main() {
         }
     }
 
+    // ── getSystemService actually returns the managers ──
+    //
+    // A manager class that exists under framework/ but is not reachable through
+    // getSystemService is, from the app's side, identical to one that was never
+    // written — and the failure is quiet, because the method just answers null.
+    // Minecraft's onCreate did getSystemService(INPUT_METHOD_SERVICE), got null and
+    // threw RuntimeException("Can't get IMM"); the whole Activity launch failed while
+    // InputMethodManager.java had been present the entire time.
+    //
+    // Checking the class list is not enough for the same reason. Each name has to be
+    // asked for, through a real Context, and the answer has to be an instance of the
+    // right type.
+    {
+        DexObject* ctx = NewObject("Landroid/app/ApplicationContext;",
+                                   "(Ljava/lang/String;)V", {Str("com.example.services")},
+                                   "new ApplicationContext for getSystemService");
+        struct ServiceCase {
+            const char* name;        // the string apps pass
+            const char* constant;    // Context.<CONSTANT> that must hold it
+            const char* expect;      // descriptor the result must be an instance of
+            const char* why;
+        };
+        // INPUT_METHOD_SERVICE and ACTIVITY_SERVICE are first: both had their class
+        // shipped with no mapping, and the first one stopped the game.
+        const ServiceCase cases[] = {
+            {"input_method", "INPUT_METHOD_SERVICE",
+             "Landroid/view/inputmethod/InputMethodManager;",
+             "onCreate throws \"Can't get IMM\" on null"},
+            {"activity", "ACTIVITY_SERVICE", "Landroid/app/ActivityManager;",
+             "getMemoryInfo callers"},
+            {"window", "WINDOW_SERVICE", "Landroid/view/WindowManager;", nullptr},
+            {"layout_inflater", "LAYOUT_INFLATER_SERVICE",
+             "Landroid/view/LayoutInflater;", nullptr},
+            {"sensor", "SENSOR_SERVICE", "Landroid/hardware/SensorManager;", nullptr},
+            {"audio", "AUDIO_SERVICE", "Landroid/media/AudioManager;", nullptr},
+            {"vibrator", "VIBRATOR_SERVICE", "Landroid/os/Vibrator;", nullptr},
+            {"connectivity", "CONNECTIVITY_SERVICE",
+             "Landroid/net/ConnectivityManager;", nullptr},
+            {"wifi", "WIFI_SERVICE", "Landroid/net/wifi/WifiManager;", nullptr},
+            {"phone", "TELEPHONY_SERVICE", "Landroid/telephony/TelephonyManager;", nullptr},
+            {"clipboard", "CLIPBOARD_SERVICE", "Landroid/content/ClipboardManager;", nullptr},
+            {"notification", "NOTIFICATION_SERVICE",
+             "Landroid/app/NotificationManager;", nullptr},
+            {"alarm", "ALARM_SERVICE", "Landroid/app/AlarmManager;", nullptr},
+            {"power", "POWER_SERVICE", "Landroid/os/PowerManager;", nullptr},
+            {"keyguard", "KEYGUARD_SERVICE", "Landroid/app/KeyguardManager;", nullptr},
+            {"accessibility", "ACCESSIBILITY_SERVICE",
+             "Landroid/view/accessibility/AccessibilityManager;", nullptr},
+            {"account", "ACCOUNT_SERVICE", "Landroid/accounts/AccountManager;", nullptr},
+            {"appops", "APP_OPS_SERVICE", "Landroid/app/AppOpsManager;", nullptr},
+            {"bluetooth", "BLUETOOTH_SERVICE", "Landroid/bluetooth/BluetoothManager;", nullptr},
+            {"display", "DISPLAY_SERVICE", "Landroid/hardware/display/DisplayManager;", nullptr},
+            {"fingerprint", "FINGERPRINT_SERVICE",
+             "Landroid/hardware/fingerprint/FingerprintManager;", nullptr},
+            {"input", "INPUT_SERVICE", "Landroid/hardware/input/InputManager;", nullptr},
+            {"jobscheduler", "JOB_SCHEDULER_SERVICE", "Landroid/app/job/JobScheduler;", nullptr},
+            {"location", "LOCATION_SERVICE", "Landroid/location/LocationManager;", nullptr},
+            {"shortcut", "SHORTCUT_SERVICE", "Landroid/content/pm/ShortcutManager;", nullptr},
+        };
+
+        DexClass* ctxCls = linker.FindClass("Landroid/content/Context;");
+        for (const ServiceCase& c : cases) {
+            // The constant has to exist and hold the name apps actually pass: code
+            // reads Context.INPUT_METHOD_SERVICE rather than the literal, so a
+            // constant with the wrong value fails in a way the literal would not show.
+            if (ctxCls != nullptr && interp.EnsureInitialized(ctxCls)) {
+                const DexField* f = ctxCls->FindStaticField(c.constant, "Ljava/lang/String;");
+                Check(f != nullptr, std::string("Context.") + c.constant + " exists");
+                if (f != nullptr) {
+                    const DexValue v = ctxCls->static_values[f->offset_or_slot];
+                    auto* s = reinterpret_cast<DexString*>(v.l);
+                    Check(s != nullptr && s->utf8 != nullptr &&
+                              std::strcmp(s->utf8, c.name) == 0,
+                          std::string("Context.") + c.constant + " == \"" + c.name + "\"");
+                }
+            }
+
+            if (ctx == nullptr) continue;
+            DexValue svc;
+            if (!CallVirtual(ctx, "getSystemService",
+                             "(Ljava/lang/String;)Ljava/lang/Object;", {Str(c.name)},
+                             &svc, "getSystemService")) {
+                continue;
+            }
+            const std::string what = std::string("getSystemService(\"") + c.name +
+                                     "\") -> non-null" +
+                                     (c.why != nullptr ? std::string(" (") + c.why + ")" : "");
+            Check(svc.l != nullptr, what);
+            if (svc.l == nullptr) continue;
+
+            // And it has to be the right type: returning some other manager would
+            // pass a null check and then fail on the first method call.
+            DexClass* expect = linker.FindClass(c.expect);
+            DexClass* got = linker.ClassOfObject(svc.l);
+            Check(expect != nullptr && got != nullptr && got->IsSubClassOf(expect),
+                  std::string("  ...and it is a ") + c.expect + ", got " +
+                      (got != nullptr ? got->PrettyName() : "null"));
+        }
+
+        // The IME manager is a process singleton in AOSP and apps compare instances:
+        // they cache what getSystemService returned and expect a later call to reach
+        // the same object, so soft-keyboard state stays consistent.
+        if (ctx != nullptr) {
+            DexValue a, b;
+            if (CallVirtual(ctx, "getSystemService",
+                            "(Ljava/lang/String;)Ljava/lang/Object;", {Str("input_method")},
+                            &a, "getSystemService(input_method) #1") &&
+                CallVirtual(ctx, "getSystemService",
+                            "(Ljava/lang/String;)Ljava/lang/Object;", {Str("input_method")},
+                            &b, "getSystemService(input_method) #2")) {
+                Check(a.l != nullptr && a.l == b.l,
+                      "InputMethodManager is the same instance every time");
+            }
+        }
+
+        // An unknown name still returns null — that is Android's contract and apps
+        // are written to cope — but it must not throw, or a defensive
+        // getSystemService for an optional service would kill the caller.
+        if (ctx != nullptr) {
+            DexValue none;
+            const bool ok = CallVirtual(ctx, "getSystemService",
+                                        "(Ljava/lang/String;)Ljava/lang/Object;",
+                                        {Str("kudroid_no_such_service")}, &none,
+                                        "getSystemService(unknown)");
+            Check(ok && none.l == nullptr,
+                  "an unknown service name returns null without throwing");
+        }
+
+        // The methods Minecraft calls on the IME right after obtaining it. Each one
+        // must answer optimistically: a false from isActive() or showSoftInput()
+        // makes an app disable its own text entry.
+        {
+            DexObject* imm = nullptr;
+            if (ctx != nullptr) {
+                DexValue v;
+                if (CallVirtual(ctx, "getSystemService",
+                                "(Ljava/lang/String;)Ljava/lang/Object;",
+                                {Str("input_method")}, &v, "IMM for method probe")) {
+                    imm = v.l;
+                }
+            }
+            if (imm != nullptr) {
+                DexValue r;
+                if (CallVirtual(imm, "isAcceptingText", "()Z", {}, &r, "isAcceptingText")) {
+                    Check(r.i != 0, "IMM.isAcceptingText() is true");
+                }
+                if (CallVirtual(imm, "isActive", "()Z", {}, &r, "isActive")) {
+                    Check(r.i != 0, "IMM.isActive() is true");
+                }
+                if (CallVirtual(imm, "showSoftInput", "(Landroid/view/View;I)Z",
+                                {DexValue::Ref(nullptr), DexValue::Int(0)}, &r,
+                                "showSoftInput")) {
+                    Check(r.i != 0, "IMM.showSoftInput() reports success");
+                }
+                if (CallVirtual(imm, "hideSoftInputFromWindow", "(Landroid/os/IBinder;I)Z",
+                                {DexValue::Ref(nullptr), DexValue::Int(0)}, &r,
+                                "hideSoftInputFromWindow")) {
+                    Check(r.i != 0, "IMM.hideSoftInputFromWindow() reports success");
+                }
+            }
+        }
+    }
+
+    // ── BaseInputConnection edits a real buffer ──
+    //
+    // Apps subclass it and override only what they need, inheriting the rest, so the
+    // inherited methods have to be correct rather than stubs. It used to be an
+    // auto-generated stub with a no-arg constructor only, which meant the app's
+    // super(view, fullEditor) resolved to an auto-stub and the connection was never
+    // attached to its view.
+    {
+        DexClass* bic = linker.FindClass("Landroid/view/inputmethod/BaseInputConnection;");
+        Check(bic != nullptr && !bic->is_stub, "BaseInputConnection is real, not a stub");
+        if (bic != nullptr && !bic->is_stub) {
+            Check(bic->FindDirectMethod("<init>", "(Landroid/view/View;Z)V") != nullptr,
+                  "BaseInputConnection(View, boolean) exists (apps call it via super)");
+
+            DexClass* ic = linker.FindClass("Landroid/view/inputmethod/InputConnection;");
+            // InputConnection must be an interface: d8 compiles a call through an
+            // InputConnection-typed variable to invoke-interface, and app classes
+            // declare `implements InputConnection`.
+            Check(ic != nullptr && ic->IsInterface(), "InputConnection is an interface");
+            Check(bic->IsSubClassOf(ic), "BaseInputConnection implements InputConnection");
+        }
+
+        DexObject* conn = NewObject("Landroid/view/inputmethod/BaseInputConnection;",
+                                    "(Landroid/view/View;Z)V",
+                                    {DexValue::Ref(nullptr), DexValue::Int(1)},
+                                    "new BaseInputConnection(null, true)");
+        if (conn != nullptr) {
+            DexValue r;
+            // commitText then read it back: this is the round trip an IME performs,
+            // and a stubbed getTextBeforeCursor returning null would make the IME
+            // believe the field is empty and re-send everything.
+            if (CallVirtual(conn, "commitText", "(Ljava/lang/CharSequence;I)Z",
+                            {Str("hello"), DexValue::Int(1)}, &r, "commitText")) {
+                Check(r.i != 0, "commitText returns true");
+            }
+            if (CallVirtual(conn, "getTextBeforeCursor", "(II)Ljava/lang/CharSequence;",
+                            {DexValue::Int(5), DexValue::Int(0)}, &r,
+                            "getTextBeforeCursor")) {
+                DexValue str;
+                if (r.l != nullptr &&
+                    CallVirtual(r.l, "toString", "()Ljava/lang/String;", {}, &str,
+                                "toString of text before cursor")) {
+                    Check(std::strcmp(Utf8Of(str), "hello") == 0,
+                          std::string("getTextBeforeCursor returns what was committed,"
+                                      " got \"") + Utf8Of(str) + "\"");
+                }
+            }
+            // deleteSurroundingText has to move the cursor as well as the text; getting
+            // the order wrong (deleting before the selection first) corrupts offsets.
+            if (CallVirtual(conn, "deleteSurroundingText", "(II)Z",
+                            {DexValue::Int(2), DexValue::Int(0)}, &r,
+                            "deleteSurroundingText")) {
+                Check(r.i != 0, "deleteSurroundingText returns true");
+            }
+            if (CallVirtual(conn, "getTextBeforeCursor", "(II)Ljava/lang/CharSequence;",
+                            {DexValue::Int(5), DexValue::Int(0)}, &r,
+                            "getTextBeforeCursor after delete")) {
+                DexValue str;
+                if (r.l != nullptr &&
+                    CallVirtual(r.l, "toString", "()Ljava/lang/String;", {}, &str,
+                                "toString after delete")) {
+                    Check(std::strcmp(Utf8Of(str), "hel") == 0,
+                          std::string("deleting 2 before the cursor leaves \"hel\","
+                                      " got \"") + Utf8Of(str) + "\"");
+                }
+            }
+            // Nothing is selected, so this must be null rather than "" — an IME uses
+            // the distinction to decide whether a commit replaces or inserts.
+            if (CallVirtual(conn, "getSelectedText", "(I)Ljava/lang/CharSequence;",
+                            {DexValue::Int(0)}, &r, "getSelectedText")) {
+                Check(r.l == nullptr, "getSelectedText is null when nothing is selected");
+            }
+        }
+    }
+
     std::printf("  executed %llu instructions\n",
                 static_cast<unsigned long long>(interp.instructions_executed()));
 

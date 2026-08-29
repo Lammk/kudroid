@@ -46,6 +46,7 @@ jobs:
                      test_kuart_jni test_kuart_exc test_kuart_reflect test_kuart_libcore \
                      test_kuart_filled_array test_kuart_jni_float test_kuart_stub \
                      test_kuart_framework test_kuart_missing_field \
+                     test_kuart_thread_state \
                      test_manifest_parse test_manifest_text test_memory_info
 
       - name: Run KuART tests
@@ -56,6 +57,7 @@ jobs:
                    test_kuart_jni test_kuart_exc test_kuart_reflect test_kuart_libcore \
                    test_kuart_filled_array test_kuart_jni_float test_kuart_stub \
                    test_kuart_framework test_kuart_missing_field \
+                   test_kuart_thread_state \
                    test_manifest_parse test_manifest_text test_memory_info; do
             echo "──────── $t ────────"
             if ./$t; then echo "PASS $t"; else echo "FAIL $t"; fail=1; fi

@@ -2,11 +2,13 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <fstream>
 #include <mutex>
 #include <set>
+#include <string>
 
 #include "dex/class_accessor-inl.h"
 #include "dex/code_item_accessors-inl.h"
@@ -606,6 +608,50 @@ DexClass* DexClassLinker::ClassOfObject(const DexObject* obj) const {
     // Validate what came out: a stale handle can carry any bit pattern, and a
     // non-null one passes the usual null check only to fault on first use.
     return IsRegisteredClass(klass) ? klass : nullptr;
+}
+
+DexClassLinker::BadReceiver DexClassLinker::ClassifyObject(const DexObject* obj) const {
+    if (obj == nullptr) return BadReceiver::kNull;
+    if (live_classes_.count(reinterpret_cast<const DexClass*>(obj)) != 0) {
+        return BadReceiver::kIsAClass;
+    }
+    DexClass* klass = obj->clazz;
+    if (klass == nullptr) return BadReceiver::kNullClass;
+    if (!IsRegisteredClass(klass)) return BadReceiver::kUnknownClass;
+    return BadReceiver::kOk;
+}
+
+std::string DexClassLinker::DescribeBadReceiver(const DexObject* obj) const {
+    char buf[128];
+    switch (ClassifyObject(obj)) {
+        case BadReceiver::kOk:
+            return "the receiver is valid";
+        case BadReceiver::kNull:
+            return "receiver is null";
+        case BadReceiver::kIsAClass: {
+            // Name the class, since we know exactly which one was passed. This is the
+            // "raftpe/" shape: reading clazz off it would have yielded the descriptor.
+            const auto* as_class = reinterpret_cast<const DexClass*>(obj);
+            std::snprintf(buf, sizeof(buf),
+                          "receiver is the CLASS %s, not an instance of it"
+                          " (a jclass was passed where a jobject was expected)",
+                          as_class->descriptor != nullptr ? as_class->descriptor : "?");
+            return buf;
+        }
+        case BadReceiver::kNullClass:
+            std::snprintf(buf, sizeof(buf),
+                          "receiver %p has clazz=null (allocated but never initialised)",
+                          static_cast<const void*>(obj));
+            return buf;
+        case BadReceiver::kUnknownClass:
+            std::snprintf(buf, sizeof(buf),
+                          "receiver %p has clazz=%p, which is not a class this runtime"
+                          " created (stale or fabricated JNI handle)",
+                          static_cast<const void*>(obj),
+                          static_cast<const void*>(obj->clazz));
+            return buf;
+    }
+    return "receiver is unusable";
 }
 
 }  // namespace kuart

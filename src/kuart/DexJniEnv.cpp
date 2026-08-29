@@ -1,11 +1,15 @@
 #include "kudroid/kuart/DexJniEnv.h"
 
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <set>
 
 #include "dex/dex_file-inl.h"
 #include "dex/modifiers.h"
 
+#include "kudroid/kuart/DexClassLinker.h"
 #include "kudroid/kuart/LibCore.h"
 
 namespace kudroid {
@@ -349,6 +353,24 @@ DexValue DexJniEnv::CallJavaA(DexObject* receiver, DexMethod* method, const jval
         if (DexClass* receiver_class = linker_->ClassOfObject(receiver)) {
             DexMethod* found = receiver_class->FindVirtualMethod(method->name, method->signature);
             if (found != nullptr) method = found;
+        } else {
+            // Report it once per method: silently degrading to a non-virtual call
+            // hides that a library is handing over bad handles, and the wrong
+            // override may then run for the rest of the session.
+            static std::mutex s_mtx;
+            static std::set<const DexMethod*> s_reported;
+            bool first = false;
+            {
+                std::lock_guard<std::mutex> lock(s_mtx);
+                first = s_reported.insert(method).second;
+            }
+            if (first) {
+                std::fprintf(stderr,
+                             "[KuART][JNI] ⚠ virtual dispatch skipped for %s%s: %s\n",
+                             method->name != nullptr ? method->name : "?",
+                             method->signature != nullptr ? method->signature : "",
+                             linker_->DescribeBadReceiver(receiver).c_str());
+            }
         }
     }
 

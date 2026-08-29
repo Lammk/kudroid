@@ -459,11 +459,21 @@ bool Interpreter::InvokeMethod(DexFrame* frame, const art::Instruction* inst, bo
                 receiver_class->FindVirtualMethod(target->name, target->signature);
             if (resolved != nullptr) target = resolved;
         } else if (receiver != nullptr) {
-            ThrowException("Ljava/lang/IllegalStateException;",
-                           std::string("invoke ") +
-                               (target->name != nullptr ? target->name : "?") +
-                               " on an object with an invalid class pointer"
-                               " (receiver came from native code)");
+            // Name the declaring class of the method that was called as well as what
+            // was wrong with the receiver. Both halves are needed: the message
+            // "invoke getSystemService on an object with an invalid class pointer"
+            // identified neither which Context-like class was expected nor what the
+            // bad pointer was, so the origin of the 0x10 could not be worked out.
+            std::string detail = "invoke ";
+            if (target->declaring_class != nullptr) {
+                detail += target->declaring_class->PrettyName();
+                detail += ".";
+            }
+            detail += target->name != nullptr ? target->name : "?";
+            if (target->signature != nullptr) detail += target->signature;
+            detail += " — ";
+            detail += linker_->DescribeBadReceiver(receiver);
+            ThrowException("Ljava/lang/IllegalStateException;", detail);
             return false;
         }
     }

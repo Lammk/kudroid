@@ -59,6 +59,17 @@ FIELD_PATTERN = re.compile(
     r"MISSING_FRAMEWORK(?:_CLASS)?_FIELD:\s*([A-Za-z0-9_$.]+)\.([A-Za-z0-9_$]+)\s*:\s*(\S+)"
 )
 
+# Service names getSystemService() had no manager for.
+#
+# Separate from a missing class because the class is usually already there — only the
+# mapping in Context.getSystemService is absent, which is indistinguishable from the
+# outside and just as fatal. Minecraft asked for "input_method", got null, and threw
+# RuntimeException("Can't get IMM") while InputMethodManager.java was present all
+# along. Nothing appeared in any log, because a null return is a legal answer.
+#
+# Format: MISSING_SYSTEM_SERVICE: getSystemService("name") -> null
+SERVICE_PATTERN = re.compile(r'MISSING_SYSTEM_SERVICE:\s*getSystemService\("([^"]+)"\)')
+
 # Descriptors ending in '$' + digits are anonymous classes; a stub cannot stand in
 # for one because only the code that created it ever names it.
 ANONYMOUS_INNER = re.compile(r"\$\d+$")
@@ -133,6 +144,42 @@ def java_type_of(descriptor):
     else:
         base = descriptor
     return base + "[]" * arrays
+
+
+def parse_missing_services(log_path):
+    """Return service names getSystemService() answered null for, first-seen order."""
+    names = []
+    seen = set()
+    with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            m = SERVICE_PATTERN.search(line)
+            if not m:
+                continue
+            name = m.group(1).strip()
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+    return names
+
+
+def report_missing_services(names):
+    """Print the service names to wire up.
+
+    Not automated for the same reason as fields: the branch has to construct the
+    right manager, and roughly half of them are process singletons that apps compare
+    by identity — handing out a fresh instance per call is a different bug, not a fix.
+    """
+    if not names:
+        return
+    print(f"\n{len(names)} system service(s) returned null.")
+    print("The manager class often already exists under framework/ — only the mapping\n"
+          "in Context.getSystemService is missing, which an app cannot tell apart from\n"
+          "the class being absent.")
+    for name in sorted(names):
+        print(f'      if (name.equals("{name}")) return new /* manager */();')
+    print("\nAdd the constant next to the others in framework/android/content/Context.java,\n"
+          "then a branch in getSystemService. Managers apps compare by identity (the IME\n"
+          "manager, for one) need a holder so every call returns the same instance.")
 
 
 def report_missing_fields(fields):
@@ -253,8 +300,19 @@ def main():
     prefixes = tuple(args.only) if args.only else BOOT_PACKAGE_PREFIXES
 
     names = parse_log(log_path)
+    fields = parse_missing_fields(log_path)
+    services = parse_missing_services(log_path)
+
     if not names:
-        print(f"No MISSING_FRAMEWORK_CLASS entries in {log_path} — nothing to do.")
+        # Still report the other two kinds. An early return here meant a log with no
+        # missing CLASS entries printed "nothing to do" and dropped the missing fields
+        # and services on the floor — which is the common case once the class set is
+        # complete, and exactly the case that hid the IMM failure.
+        print(f"No MISSING_FRAMEWORK_CLASS entries in {log_path}.")
+        report_missing_fields(fields)
+        report_missing_services(services)
+        if not fields and not services:
+            print("Nothing to do.")
         return
 
     groups, skipped = group_by_top_level(names, prefixes)
@@ -292,7 +350,8 @@ def main():
         print("Next: run framework/build.sh to rebuild framework.dex, then fill in the "
               "method bodies that the app actually needs.")
 
-    report_missing_fields(parse_missing_fields(log_path))
+    report_missing_fields(fields)
+    report_missing_services(services)
 
 
 if __name__ == "__main__":

@@ -17,11 +17,13 @@ import java.io.IOException;
 
 public abstract class Context {
     public static final String VIBRATOR_SERVICE = "vibrator";
+    public static final String VIBRATOR_MANAGER_SERVICE = "vibrator_manager";
     public static final String SENSOR_SERVICE = "sensor";
     public static final String AUDIO_SERVICE = "audio";
     public static final String CONNECTIVITY_SERVICE = "connectivity";
     public static final String WIFI_SERVICE = "wifi";
     public static final String TELEPHONY_SERVICE = "phone";
+    public static final String TELEPHONY_SUBSCRIPTION_SERVICE = "telephony_subscription_service";
     public static final String CLIPBOARD_SERVICE = "clipboard";
     public static final String NOTIFICATION_SERVICE = "notification";
     public static final String ALARM_SERVICE = "alarm";
@@ -29,6 +31,30 @@ public abstract class Context {
     public static final String KEYGUARD_SERVICE = "keyguard";
     public static final String WINDOW_SERVICE = "window";
     public static final String LAYOUT_INFLATER_SERVICE = "layout_inflater";
+
+    /**
+     * The soft keyboard service.
+     *
+     * Its absence is what stopped Minecraft: MainActivity.onCreate does
+     * {@code getSystemService(INPUT_METHOD_SERVICE)} and throws
+     * {@code RuntimeException("Can't get IMM")} when the result is null. The class
+     * itself existed all along — only this mapping was missing, so onCreate died and
+     * ActivityThread drew its diagnostic screen instead of the game.
+     */
+    public static final String INPUT_METHOD_SERVICE = "input_method";
+
+    public static final String ACTIVITY_SERVICE = "activity";
+    public static final String ACCESSIBILITY_SERVICE = "accessibility";
+    public static final String ACCOUNT_SERVICE = "account";
+    public static final String APP_OPS_SERVICE = "appops";
+    public static final String BLUETOOTH_SERVICE = "bluetooth";
+    public static final String DISPLAY_SERVICE = "display";
+    public static final String FINGERPRINT_SERVICE = "fingerprint";
+    public static final String INPUT_SERVICE = "input";
+    public static final String JOB_SCHEDULER_SERVICE = "jobscheduler";
+    public static final String LOCATION_SERVICE = "location";
+    public static final String SHORTCUT_SERVICE = "shortcut";
+    public static final String GRAMMATICAL_INFLECTION_SERVICE = "grammatical_inflection";
 
     public abstract AssetManager getAssets();
     public abstract Resources getResources();
@@ -40,13 +66,36 @@ public abstract class Context {
     public abstract File getExternalCacheDir();
     public abstract SharedPreferences getSharedPreferences(String name, int mode);
 
+    /**
+     * Names asked for that KuDroid has no manager for, reported once each.
+     *
+     * A null return from getSystemService is the quietest possible failure: the app
+     * either dereferences it and dies somewhere unrelated, or throws its own opaque
+     * message — "Can't get IMM" says nothing about which service name was involved
+     * or that the class was actually present. Naming the miss turns each of these
+     * into a one-line fix instead of a debugging session.
+     */
+    private static final java.util.Set<String> sReportedMissingServices =
+            java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+
+    /**
+     * The manager object for a service name, or null when there is none.
+     *
+     * Every branch here has to stay in step with the classes under framework/: a
+     * manager class that exists but is not reachable through this method is
+     * indistinguishable, from the app's side, from one that was never written.
+     * INPUT_METHOD_SERVICE and ACTIVITY_SERVICE were both in that state — the
+     * classes shipped, the mapping did not.
+     */
     public Object getSystemService(String name) {
         if (name == null) return null;
+
         if (name.equals(WINDOW_SERVICE)) return new android.view.WindowManagerImpl();
         if (name.equals(LAYOUT_INFLATER_SERVICE)) return android.view.LayoutInflater.from(this);
-        if (name.equals(SENSOR_SERVICE) || name.equals("sensor")) return new SystemSensorManager();
-        if (name.equals(AUDIO_SERVICE) || name.equals("audio")) return new android.media.AudioManager();
-        if (name.equals(VIBRATOR_SERVICE) || name.equals("vibrator")) return new SystemVibrator();
+        if (name.equals(INPUT_METHOD_SERVICE)) return InputMethodManagerHolder.get();
+        if (name.equals(SENSOR_SERVICE)) return new SystemSensorManager();
+        if (name.equals(AUDIO_SERVICE)) return new android.media.AudioManager();
+        if (name.equals(VIBRATOR_SERVICE)) return new SystemVibrator();
         if (name.equals(CONNECTIVITY_SERVICE)) return new android.net.ConnectivityManager();
         if (name.equals(WIFI_SERVICE)) return new android.net.wifi.WifiManager();
         if (name.equals(TELEPHONY_SERVICE)) return new android.telephony.TelephonyManager();
@@ -55,7 +104,70 @@ public abstract class Context {
         if (name.equals(ALARM_SERVICE)) return new android.app.AlarmManager();
         if (name.equals(POWER_SERVICE)) return new android.os.PowerManager();
         if (name.equals(KEYGUARD_SERVICE)) return new android.app.KeyguardManager();
+
+        // Managers that shipped under framework/ without ever being reachable.
+        if (name.equals(ACTIVITY_SERVICE)) return new android.app.ActivityManager();
+        if (name.equals(ACCESSIBILITY_SERVICE)) {
+            return android.view.accessibility.AccessibilityManager.getInstance(this);
+        }
+        if (name.equals(ACCOUNT_SERVICE)) return android.accounts.AccountManager.get(this);
+        if (name.equals(APP_OPS_SERVICE)) return new android.app.AppOpsManager();
+        if (name.equals(BLUETOOTH_SERVICE)) return new android.bluetooth.BluetoothManager();
+        if (name.equals(DISPLAY_SERVICE)) return new android.hardware.display.DisplayManager();
+        if (name.equals(FINGERPRINT_SERVICE)) {
+            return new android.hardware.fingerprint.FingerprintManager();
+        }
+        if (name.equals(INPUT_SERVICE)) return new android.hardware.input.InputManager();
+        if (name.equals(JOB_SCHEDULER_SERVICE)) return new android.app.job.JobScheduler();
+        if (name.equals(LOCATION_SERVICE)) return new android.location.LocationManager();
+        if (name.equals(SHORTCUT_SERVICE)) return new android.content.pm.ShortcutManager();
+        if (name.equals(TELEPHONY_SUBSCRIPTION_SERVICE)) {
+            return new android.telephony.SubscriptionManager(this);
+        }
+        if (name.equals(GRAMMATICAL_INFLECTION_SERVICE)) {
+            return new android.app.GrammaticalInflectionManager();
+        }
+        // VibratorManager wraps a Vibrator on Android 12+; apps target either.
+        if (name.equals(VIBRATOR_MANAGER_SERVICE)) return new SystemVibrator();
+
+        reportUnknownService(name);
         return null;
+    }
+
+    /**
+     * Name a service KuDroid does not provide, once per distinct name.
+     *
+     * Deliberately not an exception: Android returns null for a service the device
+     * does not have and apps are written to cope, so throwing would break code that
+     * is behaving correctly. The log line is the whole remedy.
+     */
+    private static void reportUnknownService(String name) {
+        if (!sReportedMissingServices.add(name)) return;
+        android.util.Log.w("Context",
+                "MISSING_SYSTEM_SERVICE: getSystemService(\"" + name + "\") -> null"
+                + " (no manager for this name; add it to Context.getSystemService)");
+    }
+
+    /**
+     * One InputMethodManager per process.
+     *
+     * AOSP's is a singleton and apps rely on that: they cache the instance, compare
+     * it against a later getSystemService result, and route all soft-keyboard state
+     * through the one object. Handing out a fresh instance per call would make
+     * showSoftInput and the InputConnection disagree about what is focused.
+     *
+     * A holder class rather than a static field on Context, so the instance is
+     * created on first use — Context is initialised long before any input exists.
+     */
+    private static final class InputMethodManagerHolder {
+        private static android.view.inputmethod.InputMethodManager sInstance;
+
+        static synchronized android.view.inputmethod.InputMethodManager get() {
+            if (sInstance == null) {
+                sInstance = android.view.inputmethod.InputMethodManager.getInstance();
+            }
+            return sInstance;
+        }
     }
 
     public CharSequence getText(int resId) {

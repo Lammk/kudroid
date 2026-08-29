@@ -1270,7 +1270,7 @@ struct APKInstallerView: View {
                             .background(Color.green.opacity(0.15))
                             .cornerRadius(6)
                             
-                            Text("Extracting assets, translating DEX bytecode & linking native ARM64 libraries...")
+                            Text("Extracting assets, parsing package manifest & linking native ARM64 libraries...")
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
                                 .multilineTextAlignment(.center)
@@ -1356,7 +1356,7 @@ struct APKInstallerView: View {
         guard let selectedAPK else { return }
         withAnimation {
             isInstalling = true
-            installStep = "Compiling DEX file & installing \(selectedAPK.lastPathComponent)..."
+            installStep = "Installing \(selectedAPK.lastPathComponent)..."
         }
         
         DispatchQueue.global(qos: .userInitiated).async {
