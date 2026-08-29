@@ -18,6 +18,7 @@
 #include <sched.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/time.h>
 #include <sys/uio.h>
 #include <sys/mman.h>
@@ -749,14 +750,39 @@ static int translate_linux_dirfd(int dirfd) {
     return dirfd;
 }
 
+// True when an *at() call's path should go through the remapper.
+//
+// A relative path is resolved by the kernel against `dirfd`, so remapping it is wrong
+// twice over: remap() would treat it as a stray relative path and root it under
+// data/local/tmp, and the kernel would then resolve that already-absolute result
+// against dirfd anyway. The guest's intent — "this name, inside the directory I already
+// opened" — is preserved by leaving it alone, because the fd it names was itself
+// obtained through a remapped open.
+//
+// AT_FDCWD is the exception: there is no directory fd, so a relative path is relative to
+// the process working directory, and remap() rooting it inside the VFS is the correct
+// interpretation of what the guest asked for.
+static bool at_path_needs_remap(int dirfd, const char* pathname) {
+    if (pathname == nullptr || *pathname == '\0') return false;
+    if (pathname[0] == '/') return true;
+    return translate_linux_dirfd(dirfd) == AT_FDCWD;
+}
+
 extern "C" int bionic_openat(int dirfd, const char* pathname, int flags, mode_t mode) {
     if (!pathname) return -1;
-    const std::string remapped = kudroid::VFSPathRemapper::getInstance().remap(pathname);
     const int host_dirfd = translate_linux_dirfd(dirfd);
+    const bool remapPath = at_path_needs_remap(dirfd, pathname);
+    const std::string remapped =
+        remapPath ? kudroid::VFSPathRemapper::getInstance().remap(pathname)
+                  : std::string(pathname);
     const int host_flags = translate_linux_open_flags(flags);
     if (host_flags & O_CREAT) {
         std::error_code ec;
-        std::filesystem::create_directories(std::filesystem::path(remapped).parent_path(), ec);
+        // Only meaningful for an absolute result; for a path relative to dirfd the
+        // parent is the directory the fd already refers to, which exists by definition.
+        if (remapPath) {
+            std::filesystem::create_directories(std::filesystem::path(remapped).parent_path(), ec);
+        }
     }
     return ::openat(host_dirfd, remapped.c_str(), host_flags, mode);
 }
@@ -791,7 +817,10 @@ extern "C" int bionic_newfstatat(int dirfd, const char* pathname, struct bionic_
     int res = 0;
     const int host_dirfd = translate_linux_dirfd(dirfd);
     if (pathname && *pathname) {
-        const std::string remapped = kudroid::VFSPathRemapper::getInstance().remap(pathname);
+        const std::string remapped =
+            at_path_needs_remap(dirfd, pathname)
+                ? kudroid::VFSPathRemapper::getInstance().remap(pathname)
+                : std::string(pathname);
         res = ::fstatat(host_dirfd, remapped.c_str(), &host_st, flags);
     } else {
         res = ::fstat(dirfd, &host_st);
@@ -825,6 +854,67 @@ extern "C" int bionic_newfstatat(int dirfd, const char* pathname, struct bionic_
     statbuf->__st_ctime_nsec = host_st.st_ctim.tv_nsec;
 #endif
     return 0;
+}
+
+// bionic's struct statfs for arm64. Darwin's is a different shape and a different size,
+// so forwarding the guest's buffer to ::statfs would have it read f_bsize out of what is
+// actually f_type, and f_blocks out of padding.
+//
+// Apps ask this before writing anything substantial — Minecraft checks free space before
+// downloading a world, installers check before unpacking — and a garbage answer reads as
+// "disk full" or, worse, as a huge amount of free space followed by a failed write.
+struct bionic_statfs64 {
+    uint64_t f_type;
+    uint64_t f_bsize;
+    uint64_t f_blocks;
+    uint64_t f_bfree;
+    uint64_t f_bavail;
+    uint64_t f_files;
+    uint64_t f_ffree;
+    struct { int32_t val[2]; } f_fsid;
+    uint64_t f_namelen;
+    uint64_t f_frsize;
+    uint64_t f_flags;
+    uint64_t f_spare[4];
+};
+
+static int fill_bionic_statfs(const struct statvfs& src, struct bionic_statfs64* dst) {
+    memset(dst, 0, sizeof(*dst));
+    // EXT4_SUPER_MAGIC. The value matters: apps branch on f_type to decide whether a
+    // path is on external storage, and an unrecognised filesystem is treated as
+    // read-only by some of them.
+    dst->f_type = 0xEF53u;
+    dst->f_bsize = src.f_bsize;
+    dst->f_frsize = src.f_frsize != 0 ? src.f_frsize : src.f_bsize;
+    dst->f_blocks = src.f_blocks;
+    dst->f_bfree = src.f_bfree;
+    dst->f_bavail = src.f_bavail;
+    dst->f_files = src.f_files;
+    dst->f_ffree = src.f_ffree;
+    dst->f_namelen = src.f_namemax;
+    dst->f_flags = src.f_flag;
+    return 0;
+}
+
+extern "C" int bionic_statfs(const char* path, struct bionic_statfs64* buf) {
+    if (!path || !buf) {
+        errno = EFAULT;
+        return -1;
+    }
+    const std::string remapped = kudroid::VFSPathRemapper::getInstance().remap(path);
+    struct statvfs host {};
+    if (::statvfs(remapped.c_str(), &host) != 0) return -1;
+    return fill_bionic_statfs(host, buf);
+}
+
+extern "C" int bionic_fstatfs(int fd, struct bionic_statfs64* buf) {
+    if (!buf) {
+        errno = EFAULT;
+        return -1;
+    }
+    struct statvfs host {};
+    if (::fstatvfs(fd, &host) != 0) return -1;
+    return fill_bionic_statfs(host, buf);
 }
 
 // Kim tra trong bionic_mmap: fd ashmem ch map c vi prot c cp
@@ -1392,15 +1482,23 @@ extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_
         case 34: { // mkdirat
             const char* path = reinterpret_cast<const char*>(a2);
             if (!path) return -1;
-            const std::string remapped = kudroid::VFSPathRemapper::getInstance().remap(path);
-            const int host_dirfd = translate_linux_dirfd(static_cast<int>(a1));
+            const int dirfd = static_cast<int>(a1);
+            const std::string remapped =
+                at_path_needs_remap(dirfd, path)
+                    ? kudroid::VFSPathRemapper::getInstance().remap(path)
+                    : std::string(path);
+            const int host_dirfd = translate_linux_dirfd(dirfd);
             return ::mkdirat(host_dirfd, remapped.c_str(), static_cast<mode_t>(a3));
         }
         case 35: { // unlinkat
             const char* path = reinterpret_cast<const char*>(a2);
             if (!path) return -1;
-            const std::string remapped = kudroid::VFSPathRemapper::getInstance().remap(path);
-            const int host_dirfd = translate_linux_dirfd(static_cast<int>(a1));
+            const int dirfd = static_cast<int>(a1);
+            const std::string remapped =
+                at_path_needs_remap(dirfd, path)
+                    ? kudroid::VFSPathRemapper::getInstance().remap(path)
+                    : std::string(path);
+            const int host_dirfd = translate_linux_dirfd(dirfd);
             return ::unlinkat(host_dirfd, remapped.c_str(), static_cast<int>(a3));
         }
         case 46: // ftruncate
@@ -2458,8 +2556,8 @@ extern "C" int bionic_epoll_ctl(int epfd, int op, int fd, void *event_ptr) {
         kevent(epfd, &changes[0], 1, NULL, 0, NULL);
         kevent(epfd, &changes[1], 1, NULL, 0, NULL);
         return 0;
-    } 
-    
+    }
+
     uint16_t base_flags = EV_ADD;
     uint32_t ep_events = event->events;
     void* udata = reinterpret_cast<void*>(event->data);
@@ -4255,6 +4353,12 @@ const SymbolEntry kSyscallSymbols[] = {
     {"unlink", reinterpret_cast<void*>(&vfs_unlink)},
     {"remove", reinterpret_cast<void*>(&vfs_remove)},
     {"rename", reinterpret_cast<void*>(&vfs_rename)},
+    // Free-space queries. statfs64/fstatfs64 are the same call on arm64 (bionic defines
+    // both names against one 64-bit layout), so they share an implementation.
+    {"statfs", reinterpret_cast<void*>(&bionic_statfs)},
+    {"statfs64", reinterpret_cast<void*>(&bionic_statfs)},
+    {"fstatfs", reinterpret_cast<void*>(&bionic_fstatfs)},
+    {"fstatfs64", reinterpret_cast<void*>(&bionic_fstatfs)},
     {"ioctl", reinterpret_cast<void*>(&bionic_ioctl)},
     {"prctl", reinterpret_cast<void*>(&bionic_prctl)},
     {"uname", reinterpret_cast<void*>(&bionic_uname)},
@@ -4277,6 +4381,12 @@ const SymbolEntry kSyscallSymbols[] = {
     {"rmdir", reinterpret_cast<void*>(&vfs_rmdir)},
     {"opendir", reinterpret_cast<void*>(&vfs_opendir)},
     {"readdir", reinterpret_cast<void*>(&vfs_readdir)},
+    // readdir64 is a distinct symbol in bionic and the one 64-bit guest code is built
+    // against. Left unshimmed it resolved through dlsym to Darwin's readdir, whose
+    // struct dirent has a different layout — d_name lands at the wrong offset, so the
+    // guest reads filenames out of the middle of other fields and sees garbage rather
+    // than an error.
+    {"readdir64", reinterpret_cast<void*>(&vfs_readdir)},
     {"closedir", reinterpret_cast<void*>(&vfs_closedir)},
     {"readlink", reinterpret_cast<void*>(&vfs_readlink)},
     {"realpath", reinterpret_cast<void*>(&vfs_realpath)},

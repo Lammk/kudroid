@@ -66,6 +66,22 @@ public abstract class Context {
     public abstract File getExternalCacheDir();
     public abstract SharedPreferences getSharedPreferences(String name, int mode);
 
+    // Declared here because resolution walks the class hierarchy, and ApplicationContext
+    // implementing them is not enough on its own: a caller holding an Activity resolves
+    // against Activity -> ContextWrapper -> Context, so a method missing from those two
+    // is a NoSuchMethodError even though the implementation exists further down.
+    //
+    // That is not hypothetical. GameActivity.onCreate calls getObbDir(), which threw
+    // NoSuchMethodError and aborted Activity creation for Minecraft — the game then sat
+    // on a black screen because the Looper was running an Activity that never finished
+    // being created. The other four are on the same path and would each have been the
+    // next launch to fail.
+    public abstract File getObbDir();
+    public abstract File getDir(String name, int mode);
+    public abstract File getDatabasePath(String name);
+    public abstract File getCodeCacheDir();
+    public abstract File getNoBackupFilesDir();
+
     /**
      * Names asked for that KuDroid has no manager for, reported once each.
      *

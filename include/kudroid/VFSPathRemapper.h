@@ -2,6 +2,7 @@
 
 #include <cstdio>
 #include <dirent.h>
+#include <mutex>
 #include <string>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -15,13 +16,28 @@ public:
     void setDocumentsDirectory(const std::string& documentsDirectory);
     [[nodiscard]] std::string remap(const char* originalPath) const;
     [[nodiscard]] const std::string& androidRoot() const { return androidRoot_; }
+
+    // Create the Android directory tree and the pseudo-files, once.
+    //
+    // Repeat calls return the first result without touching the filesystem. This is
+    // not an optimisation detail: getInstance() calls this, every vfs_* function calls
+    // getInstance(), so without the guard each guest open/stat/fopen rebuilt 24
+    // directories and rewrote 30 pseudo-files — 0.7 ms per file operation against 2.4 us
+    // for the remap itself, plus continuous writes to files the guest may be reading.
     [[nodiscard]] bool initialize();
     [[nodiscard]] bool init_pseudo_files();
 
 private:
     VFSPathRemapper();
+    // Does the work initialize() guards. Called with initMutex_ held.
+    bool initializeLocked();
+
     std::string documentsDirectory_;
     std::string androidRoot_;
+
+    mutable std::mutex initMutex_;
+    bool initialized_ = false;
+    bool initResult_ = false;
 };
 
 int vfs_open(const char* path, int flags, mode_t mode = 0);

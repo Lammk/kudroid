@@ -89,23 +89,28 @@ public class ApplicationContext extends Context {
         return new android.content.SharedPreferencesImpl(name);
     }
 
+    @Override
     public File getDir(String name, int mode) {
         return ensure(new File("/data/data/" + mPackageName + "/app_" + name));
     }
 
+    @Override
     public File getDatabasePath(String name) {
         ensure(new File("/data/data/" + mPackageName + "/databases"));
         return new File("/data/data/" + mPackageName + "/databases/" + name);
     }
 
+    @Override
     public File getObbDir() {
         return ensure(new File("/sdcard/Android/obb/" + mPackageName));
     }
 
+    @Override
     public File getCodeCacheDir() {
         return ensure(new File("/data/data/" + mPackageName + "/code_cache"));
     }
 
+    @Override
     public File getNoBackupFilesDir() {
         return ensure(new File("/data/data/" + mPackageName + "/no_backup"));
     }

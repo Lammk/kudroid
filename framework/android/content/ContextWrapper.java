@@ -26,6 +26,15 @@ public class ContextWrapper extends Context {
     public File getCacheDir() { return mBase != null ? mBase.getCacheDir() : new File("/data/data/com.kudroid.app/cache"); }
     public File getExternalFilesDir(String type) { return mBase != null ? mBase.getExternalFilesDir(type) : new File("/sdcard/Android/data/com.kudroid.app/files"); }
     public File getExternalCacheDir() { return mBase != null ? mBase.getExternalCacheDir() : new File("/sdcard/Android/data/com.kudroid.app/cache"); }
+
+    // Delegate like the rest. The fallbacks mirror ApplicationContext's layout so a
+    // wrapper built without a base context still returns a usable path instead of null:
+    // callers chain straight off these (new File(getObbDir(), "x")) and would NPE.
+    public File getObbDir() { return mBase != null ? mBase.getObbDir() : new File("/sdcard/Android/obb/com.kudroid.app"); }
+    public File getDir(String name, int mode) { return mBase != null ? mBase.getDir(name, mode) : new File("/data/data/com.kudroid.app/app_" + name); }
+    public File getDatabasePath(String name) { return mBase != null ? mBase.getDatabasePath(name) : new File("/data/data/com.kudroid.app/databases/" + name); }
+    public File getCodeCacheDir() { return mBase != null ? mBase.getCodeCacheDir() : new File("/data/data/com.kudroid.app/code_cache"); }
+    public File getNoBackupFilesDir() { return mBase != null ? mBase.getNoBackupFilesDir() : new File("/data/data/com.kudroid.app/no_backup"); }
     public SharedPreferences getSharedPreferences(String name, int mode) { return mBase != null ? mBase.getSharedPreferences(name, mode) : new SharedPreferencesImpl(name); }
     public Object getSystemService(String name) { return mBase != null ? mBase.getSystemService(name) : super.getSystemService(name); }
     public int checkSelfPermission(String permission) { return mBase != null ? mBase.checkSelfPermission(permission) : PackageManager.PERMISSION_GRANTED; }

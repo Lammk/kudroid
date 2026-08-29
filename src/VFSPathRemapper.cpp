@@ -49,10 +49,60 @@ std::string defaultDocumentsDirectory() {
     return ".";
 }
 
+// Resolve ".", ".." and duplicate separators without touching the filesystem.
+//
+// This has to happen BEFORE the path is joined to android_root, because the kernel
+// resolves ".." after the join: "/data/data/../../../../etc/passwd" concatenated onto
+// the root walks straight out of it and lands in the real iOS container. Guests produce
+// such paths routinely (asset names taken from zip entries, config strings), and a
+// hostile APK can produce them deliberately.
+//
+// Done on the string rather than with std::filesystem::weakly_canonical because that
+// consults the filesystem and follows symlinks — and android_root deliberately contains
+// symlinks that point outside itself (proc/self/fd -> /dev/fd), so canonicalising would
+// defeat the containment this exists to provide.
+//
+// A ".." that would climb above the top of an absolute path is dropped, which is what
+// the kernel does at "/" as well.
+std::string normalizePathString(std::string_view path) {
+    const bool absolute = !path.empty() && path[0] == '/';
+    std::vector<std::string_view> parts;
+    size_t i = 0;
+    while (i < path.size()) {
+        while (i < path.size() && path[i] == '/') ++i;
+        const size_t start = i;
+        while (i < path.size() && path[i] != '/') ++i;
+        if (i == start) break;
+        const std::string_view component = path.substr(start, i - start);
+        if (component == ".") continue;
+        if (component == "..") {
+            // A relative path may legitimately begin above itself ("../x"), so a
+            // leading ".." is kept there; an absolute path cannot rise above "/".
+            if (!parts.empty() && parts.back() != "..") {
+                parts.pop_back();
+            } else if (!absolute) {
+                parts.push_back(component);
+            }
+            continue;
+        }
+        parts.push_back(component);
+    }
+
+    std::string result;
+    if (absolute) result = "/";
+    for (size_t n = 0; n < parts.size(); ++n) {
+        if (n != 0) result += '/';
+        result.append(parts[n]);
+    }
+    return result;
+}
+
 } // namespace
 
 VFSPathRemapper& VFSPathRemapper::getInstance() {
     static VFSPathRemapper instance;
+    // Cheap after the first call: initialize() returns the cached result. Kept here so
+    // that whichever vfs_* function runs first still finds the tree in place.
     (void)instance.initialize();
     return instance;
 }
@@ -62,12 +112,27 @@ VFSPathRemapper::VFSPathRemapper()
       androidRoot_(documentsDirectory_ + "/android_root") {}
 
 void VFSPathRemapper::setDocumentsDirectory(const std::string& documentsDirectory) {
-    documentsDirectory_ = documentsDirectory;
-    androidRoot_ = documentsDirectory_ + "/android_root";
+    {
+        std::lock_guard<std::mutex> lock(initMutex_);
+        documentsDirectory_ = documentsDirectory;
+        androidRoot_ = documentsDirectory_ + "/android_root";
+        // The tree has to be built under the new root, so the previous run does not
+        // count. Swift calls this after the container path is known, which is normally
+        // before any guest file access.
+        initialized_ = false;
+    }
     (void)initialize();
 }
 
 bool VFSPathRemapper::initialize() {
+    std::lock_guard<std::mutex> lock(initMutex_);
+    if (initialized_) return initResult_;
+    initResult_ = initializeLocked();
+    initialized_ = true;
+    return initResult_;
+}
+
+bool VFSPathRemapper::initializeLocked() {
     std::error_code error;
     // create base folders (android-like layout).
     for (const auto& relative : {
@@ -203,7 +268,13 @@ bool VFSPathRemapper::init_pseudo_files() {
 
 std::string VFSPathRemapper::remap(const char* originalPath) const {
     if (!originalPath) return {};
-    std::string_view original(originalPath);
+
+    // Normalise before matching a prefix, not after. "/sdcard/../../x" must not be
+    // treated as an sdcard path and then joined to the root with the ".." intact — the
+    // kernel would resolve it outside android_root. After this, the path contains no
+    // "." or ".." at all, so the join below cannot escape.
+    const std::string normalized = normalizePathString(std::string_view(originalPath));
+    std::string_view original(normalized);
     
     // directly maps the server's root /dev/ devices to ios
     if (original == "/dev/urandom" || original == "/dev/random" || 
@@ -247,7 +318,31 @@ std::string VFSPathRemapper::remap(const char* originalPath) const {
             vfsTrace("Remapped relative path: " + std::string(original) + " -> " + mapped);
             return mapped;
         }
-        return std::string(original);
+
+        // Already inside android_root: return it unchanged.
+        //
+        // Required for idempotency, not a special case. realpath() and readdir() hand
+        // the guest paths that are already mapped, and the guest opens what it was
+        // given; prefixing the root a second time would turn every such reopen into
+        // ENOENT.
+        if (original.size() >= androidRoot_.size() &&
+            original.compare(0, androidRoot_.size(), androidRoot_) == 0 &&
+            (original.size() == androidRoot_.size() || original[androidRoot_.size()] == '/')) {
+            return std::string(original);
+        }
+
+        // An absolute path outside every known Android prefix. Contain it instead of
+        // passing it through.
+        //
+        // Passing it through was the hole that made normalisation above pointless:
+        // "/sdcard/../../../Library/Preferences/x.plist" normalises to
+        // "/Library/Preferences/x.plist", matches nothing, and used to be handed to
+        // open() as a real iOS path. Rooting it keeps the guest inside the VFS, and
+        // since no such directory exists there the call fails with ENOENT — which is
+        // also what it would do on Android, where /Library is not a thing.
+        std::string mapped = androidRoot_ + std::string(original);
+        vfsTrace("Contained unknown absolute path: " + std::string(original) + " -> " + mapped);
+        return mapped;
     }
 
     std::string remainder = "";
@@ -609,8 +704,9 @@ std::string run_vfs_extended_test() {
         while (std::fgets(buffer, sizeof(buffer), file)) buildProp += buffer;
         std::fclose(file);
     }
-    statPass = statPass && buildProp.find("ro.build.version.sdk=34") != std::string::npos &&
-               buildProp.find("ro.product.cpu.abi=arm64-v8a") != std::string::npos;
+    statPass = statPass &&
+               buildProp.find("ro.build.version.sdk=" KUDROID_SDK_INT_STR) != std::string::npos &&
+               buildProp.find("ro.product.cpu.abi=" KUDROID_DEVICE_ABI) != std::string::npos;
     result(1, "stat64 + build.prop keys", statPass, statPass ? "required keys verified" : "metadata/key verification failed");
 
     const std::string storage = remapper.remap("/storage/emulated/0/Download");

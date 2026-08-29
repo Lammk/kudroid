@@ -207,6 +207,16 @@ else()
         target_include_directories(test_memory_info PRIVATE include)
     endif()
 
+    # The guest filesystem view: containment (no path may escape android_root) and that
+    # initialize() is not redone on every file operation.
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_vfs.cpp")
+        add_executable(test_vfs
+            tests/test_vfs.cpp
+        )
+        target_link_libraries(test_vfs PRIVATE kudroid_core)
+        target_include_directories(test_vfs PRIVATE include)
+    endif()
+
     # KuART's tests are located in kuart-tests/ (not tests/) because tests/ is broken
     # .gitignore — CI needs these files so they must be committed.
     # test_art_dex parse DEX with ART's libdexfile
