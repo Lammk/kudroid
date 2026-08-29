@@ -280,7 +280,7 @@ std::string("superclass == Ljava/lang/Object; (th c t : ") + super_descriptor + 
         std::vector<art::Instruction::Code> opcodes;
         for (const art::DexInstructionPcPair& pair : code) {
             const art::Instruction& inst = pair.Inst();
-            std::printf("    %04zx: %s\n", pair.DexPc(), inst.Name());
+            std::printf("    %04x: %s\n", static_cast<unsigned int>(pair.DexPc()), inst.Name());
             opcodes.push_back(inst.Opcode());
         }
         bytecode_ok = opcodes.size() == 2 &&

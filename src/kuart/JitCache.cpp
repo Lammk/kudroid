@@ -32,11 +32,12 @@ size_t RoundUp(size_t n, size_t align) {
 void* MapExecutable(size_t size) {
     const int prot = PROT_READ | PROT_WRITE;
     int flags = MAP_PRIVATE | MAP_ANON;
+    void* mem = MAP_FAILED;
 #if defined(__APPLE__) && TARGET_OS_OSX
-    void* mem = ::mmap(nullptr, size, prot, flags | MAP_JIT, -1, 0);
+    mem = ::mmap(nullptr, size, prot, flags | MAP_JIT, -1, 0);
     if (mem != MAP_FAILED) return mem;
 #endif
-    void* mem = ::mmap(nullptr, size, prot, flags, -1, 0);
+    mem = ::mmap(nullptr, size, prot, flags, -1, 0);
     if (mem == MAP_FAILED) return nullptr;
 
     // Confirm the mapping can become executable NOW rather than at Commit() time.
