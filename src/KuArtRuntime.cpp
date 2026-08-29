@@ -22,6 +22,7 @@
 
 namespace {
 
+using kudroid::kuart::DexArray;
 using kudroid::kuart::DexClass;
 using kudroid::kuart::DexClassLinker;
 using kudroid::kuart::DexJniEnv;
@@ -140,6 +141,52 @@ bool CallActivityThreadStatic(const char* name, const char* signature,
         return false;
     }
     return true;
+}
+
+// Call a static method on any framework class, reporting an exception as an error.
+bool CallFrameworkStatic(const char* descriptor, const char* name, const char* signature,
+                         const DexValue* args, size_t num_args) {
+    if (g_rt == nullptr || !g_rt->ready) return false;
+    DexClass* klass = g_rt->linker.FindClass(descriptor);
+    if (klass == nullptr || klass->is_stub) {
+        SetError(std::string(descriptor) + " not found in framework.dex");
+        return false;
+    }
+    if (!g_rt->interpreter->EnsureInitialized(klass)) {
+        SetError(std::string("<clinit> of ") + descriptor + " failed: " +
+                 g_rt->interpreter->last_error());
+        g_rt->interpreter->ClearPendingException();
+        return false;
+    }
+    DexMethod* m = klass->FindDirectMethod(name, signature);
+    if (m == nullptr) {
+        SetError(std::string(descriptor) + " has no " + name + signature);
+        return false;
+    }
+    g_rt->interpreter->ClearPendingException();
+    g_rt->interpreter->Execute(m, args, num_args);
+    if (g_rt->interpreter->HasPendingException()) {
+        SetError(std::string("exception in ") + descriptor + "." + name + ": " +
+                 g_rt->interpreter->last_error());
+        g_rt->interpreter->ClearPendingException();
+        return false;
+    }
+    return true;
+}
+
+// Build a Java String[] from a C array; entries that are null become "".
+DexArray* NewStringArray(const char* const* items, int count) {
+    if (g_rt == nullptr) return nullptr;
+    DexClass* string_array = g_rt->linker.FindClass("[Ljava/lang/String;");
+    if (string_array == nullptr) return nullptr;
+    if (count < 0) count = 0;
+    auto* arr = g_rt->linker.AllocArray(string_array, count);
+    if (arr == nullptr) return nullptr;
+    for (int i = 0; i < count; ++i) {
+        const char* v = (items != nullptr && items[i] != nullptr) ? items[i] : "";
+        arr->Set<DexObject*>(i, reinterpret_cast<DexObject*>(g_rt->linker.NewString(v)));
+    }
+    return arr;
 }
 
 }  // namespace
@@ -326,6 +373,54 @@ extern "C" size_t kuart_list_app_classes(char** out, size_t max_out) {
 extern "C" void kuart_free_class_list(char** list, size_t count) {
     if (list == nullptr) return;
     for (size_t i = 0; i < count; ++i) std::free(list[i]);
+}
+
+extern "C" void kuart_register_component_meta_data(const char* component_name,
+                                                  const char* const* keys,
+                                                  const char* const* values,
+                                                  int count) {
+    if (g_rt == nullptr || !g_rt->ready) return;
+
+    DexArray* keyArr = NewStringArray(keys, count);
+    DexArray* valArr = NewStringArray(values, count);
+    if (keyArr == nullptr || valArr == nullptr) {
+        SetError("kuart_register_component_meta_data: array allocation failed");
+        return;
+    }
+
+    DexObject* name = reinterpret_cast<DexObject*>(
+        g_rt->linker.NewString(component_name != nullptr ? component_name : ""));
+
+    const DexValue args[3] = {
+        DexValue::Ref(name),
+        DexValue::Ref(reinterpret_cast<DexObject*>(keyArr)),
+        DexValue::Ref(reinterpret_cast<DexObject*>(valArr)),
+    };
+    CallFrameworkStatic("Landroid/content/pm/SystemPackageManager;",
+                        "registerComponentMetaData",
+                        "(Ljava/lang/String;[Ljava/lang/String;[Ljava/lang/String;)V",
+                        args, 3);
+}
+
+extern "C" void kuart_register_package(const char* package_name,
+                                       const char* const* activities,
+                                       int activity_count) {
+    if (g_rt == nullptr || !g_rt->ready) return;
+
+    DexArray* actArr = NewStringArray(activities, activity_count);
+    if (actArr == nullptr) {
+        SetError("kuart_register_package: array allocation failed");
+        return;
+    }
+    DexObject* pkg = reinterpret_cast<DexObject*>(
+        g_rt->linker.NewString(package_name != nullptr ? package_name : ""));
+
+    const DexValue args[2] = {
+        DexValue::Ref(pkg),
+        DexValue::Ref(reinterpret_cast<DexObject*>(actArr)),
+    };
+    CallFrameworkStatic("Landroid/content/pm/SystemPackageManager;", "registerPackage",
+                        "(Ljava/lang/String;[Ljava/lang/String;)V", args, 2);
 }
 
 extern "C" int kuart_launch_app(const char* package_name, const char* component_factory,

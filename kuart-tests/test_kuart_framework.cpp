@@ -1483,6 +1483,289 @@ int main() {
         }
     }
 
+    // ── manifest meta-data reaches the app ──
+    //
+    // The whole point of the AXML meta-data parser is that a component can read its
+    // own manifest entry. AGDK's GameActivity does exactly this inside onCreate:
+    //
+    //   getPackageManager().getActivityInfo(getIntent().getComponent(), GET_META_DATA)
+    //       .metaData.getString("android.app.lib_name")
+    //
+    // to learn which .so holds its renderer. Every link in that chain used to be
+    // broken: getIntent() returned a fresh empty Intent, getComponent() returned a
+    // String instead of a ComponentName, and getActivityInfo did not exist so it was
+    // auto-stubbed to null — the NullPointerException at GameActivity.java:317.
+    {
+        DexClass* spm = linker.FindClass("Landroid/content/pm/SystemPackageManager;");
+        Check(spm != nullptr && !spm->is_stub, "SystemPackageManager is real");
+
+        DexClass* pm = linker.FindClass("Landroid/content/pm/PackageManager;");
+        if (pm != nullptr && interp.EnsureInitialized(pm)) {
+            const DexField* f = pm->FindStaticField("GET_META_DATA", "I");
+            Check(f != nullptr, "PackageManager.GET_META_DATA exists");
+            if (f != nullptr) {
+                Check(pm->static_values[f->offset_or_slot].i == 128,
+                      "GET_META_DATA is 128, as app code passes it");
+            }
+        }
+
+        // Register what a manifest would have declared, the way the native launcher
+        // does before starting the app.
+        if (spm != nullptr && interp.EnsureInitialized(spm)) {
+            DexClass* strArr = linker.FindClass("[Ljava/lang/String;");
+            const auto makeArray = [&](std::vector<const char*> items) -> DexValue {
+                auto* arr = linker.AllocArray(strArr, static_cast<int32_t>(items.size()));
+                for (size_t i = 0; i < items.size(); ++i) {
+                    arr->Set<DexObject*>(static_cast<int32_t>(i),
+                                         reinterpret_cast<DexObject*>(
+                                             linker.NewString(items[i])));
+                }
+                return DexValue::Ref(reinterpret_cast<DexObject*>(arr));
+            };
+
+            DexValue ignored;
+            CallStatic("Landroid/content/pm/SystemPackageManager;", "registerPackage",
+                       "(Ljava/lang/String;[Ljava/lang/String;)V",
+                       {Str("com.example.probe"),
+                        makeArray({"com.example.probe.MainActivity"})},
+                       &ignored, "registerPackage");
+
+            // Activity-scoped, which is where AGDK looks.
+            CallStatic("Landroid/content/pm/SystemPackageManager;",
+                       "registerComponentMetaData",
+                       "(Ljava/lang/String;[Ljava/lang/String;[Ljava/lang/String;)V",
+                       {Str("com.example.probe.MainActivity"),
+                        makeArray({"android.app.lib_name"}),
+                        makeArray({"libprobe"})},
+                       &ignored, "registerComponentMetaData(activity)");
+
+            // Application-scoped, the fallback for a component that declared none.
+            CallStatic("Landroid/content/pm/SystemPackageManager;",
+                       "registerComponentMetaData",
+                       "(Ljava/lang/String;[Ljava/lang/String;[Ljava/lang/String;)V",
+                       {Str(""), makeArray({"com.example.APP_KEY"}),
+                        makeArray({"app-value"})},
+                       &ignored, "registerComponentMetaData(application)");
+        }
+
+        // Now walk the chain an app walks, object by object.
+        DexObject* mgr = NewObject("Landroid/content/pm/SystemPackageManager;", "()V", {},
+                                   "new SystemPackageManager");
+        DexObject* component = NewObject("Landroid/content/ComponentName;",
+                                         "(Ljava/lang/String;Ljava/lang/String;)V",
+                                         {Str("com.example.probe"),
+                                          Str("com.example.probe.MainActivity")},
+                                         "new ComponentName");
+        if (mgr != nullptr && component != nullptr) {
+            DexValue ai;
+            if (CallVirtual(mgr, "getActivityInfo",
+                            "(Landroid/content/ComponentName;I)Landroid/content/pm/ActivityInfo;",
+                            {DexValue::Ref(component), DexValue::Int(128)}, &ai,
+                            "getActivityInfo")) {
+                Check(ai.l != nullptr, "getActivityInfo returns an ActivityInfo");
+                if (ai.l != nullptr) {
+                    // metaData must be a real Bundle. It being null is what threw:
+                    // `ai.metaData.getString(...)` is an iget on null.
+                    DexClass* aiCls = linker.ClassOfObject(ai.l);
+                    const DexField* fMeta =
+                        aiCls != nullptr
+                            ? aiCls->FindInstanceField("metaData", "Landroid/os/Bundle;")
+                            : nullptr;
+                    Check(fMeta != nullptr, "ActivityInfo.metaData field exists");
+                    if (fMeta != nullptr) {
+                        DexObject* bundle = ai.l->GetField<DexObject*>(fMeta->offset_or_slot);
+                        Check(bundle != nullptr, "ActivityInfo.metaData is not null");
+                        if (bundle != nullptr) {
+                            DexValue lib;
+                            if (CallVirtual(bundle, "getString",
+                                            "(Ljava/lang/String;)Ljava/lang/String;",
+                                            {Str("android.app.lib_name")}, &lib,
+                                            "metaData.getString(lib_name)")) {
+                                Check(lib.l != nullptr &&
+                                          std::strcmp(Utf8Of(lib), "libprobe") == 0,
+                                      std::string("the AGDK chain yields the library"
+                                                  " name, got \"") + Utf8Of(lib) + "\"");
+                            }
+                        }
+                    }
+                }
+            }
+
+            // An unknown component must throw NameNotFoundException rather than hand
+            // back a blank ActivityInfo: a wrong component name should surface here,
+            // not later when something reads a field off the blank.
+            DexObject* unknown = NewObject("Landroid/content/ComponentName;",
+                                           "(Ljava/lang/String;Ljava/lang/String;)V",
+                                           {Str("com.example.probe"), Str("")},
+                                           "ComponentName with empty class");
+            if (unknown != nullptr) {
+                interp.ClearPendingException();
+                DexMethod* m = mgr->clazz->FindVirtualMethod(
+                    "getActivityInfo",
+                    "(Landroid/content/ComponentName;I)Landroid/content/pm/ActivityInfo;");
+                if (m != nullptr) {
+                    std::vector<DexValue> args = {DexValue::Ref(mgr),
+                                                  DexValue::Ref(unknown),
+                                                  DexValue::Int(128)};
+                    interp.Execute(m, args.data(), args.size());
+                    Check(interp.HasPendingException(),
+                          "a component with no class name throws NameNotFoundException");
+                    interp.ClearPendingException();
+                }
+            }
+        }
+
+        // The other half of the chain: an Activity's own Intent has to name it.
+        DexObject* activity = NewObject("Landroid/app/Activity;", "()V", {},
+                                        "new Activity for getIntent");
+        if (activity != nullptr) {
+            DexValue intent;
+            if (CallVirtual(activity, "getIntent", "()Landroid/content/Intent;", {},
+                            &intent, "getIntent")) {
+                Check(intent.l != nullptr, "getIntent() is not null");
+                if (intent.l != nullptr) {
+                    DexValue again;
+                    if (CallVirtual(activity, "getIntent", "()Landroid/content/Intent;",
+                                    {}, &again, "getIntent #2")) {
+                        // A fresh Intent per call is what made the component always
+                        // null; apps also compare the instance across calls.
+                        Check(again.l == intent.l,
+                              "getIntent() returns the same Intent every time");
+                    }
+                    DexValue comp;
+                    if (CallVirtual(intent.l, "getComponent",
+                                    "()Landroid/content/ComponentName;", {}, &comp,
+                                    "Intent.getComponent")) {
+                        Check(comp.l != nullptr,
+                              "getIntent().getComponent() is a ComponentName, not null");
+                        if (comp.l != nullptr) {
+                            DexValue cls;
+                            if (CallVirtual(comp.l, "getClassName",
+                                            "()Ljava/lang/String;", {}, &cls,
+                                            "ComponentName.getClassName")) {
+                                Check(cls.l != nullptr &&
+                                          std::strcmp(Utf8Of(cls),
+                                                      "android.app.Activity") == 0,
+                                      std::string("the component names the Activity's"
+                                                  " own class, got \"") +
+                                          Utf8Of(cls) + "\"");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ── the stubs GameActivity called on the way through onCreate ──
+    //
+    // Each was being auto-stubbed, which means it silently did nothing. Individually
+    // small; collectively they are the difference between an activity that configures
+    // its window and one that half-configures it.
+    {
+        DexObject* view = NewObject("Landroid/view/View;", "(Landroid/content/Context;)V",
+                                    {DexValue::Ref(nullptr)}, "new View for stubs");
+        if (view != nullptr) {
+            DexValue r;
+            // An unkeyed tag has to round-trip: getTag() returned a hard null before,
+            // so an app keeping its state there lost it.
+            if (CallVirtual(view, "setTag", "(Ljava/lang/Object;)V",
+                            {Str("payload")}, &r, "setTag(Object)") &&
+                CallVirtual(view, "getTag", "()Ljava/lang/Object;", {}, &r, "getTag")) {
+                Check(r.l != nullptr && std::strcmp(Utf8Of(r), "payload") == 0,
+                      "View tag round-trips");
+            }
+            // The keyed form is what libraries use to stash per-view state without
+            // subclassing; androidx.core keeps insets bookkeeping this way.
+            if (CallVirtual(view, "setTag", "(ILjava/lang/Object;)V",
+                            {DexValue::Int(0x7f0a0001), Str("keyed")}, &r,
+                            "setTag(int, Object)") &&
+                CallVirtual(view, "getTag", "(I)Ljava/lang/Object;",
+                            {DexValue::Int(0x7f0a0001)}, &r, "getTag(int)")) {
+                Check(r.l != nullptr && std::strcmp(Utf8Of(r), "keyed") == 0,
+                      "keyed View tag round-trips");
+            }
+            if (CallVirtual(view, "getTag", "(I)Ljava/lang/Object;",
+                            {DexValue::Int(0x7f0a0002)}, &r, "getTag(unset key)")) {
+                Check(r.l == nullptr, "an unset keyed tag is null");
+            }
+        }
+
+        // generateViewId must stay below 0x7f000000, where aapt allocates resource
+        // ids, or a generated id could collide with a real R.id constant.
+        DexValue id1, id2;
+        if (CallStatic("Landroid/view/View;", "generateViewId", "()I", {}, &id1,
+                       "generateViewId #1") &&
+            CallStatic("Landroid/view/View;", "generateViewId", "()I", {}, &id2,
+                       "generateViewId #2")) {
+            Check(id1.i != id2.i, "generateViewId returns distinct ids");
+            Check(id1.i > 0 && id1.i < 0x00FFFFFF && id2.i < 0x00FFFFFF,
+                  "generated ids stay below the aapt resource-id range");
+        }
+
+        // Window format and soft-input mode: KuDroid cannot act on either (the surface
+        // format is fixed by the host, keyboard geometry is the host's business) but
+        // both must survive a round trip, because apps read them back to decide
+        // whether they already configured the window.
+        DexObject* win = NewObject("Landroid/view/Window;", "(Landroid/content/Context;)V",
+                                   {DexValue::Ref(nullptr)}, "new Window");
+        if (win != nullptr) {
+            DexValue r;
+            if (CallVirtual(win, "setFormat", "(I)V", {DexValue::Int(1)}, &r,
+                            "setFormat") &&
+                CallVirtual(win, "getFormat", "()I", {}, &r, "getFormat")) {
+                Check(r.i == 1, "Window format round-trips");
+            }
+            if (CallVirtual(win, "setSoftInputMode", "(I)V", {DexValue::Int(0x10)}, &r,
+                            "setSoftInputMode") &&
+                CallVirtual(win, "getSoftInputMode", "()I", {}, &r,
+                            "getSoftInputMode")) {
+                Check(r.i == 0x10, "Window soft-input mode round-trips");
+            }
+        }
+
+        // Editable.setFilters is on the interface because libraries call it on an
+        // Editable they were handed, not on a concrete type. Auto-stubbing it dropped
+        // the cap, so a length-limited field accepted unlimited text.
+        DexClass* editable = linker.FindClass("Landroid/text/Editable;");
+        if (editable != nullptr) {
+            Check(editable->FindVirtualMethod("setFilters",
+                                              "([Landroid/text/InputFilter;)V") != nullptr,
+                  "Editable.setFilters is declared on the interface");
+        }
+        DexObject* buf = NewObject("Landroid/text/SpannableStringBuilder;",
+                                   "(Ljava/lang/CharSequence;)V", {Str("")},
+                                   "buffer for setFilters");
+        DexObject* lf2 = NewObject("Landroid/text/InputFilter$LengthFilter;", "(I)V",
+                                   {DexValue::Int(4)}, "LengthFilter(4)");
+        if (buf != nullptr && lf2 != nullptr) {
+            DexClass* filterArrCls = linker.FindClass("[Landroid/text/InputFilter;");
+            if (filterArrCls != nullptr) {
+                auto* arr = linker.AllocArray(filterArrCls, 1);
+                arr->Set<DexObject*>(0, lf2);
+                DexValue r;
+                if (CallVirtual(buf, "setFilters", "([Landroid/text/InputFilter;)V",
+                                {DexValue::Ref(reinterpret_cast<DexObject*>(arr))}, &r,
+                                "setFilters")) {
+                    // The filter has to actually run on an insertion, not merely be
+                    // stored: appending past the cap is the case a dropped filter
+                    // lets through.
+                    if (CallVirtual(buf, "append",
+                                    "(Ljava/lang/CharSequence;)Landroid/text/Editable;",
+                                    {Str("abcdefgh")}, &r, "append past the cap")) {
+                        DexValue str;
+                        if (CallVirtual(buf, "toString", "()Ljava/lang/String;", {},
+                                        &str, "toString after filtered append")) {
+                            Check(std::strcmp(Utf8Of(str), "abcd") == 0,
+                                  std::string("an installed LengthFilter truncates an"
+                                              " append, got \"") + Utf8Of(str) + "\"");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     std::printf("  executed %llu instructions\n",
                 static_cast<unsigned long long>(interp.instructions_executed()));
 

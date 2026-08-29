@@ -45,6 +45,38 @@ int kuart_class_extends_activity(const char* class_name);
 size_t kuart_list_app_classes(char** out, size_t max_out);
 void kuart_free_class_list(char** list, size_t count);
 
+// Register what AndroidManifest.xml declared, before launching anything.
+//
+// Manifest data is loaded separately from starting the app because they are separate
+// concerns and because a component reads its own manifest entry while constructing
+// itself — by the time kuart_launch_app runs it is already too late. AGDK's
+// GameActivity is the case that proves it: its onCreate does
+//
+//   getPackageManager().getActivityInfo(getIntent().getComponent(), GET_META_DATA)
+//       .metaData.getString("android.app.lib_name")
+//
+// to find the .so holding its renderer, so an activity launched before its meta-data
+// exists gets no native library and draws nothing.
+//
+// Passing this through kuart_launch_app's String[] was the alternative and is worse:
+// the data is a map per component, the argument is a flat array, and the reader is
+// PackageManager rather than ActivityThread — so it would mean a hand-written
+// serialiser on each side plus a detour through a class that has no use for it.
+//
+// Call once per component before kuart_launch_app. `component_name` NULL or empty
+// registers the <application> element. `keys`/`values` are parallel arrays of
+// `count` entries; values are strings because that is what AXML stores.
+void kuart_register_component_meta_data(const char* component_name,
+                                       const char* const* keys,
+                                       const char* const* values,
+                                       int count);
+
+// Register the package name and the activity list, for PackageManager queries that
+// name the running package.
+void kuart_register_package(const char* package_name,
+                            const char* const* activities,
+                            int activity_count);
+
 // Launch the app: bootstrap AppComponentFactory + Application, then walk the
 // activity candidates.
 //

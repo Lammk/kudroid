@@ -139,6 +139,43 @@ public class Window {
     public void setTitle(CharSequence title) {
     }
 
+    /**
+     * The pixel format the window's surface should use.
+     *
+     * A no-op on KuDroid: the surface is a CAMetalLayer whose format is fixed at
+     * bgra8Unorm by the host, and there is no path to renegotiate it. Recorded rather
+     * than discarded so getFormat() reports back what the app asked for — an app that
+     * sets RGBA_8888 and reads it back to confirm should not see 0.
+     */
+    private int mFormat = android.graphics.PixelFormat.OPAQUE;
+
+    public void setFormat(int format) {
+        mFormat = format;
+    }
+
+    public int getFormat() {
+        return mFormat;
+    }
+
+    /**
+     * How the window reacts to the soft keyboard appearing.
+     *
+     * Stored, not acted on. Resizing or panning the window for the keyboard is the
+     * host's business — iOS reports keyboard geometry through its own notifications —
+     * but the value has to survive a round trip because apps read it back to decide
+     * whether they already configured the window.
+     */
+    private int mSoftInputMode =
+            WindowManager.LayoutParams.SOFT_INPUT_STATE_UNSPECIFIED;
+
+    public void setSoftInputMode(int mode) {
+        mSoftInputMode = mode;
+    }
+
+    public int getSoftInputMode() {
+        return mSoftInputMode;
+    }
+
     public interface Callback {
     }
 

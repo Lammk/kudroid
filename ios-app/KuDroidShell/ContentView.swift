@@ -1644,7 +1644,7 @@ class NativeMetalViewController: UIViewController {
         self.view.backgroundColor = .black
         metalView.backgroundColor = .black
 
-        // Nh n ch n  o n tr ng th i t c th i tr n m n h nh
+        // On-screen status indicator for immediate feedback
         statusLabel = UILabel()
         statusLabel.text = "KuDroid: Initializing \(appName)..."
         statusLabel.textColor = UIColor.green.withAlphaComponent(0.8)

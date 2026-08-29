@@ -35,17 +35,17 @@
 
 extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
 
-// ── ghi nhật ký liên tục vào thư mục có thể ghi của ứng dụng ─────────────────────────
-// ứng dụng truyền một thư mục (thư mục documents của nó) thông qua kudroid_set_log_dir().
-// nhật ký thành công được ghi dưới dạng tệp .txt; các sự cố (dựa trên tín hiệu, do đó không có ngoại lệ
-// c++ nào được kích hoạt) được trình xử lý tín hiệu bắt, bộ đệm nhật ký được đẩy
-// vào đĩa chỉ bằng các lệnh gọi an toàn tín hiệu bất đồng bộ trước khi kích hoạt lại.
+// ── Continuous logging into the app's writable directory ─────────────────────
+// The host passes one directory (its Documents) through kudroid_set_log_dir().
+// Normal logs are written as files; crashes are signal-based, so no C++ exception
+// fires and the signal handler is what catches them — it flushes the log buffer to
+// disk using only async-signal-safe calls before re-raising.
 //
 // Two directories, deliberately distinct:
 //
-//   g_docsDir — the app's Documents. Where installed apps, extracted APKs and the
+//   g_docsDir - the app's Documents. Where installed apps, extracted APKs and the
 //               VFS root live; the host hands this in.
-//   g_logDir  — g_docsDir + "/logs". Every diagnostic file goes here.
+//   g_logDir  - g_docsDir + "/logs". Every diagnostic file goes here.
 //
 // They used to be the same, so eight log files sat among put_apk_here/, android_root/,
 // micro_tests/ and extracted_apk/ at the top level of Documents. Nothing about that
@@ -55,22 +55,20 @@ static char g_docsDir[1024] = {0};
 static char g_logDir[1024] = {0};
 const char* g_kudroid_log_dir_ptr = g_logDir;
 
-// 16KB trước đây quá nhỏ: đống dòng ELF-loading/`[kudroid_core]` lấp đầy buffer
-// và đẩy phần quan trọng (eglGetDisplay/eglInitialize ngay trước crash) ra
-// ngoài — log bị cắt đúng chỗ quan trọng. 256KB, static nên an toàn trong
-// signal handler (không cấp phát heap).
+// Previously 16KB was too small: ELF loading and verbose lines filled the
+// buffer, pushing crucial pre-crash context (e.g. EGL initialization) out.
+// Expanded to 256KB; static allocation ensures signal-handler safety without heap usage.
 static char g_crashBuf[262144];
 static volatile sig_atomic_t g_crashLen = 0;
 static std::mutex g_crashBufMtx;
 static char g_abortMessage[1024] = {0};
 
-// ── Lá chắn abort() cho JNI_OnLoad ───────────────────────────────────────────
-// Một số thư viện phụ của game (conscrypt, HttpClient, maesdk…) gọi abort()
-// ngay trong JNI_OnLoad khi không tìm được method/field chúng cần. abort() là
-// SIGABRT nên try/catch KHÔNG bắt được → cả process chết. Guard dưới đây cho
-// phép nhảy ngược ra khỏi JNI_OnLoad khi nó abort, bỏ qua thư viện đó và tiếp
-// tục khởi động app. Chỉ bật quanh đúng lời gọi JNI_OnLoad, không bật lúc khác
-// (crash thật vẫn phải ghi log đầy đủ).
+// ── JNI_OnLoad abort() Shield ────────────────────────────────────────────────
+// Secondary libraries (conscrypt, HttpClient, maesdk, etc.) may call abort()
+// directly in JNI_OnLoad when optional methods or fields are missing. abort()
+// triggers SIGABRT which bypasses C++ try/catch and kills the process. This guard
+// catches aborts during JNI_OnLoad and skips the failed module so app startup continues.
+// Only active strictly around JNI_OnLoad invocations.
 static thread_local sigjmp_buf g_jniGuardJmp;
 static thread_local volatile sig_atomic_t g_jniGuardActive = 0;
 static thread_local int g_jniGuardSignal = 0;
@@ -100,9 +98,9 @@ struct JniGuardFault {
 };
 static thread_local JniGuardFault g_jniGuardFault;
 
-// Stack riêng cho signal handler — để ở file scope vì sau khi siglongjmp ra
-// khỏi handler, kernel/libc vẫn coi alt stack đang "onstack"; phải arm lại nếu
-// không lần crash sau sẽ không chạy được trên stack riêng.
+// Dedicated alternate stack for signal handlers. Stored at file scope because after
+// siglongjmp out of a handler, the kernel still treats the alt stack as active;
+// it must be re-armed for subsequent crash handling.
 static char g_altSignalStack[64 * 1024];
 static bool g_altStackArmed = false;
 
@@ -115,10 +113,9 @@ static void armAltSignalStack(void) {
     g_altStackArmed = (sigaltstack(&ss, nullptr) == 0);
 }
 
-// Gọi JNI_OnLoad với lá chắn signal. Đặt sigsetjmp trong một hàm riêng để
-// longjmp không thể clobber biến local của hàm gọi (-Wclobbered).
-// Trả về: 0 = chạy xong bình thường (*outVersion hợp lệ),
-// -1 = C++ exception, >0 = số signal đã bị chặn.
+// Invoke JNI_OnLoad under signal protection. sigsetjmp is placed in a dedicated function
+// to prevent longjmp from clobbering caller local variables (-Wclobbered).
+// Returns: 0 on normal return (*outVersion valid), -1 on C++ exception, >0 on trapped signal.
 //
 // A guarded library often calls back into Java before it faults (RegisterNatives,
 // GetMethodID, an actual Java call), so the interpreter may have live frames when
@@ -136,8 +133,8 @@ static int kudroid_call_jni_onload_guarded(jint (*fn)(JavaVM*, void*),
     kuart_save_thread_state(const_cast<size_t*>(kuartState));
 
     if (sigsetjmp(g_jniGuardJmp, 1) != 0) {
-        // Quay lại từ signal handler — arm lại alt stack vì siglongjmp không
-        // rời alt stack một cách bình thường.
+        // Return from signal handler — re-arm alternate stack since siglongjmp
+        // does not unwind the alt stack context normally.
         if (g_altStackArmed) armAltSignalStack();
         kuart_restore_thread_state(const_cast<const size_t*>(kuartState));
         return g_jniGuardSignal > 0 ? g_jniGuardSignal : 1;
@@ -159,7 +156,7 @@ static int kudroid_call_jni_onload_guarded(jint (*fn)(JavaVM*, void*),
 }
 
 static int kudroid_jit_available(void);
-// Build stamp — định nghĩa phía dưới file, dùng trong appendTestHeader ở trên nó.
+// Build stamp — forward declaration used in appendTestHeader.
 extern "C" const char* kudroid_build_stamp(void);
 
 // Gentle crash variables:
@@ -193,11 +190,11 @@ static void extractLastLines(const char* src, size_t srcLen, char* dst, size_t d
     dst[len] = '\0';
 }
 
-// Game logs (bionic_android_log_print) mirror vào đây để file crash chứa log
-// của game ngay trước khi crash. Ring buffer — giữ phần mới nhất.
+// Guest Android logs (bionic_android_log_print) mirrored here to provide
+// immediate pre-crash diagnostic context in a ring buffer.
 extern "C" void kudroid_append_crash_log(const char* text, size_t len) {
     if (!text || len == 0) return;
-    if (len > 8192) len = 8192; // giới hạn một dòng
+    if (len > 8192) len = 8192; // single line length limit
     std::lock_guard<std::mutex> lock(g_crashBufMtx);
     size_t cur = static_cast<size_t>(g_crashLen);
     const size_t cap = sizeof(g_crashBuf) - 1;
@@ -216,19 +213,18 @@ extern "C" void kudroid_append_crash_log(const char* text, size_t len) {
     g_crashLen = static_cast<sig_atomic_t>(cur);
 }
 
-// android_set_abort_message (từ game): lưu lại để crash handler in ra.
+// android_set_abort_message: capture guest abort message for crash reporting.
 extern "C" void kudroid_store_abort_message(const char* msg) {
     if (!msg) return;
     strncpy(g_abortMessage, msg, sizeof(g_abortMessage) - 1);
     g_abortMessage[sizeof(g_abortMessage) - 1] = '\0';
 }
 
-// ── Bắt abort message phía HOST (không phải từ game) ─────────────────────────
-// SIGABRT thường là abort() sau một exception/assert không bắt được. Trước đây
-// chỉ có android_set_abort_message (từ guest) mới lưu được message → crash log
-// thiếu lý do. Hai handler dưới đây bắt lý do trước khi abort:
-// 1. ObjC exception chưa bắt (NSException — ANGLE/Metal/UIKit hay ném) → reason
-// 2. C++ exception chưa bắt (std::terminate) → what()
+// ── Host Abort Interception ──────────────────────────────────────────────────
+// SIGABRT typically results from an uncaught exception or failed assertion.
+// These handlers record the abort message before termination:
+// 1. Uncaught ObjC exceptions (NSException from ANGLE/Metal/UIKit)
+// 2. Uncaught C++ exceptions (std::terminate / exception::what())
 #if defined(__APPLE__)
 #include <exception>
 extern "C" {
@@ -238,7 +234,7 @@ extern void NSSetUncaughtExceptionHandler(void (*handler)(void* exception));
 }
 
 static void kudroid_uncaught_objc_handler(void* exception) {
-    // exception là NSException* — [exception reason] → NSString* → UTF8String.
+    // exception is NSException* — [exception reason] -> NSString* -> UTF8String.
     if (!exception) return;
     void* reason = objc_msgSend(exception, sel_registerName("reason"));
     if (reason) {
@@ -262,9 +258,8 @@ static void kudroid_terminate_handler() {
 }
 #endif
 
-// snprintf trả về độ dài "sẽ ghi" (có thể LỚN HƠN buffer khi bị cắt) — ghi đủ
-// m byte từ buffer nhỏ là đọc tràn stack → đống rác nhị phân trong crash log
-// (chính là vụ pc_sym của Discord bị cắt cụt + garbage). Clamp trước khi write.
+// snprintf returns the would-be written length (which exceeds buffer size on truncation).
+// Clamping to actual buffer bounds prevents stack overrun and garbage output in crash logs.
 static void crashWriteLine(int fd, const char* buf, int len, size_t bufSize) {
     if (len <= 0 || !buf) return;
     size_t n = (size_t)len;
@@ -272,7 +267,7 @@ static void crashWriteLine(int fd, const char* buf, int len, size_t bufSize) {
     (void)!write(fd, buf, n);
 }
 
-// Unwind bằng _Unwind_Backtrace (không dùng heap) + dladdr (best effort).
+// Unwind via _Unwind_Backtrace (no heap allocations) + dladdr (best effort).
 struct UnwindContext {
     int fd;
     int count;
@@ -322,8 +317,8 @@ static void writeBacktrace(int fd) {
 }
 
 static void mirrorCrash(const std::string& log) {
-    // Cùng mutex với kudroid_append_crash_log — ghi đè không lock là data race
-    // với luồng game đang log (có thể làm hỏng g_crashLen/g_crashBuf).
+    // Synchronized with kudroid_append_crash_log mutex to prevent data races
+    // with active guest logging threads.
     std::lock_guard<std::mutex> lock(g_crashBufMtx);
     size_t n = log.size();
     if (n >= sizeof(g_crashBuf)) n = sizeof(g_crashBuf) - 1;
@@ -342,9 +337,8 @@ static void writeLogFile(const char* name, const std::string& content) {
     }
 }
 
-// Snapshot nội dung crash buffer (log gần nhất từ game/shim) — có lock để đọc
-// an toàn với luồng game đang log. Dùng để file test chứa log chi tiết của
-// shim (trước đây chỉ nằm trong crash buffer, mất khi test thành công).
+// Safely capture crash buffer snapshot under mutex lock to provide
+// comprehensive diagnostic logs for tests.
 extern "C" const char* kudroid_crash_log_snapshot(void) {
     std::lock_guard<std::mutex> lock(g_crashBufMtx);
     const size_t n = static_cast<size_t>(g_crashLen);
@@ -355,7 +349,7 @@ extern "C" const char* kudroid_crash_log_snapshot(void) {
     return out;
 }
 
-// Append snapshot crash buffer vào cuối log test (phần "log up to test").
+// Append crash buffer snapshot to test execution logs.
 static void appendCrashSnapshot(std::string& log, const char* sectionName) {
     const char* snap = kudroid_crash_log_snapshot();
     if (!snap) return;
@@ -372,8 +366,7 @@ static void appendTestHeader(std::string& log, const char* test, const char* pat
     std::ostringstream oss;
     oss << std::put_time(&tm, "%Y-%m-%d %H:%M:%S");
 
-    // Build stamp (version + commit hash) ở ĐẦU mỗi log — để phân biệt bản IPA
-    // đang chạy với bản cũ ngay từ dòng đầu tiên của bất kỳ log nào.
+    // Build stamp (version + commit hash) prepended to test logs for IPA build identification.
     log += "[kudroid_core] Build: " + std::string(kudroid_build_stamp()) + "\n";
     log += "[kudroid_core] ===== " + std::string(test) + " =====\n";
     log += "[kudroid_core] Timestamp: " + oss.str() + "\n";
@@ -386,9 +379,9 @@ static void appendTestHeader(std::string& log, const char* test, const char* pat
 #endif
 }
 
-// Nhãn build: để phân biệt bản IPA đang chạy có phải bản mới nhất hay không.
-// Khi user nghi ngờ "iPhone vẫn chạy app cũ" — so stamp này trong
-// kudroid_crash.log với stamp của bản build mới nhất trên CI.
+// Build stamp: distinguishes whether the currently running IPA is the latest version.
+// Compare this stamp in kudroid_crash.log against CI build stamps to verify
+// the installed build version.
 extern "C" const char* kudroid_build_stamp(void) {
     static const char kStamp[] =
         "kudroid_core v0.6.5 " __DATE__ " " __TIME__ " "
@@ -402,10 +395,10 @@ extern "C" const char* kudroid_build_stamp(void) {
 }
 
 #if defined(__aarch64__) || defined(__arm64__)
-// Symbolicate một địa chỉ thành "tên hàm+offset (module)" hoặc "module+offset" —
-// để nhìn pc là biết chính xác chết trong hàm nào, không còn (no symbol) mù mờ.
-// Ưu tiên registry guest (region do ELF loader mmap — dladdr không biết), sau đó
-// dladdr cho symbol host, cuối cùng in raw + module base offset.
+// Symbolicate an address to 'function+offset (module)' or 'module+offset' —
+// providing exact crash location context instead of raw unmapped addresses.
+// Prioritize guest ELF loader symbol tables over host dladdr.
+// Falls back to host dladdr and raw module base offsets.
 static void symbolicateAddr(uintptr_t pc, char* out, size_t outSize) {
     if (kudroid::kudroid_lookup_guest_module(reinterpret_cast<void*>(pc), out, outSize)) {
         return;
@@ -556,13 +549,13 @@ static void appendCrashLogFile(const std::string& content) {
 static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
     if (sig == SIGTRAP) {
         if (kudroid::bionic_handle_tpidr_trap(ucontext)) {
-            return; // đã xử lý thành công, tiếp tục thực thi!
+            return; // handled successfully, resuming execution!
         }
     }
 
-    // Đang ở trong một lời gọi JNI_OnLoad được bọc guard: thư viện đó abort/segfault
-    // thì bỏ qua nó thay vì giết process. Chỉ dùng hàm async-signal-safe ở đây;
-    // việc ghi log để phía gọi làm sau khi siglongjmp trả về.
+    // Inside a guarded JNI_OnLoad invocation: if this library aborts/segfaults,
+    // skip it rather than killing the entire process. Only async-signal-safe calls used here;
+    // logging deferred to caller upon siglongjmp return.
     //
     // Capture the machine state first. This path never reaches the crash-log code
     // below, so without this a swallowed fault left no pc, no fault address and no
@@ -601,14 +594,13 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
         siglongjmp(g_jniGuardJmp, 1);
     }
 
-    // Xả bộ đệm stdout/stderr — các log [KuDroidGPU]/[AndroidLog] đang nằm trong
-    // buffer (block-buffered khi redirect) sẽ mất nếu không flush trước khi chết.
-    // (không async-signal-safe hoàn hảo nhưng là crash handler chẩn đoán, chấp nhận được)
+    // Flush stdout/stderr streams to ensure buffered diagnostic messages
+    // are not lost before termination.
     fflush(stdout);
     fflush(stderr);
     
     if (g_logDir[0]) {
-        // xây dựng "<dir>/kudroid_crash.log" mà không cấp phát vùng nhớ heap.
+        // construct '<dir>/kudroid_crash.log' path without heap allocation.
         char path[1200];
         size_t dl = strlen(g_logDir);
         if (dl >= sizeof(path) - 32) dl = sizeof(path) - 32;
@@ -628,9 +620,7 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
             int m = snprintf(sigline, sizeof(sigline), "signal = %d\n", sig);
             crashWriteLine(fd, sigline, m, sizeof(sigline));
 
-            // Ghi tên thread đang crash (game chạy nhiều thread — biết thread nào
-            // chết là một nửa chẩn đoán). pthread_getname_np không hoàn toàn
-            // async-signal-safe nhưng là crash handler chẩn đoán, chấp nhận được.
+            // Record faulting thread name for diagnostic context.
             {
                 char tname[64] = "?";
 #if defined(__APPLE__)
@@ -644,7 +634,7 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
                 crashWriteLine(fd, sigline, m, sizeof(sigline));
             }
 
-            // in địa chỉ lỗi
+            // log faulting memory address
             if (info) {
                 m = snprintf(sigline, sizeof(sigline),
                     "fault_addr = %p\nsi_code = %d\n",
@@ -682,19 +672,14 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
                     (unsigned long long)x6, (unsigned long long)x7, (unsigned long long)x8);
                 crashWriteLine(fd, sigline, m, sizeof(sigline));
 
-                // Symbolicate pc/lr để log có ý nghĩa (file + hàm gần nhất).
+                // Symbolicate PC/LR for meaningful source/function attribution.
                 char symPc[512], symLr[512];
                 symbolicateAddr((uintptr_t)pc, symPc, sizeof(symPc));
                 symbolicateAddr((uintptr_t)lr, symLr, sizeof(symLr));
                 m = snprintf(sigline, sizeof(sigline), "pc_sym: %s\nlr_sym: %s\n", symPc, symLr);
                 crashWriteLine(fd, sigline, m, sizeof(sigline));
 
-                // Raw stack dump từ faulting sp. Tại thời điểm abort, sp đang ở
-                // trong abort()/pthread_kill; frame phía trên (vùng nhớ cao hơn)
-                // chứa frame của caller — vd __cxa_guard_acquire (prologue
-                // `stp x29,x30,[sp,#-64]!` + `stp x20,x19,[sp,#48]`) lưu guard
-                // pointer tại [fp+56] và caller LR tại [fp+8]. Dump thô để có
-                // thể decode guard + caller khi debug crash.
+                // Raw stack dump from faulting SP to recover caller frames and register state.
                 (void)!write(fd, "\n--- stack from sp ---\n", 22);
                 {
                     const uint64_t* stack = reinterpret_cast<const uint64_t*>(sp);
@@ -710,12 +695,10 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
                     }
                 }
 
-                // Walk frame chain từ faulting fp (ucontext) — tìm frame của
-                // __cxa_guard_acquire (layout cố định `stp x20,x19,[sp,#48]`):
+                // Walk frame chain from faulting FP (ucontext) to locate __cxa_guard_acquire frame:
                 // [fp+8] = saved LR (caller), [fp+56] = x19 = guard pointer.
-                // Chỉ đọc các frame đã qua kiểm tra dải (savedFp > f, delta hữu
-                // hạn) để không double-fault trong signal handler. Không deref
-                // slot56 (guard) — chỉ dump raw, decode offline.
+                // Validate frame pointers within bounded ranges to prevent secondary faults.
+                // slot56 (guard) — ch dump raw, decode offline.
                 (void)!write(fd, "\n--- fp chain ---\n", 17);
                 {
                     uint64_t f = fp;
@@ -729,12 +712,12 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
                         const bool inGuest =
                             kudroid::kudroid_lookup_guest_module(
                                 reinterpret_cast<void*>(savedLr), lrMod, sizeof(lrMod));
-                        // Nếu không thuộc guest ELF thì đây là code HOST — gồm cả
-                        // Avian (link tĩnh vào KuDroidShell). Trước đây chỉ in raw
-                        // "lr=0x104e62934?" nên mọi abort của Avian đều vô danh và
-                        // phải đoán. symbolicateAddr có sẵn symbol table (hàm static
-                        // như crashHandler vẫn ra tên) → in luôn tên hàm ở đây để
-                        // lý do abort hiện ra ngay trong crash log, không cần atos.
+                        // Nu no/not thuc guest ELF th y l code HOST — gm c
+                        // Avian (link tnh vo KuDroidShell). before y ch in raw
+                        // "lr=0x104e62934?" nn mi abort ca Avian u v danh v
+                        // phi on. symbolicateAddr c sn symbol table (function static
+                        // nh crashHandler vn ra tn) → in lun tn function y 
+                        // l do abort hin ra ngay trong crash log, no/not cn atos.
                         char lrSym[512];
                         if (!inGuest) {
                             symbolicateAddr((uintptr_t)savedLr, lrSym, sizeof(lrSym));
@@ -747,7 +730,7 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
                             inGuest ? lrMod : lrSym, (unsigned long long)slot56,
                             guardLike ? " <-- guard?" : "");
                         crashWriteLine(fd, sigline, n2, sizeof(sigline));
-                        // Chain hợp lệ: frame kế cao hơn, delta ≤ 64KB.
+                        // Chain hp l: frame k cao hn, delta ≤ 64KB.
                         if (!(savedFp > f && savedFp - f < 0x10000)) break;
                         f = savedFp;
                     }
@@ -782,9 +765,9 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
             (void)!write(fd, "\n--- log up to crash ---\n", 25);
             (void)!write(fd, g_crashBuf, (size_t)g_crashLen);
 
-            // Dump đuôi stderr (lý do abort/fatal của avian — thường in ra đây
-            // nhưng bị mất vì iOS không hiển thị stderr). open/lseek/read/write
-            // đều async-signal-safe nên gọi được trong signal handler.
+            // Dump ui stderr (l do abort/fatal ca avian — thng in ra y
+            // nhng b mt v iOS no/not hin th stderr). open/lseek/read/write
+            // u async-signal-safe nn call c trong signal handler.
             {
                 char errPath[1200];
                 size_t dl = strlen(g_logDir);
@@ -824,14 +807,14 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
     }
 
     // --- GENTLE CRASH SYSTEM ---
-    // Đánh dấu trạng thái crash và trích xuất tối đa 30 dòng log cuối cùng
-    // để UI Swift hiển thị cảnh báo "Whoops, the app crashed" mà không đóng app.
+    // nh du trng thi crash v trch xut ti a 30 dng log cui cng
+    // UI Swift hin th cnh bo "Whoops, the app crashed" m no/not ng app.
     g_hasCrashed.store(true);
     
-    // Thu thập 30 dòng log cuối cùng từ g_crashBuf
+    // Thu thp 30 dng log cui cng t g_crashBuf
     extractLastLines(g_crashBuf, (size_t)g_crashLen, g_lastCrashTail, sizeof(g_lastCrashTail), 30);
     
-    // Nếu g_lastCrashTail quá ngắn, ghép thêm thông tin signal và PC
+    // Nu g_lastCrashTail qu ngn, ghp thm thng tin signal v PC
     if (strlen(g_lastCrashTail) < 30) {
         char fallbackSummary[512];
         snprintf(fallbackSummary, sizeof(fallbackSummary),
@@ -840,19 +823,19 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
         strncat(g_lastCrashTail, fallbackSummary, sizeof(g_lastCrashTail) - strlen(g_lastCrashTail) - 1);
     }
 
-    // Nếu crash xảy ra trên background thread (render thread, game thread, worker thread):
-    // Không gọi hàm lock mutex trong signal handler để tránh deadlock/freeze!
+    // Nu crash xy ra trn background thread (render thread, game thread, worker thread):
+    // no/not call function lock mutex trong signal handler trnh deadlock/freeze!
 #if defined(__APPLE__)
     const bool isBackground = !pthread_main_np();
 #else
     const bool isBackground = g_mainThread != 0 && !pthread_equal(pthread_self(), g_mainThread);
 #endif
     if (isBackground) {
-        // Luồng background bị crash: giải phóng và tạm dừng luồng này để Swift timer phát hiện crash
-        // và tự động hiển thị Gentle Crash modal mà không làm freeze/treo launcher.
+        // thread background b crash: gii phng v tm stop thread ny Swift timer pht hin crash
+        // v t ng hin th Gentle Crash modal m no/not lm freeze/treo launcher.
         pause();
     } else {
-        // Nếu crash ngay trên main thread, ghi nhận và kết thúc an toàn
+        // Nu crash ngay trn main thread, write nhn v kt thc an ton
         signal(sig, SIG_DFL);
         raise(sig);
     }
@@ -869,13 +852,13 @@ static void installCrashHandlers(void) {
     sa.sa_flags = SA_SIGINFO;
     sigemptyset(&sa.sa_mask);
 
-    // Chạy handler trên stack riêng: khi crash là stack overflow (hoặc stack của
-    // JVM thread quá nhỏ), handler chạy trên stack đã hỏng sẽ double-fault và
-    // KHÔNG ghi được crash log — đúng triệu chứng "app chết im lặng". Cấp stack
-    // tĩnh (không heap, an toàn trong signal context) rồi bật SA_ONSTACK.
+    // run handler trn stack ring: khi crash l stack overflow (hoc stack ca
+    // JVM thread qu nh), handler run trn stack hng s double-fault v
+    // no/not write c crash log — ng triu chng "app cht im lng". Cp stack
+    // tnh (no/not heap, an ton trong signal context) ri bt SA_ONSTACK.
     {
-        // SIGSTKSZ không còn là hằng biên dịch trên glibc mới → dùng kích thước
-        // cố định (64KB, thừa cho handler này) để mảng static hợp lệ ở mọi libc.
+        // SIGSTKSZ no/not cn l hng bin dch trn glibc mi → dng kch thc
+        // c nh (64KB, tha cho handler ny) mng static hp l mi libc.
         armAltSignalStack();
         if (g_altStackArmed) {
             sa.sa_flags |= SA_ONSTACK;
@@ -888,14 +871,14 @@ static void installCrashHandlers(void) {
     sigaction(SIGTRAP, &sa, nullptr);
     sigaction(SIGABRT, &sa, nullptr);
 
-    // Android/bionic mặc định IGNORE SIGPIPE (write vào pipe/socket đã đóng trả
-    // EPIPE thay vì giết process). Game .so tin vào hành vi này — nếu host giữ
-    // SIGPIPE mặc định, chỉ cần game ghi log vào một pipe đã đóng là app chết
-    // ngay mà không có crash log.
+    // Android/bionic mc nh IGNORE SIGPIPE (write vo pipe/socket ng tr
+    // EPIPE thay v git process). Game .so tin vo hnh vi ny — nu host gi
+    // SIGPIPE mc nh, ch cn game write log vo mt pipe ng l app cht
+    // ngay m no/not c crash log.
     ::signal(SIGPIPE, SIG_IGN);
 
 #if defined(__APPLE__)
-    // Bắt lý do abort trước khi nó xảy ra: ObjC exception chưa bắt + C++ terminate.
+    // Bt l do abort before khi n xy ra: ObjC exception cha bt + C++ terminate.
     NSSetUncaughtExceptionHandler(&kudroid_uncaught_objc_handler);
     std::set_terminate(&kudroid_terminate_handler);
 #endif
@@ -933,13 +916,16 @@ extern "C" void kudroid_set_log_dir(const char* dir) {
     static bool s_logDirInitialized = false;
     if (!s_logDirInitialized) {
         s_logDirInitialized = true;
-        // Chỉ reset log đúng một lần khi app KuDroid mới mở, giữ nguyên log khi user ấn X / quay lại màn hình chính
+        // Truncate the log exactly once per KuDroid launch. Pressing X to return to
+        // the launcher and starting another app must keep what came before, or the
+        // log of the run that just failed is gone before it can be read.
         char aPath[1200];
         snprintf(aPath, sizeof(aPath), "%s/kudroid_android_logs.txt", g_logDir);
         FILE* afp = fopen(aPath, "w");
         if (afp) {
-            // Dòng ĐẦU TIÊN của log chính luôn là build stamp — nhìn phát biết
-            // ngay IPA đang chạy là commit nào, không cần mở file version riêng.
+            // The FIRST line of the main log is always the build stamp, so which
+            // commit the running IPA was built from is visible without opening a
+            // separate version file.
             fprintf(afp, "[KuDroidCore] Build: %s\n", kudroid_build_stamp());
             fclose(afp);
         }
@@ -965,7 +951,8 @@ extern "C" void kudroid_set_log_dir(const char* dir) {
         }
 
 #if defined(__APPLE__)
-        // Redirect stderr (fd 2) vào file — dùng O_TRUNC đúng 1 lần khi mở app
+        // Redirect stderr (fd 2) into a file. O_TRUNC once per launch, for the same
+        // reason as above.
         char errPath[1200];
         snprintf(errPath, sizeof(errPath), "%s/stderr.log", g_logDir);
         int errFd = open(errPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -973,19 +960,19 @@ extern "C" void kudroid_set_log_dir(const char* dir) {
             dup2(errFd, STDERR_FILENO);
             setvbuf(stderr, nullptr, _IONBF, 0);
             close(errFd);
-            // AFC (copy file qua USB/Finder) chỉ đọc được file có quyền
-            // read cho other — umask có thể đã mask 0644 thành 0600.
+            // AFC (copying files over USB/Finder) can only read a file that is
+            // readable by other, and umask may have masked 0644 down to 0600.
             ::chmod(errPath, 0644);
-            // Dòng đầu của stderr.log = build stamp — mọi log file đều
-            // tự nhận diện được commit của bản IPA đang chạy.
+            // First line of stderr.log is the build stamp too: every log file
+            // identifies the commit of the IPA that produced it.
             fprintf(stderr, "[kudroid_core] Build: %s\n", kudroid_build_stamp());
             fprintf(stderr, "[kudroid_core] log directory: %s\n", g_logDir);
         }
 #endif
     }
 
-    // Ghi stamp build ra file để user kiểm tra app đang chạy có phải bản mới
-    // nhất không (trả lời "iPhone vẫn chạy app cũ?").
+    // Write the build stamp to its own file so the running version can be checked
+    // without reading a log, which answers "is the iPhone still on the old build?".
     const char* stamp = kudroid_build_stamp();
     writeLogFile("kudroid_version.txt", std::string(stamp) + "\n");
 
@@ -1016,17 +1003,17 @@ extern "C" void kudroid_set_documents_dir(const char* dir) {
     }
 }
 
-// con trỏ lớp metal toàn cục có thể truy cập bằng bionicshim
+// pointer lp metal ton cc c th truy cp bng bionicshim
 void* g_metalLayer = nullptr;
 int g_metalLayerWidth = 1080;
 int g_metalLayerHeight = 1920;
 float g_metalLayerDensity = 3.0f;
 
-// Đi qua pipeline log chuẩn (stdout + kudroid_android_logs.txt + crash buffer)
-// — định nghĩa trong SyscallShim.cpp, dùng chung với GraphicsShim.
+// i qua pipeline log chun (stdout + kudroid_android_logs.txt + crash buffer)
+// — nh ngha trong SyscallShim.cpp, dng chung vi GraphicsShim.
 extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
 
-// GraphicsShim.cpp — ANGLE first-touch phải trên main thread (xem comment ở
+// GraphicsShim.cpp — ANGLE first-touch phi trn main thread (xem comment 
 // kudroid_set_metal_layer).
 extern "C" void kudroid_gpu_warmup_egl(void);
 extern "C" void* bionic_ANativeWindow_fromSurface(void* env, void* surface);
@@ -1036,9 +1023,9 @@ extern "C" void kudroid_set_metal_layer(void* layer, int width, int height, floa
     g_metalLayerWidth = width;
     g_metalLayerHeight = height;
     g_metalLayerDensity = density > 0.0f ? density : g_metalLayerDensity;
-    // Log kích thước nhận từ Swift — trước đây không log gì nên width/height
-    // sai (0/âm) chỉ lộ ra ở ANativeWindow_lock (hoặc không bao giờ nếu game
-    // không dùng lock).
+    // Log kch thc nhn t Swift — before y no/not log g nn width/height
+    // sai (0/m) ch l ra ANativeWindow_lock (hoc no/not bao gi nu game
+    // no/not dng lock).
     char buf[192];
     std::snprintf(buf, sizeof(buf),
                   "kudroid_set_metal_layer(layer=%p, size=%dx%d, density=%.2f)",
@@ -1052,7 +1039,7 @@ extern "C" void kudroid_set_metal_layer(void* layer, int width, int height, floa
         kudroid::JavaCanvasRenderer::getInstance().init(width, height);
     }
 
-    // Để render thread tự khởi tạo EGL display sạch sẽ từ đầu
+    // render thread t khi create EGL display sch s t u
     // kudroid_gpu_warmup_egl();
 }
 
@@ -1105,12 +1092,12 @@ extern "C" const char* kudroid_install_apk(const char* apkPath) {
             extractedOk = kudroid::APKExtractor::extract_apk(source.string(), appDir.string());
         }
         if (extractedOk) {
-            // pkgId phía trên đoán từ tên file APK khi get_package_name() không đọc
-            // được manifest (bundle container: manifest thật nằm trong base APK bên
-            // trong, không ở top level). Sau khi giải nén, app_info.json đã chứa
-            // package thật do parseAxml của base manifest → dùng nó làm nguồn duy
-            // nhất và đổi tên thư mục, để data/app và dalvik-cache luôn theo
-            // package ID chứ không phải tên file APK.
+            // pkgId pha trn on t tn file APK khi get_package_name() no/not read
+            // c manifest (bundle container: manifest tht nm trong base APK bn
+            // trong, no/not top level). after khi gii nn, app_info.json cha
+            // package tht do parseAxml ca base manifest → dng n lm ngun duy
+            // nht v i tn th mc, data/app v dalvik-cache lun theo
+            // package ID ch no/not phi tn file APK.
             std::string effectiveAppName = pkgId;
             std::filesystem::path effectiveAppDir = appDir;
             {
@@ -1156,9 +1143,9 @@ extern "C" const char* kudroid_install_apk(const char* apkPath) {
 #include <libkern/OSCacheControl.h>
 #include <TargetConditionals.h>
 
-// csops() là một api riêng tư nhưng ổn định; được sử dụng để đọc trạng thái chữ ký mã của quá trình.
-// cs_debugged được đặt khi đường dẫn jit (ký mã động) hoạt động
-// dưới livecontainer / trình gỡ lỗi, điều này cho phép các trang prot_exec chạy.
+// csops() l mt api ring t nhng n nh; c s dng read trng thi ch k m ca qu trnh.
+// cs_debugged c t khi ng dn jit (k m ng) hot ng
+// di livecontainer / trnh g error, iu ny cho php cc trang prot_exec run.
 extern "C" int csops(pid_t pid, unsigned int ops, void* useraddr, size_t usersize);
 #ifndef CS_OPS_STATUS
 #define CS_OPS_STATUS 0
@@ -1168,10 +1155,10 @@ extern "C" int csops(pid_t pid, unsigned int ops, void* useraddr, size_t usersiz
 #endif
 #endif
 
-// trả về 1 nếu jit (bộ nhớ có thể thực thi) có vẻ khả dụng, ngược lại trả về 0.
+// return 1 nu jit (memory c th execute) c v kh dng, ngc li return 0.
 extern "C" int kudroid_is_jit_enabled(void) {
 #if defined(__APPLE__)
-    // 1. Kiểm tra CS_DEBUGGED (Trình gỡ lỗi: AltStore, SideStore, Sideloadly, Xcode, StikDebug, Jitterbug)
+    // 1. Kim tra CS_DEBUGGED (Trnh g error: AltStore, SideStore, Sideloadly, Xcode, StikDebug, Jitterbug)
     unsigned int flags = 0;
     if (csops(getpid(), CS_OPS_STATUS, &flags, sizeof(flags)) == 0) {
         if (flags & CS_DEBUGGED) {
@@ -1179,13 +1166,13 @@ extern "C" int kudroid_is_jit_enabled(void) {
         }
     }
 
-    // 2. Kiểm tra môi trường TrollStore / Jailbreak qua đường dẫn an toàn (không gọi mã máy động để tránh SIGKILL)
+    // 2. Kim tra mi trng TrollStore / Jailbreak qua ng dn an ton (no/not call m my ng trnh SIGKILL)
     if (access("/Applications/TrollStore.app", F_OK) == 0 ||
         access("/var/mobile/Library/TrollStore", F_OK) == 0 ||
         getenv("TROLLSTORE_ENABLED") != nullptr) {
         return 1;
     }
-    return 0; // Hoàn toàn không có JIT!
+    return 0; // Hon ton no/not c JIT!
 #else
     return 1;
 #endif
@@ -1264,7 +1251,7 @@ static void ensure_software_framebuffer() {
     }
 }
 
-// Chuyển ARGB (Android format) sang RGBA / BGRA (iOS Metal format)
+// Chuyn ARGB (Android format) sang RGBA / BGRA (iOS Metal format)
 static inline uint32_t argb_to_rgba(uint32_t argb) {
     uint32_t a = (argb >> 24) & 0xFF;
     uint32_t r = (argb >> 16) & 0xFF;
@@ -1363,7 +1350,7 @@ extern "C" JNIEXPORT void JNICALL Java_android_os_Vibrator_kudroid_1vibrate_1nat
     kudroid_vibrate(intensity);
 }
 
-static std::atomic<int> s_keepScreenOn{1}; // Mặc định khi chạy app là 1 (No Sleep)
+static std::atomic<int> s_keepScreenOn{1}; // Mc nh khi run app l 1 (No Sleep)
 
 extern "C" void kudroid_set_keep_screen_on(int keepOn) {
     s_keepScreenOn.store(keepOn != 0 ? 1 : 0);
@@ -1449,7 +1436,7 @@ extern "C" void kudroid_dispatch_delete_backward(void) {
 
 #include "kudroid/KuArtRuntime.h"
 
-// --- định nghĩa nativeactivity ---
+// --- nh ngha nativeactivity ---
 
 struct ANativeActivityCallbacks {
     void* onStart;
@@ -1484,8 +1471,8 @@ struct ANativeActivity {
 };
 
 
-// Tự kiểm tra KuART: nạp framework.dex nhúng rồi thử JNI cả hai chiều. Tham số
-// giữ lại cho tương thích ABI với vỏ Swift (trước là đường dẫn rt.jar của Avian).
+// T kim tra KuART: np framework.dex nhng ri th JNI c hai chiu. Tham s
+// gi li cho tng thch ABI vi v Swift (before l ng dn rt.jar ca Avian).
 extern "C" char* kudroid_test_jvm(const char* unused_path) {
     (void)unused_path;
     std::string log;
@@ -1505,7 +1492,7 @@ extern "C" char* kudroid_test_jvm(const char* unused_path) {
         }
     });
 
-    // app_dir rỗng = chỉ nạp framework.dex nhúng.
+    // app_dir rng = ch np framework.dex nhng.
     if (!kuart_init("")) {
         log += "[kudroid_core] ERROR: kuart_init failed: " + std::string(kuart_last_error()) + "\n";
         kuart_set_log_callback(nullptr);
@@ -1527,8 +1514,8 @@ extern "C" char* kudroid_test_jvm(const char* unused_path) {
 
     if (env) {
         log += "[kudroid_core] Phase: testing JNI FindClass\n";
-        // ActivityThread là class mà đường khởi động thật sự dùng — nó load được
-        // nghĩa là framework nhúng hợp lệ và class linker chạy đúng.
+        // ActivityThread l class m ng khi ng tht s dng — n load c
+        // ngha l framework nhng hp l v class linker run ng.
         for (const char* name : {"android/app/ActivityThread", "android/app/Activity",
                                  "android/os/Looper", "android/util/Log"}) {
             jclass c = env->FindClass(name);
@@ -1567,23 +1554,23 @@ extern "C" char* kudroid_test_jvm(const char* unused_path) {
     return strdup(log.c_str());
 }
 
-// Guest .so mappings PHẢI sống bằng tuổi process — đúng ngữ nghĩa dlopen trên
-// Android (libs ở lại trong process cho tới khi app chết). Bằng chứng log máy
-// thật: mọi crash triangle từ đầu đều là SIGABRT trong libtriangle_gles.so+
-// 0x4xxx NGAY SAU khi run_apk in dòng cuối "ANativeActivity_onCreate not found"
-// — render thread guest chạy SONG SONG với run_apk (spawn từ JNI_OnLoad), còn
-// manager trước đây là biến LOCAL nên khi run_apk return, destructor ElfLoader
-// munmap toàn bộ guest .so trong lúc render thread vẫn đang thực thi bên trong
-// → thực thi vùng nhớ đã unmap → abort. Warm-up ANGLE các vòng trước chỉ làm
-// render thread tới xa hơn TRƯỚC khi munmap (race) nên crash dời dần — không
-// phải fix gốc.
+// Guest .so mappings PHI sng bng tui process — ng ng ngha dlopen trn
+// Android (libs li trong process cho ti khi app cht). Bng chng log my
+// tht: mi crash triangle t u u l SIGABRT trong libtriangle_gles.so+
+// 0x4xxx NGAY after khi run_apk in dng cui "ANativeActivity_onCreate not found"
+// — render thread guest run SONG SONG vi run_apk (spawn t JNI_OnLoad), cn
+// manager before y l bin LOCAL nn khi run_apk return, destructor ElfLoader
+// munmap ton b guest .so trong lc render thread vn ang execute bn trong
+// → execute vng nh unmap → abort. Warm-up ANGLE cc vng before ch lm
+// render thread ti xa hn before khi munmap (race) nn crash di dn — no/not
+// phi fix gc.
 static kudroid::LibraryManager& globalLibraryManager() {
     static kudroid::LibraryManager instance;
     return instance;
 }
 
-// Hook tra symbol guest — định nghĩa trong SyscallShim.cpp, bionic_dlsym dùng
-// khi handle là DUMMY_HANDLE (dlopen("libc.so") v.v.).
+// Hook tra symbol guest — nh ngha trong SyscallShim.cpp, bionic_dlsym dng
+// khi handle l DUMMY_HANDLE (dlopen("libc.so") v.v.).
 extern "C" {
 extern void* (*kudroid_guest_symbol_lookup)(const char* name);
 }
@@ -1594,13 +1581,13 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
         return strdup("[kudroid_core] APK is already running.\n");
     }
 
-    // Reset/truncate logs để mỗi phiên chạy app luôn ghi đè log mới hoàn toàn (không chồng lên nhau)
+    // Reset/truncate logs mi phin run app lun write log mi hon ton (no/not chng ln nhau)
     if (g_logDir[0] != '\0') {
         char aPath[1200];
         snprintf(aPath, sizeof(aPath), "%s/kudroid_android_logs.txt", g_logDir);
         FILE* afp = fopen(aPath, "w");
         if (afp) {
-            // Build stamp ở dòng đầu tiên của log phiên chạy APK mới.
+            // Build stamp dng u tin ca log phin run APK mi.
             fprintf(afp, "[KuDroidCore] Build: %s\n", kudroid_build_stamp());
             fclose(afp);
         }
@@ -1617,7 +1604,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
             dup2(errFd, STDERR_FILENO);
             setvbuf(stderr, nullptr, _IONBF, 0);
             close(errFd);
-            // AFC (kdb dump / Finder) chỉ đọc được file có quyền read-other.
+            // AFC (kdb dump / Finder) ch read c file c quyn read-other.
             ::chmod(errPath, 0644);
             fprintf(stderr, "[kudroid_core] Build: %s\n", kudroid_build_stamp());
         }
@@ -1636,13 +1623,13 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
         std::string resolvedAppName = appName;
         std::filesystem::path appDir = std::filesystem::path(remapper.androidRoot()) / "data/app" / resolvedAppName;
 
-        // ── Chuẩn hóa tên app = package ID thật ───────────────────────────
-        // Thư mục cài đặt thường mang tên FILE APK tải về (vd
-        // "Minecraft_PE_26.30_BANDISHARE") trong khi Android thật định danh
-        // app bằng package ID ("com.mojang.minecraftpe"). Đọc manifest NGAY
-        // TỪ ĐẦU để đổi tên thư mục + di chuyển dalvik-cache sang tên chuẩn:
-        // mọi đường dẫn runtime (dalvik-cache, data/data, sdcard/Android/data)
-        // khớp Android thật và nhất quán dù tải lại APK với tên file khác.
+        // ── Chun ha tn app = package ID tht ───────────────────────────
+        // Th mc install thng mang tn FILE APK ti v (vd
+        // "Minecraft_PE_26.30_BANDISHARE") trong khi Android tht nh danh
+        // app bng package ID ("com.mojang.minecraftpe"). read manifest NGAY
+        // T U i tn th mc + di chuyn dalvik-cache sang tn chun:
+        // mi ng dn runtime (dalvik-cache, data/data, sdcard/Android/data)
+        // khp Android tht v nht qun d ti li APK vi tn file khc.
         {
             const auto mfPath = appDir / "AndroidManifest.xml";
             std::string pkgId;
@@ -1671,8 +1658,8 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                     std::filesystem::rename(appDir, cleanAppDir, renEc);
                     movedApp = !renEc;
                 }
-                // Dalvik-cache cũ của đường dex2jar phải theo tên mới để bước
-                // dọn dẹp sau này tìm thấy và xóa được.
+                // Dalvik-cache c ca ng dex2jar phi theo tn mi bc
+                // dn dp after ny tm thy v remove c.
                 const auto oldCache = std::filesystem::path(remapper.androidRoot()) /
                                       "data/dalvik-cache" / resolvedAppName;
                 const auto newCache = std::filesystem::path(remapper.androidRoot()) /
@@ -1685,13 +1672,13 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                     resolvedAppName = pkgId;
                     appDir = cleanAppDir;
                 } else if (std::filesystem::exists(cleanAppDir)) {
-                    // Đã có thư mục chuẩn từ trước (cài đè) — giữ nguyên bố cục cũ.
+                    // c th mc chun t before (ci ) — gi nguyn b cc c.
                 }
             }
         }
 
-        // Fallback cũ: nếu manifest không đọc được, thử app_info.json do
-        // extractor ghi lúc cài đặt (chứa package ID chuẩn).
+        // Fallback c: nu manifest no/not read c, th app_info.json do
+        // extractor write lc install (cha package ID chun).
         if (std::filesystem::exists(appDir)) {
             std::filesystem::path infoPath = appDir / "app_info.json";
             if (std::filesystem::exists(infoPath)) {
@@ -1747,17 +1734,17 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
         } else {
             kudroid::LibraryManager& manager = globalLibraryManager();
 
-            // Cài hook tra symbol guest cho bionic_dlsym(DUMMY_HANDLE, ...):
-            // dlopen("libc.so") trả handle giả nhưng dlsym(handle, "hàm") trên
-            // Android thật vẫn resolve được — không cài hook thì init code của
-            // guest nhận nullptr rồi gọi → SIGSEGV pc=0x0 (crash libmaesdk).
+            // Ci hook tra symbol guest cho bionic_dlsym(DUMMY_HANDLE, ...):
+            // dlopen("libc.so") tr handle gi nhng dlsym(handle, "function") trn
+            // Android tht vn resolve c — no/not ci hook th init code ca
+            // guest nhn nullptr ri call → SIGSEGV pc=0x0 (crash libmaesdk).
             kudroid_guest_symbol_lookup = [](const char* name) -> void* {
                 return globalLibraryManager().resolveGlobalSymbol(name);
             };
 
-            // KuART phải sẵn sàng TRƯỚC khi dlopen bất kỳ .so nào: static
-            // initializer của libminecraftpe.so gọi JNI_GetCreatedJavaVMs, nếu
-            // chưa có VM thì nó tự dựng state sai rồi không sửa lại được.
+            // KuART phi sn sng before khi dlopen bt k .so no: static
+            // initializer ca libminecraftpe.so call JNI_GetCreatedJavaVMs, nu
+            // cha c VM th n t dng state sai ri no/not sa li c.
             kuart_set_log_callback([](const char* msg) {
                 kudroid_android_log_message(4, "KuART", msg);
                 std::fprintf(stderr, "[KuART] %s\n", msg);
@@ -1986,12 +1973,17 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                         // run; skipping it leaves whatever the app initialises there
                         // empty. Generic: whatever the manifest names, nothing assumed.
                         std::string manifestComponentFactory;
+                        // <meta-data> per activity plus the <application> block. Kept
+                        // whole rather than reduced to what one app needs: a component
+                        // reads its own manifest entry while constructing itself, so
+                        // whatever key it wants has to already be there.
+                        kudroid::ManifestInfo manifestInfo;
 
-                        // ƯU TIÊN 1: parse AndroidManifest.xml ĐÃ GIẢI NÉN trong
-                        // appDir — nguồn chính xác duy nhất. Log cũ cho thấy
-                        // app_info.json có thể thiếu/stale (Target Activity bị
-                        // đoán "Minecraft.MainActivity" trong khi package thật
-                        // là com.mojang.minecraftpe) → ClassNotFoundException.
+                        // U TIN 1: parse AndroidManifest.xml GII NN trong
+                        // appDir — ngun main xc duy nht. Log c cho thy
+                        // app_info.json c th thiu/stale (Target Activity b
+                        // on "Minecraft.MainActivity" trong khi package tht
+                        // l com.mojang.minecraftpe) → ClassNotFoundException.
                         const auto manifestPath = appDir / "AndroidManifest.xml";
                         if (std::filesystem::exists(manifestPath)) {
                             std::ifstream mf(manifestPath, std::ios::binary);
@@ -2003,9 +1995,9 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                               std::to_string(axml.size()) + " bytes)...");
                                 kudroid::ManifestInfo mi =
                                     kudroid::APKExtractor::parse_manifest(axml.data(), axml.size());
-                                // APK repack (apktool/BANDISHARE...) thường chứa
-                                // manifest dạng TEXT — AXML parser trả rỗng với
-                                // chúng. Thử parse text trước khi bỏ cuộc.
+                                // APK repack (apktool/BANDISHARE...) thng cha
+                                // manifest dng TEXT — AXML parser tr rng vi
+                                // chng. Th parse text before khi b cuc.
                                 if (mi.mainActivity.empty() && axml.size() > 4 &&
                                     axml[0] == '<') {
                                     appendAndEcho("[kudroid_core] Manifest is TEXT XML, trying text parser...");
@@ -2033,8 +2025,13 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                 for (const auto& a : mi.activities) {
                                     appendAndEcho(std::string("[kudroid_core]   manifest activity: ") + a.name +
                                                   (a.isLauncher ? "  [LAUNCHER]" : "") +
-                                                  (a.isAlias ? "  [alias]" : ""));
+                                                  (a.isAlias ? "  [alias]" : "") +
+                                                  (a.metaData.empty()
+                                                       ? ""
+                                                       : "  [" + std::to_string(a.metaData.size()) +
+                                                             " meta-data]"));
                                 }
+                                manifestInfo = mi;
                             } else {
                                 appendAndEcho("[kudroid_core] WARNING: Cannot open AndroidManifest.xml");
                             }
@@ -2042,7 +2039,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                             appendAndEcho("[kudroid_core] WARNING: AndroidManifest.xml not found in " + appDir.string());
                         }
 
-                        // ƯU TIÊN 2: app_info.json do extractor ghi lúc cài đặt.
+                        // U TIN 2: app_info.json do extractor write lc install.
                         if (targetActivity.empty()) {
                             std::filesystem::path infoPath = appDir / "app_info.json";
                             if (std::filesystem::exists(infoPath)) {
@@ -2070,11 +2067,11 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                             }
                         }
 
-                        // ƯU TIÊN 3: quét class trong DEX của app tìm Activity.
-                        // KuART đọc thẳng classes*.dex nên không cần classes.jar.
-                        // Danh sách Activity thật verify được — dùng làm fallback
-                        // cho ActivityThread, khai báo ở scope này để dùng được cả
-                        // khi khối quét không chạy.
+                        // U TIN 3: qut class trong DEX ca app tm Activity.
+                        // KuART read thng classes*.dex nn no/not cn classes.jar.
+                        // Danh sch Activity tht verify c — dng lm fallback
+                        // cho ActivityThread, khai bo scope ny dng c c
+                        // khi khi qut no/not run.
                         std::vector<std::string> verifiedActivities;
                         if (targetActivity.empty()) {
                             std::vector<std::string> classes;
@@ -2090,25 +2087,30 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                 appendAndEcho("[kudroid_core] Scanning app DEX for Activity classes...");
                                 appendAndEcho("[kudroid_core] Found " + std::to_string(classes.size()) +
                                               " non-system classes in app DEX");
-                                // Chấm điểm chọn launcher:
-                                // -1000  Activity của SDK bên thứ ba (push/analytics
-                                // v.v.) — KHÔNG phải entry point, launch nó
-                                // chỉ cho màn hình xám (bài học Braze).
-                                // +100   tên chứa "Activity"
-                                // +50    package khớp pkgName (từ manifest/app_info)
-                                // +depth bonus: package càng ngắn (gốc app) càng
-                                // giống entry point chính.
+                                // Chm im chn launcher:
+                                // -1000 Activity ca SDK bn th ba (push/analytics
+                                // v.v.) — no/not phi entry point, launch n
+                                // ch cho screen/display xm (bi hc Braze).
+                                // +100 tn cha "Activity"
+                                // +50 package khp pkgName (t manifest/app_info)
+                                // +depth bonus: package cng ngn (gc app) cng
+                                // Heuristics to pick launcher:
+                                // -1000 Activity of 3rd party SDK (push/analytics, etc.) — should not be entry point,
+                                // launching them just shows blank screen (lesson learned from Braze).
+                                // +100 name contains "Activity"
+                                // +50 package matches pkgName (from manifest/app_info)
+                                // +depth bonus: shorter package (app root) is more likely the main entry point.
                                 static const char* kSdkActivityHints[] = {
                                     "braze", "facebook", "firebase", "google", "admob",
                                     "unity3d", "appsflyer", "adjust", "amplitude",
                                     "mixpanel", "crashlytics", "playfab", "microsoft",
-"zarchiver" /* handled riêng ở trên */
+                                    "zarchiver" /* handled specifically above */
                                 };
-                                // Tính sẵn MỘT LẦN thay vì trong vòng lặp từng
-                                // class (jar lớn có thể có 10k+ class).
+                                // Calculate score ONCE instead of inside loop for every
+                                // class (large JARs can have 10k+ classes).
                                 std::string pkgPrefix;
                                 if (!pkgName.empty()) {
-                                    // pkgName dạng a.b.c → prefix "a/b/c/".
+                                    // pkgName dng a.b.c → prefix "a/b/c/".
                                     pkgPrefix = pkgName;
                                     for (char& c : pkgPrefix) if (c == '.') c = '/';
                                     pkgPrefix += '/';
@@ -2121,14 +2123,14 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                 };
                                 std::string best;
                                 int bestScore = -1;
-                                std::string bestAny; // fallback nếu không có *Activity nào
+                                std::string bestAny; // fallback nu no/not c *Activity no
                                 int bestAnyScore = -1;
                                 for (const auto& cls : classes) {
                                     const bool isActivity = cls.find("Activity") != std::string::npos;
                                     const size_t depth = static_cast<size_t>(
                                         std::count(cls.begin(), cls.end(), '/'));
                                     int score = (isActivity ? 100 : 0) + static_cast<int>(10 - depth);
-                                    // Launcher activity hầu như luôn tên "...MainActivity".
+                                    // Launcher activity hu nh lun tn "...MainActivity".
                                     if (cls.size() >= 13 &&
                                         cls.compare(cls.size() - 13, 13, "/MainActivity") == 0) score += 80;
                                     if (!pkgPrefix.empty() &&
@@ -2149,12 +2151,12 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                     targetActivity = best;
                                     appendAndEcho("[kudroid_core] Resolved from app DEX: " + best);
                                 } else if (!bestAny.empty() && bestAnyScore > 0) {
-                                    // Không có *Activity "sạch" — dùng class điểm cao nhất.
+                                    // no/not c *Activity "sch" — dng class im cao nht.
                                     for (char& c : bestAny) if (c == '/') c = '.';
                                     targetActivity = bestAny;
                                     appendAndEcho("[kudroid_core] No clean *Activity class; using highest-scored app class: " + bestAny);
                                 } else if (!classes.empty()) {
-                                    // Mọi class đều bị trừ điểm SDK — log vài cái để debug.
+                                    // Mi class u b tr im SDK — log vi ci debug.
                                     for (size_t i = 0; i < classes.size() && i < 5; ++i) {
                                         appendAndEcho("[kudroid_core]   candidate(all-SDK?): " + classes[i]);
                                     }
@@ -2164,16 +2166,14 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                     appendAndEcho("[kudroid_core] Using first app class as last resort: " + first);
                                 }
 
-                                // ƯU TIÊN 3.5 — VERIFY: tên class KHÔNG nói lên
-                                // gì khi app bị ProGuard obfuscate (a.a.a v.v.).
-                                // Kiểm tra candidate THẬT SỰ extends
-                                // android.app.Activity qua chủng loại của KuART.
+                                // U TIN 3.5 — VERIFY: tn class no/not ni ln
+                                // g khi app b ProGuard obfuscate (a.a.a v.v.).
+                                // Kim tra candidate THT S extends
+                                // android.app.Activity through KuART class inheritance.
                                 //
-                                // BÀI HỌC Braze: vòng verify KHÔNG được lấy Activity
-                                // ĐẦU TIÊN tìm thấy — SDK Activity (push/analytics)
-                                // cũng extends Activity nhưng không render gì → màn
-                                // hình xám. Dùng lại kSdkActivityHints + isSdkOwned
-                                // đã khai báo ở trên (chấm điểm rồi chọn cao nhất).
+                                // Score-based Activity resolution: avoid blindly picking the first candidate,
+                                // as SDK sub-activities (analytics, push) extend Activity but do not render UI.
+                                // Use kSdkActivityHints and scoring to select the main UI Activity.
 
                                 if (!targetActivity.empty() &&
                                     kuart_class_extends_activity(targetActivity.c_str()) != 1) {
@@ -2183,15 +2183,9 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                     int verifiedBestScore = -1;
                                     std::string verifiedBest;
                                     int checked = 0;
-                                    // Thu thập TẤT CẢ Activity thật tìm được (không
-                                    // chỉ cái tốt nhất) — truyền xuống làm fallback
-                                    // cho ActivityThread khi candidate chính fail.
-                                    // FindClass phải link cả chuỗi kế thừa nên tốn
-                                    // kém; với DEX 10k+ class KHÔNG quét toàn bộ.
-                                    // Pass 0: chỉ class có tên chứa "Activity" (phủ
-                                    // đại đa số app). Pass 1 (chỉ chạy khi pass 0
-                                    // không thấy gì — app obfuscate hoàn toàn): phần
-                                    // còn lại, giới hạn 2000 lần kiểm.
+                                    // Collect real candidate Activities as fallbacks for ActivityThread if the primary
+                                    // candidate fails. Two-pass scan: Pass 0 checks names containing 'Activity',
+                                    // Pass 1 inspects remaining classes (bounded at 2000 items for large DEX).
                                     for (int pass = 0; pass < 2 && verifiedBestScore <= 0; ++pass) {
                                         int checkedThisPass = 0;
                                         for (const auto& cls : classes) {
@@ -2203,7 +2197,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                             for (char& c : dotted) if (c == '/') c = '.';
                                             ++checked;
                                             if (kuart_class_extends_activity(dotted.c_str()) != 1) continue;
-                                            // Là Activity thật — chấm điểm như trên.
+                                            // Real Activity candidate — calculate relevance score.
                                             const size_t depth = static_cast<size_t>(
                                                 std::count(cls.begin(), cls.end(), '/'));
                                             int score = 100 + static_cast<int>(10 - depth);
@@ -2219,7 +2213,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                                 verifiedBestScore = score;
                                                 verifiedBest = dotted;
                                             }
-                                            if (verifiedBestScore >= 185) break; // pkg match + MainActivity — đủ chắc
+                                            if (verifiedBestScore >= 185) break; // pkg match + MainActivity — high confidence match
                                         }
                                     }
                                     appendAndEcho("[kudroid_core] Activity verify done: " +
@@ -2228,7 +2222,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                         targetActivity = verifiedBest;
                                         appendAndEcho("[kudroid_core] Verified best Activity: " + verifiedBest);
                                     } else if (!verifiedBest.empty()) {
-                                        // Mọi Activity đều thuộc SDK — chọn ít tệ nhất nhưng cảnh báo rõ.
+                                        // All candidates belong to SDKs — select best-scoring candidate with a warning.
                                         targetActivity = verifiedBest;
                                         appendAndEcho("[kudroid_core] WARNING: only SDK Activities found; using least-bad: " + verifiedBest);
                                     } else {
@@ -2240,11 +2234,8 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                             }
                         }
 
-                        // ƯU TIÊN 4: đoán theo package/tên app — CHỈ khi cả ba
-                        // nguồn trên thất bại. Hoàn toàn tổng quát: không hardcode
-                        // app cụ thể nào; các biến thể tên được ActivityThread
-                        // thử động từ package prefix (xem ActivityThread.java).
-                        std::string guessBase; // dùng chung cho fallback list
+                        // PRIORITY 4: heuristic guessing from package name only when prior sources fail.
+                        std::string guessBase; // shared base name for fallback list
                         // Prefer any manifest-declared activity over a guess: the
                         // manifest is what Android itself reads.
                         if (targetActivity.empty() && !manifestActivities.empty()) {
@@ -2264,7 +2255,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                 targetActivity = base + ".MainActivity";
                             }
                             appendAndEcho("[kudroid_core] WARNING: guessed Activity '" + targetActivity +
-"' (manifest/jar-scan/JNI đều thất bại)");
+                                          "' (manifest/dex-scan/JNI lookup failed)");
                         }
 
                         // Fallback list for ActivityThread, in descending order of
@@ -2303,6 +2294,52 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                             appendAndEcho("[kudroid_core] Application class: " + manifestAppClass);
                         }
                         appendAndEcho("[kudroid_core] Launching Android ActivityThread runtime (KuART)...");
+
+                        // Register the manifest BEFORE launching. A component reads its
+                        // own entry while constructing itself — AGDK's GameActivity asks
+                        // getActivityInfo(...).metaData for "android.app.lib_name" inside
+                        // onCreate to find the .so holding its renderer — so registering
+                        // after launch would be too late and the activity would come up
+                        // with no native library and an empty surface.
+                        {
+                            std::vector<const char*> actPtrs;
+                            for (const auto& a : manifestActivities) actPtrs.push_back(a.c_str());
+                            kuart_register_package(pkgName.c_str(),
+                                                   actPtrs.empty() ? nullptr : actPtrs.data(),
+                                                   static_cast<int>(actPtrs.size()));
+
+                            // Registers keys/values as parallel arrays; the storage has
+                            // to outlive the call, hence the vectors of c_str().
+                            const auto registerMeta =
+                                [&](const std::string& component,
+                                    const std::vector<kudroid::MetaDataEntry>& meta) {
+                                    if (meta.empty()) return;
+                                    std::vector<const char*> keys, values;
+                                    keys.reserve(meta.size());
+                                    values.reserve(meta.size());
+                                    for (const auto& m : meta) {
+                                        keys.push_back(m.name.c_str());
+                                        values.push_back(m.value.c_str());
+                                    }
+                                    kuart_register_component_meta_data(
+                                        component.c_str(), keys.data(), values.data(),
+                                        static_cast<int>(keys.size()));
+                                    appendAndEcho("[kudroid_core] meta-data registered for " +
+                                                  (component.empty() ? std::string("<application>")
+                                                                     : component) +
+                                                  ": " + std::to_string(meta.size()) + " entries");
+                                    for (const auto& m : meta) {
+                                        appendAndEcho("[kudroid_core]     " + m.name + " = " +
+                                                      m.value);
+                                    }
+                                };
+
+                            registerMeta(std::string(), manifestInfo.applicationMetaData);
+                            for (const auto& a : manifestInfo.activities) {
+                                registerMeta(a.name, a.metaData);
+                            }
+                        }
+
                         if (!kuart_launch_app(pkgName.c_str(),
                                               manifestComponentFactory.c_str(),
                                               manifestAppClass.c_str(),
@@ -2449,7 +2486,7 @@ extern "C" const char* kudroid_load_elf(const char* path) {
                 log += buf;
             }
 
-            // thử ánh xạ (hiện tại là hàm giả)
+            // attempt mapping (currently stubbed)
             log += "[kudroid_core] Phase: map PT_LOAD segments\n";
             if (loader.map()) {
                 log += "[kudroid_core] Map OK.\n";
@@ -2458,7 +2495,7 @@ extern "C" const char* kudroid_load_elf(const char* path) {
                 log += buf;
             }
 
-            // thử định vị lại (hiện tại là hàm giả)
+            // attempt relocation (currently stubbed)
             log += "[kudroid_core] Phase: resolve relocations/imports\n";
             if (loader.relocate()) {
                 log += "[kudroid_core] Relocate OK.\n";
@@ -2497,9 +2534,8 @@ extern "C" const char* kudroid_execution_test(const char* path) {
     snprintf(buf, sizeof(buf), "[kudroid_core] Execution test for: %s\n", path);
     log += buf;
 
-    // từ chối chạy mã gốc khi jit bị tắt: việc thực thi các trang prot_exec
-    // mà không có ký mã động sẽ làm lỗi toàn bộ quá trình và nhật ký
-    // được đệm bên dưới sẽ không bao giờ được trả về. hãy thất bại lớn tiếng thay vì gặp sự cố.
+    // Refuse native execution when JIT is disabled: executing PROT_EXEC pages
+    // without dynamic code signing terminates the process abruptly.
     if (!kudroid_jit_available()) {
         log += "[kudroid_core] ABORT: JIT is Disabled — cannot execute native code.\n";
         log += "[kudroid_core] Enable JIT in LiveContainer and retry.\n";
@@ -2545,9 +2581,7 @@ extern "C" const char* kudroid_execution_test(const char* path) {
         log += "[kudroid_core] Phase: relocate/import binding -> OK\n";
         log += "[kudroid_core] Phase: invoke exported kudroid_add(40, 20)\n";
 
-        // chụp nhanh nhật ký cho trình xử lý sự cố: lời gọi bên dưới nhảy vào
-        // mã đã được jit và có thể bị lỗi (tín hiệu, không phải ngoại lệ). nếu có,
-        // trình xử lý sẽ đẩy bộ đệm này vào kudroid_crash.log.
+        // Snapshot logs for crash handler prior to executing JIT code.
         mirrorCrash(log);
 
         std::string execResult = loader.testExecution();
@@ -2731,7 +2765,7 @@ extern "C" const char* kudroid_run_so_test(const char* soPath, const char* entry
     }
     log += "✔ Library loaded successfully with " + std::to_string(manager.libraries().size()) + " dependencies resolved\n";
 
-    // Tìm entrypoint
+    // Locate entry point
     std::vector<std::string> candidateNames;
     if (entrypoint && strlen(entrypoint) > 0) {
         candidateNames.push_back(entrypoint);
@@ -2761,7 +2795,7 @@ extern "C" const char* kudroid_run_so_test(const char* soPath, const char* entry
     log += "🚀 Executing test function in sandbox...\n\n";
     mirrorCrash(log);
 
-    // Hỗ trợ chữ ký hàm 64-bit trả về const char* hoặc uintptr_t
+    // Support 64-bit function signatures returning const char* or uintptr_t
     typedef const char* (*StringTestFn)();
     auto strFn = reinterpret_cast<StringTestFn>(symbol);
     const char* outputStr = strFn();
@@ -2789,7 +2823,7 @@ extern "C" const char* kudroid_run_so_test(const char* soPath, const char* entry
 extern "C" int kudroid_clear_app_cache(const char* package_name) {
     if (!package_name) return 0;
     
-    // xây dựng đường dẫn đến thư mục bộ đệm của ứng dụng bằng logic ánh xạ vfs
+    // construct app cache directory path using VFS path remapper
     const std::string androidRoot = kudroid::VFSPathRemapper::getInstance().androidRoot();
     std::filesystem::path cachePath = std::filesystem::path(androidRoot) / "data/data" / package_name / "cache";
     std::filesystem::path codeCachePath = std::filesystem::path(androidRoot) / "data/data" / package_name / "code_cache";
@@ -2811,21 +2845,15 @@ extern "C" int kudroid_clear_app_cache(const char* package_name) {
 
 extern "C" int kudroid_delete_app(const char* package_name);
 
-// Xóa app với báo cáo tiến trình qua callback (phase UTF-8, percent 0-100).
-// Callback chạy trên thread gọi hàm — Swift side tự dispatch về main thread.
-// Cho phép UI hiển thị progress thay vì freeze vài giây khi remove_all quét
-// hàng nghìn file (assets, DEX, .so...).
+// Uninstall app with step-by-step progress callback (UTF-8 phase description, percent 0-100).
+// Runs synchronously on caller thread — Swift UI dispatches to main thread.
+// Provides real-time UI progress feedback during large asset/file tree deletion.
 typedef void (*kudroid_delete_progress_cb)(const char* phase, int percent, void* userdata);
 
 namespace {
-// ── [DEBUG UNINSTALL] ghi vết từng bước xóa app ──────────────────────────
-// Triệu chứng: xóa app trên máy thật kẹt ở 0% không có dấu hiệu gì. Bộ ghi
-// vết này lưu TOÀN BỘ diễn biến (đường dẫn, quyền ghi, số file xóa được/
-// thất bại, lỗi std::filesystem, số lần callback...) vào
-// <Documents>/kudroid_uninstall_debug.txt và trả về Swift qua
-// kudroid_uninstall_debug_log() để xem/copy ngay trong tab Debug.
-// File được ghi LẠI SAU MỖI dòng — kể cả khi tiến trình chết giữa chừng,
-// log vẫn còn đến đúng bước cuối nó đạt được.
+// ── [DEBUG UNINSTALL] Step-by-Step Uninstall Trace ───────────────────────────
+// Tracks full progress of file removals to <Documents>/logs/kudroid_uninstall_debug.txt
+// for diagnosis during large app deletions.
 std::string g_uninstallDbg;
 
 void uninstallDbg(const std::string& msg) {
@@ -2843,13 +2871,12 @@ void uninstallDbg(const std::string& msg) {
         if (FILE* f = fopen(path.c_str(), "w")) {
             fwrite(g_uninstallDbg.data(), 1, g_uninstallDbg.size(), f);
             fclose(f);
-            ::chmod(path.c_str(), 0644); // AFC đọc được như stderr.log
+            ::chmod(path.c_str(), 0644); // readable via AFC/USB file sharing like stderr.log
         }
     }
 }
 
-// Mô tả ngắn trạng thái 1 đường dẫn: tồn tại? loại? ghi được? — bắt lỗi
-// quyền NGAY TỪ ĐẦU thay vì đoán mò vì sao remove thất bại im lặng.
+// Summarize file/directory status (existence, type, permissions) for early diagnostics.
 std::string describePath(const std::filesystem::path& p) {
     std::error_code ec;
     const std::string raw = p.string();
@@ -2866,19 +2893,13 @@ std::string describePath(const std::filesystem::path& p) {
     return s;
 }
 
-// Xóa cây NHANH theo con cấp 1: mỗi thư mục con được remove_all nguyên khối.
-// Unlink là thao tác metadata — tốc độ gần như KHÔNG phụ thuộc dung lượng,
-// chỉ phụ thuộc số entry — đây là lý do bản cũ "freeze vài giây" là xong.
-// Bản thử progress bằng cách xóa từng file sâu nhất đã đi bộ hàng nghìn
-// entry qua std::filesystem → MCPE 932MB chậm như treo ở 0%. Ở đây:
-// - Không đếm bytes toàn cây (trước đây tốn >3s chỉ để tính %).
-// - Progress nhảy theo từng con cấp 1 (lib/, assets/, res/...) — đủ mượt.
-// - Log thời gian từng con vào trace; con nào ≥2s bị đánh dấu SLOW.
+// Fast top-level child directory pruning via atomic remove_all operations.
+// Avoids deep recursive filesystem traversal overhead on large asset trees.
 void removeTreeWithProgress(const std::filesystem::path& p,
                             const char* phase,
                             kudroid_delete_progress_cb cb, void* ud,
                             double basePct, double spanPct,
-std::uint64_t /*totalBytes - không dùng nữa*/) {
+std::uint64_t /*unused parameter*/) {
     const auto nowMs = [] {
         struct timespec ts;
         clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -2888,7 +2909,7 @@ std::uint64_t /*totalBytes - không dùng nữa*/) {
     uninstallDbg("phase='" + std::string(phase) + "' path=" + describePath(p));
     if (!std::filesystem::exists(p, ec)) return;
 
-    // File đơn (hiếm).
+    // Single file entry (rare).
     if (!std::filesystem::is_directory(p, ec)) {
         const std::int64_t t0 = nowMs();
         std::filesystem::remove(p, ec);
@@ -2897,7 +2918,7 @@ std::uint64_t /*totalBytes - không dùng nữa*/) {
         return;
     }
 
-    // Liệt kê con cấp 1 (không đệ quy) — rẻ, chỉ đọc entry thư mục.
+    // List top-level directory children non-recursively.
     std::vector<std::filesystem::path> children;
     for (std::filesystem::directory_iterator cIt(p, ec), cEnd;
          cIt != cEnd && !ec; cIt.increment(ec)) {
@@ -2927,7 +2948,7 @@ std::uint64_t /*totalBytes - không dùng nữa*/) {
             cb(phase, pct, ud);
         }
     }
-    // Xóa nốt thư mục gốc (giờ đã rỗng).
+    // Remove root directory (now empty).
     std::error_code raEc;
     std::filesystem::remove_all(p, raEc);
     uninstallDbg("  phase done in " + std::to_string(nowMs() - t0) +
@@ -2962,11 +2983,9 @@ extern "C" int kudroid_delete_app_progress(const char* package_name,
     uninstallDbg("data:   " + describePath(appDataPath));
     uninstallDbg("dalvik: " + describePath(dalvikRoot));
 
-    // KHÔNG đếm bytes toàn cây nữa — với MCPE 932MB việc đi bộ hết cây mất
-    // >3s trên máy thật chỉ để tính %. Progress giờ chia theo con cấp 1.
+    // Avoid recursive tree byte scanning; progress is tracked across top-level folders.
     std::error_code ec;
-    // dalvik-cache là tàn dư của đường dex2jar cũ; vẫn xóa để cài lại không để
-    // lại artifact mục ruỗng. Khớp cả "<pkg>" lẫn "<tên-file-apk>_<ver>".
+    // Prune any legacy dalvik-cache directory artifacts.
     std::vector<std::filesystem::path> dalvikMatches;
     if (std::filesystem::is_directory(dalvikRoot, ec)) {
         for (const auto& e : std::filesystem::directory_iterator(dalvikRoot, ec)) {
@@ -2998,8 +3017,8 @@ extern "C" int kudroid_delete_app(const char* package_name) {
     return kudroid_delete_app_progress(package_name, nullptr, nullptr);
 }
 
-// Nhật ký debug chi tiết của lần uninstall gần nhất — Swift hiển thị/copy
-// ở tab Debug. Chuỗi được malloc; caller phải free().
+// Detailed debug log from the most recent uninstall operation.
+// Returned string is malloced; caller must free().
 extern "C" const char* kudroid_uninstall_debug_log(void) {
     char* out = static_cast<char*>(std::malloc(g_uninstallDbg.size() + 1));
     if (!out) return nullptr;
@@ -3064,7 +3083,7 @@ extern "C" const char* kudroid_syscall_so_test(const char* path) {
                 log += "[kudroid_syscall] Running kudroid_syscall_test()...\n";
                 int (*test_func)() = reinterpret_cast<int (*)()>(address);
                 
-                // xóa bộ đệm theo dõi bionicshim
+                // clear BionicShim trace buffer
                 kudroid::bionic_shim_reset_trace();
                 mirrorCrash(log);
                 
@@ -3104,12 +3123,12 @@ extern "C" const char* kudroid_jni_massive_so_test(const char* path) {
             log += "[kudroid_jni] ELF mapped, relocated, and initialized.\n";
             mirrorCrash(log);
             
-            // thực thi jni_onload nếu có
+            // execute JNI_OnLoad if exported
             void* jniOnLoadAddr = loader.getSymbolAddress("JNI_OnLoad");
             if (jniOnLoadAddr) {
                 log += "[kudroid_jni] Found JNI_OnLoad, executing...\n";
                 mirrorCrash(log);
-                // lấy jvm từ bộ nối
+                // retrieve JavaVM from bridge
                 using JNI_OnLoad_t = jint (*)(JavaVM*, void*);
                 JNI_OnLoad_t jniOnLoad = reinterpret_cast<JNI_OnLoad_t>(jniOnLoadAddr);
                 jint version = jniOnLoad(kuart_get_javavm(), nullptr);
@@ -3134,7 +3153,7 @@ extern "C" const char* kudroid_jni_massive_so_test(const char* path) {
                 mirrorCrash(log);
                 int (*test_func)(void*) = reinterpret_cast<int (*)(void*)>(address);
                 
-                // thiết lập lệnh gọi lại
+                // configure callbacks
                 static std::string* g_jni_test_log = &log;
                 g_jni_test_log = &log;
                 kuart_set_log_callback([](const char* msg) {
@@ -3145,7 +3164,7 @@ extern "C" const char* kudroid_jni_massive_so_test(const char* path) {
                     }
                 });
 
-                kuart_init(""); // framework nhúng là đủ cho test này
+                kuart_init(""); // embedded framework is sufficient for this test
                 mirrorCrash(log);
                 void* vm = kuart_get_javavm();
                 
@@ -3162,9 +3181,9 @@ extern "C" const char* kudroid_jni_massive_so_test(const char* path) {
     return strdup(log.c_str());
 }
 
-// các bài kiểm tra thực thi gpu .so — tải tệp .so kiểm tra elf arm64 thông qua trình
-// tải elf, trình này gọi dlopen/dlsym cho các thư viện gpu. bionicshim chặn các lời gọi đó
-// và ánh xạ chúng trực tiếp tới gốc ios (moltenvk / angle).
+// GPU .so execution test — loads ARM64 ELF test module via ELF loader,
+// intercepting dlopen/dlsym calls to GPU libraries via BionicShim to map
+// directly to iOS native graphics (MoltenVK / ANGLE).
 // ─────────────────────────────────────────────────────────────────────────────
 
 extern "C" const char* kudroid_gpu_vulkan_so_test(const char* path) {
@@ -3262,8 +3281,7 @@ extern "C" const char* kudroid_gpu_opengl_so_test(const char* path) {
 #include "kudroid/APKExtractor.h"
 
 extern "C" const char* kudroid_load_apk(const char* apkPath) {
-    // Dùng biến cục bộ + strdup (không phải static): hàm trước đó trả con trỏ vào
-    // static std::string bị clear ở lần gọi sau — không thread-safe và dễ sai.
+    // Use local buffer + strdup: avoids non-thread-safe static buffers.
     std::string log;
     appendTestHeader(log, "APK Loader execution", apkPath);
     
@@ -3296,18 +3314,18 @@ extern "C" const char* kudroid_load_apk(const char* apkPath) {
     }
     log += "[kudroid_apk] Extracted successfully.\n";
 
-    // Cho AAssetManager shim biết nơi chứa assets đã extract của APK này.
+    // Notify AAssetManager shim about extracted APK assets directory.
     kudroid_set_assets_dir((targetDir + "/assets").c_str());
     
     log += "[kudroid_apk] Scanning for native libraries (.so)...\n";
-    // Process-lifetime (xem globalLibraryManager) — JNI_OnLoad dưới đây spawn
-    // render thread guest; mappings phải ở lại sau khi hàm này return.
+    // Process-lifetime (see globalLibraryManager) — JNI_OnLoad spawns guest render threads;
+    // library mappings must persist after this function returns.
     kudroid::LibraryManager& libManager = globalLibraryManager();
     std::string libDir = targetDir + "/lib/arm64-v8a";
 
     // ── KuART ──────────────────────────────────────────────────────────────
-    // Nạp framework.dex nhúng + classes*.dex của APK. Không còn bước dịch
-    // DEX→JAR nào: KuART thông dịch DEX trực tiếp.
+    // Load embedded framework.dex + APK classes*.dex.
+    // No DEX-to-JAR conversion: KuART directly executes DEX bytecode.
     kuart_set_symbol_lookup([](const char* symbol) -> void* {
         return globalLibraryManager().resolveGlobalSymbol(symbol);
     });
@@ -3339,11 +3357,11 @@ extern "C" const char* kudroid_load_apk(const char* apkPath) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Kiểm tra nạp DEX bằng KuART
+// KuART DEX loading verification
 //
-// Trước đây hàm này dịch DEX → JAR cho Avian. KuART nạp DEX trực tiếp nên giờ nó
-// chỉ parse và báo cáo nội dung — giữ tên cũ để vỏ Swift không phải đổi.
-// Trả chuỗi log đã malloc; caller phải free().
+// before y function ny dch DEX → JAR cho Avian. KuART np DEX trc tip nn gi n
+// ch parse v bo co ni dung — gi tn c v Swift no/not phi i.
+// Returns malloc'ed log string; caller must free().
 // ─────────────────────────────────────────────────────────────────────────────
 extern "C" const char* kudroid_translate_dex(const char* dexPath) {
     if (!dexPath || !*dexPath) {
@@ -3353,7 +3371,7 @@ extern "C" const char* kudroid_translate_dex(const char* dexPath) {
     std::string log;
     log += "[kudroid_dex] Loading DEX with KuART: " + std::string(dexPath) + "\n";
 
-    // Nạp thư mục chứa file DEX — KuART lấy mọi classes*.dex trong đó.
+    // Load DEX directory — KuART indexes all classes*.dex within the directory.
     const std::string dir = std::filesystem::path(dexPath).parent_path().string();
     if (!kuart_init(dir.c_str())) {
         log += "[kudroid_dex] LOAD FAILED: " + std::string(kuart_last_error()) + "\n";

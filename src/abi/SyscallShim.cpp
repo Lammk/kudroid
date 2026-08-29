@@ -39,29 +39,24 @@
 #include <malloc.h>
 #endif
 #if defined(__APPLE__)
-// Khai báo trực tiếp 2 hàm autorelease pool của libobjc thay vì include
-// <objc/objc-autoreleasepool.h> — header này không nằm trong search path của
-// SDK trên một số runner macOS, còn 2 symbol này là ABI public (ARC dựa vào
-// chúng) nên khai báo extern "C" là an toàn trên cả iOS lẫn macOS.
+// Direct declaration of libobjc autorelease pool functions to avoid header search path
+// issues on certain macOS SDK runners while remaining ABI-compatible.
 extern "C" void* objc_autoreleasePoolPush(void);
 extern "C" void objc_autoreleasePoolPop(void* pool);
 #endif
 
 extern "C" void __gxx_personality_v0();
 
-// Mirror một dòng log vào crash buffer (kudroid_bridge.cpp) để kudroid_crash.log
-// chứa log của game ngay trước khi crash — trước đây chỉ có log của kudroid_core.
+// Mirror log lines to crash buffer in kudroid_bridge.cpp for pre-crash diagnostics.
 extern "C" void kudroid_append_crash_log(const char* text, size_t len);
 
-// Hook do kudroid_bridge cài: tra symbol trong các lib guest (.so Android) đã
-// load qua LibraryManager. bionic_dlsym với DUMMY_HANDLE dùng nó thay vì trả
-// nullptr ngay — dlopen("libc.so") là handle giả nhưng dlsym(handle, ...) trên
-// Android thật vẫn resolve được.
+// Guest symbol lookup hook: queries loaded .so modules via LibraryManager.
+// Allows dummy handles (e.g. dlopen('libc.so')) to resolve exported symbols.
 extern "C" {
 void* (*kudroid_guest_symbol_lookup)(const char* name) = nullptr;
 }
 
-// Lưu abort message (android_set_abort_message) — crash handler in nó ra.
+// Store guest abort message (android_set_abort_message) for crash reporting.
 extern "C" void kudroid_store_abort_message(const char* msg);
 
 // JNI & JVM Runtime declarations
@@ -147,8 +142,7 @@ namespace {
 constexpr uintptr_t kStackGuardCookie = 0x1337BEEFCAFECAFEULL;
 uintptr_t gStackCheckGuard = kStackGuardCookie;
 
-// Trace dùng chung với BionicShim.cpp — KHÔNG khai báo gShimTrace riêng ở đây
-// (trước đây có 2 thread_local khác nhau → bionic_shim_trace() luôn trống).
+// Shared trace buffer across shim modules.
 void trace(const char* message) { trace_shim(message); }
 
 extern "C" int bionic_dummy() {
@@ -181,10 +175,10 @@ void appendUnsigned(std::string& output, uint64_t value, unsigned base) {
     std::string output;
     if (!format) return output;
     std::size_t argumentIndex = 0;
-    // Giới hạn số argument đọc từ guest: 5 register (arguments) + tối đa 11 từ
-    // stack. Format có nhiều specifier hơn argument (format lỗi/không khớp) sẽ
-    // không đọc quá đà vào stack guest (trước đây đọc vô hạn → có thể chạm
-    // vùng nhớ không map gây crash). Ngoài giới hạn trả 0 an toàn.
+    // Limit arguments read from guest (registers + stack slots) to prevent out-of-bounds reads.
+    // 
+    // 
+    // 
     constexpr std::size_t kMaxLogArguments = 16;
     auto nextArgument = [&]() -> uint64_t {
         if (argumentIndex >= kMaxLogArguments ||
@@ -206,12 +200,12 @@ void appendUnsigned(std::string& output, uint64_t value, unsigned base) {
             output += '%';
             continue;
         }
-        // Bỏ qua cờ/flags/width/precision (vd %.9ld, %-5d, %+d, %08x, %8x) —
-        // game thường dùng %lld, %d, %s, %p, %x, %.9ld... Không parse chính xác
-        // 100% nhưng đủ để log không hỏng.
+        // Skip formatting flags, width, and precision modifiers (e.g. %.9ld, %-5d, %08x).
+        // 
+        // 
         while (*cursor == '-' || *cursor == '+' || *cursor == ' ' ||
                *cursor == '#' || *cursor == '0' || *cursor == '\'') ++cursor;
-        // width (vd %8x, %08x — chữ số đứng sau flags, trước precision)
+        // Parse width field (e.g. %8x, %08x)
         while (*cursor >= '0' && *cursor <= '9') ++cursor;
         while (*cursor == '.') {
             ++cursor;
@@ -304,7 +298,7 @@ int logAndroidMessage(int priority, const char* tag, const std::string& message)
     }
 
     // Mirror into the crash buffer so kudroid_crash.log shows the game's own
-    // log up to the crash (trước đây phần "log up to crash" luôn trống).
+    // Provide diagnostic log buffer up to crash event.
     {
         std::string full;
         if (tag) { full += '['; full += tag; full += "] "; }
@@ -341,8 +335,8 @@ extern "C" int bionic_android_log_print(int priority, const char* tag,
 }
 #endif
 
-// Không trace: __cxa_finalize/atexit và các no-op chạy với tần suất cực cao
-// (mỗi .so unload) — trace từng lần làm log thành hàng trăm dòng rác.
+// Do not trace high-frequency no-ops (__cxa_finalize, atexit) to avoid flooding.
+// avoid tracing frequent unload events to keep logs concise.
 extern "C" void bionic_cxa_finalize(void*) {
 }
 
@@ -443,15 +437,14 @@ static inline void destroy_sync(void* guest_ptr, int type) {
 
 extern "C" int bionic_pthread_mutex_init(void* guestMutex, const void* attr) {
 
-    // Bionic pthread_mutexattr_t: kiểu (PTHREAD_MUTEX_RECURSIVE=1, ERRORCHECK=2)
-    // nằm ở 2 bit thấp của từ 4 byte đầu (little-endian). Nếu game tạo mutex
-    // recursive mà host dùng mutex thường → tự khóa chính nó → deadlock treo.
+    // Bionic pthread_mutexattr_t: mutex type (RECURSIVE=1, ERRORCHECK=2) stored
+    // in lower 2 bits. Maps recursive attributes to prevent deadlocks.
     int type = 0;
     if (attr) type = (*static_cast<const uint32_t*>(attr)) & 0x3;
 
     void* hostMutex = create_sync_obj(SYNC_MUTEX);
     if (!hostMutex) return -1;
-    if (type == 1 || type == 2) { // RECURSIVE hoặc ERRORCHECK
+    if (type == 1 || type == 2) { // RECURSIVE or ERRORCHECK
         pthread_mutexattr_t ma;
         ::pthread_mutexattr_init(&ma);
         ::pthread_mutexattr_settype(&ma, type == 1 ? PTHREAD_MUTEX_RECURSIVE
@@ -491,9 +484,7 @@ extern "C" int bionic_pthread_rwlock_init(void* rwlock, const void* attr) {
 
 
 
-// Không trace mutex lock/unlock: mỗi call 2 dòng trace, game lock hàng chục
-// nghìn lần/giây — nguồn rác lớn nhất trong log. Chỉ giữ trace cho sự kiện
-// hiếm/có giá trị (fortify overflow, dummy, missing symbol).
+// Do not trace mutex lock/unlock due to high frequency. Trace reserved for anomalous events.
 extern "C" int bionic_pthread_mutex_lock(void* guestMutex) {
     pthread_mutex_t* hostMutex = static_cast<pthread_mutex_t*>(get_or_init_sync(guestMutex, SYNC_MUTEX));
     const int result = hostMutex ? ::pthread_mutex_lock(hostMutex) : -1;
@@ -566,7 +557,7 @@ extern "C" void bionic_stack_chk_fail() {
 extern "C" int vfs_fstat(int fd, void* info);
 extern "C" int vfs_fstat64(int fd, void* info);
 
-// Bionic pthread_attr_t (arm64) — thứ tự các trường theo bionic bits/pthread_types.h.
+// Bionic pthread_attr_t (ARM64) — field layout matches bionic bits/pthread_types.h.
 struct BionicPthreadAttr {
     uint32_t flags;        // bit 0 = PTHREAD_ATTR_FLAG_DETACHED
     uint32_t pad0;
@@ -577,10 +568,7 @@ struct BionicPthreadAttr {
     int32_t sched_priority;
 };
 
-// THẬT (trước đây là dummy trả 0 không ghi gì): bionic_pthread_create đọc
-// stack_size từ attr này — nếu không init, game đọc stack_size rác →
-// pthread_attr_setstacksize(host, rác) → pthread_create fail EINVAL → game
-// không tạo được thread (treo/crash).
+// Real implementation: initializes stack_size to prevent EINVAL during thread creation.
 extern "C" int bionic_pthread_attr_init(void* attr) {
     auto* a = static_cast<BionicPthreadAttr*>(attr);
     if (!a) return -1;
@@ -600,7 +588,7 @@ extern "C" int bionic_pthread_attr_setstacksize(void* attr, size_t stacksize) {
 extern "C" int bionic_pthread_attr_getstack(void* attr, void** stackaddr, size_t* stacksize) {
     auto* a = static_cast<BionicPthreadAttr*>(attr);
     if (!a) return -1;
-    // GHI output — dummy cũ không ghi gì, game đọc stackaddr/stacksize rác.
+    // Populate output fields to return valid stackaddr and stacksize.
     if (stackaddr) *stackaddr = a->stack_base;
     if (stacksize) *stacksize = a->stack_size;
     return 0;
@@ -616,9 +604,7 @@ extern "C" int bionic_pthread_getattr_np(pthread_t thread, void* attr) {
     auto* a = static_cast<BionicPthreadAttr*>(attr);
     if (!a) return -1;
     bionic_pthread_attr_init(attr);
-    // Lấy stack size thật của thread host (guest thường gọi để tự quyết độ sâu stack).
-    // pthread_getattr_np là API glibc/Linux — KHÔNG tồn tại trên macOS, dùng
-    // pthread_get_stackaddr_np/get_stacksize_np (Apple) thay thế.
+    // Retrieve thread stack bounds using host platform APIs (pthread_get_stackaddr_np/get_stacksize_np on Darwin).
 #ifdef __APPLE__
     void* saddr = ::pthread_get_stackaddr_np(thread);
     const size_t ssize = ::pthread_get_stacksize_np(thread);
@@ -647,9 +633,7 @@ namespace {
 
 extern "C" int bionic_ioctl(int fd, unsigned long request, ...) {
     (void)fd; (void)request;
-    // Không có ioctl nào được mô phỏng. Trả lỗi rõ ràng thay vì giả vờ thành công
-    // với 0 — game query kích thước màn hình/display sẽ đọc rác từ buffer nếu
-    // ta trả 0 mà không ghi gì.
+    // Unsupported ioctl: return explicit ENOTTY instead of false 0 success.
     errno = ENOTTY;
     return -1;
 }
@@ -820,16 +804,16 @@ extern "C" int bionic_newfstatat(int dirfd, const char* pathname, struct bionic_
     return 0;
 }
 
-// Kiểm tra trong bionic_mmap: fd ashmem chỉ map được với prot đã được cấp
-// (định nghĩa ở khối ashmem phía dưới).
+// Kim tra trong bionic_mmap: fd ashmem ch map c vi prot c cp
+// (nh ngha khi ashmem pha di).
 static bool ashmem_prot_allows(int fd, int prot);
-// Fake ashmem fd (iOS fallback): trả vùng nhớ đã cấp hoặc nullptr nếu không
-// phải fake fd (định nghĩa ở khối ashmem phía dưới).
+// Fake ashmem fd (iOS fallback): tr vng nh cp hoc nullptr nu no/not
+// phi fake fd (nh ngha khi ashmem pha di).
 extern "C" void* bionic_ashmem_mmap_fd(int fd, size_t length);
 
 // Memory mapping wrappers to strip Linux specific flags
 extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
-    // ashmem fd: chỉ map được với prot đã cấp (bionic_ashmem_set_prot_region).
+    // ashmem fd: ch map c vi prot cp (bionic_ashmem_set_prot_region).
     if (!ashmem_prot_allows(fd, prot)) {
         errno = EACCES;
         return MAP_FAILED;
@@ -844,8 +828,8 @@ extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int
                       [](int f){ char b[16]; snprintf(b, sizeof(b), "%x", f); return std::string(b); }(flags) +
                       ", fd=" + std::to_string(fd) + ")");
 
-    // ashmem fake fd (fallback iOS): trả lại vùng nhớ đã cấp — không cần
-    // dịch flags, vùng là anonymous rồi.
+    // ashmem fake fd (fallback iOS): tr li vng nh cp — no/not cn
+    // dch flags, vng l anonymous ri.
     if (void* region = bionic_ashmem_mmap_fd(fd, length)) {
         logAndroidMessage(3, "KuDroidSyscall", "mmap -> ashmem region " +
                           std::to_string(reinterpret_cast<uintptr_t>(region)) + " (fake fd)");
@@ -878,11 +862,11 @@ extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int
         0x100000  | // MAP_FIXED_NOREPLACE
         0x40000000; // MAP_UNINITIALIZED
 
-    // QUAN TRỌNG: strip Linux-only flags từ INPUT (flags) TRƯỚC, không strip
-    // darwin_flags SAU khi đã set — vì LINUX_ONLY_MAP_FLAGS chứa bit 0x1000
-    // (MAP_EXECUTABLE) mà Darwin MAP_ANON cũng dùng bit 0x1000 → strip sau
-    // sẽ xóa luôn MAP_ANON vừa set → mmap anonymous mất MAP_ANON với fd=-1
-    // → EINVAL → MAP_FAILED (bug đã gặp trong syscall test).
+    // QUAN TRNG: strip Linux-only flags t INPUT (flags) before, no/not strip
+    // darwin_flags after khi set — v LINUX_ONLY_MAP_FLAGS cha bit 0x1000
+    // (MAP_EXECUTABLE) m Darwin MAP_ANON cng dng bit 0x1000 → strip after
+    // s remove lun MAP_ANON va set → mmap anonymous mt MAP_ANON vi fd=-1
+    // → EINVAL → MAP_FAILED (bug gp trong syscall test).
     const int clean_flags = flags & ~(LINUX_ONLY_MAP_FLAGS | 0xFC000000);
 
     int darwin_flags = 0;
@@ -961,7 +945,7 @@ extern "C" int bionic_sigaltstack(const stack_t *ss, stack_t *oss) {
     }
     stack_t host_ss = *ss;
 #if defined(__APPLE__)
-    // Darwin kernel yêu cầu ss_size tối thiểu ít nhất 32KB
+    // Darwin kernel yu cu ss_size ti thiu t nht 32KB
     if (!(host_ss.ss_flags & SS_DISABLE) && host_ss.ss_size < 32768) {
         host_ss.ss_size = 32768;
     }
@@ -981,27 +965,27 @@ extern "C" int bionic_sigaltstack(const stack_t *ss, stack_t *oss) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // bionic: long syscall(long number, ...)
-// Guest libc/libc++ gọi syscall() TRỰC TIẾP với SỐ HIỆU LINUX. Trước đây
-// `syscall` không có trong shim table → resolve qua dlsym(RTLD_DEFAULT) →
-// syscall macOS chạy với số Linux → KÊU NHẦM syscall kernel (vd Linux 178 =
-// SYS_gettid, nhưng macOS 178 = setrlimit!). Hệ quả nghiêm trọng: libc++abi
-// (trong libc++_shared.so của Discord) lấy thread-id cho guard static bằng
-// syscall(SYS_gettid) → trả rác/giá trị giống nhau cho MỌI thread →
-// __cxa_guard_acquire thấy guard "đang init dở bởi chính thread này" → abort
-// "recursive initialization" dù không hề đệ quy.
-// Fix: map số Linux sang hành vi host đúng. Số chưa biết → ENOSYS (an toàn
-// hơn chạy nhầm syscall macOS với arg guest).
+// Guest libc/libc++ call syscall() TRC TIP vi S HIU LINUX. before y
+// `syscall` no/not c trong shim table → resolve qua dlsym(RTLD_DEFAULT) →
+// syscall macOS run vi s Linux → KU NHM syscall kernel (vd Linux 178 =
+// SYS_gettid, nhng macOS 178 = setrlimit!). H qu nghim trng: libc++abi
+// (trong libc++_shared.so ca Discord) ly thread-id cho guard static bng
+// syscall(SYS_gettid) → tr rc/gi tr ging nhau cho MI thread →
+// __cxa_guard_acquire thy guard "ang init d bi main thread ny" → abort
+// "recursive initialization" d no/not h quy.
+// Fix: map s Linux sang hnh vi host ng. S cha bit → ENOSYS (an ton
+// hn run nhm syscall macOS vi arg guest).
 // ─────────────────────────────────────────────────────────────────────────────
-// Guest luôn là Linux ARM64 → số syscall truyền vào syscall() là hằng số ARM64
-// (gettid=178, getpid=39, futex=98, process_vm_readv=270). KHÔNG dùng SYS_*
-// của host: x86_64 Linux dùng 186/39/202/310 khác hẳn — so nhầm là ENOSYS.
+// Guest lun l Linux ARM64 → s syscall truyn vo syscall() l hng s ARM64
+// (gettid=178, getpid=39, futex=98, process_vm_readv=270). no/not dng SYS_*
+// ca host: x86_64 Linux dng 186/39/202/310 khc hn — so nhm l ENOSYS.
 #define KUDROID_SYS_gettid 178
 #define KUDROID_SYS_getpid 39
 #define KUDROID_SYS_futex 98
 #define KUDROID_SYS_process_vm_readv 270
 
-// Registry tid -> pthread_t: guest gọi tgkill với tid lấy từ gettid() của ta
-// (pthread_threadid_np). Giữ bảng để tgkill tìm được pthread_t thật của host.
+// Registry tid -> pthread_t: guest call tgkill vi tid ly t gettid() ca ta
+// (pthread_threadid_np). Gi bng tgkill tm c pthread_t tht ca host.
 static std::mutex g_tidRegistryMtx;
 static std::unordered_map<long, pthread_t> g_tidRegistry;
 
@@ -1027,19 +1011,19 @@ extern "C" pid_t bionic_gettid() {
 }
 
 #ifdef __APPLE__
-// Kiểm tra dãy [addr, addr+len) nằm trong vùng đã map của process này. Dùng
-// vm_region_64 (trả vùng CHỨA hoặc SAU addr) — loop tới khi tìm thấy vùng chứa
-// hoặc xác nhận addr không được map. Tránh memcpy vào địa chỉ lạ → SIGSEGV
-// giết cả app (chính là thứ guest probe để tránh).
+// Kim tra dy [addr, addr+len) nm trong vng map ca process ny. Dng
+// vm_region_64 (tr vng CHA hoc after addr) — loop ti khi tm thy vng cha
+// hoc xc nhn addr no/not c map. Trnh memcpy vo address l → SIGSEGV
+// git c app (main l th guest probe trnh).
 static bool range_is_mapped(uintptr_t addr, size_t len) {
     if (len == 0) return true;
     if (addr > static_cast<uintptr_t>(-1) - len) return false;
     vm_address_t region_addr = static_cast<vm_address_t>(addr);
     while (true) {
         vm_size_t region_size = 0;
-        // Ta chỉ cần RANGE (region_addr/region_size) — nội dung info bỏ qua.
-        // Dùng buffer thô đúng cỡ VM_REGION_BASIC_INFO_64 thay vì tên struct
-        // (tên struct đổi theo SDK; buffer integer thì luôn tồn tại).
+        // Ta ch cn RANGE (region_addr/region_size) — ni dung info skip.
+        // Dng buffer th ng c VM_REGION_BASIC_INFO_64 thay v tn struct
+        // (tn struct i theo SDK; buffer integer th lun tn ti).
         integer_t info[VM_REGION_BASIC_INFO_COUNT_64];
         mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
         mach_port_t object_name = MACH_PORT_NULL;
@@ -1052,22 +1036,22 @@ static bool range_is_mapped(uintptr_t addr, size_t len) {
         const uintptr_t rend = rstart + region_size;
         if (region_size == 0 || rend <= rstart) return false; // overflow
         if (addr >= rstart && addr + len <= rend) return true;
-        if (addr < rstart) return false; // addr dưới vùng kế → không map
+        if (addr < rstart) return false; // addr di vng k → no/not map
         region_addr = rend;
     }
 }
 #endif
 
-// Linux: read bộ nhớ của process khác qua kernel. Ở đây mọi guest lib đều chạy
-// trong CÙNG address space host (guest heap/code = host memory) nên pid==self
-// là trường hợp duy nhất có nghĩa — và là trường hợp fbjni/Hermes dùng để probe
-// "địa chỉ này có đọc an toàn không" (đọc 8 byte rồi so magic). ENOSYS trước đây
-// khiến probe fail → guest đi nhánh khác → lỗi khó hiểu (guard abort).
+// Linux: read memory ca process khc qua kernel. y mi guest lib u run
+// trong CNG address space host (guest heap/code = host memory) nn pid==self
+// l trng hp duy nht c ngha — v l trng hp fbjni/Hermes dng probe
+// "address ny c read an ton no/not" (read 8 byte ri so magic). ENOSYS before y
+// khin probe fail → guest i nhnh khc → error kh hiu (guard abort).
 extern "C" long bionic_process_vm_readv(pid_t pid, const struct iovec* local_iov, unsigned long liovcnt,
                                          const struct iovec* remote_iov, unsigned long riovcnt,
                                          unsigned long flags) {
 #ifdef __linux__
-    // Host Linux có syscall thật — xử lý đúng mọi pid, an toàn (kernel check).
+    // Host Linux c syscall tht — x l ng mi pid, an ton (kernel check).
     return static_cast<long>(::syscall(SYS_process_vm_readv, pid, local_iov, liovcnt,
                                        remote_iov, riovcnt, flags));
 #else
@@ -1085,8 +1069,8 @@ extern "C" long bionic_process_vm_readv(pid_t pid, const struct iovec* local_iov
         uint8_t* dst = static_cast<uint8_t*>(local_iov[i].iov_base);
         const size_t n = std::min(remote_iov[i].iov_len, local_iov[i].iov_len);
         if (n == 0) continue;
-        // Trước khi memcpy (SIGSEGV chết cả app), kiểm tra vùng đã map bằng
-        // vm_region_64 — đúng tinh thần "safe probe" mà guest đang dùng.
+        // before khi memcpy (SIGSEGV cht c app), kim tra vng map bng
+        // vm_region_64 — ng tinh thn "safe probe" m guest ang dng.
         if (!src || !dst ||
             !range_is_mapped(reinterpret_cast<uintptr_t>(src), n)) {
             if (total == 0) { errno = EFAULT; return -1; }
@@ -1099,24 +1083,24 @@ extern "C" long bionic_process_vm_readv(pid_t pid, const struct iovec* local_iov
 #endif
 }
 
-// futex qua syscall() thô: libc++ gọi syscall(98, ...) cho __libcpp_atomic_wait
-// (std::atomic wait/notify) — trước đây ENOSYS → busy-spin/vô hiệu hoá đồng bộ.
-// Nối thẳng vào bionic_futex (pthread condvar-based) đã có sẵn (định nghĩa ở
-// phần "Linux-Specific Syscalls" phía dưới).
+// futex qua syscall() th: libc++ call syscall(98, ...) cho __libcpp_atomic_wait
+// (std::atomic wait/notify) — before y ENOSYS → busy-spin/v hiu ho ng b.
+// Ni thng vo bionic_futex (pthread condvar-based) c sn (nh ngha 
+// phn "Linux-Specific Syscalls" pha di).
 extern "C" int bionic_futex(uint32_t* uaddr, int futex_op, uint32_t val,
                              const struct timespec* timeout, uint32_t* uaddr2, uint32_t val3);
 
-// Khai báo ở namespace scope — `extern "C"` KHÔNG hợp lệ trong thân hàm
-// (linkage spec chỉ cho phép ở scope ngoài), CI macOS arm64 sẽ báo
+// Khai bo namespace scope — `extern "C"` no/not hp l trong thn function
+// (linkage spec ch cho php scope ngoi), CI macOS arm64 s bo
 // "expected unqualified-id".
 #if defined(__aarch64__)
 extern "C" bool kudroid_lookup_guest_module(void* addr, char* out, std::size_t outSize);
 #endif
 
-// DIAG gate: log_guard_acquire_diag + futex diag chỉ chạy khi điều tra (env
-// KUDROID_GUARD_DIAG=1). Mặc định TẮT — frame-walk mỗi gettid + lookup module
-// là chi phí runtime thật trên mọi guard_acquire, không còn giá trị khi fix
-// guard đã hoạt động.
+// DIAG gate: log_guard_acquire_diag + futex diag ch run khi iu tra (env
+// KUDROID_GUARD_DIAG=1). Mc nh TT — frame-walk mi gettid + lookup module
+// l chi ph runtime tht trn mi guard_acquire, no/not cn gi tr khi fix
+// guard hot ng.
 static bool guard_diag_enabled() {
     static const int enabled = []() {
         const char* v = std::getenv("KUDROID_GUARD_DIAG");
@@ -1157,31 +1141,31 @@ static long emulate_futex_direct(uintptr_t arg1, uintptr_t arg2, uintptr_t arg3,
     return static_cast<long>(bionic_futex(uaddr, futex_op, val, timeout, uaddr2, val3));
 }
 
-// DIAGNOSTIC TEMP (điều tra "__cxa_guard_acquire recursive initialization"):
-// guard_acquire (cả bản libc++_shared 0x9f004 lẫn bản static trong
-// libapng-drawable 0x76064 — bản mọi consumer resolve về) gọi syscall(178)
-// để lấy tid. Lúc bionic_syscall nhận gettid thì:
-// - x19 LÚC ENTRY (bắt ngay đầu bionic_syscall, qua PLT stub `br` frameless
-// không đổi) = guard pointer
+// DIAGNOSTIC TEMP (iu tra "__cxa_guard_acquire recursive initialization"):
+// guard_acquire (c bn libc++_shared 0x9f004 ln bn static trong
+// libapng-drawable 0x76064 — bn mi consumer resolve v) call syscall(178)
+// ly tid. Lc bionic_syscall nhn gettid th:
+// - x19 LC ENTRY (bt ngay u bionic_syscall, qua PLT stub `br` frameless
+// no/not i) = guard pointer
 //   - __builtin_return_address(1) = call site syscall@plt trong guard_acquire
-// (PLT stub dùng `br`, không đổi LR — nên LR bionic_syscall trả về chính
-// là lệnh kế sau `bl syscall`)
-// - frame guard_acquire (layout cố định `stp x20,x19,[sp,#48]`) → [fp+56]
-// = x19 saved = guard, [fp+8] = caller của guard_acquire (hàm guest đang
+// (PLT stub dng `br`, no/not i LR — nn LR bionic_syscall return main
+// l lnh k after `bl syscall`)
+// - frame guard_acquire (layout c nh `stp x20,x19,[sp,#48]`) → [fp+56]
+// = x19 saved = guard, [fp+8] = caller ca guard_acquire (function guest ang
 //     init static)
-// Chỉ log case in-progress (byte1 bit1 set): hoặc (a) SAME_TID_RECURSION =
-// cú re-enter chí mạng, hoặc (b) thread khác đang chờ guard. Claim mới là
-// nhiễu — bỏ qua. Guard addr resolve ra module (gồm .bss) → biết static nào.
+// Ch log case in-progress (byte1 bit1 set): hoc (a) SAME_TID_RECURSION =
+// c re-enter ch mng, hoc (b) thread khc ang ch guard. Claim mi l
+// nhiu — skip. Guard addr resolve ra module (gm .bss) → bit static no.
 #if defined(__aarch64__)
 extern "C" bool kudroid_lookup_guest_module(void* addr, char* out, std::size_t outSize);
 __attribute__((noinline))
 static void log_guard_acquire_diag(long tid, uintptr_t guard) {
     uintptr_t x29v = 0;
     asm volatile("mov %0, x29" : "=r"(x29v));
-    // Walk frame từ frame của chính hàm này. Frame guard_acquire là cấp có
-    // [fp+56] == guard — nhưng compiler cũng save x19 (== guard!) vào frame
-    // diag/bionic_syscall ở offset tuỳ ý → giữ MATCH CUỐI (sâu nhất = cấp lâu
-    // đời nhất = guard_acquire), không break.
+    // Walk frame t frame ca main function ny. Frame guard_acquire l cp c
+    // [fp+56] == guard — nhng compiler cng save x19 (== guard!) vo frame
+    // diag/bionic_syscall offset tu → gi MATCH CUI (su nht = cp lu
+    // i nht = guard_acquire), no/not break.
     uintptr_t gaCaller = 0;
     uintptr_t fp = x29v;
     for (int i = 0; i < 6 && fp > 0x1000 && fp < 0x7fffffffffffULL; ++i) {
@@ -1195,7 +1179,7 @@ static void log_guard_acquire_diag(long tid, uintptr_t guard) {
     kudroid_lookup_guest_module(reinterpret_cast<void*>(guard), guardMod, sizeof(guardMod));
     kudroid_lookup_guest_module(reinterpret_cast<void*>(gaCaller), callerMod, sizeof(callerMod));
     unsigned b0 = 0, b1 = 0, storedTid = 0, inProgress = 0, sameTid = 0;
-    // Guard nằm trong guest .bss (0x100000000+) — deref an toàn theo dải.
+    // Guard nm trong guest .bss (0x100000000+) — deref an ton theo di.
     if (guard > 0x100000000ULL && guard < 0x7fffffffffffULL) {
         const volatile uint8_t* g = reinterpret_cast<const volatile uint8_t*>(guard);
         b0 = g[0];
@@ -1204,7 +1188,7 @@ static void log_guard_acquire_diag(long tid, uintptr_t guard) {
         inProgress = (b1 & 0x2) != 0;
         sameTid = inProgress && (static_cast<long>(storedTid) == tid);
     }
-    if (!inProgress) return; // claim mới — không phải case đang điều tra
+    if (!inProgress) return; // claim mi — no/not phi case ang iu tra
     char msg[640];
     snprintf(msg, sizeof(msg),
              "guard_diag %s tid=%ld guard=0x%llx [%s] b0=%u b1=%u stored_tid=%u "
@@ -1220,36 +1204,36 @@ static void log_guard_acquire_diag(long tid, uintptr_t guard) { (void)tid; (void
 #endif
 
 // ─────────────────────────────────────────────────────────────────────────────
-// __cxa_guard_acquire / release / abort — shim XỬ LÝ recursion.
+// __cxa_guard_acquire / release / abort — shim X L recursion.
 //
-// Libc++abi (cả bản libc++_shared lẫn bản static trong libapng-drawable mà mọi
-// consumer resolve về) ABORT khi CÙNG THREAD re-enter một guard đang in-progress
+// Libc++abi (c bn libc++_shared ln bn static trong libapng-drawable m mi
+// consumer resolve v) ABORT khi CNG THREAD re-enter mt guard ang in-progress
 // ("recursive initialization"). Discord: NitroModules JNI_OnLoad →
 // fbjni::initialize → lambda → findClassLocal → FindClass → Avian load class →
-// <clinit> chạy → native → fbjni populateWhat (guard đang in-progress bởi chính
-// thread này) → SAME_TID → abort. Crash ổn định mọi build (diag đã xác nhận:
-// guard=libfbjni+0x32cf8, tid khớp). Trên Android thật thứ tự init class khác
-// nên sequence này không xảy ra; ở đây Avian load class theo thứ tự khác.
+// <clinit> run → native → fbjni populateWhat (guard ang in-progress bi main
+// thread ny) → SAME_TID → abort. Crash n nh mi build (diag xc nhn:
+// guard=libfbjni+0x32cf8, tid khp). Trn Android tht th t init class khc
+// nn sequence ny no/not xy ra; y Avian load class theo th t khc.
 //
-// Fix: thay vì abort, clear in-progress + tid rồi return 1 → caller trong
-// (inner) claim lại và tự init lại. Init thành công → done; thất bại →
-// exception unwind bình thường (guard_abort). Không deadlock (cùng thread),
-// không loop vô hạn (Avian không chạy lại <clinit> khi class đang mid-init).
+// Fix: thay v abort, clear in-progress + tid ri return 1 → caller trong
+// (inner) claim li v t init li. Init success → done; failure →
+// exception unwind bnh thng (guard_abort). no/not deadlock (cng thread),
+// no/not loop v hn (Avian no/not run li <clinit> khi class ang mid-init).
 //
-// Byte layout guard giống hệt libc++abi: byte0 bit0 = done, byte1 bit1 =
-// in-progress, byte1 bit2 = waiting, [g+4] = tid (u32). Chỉ tác động guard
-// memory; wait dùng spin + sched_yield (không condvar nội bộ) → không xung
-// đột với condvar của bản apng nếu cùng guard bị chạm bởi hai implementation
-// (không xảy ra: guard của module nào thì module đó sở hữu).
+// Byte layout guard ging ht libc++abi: byte0 bit0 = done, byte1 bit1 =
+// in-progress, byte1 bit2 = waiting, [g+4] = tid (u32). Ch tc ng guard
+// memory; wait dng spin + sched_yield (no/not condvar ni b) → no/not xung
+// t vi condvar ca bn apng nu cng guard b chm bi hai implementation
+// (no/not xy ra: guard ca module no th module s hu).
 // ─────────────────────────────────────────────────────────────────────────────
 static std::mutex g_guardMtx;
 
-// Đếm tổng số lần same-tid recursion trên MỖI guard (từ đầu process). Nếu
-// init cứ thất bại đệ quy (vd FindClass của fbjni populateWhat fail vì class
-// không trên classpath → ném exception → tạo JniException mới → populateWhat
-// lại...), clear+return 1 sẽ re-init mãi mãi → HANG. Sau N lần: return 0
-// (pretend done) để caller đi tiếp — thay vì hang vô hạn, nó tiếp tục với
-// static chưa init (null) → thường ném/bỏ qua → có thể là lỗi tiếp theo thay vì
+// m tng s ln same-tid recursion trn MI guard (t u process). Nu
+// init c failure quy (vd FindClass ca fbjni populateWhat fail v class
+// no/not trn classpath → nm exception → create JniException mi → populateWhat
+// li...), clear+return 1 s re-init mi mi → HANG. after N ln: return 0
+// (pretend done) caller i tip — thay v hang v hn, n tip tc vi
+// static cha init (null) → thng nm/skip → c th l error tip theo thay v
 // treo.
 static constexpr int kGuardMaxRecursions = 8;
 static std::unordered_map<uintptr_t, int> g_guardRecursions;
@@ -1261,23 +1245,23 @@ static int guard_recursion_count(uintptr_t g) {
 
 extern "C" int bionic___cxa_guard_acquire(uint64_t* g) {
     if (!g) return 1;
-    // Fast path: đã done → không cần lock (benign race như libc++abi).
+    // Fast path: done → no/not cn lock (benign race nh libc++abi).
     if (reinterpret_cast<const volatile uint8_t*>(g)[0] & 0x1) return 0;
-    // Lấy tid TRƯỚC khi lock g_guardMtx — bionic_gettid lock g_tidRegistryMtx,
-    // giữ thứ tự lock nhất quán (guardMtx → tidRegistryMtx).
+    // Ly tid before khi lock g_guardMtx — bionic_gettid lock g_tidRegistryMtx,
+    // gi th t lock nht qun (guardMtx → tidRegistryMtx).
     const long tid = static_cast<long>(bionic_gettid());
     std::unique_lock<std::mutex> lock(g_guardMtx);
     for (;;) {
         volatile uint8_t* b0 = reinterpret_cast<volatile uint8_t*>(g);
-        if (b0[0] & 0x1) return 0; // đã init xong
-        if (b0[1] & 0x2) {          // đang init dở
+        if (b0[0] & 0x1) return 0; // init xong
+        if (b0[1] & 0x2) {          // ang init d
             const uint32_t stored = *reinterpret_cast<volatile uint32_t*>(b0 + 4);
             if (stored == static_cast<uint32_t>(tid)) {
-                // CÙNG THREAD re-enter → thay vì abort: clear + return 1.
+                // CNG THREAD re-enter → thay v abort: clear + return 1.
                 const int rec = guard_recursion_count(reinterpret_cast<uintptr_t>(g));
                 if (rec > kGuardMaxRecursions) {
-                    // Loop-cut: guard này init đệ quy quá nhiều lần (class thiếu
-                    // trên classpath) — trả 0 (pretend done) để thoát vòng lặp.
+                    // Loop-cut: guard ny init quy qu nhiu ln (class thiu
+                    // trn classpath) — tr 0 (pretend done) thot vng lp.
                     char msg[256];
                     snprintf(msg, sizeof(msg),
                              "guard_recursion_loop_cut guard=0x%llx tid=%ld "
@@ -1296,14 +1280,14 @@ extern "C" int bionic___cxa_guard_acquire(uint64_t* g) {
                 logAndroidMessage(4, "KuDroidSyscall", msg);
                 return 1;
             }
-            // Thread khác đang init → đánh dấu waiting, nhường CPU, thử lại.
+            // Thread khc ang init → nh du waiting, nhng CPU, th li.
             b0[1] |= 0x4;
             lock.unlock();
             ::sched_yield();
             lock.lock();
             continue;
         }
-        // Claim: đánh dấu in-progress + ghi tid của mình.
+        // Claim: nh du in-progress + write tid ca mnh.
         b0[1] |= 0x2;
         *reinterpret_cast<volatile uint32_t*>(b0 + 4) = static_cast<uint32_t>(tid);
         return 1;
@@ -1316,7 +1300,7 @@ extern "C" void bionic___cxa_guard_release(uint64_t* g) {
     volatile uint8_t* b0 = reinterpret_cast<volatile uint8_t*>(g);
     b0[0] |= 0x1;                                    // done
     b0[1] &= static_cast<uint8_t>(~0x6);             // clear in-progress + waiting
-    // Waiter spin re-check dưới lock — không cần signal.
+    // Waiter spin re-check di lock — no/not cn signal.
 }
 
 extern "C" void bionic___cxa_guard_abort(uint64_t* g) {
@@ -1498,7 +1482,7 @@ extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_
             break;
     }
 
-    // Chưa map — log 1 lần mỗi số rồi ENOSYS (không chạy syscall macOS sai số).
+    // Cha map — log 1 ln mi s ri ENOSYS (no/not run syscall macOS sai s).
     static long s_unknownSeen[64];
     static int s_unknownCount = 0;
     bool known = false;
@@ -1516,9 +1500,9 @@ extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_
     return -1;
 }
 
-// ── Wrapper syscall phổ biến bị bind dummy trước đây (log "missing symbol
-// bound to dummy"). Trên arm64 Linux, pread64/pwrite64/ftruncate64 chính là
-// pread/pwrite/ftruncate (off_t 64-bit) — host macOS có sẵn cùng signature. ──
+// ── Wrapper syscall ph bin b bind dummy before y (log "missing symbol
+// bound to dummy"). Trn arm64 Linux, pread64/pwrite64/ftruncate64 main l
+// pread/pwrite/ftruncate (off_t 64-bit) — host macOS c sn cng signature. ──
 extern "C" ssize_t bionic_pread64(int fd, void* buf, size_t count, off_t offset) {
     return ::pread(fd, buf, count, offset);
 }
@@ -1529,8 +1513,8 @@ extern "C" int bionic_ftruncate64(int fd, off_t length) {
     return ::ftruncate(fd, length);
 }
 
-// pipe2: macOS không có — pipe() + fcntl đặt cờ. Linux O_NONBLOCK=0x800,
-// O_CLOEXEC=0x80000 (asm-generic/fcntl.h — đúng cho cả arm64/x86_64).
+// pipe2: macOS no/not c — pipe() + fcntl t c. Linux O_NONBLOCK=0x800,
+// O_CLOEXEC=0x80000 (asm-generic/fcntl.h — ng cho c arm64/x86_64).
 extern "C" int bionic_pipe2(int pipefd[2], int flags) {
 #ifdef __linux__
     return ::pipe2(pipefd, flags);
@@ -1562,8 +1546,8 @@ extern "C" int bionic_pipe2(int pipefd[2], int flags) {
 #endif
 }
 
-// clock_nanosleep: flags bit0 = TIMER_ABSTIME. macOS chỉ có nanosleep (realtime
-// relative) — đủ cho cả REALTIME/MONOTONIC vì ta chỉ cần độ dài tương đối.
+// clock_nanosleep: flags bit0 = TIMER_ABSTIME. macOS ch c nanosleep (realtime
+// relative) — cho c REALTIME/MONOTONIC v ta ch cn di tng i.
 extern "C" int bionic_clock_nanosleep(int clock_id, int flags, const struct timespec* req,
                                        struct timespec* rem) {
     (void)clock_id;
@@ -1584,16 +1568,16 @@ extern "C" int bionic_clock_nanosleep(int clock_id, int flags, const struct time
 #endif
 }
 
-// usleep: POSIX/bionic thật — forward thẳng host (iOS/macOS libSystem có
-// usleep, deprecated nhưng hoạt động). Trước đây thiếu shim → resolve qua
-// RTLD_DEFAULT không chắc chắn (game gọi usleep rơi vào khoảng crash giữa
-// eglChooseConfig và eglCreateWindowSurface).
+// usleep: POSIX/bionic tht — forward thng host (iOS/macOS libSystem c
+// usleep, deprecated nhng hot ng). before y thiu shim → resolve qua
+// RTLD_DEFAULT no/not chc chn (game call usleep ri vo khong crash gia
+// eglChooseConfig v eglCreateWindowSurface).
 extern "C" int bionic_usleep(unsigned int usecs) {
     return ::usleep(usecs);
 }
 
-// tgkill(pid, tid, sig): dựa registry tid->pthread_t (được ghi khi guest gọi
-// gettid/syscall(178)). Trước đây dummy — abort/assert của guest bị nuốt im.
+// tgkill(pid, tid, sig): da registry tid->pthread_t (c write khi guest call
+// gettid/syscall(178)). before y dummy — abort/assert ca guest b nut im.
 extern "C" int bionic_tgkill(int pid, int tid, int sig) {
     if (pid != static_cast<int>(::getpid())) { errno = ESRCH; return -1; }
     pthread_t target;
@@ -1603,11 +1587,11 @@ extern "C" int bionic_tgkill(int pid, int tid, int sig) {
         if (it == g_tidRegistry.end()) { errno = ESRCH; return -1; }
         target = it->second;
     }
-    if (sig == 0) return 0; // kiểm tra thread tồn tại
+    if (sig == 0) return 0; // kim tra thread tn ti
     return ::pthread_kill(target, sig) == 0 ? 0 : -1;
 }
 
-// sendfile: macOS signature khác hẳn Linux — emulate bằng pread/write loop.
+// sendfile: macOS signature khc hn Linux — emulate bng pread/write loop.
 extern "C" ssize_t bionic_sendfile(int out_fd, int in_fd, off_t* offset, size_t count) {
     off_t pos = offset ? *offset : ::lseek(in_fd, 0, SEEK_CUR);
     if (pos < 0) return -1;
@@ -1679,7 +1663,7 @@ extern "C" ssize_t bionic_copy_file_range(int fd_in, off_t* off_in, int fd_out, 
 }
 
 extern "C" int bionic_omp_in_parallel() {
-    return 0; // chưa có OpenMP runtime — "ngoài vùng parallel"
+    return 0; // cha c OpenMP runtime — "ngoi vng parallel"
 }
 
 extern "C" char* bionic___strchr_chk(const char* s, int c, size_t dst_len) {
@@ -1691,8 +1675,8 @@ extern "C" char* bionic___strchr_chk(const char* s, int c, size_t dst_len) {
     return nullptr;
 }
 
-// bionic __strncpy_chk2(dst, src, n, dst_len, src_len): copy tối đa n ký tự,
-// không đọc quá src_len, không ghi quá dst_len (fortify).
+// bionic __strncpy_chk2(dst, src, n, dst_len, src_len): copy ti a n k t,
+// no/not read qu src_len, no/not write qu dst_len (fortify).
 extern "C" char* bionic___strncpy_chk2(char* dst, const char* src, size_t n,
                                        size_t dst_len, size_t src_len) {
     if (!dst || !src) return dst;
@@ -1700,7 +1684,7 @@ extern "C" char* bionic___strncpy_chk2(char* dst, const char* src, size_t n,
     if (copy > dst_len) { copy = dst_len; }
     if (src_len < copy) { copy = src_len; }
     if (copy > 0) std::memcpy(dst, src, copy);
-    // strncpy pad phần còn lại bằng 0 nếu còn chỗ.
+    // strncpy pad phn cn li bng 0 nu cn ch.
     if (n > copy && dst_len > copy) std::memset(dst + copy, 0, std::min(n - copy, dst_len - copy));
     return dst;
 }
@@ -1714,8 +1698,8 @@ extern "C" void bionic___FD_CLR_chk(int fd, fd_set* set) {
 }
 
 extern "C" struct cmsghdr* bionic___cmsg_nxthdr(struct msghdr* mhdr, struct cmsghdr* cmsg) {
-    // msghdr/cmsghdr layout Linux và macOS giống nhau (msg_control@40,
-    // msg_controllen@48; cmsghdr: len/level/type) nên CMSG_NXTHDR host đọc đúng.
+    // msghdr/cmsghdr layout Linux v macOS ging nhau (msg_control@40,
+    // msg_controllen@48; cmsghdr: len/level/type) nn CMSG_NXTHDR host read ng.
     return CMSG_NXTHDR(mhdr, cmsg);
 }
 
@@ -1725,19 +1709,19 @@ extern "C" struct cmsghdr* bionic___cmsg_nxthdr(struct msghdr* mhdr, struct cmsg
 
 extern "C" void* bionic_mremap(void *old_address, size_t old_size, size_t new_size, int flags, void *new_address) {
 #ifndef __APPLE__
-    // Linux host: delegate thẳng tới syscall thật. mremap trên Linux mở rộng/
-    // thu hẹp tại chỗ được khi vùng liền kề còn trống — không cần MAYMOVE
-    // (trước đây luôn trả ENOMEM khi không có bit MAYMOVE).
+    // Linux host: delegate thng ti syscall tht. mremap trn Linux m rng/
+    // thu hp ti ch c khi vng lin k cn trng — no/not cn MAYMOVE
+    // (before y lun tr ENOMEM khi no/not c bit MAYMOVE).
     return ::mremap(old_address, old_size, new_size, flags, new_address);
 #else
     (void)new_address;
-    // Không có mremap trên Darwin. Mô phỏng sát ngữ nghĩa Linux:
+    // no/not c mremap trn Darwin. M phng st ng ngha Linux:
     if (new_size == old_size) return old_address; // no-op
     if (flags & (MREMAP_MAYMOVE | MREMAP_FIXED)) {
         void* new_ptr = mmap(NULL, new_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (new_ptr != MAP_FAILED) {
-            // Chỉ copy min(old,new) — copy old_size khi new_size nhỏ hơn sẽ tràn
-            // mapping mới (corruption/crash).
+            // Ch copy min(old,new) — copy old_size khi new_size nh hn s trn
+            // mapping mi (corruption/crash).
             std::memcpy(new_ptr, old_address, std::min(old_size, new_size));
             munmap(old_address, old_size);
             return new_ptr;
@@ -1745,10 +1729,10 @@ extern "C" void* bionic_mremap(void *old_address, size_t old_size, size_t new_si
         errno = ENOMEM;
         return MAP_FAILED;
     }
-    // Không MAYMOVE: Linux chỉ mở rộng tại chỗ nếu vùng liền kề trống; thu
-    // hẹp luôn thành công tại chỗ. Thu hẹp: giữ mapping cũ (phần dư không dùng
-    // nữa — harmless), không thể làm đúng hơn trên Darwin. Mở rộng không MAYMOVE
-    // → ENOMEM như nhánh "không giãn được tại chỗ" của Linux.
+    // no/not MAYMOVE: Linux ch m rng ti ch nu vng lin k trng; thu
+    // hp lun success ti ch. Thu hp: gi mapping c (phn d no/not dng
+    // na — harmless), no/not th lm ng hn trn Darwin. M rng no/not MAYMOVE
+    // → ENOMEM nh nhnh "no/not gin c ti ch" ca Linux.
     if (new_size < old_size) return old_address;
     errno = ENOMEM;
     return MAP_FAILED;
@@ -1782,7 +1766,7 @@ extern "C" unsigned long bionic_getauxval(unsigned long type) {
         return 0x00000fff; // ATOMICS, FPHP, ASIMDHP, FLAGM, JSCVT, FCMA, LRCPC, DCPOP, SHA3, SM3, SM4, ASIMDDP
     }
     if (type == AT_PAGESZ) {
-        // Trả kích thước trang thật của host — tránh engine đọc pagesize=0.
+        // Tr kch thc trang tht ca host — trnh engine read pagesize=0.
         long pagesize = ::sysconf(_SC_PAGESIZE);
         return pagesize > 0 ? static_cast<unsigned long>(pagesize) : 4096;
     }
@@ -1809,16 +1793,16 @@ extern "C" ssize_t bionic_getrandom(void *buf, size_t buflen, unsigned int flags
 }
 
 // ── ashmem (Android shared memory) ──
-// iOS không có ashmem. Trước đây fake bằng POSIX shm (shm_open) nhưng shm_open
-// KHÔNG tồn tại trên iOS (POSIX shm là macOS-only; iOS trả -1/ENOSYS) →
-// ashmem_create_region luôn fail. Fix: cấp phát anonymous mmap thật làm vùng
-// nhớ chung + trả về fake fd; bionic_mmap trả lại chính vùng đó khi gặp fake fd.
-// Trên macOS vẫn thử shm_open trước (fd thật, mmap thật) rồi mới fallback.
+// iOS no/not c ashmem. before y fake bng POSIX shm (shm_open) nhng shm_open
+// no/not tn ti trn iOS (POSIX shm l macOS-only; iOS tr -1/ENOSYS) →
+// ashmem_create_region lun fail. Fix: cp pht anonymous mmap tht lm vng
+// nh chung + return fake fd; bionic_mmap tr li main vng khi gp fake fd.
+// Trn macOS vn th shm_open before (fd tht, mmap tht) ri mi fallback.
 static std::mutex g_ashmem_mtx;
-static std::unordered_map<int, int> g_ashmem_prot;      // fd -> prot cho phép
-static std::unordered_map<int, void*> g_ashmem_region;  // fake fd -> vùng nhớ
-static std::unordered_map<int, size_t> g_ashmem_size;   // fake fd -> kích thước
-static std::atomic<int> g_ashmem_fake_fd{0x40000000};   // fake fd bắt đầu cao tránh fd thật
+static std::unordered_map<int, int> g_ashmem_prot;      // fd -> prot cho php
+static std::unordered_map<int, void*> g_ashmem_region;  // fake fd -> vng nh
+static std::unordered_map<int, size_t> g_ashmem_size;   // fake fd -> kch thc
+static std::atomic<int> g_ashmem_fake_fd{0x40000000};   // fake fd bt u cao trnh fd tht
 
 static void ashmem_forget(int fd) {
     std::lock_guard<std::mutex> lock(g_ashmem_mtx);
@@ -1834,7 +1818,7 @@ static void ashmem_forget(int fd) {
 extern "C" int bionic_ashmem_create_region(const char* name, size_t size) {
     (void)name;
     if (size == 0) size = 1;
-    // 1) Thử POSIX shm (hoạt động trên macOS).
+    // 1) Th POSIX shm (hot ng trn macOS).
     static std::atomic<uint32_t> counter{0};
     char shm_name[64];
     std::snprintf(shm_name, sizeof(shm_name), "/kudroid_ashmem_%d_%u", ::getpid(), counter.fetch_add(1));
@@ -1842,14 +1826,14 @@ extern "C" int bionic_ashmem_create_region(const char* name, size_t size) {
     if (fd >= 0) {
         shm_unlink(shm_name);
         if (::ftruncate(fd, static_cast<off_t>(size)) != 0) {
-            // fd vẫn hợp lệ; mmap sau sẽ lỗi nếu size vượt quá.
+            // fd vn hp l; mmap after s error nu size vt qu.
         }
         std::lock_guard<std::mutex> lock(g_ashmem_mtx);
         g_ashmem_prot[fd] = PROT_READ | PROT_WRITE;
         return fd;
     }
 
-    // 2) Fallback (iOS): anonymous mmap làm region thật + fake fd.
+    // 2) Fallback (iOS): anonymous mmap lm region tht + fake fd.
     void* base = ::mmap(nullptr, size, PROT_READ | PROT_WRITE,
                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (base == MAP_FAILED) return -1;
@@ -1868,7 +1852,7 @@ extern "C" int bionic_ashmem_create_region(const char* name, size_t size) {
 
 extern "C" int bionic_ashmem_set_name(int fd, const char* name) {
     (void)fd; (void)name;
-    return 0; // tên chỉ để debug — không cần lưu
+    return 0; // tn ch debug — no/not cn lu
 }
 
 extern "C" int bionic_ashmem_set_prot_region(int fd, int prot) {
@@ -1881,11 +1865,11 @@ static bool ashmem_prot_allows(int fd, int prot) {
     if (fd < 0) return true;
     std::lock_guard<std::mutex> lock(g_ashmem_mtx);
     auto it = g_ashmem_prot.find(fd);
-    if (it == g_ashmem_prot.end()) return true; // không phải ashmem fd
+    if (it == g_ashmem_prot.end()) return true; // no/not phi ashmem fd
     return (prot & ~it->second) == 0;
 }
 
-// bionic_mmap gọi: với fake ashmem fd trả lại chính region đã cấp.
+// bionic_mmap call: vi fake ashmem fd tr li main region cp.
 extern "C" void* bionic_ashmem_mmap_fd(int fd, size_t length) {
     std::lock_guard<std::mutex> lock(g_ashmem_mtx);
     auto it = g_ashmem_region.find(fd);
@@ -1904,15 +1888,15 @@ struct FutexWaitQueue {
     std::condition_variable cv;
     int waiters = 0; // guarded by g_futexGlobalMtx
 };
-// shared_ptr để thread đang nằm trong cv.wait (hoặc giữa find và lock queue)
-// không bao giờ thấy queue bị destroy khi entry bị erase.
+// shared_ptr thread ang nm trong cv.wait (hoc gia find v lock queue)
+// no/not bao gi thy queue b destroy khi entry b erase.
 static std::unordered_map<uint32_t*, std::shared_ptr<FutexWaitQueue>> g_futexQueues;
 static std::mutex g_futexGlobalMtx;
 
-// Giảm số waiter; nếu không còn ai (và entry vẫn là queue của chúng ta) thì
-// xóa khỏi map — trước đây map không bao giờ được dọn, leak vô hạn mỗi uaddr
-// mới. Phải gọi với g_futexGlobalMtx KHÔNG được giữ (thứ tự khóa: global
-// trước queue-mtx, không bao giờ ngược lại).
+// Gim s waiter; nu no/not cn ai (v entry vn l queue ca chng ta) th
+// remove khi map — before y map no/not bao gi c dn, leak v hn mi uaddr
+// mi. Phi call vi g_futexGlobalMtx no/not c gi (th t kha: global
+// before queue-mtx, no/not bao gi ngc li).
 static void futex_leave(uint32_t* uaddr, const std::shared_ptr<FutexWaitQueue>& q) {
     std::unique_lock<std::mutex> lock(g_futexGlobalMtx);
     if (--q->waiters <= 0) {
@@ -1953,17 +1937,17 @@ extern "C" int bionic_futex(uint32_t *uaddr, int futex_op, uint32_t val, const s
 
         std::unique_lock<std::mutex> qLock(q->mtx);
 
-        // Linux: nếu *uaddr != val khi vào wait → EAGAIN ngay.
+        // Linux: nu *uaddr != val khi vo wait → EAGAIN ngay.
         if (*uaddr != val) {
-            qLock.unlock(); // thả queue-mtx trước khi lấy global (thứ tự khóa)
+            qLock.unlock(); // th queue-mtx before khi ly global (th t kha)
             futex_leave(uaddr, q);
             errno = EAGAIN;
             return -1;
         }
 
         if (timeout) {
-            // Linux timeout là TUYỆT ĐỐI: CLOCK_MONOTONIC (FUTEX_WAIT) hoặc
-            // CLOCK_REALTIME (có cờ FUTEX_CLOCK_REALTIME). Tính phần còn lại.
+            // Linux timeout l TUYT I: CLOCK_MONOTONIC (FUTEX_WAIT) hoc
+            // CLOCK_REALTIME (c c FUTEX_CLOCK_REALTIME). Tnh phn cn li.
             const bool realtime = (futex_op & FUTEX_CLOCK_REALTIME) != 0;
             struct timespec now;
             ::clock_gettime(realtime ? CLOCK_REALTIME : CLOCK_MONOTONIC, &now);
@@ -1976,7 +1960,7 @@ extern "C" int bionic_futex(uint32_t *uaddr, int futex_op, uint32_t val, const s
                 errno = ETIMEDOUT;
                 return -1;
             }
-            if (remSec > 86400) remSec = 86400; // cap 24h tránh overflow duration
+            if (remSec > 86400) remSec = 86400; // cap 24h trnh overflow duration
             const auto duration = std::chrono::seconds(remSec) +
                                   std::chrono::nanoseconds(remNs);
             if (q->cv.wait_for(qLock, duration) == std::cv_status::timeout) {
@@ -2022,12 +2006,12 @@ extern "C" int bionic_futex(uint32_t *uaddr, int futex_op, uint32_t val, const s
 }
 
 // --- Dynamic Loading (dlfcn) ---
-// Serialize ANGLE/MoltenVK framework loads: cả hai chạy module initializer
-// (khởi tạo Metal) bên trong ::dlopen. Guest chạy render thread (dlopen
-// libEGL) SONG SONG với Vulkan JNI_OnLoad (dlopen libvulkan) → Metal init
-// đồng thời → abort (SIGABRT không message — khớp crash log triangle).
-// Mutex này đảm bảo mỗi framework được load + init xong trước khi cái kia
-// bắt đầu.
+// Serialize ANGLE/MoltenVK framework loads: c hai run module initializer
+// (khi create Metal) bn trong ::dlopen. Guest run render thread (dlopen
+// libEGL) SONG SONG vi Vulkan JNI_OnLoad (dlopen libvulkan) → Metal init
+// ng thi → abort (SIGABRT no/not message — khp crash log triangle).
+// Mutex ny m bo mi framework c load + init xong before khi ci kia
+// bt u.
 extern "C" void* bionic_dlopen(const char* filename, int flags) {
     static std::mutex g_gpuFrameworkMtx;
     (void)flags;
@@ -2175,11 +2159,11 @@ extern "C" void* bionic_dlsym(void* handle, const char* symbol) {
     }
 
     // If it was a dummy handle, do NOT search RTLD_DEFAULT globally.
-    // Nhưng trước khi trả nullptr, hỏi các lib guest (.so Android) đã load qua
-    // LibraryManager — dlopen("libc.so") trả DUMMY_HANDLE vì libc không tồn tại
-    // trên host, còn dlsym(handle, "hàm") trên Android thật thì resolve được
-    // (libc.so là lib thật bên Android). Không có bước này, init code của guest
-    // (vd libmaesdk.so) nhận nullptr rồi gọi → SIGSEGV pc=0x0.
+    // Nhng before khi tr nullptr, hi cc lib guest (.so Android) load qua
+    // LibraryManager — dlopen("libc.so") tr DUMMY_HANDLE v libc no/not tn ti
+    // trn host, cn dlsym(handle, "function") trn Android tht th resolve c
+    // (libc.so l lib tht bn Android). no/not c bc ny, init code ca guest
+    // (vd libmaesdk.so) nhn nullptr ri call → SIGSEGV pc=0x0.
     if (handle == DUMMY_HANDLE) {
         if (kudroid_guest_symbol_lookup) {
             if (void* guest = kudroid_guest_symbol_lookup(symbol)) {
@@ -2207,8 +2191,8 @@ extern "C" void* bionic_android_dlopen_ext(const char* filename, int flags, cons
 }
 
 extern "C" int bionic_dlclose(void* handle) {
-    // DUMMY_HANDLE là handle giả cho các lib Android không tồn tại trên host
-    // (xem bionic_dlopen) — gọi ::dlclose với nó sẽ dereference con trỏ rác.
+    // DUMMY_HANDLE l handle gi cho cc lib Android no/not tn ti trn host
+    // (xem bionic_dlopen) — call ::dlclose vi n s dereference pointer rc.
     if (!handle || handle == RTLD_DEFAULT || handle == DUMMY_HANDLE) return 0;
     return ::dlclose(handle);
 }
@@ -2246,8 +2230,8 @@ static std::map<int, dispatch_source_t> g_timerfds;
 static std::mutex g_timerfds_mtx;
 #endif
 
-// FDs giả (inotify/signalfd emulate bằng loopback UDP) — bionic_close phải đóng
-// đúng, không để rò fd.
+// FDs gi (inotify/signalfd emulate bng loopback UDP) — bionic_close phi ng
+// ng, no/not r fd.
 static std::set<int> g_fakefds;
 static std::mutex g_fakefds_mtx;
 
@@ -2261,7 +2245,7 @@ extern "C" int bionic_eventfd(unsigned int initval, int flags) {
         write(fd, &val, sizeof(val));
     }
     if (fd >= 0) {
-        // Emulated fd (loopback UDP) — đăng ký để bionic_close bookkeeping đầy đủ.
+        // Emulated fd (loopback UDP) — register bionic_close bookkeeping y .
         std::lock_guard<std::mutex> lock(g_fakefds_mtx);
         g_fakefds.insert(fd);
     }
@@ -2276,8 +2260,8 @@ extern "C" int bionic_timerfd_create(int clockid, int flags) {
     (void)clockid; (void)flags;
     const int fd = create_loopback_udp();
     if (fd >= 0) {
-        // Emulated fd (loopback UDP + GCD timer) — đăng ký để bionic_close
-        // bookkeeping đầy đủ (giống inotify/signalfd).
+        // Emulated fd (loopback UDP + GCD timer) — register bionic_close
+        // bookkeeping y (ging inotify/signalfd).
         std::lock_guard<std::mutex> lock(g_fakefds_mtx);
         g_fakefds.insert(fd);
     }
@@ -2355,20 +2339,20 @@ extern "C" int bionic_close(int fd) {
         }
     }
 #endif
-    // Dọn entry prot + region của ashmem fd — không dọn thì fd number tái sử
-    // dụng bị prot cũ khóa (leak + hành vi sai). Fake fd (iOS fallback) còn phải
-    // munmap vùng nhớ.
+    // Dn entry prot + region ca ashmem fd — no/not dn th fd number ti s
+    // dng b prot c kha (leak + hnh vi sai). Fake fd (iOS fallback) cn phi
+    // munmap vng nh.
     {
         std::lock_guard<std::mutex> lock(g_ashmem_mtx);
         const bool is_fake = g_ashmem_region.find(fd) != g_ashmem_region.end();
         if (is_fake) {
             ashmem_forget(fd);
-            return 0; // fake fd không phải fd thật — đừng close fd number thật
+            return 0; // fake fd no/not phi fd tht — ng close fd number tht
         }
         g_ashmem_prot.erase(fd);
     }
     {
-        // inotify/signalfd fd giả — đóng socket thật qua ::close.
+        // inotify/signalfd fd gi — ng socket tht qua ::close.
         std::lock_guard<std::mutex> lock(g_fakefds_mtx);
         g_fakefds.erase(fd);
     }
@@ -2454,9 +2438,9 @@ extern "C" int bionic_epoll_wait(int epfd, void *events_ptr, int maxevents, int 
     int unique_events = 0;
     
     if (n > 0) {
-        // Gộp theo FD (kevent.ident), không theo udata: hai fd khác nhau có thể
-        // dùng chung data (vd ident 0) — gộp theo udata sẽ làm mất một event.
-        // Còn một fd đọc+ghi được gộp thành một event EPOLLIN|EPOLLOUT như epoll.
+        // Gp theo FD (kevent.ident), no/not theo udata: hai fd khc nhau c th
+        // dng chung data (vd ident 0) — gp theo udata s lm mt mt event.
+        // Cn mt fd read+write c gp thnh mt event EPOLLIN|EPOLLOUT nh epoll.
         std::vector<uint64_t> order;
         std::unordered_map<uint64_t, std::pair<uint32_t, uint64_t>> coalesced;
         for (int i = 0; i < n; i++) {
@@ -2468,7 +2452,7 @@ extern "C" int bionic_epoll_wait(int epfd, void *events_ptr, int maxevents, int 
             if (evlist[i].flags & EV_EOF) flags |= EPOLLHUP;
             auto& entry = coalesced[fd];
             if (std::find(order.begin(), order.end(), fd) == order.end()) {
-                order.push_back(fd); // giữ thứ tự xuất hiện đầu tiên
+                order.push_back(fd); // gi th t xut hin u tin
             }
             entry.first |= flags;
             entry.second = reinterpret_cast<uint64_t>(evlist[i].udata);
@@ -2492,8 +2476,8 @@ extern "C" int bionic_pthread_condattr_destroy(void* attr) { (void)attr; return 
 extern "C" int bionic_pthread_mutexattr_init(void* attr) { (void)attr; return 0; }
 extern "C" int bionic_pthread_mutexattr_destroy(void* attr) { (void)attr; return 0; }
 extern "C" int bionic_pthread_mutexattr_settype(void* attr, int type) {
-    // GHI kiểu vào attr guest (2 bit thấp từ đầu) — dummy cũ không ghi gì nên
-    // pthread_mutex_init không bao giờ biết mutex là recursive.
+    // write kiu vo attr guest (2 bit thp t u) — dummy c no/not write g nn
+    // pthread_mutex_init no/not bao gi bit mutex l recursive.
     auto* p = static_cast<uint32_t*>(attr);
     if (!p) return -1;
     *p = (*p & ~0x3u) | (static_cast<uint32_t>(type) & 0x3u);
@@ -2528,15 +2512,15 @@ extern "C" int bionic_pthread_key_delete(int guestKey) {
     return ::pthread_key_delete(static_cast<pthread_key_t>(guestKey));
 }
 
-// Bionic pthread_once_t: int 32-bit với 3 trạng thái — 0 = chưa chạy,
-// 1 = đang chạy init_routine, 2 = đã xong. Control word nằm trong bộ nhớ
-// guest nên ta dùng atomic trên chính guest_once (fast path không cần mutex).
+// Bionic pthread_once_t: int 32-bit vi 3 trng thi — 0 = cha run,
+// 1 = ang run init_routine, 2 = xong. Control word nm trong memory
+// guest nn ta dng atomic trn main guest_once (fast path no/not cn mutex).
 //
-// Trước đây dùng MỘT global mutex giữ trong suốt init_routine() → init gọi
-// pthread_once trên control word khác sẽ tự khóa chính mình → deadlock. Giờ
-// mỗi control word có mutex/cv riêng (map dùng shared_ptr để thread đang đợi
-// không bị destroy khi entry bị xóa), đúng như pthread_once thật của bionic
-// cho phép nested once trên control word khác nhau.
+// before y dng MT global mutex gi trong sut init_routine() → init call
+// pthread_once trn control word khc s t kha main mnh → deadlock. Gi
+// mi control word c mutex/cv ring (map dng shared_ptr thread ang i
+// no/not b destroy khi entry b remove), ng nh pthread_once tht ca bionic
+// cho php nested once trn control word khc nhau.
 struct BionicOnceControl {
     std::mutex mtx;
     std::condition_variable cv;
@@ -2555,7 +2539,7 @@ static void once_state_store(int* guest_once, int state) {
 extern "C" int bionic_pthread_once(int* guest_once, void (*init_routine)(void)) {
     if (!guest_once || !init_routine) return -1;
 
-    // Fast path: đã chạy xong rồi.
+    // Fast path: run xong ri.
     if (once_state_load(guest_once) == 2) return 0;
 
     std::shared_ptr<BionicOnceControl> ctl;
@@ -2567,23 +2551,23 @@ extern "C" int bionic_pthread_once(int* guest_once, void (*init_routine)(void)) 
     }
 
     std::unique_lock<std::mutex> lock(ctl->mtx);
-    // Một thread khác đang chạy init_routine cho control word này → chờ.
+    // Mt thread khc ang run init_routine cho control word ny → ch.
     while (once_state_load(guest_once) == 1) {
         ctl->cv.wait(lock);
     }
-    // Thread khác vừa chạy xong trong lúc ta chờ.
+    // Thread khc va run xong trong lc ta ch.
     if (once_state_load(guest_once) == 2) return 0;
 
-    // Ta là thread đầu tiên: đánh dấu IN_PROGRESS rồi chạy init. Mutex được
-    // giữ suốt init_routine, nhưng chỉ với control word NÀY — init gọi
-    // pthread_once trên control word khác sẽ dùng mutex khác, không deadlock.
+    // Ta l thread u tin: nh du IN_PROGRESS ri run init. Mutex c
+    // gi sut init_routine, nhng ch vi control word NY — init call
+    // pthread_once trn control word khc s dng mutex khc, no/not deadlock.
     once_state_store(guest_once, 1);
     init_routine();
     once_state_store(guest_once, 2);
     ctl->cv.notify_all();
 
-    // Best-effort dọn map: entry không còn ai tham chiếu (thread đang đợi giữ
-    // shared_ptr riêng nên vẫn sống). Fast path thường chặn các lần gọi sau.
+    // Best-effort dn map: entry no/not cn ai tham chiu (thread ang i gi
+    // shared_ptr ring nn vn sng). Fast path thng chn cc ln call after.
     std::lock_guard<std::mutex> mapLock(g_once_map_mtx);
     auto it = g_once_controls.find(guest_once);
     if (it != g_once_controls.end() && it->second == ctl) {
@@ -2604,7 +2588,7 @@ struct android_sigaction {
 
 #include <signal.h>
 
-// Bionic/Linux sa_flags (asm-generic/signal.h) — guest truyền giá trị Linux.
+// Bionic/Linux sa_flags (asm-generic/signal.h) — guest truyn gi tr Linux.
 constexpr int LINUX_SA_NOCLDSTOP = 0x00000001;
 constexpr int LINUX_SA_NOCLDWAIT = 0x00000002;
 constexpr int LINUX_SA_SIGINFO   = 0x00000004;
@@ -2613,9 +2597,9 @@ constexpr int LINUX_SA_RESTART   = 0x10000000;
 constexpr int LINUX_SA_NODEFER   = 0x40000000;
 constexpr int LINUX_SA_RESETHAND = 0x80000000;
 
-// Dịch sa_flags guest (Linux) → host. Trước đây chỉ bit SA_SIGINFO (0x4) được
-// dịch sang Darwin, còn SA_RESTART/NODEFER/RESETHAND/ONSTACK/NOCLD* bị drop im
-// lặng → game cần SA_RESTART (đa số game đặt nó) không được restart syscall.
+// Dch sa_flags guest (Linux) → host. before y ch bit SA_SIGINFO (0x4) c
+// dch sang Darwin, cn SA_RESTART/NODEFER/RESETHAND/ONSTACK/NOCLD* b drop im
+// lng → game cn SA_RESTART (a s game t n) no/not c restart syscall.
 static int sa_flags_guest_to_host(int flags) {
 #ifdef __APPLE__
     int out = 0;
@@ -2629,7 +2613,7 @@ static int sa_flags_guest_to_host(int flags) {
     return out;
 #else
     (void)flags;
-    // Linux host: giá trị giống hệt, truyền thẳng.
+    // Linux host: gi tr ging ht, truyn thng.
     return flags;
 #endif
 }
@@ -2714,14 +2698,14 @@ static void init_tls_key() {
     ::pthread_key_create(&tls_key, tls_destructor);
 }
 
-// Kích thước khối TLS guest và các offset chuẩn bionic (arm64).
-// Thread pointer (tpidr_el0) trỏ vào vùng slot; slot N ở tpidr + N*8.
+// Kch thc khi TLS guest v cc offset chun bionic (arm64).
+// Thread pointer (tpidr_el0) tr vo vng slot; slot N tpidr + N*8.
 constexpr size_t kTlsBlockSize    = 65536;
 constexpr size_t kTlsSlotOffset   = 32768; // TP = tls_base + kTlsSlotOffset
-constexpr size_t kTlsModuleOffset = 4096;  // template TLS module, tương đối với TP
+constexpr size_t kTlsModuleOffset = 4096;  // template TLS module, tng i vi TP
 constexpr size_t kTlsStackGuardSlotOffset = 40; // slot 5
 
-// Template TLS của module guest (PT_TLS), do elf_loader đăng ký sau khi map.
+// Template TLS ca module guest (PT_TLS), do elf_loader register after khi map.
 static const void* g_tls_template = nullptr;
 static size_t g_tls_template_size = 0;
 static std::mutex g_tls_template_mtx;
@@ -2736,9 +2720,9 @@ extern "C" size_t kudroid_tls_module_offset(void) {
     return kTlsModuleOffset;
 }
 
-// Cấp phát một khối TLS guest đầy đủ: zero hóa, copy template TLS module vào
-// vị trí tprel, đặt stack-guard cookie. Dùng chung cho main thread, thread mới
-// và lazy-allocation trong bionic_handle_tpidr_trap.
+// Cp pht mt khi TLS guest y : zero ha, copy template TLS module vo
+// v tr tprel, t stack-guard cookie. Dng chung cho main thread, thread mi
+// v lazy-allocation trong bionic_handle_tpidr_trap.
 static void* alloc_guest_tls_block(void) {
     void* tls_base = std::aligned_alloc(16, kTlsBlockSize);
     if (!tls_base) return nullptr;
@@ -2753,7 +2737,7 @@ static void* alloc_guest_tls_block(void) {
         }
     }
 
-    // Stack guard cookie tại slot 5 (offset 40 tính từ TP).
+    // Stack guard cookie ti slot 5 (offset 40 tnh t TP).
     *reinterpret_cast<uint64_t*>(static_cast<char*>(tls_base) + kTlsSlotOffset + kTlsStackGuardSlotOffset) =
         kStackGuardCookie;
     return tls_base;
@@ -2768,7 +2752,7 @@ static void* bionic_thread_wrapper(void* rawArgs);
 
 extern "C" void bionic_init_main_thread_tls(void) {
     ::pthread_once(&tls_key_once, init_tls_key);
-    if (::pthread_getspecific(tls_key)) return; // đã có khối TLS
+    if (::pthread_getspecific(tls_key)) return; // c khi TLS
     void* tls_base = alloc_guest_tls_block();
     if (!tls_base) return;
     
@@ -2792,7 +2776,7 @@ extern "C" void bionic_init_main_thread_tls(void) {
     // Check the stack guard is readable at offset 40
     uint64_t guard_check = *reinterpret_cast<uint64_t*>(new_tpidr + 40);
     
-    // DIAGNOSTIC (gate): chạy mỗi thread mới — chỉ log khi điều tra TLS.
+    // DIAGNOSTIC (gate): run mi thread mi — ch log khi iu tra TLS.
     if (guard_diag_enabled()) {
         fprintf(stderr, "[TLS_DIAG] tls_base=%p tls_ptr=%p\n", reinterpret_cast<void*>(tls_base), reinterpret_cast<void*>(tls_ptr));
         fprintf(stderr, "[TLS_DIAG] tpidr_el0 BEFORE=0x%llx AFTER=0x%llx\n", 
@@ -2827,11 +2811,11 @@ bool bionic_handle_tpidr_trap(void* ucontext) {
             ::pthread_once(&tls_key_once, init_tls_key);
             void* tls_base = ::pthread_getspecific(tls_key);
             if (!tls_base) {
-                // Lazy allocation: thread do host tạo (JVM/Swift) chạy guest code
-                // chưa có khối TLS. Cấp phát ngay để guest không đọc địa chỉ 0.
-                // Đây là trap đồng bộ (BRK do guest thực thi) nên malloc ở đây
-                // an toàn trong thực tế; khối được tls_destructor giải phóng khi
-                // thread kết thúc.
+                // Lazy allocation: thread do host create (JVM/Swift) run guest code
+                // cha c khi TLS. Cp pht ngay guest no/not read address 0.
+                // y l trap ng b (BRK do guest execute) nn malloc y
+                // an ton trong thc t; khi c tls_destructor gii phng khi
+                // thread kt thc.
                 tls_base = alloc_guest_tls_block();
                 if (tls_base) {
                     ::pthread_setspecific(tls_key, tls_base);
@@ -2865,9 +2849,9 @@ static void* bionic_thread_wrapper(void* rawArgs) {
 
     // Allocate 64KB for Android TLS block and set tpidr_el0
     // Darwin uses tpidrro_el0, so tpidr_el0 is free for us!
-    // KHÔNG fallback sang aligned_alloc trần: khối như vậy không có template
-    // TLS module và không có stack-guard cookie → guest đọc rác. alloc_guest_tls_block
-    // dùng chính allocator/kích thước đó; nếu nó OOM thì fallback cũng OOM.
+    // no/not fallback sang aligned_alloc trn: khi nh vy no/not c template
+    // TLS module v no/not c stack-guard cookie → guest read rc. alloc_guest_tls_block
+    // dng main allocator/kch thc ; nu n OOM th fallback cng OOM.
     void* tls_base = alloc_guest_tls_block();
     if (tls_base) {
         ::pthread_setspecific(tls_key, tls_base);
@@ -2879,7 +2863,7 @@ static void* bionic_thread_wrapper(void* rawArgs) {
     // iOS: ANGLE/Metal/ObjC require an autorelease pool on EVERY thread that
     // touches them. Guest render threads (TriangleGLES render thread, Unity's
     // render thread...) are raw pthreads with NO pool — GPU test passes because
-    // it runs on the main/GCD thread (pool có sẵn). Không có pool → abort()
+    // it runs on the main/GCD thread (pool c sn). no/not c pool → abort()
     // ngay trong ANGLE eglInitialize (Metal device/queue creation).
 #if defined(__APPLE__)
     void* pool = objc_autoreleasePoolPush();
@@ -2902,7 +2886,7 @@ extern "C" int bionic_pthread_create(pthread_t* thread, void* attr, void* (*star
         return res;
     }
 
-    // Truyền stack size + detach state từ attr guest (nếu có) sang pthread_create host.
+    // Truyn stack size + detach state t attr guest (nu c) sang pthread_create host.
     const auto* a = static_cast<const BionicPthreadAttr*>(attr);
     pthread_attr_t hostAttr;
     ::pthread_attr_init(&hostAttr);
@@ -2940,11 +2924,11 @@ extern "C" void* bionic_memalign(size_t alignment, size_t size) {
 // ============================================================================
 // __system_property_* — Android property system
 // ============================================================================
-// Bionic ABI: prop_info là con trỏ không trong suốt — game nhận từ
-// __system_property_find rồi truyền lại cho __system_property_read/
-// _read_callback. Ta lưu bảng property tĩnh và dùng con trỏ tới entry như
-// prop_info*. Trước đây find trả 0 (not found) và read_callback là no-op —
-// Unity đọc trực tiếp __system_property_read sẽ thấy rác.
+// Bionic ABI: prop_info l pointer no/not trong sut — game nhn t
+// __system_property_find ri truyn li cho __system_property_read/
+// _read_callback. Ta lu bng property tnh v dng pointer ti entry nh
+// prop_info*. before y find tr 0 (not found) v read_callback l no-op —
+// Unity read trc tip __system_property_read s thy rc.
 namespace {
 struct KudroidProp {
     const char* name;
@@ -2998,7 +2982,7 @@ extern "C" int bionic_system_property_get(const char* name, char* value) {
 }
 
 extern "C" const void* bionic_system_property_find(const char* name) {
-    return findProp(name); // prop_info* — nullptr nếu không có
+    return findProp(name); // prop_info* — nullptr nu no/not c
 }
 
 // int __system_property_read(const prop_info* pi, char* name, char* value)
@@ -3171,11 +3155,10 @@ extern "C" int bionic_sched_setaffinity(pid_t pid, size_t cpusetsize, const void
     return 0;
 }
 
-// ── inotify / signalfd — không tồn tại trên iOS → emulate ────────────────
-// Trước đây trả -1 → game (Unity hay dùng inotify để theo dõi asset) fail ngay.
-// Giờ trả fd thật (loopback UDP — poll được, không bao giờ có event = "không có
-// file thay đổi", đúng ngữ nghĩa khi không có ai ghi file). inotify_add_watch
-// trả watch descriptor giả > 0 để game tin rằng watch đã được đăng ký.
+// ── inotify / signalfd — no/not tn ti trn iOS → emulate ────────────────
+// before y tr -1 → game (Unity hay dng inotify theo di asset) fail ngay.
+// Gi tr fd tht (loopback UDP — poll c, no/not bao gi c event = "no/not c
+// file modified", valid semantics when idle). inotify_add_watch returns a positive dummy watch descriptor.
 
 // inotify_init1 — create an inotify instance (emulated: fd poll-able, never fires).
 extern "C" int bionic_inotify_init1(int flags) {
@@ -3193,7 +3176,7 @@ extern "C" int bionic_inotify_init1(int flags) {
     return fd;
 }
 
-// inotify_add_watch — register a watch (emulated: trả wd giả dương).
+// inotify_add_watch — register a watch (emulated: returns dummy descriptor).
 extern "C" int bionic_inotify_add_watch(int fd, const char* pathname, uint32_t mask) {
     (void)fd; (void)pathname; (void)mask;
     static int s_next_wd = 1;
@@ -3212,10 +3195,10 @@ extern "C" int bionic_inotify_rm_watch(int fd, int wd) {
 }
 
 // signalfd — create a file descriptor for signal delivery (emulated: fd poll-able,
-// không bao giờ có signal — game poll không treo, chỉ không nhận signal hiếm).
+// no pending signals — poll loop returns without blocking.
 extern "C" int bionic_signalfd(int fd, const void* mask, int flags) {
     (void)mask; (void)flags;
-    if (fd >= 0) return fd; // signalfd(fd,...) với fd có sẵn — tái dùng
+    if (fd >= 0) return fd; // signalfd(fd,...) with existing fd — reuse
 #ifdef __APPLE__
     const int newfd = create_loopback_udp();
 #else
@@ -3235,13 +3218,13 @@ extern "C" int bionic_eventfd2(unsigned int initval, int flags) {
 }
 
 // prlimit64 — get/set process resource limits.
-// Trước đây trả 0 KHÔNG fill old_limit → game đọc struct rlimit rác (giống bug
-// statx cũ). Fill từ getrlimit thật, map chỉ số RLIMIT_* Linux → Darwin.
+// Previously returned 0 without filling old_limit -> uninitialized struct rlimit.
+// Now populated from host getrlimit with Linux->Darwin resource index mapping.
 struct GuestRlimit64 { uint64_t rlim_cur; uint64_t rlim_max; }; // Linux rlimit64
 extern "C" int bionic_prlimit64(pid_t pid, int resource, const void* new_limit, void* old_limit) {
     (void)pid;
 #ifdef __APPLE__
-    // Linux RLIMIT_* → Darwin RLIMIT_* (chỉ số khác nhau!)
+    // Linux RLIMIT_* -> Darwin RLIMIT_* (index mapping)
     // Linux: CPU=0 FSIZE=1 DATA=2 STACK=3 CORE=4 RSS=5 NPROC=6 NOFILE=7
     //        MEMLOCK=8 AS=9 LOCKS=10 SIGPENDING=11 MSGQUEUE=12 NICE=13 RTPRIO=14
     // Darwin: CPU=0 FSIZE=1 DATA=2 STACK=3 CORE=4 AS=5 MEMLOCK=6 NPROC=7 NOFILE=8
@@ -3256,7 +3239,7 @@ extern "C" int bionic_prlimit64(pid_t pid, int resource, const void* new_limit, 
         case 7: darwin_resource = RLIMIT_NOFILE; break;   // 7 -> 8
         case 8: darwin_resource = RLIMIT_MEMLOCK; break;  // 8 -> 6
         case 9: darwin_resource = RLIMIT_AS; break;       // 9 -> 5
-        default: darwin_resource = -1; break;             // RSS/LOCKS/... không có
+        default: darwin_resource = -1; break;             // RSS/LOCKS/... unsupported on Darwin
     }
 #else
     const int darwin_resource = resource;
@@ -3267,7 +3250,7 @@ extern "C" int bionic_prlimit64(pid_t pid, int resource, const void* new_limit, 
             auto* out = static_cast<GuestRlimit64*>(old_limit);
             out->rlim_cur = out->rlim_max = 0;
         }
-        return 0; // không map được — vẫn trả 0 để game không chết
+        return 0; // unmapped resource — return 0 gracefully
     }
     if (new_limit) {
         const auto* in = static_cast<const GuestRlimit64*>(new_limit);
@@ -3283,8 +3266,7 @@ extern "C" int bionic_prlimit64(pid_t pid, int resource, const void* new_limit, 
     return 0;
 }
 
-// statx — extended stat. Trước đây trả thành công mà KHÔNG fill statxbuf → game
-// đọc struct statx chưa init (rác). Fill cấu trúc statx chuẩn Linux UAPI từ stat().
+// statx — extended stat. Emulated via host stat() into Linux UAPI struct statx.
 struct GuestStatxTimestamp {
     int64_t tv_sec;
     uint32_t tv_nsec;
@@ -3343,7 +3325,7 @@ extern "C" int bionic_statx(int dirfd, const char* pathname, int flags, unsigned
     struct stat st;
     std::string path = pathname;
     if (dirfd != AT_FDCWD && pathname[0] != '/') {
-        // Đường dẫn tương đối theo dirfd — xử lý best-effort qua /proc/self/fd.
+        // Relative path with dirfd — best-effort resolution via /proc/self/fd.
         char link[64];
         std::snprintf(link, sizeof(link), "/proc/self/fd/%d", dirfd);
         char resolved[PATH_MAX];
@@ -3356,7 +3338,7 @@ extern "C" int bionic_statx(int dirfd, const char* pathname, int flags, unsigned
     const int rc = (flags & AT_SYMLINK_NOFOLLOW)
                        ? ::lstat(path.c_str(), &st)
                        : ::stat(path.c_str(), &st);
-    if (rc != 0) return -1; // errno đã set
+    if (rc != 0) return -1; // errno already set
     fill_statx_from_stat(static_cast<GuestStatx*>(statxbuf), st);
     return 0;
 }
@@ -3382,7 +3364,7 @@ struct ALooperFd {
     int events;
     void* callback; // ALooper_callbackFunc
     void* data;
-    bool isInputPipe; // fd là wake pipe của AInputQueue (cần drain khi readable)
+    bool isInputPipe; // fd is AInputQueue wake pipe (drained when readable)
 };
 
 struct ALooper {
@@ -3454,9 +3436,8 @@ extern "C" int bionic_ALooper_addFd(void* looper, int fd, int ident, int events,
     return 1;
 }
 
-// Đánh dấu một fd là wake pipe của AInputQueue — bionic_AInputQueue_attachLooper
-// gọi hàm này sau khi đăng ký pipe với looper, để pollAll biết cần drain nó
-// (nước không bao giờ được đọc nếu không, looper sẽ trả ready mãi mãi -> busy loop).
+// Mark fd as AInputQueue wake pipe — bionic_AInputQueue_attachLooper
+// called after registering pipe with looper, ensuring pollAll drains it to prevent busy loops.
 extern "C" void bionic_ALooper_markInputPipe(void* looper, int fd) {
     if (!looper || fd < 0) return;
     ALooper* l = static_cast<ALooper*>(looper);
@@ -3530,7 +3511,7 @@ extern "C" int bionic_ALooper_pollAll(int timeoutMillis, int* outFd, int* outEve
         return -2; // ALOOPER_POLL_TIMEOUT
     }
 
-    // nfds_t là unsigned int trên Darwin — clamp tránh truncate khi pfds quá lớn.
+    // nfds_t is unsigned int on Darwin — clamp to avoid truncation.
     const nfds_t nfds = pfds.size() > static_cast<size_t>(INT_MAX)
                            ? static_cast<nfds_t>(INT_MAX)
                            : static_cast<nfds_t>(pfds.size());
@@ -3552,20 +3533,17 @@ extern "C" int bionic_ALooper_pollAll(int timeoutMillis, int* outFd, int* outEve
             return e;
         }();
 
-        // Drain wake pipe của AInputQueue: nếu không đọc, pipe luôn readable
-        // và pollAll trả ngay lập tức mãi mãi (busy loop).
-        // Pipe này do InputShim tạo với O_NONBLOCK (xem ensure_wake_pipe) nên
-        // read() trả EAGAIN khi cạn — drain cho tới khi EAGAIN. Cap rất cao chỉ
-        // để phòng thủ fd không non-blocking (không thể xảy ra với pipe của ta).
+        // Drain AInputQueue wake pipe to prevent looper busy looping on unread pipe.
+        // Created with O_NONBLOCK: drain until EAGAIN to prevent blocking.
         if (snapshot[i].isInputPipe && (pfds[i].revents & (POLLIN | POLLHUP))) {
             char drainBuf[4096];
             for (int drainIters = 0; drainIters < (1 << 20); ++drainIters) {
                 const ssize_t n = ::read(snapshot[i].fd, drainBuf, sizeof(drainBuf));
-                if (n <= 0) break; // EAGAIN hoặc đã cạn
+                if (n <= 0) break; // EAGAIN or empty
             }
         }
 
-        // Thực thi callback nếu có (giống ALooper thật). callback trả 0 = gỡ fd.
+        // Execute looper callback (return 0 unregisters fd).
         if (snapshot[i].callback) {
             const int keep = reinterpret_cast<int (*)(int, int, void*)>(snapshot[i].callback)(
                 snapshot[i].fd, ev, snapshot[i].data);
@@ -3591,9 +3569,7 @@ extern "C" int bionic_ALooper_pollAll(int timeoutMillis, int* outFd, int* outEve
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Bionic symbols game .so commonly import that the host cannot provide via
-// dlsym(RTLD_DEFAULT). Trước đây chúng bị bind vào kudroid_universal_dummy
-// (trả 0) — sincos trả rác, sem_timedwait trả 0 tức thì (mất đồng bộ thread),
-// __strlen_chk trả 0 (sai độ dài buffer). Giờ là implementation thật.
+// Resolved via real implementations rather than universal dummy stubs to ensure thread sync and valid bounds checking.
 // ─────────────────────────────────────────────────────────────────────────────
 
 // bionic: void sincos(double x, double* s, double* c)
@@ -3609,9 +3585,7 @@ extern "C" void bionic_sincosf(float x, float* s, float* c) {
 }
 
 // bionic: size_t __strlen_chk(const char* s, size_t s_len)
-// Fortify: s_len là kích thước object; bionic abort nếu strlen >= s_len. Ở đây
-// trả strlen thật (đúng kết quả game cần) và chỉ cảnh báo — không abort để game
-// không chết vì giới hạn kích thước tính từ layout bionic khác host.
+// FORTIFY: return real strlen with bounds warning rather than hard aborting on layout mismatches.
 extern "C" size_t bionic___strlen_chk(const char* s, size_t s_len) {
     const size_t len = ::strlen(s ? s : "");
     if (len >= s_len) {
@@ -3621,7 +3595,7 @@ extern "C" size_t bionic___strlen_chk(const char* s, size_t s_len) {
 }
 
 // bionic: void __FD_SET_chk(int fd, fd_set* set, size_t set_size)
-// set_size là kích thước byte của fd_set; fd hợp lệ nếu fd < set_size*8.
+// set_size is byte size of fd_set; valid if fd < set_size*8.
 extern "C" void bionic___FD_SET_chk(int fd, fd_set* set, size_t set_size) {
     if (!set) return;
     if (fd < 0 || static_cast<size_t>(fd) >= set_size * 8) {
@@ -3632,8 +3606,7 @@ extern "C" void bionic___FD_SET_chk(int fd, fd_set* set, size_t set_size) {
 }
 
 // bionic: int __FD_ISSET_chk(int fd, const fd_set* set, size_t set_size)
-// Trả về nonzero nếu fd có mặt trong set; dummy trước đây trả 0 khiến game
-// tưởng fd không sẵn sàng → poll loop treo/đọc sai.
+// Return non-zero if fd is present in set; prevents polling loops from hanging.
 extern "C" int bionic___FD_ISSET_chk(int fd, const fd_set* set, size_t set_size) {
     if (!set) return 0;
     if (fd < 0 || static_cast<size_t>(fd) >= set_size * 8) {
@@ -3737,8 +3710,7 @@ extern "C" size_t bionic___fwrite_chk(const void* buf, size_t size, size_t count
 }
 
 // bionic: int sem_timedwait(sem_t* sem, const struct timespec* abs_timeout)
-// abs_timeout là thời điểm tuyệt đối (CLOCK_REALTIME). Host iOS có sem_timedwait
-// nhưng không export qua dlsym(RTLD_DEFAULT), nên giả lập bằng sem_trywait + sleep.
+// abs_timeout is absolute CLOCK_REALTIME. Emulated via sem_trywait + sleep loop on iOS.
 extern "C" int bionic_sem_timedwait(sem_t* sem, const struct timespec* abs_timeout) {
     if (!sem || !abs_timeout) {
         errno = EINVAL;
@@ -3762,17 +3734,13 @@ extern "C" int bionic_sem_timedwait(sem_t* sem, const struct timespec* abs_timeo
     }
 }
 
-// Bản ngoài "C" cho kudroid_jni.cpp: android.util.Log.println_native forward về
-// pipeline log chuẩn của kudroid (stdout + file + crash buffer).
+// Forward android.util.Log.println_native to standard KuDroid log pipeline.
 extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message) {
     return logAndroidMessage(priority, tag, std::string(message ? message : ""));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Họ fortify (__*_chk) — game build với _FORTIFY_SOURCE (NDK mặc định cho
-// release) import rất nhiều hàm này. Trước đây rơi vào dummy (trả 0, không làm
-// gì) — __memcpy_chk không copy, __read_chk không đọc... → dữ liệu hỏng âm thầm.
-// Giờ là bản thật; khi vi phạm kích thước thì log cảnh báo thay vì abort.
+// Real FORTIFY (__*_chk) implementations to prevent silent data corruption.
 // ─────────────────────────────────────────────────────────────────────────────
 
 extern "C" void* bionic___memcpy_chk(void* dst, const void* src, size_t n, size_t dst_len) {
@@ -3828,7 +3796,7 @@ extern "C" int bionic___sprintf_chk(char* s, int flag, size_t slen, const char* 
 extern "C" char* bionic___strncpy_chk(char* dst, const char* src, size_t n, size_t dst_len) {
     if (n > dst_len) {
         trace("__strncpy_chk: destination overflow (fortify)");
-        n = dst_len; // clamp để không ghi tràn
+        n = dst_len; // clamp to prevent buffer overflow
     }
     return ::strncpy(dst, src, n);
 }
@@ -3853,8 +3821,7 @@ extern "C" unsigned long bionic___fdelt_chk(unsigned long fd) {
 }
 
 // bionic: void android_set_abort_message(const char* msg)
-// Bionic lưu msg để tombstone. Ở đây lưu lại để crash handler in ra — thường chứa
-// lý do Unity abort (ví dụ "FATAL: ..."), rất giá trị khi chẩn đoán.
+// Store guest abort messages for tombstone crash logs (e.g. Unity FATAL messages).
 extern "C" void bionic_android_set_abort_message(const char* msg) {
     if (msg && *msg) {
         kudroid_store_abort_message(msg);
@@ -3886,7 +3853,7 @@ extern "C" void bionic_ZSTD_trace_decompress_end(uint64_t handle, const void* dc
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Bionic malloc extensions — iOS libmalloc có sẵn số liệu thật, không cần đoán.
+// Bionic malloc extensions queried from host libmalloc.
 // ─────────────────────────────────────────────────────────────────────────────
 
 extern "C" size_t bionic_malloc_usable_size(const void* ptr) {
@@ -3898,18 +3865,18 @@ extern "C" size_t bionic_malloc_usable_size(const void* ptr) {
 #endif
 }
 
-// bionic struct mallinfo — 10 size_t, trả theo giá trị (arm64: qua x8).
+// Bionic struct mallinfo (10 size_t entries returned by value).
 struct BionicMallinfo {
-    size_t arena;     // tổng vùng heap không phải mmap
-    size_t ordblks;   // số block trống
-    size_t smblks;    // luôn 0 trên bionic
-    size_t hblks;     // số vùng mmap
-    size_t hblkhd;    // tổng byte mmap
-    size_t usmblks;   // luôn 0
-    size_t fsmblks;   // luôn 0
-    size_t uordblks;  // tổng byte đang được cấp phát
-    size_t fordblks;  // tổng byte trống
-    size_t keepcost;  // byte có thể trả lại OS
+    size_t arena;     // total non-mmap heap space
+    size_t ordblks;   // number of free blocks
+    size_t smblks;    // always 0 on Bionic
+    size_t hblks;     // number of mmap regions
+    size_t hblkhd;    // total mmap bytes
+    size_t usmblks;   // always 0
+    size_t fsmblks;   // always 0
+    size_t uordblks;  // total allocated bytes
+    size_t fordblks;  // total free bytes
+    size_t keepcost;  // reclaimable bytes
 };
 
 extern "C" BionicMallinfo bionic_mallinfo(void) {
@@ -3929,14 +3896,14 @@ extern "C" BionicMallinfo bionic_mallinfo(void) {
     return mi;
 }
 
-// jemalloc sized-delete: size là gợi ý tối ưu, free() vẫn đúng ngữ nghĩa.
+// jemalloc sized-delete: size is an optimization hint, mapped to standard free().
 extern "C" void bionic_sdallocx(void* ptr, size_t size, int flags) {
     (void)size;
     (void)flags;
     ::free(ptr);
 }
 
-// BoringSSL memory hooks — chỉ là malloc/free có kèm truy vấn kích thước.
+// BoringSSL memory hooks mapped to malloc/free.
 extern "C" void* bionic_OPENSSL_memory_alloc(size_t size) {
     return ::malloc(size);
 }
@@ -3950,9 +3917,7 @@ extern "C" size_t bionic_OPENSSL_memory_get_size(void* ptr) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// memfd_create — iOS không có syscall này và cấm shm_open trong sandbox. File
-// tạm trong NSTemporaryDirectory rồi unlink ngay cho fd có đúng tính chất mà
-// caller cần: ftruncate được, mmap MAP_SHARED được, tự biến mất khi close.
+// memfd_create emulation via immediate unlinked temporary file in NSTemporaryDirectory.
 // ─────────────────────────────────────────────────────────────────────────────
 
 extern "C" int bionic_memfd_create(const char* name, unsigned int flags) {
@@ -3974,8 +3939,7 @@ extern "C" int bionic_memfd_create(const char* name, unsigned int flags) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// tkill(tid, sig) — syscall Linux cũ, iOS không có. Giả lập bằng tgkill với
-// pid của process hiện tại (đúng ngữ nghĩa: tkill = tgkill(getpid, tid, sig)).
+// tkill emulated via tgkill(getpid(), tid, sig).
 // ─────────────────────────────────────────────────────────────────────────────
 
 extern "C" int bionic_tkill(int tid, int sig) {
@@ -3983,28 +3947,24 @@ extern "C" int bionic_tkill(int tid, int sig) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// pthread_setname_np(pthread_t, const char*) — dạng 2 tham số của bionic.
-// iOS chỉ có pthread_setname_np(const char*) cho thread hiện tại; với thread
-// khác thì bỏ qua (không có API tương đương, chỉ mất tên thread trong log).
+// Two-parameter pthread_setname_np adapted for Darwin.
 // ─────────────────────────────────────────────────────────────────────────────
 
 extern "C" int bionic_pthread_setname_np2(pthread_t thread, const char* name) {
 #if defined(__APPLE__)
-    // iOS/macOS: pthread_setname_np(const char*) chỉ đặt tên cho thread hiện tại.
+    // Darwin pthread_setname_np only sets current thread name.
     if (::pthread_equal(thread, ::pthread_self())) {
         return ::pthread_setname_np(name ? name : "");
     }
     return 0;
 #else
-    // Linux host: trùng chữ ký với bionic — map thẳng.
+    // Linux host matches Bionic signature directly.
     return ::pthread_setname_np(thread, name ? name : "");
 #endif
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// mallopt/malloc_info — glibc/bionic malloc tuning. iOS dùng malloc zone của
-// hệ thống, không tune được: mallopt no-op trả 1 (thành công), malloc_info trả
-// -1 với ENOSYS như Android thật (Android cũng không hỗ trợ đầy đủ).
+// mallopt/malloc_info stubs for Darwin host.
 // ─────────────────────────────────────────────────────────────────────────────
 
 extern "C" int bionic_mallopt(int param, int value) {
@@ -4020,8 +3980,7 @@ extern "C" int bionic_malloc_info(int options, FILE* fp) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// setprogname/getprogname — iOS có sẵn trong libc; Linux host không. Dùng một
-// buffer tĩnh chung: set ghi vào, get đọc ra (mặc định = basename argv[0]).
+// setprogname/getprogname fallback using static buffer on Linux hosts.
 // ─────────────────────────────────────────────────────────────────────────────
 
 static char g_progName[256] = "";
@@ -4042,7 +4001,7 @@ extern "C" const char* bionic_getprogname() {
     return ::getprogname();
 #else
     if (g_progName[0]) return g_progName;
-    // Mặc định: basename của argv[0] từ /proc/self/cmdline.
+    // Default: argv[0] basename from /proc/self/cmdline.
     static char buf[256] = "unknown";
     FILE* f = std::fopen("/proc/self/cmdline", "rb");
     if (f) {
@@ -4059,7 +4018,7 @@ extern "C" const char* bionic_getprogname() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// pthread_gettid_np — tid của MỘT thread cụ thể (không chỉ thread hiện tại).
+// pthread_gettid_np — retrieve tid for specific thread.
 // ─────────────────────────────────────────────────────────────────────────────
 
 extern "C" pid_t bionic_pthread_gettid_np(pthread_t thread) {
@@ -4069,13 +4028,12 @@ extern "C" pid_t bionic_pthread_gettid_np(pthread_t thread) {
     return static_cast<pid_t>(tid);
 #else
     if (::pthread_equal(thread, ::pthread_self())) return bionic_gettid();
-    return -1; // Linux không có API lấy tid của thread khác từ pthread_t
+    return -1; // Linux has no direct API to get tid from non-current pthread_t
 #endif
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// __pthread_cleanup_push/pop — bionic cài cleanup handler bằng stack per-thread
-// do CALLER cấp (biến trên stack của caller), không cấp phát động.
+// __pthread_cleanup_push/pop: per-thread cleanup handler stack.
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct BionicCleanup {
@@ -4102,7 +4060,7 @@ extern "C" void bionic___pthread_cleanup_pop(BionicCleanup* c, int execute) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// __fgets_chk — fgets có kiểm tra biên đích (FORTIFY).
+// __fgets_chk — bounds-checked fgets (FORTIFY).
 // ─────────────────────────────────────────────────────────────────────────────
 
 extern "C" char* bionic___fgets_chk(char* dst, int supplied_size, FILE* stream,
@@ -4110,7 +4068,7 @@ extern "C" char* bionic___fgets_chk(char* dst, int supplied_size, FILE* stream,
     if (!dst || !stream || supplied_size <= 0) return nullptr;
     if (dst_len_from_compiler != static_cast<size_t>(-1) &&
         static_cast<size_t>(supplied_size) > dst_len_from_compiler) {
-        // Buffer overflow thật sự — abort như bionic thay vì ghi tràn im lặng.
+        // Real buffer overflow — abort like Bionic rather than corrupting memory.
         bionic___assert2(__FILE__, __LINE__, "__fgets_chk",
                          "fgets: prevented write past end of buffer");
         return nullptr;
@@ -4511,24 +4469,20 @@ const SymbolEntry kSyscallSymbols[] = {
     {"__fgets_chk", reinterpret_cast<void*>(&bionic___fgets_chk)},
     {"freopen64", reinterpret_cast<void*>(&vfs_freopen)},
 
-    // ── Bổ sung sau crash Minecraft/libmaesdk (pc=0x0) ─────────────────────
-    // strlcpy/strlcat: iOS libc CÓ sẵn (BSD origin) — map thẳng, không cần shim.
+    // ── Added after Minecraft/libmaesdk null-dereference fixes ─────────────────────
+    // strlcpy/strlcat: available natively in Darwin libc (BSD origin).
     {"strlcpy", reinterpret_cast<void*>(&::strlcpy)},
     {"strlcat", reinterpret_cast<void*>(&::strlcat)},
-    // isatty/getpagesize/tkill: iOS có isatty+gethostpagesize; tkill giả lập
-    // qua tgkill(pid hiện tại).
+    // isatty/getpagesize/tkill: mapped to host libc equivalents.
     {"isatty", reinterpret_cast<void*>(&::isatty)},
     {"getpagesize", reinterpret_cast<void*>(&::getpagesize)},
     {"tkill", reinterpret_cast<void*>(&bionic_tkill)},
-    // pthread_setname_np(pthread_t, const char*) — overload 2 tham số của
-    // bionic. iOS chỉ có 1 tham số → wrapper.
+    // pthread_setname_np: 2-parameter Bionic overload wrapper.
     {"pthread_setname_np", reinterpret_cast<void*>(&bionic_pthread_setname_np2)},
-    // setprogname/getprogname: iOS có — map thẳng. Linux host không có →
-    // wrapper nhỏ dùng chương trình argv[0] (đủ cho guest chỉ đọc tên).
+    // setprogname/getprogname: Darwin native / Linux host fallback.
     {"setprogname", reinterpret_cast<void*>(&bionic_setprogname)},
     {"getprogname", reinterpret_cast<void*>(&bionic_getprogname)},
-    // mallopt/malloc_info: iOS không có mallopt → no-op trả 1 (thành công);
-    // malloc_info luôn fail như Android (Android cũng trả error cho malloc_info).
+    // mallopt/malloc_info stubs for platform parity.
     {"mallopt", reinterpret_cast<void*>(&bionic_mallopt)},
     {"malloc_info", reinterpret_cast<void*>(&bionic_malloc_info)},
 };

@@ -195,8 +195,37 @@ public class Activity extends ContextThemeWrapper {
     /**
      * returns the intent that started this activity.
      */
+    private Intent mIntent;
+
+    /**
+     * returns the intent that started this activity.
+     *
+     * Built once and kept, with the component set to this Activity's own class. It
+     * used to return {@code new Intent()} on every call — a fresh, empty Intent with
+     * no component, so {@code getIntent().getComponent()} was null and
+     * {@code getActivityInfo(null, ...)} could not name anything. That is the first
+     * half of the AGDK GameActivity idiom for finding its native library.
+     */
     public Intent getIntent() {
-        return new Intent();
+        if (mIntent == null) {
+            mIntent = new Intent(Intent.ACTION_MAIN);
+            final String cls = getClass().getName();
+            String pkg = ActivityThread.getPackageName();
+            if (pkg == null || pkg.isEmpty()) {
+                try {
+                    pkg = getPackageName();
+                } catch (Throwable ignored) {
+                    pkg = "";
+                }
+            }
+            mIntent.setComponent(new android.content.ComponentName(pkg != null ? pkg : "", cls));
+        }
+        return mIntent;
+    }
+
+    /** Replace the launch Intent, as ActivityThread does when it starts a component. */
+    public void setIntent(Intent intent) {
+        mIntent = intent;
     }
 
     /**

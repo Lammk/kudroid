@@ -27,6 +27,18 @@ public interface Editable extends CharSequence, Appendable {
     void clear();
 
     /**
+     * Filters every insertion has to pass through.
+     *
+     * Part of the interface in AOSP, and libraries call it on an Editable they were
+     * handed rather than on a concrete type — androidx's gametextinput caps its
+     * editor's length that way. Auto-stubbing the call meant the cap was silently
+     * dropped, so a length-limited field accepted unlimited text.
+     */
+    void setFilters(InputFilter[] filters);
+
+    InputFilter[] getFilters();
+
+    /**
      * Factory creates Editable from original content.
      */
     public interface Factory {

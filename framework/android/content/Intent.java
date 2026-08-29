@@ -20,6 +20,7 @@ public class Intent {
     private String mAction;
     private String mPackage;
     private String mClassName;
+    private ComponentName mComponent;
     private android.net.Uri mData;
     private Bundle mExtras;
     private int mFlags;
@@ -34,6 +35,7 @@ public class Intent {
     public Intent(Context packageContext, Class<?> cls) {
         mPackage = packageContext.getPackageName();
         mClassName = cls.getName();
+        mComponent = new ComponentName(mPackage, mClassName);
     }
 
     public Intent(String action, android.net.Uri uri) {
@@ -45,6 +47,7 @@ public class Intent {
         mAction = o.mAction;
         mPackage = o.mPackage;
         mClassName = o.mClassName;
+        mComponent = o.mComponent;
         mData = o.mData;
         mFlags = o.mFlags;
         if (o.mExtras != null) {
@@ -82,10 +85,52 @@ public class Intent {
     public Intent setClass(Context packageContext, Class<?> cls) {
         mPackage = packageContext.getPackageName();
         mClassName = cls.getName();
+        mComponent = new ComponentName(mPackage, mClassName);
         return this;
     }
 
-    public String getComponent() {
+    public Intent setClassName(Context packageContext, String className) {
+        mPackage = packageContext.getPackageName();
+        mClassName = className;
+        mComponent = new ComponentName(mPackage, className);
+        return this;
+    }
+
+    public Intent setClassName(String packageName, String className) {
+        mPackage = packageName;
+        mClassName = className;
+        mComponent = new ComponentName(packageName, className);
+        return this;
+    }
+
+    /**
+     * The component this Intent targets, or null when it is implicit.
+     *
+     * Returned a bare class-name String before, which is the wrong type: the AOSP
+     * signature is {@code ComponentName getComponent()}, and every caller either
+     * passes the result straight to PackageManager or reads getClassName() off it.
+     * A String meant that
+     *
+     *   getPackageManager().getActivityInfo(getIntent().getComponent(), GET_META_DATA)
+     *
+     * — the AGDK GameActivity idiom for finding its native library name — could not
+     * resolve at all, so the whole call was auto-stubbed to null.
+     */
+    public ComponentName getComponent() {
+        return mComponent;
+    }
+
+    public Intent setComponent(ComponentName component) {
+        mComponent = component;
+        if (component != null) {
+            mPackage = component.getPackageName();
+            mClassName = component.getClassName();
+        }
+        return this;
+    }
+
+    /** The target class name, for callers that want it without a ComponentName. */
+    public String getClassName() {
         return mClassName;
     }
 
@@ -151,6 +196,7 @@ public class Intent {
 
     @Override
     public String toString() {
-        return "Intent{action=" + mAction + ", component=" + mClassName + "}";
+        return "Intent{action=" + mAction + ", component=" +
+               (mComponent != null ? mComponent.flattenToString() : mClassName) + "}";
     }
 }

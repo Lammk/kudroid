@@ -707,16 +707,91 @@ public class View {
         return true;
     }
 
-    /**
-     * returns the view's tag.
-     */
+    // ── tags ────────────────────────────────────────────────────────────────
+    //
+    // A tag is arbitrary data an app attaches to a view, either unkeyed or under an
+    // integer key. Libraries use the keyed form heavily to stash per-view state
+    // without subclassing — androidx.core stores window-insets and lifecycle
+    // bookkeeping this way.
+    //
+    // getTag() previously returned a hard null and there was no setter at all, so
+    // storing then reading back gave null: an app that keeps its own state in a tag
+    // silently loses it, and a library that caches a helper per view rebuilds it on
+    // every call or dereferences the null it did not expect.
+    private Object mTag;
+    private android.util.SparseArray<Object> mKeyedTags;
+
     public Object getTag() {
-        return null;
+        return mTag;
+    }
+
+    public void setTag(Object tag) {
+        mTag = tag;
+    }
+
+    public Object getTag(int key) {
+        return mKeyedTags != null ? mKeyedTags.get(key) : null;
     }
 
     /**
-     * set the view's tag.
+     * Attach data under an integer key.
+     *
+     * Android requires the key to be an application-declared resource id, and throws
+     * IllegalArgumentException otherwise, to stop two libraries colliding on the same
+     * arbitrary constant. KuDroid has no resource ids to validate against, so the key
+     * is accepted as given: rejecting valid-but-unverifiable keys would break the very
+     * libraries this exists for.
      */
+    public void setTag(int key, Object tag) {
+        if (mKeyedTags == null) mKeyedTags = new android.util.SparseArray<Object>();
+        mKeyedTags.put(key, tag);
+    }
+
+    /**
+     * Generate a view id that cannot collide with an aapt-assigned one.
+     *
+     * Used by code that creates views programmatically and needs an id for them —
+     * ConstraintLayout chains, fragment containers, anything that later calls
+     * findViewById on a view it built itself.
+     *
+     * The range matters and is why this cannot be a naive counter: aapt allocates
+     * resource ids from 0x7f000000 upwards, so generated ids have to stay below that
+     * to avoid ever matching a real R.id constant. AOSP uses 1..0x00FFFFFF and wraps;
+     * copying that keeps the guarantee.
+     */
+    private static final java.util.concurrent.atomic.AtomicInteger sNextGeneratedId =
+            new java.util.concurrent.atomic.AtomicInteger(1);
+
+    public static int generateViewId() {
+        for (;;) {
+            final int result = sNextGeneratedId.get();
+            int newValue = result + 1;
+            if (newValue > 0x00FFFFFF) newValue = 1; // roll over, skipping 0
+            if (sNextGeneratedId.compareAndSet(result, newValue)) return result;
+        }
+    }
+
+    // ── window insets ───────────────────────────────────────────────────────
+
+    private OnApplyWindowInsetsListener mOnApplyWindowInsetsListener;
+
+    /**
+     * Install a listener that gets to consume window insets before this view does.
+     *
+     * androidx.core.view.ViewCompat sets one whenever an app opts out of
+     * fits-system-windows, which is the modern way to draw behind the status bar —
+     * GameActivity does it while building its surface. Auto-stubbing the setter meant
+     * the listener was dropped, so an app relying on it to inset its own content laid
+     * out under the system bars instead.
+     */
+    public void setOnApplyWindowInsetsListener(OnApplyWindowInsetsListener listener) {
+        mOnApplyWindowInsetsListener = listener;
+    }
+
+    public OnApplyWindowInsetsListener getOnApplyWindowInsetsListener() {
+        return mOnApplyWindowInsetsListener;
+    }
+
     private boolean mKeepScreenOn = false;
     private static native void setKeepScreenOnNative(boolean keepOn);
 

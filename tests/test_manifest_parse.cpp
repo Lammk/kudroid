@@ -6,6 +6,7 @@
 #include <cstring>
 #include <vector>
 
+using kudroid::ActivityEntry;
 using kudroid::APKExtractor;
 using kudroid::ManifestInfo;
 
@@ -118,7 +119,9 @@ int main() {
     // 7 intent-filter, 8 action, 9 android.intent.action.MAIN,
     // 10 category, 11 android.intent.category.LAUNCHER,
     // 12 com.example.game.MainActivity (real LAUNCHER),
-    // 13 appComponentFactory, 14 its value, 15 com.example.game.GameApp
+    // 13 appComponentFactory, 14 its value, 15 com.example.game.GameApp,
+    // 16 meta-data, 17 value, 18 android.app.lib_name, 19 libgame,
+    // 20 com.example.app.KEY, 21 app-level-value
     const std::vector<std::u16string> strings = {
         u"manifest", u"package", u"com.example.game", u"application",
         u"activity", u"name", u"com.example.game.SplashActivity",
@@ -127,6 +130,8 @@ int main() {
         u"com.example.game.MainActivity",
         u"appComponentFactory", u"androidx.core.app.CoreComponentFactory",
         u"com.example.game.GameApp",
+        u"meta-data", u"value", u"android.app.lib_name", u"libgame",
+        u"com.example.app.KEY", u"app-level-value",
     };
 
     std::vector<std::uint8_t> doc;
@@ -144,11 +149,18 @@ int main() {
     doc = appendChunk(doc, startElement(0, {{1, 2}}));
     //   <application name="...GameApp" appComponentFactory="androidx...CoreComponentFactory">
     doc = appendChunk(doc, startElement(3, {{5, 15}, {13, 14}}));
+    //     <meta-data name="com.example.app.KEY" value="app-level-value" />
+    doc = appendChunk(doc, startElement(16, {{5, 20}, {17, 21}}));
+    doc = appendChunk(doc, endElement(16));
     //   <activity name="...SplashActivity"> </activity> (first, NO launcher)
     doc = appendChunk(doc, startElement(4, {{5, 6}}));
     doc = appendChunk(doc, endElement(4));
     //   <activity name="...MainActivity">
     doc = appendChunk(doc, startElement(4, {{5, 12}}));
+    //     <meta-data name="android.app.lib_name" value="libgame" />
+    //     Nested inside <activity>, which is where AGDK's GameActivity looks for it.
+    doc = appendChunk(doc, startElement(16, {{5, 18}, {17, 19}}));
+    doc = appendChunk(doc, endElement(16));
     //     <intent-filter>
     doc = appendChunk(doc, startElement(7, {}));
     //       <action name="android.intent.action.MAIN">
@@ -218,6 +230,75 @@ int main() {
               order[0]);
         check(order[1] == "com.example.game.SplashActivity", "launchOrder[1] is the rest",
               order[1]);
+    }
+
+    // ── <meta-data> ──
+    //
+    // This is how a component is told things the framework has to look up for it, and
+    // it is not optional decoration. AGDK's GameActivity reads
+    //
+    //   getActivityInfo(getIntent().getComponent(), GET_META_DATA)
+    //       .metaData.getString("android.app.lib_name")
+    //
+    // to learn which .so holds its renderer. Parsing the manifest without meta-data
+    // means the activity never finds its native library, so the surface it creates
+    // stays blank — a failure that looks like a graphics bug and is not one.
+    {
+        // Scoped to the activity that declared it. Two activities in one app can
+        // legitimately carry different values for the same key, so a global bag would
+        // hand out the wrong one.
+        const ActivityEntry* main = nullptr;
+        const ActivityEntry* splash = nullptr;
+        for (const ActivityEntry& a : info.activities) {
+            if (a.name == "com.example.game.MainActivity") main = &a;
+            if (a.name == "com.example.game.SplashActivity") splash = &a;
+        }
+
+        check(main != nullptr && main->metaData.size() == 1,
+              "MainActivity meta-data count",
+              main != nullptr ? std::to_string(main->metaData.size()) : "no activity");
+        if (main != nullptr && main->metaData.size() == 1) {
+            check(main->metaData[0].name == "android.app.lib_name",
+                  "MainActivity meta-data key", main->metaData[0].name);
+            check(main->metaData[0].value == "libgame",
+                  "MainActivity meta-data value", main->metaData[0].value);
+        }
+
+        // The <meta-data> under <application> must NOT leak into an activity that
+        // declared none of its own at parse time; that merge is a lookup-time
+        // fallback, not a parse-time one.
+        check(splash != nullptr && splash->metaData.empty(),
+              "SplashActivity declared no meta-data of its own",
+              splash != nullptr ? std::to_string(splash->metaData.size()) : "no activity");
+
+        check(info.applicationMetaData.size() == 1, "<application> meta-data count",
+              std::to_string(info.applicationMetaData.size()));
+        if (info.applicationMetaData.size() == 1) {
+            check(info.applicationMetaData[0].name == "com.example.app.KEY",
+                  "<application> meta-data key", info.applicationMetaData[0].name);
+            check(info.applicationMetaData[0].value == "app-level-value",
+                  "<application> meta-data value", info.applicationMetaData[0].value);
+        }
+
+        // metaDataFor() is the lookup callers use: the activity's own entries when it
+        // has them, the application's otherwise. The fallback matches how apps are
+        // written rather than how Android stores it — a library documenting a manifest
+        // key rarely says which element it belongs under, so across real APKs the same
+        // key turns up in either place.
+        const auto mainMeta = info.metaDataFor("com.example.game.MainActivity");
+        check(mainMeta.size() == 1 && mainMeta[0].name == "android.app.lib_name",
+              "metaDataFor(MainActivity) returns its own entries",
+              mainMeta.empty() ? "empty" : mainMeta[0].name);
+
+        const auto splashMeta = info.metaDataFor("com.example.game.SplashActivity");
+        check(splashMeta.size() == 1 && splashMeta[0].name == "com.example.app.KEY",
+              "metaDataFor(SplashActivity) falls back to <application>",
+              splashMeta.empty() ? "empty" : splashMeta[0].name);
+
+        const auto unknownMeta = info.metaDataFor("com.example.game.NotDeclared");
+        check(unknownMeta.size() == 1 && unknownMeta[0].name == "com.example.app.KEY",
+              "metaDataFor(unknown) falls back to <application>",
+              unknownMeta.empty() ? "empty" : unknownMeta[0].name);
     }
 
     if (failures == 0) {

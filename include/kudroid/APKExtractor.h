@@ -6,12 +6,34 @@
 
 namespace kudroid {
 
+// One <meta-data android:name= android:value=> entry.
+//
+// Manifest meta-data is not decoration: it is how a component is told things the
+// framework itself has to look up for it. The case that forced this to exist is
+// AGDK's GameActivity, which reads
+//
+//   getPackageManager().getActivityInfo(getIntent().getComponent(), GET_META_DATA)
+//       .metaData.getString("android.app.lib_name")
+//
+// to learn which .so to load. With no meta-data there is no library name, so the
+// activity has no renderer and the surface stays blank — a failure that looks like a
+// graphics problem and is not one.
+struct MetaDataEntry {
+    std::string name;
+    std::string value;
+};
+
 // One <activity> / <activity-alias> declared in AndroidManifest.xml.
 struct ActivityEntry {
     std::string name;          // fully qualified, leading '.' already expanded
     bool isLauncher = false;   // has intent-filter MAIN + LAUNCHER
     bool isExported = false;   // android:exported="true", or implied by a filter
     bool isAlias = false;      // came from <activity-alias>
+
+    // <meta-data> nested in this <activity>. Per-activity rather than global
+    // because that is what Android scopes it to, and two activities in one app can
+    // legitimately carry different values for the same key.
+    std::vector<MetaDataEntry> metaData;
 };
 
 // Parsing results AndroidManifest.xml (binary AXML).
@@ -31,10 +53,27 @@ struct ManifestInfo {
     // factory never initialises can find its own static state empty.
     std::string appComponentFactory;
 
+    // <meta-data> directly under <application>. Android exposes these through
+    // ApplicationInfo.metaData, and a component that cannot find a key on itself
+    // falls back to looking here.
+    std::vector<MetaDataEntry> applicationMetaData;
+
     // Every activity the manifest declares, in declaration order. This is the
     // authoritative list: Android launches what the manifest says, so KuDroid can
     // walk real entries instead of inventing names like "<pkg>.Main".
     std::vector<ActivityEntry> activities;
+
+    // Meta-data of `activityName`, falling back to <application>'s.
+    //
+    // The fallback matches how apps are written rather than how Android stores it:
+    // a library that documents a manifest key rarely says which element it belongs
+    // under, so the same key turns up in either place across real APKs.
+    std::vector<MetaDataEntry> metaDataFor(const std::string& activityName) const {
+        for (const ActivityEntry& a : activities) {
+            if (a.name == activityName && !a.metaData.empty()) return a.metaData;
+        }
+        return applicationMetaData;
+    }
 
     // Launcher activities first, then the rest, all manifest-declared.
     std::vector<std::string> launchOrder() const {

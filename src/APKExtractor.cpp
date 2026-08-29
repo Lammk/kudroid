@@ -335,6 +335,24 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
     bool currentExportedSet = false;
     std::string firstActivityName; // fallback when there is no intent-filter
 
+    // <meta-data> state.
+    //
+    // Nesting is what makes this need state at all: the element appears inside
+    // <activity>, inside <application>, and inside <service>/<provider>/<receiver>,
+    // and the same key means different things depending on which. Tracking depth
+    // rather than a single "in activity" flag is necessary because an <activity>
+    // contains <intent-filter> too, so the parser is often two levels down.
+    int elementDepth = 0;
+    int applicationDepth = -1;   // depth of the open <application>, -1 when outside
+    int activityDepth = -1;      // depth of the open <activity>/<activity-alias>
+    std::vector<MetaDataEntry> currentActivityMeta;
+
+    // Meta-data attributes arrive in any order and android:value may be absent when
+    // the manifest uses android:resource instead, so accumulate then commit.
+    std::string metaName;
+    std::string metaValue;
+    bool sawMetaValue = false;
+
     // Record every activity, not just the launcher. Callers can then try real
     // manifest entries in order instead of guessing names from the package.
     auto commitActivity = [&](const std::string& name, bool isAlias) {
@@ -344,6 +362,13 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
             // Same activity seen again (multiple intent-filter blocks): merge.
             e.isLauncher = e.isLauncher || (sawActionMain && sawCategoryLauncher);
             e.isExported = e.isExported || currentExported || sawAnyIntentFilter;
+            for (const MetaDataEntry& m : currentActivityMeta) {
+                bool dup = false;
+                for (const MetaDataEntry& have : e.metaData) {
+                    if (have.name == m.name) { dup = true; break; }
+                }
+                if (!dup) e.metaData.push_back(m);
+            }
             return;
         }
         ActivityEntry e;
@@ -353,6 +378,7 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
         // otherwise, which is how the launcher can start it.
         e.isExported = currentExportedSet ? currentExported : sawAnyIntentFilter;
         e.isAlias = isAlias;
+        e.metaData = currentActivityMeta;
         info.activities.push_back(e);
     };
 
@@ -384,6 +410,13 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
 
                 const bool isActivityTag =
                     tagName == "activity" || tagName == "activity-alias";
+
+                // Depth is tracked for every element, including the ones this parser
+                // otherwise ignores, because <meta-data> has to be attributed to
+                // whichever element encloses it. AXML emits an END_ELEMENT even for a
+                // self-closing tag, so the counts stay balanced.
+                ++elementDepth;
+
                 if (isActivityTag) {
                     // Start a new activity — reset the state of the previous activity.
                     currentActivity.clear();
@@ -394,9 +427,17 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
                     currentExported = false;
                     currentExportedSet = false;
                     inIntentFilter = false;
+                    currentActivityMeta.clear();
+                    activityDepth = elementDepth;
+                } else if (tagName == "application") {
+                    applicationDepth = elementDepth;
                 } else if (tagName == "intent-filter") {
                     inIntentFilter = true;
                     sawAnyIntentFilter = true;
+                } else if (tagName == "meta-data") {
+                    metaName.clear();
+                    metaValue.clear();
+                    sawMetaValue = false;
                 }
 
                 std::size_t attrCur = attrsBase;
@@ -407,13 +448,33 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
                     std::string attrVal = (attrRawValIdx < stringPool.size()) ? stringPool[attrRawValIdx] : "";
 
                     // If rawValue = -1 (0xFFFFFFFF), read from Res_value (typedValue data)
+                    // Also record the type, because <meta-data> distinguishes a value
+                    // that is genuinely absent from one that is the string "0" —
+                    // android:value="false" arrives as TYPE_INT_BOOLEAN, not a string.
+                    std::uint8_t attrType = 0;
+                    if (attrCur + 20 <= cur + chunkSize) attrType = data[attrCur + 15];
                     if (attrVal.empty() && attrCur + 20 <= cur + chunkSize) {
-                        const std::uint8_t dataType = data[attrCur + 15];
                         const std::uint32_t dataVal = read32(data, attrCur + 16);
-                        if (dataType == 0x03 /* TYPE_STRING */ && dataVal < stringPool.size()) {
+                        if (attrType == 0x03 /* TYPE_STRING */ && dataVal < stringPool.size()) {
                             attrVal = stringPool[dataVal];
-                        } else if (dataType >= 0x10 && dataType <= 0x11 /* TYPE_INT_DEC / HEX */) {
+                        } else if (attrType >= 0x10 && attrType <= 0x11 /* TYPE_INT_DEC / HEX */) {
                             attrVal = std::to_string(dataVal);
+                        } else if (attrType == 0x12 /* TYPE_INT_BOOLEAN */) {
+                            // aapt writes 0xFFFFFFFF for true and 0 for false.
+                            attrVal = dataVal != 0 ? "true" : "false";
+                        } else if (attrType == 0x04 /* TYPE_FLOAT */) {
+                            float f = 0.0f;
+                            std::memcpy(&f, &dataVal, sizeof(f));
+                            attrVal = std::to_string(f);
+                        } else if (attrType == 0x01 /* TYPE_REFERENCE */) {
+                            // android:value="@string/x" or android:resource="@raw/y".
+                            // The id cannot be resolved without parsing resources.arsc,
+                            // so record it in the form aapt would print. A caller that
+                            // needs the text sees something identifiable rather than an
+                            // empty string that reads as "the key is absent".
+                            char ref[32];
+                            std::snprintf(ref, sizeof(ref), "@0x%08x", dataVal);
+                            attrVal = ref;
                         }
                     }
 
@@ -429,6 +490,19 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
                         if (attrName == "appComponentFactory" && info.appComponentFactory.empty() &&
                             !attrVal.empty()) {
                             info.appComponentFactory = attrVal;
+                        }
+                    } else if (tagName == "meta-data") {
+                        if (attrName == "name") {
+                            metaName = attrVal;
+                        } else if (attrName == "value") {
+                            metaValue = attrVal;
+                            sawMetaValue = true;
+                        } else if (attrName == "resource" && !sawMetaValue) {
+                            // android:resource is an id, not text. Keep it so the key is
+                            // known to exist — an app testing containsKey() gets the
+                            // right answer even though the value cannot be resolved.
+                            metaValue = attrVal;
+                            sawMetaValue = true;
                         }
                     } else if (isActivityTag) {
                         if (attrName == "name" && currentActivity.empty() && !attrVal.empty()) {
@@ -468,7 +542,34 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
             if (cur + 24 <= data.size()) {
                 const std::uint32_t nameIdx = read32(data, cur + 20);
                 const std::string tagName = (nameIdx < stringPool.size()) ? stringPool[nameIdx] : "";
-                if (tagName == "intent-filter") {
+
+                if (tagName == "meta-data") {
+                    // Attribute it to the innermost open element. An <activity> wins
+                    // over <application> because Android scopes it that way: two
+                    // activities can carry different values for the same key, and
+                    // reading the wrong one is worse than reading none.
+                    if (!metaName.empty()) {
+                        MetaDataEntry entry;
+                        entry.name = metaName;
+                        entry.value = metaValue;
+                        if (activityDepth >= 0) {
+                            bool dup = false;
+                            for (const MetaDataEntry& m : currentActivityMeta) {
+                                if (m.name == entry.name) { dup = true; break; }
+                            }
+                            if (!dup) currentActivityMeta.push_back(entry);
+                        } else if (applicationDepth >= 0) {
+                            bool dup = false;
+                            for (const MetaDataEntry& m : info.applicationMetaData) {
+                                if (m.name == entry.name) { dup = true; break; }
+                            }
+                            if (!dup) info.applicationMetaData.push_back(entry);
+                        }
+                    }
+                    metaName.clear();
+                    metaValue.clear();
+                    sawMetaValue = false;
+                } else if (tagName == "intent-filter") {
                     inIntentFilter = false;
                 } else if (tagName == "activity" || tagName == "activity-alias") {
                     // </activity>: if intent-filter MAIN+LAUNCHER appears between
@@ -484,7 +585,13 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
                     currentExported = false;
                     currentExportedSet = false;
                     inIntentFilter = false;
+                    currentActivityMeta.clear();
+                    activityDepth = -1;
+                } else if (tagName == "application") {
+                    applicationDepth = -1;
                 }
+
+                if (elementDepth > 0) --elementDepth;
             }
         }
         cur += chunkSize;
