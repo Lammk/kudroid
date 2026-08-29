@@ -21,6 +21,8 @@
 #include <string>
 #include <vector>
 
+#include <unistd.h>  // sysconf(_SC_PAGESIZE), for the page-sharing check below
+
 namespace {
 
 int g_failures = 0;
@@ -206,6 +208,42 @@ void TestJitCache() {
             std::memcpy(p, &ret, sizeof(ret));
             Check(cache.Commit(p, sizeof(ret)), "Commit makes the code executable");
         }
+
+        // Two methods in a row: the second must be writable AFTER the first is
+        // committed. This is a regression test for a crash on device, where Minecraft
+        // faulted with SIGBUS inside memcpy while filling the second compiled method.
+        //
+        // Commit() changes protection a page at a time, so committing a method makes
+        // all of its pages read-only. Allocation used to be 4-byte aligned bump
+        // allocation, which put the next method in the same page — memory that was
+        // already RX by the time anything was written to it.
+        //
+        // Nothing here is arm64-specific: JitCache only maps and protects memory, so
+        // this reproduces on any host where mprotect works, which is where it should
+        // have been caught before shipping.
+        void* first = cache.Allocate(16);
+        if (first != nullptr) {
+            const uint32_t ret = 0xD65F03C0u;
+            std::memcpy(first, &ret, sizeof(ret));
+            Check(cache.Commit(first, sizeof(ret)), "first method commits");
+
+            void* second = cache.Allocate(16);
+            Check(second != nullptr, "a second method can be allocated after a commit");
+            if (second != nullptr) {
+                const size_t page = static_cast<size_t>(::sysconf(_SC_PAGESIZE));
+                const uintptr_t a = reinterpret_cast<uintptr_t>(first);
+                const uintptr_t b = reinterpret_cast<uintptr_t>(second);
+                Check((a & (page - 1)) == 0, "an allocation starts on a page boundary");
+                Check((a / page) != (b / page),
+                      "two allocations never share a page (Commit would seal the second)");
+                // The write that faulted on device. Reaching the Check below at all is
+                // the result being tested.
+                std::memcpy(second, &ret, sizeof(ret));
+                Check(cache.Commit(second, sizeof(ret)),
+                      "second method is still writable, then commits");
+            }
+        }
+
         // A request larger than a block cannot be satisfied by bump allocation and
         // must be refused rather than silently truncated.
         Check(cache.Allocate(JitCache::kMaxTotalBytes * 2) == nullptr,

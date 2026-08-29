@@ -94,9 +94,22 @@ void* JitCache::Allocate(size_t size) {
     if (size == 0) return nullptr;
     if (!IsAvailable()) return nullptr;
 
-    // arm64 instructions are 4 bytes and must be 4-byte aligned; anything less would
-    // fault on the first instruction rather than produce a wrong result.
-    const size_t need = RoundUp(size, 4);
+    // One allocation per page, never two.
+    //
+    // Commit() has to work in whole pages because that is the granularity mprotect
+    // operates on, so committing one method makes every byte of its pages read-only.
+    // Packing the next method into the leftover space of such a page hands out memory
+    // that is already RX, and the memcpy filling it takes SIGBUS — which is exactly
+    // what happened: the first compiled method succeeded, the second faulted inside
+    // memcpy with the freshly returned pointer as the destination address.
+    //
+    // Rounding the allocation out to a page boundary is what makes the two operations
+    // agree. The alternative, mprotecting a page back to writable to reuse its tail,
+    // would strip PROT_EXEC from finished code that another thread may be executing at
+    // that moment; KuART has no safepoints, so there is no moment when that is known to
+    // be safe. Wasting the remainder of a page costs address space and nothing else.
+    const size_t pageSize = PageSize();
+    const size_t need = RoundUp(size, pageSize);
     if (need > kBlockSize) return nullptr;
 
     std::lock_guard<std::mutex> lock(mutex_);
@@ -112,7 +125,7 @@ void* JitCache::Allocate(size_t size) {
         }
     }
 
-    const size_t capacity = RoundUp(kBlockSize, PageSize());
+    const size_t capacity = RoundUp(kBlockSize, pageSize);
     auto* memory = static_cast<uint8_t*>(MapExecutable(capacity));
     if (memory == nullptr) return nullptr;
 
@@ -124,9 +137,9 @@ void* JitCache::Allocate(size_t size) {
 bool JitCache::Commit(void* code, size_t size) {
     if (code == nullptr || size == 0) return false;
 
-    // Page-align outwards: mprotect works on whole pages, and a block holds several
-    // compiled methods, so the range covers neighbours that are already executable.
-    // Re-protecting them is harmless — they hold finished code either way.
+    // Page-align outwards: mprotect works on whole pages. Allocate() hands out whole
+    // pages for exactly this reason, so the rounding here cannot reach a neighbouring
+    // allocation — the range covers only this method's own pages.
     const size_t pageSize = PageSize();
     auto addr = reinterpret_cast<uintptr_t>(code);
     const uintptr_t start = addr & ~(pageSize - 1);

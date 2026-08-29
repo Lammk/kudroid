@@ -816,7 +816,7 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
             (void)!write(fd, "\n--- log up to crash ---\n", 25);
             (void)!write(fd, g_crashBuf, (size_t)g_crashLen);
 
-            // Dump ui stderr (l do abort/fatal ca avian — thng in ra y
+            // Dump ui stderr (l do abort/fatal ca KuART — thng in ra y
             // nhng b mt v iOS no/not hin th stderr). open/lseek/read/write
             // u async-signal-safe nn call c trong signal handler.
             {
@@ -827,7 +827,7 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
                     memcpy(errPath + dl, "/stderr.log", 12);
                     int errFd = open(errPath, O_RDONLY);
                     if (errFd >= 0) {
-                        const char* stderrHdr = "\n--- stderr tail (avian abort reason) ---\n";
+                        const char* stderrHdr = "\n--- stderr tail (kuart abort reason) ---\n";
                         (void)!write(fd, stderrHdr, strlen(stderrHdr));
                         off_t errSize = lseek(errFd, 0, SEEK_END);
                         const off_t maxTail = 4096;

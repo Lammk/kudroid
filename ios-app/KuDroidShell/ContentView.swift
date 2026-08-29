@@ -147,10 +147,6 @@ struct AppsView: View {
                                             .background(Color.green.opacity(0.2))
                                             .foregroundColor(.green)
                                             .cornerRadius(6)
-                                        
-                                        Text("ARM64 Native")
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
                                     }
                                 }
                                 

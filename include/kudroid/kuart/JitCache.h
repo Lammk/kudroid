@@ -36,7 +36,13 @@ public:
     // entitlements say nothing about what it is allowed to do.
     static bool IsAvailable();
 
-    // Reserve `size` bytes of writable memory, 4-byte aligned for arm64 instructions.
+    // Reserve writable memory for at least `size` bytes of code.
+    //
+    // The returned block is page-aligned and owns its pages exclusively, because
+    // Commit() can only change protection a page at a time: if two methods shared a
+    // page, committing the first would make the second's memory read-only before it was
+    // written. The remainder of the last page is left unused, which costs address space
+    // and nothing else.
     //
     // Returns nullptr when JIT is unavailable, when `size` exceeds what a block can
     // hold, or when the total budget is exhausted. The memory is writable but NOT yet
