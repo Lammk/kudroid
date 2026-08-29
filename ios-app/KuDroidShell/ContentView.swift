@@ -1654,26 +1654,8 @@ class NativeMetalViewController: UIViewController {
         // the Metal view first responder so iOS shows the system keyboard. Registered
         // here rather than in the C++ layer because kudroid_core is a static library
         // and cannot touch UIKit.
-        //
-        // Both hop to the main queue: the guest calls showSoftInput from its Looper
-        // thread, and becomeFirstResponder is main-thread-only.
-        kudroid_set_soft_input_callbacks({ flags in
-            DispatchQueue.main.async {
-                guard let vc = NativeMetalViewController.sCurrentRunnerVC else { return }
-                NSLog("[KuDroid] guest requested soft keyboard (flags=0x%x)", flags)
-                if !vc.metalView.isFirstResponder {
-                    vc.metalView.becomeFirstResponder()
-                }
-                kudroid_set_soft_input_visible(vc.metalView.isFirstResponder ? 1 : 0)
-            }
-        }, {
-            DispatchQueue.main.async {
-                guard let vc = NativeMetalViewController.sCurrentRunnerVC else { return }
-                NSLog("[KuDroid] guest dismissed soft keyboard")
-                vc.metalView.resignFirstResponder()
-                kudroid_set_soft_input_visible(0)
-            }
-        })
+        kudroid_set_soft_input_callbacks(NativeMetalViewController.handleSoftInputShow,
+                                        NativeMetalViewController.handleSoftInputHide)
 
         // Track the real keyboard state rather than assuming it followed the request:
         // iOS can dismiss it on its own (interactive dismiss, scene change), and the
@@ -1690,40 +1672,65 @@ class NativeMetalViewController: UIViewController {
         }
 
         // Set up Permission Request Dialog Callback
-        kudroid_set_permission_prompt_callback { pkgNameC, permsCsvC, reqCode, actHandle in
-            let csv = permsCsvC != nil ? String(cString: permsCsvC!) : ""
-            let appTitle = NativeMetalViewController.sCurrentRunnerVC?.appName ?? "Android App"
-            DispatchQueue.main.async {
-                let items = csv.split(separator: ",").map { perm -> String in
-                    let p = String(perm)
-                    if p.contains("CAMERA") { return "📷 Camera Access" }
-                    if p.contains("AUDIO") || p.contains("RECORD") { return "🎙️ Microphone & Audio" }
-                    if p.contains("STORAGE") || p.contains("EXTERNAL") { return "📁 Storage & Files (/sdcard)" }
-                    if p.contains("LOCATION") { return "📍 Location (GPS)" }
-                    if p.contains("BLUETOOTH") { return "🎮 Bluetooth & Gamepads" }
-                    return "🔒 " + (p.components(separatedBy: ".").last ?? p)
-                }
-                let listText = items.isEmpty ? "Permissions" : items.joined(separator: "\n")
-                let alert = UIAlertController(
-                    title: "Permission Request",
-                    message: "\(appTitle) requests permission to access:\n\n\(listText)\n\nAllow access?",
-                    preferredStyle: .alert
-                )
-                alert.addAction(UIAlertAction(title: "Deny", style: .destructive) { _ in
-                    kudroid_submit_permission_response(actHandle, reqCode, permsCsvC, 0)
-                })
-                alert.addAction(UIAlertAction(title: "Allow", style: .default) { _ in
-                    kudroid_submit_permission_response(actHandle, reqCode, permsCsvC, 1)
-                })
-                NativeMetalViewController.sCurrentRunnerVC?.present(alert, animated: true)
-            }
-        }
+        kudroid_set_permission_prompt_callback(NativeMetalViewController.handlePermissionPrompt)
 
         startAppIfNeeded()
     }
 
     private weak static var sCurrentRunnerVC: NativeMetalViewController?
     private static var isGlobalAppRunning = false
+
+    private static func handleSoftInputShow(_ flags: Int32) {
+        DispatchQueue.main.async {
+            guard let vc = NativeMetalViewController.sCurrentRunnerVC else { return }
+            NSLog("[KuDroid] guest requested soft keyboard (flags=0x%x)", flags)
+            if !vc.metalView.isFirstResponder {
+                vc.metalView.becomeFirstResponder()
+            }
+            kudroid_set_soft_input_visible(vc.metalView.isFirstResponder ? 1 : 0)
+        }
+    }
+
+    private static func handleSoftInputHide() {
+        DispatchQueue.main.async {
+            guard let vc = NativeMetalViewController.sCurrentRunnerVC else { return }
+            NSLog("[KuDroid] guest dismissed soft keyboard")
+            vc.metalView.resignFirstResponder()
+            kudroid_set_soft_input_visible(0)
+        }
+    }
+
+    private static func handlePermissionPrompt(pkgNameC: UnsafePointer<CChar>?,
+                                              permsCsvC: UnsafePointer<CChar>?,
+                                              reqCode: Int32,
+                                              actHandle: UnsafeMutableRawPointer?) {
+        let csv = permsCsvC != nil ? String(cString: permsCsvC!) : ""
+        let appTitle = NativeMetalViewController.sCurrentRunnerVC?.appName ?? "Android App"
+        DispatchQueue.main.async {
+            let items = csv.split(separator: ",").map { perm -> String in
+                let p = String(perm)
+                if p.contains("CAMERA") { return "📷 Camera Access" }
+                if p.contains("AUDIO") || p.contains("RECORD") { return "🎙️ Microphone & Audio" }
+                if p.contains("STORAGE") || p.contains("EXTERNAL") { return "📁 Storage & Files (/sdcard)" }
+                if p.contains("LOCATION") { return "📍 Location (GPS)" }
+                if p.contains("BLUETOOTH") { return "🎮 Bluetooth & Gamepads" }
+                return "🔒 " + (p.components(separatedBy: ".").last ?? p)
+            }
+            let listText = items.isEmpty ? "Permissions" : items.joined(separator: "\n")
+            let alert = UIAlertController(
+                title: "Permission Request",
+                message: "\(appTitle) requests permission to access:\n\n\(listText)\n\nAllow access?",
+                preferredStyle: .alert
+            )
+            alert.addAction(UIAlertAction(title: "Deny", style: .destructive) { _ in
+                kudroid_submit_permission_response(actHandle, reqCode, permsCsvC, 0)
+            })
+            alert.addAction(UIAlertAction(title: "Allow", style: .default) { _ in
+                kudroid_submit_permission_response(actHandle, reqCode, permsCsvC, 1)
+            })
+            NativeMetalViewController.sCurrentRunnerVC?.present(alert, animated: true)
+        }
+    }
 
     @objc private func handleExitButton() {
         UIApplication.shared.isIdleTimerDisabled = false
