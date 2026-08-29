@@ -40,6 +40,18 @@ extern "C" int kudroid_android_log_message(int priority, const char* tag, const 
 // nhật ký thành công được ghi dưới dạng tệp .txt; các sự cố (dựa trên tín hiệu, do đó không có ngoại lệ
 // c++ nào được kích hoạt) được trình xử lý tín hiệu bắt, bộ đệm nhật ký được đẩy
 // vào đĩa chỉ bằng các lệnh gọi an toàn tín hiệu bất đồng bộ trước khi kích hoạt lại.
+//
+// Two directories, deliberately distinct:
+//
+//   g_docsDir — the app's Documents. Where installed apps, extracted APKs and the
+//               VFS root live; the host hands this in.
+//   g_logDir  — g_docsDir + "/logs". Every diagnostic file goes here.
+//
+// They used to be the same, so eight log files sat among put_apk_here/, android_root/,
+// micro_tests/ and extracted_apk/ at the top level of Documents. Nothing about that
+// was wrong, only unreadable — and it made "pull the logs" a matter of knowing which
+// eight of a dozen entries were logs.
+static char g_docsDir[1024] = {0};
 static char g_logDir[1024] = {0};
 const char* g_kudroid_log_dir_ptr = g_logDir;
 
@@ -892,8 +904,30 @@ static void installCrashHandlers(void) {
 extern "C" void kudroid_set_log_dir(const char* dir) {
     if (!dir) return;
     g_mainThread = pthread_self();
-    strncpy(g_logDir, dir, sizeof(g_logDir) - 1);
-    g_logDir[sizeof(g_logDir) - 1] = '\0';
+
+    // The host passes Documents; logs go into a subdirectory of it. Keeping the two
+    // apart is the whole point — Documents also holds put_apk_here/, android_root/,
+    // extracted_apk/ and micro_tests/, and eight log files scattered among them made
+    // the directory hard to read and "which files are the logs" a thing to remember.
+    strncpy(g_docsDir, dir, sizeof(g_docsDir) - 1);
+    g_docsDir[sizeof(g_docsDir) - 1] = '\0';
+
+    snprintf(g_logDir, sizeof(g_logDir), "%s/logs", g_docsDir);
+
+    // Must exist before anything opens a file in it. The crash handler in particular
+    // cannot create directories — it is restricted to async-signal-safe calls — so a
+    // missing logs/ would silently lose every crash report.
+    std::error_code mkdirError;
+    std::filesystem::create_directories(g_logDir, mkdirError);
+    if (mkdirError) {
+        // Fall back to Documents rather than losing logs entirely. A cluttered
+        // directory beats no diagnostics.
+        fprintf(stderr, "[kudroid_core] cannot create %s (%s); logging to Documents\n",
+                g_logDir, mkdirError.message().c_str());
+        strncpy(g_logDir, g_docsDir, sizeof(g_logDir) - 1);
+        g_logDir[sizeof(g_logDir) - 1] = '\0';
+    }
+
     installCrashHandlers();
 
     static bool s_logDirInitialized = false;
@@ -910,25 +944,42 @@ extern "C" void kudroid_set_log_dir(const char* dir) {
             fclose(afp);
         }
 
+        // Old runs wrote these straight into Documents. Move them aside so the top
+        // level ends up clean even for someone upgrading, rather than leaving a
+        // confusing mix of stale files next to the new logs/ directory.
+        {
+            static const char* kMoved[] = {
+                "kudroid_android_logs.txt", "stderr.log", "kudroid_crash.log",
+                "classes.log", "kudroid_version.txt", "kudroid_uninstall_debug.txt",
+            };
+            for (const char* name : kMoved) {
+                const std::filesystem::path from =
+                    std::filesystem::path(g_docsDir) / name;
+                std::error_code ec;
+                if (!std::filesystem::exists(from, ec)) continue;
+                const std::filesystem::path to =
+                    std::filesystem::path(g_logDir) / (std::string("old_") + name);
+                std::filesystem::rename(from, to, ec);
+                if (ec) std::filesystem::remove(from, ec);
+            }
+        }
+
 #if defined(__APPLE__)
         // Redirect stderr (fd 2) vào file — dùng O_TRUNC đúng 1 lần khi mở app
         char errPath[1200];
-        size_t dl = strlen(g_logDir);
-        if (dl < sizeof(errPath) - 32) {
-            memcpy(errPath, g_logDir, dl);
-            memcpy(errPath + dl, "/stderr.log", 12);
-            int errFd = open(errPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-            if (errFd >= 0) {
-                dup2(errFd, STDERR_FILENO);
-                setvbuf(stderr, nullptr, _IONBF, 0);
-                close(errFd);
-                // AFC (copy file qua USB/Finder) chỉ đọc được file có quyền
-                // read cho other — umask có thể đã mask 0644 thành 0600.
-                ::chmod(errPath, 0644);
-                // Dòng đầu của stderr.log = build stamp — mọi log file đều
-                // tự nhận diện được commit của bản IPA đang chạy.
-                fprintf(stderr, "[kudroid_core] Build: %s\n", kudroid_build_stamp());
-            }
+        snprintf(errPath, sizeof(errPath), "%s/stderr.log", g_logDir);
+        int errFd = open(errPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (errFd >= 0) {
+            dup2(errFd, STDERR_FILENO);
+            setvbuf(stderr, nullptr, _IONBF, 0);
+            close(errFd);
+            // AFC (copy file qua USB/Finder) chỉ đọc được file có quyền
+            // read cho other — umask có thể đã mask 0644 thành 0600.
+            ::chmod(errPath, 0644);
+            // Dòng đầu của stderr.log = build stamp — mọi log file đều
+            // tự nhận diện được commit của bản IPA đang chạy.
+            fprintf(stderr, "[kudroid_core] Build: %s\n", kudroid_build_stamp());
+            fprintf(stderr, "[kudroid_core] log directory: %s\n", g_logDir);
         }
 #endif
     }
@@ -938,7 +989,7 @@ extern "C" void kudroid_set_log_dir(const char* dir) {
     const char* stamp = kudroid_build_stamp();
     writeLogFile("kudroid_version.txt", std::string(stamp) + "\n");
 
-    // Đảm bảo KuART classes.log luôn ghi vào Documents/ của app iPhone
+    // KuART's classes.log belongs with the other diagnostics, not in Documents.
     std::string classesLogPath = (std::filesystem::path(g_logDir) / "classes.log").string();
     kuart_set_missing_class_log_path(classesLogPath.c_str());
 }
@@ -948,9 +999,20 @@ extern "C" void kudroid_set_documents_dir(const char* dir) {
         kudroid::VFSPathRemapper::getInstance().setDocumentsDirectory(dir);
         kudroid::PermissionManager::getInstance().init(dir);
 
-        // Đảm bảo classes.log được ghi vào thư mục Documents của app
-        std::string classesLogPath = (std::filesystem::path(dir) / "classes.log").string();
-        kuart_set_missing_class_log_path(classesLogPath.c_str());
+        if (g_docsDir[0] == '\0') {
+            strncpy(g_docsDir, dir, sizeof(g_docsDir) - 1);
+            g_docsDir[sizeof(g_docsDir) - 1] = '\0';
+        }
+
+        // classes.log is a diagnostic, so it follows the log directory rather than
+        // Documents. This used to point it back at Documents and undo whatever
+        // kudroid_set_log_dir had chosen — the two functions disagreed and the last
+        // one called won.
+        if (g_logDir[0] != '\0') {
+            const std::string classesLogPath =
+                (std::filesystem::path(g_logDir) / "classes.log").string();
+            kuart_set_missing_class_log_path(classesLogPath.c_str());
+        }
     }
 }
 
@@ -3211,10 +3273,14 @@ extern "C" const char* kudroid_load_apk(const char* apkPath) {
     }
     
     std::string apkStr(apkPath);
-    std::string targetDir = std::string(g_logDir) + "/extracted_apk";
-    
+    // Documents, not the log directory: an extracted APK is app data. These read
+    // g_logDir back when the two were the same variable, which after the split would
+    // have buried a whole extracted APK tree inside logs/.
+    const char* docsRoot = g_docsDir[0] != '\0' ? g_docsDir : g_logDir;
+    std::string targetDir = std::string(docsRoot) + "/extracted_apk";
+
     log += "[kudroid_apk] Initializing VFS...\n";
-    kudroid::VFSPathRemapper::getInstance().setDocumentsDirectory(g_logDir);
+    kudroid::VFSPathRemapper::getInstance().setDocumentsDirectory(docsRoot);
     
     log += "[kudroid_apk] Extracting APK to: " + targetDir + "\n";
     bool extractedOk = false;

@@ -410,7 +410,7 @@ ${C.bold}${C.cyan}=== KuDroid Debug Bridge (KDB) Commands ===${C.reset}
   ${C.green}stop${C.reset}                     Đóng app đang chạy, quay về màn hình Launcher
   ${C.green}install <file.apk>${C.reset}       Gửi file APK từ PC sang iPhone và cài đặt
   ${C.green}debug${C.reset}                    Bật chế độ nghe log 'thập cẩm' All-in-One (${C.yellow}Ctrl+C để thoát & lưu log${C.reset})
-  ${C.green}dump [file_name]${C.reset}         Kéo trực tiếp file log gốc từ Documents iPhone về PC (vd: dump kudroid_crash, dump test_gpu, dump stderr)
+  ${C.green}dump [file_name]${C.reset}         Kéo file log gốc từ iPhone (Documents/logs) về PC (vd: dump kudroid_crash, dump stderr, dump classes)
   ${C.green}save [crash|log]${C.reset}         Lưu dump log hoặc crash snapshot về máy tính
   ${C.green}clear <cache|all>${C.reset}        Xóa bộ nhớ đệm / dalvik-cache trên iPhone
   ${C.green}exit / quit${C.reset}              Thoát KDB
@@ -647,7 +647,7 @@ async function handleDump(filename) {
         return;
     }
     const target = filename || 'kudroid_crash';
-    console.log(`${C.cyan}📥 Fetching '${target}' directly from iPhone Documents...${C.reset}`);
+    console.log(`${C.cyan}📥 Fetching '${target}' from iPhone Documents/logs...${C.reset}`);
     const res = await sendCommandWithTimeout({ action: 'dump', file: target }, 10000);
     if (res && res.success) {
         const savedFile = res.file || `${target}.log`;

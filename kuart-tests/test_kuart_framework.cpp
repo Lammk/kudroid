@@ -1413,6 +1413,76 @@ int main() {
         }
     }
 
+    // ── InputFilter.LengthFilter ──
+    //
+    // androidx's gametextinput caps the length of its editor with
+    // `new InputFilter.LengthFilter(n)`, three frames inside
+    // GameActivity.createSurfaceView. InputFilter was an empty interface with no
+    // nested classes, so that resolved to an auto-stub and threw
+    // NoClassDefFoundError — Minecraft's onCreate died there.
+    {
+        DexClass* filter = linker.FindClass("Landroid/text/InputFilter;");
+        Check(filter != nullptr && filter->IsInterface(), "InputFilter is an interface");
+
+        DexClass* len = linker.FindClass("Landroid/text/InputFilter$LengthFilter;");
+        Check(len != nullptr && !len->is_stub, "InputFilter$LengthFilter is real");
+        if (len != nullptr && !len->is_stub) {
+            Check(len->FindDirectMethod("<init>", "(I)V") != nullptr,
+                  "LengthFilter(int) exists (how androidx constructs it)");
+            Check(len->IsSubClassOf(filter), "LengthFilter implements InputFilter");
+        }
+
+        // The arithmetic is the part that matters: room left is the cap minus what
+        // stays in the buffer, and what stays excludes the range being replaced.
+        // Ignoring the replaced range rejects valid edits near the limit, because
+        // overwriting a selection does not add to the length.
+        DexObject* lf = NewObject("Landroid/text/InputFilter$LengthFilter;", "(I)V",
+                                  {DexValue::Int(5)}, "new LengthFilter(5)");
+        DexObject* dest = NewObject("Landroid/text/SpannableStringBuilder;",
+                                    "(Ljava/lang/CharSequence;)V", {Str("abc")},
+                                    "dest buffer \"abc\"");
+        if (lf != nullptr && dest != nullptr) {
+            const char* kSig =
+                "(Ljava/lang/CharSequence;IILandroid/text/Spanned;II)"
+                "Ljava/lang/CharSequence;";
+            DexValue r;
+
+            // "abc" + "xy" = 5, exactly the cap: accepted unchanged, so null.
+            if (CallVirtual(lf, "filter", kSig,
+                            {Str("xy"), DexValue::Int(0), DexValue::Int(2),
+                             DexValue::Ref(dest), DexValue::Int(3), DexValue::Int(3)},
+                            &r, "filter: exact fit")) {
+                Check(r.l == nullptr, "an insertion that exactly fits is accepted (null)");
+            }
+
+            // "abc" + "xyz" = 6 > 5: truncated to what fits.
+            if (CallVirtual(lf, "filter", kSig,
+                            {Str("xyz"), DexValue::Int(0), DexValue::Int(3),
+                             DexValue::Ref(dest), DexValue::Int(3), DexValue::Int(3)},
+                            &r, "filter: partial fit")) {
+                DexValue str;
+                if (r.l != nullptr &&
+                    CallVirtual(r.l, "toString", "()Ljava/lang/String;", {}, &str,
+                                "toString of truncated text")) {
+                    Check(std::strcmp(Utf8Of(str), "xy") == 0,
+                          std::string("an over-long insertion is truncated to \"xy\","
+                                      " got \"") + Utf8Of(str) + "\"");
+                }
+            }
+
+            // Replacing all of "abc" leaves the whole cap free, so 5 chars fit even
+            // though the buffer was already 3 long. This is the case that breaks if
+            // the replaced range is ignored.
+            if (CallVirtual(lf, "filter", kSig,
+                            {Str("vwxyz"), DexValue::Int(0), DexValue::Int(5),
+                             DexValue::Ref(dest), DexValue::Int(0), DexValue::Int(3)},
+                            &r, "filter: replacing the whole buffer")) {
+                Check(r.l == nullptr,
+                      "replacing the selection frees its length (not counted twice)");
+            }
+        }
+    }
+
     std::printf("  executed %llu instructions\n",
                 static_cast<unsigned long long>(interp.instructions_executed()));
 

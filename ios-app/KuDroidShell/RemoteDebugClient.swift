@@ -363,17 +363,28 @@ class RemoteDebugClient: NSObject {
             targetFile.replacingOccurrences(of: "stderr", with: "stderr.log")
         ]
 
+        // logs/ first, then Documents. Diagnostics moved into logs/ to keep Documents
+        // readable; Documents stays in the search so a dump still works against an
+        // older build's files, and so non-log files remain reachable by name.
+        let searchRoots = [docURL.appendingPathComponent("logs", isDirectory: true), docURL]
+
         var foundURL: URL? = nil
-        for name in candidates {
-            let u = docURL.appendingPathComponent(name)
-            if FileManager.default.fileExists(atPath: u.path) {
-                foundURL = u
-                break
+        outer: for root in searchRoots {
+            for name in candidates {
+                let u = root.appendingPathComponent(name)
+                if FileManager.default.fileExists(atPath: u.path) {
+                    foundURL = u
+                    break outer
+                }
             }
         }
 
         guard let targetURL = foundURL, let data = try? Data(contentsOf: targetURL) else {
-            sendResponse(["success": false, "file": targetFile, "error": "File not found in Documents directory: \(targetFile)"])
+            sendResponse([
+                "success": false,
+                "file": targetFile,
+                "error": "File not found in logs/ or Documents: \(targetFile)"
+            ])
             return
         }
 

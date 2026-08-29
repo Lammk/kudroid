@@ -91,6 +91,41 @@ public class TextView extends View {
         mText = "";
     }
 
+    // ── input filters ───────────────────────────────────────────────────────
+    //
+    // An app sets these to cap length or force case, then reads them back to modify
+    // the chain. Returning null from getFilters — which is what no storage at all
+    // amounts to — breaks the read-modify-write idiom apps use to add one filter
+    // without dropping the others.
+    private android.text.InputFilter[] mFilters = new android.text.InputFilter[0];
+
+    public void setFilters(android.text.InputFilter[] filters) {
+        mFilters = filters != null ? filters : new android.text.InputFilter[0];
+    }
+
+    public android.text.InputFilter[] getFilters() {
+        return mFilters;
+    }
+
+    /**
+     * Run `source` through the filter chain.
+     *
+     * Each filter may replace the text or leave it alone (null). Later filters see the
+     * output of earlier ones, which is what makes a length cap after an upper-caser
+     * behave the way the app intends.
+     */
+    protected CharSequence applyFilters(CharSequence source, android.text.Spanned dest,
+                                        int dstart, int dend) {
+        CharSequence out = source != null ? source : "";
+        for (int i = 0; i < mFilters.length; ++i) {
+            if (mFilters[i] == null) continue;
+            CharSequence replacement =
+                    mFilters[i].filter(out, 0, out.length(), dest, dstart, dend);
+            if (replacement != null) out = replacement;
+        }
+        return out;
+    }
+
     /**
      * set text color.
      */
