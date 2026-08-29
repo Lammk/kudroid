@@ -1234,13 +1234,16 @@ extern "C" int kudroid_is_jit_enabled(void) {
 #if defined(__APPLE__)
     // Ask the kernel directly: map a page and try to make it executable.
     //
-    // This is the only test that answers the question actually being asked. The
-    // indirect checks below it are proxies — CS_DEBUGGED means a debugger is attached,
-    // a TrollStore directory means TrollStore is installed — and both can disagree
-    // with reality in either direction. Under LiveContainer they disagree in the way
-    // that matters most: the guest inherits LiveContainer's code-signing status, so
-    // what KuDroid's own entitlements say is irrelevant, and the /Applications and
-    // /var/mobile probes below cannot see anything through LiveContainer's sandbox.
+    // This is the only test that answers the question actually being asked, and it
+    // answers it for every route that grants the permission — a TrollStore install
+    // (unrestricted entitlements), an attached debugger (CS_DEBUGGED, so StikDebug /
+    // SideStore / Jitterbug / Xcode), the allow-jit entitlement, or LiveContainer's JIT
+    // mode. All of them end in the same place: mprotect(PROT_EXEC) succeeds.
+    //
+    // It also covers the case the indirect checks cannot see. Under LiveContainer the
+    // guest inherits LiveContainer's code-signing status, so KuDroid's own entitlements
+    // say nothing about what it may do, and the /Applications and /var/mobile probes
+    // below are invisible through the sandbox.
     //
     // Cached, because it is asked repeatedly and the answer cannot change within a
     // process: code-signing status is fixed at exec.
@@ -1253,10 +1256,19 @@ extern "C" int kudroid_is_jit_enabled(void) {
         ::munmap(page, len);
         return rc == 0 ? 1 : 0;
     }();
-    if (probed >= 0) return probed;
+    if (probed == 1) return 1;
 
-    // The probe could not run. Fall back to the proxies.
-    // 1. Kim tra CS_DEBUGGED (Trnh g error: AltStore, SideStore, Sideloadly, Xcode, StikDebug, Jitterbug)
+    // The probe said no, or could not run. Consult the proxies before answering no.
+    //
+    // A negative from the probe used to be returned directly, which was acceptable
+    // while this only decided whether to map guest .so files. It no longer is: the
+    // launch path now refuses outright on a 0, so a false negative stops a device that
+    // can in fact run the app. The proxies are checked in that direction only — they
+    // can add a yes, never override the kernel's yes — so a genuinely JITLess process
+    // still gets 0 and the cost of being wrong is bounded.
+
+    // 1. CS_DEBUGGED: a debugger is attached (AltStore, SideStore, Sideloadly, Xcode,
+    //    StikDebug, Jitterbug). This is exactly the state that permits RW -> RX.
     unsigned int flags = 0;
     if (csops(getpid(), CS_OPS_STATUS, &flags, sizeof(flags)) == 0) {
         if (flags & CS_DEBUGGED) {
@@ -1264,7 +1276,10 @@ extern "C" int kudroid_is_jit_enabled(void) {
         }
     }
 
-    // 2. Kim tra mi trng TrollStore / Jailbreak qua ng dn an ton (no/not call m my ng trnh SIGKILL)
+    // 2. TrollStore / jailbreak, checked through paths that are safe to stat (calling
+    //    into anything privileged here would risk SIGKILL). A TrollStore install is
+    //    signed with unrestricted entitlements, so it holds the permission even when
+    //    the probe above was inconclusive.
     if (access("/Applications/TrollStore.app", F_OK) == 0 ||
         access("/var/mobile/Library/TrollStore", F_OK) == 0 ||
         getenv("TROLLSTORE_ENABLED") != nullptr) {
@@ -1838,6 +1853,43 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
     std::string log;
     appendTestHeader(log, "Run APK Native Libraries", appName);
     kudroid::bionic_shim_reset_trace();
+
+    // JIT permission is a precondition for launching, not a mode to degrade into.
+    //
+    // Guest .so files are mapped RW and then mprotect'd to add PROT_EXEC. iOS grants
+    // PROT_EXEC on anonymous memory only to a debugged process or one holding the JIT
+    // entitlement, and it will never grant it on an unsigned file mapping — which every
+    // guest .so is. So without the permission no guest native code can run, and there
+    // is no workaround at this layer: it is a code-signing rule, not missing code.
+    //
+    // KuDroid targets Android apps with NDK libraries, where that means the app cannot
+    // start at all. Refusing here with instructions is more useful than loading the
+    // Java side and failing later at the first native call, and it avoids mapping
+    // hundreds of megabytes that are certain to be discarded.
+    //
+    // Everything downstream of this gate still keeps its interpreter path: most Dex
+    // methods are interpreted even with JIT available (JitCompiler covers a small
+    // opcode subset), java.lang natives run from LibCore inside this signed binary,
+    // and JitCache stays null-safe. That is how the runtime works, not a fallback.
+    if (kudroid_is_jit_enabled() == 0) {
+        log +=
+            "[kudroid_core] ERROR: JIT is not enabled, cannot launch.\n"
+            "[kudroid_core]        Android apps ship native libraries (.so) that must be\n"
+            "[kudroid_core]        mapped executable. iOS refuses that without JIT\n"
+            "[kudroid_core]        permission, so the app cannot start.\n"
+            "[kudroid_core]        Enable JIT, then launch again:\n"
+            "[kudroid_core]          - LiveContainer: turn on JIT for this app\n"
+            "[kudroid_core]          - Sideloaded: attach StikDebug / SideStore\n"
+            "[kudroid_core]          - TrollStore: install from TrollStore\n";
+        std::fputs(log.c_str(), stderr);
+        logCoreLine(6, "[kudroid_core] launch refused: JIT not enabled");
+        mirrorCrash(log);
+        // Released here: the launch never began, so a retry after enabling JIT must not
+        // be rejected as a duplicate by the guard at the top of this function.
+        s_isApkRunning.store(false);
+        return strdup(log.c_str());
+    }
+
     log += "[kudroid_core] Phase: init LibraryManager\n";
 
     if (!appName || !*appName) {
@@ -1954,29 +2006,6 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
         
         appendAndEcho("[kudroid_core] Scanning library directory: " + libDir.string());
 
-        // Guest .so files are mapped RW and then mprotect'd to add PROT_EXEC. Without
-        // JIT permission that mprotect fails, so no guest native code can run at all.
-        //
-        // Skip loading them entirely in that case rather than mapping each one and
-        // failing. Mapping is not free: libminecraftpe.so alone is 330 MB of dirty
-        // pages, and doing that for eight libraries only to discard them puts the
-        // process past jetsam's limit — the app then dies with SIGKILL and no crash
-        // log, which reads as a mysterious exit rather than as a missing entitlement.
-        //
-        // The Java side still runs. An app whose UI is Java reaches its Activity and
-        // can report the problem on screen, which is strictly more useful than dying.
-        const bool jitAvailable = kudroid_is_jit_enabled() != 0;
-        if (!jitAvailable) {
-            appendAndEcho("[kudroid_core] WARNING: no JIT permission (not debugged, no"
-                          " allow-jit entitlement). Guest .so files cannot be made"
-                          " executable, so native libraries will NOT be loaded.");
-            appendAndEcho("[kudroid_core]          Under LiveContainer, enable JIT."
-                          " Sideloaded: attach a debugger (StikDebug/SideStore) or"
-                          " install via TrollStore.");
-            appendAndEcho("[kudroid_core]          Continuing with Java only: an app"
-                          " whose UI is Java may still start.");
-        }
-        
         if (!std::filesystem::exists(libDir)) {
             appendAndEcho("[kudroid_core] ERROR: Library directory does not exist: " + libDir.string());
         } else {
@@ -2017,22 +2046,20 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
             }
 
             std::vector<std::string> soFiles;
-            if (jitAvailable) {
-                for (const auto& entry : std::filesystem::directory_iterator(libDir)) {
-                    if (entry.path().extension() == ".so") {
-                        soFiles.push_back(entry.path().string());
-                    }
+            for (const auto& entry : std::filesystem::directory_iterator(libDir)) {
+                if (entry.path().extension() == ".so") {
+                    soFiles.push_back(entry.path().string());
                 }
             }
 
-            if (soFiles.empty() && jitAvailable) {
+            if (soFiles.empty()) {
                 appendAndEcho("[kudroid_core] WARNING: No .so files found in " + libDir.string());
             }
             // Not an `else`: everything below — the manifest parse, KuART launch and
             // ActivityThread.main — has to run even when there are no native libraries
             // to load. It used to sit in the else branch, so an app with no usable .so
-            // (no JIT permission, or a non-arm64 APK) silently never started its Java
-            // side either. The load loop below is a no-op on an empty list.
+            // (an APK built for another ABI, say) silently never started its Java side
+            // either. The load loop below is a no-op on an empty list.
             {
                 for (const auto& soPath : soFiles) {
                     appendAndEcho("[kudroid_core] Attempting to load: " + soPath);

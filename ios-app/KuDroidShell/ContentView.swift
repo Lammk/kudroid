@@ -2065,15 +2065,11 @@ public func kudroid_blit_canvas_to_layer(layerPtr: UnsafeMutableRawPointer?, bit
     }
 }
 
-// mark: - Modal th ng b o Gentle Crash th ng minh (JIT vs Non-JIT)
+// mark: - Modal th ng b o Gentle Crash th ng minh
 struct CrashAlertView: View {
     let crashInfo: CrashInfo
     let onDismiss: () -> Void
     @State private var copied = false
-    
-    private var isJitEnabled: Bool {
-        return kudroid_is_jit_enabled() != 0
-    }
 
     var body: some View {
         ZStack {
@@ -2081,36 +2077,26 @@ struct CrashAlertView: View {
             
             VStack(spacing: 16) {
                 // Header Icon & Title
+                //
+                // Only one case to report now: a launch without JIT is refused before
+                // any guest code runs, so reaching a crash means JIT was enabled and
+                // the fault is KuDroid's — a missing framework API or shim. The old
+                // second branch told the user to go enable JIT, which can no longer
+                // be the explanation.
                 VStack(spacing: 8) {
-                    if isJitEnabled {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.system(size: 46))
-                            .foregroundColor(.red)
-                        
-                        Text("App Crashed (JIT Enabled)")
-                            .font(.title3.bold())
-                            .foregroundColor(.white)
-                        
-                        Text("App '\(crashInfo.appName)' stopped unexpectedly even with JIT active. This issue is likely caused by missing Android framework APIs or shims.")
-                            .font(.caption)
-                            .foregroundColor(.gray)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal, 8)
-                    } else {
-                        Image(systemName: "bolt.slash.trianglebadge.exclamationmark.fill")
-                            .font(.system(size: 46))
-                            .foregroundColor(.orange)
-                        
-                        Text("App Crashed (No JIT)")
-                            .font(.title3.bold())
-                            .foregroundColor(.white)
-                        
-                        Text("App '\(crashInfo.appName)' stopped. KuART ran in standalone Interpreter mode. If this app requires dynamic native code (W^X), try enabling JIT via StikDebug or SideStore.")
-                            .font(.caption)
-                            .foregroundColor(.gray)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal, 8)
-                    }
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 46))
+                        .foregroundColor(.red)
+
+                    Text("App Crashed")
+                        .font(.title3.bold())
+                        .foregroundColor(.white)
+
+                    Text("App '\(crashInfo.appName)' stopped unexpectedly. This issue is likely caused by missing Android framework APIs or shims.")
+                        .font(.caption)
+                        .foregroundColor(.gray)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 8)
                 }
                 .padding(.top, 8)
 
@@ -2160,34 +2146,32 @@ struct CrashAlertView: View {
 
                 // Action Buttons
                 VStack(spacing: 10) {
-                    if isJitEnabled {
-                        Button(action: {
-                            UIPasteboard.general.string = crashInfo.tailLog
-                            copied = true
-                            if let url = URL(string: "https://github.com/Lammk/kudroid/issues/new") {
-                                UIApplication.shared.open(url)
-                            }
-                        }) {
-                            HStack(spacing: 6) {
-                                Image(systemName: "link.badge.plus")
-                                Text("Copy Log & Report on GitHub")
-                            }
-                            .font(.subheadline.bold())
-                            .foregroundColor(.black)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 12)
-                            .background(Color.yellow)
-                            .cornerRadius(10)
+                    Button(action: {
+                        UIPasteboard.general.string = crashInfo.tailLog
+                        copied = true
+                        if let url = URL(string: "https://github.com/Lammk/kudroid/issues/new") {
+                            UIApplication.shared.open(url)
                         }
+                    }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "link.badge.plus")
+                            Text("Copy Log & Report on GitHub")
+                        }
+                        .font(.subheadline.bold())
+                        .foregroundColor(.black)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(Color.yellow)
+                        .cornerRadius(10)
                     }
 
                     Button(action: onDismiss) {
                         Text("Dismiss")
                             .font(.headline)
-                            .foregroundColor(isJitEnabled ? .white : .black)
+                            .foregroundColor(.white)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 12)
-                            .background(isJitEnabled ? Color.white.opacity(0.2) : Color.green)
+                            .background(Color.white.opacity(0.2))
                             .cornerRadius(10)
                     }
                 }
