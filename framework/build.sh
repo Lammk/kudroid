@@ -22,7 +22,11 @@ DEX_PATH="$BUILD_DIR/framework.dex"
 EMBED_HEADER="$ROOT_DIR/include/kudroid/framework_dex_bytes.h"
 
 EMBED=1
-[[ "${1:-}" == "--no-embed" ]] && EMBED=0
+REQUIRE_D8=0
+for arg in "$@"; do
+    [[ "$arg" == "--no-embed" ]] && EMBED=0
+    [[ "$arg" == "--require-d8" ]] && REQUIRE_D8=1
+done
 
 # ── javac ────────────────────────────────────────────────────────────────────
 if [[ -n "${JAVA_HOME:-}" && -x "$JAVA_HOME/bin/javac" ]]; then
@@ -38,10 +42,26 @@ if [[ -z "$JAVAC" ]]; then
 fi
 echo "javac: $JAVAC"
 
-# ── find d8 ───────────────────────────────── ──────────────────────────────────
-# Three forms: (1) d8 script in build-tools, (2) d8 on PATH, (3) d8.jar/r8.jar
-# standalone runs via `java -cp`. D8_CMD is empty = no d8.
+# ── find d8 ────────────────────────────────────────────────────────────────────
+# Prefer the repository-pinned compiler so Local and CI produce identical DEX
+# bytes. The SDK and PATH fallbacks remain useful for developer convenience, but
+# they are deliberately considered only after the pinned jar.
 D8_CMD=""
+
+if [[ -n "$JAVA" ]]; then
+    for jar in "$ROOT_DIR/third_party/d8/d8.jar" "$ROOT_DIR/third_party/d8/r8.jar"; do
+        if [[ -f "$jar" ]]; then
+            D8_CMD="$JAVA -cp $jar com.android.tools.r8.D8"
+            echo "Using repository-pinned D8: $jar"
+            break
+        fi
+    done
+fi
+
+if [[ "$REQUIRE_D8" == "1" && -z "$D8_CMD" ]]; then
+    echo "ERROR: repository-pinned D8 is required but third_party/d8/d8.jar or r8.jar is missing." >&2
+    exit 1
+fi
 
 find_d8_in_sdk() {
     local sdk="$1"
@@ -62,6 +82,7 @@ find_d8_in_sdk() {
 }
 
 for sdk in "${ANDROID_HOME:-}" "${ANDROID_SDK_ROOT:-}"; do
+    [[ -n "$D8_CMD" ]] && break
     [[ -n "$sdk" ]] || continue
     find_d8_in_sdk "$sdk" && break
 done
@@ -70,7 +91,7 @@ if [[ -z "$D8_CMD" ]] && command -v d8 > /dev/null 2>&1; then
     D8_CMD="$(command -v d8)"
 fi
 
-# The standalone jar is placed by the user into the repo.
+# Last fallback: a standalone jar placed by the user into the repo.
 if [[ -z "$D8_CMD" && -n "$JAVA" ]]; then
     for jar in "$ROOT_DIR/third_party/d8/d8.jar" "$ROOT_DIR/third_party/d8/r8.jar" \
                "$ROOT_DIR/tools/d8.jar" "$ROOT_DIR/tools/r8.jar"; do

@@ -20,6 +20,7 @@
 #include "kudroid/kuart/DexJniEnv.h"
 #include "kudroid/kuart/LibCore.h"
 #include "kudroid/kuart/VmLock.h"
+#include "kudroid/NativeCallTelemetry.h"
 
 namespace kudroid {
 namespace kuart {
@@ -741,6 +742,17 @@ DexValue Interpreter::Execute(const DexMethod* method, const DexValue* args, siz
         }
     } stack_entry(method, &frame);
 
+    const bool trace_java = kudroid::java_call_should_trace(method->name, depth_ - 1);
+    if (trace_java) {
+        kudroid::java_call_enter(
+            method->declaring_class != nullptr ? method->declaring_class->descriptor : "?",
+            method->name, method->signature, depth_ - 1);
+    }
+    struct JavaTelemetryExit {
+        bool active;
+        explicit JavaTelemetryExit(bool value) : active(value) {}
+        ~JavaTelemetryExit() { if (active) kudroid::java_call_exit(); }
+    } java_telemetry_exit(trace_java);
     result = ExecuteFrame(&frame);
     return result;
 }

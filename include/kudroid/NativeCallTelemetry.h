@@ -15,4 +15,11 @@ void native_call_enter(const char* class_name, const char* method,
 void native_call_stage(const char* stage);
 void native_call_exit();
 
+// Track the shallow lifecycle portion of Java execution without logging every
+// interpreter frame in a busy application.
+bool java_call_should_trace(const char* method, size_t depth);
+void java_call_enter(const char* class_name, const char* method,
+                     const char* signature, size_t depth);
+void java_call_exit();
+
 }  // namespace kudroid

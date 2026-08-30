@@ -105,6 +105,11 @@ class GlobalMetalView: UIView {
 struct KuDroidApp: App {
     @StateObject private var session = AppSession()
 
+    init() {
+        IOSDiagnostics.shared.start()
+        IOSDiagnostics.shared.applicationPhase("app-init")
+    }
+
     var body: some Scene {
         WindowGroup {
             ZStack {
@@ -173,6 +178,7 @@ struct KuDroidApp: App {
             }
             .preferredColorScheme(.dark)
             .onAppear {
+                IOSDiagnostics.shared.applicationPhase("window-on-appear")
                 RemoteDebugClient.shared.configure(session: session)
                 let savedIP = UserDefaults.standard.string(forKey: "kdb_server_ip") ?? ""
                 if !savedIP.isEmpty {

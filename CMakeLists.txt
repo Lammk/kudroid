@@ -133,6 +133,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
         ios-app/KuDroidShell/KuDroidApp.swift
         ios-app/KuDroidShell/ContentView.swift
         ios-app/KuDroidShell/RemoteDebugClient.swift
+        ios-app/KuDroidShell/IOSDiagnostics.swift
         ios-app/KuDroidShell/kudroid_bridge.h
     )
 

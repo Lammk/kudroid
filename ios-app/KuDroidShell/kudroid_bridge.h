@@ -50,6 +50,12 @@ const char* kudroid_jit_status(void);
 /// also installs signal handlers so that an original crash still leaves a log file.
 void kudroid_set_log_dir(const char* dir);
 
+/// Record an iOS-side lifecycle/diagnostic marker in the persistent KuDroid log.
+void kudroid_ios_diagnostic_phase(const char* phase);
+
+/// Record the current iOS task memory figures in the persistent diagnostic log.
+void kudroid_ios_diagnostic_memory(const char* phase);
+
 /// sets the documents directory used by vfspathremapper.
 void kudroid_set_documents_dir(const char* dir);
 

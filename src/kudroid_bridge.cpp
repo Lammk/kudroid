@@ -35,7 +35,44 @@
 #include <mutex>
 #include <atomic>
 
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/task.h>
+#endif
+
 extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
+extern "C" void kudroid_persistent_breadcrumb(const char* line);
+
+extern "C" void kudroid_ios_diagnostic_phase(const char* phase) {
+#if defined(__APPLE__)
+    char line[512];
+    snprintf(line, sizeof(line), "ios-phase=%s pid=%d", phase ? phase : "?", getpid());
+    kudroid_persistent_breadcrumb(line);
+#else
+    (void)phase;
+#endif
+}
+
+extern "C" void kudroid_ios_diagnostic_memory(const char* phase) {
+#if defined(__APPLE__)
+    task_vm_info_data_t info{};
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    const kern_return_t kr = task_info(mach_task_self(), TASK_VM_INFO,
+                                       reinterpret_cast<task_info_t>(&info), &count);
+    if (kr == KERN_SUCCESS) {
+        char line[768];
+        snprintf(line, sizeof(line),
+                 "ios-memory phase=%s pid=%d phys_footprint=%llu resident=%llu virtual=%llu",
+                 phase ? phase : "?", getpid(),
+                 static_cast<unsigned long long>(info.phys_footprint),
+                 static_cast<unsigned long long>(info.resident_size),
+                 static_cast<unsigned long long>(info.virtual_size));
+        kudroid_persistent_breadcrumb(line);
+    }
+#else
+    (void)phase;
+#endif
+}
 
 // ── Continuous logging into the app's writable directory ─────────────────────
 // The host passes one directory (its Documents) through kudroid_set_log_dir().
