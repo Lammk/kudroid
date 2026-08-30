@@ -998,6 +998,10 @@ extern "C" int bionic_clock_gettime64(int clock_id, struct timespec *tp) {
     return bionic_clock_gettime(clock_id, tp);
 }
 
+#ifdef __APPLE__
+static bool range_is_mapped(uintptr_t addr, size_t len);
+#endif
+
 extern "C" int bionic_sigaltstack(const stack_t *ss, stack_t *oss) {
     if (!ss) {
         return ::sigaltstack(nullptr, oss);
@@ -1034,10 +1038,6 @@ extern "C" int bionic_sigaltstack(const stack_t *ss, stack_t *oss) {
 
 #ifndef __APPLE__
 #include <sys/syscall.h>
-#endif
-
-#ifdef __APPLE__
-static bool range_is_mapped(uintptr_t addr, size_t len);
 #endif
 
 // ─────────────────────────────────────────────────────────────────────────────
