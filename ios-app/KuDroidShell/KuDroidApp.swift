@@ -102,6 +102,7 @@ class GlobalMetalView: UIView {
 }
 
 @main
+@available(iOS 15.0, *)
 struct KuDroidApp: App {
     @StateObject private var session = AppSession()
 

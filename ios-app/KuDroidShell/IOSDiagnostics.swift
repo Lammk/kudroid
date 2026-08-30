@@ -1,10 +1,11 @@
 import Foundation
 import MetricKit
-import OSLog
+import os
 import UIKit
 
 /// iOS delivers watchdog, jetsam and crash diagnostics after termination. This
 /// subscriber persists the payload immediately so the next launch can expose it.
+@available(iOS 15.0, *)
 final class IOSDiagnostics: NSObject, MXMetricManagerSubscriber {
     static let shared = IOSDiagnostics()
 
@@ -23,7 +24,15 @@ final class IOSDiagnostics: NSObject, MXMetricManagerSubscriber {
         for payload in payloads {
             let text = "metric-kit diagnostic received: \(String(describing: payload))"
             persist(text)
-            logger.error("\(text, privacy: .public)")
+            logger.error("\(text)")
+        }
+    }
+
+    func didReceive(_ payloads: [MXMetricPayload]) {
+        for payload in payloads {
+            let text = "metric-kit metrics received: \(String(describing: payload))"
+            persist(text)
+            logger.info("\(text)")
         }
     }
 
@@ -74,7 +83,7 @@ final class IOSDiagnostics: NSObject, MXMetricManagerSubscriber {
 
     func applicationPhase(_ phase: String) {
         record(phase)
-        signposter.emitEvent("phase", "\(phase, privacy: .public)")
+        signposter.emitEvent("phase")
     }
 
     func beginInterval(_ name: StaticString) -> OSSignpostIntervalState {
