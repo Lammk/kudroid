@@ -145,9 +145,13 @@ struct android_epoll_event {
     uint64_t data;
 } __attribute__((packed));
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <cerrno>
 #include <pthread.h>
+#if !defined(__APPLE__)
+#include <sys/syscall.h>
+#endif
 #include <unordered_map>
 #include <map>
 #include <set>
@@ -302,6 +306,26 @@ extern "C" void bionic_runtime_noop() {
 
 static std::unordered_map<void*, void*> gSyncRegistry;
 static std::shared_mutex gSyncRegistryLock;
+
+static void sync_diag(const char* operation, void* object, void* mutex, int result) {
+    static std::atomic<unsigned> emitted{0};
+    if (emitted.fetch_add(1, std::memory_order_relaxed) >= 256) return;
+    char message[256];
+    std::snprintf(message, sizeof(message),
+                  "thread-sync op=%s cond=%p mutex=%p tid=%llu result=%d",
+                  operation, object, mutex,
+#if defined(__APPLE__)
+                  static_cast<unsigned long long>([] {
+                      uint64_t tid = 0;
+                      pthread_threadid_np(nullptr, &tid);
+                      return tid;
+                  }()),
+#else
+                  static_cast<unsigned long long>(::syscall(SYS_gettid)),
+#endif
+                  result);
+    logAndroidMessage(4, "KuDroidThread", message);
+}
 
 // Sync object types.
 enum SyncType : int {
@@ -459,21 +483,31 @@ extern "C" int bionic_pthread_cond_wait(void* cond, void* mutex) {
     pthread_cond_t* hostCond = static_cast<pthread_cond_t*>(get_or_init_sync(cond, SYNC_COND));
     pthread_mutex_t* hostMutex = static_cast<pthread_mutex_t*>(get_or_init_sync(mutex, SYNC_MUTEX));
     if (!hostCond || !hostMutex) return -1;
-    return ::pthread_cond_wait(hostCond, hostMutex);
+    sync_diag("cond-wait-enter", cond, mutex, 0);
+    const int result = ::pthread_cond_wait(hostCond, hostMutex);
+    sync_diag("cond-wait-return", cond, mutex, result);
+    return result;
 }
 extern "C" int bionic_pthread_cond_timedwait(void* cond, void* mutex, const struct timespec* abstime) {
     pthread_cond_t* hostCond = static_cast<pthread_cond_t*>(get_or_init_sync(cond, SYNC_COND));
     pthread_mutex_t* hostMutex = static_cast<pthread_mutex_t*>(get_or_init_sync(mutex, SYNC_MUTEX));
     if (!hostCond || !hostMutex) return -1;
-    return ::pthread_cond_timedwait(hostCond, hostMutex, abstime);
+    sync_diag("cond-timedwait-enter", cond, mutex, 0);
+    const int result = ::pthread_cond_timedwait(hostCond, hostMutex, abstime);
+    sync_diag("cond-timedwait-return", cond, mutex, result);
+    return result;
 }
 extern "C" int bionic_pthread_cond_signal(void* cond) {
     pthread_cond_t* hostCond = static_cast<pthread_cond_t*>(get_or_init_sync(cond, SYNC_COND));
-    return hostCond ? ::pthread_cond_signal(hostCond) : -1;
+    const int result = hostCond ? ::pthread_cond_signal(hostCond) : -1;
+    sync_diag("cond-signal", cond, nullptr, result);
+    return result;
 }
 extern "C" int bionic_pthread_cond_broadcast(void* cond) {
     pthread_cond_t* hostCond = static_cast<pthread_cond_t*>(get_or_init_sync(cond, SYNC_COND));
-    return hostCond ? ::pthread_cond_broadcast(hostCond) : -1;
+    const int result = hostCond ? ::pthread_cond_broadcast(hostCond) : -1;
+    sync_diag("cond-broadcast", cond, nullptr, result);
+    return result;
 }
 
 extern "C" int bionic_pthread_rwlock_destroy(void* rwlock) {
@@ -3044,6 +3078,7 @@ static void* bionic_thread_wrapper(void* rawArgs) {
     void* (*start_routine)(void*) = args->start_routine;
     void* arg = args->arg;
     delete args;
+    sync_diag("thread-entry", reinterpret_cast<void*>(start_routine), nullptr, 0);
 
     ::pthread_once(&tls_key_once, init_tls_key);
 
@@ -3075,6 +3110,7 @@ static void* bionic_thread_wrapper(void* rawArgs) {
 
     // No need to free(tls_base) here, the destructor will handle it automatically
     // when the thread terminates, even if it terminates via pthread_exit().
+    sync_diag("thread-exit", reinterpret_cast<void*>(start_routine), nullptr, 0);
     return result;
 }
 
@@ -3083,6 +3119,7 @@ extern "C" int bionic_pthread_create(pthread_t* thread, void* attr, void* (*star
     if (!attr) {
         const int res = ::pthread_create(thread, nullptr, bionic_thread_wrapper, args);
         if (res != 0) delete args;
+        sync_diag("thread-create", reinterpret_cast<void*>(start_routine), nullptr, res);
         return res;
     }
 
@@ -3099,6 +3136,7 @@ extern "C" int bionic_pthread_create(pthread_t* thread, void* attr, void* (*star
     const int res = ::pthread_create(thread, &hostAttr, bionic_thread_wrapper, args);
     ::pthread_attr_destroy(&hostAttr);
     if (res != 0) delete args;
+    sync_diag("thread-create", reinterpret_cast<void*>(start_routine), nullptr, res);
     return res;
 }
 
