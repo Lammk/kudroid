@@ -50,7 +50,6 @@ add_library(kudroid_core STATIC
     src/platform/AssetShim.cpp
     src/platform/BundledFramework.cpp
     src/platform/JavaCanvasRenderer.cpp
-    src/platform/MemoryInfo.cpp
     src/kudroid_bridge.cpp
     src/gpu_test.cpp
     # KuART — micro ART: load DEX directly, without going through dex2jar/JVM.
@@ -67,6 +66,10 @@ add_library(kudroid_core STATIC
     src/kuart/LibCore.cpp
     src/kuart/JitCache.cpp
     src/kuart/JitCompiler.cpp
+    # JitCache queries the platform memory policy. Keep this provider after the
+    # JIT objects in the static archive so GNU ld extracts it when linking the
+    # minimal KuART test targets as well as the full shell.
+    src/platform/MemoryInfo.cpp
     src/kuart/OatFile.cpp
     src/kuart/VmLock.cpp
     src/framework/PermissionManager.cpp
