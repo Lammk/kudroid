@@ -48,7 +48,10 @@ echo "javac: $JAVAC"
 # they are deliberately considered only after the pinned jar.
 D8_CMD=""
 
-if [[ -n "$JAVA" ]]; then
+if [[ -n "${KUDROID_D8_JAR:-}" && -f "$KUDROID_D8_JAR" && -n "$JAVA" ]]; then
+    D8_CMD="$JAVA -cp $KUDROID_D8_JAR com.android.tools.r8.D8"
+    echo "Using explicitly pinned D8: $KUDROID_D8_JAR"
+elif [[ -n "$JAVA" ]]; then
     for jar in "$ROOT_DIR/third_party/d8/d8.jar" "$ROOT_DIR/third_party/d8/r8.jar"; do
         if [[ -f "$jar" ]]; then
             D8_CMD="$JAVA -cp $jar com.android.tools.r8.D8"
