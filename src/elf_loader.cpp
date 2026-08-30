@@ -259,6 +259,15 @@ bool ElfLoader::parse() {
         return false;
     }
 
+    // The program header table's own location, for dl_iterate_phdr.
+    //
+    // e_phoff is a FILE offset, and what the guest unwinder needs is a mapped address. For
+    // every NDK .so the table sits in the first PT_LOAD segment, which starts at file
+    // offset 0 with p_vaddr == 0, so the file offset and the vaddr coincide. PT_PHDR states
+    // the vaddr outright when present and is preferred below.
+    phdr_vaddr_ = ehdr.e_phoff;
+    phdr_count_ = ehdr.e_phnum;
+
     // Read the first parts of the program
     file.seekg(ehdr.e_phoff);
     for (uint16_t i = 0; i < ehdr.e_phnum; ++i) {
@@ -287,6 +296,8 @@ bool ElfLoader::parse() {
         } else if (phdr.p_type == 0x6474e550) { // pt_gnu_eh_frame
             eh_frame_vaddr_ = phdr.p_vaddr;
             eh_frame_memsz_ = phdr.p_memsz;
+        } else if (phdr.p_type == 6) { // pt_phdr — the table's own mapped address
+            phdr_vaddr_ = phdr.p_vaddr;
         }
     }
 
@@ -730,6 +741,15 @@ bool ElfLoader::map() {
     // ELF loader mmap should have previously printed "no symbol".
     kudroid_register_guest_module(base_, minVaddr + totalSize, path_.c_str());
 
+    // Register the program headers so the guest's own unwinder can find its exception
+    // tables. A statically linked libc++abi — which is what every NDK app ships — locates
+    // PT_GNU_EH_FRAME through dl_iterate_phdr and nothing else. Without this, throwing
+    // inside a guest library finds no FDE and calls std::terminate instead of unwinding.
+    if (phdr_count_ != 0) {
+        kudroid_register_guest_phdrs(base_, static_cast<char*>(base_) + phdr_vaddr_,
+                                     phdr_count_);
+    }
+
     return true;
 }
 
@@ -1139,6 +1159,10 @@ struct GuestModule {
     std::uintptr_t base;
     std::size_t    size;
     std::string    path;
+    // The mapped program header table, for dl_iterate_phdr. Zero until the module's
+    // headers are registered, which happens right after mapping.
+    const void*    phdrs = nullptr;
+    unsigned short phnum = 0;
 };
 std::mutex g_guestMtx;
 std::vector<GuestModule> g_guestModules;
@@ -1157,6 +1181,73 @@ extern "C" void kudroid_register_guest_module(void* base, std::size_t size,
         }
     }
     g_guestModules.push_back({addr, size, std::string(path)});
+}
+
+extern "C" void kudroid_register_guest_phdrs(void* base, const void* phdrs,
+                                            unsigned short phnum) {
+    if (!base || !phdrs || phnum == 0) return;
+    std::lock_guard<std::mutex> lock(g_guestMtx);
+    const auto addr = reinterpret_cast<std::uintptr_t>(base);
+    for (auto& m : g_guestModules) {
+        if (m.base == addr) {
+            m.phdrs = phdrs;
+            m.phnum = phnum;
+            return;
+        }
+    }
+    // Headers before the module: only possible if the caller registers out of order, which
+    // the loader does not, but recording them is better than dropping them.
+    GuestModule module{addr, 0, std::string(), phdrs, phnum};
+    g_guestModules.push_back(std::move(module));
+}
+
+// bionic's dl_phdr_info, as a guest compiled against <link.h> expects it.
+//
+// Only the first four fields are read by any unwinder, but the struct must be the right
+// SIZE too: the callback receives it and bionic passes sizeof(dl_phdr_info), so a short
+// struct would have the guest read past the end of ours.
+namespace {
+struct GuestDlPhdrInfo {
+    std::uintptr_t   dlpi_addr;      // load bias — what to add to a p_vaddr
+    const char*      dlpi_name;
+    const void*      dlpi_phdr;
+    unsigned short   dlpi_phnum;
+    // Present in bionic since API 21 and part of the struct's size even when unused.
+    unsigned long long dlpi_adds;
+    unsigned long long dlpi_subs;
+    std::size_t      dlpi_tls_modid;
+    void*            dlpi_tls_data;
+};
+} // namespace
+
+extern "C" int kudroid_iterate_guest_phdrs(
+    int (*callback)(void* info, std::size_t size, void* data), void* data) {
+    if (!callback) return 0;
+
+    // A snapshot under the lock, then the callback outside it. The guest's unwinder can
+    // throw from inside the callback, and holding the mutex across that would deadlock the
+    // next load — as well as any nested dl_iterate_phdr the unwinder chooses to make.
+    std::vector<GuestModule> snapshot;
+    {
+        std::lock_guard<std::mutex> lock(g_guestMtx);
+        snapshot = g_guestModules;
+    }
+
+    for (const auto& m : snapshot) {
+        if (!m.phdrs || m.phnum == 0) continue;
+        GuestDlPhdrInfo info{};
+        // base_ was already adjusted to the logical origin (see map()), so a p_vaddr plus
+        // this base is the final address — which is exactly what dlpi_addr means.
+        info.dlpi_addr = m.base;
+        info.dlpi_name = m.path.c_str();
+        info.dlpi_phdr = m.phdrs;
+        info.dlpi_phnum = m.phnum;
+        const int r = callback(&info, sizeof(info), data);
+        // Non-zero stops the walk and is the callback's result, per the contract. The
+        // unwinder returns non-zero the moment it finds the module holding the PC.
+        if (r != 0) return r;
+    }
+    return 0;
 }
 
 extern "C" bool kudroid_lookup_guest_module(void* addr, char* out, std::size_t outSize) {

@@ -19,6 +19,28 @@ extern "C" void kudroid_register_guest_module(void* base, std::size_t size,
 /// returns true if found. Used in crash handler (read only, not locked).
 extern "C" bool kudroid_lookup_guest_module(void* addr, char* out, std::size_t outSize);
 
+/// Report a guest module's program headers, for dl_iterate_phdr.
+///
+/// The guest's own libc++abi locates its unwind tables by walking dl_iterate_phdr and
+/// looking for PT_GNU_EH_FRAME. A stub that reports nothing means "no modules loaded", so
+/// _Unwind_RaiseException finds no FDE for the throwing frame and std::terminate runs —
+/// every C++ `throw` inside a guest library becomes an abort. On device that was four
+/// frames of libc++_shared.so above abort(), with no exception message, immediately after
+/// GameActivity_register.
+///
+/// registerEhFrame() cannot substitute: it registers with the HOST unwinder, while a
+/// statically linked guest libc++abi only ever asks dl_iterate_phdr.
+///
+/// `phdrs` must point at the mapped program header table inside the loaded image, and stays
+/// owned by the caller — the image outlives the registration.
+extern "C" void kudroid_register_guest_phdrs(void* base, const void* phdrs,
+                                            unsigned short phnum);
+
+/// Walk the registered guest modules, matching the bionic dl_iterate_phdr contract.
+/// Stops and returns the callback's value as soon as it returns non-zero.
+extern "C" int kudroid_iterate_guest_phdrs(
+    int (*callback)(void* info, std::size_t size, void* data), void* data);
+
 class LibraryManager;
 
 ///minimum elf64 (arm64) loader surface.
@@ -142,6 +164,14 @@ private:
     // exception handling (.eh_frame_hdr / pt_gnu_eh_frame)
     std::uint64_t        eh_frame_vaddr_ = 0;
     std::uint64_t        eh_frame_memsz_ = 0;
+
+    // The program header table's own vaddr and count, for dl_iterate_phdr.
+    //
+    // Taken from PT_PHDR when present, else derived from e_phoff — the table is inside the
+    // first PT_LOAD segment, so it is mapped and readable in the loaded image. The guest's
+    // unwinder needs it to find PT_GNU_EH_FRAME; without it every guest `throw` aborts.
+    std::uint64_t        phdr_vaddr_ = 0;
+    std::uint16_t        phdr_count_ = 0;
 };
 
 } // namespace kudroid

@@ -40,13 +40,71 @@ struct GuestVarargs {
 // snprintf(buf, size, fmt, ...) and __android_log_print(prio, tag, fmt, ...), 2 for
 // sprintf(buf, fmt, ...).
 //
+// `firstFpIndex` is the same for the floating-point register file. It is 0 for every
+// direct trampoline, because none of the shimmed variadic functions takes a fixed
+// floating-point argument — but it is NOT 0 when the capture was rebuilt from a guest
+// va_list, where the guest may already have consumed v-registers before handing the list
+// over.
+//
 // Writes at most `size` bytes including the terminator, and returns the length the result
 // WOULD have had — the same contract as snprintf, because callers size a second buffer
 // from the return value and a truncated length makes them allocate too little. `size` of
 // zero writes nothing at all, not even a terminator.
 size_t FormatGuestVarargs(char* out, size_t size, const char* format,
-                          const GuestVarargs* registers, unsigned firstGpIndex);
+                          const GuestVarargs* registers, unsigned firstGpIndex,
+                          unsigned firstFpIndex = 0);
+
+// A guest's va_list, as AAPCS64 defines it (§B.4, "va_list type").
+//
+// This is the second half of the same ABI split the trampolines exist for, and the one
+// that is easier to miss. Apple's arm64 va_list is a plain `char*` cursor into the stack,
+// passed BY VALUE. AAPCS64's is this 32-byte composite, and because it is a composite it
+// is passed BY REFERENCE — the caller hands over a POINTER to it.
+//
+// So when a guest calls __android_log_vprint(prio, tag, fmt, ap), the shim receives a
+// pointer to this struct in the register where the host expects a stack cursor. Forwarding
+// it to the host's vsnprintf makes the host read the struct's own bytes as characters and
+// pointers: `stack` is the first field, so the first thing printed is the low bytes of a
+// stack address. That is the "Unable to locate asset: H,\x98B\x01" line on device — five
+// bytes of a pointer, formatted as a filename, for an asset whose real name was never
+// printed at all.
+//
+// The negative offsets are how AAPCS64 tracks consumption: `gr_top` and `vr_top` point
+// just PAST the end of their save areas, and the offsets count backwards from there, so
+// they reach zero exactly when the register file is exhausted.
+struct GuestVaList {
+    const void* stack;    // next argument in the overflow area
+    const void* gr_top;   // one past the end of the x0-x7 save area
+    const void* vr_top;   // one past the end of the q0-q7 save area
+    int32_t gr_offs;      // byte offset from gr_top to the next unused x-register (<= 0)
+    int32_t vr_offs;      // byte offset from vr_top to the next unused q-register (<= 0)
+};
+
+// Rebuild a register capture from a guest va_list.
+//
+// `guest_ap` is the pointer the guest passed, i.e. a `const GuestVaList*`. The save areas
+// it points at were written by the guest's own va_start, so this copies them into the
+// layout the formatter already understands rather than teaching the formatter a second
+// argument source.
+//
+// On success `firstGpIndex` and `firstFpIndex` are set to where the guest had got to, and
+// the result can be handed to FormatGuestVarargs unchanged. Returns false when `guest_ap`
+// is null or the offsets are not ones va_start could have produced — a guest that passes
+// a stale or fabricated va_list must not send the formatter walking arbitrary memory.
+bool GuestVarargsFromVaList(const void* guest_ap, GuestVarargs* out,
+                            unsigned* firstGpIndex, unsigned* firstFpIndex);
 
 } // namespace kudroid
+
+// Format a guest's va_list, for the shims that receive one.
+//
+// Declared extern "C" and taking `const void*` so the call is expressible from the
+// freestanding arm64 test, where `va_list` is the guest's own type and the compiler
+// therefore passes it by reference — exactly as guest code does. That is the only way to
+// exercise this path on the ABI it is about.
+//
+// Returns the length the formatted string WOULD have had, as snprintf does.
+extern "C" size_t kudroid_format_guest_va_list(char* out, size_t size, const char* format,
+                                               const void* guest_ap);
 
 #endif // KUDROID_ABI_GUESTVARARGS_H

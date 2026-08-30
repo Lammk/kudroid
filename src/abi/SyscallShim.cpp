@@ -1,6 +1,7 @@
 #include "kudroid/BionicShim.h"
 #include "kudroid/abi/SyscallShim.h"
 #include "kudroid/abi/GuestVarargs.h"
+#include "kudroid/elf_loader.hpp"
 #include "kudroid/DeviceProfile.h"
 #include "kudroid/platform/BundledFramework.h"
 #include "kudroid/platform/GraphicsShim.h"
@@ -3155,13 +3156,24 @@ extern "C" void bionic_system_property_read_callback(
 }
 
 // ============================================================================
-// dl_iterate_phdr — ELF program header iteration stub
+// dl_iterate_phdr — ELF program header iteration
 // ============================================================================
+//
+// Not a stub, because the guest's own unwinder depends on it.
+//
+// Every NDK app statically links libc++abi, and that unwinder locates its exception tables
+// by walking dl_iterate_phdr looking for PT_GNU_EH_FRAME. Returning 0 means "no modules
+// loaded", so _Unwind_RaiseException finds no FDE covering the throwing frame and calls
+// std::terminate. The result is that every C++ `throw` inside a guest library aborts the
+// process — on device that appeared as four frames of libc++_shared.so above abort() with
+// no exception message, right after GameActivity_register, which reads as a crash in the
+// game rather than a missing shim.
+//
+// registerEhFrame() does not cover this: it registers with the HOST unwinder, which the
+// guest's statically linked one never consults.
 extern "C" int bionic_dl_iterate_phdr(
     int (*callback)(void* info, size_t size, void* data), void* data) {
-    (void)callback; (void)data;
-    // Return 0 = no ELF headers to iterate (safe stub)
-    return 0;
+    return kudroid_iterate_guest_phdrs(callback, data);
 }
 
 // ============================================================================
@@ -3172,20 +3184,158 @@ extern "C" off_t bionic_lseek64(int fd, off_t offset, int whence) {
 }
 
 // ============================================================================
-// __android_log_vprint — variadic log printing
+// The v*printf family — variadic functions that receive an already-built va_list
 // ============================================================================
-extern "C" int bionic_android_log_vprint(int prio, const char* tag, const char* fmt, va_list ap) {
-    (void)prio;
-    std::fprintf(stderr, "[%s] ", tag ? tag : "unknown");
-    std::vfprintf(stderr, fmt, ap);
-    std::fprintf(stderr, "\n");
-    return 0;
+//
+// The second half of the ABI split the trampolines in bionic_log_trampoline.S exist for,
+// and the easier half to miss. Those handle a guest calling a variadic function DIRECTLY,
+// where the arguments are still in registers. These handle a guest that has already run
+// va_start and is passing the resulting va_list on.
+//
+// AAPCS64's va_list is a 32-byte composite and so is passed BY REFERENCE; Apple's is a
+// plain char* passed BY VALUE. So the pointer a guest hands over lands in the register
+// where the host expects a stack cursor, and forwarding it to the host's vsnprintf prints
+// the struct's own bytes: `stack` is the first field, so the output begins with the low
+// bytes of a stack address.
+//
+// On device that produced "Unable to locate asset: H,\x98B\x01" — five bytes of a pointer
+// where an asset path should have been. The asset shim was working correctly and the file
+// was present; the NAME was never formatted, so nothing could have found it. A missing
+// asset was the obvious reading and the wrong one.
+//
+// Guest va_lists only exist on arm64. Elsewhere the guest is the host and the host's own
+// va_list is correct, so the plain forwarding below is right.
+#if defined(__aarch64__)
+// `va_list` in these signatures is the HOST type, but the value a guest passes is a
+// pointer to its own va_list — so it is reinterpreted rather than used. Taking the address
+// of the parameter would give the address of a local copy of the pointer, one level too
+// deep; the parameter's VALUE is the guest's pointer.
+static const void* guestVaListPointer(va_list ap) {
+    const void* p = nullptr;
+    __builtin_memcpy(&p, &ap, sizeof(p));
+    return p;
 }
 
+extern "C" int bionic_android_log_vprint(int prio, const char* tag, const char* fmt,
+                                         va_list ap) {
+    char message[1024];
+    kudroid_format_guest_va_list(message, sizeof(message), fmt, guestVaListPointer(ap));
+    return logAndroidMessage(prio, tag, message);
+}
+
+extern "C" int bionic_vsnprintf(char* s, size_t size, const char* format, va_list ap) {
+    return static_cast<int>(
+        kudroid_format_guest_va_list(s, size, format, guestVaListPointer(ap)));
+}
+
+// vsprintf has no bound; the guest promises the buffer is large enough, exactly as it does
+// on Android. The cap only limits how far a runaway format string can go.
+extern "C" int bionic_vsprintf(char* s, const char* format, va_list ap) {
+    return static_cast<int>(
+        kudroid_format_guest_va_list(s, 0x10000, format, guestVaListPointer(ap)));
+}
+
+extern "C" int bionic_vfprintf(FILE* stream, const char* format, va_list ap) {
+    char buffer[2048];
+    const size_t would =
+        kudroid_format_guest_va_list(buffer, sizeof(buffer), format, guestVaListPointer(ap));
+    std::fputs(buffer, stream ? stream : stderr);
+    return static_cast<int>(would);
+}
+
+extern "C" int bionic_vprintf(const char* format, va_list ap) {
+    return bionic_vfprintf(stdout, format, ap);
+}
+
+extern "C" int bionic_vasprintf(char** strp, const char* format, va_list ap) {
+    if (strp == nullptr) return -1;
+    // Format once to learn the length, exactly as the return contract allows, then once
+    // more into a buffer that fits. The guest owns the result and frees it.
+    char probe[1024];
+    const void* guest = guestVaListPointer(ap);
+    const size_t needed = kudroid_format_guest_va_list(probe, sizeof(probe), format, guest);
+    char* buffer = static_cast<char*>(std::malloc(needed + 1));
+    if (buffer == nullptr) { *strp = nullptr; return -1; }
+    if (needed < sizeof(probe)) {
+        __builtin_memcpy(buffer, probe, needed + 1);
+    } else {
+        kudroid_format_guest_va_list(buffer, needed + 1, format, guest);
+    }
+    *strp = buffer;
+    return static_cast<int>(needed);
+}
+
+extern "C" int bionic___vsnprintf_chk(char* s, size_t maxlen, int flag, size_t slen,
+                                      const char* format, va_list ap) {
+    (void)flag; (void)slen;
+    return static_cast<int>(
+        kudroid_format_guest_va_list(s, maxlen, format, guestVaListPointer(ap)));
+}
+
+extern "C" int bionic___vsprintf_chk(char* s, int flag, size_t slen, const char* format,
+                                     va_list ap) {
+    (void)flag;
+    return static_cast<int>(
+        kudroid_format_guest_va_list(s, slen != 0 ? slen : 0x10000, format,
+                                     guestVaListPointer(ap)));
+}
+
+extern "C" int bionic___vfprintf_chk(FILE* stream, int flag, const char* format,
+                                     va_list ap) {
+    (void)flag;
+    return bionic_vfprintf(stream, format, ap);
+}
+#else
+extern "C" int bionic_android_log_vprint(int prio, const char* tag, const char* fmt, va_list ap) {
+    char message[1024];
+    std::vsnprintf(message, sizeof(message), fmt ? fmt : "", ap);
+    return logAndroidMessage(prio, tag, message);
+}
+
+extern "C" int bionic_vsnprintf(char* s, size_t size, const char* format, va_list ap) {
+    return ::vsnprintf(s, size, format, ap);
+}
+
+extern "C" int bionic_vsprintf(char* s, const char* format, va_list ap) {
+    return ::vsprintf(s, format, ap);
+}
+
+extern "C" int bionic_vfprintf(FILE* stream, const char* format, va_list ap) {
+    return ::vfprintf(stream ? stream : stderr, format, ap);
+}
+
+extern "C" int bionic_vprintf(const char* format, va_list ap) {
+    return ::vprintf(format, ap);
+}
+
+extern "C" int bionic_vasprintf(char** strp, const char* format, va_list ap) {
+    return ::vasprintf(strp, format, ap);
+}
+
+extern "C" int bionic___vsnprintf_chk(char* s, size_t maxlen, int flag, size_t slen,
+                                      const char* format, va_list ap) {
+    (void)flag; (void)slen;
+    return ::vsnprintf(s, maxlen, format, ap);
+}
+
+extern "C" int bionic___vsprintf_chk(char* s, int flag, size_t slen, const char* format,
+                                     va_list ap) {
+    (void)flag;
+    return ::vsnprintf(s, slen, format, ap);
+}
+
+extern "C" int bionic___vfprintf_chk(FILE* stream, int flag, const char* format,
+                                     va_list ap) {
+    (void)flag;
+    return ::vfprintf(stream ? stream : stderr, format, ap);
+}
+#endif
+
 extern "C" int bionic_android_log_write(int prio, const char* tag, const char* text) {
-    (void)prio;
-    std::fprintf(stderr, "[%s] %s\n", tag ? tag : "unknown", text ? text : "");
-    return 0;
+    // Routed through logAndroidMessage rather than stderr alone so a guest that logs via
+    // __android_log_write lands in kudroid_android_logs.txt and the crash buffer with
+    // everything else. It used to go only to stderr, which the crash log does not carry.
+    return logAndroidMessage(prio, tag, text ? text : "");
 }
 
 extern "C" int bionic_android_log_buf_write(int bufId, int prio, const char* tag, const char* msg) {
@@ -3962,12 +4112,6 @@ extern "C" int bionic___snprintf_chk(char* s, size_t maxlen, int flag, size_t sl
     return r;
 }
 
-extern "C" int bionic___vsnprintf_chk(char* s, size_t maxlen, int flag, size_t slen,
-                                      const char* format, va_list ap) {
-    (void)flag; (void)slen;
-    return ::vsnprintf(s, maxlen, format, ap);
-}
-
 extern "C" int bionic___sprintf_chk(char* s, int flag, size_t slen, const char* format, ...) {
     (void)flag;
     va_list args;
@@ -4591,7 +4735,9 @@ const SymbolEntry kSyscallSymbols[] = {
     {"__write_chk", reinterpret_cast<void*>(&bionic___write_chk)},
     // The _FORTIFY_SOURCE forms, which is what a release-built guest calls instead of
     // snprintf/sprintf. Same ABI problem as the plain versions, so the same trampoline
-    // treatment; __vsnprintf_chk takes a va_list rather than varargs and is unaffected.
+    // treatment. The v* forms take a guest va_list, which is a 32-byte composite passed by
+    // reference where Apple's is a char* passed by value — the same split from the other
+    // direction, handled by the shims above rather than by a trampoline.
 #if defined(__aarch64__)
     {"__snprintf_chk", reinterpret_cast<void*>(&kudroid_snprintf_chk_trampoline)},
     {"__sprintf_chk", reinterpret_cast<void*>(&kudroid_sprintf_chk_trampoline)},
@@ -4600,6 +4746,17 @@ const SymbolEntry kSyscallSymbols[] = {
     {"__sprintf_chk", reinterpret_cast<void*>(&bionic___sprintf_chk)},
 #endif
     {"__vsnprintf_chk", reinterpret_cast<void*>(&bionic___vsnprintf_chk)},
+    {"__vsprintf_chk", reinterpret_cast<void*>(&bionic___vsprintf_chk)},
+    {"__vfprintf_chk", reinterpret_cast<void*>(&bionic___vfprintf_chk)},
+    // The plain v* family. Previously absent from every table, so they fell through to
+    // dlsym(RTLD_DEFAULT) and reached the HOST implementation directly — the worst case,
+    // because the host reads a guest va_list as a stack cursor and prints plausible
+    // rubbish rather than failing.
+    {"vsnprintf", reinterpret_cast<void*>(&bionic_vsnprintf)},
+    {"vsprintf", reinterpret_cast<void*>(&bionic_vsprintf)},
+    {"vfprintf", reinterpret_cast<void*>(&bionic_vfprintf)},
+    {"vprintf", reinterpret_cast<void*>(&bionic_vprintf)},
+    {"vasprintf", reinterpret_cast<void*>(&bionic_vasprintf)},
     {"__strncpy_chk", reinterpret_cast<void*>(&bionic___strncpy_chk)},
     {"__strcpy_chk", reinterpret_cast<void*>(&bionic___strcpy_chk)},
     {"__strcat_chk", reinterpret_cast<void*>(&bionic___strcat_chk)},

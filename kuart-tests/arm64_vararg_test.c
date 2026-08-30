@@ -31,6 +31,24 @@ extern int kudroid_snprintf_chk_trampoline(char* buf, size_t maxlen, int flag, s
 extern int kudroid_sprintf_chk_trampoline(char* buf, int flag, size_t slen,
                                           const char* fmt, ...);
 
+/* The va_list path, declared the way a guest declares __android_log_vprint.
+ *
+ * This is the half of the ABI split that a trampoline cannot cover. AAPCS64's va_list is a
+ * 32-byte composite, and composites are passed BY REFERENCE — so the compiler hands over a
+ * POINTER to it. Apple's va_list is a plain char* passed BY VALUE, so the same register
+ * means two different things on the two platforms, and forwarding a guest's va_list to the
+ * host's vsnprintf makes the host read the struct's own bytes as a stack cursor.
+ *
+ * Declaring the parameter as va_list HERE is what makes this test worth anything: the
+ * compiler then emits the genuine by-reference call that guest code emits. The C++ side
+ * receives it as a const void* and rebuilds the register capture from it.
+ *
+ * On device the failure printed "Unable to locate asset: H,\x98B\x01" — the low five bytes
+ * of a stack pointer where a filename should have been. The asset existed; its name was
+ * never formatted. */
+extern unsigned long kudroid_format_guest_va_list(char* out, size_t size, const char* fmt,
+                                                  __builtin_va_list ap);
+
 /* The log trampoline lives in the same assembly file and so needs its handler resolved at
  * link time, but the real one is in SyscallShim.cpp and pulls in the whole shim — mutexes,
  * files, the crash buffer — none of which can be built freestanding. Stubbed because this
@@ -97,6 +115,103 @@ static void CheckText(const char* got, const char* want, const char* what) {
     puts_("\"\n         got:  \"");
     puts_(got);
     puts_("\"\n");
+}
+
+/* ── the va_list forwarding path ──────────────────────────────────────────────────── */
+
+/* Stands in for a guest's __android_log_vprint caller: run va_start, hand the list on.
+ * This is the exact shape of the code that produced the corrupted asset name. */
+static int guest_vlog(char* out, size_t size, const char* fmt, ...) {
+    __builtin_va_list ap;
+    __builtin_va_start(ap, fmt);
+    const int n = (int)kudroid_format_guest_va_list(out, size, fmt, ap);
+    __builtin_va_end(ap);
+    return n;
+}
+
+/* A guest that consumes some arguments before forwarding the rest. The va_list then carries
+ * non-initial offsets, and a converter that assumed "nothing consumed yet" would restart
+ * from the first register and print the already-read values a second time. */
+static int guest_vlog_after_two(char* out, size_t size, const char* fmt, ...) {
+    __builtin_va_list ap;
+    __builtin_va_start(ap, fmt);
+    (void)__builtin_va_arg(ap, int);
+    (void)__builtin_va_arg(ap, int);
+    const int n = (int)kudroid_format_guest_va_list(out, size, fmt, ap);
+    __builtin_va_end(ap);
+    return n;
+}
+
+/* The same for the floating-point file, which is tracked by a SEPARATE offset. Consuming a
+ * double must advance vr_offs and leave gr_offs alone; one shared counter gets this wrong
+ * in a way that only shows when both files are in play. */
+static int guest_vlog_after_double(char* out, size_t size, const char* fmt, ...) {
+    __builtin_va_list ap;
+    __builtin_va_start(ap, fmt);
+    (void)__builtin_va_arg(ap, double);
+    const int n = (int)kudroid_format_guest_va_list(out, size, fmt, ap);
+    __builtin_va_end(ap);
+    return n;
+}
+
+static void RunVaListChecks(char* buf, size_t size) {
+    puts_("-- guest va_list, passed by reference --\n");
+
+    guest_vlog(buf, size, "%d", 42);
+    CheckText(buf, "42", "a va_list yields the register value, not its own bytes");
+
+    /* The device signature: a %s whose argument is a real string. Reading the va_list
+     * struct as a cursor printed the low bytes of its `stack` field instead. */
+    guest_vlog(buf, size, "%s", "assets/gui/hud.png");
+    CheckText(buf, "assets/gui/hud.png", "a va_list %s is the string, not a stack address");
+
+    guest_vlog(buf, size, "Unable to locate asset: %s", "sounds/click.fsb");
+    CheckText(buf, "Unable to locate asset: sounds/click.fsb",
+              "the exact log line that came out corrupted on device");
+
+    guest_vlog(buf, size, "%d %d %d %d %d", 1, 2, 3, 4, 5);
+    CheckText(buf, "1 2 3 4 5", "five integers through a va_list");
+
+    /* Past the register file: the va_list's `stack` field takes over, and it is the field a
+     * misread starts from — so this distinguishes a working converter from a lucky one. */
+    guest_vlog(buf, size, "%d %d %d %d %d %d %d %d", 1, 2, 3, 4, 5, 6, 7, 8);
+    CheckText(buf, "1 2 3 4 5 6 7 8", "a va_list overflows to the stack correctly");
+
+    guest_vlog(buf, size, "%d %.1f", 7, 2.5);
+    CheckText(buf, "7 2.5", "a va_list keeps the two register files separate");
+
+    guest_vlog(buf, size, "%.2f %d %.2f %d", 1.5, 1, 2.5, 2);
+    CheckText(buf, "1.50 1 2.50 2", "interleaved doubles and ints through a va_list");
+
+    guest_vlog(buf, size, "%s", (const char*)0);
+    CheckText(buf, "<null>", "a null %s through a va_list is reported, not dereferenced");
+
+    puts_("-- a partly consumed va_list --\n");
+
+    guest_vlog_after_two(buf, size, "%d", 1, 2, 3);
+    CheckText(buf, "3", "forwarding resumes where the guest stopped reading");
+
+    guest_vlog_after_two(buf, size, "%d %d %d", 1, 2, 3, 4, 5);
+    CheckText(buf, "3 4 5", "the remaining integers keep their order");
+
+    guest_vlog_after_double(buf, size, "%d", 1.5, 9);
+    CheckText(buf, "9", "consuming a double does not consume an integer");
+
+    guest_vlog_after_double(buf, size, "%.1f", 1.5, 2.5);
+    CheckText(buf, "2.5", "the float offset advances independently");
+
+    /* A fabricated va_list must be refused rather than followed. A guest that passes a
+     * stale one would otherwise have the formatter read from whatever gr_top held.
+     *
+     * Called through a pointer-typed view of the same symbol: a va_list is a composite and
+     * so cannot be cast from 0, but the ABI passes it as a pointer, which is precisely the
+     * property under test. */
+    typedef unsigned long (*format_by_pointer)(char*, size_t, const char*, const void*);
+    const format_by_pointer format_ptr =
+        (format_by_pointer)(void*)&kudroid_format_guest_va_list;
+    unsigned long n = format_ptr(buf, size, "%d", (const void*)0);
+    Check(buf[0] == '<', "a null va_list is reported, not followed");
+    Check(n > 0, "a rejected va_list still reports a length");
 }
 
 int main(void) {
@@ -241,6 +356,8 @@ int main(void) {
     /* __sprintf_chk(buf, flag, slen, fmt, ...): three fixed arguments, varargs from x4. */
     kudroid_sprintf_chk_trampoline(buf, 0, sizeof(buf), "%d-%s", 9, "y");
     CheckText(buf, "9-y", "__sprintf_chk finds its first vararg at x4");
+
+    RunVaListChecks(buf, sizeof(buf));
 
     puts_("\n");
     if (failures == 0) {

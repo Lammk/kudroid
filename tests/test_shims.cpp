@@ -19,6 +19,7 @@
 #include <cstdio>
 #include <cstring>
 #include <future>
+#include <string>
 #include <thread>
 
 #include <errno.h>
@@ -594,6 +595,132 @@ static void test_guest_library_handles() {
           "without the hook a guest name falls back to the dummy handle");
 }
 
+// ─── dl_iterate_phdr ─────────────────────────────────────────────────────────
+//
+// This used to return 0 unconditionally, described as a "safe stub". It was not safe: a
+// guest's statically linked libc++abi — which every NDK app ships — locates its exception
+// tables by walking dl_iterate_phdr for PT_GNU_EH_FRAME. Reporting no modules means
+// _Unwind_RaiseException finds no FDE for the throwing frame and calls std::terminate, so
+// every C++ `throw` inside a guest library aborts the process.
+//
+// On device that appeared as four frames of libc++_shared.so above abort() with no
+// exception message, immediately after GameActivity_register — which reads as the game
+// crashing rather than a shim returning the wrong answer.
+
+extern "C" void kudroid_register_guest_module(void* base, size_t size, const char* path);
+extern "C" void kudroid_register_guest_phdrs(void* base, const void* phdrs,
+                                             unsigned short phnum);
+extern "C" int bionic_dl_iterate_phdr(int (*callback)(void* info, size_t size, void* data),
+                                      void* data);
+
+// The prefix of bionic's dl_phdr_info that any unwinder reads.
+struct TestDlPhdrInfo {
+    uintptr_t      dlpi_addr;
+    const char*    dlpi_name;
+    const void*    dlpi_phdr;
+    unsigned short dlpi_phnum;
+};
+
+namespace {
+
+struct PhdrVisit {
+    int calls = 0;
+    bool sawModule = false;
+    uintptr_t addr = 0;
+    const void* phdr = nullptr;
+    unsigned short phnum = 0;
+    std::string name;
+    size_t reportedSize = 0;
+    // Stop the walk when this module is seen, to check the contract's early exit.
+    const char* stopAt = nullptr;
+};
+
+int visitPhdrs(void* info, size_t size, void* data) {
+    auto* visit = static_cast<PhdrVisit*>(data);
+    auto* phdrInfo = static_cast<const TestDlPhdrInfo*>(info);
+    ++visit->calls;
+    visit->reportedSize = size;
+    if (phdrInfo->dlpi_name != nullptr &&
+        std::strstr(phdrInfo->dlpi_name, "test_phdr_module.so") != nullptr) {
+        visit->sawModule = true;
+        visit->addr = phdrInfo->dlpi_addr;
+        visit->phdr = phdrInfo->dlpi_phdr;
+        visit->phnum = phdrInfo->dlpi_phnum;
+        visit->name = phdrInfo->dlpi_name;
+    }
+    if (visit->stopAt != nullptr && phdrInfo->dlpi_name != nullptr &&
+        std::strstr(phdrInfo->dlpi_name, visit->stopAt) != nullptr) {
+        return 7;  // any non-zero: the unwinder returns non-zero once it finds its module
+    }
+    return 0;
+}
+
+} // namespace
+
+void test_dl_iterate_phdr_reports_guest_modules() {
+    // Stand-in for a mapped image. Only the addresses are compared, so the contents do not
+    // matter — what is under test is whether the registration is reported at all.
+    alignas(8) static unsigned char fakeImage[256] = {};
+    void* base = fakeImage;
+    const void* phdrs = fakeImage + 64;
+
+    kudroid_register_guest_module(base, sizeof(fakeImage), "/fake/lib/test_phdr_module.so");
+    kudroid_register_guest_phdrs(base, phdrs, 5);
+
+    PhdrVisit visit;
+    const int result = bionic_dl_iterate_phdr(&visitPhdrs, &visit);
+
+    CHECK(result == 0, "a walk with no early exit returns 0");
+    CHECK(visit.calls >= 1, "the callback runs — the stub never called it at all");
+    CHECK(visit.sawModule, "a registered guest module is reported");
+    CHECK(visit.addr == reinterpret_cast<uintptr_t>(base),
+          "dlpi_addr is the module's load bias");
+    CHECK(visit.phdr == phdrs, "dlpi_phdr is the registered header table");
+    CHECK(visit.phnum == 5, "dlpi_phnum is the registered count");
+    CHECK(visit.name == "/fake/lib/test_phdr_module.so", "dlpi_name is the module path");
+    // The size must match the struct bionic passes, or a guest reading the later fields
+    // walks off the end of ours.
+    CHECK(visit.reportedSize >= sizeof(TestDlPhdrInfo),
+          "the reported size covers the fields an unwinder reads");
+
+    // Non-zero from the callback stops the walk and becomes the return value. An unwinder
+    // relies on this the moment it finds the module holding the PC.
+    PhdrVisit stopping;
+    stopping.stopAt = "test_phdr_module.so";
+    const int stopped = bionic_dl_iterate_phdr(&visitPhdrs, &stopping);
+    CHECK(stopped == 7, "a non-zero callback result stops the walk and is returned");
+}
+
+void test_dl_iterate_phdr_skips_modules_without_headers() {
+    // A module registered for crash symbolication but whose headers were never recorded
+    // must not be reported with a null table — an unwinder would dereference it.
+    alignas(8) static unsigned char headerless[64] = {};
+    kudroid_register_guest_module(headerless, sizeof(headerless),
+                                 "/fake/lib/test_headerless.so");
+
+    struct Seen {
+        bool headerless = false;
+        bool nullTable = false;
+    } seen;
+
+    auto visitor = [](void* info, size_t, void* data) -> int {
+        auto* phdrInfo = static_cast<const TestDlPhdrInfo*>(info);
+        auto* s = static_cast<Seen*>(data);
+        if (phdrInfo->dlpi_phdr == nullptr || phdrInfo->dlpi_phnum == 0) {
+            s->nullTable = true;
+        }
+        if (phdrInfo->dlpi_name != nullptr &&
+            std::strstr(phdrInfo->dlpi_name, "test_headerless.so") != nullptr) {
+            s->headerless = true;
+        }
+        return 0;
+    };
+
+    bionic_dl_iterate_phdr(visitor, &seen);
+    CHECK(!seen.headerless, "a module with no registered headers is skipped");
+    CHECK(!seen.nullTable, "no module is reported with a null header table");
+}
+
 // ─── main ────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -615,6 +742,8 @@ int main() {
     test_guard_recursion_loop_cut();
     test_alooper_never_null();
     test_guest_library_handles();
+    test_dl_iterate_phdr_reports_guest_modules();
+    test_dl_iterate_phdr_skips_modules_without_headers();
     std::printf("=== %d checks, %d failures ===\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

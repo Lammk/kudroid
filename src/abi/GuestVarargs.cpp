@@ -112,8 +112,8 @@ void PutDouble(Sink& sink, double value, int precision) {
 // "frame %d at %f" hits it every frame.
 class Cursor {
 public:
-    Cursor(const GuestVarargs* registers, unsigned firstGpIndex)
-        : registers_(registers), gpIndex_(firstGpIndex) {}
+    Cursor(const GuestVarargs* registers, unsigned firstGpIndex, unsigned firstFpIndex)
+        : registers_(registers), gpIndex_(firstGpIndex), fpIndex_(firstFpIndex) {}
 
     uint64_t NextInt() {
         if (registers_ == nullptr) return 0;
@@ -149,20 +149,21 @@ private:
 
     const GuestVarargs* registers_;
     unsigned gpIndex_;
-    unsigned fpIndex_ = 0;
+    unsigned fpIndex_;
     unsigned overflowIndex_ = 0;
 };
 
 } // namespace
 
 size_t FormatGuestVarargs(char* out, size_t size, const char* format,
-                          const GuestVarargs* registers, unsigned firstGpIndex) {
+                          const GuestVarargs* registers, unsigned firstGpIndex,
+                          unsigned firstFpIndex) {
     Sink sink(out, size);
     if (format == nullptr) {
         sink.Terminate();
         return 0;
     }
-    Cursor args(registers, firstGpIndex);
+    Cursor args(registers, firstGpIndex, firstFpIndex);
 
     for (const char* cursor = format; *cursor != '\0'; ++cursor) {
         if (*cursor != '%') {
@@ -305,7 +306,80 @@ size_t FormatGuestVarargs(char* out, size_t size, const char* format,
     return sink.written();
 }
 
+// Rebuild a register capture from a guest va_list.
+//
+// The guest's va_start wrote the save areas; this copies them into the layout the
+// formatter already reads, so there is one argument source rather than two.
+//
+// The offsets are negative byte counts from the top of each save area, so a guest that has
+// consumed nothing has gr_offs = -64 (eight x-registers) and vr_offs = -128 (eight
+// q-registers). Dividing by the register width converts that to the index the formatter
+// wants.
+bool GuestVarargsFromVaList(const void* guest_ap, GuestVarargs* out,
+                            unsigned* firstGpIndex, unsigned* firstFpIndex) {
+    if (guest_ap == nullptr || out == nullptr || firstGpIndex == nullptr ||
+        firstFpIndex == nullptr) {
+        return false;
+    }
+
+    const auto* ap = static_cast<const GuestVaList*>(guest_ap);
+
+    // The sizes AAPCS64 fixes: eight 8-byte x-registers, eight 16-byte q-registers.
+    const int32_t kGpSaveSize = 8 * 8;
+    const int32_t kFpSaveSize = 8 * 16;
+
+    // Reject anything va_start could not have produced. A guest passing a stale or
+    // fabricated va_list would otherwise send the loop below reading from whatever
+    // gr_top happened to hold — and a bad va_list is exactly what a shim receives when
+    // the ABI is misunderstood at the other end, so this is the case to fail loudly on
+    // rather than to guess through.
+    if (ap->gr_offs > 0 || ap->gr_offs < -kGpSaveSize) return false;
+    if (ap->vr_offs > 0 || ap->vr_offs < -kFpSaveSize) return false;
+    // A register save area is only required when the list still has registers to read
+    // from; once exhausted the guest may legitimately leave the pointer unset.
+    if (ap->gr_offs != 0 && ap->gr_top == nullptr) return false;
+    if (ap->vr_offs != 0 && ap->vr_top == nullptr) return false;
+
+    // gr_top and vr_top point one PAST their save areas, so the base is top - size.
+    const auto* gpBase = static_cast<const unsigned char*>(ap->gr_top);
+    const auto* fpBase = static_cast<const unsigned char*>(ap->vr_top);
+
+    for (int i = 0; i < 8; ++i) out->gp[i] = 0;
+    for (int i = 0; i < 16; ++i) out->fp[i] = 0;
+
+    if (gpBase != nullptr) {
+        gpBase -= kGpSaveSize;
+        __builtin_memcpy(out->gp, gpBase, kGpSaveSize);
+    }
+    if (fpBase != nullptr) {
+        fpBase -= kFpSaveSize;
+        __builtin_memcpy(out->fp, fpBase, kFpSaveSize);
+    }
+
+    out->overflow = static_cast<const uint64_t*>(ap->stack);
+    out->reserved = 0;
+
+    // -64 means nothing consumed -> index 0; -8 means seven consumed -> index 7.
+    *firstGpIndex = static_cast<unsigned>((kGpSaveSize + ap->gr_offs) / 8);
+    *firstFpIndex = static_cast<unsigned>((kFpSaveSize + ap->vr_offs) / 16);
+    return true;
+}
+
 } // namespace kudroid
+
+extern "C" size_t kudroid_format_guest_va_list(char* out, size_t size, const char* format,
+                                               const void* guest_ap) {
+    kudroid::GuestVarargs registers;
+    unsigned firstGp = 0;
+    unsigned firstFp = 0;
+    if (!kudroid::GuestVarargsFromVaList(guest_ap, &registers, &firstGp, &firstFp)) {
+        // A va_list that cannot be trusted must not be formatted from. Saying so is more
+        // use than either a crash or plausible-looking rubbish, which is the failure mode
+        // this whole file exists to remove.
+        return kudroid::FormatGuestVarargs(out, size, "<bad va_list>", nullptr, 0, 0);
+    }
+    return kudroid::FormatGuestVarargs(out, size, format, &registers, firstGp, firstFp);
+}
 
 #if defined(__aarch64__)
 // Handlers for the trampolines in bionic_log_trampoline.S.
