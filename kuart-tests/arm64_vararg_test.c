@@ -73,6 +73,40 @@ int kudroid_log_assert_from_registers(const u64* frame) { (void)frame; return 0;
  * register index. */
 int kudroid_fscanf_from_registers(const u64* frame) { (void)frame; return 0; }
 
+/* The JNI variadic handlers, stubbed.
+ *
+ * bionic_log_trampoline.S is assembled into two very different links: kudroid_core, where
+ * every handler is present, and this freestanding test, which links only the assembly and
+ * GuestVarargs.cpp. The real JNI handlers live in DexJniFunctions.cpp and pull in the whole
+ * runtime — the class linker, the heap, the interpreter — none of which can be built without
+ * a libc, so they cannot come along.
+ *
+ * Stubbing them keeps the .S file usable from both places. What that costs is worth being
+ * explicit about: it means this test does NOT cover the JNI trampolines. It covers the
+ * capture they share, which is the same macro expansion and the same frame layout, so an
+ * error in the capture shows up here. An error in a JNI handler's own argument indices does
+ * not, and would need a test that can reach the runtime.
+ *
+ * The return types are the real ones. A stub returning int where the caller expects double
+ * would put the value in the wrong register file, and the link would succeed while the
+ * result was read from x0 instead of d0. */
+u64 kudroid_jni_call_virtual_from_registers(const u64* frame) { (void)frame; return 0; }
+float kudroid_jni_call_virtual_float_from_registers(const u64* frame) { (void)frame; return 0.0f; }
+double kudroid_jni_call_virtual_double_from_registers(const u64* frame) { (void)frame; return 0.0; }
+void* kudroid_jni_call_virtual_object_from_registers(const u64* frame) { (void)frame; return 0; }
+
+u64 kudroid_jni_call_static_from_registers(const u64* frame) { (void)frame; return 0; }
+float kudroid_jni_call_static_float_from_registers(const u64* frame) { (void)frame; return 0.0f; }
+double kudroid_jni_call_static_double_from_registers(const u64* frame) { (void)frame; return 0.0; }
+void* kudroid_jni_call_static_object_from_registers(const u64* frame) { (void)frame; return 0; }
+
+u64 kudroid_jni_call_nonvirtual_from_registers(const u64* frame) { (void)frame; return 0; }
+float kudroid_jni_call_nonvirtual_float_from_registers(const u64* frame) { (void)frame; return 0.0f; }
+double kudroid_jni_call_nonvirtual_double_from_registers(const u64* frame) { (void)frame; return 0.0; }
+void* kudroid_jni_call_nonvirtual_object_from_registers(const u64* frame) { (void)frame; return 0; }
+
+void* kudroid_jni_new_object_from_registers(const u64* frame) { (void)frame; return 0; }
+
 /* ── libc pieces the C++ formatter references ─────────────────────────────────────── */
 
 static long sys_write(int fd, const void* buf, unsigned long n) {

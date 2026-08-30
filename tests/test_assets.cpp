@@ -185,6 +185,81 @@ void TestOpenDirNesting(const std::filesystem::path& assetsDir) {
     Check(sawClick && sawStep, "both entries are reported by name");
 }
 
+// getBuffer maps the file instead of copying it.
+//
+// The contents being right is only half of it. A heap copy is DIRTY memory, and iOS does
+// not swap — so it can only be reclaimed by killing the process. Minecraft ships 574 MB of
+// assets across 36005 files with a largest single material of 20.9 MB, on top of ~330 MB of
+// libminecraftpe image: a handful of copied buffers reaches the jetsam limit, and jetsam
+// sends SIGKILL, which runs no handler and writes no crash log.
+//
+// A mapping is clean, so the kernel evicts and re-reads those pages instead.
+void TestGetBufferIsMapped(const std::filesystem::path& assetsDir) {
+    std::printf("-- getBuffer maps rather than copies --\n");
+
+    // Large enough to span several pages, so a mapping is distinguishable from a small
+    // allocation that happens to look page-aligned.
+    std::string payload;
+    payload.reserve(300 * 1024);
+    for (int i = 0; i < 300 * 1024; ++i) {
+        payload.push_back(static_cast<char>('A' + (i % 26)));
+    }
+    WriteFile(assetsDir / "big.bin", payload);
+    kudroid_set_assets_dir(assetsDir.string().c_str());
+
+    void* asset = bionic_AAssetManager_open(nullptr, "big.bin", 0);
+    Check(asset != nullptr, "the large asset opens");
+    if (asset == nullptr) return;
+
+    Check(bionic_AAsset_getLength(asset) == static_cast<long>(payload.size()),
+          "the length matches the file");
+
+    const void* buffer = bionic_AAsset_getBuffer(asset);
+    Check(buffer != nullptr, "getBuffer returns a pointer");
+    if (buffer != nullptr) {
+        Check(std::memcmp(buffer, payload.data(), payload.size()) == 0,
+              "every byte of the mapped buffer matches the file");
+
+        // A mapping always starts at a page boundary. malloc for 300 KB does not have to,
+        // and in practice does not — so this distinguishes the two without reaching into
+        // the implementation.
+        const auto address = reinterpret_cast<uintptr_t>(buffer);
+        const auto pageSize = static_cast<uintptr_t>(::sysconf(_SC_PAGESIZE));
+        Check(pageSize > 0 && (address % pageSize) == 0,
+              "the buffer is page-aligned, as a mapping is and a heap copy is not");
+    }
+
+    // Called twice, the same pointer comes back: the buffer is cached, so a game that asks
+    // repeatedly does not map the file again each time.
+    const void* second = bionic_AAsset_getBuffer(asset);
+    Check(second == buffer, "a second getBuffer returns the cached pointer");
+
+    // close() must release a mapping with munmap, not free. Getting that wrong is
+    // undefined behaviour rather than a visible failure, so the check that it survives
+    // close-then-reopen is the observable part.
+    bionic_AAsset_close(asset);
+
+    void* again = bionic_AAssetManager_open(nullptr, "big.bin", 0);
+    Check(again != nullptr, "the asset reopens after close");
+    if (again != nullptr) {
+        const void* buf2 = bionic_AAsset_getBuffer(again);
+        Check(buf2 != nullptr && std::memcmp(buf2, payload.data(), payload.size()) == 0,
+              "the contents are still correct after a close and reopen");
+        bionic_AAsset_close(again);
+    }
+
+    // An empty file has nothing to map. mmap of length 0 fails, and the result must be a
+    // null buffer rather than a mapping of the wrong size.
+    WriteFile(assetsDir / "empty.bin", "");
+    void* empty = bionic_AAssetManager_open(nullptr, "empty.bin", 0);
+    if (empty != nullptr) {
+        Check(bionic_AAsset_getLength(empty) == 0, "an empty asset reports zero length");
+        Check(bionic_AAsset_getBuffer(empty) == nullptr,
+              "getBuffer on an empty asset returns null, not a zero-length mapping");
+        bionic_AAsset_close(empty);
+    }
+}
+
 } // namespace
 
 int main() {
@@ -201,6 +276,7 @@ int main() {
     TestLiteralPathWins(root / "ambiguous");
     TestMissingAndDegenerate(root / "missing");
     TestOpenDirNesting(root / "dirs");
+    TestGetBufferIsMapped(root / "buffers");
 
     std::filesystem::remove_all(root);
 

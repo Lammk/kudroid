@@ -1,5 +1,6 @@
 #include "kudroid/platform/AssetShim.h"
 #include "kudroid/platform/ShimDefs.h"
+#include "kudroid/platform/MemoryInfo.h"
 #include "kudroid/DeviceProfile.h"
 
 #include <cstdio>
@@ -12,8 +13,14 @@
 #include <vector>
 #include <filesystem>
 #include <unistd.h>
+#include <sys/mman.h>
 
 namespace kudroid {
+
+// Defined in SyscallShim.cpp. Declared here rather than pulled in through a header because
+// the asset shim otherwise has no reason to depend on the syscall layer.
+extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
+
 namespace {
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -40,18 +47,79 @@ static std::string current_assets_dir() {
     return g_assetsDir;
 }
 
+// Running totals for the buffers handed out, so the log says how much of the process
+// footprint is asset data rather than leaving it to be inferred.
+static std::mutex g_bufferStatsMtx;
+static uint64_t g_bufferBytesLive = 0;
+static uint64_t g_bufferBytesPeak = 0;
+static uint64_t g_bufferCount = 0;
+
+// Report an asset buffer against the process footprint.
+//
+// Minecraft ships 36005 assets totalling 574 MB uncompressed, and its largest single file
+// is a 20.9 MB material. libminecraftpe.so is already ~330 MB of image, so a handful of
+// those buffers is enough to reach the jetsam limit — and jetsam sends SIGKILL, which runs
+// no handler and writes no crash log. Nothing in the log would say why the process
+// vanished; this line is what makes that case identifiable rather than a guess.
+static void trace_buffer(const char* what, const std::string& name, uint64_t bytes,
+                         bool mapped) {
+    uint64_t live = 0;
+    uint64_t peak = 0;
+    uint64_t count = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_bufferStatsMtx);
+        g_bufferBytesLive += bytes;
+        if (g_bufferBytesLive > g_bufferBytesPeak) g_bufferBytesPeak = g_bufferBytesLive;
+        ++g_bufferCount;
+        live = g_bufferBytesLive;
+        peak = g_bufferBytesPeak;
+        count = g_bufferCount;
+    }
+
+    const SystemMemory mem = query_system_memory();
+    char message[512];
+    // headroom is os_proc_available_memory: what this process may still allocate before
+    // being killed. It is NOT system-available memory, and on iOS it is the only figure
+    // that predicts a jetsam kill.
+    std::snprintf(message, sizeof(message),
+                  "%s %s (%llu KB, %s) — buffers live %llu KB / peak %llu KB over %llu"
+                  " assets; footprint %llu KB, headroom %llu KB",
+                  what, name.c_str(),
+                  static_cast<unsigned long long>(bytes / 1024),
+                  mapped ? "mapped, clean" : "heap, dirty",
+                  static_cast<unsigned long long>(live / 1024),
+                  static_cast<unsigned long long>(peak / 1024),
+                  static_cast<unsigned long long>(count),
+                  static_cast<unsigned long long>(mem.process_resident_bytes / 1024),
+                  static_cast<unsigned long long>(mem.process_available_bytes / 1024));
+    trace_shim(message);
+    // Mirrored to the Android log so it reaches kudroid_android_logs.txt: the shim trace
+    // buffer is only dumped by the crash handler, and a SIGKILL never reaches it.
+    kudroid_android_log_message(4, "AssetShim", message);
+}
+
+static void untrace_buffer(uint64_t bytes) {
+    std::lock_guard<std::mutex> lock(g_bufferStatsMtx);
+    if (g_bufferBytesLive >= bytes) g_bufferBytesLive -= bytes;
+    else g_bufferBytesLive = 0;
+}
+
 // Opaque handles (bionic returns cursor without revealing content).
 struct DummyAssetManager { int dummy; };
 static DummyAssetManager g_manager;
 
-// AAsset: open with FILE*; getBuffer reads the entire thing into the heap.
+// AAsset: opened as a FILE* for reads; getBuffer maps the file rather than copying it.
 struct AAssetImpl {
     FILE* file;
     long length;
     long offset;
     std::string name;
-    void* buffer;      // cache cho AAsset_getBuffer
+    void* buffer;      // cache for AAsset_getBuffer
     size_t bufferSize;
+    // True when `buffer` came from mmap rather than malloc, so close() knows how to
+    // release it. The two are not interchangeable: munmap on heap memory and free on a
+    // mapping are both undefined.
+    bool bufferMapped;
 };
 
 struct AAssetDirImpl {
@@ -139,6 +207,7 @@ static AAssetImpl* open_asset(const char* filename) {
     asset->name = rel;
     asset->buffer = nullptr;
     asset->bufferSize = 0;
+    asset->bufferMapped = false;
     return asset;
 }
 
@@ -271,6 +340,43 @@ extern "C" const void* bionic_AAsset_getBuffer(void* asset) {
     if (!a) return nullptr;
     if (a->buffer) return a->buffer;
     if (a->length <= 0) return nullptr;
+
+    // mmap, not malloc + read.
+    //
+    // The contract is a pointer to the whole asset, valid until AAsset_close, and a
+    // mapping satisfies it as well as a heap copy does — but the pages are CLEAN, so
+    // under memory pressure the kernel can evict them and read them back from disk.
+    // Heap pages are dirty; iOS does not swap, so they can only be reclaimed by killing
+    // the process.
+    //
+    // The scale is what makes this decisive rather than tidy. Minecraft ships 574 MB of
+    // assets across 36005 files, its largest single material is 20.9 MB, and
+    // libminecraftpe.so is already ~330 MB of image. A handful of buffers reaches the
+    // jetsam limit, and jetsam sends SIGKILL: no handler runs, no crash log is written,
+    // and nothing in the log says why the process vanished.
+    //
+    // MAP_PRIVATE so a guest writing through the buffer — which the API does not permit
+    // but does not prevent — cannot modify the extracted asset on disk.
+    const int fd = ::fileno(a->file);
+    void* mapped = fd >= 0 ? ::mmap(nullptr, static_cast<size_t>(a->length), PROT_READ,
+                                    MAP_PRIVATE, fd, 0)
+                           : MAP_FAILED;
+    if (mapped != MAP_FAILED) {
+        a->buffer = mapped;
+        a->bufferSize = static_cast<size_t>(a->length);
+        a->bufferMapped = true;
+        // The API says the read cursor is unspecified after getBuffer; leaving it at the
+        // end matches what the copying implementation did, so a caller that mixes
+        // getBuffer with read() sees no change in behaviour.
+        a->offset = a->length;
+        trace_buffer("AAsset_getBuffer mapped", a->name,
+                     static_cast<uint64_t>(a->length), /*mapped=*/true);
+        return mapped;
+    }
+
+    // Falling back to a copy keeps the API working where mmap cannot (a filesystem that
+    // does not support it). Logged as dirty, because that is the case that counts against
+    // the footprint.
     void* buf = std::malloc(static_cast<size_t>(a->length));
     if (!buf) return nullptr;
     std::fseek(a->file, 0, SEEK_SET);
@@ -281,14 +387,23 @@ extern "C" const void* bionic_AAsset_getBuffer(void* asset) {
     }
     a->buffer = buf;
     a->bufferSize = got;
+    a->bufferMapped = false;
     a->offset = static_cast<long>(got);
+    trace_buffer("AAsset_getBuffer copied", a->name, static_cast<uint64_t>(got),
+                 /*mapped=*/false);
     return buf;
 }
 
 extern "C" void bionic_AAsset_close(void* asset) {
     auto* a = static_cast<AAssetImpl*>(asset);
     if (!a) return;
-    if (a->buffer) std::free(a->buffer);
+    if (a->buffer) {
+        // munmap and free are not interchangeable; using the wrong one is undefined and
+        // would corrupt the allocator or the address space rather than fail visibly.
+        if (a->bufferMapped) ::munmap(a->buffer, a->bufferSize);
+        else std::free(a->buffer);
+        untrace_buffer(static_cast<uint64_t>(a->bufferSize));
+    }
     if (a->file) std::fclose(a->file);
     delete a;
 }
