@@ -249,7 +249,10 @@ void* JitCompiler::AllocateAndCommit(const std::vector<uint32_t>& code) {
     if (code.empty()) return nullptr;
     const size_t bytes = code.size() * sizeof(uint32_t);
     void* mem = JitCache::Instance().Allocate(bytes);
-    if (mem == nullptr) return nullptr;
+    if (mem == nullptr) {
+        std::fprintf(stderr, "[KuART][JIT] allocation refused by executable-memory or pressure budget\n");
+        return nullptr;
+    }
     std::memcpy(mem, code.data(), bytes);
     if (!JitCache::Instance().Commit(mem, bytes)) return nullptr;
     return mem;

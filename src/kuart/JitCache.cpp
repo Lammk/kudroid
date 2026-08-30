@@ -50,6 +50,15 @@ JitCache& JitCache::Instance() {
     return instance;
 }
 
+size_t JitCache::EffectiveBudgetBytes(const SystemMemory& memory) {
+    if (memory.process_available_bytes == 0) return kMaxTotalBytes;
+    constexpr uint64_t kMiB = 1024ull * 1024ull;
+    if (memory.process_available_bytes < 128ull * kMiB) return 0;
+    if (memory.process_available_bytes < 256ull * kMiB) return 4ull * kMiB;
+    if (memory.process_available_bytes < 512ull * kMiB) return 16ull * kMiB;
+    return kMaxTotalBytes;
+}
+
 JitCache::~JitCache() {
     for (Block& b : blocks_) {
         if (b.memory != nullptr) ::munmap(b.memory, b.capacity);
@@ -110,7 +119,8 @@ void* JitCache::Allocate(size_t size) {
     if (need > kBlockSize) return nullptr;
 
     std::lock_guard<std::mutex> lock(mutex_);
-    if (bytes_allocated_ + need > kMaxTotalBytes) return nullptr;
+    const size_t budget = EffectiveBudgetBytes(query_system_memory());
+    if (budget == 0 || bytes_allocated_ + need > budget) return nullptr;
 
     if (!blocks_.empty()) {
         Block& tail = blocks_.back();
@@ -175,6 +185,11 @@ size_t JitCache::BytesAllocated() const {
 size_t JitCache::BlockCount() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return blocks_.size();
+}
+
+size_t JitCache::BudgetBytes() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return EffectiveBudgetBytes(query_system_memory());
 }
 
 }  // namespace kuart

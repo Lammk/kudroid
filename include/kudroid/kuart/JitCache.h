@@ -18,6 +18,8 @@
 #include <mutex>
 #include <vector>
 
+#include "kudroid/platform/MemoryInfo.h"
+
 namespace kudroid {
 namespace kuart {
 
@@ -35,6 +37,11 @@ public:
     // LiveContainer the guest inherits the host's signing status, so KuDroid's own
     // entitlements say nothing about what it is allowed to do.
     static bool IsAvailable();
+
+    // Return the current append-only budget. A zero process headroom means the
+    // platform did not expose a per-process figure, so the hard cap remains the
+    // fallback. Existing RX code is never reclaimed by this policy.
+    static size_t EffectiveBudgetBytes(const SystemMemory& memory);
 
     // Reserve writable memory for at least `size` bytes of code.
     //
@@ -60,6 +67,7 @@ public:
 
     size_t BytesAllocated() const;
     size_t BlockCount() const;
+    size_t BudgetBytes() const;
 
     // Total code the cache will ever hand out. Reached in practice only by a workload
     // that compiles tens of thousands of methods; the interpreter takes over after.
