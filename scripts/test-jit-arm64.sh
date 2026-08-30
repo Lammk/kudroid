@@ -31,9 +31,10 @@ fi
 BUILD_DIR="${1:-$ROOT_DIR/build}"
 JIT_OBJ="$BUILD_DIR/CMakeFiles/kudroid_core.dir/src/kuart/JitCompiler.cpp.o"
 CACHE_OBJ="$BUILD_DIR/CMakeFiles/kudroid_core.dir/src/kuart/JitCache.cpp.o"
+MEMORY_OBJ="$BUILD_DIR/CMakeFiles/kudroid_core.dir/src/platform/MemoryInfo.cpp.o"
 ART_LIB="$BUILD_DIR/third_party/art_dex/libart_dex.a"
 
-if [[ ! -f "$JIT_OBJ" || ! -f "$ART_LIB" ]]; then
+if [[ ! -f "$JIT_OBJ" || ! -f "$CACHE_OBJ" || ! -f "$MEMORY_OBJ" || ! -f "$ART_LIB" ]]; then
     echo "SKIP: build kudroid_core first (missing $JIT_OBJ)"
     exit 0
 fi
@@ -47,7 +48,7 @@ g++ -std=c++17 -w \
     -I "$ROOT_DIR/include" -I "$ROOT_DIR/third_party/art_dex" \
     -o "$OUT/dump" \
     "$ROOT_DIR/kuart-tests/jit_codegen_dump.cpp" \
-    "$JIT_OBJ" "$CACHE_OBJ" "$ART_LIB" -lz
+    "$JIT_OBJ" "$CACHE_OBJ" "$MEMORY_OBJ" "$ART_LIB" -lz
 
 "$OUT/dump" > "$OUT/gen_code.h"
 
