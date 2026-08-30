@@ -42,6 +42,7 @@
 
 extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
 extern "C" void kudroid_persistent_breadcrumb(const char* line);
+extern "C" bool bionic_handle_guest_syscall_trap(void* context);
 
 extern "C" void kudroid_ios_diagnostic_phase(const char* phase) {
 #if defined(__APPLE__)
@@ -661,6 +662,9 @@ static void chainToPreviousHandler(int sig) {
 }
 
 static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
+    if (sig == SIGSYS && bionic_handle_guest_syscall_trap(ucontext)) {
+        return;
+    }
     if (sig == SIGTRAP) {
         if (kudroid::bionic_handle_tpidr_trap(ucontext)) {
             return; // handled successfully, resuming execution!
@@ -996,7 +1000,7 @@ static void installCrashHandlers(void) {
     // Chaining is what makes both survive: bionic_handle_tpidr_trap claims only the
     // BRK immediates KuDroid itself planted, and anything it does not recognise goes to
     // the previous handler rather than being reported as a KuDroid crash.
-    const int kSignals[] = {SIGILL, SIGBUS, SIGSEGV, SIGTRAP, SIGABRT};
+    const int kSignals[] = {SIGILL, SIGBUS, SIGSEGV, SIGTRAP, SIGABRT, SIGSYS};
     for (int sig : kSignals) {
         struct sigaction previous;
         memset(&previous, 0, sizeof(previous));

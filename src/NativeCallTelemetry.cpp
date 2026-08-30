@@ -35,6 +35,7 @@ struct ActiveCall {
     char java_class[256] = {};
     char java_method[256] = {};
     char java_signature[512] = {};
+    std::atomic<uint64_t> java_last_progress_ns{0};
 };
 
 ActiveCall g_call;
@@ -55,7 +56,6 @@ void watchdog_main() {
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
         const bool native_active = g_call.active_count.load(std::memory_order_acquire) != 0;
         const bool java_active = g_call.java_active_count.load(std::memory_order_acquire) != 0;
-        if (!native_active && !java_active) continue;
 
         char cls[sizeof(g_call.class_name)];
         char method[sizeof(g_call.method)];
@@ -89,6 +89,9 @@ void watchdog_main() {
         const SystemMemory memory = query_system_memory();
         char line[2048];
         const uint64_t java_elapsed = java_start != 0 ? now_ns() - java_start : 0;
+        // Short Java calls stay RAM-only; durable watchdog records begin once
+        // execution has exceeded the diagnostic threshold.
+        if (!native_active && (!java_active || java_elapsed < 250000000ull)) continue;
         std::snprintf(line, sizeof(line),
                       "watchdog native_active=%d native_call_id=%llu native_thread_id=%llu stage=%s class=%s method=%s sig=%s vm_depth=%d java_active=%d java_thread_id=%llu java_depth=%zu java_elapsed_ms=%llu java_class=%s java_method=%s java_sig=%s footprint=%llu process_headroom=%llu available=%llu low_memory=%d",
                       native_active ? 1 : 0,
@@ -199,7 +202,8 @@ void java_call_enter(const char* class_name, const char* method,
         copy_text(g_call.java_signature, sizeof(g_call.java_signature), signature);
         g_call.java_thread_id = thread_id();
         g_call.java_depth = depth;
-        g_call.java_start_ns = now_ns();
+    g_call.java_start_ns = now_ns();
+        g_call.java_last_progress_ns.store(g_call.java_start_ns, std::memory_order_release);
     }
     g_call.java_active_count.fetch_add(1, std::memory_order_acq_rel);
     bool expected = false;
@@ -214,7 +218,9 @@ void java_call_enter(const char* class_name, const char* method,
                   class_name != nullptr ? class_name : "?",
                   method != nullptr ? method : "?",
                   signature != nullptr ? signature : "?");
-    kudroid_persistent_breadcrumb(line);
+    // Enter/exit are intentionally not persisted: doing so for every tiny
+    // framework helper turns tracing itself into a launch-time workload.
+    (void)line;
 }
 
 void java_call_exit() {
@@ -229,7 +235,7 @@ void java_call_exit() {
                       static_cast<unsigned long long>(elapsed / 1000000), g_call.java_class,
                       g_call.java_method, g_call.java_signature);
     }
-    kudroid_persistent_breadcrumb(line);
+    if (elapsed >= 250000000ull) kudroid_persistent_breadcrumb(line);
     g_call.java_active_count.fetch_sub(1, std::memory_order_acq_rel);
 }
 

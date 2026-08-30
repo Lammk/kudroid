@@ -1467,6 +1467,10 @@ extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_
         case 124: // sched_yield
             return ::sched_yield();
 
+        case 132: // sigaltstack (Linux arm64 syscall number)
+            return bionic_sigaltstack(reinterpret_cast<const stack_t*>(a1),
+                                      reinterpret_cast<stack_t*>(a2));
+
         case 160: // uname
             return bionic_uname(reinterpret_cast<struct bionic_utsname*>(a1));
 
@@ -1565,6 +1569,39 @@ extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_
     }
     errno = ENOSYS;
     return -1;
+}
+
+// A guest library may issue `svc #0` directly instead of calling the imported
+// libc syscall wrapper. Darwin delivers SIGSYS for that Linux syscall ABI; on
+// Apple, emulate the request from the signal context and resume after SVC.
+// This keeps the boundary generic for all Linux/Android arm64 guests.
+extern "C" bool bionic_handle_guest_syscall_trap(void* context) {
+#if defined(__APPLE__) && defined(__aarch64__)
+    if (context == nullptr) return false;
+    ucontext_t* uc = static_cast<ucontext_t*>(context);
+    uint32_t* pc = reinterpret_cast<uint32_t*>(uc->uc_mcontext->__ss.__pc);
+    uintptr_t svc_pc = reinterpret_cast<uintptr_t>(pc);
+    uint32_t inst = *pc;
+    if ((inst & 0xFFE0001F) != 0xD4000001) {
+        if (svc_pc < 4) return false;
+        pc--;
+        inst = *pc;
+        if ((inst & 0xFFE0001F) != 0xD4000001) return false;
+        svc_pc -= 4;
+    }
+    if (uc->uc_mcontext->__ss.__x[8] > 1000) return false;
+    const long result = bionic_syscall(
+        static_cast<long>(uc->uc_mcontext->__ss.__x[8]),
+        uc->uc_mcontext->__ss.__x[0], uc->uc_mcontext->__ss.__x[1],
+        uc->uc_mcontext->__ss.__x[2], uc->uc_mcontext->__ss.__x[3],
+        uc->uc_mcontext->__ss.__x[4], uc->uc_mcontext->__ss.__x[5]);
+    uc->uc_mcontext->__ss.__x[0] = static_cast<uint64_t>(result);
+    uc->uc_mcontext->__ss.__pc = svc_pc + 4;
+    return true;
+#else
+    (void)context;
+    return false;
+#endif
 }
 
 // ── Wrapper syscall ph bin b bind dummy before y (log "missing symbol

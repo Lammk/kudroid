@@ -321,6 +321,7 @@ static void test_sigaction_flag_roundtrip() {
 #define GUEST_SYS_gettid 178
 #define GUEST_SYS_futex 98
 #define GUEST_SYS_process_vm_readv 270
+#define GUEST_SYS_sigaltstack 132
 #define FUTEX_WAIT_PRIVATE 128
 #define FUTEX_WAKE_PRIVATE 129
 
@@ -334,6 +335,14 @@ static void test_syscall_mappings() {
     std::thread t([&] { otherTid = bionic_syscall(GUEST_SYS_gettid); });
     t.join();
     CHECK(otherTid != mainTid, "gettid(178) unique per thread");
+
+    // sigaltstack(132): this is also the first direct Linux ARM64 SVC observed
+    // from a guest thread on iOS. Querying the current stack exercises the
+    // mapping without changing the host signal stack.
+    stack_t current_stack{};
+    errno = 0;
+    CHECK(bionic_syscall(GUEST_SYS_sigaltstack, nullptr, &current_stack) == 0,
+          "sigaltstack(132) query is routed by the Linux ARM64 number");
 
     // tgkill: registry tid -> pthread_t (write when gettid) must be found.
     CHECK(bionic_tgkill(::getpid(), static_cast<int>(mainTid), 0) == 0,
