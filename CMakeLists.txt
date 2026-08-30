@@ -218,6 +218,17 @@ else()
         target_include_directories(test_vfs PRIVATE include)
     endif()
 
+    # AAssetManager path resolution. An APK may nest a directory named assets/ inside its
+    # assets, and an AAssetManager path is relative to the outer one — so the nested case
+    # needs the literal path, not a rewritten one.
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_assets.cpp")
+        add_executable(test_assets
+            tests/test_assets.cpp
+        )
+        target_link_libraries(test_assets PRIVATE kudroid_core)
+        target_include_directories(test_assets PRIVATE include)
+    endif()
+
     # KuART's tests are located in kuart-tests/ (not tests/) because tests/ is broken
     # .gitignore — CI needs these files so they must be committed.
     # test_art_dex parse DEX with ART's libdexfile

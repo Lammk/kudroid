@@ -59,6 +59,49 @@ struct AAssetDirImpl {
     size_t cursor = 0;
 };
 
+// Resolve an AAssetManager path against the extracted assets directory.
+//
+// The path a game passes is relative to the APK's assets/ folder, so `bootstrap.json`
+// means the zip entry `assets/bootstrap.json`. What makes this less obvious than it looks
+// is that an APK may NEST a folder of the same name: Minecraft ships 36001 of its 36005
+// asset entries under `assets/assets/`, so the file the game wants at
+// `assets/assets/bootstrap.json` is requested as `assets/bootstrap.json`.
+//
+// This used to strip a leading "assets/" unconditionally, with a comment calling it a path
+// the game "transmits incorrectly". It is not incorrect — it is a real directory inside
+// assets/, and removing it turned the one path that resolves into the one that does not:
+// `assets/bootstrap.json` became `bootstrap.json`, which exists nowhere.
+//
+// So the literal path is tried FIRST, and the strip is only a fallback for a game that
+// really does pass the zip entry name. Both APK shapes then work, and a nested assets/
+// folder is no longer shadowed by the guess.
+static bool resolve_asset_path(const std::string& base, const char* filename,
+                               std::string* relOut, std::filesystem::path* fullOut) {
+    const std::string requested = filename;
+    std::error_code ec;
+
+    const auto literal = std::filesystem::path(base) / requested;
+    if (std::filesystem::exists(literal, ec) &&
+        !std::filesystem::is_directory(literal, ec)) {
+        *relOut = requested;
+        *fullOut = literal;
+        return true;
+    }
+
+    // Fallback: the caller passed the zip entry name rather than an assets-relative path.
+    if (requested.rfind("assets/", 0) == 0) {
+        const std::string stripped = requested.substr(7);
+        const auto alternate = std::filesystem::path(base) / stripped;
+        if (std::filesystem::exists(alternate, ec) &&
+            !std::filesystem::is_directory(alternate, ec)) {
+            *relOut = stripped;
+            *fullOut = alternate;
+            return true;
+        }
+    }
+    return false;
+}
+
 static AAssetImpl* open_asset(const char* filename) {
     if (!filename || !*filename) return nullptr;
     const std::string base = current_assets_dir();
@@ -66,16 +109,22 @@ static AAssetImpl* open_asset(const char* filename) {
         trace_shim("AAssetManager_open: assets dir not set (kudroid_set_assets_dir)");
         return nullptr;
     }
-    // Remove the "assets/" prefix if the game transmits it incorrectly (path must be relative).
-    std::string rel = filename;
-    if (rel.rfind("assets/", 0) == 0) rel = rel.substr(7);
 
-    std::error_code ec;
-    const auto full = std::filesystem::path(base) / rel;
-    if (!std::filesystem::exists(full, ec)) {
-        trace_shim("AAssetManager_open: not found (fallback safe NULL)");
+    std::string rel;
+    std::filesystem::path full;
+    if (!resolve_asset_path(base, filename, &rel, &full)) {
+        // Name the path that was looked for, not just the fact of failure. The old message
+        // said only "not found", and the game's own log line prints the name it asked for
+        // — so when the two differ, as they did for every nested asset, nothing on either
+        // side showed the path that was actually tried.
+        std::string message = "AAssetManager_open: not found '";
+        message += filename;
+        message += "' under ";
+        message += base;
+        trace_shim(message.c_str());
         return nullptr;
     }
+
     FILE* f = std::fopen(full.string().c_str(), "rb");
     if (!f) return nullptr;
 
@@ -133,12 +182,17 @@ extern "C" void* bionic_AAssetManager_openDir(void* /*manager*/, const char* dir
     const std::string base = current_assets_dir();
     if (base.empty()) return dir;
 
-    std::string rel = dirName ? dirName : "";
-    if (rel.rfind("assets/", 0) == 0) rel = rel.substr(7);
-
+    // The same nesting rule as open_asset: the literal path first, the stripped form only
+    // as a fallback. Stripping unconditionally listed the wrong directory for a nested
+    // assets/ folder — and returned an EMPTY dir rather than an error, so a game
+    // enumerating its assets simply found nothing and reported no failure.
     std::error_code ec;
-    const auto full = rel.empty() ? std::filesystem::path(base)
-                                  : std::filesystem::path(base) / rel;
+    const std::string requested = dirName ? dirName : "";
+    auto full = requested.empty() ? std::filesystem::path(base)
+                                  : std::filesystem::path(base) / requested;
+    if (!std::filesystem::is_directory(full, ec) && requested.rfind("assets/", 0) == 0) {
+        full = std::filesystem::path(base) / requested.substr(7);
+    }
     if (!std::filesystem::is_directory(full, ec)) return dir;
     for (const auto& entry : std::filesystem::directory_iterator(full, ec)) {
         if (entry.is_regular_file(ec)) {
