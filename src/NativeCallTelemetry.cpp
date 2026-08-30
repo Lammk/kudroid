@@ -6,6 +6,7 @@
 #include <cstring>
 #include <mutex>
 #include <thread>
+#include <functional>
 
 #include "kudroid/Log.h"
 #include "kudroid/platform/MemoryInfo.h"
@@ -24,9 +25,16 @@ struct ActiveCall {
     int vm_lock_depth = 0;
     std::atomic<unsigned> active_count{0};
     std::atomic<bool> started{false};
+    std::atomic<uint64_t> next_call_id{1};
 };
 
 ActiveCall g_call;
+thread_local uint64_t t_call_id = 0;
+
+uint64_t thread_id() {
+    return static_cast<uint64_t>(std::hash<std::thread::id>{}(
+        std::this_thread::get_id()));
+}
 
 void watchdog_main() {
     while (g_call.started.load(std::memory_order_acquire)) {
@@ -49,8 +57,9 @@ void watchdog_main() {
         const SystemMemory memory = query_system_memory();
         char line[2048];
         std::snprintf(line, sizeof(line),
-                      "native-watchdog stage=%s class=%s method=%s sig=%s vm_depth=%d footprint=%llu process_headroom=%llu available=%llu low_memory=%d",
-                      stage, cls, method, sig, depth,
+                      "native-watchdog call_id=%llu thread_id=%llu stage=%s class=%s method=%s sig=%s vm_depth=%d footprint=%llu process_headroom=%llu available=%llu low_memory=%d",
+                      static_cast<unsigned long long>(t_call_id),
+                      static_cast<unsigned long long>(thread_id()), stage, cls, method, sig, depth,
                       static_cast<unsigned long long>(memory.process_resident_bytes),
                       static_cast<unsigned long long>(memory.process_available_bytes),
                       static_cast<unsigned long long>(memory.available_bytes),
@@ -66,6 +75,24 @@ void copy_text(char* dst, size_t capacity, const char* src) {
 
 }  // namespace
 
+void native_run_begin() {
+    static std::atomic<uint64_t> next_run{1};
+    const uint64_t run = next_run.fetch_add(1, std::memory_order_relaxed);
+    char line[160];
+    std::snprintf(line, sizeof(line), "run-start run_id=%llu thread_id=%llu",
+                  static_cast<unsigned long long>(run),
+                  static_cast<unsigned long long>(thread_id()));
+    kudroid_persistent_breadcrumb(line);
+}
+
+void native_phase(const char* phase) {
+    char line[256];
+    std::snprintf(line, sizeof(line), "phase=%s thread_id=%llu",
+                  phase != nullptr ? phase : "?",
+                  static_cast<unsigned long long>(thread_id()));
+    kudroid_persistent_breadcrumb(line);
+}
+
 void native_call_enter(const char* class_name, const char* method,
                        const char* signature, int vm_lock_depth) {
     {
@@ -77,6 +104,7 @@ void native_call_enter(const char* class_name, const char* method,
         g_call.vm_lock_depth = vm_lock_depth;
     }
     g_call.active_count.fetch_add(1, std::memory_order_acq_rel);
+    t_call_id = g_call.next_call_id.fetch_add(1, std::memory_order_relaxed);
     bool expected = false;
     if (g_call.started.compare_exchange_strong(expected, true,
                                                std::memory_order_acq_rel)) {
@@ -91,8 +119,10 @@ void native_call_stage(const char* stage) {
         std::lock_guard<std::mutex> lock(g_call.mutex);
         copy_text(g_call.stage, sizeof(g_call.stage), stage);
         std::snprintf(line, sizeof(line),
-                      "native-stage stage=%s class=%s method=%s sig=%s vm_depth=%d",
-                      stage, g_call.class_name, g_call.method, g_call.signature,
+                      "native-stage call_id=%llu thread_id=%llu stage=%s class=%s method=%s sig=%s vm_depth=%d",
+                      static_cast<unsigned long long>(t_call_id),
+                      static_cast<unsigned long long>(thread_id()), stage,
+                      g_call.class_name, g_call.method, g_call.signature,
                       g_call.vm_lock_depth);
     }
     kudroid_persistent_breadcrumb(line);
@@ -104,6 +134,7 @@ void native_call_exit() {
                               count, count - 1, std::memory_order_acq_rel,
                               std::memory_order_acquire)) {
     }
+    t_call_id = 0;
 }
 
 }  // namespace kudroid

@@ -372,7 +372,6 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
                   memory_after.low_memory ? 1 : 0);
     kudroid_persistent_breadcrumb(breadcrumb);
     native_call_stage("before-result-decode");
-
     switch (shorty[0]) {
         case 'V': break;
         case 'Z': result = DexValue::Int(ret != 0 ? 1 : 0); break;

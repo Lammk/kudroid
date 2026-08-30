@@ -14,6 +14,7 @@
 #include "dex/dex_file-inl.h"
 
 #include "kudroid/framework_dex_bytes.h"
+#include "kudroid/NativeCallTelemetry.h"
 #include "kudroid/kuart/DexClassLinker.h"
 #include "kudroid/kuart/DexJniEnv.h"
 #include "kudroid/kuart/DexReflect.h"
@@ -525,13 +526,16 @@ extern "C" int kuart_launch_app(const char* package_name, const char* component_
         put(kHeader + 1 + i, extra_candidates[i]);
     }
 
+    kudroid::native_phase("activity-thread-main-enter");
     Log("call ActivityThread.main(pkg=\"%s\" factory=\"%s\" app=\"%s\" activity=\"%s\") + %d backup candidate",
         package_name != nullptr ? package_name : "",
         component_factory != nullptr ? component_factory : "",
         app_class != nullptr ? app_class : "", activity_name,
         total - kHeader - 1);
     const DexValue arg = DexValue::Ref(args_array);
-    return CallActivityThreadStatic("main", "([Ljava/lang/String;)V", &arg, 1) ? 1 : 0;
+    const int ok = CallActivityThreadStatic("main", "([Ljava/lang/String;)V", &arg, 1) ? 1 : 0;
+    kudroid::native_phase("activity-thread-main-exit");
+    return ok;
 }
 
 extern "C" int kuart_launch_activity(const char* activity_name,

@@ -4,6 +4,9 @@
 
 namespace kudroid {
 
+void native_run_begin();
+void native_phase(const char* phase);
+
 // A native call can outlive every crash handler when the OS terminates the
 // process. These hooks maintain a small, durable diagnostic record for that
 // case. The implementation is intentionally independent of any guest app.

@@ -249,6 +249,7 @@ jobs:
           echo "ANDROID_HOME=$ANDROID_HOME"
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
           bash framework/build.sh
+          python3 scripts/verify_framework_embed.py
           ls -lh framework/build/framework.dex
           ls -lh include/kudroid/framework_dex_bytes.h
 

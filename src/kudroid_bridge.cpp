@@ -9,6 +9,7 @@
 #include "kudroid/PermissionManager.h"
 #include "kudroid/KuArtRuntime.h"
 #include "kudroid/platform/JavaCanvasRenderer.h"
+#include "kudroid/NativeCallTelemetry.h"
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
@@ -1859,7 +1860,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
         return strdup("[kudroid_core] APK is already running.\n");
     }
 
-    // Reset/truncate logs mi phin run app lun write log mi hon ton (no/not chng ln nhau)
+    // Reset/truncate logs so persistent breadcrumbs represent one APK run.
     if (g_logDir[0] != '\0') {
         char aPath[1200];
         snprintf(aPath, sizeof(aPath), "%s/kudroid_android_logs.txt", g_logDir);
@@ -1869,6 +1870,10 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
             fprintf(afp, "[kudroid_core] Build: %s\n", kudroid_build_stamp());
             fclose(afp);
         }
+
+        snprintf(aPath, sizeof(aPath), "%s/native_breadcrumbs.log", g_logDir);
+        FILE* bfp = fopen(aPath, "w");
+        if (bfp) fclose(bfp);
 
         snprintf(aPath, sizeof(aPath), "%s/kudroid_crash.log", g_logDir);
         FILE* cfp = fopen(aPath, "w");
@@ -1888,6 +1893,9 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
         }
 #endif
     }
+
+    kudroid::native_run_begin();
+    kudroid::native_phase("apk-run-enter");
 
     std::string log;
     appendTestHeader(log, "Run APK Native Libraries", appName);
@@ -2648,6 +2656,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                             appendAndEcho("[kudroid_core] Application class: " + manifestAppClass);
                         }
                         appendAndEcho("[kudroid_core] Launching Android ActivityThread runtime (KuART)...");
+                        kudroid::native_phase("activity-thread-before-main");
 
                         // Register the manifest BEFORE launching. A component reads its
                         // own entry while constructing itself — AGDK's GameActivity asks
@@ -2703,6 +2712,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                             appendAndEcho("[kudroid_core] ERROR: ActivityThread.main failed: " +
                                           std::string(kuart_last_error()));
                         }
+                        kudroid::native_phase("activity-thread-after-main");
                     }
                 }
             }
