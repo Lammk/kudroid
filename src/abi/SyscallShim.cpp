@@ -255,6 +255,8 @@ extern "C" int kudroid_android_log_print_trampoline();
 // freestanding arm64 test can link them without dragging in this file.
 extern "C" int kudroid_snprintf_trampoline();
 extern "C" int kudroid_sprintf_trampoline();
+extern "C" int kudroid_snprintf_chk_trampoline();
+extern "C" int kudroid_sprintf_chk_trampoline();
 
 extern "C" int kudroid_android_log_print_from_registers(const uint64_t* frame) {
     const auto* registers = reinterpret_cast<const GuestVarargs*>(frame);
@@ -1689,6 +1691,44 @@ extern "C" void bionic___assert2(const char* file, int line, const char* functio
     abort();
 }
 
+// Report a guest assertion failure and abort, as bionic does.
+//
+// Split from the entry point below so the arm64 path can reach it after unpacking the
+// guest's registers itself: __android_log_assert is variadic, and forwarding a guest's
+// varargs to a host vsnprintf reads the wrong place (see GuestVarargs.h). The failure was
+// visible in a crash log — strlen faulting on 0x3930 inside this function, which is a
+// format argument that was never a pointer.
+static void reportGuestAssert(const char* cond, const char* tag, const char* message) {
+    logAndroidMessage(6, tag ? tag : "KuDroidAssert", message);
+    fprintf(stderr, "[KuDroidAssert][%s] %s\n", tag ? tag : "assert", message);
+    // The condition text is what names the failing invariant; bionic prints it too, and
+    // without it the message alone often does not say which check tripped.
+    if (cond && *cond) {
+        fprintf(stderr, "[KuDroidAssert] condition: %s\n", cond);
+    }
+    abort();
+}
+
+#if defined(__aarch64__)
+extern "C" void kudroid_log_assert_trampoline();
+
+// __android_log_assert(cond, tag, fmt, ...): varargs start at the fourth integer register.
+extern "C" int kudroid_log_assert_from_registers(const uint64_t* frame) {
+    const auto* registers = reinterpret_cast<const GuestVarargs*>(frame);
+    const char* cond = reinterpret_cast<const char*>(registers->gp[0]);
+    const char* tag = reinterpret_cast<const char*>(registers->gp[1]);
+    const char* format = reinterpret_cast<const char*>(registers->gp[2]);
+
+    char message[512];
+    if (format != nullptr) {
+        FormatGuestVarargs(message, sizeof(message), format, registers, /*firstGpIndex=*/3);
+    } else {
+        FormatGuestVarargs(message, sizeof(message), "assertion failed", registers, 3);
+    }
+    reportGuestAssert(cond, tag, message);
+    return 0;  // not reached: reportGuestAssert aborts
+}
+#else
 extern "C" void bionic___android_log_assert(const char* cond, const char* tag, const char* fmt, ...) {
     char buf[512];
     if (fmt) {
@@ -1699,10 +1739,9 @@ extern "C" void bionic___android_log_assert(const char* cond, const char* tag, c
     } else {
         snprintf(buf, sizeof(buf), "assertion failed: %s", cond ? cond : "unknown");
     }
-    logAndroidMessage(6, tag ? tag : "KuDroidAssert", buf);
-    fprintf(stderr, "[KuDroidAssert][%s] %s\n", tag ? tag : "assert", buf);
-    abort();
+    reportGuestAssert(cond, tag, buf);
 }
+#endif
 
 extern "C" ssize_t bionic_splice(int fd_in, off_t* off_in, int fd_out, off_t* off_out, size_t len, unsigned int flags) {
     (void)flags;
@@ -4413,7 +4452,11 @@ const SymbolEntry kSyscallSymbols[] = {
     {"splice", reinterpret_cast<void*>(&bionic_splice)},
     {"copy_file_range", reinterpret_cast<void*>(&bionic_copy_file_range)},
     {"__assert2", reinterpret_cast<void*>(&bionic___assert2)},
+#if defined(__aarch64__)
+    {"__android_log_assert", reinterpret_cast<void*>(&kudroid_log_assert_trampoline)},
+#else
     {"__android_log_assert", reinterpret_cast<void*>(&bionic___android_log_assert)},
+#endif
     {"__android_log_vprint", reinterpret_cast<void*>(&bionic_android_log_vprint)},
     {"__android_log_write", reinterpret_cast<void*>(&bionic_android_log_write)},
     {"__android_log_buf_write", reinterpret_cast<void*>(&bionic_android_log_buf_write)},
@@ -4515,9 +4558,17 @@ const SymbolEntry kSyscallSymbols[] = {
     {"__memset_chk", reinterpret_cast<void*>(&bionic___memset_chk)},
     {"__read_chk", reinterpret_cast<void*>(&bionic___read_chk)},
     {"__write_chk", reinterpret_cast<void*>(&bionic___write_chk)},
+    // The _FORTIFY_SOURCE forms, which is what a release-built guest calls instead of
+    // snprintf/sprintf. Same ABI problem as the plain versions, so the same trampoline
+    // treatment; __vsnprintf_chk takes a va_list rather than varargs and is unaffected.
+#if defined(__aarch64__)
+    {"__snprintf_chk", reinterpret_cast<void*>(&kudroid_snprintf_chk_trampoline)},
+    {"__sprintf_chk", reinterpret_cast<void*>(&kudroid_sprintf_chk_trampoline)},
+#else
     {"__snprintf_chk", reinterpret_cast<void*>(&bionic___snprintf_chk)},
-    {"__vsnprintf_chk", reinterpret_cast<void*>(&bionic___vsnprintf_chk)},
     {"__sprintf_chk", reinterpret_cast<void*>(&bionic___sprintf_chk)},
+#endif
+    {"__vsnprintf_chk", reinterpret_cast<void*>(&bionic___vsnprintf_chk)},
     {"__strncpy_chk", reinterpret_cast<void*>(&bionic___strncpy_chk)},
     {"__strcpy_chk", reinterpret_cast<void*>(&bionic___strcpy_chk)},
     {"__strcat_chk", reinterpret_cast<void*>(&bionic___strcat_chk)},
@@ -4579,7 +4630,11 @@ const SymbolEntry kSyscallSymbols[] = {
     {"copy_file_range", reinterpret_cast<void*>(&bionic_copy_file_range)},
     {"splice", reinterpret_cast<void*>(&bionic_splice)},
     {"__assert2", reinterpret_cast<void*>(&bionic___assert2)},
+#if defined(__aarch64__)
+    {"__android_log_assert", reinterpret_cast<void*>(&kudroid_log_assert_trampoline)},
+#else
     {"__android_log_assert", reinterpret_cast<void*>(&bionic___android_log_assert)},
+#endif
 
     // KuDroid Screen Orientation, Haptic Vibrator & Sensor Bridge
     {"kudroid_vibrate", reinterpret_cast<void*>(&kudroid_vibrate)},

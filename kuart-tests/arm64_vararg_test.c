@@ -23,14 +23,22 @@ typedef unsigned long size_t;
  * emits a normal AAPCS64 variadic call — exactly what guest code does. */
 extern int kudroid_snprintf_trampoline(char* buf, size_t size, const char* fmt, ...);
 extern int kudroid_sprintf_trampoline(char* buf, const char* fmt, ...);
+/* The _FORTIFY_SOURCE forms, which is what a release-built guest actually calls. More
+ * fixed arguments before the varargs, so an off-by-one in the starting register index
+ * shows up here and not in the plain versions. */
+extern int kudroid_snprintf_chk_trampoline(char* buf, size_t maxlen, int flag, size_t slen,
+                                           const char* fmt, ...);
+extern int kudroid_sprintf_chk_trampoline(char* buf, int flag, size_t slen,
+                                          const char* fmt, ...);
 
 /* The log trampoline lives in the same assembly file and so needs its handler resolved at
  * link time, but the real one is in SyscallShim.cpp and pulls in the whole shim — mutexes,
  * files, the crash buffer — none of which can be built freestanding. Stubbed because this
  * test is about argument placement, which the snprintf path exercises identically: both
  * trampolines are the same macro expansion, and both take varargs from the fourth integer
- * register. */
+ * register. Same reasoning for the assert handler. */
 int kudroid_android_log_print_from_registers(const u64* frame) { (void)frame; return 0; }
+int kudroid_log_assert_from_registers(const u64* frame) { (void)frame; return 0; }
 
 /* ── libc pieces the C++ formatter references ─────────────────────────────────────── */
 
@@ -200,6 +208,39 @@ int main(void) {
 
     kudroid_sprintf_trampoline(buf, "%d-%s-%.1f", 5, "x", 1.5);
     CheckText(buf, "5-x-1.5", "sprintf takes its format one register earlier");
+
+    puts_("-- fortified forms --\n");
+
+    /* __snprintf_chk(buf, maxlen, flag, slen, fmt, ...): four fixed arguments, so varargs
+     * begin at x5 and only three registers are left before the overflow area. A guest
+     * built with _FORTIFY_SOURCE — which release builds are — calls this rather than
+     * snprintf, so getting the index wrong here breaks the common case while the plain
+     * version above still passes. */
+    kudroid_snprintf_chk_trampoline(buf, sizeof(buf), 0, sizeof(buf), "%d", 42);
+    CheckText(buf, "42", "__snprintf_chk finds its first vararg at x5");
+
+    kudroid_snprintf_chk_trampoline(buf, sizeof(buf), 0, sizeof(buf), "%d %s %d", 1, "mid", 2);
+    CheckText(buf, "1 mid 2", "__snprintf_chk keeps three varargs in order");
+
+    /* Three varargs fill x5-x7; the fourth must come from the stack. This is the boundary
+     * the fortified form reaches sooner than the plain one. */
+    kudroid_snprintf_chk_trampoline(buf, sizeof(buf), 0, sizeof(buf), "%d %d %d %d",
+                                    1, 2, 3, 4);
+    CheckText(buf, "1 2 3 4", "__snprintf_chk overflows to the stack after x7");
+
+    kudroid_snprintf_chk_trampoline(buf, sizeof(buf), 0, sizeof(buf), "%d %.1f", 7, 2.5);
+    CheckText(buf, "7 2.5", "__snprintf_chk mixes int and double correctly");
+
+    /* maxlen is honoured, not the compiler's slen. */
+    char small2[8];
+    int nchk = kudroid_snprintf_chk_trampoline(small2, sizeof(small2), 0, sizeof(small2),
+                                               "%s", "0123456789");
+    Check(nchk == 10, "__snprintf_chk reports the untruncated length");
+    CheckText(small2, "0123456", "__snprintf_chk truncates at maxlen");
+
+    /* __sprintf_chk(buf, flag, slen, fmt, ...): three fixed arguments, varargs from x4. */
+    kudroid_sprintf_chk_trampoline(buf, 0, sizeof(buf), "%d-%s", 9, "y");
+    CheckText(buf, "9-y", "__sprintf_chk finds its first vararg at x4");
 
     puts_("\n");
     if (failures == 0) {

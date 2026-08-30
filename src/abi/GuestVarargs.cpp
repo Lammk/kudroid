@@ -341,4 +341,31 @@ extern "C" int kudroid_sprintf_from_registers(const uint64_t* frame) {
     return static_cast<int>(
         kudroid::FormatGuestVarargs(buffer, 0x10000, format, registers, /*firstGpIndex=*/2));
 }
+
+// __snprintf_chk(buf, maxlen, flag, slen, format, ...) — the _FORTIFY_SOURCE form, which
+// is what a release-built guest actually calls for snprintf. Same ABI problem, one more
+// fixed argument: varargs start at the sixth integer register.
+extern "C" int kudroid_snprintf_chk_from_registers(const uint64_t* frame) {
+    const auto* registers = reinterpret_cast<const kudroid::GuestVarargs*>(frame);
+    char* buffer = reinterpret_cast<char*>(registers->gp[0]);
+    const auto maxlen = static_cast<size_t>(registers->gp[1]);
+    // gp[2] is the fortify flag and gp[3] the compiler's idea of the buffer size; the
+    // former is advisory and the latter is not more trustworthy than maxlen, so both are
+    // ignored, as bionic's own implementation does once the check passes.
+    const char* format = reinterpret_cast<const char*>(registers->gp[4]);
+    return static_cast<int>(
+        kudroid::FormatGuestVarargs(buffer, maxlen, format, registers, /*firstGpIndex=*/5));
+}
+
+// __sprintf_chk(buf, flag, slen, format, ...). `slen` is the destination size the compiler
+// inferred, so unlike plain sprintf there IS a bound to respect here.
+extern "C" int kudroid_sprintf_chk_from_registers(const uint64_t* frame) {
+    const auto* registers = reinterpret_cast<const kudroid::GuestVarargs*>(frame);
+    char* buffer = reinterpret_cast<char*>(registers->gp[0]);
+    const auto slen = static_cast<size_t>(registers->gp[2]);
+    const char* format = reinterpret_cast<const char*>(registers->gp[3]);
+    return static_cast<int>(
+        kudroid::FormatGuestVarargs(buffer, slen != 0 ? slen : 0x10000, format, registers,
+                                    /*firstGpIndex=*/4));
+}
 #endif
