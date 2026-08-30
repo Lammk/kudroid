@@ -49,6 +49,16 @@ extern int kudroid_sprintf_chk_trampoline(char* buf, int flag, size_t slen,
 extern unsigned long kudroid_format_guest_va_list(char* out, size_t size, const char* fmt,
                                                   __builtin_va_list ap);
 
+/* The scanf trampolines. Declared variadic so the compiler emits the genuine AAPCS64 call:
+ * output pointers in x2-x7 and the rest on the stack.
+ *
+ * This is the same ABI split with the consequences reversed. printf read the wrong place
+ * and produced rubbish; scanf STORES to the wrong place. On device Minecraft's UUID parse
+ * passed eleven output pointers, the host took five of them from stack words that were
+ * never pointers, and one of those held a jobject — reported by the next JNI call as
+ * clazz=0xf8ec9809, a value no heap pointer can be. The store after that went to 0. */
+extern int kudroid_sscanf_trampoline(const char* input, const char* fmt, ...);
+
 /* The log trampoline lives in the same assembly file and so needs its handler resolved at
  * link time, but the real one is in SyscallShim.cpp and pulls in the whole shim — mutexes,
  * files, the crash buffer — none of which can be built freestanding. Stubbed because this
@@ -57,6 +67,11 @@ extern unsigned long kudroid_format_guest_va_list(char* out, size_t size, const 
  * register. Same reasoning for the assert handler. */
 int kudroid_android_log_print_from_registers(const u64* frame) { (void)frame; return 0; }
 int kudroid_log_assert_from_registers(const u64* frame) { (void)frame; return 0; }
+/* fscanf's character source needs <cstdio>, which GuestVarargs.cpp deliberately avoids, so
+ * its handler lives in SyscallShim.cpp and cannot be linked freestanding. The string source
+ * exercises the identical argument placement — same trampoline macro, same starting
+ * register index. */
+int kudroid_fscanf_from_registers(const u64* frame) { (void)frame; return 0; }
 
 /* ── libc pieces the C++ formatter references ─────────────────────────────────────── */
 
@@ -214,6 +229,255 @@ static void RunVaListChecks(char* buf, size_t size) {
     Check(n > 0, "a rejected va_list still reports a length");
 }
 
+/* ── scanning ─────────────────────────────────────────────────────────────────────── */
+
+/* Guard bytes around every destination.
+ *
+ * The value being right is not the whole property: "%2hhx" must store exactly ONE byte, and
+ * storing four would still produce the right value while silently overwriting the two
+ * fields after it. That is worse than the crash, because nothing reports it. So each
+ * destination sits inside a padded struct and the padding is checked.
+ *
+ * This is the check that distinguishes a correct scanner from one that merely parses. */
+#define GUARD 0x5A
+
+struct guarded_u8  { unsigned char pad_lo[8]; unsigned char v;  unsigned char pad_hi[8]; };
+struct guarded_u16 { unsigned char pad_lo[8]; unsigned short v; unsigned char pad_hi[8]; };
+struct guarded_u32 { unsigned char pad_lo[8]; unsigned int v;   unsigned char pad_hi[8]; };
+struct guarded_u64 { unsigned char pad_lo[8]; unsigned long v;  unsigned char pad_hi[8]; };
+struct guarded_f32 { unsigned char pad_lo[8]; float v;          unsigned char pad_hi[8]; };
+
+static void fill_guard(unsigned char* p, unsigned long n) {
+    for (unsigned long i = 0; i < n; ++i) p[i] = GUARD;
+}
+static int guard_intact(const unsigned char* p, unsigned long n) {
+    for (unsigned long i = 0; i < n; ++i) if (p[i] != GUARD) return 0;
+    return 1;
+}
+#define INIT_GUARDS(g) do { fill_guard((g).pad_lo, 8); fill_guard((g).pad_hi, 8); \
+                            (g).v = 0; } while (0)
+#define GUARDS_OK(g) (guard_intact((g).pad_lo, 8) && guard_intact((g).pad_hi, 8))
+
+static void RunScanChecks(void) {
+    puts_("-- scanf: output pointers in x2-x7 --\n");
+
+    /* One conversion, the simplest case. Its output pointer is in x2. */
+    {
+        struct guarded_u32 a; INIT_GUARDS(a);
+        const int n = kudroid_sscanf_trampoline("42", "%d", &a.v);
+        Check(n == 1, "a single %d assigns one item");
+        Check(a.v == 42, "the value is stored through the register pointer");
+        Check(GUARDS_OK(a), "nothing was written outside the destination");
+    }
+
+    /* Six conversions fill x2-x7 exactly — the last register. */
+    {
+        struct guarded_u32 a, b, c, d, e, f;
+        INIT_GUARDS(a); INIT_GUARDS(b); INIT_GUARDS(c);
+        INIT_GUARDS(d); INIT_GUARDS(e); INIT_GUARDS(f);
+        const int n = kudroid_sscanf_trampoline("1 2 3 4 5 6", "%d %d %d %d %d %d",
+                                                &a.v, &b.v, &c.v, &d.v, &e.v, &f.v);
+        Check(n == 6, "six integers assign six items");
+        Check(a.v == 1 && b.v == 2 && c.v == 3 && d.v == 4 && e.v == 5 && f.v == 6,
+              "all six values land in the right places");
+        Check(GUARDS_OK(a) && GUARDS_OK(b) && GUARDS_OK(c) && GUARDS_OK(d) &&
+                  GUARDS_OK(e) && GUARDS_OK(f),
+              "six destinations, no overrun");
+    }
+
+    puts_("-- scanf: overflow onto the stack --\n");
+
+    /* The seventh output pointer has no register left. This is the boundary where the host
+     * implementation started reading stack words that were never pointers. */
+    {
+        struct guarded_u32 v[8];
+        for (int i = 0; i < 8; ++i) INIT_GUARDS(v[i]);
+        const int n = kudroid_sscanf_trampoline("1 2 3 4 5 6 7 8",
+                                                "%d %d %d %d %d %d %d %d",
+                                                &v[0].v, &v[1].v, &v[2].v, &v[3].v,
+                                                &v[4].v, &v[5].v, &v[6].v, &v[7].v);
+        Check(n == 8, "eight integers assign eight items");
+        int values_ok = 1, guards_ok = 1;
+        for (int i = 0; i < 8; ++i) {
+            if (v[i].v != (unsigned)(i + 1)) values_ok = 0;
+            if (!GUARDS_OK(v[i])) guards_ok = 0;
+        }
+        Check(values_ok, "the seventh and eighth come from the overflow area");
+        Check(guards_ok, "no destination was overrun, including the stack-passed ones");
+    }
+
+    puts_("-- scanf: the UUID parse from the device log --\n");
+
+    /* The exact format string at libminecraftpe.so+0x21803a6, with the exact destination
+     * widths: one 32-bit, two 16-bit, eight 8-bit. Eleven output pointers, so five of them
+     * are in the overflow area.
+     *
+     * Every "%2hhx" must store ONE byte. A scanner that stored four would produce the right
+     * values here and destroy the guards. */
+    {
+        struct guarded_u32 time_low;  INIT_GUARDS(time_low);
+        struct guarded_u16 time_mid;  INIT_GUARDS(time_mid);
+        struct guarded_u16 time_hi;   INIT_GUARDS(time_hi);
+        struct guarded_u8  n0, n1, n2, n3, n4, n5, n6, n7;
+        INIT_GUARDS(n0); INIT_GUARDS(n1); INIT_GUARDS(n2); INIT_GUARDS(n3);
+        INIT_GUARDS(n4); INIT_GUARDS(n5); INIT_GUARDS(n6); INIT_GUARDS(n7);
+
+        const int n = kudroid_sscanf_trampoline(
+            "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+            "%8x-%4hx-%4hx-%2hhx%2hhx-%2hhx%2hhx%2hhx%2hhx%2hhx%2hhx",
+            &time_low.v, &time_mid.v, &time_hi.v,
+            &n0.v, &n1.v, &n2.v, &n3.v, &n4.v, &n5.v, &n6.v, &n7.v);
+
+        Check(n == 11, "all eleven fields are assigned");
+        Check(time_low.v == 0x6ba7b810u, "%8x reads the 32-bit field");
+        Check(time_mid.v == 0x9dadu && time_hi.v == 0x11d1u, "%4hx reads the 16-bit fields");
+        Check(n0.v == 0x80 && n1.v == 0xb4, "the two %2hhx before the separator");
+        Check(n2.v == 0x00 && n3.v == 0xc0 && n4.v == 0x4f && n5.v == 0xd4 &&
+                  n6.v == 0x30 && n7.v == 0xc8,
+              "the six %2hhx from the overflow area");
+        Check(GUARDS_OK(time_low) && GUARDS_OK(time_mid) && GUARDS_OK(time_hi),
+              "the integer fields did not overrun");
+        Check(GUARDS_OK(n0) && GUARDS_OK(n1) && GUARDS_OK(n2) && GUARDS_OK(n3) &&
+                  GUARDS_OK(n4) && GUARDS_OK(n5) && GUARDS_OK(n6) && GUARDS_OK(n7),
+              "every %2hhx stored exactly one byte");
+    }
+
+    puts_("-- scanf: length modifiers store exactly their width --\n");
+
+    /* A value with bits set beyond the destination's width, so a too-wide store is visible
+     * in the guards AND a too-narrow read is visible in the value. */
+    {
+        struct guarded_u8 c; INIT_GUARDS(c);
+        Check(kudroid_sscanf_trampoline("ff", "%hhx", &c.v) == 1, "%hhx assigns");
+        Check(c.v == 0xff, "%hhx stores the byte");
+        Check(GUARDS_OK(c), "%hhx wrote one byte only");
+    }
+    {
+        struct guarded_u16 h; INIT_GUARDS(h);
+        Check(kudroid_sscanf_trampoline("ffff", "%hx", &h.v) == 1, "%hx assigns");
+        Check(h.v == 0xffffu, "%hx stores two bytes");
+        Check(GUARDS_OK(h), "%hx wrote two bytes only");
+    }
+    {
+        struct guarded_u64 l; INIT_GUARDS(l);
+        Check(kudroid_sscanf_trampoline("123456789abcdef0", "%lx", &l.v) == 1, "%lx assigns");
+        Check(l.v == 0x123456789abcdef0UL, "%lx stores all eight bytes");
+        Check(GUARDS_OK(l), "%lx stayed inside eight bytes");
+    }
+    /* No length modifier means int, and a plain %f means FLOAT — storing a double would
+     * overwrite the four bytes after it. */
+    {
+        struct guarded_f32 f; INIT_GUARDS(f);
+        Check(kudroid_sscanf_trampoline("2.5", "%f", &f.v) == 1, "%f assigns");
+        Check(f.v > 2.49f && f.v < 2.51f, "%f stores the value");
+        Check(GUARDS_OK(f), "%f stored four bytes, not eight");
+    }
+
+    puts_("-- scanf: width limits and separators --\n");
+
+    /* "%2hhx" against a longer run of digits must stop after two. Without the width the
+     * first conversion would swallow the whole string. */
+    {
+        struct guarded_u8 a, b; INIT_GUARDS(a); INIT_GUARDS(b);
+        const int n = kudroid_sscanf_trampoline("abcd", "%2hhx%2hhx", &a.v, &b.v);
+        Check(n == 2, "two width-limited conversions both assign");
+        Check(a.v == 0xab && b.v == 0xcd, "each took exactly two digits");
+        Check(GUARDS_OK(a) && GUARDS_OK(b), "neither overran");
+    }
+    /* A literal that does not match stops the scan, and the count reflects what was stored
+     * before it. This is what makes the '-' separators meaningful. */
+    {
+        struct guarded_u32 a, b; INIT_GUARDS(a); INIT_GUARDS(b);
+        const int n = kudroid_sscanf_trampoline("12:34", "%d-%d", &a.v, &b.v);
+        Check(n == 1, "a mismatched literal stops the scan after one assignment");
+        Check(a.v == 12, "what was parsed before the mismatch is kept");
+        Check(b.v == 0, "the unreached destination is untouched");
+        Check(GUARDS_OK(a) && GUARDS_OK(b), "no overrun on the partial scan");
+    }
+
+    puts_("-- scanf: assignment suppression --\n");
+
+    /* '*' parses and discards, consuming NO output pointer. Treating it as a normal
+     * conversion would shift every later pointer by one — and write through the wrong one,
+     * which is the same class of failure as the ABI bug itself. */
+    {
+        struct guarded_u32 a, b; INIT_GUARDS(a); INIT_GUARDS(b);
+        const int n = kudroid_sscanf_trampoline("1 2 3", "%*d %d %d", &a.v, &b.v);
+        Check(n == 2, "a suppressed conversion is not counted");
+        Check(a.v == 2 && b.v == 3, "suppression consumes no output pointer");
+        Check(GUARDS_OK(a) && GUARDS_OK(b), "no overrun with suppression");
+    }
+
+    puts_("-- scanf: strings, sets and characters --\n");
+
+    {
+        char s[32];
+        for (int i = 0; i < 32; ++i) s[i] = GUARD;
+        const int n = kudroid_sscanf_trampoline("hello world", "%s", s);
+        Check(n == 1, "%s assigns");
+        Check(streq(s, "hello"), "%s stops at whitespace and terminates");
+        Check((unsigned char)s[6] == GUARD, "%s wrote no further than its terminator");
+    }
+    {
+        char s[32];
+        for (int i = 0; i < 32; ++i) s[i] = GUARD;
+        Check(kudroid_sscanf_trampoline("abcdefgh", "%3s", s) == 1, "%3s assigns");
+        Check(streq(s, "abc"), "a width-limited %s takes only three characters");
+        Check((unsigned char)s[4] == GUARD, "%3s respected its width");
+    }
+    {
+        /* %c does NOT terminate — it is a character array. Writing a terminator would
+         * corrupt the byte after it. */
+        struct guarded_u8 ch; INIT_GUARDS(ch);
+        Check(kudroid_sscanf_trampoline("xy", "%c", (char*)&ch.v) == 1, "%c assigns");
+        Check(ch.v == 'x', "%c stores one character");
+        Check(GUARDS_OK(ch), "%c wrote one byte and no terminator");
+    }
+    {
+        char s[32];
+        for (int i = 0; i < 32; ++i) s[i] = GUARD;
+        Check(kudroid_sscanf_trampoline("key=value", "%[^=]", s) == 1, "%[^=] assigns");
+        Check(streq(s, "key"), "a negated set stops at its delimiter");
+    }
+    {
+        char s[32];
+        for (int i = 0; i < 32; ++i) s[i] = GUARD;
+        Check(kudroid_sscanf_trampoline("abc123", "%[a-z]", s) == 1, "%[a-z] assigns");
+        Check(streq(s, "abc"), "a set range matches only its members");
+    }
+
+    puts_("-- scanf: failure cases must not write --\n");
+
+    /* No input at all is -1, distinct from 0. A caller deciding whether to retry reads that
+     * difference. */
+    {
+        struct guarded_u32 a; INIT_GUARDS(a);
+        const int n = kudroid_sscanf_trampoline("", "%d", &a.v);
+        Check(n == -1, "empty input returns -1, not 0");
+        Check(a.v == 0 && GUARDS_OK(a), "nothing was written");
+    }
+    {
+        struct guarded_u32 a; INIT_GUARDS(a);
+        const int n = kudroid_sscanf_trampoline("zzz", "%d", &a.v);
+        Check(n == 0, "input that cannot match returns 0");
+        Check(a.v == 0 && GUARDS_OK(a), "a matching failure writes nothing");
+    }
+    /* An unknown conversion must stop rather than guess: the number of output pointers it
+     * would consume is unknown, so continuing would write through the wrong one. */
+    {
+        struct guarded_u32 a; INIT_GUARDS(a);
+        const int n = kudroid_sscanf_trampoline("1 2", "%d %Q", &a.v);
+        Check(n == 1, "an unknown conversion stops the scan");
+        Check(a.v == 1 && GUARDS_OK(a), "what was already stored is intact");
+    }
+    /* A null destination must be tolerated: guest code does pass one, and a scanner that
+     * dereferences it crashes inside a parse. */
+    {
+        const int n = kudroid_sscanf_trampoline("5", "%d", (void*)0);
+        Check(n == 1, "a null destination is counted but not written");
+    }
+}
+
 int main(void) {
     char buf[512];
 
@@ -358,6 +622,7 @@ int main(void) {
     CheckText(buf, "9-y", "__sprintf_chk finds its first vararg at x4");
 
     RunVaListChecks(buf, sizeof(buf));
+    RunScanChecks();
 
     puts_("\n");
     if (failures == 0) {

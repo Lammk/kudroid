@@ -249,6 +249,10 @@ else()
     #                          Java thread that would release it cannot run — Minecraft
     #                          stopped (not crashed) exactly there, waiting on a flag no
     #                          other thread could set
+    # test_kuart_prefs         Java file I/O and SharedPreferences persistence. Both had
+    #                          silent failures: FileOutputStream.write was an empty method,
+    #                          and Java paths skipped the VFS remapper so every write aimed
+    #                          at the real /data/data, which iOS forbids
     # test_kuart_jit           the arm64 encoder against GNU as byte for byte, the
     #                          executable-memory cache (including the no-JIT path that
     #                          stock iOS and LiveContainer JITLess take), and the OAT
@@ -275,6 +279,7 @@ else()
         test_kuart_missing_field
         test_kuart_thread_state
         test_kuart_vmlock
+        test_kuart_prefs
         test_kuart_jit
     )
         if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/${kuart_test}.cpp")

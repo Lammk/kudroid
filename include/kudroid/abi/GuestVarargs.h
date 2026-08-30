@@ -94,6 +94,29 @@ struct GuestVaList {
 bool GuestVarargsFromVaList(const void* guest_ap, GuestVarargs* out,
                             unsigned* firstGpIndex, unsigned* firstFpIndex);
 
+// Scan `format` from a character source, storing through the guest's output pointers.
+//
+// The same ABI split as formatting, with the consequences reversed. A guest's sscanf passes
+// OUTPUT POINTERS as its varargs — the first six in x2-x7, the rest on the stack — and
+// Apple's callee reads every one of them from the stack. So a forwarded call does not merely
+// read the wrong place, it WRITES to it.
+//
+// On device Minecraft parses a UUID with eleven output pointers; the host wrote through five
+// stack words that were never pointers. One held a jobject, which the next JNI call reported
+// as clazz=0xf8ec9809 — a value no heap pointer can take. The following store went to
+// address 0 and took SIGSEGV.
+//
+// `peek` returns the next character without consuming it, or -1 at end of input; `advance`
+// consumes the character last peeked. Two callbacks rather than a buffer so fscanf can read
+// a FILE* without this file including <cstdio> — it is compiled freestanding for the arm64
+// test.
+//
+// Returns the number of items ASSIGNED, or -1 when input ended before any assignment. That
+// distinction is part of the contract: a caller deciding whether to retry reads it.
+int ScanGuestVarargsFrom(int (*peek)(void*), void (*advance)(void*), void* state,
+                         const char* format, const GuestVarargs* registers,
+                         unsigned firstGpIndex, unsigned firstFpIndex);
+
 } // namespace kudroid
 
 // Format a guest's va_list, for the shims that receive one.
@@ -106,5 +129,19 @@ bool GuestVarargsFromVaList(const void* guest_ap, GuestVarargs* out,
 // Returns the length the formatted string WOULD have had, as snprintf does.
 extern "C" size_t kudroid_format_guest_va_list(char* out, size_t size, const char* format,
                                                const void* guest_ap);
+
+// Scan a string using a guest's va_list, for vsscanf. Returns items assigned, or -1.
+//
+// A va_list that cannot be validated returns -1 without scanning: every conversion would
+// otherwise store to an address taken from it.
+extern "C" int kudroid_scan_guest_va_list(const char* input, const char* format,
+                                          const void* guest_ap);
+
+#if defined(__aarch64__)
+// Handlers for the scanf trampolines in bionic_log_trampoline.S. `frame` points at the
+// register capture the trampoline wrote.
+extern "C" int kudroid_sscanf_from_registers(const uint64_t* frame);
+extern "C" int kudroid_isoc99_sscanf_from_registers(const uint64_t* frame);
+#endif
 
 #endif // KUDROID_ABI_GUESTVARARGS_H

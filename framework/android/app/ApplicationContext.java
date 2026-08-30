@@ -84,9 +84,29 @@ public class ApplicationContext extends Context {
         return ensure(new File("/sdcard/Android/data/" + mPackageName + "/cache"));
     }
 
+    /**
+     * Preferences, cached by name.
+     *
+     * A fresh instance per call is a bug that hides as a persistence problem: two calls
+     * return two independent stores, so a value written through one is absent from the
+     * other and even a write-then-read within a single run yields the default. Android
+     * returns the same instance for a given name, and apps rely on it — they also register
+     * change listeners, which only fire if the writer and the listener share the object.
+     */
+    private static final java.util.HashMap<String, SharedPreferences> sPrefs =
+            new java.util.HashMap<String, SharedPreferences>();
+
     @Override
     public SharedPreferences getSharedPreferences(String name, int mode) {
-        return new android.content.SharedPreferencesImpl(name);
+        final String key = name != null ? name : "default";
+        synchronized (sPrefs) {
+            SharedPreferences existing = sPrefs.get(key);
+            if (existing != null) return existing;
+            SharedPreferences created = new android.content.SharedPreferencesImpl(
+                    key, ensure(new File("/data/data/" + mPackageName + "/shared_prefs")));
+            sPrefs.put(key, created);
+            return created;
+        }
     }
 
     @Override

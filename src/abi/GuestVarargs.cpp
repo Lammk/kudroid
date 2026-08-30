@@ -153,7 +153,450 @@ private:
     unsigned overflowIndex_ = 0;
 };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Scanning, which is the same ABI problem with the consequences reversed.
+//
+// A guest's sscanf passes OUTPUT POINTERS as its varargs: the first six in x2-x7 and the
+// rest in the overflow area. Apple's callee reads every one of them from the stack, so a
+// forwarded call takes whatever is there and WRITES through it. printf formatted from the
+// wrong place and produced rubbish; scanf stores to the wrong place and corrupts memory.
+//
+// On device Minecraft parses a UUID with
+//   "%8x-%4hx-%4hx-%2hhx%2hhx-%2hhx%2hhx%2hhx%2hhx%2hhx%2hhx"
+// — eleven output pointers. The host wrote to five words of stack that were never
+// pointers, one of which held a jobject: the next JNI call reported clazz=0xf8ec9809, a
+// value no heap pointer can be. Then it stored to 0 and took SIGSEGV.
+//
+// The width and length modifiers are not decoration here. "%2hhx" must store exactly ONE
+// byte; storing four silently overwrites the two fields after it, which is worse than the
+// crash because nothing reports it.
+
+// Where characters come from. A function pointer rather than two copies of the scanner,
+// because fscanf reads a FILE* and this file cannot include <cstdio> — it is compiled
+// freestanding for the arm64 test.
+struct ScanSource {
+    // Next character, or -1 at end of input. Must not consume.
+    int (*peek)(void* state);
+    // Consume the character last peeked.
+    void (*advance)(void* state);
+    void* state;
+    // Characters consumed so far, for %n and for the "matched nothing" check.
+    size_t consumed;
+};
+
+int SourcePeek(ScanSource& src) { return src.peek(src.state); }
+void SourceAdvance(ScanSource& src) {
+    src.advance(src.state);
+    ++src.consumed;
+}
+
+bool IsSpace(int c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\v' || c == '\f' || c == '\r';
+}
+bool IsDigit(int c) { return c >= '0' && c <= '9'; }
+
+int HexValue(int c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+// How wide the destination is. This IS the correctness question for scanning: the value
+// parsed is 64-bit internally and must be narrowed to exactly what the caller declared.
+enum class ScanWidth { kChar, kShort, kInt, kLong, kLongLong, kSizeT, kIntMax, kPtrDiff };
+
+void StoreInteger(void* dest, uint64_t value, ScanWidth width, bool is_signed) {
+    if (dest == nullptr) return;
+    switch (width) {
+        case ScanWidth::kChar: {
+            // "%hhx" — one byte. Writing more corrupts whatever follows, which for the
+            // UUID parse is the next two bytes of the same struct.
+            const uint8_t narrow = static_cast<uint8_t>(value);
+            __builtin_memcpy(dest, &narrow, sizeof(narrow));
+            break;
+        }
+        case ScanWidth::kShort: {
+            const uint16_t narrow = static_cast<uint16_t>(value);
+            __builtin_memcpy(dest, &narrow, sizeof(narrow));
+            break;
+        }
+        case ScanWidth::kInt: {
+            if (is_signed) {
+                const int32_t narrow = static_cast<int32_t>(value);
+                __builtin_memcpy(dest, &narrow, sizeof(narrow));
+            } else {
+                const uint32_t narrow = static_cast<uint32_t>(value);
+                __builtin_memcpy(dest, &narrow, sizeof(narrow));
+            }
+            break;
+        }
+        default:
+            // long, long long, size_t, intmax_t and ptrdiff_t are all 64-bit on arm64.
+            __builtin_memcpy(dest, &value, sizeof(value));
+            break;
+    }
+}
+
+// Parse an integer in `base`, at most `max_width` characters. base 0 detects 0x/0 prefixes,
+// as strtol does. Returns false when no digits were available.
+bool ScanInteger(ScanSource& src, unsigned base, int max_width, bool is_signed,
+                 uint64_t* out) {
+    int budget = max_width > 0 ? max_width : -1;
+    const auto take = [&]() { SourceAdvance(src); if (budget > 0) --budget; };
+
+    bool negative = false;
+    int c = SourcePeek(src);
+    if (budget != 0 && (c == '+' || c == '-')) {
+        negative = (c == '-');
+        take();
+        c = SourcePeek(src);
+    }
+
+    // A "0x" prefix is only a prefix when a hex digit follows; "0xz" is the value 0 with
+    // "xz" left unread. Consuming the x regardless would swallow input the next conversion
+    // needs.
+    if (budget != 0 && (base == 0 || base == 16) && c == '0') {
+        take();
+        c = SourcePeek(src);
+        if (budget != 0 && (c == 'x' || c == 'X')) {
+            // Peeking two ahead is not possible through this interface, so commit to the
+            // prefix and treat a following non-digit as a value of 0 — which is what the
+            // digits-seen flag below produces.
+            take();
+            base = 16;
+            c = SourcePeek(src);
+        } else {
+            if (base == 0) base = 8;
+            // The leading zero already counts as a digit, so "0" alone parses as 0.
+            uint64_t value = 0;
+            bool any = true;
+            while (budget != 0 && HexValue(c) >= 0 &&
+                   static_cast<unsigned>(HexValue(c)) < base) {
+                value = value * base + static_cast<unsigned>(HexValue(c));
+                take();
+                c = SourcePeek(src);
+            }
+            (void)any;
+            *out = negative ? ~value + 1u : value;
+            return true;
+        }
+    }
+    if (base == 0) base = 10;
+
+    uint64_t value = 0;
+    bool any_digits = false;
+    for (;;) {
+        if (budget == 0) break;
+        c = SourcePeek(src);
+        const int digit = HexValue(c);
+        if (digit < 0 || static_cast<unsigned>(digit) >= base) break;
+        value = value * base + static_cast<unsigned>(digit);
+        any_digits = true;
+        take();
+    }
+    if (!any_digits) return false;
+    (void)is_signed;
+    *out = negative ? ~value + 1u : value;
+    return true;
+}
+
+// Parse a decimal floating-point number. Exponents are supported; hex floats are not, and
+// no guest format string seen so far asks for one.
+bool ScanFloat(ScanSource& src, int max_width, double* out) {
+    int budget = max_width > 0 ? max_width : -1;
+    const auto take = [&]() { SourceAdvance(src); if (budget > 0) --budget; };
+
+    bool negative = false;
+    int c = SourcePeek(src);
+    if (budget != 0 && (c == '+' || c == '-')) {
+        negative = (c == '-');
+        take();
+    }
+
+    double value = 0.0;
+    bool any_digits = false;
+    while (budget != 0 && IsDigit(SourcePeek(src))) {
+        value = value * 10.0 + static_cast<double>(SourcePeek(src) - '0');
+        any_digits = true;
+        take();
+    }
+    if (budget != 0 && SourcePeek(src) == '.') {
+        take();
+        double scale = 0.1;
+        while (budget != 0 && IsDigit(SourcePeek(src))) {
+            value += static_cast<double>(SourcePeek(src) - '0') * scale;
+            scale *= 0.1;
+            any_digits = true;
+            take();
+        }
+    }
+    if (!any_digits) return false;
+
+    if (budget != 0 && (SourcePeek(src) == 'e' || SourcePeek(src) == 'E')) {
+        take();
+        bool exp_negative = false;
+        if (budget != 0 && (SourcePeek(src) == '+' || SourcePeek(src) == '-')) {
+            exp_negative = (SourcePeek(src) == '-');
+            take();
+        }
+        int exponent = 0;
+        bool exp_digits = false;
+        while (budget != 0 && IsDigit(SourcePeek(src))) {
+            if (exponent < 10000) exponent = exponent * 10 + (SourcePeek(src) - '0');
+            exp_digits = true;
+            take();
+        }
+        if (exp_digits) {
+            for (int i = 0; i < exponent; ++i) {
+                if (exp_negative) value *= 0.1; else value *= 10.0;
+            }
+        }
+    }
+
+    *out = negative ? -value : value;
+    return true;
+}
+
+// The %[...] set. Returns the position just past the closing bracket, or nullptr when the
+// set is unterminated — a malformed guest format must stop the scan, not run off the end.
+const char* ParseScanSet(const char* p, bool* table, bool* negated) {
+    for (int i = 0; i < 256; ++i) table[i] = false;
+    *negated = false;
+    if (*p == '^') { *negated = true; ++p; }
+    // A ']' first is a literal member, per the standard.
+    bool first = true;
+    while (*p != '\0' && (*p != ']' || first)) {
+        if (p[0] == '-' && p[1] != ']' && p[1] != '\0' && !first) {
+            // A range: the previous character was already added, so fill up to p[1].
+            const unsigned char lo = static_cast<unsigned char>(p[-1]);
+            const unsigned char hi = static_cast<unsigned char>(p[1]);
+            if (lo <= hi) {
+                for (unsigned c = lo; c <= hi; ++c) table[c] = true;
+            }
+            p += 2;
+            first = false;
+            continue;
+        }
+        table[static_cast<unsigned char>(*p)] = true;
+        ++p;
+        first = false;
+    }
+    if (*p != ']') return nullptr;
+    return p + 1;
+}
+
 } // namespace
+
+int ScanGuestVarargsFrom(int (*peek)(void*), void (*advance)(void*), void* state,
+                         const char* format, const GuestVarargs* registers,
+                         unsigned firstGpIndex, unsigned firstFpIndex) {
+    if (peek == nullptr || advance == nullptr || format == nullptr) return -1;
+
+    ScanSource src{peek, advance, state, 0};
+    Cursor args(registers, firstGpIndex, firstFpIndex);
+    int assigned = 0;
+    bool input_ended_early = false;
+
+    for (const char* p = format; *p != '\0'; ++p) {
+        if (IsSpace(*p)) {
+            // Whitespace in the format matches any amount of whitespace, including none.
+            while (IsSpace(SourcePeek(src))) SourceAdvance(src);
+            continue;
+        }
+        if (*p != '%') {
+            // A literal must match exactly. This is what makes the '-' separators in the
+            // UUID format do their job: a mismatch stops the scan.
+            const int c = SourcePeek(src);
+            if (c < 0) { input_ended_early = true; break; }
+            if (c != static_cast<unsigned char>(*p)) break;
+            SourceAdvance(src);
+            continue;
+        }
+
+        ++p;
+        if (*p == '%') {
+            while (IsSpace(SourcePeek(src))) SourceAdvance(src);
+            if (SourcePeek(src) != '%') break;
+            SourceAdvance(src);
+            continue;
+        }
+        if (*p == '\0') break;
+
+        // '*' suppresses assignment: the value is parsed and thrown away, and NO pointer
+        // is consumed. Treating it as a normal conversion would shift every later output
+        // pointer by one — and write through the wrong one.
+        bool suppress = false;
+        if (*p == '*') { suppress = true; ++p; }
+
+        int max_width = 0;
+        while (IsDigit(*p)) {
+            max_width = max_width * 10 + (*p - '0');
+            ++p;
+        }
+
+        ScanWidth width = ScanWidth::kInt;
+        for (;;) {
+            if (p[0] == 'h' && p[1] == 'h') { width = ScanWidth::kChar; p += 2; }
+            else if (p[0] == 'h') { width = ScanWidth::kShort; ++p; }
+            else if (p[0] == 'l' && p[1] == 'l') { width = ScanWidth::kLongLong; p += 2; }
+            else if (p[0] == 'l') { width = ScanWidth::kLong; ++p; }
+            else if (p[0] == 'j') { width = ScanWidth::kIntMax; ++p; }
+            else if (p[0] == 'z') { width = ScanWidth::kSizeT; ++p; }
+            else if (p[0] == 't') { width = ScanWidth::kPtrDiff; ++p; }
+            else if (p[0] == 'L' || p[0] == 'q') { width = ScanWidth::kLongLong; ++p; }
+            else break;
+        }
+
+        const char conversion = *p;
+
+        // Every conversion but %c, %s, %[ and %n skips leading whitespace first.
+        if (conversion != 'c' && conversion != '[' && conversion != 'n') {
+            while (IsSpace(SourcePeek(src))) SourceAdvance(src);
+        }
+
+        switch (conversion) {
+            case 'd':
+            case 'i':
+            case 'u':
+            case 'o':
+            case 'x':
+            case 'X':
+            case 'p': {
+                unsigned base = 10;
+                if (conversion == 'o') base = 8;
+                else if (conversion == 'x' || conversion == 'X' || conversion == 'p') base = 16;
+                else if (conversion == 'i') base = 0;
+                const bool is_signed = (conversion == 'd' || conversion == 'i');
+
+                if (SourcePeek(src) < 0) { input_ended_early = true; break; }
+                uint64_t value = 0;
+                if (!ScanInteger(src, base, max_width, is_signed, &value)) {
+                    return assigned;  // matching failure
+                }
+                if (!suppress) {
+                    void* dest = reinterpret_cast<void*>(args.NextInt());
+                    // %p is always a full pointer, whatever a length modifier claimed.
+                    StoreInteger(dest, value,
+                                 conversion == 'p' ? ScanWidth::kLong : width, is_signed);
+                    ++assigned;
+                }
+                break;
+            }
+            case 'f':
+            case 'F':
+            case 'e':
+            case 'E':
+            case 'g':
+            case 'G':
+            case 'a': {
+                if (SourcePeek(src) < 0) { input_ended_early = true; break; }
+                double value = 0.0;
+                if (!ScanFloat(src, max_width, &value)) return assigned;
+                if (!suppress) {
+                    void* dest = reinterpret_cast<void*>(args.NextInt());
+                    if (dest != nullptr) {
+                        // No length modifier means float, not double — storing eight bytes
+                        // into a float would overwrite the next member.
+                        if (width == ScanWidth::kInt) {
+                            const float narrow = static_cast<float>(value);
+                            __builtin_memcpy(dest, &narrow, sizeof(narrow));
+                        } else {
+                            __builtin_memcpy(dest, &value, sizeof(value));
+                        }
+                    }
+                    ++assigned;
+                }
+                break;
+            }
+            case 'c': {
+                const int count = max_width > 0 ? max_width : 1;
+                char* dest = suppress ? nullptr
+                                      : reinterpret_cast<char*>(args.NextInt());
+                int written = 0;
+                for (int i = 0; i < count; ++i) {
+                    const int c = SourcePeek(src);
+                    if (c < 0) { input_ended_early = true; break; }
+                    if (dest != nullptr) dest[written] = static_cast<char>(c);
+                    ++written;
+                    SourceAdvance(src);
+                }
+                if (written != count) return assigned;
+                // %c does NOT terminate: it is a character array, not a string.
+                if (!suppress) ++assigned;
+                break;
+            }
+            case 's': {
+                char* dest = suppress ? nullptr
+                                      : reinterpret_cast<char*>(args.NextInt());
+                size_t written = 0;
+                for (;;) {
+                    const int c = SourcePeek(src);
+                    if (c < 0 || IsSpace(c)) break;
+                    if (max_width > 0 && written >= static_cast<size_t>(max_width)) break;
+                    if (dest != nullptr) dest[written] = static_cast<char>(c);
+                    ++written;
+                    SourceAdvance(src);
+                }
+                if (written == 0) {
+                    if (dest != nullptr) dest[0] = '\0';
+                    return assigned;
+                }
+                if (dest != nullptr) dest[written] = '\0';
+                if (!suppress) ++assigned;
+                break;
+            }
+            case '[': {
+                bool table[256];
+                bool negated = false;
+                const char* after = ParseScanSet(p + 1, table, &negated);
+                if (after == nullptr) return assigned;  // unterminated set
+                p = after - 1;                          // loop's ++p lands past ']'
+
+                char* dest = suppress ? nullptr
+                                      : reinterpret_cast<char*>(args.NextInt());
+                size_t written = 0;
+                for (;;) {
+                    const int c = SourcePeek(src);
+                    if (c < 0) break;
+                    const bool in_set = table[static_cast<unsigned char>(c)];
+                    if (in_set == negated) break;
+                    if (max_width > 0 && written >= static_cast<size_t>(max_width)) break;
+                    if (dest != nullptr) dest[written] = static_cast<char>(c);
+                    ++written;
+                    SourceAdvance(src);
+                }
+                if (written == 0) {
+                    if (dest != nullptr) dest[0] = '\0';
+                    return assigned;
+                }
+                if (dest != nullptr) dest[written] = '\0';
+                if (!suppress) ++assigned;
+                break;
+            }
+            case 'n': {
+                // %n reports progress and does NOT count as an assignment.
+                if (!suppress) {
+                    void* dest = reinterpret_cast<void*>(args.NextInt());
+                    StoreInteger(dest, static_cast<uint64_t>(src.consumed), width, true);
+                }
+                break;
+            }
+            default:
+                // An unknown conversion cannot be skipped safely: the number of output
+                // pointers it would have consumed is unknown, so continuing would write
+                // through the wrong one. Stop instead.
+                return assigned;
+        }
+
+        if (input_ended_early) break;
+    }
+
+    // EOF before any assignment is -1, not 0. Callers distinguish "no input" from "input
+    // that did not match", and a game deciding whether to retry reads that difference.
+    if (assigned == 0 && input_ended_early) return -1;
+    return assigned;
+}
 
 size_t FormatGuestVarargs(char* out, size_t size, const char* format,
                           const GuestVarargs* registers, unsigned firstGpIndex,
@@ -442,4 +885,69 @@ extern "C" int kudroid_sprintf_chk_from_registers(const uint64_t* frame) {
         kudroid::FormatGuestVarargs(buffer, slen != 0 ? slen : 0x10000, format, registers,
                                     /*firstGpIndex=*/4));
 }
+
+// ── scanning from a string ───────────────────────────────────────────────────
+//
+// The character source for sscanf/vsscanf. fscanf's source needs <cstdio> and so lives in
+// SyscallShim.cpp; the scanner itself is shared.
+namespace {
+struct StringScanState {
+    const char* p;
+};
+int StringPeek(void* state) {
+    auto* s = static_cast<StringScanState*>(state);
+    if (s->p == nullptr || *s->p == '\0') return -1;
+    return static_cast<unsigned char>(*s->p);
+}
+void StringAdvance(void* state) {
+    auto* s = static_cast<StringScanState*>(state);
+    if (s->p != nullptr && *s->p != '\0') ++s->p;
+}
+}  // namespace
+
+// sscanf(str, format, ...): the output pointers start at the third integer register.
+extern "C" int kudroid_sscanf_from_registers(const uint64_t* frame) {
+    const auto* registers = reinterpret_cast<const kudroid::GuestVarargs*>(frame);
+    const char* input = reinterpret_cast<const char*>(registers->gp[0]);
+    const char* format = reinterpret_cast<const char*>(registers->gp[1]);
+    if (input == nullptr || format == nullptr) return -1;
+    StringScanState state{input};
+    return kudroid::ScanGuestVarargsFrom(&StringPeek, &StringAdvance, &state, format,
+                                        registers, /*firstGpIndex=*/2, /*firstFpIndex=*/0);
+}
+
+// __isoc99_sscanf has the same signature; glibc-built guests call it instead.
+extern "C" int kudroid_isoc99_sscanf_from_registers(const uint64_t* frame) {
+    return kudroid_sscanf_from_registers(frame);
+}
 #endif
+
+// Scanning a string from a guest va_list, for vsscanf.
+//
+// Not inside the __aarch64__ guard: the declaration is unconditional so the shim table can
+// name it on every host, and on a non-arm64 host the guest IS the host, so the plain
+// forwarding in SyscallShim.cpp is used instead and this is never called.
+extern "C" int kudroid_scan_guest_va_list(const char* input, const char* format,
+                                          const void* guest_ap) {
+    if (input == nullptr || format == nullptr) return -1;
+    kudroid::GuestVarargs registers;
+    unsigned firstGp = 0;
+    unsigned firstFp = 0;
+    if (!kudroid::GuestVarargsFromVaList(guest_ap, &registers, &firstGp, &firstFp)) {
+        // A va_list that cannot be trusted must not be scanned through: every conversion
+        // would WRITE to an address taken from it.
+        return -1;
+    }
+    struct State { const char* p; } state{input};
+    const auto peek = [](void* s) -> int {
+        auto* st = static_cast<State*>(s);
+        if (st->p == nullptr || *st->p == '\0') return -1;
+        return static_cast<unsigned char>(*st->p);
+    };
+    const auto advance = [](void* s) {
+        auto* st = static_cast<State*>(s);
+        if (st->p != nullptr && *st->p != '\0') ++st->p;
+    };
+    return kudroid::ScanGuestVarargsFrom(peek, advance, &state, format, &registers, firstGp,
+                                        firstFp);
+}

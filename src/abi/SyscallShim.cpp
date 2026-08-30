@@ -3285,11 +3285,70 @@ extern "C" int bionic___vfprintf_chk(FILE* stream, int flag, const char* format,
     (void)flag;
     return bionic_vfprintf(stream, format, ap);
 }
+
+// ── the scanf family ────────────────────────────────────────────────────────
+//
+// Same ABI split, opposite consequence: these WRITE through the guest's varargs. See
+// GuestVarargs.h. The trampolines capture the registers; the character source for a FILE*
+// lives here because GuestVarargs.cpp cannot include <cstdio>.
+extern "C" int kudroid_sscanf_trampoline();
+extern "C" int kudroid_isoc99_sscanf_trampoline();
+extern "C" int kudroid_fscanf_trampoline();
+
+namespace {
+// ungetc is the only way to un-peek a FILE*, and it is guaranteed for one character —
+// which is all the scanner's peek/advance interface needs.
+int FilePeek(void* state) {
+    FILE* f = static_cast<FILE*>(state);
+    if (f == nullptr) return -1;
+    const int c = std::fgetc(f);
+    if (c == EOF) return -1;
+    std::ungetc(c, f);
+    return c;
+}
+void FileAdvance(void* state) {
+    FILE* f = static_cast<FILE*>(state);
+    if (f != nullptr) (void)std::fgetc(f);
+}
+}  // namespace
+
+extern "C" int kudroid_fscanf_from_registers(const uint64_t* frame) {
+    const auto* registers = reinterpret_cast<const GuestVarargs*>(frame);
+    FILE* stream = reinterpret_cast<FILE*>(registers->gp[0]);
+    const char* format = reinterpret_cast<const char*>(registers->gp[1]);
+    if (stream == nullptr || format == nullptr) return -1;
+    return ScanGuestVarargsFrom(&FilePeek, &FileAdvance, stream, format, registers,
+                                /*firstGpIndex=*/2, /*firstFpIndex=*/0);
+}
+
+extern "C" int bionic_vsscanf(const char* s, const char* format, va_list ap) {
+    return kudroid_scan_guest_va_list(s, format, guestVaListPointer(ap));
+}
+
+extern "C" int bionic_vfscanf(FILE* stream, const char* format, va_list ap) {
+    if (stream == nullptr || format == nullptr) return -1;
+    GuestVarargs registers;
+    unsigned firstGp = 0;
+    unsigned firstFp = 0;
+    if (!GuestVarargsFromVaList(guestVaListPointer(ap), &registers, &firstGp, &firstFp)) {
+        return -1;
+    }
+    return ScanGuestVarargsFrom(&FilePeek, &FileAdvance, stream, format, &registers, firstGp,
+                                firstFp);
+}
 #else
 extern "C" int bionic_android_log_vprint(int prio, const char* tag, const char* fmt, va_list ap) {
     char message[1024];
     std::vsnprintf(message, sizeof(message), fmt ? fmt : "", ap);
     return logAndroidMessage(prio, tag, message);
+}
+
+extern "C" int bionic_vsscanf(const char* s, const char* format, va_list ap) {
+    return ::vsscanf(s, format, ap);
+}
+
+extern "C" int bionic_vfscanf(FILE* stream, const char* format, va_list ap) {
+    return ::vfscanf(stream ? stream : stdin, format, ap);
 }
 
 extern "C" int bionic_vsnprintf(char* s, size_t size, const char* format, va_list ap) {
@@ -3328,6 +3387,23 @@ extern "C" int bionic___vfprintf_chk(FILE* stream, int flag, const char* format,
                                      va_list ap) {
     (void)flag;
     return ::vfprintf(stream ? stream : stderr, format, ap);
+}
+
+// On a non-arm64 host the guest IS the host, so plain forwarding is correct.
+extern "C" int bionic_sscanf(const char* s, const char* format, ...) {
+    va_list ap;
+    va_start(ap, format);
+    const int r = ::vsscanf(s, format, ap);
+    va_end(ap);
+    return r;
+}
+
+extern "C" int bionic_fscanf(FILE* stream, const char* format, ...) {
+    va_list ap;
+    va_start(ap, format);
+    const int r = ::vfscanf(stream ? stream : stdin, format, ap);
+    va_end(ap);
+    return r;
 }
 #endif
 
@@ -4757,6 +4833,25 @@ const SymbolEntry kSyscallSymbols[] = {
     {"vfprintf", reinterpret_cast<void*>(&bionic_vfprintf)},
     {"vprintf", reinterpret_cast<void*>(&bionic_vprintf)},
     {"vasprintf", reinterpret_cast<void*>(&bionic_vasprintf)},
+    // The scanf family. These were absent too, and reaching the host implementation is
+    // worse here than for printf: scanf WRITES through its varargs. Minecraft's UUID parse
+    // passes eleven output pointers, and the host took five of them from stack words that
+    // were never pointers — one held a jobject (reported later as clazz=0xf8ec9809), and
+    // the next store went to address 0.
+#if defined(__aarch64__)
+    {"sscanf", reinterpret_cast<void*>(&kudroid_sscanf_trampoline)},
+    {"__isoc99_sscanf", reinterpret_cast<void*>(&kudroid_isoc99_sscanf_trampoline)},
+    {"fscanf", reinterpret_cast<void*>(&kudroid_fscanf_trampoline)},
+    {"__isoc99_fscanf", reinterpret_cast<void*>(&kudroid_fscanf_trampoline)},
+#else
+    {"sscanf", reinterpret_cast<void*>(&bionic_sscanf)},
+    {"__isoc99_sscanf", reinterpret_cast<void*>(&bionic_sscanf)},
+    {"fscanf", reinterpret_cast<void*>(&bionic_fscanf)},
+    {"__isoc99_fscanf", reinterpret_cast<void*>(&bionic_fscanf)},
+#endif
+    {"vsscanf", reinterpret_cast<void*>(&bionic_vsscanf)},
+    {"__isoc99_vsscanf", reinterpret_cast<void*>(&bionic_vsscanf)},
+    {"vfscanf", reinterpret_cast<void*>(&bionic_vfscanf)},
     {"__strncpy_chk", reinterpret_cast<void*>(&bionic___strncpy_chk)},
     {"__strcpy_chk", reinterpret_cast<void*>(&bionic___strcpy_chk)},
     {"__strcat_chk", reinterpret_cast<void*>(&bionic___strcat_chk)},

@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "kudroid/kudroid_bridge.h"
+#include "kudroid/VFSPathRemapper.h"
 #include "kudroid/kuart/DexClass.h"
 #include "kudroid/kuart/DexClassLinker.h"
 #include "kudroid/kuart/DexHeap.h"
@@ -1765,9 +1766,24 @@ std::string GetFilePath(const DexValue& file_obj) {
     return str->utf8 ? str->utf8 : "";
 }
 
+// Where a Java path actually lands on disk.
+//
+// A guest's own native code reaches the filesystem through the vfs_* shims, which rewrite
+// "/data/data/<pkg>/files" into the app's container. Java did not: everything below called
+// bare open/stat/mkdir, so getFilesDir() aimed at the REAL /data/data — a path iOS does not
+// let anyone write. mkdirs() failed, and File.mkdirs() swallows the failure, so nothing
+// reported it and every Java write went nowhere.
+//
+// Routing through the same remapper as native code is also what keeps the two consistent: a
+// file the guest writes with fopen() must be the file Java reads with FileInputStream.
+std::string RemapJavaPath(const std::string& path) {
+    if (path.empty()) return path;
+    return VFSPathRemapper::getInstance().remap(path.c_str());
+}
+
 bool Invoke_java_io_File(Interpreter* interp, const char* name, const DexValue* args,
                          size_t num_args, DexValue* result) {
-    std::string path = GetFilePath(args[0]);
+    std::string path = RemapJavaPath(GetFilePath(args[0]));
     if (path.empty()) {
         // Every native here returns boolean/long/array; zero is the right answer
         // for an unusable path in all of them.
@@ -1792,7 +1808,9 @@ bool Invoke_java_io_File(Interpreter* interp, const char* name, const DexValue* 
         return true;
     }
     if (std::strcmp(name, "renameTo") == 0) {
-        const std::string dest = GetFilePath(num_args > 1 ? args[1] : DexValue());
+        // The destination needs the same remapping as the source, or a rename inside
+        // /data/data would move a container file to a path outside it and fail.
+        const std::string dest = RemapJavaPath(GetFilePath(num_args > 1 ? args[1] : DexValue()));
         *result = DexValue::Int(
             (!dest.empty() && std::rename(path.c_str(), dest.c_str()) == 0) ? 1 : 0);
         return true;
@@ -1857,8 +1875,9 @@ bool Invoke_java_io_File(Interpreter* interp, const char* name, const DexValue* 
 bool Invoke_java_io_FileInputStream(Interpreter* /*interp*/, const char* name, const DexValue* args,
                                     size_t /*num_args*/, DexValue* result) {
     if (std::strcmp(name, "openNative") == 0) {
-        const char* path = GetStringUtf8(args[0]);
-        int fd = open(path, O_RDONLY);
+        // Static native: args[0] is the path, not a receiver.
+        const std::string path = RemapJavaPath(GetStringUtf8(args[0]));
+        int fd = path.empty() ? -1 : open(path.c_str(), O_RDONLY);
         *result = DexValue::Int(fd);
         return true;
     }
@@ -1911,10 +1930,10 @@ bool Invoke_java_io_FileInputStream(Interpreter* /*interp*/, const char* name, c
 bool Invoke_java_io_FileOutputStream(Interpreter* /*interp*/, const char* name, const DexValue* args,
                                      size_t /*num_args*/, DexValue* result) {
     if (std::strcmp(name, "openNative") == 0) {
-        const char* path = GetStringUtf8(args[0]);
+        const std::string path = RemapJavaPath(GetStringUtf8(args[0]));
         bool append = args[1].i != 0;
         int flags = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
-        int fd = open(path, flags, 0644);
+        int fd = path.empty() ? -1 : open(path.c_str(), flags, 0644);
         *result = DexValue::Int(fd);
         return true;
     }

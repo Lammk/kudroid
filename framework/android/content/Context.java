@@ -16,6 +16,17 @@ import java.io.InputStream;
 import java.io.IOException;
 
 public abstract class Context {
+    // File and preference modes. MODE_APPEND is the one with a value that matters here —
+    // openFileOutput() below tests for it; the rest are the documented constants apps pass
+    // to getSharedPreferences and would otherwise fail to resolve at all.
+    public static final int MODE_PRIVATE = 0x0000;
+    public static final int MODE_WORLD_READABLE = 0x0001;
+    public static final int MODE_WORLD_WRITEABLE = 0x0002;
+    public static final int MODE_APPEND = 0x8000;
+    public static final int MODE_MULTI_PROCESS = 0x0004;
+    public static final int MODE_ENABLE_WRITE_AHEAD_LOGGING = 0x0008;
+    public static final int MODE_NO_LOCALIZED_COLLATORS = 0x0010;
+
     public static final String VIBRATOR_SERVICE = "vibrator";
     public static final String VIBRATOR_MANAGER_SERVICE = "vibrator_manager";
     public static final String SENSOR_SERVICE = "sensor";
