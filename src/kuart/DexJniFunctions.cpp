@@ -9,6 +9,7 @@
 //   jmethodID              -> DexMethod*
 //   jfieldID               -> DexField*
 #include "kudroid/kuart/DexJniEnv.h"
+#include "kudroid/abi/GuestVarargs.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -310,7 +311,7 @@ jobject JNICALL NewObjectA(JNIEnv* env, jclass clazz, jmethodID methodID, const 
 
 jobject JNICALL NewObjectV(JNIEnv* env, jclass clazz, jmethodID methodID, va_list args) {
     DexJniEnv* self = Self(env);
-    if (self == nullptr) return nullptr;
+    if (self == nullptr || methodID == nullptr) return nullptr;
     DexClass* k = CheckedCls(self, clazz);
     if (k == nullptr) {
         ThrowLookupFailure(self, "Ljava/lang/InstantiationException;",
@@ -319,7 +320,14 @@ jobject JNICALL NewObjectV(JNIEnv* env, jclass clazz, jmethodID methodID, va_lis
     }
     DexObject* obj = self->linker()->AllocObject(k);
     if (obj == nullptr) return nullptr;
-    self->CallJavaV(obj, Mth(methodID), args, /*virtual_dispatch=*/false);
+    DexMethod* method = Mth(methodID);
+    const char* shorty = DexJniEnv::MethodShorty(method);
+    jvalue boxed[64];
+    if (kudroid::UnpackGuestVaListToJvalues(shorty, reinterpret_cast<const void*>(args), boxed, 64)) {
+        self->CallJavaA(obj, method, boxed, /*virtual_dispatch=*/false);
+    } else {
+        self->CallJavaV(obj, method, args, /*virtual_dispatch=*/false);
+    }
     return self->AddLocalRef(obj);
 }
 
@@ -435,8 +443,14 @@ jfieldID JNICALL GetStaticFieldID(JNIEnv* env, jclass clazz, const char* name, c
     RET_TYPE JNICALL Call##NAME##MethodV(JNIEnv* env, jobject obj, jmethodID mid,   \
                                         va_list args) {                             \
         DexJniEnv* self = Self(env);                                                \
-        if (self == nullptr) return RET_TYPE();                                      \
-        return static_cast<RET_TYPE>(self->CallJavaV(Obj(obj), Mth(mid), args, true).FIELD); \
+        if (self == nullptr || mid == nullptr) return RET_TYPE();                   \
+        DexMethod* method = Mth(mid);                                               \
+        const char* shorty = DexJniEnv::MethodShorty(method);                       \
+        jvalue boxed[64];                                                           \
+        if (kudroid::UnpackGuestVaListToJvalues(shorty, reinterpret_cast<const void*>(args), boxed, 64)) { \
+            return static_cast<RET_TYPE>(self->CallJavaA(Obj(obj), method, boxed, true).FIELD); \
+        }                                                                            \
+        return static_cast<RET_TYPE>(self->CallJavaV(Obj(obj), method, args, true).FIELD); \
     }                                                                                \
     RET_TYPE JNICALL Call##NAME##Method(JNIEnv* env, jobject obj, jmethodID mid, ...) { \
         va_list args;                                                                \
@@ -457,8 +471,14 @@ jfieldID JNICALL GetStaticFieldID(JNIEnv* env, jclass clazz, const char* name, c
     RET_TYPE JNICALL CallNonvirtual##NAME##MethodV(JNIEnv* env, jobject obj, jclass,  \
                                                   jmethodID mid, va_list args) {      \
         DexJniEnv* self = Self(env);                                                  \
-        if (self == nullptr) return RET_TYPE();                                        \
-        return static_cast<RET_TYPE>(self->CallJavaV(Obj(obj), Mth(mid), args, false).FIELD); \
+        if (self == nullptr || mid == nullptr) return RET_TYPE();                     \
+        DexMethod* method = Mth(mid);                                                 \
+        const char* shorty = DexJniEnv::MethodShorty(method);                         \
+        jvalue boxed[64];                                                             \
+        if (kudroid::UnpackGuestVaListToJvalues(shorty, reinterpret_cast<const void*>(args), boxed, 64)) { \
+            return static_cast<RET_TYPE>(self->CallJavaA(Obj(obj), method, boxed, false).FIELD); \
+        }                                                                              \
+        return static_cast<RET_TYPE>(self->CallJavaV(Obj(obj), method, args, false).FIELD); \
     }                                                                                  \
     RET_TYPE JNICALL CallNonvirtual##NAME##Method(JNIEnv* env, jobject obj, jclass c, \
                                                  jmethodID mid, ...) {                \
@@ -480,8 +500,14 @@ jfieldID JNICALL GetStaticFieldID(JNIEnv* env, jclass clazz, const char* name, c
     RET_TYPE JNICALL CallStatic##NAME##MethodV(JNIEnv* env, jclass, jmethodID mid,   \
                                               va_list args) {                        \
         DexJniEnv* self = Self(env);                                                 \
-        if (self == nullptr) return RET_TYPE();                                       \
-        return static_cast<RET_TYPE>(self->CallJavaV(nullptr, Mth(mid), args, false).FIELD); \
+        if (self == nullptr || mid == nullptr) return RET_TYPE();                     \
+        DexMethod* method = Mth(mid);                                                 \
+        const char* shorty = DexJniEnv::MethodShorty(method);                         \
+        jvalue boxed[64];                                                             \
+        if (kudroid::UnpackGuestVaListToJvalues(shorty, reinterpret_cast<const void*>(args), boxed, 64)) { \
+            return static_cast<RET_TYPE>(self->CallJavaA(nullptr, method, boxed, false).FIELD); \
+        }                                                                              \
+        return static_cast<RET_TYPE>(self->CallJavaV(nullptr, method, args, false).FIELD); \
     }                                                                                 \
     RET_TYPE JNICALL CallStatic##NAME##Method(JNIEnv* env, jclass c, jmethodID mid, ...) { \
         va_list args;                                                                 \
@@ -520,8 +546,14 @@ jobject JNICALL CallObjectMethodA(JNIEnv* env, jobject obj, jmethodID mid,
 }
 jobject JNICALL CallObjectMethodV(JNIEnv* env, jobject obj, jmethodID mid, va_list args) {
     DexJniEnv* self = Self(env);
-    if (self == nullptr) return nullptr;
-    return self->AddLocalRef(self->CallJavaV(Obj(obj), Mth(mid), args, true).l);
+    if (self == nullptr || mid == nullptr) return nullptr;
+    DexMethod* method = Mth(mid);
+    const char* shorty = DexJniEnv::MethodShorty(method);
+    jvalue boxed[64];
+    if (kudroid::UnpackGuestVaListToJvalues(shorty, reinterpret_cast<const void*>(args), boxed, 64)) {
+        return self->AddLocalRef(self->CallJavaA(Obj(obj), method, boxed, true).l);
+    }
+    return self->AddLocalRef(self->CallJavaV(Obj(obj), method, args, true).l);
 }
 jobject JNICALL CallObjectMethod(JNIEnv* env, jobject obj, jmethodID mid, ...) {
     va_list args;
@@ -540,8 +572,14 @@ jobject JNICALL CallNonvirtualObjectMethodA(JNIEnv* env, jobject obj, jclass, jm
 jobject JNICALL CallNonvirtualObjectMethodV(JNIEnv* env, jobject obj, jclass, jmethodID mid,
                                            va_list args) {
     DexJniEnv* self = Self(env);
-    if (self == nullptr) return nullptr;
-    return self->AddLocalRef(self->CallJavaV(Obj(obj), Mth(mid), args, false).l);
+    if (self == nullptr || mid == nullptr) return nullptr;
+    DexMethod* method = Mth(mid);
+    const char* shorty = DexJniEnv::MethodShorty(method);
+    jvalue boxed[64];
+    if (kudroid::UnpackGuestVaListToJvalues(shorty, reinterpret_cast<const void*>(args), boxed, 64)) {
+        return self->AddLocalRef(self->CallJavaA(Obj(obj), method, boxed, false).l);
+    }
+    return self->AddLocalRef(self->CallJavaV(Obj(obj), method, args, false).l);
 }
 jobject JNICALL CallNonvirtualObjectMethod(JNIEnv* env, jobject obj, jclass c, jmethodID mid,
                                           ...) {
@@ -560,8 +598,14 @@ jobject JNICALL CallStaticObjectMethodA(JNIEnv* env, jclass, jmethodID mid,
 }
 jobject JNICALL CallStaticObjectMethodV(JNIEnv* env, jclass, jmethodID mid, va_list args) {
     DexJniEnv* self = Self(env);
-    if (self == nullptr) return nullptr;
-    return self->AddLocalRef(self->CallJavaV(nullptr, Mth(mid), args, false).l);
+    if (self == nullptr || mid == nullptr) return nullptr;
+    DexMethod* method = Mth(mid);
+    const char* shorty = DexJniEnv::MethodShorty(method);
+    jvalue boxed[64];
+    if (kudroid::UnpackGuestVaListToJvalues(shorty, reinterpret_cast<const void*>(args), boxed, 64)) {
+        return self->AddLocalRef(self->CallJavaA(nullptr, method, boxed, false).l);
+    }
+    return self->AddLocalRef(self->CallJavaV(nullptr, method, args, false).l);
 }
 jobject JNICALL CallStaticObjectMethod(JNIEnv* env, jclass c, jmethodID mid, ...) {
     va_list args;
@@ -576,7 +620,17 @@ void JNICALL CallVoidMethodA(JNIEnv* env, jobject obj, jmethodID mid, const jval
     if (DexJniEnv* self = Self(env)) self->CallJavaA(Obj(obj), Mth(mid), args, true);
 }
 void JNICALL CallVoidMethodV(JNIEnv* env, jobject obj, jmethodID mid, va_list args) {
-    if (DexJniEnv* self = Self(env)) self->CallJavaV(Obj(obj), Mth(mid), args, true);
+    if (DexJniEnv* self = Self(env)) {
+        if (mid == nullptr) return;
+        DexMethod* method = Mth(mid);
+        const char* shorty = DexJniEnv::MethodShorty(method);
+        jvalue boxed[64];
+        if (kudroid::UnpackGuestVaListToJvalues(shorty, reinterpret_cast<const void*>(args), boxed, 64)) {
+            self->CallJavaA(Obj(obj), method, boxed, true);
+        } else {
+            self->CallJavaV(Obj(obj), method, args, true);
+        }
+    }
 }
 void JNICALL CallVoidMethod(JNIEnv* env, jobject obj, jmethodID mid, ...) {
     va_list args;
@@ -591,7 +645,17 @@ void JNICALL CallNonvirtualVoidMethodA(JNIEnv* env, jobject obj, jclass, jmethod
 }
 void JNICALL CallNonvirtualVoidMethodV(JNIEnv* env, jobject obj, jclass, jmethodID mid,
                                        va_list args) {
-    if (DexJniEnv* self = Self(env)) self->CallJavaV(Obj(obj), Mth(mid), args, false);
+    if (DexJniEnv* self = Self(env)) {
+        if (mid == nullptr) return;
+        DexMethod* method = Mth(mid);
+        const char* shorty = DexJniEnv::MethodShorty(method);
+        jvalue boxed[64];
+        if (kudroid::UnpackGuestVaListToJvalues(shorty, reinterpret_cast<const void*>(args), boxed, 64)) {
+            self->CallJavaA(Obj(obj), method, boxed, false);
+        } else {
+            self->CallJavaV(Obj(obj), method, args, false);
+        }
+    }
 }
 void JNICALL CallNonvirtualVoidMethod(JNIEnv* env, jobject obj, jclass c, jmethodID mid, ...) {
     va_list args;
@@ -604,7 +668,17 @@ void JNICALL CallStaticVoidMethodA(JNIEnv* env, jclass, jmethodID mid, const jva
     if (DexJniEnv* self = Self(env)) self->CallJavaA(nullptr, Mth(mid), args, false);
 }
 void JNICALL CallStaticVoidMethodV(JNIEnv* env, jclass, jmethodID mid, va_list args) {
-    if (DexJniEnv* self = Self(env)) self->CallJavaV(nullptr, Mth(mid), args, false);
+    if (DexJniEnv* self = Self(env)) {
+        if (mid == nullptr) return;
+        DexMethod* method = Mth(mid);
+        const char* shorty = DexJniEnv::MethodShorty(method);
+        jvalue boxed[64];
+        if (kudroid::UnpackGuestVaListToJvalues(shorty, reinterpret_cast<const void*>(args), boxed, 64)) {
+            self->CallJavaA(nullptr, method, boxed, false);
+        } else {
+            self->CallJavaV(nullptr, method, args, false);
+        }
+    }
 }
 void JNICALL CallStaticVoidMethod(JNIEnv* env, jclass c, jmethodID mid, ...) {
     va_list args;
@@ -1090,6 +1164,207 @@ jint JNICALL AttachCurrentThreadAsDaemon(JavaVM* vm, void** penv, void* args) {
 }  // namespace jnifns
 }  // namespace
 
+#if defined(__aarch64__)
+extern "C" {
+void* kudroid_jni_call_virtual_trampoline(void);
+void* kudroid_jni_call_virtual_float_trampoline(void);
+void* kudroid_jni_call_virtual_double_trampoline(void);
+void* kudroid_jni_call_virtual_object_trampoline(void);
+
+void* kudroid_jni_call_static_trampoline(void);
+void* kudroid_jni_call_static_float_trampoline(void);
+void* kudroid_jni_call_static_double_trampoline(void);
+void* kudroid_jni_call_static_object_trampoline(void);
+
+void* kudroid_jni_call_nonvirtual_trampoline(void);
+void* kudroid_jni_call_nonvirtual_float_trampoline(void);
+void* kudroid_jni_call_nonvirtual_double_trampoline(void);
+void* kudroid_jni_call_nonvirtual_object_trampoline(void);
+
+void* kudroid_jni_new_object_trampoline(void);
+
+uint64_t kudroid_jni_call_virtual_from_registers(const uint64_t* frame) {
+    const auto* regs = reinterpret_cast<const kudroid::GuestVarargs*>(frame);
+    JNIEnv* env = reinterpret_cast<JNIEnv*>(regs->gp[0]);
+    jobject obj = reinterpret_cast<jobject>(regs->gp[1]);
+    jmethodID mid = reinterpret_cast<jmethodID>(regs->gp[2]);
+    DexJniEnv* self = jnifns::Self(env);
+    if (!self || !mid) return 0;
+    DexMethod* method = jnifns::Mth(mid);
+    const char* shorty = DexJniEnv::MethodShorty(method);
+    jvalue args[64];
+    kudroid::UnpackGuestVarargsToJvalues(shorty, regs, 3, 0, args, 64);
+    return self->CallJavaA(jnifns::Obj(obj), method, args, true).j;
+}
+
+float kudroid_jni_call_virtual_float_from_registers(const uint64_t* frame) {
+    const auto* regs = reinterpret_cast<const kudroid::GuestVarargs*>(frame);
+    JNIEnv* env = reinterpret_cast<JNIEnv*>(regs->gp[0]);
+    jobject obj = reinterpret_cast<jobject>(regs->gp[1]);
+    jmethodID mid = reinterpret_cast<jmethodID>(regs->gp[2]);
+    DexJniEnv* self = jnifns::Self(env);
+    if (!self || !mid) return 0.0f;
+    DexMethod* method = jnifns::Mth(mid);
+    const char* shorty = DexJniEnv::MethodShorty(method);
+    jvalue args[64];
+    kudroid::UnpackGuestVarargsToJvalues(shorty, regs, 3, 0, args, 64);
+    return self->CallJavaA(jnifns::Obj(obj), method, args, true).f;
+}
+
+double kudroid_jni_call_virtual_double_from_registers(const uint64_t* frame) {
+    const auto* regs = reinterpret_cast<const kudroid::GuestVarargs*>(frame);
+    JNIEnv* env = reinterpret_cast<JNIEnv*>(regs->gp[0]);
+    jobject obj = reinterpret_cast<jobject>(regs->gp[1]);
+    jmethodID mid = reinterpret_cast<jmethodID>(regs->gp[2]);
+    DexJniEnv* self = jnifns::Self(env);
+    if (!self || !mid) return 0.0;
+    DexMethod* method = jnifns::Mth(mid);
+    const char* shorty = DexJniEnv::MethodShorty(method);
+    jvalue args[64];
+    kudroid::UnpackGuestVarargsToJvalues(shorty, regs, 3, 0, args, 64);
+    return self->CallJavaA(jnifns::Obj(obj), method, args, true).d;
+}
+
+jobject kudroid_jni_call_virtual_object_from_registers(const uint64_t* frame) {
+    const auto* regs = reinterpret_cast<const kudroid::GuestVarargs*>(frame);
+    JNIEnv* env = reinterpret_cast<JNIEnv*>(regs->gp[0]);
+    jobject obj = reinterpret_cast<jobject>(regs->gp[1]);
+    jmethodID mid = reinterpret_cast<jmethodID>(regs->gp[2]);
+    DexJniEnv* self = jnifns::Self(env);
+    if (!self || !mid) return nullptr;
+    DexMethod* method = jnifns::Mth(mid);
+    const char* shorty = DexJniEnv::MethodShorty(method);
+    jvalue args[64];
+    kudroid::UnpackGuestVarargsToJvalues(shorty, regs, 3, 0, args, 64);
+    return self->AddLocalRef(self->CallJavaA(jnifns::Obj(obj), method, args, true).l);
+}
+
+uint64_t kudroid_jni_call_static_from_registers(const uint64_t* frame) {
+    const auto* regs = reinterpret_cast<const kudroid::GuestVarargs*>(frame);
+    JNIEnv* env = reinterpret_cast<JNIEnv*>(regs->gp[0]);
+    jmethodID mid = reinterpret_cast<jmethodID>(regs->gp[2]);
+    DexJniEnv* self = jnifns::Self(env);
+    if (!self || !mid) return 0;
+    DexMethod* method = jnifns::Mth(mid);
+    const char* shorty = DexJniEnv::MethodShorty(method);
+    jvalue args[64];
+    kudroid::UnpackGuestVarargsToJvalues(shorty, regs, 3, 0, args, 64);
+    return self->CallJavaA(nullptr, method, args, false).j;
+}
+
+float kudroid_jni_call_static_float_from_registers(const uint64_t* frame) {
+    const auto* regs = reinterpret_cast<const kudroid::GuestVarargs*>(frame);
+    JNIEnv* env = reinterpret_cast<JNIEnv*>(regs->gp[0]);
+    jmethodID mid = reinterpret_cast<jmethodID>(regs->gp[2]);
+    DexJniEnv* self = jnifns::Self(env);
+    if (!self || !mid) return 0.0f;
+    DexMethod* method = jnifns::Mth(mid);
+    const char* shorty = DexJniEnv::MethodShorty(method);
+    jvalue args[64];
+    kudroid::UnpackGuestVarargsToJvalues(shorty, regs, 3, 0, args, 64);
+    return self->CallJavaA(nullptr, method, args, false).f;
+}
+
+double kudroid_jni_call_static_double_from_registers(const uint64_t* frame) {
+    const auto* regs = reinterpret_cast<const kudroid::GuestVarargs*>(frame);
+    JNIEnv* env = reinterpret_cast<JNIEnv*>(regs->gp[0]);
+    jmethodID mid = reinterpret_cast<jmethodID>(regs->gp[2]);
+    DexJniEnv* self = jnifns::Self(env);
+    if (!self || !mid) return 0.0;
+    DexMethod* method = jnifns::Mth(mid);
+    const char* shorty = DexJniEnv::MethodShorty(method);
+    jvalue args[64];
+    kudroid::UnpackGuestVarargsToJvalues(shorty, regs, 3, 0, args, 64);
+    return self->CallJavaA(nullptr, method, args, false).d;
+}
+
+jobject kudroid_jni_call_static_object_from_registers(const uint64_t* frame) {
+    const auto* regs = reinterpret_cast<const kudroid::GuestVarargs*>(frame);
+    JNIEnv* env = reinterpret_cast<JNIEnv*>(regs->gp[0]);
+    jmethodID mid = reinterpret_cast<jmethodID>(regs->gp[2]);
+    DexJniEnv* self = jnifns::Self(env);
+    if (!self || !mid) return nullptr;
+    DexMethod* method = jnifns::Mth(mid);
+    const char* shorty = DexJniEnv::MethodShorty(method);
+    jvalue args[64];
+    kudroid::UnpackGuestVarargsToJvalues(shorty, regs, 3, 0, args, 64);
+    return self->AddLocalRef(self->CallJavaA(nullptr, method, args, false).l);
+}
+
+uint64_t kudroid_jni_call_nonvirtual_from_registers(const uint64_t* frame) {
+    const auto* regs = reinterpret_cast<const kudroid::GuestVarargs*>(frame);
+    JNIEnv* env = reinterpret_cast<JNIEnv*>(regs->gp[0]);
+    jobject obj = reinterpret_cast<jobject>(regs->gp[1]);
+    jmethodID mid = reinterpret_cast<jmethodID>(regs->gp[3]);
+    DexJniEnv* self = jnifns::Self(env);
+    if (!self || !mid) return 0;
+    DexMethod* method = jnifns::Mth(mid);
+    const char* shorty = DexJniEnv::MethodShorty(method);
+    jvalue args[64];
+    kudroid::UnpackGuestVarargsToJvalues(shorty, regs, 4, 0, args, 64);
+    return self->CallJavaA(jnifns::Obj(obj), method, args, false).j;
+}
+
+float kudroid_jni_call_nonvirtual_float_from_registers(const uint64_t* frame) {
+    const auto* regs = reinterpret_cast<const kudroid::GuestVarargs*>(frame);
+    JNIEnv* env = reinterpret_cast<JNIEnv*>(regs->gp[0]);
+    jobject obj = reinterpret_cast<jobject>(regs->gp[1]);
+    jmethodID mid = reinterpret_cast<jmethodID>(regs->gp[3]);
+    DexJniEnv* self = jnifns::Self(env);
+    if (!self || !mid) return 0.0f;
+    DexMethod* method = jnifns::Mth(mid);
+    const char* shorty = DexJniEnv::MethodShorty(method);
+    jvalue args[64];
+    kudroid::UnpackGuestVarargsToJvalues(shorty, regs, 4, 0, args, 64);
+    return self->CallJavaA(jnifns::Obj(obj), method, args, false).f;
+}
+
+double kudroid_jni_call_nonvirtual_double_from_registers(const uint64_t* frame) {
+    const auto* regs = reinterpret_cast<const kudroid::GuestVarargs*>(frame);
+    JNIEnv* env = reinterpret_cast<JNIEnv*>(regs->gp[0]);
+    jobject obj = reinterpret_cast<jobject>(regs->gp[1]);
+    jmethodID mid = reinterpret_cast<jmethodID>(regs->gp[3]);
+    DexJniEnv* self = jnifns::Self(env);
+    if (!self || !mid) return 0.0;
+    DexMethod* method = jnifns::Mth(mid);
+    const char* shorty = DexJniEnv::MethodShorty(method);
+    jvalue args[64];
+    kudroid::UnpackGuestVarargsToJvalues(shorty, regs, 4, 0, args, 64);
+    return self->CallJavaA(jnifns::Obj(obj), method, args, false).d;
+}
+
+jobject kudroid_jni_call_nonvirtual_object_from_registers(const uint64_t* frame) {
+    const auto* regs = reinterpret_cast<const kudroid::GuestVarargs*>(frame);
+    JNIEnv* env = reinterpret_cast<JNIEnv*>(regs->gp[0]);
+    jobject obj = reinterpret_cast<jobject>(regs->gp[1]);
+    jmethodID mid = reinterpret_cast<jmethodID>(regs->gp[3]);
+    DexJniEnv* self = jnifns::Self(env);
+    if (!self || !mid) return nullptr;
+    DexMethod* method = jnifns::Mth(mid);
+    const char* shorty = DexJniEnv::MethodShorty(method);
+    jvalue args[64];
+    kudroid::UnpackGuestVarargsToJvalues(shorty, regs, 4, 0, args, 64);
+    return self->AddLocalRef(self->CallJavaA(jnifns::Obj(obj), method, args, false).l);
+}
+
+jobject kudroid_jni_new_object_from_registers(const uint64_t* frame) {
+    const auto* regs = reinterpret_cast<const kudroid::GuestVarargs*>(frame);
+    JNIEnv* env = reinterpret_cast<JNIEnv*>(regs->gp[0]);
+    jclass clazz = reinterpret_cast<jclass>(regs->gp[1]);
+    jmethodID mid = reinterpret_cast<jmethodID>(regs->gp[2]);
+    DexJniEnv* self = jnifns::Self(env);
+    if (!self || !clazz || !mid) return nullptr;
+    DexClass* k = jnifns::CheckedCls(self, clazz);
+    if (k == nullptr) return nullptr;
+    DexMethod* method = jnifns::Mth(mid);
+    const char* shorty = DexJniEnv::MethodShorty(method);
+    jvalue args[64];
+    kudroid::UnpackGuestVarargsToJvalues(shorty, regs, 3, 0, args, 64);
+    return self->AddLocalRef(self->NewObjectA(k, method, args));
+}
+}
+#endif
+
 void DexJniEnv::InitFunctionTable() {
     // static: table shared by all DexJniEnv, initialized only once.
     static JNINativeInterface_ fns = {};
@@ -1150,6 +1425,43 @@ void DexJniEnv::InitFunctionTable() {
         DEXRT_BIND_CALLS(Double)
         DEXRT_BIND_CALLS(Void)
 #undef DEXRT_BIND_CALLS
+
+#if defined(__aarch64__)
+        fns.NewObject = reinterpret_cast<jobject (JNICALL *)(JNIEnv*, jclass, jmethodID, ...)>(kudroid_jni_new_object_trampoline);
+
+        fns.CallVoidMethod = reinterpret_cast<void (JNICALL *)(JNIEnv*, jobject, jmethodID, ...)>(kudroid_jni_call_virtual_trampoline);
+        fns.CallObjectMethod = reinterpret_cast<jobject (JNICALL *)(JNIEnv*, jobject, jmethodID, ...)>(kudroid_jni_call_virtual_object_trampoline);
+        fns.CallBooleanMethod = reinterpret_cast<jboolean (JNICALL *)(JNIEnv*, jobject, jmethodID, ...)>(kudroid_jni_call_virtual_trampoline);
+        fns.CallByteMethod = reinterpret_cast<jbyte (JNICALL *)(JNIEnv*, jobject, jmethodID, ...)>(kudroid_jni_call_virtual_trampoline);
+        fns.CallCharMethod = reinterpret_cast<jchar (JNICALL *)(JNIEnv*, jobject, jmethodID, ...)>(kudroid_jni_call_virtual_trampoline);
+        fns.CallShortMethod = reinterpret_cast<jshort (JNICALL *)(JNIEnv*, jobject, jmethodID, ...)>(kudroid_jni_call_virtual_trampoline);
+        fns.CallIntMethod = reinterpret_cast<jint (JNICALL *)(JNIEnv*, jobject, jmethodID, ...)>(kudroid_jni_call_virtual_trampoline);
+        fns.CallLongMethod = reinterpret_cast<jlong (JNICALL *)(JNIEnv*, jobject, jmethodID, ...)>(kudroid_jni_call_virtual_trampoline);
+        fns.CallFloatMethod = reinterpret_cast<jfloat (JNICALL *)(JNIEnv*, jobject, jmethodID, ...)>(kudroid_jni_call_virtual_float_trampoline);
+        fns.CallDoubleMethod = reinterpret_cast<jdouble (JNICALL *)(JNIEnv*, jobject, jmethodID, ...)>(kudroid_jni_call_virtual_double_trampoline);
+
+        fns.CallStaticVoidMethod = reinterpret_cast<void (JNICALL *)(JNIEnv*, jclass, jmethodID, ...)>(kudroid_jni_call_static_trampoline);
+        fns.CallStaticObjectMethod = reinterpret_cast<jobject (JNICALL *)(JNIEnv*, jclass, jmethodID, ...)>(kudroid_jni_call_static_object_trampoline);
+        fns.CallStaticBooleanMethod = reinterpret_cast<jboolean (JNICALL *)(JNIEnv*, jclass, jmethodID, ...)>(kudroid_jni_call_static_trampoline);
+        fns.CallStaticByteMethod = reinterpret_cast<jbyte (JNICALL *)(JNIEnv*, jclass, jmethodID, ...)>(kudroid_jni_call_static_trampoline);
+        fns.CallStaticCharMethod = reinterpret_cast<jchar (JNICALL *)(JNIEnv*, jclass, jmethodID, ...)>(kudroid_jni_call_static_trampoline);
+        fns.CallStaticShortMethod = reinterpret_cast<jshort (JNICALL *)(JNIEnv*, jclass, jmethodID, ...)>(kudroid_jni_call_static_trampoline);
+        fns.CallStaticIntMethod = reinterpret_cast<jint (JNICALL *)(JNIEnv*, jclass, jmethodID, ...)>(kudroid_jni_call_static_trampoline);
+        fns.CallStaticLongMethod = reinterpret_cast<jlong (JNICALL *)(JNIEnv*, jclass, jmethodID, ...)>(kudroid_jni_call_static_trampoline);
+        fns.CallStaticFloatMethod = reinterpret_cast<jfloat (JNICALL *)(JNIEnv*, jclass, jmethodID, ...)>(kudroid_jni_call_static_float_trampoline);
+        fns.CallStaticDoubleMethod = reinterpret_cast<jdouble (JNICALL *)(JNIEnv*, jclass, jmethodID, ...)>(kudroid_jni_call_static_double_trampoline);
+
+        fns.CallNonvirtualVoidMethod = reinterpret_cast<void (JNICALL *)(JNIEnv*, jobject, jclass, jmethodID, ...)>(kudroid_jni_call_nonvirtual_trampoline);
+        fns.CallNonvirtualObjectMethod = reinterpret_cast<jobject (JNICALL *)(JNIEnv*, jobject, jclass, jmethodID, ...)>(kudroid_jni_call_nonvirtual_object_trampoline);
+        fns.CallNonvirtualBooleanMethod = reinterpret_cast<jboolean (JNICALL *)(JNIEnv*, jobject, jclass, jmethodID, ...)>(kudroid_jni_call_nonvirtual_trampoline);
+        fns.CallNonvirtualByteMethod = reinterpret_cast<jbyte (JNICALL *)(JNIEnv*, jobject, jclass, jmethodID, ...)>(kudroid_jni_call_nonvirtual_trampoline);
+        fns.CallNonvirtualCharMethod = reinterpret_cast<jchar (JNICALL *)(JNIEnv*, jobject, jclass, jmethodID, ...)>(kudroid_jni_call_nonvirtual_trampoline);
+        fns.CallNonvirtualShortMethod = reinterpret_cast<jshort (JNICALL *)(JNIEnv*, jobject, jclass, jmethodID, ...)>(kudroid_jni_call_nonvirtual_trampoline);
+        fns.CallNonvirtualIntMethod = reinterpret_cast<jint (JNICALL *)(JNIEnv*, jobject, jclass, jmethodID, ...)>(kudroid_jni_call_nonvirtual_trampoline);
+        fns.CallNonvirtualLongMethod = reinterpret_cast<jlong (JNICALL *)(JNIEnv*, jobject, jclass, jmethodID, ...)>(kudroid_jni_call_nonvirtual_trampoline);
+        fns.CallNonvirtualFloatMethod = reinterpret_cast<jfloat (JNICALL *)(JNIEnv*, jobject, jclass, jmethodID, ...)>(kudroid_jni_call_nonvirtual_float_trampoline);
+        fns.CallNonvirtualDoubleMethod = reinterpret_cast<jdouble (JNICALL *)(JNIEnv*, jobject, jclass, jmethodID, ...)>(kudroid_jni_call_nonvirtual_double_trampoline);
+#endif
 
         fns.GetFieldID = jnifns::GetFieldID;
         fns.GetStaticMethodID = jnifns::GetStaticMethodID;

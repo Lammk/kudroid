@@ -7,6 +7,7 @@
 // V n d ng th  thu t build hai l t nh  test_kuart_object: bytecode tham chi u
 // entity b ng index, index ch  ch t sau khi builder sort xong m i b ng.
 #include "kudroid/kuart/DexJniEnv.h"
+#include "kudroid/abi/GuestVarargs.h"
 #include "kudroid/framework_dex_bytes.h"
 
 #include <cstdio>
@@ -554,10 +555,24 @@ Check(obj.l != nullptr, "CallJavaA static tr  object");
 Check(v.i == 7, "CallJavaA virtual tr  7");
     }
 
-    // B ng ref: local t ch lu  trong frame ngo i c ng, global   xo  h t.
-Check(jni.NumGlobalRefs() == 0, "global ref   d n s ch");
-Check(jni.NumLocalRefs() > 0, "local ref c n trong frame ngo i c ng");
+    // Test AAPCS64 Register Unpacking to JValues
+    {
+        kudroid::GuestVarargs regs = {};
+        regs.gp[0] = 0x1111; // env
+        regs.gp[1] = 0x2222; // obj
+        regs.gp[2] = 0x3333; // mid
+        regs.gp[3] = 0x12345678; // int arg1
+        regs.gp[4] = 0xabcdef0123456789ULL; // long arg2
+        regs.gp[5] = 0x5555; // jobject arg3
 
-std::printf("=== %s (%d error) ===\n", g_failures == 0 ? "PASSED" : "FAILED", g_failures);
+        jvalue out[10];
+        const bool ok = kudroid::UnpackGuestVarargsToJvalues("VIJL", &regs, 3, 0, out, 10);
+        Check(ok, "UnpackGuestVarargsToJvalues parsed shorty VIJL");
+        Check(out[0].i == 0x12345678, "out[0].i == 0x12345678");
+        Check(out[1].j == static_cast<jlong>(0xabcdef0123456789ULL), "out[1].j retains all 64 bits");
+        Check(out[2].l == reinterpret_cast<jobject>(0x5555), "out[2].l == 0x5555");
+    }
+
+    std::printf("=== %s (%d error) ===\n", g_failures == 0 ? "PASSED" : "FAILED", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

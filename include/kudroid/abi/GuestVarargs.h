@@ -117,23 +117,25 @@ int ScanGuestVarargsFrom(int (*peek)(void*), void (*advance)(void*), void* state
                          const char* format, const GuestVarargs* registers,
                          unsigned firstGpIndex, unsigned firstFpIndex);
 
+// Unpack a guest's variadic arguments into an array of jvalue according to a Dex shorty.
+//
+// `shorty` is the method's shorty signature (e.g. "VI" for void(int), "VL" for void(Object)).
+// `firstGpIndex` is 3 for Call<Type>Method and CallStatic<Type>Method, 4 for CallNonvirtual<Type>Method.
+// `firstFpIndex` is 0.
+bool UnpackGuestVarargsToJvalues(const char* shorty, const GuestVarargs* registers,
+                                unsigned firstGpIndex, unsigned firstFpIndex,
+                                void* outJvalues, size_t maxOut);
+
+bool UnpackGuestVaListToJvalues(const char* shorty, const void* guest_ap,
+                               void* outJvalues, size_t maxOut);
+
 } // namespace kudroid
 
 // Format a guest's va_list, for the shims that receive one.
-//
-// Declared extern "C" and taking `const void*` so the call is expressible from the
-// freestanding arm64 test, where `va_list` is the guest's own type and the compiler
-// therefore passes it by reference — exactly as guest code does. That is the only way to
-// exercise this path on the ABI it is about.
-//
-// Returns the length the formatted string WOULD have had, as snprintf does.
 extern "C" size_t kudroid_format_guest_va_list(char* out, size_t size, const char* format,
                                                const void* guest_ap);
 
 // Scan a string using a guest's va_list, for vsscanf. Returns items assigned, or -1.
-//
-// A va_list that cannot be validated returns -1 without scanning: every conversion would
-// otherwise store to an address taken from it.
 extern "C" int kudroid_scan_guest_va_list(const char* input, const char* format,
                                           const void* guest_ap);
 

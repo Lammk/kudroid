@@ -951,3 +951,100 @@ extern "C" int kudroid_scan_guest_va_list(const char* input, const char* format,
     return kudroid::ScanGuestVarargsFrom(peek, advance, &state, format, &registers, firstGp,
                                         firstFp);
 }
+
+namespace kudroid {
+
+bool UnpackGuestVarargsToJvalues(const char* shorty, const GuestVarargs* registers,
+                                unsigned firstGpIndex, unsigned firstFpIndex,
+                                void* outJvalues, size_t maxOut) {
+    if (shorty == nullptr || registers == nullptr || outJvalues == nullptr) return false;
+    auto* out = reinterpret_cast<uint64_t*>(outJvalues);
+    unsigned gp_idx = firstGpIndex;
+    unsigned fp_idx = firstFpIndex;
+    const uint64_t* stack_ptr = registers->overflow;
+    size_t count = 0;
+
+    for (const char* p = shorty + 1; *p != '\0'; ++p) {
+        if (count >= maxOut) break;
+        uint64_t& val = out[count++];
+        val = 0;
+        char type = *p;
+        if (type == 'F') {
+            float f_val = 0.0f;
+            if (fp_idx < 8) {
+                uint32_t raw = static_cast<uint32_t>(registers->fp[fp_idx * 2]);
+                __builtin_memcpy(&f_val, &raw, sizeof(float));
+                fp_idx++;
+            } else if (stack_ptr != nullptr) {
+                uint32_t raw = static_cast<uint32_t>(*stack_ptr++);
+                __builtin_memcpy(&f_val, &raw, sizeof(float));
+            }
+            __builtin_memcpy(&val, &f_val, sizeof(float));
+        } else if (type == 'D') {
+            double d_val = 0.0;
+            if (fp_idx < 8) {
+                uint64_t raw = registers->fp[fp_idx * 2];
+                __builtin_memcpy(&d_val, &raw, sizeof(double));
+                fp_idx++;
+            } else if (stack_ptr != nullptr) {
+                uint64_t raw = *stack_ptr++;
+                __builtin_memcpy(&d_val, &raw, sizeof(double));
+            }
+            __builtin_memcpy(&val, &d_val, sizeof(double));
+        } else {
+            uint64_t raw = 0;
+            if (gp_idx < 8) {
+                raw = registers->gp[gp_idx++];
+            } else if (stack_ptr != nullptr) {
+                raw = *stack_ptr++;
+            }
+            switch (type) {
+                case 'Z': {
+                    uint8_t z = (raw != 0) ? 1 : 0;
+                    __builtin_memcpy(&val, &z, sizeof(uint8_t));
+                    break;
+                }
+                case 'B': {
+                    int8_t b = static_cast<int8_t>(raw);
+                    __builtin_memcpy(&val, &b, sizeof(int8_t));
+                    break;
+                }
+                case 'C': {
+                    uint16_t c = static_cast<uint16_t>(raw);
+                    __builtin_memcpy(&val, &c, sizeof(uint16_t));
+                    break;
+                }
+                case 'S': {
+                    int16_t s = static_cast<int16_t>(raw);
+                    __builtin_memcpy(&val, &s, sizeof(int16_t));
+                    break;
+                }
+                case 'I': {
+                    int32_t i = static_cast<int32_t>(raw);
+                    __builtin_memcpy(&val, &i, sizeof(int32_t));
+                    break;
+                }
+                case 'J':
+                default: {
+                    val = raw; // int64_t, jobject / jclass / jstring / jarray
+                    break;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+bool UnpackGuestVaListToJvalues(const char* shorty, const void* guest_ap,
+                               void* outJvalues, size_t maxOut) {
+    if (shorty == nullptr || guest_ap == nullptr || outJvalues == nullptr) return false;
+    GuestVarargs regs;
+    unsigned firstGp = 0;
+    unsigned firstFp = 0;
+    if (!GuestVarargsFromVaList(guest_ap, &regs, &firstGp, &firstFp)) {
+        return false;
+    }
+    return UnpackGuestVarargsToJvalues(shorty, &regs, firstGp, firstFp, outJvalues, maxOut);
+}
+
+}  // namespace kudroid
