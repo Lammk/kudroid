@@ -86,8 +86,16 @@ void native_call_enter(const char* class_name, const char* method,
 
 void native_call_stage(const char* stage) {
     if (g_call.active_count.load(std::memory_order_acquire) == 0) return;
-    std::lock_guard<std::mutex> lock(g_call.mutex);
-    copy_text(g_call.stage, sizeof(g_call.stage), stage);
+    char line[2048];
+    {
+        std::lock_guard<std::mutex> lock(g_call.mutex);
+        copy_text(g_call.stage, sizeof(g_call.stage), stage);
+        std::snprintf(line, sizeof(line),
+                      "native-stage stage=%s class=%s method=%s sig=%s vm_depth=%d",
+                      stage, g_call.class_name, g_call.method, g_call.signature,
+                      g_call.vm_lock_depth);
+    }
+    kudroid_persistent_breadcrumb(line);
 }
 
 void native_call_exit() {
