@@ -3,6 +3,7 @@
 #include <chrono>
 
 #include "kudroid/Log.h"
+#include "kudroid/NativeCallTelemetry.h"
 #include "kudroid/platform/MemoryInfo.h"
 
 #include <cstdio>
@@ -250,13 +251,18 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
                   static_cast<unsigned long long>(memory_before.available_bytes),
                   memory_before.low_memory ? 1 : 0);
     kudroid_persistent_breadcrumb(breadcrumb);
+    native_call_enter(owner, method_name, method_sig, VmLockDepth());
 
     const char* shorty = nullptr;
     if (method->dex_file != nullptr) {
         shorty = method->dex_file->GetMethodShorty(
             method->dex_file->GetMethodId(method->dex_method_index));
     }
-    if (shorty == nullptr) return result;
+    if (shorty == nullptr) {
+        native_call_stage("invalid-shorty");
+        native_call_exit();
+        return result;
+    }
 
     // The first parameter after env is receiver (instance) or jclass (static).
     void* self;
@@ -322,6 +328,8 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
         }
         last_error_ = std::string("native method needs stack-passed arguments: ") +
                       (method->name != nullptr ? method->name : "?");
+        native_call_stage("unsupported-stack-args");
+        native_call_exit();
         return result;
     }
 
@@ -343,8 +351,11 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
         // Releasing here is also what makes a JNI callback into Java work from a native
         // method: Interpreter::Execute takes the lock for itself when the thread does not
         // hold it, so the callback is serialised against other Java threads normally.
+        native_call_stage("before-vm-release");
         VmLockRelease unlocked;
+        native_call_stage("before-trampoline");
         ret = kudroid_jni_call(method->native_fn, gp, ngp, fp, nfp, &fp_ret);
+        native_call_stage("after-trampoline");
     }
 
     const auto native_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -360,6 +371,7 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
                   static_cast<unsigned long long>(memory_after.available_bytes),
                   memory_after.low_memory ? 1 : 0);
     kudroid_persistent_breadcrumb(breadcrumb);
+    native_call_stage("before-result-decode");
 
     switch (shorty[0]) {
         case 'V': break;
@@ -393,6 +405,7 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
                           (method->name != nullptr ? method->name : "?");
             break;
     }
+    native_call_exit();
     return result;
 }
 
