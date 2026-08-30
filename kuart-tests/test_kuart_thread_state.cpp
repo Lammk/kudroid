@@ -352,7 +352,19 @@ int main() {
             kudroid::kuart::Interpreter::CaptureThreadState();
         Check(leaked.frames == 2, "both abandoned frames are still recorded");
         Check(leaked.depth == 2, "the depth counter is still raised");
-        Check(leaked.vm_lock_depth == 1, "the VM lock is still held");
+        // The VM lock is NOT stranded, even though nothing unwound.
+        //
+        // The jump originates inside a native method, and a native call runs with the VM
+        // lock released — as a thread in Android's kNative state does. So by the time the
+        // jump happens this thread holds nothing, and skipping the destructors cannot
+        // strand what was never held.
+        //
+        // That is a change from the behaviour this test first pinned, and the right way
+        // round: a stranded VM lock blocks every other Java thread permanently, and
+        // nothing in the log points at the library whose fault caused it. The frame and
+        // depth bookkeeping above still needs repairing by hand; the lock no longer does.
+        Check(leaked.vm_lock_depth == 0,
+              "the VM lock is free, because native code did not hold it");
 
         // The trace is built from entries whose DexFrame storage has been reclaimed
         // AND overwritten, which is the state the real failure was in by the time the

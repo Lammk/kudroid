@@ -40,11 +40,19 @@ VmLockGuard::~VmLockGuard() {
 }
 
 VmLockRelease::VmLockRelease() : depth_(t_vm_lock_depth) {
+    // The counter must go to zero while the lock is released, not merely be
+    // remembered. VmLockDepth() answers "does this thread hold the VM lock?", and
+    // callers act on it: Interpreter::Execute takes a guard when the answer is no,
+    // which is what lets a native downcall re-enter Java. Leaving the counter at its
+    // old value made that question return yes for a thread holding nothing, so the
+    // re-entering call ran bytecode with no lock at all.
+    t_vm_lock_depth = 0;
     for (int i = 0; i < depth_; ++i) g_vm_lock.unlock();
 }
 
 VmLockRelease::~VmLockRelease() {
     for (int i = 0; i < depth_; ++i) g_vm_lock.lock();
+    t_vm_lock_depth = depth_;
 }
 
 int VmLockDepth() { return t_vm_lock_depth; }

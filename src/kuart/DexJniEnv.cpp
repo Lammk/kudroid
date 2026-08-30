@@ -13,6 +13,7 @@
 #include "kudroid/kuart/DexClassLinker.h"
 #include "kudroid/kuart/DexClassObject.h"
 #include "kudroid/kuart/LibCore.h"
+#include "kudroid/kuart/VmLock.h"
 
 namespace kudroid {
 namespace kuart {
@@ -298,8 +299,26 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
     }
 
     uint64_t fp_ret = 0;
-    const uint64_t ret =
-        kudroid_jni_call(method->native_fn, gp, ngp, fp, nfp, &fp_ret);
+    uint64_t ret;
+    {
+        // Native code runs with the VM lock RELEASED, as a thread in Android's kNative
+        // state does.
+        //
+        // A native method is free to block, and Minecraft's
+        // MainActivity.nativeWaitCrashManagementSetupComplete does exactly that: it takes
+        // a mutex and waits on a condition variable until another thread sets a flag.
+        // Holding the VM lock across that call means the thread that would set the flag
+        // cannot run any bytecode, so the flag is never set and the wait never ends. The
+        // app did not crash — it stopped, with the log ending on the line that resolved
+        // that very symbol, which reads like the call never happened rather than like it
+        // never returned.
+        //
+        // Releasing here is also what makes a JNI callback into Java work from a native
+        // method: Interpreter::Execute takes the lock for itself when the thread does not
+        // hold it, so the callback is serialised against other Java threads normally.
+        VmLockRelease unlocked;
+        ret = kudroid_jni_call(method->native_fn, gp, ngp, fp, nfp, &fp_ret);
+    }
 
     switch (shorty[0]) {
         case 'V': break;

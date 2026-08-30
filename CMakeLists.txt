@@ -245,6 +245,10 @@ else()
     # test_kuart_missing_field an unresolvable field must name itself, not say "iput"
     # test_kuart_thread_state  siglongjmp out of the interpreter: no stale frames, no
     #                          held VM lock, no leaked depth; untrusted receiver classes
+    # test_kuart_vmlock        a blocking native method must not hold the VM lock, or the
+    #                          Java thread that would release it cannot run — Minecraft
+    #                          stopped (not crashed) exactly there, waiting on a flag no
+    #                          other thread could set
     # test_kuart_jit           the arm64 encoder against GNU as byte for byte, the
     #                          executable-memory cache (including the no-JIT path that
     #                          stock iOS and LiveContainer JITLess take), and the OAT
@@ -270,6 +274,7 @@ else()
         test_kuart_framework
         test_kuart_missing_field
         test_kuart_thread_state
+        test_kuart_vmlock
         test_kuart_jit
     )
         if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/${kuart_test}.cpp")

@@ -27,6 +27,11 @@ public:
 
 // Drops the VM lock for the duration of a blocking call, then takes it back.
 // No-op on a thread that does not hold it.
+//
+// While released, VmLockDepth() reports 0 — the counter tracks what is actually
+// held, not what will be re-taken. Anything that asks "does this thread hold the
+// VM lock?" must get the truth, because a native downcall that re-enters Java
+// needs to take the lock for itself, and it decides that from this counter.
 class VmLockRelease {
 public:
     VmLockRelease();

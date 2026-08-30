@@ -705,10 +705,17 @@ DexValue Interpreter::Execute(const DexMethod* method, const DexValue* args, siz
     // multiple calls — otherwise a method that runs for a long time will cause subsequent calls to fail.
     if (depth_ == 0) instructions_executed_ = 0;
 
-    // Serialise bytecode across Java threads. Taken only at the outermost call so
-    // nested invokes stay cheap; the mutex is recursive either way.
+    // Serialise bytecode across Java threads. The mutex is recursive, so a nested
+    // invoke on a thread that already holds it costs nothing extra.
+    //
+    // Keyed on whether the lock is actually HELD, not on depth_ == 0. A native method
+    // releases the VM lock while it blocks (see DexJniEnv::CallNative), and native code
+    // routinely calls back into Java while in that state — a JNI callback, or a
+    // condition variable's predicate. Such a call arrives at depth_ > 0 with no lock
+    // held, and keying on depth_ meant it interpreted bytecode completely unsynchronised
+    // against every other Java thread.
     std::unique_ptr<VmLockGuard> vm_lock;
-    if (depth_ == 0) vm_lock = std::make_unique<VmLockGuard>();
+    if (VmLockDepth() == 0) vm_lock = std::make_unique<VmLockGuard>();
 
     // Publish the frame for BuildStackTrace() and count the call depth. Both must be
     // undone on EVERY exit path, including a C++ exception escaping a native
