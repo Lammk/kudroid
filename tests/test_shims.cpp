@@ -41,6 +41,7 @@ extern "C" void* bionic_mremap(void* old_address, size_t old_size,
 extern "C" int bionic_sigaction(int signum, const struct android_sigaction* act,
                                 struct android_sigaction* oldact);
 extern "C" long bionic_syscall(long number, ...);
+extern "C" int bionic_sigaltstack(const stack_t* ss, stack_t* oss);
 extern "C" int bionic_tgkill(int pid, int tid, int sig);
 extern "C" int bionic_pipe2(int pipefd[2], int flags);
 extern "C" int bionic___cxa_guard_acquire(uint64_t* g);
@@ -343,6 +344,10 @@ static void test_syscall_mappings() {
     errno = 0;
     CHECK(bionic_syscall(GUEST_SYS_sigaltstack, nullptr, &current_stack) == 0,
           "sigaltstack(132) query is routed by the Linux ARM64 number");
+    errno = 0;
+    CHECK(bionic_sigaltstack(reinterpret_cast<const stack_t*>(0x4e), nullptr) == -1 &&
+              errno == EFAULT,
+          "sigaltstack rejects an invalid guest pointer with EFAULT");
 
     // tgkill: registry tid -> pthread_t (write when gettid) must be found.
     CHECK(bionic_tgkill(::getpid(), static_cast<int>(mainTid), 0) == 0,

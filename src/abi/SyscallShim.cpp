@@ -1002,6 +1002,20 @@ extern "C" int bionic_sigaltstack(const stack_t *ss, stack_t *oss) {
     if (!ss) {
         return ::sigaltstack(nullptr, oss);
     }
+    if (reinterpret_cast<uintptr_t>(ss) < 4096 ||
+        (oss != nullptr && reinterpret_cast<uintptr_t>(oss) < 4096)) {
+        errno = EFAULT;
+        return -1;
+    }
+#ifdef __APPLE__
+    // A direct guest SVC can carry an invalid Linux pointer. Return the
+    // guest-visible EFAULT instead of dereferencing it in the host shim.
+    if (!range_is_mapped(reinterpret_cast<uintptr_t>(ss), sizeof(*ss)) ||
+        (oss != nullptr && !range_is_mapped(reinterpret_cast<uintptr_t>(oss), sizeof(*oss)))) {
+        errno = EFAULT;
+        return -1;
+    }
+#endif
     stack_t host_ss = *ss;
 #if defined(__APPLE__)
     // Darwin kernel yu cu ss_size ti thiu t nht 32KB
@@ -1020,6 +1034,10 @@ extern "C" int bionic_sigaltstack(const stack_t *ss, stack_t *oss) {
 
 #ifndef __APPLE__
 #include <sys/syscall.h>
+#endif
+
+#ifdef __APPLE__
+static bool range_is_mapped(uintptr_t addr, size_t len);
 #endif
 
 // ─────────────────────────────────────────────────────────────────────────────
