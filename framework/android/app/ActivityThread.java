@@ -65,6 +65,19 @@ public final class ActivityThread {
         return (t != null) ? t.mApplication : null;
     }
 
+    /**
+     * The Activity this thread launched, or null before it exists.
+     *
+     * KuDroid runs one Activity, so "the current Activity" is unambiguous here in a way it
+     * is not on Android. Exposed because code that was handed no Context asks for one this
+     * way — Fragment.getActivity() with no fragment manager to attach it, and SDKs that
+     * reach for an Activity to show UI over.
+     */
+    public static Activity currentActivity() {
+        ActivityThread t = sCurrentActivityThread;
+        return (t != null) ? t.mInitialActivity : null;
+    }
+
     private class H extends Handler {
         public void handleMessage(Message msg) {
             switch (msg.what) {

@@ -45,6 +45,10 @@ extern "C" int bionic_pipe2(int pipefd[2], int flags);
 extern "C" int bionic___cxa_guard_acquire(uint64_t* g);
 extern "C" void bionic___cxa_guard_release(uint64_t* g);
 extern "C" void bionic___cxa_guard_abort(uint64_t* g);
+extern "C" void* bionic_ALooper_prepare(int opts);
+extern "C" void* bionic_ALooper_forThread(void);
+extern "C" void bionic_ALooper_acquire(void* looper);
+extern "C" void bionic_ALooper_release(void* looper);
 extern "C" void* bionic_dlopen(const char* filename, int flags);
 extern "C" void* bionic_dlsym(void* handle, const char* symbol);
 extern "C" int bionic_dlclose(void* handle);
@@ -505,6 +509,45 @@ static int fake_guest_owns(void* handle) {
     return handle == FAKE_GUEST_HANDLE ? 1 : 0;
 }
 
+// ALooper_forThread must never return null.
+//
+// Android's main thread always has a looper — ActivityThread prepares one before any
+// activity exists — so native code treats a null as fatal rather than as something to
+// prepare around. AGDK's initializeNativeCode did exactly that: it aborted with
+// "Unable to retrieve native ALooper", which surfaced as an UnsatisfiedLinkError during
+// onCreate and left the app on a black screen with no crash to read.
+//
+// KuART's main loop is Java and never called ALooper_prepare, so forThread() had nothing
+// to return. Creating on demand is what fixes it, and this pins the property rather than
+// the implementation: whoever asks first gets a looper.
+static void test_alooper_never_null() {
+    void* first = bionic_ALooper_forThread();
+    CHECK(first != nullptr,
+          "ALooper_forThread returns a looper without a prior prepare");
+
+    // The same looper every time: guest code stores the pointer and compares it later,
+    // and a second instance would silently split fd registrations between two loopers.
+    CHECK(bionic_ALooper_forThread() == first,
+          "ALooper_forThread is stable across calls");
+    CHECK(bionic_ALooper_prepare(0) == first,
+          "ALooper_prepare returns the same main looper");
+
+    // An unbalanced release must not destroy the main looper. Guest code releases what it
+    // did not acquire, and on Android the main looper simply outlives it; freeing here
+    // would leave a dangling pointer for any thread already inside pollOnce, faulting far
+    // from the release that caused it.
+    bionic_ALooper_release(first);
+    bionic_ALooper_release(first);
+    bionic_ALooper_release(first);
+    CHECK(bionic_ALooper_forThread() == first,
+          "the main looper survives more releases than acquires");
+
+    bionic_ALooper_acquire(first);
+    bionic_ALooper_release(first);
+    CHECK(bionic_ALooper_forThread() == first,
+          "a balanced acquire/release leaves it alive");
+}
+
 static void test_guest_library_handles() {
     std::printf("[dlfcn] guest .so gets its own handle\n");
 
@@ -570,6 +613,7 @@ int main() {
     test_guard_same_tid_recursion_tolerated();
     test_guard_cross_thread_wait();
     test_guard_recursion_loop_cut();
+    test_alooper_never_null();
     test_guest_library_handles();
     std::printf("=== %d checks, %d failures ===\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

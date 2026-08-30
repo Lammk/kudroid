@@ -259,6 +259,21 @@ public class View {
     }
 
     /**
+     * True while a layout pass is owed to this view.
+     *
+     * The inverse of isLaidOut() under KuDroid's model: requestLayout() clears mLaidOut and
+     * layout() sets it, so "not laid out" and "layout requested" are the same state. Android
+     * tracks them separately because it batches passes; here a request is served on the next
+     * top-down render.
+     *
+     * Declared on View rather than only on ViewGroup because ViewParent requires it and
+     * ViewGroup inherits it from here.
+     */
+    public boolean isLayoutRequested() {
+        return !mLaidOut;
+    }
+
+    /**
      * returns the view's visibility.
      */
     public int getVisibility() {
@@ -273,9 +288,23 @@ public class View {
     }
 
     /**
-     * returns the view's parent.
+     * The container this view sits in, or null at the root.
+     *
+     * Declared as ViewParent, not ViewGroup, because that is the signature guest code
+     * references: {@code View.getParent()Landroid/view/ViewParent;}. Returning ViewGroup
+     * made that reference resolve to nothing, so an app assigning the result to a
+     * ViewParent got a NoSuchMethodError for a method that plainly existed — it was the
+     * RETURN TYPE that did not match. Five of six APKs in the corpus need this one.
      */
-    public ViewGroup getParent() {
+    public ViewParent getParent() {
+        return mParent;
+    }
+
+    /**
+     * The parent as a ViewGroup, for callers inside the framework that need to touch child
+     * management. Separate from getParent() so that one can keep Android's signature.
+     */
+    public ViewGroup getParentGroup() {
         return mParent;
     }
 
@@ -646,11 +675,68 @@ public class View {
         return mVisibility == VISIBLE;
     }
 
+    private android.graphics.drawable.Drawable mBackground;
+
     /**
      * returns the background of the view.
      */
     public android.graphics.drawable.Drawable getBackground() {
-        return null;
+        return mBackground;
+    }
+
+    /**
+     * The modern name for setBackgroundDrawable, and the one apps use.
+     *
+     * All five real APKs in the corpus reference setBackground; only the deprecated spelling
+     * existed. Stored rather than dropped so getBackground() returns what was set — a view
+     * that accepts a background and reports null makes any app that reads it back believe it
+     * has none.
+     */
+    public void setBackground(android.graphics.drawable.Drawable background) {
+        mBackground = background;
+        invalidate();
+    }
+
+    /**
+     * Where this view sits on screen, written into `location` as {x, y}.
+     *
+     * Walked up the parent chain rather than answered with the view's own left/top, which
+     * would only be right for a child of the root. Callers use this to position popups and
+     * hit-test against other views, so an answer in the wrong coordinate space puts things
+     * visibly in the wrong place.
+     *
+     * KuDroid draws the guest full-screen with no window offset, so screen and window
+     * coordinates coincide and getLocationInWindow gives the same answer.
+     */
+    public void getLocationOnScreen(int[] location) {
+        if (location == null || location.length < 2) return;
+        int x = 0;
+        int y = 0;
+        View v = this;
+        while (v != null) {
+            x += v.mLeft - v.mScrollX;
+            y += v.mTop - v.mScrollY;
+            v = v.mParent;
+        }
+        location[0] = x;
+        location[1] = y;
+    }
+
+    public void getLocationInWindow(int[] location) {
+        getLocationOnScreen(location);
+    }
+
+    /**
+     * The Resources of this view's Context.
+     *
+     * Needed by all five corpus APKs: this is how view code reads dimensions and densities
+     * without being passed a Context. Falls back to the system Resources when the view has
+     * no context, because callers chain straight off it — getResources().getDisplayMetrics()
+     * is the common form, and a null here is an NPE one frame later.
+     */
+    public android.content.res.Resources getResources() {
+        return mContext != null ? mContext.getResources()
+                                : android.content.res.Resources.getSystem();
     }
 
     /**
@@ -664,7 +750,9 @@ public class View {
     /**
      * set the view's background drawable.
      */
+    /** Deprecated spelling; kept because older code calls it. Same storage as setBackground. */
     public void setBackgroundDrawable(android.graphics.drawable.Drawable background) {
+        setBackground(background);
     }
 
     /**

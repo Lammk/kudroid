@@ -1,6 +1,16 @@
 package android.content.res;
 
 import android.util.AttributeSet;
+// android.util.DisplayMetrics, explicitly.
+//
+// There used to be a second DisplayMetrics in this package. Being in the same package, it
+// won name resolution here without an import, so getDisplayMetrics() returned
+// android.content.res.DisplayMetrics — while every app references
+// Resources.getDisplayMetrics()Landroid/util/DisplayMetrics;. The method looked present and
+// the reference resolved to nothing: a NoSuchMethodError whose cause was the return type.
+// Five of six APKs in the corpus needed it. The duplicate class is gone; this import is
+// what keeps it from coming back by accident.
+import android.util.DisplayMetrics;
 import android.util.TypedValue;
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;

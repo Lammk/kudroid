@@ -79,6 +79,39 @@ public class Handler {
     }
 
     /**
+     * A message already addressed to this handler.
+     *
+     * The no-argument and (what) forms exist because sendToTarget() is only usable on a
+     * message that has a target, and these are where the target gets set — code that calls
+     * Message.obtain() directly and then sendToTarget() has nowhere to send it.
+     */
+    public final Message obtainMessage() {
+        Message m = Message.obtain();
+        m.target = this;
+        return m;
+    }
+
+    public final Message obtainMessage(int what) {
+        Message m = Message.obtain();
+        m.target = this;
+        m.what = what;
+        return m;
+    }
+
+    public final Message obtainMessage(int what, int arg1, int arg2) {
+        Message m = obtainMessage(what);
+        m.arg1 = arg1;
+        m.arg2 = arg2;
+        return m;
+    }
+
+    public final Message obtainMessage(int what, int arg1, int arg2, Object obj) {
+        Message m = obtainMessage(what, arg1, arg2);
+        m.obj = obj;
+        return m;
+    }
+
+    /**
      * takes a message with a runnable as obj.
      */
     public final Message obtainMessage(int what, Object obj) {

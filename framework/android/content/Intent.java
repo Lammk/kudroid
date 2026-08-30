@@ -180,6 +180,65 @@ public class Intent {
         return this;
     }
 
+    // Extra getters. All five real APKs in the corpus reference getStringExtra, getIntExtra
+    // and getBooleanExtra — the putExtra half was here, the reading half was not, which made
+    // the Bundle write-only from the app's point of view.
+    //
+    // Every one takes the app's default when the key is absent, rather than a fixed zero or
+    // null. That is the whole contract of these methods: an app passes the value it wants
+    // for "not present", and returning something else changes behaviour on the exact path
+    // the default exists for.
+
+    public String getStringExtra(String name) {
+        return mExtras != null ? mExtras.getString(name) : null;
+    }
+
+    public int getIntExtra(String name, int defaultValue) {
+        return mExtras != null ? mExtras.getInt(name, defaultValue) : defaultValue;
+    }
+
+    public long getLongExtra(String name, long defaultValue) {
+        return mExtras != null ? mExtras.getLong(name, defaultValue) : defaultValue;
+    }
+
+    public boolean getBooleanExtra(String name, boolean defaultValue) {
+        return mExtras != null ? mExtras.getBoolean(name, defaultValue) : defaultValue;
+    }
+
+    public float getFloatExtra(String name, float defaultValue) {
+        return mExtras != null ? mExtras.getFloat(name, defaultValue) : defaultValue;
+    }
+
+    public double getDoubleExtra(String name, double defaultValue) {
+        return mExtras != null ? mExtras.getDouble(name, defaultValue) : defaultValue;
+    }
+
+    public CharSequence getCharSequenceExtra(String name) {
+        return getStringExtra(name);
+    }
+
+    public Bundle getBundleExtra(String name) {
+        return mExtras != null ? mExtras.getBundle(name) : null;
+    }
+
+    public boolean hasExtra(String name) {
+        return mExtras != null && mExtras.containsKey(name);
+    }
+
+    public Intent removeExtra(String name) {
+        if (mExtras != null) mExtras.remove(name);
+        return this;
+    }
+
+    /**
+     * A URI form of this Intent, as ClipData.Item.coerceToText needs when a clip holds an
+     * Intent. Not the full intent: scheme syntax that Android can parse back, which nothing
+     * here does, so the readable form is more useful than an unparseable one.
+     */
+    public String toUri(int flags) {
+        return toString();
+    }
+
     public int getFlags() {
         return mFlags;
     }

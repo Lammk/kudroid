@@ -176,6 +176,100 @@ public class Window {
         return mSoftInputMode;
     }
 
+    /**
+     * Window features, requested before the content view is set.
+     *
+     * Recorded and reported through hasFeature() rather than ignored: apps ask for
+     * FEATURE_NO_TITLE and then check, and a window that forgets what was requested makes
+     * that check disagree with what was asked for. Nothing here draws a title bar, so
+     * granting every request is honest — the feature's effect is already the default.
+     */
+    private int mFeatures;
+
+    public boolean requestFeature(int featureId) {
+        mFeatures |= (1 << featureId);
+        return true;
+    }
+
+    public boolean hasFeature(int featureId) {
+        return (mFeatures & (1 << featureId)) != 0;
+    }
+
+    /**
+     * The layout parameters of this window.
+     *
+     * One instance, kept: apps read them, mutate a field, and call
+     * WindowManager.updateViewLayout with the same object. Handing back a fresh copy would
+     * accept those mutations and discard them.
+     */
+    private WindowManager.LayoutParams mAttributes;
+
+    public WindowManager.LayoutParams getAttributes() {
+        if (mAttributes == null) {
+            mAttributes = new WindowManager.LayoutParams();
+        }
+        return mAttributes;
+    }
+
+    public void setAttributes(WindowManager.LayoutParams params) {
+        mAttributes = params;
+    }
+
+    /** Size the window; KuDroid runs everything full-screen, so this only records intent. */
+    public void setLayout(int width, int height) {
+        final WindowManager.LayoutParams params = getAttributes();
+        params.width = width;
+        params.height = height;
+    }
+
+    public View findViewById(int id) {
+        final View content = getContentView();
+        return content != null ? content.findViewById(id) : null;
+    }
+
+    /**
+     * System-bar colours and inset behaviour.
+     *
+     * No-ops: the guest draws into a Metal layer that occupies the whole screen, and iOS
+     * owns the status bar. Present because apps set them during theme setup and a missing
+     * method there stops the Activity before it draws anything.
+     */
+    public void setStatusBarColor(int color) {
+    }
+
+    public void setNavigationBarColor(int color) {
+    }
+
+    public void setStatusBarContrastEnforced(boolean enforced) {
+    }
+
+    public void setNavigationBarContrastEnforced(boolean enforced) {
+    }
+
+    public void setDecorFitsSystemWindows(boolean decorFitsSystemWindows) {
+    }
+
+    private Callback mCallback;
+
+    public void setCallback(Callback callback) {
+        mCallback = callback;
+    }
+
+    public Callback getCallback() {
+        return mCallback;
+    }
+
+    /**
+     * The decor view if one exists, WITHOUT creating it.
+     *
+     * The distinction from getDecorView() is the whole point: callers use peekDecorView to
+     * test whether a window has been laid out yet, and a version that creates on demand
+     * always answers yes.
+     */
+    public View peekDecorView() {
+        return getContentView();
+    }
+
     public interface Callback {
     }
 

@@ -34,6 +34,54 @@ public final class Bitmap {
     }
 
     /**
+     * create a bitmap with a Config rather than an int.
+     *
+     * This is the signature apps actually reference —
+     * {@code createBitmap(IILandroid/graphics/Bitmap$Config;)Landroid/graphics/Bitmap;} —
+     * and all five real APKs in the corpus need it. The int form below is the internal one;
+     * having only that left every ordinary createBitmap call unresolved.
+     */
+    public static Bitmap createBitmap(int width, int height, Config config) {
+        return new Bitmap(width, height, config != null ? config.nativeInt()
+                                                        : Config.ARGB_8888.nativeInt());
+    }
+
+    public static Bitmap createBitmap(Bitmap source) {
+        if (source == null) return null;
+        Bitmap copy = new Bitmap(source.mWidth, source.mHeight, source.mConfig);
+        System.arraycopy(source.mPixels, 0, copy.mPixels, 0, source.mPixels.length);
+        return copy;
+    }
+
+    public static Bitmap createBitmap(int[] colors, int width, int height, Config config) {
+        return createBitmap(colors, width, height,
+                            config != null ? config.nativeInt() : Config.ARGB_8888.nativeInt());
+    }
+
+    /**
+     * Scale `src` to the given size.
+     *
+     * Nearest-neighbour, chosen deliberately over bilinear: the callers in the corpus scale
+     * icons and thumbnails where a visibly blocky result is obvious, while a smoothing
+     * filter that is subtly wrong is not. `filter` is accepted and ignored, which is the
+     * honest reading of "no filtering implemented".
+     */
+    public static Bitmap createScaledBitmap(Bitmap src, int dstWidth, int dstHeight,
+                                            boolean filter) {
+        if (src == null || dstWidth <= 0 || dstHeight <= 0) return null;
+        Bitmap out = new Bitmap(dstWidth, dstHeight, src.mConfig);
+        if (src.mWidth == 0 || src.mHeight == 0) return out;
+        for (int y = 0; y < dstHeight; ++y) {
+            final int srcY = (int) ((long) y * src.mHeight / dstHeight);
+            for (int x = 0; x < dstWidth; ++x) {
+                final int srcX = (int) ((long) x * src.mWidth / dstWidth);
+                out.mPixels[y * dstWidth + x] = src.mPixels[srcY * src.mWidth + srcX];
+            }
+        }
+        return out;
+    }
+
+    /**
      * create a bitmap from an array of pixels.
      */
     public static Bitmap createBitmap(int[] colors, int width, int height, int config) {

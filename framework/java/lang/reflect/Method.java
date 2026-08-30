@@ -4,7 +4,7 @@ package java.lang.reflect;
  * Handle to KuART's DexMethod. Field `artMethod` is written by native, not by Java
  * corrected.
  */
-public final class Method {
+public final class Method extends AccessibleObject {
 
     private long artMethod;
     private Class<?> declaringClass;
@@ -34,12 +34,8 @@ public final class Method {
         return getParameterTypes().length;
     }
 
-    public boolean isAccessible() {
-        return true;
-    }
-
-    public void setAccessible(boolean flag) {
-    }
+    // isAccessible()/setAccessible() come from AccessibleObject, which is also the type
+    // apps reference when they unlock several members at once.
 
     public boolean isVarArgs() {
         return false;

@@ -122,6 +122,21 @@ public final class Bundle {
         return (v instanceof java.io.Serializable) ? (java.io.Serializable) v : null;
     }
 
+    public Bundle getBundle(String key) {
+        Object v = mMap.get(key);
+        return (v instanceof Bundle) ? (Bundle) v : null;
+    }
+
+    public Bundle putBundle(String key, Bundle value) {
+        mMap.put(key, value);
+        return this;
+    }
+
+    /** Removing a key is how Intent.removeExtra works; without it an extra could only grow. */
+    public void remove(String key) {
+        mMap.remove(key);
+    }
+
     public boolean containsKey(String key) {
         return mMap.containsKey(key);
     }

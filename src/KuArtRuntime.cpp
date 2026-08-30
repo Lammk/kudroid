@@ -366,6 +366,19 @@ extern "C" size_t kuart_num_dex_files(void) {
     return g_rt != nullptr ? g_rt->linker.NumDexFiles() : 0;
 }
 
+// The live class linker, for tools that need to ask it questions the C API does not cover.
+//
+// Exposed for tools/kuart_verify, which walks every method and field reference in a guest's
+// DEX and reports what cannot be resolved. That has to run against the REAL linker: a
+// separate DEX parser would answer "what would my model of KuART fail to resolve", and the
+// question worth answering is what KuART itself fails to resolve.
+//
+// Not part of KuArtRuntime.h, because nothing in the app should reach inside the runtime
+// like this — the declaration lives with the tool that uses it.
+extern "C" kudroid::kuart::DexClassLinker* kuart_debug_linker(void) {
+    return g_rt != nullptr && g_rt->ready ? &g_rt->linker : nullptr;
+}
+
 extern "C" size_t kuart_num_loaded_classes(void) {
     return g_rt != nullptr ? g_rt->linker.NumLoadedClasses() : 0;
 }

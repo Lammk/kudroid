@@ -1,6 +1,6 @@
 package java.lang.reflect;
 
-public final class Constructor<T> {
+public final class Constructor<T> extends AccessibleObject {
 
     private long artMethod;
     private Class<T> declaringClass;
@@ -27,12 +27,8 @@ public final class Constructor<T> {
         return getParameterTypes().length;
     }
 
-    public boolean isAccessible() {
-        return true;
-    }
-
-    public void setAccessible(boolean flag) {
-    }
+    // isAccessible()/setAccessible() come from AccessibleObject, which is also the type
+    // apps reference when they unlock several members at once.
 
     public Class<?>[] getExceptionTypes() {
         return new Class<?>[0];

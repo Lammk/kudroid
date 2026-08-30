@@ -64,6 +64,36 @@ public final class Message {
     }
 
     /**
+     * Send this message to the handler it was obtained from.
+     *
+     * Needed by all five real APKs in the corpus. The idiom is
+     * {@code handler.obtainMessage(what, obj).sendToTarget()}, which is how code that builds
+     * a message in one place and posts it in another avoids passing the handler along —
+     * so without this the whole pattern fails at the last step, after the message is built.
+     *
+     * A message with no target is dropped rather than throwing. Android throws
+     * NullPointerException here, but its messages always have a target because obtainMessage
+     * sets it; one that does not came from Message.obtain() directly, where dropping is the
+     * behaviour that keeps a logging or metrics path from taking the app down.
+     */
+    public void sendToTarget() {
+        final Handler handler = target;
+        if (handler != null) handler.sendMessage(this);
+    }
+
+    public Handler getTarget() {
+        return target;
+    }
+
+    public void setTarget(Handler handler) {
+        target = handler;
+    }
+
+    public int getWhat() {
+        return what;
+    }
+
+    /**
      * return this message to the group.
      */
     public void recycle() {

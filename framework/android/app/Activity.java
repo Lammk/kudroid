@@ -186,10 +186,182 @@ public class Activity extends ContextThemeWrapper {
         return mResumed;
     }
 
+    private boolean mFinishing;
+    private boolean mChangingConfigurations;
+
     /**
      * end of operation.
      */
     public void finish() {
+        mFinishing = true;
+    }
+
+    /**
+     * True once finish() has been called.
+     *
+     * Needed by all five real APKs in the corpus, and for a reason that makes a missing
+     * answer worse than a wrong one: this is the guard an app puts in front of UI work from
+     * a background thread or a callback. An app that cannot ask goes ahead and touches a
+     * dead Activity.
+     */
+    public boolean isFinishing() {
+        return mFinishing;
+    }
+
+    /**
+     * Whether the Activity is being torn down for a configuration change rather than for
+     * good. Always false: KuDroid does not recreate activities, so nothing is retained
+     * across a change and an app told "true" would wait for a restart that never comes.
+     */
+    public boolean isChangingConfigurations() {
+        return mChangingConfigurations;
+    }
+
+    /** An Activity started by another Activity, which KuDroid never does. */
+    public boolean isChild() {
+        return false;
+    }
+
+    /**
+     * Key events, routed the way Android routes them.
+     *
+     * dispatchKeyEvent is the entry point the window calls; onKeyDown/onKeyUp are what an
+     * app overrides. Dispatching here rather than reporting "unhandled" is what makes an
+     * app's own key handling run at all — five of six corpus APKs reference this method,
+     * and the ones that override onKeyDown would never be called without it.
+     */
+    public boolean dispatchKeyEvent(android.view.KeyEvent event) {
+        if (event == null) return false;
+        final android.view.View focus = getCurrentFocus();
+        if (focus != null && focus.dispatchKeyEvent(event)) return true;
+        if (event.getAction() == android.view.KeyEvent.ACTION_DOWN) {
+            return onKeyDown(event.getKeyCode(), event);
+        }
+        if (event.getAction() == android.view.KeyEvent.ACTION_UP) {
+            return onKeyUp(event.getKeyCode(), event);
+        }
+        return false;
+    }
+
+    /** Shortcut keys (Ctrl+X and friends), which KuDroid does not synthesise. */
+    public boolean dispatchKeyShortcutEvent(android.view.KeyEvent event) {
+        return false;
+    }
+
+    public boolean onKeyDown(int keyCode, android.view.KeyEvent event) {
+        return false;
+    }
+
+    public boolean onKeyUp(int keyCode, android.view.KeyEvent event) {
+        return false;
+    }
+
+    /**
+     * Configuration changed — rotation, locale, night mode.
+     *
+     * Empty by default, as on Android: an app overrides it. Present because the framework
+     * calls it and because apps that declare android:configChanges rely on being told
+     * instead of being recreated, which is the only mode KuDroid offers.
+     */
+    public void onConfigurationChanged(android.content.res.Configuration newConfig) {
+    }
+
+    /** Called before each user interaction; apps use it to reset idle timers. */
+    public void onUserInteraction() {
+    }
+
+    /**
+     * The view holding focus, or null.
+     *
+     * Read from the content view's hierarchy rather than tracked here, so it cannot fall out
+     * of step with what the views themselves believe.
+     */
+    public android.view.View getCurrentFocus() {
+        final android.view.View root = getContentView();
+        return root != null ? findFocusIn(root) : null;
+    }
+
+    private static android.view.View findFocusIn(android.view.View v) {
+        if (v == null) return null;
+        if (v.isFocused()) return v;
+        if (v instanceof android.view.ViewGroup) {
+            final android.view.ViewGroup group = (android.view.ViewGroup) v;
+            for (int i = 0; i < group.getChildCount(); ++i) {
+                final android.view.View found = findFocusIn(group.getChildAt(i));
+                if (found != null) return found;
+            }
+        }
+        return null;
+    }
+
+    /** The WindowManager for this Activity's window. */
+    public android.view.WindowManager getWindowManager() {
+        return (android.view.WindowManager) getSystemService(WINDOW_SERVICE);
+    }
+
+    /** The main thread's Looper, which is the thread every Activity callback runs on. */
+    public android.os.Looper getMainLooper() {
+        return android.os.Looper.getMainLooper();
+    }
+
+    /** The Application this Activity belongs to. */
+    public Application getApplication() {
+        return ActivityThread.currentApplication();
+    }
+
+    /** The component name of this Activity, as the manifest declares it. */
+    public android.content.ComponentName getComponentName() {
+        final Intent intent = getIntent();
+        if (intent != null && intent.getComponent() != null) return intent.getComponent();
+        return new android.content.ComponentName(getPackageName(), getClass().getName());
+    }
+
+    /** Class name without the package prefix, which is what Android's version returns. */
+    public String getLocalClassName() {
+        final String name = getClass().getName();
+        final String pkg = getPackageName();
+        if (pkg != null && !pkg.isEmpty() && name.startsWith(pkg + ".")) {
+            return name.substring(pkg.length() + 1);
+        }
+        return name;
+    }
+
+    private CharSequence mTitle = "";
+
+    public CharSequence getTitle() {
+        return mTitle;
+    }
+
+    public void setTitle(CharSequence title) {
+        mTitle = title != null ? title : "";
+    }
+
+    public void setTitle(int titleId) {
+        mTitle = "";
+    }
+
+    /** The inflater for this Activity's context. */
+    public android.view.LayoutInflater getLayoutInflater() {
+        return android.view.LayoutInflater.from(this);
+    }
+
+    /**
+     * Options-menu invalidation, and the transition hooks below.
+     *
+     * All no-ops: KuDroid draws no action bar and runs no activity transitions. They exist
+     * because apps call them unconditionally during setup — an app that cannot call
+     * postponeEnterTransition() crashes instead of simply not animating.
+     */
+    public void invalidateOptionsMenu() {
+    }
+
+    public void postponeEnterTransition() {
+    }
+
+    public void startPostponedEnterTransition() {
+    }
+
+    public void recreate() {
     }
 
     /**

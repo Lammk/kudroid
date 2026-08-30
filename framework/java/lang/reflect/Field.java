@@ -1,7 +1,7 @@
 package java.lang.reflect;
 
 /** Handle to KuART's DexField; `artField` written by native. */
-public final class Field {
+public final class Field extends AccessibleObject {
 
     private long artField;
     private Class<?> declaringClass;
@@ -74,12 +74,8 @@ public final class Field {
         set(obj, Character.valueOf(value));
     }
 
-    public boolean isAccessible() {
-        return true;
-    }
-
-    public void setAccessible(boolean flag) {
-    }
+    // isAccessible()/setAccessible() come from AccessibleObject, which is also the type
+    // apps reference when they unlock several members at once.
 
     public boolean isSynthetic() {
         return false;

@@ -24,9 +24,36 @@ public class EditText extends TextView {
         return mHint;
     }
 
-    /** getText() of EditText returns Editable; wrap current content. */
+    /**
+     * The text, as an Editable.
+     *
+     * EditText NARROWS TextView's return type: apps reference
+     * {@code EditText.getText()Landroid/text/Editable;} and immediately call editing methods
+     * on it. Inheriting TextView's CharSequence version left that reference unresolved — a
+     * missing method on a method that was obviously present, needed by five of six corpus
+     * APKs.
+     *
+     * Backed by the same SpannableStringBuilder each time, and written back through
+     * setText, so an app that edits what it gets from here sees the change reflected. A
+     * fresh wrapper per call would accept edits and silently discard them.
+     */
+    private android.text.SpannableStringBuilder mEditable;
+
+    @Override
+    public android.text.Editable getText() {
+        final CharSequence current = super.getText();
+        if (mEditable == null) {
+            mEditable = new android.text.SpannableStringBuilder(current);
+        } else if (!mEditable.toString().contentEquals(current)) {
+            // setText was called behind our back; resynchronise rather than hand back stale
+            // content.
+            mEditable = new android.text.SpannableStringBuilder(current);
+        }
+        return mEditable;
+    }
+
     public android.text.Editable getEditableText() {
-        return new android.text.SpannableStringBuilder(getText());
+        return getText();
     }
 
     public void setSelection(int index) {

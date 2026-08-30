@@ -10,10 +10,29 @@ public abstract class Drawable {
     public Drawable() {
     }
 
+    private final android.graphics.Rect mBounds = new android.graphics.Rect();
+
     /**
      * set the boundaries of the drawable.
+     *
+     * Recorded rather than discarded so getBounds() can answer and so subclasses that
+     * position sub-drawables (LayerDrawable) have something to work from. A drawable that
+     * forgets its bounds draws in the wrong place or not at all.
      */
     public void setBounds(int left, int top, int right, int bottom) {
+        mBounds.set(left, top, right, bottom);
+    }
+
+    public void setBounds(android.graphics.Rect bounds) {
+        if (bounds != null) setBounds(bounds.left, bounds.top, bounds.right, bounds.bottom);
+    }
+
+    public final android.graphics.Rect getBounds() {
+        return mBounds;
+    }
+
+    public final android.graphics.Rect copyBounds() {
+        return new android.graphics.Rect(mBounds);
     }
 
     /**

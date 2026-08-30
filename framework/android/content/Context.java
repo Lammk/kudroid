@@ -82,6 +82,116 @@ public abstract class Context {
     public abstract File getCodeCacheDir();
     public abstract File getNoBackupFilesDir();
 
+    // Needed by all five real APKs in the corpus. Concrete rather than abstract so
+    // ContextWrapper and ApplicationContext do not both have to restate them; the base
+    // answers are correct for every context KuDroid creates.
+
+    /**
+     * The ContentResolver for this context.
+     *
+     * One per process, not per context: apps register observers through one resolver and
+     * expect notifications from another, and separate instances would silently drop them.
+     */
+    public ContentResolver getContentResolver() {
+        return ContentResolver.getInstance();
+    }
+
+    /** Describes this application, as the manifest declares it. */
+    public android.content.pm.ApplicationInfo getApplicationInfo() {
+        android.content.pm.ApplicationInfo info = new android.content.pm.ApplicationInfo();
+        info.packageName = getPackageName();
+        info.processName = getPackageName();
+        info.dataDir = "/data/data/" + getPackageName();
+        return info;
+    }
+
+    /**
+     * Whether this app holds a permission.
+     *
+     * Granted, which matches what PermissionManager reports elsewhere in KuDroid and what
+     * an installed-by-the-user app would see on Android. Denying here would send apps down
+     * their request-permission path, which needs UI KuDroid does not present — so they
+     * would wait for a dialog that never appears.
+     */
+    public int checkCallingOrSelfPermission(String permission) {
+        return android.content.pm.PackageManager.PERMISSION_GRANTED;
+    }
+
+    public int checkPermission(String permission, int pid, int uid) {
+        return android.content.pm.PackageManager.PERMISSION_GRANTED;
+    }
+
+    /** The main thread's Looper, which every lifecycle callback runs on. */
+    public android.os.Looper getMainLooper() {
+        return android.os.Looper.getMainLooper();
+    }
+
+    /**
+     * Data directory for this app.
+     *
+     * The same path getFilesDir()'s parent would give, but named the way modern apps ask
+     * for it. Both go through the VFS, so either spelling lands in the same place.
+     */
+    public File getDataDir() {
+        return new File("/data/data/" + getPackageName());
+    }
+
+    /**
+     * Single-element arrays for the plural forms.
+     *
+     * Android returns one entry per storage volume and KuDroid has one, so a single-element
+     * array is the honest answer. Returning an empty array would be worse than wrong: apps
+     * index [0] without checking.
+     */
+    public File[] getExternalFilesDirs(String type) {
+        return new File[] { getExternalFilesDir(type) };
+    }
+
+    public File[] getExternalCacheDirs() {
+        return new File[] { getExternalCacheDir() };
+    }
+
+    public File[] getObbDirs() {
+        return new File[] { getObbDir() };
+    }
+
+    public File[] getExternalMediaDirs() {
+        return new File[] { getExternalFilesDir("Media") };
+    }
+
+    /** Open a file in getFilesDir(), the shorthand apps use for app-private storage. */
+    public java.io.FileInputStream openFileInput(String name) throws java.io.FileNotFoundException {
+        return new java.io.FileInputStream(new File(getFilesDir(), name));
+    }
+
+    public java.io.FileOutputStream openFileOutput(String name, int mode)
+            throws java.io.FileNotFoundException {
+        // MODE_APPEND is 0x8000; anything else truncates, as on Android.
+        final boolean append = (mode & 0x8000) != 0;
+        return new java.io.FileOutputStream(new File(getFilesDir(), name), append);
+    }
+
+    public boolean deleteFile(String name) {
+        return new File(getFilesDir(), name).delete();
+    }
+
+    public String[] fileList() {
+        final String[] names = getFilesDir().list();
+        return names != null ? names : new String[0];
+    }
+
+    /**
+     * The package name to attribute operations to, which for a normal app is its own.
+     * Attribution tags are a privacy-accounting feature with nothing behind them here.
+     */
+    public String getOpPackageName() {
+        return getPackageName();
+    }
+
+    public String getAttributionTag() {
+        return null;
+    }
+
     /**
      * Names asked for that KuDroid has no manager for, reported once each.
      *

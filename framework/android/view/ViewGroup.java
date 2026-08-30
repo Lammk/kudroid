@@ -8,7 +8,7 @@ import android.content.Context;
  * a view contains other views. for kudroid minimal framework, this
  * Provides basic child management.
  */
-public class ViewGroup extends View {
+public class ViewGroup extends View implements ViewParent {
     // protected so subclasses in this package tree can iterate children directly.
     protected View[] mChildren;
     protected int mChildCount = 0;
@@ -238,4 +238,63 @@ public class ViewGroup extends View {
     public interface OnHierarchyChangeListener {
     }
 
+    // ── ViewParent ───────────────────────────────────────────────────────────────────
+    //
+    // A child talks upwards through this interface rather than through ViewGroup, which is
+    // why View.getParent() has to return ViewParent: apps assign the result to a
+    // ViewParent variable, and a getParent() declared as returning ViewGroup does not
+    // satisfy that reference — it fails as a missing method on a method that looks present.
+    //
+    // requestLayout() and isLayoutRequested() are inherited from View, which already
+    // implements them for the top-down layout model; the rest are below.
+
+    /**
+     * A child's content changed.
+     *
+     * Redraw is driven from the top by Activity.renderViewHierarchy(), so the rectangle is
+     * not used: there is no dirty-region tracking to feed it into. Repainting the whole
+     * hierarchy is what already happens, and pretending to honour the rect would be a lie
+     * a caller could act on.
+     */
+    @Override
+    public void invalidateChild(View child, android.graphics.Rect r) {
+        invalidate();
+    }
+
+    /**
+     * A child asks ancestors not to intercept the rest of this gesture.
+     *
+     * Empty because nothing here intercepts: touch events reach the child directly. Present
+     * because scrolling containers call it unconditionally on the way down, and a missing
+     * method there is a crash rather than a layout quirk.
+     */
+    @Override
+    public void requestDisallowInterceptTouchEvent(boolean disallowIntercept) {
+    }
+
+    @Override
+    public void requestChildFocus(View child, View focused) {
+        // Focus is tracked on the View itself; a container has nothing to record. Passed up
+        // so an ancestor that does care still hears about it.
+        ViewParent parent = getParent();
+        if (parent != null) parent.requestChildFocus(this, focused);
+    }
+
+    @Override
+    public void clearChildFocus(View child) {
+        ViewParent parent = getParent();
+        if (parent != null) parent.clearChildFocus(this);
+    }
+
+    /**
+     * Focus navigation, which KuDroid does not implement.
+     *
+     * Returns null — "nothing to move to" — rather than an arbitrary view. A wrong answer
+     * would move focus somewhere the user did not ask for, which is worse than focus not
+     * moving at all.
+     */
+    @Override
+    public View focusSearch(View v, int direction) {
+        return null;
+    }
 }

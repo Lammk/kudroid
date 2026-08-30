@@ -3529,21 +3529,45 @@ struct ALooper {
 static ALooper* g_mainLooper = nullptr;
 static std::mutex g_looperMtx;
 
-extern "C" void* bionic_ALooper_prepare(int opts) {
-    (void)opts;
+// Create the main thread's looper if it does not exist yet, and return it.
+//
+// Android's main thread always has a looper: ActivityThread prepares one before any
+// activity is created, so by the time native code runs ALooper_forThread() cannot fail.
+// KuART's main loop is Java (Looper.loop() in ActivityThread) and never touched the native
+// ALooper, so forThread() returned null and AGDK's initializeNativeCode aborted with
+// "Unable to retrieve native ALooper" — an UnsatisfiedLinkError that stopped onCreate
+// before a surface existed, leaving the app on a black screen with no crash.
+//
+// Created on demand rather than at startup so a process that never loads native code does
+// not carry one, and so this holds whichever thread asks first — which is the main thread,
+// because that is where the activity is created.
+static ALooper* GetOrCreateMainLooper() {
     std::lock_guard<std::mutex> lock(g_looperMtx);
-    if (!g_mainLooper) {
+    if (g_mainLooper == nullptr) {
         g_mainLooper = new ALooper();
+        // One reference for the looper's own existence. Android's main looper is never
+        // released, and ALooper_release() deletes at zero — without this an acquire/release
+        // pair from guest code would free the main looper and turn every later
+        // forThread() into a dangling pointer rather than a null one.
         g_mainLooper->refCount = 1;
-    } else {
-        g_mainLooper->refCount++;
     }
     return g_mainLooper;
 }
 
-extern "C" void* bionic_ALooper_forThread() {
+extern "C" void* bionic_ALooper_prepare(int opts) {
+    (void)opts;
+    ALooper* looper = GetOrCreateMainLooper();
     std::lock_guard<std::mutex> lock(g_looperMtx);
-    return g_mainLooper;
+    looper->refCount++;
+    return looper;
+}
+
+// The looper for the calling thread, creating the main one if nothing has yet.
+//
+// Returning null here is what broke AGDK. Android guarantees a looper on the main thread,
+// so guest code treats null as a fatal error rather than something to prepare around.
+extern "C" void* bionic_ALooper_forThread() {
+    return GetOrCreateMainLooper();
 }
 
 extern "C" void bionic_ALooper_acquire(void* looper) {
@@ -3557,9 +3581,16 @@ extern "C" void bionic_ALooper_release(void* looper) {
     if (!looper) return;
     ALooper* l = static_cast<ALooper*>(looper);
     std::lock_guard<std::mutex> lock(g_looperMtx);
+    // The main looper outlives every reference to it, as it does on Android: its baseline
+    // reference is never released. Deleting it on an unbalanced release from guest code
+    // would leave g_mainLooper dangling for any thread already inside pollOnce, and the
+    // fault would appear far from the release that caused it.
+    if (l == g_mainLooper) {
+        if (l->refCount > 1) --l->refCount;
+        return;
+    }
     if (--l->refCount <= 0) {
         delete l;
-        if (g_mainLooper == l) g_mainLooper = nullptr;
     }
 }
 

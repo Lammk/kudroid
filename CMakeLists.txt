@@ -267,4 +267,20 @@ else()
             target_include_directories(${kuart_test} PRIVATE include kuart-tests)
         endif()
     endforeach()
+
+    # kuart_verify — what a guest APK references that KuART cannot resolve.
+    #
+    # A developer tool, not a test: it takes extracted APK directories and reports the
+    # boot-classpath classes, methods and fields they need and KuART lacks, ranked across a
+    # corpus by how many apps need each one. That replaces finding missing API one device
+    # round-trip at a time, which is how it was being found.
+    #
+    # Links kudroid_core so it asks the real DexClassLinker. A standalone DEX parser would
+    # drift from the runtime, and the question is what KuART fails to resolve — not what a
+    # model of KuART fails to resolve.
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/kuart_verify.cpp")
+        add_executable(kuart_verify tools/kuart_verify.cpp)
+        target_link_libraries(kuart_verify PRIVATE kudroid_core art_dex ZLIB::ZLIB)
+        target_include_directories(kuart_verify PRIVATE include third_party/art_dex)
+    endif()
 endif()
