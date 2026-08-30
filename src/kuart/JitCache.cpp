@@ -40,19 +40,6 @@ void* MapExecutable(size_t size) {
     mem = ::mmap(nullptr, size, prot, flags, -1, 0);
     if (mem == MAP_FAILED) return nullptr;
 
-    // Confirm the mapping can become executable NOW rather than at Commit() time.
-    // Discovering it at Commit means a compiler has already produced code with nowhere
-    // to put it, and the caller has no way back to the interpreter for that method.
-    if (::mprotect(mem, size, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
-        ::munmap(mem, size);
-        return nullptr;
-    }
-    // Back to writable: code is written before it is run, and leaving a block
-    // permanently RWX is both unnecessary and the shape every W^X policy objects to.
-    if (::mprotect(mem, size, PROT_READ | PROT_WRITE) != 0) {
-        ::munmap(mem, size);
-        return nullptr;
-    }
     return mem;
 }
 
@@ -83,7 +70,17 @@ bool JitCache::IsAvailable() {
                          " LiveContainer JIT mode, or TrollStore) for compiled code.\n");
             return false;
         }
+        // Probe the actual transition used by Commit(), never RWX. The product
+        // must not depend on a permission combination rejected by W^X policy.
+        const bool executable = ::mprotect(probe, size, PROT_READ | PROT_EXEC) == 0;
+        if (executable) {
+            (void)::mprotect(probe, size, PROT_READ | PROT_WRITE);
+        }
         ::munmap(probe, size);
+        if (!executable) {
+            std::fprintf(stderr, "[KuART][JIT] executable transition unavailable; running interpreter only.\n");
+            return false;
+        }
         std::fprintf(stderr, "[KuART][JIT] executable memory available\n");
         return true;
     }();

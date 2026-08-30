@@ -44,6 +44,8 @@ constexpr unsigned kJniFpRegs = 8;
 }  // namespace kudroid
 
 extern "C" {
+// Append a SIGKILL-surviving breadcrumb to the host log directory.
+void kudroid_persistent_breadcrumb(const char* line);
 // Calls `fn` with the given register files. See src/kuart/jni_trampoline.S for
 // the contract; `gp` and `fp` must each have 8 initialised slots. The integer
 // return comes back directly, the float/double return is written to *fp_ret as

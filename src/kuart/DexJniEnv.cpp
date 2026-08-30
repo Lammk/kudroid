@@ -1,5 +1,10 @@
 #include "kudroid/kuart/DexJniEnv.h"
 
+#include <chrono>
+
+#include "kudroid/Log.h"
+#include "kudroid/platform/MemoryInfo.h"
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -224,6 +229,28 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
     if (LibCoreInvoke(interpreter_, method, args, num_args, &result)) return result;
     if (method->native_fn == nullptr) return result;
 
+    // This breadcrumb is deliberately emitted before entering guest code.  A
+    // SIGKILL does not run the crash handler, so the last durable line in the
+    // Android log is often the only evidence of the operation in progress.
+    const char* owner = (method->declaring_class != nullptr &&
+                         method->declaring_class->descriptor != nullptr)
+                            ? method->declaring_class->descriptor : "?";
+    const char* method_name = method->name != nullptr ? method->name : "?";
+    const char* method_sig = method->signature != nullptr ? method->signature : "?";
+    const auto native_start = std::chrono::steady_clock::now();
+    KLOGV("KuARTNative", "enter class=%s method=%s sig=%s args=%zu vm_depth=%d",
+          owner, method_name, method_sig, num_args, VmLockDepth());
+    char breadcrumb[2048];
+    const SystemMemory memory_before = query_system_memory();
+    std::snprintf(breadcrumb, sizeof(breadcrumb),
+                  "native-enter class=%s method=%s sig=%s args=%zu vm_depth=%d footprint=%llu process_headroom=%llu available=%llu low_memory=%d",
+                  owner, method_name, method_sig, num_args, VmLockDepth(),
+                  static_cast<unsigned long long>(memory_before.process_resident_bytes),
+                  static_cast<unsigned long long>(memory_before.process_available_bytes),
+                  static_cast<unsigned long long>(memory_before.available_bytes),
+                  memory_before.low_memory ? 1 : 0);
+    kudroid_persistent_breadcrumb(breadcrumb);
+
     const char* shorty = nullptr;
     if (method->dex_file != nullptr) {
         shorty = method->dex_file->GetMethodShorty(
@@ -319,6 +346,20 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
         VmLockRelease unlocked;
         ret = kudroid_jni_call(method->native_fn, gp, ngp, fp, nfp, &fp_ret);
     }
+
+    const auto native_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - native_start).count();
+    KLOGV("KuARTNative", "exit class=%s method=%s sig=%s duration_ms=%lld vm_depth=%d",
+          owner, method_name, method_sig, static_cast<long long>(native_ms), VmLockDepth());
+    const SystemMemory memory_after = query_system_memory();
+    std::snprintf(breadcrumb, sizeof(breadcrumb),
+                  "native-exit class=%s method=%s sig=%s duration_ms=%lld vm_depth=%d footprint=%llu process_headroom=%llu available=%llu low_memory=%d",
+                  owner, method_name, method_sig, static_cast<long long>(native_ms), VmLockDepth(),
+                  static_cast<unsigned long long>(memory_after.process_resident_bytes),
+                  static_cast<unsigned long long>(memory_after.process_available_bytes),
+                  static_cast<unsigned long long>(memory_after.available_bytes),
+                  memory_after.low_memory ? 1 : 0);
+    kudroid_persistent_breadcrumb(breadcrumb);
 
     switch (shorty[0]) {
         case 'V': break;

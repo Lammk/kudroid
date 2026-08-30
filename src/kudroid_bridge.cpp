@@ -56,6 +56,37 @@ static char g_docsDir[1024] = {0};
 static char g_logDir[1024] = {0};
 const char* g_kudroid_log_dir_ptr = g_logDir;
 
+// A crash buffer is useful for faults handled by KuDroid, but SIGKILL skips
+// every handler.  This small append-only journal is therefore flushed after
+// each breadcrumb.  It is intentionally independent of the C++ log mutex: the
+// last completed write remains useful even when a thread is blocked elsewhere.
+extern "C" void kudroid_persistent_breadcrumb(const char* line) {
+    if (!line || !g_logDir[0]) return;
+    char path[sizeof(g_logDir) + 32];
+    const int n = snprintf(path, sizeof(path), "%s/native_breadcrumbs.log", g_logDir);
+    if (n <= 0 || static_cast<size_t>(n) >= sizeof(path)) return;
+    const int fd = ::open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) return;
+    struct timespec now;
+    ::clock_gettime(CLOCK_MONOTONIC, &now);
+    char record[2304];
+    const int record_len = snprintf(record, sizeof(record), "t_ns=%lld %s\n",
+                                    static_cast<long long>(now.tv_sec) * 1000000000LL +
+                                        now.tv_nsec, line);
+    if (record_len <= 0) {
+        (void)::close(fd);
+        return;
+    }
+    const size_t len = static_cast<size_t>(record_len) < sizeof(record)
+                           ? static_cast<size_t>(record_len) : sizeof(record) - 1;
+    (void)::write(fd, record, len);
+    (void)::fsync(fd);
+#if defined(__APPLE__) && defined(F_FULLFSYNC)
+    (void)::fcntl(fd, F_FULLFSYNC, 0);
+#endif
+    (void)::close(fd);
+}
+
 // Previously 16KB was too small: ELF loading and verbose lines filled the
 // buffer, pushing crucial pre-crash context (e.g. EGL initialization) out.
 // Expanded to 256KB; static allocation ensures signal-handler safety without heap usage.
