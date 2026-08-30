@@ -37,11 +37,12 @@ final class IOSDiagnostics: NSObject, MXMetricManagerSubscriber {
     }
 
     private func diagnosticsURL() -> URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory,
-                                             in: .userDomainMask)[0]
+        let documents = FileManager.default.urls(for: .documentDirectory,
+                                                  in: .userDomainMask)[0]
+        let base = documents.appendingPathComponent("logs", isDirectory: true)
         try? FileManager.default.createDirectory(at: base,
                                                  withIntermediateDirectories: true)
-        return base.appendingPathComponent("kudroid_ios_diagnostics.log")
+        return base.appendingPathComponent("ios_diagnostics.log")
     }
 
     private func persist(_ text: String) {

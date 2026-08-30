@@ -728,7 +728,7 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
         const char* suffix = "/kudroid_crash.log";
         memcpy(path + dl, suffix, strlen(suffix) + 1);
 
-        int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
         if (fd >= 0) {
             const char* hdr = "[kudroid_core] CRASH — fatal signal caught\n";
             (void)!write(fd, hdr, strlen(hdr));
@@ -1059,17 +1059,13 @@ extern "C" void kudroid_set_log_dir(const char* dir) {
     static bool s_logDirInitialized = false;
     if (!s_logDirInitialized) {
         s_logDirInitialized = true;
-        // Truncate the log exactly once per KuDroid launch. Pressing X to return to
-        // the launcher and starting another app must keep what came before, or the
-        // log of the run that just failed is gone before it can be read.
+        // Keep the log across process launches. A SIGKILL leaves no callback that
+        // can archive the previous run before the next launch starts.
         char aPath[1200];
         snprintf(aPath, sizeof(aPath), "%s/kudroid_android_logs.txt", g_logDir);
-        FILE* afp = fopen(aPath, "w");
+        FILE* afp = fopen(aPath, "a");
         if (afp) {
-            // The FIRST line of the main log is always the build stamp, so which
-            // commit the running IPA was built from is visible without opening a
-            // separate version file.
-            fprintf(afp, "[kudroid_core] Build: %s\n", kudroid_build_stamp());
+            fprintf(afp, "[kudroid_core] process-start Build: %s\n", kudroid_build_stamp());
             fclose(afp);
         }
 
@@ -1094,11 +1090,11 @@ extern "C" void kudroid_set_log_dir(const char* dir) {
         }
 
 #if defined(__APPLE__)
-        // Redirect stderr (fd 2) into a file. O_TRUNC once per launch, for the same
-        // reason as above.
+        // Redirect stderr (fd 2) into an append-only file so a subsequent launch
+        // cannot erase the tail of a run terminated by SIGKILL.
         char errPath[1200];
         snprintf(errPath, sizeof(errPath), "%s/stderr.log", g_logDir);
-        int errFd = open(errPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        int errFd = open(errPath, O_WRONLY | O_CREAT | O_APPEND, 0644);
         if (errFd >= 0) {
             dup2(errFd, STDERR_FILENO);
             setvbuf(stderr, nullptr, _IONBF, 0);
@@ -1108,7 +1104,7 @@ extern "C" void kudroid_set_log_dir(const char* dir) {
             ::chmod(errPath, 0644);
             // First line of stderr.log is the build stamp too: every log file
             // identifies the commit of the IPA that produced it.
-            fprintf(stderr, "[kudroid_core] Build: %s\n", kudroid_build_stamp());
+            fprintf(stderr, "[kudroid_core] process-start Build: %s\n", kudroid_build_stamp());
             fprintf(stderr, "[kudroid_core] log directory: %s\n", g_logDir);
         }
 #endif
@@ -1897,36 +1893,20 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
         return strdup("[kudroid_core] APK is already running.\n");
     }
 
-    // Reset/truncate logs so persistent breadcrumbs represent one APK run.
+    // Keep logs across APK launches. The persistent journal and run markers
+    // provide boundaries without destroying evidence from a prior SIGKILL.
     if (g_logDir[0] != '\0') {
-        char aPath[1200];
-        snprintf(aPath, sizeof(aPath), "%s/kudroid_android_logs.txt", g_logDir);
-        FILE* afp = fopen(aPath, "w");
-        if (afp) {
-            // Build stamp dng u tin ca log phin run APK mi.
-            fprintf(afp, "[kudroid_core] Build: %s\n", kudroid_build_stamp());
-            fclose(afp);
-        }
-
-        snprintf(aPath, sizeof(aPath), "%s/native_breadcrumbs.log", g_logDir);
-        FILE* bfp = fopen(aPath, "w");
-        if (bfp) fclose(bfp);
-
-        snprintf(aPath, sizeof(aPath), "%s/kudroid_crash.log", g_logDir);
-        FILE* cfp = fopen(aPath, "w");
-        if (cfp) fclose(cfp);
-
 #if defined(__APPLE__)
         char errPath[1200];
         snprintf(errPath, sizeof(errPath), "%s/stderr.log", g_logDir);
-        int errFd = open(errPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        int errFd = open(errPath, O_WRONLY | O_CREAT | O_APPEND, 0644);
         if (errFd >= 0) {
             dup2(errFd, STDERR_FILENO);
             setvbuf(stderr, nullptr, _IONBF, 0);
             close(errFd);
             // AFC (kdb dump / Finder) ch read c file c quyn read-other.
             ::chmod(errPath, 0644);
-            fprintf(stderr, "[kudroid_core] Build: %s\n", kudroid_build_stamp());
+            fprintf(stderr, "[kudroid_core] apk-run Build: %s\n", kudroid_build_stamp());
         }
 #endif
     }
