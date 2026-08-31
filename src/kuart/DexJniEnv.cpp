@@ -275,17 +275,6 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
         return result;
     }
 
-    // Minecraft's NetworkMonitor.nativeUpdateNetworkStatus blocks indefinitely
-    // waiting for ConnectivityManager broadcasts that KuDroid does not implement.
-    // On iOS, network reachability is monitored natively by NWPathMonitor; letting
-    // this call enter the guest trampoline deadlocks the android_main thread and
-    // the iOS watchdog kills the process (low_memory + unresponsive main thread).
-    if (std::strcmp(method_name, "nativeUpdateNetworkStatus") == 0) {
-        KLOGV("KuARTNative", "bypassing nativeUpdateNetworkStatus -> returning immediately (iOS handles connectivity)");
-        native_call_exit();
-        return result;
-    }
-
     // The first parameter after env is receiver (instance) or jclass (static).
     void* self;
     size_t first = 0;
