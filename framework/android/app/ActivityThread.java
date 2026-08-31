@@ -528,6 +528,7 @@ public final class ActivityThread {
                 mInitialActivity.onStart();
                 android.util.Log.i("ActivityThread", "Calling onResume()...");
                 mInitialActivity.onResume();
+                mInitialActivity.onWindowFocusChanged(true);
 
                 // Activate asynchronous SurfaceHolder Callback cycle via Message Queue (Android standard)
                 if (mH != null) {
@@ -535,22 +536,27 @@ public final class ActivityThread {
                         @Override
                         public void run() {
                             try {
+                                android.view.SurfaceView foundSv = findSurfaceView(mInitialActivity);
+                                if (foundSv != null) {
+                                    android.util.Log.i("ActivityThread", "Found SurfaceView in hierarchy -> dispatching surfaceCreated");
+                                    foundSv.dispatchSurfaceCreated();
+                                }
+
                                 if (mInitialActivity instanceof android.view.SurfaceHolder.Callback) {
                                     android.view.SurfaceHolder.Callback cb = (android.view.SurfaceHolder.Callback) mInitialActivity;
-                                    android.view.SurfaceView sv = ((Object) mInitialActivity instanceof android.view.SurfaceView) ?
-                                        (android.view.SurfaceView) (Object) mInitialActivity : new android.view.SurfaceView(mInitialActivity);
-                                    android.view.SurfaceHolder holder = sv.getHolder();
+                                    android.view.SurfaceHolder holder = (foundSv != null) ? foundSv.getHolder() :
+                                        (((Object) mInitialActivity instanceof android.view.SurfaceView) ?
+                                            ((android.view.SurfaceView) (Object) mInitialActivity).getHolder() :
+                                            new android.view.SurfaceView(mInitialActivity).getHolder());
                                     android.util.Log.i("ActivityThread", "Activity implements SurfaceHolder.Callback -> dispatching surfaceCreated & surfaceChanged");
                                     cb.surfaceCreated(holder);
                                     cb.surfaceChanged(holder, 0, 1080, 1920);
                                     if (cb instanceof android.view.SurfaceHolder.Callback2) {
                                         ((android.view.SurfaceHolder.Callback2) cb).surfaceRedrawNeeded(holder);
                                     }
-                                } else if (mInitialActivity != null && mInitialActivity.getContentView() instanceof android.view.SurfaceView) {
-                                    android.view.SurfaceView sv = (android.view.SurfaceView) mInitialActivity.getContentView();
-                                    android.util.Log.i("ActivityThread", "ContentView is SurfaceView -> dispatching surfaceCreated & surfaceChanged");
-                                    sv.dispatchSurfaceCreated();
                                 }
+
+                                mInitialActivity.onWindowFocusChanged(true);
                             } catch (Throwable st) {
                                 android.util.Log.e("ActivityThread", "NON-FATAL surface callback: " + st.toString());
                             }
@@ -605,6 +611,31 @@ public final class ActivityThread {
         // Start Android's Main Event Loop
         android.util.Log.i("ActivityThread", "Entering Looper.loop() main event loop...");
         android.os.Looper.loop();
+    }
+
+    private static android.view.SurfaceView findSurfaceView(Activity activity) {
+        if (activity == null) return null;
+        if ((Object) activity instanceof android.view.SurfaceView) {
+            return (android.view.SurfaceView) (Object) activity;
+        }
+        android.view.View root = activity.getContentView();
+        return findSurfaceViewInView(root);
+    }
+
+    private static android.view.SurfaceView findSurfaceViewInView(android.view.View view) {
+        if (view == null) return null;
+        if (view instanceof android.view.SurfaceView) {
+            return (android.view.SurfaceView) view;
+        }
+        if (view instanceof android.view.ViewGroup) {
+            android.view.ViewGroup vg = (android.view.ViewGroup) view;
+            final int count = vg.getChildCount();
+            for (int i = 0; i < count; i++) {
+                android.view.SurfaceView found = findSurfaceViewInView(vg.getChildAt(i));
+                if (found != null) return found;
+            }
+        }
+        return null;
     }
 
     /**

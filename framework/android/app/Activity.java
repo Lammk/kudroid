@@ -150,6 +150,13 @@ public class Activity extends ContextThemeWrapper {
     }
 
     /**
+     * Called when the current Window of the activity gains or loses focus.
+     * Essential for game engines (AGDK/GameActivity/Unity) to resume rendering loops.
+     */
+    public void onWindowFocusChanged(boolean hasFocus) {
+    }
+
+    /**
      * is called when the activity is stopped (called by the framework).
      */
     public void performStop() {
