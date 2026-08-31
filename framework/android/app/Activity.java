@@ -507,6 +507,22 @@ public class Activity extends ContextThemeWrapper {
         return mContentView;
     }
 
+    public void setVolumeControlStream(int streamType) {
+    }
+
+    private static boolean containsSurfaceView(android.view.View view) {
+        if (view == null) return false;
+        if (view instanceof android.view.SurfaceView) return true;
+        if (view instanceof android.view.ViewGroup) {
+            android.view.ViewGroup vg = (android.view.ViewGroup) view;
+            final int count = vg.getChildCount();
+            for (int i = 0; i < count; i++) {
+                if (containsSurfaceView(vg.getChildAt(i))) return true;
+            }
+        }
+        return false;
+    }
+
     /**
      * Draw the entire view hierarchy on the Metal screen.
      *
@@ -519,14 +535,17 @@ public class Activity extends ContextThemeWrapper {
         if (mContentView == null) {
             return;
         }
+        // If this activity contains a SurfaceView (like 3D games with OpenGL/Metal),
+        // do not blit the 2D software canvas over the native hardware CAMetalLayer.
+        if (containsSurfaceView(mContentView)) {
+            return;
+        }
         try {
             android.graphics.Canvas canvas = new android.graphics.Canvas();
             final int width = canvas.getWidth();
             final int height = canvas.getHeight();
 
-            if (!(mContentView instanceof android.view.SurfaceView)) {
-                canvas.drawColor(0xFF181818);
-            }
+            canvas.drawColor(0xFF181818);
 
             // EXACTLY: the root view gets the whole screen, nothing more or less.
             mContentView.measure(
