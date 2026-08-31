@@ -542,16 +542,32 @@ public final class ActivityThread {
                                     foundSv.dispatchSurfaceCreated();
                                 }
 
-                                int surfaceW = 1920;
-                                int surfaceH = 1080;
+                                int realW = 1080;
+                                int realH = 1920;
+                                try {
+                                    android.graphics.Canvas c = new android.graphics.Canvas();
+                                    if (c.getWidth() > 0 && c.getHeight() > 0) {
+                                        realW = c.getWidth();
+                                        realH = c.getHeight();
+                                    }
+                                } catch (Throwable ignored) {}
+
+                                int surfaceW = realW;
+                                int surfaceH = realH;
                                 int reqOri = mInitialActivity.getRequestedOrientation();
-                                if (reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT ||
-                                    reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT) {
-                                    surfaceW = 1080;
-                                    surfaceH = 1920;
-                                } else {
-                                    // Default to Landscape for full-screen games
-                                    mInitialActivity.setRequestedOrientation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
+
+                                if (reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE ||
+                                    reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE ||
+                                    reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE ||
+                                    reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE) {
+                                    surfaceW = Math.max(realW, realH);
+                                    surfaceH = Math.min(realW, realH);
+                                } else if (reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT ||
+                                           reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT ||
+                                           reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT ||
+                                           reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT) {
+                                    surfaceW = Math.min(realW, realH);
+                                    surfaceH = Math.max(realW, realH);
                                 }
 
                                 if (mInitialActivity instanceof android.view.SurfaceHolder.Callback) {
