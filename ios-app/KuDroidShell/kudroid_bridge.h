@@ -49,6 +49,7 @@ const char* kudroid_jit_status(void);
 /// called once at startup against the application's writable documents directory.
 /// also installs signal handlers so that an original crash still leaves a log file.
 void kudroid_set_log_dir(const char* dir);
+void kudroid_clear_all_logs(void);
 
 /// Record an iOS-side lifecycle/diagnostic marker in the persistent KuDroid log.
 void kudroid_ios_diagnostic_phase(const char* phase);

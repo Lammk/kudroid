@@ -1060,66 +1060,76 @@ extern "C" void kudroid_set_log_dir(const char* dir) {
 
     installCrashHandlers();
 
-    static bool s_logDirInitialized = false;
-    if (!s_logDirInitialized) {
-        s_logDirInitialized = true;
-        // Keep the log across process launches. A SIGKILL leaves no callback that
-        // can archive the previous run before the next launch starts.
-        char aPath[1200];
-        snprintf(aPath, sizeof(aPath), "%s/kudroid_android_logs.txt", g_logDir);
-        FILE* afp = fopen(aPath, "a");
-        if (afp) {
-            fprintf(afp, "[kudroid_core] process-start Build: %s\n", kudroid_build_stamp());
-            fclose(afp);
-        }
+    // Completely clear all old logs (android, stderr, breadcrumbs, crash, etc.) on app launch
+    kudroid_clear_all_logs();
+}
 
-        // Old runs wrote these straight into Documents. Move them aside so the top
-        // level ends up clean even for someone upgrading, rather than leaving a
-        // confusing mix of stale files next to the new logs/ directory.
-        {
-            static const char* kMoved[] = {
-                "kudroid_android_logs.txt", "stderr.log", "kudroid_crash.log",
-                "classes.log", "kudroid_version.txt", "kudroid_uninstall_debug.txt",
-            };
-            for (const char* name : kMoved) {
-                const std::filesystem::path from =
-                    std::filesystem::path(g_docsDir) / name;
-                std::error_code ec;
-                if (!std::filesystem::exists(from, ec)) continue;
-                const std::filesystem::path to =
-                    std::filesystem::path(g_logDir) / (std::string("old_") + name);
-                std::filesystem::rename(from, to, ec);
-                if (ec) std::filesystem::remove(from, ec);
+extern "C" void kudroid_clear_all_logs(void) {
+    if (!g_logDir[0]) return;
+
+    std::error_code ec;
+
+    // 1. Wipe all files in logs directory
+    if (std::filesystem::exists(g_logDir, ec)) {
+        for (const auto& entry : std::filesystem::directory_iterator(g_logDir, ec)) {
+            if (entry.is_regular_file(ec)) {
+                std::filesystem::remove(entry.path(), ec);
             }
         }
-
-#if defined(__APPLE__)
-        // Redirect stderr (fd 2) into an append-only file so a subsequent launch
-        // cannot erase the tail of a run terminated by SIGKILL.
-        char errPath[1200];
-        snprintf(errPath, sizeof(errPath), "%s/stderr.log", g_logDir);
-        int errFd = open(errPath, O_WRONLY | O_CREAT | O_APPEND, 0644);
-        if (errFd >= 0) {
-            dup2(errFd, STDERR_FILENO);
-            setvbuf(stderr, nullptr, _IONBF, 0);
-            close(errFd);
-            // AFC (copying files over USB/Finder) can only read a file that is
-            // readable by other, and umask may have masked 0644 down to 0600.
-            ::chmod(errPath, 0644);
-            // First line of stderr.log is the build stamp too: every log file
-            // identifies the commit of the IPA that produced it.
-            fprintf(stderr, "[kudroid_core] process-start Build: %s\n", kudroid_build_stamp());
-            fprintf(stderr, "[kudroid_core] log directory: %s\n", g_logDir);
-        }
-#endif
     }
 
-    // Write the build stamp to its own file so the running version can be checked
-    // without reading a log, which answers "is the iPhone still on the old build?".
+    // 2. Wipe any legacy logs in Documents directory
+    if (g_docsDir[0]) {
+        static const char* kLegacyLogs[] = {
+            "kudroid_android_logs.txt", "stderr.log", "kudroid_crash.log",
+            "native_breadcrumbs.log", "classes.log", "kudroid_version.txt",
+            "kudroid_uninstall_debug.txt", "kudroid_run_apk.txt", "kudroid_exec.txt",
+            "kudroid_load.txt", "kudroid_selftest.txt", "kudroid_vfs_selftest.txt",
+            "kudroid_vfs_extended_test.txt"
+        };
+        for (const char* name : kLegacyLogs) {
+            const std::filesystem::path p = std::filesystem::path(g_docsDir) / name;
+            std::filesystem::remove(p, ec);
+        }
+    }
+
+    // 3. Clear in-memory crash log buffer
+    {
+        std::lock_guard<std::mutex> lock(g_crashBufMtx);
+        g_crashLen = 0;
+        g_abortMessage[0] = '\0';
+    }
+
+    // 4. Create fresh, clean kudroid_android_logs.txt (truncate/write)
+    char aPath[1200];
+    snprintf(aPath, sizeof(aPath), "%s/kudroid_android_logs.txt", g_logDir);
+    FILE* afp = fopen(aPath, "w");
+    if (afp) {
+        fprintf(afp, "[kudroid_core] process-start Build: %s\n", kudroid_build_stamp());
+        fclose(afp);
+        ::chmod(aPath, 0644);
+    }
+
+#if defined(__APPLE__)
+    // 5. Truncate/create fresh stderr.log
+    char errPath[1200];
+    snprintf(errPath, sizeof(errPath), "%s/stderr.log", g_logDir);
+    int errFd = open(errPath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (errFd >= 0) {
+        dup2(errFd, STDERR_FILENO);
+        setvbuf(stderr, nullptr, _IONBF, 0);
+        close(errFd);
+        ::chmod(errPath, 0644);
+        fprintf(stderr, "[kudroid_core] process-start Build: %s\n", kudroid_build_stamp());
+        fprintf(stderr, "[kudroid_core] log directory: %s\n", g_logDir);
+    }
+#endif
+
+    // 6. Write fresh version stamp
     const char* stamp = kudroid_build_stamp();
     writeLogFile("kudroid_version.txt", std::string(stamp) + "\n");
 
-    // KuART's classes.log belongs with the other diagnostics, not in Documents.
+    // 7. Reset KuART's missing classes log path
     std::string classesLogPath = (std::filesystem::path(g_logDir) / "classes.log").string();
     kuart_set_missing_class_log_path(classesLogPath.c_str());
 }
@@ -1897,23 +1907,8 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
         return strdup("[kudroid_core] APK is already running.\n");
     }
 
-    // Keep logs across APK launches. The persistent journal and run markers
-    // provide boundaries without destroying evidence from a prior SIGKILL.
-    if (g_logDir[0] != '\0') {
-#if defined(__APPLE__)
-        char errPath[1200];
-        snprintf(errPath, sizeof(errPath), "%s/stderr.log", g_logDir);
-        int errFd = open(errPath, O_WRONLY | O_CREAT | O_APPEND, 0644);
-        if (errFd >= 0) {
-            dup2(errFd, STDERR_FILENO);
-            setvbuf(stderr, nullptr, _IONBF, 0);
-            close(errFd);
-            // AFC (kdb dump / Finder) ch read c file c quyn read-other.
-            ::chmod(errPath, 0644);
-            fprintf(stderr, "[kudroid_core] apk-run Build: %s\n", kudroid_build_stamp());
-        }
-#endif
-    }
+    // Clear all old logs before launching guest app so logs start fresh for this run
+    kudroid_clear_all_logs();
 
     kudroid::native_run_begin();
     kudroid::native_phase("apk-run-enter");

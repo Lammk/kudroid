@@ -922,6 +922,7 @@ struct DebugView: View {
                         }
                         
                         Button(action: {
+                            kudroid_clear_all_logs()
                             fullLog = "[kudroid_core] Log cleared."
                         }) {
                             HStack {

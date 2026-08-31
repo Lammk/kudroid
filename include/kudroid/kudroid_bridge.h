@@ -43,6 +43,9 @@ const char* kudroid_jit_status(void);
 /// also installs signal handlers so that an original crash still leaves a log file.
 void kudroid_set_log_dir(const char* dir);
 
+/// completely clears all diagnostic log files (android, stderr, crash, breadcrumbs, etc.)
+void kudroid_clear_all_logs(void);
+
 /// sets the documents directory used by vfspathremapper.
 void kudroid_set_documents_dir(const char* dir);
 
