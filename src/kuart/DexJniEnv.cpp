@@ -264,6 +264,17 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
         return result;
     }
 
+    // Minecraft's MainActivity.nativeWaitCrashManagementSetupComplete waits on a
+    // condition variable signaled by the Linux crashpad setup in android_main.
+    // On iOS/KuDroid, crash telemetry is handled by MetricKit and Mach signal shims,
+    // and the background setup completes during initializeNativeCode. Bypassing this
+    // wait avoids deadlocks when signals are delivered before or concurrently.
+    if (std::strcmp(method_name, "nativeWaitCrashManagementSetupComplete") == 0) {
+        KLOGV("KuARTNative", "bypassing nativeWaitCrashManagementSetupComplete -> returning immediately");
+        native_call_exit();
+        return result;
+    }
+
     // The first parameter after env is receiver (instance) or jclass (static).
     void* self;
     size_t first = 0;
