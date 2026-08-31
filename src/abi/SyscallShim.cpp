@@ -162,6 +162,7 @@ struct android_epoll_event {
 #include <string>
 #include <array>
 #include <memory>
+#include <new>
 #include <dlfcn.h>
 
 extern const char* g_kudroid_log_dir_ptr;
@@ -307,23 +308,23 @@ extern "C" void bionic_runtime_noop() {
 static std::unordered_map<void*, void*> gSyncRegistry;
 static std::shared_mutex gSyncRegistryLock;
 
+static inline unsigned long long current_thread_id() {
+#if defined(__APPLE__)
+    uint64_t tid = 0;
+    ::pthread_threadid_np(nullptr, &tid);
+    return static_cast<unsigned long long>(tid);
+#else
+    return static_cast<unsigned long long>(::syscall(SYS_gettid));
+#endif
+}
+
 static void sync_diag(const char* operation, void* object, void* mutex, int result) {
     static std::atomic<unsigned> emitted{0};
     if (emitted.fetch_add(1, std::memory_order_relaxed) >= 256) return;
     char message[256];
     std::snprintf(message, sizeof(message),
                   "thread-sync op=%s cond=%p mutex=%p tid=%llu result=%d",
-                  operation, object, mutex,
-#if defined(__APPLE__)
-                  static_cast<unsigned long long>([] {
-                      uint64_t tid = 0;
-                      pthread_threadid_np(nullptr, &tid);
-                      return tid;
-                  }()),
-#else
-                  static_cast<unsigned long long>(::syscall(SYS_gettid)),
-#endif
-                  result);
+                  operation, object, mutex, current_thread_id(), result);
     logAndroidMessage(4, "KuDroidThread", message);
 }
 
@@ -334,15 +335,92 @@ enum SyncType : int {
     SYNC_RWLOCK = 3,
 };
 
+// Bionic mutex kinds, as stored in a guest pthread_mutexattr_t and decoded from
+// a guest pthread_mutex_t. Values match PTHREAD_MUTEX_{NORMAL,RECURSIVE,ERRORCHECK}.
+enum BionicMutexKind : int {
+    BIONIC_MUTEX_NORMAL = 0,
+    BIONIC_MUTEX_RECURSIVE = 1,
+    BIONIC_MUTEX_ERRORCHECK = 2,
+};
+
+// Bionic keeps a mutex's kind in bits 14-15 of the first 32-bit word of
+// pthread_mutex_t. That word is the ONLY record of the kind for a mutex built by
+// PTHREAD_RECURSIVE_MUTEX_INITIALIZER, because a statically initialised mutex
+// never calls pthread_mutex_init and so never reaches this shim before its first
+// lock. Handing such a guest a default (non-recursive) host mutex turns its
+// second re-entrant lock into a permanent self-deadlock inside
+// pthread_mutex_lock — which from the outside is indistinguishable from a native
+// method that simply never returns.
+static constexpr uint32_t kBionicMutexTypeShift = 14;
+static constexpr uint32_t kBionicMutexStaticNormal =
+    static_cast<uint32_t>(BIONIC_MUTEX_NORMAL) << kBionicMutexTypeShift;
+static constexpr uint32_t kBionicMutexStaticRecursive =
+    static_cast<uint32_t>(BIONIC_MUTEX_RECURSIVE) << kBionicMutexTypeShift;
+static constexpr uint32_t kBionicMutexStaticErrorcheck =
+    static_cast<uint32_t>(BIONIC_MUTEX_ERRORCHECK) << kBionicMutexTypeShift;
+
+// Deliberately an exact match against a pristine static initializer rather than a
+// mask of bits 14-15. A mutex the guest initialised at runtime has a control word
+// this shim never wrote, so its contents are unspecified; masking would read
+// uninitialised memory as "recursive" and silently hide real double-lock bugs.
+// An untouched static initializer is exactly one of these three values.
+static inline int bionic_static_mutex_kind(const void* guest_mutex) {
+    if (!guest_mutex) return BIONIC_MUTEX_NORMAL;
+    uint32_t word = 0;
+    std::memcpy(&word, guest_mutex, sizeof(word));
+    if (word == kBionicMutexStaticRecursive) return BIONIC_MUTEX_RECURSIVE;
+    if (word == kBionicMutexStaticErrorcheck) return BIONIC_MUTEX_ERRORCHECK;
+    (void)kBionicMutexStaticNormal;
+    return BIONIC_MUTEX_NORMAL;
+}
+
+// A guest mutex maps to a host mutex plus the owner this shim recorded for it.
+//
+// The owner is tracked because the host cannot answer "did THIS thread already
+// lock this?" for a default mutex: pthread_mutex_trylock returns EBUSY whether the
+// holder is this thread or another one. Only an ERRORCHECK mutex reports EDEADLK,
+// and promoting every guest mutex to ERRORCHECK is not safe — bionic tolerates an
+// unlock from a thread that is not the owner on a NORMAL mutex, and some guest
+// code relies on that hand-off pattern, which ERRORCHECK would start rejecting
+// with EPERM.
+struct HostMutex {
+    pthread_mutex_t mutex;
+    // Only meaningful when track_owner is set. Relaxed ordering is enough: the
+    // value is only ever compared against the current thread's own id, and a
+    // thread's own writes are always visible to itself.
+    std::atomic<unsigned long long> owner{0};
+    bool track_owner = false;
+};
+
+static inline void* create_mutex_obj(int kind) {
+    auto* host = new (std::nothrow) HostMutex();
+    if (!host) return nullptr;
+    int rc;
+    if (kind == BIONIC_MUTEX_RECURSIVE || kind == BIONIC_MUTEX_ERRORCHECK) {
+        // Both kinds detect owner re-entry in the host: RECURSIVE by allowing it,
+        // ERRORCHECK by returning EDEADLK. Neither needs bookkeeping here.
+        pthread_mutexattr_t ma;
+        ::pthread_mutexattr_init(&ma);
+        ::pthread_mutexattr_settype(&ma, kind == BIONIC_MUTEX_RECURSIVE
+                                             ? PTHREAD_MUTEX_RECURSIVE
+                                             : PTHREAD_MUTEX_ERRORCHECK);
+        rc = ::pthread_mutex_init(&host->mutex, &ma);
+        ::pthread_mutexattr_destroy(&ma);
+        host->track_owner = false;
+    } else {
+        rc = ::pthread_mutex_init(&host->mutex, nullptr);
+        host->track_owner = true;
+    }
+    if (rc != 0) {
+        delete host;
+        return nullptr;
+    }
+    return host;
+}
+
 static inline void* create_sync_obj(int type) {
     if (type == SYNC_MUTEX) {
-        auto* hostMutex = static_cast<pthread_mutex_t*>(std::malloc(sizeof(pthread_mutex_t)));
-        if (!hostMutex) return nullptr;
-        if (::pthread_mutex_init(hostMutex, nullptr) != 0) {
-            std::free(hostMutex);
-            return nullptr;
-        }
-        return hostMutex;
+        return create_mutex_obj(BIONIC_MUTEX_NORMAL);
     } else if (type == SYNC_COND) {
         auto* hostCond = static_cast<pthread_cond_t*>(std::malloc(sizeof(pthread_cond_t)));
         if (!hostCond) return nullptr;
@@ -365,8 +443,13 @@ static inline void* create_sync_obj(int type) {
 
 static inline void destroy_sync_obj(void* host_obj, int type) {
     if (!host_obj) return;
-    if (type == SYNC_MUTEX) ::pthread_mutex_destroy(static_cast<pthread_mutex_t*>(host_obj));
-    else if (type == SYNC_COND) ::pthread_cond_destroy(static_cast<pthread_cond_t*>(host_obj));
+    if (type == SYNC_MUTEX) {
+        auto* host = static_cast<HostMutex*>(host_obj);
+        ::pthread_mutex_destroy(&host->mutex);
+        delete host;
+        return;
+    }
+    if (type == SYNC_COND) ::pthread_cond_destroy(static_cast<pthread_cond_t*>(host_obj));
     else if (type == SYNC_RWLOCK) ::pthread_rwlock_destroy(static_cast<pthread_rwlock_t*>(host_obj));
     std::free(host_obj);
 }
@@ -389,11 +472,29 @@ static inline void* get_or_init_sync(void* guest_ptr, int type) {
         return it->second;
     }
 
-    void* host_obj = create_sync_obj(type);
+    // A mutex reaching this point was never passed to pthread_mutex_init, so it is
+    // a static initializer and its control word states the kind it must have.
+    void* host_obj = type == SYNC_MUTEX
+                         ? create_mutex_obj(bionic_static_mutex_kind(guest_ptr))
+                         : create_sync_obj(type);
     if (!host_obj) return nullptr;
 
     gSyncRegistry[guest_ptr] = host_obj;
     return host_obj;
+}
+
+// Replace any existing mapping for guest_ptr, destroying the object it displaces.
+// A guest re-initialising a sync object is legal, and leaking the previous host
+// object leaks its kernel resources too, not just the malloc.
+static inline void register_sync(void* guest_ptr, void* host_obj, int type) {
+    std::unique_lock<std::shared_mutex> lock(gSyncRegistryLock);
+    auto it = gSyncRegistry.find(guest_ptr);
+    if (it != gSyncRegistry.end()) {
+        destroy_sync_obj(it->second, type);
+        it->second = host_obj;
+        return;
+    }
+    gSyncRegistry[guest_ptr] = host_obj;
 }
 
 static inline void destroy_sync(void* guest_ptr, int type) {
@@ -408,65 +509,96 @@ static inline void destroy_sync(void* guest_ptr, int type) {
 }
 
 extern "C" int bionic_pthread_mutex_init(void* guestMutex, const void* attr) {
+    if (!guestMutex) return EINVAL;
 
-    // Bionic pthread_mutexattr_t: mutex type (RECURSIVE=1, ERRORCHECK=2) stored
-    // in lower 2 bits. Maps recursive attributes to prevent deadlocks.
-    int type = 0;
-    if (attr) type = (*static_cast<const uint32_t*>(attr)) & 0x3;
+    // Bionic pthread_mutexattr_t: mutex kind (RECURSIVE=1, ERRORCHECK=2) in the
+    // low 2 bits.
+    int kind = BIONIC_MUTEX_NORMAL;
+    if (attr) kind = static_cast<int>((*static_cast<const uint32_t*>(attr)) & 0x3u);
 
-    void* hostMutex = create_sync_obj(SYNC_MUTEX);
-    if (!hostMutex) return -1;
-    if (type == 1 || type == 2) { // RECURSIVE or ERRORCHECK
-        pthread_mutexattr_t ma;
-        ::pthread_mutexattr_init(&ma);
-        ::pthread_mutexattr_settype(&ma, type == 1 ? PTHREAD_MUTEX_RECURSIVE
-                                                   : PTHREAD_MUTEX_ERRORCHECK);
-        const int rc = ::pthread_mutex_init(static_cast<pthread_mutex_t*>(hostMutex), &ma);
-        ::pthread_mutexattr_destroy(&ma);
-        if (rc != 0) {
-            std::free(hostMutex);
-            return rc;
-        }
-    }
+    void* hostMutex = create_mutex_obj(kind);
+    if (!hostMutex) return EAGAIN;
 
-    std::unique_lock<std::shared_mutex> lock(gSyncRegistryLock);
-    gSyncRegistry[guestMutex] = hostMutex;
+    register_sync(guestMutex, hostMutex, SYNC_MUTEX);
     return 0;
 }
 
 extern "C" int bionic_pthread_cond_init(void* cond, const void* attr) {
     (void)attr;
+    if (!cond) return EINVAL;
     void* hostCond = create_sync_obj(SYNC_COND);
-    if (!hostCond) return -1;
-    
-    std::unique_lock<std::shared_mutex> lock(gSyncRegistryLock);
-    gSyncRegistry[cond] = hostCond;
+    if (!hostCond) return EAGAIN;
+
+    register_sync(cond, hostCond, SYNC_COND);
     return 0;
 }
 
 extern "C" int bionic_pthread_rwlock_init(void* rwlock, const void* attr) {
     (void)attr;
+    if (!rwlock) return EINVAL;
     void* hostRwlock = create_sync_obj(SYNC_RWLOCK);
-    if (!hostRwlock) return -1;
-    
-    std::unique_lock<std::shared_mutex> lock(gSyncRegistryLock);
-    gSyncRegistry[rwlock] = hostRwlock;
+    if (!hostRwlock) return EAGAIN;
+
+    register_sync(rwlock, hostRwlock, SYNC_RWLOCK);
     return 0;
 }
 
 
 
+// Mutex lock/unlock are far too hot to log per call. What is worth reporting is a
+// lock that cannot succeed: a guest thread stuck in pthread_mutex_lock produces no
+// output of its own, so the only symptom is a native method that never returns.
+static void mutex_deadlock_diag(void* guestMutex) {
+    static std::atomic<unsigned> emitted{0};
+    if (emitted.fetch_add(1, std::memory_order_relaxed) >= 64) return;
+    char message[256];
+    std::snprintf(message, sizeof(message),
+                  "mutex-self-deadlock guest=%p tid=%llu -> EDEADLK (would block forever)",
+                  guestMutex, current_thread_id());
+    logAndroidMessage(6, "KuDroidThread", message);
+}
+
+static inline HostMutex* host_mutex_for(void* guestMutex) {
+    return static_cast<HostMutex*>(get_or_init_sync(guestMutex, SYNC_MUTEX));
+}
+
 // Do not trace mutex lock/unlock due to high frequency. Trace reserved for anomalous events.
 extern "C" int bionic_pthread_mutex_lock(void* guestMutex) {
-    pthread_mutex_t* hostMutex = static_cast<pthread_mutex_t*>(get_or_init_sync(guestMutex, SYNC_MUTEX));
-    const int result = hostMutex ? ::pthread_mutex_lock(hostMutex) : -1;
-    return result;
+    HostMutex* host = host_mutex_for(guestMutex);
+    if (!host) return EINVAL;
+
+    if (host->track_owner) {
+        // A NORMAL mutex re-locked by its own holder is undefined behaviour in
+        // POSIX and an unrecoverable hang here: nothing will ever unlock it,
+        // because the only thread that could is the one about to block. Report
+        // EDEADLK — the guest's error path runs and the thread stays alive.
+        if (host->owner.load(std::memory_order_relaxed) == current_thread_id()) {
+            mutex_deadlock_diag(guestMutex);
+            return EDEADLK;
+        }
+    }
+
+    const int rc = ::pthread_mutex_lock(&host->mutex);
+    if (rc == 0 && host->track_owner) {
+        host->owner.store(current_thread_id(), std::memory_order_relaxed);
+    } else if (rc == EDEADLK) {
+        // An ERRORCHECK mutex reaches this instead of the check above.
+        mutex_deadlock_diag(guestMutex);
+    }
+    return rc;
 }
 
 extern "C" int bionic_pthread_mutex_unlock(void* guestMutex) {
-    pthread_mutex_t* hostMutex = static_cast<pthread_mutex_t*>(get_or_init_sync(guestMutex, SYNC_MUTEX));
-    const int result = hostMutex ? ::pthread_mutex_unlock(hostMutex) : -1;
-    return result;
+    HostMutex* host = host_mutex_for(guestMutex);
+    if (!host) return EINVAL;
+    // Clear the owner BEFORE unlocking: afterwards another thread may already hold
+    // the mutex, and clearing then would erase its ownership instead of ours.
+    if (host->track_owner &&
+        host->owner.load(std::memory_order_relaxed) == current_thread_id()) {
+        host->owner.store(0, std::memory_order_relaxed);
+    }
+    const int rc = ::pthread_mutex_unlock(&host->mutex);
+    return rc;
 }
 
 extern "C" int bionic_pthread_mutex_destroy(void* guestMutex) {
@@ -481,20 +613,29 @@ extern "C" int bionic_pthread_cond_destroy(void* cond) {
 }
 extern "C" int bionic_pthread_cond_wait(void* cond, void* mutex) {
     pthread_cond_t* hostCond = static_cast<pthread_cond_t*>(get_or_init_sync(cond, SYNC_COND));
-    pthread_mutex_t* hostMutex = static_cast<pthread_mutex_t*>(get_or_init_sync(mutex, SYNC_MUTEX));
-    if (!hostCond || !hostMutex) return -1;
+    HostMutex* host = host_mutex_for(mutex);
+    if (!hostCond || !host) return EINVAL;
+    // pthread_cond_wait releases the mutex while blocked, so this thread stops
+    // being the owner for the duration and becomes it again on return.
+    const bool track = host->track_owner;
+    if (track) host->owner.store(0, std::memory_order_relaxed);
     sync_diag("cond-wait-enter", cond, mutex, 0);
-    const int result = ::pthread_cond_wait(hostCond, hostMutex);
+    const int result = ::pthread_cond_wait(hostCond, &host->mutex);
     sync_diag("cond-wait-return", cond, mutex, result);
+    if (track && result == 0) host->owner.store(current_thread_id(), std::memory_order_relaxed);
     return result;
 }
 extern "C" int bionic_pthread_cond_timedwait(void* cond, void* mutex, const struct timespec* abstime) {
     pthread_cond_t* hostCond = static_cast<pthread_cond_t*>(get_or_init_sync(cond, SYNC_COND));
-    pthread_mutex_t* hostMutex = static_cast<pthread_mutex_t*>(get_or_init_sync(mutex, SYNC_MUTEX));
-    if (!hostCond || !hostMutex) return -1;
+    HostMutex* host = host_mutex_for(mutex);
+    if (!hostCond || !host) return EINVAL;
+    const bool track = host->track_owner;
+    if (track) host->owner.store(0, std::memory_order_relaxed);
     sync_diag("cond-timedwait-enter", cond, mutex, 0);
-    const int result = ::pthread_cond_timedwait(hostCond, hostMutex, abstime);
+    const int result = ::pthread_cond_timedwait(hostCond, &host->mutex, abstime);
     sync_diag("cond-timedwait-return", cond, mutex, result);
+    // The mutex is reacquired on timeout too, so ownership is restored either way.
+    if (track) host->owner.store(current_thread_id(), std::memory_order_relaxed);
     return result;
 }
 extern "C" int bionic_pthread_cond_signal(void* cond) {
@@ -2707,7 +2848,17 @@ extern "C" int bionic_epoll_wait(int epfd, void *events_ptr, int maxevents, int 
 
 extern "C" int bionic_pthread_condattr_init(void* attr) { (void)attr; return 0; }
 extern "C" int bionic_pthread_condattr_destroy(void* attr) { (void)attr; return 0; }
-extern "C" int bionic_pthread_mutexattr_init(void* attr) { (void)attr; return 0; }
+extern "C" int bionic_pthread_mutexattr_init(void* attr) {
+    // Must clear the kind bits. A guest typically declares pthread_mutexattr_t on
+    // the stack, so leaving it untouched let pthread_mutex_init read stack garbage
+    // as the mutex kind — a NORMAL mutex became RECURSIVE or vice versa depending
+    // on what happened to be in that frame. Only the low 32 bits are written: the
+    // shim reads nothing above them, and bionic's own type is wider.
+    auto* p = static_cast<uint32_t*>(attr);
+    if (!p) return EINVAL;
+    *p = 0;  // PTHREAD_MUTEX_DEFAULT
+    return 0;
+}
 extern "C" int bionic_pthread_mutexattr_destroy(void* attr) { (void)attr; return 0; }
 extern "C" int bionic_pthread_mutexattr_settype(void* attr, int type) {
     // write kiu vo attr guest (2 bit thp t u) — dummy c no/not write g nn
@@ -2718,10 +2869,22 @@ extern "C" int bionic_pthread_mutexattr_settype(void* attr, int type) {
     return 0;
 }
 
+extern "C" int bionic_pthread_mutexattr_gettype(void* attr, int* type) {
+    const auto* p = static_cast<const uint32_t*>(attr);
+    if (!p || !type) return EINVAL;
+    *type = static_cast<int>(*p & 0x3u);
+    return 0;
+}
+
 
 extern "C" int bionic_pthread_mutex_trylock(void* guestMutex) {
-    pthread_mutex_t* hostMutex = static_cast<pthread_mutex_t*>(get_or_init_sync(guestMutex, SYNC_MUTEX));
-    return hostMutex ? ::pthread_mutex_trylock(hostMutex) : -1;
+    HostMutex* host = host_mutex_for(guestMutex);
+    if (!host) return EINVAL;
+    const int rc = ::pthread_mutex_trylock(&host->mutex);
+    if (rc == 0 && host->track_owner) {
+        host->owner.store(current_thread_id(), std::memory_order_relaxed);
+    }
+    return rc;
 }
 
 extern "C" int bionic_pthread_key_create(void* guestKey, void (*destructor)(void*)) {
@@ -4587,6 +4750,7 @@ const SymbolEntry kSyscallSymbols[] = {
     {"pthread_mutexattr_init", reinterpret_cast<void*>(&bionic_pthread_mutexattr_init)},
     {"pthread_mutexattr_destroy", reinterpret_cast<void*>(&bionic_pthread_mutexattr_destroy)},
     {"pthread_mutexattr_settype", reinterpret_cast<void*>(&bionic_pthread_mutexattr_settype)},
+    {"pthread_mutexattr_gettype", reinterpret_cast<void*>(&bionic_pthread_mutexattr_gettype)},
     {"pthread_mutex_trylock", reinterpret_cast<void*>(&bionic_pthread_mutex_trylock)},
     {"pthread_key_create", reinterpret_cast<void*>(&bionic_pthread_key_create)},
     {"pthread_setspecific", reinterpret_cast<void*>(&bionic_pthread_setspecific)},

@@ -99,6 +99,21 @@ const char* g_kudroid_log_dir_ptr = g_logDir;
 // every handler.  This small append-only journal is therefore flushed after
 // each breadcrumb.  It is intentionally independent of the C++ log mutex: the
 // last completed write remains useful even when a thread is blocked elsewhere.
+//
+// Durability is provided by write(2) alone, deliberately. The threat here is the
+// process dying without running handlers — SIGKILL, an iOS watchdog kill, an
+// uncatchable fault — and a completed write(2) already survives all of those: the
+// data is in the kernel's page cache, which outlives the process. fsync and
+// F_FULLFSYNC defend against something else entirely (losing power before the
+// cache reaches storage), and they are not free: F_FULLFSYNC blocks on a full
+// device cache flush, tens of milliseconds on iOS flash.
+//
+// That cost was being paid six times per JNI call, on the calling thread, inside
+// the call it was measuring. It is why trivial natives in the captured logs report
+// absurd durations — MainActivity.isEduMode, which returns a constant boolean,
+// took 77ms. The instrument was the workload, it inflated every duration it
+// reported, and on a startup path with an iOS watchdog it was pushing the process
+// toward the kill it existed to explain.
 extern "C" void kudroid_persistent_breadcrumb(const char* line) {
     if (!line || !g_logDir[0]) return;
     char path[sizeof(g_logDir) + 32];
@@ -118,11 +133,9 @@ extern "C" void kudroid_persistent_breadcrumb(const char* line) {
     }
     const size_t len = static_cast<size_t>(record_len) < sizeof(record)
                            ? static_cast<size_t>(record_len) : sizeof(record) - 1;
+    // One write of one line to an O_APPEND fd: the record cannot interleave with a
+    // record from another thread, so no lock is needed.
     (void)::write(fd, record, len);
-    (void)::fsync(fd);
-#if defined(__APPLE__) && defined(F_FULLFSYNC)
-    (void)::fcntl(fd, F_FULLFSYNC, 0);
-#endif
     (void)::close(fd);
 }
 

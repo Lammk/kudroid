@@ -21,6 +21,8 @@
 #include <future>
 #include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 
 #include <errno.h>
 #include <fcntl.h>
@@ -54,6 +56,15 @@ extern "C" void bionic_ALooper_release(void* looper);
 extern "C" void* bionic_dlopen(const char* filename, int flags);
 extern "C" void* bionic_dlsym(void* handle, const char* symbol);
 extern "C" int bionic_dlclose(void* handle);
+extern "C" int bionic_pthread_mutex_init(void* guestMutex, const void* attr);
+extern "C" int bionic_pthread_mutex_lock(void* guestMutex);
+extern "C" int bionic_pthread_mutex_unlock(void* guestMutex);
+extern "C" int bionic_pthread_mutex_trylock(void* guestMutex);
+extern "C" int bionic_pthread_mutex_destroy(void* guestMutex);
+extern "C" int bionic_pthread_mutexattr_init(void* attr);
+extern "C" int bionic_pthread_mutexattr_settype(void* attr, int type);
+extern "C" int bionic_pthread_mutexattr_gettype(void* attr, int* type);
+extern "C" int bionic_pthread_mutexattr_destroy(void* attr);
 
 // Guest library hooks, installed by kudroid_run_apk in production.
 extern "C" void* (*kudroid_guest_library_open)(const char* filename);
@@ -735,6 +746,190 @@ void test_dl_iterate_phdr_skips_modules_without_headers() {
     CHECK(!seen.nullTable, "no module is reported with a null header table");
 }
 
+// ─── guest mutex kinds ───────────────────────────────────────────────────────
+// A guest pthread_mutex_t built by PTHREAD_RECURSIVE_MUTEX_INITIALIZER never
+// reaches pthread_mutex_init, so the shim first sees it at pthread_mutex_lock and
+// must recover its kind from the control word. Bionic stores the kind in bits
+// 14-15 of the first 32-bit word.
+//
+// Getting this wrong is not a subtle degradation: the guest's second re-entrant
+// lock blocks forever on a non-recursive host mutex, which presents as a native
+// method that entered and never returned, with no output of its own.
+
+// Guest pthread_mutex_t is 4 bytes on bionic arm64, but allocate the full 40-byte
+// bionic pthread_mutex_t footprint so nothing the shim reads lands out of bounds.
+struct GuestMutex {
+    uint32_t control;
+    unsigned char reserved[36];
+};
+
+static constexpr uint32_t kBionicRecursiveInit = 1u << 14;
+static constexpr uint32_t kBionicErrorcheckInit = 2u << 14;
+
+// Bound every lock that is expected to succeed: a regression here hangs rather
+// than fails, and a hung test tells you far less than a failing one.
+template <typename Fn>
+static bool completes_within(Fn&& fn, int timeout_ms) {
+    auto fut = std::async(std::launch::async, std::forward<Fn>(fn));
+    return fut.wait_for(std::chrono::milliseconds(timeout_ms)) ==
+           std::future_status::ready;
+}
+
+static void test_static_recursive_mutex_relocks() {
+    std::printf("[mutex] static recursive initializer survives lazy creation\n");
+    // Deliberately NOT passed to bionic_pthread_mutex_init — that is the whole
+    // point. The shim has to infer the kind on first lock.
+    static GuestMutex guest = {kBionicRecursiveInit, {}};
+
+    // Lock AND unlock on the same thread: a recursive mutex is owned by the thread
+    // that locked it, so unlocking from elsewhere is EPERM and would be testing
+    // the wrong thing.
+    int inner_unlock = -1;
+    int outer_unlock = -1;
+    const bool done = completes_within([&] {
+        if (bionic_pthread_mutex_lock(&guest) != 0) return false;
+        if (bionic_pthread_mutex_lock(&guest) != 0) return false;
+        inner_unlock = bionic_pthread_mutex_unlock(&guest);
+        outer_unlock = bionic_pthread_mutex_unlock(&guest);
+        return true;
+    }, 2000);
+    CHECK(done, "a recursive static mutex re-locks instead of deadlocking");
+    CHECK(inner_unlock == 0, "inner unlock succeeds");
+    CHECK(outer_unlock == 0, "outer unlock succeeds");
+    bionic_pthread_mutex_destroy(&guest);
+}
+
+static void test_static_normal_mutex_reports_deadlock() {
+    std::printf("[mutex] static normal initializer reports self-deadlock\n");
+    static GuestMutex guest = {0, {}};
+
+    // A NORMAL mutex re-locked by its owner is undefined behaviour in POSIX and a
+    // permanent hang in practice. Returning EDEADLK runs the guest's error path
+    // instead of losing the thread, and keeps the failure visible in the log.
+    int second = 0;
+    const bool done = completes_within([&second] {
+        if (bionic_pthread_mutex_lock(&guest) != 0) return false;
+        second = bionic_pthread_mutex_lock(&guest);
+        bionic_pthread_mutex_unlock(&guest);
+        return true;
+    }, 2000);
+    CHECK(done, "re-locking a normal mutex returns instead of blocking forever");
+    CHECK(second == EDEADLK, "the second lock reports EDEADLK");
+    bionic_pthread_mutex_destroy(&guest);
+}
+
+static void test_mutexattr_init_clears_stale_kind() {
+    std::printf("[mutex] mutexattr_init clears a stale kind\n");
+    // A guest declares pthread_mutexattr_t on the stack; init must not leave
+    // whatever was in that frame to be read as the mutex kind.
+    uint32_t attr = 0xFFFFFFFFu;
+    CHECK(bionic_pthread_mutexattr_init(&attr) == 0, "mutexattr_init succeeds");
+    int kind = -1;
+    CHECK(bionic_pthread_mutexattr_gettype(&attr, &kind) == 0, "gettype succeeds");
+    CHECK(kind == 0, "the kind is NORMAL, not garbage from the caller's stack");
+
+    static GuestMutex guest = {0, {}};
+    CHECK(bionic_pthread_mutex_init(&guest, &attr) == 0, "mutex_init with the cleared attr succeeds");
+    int second = 0;
+    const bool done = completes_within([&second] {
+        if (bionic_pthread_mutex_lock(&guest) != 0) return false;
+        second = bionic_pthread_mutex_lock(&guest);
+        bionic_pthread_mutex_unlock(&guest);
+        return true;
+    }, 2000);
+    CHECK(done && second == EDEADLK, "a mutex built from the cleared attr is not recursive");
+    bionic_pthread_mutex_destroy(&guest);
+    bionic_pthread_mutexattr_destroy(&attr);
+}
+
+static void test_mutexattr_settype_recursive_is_honoured() {
+    std::printf("[mutex] mutexattr_settype(RECURSIVE) reaches the host mutex\n");
+    uint32_t attr = 0;
+    bionic_pthread_mutexattr_init(&attr);
+    CHECK(bionic_pthread_mutexattr_settype(&attr, 1 /* RECURSIVE */) == 0,
+          "settype(RECURSIVE) succeeds");
+    int kind = -1;
+    bionic_pthread_mutexattr_gettype(&attr, &kind);
+    CHECK(kind == 1, "gettype reads back RECURSIVE");
+
+    static GuestMutex guest = {0, {}};
+    CHECK(bionic_pthread_mutex_init(&guest, &attr) == 0, "mutex_init(RECURSIVE) succeeds");
+    const bool done = completes_within([] {
+        if (bionic_pthread_mutex_lock(&guest) != 0) return false;
+        if (bionic_pthread_mutex_lock(&guest) != 0) return false;
+        bionic_pthread_mutex_unlock(&guest);
+        bionic_pthread_mutex_unlock(&guest);
+        return true;
+    }, 2000);
+    CHECK(done, "an explicitly recursive mutex re-locks");
+    bionic_pthread_mutex_destroy(&guest);
+    bionic_pthread_mutexattr_destroy(&attr);
+}
+
+static void test_mutex_reinit_replaces_mapping() {
+    std::printf("[mutex] re-init replaces the host mutex rather than leaking it\n");
+    static GuestMutex guest = {0, {}};
+
+    // First init: NORMAL. Lock and unlock so the mapping is definitely live.
+    uint32_t normal = 0;
+    bionic_pthread_mutexattr_init(&normal);
+    CHECK(bionic_pthread_mutex_init(&guest, &normal) == 0, "first init succeeds");
+    CHECK(bionic_pthread_mutex_lock(&guest) == 0, "lock after first init succeeds");
+    CHECK(bionic_pthread_mutex_unlock(&guest) == 0, "unlock after first init succeeds");
+
+    // Re-init the SAME guest address as RECURSIVE. The new kind must take effect;
+    // if the old mapping were kept, the re-lock below would deadlock.
+    uint32_t recursive = 0;
+    bionic_pthread_mutexattr_init(&recursive);
+    bionic_pthread_mutexattr_settype(&recursive, 1);
+    CHECK(bionic_pthread_mutex_init(&guest, &recursive) == 0, "re-init succeeds");
+    const bool done = completes_within([] {
+        if (bionic_pthread_mutex_lock(&guest) != 0) return false;
+        if (bionic_pthread_mutex_lock(&guest) != 0) return false;
+        bionic_pthread_mutex_unlock(&guest);
+        bionic_pthread_mutex_unlock(&guest);
+        return true;
+    }, 2000);
+    CHECK(done, "the re-initialised kind is the one in effect");
+    bionic_pthread_mutex_destroy(&guest);
+    bionic_pthread_mutexattr_destroy(&normal);
+    bionic_pthread_mutexattr_destroy(&recursive);
+}
+
+static void test_mutex_shared_between_threads() {
+    std::printf("[mutex] a guest mutex still excludes a second thread\n");
+    // The trylock fast path must not turn a real lock into a no-op: two threads
+    // incrementing under the same guest mutex must not lose an update.
+    static GuestMutex guest = {0, {}};
+    uint32_t attr = 0;
+    bionic_pthread_mutexattr_init(&attr);
+    bionic_pthread_mutex_init(&guest, &attr);
+
+    constexpr int kThreads = 4;
+    constexpr int kIterations = 2000;
+    long counter = 0;  // deliberately not atomic — the mutex is what protects it
+    std::atomic<bool> lock_error{false};
+
+    auto worker = [&] {
+        for (int i = 0; i < kIterations; ++i) {
+            if (bionic_pthread_mutex_lock(&guest) != 0) { lock_error = true; return; }
+            ++counter;
+            if (bionic_pthread_mutex_unlock(&guest) != 0) { lock_error = true; return; }
+        }
+    };
+
+    std::vector<std::thread> threads;
+    threads.reserve(kThreads);
+    for (int i = 0; i < kThreads; ++i) threads.emplace_back(worker);
+    for (auto& t : threads) t.join();
+
+    CHECK(!lock_error.load(), "every lock and unlock reported success");
+    CHECK(counter == static_cast<long>(kThreads) * kIterations,
+          "no increment was lost — the mutex provides real exclusion");
+    bionic_pthread_mutex_destroy(&guest);
+    bionic_pthread_mutexattr_destroy(&attr);
+}
+
 // ─── main ────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -758,6 +953,12 @@ int main() {
     test_guest_library_handles();
     test_dl_iterate_phdr_reports_guest_modules();
     test_dl_iterate_phdr_skips_modules_without_headers();
+    test_static_recursive_mutex_relocks();
+    test_static_normal_mutex_reports_deadlock();
+    test_mutexattr_init_clears_stale_kind();
+    test_mutexattr_settype_recursive_is_honoured();
+    test_mutex_reinit_replaces_mapping();
+    test_mutex_shared_between_threads();
     std::printf("=== %d checks, %d failures ===\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }
