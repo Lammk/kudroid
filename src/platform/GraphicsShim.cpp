@@ -128,9 +128,12 @@ extern "C" void* bionic_ANativeWindow_fromSurface(void* env_ptr, void* surface_o
                     }
                 }
                 auto* nw = new KuDroidNativeWindow();
+                nw->magic = 0x4B554457;
                 nw->layer = layer;
                 nw->width = width;
                 nw->height = height;
+                nw->format = 1;
+                nw->refCount.store(1);
                 env->SetLongField(jsurf, fid, reinterpret_cast<jlong>(nw));
                 gpuLog("ANativeWindow_fromSurface allocated %p for Surface %p (layer=%p, size=%dx%d)",
                        (void*)nw, (void*)jsurf, nw->layer, nw->width, nw->height);

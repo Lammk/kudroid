@@ -1,6 +1,6 @@
 package android.media;
 
-/** Stub automatically generated for android.media.AudioDeviceCallback */
-public class AudioDeviceCallback {
-    public AudioDeviceCallback() {}
+public abstract class AudioDeviceCallback {
+    public void onAudioDevicesAdded(AudioDeviceInfo[] addedDevices) {}
+    public void onAudioDevicesRemoved(AudioDeviceInfo[] removedDevices) {}
 }

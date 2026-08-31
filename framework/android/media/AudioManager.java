@@ -22,6 +22,11 @@ public class AudioManager {
     public void setSpeakerphoneOn(boolean on) {}
     public boolean isBluetoothScoOn() { return false; }
     public void setBluetoothScoOn(boolean on) {}
+    public AudioDeviceInfo[] getDevices(int flags) {
+        return new AudioDeviceInfo[] { new AudioDeviceInfo(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER, 1) };
+    }
+    public void registerAudioDeviceCallback(AudioDeviceCallback callback, android.os.Handler handler) {}
+    public void unregisterAudioDeviceCallback(AudioDeviceCallback callback) {}
     public int getMode() { return MODE_NORMAL; }
     public void setMode(int mode) {}
 }
