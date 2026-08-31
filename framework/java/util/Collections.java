@@ -78,6 +78,12 @@ public final class Collections {
         return out;
     }
 
+    public static <K, V> Map<K, V> singletonMap(K key, V value) {
+        HashMap<K, V> out = new HashMap<K, V>(1);
+        out.put(key, value);
+        return out;
+    }
+
     public static <T> List<T> unmodifiableList(List<T> list) {
         return list;
     }

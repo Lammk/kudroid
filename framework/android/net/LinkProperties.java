@@ -24,6 +24,7 @@ public final class LinkProperties implements Parcelable {
     public List<LinkAddress> getLinkAddresses() { return Collections.unmodifiableList(mLinkAddresses); }
     public List<InetAddress> getDnsServers() { return Collections.unmodifiableList(mDnses); }
     public List<RouteInfo> getRoutes() { return Collections.unmodifiableList(mRoutes); }
+    public ProxyInfo getHttpProxy() { return null; }
     public int describeContents() { return 0; }
     public void writeToParcel(Parcel dest, int flags) {}
 }
