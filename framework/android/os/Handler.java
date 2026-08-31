@@ -55,35 +55,56 @@ public class Handler {
     }
 
     /**
-     * send a message to the callback or handlemessage.
+     * send a message to the callback, mCallback, or handleMessage.
      */
     public void dispatchMessage(Message msg) {
-        if (mCallback != null && mCallback.handleMessage(msg)) {
-            return;
+        if (msg.callback != null) {
+            handleCallback(msg);
+        } else {
+            if (mCallback != null) {
+                if (mCallback.handleMessage(msg)) {
+                    return;
+                }
+            }
+            handleMessage(msg);
         }
-        handleMessage(msg);
     }
 
-    /**
-     * post a runnable to the queue.
-     */
+    private static void handleCallback(Message message) {
+        message.callback.run();
+    }
+
     public final boolean post(Runnable r) {
-        return sendMessageDelayed(obtainMessage(0, r), 0);
+        return sendMessageDelayed(getPostMessage(r), 0);
     }
 
-    /**
-     * post a runnable to the queue with a delay.
-     */
     public final boolean postDelayed(Runnable r, long delayMillis) {
-        return sendMessageDelayed(obtainMessage(0, r), delayMillis);
+        return sendMessageDelayed(getPostMessage(r), delayMillis);
+    }
+
+    public final boolean postAtTime(Runnable r, long uptimeMillis) {
+        return sendMessageAtTime(getPostMessage(r), uptimeMillis);
+    }
+
+    public final boolean postAtFrontOfQueue(Runnable r) {
+        return sendMessageAtFrontOfQueue(getPostMessage(r));
+    }
+
+    private static Message getPostMessage(Runnable r) {
+        Message m = Message.obtain();
+        m.callback = r;
+        return m;
+    }
+
+    private static Message getPostMessage(Runnable r, Object token) {
+        Message m = Message.obtain();
+        m.obj = token;
+        m.callback = r;
+        return m;
     }
 
     /**
      * A message already addressed to this handler.
-     *
-     * The no-argument and (what) forms exist because sendToTarget() is only usable on a
-     * message that has a target, and these are where the target gets set — code that calls
-     * Message.obtain() directly and then sendToTarget() has nowhere to send it.
      */
     public final Message obtainMessage() {
         Message m = Message.obtain();
@@ -111,9 +132,6 @@ public class Handler {
         return m;
     }
 
-    /**
-     * takes a message with a runnable as obj.
-     */
     public final Message obtainMessage(int what, Object obj) {
         Message m = Message.obtain();
         m.target = this;
@@ -122,27 +140,75 @@ public class Handler {
         return m;
     }
 
-    /**
-     * send a message instantly.
-     */
     public final boolean sendMessage(Message msg) {
         return sendMessageDelayed(msg, 0);
     }
 
-    /**
-     * send a message with a delay.
-     */
-    public final boolean sendMessageDelayed(Message msg, long delayMillis) {
-        if (msg.target == null) {
-            msg.target = this;
-        }
-        return mQueue.enqueueMessage(msg, System.currentTimeMillis() + delayMillis);
+    public final boolean sendEmptyMessage(int what) {
+        return sendEmptyMessageDelayed(what, 0);
     }
 
-    /**
-     * remove any pending posts of runnable r.
-     */
+    public final boolean sendEmptyMessageDelayed(int what, long delayMillis) {
+        Message msg = Message.obtain();
+        msg.what = what;
+        return sendMessageDelayed(msg, delayMillis);
+    }
+
+    public final boolean sendEmptyMessageAtTime(int what, long uptimeMillis) {
+        Message msg = Message.obtain();
+        msg.what = what;
+        return sendMessageAtTime(msg, uptimeMillis);
+    }
+
+    public final boolean sendMessageDelayed(Message msg, long delayMillis) {
+        if (delayMillis < 0) {
+            delayMillis = 0;
+        }
+        return sendMessageAtTime(msg, SystemClock.uptimeMillis() + delayMillis);
+    }
+
+    public boolean sendMessageAtTime(Message msg, long uptimeMillis) {
+        MessageQueue queue = mQueue;
+        if (queue == null) {
+            return false;
+        }
+        return enqueueMessage(queue, msg, uptimeMillis);
+    }
+
+    public final boolean sendMessageAtFrontOfQueue(Message msg) {
+        MessageQueue queue = mQueue;
+        if (queue == null) {
+            return false;
+        }
+        return enqueueMessage(queue, msg, 0);
+    }
+
+    private boolean enqueueMessage(MessageQueue queue, Message msg, long uptimeMillis) {
+        msg.target = this;
+        return queue.enqueueMessage(msg, uptimeMillis);
+    }
+
     public final void removeCallbacks(Runnable r) {
-        // Minimal: no-op for now.
+        mQueue.removeCallbacks(this, r, null);
+    }
+
+    public final void removeCallbacks(Runnable r, Object token) {
+        mQueue.removeCallbacks(this, r, token);
+    }
+
+    public final void removeMessages(int what) {
+        mQueue.removeMessages(this, what, null);
+    }
+
+    public final void removeMessages(int what, Object object) {
+        mQueue.removeMessages(this, what, object);
+    }
+
+    public final void removeCallbacksAndMessages(Object token) {
+        mQueue.removeCallbacksAndMessages(this, token);
+    }
+
+    public final Looper getLooper() {
+        return mLooper;
     }
 }

@@ -1060,8 +1060,14 @@ extern "C" void kudroid_set_log_dir(const char* dir) {
 
     installCrashHandlers();
 
-    // Completely clear all old logs (android, stderr, breadcrumbs, crash, etc.) on app launch
-    kudroid_clear_all_logs();
+    // Write the build stamp to its own file so the running version can be checked
+    // without reading a log, which answers "is the iPhone still on the old build?".
+    const char* stamp = kudroid_build_stamp();
+    writeLogFile("kudroid_version.txt", std::string(stamp) + "\n");
+
+    // KuART's classes.log belongs with the other diagnostics, not in Documents.
+    std::string classesLogPath = (std::filesystem::path(g_logDir) / "classes.log").string();
+    kuart_set_missing_class_log_path(classesLogPath.c_str());
 }
 
 extern "C" void kudroid_clear_all_logs(void) {

@@ -530,64 +530,13 @@ public final class ActivityThread {
                 mInitialActivity.onResume();
                 mInitialActivity.onWindowFocusChanged(true);
 
-                // Activate asynchronous SurfaceHolder Callback cycle via Message Queue (Android standard)
+                // Dispatch surface lifecycle callbacks immediately and also post to main loop
+                dispatchSurfaceCallbacks(mInitialActivity);
                 if (mH != null) {
                     mH.post(new Runnable() {
                         @Override
                         public void run() {
-                            try {
-                                android.view.SurfaceView foundSv = findSurfaceView(mInitialActivity);
-                                if (foundSv != null) {
-                                    android.util.Log.i("ActivityThread", "Found SurfaceView in hierarchy -> dispatching surfaceCreated");
-                                    foundSv.dispatchSurfaceCreated();
-                                }
-
-                                int realW = 1080;
-                                int realH = 1920;
-                                try {
-                                    android.graphics.Canvas c = new android.graphics.Canvas();
-                                    if (c.getWidth() > 0 && c.getHeight() > 0) {
-                                        realW = c.getWidth();
-                                        realH = c.getHeight();
-                                    }
-                                } catch (Throwable ignored) {}
-
-                                int surfaceW = realW;
-                                int surfaceH = realH;
-                                int reqOri = mInitialActivity.getRequestedOrientation();
-
-                                if (reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE ||
-                                    reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE ||
-                                    reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE ||
-                                    reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE) {
-                                    surfaceW = Math.max(realW, realH);
-                                    surfaceH = Math.min(realW, realH);
-                                } else if (reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT ||
-                                           reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT ||
-                                           reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT ||
-                                           reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT) {
-                                    surfaceW = Math.min(realW, realH);
-                                    surfaceH = Math.max(realW, realH);
-                                }
-
-                                if (mInitialActivity instanceof android.view.SurfaceHolder.Callback) {
-                                    android.view.SurfaceHolder.Callback cb = (android.view.SurfaceHolder.Callback) mInitialActivity;
-                                    android.view.SurfaceHolder holder = (foundSv != null) ? foundSv.getHolder() :
-                                        (((Object) mInitialActivity instanceof android.view.SurfaceView) ?
-                                            ((android.view.SurfaceView) (Object) mInitialActivity).getHolder() :
-                                            new android.view.SurfaceView(mInitialActivity).getHolder());
-                                    android.util.Log.i("ActivityThread", "Activity implements SurfaceHolder.Callback -> dispatching surfaceCreated & surfaceChanged(" + surfaceW + "x" + surfaceH + ")");
-                                    cb.surfaceCreated(holder);
-                                    cb.surfaceChanged(holder, 0, surfaceW, surfaceH);
-                                    if (cb instanceof android.view.SurfaceHolder.Callback2) {
-                                        ((android.view.SurfaceHolder.Callback2) cb).surfaceRedrawNeeded(holder);
-                                    }
-                                }
-
-                                mInitialActivity.onWindowFocusChanged(true);
-                            } catch (Throwable st) {
-                                android.util.Log.e("ActivityThread", "NON-FATAL surface callback: " + st.toString());
-                            }
+                            dispatchSurfaceCallbacks(mInitialActivity);
                         }
                     });
                 }
@@ -639,6 +588,63 @@ public final class ActivityThread {
         // Start Android's Main Event Loop
         android.util.Log.i("ActivityThread", "Entering Looper.loop() main event loop...");
         android.os.Looper.loop();
+    }
+
+    private void dispatchSurfaceCallbacks(final Activity activity) {
+        if (activity == null) return;
+        try {
+            android.view.SurfaceView foundSv = findSurfaceView(activity);
+            if (foundSv != null) {
+                android.util.Log.i("ActivityThread", "Found SurfaceView in hierarchy -> dispatching surfaceCreated");
+                foundSv.dispatchSurfaceCreated();
+            }
+
+            int realW = 1080;
+            int realH = 1920;
+            try {
+                android.graphics.Canvas c = new android.graphics.Canvas();
+                if (c.getWidth() > 0 && c.getHeight() > 0) {
+                    realW = c.getWidth();
+                    realH = c.getHeight();
+                }
+            } catch (Throwable ignored) {}
+
+            int surfaceW = realW;
+            int surfaceH = realH;
+            int reqOri = activity.getRequestedOrientation();
+
+            if (reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE ||
+                reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE ||
+                reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE ||
+                reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE) {
+                surfaceW = Math.max(realW, realH);
+                surfaceH = Math.min(realW, realH);
+            } else if (reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT ||
+                       reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT ||
+                       reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT ||
+                       reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT) {
+                surfaceW = Math.min(realW, realH);
+                surfaceH = Math.max(realW, realH);
+            }
+
+            if (activity instanceof android.view.SurfaceHolder.Callback) {
+                android.view.SurfaceHolder.Callback cb = (android.view.SurfaceHolder.Callback) activity;
+                android.view.SurfaceHolder holder = (foundSv != null) ? foundSv.getHolder() :
+                    (((Object) activity instanceof android.view.SurfaceView) ?
+                        ((android.view.SurfaceView) (Object) activity).getHolder() :
+                        new android.view.SurfaceView(activity).getHolder());
+                android.util.Log.i("ActivityThread", "Activity implements SurfaceHolder.Callback -> dispatching surfaceCreated & surfaceChanged(" + surfaceW + "x" + surfaceH + ")");
+                cb.surfaceCreated(holder);
+                cb.surfaceChanged(holder, 0, surfaceW, surfaceH);
+                if (cb instanceof android.view.SurfaceHolder.Callback2) {
+                    ((android.view.SurfaceHolder.Callback2) cb).surfaceRedrawNeeded(holder);
+                }
+            }
+
+            activity.onWindowFocusChanged(true);
+        } catch (Throwable st) {
+            android.util.Log.e("ActivityThread", "NON-FATAL surface callback: " + st.toString());
+        }
     }
 
     private static android.view.SurfaceView findSurfaceView(Activity activity) {

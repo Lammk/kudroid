@@ -18,6 +18,10 @@ public final class Message {
     public Object obj;
     /** handler will handle this message. */
     public Handler target;
+    /** optional callback runnable executed on dispatch. */
+    public Runnable callback;
+    /** target delivery timestamp (milliseconds). */
+    public long when;
 
     private static final Object sPoolSync = new Object();
     private static Message sPool;
@@ -25,11 +29,12 @@ public final class Message {
     private static final int MAX_POOL_SIZE = 50;
 
     Message next; // package-private so MessageQueue can access it
+    boolean inUse = false;
 
-    private Message() {}
+    public Message() {}
 
     /**
-     * retrieves a message from the public group.
+     * retrieves a message from the public pool.
      */
     public static Message obtain() {
         synchronized (sPoolSync) {
@@ -37,6 +42,7 @@ public final class Message {
                 Message m = sPool;
                 sPool = m.next;
                 m.next = null;
+                m.inUse = false;
                 sPoolSize--;
                 return m;
             }
@@ -54,12 +60,62 @@ public final class Message {
     }
 
     /**
+     * retrieves a message with a destination handler and callback.
+     */
+    public static Message obtain(Handler h, Runnable callback) {
+        Message m = obtain();
+        m.target = h;
+        m.callback = callback;
+        return m;
+    }
+
+    /**
      * retrieves a message with a destination handler and what code.
      */
     public static Message obtain(Handler h, int what) {
         Message m = obtain();
         m.target = h;
         m.what = what;
+        return m;
+    }
+
+    public static Message obtain(Handler h, int what, Object obj) {
+        Message m = obtain();
+        m.target = h;
+        m.what = what;
+        m.obj = obj;
+        return m;
+    }
+
+    public static Message obtain(Handler h, int what, int arg1, int arg2) {
+        Message m = obtain();
+        m.target = h;
+        m.what = what;
+        m.arg1 = arg1;
+        m.arg2 = arg2;
+        return m;
+    }
+
+    public static Message obtain(Handler h, int what, int arg1, int arg2, Object obj) {
+        Message m = obtain();
+        m.target = h;
+        m.what = what;
+        m.arg1 = arg1;
+        m.arg2 = arg2;
+        m.obj = obj;
+        return m;
+    }
+
+    public static Message obtain(Message orig) {
+        Message m = obtain();
+        if (orig != null) {
+            m.what = orig.what;
+            m.arg1 = orig.arg1;
+            m.arg2 = orig.arg2;
+            m.obj = orig.obj;
+            m.target = orig.target;
+            m.callback = orig.callback;
+        }
         return m;
     }
 
@@ -93,8 +149,16 @@ public final class Message {
         return what;
     }
 
+    public Runnable getCallback() {
+        return callback;
+    }
+
+    public long getWhen() {
+        return when;
+    }
+
     /**
-     * return this message to the group.
+     * return this message to the pool.
      */
     public void recycle() {
         this.what = 0;
@@ -102,6 +166,9 @@ public final class Message {
         this.arg2 = 0;
         this.obj = null;
         this.target = null;
+        this.callback = null;
+        this.when = 0;
+        this.inUse = false;
         synchronized (sPoolSync) {
             if (sPoolSize < MAX_POOL_SIZE) {
                 this.next = sPool;
