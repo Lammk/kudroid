@@ -70,12 +70,21 @@ public class SurfaceView extends View implements SurfaceHolder.Callback2 {
             synchronized (mCallbacks) {
                 cbs = mCallbacks.toArray();
             }
+            int w = mView != null ? mView.getWidth() : 0;
+            int h = mView != null ? mView.getHeight() : 0;
+            if (w <= 0 || h <= 0) {
+                try {
+                    android.graphics.Canvas canvas = new android.graphics.Canvas();
+                    w = canvas.getWidth();
+                    h = canvas.getHeight();
+                } catch (Throwable ignored) {}
+            }
             for (Object obj : cbs) {
                 if (obj instanceof Callback) {
                     Callback cb = (Callback) obj;
                     try {
                         cb.surfaceCreated(this);
-                        cb.surfaceChanged(this, 0, 1080, 1920);
+                        cb.surfaceChanged(this, 0, w, h);
                         if (cb instanceof Callback2) {
                             ((Callback2) cb).surfaceRedrawNeeded(this);
                         }
@@ -111,9 +120,16 @@ public class SurfaceView extends View implements SurfaceHolder.Callback2 {
 
         @Override
         public Rect getSurfaceFrame() {
-            int w = mView != null ? mView.getWidth() : 1080;
-            int h = mView != null ? mView.getHeight() : 1920;
-            return new Rect(0, 0, w > 0 ? w : 1080, h > 0 ? h : 1920);
+            int w = mView != null ? mView.getWidth() : 0;
+            int h = mView != null ? mView.getHeight() : 0;
+            if (w <= 0 || h <= 0) {
+                try {
+                    android.graphics.Canvas canvas = new android.graphics.Canvas();
+                    w = canvas.getWidth();
+                    h = canvas.getHeight();
+                } catch (Throwable ignored) {}
+            }
+            return new Rect(0, 0, w, h);
         }
 
         @Override
