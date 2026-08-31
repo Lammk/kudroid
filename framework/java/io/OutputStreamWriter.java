@@ -9,6 +9,9 @@ public class OutputStreamWriter extends Writer {
     public OutputStreamWriter(OutputStream out, String charsetName) {
         this.out = out;
     }
+    public OutputStreamWriter(OutputStream out, java.nio.charset.Charset cs) {
+        this.out = out;
+    }
     public void write(char[] cbuf, int off, int len) throws IOException {
         if (out == null) return;
         byte[] b = new byte[len];

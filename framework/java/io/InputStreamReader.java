@@ -9,6 +9,9 @@ public class InputStreamReader extends Reader {
     public InputStreamReader(InputStream in, String charsetName) {
         this.in = in;
     }
+    public InputStreamReader(InputStream in, java.nio.charset.Charset cs) {
+        this.in = in;
+    }
     public int read(char[] cbuf, int off, int len) throws IOException {
         if (in == null) return -1;
         byte[] b = new byte[len];

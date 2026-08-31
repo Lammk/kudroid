@@ -34,6 +34,19 @@ public final class String implements CharSequence, Comparable<String> {
         initBytes(bytes, 0, bytes.length);
     }
 
+    public String(byte[] bytes, java.nio.charset.Charset charset) {
+        initBytes(bytes, 0, bytes.length);
+    }
+
+    public String(byte[] bytes, int offset, int length, java.nio.charset.Charset charset) {
+        initBytes(bytes, offset, length);
+    }
+
+    public int compareToIgnoreCase(String str) {
+        if (str == null) return 1;
+        return toLowerCase().compareTo(str.toLowerCase());
+    }
+
     private native void initEmpty();
 
     private native void initCopy(String other);
