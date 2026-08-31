@@ -28,23 +28,37 @@ public class ConnectivityManager {
     public LinkProperties getLinkProperties(Network network) { return new LinkProperties(); }
     public Network[] getAllNetworks() { return new Network[]{ new Network() }; }
 
-    public void registerDefaultNetworkCallback(NetworkCallback networkCallback) {
-        if (networkCallback != null) {
-            mCallbacks.add(networkCallback);
-            Network net = getActiveNetwork();
-            networkCallback.onAvailable(net);
-            networkCallback.onCapabilitiesChanged(net, getNetworkCapabilities(net));
-            networkCallback.onLinkPropertiesChanged(net, getLinkProperties(net));
+    public void registerDefaultNetworkCallback(final NetworkCallback networkCallback) {
+        registerDefaultNetworkCallback(networkCallback, null);
+    }
+    public void registerDefaultNetworkCallback(final NetworkCallback networkCallback, final Handler handler) {
+        if (networkCallback == null) return;
+        mCallbacks.add(networkCallback);
+        Runnable r = new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Network net = getActiveNetwork();
+                    networkCallback.onAvailable(net);
+                    networkCallback.onCapabilitiesChanged(net, getNetworkCapabilities(net));
+                    networkCallback.onLinkPropertiesChanged(net, getLinkProperties(net));
+                } catch (Throwable ignored) {}
+            }
+        };
+        if (handler != null) {
+            handler.post(r);
+        } else {
+            android.os.Looper looper = android.os.Looper.getMainLooper();
+            if (looper != null) {
+                new Handler(looper).post(r);
+            }
         }
     }
-    public void registerDefaultNetworkCallback(NetworkCallback networkCallback, Handler handler) {
-        registerDefaultNetworkCallback(networkCallback);
-    }
     public void registerNetworkCallback(NetworkRequest request, NetworkCallback networkCallback) {
-        registerDefaultNetworkCallback(networkCallback);
+        registerDefaultNetworkCallback(networkCallback, null);
     }
     public void registerNetworkCallback(NetworkRequest request, NetworkCallback networkCallback, Handler handler) {
-        registerDefaultNetworkCallback(networkCallback);
+        registerDefaultNetworkCallback(networkCallback, handler);
     }
     public void unregisterNetworkCallback(NetworkCallback networkCallback) {
         if (networkCallback != null) mCallbacks.remove(networkCallback);

@@ -275,6 +275,18 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
         return result;
     }
 
+    // Minecraft's NetworkMonitor.nativeUpdateNetworkStatus blocks synchronously
+    // waiting for the native game engine thread to acknowledge network state.
+    // However, the native engine in android_main is waiting for APP_CMD_INIT_WINDOW
+    // (surfaceCreated) before starting its loop, creating a circular deadlock between
+    // onCreate and android_main. Returning immediately allows onCreate to complete
+    // and dispatch surfaceCreated to the native window.
+    if (std::strcmp(method_name, "nativeUpdateNetworkStatus") == 0) {
+        KLOGV("KuARTNative", "bypassing nativeUpdateNetworkStatus -> returning immediately to prevent onCreate circular deadlock");
+        native_call_exit();
+        return result;
+    }
+
     // The first parameter after env is receiver (instance) or jclass (static).
     void* self;
     size_t first = 0;
