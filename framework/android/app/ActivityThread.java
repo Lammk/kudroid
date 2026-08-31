@@ -542,15 +542,27 @@ public final class ActivityThread {
                                     foundSv.dispatchSurfaceCreated();
                                 }
 
+                                int surfaceW = 1920;
+                                int surfaceH = 1080;
+                                int reqOri = mInitialActivity.getRequestedOrientation();
+                                if (reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT ||
+                                    reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT) {
+                                    surfaceW = 1080;
+                                    surfaceH = 1920;
+                                } else {
+                                    // Default to Landscape for full-screen games
+                                    mInitialActivity.setRequestedOrientation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
+                                }
+
                                 if (mInitialActivity instanceof android.view.SurfaceHolder.Callback) {
                                     android.view.SurfaceHolder.Callback cb = (android.view.SurfaceHolder.Callback) mInitialActivity;
                                     android.view.SurfaceHolder holder = (foundSv != null) ? foundSv.getHolder() :
                                         (((Object) mInitialActivity instanceof android.view.SurfaceView) ?
                                             ((android.view.SurfaceView) (Object) mInitialActivity).getHolder() :
                                             new android.view.SurfaceView(mInitialActivity).getHolder());
-                                    android.util.Log.i("ActivityThread", "Activity implements SurfaceHolder.Callback -> dispatching surfaceCreated & surfaceChanged");
+                                    android.util.Log.i("ActivityThread", "Activity implements SurfaceHolder.Callback -> dispatching surfaceCreated & surfaceChanged(" + surfaceW + "x" + surfaceH + ")");
                                     cb.surfaceCreated(holder);
-                                    cb.surfaceChanged(holder, 0, 1080, 1920);
+                                    cb.surfaceChanged(holder, 0, surfaceW, surfaceH);
                                     if (cb instanceof android.view.SurfaceHolder.Callback2) {
                                         ((android.view.SurfaceHolder.Callback2) cb).surfaceRedrawNeeded(holder);
                                     }

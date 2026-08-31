@@ -101,9 +101,24 @@ class GlobalMetalView: UIView {
     }
 }
 
+class AppDelegate: NSObject, UIApplicationDelegate {
+    static var orientationLock = UIInterfaceOrientationMask.all
+
+    func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
+        let req = kudroid_get_requested_orientation()
+        if req == 0 || req == 6 || req == 8 {
+            return .landscape
+        } else if req == 1 || req == 7 || req == 9 {
+            return .portrait
+        }
+        return AppDelegate.orientationLock
+    }
+}
+
 @main
 @available(iOS 15.0, *)
 struct KuDroidApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var session = AppSession()
 
     init() {
