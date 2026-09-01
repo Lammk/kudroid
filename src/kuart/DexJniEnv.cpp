@@ -287,6 +287,16 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
         return result;
     }
 
+    // Xbox HttpClient NetworkObserver.Log is a pure diagnostic log callback from Java
+    // to libHttpClient.Android.so. Inside libHttpClient, calling this on the main thread
+    // blocks on an uninitialized internal logging sink or mutex before HttpClient is initialized.
+    // Returning immediately avoids this hang.
+    if (std::strcmp(method_name, "Log") == 0 && std::strstr(owner, "NetworkObserver") != nullptr) {
+        KLOGV("KuARTNative", "bypassing NetworkObserver.Log -> returning immediately");
+        native_call_exit();
+        return result;
+    }
+
     // The first parameter after env is receiver (instance) or jclass (static).
     void* self;
     size_t first = 0;

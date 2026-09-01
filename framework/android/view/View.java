@@ -198,6 +198,13 @@ public class View {
         return null;
     }
 
+    public View getRootView() {
+        if (mParent instanceof View) {
+            return ((View) mParent).getRootView();
+        }
+        return this;
+    }
+
     /**
      * returns the left position of the view.
      */
@@ -514,7 +521,7 @@ public class View {
      * ViewTreeObserver of this view tree (shared with parent if attached).
      */
     public ViewTreeObserver getViewTreeObserver() {
-        if (mParent != null) return mParent.getViewTreeObserver();
+        if (mParent instanceof View) return ((View) mParent).getViewTreeObserver();
         if (mViewTreeObserver == null) mViewTreeObserver = new ViewTreeObserver();
         return mViewTreeObserver;
     }
