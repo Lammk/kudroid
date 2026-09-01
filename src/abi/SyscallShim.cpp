@@ -2401,30 +2401,83 @@ extern "C" int bionic_futex(uint32_t *uaddr, int futex_op, uint32_t val, const s
         }
 
         if (timeout) {
-            // Linux timeout l TUYT I: CLOCK_MONOTONIC (FUTEX_WAIT) hoc
-            // CLOCK_REALTIME (c c FUTEX_CLOCK_REALTIME). Tnh phn cn li.
+            // FUTEX_WAIT takes a RELATIVE timeout. FUTEX_WAIT_BITSET takes an
+            // ABSOLUTE deadline. This treated BOTH as absolute, and the difference is
+            // not subtle on a device that has been up for a while.
+            //
+            // Unity's asset threads pass FUTEX_WAIT (op=128 = FUTEX_WAIT |
+            // FUTEX_PRIVATE_FLAG) with a small relative timeout — tens of
+            // milliseconds, so tv_sec is 0. Subtracting CLOCK_MONOTONIC from that
+            // gave remSec = 0 - 528730 on a phone six days into its uptime, so every
+            // wait returned ETIMEDOUT before waiting at all and the guest spun
+            // instead of progressing. When tv_sec was large enough to survive the
+            // subtraction the other branch ran and the 24h cap parked the thread for
+            // a day. Either way AssetGarbageCollectorHelper never came back, and the
+            // log ended on the prctl that named it.
+            const bool absolute = (cmd == FUTEX_WAIT_BITSET);
+
+            // The clock only matters for an absolute deadline. FUTEX_CLOCK_REALTIME
+            // selects CLOCK_REALTIME; without it the deadline is CLOCK_MONOTONIC.
             const bool realtime = (futex_op & FUTEX_CLOCK_REALTIME) != 0;
-            struct timespec now;
-            ::clock_gettime(realtime ? CLOCK_REALTIME : CLOCK_MONOTONIC, &now);
-            int64_t remSec = int64_t(timeout->tv_sec) - int64_t(now.tv_sec);
-            int64_t remNs  = int64_t(timeout->tv_nsec) - int64_t(now.tv_nsec);
-            if (remNs < 0) { remSec -= 1; remNs += 1000000000; }
-            if (remSec < 0) {
-                qLock.unlock();
-                futex_leave(uaddr, q);
-                errno = ETIMEDOUT;
-                return -1;
-            }
-            if (remSec > 86400) remSec = 86400; // cap 24h trnh overflow duration
-            const auto duration = std::chrono::seconds(remSec) +
-                                  std::chrono::nanoseconds(remNs);
+            const clockid_t deadline_clock = realtime ? CLOCK_REALTIME : CLOCK_MONOTONIC;
+
             const BlockingWaitScope tracked(WaitKind::kFutexTimed, uaddr,
                                             __builtin_return_address(0));
-            if (q->cv.wait_for(qLock, duration) == std::cv_status::timeout) {
-                qLock.unlock();
-                futex_leave(uaddr, q);
-                errno = ETIMEDOUT;
-                return -1;
+
+            if (!absolute) {
+                // Relative: wait exactly as long as asked. A negative or absurd value
+                // is rejected the way the kernel does rather than being clamped into a
+                // long sleep.
+                if (timeout->tv_sec < 0 || timeout->tv_nsec < 0 ||
+                    timeout->tv_nsec >= 1000000000) {
+                    qLock.unlock();
+                    futex_leave(uaddr, q);
+                    errno = EINVAL;
+                    return -1;
+                }
+                const auto duration = std::chrono::seconds(timeout->tv_sec) +
+                                      std::chrono::nanoseconds(timeout->tv_nsec);
+                if (q->cv.wait_for(qLock, duration) == std::cv_status::timeout) {
+                    qLock.unlock();
+                    futex_leave(uaddr, q);
+                    errno = ETIMEDOUT;
+                    return -1;
+                }
+            } else {
+                // Absolute: re-derive the remaining time on every pass. Waiting on a
+                // capped slice and looping keeps a far-future deadline from either
+                // overflowing the duration or being silently shortened to the cap —
+                // the previous code turned a distant deadline into a 24-hour sleep and
+                // then reported a timeout that had not happened.
+                for (;;) {
+                    struct timespec now;
+                    ::clock_gettime(deadline_clock, &now);
+                    int64_t remSec = int64_t(timeout->tv_sec) - int64_t(now.tv_sec);
+                    int64_t remNs = int64_t(timeout->tv_nsec) - int64_t(now.tv_nsec);
+                    if (remNs < 0) { remSec -= 1; remNs += 1000000000; }
+                    if (remSec < 0) {
+                        qLock.unlock();
+                        futex_leave(uaddr, q);
+                        errno = ETIMEDOUT;
+                        return -1;
+                    }
+                    int64_t sliceSec = remSec;
+                    int64_t sliceNs = remNs;
+                    const bool partial = sliceSec > 86400;
+                    if (partial) { sliceSec = 86400; sliceNs = 0; }
+                    const auto duration = std::chrono::seconds(sliceSec) +
+                                          std::chrono::nanoseconds(sliceNs);
+                    if (q->cv.wait_for(qLock, duration) != std::cv_status::timeout) {
+                        break;  // woken (or spurious — the guest re-checks *uaddr)
+                    }
+                    if (!partial) {
+                        qLock.unlock();
+                        futex_leave(uaddr, q);
+                        errno = ETIMEDOUT;
+                        return -1;
+                    }
+                    // A slice expired but the deadline has not: keep waiting.
+                }
             }
         } else {
             // No timeout: this returns only when someone wakes it. If the wake never

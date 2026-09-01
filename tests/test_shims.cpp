@@ -100,7 +100,9 @@ struct android_sigaction {
 #define FUTEX_WAIT           0
 #define FUTEX_WAKE           1
 #define FUTEX_CMP_REQUEUE    4
+#define FUTEX_WAIT_BITSET    9
 #define FUTEX_PRIVATE_FLAG   128
+#define FUTEX_CLOCK_REALTIME 256
 #define MREMAP_MAYMOVE 1
 
 // Guest-visible sa_flags are ALWAYS Linux values (asm-generic/signal.h) — the
@@ -224,12 +226,147 @@ static void test_futex_eagain() {
 }
 
 static void test_futex_etimedout() {
-    std::printf("[futex] WAIT with past absolute timeout -> ETIMEDOUT\n");
+    std::printf("[futex] WAIT with a tiny relative timeout -> ETIMEDOUT\n");
     uint32_t word = 0;
-    struct timespec past = {0, 0}; // 1970-01-01, way in the past
+    // FUTEX_WAIT's timeout is RELATIVE, so this asks for 20ms and must time out
+    // after roughly that long.
+    struct timespec relative = {0, 20 * 1000 * 1000};
     errno = 0;
-    int r = bionic_futex(&word, FUTEX_WAIT, 0, &past, nullptr, 0);
+    const auto t0 = std::chrono::steady_clock::now();
+    int r = bionic_futex(&word, FUTEX_WAIT, 0, &relative, nullptr, 0);
+    const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - t0).count();
     CHECK(r == -1 && errno == ETIMEDOUT, "returns -1/ETIMEDOUT");
+    CHECK(waited >= 15, "after actually waiting for the requested interval");
+}
+
+// ─── futex timeout semantics: relative vs absolute ───────────────────────────
+//
+// FUTEX_WAIT takes a RELATIVE timeout; FUTEX_WAIT_BITSET takes an ABSOLUTE
+// deadline. The shim treated both as absolute, subtracting CLOCK_MONOTONIC from
+// whatever the guest passed.
+//
+// On a device that has been up a while that is catastrophic rather than merely
+// wrong. Unity's asset threads call FUTEX_WAIT (op=128) with a few tens of
+// milliseconds, so tv_sec is 0; on a phone six days into its uptime the
+// subtraction produced 0 - 528730 and every wait returned ETIMEDOUT without
+// waiting, so the guest spun in place. ULTRAKILL's AssetGarbageCollectorHelper
+// never got past the prctl that named it, and the log ended there.
+//
+// The host clock is nowhere near zero either, which is what makes these tests able
+// to tell the two interpretations apart at all: a relative 30ms read as an absolute
+// deadline is always in the past.
+
+static void test_futex_wait_timeout_is_relative() {
+    std::printf("[futex] FUTEX_WAIT treats its timeout as relative, not absolute\n");
+
+    uint32_t word = 0;
+    // A wake arrives well within the timeout. Read as an absolute deadline this
+    // would expire instantly and report ETIMEDOUT before the waker ever ran.
+    struct timespec relative = {5, 0};  // 5 seconds, relative
+
+    std::atomic<int> result{-999};
+    std::atomic<int> saved_errno{0};
+    std::thread waiter([&] {
+        errno = 0;
+        result = bionic_futex(&word, FUTEX_WAIT, 0, &relative, nullptr, 0);
+        saved_errno = errno;
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    CHECK(result.load() == -999,
+          "the waiter is still parked 80ms in — an absolute reading would already have "
+          "returned ETIMEDOUT, which is what made Unity spin");
+
+    word = 1;
+    bionic_futex(&word, FUTEX_WAKE, 1, nullptr, nullptr, 0);
+    waiter.join();
+    CHECK(result.load() == 0, "the wake was received and the wait succeeded");
+    CHECK(saved_errno.load() != ETIMEDOUT, "and it was not reported as a timeout");
+}
+
+static void test_futex_wait_relative_zero_does_not_hang() {
+    std::printf("[futex] a zero relative timeout expires at once\n");
+    uint32_t word = 0;
+    struct timespec zero = {0, 0};
+    errno = 0;
+    const auto t0 = std::chrono::steady_clock::now();
+    const int r = bionic_futex(&word, FUTEX_WAIT, 0, &zero, nullptr, 0);
+    const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - t0).count();
+    CHECK(r == -1 && errno == ETIMEDOUT, "a zero timeout is ETIMEDOUT");
+    CHECK(waited < 500, "and returns promptly rather than sleeping");
+}
+
+static void test_futex_wait_rejects_malformed_relative_timeout() {
+    std::printf("[futex] a malformed relative timeout is EINVAL\n");
+    uint32_t word = 0;
+    struct timespec negative = {-1, 0};
+    errno = 0;
+    CHECK(bionic_futex(&word, FUTEX_WAIT, 0, &negative, nullptr, 0) == -1 &&
+              errno == EINVAL,
+          "a negative timeout is rejected, not clamped into a long sleep");
+
+    struct timespec overflow_ns = {0, 1000000000};
+    errno = 0;
+    CHECK(bionic_futex(&word, FUTEX_WAIT, 0, &overflow_ns, nullptr, 0) == -1 &&
+              errno == EINVAL,
+          "tv_nsec >= 1e9 is rejected");
+}
+
+static void test_futex_wait_bitset_timeout_is_absolute() {
+    std::printf("[futex] FUTEX_WAIT_BITSET treats its timeout as an absolute deadline\n");
+
+    uint32_t word = 0;
+
+    // A deadline in the past must expire immediately. Read as relative, {0,0} would
+    // also expire at once — so use a deadline that is clearly past but non-zero, and
+    // pair it with the future-deadline check below, which the two readings cannot
+    // both satisfy.
+    struct timespec past;
+    ::clock_gettime(CLOCK_MONOTONIC, &past);
+    past.tv_sec -= 10;
+    errno = 0;
+    CHECK(bionic_futex(&word, FUTEX_WAIT_BITSET, 0, &past, nullptr, ~0u) == -1 &&
+              errno == ETIMEDOUT,
+          "a deadline ten seconds in the past is ETIMEDOUT");
+
+    // A deadline 60ms in the future must wait about that long. Read as relative this
+    // would be the host's whole uptime — an effectively infinite sleep.
+    struct timespec soon;
+    ::clock_gettime(CLOCK_MONOTONIC, &soon);
+    soon.tv_nsec += 60 * 1000 * 1000;
+    if (soon.tv_nsec >= 1000000000) { soon.tv_sec += 1; soon.tv_nsec -= 1000000000; }
+    errno = 0;
+    const auto t0 = std::chrono::steady_clock::now();
+    const int r = bionic_futex(&word, FUTEX_WAIT_BITSET, 0, &soon, nullptr, ~0u);
+    const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - t0).count();
+    CHECK(r == -1 && errno == ETIMEDOUT, "a near-future deadline times out");
+    CHECK(waited >= 40 && waited < 3000,
+          "after waiting for the deadline rather than for the host's uptime");
+}
+
+static void test_futex_wait_bitset_absolute_wake_still_works() {
+    std::printf("[futex] an absolute deadline still yields to a wake\n");
+
+    uint32_t word = 0;
+    struct timespec deadline;
+    ::clock_gettime(CLOCK_MONOTONIC, &deadline);
+    deadline.tv_sec += 30;  // far enough out that only a wake can end this
+
+    std::atomic<int> result{-999};
+    std::thread waiter([&] {
+        result = bionic_futex(&word, FUTEX_WAIT_BITSET, 0, &deadline, nullptr, ~0u);
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    CHECK(result.load() == -999, "still waiting on a 30-second deadline");
+
+    word = 1;
+    bionic_futex(&word, FUTEX_WAKE, 1, nullptr, nullptr, 0);
+    waiter.join();
+    CHECK(result.load() == 0, "the wake ended the wait early");
 }
 
 static void test_futex_cmp_requeue_precond() {
@@ -1240,6 +1377,11 @@ int main() {
     test_futex_wait_wake();
     test_futex_eagain();
     test_futex_etimedout();
+    test_futex_wait_timeout_is_relative();
+    test_futex_wait_relative_zero_does_not_hang();
+    test_futex_wait_rejects_malformed_relative_timeout();
+    test_futex_wait_bitset_timeout_is_absolute();
+    test_futex_wait_bitset_absolute_wake_still_works();
     test_futex_cmp_requeue_precond();
     test_futex_wait_wake_cycles();
     test_syscall_mappings();
