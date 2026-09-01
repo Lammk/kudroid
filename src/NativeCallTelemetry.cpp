@@ -9,6 +9,7 @@
 #include <functional>
 
 #include "kudroid/Log.h"
+#include "kudroid/abi/BlockingWaitRegistry.h"
 #include "kudroid/platform/MemoryInfo.h"
 
 extern "C" void kudroid_persistent_breadcrumb(const char* line);
@@ -54,6 +55,20 @@ uint64_t now_ns() {
 void watchdog_main() {
     while (g_call.started.load(std::memory_order_acquire)) {
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
+
+        // Name any thread parked on a blocking wait for too long.
+        //
+        // This runs before the progress check below and independently of it: a stuck
+        // thread is worth reporting whether or not a native or Java call happens to be
+        // in flight on some other thread. Three seconds is long enough that no real
+        // handshake, asset load or lock convoy trips it, and short enough to appear
+        // well before a user gives up and force-quits.
+        //
+        // This is the line that was missing when ULTRAKILL stopped inside
+        // nativeRender: the log simply ended, because a wait is the one thing the
+        // shims did not record.
+        blocking_wait_report_stalled(/*threshold_ms=*/3000);
+
         const bool native_active = g_call.active_count.load(std::memory_order_acquire) != 0;
         const bool java_active = g_call.java_active_count.load(std::memory_order_acquire) != 0;
 

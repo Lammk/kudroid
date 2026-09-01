@@ -47,6 +47,7 @@ add_library(kudroid_core STATIC
     src/platform/GraphicsShim.cpp
     src/abi/SyscallShim.cpp
     src/abi/GuestVarargs.cpp
+    src/abi/BlockingWaitRegistry.cpp
     src/platform/AssetShim.cpp
     src/platform/BundledFramework.cpp
     src/platform/JavaCanvasRenderer.cpp
@@ -223,6 +224,18 @@ else()
         )
         target_link_libraries(test_metal_layer_rebind PRIVATE kudroid_core)
         target_include_directories(test_metal_layer_rebind PRIVATE include)
+    endif()
+
+    # A guest thread parked forever must appear in the log. Every wait the shims
+    # expose is checked THROUGH the shim, not just against the registry: a wait that
+    # is trackable but not wired up would pass a registry-only test and still leave
+    # the next hang invisible, which is what happened with ULTRAKILL.
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_blocking_wait.cpp")
+        add_executable(test_blocking_wait
+            tests/test_blocking_wait.cpp
+        )
+        target_link_libraries(test_blocking_wait PRIVATE kudroid_core)
+        target_include_directories(test_blocking_wait PRIVATE include)
     endif()
 
     # Device memory figures: apps size caches from them, so they must be real,

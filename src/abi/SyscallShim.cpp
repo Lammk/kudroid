@@ -1,6 +1,7 @@
 #include "kudroid/BionicShim.h"
 #include "kudroid/abi/SyscallShim.h"
 #include "kudroid/abi/GuestVarargs.h"
+#include "kudroid/abi/BlockingWaitRegistry.h"
 #include "kudroid/elf_loader.hpp"
 #include "kudroid/DeviceProfile.h"
 #include "kudroid/platform/BundledFramework.h"
@@ -579,7 +580,13 @@ extern "C" int bionic_pthread_mutex_lock(void* guestMutex) {
         }
     }
 
-    const int rc = ::pthread_mutex_lock(&host->mutex);
+    const int rc = [&] {
+        // Tracked: a mutex whose holder never releases it parks this thread forever,
+        // and nothing else in the log would say so.
+        const BlockingWaitScope tracked(WaitKind::kMutex, guestMutex,
+                                        __builtin_return_address(0));
+        return ::pthread_mutex_lock(&host->mutex);
+    }();
     if (rc == 0 && host->track_owner) {
         host->owner.store(current_thread_id(), std::memory_order_relaxed);
     } else if (rc == EDEADLK) {
@@ -621,7 +628,11 @@ extern "C" int bionic_pthread_cond_wait(void* cond, void* mutex) {
     const bool track = host->track_owner;
     if (track) host->owner.store(0, std::memory_order_relaxed);
     sync_diag("cond-wait-enter", cond, mutex, 0);
-    const int result = ::pthread_cond_wait(hostCond, &host->mutex);
+    const int result = [&] {
+        const BlockingWaitScope tracked(WaitKind::kCondition, cond,
+                                        __builtin_return_address(0));
+        return ::pthread_cond_wait(hostCond, &host->mutex);
+    }();
     sync_diag("cond-wait-return", cond, mutex, result);
     if (track && result == 0) host->owner.store(current_thread_id(), std::memory_order_relaxed);
     return result;
@@ -633,7 +644,11 @@ extern "C" int bionic_pthread_cond_timedwait(void* cond, void* mutex, const stru
     const bool track = host->track_owner;
     if (track) host->owner.store(0, std::memory_order_relaxed);
     sync_diag("cond-timedwait-enter", cond, mutex, 0);
-    const int result = ::pthread_cond_timedwait(hostCond, &host->mutex, abstime);
+    const int result = [&] {
+        const BlockingWaitScope tracked(WaitKind::kConditionTimed, cond,
+                                        __builtin_return_address(0));
+        return ::pthread_cond_timedwait(hostCond, &host->mutex, abstime);
+    }();
     sync_diag("cond-timedwait-return", cond, mutex, result);
     // The mutex is reacquired on timeout too, so ownership is restored either way.
     if (track) host->owner.store(current_thread_id(), std::memory_order_relaxed);
@@ -1350,10 +1365,16 @@ extern "C" int bionic_futex(uint32_t* uaddr, int futex_op, uint32_t val,
 extern "C" bool kudroid_lookup_guest_module(void* addr, char* out, std::size_t outSize);
 #endif
 
-// DIAG gate: log_guard_acquire_diag + futex diag ch run khi iu tra (env
+// DIAG gate: log_guard_acquire_diag + TLS diag ch run khi iu tra (env
 // KUDROID_GUARD_DIAG=1). Mc nh TT — frame-walk mi gettid + lookup module
 // l chi ph runtime tht trn mi guard_acquire, no/not cn gi tr khi fix
 // guard hot ng.
+//
+// The futex diagnostic USED to sit behind this too, and that was a mistake: no
+// environment variable is set on iOS, so the one record of a guest parking on a
+// futex had never run on the platform it was written for. It is unconditional now
+// and bounded instead (16 distinct futex words for the life of the process). The
+// remaining users are genuinely per-call expensive, so they stay gated.
 static bool guard_diag_enabled() {
     static const int enabled = []() {
         const char* v = std::getenv("KUDROID_GUARD_DIAG");
@@ -1370,17 +1391,35 @@ static long emulate_futex_direct(uintptr_t arg1, uintptr_t arg2, uintptr_t arg3,
     uint32_t* uaddr2 = reinterpret_cast<uint32_t*>(arg5);
     const uint32_t val3 = static_cast<uint32_t>(arg6);
 #if defined(__aarch64__)
-    if (guard_diag_enabled()) {
+    // Not gated behind KUDROID_GUARD_DIAG any more.
+    //
+    // That gate reads an environment variable, and nothing sets it on iOS — so this
+    // diagnostic had never once run on the platform it was written for. A guest that
+    // parks on a futex forever left no trace at all, which cost three rounds of
+    // guessing at a hang in ULTRAKILL.
+    //
+    // Leaving it on is affordable because it is capped at 16 DISTINCT futex words for
+    // the life of the process: the cost is bounded no matter how hot the futex path
+    // gets, and it is the first wait a guest performs, so those 16 are the
+    // interesting ones.
+    {
         const int cmd = futex_op & 127;
         if (cmd == 0 /* FUTEX_WAIT */ || cmd == 9 /* FUTEX_WAIT_BITSET */) {
+            static std::mutex s_seenMtx;
             static void* s_seen[16];
             static int s_seenN = 0;
             bool dup = false;
-            for (int i = 0; i < s_seenN; ++i) {
-                if (s_seen[i] == uaddr) { dup = true; break; }
+            {
+                // Guarded: this used to race, and two threads entering an unseen
+                // futex at once could both write s_seen[s_seenN] and lose one.
+                std::lock_guard<std::mutex> lock(s_seenMtx);
+                for (int i = 0; i < s_seenN; ++i) {
+                    if (s_seen[i] == uaddr) { dup = true; break; }
+                }
+                if (!dup && s_seenN < 16) s_seen[s_seenN++] = uaddr;
+                else dup = true;  // table full: stop logging rather than grow
             }
-            if (!dup && s_seenN < 16) {
-                s_seen[s_seenN++] = uaddr;
+            if (!dup) {
                 char mod[256] = {0};
                 kudroid_lookup_guest_module(uaddr, mod, sizeof(mod));
                 char msg[320];
@@ -2379,6 +2418,8 @@ extern "C" int bionic_futex(uint32_t *uaddr, int futex_op, uint32_t val, const s
             if (remSec > 86400) remSec = 86400; // cap 24h trnh overflow duration
             const auto duration = std::chrono::seconds(remSec) +
                                   std::chrono::nanoseconds(remNs);
+            const BlockingWaitScope tracked(WaitKind::kFutexTimed, uaddr,
+                                            __builtin_return_address(0));
             if (q->cv.wait_for(qLock, duration) == std::cv_status::timeout) {
                 qLock.unlock();
                 futex_leave(uaddr, q);
@@ -2386,6 +2427,11 @@ extern "C" int bionic_futex(uint32_t *uaddr, int futex_op, uint32_t val, const s
                 return -1;
             }
         } else {
+            // No timeout: this returns only when someone wakes it. If the wake never
+            // comes the thread is parked for the life of the process, which is what
+            // the registry exists to make visible.
+            const BlockingWaitScope tracked(WaitKind::kFutex, uaddr,
+                                            __builtin_return_address(0));
             q->cv.wait(qLock);
         }
         qLock.unlock();
@@ -4564,7 +4610,14 @@ extern "C" int bionic_sem_wait(sem_t* sem) {
     }
     auto s = guest_sem_find(sem, /*create=*/true);
     std::unique_lock<std::mutex> lock(s->mtx);
-    s->cv.wait(lock, [&s] { return s->value > 0 || s->destroyed; });
+    {
+        // A handshake whose post never arrives parks this thread for good. This is
+        // where Unity's helper threads wait, so it is the first thing worth naming
+        // when a launch stops making progress.
+        const BlockingWaitScope tracked(WaitKind::kSemaphore, sem,
+                                        __builtin_return_address(0));
+        s->cv.wait(lock, [&s] { return s->value > 0 || s->destroyed; });
+    }
     if (s->destroyed) {
         errno = EINVAL;
         return -1;
@@ -4652,6 +4705,8 @@ extern "C" int bionic_sem_timedwait(sem_t* sem, const struct timespec* abs_timeo
         if (remSec > 86400) remSec = 86400;  // cap so the duration cannot overflow
         const auto duration =
             std::chrono::seconds(remSec) + std::chrono::nanoseconds(remNs);
+        const BlockingWaitScope tracked(WaitKind::kSemaphoreTimed, sem,
+                                        __builtin_return_address(0));
         if (!s->cv.wait_for(lock, duration, ready)) {
             errno = ETIMEDOUT;
             return -1;

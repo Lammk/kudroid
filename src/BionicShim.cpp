@@ -195,6 +195,13 @@ void* resolve_bionic_symbol(const char* name) {
             resolved = reinterpret_cast<void*>(&::stdin);
             is_host = true;
         }
+        // __sF deliberately has no special case. It is bionic's array of the three
+        // standard FILE objects, and a guest reaches the streams as &__sF[0..2].
+        // Darwin declares the same array with the same meaning, so the dlsym above
+        // already binds it to real host streams — which is what the guest's
+        // (host-backed) fwrite/fprintf need. Substituting our own array would only
+        // help if the guest read FILE fields directly, and would break the common
+        // case of passing the pointer straight to host stdio.
 
         if (!resolved) {
             char msg[256];
