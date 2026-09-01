@@ -123,6 +123,9 @@ private:
     // the file. Called once, before the file mapping is released.
     void buildSymbolIndex();
 
+    // Apply final W^X safe segment protections after relocations have completed.
+    bool applyProtections();
+
     std::string          path_;
     void*                base_     = nullptr;
     // The base of the original mmap region (before base_ is adjusted by -minVaddr),

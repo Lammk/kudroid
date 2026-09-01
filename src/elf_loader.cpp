@@ -670,74 +670,6 @@ bool ElfLoader::map() {
         }
     }
 
-#if defined(__APPLE__) && TARGET_OS_OSX
-    if (usedMapJit) pthread_jit_write_protect_np(1);
-#endif
-
-    // arm64 has a separate i/d buffer: newly written code must be flushed from
-    // The old data cache and command cache must be disabled, otherwise cpu
-    // will execute garbage and the process will crash (sigill/sigbus) with no logs.
-    char* mapStart = static_cast<char*>(base_);
-#if defined(__APPLE__)
-    sys_icache_invalidate(mapStart, totalSize);
-#else
-    __builtin___clear_cache(mapStart, mapStart + totalSize);
-#endif
-
-    const size_t numPages = totalSize / pageSize;
-    std::vector<int> pageProts(numPages, 0);
-
-    for (const auto& seg : segments_) {
-        const uint64_t segmentStart = seg.vaddr - minVaddr;
-        const uint64_t segmentEnd = segmentStart + seg.memsz;
-        
-        int segmentProt = 0;
-        if (seg.flags & 4) segmentProt |= PROT_READ;
-        if (seg.flags & 2) segmentProt |= PROT_WRITE;
-        if (seg.flags & 1) segmentProt |= PROT_EXEC;
-
-        size_t startPage = segmentStart / pageSize;
-        size_t endPage = (segmentEnd + pageSize - 1) / pageSize;
-        for (size_t i = startPage; i < endPage && i < numPages; ++i) {
-            pageProts[i] |= segmentProt;
-        }
-    }
-
-    // On iOS (and non-JIT environments), pages marked both writable and executable
-    // (W^X violation) result in SIGBUS when instructions are fetched from them.
-    // Since all ELF relocations, GOT updates, and initial data writes have ALREADY
-    // been performed into the mapping while it was writable, strip PROT_WRITE from
-    // any page that contains executable code (PROT_EXEC) so that it remains cleanly RX.
-    for (size_t i = 0; i < numPages; ++i) {
-        if (pageProts[i] & PROT_EXEC) {
-            pageProts[i] &= ~PROT_WRITE;
-            pageProts[i] |= (PROT_READ | PROT_EXEC);
-        }
-    }
-
-    size_t groupStart = 0;
-    while (groupStart < numPages) {
-        int currentProt = pageProts[groupStart];
-        size_t groupEnd = groupStart + 1;
-        while (groupEnd < numPages && pageProts[groupEnd] == currentProt) {
-            groupEnd++;
-        }
-
-        if (currentProt != 0) {
-            if (mprotect(mapStart + (groupStart * pageSize),
-                         (groupEnd - groupStart) * pageSize, currentProt) != 0) {
-                lastError_ = "mprotect failed (no JIT?): " +
-                             std::string(strerror(errno));
-                munmap(mapStart, totalSize);
-                base_ = nullptr;
-                allocBase_ = nullptr;
-                allocSize_ = 0;
-                return false;
-            }
-        }
-        groupStart = groupEnd;
-    }
-
     // Adjust base_ to point to logical address 0
     // (let base_ + st_value = real address)
     base_ = static_cast<char*>(base_) - minVaddr;
@@ -1017,10 +949,88 @@ bool ElfLoader::relocate() {
             static_cast<unsigned long long>(relaEnt ? jmpRelSize / relaEnt : 0),
             static_cast<unsigned long long>(relrSize),
             symtabVaddr != 0 ? "present" : "absent");
+
+    if (ok) {
+        applyProtections();
+    }
+
 #if defined(__APPLE__) && TARGET_OS_OSX
     pthread_jit_write_protect_np(1);
 #endif
     return ok;
+}
+
+bool ElfLoader::applyProtections() {
+    if (!allocBase_ || allocSize_ == 0) return true;
+
+    const long pageSizeValue = sysconf(_SC_PAGESIZE);
+    if (pageSizeValue <= 0) return false;
+    const uint64_t pageSize = static_cast<uint64_t>(pageSizeValue);
+
+    uint64_t minVaddr = UINT64_MAX;
+    for (const auto& seg : segments_) {
+        if (seg.vaddr < minVaddr) minVaddr = seg.vaddr;
+    }
+    if (minVaddr == UINT64_MAX) minVaddr = 0;
+
+    const size_t numPages = allocSize_ / pageSize;
+    std::vector<int> pageProts(numPages, 0);
+
+    for (const auto& seg : segments_) {
+        const uint64_t segmentStart = seg.vaddr - minVaddr;
+        const uint64_t segmentEnd = segmentStart + seg.memsz;
+        
+        int segmentProt = 0;
+        if (seg.flags & 4) segmentProt |= PROT_READ;
+        if (seg.flags & 2) segmentProt |= PROT_WRITE;
+        if (seg.flags & 1) segmentProt |= PROT_EXEC;
+
+        size_t startPage = segmentStart / pageSize;
+        size_t endPage = (segmentEnd + pageSize - 1) / pageSize;
+        for (size_t i = startPage; i < endPage && i < numPages; ++i) {
+            pageProts[i] |= segmentProt;
+        }
+    }
+
+    // On iOS (and non-JIT environments), pages marked both writable and executable
+    // (W^X violation) result in SIGBUS when instructions are fetched from them.
+    // Since all ELF relocations, GOT updates, and initial data writes have ALREADY
+    // been performed into the mapping while it was writable, strip PROT_WRITE from
+    // any page that contains executable code (PROT_EXEC) so that it remains cleanly RX.
+    for (size_t i = 0; i < numPages; ++i) {
+        if (pageProts[i] & PROT_EXEC) {
+            pageProts[i] &= ~PROT_WRITE;
+            pageProts[i] |= (PROT_READ | PROT_EXEC);
+        }
+    }
+
+    char* mapStart = static_cast<char*>(allocBase_);
+    size_t groupStart = 0;
+    while (groupStart < numPages) {
+        int currentProt = pageProts[groupStart];
+        size_t groupEnd = groupStart + 1;
+        while (groupEnd < numPages && pageProts[groupEnd] == currentProt) {
+            groupEnd++;
+        }
+
+        if (currentProt != 0) {
+            if (mprotect(mapStart + (groupStart * pageSize),
+                         (groupEnd - groupStart) * pageSize, currentProt) != 0) {
+                lastError_ = "mprotect failed (no JIT?): " +
+                             std::string(strerror(errno));
+                return false;
+            }
+        }
+        groupStart = groupEnd;
+    }
+
+#if defined(__APPLE__)
+    sys_icache_invalidate(mapStart, allocSize_);
+#else
+    __builtin___clear_cache(mapStart, mapStart + allocSize_);
+#endif
+
+    return true;
 }
 
 void* ElfLoader::getSymbolAddress(const char* symbolName) {
