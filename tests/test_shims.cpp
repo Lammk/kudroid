@@ -463,19 +463,41 @@ static void test_sched_getaffinity_raw_returns_byte_count() {
           "a null mask pointer is an error, not a silent success");
 }
 
+// cpu_set_t, CPU_COUNT and CPU_ISSET are glibc extensions and do not exist on
+// Apple, so the set is inspected as raw bytes instead. That is also closer to
+// what the guest sees: bionic's cpu_set_t is a flat little-endian bitmap, so CPU
+// n lives in bit (n % 8) of byte (n / 8) regardless of the host's own struct.
+namespace {
+
+constexpr size_t kGuestCpuSetBytes = 128;  // bionic's CPU_SETSIZE / 8
+
+bool guest_cpu_isset(const unsigned char* set, unsigned cpu) {
+    return (set[cpu / 8] >> (cpu % 8)) & 1u;
+}
+
+unsigned guest_cpu_count(const unsigned char* set, size_t bytes) {
+    unsigned n = 0;
+    for (size_t i = 0; i < bytes; ++i) {
+        n += static_cast<unsigned>(__builtin_popcount(set[i]));
+    }
+    return n;
+}
+
+}  // namespace
+
 static void test_sched_getaffinity_wrapper_returns_zero() {
     std::printf("[sched_getaffinity] wrapper returns 0 on success\n");
 
-    cpu_set_t set;
-    std::memset(&set, 0, sizeof(set));
-    CHECK(bionic_sched_getaffinity(0, sizeof(set), &set) == 0,
+    unsigned char set[kGuestCpuSetBytes];
+    std::memset(set, 0, sizeof(set));
+    CHECK(bionic_sched_getaffinity(0, sizeof(set), set) == 0,
           "the wrapper reports success as 0");
-    CHECK(CPU_COUNT(&set) == 8, "the wrapper fills in eight CPUs");
-    CHECK(CPU_ISSET(0, &set) && CPU_ISSET(7, &set), "CPUs 0 and 7 are both set");
-    CHECK(!CPU_ISSET(8, &set), "CPU 8 is not claimed");
+    CHECK(guest_cpu_count(set, sizeof(set)) == 8, "the wrapper fills in eight CPUs");
+    CHECK(guest_cpu_isset(set, 0) && guest_cpu_isset(set, 7), "CPUs 0 and 7 are both set");
+    CHECK(!guest_cpu_isset(set, 8), "CPU 8 is not claimed");
 
     errno = 0;
-    CHECK(bionic_sched_getaffinity(0, 0, &set) == -1 && errno == EINVAL,
+    CHECK(bionic_sched_getaffinity(0, 0, set) == -1 && errno == EINVAL,
           "a zero-sized set is rejected with EINVAL");
     errno = 0;
     CHECK(bionic_sched_getaffinity(0, sizeof(set), nullptr) == -1 && errno == EINVAL,
