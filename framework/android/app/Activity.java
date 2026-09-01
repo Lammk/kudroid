@@ -488,10 +488,15 @@ public class Activity extends ContextThemeWrapper {
      * find a view by id.
      */
     public android.view.View findViewById(int id) {
-        if (mContentView != null) {
-            return mContentView.findViewById(id);
+        if (id == android.R.id.content || id == 0x01020002) {
+            return getWindow().getDecorView();
         }
-        return null;
+        if (mContentView != null) {
+            if (mContentView.getId() == id) return mContentView;
+            android.view.View v = mContentView.findViewById(id);
+            if (v != null) return v;
+        }
+        return getWindow().findViewById(id);
     }
 
     public boolean dispatchTouchEvent(android.view.MotionEvent event) {

@@ -96,12 +96,10 @@ public class ViewGroup extends View implements ViewParent {
         if (getId() == id) return this;
         for (int i = 0; i < mChildCount; i++) {
             View child = mChildren[i];
-            if (child instanceof ViewGroup) {
-                View found = ((ViewGroup) child).findViewById(id);
-                if (found != null) return found;
-            } else if (child.getId() == id) {
-                return child;
-            }
+            if (child == null) continue;
+            if (child.getId() == id) return child;
+            View found = child.findViewById(id);
+            if (found != null) return found;
         }
         return null;
     }

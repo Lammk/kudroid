@@ -68,11 +68,25 @@ public class Window {
         return decorGroup();
     }
 
+    public View findViewById(int id) {
+        ViewGroup decor = decorGroup();
+        if (decor != null) {
+            if (decor.getId() == id) return decor;
+            View v = decor.findViewById(id);
+            if (v != null) return v;
+            if (id == android.R.id.content || id == 0x01020002) {
+                return decor;
+            }
+        }
+        return null;
+    }
+
     private ViewGroup mDecorGroup;
 
     private ViewGroup decorGroup() {
         if (mDecorGroup == null) {
             android.widget.FrameLayout decor = new android.widget.FrameLayout(mContext);
+            decor.setId(android.R.id.content);
             decor.setLayoutParams(new ViewGroup.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT));
@@ -220,11 +234,6 @@ public class Window {
         final WindowManager.LayoutParams params = getAttributes();
         params.width = width;
         params.height = height;
-    }
-
-    public View findViewById(int id) {
-        final View content = getContentView();
-        return content != null ? content.findViewById(id) : null;
     }
 
     /**
