@@ -1204,7 +1204,7 @@ extern "C" int bionic_sigaltstack(const stack_t *ss, stack_t *oss) {
 #endif
     const int r = ::sigaltstack(&host_ss, oss);
     if (r != 0) {
-        logAndroidMessage(4, "KuDroidSyscall", "sigaltstack() -> -1 errno=" +
+        logAndroidMessage(2, "KuDroidSyscall", "sigaltstack() -> -1 errno=" +
                           std::to_string(errno) + " (faked to 0)");
         return 0;
     }
@@ -1717,6 +1717,17 @@ extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_
 
         case 207: // recvfrom
             return ::recvfrom(static_cast<int>(a1), reinterpret_cast<void*>(a2), static_cast<size_t>(a3), static_cast<int>(a4), reinterpret_cast<struct sockaddr*>(a5), reinterpret_cast<socklen_t*>(a6));
+
+        case 122: // sched_setaffinity (Linux arm64 syscall)
+            // iOS does not support binding threads to CPU cores; return 0 (success)
+            return 0;
+
+        case 123: // sched_getaffinity (Linux arm64 syscall)
+            if (a3 != 0 && a2 >= sizeof(unsigned long)) {
+                *reinterpret_cast<unsigned long*>(a3) = 0x0F;
+                return sizeof(unsigned long);
+            }
+            return 0;
 
         case 215: // munmap
             return ::munmap(reinterpret_cast<void*>(a1), static_cast<size_t>(a2));

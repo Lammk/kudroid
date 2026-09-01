@@ -27,7 +27,29 @@ public class AudioManager {
         return new AudioDeviceInfo[] { new AudioDeviceInfo(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER, 1) };
     }
     public void registerAudioDeviceCallback(AudioDeviceCallback callback, android.os.Handler handler) {}
-    public void unregisterAudioDeviceCallback(AudioDeviceCallback callback) {}
+    public static final int AUDIOFOCUS_GAIN = 1;
+    public static final int AUDIOFOCUS_GAIN_TRANSIENT = 2;
+    public static final int AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK = 3;
+    public static final int AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE = 4;
+    public static final int AUDIOFOCUS_LOSS = -1;
+    public static final int AUDIOFOCUS_LOSS_TRANSIENT = -2;
+    public static final int AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK = -3;
+    public static final int AUDIOFOCUS_REQUEST_FAILED = 0;
+    public static final int AUDIOFOCUS_REQUEST_GRANTED = 1;
+    public static final int AUDIOFOCUS_REQUEST_DELAYED = 2;
+
+    public interface OnAudioFocusChangeListener {
+        void onAudioFocusChange(int focusChange);
+    }
+
+    public int requestAudioFocus(OnAudioFocusChangeListener l, int streamType, int durationHint) {
+        return AUDIOFOCUS_REQUEST_GRANTED;
+    }
+
+    public int abandonAudioFocus(OnAudioFocusChangeListener l) {
+        return AUDIOFOCUS_REQUEST_GRANTED;
+    }
+
     public int getMode() { return MODE_NORMAL; }
     public void setMode(int mode) {}
 }

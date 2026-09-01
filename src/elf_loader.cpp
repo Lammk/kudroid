@@ -703,6 +703,18 @@ bool ElfLoader::map() {
         }
     }
 
+    // On iOS (and non-JIT environments), pages marked both writable and executable
+    // (W^X violation) result in SIGBUS when instructions are fetched from them.
+    // Since all ELF relocations, GOT updates, and initial data writes have ALREADY
+    // been performed into the mapping while it was writable, strip PROT_WRITE from
+    // any page that contains executable code (PROT_EXEC) so that it remains cleanly RX.
+    for (size_t i = 0; i < numPages; ++i) {
+        if (pageProts[i] & PROT_EXEC) {
+            pageProts[i] &= ~PROT_WRITE;
+            pageProts[i] |= (PROT_READ | PROT_EXEC);
+        }
+    }
+
     size_t groupStart = 0;
     while (groupStart < numPages) {
         int currentProt = pageProts[groupStart];

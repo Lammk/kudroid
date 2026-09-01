@@ -45,6 +45,16 @@ public class ApplicationContext extends Context {
     }
 
     @Override
+    public String getPackageCodePath() {
+        return "/data/app/" + mPackageName + "/base.apk";
+    }
+
+    @Override
+    public String getPackageResourcePath() {
+        return getPackageCodePath();
+    }
+
+    @Override
     public AssetManager getAssets() {
         if (mAssets == null) mAssets = new AssetManager();
         return mAssets;

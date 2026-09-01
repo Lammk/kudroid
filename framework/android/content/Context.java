@@ -93,6 +93,14 @@ public abstract class Context {
     public abstract File getCodeCacheDir();
     public abstract File getNoBackupFilesDir();
 
+    public String getPackageCodePath() {
+        return "/data/app/" + getPackageName() + "/base.apk";
+    }
+
+    public String getPackageResourcePath() {
+        return getPackageCodePath();
+    }
+
     // Needed by all five real APKs in the corpus. Concrete rather than abstract so
     // ContextWrapper and ApplicationContext do not both have to restate them; the base
     // answers are correct for every context KuDroid creates.

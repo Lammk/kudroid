@@ -2402,10 +2402,14 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                     appendAndEcho(std::string("[kudroid_core]   manifest activity: ") + a.name +
                                                   (a.isLauncher ? "  [LAUNCHER]" : "") +
                                                   (a.isAlias ? "  [alias]" : "") +
+                                                  (a.screenOrientation >= 0 ? "  [orientation=" + (a.screenOrientationStr.empty() ? std::to_string(a.screenOrientation) : a.screenOrientationStr) + "]" : "") +
                                                   (a.metaData.empty()
                                                        ? ""
                                                        : "  [" + std::to_string(a.metaData.size()) +
                                                              " meta-data]"));
+                                    if ((a.isLauncher || a.name == targetActivity) && a.screenOrientation >= 0) {
+                                        kudroid_set_requested_orientation(a.screenOrientation);
+                                    }
                                 }
                                 manifestInfo = mi;
                             } else {

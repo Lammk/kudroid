@@ -26,6 +26,8 @@ public class ContextWrapper extends Context {
     public File getCacheDir() { return mBase != null ? mBase.getCacheDir() : new File("/data/data/com.kudroid.app/cache"); }
     public File getExternalFilesDir(String type) { return mBase != null ? mBase.getExternalFilesDir(type) : new File("/sdcard/Android/data/com.kudroid.app/files"); }
     public File getExternalCacheDir() { return mBase != null ? mBase.getExternalCacheDir() : new File("/sdcard/Android/data/com.kudroid.app/cache"); }
+    public String getPackageCodePath() { return mBase != null ? mBase.getPackageCodePath() : "/data/app/" + getPackageName() + "/base.apk"; }
+    public String getPackageResourcePath() { return mBase != null ? mBase.getPackageResourcePath() : "/data/app/" + getPackageName() + "/base.apk"; }
 
     // Delegate like the rest. The fallbacks mirror ApplicationContext's layout so a
     // wrapper built without a base context still returns a usable path instead of null:

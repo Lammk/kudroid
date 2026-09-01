@@ -12,6 +12,9 @@ public final class Scanner implements Iterator<String>, Closeable {
     public Scanner(InputStream source) {
         this(new InputStreamReader(source));
     }
+    public Scanner(InputStream source, String charsetName) {
+        this(source);
+    }
     public Scanner(Reader source) {
         this("");
     }

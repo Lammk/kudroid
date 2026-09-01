@@ -29,6 +29,8 @@ struct ActivityEntry {
     bool isLauncher = false;   // has intent-filter MAIN + LAUNCHER
     bool isExported = false;   // android:exported="true", or implied by a filter
     bool isAlias = false;      // came from <activity-alias>
+    std::string screenOrientationStr; // e.g. "sensorLandscape", "landscape", "portrait"
+    int screenOrientation = -1;       // ActivityInfo.SCREEN_ORIENTATION_*
 
     // <meta-data> nested in this <activity>. Per-activity rather than global
     // because that is what Android scopes it to, and two activities in one app can

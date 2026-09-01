@@ -329,6 +329,8 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
     static const char* kCategoryLauncher = "android.intent.category.LAUNCHER";
     std::string currentActivity;   // name of the <activity>/<activity-alias> being browsed
     std::string aliasTarget;       // targetActivity of <activity-alias>
+    std::string currentOrientationStr;
+    int currentOrientation = -1;
     bool inIntentFilter = false;
     bool sawActionMain = false;
     bool sawCategoryLauncher = false;
@@ -364,6 +366,10 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
             // Same activity seen again (multiple intent-filter blocks): merge.
             e.isLauncher = e.isLauncher || (sawActionMain && sawCategoryLauncher);
             e.isExported = e.isExported || currentExported || sawAnyIntentFilter;
+            if (e.screenOrientation == -1 && currentOrientation != -1) {
+                e.screenOrientation = currentOrientation;
+                e.screenOrientationStr = currentOrientationStr;
+            }
             for (const MetaDataEntry& m : currentActivityMeta) {
                 bool dup = false;
                 for (const MetaDataEntry& have : e.metaData) {
@@ -380,6 +386,8 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
         // otherwise, which is how the launcher can start it.
         e.isExported = currentExportedSet ? currentExported : sawAnyIntentFilter;
         e.isAlias = isAlias;
+        e.screenOrientationStr = currentOrientationStr;
+        e.screenOrientation = currentOrientation;
         e.metaData = currentActivityMeta;
         info.activities.push_back(e);
     };
@@ -423,6 +431,8 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
                     // Start a new activity — reset the state of the previous activity.
                     currentActivity.clear();
                     aliasTarget.clear();
+                    currentOrientationStr.clear();
+                    currentOrientation = -1;
                     sawActionMain = false;
                     sawCategoryLauncher = false;
                     sawAnyIntentFilter = false;
@@ -516,6 +526,28 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
                             currentExportedSet = true;
                             // Boolean attributes arrive as "true"/"false" or as an int 0/1.
                             currentExported = (attrVal == "true" || attrVal == "1");
+                        } else if (attrName == "screenOrientation") {
+                            currentOrientationStr = attrVal;
+                            auto parseOrientationString = [](const std::string& str) -> int {
+                                if (str.empty() || str == "unspecified" || str == "-1") return -1;
+                                if (str == "landscape" || str == "0") return 0;
+                                if (str == "portrait" || str == "1") return 1;
+                                if (str == "user" || str == "2") return 2;
+                                if (str == "behind" || str == "3") return 3;
+                                if (str == "sensor" || str == "4") return 4;
+                                if (str == "nosensor" || str == "5") return 5;
+                                if (str == "sensorLandscape" || str == "6") return 6;
+                                if (str == "sensorPortrait" || str == "7") return 7;
+                                if (str == "reverseLandscape" || str == "8") return 8;
+                                if (str == "reversePortrait" || str == "9") return 9;
+                                if (str == "fullSensor" || str == "10") return 10;
+                                if (str == "userLandscape" || str == "11") return 11;
+                                if (str == "userPortrait" || str == "12") return 12;
+                                if (str == "fullUser" || str == "13") return 13;
+                                if (str == "locked" || str == "14") return 14;
+                                try { return std::stoi(str); } catch (...) { return -1; }
+                            };
+                            currentOrientation = parseOrientationString(attrVal);
                         }
                     } else if (tagName == "action") {
                         if (inIntentFilter && attrName == "name" && attrVal == kActionMain) {
