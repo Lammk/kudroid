@@ -9,6 +9,21 @@ import android.content.Context;
  * provides basic window management.
  */
 public class Window {
+    public static final int FEATURE_OPTIONS_PANEL = 0;
+    public static final int FEATURE_NO_TITLE = 1;
+    public static final int FEATURE_PROGRESS = 2;
+    public static final int FEATURE_LEFT_ICON = 3;
+    public static final int FEATURE_RIGHT_ICON = 4;
+    public static final int FEATURE_INDETERMINATE_PROGRESS = 5;
+    public static final int FEATURE_CONTEXT_MENU = 6;
+    public static final int FEATURE_CUSTOM_TITLE = 7;
+    public static final int FEATURE_ACTION_BAR = 8;
+    public static final int FEATURE_ACTION_BAR_OVERLAY = 9;
+    public static final int FEATURE_ACTION_MODE_OVERLAY = 10;
+    public static final int FEATURE_SWIPE_TO_DISMISS = 11;
+    public static final int FEATURE_CONTENT_TRANSITIONS = 12;
+    public static final int FEATURE_ACTIVITY_TRANSITIONS = 13;
+
     private final Context mContext;
     private View mDecorView;
     private View mContentView;
@@ -17,6 +32,9 @@ public class Window {
     public Window(Context context) {
         mContext = context;
     }
+
+    public void takeSurface(android.view.SurfaceHolder.Callback2 callback) {}
+    public void takeInputQueue(android.view.InputQueue.Callback callback) {}
 
     /**
      * returns the context this window was created with.

@@ -512,6 +512,13 @@ public class Activity extends ContextThemeWrapper {
         return mContentView;
     }
 
+    public boolean requestWindowFeature(int featureId) {
+        return getWindow().requestFeature(featureId);
+    }
+
+    public void overridePendingTransition(int enterAnim, int exitAnim) {
+    }
+
     public void setVolumeControlStream(int streamType) {
     }
 
