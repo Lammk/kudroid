@@ -121,6 +121,9 @@ public abstract class Context {
         info.packageName = getPackageName();
         info.processName = getPackageName();
         info.dataDir = "/data/data/" + getPackageName();
+        info.sourceDir = getPackageCodePath();
+        info.publicSourceDir = getPackageCodePath();
+        info.nativeLibraryDir = "/data/app/" + getPackageName() + "/lib/" + android.os.Build.CPU_ABI;
         return info;
     }
 
