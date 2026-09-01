@@ -1811,21 +1811,22 @@ class NativeMetalViewController: UIViewController {
         let width = Int32(bounds.width * scale)
         let height = Int32(bounds.height * scale)
 
-        if let metalLayer = metalView.layer as? CAMetalLayer {
-            if metalLayer.device == nil {
-                metalLayer.device = MTLCreateSystemDefaultDevice()
-            }
-            metalLayer.pixelFormat = .bgra8Unorm
-            metalLayer.framebufferOnly = false
-            metalLayer.allowsNextDrawableTimeout = false
-            metalLayer.maximumDrawableCount = 3
-            metalLayer.presentsWithTransaction = false
-            metalLayer.isOpaque = true
-            metalLayer.contentsScale = scale
-            metalLayer.drawableSize = CGSize(width: Double(width), height: Double(height))
-            let unmanaged = Unmanaged.passUnretained(metalLayer)
-            kudroid_set_metal_layer(unmanaged.toOpaque(), width, height, Float(scale))
+        let _ = self.view
+        guard let mv = metalView, let metalLayer = mv.layer as? CAMetalLayer else { return }
+
+        if metalLayer.device == nil {
+            metalLayer.device = MTLCreateSystemDefaultDevice()
         }
+        metalLayer.pixelFormat = .bgra8Unorm
+        metalLayer.framebufferOnly = false
+        metalLayer.allowsNextDrawableTimeout = false
+        metalLayer.maximumDrawableCount = 3
+        metalLayer.presentsWithTransaction = false
+        metalLayer.isOpaque = true
+        metalLayer.contentsScale = scale
+        metalLayer.drawableSize = CGSize(width: Double(width), height: Double(height))
+        let unmanaged = Unmanaged.passUnretained(metalLayer)
+        kudroid_set_metal_layer(unmanaged.toOpaque(), width, height, Float(scale))
 
         // Timer periodically scans crash status, screen orientation, and No Sleep from the C++ bridge
         crashCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] timer in
