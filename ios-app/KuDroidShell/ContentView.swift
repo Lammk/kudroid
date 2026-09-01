@@ -1750,31 +1750,35 @@ class NativeMetalViewController: UIViewController {
     fileprivate weak static var sCurrentRunnerVC: NativeMetalViewController?
     private static var isGlobalAppRunning = false
 
-    @objc private func handleExitButton() {
+    private func cleanupAndResetOrientation() {
         UIApplication.shared.isIdleTimerDisabled = false
         NativeMetalViewController.isGlobalAppRunning = false
         motionManager.stopAccelerometerUpdates()
         motionManager.stopGyroUpdates()
         crashCheckTimer?.invalidate()
-        // Clear the keyboard callbacks before the view goes away: they capture the
-        // controller weakly but the C++ side would still call into a dead closure's
-        // main-queue hop on the next guest showSoftInput.
         kudroid_set_soft_input_callbacks(nil, nil)
         metalView?.resignFirstResponder()
         kudroid_set_soft_input_visible(0)
-        kudroid_unbind_metal_layer()
+        kudroid_stop_app()
+
+        // Force orientation back to portrait
+        if #available(iOS 16.0, *) {
+            if let windowScene = self.view.window?.windowScene {
+                let geometryPreferences = UIWindowScene.GeometryPreferences.iOS(interfaceOrientations: .portrait)
+                windowScene.requestGeometryUpdate(geometryPreferences) { _ in }
+            }
+        } else {
+            UIDevice.current.setValue(UIInterfaceOrientation.portrait.rawValue, forKey: "orientation")
+        }
+    }
+
+    @objc private func handleExitButton() {
+        cleanupAndResetOrientation()
         onExit()
     }
 
     deinit {
-        UIApplication.shared.isIdleTimerDisabled = false
-        NativeMetalViewController.isGlobalAppRunning = false
-        motionManager.stopAccelerometerUpdates()
-        motionManager.stopGyroUpdates()
-        crashCheckTimer?.invalidate()
-        kudroid_set_soft_input_callbacks(nil, nil)
-        kudroid_set_soft_input_visible(0)
-        kudroid_unbind_metal_layer()
+        cleanupAndResetOrientation()
     }
 
     override func viewDidLayoutSubviews() {
@@ -1899,6 +1903,7 @@ class NativeMetalViewController: UIViewController {
     }
 
     private func handleCrash(fallbackLog: String = "") {
+        cleanupAndResetOrientation()
         var tailLog = ""
         if let cTail = kudroid_get_last_crash_tail() {
             tailLog = String(cString: cTail)
@@ -1911,8 +1916,7 @@ class NativeMetalViewController: UIViewController {
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        crashCheckTimer?.invalidate()
-        kudroid_clear_crash_state()
+        cleanupAndResetOrientation()
     }
 }
 

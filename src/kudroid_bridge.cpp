@@ -3836,6 +3836,14 @@ extern "C" void kudroid_clear_crash_state(void) {
     g_lastCrashTail[0] = '\0';
 }
 
+extern "C" void kudroid_stop_app(void) {
+    kuart_send_lifecycle_event(103); // DESTROY_ACTIVITY
+    s_isApkRunning.store(false);
+    kudroid_clear_crash_state();
+    kudroid_unbind_metal_layer();
+    kudroid_set_requested_orientation(1); // SCREEN_ORIENTATION_PORTRAIT
+}
+
 extern "C" const char* kudroid_get_last_crash_tail(void) {
     if (g_lastCrashTail[0] == '\0') {
         return strdup("No recent crash detected.");

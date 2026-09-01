@@ -196,17 +196,16 @@ public final class ActivityThread {
             thread.handleLaunchActivity(candidates);
         }
 
-        // Main UI event loop — runs forever, never exits itself
-        while (true) {
-            try {
-                Looper.loop();
-            } catch (Throwable t) {
-                android.util.Log.e("ActivityThread", "Handled exception in main looper: " + t.toString());
-                t.printStackTrace();
-            }
-            try {
-                Thread.sleep(10);
-            } catch (Throwable ignored) {}
+        // Main UI event loop
+        try {
+            Looper.loop();
+        } catch (Throwable t) {
+            android.util.Log.e("ActivityThread", "Handled exception in main looper: " + t.toString());
+            t.printStackTrace();
+        } finally {
+            sCurrentActivityThread = null;
+            sPackageName = "";
+            android.util.Log.i("ActivityThread", "Main Looper exited. ActivityThread terminated.");
         }
     }
 
@@ -760,9 +759,16 @@ public final class ActivityThread {
         try {
             if (mInitialActivity != null) {
                 mInitialActivity.onDestroy();
+                mInitialActivity = null;
             }
         } catch (Throwable t) {
             t.printStackTrace();
         }
+        try {
+            if (Looper.myLooper() != null) {
+                Looper.myLooper().quit();
+            }
+        } catch (Throwable ignored) {}
+        sCurrentActivityThread = null;
     }
 }

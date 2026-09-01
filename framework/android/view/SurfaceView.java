@@ -110,9 +110,33 @@ public class SurfaceView extends View implements SurfaceHolder.Callback2 {
         @Override
         public void addCallback(Callback callback) {
             if (callback == null) return;
+            boolean isNew = false;
             synchronized (mCallbacks) {
                 if (!mCallbacks.contains(callback)) {
                     mCallbacks.add(callback);
+                    isNew = true;
+                }
+            }
+            if (isNew) {
+                int w = mView != null ? mView.getWidth() : 0;
+                int h = mView != null ? mView.getHeight() : 0;
+                if (w <= 0 || h <= 0) {
+                    try {
+                        android.graphics.Canvas canvas = new android.graphics.Canvas();
+                        w = canvas.getWidth();
+                        h = canvas.getHeight();
+                    } catch (Throwable ignored) {}
+                }
+                if (w <= 0) w = 1080;
+                if (h <= 0) h = 1920;
+                try {
+                    callback.surfaceCreated(this);
+                    callback.surfaceChanged(this, 0, w, h);
+                    if (callback instanceof Callback2) {
+                        ((Callback2) callback).surfaceRedrawNeeded(this);
+                    }
+                } catch (Throwable t) {
+                    android.util.Log.e("SurfaceHolder", "Error in immediate addCallback surface dispatch: " + t);
                 }
             }
         }

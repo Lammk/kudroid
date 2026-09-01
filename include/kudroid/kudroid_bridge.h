@@ -100,6 +100,9 @@ int kudroid_has_crashed(void);
 /// clear the crash state after the interface has displayed a notification.
 void kudroid_clear_crash_state(void);
 
+/// forcibly terminate running guest app and reset runtime state
+void kudroid_stop_app(void);
+
 /// extract up to 30 last log lines before crash.
 ///return string malloc; the caller must free it with free().
 const char* kudroid_get_last_crash_tail(void);
