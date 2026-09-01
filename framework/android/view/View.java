@@ -937,4 +937,8 @@ public class View {
     public interface OnUnhandledKeyEventListener {
     }
 
+    public void saveAttributeDataForStyleable(Context context, int[] styleable,
+            android.util.AttributeSet set, android.content.res.TypedArray attrs,
+            int defStyleAttr, int defStyleRes) {
+    }
 }

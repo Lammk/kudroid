@@ -41,7 +41,15 @@ public interface Editable extends CharSequence, Appendable {
     /**
      * Factory creates Editable from original content.
      */
-    public interface Factory {
-        Editable newEditable(CharSequence source);
+    public static class Factory {
+        private static Editable.Factory sInstance = new Editable.Factory();
+
+        public static Editable.Factory getInstance() {
+            return sInstance;
+        }
+
+        public Editable newEditable(CharSequence source) {
+            return new SpannableStringBuilder(source);
+        }
     }
 }

@@ -253,4 +253,46 @@ public class TextView extends View {
             }
         }
     }
+
+    private android.text.method.TransformationMethod mTransformation;
+    private android.text.method.MovementMethod mMovement;
+    private android.text.method.KeyListener mKeyListener;
+    private android.text.Editable.Factory mEditableFactory = android.text.Editable.Factory.getInstance();
+    private int mInputType = 0;
+
+    public void setTransformationMethod(android.text.method.TransformationMethod method) {
+        mTransformation = method;
+    }
+
+    public android.text.method.TransformationMethod getTransformationMethod() {
+        return mTransformation;
+    }
+
+    public void setMovementMethod(android.text.method.MovementMethod movement) {
+        mMovement = movement;
+    }
+
+    public android.text.method.MovementMethod getMovementMethod() {
+        return mMovement;
+    }
+
+    public void setKeyListener(android.text.method.KeyListener input) {
+        mKeyListener = input;
+    }
+
+    public android.text.method.KeyListener getKeyListener() {
+        return mKeyListener;
+    }
+
+    public void setEditableFactory(android.text.Editable.Factory factory) {
+        mEditableFactory = factory != null ? factory : android.text.Editable.Factory.getInstance();
+    }
+
+    public int getInputType() {
+        return mInputType;
+    }
+
+    public void setInputType(int type) {
+        mInputType = type;
+    }
 }

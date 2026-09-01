@@ -3,20 +3,20 @@ package android.text.method;
 import android.graphics.Rect;
 import android.view.View;
 
-public class SingleLineTransformationMethod implements TransformationMethod {
-    private static SingleLineTransformationMethod sInstance;
+public class PasswordTransformationMethod extends SingleLineTransformationMethod {
+    private static PasswordTransformationMethod sInstance;
 
-    public static SingleLineTransformationMethod getInstance() {
+    public static PasswordTransformationMethod getInstance() {
         if (sInstance != null) return sInstance;
-        sInstance = new SingleLineTransformationMethod();
+        sInstance = new PasswordTransformationMethod();
         return sInstance;
     }
 
-    public SingleLineTransformationMethod() {}
+    public PasswordTransformationMethod() {}
 
     @Override
     public CharSequence getTransformation(CharSequence source, View view) {
-        return source != null ? source.toString().replace('\n', ' ') : null;
+        return source;
     }
 
     @Override
