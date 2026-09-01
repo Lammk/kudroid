@@ -88,6 +88,7 @@ struct ZipEntryInfo {
     std::string name;
     std::uint16_t compression;
     std::uint32_t compressedSize;
+    std::uint32_t uncompressedSize;
     std::uint32_t localOffset;
 };
 
@@ -117,6 +118,7 @@ bool readZipEntries(std::ifstream& f, std::streamsize fileSize, std::vector<ZipE
         ZipEntryInfo info;
         info.compression = read16b(hdr, 10);
         info.compressedSize = read32b(hdr, 20);
+        info.uncompressedSize = read32b(hdr, 24);
         const std::uint16_t nameLen = read16b(hdr, 28);
         const std::uint16_t extraLen = read16b(hdr, 30);
         const std::uint16_t commentLen = read16b(hdr, 32);
@@ -128,6 +130,27 @@ bool readZipEntries(std::ifstream& f, std::streamsize fileSize, std::vector<ZipE
         entries.push_back(std::move(info));
     }
     return true;
+}
+
+bool extractZipEntryToMemory(std::ifstream& f, const ZipEntryInfo& e, std::vector<std::uint8_t>& output) {
+    f.seekg(e.localOffset);
+    char lh[30];
+    if (!readExact(f, lh, 30) || read32b(lh, 0) != 0x04034b50) return false;
+    const std::uint16_t nameLen = read16b(lh, 26);
+    const std::uint16_t extraLen = read16b(lh, 28);
+    f.seekg(static_cast<std::streamoff>(nameLen) + extraLen, std::ios::cur);
+
+    if (e.compression == 0) {
+        output.resize(e.compressedSize);
+        return readExact(f, output.data(), e.compressedSize);
+    }
+    if (e.compression != 8) return false;
+
+    output.resize(e.uncompressedSize);
+    std::vector<std::uint8_t> in(e.compressedSize);
+    if (!readExact(f, in.data(), e.compressedSize)) return false;
+
+    return inflateRaw(in.data(), in.size(), output);
 }
 
 // Decompress an entry (stored or deflate) to a file — streaming, do not load the entire entry.
@@ -158,8 +181,8 @@ bool extractZipEntryToFile(std::ifstream& f, const ZipEntryInfo& e, const std::s
 
     z_stream stream = {};
     if (inflateInit2(&stream, -MAX_WBITS) != Z_OK) return false;
-    std::vector<char> in(1 << 16);
-    std::vector<char> outBuf(1 << 16);
+    std::vector<char> in(1 << 20);
+    std::vector<char> outBuf(1 << 20);
     std::size_t remaining = e.compressedSize;
     int ret = Z_OK;
     bool ok = true;
@@ -814,21 +837,17 @@ const std::string& APKExtractor::lastError() { return gLastError; }
 static bool extract_apk_impl(const std::string& apkPath, const std::string& targetDirectory,
                              bool requireEntries, bool extractManifest) {
     gLastError.clear();
-    std::ifstream apk(apkPath, std::ios::binary);
+    std::ifstream apk(apkPath, std::ios::binary | std::ios::ate);
     if (!apk) { gLastError = "Cannot open APK: " + apkPath; apkLog(gLastError); return false; }
-    const std::vector<std::uint8_t> data((std::istreambuf_iterator<char>(apk)), {});
-    if (data.size() < 22) { gLastError = "APK is too small to be a ZIP archive"; apkLog(gLastError); return false; }
+    const std::streamsize fileSize = apk.tellg();
+    if (fileSize < 22) { gLastError = "APK is too small to be a ZIP archive"; apkLog(gLastError); return false; }
 
-    const std::size_t searchStart = data.size() > 65557 ? data.size() - 65557 : 0;
-    std::size_t endRecord = data.size();
-    for (std::size_t offset = data.size() - 22;; --offset) {
-        if (read32(data, offset) == 0x06054b50) { endRecord = offset; break; }
-        if (offset == searchStart) break;
+    std::vector<ZipEntryInfo> entries;
+    if (!readZipEntries(apk, fileSize, entries)) {
+        apkLog("readZipEntries failed: " + gLastError);
+        return false;
     }
-    if (endRecord == data.size()) { gLastError = "ZIP end record not found"; apkLog(gLastError); return false; }
 
-    const std::uint16_t entryCount = read16(data, endRecord + 10);
-    std::size_t centralOffset = read32(data, endRecord + 16);
     std::error_code error;
     std::filesystem::create_directories(targetDirectory, error);
     if (error) { gLastError = "Cannot create target directory: " + error.message(); apkLog(gLastError); return false; }
@@ -849,21 +868,8 @@ static bool extract_apk_impl(const std::string& apkPath, const std::string& targ
     std::set<std::string> abisSeen;
     bool extractedArm64Lib = false;
 
-    for (std::uint16_t index = 0; index < entryCount; ++index) {
-        if (!hasBytes(data, centralOffset, 46) || read32(data, centralOffset) != 0x02014b50) {
-            gLastError = "Invalid ZIP central-directory entry"; apkLog(gLastError); return false;
-        }
-        const std::uint16_t compression = read16(data, centralOffset + 10);
-        const std::uint32_t compressedSize = read32(data, centralOffset + 20);
-        const std::uint32_t uncompressedSize = read32(data, centralOffset + 24);
-        const std::uint16_t nameLength = read16(data, centralOffset + 28);
-        const std::uint16_t extraLength = read16(data, centralOffset + 30);
-        const std::uint16_t commentLength = read16(data, centralOffset + 32);
-        const std::uint32_t localOffset = read32(data, centralOffset + 42);
-        if (!hasBytes(data, centralOffset + 46, nameLength)) { gLastError = "Invalid ZIP entry name"; return false; }
-        const std::string entry(reinterpret_cast<const char*>(data.data() + centralOffset + 46), nameLength);
-        centralOffset += 46 + nameLength + extraLength + commentLength;
-
+    for (const auto& entryInfo : entries) {
+        const std::string& entry = entryInfo.name;
         const int iconScore = iconPriority(entry);
         bool shouldExtract = false;
         const bool isNativeLib = entry.rfind("lib/", 0) == 0 && entry.size() >= 3 &&
@@ -891,25 +897,21 @@ static bool extract_apk_impl(const std::string& apkPath, const std::string& targ
         apkLog("Extracting: " + entry);
 
         found = true;
-        if (!hasBytes(data, localOffset, 30) || read32(data, localOffset) != 0x04034b50) { gLastError = "Invalid local header: " + entry; return false; }
-        const std::size_t contentOffset = localOffset + 30 + read16(data, localOffset + 26) + read16(data, localOffset + 28);
-        if (!hasBytes(data, contentOffset, compressedSize)) { gLastError = "Truncated entry: " + entry; return false; }
-        std::vector<std::uint8_t> output(uncompressedSize);
-        if (compression == 0 && compressedSize == uncompressedSize) {
-            std::memcpy(output.data(), data.data() + contentOffset, output.size());
-        } else if (compression == 8) {
-            if (!inflateRaw(data.data() + contentOffset, compressedSize, output)) { gLastError = "Deflate failed: " + entry; return false; }
-        } else { gLastError = "Unsupported compression for: " + entry; return false; }
-
         if (entry == "AndroidManifest.xml") {
-            manifestInfo = parseAxml(output);
+            std::vector<std::uint8_t> output;
+            if (extractZipEntryToMemory(apk, entryInfo, output)) {
+                manifestInfo = parseAxml(output);
+            }
         } else if (entry == "resources.arsc") {
-            arscAppName = parseArscAppName(output);
+            std::vector<std::uint8_t> output;
+            if (extractZipEntryToMemory(apk, entryInfo, output)) {
+                arscAppName = parseArscAppName(output);
+            }
         }
 
         if (iconScore > bestIconScore) {
             bestIconScore = iconScore;
-            bestIconData = output;
+            extractZipEntryToMemory(apk, entryInfo, bestIconData);
         }
 
         if (iconScore > 0 && entry != "AndroidManifest.xml" && entry != "resources.arsc" && entry.rfind("assets/", 0) != 0 && entry.rfind("lib/", 0) != 0 && !endsWithCi(entry, ".dex")) {
@@ -919,11 +921,13 @@ static bool extract_apk_impl(const std::string& apkPath, const std::string& targ
         const auto destination = std::filesystem::path(targetDirectory) / entry;
         std::filesystem::create_directories(destination.parent_path(), error);
 
-        std::ofstream extracted(destination, std::ios::binary);
-        extracted.write(reinterpret_cast<const char*>(output.data()), output.size());
-        extracted.close();
-        apkLog("  -> Saved to " + destination.string() + " (" + std::to_string(output.size()) + " bytes)");
-        if (!extracted || ::chmod(destination.c_str(), 0755) != 0) { gLastError = "Cannot write/chmod: " + destination.string(); return false; }
+        if (!extractZipEntryToFile(apk, entryInfo, destination.string())) {
+            gLastError = "Cannot extract entry: " + entry;
+            apkLog(gLastError);
+            return false;
+        }
+        ::chmod(destination.c_str(), 0755);
+        apkLog("  -> Saved to " + destination.string() + " (" + std::to_string(entryInfo.uncompressedSize) + " bytes)");
     }
 
     if (!found) {
