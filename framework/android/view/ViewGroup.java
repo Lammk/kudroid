@@ -14,7 +14,19 @@ public class ViewGroup extends View implements ViewParent {
     protected int mChildCount = 0;
 
     public ViewGroup(Context context) {
-        super(context);
+        this(context, null);
+    }
+
+    public ViewGroup(Context context, android.util.AttributeSet attrs) {
+        this(context, attrs, 0);
+    }
+
+    public ViewGroup(Context context, android.util.AttributeSet attrs, int defStyleAttr) {
+        this(context, attrs, defStyleAttr, 0);
+    }
+
+    public ViewGroup(Context context, android.util.AttributeSet attrs, int defStyleAttr, int defStyleRes) {
+        super(context, attrs, defStyleAttr, defStyleRes);
         mChildren = new View[16];
     }
 

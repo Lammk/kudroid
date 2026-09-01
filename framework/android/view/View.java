@@ -157,6 +157,18 @@ public class View {
     }
 
     public View(Context context) {
+        this(context, null);
+    }
+
+    public View(Context context, android.util.AttributeSet attrs) {
+        this(context, attrs, 0);
+    }
+
+    public View(Context context, android.util.AttributeSet attrs, int defStyleAttr) {
+        this(context, attrs, defStyleAttr, 0);
+    }
+
+    public View(Context context, android.util.AttributeSet attrs, int defStyleAttr, int defStyleRes) {
         mContext = context;
     }
 

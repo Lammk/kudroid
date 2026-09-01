@@ -20,6 +20,7 @@ public class AudioManager {
     public boolean isMusicActive() { return false; }
     public boolean isSpeakerphoneOn() { return true; }
     public void setSpeakerphoneOn(boolean on) {}
+    public boolean isWiredHeadsetOn() { return false; }
     public boolean isBluetoothScoOn() { return false; }
     public void setBluetoothScoOn(boolean on) {}
     public AudioDeviceInfo[] getDevices(int flags) {

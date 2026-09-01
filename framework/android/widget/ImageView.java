@@ -22,7 +22,10 @@ public class ImageView extends View {
     private ScaleType mScaleType = ScaleType.FIT_CENTER;
 
     public ImageView() { super(null); }
-    public ImageView(Context context) { super(context); }
+    public ImageView(Context context) { this(context, null); }
+    public ImageView(Context context, android.util.AttributeSet attrs) { this(context, attrs, 0); }
+    public ImageView(Context context, android.util.AttributeSet attrs, int defStyleAttr) { this(context, attrs, defStyleAttr, 0); }
+    public ImageView(Context context, android.util.AttributeSet attrs, int defStyleAttr, int defStyleRes) { super(context, attrs, defStyleAttr, defStyleRes); }
     public void setImageDrawable(Drawable drawable) { this.mDrawable = drawable; invalidate(); }
     public Drawable getDrawable() { return mDrawable; }
     public void setImageResource(int resId) { invalidate(); }

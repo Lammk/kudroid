@@ -9,7 +9,19 @@ public class EditText extends TextView {
     private CharSequence mHint = "";
 
     public EditText(Context context) {
-        super(context);
+        this(context, null);
+    }
+
+    public EditText(Context context, android.util.AttributeSet attrs) {
+        this(context, attrs, 0);
+    }
+
+    public EditText(Context context, android.util.AttributeSet attrs, int defStyleAttr) {
+        this(context, attrs, defStyleAttr, 0);
+    }
+
+    public EditText(Context context, android.util.AttributeSet attrs, int defStyleAttr, int defStyleRes) {
+        super(context, attrs, defStyleAttr, defStyleRes);
     }
 
     public void setHint(CharSequence hint) {

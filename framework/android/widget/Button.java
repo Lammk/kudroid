@@ -9,15 +9,19 @@ import android.content.Context;
  */
 public class Button extends TextView {
     public Button(Context context) {
-        super(context);
+        this(context, null);
     }
 
     public Button(Context context, android.util.AttributeSet attrs) {
-        super(context);
+        this(context, attrs, 0);
     }
 
     public Button(Context context, android.util.AttributeSet attrs, int defStyleAttr) {
-        super(context);
+        this(context, attrs, defStyleAttr, 0);
+    }
+
+    public Button(Context context, android.util.AttributeSet attrs, int defStyleAttr, int defStyleRes) {
+        super(context, attrs, defStyleAttr, defStyleRes);
     }
 
     @Override

@@ -28,7 +28,19 @@ public class TextView extends View {
     private OnEditorActionListener mOnEditorActionListener;
 
     public TextView(Context context) {
-        super(context);
+        this(context, null);
+    }
+
+    public TextView(Context context, android.util.AttributeSet attrs) {
+        this(context, attrs, 0);
+    }
+
+    public TextView(Context context, android.util.AttributeSet attrs, int defStyleAttr) {
+        this(context, attrs, defStyleAttr, 0);
+    }
+
+    public TextView(Context context, android.util.AttributeSet attrs, int defStyleAttr, int defStyleRes) {
+        super(context, attrs, defStyleAttr, defStyleRes);
         mPaint = new Paint();
         mPaint.setColor(mTextColor);
         mPaint.setTextSize(mTextSize);
