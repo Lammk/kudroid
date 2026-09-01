@@ -42,6 +42,12 @@ struct Slot {
     std::atomic<const void*> caller{nullptr};
     std::atomic<uint64_t> started_ns{0};
     std::atomic<uint64_t> thread_id{0};
+    // Retry count, for a spin that has no single blocking call to sit inside.
+    std::atomic<uint64_t> iterations{0};
+    // Whoever holds the thing being waited for, when the wait can know it. Zero
+    // means unknown, which is the honest answer for a futex word or a mutex whose
+    // owner the shim does not track.
+    std::atomic<uint64_t> owner{0};
     // Set once a stall has been reported, so a permanently stuck thread produces
     // one line rather than one every watchdog tick.
     std::atomic<bool> reported{false};
@@ -81,6 +87,11 @@ const char* kind_name(WaitKind kind) {
         case WaitKind::kCondition: return "cond-wait";
         case WaitKind::kConditionTimed: return "cond-timedwait";
         case WaitKind::kJavaMonitor: return "java-monitor";
+        case WaitKind::kRwlockRead: return "rwlock-rdlock";
+        case WaitKind::kRwlockWrite: return "rwlock-wrlock";
+        case WaitKind::kOnce: return "pthread-once";
+        case WaitKind::kEpoll: return "epoll-wait";
+        case WaitKind::kGuardSpin: return "cxa-guard-spin";
     }
     return "?";
 }
@@ -102,6 +113,44 @@ Slot* acquire_slot() {
 
 }  // namespace
 
+const void* guest_return_address(int frames) {
+    // Walk the frame chain looking for the first address inside a loaded guest
+    // module. The immediate return address is almost always KuDroid's own wrapper —
+    // bionic_futex reached through emulate_futex_direct, for instance — and a report
+    // naming that says nothing: every futex wait in the process comes from there.
+    //
+    // The walk is bounded and every dereference is range-checked, because this runs
+    // on a thread that is about to block and must not turn a diagnostic into a
+    // crash. A frame pointer outside plausible stack range ends the walk.
+#if defined(__aarch64__) || defined(__x86_64__)
+    if (frames < 1) frames = 1;
+    if (frames > 12) frames = 12;
+
+    uintptr_t fp = reinterpret_cast<uintptr_t>(__builtin_frame_address(0));
+    const void* first = nullptr;
+    char scratch[256];
+
+    for (int i = 0; i < frames; ++i) {
+        if (fp < 0x1000 || fp > 0x7fffffffffffULL || (fp & 0x7) != 0) break;
+        // AAPCS64 and SysV both store [saved fp, return address] at the frame base.
+        const uintptr_t ret = *reinterpret_cast<const uintptr_t*>(fp + sizeof(void*));
+        if (ret == 0) break;
+        if (first == nullptr) first = reinterpret_cast<const void*>(ret);
+        if (kudroid_lookup_guest_module(reinterpret_cast<void*>(ret), scratch,
+                                        sizeof(scratch))) {
+            return reinterpret_cast<const void*>(ret);
+        }
+        fp = *reinterpret_cast<const uintptr_t*>(fp);
+    }
+    // No guest frame in range: report the immediate caller rather than nothing, so
+    // the address is at least a starting point.
+    return first;
+#else
+    (void)frames;
+    return __builtin_return_address(0);
+#endif
+}
+
 void blocking_wait_begin(WaitKind kind, const void* object, const void* caller) {
     if (t_slot == nullptr) {
         t_slot = acquire_slot();
@@ -116,9 +165,25 @@ void blocking_wait_begin(WaitKind kind, const void* object, const void* caller) 
     s->object.store(object, std::memory_order_relaxed);
     s->caller.store(caller, std::memory_order_relaxed);
     s->started_ns.store(now_ns(), std::memory_order_relaxed);
+    s->iterations.store(0, std::memory_order_relaxed);
+    s->owner.store(0, std::memory_order_relaxed);
     s->reported.store(false, std::memory_order_relaxed);
     s->in_wait.store(true, std::memory_order_release);
     g_active.fetch_add(1, std::memory_order_relaxed);
+}
+
+void blocking_wait_note_iteration() {
+    Slot* s = t_slot;
+    if (s == nullptr) return;
+    if (!s->in_wait.load(std::memory_order_relaxed)) return;
+    s->iterations.fetch_add(1, std::memory_order_relaxed);
+}
+
+void blocking_wait_note_owner(uint64_t owner) {
+    Slot* s = t_slot;
+    if (s == nullptr) return;
+    if (!s->in_wait.load(std::memory_order_relaxed)) return;
+    s->owner.store(owner, std::memory_order_relaxed);
 }
 
 void blocking_wait_end() {
@@ -184,12 +249,17 @@ int blocking_wait_report_stalled(uint64_t threshold_ms) {
         }
 
         char line[512];
+        const uint64_t iterations = s.iterations.load(std::memory_order_relaxed);
         std::snprintf(line, sizeof(line),
-                      "blocking-wait-stalled kind=%s object=%p tid=%llu waited_ms=%llu caller=%s",
+                      "blocking-wait-stalled kind=%s object=%p tid=%llu waited_ms=%llu "
+                      "iterations=%llu owner=%llu caller=%s",
                       kind_name(static_cast<WaitKind>(s.kind.load(std::memory_order_relaxed))),
                       s.object.load(std::memory_order_relaxed),
                       static_cast<unsigned long long>(s.thread_id.load(std::memory_order_relaxed)),
-                      static_cast<unsigned long long>(elapsed_ms), where);
+                      static_cast<unsigned long long>(elapsed_ms),
+                      static_cast<unsigned long long>(iterations),
+                      static_cast<unsigned long long>(s.owner.load(std::memory_order_relaxed)),
+                      where);
         kudroid_persistent_breadcrumb(line);
         // Also to the Android log: that is the file a user attaches to a report,
         // and a stall is exactly what they are reporting.
@@ -210,6 +280,8 @@ void blocking_wait_reset_for_test() {
         g_slots[i].object.store(nullptr, std::memory_order_relaxed);
         g_slots[i].caller.store(nullptr, std::memory_order_relaxed);
         g_slots[i].started_ns.store(0, std::memory_order_relaxed);
+        g_slots[i].iterations.store(0, std::memory_order_relaxed);
+        g_slots[i].owner.store(0, std::memory_order_relaxed);
     }
     g_active.store(0, std::memory_order_relaxed);
     t_slot = nullptr;

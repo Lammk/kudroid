@@ -51,9 +51,12 @@ void Check(bool ok, const std::string& what) {
 using kudroid::blocking_wait_active_count;
 using kudroid::blocking_wait_begin;
 using kudroid::blocking_wait_end;
+using kudroid::blocking_wait_note_iteration;
+using kudroid::blocking_wait_note_owner;
 using kudroid::blocking_wait_report_stalled;
 using kudroid::blocking_wait_reset_for_test;
 using kudroid::BlockingWaitScope;
+using kudroid::guest_return_address;
 using kudroid::WaitKind;
 
 constexpr int FUTEX_WAIT_OP = 0;
@@ -259,6 +262,70 @@ void test_mutex_lock_is_tracked() {
     bionic_pthread_mutex_destroy(guest_mutex);
 }
 
+// ─── spin tracking ───────────────────────────────────────────────────────────
+//
+// A wait parks; a spin burns CPU. Nothing that looks for blocked threads can see a
+// spin, which is how ULTRAKILL's main thread spent twelve seconds inside
+// nativeRender with no wait registered anywhere: __cxa_guard_acquire yields and
+// retries while another thread runs a static initialiser.
+//
+// Elapsed time alone cannot tell a spin from a legitimate long wait — an idle worker
+// blocked on a semaphore also crosses three seconds. The iteration count is what
+// separates them.
+
+void test_spin_reports_its_iteration_count() {
+    std::printf("[spin] a spin reports how many times it went round\n");
+    blocking_wait_reset_for_test();
+
+    int guard = 0;
+    const BlockingWaitScope tracked(WaitKind::kGuardSpin, &guard, nullptr);
+    for (int i = 0; i < 2500; ++i) blocking_wait_note_iteration();
+    blocking_wait_note_owner(4242);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    Check(blocking_wait_report_stalled(100) == 1,
+          "the spin is reported (iterations and owner appear in the line)");
+    Check(blocking_wait_report_stalled(100) == 0, "and only once");
+}
+
+void test_iteration_and_owner_are_ignored_without_a_wait() {
+    std::printf("[spin] noting progress outside a wait is harmless\n");
+    blocking_wait_reset_for_test();
+
+    // Both are called from loops that may not have registered — the slot table can
+    // be full — so neither may touch state or crash.
+    blocking_wait_note_iteration();
+    blocking_wait_note_owner(7);
+    Check(blocking_wait_active_count() == 0, "nothing was registered");
+
+    int object = 0;
+    {
+        const BlockingWaitScope tracked(WaitKind::kGuardSpin, &object, nullptr);
+        blocking_wait_note_iteration();
+        Check(blocking_wait_active_count() == 1, "a real spin still registers");
+    }
+    blocking_wait_note_iteration();
+    Check(blocking_wait_active_count() == 0, "and a late note does not resurrect it");
+}
+
+// A stall report naming KuDroid's own bionic_futex is worthless: that is where every
+// futex wait in the process comes from. What identifies a bug is the guest frame.
+void test_guest_return_address_falls_back_sanely() {
+    std::printf("[spin] guest_return_address returns a usable address off-device\n");
+
+    const void* a = guest_return_address(6);
+    Check(a != nullptr,
+          "with no guest module loaded it still yields the immediate caller rather "
+          "than nothing");
+
+    // Must not walk off the end of the stack for any frame count, including absurd
+    // ones: this runs on a thread that is about to block, so a diagnostic that
+    // crashes is worse than no diagnostic.
+    Check(guest_return_address(0) != nullptr, "a zero frame count is clamped, not UB");
+    Check(guest_return_address(1000) != nullptr, "a huge frame count is clamped too");
+    Check(guest_return_address(-5) != nullptr, "a negative frame count is clamped too");
+}
+
 }  // namespace
 
 int main() {
@@ -271,6 +338,9 @@ int main() {
     test_sem_wait_is_tracked();
     test_futex_wait_is_tracked();
     test_mutex_lock_is_tracked();
+    test_spin_reports_its_iteration_count();
+    test_iteration_and_owner_are_ignored_without_a_wait();
+    test_guest_return_address_falls_back_sanely();
 
     std::printf("=== %d checks, %d failures ===\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

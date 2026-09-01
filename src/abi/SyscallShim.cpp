@@ -158,6 +158,7 @@ struct android_epoll_event {
 #include <set>
 #include <mutex>
 #include <shared_mutex>
+#include <optional>
 #include <atomic>
 #include <vector>
 #include <string>
@@ -584,7 +585,7 @@ extern "C" int bionic_pthread_mutex_lock(void* guestMutex) {
         // Tracked: a mutex whose holder never releases it parks this thread forever,
         // and nothing else in the log would say so.
         const BlockingWaitScope tracked(WaitKind::kMutex, guestMutex,
-                                        __builtin_return_address(0));
+                                        guest_return_address(6));
         return ::pthread_mutex_lock(&host->mutex);
     }();
     if (rc == 0 && host->track_owner) {
@@ -630,7 +631,7 @@ extern "C" int bionic_pthread_cond_wait(void* cond, void* mutex) {
     sync_diag("cond-wait-enter", cond, mutex, 0);
     const int result = [&] {
         const BlockingWaitScope tracked(WaitKind::kCondition, cond,
-                                        __builtin_return_address(0));
+                                        guest_return_address(6));
         return ::pthread_cond_wait(hostCond, &host->mutex);
     }();
     sync_diag("cond-wait-return", cond, mutex, result);
@@ -646,7 +647,7 @@ extern "C" int bionic_pthread_cond_timedwait(void* cond, void* mutex, const stru
     sync_diag("cond-timedwait-enter", cond, mutex, 0);
     const int result = [&] {
         const BlockingWaitScope tracked(WaitKind::kConditionTimed, cond,
-                                        __builtin_return_address(0));
+                                        guest_return_address(6));
         return ::pthread_cond_timedwait(hostCond, &host->mutex, abstime);
     }();
     sync_diag("cond-timedwait-return", cond, mutex, result);
@@ -673,11 +674,17 @@ extern "C" int bionic_pthread_rwlock_destroy(void* rwlock) {
 }
 extern "C" int bionic_pthread_rwlock_rdlock(void* rwlock) {
     pthread_rwlock_t* hostRwlock = static_cast<pthread_rwlock_t*>(get_or_init_sync(rwlock, SYNC_RWLOCK));
-    return hostRwlock ? ::pthread_rwlock_rdlock(hostRwlock) : -1;
+    if (!hostRwlock) return -1;
+    const BlockingWaitScope tracked(WaitKind::kRwlockRead, rwlock, guest_return_address(6));
+    return ::pthread_rwlock_rdlock(hostRwlock);
 }
 extern "C" int bionic_pthread_rwlock_wrlock(void* rwlock) {
     pthread_rwlock_t* hostRwlock = static_cast<pthread_rwlock_t*>(get_or_init_sync(rwlock, SYNC_RWLOCK));
-    return hostRwlock ? ::pthread_rwlock_wrlock(hostRwlock) : -1;
+    if (!hostRwlock) return -1;
+    // A write lock waits for every reader to leave, so one reader that never
+    // releases parks this thread for good.
+    const BlockingWaitScope tracked(WaitKind::kRwlockWrite, rwlock, guest_return_address(6));
+    return ::pthread_rwlock_wrlock(hostRwlock);
 }
 extern "C" int bionic_pthread_rwlock_unlock(void* rwlock) {
     pthread_rwlock_t* hostRwlock = static_cast<pthread_rwlock_t*>(get_or_init_sync(rwlock, SYNC_RWLOCK));
@@ -1375,7 +1382,9 @@ extern "C" bool kudroid_lookup_guest_module(void* addr, char* out, std::size_t o
 // futex had never run on the platform it was written for. It is unconditional now
 // and bounded instead (16 distinct futex words for the life of the process). The
 // remaining users are genuinely per-call expensive, so they stay gated.
-static bool guard_diag_enabled() {
+// The remaining user is the TLS dump, which is aarch64-only — hence maybe_unused,
+// so a host build without that block does not warn.
+[[maybe_unused]] static bool guard_diag_enabled() {
     static const int enabled = []() {
         const char* v = std::getenv("KUDROID_GUARD_DIAG");
         return v && v[0] == '1';
@@ -1481,6 +1490,19 @@ static void log_guard_acquire_diag(long tid, uintptr_t guard) {
         sameTid = inProgress && (static_cast<long>(storedTid) == tid);
     }
     if (!inProgress) return; // claim mi — no/not phi case ang iu tra
+    // Bounded instead of gated.
+    //
+    // This used to sit behind KUDROID_GUARD_DIAG, which nothing sets on iOS, so it had
+    // never run on the platform it was written for. But unlike the futex diagnostic it
+    // cannot simply be turned on: it frame-walks and resolves two module lookups, and
+    // it runs on EVERY gettid the guest performs. Leaving it unconditional would put
+    // that on a hot path for the life of the process.
+    //
+    // A count fixes both problems. The first few in-progress guards are the ones worth
+    // seeing — a spin that matters happens early, during static initialisation — and
+    // after that the cost returns to a single compare.
+    static std::atomic<int> s_emitted{0};
+    if (s_emitted.fetch_add(1, std::memory_order_relaxed) >= 16) return;
     char msg[640];
     snprintf(msg, sizeof(msg),
              "guard_diag %s tid=%ld guard=0x%llx [%s] b0=%u b1=%u stored_tid=%u "
@@ -1542,6 +1564,9 @@ extern "C" int bionic___cxa_guard_acquire(uint64_t* g) {
     // Ly tid before khi lock g_guardMtx — bionic_gettid lock g_tidRegistryMtx,
     // gi th t lock nht qun (guardMtx → tidRegistryMtx).
     const long tid = static_cast<long>(bionic_gettid());
+    // Declared outside the loop so one spin is one registry entry, however many
+    // times it goes round, and so it clears on every exit path.
+    std::optional<BlockingWaitScope> spinTracked;
     std::unique_lock<std::mutex> lock(g_guardMtx);
     for (;;) {
         volatile uint8_t* b0 = reinterpret_cast<volatile uint8_t*>(g);
@@ -1573,6 +1598,25 @@ extern "C" int bionic___cxa_guard_acquire(uint64_t* g) {
                 return 1;
             }
             // Thread khc ang init → nh du waiting, nhng CPU, th li.
+            //
+            // This is a SPIN, not a wait: it burns CPU rather than parking, so nothing
+            // that looks for blocked threads can see it. ULTRAKILL's main thread spent
+            // twelve seconds inside nativeRender with no wait registered anywhere,
+            // which is precisely what this shape produces.
+            //
+            // Unlike the same-tid branch above there is no loop-cut here, and there
+            // must not be: another thread genuinely owns the initialiser and returning
+            // early would hand the caller a half-constructed static. What was missing
+            // is any record that it is happening.
+            if (!spinTracked) {
+                spinTracked.emplace(WaitKind::kGuardSpin, g, guest_return_address(6));
+            }
+            // The guard word carries the tid of whoever is running the initialiser.
+            // Recording it turns "spinning on guard X" into "spinning on X, held by
+            // tid Y", which pairs with Y's own stalled line and names the whole cycle
+            // instead of half of it.
+            blocking_wait_note_owner(*reinterpret_cast<volatile uint32_t*>(b0 + 4));
+            blocking_wait_note_iteration();
             b0[1] |= 0x4;
             lock.unlock();
             ::sched_yield();
@@ -1616,7 +1660,11 @@ extern "C" ssize_t bionic_getrandom(void *buf, size_t buflen, unsigned int flags
 extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5, uintptr_t a6) {
     uintptr_t entryX19 = 0;
 #if defined(__aarch64__)
-    if (guard_diag_enabled()) asm volatile("mov %0, x19" : "=r"(entryX19));
+    // x19 at entry is the guard pointer when this syscall came from
+    // __cxa_guard_acquire (see log_guard_acquire_diag). Reading a register is free;
+    // the expensive part is the frame walk, which only happens for an in-progress
+    // guard and only for the first few.
+    asm volatile("mov %0, x19" : "=r"(entryX19));
 #endif
 
     switch (number) {
@@ -1737,7 +1785,7 @@ extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_
             const long result = static_cast<long>(::syscall(SYS_gettid));
 #endif
             tid_registry_record(result);
-            if (guard_diag_enabled()) log_guard_acquire_diag(result, entryX19);
+            log_guard_acquire_diag(result, entryX19);
             return result;
         }
         case 198: // socket
@@ -2422,7 +2470,7 @@ extern "C" int bionic_futex(uint32_t *uaddr, int futex_op, uint32_t val, const s
             const clockid_t deadline_clock = realtime ? CLOCK_REALTIME : CLOCK_MONOTONIC;
 
             const BlockingWaitScope tracked(WaitKind::kFutexTimed, uaddr,
-                                            __builtin_return_address(0));
+                                            guest_return_address(6));
 
             if (!absolute) {
                 // Relative: wait exactly as long as asked. A negative or absurd value
@@ -2484,7 +2532,7 @@ extern "C" int bionic_futex(uint32_t *uaddr, int futex_op, uint32_t val, const s
             // comes the thread is parked for the life of the process, which is what
             // the registry exists to make visible.
             const BlockingWaitScope tracked(WaitKind::kFutex, uaddr,
-                                            __builtin_return_address(0));
+                                            guest_return_address(6));
             q->cv.wait(qLock);
         }
         qLock.unlock();
@@ -2990,7 +3038,20 @@ extern "C" int bionic_epoll_wait(int epfd, void *events_ptr, int maxevents, int 
         ts_ptr = &ts;
     }
     
-    int n = kevent(epfd, NULL, 0, evlist, maxevents * 2, ts_ptr);
+    // timeout < 0 means "wait indefinitely", which is the case worth naming: a guest
+    // event loop whose fd never becomes ready sits here for the life of the process.
+    // A bounded wait is left untracked, because a report for something that will end
+    // on its own is noise.
+    int n;
+    if (timeout < 0) {
+        const BlockingWaitScope tracked(WaitKind::kEpoll,
+                                        reinterpret_cast<const void*>(
+                                            static_cast<uintptr_t>(epfd)),
+                                        guest_return_address(6));
+        n = kevent(epfd, NULL, 0, evlist, maxevents * 2, ts_ptr);
+    } else {
+        n = kevent(epfd, NULL, 0, evlist, maxevents * 2, ts_ptr);
+    }
     int unique_events = 0;
     
     if (n > 0) {
@@ -3023,6 +3084,13 @@ extern "C" int bionic_epoll_wait(int epfd, void *events_ptr, int maxevents, int 
     }
     return n >= 0 ? unique_events : -1;
 #else
+    if (timeout < 0) {
+        const BlockingWaitScope tracked(WaitKind::kEpoll,
+                                        reinterpret_cast<const void*>(
+                                            static_cast<uintptr_t>(epfd)),
+                                        guest_return_address(6));
+        return ::epoll_wait(epfd, reinterpret_cast<struct epoll_event*>(events_ptr), maxevents, timeout);
+    }
     return ::epoll_wait(epfd, reinterpret_cast<struct epoll_event*>(events_ptr), maxevents, timeout);
 #endif
 }
@@ -3130,8 +3198,14 @@ extern "C" int bionic_pthread_once(int* guest_once, void (*init_routine)(void)) 
 
     std::unique_lock<std::mutex> lock(ctl->mtx);
     // Mt thread khc ang run init_routine cho control word ny → ch.
-    while (once_state_load(guest_once) == 1) {
-        ctl->cv.wait(lock);
+    if (once_state_load(guest_once) == 1) {
+        // An initialiser that never finishes parks every other thread that needs the
+        // same static, and nothing else in the log would say which one.
+        const BlockingWaitScope tracked(WaitKind::kOnce, guest_once,
+                                        guest_return_address(6));
+        while (once_state_load(guest_once) == 1) {
+            ctl->cv.wait(lock);
+        }
     }
     // Thread khc va run xong trong lc ta ch.
     if (once_state_load(guest_once) == 2) return 0;
@@ -4668,7 +4742,7 @@ extern "C" int bionic_sem_wait(sem_t* sem) {
         // where Unity's helper threads wait, so it is the first thing worth naming
         // when a launch stops making progress.
         const BlockingWaitScope tracked(WaitKind::kSemaphore, sem,
-                                        __builtin_return_address(0));
+                                        guest_return_address(6));
         s->cv.wait(lock, [&s] { return s->value > 0 || s->destroyed; });
     }
     if (s->destroyed) {
@@ -4759,7 +4833,7 @@ extern "C" int bionic_sem_timedwait(sem_t* sem, const struct timespec* abs_timeo
         const auto duration =
             std::chrono::seconds(remSec) + std::chrono::nanoseconds(remNs);
         const BlockingWaitScope tracked(WaitKind::kSemaphoreTimed, sem,
-                                        __builtin_return_address(0));
+                                        guest_return_address(6));
         if (!s->cv.wait_for(lock, duration, ready)) {
             errno = ETIMEDOUT;
             return -1;

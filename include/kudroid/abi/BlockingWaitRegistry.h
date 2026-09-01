@@ -38,12 +38,24 @@ enum class WaitKind : int {
     kCondition,      // pthread_cond_wait (no timeout)
     kConditionTimed, // pthread_cond_timedwait
     kJavaMonitor,    // Object.wait / contended monitor-enter inside KuART
+    kRwlockRead,     // pthread_rwlock_rdlock
+    kRwlockWrite,    // pthread_rwlock_wrlock
+    kOnce,           // pthread_once, waiting for another thread's initialiser
+    kEpoll,          // epoll_wait with an indefinite timeout
+    // A SPIN, not a wait: __cxa_guard_acquire yields and retries while another
+    // thread runs a C++ static initialiser. Tracked with the waits because the
+    // question a stalled report answers is the same one — "what is this thread
+    // stuck on" — but it burns CPU instead of parking, so nothing that looks for
+    // blocked threads can see it. That is exactly how ULTRAKILL's main thread
+    // spent twelve seconds inside nativeRender with no wait registered anywhere.
+    kGuardSpin,
 };
 
 // Declare that this thread is entering a blocking wait. `object` is the address the
 // guest is waiting on (futex word, sem_t, mutex, condvar) and is what makes two
-// stuck threads distinguishable. `caller` should be __builtin_return_address(0) so
-// the report can name the guest function; nullptr is accepted.
+// stuck threads distinguishable. `caller` should be the guest address that asked for
+// the wait — see guest_return_address() below, because the immediate return address
+// is usually inside KuDroid's own wrapper and therefore useless in a report.
 //
 // Re-entrant declarations are not stacked: the innermost wins, which is correct
 // because a thread can only be parked on one thing at a time and the innermost is
@@ -52,6 +64,29 @@ void blocking_wait_begin(WaitKind kind, const void* object, const void* caller);
 
 // Clear this thread's declaration. Safe to call when nothing was declared.
 void blocking_wait_end();
+
+// Note that a tracked wait is still going round its retry loop. Only meaningful for
+// kGuardSpin, where there is no single blocking call to sit inside: the count is
+// what distinguishes "briefly contended" from "spinning forever", and it appears in
+// the stalled report.
+void blocking_wait_note_iteration();
+
+// Attach one number to this thread's current wait, reported as owner=N.
+//
+// For kGuardSpin it is the tid recorded in the guard word — the thread running the
+// static initialiser. That is the mssing half of a stall report: knowing a thread is
+// spinning on guard X is not actionable, but "spinning on X, owned by tid Y" pairs
+// directly with Y's own stalled line and names the whole cycle.
+void blocking_wait_note_owner(uint64_t owner);
+
+// The first return address that lies inside a guest module, or the immediate caller
+// when none does.
+//
+// A report naming KuDroid's own bionic_futex is worthless — that is where every
+// futex wait comes from. What identifies the bug is the guest frame that asked for
+// it. `frames` is how many levels to walk; the walk stops at the first address that
+// resolves to a loaded guest module.
+const void* guest_return_address(int frames);
 
 // RAII form. Prefer this: an early return out of a wait path that forgot to call
 // blocking_wait_end would leave a phantom entry and produce a false report.
