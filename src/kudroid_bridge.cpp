@@ -2171,91 +2171,95 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                         manager.resolveAppSymbol("ANativeActivity_onCreate")
                     );
 
-                    kuart_set_load_library_callback([](const char* libname) -> int {
-                        static std::set<std::string> s_loadedJniOnLoads;
-                if (!libname || !*libname) return 0;
-                std::string name = libname;
-                std::string filename = name;
-                if (filename.find(".so") == std::string::npos) {
-                    filename = "lib" + filename + ".so";
-                }
-                kudroid::LibraryManager& manager = globalLibraryManager();
-                void* sym = manager.resolveSymbolInLib(filename, "JNI_OnLoad");
-                if (!sym) sym = manager.resolveSymbolInLib(name, "JNI_OnLoad");
-                if (sym) {
-                    if (s_loadedJniOnLoads.insert(filename).second) {
-                        JavaVM* jvm = kuart_get_javavm();
-                        if (jvm) {
-                            bionic_init_main_thread_tls();
-                            char msg[256];
-                            snprintf(msg, sizeof(msg), "[kudroid_core] Invoking JNI_OnLoad in %s (System.loadLibrary)", filename.c_str());
-                            logCoreLine(4, msg);
-                            std::fprintf(stderr, "%s\n", msg);
+                    static std::set<std::string> s_loadedJniOnLoads;
+                    auto invokeJniOnLoad = [](const std::string& libname) -> int {
+                        if (libname.empty()) return 0;
+                        std::string name = libname;
+                        std::string filename = name;
+                        if (filename.find(".so") == std::string::npos) {
+                            filename = "lib" + filename + ".so";
+                        }
+                        kudroid::LibraryManager& manager = globalLibraryManager();
+                        void* sym = manager.resolveSymbolInLib(filename, "JNI_OnLoad");
+                        if (!sym) sym = manager.resolveSymbolInLib(name, "JNI_OnLoad");
+                        if (sym) {
+                            if (s_loadedJniOnLoads.insert(filename).second) {
+                                JavaVM* jvm = kuart_get_javavm();
+                                if (jvm) {
+                                    bionic_init_main_thread_tls();
+                                    char msg[256];
+                                    snprintf(msg, sizeof(msg), "[kudroid_core] Invoking JNI_OnLoad in %s", filename.c_str());
+                                    logCoreLine(4, msg);
+                                    std::fprintf(stderr, "%s\n", msg);
 
-                            auto jni_onload = reinterpret_cast<jint (*)(JavaVM*, void*)>(sym);
-                            jint version = 0;
-                            const int guardRc = kudroid_call_jni_onload_guarded(jni_onload, jvm, &version);
-                            if (guardRc == 0) {
-                                snprintf(msg, sizeof(msg), "[kudroid_core] JNI_OnLoad(%s) returned version: %d", filename.c_str(), version);
-                                logCoreLine(4, msg);
-                                std::fprintf(stderr, "%s\n", msg);
-                            } else if (guardRc < 0) {
-                                snprintf(msg, sizeof(msg), "[kudroid_core] WARNING: Native exception in JNI_OnLoad for %s", filename.c_str());
-                                logCoreLine(5, msg);
-                                std::fprintf(stderr, "%s\n", msg);
-                                const std::string report =
-                                    describeJniGuardFault(filename, guardRc);
-                                std::fputs(report.c_str(), stderr);
-                                appendCrashLogFile(report);
-                            } else {
-                                snprintf(msg, sizeof(msg), "[kudroid_core] WARNING: JNI_OnLoad in %s raised fatal signal %d", filename.c_str(), guardRc);
-                                logCoreLine(5, msg);
-                                std::fprintf(stderr, "%s\n", msg);
-                                // The guard leaves the crash-log path unreached, so
-                                // report the captured state here. Without it a
-                                // swallowed fault was one WARNING line with no pc,
-                                // no fault address and no stack — nothing to work
-                                // from. Goes to kudroid_crash.log as well, where
-                                // every other fault in this process is recorded.
-                                const std::string report =
-                                    describeJniGuardFault(filename, guardRc);
-                                std::fputs(report.c_str(), stderr);
-                                appendCrashLogFile(report);
-                            }
+                                    auto jni_onload = reinterpret_cast<jint (*)(JavaVM*, void*)>(sym);
+                                    jint version = 0;
+                                    const int guardRc = kudroid_call_jni_onload_guarded(jni_onload, jvm, &version);
+                                    if (guardRc == 0) {
+                                        snprintf(msg, sizeof(msg), "[kudroid_core] JNI_OnLoad(%s) returned version: %d", filename.c_str(), version);
+                                        logCoreLine(4, msg);
+                                        std::fprintf(stderr, "%s\n", msg);
+                                    } else if (guardRc < 0) {
+                                        snprintf(msg, sizeof(msg), "[kudroid_core] WARNING: Native exception in JNI_OnLoad for %s", filename.c_str());
+                                        logCoreLine(5, msg);
+                                        std::fprintf(stderr, "%s\n", msg);
+                                        const std::string report =
+                                            describeJniGuardFault(filename, guardRc);
+                                        std::fputs(report.c_str(), stderr);
+                                        appendCrashLogFile(report);
+                                    } else {
+                                        snprintf(msg, sizeof(msg), "[kudroid_core] WARNING: JNI_OnLoad in %s raised fatal signal %d", filename.c_str(), guardRc);
+                                        logCoreLine(5, msg);
+                                        std::fprintf(stderr, "%s\n", msg);
+                                        const std::string report =
+                                            describeJniGuardFault(filename, guardRc);
+                                        std::fputs(report.c_str(), stderr);
+                                        appendCrashLogFile(report);
+                                    }
 
-                            // JNI requires native code to check and clear pending
-                            // exceptions before returning to Java. Libraries that
-                            // ignore the rule leave one in flight, and the
-                            // interpreter then attributes it to the Java call that
-                            // triggered the load: an exception raised inside a
-                            // JNI_OnLoad callback came back out of
-                            // System.loadLibrary("PlayFabMultiplayer"), which
-                            // Minecraft only guards with
-                            // catch(UnsatisfiedLinkError), so MainActivity.<clinit>
-                            // died on an unrelated ArrayIndexOutOfBoundsException.
-                            //
-                            // Done on every exit path, not just the clean one: a
-                            // library that aborted mid-callback is even more likely
-                            // to have left one behind. The description carries the
-                            // Java stack trace so the discarded exception stays
-                            // diagnosable instead of vanishing.
-                            const char* leaked = nullptr;
-                            if (kuart_take_pending_exception(&leaked)) {
-                                snprintf(msg, sizeof(msg),
-                                         "[kudroid_core] JNI_OnLoad(%s) left a pending Java exception; cleared",
-                                         filename.c_str());
-                                logCoreLine(5, msg);
-                                // The description carries a multi-line stack trace,
-                                // so it goes straight to stderr rather than through
-                                // the fixed-size log buffer that would truncate it.
-                                std::fprintf(stderr, "%s:\n%s\n", msg,
-                                             leaked != nullptr ? leaked : "?");
+                                    const char* leaked = nullptr;
+                                    if (kuart_take_pending_exception(&leaked)) {
+                                        snprintf(msg, sizeof(msg),
+                                                 "[kudroid_core] JNI_OnLoad(%s) left a pending Java exception; cleared",
+                                                 filename.c_str());
+                                        logCoreLine(5, msg);
+                                        std::fprintf(stderr, "%s:\n%s\n", msg,
+                                                     leaked != nullptr ? leaked : "?");
+                                    }
+                                }
                             }
                         }
-                    }
-                }
-                return 1;
-            });
+                        return 1;
+                    };
+
+                    kuart_set_load_library_callback([](const char* libname) -> int {
+                        if (!libname || !*libname) return 0;
+                        kudroid::LibraryManager& manager = globalLibraryManager();
+                        std::string filename = libname;
+                        if (filename.find(".so") == std::string::npos) {
+                            filename = "lib" + filename + ".so";
+                        }
+                        void* sym = manager.resolveSymbolInLib(filename, "JNI_OnLoad");
+                        if (!sym) sym = manager.resolveSymbolInLib(libname, "JNI_OnLoad");
+                        if (sym) {
+                            static std::set<std::string> s_dynamicJniOnLoads;
+                            if (s_dynamicJniOnLoads.insert(filename).second) {
+                                JavaVM* jvm = kuart_get_javavm();
+                                if (jvm) {
+                                    bionic_init_main_thread_tls();
+                                    char msg[256];
+                                    snprintf(msg, sizeof(msg), "[kudroid_core] Invoking JNI_OnLoad in %s (System.loadLibrary)", filename.c_str());
+                                    logCoreLine(4, msg);
+                                    std::fprintf(stderr, "%s\n", msg);
+
+                                    auto jni_onload = reinterpret_cast<jint (*)(JavaVM*, void*)>(sym);
+                                    jint version = 0;
+                                    kudroid_call_jni_onload_guarded(jni_onload, jvm, &version);
+                                }
+                            }
+                        }
+                        return 1;
+                    });
 
                     if (native_activity_create) {
                         appendAndEcho("[kudroid_core] Native Game Activity detected.");
@@ -2736,6 +2740,12 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                             for (const auto& a : manifestInfo.activities) {
                                 registerMeta(a.name, a.metaData);
                             }
+                        }
+
+                        // Execute JNI_OnLoad for all pre-loaded native libraries so that RegisterNatives
+                        // binds all JNI methods (e.g. UnityPlayer native callbacks) before Java startup.
+                        for (const auto& [libPath, loader] : manager.libraries()) {
+                            invokeJniOnLoad(libPath);
                         }
 
                         if (!kuart_launch_app(pkgName.c_str(),

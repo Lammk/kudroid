@@ -207,7 +207,7 @@ private:
     DexClassLinker* linker_ = nullptr;
     DexJniEnv* jni_env_ = nullptr;
     std::string last_error_;
-    uint64_t instruction_limit_ = 100'000'000;
+    uint64_t instruction_limit_ = UINT64_MAX;
     OatFile* oat_profile_ = nullptr;
 
     // Per-thread interpreter state. One Interpreter instance is shared by every

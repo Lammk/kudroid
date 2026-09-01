@@ -205,6 +205,16 @@ public class View {
         return this;
     }
 
+    private CharSequence mContentDescription;
+
+    public void setContentDescription(CharSequence contentDescription) {
+        mContentDescription = contentDescription;
+    }
+
+    public CharSequence getContentDescription() {
+        return mContentDescription;
+    }
+
     /**
      * returns the left position of the view.
      */

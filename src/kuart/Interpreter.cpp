@@ -951,7 +951,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
     const uint32_t insns_size = accessor.InsnsSizeInCodeUnits();
 
     while (dex_pc < insns_size) {
-        if (++instructions_executed_ > instruction_limit_) {
+        if (instruction_limit_ != UINT64_MAX && ++instructions_executed_ > instruction_limit_) {
             ThrowException("Ljava/lang/InternalError;", "instruction number limit exceeded");
             return return_value;
         }

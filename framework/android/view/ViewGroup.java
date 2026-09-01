@@ -58,9 +58,34 @@ public class ViewGroup extends View implements ViewParent {
             if (mChildren[i] == view) {
                 System.arraycopy(mChildren, i + 1, mChildren, i, mChildCount - i - 1);
                 mChildCount--;
+                mChildren[mChildCount] = null;
                 view.setParent(null);
                 return;
             }
+        }
+    }
+
+    public int indexOfChild(View child) {
+        for (int i = 0; i < mChildCount; i++) {
+            if (mChildren[i] == child) return i;
+        }
+        return -1;
+    }
+
+    public void removeViewAt(int index) {
+        if (index < 0 || index >= mChildCount) return;
+        View view = mChildren[index];
+        System.arraycopy(mChildren, index + 1, mChildren, index, mChildCount - index - 1);
+        mChildCount--;
+        mChildren[mChildCount] = null;
+        if (view != null) view.setParent(null);
+    }
+
+    public void bringChildToFront(View child) {
+        int index = indexOfChild(child);
+        if (index >= 0) {
+            removeViewAt(index);
+            addView(child);
         }
     }
 
