@@ -512,6 +512,10 @@ public class Activity extends ContextThemeWrapper {
         return mContentView;
     }
 
+    public boolean isInMultiWindowMode() {
+        return false;
+    }
+
     public boolean requestWindowFeature(int featureId) {
         return getWindow().requestFeature(featureId);
     }

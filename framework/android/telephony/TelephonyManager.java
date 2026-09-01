@@ -25,6 +25,11 @@ public class TelephonyManager {
     public String getSimCountryIso() { return "vn"; }
     public int getSimState() { return SIM_STATE_READY; }
     public int getPhoneType() { return PHONE_TYPE_GSM; }
-    public int getNetworkType() { return NETWORK_TYPE_LTE; }
+    public static final int CALL_STATE_IDLE = 0;
+    public static final int CALL_STATE_RINGING = 1;
+    public static final int CALL_STATE_OFFHOOK = 2;
+
+    public void listen(PhoneStateListener listener, int events) {}
+
     public int getDataState() { return 2; } // DATA_CONNECTED
 }

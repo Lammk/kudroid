@@ -297,6 +297,19 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
         return result;
     }
 
+    // Unity's NativeLoader verifies that native libraries (libmain.so, libunity.so) are loaded.
+    // In KuDroid, all ELF libraries are pre-loaded by the core runtime before Java startup.
+    // Returning true (1) confirms library availability so UnityPlayer proceeds to native initialization.
+    if (std::strstr(owner, "NativeLoader") != nullptr) {
+        if (std::strcmp(method_name, "load") == 0 ||
+            std::strcmp(method_name, "unload") == 0 ||
+            std::strcmp(method_name, "initialize") == 0) {
+            KLOGV("KuARTNative", "Unity NativeLoader.%s -> returning true", method_name);
+            native_call_exit();
+            return DexValue::Int(1);
+        }
+    }
+
     // The first parameter after env is receiver (instance) or jclass (static).
     void* self;
     size_t first = 0;
