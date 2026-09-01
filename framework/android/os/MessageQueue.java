@@ -72,8 +72,8 @@ public final class MessageQueue {
      * Returns the next message ready to be executed, or null if the queue is quitting.
      */
     Message next() {
-        for (;;) {
-            synchronized (this) {
+        synchronized (this) {
+            for (;;) {
                 if (mQuitting) {
                     return null;
                 }
@@ -86,9 +86,8 @@ public final class MessageQueue {
                         // Next message is in the future. Calculate wait timeout.
                         long timeout = msg.when - now;
                         try {
-                            this.wait(Math.min(timeout, 50));
+                            this.wait(timeout);
                         } catch (InterruptedException ignored) {}
-                        continue;
                     } else {
                         // Message is ready to dispatch
                         mMessages = msg.next;
@@ -97,9 +96,9 @@ public final class MessageQueue {
                         return msg;
                     }
                 } else {
-                    // No messages, wait for notification
+                    // No messages, wait unbounded for notification
                     try {
-                        this.wait(50);
+                        this.wait();
                     } catch (InterruptedException ignored) {}
                 }
             }

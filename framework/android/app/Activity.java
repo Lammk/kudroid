@@ -604,4 +604,27 @@ public class Activity extends ContextThemeWrapper {
      */
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
     }
+
+    public <I, O> androidx.activity.result.ActivityResultLauncher<I> registerForActivityResult(
+            androidx.activity.result.contract.ActivityResultContract<I, O> contract,
+            androidx.activity.result.ActivityResultCallback<O> callback) {
+        return new androidx.activity.result.ActivityResultLauncher<I>() {
+            @Override
+            public void launch(I input, androidx.core.app.ActivityOptionsCompat options) {}
+            @Override
+            public void unregister() {}
+            @Override
+            public androidx.activity.result.contract.ActivityResultContract<I, ?> getContract() { return contract; }
+        };
+    }
+
+    public <I, O> androidx.activity.result.ActivityResultLauncher<I> registerForActivityResult(
+            androidx.activity.result.contract.ActivityResultContract<I, O> contract,
+            androidx.activity.result.ActivityResultRegistry registry,
+            androidx.activity.result.ActivityResultCallback<O> callback) {
+        if (registry != null) {
+            return registry.register("activity_rq#" + System.identityHashCode(callback), contract, callback);
+        }
+        return registerForActivityResult(contract, callback);
+    }
 }

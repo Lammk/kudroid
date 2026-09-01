@@ -1,3 +1,3 @@
 package androidx.core.app;
-import android.app.Activity;
-public class ComponentActivity extends Activity {}
+
+public class ComponentActivity extends androidx.activity.ComponentActivity {}
