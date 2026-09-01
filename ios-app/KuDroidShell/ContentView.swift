@@ -1642,9 +1642,9 @@ class NativeMetalViewController: UIViewController {
 
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
         let req = kudroid_get_requested_orientation()
-        if req == 0 || req == 6 || req == 8 {
+        if req == 0 || req == 6 || req == 8 || req == 11 {
             return .landscape
-        } else if req == 1 || req == 7 || req == 9 {
+        } else if req == 1 || req == 7 || req == 9 || req == 12 {
             return .portrait
         }
         return .allButUpsideDown
@@ -2223,7 +2223,7 @@ public func kudroid_trigger_haptic(intensity: Int32) {
 @_cdecl("kudroid_notify_orientation_change")
 public func kudroid_notify_orientation_change(orientation: Int32) {
     DispatchQueue.main.async {
-        if orientation == 0 || orientation == 6 || orientation == 8 {
+        if orientation == 0 || orientation == 6 || orientation == 8 || orientation == 11 {
             // Landscape
             NSLog("[KuDroid] kudroid_notify_orientation_change: LANDSCAPE (%d)", orientation)
             if #available(iOS 16.0, *) {
@@ -2239,7 +2239,7 @@ public func kudroid_notify_orientation_change(orientation: Int32) {
                 UIDevice.current.setValue(UIInterfaceOrientation.landscapeRight.rawValue, forKey: "orientation")
                 UIViewController.attemptRotationToDeviceOrientation()
             }
-        } else if orientation == 1 || orientation == 7 || orientation == 9 {
+        } else if orientation == 1 || orientation == 7 || orientation == 9 || orientation == 12 {
             // Portrait
             NSLog("[KuDroid] kudroid_notify_orientation_change: PORTRAIT (%d)", orientation)
             if #available(iOS 16.0, *) {

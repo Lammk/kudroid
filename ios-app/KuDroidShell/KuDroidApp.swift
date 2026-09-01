@@ -106,9 +106,9 @@ class AppDelegate: NSObject, UIApplicationDelegate {
 
     func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
         let req = kudroid_get_requested_orientation()
-        if req == 0 || req == 6 || req == 8 {
+        if req == 0 || req == 6 || req == 8 || req == 11 {
             return .landscape
-        } else if req == 1 || req == 7 || req == 9 {
+        } else if req == 1 || req == 7 || req == 9 || req == 12 {
             return .portrait
         }
         return AppDelegate.orientationLock

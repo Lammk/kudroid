@@ -164,6 +164,7 @@ struct android_epoll_event {
 #include <memory>
 #include <new>
 #include <dlfcn.h>
+#include <thread>
 
 extern const char* g_kudroid_log_dir_ptr;
 
@@ -2135,6 +2136,52 @@ extern "C" ssize_t bionic_getrandom(void *buf, size_t buflen, unsigned int flags
     ::close(fd);
     return ret;
 #endif
+}
+
+extern "C" long bionic_sysconf(int name) {
+    switch (name) {
+        case 0: // _SC_ARG_MAX
+            return 131072;
+        case 1: // _SC_CHILD_MAX
+            return 1024;
+        case 2: // _SC_CLK_TCK
+            return 100;
+        case 3: // _SC_NGROUPS_MAX
+            return 65536;
+        case 4: // _SC_OPEN_MAX
+            return 32768;
+        case 30: // _SC_PAGESIZE (Linux)
+        case 39:
+        case 40: {
+            long pz = ::sysconf(_SC_PAGESIZE);
+            return pz > 0 ? pz : 16384;
+        }
+        case 83: // _SC_NPROCESSORS_CONF (Linux)
+        case 84: // _SC_NPROCESSORS_ONLN (Linux)
+        case 96: // _SC_NPROCESSORS_CONF (Android Bionic)
+        case 97: // _SC_NPROCESSORS_ONLN (Android Bionic)
+        {
+            unsigned int count = std::thread::hardware_concurrency();
+            return count > 0 ? static_cast<long>(count) : 8;
+        }
+        case 85: // _SC_PHYS_PAGES (Linux)
+        {
+            long pz = ::sysconf(_SC_PAGESIZE);
+            if (pz <= 0) pz = 16384;
+            uint64_t mem = 8589934592ULL; // 8GB RAM
+            return static_cast<long>(mem / pz);
+        }
+        case 86: // _SC_AVPHYS_PAGES (Linux)
+        {
+            long pz = ::sysconf(_SC_PAGESIZE);
+            if (pz <= 0) pz = 16384;
+            uint64_t mem = 4294967296ULL; // 4GB free RAM
+            return static_cast<long>(mem / pz);
+        }
+        default:
+            break;
+    }
+    return ::sysconf(name);
 }
 
 // ── ashmem (Android shared memory) ──
@@ -4778,6 +4825,7 @@ const SymbolEntry kSyscallSymbols[] = {
     {"gettid", reinterpret_cast<void*>(&bionic_gettid)},
     {"syscall", reinterpret_cast<void*>(&bionic_syscall)},
     {"getauxval", reinterpret_cast<void*>(&bionic_getauxval)},
+    {"sysconf", reinterpret_cast<void*>(&bionic_sysconf)},
     {"timerfd_create", reinterpret_cast<void*>(&bionic_timerfd_create)},
     {"timerfd_settime", reinterpret_cast<void*>(&bionic_timerfd_settime)},
     {"eventfd", reinterpret_cast<void*>(&bionic_eventfd)},

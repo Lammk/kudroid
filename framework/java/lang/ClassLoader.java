@@ -28,6 +28,13 @@ public class ClassLoader {
         return null;
     }
 
+    public String findLibrary(String libname) {
+        if (libname == null) return null;
+        if (!libname.startsWith("lib")) libname = "lib" + libname;
+        if (!libname.endsWith(".so")) libname = libname + ".so";
+        return "/data/app/" + android.app.ActivityThread.getPackageName() + "/lib/arm64-v8a/" + libname;
+    }
+
     public static ClassLoader getSystemClassLoader() {
         return SystemHolder.INSTANCE;
     }

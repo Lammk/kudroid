@@ -31,6 +31,9 @@ public final class Scanner implements Iterator<String>, Closeable {
     public double nextDouble() { return Double.parseDouble(next()); }
     public boolean hasNextLine() { return hasNext(); }
     public String nextLine() { return next(); }
+    public Scanner useDelimiter(String pattern) { return this; }
+    public Scanner useDelimiter(java.util.regex.Pattern pattern) { return this; }
+    public java.util.regex.Pattern delimiter() { return java.util.regex.Pattern.compile("\\s+"); }
     public void remove() { throw new UnsupportedOperationException(); }
     public void close() {}
 }
