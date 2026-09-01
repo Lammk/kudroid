@@ -129,9 +129,6 @@ struct KuDroidApp: App {
     var body: some Scene {
         WindowGroup {
             ZStack {
-                GlobalMetalViewRepresentable()
-                    .ignoresSafeArea()
-
                 if !session.activeGuestApp.isEmpty {
                     DedicatedAppRunnerView(
                         appName: session.activeGuestApp,

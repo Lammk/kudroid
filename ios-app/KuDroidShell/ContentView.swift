@@ -1636,8 +1636,12 @@ class NativeMetalViewController: UIViewController {
     }
 
     override func loadView() {
-        metalView = NativeMetalView(frame: UIScreen.main.bounds)
-        self.view = metalView
+        let root = UIView(frame: UIScreen.main.bounds)
+        root.backgroundColor = .black
+        metalView = NativeMetalView(frame: root.bounds)
+        metalView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        root.addSubview(metalView)
+        self.view = root
     }
 
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
@@ -1668,16 +1672,18 @@ class NativeMetalViewController: UIViewController {
         view.addSubview(statusLabel)
 
         // Floating Exit Button allows users to return to Launcher at any time
-        let closeButton = UIButton(type: .system)
-        let config = UIImage.SymbolConfiguration(pointSize: 22, weight: .bold)
+        let closeButton = UIButton(type: .custom)
+        let config = UIImage.SymbolConfiguration(pointSize: 24, weight: .bold)
         closeButton.setImage(UIImage(systemName: "xmark.circle.fill", withConfiguration: config), for: .normal)
-        closeButton.tintColor = UIColor.white.withAlphaComponent(0.6)
-        closeButton.backgroundColor = UIColor.black.withAlphaComponent(0.4)
-        closeButton.layer.cornerRadius = 20
+        closeButton.tintColor = UIColor.white.withAlphaComponent(0.85)
+        closeButton.backgroundColor = UIColor.black.withAlphaComponent(0.5)
+        closeButton.layer.cornerRadius = 22
         closeButton.layer.masksToBounds = true
+        closeButton.isUserInteractionEnabled = true
         closeButton.translatesAutoresizingMaskIntoConstraints = false
         closeButton.addTarget(self, action: #selector(handleExitButton), for: .touchUpInside)
         view.addSubview(closeButton)
+        view.bringSubviewToFront(closeButton)
 
         NSLayoutConstraint.activate([
             statusLabel.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -16),
@@ -1687,8 +1693,8 @@ class NativeMetalViewController: UIViewController {
 
             closeButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 10),
             closeButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
-            closeButton.widthAnchor.constraint(equalToConstant: 40),
-            closeButton.heightAnchor.constraint(equalToConstant: 40)
+            closeButton.widthAnchor.constraint(equalToConstant: 44),
+            closeButton.heightAnchor.constraint(equalToConstant: 44)
         ])
 
         // Automatically dim status labels after 3 seconds
@@ -1774,7 +1780,7 @@ class NativeMetalViewController: UIViewController {
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        if !isStarted, let metalLayer = view.layer as? CAMetalLayer {
+        if !isStarted, let metalLayer = metalView?.layer as? CAMetalLayer {
             let scale = UIScreen.main.scale
             let bounds = view.bounds.size.width > 0 ? view.bounds : UIScreen.main.bounds
             let targetSize = CGSize(width: bounds.width * scale, height: bounds.height * scale)
@@ -1805,7 +1811,7 @@ class NativeMetalViewController: UIViewController {
         let width = Int32(bounds.width * scale)
         let height = Int32(bounds.height * scale)
 
-        if let metalLayer = view.layer as? CAMetalLayer {
+        if let metalLayer = metalView.layer as? CAMetalLayer {
             if metalLayer.device == nil {
                 metalLayer.device = MTLCreateSystemDefaultDevice()
             }
@@ -1817,10 +1823,9 @@ class NativeMetalViewController: UIViewController {
             metalLayer.isOpaque = true
             metalLayer.contentsScale = scale
             metalLayer.drawableSize = CGSize(width: Double(width), height: Double(height))
+            let unmanaged = Unmanaged.passUnretained(metalLayer)
+            kudroid_set_metal_layer(unmanaged.toOpaque(), width, height, Float(scale))
         }
-
-        let unmanaged = Unmanaged.passUnretained(view.layer)
-        kudroid_set_metal_layer(unmanaged.toOpaque(), width, height, Float(scale))
 
         // Timer periodically scans crash status, screen orientation, and No Sleep from the C++ bridge
         crashCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] timer in
@@ -1831,18 +1836,18 @@ class NativeMetalViewController: UIViewController {
                 return
             }
 
-            // ng b  tr ng th i No Sleep (Keep Screen On) t  Android app
+            // Đồng bộ trạng thái No Sleep (Keep Screen On) từ Android app
             let keepScreenOn = kudroid_get_keep_screen_on() != 0
             if UIApplication.shared.isIdleTimerDisabled != keepScreenOn {
                 UIApplication.shared.isIdleTimerDisabled = keepScreenOn
                 NSLog("[KuDroid] Synchronized isIdleTimerDisabled = %@", keepScreenOn ? "true" : "false")
             }
 
-            // Qu t h ng m n h nh y u c u t  Android guest app
+            // Quét hướng màn hình yêu cầu từ Android guest app
             let reqOri = kudroid_get_requested_orientation()
             if reqOri != self.lastRequestedOrientation {
                 self.lastRequestedOrientation = reqOri
-                if reqOri == 0 || reqOri == 6 || reqOri == 8 {
+                if reqOri == 0 || reqOri == 6 || reqOri == 8 || reqOri == 11 {
                     // Landscape
                     NSLog("[KuDroid] Guest app requested LANDSCAPE orientation (%d)", reqOri)
                     if #available(iOS 16.0, *) {
@@ -1853,7 +1858,7 @@ class NativeMetalViewController: UIViewController {
                             }
                         }
                     }
-                } else if reqOri == 1 || reqOri == 7 || reqOri == 9 {
+                } else if reqOri == 1 || reqOri == 7 || reqOri == 9 || reqOri == 12 {
                     // Portrait
                     NSLog("[KuDroid] Guest app requested PORTRAIT orientation (%d)", reqOri)
                     if #available(iOS 16.0, *) {
