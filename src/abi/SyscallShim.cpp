@@ -4467,29 +4467,202 @@ extern "C" size_t bionic___fwrite_chk(const void* buf, size_t size, size_t count
     return ::fwrite(buf, size, count, stream);
 }
 
+// ── POSIX unnamed semaphores ────────────────────────────────────────────────
+//
+// Darwin DECLARES sem_init/sem_wait/sem_post/sem_destroy in <semaphore.h> but does
+// not implement them: each sets ENOSYS and returns -1. Only named semaphores
+// (sem_open) work. So an unshimmed guest call fell through BionicShim's
+// dlsym(RTLD_DEFAULT) straight to libSystem and failed.
+//
+// libunity.so imports exactly sem_init, sem_wait, sem_post and sem_destroy — all
+// four unnamed. Unity starts a helper thread, sets its name, then blocks on a
+// semaphore waiting for the spawner's handshake. sem_wait returning -1/ENOSYS is
+// not a blocking wait, so the helper raced ahead while the spawner waited for a
+// sem_post that the failed pair could never deliver. The log stopped on
+// prctl(PR_SET_NAME, "AssetGarbageCollectorHelper") — the last thing that happened
+// before the handshake — with nothing to say a semaphore had failed.
+//
+// The guest's sem_t cannot hold this state: bionic's is 4 bytes, the guest embeds
+// it in its own structs, and its layout is not ours to reinterpret. State is
+// therefore kept beside it, keyed by address, the same way g_futexQueues does.
+struct GuestSemaphore {
+    std::mutex mtx;
+    std::condition_variable cv;
+    unsigned int value = 0;
+    bool destroyed = false;
+};
+
+static std::map<const void*, std::shared_ptr<GuestSemaphore>> g_semaphores;
+static std::mutex g_semaphoresMtx;
+
+// Look up, optionally creating. A wait on a semaphore we never saw initialised is
+// treated as a semaphore initialised to 0, which is what a handshake uses and the
+// only interpretation that can be correct; it is logged once because it means an
+// init slipped past this shim.
+static std::shared_ptr<GuestSemaphore> guest_sem_find(const void* sem, bool create) {
+    std::lock_guard<std::mutex> lock(g_semaphoresMtx);
+    auto it = g_semaphores.find(sem);
+    if (it != g_semaphores.end()) return it->second;
+    if (!create) return nullptr;
+    static std::once_flag once;
+    std::call_once(once, [] {
+        logAndroidMessage(5, "KuDroidSyscall",
+                          "sem_wait/sem_post on a semaphore that was never sem_init'd;"
+                          " treating it as initialised to 0");
+    });
+    auto created = std::make_shared<GuestSemaphore>();
+    g_semaphores.emplace(sem, created);
+    return created;
+}
+
+extern "C" int bionic_sem_init(sem_t* sem, int pshared, unsigned int value) {
+    if (!sem) {
+        errno = EINVAL;
+        return -1;
+    }
+    // pshared is accepted and ignored: KuDroid runs the guest in one process, so a
+    // process-shared semaphore and a thread-shared one behave identically here.
+    // Rejecting it would fail guests that pass 1 out of habit.
+    (void)pshared;
+    auto s = std::make_shared<GuestSemaphore>();
+    s->value = value;
+    {
+        std::lock_guard<std::mutex> lock(g_semaphoresMtx);
+        g_semaphores[sem] = s;  // re-init at the same address replaces the old state
+    }
+    return 0;
+}
+
+extern "C" int bionic_sem_destroy(sem_t* sem) {
+    if (!sem) {
+        errno = EINVAL;
+        return -1;
+    }
+    std::shared_ptr<GuestSemaphore> s;
+    {
+        std::lock_guard<std::mutex> lock(g_semaphoresMtx);
+        auto it = g_semaphores.find(sem);
+        if (it == g_semaphores.end()) return 0;  // destroying an unknown one is harmless
+        s = it->second;
+        g_semaphores.erase(it);
+    }
+    // Release anyone still parked. Destroying a semaphore with waiters is undefined
+    // in POSIX, but leaving a guest thread blocked forever during shutdown turns an
+    // exit into a hang, which is the failure this whole shim exists to avoid.
+    {
+        std::lock_guard<std::mutex> lock(s->mtx);
+        s->destroyed = true;
+    }
+    s->cv.notify_all();
+    return 0;
+}
+
+extern "C" int bionic_sem_wait(sem_t* sem) {
+    if (!sem) {
+        errno = EINVAL;
+        return -1;
+    }
+    auto s = guest_sem_find(sem, /*create=*/true);
+    std::unique_lock<std::mutex> lock(s->mtx);
+    s->cv.wait(lock, [&s] { return s->value > 0 || s->destroyed; });
+    if (s->destroyed) {
+        errno = EINVAL;
+        return -1;
+    }
+    --s->value;
+    return 0;
+}
+
+extern "C" int bionic_sem_trywait(sem_t* sem) {
+    if (!sem) {
+        errno = EINVAL;
+        return -1;
+    }
+    auto s = guest_sem_find(sem, /*create=*/true);
+    std::unique_lock<std::mutex> lock(s->mtx);
+    if (s->value == 0) {
+        errno = EAGAIN;
+        return -1;
+    }
+    --s->value;
+    return 0;
+}
+
+extern "C" int bionic_sem_post(sem_t* sem) {
+    if (!sem) {
+        errno = EINVAL;
+        return -1;
+    }
+    auto s = guest_sem_find(sem, /*create=*/true);
+    {
+        std::lock_guard<std::mutex> lock(s->mtx);
+        ++s->value;
+    }
+    // notify_one, not all: a post releases exactly one waiter, and waking the rest
+    // only to re-block them turns a handshake between many threads into a stampede.
+    s->cv.notify_one();
+    return 0;
+}
+
+extern "C" int bionic_sem_getvalue(sem_t* sem, int* out) {
+    if (!sem || !out) {
+        errno = EINVAL;
+        return -1;
+    }
+    auto s = guest_sem_find(sem, /*create=*/true);
+    std::lock_guard<std::mutex> lock(s->mtx);
+    *out = static_cast<int>(s->value);
+    return 0;
+}
+
 // bionic: int sem_timedwait(sem_t* sem, const struct timespec* abs_timeout)
-// abs_timeout is absolute CLOCK_REALTIME. Emulated via sem_trywait + sleep loop on iOS.
+// abs_timeout is absolute CLOCK_REALTIME.
+//
+// Previously this called the host ::sem_trywait on the guest's sem_t in a sleep
+// loop, which on Darwin fails with ENOSYS on the very first iteration and then
+// spins until the deadline. It now waits on the same emulated state as the rest.
 extern "C" int bionic_sem_timedwait(sem_t* sem, const struct timespec* abs_timeout) {
     if (!sem || !abs_timeout) {
         errno = EINVAL;
         return -1;
     }
-    for (;;) {
-        if (::sem_trywait(sem) == 0) return 0;
-        const int err = errno;
-        if (err != EAGAIN) return -1; // EINTR / EINVAL
+    auto s = guest_sem_find(sem, /*create=*/true);
 
-        struct timespec now;
-        ::clock_gettime(CLOCK_REALTIME, &now);
-        if (now.tv_sec > abs_timeout->tv_sec ||
-            (now.tv_sec == abs_timeout->tv_sec && now.tv_nsec >= abs_timeout->tv_nsec)) {
+    // The deadline is absolute CLOCK_REALTIME; convert to a duration so it can be
+    // waited on without assuming the host clock's epoch matches.
+    struct timespec now;
+    ::clock_gettime(CLOCK_REALTIME, &now);
+    int64_t remSec = int64_t(abs_timeout->tv_sec) - int64_t(now.tv_sec);
+    int64_t remNs = int64_t(abs_timeout->tv_nsec) - int64_t(now.tv_nsec);
+    if (remNs < 0) {
+        remSec -= 1;
+        remNs += 1000000000;
+    }
+
+    std::unique_lock<std::mutex> lock(s->mtx);
+    auto ready = [&s] { return s->value > 0 || s->destroyed; };
+    if (remSec < 0) {
+        // Already expired. POSIX still requires the semaphore be taken if it is
+        // available, so check before reporting a timeout.
+        if (!ready()) {
             errno = ETIMEDOUT;
             return -1;
         }
-
-        struct timespec slp = {0, 1000000}; // 1ms
-        ::nanosleep(&slp, nullptr);
+    } else {
+        if (remSec > 86400) remSec = 86400;  // cap so the duration cannot overflow
+        const auto duration =
+            std::chrono::seconds(remSec) + std::chrono::nanoseconds(remNs);
+        if (!s->cv.wait_for(lock, duration, ready)) {
+            errno = ETIMEDOUT;
+            return -1;
+        }
     }
+    if (s->destroyed) {
+        errno = EINVAL;
+        return -1;
+    }
+    --s->value;
+    return 0;
 }
 
 // Forward android.util.Log.println_native to standard KuDroid log pipeline.
@@ -5152,6 +5325,12 @@ const SymbolEntry kSyscallSymbols[] = {
     {"__strlen_chk", reinterpret_cast<void*>(&bionic___strlen_chk)},
     {"__FD_SET_chk", reinterpret_cast<void*>(&bionic___FD_SET_chk)},
     {"__FD_ISSET_chk", reinterpret_cast<void*>(&bionic___FD_ISSET_chk)},
+    {"sem_init", reinterpret_cast<void*>(&bionic_sem_init)},
+    {"sem_destroy", reinterpret_cast<void*>(&bionic_sem_destroy)},
+    {"sem_wait", reinterpret_cast<void*>(&bionic_sem_wait)},
+    {"sem_trywait", reinterpret_cast<void*>(&bionic_sem_trywait)},
+    {"sem_post", reinterpret_cast<void*>(&bionic_sem_post)},
+    {"sem_getvalue", reinterpret_cast<void*>(&bionic_sem_getvalue)},
     {"sem_timedwait", reinterpret_cast<void*>(&bionic_sem_timedwait)},
     {"android_set_abort_message", reinterpret_cast<void*>(&bionic_android_set_abort_message)},
     {"__memcpy_chk", reinterpret_cast<void*>(&bionic___memcpy_chk)},

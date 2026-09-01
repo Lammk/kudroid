@@ -34,6 +34,7 @@
 #include <unwind.h>
 #include <mutex>
 #include <atomic>
+#include <thread>
 
 #if defined(__APPLE__)
 #include <mach/mach.h>
@@ -3837,11 +3838,27 @@ extern "C" void kudroid_clear_crash_state(void) {
 }
 
 extern "C" void kudroid_stop_app(void) {
-    kuart_send_lifecycle_event(103); // DESTROY_ACTIVITY
+    // Teardown that does not run bytecode happens on the caller's thread, so the
+    // shell sees the app marked stopped the moment ✕ is pressed.
     s_isApkRunning.store(false);
     kudroid_clear_crash_state();
-    kudroid_unbind_metal_layer();
     kudroid_set_requested_orientation(1); // SCREEN_ORIENTATION_PORTRAIT
+
+    // DESTROY_ACTIVITY runs Java, and Interpreter::Execute takes the global VM lock.
+    // This is called from the iOS main thread, so doing it here froze the whole UI
+    // whenever a guest thread held that lock — which is exactly the situation when a
+    // guest is wedged, i.e. every time a user actually reaches for ✕. The screen
+    // stopped responding and the app had to be killed from the multitasking switcher.
+    //
+    // Detached rather than joined: the point is that the caller must not wait. If the
+    // guest is unrecoverably stuck the event may never be delivered, and that is
+    // still better than taking the UI down with it.
+    std::thread([] {
+        kuart_send_lifecycle_event(103); // DESTROY_ACTIVITY
+        // Unbind only after the guest has been told to stop, so a render still in
+        // flight does not have the layer pulled out from under it.
+        kudroid_unbind_metal_layer();
+    }).detach();
 }
 
 extern "C" const char* kudroid_get_last_crash_tail(void) {

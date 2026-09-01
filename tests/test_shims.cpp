@@ -31,6 +31,7 @@
 #include <stdint.h>
 #include <sys/mman.h>
 #include <sched.h>
+#include <semaphore.h>
 #include <sys/uio.h>
 #include <unistd.h>
 
@@ -46,6 +47,13 @@ extern "C" int bionic_sigaction(int signum, const struct android_sigaction* act,
 extern "C" long bionic_syscall(long number, ...);
 extern "C" int bionic_sigaltstack(const stack_t* ss, stack_t* oss);
 extern "C" int bionic_sched_getaffinity(pid_t pid, size_t cpusetsize, void* mask);
+extern "C" int bionic_sem_init(sem_t* sem, int pshared, unsigned int value);
+extern "C" int bionic_sem_destroy(sem_t* sem);
+extern "C" int bionic_sem_wait(sem_t* sem);
+extern "C" int bionic_sem_trywait(sem_t* sem);
+extern "C" int bionic_sem_post(sem_t* sem);
+extern "C" int bionic_sem_getvalue(sem_t* sem, int* out);
+extern "C" int bionic_sem_timedwait(sem_t* sem, const struct timespec* abs_timeout);
 extern "C" int bionic_tgkill(int pid, int tid, int sig);
 extern "C" int bionic_pipe2(int pipefd[2], int flags);
 extern "C" int bionic___cxa_guard_acquire(uint64_t* g);
@@ -502,6 +510,203 @@ static void test_sched_getaffinity_wrapper_returns_zero() {
     errno = 0;
     CHECK(bionic_sched_getaffinity(0, sizeof(set), nullptr) == -1 && errno == EINVAL,
           "a null set is rejected with EINVAL");
+}
+
+// ─── POSIX unnamed semaphores ────────────────────────────────────────────────
+//
+// Darwin declares sem_init/sem_wait/sem_post/sem_destroy but does not implement
+// them: each returns -1/ENOSYS. Only sem_open works. Unshimmed, a guest call fell
+// through to libSystem and failed, so a "wait" did not wait and a "post" woke
+// nobody.
+//
+// libunity.so imports exactly those four. Unity spawns a helper thread, names it,
+// then blocks on a semaphore for the spawner's handshake. With sem_wait failing
+// immediately the handshake could never complete, and the log stopped dead on
+// prctl(PR_SET_NAME, "AssetGarbageCollectorHelper") with no mention of a semaphore.
+//
+// These run on the Linux host, where the host's own sem_* DO work — which is the
+// point: the shim must be exercised, not the host, so every call here goes through
+// bionic_sem_*.
+
+static void test_sem_counting_semantics() {
+    std::printf("[semaphore] init/post/wait counting\n");
+
+    sem_t sem;
+    std::memset(&sem, 0, sizeof(sem));
+    CHECK(bionic_sem_init(&sem, 0, 0) == 0, "sem_init to 0 succeeds");
+
+    int value = -1;
+    CHECK(bionic_sem_getvalue(&sem, &value) == 0 && value == 0, "starts at 0");
+
+    // A wait on a zero semaphore must block, so it cannot be called here. trywait
+    // is the observable equivalent.
+    errno = 0;
+    CHECK(bionic_sem_trywait(&sem) == -1 && errno == EAGAIN,
+          "trywait on an empty semaphore reports EAGAIN rather than succeeding");
+
+    CHECK(bionic_sem_post(&sem) == 0, "post succeeds");
+    CHECK(bionic_sem_getvalue(&sem, &value) == 0 && value == 1, "post raised the count");
+    CHECK(bionic_sem_wait(&sem) == 0, "wait takes the posted token without blocking");
+    CHECK(bionic_sem_getvalue(&sem, &value) == 0 && value == 0, "and consumed it");
+
+    // Counting, not binary: three posts must permit three waits.
+    for (int i = 0; i < 3; ++i) bionic_sem_post(&sem);
+    CHECK(bionic_sem_getvalue(&sem, &value) == 0 && value == 3, "three posts count to 3");
+    CHECK(bionic_sem_wait(&sem) == 0 && bionic_sem_wait(&sem) == 0 &&
+              bionic_sem_wait(&sem) == 0,
+          "three waits all succeed");
+    errno = 0;
+    CHECK(bionic_sem_trywait(&sem) == -1 && errno == EAGAIN, "the fourth finds it empty");
+
+    CHECK(bionic_sem_init(&sem, 0, 5) == 0, "re-init at the same address");
+    CHECK(bionic_sem_getvalue(&sem, &value) == 0 && value == 5,
+          "replaces the old state rather than adding to it");
+
+    bionic_sem_destroy(&sem);
+}
+
+// The handshake Unity actually performs, and the reason the log stopped.
+static void test_sem_blocks_until_posted() {
+    std::printf("[semaphore] wait blocks until another thread posts\n");
+
+    sem_t sem;
+    std::memset(&sem, 0, sizeof(sem));
+    bionic_sem_init(&sem, 0, 0);
+
+    std::atomic<bool> waiter_returned{false};
+    std::atomic<bool> waiter_started{false};
+
+    std::thread waiter([&] {
+        waiter_started = true;
+        if (bionic_sem_wait(&sem) == 0) waiter_returned = true;
+    });
+
+    while (!waiter_started.load()) std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    CHECK(!waiter_returned.load(),
+          "the waiter is still parked — a sem_wait that returns immediately is the bug "
+          "that let Unity's helper thread race past its handshake");
+
+    bionic_sem_post(&sem);
+    waiter.join();
+    CHECK(waiter_returned.load(), "posting released it");
+
+    bionic_sem_destroy(&sem);
+}
+
+// Two threads, both waiting: one post must release exactly one of them.
+static void test_sem_post_releases_one_waiter() {
+    std::printf("[semaphore] one post releases exactly one waiter\n");
+
+    sem_t sem;
+    std::memset(&sem, 0, sizeof(sem));
+    bionic_sem_init(&sem, 0, 0);
+
+    std::atomic<int> released{0};
+    std::atomic<int> started{0};
+    std::thread a([&] { ++started; if (bionic_sem_wait(&sem) == 0) ++released; });
+    std::thread b([&] { ++started; if (bionic_sem_wait(&sem) == 0) ++released; });
+
+    while (started.load() < 2) std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    bionic_sem_post(&sem);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    CHECK(released.load() == 1, "exactly one waiter woke");
+
+    bionic_sem_post(&sem);
+    a.join();
+    b.join();
+    CHECK(released.load() == 2, "the second post released the other");
+
+    bionic_sem_destroy(&sem);
+}
+
+static void test_sem_timedwait_deadline() {
+    std::printf("[semaphore] timedwait honours its absolute deadline\n");
+
+    sem_t sem;
+    std::memset(&sem, 0, sizeof(sem));
+    bionic_sem_init(&sem, 0, 0);
+
+    // An expired deadline on an empty semaphore is ETIMEDOUT, not a spin. The old
+    // implementation called the host ::sem_trywait on the guest's sem_t, which on
+    // Darwin fails ENOSYS on the first iteration and then busy-loops to the deadline.
+    struct timespec past;
+    ::clock_gettime(CLOCK_REALTIME, &past);
+    past.tv_sec -= 1;
+    errno = 0;
+    const auto t0 = std::chrono::steady_clock::now();
+    CHECK(bionic_sem_timedwait(&sem, &past) == -1 && errno == ETIMEDOUT,
+          "an already-expired deadline reports ETIMEDOUT");
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - t0).count();
+    CHECK(elapsed < 100, "and returns at once rather than spinning to it");
+
+    // An available token must be taken even when the deadline has passed.
+    bionic_sem_post(&sem);
+    CHECK(bionic_sem_timedwait(&sem, &past) == 0,
+          "an expired deadline still takes a token that is already available");
+
+    // A live deadline blocks, then times out.
+    struct timespec soon;
+    ::clock_gettime(CLOCK_REALTIME, &soon);
+    soon.tv_nsec += 120 * 1000 * 1000;
+    if (soon.tv_nsec >= 1000000000) { soon.tv_sec += 1; soon.tv_nsec -= 1000000000; }
+    errno = 0;
+    const auto t1 = std::chrono::steady_clock::now();
+    CHECK(bionic_sem_timedwait(&sem, &soon) == -1 && errno == ETIMEDOUT,
+          "a future deadline on an empty semaphore times out");
+    const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - t1).count();
+    CHECK(waited >= 100, "after actually waiting for it");
+
+    bionic_sem_destroy(&sem);
+}
+
+// Destroying a semaphore with a thread parked on it must not leave that thread
+// blocked forever: during shutdown that turns an exit into a hang.
+static void test_sem_destroy_releases_waiters() {
+    std::printf("[semaphore] destroy releases a parked waiter\n");
+
+    sem_t sem;
+    std::memset(&sem, 0, sizeof(sem));
+    bionic_sem_init(&sem, 0, 0);
+
+    std::atomic<bool> returned{false};
+    std::atomic<bool> started{false};
+    std::thread waiter([&] {
+        started = true;
+        bionic_sem_wait(&sem);
+        returned = true;
+    });
+
+    while (!started.load()) std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    CHECK(!returned.load(), "the waiter is parked");
+
+    bionic_sem_destroy(&sem);
+    waiter.join();
+    CHECK(returned.load(), "destroy woke it instead of leaving it blocked at shutdown");
+}
+
+static void test_sem_rejects_null() {
+    std::printf("[semaphore] null arguments are rejected\n");
+    errno = 0;
+    CHECK(bionic_sem_init(nullptr, 0, 0) == -1 && errno == EINVAL, "sem_init(null)");
+    errno = 0;
+    CHECK(bionic_sem_wait(nullptr) == -1 && errno == EINVAL, "sem_wait(null)");
+    errno = 0;
+    CHECK(bionic_sem_post(nullptr) == -1 && errno == EINVAL, "sem_post(null)");
+    errno = 0;
+    CHECK(bionic_sem_destroy(nullptr) == -1 && errno == EINVAL, "sem_destroy(null)");
+    sem_t sem;
+    std::memset(&sem, 0, sizeof(sem));
+    bionic_sem_init(&sem, 0, 0);
+    errno = 0;
+    CHECK(bionic_sem_getvalue(&sem, nullptr) == -1 && errno == EINVAL,
+          "sem_getvalue with a null out pointer");
+    bionic_sem_destroy(&sem);
 }
 
 // ─── __cxa_guard shim (recursion-tolerant) ──────────────────────────────────
@@ -1040,6 +1245,12 @@ int main() {
     test_syscall_mappings();
     test_sched_getaffinity_raw_returns_byte_count();
     test_sched_getaffinity_wrapper_returns_zero();
+    test_sem_counting_semantics();
+    test_sem_blocks_until_posted();
+    test_sem_post_releases_one_waiter();
+    test_sem_timedwait_deadline();
+    test_sem_destroy_releases_waiters();
+    test_sem_rejects_null();
     test_mremap_shrink_in_place();
     test_mremap_grow_with_maymove();
     test_sigaction_flag_roundtrip();
