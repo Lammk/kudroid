@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 #include <atomic>
+#include <mutex>
 
 #if defined(__APPLE__)
 #include <pthread.h>
@@ -98,6 +99,38 @@ struct KuDroidNativeWindow {
 
 static KuDroidNativeWindow g_nativeWindowInstance;
 
+// Every window handed to the guest, so a later CAMetalLayer change can reach the
+// ones already in flight.
+//
+// A guest calls ANativeWindow_fromSurface once, keeps the pointer, and renders
+// through it forever. The shell, meanwhile, can bind a different CAMetalLayer
+// afterwards: the app starts on one UIView and the guest-app runner installs its
+// own on top, so kudroid_set_metal_layer arrives a second time with a different
+// layer. Without this registry the guest kept drawing into the layer it captured
+// first, which by then was covered by the new one — a black screen while the guest
+// itself renders perfectly happily, with nothing in any log to say so.
+static std::mutex g_nativeWindowsMutex;
+static std::vector<KuDroidNativeWindow*> g_nativeWindows;
+
+static void register_native_window(KuDroidNativeWindow* nw) {
+    if (!nw) return;
+    std::lock_guard<std::mutex> lock(g_nativeWindowsMutex);
+    for (KuDroidNativeWindow* known : g_nativeWindows) {
+        if (known == nw) return;
+    }
+    g_nativeWindows.push_back(nw);
+}
+
+static void unregister_native_window(KuDroidNativeWindow* nw) {
+    std::lock_guard<std::mutex> lock(g_nativeWindowsMutex);
+    for (size_t i = 0; i < g_nativeWindows.size(); ++i) {
+        if (g_nativeWindows[i] == nw) {
+            g_nativeWindows.erase(g_nativeWindows.begin() + static_cast<long>(i));
+            return;
+        }
+    }
+}
+
 extern "C" void* bionic_ANativeWindow_fromSurface(void* env_ptr, void* surface_obj) {
     void* layer = g_metalLayer;
 #if defined(__APPLE__)
@@ -122,6 +155,7 @@ extern "C" void* bionic_ANativeWindow_fromSurface(void* env_ptr, void* surface_o
                         nw->width = width;
                         nw->height = height;
                         nw->refCount.fetch_add(1);
+                        register_native_window(nw);
                         gpuLog("ANativeWindow_fromSurface reused %p (layer=%p, size=%dx%d)",
                                (void*)nw, nw->layer, nw->width, nw->height);
                         return nw;
@@ -135,6 +169,7 @@ extern "C" void* bionic_ANativeWindow_fromSurface(void* env_ptr, void* surface_o
                 nw->format = 1;
                 nw->refCount.store(1);
                 env->SetLongField(jsurf, fid, reinterpret_cast<jlong>(nw));
+                register_native_window(nw);
                 gpuLog("ANativeWindow_fromSurface allocated %p for Surface %p (layer=%p, size=%dx%d)",
                        (void*)nw, (void*)jsurf, nw->layer, nw->width, nw->height);
                 return nw;
@@ -145,10 +180,40 @@ extern "C" void* bionic_ANativeWindow_fromSurface(void* env_ptr, void* surface_o
     g_nativeWindowInstance.layer = layer;
     g_nativeWindowInstance.width = width;
     g_nativeWindowInstance.height = height;
+    register_native_window(&g_nativeWindowInstance);
     gpuLog("ANativeWindow_fromSurface fallback -> %p (layer=%p, size=%dx%d)",
            (void*)&g_nativeWindowInstance, g_nativeWindowInstance.layer,
            g_nativeWindowInstance.width, g_nativeWindowInstance.height);
     return &g_nativeWindowInstance;
+}
+
+// Point every live guest window at the layer the shell is actually presenting.
+// Called from kudroid_set_metal_layer, which can fire long after the guest took
+// its window. Sizes are only widened to the new surface when they came from this
+// same path; a guest that called setBuffersGeometry chose its own resolution and
+// must keep it, because it has already sized its swapchain to match.
+extern "C" void kudroid_gpu_rebind_native_windows(void* layer, int width, int height) {
+    if (!layer) return;
+    std::lock_guard<std::mutex> lock(g_nativeWindowsMutex);
+    for (KuDroidNativeWindow* nw : g_nativeWindows) {
+        if (!nw || nw->magic != 0x4B554457) continue;
+        if (nw->layer == layer) continue;
+        gpuLog("rebind window %p: layer %p -> %p (size %dx%d -> %dx%d)",
+               (void*)nw, nw->layer, layer, nw->width, nw->height, width, height);
+        nw->layer = layer;
+        if (width > 0) nw->width = width;
+        if (height > 0) nw->height = height;
+    }
+}
+
+// Which CAMetalLayer a guest window currently points at. Exists so the rebind
+// above is observable — from a test, and from a log line when a black screen has
+// to be told apart from a guest that is not drawing at all.
+extern "C" void* kudroid_gpu_native_window_layer(void* window) {
+    if (!window) return nullptr;
+    auto* nw = static_cast<KuDroidNativeWindow*>(window);
+    if (nw->magic != 0x4B554457) return nullptr;
+    return nw->layer;
 }
 
 extern "C" int bionic_ANativeWindow_getWidth(void* window) {
@@ -192,12 +257,18 @@ extern "C" void bionic_ANativeWindow_release(void* window) {
     if (!window) return;
     auto* nw = static_cast<KuDroidNativeWindow*>(window);
     if (nw->magic == 0x4B554457) {
-        if (nw != &g_nativeWindowInstance && nw->refCount.fetch_sub(1) == 1) {
+        // One decrement per release. This used to fetch_sub in the condition and
+        // then fetch_sub AGAIN in the else branch, so every release past the last
+        // one dropped the count by two and the window could be destroyed while the
+        // guest still held it.
+        const int32_t previous = nw->refCount.fetch_sub(1);
+        if (nw != &g_nativeWindowInstance && previous == 1) {
             gpuLog("ANativeWindow_release destroying window %p", window);
+            // Drop it from the rebind registry BEFORE freeing: a later
+            // kudroid_set_metal_layer would otherwise walk into freed memory.
+            unregister_native_window(nw);
             delete nw;
             return;
-        } else {
-            nw->refCount.fetch_sub(1);
         }
     }
     gpuLog("ANativeWindow_release(%p)", window);

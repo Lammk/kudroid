@@ -214,6 +214,17 @@ else()
         target_include_directories(test_apk_extract PRIVATE include)
     endif()
 
+    # A guest window must follow the CAMetalLayer the shell presents. The shell binds
+    # twice (app-wide view, then the guest-app runner's), and a guest takes its window
+    # once — Unity did, and kept rendering into the layer that was no longer on screen.
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_metal_layer_rebind.cpp")
+        add_executable(test_metal_layer_rebind
+            tests/test_metal_layer_rebind.cpp
+        )
+        target_link_libraries(test_metal_layer_rebind PRIVATE kudroid_core)
+        target_include_directories(test_metal_layer_rebind PRIVATE include)
+    endif()
+
     # Device memory figures: apps size caches from them, so they must be real,
     # self-consistent and never zero.
     if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_memory_info.cpp")
