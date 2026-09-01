@@ -259,6 +259,23 @@ public class TextView extends View {
     private android.text.method.KeyListener mKeyListener;
     private android.text.Editable.Factory mEditableFactory = android.text.Editable.Factory.getInstance();
     private int mInputType = 0;
+    private int mImeOptions = 0;
+    private String mPrivateImeOptions = null;
+    private CharSequence mImeActionLabel = null;
+    private int mImeActionId = 0;
+    private boolean mSingleLine = false;
+    private int mLines = -1;
+    private int mMinLines = -1;
+    private int mMaxLines = -1;
+    private boolean mHorizontallyScrolling = false;
+    private boolean mSelectAllOnFocus = false;
+    private boolean mCursorVisible = true;
+    private boolean mTextIsSelectable = false;
+    private int mHighlightColor = 0x6633B5E5;
+    private boolean mIncludeFontPadding = true;
+    private boolean mAllCaps = false;
+    private float mSpacingMult = 1.0f;
+    private float mSpacingAdd = 0.0f;
 
     public void setTransformationMethod(android.text.method.TransformationMethod method) {
         mTransformation = method;
@@ -295,4 +312,138 @@ public class TextView extends View {
     public void setInputType(int type) {
         mInputType = type;
     }
+
+    public void setImeOptions(int imeOptions) {
+        mImeOptions = imeOptions;
+    }
+
+    public int getImeOptions() {
+        return mImeOptions;
+    }
+
+    public void setPrivateImeOptions(String type) {
+        mPrivateImeOptions = type;
+    }
+
+    public String getPrivateImeOptions() {
+        return mPrivateImeOptions;
+    }
+
+    public void setImeActionLabel(CharSequence label, int actionId) {
+        mImeActionLabel = label;
+        mImeActionId = actionId;
+    }
+
+    public CharSequence getImeActionLabel() {
+        return mImeActionLabel;
+    }
+
+    public int getImeActionId() {
+        return mImeActionId;
+    }
+
+    public void setRawInputType(int type) {
+        mInputType = type;
+    }
+
+    public void setSingleLine() {
+        setSingleLine(true);
+    }
+
+    public void setSingleLine(boolean singleLine) {
+        mSingleLine = singleLine;
+    }
+
+    public void setLines(int lines) {
+        mLines = lines;
+    }
+
+    public void setMinLines(int minlines) {
+        mMinLines = minlines;
+    }
+
+    public void setMaxLines(int maxlines) {
+        mMaxLines = maxlines;
+    }
+
+    public void setHorizontallyScrolling(boolean whether) {
+        mHorizontallyScrolling = whether;
+    }
+
+    public void setSelectAllOnFocus(boolean selectAllOnFocus) {
+        mSelectAllOnFocus = selectAllOnFocus;
+    }
+
+    public void setCursorVisible(boolean visible) {
+        mCursorVisible = visible;
+    }
+
+    public boolean isCursorVisible() {
+        return mCursorVisible;
+    }
+
+    public void setTextIsSelectable(boolean selectable) {
+        mTextIsSelectable = selectable;
+    }
+
+    public boolean isTextSelectable() {
+        return mTextIsSelectable;
+    }
+
+    public int length() {
+        return mText != null ? mText.length() : 0;
+    }
+
+    public void setHighlightColor(int color) {
+        mHighlightColor = color;
+    }
+
+    public int getHighlightColor() {
+        return mHighlightColor;
+    }
+
+    public void setIncludeFontPadding(boolean includepad) {
+        mIncludeFontPadding = includepad;
+    }
+
+    public boolean getIncludeFontPadding() {
+        return mIncludeFontPadding;
+    }
+
+    public void setAllCaps(boolean allCaps) {
+        mAllCaps = allCaps;
+    }
+
+    public void setLineSpacing(float add, float mult) {
+        mSpacingAdd = add;
+        mSpacingMult = mult;
+    }
+
+    public float getLineSpacingMultiplier() {
+        return mSpacingMult;
+    }
+
+    public float getLineSpacingExtra() {
+        return mSpacingAdd;
+    }
+
+    public void setCompoundDrawables(android.graphics.drawable.Drawable left, android.graphics.drawable.Drawable top, android.graphics.drawable.Drawable right, android.graphics.drawable.Drawable bottom) {}
+    public void setCompoundDrawablesWithIntrinsicBounds(int left, int top, int right, int bottom) {}
+    public void setCompoundDrawablesWithIntrinsicBounds(android.graphics.drawable.Drawable left, android.graphics.drawable.Drawable top, android.graphics.drawable.Drawable right, android.graphics.drawable.Drawable bottom) {}
+    public android.graphics.drawable.Drawable[] getCompoundDrawables() {
+        return new android.graphics.drawable.Drawable[4];
+    }
+    public void setCompoundDrawablePadding(int pad) {}
+    public int getCompoundDrawablePadding() { return 0; }
+    public void setTypeface(android.graphics.Typeface tf) {}
+    public void setTypeface(android.graphics.Typeface tf, int style) {}
+    public android.graphics.Typeface getTypeface() { return null; }
+    public void setShadowLayer(float radius, float dx, float dy, int color) {}
+    public void setCustomSelectionActionModeCallback(android.view.ActionMode.Callback actionModeCallback) {}
+    public android.view.ActionMode.Callback getCustomSelectionActionModeCallback() { return null; }
+    public void setCustomInsertionActionModeCallback(android.view.ActionMode.Callback actionModeCallback) {}
+    public android.view.ActionMode.Callback getCustomInsertionActionModeCallback() { return null; }
+    public void setEllipsize(android.text.TextUtils.TruncateAt where) {}
+    public android.text.TextUtils.TruncateAt getEllipsize() { return null; }
+    public void setTextKeepState(CharSequence text) { setText(text); }
 }
