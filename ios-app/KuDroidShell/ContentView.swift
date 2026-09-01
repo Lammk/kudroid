@@ -1683,7 +1683,6 @@ class NativeMetalViewController: UIViewController {
         closeButton.translatesAutoresizingMaskIntoConstraints = false
         closeButton.addTarget(self, action: #selector(handleExitButton), for: .touchUpInside)
         view.addSubview(closeButton)
-        view.bringSubviewToFront(closeButton)
 
         NSLayoutConstraint.activate([
             statusLabel.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -16),
@@ -1802,6 +1801,7 @@ class NativeMetalViewController: UIViewController {
         NativeMetalViewController.isGlobalAppRunning = true
         isStarted = true
 
+        let _ = self.view
         // By default, No Sleep is enabled (keeps the screen on when playing games)
         UIApplication.shared.isIdleTimerDisabled = true
         NSLog("[KuDroid] >>> Launching guest app: %@ (isIdleTimerDisabled = true) <<<", appName)
@@ -1811,7 +1811,6 @@ class NativeMetalViewController: UIViewController {
         let width = Int32(bounds.width * scale)
         let height = Int32(bounds.height * scale)
 
-        let _ = self.view
         guard let mv = metalView, let metalLayer = mv.layer as? CAMetalLayer else { return }
 
         if metalLayer.device == nil {
