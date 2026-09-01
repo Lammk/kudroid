@@ -62,6 +62,19 @@ public:
     // of a string — unreadable as a diagnosis, and fatal.
     bool IsRegisteredClass(const DexClass* klass) const;
 
+    // Synthesise the class behind Proxy.newProxyInstance(loader, interfaces, h).
+    //
+    // The result subclasses java.lang.reflect.Proxy — so it inherits the `h` field
+    // and instanceof Proxy holds — and lists `interfaces` so that a checked cast to
+    // the proxied interface and instanceof both succeed. It deliberately declares no
+    // methods: the interpreter recognises DexClass::is_proxy and forwards any call
+    // that resolves to a bodyless method to the handler, which is what makes one
+    // synthesised class able to stand in for any interface.
+    //
+    // Classes are cached per interface set, matching the real Proxy.getProxyClass
+    // contract that two calls with the same interfaces yield the same class.
+    DexClass* GetOrCreateProxyClass(const std::vector<DexClass*>& interfaces);
+
     // The class of `obj`, or nullptr when `obj` is not a usable object.
     //
     // Reading obj->clazz directly is only safe once the handle is known to be an
@@ -166,6 +179,9 @@ private:
     // from native code. A set of pointers rather than a scan of classes_ because
     // GetMethodID is on the hot path of JNI-heavy startup.
     std::unordered_set<const DexClass*> live_classes_;
+    // Synthesised proxy classes, keyed by their interface set so that repeated
+    // newProxyInstance calls for the same interfaces share one class.
+    std::unordered_map<std::string, DexClass*> proxy_classes_;
     std::vector<std::string> loading_;
     std::string last_error_;
 };

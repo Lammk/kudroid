@@ -429,6 +429,92 @@ DexMethod* Interpreter::ResolveMethod(const DexMethod* context, uint32_t method_
     return nullptr;
 }
 
+// Forward a call on a synthesised proxy to its InvocationHandler.
+//
+// Kept next to InvokeMethod rather than in LibCore because it has to be reachable
+// from both invoke sites: the bytecode path here and Execute(), which reflection and
+// JNI enter directly.
+bool Interpreter::InvokeProxyMethod(DexObject* proxy, DexMethod* method,
+                                    const DexValue* args, size_t num_args,
+                                    DexValue* out) {
+    if (linker_ == nullptr || proxy == nullptr || method == nullptr) return false;
+
+    DexObject* handler = LibCoreGetRefField(proxy, "h",
+                                           "Ljava/lang/reflect/InvocationHandler;");
+    if (handler == nullptr) {
+        ThrowException("Ljava/lang/NullPointerException;",
+                       "proxy has no InvocationHandler");
+        return true;
+    }
+
+    DexClass* handler_class = linker_->ClassOfObject(handler);
+    if (handler_class == nullptr) {
+        ThrowException("Ljava/lang/IllegalStateException;",
+                       "proxy handler is not a usable object");
+        return true;
+    }
+    DexMethod* invoke = handler_class->FindVirtualMethod(
+        "invoke",
+        "(Ljava/lang/Object;Ljava/lang/reflect/Method;[Ljava/lang/Object;)Ljava/lang/Object;");
+    if (invoke == nullptr) {
+        ThrowException("Ljava/lang/AbstractMethodError;",
+                       handler_class->PrettyName() + " does not implement InvocationHandler.invoke");
+        return true;
+    }
+
+    // A real java.lang.reflect.Method for the interface method being proxied. Passing
+    // null here would be simpler but breaks the common handler shape, which switches
+    // on method.getName() and inspects getParameterTypes().
+    DexObject* method_object = LibCoreNewMethodObject(linker_, method);
+
+    // Arguments arrive with the receiver at index 0 for an instance method; the
+    // handler expects only the declared parameters, each boxed.
+    const size_t first = method->IsStatic() ? 0 : 1;
+    std::vector<DexObject*> boxed;
+    const std::vector<std::string> params = LibCoreSplitParams(method->signature);
+    boxed.reserve(params.size());
+    size_t arg_index = first;
+    for (const std::string& param : params) {
+        if (arg_index >= num_args) break;
+        boxed.push_back(LibCoreBoxValue(this, param.c_str(), args[arg_index]));
+        // A long or double occupies two DexValue slots in the incoming array.
+        arg_index += (param == "J" || param == "D") ? 2 : 1;
+    }
+
+    DexArray* arg_array = LibCoreNewRefArray(linker_, "[Ljava/lang/Object;", boxed);
+
+    DexValue call_args[4];
+    call_args[0] = DexValue::Ref(handler);
+    call_args[1] = DexValue::Ref(proxy);
+    call_args[2] = DexValue::Ref(method_object);
+    call_args[3] = DexValue::Ref(reinterpret_cast<DexObject*>(arg_array));
+
+    const DexValue boxed_result = Execute(invoke, call_args, 4);
+    if (HasPendingException()) return true;
+
+    // Unbox to the declared return type. A handler returning null for a primitive is
+    // a real error in Java (NullPointerException on unboxing), but returning zero is
+    // the more useful behaviour here: guest handlers written against a permissive VM
+    // do it routinely, and a hard failure would abort a callback that has already
+    // done its work.
+    const char* ret = method->signature != nullptr ? std::strchr(method->signature, ')') : nullptr;
+    if (ret != nullptr) ++ret;
+    if (ret == nullptr || ret[0] == 'V') {
+        *out = DexValue();
+        return true;
+    }
+    if (ret[0] == 'L' || ret[0] == '[') {
+        *out = DexValue::Ref(boxed_result.l);
+        return true;
+    }
+    DexValue unboxed;
+    if (!LibCoreUnboxValue(this, ret, boxed_result.l, &unboxed)) {
+        unboxed = DexValue();
+    }
+    *out = unboxed;
+    return true;
+}
+
 bool Interpreter::InvokeMethod(DexFrame* frame, const art::Instruction* inst, bool is_range,
                               Instruction::Code opcode) {
     const uint32_t method_idx = is_range ? inst->VRegB_3rc() : inst->VRegB_35c();
@@ -675,6 +761,23 @@ DexValue Interpreter::Execute(const DexMethod* method, const DexValue* args, siz
     }
 
     if (method->code_item == nullptr) {
+        // A call on a proxy instance. The proxy class deliberately has no bodies —
+        // every interface method it nominally implements is meant to reach the
+        // InvocationHandler instead. This must be checked BEFORE the stub and
+        // AbstractMethodError paths below, both of which would treat the absence of a
+        // body as the defect it is for any other class.
+        if (!method->IsStatic() && num_args > 0 && linker_ != nullptr) {
+            DexObject* receiver = args[0].l;
+            DexClass* receiver_class = linker_->ClassOfObject(receiver);
+            if (receiver_class != nullptr && receiver_class->is_proxy) {
+                DexValue proxy_result;
+                if (InvokeProxyMethod(receiver, const_cast<DexMethod*>(method), args,
+                                      num_args, &proxy_result)) {
+                    return proxy_result;
+                }
+            }
+        }
+
         // A method on an auto-stubbed class has no body. Returning 0/null here — which
         // is what this used to do — converts "KuDroid does not ship this class" into a
         // wrong value that surfaces far away as a NullPointerException with no hint of

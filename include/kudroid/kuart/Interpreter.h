@@ -184,6 +184,20 @@ private:
     bool InvokeMethod(DexFrame* frame, const art::Instruction* inst, bool is_range,
                       art::Instruction::Code opcode);
 
+    // Forward a call on a Proxy instance to its InvocationHandler.
+    //
+    // A synthesised proxy class declares no method bodies (see
+    // DexClassLinker::GetOrCreateProxyClass), so any interface method invoked on it
+    // resolves to something with no code. Rather than the AbstractMethodError that
+    // would be correct for a normal class, the call becomes
+    // handler.invoke(proxy, method, args) with the arguments boxed into an Object[],
+    // and the boxed result unboxed back to the declared return type.
+    //
+    // Returns true when the call was handled — including when the handler threw, in
+    // which case the pending exception is left set for the caller to propagate.
+    bool InvokeProxyMethod(DexObject* proxy, DexMethod* method, const DexValue* args,
+                           size_t num_args, DexValue* out);
+
     // filled-new-array{,/range}: allocate an array and fill it from the argument
     // registers. Result goes to frame->result() (read back by move-result-object)
     // exactly like an invoke, NOT into a destination register. Returns false when

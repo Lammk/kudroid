@@ -271,6 +271,12 @@ void SetRefField(DexObject* obj, const char* name, const char* type, DexObject* 
     }
 }
 
+DexObject* GetRefField(DexObject* obj, const char* name, const char* type) {
+    if (obj == nullptr || obj->clazz == nullptr) return nullptr;
+    DexField* f = obj->clazz->FindInstanceField(name, type);
+    return f != nullptr ? obj->GetField<DexObject*>(f->offset_or_slot) : nullptr;
+}
+
 void SetLongField(DexObject* obj, const char* name, int64_t value) {
     if (obj == nullptr || obj->clazz == nullptr) return;
     if (DexField* f = obj->clazz->FindInstanceField(name, "J")) {
@@ -1062,6 +1068,102 @@ bool Invoke_java_lang_reflect_Array(Interpreter* interp, const DexMethod* method
         default:  reinterpret_cast<DexObject**>(base)[index] = v.l; break;
     }
     return true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// java.lang.reflect.Proxy
+// ─────────────────────────────────────────────────────────────────────────────
+
+// newProxyInstance(ClassLoader, Class[], InvocationHandler).
+//
+// The Java side cannot do this itself: it would have to generate a class
+// implementing the requested interfaces, which needs a class writer KuART does not
+// have. Instead the linker synthesises a bodyless class carrying those interfaces
+// (DexClassLinker::GetOrCreateProxyClass) and the interpreter forwards calls on it
+// to the handler.
+//
+// The previous Java implementation returned `new Proxy(h)` — an object that does not
+// implement the requested interface and has no method bodies — so the checked cast at
+// the call site either failed or, when the DEX had no cast, the first interface call
+// died with AbstractMethodError.
+bool Invoke_java_lang_reflect_Proxy(Interpreter* interp, const char* name,
+                                    const DexValue* args, size_t num_args,
+                                    DexValue* result) {
+    DexClassLinker* linker = interp->linker();
+
+    const auto collect_interfaces = [&](DexObject* array_obj,
+                                        std::vector<DexClass*>* out) -> bool {
+        auto* arr = reinterpret_cast<DexArray*>(array_obj);
+        if (arr == nullptr) return true;  // no interfaces is legal, if useless
+        auto** items = reinterpret_cast<DexObject**>(arr + 1);
+        for (int32_t i = 0; i < arr->length; ++i) {
+            DexClass* iface = ClassOf(interp, items[i]);
+            if (iface == nullptr) {
+                interp->ThrowException("Ljava/lang/IllegalArgumentException;",
+                                       "interface " + std::to_string(i) +
+                                           " is not a class");
+                return false;
+            }
+            out->push_back(iface);
+        }
+        return true;
+    };
+
+    if (std::strcmp(name, "newProxyInstance") == 0) {
+        // (ClassLoader, Class[], InvocationHandler) — static, so args[0] is the loader.
+        DexObject* handler = num_args > 2 ? args[2].l : nullptr;
+        if (handler == nullptr) {
+            interp->ThrowException("Ljava/lang/NullPointerException;",
+                                   "InvocationHandler is null");
+            return true;
+        }
+        std::vector<DexClass*> interfaces;
+        if (!collect_interfaces(num_args > 1 ? args[1].l : nullptr, &interfaces)) return true;
+
+        DexClass* proxy_class = linker->GetOrCreateProxyClass(interfaces);
+        if (proxy_class == nullptr) {
+            interp->ThrowException("Ljava/lang/IllegalArgumentException;",
+                                   "cannot create proxy class: " + linker->last_error());
+            return true;
+        }
+        DexObject* proxy = linker->AllocObject(proxy_class);
+        if (proxy == nullptr) {
+            interp->ThrowException("Ljava/lang/OutOfMemoryError;", "proxy allocation failed");
+            return true;
+        }
+        // `h` is declared by java.lang.reflect.Proxy, which this class extends.
+        SetRefField(proxy, "h", "Ljava/lang/reflect/InvocationHandler;", handler);
+        result->l = proxy;
+        return true;
+    }
+
+    if (std::strcmp(name, "getProxyClass") == 0) {
+        std::vector<DexClass*> interfaces;
+        if (!collect_interfaces(num_args > 1 ? args[1].l : nullptr, &interfaces)) return true;
+        DexClass* proxy_class = linker->GetOrCreateProxyClass(interfaces);
+        result->l = proxy_class != nullptr ? linker->GetClassObject(proxy_class) : nullptr;
+        return true;
+    }
+
+    if (std::strcmp(name, "isProxyClass") == 0) {
+        DexClass* k = ClassOf(interp, num_args > 0 ? args[0].l : nullptr);
+        *result = DexValue::Int(k != nullptr && k->is_proxy ? 1 : 0);
+        return true;
+    }
+
+    if (std::strcmp(name, "getInvocationHandler") == 0) {
+        DexObject* proxy = num_args > 0 ? args[0].l : nullptr;
+        DexClass* k = linker->ClassOfObject(proxy);
+        if (k == nullptr || !k->is_proxy) {
+            interp->ThrowException("Ljava/lang/IllegalArgumentException;",
+                                   "not a proxy instance");
+            return true;
+        }
+        result->l = GetRefField(proxy, "h", "Ljava/lang/reflect/InvocationHandler;");
+        return true;
+    }
+
+    return false;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2462,6 +2564,7 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
     if (std::strcmp(desc, "Ljava/lang/reflect/Constructor;") == 0) return Invoke_java_lang_reflect_Constructor(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/lang/reflect/Field;") == 0) return Invoke_java_lang_reflect_Field(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/lang/reflect/Array;") == 0) return Invoke_java_lang_reflect_Array(interp, method, name, args, num_args, result);
+    if (std::strcmp(desc, "Ljava/lang/reflect/Proxy;") == 0) return Invoke_java_lang_reflect_Proxy(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/io/File;") == 0) return Invoke_java_io_File(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/io/FileInputStream;") == 0) return Invoke_java_io_FileInputStream(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/io/FileOutputStream;") == 0) return Invoke_java_io_FileOutputStream(interp, name, args, num_args, result);
@@ -2514,6 +2617,37 @@ bool LibCoreHasMethod(const DexMethod* method) {
             std::strcmp(desc, "Landroid/view/View;") == 0 ||
             std::strcmp(desc, "Landroid/view/inputmethod/InputMethodManager;") == 0 ||
             std::strcmp(desc, "Landroid/os/PowerManager$WakeLock;") == 0);
+}
+
+// ── Bridges for the interpreter's proxy dispatch ──────────────────────────────
+//
+// Thin forwards to the anonymous-namespace helpers above. The alternative was
+// making those helpers public, which would widen this file's surface for one caller.
+
+DexObject* LibCoreGetRefField(DexObject* obj, const char* name, const char* type) {
+    return GetRefField(obj, name, type);
+}
+
+DexObject* LibCoreNewMethodObject(DexClassLinker* linker, DexMethod* m) {
+    return NewMethodObject(linker, m);
+}
+
+DexArray* LibCoreNewRefArray(DexClassLinker* linker, const char* array_descriptor,
+                             const std::vector<DexObject*>& items) {
+    return NewRefArray(linker, array_descriptor, items);
+}
+
+std::vector<std::string> LibCoreSplitParams(const char* signature) {
+    return SplitParams(signature);
+}
+
+DexObject* LibCoreBoxValue(Interpreter* interp, const char* descriptor, const DexValue& v) {
+    return BoxValue(interp, descriptor, v);
+}
+
+bool LibCoreUnboxValue(Interpreter* interp, const char* descriptor, DexObject* obj,
+                       DexValue* out) {
+    return UnboxValue(interp, descriptor, obj, out);
 }
 
 }  // namespace kuart

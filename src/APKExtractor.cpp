@@ -958,6 +958,46 @@ static bool extract_apk_impl(const std::string& apkPath, const std::string& targ
         }
     }
 
+    // Keep the APK itself alongside the extracted tree, as base.apk.
+    //
+    // Extracting entries as loose files is not enough for every app. A Unity game
+    // opens its own APK as a ZIP and reads assets/bin/Data/* out of the central
+    // directory — it never looks at loose files — so it needs the archive present at
+    // the path getPackageCodePath() reports, which is /data/app/<pkg>/base.apk.
+    // Without it Unity logs "ApkAddCentralDirectory : Unable to open" and starts with
+    // no scenes, no textures and no audio: a black screen and silence, with no
+    // failure anywhere near the cause.
+    //
+    // Only written for a base APK (extractManifest), not for config splits: they
+    // would each overwrite it, and the base is the one an app expects to find.
+    // Copying rather than moving keeps the caller's file intact — kudroid_install_apk
+    // deletes its own temp copy, and the KDB install path streams from elsewhere.
+    if (extractManifest) {
+        const auto apkDest = std::filesystem::path(targetDirectory) / "base.apk";
+        std::error_code copyError;
+        // Compare canonical paths: re-installing from a path that already IS the
+        // destination would otherwise truncate the source to nothing.
+        const bool sameFile = std::filesystem::exists(apkDest, copyError) &&
+                              std::filesystem::equivalent(apkPath, apkDest, copyError);
+        if (!sameFile) {
+            copyError.clear();
+            std::filesystem::copy_file(apkPath, apkDest,
+                                       std::filesystem::copy_options::overwrite_existing,
+                                       copyError);
+            if (copyError) {
+                // Not fatal on its own — an app that only reads loose files still
+                // runs — but say so, because the apps that need it fail in a way
+                // that points nowhere near here.
+                apkLog("  !! Could not place base.apk at " + apkDest.string() + ": " +
+                       copyError.message() +
+                       " (apps that read their own APK as a ZIP will find no assets)");
+            } else {
+                ::chmod(apkDest.c_str(), 0644);
+                apkLog("  -> Kept APK as " + apkDest.string());
+            }
+        }
+    }
+
     // Save app_info.json (metadata: version, label, package)
     if (extractManifest) {
         const auto infoDest = std::filesystem::path(targetDirectory) / "app_info.json";

@@ -1724,11 +1724,35 @@ extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_
             return 0;
 
         case 123: // sched_getaffinity (Linux arm64 syscall)
-            if (a3 != 0 && a2 >= sizeof(unsigned long)) {
-                *reinterpret_cast<unsigned long*>(a3) = 0x0F;
-                return sizeof(unsigned long);
+            // a1=pid, a2=cpusetsize, a3=mask pointer.
+            //
+            // Returns the NUMBER OF BYTES WRITTEN, which is what the kernel does and
+            // what bionic's wrapper relies on:
+            //
+            //     int rc = __sched_getaffinity(pid, size, set);
+            //     if (rc == -1) return -1;
+            //     if ((size_t)rc < size) memset((char*)set + rc, 0, size - rc);
+            //     return 0;
+            //
+            // Returning 0 here therefore made bionic memset the ENTIRE mask to zero,
+            // handing the guest an affinity set with no CPUs in it. Unity read that
+            // back as "Cores = 0" and "0 big (mask: 0x0), 0 little (mask: 0x0)", then
+            // sized its job system from it.
+            if (a3 != 0 && a2 > 0) {
+                const size_t requested = static_cast<size_t>(a2);
+                const size_t written = requested < sizeof(unsigned long)
+                                           ? requested
+                                           : sizeof(unsigned long);
+                // Zero only the part being reported: bionic clears the remainder
+                // itself, and a mask larger than one word must not be pre-cleared
+                // past `written` or the return value would be a lie.
+                memset(reinterpret_cast<void*>(a3), 0, written);
+                const unsigned long online = 0xFF;  // CPUs 0-7
+                memcpy(reinterpret_cast<void*>(a3), &online, written);
+                return static_cast<long>(written);
             }
-            return 0;
+            errno = EFAULT;
+            return -1;
 
         case 215: // munmap
             return ::munmap(reinterpret_cast<void*>(a1), static_cast<size_t>(a2));
@@ -3833,12 +3857,22 @@ extern "C" int bionic_getcpu(unsigned* cpu, unsigned* node, void* tcache) {
 }
 
 // sched_getaffinity — return the CPU affinity mask.
+//
+// This is the WRAPPER, not the raw syscall, so success is 0 and the caller reads
+// the mask out of `mask`. The raw syscall (number 123 in bionic_syscall) has the
+// opposite contract and returns the byte count instead; see the note there.
 extern "C" int bionic_sched_getaffinity(pid_t pid, size_t cpusetsize, void* mask) {
-    (void)pid; (void)cpusetsize;
-    // Return a mask with all CPUs set (0xFF for 8 CPUs).
-    if (mask && cpusetsize >= 1) {
-        static_cast<uint8_t*>(mask)[0] = 0xFF;
+    (void)pid;
+    if (!mask || cpusetsize == 0) {
+        errno = EINVAL;
+        return -1;
     }
+    // Zero the whole set, then report CPUs 0-7 in the low word. Zeroing everything
+    // is correct here because nothing downstream reinterprets the return value as a
+    // length.
+    memset(mask, 0, cpusetsize);
+    const unsigned long online = 0xFF;  // CPUs 0-7
+    memcpy(mask, &online, cpusetsize < sizeof(online) ? cpusetsize : sizeof(online));
     return 0;
 }
 

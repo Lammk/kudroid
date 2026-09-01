@@ -203,6 +203,17 @@ else()
         target_include_directories(test_manifest_text PRIVATE include)
     endif()
 
+    # APK extraction keeps the archive as base.apk. Loose files are not enough: a Unity
+    # game reads assets/bin/Data/* out of its own ZIP via getPackageCodePath(), and with
+    # no archive it starts to a black screen with no sound and no error near the cause.
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_apk_extract.cpp")
+        add_executable(test_apk_extract
+            tests/test_apk_extract.cpp
+        )
+        target_link_libraries(test_apk_extract PRIVATE kudroid_core)
+        target_include_directories(test_apk_extract PRIVATE include)
+    endif()
+
     # Device memory figures: apps size caches from them, so they must be real,
     # self-consistent and never zero.
     if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_memory_info.cpp")
@@ -263,6 +274,11 @@ else()
     #                          stock iOS and LiveContainer JITLess take), and the OAT
     #                          profile's round trip and staleness checks.
     #                          scripts/test-jit-arm64.sh runs the generated code.
+    # test_kuart_proxy         Proxy.newProxyInstance: the returned object must BE the
+    #                          proxied interface and route its calls to the handler. The
+    #                          old Java version returned a bare Proxy, so the cast failed
+    #                          and the first call died with "method without body: run" —
+    #                          which is where Unity's runOnUiThread stopped.
     if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/test_art_dex.cpp")
         add_executable(test_art_dex kuart-tests/test_art_dex.cpp)
         target_link_libraries(test_art_dex PRIVATE art_dex ZLIB::ZLIB)
@@ -286,6 +302,7 @@ else()
         test_kuart_vmlock
         test_kuart_prefs
         test_kuart_jit
+        test_kuart_proxy
     )
         if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/${kuart_test}.cpp")
             add_executable(${kuart_test} kuart-tests/${kuart_test}.cpp)

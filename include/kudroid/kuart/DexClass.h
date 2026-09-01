@@ -139,6 +139,15 @@ public:
     // ClassCastException in unrelated code.
     bool is_stub = false;
 
+    // Synthesised by Proxy.newProxyInstance: subclasses java.lang.reflect.Proxy and
+    // declares the requested interfaces, but has no method bodies of its own.
+    //
+    // The flag is what tells the interpreter that a call landing on a bodyless
+    // method is not a defect but the whole point — it must be forwarded to the
+    // instance's InvocationHandler rather than raising AbstractMethodError. Without
+    // it, every proxied interface method died with "method without body: run".
+    bool is_proxy = false;
+
     // java.lang.Class instance object, lazily created on first access.
     DexObject* class_object = nullptr;
 

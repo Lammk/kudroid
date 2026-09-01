@@ -597,6 +597,55 @@ bool DexClassLinker::IsRegisteredClass(const DexClass* klass) const {
     return live_classes_.count(klass) != 0;
 }
 
+DexClass* DexClassLinker::GetOrCreateProxyClass(const std::vector<DexClass*>& interfaces) {
+    DexClass* proxy_base = FindClass("Ljava/lang/reflect/Proxy;");
+    if (proxy_base == nullptr) {
+        last_error_ = "java.lang.reflect.Proxy is missing from the framework";
+        return nullptr;
+    }
+    if (!LinkClass(proxy_base)) return nullptr;
+
+    // Key on the interface descriptors, in the order given. Order is part of the
+    // identity for the real Proxy too — getProxyClass({A,B}) and getProxyClass({B,A})
+    // are distinct classes — so preserving it here keeps the cache faithful rather
+    // than merely convenient.
+    std::string key;
+    for (const DexClass* iface : interfaces) {
+        if (iface == nullptr || iface->descriptor == nullptr) continue;
+        key += iface->descriptor;
+    }
+
+    auto cached = proxy_classes_.find(key);
+    if (cached != proxy_classes_.end()) return cached->second;
+
+    auto* proxy = heap_.New<DexClass>();
+    if (proxy == nullptr) return nullptr;
+
+    // A name in the shape the platform uses ($Proxy0, $Proxy1, ...) so that a stack
+    // trace or getClass().getName() reads the way a developer expects.
+    const std::string descriptor = "L$Proxy" + std::to_string(proxy_classes_.size()) + ";";
+    proxy->descriptor = heap_.InternString(descriptor.c_str());
+    proxy->access_flags = art::kAccPublic | art::kAccFinal;
+    proxy->superclass = proxy_base;
+    proxy->interfaces = interfaces;
+    proxy->is_proxy = true;
+    // Inherit Proxy's layout so the `h` field it declares is reachable on instances
+    // of this class; the proxy adds no storage of its own.
+    proxy->object_size = proxy_base->object_size;
+    // No <clinit> exists to run, and nothing would resolve one — mark it done so a
+    // reference to the class does not try.
+    proxy->status = DexClass::Status::kInitialized;
+    // Share the superclass vtable. Nothing dispatches through it (the proxy declares
+    // no methods) but leaving it empty would make an inherited Object method such as
+    // toString unreachable by vtable index.
+    proxy->vtable = proxy_base->vtable;
+
+    classes_[descriptor] = proxy;
+    live_classes_.insert(proxy);
+    proxy_classes_[key] = proxy;
+    return proxy;
+}
+
 DexClass* DexClassLinker::ClassOfObject(const DexObject* obj) const {
     if (obj == nullptr) return nullptr;
 

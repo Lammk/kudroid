@@ -30,6 +30,7 @@
 #include <signal.h>
 #include <stdint.h>
 #include <sys/mman.h>
+#include <sched.h>
 #include <sys/uio.h>
 #include <unistd.h>
 
@@ -44,6 +45,7 @@ extern "C" int bionic_sigaction(int signum, const struct android_sigaction* act,
                                 struct android_sigaction* oldact);
 extern "C" long bionic_syscall(long number, ...);
 extern "C" int bionic_sigaltstack(const stack_t* ss, stack_t* oss);
+extern "C" int bionic_sched_getaffinity(pid_t pid, size_t cpusetsize, void* mask);
 extern "C" int bionic_tgkill(int pid, int tid, int sig);
 extern "C" int bionic_pipe2(int pipefd[2], int flags);
 extern "C" int bionic___cxa_guard_acquire(uint64_t* g);
@@ -334,6 +336,7 @@ static void test_sigaction_flag_roundtrip() {
 #define GUEST_SYS_futex 98
 #define GUEST_SYS_process_vm_readv 270
 #define GUEST_SYS_sigaltstack 132
+#define GUEST_SYS_sched_getaffinity 123
 #define FUTEX_WAIT_PRIVATE 128
 #define FUTEX_WAKE_PRIVATE 129
 
@@ -406,6 +409,77 @@ static void test_syscall_mappings() {
         CHECK((::fcntl(fds[0], F_GETFD) & FD_CLOEXEC) != 0, "pipe2 set CLOEXEC");
         ::close(fds[0]); ::close(fds[1]);
     }
+}
+
+// ─── sched_getaffinity: raw syscall vs wrapper ───────────────────────────────
+//
+// The two have OPPOSITE success conventions, and conflating them silently produces
+// an empty CPU set rather than an error.
+//
+// The raw syscall returns the number of bytes written. bionic's wrapper uses that
+// count to zero the remainder of the caller's set:
+//
+//     int rc = __sched_getaffinity(pid, size, set);
+//     if (rc == -1) return -1;
+//     if ((size_t)rc < size) memset((char*)set + rc, 0, size - rc);
+//     return 0;
+//
+// so a raw syscall that returns 0 makes bionic clear the WHOLE mask. Unity then
+// reported "Cores = 0" and "0 big (mask: 0x0), 0 little (mask: 0x0)" and sized its
+// job system from an empty set.
+
+static void test_sched_getaffinity_raw_returns_byte_count() {
+    std::printf("[sched_getaffinity] raw syscall returns bytes written\n");
+
+    unsigned long mask = 0;
+    const long rc = bionic_syscall(GUEST_SYS_sched_getaffinity, 0, sizeof(mask), &mask);
+    CHECK(rc == static_cast<long>(sizeof(mask)),
+          "raw syscall(123) returns sizeof(mask), not 0");
+    CHECK(mask != 0, "the mask is not empty");
+    CHECK(__builtin_popcountl(mask) == 8, "eight CPUs are reported online");
+
+    // A guest asking for fewer bytes than a word must get exactly that many, or
+    // bionic's memset of the "remainder" would run off the end of its buffer.
+    unsigned char small[2] = {0xAA, 0xAA};
+    const long small_rc = bionic_syscall(GUEST_SYS_sched_getaffinity, 0, sizeof(small), &small);
+    CHECK(small_rc == static_cast<long>(sizeof(small)),
+          "a 2-byte set reports 2 bytes written");
+    CHECK(small[0] == 0xFF, "the low byte carries CPUs 0-7");
+
+    // Reproduce what bionic does with the return value: whatever it clears, the
+    // result must still describe a non-empty set.
+    unsigned long emulated[4] = {0, 0, 0, 0};
+    const long n = bionic_syscall(GUEST_SYS_sched_getaffinity, 0, sizeof(emulated), &emulated);
+    CHECK(n > 0, "a larger set still succeeds");
+    if (n > 0 && static_cast<size_t>(n) < sizeof(emulated)) {
+        std::memset(reinterpret_cast<char*>(emulated) + n, 0, sizeof(emulated) - n);
+    }
+    CHECK(emulated[0] != 0,
+          "after bionic zeroes the remainder the set is still non-empty — the bug that "
+          "made Unity see zero cores");
+
+    errno = 0;
+    CHECK(bionic_syscall(GUEST_SYS_sched_getaffinity, 0, sizeof(mask), nullptr) == -1,
+          "a null mask pointer is an error, not a silent success");
+}
+
+static void test_sched_getaffinity_wrapper_returns_zero() {
+    std::printf("[sched_getaffinity] wrapper returns 0 on success\n");
+
+    cpu_set_t set;
+    std::memset(&set, 0, sizeof(set));
+    CHECK(bionic_sched_getaffinity(0, sizeof(set), &set) == 0,
+          "the wrapper reports success as 0");
+    CHECK(CPU_COUNT(&set) == 8, "the wrapper fills in eight CPUs");
+    CHECK(CPU_ISSET(0, &set) && CPU_ISSET(7, &set), "CPUs 0 and 7 are both set");
+    CHECK(!CPU_ISSET(8, &set), "CPU 8 is not claimed");
+
+    errno = 0;
+    CHECK(bionic_sched_getaffinity(0, 0, &set) == -1 && errno == EINVAL,
+          "a zero-sized set is rejected with EINVAL");
+    errno = 0;
+    CHECK(bionic_sched_getaffinity(0, sizeof(set), nullptr) == -1 && errno == EINVAL,
+          "a null set is rejected with EINVAL");
 }
 
 // ─── __cxa_guard shim (recursion-tolerant) ──────────────────────────────────
@@ -942,6 +1016,8 @@ int main() {
     test_futex_cmp_requeue_precond();
     test_futex_wait_wake_cycles();
     test_syscall_mappings();
+    test_sched_getaffinity_raw_returns_byte_count();
+    test_sched_getaffinity_wrapper_returns_zero();
     test_mremap_shrink_in_place();
     test_mremap_grow_with_maymove();
     test_sigaction_flag_roundtrip();
