@@ -40,25 +40,97 @@ namespace {
 // The divergence is not cosmetic. Guest SIGUSR1 is 10, and 10 on Darwin is SIGBUS:
 // forwarding the number unchanged hands a guest's routine user-signal handler the
 // signal KuDroid uses for memory faults.
+//
+// Two Linux signals have NO Darwin equivalent by name — SIGSTKFLT (16) and SIGPWR (30) —
+// and Linux also has 33 real-time signals that Darwin does not have at all. Leaving them
+// unmapped meant sigaction returned EINVAL for them, and that is not a harmless gap: a
+// managed runtime suspends its threads for GC with a signal it picks from exactly that
+// range. Mono/il2cpp uses SIGPWR (or SIGRTMIN on newer builds) as SIG_SUSPEND and SIGXCPU
+// as SIG_RESTART, so ULTRAKILL printed "Cannot set SIG_SUSPEND handler" and ran with no
+// working thread suspension.
+//
+// They are mapped onto host signals that exist and that nothing else here claims.
 struct SignalPair {
     int linux_num;
     int host_num;
 };
 
+// Host signals borrowed for Linux numbers that have no name-wise counterpart.
+//
+// SIGEMT (7) and SIGINFO (29) are the only two Darwin signals no entry below uses, and
+// neither is something a guest can receive by accident: SIGEMT is an emulator trap that
+// arm64 never raises, and SIGINFO only arrives from a terminal keystroke that no iOS app
+// has. So a handler installed for one of these is only ever reached because the guest
+// itself sent the signal — which is precisely how a runtime uses SIG_SUSPEND.
+//
+// The alternative was to reject them, and that was already tried by omission: it produced
+// a guest whose GC cannot stop the world.
+#if defined(SIGEMT)
+#define KUDROID_HOST_FOR_SIGSTKFLT SIGEMT
+#else
+#define KUDROID_HOST_FOR_SIGSTKFLT SIGSTKFLT
+#endif
+#if defined(SIGINFO)
+#define KUDROID_HOST_FOR_SIGPWR SIGINFO
+#else
+#define KUDROID_HOST_FOR_SIGPWR SIGPWR
+#endif
+
 constexpr SignalPair kSignalMap[] = {
     {1, SIGHUP},   {2, SIGINT},   {3, SIGQUIT},  {4, SIGILL},   {5, SIGTRAP},
     {6, SIGABRT},  {7, SIGBUS},   {8, SIGFPE},   {9, SIGKILL},  {10, SIGUSR1},
     {11, SIGSEGV}, {12, SIGUSR2}, {13, SIGPIPE}, {14, SIGALRM}, {15, SIGTERM},
-    // Linux 16 is SIGSTKFLT, which Darwin has no counterpart for.
+    // Linux 16 is SIGSTKFLT. No Darwin signal has that meaning, so it borrows one that
+    // arm64 never raises on its own.
+    {16, KUDROID_HOST_FOR_SIGSTKFLT},
     {17, SIGCHLD}, {18, SIGCONT}, {19, SIGSTOP}, {20, SIGTSTP}, {21, SIGTTIN},
     {22, SIGTTOU}, {23, SIGURG},  {24, SIGXCPU}, {25, SIGXFSZ}, {26, SIGVTALRM},
     {27, SIGPROF}, {28, SIGWINCH},
 #if defined(SIGIO)
     {29, SIGIO},
 #endif
-    // Linux 30 is SIGPWR, likewise absent on Darwin.
+    // Linux 30 is SIGPWR — Mono's default SIG_SUSPEND on Android, and the reason this
+    // entry exists rather than staying a comment about an absent counterpart.
+    {30, KUDROID_HOST_FOR_SIGPWR},
     {31, SIGSYS},
 };
+
+// Linux real-time signals, and the host range they map onto.
+//
+// Linux has SIGRTMIN=32 through SIGRTMAX=64. Darwin has none, and a guest runtime that
+// asks for SIGRTMIN gets EINVAL — the newer-Mono form of the same SIG_SUSPEND failure.
+//
+// Mapped onto the host's own real-time range where one exists (Linux hosts, so the shim
+// tests exercise a real mapping) and refused where it does not. Refusing is honest: there
+// is no host signal left to borrow for 33 of them, and silently aliasing several guest
+// signals onto one host signal would make a guest's suspend and restart signals the same
+// number — worse than EINVAL, because the runtime would believe it had two.
+constexpr int kLinuxSigRtMin = 32;
+constexpr int kLinuxSigRtMax = 64;
+
+int rt_signal_to_host(int guest_signum) {
+    if (guest_signum < kLinuxSigRtMin || guest_signum > kLinuxSigRtMax) return 0;
+#if defined(SIGRTMIN) && defined(SIGRTMAX)
+    const int offset = guest_signum - kLinuxSigRtMin;
+    const int host = SIGRTMIN + offset;
+    if (host > SIGRTMAX) return 0;
+    return host;
+#else
+    return 0;
+#endif
+}
+
+int rt_signal_to_guest(int host_signum) {
+#if defined(SIGRTMIN) && defined(SIGRTMAX)
+    if (host_signum < SIGRTMIN || host_signum > SIGRTMAX) return 0;
+    const int guest = kLinuxSigRtMin + (host_signum - SIGRTMIN);
+    if (guest > kLinuxSigRtMax) return 0;
+    return guest;
+#else
+    (void)host_signum;
+    return 0;
+#endif
+}
 
 // ── Flags ────────────────────────────────────────────────────────────────────
 //
@@ -242,14 +314,16 @@ int guest_signal_to_host(int guest_signum) {
     for (const SignalPair& p : kSignalMap) {
         if (p.linux_num == guest_signum) return p.host_num;
     }
-    return 0;
+    // Real-time signals are a contiguous range rather than a table entry: a guest asking
+    // for SIGRTMIN+2 must reach the host's SIGRTMIN+2, not fall off the end.
+    return rt_signal_to_host(guest_signum);
 }
 
 int host_signal_to_guest(int host_signum) {
     for (const SignalPair& p : kSignalMap) {
         if (p.host_num == host_signum) return p.linux_num;
     }
-    return 0;
+    return rt_signal_to_guest(host_signum);
 }
 
 bool guest_signal_has_handler(int host_signum) {
@@ -356,9 +430,50 @@ extern "C" void kudroid_guest_signal_trampoline(int host_signum, siginfo_t* info
 int guest_sigaction(int guest_signum, const GuestSigaction* act, GuestSigaction* oldact) {
     const int host_signum = guest_signal_to_host(guest_signum);
     if (host_signum == 0) {
-        // A signal with no host counterpart: SIGSTKFLT, SIGPWR, or a real-time signal.
-        // EINVAL is what Linux returns for a number it does not know, and it is what
-        // the guest's error path is written for.
+        // No host signal left to carry this one. Only reachable now for a real-time signal
+        // on a host with no RT range of its own — every named Linux signal is mapped.
+        //
+        // SAY SO. A silent EINVAL here is what "Cannot set SIG_SUSPEND handler" was: the
+        // guest reported a failure, KuDroid reported nothing, and the number it had asked
+        // for — the one fact needed to fix it — appeared in no log. Rate-limited to the
+        // first few distinct signals so a guest retrying in a loop cannot flood the log.
+        static std::mutex s_mtx;
+        static int s_seen[8];
+        static int s_seenN = 0;
+        bool report = false;
+        {
+            std::lock_guard<std::mutex> lock(s_mtx);
+            bool dup = false;
+            for (int i = 0; i < s_seenN; ++i) {
+                if (s_seen[i] == guest_signum) { dup = true; break; }
+            }
+            if (!dup && s_seenN < 8) {
+                s_seen[s_seenN++] = guest_signum;
+                report = true;
+            }
+        }
+        if (report) {
+            // Only the real-time range is reachable here now, and only on a host with no
+            // RT signals of its own — every named Linux signal is mapped. Anything else is
+            // simply not a signal number, so the message must not speculate about
+            // SIG_SUSPEND for it: the last round was cost by a log line that pointed
+            // somewhere plausible and wrong.
+            const bool plausible_runtime_signal =
+                guest_signum >= kLinuxSigRtMin && guest_signum <= kLinuxSigRtMax;
+            char msg[256];
+            std::snprintf(msg, sizeof(msg),
+                          "guest sigaction(%d) REFUSED: no host signal carries Linux %d "
+                          "(handler=%p flags=0x%x).%s",
+                          guest_signum, guest_signum,
+                          act != nullptr ? act->sa_handler_or_sigaction : nullptr,
+                          act != nullptr ? static_cast<unsigned>(act->sa_flags) : 0u,
+                          plausible_runtime_signal
+                              ? " This is a real-time signal; a managed runtime using it"
+                                " for thread suspension will report that it cannot install"
+                                " SIG_SUSPEND."
+                              : " This is not a valid Linux signal number.");
+            kudroid_android_log_message(6, "KuDroidSignal", msg);
+        }
         errno = EINVAL;
         return -1;
     }
@@ -445,7 +560,19 @@ int guest_sigaction(int guest_signum, const GuestSigaction* act, GuestSigaction*
         host_act.sa_flags &= ~SA_SIGINFO;
     }
 
-    if (::sigaction(host_signum, &host_act, nullptr) != 0) return -1;
+    if (::sigaction(host_signum, &host_act, nullptr) != 0) {
+        // The host refused it. Report which signal, for the same reason as the mapping
+        // failure above: the guest prints its own message, and without this there is no
+        // record of what it asked for.
+        const int saved = errno;
+        char msg[224];
+        std::snprintf(msg, sizeof(msg),
+                      "guest sigaction(%d) -> host signal %d REJECTED by the host: %s",
+                      guest_signum, host_signum, std::strerror(saved));
+        kudroid_android_log_message(6, "KuDroidSignal", msg);
+        errno = saved;
+        return -1;
+    }
     return 0;
 }
 

@@ -106,26 +106,39 @@ void watchdog_main() {
     uint64_t next_sample_ms = kSampleAfterMs;
     uint64_t sampled_start = 0;
 
+    // Set once a fatal signal has been seen, so the announcement is made exactly once
+    // while the loop itself keeps running.
+    bool fatal_announced = false;
+
     while (g_call.started.load(std::memory_order_acquire)) {
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
 
-        // A thread has crashed: say so once and stop reporting.
+        // A thread has taken a fatal signal. Announce it once, then stop reporting
+        // DURATIONS — but keep the loop alive.
         //
-        // Everything below measures how long calls have been running, and after a fatal
-        // fault those measurements are lies — the thread is parked in the crash handler,
-        // not working. Continuing to print them is worse than printing nothing, because
-        // a reader chases the wrong thing: this watchdog announced
-        // `native_elapsed_ms=16570 stage=before-trampoline nativeRender` for sixteen
-        // seconds after UnityMain had already taken a SIGSEGV.
-        if (const int fatal = g_call.fatal_signal.load(std::memory_order_acquire)) {
+        // The durations become lies at that moment: the faulting thread never reaches
+        // native_call_exit, so active_count stays non-zero and native_start_ns stays put,
+        // and the watchdog goes on describing a call whose thread is gone. That is what
+        // reported `native_call_id=14 native_elapsed_ms=9429` for nine seconds after
+        // UnityMain had already aborted, and it is worse than silence because a reader
+        // chases it.
+        //
+        // Returning outright — which is what this did first — throws away the diagnostics
+        // that are still TRUE. The blocking-wait registry is per-thread and self-clearing,
+        // so it keeps working after another thread dies, and a process that survives a
+        // fault its own handler fixed would otherwise run the rest of the session with no
+        // stall detection at all.
+        const int fatal = g_call.fatal_signal.load(std::memory_order_acquire);
+        if (fatal != 0 && !fatal_announced) {
+            fatal_announced = true;
             char line[256];
             std::snprintf(line, sizeof(line),
-                          "watchdog stopped reason=fatal-signal signal=%d thread_id=%llu",
+                          "watchdog call-timing stopped reason=fatal-signal signal=%d "
+                          "thread_id=%llu (stall reporting continues)",
                           fatal,
                           static_cast<unsigned long long>(
                               g_call.fatal_thread_id.load(std::memory_order_relaxed)));
             kudroid_persistent_breadcrumb(line);
-            return;
         }
 
         // Name any thread parked on a blocking wait for too long.
@@ -189,11 +202,15 @@ void watchdog_main() {
         // observed. Native calls can start and finish between two 250ms ticks, so
         // "native_active went false" is not a reliable signal that a new call began —
         // whereas a changed start stamp is exactly that, by construction.
+        //
+        // Skipped once a thread has faulted: the elapsed time is measured against a call
+        // that will never return, so it grows without bound and would trigger a sample
+        // every ten seconds forever, each one describing a thread that is gone.
         if (native_start != sampled_start) {
             sampled_start = native_start;
             next_sample_ms = kSampleAfterMs;
         }
-        if (native_active && native_elapsed_ms >= next_sample_ms) {
+        if (!fatal_announced && native_active && native_elapsed_ms >= next_sample_ms) {
             char reason[704];
             std::snprintf(reason, sizeof(reason), "native-%llums-%s.%s-at-%s",
                           static_cast<unsigned long long>(native_elapsed_ms), cls, method,
@@ -201,6 +218,11 @@ void watchdog_main() {
             thread_sample_report(reason);
             next_sample_ms = native_elapsed_ms + kResampleEveryMs;
         }
+
+        // Call timing is over once a thread has faulted, for the reason given at the top
+        // of the loop: active_count never returns to zero, so every figure below would
+        // describe a call whose thread is dead. The blocking-wait check above still runs.
+        if (fatal_announced) continue;
 
         const SystemMemory memory = query_system_memory();
         char line[2048];

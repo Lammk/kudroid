@@ -714,7 +714,7 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
     // entirely. Both are correct behaviours and both used to leave no KuDroid-side trace
     // at all.
     //
-    // That cost a full round. This run took a SIGSEGV at 0x64696f72646e6140 that only
+    // That cost a full round. One run took a SIGSEGV at 0x64696f72646e6140 that only
     // exists in the log as libunity's own tombstone text, arriving through
     // __android_log_print with no thread, no KuDroid context and no way to place it in
     // the timeline — while KuDroid's crash log described a different, later fault and
@@ -738,6 +738,25 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
                  g_jniGuardActive ? 1 : 0);
         kudroid_persistent_breadcrumb(mark);
     }
+
+    // Stop the watchdog timing this thread's work, HERE — at the one point every path
+    // passes through.
+    //
+    // This used to sit further down, past the guest-handler dispatch and past the
+    // JNI_OnLoad shield, and that was the same mistake twice over: those are exits, not
+    // the entry. A guest handler that does not return — il2cpp's SIGABRT handler
+    // siglongjmps out — skipped it entirely, so the last run reported
+    // `native_call_id=14 native_elapsed_ms=9429` for nine seconds after UnityMain had
+    // taken the signal, timing a call whose thread was gone. The `fatal-signal` line
+    // above was written from the right place and was the only reason that was visible.
+    //
+    // The cost of being early is a false positive: a fault the guest genuinely fixes and
+    // resumes from also stops the watchdog. That is the right trade — a stopped watchdog
+    // says "stopped, reason=fatal-signal" and can be reasoned about, while a watchdog
+    // reporting a dead thread's call as a live hang sends the reader somewhere else
+    // entirely. Two relaxed stores, safe in a signal handler.
+    kudroid::native_note_fatal_signal(sig,
+                                      static_cast<unsigned long long>(currentThreadIdForCrash()));
 
     // The guest's own handler, for the signals KuDroid must keep installed.
     //
@@ -801,12 +820,6 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
         g_jniGuardSignal = sig;
         siglongjmp(g_jniGuardJmp, 1);
     }
-
-    // Past every path that survives: this fault ends the thread. Tell the watchdog, so
-    // it stops timing a native call whose thread is about to be parked forever and
-    // reporting the result as a hang. Two relaxed stores, safe in a signal handler.
-    kudroid::native_note_fatal_signal(sig,
-                                      static_cast<unsigned long long>(currentThreadIdForCrash()));
 
     // Flush stdout/stderr streams to ensure buffered diagnostic messages
     // are not lost before termination.

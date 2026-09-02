@@ -162,27 +162,124 @@ void test_signal_numbers_are_translated_above_sigfpe() {
     Check(true, "every mapped signal round-trips guest -> host -> guest");
 }
 
-void test_signals_with_no_host_counterpart_are_rejected() {
-    std::printf("[numbers] a signal the host does not have is EINVAL, not a wrong guess\n");
+// The signals a managed runtime uses to suspend its own threads.
+//
+// This test asserted the OPPOSITE until now — that SIGSTKFLT (16) and SIGPWR (30) are
+// correctly rejected with EINVAL, because neither has a Darwin signal of the same name.
+// That was testing the gap rather than the requirement: Mono/il2cpp picks SIG_SUSPEND from
+// exactly that range (SIGPWR on Android, SIGRTMIN on newer builds) and uses SIGXCPU for
+// SIG_RESTART, so rejecting it produced a guest whose GC cannot stop the world.
+// ULTRAKILL printed "Cannot set SIG_SUSPEND handler" and ran on with no thread suspension.
+//
+// A test agreeing with the implementation's limitation is how the limitation survives, so
+// what is pinned now is that these signals WORK, and that they land somewhere distinct.
+void test_thread_suspension_signals_are_installable() {
+    std::printf("[numbers] the signals a runtime suspends threads with are installable\n");
     guest_signal_reset_for_test();
 
-    Check(guest_signal_to_host(kGuestSIGSTKFLT) == 0, "SIGSTKFLT (16) has no counterpart");
-    Check(guest_signal_to_host(kGuestSIGPWR) == 0, "SIGPWR (30) has no counterpart");
+    const int stkflt_host = guest_signal_to_host(kGuestSIGSTKFLT);
+    const int pwr_host = guest_signal_to_host(kGuestSIGPWR);
+
+    Check(stkflt_host != 0, "SIGSTKFLT (16) maps to a host signal");
+    Check(pwr_host != 0, "SIGPWR (30) maps to a host signal — Mono's SIG_SUSPEND");
+
+    // Distinct host signals, or a runtime's suspend and restart signals collide and it
+    // believes it has two when it has one. That would be worse than the EINVAL this
+    // replaces, because the failure would be silent.
+    Check(stkflt_host != pwr_host, "the two do not alias onto one host signal");
+
+    // Neither may collide with a signal that already means something else. SIGXCPU is
+    // Mono's SIG_RESTART, and the fault signals are KuDroid's own.
+    Check(pwr_host != SIGXCPU && stkflt_host != SIGXCPU,
+          "neither collides with SIGXCPU, which a runtime uses for SIG_RESTART");
+    Check(pwr_host != SIGSEGV && pwr_host != SIGBUS && pwr_host != SIGABRT &&
+              pwr_host != SIGILL && pwr_host != SIGTRAP && pwr_host != SIGSYS,
+          "SIGPWR does not land on a signal KuDroid owns for faults");
+
+    // Round-tripping matters for dispatch: the handler is called with the GUEST number,
+    // so a mapping that does not invert hands the runtime the wrong signal and its
+    // suspend handler runs for a restart.
+    Check(host_signal_to_guest(pwr_host) == kGuestSIGPWR,
+          "SIGPWR round-trips, so the handler is called with 30");
+    Check(host_signal_to_guest(stkflt_host) == kGuestSIGSTKFLT,
+          "SIGSTKFLT round-trips");
 
     GuestSigaction act;
     std::memset(&act, 0, sizeof(act));
     act.sa_handler_or_sigaction = reinterpret_cast<void*>(&test_layout_matches_bionic_lp64);
 
     errno = 0;
-    Check(guest_sigaction(kGuestSIGSTKFLT, &act, nullptr) == -1 && errno == EINVAL,
-          "installing a handler for it fails with EINVAL rather than landing on some "
-          "other signal");
+    Check(guest_sigaction(kGuestSIGPWR, &act, nullptr) == 0,
+          "installing a SIG_SUSPEND handler succeeds — the call that used to fail");
+    Check(guest_signal_has_handler(pwr_host), "and the handler is recorded against it");
+
+    errno = 0;
+    Check(guest_sigaction(kGuestSIGSTKFLT, &act, nullptr) == 0,
+          "installing a SIGSTKFLT handler succeeds");
+
+    guest_signal_reset_for_test();
+}
+
+// Linux real-time signals. Newer Mono builds use SIGRTMIN for SIG_SUSPEND rather than
+// SIGPWR, so the same failure reappears there if the range is unmapped.
+void test_real_time_signals_are_handled() {
+    std::printf("[numbers] real-time signals map onto the host's own range\n");
+    guest_signal_reset_for_test();
+
+    constexpr int kGuestSigRtMin = 32;
+    constexpr int kGuestSigRtMax = 64;
+
+#if defined(SIGRTMIN) && defined(SIGRTMAX)
+    const int rtmin_host = guest_signal_to_host(kGuestSigRtMin);
+    Check(rtmin_host != 0, "SIGRTMIN (32) maps to a host real-time signal");
+    Check(rtmin_host >= SIGRTMIN && rtmin_host <= SIGRTMAX,
+          "and it lands inside the host's real-time range");
+    Check(host_signal_to_guest(rtmin_host) == kGuestSigRtMin, "it round-trips");
+
+    // Offsets must be preserved, not collapsed: a runtime using SIGRTMIN for suspend and
+    // SIGRTMIN+1 for restart needs two distinct signals.
+    const int rt2_host = guest_signal_to_host(kGuestSigRtMin + 1);
+    if (rt2_host != 0) {
+        Check(rt2_host != rtmin_host, "SIGRTMIN+1 is a different host signal from SIGRTMIN");
+        Check(rt2_host - rtmin_host == 1, "the offset within the range is preserved");
+    }
+
+    GuestSigaction act;
+    std::memset(&act, 0, sizeof(act));
+    act.sa_handler_or_sigaction = reinterpret_cast<void*>(&test_layout_matches_bionic_lp64);
+    errno = 0;
+    Check(guest_sigaction(kGuestSigRtMin, &act, nullptr) == 0,
+          "installing a SIGRTMIN handler succeeds");
+#else
+    // A host with no real-time signals must still REFUSE rather than alias: mapping 33
+    // guest signals onto one host signal is worse than EINVAL.
+    Check(guest_signal_to_host(kGuestSigRtMin) == 0,
+          "with no host RT range, SIGRTMIN is refused rather than aliased");
+#endif
+
+    // Past SIGRTMAX is not a signal on either side.
+    Check(guest_signal_to_host(kGuestSigRtMax + 1) == 0,
+          "a number above SIGRTMAX has no mapping");
+
+    guest_signal_reset_for_test();
+}
+
+void test_out_of_range_signals_are_rejected() {
+    std::printf("[numbers] a number that is not a signal is EINVAL, not a wrong guess\n");
+    guest_signal_reset_for_test();
+
+    GuestSigaction act;
+    std::memset(&act, 0, sizeof(act));
+    act.sa_handler_or_sigaction = reinterpret_cast<void*>(&test_layout_matches_bionic_lp64);
 
     errno = 0;
     Check(guest_sigaction(0, &act, nullptr) == -1 && errno == EINVAL, "signal 0 is EINVAL");
     errno = 0;
     Check(guest_sigaction(9999, &act, nullptr) == -1 && errno == EINVAL,
           "an out-of-range signal is EINVAL, not an out-of-bounds write");
+    errno = 0;
+    Check(guest_sigaction(-1, &act, nullptr) == -1 && errno == EINVAL,
+          "a negative signal is EINVAL");
 }
 
 void test_uncatchable_signals_are_refused() {
@@ -448,7 +545,9 @@ int main() {
     test_the_observed_bad_pc_is_reproduced_by_the_old_layout();
     test_signal_numbers_agree_below_sigfpe();
     test_signal_numbers_are_translated_above_sigfpe();
-    test_signals_with_no_host_counterpart_are_rejected();
+    test_thread_suspension_signals_are_installable();
+    test_real_time_signals_are_handled();
+    test_out_of_range_signals_are_rejected();
     test_uncatchable_signals_are_refused();
     test_owned_signals_are_recorded_not_installed();
     test_owned_signal_reaches_the_guest_through_dispatch();

@@ -335,6 +335,14 @@ else()
     #                          old Java version returned a bare Proxy, so the cast failed
     #                          and the first call died with "method without body: run" —
     #                          which is where Unity's runOnUiThread stopped.
+    # test_kuart_default_methods
+    #                          Interface default method resolution (JVMS 5.4.3.3). An
+    #                          abstract declaration in the class chain used to hide a
+    #                          default, turning correct Java into AbstractMethodError, and
+    #                          among several interfaces the first found won rather than the
+    #                          most specific — so an overridden default ran silently.
+    #                          Unity reported "default methods are only supported since
+    #                          Android Oreo" on an SDK-29 runtime because of it.
     if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/test_art_dex.cpp")
         add_executable(test_art_dex kuart-tests/test_art_dex.cpp)
         target_link_libraries(test_art_dex PRIVATE art_dex ZLIB::ZLIB)
@@ -359,6 +367,7 @@ else()
         test_kuart_prefs
         test_kuart_jit
         test_kuart_proxy
+        test_kuart_default_methods
     )
         if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/${kuart_test}.cpp")
             add_executable(${kuart_test} kuart-tests/${kuart_test}.cpp)
