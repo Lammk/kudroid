@@ -87,6 +87,20 @@ public:
     // Throw exception by class descriptor.
     void ThrowException(const char* descriptor, const std::string& message);
 
+    // Print the pending exception as uncaught, with its stack trace. No-op when nothing
+    // is pending.
+    //
+    // Called automatically by Execute() when an exception reaches depth 0 — no Java
+    // frame caught it and it is being handed back to native code. That is the one point
+    // where "uncaught" is a fact rather than a guess.
+    //
+    // The trace deliberately does NOT print at the throw site. Most exceptions a real
+    // app throws are caught and expected: ULTRAKILL looks up an optional class by name
+    // during startup and handles the ClassNotFoundException. Printing a five-frame trace
+    // for each one reads as a fatal error and cost a round of investigation aimed at the
+    // wrong problem.
+    void ReportUncaughtException();
+
     // One entry of the per-thread Java call stack.
     //
     // The method pointer is recorded alongside the frame rather than read back out

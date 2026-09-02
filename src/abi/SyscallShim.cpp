@@ -2,6 +2,7 @@
 #include "kudroid/abi/SyscallShim.h"
 #include "kudroid/abi/GuestVarargs.h"
 #include "kudroid/abi/BlockingWaitRegistry.h"
+#include "kudroid/abi/GuestSignals.h"
 #include "kudroid/elf_loader.hpp"
 #include "kudroid/DeviceProfile.h"
 #include "kudroid/platform/BundledFramework.h"
@@ -1200,38 +1201,27 @@ extern "C" int bionic_clock_gettime64(int clock_id, struct timespec *tp) {
 static bool range_is_mapped(uintptr_t addr, size_t len);
 #endif
 
-extern "C" int bionic_sigaltstack(const stack_t *ss, stack_t *oss) {
-    if (!ss) {
-        return ::sigaltstack(nullptr, oss);
-    }
-    if (reinterpret_cast<uintptr_t>(ss) < 4096 ||
-        (oss != nullptr && reinterpret_cast<uintptr_t>(oss) < 4096)) {
-        errno = EFAULT;
-        return -1;
-    }
+// The guest's sigaltstack, through the guest's own stack_t layout.
+//
+// Linux's is {sp, flags, size}; Darwin's is {sp, size, flags}. Taking a `stack_t*`
+// here and dereferencing it read those two fields swapped: a guest asking for a 64KB
+// alternate stack passed ss_flags=65536, which is neither SS_ONSTACK nor SS_DISABLE,
+// the host rejected it — and the old shim logged the failure then returned 0 anyway, so
+// the guest went on believing it had an alternate stack it did not have. A stack
+// overflow then had nowhere to run its handler, which is exactly the case an alternate
+// stack exists for.
+extern "C" int bionic_sigaltstack(const void* ss, void* oss) {
 #ifdef __APPLE__
-    // A direct guest SVC can carry an invalid Linux pointer. Return the
-    // guest-visible EFAULT instead of dereferencing it in the host shim.
-    if (!range_is_mapped(reinterpret_cast<uintptr_t>(ss), sizeof(*ss)) ||
-        (oss != nullptr && !range_is_mapped(reinterpret_cast<uintptr_t>(oss), sizeof(*oss)))) {
+    // A direct guest SVC can carry a pointer that is plausible but not mapped in this
+    // address space. GuestSignals rejects null and the low page; the mapped-range check
+    // needs Mach and lives here.
+    if ((ss != nullptr && !range_is_mapped(reinterpret_cast<uintptr_t>(ss), 24)) ||
+        (oss != nullptr && !range_is_mapped(reinterpret_cast<uintptr_t>(oss), 24))) {
         errno = EFAULT;
         return -1;
     }
 #endif
-    stack_t host_ss = *ss;
-#if defined(__APPLE__)
-    // Darwin kernel yu cu ss_size ti thiu t nht 32KB
-    if (!(host_ss.ss_flags & SS_DISABLE) && host_ss.ss_size < 32768) {
-        host_ss.ss_size = 32768;
-    }
-#endif
-    const int r = ::sigaltstack(&host_ss, oss);
-    if (r != 0) {
-        logAndroidMessage(2, "KuDroidSyscall", "sigaltstack() -> -1 errno=" +
-                          std::to_string(errno) + " (faked to 0)");
-        return 0;
-    }
-    return 0;
+    return kudroid::guest_sigaltstack(ss, oss);
 }
 
 #ifndef __APPLE__
@@ -1662,6 +1652,9 @@ extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int
 extern "C" int bionic_mprotect(void *addr, size_t len, int prot);
 extern "C" int bionic_close(int fd);
 extern "C" ssize_t bionic_getrandom(void *buf, size_t buflen, unsigned int flags);
+// Defined further down, next to the rest of the guest signal glue.
+extern "C" int bionic_rt_sigaction(int signum, const void* act, void* oldact,
+                                   size_t sigsetsize);
 
 extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5, uintptr_t a6) {
     uintptr_t entryX19 = 0;
@@ -1755,8 +1748,15 @@ extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_
             return ::sched_yield();
 
         case 132: // sigaltstack (Linux arm64 syscall number)
-            return bionic_sigaltstack(reinterpret_cast<const stack_t*>(a1),
-                                      reinterpret_cast<stack_t*>(a2));
+            return bionic_sigaltstack(reinterpret_cast<const void*>(a1),
+                                      reinterpret_cast<void*>(a2));
+
+        // rt_sigaction (Linux arm64 syscall 134). Missing before, so a guest that used
+        // syscall() rather than the libc wrapper got ENOSYS and silently ran without
+        // the handler it thought it had installed.
+        case 134:
+            return bionic_rt_sigaction(static_cast<int>(a1), reinterpret_cast<const void*>(a2),
+                                       reinterpret_cast<void*>(a3), static_cast<size_t>(a4));
 
         case 160: // uname
             return bionic_uname(reinterpret_cast<struct bionic_utsname*>(a1));
@@ -3252,113 +3252,40 @@ extern "C" int bionic_pthread_once(int* guest_once, void (*init_routine)(void)) 
     return 0;
 }
 
-struct android_sigaction {
-    union {
-        void (*android_sa_handler)(int);
-        void (*android_sa_sigaction)(int, void*, void*);
-    };
-    uint64_t sa_mask;
-    int sa_flags;
-    void (*sa_restorer)(void);
-};
-
 #include <signal.h>
 
-// Bionic/Linux sa_flags (asm-generic/signal.h) — guest truyn gi tr Linux.
-constexpr int LINUX_SA_NOCLDSTOP = 0x00000001;
-constexpr int LINUX_SA_NOCLDWAIT = 0x00000002;
-constexpr int LINUX_SA_SIGINFO   = 0x00000004;
-constexpr int LINUX_SA_ONSTACK   = 0x08000000;
-constexpr int LINUX_SA_RESTART   = 0x10000000;
-constexpr int LINUX_SA_NODEFER   = 0x40000000;
-constexpr int LINUX_SA_RESETHAND = 0x80000000;
-
-// Dch sa_flags guest (Linux) → host. before y ch bit SA_SIGINFO (0x4) c
-// dch sang Darwin, cn SA_RESTART/NODEFER/RESETHAND/ONSTACK/NOCLD* b drop im
-// lng → game cn SA_RESTART (a s game t n) no/not c restart syscall.
-static int sa_flags_guest_to_host(int flags) {
-#ifdef __APPLE__
-    int out = 0;
-    if (flags & LINUX_SA_SIGINFO)   out |= SA_SIGINFO;
-    if (flags & LINUX_SA_ONSTACK)   out |= SA_ONSTACK;
-    if (flags & LINUX_SA_RESTART)   out |= SA_RESTART;
-    if (flags & LINUX_SA_NODEFER)   out |= SA_NODEFER;
-    if (flags & LINUX_SA_RESETHAND) out |= SA_RESETHAND;
-    if (flags & LINUX_SA_NOCLDSTOP) out |= SA_NOCLDSTOP;
-    if (flags & LINUX_SA_NOCLDWAIT) out |= SA_NOCLDWAIT;
-    return out;
-#else
-    (void)flags;
-    // Linux host: gi tr ging ht, truyn thng.
-    return flags;
-#endif
+// Guest signal handling lives in GuestSignals.cpp.
+//
+// It used to live here, in a `struct android_sigaction` that declared bionic's ILP32
+// field order on an LP64 guest. Both layouts are 32 bytes, so nothing failed a size
+// check; what happened instead is that sa_flags was read as the handler pointer.
+// ULTRAKILL's main thread ended up executing at pc=0x18000004 — which is
+// SA_SIGINFO|SA_ONSTACK|SA_RESTART, the flags the guest had passed — spinning at 100%
+// of one core inside _sigtramp, because every fault re-entered the same bad handler.
+// The same bug also replaced KuDroid's SIGSEGV handler with that value, which is why
+// the run produced no crash log at all.
+//
+// Three separate translations are needed and none of them is optional: the struct
+// layout, the signal NUMBER (Linux and Darwin diverge after SIGFPE — guest SIGUSR1 is
+// 10, which is Darwin's SIGBUS), and ownership of the signals KuDroid needs to keep
+// working (SIGTRAP supplies guest TLS, SIGSYS emulates a raw `svc`). Doing that in one
+// place, with the layouts pinned by static_assert, is the point.
+extern "C" int bionic_sigaction(int signum, const void* act, void* oldact) {
+    return kudroid::guest_sigaction(signum,
+                                    static_cast<const kudroid::GuestSigaction*>(act),
+                                    static_cast<kudroid::GuestSigaction*>(oldact));
 }
 
-static int sa_flags_host_to_guest(int flags) {
-#ifdef __APPLE__
-    int out = 0;
-    if (flags & SA_SIGINFO)   out |= LINUX_SA_SIGINFO;
-    if (flags & SA_ONSTACK)   out |= LINUX_SA_ONSTACK;
-    if (flags & SA_RESTART)   out |= LINUX_SA_RESTART;
-    if (flags & SA_NODEFER)   out |= LINUX_SA_NODEFER;
-    if (flags & SA_RESETHAND) out |= LINUX_SA_RESETHAND;
-    if (flags & SA_NOCLDSTOP) out |= LINUX_SA_NOCLDSTOP;
-    if (flags & SA_NOCLDWAIT) out |= LINUX_SA_NOCLDWAIT;
-    return out;
-#else
-    (void)flags;
-    return flags;
-#endif
-}
-
-extern "C" int bionic_sigaction(int signum, const struct android_sigaction* act, struct android_sigaction* oldact) {
-#ifdef KUDROID_DEBUG
-    char buf[128];
-    std::snprintf(buf, sizeof(buf), "sigaction(signum=%d)", signum);
-    trace(buf);
-#endif
-    
-    struct sigaction host_act;
-    struct sigaction host_oldact;
-    
-    if (act) {
-        std::memset(&host_act, 0, sizeof(host_act));
-        const int host_flags = sa_flags_guest_to_host(act->sa_flags);
-        if (host_flags & SA_SIGINFO) {
-            host_act.sa_sigaction = reinterpret_cast<void (*)(int, siginfo_t*, void*)>(act->android_sa_sigaction);
-        } else {
-            host_act.sa_handler = act->android_sa_handler;
-        }
-        host_act.sa_flags = host_flags;
-        // Copy the signal mask (Android sa_mask is a 64-bit bitmask).
-        sigemptyset(&host_act.sa_mask);
-        for (int sig = 1; sig < 64; ++sig) {
-            if (act->sa_mask & (1ULL << (sig - 1))) {
-                sigaddset(&host_act.sa_mask, sig);
-            }
-        }
+// rt_sigaction is what a guest reaches through syscall(). Same call: bionic's
+// sigaction() is a thin wrapper over it, and the sigset size argument only matters for
+// ILP32, where sigset_t is too small for the real-time signals.
+extern "C" int bionic_rt_sigaction(int signum, const void* act, void* oldact,
+                                   size_t sigsetsize) {
+    if (sigsetsize != sizeof(uint64_t)) {
+        errno = EINVAL;
+        return -1;
     }
-    
-    int ret = ::sigaction(signum, act ? &host_act : nullptr, oldact ? &host_oldact : nullptr);
-    
-    if (oldact && ret == 0) {
-        std::memset(oldact, 0, sizeof(struct android_sigaction));
-        oldact->sa_flags = sa_flags_host_to_guest(host_oldact.sa_flags);
-        if (host_oldact.sa_flags & SA_SIGINFO) {
-            oldact->android_sa_sigaction = reinterpret_cast<void (*)(int, void*, void*)>(host_oldact.sa_sigaction);
-        } else {
-            oldact->android_sa_handler = host_oldact.sa_handler;
-        }
-        // Copy the mask back.
-        oldact->sa_mask = 0;
-        for (int sig = 1; sig < 64; ++sig) {
-            if (sigismember(&host_oldact.sa_mask, sig) == 1) {
-                oldact->sa_mask |= (1ULL << (sig - 1));
-            }
-        }
-    }
-    
-    return ret;
+    return bionic_sigaction(signum, act, oldact);
 }
 
 static pthread_key_t tls_key;
@@ -5249,6 +5176,9 @@ const SymbolEntry kSyscallSymbols[] = {
     {"pthread_once", reinterpret_cast<void*>(&bionic_pthread_once)},
     {"sigaction", reinterpret_cast<void*>(&bionic_sigaction)},
     {"sigaltstack", reinterpret_cast<void*>(&bionic_sigaltstack)},
+    // rt_sigaction is the symbol bionic's own sigaction() is built on, and some guests
+    // import it directly.
+    {"rt_sigaction", reinterpret_cast<void*>(&bionic_rt_sigaction)},
     {"futex", reinterpret_cast<void*>(&bionic_futex)},
     {"__futex", reinterpret_cast<void*>(&bionic_futex)},
     {"futex_time64", reinterpret_cast<void*>(&bionic_futex)},

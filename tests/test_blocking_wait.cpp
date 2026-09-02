@@ -331,6 +331,72 @@ void test_guest_return_address_falls_back_sanely() {
     Check(guest_return_address(-5) != nullptr, "a negative frame count is clamped too");
 }
 
+// The frame walk must survive being called from an arbitrary frame shape, on an
+// arbitrary thread, at the optimisation level the product ships with.
+//
+// This is a regression test with a real failure behind it. The walk used to accept any
+// frame pointer in [0x1000, 0x7fffffffffff] — which excludes null and nothing else. At
+// -O3 the compiler may omit the frame pointer, so __builtin_frame_address(0) is not
+// necessarily the base of a valid chain: the word read where a saved fp would be is
+// whatever was in that stack slot, and the next iteration dereferences it. Adding one
+// caller with a different frame shape (Monitor::Wait) turned that into a segfault on
+// every run of test_kuart_libcore and roughly half the runs of test_shims — a
+// diagnostic crashing the process it was meant to explain.
+//
+// Calling it many times from several depths on several threads is what would have
+// caught it. A single call from main() did not.
+void test_guest_return_address_survives_deep_and_threaded_calls() {
+    std::printf("[spin] guest_return_address is safe from any frame depth, on any thread\n");
+
+    // Recursion, so the walk is entered from a chain of frames of varying shape rather
+    // than only from main's.
+    struct Recurse {
+        static const void* go(int depth) {
+            if (depth == 0) return guest_return_address(12);
+            // A live local the compiler cannot fold away, so each level really does
+            // build a frame.
+            volatile char pad[64];
+            pad[0] = static_cast<char>(depth);
+            const void* r = go(depth - 1);
+            return r != nullptr ? r : reinterpret_cast<const void*>(pad[0]);
+        }
+    };
+
+    bool all_non_null = true;
+    for (int depth = 0; depth < 24; ++depth) {
+        if (Recurse::go(depth) == nullptr) { all_non_null = false; break; }
+    }
+    Check(all_non_null, "24 nesting depths all return an address and none faults");
+
+    // On a fresh thread, whose stack bounds are different from the main thread's — the
+    // main thread's stack is the process stack and is queried differently on some
+    // platforms, so a bounds check that works only there is not enough.
+    std::atomic<int> ok{0};
+    std::atomic<bool> faulted{false};
+    auto worker = [&] {
+        for (int i = 0; i < 200; ++i) {
+            if (guest_return_address(12) == nullptr) { faulted = true; return; }
+        }
+        ok.fetch_add(1);
+    };
+    std::thread t1(worker);
+    std::thread t2(worker);
+    t1.join();
+    t2.join();
+    Check(!faulted.load() && ok.load() == 2,
+          "400 calls across two fresh threads: no fault, every call answered");
+
+    // And from inside a wait, which is the only place it is really called from.
+    int object = 0;
+    {
+        const BlockingWaitScope tracked(WaitKind::kJavaMonitor, &object,
+                                        guest_return_address(6));
+        Check(blocking_wait_active_count() == 1,
+              "a wait registered with an address taken the way the shims take it");
+    }
+    Check(blocking_wait_active_count() == 0, "and cleared normally");
+}
+
 // ─── budgets ─────────────────────────────────────────────────────────────────
 //
 // The captured ULTRAKILL log reported exactly one stall, and it was the wrong thread:
@@ -495,6 +561,7 @@ int main() {
     test_spin_reports_its_iteration_count();
     test_iteration_and_owner_are_ignored_without_a_wait();
     test_guest_return_address_falls_back_sanely();
+    test_guest_return_address_survives_deep_and_threaded_calls();
     test_a_wait_inside_its_budget_is_not_stalled();
     test_a_wait_past_its_budget_is_stalled();
     test_an_unbounded_wait_ignores_the_budget_rule();

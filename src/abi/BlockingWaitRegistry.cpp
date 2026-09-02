@@ -101,6 +101,56 @@ const char* kind_name(WaitKind kind) {
     return "?";
 }
 
+// This thread's stack, as [low, high).
+//
+// The frame walk below needs real bounds, not a plausibility test. It used to accept
+// any fp in [0x1000, 0x7fffffffffff], which excludes null and nothing else: at -O3 the
+// frame pointer may be omitted, so __builtin_frame_address(0) is not necessarily the
+// base of a valid chain, `*fp` yields whatever was in that slot, and the next iteration
+// dereferences it. That is a segfault inside a diagnostic — and it was real, not
+// theoretical: it crashed test_kuart_libcore every run and test_shims about half the
+// time, from the moment a call site with a different frame shape was added.
+//
+// Queried once per thread and cached. pthread_attr_t on Linux needs a heap allocation
+// inside pthread_getattr_np, which is not something to do on every wait.
+struct StackBounds {
+    uintptr_t low = 0;
+    uintptr_t high = 0;
+    bool valid = false;
+};
+
+StackBounds query_stack_bounds() {
+    StackBounds b;
+#if defined(__APPLE__)
+    // Darwin hands back the high address and the size; the stack grows down from there.
+    void* top = ::pthread_get_stackaddr_np(::pthread_self());
+    const size_t size = ::pthread_get_stacksize_np(::pthread_self());
+    if (top != nullptr && size != 0) {
+        b.high = reinterpret_cast<uintptr_t>(top);
+        b.low = b.high - size;
+        b.valid = true;
+    }
+#else
+    pthread_attr_t attr;
+    if (::pthread_getattr_np(::pthread_self(), &attr) == 0) {
+        void* base = nullptr;
+        size_t size = 0;
+        if (::pthread_attr_getstack(&attr, &base, &size) == 0 && base != nullptr && size != 0) {
+            b.low = reinterpret_cast<uintptr_t>(base);
+            b.high = b.low + size;
+            b.valid = true;
+        }
+        ::pthread_attr_destroy(&attr);
+    }
+#endif
+    return b;
+}
+
+const StackBounds& stack_bounds() {
+    static thread_local StackBounds bounds = query_stack_bounds();
+    return bounds;
+}
+
 // Claim a slot for this thread. Returns nullptr when the table is full, which the
 // callers treat as "do not track" rather than as an error: losing a diagnostic is
 // acceptable, refusing to let the guest wait is not.
@@ -124,19 +174,30 @@ const void* guest_return_address(int frames) {
     // bionic_futex reached through emulate_futex_direct, for instance — and a report
     // naming that says nothing: every futex wait in the process comes from there.
     //
-    // The walk is bounded and every dereference is range-checked, because this runs
-    // on a thread that is about to block and must not turn a diagnostic into a
-    // crash. A frame pointer outside plausible stack range ends the walk.
+    // Every step is bounded by the calling thread's REAL stack, not by a plausibility
+    // check. This runs on a thread that is about to block, and a diagnostic that
+    // segfaults is worse than no diagnostic — which is exactly what the earlier version
+    // did once a caller with a different frame shape appeared.
 #if defined(__aarch64__) || defined(__x86_64__)
     if (frames < 1) frames = 1;
     if (frames > 12) frames = 12;
+
+    const StackBounds& stack = stack_bounds();
+    if (!stack.valid) {
+        // No bounds means no safe walk. The immediate caller is still true and costs
+        // nothing to obtain.
+        return __builtin_return_address(0);
+    }
 
     uintptr_t fp = reinterpret_cast<uintptr_t>(__builtin_frame_address(0));
     const void* first = nullptr;
     char scratch[256];
 
     for (int i = 0; i < frames; ++i) {
-        if (fp < 0x1000 || fp > 0x7fffffffffffULL || (fp & 0x7) != 0) break;
+        // Both words of the frame record must lie inside this thread's stack.
+        if ((fp & 0x7) != 0) break;
+        if (fp < stack.low || fp + 2 * sizeof(void*) > stack.high) break;
+
         // AAPCS64 and SysV both store [saved fp, return address] at the frame base.
         const uintptr_t ret = *reinterpret_cast<const uintptr_t*>(fp + sizeof(void*));
         if (ret == 0) break;
@@ -145,11 +206,18 @@ const void* guest_return_address(int frames) {
                                         sizeof(scratch))) {
             return reinterpret_cast<const void*>(ret);
         }
-        fp = *reinterpret_cast<const uintptr_t*>(fp);
+
+        // A frame chain grows towards higher addresses. Requiring that strictly is what
+        // stops a garbage slot — the value read where a saved fp would be when the
+        // compiler omitted the frame pointer — from being followed, and it makes a
+        // cycle impossible rather than merely bounded.
+        const uintptr_t next = *reinterpret_cast<const uintptr_t*>(fp);
+        if (next <= fp) break;
+        fp = next;
     }
     // No guest frame in range: report the immediate caller rather than nothing, so
     // the address is at least a starting point.
-    return first;
+    return first != nullptr ? first : __builtin_return_address(0);
 #else
     (void)frames;
     return __builtin_return_address(0);

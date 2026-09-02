@@ -28,6 +28,7 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <sys/mman.h>
 #include <sched.h>
@@ -42,10 +43,9 @@ extern "C" int bionic_futex(uint32_t* uaddr, int futex_op, uint32_t val,
                             uint32_t val3);
 extern "C" void* bionic_mremap(void* old_address, size_t old_size,
                                size_t new_size, int flags, void* new_address);
-extern "C" int bionic_sigaction(int signum, const struct android_sigaction* act,
-                                struct android_sigaction* oldact);
+extern "C" int bionic_sigaction(int signum, const void* act, void* oldact);
 extern "C" long bionic_syscall(long number, ...);
-extern "C" int bionic_sigaltstack(const stack_t* ss, stack_t* oss);
+extern "C" int bionic_sigaltstack(const void* ss, void* oss);
 extern "C" int bionic_sched_getaffinity(pid_t pid, size_t cpusetsize, void* mask);
 extern "C" int bionic_sem_init(sem_t* sem, int pshared, unsigned int value);
 extern "C" int bionic_sem_destroy(sem_t* sem);
@@ -81,16 +81,25 @@ extern "C" void* (*kudroid_guest_library_open)(const char* filename);
 extern "C" void* (*kudroid_guest_library_symbol)(void* handle, const char* symbol);
 extern "C" int (*kudroid_guest_library_owns)(void* handle);
 
-// Mirror of the guest android_sigaction layout from SyscallShim.cpp.
+// The guest's sigaction, in bionic's LP64 layout.
+//
+// This mirror used to carry bionic's ILP32 field order — handler first, then mask, then
+// flags — which is what SyscallShim.cpp declared. Both orders are 32 bytes, so the
+// mismatch failed no size check and this test passed while the shim read sa_flags as
+// the handler pointer. On device that installed 0x18000004 (SA_SIGINFO|SA_ONSTACK|
+// SA_RESTART) as ULTRAKILL's SIGSEGV handler and spun the main thread at 100% of a core
+// inside _sigtramp. See tests/test_guest_signals.cpp, which pins the offsets.
 struct android_sigaction {
+    int sa_flags;
     union {
         void (*android_sa_handler)(int);
         void (*android_sa_sigaction)(int, void*, void*);
     };
     uint64_t sa_mask;
-    int sa_flags;
     void (*sa_restorer)(void);
 };
+static_assert(sizeof(struct android_sigaction) == 32, "LP64 guest sigaction is 32 bytes");
+static_assert(offsetof(struct android_sigaction, sa_flags) == 0, "sa_flags is first on LP64");
 
 // ─── Host-link stubs ─────────────────────────────────────────────────────────
 // The JNI_CreateJavaVM/classpathJar stub is no longer needed: KuART defines them itself
@@ -452,7 +461,11 @@ static void test_sigaction_flag_roundtrip() {
     // Guest-visible flags are Linux values regardless of host: on Linux they
     // pass straight through, on Apple the shim translates them.
     act.sa_flags = LINUX_SA_RESTART | LINUX_SA_NODEFER | LINUX_SA_RESETHAND;
-    if (::bionic_sigaction(SIGUSR1, &act, nullptr) != 0) {
+    // SIGUSR1 deliberately: it is a signal KuDroid does not own, so this exercises the
+    // path that really installs a host handler. Guest SIGUSR1 is 10, which on Darwin is
+    // SIGBUS — hence the translation, and hence why passing the number through would
+    // have handed this test's SIG_IGN to KuDroid's own fault handling.
+    if (::bionic_sigaction(10 /* guest SIGUSR1 */, &act, nullptr) != 0) {
         std::printf("  FAIL: bionic_sigaction set failed errno=%d\n", errno);
         ++g_failures;
         ++g_checks;
@@ -460,18 +473,20 @@ static void test_sigaction_flag_roundtrip() {
     }
     struct android_sigaction old;
     std::memset(&old, 0, sizeof(old));
-    CHECK(::bionic_sigaction(SIGUSR1, nullptr, &old) == 0,
+    CHECK(::bionic_sigaction(10, nullptr, &old) == 0,
           "query succeeds");
     CHECK((old.sa_flags & LINUX_SA_RESTART) != 0, "SA_RESTART preserved");
     CHECK((old.sa_flags & LINUX_SA_NODEFER) != 0, "SA_NODEFER preserved");
     CHECK((old.sa_flags & LINUX_SA_RESETHAND) != 0, "SA_RESETHAND preserved");
+    CHECK(old.android_sa_handler == SIG_IGN,
+          "and the handler comes back from the handler field, not from the flags");
 
     // Restore default so we don't leave the process in a weird state.
     struct android_sigaction dfl;
     std::memset(&dfl, 0, sizeof(dfl));
     dfl.android_sa_handler = SIG_DFL;
     dfl.sa_flags = 0;
-    ::bionic_sigaction(SIGUSR1, &dfl, nullptr);
+    ::bionic_sigaction(10, &dfl, nullptr);
 }
 
 // ─── syscall() mappings: bionic_syscall must understand fixed ARM64 NUMBERS, not

@@ -10,6 +10,7 @@
 #include "kudroid/KuArtRuntime.h"
 #include "kudroid/platform/JavaCanvasRenderer.h"
 #include "kudroid/NativeCallTelemetry.h"
+#include "kudroid/abi/GuestSignals.h"
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
@@ -689,6 +690,27 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
         // their own purposes. Reporting it as a KuDroid crash would both lose their
         // event and produce a misleading log.
         chainToPreviousHandler(sig);
+    }
+
+    // The guest's own handler, for the signals KuDroid must keep installed.
+    //
+    // KuDroid owns SIGTRAP (it supplies guest TLS), SIGSYS (it emulates a raw `svc`)
+    // and the fault signals (crash reporting, the JNI_OnLoad abort shield). A guest
+    // that installs handlers for those — a crash reporter does, and so does a runtime
+    // that patches up faults — cannot be given the signal outright without breaking
+    // the emulator, so guest_sigaction records it and this is where it is honoured.
+    //
+    // The KuDroid-internal cases above run first, and deliberately: a BRK that supplies
+    // TLS is not a fault the guest should ever see.
+    //
+    // Dispatch returns true only when the guest handler MOVED pc — a handler saying it
+    // fixed the fault and where to resume. A handler that returns without moving pc has
+    // not handled anything, whatever else it did, and resuming would re-execute the
+    // faulting instruction and fault again forever. That loop is not hypothetical: it
+    // is what a mis-decoded sigaction struct did to ULTRAKILL, 100% of one core with pc
+    // frozen at 0x18000004.
+    if (kudroid::guest_signal_dispatch(sig, info, ucontext)) {
+        return;
     }
 
     // Inside a guarded JNI_OnLoad invocation: if this library aborts/segfaults,

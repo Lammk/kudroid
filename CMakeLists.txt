@@ -48,6 +48,7 @@ add_library(kudroid_core STATIC
     src/abi/SyscallShim.cpp
     src/abi/GuestVarargs.cpp
     src/abi/BlockingWaitRegistry.cpp
+    src/abi/GuestSignals.cpp
     src/platform/AssetShim.cpp
     src/platform/BundledFramework.cpp
     src/platform/JavaCanvasRenderer.cpp
@@ -237,6 +238,19 @@ else()
         )
         target_link_libraries(test_blocking_wait PRIVATE kudroid_core)
         target_include_directories(test_blocking_wait PRIVATE include)
+    endif()
+
+    # A guest's sigaction, decoded the way the guest wrote it. `struct sigaction` has
+    # three layouts in play (bionic ILP32, bionic LP64, Darwin) and they are all 32
+    # bytes, so a wrong one fails no size check: KuDroid read sa_flags as the handler
+    # pointer and ULTRAKILL's main thread spun at 100% of a core executing 0x18000004,
+    # which is SA_SIGINFO|SA_ONSTACK|SA_RESTART. The offsets are pinned here.
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_guest_signals.cpp")
+        add_executable(test_guest_signals
+            tests/test_guest_signals.cpp
+        )
+        target_link_libraries(test_guest_signals PRIVATE kudroid_core)
+        target_include_directories(test_guest_signals PRIVATE include)
     endif()
 
     # Device memory figures: apps size caches from them, so they must be real,

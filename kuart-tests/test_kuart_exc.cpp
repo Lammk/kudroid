@@ -7,8 +7,11 @@
 #include "kudroid/kuart/Interpreter.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
+
+#include <unistd.h>
 
 #include "dex_builder.h"
 
@@ -534,6 +537,70 @@ Check(r.threw, "<clinit> n m exception th  lan ra ch  d ng class");
         Check(!r.threw, "caught exception does not propagate");
         Check(interp.pending_exception_trace().empty(),
               "trace cleared once the exception is handled");
+    }
+
+    // ── what the log says about a caught exception ──
+    //
+    // A caught exception must not be reported as uncaught. This is not cosmetic: the
+    // 💥 line used to print at the moment of the throw, before any try table was
+    // consulted, together with a full stack trace. ULTRAKILL looks up an optional class
+    // by name during startup (Class.forName("com.unity3d.JavaPluginPreloader")), catches
+    // the ClassNotFoundException and carries on — and that produced a 💥 with five
+    // frames in the log of an app that was working correctly. It read as the cause of
+    // the hang and cost a full round of investigation aimed at the wrong thing, while
+    // the actual bug never appeared in the log at all.
+    //
+    // stderr is captured rather than eyeballed, because "the log is misleading" is
+    // exactly the kind of defect that returns the moment nothing checks for it.
+    {
+        // A private temporary, created with mkstemp rather than tmpnam: tmpnam returns a
+        // name that another process can claim before it is opened, and the linker warns
+        // about it for that reason.
+        char tmp[] = "/tmp/kuart_exc_stderr_XXXXXX";
+        const int tmp_fd = mkstemp(tmp);
+        if (tmp_fd < 0) {
+            std::printf("  FAIL mkstemp failed\n");
+            ++g_failures;
+        } else {
+            close(tmp_fd);
+        }
+
+        auto capture = [&](const char* method, const char* sig,
+                           std::vector<DexValue> args) -> std::string {
+            std::fflush(stderr);
+            const int saved = dup(fileno(stderr));
+            FILE* redirected = std::freopen(tmp, "w", stderr);
+            if (redirected == nullptr) return "<redirect failed>";
+            call(method, sig, std::move(args));
+            std::fflush(stderr);
+            dup2(saved, fileno(stderr));
+            close(saved);
+            std::string out;
+            if (FILE* f = std::fopen(tmp, "r")) {
+                char buf[4096];
+                size_t n;
+                while ((n = std::fread(buf, 1, sizeof(buf), f)) > 0) out.append(buf, n);
+                std::fclose(f);
+            }
+            return out;
+        };
+
+        const std::string caught = capture("catchArith", "(II)I",
+                                           {DexValue::Int(1), DexValue::Int(0)});
+        Check(caught.find("uncaught") == std::string::npos,
+              "a caught exception is not reported as uncaught");
+        Check(caught.find("    at ") == std::string::npos,
+              "and prints no stack trace — it was handled, so there is nothing to chase");
+        Check(caught.find("ArithmeticException") != std::string::npos,
+              "the throw itself is still recorded, on one line");
+
+        const std::string uncaught = capture("uncaught", "()I", {});
+        Check(uncaught.find("uncaught") != std::string::npos,
+              "an exception nothing catches IS reported as uncaught");
+        Check(uncaught.find("    at ") != std::string::npos,
+              "with its stack trace, which is the case a trace is worth printing for");
+
+        std::remove(tmp);
     }
 
 std::printf("=== %s (%d error) ===\n", g_failures == 0 ? "PASSED" : "FAILED", g_failures);

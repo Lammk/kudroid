@@ -198,10 +198,26 @@ std::string Interpreter::DescribePendingException() const {
 void Interpreter::ThrowException(const char* descriptor, const std::string& message) {
     last_error_ = std::string(descriptor) + ": " + message;
     pending_exception_trace_ = BuildStackTrace();
-    std::fprintf(stderr, "[KuART][EXCEPTION] 💥 %s: %s\n", descriptor, message.c_str());
-    if (!pending_exception_trace_.empty()) {
-        std::fputs(pending_exception_trace_.c_str(), stderr);
-    }
+
+    // Deliberately NOT printed here.
+    //
+    // This used to write "[KuART][EXCEPTION] 💥 ..." plus the full stack trace the
+    // instant an exception was created — before any try table was consulted. Most
+    // exceptions in a real app are caught and expected: ULTRAKILL calls
+    // Class.forName("com.unity3d.JavaPluginPreloader") for a class that is only present
+    // if the developer shipped it, catches the ClassNotFoundException, and carries on.
+    // That produced a 💥 with a five-frame trace at startup, indistinguishable from a
+    // fatal error, and it cost a full round of investigation aimed at the wrong thing
+    // while the real bug — a mis-decoded sigaction struct — went unmentioned.
+    //
+    // The exception is recorded here and reported by whoever ends up owning it:
+    // ExecuteFrame logs it as caught when a handler takes it, and the top of the
+    // interpreter logs it as uncaught when nothing does. A log line that says which of
+    // those happened is worth reading; one that fires on every throw is not.
+    // A throw at the VM level is a fact worth one line, not a five-line trace: it may
+    // well be caught two instructions later. The trace is kept in
+    // pending_exception_trace_ and printed only if the exception goes unhandled.
+    std::fprintf(stderr, "[KuART][EXCEPTION] %s: %s\n", descriptor, message.c_str());
 
     DexClass* klass = linker_ != nullptr ? linker_->FindClass(descriptor) : nullptr;
     if (klass != nullptr) {
@@ -736,6 +752,35 @@ bool Interpreter::FilledNewArray(DexFrame* frame, const art::Instruction* inst, 
 }
 
 DexValue Interpreter::Execute(const DexMethod* method, const DexValue* args, size_t num_args) {
+    // Report an exception that leaves the interpreter entirely.
+    //
+    // Declared before everything else so it destructs LAST — after StackEntry below has
+    // restored depth_ — and so it covers the early returns above StackEntry too.
+    //
+    // depth_ == 0 on the way out means no Java frame anywhere caught this: it passed
+    // every try table on the way up and is now being handed back to native code. That
+    // is the one point where "uncaught" is a fact rather than a guess, and it is where
+    // the stack trace belongs.
+    //
+    // It used to be printed by ThrowException instead — at the moment of the throw,
+    // before any try table was consulted. Most exceptions a real app throws are caught
+    // and expected: ULTRAKILL calls Class.forName("com.unity3d.JavaPluginPreloader") for
+    // a class that only exists if the developer shipped it, catches the
+    // ClassNotFoundException and carries on. That printed a 💥 with a five-frame trace
+    // during startup, indistinguishable from a fatal error, and it cost a full round of
+    // investigation aimed at the wrong thing while the real bug went unmentioned.
+    //
+    // Doing it here rather than at each call site is what makes it complete: a JNI
+    // callback, a Java thread started from LibCore and the ActivityThread entry point
+    // all leave through this function, and each of those used to discard a pending
+    // exception without a word.
+    struct UncaughtReporter {
+        Interpreter* self;
+        ~UncaughtReporter() {
+            if (self->depth_ == 0) self->ReportUncaughtException();
+        }
+    } uncaught_reporter{this};
+
     DexValue result;
     if (method == nullptr) {
         ThrowException("Ljava/lang/NullPointerException;", "method null");
@@ -1042,6 +1087,20 @@ DexValue Interpreter::ExecuteFrame(DexFrame* frame) {
         frame->set_caught_exception(pending_exception_);
         ClearPendingException();
         frame->set_dex_pc(handler_pc);
+    }
+}
+
+// Whether this exception left the interpreter entirely, and the trace if it did.
+//
+// Called from Execute()'s exit when depth_ has returned to 0: the exception passed every
+// try table on the way up and native code is about to receive it. The 💥 line and its
+// trace belong here rather than at the throw site — an exception a guest catches is not
+// a failure, and printing a trace for one trains a reader to ignore the tag.
+void Interpreter::ReportUncaughtException() {
+    if (!HasPendingException()) return;
+    std::fprintf(stderr, "[KuART][EXCEPTION] 💥 uncaught: %s\n", last_error_.c_str());
+    if (!pending_exception_trace_.empty()) {
+        std::fputs(pending_exception_trace_.c_str(), stderr);
     }
 }
 
