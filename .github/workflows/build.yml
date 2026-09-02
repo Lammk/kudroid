@@ -39,31 +39,34 @@ jobs:
       - name: Build KuART
         run: cmake --build build --target art_dex kudroid_core --parallel
 
+      # Build and run EVERY test target, discovered from the build directory.
+      #
+      # This used to be two hand-written lists, and they drifted the way hand-written
+      # lists do: test_guest_signals was absent the entire time it was the regression
+      # test for a live crash, and test_kuart_proxy — which covers a jclass being read as
+      # a string, a fault that reached a user — was never run here either. Six binaries
+      # were missing in total. A test that CI does not run is not a test.
+      #
+      # `--target all` builds them because CMake defines each test as an executable, so
+      # a new tests/*.cpp file is picked up with no change to this file.
       - name: Build KuART tests
-        run: |
-          cmake --build build --parallel \
-            --target test_art_dex test_kuart test_kuart_interp test_kuart_object \
-                     test_kuart_jni test_kuart_exc test_kuart_reflect test_kuart_libcore \
-                     test_kuart_filled_array test_kuart_jni_float test_kuart_stub \
-                     test_kuart_framework test_kuart_missing_field \
-                     test_kuart_thread_state test_kuart_jit \
-                     test_manifest_parse test_manifest_text test_memory_info \
-                     test_shims test_blocking_wait test_guest_signals test_vfs
+        run: cmake --build build --parallel
 
       - name: Run KuART tests
         working-directory: build
         run: |
           fail=0
-          for t in test_art_dex test_kuart test_kuart_interp test_kuart_object \
-                   test_kuart_jni test_kuart_exc test_kuart_reflect test_kuart_libcore \
-                   test_kuart_filled_array test_kuart_jni_float test_kuart_stub \
-                   test_kuart_framework test_kuart_missing_field \
-                   test_kuart_thread_state test_kuart_jit \
-                   test_manifest_parse test_manifest_text test_memory_info \
-                   test_shims test_blocking_wait test_guest_signals test_vfs; do
+          count=0
+          for t in test_*; do
+            [ -x "$t" ] || continue
+            [ -f "$t" ] || continue
+            count=$((count + 1))
             echo "──────── $t ────────"
-            if ./$t; then echo "PASS $t"; else echo "FAIL $t"; fail=1; fi
+            if ./"$t"; then echo "PASS $t"; else echo "FAIL $t"; fail=1; fi
           done
+          echo "ran $count test binaries"
+          # No tests found means the discovery above broke, which must not look like success.
+          if [ "$count" -eq 0 ]; then echo "no test binaries found"; exit 1; fi
           exit $fail
 
       # Cross-compiled + qemu: covers the arm64 half of the JNI float/double ABI,

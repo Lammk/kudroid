@@ -479,6 +479,92 @@ int main() {
         interp.ClearPendingException();
     }
 
+    // ── a Class[] holding RAW jclass handles, the way native code builds one ──
+    //
+    // This is the crash. Unity reaches Proxy.newProxyInstance through JNI, and native
+    // code holds a class as a raw DexClass* — that is what a jclass IS (see
+    // DexJniEnv.h). So the Class[] it fills contains DexClass pointers, not the heap
+    // java.lang.Class objects that bytecode would put there. Both denote the same class
+    // and both are legal to hold; the array is not malformed.
+    //
+    // ClassOf's fallback was `class_object->clazz`, and DexClass::descriptor sits at the
+    // same offset 0 as DexObject::clazz — so each element resolved to its own descriptor
+    // STRING pointer, which was then used as a DexClass*. GetOrCreateProxyClass appended
+    // iface->descriptor (offset 0 of the string) to its cache key, and strlen faulted at
+    // 0x64696f72646e6140: the 16-byte-aligned form of 0x64696f72646e614c, the bytes
+    // `Landroid`. pc was _platform_strlen+0x4 with lr in basic_string::append.
+    //
+    // Every element here is a raw jclass, so nothing about this test passes by accident:
+    // the old code could not get through it without dereferencing a string.
+    {
+        DexClass* array_class = linker.FindClass("[Ljava/lang/Class;");
+        Check(array_class != nullptr, "the Class[] array class exists");
+        DexMethod* factory = proxy_base->FindDirectMethod(
+            "newProxyInstance",
+            "(Ljava/lang/ClassLoader;[Ljava/lang/Class;Ljava/lang/reflect/InvocationHandler;)"
+            "Ljava/lang/Object;");
+        if (array_class != nullptr && factory != nullptr) {
+            DexArray* raw = linker.AllocArray(array_class, 1);
+            Check(raw != nullptr, "allocated a Class[1]");
+            if (raw != nullptr) {
+                // A jclass, exactly as GetObjectArrayElement or a returned Class<?>
+                // would hand it to a guest library.
+                reinterpret_cast<DexObject**>(raw + 1)[0] =
+                    reinterpret_cast<DexObject*>(calc);
+
+                DexObject* handler = linker.AllocObject(handler_class);
+                DexValue args[3] = {DexValue::Ref(nullptr), DexValue::Ref(raw),
+                                    DexValue::Ref(handler)};
+                interp.ClearPendingException();
+                const DexValue made = interp.Execute(factory, args, 3);
+                Check(!interp.HasPendingException(),
+                      "newProxyInstance accepts a Class[] of raw jclass handles");
+                Check(made.l != nullptr, "and returns a proxy");
+
+                DexClass* made_class = linker.ClassOfObject(made.l);
+                Check(made_class != nullptr && made_class->is_proxy,
+                      "the result is a proxy class");
+                // The interface was resolved to the REAL class, not to something derived
+                // from its descriptor bytes. Without this the proxy would not implement
+                // Calc and every call site through it would break.
+                Check(made_class != nullptr && made_class->IsSubClassOf(calc),
+                      "the proxy IS-A com.foo.Calc, so the jclass resolved correctly");
+                interp.ClearPendingException();
+            }
+        }
+    }
+
+    // ── an object that is not a class at all is refused, not guessed at ──
+    //
+    // The old fallback answered "the class OF this object", so a String element reported
+    // java.lang.String as though the caller had passed String.class. A wrong answer
+    // dressed as a right one: the proxy would be built for the wrong interface and the
+    // failure would surface somewhere else entirely.
+    {
+        DexClass* array_class = linker.FindClass("[Ljava/lang/Class;");
+        DexMethod* factory = proxy_base->FindDirectMethod(
+            "newProxyInstance",
+            "(Ljava/lang/ClassLoader;[Ljava/lang/Class;Ljava/lang/reflect/InvocationHandler;)"
+            "Ljava/lang/Object;");
+        if (array_class != nullptr && factory != nullptr) {
+            DexArray* bad = linker.AllocArray(array_class, 1);
+            if (bad != nullptr) {
+                // A plain instance where a Class was expected.
+                reinterpret_cast<DexObject**>(bad + 1)[0] =
+                    linker.AllocObject(handler_class);
+
+                DexObject* handler = linker.AllocObject(handler_class);
+                DexValue args[3] = {DexValue::Ref(nullptr), DexValue::Ref(bad),
+                                    DexValue::Ref(handler)};
+                interp.ClearPendingException();
+                interp.Execute(factory, args, 3);
+                Check(interp.HasPendingException(),
+                      "a non-class element throws instead of being read as its own class");
+                interp.ClearPendingException();
+            }
+        }
+    }
+
     std::printf("=== %s (%d error) ===\n", g_failures == 0 ? "PASSED" : "FAILED", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

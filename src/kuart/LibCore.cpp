@@ -379,10 +379,56 @@ DexField* FieldFromObject(DexObject* obj) {
         static_cast<uintptr_t>(GetLongField(obj, "artField")));
 }
 
+// The DexClass behind a value that is supposed to name a class.
+//
+// Three different things arrive here and only one of them is a plain object:
+//
+//   DexClassObject*  — a java.lang.Class INSTANCE, from const-class, Class.forName or
+//                      Object.getClass. This is what bytecode passes.
+//   DexClass*        — a raw jclass. Native code holds classes as DexClass* (see
+//                      DexJniEnv.h) and a jclass IS a jobject in the JNI object model,
+//                      so handing one to anything typed Class<?> is CORRECT usage.
+//   anything else    — not a class at all.
+//
+// The middle case is why this function needs to exist rather than just reading ->clazz.
+// DexClass::descriptor and DexObject::clazz both sit at offset 0, so ->clazz on a
+// DexClass yields the descriptor STRING pointer, and that pointer then gets used as a
+// class. This function used to do exactly that, and Unity crashed on it:
+// Proxy.newProxyInstance received Class[] whose elements were raw jclass handles, each
+// became a `const char*`, and GetOrCreateProxyClass appended iface->descriptor — reading
+// offset 0 of the string "Landroid/..." — to its cache key. strlen() faulted at
+// 0x64696f72646e6140, which is the 16-byte-aligned form of 0x64696f72646e614c, the ASCII
+// bytes `Landroid`.
+//
+// The same shape was already fixed in DexJniEnv::CallJavaA and JNI GetObjectClass, both
+// of which substitute the heap java.lang.Class object for a DexClass receiver. Fixing it
+// there and not here left the reflection helpers as the one remaining way in.
+//
+// An unregistered pointer resolves to nullptr rather than being dereferenced: every
+// caller already treats null as "not a class" and raises a Java exception naming the
+// argument, which is a diagnosis instead of a signal.
 DexClass* ClassOf(Interpreter* interp, DexObject* class_object) {
     if (class_object == nullptr) return nullptr;
-    DexClass* k = interp->linker()->ClassFromObject(class_object);
-    return k != nullptr ? k : class_object->clazz;
+    DexClassLinker* linker = interp->linker();
+    if (linker == nullptr) return nullptr;
+
+    // A java.lang.Class instance: the registered mapping is authoritative.
+    if (DexClass* k = linker->ClassFromObject(class_object)) return k;
+
+    // A raw jclass. Checked against the linker, never assumed — an unregistered pointer
+    // that happened to be passed here must not be treated as class metadata.
+    if (linker->IsRegisteredClass(reinterpret_cast<const DexClass*>(class_object))) {
+        return reinterpret_cast<DexClass*>(class_object);
+    }
+
+    // Anything else is not a class, and saying so is the point.
+    //
+    // The old fallback was `class_object->clazz`, which answered "the class OF this
+    // object" — so a String argument reported java.lang.String as though the caller had
+    // passed String.class, and a jclass reported its own descriptor string. Both are
+    // wrong answers dressed as right ones. Every caller here treats null as "not a
+    // class" and raises a Java exception naming the argument.
+    return nullptr;
 }
 
 // Boxes a primitive so reflection can return Object. `descriptor` is the field

@@ -47,8 +47,14 @@ DexArray* Arr(jarray a) { return reinterpret_cast<DexArray*>(a); }
 DexClass* CheckedCls(DexJniEnv* self, jclass c) {
     DexClass* k = Cls(c);
     if (k == nullptr || self == nullptr) return nullptr;
-    if (!self->linker()->IsRegisteredClass(k)) return nullptr;
-    return k;
+    if (self->linker()->IsRegisteredClass(k)) return k;
+    // A java.lang.Class INSTANCE passed as a jclass. Native code obtains one from
+    // GetObjectArrayElement on a Class[], from a returned Class<?>, or from a field read
+    // — all of which yield the heap DexClassObject rather than the DexClass* that JNI
+    // uses as a jclass. Both denote the same class, so resolve it instead of rejecting a
+    // handle the caller was entitled to hold.
+    if (DexClass* represented = self->linker()->ClassFromObject(Obj(c))) return represented;
+    return nullptr;
 }
 
 jclass ToJClass(DexClass* k) { return reinterpret_cast<jclass>(k); }
