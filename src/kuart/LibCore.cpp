@@ -30,6 +30,7 @@
 #include "kudroid/kuart/Interpreter.h"
 #include "kudroid/kuart/VmLock.h"
 #include "kudroid/platform/MemoryInfo.h"
+#include "kudroid/platform/CpuInfo.h"
 #include "kudroid/platform/JavaCanvasRenderer.h"
 
 namespace kudroid {
@@ -2332,11 +2333,12 @@ bool Invoke_kudroid_memory(Interpreter* /*interp*/, const char* name,
         return true;
     }
     if (std::strcmp(name, "availableProcessors") == 0) {
-        // Thread-pool sizes are derived from this; a hardcoded 4 either leaves cores
-        // idle or oversubscribes a smaller device.
-        unsigned cores = std::thread::hardware_concurrency();
-        if (cores == 0) cores = 4;
-        *result = DexValue::Int(static_cast<int32_t>(cores));
+        // Thread-pool sizes are derived from this, and it must agree with what native
+        // code sees through sysconf and /proc/cpuinfo: a guest that sizes a Java pool
+        // from Runtime and a native pool from sysconf would otherwise build two pools
+        // for two different machines. Same source for both now.
+        *result = DexValue::Int(
+            static_cast<int32_t>(kudroid::query_cpu_topology().total_cores));
         return true;
     }
     return false;

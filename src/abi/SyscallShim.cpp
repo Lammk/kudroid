@@ -9,6 +9,8 @@
 #include "kudroid/platform/GraphicsShim.h"
 #include "kudroid/platform/InputShim.h"
 #include "kudroid/platform/AudioShim.h"
+#include "kudroid/platform/CpuInfo.h"
+#include "kudroid/platform/MemoryInfo.h"
 #include "kudroid/VFSPathRemapper.h"
 #include <filesystem>
 
@@ -1900,7 +1902,10 @@ extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_
                 // itself, and a mask larger than one word must not be pre-cleared
                 // past `written` or the return value would be a lie.
                 memset(reinterpret_cast<void*>(a3), 0, written);
-                const unsigned long online = 0xFF;  // CPUs 0-7
+                // Same topology as the wrapper, sysconf and /proc/cpuinfo. This was
+                // 0xFF regardless of the device.
+                const unsigned long online =
+                    static_cast<unsigned long>(kudroid::cpu_online_mask());
                 memcpy(reinterpret_cast<void*>(a3), &online, written);
                 return static_cast<long>(written);
             }
@@ -2315,6 +2320,13 @@ extern "C" ssize_t bionic_getrandom(void *buf, size_t buflen, unsigned int flags
 #endif
 }
 
+// sysconf, through the GUEST's constant numbering.
+//
+// bionic and glibc do not agree on the values, and the guest is always bionic. The cases
+// below therefore list both where they differ — and the pair that was missing is exactly
+// the pair that matters here: bionic's _SC_PHYS_PAGES is 98 and _SC_AVPHYS_PAGES is 99,
+// while only the glibc 85/86 were handled. A guest asking for physical memory fell
+// through to Darwin's ::sysconf(98), which means something else entirely.
 extern "C" long bionic_sysconf(int name) {
     switch (name) {
         case 0: // _SC_ARG_MAX
@@ -2327,33 +2339,40 @@ extern "C" long bionic_sysconf(int name) {
             return 65536;
         case 4: // _SC_OPEN_MAX
             return 32768;
-        case 30: // _SC_PAGESIZE (Linux)
-        case 39:
-        case 40: {
+        case 30: // _SC_PAGESIZE (glibc)
+        case 39: // _SC_PAGESIZE (bionic)
+        case 40: // _SC_PAGE_SIZE (bionic)
+        {
             long pz = ::sysconf(_SC_PAGESIZE);
             return pz > 0 ? pz : 16384;
         }
-        case 83: // _SC_NPROCESSORS_CONF (Linux)
-        case 84: // _SC_NPROCESSORS_ONLN (Linux)
-        case 96: // _SC_NPROCESSORS_CONF (Android Bionic)
-        case 97: // _SC_NPROCESSORS_ONLN (Android Bionic)
+        case 83: // _SC_NPROCESSORS_CONF (glibc)
+        case 84: // _SC_NPROCESSORS_ONLN (glibc)
+        case 96: // _SC_NPROCESSORS_CONF (bionic)
+        case 97: // _SC_NPROCESSORS_ONLN (bionic)
         {
-            unsigned int count = std::thread::hardware_concurrency();
-            return count > 0 ? static_cast<long>(count) : 8;
+            // The same source as /proc/cpuinfo, /sys/.../present and the affinity mask.
+            // It used to be std::thread::hardware_concurrency() with a fallback of 8,
+            // independent of every other surface — so a guest cross-checking two of them
+            // could see different machines.
+            return static_cast<long>(kudroid::query_cpu_topology().total_cores);
         }
-        case 85: // _SC_PHYS_PAGES (Linux)
+        case 85: // _SC_PHYS_PAGES (glibc)
+        case 98: // _SC_PHYS_PAGES (bionic)
         {
             long pz = ::sysconf(_SC_PAGESIZE);
             if (pz <= 0) pz = 16384;
-            uint64_t mem = 8589934592ULL; // 8GB RAM
-            return static_cast<long>(mem / pz);
+            // The real device figure, not a constant. This said 8 GB on every device.
+            return static_cast<long>(kudroid::query_system_memory().total_bytes /
+                                     static_cast<uint64_t>(pz));
         }
-        case 86: // _SC_AVPHYS_PAGES (Linux)
+        case 86: // _SC_AVPHYS_PAGES (glibc)
+        case 99: // _SC_AVPHYS_PAGES (bionic)
         {
             long pz = ::sysconf(_SC_PAGESIZE);
             if (pz <= 0) pz = 16384;
-            uint64_t mem = 4294967296ULL; // 4GB free RAM
-            return static_cast<long>(mem / pz);
+            return static_cast<long>(kudroid::query_system_memory().available_bytes /
+                                     static_cast<uint64_t>(pz));
         }
         default:
             break;
@@ -4066,11 +4085,15 @@ extern "C" int bionic_sched_getaffinity(pid_t pid, size_t cpusetsize, void* mask
         errno = EINVAL;
         return -1;
     }
-    // Zero the whole set, then report CPUs 0-7 in the low word. Zeroing everything
-    // is correct here because nothing downstream reinterprets the return value as a
-    // length.
+    // Zero the whole set, then report the online cores in the low word. Zeroing
+    // everything is correct here because nothing downstream reinterprets the return value
+    // as a length.
+    //
+    // The mask comes from the same topology as sysconf and /proc/cpuinfo. It was 0xFF —
+    // eight cores, regardless of what the device had and regardless of what every other
+    // surface reported.
     memset(mask, 0, cpusetsize);
-    const unsigned long online = 0xFF;  // CPUs 0-7
+    const unsigned long online = static_cast<unsigned long>(kudroid::cpu_online_mask());
     memcpy(mask, &online, cpusetsize < sizeof(online) ? cpusetsize : sizeof(online));
     return 0;
 }
@@ -4079,6 +4102,68 @@ extern "C" int bionic_sched_getaffinity(pid_t pid, size_t cpusetsize, void* mask
 extern "C" int bionic_sched_setaffinity(pid_t pid, size_t cpusetsize, const void* mask) {
     (void)pid; (void)cpusetsize; (void)mask;
     return 0;
+}
+
+// __sched_cpucount — count the set bits in a cpu_set_t.
+//
+// This is the prime suspect for "Cores = 0". It was not in the shim table at all, so the
+// ELF loader bound it to kudroid_universal_dummy, which returns 0 — and CPU_COUNT() is a
+// macro over this function, so every guest asking how many CPUs its affinity mask names
+// got zero no matter what the mask actually contained. That is the exact shape of Unity's
+// "Cores = 0" alongside a mask this shim had filled in.
+//
+// bionic's signature is `int __sched_cpucount(size_t setsize, const cpu_set_t* set)`, and
+// it counts over the CALLER's declared size rather than a fixed width: a guest with a
+// larger cpu_set_t must have all of its words counted.
+extern "C" int bionic___sched_cpucount(size_t setsize, const void* set) {
+    if (set == nullptr || setsize == 0) return 0;
+    const unsigned char* bytes = static_cast<const unsigned char*>(set);
+    int count = 0;
+    for (size_t i = 0; i < setsize; ++i) {
+        count += __builtin_popcount(static_cast<unsigned>(bytes[i]));
+    }
+    return count;
+}
+
+// sched_getcpu — which core the caller is running on.
+//
+// iOS exposes no way to ask, and pinning is not available either, so any answer is a
+// guess. Zero is the one guess that is always a VALID core index: a guest using the
+// result to index a per-core array stays in bounds, which is what this is normally for.
+extern "C" int bionic_sched_getcpu(void) {
+#ifdef __APPLE__
+    return 0;
+#else
+    const int cpu = ::sched_getcpu();
+    return cpu >= 0 ? cpu : 0;
+#endif
+}
+
+// get_nprocs / get_nprocs_conf — glibc's core-count helpers.
+//
+// Present in bionic too, and absent from the shim table until now, which meant the
+// universal dummy answered 0. Same source as sysconf, so the two cannot disagree.
+extern "C" int bionic_get_nprocs(void) {
+    return static_cast<int>(kudroid::query_cpu_topology().total_cores);
+}
+
+extern "C" int bionic_get_nprocs_conf(void) {
+    return static_cast<int>(kudroid::query_cpu_topology().total_cores);
+}
+
+// get_phys_pages / get_avphys_pages — memory in pages.
+extern "C" long bionic_get_phys_pages(void) {
+    long pz = ::sysconf(_SC_PAGESIZE);
+    if (pz <= 0) pz = 16384;
+    return static_cast<long>(kudroid::query_system_memory().total_bytes /
+                             static_cast<uint64_t>(pz));
+}
+
+extern "C" long bionic_get_avphys_pages(void) {
+    long pz = ::sysconf(_SC_PAGESIZE);
+    if (pz <= 0) pz = 16384;
+    return static_cast<long>(kudroid::query_system_memory().available_bytes /
+                             static_cast<uint64_t>(pz));
 }
 
 // ── inotify / signalfd — no/not tn ti trn iOS → emulate ────────────────
@@ -4616,10 +4701,17 @@ struct bionic_sysinfo_struct {
 extern "C" int bionic_sysinfo(struct bionic_sysinfo_struct* info) {
     if (!info) return -1;
     memset(info, 0, sizeof(*info));
+    const kudroid::SystemMemory mem = kudroid::query_system_memory();
     info->uptime = 3600;
-    info->totalram = 4ULL * 1024 * 1024 * 1024;
-    info->freeram = 2ULL * 1024 * 1024 * 1024;
+    // The real device figures. These were constants — 4 GB total, 2 GB free — which
+    // happened to match one test device and no other.
+    info->totalram = static_cast<unsigned long>(mem.total_bytes);
+    info->freeram = static_cast<unsigned long>(mem.available_bytes);
     info->procs = 100;
+    // No swap on iOS. A guest told it has swap will overcommit, and on iOS that ends in a
+    // jetsam kill rather than in paging.
+    info->totalswap = 0;
+    info->freeswap = 0;
     info->mem_unit = 1;
     return 0;
 }
@@ -5617,6 +5709,14 @@ const SymbolEntry kSyscallSymbols[] = {
     {"getcpu", reinterpret_cast<void*>(&bionic_getcpu)},
     {"sched_getaffinity", reinterpret_cast<void*>(&bionic_sched_getaffinity)},
     {"sched_setaffinity", reinterpret_cast<void*>(&bionic_sched_setaffinity)},
+    // CPU_COUNT() expands to this. Missing here meant it bound to the universal dummy
+    // and returned 0 for every mask, which is the shape of Unity's "Cores = 0".
+    {"__sched_cpucount", reinterpret_cast<void*>(&bionic___sched_cpucount)},
+    {"sched_getcpu", reinterpret_cast<void*>(&bionic_sched_getcpu)},
+    {"get_nprocs", reinterpret_cast<void*>(&bionic_get_nprocs)},
+    {"get_nprocs_conf", reinterpret_cast<void*>(&bionic_get_nprocs_conf)},
+    {"get_phys_pages", reinterpret_cast<void*>(&bionic_get_phys_pages)},
+    {"get_avphys_pages", reinterpret_cast<void*>(&bionic_get_avphys_pages)},
     {"inotify_init1", reinterpret_cast<void*>(&bionic_inotify_init1)},
     {"inotify_add_watch", reinterpret_cast<void*>(&bionic_inotify_add_watch)},
     {"inotify_rm_watch", reinterpret_cast<void*>(&bionic_inotify_rm_watch)},

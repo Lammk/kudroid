@@ -72,6 +72,10 @@ add_library(kudroid_core STATIC
     # JIT objects in the static archive so GNU ld extracts it when linking the
     # minimal KuART test targets as well as the full shell.
     src/platform/MemoryInfo.cpp
+    # Same reasoning: the VFS pseudo-file writer and the syscall shims both derive
+    # their CPU figures from here, so it must be extracted for every target that
+    # links either of them.
+    src/platform/CpuInfo.cpp
     src/kuart/OatFile.cpp
     src/kuart/VmLock.cpp
     src/framework/PermissionManager.cpp
@@ -261,6 +265,19 @@ else()
         )
         target_link_libraries(test_memory_info PRIVATE kudroid_core)
         target_include_directories(test_memory_info PRIVATE include)
+    endif()
+
+    # Device CPU topology and every surface that reports it. Unity read "Cores = 0,
+    # Memory = 8000mb" on a 6-core 4 GB phone: the figures were string literals and
+    # hardcoded constants written independently of each other, and __sched_cpucount was
+    # missing entirely so it bound to the universal dummy and returned 0. These tests pin
+    # that every surface answers with the same topology.
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cpu_info.cpp")
+        add_executable(test_cpu_info
+            tests/test_cpu_info.cpp
+        )
+        target_link_libraries(test_cpu_info PRIVATE kudroid_core)
+        target_include_directories(test_cpu_info PRIVATE include)
     endif()
 
     # The guest filesystem view: containment (no path may escape android_root) and that

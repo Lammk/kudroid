@@ -14,6 +14,8 @@
 //      Apple branch always returned ENOMEM without the flag).
 //   5. bionic_sigaction: SA_* flags round-trip through oldact (previously only
 //      SA_SIGINFO was translated on Apple; host passes values straight through).
+#include "kudroid/platform/CpuInfo.h"
+
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -680,12 +682,24 @@ static void test_process_vm_readv_rejects_inaccessible_memory() {
 static void test_sched_getaffinity_raw_returns_byte_count() {
     std::printf("[sched_getaffinity] raw syscall returns bytes written\n");
 
+    // The expected mask comes from the topology, not from a literal.
+    //
+    // These checks used to assert exactly eight CPUs, which is what the shim hardcoded —
+    // so the test agreed with the shim and both were wrong about every device that does
+    // not have eight cores. A test that repeats the implementation's constant cannot
+    // catch the implementation being wrong; test_cpu_info.cpp pins the topology itself,
+    // and this pins that the raw syscall reports it.
+    const uint32_t cores = kudroid::query_cpu_topology().total_cores;
+    const unsigned long expected = static_cast<unsigned long>(kudroid::cpu_online_mask());
+
     unsigned long mask = 0;
     const long rc = bionic_syscall(GUEST_SYS_sched_getaffinity, 0, sizeof(mask), &mask);
     CHECK(rc == static_cast<long>(sizeof(mask)),
           "raw syscall(123) returns sizeof(mask), not 0");
     CHECK(mask != 0, "the mask is not empty");
-    CHECK(__builtin_popcountl(mask) == 8, "eight CPUs are reported online");
+    CHECK(mask == expected, "the mask matches the device topology");
+    CHECK(__builtin_popcountl(mask) == static_cast<int>(cores),
+          "one bit per online core");
 
     // A guest asking for fewer bytes than a word must get exactly that many, or
     // bionic's memset of the "remainder" would run off the end of its buffer.
@@ -693,7 +707,8 @@ static void test_sched_getaffinity_raw_returns_byte_count() {
     const long small_rc = bionic_syscall(GUEST_SYS_sched_getaffinity, 0, sizeof(small), &small);
     CHECK(small_rc == static_cast<long>(sizeof(small)),
           "a 2-byte set reports 2 bytes written");
-    CHECK(small[0] == 0xFF, "the low byte carries CPUs 0-7");
+    CHECK(small[0] == static_cast<unsigned char>(expected & 0xFF),
+          "the low byte carries the low eight CPUs of the mask");
 
     // Reproduce what bionic does with the return value: whatever it clears, the
     // result must still describe a non-empty set.
@@ -737,13 +752,19 @@ unsigned guest_cpu_count(const unsigned char* set, size_t bytes) {
 static void test_sched_getaffinity_wrapper_returns_zero() {
     std::printf("[sched_getaffinity] wrapper returns 0 on success\n");
 
+    const uint32_t cores = kudroid::query_cpu_topology().total_cores;
+
     unsigned char set[kGuestCpuSetBytes];
     std::memset(set, 0, sizeof(set));
     CHECK(bionic_sched_getaffinity(0, sizeof(set), set) == 0,
           "the wrapper reports success as 0");
-    CHECK(guest_cpu_count(set, sizeof(set)) == 8, "the wrapper fills in eight CPUs");
-    CHECK(guest_cpu_isset(set, 0) && guest_cpu_isset(set, 7), "CPUs 0 and 7 are both set");
-    CHECK(!guest_cpu_isset(set, 8), "CPU 8 is not claimed");
+    CHECK(guest_cpu_count(set, sizeof(set)) == cores,
+          "the wrapper fills in one bit per online core");
+    CHECK(guest_cpu_isset(set, 0), "CPU 0 is set, so pinning to the first CPU works");
+    CHECK(guest_cpu_isset(set, cores - 1), "the highest online CPU is set");
+    // Nothing beyond the core count may be claimed: a guest pinning to a CPU the device
+    // does not have gets EINVAL from the real kernel and confusion from this one.
+    CHECK(!guest_cpu_isset(set, cores), "no CPU past the core count is claimed");
 
     errno = 0;
     CHECK(bionic_sched_getaffinity(0, 0, set) == -1 && errno == EINVAL,
