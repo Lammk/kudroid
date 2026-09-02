@@ -879,25 +879,101 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
                 uint64_t sp = uc->uc_mcontext->__ss.__sp;
                 uint64_t fp = uc->uc_mcontext->__ss.__fp;
                 uint64_t cpsr = uc->uc_mcontext->__ss.__cpsr;
-                uint64_t x0 = uc->uc_mcontext->__ss.__x[0];
-                uint64_t x1 = uc->uc_mcontext->__ss.__x[1];
-                uint64_t x2 = uc->uc_mcontext->__ss.__x[2];
-                uint64_t x3 = uc->uc_mcontext->__ss.__x[3];
-                uint64_t x4 = uc->uc_mcontext->__ss.__x[4];
-                uint64_t x5 = uc->uc_mcontext->__ss.__x[5];
-                uint64_t x6 = uc->uc_mcontext->__ss.__x[6];
-                uint64_t x7 = uc->uc_mcontext->__ss.__x[7];
-                uint64_t x8 = uc->uc_mcontext->__ss.__x[8];
                 m = snprintf(sigline, sizeof(sigline),
-                    "pc = 0x%llx\nlr = 0x%llx\nsp = 0x%llx\nfp = 0x%llx\ncpsr = 0x%llx\n"
-                    "x0 = 0x%llx\nx1 = 0x%llx\nx2 = 0x%llx\nx3 = 0x%llx\n"
-                    "x4 = 0x%llx\nx5 = 0x%llx\nx6 = 0x%llx\nx7 = 0x%llx\nx8 = 0x%llx\n",
+                    "pc = 0x%llx\nlr = 0x%llx\nsp = 0x%llx\nfp = 0x%llx\ncpsr = 0x%llx\n",
                     (unsigned long long)pc, (unsigned long long)lr, (unsigned long long)sp,
-                    (unsigned long long)fp, (unsigned long long)cpsr,
-                    (unsigned long long)x0, (unsigned long long)x1, (unsigned long long)x2,
-                    (unsigned long long)x3, (unsigned long long)x4, (unsigned long long)x5,
-                    (unsigned long long)x6, (unsigned long long)x7, (unsigned long long)x8);
+                    (unsigned long long)fp, (unsigned long long)cpsr);
                 crashWriteLine(fd, sigline, m, sizeof(sigline));
+
+                // All 29 general-purpose registers, not the first nine.
+                //
+                // x0-x8 alone cannot identify the base register of a faulting access, and
+                // that is the one thing a BUS_ADRALN or a bad load needs: the last round
+                // reported fault_addr=0x16be80148 with the pointer it came from sitting in
+                // x19 and x23, neither of which was printed. The tombstone libunity writes
+                // to logcat has all of them, so the two logs described the same fault at
+                // different levels of detail and the fuller one was the guest's.
+                //
+                // Four per line to keep the log readable and the snprintf well inside its
+                // buffer.
+                for (int r = 0; r < 29; r += 4) {
+                    char regbuf[256];
+                    int rn = 0;
+                    if (r + 3 < 29) {
+                        rn = snprintf(regbuf, sizeof(regbuf),
+                                      "x%-2d = 0x%016llx  x%-2d = 0x%016llx  "
+                                      "x%-2d = 0x%016llx  x%-2d = 0x%016llx\n",
+                                      r,     (unsigned long long)uc->uc_mcontext->__ss.__x[r],
+                                      r + 1, (unsigned long long)uc->uc_mcontext->__ss.__x[r + 1],
+                                      r + 2, (unsigned long long)uc->uc_mcontext->__ss.__x[r + 2],
+                                      r + 3, (unsigned long long)uc->uc_mcontext->__ss.__x[r + 3]);
+                    } else {
+                        rn = snprintf(regbuf, sizeof(regbuf), "x%-2d = 0x%016llx\n",
+                                      r, (unsigned long long)uc->uc_mcontext->__ss.__x[r]);
+                    }
+                    crashWriteLine(fd, regbuf, rn, sizeof(regbuf));
+                }
+
+                // The faulting instruction itself.
+                //
+                // For SIGBUS/BUS_ADRALN the instruction is the whole answer and the
+                // registers are only supporting evidence: the encoding names the base
+                // register, the offset and the access width, which is what says whether the
+                // pointer was wrong or the access was wider than the pointer's alignment.
+                // Without it a misaligned 16-byte LDP and a misaligned 8-byte LDR look
+                // identical in the log, and they have different causes.
+                //
+                // Reading at pc is safe — it was just executed, so the page is mapped and
+                // readable. The neighbours are only read when they share pc's page, which
+                // keeps a diagnostic from becoming a second fault at a page boundary.
+                {
+                    const uint64_t page = pc & ~static_cast<uint64_t>(0xFFF);
+                    const uint32_t* at_pc = reinterpret_cast<const uint32_t*>(pc);
+                    m = snprintf(sigline, sizeof(sigline),
+                                 "\n--- instruction at pc ---\ninst = 0x%08x\n",
+                                 (pc & 3) == 0 ? *at_pc : 0u);
+                    crashWriteLine(fd, sigline, m, sizeof(sigline));
+                    for (int d = -2; d <= 2; ++d) {
+                        const uint64_t a = pc + static_cast<uint64_t>(d * 4);
+                        if ((a & ~static_cast<uint64_t>(0xFFF)) != page) continue;
+                        if ((a & 3) != 0) continue;
+                        int n = snprintf(sigline, sizeof(sigline), "  %s0x%llx: 0x%08x\n",
+                                         d == 0 ? "-> " : "   ",
+                                         (unsigned long long)a,
+                                         *reinterpret_cast<const uint32_t*>(a));
+                        crashWriteLine(fd, sigline, n, sizeof(sigline));
+                    }
+                }
+
+                // Where the fault address sits relative to this thread's stack.
+                //
+                // Last round's fault_addr was 20808 bytes ABOVE the value of
+                // pthread_self() and the log could not say so, which left "stack overflow"
+                // and "wrong pointer" equally consistent with the evidence. Printing the
+                // bounds and the verdict answers it in the crash log instead of by hand.
+                {
+                    char* const stack_top =
+                        static_cast<char*>(pthread_get_stackaddr_np(pthread_self()));
+                    const size_t stack_size = pthread_get_stacksize_np(pthread_self());
+                    char* const stack_low = stack_top - stack_size;
+                    const char* fa = info != nullptr
+                                         ? static_cast<const char*>(info->si_addr)
+                                         : nullptr;
+                    const char* verdict = "no fault address";
+                    if (fa != nullptr) {
+                        if (fa >= stack_low && fa < stack_top) verdict = "inside this thread's stack";
+                        else if (fa >= stack_top)              verdict = "ABOVE the top of this thread's stack";
+                        else if (fa >= stack_low - 0x10000)    verdict = "just BELOW the stack (guard page / overflow)";
+                        else                                    verdict = "not on this thread's stack";
+                    }
+                    m = snprintf(sigline, sizeof(sigline),
+                                 "\n--- stack bounds ---\nstack = [0x%llx, 0x%llx) size=%llu\n"
+                                 "fault_addr is %s\n",
+                                 (unsigned long long)(uintptr_t)stack_low,
+                                 (unsigned long long)(uintptr_t)stack_top,
+                                 (unsigned long long)stack_size, verdict);
+                    crashWriteLine(fd, sigline, m, sizeof(sigline));
+                }
 
                 // Symbolicate PC/LR for meaningful source/function attribution.
                 char symPc[512], symLr[512];

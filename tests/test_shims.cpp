@@ -77,6 +77,21 @@ extern "C" int bionic_pthread_mutexattr_init(void* attr);
 extern "C" int bionic_pthread_mutexattr_settype(void* attr, int type);
 extern "C" int bionic_pthread_mutexattr_gettype(void* attr, int* type);
 extern "C" int bionic_pthread_mutexattr_destroy(void* attr);
+extern "C" int bionic_pthread_getattr_np(pthread_t thread, void* attr);
+extern "C" int bionic_pthread_attr_getstack(void* attr, void** stackaddr, size_t* stacksize);
+
+// Mirror of the bionic arm64 pthread_attr_t the shim writes through. Declared here
+// rather than shared with the shim on purpose: if the shim's field order changes, this
+// test must fail rather than silently follow it.
+struct GuestPthreadAttr {
+    uint32_t flags;
+    uint32_t pad0;
+    void* stack_base;
+    size_t stack_size;
+    size_t guard_size;
+    int32_t sched_policy;
+    int32_t sched_priority;
+};
 
 // Guest library hooks, installed by kudroid_run_apk in production.
 extern "C" void* (*kudroid_guest_library_open)(const char* filename);
@@ -1493,6 +1508,80 @@ static void test_mutex_shared_between_threads() {
     bionic_pthread_mutexattr_destroy(&attr);
 }
 
+// ─── pthread_getattr_np stack bounds ────────────────────────────────────────
+
+// bionic's stack_base is the LOWEST address of the stack. Every guest that asks for
+// its own bounds computes the far end as stack_base + stack_size, so returning the
+// highest address instead describes a region entirely above the real stack — and the
+// guest then reads or writes there.
+//
+// This is host-independent by construction: the check is that the reported region
+// actually CONTAINS a local variable of the calling thread. On Darwin the shim has to
+// subtract the size from pthread_get_stackaddr_np to satisfy it, on Linux
+// pthread_attr_getstack already answers with the low address. Both are the same
+// assertion, which is the point — the two platforms had drifted apart on exactly this.
+static void test_getattr_np_stack_base_is_the_low_address() {
+    std::printf("[pthread] getattr_np reports stack_base as the LOW address\n");
+
+    GuestPthreadAttr attr;
+    std::memset(&attr, 0xAA, sizeof(attr));  // detect fields never written
+    CHECK(bionic_pthread_getattr_np(pthread_self(), &attr) == 0,
+          "getattr_np succeeds for the calling thread");
+    CHECK(attr.stack_size > 0, "a non-zero stack size is reported");
+    CHECK(attr.stack_base != nullptr, "a non-null stack base is reported");
+
+    char* const low = static_cast<char*>(attr.stack_base);
+    char* const high = low + attr.stack_size;
+
+    int local = 0;
+    char* const probe = reinterpret_cast<char*>(&local);
+    CHECK(probe >= low && probe < high,
+          "the reported [base, base+size) contains a local of this very thread");
+
+    // The specific inversion this guards against: stack_base == the high address, which
+    // puts every byte of the reported region above the stack rather than inside it.
+    CHECK(probe >= low,
+          "stack_base is not ABOVE the caller's frame (the Darwin stackaddr inversion)");
+
+    // getattr_np must also agree with what attr_getstack hands back, since that is the
+    // call a guest actually makes to read the fields.
+    void* out_base = nullptr;
+    size_t out_size = 0;
+    CHECK(bionic_pthread_attr_getstack(&attr, &out_base, &out_size) == 0,
+          "attr_getstack succeeds on the filled attr");
+    CHECK(out_base == attr.stack_base && out_size == attr.stack_size,
+          "attr_getstack returns the same bounds getattr_np recorded");
+}
+
+// A fresh thread, because the main thread's stack is the process stack and is reported
+// through a different path on some platforms — a conversion that is right only there is
+// not right.
+static void test_getattr_np_stack_base_on_a_fresh_thread() {
+    std::printf("[pthread] getattr_np bounds are correct on a spawned thread too\n");
+    std::atomic<bool> contains{false};
+    std::atomic<bool> called_ok{false};
+    std::atomic<size_t> size_seen{0};
+
+    std::thread worker([&] {
+        GuestPthreadAttr attr;
+        std::memset(&attr, 0, sizeof(attr));
+        if (bionic_pthread_getattr_np(pthread_self(), &attr) != 0) return;
+        called_ok = true;
+        size_seen = attr.stack_size;
+        char* const low = static_cast<char*>(attr.stack_base);
+        int local = 0;
+        char* const probe = reinterpret_cast<char*>(&local);
+        contains = (attr.stack_base != nullptr && attr.stack_size > 0 &&
+                    probe >= low && probe < low + attr.stack_size);
+    });
+    worker.join();
+
+    CHECK(called_ok.load(), "getattr_np succeeds on the spawned thread");
+    CHECK(size_seen.load() > 0, "a non-zero stack size is reported there");
+    CHECK(contains.load(),
+          "the spawned thread's own frame lies inside its reported bounds");
+}
+
 // ─── main ────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -1536,6 +1625,8 @@ int main() {
     test_mutexattr_settype_recursive_is_honoured();
     test_mutex_reinit_replaces_mapping();
     test_mutex_shared_between_threads();
+    test_getattr_np_stack_base_is_the_low_address();
+    test_getattr_np_stack_base_on_a_fresh_thread();
     std::printf("=== %d checks, %d failures ===\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

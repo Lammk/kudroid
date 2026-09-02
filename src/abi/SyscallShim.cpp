@@ -753,12 +753,27 @@ extern "C" int bionic_pthread_getattr_np(pthread_t thread, void* attr) {
     auto* a = static_cast<BionicPthreadAttr*>(attr);
     if (!a) return -1;
     bionic_pthread_attr_init(attr);
-    // Retrieve thread stack bounds using host platform APIs (pthread_get_stackaddr_np/get_stacksize_np on Darwin).
+    // stack_base is the LOWEST address of the stack, because that is what bionic means
+    // by it: bionic's own pthread_attr_getstack hands this field back verbatim and every
+    // guest computes the far end as stack_base + stack_size.
+    //
+    // Darwin's pthread_get_stackaddr_np answers the opposite question. It returns the
+    // HIGHEST address — the stack grows down from there — so storing it here described a
+    // region [top, top + size): entirely above the real stack, not one byte of it inside.
+    // A guest that asks for its own bounds and then walks them (a GC scanning roots, a
+    // runtime checking for overflow, an unwinder validating a frame pointer) reads or
+    // writes past the top of its stack, and on Darwin that lands in the _pthread struct
+    // or the guard page rather than anywhere it may touch.
+    //
+    // BlockingWaitRegistry does this same conversion for its own frame walk and gets it
+    // right; the two disagreed about the same host API, which is how this survived.
 #ifdef __APPLE__
-    void* saddr = ::pthread_get_stackaddr_np(thread);
+    void* const stack_top = ::pthread_get_stackaddr_np(thread);
     const size_t ssize = ::pthread_get_stacksize_np(thread);
-    if (saddr) a->stack_base = saddr;
     if (ssize > 0) a->stack_size = ssize;
+    if (stack_top != nullptr && ssize > 0) {
+        a->stack_base = static_cast<char*>(stack_top) - ssize;
+    }
 #else
     pthread_attr_t hostAttr;
     if (::pthread_getattr_np(thread, &hostAttr) == 0) {
