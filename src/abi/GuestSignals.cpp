@@ -334,7 +334,7 @@ bool guest_signal_dispatch(int host_signum, void* host_siginfo, void* host_ucont
             auto* ss = &hu->uc_mcontext->__ss;
             for (int i = 0; i < 29; ++i) ss->__x[i] = s.uc.uc_mcontext.regs[i];
             arm_thread_state64_set_fp(*ss, s.uc.uc_mcontext.regs[29]);
-            arm_thread_state64_set_lr(*ss, s.uc.uc_mcontext.regs[30]);
+            arm_thread_state64_set_lr_fptr(*ss, reinterpret_cast<void*>(s.uc.uc_mcontext.regs[30]));
             arm_thread_state64_set_sp(*ss, s.uc.uc_mcontext.sp);
             arm_thread_state64_set_pc_fptr(*ss, reinterpret_cast<void*>(s.uc.uc_mcontext.pc));
             state_changed = true;
