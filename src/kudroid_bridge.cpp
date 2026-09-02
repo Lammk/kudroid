@@ -40,6 +40,8 @@
 #if defined(__APPLE__)
 #include <mach/mach.h>
 #include <mach/task.h>
+#else
+#include <sys/syscall.h>
 #endif
 
 extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
@@ -676,6 +678,19 @@ static void chainToPreviousHandler(int sig) {
     raise(sig);
 }
 
+// The OS thread id, the same number the watchdog, the stall reports and the thread
+// sampler print. Async-signal-safe on both platforms, which is why the crash handler can
+// call it.
+static unsigned long long currentThreadIdForCrash(void) {
+#if defined(__APPLE__)
+    uint64_t tid = 0;
+    pthread_threadid_np(nullptr, &tid);
+    return static_cast<unsigned long long>(tid);
+#else
+    return static_cast<unsigned long long>(::syscall(SYS_gettid));
+#endif
+}
+
 static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
     if (sig == SIGSYS && bionic_handle_guest_syscall_trap(ucontext)) {
         return;
@@ -690,6 +705,38 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
         // their own purposes. Reporting it as a KuDroid crash would both lose their
         // event and produce a misleading log.
         chainToPreviousHandler(sig);
+    }
+
+    // Record the fault BEFORE anyone gets a chance to swallow it.
+    //
+    // Everything below this point can return without writing a thing: the guest's own
+    // handler may report the fault true and resume, and the JNI_OnLoad shield jumps out
+    // entirely. Both are correct behaviours and both used to leave no KuDroid-side trace
+    // at all.
+    //
+    // That cost a full round. This run took a SIGSEGV at 0x64696f72646e6140 that only
+    // exists in the log as libunity's own tombstone text, arriving through
+    // __android_log_print with no thread, no KuDroid context and no way to place it in
+    // the timeline — while KuDroid's crash log described a different, later fault and
+    // presented it as the crash. One line here, in the same file as the watchdog and the
+    // thread samples, is what makes the order of events readable.
+    {
+        char mark[256];
+        char tname[64] = "?";
+#if defined(__APPLE__)
+        pthread_getname_np(pthread_self(), tname, sizeof(tname));
+#else
+        (void)pthread_getname_np(pthread_self(), tname, sizeof(tname));
+#endif
+        snprintf(mark, sizeof(mark),
+                 "fatal-signal sig=%d fault_addr=%p si_code=%d thread=%s guest_handler=%d "
+                 "jni_guard=%d",
+                 sig, info != nullptr ? info->si_addr : nullptr,
+                 info != nullptr ? info->si_code : 0,
+                 tname[0] != '\0' ? tname : "?",
+                 kudroid::guest_signal_has_handler(sig) ? 1 : 0,
+                 g_jniGuardActive ? 1 : 0);
+        kudroid_persistent_breadcrumb(mark);
     }
 
     // The guest's own handler, for the signals KuDroid must keep installed.
@@ -710,6 +757,7 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
     // is what a mis-decoded sigaction struct did to ULTRAKILL, 100% of one core with pc
     // frozen at 0x18000004.
     if (kudroid::guest_signal_dispatch(sig, info, ucontext)) {
+        kudroid_persistent_breadcrumb("fatal-signal resolved-by-guest-handler");
         return;
     }
 
@@ -753,6 +801,12 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
         g_jniGuardSignal = sig;
         siglongjmp(g_jniGuardJmp, 1);
     }
+
+    // Past every path that survives: this fault ends the thread. Tell the watchdog, so
+    // it stops timing a native call whose thread is about to be parked forever and
+    // reporting the result as a hang. Two relaxed stores, safe in a signal handler.
+    kudroid::native_note_fatal_signal(sig,
+                                      static_cast<unsigned long long>(currentThreadIdForCrash()));
 
     // Flush stdout/stderr streams to ensure buffered diagnostic messages
     // are not lost before termination.
@@ -991,9 +1045,28 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
     const bool isBackground = g_mainThread != 0 && !pthread_equal(pthread_self(), g_mainThread);
 #endif
     if (isBackground) {
-        // thread background b crash: gii phng v tm stop thread ny Swift timer pht hin crash
-        // v t ng hin th Gentle Crash modal m no/not lm freeze/treo launcher.
-        pause();
+        // A guest thread that faulted is parked here permanently so the launcher UI
+        // stays alive and the Swift timer can show the crash modal.
+        //
+        // The loop is not cosmetic. pause() returns -1/EINTR as soon as ANY handler on
+        // this thread returns, and falling out of it returns from crashHandler, which
+        // resumes the faulting instruction and faults again — an endless fault → handler
+        // → pause → fault cycle on a thread that is already dead. Each pass appends
+        // another crash block, which is why one run produced two unrelated-looking
+        // tombstones for the same thread and no way to tell which fault came first.
+        //
+        // Blocking every signal first means the next fault on this thread cannot even
+        // re-enter the handler: the thread stops here, once, for good.
+        sigset_t block_all;
+        sigfillset(&block_all);
+        pthread_sigmask(SIG_BLOCK, &block_all, nullptr);
+        for (;;) {
+            pause();
+            // pause() also returns for a signal that is merely unblocked-and-ignored,
+            // so sleeping keeps this from becoming a spin if that ever happens.
+            struct timespec forever = {3600, 0};
+            nanosleep(&forever, nullptr);
+        }
     } else {
         // Nu crash ngay trn main thread, write nhn v kt thc an ton
         signal(sig, SIG_DFL);

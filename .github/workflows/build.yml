@@ -47,7 +47,8 @@ jobs:
                      test_kuart_filled_array test_kuart_jni_float test_kuart_stub \
                      test_kuart_framework test_kuart_missing_field \
                      test_kuart_thread_state test_kuart_jit \
-                     test_manifest_parse test_manifest_text test_memory_info
+                     test_manifest_parse test_manifest_text test_memory_info \
+                     test_shims test_blocking_wait test_guest_signals test_vfs
 
       - name: Run KuART tests
         working-directory: build
@@ -58,7 +59,8 @@ jobs:
                    test_kuart_filled_array test_kuart_jni_float test_kuart_stub \
                    test_kuart_framework test_kuart_missing_field \
                    test_kuart_thread_state test_kuart_jit \
-                   test_manifest_parse test_manifest_text test_memory_info; do
+                   test_manifest_parse test_manifest_text test_memory_info \
+                   test_shims test_blocking_wait test_guest_signals test_vfs; do
             echo "──────── $t ────────"
             if ./$t; then echo "PASS $t"; else echo "FAIL $t"; fail=1; fi
           done

@@ -1198,7 +1198,7 @@ extern "C" int bionic_clock_gettime64(int clock_id, struct timespec *tp) {
 }
 
 #ifdef __APPLE__
-static bool range_is_mapped(uintptr_t addr, size_t len);
+static size_t prot_prefix_len(uintptr_t addr, size_t len, vm_prot_t required);
 #endif
 
 // The guest's sigaltstack, through the guest's own stack_t layout.
@@ -1212,11 +1212,18 @@ static bool range_is_mapped(uintptr_t addr, size_t len);
 // stack exists for.
 extern "C" int bionic_sigaltstack(const void* ss, void* oss) {
 #ifdef __APPLE__
-    // A direct guest SVC can carry a pointer that is plausible but not mapped in this
-    // address space. GuestSignals rejects null and the low page; the mapped-range check
-    // needs Mach and lives here.
-    if ((ss != nullptr && !range_is_mapped(reinterpret_cast<uintptr_t>(ss), 24)) ||
-        (oss != nullptr && !range_is_mapped(reinterpret_cast<uintptr_t>(oss), 24))) {
+    // A direct guest SVC can carry a pointer that is plausible but not accessible in
+    // this address space. GuestSignals rejects null and the low page; the Mach-based
+    // protection check lives here.
+    //
+    // Each side is checked for what it is actually used for: `ss` is read from and `oss`
+    // is written to. Checking both for readability would approve an `oss` in a read-only
+    // page and fault on the store instead. Both must be accessible ENTIRELY — unlike a
+    // bulk copy there is no meaningful partial stack_t, so a short prefix is EFAULT.
+    if ((ss != nullptr && prot_prefix_len(reinterpret_cast<uintptr_t>(ss), 24,
+                                          VM_PROT_READ) != 24) ||
+        (oss != nullptr && prot_prefix_len(reinterpret_cast<uintptr_t>(oss), 24,
+                                           VM_PROT_WRITE) != 24)) {
         errno = EFAULT;
         return -1;
     }
@@ -1276,34 +1283,59 @@ extern "C" pid_t bionic_gettid() {
 }
 
 #ifdef __APPLE__
-// Kim tra dy [addr, addr+len) nm trong vng map ca process ny. Dng
-// vm_region_64 (tr vng CHA hoc after addr) — loop ti khi tm thy vng cha
-// hoc xc nhn addr no/not c map. Trnh memcpy vo address l → SIGSEGV
-// git c app (main l th guest probe trnh).
-static bool range_is_mapped(uintptr_t addr, size_t len) {
-    if (len == 0) return true;
-    if (addr > static_cast<uintptr_t>(-1) - len) return false;
+// How many bytes from `addr` carry every protection bit in `required`.
+//
+// Returns a LENGTH, not a yes/no, because the kernel this stands in for answers with a
+// length: a read that starts in a committed page and runs into a PROT_NONE reservation
+// returns the readable prefix and no error. Verified against the real syscall on Linux —
+// a 16-byte read straddling the boundary returns 6, not EFAULT. Answering yes/no would
+// either approve the faulting half or reject a request the guest is entitled to have
+// partly served.
+//
+// Protection, not mere mappedness, is the question. Getting that wrong is what turned a
+// probe meant to PREVENT a segfault into the cause of one: a PROT_NONE reservation IS a
+// mapped region — vm_region_64 reports it with a base, a size and protection 0 — so a
+// range check answered "safe to read" for memory that faults on its first byte.
+//
+// That is not an edge case on iOS, it is the common case. Unity reserves address space in
+// half-gigabyte PROT_NONE chunks before committing any of it; the ULTRAKILL log has
+// eleven `mmap(len=536854528, prot=0x0, flags=0x22)` calls in a row, and 0x5500000000 —
+// the address that faulted — has exactly that shape. libunity's own crash reporter probed
+// it, this said yes, and the memcpy took the fault inside _platform_memmove with lr in
+// bionic_syscall.
+static size_t prot_prefix_len(uintptr_t addr, size_t len, vm_prot_t required) {
+    if (len == 0) return 0;
+    if (addr > static_cast<uintptr_t>(-1) - len) return 0;
+    const uintptr_t end = addr + len;
+    uintptr_t reached = addr;
     vm_address_t region_addr = static_cast<vm_address_t>(addr);
-    while (true) {
+    while (reached < end) {
         vm_size_t region_size = 0;
-        // Ta ch cn RANGE (region_addr/region_size) — ni dung info skip.
-        // Dng buffer th ng c VM_REGION_BASIC_INFO_64 thay v tn struct
-        // (tn struct i theo SDK; buffer integer th lun tn ti).
-        integer_t info[VM_REGION_BASIC_INFO_COUNT_64];
+        // The real info struct, not an integer buffer. The protection bits are the whole
+        // point of this call now, and VM_REGION_BASIC_INFO_COUNT_64 is DEFINED as
+        // sizeof(vm_region_basic_info_data_64_t)/sizeof(int) — so the struct and the
+        // count cannot disagree, which is what the integer buffer was guarding against.
+        vm_region_basic_info_data_64_t info;
         mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
         mach_port_t object_name = MACH_PORT_NULL;
         const kern_return_t kr = vm_region_64(mach_task_self(), &region_addr, &region_size,
                                               VM_REGION_BASIC_INFO_64,
-                                              reinterpret_cast<vm_region_info_t>(info),
+                                              reinterpret_cast<vm_region_info_t>(&info),
                                               &count, &object_name);
-        if (kr != KERN_SUCCESS) return false;
+        if (kr != KERN_SUCCESS) break;
         const uintptr_t rstart = static_cast<uintptr_t>(region_addr);
         const uintptr_t rend = rstart + region_size;
-        if (region_size == 0 || rend <= rstart) return false; // overflow
-        if (addr >= rstart && addr + len <= rend) return true;
-        if (addr < rstart) return false; // addr di vng k → no/not map
+        if (region_size == 0 || rend <= rstart) break; // overflow
+        // vm_region_64 returns the region containing the address OR the next one after
+        // it. A gap before the point reached means the rest is unmapped.
+        if (reached < rstart) break;
+        if ((info.protection & required) != required) break;
+        reached = rend;
         region_addr = rend;
     }
+    if (reached <= addr) return 0;
+    const size_t covered = static_cast<size_t>(reached - addr);
+    return covered < len ? covered : len;
 }
 #endif
 
@@ -1334,15 +1366,43 @@ extern "C" long bionic_process_vm_readv(pid_t pid, const struct iovec* local_iov
         uint8_t* dst = static_cast<uint8_t*>(local_iov[i].iov_base);
         const size_t n = std::min(remote_iov[i].iov_len, local_iov[i].iov_len);
         if (n == 0) continue;
-        // before khi memcpy (SIGSEGV cht c app), kim tra vng map bng
-        // vm_region_64 — ng tinh thn "safe probe" m guest ang dng.
-        if (!src || !dst ||
-            !range_is_mapped(reinterpret_cast<uintptr_t>(src), n)) {
+        if (!src || !dst) {
             if (total == 0) { errno = EFAULT; return -1; }
             return total;
         }
-        std::memcpy(dst, src, n);
-        total += static_cast<long>(n);
+        // The guest is asking "can I read here?" precisely because it does NOT know, so
+        // the answer has to be established before the memcpy rather than discovered by
+        // faulting during it.
+        //
+        // Protection, not mappedness — the distinction this used to miss, and it cost a
+        // crash: a PROT_NONE reservation is mapped, Unity makes hundreds of gigabytes of
+        // them at startup, and approving one turned libunity's own crash-reporter probe
+        // into a fault inside _platform_memmove.
+        //
+        // The DESTINATION is checked too, which it was not before and which is just as
+        // fatal: a local_iov pointing into a read-only or reserved page faults on the
+        // write side of the same memcpy, at an address that looks like the guest's own
+        // buffer with nothing to suggest this shim chose to write there.
+        //
+        // A partly-accessible range copies its accessible PREFIX, matching the kernel
+        // rather than a convenient simplification. Checked against the real syscall on
+        // Linux: a 16-byte read spanning a committed page and the PROT_NONE mapping after
+        // it returns 6 and no error. Refusing the whole request would make a guest whose
+        // probe legitimately runs off the end of a region conclude the memory is
+        // unreadable when it is not.
+        size_t copy = prot_prefix_len(reinterpret_cast<uintptr_t>(src), n, VM_PROT_READ);
+        const size_t writable = prot_prefix_len(reinterpret_cast<uintptr_t>(dst), copy,
+                                                VM_PROT_WRITE);
+        if (writable < copy) copy = writable;
+        if (copy == 0) {
+            if (total == 0) { errno = EFAULT; return -1; }
+            return total;
+        }
+        std::memcpy(dst, src, copy);
+        total += static_cast<long>(copy);
+        // A short copy means the range ran out of accessible memory, so there is nothing
+        // further to read in this iovec and no point starting the next.
+        if (copy < n) return total;
     }
     return total;
 #endif

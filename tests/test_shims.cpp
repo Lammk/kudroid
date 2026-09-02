@@ -571,6 +571,95 @@ static void test_syscall_mappings() {
     }
 }
 
+// ─── process_vm_readv: reserved memory must be refused, not read ─────────────
+//
+// The shim answers a probe whose entire purpose is "is this address safe to touch?", so a
+// wrong yes is not a wrong answer, it is a crash — and the crash lands inside memcpy with
+// a fault address that belongs to the guest, which is what made it hard to place.
+//
+// It used to check only whether the address was MAPPED. A PROT_NONE reservation is
+// mapped; Unity makes hundreds of gigabytes of them at startup (eleven consecutive
+// `mmap(len=536854528, prot=0x0)` calls in the captured ULTRAKILL log), libunity's crash
+// reporter probed one, this said yes, and the copy took a fault inside _platform_memmove.
+//
+// These cases run on BOTH hosts deliberately. On Linux the calls go to the real kernel,
+// so the expectations here are the kernel's own behaviour rather than this shim's opinion
+// of it; on Apple the same expectations are met by the Mach region walk. That is what
+// makes the parity meaningful — the Apple path is being held to a contract the kernel
+// demonstrably satisfies, not to one invented alongside it.
+static void test_process_vm_readv_rejects_inaccessible_memory() {
+    std::printf("[process_vm_readv] reserved and read-only memory is refused\n");
+
+    const size_t page = static_cast<size_t>(::sysconf(_SC_PAGESIZE));
+    uint64_t magic = 0x1122334455667788ULL;
+
+    // A PROT_NONE reservation: mapped, and fatal to read.
+    void* reserved = ::mmap(nullptr, page * 2, PROT_NONE,
+                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    CHECK(reserved != MAP_FAILED, "a PROT_NONE reservation can be created");
+    if (reserved != MAP_FAILED) {
+        uint64_t out = 0;
+        struct iovec local = { &out, sizeof(out) };
+        struct iovec remote = { reserved, sizeof(out) };
+        errno = 0;
+        const long rc = bionic_syscall(GUEST_SYS_process_vm_readv,
+                                       static_cast<int>(::getpid()),
+                                       &local, 1UL, &remote, 1UL, 0UL);
+        CHECK(rc == -1 && errno == EFAULT,
+              "reading a PROT_NONE reservation fails with EFAULT instead of faulting");
+        CHECK(out == 0, "nothing was copied out of it");
+    }
+
+    // A read-only DESTINATION. The source is fine; the write side is not, and this shim
+    // performs that write. Unchecked before, and just as fatal as the read side.
+    void* readonly = ::mmap(nullptr, page, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    CHECK(readonly != MAP_FAILED, "a read-only page can be created");
+    if (readonly != MAP_FAILED) {
+        struct iovec local = { readonly, sizeof(magic) };
+        struct iovec remote = { &magic, sizeof(magic) };
+        errno = 0;
+        const long rc = bionic_syscall(GUEST_SYS_process_vm_readv,
+                                       static_cast<int>(::getpid()),
+                                       &local, 1UL, &remote, 1UL, 0UL);
+        CHECK(rc == -1 && errno == EFAULT,
+              "a read-only destination fails with EFAULT instead of faulting on the store");
+        ::munmap(readonly, page);
+    }
+
+    // A range that STRADDLES committed memory and the reservation after it. The kernel
+    // copies the accessible prefix and reports that length with no error, so the shim
+    // must too: refusing outright would tell a guest whose probe merely runs off the end
+    // of a region that the memory is unreadable when the first half is fine.
+    if (reserved != MAP_FAILED) {
+        char* base = static_cast<char*>(reserved);
+        CHECK(::mprotect(base, page, PROT_READ | PROT_WRITE) == 0,
+              "the first page of the reservation can be committed");
+        std::memset(base, 0xC5, page);
+
+        unsigned char out[16] = {0};
+        const size_t offset = page - 6;  // 6 readable bytes, then PROT_NONE
+        struct iovec local = { out, sizeof(out) };
+        struct iovec remote = { base + offset, sizeof(out) };
+        errno = 0;
+        const long rc = bionic_syscall(GUEST_SYS_process_vm_readv,
+                                       static_cast<int>(::getpid()),
+                                       &local, 1UL, &remote, 1UL, 0UL);
+        CHECK(rc == 6, "a straddling read copies the accessible prefix and reports it");
+        CHECK(out[0] == 0xC5 && out[5] == 0xC5, "the prefix that was copied is the real data");
+        CHECK(out[6] == 0, "nothing past the accessible prefix was written");
+        ::munmap(reserved, page * 2);
+    }
+
+    // The ordinary case still works, which is the point of having the shim at all.
+    uint64_t out = 0;
+    struct iovec local = { &out, sizeof(out) };
+    struct iovec remote = { &magic, sizeof(magic) };
+    const long rc = bionic_syscall(GUEST_SYS_process_vm_readv,
+                                   static_cast<int>(::getpid()),
+                                   &local, 1UL, &remote, 1UL, 0UL);
+    CHECK(rc == 8 && out == magic, "a readable range is still copied in full");
+}
+
 // ─── sched_getaffinity: raw syscall vs wrapper ───────────────────────────────
 //
 // The two have OPPOSITE success conventions, and conflating them silently produces
@@ -1400,6 +1489,7 @@ int main() {
     test_futex_cmp_requeue_precond();
     test_futex_wait_wake_cycles();
     test_syscall_mappings();
+    test_process_vm_readv_rejects_inaccessible_memory();
     test_sched_getaffinity_raw_returns_byte_count();
     test_sched_getaffinity_wrapper_returns_zero();
     test_sem_counting_semantics();

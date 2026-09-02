@@ -52,6 +52,16 @@ struct ActiveCall {
     char java_method[256] = {};
     char java_signature[512] = {};
     std::atomic<uint64_t> java_last_progress_ns{0};
+
+    // Set from a signal handler when a thread takes a fatal fault. Only scalars, and
+    // only stores, because that is all a signal handler may do.
+    //
+    // Without this the watchdog cannot tell a hang from a crash, and it defaults to
+    // calling everything a hang: UnityMain faulted, parked in the crash handler, and the
+    // watchdog kept reporting `native_elapsed_ms=16570 nativeRender` — a native call it
+    // described as running when the thread executing it was dead.
+    std::atomic<int> fatal_signal{0};
+    std::atomic<uint64_t> fatal_thread_id{0};
 };
 
 ActiveCall g_call;
@@ -98,6 +108,25 @@ void watchdog_main() {
 
     while (g_call.started.load(std::memory_order_acquire)) {
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
+
+        // A thread has crashed: say so once and stop reporting.
+        //
+        // Everything below measures how long calls have been running, and after a fatal
+        // fault those measurements are lies — the thread is parked in the crash handler,
+        // not working. Continuing to print them is worse than printing nothing, because
+        // a reader chases the wrong thing: this watchdog announced
+        // `native_elapsed_ms=16570 stage=before-trampoline nativeRender` for sixteen
+        // seconds after UnityMain had already taken a SIGSEGV.
+        if (const int fatal = g_call.fatal_signal.load(std::memory_order_acquire)) {
+            char line[256];
+            std::snprintf(line, sizeof(line),
+                          "watchdog stopped reason=fatal-signal signal=%d thread_id=%llu",
+                          fatal,
+                          static_cast<unsigned long long>(
+                              g_call.fatal_thread_id.load(std::memory_order_relaxed)));
+            kudroid_persistent_breadcrumb(line);
+            return;
+        }
 
         // Name any thread parked on a blocking wait for too long.
         //
@@ -219,6 +248,13 @@ void native_phase(const char* phase) {
                   phase != nullptr ? phase : "?",
                   static_cast<unsigned long long>(thread_id()));
     kudroid_persistent_breadcrumb(line);
+}
+
+void native_note_fatal_signal(int signal_number, unsigned long long thread_id_value) {
+    // Two relaxed stores of scalars. Called from a signal handler, so nothing here may
+    // allocate, lock or format — the watchdog thread does all of that on the next tick.
+    g_call.fatal_thread_id.store(thread_id_value, std::memory_order_relaxed);
+    g_call.fatal_signal.store(signal_number, std::memory_order_release);
 }
 
 void native_call_enter(const char* class_name, const char* method,
