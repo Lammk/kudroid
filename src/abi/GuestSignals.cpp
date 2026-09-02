@@ -10,6 +10,8 @@
 
 #if defined(__APPLE__)
 #include <sys/ucontext.h>
+#include <mach/mach.h>
+#include <mach/thread_status.h>
 #endif
 
 extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
