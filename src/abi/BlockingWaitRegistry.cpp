@@ -48,6 +48,10 @@ struct Slot {
     // means unknown, which is the honest answer for a futex word or a mutex whose
     // owner the shim does not track.
     std::atomic<uint64_t> owner{0};
+    // How long this wait was asked to take, when it asked for a bound. Zero means
+    // unbounded. A wait inside its own budget is not stalled however long the budget
+    // is — see blocking_wait_note_budget.
+    std::atomic<uint64_t> budget_ms{0};
     // Set once a stall has been reported, so a permanently stuck thread produces
     // one line rather than one every watchdog tick.
     std::atomic<bool> reported{false};
@@ -91,6 +95,7 @@ const char* kind_name(WaitKind kind) {
         case WaitKind::kRwlockWrite: return "rwlock-wrlock";
         case WaitKind::kOnce: return "pthread-once";
         case WaitKind::kEpoll: return "epoll-wait";
+        case WaitKind::kJoin: return "pthread-join";
         case WaitKind::kGuardSpin: return "cxa-guard-spin";
     }
     return "?";
@@ -167,6 +172,7 @@ void blocking_wait_begin(WaitKind kind, const void* object, const void* caller) 
     s->started_ns.store(now_ns(), std::memory_order_relaxed);
     s->iterations.store(0, std::memory_order_relaxed);
     s->owner.store(0, std::memory_order_relaxed);
+    s->budget_ms.store(0, std::memory_order_relaxed);
     s->reported.store(false, std::memory_order_relaxed);
     s->in_wait.store(true, std::memory_order_release);
     g_active.fetch_add(1, std::memory_order_relaxed);
@@ -184,6 +190,13 @@ void blocking_wait_note_owner(uint64_t owner) {
     if (s == nullptr) return;
     if (!s->in_wait.load(std::memory_order_relaxed)) return;
     s->owner.store(owner, std::memory_order_relaxed);
+}
+
+void blocking_wait_note_budget(uint64_t budget_ms) {
+    Slot* s = t_slot;
+    if (s == nullptr) return;
+    if (!s->in_wait.load(std::memory_order_relaxed)) return;
+    s->budget_ms.store(budget_ms, std::memory_order_relaxed);
 }
 
 void blocking_wait_end() {
@@ -227,6 +240,18 @@ int blocking_wait_report_stalled(uint64_t threshold_ms) {
         const uint64_t elapsed_ms = (now - started) / 1000000ull;
         if (elapsed_ms < threshold_ms) continue;
 
+        // A wait still inside the bound it asked for is not stalled, however long
+        // that bound is.
+        //
+        // This is what kept the captured ULTRAKILL log from being readable: the only
+        // stall reported was an idle AssetGarbageCollectorHelper that had asked to
+        // wait and was waiting, while the main thread — genuinely wedged, 36 seconds
+        // into a nativeRender that never returned — produced nothing. One false line
+        // and one missing line, and the false one is worse: it is what a reader
+        // chases.
+        const uint64_t budget = s.budget_ms.load(std::memory_order_relaxed);
+        if (budget != 0 && elapsed_ms < budget) continue;
+
         // Claim the report so two watchdogs cannot both emit it.
         bool expected = false;
         if (!s.reported.compare_exchange_strong(expected, true,
@@ -248,15 +273,16 @@ int blocking_wait_report_stalled(uint64_t threshold_ms) {
             }
         }
 
-        char line[512];
+        char line[576];
         const uint64_t iterations = s.iterations.load(std::memory_order_relaxed);
         std::snprintf(line, sizeof(line),
                       "blocking-wait-stalled kind=%s object=%p tid=%llu waited_ms=%llu "
-                      "iterations=%llu owner=%llu caller=%s",
+                      "budget_ms=%llu iterations=%llu owner=%llu caller=%s",
                       kind_name(static_cast<WaitKind>(s.kind.load(std::memory_order_relaxed))),
                       s.object.load(std::memory_order_relaxed),
                       static_cast<unsigned long long>(s.thread_id.load(std::memory_order_relaxed)),
                       static_cast<unsigned long long>(elapsed_ms),
+                      static_cast<unsigned long long>(budget),
                       static_cast<unsigned long long>(iterations),
                       static_cast<unsigned long long>(s.owner.load(std::memory_order_relaxed)),
                       where);
@@ -282,6 +308,7 @@ void blocking_wait_reset_for_test() {
         g_slots[i].started_ns.store(0, std::memory_order_relaxed);
         g_slots[i].iterations.store(0, std::memory_order_relaxed);
         g_slots[i].owner.store(0, std::memory_order_relaxed);
+        g_slots[i].budget_ms.store(0, std::memory_order_relaxed);
     }
     g_active.store(0, std::memory_order_relaxed);
     t_slot = nullptr;

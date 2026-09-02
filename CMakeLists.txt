@@ -75,6 +75,7 @@ add_library(kudroid_core STATIC
     src/kuart/VmLock.cpp
     src/framework/PermissionManager.cpp
     src/debug/Log.cpp
+    src/debug/ThreadSampler.cpp
     src/NativeCallTelemetry.cpp
 )
 

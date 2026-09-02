@@ -42,6 +42,10 @@ enum class WaitKind : int {
     kRwlockWrite,    // pthread_rwlock_wrlock
     kOnce,           // pthread_once, waiting for another thread's initialiser
     kEpoll,          // epoll_wait with an indefinite timeout
+    // pthread_join: waits for another thread to exit, and therefore inherits whatever
+    // is blocking that thread. A join is the one wait whose report is only half the
+    // story on its own — the other half is the target's own stalled line.
+    kJoin,
     // A SPIN, not a wait: __cxa_guard_acquire yields and retries while another
     // thread runs a C++ static initialiser. Tracked with the waits because the
     // question a stalled report answers is the same one — "what is this thread
@@ -78,6 +82,22 @@ void blocking_wait_note_iteration();
 // spinning on guard X is not actionable, but "spinning on X, owned by tid Y" pairs
 // directly with Y's own stalled line and names the whole cycle.
 void blocking_wait_note_owner(uint64_t owner);
+
+// Declare how long this wait was ASKED to take, so overrunning can be told from
+// simply being long.
+//
+// Without this, a timed wait is judged against a fixed threshold, and that produced
+// the one false positive in the captured ULTRAKILL log: an idle
+// AssetGarbageCollectorHelper parked on a futex with a long timeout was reported as
+// "stalled" at 3035ms while the actually-wedged main thread was reported not at all.
+// A thread that asked to wait a minute and has waited three seconds is doing exactly
+// what it asked for, and saying otherwise trains a reader to ignore the line.
+//
+// With a budget set, the wait is reported only once it passes BOTH the caller's
+// threshold and its own budget. Zero, the default, means "no bound was requested" —
+// which for an untimed wait is the truth, and those are judged on the threshold
+// alone.
+void blocking_wait_note_budget(uint64_t budget_ms);
 
 // The first return address that lies inside a guest module, or the immediate caller
 // when none does.

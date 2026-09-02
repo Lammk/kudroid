@@ -1431,9 +1431,15 @@ static long emulate_futex_direct(uintptr_t arg1, uintptr_t arg2, uintptr_t arg3,
             if (!dup) {
                 char mod[256] = {0};
                 kudroid_lookup_guest_module(uaddr, mod, sizeof(mod));
-                char msg[320];
-                snprintf(msg, sizeof(msg), "futex_wait uaddr=0x%llx [%s] val=%u op=%d",
-                         (unsigned long long)(uintptr_t)uaddr, mod, val, futex_op);
+                char msg[352];
+                // tid, because without it this line cannot be joined to anything. The
+                // captured ULTRAKILL log had two futex_wait lines and one stall report,
+                // and no way to tell whether the reported thread was one of the two:
+                // the stall said tid=2844404, these said nothing at all.
+                snprintf(msg, sizeof(msg),
+                         "futex_wait uaddr=0x%llx [%s] val=%u op=%d tid=%llu",
+                         (unsigned long long)(uintptr_t)uaddr, mod, val, futex_op,
+                         current_thread_id());
                 logAndroidMessage(4, "KuDroidSyscall", msg);
             }
         }
@@ -2483,6 +2489,15 @@ extern "C" int bionic_futex(uint32_t *uaddr, int futex_op, uint32_t val, const s
                     errno = EINVAL;
                     return -1;
                 }
+                // Tell the registry how long this wait asked for. An idle worker that
+                // requested a long timeout and is inside it is not stalled, and
+                // reporting it as such is worse than saying nothing: the captured
+                // ULTRAKILL log's only stall line was exactly that, an
+                // AssetGarbageCollectorHelper doing what it asked to do, while the
+                // wedged main thread went unmentioned.
+                blocking_wait_note_budget(
+                    static_cast<uint64_t>(timeout->tv_sec) * 1000ull +
+                    static_cast<uint64_t>(timeout->tv_nsec) / 1000000ull);
                 const auto duration = std::chrono::seconds(timeout->tv_sec) +
                                       std::chrono::nanoseconds(timeout->tv_nsec);
                 if (q->cv.wait_for(qLock, duration) == std::cv_status::timeout) {
@@ -2497,7 +2512,7 @@ extern "C" int bionic_futex(uint32_t *uaddr, int futex_op, uint32_t val, const s
                 // overflowing the duration or being silently shortened to the cap —
                 // the previous code turned a distant deadline into a 24-hour sleep and
                 // then reported a timeout that had not happened.
-                for (;;) {
+                for (bool first = true;; first = false) {
                     struct timespec now;
                     ::clock_gettime(deadline_clock, &now);
                     int64_t remSec = int64_t(timeout->tv_sec) - int64_t(now.tv_sec);
@@ -2508,6 +2523,15 @@ extern "C" int bionic_futex(uint32_t *uaddr, int futex_op, uint32_t val, const s
                         futex_leave(uaddr, q);
                         errno = ETIMEDOUT;
                         return -1;
+                    }
+                    // The budget is the time remaining ON THE FIRST PASS, which is the
+                    // total the caller asked for. Refreshing it every pass would be
+                    // wrong: the remaining time shrinks as elapsed time grows, so the
+                    // two would cross at half the requested wait and the report would
+                    // fire while the wait was still legitimate.
+                    if (first) {
+                        blocking_wait_note_budget(static_cast<uint64_t>(remSec) * 1000ull +
+                                                  static_cast<uint64_t>(remNs) / 1000000ull);
                     }
                     int64_t sliceSec = remSec;
                     int64_t sliceNs = remNs;
@@ -3556,6 +3580,21 @@ extern "C" int bionic_pthread_create(pthread_t* thread, void* attr, void* (*star
     if (res != 0) delete args;
     sync_diag("thread-create", reinterpret_cast<void*>(start_routine), nullptr, res);
     return res;
+}
+
+// pthread_join blocks until the target thread exits, which means it inherits whatever
+// the target is blocked on. Bound straight to the host symbol it was the one wait with
+// no wrapper at all, so a guest joining a thread that never returns produced no record
+// of either half.
+//
+// The object reported is the joined thread's handle, and it deliberately does not try
+// to resolve that to a tid: pthread_t is opaque, mapping it costs a Mach call, and the
+// thread sampler now prints every thread's tid and pc anyway — pairing the two is what
+// names the cycle.
+extern "C" int bionic_pthread_join(pthread_t thread, void** retval) {
+    const BlockingWaitScope tracked(WaitKind::kJoin, reinterpret_cast<const void*>(thread),
+                                    guest_return_address(6));
+    return ::pthread_join(thread, retval);
 }
 
 // errno accessor: Darwin exports `__error`, glibc/musl export `__errno_location`.
@@ -4834,6 +4873,10 @@ extern "C" int bionic_sem_timedwait(sem_t* sem, const struct timespec* abs_timeo
             std::chrono::seconds(remSec) + std::chrono::nanoseconds(remNs);
         const BlockingWaitScope tracked(WaitKind::kSemaphoreTimed, sem,
                                         guest_return_address(6));
+        // Same reasoning as the timed futex: a wait inside its own deadline is doing
+        // what it asked for, and reporting it as stalled buries the real one.
+        blocking_wait_note_budget(static_cast<uint64_t>(remSec) * 1000ull +
+                                  static_cast<uint64_t>(remNs) / 1000000ull);
         if (!s->cv.wait_for(lock, duration, ready)) {
             errno = ETIMEDOUT;
             return -1;
@@ -5316,7 +5359,7 @@ const SymbolEntry kSyscallSymbols[] = {
     {"closedir", reinterpret_cast<void*>(&vfs_closedir)},
     {"readlink", reinterpret_cast<void*>(&vfs_readlink)},
     {"realpath", reinterpret_cast<void*>(&vfs_realpath)},
-    {"pthread_join", reinterpret_cast<void*>(&::pthread_join)},
+    {"pthread_join", reinterpret_cast<void*>(&bionic_pthread_join)},
     {"pthread_mutex_init", reinterpret_cast<void*>(&bionic_pthread_mutex_init)},
     {"pthread_mutex_lock", reinterpret_cast<void*>(&bionic_pthread_mutex_lock)},
     {"pthread_mutex_unlock", reinterpret_cast<void*>(&bionic_pthread_mutex_unlock)},

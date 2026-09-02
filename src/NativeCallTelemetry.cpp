@@ -7,9 +7,15 @@
 #include <mutex>
 #include <thread>
 #include <functional>
+#include <pthread.h>
+#if !defined(__APPLE__)
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
 
 #include "kudroid/Log.h"
 #include "kudroid/abi/BlockingWaitRegistry.h"
+#include "kudroid/debug/ThreadSampler.h"
 #include "kudroid/platform/MemoryInfo.h"
 
 extern "C" void kudroid_persistent_breadcrumb(const char* line);
@@ -29,6 +35,15 @@ struct ActiveCall {
     std::atomic<uint64_t> next_call_id{1};
     uint64_t native_call_id = 0;
     uint64_t native_thread_id = 0;
+    // When the outermost native call currently in flight began.
+    //
+    // Without this there was no native duration anywhere: the watchdog printed
+    // native_active=1 every 250ms for as long as any native call ran and left the
+    // reader to subtract timestamps by hand. Worse, it could not tell a call that had
+    // been running for 40 seconds from one that started a tick ago, so it had no basis
+    // for escalating — which is why 36 seconds of a wedged nativeRender produced 40
+    // identical lines and no diagnosis.
+    std::atomic<uint64_t> native_start_ns{0};
     std::atomic<unsigned> java_active_count{0};
     uint64_t java_thread_id = 0;
     size_t java_depth = 0;
@@ -42,9 +57,22 @@ struct ActiveCall {
 ActiveCall g_call;
 thread_local uint64_t t_call_id = 0;
 
+// The operating system's thread id, the same number pthread_threadid_np gives and
+// the same one the blocking-wait registry and the thread sampler print.
+//
+// This used to be std::hash<std::thread::id>, which produced values like
+// 15304429423467498172 — stable within a run but shared with nothing else. So the
+// watchdog said native_thread_id=15304429423467498172 while the stall report said
+// tid=2844404, and there was no way to tell whether they were the same thread. They
+// were not, and that fact was the whole answer; it just was not readable.
 uint64_t thread_id() {
-    return static_cast<uint64_t>(std::hash<std::thread::id>{}(
-        std::this_thread::get_id()));
+#if defined(__APPLE__)
+    uint64_t tid = 0;
+    ::pthread_threadid_np(nullptr, &tid);
+    return tid;
+#else
+    return static_cast<uint64_t>(::syscall(SYS_gettid));
+#endif
 }
 
 uint64_t now_ns() {
@@ -53,6 +81,21 @@ uint64_t now_ns() {
 }
 
 void watchdog_main() {
+    // Sampling thresholds. A sample costs one Mach call per thread and writes a line
+    // each, so it is not something to do every tick — but it is the only diagnostic
+    // that can see a thread stuck outside our code, so it must happen without anyone
+    // enabling it.
+    //
+    // 5s: long enough that no legitimate frame, asset load or shader compile reaches
+    // it, short enough to land well inside the window before a user force-quits.
+    // Then every 10s, because the second and third samples are what turn a snapshot
+    // into an answer: a pc that moved with cpu_ms climbing is a spin, a pc that did
+    // not move with cpu_ms flat is a deadlock.
+    constexpr uint64_t kSampleAfterMs = 5000;
+    constexpr uint64_t kResampleEveryMs = 10000;
+    uint64_t next_sample_ms = kSampleAfterMs;
+    uint64_t sampled_start = 0;
+
     while (g_call.started.load(std::memory_order_acquire)) {
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
 
@@ -101,17 +144,47 @@ void watchdog_main() {
             std::memcpy(java_method, g_call.java_method, sizeof(java_method));
             std::memcpy(java_sig, g_call.java_signature, sizeof(java_sig));
         }
+        const uint64_t now = now_ns();
+        const uint64_t native_start = g_call.native_start_ns.load(std::memory_order_acquire);
+        const uint64_t native_elapsed_ms =
+            (native_active && native_start != 0 && now > native_start)
+                ? (now - native_start) / 1000000ull
+                : 0;
+        const uint64_t java_elapsed = java_start != 0 ? now - java_start : 0;
+
+        // A native call that has outlasted the threshold: read every thread's pc
+        // directly. Nothing else can, and the case this exists for is exactly the one
+        // where the stuck thread reports nothing itself.
+        //
+        // The schedule is keyed on the start timestamp, not on whether an idle tick was
+        // observed. Native calls can start and finish between two 250ms ticks, so
+        // "native_active went false" is not a reliable signal that a new call began —
+        // whereas a changed start stamp is exactly that, by construction.
+        if (native_start != sampled_start) {
+            sampled_start = native_start;
+            next_sample_ms = kSampleAfterMs;
+        }
+        if (native_active && native_elapsed_ms >= next_sample_ms) {
+            char reason[704];
+            std::snprintf(reason, sizeof(reason), "native-%llums-%s.%s-at-%s",
+                          static_cast<unsigned long long>(native_elapsed_ms), cls, method,
+                          stage);
+            thread_sample_report(reason);
+            next_sample_ms = native_elapsed_ms + kResampleEveryMs;
+        }
+
         const SystemMemory memory = query_system_memory();
         char line[2048];
-        const uint64_t java_elapsed = java_start != 0 ? now_ns() - java_start : 0;
         // Short Java calls stay RAM-only; durable watchdog records begin once
         // execution has exceeded the diagnostic threshold.
         if (!native_active && (!java_active || java_elapsed < 250000000ull)) continue;
         std::snprintf(line, sizeof(line),
-                      "watchdog native_active=%d native_call_id=%llu native_thread_id=%llu stage=%s class=%s method=%s sig=%s vm_depth=%d java_active=%d java_thread_id=%llu java_depth=%zu java_elapsed_ms=%llu java_class=%s java_method=%s java_sig=%s footprint=%llu process_headroom=%llu available=%llu low_memory=%d",
+                      "watchdog native_active=%d native_call_id=%llu native_thread_id=%llu native_elapsed_ms=%llu stage=%s class=%s method=%s sig=%s vm_depth=%d java_active=%d java_thread_id=%llu java_depth=%zu java_elapsed_ms=%llu java_class=%s java_method=%s java_sig=%s footprint=%llu process_headroom=%llu available=%llu low_memory=%d",
                       native_active ? 1 : 0,
                       static_cast<unsigned long long>(native_id),
-                      static_cast<unsigned long long>(native_tid), stage, cls, method, sig, depth,
+                      static_cast<unsigned long long>(native_tid),
+                      static_cast<unsigned long long>(native_elapsed_ms),
+                      stage, cls, method, sig, depth,
                       java_active ? 1 : 0, static_cast<unsigned long long>(java_tid), java_depth,
                       static_cast<unsigned long long>(java_elapsed / 1000000), java_cls,
                       java_method, java_sig,
@@ -160,7 +233,17 @@ void native_call_enter(const char* class_name, const char* method,
         g_call.native_call_id = g_call.next_call_id.load(std::memory_order_relaxed);
         g_call.native_thread_id = thread_id();
     }
-    g_call.active_count.fetch_add(1, std::memory_order_acq_rel);
+    // Stamp the start of the OUTERMOST native call in flight, not this one.
+    //
+    // Native calls nest: a native re-enters Java, which calls another native. Timing
+    // the innermost would reset the clock on every nested call and a wedge deep inside
+    // a long call would never look long. The outermost is what "native code has been
+    // running for N ms without returning" means, and it is the number worth escalating
+    // on. It goes back to zero when the last one leaves.
+    const unsigned previous = g_call.active_count.fetch_add(1, std::memory_order_acq_rel);
+    if (previous == 0) {
+        g_call.native_start_ns.store(now_ns(), std::memory_order_release);
+    }
     t_call_id = g_call.next_call_id.fetch_add(1, std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> lock(g_call.mutex);
@@ -195,6 +278,9 @@ void native_call_exit() {
                               count, count - 1, std::memory_order_acq_rel,
                               std::memory_order_acquire)) {
     }
+    // The last native call left: clear the start stamp so the next one is timed from
+    // its own entry rather than inheriting an age it did not earn.
+    if (count == 1) g_call.native_start_ns.store(0, std::memory_order_release);
     t_call_id = 0;
 }
 

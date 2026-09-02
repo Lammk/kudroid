@@ -12,6 +12,7 @@
 // the shims: a wait that is tracked in principle but not wired into bionic_sem_wait
 // would pass a registry-only test and still leave the next hang invisible.
 #include "kudroid/abi/BlockingWaitRegistry.h"
+#include "kudroid/debug/ThreadSampler.h"
 
 #include <atomic>
 #include <chrono>
@@ -21,6 +22,7 @@
 #include <thread>
 
 #include <errno.h>
+#include <pthread.h>
 #include <semaphore.h>
 #include <stdint.h>
 
@@ -35,6 +37,7 @@ int bionic_pthread_mutex_init(void* m, void* attr);
 int bionic_pthread_mutex_lock(void* m);
 int bionic_pthread_mutex_unlock(void* m);
 int bionic_pthread_mutex_destroy(void* m);
+int bionic_pthread_join(pthread_t thread, void** retval);
 }
 
 namespace {
@@ -51,12 +54,14 @@ void Check(bool ok, const std::string& what) {
 using kudroid::blocking_wait_active_count;
 using kudroid::blocking_wait_begin;
 using kudroid::blocking_wait_end;
+using kudroid::blocking_wait_note_budget;
 using kudroid::blocking_wait_note_iteration;
 using kudroid::blocking_wait_note_owner;
 using kudroid::blocking_wait_report_stalled;
 using kudroid::blocking_wait_reset_for_test;
 using kudroid::BlockingWaitScope;
 using kudroid::guest_return_address;
+using kudroid::thread_sample_report;
 using kudroid::WaitKind;
 
 constexpr int FUTEX_WAIT_OP = 0;
@@ -326,6 +331,155 @@ void test_guest_return_address_falls_back_sanely() {
     Check(guest_return_address(-5) != nullptr, "a negative frame count is clamped too");
 }
 
+// ─── budgets ─────────────────────────────────────────────────────────────────
+//
+// The captured ULTRAKILL log reported exactly one stall, and it was the wrong thread:
+// an idle AssetGarbageCollectorHelper that had asked to wait and was waiting
+// (waited_ms=3035, timeout op=128). The main thread — 36 seconds into a nativeRender
+// that never returned — was not mentioned. One false line and one missing line, and
+// the false one does more damage: it is what a reader chases.
+
+void test_a_wait_inside_its_budget_is_not_stalled() {
+    std::printf("[budget] a wait still inside the time it asked for is not stalled\n");
+    blocking_wait_reset_for_test();
+
+    int object = 0;
+    const BlockingWaitScope tracked(WaitKind::kFutexTimed, &object, nullptr);
+    blocking_wait_note_budget(60000);  // asked to wait a minute
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+
+    Check(blocking_wait_report_stalled(100) == 0,
+          "past the watchdog threshold but far inside its own budget: silent");
+    Check(blocking_wait_active_count() == 1, "and the wait is still registered");
+}
+
+void test_a_wait_past_its_budget_is_stalled() {
+    std::printf("[budget] a wait that overran the time it asked for is stalled\n");
+    blocking_wait_reset_for_test();
+
+    int object = 0;
+    const BlockingWaitScope tracked(WaitKind::kFutexTimed, &object, nullptr);
+    blocking_wait_note_budget(50);  // asked for 50ms
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+
+    Check(blocking_wait_report_stalled(100) == 1,
+          "over both the threshold and its own budget: reported");
+}
+
+void test_an_unbounded_wait_ignores_the_budget_rule() {
+    std::printf("[budget] a wait that asked for no bound is judged on the threshold alone\n");
+    blocking_wait_reset_for_test();
+
+    int object = 0;
+    const BlockingWaitScope tracked(WaitKind::kFutex, &object, nullptr);
+    // No note_budget call at all — an untimed FUTEX_WAIT, which is the case that
+    // genuinely waits forever.
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    Check(blocking_wait_report_stalled(100) == 1, "reported at the threshold");
+}
+
+void test_budget_is_cleared_between_waits() {
+    std::printf("[budget] a budget does not leak into the thread's next wait\n");
+    blocking_wait_reset_for_test();
+
+    int object = 0;
+    {
+        const BlockingWaitScope tracked(WaitKind::kFutexTimed, &object, nullptr);
+        blocking_wait_note_budget(60000);
+    }
+    // The same slot, reused. If the budget survived, this untimed wait would inherit a
+    // minute of grace and the next real hang would go unreported.
+    const BlockingWaitScope tracked(WaitKind::kFutex, &object, nullptr);
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    Check(blocking_wait_report_stalled(100) == 1,
+          "the second wait is reported: the previous budget did not carry over");
+}
+
+void test_note_budget_without_a_wait_is_harmless() {
+    std::printf("[budget] noting a budget outside a wait does nothing\n");
+    blocking_wait_reset_for_test();
+
+    blocking_wait_note_budget(1000);
+    Check(blocking_wait_active_count() == 0, "nothing was registered");
+}
+
+// ─── pthread_join ────────────────────────────────────────────────────────────
+//
+// A join inherits whatever is blocking the target thread. It was bound straight to
+// the host symbol with no wrapper, so a guest joining a thread that never returns
+// produced no record of either half of the problem.
+
+void test_join_is_tracked() {
+    std::printf("[stall] bionic_pthread_join registers its wait\n");
+    blocking_wait_reset_for_test();
+
+    std::atomic<bool> release{false};
+    // A raw pthread, because that is what bionic_pthread_join takes.
+    struct Args {
+        std::atomic<bool>* release;
+    };
+    Args args{&release};
+    pthread_t worker;
+    const int created = pthread_create(
+        &worker, nullptr,
+        [](void* raw) -> void* {
+            Args* a = static_cast<Args*>(raw);
+            while (!a->release->load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            return nullptr;
+        },
+        &args);
+    Check(created == 0, "the worker started");
+
+    std::atomic<bool> joined{false};
+    std::thread joiner([&] {
+        bionic_pthread_join(worker, nullptr);
+        joined = true;
+    });
+
+    for (int i = 0; i < 400 && blocking_wait_active_count() == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    Check(blocking_wait_active_count() == 1, "a thread inside pthread_join is visible");
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    Check(blocking_wait_report_stalled(100) == 1,
+          "a join on a thread that will not exit is reported");
+
+    release = true;
+    joiner.join();
+    Check(joined.load(), "the join returned once the worker exited");
+    Check(blocking_wait_active_count() == 0, "and cleared its entry");
+}
+
+// ─── thread sampler ──────────────────────────────────────────────────────────
+//
+// The sampler answers the question every other diagnostic here cannot: where is a
+// thread that is stuck WITHOUT calling any of our code. On this host there is no
+// cross-thread register access, so what is checked is that it reports its own
+// unavailability rather than crashing or lying — a sampler that segfaulted while
+// explaining a hang would be worse than none.
+
+void test_thread_sampler_is_safe_to_call() {
+    std::printf("[sample] the thread sampler is safe to call and honest when it cannot read\n");
+
+    const int n = thread_sample_report("test");
+    // On Apple arm64 this reports at least this thread; elsewhere it reports nothing
+    // and says so. Both are correct; a crash or a fabricated number is not.
+    Check(n >= 0, "it returns a count, not a crash");
+#if defined(__APPLE__) && defined(__aarch64__)
+    Check(n >= 1, "on Apple arm64 it sees at least the calling thread");
+#else
+    Check(n == 0, "off Apple arm64 it reports nothing rather than guessing");
+#endif
+
+    // Repeated calls must stay bounded and not accumulate state: the watchdog calls
+    // this every ten seconds for as long as a call is wedged.
+    for (int i = 0; i < 20; ++i) thread_sample_report("repeat");
+    Check(true, "twenty repeat samples completed without incident");
+}
+
 }  // namespace
 
 int main() {
@@ -341,6 +495,13 @@ int main() {
     test_spin_reports_its_iteration_count();
     test_iteration_and_owner_are_ignored_without_a_wait();
     test_guest_return_address_falls_back_sanely();
+    test_a_wait_inside_its_budget_is_not_stalled();
+    test_a_wait_past_its_budget_is_stalled();
+    test_an_unbounded_wait_ignores_the_budget_rule();
+    test_budget_is_cleared_between_waits();
+    test_note_budget_without_a_wait_is_harmless();
+    test_join_is_tracked();
+    test_thread_sampler_is_safe_to_call();
 
     std::printf("=== %d checks, %d failures ===\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

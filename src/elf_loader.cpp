@@ -1275,7 +1275,20 @@ extern "C" int kudroid_iterate_guest_phdrs(
 extern "C" bool kudroid_lookup_guest_module(void* addr, char* out, std::size_t outSize) {
     if (!addr || !out || outSize == 0) return false;
     const auto a = reinterpret_cast<std::uintptr_t>(addr);
-    // c kh ng lock (xem ghi ch  ph a tr n)   vector ch  b  s a l c load.
+
+    // try_lock, not lock, and not an unlocked read either.
+    //
+    // Every caller is a diagnostic — a stall report, a crash backtrace, the thread
+    // sampler — so two rules apply that do not apply to normal code. It must never
+    // block, because a guest thread wedged inside dlopen holds this mutex and waiting
+    // on it would hang the very report meant to explain that wedge. And it must not
+    // read the vector unlocked, which is what it did before: a concurrent dlopen can
+    // reallocate the backing store, and iterating through a freed buffer turns a
+    // diagnostic into the crash. Failing to name the module is a fine outcome; the
+    // caller falls back to the raw address, which is still resolvable by hand.
+    std::unique_lock<std::mutex> lock(g_guestMtx, std::try_to_lock);
+    if (!lock.owns_lock()) return false;
+
     for (const auto& m : g_guestModules) {
         if (a >= m.base && a < m.base + m.size) {
             const auto off = a - m.base;
