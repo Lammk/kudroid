@@ -1732,6 +1732,10 @@ extern "C" ssize_t bionic_getrandom(void *buf, size_t buflen, unsigned int flags
 // Defined further down, next to the rest of the guest signal glue.
 extern "C" int bionic_rt_sigaction(int signum, const void* act, void* oldact,
                                    size_t sigsetsize);
+// The outbound signal senders, reached from bionic_syscall below as well as from the
+// symbol table. Declared here because the syscall switch comes first in this file.
+extern "C" int bionic_tgkill(int pid, int tid, int sig);
+extern "C" int bionic_tkill(int tid, int sig);
 
 extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5, uintptr_t a6) {
     uintptr_t entryX19 = 0;
@@ -1834,6 +1838,57 @@ extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_
         case 134:
             return bionic_rt_sigaction(static_cast<int>(a1), reinterpret_cast<const void*>(a2),
                                        reinterpret_cast<void*>(a3), static_cast<size_t>(a4));
+
+        // The outbound signal syscalls, Linux arm64 numbering.
+        //
+        // A managed runtime does not always go through the libc wrapper: Mono's thread
+        // suspension issues the syscall directly on some builds, and until now every one
+        // of these fell through to the ENOSYS default. That is not a silent no-op — the
+        // guest reads -1/ENOSYS from a suspend it believes it sent, and waits for a
+        // thread that was never signalled.
+        case 129: // kill(pid, sig)
+            return kudroid::guest_kill(static_cast<int>(a1), static_cast<int>(a2));
+
+        case 130: // tkill(tid, sig)
+            return bionic_tkill(static_cast<int>(a1), static_cast<int>(a2));
+
+        case 131: // tgkill(tgid, tid, sig)
+            return bionic_tgkill(static_cast<int>(a1), static_cast<int>(a2),
+                                 static_cast<int>(a3));
+
+        // rt_sigprocmask(how, set, oldset, sigsetsize). Both `how` and the mask need
+        // translating; see bionic_sigprocmask.
+        case 135:
+            if (static_cast<size_t>(a4) != sizeof(uint64_t)) { errno = EINVAL; return -1; }
+            return kudroid::guest_sigprocmask(static_cast<int>(a1),
+                                              reinterpret_cast<const uint64_t*>(a2),
+                                              reinterpret_cast<uint64_t*>(a3));
+
+        case 133: // rt_sigsuspend(mask, sigsetsize)
+            if (static_cast<size_t>(a2) != sizeof(uint64_t)) { errno = EINVAL; return -1; }
+            return kudroid::guest_sigsuspend(reinterpret_cast<const uint64_t*>(a1));
+
+        // rt_sigpending(set, sigsetsize): which signals are pending, in the GUEST's
+        // numbering. Reported raw, the guest tests bits against its own constants and
+        // reads the wrong ones — the same error as the send, one step later.
+        case 136: {
+            if (static_cast<size_t>(a2) != sizeof(uint64_t)) { errno = EINVAL; return -1; }
+            sigset_t host_pending;
+            sigemptyset(&host_pending);
+            if (::sigpending(&host_pending) != 0) return -1;
+            if (a1 != 0) {
+                uint64_t guest_pending = 0;
+                for (int host_sig = 1; host_sig < NSIG; ++host_sig) {
+                    if (sigismember(&host_pending, host_sig) != 1) continue;
+                    const int guest_sig = kudroid::host_signal_to_guest(host_sig);
+                    if (guest_sig >= 1 && guest_sig < 65) {
+                        guest_pending |= (1ull << (guest_sig - 1));
+                    }
+                }
+                *reinterpret_cast<uint64_t*>(a1) = guest_pending;
+            }
+            return 0;
+        }
 
         case 160: // uname
             return bionic_uname(reinterpret_cast<struct bionic_utsname*>(a1));
@@ -2084,6 +2139,13 @@ extern "C" int bionic_usleep(unsigned int usecs) {
 
 // tgkill(pid, tid, sig): da registry tid->pthread_t (c write khi guest call
 // gettid/syscall(178)). before y dummy — abort/assert ca guest b nut im.
+//
+// `sig` is a LINUX number and must be translated before it reaches the host, exactly as
+// sigaction translates it on the way in. This used to forward it raw, and the asymmetry
+// is what broke il2cpp's thread suspension: the guest installs a handler for Linux
+// SIGPWR (30), which lands on host SIGINFO (29), and then sends 30 — Darwin's SIGUSR1,
+// an empty slot whose default action terminates the process. The install and the send
+// both reported success.
 extern "C" int bionic_tgkill(int pid, int tid, int sig) {
     if (pid != static_cast<int>(::getpid())) { errno = ESRCH; return -1; }
     pthread_t target;
@@ -2094,7 +2156,118 @@ extern "C" int bionic_tgkill(int pid, int tid, int sig) {
         target = it->second;
     }
     if (sig == 0) return 0; // kim tra thread tn ti
-    return ::pthread_kill(target, sig) == 0 ? 0 : -1;
+    unsigned long thread_bits = 0;
+    std::memcpy(&thread_bits, &target,
+                sizeof(thread_bits) < sizeof(target) ? sizeof(thread_bits) : sizeof(target));
+    return kudroid::guest_pthread_kill(thread_bits, sig);
+}
+
+// The rest of the outbound signal surface. All four were previously unshimmed, so the
+// guest's Linux number went straight to the host — see the note on bionic_tgkill above.
+extern "C" int bionic_raise(int sig) {
+    return kudroid::guest_raise(sig);
+}
+
+extern "C" int bionic_kill(pid_t pid, int sig) {
+    return kudroid::guest_kill(static_cast<int>(pid), sig);
+}
+
+extern "C" int bionic_pthread_kill(pthread_t thread, int sig) {
+    unsigned long thread_bits = 0;
+    std::memcpy(&thread_bits, &thread,
+                sizeof(thread_bits) < sizeof(thread) ? sizeof(thread_bits) : sizeof(thread));
+    return kudroid::guest_pthread_kill(thread_bits, sig);
+}
+
+extern "C" int bionic_tkill(int tid, int sig) {
+    return bionic_tgkill(static_cast<int>(::getpid()), tid, sig);
+}
+
+// abort(), so the guest's own abort message and thread reach the log before the process
+// goes down.
+//
+// Not a translation — SIGABRT is 6 on both platforms — but the one place where a guest
+// says "I am giving up" with a reason it has already stored, and routing it through
+// guest_raise means the fatal-signal breadcrumb is written by KuDroid's handler with
+// that reason attached. Falling through to the host's abort() reached the same handler
+// but named nothing about the guest.
+extern "C" void bionic_abort(void) {
+    // Unblock SIGABRT first: abort() must not be silently swallowed by a guest that
+    // blocked it, which is what the C standard requires of a conforming abort().
+    sigset_t only_abort;
+    sigemptyset(&only_abort);
+    sigaddset(&only_abort, SIGABRT);
+    ::pthread_sigmask(SIG_UNBLOCK, &only_abort, nullptr);
+
+    kudroid::guest_raise(6);  // Linux SIGABRT
+
+    // A handler that returned, or one that was ignored: abort() may not return, so fall
+    // back to the host's, which restores SIG_DFL and re-raises.
+    ::abort();
+}
+
+// sigprocmask / pthread_sigmask, where BOTH the mask and `how` need translating: Linux
+// numbers SIG_BLOCK/UNBLOCK/SETMASK 0/1/2 and Darwin numbers them 1/2/3, so forwarding
+// the guest's value selects a different operation rather than failing.
+extern "C" int bionic_sigprocmask(int how, const void* set, void* oldset) {
+    return kudroid::guest_sigprocmask(how, static_cast<const uint64_t*>(set),
+                                      static_cast<uint64_t*>(oldset));
+}
+
+extern "C" int bionic_pthread_sigmask(int how, const void* set, void* oldset) {
+    return kudroid::guest_sigprocmask(how, static_cast<const uint64_t*>(set),
+                                      static_cast<uint64_t*>(oldset));
+}
+
+extern "C" int bionic_sigsuspend(const void* mask) {
+    return kudroid::guest_sigsuspend(static_cast<const uint64_t*>(mask));
+}
+
+extern "C" int bionic_sigwait(const void* set, int* sig) {
+    return kudroid::guest_sigwait(static_cast<const uint64_t*>(set), sig);
+}
+
+// signal(): sigaction with BSD flags, recorded through the same registry so a guest that
+// installs with one and reads back with the other sees its own handler.
+extern "C" void* bionic_signal(int sig, void* handler) {
+    return kudroid::guest_signal(sig, handler);
+}
+
+// bionic's sigset_t operations, on the GUEST's 64-bit mask.
+//
+// These take a pointer to the guest's sigset_t — a bare unsigned long on LP64 bionic —
+// and the bit for Linux signal n is (n-1). The host's macros operate on the host's
+// sigset_t, which on Darwin is also 32 bits wide but numbers its bits by HOST signal, so
+// letting these bind to the host's implementations mixes the two numbering schemes in
+// one word. A guest that builds a mask with sigaddset and hands it to sigprocmask would
+// then have it translated a second time.
+extern "C" int bionic_sigemptyset(void* set) {
+    if (!set) { errno = EINVAL; return -1; }
+    *static_cast<uint64_t*>(set) = 0;
+    return 0;
+}
+
+extern "C" int bionic_sigfillset(void* set) {
+    if (!set) { errno = EINVAL; return -1; }
+    *static_cast<uint64_t*>(set) = ~0ull;
+    return 0;
+}
+
+extern "C" int bionic_sigaddset(void* set, int sig) {
+    if (!set || sig < 1 || sig >= 65) { errno = EINVAL; return -1; }
+    *static_cast<uint64_t*>(set) |= (1ull << (sig - 1));
+    return 0;
+}
+
+extern "C" int bionic_sigdelset(void* set, int sig) {
+    if (!set || sig < 1 || sig >= 65) { errno = EINVAL; return -1; }
+    *static_cast<uint64_t*>(set) &= ~(1ull << (sig - 1));
+    return 0;
+}
+
+extern "C" int bionic_sigismember(const void* set, int sig) {
+    if (!set || sig < 1 || sig >= 65) { errno = EINVAL; return -1; }
+    return (*static_cast<const uint64_t*>(set) & (1ull << (sig - 1))) != 0 ? 1 : 0;
 }
 
 // sendfile: macOS signature khc hn Linux — emulate bng pread/write loop.
@@ -5183,14 +5356,6 @@ extern "C" int bionic_memfd_create(const char* name, unsigned int flags) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// tkill emulated via tgkill(getpid(), tid, sig).
-// ─────────────────────────────────────────────────────────────────────────────
-
-extern "C" int bionic_tkill(int tid, int sig) {
-    return bionic_tgkill(static_cast<int>(::getpid()), tid, sig);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Two-parameter pthread_setname_np adapted for Darwin.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -5346,6 +5511,44 @@ const SymbolEntry kSyscallSymbols[] = {
     // rt_sigaction is the symbol bionic's own sigaction() is built on, and some guests
     // import it directly.
     {"rt_sigaction", reinterpret_cast<void*>(&bionic_rt_sigaction)},
+    // The OUTBOUND half of signal translation, which was missing entirely.
+    //
+    // sigaction translated the number on the way in, so a handler for Linux SIGPWR (30)
+    // was installed on the host signal that carries it — Darwin's SIGINFO (29). raise,
+    // kill and pthread_kill were not here at all, so they bound to the HOST libc through
+    // dlsym(RTLD_DEFAULT) and the guest's Linux number went straight through:
+    // pthread_kill(tid, 30) delivered Darwin signal 30, which is SIGUSR1, an unhandled
+    // slot whose default action terminates the process.
+    //
+    // That is Mono's SIG_SUSPEND — how il2cpp stops threads for GC. Twelve of the
+    // thirty-one named signals are misdirected this way, and neither side can see it: the
+    // install succeeds and so does the send.
+    {"raise", reinterpret_cast<void*>(&bionic_raise)},
+    {"kill", reinterpret_cast<void*>(&bionic_kill)},
+    {"pthread_kill", reinterpret_cast<void*>(&bionic_pthread_kill)},
+    {"tkill", reinterpret_cast<void*>(&bionic_tkill)},
+    {"abort", reinterpret_cast<void*>(&bionic_abort)},
+    {"signal", reinterpret_cast<void*>(&bionic_signal)},
+    {"bsd_signal", reinterpret_cast<void*>(&bionic_signal)},
+    {"sysv_signal", reinterpret_cast<void*>(&bionic_signal)},
+    // Masks: both the signal numbers in the set AND `how` differ. Linux numbers
+    // SIG_BLOCK/UNBLOCK/SETMASK 0/1/2, Darwin numbers them 1/2/3, so an unshimmed
+    // sigprocmask does not fail — it performs a different operation. A runtime that
+    // blocks its suspend signal and unblocks it after ends up blocking it twice.
+    {"sigprocmask", reinterpret_cast<void*>(&bionic_sigprocmask)},
+    {"rt_sigprocmask", reinterpret_cast<void*>(&bionic_sigprocmask)},
+    {"pthread_sigmask", reinterpret_cast<void*>(&bionic_pthread_sigmask)},
+    {"sigsuspend", reinterpret_cast<void*>(&bionic_sigsuspend)},
+    {"rt_sigsuspend", reinterpret_cast<void*>(&bionic_sigsuspend)},
+    {"sigwait", reinterpret_cast<void*>(&bionic_sigwait)},
+    // sigset_t operations on the GUEST's mask. Bit (n-1) is Linux signal n; the host's
+    // macros number their bits by host signal, so binding these to the host would mix
+    // the two schemes inside one word and have sigprocmask translate it a second time.
+    {"sigemptyset", reinterpret_cast<void*>(&bionic_sigemptyset)},
+    {"sigfillset", reinterpret_cast<void*>(&bionic_sigfillset)},
+    {"sigaddset", reinterpret_cast<void*>(&bionic_sigaddset)},
+    {"sigdelset", reinterpret_cast<void*>(&bionic_sigdelset)},
+    {"sigismember", reinterpret_cast<void*>(&bionic_sigismember)},
     {"futex", reinterpret_cast<void*>(&bionic_futex)},
     {"__futex", reinterpret_cast<void*>(&bionic_futex)},
     {"futex_time64", reinterpret_cast<void*>(&bionic_futex)},

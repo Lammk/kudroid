@@ -96,6 +96,56 @@ bool guest_signal_has_handler(int host_signum);
 // and the guest carries on believing it has an alternate stack it does not have.
 int guest_sigaltstack(const void* guest_ss, void* guest_oss);
 
+// ── Sending a signal ─────────────────────────────────────────────────────────
+//
+// The other half of the translation, and it was missing entirely.
+//
+// sigaction translated the number on the way IN, so a guest handler for Linux SIGPWR
+// (30) was installed on the host signal that carries it — SIGINFO (29) on Darwin. But
+// raise, kill and pthread_kill were not shimmed at all, so the guest's own number went
+// straight to the host: pthread_kill(tid, 30) delivered Darwin signal 30, which is
+// SIGUSR1. The handler sat in slot 29 while the signal arrived at slot 30, and
+// SIGUSR1's default action is to terminate the process.
+//
+// That is Mono's SIG_SUSPEND, which is how il2cpp stops threads for GC. The guest
+// installs it successfully — the log confirms it — and then every attempt to use it is
+// delivered somewhere else. Twelve of the thirty-one named signals are misdirected this
+// way, and the direction of the error is not visible from either side on its own: the
+// install succeeds and the send succeeds.
+//
+// All four follow the Linux syscall contract: 0, or -1 with errno set.
+int guest_raise(int guest_signum);
+int guest_kill(int pid, int guest_signum);
+int guest_pthread_kill(unsigned long thread, int guest_signum);
+int guest_tgkill(int tgid, int tid, int guest_signum);
+
+// ── Blocking a signal ────────────────────────────────────────────────────────
+//
+// Two translations, not one. The signal numbers in the set, and `how` itself:
+//
+//     Linux : SIG_BLOCK=0  SIG_UNBLOCK=1  SIG_SETMASK=2
+//     Darwin: SIG_BLOCK=1  SIG_UNBLOCK=2  SIG_SETMASK=3
+//
+// Forwarding `how` unchanged does not fail — it silently means something else. A guest
+// blocking signals (Linux 0) passes 0, which is not any Darwin constant; a guest
+// UNBLOCKING (Linux 1) passes 1, which Darwin reads as BLOCK. So a runtime that blocks
+// its suspend signal around a critical section and unblocks it after ends up with the
+// signal blocked permanently, and its GC hangs rather than crashing.
+//
+// `guest_set` and `guest_oldset` are Linux sigset_t: a bare 64-bit word where bit (n-1)
+// is Linux signal n. Either may be null, as in the syscall.
+int guest_sigprocmask(int guest_how, const uint64_t* guest_set, uint64_t* guest_oldset);
+
+// sigsuspend and sigwait, for completeness: both take a Linux mask and both are
+// reachable from a managed runtime's thread control.
+int guest_sigsuspend(const uint64_t* guest_mask);
+int guest_sigwait(const uint64_t* guest_set, int* guest_signum_out);
+
+// The simple handler interface, which is still what a lot of guest code uses. Returns
+// the previous handler, or SIG_ERR. Recorded through the same registry as sigaction so
+// the two cannot disagree about what is installed.
+void* guest_signal(int guest_signum, void* guest_handler);
+
 // Test seam: drop every recorded guest handler. Not for use on a live guest.
 void guest_signal_reset_for_test();
 

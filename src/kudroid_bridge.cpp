@@ -780,6 +780,53 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
             }
         }
 
+        // The first GUEST frame above the fault, which for an abort() is the only thing
+        // that identifies the caller.
+        //
+        // pc and lr are not enough and cannot be. The captured ULTRAKILL run reported
+        // `pc=0x1da7b81dc (host or unknown) lr=0x213e07c1c (host or unknown)`: pc was
+        // exactly the fault address, both were inside libsystem, and no frame belonged to
+        // libil2cpp — because abort() and _sigtramp sit between the handler and whoever
+        // decided to abort. Adding pc/lr answered the question by showing it was the
+        // wrong question.
+        //
+        // Walking finds the frame that matters. Every step is bounded by this thread's
+        // REAL stack — queried through pthread_get_stackaddr_np/get_stacksize_np rather
+        // than a plausibility test — because a diagnostic that faults takes down the
+        // process it was supposed to explain. The frame chain grows towards higher
+        // addresses, and requiring that strictly makes a cycle impossible rather than
+        // merely bounded: at -O3 the frame pointer may be omitted and the word where a
+        // saved fp would be is then whatever was in that slot.
+        char guest_frame[256] = {0};
+        int guest_frame_depth = -1;
+#if (defined(__aarch64__) || defined(__arm64__)) && defined(__APPLE__)
+        if (ucontext != nullptr) {
+            const ucontext_t* uc = static_cast<const ucontext_t*>(ucontext);
+            char* const stack_top =
+                static_cast<char*>(pthread_get_stackaddr_np(pthread_self()));
+            const size_t stack_size = pthread_get_stacksize_np(pthread_self());
+            const uintptr_t low = reinterpret_cast<uintptr_t>(stack_top - stack_size);
+            const uintptr_t high = reinterpret_cast<uintptr_t>(stack_top);
+
+            uintptr_t frame = static_cast<uintptr_t>(uc->uc_mcontext->__ss.__fp);
+            for (int depth = 0; depth < 24 && stack_size != 0; ++depth) {
+                if ((frame & 0x7) != 0) break;
+                if (frame < low || frame + 2 * sizeof(void*) > high) break;
+                const uintptr_t ret =
+                    *reinterpret_cast<const uintptr_t*>(frame + sizeof(void*));
+                if (ret == 0) break;
+                if (kudroid::kudroid_lookup_guest_module(reinterpret_cast<void*>(ret),
+                                                        guest_frame, sizeof(guest_frame))) {
+                    guest_frame_depth = depth;
+                    break;
+                }
+                const uintptr_t next = *reinterpret_cast<const uintptr_t*>(frame);
+                if (next <= frame) break;
+                frame = next;
+            }
+        }
+#endif
+
         // Field names are uniform with the rest of this file on purpose. `sig=` already
         // means a Java type signature in native-enter/native-exit — 76 lines of one run
         // used it that way against this line's one — so grepping `sig=` for signals
@@ -800,6 +847,17 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
         if (n > 0 && static_cast<size_t>(n) < sizeof(mark) && have_pc) {
             n += snprintf(mark + n, sizeof(mark) - static_cast<size_t>(n),
                           " pc=%s lr=%s", pc_mod, lr_mod);
+        }
+        // The guest frame, when the walk found one. `frame_depth` says how many host
+        // frames sat between the signal and it, which is what distinguishes "the guest
+        // faulted" (depth 0-1) from "the guest called into libsystem and that aborted"
+        // (deeper) — the case pc/lr cannot describe at all.
+        if (n > 0 && static_cast<size_t>(n) < sizeof(mark) && guest_frame_depth >= 0) {
+            n += snprintf(mark + n, sizeof(mark) - static_cast<size_t>(n),
+                          " guest_frame=%s frame_depth=%d", guest_frame, guest_frame_depth);
+        } else if (n > 0 && static_cast<size_t>(n) < sizeof(mark) && have_pc) {
+            n += snprintf(mark + n, sizeof(mark) - static_cast<size_t>(n),
+                          " guest_frame=none-in-24-frames");
         }
         // The guest's own words, last, because it is the only variable-length part and
         // the fields above must not be pushed out by a long message.

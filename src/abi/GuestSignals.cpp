@@ -186,6 +186,26 @@ uint64_t mask_host_to_guest(const sigset_t* host_mask) {
             out |= 1ull << (p.linux_num - 1);
         }
     }
+    // The real-time range, which the table above does not contain: it is a contiguous
+    // mapping, not a list of pairs.
+    //
+    // Leaving it out silently dropped every RT signal from a mask the guest read back,
+    // and that is not a cosmetic loss. The normal sequence is save-block-restore: a
+    // runtime reads its mask, blocks its suspend signal, does the critical work, then
+    // restores what it saved. If the readback loses the RT bits, the restore installs a
+    // mask that never had them, so a signal the guest believed blocked comes through — or
+    // one it believed unblocked stays masked. Mono's newer builds use SIGRTMIN for
+    // SIG_SUSPEND, so this is the same signal the send path misdirects, failing one step
+    // later and in the opposite direction.
+#if defined(SIGRTMIN) && defined(SIGRTMAX)
+    for (int host_sig = SIGRTMIN; host_sig <= SIGRTMAX; ++host_sig) {
+        if (sigismember(host_mask, host_sig) != 1) continue;
+        const int guest_sig = rt_signal_to_guest(host_sig);
+        if (guest_sig >= 1 && guest_sig <= 64) {
+            out |= 1ull << (guest_sig - 1);
+        }
+    }
+#endif
     return out;
 }
 
@@ -696,5 +716,251 @@ void guest_signal_reset_for_test() {
     t_depth = 0;
     t_depth_frame = 0;
 }
+
+// ── Sending a signal ─────────────────────────────────────────────────────────
+
+namespace {
+
+// Would this host signal kill the process if it arrived right now?
+//
+// The check that the whole outbound bug needed and nobody could make. A guest sending a
+// signal gets 0 back whether the target had a handler or not, and if it did not, the
+// default action runs — for most of these, terminate. So "the send succeeded" and "the
+// process is about to die" are the same observation from the guest's side, and the log
+// said neither.
+//
+// Ignorable-by-default signals (SIGCHLD, SIGURG, SIGWINCH, and SIGINFO where it exists)
+// are excluded: arriving at an empty slot is normal for those and warning would be noise.
+bool host_default_action_is_fatal(int host_signum) {
+    switch (host_signum) {
+        case SIGCHLD:
+        case SIGURG:
+        case SIGWINCH:
+        case SIGCONT:
+#if defined(SIGINFO)
+        case SIGINFO:
+#endif
+            return false;
+        default:
+            return true;
+    }
+}
+
+// Warn when a guest sends a signal that nothing will catch and whose default action
+// ends the process.
+//
+// This is the line that was missing from the ULTRAKILL log. il2cpp installed
+// SIG_SUSPEND, KuDroid recorded it, and then every suspend went to a different host
+// signal with an empty slot — a fatal delivery that looked, from every log KuDroid
+// wrote, like a successful send.
+//
+// Rate-limited per guest signal so a runtime suspending threads in a loop cannot flood
+// the log, and only ever a warning: refusing the send would be worse, since a guest
+// signalling a thread it does not control is legitimate.
+void warn_if_delivery_is_unhandled_and_fatal(int guest_signum, int host_signum,
+                                             const char* how) {
+    if (guest_signal_has_handler(host_signum)) return;
+    if (kudroid_owns(host_signum)) return;  // KuDroid's own handler will catch it
+    if (!host_default_action_is_fatal(host_signum)) return;
+
+    // Nothing recorded on our side and nothing of KuDroid's: is there a host handler?
+    struct sigaction current;
+    std::memset(&current, 0, sizeof(current));
+    if (::sigaction(host_signum, nullptr, &current) == 0) {
+        const bool has_host_handler =
+            (current.sa_flags & SA_SIGINFO) ? current.sa_sigaction != nullptr
+                                            : (current.sa_handler != SIG_DFL &&
+                                               current.sa_handler != SIG_IGN);
+        if (has_host_handler) return;
+    }
+
+    static std::mutex s_mtx;
+    static int s_seen[16];
+    static int s_seenN = 0;
+    {
+        std::lock_guard<std::mutex> lock(s_mtx);
+        for (int i = 0; i < s_seenN; ++i) {
+            if (s_seen[i] == guest_signum) return;
+        }
+        if (s_seenN >= 16) return;
+        s_seen[s_seenN++] = guest_signum;
+    }
+
+    char msg[320];
+    std::snprintf(msg, sizeof(msg),
+                  "%s(%d) delivers host signal %d, which NOTHING handles and whose "
+                  "default action terminates the process. If the guest installed a "
+                  "handler for Linux %d it is on host %d — check that both directions "
+                  "translate. A managed runtime using this as SIG_SUSPEND will die here "
+                  "instead of suspending a thread.",
+                  how, guest_signum, host_signum, guest_signum,
+                  guest_signal_to_host(guest_signum));
+    kudroid_android_log_message(6, "KuDroidSignal", msg);
+}
+
+// Shared entry check for the four senders. Returns the host number, or 0 having set
+// errno — every caller then returns -1, as the syscall does.
+int host_signum_for_send(int guest_signum, const char* how) {
+    if (guest_signum == 0) return 0;  // the existence check; callers special-case it
+    const int host_signum = guest_signal_to_host(guest_signum);
+    if (host_signum == 0) {
+        char msg[224];
+        std::snprintf(msg, sizeof(msg),
+                      "%s(%d) REFUSED: no host signal carries Linux %d, so the send "
+                      "cannot be delivered to whatever installed a handler for it.",
+                      how, guest_signum, guest_signum);
+        kudroid_android_log_message(6, "KuDroidSignal", msg);
+        errno = EINVAL;
+        return 0;
+    }
+    warn_if_delivery_is_unhandled_and_fatal(guest_signum, host_signum, how);
+    return host_signum;
+}
+
+}  // namespace
+
+int guest_raise(int guest_signum) {
+    if (guest_signum == 0) return 0;
+    const int host_signum = host_signum_for_send(guest_signum, "raise");
+    if (host_signum == 0) return -1;
+    // pthread_kill on self rather than ::raise: raise() is defined to signal the calling
+    // THREAD on both platforms, but going through pthread_kill makes that explicit and
+    // matches what the other three do.
+    return ::pthread_kill(::pthread_self(), host_signum) == 0 ? 0 : -1;
+}
+
+int guest_kill(int pid, int guest_signum) {
+    if (guest_signum == 0) return ::kill(pid, 0);
+    const int host_signum = host_signum_for_send(guest_signum, "kill");
+    if (host_signum == 0) return -1;
+    return ::kill(pid, host_signum);
+}
+
+int guest_pthread_kill(unsigned long thread, int guest_signum) {
+    pthread_t target;
+    std::memcpy(&target, &thread, sizeof(target) < sizeof(thread) ? sizeof(target)
+                                                                 : sizeof(thread));
+    if (guest_signum == 0) return ::pthread_kill(target, 0) == 0 ? 0 : -1;
+    const int host_signum = host_signum_for_send(guest_signum, "pthread_kill");
+    if (host_signum == 0) return -1;
+    const int rc = ::pthread_kill(target, host_signum);
+    if (rc != 0) {
+        errno = rc;
+        return -1;
+    }
+    return 0;
+}
+
+int guest_tgkill(int tgid, int tid, int guest_signum) {
+    // The tid -> pthread_t lookup belongs to the syscall shim, which owns the registry.
+    // This is only the translation, so tgkill's caller resolves the thread and then
+    // reaches guest_pthread_kill. Kept as a named entry point so the four senders read
+    // the same way at the call sites.
+    (void)tgid;
+    (void)tid;
+    errno = ENOSYS;
+    return -1;
+}
+
+// ── Blocking a signal ────────────────────────────────────────────────────────
+
+namespace {
+
+// Linux's SIG_* for sigprocmask. Written as literals because the point is that they are
+// NOT the host's: on Darwin the same three names are 1, 2, 3.
+constexpr int kLinuxSigBlock   = 0;
+constexpr int kLinuxSigUnblock = 1;
+constexpr int kLinuxSigSetmask = 2;
+
+int how_guest_to_host(int guest_how) {
+    switch (guest_how) {
+        case kLinuxSigBlock:   return SIG_BLOCK;
+        case kLinuxSigUnblock: return SIG_UNBLOCK;
+        case kLinuxSigSetmask: return SIG_SETMASK;
+        default:               return -1;
+    }
+}
+
+}  // namespace
+
+int guest_sigprocmask(int guest_how, const uint64_t* guest_set, uint64_t* guest_oldset) {
+    // A null set means "query only", and then `how` is not read at all — Linux allows
+    // any value there. Validating it unconditionally would reject a legitimate query.
+    int host_how = SIG_SETMASK;
+    if (guest_set != nullptr) {
+        host_how = how_guest_to_host(guest_how);
+        if (host_how < 0) {
+            errno = EINVAL;
+            return -1;
+        }
+    }
+
+    sigset_t host_set;
+    sigset_t host_oldset;
+    sigemptyset(&host_set);
+    sigemptyset(&host_oldset);
+    if (guest_set != nullptr) mask_guest_to_host(*guest_set, &host_set);
+
+    const int rc = ::pthread_sigmask(host_how, guest_set != nullptr ? &host_set : nullptr,
+                                     guest_oldset != nullptr ? &host_oldset : nullptr);
+    if (rc != 0) {
+        errno = rc;
+        return -1;
+    }
+    if (guest_oldset != nullptr) *guest_oldset = mask_host_to_guest(&host_oldset);
+    return 0;
+}
+
+int guest_sigsuspend(const uint64_t* guest_mask) {
+    sigset_t host_mask;
+    sigemptyset(&host_mask);
+    if (guest_mask != nullptr) mask_guest_to_host(*guest_mask, &host_mask);
+    // sigsuspend always returns -1 with EINTR on success, which is the contract on both
+    // platforms; pass it through rather than inventing a 0.
+    return ::sigsuspend(&host_mask);
+}
+
+int guest_sigwait(const uint64_t* guest_set, int* guest_signum_out) {
+    if (guest_set == nullptr) {
+        errno = EINVAL;
+        return -1;
+    }
+    sigset_t host_set;
+    sigemptyset(&host_set);
+    mask_guest_to_host(*guest_set, &host_set);
+
+    int host_signum = 0;
+    const int rc = ::sigwait(&host_set, &host_signum);
+    if (rc != 0) {
+        errno = rc;
+        return -1;
+    }
+    // Back to the guest's numbering, or the guest compares it against its own constants
+    // and takes the wrong branch — the same error as the send, one step later.
+    if (guest_signum_out != nullptr) {
+        const int guest_signum = host_signal_to_guest(host_signum);
+        *guest_signum_out = guest_signum != 0 ? guest_signum : host_signum;
+    }
+    return 0;
+}
+
+void* guest_signal(int guest_signum, void* guest_handler) {
+    // signal() is sigaction() with a fixed set of flags. Routing it through
+    // guest_sigaction is what keeps the registry the single source of truth: a guest
+    // that installs with signal() and reads back with sigaction() must see its own
+    // handler, and a KuDroid-owned signal must be recorded rather than installed.
+    GuestSigaction act;
+    std::memset(&act, 0, sizeof(act));
+    act.sa_handler_or_sigaction = guest_handler;
+    act.sa_flags = kLinuxSaRestart;  // BSD semantics, which is what bionic's signal() uses
+
+    GuestSigaction old;
+    std::memset(&old, 0, sizeof(old));
+    if (guest_sigaction(guest_signum, &act, &old) != 0) {
+        return reinterpret_cast<void*>(SIG_ERR);
+    }
+    return old.sa_handler_or_sigaction;
+}
+
 
 }  // namespace kudroid

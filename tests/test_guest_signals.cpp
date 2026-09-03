@@ -30,6 +30,7 @@
 #include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <unistd.h>
 
 namespace {
 
@@ -641,6 +642,223 @@ void test_recursion_is_still_declined_after_a_jump_out() {
           "the handler was reached once more and its nested re-entry was declined");
 }
 
+// ─── sending a signal ────────────────────────────────────────────────────────
+//
+// The other half of the translation, and the one that was missing.
+//
+// sigaction translated the number on the way IN, so a handler for a Linux signal was
+// installed on whatever host signal carries it. raise/kill/pthread_kill were not shimmed
+// at all, so the guest's Linux number went straight to the host — and for twelve of the
+// thirty-one named signals that is a different signal entirely. Neither side can see the
+// error alone: the install succeeds and so does the send.
+//
+// This is testable on any host where the two numberings differ for at least one signal,
+// and one always does: Linux SIGRTMIN is 32, glibc reserves 32-33 so its SIGRTMIN is 34,
+// and Darwin has no real-time signals at all. The assertion below is therefore about the
+// PROPERTY — a signal sent lands where the handler was installed — rather than about a
+// specific pair of numbers, which is what makes it correct on both platforms.
+
+std::atomic<int> g_sent_hits{0};
+std::atomic<int> g_sent_signum{0};
+
+void recording_handler(int signum) {
+    g_sent_hits.fetch_add(1);
+    g_sent_signum.store(signum);
+}
+
+// Pick a guest signal whose host number differs, or 0 if the platforms agree everywhere
+// (which no real host does, but the test must not assert on an assumption).
+int find_a_translated_signal() {
+    // Real-time first: guest 32 is Mono's SIGRTMIN choice for SIG_SUSPEND on newer
+    // builds, and it is translated on both hosts.
+    for (int guest = 32; guest <= 40; ++guest) {
+        const int host = guest_signal_to_host(guest);
+        if (host != 0 && host != guest) return guest;
+    }
+    // Then the named ones: SIGPWR (30) on Darwin, and several others.
+    for (int guest = 1; guest < 32; ++guest) {
+        const int host = guest_signal_to_host(guest);
+        if (host != 0 && host != guest && host != SIGKILL && host != SIGSTOP) return guest;
+    }
+    return 0;
+}
+
+void test_a_sent_signal_arrives_where_the_handler_was_installed() {
+    std::printf("[send] raise/pthread_kill translate, so a send reaches the guest handler\n");
+    guest_signal_reset_for_test();
+
+    const int guest_sig = find_a_translated_signal();
+    if (guest_sig == 0) {
+        Check(false, "this host has no signal whose number differs — cannot test");
+        return;
+    }
+    const int host_sig = guest_signal_to_host(guest_sig);
+    std::printf("       using guest %d -> host %d\n", guest_sig, host_sig);
+
+    // Unblock it: a previous test may have left it masked, and a blocked signal would be
+    // pending rather than delivered.
+    uint64_t unblock = 1ull << (guest_sig - 1);
+    kudroid::guest_sigprocmask(1 /* Linux SIG_UNBLOCK */, &unblock, nullptr);
+
+    GuestSigaction act;
+    std::memset(&act, 0, sizeof(act));
+    act.sa_handler_or_sigaction = reinterpret_cast<void*>(&recording_handler);
+    Check(guest_sigaction(guest_sig, &act, nullptr) == 0, "the guest installs a handler");
+
+    // guest_raise, which is what the guest's raise() now reaches.
+    g_sent_hits.store(0);
+    g_sent_signum.store(0);
+    Check(kudroid::guest_raise(guest_sig) == 0, "guest_raise reports success");
+    for (int i = 0; i < 200 && g_sent_hits.load() == 0; ++i) {
+        ::usleep(1000);
+    }
+    Check(g_sent_hits.load() == 1,
+          "the handler ran — the send was translated to the same host signal as the install");
+
+    // And the number the handler receives is the GUEST's, not the host's. A handler that
+    // compares it against its own constants takes the wrong branch otherwise.
+    Check(g_sent_signum.load() == guest_sig,
+          "the handler was passed the guest's signal number, not the host's");
+
+    // pthread_kill on this thread, the call a runtime actually uses to suspend one.
+    g_sent_hits.store(0);
+    unsigned long self_bits = 0;
+    pthread_t self = ::pthread_self();
+    std::memcpy(&self_bits, &self, sizeof(self_bits) < sizeof(self) ? sizeof(self_bits)
+                                                                   : sizeof(self));
+    Check(kudroid::guest_pthread_kill(self_bits, guest_sig) == 0,
+          "guest_pthread_kill reports success");
+    for (int i = 0; i < 200 && g_sent_hits.load() == 0; ++i) {
+        ::usleep(1000);
+    }
+    Check(g_sent_hits.load() == 1, "and it too reached the guest's handler");
+}
+
+// The untranslated send, demonstrated rather than described: the same signal number sent
+// straight to the host does NOT reach the handler. This is what the code did before.
+void test_the_untranslated_send_does_not_arrive() {
+    std::printf("[send] the raw guest number sent to the host misses the handler\n");
+    guest_signal_reset_for_test();
+
+    const int guest_sig = find_a_translated_signal();
+    if (guest_sig == 0) {
+        Check(false, "this host has no signal whose number differs — cannot test");
+        return;
+    }
+
+    GuestSigaction act;
+    std::memset(&act, 0, sizeof(act));
+    act.sa_handler_or_sigaction = reinterpret_cast<void*>(&recording_handler);
+    Check(guest_sigaction(guest_sig, &act, nullptr) == 0, "handler installed for the guest signal");
+
+    g_sent_hits.store(0);
+    // Deliberately NOT translated — this is the old behaviour.
+    const int rc = ::pthread_kill(::pthread_self(), guest_sig);
+    ::usleep(20000);
+    Check(g_sent_hits.load() == 0,
+          "sending the guest's own number reaches a different host slot: handler never ran");
+    // Either the host refused the number outright or it delivered it somewhere else.
+    // Both are failures of the same kind; what matters is that it did not arrive.
+    Check(rc != 0 || g_sent_hits.load() == 0,
+          "so a runtime doing this suspends nothing, whatever the return value said");
+}
+
+// ─── blocking a signal ───────────────────────────────────────────────────────
+
+// `how` is translated by MEANING, not forwarded. Linux numbers SIG_BLOCK/UNBLOCK/SETMASK
+// 0/1/2 and Darwin numbers them 1/2/3, so passing the guest's value through does not fail
+// — it performs a different operation. A runtime that blocks its suspend signal around a
+// critical section and unblocks it after would end up blocking it twice and never
+// unblocking, which hangs its GC rather than crashing anywhere near the cause.
+void test_sigprocmask_translates_how_and_the_mask() {
+    std::printf("[mask] sigprocmask translates both `how` and the signal numbers\n");
+    guest_signal_reset_for_test();
+
+    const int guest_sig = find_a_translated_signal();
+    if (guest_sig == 0) {
+        Check(false, "this host has no signal whose number differs — cannot test");
+        return;
+    }
+    const int host_sig = guest_signal_to_host(guest_sig);
+
+    // Start from a known state.
+    uint64_t empty = 0;
+    kudroid::guest_sigprocmask(2 /* Linux SIG_SETMASK */, &empty, nullptr);
+
+    // BLOCK it, using LINUX's SIG_BLOCK (0).
+    uint64_t one = 1ull << (guest_sig - 1);
+    Check(kudroid::guest_sigprocmask(0 /* Linux SIG_BLOCK */, &one, nullptr) == 0,
+          "SIG_BLOCK (Linux 0) is accepted");
+
+    // The host mask must now contain the HOST signal, which is the whole point.
+    sigset_t host_now;
+    sigemptyset(&host_now);
+    ::pthread_sigmask(SIG_BLOCK, nullptr, &host_now);
+    Check(sigismember(&host_now, host_sig) == 1,
+          "the HOST signal is blocked — the number in the set was translated");
+    Check(sigismember(&host_now, guest_sig) == 0 || host_sig == guest_sig,
+          "and the guest's raw number was NOT blocked instead");
+
+    // Read it back through the guest interface: the guest's own number, not the host's.
+    uint64_t readback = 0;
+    Check(kudroid::guest_sigprocmask(0, nullptr, &readback) == 0, "a query succeeds");
+    Check((readback & (1ull << (guest_sig - 1))) != 0,
+          "the guest reads its own number back from oldset");
+
+    // UNBLOCK, using LINUX's SIG_UNBLOCK (1). Forwarded raw to Darwin this is SIG_BLOCK,
+    // so the signal would stay blocked — the failure this check exists for.
+    Check(kudroid::guest_sigprocmask(1 /* Linux SIG_UNBLOCK */, &one, nullptr) == 0,
+          "SIG_UNBLOCK (Linux 1) is accepted");
+    sigemptyset(&host_now);
+    ::pthread_sigmask(SIG_BLOCK, nullptr, &host_now);
+    Check(sigismember(&host_now, host_sig) == 0,
+          "the signal is genuinely unblocked, not blocked a second time");
+
+    // An out-of-range how must be refused rather than silently meaning something.
+    Check(kudroid::guest_sigprocmask(99, &one, nullptr) == -1 && errno == EINVAL,
+          "an unknown `how` is rejected with EINVAL");
+}
+
+// signal() and sigaction() must agree about what is installed. Two independent paths
+// would disagree, and dispatch reads only one of them.
+void test_signal_and_sigaction_share_one_registry() {
+    std::printf("[signal] signal() records through the same registry as sigaction()\n");
+    guest_signal_reset_for_test();
+
+    void* const prev = kudroid::guest_signal(kGuestSIGUSR1,
+                                             reinterpret_cast<void*>(&recording_handler));
+    Check(prev != reinterpret_cast<void*>(SIG_ERR), "signal() succeeds");
+
+    // Read it back with sigaction: it must be the handler signal() installed.
+    GuestSigaction old;
+    std::memset(&old, 0, sizeof(old));
+    Check(guest_sigaction(kGuestSIGUSR1, nullptr, &old) == 0, "sigaction query succeeds");
+    Check(old.sa_handler_or_sigaction == reinterpret_cast<void*>(&recording_handler),
+          "sigaction sees the handler that signal() installed");
+
+    // And signal() returns the previous one on the second call.
+    void* const second = kudroid::guest_signal(kGuestSIGUSR1, reinterpret_cast<void*>(SIG_DFL));
+    Check(second == reinterpret_cast<void*>(&recording_handler),
+          "signal() returns the handler it is replacing");
+}
+
+// An unmappable number must be refused on the way out too, not sent raw. Sending it lands
+// on whatever host signal has that value, which is how this class of bug does its damage.
+void test_an_unmappable_send_is_refused() {
+    std::printf("[send] a signal with no host counterpart is refused, not sent raw\n");
+    guest_signal_reset_for_test();
+
+    errno = 0;
+    Check(kudroid::guest_raise(200) == -1 && errno == EINVAL,
+          "raise(200) is refused with EINVAL rather than delivered somewhere");
+    errno = 0;
+    Check(kudroid::guest_kill(::getpid(), 200) == -1 && errno == EINVAL,
+          "kill(pid, 200) likewise");
+
+    // Signal 0 is the existence probe and must keep working: it delivers nothing.
+    Check(kudroid::guest_raise(0) == 0, "raise(0) still succeeds as the no-op probe");
+}
+
 }  // namespace
 
 int main() {
@@ -664,6 +882,11 @@ int main() {
     test_a_faulting_guest_handler_does_not_recurse();
     test_a_handler_that_jumps_out_does_not_disable_later_dispatch();
     test_recursion_is_still_declined_after_a_jump_out();
+    test_a_sent_signal_arrives_where_the_handler_was_installed();
+    test_the_untranslated_send_does_not_arrive();
+    test_sigprocmask_translates_how_and_the_mask();
+    test_signal_and_sigaction_share_one_registry();
+    test_an_unmappable_send_is_refused();
 
     std::printf("=== %d checks, %d failures ===\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

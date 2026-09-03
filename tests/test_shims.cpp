@@ -80,6 +80,28 @@ extern "C" int bionic_pthread_mutexattr_destroy(void* attr);
 extern "C" int bionic_pthread_getattr_np(pthread_t thread, void* attr);
 extern "C" int bionic_pthread_attr_getstack(void* attr, void** stackaddr, size_t* stacksize);
 
+// Outbound signal senders and mask operations. Absent from the symbol table until now,
+// which is the whole bug: a guest binding to "raise" got the host's.
+extern "C" int bionic_raise(int sig);
+extern "C" int bionic_kill(pid_t pid, int sig);
+extern "C" int bionic_pthread_kill(pthread_t thread, int sig);
+extern "C" int bionic_tgkill(int pid, int tid, int sig);
+extern "C" int bionic_sigprocmask(int how, const void* set, void* oldset);
+extern "C" int bionic_pthread_sigmask(int how, const void* set, void* oldset);
+extern "C" void* bionic_signal(int sig, void* handler);
+extern "C" int bionic_sigemptyset(void* set);
+extern "C" int bionic_sigfillset(void* set);
+extern "C" int bionic_sigaddset(void* set, int sig);
+extern "C" int bionic_sigdelset(void* set, int sig);
+extern "C" int bionic_sigismember(const void* set, int sig);
+
+// The resolver a guest relocation goes through. What it returns for a name is what the
+// guest actually calls, which is the thing these tests have to check.
+namespace kudroid {
+void* resolve_bionic_symbol(const char* name);
+}
+using kudroid::resolve_bionic_symbol;
+
 // Mirror of the bionic arm64 pthread_attr_t the shim writes through. Declared here
 // rather than shared with the shim on purpose: if the shim's field order changes, this
 // test must fail rather than silently follow it.
@@ -1582,6 +1604,81 @@ static void test_getattr_np_stack_base_on_a_fresh_thread() {
           "the spawned thread's own frame lies inside its reported bounds");
 }
 
+// ─── the outbound signal symbols are actually IN the table ───────────────────
+//
+// The bug was not a wrong implementation, it was an absent one. raise, kill and
+// pthread_kill had no entry in kSyscallSymbols, so resolve_bionic_symbol fell through to
+// dlsym(RTLD_DEFAULT) and the guest's Linux signal number went to the host libc
+// untranslated — while sigaction, which IS in the table, translated it on the way in.
+//
+// A test that only exercises bionic_raise() would pass with the entry missing, because it
+// calls the function directly. What has to be checked is the binding: what does a guest
+// relocating against "raise" actually get?
+static void test_outbound_signal_symbols_resolve_to_the_shim() {
+    std::printf("[signal] the outbound senders resolve to KuDroid, not the host libc\n");
+
+    struct Probe { const char* name; void* shim; };
+    const Probe probes[] = {
+        {"raise",           reinterpret_cast<void*>(&bionic_raise)},
+        {"kill",            reinterpret_cast<void*>(&bionic_kill)},
+        {"pthread_kill",    reinterpret_cast<void*>(&bionic_pthread_kill)},
+        {"tgkill",          reinterpret_cast<void*>(&bionic_tgkill)},
+        {"sigprocmask",     reinterpret_cast<void*>(&bionic_sigprocmask)},
+        {"pthread_sigmask", reinterpret_cast<void*>(&bionic_pthread_sigmask)},
+        {"signal",          reinterpret_cast<void*>(&bionic_signal)},
+        {"sigaddset",       reinterpret_cast<void*>(&bionic_sigaddset)},
+        {"sigismember",     reinterpret_cast<void*>(&bionic_sigismember)},
+    };
+
+    for (const Probe& p : probes) {
+        void* const bound = resolve_bionic_symbol(p.name);
+        const bool is_shim = (bound == p.shim);
+        // CHECK takes a const char* (it goes to printf), so the message is built into a
+        // buffer rather than passed as a std::string.
+        char msg[160];
+        std::snprintf(msg, sizeof(msg),
+                      "a guest binding to %s reaches KuDroid's translating version",
+                      p.name);
+        CHECK(is_shim, msg);
+    }
+
+    // And the inbound side, for contrast: it was already correct, and if it ever stops
+    // being in the table the asymmetry comes back from the other direction.
+    CHECK(resolve_bionic_symbol("sigaction") == reinterpret_cast<void*>(&bionic_sigaction),
+          "sigaction is still bound to the shim too — both directions or neither");
+}
+
+// The guest's sigset_t operations work on the GUEST's bit numbering.
+//
+// bionic's sigset_t on LP64 is a bare 64-bit word where bit (n-1) is Linux signal n. The
+// host's macros number their bits by HOST signal, so binding these to the host mixes two
+// numbering schemes inside one word — and sigprocmask would then translate a mask that
+// was already in host terms.
+static void test_guest_sigset_operations_use_linux_bit_positions() {
+    std::printf("[signal] sigaddset/sigismember use the guest's bit positions\n");
+
+    uint64_t set = 0;
+    CHECK(bionic_sigemptyset(&set) == 0 && set == 0, "sigemptyset zeroes the word");
+
+    // Linux SIGPWR is 30, so its bit is 29. That is the signal Mono uses for SIG_SUSPEND.
+    CHECK(bionic_sigaddset(&set, 30) == 0, "sigaddset(30) succeeds");
+    CHECK(set == (1ull << 29), "bit 29 is set — position (n-1), the guest's convention");
+    CHECK(bionic_sigismember(&set, 30) == 1, "sigismember(30) reports it present");
+    CHECK(bionic_sigismember(&set, 29) == 0, "and the neighbouring signal is not");
+
+    CHECK(bionic_sigdelset(&set, 30) == 0 && set == 0, "sigdelset removes it again");
+
+    CHECK(bionic_sigfillset(&set) == 0 && set == ~0ull, "sigfillset sets every bit");
+
+    // Out of range must be refused rather than shifting by an absurd amount.
+    errno = 0;
+    CHECK(bionic_sigaddset(&set, 0) == -1 && errno == EINVAL, "signal 0 is not a set member");
+    errno = 0;
+    CHECK(bionic_sigaddset(&set, 65) == -1 && errno == EINVAL, "signal 65 is out of range");
+    errno = 0;
+    CHECK(bionic_sigaddset(nullptr, 10) == -1 && errno == EINVAL, "a null set is rejected");
+}
+
 // ─── main ────────────────────────────────────────────────────────────────────
 
 int main() {
@@ -1627,6 +1724,8 @@ int main() {
     test_mutex_shared_between_threads();
     test_getattr_np_stack_base_is_the_low_address();
     test_getattr_np_stack_base_on_a_fresh_thread();
+    test_outbound_signal_symbols_resolve_to_the_shim();
+    test_guest_sigset_operations_use_linux_bit_positions();
     std::printf("=== %d checks, %d failures ===\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }
