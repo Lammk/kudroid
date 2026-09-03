@@ -257,6 +257,19 @@ else()
         target_include_directories(test_guest_signals PRIVATE include)
     endif()
 
+    # The fatal-signal breadcrumb, driven by a real signal through the real crash handler.
+    # A guest handler that siglongjmps out — il2cpp's SIGABRT handler does — reaches none
+    # of the crash-log writing, so for that whole class of crash this one line IS the
+    # report: ULTRAKILL took SIGABRT with a guest handler installed and produced no
+    # kudroid_crash.log at all. These tests pin what the line has to carry.
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_crash_breadcrumb.cpp")
+        add_executable(test_crash_breadcrumb
+            tests/test_crash_breadcrumb.cpp
+        )
+        target_link_libraries(test_crash_breadcrumb PRIVATE kudroid_core)
+        target_include_directories(test_crash_breadcrumb PRIVATE include)
+    endif()
+
     # Device memory figures: apps size caches from them, so they must be real,
     # self-consistent and never zero.
     if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_memory_info.cpp")

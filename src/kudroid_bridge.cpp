@@ -720,22 +720,93 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
     // the timeline — while KuDroid's crash log described a different, later fault and
     // presented it as the crash. One line here, in the same file as the watchdog and the
     // thread samples, is what makes the order of events readable.
+    //
+    // It carries pc/lr and the abort message for the same reason, learned the same way.
+    // A guest handler that does not return reaches none of the reporting below: the
+    // ULTRAKILL run that took sig=6 with guest_handler=1 wrote no crash log at all,
+    // because il2cpp's SIGABRT handler siglongjmps out to its own recovery point. The
+    // fault address for an abort() is just the pc of abort inside libsystem and says
+    // nothing; pc, lr and the module they fall in are what identify the caller, and
+    // android_set_abort_message is the guest's own statement of what went wrong. All of
+    // it was already in memory and none of it was written anywhere.
+    //
+    // Everything here is async-signal-safe: reads of scalars, snprintf into a local,
+    // kudroid_lookup_guest_module (a try_lock that gives up rather than blocking) and
+    // one O_APPEND write.
     {
-        char mark[256];
+        char mark[1536];
         char tname[64] = "?";
 #if defined(__APPLE__)
         pthread_getname_np(pthread_self(), tname, sizeof(tname));
 #else
         (void)pthread_getname_np(pthread_self(), tname, sizeof(tname));
 #endif
-        snprintf(mark, sizeof(mark),
-                 "fatal-signal sig=%d fault_addr=%p si_code=%d thread=%s guest_handler=%d "
-                 "jni_guard=%d",
-                 sig, info != nullptr ? info->si_addr : nullptr,
-                 info != nullptr ? info->si_code : 0,
-                 tname[0] != '\0' ? tname : "?",
-                 kudroid::guest_signal_has_handler(sig) ? 1 : 0,
-                 g_jniGuardActive ? 1 : 0);
+
+        // pc/lr, and the guest module they land in.
+        //
+        // Named pc_mod/lr_mod rather than symbolicated: symbolicateAddr falls through to
+        // dladdr, which takes the dynamic linker's lock and is not safe here. The guest
+        // module lookup is, and a module+offset is what actually needs decoding offline
+        // anyway — a raw address alone cannot even be attributed to a library.
+        uint64_t pc = 0, lr = 0;
+        bool have_pc = false;
+        char pc_mod[256] = {0};
+        char lr_mod[256] = {0};
+#if (defined(__aarch64__) || defined(__arm64__)) && defined(__APPLE__)
+        if (ucontext != nullptr) {
+            const ucontext_t* uc = static_cast<const ucontext_t*>(ucontext);
+            pc = uc->uc_mcontext->__ss.__pc;
+            lr = uc->uc_mcontext->__ss.__lr;
+            have_pc = true;
+        }
+#elif defined(__aarch64__) && defined(__linux__)
+        if (ucontext != nullptr) {
+            const ucontext_t* uc = static_cast<const ucontext_t*>(ucontext);
+            pc = uc->uc_mcontext.pc;
+            lr = uc->uc_mcontext.regs[30];
+            have_pc = true;
+        }
+#endif
+        if (have_pc) {
+            if (!kudroid::kudroid_lookup_guest_module(reinterpret_cast<void*>(pc),
+                                                     pc_mod, sizeof(pc_mod))) {
+                snprintf(pc_mod, sizeof(pc_mod), "0x%llx (host or unknown)",
+                         (unsigned long long)pc);
+            }
+            if (!kudroid::kudroid_lookup_guest_module(reinterpret_cast<void*>(lr),
+                                                     lr_mod, sizeof(lr_mod))) {
+                snprintf(lr_mod, sizeof(lr_mod), "0x%llx (host or unknown)",
+                         (unsigned long long)lr);
+            }
+        }
+
+        // Field names are uniform with the rest of this file on purpose. `sig=` already
+        // means a Java type signature in native-enter/native-exit — 76 lines of one run
+        // used it that way against this line's one — so grepping `sig=` for signals
+        // returns almost entirely the wrong records. `signo=` is unambiguous, and
+        // `thread_id=` is the numeric id every other breadcrumb prints, which is what
+        // makes this line joinable to the watchdog, the stall reports and the thread
+        // samples instead of only readable next to them.
+        int n = snprintf(mark, sizeof(mark),
+                         "fatal-signal signo=%d si_code=%d fault_addr=%p thread=%s "
+                         "thread_id=%llu guest_handler=%d jni_guard=%d",
+                         sig,
+                         info != nullptr ? info->si_code : 0,
+                         info != nullptr ? info->si_addr : nullptr,
+                         tname[0] != '\0' ? tname : "?",
+                         currentThreadIdForCrash(),
+                         kudroid::guest_signal_has_handler(sig) ? 1 : 0,
+                         g_jniGuardActive ? 1 : 0);
+        if (n > 0 && static_cast<size_t>(n) < sizeof(mark) && have_pc) {
+            n += snprintf(mark + n, sizeof(mark) - static_cast<size_t>(n),
+                          " pc=%s lr=%s", pc_mod, lr_mod);
+        }
+        // The guest's own words, last, because it is the only variable-length part and
+        // the fields above must not be pushed out by a long message.
+        if (n > 0 && static_cast<size_t>(n) < sizeof(mark) && g_abortMessage[0] != '\0') {
+            snprintf(mark + n, sizeof(mark) - static_cast<size_t>(n),
+                     " abort_message=\"%.512s\"", g_abortMessage);
+        }
         kudroid_persistent_breadcrumb(mark);
     }
 

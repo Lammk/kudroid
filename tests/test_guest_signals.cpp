@@ -26,6 +26,7 @@
 
 #include <errno.h>
 #include <pthread.h>
+#include <setjmp.h>
 #include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -537,6 +538,109 @@ void test_a_faulting_guest_handler_does_not_recurse() {
           "the handler ran once; its re-entry was declined rather than recursing");
 }
 
+// ─── a handler that never returns ────────────────────────────────────────────
+//
+// il2cpp's SIGABRT handler does not return: it siglongjmps out to its own recovery
+// point. That is normal for a managed runtime and dispatch has to survive it, because
+// the depth guard is incremented on the way in and decremented on the way out — and a
+// handler that jumps out skips the way out entirely.
+//
+// The consequence is not a leak of a counter. It is that the guard stays raised on that
+// thread for the rest of the process: every later signal sees a non-zero depth, decides
+// the guest handler itself faulted, and declines to call it. The guest keeps its handler
+// installed, KuDroid keeps recording it, and nothing calls it ever again.
+//
+// This is what the ULTRAKILL log shows. UnityMain took sig=6 with guest_handler=1, no
+// crash log was written and no "resolved-by-guest-handler" breadcrumb appeared, which is
+// only consistent with the handler not returning. From that point the thread's dispatch
+// is dead.
+
+std::atomic<int> g_jumping_calls{0};
+sigjmp_buf g_handler_jmp;
+
+void jumping_handler(int signum) {
+    (void)signum;
+    g_jumping_calls.fetch_add(1);
+    // Leave without returning, the way a runtime's abort handler does.
+    siglongjmp(g_handler_jmp, 1);
+}
+
+void test_a_handler_that_jumps_out_does_not_disable_later_dispatch() {
+    std::printf("[recursion] a handler that siglongjmps out leaves dispatch usable\n");
+    guest_signal_reset_for_test();
+    g_jumping_calls.store(0);
+
+    GuestSigaction act;
+    std::memset(&act, 0, sizeof(act));
+    act.sa_handler_or_sigaction = reinterpret_cast<void*>(&jumping_handler);
+    Check(guest_sigaction(kGuestSIGABRT, &act, nullptr) == 0, "installed for SIGABRT");
+
+    // First delivery: the handler runs and jumps out instead of returning.
+    if (sigsetjmp(g_handler_jmp, 1) == 0) {
+        guest_signal_dispatch(SIGABRT, nullptr, nullptr);
+        Check(false, "unreachable: the handler was supposed to jump out");
+    }
+    Check(g_jumping_calls.load() == 1, "the handler ran and left without returning");
+
+    // Second delivery, same thread. This is the assertion that matters: the guest's
+    // handler must still be reachable. A depth counter left raised by the jump makes
+    // dispatch decline here, and the guest's handler is never called again.
+    if (sigsetjmp(g_handler_jmp, 1) == 0) {
+        guest_signal_dispatch(SIGABRT, nullptr, nullptr);
+        // Reaching here means dispatch declined to call the handler and returned
+        // normally — the bug. Fall through to the check below, which reports it.
+    }
+    Check(g_jumping_calls.load() == 2,
+          "a second signal on the same thread still reaches the guest handler");
+
+    // And a third, because a guard that is merely off-by-one would pass the second.
+    if (sigsetjmp(g_handler_jmp, 1) == 0) {
+        guest_signal_dispatch(SIGABRT, nullptr, nullptr);
+    }
+    Check(g_jumping_calls.load() == 3, "and a third, so the depth is not merely off by one");
+}
+
+// The recursion guard must still hold AFTER a jump has reset it. Relaxing the guard to
+// survive a non-returning handler is only correct if it still declines the case it exists
+// for, and testing the two in isolation would not show that they hold together.
+std::atomic<int> g_mixed_calls{0};
+sigjmp_buf g_mixed_jmp;
+
+void mixed_handler(int signum) {
+    const int n = g_mixed_calls.fetch_add(1) + 1;
+    if (n == 1) {
+        // First: leave without returning, raising the guard and abandoning its frame.
+        siglongjmp(g_mixed_jmp, 1);
+    }
+    // Second: genuine recursion, with this dispatch frame still live. It must be
+    // declined — otherwise the fault-in-handler case recurses until the stack is gone.
+    guest_signal_dispatch(guest_signal_to_host(signum), nullptr, nullptr);
+}
+
+void test_recursion_is_still_declined_after_a_jump_out() {
+    std::printf("[recursion] the guard survives a jump AND still stops real recursion\n");
+    guest_signal_reset_for_test();
+    g_mixed_calls.store(0);
+
+    GuestSigaction act;
+    std::memset(&act, 0, sizeof(act));
+    act.sa_handler_or_sigaction = reinterpret_cast<void*>(&mixed_handler);
+    Check(guest_sigaction(kGuestSIGABRT, &act, nullptr) == 0, "installed for SIGABRT");
+
+    if (sigsetjmp(g_mixed_jmp, 1) == 0) {
+        guest_signal_dispatch(SIGABRT, nullptr, nullptr);
+        Check(false, "unreachable: the first call jumps out");
+    }
+    Check(g_mixed_calls.load() == 1, "the first handler jumped out, leaving the guard raised");
+
+    // Second delivery: reaches the handler (the jump is forgiven), and the handler's own
+    // re-entry is refused (recursion is not). Exactly two calls: this one and no nested
+    // one. Anything more means the guard stopped working.
+    guest_signal_dispatch(SIGABRT, nullptr, nullptr);
+    Check(g_mixed_calls.load() == 2,
+          "the handler was reached once more and its nested re-entry was declined");
+}
+
 }  // namespace
 
 int main() {
@@ -558,6 +662,8 @@ int main() {
     test_sigaltstack_uses_the_guests_field_order();
     test_sigaltstack_reports_failure();
     test_a_faulting_guest_handler_does_not_recurse();
+    test_a_handler_that_jumps_out_does_not_disable_later_dispatch();
+    test_recursion_is_still_declined_after_a_jump_out();
 
     std::printf("=== %d checks, %d failures ===\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

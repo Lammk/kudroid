@@ -308,6 +308,34 @@ thread_local DispatchScratch t_scratch;
 // reason it must be impossible by construction rather than by care.
 thread_local int t_depth = 0;
 
+// The approximate stack position of the dispatch frame that raised the guard.
+//
+// A plain counter is not enough, because a handler is not required to return. il2cpp's
+// SIGABRT handler siglongjmps out to its own recovery point, and a jump does not unwind:
+// the `--t_depth` at the end of dispatch never runs. The counter then stays raised for
+// the rest of the thread's life, every later signal looks like recursion, and the guest's
+// handler is never called again. On device that is silent — no crash log, no breadcrumb,
+// and a guest that believes its handler is installed.
+//
+// The stack tells the two cases apart. Genuine recursion happens with the previous
+// dispatch frame still live, so it runs DEEPER: on a downward-growing stack its frame
+// address is lower. A jump out unwinds past that frame, so the next dispatch runs at the
+// same depth or shallower — a higher address. Comparing frame positions is therefore an
+// observation about whether the earlier frame still exists, which is exactly the question.
+//
+// arm64 and x86-64 both grow down; there is no upward-growing platform in play here.
+thread_local uintptr_t t_depth_frame = 0;
+
+// A local's address, as a stand-in for "where this frame is".
+//
+// __builtin_frame_address(0) would be the direct way to ask, but at -O3 the frame pointer
+// may be omitted and it is then not required to answer usefully. The address of a local
+// is always in the current frame.
+__attribute__((noinline)) uintptr_t current_frame_position() {
+    volatile char probe = 0;
+    return reinterpret_cast<uintptr_t>(&probe);
+}
+
 }  // namespace
 
 int guest_signal_to_host(int guest_signum) {
@@ -338,8 +366,27 @@ bool guest_signal_dispatch(int host_signum, void* host_siginfo, void* host_ucont
     void* handler = slot.handler.load(std::memory_order_acquire);
     if (!is_real_handler(handler)) return false;
 
-    if (t_depth != 0) return false;  // the guest handler itself faulted
+    // Recursion, or a handler that left without returning?
+    //
+    // The counter alone cannot tell: a handler that siglongjmps out skips the decrement,
+    // so a raised counter means either "a dispatch frame is still live above us" (real
+    // recursion, decline) or "an earlier handler jumped out and the counter was never
+    // put back" (the frame is gone, proceed).
+    //
+    // The frame position answers it. Recursion runs deeper than the frame that raised the
+    // guard — a lower address on a downward-growing stack. A jump out unwound that frame,
+    // so this call runs at the same position or shallower.
+    const uintptr_t frame = current_frame_position();
+    if (t_depth != 0) {
+        if (frame < t_depth_frame) {
+            return false;  // deeper: the guest handler itself faulted
+        }
+        // The frame that raised the guard is gone. Reset rather than decline, or this
+        // thread never dispatches to the guest again.
+        t_depth = 0;
+    }
     ++t_depth;
+    t_depth_frame = frame;
 
     const int guest_signum = host_signal_to_guest(host_signum);
     const int guest_flags = slot.guest_flags.load(std::memory_order_relaxed);
@@ -417,6 +464,7 @@ bool guest_signal_dispatch(int host_signum, void* host_siginfo, void* host_ucont
     }
 
     --t_depth;
+    t_depth_frame = 0;
     return state_changed;
 }
 
@@ -646,6 +694,7 @@ void guest_signal_reset_for_test() {
         g_slots[i].restorer.store(nullptr, std::memory_order_relaxed);
     }
     t_depth = 0;
+    t_depth_frame = 0;
 }
 
 }  // namespace kudroid
