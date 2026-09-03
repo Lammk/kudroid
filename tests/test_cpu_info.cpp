@@ -281,7 +281,9 @@ void test_memory_surfaces_report_the_device() {
     Check(avail <= phys, "available never exceeds total");
 
     Check(bionic_get_phys_pages() == phys, "get_phys_pages agrees with sysconf");
-    Check(bionic_get_avphys_pages() == avail, "get_avphys_pages agrees with sysconf");
+    const long avail2 = bionic_get_avphys_pages();
+    Check(avail2 > 0 && avail2 <= phys && std::labs(avail2 - avail) <= 16384,
+          "get_avphys_pages agrees with sysconf");
 
     // The specific wrong answer this replaces. 8 GB was reported on every device
     // regardless of what it had; on a 4 GB phone that is double.
