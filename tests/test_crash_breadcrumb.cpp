@@ -191,7 +191,11 @@ void test_pc_and_lr_are_arm64_only_and_this_host_is_not() {
 void raise_a_real_signal_on_a_background_thread() {
     std::atomic<bool> raised{false};
     std::thread([&raised] {
+#ifdef __APPLE__
+        pthread_setname_np("TestFaultThread");
+#else
         pthread_setname_np(pthread_self(), "TestFaultThread");
+#endif
         raised = true;
         // SIGABRT, because that is the signal the captured crash used and the one whose
         // reporting path a non-returning guest handler skips.
