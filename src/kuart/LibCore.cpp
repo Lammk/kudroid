@@ -31,6 +31,7 @@
 #include "kudroid/kuart/VmLock.h"
 #include "kudroid/platform/MemoryInfo.h"
 #include "kudroid/platform/CpuInfo.h"
+#include "kudroid/platform/AudioShim.h"
 #include "kudroid/platform/JavaCanvasRenderer.h"
 
 namespace kudroid {
@@ -2225,6 +2226,131 @@ bool Invoke_keep_screen_on(Interpreter* /*interp*/, const char* name, const DexV
     return false;
 }
 
+// android.media.AudioTrack -> the host audio queue.
+//
+// This is the JAVA audio path, and it is the one that matters for Unity: FMOD drives
+// AudioTrack from Java rather than calling OpenSL ES or AAudio from native code. The
+// framework stub had a single empty constructor, so every method was auto-stubbed to
+// return 0 and FMOD read that as a device it could not open:
+//
+//     [KuART][MISSING-METHOD] Auto-stubbing: AudioTrack->getMinBufferSize(III)I
+//     [E/FMOD] AudioTrack failed to initialize (status 0)
+//
+// It then retried forever — the thread sampler caught the loop spinning in malloc with lr
+// in DexClassLinker::FindClass, CPU climbing across five samples ten seconds apart.
+// ULTRAKILL reached Vulkan and its swapchain and never produced a frame.
+//
+// Every method here forwards to AudioShim, which already owns a real CoreAudio queue on
+// iOS. Same output, same callback, same frame counter as the other two audio APIs.
+bool Invoke_android_media_AudioTrack(Interpreter* interp, const char* name,
+                                     const DexValue* args, size_t num_args,
+                                     DexValue* result) {
+    // Static: (sampleRate, channelCount, encoding). No receiver, so args start at 0.
+    if (std::strcmp(name, "nativeGetMinBufferSize") == 0) {
+        if (num_args < 3) return false;
+        *result = DexValue::Int(bionic_kudroid_audiotrack_min_buffer_size(
+            args[0].i, args[1].i, args[2].i));
+        return true;
+    }
+    if (std::strcmp(name, "nativeCreate") == 0) {
+        if (num_args < 4) return false;
+        *result = DexValue::Long(bionic_kudroid_audiotrack_create(
+            args[0].i, args[1].i, args[2].i, args[3].i));
+        return true;
+    }
+
+    // The rest take the handle first. A zero handle is a released or never-opened track
+    // and the shim answers ERROR_INVALID_OPERATION for it rather than dereferencing.
+    if (std::strcmp(name, "nativeWrite") == 0) {
+        // (track, byte[] data, offsetInBytes, sizeInBytes)
+        if (num_args < 4) return false;
+        auto* data = reinterpret_cast<DexArray*>(args[1].l);
+        const int32_t offset = args[2].i;
+        const int32_t size = args[3].i;
+        if (data == nullptr) {
+            *result = DexValue::Int(-3);  // ERROR_INVALID_OPERATION
+            return true;
+        }
+        // Bounds are re-checked here even though AudioTrack.java checks them: the Java
+        // side can be bypassed by a guest calling the native method through reflection,
+        // and this reads raw memory.
+        if (offset < 0 || size < 0 || offset > data->length ||
+            size > data->length - offset) {
+            *result = DexValue::Int(-2);  // ERROR_BAD_VALUE
+            return true;
+        }
+        *result = DexValue::Int(bionic_kudroid_audiotrack_write(
+            args[0].j, data->Data() + offset, size));
+        return true;
+    }
+    if (std::strcmp(name, "nativeWriteShorts") == 0) {
+        // (track, short[] data, offsetInShorts, sizeInShorts) — offsets are in ELEMENTS,
+        // and PCM 16-bit is what FMOD writes, so this is the hot path.
+        if (num_args < 4) return false;
+        auto* data = reinterpret_cast<DexArray*>(args[1].l);
+        const int32_t offset = args[2].i;
+        const int32_t count = args[3].i;
+        if (data == nullptr) {
+            *result = DexValue::Int(-3);
+            return true;
+        }
+        if (offset < 0 || count < 0 || offset > data->length ||
+            count > data->length - offset) {
+            *result = DexValue::Int(-2);
+            return true;
+        }
+        const int32_t written = bionic_kudroid_audiotrack_write(
+            args[0].j, data->Data() + static_cast<size_t>(offset) * sizeof(int16_t),
+            count * static_cast<int32_t>(sizeof(int16_t)));
+        // Back to elements, because that is what the Java caller passed and expects.
+        *result = DexValue::Int(written < 0 ? written
+                                            : written / static_cast<int32_t>(sizeof(int16_t)));
+        return true;
+    }
+    if (std::strcmp(name, "nativePlay") == 0) {
+        if (num_args < 1) return false;
+        *result = DexValue::Int(bionic_kudroid_audiotrack_play(args[0].j));
+        return true;
+    }
+    if (std::strcmp(name, "nativePause") == 0) {
+        if (num_args < 1) return false;
+        *result = DexValue::Int(bionic_kudroid_audiotrack_pause(args[0].j));
+        return true;
+    }
+    if (std::strcmp(name, "nativeStop") == 0) {
+        if (num_args < 1) return false;
+        *result = DexValue::Int(bionic_kudroid_audiotrack_stop(args[0].j));
+        return true;
+    }
+    if (std::strcmp(name, "nativeFlush") == 0) {
+        if (num_args < 1) return false;
+        *result = DexValue::Int(bionic_kudroid_audiotrack_flush(args[0].j));
+        return true;
+    }
+    if (std::strcmp(name, "nativeRelease") == 0) {
+        if (num_args < 1) return false;
+        *result = DexValue::Int(bionic_kudroid_audiotrack_release(args[0].j));
+        return true;
+    }
+    if (std::strcmp(name, "nativeSetVolume") == 0) {
+        if (num_args < 2) return false;
+        *result = DexValue::Int(bionic_kudroid_audiotrack_set_volume(args[0].j, args[1].f));
+        return true;
+    }
+    if (std::strcmp(name, "nativeGetPlaybackHeadPosition") == 0) {
+        if (num_args < 1) return false;
+        *result = DexValue::Int(bionic_kudroid_audiotrack_head_position(args[0].j));
+        return true;
+    }
+    if (std::strcmp(name, "nativeGetLatencyFrames") == 0) {
+        if (num_args < 1) return false;
+        *result = DexValue::Int(bionic_kudroid_audiotrack_latency_frames(args[0].j));
+        return true;
+    }
+    (void)interp;
+    return false;
+}
+
 // InputMethodManager -> host keyboard.
 //
 // KuDroid ships no keyboard, so the guest's request is forwarded to whatever the host
@@ -2627,6 +2753,11 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
     if (std::strcmp(desc, "Landroid/graphics/Canvas;") == 0) return Invoke_android_graphics_Canvas(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Landroid/app/Activity;") == 0) return Invoke_android_app_Activity(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Landroid/os/Vibrator;") == 0) return Invoke_android_os_Vibrator(interp, name, args, num_args, result);
+    // AudioTrack is the Java audio path FMOD uses. Without it every method was
+    // auto-stubbed to 0 and FMOD retried "AudioTrack failed to initialize" forever.
+    if (std::strcmp(desc, "Landroid/media/AudioTrack;") == 0) {
+        return Invoke_android_media_AudioTrack(interp, name, args, num_args, result);
+    }
     // Memory figures come from the host device rather than constants: apps size
     // caches from them, so a wrong value either gets the process killed or makes it
     // run degraded.
@@ -2661,6 +2792,7 @@ bool LibCoreHasMethod(const DexMethod* method) {
             std::strcmp(desc, "Landroid/app/ActivityManager;") == 0 ||
             std::strcmp(desc, "Landroid/os/Debug;") == 0 ||
             std::strcmp(desc, "Landroid/os/Vibrator;") == 0 ||
+            std::strcmp(desc, "Landroid/media/AudioTrack;") == 0 ||
             std::strcmp(desc, "Landroid/view/Window;") == 0 ||
             std::strcmp(desc, "Landroid/view/View;") == 0 ||
             std::strcmp(desc, "Landroid/view/inputmethod/InputMethodManager;") == 0 ||

@@ -491,7 +491,7 @@ static void appendTestHeader(std::string& log, const char* test, const char* pat
 // the installed build version.
 extern "C" const char* kudroid_build_stamp(void) {
     static const char kStamp[] =
-        "kudroid_core v0.8.0 " __DATE__ " " __TIME__ " "
+        "kudroid_core v0.9.5 " __DATE__ " " __TIME__ " "
 #ifdef KUDROID_GIT_HASH
         KUDROID_GIT_HASH
 #else

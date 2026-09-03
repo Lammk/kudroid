@@ -833,9 +833,61 @@ static std::string prettifyAppName(const std::string& raw) {
 
 const std::string& APKExtractor::lastError() { return gLastError; }
 
+// Scan all existing .so and .dex files in targetDirectory before extraction.
+static std::set<std::filesystem::path> scan_code_files(const std::string& targetDirectory) {
+    std::set<std::filesystem::path> codeFiles;
+    std::error_code ec;
+    const std::filesystem::path root(targetDirectory);
+    if (!std::filesystem::exists(root, ec) || !std::filesystem::is_directory(root, ec)) {
+        return codeFiles;
+    }
+    for (const auto& it : std::filesystem::recursive_directory_iterator(root, std::filesystem::directory_options::skip_permission_denied, ec)) {
+        if (ec) break;
+        if (it.is_regular_file(ec)) {
+            const std::string name = it.path().filename().string();
+            if (endsWithCi(name, ".so") || endsWithCi(name, ".dex")) {
+                codeFiles.insert(it.path().lexically_normal());
+            }
+        }
+    }
+    return codeFiles;
+}
+
+// Remove empty directories recursively (e.g. emptied lib/<abi> folders).
+static void remove_empty_dirs(const std::filesystem::path& dir) {
+    std::error_code ec;
+    if (!std::filesystem::exists(dir, ec) || !std::filesystem::is_directory(dir, ec)) return;
+    for (const auto& it : std::filesystem::directory_iterator(dir, std::filesystem::directory_options::skip_permission_denied, ec)) {
+        if (ec) break;
+        if (it.is_directory(ec)) {
+            remove_empty_dirs(it.path());
+            std::filesystem::remove(it.path(), ec);
+        }
+    }
+}
+
+// When re-installing an APK or bundle over an existing app directory, delete any old .so
+// or .dex files that are no longer part of the new APK release.
+static void purge_orphaned_code_files(const std::string& targetDirectory,
+                                      const std::set<std::filesystem::path>& oldCodeFiles,
+                                      const std::set<std::filesystem::path>& newCodeFiles) {
+    for (const auto& oldPath : oldCodeFiles) {
+        if (newCodeFiles.find(oldPath) == newCodeFiles.end()) {
+            std::error_code ec;
+            std::filesystem::remove(oldPath, ec);
+            if (!ec) {
+                apkLog("  -> Removed orphaned code file: " + oldPath.string());
+            }
+        }
+    }
+    const auto libDir = std::filesystem::path(targetDirectory) / "lib";
+    remove_empty_dirs(libDir);
+}
+
 // Generic body for extract_apk / extract_split.
 static bool extract_apk_impl(const std::string& apkPath, const std::string& targetDirectory,
-                             bool requireEntries, bool extractManifest) {
+                             bool requireEntries, bool extractManifest,
+                             std::set<std::filesystem::path>* outExtractedCodeFiles = nullptr) {
     gLastError.clear();
     std::ifstream apk(apkPath, std::ios::binary | std::ios::ate);
     if (!apk) { gLastError = "Cannot open APK: " + apkPath; apkLog(gLastError); return false; }
@@ -928,6 +980,10 @@ static bool extract_apk_impl(const std::string& apkPath, const std::string& targ
         }
         ::chmod(destination.c_str(), 0755);
         apkLog("  -> Saved to " + destination.string() + " (" + std::to_string(entryInfo.uncompressedSize) + " bytes)");
+        if (outExtractedCodeFiles != nullptr &&
+            (endsWithCi(entry, ".so") || endsWithCi(entry, ".dex"))) {
+            outExtractedCodeFiles->insert(destination.lexically_normal());
+        }
     }
 
     if (!found) {
@@ -1040,11 +1096,17 @@ static bool extract_apk_impl(const std::string& apkPath, const std::string& targ
 }
 
 bool APKExtractor::extract_apk(const std::string& apkPath, const std::string& targetDirectory) {
-    return extract_apk_impl(apkPath, targetDirectory, /*requireEntries=*/true, /*extractManifest=*/true);
+    const auto oldCodeFiles = scan_code_files(targetDirectory);
+    std::set<std::filesystem::path> newCodeFiles;
+    const bool ok = extract_apk_impl(apkPath, targetDirectory, /*requireEntries=*/true, /*extractManifest=*/true, &newCodeFiles);
+    if (ok) {
+        purge_orphaned_code_files(targetDirectory, oldCodeFiles, newCodeFiles);
+    }
+    return ok;
 }
 
 bool APKExtractor::extract_split(const std::string& apkPath, const std::string& targetDirectory) {
-    return extract_apk_impl(apkPath, targetDirectory, /*requireEntries=*/false, /*extractManifest=*/false);
+    return extract_apk_impl(apkPath, targetDirectory, /*requireEntries=*/false, /*extractManifest=*/false, nullptr);
 }
 
 bool APKExtractor::is_bundle_container(const std::string& path) {
@@ -1131,6 +1193,9 @@ bool APKExtractor::extract_bundle(const std::string& containerPath, const std::s
     std::filesystem::create_directories(splitDir, error);
     if (error) { gLastError = "Cannot create split temp dir: " + error.message(); return false; }
 
+    const auto oldCodeFiles = scan_code_files(targetDirectory);
+    std::set<std::filesystem::path> newCodeFiles;
+
     bool ok = true;
     std::size_t index = 0;
     for (const auto& e : apks) {
@@ -1144,8 +1209,8 @@ bool APKExtractor::extract_bundle(const std::string& containerPath, const std::s
         }
         apkLog("Processing split: " + e.name);
         const bool splitOk = isBaseApk(e)
-            ? extract_apk(tmpApk, targetDirectory)
-            : extract_split(tmpApk, targetDirectory);
+            ? extract_apk_impl(tmpApk, targetDirectory, /*requireEntries=*/true, /*extractManifest=*/true, &newCodeFiles)
+            : extract_apk_impl(tmpApk, targetDirectory, /*requireEntries=*/false, /*extractManifest=*/false, &newCodeFiles);
         if (!splitOk) {
             gLastError = "Split failed (" + e.name + "): " + lastError();
             apkLog(gLastError);
@@ -1203,6 +1268,7 @@ bool APKExtractor::extract_bundle(const std::string& containerPath, const std::s
     // Clean up temp (even if there are errors).
     std::filesystem::remove_all(splitDir, error);
     if (!ok) return false;
+    purge_orphaned_code_files(targetDirectory, oldCodeFiles, newCodeFiles);
     apkLog("Bundle merged into " + targetDirectory);
     return true;
 }

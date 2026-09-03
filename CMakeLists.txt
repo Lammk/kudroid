@@ -396,6 +396,7 @@ else()
         test_kuart_jit
         test_kuart_proxy
         test_kuart_default_methods
+        test_kuart_audiotrack
     )
         if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/${kuart_test}.cpp")
             add_executable(${kuart_test} kuart-tests/${kuart_test}.cpp)

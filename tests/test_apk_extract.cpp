@@ -207,6 +207,36 @@ int main() {
               "a split does not leave a base.apk behind");
     }
 
+    // ── re-installing an APK must delete orphaned .so and .dex from old versions ──
+    {
+        // Seed the app directory with an orphaned .so and an orphaned .dex from an older version
+        const auto orphanSo = appDir / "lib/arm64-v8a/libold_orphan.so";
+        const auto orphanDex = appDir / "classes99.dex";
+        std::filesystem::create_directories(orphanSo.parent_path(), ec);
+        {
+            std::ofstream f(orphanSo, std::ios::binary);
+            f << "old-native-code";
+        }
+        {
+            std::ofstream f(orphanDex, std::ios::binary);
+            f << "old-dex-bytecode";
+        }
+        Check(std::filesystem::exists(orphanSo), "created orphan .so before re-install");
+        Check(std::filesystem::exists(orphanDex), "created orphan .dex before re-install");
+
+        // Now re-install the APK (which does NOT have libold_orphan.so or classes99.dex)
+        const bool ok = kudroid::APKExtractor::extract_apk(apkPath.string(), appDir.string());
+        Check(ok, "re-installing APK succeeded");
+
+        // Verify orphaned code files were purged
+        Check(!std::filesystem::exists(orphanSo), "orphaned .so from old app was purged on update");
+        Check(!std::filesystem::exists(orphanDex), "orphaned .dex from old app was purged on update");
+
+        // Verify current APK's code files are still present
+        Check(std::filesystem::exists(appDir / "classes.dex"), "current classes.dex is preserved");
+        Check(std::filesystem::exists(appDir / "assets/bin/Data/unity_app_guid"), "current assets are preserved");
+    }
+
     std::filesystem::remove_all(root, ec);
 
     std::printf("=== %s (%d error) ===\n", g_failures == 0 ? "PASSED" : "FAILED", g_failures);
