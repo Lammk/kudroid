@@ -80,6 +80,7 @@ add_library(kudroid_core STATIC
     src/kuart/VmLock.cpp
     src/framework/PermissionManager.cpp
     src/debug/Log.cpp
+    src/debug/FrameWalk.cpp
     src/debug/ThreadSampler.cpp
     src/NativeCallTelemetry.cpp
 )
@@ -255,6 +256,20 @@ else()
         )
         target_link_libraries(test_guest_signals PRIVATE kudroid_core)
         target_include_directories(test_guest_signals PRIVATE include)
+    endif()
+
+    # Frame-chain walking, which must never itself be the crash. Four hand-written walks
+    # existed and three validated a frame pointer with `fp > 0x1000 && fp < 0x7fffffffffff`
+    # — a test that excludes null and nothing else. One of them killed a device run:
+    # log_guard_acquire_diag read [fp+56] at fp=0x100000000018 and faulted at
+    # 0x100000000050, on the guest's main thread, inside a diagnostic. These tests pin the
+    # shared implementation using that exact address.
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_frame_walk.cpp")
+        add_executable(test_frame_walk
+            tests/test_frame_walk.cpp
+        )
+        target_link_libraries(test_frame_walk PRIVATE kudroid_core)
+        target_include_directories(test_frame_walk PRIVATE include)
     endif()
 
     # The fatal-signal breadcrumb, driven by a real signal through the real crash handler.

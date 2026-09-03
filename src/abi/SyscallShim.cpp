@@ -3,6 +3,7 @@
 #include "kudroid/abi/GuestVarargs.h"
 #include "kudroid/abi/BlockingWaitRegistry.h"
 #include "kudroid/abi/GuestSignals.h"
+#include "kudroid/debug/FrameWalk.h"
 #include "kudroid/elf_loader.hpp"
 #include "kudroid/DeviceProfile.h"
 #include "kudroid/platform/BundledFramework.h"
@@ -1540,21 +1541,48 @@ static void log_guard_acquire_diag(long tid, uintptr_t guard) {
     // [fp+56] == guard — nhng compiler cng save x19 (== guard!) vo frame
     // diag/bionic_syscall offset tu → gi MATCH CUI (su nht = cp lu
     // i nht = guard_acquire), no/not break.
+    //
+    // Through FrameWalker, and that is not a refactor — this loop is what crashed the
+    // last run. It tested `fp > 0x1000 && fp < 0x7fffffffffff`, which excludes null and
+    // nothing else, then read [fp+56] unchecked:
+    //
+    //     signal = 11  si_code = 2  fault_addr = 0x100000000050
+    //     inst = 0xf9401d49            -> LDR x9, [x10, #56]
+    //     x10  = 0x100000000018        -> +56 == the fault address
+    //     stack = [0x16b718000, 0x16b79b000)
+    //     pc_sym: log_guard_acquire_diag+0x250
+    //
+    // `fp = *fp` had followed a slot that was not a saved frame pointer, landed far
+    // outside the stack, and passed the plausibility test on the way. The guest's main
+    // thread died inside a diagnostic. FrameWalker reads [fp+56] only when the whole word
+    // is inside this thread's real stack, and refuses a chain that does not climb.
     uintptr_t gaCaller = 0;
-    uintptr_t fp = x29v;
-    for (int i = 0; i < 6 && fp > 0x1000 && fp < 0x7fffffffffffULL; ++i) {
-        const uintptr_t candGuard = *reinterpret_cast<const uintptr_t*>(fp + 56);
-        if (candGuard == guard) {
-            gaCaller = *reinterpret_cast<const uintptr_t*>(fp + 8);
+    kudroid::FrameWalker walker(x29v, kudroid::cached_thread_stack_bounds());
+    for (int i = 0; i < 6 && walker.valid(); ++i) {
+        uintptr_t candGuard = 0;
+        if (walker.slot(56, &candGuard) && candGuard == guard) {
+            uintptr_t caller = 0;
+            if (walker.return_address(&caller)) gaCaller = caller;
         }
-        fp = *reinterpret_cast<const uintptr_t*>(fp); // next frame up
+        if (!walker.next()) break;
     }
     char guardMod[256] = {0}, callerMod[256] = {0};
     kudroid_lookup_guest_module(reinterpret_cast<void*>(guard), guardMod, sizeof(guardMod));
     kudroid_lookup_guest_module(reinterpret_cast<void*>(gaCaller), callerMod, sizeof(callerMod));
     unsigned b0 = 0, b1 = 0, storedTid = 0, inProgress = 0, sameTid = 0;
-    // Guard nm trong guest .bss (0x100000000+) — deref an ton theo di.
-    if (guard > 0x100000000ULL && guard < 0x7fffffffffffULL) {
+    // The guard lives in a guest module's .bss, so ask the module registry rather than
+    // guessing from the address range.
+    //
+    // `guard > 0x100000000 && guard < 0x7fffffffffff` was the same kind of plausibility
+    // test that crashed the frame walk directly above: it admits every address in a 127 TB
+    // window, including the one this function faulted on. `guard` arrives from x19 at
+    // syscall entry and is only meaningful when the caller really was
+    // __cxa_guard_acquire — for every other gettid it is whatever that function had in
+    // x19, which is exactly the situation this must not dereference.
+    //
+    // kudroid_lookup_guest_module already ran above and answers the real question: is this
+    // inside a module KuDroid mapped? A non-empty guardMod means yes.
+    if (guardMod[0] != '\0') {
         const volatile uint8_t* g = reinterpret_cast<const volatile uint8_t*>(guard);
         b0 = g[0];
         b1 = g[1];

@@ -11,6 +11,7 @@
 #include "kudroid/platform/JavaCanvasRenderer.h"
 #include "kudroid/NativeCallTelemetry.h"
 #include "kudroid/abi/GuestSignals.h"
+#include "kudroid/debug/FrameWalk.h"
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
@@ -615,24 +616,32 @@ static std::string describeJniGuardFault(const std::string& library, int guardRc
 
 #if defined(__aarch64__) || defined(__arm64__)
     // Walk the frame chain so the caller inside the library is named, not just the
-    // faulting instruction. Range-checked at every step: a bad fp must not turn a
-    // survivable fault into a real crash.
+    // faulting instruction.
+    //
+    // Through FrameWalker, with this thread's real stack bounds. The previous version
+    // accepted any fp in [0x1000, 0x7fffffffffff] and followed `fp = *fp` — the same
+    // shape that crashed the guard diagnostic on the guest's main thread with
+    // fault_addr=0x100000000050, an address that passes that test and is nowhere near a
+    // stack. A diagnostic must not be able to do that.
+    //
+    // The bounds are the CALLING thread's, which is correct here: this runs after the
+    // guard longjmp'd back, on the thread that took the fault.
     out += "--- fp chain ---\n";
     {
-        uint64_t fp = f.fp;
-        for (int depth = 0; depth < 24; ++depth) {
-            if (!(fp > 0x1000 && fp < 0x7fffffffffffULL)) break;
-            const uint64_t* p = reinterpret_cast<const uint64_t*>(fp);
-            const uint64_t savedFp = p[0];
-            const uint64_t savedLr = p[1];
-            if (savedLr == 0) break;
+        kudroid::FrameWalker walker(static_cast<uintptr_t>(f.fp),
+                                    kudroid::query_thread_stack_bounds());
+        if (!walker.valid()) {
+            out += "  (no readable frame chain: fp is outside this thread's stack)\n";
+        }
+        for (int depth = 0; depth < 24 && walker.valid(); ++depth) {
+            uintptr_t savedLr = 0;
+            if (!walker.return_address(&savedLr)) break;
             char sym[512];
-            symbolicateAddr(static_cast<uintptr_t>(savedLr), sym, sizeof(sym));
+            symbolicateAddr(savedLr, sym, sizeof(sym));
             snprintf(line, sizeof(line), "  #%02d lr=0x%llx  %s\n", depth,
                      (unsigned long long)savedLr, sym);
             out += line;
-            if (!(savedFp > fp && savedFp < 0x7fffffffffffULL)) break;
-            fp = savedFp;
+            if (!walker.next()) break;
         }
     }
 #endif
@@ -793,36 +802,26 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
         // Walking finds the frame that matters. Every step is bounded by this thread's
         // REAL stack — queried through pthread_get_stackaddr_np/get_stacksize_np rather
         // than a plausibility test — because a diagnostic that faults takes down the
-        // process it was supposed to explain. The frame chain grows towards higher
-        // addresses, and requiring that strictly makes a cycle impossible rather than
-        // merely bounded: at -O3 the frame pointer may be omitted and the word where a
-        // saved fp would be is then whatever was in that slot.
+        // process it was supposed to explain. That is not hypothetical: the run after this
+        // one was added died inside the guard diagnostic, which still used a plausibility
+        // test, at fault_addr=0x100000000050. FrameWalker is the shared implementation
+        // both now use.
         char guest_frame[256] = {0};
         int guest_frame_depth = -1;
 #if (defined(__aarch64__) || defined(__arm64__)) && defined(__APPLE__)
         if (ucontext != nullptr) {
             const ucontext_t* uc = static_cast<const ucontext_t*>(ucontext);
-            char* const stack_top =
-                static_cast<char*>(pthread_get_stackaddr_np(pthread_self()));
-            const size_t stack_size = pthread_get_stacksize_np(pthread_self());
-            const uintptr_t low = reinterpret_cast<uintptr_t>(stack_top - stack_size);
-            const uintptr_t high = reinterpret_cast<uintptr_t>(stack_top);
-
-            uintptr_t frame = static_cast<uintptr_t>(uc->uc_mcontext->__ss.__fp);
-            for (int depth = 0; depth < 24 && stack_size != 0; ++depth) {
-                if ((frame & 0x7) != 0) break;
-                if (frame < low || frame + 2 * sizeof(void*) > high) break;
-                const uintptr_t ret =
-                    *reinterpret_cast<const uintptr_t*>(frame + sizeof(void*));
-                if (ret == 0) break;
+            kudroid::FrameWalker walker(static_cast<uintptr_t>(uc->uc_mcontext->__ss.__fp),
+                                        kudroid::query_thread_stack_bounds());
+            for (int depth = 0; depth < 24 && walker.valid(); ++depth) {
+                uintptr_t ret = 0;
+                if (!walker.return_address(&ret)) break;
                 if (kudroid::kudroid_lookup_guest_module(reinterpret_cast<void*>(ret),
                                                         guest_frame, sizeof(guest_frame))) {
-                    guest_frame_depth = depth;
+                    guest_frame_depth = walker.depth();
                     break;
                 }
-                const uintptr_t next = *reinterpret_cast<const uintptr_t*>(frame);
-                if (next <= frame) break;
-                frame = next;
+                if (!walker.next()) break;
             }
         }
 #endif
@@ -933,12 +932,22 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
             f.sp = uc->uc_mcontext->__ss.__sp;
             f.fp = uc->uc_mcontext->__ss.__fp;
             for (int i = 0; i < 9; ++i) f.x[i] = uc->uc_mcontext->__ss.__x[i];
-            // Only read the stack when sp looks like a mapped address: a
-            // double fault inside the handler would take down the process for
-            // real, which is exactly what the guard exists to avoid.
-            if (f.sp > 0x1000 && f.sp < 0x7fffffffffffULL) {
-                const uint64_t* stack = reinterpret_cast<const uint64_t*>(f.sp);
-                for (int i = 0; i < 32; ++i) f.stack[i] = stack[i];
+            // Copy the stack words only when sp is genuinely inside this thread's stack.
+            //
+            // This used to test `sp > 0x1000 && sp < 0x7fffffffffff`, which excludes null
+            // and nothing else — the same plausibility test that let the guard diagnostic
+            // dereference 0x100000000018 and turned a diagnostic into the crash. Here the
+            // consequence would be worse still: a double fault inside the signal handler,
+            // which is precisely what the JNI_OnLoad guard exists to avoid.
+            {
+                const kudroid::StackBounds bounds = kudroid::query_thread_stack_bounds();
+                const uintptr_t sp = static_cast<uintptr_t>(f.sp);
+                const size_t want = sizeof(f.stack);
+                if (bounds.valid && (sp & 0x7) == 0 && sp >= bounds.low &&
+                    sp + want <= bounds.high) {
+                    const uint64_t* stack = reinterpret_cast<const uint64_t*>(sp);
+                    for (int i = 0; i < 32; ++i) f.stack[i] = stack[i];
+                }
             }
             f.have_regs = true;
         }
@@ -1112,10 +1121,35 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
                 crashWriteLine(fd, sigline, m, sizeof(sigline));
 
                 // Raw stack dump from faulting SP to recover caller frames and register state.
+                //
+                // Bounded by the thread's real stack, and clamped rather than skipped: a
+                // fault near the top of the stack still has useful words below sp, and
+                // refusing the whole dump would lose them. This read had NO check at all —
+                // 1024 bytes from whatever sp happened to be — which in a crash handler
+                // means a double fault that destroys the report for the original crash.
                 (void)!write(fd, "\n--- stack from sp ---\n", 22);
                 {
-                    const uint64_t* stack = reinterpret_cast<const uint64_t*>(sp);
-                    for (int i = 0; i < 128; i += 4) {
+                    const kudroid::StackBounds bounds = kudroid::query_thread_stack_bounds();
+                    const uintptr_t spv = static_cast<uintptr_t>(sp);
+                    int words = 0;
+                    if (bounds.valid && (spv & 0x7) == 0 && spv >= bounds.low &&
+                        spv < bounds.high) {
+                        const uintptr_t available = bounds.high - spv;
+                        words = static_cast<int>(available / sizeof(uint64_t));
+                        if (words > 128) words = 128;
+                        words &= ~3;  // whole rows of four, which is how it is printed
+                    }
+                    if (words == 0) {
+                        int n0 = snprintf(sigline, sizeof(sigline),
+                                          "sp=0x%llx is outside this thread's stack "
+                                          "[0x%llx, 0x%llx) — not dumped\n",
+                                          (unsigned long long)spv,
+                                          (unsigned long long)bounds.low,
+                                          (unsigned long long)bounds.high);
+                        crashWriteLine(fd, sigline, n0, sizeof(sigline));
+                    }
+                    const uint64_t* stack = reinterpret_cast<const uint64_t*>(spv);
+                    for (int i = 0; i < words; i += 4) {
                         int n = snprintf(sigline, sizeof(sigline),
                             "sp%+04d: %016llx  %016llx  %016llx  %016llx\n",
                             i * 8,
@@ -1129,42 +1163,61 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
 
                 // Walk frame chain from faulting FP (ucontext) to locate __cxa_guard_acquire frame:
                 // [fp+8] = saved LR (caller), [fp+56] = x19 = guard pointer.
-                // Validate frame pointers within bounded ranges to prevent secondary faults.
                 // slot56 (guard) — ch dump raw, decode offline.
+                //
+                // Through FrameWalker, bounded by this thread's real stack. The previous
+                // version read p[0], p[1] and p[7] straight off any fp that passed
+                // `> 0x1000 && < 0x7fffffffffff`, which is the same unchecked read that
+                // crashed the guard diagnostic — and here it would fault INSIDE the crash
+                // handler, losing the report for the original fault entirely.
+                //
+                // Bounds come from the faulting thread, which is this one: the handler
+                // runs on the thread that took the signal.
                 (void)!write(fd, "\n--- fp chain ---\n", 17);
                 {
-                    uint64_t f = fp;
-                    for (int i = 0; i < 32; ++i) {
-                        if (!(f > 0x1000 && f < 0x7fffffffffffULL)) break;
-                        const uint64_t* p = reinterpret_cast<const uint64_t*>(f);
-                        const uint64_t savedFp = p[0];
-                        const uint64_t savedLr = p[1];
-                        const uint64_t slot56  = p[7]; // [fp+56]
+                    const kudroid::StackBounds bounds = kudroid::query_thread_stack_bounds();
+                    kudroid::FrameWalker walker(static_cast<uintptr_t>(fp), bounds);
+                    if (!walker.valid()) {
+                        int n0 = snprintf(sigline, sizeof(sigline),
+                                          "fp=0x%llx is outside this thread's stack "
+                                          "[0x%llx, 0x%llx) — no chain to walk\n",
+                                          (unsigned long long)fp,
+                                          (unsigned long long)bounds.low,
+                                          (unsigned long long)bounds.high);
+                        crashWriteLine(fd, sigline, n0, sizeof(sigline));
+                    }
+                    for (int i = 0; i < 32 && walker.valid(); ++i) {
+                        uintptr_t savedLr = 0;
+                        const bool haveLr = walker.return_address(&savedLr);
+                        uintptr_t slot56 = 0;
+                        const bool haveSlot = walker.slot(56, &slot56);
+
                         char lrMod[256] = {0};
                         const bool inGuest =
-                            kudroid::kudroid_lookup_guest_module(
-                                reinterpret_cast<void*>(savedLr), lrMod, sizeof(lrMod));
+                            haveLr && kudroid::kudroid_lookup_guest_module(
+                                          reinterpret_cast<void*>(savedLr), lrMod, sizeof(lrMod));
                         // Nu no/not thuc guest ELF th y l code HOST — gm c
                         // Avian (link tnh vo KuDroidShell). before y ch in raw
                         // "lr=0x104e62934?" nn mi abort ca Avian u v danh v
                         // phi on. symbolicateAddr c sn symbol table (function static
                         // nh crashHandler vn ra tn) → in lun tn function y 
                         // l do abort hin ra ngay trong crash log, no/not cn atos.
-                        char lrSym[512];
-                        if (!inGuest) {
-                            symbolicateAddr((uintptr_t)savedLr, lrSym, sizeof(lrSym));
+                        char lrSym[512] = {0};
+                        if (haveLr && !inGuest) {
+                            symbolicateAddr(savedLr, lrSym, sizeof(lrSym));
                         }
                         const bool guardLike =
-                            slot56 > 0x100000000ULL && slot56 < 0x7fffffffffffULL;
+                            haveSlot && slot56 > 0x100000000ULL && slot56 < 0x7fffffffffffULL;
                         int n2 = snprintf(sigline, sizeof(sigline),
                             "fp%02d: f=0x%llx lr=0x%llx %s slot56=0x%llx%s\n",
-                            i, (unsigned long long)f, (unsigned long long)savedLr,
-                            inGuest ? lrMod : lrSym, (unsigned long long)slot56,
-                            guardLike ? " <-- guard?" : "");
+                            i, (unsigned long long)walker.fp(),
+                            (unsigned long long)savedLr,
+                            haveLr ? (inGuest ? lrMod : lrSym) : "(no return address)",
+                            (unsigned long long)slot56,
+                            guardLike ? " <-- guard?" : (haveSlot ? "" : " (slot56 out of bounds)"));
                         crashWriteLine(fd, sigline, n2, sizeof(sigline));
-                        // Chain hp l: frame k cao hn, delta ≤ 64KB.
-                        if (!(savedFp > f && savedFp - f < 0x10000)) break;
-                        f = savedFp;
+                        if (!haveLr) break;
+                        if (!walker.next()) break;
                     }
                 }
 #elif defined(__linux__)
