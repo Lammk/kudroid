@@ -105,7 +105,20 @@ public class Display {
     }
 
     public static class Mode {
-        public Mode() {}
+        private final int mModeId;
+
+        public Mode() {
+            this(1);
+        }
+
+        Mode(int modeId) {
+            this.mModeId = modeId;
+        }
+
+        public int getModeId() {
+            return mModeId;
+        }
+
         public int getPhysicalWidth() {
             try {
                 return new android.graphics.Canvas().getWidth();
@@ -121,5 +134,81 @@ public class Display {
             }
         }
         public float getRefreshRate() { return 60.0f; }
+    }
+
+    /**
+     * The one mode this display has.
+     *
+     * A single-element array rather than an empty one: callers iterate the result to pick a
+     * refresh rate and an empty array leaves them with nothing to pick, which reads as a
+     * display that cannot be driven. The mode reports the live surface size, so it stays
+     * consistent with getSize() rather than describing a second, imaginary display.
+     */
+    public Mode[] getSupportedModes() {
+        return new Mode[] { new Mode(1) };
+    }
+
+    public Mode getMode() {
+        return new Mode(1);
+    }
+
+    /**
+     * Nanoseconds by which this display's vsync is offset from the timestamp Choreographer
+     * reports.
+     *
+     * Zero, and that is the honest answer rather than a placeholder: KuDroid presents through
+     * CoreAnimation, which hands out the frame deadline directly, so there is no separate
+     * hardware offset to correct for. An invented non-zero value would make a frame pacer
+     * aim slightly early or late on every frame.
+     */
+    public long getAppVsyncOffsetNanos() {
+        return 0L;
+    }
+
+    /**
+     * Nanoseconds before vsync by which a frame must be submitted.
+     *
+     * One frame at the reported refresh rate, which is what a display with no deeper
+     * pipeline reports. Zero would tell a pacer it may submit at the instant of vsync.
+     */
+    public long getPresentationDeadlineNanos() {
+        final float rate = getRefreshRate();
+        return rate > 0.0f ? (long) (1000000000.0f / rate) : 16666666L;
+    }
+
+    /**
+     * Whether this display can show more than sRGB.
+     *
+     * False. iOS devices with a P3 panel do exist, but KuDroid's swapchain and the Metal
+     * layer behind it are configured for sRGB — claiming wide gamut would have the app
+     * submit P3 content that is then displayed as sRGB, which shifts every colour.
+     */
+    public boolean isWideColorGamut() {
+        return false;
+    }
+
+    /** HDR capabilities. Null means "none", which is what the platform returns. */
+    public HdrCapabilities getHdrCapabilities() {
+        return null;
+    }
+
+    public static final class HdrCapabilities {
+        public static final int HDR_TYPE_DOLBY_VISION = 1;
+        public static final int HDR_TYPE_HDR10 = 2;
+        public static final int HDR_TYPE_HLG = 3;
+        public static final int HDR_TYPE_HDR10_PLUS = 4;
+
+        public int[] getSupportedHdrTypes() {
+            return new int[0];
+        }
+    }
+
+    public String getName() {
+        return "Built-in Screen";
+    }
+
+    /** Every flag off: no secure output, no presentation, no rotation lock. */
+    public int getFlags() {
+        return 0;
     }
 }

@@ -38,16 +38,70 @@ public final class Configuration implements Parcelable, Comparable<Configuration
     public static final int TOUCHSCREEN_UNDEFINED = 0;
     public static final int UI_MODE_TYPE_UNDEFINED = 0;
 
+    // The `keyboard`, `touchscreen`, `navigation` and `*Hidden` fields below hold these
+    // values. They are declared here rather than left out because an app READS the field
+    // and compares it against the constant — an input layer deciding whether a hardware
+    // keyboard is attached does `config.keyboard == Configuration.KEYBOARD_QWERTY`, and
+    // without the constant the comparison cannot be compiled or resolved at all.
+    public static final int KEYBOARD_UNDEFINED = 0;
+    public static final int KEYBOARD_NOKEYS = 1;
+    public static final int KEYBOARD_QWERTY = 2;
+    public static final int KEYBOARD_12KEY = 3;
+
+    public static final int KEYBOARDHIDDEN_NO = 1;
+    public static final int KEYBOARDHIDDEN_YES = 2;
+
+    public static final int HARDKEYBOARDHIDDEN_UNDEFINED = 0;
+    public static final int HARDKEYBOARDHIDDEN_NO = 1;
+    public static final int HARDKEYBOARDHIDDEN_YES = 2;
+
+    public static final int NAVIGATION_NONAV = 1;
+    public static final int NAVIGATION_DPAD = 2;
+    public static final int NAVIGATION_TRACKBALL = 3;
+    public static final int NAVIGATION_WHEEL = 4;
+
+    public static final int NAVIGATIONHIDDEN_UNDEFINED = 0;
+    public static final int NAVIGATIONHIDDEN_NO = 1;
+    public static final int NAVIGATIONHIDDEN_YES = 2;
+
+    public static final int TOUCHSCREEN_NOTOUCH = 1;
+    public static final int TOUCHSCREEN_FINGER = 3;
+
+    public static final int SCREENLAYOUT_LONG_UNDEFINED = 0x00;
+    public static final int SCREENLAYOUT_LONG_MASK = 0x30;
+    public static final int SCREENLAYOUT_LONG_NO = 0x10;
+    public static final int SCREENLAYOUT_LONG_YES = 0x20;
+
+    public static final int SCREENLAYOUT_ROUND_UNDEFINED = 0x00;
+    public static final int SCREENLAYOUT_ROUND_MASK = 0x300;
+    public static final int SCREENLAYOUT_ROUND_NO = 0x100;
+    public static final int SCREENLAYOUT_ROUND_YES = 0x200;
+
+    public static final int UI_MODE_TYPE_MASK = 0x0f;
+    public static final int UI_MODE_TYPE_DESK = 0x02;
+    public static final int UI_MODE_TYPE_CAR = 0x03;
+    public static final int UI_MODE_TYPE_TELEVISION = 0x04;
+    public static final int UI_MODE_TYPE_APPLIANCE = 0x05;
+    public static final int UI_MODE_TYPE_WATCH = 0x06;
+    public static final int UI_MODE_TYPE_VR_HEADSET = 0x07;
+    public static final int UI_MODE_NIGHT_MASK = 0x30;
+    public static final int UI_MODE_NIGHT_UNDEFINED = 0x00;
+
     public float fontScale = 1.0f;
     public int mcc;
     public int mnc;
     public Locale locale = Locale.getDefault();
-    public int touchscreen = 3;
-    public int keyboard = 1;
-    public int keyboardHidden = 1;
-    public int hardKeyboardHidden = 2;
-    public int navigation = 1;
-    public int navigationHidden = 2;
+    // Reported as the constants above, not as bare numbers: an app comparing the field
+    // against Configuration.TOUCHSCREEN_FINGER must find them equal, and a magic number
+    // here that drifts from the constant would silently make every such test false.
+    public int touchscreen = TOUCHSCREEN_FINGER;
+    // No hardware keyboard is attached to an iOS device by default, and saying otherwise
+    // makes a game route input through a key handler that will never fire.
+    public int keyboard = KEYBOARD_NOKEYS;
+    public int keyboardHidden = KEYBOARDHIDDEN_YES;
+    public int hardKeyboardHidden = HARDKEYBOARDHIDDEN_YES;
+    public int navigation = NAVIGATION_NONAV;
+    public int navigationHidden = NAVIGATIONHIDDEN_YES;
     public int orientation = ORIENTATION_PORTRAIT;
     public int screenLayout = SCREENLAYOUT_SIZE_NORMAL;
 

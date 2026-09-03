@@ -19,7 +19,11 @@ public final class Character implements Comparable<Character> {
     public static final char MAX_VALUE = '\uffff';
     public static final int MIN_RADIX = 2;
     public static final int MAX_RADIX = 36;
-    public static final Class<Character> TYPE = null;
+    // char.class compiles to a read of this field, so it must hold the real
+    // primitive Class rather than null. See Class.getPrimitiveClass.
+    @SuppressWarnings("unchecked")
+    public static final Class<Character> TYPE =
+            (Class<Character>) Class.getPrimitiveClass("char");
 
     // Surrogate and code-point range constants.
     public static final char MIN_HIGH_SURROGATE = '\uD800';

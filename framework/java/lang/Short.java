@@ -6,7 +6,11 @@ public final class Short extends Number implements Comparable<Short> {
     public static final short MAX_VALUE = 32767;
     public static final int SIZE = 16;
     public static final int BYTES = 2;
-    public static final Class<Short> TYPE = null;
+    // short.class compiles to a read of this field, so it must hold the real
+    // primitive Class rather than null. See Class.getPrimitiveClass.
+    @SuppressWarnings("unchecked")
+    public static final Class<Short> TYPE =
+            (Class<Short>) Class.getPrimitiveClass("short");
 
     private final short value;
 

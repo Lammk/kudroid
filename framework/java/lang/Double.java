@@ -9,7 +9,11 @@ public final class Double extends Number implements Comparable<Double> {
     public static final double NaN = 0.0 / 0.0;
     public static final int SIZE = 64;
     public static final int BYTES = 8;
-    public static final Class<Double> TYPE = null;
+    // double.class compiles to a read of this field, so it must hold the real
+    // primitive Class rather than null. See Class.getPrimitiveClass.
+    @SuppressWarnings("unchecked")
+    public static final Class<Double> TYPE =
+            (Class<Double>) Class.getPrimitiveClass("double");
 
     private final double value;
 

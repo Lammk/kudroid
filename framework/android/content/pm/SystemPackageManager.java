@@ -180,11 +180,52 @@ public class SystemPackageManager extends PackageManager {
     @Override
     public int checkPermission(String permName, String pkgName) { return PERMISSION_GRANTED; }
 
+    /**
+     * Whether the device has a named feature.
+     *
+     * "true for everything" is wrong for the features an app acts on rather than merely
+     * reports. FEATURE_GAMEPAD is the clearest: a game told a gamepad is present hides its
+     * touch controls and then receives no input, because nothing here bridges iOS's
+     * GameController.framework. The same reasoning covers the camera and the microphone —
+     * both are absent from KuDroid, and claiming them makes an app open a capture session
+     * that fails much later.
+     *
+     * Everything not named below still returns true. That default is deliberate: the
+     * overwhelming majority of feature queries gate on graphics or platform capabilities
+     * that KuDroid does provide, and a false answer there turns a working app into one that
+     * refuses to start.
+     */
     @Override
-    public boolean hasSystemFeature(String name) { return true; }
+    public boolean hasSystemFeature(String name) {
+        if (name == null) {
+            return false;
+        }
+        // No input hardware is reachable; see android.hardware.input.InputManager, which
+        // reports the same thing through getInputDeviceIds().
+        if (name.equals(FEATURE_GAMEPAD)) {
+            return false;
+        }
+        // No capture path exists for either.
+        if (name.equals(FEATURE_CAMERA) || name.equals(FEATURE_MICROPHONE)) {
+            return false;
+        }
+        // Low-latency and pro audio describe guarantees KuDroid cannot make: audio goes
+        // through a CoreAudio queue whose period is not under the guest's control. An app
+        // that believes it has low-latency output sizes its mixer for a deadline it will
+        // miss, which is audible as underruns rather than reported as an error.
+        if (name.equals(FEATURE_AUDIO_LOW_LATENCY) || name.equals(FEATURE_AUDIO_PRO)) {
+            return false;
+        }
+        return true;
+    }
 
     @Override
-    public boolean hasSystemFeature(String name, int version) { return true; }
+    public boolean hasSystemFeature(String name, int version) {
+        // The versioned form asks whether the feature is available AT LEAST at `version`.
+        // Deferring to the unversioned answer is right for everything KuDroid reports,
+        // because none of the features above are version-graded here.
+        return hasSystemFeature(name);
+    }
 
     /**
      * Resolve an Intent to the component that handles it.

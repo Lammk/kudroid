@@ -52,6 +52,26 @@ public final class Class<T> {
         return forName(className);
     }
 
+    /**
+     * The Class object for a primitive type, named the way Java source names it
+     * ("int", "void", ...).
+     *
+     * Not an API apps call directly. It exists because javac compiles every primitive
+     * class literal into a read of the matching box class's TYPE field — {@code int.class}
+     * is {@code getstatic java/lang/Integer.TYPE}, {@code void.class} is
+     * {@code getstatic java/lang/Void.TYPE} — so this one method backs all nine primitive
+     * literals appearing in guest bytecode.
+     *
+     * Those TYPE fields used to be initialised to null, and the damage was much wider than
+     * a null literal. getMethod, getDeclaredConstructor and getDeclaredMethod all compare
+     * parameter types by reference identity: one side came from the DEX signature and was a
+     * real Class for descriptor "I", the other was the app's {@code int.class} and was
+     * null. They never matched, so EVERY reflective lookup whose signature mentioned a
+     * primitive failed with NoSuchMethodException — for any app, with nothing in the
+     * message pointing at the literal that was actually empty.
+     */
+    static native Class<?> getPrimitiveClass(String name);
+
     public String getSimpleName() {
         String name = getName();
         int dollar = name.lastIndexOf('$');

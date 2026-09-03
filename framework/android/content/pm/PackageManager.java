@@ -31,6 +31,31 @@ public abstract class PackageManager {
     public static final String FEATURE_BLUETOOTH = "android.hardware.bluetooth";
     public static final String FEATURE_OPENGL_ES_EXTENSION = "android.hardware.opengles.aep";
 
+    // Audio latency features. Read as CONSTANTS by the caller — an app builds
+    // hasSystemFeature(FEATURE_AUDIO_LOW_LATENCY) and needs the field to resolve before the
+    // query happens, so a missing one is a NoSuchFieldError rather than a false answer.
+    //
+    // Whether they are actually supported is hasSystemFeature's decision, not this
+    // declaration's; see SystemPackageManager, which answers it from the audio path.
+    public static final String FEATURE_AUDIO_LOW_LATENCY = "android.hardware.audio.low_latency";
+    public static final String FEATURE_AUDIO_OUTPUT = "android.hardware.audio.output";
+    public static final String FEATURE_AUDIO_PRO = "android.hardware.audio.pro";
+    public static final String FEATURE_MICROPHONE = "android.hardware.microphone";
+
+    public static final String FEATURE_GAMEPAD = "android.hardware.gamepad";
+    public static final String FEATURE_SENSOR_ACCELEROMETER =
+            "android.hardware.sensor.accelerometer";
+    public static final String FEATURE_SENSOR_GYROSCOPE = "android.hardware.sensor.gyroscope";
+    public static final String FEATURE_SENSOR_COMPASS = "android.hardware.sensor.compass";
+    public static final String FEATURE_TOUCHSCREEN_MULTITOUCH =
+            "android.hardware.touchscreen.multitouch";
+    public static final String FEATURE_TOUCHSCREEN_MULTITOUCH_DISTINCT =
+            "android.hardware.touchscreen.multitouch.distinct";
+    public static final String FEATURE_VULKAN_HARDWARE_LEVEL =
+            "android.hardware.vulkan.level";
+    public static final String FEATURE_VULKAN_HARDWARE_VERSION =
+            "android.hardware.vulkan.version";
+
     public abstract PackageInfo getPackageInfo(String packageName, int flags) throws NameNotFoundException;
     public abstract ApplicationInfo getApplicationInfo(String packageName, int flags) throws NameNotFoundException;
 

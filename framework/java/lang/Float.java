@@ -9,7 +9,11 @@ public final class Float extends Number implements Comparable<Float> {
     public static final float NaN = 0.0f / 0.0f;
     public static final int SIZE = 32;
     public static final int BYTES = 4;
-    public static final Class<Float> TYPE = null;
+    // float.class compiles to a read of this field, so it must hold the real
+    // primitive Class rather than null. See Class.getPrimitiveClass.
+    @SuppressWarnings("unchecked")
+    public static final Class<Float> TYPE =
+            (Class<Float>) Class.getPrimitiveClass("float");
 
     private final float value;
 

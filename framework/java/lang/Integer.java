@@ -6,7 +6,10 @@ public final class Integer extends Number implements Comparable<Integer> {
     public static final int MAX_VALUE = 0x7fffffff;
     public static final int SIZE = 32;
     public static final int BYTES = 4;
-    public static final Class<Integer> TYPE = null;
+    // int.class compiles to a read of this field, so it must hold the real primitive
+    // Class rather than null. See Class.getPrimitiveClass for what null broke.
+    @SuppressWarnings("unchecked")
+    public static final Class<Integer> TYPE = (Class<Integer>) Class.getPrimitiveClass("int");
 
     private final int value;
 

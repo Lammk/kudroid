@@ -6,7 +6,11 @@ public final class Byte extends Number implements Comparable<Byte> {
     public static final byte MAX_VALUE = 127;
     public static final int SIZE = 8;
     public static final int BYTES = 1;
-    public static final Class<Byte> TYPE = null;
+    // byte.class compiles to a read of this field, so it must hold the real
+    // primitive Class rather than null. See Class.getPrimitiveClass.
+    @SuppressWarnings("unchecked")
+    public static final Class<Byte> TYPE =
+            (Class<Byte>) Class.getPrimitiveClass("byte");
 
     private final byte value;
 

@@ -371,6 +371,14 @@ else()
     #                          most specific — so an overridden default ran silently.
     #                          Unity reported "default methods are only supported since
     #                          Android Oreo" on an SDK-29 runtime because of it.
+    # test_kuart_method_handles
+    #                          Primitive class literals and java.lang.invoke. javac compiles
+    #                          int.class into a read of Integer.TYPE, and all eight TYPE
+    #                          fields were null — so every reflective lookup whose signature
+    #                          mentioned a primitive could never match, in any app. On top of
+    #                          that, unreflectSpecial is the only way to run an interface
+    #                          default method on a Proxy: an ordinary call reaches the
+    #                          InvocationHandler that is asking for it and recurses.
     if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/test_art_dex.cpp")
         add_executable(test_art_dex kuart-tests/test_art_dex.cpp)
         target_link_libraries(test_art_dex PRIVATE art_dex ZLIB::ZLIB)
@@ -396,6 +404,7 @@ else()
         test_kuart_jit
         test_kuart_proxy
         test_kuart_default_methods
+        test_kuart_method_handles
         test_kuart_audiotrack
     )
         if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/${kuart_test}.cpp")

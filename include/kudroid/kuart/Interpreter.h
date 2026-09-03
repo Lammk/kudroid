@@ -87,6 +87,20 @@ public:
     // Throw exception by class descriptor.
     void ThrowException(const char* descriptor, const std::string& message);
 
+    // The class whose bytecode is executing, for a native method that has to answer a
+    // question about its caller.
+    //
+    // MethodHandles.lookup() is defined to report the calling class, and libraries act on
+    // it: they compare lookupClass() against their own to decide whether the Lookup they
+    // hold has the access they need. Returning a placeholder sends them down a fallback
+    // path built for a different runtime.
+    //
+    // A libcore native method is dispatched from InvokeMethod without a frame of its own
+    // (LibCoreInvoke is called in place of pushing one), so the top of the Java call stack
+    // is already the caller. Null when there is no Java frame — a native downcall from JNI,
+    // where there is no calling class to report.
+    DexClass* CallerClass() const;
+
     // Print the pending exception as uncaught, with its stack trace. No-op when nothing
     // is pending.
     //

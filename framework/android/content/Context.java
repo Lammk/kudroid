@@ -65,6 +65,22 @@ public abstract class Context {
     public static final String JOB_SCHEDULER_SERVICE = "jobscheduler";
     public static final String LOCATION_SERVICE = "location";
     public static final String SHORTCUT_SERVICE = "shortcut";
+
+    /**
+     * Media routing.
+     *
+     * The name is declared even though getSystemService returns null for it, because a
+     * caller reads the CONSTANT to build the call — {@code getSystemService(MEDIA_ROUTER_SERVICE)}
+     * needs the field to resolve before the lookup can even be attempted, and a missing
+     * field is a NoSuchFieldError rather than the null the caller is prepared for.
+     *
+     * Returning null is the honest answer: KuDroid presents audio through one CoreAudio
+     * output with no route selection, so there is nothing for a MediaRouter to enumerate.
+     * Apps handle null here — the platform itself returns null on devices without the
+     * service.
+     */
+    public static final String MEDIA_ROUTER_SERVICE = "media_router";
+    public static final String MEDIA_SESSION_SERVICE = "media_session";
     public static final String GRAMMATICAL_INFLECTION_SERVICE = "grammatical_inflection";
 
     public abstract AssetManager getAssets();

@@ -195,6 +195,21 @@ std::string Interpreter::DescribePendingException() const {
     return out;
 }
 
+// The class of the innermost Java frame.
+//
+// A libcore native method does NOT get a frame: InvokeMethod calls LibCoreInvoke instead of
+// pushing one (see the IsNative branch), so while such a method runs, the top of
+// call_stack_ is its caller — which is exactly what MethodHandles.lookup() must report.
+//
+// Empty when native code called in through JNI with no Java frame beneath it. Null is the
+// honest answer there: there is no calling class, and inventing one would be worse than
+// reporting none.
+DexClass* Interpreter::CallerClass() const {
+    if (call_stack_.empty()) return nullptr;
+    const DexMethod* method = call_stack_.back().method;
+    return method != nullptr ? method->declaring_class : nullptr;
+}
+
 void Interpreter::ThrowException(const char* descriptor, const std::string& message) {
     last_error_ = std::string(descriptor) + ": " + message;
     pending_exception_trace_ = BuildStackTrace();

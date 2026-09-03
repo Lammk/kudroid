@@ -34,6 +34,28 @@ public final class Method extends AccessibleObject {
         return getParameterTypes().length;
     }
 
+    /**
+     * True for an interface method that carries a body.
+     *
+     * The three conditions are exactly the platform's: declared in an interface, not
+     * static, and not abstract. A caller uses this to decide whether the method can be
+     * invoked at all before reaching for MethodHandles.Lookup.unreflectSpecial — Unity's
+     * JNIBridge tests it on every method its proxy handler receives, and answering wrongly
+     * either skips a callable default or attempts to call an abstract declaration.
+     */
+    public native boolean isDefault();
+
+    /**
+     * True for a bridge method — a synthetic forwarder javac emits for a covariant
+     * override or a generic erasure mismatch.
+     *
+     * Reported from the access flags rather than hardcoded false: reflection over a
+     * generic class returns both the real method and its bridge, and code that dispatches
+     * on getDeclaredMethods() has to be able to skip the bridge or it invokes the same
+     * logic twice.
+     */
+    public native boolean isBridge();
+
     // isAccessible()/setAccessible() come from AccessibleObject, which is also the type
     // apps reference when they unlock several members at once.
 

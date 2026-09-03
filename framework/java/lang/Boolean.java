@@ -4,7 +4,11 @@ public final class Boolean implements Comparable<Boolean> {
 
     public static final Boolean TRUE = new Boolean(true);
     public static final Boolean FALSE = new Boolean(false);
-    public static final Class<Boolean> TYPE = null;
+    // boolean.class compiles to a read of this field, so it must hold the real
+    // primitive Class rather than null. See Class.getPrimitiveClass.
+    @SuppressWarnings("unchecked")
+    public static final Class<Boolean> TYPE =
+            (Class<Boolean>) Class.getPrimitiveClass("boolean");
 
     private final boolean value;
 
