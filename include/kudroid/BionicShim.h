@@ -36,6 +36,28 @@ namespace kudroid {
 // / c c k  hi u kh ng x c  nh tr  v  m t h m gi  kh c null v  ph t ra c nh b o.
 void* resolve_bionic_symbol(const char* name);
 
+// True when `address` is the universal dummy — the stub every unresolved symbol is
+// bound to, which takes no arguments and returns 0.
+//
+// Needed because "resolved" and "bound to a stub that returns 0" are different
+// answers that were being reported as the same one. resolve_bionic_symbol caches the
+// dummy under the symbol's name, so every later lookup finds a non-null address and
+// says so. In the ULTRAKILL log that produced consecutive lines that contradict each
+// other:
+//
+//     [BionicShim] missing symbol bound to dummy: AChoreographer_getInstance
+//     [KuDroidSyscall] bionic_dlsym: [AChoreographer_getInstance] resolved via guest
+//                      LibraryManager
+//
+// Same address, and it was the dummy both times. The second line reads as a success
+// and cancels the warning above it, so a search for what was missing finds nothing —
+// which is why six absent frame-pacing symbols sat unnoticed in a log that named all
+// of them.
+//
+// Binding to the dummy stays: a guest that calls a null pointer faults at 0x0, and a
+// stub returning 0 is the lesser failure. What changes is that the log says so.
+bool is_universal_dummy(const void* address);
+
 // / x a v  truy xu t c c th ng b o ch n  o n  c t o ra b i l p  m.
 void bionic_shim_reset_trace();
 const char* bionic_shim_trace();

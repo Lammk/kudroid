@@ -3083,7 +3083,29 @@ extern "C" void* bionic_dlsym(void* handle, const char* symbol) {
     if (handle == DUMMY_HANDLE) {
         if (kudroid_guest_symbol_lookup) {
             if (void* guest = kudroid_guest_symbol_lookup(symbol)) {
-                logAndroidMessage(2, "KuDroidSyscall", std::string("bionic_dlsym: [") + symbol + "] resolved via guest LibraryManager");
+                // Distinguish a real resolution from the universal dummy.
+                //
+                // resolve_bionic_symbol caches the dummy under the symbol's name, and
+                // resolveGlobalSymbol falls back to it — so an unimplemented symbol
+                // comes back non-null here and used to be logged as "resolved". In the
+                // ULTRAKILL log that produced pairs of consecutive contradictory lines:
+                //
+                //   missing symbol bound to dummy: AChoreographer_getInstance
+                //   bionic_dlsym: [AChoreographer_getInstance] resolved via guest
+                //                 LibraryManager
+                //
+                // Same address both times, and it was the stub. The second line reads
+                // as success and cancels the warning above it, so searching the log for
+                // what was missing turned up nothing — while six absent frame-pacing
+                // symbols, all named right there, went unnoticed.
+                if (is_universal_dummy(guest)) {
+                    logAndroidMessage(5, "KuDroidSyscall",
+                                      std::string("bionic_dlsym: [") + symbol +
+                                          "] NOT IMPLEMENTED — bound to the universal dummy, "
+                                          "which takes no arguments and returns 0");
+                } else {
+                    logAndroidMessage(2, "KuDroidSyscall", std::string("bionic_dlsym: [") + symbol + "] resolved via guest LibraryManager");
+                }
                 return guest;
             }
         }

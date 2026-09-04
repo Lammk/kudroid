@@ -56,6 +56,8 @@ struct Slot {
     // Set once a stall has been reported, so a permanently stuck thread produces
     // one line rather than one every watchdog tick.
     std::atomic<bool> reported{false};
+    // Same, for the idle report, which uses a different threshold and severity.
+    std::atomic<bool> idle_reported{false};
 };
 
 Slot g_slots[kMaxSlots];
@@ -92,6 +94,7 @@ const char* kind_name(WaitKind kind) {
         case WaitKind::kCondition: return "cond-wait";
         case WaitKind::kConditionTimed: return "cond-timedwait";
         case WaitKind::kJavaMonitor: return "java-monitor";
+        case WaitKind::kJavaWait: return "java-wait";
         case WaitKind::kRwlockRead: return "rwlock-rdlock";
         case WaitKind::kRwlockWrite: return "rwlock-wrlock";
         case WaitKind::kOnce: return "pthread-once";
@@ -196,6 +199,7 @@ void blocking_wait_begin(WaitKind kind, const void* object, const void* caller) 
     s->owner.store(0, std::memory_order_relaxed);
     s->budget_ms.store(0, std::memory_order_relaxed);
     s->reported.store(false, std::memory_order_relaxed);
+    s->idle_reported.store(false, std::memory_order_relaxed);
     s->in_wait.store(true, std::memory_order_release);
     g_active.fetch_add(1, std::memory_order_relaxed);
 }
@@ -274,6 +278,39 @@ int blocking_wait_report_stalled(uint64_t threshold_ms) {
         const uint64_t budget = s.budget_ms.load(std::memory_order_relaxed);
         if (budget != 0 && elapsed_ms < budget) continue;
 
+        // An unbounded Object.wait() is a thread with nothing to do, not a stall.
+        //
+        // This is the other false line from that log, and the worse of the two because
+        // it came first:
+        //
+        //   blocking-wait-stalled kind=java-monitor object=0x12089e3d0 tid=3711750
+        //     waited_ms=3060 budget_ms=0 iterations=0 owner=0
+        //
+        // An idle HandlerThread in MessageQueue.next(), which calls this.wait() with no
+        // timeout when the queue is empty — precisely what Android's MessageQueue does
+        // with nativePollOnce(-1). cpu_ms=0 across every sample. It was working
+        // correctly, and it was reported at the same severity as a real hang with
+        // owner=0, so there was nothing to follow and nothing to rule out.
+        //
+        // Any Java thread with an idle Looper trips this, in every app, forever. Left
+        // in place it does not merely add noise: it trains a reader to skip the first
+        // stall line, which is where a real one usually appears.
+        //
+        // Reported through blocking_wait_report_idle() instead, at a longer threshold
+        // and a lower severity.
+        //
+        // Only the UNBOUNDED case. A timed wait that overran its own deadline is a
+        // genuine anomaly and stays here: the thread asked to be woken by a point in
+        // time that has passed, so either the notify never came and the timeout did not
+        // fire, or it woke and could not retake the monitor. Both are real, and both are
+        // invisible if the exemption is written on the kind alone. Reaching this line at
+        // all means the budget check above already passed, so the deadline is behind us.
+        if (static_cast<WaitKind>(s.kind.load(std::memory_order_relaxed)) ==
+                WaitKind::kJavaWait &&
+            budget == 0) {
+            continue;
+        }
+
         // Claim the report so two watchdogs cannot both emit it.
         bool expected = false;
         if (!s.reported.compare_exchange_strong(expected, true,
@@ -319,11 +356,70 @@ int blocking_wait_report_stalled(uint64_t threshold_ms) {
 
 int blocking_wait_active_count() { return g_active.load(std::memory_order_relaxed); }
 
-void blocking_wait_reset_for_test() {
+// Long-idle waits: a thread that parked itself with no deadline and nothing owing.
+//
+// Reported at priority 4 (info) rather than 5 (warn), under its own name, and at a
+// threshold far above the stall one. All three differences matter: this is normal,
+// and the reader has to be able to see that at a glance without reading the fields.
+int blocking_wait_report_idle(uint64_t threshold_ms) {
+    const uint64_t now = now_ns();
+    int reported = 0;
     for (int i = 0; i < kMaxSlots; ++i) {
+        Slot& s = g_slots[i];
+        if (!s.in_wait.load(std::memory_order_acquire)) continue;
+        if (s.idle_reported.load(std::memory_order_relaxed)) continue;
+        if (static_cast<WaitKind>(s.kind.load(std::memory_order_relaxed)) !=
+            WaitKind::kJavaWait) {
+            continue;
+        }
+
+        const uint64_t started = s.started_ns.load(std::memory_order_relaxed);
+        if (started == 0 || now < started) continue;
+        const uint64_t elapsed_ms = (now - started) / 1000000ull;
+        if (elapsed_ms < threshold_ms) continue;
+
+        // A timed wait belongs to the stall scan, not here: overrunning a deadline it
+        // set itself is an anomaly, and the two scans must not both claim it.
+        const uint64_t budget = s.budget_ms.load(std::memory_order_relaxed);
+        if (budget != 0) continue;
+
+        bool expected = false;
+        if (!s.idle_reported.compare_exchange_strong(expected, true,
+                                                     std::memory_order_acq_rel)) {
+            continue;
+        }
+        if (!s.in_wait.load(std::memory_order_acquire)) continue;
+
+        const void* caller = s.caller.load(std::memory_order_relaxed);
+        char where[256] = "unknown";
+        if (caller != nullptr) {
+            if (!kudroid_lookup_guest_module(const_cast<void*>(caller), where,
+                                             sizeof(where))) {
+                std::snprintf(where, sizeof(where), "%p (not a guest module)", caller);
+            }
+        }
+
+        char line[576];
+        std::snprintf(line, sizeof(line),
+                      "blocking-wait-idle kind=%s object=%p tid=%llu waited_ms=%llu "
+                      "budget_ms=%llu caller=%s (parked with no deadline; not a stall)",
+                      kind_name(static_cast<WaitKind>(s.kind.load(std::memory_order_relaxed))),
+                      s.object.load(std::memory_order_relaxed),
+                      static_cast<unsigned long long>(s.thread_id.load(std::memory_order_relaxed)),
+                      static_cast<unsigned long long>(elapsed_ms),
+                      static_cast<unsigned long long>(budget), where);
+        kudroid_persistent_breadcrumb(line);
+        kudroid_android_log_message(4, "KuDroidIdle", line);
+        ++reported;
+    }
+    return reported;
+}
+
+void blocking_wait_reset_for_test() {    for (int i = 0; i < kMaxSlots; ++i) {
         g_slots[i].in_wait.store(false, std::memory_order_relaxed);
         g_slots[i].claimed.store(false, std::memory_order_relaxed);
         g_slots[i].reported.store(false, std::memory_order_relaxed);
+        g_slots[i].idle_reported.store(false, std::memory_order_relaxed);
         g_slots[i].kind.store(static_cast<int>(WaitKind::kNone), std::memory_order_relaxed);
         g_slots[i].object.store(nullptr, std::memory_order_relaxed);
         g_slots[i].caller.store(nullptr, std::memory_order_relaxed);

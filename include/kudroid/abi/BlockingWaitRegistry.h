@@ -37,7 +37,27 @@ enum class WaitKind : int {
     kMutex,          // pthread_mutex_lock
     kCondition,      // pthread_cond_wait (no timeout)
     kConditionTimed, // pthread_cond_timedwait
-    kJavaMonitor,    // Object.wait / contended monitor-enter inside KuART
+    // A CONTENDED monitor-enter inside KuART: this thread wants a monitor another
+    // thread holds. Stuck iff the holder is stuck, and `owner` names it.
+    kJavaMonitor,
+    // Object.wait(): the monitor was RELEASED and the thread is parked until someone
+    // notifies it. Distinct from kJavaMonitor because the two mean opposite things to
+    // a reader, and conflating them produced the single most misleading line in the
+    // captured ULTRAKILL log:
+    //
+    //   blocking-wait-stalled kind=java-monitor object=0x12089e3d0 tid=3711750
+    //     waited_ms=3060 budget_ms=0 owner=0
+    //
+    // That was an idle HandlerThread sitting in MessageQueue.next(), which calls
+    // this.wait() with no timeout when the queue is empty — exactly what Android's
+    // own MessageQueue does with nativePollOnce(-1). Nothing was wrong with it. But
+    // it was the FIRST stall line in the log, carried the same severity as a real
+    // one, and `owner=0` gave nothing to follow, so it is what got chased while the
+    // genuinely wedged main thread went unmentioned.
+    //
+    // An unbounded Object.wait() is reported through the idle path instead of the
+    // stall path — see blocking_wait_report_idle().
+    kJavaWait,
     kRwlockRead,     // pthread_rwlock_rdlock
     kRwlockWrite,    // pthread_rwlock_wrlock
     kOnce,           // pthread_once, waiting for another thread's initialiser
@@ -123,7 +143,23 @@ public:
 // Report every wait that has been outstanding longer than `threshold_ms`, once per
 // wait. Called from the telemetry watchdog thread; returns how many it reported so
 // the caller can tell "nothing is stuck" from "the scan did not run".
+//
+// A wait a thread PARKED ITSELF in with no deadline and no owner — kJavaWait, an
+// unbounded Object.wait() — is not reported here. That is not a stall; it is a thread
+// with nothing to do, and it is indistinguishable from one only by what it is waiting
+// for. See blocking_wait_report_idle().
 int blocking_wait_report_stalled(uint64_t threshold_ms);
+
+// Report long-idle waits, at a lower severity and a much higher threshold.
+//
+// Kept separate rather than dropped, because "which threads are asleep and on what"
+// is genuinely useful when a deadlock involves one of them — a notifier that died is
+// visible only as its waiter never being woken. What it must not do is share a
+// severity with a real stall: the captured ULTRAKILL log opened with an idle
+// HandlerThread reported as stalled, and that line is what a reader follows first.
+//
+// Returns how many it reported.
+int blocking_wait_report_idle(uint64_t threshold_ms);
 
 // Number of waits currently outstanding. For tests, and for a summary line.
 int blocking_wait_active_count();

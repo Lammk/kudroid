@@ -45,6 +45,9 @@ add_library(kudroid_core STATIC
     src/platform/InputShim.cpp
     src/platform/AudioShim.cpp
     src/platform/GraphicsShim.cpp
+    # AChoreographer + ANativeWindow_setFrameRate. Kept out of GraphicsShim.cpp
+    # because it owns a thread and a set of pipes, and nothing else in there does.
+    src/platform/FramePacer.cpp
     src/abi/SyscallShim.cpp
     src/abi/GuestVarargs.cpp
     src/abi/BlockingWaitRegistry.cpp
@@ -243,6 +246,33 @@ else()
         )
         target_link_libraries(test_blocking_wait PRIVATE kudroid_core)
         target_include_directories(test_blocking_wait PRIVATE include)
+    endif()
+
+    # A guest that asks for frames must get them. ULTRAKILL brought up Vulkan, created
+    # its swapchain, and then stopped forever: all six AChoreographer symbols were
+    # bound to the universal dummy, so getInstance() returned NULL, Unity's pacer
+    # thread read that as "no Looper on this thread", exited immediately, and never
+    # signalled the condition variable its render thread was waiting on. No crash, no
+    # further log output, one frame never submitted.
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_frame_pacer.cpp")
+        add_executable(test_frame_pacer
+            tests/test_frame_pacer.cpp
+        )
+        target_link_libraries(test_frame_pacer PRIVATE kudroid_core)
+        target_include_directories(test_frame_pacer PRIVATE include)
+    endif()
+
+    # What the watchdog reports while a call is wedged. Native calls nest, and the
+    # record used to be one global slot that was never restored on the way out — so
+    # after JNIBridge.invoke returned in 435 microseconds, 47 seconds of watchdog lines
+    # carried ITS name beside nativeRender's elapsed time. The log named a method that
+    # had already returned as the thing that was hung.
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_call_telemetry.cpp")
+        add_executable(test_call_telemetry
+            tests/test_call_telemetry.cpp
+        )
+        target_link_libraries(test_call_telemetry PRIVATE kudroid_core)
+        target_include_directories(test_call_telemetry PRIVATE include)
     endif()
 
     # A guest's sigaction, decoded the way the guest wrote it. `struct sigaction` has

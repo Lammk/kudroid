@@ -46,7 +46,7 @@ uint64_t PhysicalMemory() {
 // "Available" is not just free pages: inactive and purgeable pages are handed over
 // on demand, and ignoring them under-reports by gigabytes on a device that has been
 // running a while — which would make every app think it is nearly out of memory.
-uint64_t AvailableMemory(bool* low_pressure) {
+uint64_t AvailableMemory() {
     mach_port_t host = mach_host_self();
     vm_size_t page_size = 0;
     if (host_page_size(host, &page_size) != KERN_SUCCESS || page_size == 0) {
@@ -63,11 +63,6 @@ uint64_t AvailableMemory(bool* low_pressure) {
         static_cast<uint64_t>(vm.free_count) + static_cast<uint64_t>(vm.inactive_count) +
         static_cast<uint64_t>(vm.purgeable_count);
 
-    if (low_pressure != nullptr) {
-        // The kernel is actively evicting pages. Android sets lowMemory on the same
-        // idea, and apps use it to drop caches before they are killed for it.
-        *low_pressure = vm.free_count < (256 * kMiB / page_size);
-    }
     return reclaimable * static_cast<uint64_t>(page_size);
 }
 
@@ -160,12 +155,37 @@ SystemMemory query_system_memory() {
 
 #if defined(__APPLE__)
     out.total_bytes = PhysicalMemory();
-    bool low = false;
-    out.available_bytes = AvailableMemory(&low);
-    out.low_memory = low;
+    out.available_bytes = AvailableMemory();
     out.process_available_bytes = ProcessAvailableMemory();
     out.process_resident_bytes = ProcessResidentMemory();
     out.measured = out.total_bytes > 0 && out.available_bytes > 0;
+
+    // Memory pressure, judged against what this PROCESS may still allocate.
+    //
+    // The previous test was `vm.free_count < 256 MiB`, which is permanently true on
+    // iOS: the kernel keeps almost nothing on the free list and serves allocations
+    // from the inactive and purgeable lists instead. So every log line in the captured
+    // ULTRAKILL session carried low_memory=1 while reporting available=1.2 GB and
+    // process_headroom=2.0 GB beside it — three fields, one contradicting the other
+    // two, on 188 consecutive lines.
+    //
+    // That is not merely noise. The same flag is what ActivityManager.MemoryInfo
+    // reports through nativeIsLowMemory(), so a guest reading it drops its caches and
+    // runs degraded on a device with two spare gigabytes.
+    //
+    // jetsam kills on the per-process footprint, so the process limit is the figure
+    // that decides whether this app is in trouble. An eighth is the point where iOS
+    // starts sending memory warnings in practice, and it is a fraction rather than a
+    // constant because the limit itself scales with the device.
+    if (out.process_available_bytes > 0) {
+        const uint64_t footprint_limit =
+            out.process_available_bytes + out.process_resident_bytes;
+        out.low_memory = out.process_available_bytes < footprint_limit / 8;
+    } else {
+        // No per-process figure: fall back to the system-wide one, on the same tenth
+        // that the Linux path uses, so the two platforms answer the same question.
+        out.low_memory = out.total_bytes > 0 && out.available_bytes < out.total_bytes / 10;
+    }
 #else
     uint64_t total = 0;
     uint64_t available = 0;

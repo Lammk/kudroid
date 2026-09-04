@@ -39,6 +39,13 @@ extern "C" int kudroid_universal_dummy() {
     trace("universal dummy fallback invoked");
     return 0;
 }
+} // namespace
+
+bool is_universal_dummy(const void* address) {
+    return address == reinterpret_cast<const void*>(&kudroid_universal_dummy);
+}
+
+namespace {
 
 std::shared_mutex resolveMutex;
 std::unordered_map<std::string, std::pair<void*, bool>> boundSymbols;
@@ -210,7 +217,13 @@ void* resolve_bionic_symbol(const char* name) {
             // Mirror to standard logs (android_logs.txt + crash buffer) — previously
             // is only in the shim trace so it disappears when looking for relocation
             // unresolved (which is Discord's SIGILL suspect in init).
-            kudroid_android_log_message(2, "BionicShim", msg);
+            //
+            // Priority 5 (warn), not 2 (verbose). This line is the record that a guest
+            // is about to call something KuDroid does not implement, and it is often
+            // the only warning before the failure it causes: six of these named the
+            // AChoreographer functions whose absence stopped ULTRAKILL dead, and at
+            // verbose they sat among thousands of routine dlsym lines.
+            kudroid_android_log_message(5, "BionicShim", msg);
             resolved = reinterpret_cast<void*>(&kudroid_universal_dummy);
         }
 

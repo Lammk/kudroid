@@ -77,6 +77,44 @@ int main() {
     const kudroid::SystemMemory again = kudroid::query_system_memory();
     Check(again.total_bytes == mem.total_bytes, "total is stable across calls");
 
+    // low_memory must AGREE with the figures printed beside it.
+    //
+    // It did not. The iOS test was `vm.free_count < 256 MiB`, which is permanently
+    // true there — the kernel keeps almost nothing on the free list and serves
+    // allocations from the inactive and purgeable lists — so all 188 watchdog lines in
+    // the captured ULTRAKILL log read `low_memory=1 available=1.2GB
+    // process_headroom=2.0GB`: one field contradicting the other two on every line.
+    //
+    // The same flag reaches guests as ActivityManager.MemoryInfo.lowMemory, so an app
+    // reading it drops its caches and runs degraded on a device with two spare
+    // gigabytes. A permanently-set warning flag is worth less than no flag.
+    if (mem.low_memory) {
+        const bool process_tight =
+            mem.process_available_bytes > 0 &&
+            mem.process_available_bytes <
+                (mem.process_available_bytes + mem.process_resident_bytes) / 8;
+        const bool system_tight =
+            mem.total_bytes > 0 && mem.available_bytes < mem.total_bytes / 10;
+        Check(process_tight || system_tight,
+              "low_memory is only set when the process or the system really is short");
+    } else {
+        Check(true, "low_memory is clear, which agrees with the figures above");
+    }
+
+    // And the converse: plenty of headroom must not be reported as pressure. Stated
+    // separately because it is the exact shape of the bug — the flag was set while
+    // both headroom figures were large.
+    const bool plenty_for_process =
+        mem.process_available_bytes > 0 &&
+        mem.process_available_bytes >
+            (mem.process_available_bytes + mem.process_resident_bytes) / 4;
+    const bool plenty_for_system =
+        mem.total_bytes > 0 && mem.available_bytes > mem.total_bytes / 4;
+    if (plenty_for_process || plenty_for_system) {
+        Check(!mem.low_memory,
+              "a quarter of the budget still free is not reported as low memory");
+    }
+
     if (g_failures == 0) {
         std::printf("=== platform memory PASSED ===\n");
         return 0;

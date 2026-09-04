@@ -13,6 +13,8 @@
 // would pass a registry-only test and still leave the next hang invisible.
 #include "kudroid/abi/BlockingWaitRegistry.h"
 #include "kudroid/debug/ThreadSampler.h"
+#include "kudroid/kuart/DexObject.h"
+#include "kudroid/kuart/VmLock.h"
 
 #include <atomic>
 #include <chrono>
@@ -57,6 +59,7 @@ using kudroid::blocking_wait_end;
 using kudroid::blocking_wait_note_budget;
 using kudroid::blocking_wait_note_iteration;
 using kudroid::blocking_wait_note_owner;
+using kudroid::blocking_wait_report_idle;
 using kudroid::blocking_wait_report_stalled;
 using kudroid::blocking_wait_reset_for_test;
 using kudroid::BlockingWaitScope;
@@ -519,6 +522,237 @@ void test_join_is_tracked() {
     Check(blocking_wait_active_count() == 0, "and cleared its entry");
 }
 
+// ─── idle waits versus stalls ────────────────────────────────────────────────
+//
+// The captured ULTRAKILL log opened with this, as the first and for a while the only
+// stall reported:
+//
+//   blocking-wait-stalled kind=java-monitor object=0x12089e3d0 tid=3711750
+//     waited_ms=3060 budget_ms=0 iterations=0 owner=0 caller=... (not a guest module)
+//
+// It was an idle HandlerThread sitting in MessageQueue.next(), which calls this.wait()
+// with no timeout when the queue is empty — exactly what Android's own MessageQueue
+// does with nativePollOnce(-1). cpu_ms=0 in every one of five thread samples. Nothing
+// was wrong with it.
+//
+// The damage is not the extra line. It is that the line came FIRST, carried the same
+// severity as a genuine hang, and offered `owner=0` — nothing to follow and nothing to
+// rule out. Meanwhile the actually wedged thread was reported three lines later among
+// two more idle workers. Every app has an idle Looper thread, so this fires in every
+// app, forever, and it trains a reader to skip the first stall line.
+//
+// The split: a thread PARKED with no deadline and nothing owed to it is idle, not
+// stalled. A thread BLOCKED because another holds what it needs is stalled.
+
+void test_an_idle_object_wait_is_not_a_stall() {
+    std::printf("[idle] an unbounded Object.wait is not reported as a stall\n");
+    blocking_wait_reset_for_test();
+
+    int queue = 0;
+    const BlockingWaitScope tracked(WaitKind::kJavaWait, &queue, nullptr);
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+
+    Check(blocking_wait_report_stalled(100) == 0,
+          "an idle Looper thread in MessageQueue.next() is silent at the stall threshold "
+          "— it was the first and most misleading line in the ULTRAKILL log");
+    Check(blocking_wait_active_count() == 1, "while still being tracked");
+}
+
+void test_an_idle_wait_is_reported_as_idle() {
+    std::printf("[idle] but it is still reported, at its own threshold and severity\n");
+    blocking_wait_reset_for_test();
+
+    int queue = 0;
+    const BlockingWaitScope tracked(WaitKind::kJavaWait, &queue, nullptr);
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+
+    Check(blocking_wait_report_idle(100) == 1,
+          "the idle scan reports it — which threads are parked and on what is worth "
+          "knowing when a deadlock turns out to involve a notifier that died");
+    Check(blocking_wait_report_idle(100) == 0, "and only once");
+    // The stall scan must still ignore it after the idle scan has run: the two
+    // decisions are independent.
+    Check(blocking_wait_report_stalled(100) == 0,
+          "and the stall scan still ignores it afterwards");
+}
+
+// The other half of the split, and the one that must keep working: a contended
+// monitor-enter IS a stall. Losing it would be a worse regression than the false
+// positive being fixed, because it is how a real Java deadlock becomes visible.
+void test_a_contended_monitor_is_still_a_stall() {
+    std::printf("[idle] a contended monitor-enter is still reported as a stall\n");
+    blocking_wait_reset_for_test();
+
+    int monitor = 0;
+    const BlockingWaitScope tracked(WaitKind::kJavaMonitor, &monitor, nullptr);
+    blocking_wait_note_owner(9876);
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+
+    Check(blocking_wait_report_stalled(100) == 1,
+          "a thread blocked because another holds the monitor is a stall — this is how a "
+          "real Java deadlock becomes visible, and it must not be lost with the noise");
+    Check(blocking_wait_report_idle(100) == 0,
+          "and it is not reported as idle: it is not parked by choice");
+}
+
+// A TIMED Object.wait past its own timeout is a genuine anomaly: the thread asked to
+// be woken by a deadline that has passed. That must still be reported as a stall.
+void test_a_timed_java_wait_past_its_budget_is_still_a_stall() {
+    std::printf("[idle] a timed Object.wait that overran its own timeout is a stall\n");
+    blocking_wait_reset_for_test();
+
+    int monitor = 0;
+    const BlockingWaitScope tracked(WaitKind::kJavaWait, &monitor, nullptr);
+    blocking_wait_note_budget(20);  // wait(20)
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+
+    // Deliberately NOT silent. A thread that asked to be woken in 20ms and is still
+    // parked 120ms later is not idle by choice — it is late, and the wait it is in has
+    // a deadline that has passed.
+    Check(blocking_wait_report_stalled(100) == 1,
+          "wait(20) still parked at 120 ms is reported: it asked for a deadline and "
+          "missed it, which is not the same as parking forever on purpose");
+}
+
+// Every other unbounded wait must remain a stall. The exemption is narrow on purpose:
+// widening it to all budget-less waits would silence an untimed FUTEX_WAIT, which is
+// the single most common shape of a real hang.
+void test_the_exemption_does_not_cover_other_unbounded_waits() {
+    std::printf("[idle] the exemption is narrow: other unbounded waits are still stalls\n");
+    blocking_wait_reset_for_test();
+
+    const WaitKind kinds[] = {WaitKind::kFutex, WaitKind::kCondition, WaitKind::kSemaphore,
+                              WaitKind::kMutex, WaitKind::kJoin,      WaitKind::kEpoll};
+    bool all_reported = true;
+    for (WaitKind kind : kinds) {
+        blocking_wait_reset_for_test();
+        int object = 0;
+        const BlockingWaitScope tracked(kind, &object, nullptr);
+        std::this_thread::sleep_for(std::chrono::milliseconds(120));
+        if (blocking_wait_report_stalled(100) != 1) all_reported = false;
+    }
+    Check(all_reported,
+          "futex, condvar, semaphore, mutex, join and epoll waits are all still reported "
+          "— an untimed FUTEX_WAIT is the commonest shape of a real hang");
+}
+
+void test_idle_scan_ignores_everything_else() {
+    std::printf("[idle] the idle scan reports only what parked itself\n");
+    blocking_wait_reset_for_test();
+
+    int a = 0, b = 0;
+    std::atomic<bool> release{false};
+    std::atomic<int> parked{0};
+    std::thread futex_waiter([&] {
+        const BlockingWaitScope tracked(WaitKind::kFutex, &a, nullptr);
+        ++parked;
+        while (!release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    });
+    std::thread java_waiter([&] {
+        const BlockingWaitScope tracked(WaitKind::kJavaWait, &b, nullptr);
+        ++parked;
+        while (!release.load()) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    });
+    while (parked.load() < 2) std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+
+    Check(blocking_wait_report_idle(100) == 1,
+          "with one futex wait and one Object.wait outstanding, the idle scan reports "
+          "exactly one");
+    Check(blocking_wait_report_stalled(100) == 1, "and the stall scan reports the other");
+
+    release = true;
+    futex_waiter.join();
+    java_waiter.join();
+    Check(blocking_wait_active_count() == 0, "both clear on the way out");
+}
+
+// ─── through KuART's monitors ────────────────────────────────────────────────
+//
+// The classification above is only worth anything if Monitor::Wait actually uses it.
+// A registry that can tell idle from stalled, wired to a Monitor::Wait that still
+// declares kJavaMonitor, passes every test above and reproduces the device bug exactly
+// — so this drives the real monitor code rather than the enum.
+
+// A bare DexObject is all a monitor needs: Monitor touches only lock_owner_tid,
+// lock_count and notify_seq, and never dereferences clazz.
+kudroid::kuart::DexObject make_monitor_object() {
+    kudroid::kuart::DexObject obj;
+    return obj;
+}
+
+void test_object_wait_through_the_monitor_is_idle_not_stalled() {
+    std::printf("[monitor] Monitor::Wait declares an idle wait, not a contended monitor\n");
+    blocking_wait_reset_for_test();
+
+    kudroid::kuart::DexObject obj = make_monitor_object();
+
+    std::atomic<bool> waiting{false};
+    std::atomic<bool> returned{false};
+    std::thread waiter([&] {
+        // Exactly what MessageQueue.next() compiles to: enter the monitor, then wait
+        // with no timeout because the queue is empty.
+        kudroid::kuart::Monitor::Enter(&obj);
+        waiting = true;
+        kudroid::kuart::Monitor::Wait(&obj, 0, 0);
+        returned = true;
+        kudroid::kuart::Monitor::Exit(&obj);
+    });
+
+    while (!waiting.load()) std::this_thread::yield();
+    for (int i = 0; i < 400 && blocking_wait_active_count() == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    Check(blocking_wait_active_count() == 1, "the waiting thread is tracked");
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    Check(blocking_wait_report_stalled(100) == 0,
+          "and is NOT reported as a stall — this is the idle HandlerThread that opened "
+          "the ULTRAKILL log as its only stall, with owner=0 and nothing to follow");
+    Check(blocking_wait_report_idle(100) == 1, "it is reported as idle instead");
+
+    // Wake it the way notifyAll does, so the test cannot pass by the thread timing out.
+    kudroid::kuart::Monitor::Enter(&obj);
+    kudroid::kuart::Monitor::Notify(&obj, true);
+    kudroid::kuart::Monitor::Exit(&obj);
+    waiter.join();
+    Check(returned.load(), "the wait completed once notified");
+    Check(blocking_wait_active_count() == 0, "and cleared its entry");
+}
+
+void test_contended_monitor_enter_through_the_monitor_is_a_stall() {
+    std::printf("[monitor] a contended Monitor::Enter is still reported as a stall\n");
+    blocking_wait_reset_for_test();
+
+    kudroid::kuart::DexObject obj = make_monitor_object();
+
+    // Held by this thread, so the other one has to block.
+    kudroid::kuart::Monitor::Enter(&obj);
+
+    std::atomic<bool> acquired{false};
+    std::thread contender([&] {
+        kudroid::kuart::Monitor::Enter(&obj);
+        acquired = true;
+        kudroid::kuart::Monitor::Exit(&obj);
+    });
+
+    for (int i = 0; i < 400 && blocking_wait_active_count() == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    Check(blocking_wait_active_count() == 1, "the blocked thread is tracked");
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    Check(blocking_wait_report_stalled(100) == 1,
+          "and IS reported as a stall — a thread blocked by another holding the monitor "
+          "is how a real Java deadlock becomes visible");
+    Check(blocking_wait_report_idle(100) == 0, "and never as idle");
+
+    kudroid::kuart::Monitor::Exit(&obj);
+    contender.join();
+    Check(acquired.load(), "the contender got the monitor");
+    Check(blocking_wait_active_count() == 0, "and cleared its entry");
+}
+
 // ─── thread sampler ──────────────────────────────────────────────────────────
 //
 // The sampler answers the question every other diagnostic here cannot: where is a
@@ -568,6 +802,14 @@ int main() {
     test_budget_is_cleared_between_waits();
     test_note_budget_without_a_wait_is_harmless();
     test_join_is_tracked();
+    test_an_idle_object_wait_is_not_a_stall();
+    test_an_idle_wait_is_reported_as_idle();
+    test_a_contended_monitor_is_still_a_stall();
+    test_a_timed_java_wait_past_its_budget_is_still_a_stall();
+    test_the_exemption_does_not_cover_other_unbounded_waits();
+    test_idle_scan_ignores_everything_else();
+    test_object_wait_through_the_monitor_is_idle_not_stalled();
+    test_contended_monitor_enter_through_the_monitor_is_a_stall();
     test_thread_sampler_is_safe_to_call();
 
     std::printf("=== %d checks, %d failures ===\n", g_checks, g_failures);

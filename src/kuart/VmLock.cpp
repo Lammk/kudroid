@@ -184,8 +184,17 @@ bool Wait(DexObject* obj, int64_t millis, int32_t nanos) {
         VmLockRelease unlocked;
         // Object.wait: parked until notified, or until the timeout if one was given.
         // The timeout becomes the budget, so an app that asked to wait a minute is not
-        // reported as stalled three seconds in — and one that asked to wait forever is.
-        const BlockingWaitScope tracked(WaitKind::kJavaMonitor, obj, guest_return_address(6));
+        // reported as stalled three seconds in.
+        //
+        // kJavaWait, not kJavaMonitor. The two are opposites: a contended
+        // monitor-enter is a thread BLOCKED by another that holds the lock, and is
+        // stuck iff that holder is stuck; an Object.wait() has RELEASED the monitor and
+        // is parked with nothing owed to it. Reporting both as "java-monitor" put an
+        // idle HandlerThread — MessageQueue.next() calling this.wait() on an empty
+        // queue, which is what Android's own MessageQueue does — at the top of the
+        // ULTRAKILL log as the only stall, with owner=0 and nothing to follow, while
+        // the genuinely wedged main thread was not mentioned at all.
+        const BlockingWaitScope tracked(WaitKind::kJavaWait, obj, guest_return_address(6));
         if (millis > 0 || nanos > 0) {
             blocking_wait_note_budget(static_cast<uint64_t>(millis) +
                                       static_cast<uint64_t>(nanos) / 1000000ull);
