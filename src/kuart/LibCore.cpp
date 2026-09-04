@@ -25,6 +25,7 @@
 #include "kudroid/kuart/DexClass.h"
 #include "kudroid/kuart/DexClassLinker.h"
 #include "kudroid/kuart/DexHeap.h"
+#include "kudroid/kuart/DexJniEnv.h"
 #include "kudroid/kuart/DexObject.h"
 #include "kudroid/kuart/DexString.h"
 #include "kudroid/kuart/Interpreter.h"
@@ -32,6 +33,7 @@
 #include "kudroid/platform/MemoryInfo.h"
 #include "kudroid/platform/CpuInfo.h"
 #include "kudroid/platform/AudioShim.h"
+#include "kudroid/platform/FramePacer.h"
 #include "kudroid/platform/JavaCanvasRenderer.h"
 
 namespace kudroid {
@@ -2657,6 +2659,178 @@ bool Invoke_android_os_Vibrator(Interpreter* /*interp*/, const char* name, const
         kudroid_vibrate(args[0].i);
         return true;
     }
+    return false;}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// android.view.Choreographer — the JAVA frame-callback API.
+//
+// The NDK half (AChoreographer_*) was implemented first and ULTRAKILL still stopped,
+// because Unity uses both and this class was a nine-line stub with no methods:
+//
+//     android.view.Choreographer->getInstance()Landroid/view/Choreographer;
+//     android.view.Choreographer->postFrameCallback(...FrameCallback;)V
+//     android.view.Choreographer->postFrameCallbackDelayed(...FrameCallback;J)V
+//
+// The class existed, so Interpreter::ResolveMethod auto-stubbed the missing methods
+// into bodyless DexMethods rather than reporting them. getInstance() returned null,
+// and Unity's JNIBridge responded by throwing NoSuchMethodError itself — the string
+// "JNIBridge error: Java interface default methods are only supported since Android
+// Oreo" sits in ULTRAKILL's own classes.dex right beside Ljava/lang/NoSuchMethodError;.
+// That went uncaught out of Looper.loop, ActivityThread.main returned, and the shell
+// printed "Session ended" while FMOD's audio thread carried on.
+//
+// Frames come from the SAME pacer the NDK entry points use. Two frame sources in one
+// process would mean two clocks: a guest posting on both would read timestamps that
+// disagree and pace against whichever it saw last.
+//
+// The FrameCallback object is registered as a JNI global reference before being
+// queued. Without that it is a bare DexObject* held only by the pacer — and although
+// KuART's heap never frees, the object must still be reachable for the interpreter to
+// dispatch on it, and a global ref is what states that intent rather than relying on
+// the absence of a collector.
+namespace {
+
+// A queued Java frame callback. Allocated per post and owned by the pacer until the
+// callback fires or is removed.
+struct JavaFrameCallback {
+    Interpreter* interp;
+    DexObject* callback;
+};
+
+// Every JavaFrameCallback handed to the pacer, so removeFrameCallback can find the
+// context belonging to a given Java object and the entry can be freed exactly once.
+std::mutex g_java_frame_mutex;
+std::vector<JavaFrameCallback*> g_java_frame_contexts;
+
+// Invoked by the pacer — either on the guest thread that polled its looper, or on the
+// pacer thread. Runs bytecode, so it must take the VM lock, which Execute() does for
+// itself when the calling thread does not already hold it.
+void JavaFrameCallbackTrampoline(int64_t frame_time_ns, void* data) {
+    auto* ctx = static_cast<JavaFrameCallback*>(data);
+    if (ctx == nullptr) return;
+
+    Interpreter* interp = ctx->interp;
+    DexObject* callback = ctx->callback;
+    {
+        std::lock_guard<std::mutex> lock(g_java_frame_mutex);
+        for (size_t i = 0; i < g_java_frame_contexts.size(); ++i) {
+            if (g_java_frame_contexts[i] == ctx) {
+                g_java_frame_contexts.erase(g_java_frame_contexts.begin() +
+                                            static_cast<long>(i));
+                break;
+            }
+        }
+    }
+
+    if (interp != nullptr && callback != nullptr && interp->linker() != nullptr) {
+        DexClass* klass = interp->linker()->ClassOfObject(callback);
+        if (klass != nullptr) {
+            // Virtual dispatch on the callback's real class. The interface method is
+            // doFrame(J)V; a Proxy implementing FrameCallback resolves through the
+            // proxy path inside Execute, which is why this looks the method up on the
+            // receiver rather than on the interface.
+            DexMethod* do_frame = klass->FindVirtualMethod("doFrame", "(J)V");
+            if (do_frame != nullptr) {
+                const DexValue call_args[3] = {DexValue::Ref(callback),
+                                               DexValue::Long(frame_time_ns), DexValue()};
+                interp->ClearPendingException();
+                interp->Execute(do_frame, call_args, 2);
+                // An exception out of a frame callback is the app's own, and there is
+                // no Java frame above this to catch it. Clearing rather than
+                // propagating: the alternative is to leave it pending on a thread that
+                // is about to run unrelated work, which would surface it at whatever
+                // the next Java call happens to be.
+                if (interp->HasPendingException()) {
+                    std::fprintf(stderr,
+                                 "[KuART][Choreographer] exception in doFrame: %s\n",
+                                 interp->last_error().c_str());
+                    interp->ClearPendingException();
+                }
+            }
+        }
+    }
+    delete ctx;
+}
+
+}  // namespace
+
+bool Invoke_android_view_Choreographer(Interpreter* interp, const char* name,
+                                       const DexValue* args, size_t num_args,
+                                       DexValue* result) {
+    if (std::strcmp(name, "nativePostFrameCallback") == 0) {
+        // (this, FrameCallback, long delayMillis)
+        if (num_args < 3) return false;
+        DexObject* callback = args[1].l;
+        if (callback == nullptr) {
+            interp->ThrowException("Ljava/lang/IllegalArgumentException;",
+                                   "postFrameCallback with a null callback");
+            return true;
+        }
+        // Keep the callback reachable for as long as the pacer holds it. KuART's heap
+        // has no collector, but a global ref is the statement of intent — and it is
+        // what keeps this correct if one is ever added.
+        if (interp->jni_env() != nullptr) {
+            interp->jni_env()->AddGlobalRef(callback);
+        }
+        auto* ctx = new JavaFrameCallback{interp, callback};
+        {
+            std::lock_guard<std::mutex> lock(g_java_frame_mutex);
+            g_java_frame_contexts.push_back(ctx);
+        }
+        const int64_t delay_ms = args[2].j;
+        kudroid::frame_pacer_post(
+            kudroid::frame_pacer_instance_for_this_thread(),
+            reinterpret_cast<void*>(&JavaFrameCallbackTrampoline), ctx,
+            delay_ms > 0 ? static_cast<uint64_t>(delay_ms) * 1000000ull : 0);
+        return true;
+    }
+    if (std::strcmp(name, "nativeRemoveFrameCallback") == 0) {
+        if (num_args < 2) return false;
+        DexObject* callback = args[1].l;
+        if (callback == nullptr) return true;
+        // Every context naming this Java object, because the same callback posted
+        // twice is queued twice and Android's remove clears both.
+        std::vector<JavaFrameCallback*> matches;
+        {
+            std::lock_guard<std::mutex> lock(g_java_frame_mutex);
+            for (size_t i = g_java_frame_contexts.size(); i-- > 0;) {
+                if (g_java_frame_contexts[i]->callback == callback) {
+                    matches.push_back(g_java_frame_contexts[i]);
+                    g_java_frame_contexts.erase(g_java_frame_contexts.begin() +
+                                                static_cast<long>(i));
+                }
+            }
+        }
+        for (JavaFrameCallback* ctx : matches) {
+            // Only free the context once the pacer has agreed it no longer holds it.
+            // A context the pacer had already dequeued is about to be freed by the
+            // trampoline, and deleting it here as well would be a double free.
+            if (kudroid::frame_pacer_remove(
+                    reinterpret_cast<void*>(&JavaFrameCallbackTrampoline), ctx) > 0) {
+                delete ctx;
+            }
+        }
+        return true;
+    }
+    if (std::strcmp(name, "nativeGetFrameIntervalNanos") == 0) {
+        *result = DexValue::Long(kudroid::frame_pacer_interval_ns());
+        return true;
+    }
+    if (std::strcmp(name, "nativeGetFrameTimeNanos") == 0) {
+        // Inside a frame callback this is that frame's timestamp; outside one there is
+        // no frame, and "now" is more useful than an exception or a stale value. Both
+        // are on CLOCK_MONOTONIC, the clock System.nanoTime reports.
+        const int64_t in_frame = kudroid::frame_pacer_current_frame_time_ns();
+        if (in_frame != 0) {
+            *result = DexValue::Long(in_frame);
+            return true;
+        }
+        struct timespec ts {};
+        ::clock_gettime(CLOCK_MONOTONIC, &ts);
+        *result = DexValue::Long(static_cast<int64_t>(ts.tv_sec) * 1000000000ll +
+                                 static_cast<int64_t>(ts.tv_nsec));
+        return true;
+    }
     return false;
 }
 
@@ -3208,6 +3382,12 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
     if (std::strcmp(desc, "Landroid/util/Log;") == 0) return Invoke_android_util_Log(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Landroid/graphics/Canvas;") == 0) return Invoke_android_graphics_Canvas(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Landroid/app/Activity;") == 0) return Invoke_android_app_Activity(interp, name, args, num_args, result);
+    // The JAVA frame-callback API, sharing one frame source with the NDK
+    // AChoreographer_* entry points. Absent, it was auto-stubbed to return null and
+    // Unity's JNIBridge threw NoSuchMethodError out of Looper.loop.
+    if (std::strcmp(desc, "Landroid/view/Choreographer;") == 0) {
+        return Invoke_android_view_Choreographer(interp, name, args, num_args, result);
+    }
     if (std::strcmp(desc, "Landroid/os/Vibrator;") == 0) return Invoke_android_os_Vibrator(interp, name, args, num_args, result);
     // AudioTrack is the Java audio path FMOD uses. Without it every method was
     // auto-stubbed to 0 and FMOD retried "AudioTrack failed to initialize" forever.

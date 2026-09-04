@@ -100,6 +100,25 @@ void frame_pacer_add_refresh_callback(void* instance, void* callback, void* data
 void frame_pacer_remove_refresh_callback(void* instance, void* callback, void* data);
 void frame_pacer_request_rate(float frame_rate);
 
+// Drop every queued frame callback matching (callback, data), across every thread's
+// queue. Returns how many were removed.
+//
+// Across every queue rather than only the calling thread's, because
+// Choreographer.removeFrameCallback is reachable from a thread other than the one
+// that posted — an app cancelling its pending frame during teardown routinely runs
+// on the main thread while the post came from its render thread. Cancelling nothing
+// in that case would leave the callback to fire into a half-destroyed object.
+int frame_pacer_remove(void* callback, void* data);
+
+// The frame timestamp currently being dispatched on THIS thread, or 0 outside a
+// callback.
+//
+// Thread-local because two threads can be inside their own frame callbacks at once
+// and each must see its own frame's time. Choreographer.getFrameTimeNanos is defined
+// only inside a callback on the platform; 0 outside is the honest answer here, and
+// the Java side turns it into "now".
+int64_t frame_pacer_current_frame_time_ns();
+
 // The host display's vsync period in nanoseconds. Queried from the platform once
 // and cached; 60 Hz until the answer arrives, and if it never does.
 //

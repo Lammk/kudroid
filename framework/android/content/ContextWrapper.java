@@ -39,6 +39,11 @@ public class ContextWrapper extends Context {
     public File getNoBackupFilesDir() { return mBase != null ? mBase.getNoBackupFilesDir() : new File("/data/data/com.kudroid.app/no_backup"); }
     public SharedPreferences getSharedPreferences(String name, int mode) { return mBase != null ? mBase.getSharedPreferences(name, mode) : new SharedPreferencesImpl(name); }
     public Object getSystemService(String name) { return mBase != null ? mBase.getSystemService(name) : super.getSystemService(name); }
+    // The Class overload has to delegate too, or a wrapped Context answers the two
+    // overloads from different objects. Activity is a ContextWrapper, so this is the
+    // path Unity's getSystemService(WindowManager.class) actually takes.
+    public Object getSystemService(Class<?> serviceClass) { return mBase != null ? mBase.getSystemService(serviceClass) : super.getSystemService(serviceClass); }
+    public String getSystemServiceName(Class<?> serviceClass) { return mBase != null ? mBase.getSystemServiceName(serviceClass) : super.getSystemServiceName(serviceClass); }
     public int checkSelfPermission(String permission) { return mBase != null ? mBase.checkSelfPermission(permission) : PackageManager.PERMISSION_GRANTED; }
     public Intent registerReceiver(BroadcastReceiver receiver, IntentFilter filter) { return mBase != null ? mBase.registerReceiver(receiver, filter) : null; }
     public void unregisterReceiver(BroadcastReceiver receiver) { if (mBase != null) mBase.unregisterReceiver(receiver); }

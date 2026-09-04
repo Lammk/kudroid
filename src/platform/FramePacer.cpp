@@ -191,6 +191,14 @@ PacerState& state() {
 
 thread_local Choreographer* t_instance = nullptr;
 
+// The frame timestamp being dispatched on this thread, 0 when not in a callback.
+//
+// Thread-local, not global: two threads can each be inside their own frame callback
+// at the same time, and a shared value would have one of them read the other's frame
+// time. Choreographer.getFrameTimeNanos is only defined inside a callback on the
+// platform, so 0 outside it is the truthful answer rather than a stale one.
+thread_local int64_t t_current_frame_time_ns = 0;
+
 // Frames delivered through the guest's looper, and frames the pacer had to deliver
 // itself because nobody collected them.
 //
@@ -358,10 +366,15 @@ int dispatch_instance(Choreographer* c) {
 
     for (int i = 0; i < count; ++i) {
         if (due[i].fn == nullptr) continue;
+        // Published for the duration of the call so getFrameTimeNanos() can answer
+        // from inside the callback, and cleared afterwards so it cannot report a stale
+        // frame to code that asks outside one.
+        t_current_frame_time_ns = static_cast<int64_t>(now);
         // void(long frameTimeNanos, void* data) — the 32-bit and 64-bit NDK forms
         // share this ABI on arm64, where long is 64-bit.
         reinterpret_cast<void (*)(int64_t, void*)>(due[i].fn)(static_cast<int64_t>(now),
                                                              due[i].data);
+        t_current_frame_time_ns = 0;
     }
     return count;
 }
@@ -572,6 +585,33 @@ void frame_pacer_request_rate(float frame_rate) {
             static_cast<long long>(interval_ns()));
     wake_pacer();
 }
+
+// Remove every queued entry matching (callback, data), on every thread's queue.
+//
+// Every queue, not just the calling thread's: Choreographer.removeFrameCallback is
+// routinely called from a thread other than the one that posted — an app cancelling
+// its pending frame during teardown runs on the main thread while the post came from
+// its render thread. Scanning only the caller's queue would silently cancel nothing
+// and let the callback fire into a half-destroyed object.
+int frame_pacer_remove(void* callback, void* data) {
+    if (callback == nullptr) return 0;
+    int removed = 0;
+    for (int i = 0; i <= kMaxInstances; ++i) {
+        Choreographer* c = (i == kMaxInstances) ? &state().shared : &state().instances[i];
+        std::lock_guard<std::mutex> lock(c->mtx);
+        for (size_t k = c->frame_callbacks.size(); k-- > 0;) {
+            if (c->frame_callbacks[k].fn == callback && c->frame_callbacks[k].data == data) {
+                c->frame_callbacks.erase(c->frame_callbacks.begin() + static_cast<long>(k));
+                ++removed;
+            }
+        }
+        c->pending.store(static_cast<unsigned>(c->frame_callbacks.size()),
+                         std::memory_order_release);
+    }
+    return removed;
+}
+
+int64_t frame_pacer_current_frame_time_ns() { return t_current_frame_time_ns; }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public queries

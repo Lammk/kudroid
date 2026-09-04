@@ -299,6 +299,99 @@ public abstract class Context {
     }
 
     /**
+     * The manager object for a manager CLASS, or null when there is none.
+     *
+     * Added because its absence stopped ULTRAKILL. Only the String overload existed, so
+     * Interpreter::ResolveMethod auto-stubbed this one — the class is present, only the
+     * method was missing, which yields a bodyless method rather than a
+     * NoSuchMethodError — and Unity's
+     * {@code getSystemService(WindowManager.class).getDefaultDisplay()} got null and
+     * threw NullPointerException. The log said only "call getDefaultDisplay on null",
+     * naming neither the service nor the missing overload.
+     *
+     * Resolved by asking the String overload and checking what came back, rather than by
+     * a second Class-to-name table. A second table is the actual hazard here: the two
+     * would drift, and a service reachable by name but not by class is indistinguishable
+     * — from the app's side — from one that was never implemented. That is precisely how
+     * INPUT_METHOD_SERVICE and ACTIVITY_SERVICE came to ship as unreachable classes.
+     *
+     * The candidate list only has to cover names whose manager type is not obvious from
+     * the name itself; every entry is verified against the returned object with
+     * isInstance, so a wrong guess yields null rather than a ClassCastException inside
+     * the caller.
+     */
+    public Object getSystemService(Class<?> serviceClass) {
+        if (serviceClass == null) return null;
+
+        // Ordered so the commonly-requested managers are found first. Each candidate is
+        // asked of the String overload above, which is the single source of truth for
+        // what this Context can actually provide.
+        final String[] candidates = {
+            WINDOW_SERVICE, LAYOUT_INFLATER_SERVICE, INPUT_METHOD_SERVICE, SENSOR_SERVICE,
+            AUDIO_SERVICE, VIBRATOR_SERVICE, VIBRATOR_MANAGER_SERVICE, CONNECTIVITY_SERVICE,
+            WIFI_SERVICE, TELEPHONY_SERVICE, TELEPHONY_SUBSCRIPTION_SERVICE,
+            CLIPBOARD_SERVICE, NOTIFICATION_SERVICE, ALARM_SERVICE, POWER_SERVICE,
+            KEYGUARD_SERVICE, ACTIVITY_SERVICE, ACCESSIBILITY_SERVICE, ACCOUNT_SERVICE,
+            APP_OPS_SERVICE, BLUETOOTH_SERVICE, DISPLAY_SERVICE, FINGERPRINT_SERVICE,
+            INPUT_SERVICE, JOB_SCHEDULER_SERVICE, LOCATION_SERVICE, SHORTCUT_SERVICE,
+            GRAMMATICAL_INFLECTION_SERVICE,
+        };
+
+        for (int i = 0; i < candidates.length; ++i) {
+            final Object service = getSystemService(candidates[i]);
+            // isInstance rather than a name comparison, so a subclass answers for its
+            // interface — WindowManagerImpl is what WINDOW_SERVICE returns and
+            // WindowManager.class is what an app asks for.
+            if (service != null && serviceClass.isInstance(service)) return service;
+        }
+
+        reportUnknownServiceClass(serviceClass);
+        return null;
+    }
+
+    /**
+     * The service name for a manager class, as Android's getSystemServiceName does.
+     *
+     * Derived from the same candidate walk as the Class overload, for the same reason:
+     * one source of truth. Returns null for a class this Context has no manager for,
+     * which is what the platform does.
+     */
+    public String getSystemServiceName(Class<?> serviceClass) {
+        if (serviceClass == null) return null;
+        final String[] candidates = {
+            WINDOW_SERVICE, LAYOUT_INFLATER_SERVICE, INPUT_METHOD_SERVICE, SENSOR_SERVICE,
+            AUDIO_SERVICE, VIBRATOR_SERVICE, VIBRATOR_MANAGER_SERVICE, CONNECTIVITY_SERVICE,
+            WIFI_SERVICE, TELEPHONY_SERVICE, TELEPHONY_SUBSCRIPTION_SERVICE,
+            CLIPBOARD_SERVICE, NOTIFICATION_SERVICE, ALARM_SERVICE, POWER_SERVICE,
+            KEYGUARD_SERVICE, ACTIVITY_SERVICE, ACCESSIBILITY_SERVICE, ACCOUNT_SERVICE,
+            APP_OPS_SERVICE, BLUETOOTH_SERVICE, DISPLAY_SERVICE, FINGERPRINT_SERVICE,
+            INPUT_SERVICE, JOB_SCHEDULER_SERVICE, LOCATION_SERVICE, SHORTCUT_SERVICE,
+            GRAMMATICAL_INFLECTION_SERVICE,
+        };
+        for (int i = 0; i < candidates.length; ++i) {
+            final Object service = getSystemService(candidates[i]);
+            if (service != null && serviceClass.isInstance(service)) return candidates[i];
+        }
+        return null;
+    }
+
+    /**
+     * Name a manager class KuDroid cannot provide, once per distinct class.
+     *
+     * Separate from reportUnknownService because the two say different things: a name
+     * with no manager is a missing mapping, while a CLASS with no manager may well be a
+     * mapping that exists under a name this walk does not try. Sharing one message would
+     * send a reader to the wrong half.
+     */
+    private static void reportUnknownServiceClass(Class<?> serviceClass) {
+        if (!sReportedMissingServices.add("class:" + serviceClass.getName())) return;
+        android.util.Log.w("Context",
+                "MISSING_SYSTEM_SERVICE: getSystemService(" + serviceClass.getName()
+                + ") -> null (no manager of this type; add it to Context.getSystemService"
+                + " or to the candidate list in the Class overload)");
+    }
+
+    /**
      * Name a service KuDroid does not provide, once per distinct name.
      *
      * Deliberately not an exception: Android returns null for a service the device

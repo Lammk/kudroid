@@ -450,6 +450,30 @@ DexMethod* Interpreter::ResolveMethod(const DexMethod* context, uint32_t method_
 
         auto stubM = std::make_unique<DexMethod>();
         stubM->name = name;
+        // The signature MUST be recorded, and leaving it null was not a cosmetic gap.
+        //
+        // NameAndSigMatch treats a null signature as "match anything", so a stub with no
+        // signature is found by name alone — and InvokeMethod re-resolves every virtual
+        // call against the receiver's class using target->signature. A stubbed overload
+        // therefore silently redirected to a DIFFERENT overload of the same name, with
+        // incompatible parameter types and no diagnostic at all.
+        //
+        // That is what ULTRAKILL hit. Unity called
+        // Activity.getSystemService(Ljava/lang/Class;), which was absent, so this stub was
+        // created; the re-resolution then found the real getSystemService(String) and the
+        // interpreter passed a java.lang.Class where a String was expected. The String
+        // overload compared it against its service names, matched none, and returned null
+        // — so the log read only "call getDefaultDisplay on null", naming neither the
+        // missing overload nor the substitution that caused it.
+        //
+        // It is luck that this particular case was survivable: equals() on the wrong type
+        // merely returns false. Had the stubbed overload's argument been a primitive
+        // redirected into a reference parameter, the same path would have handed an
+        // integer to code that dereferences it.
+        //
+        // Interned into the linker's heap because `signature` is a local std::string and
+        // DexMethod holds a borrowed pointer for the lifetime of the runtime.
+        stubM->signature = linker_->heap().InternString(signature.c_str());
         stubM->declaring_class = klass;
         stubM->access_flags = art::kAccPublic;
         stubM->code_item = nullptr;

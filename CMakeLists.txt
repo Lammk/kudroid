@@ -409,6 +409,18 @@ else()
     #                          that, unreflectSpecial is the only way to run an interface
     #                          default method on a Proxy: an ordinary call reaches the
     #                          InvocationHandler that is asking for it and recurses.
+    # test_kuart_choreographer
+    #                          android.view.Choreographer, the JAVA frame API. The NDK half
+    #                          (AChoreographer_*) was implemented and ULTRAKILL still stopped:
+    #                          Unity uses both, and this class was a nine-line stub whose
+    #                          FrameCallback interface declared no methods at all. Because the
+    #                          CLASS existed, the missing methods were auto-stubbed rather than
+    #                          reported, getInstance() returned null, and Unity's JNIBridge
+    #                          threw NoSuchMethodError out of Looper.loop. Also pins the
+    #                          auto-stub signature defect behind it: the stub left
+    #                          DexMethod::signature null, which NameAndSigMatch reads as
+    #                          "match anything", so getSystemService(Class) silently resolved
+    #                          to getSystemService(String).
     if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/test_art_dex.cpp")
         add_executable(test_art_dex kuart-tests/test_art_dex.cpp)
         target_link_libraries(test_art_dex PRIVATE art_dex ZLIB::ZLIB)
@@ -435,6 +447,7 @@ else()
         test_kuart_proxy
         test_kuart_default_methods
         test_kuart_method_handles
+        test_kuart_choreographer
         test_kuart_audiotrack
     )
         if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/${kuart_test}.cpp")
