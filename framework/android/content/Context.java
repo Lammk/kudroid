@@ -69,15 +69,15 @@ public abstract class Context {
     /**
      * Media routing.
      *
-     * The name is declared even though getSystemService returns null for it, because a
-     * caller reads the CONSTANT to build the call — {@code getSystemService(MEDIA_ROUTER_SERVICE)}
-     * needs the field to resolve before the lookup can even be attempted, and a missing
-     * field is a NoSuchFieldError rather than the null the caller is prepared for.
-     *
-     * Returning null is the honest answer: KuDroid presents audio through one CoreAudio
-     * output with no route selection, so there is nothing for a MediaRouter to enumerate.
-     * Apps handle null here — the platform itself returns null on devices without the
-     * service.
+     * Backed by {@link android.media.MediaRouter}, a single built-in route that is
+     * always selected: KuDroid presents audio through one CoreAudio output with no
+     * route selection, so there is nothing to enumerate — but the object must exist.
+     * Returning null here stopped ULTRAKILL: Unity's {@code bitter.jnibridge} bridge
+     * calls {@code getSystemService("media_router")} from inside
+     * {@code UnityPlayer.nativeRender} and reflects on the result without a
+     * null-check, so null became {@code NoClassDefFoundError: MediaRouter} and then
+     * an uncaught {@code NoSuchMethodError} out of {@code Looper.loop}, which killed
+     * {@code ActivityThread.main}.
      */
     public static final String MEDIA_ROUTER_SERVICE = "media_router";
     public static final String MEDIA_SESSION_SERVICE = "media_session";
@@ -291,6 +291,7 @@ public abstract class Context {
         if (name.equals(GRAMMATICAL_INFLECTION_SERVICE)) {
             return new android.app.GrammaticalInflectionManager();
         }
+        if (name.equals(MEDIA_ROUTER_SERVICE)) return MediaRouterHolder.get();
         // VibratorManager wraps a Vibrator on Android 12+; apps target either.
         if (name.equals(VIBRATOR_MANAGER_SERVICE)) return new SystemVibrator();
 
@@ -334,7 +335,7 @@ public abstract class Context {
             KEYGUARD_SERVICE, ACTIVITY_SERVICE, ACCESSIBILITY_SERVICE, ACCOUNT_SERVICE,
             APP_OPS_SERVICE, BLUETOOTH_SERVICE, DISPLAY_SERVICE, FINGERPRINT_SERVICE,
             INPUT_SERVICE, JOB_SCHEDULER_SERVICE, LOCATION_SERVICE, SHORTCUT_SERVICE,
-            GRAMMATICAL_INFLECTION_SERVICE,
+            GRAMMATICAL_INFLECTION_SERVICE, MEDIA_ROUTER_SERVICE,
         };
 
         for (int i = 0; i < candidates.length; ++i) {
@@ -366,7 +367,7 @@ public abstract class Context {
             KEYGUARD_SERVICE, ACTIVITY_SERVICE, ACCESSIBILITY_SERVICE, ACCOUNT_SERVICE,
             APP_OPS_SERVICE, BLUETOOTH_SERVICE, DISPLAY_SERVICE, FINGERPRINT_SERVICE,
             INPUT_SERVICE, JOB_SCHEDULER_SERVICE, LOCATION_SERVICE, SHORTCUT_SERVICE,
-            GRAMMATICAL_INFLECTION_SERVICE,
+            GRAMMATICAL_INFLECTION_SERVICE, MEDIA_ROUTER_SERVICE,
         };
         for (int i = 0; i < candidates.length; ++i) {
             final Object service = getSystemService(candidates[i]);
@@ -422,6 +423,25 @@ public abstract class Context {
         static synchronized android.view.inputmethod.InputMethodManager get() {
             if (sInstance == null) {
                 sInstance = android.view.inputmethod.InputMethodManager.getInstance();
+            }
+            return sInstance;
+        }
+    }
+
+    /**
+     * One MediaRouter per process.
+     *
+     * AOSP caches the router per Context; apps register a Callback once and expect
+     * later getSystemService calls to return an object that knows about it. A fresh
+     * instance per call would silently drop callbacks, so the holder mirrors
+     * InputMethodManagerHolder above.
+     */
+    private static final class MediaRouterHolder {
+        private static android.media.MediaRouter sInstance;
+
+        static synchronized android.media.MediaRouter get() {
+            if (sInstance == null) {
+                sInstance = new android.media.MediaRouter();
             }
             return sInstance;
         }
