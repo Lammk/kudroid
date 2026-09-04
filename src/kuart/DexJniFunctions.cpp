@@ -1125,6 +1125,7 @@ jfieldID JNICALL FromReflectedField(JNIEnv*, jobject field) {
 jobject JNICALL ToReflectedMethod(JNIEnv* env, jclass clazz, jmethodID methodID, jboolean /*isStatic*/) {
     DexJniEnv* self = Self(env);
     if (self == nullptr || methodID == nullptr) return nullptr;
+    DexMethod* m = reinterpret_cast<DexMethod*>(methodID);
     DexClass* method_cls = self->linker()->FindClass("Ljava/lang/reflect/Method;");
     if (method_cls == nullptr) return nullptr;
     DexObject* obj = self->linker()->AllocObject(method_cls);
@@ -1133,9 +1134,22 @@ jobject JNICALL ToReflectedMethod(JNIEnv* env, jclass clazz, jmethodID methodID,
     if (f_handle != nullptr) {
         obj->SetField<int64_t>(f_handle->offset_or_slot, reinterpret_cast<int64_t>(methodID));
     }
+    // A Method with null declaringClass/name is a trap: getName() returns null and
+    // toString() becomes "com.foo.Bar.null()", and Unity's JNIBridge turns that
+    // into NoSuchMethodError "java.lang.Runnable.null()" (cleared by native, then
+    // rethrown empty from bitter.jnibridge.a.invoke). Fill all three fields the
+    // same way LibCore::NewReflectObject does. The declaring class comes from the
+    // method itself (authoritative); the passed clazz is only a fallback.
+    DexClass* declaring = (m->declaring_class != nullptr) ? m->declaring_class
+                         : CheckedCls(self, clazz);
     const DexField* f_decl = method_cls->FindInstanceField("declaringClass", "Ljava/lang/Class;");
-    if (f_decl != nullptr && clazz != nullptr) {
-        obj->SetField<DexObject*>(f_decl->offset_or_slot, Obj(clazz));
+    if (f_decl != nullptr && declaring != nullptr) {
+        obj->SetField<DexObject*>(f_decl->offset_or_slot,
+                                  self->linker()->GetClassObject(declaring));
+    }
+    const DexField* f_name = method_cls->FindInstanceField("name", "Ljava/lang/String;");
+    if (f_name != nullptr && m->name != nullptr) {
+        obj->SetField<DexObject*>(f_name->offset_or_slot, self->linker()->NewString(m->name));
     }
     return self->AddLocalRef(obj);
 }
@@ -1143,6 +1157,7 @@ jobject JNICALL ToReflectedMethod(JNIEnv* env, jclass clazz, jmethodID methodID,
 jobject JNICALL ToReflectedField(JNIEnv* env, jclass clazz, jfieldID fieldID, jboolean /*isStatic*/) {
     DexJniEnv* self = Self(env);
     if (self == nullptr || fieldID == nullptr) return nullptr;
+    DexField* f = reinterpret_cast<DexField*>(fieldID);
     DexClass* field_cls = self->linker()->FindClass("Ljava/lang/reflect/Field;");
     if (field_cls == nullptr) return nullptr;
     DexObject* obj = self->linker()->AllocObject(field_cls);
@@ -1151,9 +1166,18 @@ jobject JNICALL ToReflectedField(JNIEnv* env, jclass clazz, jfieldID fieldID, jb
     if (f_handle != nullptr) {
         obj->SetField<int64_t>(f_handle->offset_or_slot, reinterpret_cast<int64_t>(fieldID));
     }
+    // Same completeness rule as ToReflectedMethod above: a Field with null
+    // declaringClass/name poisons every later reflective use of it.
+    DexClass* declaring = (f->declaring_class != nullptr) ? f->declaring_class
+                         : CheckedCls(self, clazz);
     const DexField* f_decl = field_cls->FindInstanceField("declaringClass", "Ljava/lang/Class;");
-    if (f_decl != nullptr && clazz != nullptr) {
-        obj->SetField<DexObject*>(f_decl->offset_or_slot, Obj(clazz));
+    if (f_decl != nullptr && declaring != nullptr) {
+        obj->SetField<DexObject*>(f_decl->offset_or_slot,
+                                  self->linker()->GetClassObject(declaring));
+    }
+    const DexField* f_name = field_cls->FindInstanceField("name", "Ljava/lang/String;");
+    if (f_name != nullptr && f->name != nullptr) {
+        obj->SetField<DexObject*>(f_name->offset_or_slot, self->linker()->NewString(f->name));
     }
     return self->AddLocalRef(obj);
 }
