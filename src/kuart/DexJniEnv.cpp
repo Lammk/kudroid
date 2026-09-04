@@ -457,7 +457,14 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
 DexValue DexJniEnv::CallJavaA(DexObject* receiver, DexMethod* method, const jvalue* args,
                               bool virtual_dispatch) {
     DexValue result;
-    if (method == nullptr || interpreter_ == nullptr) return result;
+    if (method == nullptr || interpreter_ == nullptr) {
+        // Was silent: native got null/0 back with no pending exception, returned
+        // OK to Java, and Unity's JNIBridge wrapper threw a messageless
+        // NoSuchMethodError far from here. Name the call site instead.
+        std::fprintf(stderr, "[KuART][JNI] CallJavaA with null method (receiver=%p)\n",
+                     reinterpret_cast<const void*>(receiver));
+        return result;
+    }
 
     // Virtual dispatch off a native-supplied receiver.
     //
@@ -597,7 +604,11 @@ DexValue DexJniEnv::CallJavaA(DexObject* receiver, DexMethod* method, const jval
 DexValue DexJniEnv::CallJavaV(DexObject* receiver, DexMethod* method, va_list args,
                               bool virtual_dispatch) {
     DexValue result;
-    if (method == nullptr) return result;
+    if (method == nullptr) {
+        std::fprintf(stderr, "[KuART][JNI] CallJavaV with null method (receiver=%p)\n",
+                     reinterpret_cast<const void*>(receiver));
+        return result;
+    }
 
     // va_arg promote: any type smaller than int to int, float to double.
     std::vector<jvalue> boxed;

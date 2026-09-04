@@ -220,7 +220,19 @@ void JNICALL ExceptionDescribe(JNIEnv* env) {
 }
 
 void JNICALL ExceptionClear(JNIEnv* env) {
-    if (DexJniEnv* self = Self(env)) self->ClearException();
+    if (DexJniEnv* self = Self(env)) {
+        // Diagnostic: native dismissing a pending exception is where the real
+        // cause goes to die — Unity's JNIBridge clears the inner failure and its
+        // Java wrapper then throws a messageless NoSuchMethodError, so the
+        // uncaught trace names only the wrapper. The cleared exception's
+        // class+message names the actual missing API. Grep JNI-CLEAR.
+        if (DexObject* ex = self->pending_exception()) {
+            std::fprintf(stderr, "[KuART][JNI] ExceptionClear dropping %s (%s)\n",
+                         ex->clazz != nullptr ? ex->clazz->PrettyName().c_str() : "?",
+                         self->last_error().c_str());
+        }
+        self->ClearException();
+    }
 }
 
 jboolean JNICALL ExceptionCheck(JNIEnv* env) {
@@ -1083,12 +1095,19 @@ jlong JNICALL GetDirectBufferCapacity(JNIEnv*, jobject buf) {
 
 jmethodID JNICALL FromReflectedMethod(JNIEnv*, jobject method) {
     DexObject* obj = Obj(method);
-    if (obj == nullptr || obj->clazz == nullptr) return nullptr;
+    if (obj == nullptr || obj->clazz == nullptr) {
+        std::fprintf(stderr, "[KuART][JNI] FromReflectedMethod with null/invalid object\n");
+        return nullptr;
+    }
     const DexField* f_handle = obj->clazz->FindInstanceField("artMethod", "J");
     if (f_handle != nullptr) {
         int64_t m = obj->GetField<int64_t>(f_handle->offset_or_slot);
+        if (m == 0) {
+            std::fprintf(stderr, "[KuART][JNI] FromReflectedMethod with zero artMethod\n");
+        }
         return reinterpret_cast<jmethodID>(m);
     }
+    std::fprintf(stderr, "[KuART][JNI] FromReflectedMethod with no artMethod field\n");
     return nullptr;
 }
 

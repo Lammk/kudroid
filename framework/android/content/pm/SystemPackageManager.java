@@ -112,6 +112,12 @@ public class SystemPackageManager extends PackageManager {
         PackageInfo pi = new PackageInfo();
         pi.packageName = packageName;
         pi.applicationInfo = getApplicationInfo(packageName, flags);
+        // Never leave these unset: Unity parses versionName at startup
+        // (split on "."), and a null here becomes an NPE/FormatException far
+        // from the real cause. The manifest value should be plumbed through
+        // registerPackage later; "1.0.0"/1 is the honest fallback until then.
+        pi.versionName = "1.0.0";
+        pi.versionCode = 1;
         return pi;
     }
 

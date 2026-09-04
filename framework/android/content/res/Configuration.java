@@ -148,7 +148,22 @@ public final class Configuration implements Parcelable, Comparable<Configuration
         smallestScreenWidthDp = o.smallestScreenWidthDp;
         densityDpi = o.densityDpi;
     }
-    public Locale getLocales() { return locale; }
+    /**
+     * The locales, as {@link android.os.LocaleList}.
+     *
+     * AOSP changed the signature at API 24 from {@code Locale getLocale()} to
+     * {@code LocaleList getLocales()}. This used to declare the new NAME with the
+     * old TYPE, so any app built for API 24+ (Unity targets 30+) failed to resolve
+     * {@code getLocales()Landroid/os/LocaleList;} through JNIBridge reflection —
+     * a NoSuchMethodError out of the main Handler with no other trace.
+     */
+    public android.os.LocaleList getLocales() { return new android.os.LocaleList(locale); }
+    /** Pre-24 spelling, kept for old callers. */
+    public Locale getLocale() { return locale; }
+    public void setLocale(Locale l) { if (l != null) locale = l; }
+    public void setLocales(android.os.LocaleList list) {
+        if (list != null && !list.isEmpty() && list.get(0) != null) locale = list.get(0);
+    }
     public boolean isScreenRound() { return false; }
     public boolean isScreenHdr() { return (colorMode & COLOR_MODE_HDR_MASK) == COLOR_MODE_HDR_YES; }
     public boolean isScreenWideColorGamut() {
