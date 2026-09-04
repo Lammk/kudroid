@@ -1138,6 +1138,25 @@ DexValue Interpreter::ExecuteFrame(DexFrame* frame) {
 void Interpreter::ReportUncaughtException() {
     if (!HasPendingException()) return;
     std::fprintf(stderr, "[KuART][EXCEPTION] 💥 uncaught: %s\n", last_error_.c_str());
+    // Guest `throw` carries its reason in Throwable.message, which last_error_ does
+    // not include (it is only "throw ClassName"). Print it so the next missing API
+    // names itself instead of needing one device round-trip per guess. Null-safe:
+    // this runs on the crash path and must not crash the crash reporter.
+    if (pending_exception_ != nullptr && pending_exception_->clazz != nullptr) {
+        if (DexField* f_msg = pending_exception_->clazz->FindInstanceField(
+                "message", "Ljava/lang/String;")) {
+            DexObject* msg_obj =
+                pending_exception_->GetField<DexObject*>(f_msg->offset_or_slot);
+            if (msg_obj != nullptr && msg_obj->clazz != nullptr &&
+                msg_obj->clazz->descriptor != nullptr &&
+                std::strcmp(msg_obj->clazz->descriptor, "Ljava/lang/String;") == 0) {
+                const char* utf8 = reinterpret_cast<DexString*>(msg_obj)->utf8;
+                if (utf8 != nullptr && utf8[0] != '\0') {
+                    std::fprintf(stderr, "[KuART][EXCEPTION] message: %s\n", utf8);
+                }
+            }
+        }
+    }
     if (!pending_exception_trace_.empty()) {
         std::fputs(pending_exception_trace_.c_str(), stderr);
     }
