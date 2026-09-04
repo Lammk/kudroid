@@ -847,6 +847,20 @@ bool Invoke_java_lang_reflect_Method(Interpreter* interp, const char* name,
         DexObject* receiver = num_args > 1 ? args[1].l : nullptr;
         auto* boxed = num_args > 2 ? reinterpret_cast<DexArray*>(args[2].l) : nullptr;
 
+        // Diagnostic: Unity's JNIBridge reflects every Java call from C# through
+        // here, and when it throws a messageless NoSuchMethodError the only way
+        // to know which method died is this line. The last REFLECT line before
+        // the uncaught trace is the prime suspect. Grep REFLECT in stderr.log.
+        {
+            const char* owner = (m->declaring_class != nullptr &&
+                                 m->declaring_class->descriptor != nullptr)
+                                    ? m->declaring_class->descriptor
+                                    : "?";
+            std::fprintf(stderr, "[KuART][REFLECT] invoke %s.%s%s\n", owner,
+                         m->name != nullptr ? m->name : "?",
+                         m->signature != nullptr ? m->signature : "?");
+        }
+
         if (!m->IsStatic() && receiver == nullptr) {
             interp->ThrowException("Ljava/lang/NullPointerException;",
                                    std::string("invoke ") + m->name + " on null");
@@ -870,7 +884,17 @@ bool Invoke_java_lang_reflect_Method(Interpreter* interp, const char* name,
         if (!BuildInvokeArgs(interp, target, receiver, boxed, &call_args)) return true;
 
         const DexValue ret = interp->Execute(target, call_args.data(), call_args.size());
-        if (interp->HasPendingException()) return true;
+        if (interp->HasPendingException()) {
+            const char* owner = (target->declaring_class != nullptr &&
+                                 target->declaring_class->descriptor != nullptr)
+                                    ? target->declaring_class->descriptor
+                                    : "?";
+            std::fprintf(stderr, "[KuART][REFLECT] invoke FAILED %s.%s%s: %s\n",
+                         owner, target->name != nullptr ? target->name : "?",
+                         target->signature != nullptr ? target->signature : "?",
+                         interp->last_error().c_str());
+            return true;
+        }
 
         const char* ret_desc = ReturnDescriptor(target);
         result->l = (ret_desc[0] == 'V') ? nullptr : BoxValue(interp, ret_desc, ret);
