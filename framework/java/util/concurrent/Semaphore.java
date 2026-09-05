@@ -76,4 +76,16 @@ public class Semaphore implements Serializable {
     public synchronized int availablePermits() {
         return permits;
     }
+
+    /**
+     * Atomically takes all permits. Unity's destroy path calls this to reset
+     * the pause semaphore; was absent (auto-stubbed to constant 0, which reads
+     * as "nothing to drain" and is harmless only by luck — a nonzero permit
+     * left over would let the NEXT acquire pass without waiting).
+     */
+    public synchronized int drainPermits() {
+        int drained = permits;
+        permits = 0;
+        return drained;
+    }
 }

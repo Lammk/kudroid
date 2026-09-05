@@ -74,6 +74,9 @@ public final class Looper {
         }
     }
     public static Looper myLooper() { return sThreadLocal.get(); }
+    public static MessageQueue myQueue() {
+        return myLooper().getQueue();
+    }
     public void quit() { mQueue.quit(); }
     public void quitSafely() { mQueue.quit(); }
     /**

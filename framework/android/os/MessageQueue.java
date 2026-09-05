@@ -11,6 +11,23 @@ public final class MessageQueue {
     private boolean mQuitting = false;
 
     /**
+     * Idle callbacks. Unity registers one on the UnityMain queue at startup
+     * (and Choreographer-style pumps use them for vsync-adjacent work); with
+     * no IdleHandler type the registration died as NPE-on-null and took the
+     * whole UnityMain thread down before the first frame.
+     */
+    public static interface IdleHandler {
+        /**
+         * Called when the queue has nothing ready to dispatch. Return false
+         * to unregister, true to stay registered.
+         */
+        boolean queueIdle();
+    }
+
+    private final java.util.ArrayList<IdleHandler> mIdleHandlers =
+            new java.util.ArrayList<IdleHandler>();
+
+    /**
      * False for the main looper: quitting it kills the process's event pump.
      * Matches AOSP, where quit() on the main queue throws instead of silently
      * ending the session (which is exactly how a stray quit becomes a mystery
@@ -121,11 +138,16 @@ public final class MessageQueue {
 
                 if (msg != null) {
                     if (now < msg.when) {
-                        // Next message is in the future. Calculate wait timeout.
-                        long timeout = msg.when - now;
-                        try {
-                            this.wait(timeout);
-                        } catch (InterruptedException ignored) {}
+                        // Head is in the future: run idle handlers first (AOSP
+                        // does), then wait out the remainder. Handlers that
+                        // enqueue work wake this wait via notifyAll.
+                        dispatchIdleHandlers();
+                        long timeout = msg.when - SystemClock.uptimeMillis();
+                        if (timeout > 0) {
+                            try {
+                                this.wait(timeout);
+                            } catch (InterruptedException ignored) {}
+                        }
                     } else {
                         // Message is ready to dispatch
                         mMessages = msg.next;
@@ -134,11 +156,52 @@ public final class MessageQueue {
                         return msg;
                     }
                 } else {
-                    // No messages, wait unbounded for notification
+                    // Idle: run idle handlers, then wait unbounded for
+                    // notification. Unlike AOSP (which re-polls immediately
+                    // and can spin on a staying-registered handler), one pass
+                    // per wake keeps CPU bounded; any enqueue wakes us.
+                    dispatchIdleHandlers();
                     try {
                         this.wait();
                     } catch (InterruptedException ignored) {}
                 }
+            }
+        }
+    }
+
+    public void addIdleHandler(IdleHandler handler) {
+        if (handler == null) {
+            throw new NullPointerException("IdleHandler must not be null");
+        }
+        synchronized (this) {
+            mIdleHandlers.add(handler);
+        }
+    }
+
+    public void removeIdleHandler(IdleHandler handler) {
+        synchronized (this) {
+            mIdleHandlers.remove(handler);
+        }
+    }
+
+    /**
+     * Runs registered idle handlers. Called from next() when the queue has no
+     * message ready (empty, or head still in the future). A handler returning
+     * false is unregistered, matching AOSP. Runs under the queue monitor like
+     * AOSP so add/remove cannot interleave mid-dispatch.
+     */
+    private void dispatchIdleHandlers() {
+        int count = mIdleHandlers.size();
+        for (int i = 0; i < count; i++) {
+            IdleHandler handler = mIdleHandlers.get(i);
+            boolean keep = false;
+            try {
+                keep = handler.queueIdle();
+            } catch (Throwable ignored) {}
+            if (!keep) {
+                mIdleHandlers.remove(handler);
+                i--;
+                count--;
             }
         }
     }
