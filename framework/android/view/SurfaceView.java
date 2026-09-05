@@ -188,6 +188,7 @@ public class SurfaceView extends View implements SurfaceHolder.Callback2 {
         @Override
         public void addCallback(Callback callback) {
             if (callback == null) return;
+            android.util.Log.e("KuSurface", "addCallback " + callback.getClass().getName());
             boolean isNew = false;
             synchronized (mCallbacks) {
                 if (!mCallbacks.contains(callback)) {

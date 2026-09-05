@@ -593,6 +593,10 @@ public final class ActivityThread {
         if (activity == null) return;
         try {
             android.view.SurfaceView foundSv = findSurfaceView(activity);
+            android.util.Log.e("KuSurface", "dispatch foundSv="
+                    + (foundSv != null ? foundSv.getClass().getName() : "null")
+                    + " activity=" + activity.getClass().getName()
+                    + " reqOri=" + activity.getRequestedOrientation());
             if (foundSv != null) {
                 android.util.Log.i("ActivityThread", "Found SurfaceView in hierarchy -> dispatching surfaceCreated");
                 foundSv.dispatchSurfaceCreated();
@@ -639,6 +643,8 @@ public final class ActivityThread {
                     // orientation-corrected size here, and only on change —
                     // firing created+changed again rebuilds Unity's swapchain
                     // for an identical surface.
+                    android.util.Log.e("KuSurface", "direct changedOnce "
+                            + cb.getClass().getName() + " " + surfaceW + "x" + surfaceH);
                     foundSv.dispatchSurfaceChangedOnce(cb, 0, surfaceW, surfaceH);
                 } else {
                     cb.surfaceCreated(holder);
