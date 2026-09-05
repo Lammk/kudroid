@@ -109,6 +109,9 @@ jclass JNICALL FindClass(JNIEnv* env, const char* name) {
     const std::string descriptor = ToDescriptor(name);
     DexClass* klass = self->linker()->FindClass(descriptor.c_str());
     if (klass == nullptr) {
+        if (JnibridgeTraceActive()) {
+            std::fprintf(stderr, "[KuART][JNIBRIDGE] FindClass %s -> MISS\n", name);
+        }
         ThrowLookupFailure(self, "Ljava/lang/NoClassDefFoundError;", name);
         return nullptr;
     }
@@ -117,6 +120,9 @@ jclass JNICALL FindClass(JNIEnv* env, const char* name) {
     // GetMethodID, which returns null and takes the library down with no name
     // attached. Report the missing class here instead. See DexClass::is_stub.
     if (klass->is_stub) {
+        if (JnibridgeTraceActive()) {
+            std::fprintf(stderr, "[KuART][JNIBRIDGE] FindClass %s -> STUB\n", name);
+        }
         ThrowLookupFailure(self, "Ljava/lang/NoClassDefFoundError;",
                            klass->PrettyName() +
                                " (class not implemented in KuDroid framework)");
@@ -124,6 +130,9 @@ jclass JNICALL FindClass(JNIEnv* env, const char* name) {
     }
     // JNI FindClass instantiates the class (as defined by the JNI spec).
     if (self->interpreter() != nullptr) self->interpreter()->EnsureInitialized(klass);
+    if (JnibridgeTraceActive()) {
+        std::fprintf(stderr, "[KuART][JNIBRIDGE] FindClass %s -> FOUND\n", name);
+    }
     return ToJClass(klass);
 }
 
@@ -143,7 +152,12 @@ jboolean JNICALL IsAssignableFrom(JNIEnv* env, jclass sub, jclass sup) {
     DexClass* a = CheckedCls(self, sub);
     DexClass* b = CheckedCls(self, sup);
     if (a == nullptr || b == nullptr) return JNI_FALSE;
-    return a->IsSubClassOf(b) ? JNI_TRUE : JNI_FALSE;
+    const jboolean r = a->IsSubClassOf(b) ? JNI_TRUE : JNI_FALSE;
+    if (JnibridgeTraceActive()) {
+        std::fprintf(stderr, "[KuART][JNIBRIDGE] IsAssignableFrom %s -> %s = %d\n",
+                     a->PrettyName().c_str(), b->PrettyName().c_str(), r);
+    }
+    return r;
 }
 
 jclass JNICALL GetObjectClass(JNIEnv* env, jobject obj) {
@@ -164,6 +178,9 @@ jclass JNICALL GetObjectClass(JNIEnv* env, jobject obj) {
     // GetObjectClass(someClass) is expected to return java.lang.Class. Detect that
     // case and answer with Class rather than misreading memory.
     if (self->linker()->IsRegisteredClass(reinterpret_cast<const DexClass*>(o))) {
+        if (JnibridgeTraceActive()) {
+            std::fprintf(stderr, "[KuART][JNIBRIDGE] GetObjectClass -> java.lang.Class (jclass input)\n");
+        }
         return ToJClass(self->linker()->FindClass("Ljava/lang/Class;"));
     }
 
@@ -171,7 +188,12 @@ jclass JNICALL GetObjectClass(JNIEnv* env, jobject obj) {
     // jobject whose class is java.lang.Class. ClassOfObject validates what it finds,
     // so a stale handle whose clazz is non-null but not a class returns null here
     // instead of being handed to the caller as a jclass.
-    return ToJClass(self->linker()->ClassOfObject(o));
+    DexClass* result = self->linker()->ClassOfObject(o);
+    if (JnibridgeTraceActive()) {
+        std::fprintf(stderr, "[KuART][JNIBRIDGE] GetObjectClass -> %s\n",
+                     result != nullptr ? result->PrettyName().c_str() : "(null)");
+    }
+    return ToJClass(result);
 }
 
 jboolean JNICALL IsInstanceOf(JNIEnv* env, jobject obj, jclass clazz) {
@@ -182,12 +204,24 @@ jboolean JNICALL IsInstanceOf(JNIEnv* env, jobject obj, jclass clazz) {
     if (k == nullptr || self == nullptr) return JNI_FALSE;
     DexClass* o_class = self->linker()->ClassOfObject(o);
     if (o_class == nullptr) return JNI_FALSE;
-    return o_class->IsSubClassOf(k) ? JNI_TRUE : JNI_FALSE;
+    const jboolean r = o_class->IsSubClassOf(k) ? JNI_TRUE : JNI_FALSE;
+    if (JnibridgeTraceActive()) {
+        std::fprintf(stderr, "[KuART][JNIBRIDGE] IsInstanceOf %s -> %s = %d\n",
+                     o_class->PrettyName().c_str(), k->PrettyName().c_str(), r);
+    }
+    return r;
 }
 
 jint JNICALL Throw(JNIEnv* env, jthrowable obj) {
     DexJniEnv* self = Self(env);
     if (self == nullptr) return JNI_ERR;
+    if (JnibridgeTraceActive()) {
+        DexObject* ex = Obj(obj);
+        std::fprintf(stderr, "[KuART][JNIBRIDGE] Throw %s\n",
+                     (ex != nullptr && ex->clazz != nullptr)
+                         ? ex->clazz->PrettyName().c_str()
+                         : "(null)");
+    }
     self->SetPendingException(Obj(obj));
     return JNI_OK;
 }
@@ -249,7 +283,12 @@ void JNICALL ExceptionClear(JNIEnv* env) {
 
 jboolean JNICALL ExceptionCheck(JNIEnv* env) {
     DexJniEnv* self = Self(env);
-    return (self != nullptr && self->pending_exception() != nullptr) ? JNI_TRUE : JNI_FALSE;
+    const jboolean r =
+        (self != nullptr && self->pending_exception() != nullptr) ? JNI_TRUE : JNI_FALSE;
+    if (JnibridgeTraceActive()) {
+        std::fprintf(stderr, "[KuART][JNIBRIDGE] ExceptionCheck -> %d\n", r);
+    }
+    return r;
 }
 
 void JNICALL FatalError(JNIEnv*, const char* msg) {
@@ -291,7 +330,11 @@ jobject JNICALL NewLocalRef(JNIEnv* env, jobject ref) {
 }
 
 jboolean JNICALL IsSameObject(JNIEnv*, jobject a, jobject b) {
-    return Obj(a) == Obj(b) ? JNI_TRUE : JNI_FALSE;
+    const jboolean r = Obj(a) == Obj(b) ? JNI_TRUE : JNI_FALSE;
+    if (JnibridgeTraceActive()) {
+        std::fprintf(stderr, "[KuART][JNIBRIDGE] IsSameObject -> %d\n", r);
+    }
+    return r;
 }
 
 jint JNICALL EnsureLocalCapacity(JNIEnv*, jint) { return JNI_OK; }
@@ -389,6 +432,10 @@ jmethodID JNICALL GetMethodID(JNIEnv* env, jclass clazz, const char* name, const
     DexMethod* m = k->FindVirtualMethod(name, sig);
     if (m == nullptr) m = k->FindDirectMethod(name, sig);
     if (m == nullptr) {
+        if (JnibridgeTraceActive()) {
+            std::fprintf(stderr, "[KuART][JNIBRIDGE] GetMethodID %s.%s%s -> MISS\n",
+                         k->PrettyName().c_str(), name, sig != nullptr ? sig : "?");
+        }
         ThrowLookupFailure(self, "Ljava/lang/NoSuchMethodError;",
                            k->PrettyName() + "." + name + (sig != nullptr ? sig : ""));
     } else if (JnibridgeTraceActive()) {
@@ -414,6 +461,10 @@ jmethodID JNICALL GetStaticMethodID(JNIEnv* env, jclass clazz, const char* name,
     }
     DexMethod* m = k->FindDirectMethod(name, sig);
     if (m == nullptr) {
+        if (JnibridgeTraceActive()) {
+            std::fprintf(stderr, "[KuART][JNIBRIDGE] GetStaticMethodID %s.%s%s -> MISS\n",
+                         k->PrettyName().c_str(), name, sig != nullptr ? sig : "?");
+        }
         ThrowLookupFailure(self, "Ljava/lang/NoSuchMethodError;",
                            k->PrettyName() + "." + name + (sig != nullptr ? sig : ""));
     } else if (JnibridgeTraceActive()) {
@@ -435,9 +486,16 @@ jfieldID JNICALL GetFieldID(JNIEnv* env, jclass clazz, const char* name, const c
     }
     DexField* f = k->FindInstanceField(name, sig);
     if (f == nullptr) {
+        if (JnibridgeTraceActive()) {
+            std::fprintf(stderr, "[KuART][JNIBRIDGE] GetFieldID %s.%s -> MISS\n",
+                         k->PrettyName().c_str(), name);
+        }
         ThrowLookupFailure(self, "Ljava/lang/NoSuchFieldError;",
                            k->PrettyName() + "." + name + " " +
                                (sig != nullptr ? sig : ""));
+    } else if (JnibridgeTraceActive()) {
+        std::fprintf(stderr, "[KuART][JNIBRIDGE] GetFieldID %s.%s -> FOUND\n",
+                     k->PrettyName().c_str(), name);
     }
     return reinterpret_cast<jfieldID>(f);
 }
@@ -454,9 +512,16 @@ jfieldID JNICALL GetStaticFieldID(JNIEnv* env, jclass clazz, const char* name, c
     }
     DexField* f = k->FindStaticField(name, sig);
     if (f == nullptr) {
+        if (JnibridgeTraceActive()) {
+            std::fprintf(stderr, "[KuART][JNIBRIDGE] GetStaticFieldID %s.%s -> MISS\n",
+                         k->PrettyName().c_str(), name);
+        }
         ThrowLookupFailure(self, "Ljava/lang/NoSuchFieldError;",
                            k->PrettyName() + "." + name + " " +
                                (sig != nullptr ? sig : ""));
+    } else if (JnibridgeTraceActive()) {
+        std::fprintf(stderr, "[KuART][JNIBRIDGE] GetStaticFieldID %s.%s -> FOUND\n",
+                     k->PrettyName().c_str(), name);
     }
     return reinterpret_cast<jfieldID>(f);
 }
@@ -733,6 +798,13 @@ void JNICALL CallStaticVoidMethod(JNIEnv* env, jclass c, jmethodID mid, ...) {
         DexObject* o = Obj(obj);                                                    \
         DexField* f = Fld(fid);                                                     \
         if (o == nullptr || f == nullptr) return RET_TYPE();                         \
+        if (JnibridgeTraceActive()) {                                               \
+            std::fprintf(stderr, "[KuART][JNIBRIDGE] Get%sField %s.%s\n", #NAME,     \
+                         f->declaring_class != nullptr                              \
+                             ? f->declaring_class->PrettyName().c_str()              \
+                             : "?",                                                 \
+                         f->name != nullptr ? f->name : "?");                       \
+        }                                                                            \
         return static_cast<RET_TYPE>(o->GetField<CTYPE>(f->offset_or_slot));         \
     }                                                                                \
     void JNICALL Set##NAME##Field(JNIEnv*, jobject obj, jfieldID fid, RET_TYPE v) { \
@@ -758,6 +830,13 @@ jobject JNICALL GetObjectField(JNIEnv* env, jobject obj, jfieldID fid) {
     DexObject* o = Obj(obj);
     DexField* f = Fld(fid);
     if (self == nullptr || o == nullptr || f == nullptr) return nullptr;
+    if (JnibridgeTraceActive()) {
+        std::fprintf(stderr, "[KuART][JNIBRIDGE] GetObjectField %s.%s\n",
+                     f->declaring_class != nullptr
+                         ? f->declaring_class->PrettyName().c_str()
+                         : "?",
+                     f->name != nullptr ? f->name : "?");
+    }
     return self->AddLocalRef(o->GetField<DexObject*>(f->offset_or_slot));
 }
 
@@ -816,6 +895,9 @@ void JNICALL SetStaticObjectField(JNIEnv*, jclass, jfieldID fid, jobject v) {
 jstring JNICALL NewStringUTF(JNIEnv* env, const char* utf) {
     DexJniEnv* self = Self(env);
     if (self == nullptr || utf == nullptr) return nullptr;
+    if (JnibridgeTraceActive()) {
+        std::fprintf(stderr, "[KuART][JNIBRIDGE] NewStringUTF \"%.64s\"\n", utf);
+    }
     return reinterpret_cast<jstring>(self->AddLocalRef(self->linker()->NewString(utf)));
 }
 
@@ -827,6 +909,11 @@ jsize JNICALL GetStringUTFLength(JNIEnv*, jstring str) {
 const char* JNICALL GetStringUTFChars(JNIEnv*, jstring str, jboolean* isCopy) {
     DexString* s = Str(str);
     if (isCopy != nullptr) *isCopy = JNI_FALSE;  // Return the heap buffer directly
+    if (JnibridgeTraceActive()) {
+        std::fprintf(stderr, "[KuART][JNIBRIDGE] GetStringUTFChars len=%u \"%.64s\"\n",
+                     s != nullptr ? s->length : 0,
+                     (s != nullptr && s->utf8 != nullptr) ? s->utf8 : "(null)");
+    }
     return s != nullptr ? s->utf8 : nullptr;
 }
 
@@ -901,7 +988,11 @@ jlong JNICALL GetStringUTFLengthAsLong(JNIEnv*, jstring str) {
 
 jsize JNICALL GetArrayLength(JNIEnv*, jarray array) {
     DexArray* a = Arr(array);
-    return a != nullptr ? a->length : 0;
+    const jsize len = a != nullptr ? a->length : 0;
+    if (JnibridgeTraceActive()) {
+        std::fprintf(stderr, "[KuART][JNIBRIDGE] GetArrayLength -> %d\n", len);
+    }
+    return len;
 }
 
 // Primitive array: array class name is descriptor with '[' in front.
@@ -961,7 +1052,16 @@ jobject JNICALL GetObjectArrayElement(JNIEnv* env, jobjectArray array, jsize ind
     DexJniEnv* self = Self(env);
     DexArray* a = Arr(array);
     if (self == nullptr || a == nullptr || index < 0 || index >= a->length) return nullptr;
-    return self->AddLocalRef(a->Get<DexObject*>(index));
+    DexObject* elem = a->Get<DexObject*>(index);
+    if (JnibridgeTraceActive()) {
+        DexClass* ec =
+            (elem != nullptr && self->linker() != nullptr)
+                ? self->linker()->ClassOfObject(elem)
+                : nullptr;
+        std::fprintf(stderr, "[KuART][JNIBRIDGE] GetObjectArrayElement [%d] -> %s\n",
+                     index, ec != nullptr ? ec->PrettyName().c_str() : "(null)");
+    }
+    return self->AddLocalRef(elem);
 }
 
 void JNICALL SetObjectArrayElement(JNIEnv*, jobjectArray array, jsize index, jobject val) {
@@ -1147,6 +1247,15 @@ jfieldID JNICALL FromReflectedField(JNIEnv*, jobject field) {
     const DexField* f_handle = obj->clazz->FindInstanceField("artField", "J");
     if (f_handle != nullptr) {
         int64_t f = obj->GetField<int64_t>(f_handle->offset_or_slot);
+        if (JnibridgeTraceActive()) {
+            const DexField* df =
+                reinterpret_cast<const DexField*>(static_cast<uintptr_t>(f));
+            std::fprintf(stderr, "[KuART][JNIBRIDGE] FromReflectedField -> %s.%s\n",
+                         (df != nullptr && df->declaring_class != nullptr)
+                             ? df->declaring_class->PrettyName().c_str()
+                             : "?",
+                         (df != nullptr && df->name != nullptr) ? df->name : "?");
+        }
         return reinterpret_cast<jfieldID>(f);
     }
     return nullptr;
