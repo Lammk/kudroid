@@ -900,8 +900,10 @@ extern "C" PFN_vkVoidFunction bionic_vkGetInstanceProcAddr(VkInstance instance, 
 typedef uint32_t (*PFN_vkQueuePresentKHR_fn)(void*, const void*);
 typedef uint32_t (*PFN_vkAcquireNextImageKHR_fn)(void*, void*, uint64_t, void*, void*,
                                                  uint32_t*);
+typedef uint32_t (*PFN_vkCreateSwapchainKHR_fn)(void*, const void*, const void*, void**);
 static PFN_vkQueuePresentKHR_fn s_realQueuePresent = nullptr;
 static PFN_vkAcquireNextImageKHR_fn s_realAcquireNextImage = nullptr;
+static PFN_vkCreateSwapchainKHR_fn s_realCreateSwapchain = nullptr;
 static std::atomic<uint64_t> s_presentCount{0};
 static std::atomic<uint64_t> s_acquireCount{0};
 
@@ -930,8 +932,7 @@ extern "C" uint32_t bionic_vkQueuePresentKHR(void* queue, const void* present_in
 
 extern "C" uint32_t bionic_vkAcquireNextImageKHR(void* device, void* swapchain, uint64_t timeout,
                                                 void* semaphore, void* fence,
-                                                uint32_t* image_index) {
-    const uint64_t n = ++s_acquireCount;
+                                                uint32_t* image_index) {    const uint64_t n = ++s_acquireCount;
     uint32_t index = 0xFFFFFFFFu;
     uint32_t r = 0xFFFFFFFFu;
     if (s_realAcquireNextImage != nullptr) {
@@ -941,6 +942,24 @@ extern "C" uint32_t bionic_vkAcquireNextImageKHR(void* device, void* swapchain, 
     if (n <= 5 || r != 0 || (n % 120) == 0) {
         gpuLog("vkAcquireNextImageKHR #%llu -> %u image=%u", (unsigned long long)n, r, index);
     }
+    return r;
+}
+
+extern "C" uint32_t bionic_vkCreateSwapchainKHR(void* device, const void* create_info,
+                                               const void* allocator, void** swapchain) {
+    // TEMP DIAGNOSTIC (ULTRAKILL Vulkan black): associate swapchain<->surface.
+    // VkSwapchainCreateInfoKHR 64-bit layout: sType(0) pNext(8) flags(16)
+    // surface(24) minImageCount(32).
+    void* surface = nullptr;
+    if (create_info != nullptr) {
+        surface = *(void* const*) (static_cast<const char*>(create_info) + 24);
+    }
+    void* created = nullptr;
+    const uint32_t r = s_realCreateSwapchain != nullptr
+                           ? s_realCreateSwapchain(device, create_info, allocator, &created)
+                           : 0xFFFFFFFFu;
+    if (swapchain != nullptr) *swapchain = created;
+    gpuLog("vkCreateSwapchainKHR surface=%p -> %u swap=%p", surface, r, created);
     return r;
 }
 
@@ -966,6 +985,15 @@ extern "C" PFN_vkVoidFunction bionic_vkGetDeviceProcAddr(VkDevice device, const 
     }
     if (strcmp(pName, "vkAcquireNextImageKHR") == 0 && s_realAcquireNextImage != nullptr) {
         return reinterpret_cast<PFN_vkVoidFunction>(&bionic_vkAcquireNextImageKHR);
+    }
+    if (strcmp(pName, "vkCreateSwapchainKHR") == 0 && s_realCreateSwapchain == nullptr) {
+        if (void* mvk = get_mvk_handle()) {
+            s_realCreateSwapchain = reinterpret_cast<PFN_vkCreateSwapchainKHR_fn>(
+                ::dlsym(mvk, "vkCreateSwapchainKHR"));
+        }
+    }
+    if (strcmp(pName, "vkCreateSwapchainKHR") == 0 && s_realCreateSwapchain != nullptr) {
+        return reinterpret_cast<PFN_vkVoidFunction>(&bionic_vkCreateSwapchainKHR);
     }
     void* mvk = get_mvk_handle();
     if (mvk) {
