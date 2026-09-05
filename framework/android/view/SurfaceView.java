@@ -65,34 +65,6 @@ public class SurfaceView extends View implements SurfaceHolder.Callback2 {
         }
     }
 
-    /**
-     * Deliver a size/format change to one callback, skipping it when that
-     * callback already saw these exact dimensions. Used by ActivityThread's
-     * direct-activity path (orientation-corrected size) so it shares one
-     * record with the holder dispatches above instead of doubling them.
-     */
-    public void dispatchSurfaceChangedOnce(SurfaceHolder.Callback cb, int format, int w, int h) {
-        if (cb == null) return;
-        if (!(mHolder instanceof SimpleSurfaceHolder)) {
-            try {
-                cb.surfaceChanged(mHolder, format, w, h);
-            } catch (Throwable t) {
-                android.util.Log.e("SurfaceHolder", "Error in dispatchSurfaceChangedOnce: " + t);
-            }
-            return;
-        }
-        SimpleSurfaceHolder holder = (SimpleSurfaceHolder) mHolder;
-        if (!holder.markChanged(cb, w, h, format)) return;
-        try {
-            cb.surfaceChanged(holder, format, w, h);
-            if (cb instanceof SurfaceHolder.Callback2) {
-                ((SurfaceHolder.Callback2) cb).surfaceRedrawNeeded(holder);
-            }
-        } catch (Throwable t) {
-            android.util.Log.e("SurfaceHolder", "Error in dispatchSurfaceChangedOnce: " + t);
-        }
-    }
-
     @Override
     protected void onDraw(Canvas canvas) {}
 
@@ -100,54 +72,9 @@ public class SurfaceView extends View implements SurfaceHolder.Callback2 {
         private final View mView;
         private final Surface mSurface = new Surface();
         private final java.util.ArrayList<Callback> mCallbacks = new java.util.ArrayList<Callback>();
-        /**
-         * Callbacks already told about this surface's creation, and the last
-         * dimensions each one saw. AOSP fires created once per surface and
-         * changed only when size/format actually changes; firing either on
-         * every dispatch makes Unity rebuild its swapchain every time (it saw
-         * four recreates in two seconds at startup, churning the very
-         * swapchain images it was presenting). removeCallback clears both so
-         * re-adding behaves like a fresh registration.
-         */
-        private final java.util.ArrayList<Callback> mCreatedFired =
-                new java.util.ArrayList<Callback>();
-        private final java.util.ArrayList<Callback> mChangedCbs =
-                new java.util.ArrayList<Callback>();
-        private final java.util.ArrayList<String> mChangedDims =
-                new java.util.ArrayList<String>();
 
         public SimpleSurfaceHolder(View view) {
             mView = view;
-        }
-
-        /**
-         * True the first time this callback is fired for the current surface;
-         * marks it either way so every dispatch path shares one record.
-         */
-        private boolean markCreated(Callback cb) {
-            synchronized (mCallbacks) {
-                if (mCreatedFired.contains(cb)) return false;
-                mCreatedFired.add(cb);
-                return true;
-            }
-        }
-
-        /**
-         * True when (w,h,format) differs from what this callback last saw.
-         */
-        private boolean markChanged(Callback cb, int w, int h, int format) {
-            String dims = w + "," + h + "," + format;
-            synchronized (mCallbacks) {
-                int i = mChangedCbs.indexOf(cb);
-                if (i >= 0 && dims.equals(mChangedDims.get(i))) return false;
-                if (i >= 0) {
-                    mChangedDims.set(i, dims);
-                } else {
-                    mChangedCbs.add(cb);
-                    mChangedDims.add(dims);
-                }
-                return true;
-            }
         }
 
         public void dispatchSurfaceCreated() {
@@ -167,16 +94,16 @@ public class SurfaceView extends View implements SurfaceHolder.Callback2 {
             for (Object obj : cbs) {
                 if (obj instanceof Callback) {
                     Callback cb = (Callback) obj;
-                    boolean created = markCreated(cb);
-                    boolean changed = markChanged(cb, w, h, 0);
-                    if (!created && !changed) continue;
+                    // Deliberately no dedupe here: Unity recovers from repeated
+                    // created/changed (it rebuilt its swapchain 4x and rendered
+                    // fine), but it cannot recover from a changed it never
+                    // gets — suppressing redelivery starved Gfx init entirely
+                    // (zero recreates, zero renders). See ActivityThread.
                     try {
-                        if (created) cb.surfaceCreated(this);
-                        if (changed) {
-                            cb.surfaceChanged(this, 0, w, h);
-                            if (cb instanceof Callback2) {
-                                ((Callback2) cb).surfaceRedrawNeeded(this);
-                            }
+                        cb.surfaceCreated(this);
+                        cb.surfaceChanged(this, 0, w, h);
+                        if (cb instanceof Callback2) {
+                            ((Callback2) cb).surfaceRedrawNeeded(this);
                         }
                     } catch (Throwable t) {
                         android.util.Log.e("SurfaceHolder", "Error in dispatchSurfaceCreated: " + t);
@@ -208,16 +135,14 @@ public class SurfaceView extends View implements SurfaceHolder.Callback2 {
                 }
                 if (w <= 0) w = 1080;
                 if (h <= 0) h = 1920;
-                boolean created = markCreated(callback);
-                boolean changed = markChanged(callback, w, h, 0);
-                if (!created && !changed) return;
+                // No dedupe (see dispatchSurfaceCreated above): the immediate
+                // fire on registration is the only delivery a late registrant
+                // may ever get.
                 try {
-                    if (created) callback.surfaceCreated(this);
-                    if (changed) {
-                        callback.surfaceChanged(this, 0, w, h);
-                        if (callback instanceof Callback2) {
-                            ((Callback2) callback).surfaceRedrawNeeded(this);
-                        }
+                    callback.surfaceCreated(this);
+                    callback.surfaceChanged(this, 0, w, h);
+                    if (callback instanceof Callback2) {
+                        ((Callback2) callback).surfaceRedrawNeeded(this);
                     }
                 } catch (Throwable t) {
                     android.util.Log.e("SurfaceHolder", "Error in immediate addCallback surface dispatch: " + t);
@@ -230,12 +155,6 @@ public class SurfaceView extends View implements SurfaceHolder.Callback2 {
             if (callback == null) return;
             synchronized (mCallbacks) {
                 mCallbacks.remove(callback);
-                mCreatedFired.remove(callback);
-                int i = mChangedCbs.indexOf(callback);
-                if (i >= 0) {
-                    mChangedCbs.remove(i);
-                    mChangedDims.remove(i);
-                }
             }
         }
 
