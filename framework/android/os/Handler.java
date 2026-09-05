@@ -19,17 +19,32 @@ public class Handler {
     }
 
     /**
-     * default constructor - uses main iterator.
+     * default constructor - uses the current thread's looper.
+     *
+     * Was bound to the MAIN looper regardless of calling thread, which put
+     * every background Handler (notably Unity's UnityMain render driver, built
+     * as `new Handler(callback)` on its own thread) onto the UI thread: ticks
+     * dispatched on main, renders ran on main, and the driver's quit message
+     * quit the MAIN looper instead of its own. AOSP binds myLooper() here.
      */
     public Handler() {
-        this(Looper.getMainLooper(), null);
+        this(findLooper(), null);
     }
 
     /**
      * constructor with a callback.
      */
     public Handler(Callback callback) {
-        this(Looper.getMainLooper(), callback);
+        this(findLooper(), callback);
+    }
+
+    private static Looper findLooper() {
+        Looper looper = Looper.myLooper();
+        if (looper == null) {
+            throw new RuntimeException("Can't create handler inside thread "
+                    + Thread.currentThread() + " that has not called Looper.prepare()");
+        }
+        return looper;
     }
 
     /**
