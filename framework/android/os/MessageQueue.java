@@ -50,6 +50,11 @@ public final class MessageQueue {
         // apart. Remove once the stall is understood.
         if (msg.what == 2269) {
             String obj = (msg.obj != null) ? msg.obj.getClass().getName() : "null";
+            if (msg.obj != null) {
+                try {
+                    obj += ":" + msg.obj.toString();
+                } catch (Throwable ignored) {}
+            }
             android.util.Log.e("KuTick", "post what=2269 obj=" + obj
                     + " target=" + msg.target.getClass().getName());
         }

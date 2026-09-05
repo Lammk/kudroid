@@ -24,6 +24,35 @@ public final class System {
 
     public static native void exit(int status);
 
+    /**
+     * Live properties built from the same keys as the native getProperty
+     * table (see LibCore Invoke_java_lang_System); unknown keys read null
+     * and are skipped because Hashtable forbids null values.
+     *
+     * This used to be absent entirely, so the runtime auto-stubbed it with a
+     * null return — and UnityPlayer.getNetworkProxySettings then threw NPE on
+     * getProperty. An empty-but-real Properties is what callers expect.
+     */
+    public static java.util.Properties getProperties() {
+        java.util.Properties p = new java.util.Properties();
+        String[] keys = {
+            "line.separator", "file.separator", "path.separator",
+            "java.io.tmpdir", "user.dir", "user.home", "java.vm.name",
+            "java.vm.vendor", "java.vendor", "java.specification.name",
+            "java.vm.specification.name", "java.vm.version", "java.version",
+            "java.specification.version", "java.runtime.name",
+            "java.runtime.version", "os.name", "os.arch", "os.version",
+            "file.encoding",
+        };
+        for (int i = 0; i < keys.length; i++) {
+            String v = getProperty(keys[i]);
+            if (v != null) {
+                p.setProperty(keys[i], v);
+            }
+        }
+        return p;
+    }
+
     public static void gc() {
     }
 
