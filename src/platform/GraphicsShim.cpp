@@ -909,9 +909,22 @@ extern "C" uint32_t bionic_vkQueuePresentKHR(void* queue, const void* present_in
     const uint64_t n = ++s_presentCount;
     const uint32_t r =
         s_realQueuePresent != nullptr ? s_realQueuePresent(queue, present_info) : 0;
-    if (n <= 5 || r != 0 || (n % 120) == 0) {
-        gpuLog("vkQueuePresentKHR #%llu -> %u", (unsigned long long)n, r);
+    // Log every present: result + target swapchain/image (standard
+    // VkPresentInfoKHR 64-bit layout) so a present stream that stops, fails,
+    // or switches swapchain mid-run is visible. ~30 lines/s while running.
+    void* swapchain = nullptr;
+    uint32_t image_index = 0xFFFFFFFFu;
+    if (present_info != nullptr) {
+        const void* const* words = static_cast<const void* const*>(present_info);
+        // sType(0) pNext(8) waitCount(16) pWait(24) swapCount(32) pSwap(40)
+        // pImageIdx(48) pResults(56)
+        const void* const* p_swap = static_cast<const void* const*>(words[5]);
+        const uint32_t* p_idx = static_cast<const uint32_t*>(words[6]);
+        if (p_swap != nullptr) swapchain = const_cast<void*>(p_swap[0]);
+        if (p_idx != nullptr) image_index = p_idx[0];
     }
+    gpuLog("vkQueuePresentKHR #%llu -> %u swap=%p image=%u",
+           (unsigned long long)n, r, swapchain, image_index);
     return r;
 }
 

@@ -8,7 +8,7 @@ package android.view;
  * missing one throws NoSuchMethodError during Activity creation and stops onCreate before
  * a surface exists. Seven were missing, which is what left Minecraft on a black screen.
  */
-public class KeyEvent {
+public class KeyEvent extends InputEvent {
     /** Action: key is pressed down. */
     public static final int ACTION_DOWN = 0;
     /** Action: key is released. */

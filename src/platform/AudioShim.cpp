@@ -12,6 +12,8 @@
 #include <unordered_map>
 #include <memory>
 #include <atomic>
+#include <cstdio>
+#include <atomic>
 #include <string>
 
 #if defined(__APPLE__)
@@ -764,6 +766,14 @@ extern "C" int64_t bionic_kudroid_audiotrack_create(int32_t sampleRateInHz,
                                                     int32_t encoding,
                                                     int32_t bufferSizeInBytes) {
     (void)bufferSizeInBytes;
+    // TEMP DIAGNOSTIC (ULTRAKILL silence): prove samples reach the shim.
+    static std::atomic<int> s_tracks{0};
+    const int n = ++s_tracks;
+    if (n <= 3) {
+        std::fprintf(stderr,
+                     "[KuDroidAudio] AudioTrack create #%d rate=%d ch=%d enc=%d\n",
+                     n, sampleRateInHz, channelCount, encoding);
+    }
     if (sampleRateInHz <= 0 || channelCount <= 0) return 0;
 
     auto player = std::make_shared<AudioPlayer>();
@@ -793,8 +803,19 @@ extern "C" int32_t bionic_kudroid_audiotrack_write(int64_t track, const void* da
     auto p = audiotrack_find(track);
     if (!p || sizeInBytes < 0) return -3;  // ERROR_INVALID_OPERATION
     if (sizeInBytes == 0) return 0;
+    // TEMP DIAGNOSTIC (ULTRAKILL silence): byte flow + failures.
+    static std::atomic<long long> s_bytes{0};
+    static std::atomic<int> s_fails{0};
 #if defined(__APPLE__)
-    if (!enqueue_pcm(p.get(), data, static_cast<uint32_t>(sizeInBytes))) return -1;  // ERROR
+    if (!enqueue_pcm(p.get(), data, static_cast<uint32_t>(sizeInBytes))) {
+        const int f = ++s_fails;
+        if (f <= 3) std::fprintf(stderr, "[KuDroidAudio] write FAILED #%d\n", f);
+        return -1;  // ERROR
+    }
+    const long long total = (s_bytes += sizeInBytes);
+    if (total - sizeInBytes == 0 || (total / 10000000) != ((total - sizeInBytes) / 10000000)) {
+        std::fprintf(stderr, "[KuDroidAudio] written %lld bytes total\n", total);
+    }
     return sizeInBytes;
 #else
     // Host build: hand it to the same worker the OpenSL path uses, so the callback and

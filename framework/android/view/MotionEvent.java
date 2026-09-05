@@ -15,7 +15,7 @@ package android.view;
  * device IDs) the answer is the one Android gives for "none", not a guess: a guest reading
  * a fabricated non-zero value would act on it.
  */
-public final class MotionEvent {
+public final class MotionEvent extends InputEvent {
     /** action: down. */
     public static final int ACTION_DOWN = 0;
     /** action: up. */
