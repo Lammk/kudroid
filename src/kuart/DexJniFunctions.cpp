@@ -32,6 +32,27 @@ DexField* Fld(jfieldID f) { return reinterpret_cast<DexField*>(f); }
 DexString* Str(jstring s) { return reinterpret_cast<DexString*>(s); }
 DexArray* Arr(jarray a) { return reinterpret_cast<DexArray*>(a); }
 
+// The DexClass denoted by a handle that may name a class either way KuART
+// represents one: the raw DexClass* JNI uses as a jclass, or the heap
+// java.lang.Class instance (DexClassObject) bytecode and reflection use.
+//
+// On ART these are the same object, so a native `IsSameObject(a, b)` mixing the
+// two forms answers true. Here they are different pointers to the same class,
+// and a raw pointer comparison answers false — which is exactly how Unity's
+// generated proxy dispatch fails: it compares the incoming `clazz`
+// (from Method.getDeclaringClass(), a heap instance) against its cached
+// interface jclass (a raw DexClass*), finds them "different", and throws
+// NoSuchMethodError for a method that exists.
+//
+// Only set lookups, no dereference of the handle itself, so an arbitrary
+// non-class pointer safely resolves to null rather than faulting.
+DexClass* ClassOfHandle(DexJniEnv* self, DexObject* o) {
+    if (o == nullptr || self == nullptr || self->linker() == nullptr) return nullptr;
+    if (DexClass* represented = self->linker()->ClassFromObject(o)) return represented;
+    const DexClass* k = reinterpret_cast<const DexClass*>(o);
+    return self->linker()->IsRegisteredClass(k) ? const_cast<DexClass*>(k) : nullptr;
+}
+
 // A jclass, validated against the linker before it is dereferenced.
 //
 // jclass is a raw DexClass* by convention (see DexJniEnv.h), so a handle that is
@@ -329,10 +350,28 @@ jobject JNICALL NewLocalRef(JNIEnv* env, jobject ref) {
     return self != nullptr ? self->AddLocalRef(Obj(ref)) : nullptr;
 }
 
-jboolean JNICALL IsSameObject(JNIEnv*, jobject a, jobject b) {
-    const jboolean r = Obj(a) == Obj(b) ? JNI_TRUE : JNI_FALSE;
+jboolean JNICALL IsSameObject(JNIEnv* env, jobject a, jobject b) {
+    DexObject* oa = Obj(a);
+    DexObject* ob = Obj(b);
+    jboolean r = JNI_FALSE;
+    if (oa == ob) {
+        r = JNI_TRUE;
+    } else if (DexJniEnv* self = Self(env)) {
+        // Same class under the two handle forms (see ClassOfHandle): a raw
+        // pointer comparison is not the whole answer on KuART.
+        DexClass* ka = ClassOfHandle(self, oa);
+        DexClass* kb = ClassOfHandle(self, ob);
+        if (ka != nullptr && ka == kb) r = JNI_TRUE;
+    }
     if (JnibridgeTraceActive()) {
-        std::fprintf(stderr, "[KuART][JNIBRIDGE] IsSameObject -> %d\n", r);
+        DexClass* ka = ClassOfHandle(Self(env), oa);
+        DexClass* kb = ClassOfHandle(Self(env), ob);
+        std::fprintf(stderr, "[KuART][JNIBRIDGE] IsSameObject a=%p[%s] b=%p[%s] -> %d\n",
+                     reinterpret_cast<const void*>(oa),
+                     ka != nullptr ? ka->PrettyName().c_str() : "?",
+                     reinterpret_cast<const void*>(ob),
+                     kb != nullptr ? kb->PrettyName().c_str() : "?",
+                     r);
     }
     return r;
 }

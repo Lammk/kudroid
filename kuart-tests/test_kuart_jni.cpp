@@ -232,6 +232,31 @@ Check(env->IsSameObject(global, nat) == JNI_TRUE, "NewGlobalRef c ng object");
     Check(env->GetObjectRefType(global) == JNIGlobalRefType, "GetObjectRefType global");
     env->DeleteGlobalRef(global);
 
+    // jclass duality: FindClass returns the raw DexClass*, while reflection
+    // (getDeclaringClass, const-class) hands out the heap java.lang.Class
+    // instance — a different pointer for the same class. On ART both ARE the
+    // same object, and native code mixes the forms (Unity's generated proxy
+    // dispatch compares the incoming declaring-Class against its cached
+    // interface jclass with IsSameObject, then throws NoSuchMethodError on
+    // false). Both orders must answer true; different classes stay false.
+    {
+        kudroid::kuart::DexJniEnv* self = kudroid::kuart::DexJniEnv::FromEnv(env);
+        kudroid::kuart::DexClass* raw =
+            reinterpret_cast<kudroid::kuart::DexClass*>(k);
+        jobject heap_cls = reinterpret_cast<jobject>(
+            self != nullptr ? self->linker()->GetClassObject(raw) : nullptr);
+Check(heap_cls != nullptr && heap_cls != reinterpret_cast<jobject>(k),
+"heap Class instance is a distinct pointer from the raw jclass");
+Check(env->IsSameObject(k, heap_cls) == JNI_TRUE,
+"IsSameObject(raw jclass, heap Class) is true");
+Check(env->IsSameObject(heap_cls, k) == JNI_TRUE,
+"IsSameObject(heap Class, raw jclass) is true");
+Check(env->IsSameObject(k, super) == JNI_FALSE,
+"IsSameObject of two different classes stays false");
+Check(env->IsSameObject(nullptr, nullptr) == JNI_TRUE,
+"IsSameObject(null, null) stays true");
+    }
+
     env->PushLocalFrame(8);
     jstring inner = env->NewStringUTF("tmp");
     jobject kept = env->PopLocalFrame(inner);
