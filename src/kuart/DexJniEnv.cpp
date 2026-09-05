@@ -528,6 +528,13 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
                           (method->name != nullptr ? method->name : "?");
             break;
     }
+    // TEMP DIAGNOSTIC (ULTRAKILL render stall): Unity's frame loop lives or dies
+    // on UnityPlayer.nativeRender()'s boolean — false quits the game. Log it.
+    if (std::strcmp(owner, "Lcom/unity3d/player/UnityPlayer;") == 0 && shorty != nullptr &&
+        (shorty[0] == 'Z' || shorty[0] == 'I')) {
+        std::fprintf(stderr, "[KuART][UNITYPLAYER] %s%s -> %d\n", method_name,
+                     method_sig, result.i);
+    }
     native_call_exit();
     return result;
 }
