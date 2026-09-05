@@ -98,6 +98,20 @@ DexJniEnv* DexJniEnv::FromEnv(JNIEnv* env) {
     return reinterpret_cast<EnvStorage*>(env)->self;
 }
 
+thread_local bool t_jnibridge_trace = false;
+
+bool JnibridgeTraceActive() { return t_jnibridge_trace; }
+
+// RAII guard: restores the previous state so a nested native call (a Java callback
+// made inside invoke calling back out to another native) cannot leak the flag.
+struct JnibridgeTraceGuard {
+    bool prev;
+    explicit JnibridgeTraceGuard(bool on) : prev(t_jnibridge_trace) {
+        if (on) t_jnibridge_trace = true;
+    }
+    ~JnibridgeTraceGuard() { t_jnibridge_trace = prev; }
+};
+
 DexJniEnv* DexJniEnv::FromVm(JavaVM* vm) {
     if (vm == nullptr) return nullptr;
     return reinterpret_cast<VmStorage*>(vm)->self;
@@ -221,6 +235,59 @@ bool DexJniEnv::LinkNativeMethod(DexMethod* method) {
     return false;
 }
 
+// One-line decode of Unity's JNIBridge.invoke(J, Class, Method, Object[]) arguments:
+// the native peer pointer, the interface Class, and the reflected Method (name and
+// signature via its artMethod handle). Logged once at entry so a failing call can
+// be told apart from a succeeding one without decoding raw pointers from the log.
+void LogJnibridgeInvokeArgs(DexClassLinker* linker, const DexValue* args, size_t num_args) {
+    if (linker == nullptr || args == nullptr || num_args < 4) {
+        std::fprintf(stderr, "[KuART][JNIBRIDGE] invoke (undecodable args=%zu)\n", num_args);
+        return;
+    }
+    const int64_t ptr = args[0].j;
+
+    std::string cls_name = "?";
+    if (DexObject* cls_obj = args[1].l) {
+        DexClass* cls = linker->ClassFromObject(cls_obj);
+        if (cls == nullptr &&
+            linker->IsRegisteredClass(reinterpret_cast<const DexClass*>(cls_obj))) {
+            cls = reinterpret_cast<DexClass*>(cls_obj);
+        }
+        if (cls != nullptr) cls_name = cls->PrettyName();
+    }
+
+    std::string method_name = "?";
+    if (DexObject* m_obj = args[2].l) {
+        if (m_obj->clazz != nullptr) {
+            if (const DexField* f = m_obj->clazz->FindInstanceField("artMethod", "J")) {
+                auto* m = reinterpret_cast<const DexMethod*>(
+                    static_cast<uintptr_t>(m_obj->GetField<int64_t>(f->offset_or_slot)));
+                if (m != nullptr) {
+                    method_name = (m->declaring_class != nullptr)
+                                      ? m->declaring_class->PrettyName()
+                                      : "?";
+                    method_name += ".";
+                    method_name += m->name != nullptr ? m->name : "?";
+                    method_name += m->signature != nullptr ? m->signature : "?";
+                } else {
+                    method_name = "(null artMethod)";
+                }
+            }
+        }
+    }
+
+    int nargs = -1;
+    if (DexObject* arr_obj = args[3].l) {
+        DexClass* ac = linker->ClassOfObject(arr_obj);
+        if (ac != nullptr && ac->is_array) {
+            nargs = static_cast<DexArray*>(arr_obj)->length;
+        }
+    }
+    std::fprintf(stderr, "[KuART][JNIBRIDGE] invoke ptr=0x%llx class=%s method=%s nargs=%d\n",
+                 static_cast<unsigned long long>(ptr), cls_name.c_str(),
+                 method_name.c_str(), nargs);
+}
+
 DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t num_args) {
     DexValue result;
     if (method == nullptr) return result;
@@ -238,6 +305,17 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
                             ? method->declaring_class->descriptor : "?";
     const char* method_name = method->name != nullptr ? method->name : "?";
     const char* method_sig = method->signature != nullptr ? method->signature : "?";
+    // Trace every JNI call made while Unity's bridge runs: the bridge is a black
+    // box (real libunity.so code) and the failing lookup inside it is invisible
+    // otherwise. Scoped to this call's dynamic extent by the RAII guard.
+    const bool is_jnibridge_invoke =
+        std::strcmp(owner, "Lbitter/jnibridge/JNIBridge;") == 0 &&
+        std::strcmp(method_name, "invoke") == 0;
+    JnibridgeTraceGuard trace_guard(is_jnibridge_invoke);
+    if (is_jnibridge_invoke) {
+        LogJnibridgeInvokeArgs(interpreter_ != nullptr ? interpreter_->linker() : nullptr,
+                               args, num_args);
+    }
     const auto native_start = std::chrono::steady_clock::now();
     KLOGV("KuARTNative", "enter class=%s method=%s sig=%s args=%zu vm_depth=%d",
           owner, method_name, method_sig, num_args, VmLockDepth());
@@ -465,6 +543,19 @@ DexValue DexJniEnv::CallJavaA(DexObject* receiver, DexMethod* method, const jval
                      reinterpret_cast<const void*>(receiver));
         return result;
     }
+    if (t_jnibridge_trace) {
+        std::string recv = "(null)";
+        if (receiver != nullptr && linker_ != nullptr) {
+            if (DexClass* rc = linker_->ClassOfObject(receiver)) recv = rc->PrettyName();
+        }
+        std::fprintf(stderr, "[KuART][JNIBRIDGE] CallJavaA %s.%s%s virtual=%d receiver=%s\n",
+                     method->declaring_class != nullptr
+                         ? method->declaring_class->PrettyName().c_str()
+                         : "?",
+                     method->name != nullptr ? method->name : "?",
+                     method->signature != nullptr ? method->signature : "?",
+                     virtual_dispatch ? 1 : 0, recv.c_str());
+    }
 
     // Virtual dispatch off a native-supplied receiver.
     //
@@ -477,8 +568,7 @@ DexValue DexJniEnv::CallJavaA(DexObject* receiver, DexMethod* method, const jval
     // named: the jmethodID is a separately validated handle, so a non-virtual call
     // is the conservative interpretation rather than a crash.
     if (receiver != nullptr && linker_ != nullptr &&
-        linker_->IsRegisteredClass(reinterpret_cast<const DexClass*>(receiver))) {
-        // A jclass receiver is not a mistake. In the JNI object model a jclass IS the
+        linker_->IsRegisteredClass(reinterpret_cast<const DexClass*>(receiver))) {        // A jclass receiver is not a mistake. In the JNI object model a jclass IS the
         // java.lang.Class instance, so CallObjectMethod(cls, Class.getClassLoader) is
         // exactly how native code asks a class for its loader — which is what
         // libminecraftpe does on the way to finding its renderer .so.

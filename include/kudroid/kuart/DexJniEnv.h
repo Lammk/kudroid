@@ -157,6 +157,12 @@ private:
     std::string last_error_;
 };
 
+// Scoped JNI tracing, active only while Unity's bitter.jnibridge.JNIBridge.invoke
+// native method runs (set in DexJniEnv::CallNative). Lets the handful of JNI
+// entry points Unity's bridge uses log their arguments/results so the failing
+// lookup inside invoke can be identified from the log.
+bool JnibridgeTraceActive();
+
 }  // namespace kuart
 }  // namespace kudroid
 

@@ -201,6 +201,10 @@ jint JNICALL ThrowNew(JNIEnv* env, jclass clazz, const char* msg) {
     if (ex == nullptr) return JNI_ERR;
     self->SetPendingException(ex);
     self->set_last_error(k->PrettyName() + ": " + (msg != nullptr ? msg : ""));
+    if (JnibridgeTraceActive()) {
+        std::fprintf(stderr, "[KuART][JNIBRIDGE] ThrowNew %s: %s\n",
+                     k->PrettyName().c_str(), msg != nullptr ? msg : "");
+    }
     return JNI_OK;
 }
 
@@ -387,6 +391,12 @@ jmethodID JNICALL GetMethodID(JNIEnv* env, jclass clazz, const char* name, const
     if (m == nullptr) {
         ThrowLookupFailure(self, "Ljava/lang/NoSuchMethodError;",
                            k->PrettyName() + "." + name + (sig != nullptr ? sig : ""));
+    } else if (JnibridgeTraceActive()) {
+        std::fprintf(stderr, "[KuART][JNIBRIDGE] GetMethodID %s.%s%s -> FOUND in %s\n",
+                     k->PrettyName().c_str(), name, sig != nullptr ? sig : "?",
+                     m->declaring_class != nullptr
+                         ? m->declaring_class->PrettyName().c_str()
+                         : "?");
     }
     return reinterpret_cast<jmethodID>(m);
 }
@@ -406,6 +416,9 @@ jmethodID JNICALL GetStaticMethodID(JNIEnv* env, jclass clazz, const char* name,
     if (m == nullptr) {
         ThrowLookupFailure(self, "Ljava/lang/NoSuchMethodError;",
                            k->PrettyName() + "." + name + (sig != nullptr ? sig : ""));
+    } else if (JnibridgeTraceActive()) {
+        std::fprintf(stderr, "[KuART][JNIBRIDGE] GetStaticMethodID %s.%s%s -> FOUND\n",
+                     k->PrettyName().c_str(), name, sig != nullptr ? sig : "?");
     }
     return reinterpret_cast<jmethodID>(m);
 }
@@ -1112,6 +1125,15 @@ jmethodID JNICALL FromReflectedMethod(JNIEnv*, jobject method) {
         int64_t m = obj->GetField<int64_t>(f_handle->offset_or_slot);
         if (m == 0) {
             std::fprintf(stderr, "[KuART][JNI] FromReflectedMethod with zero artMethod\n");
+        } else if (JnibridgeTraceActive()) {
+            const DexMethod* dm = reinterpret_cast<const DexMethod*>(
+                static_cast<uintptr_t>(m));
+            std::fprintf(stderr, "[KuART][JNIBRIDGE] FromReflectedMethod -> %s.%s%s\n",
+                         dm->declaring_class != nullptr
+                             ? dm->declaring_class->PrettyName().c_str()
+                             : "?",
+                         dm->name != nullptr ? dm->name : "?",
+                         dm->signature != nullptr ? dm->signature : "?");
         }
         return reinterpret_cast<jmethodID>(m);
     }
