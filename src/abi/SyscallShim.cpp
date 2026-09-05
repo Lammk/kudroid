@@ -1971,7 +1971,11 @@ extern "C" bool bionic_handle_guest_syscall_trap(void* context) {
 
 // Wrappers previously bound to the dummy; on arm64/Linux these match the host signatures.
 extern "C" ssize_t bionic_pread64(int fd, void* buf, size_t count, off_t offset) {
+    const auto t0 = std::chrono::steady_clock::now();
     const ssize_t ret = ::pread(fd, buf, count, offset);
+    const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - t0)
+                             .count();
     // Diagnostic: short reads on asset/bank streaming corrupt async loads.
     if ((ret >= 0 && static_cast<size_t>(ret) < count) || ret < 0) {
         static std::atomic<int> s_logged{0};
@@ -1981,6 +1985,16 @@ extern "C" ssize_t bionic_pread64(int fd, void* buf, size_t count, off_t offset)
                          "[KuDroidIO] pread64 fd=%d count=%zu offset=%lld ret=%zd%s\n",
                          fd, count, static_cast<long long>(offset), ret,
                          ret < 0 ? " ERR" : " SHORT");
+        }
+    }
+    // Diagnostic: slow asset reads starve async loaders (mixer hits pending voices).
+    if (ms >= 5 && count >= 65536) {
+        static std::atomic<int> s_slow{0};
+        if (s_slow.load() < 20) {
+            ++s_slow;
+            std::fprintf(stderr,
+                         "[KuDroidIO] slow pread64 fd=%d count=%zu ret=%zd took=%lldms\n",
+                         fd, count, ret, ms);
         }
     }
     return ret;

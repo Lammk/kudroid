@@ -1594,6 +1594,20 @@ extern "C" const char* kudroid_vfs_extended_test_log(void) {
     return result;
 }
 
+static std::atomic<bool> s_isApkRunning{false};
+
+// One in-flight teardown: X, viewWillDisappear and deinit can each post DESTROY.
+// File scope so run end can re-arm it; resetting right after unbind allowed a
+// second DESTROY into a half-destroyed engine.
+static std::atomic<bool> s_stopping{false};
+
+// Install generation: bumped on every install/uninstall. Guest .so mappings live
+// for the process lifetime (unmapping under a detached thread aborts), so a run
+// started after an install would reuse stale code. The run entry refuses instead.
+static std::atomic<uint64_t> s_installGeneration{0};
+static std::atomic<bool> s_libsResident{false};
+static std::atomic<uint64_t> s_libsGeneration{0};
+
 extern "C" const char* kudroid_install_apk(const char* apkPath) {
     std::string log = "[kudroid_core] ===== APK Install =====\n";
     if (!apkPath || !*apkPath) {
@@ -1619,6 +1633,27 @@ extern "C" const char* kudroid_install_apk(const char* apkPath) {
         log += "[kudroid_apk] APK: " + source.string() + "\n";
         log += "[kudroid_apk] Target Android Package: " + pkgId + "\n";
         log += "[kudroid_apk] Target extraction directory: " + appDir.string() + "\n";
+        // Overwrite-only extract leaves files the new APK dropped behind, mixing
+        // two versions. Wipe first; skipped while a run holds the files open.
+        if (s_isApkRunning.load()) {
+            log += "[kudroid_apk] WARNING: app is running, keeping old files until restart\n";
+        } else {
+            std::error_code wipeEc;
+            std::filesystem::remove_all(appDir, wipeEc);
+            const auto dalvikRoot = std::filesystem::path(remapper.androidRoot()) /
+                                    "data/dalvik-cache";
+            std::error_code iterEc;
+            if (std::filesystem::is_directory(dalvikRoot, iterEc)) {
+                for (const auto& e : std::filesystem::directory_iterator(dalvikRoot, iterEc)) {
+                    const std::string name = e.path().filename().string();
+                    if (name == pkgId || name.rfind(pkgId + "_", 0) == 0) {
+                        std::filesystem::remove_all(e.path(), wipeEc);
+                    }
+                }
+            }
+            log += "[kudroid_apk] Wiped previous install state for " + pkgId + "\n";
+        }
+        ++s_installGeneration;
         bool extractedOk = false;
         if (kudroid::APKExtractor::is_bundle_container(source.string())) {
             log += "[kudroid_apk] Split-APK bundle detected (.xapk/.apks/.apkm), merging splits...\n";
@@ -1791,13 +1826,6 @@ extern "C" JNIEXPORT void JNICALL Java_android_app_Activity_setRequestedOrientat
 }
 
 extern "C" void kudroid_blit_canvas_to_layer(void* layer, const void* bits, int width, int height);
-
-static std::atomic<bool> s_isApkRunning{false};
-
-// One in-flight teardown: X, viewWillDisappear and deinit can each post DESTROY.
-// File scope so run end can re-arm it; resetting right after unbind allowed a
-// second DESTROY into a half-destroyed engine.
-static std::atomic<bool> s_stopping{false};
 
 extern "C" void kudroid_unbind_metal_layer(void) {
     g_metalLayer = nullptr;
@@ -2275,6 +2303,16 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
         return strdup("[kudroid_core] APK is already running.\n");
     }
 
+    // Stale native mappings survive installs (unmapping under detached threads
+    // aborts), so a post-install run in this process would mix old code with new
+    // files. Refuse with instructions instead of crashing mysteriously.
+    if (s_libsResident.load() && s_libsGeneration.load() != s_installGeneration.load()) {
+        s_isApkRunning.store(false);
+        return strdup("[kudroid_core] ERROR: installed or removed an app since the last run.\n"
+                      "[kudroid_core] Native libraries from before are still mapped in this process.\n"
+                      "[kudroid_core] Please restart KuDroidShell, then run again.\n");
+    }
+
     // Clear all old logs before launching guest app so logs start fresh for this run
     kudroid_clear_all_logs();
 
@@ -2497,6 +2535,9 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                     snprintf(mapLine, sizeof(mapLine), "  %s -> %p", pair.first.c_str(), pair.second->baseAddress());
                     appendAndEcho(mapLine);
                 }
+                // Resident from here on; a later install taints the next run.
+                s_libsResident.store(true);
+                s_libsGeneration.store(s_installGeneration.load());
 
                 JavaVM* jvm = kuart_get_javavm();
                 if (!jvm) {
@@ -3745,6 +3786,7 @@ extern "C" int kudroid_delete_app_progress(const char* package_name,
     }
     if (cb) cb("Done", 100, userdata);
     uninstallDbg("=== UNINSTALL DONE success=" + std::to_string(success) + " ===");
+    if (success) ++s_installGeneration;
     return success;
 }
 
