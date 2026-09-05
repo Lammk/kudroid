@@ -536,6 +536,25 @@ DexValue DexJniEnv::CallJavaA(DexObject* receiver, DexMethod* method, const jval
                      method->signature != nullptr ? method->signature : "?",
                      virtual_dispatch ? 1 : 0, recv.c_str());
     }
+    // TEMP DIAGNOSTIC (ULTRAKILL no-Gfx): Unity 2021 drives Gfx setup through
+    // displayChanged/updateDisplayInternal/updateGLDisplay/sendSurfaceChangedEvent,
+    // and this run shows zero nativeRecreateGfxState. Log every such call so a
+    // missing driver (native never calls back) vs a swallowed call is visible.
+    if (method->declaring_class != nullptr && method->name != nullptr &&
+        method->declaring_class->descriptor != nullptr &&
+        std::strcmp(method->declaring_class->descriptor, "Lcom/unity3d/player/UnityPlayer;") == 0 &&
+        (std::strcmp(method->name, "displayChanged") == 0 ||
+         std::strcmp(method->name, "updateDisplayInternal") == 0 ||
+         std::strcmp(method->name, "updateGLDisplay") == 0 ||
+         std::strcmp(method->name, "sendSurfaceChangedEvent") == 0)) {
+        std::string recv = "(null)";
+        if (receiver != nullptr && linker_ != nullptr) {
+            if (DexClass* rc = linker_->ClassOfObject(receiver)) recv = rc->PrettyName();
+        }
+        std::fprintf(stderr, "[KuART][GLDRIVER] CallJavaA UnityPlayer.%s%s receiver=%s\n",
+                     method->name, method->signature != nullptr ? method->signature : "?",
+                     recv.c_str());
+    }
 
     // Validate native-supplied receiver; fall back to non-virtual on bad handles.
     if (receiver != nullptr && linker_ != nullptr &&
