@@ -632,11 +632,20 @@ public final class ActivityThread {
                     (((Object) activity instanceof android.view.SurfaceView) ?
                         ((android.view.SurfaceView) (Object) activity).getHolder() :
                         new android.view.SurfaceView(activity).getHolder());
-                android.util.Log.i("ActivityThread", "Activity implements SurfaceHolder.Callback -> dispatching surfaceCreated & surfaceChanged(" + surfaceW + "x" + surfaceH + ")");
-                cb.surfaceCreated(holder);
-                cb.surfaceChanged(holder, 0, surfaceW, surfaceH);
-                if (cb instanceof android.view.SurfaceHolder.Callback2) {
-                    ((android.view.SurfaceHolder.Callback2) cb).surfaceRedrawNeeded(holder);
+                android.util.Log.i("ActivityThread", "Activity implements SurfaceHolder.Callback -> dispatching surfaceChanged(" + surfaceW + "x" + surfaceH + ")");
+                if (foundSv != null) {
+                    // Created already went through the SurfaceView dispatch
+                    // above (one shared dedupe record); deliver only the
+                    // orientation-corrected size here, and only on change —
+                    // firing created+changed again rebuilds Unity's swapchain
+                    // for an identical surface.
+                    foundSv.dispatchSurfaceChangedOnce(cb, 0, surfaceW, surfaceH);
+                } else {
+                    cb.surfaceCreated(holder);
+                    cb.surfaceChanged(holder, 0, surfaceW, surfaceH);
+                    if (cb instanceof android.view.SurfaceHolder.Callback2) {
+                        ((android.view.SurfaceHolder.Callback2) cb).surfaceRedrawNeeded(holder);
+                    }
                 }
             }
 
