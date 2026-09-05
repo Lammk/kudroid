@@ -333,6 +333,28 @@ public final class MotionEvent extends InputEvent {
     }
 
     /**
+     * Contact patch long/short axis in pixels. Unity asks for these on every
+     * touch and died as NoSuchMethodError without them. A fixed plausible
+     * finger width: nothing here measures the real patch, but zero would read
+     * as "no contact" and break pressure-ratio math downstream.
+     */
+    public float getTouchMajor() {
+        return 10.0f;
+    }
+
+    public float getTouchMajor(int pointerIndex) {
+        return 10.0f;
+    }
+
+    public float getTouchMinor() {
+        return 10.0f;
+    }
+
+    public float getTouchMinor(int pointerIndex) {
+        return 10.0f;
+    }
+
+    /**
      * Axis value, the route AGDK uses to read pointer geometry.
      *
      * X and Y come from the event; the contact-shape axes report no measurement rather
