@@ -13,6 +13,7 @@
 #include <functional>
 #include <mutex>
 #include <random>
+#include <set>
 #include <string>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -697,6 +698,37 @@ bool Invoke_java_lang_Class(Interpreter* interp, const char* name, const DexValu
             }
             for (DexMethod& m : klass->virtual_methods) {
                 objects.push_back(NewMethodObject(linker, &m));
+            }
+            // A proxy class declares the methods of every interface it was created
+            // for. KuART's proxy carries no DexMethods of its own — dispatch reaches
+            // the InvocationHandler through DexClass::is_proxy instead — so without
+            // this a proxy for Runnable reported an EMPTY method list. Unity's
+            // JNIBridge enumerates that list to decide whether a method exists, ran
+            // its iterator dry (the NoSuchElementException burst in the log) and
+            // then threw NoSuchMethodError("java.lang.Runnable.run()") through JNI
+            // ThrowNew, cleared it, and rethrew an empty one from
+            // bitter.jnibridge.a.invoke — which killed ActivityThread with nothing
+            // in the log naming the cause.
+            //
+            // The Method objects report the INTERFACE as their declaring class,
+            // which is also what the handler receives from InvokeProxyMethod. Real
+            // $ProxyN names itself, but one answer in two places would be worse than
+            // one that is merely less specific.
+            if (klass->is_proxy) {
+                std::vector<DexClass*> pending(klass->interfaces.begin(),
+                                               klass->interfaces.end());
+                std::set<DexClass*> visited;
+                while (!pending.empty()) {
+                    DexClass* iface = pending.back();
+                    pending.pop_back();
+                    if (iface == nullptr || !visited.insert(iface).second) continue;
+                    for (DexMethod& m : iface->virtual_methods) {
+                        objects.push_back(NewMethodObject(linker, &m));
+                    }
+                    for (DexClass* super_iface : iface->interfaces) {
+                        pending.push_back(super_iface);
+                    }
+                }
             }
         }
         result->l = NewRefArray(linker, "[Ljava/lang/reflect/Method;", objects);

@@ -132,6 +132,21 @@ public final class Class<T> {
         throw new NoSuchMethodException(getName() + "." + name);
     }
 
+    /**
+     * A public method by name and parameter types, from this class OR any interface
+     * it implements.
+     *
+     * The interface half is not optional. This used to walk only getSuperclass(),
+     * and a Proxy created for Runnable declares nothing itself while Proxy and
+     * Object declare no run() either — so run() was invisible and Unity's JNIBridge
+     * concluded the method did not exist, threw NoSuchMethodError("Runnable.run()")
+     * through JNI ThrowNew, cleared it, and rethrew an empty one from
+     * bitter.jnibridge.a.invoke. Nothing named the real problem.
+     *
+     * The class chain is searched first, all of it, before any interface: a class's
+     * own body always beats an inherited declaration, which is the same precedence
+     * DexClass::FindVirtualMethod applies on the invoke side.
+     */
     public java.lang.reflect.Method getMethod(String name, Class<?>... parameterTypes)
             throws NoSuchMethodException {
         Class<?> c = this;
@@ -145,9 +160,43 @@ public final class Class<T> {
             }
             c = c.getSuperclass();
         }
+        // Interfaces, walked transitively: a method may be declared on an interface
+        // the directly-implemented one extends.
+        java.lang.reflect.Method found = findInterfaceMethod(this, name, parameterTypes);
+        if (found != null) return found;
         throw new NoSuchMethodException(getName() + "." + name);
     }
 
+    /** Depth-first search of the interface graph reachable from `c`, or null. */
+    private static java.lang.reflect.Method findInterfaceMethod(
+            Class<?> c, String name, Class<?>[] parameterTypes) {
+        while (c != null) {
+            Class<?>[] ifaces = c.getInterfaces();
+            for (int i = 0; i < ifaces.length; i++) {
+                if (ifaces[i] == null) continue;
+                java.lang.reflect.Method[] all = ifaces[i].getDeclaredMethods();
+                for (int j = 0; j < all.length; j++) {
+                    if (all[j].getName().equals(name)
+                            && matches(all[j].getParameterTypes(), parameterTypes)) {
+                        return all[j];
+                    }
+                }
+                java.lang.reflect.Method deeper =
+                        findInterfaceMethod(ifaces[i], name, parameterTypes);
+                if (deeper != null) return deeper;
+            }
+            c = c.getSuperclass();
+        }
+        return null;
+    }
+
+    /**
+     * Every public method of this class, its superclasses AND its interfaces.
+     *
+     * Callers enumerate this to decide whether a method exists at all — Unity's
+     * JNIBridge does exactly that for the interfaces it proxies — so leaving the
+     * interface methods out reports a Runnable proxy as having no run().
+     */
     public java.lang.reflect.Method[] getMethods() {
         java.util.ArrayList<java.lang.reflect.Method> out =
                 new java.util.ArrayList<java.lang.reflect.Method>();
@@ -159,11 +208,45 @@ public final class Class<T> {
             }
             c = c.getSuperclass();
         }
+        collectInterfaceMethods(this, out);
         java.lang.reflect.Method[] arr = new java.lang.reflect.Method[out.size()];
         for (int i = 0; i < arr.length; i++) {
             arr[i] = out.get(i);
         }
         return arr;
+    }
+
+    /**
+     * Append interface methods not already present, by name and parameter types.
+     *
+     * De-duplicated on the signature rather than on the Method object: a class that
+     * implements an interface has its own Method for the same signature, and
+     * returning both would make a caller that dispatches on getMethods() invoke the
+     * same logic twice.
+     */
+    private static void collectInterfaceMethods(
+            Class<?> c, java.util.ArrayList<java.lang.reflect.Method> out) {
+        while (c != null) {
+            Class<?>[] ifaces = c.getInterfaces();
+            for (int i = 0; i < ifaces.length; i++) {
+                if (ifaces[i] == null) continue;
+                java.lang.reflect.Method[] all = ifaces[i].getDeclaredMethods();
+                for (int j = 0; j < all.length; j++) {
+                    boolean seen = false;
+                    for (int k = 0; k < out.size(); k++) {
+                        java.lang.reflect.Method m = out.get(k);
+                        if (m.getName().equals(all[j].getName())
+                                && matches(m.getParameterTypes(), all[j].getParameterTypes())) {
+                            seen = true;
+                            break;
+                        }
+                    }
+                    if (!seen) out.add(all[j]);
+                }
+                collectInterfaceMethods(ifaces[i], out);
+            }
+            c = c.getSuperclass();
+        }
     }
 
     public java.lang.reflect.Field getDeclaredField(String name) throws NoSuchFieldException {

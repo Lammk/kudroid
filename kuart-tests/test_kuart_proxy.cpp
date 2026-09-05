@@ -465,6 +465,116 @@ int main() {
         }
     }
 
+    // ── a proxy class REPORTS the interface methods it stands in for ──
+    //
+    // This is the ULTRAKILL failure. A proxy carries no DexMethods of its own, so
+    // Class.getDeclaredMethods() returned an EMPTY array for it and
+    // Class.getMethods() walked only the superclass chain — Proxy and Object, neither
+    // of which declares run(). Unity's JNIBridge enumerates that list to decide
+    // whether a method exists, found nothing, and threw
+    // NoSuchMethodError("java.lang.Runnable.run()") through JNI ThrowNew; native then
+    // cleared it and rethrew an empty one from bitter.jnibridge.a.invoke, so the
+    // uncaught trace named only the wrapper and the log said nothing about proxies.
+    {
+        DexClass* class_class = linker.FindClass("Ljava/lang/Class;");
+        DexClass* proxy_class = linker.ClassOfObject(proxy);
+        Check(class_class != nullptr && proxy_class != nullptr,
+              "java.lang.Class and the proxy class are both available");
+
+        if (class_class != nullptr && proxy_class != nullptr) {
+            DexMethod* declared = class_class->FindVirtualMethod(
+                "getDeclaredMethods", "()[Ljava/lang/reflect/Method;");
+            Check(declared != nullptr, "found Class.getDeclaredMethods");
+
+            // The names the proxy must report: every method of every interface it
+            // was created for. Compared by name so the check does not depend on
+            // which Method object represents them.
+            const auto names_of = [&](DexMethod* getter) {
+                std::vector<std::string> names;
+                DexValue recv = DexValue::Ref(linker.GetClassObject(proxy_class));
+                interp.ClearPendingException();
+                const DexValue arr = interp.Execute(getter, &recv, 1);
+                if (interp.HasPendingException()) {
+                    interp.ClearPendingException();
+                    return names;
+                }
+                auto* methods = reinterpret_cast<DexArray*>(arr.l);
+                if (methods == nullptr) return names;
+                auto** items = reinterpret_cast<DexObject**>(methods + 1);
+                DexClass* method_class = linker.FindClass("Ljava/lang/reflect/Method;");
+                DexMethod* get_name = method_class != nullptr
+                    ? method_class->FindVirtualMethod("getName", "()Ljava/lang/String;")
+                    : nullptr;
+                for (int32_t i = 0; i < methods->length; ++i) {
+                    if (items[i] == nullptr || get_name == nullptr) continue;
+                    DexValue m = DexValue::Ref(items[i]);
+                    const DexValue n = interp.Execute(get_name, &m, 1);
+                    interp.ClearPendingException();
+                    auto* s = reinterpret_cast<DexString*>(n.l);
+                    if (s != nullptr && s->utf8 != nullptr) names.emplace_back(s->utf8);
+                }
+                return names;
+            };
+
+            const auto has = [](const std::vector<std::string>& v, const char* what) {
+                for (const std::string& s : v) {
+                    if (s == what) return true;
+                }
+                return false;
+            };
+
+            if (declared != nullptr) {
+                const std::vector<std::string> names = names_of(declared);
+                Check(!names.empty(),
+                      "getDeclaredMethods on a proxy is not empty — an empty list is what "
+                      "made JNIBridge report Runnable.run() as missing");
+                Check(has(names, "add") && has(names, "run"),
+                      "and it names both Calc.add and Calc.run");
+            }
+
+            DexMethod* all = class_class->FindVirtualMethod(
+                "getMethods", "()[Ljava/lang/reflect/Method;");
+            Check(all != nullptr, "found Class.getMethods");
+            if (all != nullptr) {
+                const std::vector<std::string> names = names_of(all);
+                Check(has(names, "run"),
+                      "getMethods on a proxy includes the interface method run() — it used "
+                      "to walk only the superclass chain, where run() does not exist");
+            }
+        }
+    }
+
+    // ── getMethod finds a method an INTERFACE declares, not just the class chain ──
+    // Class.getMethod is specified to search implemented interfaces too. Walking only
+    // getSuperclass() cannot see run() on a Runnable-shaped proxy, which is the same
+    // blind spot that made JNIBridge report the method as missing.
+    {
+        DexClass* class_class = linker.FindClass("Ljava/lang/Class;");
+        DexClass* proxy_class = linker.ClassOfObject(proxy);
+        if (class_class != nullptr && proxy_class != nullptr) {
+            DexMethod* get_method = class_class->FindVirtualMethod(
+                "getMethod",
+                "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;");
+            Check(get_method != nullptr, "found Class.getMethod");
+            if (get_method != nullptr) {
+                // Calc.run() takes no arguments, so an empty Class[] is the right
+                // parameter list — and it is declared by the INTERFACE, never by the
+                // proxy class or anything in its superclass chain.
+                DexValue args[3];
+                args[0] = DexValue::Ref(linker.GetClassObject(proxy_class));
+                args[1] = DexValue::Ref(
+                    reinterpret_cast<DexObject*>(linker.NewString("run")));
+                args[2] = DexValue::Ref(NewClassArray({}));
+                interp.ClearPendingException();
+                const DexValue found = interp.Execute(get_method, args, 3);
+                Check(!interp.HasPendingException() && found.l != nullptr,
+                      "getMethod(\"run\") on a proxy resolves through the interface graph "
+                      "instead of throwing NoSuchMethodException");
+                interp.ClearPendingException();
+            }
+        }
+    }
+
     // ── a bodyless method on a NON-proxy still reports the defect ──
     // The proxy path must not swallow the AbstractMethodError that a genuinely
     // abstract call deserves, or a real bug becomes a silent zero.
