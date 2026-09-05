@@ -106,6 +106,17 @@ public final class MotionEvent extends InputEvent {
     }
 
     /**
+     * Copy an event. Our touch pipeline (ActivityThread.postTouchEvent)
+     * copies every event before dispatch; without this it died as
+     * NoSuchMethodError and no touch ever reached the game.
+     */
+    public static MotionEvent obtain(MotionEvent other) {
+        if (other == null) throw new IllegalArgumentException("other must not be null");
+        return new MotionEvent(other.mAction, other.mX, other.mY, other.mEventTime,
+                other.mPointerCount);
+    }
+
+    /**
      * returns action.
      */
     public int getAction() {
