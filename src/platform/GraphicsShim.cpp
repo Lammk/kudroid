@@ -894,8 +894,66 @@ extern "C" PFN_vkVoidFunction bionic_vkGetInstanceProcAddr(VkInstance instance, 
     return nullptr;
 }
 
+// Present/acquire tap (see diagnostic note at bionic_vkGetDeviceProcAddr).
+// Signatures use opaque pointers (no Vulkan headers here); only the result
+// code and counters are observed, arguments pass straight through.
+typedef uint32_t (*PFN_vkQueuePresentKHR_fn)(void*, const void*);
+typedef uint32_t (*PFN_vkAcquireNextImageKHR_fn)(void*, void*, uint64_t, void*, void*,
+                                                 uint32_t*);
+static PFN_vkQueuePresentKHR_fn s_realQueuePresent = nullptr;
+static PFN_vkAcquireNextImageKHR_fn s_realAcquireNextImage = nullptr;
+static std::atomic<uint64_t> s_presentCount{0};
+static std::atomic<uint64_t> s_acquireCount{0};
+
+extern "C" uint32_t bionic_vkQueuePresentKHR(void* queue, const void* present_info) {
+    const uint64_t n = ++s_presentCount;
+    const uint32_t r =
+        s_realQueuePresent != nullptr ? s_realQueuePresent(queue, present_info) : 0;
+    if (n <= 5 || r != 0 || (n % 120) == 0) {
+        gpuLog("vkQueuePresentKHR #%llu -> %u", (unsigned long long)n, r);
+    }
+    return r;
+}
+
+extern "C" uint32_t bionic_vkAcquireNextImageKHR(void* device, void* swapchain, uint64_t timeout,
+                                                void* semaphore, void* fence,
+                                                uint32_t* image_index) {
+    const uint64_t n = ++s_acquireCount;
+    uint32_t index = 0xFFFFFFFFu;
+    uint32_t r = 0xFFFFFFFFu;
+    if (s_realAcquireNextImage != nullptr) {
+        r = s_realAcquireNextImage(device, swapchain, timeout, semaphore, fence, &index);
+        if (image_index != nullptr) *image_index = index;
+    }
+    if (n <= 5 || r != 0 || (n % 120) == 0) {
+        gpuLog("vkAcquireNextImageKHR #%llu -> %u image=%u", (unsigned long long)n, r, index);
+    }
+    return r;
+}
+
 extern "C" PFN_vkVoidFunction bionic_vkGetDeviceProcAddr(VkDevice device, const char* pName) {
     if (!pName) return nullptr;
+    // TEMP DIAGNOSTIC (ULTRAKILL black screen): tap presents/acquires to prove
+    // whether Unity submits frames at all — both are otherwise pure passthrough
+    // and invisible in logs. Remove once first-frame visibility is understood.
+    if (strcmp(pName, "vkQueuePresentKHR") == 0 && s_realQueuePresent == nullptr) {
+        if (void* mvk = get_mvk_handle()) {
+            s_realQueuePresent =
+                reinterpret_cast<PFN_vkQueuePresentKHR_fn>(::dlsym(mvk, "vkQueuePresentKHR"));
+        }
+    }
+    if (strcmp(pName, "vkQueuePresentKHR") == 0 && s_realQueuePresent != nullptr) {
+        return reinterpret_cast<PFN_vkVoidFunction>(&bionic_vkQueuePresentKHR);
+    }
+    if (strcmp(pName, "vkAcquireNextImageKHR") == 0 && s_realAcquireNextImage == nullptr) {
+        if (void* mvk = get_mvk_handle()) {
+            s_realAcquireNextImage = reinterpret_cast<PFN_vkAcquireNextImageKHR_fn>(
+                ::dlsym(mvk, "vkAcquireNextImageKHR"));
+        }
+    }
+    if (strcmp(pName, "vkAcquireNextImageKHR") == 0 && s_realAcquireNextImage != nullptr) {
+        return reinterpret_cast<PFN_vkVoidFunction>(&bionic_vkAcquireNextImageKHR);
+    }
     void* mvk = get_mvk_handle();
     if (mvk) {
         typedef PFN_vkVoidFunction (*PFN_vkGDPA)(VkDevice, const char*);
