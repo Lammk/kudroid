@@ -89,7 +89,19 @@ public final class Field extends AccessibleObject {
         return (int) (artField ^ (artField >>> 32));
     }
 
+    /**
+     * AOSP spelling: "private static final java.lang.String java.lang.Foo.bar".
+     * Same reason as Method.toString: native bridges parse this string.
+     */
     public String toString() {
-        return declaringClass.getName() + "." + name;
+        StringBuilder sb = new StringBuilder();
+        int mod = getModifiers() & Modifier.fieldModifiers();
+        if (mod != 0) {
+            sb.append(Modifier.toString(mod)).append(' ');
+        }
+        sb.append(getType().getTypeName()).append(' ');
+        sb.append(declaringClass.getTypeName()).append('.');
+        sb.append(name);
+        return sb.toString();
     }
 }

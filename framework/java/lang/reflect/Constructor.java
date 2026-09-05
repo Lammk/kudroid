@@ -42,7 +42,23 @@ public final class Constructor<T> extends AccessibleObject {
         return (int) (artMethod ^ (artMethod >>> 32));
     }
 
+    /**
+     * AOSP spelling: "public java.lang.StringBuilder(java.lang.String)".
+     * Same reason as Method.toString: native bridges parse this string.
+     */
     public String toString() {
-        return declaringClass.getName() + ".<init>()";
+        StringBuilder sb = new StringBuilder();
+        int mod = getModifiers() & Modifier.constructorModifiers();
+        if (mod != 0) {
+            sb.append(Modifier.toString(mod)).append(' ');
+        }
+        sb.append(declaringClass.getTypeName()).append('(');
+        Class<?>[] params = getParameterTypes();
+        for (int i = 0; i < params.length; i++) {
+            if (i > 0) sb.append(',');
+            sb.append(params[i].getTypeName());
+        }
+        sb.append(')');
+        return sb.toString();
     }
 }

@@ -79,7 +79,30 @@ public final class Method extends AccessibleObject {
         return (int) (artMethod ^ (artMethod >>> 32));
     }
 
+    /**
+     * AOSP spelling: "public abstract void java.lang.Runnable.run()".
+     *
+     * Not cosmetic. Unity's native JNIBridge calls this on every proxied method
+     * and parses the result; the old short form ("java.lang.Runnable.run()")
+     * failed its parse and the bridge answered with
+     * NoSuchMethodError("java.lang.Runnable.run()"), which escaped
+     * ActivityThread.main and ended the session.
+     */
     public String toString() {
-        return declaringClass.getName() + "." + name + "()";
+        StringBuilder sb = new StringBuilder();
+        int mod = getModifiers() & Modifier.methodModifiers();
+        if (mod != 0) {
+            sb.append(Modifier.toString(mod)).append(' ');
+        }
+        sb.append(getReturnType().getTypeName()).append(' ');
+        sb.append(declaringClass.getTypeName()).append('.');
+        sb.append(name).append('(');
+        Class<?>[] params = getParameterTypes();
+        for (int i = 0; i < params.length; i++) {
+            if (i > 0) sb.append(',');
+            sb.append(params[i].getTypeName());
+        }
+        sb.append(')');
+        return sb.toString();
     }
 }

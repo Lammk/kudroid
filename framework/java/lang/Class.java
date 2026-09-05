@@ -86,6 +86,35 @@ public final class Class<T> {
         return getName().replace('$', '.');
     }
 
+    /**
+     * Source-style type name: "int" for primitives, "java.lang.String[]" for
+     * arrays, getName() otherwise.
+     *
+     * Native getName() returns raw descriptors ("I", "[Ljava/lang/String;"),
+     * which is what JNI uses but not what Method.toString() must print — AOSP
+     * spells them the way source does, and Unity's JNIBridge parses that
+     * spelling, so the conversion lives here rather than in every caller.
+     */
+    public String getTypeName() {
+        if (isArray()) {
+            return getComponentType().getTypeName() + "[]";
+        }
+        String name = getName();
+        if (name.length() == 1) {
+            char c = name.charAt(0);
+            if (c == 'Z') return "boolean";
+            if (c == 'B') return "byte";
+            if (c == 'C') return "char";
+            if (c == 'S') return "short";
+            if (c == 'I') return "int";
+            if (c == 'J') return "long";
+            if (c == 'F') return "float";
+            if (c == 'D') return "double";
+            if (c == 'V') return "void";
+        }
+        return name;
+    }
+
     public String getPackageName() {
         String name = getName();
         int dot = name.lastIndexOf('.');

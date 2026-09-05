@@ -467,14 +467,13 @@ int main() {
 
     // ── a proxy class REPORTS the interface methods it stands in for ──
     //
-    // This is the ULTRAKILL failure. A proxy carries no DexMethods of its own, so
+    // Part of the ULTRAKILL failure. A proxy carries no DexMethods of its own, so
     // Class.getDeclaredMethods() returned an EMPTY array for it and
     // Class.getMethods() walked only the superclass chain — Proxy and Object, neither
-    // of which declares run(). Unity's JNIBridge enumerates that list to decide
-    // whether a method exists, found nothing, and threw
-    // NoSuchMethodError("java.lang.Runnable.run()") through JNI ThrowNew; native then
-    // cleared it and rethrew an empty one from bitter.jnibridge.a.invoke, so the
-    // uncaught trace named only the wrapper and the log said nothing about proxies.
+    // of which declares run(). (The killing blow turned out to be one step further
+    // down: Unity parses Method.toString(), covered by the test at the bottom —
+    // but an empty method list breaks every other reflective consumer too, so both
+    // halves are load-bearing.)
     {
         DexClass* class_class = linker.FindClass("Ljava/lang/Class;");
         DexClass* proxy_class = linker.ClassOfObject(proxy);
@@ -670,6 +669,60 @@ int main() {
                 interp.Execute(factory, args, 3);
                 Check(interp.HasPendingException(),
                       "a non-class element throws instead of being read as its own class");
+                interp.ClearPendingException();
+            }
+        }
+    }
+
+    // ── Method.toString speaks AOSP, because Unity parses it ──
+    //
+    // The actual ULTRAKILL mechanism, found by tracing the JNI calls inside
+    // Unity's native JNIBridge.invoke: the bridge resolves the Method fine
+    // (FromReflectedMethod succeeds), then calls Method.toString() and parses
+    // the result. The old short form — "java.lang.Runnable.run()" — failed that
+    // parse, and the bridge answered with
+    // NoSuchMethodError("java.lang.Runnable.run()"), which escaped
+    // ActivityThread.main and ended the session. AOSP spells it
+    // "public abstract void java.lang.Runnable.run()".
+    {
+        DexClass* runnable = linker.FindClass("Ljava/lang/Runnable;");
+        DexClass* class_class = linker.FindClass("Ljava/lang/Class;");
+        DexClass* method_class = linker.FindClass("Ljava/lang/reflect/Method;");
+        DexMethod* get_method =
+            class_class != nullptr
+                ? class_class->FindVirtualMethod(
+                      "getMethod",
+                      "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;")
+                : nullptr;
+        DexMethod* to_string =
+            method_class != nullptr
+                ? method_class->FindVirtualMethod("toString", "()Ljava/lang/String;")
+                : nullptr;
+        Check(runnable != nullptr && get_method != nullptr && to_string != nullptr,
+              "Runnable, Class.getMethod and Method.toString are all available");
+        if (runnable != nullptr && get_method != nullptr && to_string != nullptr) {
+            DexValue args[3];
+            args[0] = DexValue::Ref(linker.GetClassObject(runnable));
+            args[1] = DexValue::Ref(
+                reinterpret_cast<DexObject*>(linker.NewString("run")));
+            args[2] = DexValue::Ref(NewClassArray({}));
+            interp.ClearPendingException();
+            const DexValue found = interp.Execute(get_method, args, 3);
+            Check(!interp.HasPendingException() && found.l != nullptr,
+                  "resolved Runnable.run reflectively");
+            if (!interp.HasPendingException() && found.l != nullptr) {
+                DexValue recv = DexValue::Ref(found.l);
+                interp.ClearPendingException();
+                const DexValue str = interp.Execute(to_string, &recv, 1);
+                Check(!interp.HasPendingException(),
+                      "Method.toString threw nothing");
+                auto* s = reinterpret_cast<DexString*>(str.l);
+                const char* text =
+                    (s != nullptr && s->utf8 != nullptr) ? s->utf8 : "(null)";
+                Check(std::strcmp(text,
+                                  "public abstract void java.lang.Runnable.run()") == 0,
+                      std::string("Method.toString is AOSP-spelled, got \"") + text +
+                          "\"");
                 interp.ClearPendingException();
             }
         }
