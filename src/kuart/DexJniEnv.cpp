@@ -27,7 +27,7 @@ namespace kuart {
 namespace {
 
 // jobject is an opaque handle; KuART directly uses the DexObject pointer as a handle. Board
-// local/global refs are only for lifetime management, not for address translation — so
+// local/global refs are only for lifetime management, not for address translation - so
 // Decode ch  l  m t cast.  n gi n h n ART (d ng indirect reference table) v
 // enough because there is no GC to move the object.
 DexObject* AsObject(jobject ref) { return reinterpret_cast<DexObject*>(ref); }
@@ -37,7 +37,7 @@ jobject AsHandle(DexObject* obj) { return reinterpret_cast<jobject>(obj); }
 // '_' -> "_1", '/' -> '_', ';' -> "_2", '[' -> "_3".
 std::string MangleJniName(const char* descriptor, const char* method_name) {
     std::string out = "Java_";
-    // descriptor of the form "Lcom/foo/Bar;" — remove the leading 'L' and ';' last.
+    // descriptor of the form "Lcom/foo/Bar;" - remove the leading 'L' and ';' last.
     const size_t len = std::strlen(descriptor);
     size_t start = (len > 0 && descriptor[0] == 'L') ? 1 : 0;
     size_t end = (len > 0 && descriptor[len - 1] == ';') ? len - 1 : len;
@@ -342,23 +342,14 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
         return result;
     }
 
-    // Minecraft's MainActivity.nativeWaitCrashManagementSetupComplete waits on a
-    // condition variable signaled by the Linux crashpad setup in android_main.
-    // On iOS/KuDroid, crash telemetry is handled by MetricKit and Mach signal shims,
-    // and the background setup completes during initializeNativeCode. Bypassing this
-    // wait avoids deadlocks when signals are delivered before or concurrently.
+    // Bypass crash-setup wait; handled by host telemetry, avoids deadlock.
     if (std::strcmp(method_name, "nativeWaitCrashManagementSetupComplete") == 0) {
         KLOGV("KuARTNative", "bypassing nativeWaitCrashManagementSetupComplete -> returning immediately");
         native_call_exit();
         return result;
     }
 
-    // Minecraft's NetworkMonitor.nativeUpdateNetworkStatus blocks synchronously
-    // waiting for the native game engine thread to acknowledge network state.
-    // However, the native engine in android_main is waiting for APP_CMD_INIT_WINDOW
-    // (surfaceCreated) before starting its loop, creating a circular deadlock between
-    // onCreate and android_main. Returning immediately allows onCreate to complete
-    // and dispatch surfaceCreated to the native window.
+    // Bypass network-status wait; avoids onCreate circular deadlock.
     if (std::strcmp(method_name, "nativeUpdateNetworkStatus") == 0) {
         KLOGV("KuARTNative", "bypassing nativeUpdateNetworkStatus -> returning immediately to prevent onCreate circular deadlock");
         native_call_exit();
@@ -400,7 +391,7 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
 
     // JNI ABI: (JNIEnv*, jclass|jobject, ...parameters). Integer/pointer arguments
     // travel in the general-purpose registers while float/double travel in the
-    // SEPARATE FP register file — they consume independent budgets, so a method
+    // SEPARATE FP register file - they consume independent budgets, so a method
     // taking many floats is fine even though it has many parameters.
     uint64_t gp[kJniGpRegs] = {0};
     uint64_t fp[kJniFpRegs] = {0};
@@ -439,11 +430,7 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
         }
         continue;
     too_many_args:
-        // Deliberately an exception rather than a zero return. Stack-passed
-        // arguments are not implemented (Apple's arm64 ABI packs them at their
-        // natural size instead of uniform 8-byte slots, so guessing corrupts
-        // them silently) — and silently returning 0 is the very failure mode
-        // this call path was rewritten to eliminate.
+        // Throw for stack-passed args; silently returning 0 hides failures.
         if (interpreter_ != nullptr) {
             interpreter_->ThrowException(
                 "Ljava/lang/UnsatisfiedLinkError;",
@@ -460,21 +447,7 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
     uint64_t fp_ret = 0;
     uint64_t ret;
     {
-        // Native code runs with the VM lock RELEASED, as a thread in Android's kNative
-        // state does.
-        //
-        // A native method is free to block, and Minecraft's
-        // MainActivity.nativeWaitCrashManagementSetupComplete does exactly that: it takes
-        // a mutex and waits on a condition variable until another thread sets a flag.
-        // Holding the VM lock across that call means the thread that would set the flag
-        // cannot run any bytecode, so the flag is never set and the wait never ends. The
-        // app did not crash — it stopped, with the log ending on the line that resolved
-        // that very symbol, which reads like the call never happened rather than like it
-        // never returned.
-        //
-        // Releasing here is also what makes a JNI callback into Java work from a native
-        // method: Interpreter::Execute takes the lock for itself when the thread does not
-        // hold it, so the callback is serialised against other Java threads normally.
+        // Run native with VM lock released so blocking calls and callbacks work.
         native_call_stage("before-vm-release");
         VmLockRelease unlocked;
         native_call_stage("before-trampoline");
@@ -529,7 +502,7 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
             break;
     }
     // TEMP DIAGNOSTIC (ULTRAKILL render stall): Unity's frame loop lives or dies
-    // on UnityPlayer.nativeRender()'s boolean — false quits the game. Log it.
+    // on UnityPlayer.nativeRender()'s boolean - false quits the game. Log it.
     if (std::strcmp(owner, "Lcom/unity3d/player/UnityPlayer;") == 0 && shorty != nullptr &&
         (shorty[0] == 'Z' || shorty[0] == 'I')) {
         std::fprintf(stderr, "[KuART][UNITYPLAYER] %s%s -> %d\n", method_name,
@@ -564,28 +537,10 @@ DexValue DexJniEnv::CallJavaA(DexObject* receiver, DexMethod* method, const jval
                      virtual_dispatch ? 1 : 0, recv.c_str());
     }
 
-    // Virtual dispatch off a native-supplied receiver.
-    //
-    // receiver->clazz cannot be trusted here: every argument on this path came
-    // straight from a guest .so. A jclass passed as a jobject reads back
-    // DexClass::descriptor (same offset 0) and hands a string pointer to
-    // FindVirtualMethod — the SIGSEGV at 0x2f657074666172eb, the bytes "raftpe/"
-    // from "Lcom/mojang/minecraftpe/MainActivity;", reached through exactly this
-    // line. When the class does not check out, fall back to the method the caller
-    // named: the jmethodID is a separately validated handle, so a non-virtual call
-    // is the conservative interpretation rather than a crash.
+    // Validate native-supplied receiver; fall back to non-virtual on bad handles.
     if (receiver != nullptr && linker_ != nullptr &&
         linker_->IsRegisteredClass(reinterpret_cast<const DexClass*>(receiver))) {        // A jclass receiver is not a mistake. In the JNI object model a jclass IS the
-        // java.lang.Class instance, so CallObjectMethod(cls, Class.getClassLoader) is
-        // exactly how native code asks a class for its loader — which is what
-        // libminecraftpe does on the way to finding its renderer .so.
-        //
-        // The two are different C++ types here: a DexClass is runtime metadata, the
-        // java.lang.Class object is a DexClassObject on the heap. Substitute the
-        // latter so the receiver is a real object, and both virtual dispatch and any
-        // libcore native that reads it get something valid. Without this the DexClass
-        // reached the callee as `this`, where reading a field meant reading DexClass
-        // internals at that offset.
+        // A jclass is a valid Class object; substitute the heap instance.
         if (DexClassObject* as_object = linker_->GetClassObject(
                 const_cast<DexClass*>(reinterpret_cast<const DexClass*>(receiver)))) {
             receiver = as_object;
@@ -655,31 +610,12 @@ DexValue DexJniEnv::CallJavaA(DexObject* receiver, DexMethod* method, const jval
                 case 'F': vals.push_back(DexValue::Float(args[i].f)); break;
                 case 'D': vals.push_back(DexValue::Double(args[i].d)); break;
                 default: {
-                    // A reference argument gets the same scrutiny as the receiver.
-                    //
-                    // It arrived from a guest .so and nothing before this point looked
-                    // at it: the old code was a bare reinterpret_cast into a
-                    // DexValue::Ref. libHttpClient.Android.so passed a NATIVE STACK
-                    // address (0x16e0e4750) as the Context for
-                    // NetworkObserver.Initialize, and the failure only surfaced one
-                    // invoke later, as "receiver ... has clazz=0x10" on a
-                    // getSystemService call inside that method — naming the wrong
-                    // object, in the wrong frame, with the culprit library nowhere in
-                    // the message.
-                    //
-                    // Rejecting at the boundary is the difference between a diagnosis
-                    // and a puzzle. It also stops a bad handle reaching code paths that
-                    // do NOT check: check-cast, instance-of and iget all dereference
-                    // obj->clazz behind a null check only, so an argument that is cast
-                    // or field-read before any virtual call takes a SIGSEGV instead.
+                    // Validate guest-supplied reference args at the boundary.
                     DexObject* arg = AsObject(args[i].l);
                     if (arg != nullptr && linker_ != nullptr) {
                         const DexClassLinker::BadReceiver kind = linker_->ClassifyObject(arg);
                         if (kind == DexClassLinker::BadReceiver::kIsAClass) {
-                            // Not a mistake: in the JNI object model a jclass IS the
-                            // java.lang.Class instance, so passing one where the
-                            // signature says Class<?> is correct usage. Substitute the
-                            // heap object, exactly as the receiver path does.
+                            // A jclass is valid for Class params; substitute heap instance.
                             if (DexClassObject* as_object = linker_->GetClassObject(
                                     const_cast<DexClass*>(
                                         reinterpret_cast<const DexClass*>(arg)))) {

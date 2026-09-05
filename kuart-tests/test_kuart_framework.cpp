@@ -1,13 +1,5 @@
-// Integration test: run the real framework.dex inside KuART and drive the Java that
-// was just added — java.util.regex, java.text.SimpleDateFormat, java.util.Calendar.
-//
-// Compiling is not evidence. These classes are large, mutually dependent, and reach
-// deep into the interpreter (filled-new-array in enum $values(), string natives,
-// ListResourceBundle lookups, exception tables). Executing them here is what proves
-// KuART can actually run them on device.
-//
-// Methods are invoked directly through the linker rather than from synthesised
-// bytecode: the point is to exercise the framework code, not the call sequence.
+// Integration test: run the real framework.dex in KuART (regex, dates, services).
+// Executing them here proves KuART can actually run them on device.
 #include "kudroid/framework_dex_bytes.h"
 #include "kudroid/DeviceProfile.h"
 #include "kudroid/kudroid_bridge.h"

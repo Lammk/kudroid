@@ -1,26 +1,6 @@
 // test_kuart_audiotrack.cpp — the Java audio path, driven the way FMOD drives it.
-//
-// Why this exists. FMOD — which is what Unity games ship for audio — does not call OpenSL
-// ES or AAudio from native code. It drives android.media.AudioTrack from JAVA. The
-// generated framework stub had one empty constructor, so every method the sequence needs
-// was auto-stubbed to return 0:
-//
-//     [KuART][MISSING-METHOD] Auto-stubbing: AudioTrack->getMinBufferSize(III)I
-//     [KuART][MISSING-METHOD] Auto-stubbing: AudioTrack-><init>(IIIIII)V
-//     [KuART][MISSING-METHOD] Auto-stubbing: AudioTrack->getState()I
-//     [E/FMOD] AudioTrack failed to initialize (status 0)
-//
-// getState() returning 0 is the fatal one: FMOD compares it against STATE_INITIALIZED, so
-// 0 is a permanent failure and no amount of retrying gets past it. It retried anyway. The
-// thread sampler caught the loop — pc moving inside libsystem_malloc with lr in
-// DexClassLinker::FindClass across five samples ten seconds apart, CPU climbing rather
-// than flat, which is a spin and not a park. ULTRAKILL reached Vulkan, created its
-// swapchain, and never produced a frame.
-//
-// So this test runs FMOD's actual sequence through the interpreter against the real
-// framework.dex: getMinBufferSize, construct, getState, play, write, getPlaybackHeadPosition,
-// stop, release. A stub passes none of it, which is the point — compiling the Java is not
-// evidence that the sequence works.
+// FMOD needs getMinBufferSize/getState to report honestly; a 0 from an auto-stub
+// made it retry forever, so this pins the real sequence against framework.dex.
 #include "kudroid/framework_dex_bytes.h"
 #include "kudroid/kuart/DexClassLinker.h"
 #include "kudroid/kuart/DexJniEnv.h"

@@ -1,23 +1,5 @@
-// Probe: a native method that blocks must not hold the VM lock.
-//
-// Minecraft stopped — did not crash — on this. MainActivity.onCreate called
-// nativeWaitCrashManagementSetupComplete, whose disassembly is a mutex lock, a flag test
-// and a condition_variable::wait loop: it waits for another thread to set a flag and
-// notify. KuART held the VM lock across the native call, so the thread that would set the
-// flag could not run any bytecode, and the wait never ended.
-//
-// The log ended on the line that RESOLVED that symbol, with no error and no crash, which
-// reads as if the call never happened rather than as if it never returned.
-//
-// Android does not have this problem because a thread in the kNative state holds no
-// runtime lock. That is the property pinned here:
-//
-//   1. A blocking native method releases the VM lock, so another Java thread can run.
-//   2. Native code can call BACK into Java while in that state, and the callback is still
-//      serialised against other Java threads.
-//   3. VmLockDepth() reports what is actually held, since (2) is decided from it.
-//
-// Every wait in this file is bounded. A regression must fail the test, not hang CI.
+// Probe: a blocking native must release the VM lock (Android kNative holds none)
+// while callbacks re-acquire it; VmLockDepth() reports what is actually held.
 #include "kudroid/kuart/DexClassLinker.h"
 #include "kudroid/kuart/DexJniEnv.h"
 #include "kudroid/kuart/DexObject.h"

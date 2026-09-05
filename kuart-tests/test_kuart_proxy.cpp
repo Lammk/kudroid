@@ -1,19 +1,5 @@
 // Host test for dynamic proxies: Proxy.newProxyInstance + InvocationHandler dispatch.
-//
-// A proxy class is synthesised by the linker (DexClassLinker::GetOrCreateProxyClass)
-// with no method bodies at all, and the interpreter is what makes it work: a call
-// landing on a bodyless method whose receiver is a proxy is forwarded to the
-// instance's InvocationHandler instead of raising AbstractMethodError.
-//
-// That distinction is the whole feature, and it is easy to get wrong in a way that
-// compiles: the previous implementation returned a bare `new Proxy(h)`, which does
-// not implement the requested interface, so a cast to it failed and — where the DEX
-// had no cast — the first interface call died with "method without body: run". Unity
-// hit exactly that through Activity.runOnUiThread.
-//
-// framework.dex is loaded because Proxy, InvocationHandler and Integer must be the
-// real classes; the synthetic DEX adds the interface being proxied and a handler
-// with a genuine bytecode body.
+// The linker synthesises the class; the interpreter forwards bodyless calls to the handler.
 #include "kudroid/framework_dex_bytes.h"
 #include "kudroid/kuart/DexClassLinker.h"
 #include "kudroid/kuart/DexJniEnv.h"

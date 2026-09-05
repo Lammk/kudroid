@@ -24,11 +24,7 @@ size_t RoundUp(size_t n, size_t align) {
     return (n + align - 1) & ~(align - 1);
 }
 
-// Map `size` bytes that this process is permitted to execute, or nullptr.
-//
-// MAP_JIT is the sanctioned route under the hardened runtime, but only exists for
-// macOS; on iOS the equivalent is to map RW and mprotect. Both are attempted because
-// KuDroid's host tests run on macOS and Linux while the product target is iOS.
+// Map executable memory, or nullptr.
 void* MapExecutable(size_t size) {
     const int prot = PROT_READ | PROT_WRITE;
     int flags = MAP_PRIVATE | MAP_ANON;
@@ -67,8 +63,7 @@ JitCache::~JitCache() {
 }
 
 bool JitCache::IsAvailable() {
-    // Cached: code-signing status is fixed at exec, so the answer cannot change, and
-    // this is consulted on every method that becomes hot.
+    // Cached; code-signing status is fixed at exec.
     static const bool available = [] {
         const size_t size = PageSize();
         void* probe = MapExecutable(size);
@@ -79,8 +74,7 @@ bool JitCache::IsAvailable() {
                          " LiveContainer JIT mode, or TrollStore) for compiled code.\n");
             return false;
         }
-        // Probe the actual transition used by Commit(), never RWX. The product
-        // must not depend on a permission combination rejected by W^X policy.
+        // Probe the Commit transition, never RWX.
         const bool executable = ::mprotect(probe, size, PROT_READ | PROT_EXEC) == 0;
         if (executable) {
             (void)::mprotect(probe, size, PROT_READ | PROT_WRITE);
@@ -100,20 +94,7 @@ void* JitCache::Allocate(size_t size) {
     if (size == 0) return nullptr;
     if (!IsAvailable()) return nullptr;
 
-    // One allocation per page, never two.
-    //
-    // Commit() has to work in whole pages because that is the granularity mprotect
-    // operates on, so committing one method makes every byte of its pages read-only.
-    // Packing the next method into the leftover space of such a page hands out memory
-    // that is already RX, and the memcpy filling it takes SIGBUS — which is exactly
-    // what happened: the first compiled method succeeded, the second faulted inside
-    // memcpy with the freshly returned pointer as the destination address.
-    //
-    // Rounding the allocation out to a page boundary is what makes the two operations
-    // agree. The alternative, mprotecting a page back to writable to reuse its tail,
-    // would strip PROT_EXEC from finished code that another thread may be executing at
-    // that moment; KuART has no safepoints, so there is no moment when that is known to
-    // be safe. Wasting the remainder of a page costs address space and nothing else.
+    // One page-aligned allocation per method; sharing RX pages would fault.
     const size_t pageSize = PageSize();
     const size_t need = RoundUp(size, pageSize);
     if (need > kBlockSize) return nullptr;
@@ -144,17 +125,14 @@ void* JitCache::Allocate(size_t size) {
 bool JitCache::Commit(void* code, size_t size) {
     if (code == nullptr || size == 0) return false;
 
-    // Page-align outwards: mprotect works on whole pages. Allocate() hands out whole
-    // pages for exactly this reason, so the rounding here cannot reach a neighbouring
-    // allocation — the range covers only this method's own pages.
+    // Page-align outwards for mprotect; covers only this method.
     const size_t pageSize = PageSize();
     auto addr = reinterpret_cast<uintptr_t>(code);
     const uintptr_t start = addr & ~(pageSize - 1);
     const uintptr_t end = RoundUp(addr + size, pageSize);
 
 #if defined(__APPLE__) && TARGET_OS_OSX
-    // Under MAP_JIT the pages are already RX; what changes is the per-thread
-    // write-protect state, which the compiler turned off to write this code.
+    // Under MAP_JIT, restore write-protect after emitting code.
     pthread_jit_write_protect_np(1);
 #endif
 
@@ -165,10 +143,7 @@ bool JitCache::Commit(void* code, size_t size) {
         return false;
     }
 
-    // Split I/D caches: the code just written is in the data cache while the
-    // instruction cache may hold whatever occupied these addresses before. Executing
-    // without the flush runs stale bytes, which faults at a pc that never held an
-    // instruction — the hardest possible failure to read.
+    // Flush caches so the CPU fetches the bytes just written.
 #if defined(__APPLE__)
     sys_icache_invalidate(reinterpret_cast<void*>(start), end - start);
 #else

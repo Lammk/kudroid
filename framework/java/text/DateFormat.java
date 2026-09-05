@@ -73,8 +73,7 @@ public abstract class DateFormat extends Format {
         return parse(string, position);
     }
 
-    // ── factories ──
-    // Patterns follow the JDK's en_US forms, since DateFormatSymbols is English-only.
+    // Factories.
 
     public static final DateFormat getInstance() {
         return getDateTimeInstance(SHORT, SHORT);

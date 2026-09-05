@@ -16,7 +16,7 @@ std::string DexReflect::DottedToDescriptor(const char* dotted) {
     }
     // The array name is already a descriptor ("[I", "[Ljava/lang/String;").
     if (s[0] == '[') return s;
-    // Java allows passing built-in descriptors; Don't wrap it twice.
+    // Already a descriptor; do not wrap twice.
     if (s.size() > 2 && s.front() == 'L' && s.back() == ';') return s;
     return "L" + s + ";";
 }
@@ -78,8 +78,7 @@ DexObject* DexReflect::NewInstance(DexClass* klass) {
         last_error_ = "NoSuchMethodException: " + klass->PrettyName() + ".<init>()";
         return nullptr;
     }
-    // Constructor declares itself but has no body which happens when framework only has
-    // stub; Consider the object to have been constructed (field zero) instead of reporting an error.
+    // Bodiless constructor on a stub class; treat as already constructed.
     if (ctor->code_item == nullptr && !ctor->IsNative()) return obj;
 
     const DexValue self = DexValue::Ref(obj);
@@ -107,10 +106,7 @@ DexValue DexReflect::Invoke(DexMethod* method, DexObject* receiver, const DexVal
     DexValue result;
     if (method == nullptr) return result;
 
-    // Method.invoke uses dynamic dispatch: the override child object calls its version.
-    // The receiver reaches here from JNI (CallObjectMethod on a reflected Method) as
-    // well as from bytecode, so its class is validated rather than null-checked —
-    // see DexClassLinker::ClassOfObject.
+    // Method.invoke uses dynamic dispatch; validate the receiver class.
     if (!method->IsStatic() && receiver != nullptr && linker_ != nullptr &&
         method->vtable_index != DexMethod::kInvalidVTableIndex) {
         if (DexClass* receiver_class = linker_->ClassOfObject(receiver)) {

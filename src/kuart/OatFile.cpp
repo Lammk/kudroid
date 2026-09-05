@@ -8,10 +8,7 @@ namespace kudroid {
 namespace kuart {
 namespace {
 
-// On-disk header. Fixed-width fields, written in host byte order: the file never
-// leaves the device it was written on, and an endianness mismatch would mean a
-// different architecture, which the version check already rejects by way of a
-// different build.
+// On-disk header in host byte order; the file never leaves this device.
 struct Header {
     uint32_t magic;
     uint32_t version;
@@ -41,8 +38,7 @@ bool OatFile::Load(const std::string& path) {
         std::fclose(f);
         return false;
     }
-    // A wrong magic or version is not corruption to report — it is a file from another
-    // build. Treat it as absent so the run proceeds with no profile.
+    // Wrong magic/version means another build; treat as absent.
     if (h.magic != kMagic || h.version != kVersion) {
         std::fclose(f);
         return false;
@@ -56,8 +52,7 @@ bool OatFile::Load(const std::string& path) {
     for (uint32_t i = 0; i < h.entry_count; ++i) {
         Record r = {};
         if (std::fread(&r, sizeof(r), 1, f) != 1) {
-            // Truncated: keep what was read. A partial profile is still useful, and the
-            // alternative (discarding it) throws away work for no gain.
+            // Truncated: keep the partial profile.
             break;
         }
         if (r.state > static_cast<uint8_t>(MethodState::kRefused)) continue;
@@ -69,9 +64,7 @@ bool OatFile::Load(const std::string& path) {
 }
 
 bool OatFile::Save(const std::string& path) const {
-    // Write to a sibling temporary then rename. rename() is atomic within a
-    // filesystem, so a kill mid-write leaves the previous file intact instead of a
-    // header claiming more records than follow it.
+    // Write to a temp file then rename so a crash keeps the old file.
     const std::string tmp = path + ".tmp";
     std::FILE* f = std::fopen(tmp.c_str(), "wb");
     if (f == nullptr) return false;
@@ -117,8 +110,7 @@ void OatFile::Note(uint32_t dex_checksum, uint32_t method_index, MethodState sta
         it->second = state;
         return;
     }
-    // At the cap, drop the new entry rather than evicting an old one: an existing entry
-    // has already proven useful across at least one run, while this one is a guess.
+    // At the cap, keep proven entries over new guesses.
     if (entries_.size() >= kMaxEntries) return;
     entries_.emplace(key, state);
 }

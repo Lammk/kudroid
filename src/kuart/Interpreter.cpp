@@ -106,20 +106,7 @@ std::string DescriptorToDotted(const char* descriptor) {
     return s;
 }
 
-// One stack frame rendered the way java.lang.Throwable does it. The line number
-// comes from the DEX debug info when present (release APKs usually keep it, and
-// d8 emits it for framework.dex), otherwise the dex_pc is shown instead so the
-// location is still identifiable in a disassembly.
-//
-// `method` is taken from the call_stack_ slot rather than from frame->method().
-// That distinction is what keeps this function from crashing on a stale entry: a
-// DexMethod lives on the linker heap for the lifetime of the runtime, while the
-// DexFrame lives on the C++ stack only for one Execute() call. Reading the method
-// pointer back out of a reclaimed frame yields garbage, and dereferencing it is
-// exactly how this function used to fault (fault_addr 0x100000015 inside
-// BuildStackTrace). Frame memory is still only read for dex_pc — a uint32_t out of
-// thread stack storage, which stays mapped for the thread's lifetime, so a stale
-// read produces a wrong line number rather than a signal.
+// Render one frame like Throwable; method comes from the slot, not the frame.
 std::string DescribeFrame(const Interpreter::StackSlot& slot) {
     const DexMethod* method = slot.method;
     if (method == nullptr) return "    at <null method>";
@@ -195,15 +182,7 @@ std::string Interpreter::DescribePendingException() const {
     return out;
 }
 
-// The class of the innermost Java frame.
-//
-// A libcore native method does NOT get a frame: InvokeMethod calls LibCoreInvoke instead of
-// pushing one (see the IsNative branch), so while such a method runs, the top of
-// call_stack_ is its caller — which is exactly what MethodHandles.lookup() must report.
-//
-// Empty when native code called in through JNI with no Java frame beneath it. Null is the
-// honest answer there: there is no calling class, and inventing one would be worse than
-// reporting none.
+// Innermost Java frame's class; null when called from native with no frame.
 DexClass* Interpreter::CallerClass() const {
     if (call_stack_.empty()) return nullptr;
     const DexMethod* method = call_stack_.back().method;
@@ -214,24 +193,7 @@ void Interpreter::ThrowException(const char* descriptor, const std::string& mess
     last_error_ = std::string(descriptor) + ": " + message;
     pending_exception_trace_ = BuildStackTrace();
 
-    // Deliberately NOT printed here.
-    //
-    // This used to write "[KuART][EXCEPTION] 💥 ..." plus the full stack trace the
-    // instant an exception was created — before any try table was consulted. Most
-    // exceptions in a real app are caught and expected: ULTRAKILL calls
-    // Class.forName("com.unity3d.JavaPluginPreloader") for a class that is only present
-    // if the developer shipped it, catches the ClassNotFoundException, and carries on.
-    // That produced a 💥 with a five-frame trace at startup, indistinguishable from a
-    // fatal error, and it cost a full round of investigation aimed at the wrong thing
-    // while the real bug — a mis-decoded sigaction struct — went unmentioned.
-    //
-    // The exception is recorded here and reported by whoever ends up owning it:
-    // ExecuteFrame logs it as caught when a handler takes it, and the top of the
-    // interpreter logs it as uncaught when nothing does. A log line that says which of
-    // those happened is worth reading; one that fires on every throw is not.
-    // A throw at the VM level is a fact worth one line, not a five-line trace: it may
-    // well be caught two instructions later. The trace is kept in
-    // pending_exception_trace_ and printed only if the exception goes unhandled.
+    // Record only; the owner logs caught vs uncaught later.
     std::fprintf(stderr, "[KuART][EXCEPTION] %s: %s\n", descriptor, message.c_str());
 
     DexClass* klass = linker_ != nullptr ? linker_->FindClass(descriptor) : nullptr;
@@ -246,7 +208,7 @@ void Interpreter::ThrowException(const char* descriptor, const std::string& mess
         }
     }
     if (pending_exception_ == nullptr) {
-        // No class exception in classpath (framework not loaded) —
+        // No class exception in classpath (framework not loaded) -
         // You still have to stop the method, using an empty object as a flag.
         static DexObject placeholder;
         pending_exception_ = &placeholder;
@@ -281,20 +243,7 @@ DexField* Interpreter::ResolveField(const DexMethod* context, uint32_t field_idx
     return field;
 }
 
-// Name a field KuDroid does not implement, once per distinct field.
-//
-// A missing field cannot be auto-stubbed the way a missing method can: object
-// layout is fixed by LinkClass, so there is nowhere to put the storage. Reporting
-// it precisely is therefore the whole remedy, and it used to be absent — the
-// interpreter threw NoSuchFieldError whose message was the bare opcode name
-// ("iput"), with no class and no field. A real failure looked like this:
-//
-//   NoSuchFieldError: iput
-//       at com.google.androidgamesdk.GameActivity.getImeEditorInfo(...)
-//
-// which says nothing about EditorInfo.inputType being the field at fault. Worse,
-// the class involved is present in framework.dex, so nothing appeared in
-// classes.log either and generate_framework_stubs.py never learned of it.
+// Report a missing field once; fields cannot be auto-stubbed like methods.
 void Interpreter::ReportMissingField(const DexClass* klass, const char* name,
                                      const char* type, bool is_static) {
     if (klass == nullptr) return;
@@ -318,8 +267,7 @@ void Interpreter::ReportMissingField(const DexClass* klass, const char* name,
     DexClassLinker::LogMissingMember(kind, detail);
 }
 
-// Human-readable "class.field : type" for an unresolvable field reference, used in
-// the exception message so the failure names itself.
+// Describe a field reference so failures name the field.
 std::string Interpreter::DescribeFieldRef(const DexMethod* context, uint32_t field_idx,
                                           const char* opcode) const {
     std::string out = opcode != nullptr ? opcode : "field";
@@ -339,8 +287,7 @@ std::string Interpreter::DescribeFieldRef(const DexMethod* context, uint32_t fie
     return out;
 }
 
-// Human-readable "class.method(sig)" for a method reference, used so an
-// unresolvable one names itself instead of printing a DEX index.
+// Describe a method reference so failures name the method.
 std::string Interpreter::DescribeMethodRef(const DexMethod* context,
                                           uint32_t method_idx) const {
     if (context == nullptr || context->dex_file == nullptr) {
@@ -360,12 +307,7 @@ std::string Interpreter::DescribeMethodRef(const DexMethod* context,
     return out;
 }
 
-// An unresolvable method reference, named in classes.log so it can be added.
-//
-// The auto-stub path already logs boot-classpath methods it stubs. This is the other
-// half: references that cannot be stubbed and therefore reach the caller as a
-// NoSuchMethodError. GameActivity.onCreate hit one and the only record was the
-// exception text, which carried an index rather than a name.
+// Log unresolvable methods so stubs can be added.
 void Interpreter::ReportUnresolvableMethod(const DexMethod* context, uint32_t method_idx) {
     if (context == nullptr || context->dex_file == nullptr) return;
     const art::DexFile& dex_file = *context->dex_file;
@@ -375,9 +317,7 @@ void Interpreter::ReportUnresolvableMethod(const DexMethod* context, uint32_t me
     const char* name = dex_file.GetMethodName(method_id);
     const std::string signature = dex_file.GetMethodSignature(method_id).ToString();
 
-    // Whether the CLASS resolved decides what has to be done about it, so say which
-    // case this is. A missing class needs the class written; a present class missing
-    // one method needs only that method.
+    // Note whether the declaring class itself is missing or stubbed.
     DexClass* klass = linker_ != nullptr ? linker_->FindClass(cls) : nullptr;
     std::string detail = std::string(cls != nullptr ? cls : "?") + "->" +
                          (name != nullptr ? name : "?") + signature;
@@ -450,29 +390,7 @@ DexMethod* Interpreter::ResolveMethod(const DexMethod* context, uint32_t method_
 
         auto stubM = std::make_unique<DexMethod>();
         stubM->name = name;
-        // The signature MUST be recorded, and leaving it null was not a cosmetic gap.
-        //
-        // NameAndSigMatch treats a null signature as "match anything", so a stub with no
-        // signature is found by name alone — and InvokeMethod re-resolves every virtual
-        // call against the receiver's class using target->signature. A stubbed overload
-        // therefore silently redirected to a DIFFERENT overload of the same name, with
-        // incompatible parameter types and no diagnostic at all.
-        //
-        // That is what ULTRAKILL hit. Unity called
-        // Activity.getSystemService(Ljava/lang/Class;), which was absent, so this stub was
-        // created; the re-resolution then found the real getSystemService(String) and the
-        // interpreter passed a java.lang.Class where a String was expected. The String
-        // overload compared it against its service names, matched none, and returned null
-        // — so the log read only "call getDefaultDisplay on null", naming neither the
-        // missing overload nor the substitution that caused it.
-        //
-        // It is luck that this particular case was survivable: equals() on the wrong type
-        // merely returns false. Had the stubbed overload's argument been a primitive
-        // redirected into a reference parameter, the same path would have handed an
-        // integer to code that dereferences it.
-        //
-        // Interned into the linker's heap because `signature` is a local std::string and
-        // DexMethod holds a borrowed pointer for the lifetime of the runtime.
+        // Signature must be recorded; null matches any overload by name.
         stubM->signature = linker_->heap().InternString(signature.c_str());
         stubM->declaring_class = klass;
         stubM->access_flags = art::kAccPublic;
@@ -484,11 +402,7 @@ DexMethod* Interpreter::ResolveMethod(const DexMethod* context, uint32_t method_
     return nullptr;
 }
 
-// Forward a call on a synthesised proxy to its InvocationHandler.
-//
-// Kept next to InvokeMethod rather than in LibCore because it has to be reachable
-// from both invoke sites: the bytecode path here and Execute(), which reflection and
-// JNI enter directly.
+// Forward proxy calls to the InvocationHandler; reachable from both invoke sites.
 bool Interpreter::InvokeProxyMethod(DexObject* proxy, DexMethod* method,
                                     const DexValue* args, size_t num_args,
                                     DexValue* out) {
@@ -547,11 +461,7 @@ bool Interpreter::InvokeProxyMethod(DexObject* proxy, DexMethod* method,
     const DexValue boxed_result = Execute(invoke, call_args, 4);
     if (HasPendingException()) return true;
 
-    // Unbox to the declared return type. A handler returning null for a primitive is
-    // a real error in Java (NullPointerException on unboxing), but returning zero is
-    // the more useful behaviour here: guest handlers written against a permissive VM
-    // do it routinely, and a hard failure would abort a callback that has already
-    // done its work.
+    // Unbox to return type; null for primitives yields zero, not failure.
     const char* ret = method->signature != nullptr ? std::strchr(method->signature, ')') : nullptr;
     if (ret != nullptr) ++ret;
     if (ret == nullptr || ret[0] == 'V') {
@@ -575,10 +485,7 @@ bool Interpreter::InvokeMethod(DexFrame* frame, const art::Instruction* inst, bo
     const uint32_t method_idx = is_range ? inst->VRegB_3rc() : inst->VRegB_35c();
     DexMethod* target = ResolveMethod(frame->method(), method_idx);
     if (target == nullptr) {
-        // Name the method. "failed to resolve method index 45364" is meaningful only
-        // inside one DEX file: GameActivity.onCreate threw it and the message named
-        // neither the class nor the method, so there was nothing to add to the
-        // framework without disassembling the APK first.
+        // Name the method; a raw DEX index alone cannot be acted on.
         ReportUnresolvableMethod(frame->method(), method_idx);
         ThrowException("Ljava/lang/NoSuchMethodError;",
                        DescribeMethodRef(frame->method(), method_idx));
@@ -600,14 +507,13 @@ bool Interpreter::InvokeMethod(DexFrame* frame, const art::Instruction* inst, bo
     const bool is_static = opcode == Instruction::INVOKE_STATIC ||
                            opcode == Instruction::INVOKE_STATIC_RANGE;
 
-    // The static method is the first point the class is used if the app does not have a new object.
+    // Static call triggers class initialization.
     if (is_static) {
         EnsureInitialized(target->declaring_class);
         if (HasPendingException()) return false;
     }
 
-    // Register wide takes up 2 slots in the parameter list but is only one price
-    // value — must ignore second slot when collecting.
+    // Wide values use two slots but one register; skip the second slot.
     const char* shorty = nullptr;
     if (target->dex_file != nullptr) {
         shorty = target->dex_file->GetMethodShorty(
@@ -645,15 +551,7 @@ bool Interpreter::InvokeMethod(DexFrame* frame, const art::Instruction* inst, bo
         }
     }
 
-    // invoke-virtual/interface: choose the override version according to the receiver's real class.
-    //
-    // The receiver's class is validated rather than merely null-checked. A receiver
-    // that came from native code can carry a clazz that is non-null yet not a class
-    // at all — libPlayFabMultiplayer's JNI_OnLoad produced clazz == 0x10, which
-    // passed the null check and then faulted at offset 0x98 inside
-    // FindVirtualMethod. An unvalidated pointer here turns a bad JNI handle into a
-    // signal with no Java context; falling back to the statically resolved target
-    // keeps the failure inside the interpreter where it can be reported.
+    // Dispatch virtually on the validated receiver class.
     if (opcode == Instruction::INVOKE_VIRTUAL ||
         opcode == Instruction::INVOKE_VIRTUAL_RANGE ||
         opcode == Instruction::INVOKE_INTERFACE ||
@@ -665,11 +563,7 @@ bool Interpreter::InvokeMethod(DexFrame* frame, const art::Instruction* inst, bo
                 receiver_class->FindVirtualMethod(target->name, target->signature);
             if (resolved != nullptr) target = resolved;
         } else if (receiver != nullptr) {
-            // Name the declaring class of the method that was called as well as what
-            // was wrong with the receiver. Both halves are needed: the message
-            // "invoke getSystemService on an object with an invalid class pointer"
-            // identified neither which Context-like class was expected nor what the
-            // bad pointer was, so the origin of the 0x10 could not be worked out.
+            // Name both the method and the bad receiver for diagnosis.
             std::string detail = "invoke ";
             if (target->declaring_class != nullptr) {
                 detail += target->declaring_class->PrettyName();
@@ -685,7 +579,7 @@ bool Interpreter::InvokeMethod(DexFrame* frame, const art::Instruction* inst, bo
     }
 
     if (target->IsNative()) {
-        // The self-written libcore is called directly in C++, without going through the JNI ABI.
+        // Libcore natives run directly in C++, bypassing the JNI ABI.
         DexValue lib_result;
         if (LibCoreInvoke(this, target, args.data(), args.size(), &lib_result)) {
             if (HasPendingException()) return false;
@@ -709,20 +603,11 @@ bool Interpreter::InvokeMethod(DexFrame* frame, const art::Instruction* inst, bo
     return true;
 }
 
-// filled-new-array vX..vY, type@BBBB   (k35c, up to 5 elements)
-// filled-new-array/range {vX..vY}, type@BBBB  (k3rc, any count)
-//
-// d8 emits this for every `new T[]{a, b, c}` literal, which includes the
-// synthetic `$values()` method it generates for EVERY enum — so without this
-// opcode no enum can run its <clinit> at all.
-//
-// Unlike new-array the result does NOT go into a destination register: it is read
-// back with move-result-object, exactly like an invoke. That is why this writes
-// frame->set_result() instead of frame->SetRef().
+// filled-new-array writes frame result, like an invoke, for move-result.
 bool Interpreter::FilledNewArray(DexFrame* frame, const art::Instruction* inst, bool is_range) {
     const DexMethod* method = frame->method();
 
-    // VRegB is the ARRAY type ("[I"), not the element type — take component_type
+    // VRegB is the ARRAY type ("[I"), not the element type - take component_type
     // from the resolved class rather than slicing the descriptor, so that
     // multi-dimensional arrays ("[[I") stay correct.
     const uint32_t type_idx = is_range ? inst->VRegB_3rc() : inst->VRegB_35c();
@@ -749,7 +634,7 @@ bool Interpreter::FilledNewArray(DexFrame* frame, const art::Instruction* inst, 
     }
 
     // Element width follows component_type, matching DexClassLinker::ElementSize
-    // used by AllocArray — writing a wider type here would run past the allocation.
+    // used by AllocArray - writing a wider type here would run past the allocation.
     const DexClass* component = array_class->component_type;
     const char kind = (component != nullptr && component->is_primitive &&
                        component->descriptor != nullptr)
@@ -791,28 +676,7 @@ bool Interpreter::FilledNewArray(DexFrame* frame, const art::Instruction* inst, 
 }
 
 DexValue Interpreter::Execute(const DexMethod* method, const DexValue* args, size_t num_args) {
-    // Report an exception that leaves the interpreter entirely.
-    //
-    // Declared before everything else so it destructs LAST — after StackEntry below has
-    // restored depth_ — and so it covers the early returns above StackEntry too.
-    //
-    // depth_ == 0 on the way out means no Java frame anywhere caught this: it passed
-    // every try table on the way up and is now being handed back to native code. That
-    // is the one point where "uncaught" is a fact rather than a guess, and it is where
-    // the stack trace belongs.
-    //
-    // It used to be printed by ThrowException instead — at the moment of the throw,
-    // before any try table was consulted. Most exceptions a real app throws are caught
-    // and expected: ULTRAKILL calls Class.forName("com.unity3d.JavaPluginPreloader") for
-    // a class that only exists if the developer shipped it, catches the
-    // ClassNotFoundException and carries on. That printed a 💥 with a five-frame trace
-    // during startup, indistinguishable from a fatal error, and it cost a full round of
-    // investigation aimed at the wrong thing while the real bug went unmentioned.
-    //
-    // Doing it here rather than at each call site is what makes it complete: a JNI
-    // callback, a Java thread started from LibCore and the ActivityThread entry point
-    // all leave through this function, and each of those used to discard a pending
-    // exception without a word.
+    // Report uncaught exceptions on exit when no Java frame caught them.
     struct UncaughtReporter {
         Interpreter* self;
         ~UncaughtReporter() {
@@ -830,8 +694,7 @@ DexValue Interpreter::Execute(const DexMethod* method, const DexValue* args, siz
         return result;
     }
 
-    // Native methods have no bytecode. Reflection (Method.invoke) and JNI both
-    // land here, so the native path must be handled before the code_item check.
+    // Native methods have no bytecode; handle before the code check.
     if (method->IsNative()) {
         auto* target = const_cast<DexMethod*>(method);
         if (LibCoreInvoke(this, target, args, num_args, &result)) return result;
@@ -845,11 +708,7 @@ DexValue Interpreter::Execute(const DexMethod* method, const DexValue* args, siz
     }
 
     if (method->code_item == nullptr) {
-        // A call on a proxy instance. The proxy class deliberately has no bodies —
-        // every interface method it nominally implements is meant to reach the
-        // InvocationHandler instead. This must be checked BEFORE the stub and
-        // AbstractMethodError paths below, both of which would treat the absence of a
-        // body as the defect it is for any other class.
+        // Proxy calls go to the handler; check before stub handling.
         if (!method->IsStatic() && num_args > 0 && linker_ != nullptr) {
             DexObject* receiver = args[0].l;
             DexClass* receiver_class = linker_->ClassOfObject(receiver);
@@ -862,10 +721,7 @@ DexValue Interpreter::Execute(const DexMethod* method, const DexValue* args, siz
             }
         }
 
-        // A method on an auto-stubbed class has no body. Returning 0/null here — which
-        // is what this used to do — converts "KuDroid does not ship this class" into a
-        // wrong value that surfaces far away as a NullPointerException with no hint of
-        // the real cause. Name the missing class instead so it can be added.
+        // Stub methods have no body; report the missing class.
         if (method->declaring_class != nullptr && method->declaring_class->is_stub) {
             ThrowException("Ljava/lang/NoClassDefFoundError;",
                            method->declaring_class->PrettyName() + "." +
@@ -889,32 +745,14 @@ DexValue Interpreter::Execute(const DexMethod* method, const DexValue* args, siz
     }
     frame.LoadArguments(args, num_args, shorty, method->IsStatic());
 
-    // The instruction limit is calculated for each missed call, not cumulative
-    // multiple calls — otherwise a method that runs for a long time will cause subsequent calls to fail.
+    // Instruction limit is per top-level call, not cumulative.
     if (depth_ == 0) instructions_executed_ = 0;
 
-    // Serialise bytecode across Java threads. The mutex is recursive, so a nested
-    // invoke on a thread that already holds it costs nothing extra.
-    //
-    // Keyed on whether the lock is actually HELD, not on depth_ == 0. A native method
-    // releases the VM lock while it blocks (see DexJniEnv::CallNative), and native code
-    // routinely calls back into Java while in that state — a JNI callback, or a
-    // condition variable's predicate. Such a call arrives at depth_ > 0 with no lock
-    // held, and keying on depth_ meant it interpreted bytecode completely unsynchronised
-    // against every other Java thread.
+    // Serialize bytecode; key on lock held, not call depth, for callbacks.
     std::unique_ptr<VmLockGuard> vm_lock;
     if (VmLockDepth() == 0) vm_lock = std::make_unique<VmLockGuard>();
 
-    // Publish the frame for BuildStackTrace() and count the call depth. Both must be
-    // undone on EVERY exit path, including a C++ exception escaping a native
-    // downcall, or the vector would keep a pointer to a destroyed stack frame and
-    // depth_ would drift upwards until every call trips the kMaxCallDepth check.
-    //
-    // Unwinding resizes back to the depth seen on entry rather than popping one
-    // entry. Popping assumes the vector is exactly as this frame left it, which is
-    // false after the JNI_OnLoad shield siglongjmps past inner frames: the pop would
-    // then remove some other frame's live entry and leave the dead ones in place.
-    // Resizing makes each frame's own exit repair everything below it.
+    // Publish frame and depth; unwind by resizing to survive longjmps.
     struct StackEntry {
         size_t saved_frames;
         size_t saved_depth;
@@ -959,7 +797,7 @@ bool Interpreter::FindCatchHandler(const art::CodeItemDataAccessor& accessor,
         }
         DexClass* catch_class = ResolveClass(method, type_idx.index_);
         // If the class handler cannot be loaded, then that handler is ignored and is not considered captured
-        // Yes — otherwise the exception will be thrown in the wrong place.
+        // Yes - otherwise the exception will be thrown in the wrong place.
         if (catch_class == nullptr) continue;
         if (ex_class != nullptr && ex_class->IsSubClassOf(catch_class)) {
             *handler_pc = it.GetHandlerAddress();
@@ -993,9 +831,7 @@ bool Interpreter::EnsureInitialized(DexClass* klass) {
     return true;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // JIT dispatch
-// ─────────────────────────────────────────────────────────────────────────────
 
 namespace {
 std::atomic<uint64_t> g_jit_compiled_methods{0};
@@ -1018,7 +854,7 @@ bool Interpreter::TryJit(DexFrame* frame, DexValue* out, uint32_t* resume_pc) {
 
     if (method->jit_state == DexMethod::JitState::kNotCompiled) {
         // A profile from the previous run turns a hot method into a first-call compile.
-        // Without it, kJitThreshold calls must be interpreted before the counter trips —
+        // Without it, kJitThreshold calls must be interpreted before the counter trips -
         // a cost paid again on every launch, which is precisely what an ahead-of-time
         // cache exists to remove.
         bool compileNow = false;
@@ -1105,7 +941,7 @@ DexValue Interpreter::ExecuteFrame(DexFrame* frame) {
     art::CodeItemDataAccessor accessor(*method->dex_file, method->code_item);
 
     // Compiled code first, if this method has any. A bail sets the dex_pc the
-    // interpreter should continue from — compiled code and the interpreter share the
+    // interpreter should continue from - compiled code and the interpreter share the
     // frame's register array, so resuming mid-method needs no state transfer.
     {
         DexValue jitResult;
@@ -1129,19 +965,11 @@ DexValue Interpreter::ExecuteFrame(DexFrame* frame) {
     }
 }
 
-// Whether this exception left the interpreter entirely, and the trace if it did.
-//
-// Called from Execute()'s exit when depth_ has returned to 0: the exception passed every
-// try table on the way up and native code is about to receive it. The 💥 line and its
-// trace belong here rather than at the throw site — an exception a guest catches is not
-// a failure, and printing a trace for one trains a reader to ignore the tag.
+// Report uncaught exceptions exiting to native code with their trace.
 void Interpreter::ReportUncaughtException() {
     if (!HasPendingException()) return;
     std::fprintf(stderr, "[KuART][EXCEPTION] 💥 uncaught: %s\n", last_error_.c_str());
-    // Guest `throw` carries its reason in Throwable.message, which last_error_ does
-    // not include (it is only "throw ClassName"). Print it so the next missing API
-    // names itself instead of needing one device round-trip per guess. Null-safe:
-    // this runs on the crash path and must not crash the crash reporter.
+    // Also print Throwable.message, which last_error_ omits.
     if (pending_exception_ != nullptr && pending_exception_->clazz != nullptr) {
         if (DexField* f_msg = pending_exception_->clazz->FindInstanceField(
                 "message", "Ljava/lang/String;")) {
@@ -1176,7 +1004,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
             return return_value;
         }
 
-        // Record the computer before running so that ExecuteFrame knows which instructions to throw.
+        // Record dex_pc before running so handlers know the throwing instruction.
         frame->set_dex_pc(dex_pc);
 
         const Instruction* inst = Instruction::At(insns + dex_pc);
@@ -1187,7 +1015,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
             case Instruction::NOP:
                 break;
 
-            // ── move ──
+            // Move.
             case Instruction::MOVE:
             case Instruction::MOVE_OBJECT:
                 frame->Set(inst->VRegA_12x(), frame->Get(inst->VRegB_12x()));
@@ -1222,7 +1050,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                 frame->set_caught_exception(nullptr);
                 break;
 
-            // ── const ──
+            // Const.
             case Instruction::CONST_4:
                 frame->SetInt(inst->VRegA_11n(), inst->VRegB_11n());
                 break;
@@ -1251,7 +1079,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                                static_cast<int64_t>(inst->VRegB_21h()) << 48);
                 break;
 
-            // ── return ──
+            // Return.
             case Instruction::RETURN_VOID:
             case Instruction::RETURN_VOID_NO_BARRIER:
                 return return_value;
@@ -1260,7 +1088,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
             case Instruction::RETURN_OBJECT:
                 return frame->Get(inst->VRegA_11x());
 
-            // ── compare ──
+            // Compare.
             case Instruction::CMPL_FLOAT:
                 frame->SetInt(inst->VRegA_23x(),
                               CompareFloat(frame->GetFloat(inst->VRegB_23x()),
@@ -1287,7 +1115,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                                           frame->GetLong(inst->VRegC_23x())));
                 break;
 
-            // ── jump ──
+            // Jump.
             case Instruction::GOTO:
                 dex_pc += inst->VRegA_10t();
                 continue;
@@ -1339,7 +1167,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                 break;
             }
 
-            // ── an operand ──
+            // An operand.
             case Instruction::NEG_INT:
                 frame->SetInt(inst->VRegA_12x(), -frame->GetInt(inst->VRegB_12x()));
                 break;
@@ -1359,7 +1187,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                 frame->SetDouble(inst->VRegA_12x(), -frame->GetDouble(inst->VRegB_12x()));
                 break;
 
-            // ── change style ──
+            // Change style.
             case Instruction::INT_TO_LONG:
                 frame->SetLong(inst->VRegA_12x(), frame->GetInt(inst->VRegB_12x()));
                 break;
@@ -1418,7 +1246,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                               static_cast<int16_t>(frame->GetInt(inst->VRegB_12x())));
                 break;
 
-            // ── int arithmetic, two operands (23x) ──
+            // Int arithmetic, two operands (23x).
             case Instruction::ADD_INT:
                 frame->SetInt(inst->VRegA_23x(),
                               static_cast<int32_t>(
@@ -1480,7 +1308,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                                                           frame->GetInt(inst->VRegC_23x())));
                 break;
 
-            // ── long arithmetic ──
+            // Long arithmetic.
             case Instruction::ADD_LONG:
                 frame->SetLong(inst->VRegA_23x(),
                                static_cast<int64_t>(
@@ -1542,7 +1370,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                                                                frame->GetInt(inst->VRegC_23x())));
                 break;
 
-            // ── float/double arithmetic ──
+            // Float/double arithmetic.
             case Instruction::ADD_FLOAT:
                 frame->SetFloat(inst->VRegA_23x(), frame->GetFloat(inst->VRegB_23x()) +
                                                        frame->GetFloat(inst->VRegC_23x()));
@@ -1584,7 +1412,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                                                               frame->GetDouble(inst->VRegC_23x())));
                 break;
 
-            // ── form /2addr: destination is also the first operand ──
+            // Form /2addr: destination is also the first operand.
             case Instruction::ADD_INT_2ADDR:
                 frame->SetInt(inst->VRegA_12x(),
                               static_cast<int32_t>(
@@ -1746,7 +1574,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                                                               frame->GetDouble(inst->VRegB_12x())));
                 break;
 
-            // ── int with constant ──
+            // Int with constant.
             case Instruction::ADD_INT_LIT16:
                 frame->SetInt(inst->VRegA_22s(),
                               static_cast<int32_t>(
@@ -1857,7 +1685,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                               JavaUshr(frame->GetInt(inst->VRegB_22b()), inst->VRegC_22b()));
                 break;
 
-            // ── constant string and constant class ──
+            // Constant string and constant class.
             case Instruction::CONST_STRING: {
                 const char* s = method->dex_file->StringDataByIdx(
                     art::dex::StringIndex(inst->VRegB_21c()));
@@ -1880,18 +1708,14 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                 break;
             }
 
-            // ── create objects and arrays ──
+            // Create objects and arrays.
             case Instruction::NEW_INSTANCE: {
                 DexClass* klass = ResolveClass(method, inst->VRegB_21c());
                 if (klass == nullptr) {
                     ThrowException("Ljava/lang/ClassNotFoundException;", "new-instance");
                     return return_value;
                 }
-                // Instantiating an auto-stub yields an object with no fields and no
-                // methods. Java's own answer for "the class exists as a reference
-                // but has no implementation" is NoClassDefFoundError, and throwing
-                // it here keeps the failure at the point of the missing class
-                // instead of leaking a hollow object into unrelated code.
+                // Stub instantiation fails fast with NoClassDefFoundError.
                 if (klass->is_stub) {
                     ThrowException("Ljava/lang/NoClassDefFoundError;", klass->PrettyName());
                     return return_value;
@@ -1946,7 +1770,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                 break;
             }
 
-            // ── check the type ──
+            // Check the type.
             case Instruction::INSTANCE_OF: {
                 DexObject* obj = frame->GetRef(inst->VRegB_22c());
                 DexClass* target = ResolveClass(method, inst->VRegC_22c());
@@ -1970,7 +1794,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                 break;
             }
 
-            // ── field instance ──
+            // Field instance.
             case Instruction::IGET:
             case Instruction::IGET_WIDE:
             case Instruction::IGET_OBJECT:
@@ -2059,7 +1883,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                 break;
             }
 
-            // ── field static ──
+            // Field static.
             case Instruction::SGET:
             case Instruction::SGET_WIDE:
             case Instruction::SGET_OBJECT:
@@ -2112,7 +1936,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                 break;
             }
 
-            // ── array element ──
+            // Array element.
             case Instruction::AGET:
             case Instruction::AGET_WIDE:
             case Instruction::AGET_OBJECT:
@@ -2201,7 +2025,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                 break;
             }
 
-            // ── call method ──
+            // Call method.
             case Instruction::INVOKE_VIRTUAL:
             case Instruction::INVOKE_SUPER:
             case Instruction::INVOKE_DIRECT:
@@ -2221,7 +2045,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                 }
                 break;
 
-            // ── switch ──
+            // Switch.
             case Instruction::PACKED_SWITCH: {
                 const int32_t test = frame->GetInt(inst->VRegA_31t());
                 const uint16_t* payload = insns + dex_pc + inst->VRegB_31t();
@@ -2271,7 +2095,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                 break;
             }
 
-            // ── exception ──
+            // Exception.
             case Instruction::THROW: {
                 DexObject* ex = frame->GetRef(inst->VRegA_11x());
                 if (ex == nullptr) {
@@ -2322,7 +2146,7 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
         dex_pc = next_pc;
     }
 
-    // Falling out of the end of the method without returning — bytecode error.
+    // Falling out of the end of the method without returning - bytecode error.
     ThrowException("Ljava/lang/VerifyError;", "run out of bytecode without return");
     return return_value;
 }

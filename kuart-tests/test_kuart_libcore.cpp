@@ -1,10 +1,5 @@
-// Host test for the libcore native implementations in src/kuart/LibCore.cpp.
-//
-// Every check drives the natives the way real Java code does: allocate the
-// receiver, then call the native method through Interpreter::Execute. The
-// libcore Java sources are not available here (they need d8), so the DEX built
-// below declares just the classes and native method signatures that LibCore.cpp
-// dispatches on.
+// Host test for the libcore natives, driven the way real Java calls them.
+// The DEX declares only the classes/signatures LibCore.cpp dispatches on (no d8 here).
 #include "kudroid/kuart/DexClassLinker.h"
 #include "kudroid/kuart/DexObject.h"
 #include "kudroid/kuart/DexString.h"

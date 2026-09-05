@@ -1,18 +1,5 @@
-// Execute the machine code JitCompiler produced, on real arm64 under qemu.
-//
-// The golden-byte test proves the encoder agrees with GNU as. This proves the encoded
-// sequences COMPUTE the right values — which is a different question, and the one that
-// matters. An encoding can be byte-correct and still be assembled into the wrong
-// sequence: a load from the wrong offset, a clamp that drops the sign, a branch patched
-// to the wrong instruction. None of those show up as invalid bytes.
-//
-// Freestanding on purpose: the toolchain ships an aarch64 cross-compiler but no aarch64
-// libc sysroot, so this talks to the kernel through svc directly. The alternative — no
-// arm64 execution test at all — leaves the code generator checked only against itself.
-//
-// Values are chosen to catch specific mistakes rather than to cover a range:
-// INT_MAX + 1 catches a missing 32-bit wrap, INT64_MIN vs INT64_MAX catches a signed
-// comparison done unsigned, and a loop bound of 0 and -3 catch an inverted exit test.
+// Execute JitCompiler output on real arm64 under qemu: golden bytes prove the encoding,
+// this proves the sequences COMPUTE the right values. Freestanding (svc only, no sysroot).
 typedef unsigned long long u64; typedef unsigned int u32;
 typedef long long i64; typedef int i32;
 #include "gen_code.h"

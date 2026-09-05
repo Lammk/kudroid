@@ -37,10 +37,10 @@ git checkout -B pinned-angle "$ANGLE_REF"
 python3 scripts/bootstrap.py
 gclient sync --no-history --shallow --reset --force
 
-# v  error vulkan-loader:  nh ngh a sysconfdir / fallback_*_dirs
-# b n d ng gn c a angle kh ng truy n extra_cflags cho t t c  c c m c ti u third_party.
-# vulkan-loader c n c c macro n y nh ng ch ng ch   c x c  nh trong c c b n d ng cmake.
-# ch ng t i  a ch ng tr c ti p v o c c t p ngu n tham chi u  n ch ng.
+# Work around vulkan-loader error: define sysconfdir / fallback_*_dirs.
+# ANGLE's gn build passes no extra_cflags to third_party targets, while
+# vulkan-loader needs these macros (cmake builds define them), so patch them
+# directly into the sources that reference them.
 LOADER_PATCH='
 #ifndef SYSCONFDIR
 #define SYSCONFDIR "/etc"
@@ -61,12 +61,11 @@ for vkfile in third_party/vulkan-loader/src/loader/loader.c \
     fi
 done
 
-# b n v : inline-stub mac-only c c k  hi u hi n th  vulkan cho ios
-# display.cpp tham chi u rx::isvulkanmacdisplayavailable() v
-# rx::createvulkanmacdisplay() ch   c bi n d ch tr n macos.
-# tr n ios, c c k  hi u n y kh ng  c x c  nh   error tr nh li n k t   b c solink libglesv2.
-# s a error:  a c c  nh ngh a n i tuy n tr c ti p v o display.cpp   tr nh bi n d ch
-# ph n gi i ch ng c c b  m  kh ng c n c c k  hi u b n ngo i.
+# Patch: inline stubs for mac-only vulkan display symbols on ios.
+# Display.cpp references rx::IsVulkanMacDisplayAvailable() and
+# rx::CreateVulkanMacDisplay(), which exist only on macos; on ios they are
+# undefined and linking libGLESv2 fails. Fix: inline the definitions directly
+# into Display.cpp.
 DISPLAY_FILE="src/libANGLE/Display.cpp"
 if [[ -f "$DISPLAY_FILE" ]] && ! grep -q 'KuDroid' "$DISPLAY_FILE"; then
     python3 << 'PYEOF'
@@ -93,7 +92,7 @@ stub = [
     "\n",
 ]
 
-# t m  i m ch n: sau d ng #include cu i c ng
+# insertion point: after the last #include line
 insert_after = 0
 for i, line in enumerate(lines):
     if line.strip().startswith("#include"):
@@ -108,7 +107,7 @@ print(f"Patched {filepath}: added inline Mac display stubs for iOS")
 PYEOF
 fi
 
-# kh ng x a $build_dir   cho ph p c c b n d ng t ng d n t  b   m!
+# keep $build_dir for incremental rebuilds!
 mkdir -p "$BUILD_DIR"
 gn gen "$BUILD_DIR" --args='target_os="ios"
 target_cpu="arm64"
@@ -135,7 +134,7 @@ autoninja -C "$BUILD_DIR" libEGL libGLESv2
 
 cp -R include/EGL include/GLES include/GLES2 include/GLES3 include/KHR "$OUTPUT_DIR/include/"
 
-# angle tr n ios t o ra c c g i .framework
+# angle on ios produces .framework packages
 if [[ -d "$BUILD_DIR/libEGL.framework" ]]; then
     cp -R "$BUILD_DIR/libEGL.framework" "$OUTPUT_DIR/lib/ios-arm64/"
 fi
@@ -143,10 +142,10 @@ if [[ -d "$BUILD_DIR/libGLESv2.framework" ]]; then
     cp -R "$BUILD_DIR/libGLESv2.framework" "$OUTPUT_DIR/lib/ios-arm64/"
 fi
 
-# c ng t m ki m   quy b t k  t p .a ho c .dylib libegl/libglesv2 n o
+# also collect any libegl/libglesv2 .a or .dylib
 find "$BUILD_DIR" -type f \( -name 'libEGL.a' -o -name 'libGLESv2.a' -o -name 'libEGL.dylib' -o -name 'libGLESv2.dylib' \) -exec cp {} "$OUTPUT_DIR/lib/ios-arm64/" \;
 
-# n u c c t p nh  ph n framework t n t i, h y  m b o libegl.dylib v  libglesv2.dylib t n t i cho c c c  tr nh li n k t -legl / -lglesv2
+# if framework binaries exist, ensure libegl.dylib and libglesv2.dylib exist for -legl / -lglesv2 link steps
 if [[ -f "$OUTPUT_DIR/lib/ios-arm64/libEGL.framework/libEGL" && ! -f "$OUTPUT_DIR/lib/ios-arm64/libEGL.dylib" && ! -f "$OUTPUT_DIR/lib/ios-arm64/libEGL.a" ]]; then
     cp "$OUTPUT_DIR/lib/ios-arm64/libEGL.framework/libEGL" "$OUTPUT_DIR/lib/ios-arm64/libEGL.dylib"
 fi

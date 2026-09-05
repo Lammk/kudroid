@@ -1,9 +1,8 @@
-// Host test for nh m opcode object interaction: new/field/array/invoke/switch.
+// Host test for the object-interaction opcode group: new/field/array/invoke/switch.
 //
-// Bytecode tham chi u class/field/method b ng INDEX trong DEX, m  index ch
-// ch t sau khi builder sort xong m i b ng. N n test build HAI L N: l n  u v i
-// code r ng   h c index, l n hai v i bytecode th t. C ng b  spec th  index
-// gi ng nhau n n c ch n y tin  c.
+// Bytecode references class/field/method by DEX index, which settles only after
+// the builder sorts each table. So the test builds TWICE: first with empty code
+// to learn the indices, then with real bytecode.
 #include "kudroid/kuart/DexClassLinker.h"
 #include "kudroid/kuart/Interpreter.h"
 
@@ -48,7 +47,7 @@ void Op22b(std::vector<uint16_t>* code, uint8_t op, uint8_t a, uint8_t b, int8_t
     code->push_back(static_cast<uint16_t>(op | (a << 8)));
     code->push_back(static_cast<uint16_t>((b & 0xFF) | ((c & 0xFF) << 8)));
 }
-// invoke 35c: op | argc<<12, idx, r i c c register 4-bit  ng g i
+// invoke 35c: op | argc<<12, idx, then packed 4-bit registers
 void Op35c(std::vector<uint16_t>* code, uint8_t op, uint16_t idx,
            const std::vector<uint8_t>& regs) {
     code->push_back(static_cast<uint16_t>(op | (regs.size() << 12)));
@@ -86,7 +85,7 @@ constexpr uint8_t kOpAddInt = 0x90;
 constexpr uint8_t kOpAddIntLit8 = 0xd8;
 constexpr uint8_t kOpConstString = 0x1a;
 
-// Spec d ng chung cho c  hai l n build; ch  ph n code kh c nhau.
+// Spec shared by both builds; only the code differs.
 struct Specs {
     FieldSpec point_x{"x", "I", 0x1};
     FieldSpec point_y{"y", "I", 0x1};
@@ -94,22 +93,22 @@ struct Specs {
 
     MethodSpec point_ctor;
     MethodSpec point_get_x;
-    MethodSpec point_sum;      // virtual, Point tr  x+y
-    MethodSpec point3d_sum;    // override, c ng th m z
+    MethodSpec point_sum;      // virtual, Point returns x+y
+    MethodSpec point3d_sum;    // override, adds z
     FieldSpec point3d_z{"z", "I", 0x1};
     MethodSpec point3d_ctor;
 
-    MethodSpec make_point;     // static: new Point, set field, tr  object
+    MethodSpec make_point;     // static: new Point, set fields, return object
     MethodSpec read_x;         // static: iget
     MethodSpec array_ops;      // static: new-array + aput + aget + array-length
-    MethodSpec static_ops;     // static: sput r i sget
-    MethodSpec call_virtual;   // static: g i sum() qua tham s  Point
-    MethodSpec call_static;    // static: g i addTwo()
+    MethodSpec static_ops;     // static: sput then sget
+    MethodSpec call_virtual;   // static: call sum() via Point param
+    MethodSpec call_static;    // static: call addTwo()
     MethodSpec add_two;        // static helper
     MethodSpec instance_check; // static: instance-of
-    MethodSpec npe_test;       // static: iget tr n null
-    MethodSpec oob_test;       // static: aget ngo i d i
-    MethodSpec string_test;    // static: const-string tr  object
+    MethodSpec npe_test;       // static: iget on null
+    MethodSpec oob_test;       // static: out-of-range aget
+    MethodSpec string_test;    // static: const-string returns object
 
     Specs() {
         point_ctor.name = "<init>";
@@ -231,9 +230,9 @@ std::vector<ClassSpec> BuildClasses(const Specs& s) {
 int main() {
     std::printf("=== KuART Interpreter 3b: object/field/array/invoke ===\n");
 
-    // L t 1: h c index
-    // "hello" v  "[I" ch  xu t hi n trong bytecode (const-string, new-array) n n
-    // builder kh ng t  thu th p  c   ph i khai b o qua spec   ch ng v o b ng.
+    // Pass 1: learn indices
+    // "hello" and "[I" appear only in bytecode, so the builder cannot collect them;
+    // declare via spec to get them into the tables.
     Specs probe;
     DexBuilder index_builder;
     index_builder.Build(BuildClasses(probe));
@@ -258,7 +257,7 @@ int main() {
     const uint16_t kStringHello =
         static_cast<uint16_t>(index_builder.StringIndexOf("hello"));
 
-    // L t 2:  i n bytecode th t
+    // Pass 2: fill in real bytecode
     Specs s;
 
     // Point.<init>()V  { return; }
@@ -266,7 +265,7 @@ int main() {
     s.point_ctor.registers_size = 1;
     s.point_ctor.ins_size = 1;
 
-    // Point.getX()I  { return this.x; }  v0 kq, v1 = this
+    // Point.getX()I  { return this.x; }  v0 result, v1 = this
     {
         std::vector<uint16_t> c;
         Op22c(&c, kOpIget, 0, 1, kFieldX);
@@ -275,7 +274,7 @@ int main() {
         s.point_get_x.registers_size = 2;
         s.point_get_x.ins_size = 1;
     }
-    // Point.sum()I  { return this.x + this.y; }  v0,v1 t m, v2 = this
+    // Point.sum()I  { return this.x + this.y; }  v0,v1 scratch, v2 = this
     {
         std::vector<uint16_t> c;
         Op22c(&c, kOpIget, 0, 2, kFieldX);
@@ -306,7 +305,7 @@ int main() {
     }
 
     // T.makePoint(int x, int y) { Point p = new Point(); p.x = x; p.y = y; return p; }
-    // v0 = p, v1 = x, v2 = y  (regs=3, ins=2   tham s    v1,v2)
+    // v0 = p, v1 = x, v2 = y  (regs=3, ins=2, params in v1,v2)
     {
         std::vector<uint16_t> c;
         Op21c(&c, kOpNewInstance, 0, kPointType);
@@ -328,7 +327,7 @@ int main() {
         s.read_x.ins_size = 1;
     }
     // T.arrayOps(int n) { int[] a = new int[3]; a[1] = n; return a[1] + a.length; }
-    // v0 = a, v1 t m, v2 t m, v3 = n
+    // v0 = a, v1 scratch, v2 scratch, v3 = n
     {
         std::vector<uint16_t> c;
         c.push_back(Op11n(kOpConst4, 1, 3));       // v1 = 3
@@ -430,7 +429,7 @@ int main() {
     const std::vector<uint8_t> dex = builder.Build(BuildClasses(s));
     std::printf("DEX synthetic: %zu bytes\n", dex.size());
 
-    // Index c a l t 2 ph i kh p l t 1, n u kh ng bytecode tr  sai entity.
+    // Pass-2 indices must match pass 1, or bytecode points at the wrong entity.
 Check(builder.TypeIndexOf("LPoint;") == kPointType, "index  n  nh gi a hai l t build");
 
     kudroid::kuart::DexClassLinker linker;
@@ -468,10 +467,10 @@ Check(p.l != nullptr, "makePoint tr  object kh c null");
 Check(p.l != nullptr && p.l->clazz == point, "object c  class l  Point");
 Check(call("readX", "(LPoint;)I", {p}).i == 7, "readX  c  ng field   iput");
 
-    // invoke-virtual + dispatch  ng
+    // invoke-virtual + correct dispatch
     Check(call("callVirtual", "(LPoint;)I", {p}).i == 42, "callVirtual(Point) == 7+35 == 42");
 
-    // Point3D override sum()   c ng bytecode g i, kh c k t qu .
+    // Point3D overrides sum(): same bytecode call, different result.
     kudroid::kuart::DexObject* p3 = linker.AllocObject(point3d);
     Check(p3 != nullptr, "AllocObject(Point3D)");
     if (p3 != nullptr) {
@@ -491,14 +490,14 @@ Check(fx != nullptr && fy != nullptr && fz != nullptr, "Point3D th y c  x,y k  t
     // ── invoke-static ──
     Check(call("callStatic", "()I", {}).i == 42, "callStatic() == 20+22 == 42");
 
-    // m ng
+    // array
     Check(call("arrayOps", "(I)I", {DexValue::Int(10)}).i == 13,
           "arrayOps(10) == a[1] + a.length == 10+3 == 13");
 
     // ── field static ──
     Check(call("staticOps", "(I)I", {DexValue::Int(99)}).i == 100,
 "staticOps(99) == 100 (sput r i sget)");
-    // Gi  tr  static ph i gi  l i sau khi method finished.
+    // Static value must persist after the method returns.
     kudroid::kuart::DexField* counter = point->FindStaticField("counter", "I");
     Check(counter != nullptr && point->static_values[counter->offset_or_slot].i == 99,
 "field static gi  gi  tr  sau khi method tr  v ");
@@ -517,7 +516,7 @@ Check(fx != nullptr && fy != nullptr && fz != nullptr, "Point3D th y c  x,y k  t
         auto* ds = static_cast<kudroid::kuart::DexString*>(str.l);
         Check(ds != nullptr && ds->utf8 != nullptr && std::strcmp(ds->utf8, "hello") == 0,
 "const-string tr  chu i \"hello\"");
-        // Interning: g i l i ph i ra C NG object.
+        // Interning: repeat call must return the SAME object.
         const DexValue str2 = call("stringTest", "()Ljava/lang/String;", {});
 Check(str.l == str2.l, "chu i h ng  c intern (c ng con tr )");
     }

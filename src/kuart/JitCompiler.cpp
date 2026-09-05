@@ -20,12 +20,7 @@ namespace {
 std::atomic<size_t> g_compiled{0};
 std::atomic<size_t> g_refused{0};
 
-// Fixed register assignment.
-//
-// x0/x1/x2 are the incoming arguments and must survive the whole body, so scratch
-// starts at x9 — the first of the arm64 temporary registers, which no calling
-// convention requires a callee to preserve. Nothing here calls out, so there is no
-// need to save anything.
+// Fixed registers: x0-x2 are live throughout; scratch starts at x9.
 constexpr int kRegs = 0;      // x0: DexValue* registers
 constexpr int kResult = 1;    // x1: DexValue* out_result
 constexpr int kOutPc = 2;     // x2: uint32_t* out_pc
@@ -39,14 +34,7 @@ uint32_t VRegOffset(uint32_t vreg) { return vreg * static_cast<uint32_t>(sizeof(
 
 }  // namespace
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Encoder
-//
-// Every encoding below was checked against GNU as output for the same mnemonic; the
-// golden-byte test in kuart-tests/test_kuart_jit.cpp pins them so a later edit cannot
-// silently change one. A wrong bit here yields a valid but different instruction, which
-// is why this is tested rather than reviewed.
-// ─────────────────────────────────────────────────────────────────────────────
+// Encoder: encodings are pinned by the golden-byte test.
 
 void JitCompiler::Asm::LdrX(int rt, int rn, uint32_t byteOffset) {
     // LDR (immediate, unsigned offset), 64-bit: 1111 1001 01ii iiii iiii iinn nnnt tttt
@@ -223,19 +211,10 @@ void JitCompiler::Asm::PatchBranch(size_t at, size_t target) {
 
 void JitCompiler::Asm::Ret() { Emit(0xD65F03C0u); }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Compiler
-// ─────────────────────────────────────────────────────────────────────────────
 
 bool JitCompiler::IsAvailable() {
-    // The encoder emits arm64 instructions, so compiled code can only be EXECUTED on
-    // arm64. Host builds (x86-64 Linux/macOS, where the tests run) must never enter it:
-    // the bytes are valid AArch64 and meaningless to an x86 decoder, so the first call
-    // faults immediately. The encoder itself stays available everywhere, which is what
-    // lets the golden-byte test check it on any host.
-    //
-    // This is not a portability limitation to fix later. The product target is arm64
-    // iOS; a second backend would be a second compiler.
+    // Compiled code runs only on arm64; encoder stays available for tests.
 #if defined(__aarch64__) || defined(__arm64__)
     return JitCache::IsAvailable();
 #else
@@ -271,19 +250,16 @@ JitEntry JitCompiler::Compile(const DexMethod* method, std::string* reason) {
     if (!IsAvailable()) return refuse("no executable memory");
 
     art::CodeItemDataAccessor accessor(*method->dex_file, method->code_item);
-    // A method with a try block needs the exception path, which means every
-    // instruction becomes a potential branch to a handler. Out of scope.
+    // Try blocks need exception paths; out of scope.
     if (accessor.TriesSize() != 0) return refuse("has try/catch");
 
     const uint16_t* insns = accessor.Insns();
     const uint32_t insns_size = accessor.InsnsSizeInCodeUnits();
-    // Registers are addressed with a 12-bit scaled immediate: 4095 * 8 bytes. Any
-    // realistic method is far below this; refuse rather than truncate the offset.
+    // Registers use a 12-bit scaled offset; refuse oversized methods.
     if (method->registers_size > 4000) return refuse("too many registers");
 
     Asm a;
-    // dex_pc -> index in a.code, so a backward branch can be resolved once the target
-    // has been emitted, and a forward branch can be patched at the end.
+    // dex_pc to emitted index for branch patching.
     std::vector<size_t> pcToIndex(insns_size, SIZE_MAX);
     struct PendingBranch {
         size_t at;          // index in a.code
@@ -291,7 +267,7 @@ JitEntry JitCompiler::Compile(const DexMethod* method, std::string* reason) {
     };
     std::vector<PendingBranch> pending;
 
-    // Bail out of compiled code back into the interpreter at `pc`.
+    // Bail to the interpreter at pc.
     const auto emitBail = [&](uint32_t pc) {
         // *out_pc = pc; return -1
         a.MovzW(kTmpA, static_cast<uint16_t>(pc & 0xFFFF));
@@ -310,7 +286,7 @@ JitEntry JitCompiler::Compile(const DexMethod* method, std::string* reason) {
             case Instruction::NOP:
                 break;
 
-            // ── moves: one 64-bit slot copy covers every width ──
+            // Moves: one 64-bit slot copy covers every width.
             case Instruction::MOVE:
             case Instruction::MOVE_OBJECT:
             case Instruction::MOVE_WIDE:
@@ -330,7 +306,7 @@ JitEntry JitCompiler::Compile(const DexMethod* method, std::string* reason) {
                 a.StrX(kTmpA, kRegs, VRegOffset(inst->VRegA_32x()));
                 break;
 
-            // ── constants ──
+            // Constants.
             case Instruction::CONST_4: {
                 // The 4-bit literal is signed; DexValue::Int zero-extends the upper
                 // half, so the whole slot is written to keep it consistent with the
@@ -360,7 +336,7 @@ JitEntry JitCompiler::Compile(const DexMethod* method, std::string* reason) {
                 break;
             }
 
-            // ── returns ──
+            // Returns.
             case Instruction::RETURN_VOID:
                 // Nothing is written to *out_result: the caller ignores it for a void
                 // method, exactly as the interpreter's default-constructed DexValue is
@@ -377,7 +353,7 @@ JitEntry JitCompiler::Compile(const DexMethod* method, std::string* reason) {
                 a.Ret();
                 break;
 
-            // ── int arithmetic, two source registers ──
+            // Int arithmetic, two source registers.
             case Instruction::ADD_INT:
             case Instruction::SUB_INT:
             case Instruction::MUL_INT:
@@ -414,7 +390,7 @@ JitEntry JitCompiler::Compile(const DexMethod* method, std::string* reason) {
                 break;
             }
 
-            // ── long arithmetic ──
+            // Long arithmetic.
             case Instruction::ADD_LONG:
             case Instruction::SUB_LONG:
             case Instruction::MUL_LONG:
@@ -435,7 +411,7 @@ JitEntry JitCompiler::Compile(const DexMethod* method, std::string* reason) {
                 break;
             }
 
-            // ── unary ──
+            // Unary.
             case Instruction::NEG_INT:
             case Instruction::NOT_INT: {
                 a.LdrW(kTmpA, kRegs, VRegOffset(inst->VRegB_12x()));
@@ -470,7 +446,7 @@ JitEntry JitCompiler::Compile(const DexMethod* method, std::string* reason) {
                 break;
             }
 
-            // ── int arithmetic, literal operand ──
+            // Int arithmetic, literal operand.
             case Instruction::ADD_INT_LIT8:
             case Instruction::MUL_INT_LIT8:
             case Instruction::AND_INT_LIT8:
@@ -496,7 +472,7 @@ JitEntry JitCompiler::Compile(const DexMethod* method, std::string* reason) {
                 break;
             }
 
-            // ── /2addr forms: destination is also the first source ──
+            // /2addr forms: destination is also the first source.
             case Instruction::ADD_INT_2ADDR:
             case Instruction::SUB_INT_2ADDR:
             case Instruction::MUL_INT_2ADDR:
@@ -545,7 +521,7 @@ JitEntry JitCompiler::Compile(const DexMethod* method, std::string* reason) {
                 break;
             }
 
-            // ── comparisons producing -1/0/1 ──
+            // Comparisons producing -1/0/1.
             case Instruction::CMP_LONG: {
                 // (b > c) - (b < c), via two csets. Branchless, and the only shape that
                 // gives all three results without a jump.
@@ -562,7 +538,7 @@ JitEntry JitCompiler::Compile(const DexMethod* method, std::string* reason) {
                 break;
             }
 
-            // ── unconditional branches ──
+            // Unconditional branches.
             case Instruction::GOTO:
             case Instruction::GOTO_16:
             case Instruction::GOTO_32: {
@@ -576,7 +552,7 @@ JitEntry JitCompiler::Compile(const DexMethod* method, std::string* reason) {
                 break;
             }
 
-            // ── conditional branches, two registers ──
+            // Conditional branches, two registers.
             case Instruction::IF_EQ:
             case Instruction::IF_NE:
             case Instruction::IF_LT:
@@ -603,7 +579,7 @@ JitEntry JitCompiler::Compile(const DexMethod* method, std::string* reason) {
                 break;
             }
 
-            // ── conditional branches against zero ──
+            // Conditional branches against zero.
             case Instruction::IF_EQZ:
             case Instruction::IF_NEZ:
             case Instruction::IF_LTZ:
@@ -630,11 +606,7 @@ JitEntry JitCompiler::Compile(const DexMethod* method, std::string* reason) {
             }
 
             default:
-                // Everything else stays interpreted. Bailing here rather than refusing
-                // the whole method would be possible, but a method whose hot path
-                // contains an uncompiled opcode gains nothing from compiling the rest —
-                // and the frame-resident register model means the bail is correct, so
-                // this is a policy choice, not a correctness one.
+                // Uncompiled opcodes refuse the method; partial compile gains nothing.
                 return refuse(Instruction::Name(inst->Opcode()));
         }
 

@@ -409,19 +409,7 @@ public class View {
         return false;
     }
 
-    // ── system UI visibility ────────────────────────────────────────────────
-    //
-    // Deprecated in AOSP since API 30 but still what androidx.core's compat layer
-    // reads on older API levels, and it reaches these through the decor view:
-    //
-    //   WindowCompat.setDecorFitsSystemWindows(window, false)
-    //       -> decorView.getSystemUiVisibility() | SYSTEM_UI_FLAG_LAYOUT_STABLE ...
-    //       -> decorView.setSystemUiVisibility(newFlags)
-    //
-    // That call sits in GameActivity.createSurfaceView, so its absence stopped
-    // Minecraft's onCreate outright. Auto-stubbing the getter would have been worse
-    // than useless here: it returns 0 and the setter discards, so the flags round-trip
-    // as zero and any app that reads back what it set sees the wrong value.
+    // System UI visibility (deprecated in API 30 but still read by compat code).
 
     public static final int SYSTEM_UI_FLAG_VISIBLE = 0;
     public static final int SYSTEM_UI_FLAG_LOW_PROFILE = 0x00000001;
@@ -455,15 +443,7 @@ public class View {
         mOnSystemUiVisibilityChangeListener = l;
     }
 
-    // ── layout params ───────────────────────────────────────────────────────
-    //
-    // A view added to a container carries its own sizing request. Returning null from
-    // getLayoutParams — which had no storage at all before — makes the standard
-    // read-modify-write idiom throw:
-    //
-    //   ViewGroup.LayoutParams lp = view.getLayoutParams();
-    //   lp.height = ...;                 // NPE
-    //
+    // Layout params.
     private ViewGroup.LayoutParams mLayoutParams;
 
     public ViewGroup.LayoutParams getLayoutParams() {
@@ -475,16 +455,9 @@ public class View {
         requestLayout();
     }
 
-    // ── IME attachment ──────────────────────────────────────────────────────
+    // IME attachment.
 
-    /**
-     * Create the InputConnection through which an IME edits this view's text.
-     *
-     * Returning null means "this view does not accept text", which is right for a
-     * plain View. A view that does — an EditText, or a game's own surface — overrides
-     * this and hands back its own connection; Minecraft's GameActivity does exactly
-     * that, which is why BaseInputConnection has to be usable as a superclass.
-     */
+    /** Create the InputConnection for an IME, or null when text is not accepted. */
     public android.view.inputmethod.InputConnection onCreateInputConnection(
             android.view.inputmethod.EditorInfo outAttrs) {
         return null;
@@ -824,17 +797,7 @@ public class View {
         return true;
     }
 
-    // ── tags ────────────────────────────────────────────────────────────────
-    //
-    // A tag is arbitrary data an app attaches to a view, either unkeyed or under an
-    // integer key. Libraries use the keyed form heavily to stash per-view state
-    // without subclassing — androidx.core stores window-insets and lifecycle
-    // bookkeeping this way.
-    //
-    // getTag() previously returned a hard null and there was no setter at all, so
-    // storing then reading back gave null: an app that keeps its own state in a tag
-    // silently loses it, and a library that caches a helper per view rebuilds it on
-    // every call or dereferences the null it did not expect.
+    // Tags.
     private Object mTag;
     private android.util.SparseArray<Object> mKeyedTags;
 
@@ -888,19 +851,11 @@ public class View {
         }
     }
 
-    // ── window insets ───────────────────────────────────────────────────────
+    // Window insets.
 
     private OnApplyWindowInsetsListener mOnApplyWindowInsetsListener;
 
-    /**
-     * Install a listener that gets to consume window insets before this view does.
-     *
-     * androidx.core.view.ViewCompat sets one whenever an app opts out of
-     * fits-system-windows, which is the modern way to draw behind the status bar —
-     * GameActivity does it while building its surface. Auto-stubbing the setter meant
-     * the listener was dropped, so an app relying on it to inset its own content laid
-     * out under the system bars instead.
-     */
+    /** Install a listener that consumes window insets before this view does. */
     public void setOnApplyWindowInsetsListener(OnApplyWindowInsetsListener listener) {
         mOnApplyWindowInsetsListener = listener;
     }

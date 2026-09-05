@@ -1,7 +1,5 @@
-// Host test for KuART: n p class t  DEX, build field layout + vtable.
-//
-// y l  th  thay th  to n b  chu i dex2jar   classes.jar   AutoStub   Avian:
-// DEX v o th ng, ra DexClass d ng  c ngay.
+// Host test: load classes from DEX, build field layout + vtable.
+// Replaces the dex2jar/JAR/AutoStub chain: DEX in, usable DexClass out.
 #include "kudroid/kuart/DexClassLinker.h"
 
 #include <cstdio>
@@ -21,9 +19,9 @@ void Check(bool ok, const std::string& what) {
 
 using namespace dexbuild;
 
-// C y class   test: Object <- Base <- Derived, Derived implements Runnable.
+// Test class tree: Object <- Base <- Derived, Derived implements Runnable.
 //
-// Object  : kh ng field, kh ng method ( ng l m g c)
+// Object  : no fields, no methods (used as root)
 //   Base    : int baseInt; long baseLong; Object baseRef
 //             static int counter
 //             void run()      -> Derived override
@@ -34,7 +32,7 @@ using namespace dexbuild;
 std::vector<ClassSpec> MakeClassTree() {
     ClassSpec object;
     object.descriptor = "Ljava/lang/Object;";
-    object.superclass = "";  // g c, kh ng superclass
+    object.superclass = "";  // root, no superclass
     {
         MethodSpec ctor;
         ctor.name = "<init>";
@@ -113,7 +111,7 @@ std::vector<ClassSpec> MakeClassTree() {
         MethodSpec only;
         only.name = "derivedOnly";
         only.return_type = "I";
-        only.params.push_back("J");  // ki m tra arg_words c a long
+        only.params.push_back("J");  // check arg_words of long
         only.code = {0x0012, 0x000f};
         only.registers_size = 4;
         only.ins_size = 3;
@@ -153,7 +151,7 @@ Check(linker.NumDexFiles() == 1, "m   c 1 DEX");
     Check(derived->PrettyName() == "Derived", "PrettyName == Derived");
 Check(derived->status == kudroid::kuart::DexClass::Status::kLinked, "tr ng th i kLinked");
 
-    // chu i k  th a
+    // inheritance chain
     kudroid::kuart::DexClass* base = derived->superclass;
     Check(base != nullptr && std::strcmp(base->descriptor, "LBase;") == 0,
 "superclass c a Derived l  Base");
@@ -166,11 +164,11 @@ Check(derived->status == kudroid::kuart::DexClass::Status::kLinked, "tr ng th i 
     Check(derived->IsSubClassOf(base), "IsSubClassOf(Base)");
     Check(derived->IsSubClassOf(derived->interfaces[0]), "IsSubClassOf(Runnable)");
 
-    // cache: g i l i ph i tr  c ng con tr
+    // cache: repeat lookup returns the same pointer
 Check(linker.FindClass("LDerived;") == derived, "FindClass cache tr  c ng con tr ");
 
     // ── field layout ──
-    // Base: long 8B tr c (offset 0), r i ref 8B (offset 8), r i int 4B (16) = 20
+    // Base: long 8B first (offset 0), then ref 8B (offset 8), then int 4B (16) = 20
     kudroid::kuart::DexField* base_long = base->FindInstanceField("baseLong", "J");
     kudroid::kuart::DexField* base_ref = base->FindInstanceField("baseRef", "Ljava/lang/Object;");
     kudroid::kuart::DexField* base_int = base->FindInstanceField("baseInt", "I");
@@ -182,13 +180,13 @@ Check(linker.FindClass("LDerived;") == derived, "FindClass cache tr  c ng con tr
                     base_int->offset_or_slot, base->object_size);
         Check(base_long->offset_or_slot % 8 == 0, "baseLong align 8");
         Check(base_int->offset_or_slot % 4 == 0, "baseInt align 4");
-        // Field kh ng  c ch ng nhau.
+        // Fields must not overlap.
         Check(base_long->offset_or_slot != base_ref->offset_or_slot &&
                   base_ref->offset_or_slot != base_int->offset_or_slot,
 "field Base kh ng ch ng offset");
     }
 
-    // Field c a Derived ph i n m SAU field c a Base.
+    // Derived fields must sit AFTER Base fields.
     kudroid::kuart::DexField* derived_int = derived->FindInstanceField("derivedInt", "I");
     Check(derived_int != nullptr && derived_int->offset_or_slot >= base->object_size,
 "field c a Derived n m sau field k  th a");
@@ -197,7 +195,7 @@ Check(derived->object_size > base->object_size, "object_size c a Derived l n h n
                 derived_int != nullptr ? derived_int->offset_or_slot : 0,
                 derived->object_size);
 
-    // Field k  th a nh n th y  c t  subclass, c ng offset.
+    // Inherited fields visible from subclass, same offset.
     kudroid::kuart::DexField* inherited = derived->FindInstanceField("baseInt", "I");
 Check(inherited == base_int, "Derived th y baseInt k  th a, c ng offset");
 
@@ -207,8 +205,8 @@ Check(inherited == base_int, "Derived th y baseInt k  th a, c ng offset");
 Check(base->static_values.size() == 1, "static_values c  1  ");
 
     // ── vtable ──
-    // Base c  run + onlyInBase = 2 slot. Derived override run (kh ng th m slot)
-    // v  th m derivedOnly = 3 slot.
+    // Base has run + onlyInBase = 2 slots. Derived overrides run (no new slot)
+    // and adds derivedOnly = 3 slots.
     std::printf("    vtable Base=%zu Derived=%zu\n", base->vtable.size(),
                 derived->vtable.size());
 Check(base->vtable.size() == 2, "vtable Base c  2 slot");
@@ -225,7 +223,7 @@ Check(base_run != derived_run, "run() c a Derived kh c c a Base");
 "vtable Derived tr  t i b n override");
     }
 
-    // Method ch  c    Base v n g i  c qua Derived, gi  nguy n slot.
+    // Base-only method still callable via Derived, same slot.
     kudroid::kuart::DexMethod* only_in_base = derived->FindVirtualMethod("onlyInBase", "()I");
 Check(only_in_base != nullptr, "Derived th y onlyInBase k  th a");
     if (only_in_base != nullptr) {
@@ -248,7 +246,7 @@ Check(ctor != nullptr && ctor->IsConstructor(), "constructor l  direct method");
     Check(ctor != nullptr && ctor->vtable_index == kudroid::kuart::DexMethod::kInvalidVTableIndex,
 "constructor kh ng v o vtable");
 
-    // c p ph t object
+    // allocate object
     kudroid::kuart::DexObject* obj = linker.AllocObject(derived);
     Check(obj != nullptr && obj->clazz == derived, "AllocObject(Derived)");
     if (obj != nullptr && base_int != nullptr && base_long != nullptr &&
@@ -262,12 +260,12 @@ Check(ctor != nullptr && ctor->IsConstructor(), "constructor l  direct method");
 " c/ghi field long (kh ng l ch align)");
         Check(obj->GetField<int32_t>(derived_int->offset_or_slot) == 0x55667788,
 " c/ghi field c a subclass");
-        // Ghi field n y kh ng  c   field kia.
+        // Writing one field must not clobber the other.
         Check(obj->GetField<int32_t>(base_int->offset_or_slot) == 0x11223344,
 "field kh ng   l n nhau");
     }
 
-    // class nguy n th y + m ng
+    // primitives + arrays
     kudroid::kuart::DexClass* int_class = linker.FindClass("I");
 Check(int_class != nullptr && int_class->is_primitive, "class nguy n th y I");
 

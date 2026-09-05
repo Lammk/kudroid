@@ -1,16 +1,5 @@
-// Probe: the JIT, the executable-memory cache, and the OAT profile.
-//
-// The instruction encoder is the part that most needs a test and least shows its
-// failures at runtime. A wrong bit does not crash — it produces a DIFFERENT valid
-// instruction, so the compiled method returns a wrong answer that looks like an
-// interpreter bug. Every encoding here is pinned against bytes taken from GNU as
-// assembling the same mnemonic, so an edit that changes an encoding fails here instead
-// of silently changing arithmetic.
-//
-// The cache and the profile are tested for the no-JIT path above all: on iOS without
-// a debugger, and under LiveContainer's JITLess mode, executable memory is refused.
-// That is the common case, not the exceptional one, and it must degrade to the
-// interpreter rather than fail.
+// Probe: the JIT encoder pinned against GNU as bytes, the executable-memory cache
+// (incl. the no-JIT fallback path), and the OAT profile round trip.
 #include "kudroid/kuart/JitCache.h"
 #include "kudroid/kuart/JitCompiler.h"
 #include "kudroid/kuart/OatFile.h"

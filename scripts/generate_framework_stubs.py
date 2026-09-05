@@ -1,17 +1,8 @@
 #!/usr/bin/env python3
-"""Generate empty Java stubs for boot-classpath classes KuART could not resolve.
+"""Generate empty Java stubs for boot-classpath classes KuART auto-stubbed.
 
-Input is the classes.log written by DexClassLinker::FindClass when it auto-stubs a
-missing class. On device that file lives next to the app's other logs (pull it with
-`tools/kdb/kdb.js dump classes.log`); the path can also be passed explicitly.
-
-Log format, one line per distinct class:
-
-    [2026-08-27 22:15:16] MISSING_FRAMEWORK_CLASS: android.util.Foo (descriptor: Landroid/util/Foo;)
-
-A generated stub only makes the class resolvable — every method still has to be
-filled in by hand. The point is to turn "app died on a missing class" into "app
-runs and the missing behaviour is visible", one round-trip at a time.
+Input: classes.log from DexClassLinker::FindClass. A stub only makes the class
+resolvable; methods still need filling in by hand.
 """
 import argparse
 import os
@@ -46,26 +37,16 @@ LINE_PATTERNS = (
     re.compile(r"\[\d+\]\s+\[(?:CLASS|INTERFACE)\]\s+([A-Za-z0-9_$.]+)"),
 )
 
-# Missing FIELDS on classes that already exist.
-#
-# These cannot be stubbed: a field needs storage inside an object whose layout is
-# already fixed, so the runtime has no equivalent of the auto-stub it uses for a
-# missing method. The remedy is always to write the field into the framework source
-# by hand, which makes reporting them the point of this section — a missing field
-# used to surface as "NoSuchFieldError: iput" with no class and no field name.
+# Missing FIELDS on classes that already exist. These cannot be stubbed (object
+# layout is already fixed), so they must be written into the framework by hand.
 #
 # Format: MISSING_FRAMEWORK_FIELD: pkg.Class.name : Descriptor
 FIELD_PATTERN = re.compile(
     r"MISSING_FRAMEWORK(?:_CLASS)?_FIELD:\s*([A-Za-z0-9_$.]+)\.([A-Za-z0-9_$]+)\s*:\s*(\S+)"
 )
 
-# Service names getSystemService() had no manager for.
-#
-# Separate from a missing class because the class is usually already there — only the
-# mapping in Context.getSystemService is absent, which is indistinguishable from the
-# outside and just as fatal. Minecraft asked for "input_method", got null, and threw
-# RuntimeException("Can't get IMM") while InputMethodManager.java was present all
-# along. Nothing appeared in any log, because a null return is a legal answer.
+# Service names getSystemService() had no manager for. The class usually exists;
+# only the Context mapping is absent, which is indistinguishable from the outside.
 #
 # Format: MISSING_SYSTEM_SERVICE: getSystemService("name") -> null
 SERVICE_PATTERN = re.compile(r'MISSING_SYSTEM_SERVICE:\s*getSystemService\("([^"]+)"\)')

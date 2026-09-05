@@ -1,25 +1,5 @@
 // Probe: Java file I/O and SharedPreferences, run through the real framework.dex.
-//
-// Two failures this pins, both of which were silent — the reason they survived is that
-// neither reported anything at all:
-//
-// 1. FileOutputStream.write was an EMPTY METHOD. An app wrote its data, got no exception,
-//    and no file appeared. Reading it back produced the default value, which looks like the
-//    data was never stored rather than like the write was dropped. FileInputStream.read
-//    returned -1 unconditionally, indistinguishable from an empty file. The natives existed
-//    in LibCore.cpp the whole time; no Java class declared them, so nothing called them.
-//
-// 2. Java file paths did not go through the VFS remapper, while a guest's own native code
-//    did. getFilesDir() returns /data/data/<pkg>/files, so Java aimed at the REAL path —
-//    which iOS does not allow anyone to write — and File.mkdirs() swallows the failure.
-//
-// And what depends on both: SharedPreferences persistence. In-memory is not merely
-// incomplete here. An app that generates an identifier once and stores it (Minecraft's
-// getLegacyDeviceID) gets a NEW one on every launch, so the install looks like a different
-// device each time. That is the bug the device log showed, one step removed.
-//
-// HOME is redirected to a temporary directory, so the remapper builds its tree there and
-// the test never touches a real android_root.
+// Pins two silent failures: empty write natives and Java paths skipping the VFS remapper.
 #include "kudroid/framework_dex_bytes.h"
 #include "kudroid/VFSPathRemapper.h"
 #include "kudroid/kuart/DexClassLinker.h"

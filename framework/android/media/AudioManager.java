@@ -53,16 +53,7 @@ public class AudioManager {
     public int getMode() { return MODE_NORMAL; }
     public void setMode(int mode) {}
 
-    // ── getProperty ──────────────────────────────────────────────────────────
-    //
-    // How an app discovers the device's audio geometry before opening a stream. Unity reads
-    // both keys below during startup to size its mixer, and FMOD does the same.
-    //
-    // The values are read from the SAME source AudioTrack uses (AudioShim, via
-    // AudioTrack.getNativeOutputSampleRate and getMinBufferSize) rather than being constants
-    // here. Two different answers for one device is worse than either answer alone: the app
-    // sizes its buffers from these strings and then writes into a stream configured from the
-    // other path, so every buffer is the wrong length for the life of the process.
+    // getProperty: device audio geometry, from the same source AudioTrack uses.
     public static final String PROPERTY_OUTPUT_SAMPLE_RATE = "android.media.property.OUTPUT_SAMPLE_RATE";
     public static final String PROPERTY_OUTPUT_FRAMES_PER_BUFFER =
             "android.media.property.OUTPUT_FRAMES_PER_BUFFER";
@@ -74,8 +65,7 @@ public class AudioManager {
             "android.media.property.SUPPORT_AUDIO_SOURCE_UNPROCESSED";
 
     /**
-     * Returns null for an unknown key, which is what the platform does and what callers
-     * handle — a made-up value would be taken as fact.
+     * Returns null for an unknown key, as the platform does.
      */
     public String getProperty(String key) {
         if (key == null) {
@@ -102,11 +92,7 @@ public class AudioManager {
         return null;
     }
 
-    // ── getDevices flags ─────────────────────────────────────────────────────
-    //
-    // getDevices() already exists above and returns the built-in speaker; these are the
-    // masks that say which direction to report. An app passes GET_DEVICES_OUTPUTS to
-    // enumerate outputs, so without the constant the call site cannot be written at all.
+    // getDevices flags.
     public static final int GET_DEVICES_OUTPUTS = 0x2;
     public static final int GET_DEVICES_INPUTS = 0x1;
     public static final int GET_DEVICES_ALL = GET_DEVICES_OUTPUTS | GET_DEVICES_INPUTS;

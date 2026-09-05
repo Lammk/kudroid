@@ -10,21 +10,8 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * android.content.SharedPreferences, persisted to disk.
- *
- * In-memory is not sufficient here, and the reason is concrete: an app that generates an
- * identifier once and stores it — Minecraft's getLegacyDeviceID does exactly this — gets a
- * NEW one on every launch, so the installation looks like a different device each time.
- *
- * The on-disk format is a small text format rather than Android's XML: nothing outside
- * KuDroid reads these files, and a hand-rolled XML parser is a larger surface than the
- * problem needs. Each line is
- *
- *     <type>:<encoded key>=<encoded value>
- *
- * with newline, backslash and '=' escaped, so a key or value containing any of them cannot
- * forge a line boundary. Types are s/i/l/f/b/S (string, int, long, float, boolean, set),
- * and a set's members are separated by an unescaped ';'.
+ * SharedPreferences, persisted to disk.
+ * On-disk format is one {@code <type>:<key>=<value>} line per entry.
  */
 public class SharedPreferencesImpl implements SharedPreferences {
     private final Map<String, Object> mMap = new HashMap<String, Object>();
@@ -148,7 +135,7 @@ public class SharedPreferencesImpl implements SharedPreferences {
         }
     }
 
-    // ── persistence ─────────────────────────────────────────────────────────
+    // Persistence.
 
     private static String escape(String s) {
         StringBuilder out = new StringBuilder(s.length() + 8);

@@ -1,10 +1,5 @@
 // interpreter call frame: register array + current bytecode PC.
-//
-// Register trong DEX l  32-bit v  long/double chi m m t C P (vN, vN+1).    y
-// m i slot l  DexValue 64-bit n n gi  tr  wide n m g n trong slot N, slot N+1
-// b  tr ng. Bytecode h p l  kh ng bao gi   c ri ng n a sau c a m t c p wide
-// (verifier c a Android ch n t  l c build APK), n n c ch n y an to n v  b
-// c to n b  vi c gh p/t ch 32-bit nh  ART ph i l m.
+// Each slot is 64-bit, so wide values fit in one slot; the second slot stays empty.
 #ifndef KUDROID_KUART_DEXFRAME_H
 #define KUDROID_KUART_DEXFRAME_H
 
@@ -54,8 +49,8 @@ public:
     void SetDouble(uint32_t vreg, double v) { Set(vreg, DexValue::Double(v)); }
     void SetRef(uint32_t vreg, DexObject* v) { Set(vreg, DexValue::Ref(v)); }
 
-    // Tham s  n m   c c register CU I c ng c a frame (quy  c DEX), g m c
-    // `this` cho method instance.
+    // Args live in the frame's last registers (DEX convention), including
+    // `this` for instance methods.
     uint32_t FirstArgRegister() const {
         if (method_ == nullptr) return 0;
         const uint32_t regs = method_->registers_size;
@@ -63,20 +58,18 @@ public:
         return regs >= ins ? regs - ins : 0;
     }
 
-    // N p tham s  v o c c register cu i. `args` theo th  t  khai b o, long/
-    // double t nh M T ph n t  (  g p trong DexValue) nh ng chi m HAI slot.
+    // Load args into the last registers; wide values count as one arg but use two slots.
     void LoadArguments(const DexValue* args, size_t count, const char* shorty, bool is_static);
 
-    // Gi  tr  c a move-result / move-result-wide / move-result-object.
+    // Value for move-result / move-result-wide / move-result-object.
     DexValue result() const { return result_; }
     void set_result(DexValue v) { result_ = v; }
 
-    // V  tr  instruction is running. L u theo frame (kh ng theo Interpreter) v
-    // method n y c  th   ang g i method kh c   m i frame c  pc ri ng.
+    // Current instruction position, stored per frame.
     uint32_t dex_pc() const { return dex_pc_; }
     void set_dex_pc(uint32_t pc) { dex_pc_ = pc; }
 
-    // Exception   b t  c, ch  move-exception  c ra.
+    // Caught exception, read via move-exception only.
     DexObject* caught_exception() const { return caught_exception_; }
     void set_caught_exception(DexObject* ex) { caught_exception_ = ex; }
 

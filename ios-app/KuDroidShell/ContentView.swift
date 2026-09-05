@@ -438,9 +438,8 @@ struct AppsView: View {
 
             let success = kudroid_delete_app_progress(name, cb, opaque)
             Unmanaged<Ctx>.fromOpaque(opaque).release()
-            // [DEBUG] drag the entire native side trace to the Swift log to view/copy
-            // ngay trong tab Debug (file kudroid_uninstall_debug.txt trong
-            // Documents also contains this content).
+            // [DEBUG] pull the native-side trace into the Swift log for viewing/copying
+            // (also saved to kudroid_uninstall_debug.txt in Documents).
             if let cTrace = kudroid_uninstall_debug_log() {
                 let trace = String(cString: cTrace)
                 free(UnsafeMutablePointer(mutating: cTrace))
@@ -1379,15 +1378,8 @@ struct APKInstallerView: View {
         }
         do {
             try FileManager.default.createDirectory(at: inboxURL, withIntermediateDirectories: true)
-            // Extensions offered by the sites people actually download from. The extractor
-            // does not trust any of them — is_bundle_container reads the zip and looks for
-            // .apk entries at the top level or under splits/ — so this list only decides
-            // what the user is allowed to pick.
-            //
-            // "zip" is here because APKMirror and SAI hand out bundles named
-            // <pkg>.apks.zip or plain .zip. pathExtension returns just "zip" for the
-            // former, so both are covered by the one entry, and extraction already worked
-            // for them; only the picker was refusing to show them.
+            // Picker-only extension list (the extractor validates zips by content).
+            // "zip" covers APKMirror/SAI bundles like <pkg>.apks.zip.
             let supportedExtensions = ["apk", "apkm", "xapk", "apks", "zip"]
             apkFiles = try FileManager.default.contentsOfDirectory(
                 at: inboxURL, includingPropertiesForKeys: [.fileSizeKey], options: [.skipsHiddenFiles]
@@ -1840,14 +1832,14 @@ class NativeMetalViewController: UIViewController {
                 return
             }
 
-            // Đồng bộ trạng thái No Sleep (Keep Screen On) từ Android app
+            // Sync No Sleep (Keep Screen On) state from the Android app
             let keepScreenOn = kudroid_get_keep_screen_on() != 0
             if UIApplication.shared.isIdleTimerDisabled != keepScreenOn {
                 UIApplication.shared.isIdleTimerDisabled = keepScreenOn
                 NSLog("[KuDroid] Synchronized isIdleTimerDisabled = %@", keepScreenOn ? "true" : "false")
             }
 
-            // Quét hướng màn hình yêu cầu từ Android guest app
+            // Poll the requested screen orientation from the Android guest app
             let reqOri = kudroid_get_requested_orientation()
             if reqOri != self.lastRequestedOrientation {
                 self.lastRequestedOrientation = reqOri
@@ -1893,7 +1885,7 @@ class NativeMetalViewController: UIViewController {
                 if kudroid_has_crashed() != 0 {
                     self.handleCrash(fallbackLog: logOutput)
                 } else {
-                    // App   ch y xong m  kh ng crash (ho c tr  v  log finished)
+                    // App finished without crashing
                     self.statusLabel.alpha = 1.0
                     self.statusLabel.text = "Session ended. Tap ✕ to close."
                     self.statusLabel.textColor = .yellow
@@ -1994,15 +1986,8 @@ class NativeMetalView: UIView {
 
 // MARK: - Soft keyboard
 //
-// The guest asks for a keyboard through InputMethodManager; iOS shows the system
-// keyboard for whichever view is first responder. NativeMetalView is that view, so it
-// adopts UIKeyInput — the minimal text-input protocol, which is all a game needs: it
-// has its own text rendering and only wants the characters.
-//
-// UITextInput would be the fuller option, but it requires exposing a document model
-// (positions, ranges, tokenizer) that the guest owns rather than the host. UIKeyInput
-// keeps the boundary where it belongs: iOS reports keystrokes, the guest's
-// InputConnection decides what they mean.
+// UIKeyInput (not UITextInput) bridges the guest IME: iOS reports keystrokes,
+// the guest's InputConnection decides what they mean.
 extension NativeMetalView: UIKeyInput {
     // The keyboard only appears for a first responder, and a plain UIView refuses.
     override var canBecomeFirstResponder: Bool { true }
@@ -2047,7 +2032,7 @@ extension NativeMetalView: UIKeyInput {
     }
 }
 
-// H m nh n buffer 2D v  b ng CPU t  C++ v  blit th ng l n m n h nh iOS (CALayer)
+// Blit a CPU-drawn 2D buffer from C++ straight to the iOS screen (CALayer)
 @_cdecl("kudroid_blit_canvas_to_layer")
 public func kudroid_blit_canvas_to_layer(layerPtr: UnsafeMutableRawPointer?, bits: UnsafeRawPointer?, width: Int32, height: Int32) {
     guard let layerPtr = layerPtr, let bits = bits, width > 0, height > 0 else { return }
@@ -2080,7 +2065,7 @@ public func kudroid_blit_canvas_to_layer(layerPtr: UnsafeMutableRawPointer?, bit
     }
 }
 
-// mark: - Modal th ng b o Gentle Crash th ng minh
+// mark: - Smart Gentle Crash alert modal
 struct CrashAlertView: View {
     let crashInfo: CrashInfo
     let onDismiss: () -> Void

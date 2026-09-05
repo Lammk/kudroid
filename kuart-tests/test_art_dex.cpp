@@ -1,8 +1,5 @@
-// Host test for art_dex: verifies ART libdexfile (  c t g n) parse  c
-// DEX v   c ra class/method/bytecode   n n cho DEX interpreter thay dex2jar.
-//
-// DEX d ng   test  c sinh ngay trong file n y thay v  ph  thu c Android SDK
-// (m y dev kh ng c  d8/dx). Layout tu n theo spec DEX 035.
+// Host test: ART libdexfile parsing a synthetic DEX into class/method/bytecode.
+// The DEX is generated in this file (no Android SDK on dev machines); layout per spec 035.
 #include "dex/class_accessor-inl.h"
 #include "dex/code_item_accessors-inl.h"
 #include "dex/dex_file.h"
@@ -28,23 +25,23 @@ void Check(bool ok, const std::string& what) {
     if (!ok) ++g_failures;
 }
 
-// B  sinh DEX
-// Ghi little-endian; m i offset t nh sau khi bi t k ch th c t ng section.
+// DEX synthesizer.
+// Little-endian; every offset is computed after section sizes are known.
 class DexBuilder {
 public:
-    // Sinh m t DEX ch a: class LHello; extends Object, c  1 static method
-    // add(II)I v i th n `add-int v0, v1, v2; return v0`.
+    // Build a DEX holding class LHello extends Object with one static method
+    // add(II)I whose body is `add-int v0, v1, v2; return v0`.
     std::vector<uint8_t> Build() {
-        // string_ids PH I s p theo th  t  UTF-16 t ng d n (spec DEX).
+        // string_ids must be ascending UTF-16 order (DEX spec).
         const char* kStrings[] = {
             "I",                   // 0
-            "III",                 // 1 shorty c a (II)I
+            "III",                 // 1 shorty of (II)I
             "LHello;",             // 2
             "Ljava/lang/Object;",  // 3
             "add",                 // 4
         };
         constexpr uint32_t kNumStrings = 5;
-        // type_ids c ng ph i s p theo descriptor_idx t ng d n.
+        // type_ids likewise ascending by descriptor_idx.
         const uint32_t kTypeToString[] = {0, 2, 3};  // I, LHello;, Object
         constexpr uint32_t kNumTypes = 3;
         constexpr uint16_t kTypeInt = 0;
@@ -74,17 +71,17 @@ public:
             data.push_back(0);
         }
 
-        // TypeList cho tham s  (II)
+        // TypeList for params (II)
         align4();
         const uint32_t param_type_list_off = data_pos();
         PutU32(&data, 2);
         PutU16(&data, kTypeInt);
         PutU16(&data, kTypeInt);
 
-        // code_item cho add(II)I
+        // code_item for add(II)I
         align4();
         const uint32_t code_item_off = data_pos();
-        PutU16(&data, 3);  // registers_size: v0 k t qu , v1/v2 tham s
+        PutU16(&data, 3);  // registers_size: v0 result, v1/v2 params
         PutU16(&data, 2);  // ins_size
         PutU16(&data, 0);  // outs_size
         PutU16(&data, 0);  // tries_size
@@ -94,7 +91,7 @@ public:
         PutU16(&data, 0x0201);  // BB=v1, CC=v2
         PutU16(&data, 0x000f);  // return vAA=v0 | op=0x0f
 
-        // class_data_item: to n b  LEB128
+        // class_data_item: all LEB128
         const uint32_t class_data_off = data_pos();
         art::EncodeUnsignedLeb128(&data, 0);  // static_fields_size
         art::EncodeUnsignedLeb128(&data, 0);  // instance_fields_size
@@ -104,7 +101,7 @@ public:
         art::EncodeUnsignedLeb128(&data, 0x9);  // ACC_PUBLIC | ACC_STATIC
         art::EncodeUnsignedLeb128(&data, code_item_off);
 
-        // map_list: b t bu c theo spec, InitializeSectionsFromMapList s   c.
+        // map_list: required by spec; InitializeSectionsFromMapList reads it.
         align4();
         const uint32_t map_off = data_pos();
         struct MapEntry { uint16_t type; uint32_t size; uint32_t offset; };
@@ -133,15 +130,15 @@ public:
         const uint32_t data_size = static_cast<uint32_t>(data.size());
         const uint32_t file_size = data_off + data_size;
 
-        // gh p file
+        // assemble file
         std::vector<uint8_t> out;
         out.reserve(file_size);
 
         // header
         const uint8_t kMagic[8] = {'d', 'e', 'x', '\n', '0', '3', '5', '\0'};
         out.insert(out.end(), kMagic, kMagic + 8);
-        PutU32(&out, 0);  // checksum    i n sau
-        out.resize(out.size() + 20, 0);  // signature SHA-1   kh ng ki m tra
+        PutU32(&out, 0);  // checksum, filled in later
+        out.resize(out.size() + 20, 0);  // SHA-1 signature, not verified
         PutU32(&out, file_size);
         PutU32(&out, kHeaderSize);
         PutU32(&out, 0x12345678);  // endian_tag little-endian
@@ -190,7 +187,7 @@ public:
 
         out.insert(out.end(), data.begin(), data.end());
 
-        // checksum = adler32 c a m i byte sau magic+checksum (offset 12 tr   i)
+        // checksum = adler32 of every byte after magic+checksum (offset 12 onward)
         const uint32_t adler = adler32(adler32(0L, nullptr, 0), out.data() + 12,
                                       static_cast<uInt>(out.size() - 12));
         std::memcpy(out.data() + 8, &adler, sizeof(adler));
@@ -218,7 +215,7 @@ std::printf("=== art_dex: parse DEX b ng libdexfile c a ART ===\n");
     const std::vector<uint8_t> dex_bytes = builder.Build();
     std::printf("DEX synthetic: %zu bytes\n", dex_bytes.size());
 
-    // (1) M  DEX
+    // (1) Open DEX
     const art::DexFileLoader loader;
     std::string error_msg;
     std::unique_ptr<const art::DexFile> dex_file = loader.Open(
@@ -239,8 +236,8 @@ dex_file != nullptr ? "m  DEX succeeded" : "m  DEX: " + error_msg);
     Check(dex_file->NumMethodIds() == 1, "NumMethodIds == 1");
     Check(dex_file->NumClassDefs() == 1, "NumClassDefs == 1");
 
-    // (3) Class descriptor    y l  th  AutoStub/DexAotCache ph i d ch qua JAR
-    // m i  c  c; gi   c th ng t  DEX.
+    // (3) Class descriptor: what AutoStub/DexAotCache had to translate via JAR;
+    // now read straight from DEX.
     const art::dex::ClassDef& class_def = dex_file->GetClassDef(0);
     const char* descriptor = dex_file->GetClassDescriptor(class_def);
     Check(std::strcmp(descriptor, "LHello;") == 0,
@@ -251,7 +248,7 @@ std::string("class descriptor == LHello; (th c t : ") + descriptor + ")");
     Check(std::strcmp(super_descriptor, "Ljava/lang/Object;") == 0,
 std::string("superclass == Ljava/lang/Object; (th c t : ") + super_descriptor + ")");
 
-    // (4) Duy t method qua ClassAccessor
+    // (4) Iterate methods via ClassAccessor
     art::ClassAccessor accessor(*dex_file, class_def);
     Check(accessor.NumMethods() == 1, "NumMethods == 1");
 
@@ -271,7 +268,7 @@ std::string("superclass == Ljava/lang/Object; (th c t : ") + super_descriptor + 
             found_add = true;
         }
 
-        // (5)  c bytecode   b c quy t  nh: interpreter s   i qua  ng API n y.
+        // (5) Read bytecode: the interpreter goes through this exact API.
         art::CodeItemDataAccessor code(*dex_file, method.GetCodeItem());
         Check(code.RegistersSize() == 3, "registers_size == 3");
         Check(code.InsSize() == 2, "ins_size == 2");
@@ -292,7 +289,7 @@ Check(methods_seen == 1, "duy t  c  ng 1 method");
 Check(found_add, "t m th y add(II)I");
 Check(bytecode_ok, "bytecode gi i m   ng: add-int r i return");
 
-    // (6) FindClassDef theo descriptor   class loader s  d ng  ng n y.
+    // (6) FindClassDef by descriptor, as the class loader uses it.
     const art::dex::TypeId* type_id = dex_file->FindTypeId("LHello;");
 Check(type_id != nullptr, "FindTypeId(LHello;) kh c null");
     if (type_id != nullptr) {

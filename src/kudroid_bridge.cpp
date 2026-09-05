@@ -1196,12 +1196,7 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
                         const bool inGuest =
                             haveLr && kudroid::kudroid_lookup_guest_module(
                                           reinterpret_cast<void*>(savedLr), lrMod, sizeof(lrMod));
-                        // Nu no/not thuc guest ELF th y l code HOST — gm c
-                        // Avian (link tnh vo KuDroidShell). before y ch in raw
-                        // "lr=0x104e62934?" nn mi abort ca Avian u v danh v
-                        // phi on. symbolicateAddr c sn symbol table (function static
-                        // nh crashHandler vn ra tn) → in lun tn function y 
-                        // l do abort hin ra ngay trong crash log, no/not cn atos.
+                        // When not in a guest ELF it is host code; symbolicate it so aborts name the function.
                         char lrSym[512] = {0};
                         if (haveLr && !inGuest) {
                             symbolicateAddr(savedLr, lrSym, sizeof(lrSym));
@@ -1250,9 +1245,7 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
             (void)!write(fd, "\n--- log up to crash ---\n", 25);
             (void)!write(fd, g_crashBuf, (size_t)g_crashLen);
 
-            // Dump ui stderr (l do abort/fatal ca KuART — thng in ra y
-            // nhng b mt v iOS no/not hin th stderr). open/lseek/read/write
-            // u async-signal-safe nn call c trong signal handler.
+            // Also dump the stderr tail (KuART abort reasons go there); all calls are async-signal-safe.
             {
                 char errPath[1200];
                 size_t dl = strlen(g_logDir);
@@ -1291,15 +1284,13 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
         }
     }
 
-    // --- GENTLE CRASH SYSTEM ---
-    // nh du trng thi crash v trch xut ti a 30 dng log cui cng
-    // UI Swift hin th cnh bo "Whoops, the app crashed" m no/not ng app.
+    // Mark crashed state and keep the last 30 log lines for the Swift warning.
     g_hasCrashed.store(true);
     
-    // Thu thp 30 dng log cui cng t g_crashBuf
+    // Collect the last 30 log lines.
     extractLastLines(g_crashBuf, (size_t)g_crashLen, g_lastCrashTail, sizeof(g_lastCrashTail), 30);
     
-    // Nu g_lastCrashTail qu ngn, ghp thm thng tin signal v PC
+    // If the tail is too short, append signal and PC.
     if (strlen(g_lastCrashTail) < 30) {
         char fallbackSummary[512];
         snprintf(fallbackSummary, sizeof(fallbackSummary),
@@ -1308,8 +1299,7 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
         strncat(g_lastCrashTail, fallbackSummary, sizeof(g_lastCrashTail) - strlen(g_lastCrashTail) - 1);
     }
 
-    // Nu crash xy ra trn background thread (render thread, game thread, worker thread):
-    // no/not call function lock mutex trong signal handler trnh deadlock/freeze!
+    // On a background thread: never lock a mutex in the signal handler.
 #if defined(__APPLE__)
     const bool isBackground = !pthread_main_np();
 #else
@@ -1356,13 +1346,9 @@ static void installCrashHandlers(void) {
     sa.sa_flags = SA_SIGINFO;
     sigemptyset(&sa.sa_mask);
 
-    // run handler trn stack ring: khi crash l stack overflow (hoc stack ca
-    // JVM thread qu nh), handler run trn stack hng s double-fault v
-    // no/not write c crash log — ng triu chng "app cht im lng". Cp stack
-    // tnh (no/not heap, an ton trong signal context) ri bt SA_ONSTACK.
+    // Run the handler on a separate static stack (signal-safe, survives stack overflow).
     {
-        // SIGSTKSZ no/not cn l hng bin dch trn glibc mi → dng kch thc
-        // c nh (64KB, tha cho handler ny) mng static hp l mi libc.
+        // Fixed 64KB static stack (SIGSTKSZ is no longer constant on new glibc).
         armAltSignalStack();
         if (g_altStackArmed) {
             sa.sa_flags |= SA_ONSTACK;
@@ -1398,14 +1384,11 @@ static void installCrashHandlers(void) {
         }
     }
 
-    // Android/bionic mc nh IGNORE SIGPIPE (write vo pipe/socket ng tr
-    // EPIPE thay v git process). Game .so tin vo hnh vi ny — nu host gi
-    // SIGPIPE mc nh, ch cn game write log vo mt pipe ng l app cht
-    // ngay m no/not c crash log.
+    // Android/bionic ignores SIGPIPE by default (writes fail with EPIPE instead of killing).
     ::signal(SIGPIPE, SIG_IGN);
 
 #if defined(__APPLE__)
-    // Bt l do abort before khi n xy ra: ObjC exception cha bt + C++ terminate.
+    // Catch abort reasons as they happen: uncaught ObjC exceptions + C++ terminate.
     NSSetUncaughtExceptionHandler(&kudroid_uncaught_objc_handler);
     std::set_terminate(&kudroid_terminate_handler);
 #endif
@@ -1548,12 +1531,10 @@ int g_metalLayerWidth = 1080;
 int g_metalLayerHeight = 1920;
 float g_metalLayerDensity = 3.0f;
 
-// i qua pipeline log chun (stdout + kudroid_android_logs.txt + crash buffer)
-// — nh ngha trong SyscallShim.cpp, dng chung vi GraphicsShim.
+// Via the standard log pipeline; defined in SyscallShim.cpp, shared with GraphicsShim.
 extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
 
-// GraphicsShim.cpp — ANGLE first-touch phi trn main thread (xem comment 
-// kudroid_set_metal_layer).
+// ANGLE first-touch must run on the main thread.
 extern "C" void kudroid_gpu_warmup_egl(void);
 extern "C" void* bionic_ANativeWindow_fromSurface(void* env, void* surface);
 extern "C" void kudroid_gpu_rebind_native_windows(void* layer, int width, int height);
@@ -1564,9 +1545,7 @@ extern "C" void kudroid_set_metal_layer(void* layer, int width, int height, floa
     g_metalLayerWidth = width;
     g_metalLayerHeight = height;
     g_metalLayerDensity = density > 0.0f ? density : g_metalLayerDensity;
-    // Log kch thc nhn t Swift — before y no/not log g nn width/height
-    // sai (0/m) ch l ra ANativeWindow_lock (hoc no/not bao gi nu game
-    // no/not dng lock).
+    // Log the size from Swift; wrong sizes otherwise surface only at lock time.
     char buf[192];
     std::snprintf(buf, sizeof(buf),
                   "kudroid_set_metal_layer(layer=%p, size=%dx%d, density=%.2f)",
@@ -1593,7 +1572,7 @@ extern "C" void kudroid_set_metal_layer(void* layer, int width, int height, floa
         kudroid_gpu_rebind_native_windows(layer, width, height);
     }
 
-    // render thread t khi create EGL display sch s t u
+    // EGL warmup runs after the display is created.
     // kudroid_gpu_warmup_egl();
 }
 
@@ -1646,12 +1625,7 @@ extern "C" const char* kudroid_install_apk(const char* apkPath) {
             extractedOk = kudroid::APKExtractor::extract_apk(source.string(), appDir.string());
         }
         if (extractedOk) {
-            // pkgId pha trn on t tn file APK khi get_package_name() no/not read
-            // c manifest (bundle container: manifest tht nm trong base APK bn
-            // trong, no/not top level). after khi gii nn, app_info.json cha
-            // package tht do parseAxml ca base manifest → dng n lm ngun duy
-            // nht v i tn th mc, data/app v dalvik-cache lun theo
-            // package ID ch no/not phi tn file APK.
+            // pkgId may come from the APK filename when the manifest is nested; prefer the real package.
             std::string effectiveAppName = pkgId;
             std::filesystem::path effectiveAppDir = appDir;
             {
@@ -1697,9 +1671,7 @@ extern "C" const char* kudroid_install_apk(const char* apkPath) {
 #include <libkern/OSCacheControl.h>
 #include <TargetConditionals.h>
 
-// csops() l mt api ring t nhng n nh; c s dng read trng thi ch k m ca qu trnh.
-// cs_debugged c t khi ng dn jit (k m ng) hot ng
-// di livecontainer / trnh g error, iu ny cho php cc trang prot_exec run.
+// csops() is a private but stable API for code-signing status.
 extern "C" int csops(pid_t pid, unsigned int ops, void* useraddr, size_t usersize);
 #ifndef CS_OPS_STATUS
 #define CS_OPS_STATUS 0
@@ -1709,7 +1681,7 @@ extern "C" int csops(pid_t pid, unsigned int ops, void* useraddr, size_t usersiz
 #endif
 #endif
 
-// return 1 nu jit (memory c th execute) c v kh dng, ngc li return 0.
+// Return 1 when JIT memory is available, 0 otherwise.
 extern "C" int kudroid_is_jit_enabled(void) {
 #if defined(__APPLE__)
     // Ask the kernel: map a page and try to make it executable.
@@ -1761,7 +1733,7 @@ extern "C" int kudroid_is_jit_enabled(void) {
         getenv("TROLLSTORE_ENABLED") != nullptr) {
         return 1;
     }
-    return 0; // Hon ton no/not c JIT!
+    return 0; // Definitely no JIT on this device.
 #else
     return 1;
 #endif
@@ -1772,9 +1744,7 @@ static int kudroid_jit_available(void) {
 }
 
 extern "C" const char* kudroid_jit_status(void) {
-    // Names the route, not just the verdict. "JIT: Disabled" alone left the user with
-    // nothing to act on, and — while the TrollStore proxy could still produce a false
-    // positive — no way to tell a real grant from a bad guess.
+    // Name the route, not just the verdict.
     const char* text = "JIT: Disabled";
 #if defined(__APPLE__)
     if (kudroid_is_jit_enabled()) {
@@ -2072,8 +2042,7 @@ struct ANativeActivity {
 };
 
 
-// T kim tra KuART: np framework.dex nhng ri th JNI c hai chiu. Tham s
-// gi li cho tng thch ABI vi v Swift (before l ng dn rt.jar ca Avian).
+// KuART self-test: load framework.dex and exercise JNI both ways; arg kept for ABI compat.
 extern "C" char* kudroid_test_jvm(const char* unused_path) {
     (void)unused_path;
     std::string log;
@@ -2115,8 +2084,7 @@ extern "C" char* kudroid_test_jvm(const char* unused_path) {
 
     if (env) {
         log += "[kudroid_core] Phase: testing JNI FindClass\n";
-        // ActivityThread l class m ng khi ng tht s dng — n load c
-        // ngha l framework nhng hp l v class linker run ng.
+        // ActivityThread must load; success means the framework and linker work.
         for (const char* name : {"android/app/ActivityThread", "android/app/Activity",
                                  "android/os/Looper", "android/util/Log"}) {
             jclass c = env->FindClass(name);
@@ -2155,16 +2123,7 @@ extern "C" char* kudroid_test_jvm(const char* unused_path) {
     return strdup(log.c_str());
 }
 
-// Guest .so mappings PHI sng bng tui process — ng ng ngha dlopen trn
-// Android (libs li trong process cho ti khi app cht). Bng chng log my
-// tht: mi crash triangle t u u l SIGABRT trong libtriangle_gles.so+
-// 0x4xxx NGAY after khi run_apk in dng cui "ANativeActivity_onCreate not found"
-// — render thread guest run SONG SONG vi run_apk (spawn t JNI_OnLoad), cn
-// manager before y l bin LOCAL nn khi run_apk return, destructor ElfLoader
-// munmap ton b guest .so trong lc render thread vn ang execute bn trong
-// → execute vng nh unmap → abort. Warm-up ANGLE cc vng before ch lm
-// render thread ti xa hn before khi munmap (race) nn crash di dn — no/not
-// phi fix gc.
+// Guest .so mappings must live for the process lifetime; unmapping while a render thread runs inside aborts.
 static kudroid::LibraryManager& globalLibraryManager() {
     static kudroid::LibraryManager instance;
     return instance;
@@ -2233,8 +2192,7 @@ extern "C" int kudroid_find_native_library(const char* name, char* out,
     return 0;
 }
 
-// Hook tra symbol guest — nh ngha trong SyscallShim.cpp, bionic_dlsym dng
-// khi handle l DUMMY_HANDLE (dlopen("libc.so") v.v.).
+// Guest symbol hook used by bionic_dlsym for DUMMY_HANDLE.
 extern "C" {
 extern void* (*kudroid_guest_symbol_lookup)(const char* name);
 extern void* (*kudroid_guest_library_open)(const char* filename);
@@ -2363,13 +2321,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
         std::string resolvedAppName = appName;
         std::filesystem::path appDir = std::filesystem::path(remapper.androidRoot()) / "data/app" / resolvedAppName;
 
-        // ── Chun ha tn app = package ID tht ───────────────────────────
-        // Th mc install thng mang tn FILE APK ti v (vd
-        // "Minecraft_PE_26.30_BANDISHARE") trong khi Android tht nh danh
-        // app bng package ID ("com.mojang.minecraftpe"). read manifest NGAY
-        // T U i tn th mc + di chuyn dalvik-cache sang tn chun:
-        // mi ng dn runtime (dalvik-cache, data/data, sdcard/Android/data)
-        // khp Android tht v nht qun d ti li APK vi tn file khc.
+        // Standardize the install dir to the real package ID.
         {
             const auto mfPath = appDir / "AndroidManifest.xml";
             std::string pkgId;
@@ -2412,13 +2364,12 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                     resolvedAppName = pkgId;
                     appDir = cleanAppDir;
                 } else if (std::filesystem::exists(cleanAppDir)) {
-                    // c th mc chun t before (ci ) — gi nguyn b cc c.
+                    // Already standard; keep as is.
                 }
             }
         }
 
-        // Fallback c: nu manifest no/not read c, th app_info.json do
-        // extractor write lc install (cha package ID chun).
+        // Fallback: when the manifest is unreadable, use the package ID from app_info.json.
         if (std::filesystem::exists(appDir)) {
             std::filesystem::path infoPath = appDir / "app_info.json";
             if (std::filesystem::exists(infoPath)) {
@@ -2475,10 +2426,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
         } else {
             kudroid::LibraryManager& manager = globalLibraryManager();
 
-            // Ci hook tra symbol guest cho bionic_dlsym(DUMMY_HANDLE, ...):
-            // dlopen("libc.so") tr handle gi nhng dlsym(handle, "function") trn
-            // Android tht vn resolve c — no/not ci hook th init code ca
-            // guest nhn nullptr ri call → SIGSEGV pc=0x0 (crash libmaesdk).
+            // Hook guest symbol lookup for bionic_dlsym(DUMMY_HANDLE, ...).
             kudroid_guest_symbol_lookup = [](const char* name) -> void* {
                 return globalLibraryManager().resolveGlobalSymbol(name);
             };
@@ -2490,9 +2438,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
             kudroid_guest_library_symbol = &guestLibrarySymbol;
             kudroid_guest_library_owns = &guestLibraryOwns;
 
-            // KuART phi sn sng before khi dlopen bt k .so no: static
-            // initializer ca libminecraftpe.so call JNI_GetCreatedJavaVMs, nu
-            // cha c VM th n t dng state sai ri no/not sa li c.
+            // KuART must be ready before dlopening anything: static initializers may query the VM.
             kuart_set_log_callback([](const char* msg) {
                 kudroid_android_log_message(4, "KuART", msg);
                 std::fprintf(stderr, "[KuART] %s\n", msg);
@@ -2737,11 +2683,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                         // whatever key it wants has to already be there.
                         kudroid::ManifestInfo manifestInfo;
 
-                        // U TIN 1: parse AndroidManifest.xml GII NN trong
-                        // appDir — ngun main xc duy nht. Log c cho thy
-                        // app_info.json c th thiu/stale (Target Activity b
-                        // on "Minecraft.MainActivity" trong khi package tht
-                        // l com.mojang.minecraftpe) → ClassNotFoundException.
+                        // Priority 1: parse the extracted manifest; app_info.json may be stale.
                         const auto manifestPath = appDir / "AndroidManifest.xml";
                         if (std::filesystem::exists(manifestPath)) {
                             std::ifstream mf(manifestPath, std::ios::binary);
@@ -2829,11 +2771,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                             }
                         }
 
-                        // U TIN 3: qut class trong DEX ca app tm Activity.
-                        // KuART read thng classes*.dex nn no/not cn classes.jar.
-                        // Danh sch Activity tht verify c — dng lm fallback
-                        // cho ActivityThread, khai bo scope ny dng c c
-                        // khi khi qut no/not run.
+                        // Priority 3: scan app DEX classes for Activities (no classes.jar needed).
                         std::vector<std::string> verifiedActivities;
                         if (targetActivity.empty()) {
                             std::vector<std::string> classes;
@@ -2849,13 +2787,6 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                 appendAndEcho("[kudroid_core] Scanning app DEX for Activity classes...");
                                 appendAndEcho("[kudroid_core] Found " + std::to_string(classes.size()) +
                                               " non-system classes in app DEX");
-                                // Chm im chn launcher:
-                                // -1000 Activity ca SDK bn th ba (push/analytics
-                                // v.v.) — no/not phi entry point, launch n
-                                // ch cho screen/display xm (bi hc Braze).
-                                // +100 tn cha "Activity"
-                                // +50 package khp pkgName (t manifest/app_info)
-                                // +depth bonus: package cng ngn (gc app) cng
                                 // Heuristics to pick launcher:
                                 // -1000 Activity of 3rd party SDK (push/analytics, etc.) — should not be entry point,
                                 // launching them just shows blank screen (lesson learned from Braze).
@@ -2910,14 +2841,14 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                 };
                                 std::string best;
                                 int bestScore = -1;
-                                std::string bestAny; // fallback nu no/not c *Activity no
+                                std::string bestAny; // fallback when no *Activity found
                                 int bestAnyScore = -1;
                                 for (const auto& cls : classes) {
                                     const bool isActivity = cls.find("Activity") != std::string::npos;
                                     const size_t depth = static_cast<size_t>(
                                         std::count(cls.begin(), cls.end(), '/'));
                                     int score = (isActivity ? 100 : 0) + static_cast<int>(10 - depth);
-                                    // Launcher activity hu nh lun tn "...MainActivity".
+                                    // Launcher activities are usually named "...MainActivity".
                                     if (cls.size() >= 13 &&
                                         cls.compare(cls.size() - 13, 13, "/MainActivity") == 0) score += 80;
                                     if (!pkgPrefix.empty() &&
@@ -2938,12 +2869,12 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                     targetActivity = best;
                                     appendAndEcho("[kudroid_core] Resolved from app DEX: " + best);
                                 } else if (!bestAny.empty() && bestAnyScore > 0) {
-                                    // no/not c *Activity "sch" — dng class im cao nht.
+                                    // No clean *Activity — use the highest-scored class.
                                     for (char& c : bestAny) if (c == '/') c = '.';
                                     targetActivity = bestAny;
                                     appendAndEcho("[kudroid_core] No clean *Activity class; using highest-scored app class: " + bestAny);
                                 } else if (!classes.empty()) {
-                                    // Mi class u b tr im SDK — log vi ci debug.
+                                    // Every class was SDK-penalised — log a few for debugging.
                                     for (size_t i = 0; i < classes.size() && i < 5; ++i) {
                                         appendAndEcho("[kudroid_core]   candidate(all-SDK?): " + classes[i]);
                                     }
@@ -2953,15 +2884,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                     appendAndEcho("[kudroid_core] Using first app class as last resort: " + first);
                                 }
 
-                                // U TIN 3.5 — VERIFY: tn class no/not ni ln
-                                // g khi app b ProGuard obfuscate (a.a.a v.v.).
-                                // Kim tra candidate THT S extends
-                                // android.app.Activity through KuART class inheritance.
-                                //
-                                // Score-based Activity resolution: avoid blindly picking the first candidate,
-                                // as SDK sub-activities (analytics, push) extend Activity but do not render UI.
-                                // Use kSdkActivityHints and scoring to select the main UI Activity.
-
+                                // Verify the candidate really extends Activity (ProGuard may obfuscate names).
                                 if (!targetActivity.empty() &&
                                     kuart_class_extends_activity(targetActivity.c_str()) != 1) {
                                     appendAndEcho("[kudroid_core] Candidate '" + targetActivity +
@@ -4151,13 +4074,8 @@ extern "C" const char* kudroid_load_apk(const char* apkPath) {
     return strdup(log.c_str());
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// KuART DEX loading verification
-//
-// before y function ny dch DEX → JAR cho Avian. KuART np DEX trc tip nn gi n
-// ch parse v bo co ni dung — gi tn c v Swift no/not phi i.
+// KuART DEX loading verification: parse and report contents.
 // Returns malloc'ed log string; caller must free().
-// ─────────────────────────────────────────────────────────────────────────────
 extern "C" const char* kudroid_translate_dex(const char* dexPath) {
     if (!dexPath || !*dexPath) {
         return strdup("[kudroid_dex] ERROR: null DEX path\n");

@@ -1,11 +1,5 @@
-// Host test for DexJniEnv: two-way Java <-> native.
-//
-// Chi u 1: bytecode invoke-static g i method native   RegisterNatives.
-// Chi u 2: h m native   d ng JNIEnv g i ng c v o bytecode,  c/ghi field,
-// t o string/array, n m exception.
-//
-// V n d ng th  thu t build hai l t nh  test_kuart_object: bytecode tham chi u
-// entity b ng index, index ch  ch t sau khi builder sort xong m i b ng.
+// Host test for DexJniEnv: two-way Java <-> native (bytecode calls registered
+// natives; natives call back via JNIEnv). Same two-pass index build as test_kuart_object.
 #include "kudroid/kuart/DexJniEnv.h"
 #include "kudroid/abi/GuestVarargs.h"
 #include "kudroid/framework_dex_bytes.h"
@@ -59,7 +53,7 @@ constexpr uint8_t kOpIput = 0x59;
 constexpr uint8_t kOpInvokeDirect = 0x70;
 constexpr uint8_t kOpInvokeStatic = 0x71;
 
-// ACC_PUBLIC|ACC_STATIC|ACC_NATIVE   method kh ng c  code item.
+// ACC_PUBLIC|ACC_STATIC|ACC_NATIVE — a native method has no code item.
 constexpr uint32_t kAccPublicStaticNative = 0x1 | 0x8 | 0x100;
 
 struct Specs {
@@ -67,12 +61,12 @@ struct Specs {
     FieldSpec total{"total", "I", 0x9};
 
     MethodSpec nat_ctor;
-    MethodSpec get_value;      // virtual: tr  this.value
+    MethodSpec get_value;      // virtual: returns this.value
     MethodSpec native_add;     // static native (II)I
-    MethodSpec native_probe;   // static native (LNat;)I   g i ng c v o Java
-    MethodSpec call_native;    // static: g i nativeAdd
-    MethodSpec call_probe;     // static: g i nativeProbe
-    MethodSpec make_nat;       // static: new Nat, set value, tr  object
+    MethodSpec native_probe;   // static native (LNat;)I, calls back into Java
+    MethodSpec call_native;    // static: call nativeAdd
+    MethodSpec call_probe;     // static: call nativeProbe
+    MethodSpec make_nat;       // static: new Nat, set value, return object
 
     Specs() {
         nat_ctor.name = "<init>";
@@ -138,11 +132,11 @@ std::vector<ClassSpec> BuildClasses(const Specs& s) {
     return {object, string, nat};
 }
 
-// Runtime d ng chung cho c c h m native b n d i; ch ng ch  nh n JNIEnv n n
-// m i th  kh c ph i l y qua env ho c bi n file-scope n y.
+// Shared runtime for the natives below; they only receive JNIEnv,
+// so everything else comes via env or this file-scope variable.
 kudroid::kuart::DexClassLinker* g_linker = nullptr;
 
-// c c h m native  c RegisterNatives
+// natives registered via RegisterNatives
 
 jint JNICALL NativeAdd(JNIEnv* env, jclass clazz, jint a, jint b) {
 Check(env != nullptr, "native nh n JNIEnv kh c null");
@@ -150,9 +144,9 @@ Check(clazz != nullptr, "native static nh n jclass kh c null");
     return a + b;
 }
 
-// Ki m tra to n b  chi u native   Java trong m t l n g i.
+// Exercise the whole native-to-Java direction in one call.
 jint JNICALL NativeProbe(JNIEnv* env, jclass, jobject nat) {
-    // FindClass nh n t n kh ng c  L;   DexJniEnv ph i t  b c th nh descriptor.
+    // FindClass takes a bare name; DexJniEnv must wrap it into a descriptor.
     jclass k = env->FindClass("Nat");
 Check(k != nullptr, "FindClass(\"Nat\") kh ng c n L;");
 
@@ -164,7 +158,7 @@ Check(obj_class == k, "GetObjectClass tr   ng class");
 Check(super != nullptr, "GetSuperclass tr  java/lang/Object");
     Check(env->IsAssignableFrom(k, super) == JNI_TRUE, "IsAssignableFrom(Nat, Object)");
 
-    // G i ng c v o bytecode.
+    // Call back into bytecode.
     jmethodID get_value = env->GetMethodID(k, "getValue", "()I");
     Check(get_value != nullptr, "GetMethodID(getValue)");
     const jint from_java = env->CallIntMethod(nat, get_value);
@@ -184,14 +178,14 @@ Check(env->CallIntMethod(nat, get_value) == 25, "bytecode th y field v a ghi");
     env->SetStaticIntField(k, sfid, 77);
 Check(env->GetStaticIntField(k, sfid) == 77, "static field ghi/ c");
 
-    // G i static method c a Java (makeNat) r i ki m tra object tr  v .
+    // Call Java static makeNat, then check the returned object.
     jmethodID make = env->GetStaticMethodID(k, "makeNat", "(I)LNat;");
     Check(make != nullptr, "GetStaticMethodID(makeNat)");
     jobject made = env->CallStaticObjectMethod(k, make, 99);
 Check(made != nullptr, "CallStaticObjectMethod tr  object");
 Check(env->GetIntField(made, fid) == 99, "object do bytecode t o c  field  ng");
 
-    // Chu i.
+    // Strings.
     jstring str = env->NewStringUTF("kudroid");
     Check(str != nullptr, "NewStringUTF");
     Check(env->GetStringUTFLength(str) == 7, "GetStringUTFLength");
@@ -202,7 +196,7 @@ Check(env->GetIntField(made, fid) == 99, "object do bytecode t o c  field  ng");
     env->GetStringUTFRegion(str, 1, 3, region);
     Check(std::strcmp(region, "udr") == 0, "GetStringUTFRegion");
 
-    // M ng nguy n th y.
+    // Primitive arrays.
     jintArray arr = env->NewIntArray(4);
     Check(arr != nullptr, "NewIntArray");
     Check(env->GetArrayLength(arr) == 4, "GetArrayLength");
@@ -218,7 +212,7 @@ Check(elems != nullptr && elems[2] == 7, "GetIntArrayElements tr  th ng v o m ng
     env->GetIntArrayRegion(arr, 2, 1, dst);
 Check(dst[0] == 70, "ghi qua GetIntArrayElements c  hi u l c");
 
-    // M ng object.
+    // Object arrays.
     jclass string_class = env->FindClass("java/lang/String");
     Check(string_class != nullptr, "FindClass(java/lang/String)");
     jobjectArray objs = env->NewObjectArray(2, string_class, nullptr);
@@ -509,7 +503,7 @@ Check(builder.TypeIndexOf("LNat;") == kNatType, "index  n  nh gi a hai l t build
     kudroid::kuart::DexJniEnv jni(&linker, &interp);
     interp.set_jni_env(&jni);
 
-    // Method native ch a li n k t th  invoke ph i n m UnsatisfiedLinkError.
+    // Invoking an unlinked native must throw UnsatisfiedLinkError.
     {
         kudroid::kuart::DexMethod* m = nat->FindDirectMethod("callNative", "(II)I");
 Check(m != nullptr, "t m  c callNative");
@@ -520,8 +514,8 @@ Check(interp.HasPendingException(), "native ch a li n k t   c  exception");
         interp.ClearPendingException();
     }
 
-    // RegisterNatives nh  JNI_OnLoad c a game. JNINativeMethod khai b o char*
-    // (kh ng const) n n t n/ch  k  ph i l  buffer ghi  c.
+    // RegisterNatives as a game's JNI_OnLoad does. JNINativeMethod declares char*
+    // (non-const), so names/signatures must be writable buffers.
     char n1[] = "nativeAdd";
     char s1[] = "(II)I";
     char n2[] = "nativeProbe";
@@ -532,7 +526,7 @@ Check(interp.HasPendingException(), "native ch a li n k t   c  exception");
     };
     Check(jni.RegisterNatives(nat, natives, 2) == JNI_OK, "RegisterNatives");
 
-    // Chi u 1: bytecode   native.
+    // Direction 1: bytecode to native.
     {
         kudroid::kuart::DexMethod* m = nat->FindDirectMethod("callNative", "(II)I");
         DexValue args[2] = {DexValue::Int(20), DexValue::Int(22)};
@@ -542,7 +536,7 @@ Check(!interp.HasPendingException(), "invoke native kh ng n m exception");
 Check(r.i == 42, "bytecode g i native, nh n 42");
     }
 
-    // RegisterNatives v i method kh ng t n t i ph i b o error, kh ng crash.
+    // RegisterNatives for a missing method must report an error, not crash.
     {
         char bad_name[] = "khongCo";
         char bad_sig[] = "()V";
@@ -550,7 +544,7 @@ Check(r.i == 42, "bytecode g i native, nh n 42");
         Check(jni.RegisterNatives(nat, bad, 1) == JNI_ERR, "RegisterNatives method sai → ERR");
     }
 
-    // Chi u 2: bytecode   native   bytecode, qua to n b  vtable JNIEnv.
+    // Direction 2: bytecode to native to bytecode, through the whole JNIEnv vtable.
     {
         kudroid::kuart::DexMethod* make = nat->FindDirectMethod("makeNat", "(I)LNat;");
 Check(make != nullptr, "t m  c makeNat");
@@ -567,7 +561,7 @@ Check(!interp.HasPendingException(), "nativeProbe kh ng   l i exception");
 Check(r.i == 36, "nativeProbe tr  11 + 25 = 36");
     }
 
-    // G i Java tr c ti p t  host qua CallJavaA ( ng m  JNI vtable d ng).
+    // Call Java directly from host via CallJavaA (as the JNI vtable does).
     {
         kudroid::kuart::DexMethod* make = nat->FindDirectMethod("makeNat", "(I)LNat;");
         jvalue mk[1];

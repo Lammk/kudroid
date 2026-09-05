@@ -35,7 +35,7 @@ void* DexHeap::Allocate(size_t bytes) {
         }
     }
 
-    // If the object is larger than the block, it will provide enough separate block without wasting the remainder.
+    // Oversized objects get their own block to avoid wasting space.
     const size_t capacity = need > kBlockSize ? need : kBlockSize;
     auto* memory = static_cast<uint8_t*>(std::calloc(1, capacity));
     if (memory == nullptr) return nullptr;

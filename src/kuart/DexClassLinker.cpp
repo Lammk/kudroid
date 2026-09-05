@@ -21,8 +21,7 @@ namespace kuart {
 
 namespace {
 
-// Count the number of DexValue cells the parameter list occupies. DEX convention: long/double accounts
-// 2 registers, all other types take 1.
+// Count DexValue slots; long/double take 2, others take 1.
 uint16_t CountArgWords(const char* shorty, bool is_static) {
     uint16_t words = is_static ? 0 : 1;  // `this`
     if (shorty == nullptr) return words;
@@ -44,25 +43,11 @@ bool IsPrimitiveDescriptor(const char* d) {
     }
 }
 
-// Where to record classes KuDroid failed to resolve. Set by KuArtRuntime to the
-// app's writable directory; scripts/generate_framework_stubs.py reads the file to
-// generate stubs.
-//
-// Absolute path on purpose. This used to open "classes.log" relative to the CWD,
-// which meant every host test run littered whatever directory it happened to be
-// started from — the stale classes.log committed at the repo root came from
-// kuart-tests binaries, not from a real APK launch, which made it look like
-// java.lang.String was missing at runtime when it is present in framework.dex.
+// Missing-class log path set by KuArtRuntime; absolute so tests do not litter CWD.
 std::mutex g_missing_class_log_mtx;
 std::vector<std::string> g_missing_class_log_paths;
 
-// Append one "[timestamp] KIND: detail" line to every configured log.
-//
-// Shared by the missing-class, missing-field and missing-method paths so all three
-// land in the same file with the same shape; scripts/generate_framework_stubs.py
-// parses it. A missing field used to be reported nowhere at all — the interpreter
-// threw NoSuchFieldError with the bare text "iput" — so each one cost a manual
-// debugging round.
+// Append one timestamped line; shared by missing-class/field/method logs.
 void AppendMissingLog(const char* kind, const std::string& detail) {
     std::vector<std::string> paths;
     {
@@ -191,7 +176,7 @@ DexClass* DexClassLinker::FindClass(const char* descriptor) {
         return CreateArrayClass(descriptor);
     }
 
-    // If the superclass chain has a loop, it stops, otherwise it will recur indefinitely.
+    // Guard against inheritance loops to avoid infinite recursion.
     if (std::find(loading_.begin(), loading_.end(), descriptor) != loading_.end()) {
         last_error_ = std::string("inherit loop when loading ") + descriptor;
         return nullptr;
@@ -210,16 +195,7 @@ DexClass* DexClassLinker::FindClass(const char* descriptor) {
         return klass;
     }
 
-    // ── Auto-stubbing for missing BOOT-CLASSPATH classes ──
-    //
-    // Only packages KuDroid is responsible for shipping are stubbed. An app's own
-    // packages must NOT be: a missing app class means either the candidate name is
-    // wrong or a DEX is missing, and both cases have to fail so the caller can
-    // react. ActivityThread.handleLaunchActivity guesses names like
-    // "<pkg>.Main"/"<pkg>.MainActivity" and walks to the next candidate when
-    // Class.forName throws — stubbing those guesses made forName "succeed" for a
-    // class that does not exist, so the cast to Activity blew up with a
-    // ClassCastException and the remaining candidates were never tried.
+    // Auto-stub missing boot-classpath classes only; app classes must still fail.
     auto isBootClasspathDescriptor = [](const char* desc) -> bool {
         if (!desc || desc[0] != 'L') return false;
         return (std::strncmp(desc, "Landroid/", 9) == 0 ||
@@ -258,9 +234,7 @@ DexClass* DexClassLinker::FindClass(const char* descriptor) {
         if (stub != nullptr) {
             stub->descriptor = heap_.InternString(descriptor);
             stub->access_flags = art::kAccPublic;
-            // Marked initialized so that resolving a reference to it does not try
-            // to run a <clinit> it does not have, but flagged as a stub so that
-            // Class.forName and new-instance refuse it. See DexClass::is_stub.
+            // Marked initialized with no clinit; flagged as stub. See DexClass::is_stub.
             stub->status = DexClass::Status::kInitialized;
             stub->is_stub = true;
             classes_[descriptor] = stub;
@@ -289,8 +263,7 @@ DexClass* DexClassLinker::LoadClassFromDexFile(const art::DexFile& dex_file,
     klass->dex_file = &dex_file;
     klass->class_def = &class_def;
 
-    // Go to cache BEFORE resolving the superclass: the class references itself
-    // field/method will find the currently loaded version instead of reloading it again.
+    // Cache before resolving superclass to handle self-references.
     classes_[descriptor] = klass;
     live_classes_.insert(klass);
 
@@ -298,8 +271,7 @@ DexClass* DexClassLinker::LoadClassFromDexFile(const art::DexFile& dex_file,
         const char* super_descriptor = dex_file.StringByTypeIdx(class_def.superclass_idx_);
         klass->superclass = FindClass(super_descriptor);
         if (klass->superclass == nullptr) {
-            // java/lang/Object is usually not included in the app's DEX — accepted
-            // The superclass is empty so the class can still be used, instead of failing the entire class.
+            // Missing Object superclass is tolerated; class stays usable.
             last_error_ = std::string("missing superclass ") + super_descriptor +
                           " of " + descriptor;
         }
@@ -332,17 +304,7 @@ DexClass* DexClassLinker::LoadClassFromDexFile(const art::DexFile& dex_file,
     }
     klass->static_values.resize(klass->static_fields.size());
 
-    // Constant initialisers for static fields.
-    //
-    // d8 does NOT emit a <clinit> for `static final int X = -1`; it puts the value in
-    // the class_def's static_values array instead, and the runtime is expected to
-    // apply it. KuDroid only zero-filled, so every compile-time constant read as 0.
-    // That is silent and wrong rather than a crash: ViewGroup.LayoutParams.
-    // MATCH_PARENT came back 0 instead of -1, so a view asking to fill its parent got
-    // a zero-width layout and drew nothing.
-    //
-    // The array is positional — the Nth value initialises the Nth static field — and
-    // may be shorter than the field list, in which case the rest stay zero.
+    // Apply d8 constant initializers; array is positional, rest stay zero.
     if (class_def.static_values_off_ != 0) {
         art::EncodedStaticFieldValueIterator it(dex_file, class_def);
         for (size_t slot = 0; it.HasNext() && slot < klass->static_values.size();
@@ -385,11 +347,7 @@ DexClass* DexClassLinker::LoadClassFromDexFile(const art::DexFile& dex_file,
                     klass->static_values[slot] = DexValue::Ref(nullptr);
                     break;
                 default:
-                    // kType/kEnum/kField/kMethod/kArray/kAnnotation: these need a
-                    // resolved object, and resolving one here would recurse into a
-                    // class that is still being loaded. <clinit> assigns them anyway
-                    // for every case KuDroid runs, so leaving the slot zero is
-                    // correct rather than merely convenient.
+                    // Complex types are set by clinit; leave the slot zero.
                     break;
             }
         }
@@ -457,8 +415,7 @@ bool DexClassLinker::LinkClass(DexClass* klass) {
         LinkClass(klass->superclass);
     }
 
-    // The field instance follows the parent field, placing the larger field first for each field
-    // naturally align to its size without adding padding.
+    // Lay out fields after the parent, largest first for natural alignment.
     uint32_t offset = klass->superclass != nullptr ? klass->superclass->object_size : 0;
 
     for (uint32_t want : {8u, 4u, 2u, 1u}) {
@@ -473,7 +430,7 @@ bool DexClassLinker::LinkClass(DexClass* klass) {
     }
     klass->object_size = offset;
 
-    // vtable: copy from parent and overwrite slot when name+signature overlaps.
+    // vtable: copy parent entries, overriding on name+signature match.
     klass->vtable.clear();
     if (klass->superclass != nullptr) {
         klass->vtable = klass->superclass->vtable;
@@ -507,10 +464,7 @@ DexObject* DexClassLinker::AllocObject(DexClass* klass) {
     if (klass == nullptr) return nullptr;
     if (!LinkClass(klass)) return nullptr;
 
-    // String and Class instances carry a native payload (DexString::utf8,
-    // DexClassObject::represented) laid out right after the DexObject header.
-    // Their Java classes declare no instance fields, so object_size is 0 and a
-    // plain allocation would be too small for the native code to write into.
+    // String/Class carry a native payload past the header; ensure room for it.
     size_t bytes = sizeof(DexObject) + klass->object_size;
     if (klass->descriptor != nullptr) {
         if (std::strcmp(klass->descriptor, "Ljava/lang/String;") == 0) {
@@ -605,10 +559,7 @@ DexClass* DexClassLinker::GetOrCreateProxyClass(const std::vector<DexClass*>& in
     }
     if (!LinkClass(proxy_base)) return nullptr;
 
-    // Key on the interface descriptors, in the order given. Order is part of the
-    // identity for the real Proxy too — getProxyClass({A,B}) and getProxyClass({B,A})
-    // are distinct classes — so preserving it here keeps the cache faithful rather
-    // than merely convenient.
+    // Order is part of proxy identity, so keep it in the cache key.
     std::string key;
     for (const DexClass* iface : interfaces) {
         if (iface == nullptr || iface->descriptor == nullptr) continue;
@@ -621,23 +572,18 @@ DexClass* DexClassLinker::GetOrCreateProxyClass(const std::vector<DexClass*>& in
     auto* proxy = heap_.New<DexClass>();
     if (proxy == nullptr) return nullptr;
 
-    // A name in the shape the platform uses ($Proxy0, $Proxy1, ...) so that a stack
-    // trace or getClass().getName() reads the way a developer expects.
+    // Platform-style $ProxyN name for readable traces.
     const std::string descriptor = "L$Proxy" + std::to_string(proxy_classes_.size()) + ";";
     proxy->descriptor = heap_.InternString(descriptor.c_str());
     proxy->access_flags = art::kAccPublic | art::kAccFinal;
     proxy->superclass = proxy_base;
     proxy->interfaces = interfaces;
     proxy->is_proxy = true;
-    // Inherit Proxy's layout so the `h` field it declares is reachable on instances
-    // of this class; the proxy adds no storage of its own.
+    // Inherit Proxy layout so the h field stays reachable.
     proxy->object_size = proxy_base->object_size;
-    // No <clinit> exists to run, and nothing would resolve one — mark it done so a
-    // reference to the class does not try.
+    // No clinit to run; mark initialized.
     proxy->status = DexClass::Status::kInitialized;
-    // Share the superclass vtable. Nothing dispatches through it (the proxy declares
-    // no methods) but leaving it empty would make an inherited Object method such as
-    // toString unreachable by vtable index.
+    // Share superclass vtable so inherited Object methods stay reachable.
     proxy->vtable = proxy_base->vtable;
 
     classes_[descriptor] = proxy;
@@ -649,13 +595,11 @@ DexClass* DexClassLinker::GetOrCreateProxyClass(const std::vector<DexClass*>& in
 DexClass* DexClassLinker::ClassOfObject(const DexObject* obj) const {
     if (obj == nullptr) return nullptr;
 
-    // A DexClass handed in where a DexObject was expected: reading obj->clazz would
-    // read DexClass::descriptor, which shares offset 0. Check before dereferencing.
+    // A DexClass passed as DexObject shares offset 0; check before dereferencing.
     if (live_classes_.count(reinterpret_cast<const DexClass*>(obj)) != 0) return nullptr;
 
     DexClass* klass = obj->clazz;
-    // Validate what came out: a stale handle can carry any bit pattern, and a
-    // non-null one passes the usual null check only to fault on first use.
+    // Validate the class; stale handles pass null checks but fault on use.
     return IsRegisteredClass(klass) ? klass : nullptr;
 }
 
@@ -683,8 +627,7 @@ std::string DexClassLinker::DescribeBadObject(const DexObject* obj, const char* 
         case BadReceiver::kNull:
             return std::string(what) + " is null";
         case BadReceiver::kIsAClass: {
-            // Name the class, since we know exactly which one was passed. This is the
-            // "raftpe/" shape: reading clazz off it would have yielded the descriptor.
+            // Name the class; reading clazz would yield the descriptor.
             const auto* as_class = reinterpret_cast<const DexClass*>(obj);
             std::snprintf(buf, sizeof(buf),
                           "%s is the CLASS %s, not an instance of it"

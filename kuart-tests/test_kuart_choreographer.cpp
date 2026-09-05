@@ -1,33 +1,6 @@
 // test_kuart_choreographer.cpp — the Java frame-callback API, driven through the real
-// framework.dex.
-//
-// Why this exists. KuDroid implemented the NDK frame API (AChoreographer_*) and
-// ULTRAKILL still stopped dead. Unity uses both halves, and the Java one was a nine-line
-// stub — a class with an empty constructor and a FrameCallback interface that declared
-// no methods at all. kuart_verify on ULTRAKILL's own classes.dex named the three that
-// were missing:
-//
-//     android.view.Choreographer->getInstance()Landroid/view/Choreographer;
-//     android.view.Choreographer->postFrameCallback(...FrameCallback;)V
-//     android.view.Choreographer->postFrameCallbackDelayed(...FrameCallback;J)V
-//
-// Because the CLASS existed, Interpreter::ResolveMethod auto-stubbed the missing methods
-// into bodyless DexMethods instead of reporting them. getInstance() therefore returned
-// null, and Unity's JNIBridge answered by throwing NoSuchMethodError itself — the string
-// "JNIBridge error: Java interface default methods are only supported since Android
-// Oreo" is in ULTRAKILL's classes.dex, adjacent to Ljava/lang/NoSuchMethodError;. That
-// escaped Looper.loop, ActivityThread.main returned, and the shell printed
-// "Session ended" while FMOD's audio thread kept running and footprint kept climbing.
-//
-// So the assertions here are mostly about what a guest is entitled to conclude from each
-// return value, and the one that would have caught the original bug is a single line:
-// getInstance() must not be null.
-//
-// The other half of that session's failure is pinned here too. The auto-stub created its
-// DexMethod without a signature, and NameAndSigMatch treats a null signature as "match
-// anything" — so a stubbed overload silently redirected to a DIFFERENT overload of the
-// same name. Unity called Activity.getSystemService(Class), got the String overload, and
-// the log said only "call getDefaultDisplay on null".
+// framework.dex. Unity needs getInstance()/postFrameCallback to work, and auto-stubs
+// with null signatures must not silently resolve to the wrong overload.
 #include "kudroid/framework_dex_bytes.h"
 #include "kudroid/kuart/DexClassLinker.h"
 #include "kudroid/kuart/DexJniEnv.h"

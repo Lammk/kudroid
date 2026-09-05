@@ -1,15 +1,6 @@
 // Report every class, method and field a guest APK references that KuART cannot resolve.
-//
-// The point is to stop discovering missing framework API one device round-trip at a time.
-// A DEX file's method_ids/field_ids tables list everything its code can possibly reference,
-// so the whole list is available on a developer machine before any bytecode runs — and
-// across a corpus of APKs, sorted by how many of them need each entry, it says what to
-// implement next and in what order.
-//
-// Built as a binary against the real DexClassLinker rather than written as a script that
-// parses DEX itself. A separate parser would drift from what KuART actually does, and the
-// question being asked is precisely "what does KuART fail to resolve", not "what does some
-// model of KuART fail to resolve".
+// DEX tables list all references upfront, so ranking them across APKs says what to
+// implement next. Built on the real DexClassLinker, not a separate parser.
 //
 // What this CANNOT see, and why it is not the whole answer:
 //

@@ -99,7 +99,7 @@ public abstract class Calendar implements Cloneable, Comparable<Calendar> {
         return new GregorianCalendar(timezone);
     }
 
-    // ── field access ──
+    // Field access.
 
     public int get(int field) {
         complete();
@@ -151,7 +151,7 @@ public abstract class Calendar implements Cloneable, Comparable<Calendar> {
         return isSet[field];
     }
 
-    // ── time ──
+    // Time.
 
     public final Date getTime() {
         return new Date(getTimeInMillis());
@@ -220,7 +220,7 @@ public abstract class Calendar implements Cloneable, Comparable<Calendar> {
         return getLeastMaximum(field);
     }
 
-    // ── comparison ──
+    // Comparison.
 
     public boolean before(Object calendar) {
         return (calendar instanceof Calendar)
@@ -273,7 +273,7 @@ public abstract class Calendar implements Cloneable, Comparable<Calendar> {
         }
     }
 
-    // ── configuration ──
+    // Configuration.
 
     public boolean isLenient() {
         return lenient;

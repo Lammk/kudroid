@@ -1,14 +1,5 @@
-// Emit the machine code JitCompiler's encoder produces, as a C header.
-//
-// Two halves make a real test of a code generator: that the bytes match a reference
-// assembler (test_kuart_jit.cpp), and that executing them computes the right answer.
-// The second half cannot run on the host — the bytes are AArch64 — so this dumps them
-// and scripts/test-jit-arm64.sh runs them under qemu.
-//
-// The sequences below are what JitCompiler emits for specific DEX opcodes, written out
-// by hand rather than compiled from a DEX. That keeps this program free of the linker,
-// the class loader and framework.dex, so a failure points at the encoder rather than at
-// something twelve layers away.
+// Dump JitCompiler output as a C header; scripts/test-jit-arm64.sh runs it under qemu.
+// Hand-written sequences keep the linker/loader out, so failures point at the encoder.
 #include "kudroid/kuart/JitCompiler.h"
 
 #include <cstdio>

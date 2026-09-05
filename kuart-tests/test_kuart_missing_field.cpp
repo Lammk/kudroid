@@ -1,19 +1,6 @@
 // Probe: an unresolvable field or method reference must name itself.
-//
-// A missing field cannot be auto-stubbed the way a missing method can — object
-// layout is fixed once LinkClass has run, so there is nowhere to put the storage —
-// which makes the diagnostic the entire remedy. It used to throw NoSuchFieldError
-// whose message was the bare opcode name, "iput", identifying neither the class nor
-// the field, and nothing reached classes.log because the declaring class was
-// present. That is the shape that stopped Minecraft in onCreate: GameActivity did
-// `new EditorInfo()` (fine, real class) then `iput inputType` (fatal, the class
-// declared zero fields).
-//
-// The method half had the same defect and is covered here too. An unresolvable
-// invoke threw "failed to resolve method index 45364" — an index meaningful only
-// inside one DEX file, naming neither class nor method. GameActivity.onCreate hit it
-// on the line after it found libminecraftpe.so, so the app reached the point of
-// loading its renderer and then failed with nothing to act on.
+// Fields cannot be auto-stubbed (layout is fixed), so the diagnostic is the remedy;
+// bare opcodes ("iput") and DEX-local indices never identified the missing member.
 #include "kudroid/kuart/DexClassLinker.h"
 #include "kudroid/kuart/DexJniEnv.h"
 #include "kudroid/kuart/DexObject.h"

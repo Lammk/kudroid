@@ -103,12 +103,7 @@ public class TextView extends View {
         mText = "";
     }
 
-    // ── input filters ───────────────────────────────────────────────────────
-    //
-    // An app sets these to cap length or force case, then reads them back to modify
-    // the chain. Returning null from getFilters — which is what no storage at all
-    // amounts to — breaks the read-modify-write idiom apps use to add one filter
-    // without dropping the others.
+    // Input filters.
     private android.text.InputFilter[] mFilters = new android.text.InputFilter[0];
 
     public void setFilters(android.text.InputFilter[] filters) {

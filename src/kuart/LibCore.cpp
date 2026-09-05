@@ -196,9 +196,7 @@ void InitStringFrom(DexClassLinker* linker, DexObject* self, const std::string& 
     str->ascii = fresh->ascii;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // java.lang.Object
-// ─────────────────────────────────────────────────────────────────────────────
 bool Invoke_java_lang_Object(Interpreter* interp, const char* name, const DexValue* args,
                              size_t num_args, DexValue* result) {
     DexObject* self = args[0].l;
@@ -265,9 +263,7 @@ bool Invoke_java_lang_Object(Interpreter* interp, const char* name, const DexVal
     return false;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // reflection object plumbing
-// ─────────────────────────────────────────────────────────────────────────────
 
 void SetRefField(DexObject* obj, const char* name, const char* type, DexObject* value) {
     if (obj == nullptr || obj->clazz == nullptr) return;
@@ -384,34 +380,7 @@ DexField* FieldFromObject(DexObject* obj) {
         static_cast<uintptr_t>(GetLongField(obj, "artField")));
 }
 
-// The DexClass behind a value that is supposed to name a class.
-//
-// Three different things arrive here and only one of them is a plain object:
-//
-//   DexClassObject*  — a java.lang.Class INSTANCE, from const-class, Class.forName or
-//                      Object.getClass. This is what bytecode passes.
-//   DexClass*        — a raw jclass. Native code holds classes as DexClass* (see
-//                      DexJniEnv.h) and a jclass IS a jobject in the JNI object model,
-//                      so handing one to anything typed Class<?> is CORRECT usage.
-//   anything else    — not a class at all.
-//
-// The middle case is why this function needs to exist rather than just reading ->clazz.
-// DexClass::descriptor and DexObject::clazz both sit at offset 0, so ->clazz on a
-// DexClass yields the descriptor STRING pointer, and that pointer then gets used as a
-// class. This function used to do exactly that, and Unity crashed on it:
-// Proxy.newProxyInstance received Class[] whose elements were raw jclass handles, each
-// became a `const char*`, and GetOrCreateProxyClass appended iface->descriptor — reading
-// offset 0 of the string "Landroid/..." — to its cache key. strlen() faulted at
-// 0x64696f72646e6140, which is the 16-byte-aligned form of 0x64696f72646e614c, the ASCII
-// bytes `Landroid`.
-//
-// The same shape was already fixed in DexJniEnv::CallJavaA and JNI GetObjectClass, both
-// of which substitute the heap java.lang.Class object for a DexClass receiver. Fixing it
-// there and not here left the reflection helpers as the one remaining way in.
-//
-// An unregistered pointer resolves to nullptr rather than being dereferenced: every
-// caller already treats null as "not a class" and raises a Java exception naming the
-// argument, which is a diagnosis instead of a signal.
+// Resolve a class from a Class instance, raw jclass, or null if neither.
 DexClass* ClassOf(Interpreter* interp, DexObject* class_object) {
     if (class_object == nullptr) return nullptr;
     DexClassLinker* linker = interp->linker();
@@ -420,19 +389,13 @@ DexClass* ClassOf(Interpreter* interp, DexObject* class_object) {
     // A java.lang.Class instance: the registered mapping is authoritative.
     if (DexClass* k = linker->ClassFromObject(class_object)) return k;
 
-    // A raw jclass. Checked against the linker, never assumed — an unregistered pointer
+    // A raw jclass. Checked against the linker, never assumed - an unregistered pointer
     // that happened to be passed here must not be treated as class metadata.
     if (linker->IsRegisteredClass(reinterpret_cast<const DexClass*>(class_object))) {
         return reinterpret_cast<DexClass*>(class_object);
     }
 
-    // Anything else is not a class, and saying so is the point.
-    //
-    // The old fallback was `class_object->clazz`, which answered "the class OF this
-    // object" — so a String argument reported java.lang.String as though the caller had
-    // passed String.class, and a jclass reported its own descriptor string. Both are
-    // wrong answers dressed as right ones. Every caller here treats null as "not a
-    // class" and raises a Java exception naming the argument.
+    // Not a class; callers report null as an error.
     return nullptr;
 }
 
@@ -489,16 +452,7 @@ bool UnboxValue(Interpreter* interp, const char* descriptor, DexObject* obj, Dex
     return true;
 }
 
-// The process-wide ClassLoader instance.
-//
-// KuART resolves classes through a single DexClassLinker, so there is one loader.
-// It still has to be a real object: app code calls
-// SomeClass.class.getClassLoader().loadClass(name), and a null loader turns that
-// into a NullPointerException inside a <clinit>.
-//
-// Built by calling ClassLoader.getSystemClassLoader() so Java code that asks
-// directly and native code that asks through Class.getClassLoader() get the same
-// instance, exactly as on Android.
+// Single shared ClassLoader; must be a real object, not null.
 DexObject* SystemClassLoaderObject(Interpreter* interp) {
     static DexObject* loader = nullptr;
     if (loader != nullptr) return loader;
@@ -524,17 +478,10 @@ DexObject* SystemClassLoaderObject(Interpreter* interp) {
     return loader;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // java.lang.Class
-// ─────────────────────────────────────────────────────────────────────────────
 bool Invoke_java_lang_Class(Interpreter* interp, const char* name, const DexValue* args,
                             size_t num_args, DexValue* result) {
-    // Static, so it must be handled before args[0] is read as a receiver.
-    //
-    // Backs every primitive class literal in guest bytecode: javac turns int.class into a
-    // read of Integer.TYPE, and each box class initialises TYPE from here. The names are
-    // Java's source spellings rather than DEX descriptors because that is what the box
-    // classes pass and what the platform's own Class.getPrimitiveClass takes.
+    // Static; handle before reading args[0] as receiver.
     if (std::strcmp(name, "getPrimitiveClass") == 0) {
         const char* prim = num_args > 0 ? GetStringUtf8(args[0]) : nullptr;
         if (prim == nullptr || prim[0] == '\0') {
@@ -542,9 +489,7 @@ bool Invoke_java_lang_Class(Interpreter* interp, const char* name, const DexValu
                                    "getPrimitiveClass with no name");
             return true;
         }
-        // Source name -> DEX descriptor. The linker already manufactures a DexClass for a
-        // one-character primitive descriptor (DexClassLinker::CreatePrimitiveClass), so
-        // there is nothing to build here beyond the translation.
+        // Translate source name to DEX descriptor.
         const char* descriptor = nullptr;
         if (std::strcmp(prim, "int") == 0) descriptor = "I";
         else if (std::strcmp(prim, "long") == 0) descriptor = "J";
@@ -556,8 +501,7 @@ bool Invoke_java_lang_Class(Interpreter* interp, const char* name, const DexValu
         else if (std::strcmp(prim, "boolean") == 0) descriptor = "Z";
         else if (std::strcmp(prim, "void") == 0) descriptor = "V";
         if (descriptor == nullptr) {
-            // Not a primitive name. Naming the argument matters: the only way to get here
-            // is a caller that invented a name, and "int " or "Integer" both look right.
+            // Name the bad argument; only invented names reach here.
             interp->ThrowException("Ljava/lang/IllegalArgumentException;",
                                    std::string("not a primitive type: ") + prim);
             return true;
@@ -656,18 +600,7 @@ bool Invoke_java_lang_Class(Interpreter* interp, const char* name, const DexValu
         return true;
     }
     if (std::strcmp(name, "getClassLoader") == 0) {
-        // KuART resolves every class through one DexClassLinker, so there is only
-        // ever one loader — but it must be a real object, not null.
-        //
-        // Returning null used to look harmless because KuDroid's own code never
-        // asks. App code does: the common obfuscator pattern is
-        // SomeClass.class.getClassLoader().loadClass("...") to reach a class by
-        // name, and on null that is an immediate NullPointerException inside a
-        // <clinit>, which poisons the class for the rest of the process. Any app
-        // built with that tooling cannot start.
-        //
-        // The instance comes from ClassLoader.getSystemClassLoader() so there is
-        // exactly one, shared with what Java code obtains directly.
+        // One shared loader; null would break obfuscated loadClass calls.
         result->l = SystemClassLoaderObject(interp);
         return true;
     }
@@ -699,21 +632,7 @@ bool Invoke_java_lang_Class(Interpreter* interp, const char* name, const DexValu
             for (DexMethod& m : klass->virtual_methods) {
                 objects.push_back(NewMethodObject(linker, &m));
             }
-            // A proxy class declares the methods of every interface it was created
-            // for. KuART's proxy carries no DexMethods of its own — dispatch reaches
-            // the InvocationHandler through DexClass::is_proxy instead — so without
-            // this a proxy for Runnable reported an EMPTY method list. Unity's
-            // JNIBridge enumerates that list to decide whether a method exists, ran
-            // its iterator dry (the NoSuchElementException burst in the log) and
-            // then threw NoSuchMethodError("java.lang.Runnable.run()") through JNI
-            // ThrowNew, cleared it, and rethrew an empty one from
-            // bitter.jnibridge.a.invoke — which killed ActivityThread with nothing
-            // in the log naming the cause.
-            //
-            // The Method objects report the INTERFACE as their declaring class,
-            // which is also what the handler receives from InvokeProxyMethod. Real
-            // $ProxyN names itself, but one answer in two places would be worse than
-            // one that is merely less specific.
+            // Proxies report interface methods with the interface as owner.
             if (klass->is_proxy) {
                 std::vector<DexClass*> pending(klass->interfaces.begin(),
                                                klass->interfaces.end());
@@ -792,9 +711,7 @@ bool Invoke_java_lang_Class(Interpreter* interp, const char* name, const DexValu
     return false;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // java.lang.reflect.{Method,Constructor,Field,Array}
-// ─────────────────────────────────────────────────────────────────────────────
 
 const char* ReturnDescriptor(const DexMethod* m) {
     if (m == nullptr || m->signature == nullptr) return "V";
@@ -900,7 +817,7 @@ bool Invoke_java_lang_reflect_Method(Interpreter* interp, const char* name,
         }
         // Virtual dispatch: the Method handle may come from a superclass while
         // the receiver overrides it. Validate the receiver's class instead of only
-        // null-checking it — a Method.invoke reachable from JNI can be handed a
+        // null-checking it - a Method.invoke reachable from JNI can be handed a
         // native-supplied receiver (see DexClassLinker::ClassOfObject).
         DexMethod* target = m;
         if (!m->IsStatic() && m->vtable_index != DexMethod::kInvalidVTableIndex) {
@@ -1133,7 +1050,7 @@ bool Invoke_java_lang_reflect_Array(Interpreter* interp, const DexMethod* method
         }
 
         // Two overloads share this name. DEX has no multianewarray opcode, so d8
-        // compiles `new T[a][b]` into newInstance(Class, int[]) — dispatch on the
+        // compiles `new T[a][b]` into newInstance(Class, int[]) - dispatch on the
         // declared signature rather than guessing from the argument value, which
         // would confuse an int[] handle with an int.
         const bool multi = method != nullptr && method->signature != nullptr &&
@@ -1241,22 +1158,9 @@ bool Invoke_java_lang_reflect_Array(Interpreter* interp, const DexMethod* method
     return true;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // java.lang.reflect.Proxy
-// ─────────────────────────────────────────────────────────────────────────────
 
-// newProxyInstance(ClassLoader, Class[], InvocationHandler).
-//
-// The Java side cannot do this itself: it would have to generate a class
-// implementing the requested interfaces, which needs a class writer KuART does not
-// have. Instead the linker synthesises a bodyless class carrying those interfaces
-// (DexClassLinker::GetOrCreateProxyClass) and the interpreter forwards calls on it
-// to the handler.
-//
-// The previous Java implementation returned `new Proxy(h)` — an object that does not
-// implement the requested interface and has no method bodies — so the checked cast at
-// the call site either failed or, when the DEX had no cast, the first interface call
-// died with AbstractMethodError.
+// newProxyInstance synthesizes a bodyless class; interpreter forwards to handler.
 bool Invoke_java_lang_reflect_Proxy(Interpreter* interp, const char* name,
                                     const DexValue* args, size_t num_args,
                                     DexValue* result) {
@@ -1281,7 +1185,7 @@ bool Invoke_java_lang_reflect_Proxy(Interpreter* interp, const char* name,
     };
 
     if (std::strcmp(name, "newProxyInstance") == 0) {
-        // (ClassLoader, Class[], InvocationHandler) — static, so args[0] is the loader.
+        // (ClassLoader, Class[], InvocationHandler) - static, so args[0] is the loader.
         DexObject* handler = num_args > 2 ? args[2].l : nullptr;
         if (handler == nullptr) {
             interp->ThrowException("Ljava/lang/NullPointerException;",
@@ -1368,27 +1272,9 @@ bool Invoke_java_lang_reflect_Proxy(Interpreter* interp, const char* name,
     return false;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// java.lang.invoke — MethodHandle / MethodHandles.Lookup
-//
-// The narrow reason this exists: an interface DEFAULT method cannot be reached by
-// ordinary reflection on a proxy. Method.invoke dispatches virtually, so invoking a
-// default on a Proxy instance re-enters the proxy's InvocationHandler and recurses until
-// the stack is gone. The platform's answer is Lookup.unreflectSpecial, which yields a
-// handle that invokes the method NON-virtually, and that is the whole feature below.
-//
-// KuART has no bytecode writer, so a handle cannot be a synthesised lambda form. It is a
-// resolved DexMethod plus an optional bound receiver plus a "special" flag, and invoking it
-// calls that method directly. Composition (filterArguments, asType and friends) is
-// therefore absent; direct handles are complete.
-// ─────────────────────────────────────────────────────────────────────────────
+// MethodHandle support for unreflectSpecial default-method calls on proxies.
 
-// A java.lang.invoke.MethodHandle wrapping `m`.
-//
-// MethodHandle is abstract so that `instanceof MethodHandle` keeps its platform meaning;
-// the concrete class is the nested Direct. The type is filled in from the DEX signature
-// rather than from whatever the caller asked for, so type() describes the method that will
-// actually run.
+// Wrap DexMethod as a Direct MethodHandle with its DEX type.
 DexObject* NewMethodHandle(Interpreter* interp, DexMethod* m, DexObject* receiver,
                            bool special) {
     DexClassLinker* linker = interp->linker();
@@ -1410,9 +1296,7 @@ DexObject* NewMethodHandle(Interpreter* interp, DexMethod* m, DexObject* receive
     SetLongField(handle, "artMethod", static_cast<int64_t>(reinterpret_cast<uintptr_t>(m)));
     SetRefField(handle, "receiver", "Ljava/lang/Object;", receiver);
 
-    // The two booleans and the type are read back by invokeWithArguments below and by
-    // bindTo in Java, so all three must be set even when false — AllocObject zeroes the
-    // payload, but relying on that would break the moment a field is reordered.
+    // Set all handle fields explicitly; do not rely on zeroed payload.
     if (DexField* f_special = klass->FindInstanceField("special", "Z")) {
         handle->SetField<uint8_t>(f_special->offset_or_slot, special ? 1 : 0);
     }
@@ -1456,11 +1340,7 @@ DexObject* NewMethodHandle(Interpreter* interp, DexMethod* m, DexObject* receive
     return handle;
 }
 
-// The DEX signature a MethodType describes, or "" when it cannot be read.
-//
-// Calls toMethodDescriptorString() on the Java object instead of walking its fields: the
-// descriptor is what MethodType is authoritative about, and reproducing the conversion here
-// would be a second implementation that can disagree with the first.
+// Read the DEX signature from a MethodType via Java.
 std::string DescriptorFromMethodType(Interpreter* interp, DexObject* type_obj) {
     if (type_obj == nullptr) return std::string();
     DexClassLinker* linker = interp->linker();
@@ -1479,11 +1359,7 @@ std::string DescriptorFromMethodType(Interpreter* interp, DexObject* type_obj) {
     return utf8 != nullptr ? std::string(utf8) : std::string();
 }
 
-// The signature to search for when a Lookup is given a name and a MethodType.
-//
-// findVirtual's MethodType omits the receiver (it is implied), which already matches a DEX
-// signature. findConstructor's names the return type of the constructed object, whereas a
-// DEX <init> returns void — hence `force_void_return`.
+// Build the lookup signature; constructors force void return.
 std::string LookupSignature(Interpreter* interp, DexObject* type_obj, bool force_void_return) {
     std::string desc = DescriptorFromMethodType(interp, type_obj);
     if (desc.empty()) return desc;
@@ -1522,7 +1398,7 @@ bool Invoke_java_lang_invoke_MethodHandle(Interpreter* interp, const char* name,
     auto* boxed = num_args > 1 ? reinterpret_cast<DexArray*>(args[1].l) : nullptr;
 
     // The receiver comes from bindTo when the handle is bound, otherwise from the first
-    // element of the argument array — the platform's rule, and the reason the two cases
+    // element of the argument array - the platform's rule, and the reason the two cases
     // cannot share a single argument-count check.
     DexObject* receiver = bound;
     int32_t first_arg = 0;
@@ -1546,7 +1422,7 @@ bool Invoke_java_lang_invoke_MethodHandle(Interpreter* interp, const char* name,
     // Virtual dispatch UNLESS the handle is special. This branch is the entire point of
     // unreflectSpecial: for a default method invoked on a Proxy, re-resolving against the
     // receiver's class would land back on the proxy's bodyless method and be forwarded to
-    // the InvocationHandler that is asking for this call — unbounded recursion.
+    // the InvocationHandler that is asking for this call - unbounded recursion.
     DexMethod* resolved = target;
     if (!special && !target->IsStatic()) {
         if (DexClass* receiver_class = interp->linker()->ClassOfObject(receiver)) {
@@ -1623,7 +1499,7 @@ bool Invoke_java_lang_invoke_MethodHandles(Interpreter* interp, const char* name
 
     // The lookup class is the CALLER's, which the interpreter knows. Reporting a
     // placeholder would break a caller that passes the Lookup to in() or compares
-    // lookupClass() against its own — and that comparison is how libraries decide whether
+    // lookupClass() against its own - and that comparison is how libraries decide whether
     // they need the reflective Lookup constructor at all.
     DexClass* caller = interp->CallerClass();
     DexObject* caller_class_obj =
@@ -1818,15 +1694,7 @@ bool Invoke_java_lang_System(Interpreter* interp, const char* name, const DexVal
         } else if (key == "user.dir" || key == "user.home") {
             value = "/";
         } else if (key == "java.vm.name") {
-            // Libraries decide which platform they are on by comparing this against
-            // "Dalvik" — okhttp, guava, gRPC and Kotlin's stdlib all do it. KuDroid
-            // reported "KuART", so every one of them took its desktop-JVM branch:
-            // okhttp went looking for Conscrypt/BouncyCastle JSSE providers instead
-            // of using the Android platform, failed, and left its Platform class
-            // permanently in error — which kills all HTTP for the rest of the run.
-            //
-            // Everything else KuDroid reports is already Android (SDK_INT 29,
-            // aarch64), so this is the consistent answer, not a special case.
+            // Report Dalvik; libraries branch on this for platform detection.
             value = "Dalvik";
         } else if (key == "java.vm.vendor") {
             value = "The Android Project";
@@ -1873,9 +1741,7 @@ bool Invoke_java_lang_System(Interpreter* interp, const char* name, const DexVal
     return false;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // java.lang.Math
-// ─────────────────────────────────────────────────────────────────────────────
 bool Invoke_java_lang_Math(Interpreter* /*interp*/, const char* name, const DexValue* args,
                            size_t /*num_args*/, DexValue* result) {
     if (std::strcmp(name, "sin") == 0) { *result = DexValue::Double(std::sin(args[0].d)); return true; }
@@ -1908,9 +1774,7 @@ bool Invoke_java_lang_Math(Interpreter* /*interp*/, const char* name, const DexV
     return false;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // java.lang.Float / Double bit casts
-// ─────────────────────────────────────────────────────────────────────────────
 
 // Double.toString per the Java spec: shortest decimal that round-trips, always
 // with a fractional part, scientific notation only outside [1e-3, 1e7).
@@ -2035,9 +1899,7 @@ bool Invoke_java_lang_Double(Interpreter* interp, const char* name, const DexVal
     return false;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // java.lang.String
-// ─────────────────────────────────────────────────────────────────────────────
 
 // Allocates a Java char[] holding `units`.
 DexArray* NewCharArray(DexClassLinker* linker, const std::vector<uint16_t>& units) {
@@ -2065,7 +1927,7 @@ bool Invoke_java_lang_String(Interpreter* interp, const DexMethod* method,
     const char* signature = method->signature != nullptr ? method->signature : "";
     DexClassLinker* linker = interp->linker();
 
-    // ── constructors: the object exists, this fills in its payload ──
+    // Constructors: the object exists, this fills in its payload.
     if (std::strcmp(name, "initEmpty") == 0) {
         InitStringFrom(linker, args[0].l, std::string());
         return true;
@@ -2146,7 +2008,7 @@ bool Invoke_java_lang_String(Interpreter* interp, const DexMethod* method,
     if (std::strcmp(name, "indexOf") == 0 || std::strcmp(name, "lastIndexOf") == 0) {
         const bool last = name[0] == 'l';
         // Two overloads share the name: (int ch, int from) and (String, int from).
-        // Only the signature can tell them apart — an int register holding 'l'
+        // Only the signature can tell them apart - an int register holding 'l'
         // looks exactly like a reference.
         const bool by_string = std::strncmp(signature, "(Ljava/lang/String;", 19) == 0;
         const int32_t from = num_args > 2 ? args[2].i : 0;
@@ -2356,9 +2218,7 @@ bool Invoke_java_lang_String(Interpreter* interp, const DexMethod* method,
     return false;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // java.lang.Thread
-// ─────────────────────────────────────────────────────────────────────────────
 
 // Thread that is currently running bytecode. Set on entry to a Java thread body
 // so currentThread() can return the right object without a thread-id map.
@@ -2430,9 +2290,7 @@ bool Invoke_java_lang_Thread(Interpreter* interp, const char* name, const DexVal
     return false;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // java.io.File
-// ─────────────────────────────────────────────────────────────────────────────
 
 // The path lives in the `path` field written by File's Java constructor.
 std::string GetFilePath(const DexValue& file_obj) {
@@ -2448,16 +2306,7 @@ std::string GetFilePath(const DexValue& file_obj) {
     return str->utf8 ? str->utf8 : "";
 }
 
-// Where a Java path actually lands on disk.
-//
-// A guest's own native code reaches the filesystem through the vfs_* shims, which rewrite
-// "/data/data/<pkg>/files" into the app's container. Java did not: everything below called
-// bare open/stat/mkdir, so getFilesDir() aimed at the REAL /data/data — a path iOS does not
-// let anyone write. mkdirs() failed, and File.mkdirs() swallows the failure, so nothing
-// reported it and every Java write went nowhere.
-//
-// Routing through the same remapper as native code is also what keeps the two consistent: a
-// file the guest writes with fopen() must be the file Java reads with FileInputStream.
+// Remap Java paths like native code so both see the same files.
 std::string RemapJavaPath(const std::string& path) {
     if (path.empty()) return path;
     return VFSPathRemapper::getInstance().remap(path.c_str());
@@ -2551,9 +2400,7 @@ bool Invoke_java_io_File(Interpreter* interp, const char* name, const DexValue* 
     return false;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // java.io.FileInputStream / FileOutputStream / PrintStream
-// ─────────────────────────────────────────────────────────────────────────────
 bool Invoke_java_io_FileInputStream(Interpreter* /*interp*/, const char* name, const DexValue* args,
                                     size_t /*num_args*/, DexValue* result) {
     if (std::strcmp(name, "openNative") == 0) {
@@ -2655,9 +2502,7 @@ bool Invoke_java_io_PrintStream(Interpreter* /*interp*/, const char* name, const
     return false;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // android.* native methods
-// ─────────────────────────────────────────────────────────────────────────────
 bool Invoke_android_util_Log(Interpreter* /*interp*/, const char* name, const DexValue* args,
                              size_t /*num_args*/, DexValue* result) {
     if (std::strcmp(name, "println_native") == 0) {
@@ -2748,33 +2593,11 @@ bool Invoke_android_os_Vibrator(Interpreter* /*interp*/, const char* name, const
     }
     return false;}
 
-// ─────────────────────────────────────────────────────────────────────────────
-// android.view.Choreographer — the JAVA frame-callback API.
-//
-// The NDK half (AChoreographer_*) was implemented first and ULTRAKILL still stopped,
-// because Unity uses both and this class was a nine-line stub with no methods:
+// Choreographer callbacks share the NDK pacer; callbacks are global refs.
 //
 //     android.view.Choreographer->getInstance()Landroid/view/Choreographer;
 //     android.view.Choreographer->postFrameCallback(...FrameCallback;)V
 //     android.view.Choreographer->postFrameCallbackDelayed(...FrameCallback;J)V
-//
-// The class existed, so Interpreter::ResolveMethod auto-stubbed the missing methods
-// into bodyless DexMethods rather than reporting them. getInstance() returned null,
-// and Unity's JNIBridge responded by throwing NoSuchMethodError itself — the string
-// "JNIBridge error: Java interface default methods are only supported since Android
-// Oreo" sits in ULTRAKILL's own classes.dex right beside Ljava/lang/NoSuchMethodError;.
-// That went uncaught out of Looper.loop, ActivityThread.main returned, and the shell
-// printed "Session ended" while FMOD's audio thread carried on.
-//
-// Frames come from the SAME pacer the NDK entry points use. Two frame sources in one
-// process would mean two clocks: a guest posting on both would read timestamps that
-// disagree and pace against whichever it saw last.
-//
-// The FrameCallback object is registered as a JNI global reference before being
-// queued. Without that it is a bare DexObject* held only by the pacer — and although
-// KuART's heap never frees, the object must still be reachable for the interpreter to
-// dispatch on it, and a global ref is what states that intent rather than relying on
-// the absence of a collector.
 namespace {
 
 // A queued Java frame callback. Allocated per post and owned by the pacer until the
@@ -2789,7 +2612,7 @@ struct JavaFrameCallback {
 std::mutex g_java_frame_mutex;
 std::vector<JavaFrameCallback*> g_java_frame_contexts;
 
-// Invoked by the pacer — either on the guest thread that polled its looper, or on the
+// Invoked by the pacer - either on the guest thread that polled its looper, or on the
 // pacer thread. Runs bytecode, so it must take the VM lock, which Execute() does for
 // itself when the calling thread does not already hold it.
 void JavaFrameCallbackTrampoline(int64_t frame_time_ns, void* data) {
@@ -2822,11 +2645,7 @@ void JavaFrameCallbackTrampoline(int64_t frame_time_ns, void* data) {
                                                DexValue::Long(frame_time_ns), DexValue()};
                 interp->ClearPendingException();
                 interp->Execute(do_frame, call_args, 2);
-                // An exception out of a frame callback is the app's own, and there is
-                // no Java frame above this to catch it. Clearing rather than
-                // propagating: the alternative is to leave it pending on a thread that
-                // is about to run unrelated work, which would surface it at whatever
-                // the next Java call happens to be.
+                // Clear callback exceptions; no Java frame above can catch them.
                 if (interp->HasPendingException()) {
                     std::fprintf(stderr,
                                  "[KuART][Choreographer] exception in doFrame: %s\n",
@@ -2853,9 +2672,7 @@ bool Invoke_android_view_Choreographer(Interpreter* interp, const char* name,
                                    "postFrameCallback with a null callback");
             return true;
         }
-        // Keep the callback reachable for as long as the pacer holds it. KuART's heap
-        // has no collector, but a global ref is the statement of intent — and it is
-        // what keeps this correct if one is ever added.
+        // Global ref keeps the callback reachable while queued.
         if (interp->jni_env() != nullptr) {
             interp->jni_env()->AddGlobalRef(callback);
         }
@@ -2930,22 +2747,7 @@ bool Invoke_keep_screen_on(Interpreter* /*interp*/, const char* name, const DexV
     return false;
 }
 
-// android.media.AudioTrack -> the host audio queue.
-//
-// This is the JAVA audio path, and it is the one that matters for Unity: FMOD drives
-// AudioTrack from Java rather than calling OpenSL ES or AAudio from native code. The
-// framework stub had a single empty constructor, so every method was auto-stubbed to
-// return 0 and FMOD read that as a device it could not open:
-//
-//     [KuART][MISSING-METHOD] Auto-stubbing: AudioTrack->getMinBufferSize(III)I
-//     [E/FMOD] AudioTrack failed to initialize (status 0)
-//
-// It then retried forever — the thread sampler caught the loop spinning in malloc with lr
-// in DexClassLinker::FindClass, CPU climbing across five samples ten seconds apart.
-// ULTRAKILL reached Vulkan and its swapchain and never produced a frame.
-//
-// Every method here forwards to AudioShim, which already owns a real CoreAudio queue on
-// iOS. Same output, same callback, same frame counter as the other two audio APIs.
+// AudioTrack forwards to the host AudioShim queue.
 bool Invoke_android_media_AudioTrack(Interpreter* interp, const char* name,
                                      const DexValue* args, size_t num_args,
                                      DexValue* result) {
@@ -2963,8 +2765,7 @@ bool Invoke_android_media_AudioTrack(Interpreter* interp, const char* name,
         return true;
     }
 
-    // The rest take the handle first. A zero handle is a released or never-opened track
-    // and the shim answers ERROR_INVALID_OPERATION for it rather than dereferencing.
+    // Remaining methods take the handle first; zero means released.
     if (std::strcmp(name, "nativeWrite") == 0) {
         // (track, byte[] data, offsetInBytes, sizeInBytes)
         if (num_args < 4) return false;
@@ -2975,9 +2776,7 @@ bool Invoke_android_media_AudioTrack(Interpreter* interp, const char* name,
             *result = DexValue::Int(-3);  // ERROR_INVALID_OPERATION
             return true;
         }
-        // Bounds are re-checked here even though AudioTrack.java checks them: the Java
-        // side can be bypassed by a guest calling the native method through reflection,
-        // and this reads raw memory.
+        // Re-check bounds; reflection can bypass Java-side checks.
         if (offset < 0 || size < 0 || offset > data->length ||
             size > data->length - offset) {
             *result = DexValue::Int(-2);  // ERROR_BAD_VALUE
@@ -2988,7 +2787,7 @@ bool Invoke_android_media_AudioTrack(Interpreter* interp, const char* name,
         return true;
     }
     if (std::strcmp(name, "nativeWriteShorts") == 0) {
-        // (track, short[] data, offsetInShorts, sizeInShorts) — offsets are in ELEMENTS,
+        // (track, short[] data, offsetInShorts, sizeInShorts) - offsets are in ELEMENTS,
         // and PCM 16-bit is what FMOD writes, so this is the hot path.
         if (num_args < 4) return false;
         auto* data = reinterpret_cast<DexArray*>(args[1].l);
@@ -3055,13 +2854,7 @@ bool Invoke_android_media_AudioTrack(Interpreter* interp, const char* name,
     return false;
 }
 
-// InputMethodManager -> host keyboard.
-//
-// KuDroid ships no keyboard, so the guest's request is forwarded to whatever the host
-// registered (on iOS, a view that becomes first responder). The return value tells the
-// guest only whether a host was listening; InputMethodManager reports success to the
-// app either way, because an app told the keyboard cannot be shown disables its own
-// text entry rather than retrying.
+// Forward keyboard requests to the host; report whether host listened.
 bool Invoke_android_view_inputmethod_InputMethodManager(Interpreter* /*interp*/,
                                                         const char* name,
                                                         const DexValue* args,
@@ -3083,14 +2876,7 @@ bool Invoke_android_view_inputmethod_InputMethodManager(Interpreter* /*interp*/,
     return false;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Device memory, read from the host.
-//
-// Apps size caches, texture atlases and world chunks from these numbers. Fixed
-// values are worse than they look: too high and the app allocates past what the
-// device can give and gets killed mid-load; too low and it runs degraded on
-// hardware that could do better. Reading the host makes the answer correct on
-// whatever device KuDroid happens to be on, with no per-app knowledge.
+// Device memory from the host; fixed values mislead cache sizing.
 bool Invoke_kudroid_memory(Interpreter* /*interp*/, const char* name,
                            const DexValue* /*args*/, size_t /*num_args*/,
                            DexValue* result) {
@@ -3101,9 +2887,7 @@ bool Invoke_kudroid_memory(Interpreter* /*interp*/, const char* name,
     }
     if (std::strcmp(name, "nativeAvailableMemory") == 0) {
         const kudroid::SystemMemory mem = kudroid::query_system_memory();
-        // Report the per-process headroom when the OS enforces one. On iOS jetsam
-        // kills a process well below system-available memory, so handing back the
-        // system figure invites an app to allocate its way into a kill.
+        // Prefer per-process headroom; system-wide invites jetsam kills.
         const uint64_t value = mem.process_available_bytes > 0
                                    ? mem.process_available_bytes
                                    : mem.available_bytes;
@@ -3133,11 +2917,7 @@ bool Invoke_kudroid_memory(Interpreter* /*interp*/, const char* name,
         return true;
     }
 
-    // java.lang.Runtime heap figures.
-    //
-    // KuART has no separate managed heap — objects come from the process allocator —
-    // so the process budget IS the heap budget. Kept consistent so that
-    // total + free == max, which is what callers assume when they compute headroom.
+    // Heap figures use the process budget; keep total + free == max.
     if (std::strcmp(name, "maxMemory") == 0) {
         const kudroid::SystemMemory mem = kudroid::query_system_memory();
         const uint64_t ceiling = mem.process_available_bytes > 0
@@ -3174,11 +2954,9 @@ bool Invoke_kudroid_memory(Interpreter* /*interp*/, const char* name,
     return false;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // java.lang.Runtime
 static LoadLibraryCallback g_load_lib_cb = nullptr;
 
-// ─────────────────────────────────────────────────────────────────────────────
 bool Invoke_java_lang_Runtime(Interpreter* interp, const char* name, const DexValue* args,
                               size_t num_args, DexValue* /*result*/) {
     const bool by_name = std::strcmp(name, "loadLibrary") == 0;
@@ -3199,9 +2977,7 @@ bool Invoke_java_lang_Runtime(Interpreter* interp, const char* name, const DexVa
     return true;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // dalvik.system.BaseDexClassLoader
-// ─────────────────────────────────────────────────────────────────────────────
 bool Invoke_dalvik_system_BaseDexClassLoader(Interpreter* interp, const char* name,
                                             const DexValue* args, size_t num_args,
                                             DexValue* result) {
@@ -3212,9 +2988,7 @@ bool Invoke_dalvik_system_BaseDexClassLoader(Interpreter* interp, const char* na
     result->l = nullptr;
     if (lib == nullptr || lib[0] == '\0') return true;
 
-    // PATH_MAX would do, but the buffer is the failure mode this API is most likely
-    // to hit on iOS: a container path is ~110 characters before the app's own
-    // /data/app/<pkg>/lib/arm64-v8a/lib<name>.so is appended.
+    // Large buffer for long iOS container paths.
     char path[2048];
     if (kudroid_find_native_library(lib, path, sizeof(path)) != 0) {
         result->l = reinterpret_cast<DexObject*>(interp->linker()->NewString(path));
@@ -3369,12 +3143,7 @@ bool Invoke_sun_misc_Unsafe(Interpreter* /*interp*/, const char* name, const Dex
     return false;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// java.util.TimeZone
-//
-// There is no zoneinfo database on the device side of KuDroid, so the default zone
-// comes from the host's own UTC offset via localtime(). Enough for formatting and
-// for the getDefault() call apps make at startup.
+// TimeZone default from the host UTC offset; no zoneinfo on device.
 bool Invoke_java_util_TimeZone(Interpreter* interp, const char* name,
                                const DexValue* /*args*/, size_t /*num_args*/,
                                DexValue* result) {
@@ -3389,8 +3158,7 @@ bool Invoke_java_util_TimeZone(Interpreter* interp, const char* name,
         localtime_r(&now, &local_tm);
         gmtime_r(&now, &utc_tm);
 #endif
-        // Difference in seconds between local wall clock and UTC for this instant.
-        // Computed via mktime on both so day/month rollover is handled.
+        // Diff via mktime so rollover is handled.
         local_tm.tm_isdst = 0;
         utc_tm.tm_isdst = 0;
         const double diff = std::difftime(std::mktime(&local_tm), std::mktime(&utc_tm));
@@ -3443,9 +3211,7 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
     if (std::strcmp(desc, "Ljava/lang/reflect/Field;") == 0) return Invoke_java_lang_reflect_Field(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/lang/reflect/Array;") == 0) return Invoke_java_lang_reflect_Array(interp, method, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/lang/reflect/Proxy;") == 0) return Invoke_java_lang_reflect_Proxy(interp, name, args, num_args, result);
-    // java.lang.invoke. MethodHandle is abstract and the concrete class is its nested
-    // Direct, so both descriptors must route here — a handle created by the linker is a
-    // Direct, and that is the class the interpreter sees on the receiver.
+    // Direct handles arrive as Direct; route both here.
     if (std::strcmp(desc, "Ljava/lang/invoke/MethodHandle;") == 0 ||
         std::strcmp(desc, "Ljava/lang/invoke/MethodHandle$Direct;") == 0) {
         return Invoke_java_lang_invoke_MethodHandle(interp, name, args, num_args, result);
@@ -3469,21 +3235,16 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
     if (std::strcmp(desc, "Landroid/util/Log;") == 0) return Invoke_android_util_Log(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Landroid/graphics/Canvas;") == 0) return Invoke_android_graphics_Canvas(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Landroid/app/Activity;") == 0) return Invoke_android_app_Activity(interp, name, args, num_args, result);
-    // The JAVA frame-callback API, sharing one frame source with the NDK
-    // AChoreographer_* entry points. Absent, it was auto-stubbed to return null and
-    // Unity's JNIBridge threw NoSuchMethodError out of Looper.loop.
+    // Choreographer shares one frame source with NDK entry points.
     if (std::strcmp(desc, "Landroid/view/Choreographer;") == 0) {
         return Invoke_android_view_Choreographer(interp, name, args, num_args, result);
     }
     if (std::strcmp(desc, "Landroid/os/Vibrator;") == 0) return Invoke_android_os_Vibrator(interp, name, args, num_args, result);
-    // AudioTrack is the Java audio path FMOD uses. Without it every method was
-    // auto-stubbed to 0 and FMOD retried "AudioTrack failed to initialize" forever.
+    // AudioTrack is the Java audio path used by FMOD.
     if (std::strcmp(desc, "Landroid/media/AudioTrack;") == 0) {
         return Invoke_android_media_AudioTrack(interp, name, args, num_args, result);
     }
-    // Memory figures come from the host device rather than constants: apps size
-    // caches from them, so a wrong value either gets the process killed or makes it
-    // run degraded.
+    // Memory figures come from the host, not constants.
     if (std::strcmp(desc, "Landroid/app/ActivityManager;") == 0 ||
         std::strcmp(desc, "Landroid/os/Debug;") == 0) {
         return Invoke_kudroid_memory(interp, name, args, num_args, result);
@@ -3522,10 +3283,7 @@ bool LibCoreHasMethod(const DexMethod* method) {
             std::strcmp(desc, "Landroid/os/PowerManager$WakeLock;") == 0);
 }
 
-// ── Bridges for the interpreter's proxy dispatch ──────────────────────────────
-//
-// Thin forwards to the anonymous-namespace helpers above. The alternative was
-// making those helpers public, which would widen this file's surface for one caller.
+// Bridges for the interpreter's proxy dispatch.
 
 DexObject* LibCoreGetRefField(DexObject* obj, const char* name, const char* type) {
     return GetRefField(obj, name, type);

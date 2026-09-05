@@ -54,11 +54,7 @@ public class AccessibleObject implements AnnotatedElement {
         return true;
     }
 
-    // ── AnnotatedElement ─────────────────────────────────────────────────────────────
-    //
-    // Annotations are not retained by KuART's class loader, so there are none to report.
-    // Empty arrays rather than null: callers iterate the result without checking, and null
-    // turns "no annotations" into a NullPointerException.
+    // AnnotatedElement: no annotations retained, so return empty arrays.
 
     @Override
     public <T extends java.lang.annotation.Annotation> T getAnnotation(Class<T> annotationClass) {

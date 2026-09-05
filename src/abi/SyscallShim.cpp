@@ -1058,16 +1058,14 @@ extern "C" int bionic_fstatfs(int fd, struct bionic_statfs64* buf) {
     return fill_bionic_statfs(host, buf);
 }
 
-// Kim tra trong bionic_mmap: fd ashmem ch map c vi prot c cp
-// (nh ngha khi ashmem pha di).
+// Check in bionic_mmap: ashmem fd may only map with granted prot.
 static bool ashmem_prot_allows(int fd, int prot);
-// Fake ashmem fd (iOS fallback): tr vng nh cp hoc nullptr nu no/not
-// phi fake fd (nh ngha khi ashmem pha di).
+// Fake ashmem fd (iOS fallback): return granted region or nullptr when not a fake fd.
 extern "C" void* bionic_ashmem_mmap_fd(int fd, size_t length);
 
 // Memory mapping wrappers to strip Linux specific flags
 extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
-    // ashmem fd: ch map c vi prot cp (bionic_ashmem_set_prot_region).
+    // ashmem fd: only mappable with granted prot.
     if (!ashmem_prot_allows(fd, prot)) {
         errno = EACCES;
         return MAP_FAILED;
@@ -1082,8 +1080,7 @@ extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int
                       [](int f){ char b[16]; snprintf(b, sizeof(b), "%x", f); return std::string(b); }(flags) +
                       ", fd=" + std::to_string(fd) + ")");
 
-    // ashmem fake fd (fallback iOS): tr li vng nh cp — no/not cn
-    // dch flags, vng l anonymous ri.
+    // ashmem fake fd (iOS fallback): return granted region; no flag translation needed.
     if (void* region = bionic_ashmem_mmap_fd(fd, length)) {
         logAndroidMessage(3, "KuDroidSyscall", "mmap -> ashmem region " +
                           std::to_string(reinterpret_cast<uintptr_t>(region)) + " (fake fd)");
@@ -1116,11 +1113,8 @@ extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int
         0x100000  | // MAP_FIXED_NOREPLACE
         0x40000000; // MAP_UNINITIALIZED
 
-    // QUAN TRNG: strip Linux-only flags t INPUT (flags) before, no/not strip
-    // darwin_flags after khi set — v LINUX_ONLY_MAP_FLAGS cha bit 0x1000
-    // (MAP_EXECUTABLE) m Darwin MAP_ANON cng dng bit 0x1000 → strip after
-    // s remove lun MAP_ANON va set → mmap anonymous mt MAP_ANON vi fd=-1
-    // → EINVAL → MAP_FAILED (bug gp trong syscall test).
+    // IMPORTANT: strip Linux-only flags from the input flags, not from darwin_flags
+    // after mapping — both use bit 0x1000, so stripping after would drop MAP_ANON.
     const int clean_flags = flags & ~(LINUX_ONLY_MAP_FLAGS | 0xFC000000);
 
     int darwin_flags = 0;
@@ -1253,29 +1247,15 @@ extern "C" int bionic_sigaltstack(const void* ss, void* oss) {
 #include <sys/syscall.h>
 #endif
 
-// ─────────────────────────────────────────────────────────────────────────────
 // bionic: long syscall(long number, ...)
-// Guest libc/libc++ call syscall() TRC TIP vi S HIU LINUX. before y
-// `syscall` no/not c trong shim table → resolve qua dlsym(RTLD_DEFAULT) →
-// syscall macOS run vi s Linux → KU NHM syscall kernel (vd Linux 178 =
-// SYS_gettid, nhng macOS 178 = setrlimit!). H qu nghim trng: libc++abi
-// (trong libc++_shared.so ca Discord) ly thread-id cho guard static bng
-// syscall(SYS_gettid) → tr rc/gi tr ging nhau cho MI thread →
-// __cxa_guard_acquire thy guard "ang init d bi main thread ny" → abort
-// "recursive initialization" d no/not h quy.
-// Fix: map s Linux sang hnh vi host ng. S cha bit → ENOSYS (an ton
-// hn run nhm syscall macOS vi arg guest).
-// ─────────────────────────────────────────────────────────────────────────────
-// Guest lun l Linux ARM64 → s syscall truyn vo syscall() l hng s ARM64
-// (gettid=178, getpid=39, futex=98, process_vm_readv=270). no/not dng SYS_*
-// ca host: x86_64 Linux dng 186/39/202/310 khc hn — so nhm l ENOSYS.
+// Guest libc/libc++ call syscall() directly with Linux numbers; map them to host
+// behaviour and return ENOSYS for unknown numbers (safer than running the wrong call).
 #define KUDROID_SYS_gettid 178
 #define KUDROID_SYS_getpid 39
 #define KUDROID_SYS_futex 98
 #define KUDROID_SYS_process_vm_readv 270
 
-// Registry tid -> pthread_t: guest call tgkill vi tid ly t gettid() ca ta
-// (pthread_threadid_np). Gi bng tgkill tm c pthread_t tht ca host.
+// Registry tid -> pthread_t: guest tgkill uses tids from our gettid().
 static std::mutex g_tidRegistryMtx;
 static std::unordered_map<long, pthread_t> g_tidRegistry;
 
@@ -1357,16 +1337,13 @@ static size_t prot_prefix_len(uintptr_t addr, size_t len, vm_prot_t required) {
 }
 #endif
 
-// Linux: read memory ca process khc qua kernel. y mi guest lib u run
-// trong CNG address space host (guest heap/code = host memory) nn pid==self
-// l trng hp duy nht c ngha — v l trng hp fbjni/Hermes dng probe
-// "address ny c read an ton no/not" (read 8 byte ri so magic). ENOSYS before y
-// khin probe fail → guest i nhnh khc → error kh hiu (guard abort).
+// Guest libs share the host address space, so only pid==self is meaningful —
+// used by fbjni/Hermes to probe readability before reading.
 extern "C" long bionic_process_vm_readv(pid_t pid, const struct iovec* local_iov, unsigned long liovcnt,
                                          const struct iovec* remote_iov, unsigned long riovcnt,
                                          unsigned long flags) {
 #ifdef __linux__
-    // Host Linux c syscall tht — x l ng mi pid, an ton (kernel check).
+    // Host Linux has a real syscall — handle every pid safely.
     return static_cast<long>(::syscall(SYS_process_vm_readv, pid, local_iov, liovcnt,
                                        remote_iov, riovcnt, flags));
 #else
@@ -1426,32 +1403,17 @@ extern "C" long bionic_process_vm_readv(pid_t pid, const struct iovec* local_iov
 #endif
 }
 
-// futex qua syscall() th: libc++ call syscall(98, ...) cho __libcpp_atomic_wait
-// (std::atomic wait/notify) — before y ENOSYS → busy-spin/v hiu ho ng b.
-// Ni thng vo bionic_futex (pthread condvar-based) c sn (nh ngha 
-// phn "Linux-Specific Syscalls" pha di).
+// futex via syscall(): libc++ calls syscall(98) for atomic wait/notify; route into bionic_futex.
 extern "C" int bionic_futex(uint32_t* uaddr, int futex_op, uint32_t val,
                              const struct timespec* timeout, uint32_t* uaddr2, uint32_t val3);
 
-// Khai bo namespace scope — `extern "C"` no/not hp l trong thn function
-// (linkage spec ch cho php scope ngoi), CI macOS arm64 s bo
-// "expected unqualified-id".
+// Declared at namespace scope — `extern "C"` is invalid inside a function.
 #if defined(__aarch64__)
 extern "C" bool kudroid_lookup_guest_module(void* addr, char* out, std::size_t outSize);
 #endif
 
-// DIAG gate: log_guard_acquire_diag + TLS diag ch run khi iu tra (env
-// KUDROID_GUARD_DIAG=1). Mc nh TT — frame-walk mi gettid + lookup module
-// l chi ph runtime tht trn mi guard_acquire, no/not cn gi tr khi fix
-// guard hot ng.
-//
-// The futex diagnostic USED to sit behind this too, and that was a mistake: no
-// environment variable is set on iOS, so the one record of a guest parking on a
-// futex had never run on the platform it was written for. It is unconditional now
-// and bounded instead (16 distinct futex words for the life of the process). The
-// remaining users are genuinely per-call expensive, so they stay gated.
-// The remaining user is the TLS dump, which is aarch64-only — hence maybe_unused,
-// so a host build without that block does not warn.
+// DIAG gate: guard/TLS diagnostics run only when investigating (KUDROID_GUARD_DIAG=1).
+// Off by default — per-call frame walks cost real runtime; futex logging stays unconditional but capped.
 [[maybe_unused]] static bool guard_diag_enabled() {
     static const int enabled = []() {
         const char* v = std::getenv("KUDROID_GUARD_DIAG");
@@ -1468,17 +1430,7 @@ static long emulate_futex_direct(uintptr_t arg1, uintptr_t arg2, uintptr_t arg3,
     uint32_t* uaddr2 = reinterpret_cast<uint32_t*>(arg5);
     const uint32_t val3 = static_cast<uint32_t>(arg6);
 #if defined(__aarch64__)
-    // Not gated behind KUDROID_GUARD_DIAG any more.
-    //
-    // That gate reads an environment variable, and nothing sets it on iOS — so this
-    // diagnostic had never once run on the platform it was written for. A guest that
-    // parks on a futex forever left no trace at all, which cost three rounds of
-    // guessing at a hang in ULTRAKILL.
-    //
-    // Leaving it on is affordable because it is capped at 16 DISTINCT futex words for
-    // the life of the process: the cost is bounded no matter how hot the futex path
-    // gets, and it is the first wait a guest performs, so those 16 are the
-    // interesting ones.
+    // Futex waits are logged unconditionally but capped at 16 distinct addresses.
     {
         const int cmd = futex_op & 127;
         if (cmd == 0 /* FUTEX_WAIT */ || cmd == 9 /* FUTEX_WAIT_BITSET */) {
@@ -1516,46 +1468,14 @@ static long emulate_futex_direct(uintptr_t arg1, uintptr_t arg2, uintptr_t arg3,
     return static_cast<long>(bionic_futex(uaddr, futex_op, val, timeout, uaddr2, val3));
 }
 
-// DIAGNOSTIC TEMP (iu tra "__cxa_guard_acquire recursive initialization"):
-// guard_acquire (c bn libc++_shared 0x9f004 ln bn static trong
-// libapng-drawable 0x76064 — bn mi consumer resolve v) call syscall(178)
-// ly tid. Lc bionic_syscall nhn gettid th:
-// - x19 LC ENTRY (bt ngay u bionic_syscall, qua PLT stub `br` frameless
-// no/not i) = guard pointer
-//   - __builtin_return_address(1) = call site syscall@plt trong guard_acquire
-// (PLT stub dng `br`, no/not i LR — nn LR bionic_syscall return main
-// l lnh k after `bl syscall`)
-// - frame guard_acquire (layout c nh `stp x20,x19,[sp,#48]`) → [fp+56]
-// = x19 saved = guard, [fp+8] = caller ca guard_acquire (function guest ang
-//     init static)
-// Ch log case in-progress (byte1 bit1 set): hoc (a) SAME_TID_RECURSION =
-// c re-enter ch mng, hoc (b) thread khc ang ch guard. Claim mi l
-// nhiu — skip. Guard addr resolve ra module (gm .bss) → bit static no.
+// Diagnostic for __cxa_guard_acquire recursion: logs in-progress guards with module + caller.
 #if defined(__aarch64__)
 extern "C" bool kudroid_lookup_guest_module(void* addr, char* out, std::size_t outSize);
 __attribute__((noinline))
 static void log_guard_acquire_diag(long tid, uintptr_t guard) {
     uintptr_t x29v = 0;
     asm volatile("mov %0, x29" : "=r"(x29v));
-    // Walk frame t frame ca main function ny. Frame guard_acquire l cp c
-    // [fp+56] == guard — nhng compiler cng save x19 (== guard!) vo frame
-    // diag/bionic_syscall offset tu → gi MATCH CUI (su nht = cp lu
-    // i nht = guard_acquire), no/not break.
-    //
-    // Through FrameWalker, and that is not a refactor — this loop is what crashed the
-    // last run. It tested `fp > 0x1000 && fp < 0x7fffffffffff`, which excludes null and
-    // nothing else, then read [fp+56] unchecked:
-    //
-    //     signal = 11  si_code = 2  fault_addr = 0x100000000050
-    //     inst = 0xf9401d49            -> LDR x9, [x10, #56]
-    //     x10  = 0x100000000018        -> +56 == the fault address
-    //     stack = [0x16b718000, 0x16b79b000)
-    //     pc_sym: log_guard_acquire_diag+0x250
-    //
-    // `fp = *fp` had followed a slot that was not a saved frame pointer, landed far
-    // outside the stack, and passed the plausibility test on the way. The guest's main
-    // thread died inside a diagnostic. FrameWalker reads [fp+56] only when the whole word
-    // is inside this thread's real stack, and refuses a chain that does not climb.
+    // Walk from this frame; keep the deepest [fp+56] == guard match.
     uintptr_t gaCaller = 0;
     kudroid::FrameWalker walker(x29v, kudroid::cached_thread_stack_bounds());
     for (int i = 0; i < 6 && walker.valid(); ++i) {
@@ -1570,18 +1490,7 @@ static void log_guard_acquire_diag(long tid, uintptr_t guard) {
     kudroid_lookup_guest_module(reinterpret_cast<void*>(guard), guardMod, sizeof(guardMod));
     kudroid_lookup_guest_module(reinterpret_cast<void*>(gaCaller), callerMod, sizeof(callerMod));
     unsigned b0 = 0, b1 = 0, storedTid = 0, inProgress = 0, sameTid = 0;
-    // The guard lives in a guest module's .bss, so ask the module registry rather than
-    // guessing from the address range.
-    //
-    // `guard > 0x100000000 && guard < 0x7fffffffffff` was the same kind of plausibility
-    // test that crashed the frame walk directly above: it admits every address in a 127 TB
-    // window, including the one this function faulted on. `guard` arrives from x19 at
-    // syscall entry and is only meaningful when the caller really was
-    // __cxa_guard_acquire — for every other gettid it is whatever that function had in
-    // x19, which is exactly the situation this must not dereference.
-    //
-    // kudroid_lookup_guest_module already ran above and answers the real question: is this
-    // inside a module KuDroid mapped? A non-empty guardMod means yes.
+    // The guard lives in a guest module's .bss; confirm via the module registry.
     if (guardMod[0] != '\0') {
         const volatile uint8_t* g = reinterpret_cast<const volatile uint8_t*>(guard);
         b0 = g[0];
@@ -1590,18 +1499,8 @@ static void log_guard_acquire_diag(long tid, uintptr_t guard) {
         inProgress = (b1 & 0x2) != 0;
         sameTid = inProgress && (static_cast<long>(storedTid) == tid);
     }
-    if (!inProgress) return; // claim mi — no/not phi case ang iu tra
-    // Bounded instead of gated.
-    //
-    // This used to sit behind KUDROID_GUARD_DIAG, which nothing sets on iOS, so it had
-    // never run on the platform it was written for. But unlike the futex diagnostic it
-    // cannot simply be turned on: it frame-walks and resolves two module lookups, and
-    // it runs on EVERY gettid the guest performs. Leaving it unconditional would put
-    // that on a hot path for the life of the process.
-    //
-    // A count fixes both problems. The first few in-progress guards are the ones worth
-    // seeing — a spin that matters happens early, during static initialisation — and
-    // after that the cost returns to a single compare.
+    if (!inProgress) return; // new claim — not the case under investigation
+    // Bounded to the first 16 reports; unconditional logging would sit on a hot path.
     static std::atomic<int> s_emitted{0};
     if (s_emitted.fetch_add(1, std::memory_order_relaxed) >= 16) return;
     char msg[640];
@@ -1618,38 +1517,11 @@ static void log_guard_acquire_diag(long tid, uintptr_t guard) {
 static void log_guard_acquire_diag(long tid, uintptr_t guard) { (void)tid; (void)guard; }
 #endif
 
-// ─────────────────────────────────────────────────────────────────────────────
-// __cxa_guard_acquire / release / abort — shim X L recursion.
-//
-// Libc++abi (c bn libc++_shared ln bn static trong libapng-drawable m mi
-// consumer resolve v) ABORT khi CNG THREAD re-enter mt guard ang in-progress
-// ("recursive initialization"). Discord: NitroModules JNI_OnLoad →
-// fbjni::initialize → lambda → findClassLocal → FindClass → Avian load class →
-// <clinit> run → native → fbjni populateWhat (guard ang in-progress bi main
-// thread ny) → SAME_TID → abort. Crash n nh mi build (diag xc nhn:
-// guard=libfbjni+0x32cf8, tid khp). Trn Android tht th t init class khc
-// nn sequence ny no/not xy ra; y Avian load class theo th t khc.
-//
-// Fix: thay v abort, clear in-progress + tid ri return 1 → caller trong
-// (inner) claim li v t init li. Init success → done; failure →
-// exception unwind bnh thng (guard_abort). no/not deadlock (cng thread),
-// no/not loop v hn (Avian no/not run li <clinit> khi class ang mid-init).
-//
-// Byte layout guard ging ht libc++abi: byte0 bit0 = done, byte1 bit1 =
-// in-progress, byte1 bit2 = waiting, [g+4] = tid (u32). Ch tc ng guard
-// memory; wait dng spin + sched_yield (no/not condvar ni b) → no/not xung
-// t vi condvar ca bn apng nu cng guard b chm bi hai implementation
-// (no/not xy ra: guard ca module no th module s hu).
-// ─────────────────────────────────────────────────────────────────────────────
+// __cxa_guard_acquire / release / abort — handle same-thread recursion.
+// Same-thread re-entry clears in-progress and succeeds instead of aborting.
 static std::mutex g_guardMtx;
 
-// m tng s ln same-tid recursion trn MI guard (t u process). Nu
-// init c failure quy (vd FindClass ca fbjni populateWhat fail v class
-// no/not trn classpath → nm exception → create JniException mi → populateWhat
-// li...), clear+return 1 s re-init mi mi → HANG. after N ln: return 0
-// (pretend done) caller i tip — thay v hang v hn, n tip tc vi
-// static cha init (null) → thng nm/skip → c th l error tip theo thay v
-// treo.
+// Cap same-tid recursions; after N pretend done so a failing init cannot hang forever.
 static constexpr int kGuardMaxRecursions = 8;
 static std::unordered_map<uintptr_t, int> g_guardRecursions;
 
@@ -1660,10 +1532,9 @@ static int guard_recursion_count(uintptr_t g) {
 
 extern "C" int bionic___cxa_guard_acquire(uint64_t* g) {
     if (!g) return 1;
-    // Fast path: done → no/not cn lock (benign race nh libc++abi).
+    // Fast path: done needs no lock.
     if (reinterpret_cast<const volatile uint8_t*>(g)[0] & 0x1) return 0;
-    // Ly tid before khi lock g_guardMtx — bionic_gettid lock g_tidRegistryMtx,
-    // gi th t lock nht qun (guardMtx → tidRegistryMtx).
+    // Take tid before locking to keep lock order consistent.
     const long tid = static_cast<long>(bionic_gettid());
     // Declared outside the loop so one spin is one registry entry, however many
     // times it goes round, and so it clears on every exit path.
@@ -1671,15 +1542,14 @@ extern "C" int bionic___cxa_guard_acquire(uint64_t* g) {
     std::unique_lock<std::mutex> lock(g_guardMtx);
     for (;;) {
         volatile uint8_t* b0 = reinterpret_cast<volatile uint8_t*>(g);
-        if (b0[0] & 0x1) return 0; // init xong
-        if (b0[1] & 0x2) {          // ang init d
+        if (b0[0] & 0x1) return 0; // already initialised
+        if (b0[1] & 0x2) {          // initialisation in progress
             const uint32_t stored = *reinterpret_cast<volatile uint32_t*>(b0 + 4);
             if (stored == static_cast<uint32_t>(tid)) {
-                // CNG THREAD re-enter → thay v abort: clear + return 1.
+                // Same thread re-entered → clear and retry instead of aborting.
                 const int rec = guard_recursion_count(reinterpret_cast<uintptr_t>(g));
                 if (rec > kGuardMaxRecursions) {
-                    // Loop-cut: guard ny init quy qu nhiu ln (class thiu
-                    // trn classpath) — tr 0 (pretend done) thot vng lp.
+                    // Loop-cut: guard keeps failing; pretend done to escape.
                     char msg[256];
                     snprintf(msg, sizeof(msg),
                              "guard_recursion_loop_cut guard=0x%llx tid=%ld "
@@ -1698,17 +1568,7 @@ extern "C" int bionic___cxa_guard_acquire(uint64_t* g) {
                 logAndroidMessage(4, "KuDroidSyscall", msg);
                 return 1;
             }
-            // Thread khc ang init → nh du waiting, nhng CPU, th li.
-            //
-            // This is a SPIN, not a wait: it burns CPU rather than parking, so nothing
-            // that looks for blocked threads can see it. ULTRAKILL's main thread spent
-            // twelve seconds inside nativeRender with no wait registered anywhere,
-            // which is precisely what this shape produces.
-            //
-            // Unlike the same-tid branch above there is no loop-cut here, and there
-            // must not be: another thread genuinely owns the initialiser and returning
-            // early would hand the caller a half-constructed static. What was missing
-            // is any record that it is happening.
+            // Another thread is initialising → mark waiting and spin.
             if (!spinTracked) {
                 spinTracked.emplace(WaitKind::kGuardSpin, g, guest_return_address(6));
             }
@@ -1724,7 +1584,7 @@ extern "C" int bionic___cxa_guard_acquire(uint64_t* g) {
             lock.lock();
             continue;
         }
-        // Claim: nh du in-progress + write tid ca mnh.
+        // Claim: mark in-progress and record our tid.
         b0[1] |= 0x2;
         *reinterpret_cast<volatile uint32_t*>(b0 + 4) = static_cast<uint32_t>(tid);
         return 1;
@@ -1737,7 +1597,7 @@ extern "C" void bionic___cxa_guard_release(uint64_t* g) {
     volatile uint8_t* b0 = reinterpret_cast<volatile uint8_t*>(g);
     b0[0] |= 0x1;                                    // done
     b0[1] &= static_cast<uint8_t>(~0x6);             // clear in-progress + waiting
-    // Waiter spin re-check di lock — no/not cn signal.
+    // Spinners re-check under the lock — no signal needed.
 }
 
 extern "C" void bionic___cxa_guard_abort(uint64_t* g) {
@@ -2038,7 +1898,7 @@ extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_
             break;
     }
 
-    // Cha map — log 1 ln mi s ri ENOSYS (no/not run syscall macOS sai s).
+    // Unmapped — log once per number, then ENOSYS (never run the wrong host call).
     static long s_unknownSeen[64];
     static int s_unknownCount = 0;
     bool known = false;
@@ -2089,9 +1949,7 @@ extern "C" bool bionic_handle_guest_syscall_trap(void* context) {
 #endif
 }
 
-// ── Wrapper syscall ph bin b bind dummy before y (log "missing symbol
-// bound to dummy"). Trn arm64 Linux, pread64/pwrite64/ftruncate64 main l
-// pread/pwrite/ftruncate (off_t 64-bit) — host macOS c sn cng signature. ──
+// Wrappers previously bound to the dummy; on arm64/Linux these match the host signatures.
 extern "C" ssize_t bionic_pread64(int fd, void* buf, size_t count, off_t offset) {
     return ::pread(fd, buf, count, offset);
 }
@@ -2102,8 +1960,7 @@ extern "C" int bionic_ftruncate64(int fd, off_t length) {
     return ::ftruncate(fd, length);
 }
 
-// pipe2: macOS no/not c — pipe() + fcntl t c. Linux O_NONBLOCK=0x800,
-// O_CLOEXEC=0x80000 (asm-generic/fcntl.h — ng cho c arm64/x86_64).
+// pipe2: macOS lacks it — pipe() + fcntl. Linux O_NONBLOCK=0x800, O_CLOEXEC=0x80000.
 extern "C" int bionic_pipe2(int pipefd[2], int flags) {
 #ifdef __linux__
     return ::pipe2(pipefd, flags);
@@ -2135,8 +1992,7 @@ extern "C" int bionic_pipe2(int pipefd[2], int flags) {
 #endif
 }
 
-// clock_nanosleep: flags bit0 = TIMER_ABSTIME. macOS ch c nanosleep (realtime
-// relative) — cho c REALTIME/MONOTONIC v ta ch cn di tng i.
+// clock_nanosleep: macOS has only relative nanosleep; use it for both clocks.
 extern "C" int bionic_clock_nanosleep(int clock_id, int flags, const struct timespec* req,
                                        struct timespec* rem) {
     (void)clock_id;
@@ -2157,17 +2013,12 @@ extern "C" int bionic_clock_nanosleep(int clock_id, int flags, const struct time
 #endif
 }
 
-// usleep: POSIX/bionic tht — forward thng host (iOS/macOS libSystem c
-// usleep, deprecated nhng hot ng). before y thiu shim → resolve qua
-// RTLD_DEFAULT no/not chc chn (game call usleep ri vo khong crash gia
-// eglChooseConfig v eglCreateWindowSurface).
+// usleep: forward to the host; previously missing so resolution was unreliable.
 extern "C" int bionic_usleep(unsigned int usecs) {
     return ::usleep(usecs);
 }
 
-// tgkill(pid, tid, sig): da registry tid->pthread_t (c write khi guest call
-// gettid/syscall(178)). before y dummy — abort/assert ca guest b nut im.
-//
+// tgkill(pid, tid, sig): look up the tid->pthread_t recorded at gettid.
 // `sig` is a LINUX number and must be translated before it reaches the host, exactly as
 // sigaction translates it on the way in. This used to forward it raw, and the asymmetry
 // is what broke il2cpp's thread suspension: the guest installs a handler for Linux
@@ -2419,8 +2270,7 @@ extern "C" char* bionic___strchr_chk(const char* s, int c, size_t dst_len) {
     return nullptr;
 }
 
-// bionic __strncpy_chk2(dst, src, n, dst_len, src_len): copy ti a n k t,
-// no/not read qu src_len, no/not write qu dst_len (fortify).
+// bionic __strncpy_chk2: copy at most n chars, bounded by src_len/dst_len (fortify).
 extern "C" char* bionic___strncpy_chk2(char* dst, const char* src, size_t n,
                                        size_t dst_len, size_t src_len) {
     if (!dst || !src) return dst;
@@ -2428,7 +2278,7 @@ extern "C" char* bionic___strncpy_chk2(char* dst, const char* src, size_t n,
     if (copy > dst_len) { copy = dst_len; }
     if (src_len < copy) { copy = src_len; }
     if (copy > 0) std::memcpy(dst, src, copy);
-    // strncpy pad phn cn li bng 0 nu cn ch.
+    // strncpy pads the remainder with 0 when space remains.
     if (n > copy && dst_len > copy) std::memset(dst + copy, 0, std::min(n - copy, dst_len - copy));
     return dst;
 }
@@ -2453,19 +2303,16 @@ extern "C" struct cmsghdr* bionic___cmsg_nxthdr(struct msghdr* mhdr, struct cmsg
 
 extern "C" void* bionic_mremap(void *old_address, size_t old_size, size_t new_size, int flags, void *new_address) {
 #ifndef __APPLE__
-    // Linux host: delegate thng ti syscall tht. mremap trn Linux m rng/
-    // thu hp ti ch c khi vng lin k cn trng — no/not cn MAYMOVE
-    // (before y lun tr ENOMEM khi no/not c bit MAYMOVE).
+    // Linux host: delegate to the real syscall.
     return ::mremap(old_address, old_size, new_size, flags, new_address);
 #else
     (void)new_address;
-    // no/not c mremap trn Darwin. M phng st ng ngha Linux:
+    // No mremap on Darwin; emulate Linux semantics:
     if (new_size == old_size) return old_address; // no-op
     if (flags & (MREMAP_MAYMOVE | MREMAP_FIXED)) {
         void* new_ptr = mmap(NULL, new_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (new_ptr != MAP_FAILED) {
-            // Ch copy min(old,new) — copy old_size khi new_size nh hn s trn
-            // mapping mi (corruption/crash).
+            // Copy only min(old,new) to avoid overflowing the new mapping.
             std::memcpy(new_ptr, old_address, std::min(old_size, new_size));
             munmap(old_address, old_size);
             return new_ptr;
@@ -2473,10 +2320,7 @@ extern "C" void* bionic_mremap(void *old_address, size_t old_size, size_t new_si
         errno = ENOMEM;
         return MAP_FAILED;
     }
-    // no/not MAYMOVE: Linux ch m rng ti ch nu vng lin k trng; thu
-    // hp lun success ti ch. Thu hp: gi mapping c (phn d no/not dng
-    // na — harmless), no/not th lm ng hn trn Darwin. M rng no/not MAYMOVE
-    // → ENOMEM nh nhnh "no/not gin c ti ch" ca Linux.
+    // Without MAYMOVE only shrinking in place succeeds; growing fails like Linux.
     if (new_size < old_size) return old_address;
     errno = ENOMEM;
     return MAP_FAILED;
@@ -2596,17 +2440,12 @@ extern "C" long bionic_sysconf(int name) {
     return ::sysconf(name);
 }
 
-// ── ashmem (Android shared memory) ──
-// iOS no/not c ashmem. before y fake bng POSIX shm (shm_open) nhng shm_open
-// no/not tn ti trn iOS (POSIX shm l macOS-only; iOS tr -1/ENOSYS) →
-// ashmem_create_region lun fail. Fix: cp pht anonymous mmap tht lm vng
-// nh chung + return fake fd; bionic_mmap tr li main vng khi gp fake fd.
-// Trn macOS vn th shm_open before (fd tht, mmap tht) ri mi fallback.
+// ashmem (Android shared memory): iOS lacks it, so back it with anonymous mmap + fake fd.
 static std::mutex g_ashmem_mtx;
-static std::unordered_map<int, int> g_ashmem_prot;      // fd -> prot cho php
-static std::unordered_map<int, void*> g_ashmem_region;  // fake fd -> vng nh
-static std::unordered_map<int, size_t> g_ashmem_size;   // fake fd -> kch thc
-static std::atomic<int> g_ashmem_fake_fd{0x40000000};   // fake fd bt u cao trnh fd tht
+static std::unordered_map<int, int> g_ashmem_prot;      // fd -> granted prot
+static std::unordered_map<int, void*> g_ashmem_region;  // fake fd -> region
+static std::unordered_map<int, size_t> g_ashmem_size;   // fake fd -> size
+static std::atomic<int> g_ashmem_fake_fd{0x40000000};   // fake fds start high to avoid real fds
 
 static void ashmem_forget(int fd) {
     std::lock_guard<std::mutex> lock(g_ashmem_mtx);
@@ -2622,7 +2461,7 @@ static void ashmem_forget(int fd) {
 extern "C" int bionic_ashmem_create_region(const char* name, size_t size) {
     (void)name;
     if (size == 0) size = 1;
-    // 1) Th POSIX shm (hot ng trn macOS).
+    // 1) Try POSIX shm (works on macOS).
     static std::atomic<uint32_t> counter{0};
     char shm_name[64];
     std::snprintf(shm_name, sizeof(shm_name), "/kudroid_ashmem_%d_%u", ::getpid(), counter.fetch_add(1));
@@ -2630,14 +2469,14 @@ extern "C" int bionic_ashmem_create_region(const char* name, size_t size) {
     if (fd >= 0) {
         shm_unlink(shm_name);
         if (::ftruncate(fd, static_cast<off_t>(size)) != 0) {
-            // fd vn hp l; mmap after s error nu size vt qu.
+            // fd stays valid; later mmap fails if the size overruns.
         }
         std::lock_guard<std::mutex> lock(g_ashmem_mtx);
         g_ashmem_prot[fd] = PROT_READ | PROT_WRITE;
         return fd;
     }
 
-    // 2) Fallback (iOS): anonymous mmap lm region tht + fake fd.
+    // 2) Fallback (iOS): anonymous mmap as the backing region + fake fd.
     void* base = ::mmap(nullptr, size, PROT_READ | PROT_WRITE,
                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (base == MAP_FAILED) return -1;
@@ -2656,7 +2495,7 @@ extern "C" int bionic_ashmem_create_region(const char* name, size_t size) {
 
 extern "C" int bionic_ashmem_set_name(int fd, const char* name) {
     (void)fd; (void)name;
-    return 0; // tn ch debug — no/not cn lu
+    return 0; // debug name only — nothing to store
 }
 
 extern "C" int bionic_ashmem_set_prot_region(int fd, int prot) {
@@ -2669,11 +2508,11 @@ static bool ashmem_prot_allows(int fd, int prot) {
     if (fd < 0) return true;
     std::lock_guard<std::mutex> lock(g_ashmem_mtx);
     auto it = g_ashmem_prot.find(fd);
-    if (it == g_ashmem_prot.end()) return true; // no/not phi ashmem fd
+    if (it == g_ashmem_prot.end()) return true; // not an ashmem fd
     return (prot & ~it->second) == 0;
 }
 
-// bionic_mmap call: vi fake ashmem fd tr li main region cp.
+// bionic_mmap helper: return the backing region for a fake ashmem fd.
 extern "C" void* bionic_ashmem_mmap_fd(int fd, size_t length) {
     std::lock_guard<std::mutex> lock(g_ashmem_mtx);
     auto it = g_ashmem_region.find(fd);
@@ -2692,15 +2531,12 @@ struct FutexWaitQueue {
     std::condition_variable cv;
     int waiters = 0; // guarded by g_futexGlobalMtx
 };
-// shared_ptr thread ang nm trong cv.wait (hoc gia find v lock queue)
-// no/not bao gi thy queue b destroy khi entry b erase.
+// shared_ptr keeps the queue alive while a thread sleeps in cv.wait.
 static std::unordered_map<uint32_t*, std::shared_ptr<FutexWaitQueue>> g_futexQueues;
 static std::mutex g_futexGlobalMtx;
 
-// Gim s waiter; nu no/not cn ai (v entry vn l queue ca chng ta) th
-// remove khi map — before y map no/not bao gi c dn, leak v hn mi uaddr
-// mi. Phi call vi g_futexGlobalMtx no/not c gi (th t kha: global
-// before queue-mtx, no/not bao gi ngc li).
+// Drop the waiter count; erase the entry when nobody remains.
+// Must be called without g_futexGlobalMtx held (lock order: global before queue-mtx).
 static void futex_leave(uint32_t* uaddr, const std::shared_ptr<FutexWaitQueue>& q) {
     std::unique_lock<std::mutex> lock(g_futexGlobalMtx);
     if (--q->waiters <= 0) {
@@ -2887,13 +2723,7 @@ extern "C" int bionic_futex(uint32_t *uaddr, int futex_op, uint32_t val, const s
     return -1;
 }
 
-// --- Dynamic Loading (dlfcn) ---
-// Serialize ANGLE/MoltenVK framework loads: c hai run module initializer
-// (khi create Metal) bn trong ::dlopen. Guest run render thread (dlopen
-// libEGL) SONG SONG vi Vulkan JNI_OnLoad (dlopen libvulkan) → Metal init
-// ng thi → abort (SIGABRT no/not message — khp crash log triangle).
-// Mutex ny m bo mi framework c load + init xong before khi ci kia
-// bt u.
+// Dynamic Loading (dlfcn): serialize ANGLE/MoltenVK loads; concurrent Metal init aborts.
 extern "C" void* bionic_dlopen(const char* filename, int flags) {
     static std::mutex g_gpuFrameworkMtx;
     (void)flags;
@@ -3075,29 +2905,11 @@ extern "C" void* bionic_dlsym(void* handle, const char* symbol) {
     }
 
     // If it was a dummy handle, do NOT search RTLD_DEFAULT globally.
-    // Nhng before khi tr nullptr, hi cc lib guest (.so Android) load qua
-    // LibraryManager — dlopen("libc.so") tr DUMMY_HANDLE v libc no/not tn ti
-    // trn host, cn dlsym(handle, "function") trn Android tht th resolve c
-    // (libc.so l lib tht bn Android). no/not c bc ny, init code ca guest
-    // (vd libmaesdk.so) nhn nullptr ri call → SIGSEGV pc=0x0.
+    // Fall back to guest libs; Android libs like libc.so have no host counterpart.
     if (handle == DUMMY_HANDLE) {
         if (kudroid_guest_symbol_lookup) {
             if (void* guest = kudroid_guest_symbol_lookup(symbol)) {
                 // Distinguish a real resolution from the universal dummy.
-                //
-                // resolve_bionic_symbol caches the dummy under the symbol's name, and
-                // resolveGlobalSymbol falls back to it — so an unimplemented symbol
-                // comes back non-null here and used to be logged as "resolved". In the
-                // ULTRAKILL log that produced pairs of consecutive contradictory lines:
-                //
-                //   missing symbol bound to dummy: AChoreographer_getInstance
-                //   bionic_dlsym: [AChoreographer_getInstance] resolved via guest
-                //                 LibraryManager
-                //
-                // Same address both times, and it was the stub. The second line reads
-                // as success and cancels the warning above it, so searching the log for
-                // what was missing turned up nothing — while six absent frame-pacing
-                // symbols, all named right there, went unnoticed.
                 if (is_universal_dummy(guest)) {
                     logAndroidMessage(5, "KuDroidSyscall",
                                       std::string("bionic_dlsym: [") + symbol +
@@ -3129,8 +2941,7 @@ extern "C" void* bionic_android_dlopen_ext(const char* filename, int flags, cons
 }
 
 extern "C" int bionic_dlclose(void* handle) {
-    // DUMMY_HANDLE l handle gi cho cc lib Android no/not tn ti trn host
-    // (xem bionic_dlopen) — call ::dlclose vi n s dereference pointer rc.
+    // DUMMY_HANDLE is a fake handle for Android libs missing on the host.
     if (!handle || handle == RTLD_DEFAULT || handle == DUMMY_HANDLE) return 0;
     // A guest library handle is ours, not the host loader's. Guest mappings live for
     // the life of the process on purpose (unmapping one while another thread executes
@@ -3175,8 +2986,7 @@ static std::map<int, dispatch_source_t> g_timerfds;
 static std::mutex g_timerfds_mtx;
 #endif
 
-// FDs gi (inotify/signalfd emulate bng loopback UDP) — bionic_close phi ng
-// ng, no/not r fd.
+// Fake fds (emulated inotify/signalfd) — bionic_close must not leak them.
 static std::set<int> g_fakefds;
 static std::mutex g_fakefds_mtx;
 
@@ -3284,20 +3094,18 @@ extern "C" int bionic_close(int fd) {
         }
     }
 #endif
-    // Dn entry prot + region ca ashmem fd — no/not dn th fd number ti s
-    // dng b prot c kha (leak + hnh vi sai). Fake fd (iOS fallback) cn phi
-    // munmap vng nh.
+    // Drop ashmem prot/region entries; fake fds also need munmap.
     {
         std::lock_guard<std::mutex> lock(g_ashmem_mtx);
         const bool is_fake = g_ashmem_region.find(fd) != g_ashmem_region.end();
         if (is_fake) {
             ashmem_forget(fd);
-            return 0; // fake fd no/not phi fd tht — ng close fd number tht
+            return 0; // fake fd is not a real fd — do not close it.
         }
         g_ashmem_prot.erase(fd);
     }
     {
-        // inotify/signalfd fd gi — ng socket tht qua ::close.
+        // Fake inotify/signalfd fd — close the real socket.
         std::lock_guard<std::mutex> lock(g_fakefds_mtx);
         g_fakefds.erase(fd);
     }
@@ -3396,9 +3204,7 @@ extern "C" int bionic_epoll_wait(int epfd, void *events_ptr, int maxevents, int 
     int unique_events = 0;
     
     if (n > 0) {
-        // Gp theo FD (kevent.ident), no/not theo udata: hai fd khc nhau c th
-        // dng chung data (vd ident 0) — gp theo udata s lm mt mt event.
-        // Cn mt fd read+write c gp thnh mt event EPOLLIN|EPOLLOUT nh epoll.
+        // Coalesce by fd, not udata; one fd may report both read+write.
         std::vector<uint64_t> order;
         std::unordered_map<uint64_t, std::pair<uint32_t, uint64_t>> coalesced;
         for (int i = 0; i < n; i++) {
@@ -3410,7 +3216,7 @@ extern "C" int bionic_epoll_wait(int epfd, void *events_ptr, int maxevents, int 
             if (evlist[i].flags & EV_EOF) flags |= EPOLLHUP;
             auto& entry = coalesced[fd];
             if (std::find(order.begin(), order.end(), fd) == order.end()) {
-                order.push_back(fd); // gi th t xut hin u tin
+                order.push_back(fd); // keep first-seen order
             }
             entry.first |= flags;
             entry.second = reinterpret_cast<uint64_t>(evlist[i].udata);
@@ -3451,8 +3257,7 @@ extern "C" int bionic_pthread_mutexattr_init(void* attr) {
 }
 extern "C" int bionic_pthread_mutexattr_destroy(void* attr) { (void)attr; return 0; }
 extern "C" int bionic_pthread_mutexattr_settype(void* attr, int type) {
-    // write kiu vo attr guest (2 bit thp t u) — dummy c no/not write g nn
-    // pthread_mutex_init no/not bao gi bit mutex l recursive.
+    // Store the kind in the guest attr's low 2 bits.
     auto* p = static_cast<uint32_t*>(attr);
     if (!p) return -1;
     *p = (*p & ~0x3u) | (static_cast<uint32_t>(type) & 0x3u);
@@ -3499,15 +3304,8 @@ extern "C" int bionic_pthread_key_delete(int guestKey) {
     return ::pthread_key_delete(static_cast<pthread_key_t>(guestKey));
 }
 
-// Bionic pthread_once_t: int 32-bit vi 3 trng thi — 0 = cha run,
-// 1 = ang run init_routine, 2 = xong. Control word nm trong memory
-// guest nn ta dng atomic trn main guest_once (fast path no/not cn mutex).
-//
-// before y dng MT global mutex gi trong sut init_routine() → init call
-// pthread_once trn control word khc s t kha main mnh → deadlock. Gi
-// mi control word c mutex/cv ring (map dng shared_ptr thread ang i
-// no/not b destroy khi entry b remove), ng nh pthread_once tht ca bionic
-// cho php nested once trn control word khc nhau.
+// Bionic pthread_once: 0 = not run, 1 = running, 2 = done. Per-word mutex
+// avoids deadlock on nested calls with different control words.
 struct BionicOnceControl {
     std::mutex mtx;
     std::condition_variable cv;
@@ -3526,7 +3324,7 @@ static void once_state_store(int* guest_once, int state) {
 extern "C" int bionic_pthread_once(int* guest_once, void (*init_routine)(void)) {
     if (!guest_once || !init_routine) return -1;
 
-    // Fast path: run xong ri.
+    // Fast path: already done.
     if (once_state_load(guest_once) == 2) return 0;
 
     std::shared_ptr<BionicOnceControl> ctl;
@@ -3538,7 +3336,7 @@ extern "C" int bionic_pthread_once(int* guest_once, void (*init_routine)(void)) 
     }
 
     std::unique_lock<std::mutex> lock(ctl->mtx);
-    // Mt thread khc ang run init_routine cho control word ny → ch.
+    // Another thread is running init for this word → wait.
     if (once_state_load(guest_once) == 1) {
         // An initialiser that never finishes parks every other thread that needs the
         // same static, and nothing else in the log would say which one.
@@ -3548,19 +3346,16 @@ extern "C" int bionic_pthread_once(int* guest_once, void (*init_routine)(void)) 
             ctl->cv.wait(lock);
         }
     }
-    // Thread khc va run xong trong lc ta ch.
+    // Another thread finished while we waited.
     if (once_state_load(guest_once) == 2) return 0;
 
-    // Ta l thread u tin: nh du IN_PROGRESS ri run init. Mutex c
-    // gi sut init_routine, nhng ch vi control word NY — init call
-    // pthread_once trn control word khc s dng mutex khc, no/not deadlock.
+    // We run first: mark in-progress and run init; other words use other mutexes.
     once_state_store(guest_once, 1);
     init_routine();
     once_state_store(guest_once, 2);
     ctl->cv.notify_all();
 
-    // Best-effort dn map: entry no/not cn ai tham chiu (thread ang i gi
-    // shared_ptr ring nn vn sng). Fast path thng chn cc ln call after.
+    // Best-effort map cleanup; later calls hit the fast path.
     std::lock_guard<std::mutex> mapLock(g_once_map_mtx);
     auto it = g_once_controls.find(guest_once);
     if (it != g_once_controls.end() && it->second == ctl) {
@@ -3618,14 +3413,14 @@ static void init_tls_key() {
     ::pthread_key_create(&tls_key, tls_destructor);
 }
 
-// Kch thc khi TLS guest v cc offset chun bionic (arm64).
-// Thread pointer (tpidr_el0) tr vo vng slot; slot N tpidr + N*8.
+// Guest TLS block size and bionic offsets (arm64).
+// Thread pointer (tpidr_el0) points into the slot area; slot N is tpidr + N*8.
 constexpr size_t kTlsBlockSize    = 65536;
 constexpr size_t kTlsSlotOffset   = 32768; // TP = tls_base + kTlsSlotOffset
-constexpr size_t kTlsModuleOffset = 4096;  // template TLS module, tng i vi TP
+constexpr size_t kTlsModuleOffset = 4096;  // guest TLS template offset relative to TP
 constexpr size_t kTlsStackGuardSlotOffset = 40; // slot 5
 
-// Template TLS ca module guest (PT_TLS), do elf_loader register after khi map.
+// Guest module TLS template (PT_TLS), registered by elf_loader after mapping.
 static const void* g_tls_template = nullptr;
 static size_t g_tls_template_size = 0;
 static std::mutex g_tls_template_mtx;
@@ -3640,9 +3435,8 @@ extern "C" size_t kudroid_tls_module_offset(void) {
     return kTlsModuleOffset;
 }
 
-// Cp pht mt khi TLS guest y : zero ha, copy template TLS module vo
-// v tr tprel, t stack-guard cookie. Dng chung cho main thread, thread mi
-// v lazy-allocation trong bionic_handle_tpidr_trap.
+// Allocate a guest TLS block: zero it, copy the TLS template, set guard cookie.
+// Shared by the main thread, new threads, and lazy allocation in the trap handler.
 static void* alloc_guest_tls_block(void) {
     void* tls_base = std::aligned_alloc(16, kTlsBlockSize);
     if (!tls_base) return nullptr;
@@ -3657,7 +3451,7 @@ static void* alloc_guest_tls_block(void) {
         }
     }
 
-    // Stack guard cookie ti slot 5 (offset 40 tnh t TP).
+    // Stack guard cookie at slot 5 (offset 40 from TP).
     *reinterpret_cast<uint64_t*>(static_cast<char*>(tls_base) + kTlsSlotOffset + kTlsStackGuardSlotOffset) =
         kStackGuardCookie;
     return tls_base;
@@ -3672,7 +3466,7 @@ static void* bionic_thread_wrapper(void* rawArgs);
 
 extern "C" void bionic_init_main_thread_tls(void) {
     ::pthread_once(&tls_key_once, init_tls_key);
-    if (::pthread_getspecific(tls_key)) return; // c khi TLS
+    if (::pthread_getspecific(tls_key)) return; // already has TLS
     void* tls_base = alloc_guest_tls_block();
     if (!tls_base) return;
     
@@ -3696,7 +3490,7 @@ extern "C" void bionic_init_main_thread_tls(void) {
     // Check the stack guard is readable at offset 40
     uint64_t guard_check = *reinterpret_cast<uint64_t*>(new_tpidr + 40);
     
-    // DIAGNOSTIC (gate): run mi thread mi — ch log khi iu tra TLS.
+    // Diagnostic (gated): runs per new thread — log only when investigating TLS.
     if (guard_diag_enabled()) {
         fprintf(stderr, "[TLS_DIAG] tls_base=%p tls_ptr=%p\n", reinterpret_cast<void*>(tls_base), reinterpret_cast<void*>(tls_ptr));
         fprintf(stderr, "[TLS_DIAG] tpidr_el0 BEFORE=0x%llx AFTER=0x%llx\n", 
@@ -3731,11 +3525,8 @@ bool bionic_handle_tpidr_trap(void* ucontext) {
             ::pthread_once(&tls_key_once, init_tls_key);
             void* tls_base = ::pthread_getspecific(tls_key);
             if (!tls_base) {
-                // Lazy allocation: thread do host create (JVM/Swift) run guest code
-                // cha c khi TLS. Cp pht ngay guest no/not read address 0.
-                // y l trap ng b (BRK do guest execute) nn malloc y
-                // an ton trong thc t; khi c tls_destructor gii phng khi
-                // thread kt thc.
+                // Lazy allocation for host-created threads running guest code.
+                // Synchronous trap, so malloc here is safe; freed at thread exit.
                 tls_base = alloc_guest_tls_block();
                 if (tls_base) {
                     ::pthread_setspecific(tls_key, tls_base);
@@ -3770,9 +3561,7 @@ static void* bionic_thread_wrapper(void* rawArgs) {
 
     // Allocate 64KB for Android TLS block and set tpidr_el0
     // Darwin uses tpidrro_el0, so tpidr_el0 is free for us!
-    // no/not fallback sang aligned_alloc trn: khi nh vy no/not c template
-    // TLS module v no/not c stack-guard cookie → guest read rc. alloc_guest_tls_block
-    // dng main allocator/kch thc ; nu n OOM th fallback cng OOM.
+    // Never fall back to plain aligned_alloc: it lacks the TLS template and guard cookie.
     void* tls_base = alloc_guest_tls_block();
     if (tls_base) {
         ::pthread_setspecific(tls_key, tls_base);
@@ -3782,10 +3571,9 @@ static void* bionic_thread_wrapper(void* rawArgs) {
     }
 
     // iOS: ANGLE/Metal/ObjC require an autorelease pool on EVERY thread that
-    // touches them. Guest render threads (TriangleGLES render thread, Unity's
-    // render thread...) are raw pthreads with NO pool — GPU test passes because
-    // it runs on the main/GCD thread (pool c sn). no/not c pool → abort()
-    // ngay trong ANGLE eglInitialize (Metal device/queue creation).
+    // touches them. Guest render threads are raw pthreads with NO pool — GPU test passes because
+    // it runs on the main/GCD thread (pool present). Without a pool → abort()
+    // inside ANGLE eglInitialize (Metal device/queue creation).
 #if defined(__APPLE__)
     void* pool = objc_autoreleasePoolPush();
 #endif
@@ -3809,7 +3597,7 @@ extern "C" int bionic_pthread_create(pthread_t* thread, void* attr, void* (*star
         return res;
     }
 
-    // Truyn stack size + detach state t attr guest (nu c) sang pthread_create host.
+    // Forward stack size + detach state from the guest attr when present.
     const auto* a = static_cast<const BionicPthreadAttr*>(attr);
     pthread_attr_t hostAttr;
     ::pthread_attr_init(&hostAttr);
@@ -3826,15 +3614,7 @@ extern "C" int bionic_pthread_create(pthread_t* thread, void* attr, void* (*star
     return res;
 }
 
-// pthread_join blocks until the target thread exits, which means it inherits whatever
-// the target is blocked on. Bound straight to the host symbol it was the one wait with
-// no wrapper at all, so a guest joining a thread that never returns produced no record
-// of either half.
-//
-// The object reported is the joined thread's handle, and it deliberately does not try
-// to resolve that to a tid: pthread_t is opaque, mapping it costs a Mach call, and the
-// thread sampler now prints every thread's tid and pc anyway — pairing the two is what
-// names the cycle.
+// pthread_join blocks until the target exits; track it as a join wait.
 extern "C" int bionic_pthread_join(pthread_t thread, void** retval) {
     const BlockingWaitScope tracked(WaitKind::kJoin, reinterpret_cast<const void*>(thread),
                                     guest_return_address(6));
@@ -3850,9 +3630,7 @@ extern "C" int* __error(void);
 extern "C" int* __errno_location(void);
 #endif
 
-// ============================================================================
-// memalign — aligned memory allocation (CRITICAL for Unity)
-// ============================================================================
+// memalign — aligned memory allocation.
 extern "C" void* bionic_memalign(size_t alignment, size_t size) {
     void* ptr = nullptr;
     if (alignment < sizeof(void*)) alignment = sizeof(void*);
@@ -3860,24 +3638,15 @@ extern "C" void* bionic_memalign(size_t alignment, size_t size) {
     return ptr;
 }
 
-// ============================================================================
-// __system_property_* — Android property system
-// ============================================================================
-// Bionic ABI: prop_info l pointer no/not trong sut — game nhn t
-// __system_property_find ri truyn li cho __system_property_read/
-// _read_callback. Ta lu bng property tnh v dng pointer ti entry nh
-// prop_info*. before y find tr 0 (not found) v read_callback l no-op —
-// Unity read trc tip __system_property_read s thy rc.
+// __system_property_* — Android property system.
+// prop_info is an opaque pointer; find returns it and read/callback consume it.
 namespace {
 struct KudroidProp {
     const char* name;
     const char* value;
 };
 const KudroidProp kKnownProps[] = {
-    // Version and identity come from DeviceProfile.h so the property service,
-    // /system/build.prop and Build.java cannot drift apart. They used to: an app
-    // reading a property saw SDK 34 while the same app reading Build.VERSION.SDK_INT
-    // saw 29.
+    // Version and identity come from DeviceProfile.h so all surfaces agree.
     {"ro.build.version.sdk", KUDROID_SDK_INT_STR},
     {"ro.build.version.release", KUDROID_ANDROID_RELEASE},
     {"ro.build.version.codename", "REL"},
@@ -3887,9 +3656,7 @@ const KudroidProp kKnownProps[] = {
     {"ro.build.fingerprint",
      KUDROID_DEVICE_BRAND "/" KUDROID_DEVICE_NAME "/" KUDROID_DEVICE_BOARD
      ":" KUDROID_ANDROID_RELEASE "/QP1A.190711.020/6000000:user/release-keys"},
-    // KuDroid, not a spoofed Pixel. Claiming Google hardware invites an app to take
-    // a device-specific path — vendor GPU workarounds, Play-services assumptions —
-    // that this runtime cannot honour, and it made bug reports impossible to read.
+    // KuDroid, not a spoofed Pixel, so apps avoid device-specific paths.
     {"ro.product.model", KUDROID_DEVICE_MODEL},
     {"ro.product.manufacturer", KUDROID_DEVICE_MANUFACTURER},
     {"ro.product.brand", KUDROID_DEVICE_BRAND},
@@ -3930,7 +3697,7 @@ extern "C" int bionic_system_property_get(const char* name, char* value) {
 }
 
 extern "C" const void* bionic_system_property_find(const char* name) {
-    return findProp(name); // prop_info* — nullptr nu no/not c
+    return findProp(name); // prop_info* — nullptr when missing
 }
 
 // int __system_property_read(const prop_info* pi, char* name, char* value)
@@ -3949,56 +3716,18 @@ extern "C" void bionic_system_property_read_callback(
     callback(cookie, p->name, p->value, 0u);
 }
 
-// ============================================================================
-// dl_iterate_phdr — ELF program header iteration
-// ============================================================================
-//
-// Not a stub, because the guest's own unwinder depends on it.
-//
-// Every NDK app statically links libc++abi, and that unwinder locates its exception tables
-// by walking dl_iterate_phdr looking for PT_GNU_EH_FRAME. Returning 0 means "no modules
-// loaded", so _Unwind_RaiseException finds no FDE covering the throwing frame and calls
-// std::terminate. The result is that every C++ `throw` inside a guest library aborts the
-// process — on device that appeared as four frames of libc++_shared.so above abort() with
-// no exception message, right after GameActivity_register, which reads as a crash in the
-// game rather than a missing shim.
-//
-// registerEhFrame() does not cover this: it registers with the HOST unwinder, which the
-// guest's statically linked one never consults.
+// dl_iterate_phdr — needed by the guest unwinder to find its exception tables.
 extern "C" int bionic_dl_iterate_phdr(
     int (*callback)(void* info, size_t size, void* data), void* data) {
     return kudroid_iterate_guest_phdrs(callback, data);
 }
 
-// ============================================================================
 // lseek64 — 64-bit file seek (on Darwin/iOS lseek is already 64-bit)
-// ============================================================================
 extern "C" off_t bionic_lseek64(int fd, off_t offset, int whence) {
     return ::lseek(fd, offset, whence);
 }
 
-// ============================================================================
-// The v*printf family — variadic functions that receive an already-built va_list
-// ============================================================================
-//
-// The second half of the ABI split the trampolines in bionic_log_trampoline.S exist for,
-// and the easier half to miss. Those handle a guest calling a variadic function DIRECTLY,
-// where the arguments are still in registers. These handle a guest that has already run
-// va_start and is passing the resulting va_list on.
-//
-// AAPCS64's va_list is a 32-byte composite and so is passed BY REFERENCE; Apple's is a
-// plain char* passed BY VALUE. So the pointer a guest hands over lands in the register
-// where the host expects a stack cursor, and forwarding it to the host's vsnprintf prints
-// the struct's own bytes: `stack` is the first field, so the output begins with the low
-// bytes of a stack address.
-//
-// On device that produced "Unable to locate asset: H,\x98B\x01" — five bytes of a pointer
-// where an asset path should have been. The asset shim was working correctly and the file
-// was present; the NAME was never formatted, so nothing could have found it. A missing
-// asset was the obvious reading and the wrong one.
-//
-// Guest va_lists only exist on arm64. Elsewhere the guest is the host and the host's own
-// va_list is correct, so the plain forwarding below is right.
+// The v*printf family — receives an already-built guest va_list.
 #if defined(__aarch64__)
 // `va_list` in these signatures is the HOST type, but the value a guest passes is a
 // pointer to its own va_list — so it is reinterpreted rather than used. Taking the address
@@ -4363,11 +4092,7 @@ extern "C" int bionic___sched_cpucount(size_t setsize, const void* set) {
     return count;
 }
 
-// sched_getcpu — which core the caller is running on.
-//
-// iOS exposes no way to ask, and pinning is not available either, so any answer is a
-// guess. Zero is the one guess that is always a VALID core index: a guest using the
-// result to index a per-core array stays in bounds, which is what this is normally for.
+// sched_getcpu — return 0; iOS has no query and 0 is always a valid index.
 extern "C" int bionic_sched_getcpu(void) {
 #ifdef __APPLE__
     return 0;
@@ -4377,10 +4102,7 @@ extern "C" int bionic_sched_getcpu(void) {
 #endif
 }
 
-// get_nprocs / get_nprocs_conf — glibc's core-count helpers.
-//
-// Present in bionic too, and absent from the shim table until now, which meant the
-// universal dummy answered 0. Same source as sysconf, so the two cannot disagree.
+// get_nprocs / get_nprocs_conf — core-count helpers sharing the sysconf source.
 extern "C" int bionic_get_nprocs(void) {
     return static_cast<int>(kudroid::query_cpu_topology().total_cores);
 }
@@ -4404,12 +4126,7 @@ extern "C" long bionic_get_avphys_pages(void) {
                              static_cast<uint64_t>(pz));
 }
 
-// ── inotify / signalfd — no/not tn ti trn iOS → emulate ────────────────
-// before y tr -1 → game (Unity hay dng inotify theo di asset) fail ngay.
-// Gi tr fd tht (loopback UDP — poll c, no/not bao gi c event = "no/not c
-// file modified", valid semantics when idle). inotify_add_watch returns a positive dummy watch descriptor.
-
-// inotify_init1 — create an inotify instance (emulated: fd poll-able, never fires).
+// inotify / signalfd — not on iOS; emulate with a pollable fd that never fires.
 extern "C" int bionic_inotify_init1(int flags) {
     (void)flags;
 #ifdef __APPLE__
@@ -5399,7 +5116,7 @@ extern "C" int bionic_memfd_create(const char* name, unsigned int flags) {
     if (fd < 0) return -1;
     ::unlink(path);
 #ifdef FD_CLOEXEC
-    // MFD_CLOEXEC == 1 trong bionic.
+    // MFD_CLOEXEC == 1 in bionic.
     if (flags & 1u) ::fcntl(fd, F_SETFD, FD_CLOEXEC);
 #endif
     return fd;

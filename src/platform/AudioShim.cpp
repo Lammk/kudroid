@@ -55,7 +55,7 @@ typedef void* SLboolean;
 struct SLDataFormat_PCM {
     uint32_t formatType;      // SL_DATAFORMAT_PCM = 3
     uint32_t numChannels;
-    uint32_t samplesPerSec;   // milliHz trong OpenSL ES!
+    uint32_t samplesPerSec;   // milliHz in OpenSL ES!
     uint32_t bitsPerSample;
     uint32_t containerSize;
     uint32_t channelMask;

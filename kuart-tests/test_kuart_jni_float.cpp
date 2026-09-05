@@ -1,15 +1,6 @@
 // Host test for the JNI float/double ABI and for argument counts past the
-// register budget.
-//
-// Before the AAPCS64 trampoline landed, DexJniEnv called natives through
-// Fn0..Fn6 casts that only took uintptr_t. Both AAPCS64 and SysV x86-64 pass
-// float/double in a SEPARATE register file, so:
-//   - an F/D argument was refused outright (last_error set, call skipped);
-//   - an F/D RETURN silently produced 0, because only the integer return
-//     register was read back.
-// The second case is the dangerous one: no exception, no log, just wrong numbers
-// flowing into a graphics/game engine. These tests pin both directions plus the
-// float/int interleaving that decides which value lands in which register file.
+// register budget. F/D values travel in a separate register file, which the old
+// uintptr_t-only path dropped to silent 0s.
 #include "kudroid/kuart/DexJniEnv.h"
 
 #include <cmath>

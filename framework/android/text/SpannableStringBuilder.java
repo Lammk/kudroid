@@ -90,7 +90,7 @@ public class SpannableStringBuilder implements Editable, Spanned {
         mText.setLength(0);
     }
 
-    // ── filters ─────────────────────────────────────────────────────────────
+    // Filters.
 
     private InputFilter[] mFilters = new InputFilter[0];
 
@@ -104,14 +104,7 @@ public class SpannableStringBuilder implements Editable, Spanned {
         return mFilters;
     }
 
-    /**
-     * Run an insertion through the filter chain.
-     *
-     * Later filters see the output of earlier ones, which is what makes a length cap
-     * placed after an upper-caser behave the way the app intended. A filter returning
-     * null means "accept what you were given", so the running value is only replaced
-     * on a non-null result.
-     */
+    /** Run an insertion through the filter chain. */
     private CharSequence applyFilters(CharSequence source, int dstart, int dend) {
         if (mFilters.length == 0) return source;
         CharSequence out = source;
@@ -124,12 +117,7 @@ public class SpannableStringBuilder implements Editable, Spanned {
         return out;
     }
 
-    // ── Spanned ─────────────────────────────────────────────────────────────
-    //
-    // No span storage: KuDroid has no text styling, so nothing can set one. The
-    // methods answer "no spans here" rather than throwing, which is the correct
-    // answer for a buffer that holds none — and it is what a filter or a layout pass
-    // walking spans expects to find.
+    // Spanned: no span storage, so answer "no spans".
 
     @Override
     public <T> T[] getSpans(int start, int end, Class<T> type) {

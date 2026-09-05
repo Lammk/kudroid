@@ -1,20 +1,6 @@
-/* Freestanding verification of the guest vararg trampolines under real arm64.
- *
- * A guest .so is built for Linux AAPCS64: the first eight integer varargs arrive in
- * x0-x7, the first eight floating-point varargs in v0-v7, the rest on the stack. Apple's
- * arm64 ABI passes every variadic argument on the stack instead, so forwarding a guest's
- * variadic call to the host implementation makes it read the wrong place. That is not a
- * crash — it prints plausible-looking numbers, which is why snprintf reported a check
- * counter of 1839197616 before this was fixed.
- *
- * Nothing on an x86-64 host can catch that: the register files and the convention are
- * both different. So this cross-compiles the real trampoline plus the real formatter and
- * calls them the way a guest would — a genuine variadic call, letting the compiler place
- * the arguments per AAPCS64 — then checks the text that comes out.
- *
- * Freestanding because the toolchain has an aarch64 compiler but no aarch64 sysroot; the
- * few libc functions the formatter needs are provided here. Exit status is the number of
- * failed checks. */
+/* Freestanding AAPCS64 check of the guest vararg trampolines: genuine variadic calls
+ * through the real trampoline + formatter, verifying the text. No aarch64 sysroot
+ * exists, so libc pieces are stubbed here; exit status counts failures. */
 
 typedef unsigned long long u64;
 typedef unsigned long size_t;

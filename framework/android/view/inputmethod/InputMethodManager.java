@@ -68,8 +68,7 @@ public final class InputMethodManager {
     /** Deprecated in AOSP but still called by older game code. */
     public static InputMethodManager peekInstance() { return getInstance(); }
 
-    // ── host bridge ─────────────────────────────────────────────────────────
-    // Implemented in src/kudroid_bridge.cpp; forwarded to the platform keyboard.
+    // Host bridge.
 
     private static native boolean showSoftInputNative(int flags);
     private static native boolean hideSoftInputNative();
@@ -137,7 +136,7 @@ public final class InputMethodManager {
         }
     }
 
-    // ── the IME API apps call ───────────────────────────────────────────────
+    // IME API.
 
     public boolean isActive(View view) {
         return view != null;

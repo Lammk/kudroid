@@ -109,7 +109,7 @@ public final class Character implements Comparable<Character> {
         return a - b;
     }
 
-    // ── classification ──
+    // Classification.
     // Each has a char and an int (code point) overload. Harmony's regex passes code
     // points, and letting those bind to the char version would silently truncate
     // anything above U+FFFF.
@@ -326,7 +326,7 @@ public final class Character implements Comparable<Character> {
         return DIRECTIONALITY_LEFT_TO_RIGHT;
     }
 
-    // ── case conversion ──
+    // Case conversion.
 
     public static char toUpperCase(char c) {
         return (char) toUpperCase((int) c);
@@ -357,7 +357,7 @@ public final class Character implements Comparable<Character> {
         return toUpperCase(c);
     }
 
-    // ── digits ──
+    // Digits.
 
     public static int digit(char c, int radix) {
         return digit((int) c, radix);
@@ -389,7 +389,7 @@ public final class Character implements Comparable<Character> {
         return digit(c, 36);
     }
 
-    // ── surrogates and code points ──
+    // Surrogates and code points.
 
     public static boolean isHighSurrogate(char c) {
         return c >= MIN_HIGH_SURROGATE && c <= MAX_HIGH_SURROGATE;

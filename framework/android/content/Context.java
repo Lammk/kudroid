@@ -43,15 +43,7 @@ public abstract class Context {
     public static final String WINDOW_SERVICE = "window";
     public static final String LAYOUT_INFLATER_SERVICE = "layout_inflater";
 
-    /**
-     * The soft keyboard service.
-     *
-     * Its absence is what stopped Minecraft: MainActivity.onCreate does
-     * {@code getSystemService(INPUT_METHOD_SERVICE)} and throws
-     * {@code RuntimeException("Can't get IMM")} when the result is null. The class
-     * itself existed all along — only this mapping was missing, so onCreate died and
-     * ActivityThread drew its diagnostic screen instead of the game.
-     */
+    /** The soft keyboard service. Must exist or apps throw in onCreate. */
     public static final String INPUT_METHOD_SERVICE = "input_method";
 
     public static final String ACTIVITY_SERVICE = "activity";
@@ -66,19 +58,7 @@ public abstract class Context {
     public static final String LOCATION_SERVICE = "location";
     public static final String SHORTCUT_SERVICE = "shortcut";
 
-    /**
-     * Media routing.
-     *
-     * Backed by {@link android.media.MediaRouter}, a single built-in route that is
-     * always selected: KuDroid presents audio through one CoreAudio output with no
-     * route selection, so there is nothing to enumerate — but the object must exist.
-     * Returning null here stopped ULTRAKILL: Unity's {@code bitter.jnibridge} bridge
-     * calls {@code getSystemService("media_router")} from inside
-     * {@code UnityPlayer.nativeRender} and reflects on the result without a
-     * null-check, so null became {@code NoClassDefFoundError: MediaRouter} and then
-     * an uncaught {@code NoSuchMethodError} out of {@code Looper.loop}, which killed
-     * {@code ActivityThread.main}.
-     */
+    /** Media routing. Single built-in route backed by MediaRouter. */
     public static final String MEDIA_ROUTER_SERVICE = "media_router";
     public static final String MEDIA_SESSION_SERVICE = "media_session";
     public static final String GRAMMATICAL_INFLECTION_SERVICE = "grammatical_inflection";
@@ -93,16 +73,8 @@ public abstract class Context {
     public abstract File getExternalCacheDir();
     public abstract SharedPreferences getSharedPreferences(String name, int mode);
 
-    // Declared here because resolution walks the class hierarchy, and ApplicationContext
-    // implementing them is not enough on its own: a caller holding an Activity resolves
-    // against Activity -> ContextWrapper -> Context, so a method missing from those two
-    // is a NoSuchMethodError even though the implementation exists further down.
-    //
-    // That is not hypothetical. GameActivity.onCreate calls getObbDir(), which threw
-    // NoSuchMethodError and aborted Activity creation for Minecraft — the game then sat
-    // on a black screen because the Looper was running an Activity that never finished
-    // being created. The other four are on the same path and would each have been the
-    // next launch to fail.
+    // Declared here because resolution walks the class hierarchy.
+    // A method missing here is a NoSuchMethodError for Activity holders.
     public abstract File getObbDir();
     public abstract File getDir(String name, int mode);
     public abstract File getDatabasePath(String name);
@@ -301,25 +273,7 @@ public abstract class Context {
 
     /**
      * The manager object for a manager CLASS, or null when there is none.
-     *
-     * Added because its absence stopped ULTRAKILL. Only the String overload existed, so
-     * Interpreter::ResolveMethod auto-stubbed this one — the class is present, only the
-     * method was missing, which yields a bodyless method rather than a
-     * NoSuchMethodError — and Unity's
-     * {@code getSystemService(WindowManager.class).getDefaultDisplay()} got null and
-     * threw NullPointerException. The log said only "call getDefaultDisplay on null",
-     * naming neither the service nor the missing overload.
-     *
-     * Resolved by asking the String overload and checking what came back, rather than by
-     * a second Class-to-name table. A second table is the actual hazard here: the two
-     * would drift, and a service reachable by name but not by class is indistinguishable
-     * — from the app's side — from one that was never implemented. That is precisely how
-     * INPUT_METHOD_SERVICE and ACTIVITY_SERVICE came to ship as unreachable classes.
-     *
-     * The candidate list only has to cover names whose manager type is not obvious from
-     * the name itself; every entry is verified against the returned object with
-     * isInstance, so a wrong guess yields null rather than a ClassCastException inside
-     * the caller.
+     * Delegates to the String overload so both stay in step.
      */
     public Object getSystemService(Class<?> serviceClass) {
         if (serviceClass == null) return null;

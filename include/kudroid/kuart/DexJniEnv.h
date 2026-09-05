@@ -1,17 +1,6 @@
-// JNIEnv for KuART: bridge between DEX bytecode and native code ARM64 c a game.
-//
-// In place of the ~230 vtable functions that Avian/ART provides. This is the biggest part of
-// KuART: game g i JNI li n t c (FindClass, GetMethodID, CallVoidMethod,
-// RegisterNatives...) trong khi bytecode ch  ch y l c onCreate + touch event.
-//
-// nh x  handle JNI sang con tr  KuART:
-// jclass    -> DexClass*   (qua b ng local/global ref)
-//   jobject   -> DexObject*
-// jmethodID -> DexMethod*  (con tr  tr c ti p, kh ng qua b ng   ID ph i b n)
-//   jfieldID  -> DexField*
-//
-// Local ref d ng b ng theo frame   DeleteLocalRef v  PopLocalFrame ho t  ng
-// ng; global ref c  b ng ri ng kh ng b  xo  theo frame.
+// JNIEnv for KuART: bridge between DEX bytecode and game native code.
+// Replaces ~230 ART vtable functions; maps JNI handles to KuART pointers.
+// Local refs are per-frame; global refs live in a separate table.
 #ifndef KUDROID_KUART_DEXJNIENV_H
 #define KUDROID_KUART_DEXJNIENV_H
 
@@ -65,7 +54,7 @@ public:
     DexJniEnv(const DexJniEnv&) = delete;
     DexJniEnv& operator=(const DexJniEnv&) = delete;
 
-    // Con tr  truy n cho m  native. Layout kh p JNIEnv_ n n native cast  c.
+    // Pointer handed to native code; layout matches JNIEnv_.
     JNIEnv* env() { return reinterpret_cast<JNIEnv*>(&env_storage_); }
     JavaVM* vm() { return reinterpret_cast<JavaVM*>(&vm_storage_); }
 
@@ -75,7 +64,7 @@ public:
     DexClassLinker* linker() { return linker_; }
     Interpreter* interpreter() { return interpreter_; }
 
-    // qu n l  reference
+    // Reference management
     jobject AddLocalRef(DexObject* obj);
     jobject AddGlobalRef(DexObject* obj);
     void DeleteLocalRef(jobject ref);
@@ -85,25 +74,20 @@ public:
     void PushLocalFrame();
     void PopLocalFrame();
 
-    // li n k t method native
-    // RegisterNatives t  JNI_OnLoad c a game.
+    // Native method binding (RegisterNatives from game JNI_OnLoad).
     jint RegisterNatives(DexClass* klass, const JNINativeMethod* methods, jint count);
 
-    // T m h m native theo quy  c t n JNI (Java_pkg_Class_method) qua hook do
-    // KuDroid c p   tr  t i LibraryManager c a guest .so.
+    // Find native funcs by JNI name convention via the guest LibraryManager hook.
     using SymbolLookup = void* (*)(const char* symbol);
     void set_symbol_lookup(SymbolLookup fn) { symbol_lookup_ = fn; }
 
-    // Li n k t method native ch a c  native_fn. Tr  false n u not found.
+    // Bind a native method lacking native_fn; false when not found.
     bool LinkNativeMethod(DexMethod* method);
 
-    // G i method native   li n k t. args KH NG g m JNIEnv/jclass   h m n y t  th m.
+    // Call a bound native; args exclude JNIEnv/jclass (added here).
     DexValue CallNative(DexMethod* method, const DexValue* args, size_t num_args);
 
-    // g i method Java t  native
-    // `receiver` null cho method static. `virtual_dispatch` = ch n l i b n
-    // override theo class th t c a receiver (Call<Type>Method), t t cho
-    // CallNonvirtual<Type>Method v  CallStatic<Type>Method.
+    // Call Java from native; null receiver for static. virtual_dispatch selects the override.
     DexValue CallJavaA(DexObject* receiver, DexMethod* method, const jvalue* args,
                        bool virtual_dispatch);
     DexValue CallJavaV(DexObject* receiver, DexMethod* method, va_list args,
@@ -114,8 +98,7 @@ public:
     static const char* MethodShorty(const DexMethod* method);
 
     // ── exception ──
-    // Exception do bytecode n m n m   Interpreter, do native n m n m    y;
-    // ba h m n y h p nh t hai ngu n   native ch  th y m t tr ng th i.
+    // Exceptions from bytecode live in the Interpreter, from native here; merged to one state.
     void SetPendingException(DexObject* ex);
     DexObject* pending_exception() const;
     void ClearException();
@@ -130,9 +113,7 @@ public:
 private:
     void InitFunctionTable();
 
-    // B  c c kh p JNIEnv_ / JavaVM_   tr ng  U TI N (con tr  b ng h m)
-    // native ch   c tr ng  . Tr ng `self` ph a sau   FromEnv/FromVm quay
-    // ng c v  DexJniEnv m  kh ng c n b ng tra c u to n c c.
+    // Layout matches JNIEnv_/JavaVM_ (function table first); trailing `self` maps back.
     struct EnvStorage {
         const JNINativeInterface_* functions = nullptr;
         DexJniEnv* self = nullptr;
@@ -149,7 +130,7 @@ private:
     Interpreter* interpreter_ = nullptr;
     SymbolLookup symbol_lookup_ = nullptr;
 
-    // M i frame l  m t t p local ref. Frame ngo i c ng lu n t n t i.
+    // Each frame holds a local-ref set; the outermost frame always exists.
     std::vector<std::vector<DexObject*>> local_frames_;
     std::unordered_set<DexObject*> global_refs_;
 
@@ -157,10 +138,7 @@ private:
     std::string last_error_;
 };
 
-// Scoped JNI tracing, active only while Unity's bitter.jnibridge.JNIBridge.invoke
-// native method runs (set in DexJniEnv::CallNative). Lets the handful of JNI
-// entry points Unity's bridge uses log their arguments/results so the failing
-// lookup inside invoke can be identified from the log.
+// True while Unity's JNIBridge.invoke runs, enabling scoped JNI tracing.
 bool JnibridgeTraceActive();
 
 }  // namespace kuart

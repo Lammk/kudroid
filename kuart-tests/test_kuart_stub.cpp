@@ -1,20 +1,5 @@
-// Host test for auto-stub policy: which missing classes get a placeholder, and
-// what happens when code tries to use one.
-//
-// Two bugs are pinned here, both observed launching a real APK:
-//
-// 1. The stub whitelist used to include app packages (Lcom/mojang/,
-//    Lcom/unity3d/, Lcom/facebook/). ActivityThread.handleLaunchActivity guesses
-//    Activity names like "<pkg>.Main" and moves to the next candidate when
-//    Class.forName throws — but stubbing the guess made forName "succeed", so the
-//    cast to Activity threw ClassCastException and the remaining candidates were
-//    never tried. App packages must fail to resolve.
-//
-// 2. A stub was created with status kInitialized and no other marking, so it was
-//    indistinguishable from a real class. Anything that hands a stub instance to
-//    real code now refuses instead: Class.forName reports it as absent, and
-//    new-instance throws NoClassDefFoundError at the point of the missing class
-//    rather than leaking a member-less object into unrelated code.
+// Host test for auto-stub policy: boot-classpath classes get a placeholder;
+// app packages must fail to resolve, and using a stub must fail loudly.
 #include "kudroid/kuart/DexJniEnv.h"
 #include "kudroid/kuart/DexReflect.h"
 

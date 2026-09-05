@@ -1,33 +1,6 @@
 // test_kuart_method_handles.cpp — primitive class literals and java.lang.invoke.
-//
-// Two defects, and the first is the reason the second was unreachable.
-//
-// ── primitive class literals ──
-//
-// javac compiles every primitive class literal into a read of the matching box class's TYPE
-// field: `int.class` is `getstatic java/lang/Integer.TYPE`, `void.class` is
-// `getstatic java/lang/Void.TYPE`. KuDroid's framework declared all eight TYPE fields as
-// `= null` and shipped no java.lang.Void at all, so every primitive literal in every guest
-// APK evaluated to null.
-//
-// The damage was far wider than a null literal. Class.getMethod, getDeclaredMethod and
-// getDeclaredConstructor all compare parameter types by REFERENCE IDENTITY: one side comes
-// from the DEX signature and is a real Class for descriptor "I", the other is the app's
-// `int.class` and was null. They could never match, so EVERY reflective lookup whose
-// signature mentioned a primitive failed — in any app, with nothing in the message pointing
-// at the empty literal.
-//
-// ── java.lang.invoke ──
-//
-// An interface DEFAULT method cannot be reached by ordinary reflection on a Proxy.
-// Method.invoke dispatches virtually, so invoking a default on a proxy instance resolves
-// back to the proxy's bodyless method, which the interpreter forwards to the very
-// InvocationHandler that is asking for the call — unbounded recursion. The platform's answer
-// is MethodHandles.Lookup.unreflectSpecial, which yields a handle that invokes the method
-// NON-virtually. KuDroid's java.lang.invoke was four empty shells returning null.
-//
-// The recursion is the check with teeth here: a `special` handle that quietly dispatched
-// virtually would look correct in every structural test and then hang the app.
+// Null TYPE fields broke every reflective lookup mentioning a primitive; the invoke
+// half pins unreflect vs unreflectSpecial dispatch on proxies.
 #include "kudroid/framework_dex_bytes.h"
 #include "kudroid/kuart/DexClassLinker.h"
 #include "kudroid/kuart/DexJniEnv.h"

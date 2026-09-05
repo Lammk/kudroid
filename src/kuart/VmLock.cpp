@@ -20,30 +20,16 @@ namespace {
 
 std::recursive_mutex g_vm_lock;
 
-// Recursion depth of this thread inside g_vm_lock. Needed because the main
-// thread enters bytecode without going through VmLockGuard (it is called from
-// the iOS host), so VmLockRelease must not unlock a mutex it never acquired.
+// Recursion depth; main thread enters bytecode without VmLockGuard.
 thread_local int t_vm_lock_depth = 0;
 
-// Guards every DexObject monitor. One mutex for all objects is enough: the VM
-// lock already serialises bytecode, so contention here is only between a waiter
-// and a notifier.
+// One mutex for all monitors; VM lock already serializes bytecode.
 std::mutex g_monitor_mutex;
 std::condition_variable g_monitor_cv;
 
 thread_local uint32_t t_thread_id = 0;
 
-// KuART thread id → operating-system thread id.
-//
-// A monitor records its holder as DexObject::lock_owner_tid, which is a dense counter
-// starting at 1 — not an OS tid. Reporting that number as owner= would be worse than
-// reporting nothing: every other diagnostic KuDroid prints uses the real 64-bit tid
-// (the registry's tid=, the futex line's, the thread sampler's), so a small integer in
-// the same field reads as a tid and joins to the wrong thread, or to none.
-//
-// The ids are dense and small by construction, so a fixed array indexed by id is both
-// exact and allocation-free. Overflow past the array degrades to owner=0, "unknown",
-// which is the honest answer.
+// KuART id to OS tid mapping for diagnostics.
 constexpr uint32_t kMaxKuartThreads = 256;
 std::atomic<uint64_t> g_os_tid_by_kuart_id[kMaxKuartThreads];
 
@@ -57,7 +43,7 @@ uint64_t os_thread_id() {
 #endif
 }
 
-// The OS tid of whichever thread holds KuART id `id`, or 0 when unknown.
+// OS tid for KuART id, or 0 when unknown.
 uint64_t os_tid_for(uint32_t id) {
     if (id == 0 || id >= kMaxKuartThreads) return 0;
     return g_os_tid_by_kuart_id[id].load(std::memory_order_relaxed);
@@ -76,12 +62,7 @@ VmLockGuard::~VmLockGuard() {
 }
 
 VmLockRelease::VmLockRelease() : depth_(t_vm_lock_depth) {
-    // The counter must go to zero while the lock is released, not merely be
-    // remembered. VmLockDepth() answers "does this thread hold the VM lock?", and
-    // callers act on it: Interpreter::Execute takes a guard when the answer is no,
-    // which is what lets a native downcall re-enter Java. Leaving the counter at its
-    // old value made that question return yes for a thread holding nothing, so the
-    // re-entering call ran bytecode with no lock at all.
+    // Reset depth while released so re-entry retakes the lock.
     t_vm_lock_depth = 0;
     for (int i = 0; i < depth_; ++i) g_vm_lock.unlock();
 }
@@ -107,8 +88,7 @@ uint32_t SelfThreadId() {
     if (t_thread_id == 0) {
         static std::atomic<uint32_t> next{1};
         t_thread_id = next.fetch_add(1);
-        // Record the mapping once, on the thread that owns it, so a monitor report can
-        // name its holder in the same terms as every other diagnostic.
+        // Record mapping so monitor reports use OS tids.
         if (t_thread_id < kMaxKuartThreads) {
             g_os_tid_by_kuart_id[t_thread_id].store(os_thread_id(), std::memory_order_relaxed);
         }
@@ -133,14 +113,8 @@ void Enter(DexObject* obj) {
         }
     }
 
-    // Contended: the owner can only release it by running bytecode, which needs
-    // the VM lock this thread is holding.
-    //
-    // Tracked, because this is the shape of hang that is hardest to see from outside:
-    // the thread is parked on a condition variable inside KuART, so no bionic shim is
-    // involved and nothing else logs it. WaitKind::kJavaMonitor existed for this and
-    // was never constructed — it named a case the registry could not actually observe.
-    // owner= carries the monitor's holder, which is the whole question for a monitor.
+    // Contended: owner releases it only by running bytecode.
+    // Tracked since parked waits here are otherwise invisible.
     VmLockRelease unlocked;
     const BlockingWaitScope tracked(WaitKind::kJavaMonitor, obj, guest_return_address(6));
     std::unique_lock<std::mutex> lock(g_monitor_mutex);
@@ -172,8 +146,7 @@ bool Wait(DexObject* obj, int64_t millis, int32_t nanos) {
     {
         std::unique_lock<std::mutex> lock(g_monitor_mutex);
         if (obj->lock_owner_tid != self || obj->lock_count == 0) return false;
-        // wait() releases the monitor completely, however deep the recursion is,
-        // and restores that same depth on return.
+        // wait() releases the monitor fully and restores depth on return.
         saved_count = obj->lock_count;
         obj->lock_owner_tid = 0;
         obj->lock_count = 0;
@@ -182,18 +155,7 @@ bool Wait(DexObject* obj, int64_t millis, int32_t nanos) {
 
     {
         VmLockRelease unlocked;
-        // Object.wait: parked until notified, or until the timeout if one was given.
-        // The timeout becomes the budget, so an app that asked to wait a minute is not
-        // reported as stalled three seconds in.
-        //
-        // kJavaWait, not kJavaMonitor. The two are opposites: a contended
-        // monitor-enter is a thread BLOCKED by another that holds the lock, and is
-        // stuck iff that holder is stuck; an Object.wait() has RELEASED the monitor and
-        // is parked with nothing owed to it. Reporting both as "java-monitor" put an
-        // idle HandlerThread — MessageQueue.next() calling this.wait() on an empty
-        // queue, which is what Android's own MessageQueue does — at the top of the
-        // ULTRAKILL log as the only stall, with owner=0 and nothing to follow, while
-        // the genuinely wedged main thread was not mentioned at all.
+        // Parked wait with timeout as stall budget; kJavaWait, not kJavaMonitor.
         const BlockingWaitScope tracked(WaitKind::kJavaWait, obj, guest_return_address(6));
         if (millis > 0 || nanos > 0) {
             blocking_wait_note_budget(static_cast<uint64_t>(millis) +
@@ -201,8 +163,7 @@ bool Wait(DexObject* obj, int64_t millis, int32_t nanos) {
         }
         std::unique_lock<std::mutex> lock(g_monitor_mutex);
 
-        // Wake when someone notifies (notify_seq changes) or the monitor is free
-        // and the deadline passed. A spurious wakeup just re-checks.
+        // Wake on notify or free monitor; spurious wakeups re-check.
         const uint32_t seq_at_entry = obj->notify_seq;
         auto notified = [obj, seq_at_entry] { return obj->notify_seq != seq_at_entry; };
         if (millis <= 0 && nanos <= 0) {
@@ -227,8 +188,7 @@ bool Notify(DexObject* obj, bool /*all*/) {
     {
         std::unique_lock<std::mutex> lock(g_monitor_mutex);
         if (obj->lock_owner_tid != self || obj->lock_count == 0) return false;
-        // One counter serves both notify and notifyAll: waiters re-check their
-        // own condition anyway, so waking all of them is always correct.
+        // One counter for notify/notifyAll; waiters re-check anyway.
         ++obj->notify_seq;
     }
     g_monitor_cv.notify_all();

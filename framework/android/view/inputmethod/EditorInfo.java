@@ -3,23 +3,12 @@ package android.view.inputmethod;
 import android.os.Bundle;
 
 /**
- * android.view.inputmethod.EditorInfo.
- *
- * Was an empty generated stub with no fields at all, and that is a worse failure
- * mode than a missing class: {@code new EditorInfo()} succeeds because the class is
- * genuinely present, then the first field write throws NoSuchFieldError with no name
- * attached. It stopped Minecraft in onCreate — GameActivity.getImeEditorInfo()
- * constructs one and writes inputType/actionId/imeOptions, so createSurfaceView()
- * never completed and there was no surface to draw on.
- *
- * The fields are public and written directly by callers, which is why they have to
- * exist under their exact AOSP names; there is no getter to intercept.
+ * Editor info for an IME session.
+ * Fields are public and written directly by callers under exact AOSP names.
  */
 public class EditorInfo {
 
-    // ── inputType ────────────────────────────────────────────────────────────
-    // Mirrors android.text.InputType, duplicated here because callers reference
-    // both and the values must agree.
+    // inputType mirrors InputType; values must agree.
     public static final int TYPE_MASK_CLASS = 0x0000000f;
     public static final int TYPE_MASK_VARIATION = 0x00000ff0;
     public static final int TYPE_MASK_FLAGS = 0x00fff000;
@@ -29,7 +18,7 @@ public class EditorInfo {
     public static final int TYPE_CLASS_PHONE = 0x00000003;
     public static final int TYPE_CLASS_DATETIME = 0x00000004;
 
-    // ── imeOptions ───────────────────────────────────────────────────────────
+    // imeOptions.
     public static final int IME_MASK_ACTION = 0x000000ff;
     public static final int IME_ACTION_UNSPECIFIED = 0x00000000;
     public static final int IME_ACTION_NONE = 0x00000001;

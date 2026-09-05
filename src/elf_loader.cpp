@@ -345,15 +345,7 @@ static const uint32_t R_AARCH64_JUMP_SLOT = 1026;
 static const uint32_t R_AARCH64_ABS64 = 257;
 static const uint32_t R_AARCH64_IRELATIVE = 1032;
 
-// Count the number of REAL symbols in .dynsym using hash table (DT_HASH nchain or
-// DT_GNU_HASH chains), instead of the distance (strtabOff - symtabOff)/24.
-//
-// .dynstr is NOT right after .dynsym in .so NDK — there is between them
-// .gnu.hash/.hash, so the distance for the number is too large → the wrong junk entry is scanned
-// (st_name happens to point to the correct string, st_shndx != 0) → getSymbolAddress returns
-// base+st_value of GARBAGE → GOT slot points to the ELF → SIGILL header area when called.
-// It's the Discord case: "__cxa_atexit resolved from libreactnative.so ->
-// 0x112ab5080" (= base+0x1080, pc crash).
+// Count .dynsym symbols via the hash table; strtab distance overcounts when .gnu.hash sits between.
 static size_t countDynsymSymbols(const char* fileData, size_t fileSize,
                                  const Elf64Ehdr* ehdr,
                                  const Elf64Phdr* phdrs) {
@@ -1133,7 +1125,7 @@ void ElfLoader::registerEhFrame() {
     // uint8_t fde_count_enc;
     // uint8_t table_enc;
     
-    if (hdr[0] != 1) return; // phi n b n kh ng x c  nh
+    if (hdr[0] != 1) return; // unknown version
     
     // dw_eh_pe_pcrel | dw_eh_pe_sdata4 (0x1b) is the most common
     if (hdr[1] == 0x1B) {
@@ -1164,18 +1156,8 @@ void ElfLoader::deregisterEhFrame() {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Registry module guest — crash handler symbolicate.
-//
-// C c region do ELF loader mmap kh ng n m trong dyld image list n n dladdr
-// don't know; This registry maps base → (size, path) to the crash handler to print
-// "<path>+0x<offset>" thay v  "(no symbol)".
-//
-// Ghi x y ra l c load ( n lu ng kh i  ng, c  lock   an to n n u 2 lu ng
-// load at the same time). Read occurs in crash handler (can be on any thread)
-// and NO lock — avoid deadlock if crash occurs while another thread is running
-// gi  mutex. Sau khi load xong registry g n nh  b t bi n n n  c kh ng lock
-// l  ch p nh n  c (best effort nh  m i ph n kh c c a crash handler).
+// Guest module registry for crash-handler symbolication.
+// Writes take the lock at load time; reads in the crash handler are lock-free best effort.
 namespace {
 struct GuestModule {
     std::uintptr_t base;
@@ -1196,7 +1178,7 @@ extern "C" void kudroid_register_guest_module(void* base, std::size_t size,
     std::lock_guard<std::mutex> lock(g_guestMtx);
     const auto addr = reinterpret_cast<std::uintptr_t>(base);
     for (auto& m : g_guestModules) {
-        if (m.base == addr) {  // reload c ng module: c p nh t thay v  th m tr ng
+        if (m.base == addr) {  // same module reloaded: update instead of duplicating
             m.size = size;
             m.path = path;
             return;

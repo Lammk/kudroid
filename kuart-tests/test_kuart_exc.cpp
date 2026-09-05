@@ -1,8 +1,8 @@
-// Host test for KuART b c 5: try/catch table + auto-executing <clinit>.
+// Host test for KuART exceptions: try/catch table + auto-executing <clinit>.
 //
-// V n build hai l t (l t 1 h c index, l t 2  i n bytecode th t) nh  c c test
-// KuART kh c. Offset trong bytecode t nh theo CODE UNIT    m sai m t  n v  l
-// nh y v o gi a instruction, n n m i kh i code d i  y c  ch  th ch pc.
+// Same two-pass build as the other KuART tests (pass 1 learns indices, pass 2
+// fills real bytecode). Bytecode offsets count in CODE UNITs, so every block
+// below notes its pc.
 #include "kudroid/kuart/DexClassLinker.h"
 #include "kudroid/kuart/Interpreter.h"
 
@@ -93,16 +93,16 @@ struct Specs {
     MethodSpec bad_clinit;
 
     MethodSpec catch_arith;     // try div → catch ArithmeticException
-    MethodSpec catch_two;       // hai handler, handler th  hai kh p
+    MethodSpec catch_two;       // two handlers; the second matches
     MethodSpec catch_all;       // catch-all (finally)
-    MethodSpec catch_check;     // move-exception r i instance-of
-    MethodSpec no_match;        // handler kh ng kh p   truy n l n
-    MethodSpec uncaught;        // kh ng c  try
-    MethodSpec thrower;         // n m   caller b t
-    MethodSpec caller_catches;  // b t exception c a callee
-    MethodSpec read_c;          // sget   k ch ho t <clinit> c a LC
+    MethodSpec catch_check;     // move-exception then instance-of
+    MethodSpec no_match;        // no matching handler; propagates
+    MethodSpec uncaught;        // no try block
+    MethodSpec thrower;         // throws; caller catches
+    MethodSpec caller_catches;  // catches callee exception
+    MethodSpec read_c;          // sget to trigger LC <clinit>
     MethodSpec read_counter;
-    MethodSpec read_bad;        // <clinit> n m exception
+    MethodSpec read_bad;        // <clinit> throws
 
     Specs() {
         object_ctor.name = "<init>";
@@ -230,7 +230,7 @@ std::printf("=== KuART b c 5: try/catch + <clinit> ===\n");
     s.myex_ctor.ins_size = 1;
 
     // LC.<clinit>: init = 42; Counter.n = Counter.n + 1
-    // T ng Counter.n    m s  l n <clinit> th c s  ch y.
+    // Bump Counter.n to count actual <clinit> runs.
     {
         std::vector<uint16_t> c;
         Op21s(&c, kOpConst16, 0, 42);          // pc 0
@@ -242,7 +242,7 @@ std::printf("=== KuART b c 5: try/catch + <clinit> ===\n");
         s.c_clinit.code = c;
         s.c_clinit.registers_size = 1;
     }
-    // LBad.<clinit>: x = 1 / 0   n m ArithmeticException
+    // LBad.<clinit>: x = 1 / 0 throws ArithmeticException
     {
         std::vector<uint16_t> c;
         c.push_back(Op11n(kOpConst4, 0, 1));  // pc 0
@@ -257,7 +257,7 @@ std::printf("=== KuART b c 5: try/catch + <clinit> ===\n");
     // LE.catchArith(a, b): try { return a/b; } catch (ArithmeticException) { return -1; }
     {
         std::vector<uint16_t> c;
-        Op23x(&c, kOpDivInt, 0, 1, 2);              // pc 0..1  (trong try)
+        Op23x(&c, kOpDivInt, 0, 1, 2);              // pc 0..1 (inside try)
         c.push_back(Op11x(kOpReturn, 0));           // pc 2
         c.push_back(Op11x(kOpMoveException, 0));    // pc 3  ← handler
         c.push_back(Op11n(kOpConst4, 0, -1));       // pc 4
@@ -272,7 +272,7 @@ std::printf("=== KuART b c 5: try/catch + <clinit> ===\n");
         s.catch_arith.tries = {t};
     }
 
-    // LE.catchTwo(a, b): handler  u (MyEx) kh ng kh p, handler th  hai kh p.
+    // LE.catchTwo(a, b): first handler (MyEx) misses, second matches.
     {
         std::vector<uint16_t> c;
         Op23x(&c, kOpDivInt, 0, 1, 2);           // pc 0..1
@@ -293,7 +293,7 @@ std::printf("=== KuART b c 5: try/catch + <clinit> ===\n");
         s.catch_two.tries = {t};
     }
 
-    // LE.catchAll(): try { throw new MyEx(); } catch (m i th ) { return 7; }
+    // LE.catchAll(): try { throw new MyEx(); } catch (everything) { return 7; }
     {
         std::vector<uint16_t> c;
         Op21c(&c, kOpNewInstance, 0, kTypeMyEx);            // pc 0..1
@@ -308,11 +308,11 @@ std::printf("=== KuART b c 5: try/catch + <clinit> ===\n");
         TrySpec t;
         t.start_addr = 0;
         t.insn_count = 6;
-        t.handlers = {{"", 6}};  // type r ng = catch-all
+        t.handlers = {{"", 6}};  // empty type = catch-all
         s.catch_all.tries = {t};
     }
 
-    // LE.catchCheck(): b t b ng RuntimeException r i ki m tra object  ng l  MyEx.
+    // LE.catchCheck(): catch via RuntimeException, then verify the object is MyEx.
     {
         std::vector<uint16_t> c;
         Op21c(&c, kOpNewInstance, 0, kTypeMyEx);          // pc 0..1
@@ -331,7 +331,7 @@ std::printf("=== KuART b c 5: try/catch + <clinit> ===\n");
         s.catch_check.tries = {t};
     }
 
-    // LE.noMatch(a, b): ch  b t MyEx n n ArithmeticException ph i l t l n.
+    // LE.noMatch(a, b): catches only MyEx, so ArithmeticException propagates.
     {
         std::vector<uint16_t> c;
         Op23x(&c, kOpDivInt, 0, 1, 2);           // pc 0..1
@@ -349,7 +349,7 @@ std::printf("=== KuART b c 5: try/catch + <clinit> ===\n");
         s.no_match.tries = {t};
     }
 
-    // LE.uncaught(): n m m  kh ng c  try.
+    // LE.uncaught(): throws with no try.
     {
         std::vector<uint16_t> c;
         Op21c(&c, kOpNewInstance, 0, kTypeMyEx);
@@ -360,7 +360,7 @@ std::printf("=== KuART b c 5: try/catch + <clinit> ===\n");
         s.uncaught.outs_size = 1;
     }
 
-    // LE.thrower(): n m MyEx, kh ng b t.
+    // LE.thrower(): throws MyEx, catches nothing.
     {
         std::vector<uint16_t> c;
         Op21c(&c, kOpNewInstance, 0, kTypeMyEx);
@@ -371,7 +371,7 @@ std::printf("=== KuART b c 5: try/catch + <clinit> ===\n");
         s.thrower.outs_size = 1;
     }
 
-    // LE.callerCatches(): try { thrower(); return 1; } catch (m i th ) { return 9; }
+    // LE.callerCatches(): try { thrower(); return 1; } catch (everything) { return 9; }
     {
         std::vector<uint16_t> c;
         Op35c(&c, kOpInvokeStatic, kMethodThrower, {});  // pc 0..2

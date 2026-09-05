@@ -70,16 +70,7 @@ public final class Uri {
         return mString == null ? 0 : mString.hashCode();
     }
 
-    // ── percent-encoding ─────────────────────────────────────────────────────
-    //
-    // Uri.encode is a static string utility rather than anything to do with a Uri instance,
-    // and it is used far outside URL building: apps run it over a filename or a query
-    // fragment before putting it into a path or an HTTP request. Getting the character set
-    // wrong is not cosmetic — an unescaped '&' or '=' silently changes what the receiver
-    // parses, and over-escaping a '/' breaks the path it was part of.
-    //
-    // The unreserved set is RFC 3986's, which is also what the platform uses:
-    // A-Z a-z 0-9 and "_-!.~'()*". Everything else becomes %XX of its UTF-8 bytes.
+    // Percent-encoding (RFC 3986 unreserved set).
 
     /** Percent-encodes everything outside the unreserved set. */
     public static String encode(String s) {

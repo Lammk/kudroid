@@ -1,9 +1,5 @@
 // 64-bit value slot of interpreter — replacing ART JValue.
-//
-// DEX bytecode coi register l  32-bit; long/double chi m hai register li n k .
-// y m i   l  64-bit   long/double v o g n m t  , c n opcode d ng c p
-// (v0,v1) ch   c/ghi   th p. C ch n y  n gi n h n ART (d ng m ng 32-bit +
-// bitmap tham chi u) v    v  KuDroid ch a c  GC c n bi t   n o l  con tr .
+// DEX registers are 32-bit with wide values spanning a pair; here each slot holds a whole value.
 #ifndef KUDROID_KUART_DEXVALUE_H
 #define KUDROID_KUART_DEXVALUE_H
 

@@ -1,12 +1,11 @@
 // Host test for Interpreter: executes real DEX bytecode and asserts results.
 //
-// Focuses on edge cases m  semantics Java KH C C++   ch  d  sai
-// nh t v  kh ng t  l  ra n u ch  test s  b nh th ng:
-// INT_MIN / -1      Java tr  INT_MIN, C++ l  UB
-// d ch bit >= 32    Java l y 5 bit th p, C++ l  UB
-// (int) NaN         Java tr  0, C++ l  UB
-// (int) 1e30        Java saturate INT_MAX, C++ l  UB
-// cmpl vs cmpg      ch  kh c nhau khi c  NaN
+// Focuses on edge cases where Java semantics differ from C++ (each UB in C++):
+// INT_MIN / -1      Java returns INT_MIN
+// bit shift >= 32   Java uses low 5 bits
+// (int) NaN         Java returns 0
+// (int) 1e30        Java saturates to INT_MAX
+// cmpl vs cmpg      differ only on NaN
 #include "kudroid/kuart/DexClassLinker.h"
 #include "kudroid/kuart/Interpreter.h"
 
@@ -29,7 +28,7 @@ void Check(bool ok, const std::string& what) {
 
 using namespace dexbuild;
 
-// Tr  gi p sinh bytecode
+// Bytecode builders.
 // Format 12x: op | B<<12 | A<<8
 uint16_t Op12x(uint8_t op, uint8_t a, uint8_t b) {
     return static_cast<uint16_t>(op | (a << 8) | (b << 12));
@@ -39,33 +38,33 @@ uint16_t Op11x(uint8_t op, uint8_t a) { return static_cast<uint16_t>(op | (a << 
 uint16_t Op11n(uint8_t op, uint8_t a, int8_t b) {
     return static_cast<uint16_t>(op | (a << 8) | ((b & 0xF) << 12));
 }
-// Format 23x: op | A<<8, r i B | C<<8
+// Format 23x: op | A<<8, then B | C<<8
 void Op23x(std::vector<uint16_t>* code, uint8_t op, uint8_t a, uint8_t b, uint8_t c) {
     code->push_back(static_cast<uint16_t>(op | (a << 8)));
     code->push_back(static_cast<uint16_t>(b | (c << 8)));
 }
-// Format 22b: op | A<<8, r i B | C<<8 (C l  h ng 8-bit)
+// Format 22b: op | A<<8, then B | C<<8 (C is 8-bit literal)
 void Op22b(std::vector<uint16_t>* code, uint8_t op, uint8_t a, uint8_t b, int8_t c) {
     code->push_back(static_cast<uint16_t>(op | (a << 8)));
     code->push_back(static_cast<uint16_t>((b & 0xFF) | ((c & 0xFF) << 8)));
 }
-// Format 21s / 21t / 21h: op | A<<8, r i B (16-bit)
+// Format 21s / 21t / 21h: op | A<<8, then B (16-bit)
 void Op21(std::vector<uint16_t>* code, uint8_t op, uint8_t a, int16_t b) {
     code->push_back(static_cast<uint16_t>(op | (a << 8)));
     code->push_back(static_cast<uint16_t>(b));
 }
-// Format 22t: op | B<<12 | A<<8, r i offset
+// Format 22t: op | B<<12 | A<<8, then offset
 void Op22t(std::vector<uint16_t>* code, uint8_t op, uint8_t a, uint8_t b, int16_t off) {
     code->push_back(static_cast<uint16_t>(op | (a << 8) | (b << 12)));
     code->push_back(static_cast<uint16_t>(off));
 }
-// Format 31i: op | A<<8, r i B (32-bit, low tr c)
+// Format 31i: op | A<<8, then B (32-bit, low first)
 void Op31i(std::vector<uint16_t>* code, uint8_t op, uint8_t a, int32_t b) {
     code->push_back(static_cast<uint16_t>(op | (a << 8)));
     code->push_back(static_cast<uint16_t>(b & 0xFFFF));
     code->push_back(static_cast<uint16_t>((b >> 16) & 0xFFFF));
 }
-// Format 51l: op | A<<8, r i 4 code unit
+// Format 51l: op | A<<8, then 4 code units
 void Op51l(std::vector<uint16_t>* code, uint8_t a, int64_t v) {
     code->push_back(static_cast<uint16_t>(0x18 | (a << 8)));  // const-wide
     for (int i = 0; i < 4; ++i) {
@@ -111,7 +110,7 @@ constexpr uint8_t kOpAddInt2Addr = 0xb0;
 constexpr uint8_t kOpAddIntLit8 = 0xd8;
 constexpr uint8_t kOpMulIntLit8 = 0xda;
 
-// M i method test nh n tham s    register cu i v  tr  k t qu .
+// Each test method takes params in the last registers and returns the result.
 MethodSpec MakeMethod(const std::string& name, const std::string& ret,
                       const std::vector<std::string>& params,
                       const std::vector<uint16_t>& code, uint16_t registers,
@@ -136,7 +135,7 @@ std::vector<ClassSpec> MakeTestClasses() {
     t.descriptor = "LT;";
     t.superclass = "Ljava/lang/Object;";
 
-    // int addInt(int a, int b) { return a + b; }  regs: v0 kq, v1=a, v2=b
+    // int addInt(int a, int b) { return a + b; }  regs: v0 result, v1=a, v2=b
     {
         std::vector<uint16_t> code;
         Op23x(&code, kOpAddInt, 0, 1, 2);
@@ -171,7 +170,7 @@ std::vector<ClassSpec> MakeTestClasses() {
         code.push_back(Op11x(kOpReturn, 0));
         t.direct_methods.push_back(MakeMethod("ushrInt", "I", {"I", "I"}, code, 3, 2));
     }
-    // long mulLong(long a, long b) { return a * b; }  v0/v1 kq, v2=a, v4=b
+    // long mulLong(long a, long b) { return a * b; }  v0/v1 result, v2=a, v4=b
     {
         std::vector<uint16_t> code;
         Op23x(&code, kOpMulLong, 0, 2, 4);
@@ -192,7 +191,7 @@ std::vector<ClassSpec> MakeTestClasses() {
         code.push_back(Op11x(kOpReturn, 0));
         t.direct_methods.push_back(MakeMethod("divFloat", "F", {"F", "F"}, code, 3, 2));
     }
-    // double addDouble(double a, double b)  v0/v1 kq, v2=a, v4=b
+    // double addDouble(double a, double b)  v0/v1 result, v2=a, v4=b
     {
         std::vector<uint16_t> code;
         Op23x(&code, kOpAddDouble, 0, 2, 4);
@@ -206,7 +205,7 @@ std::vector<ClassSpec> MakeTestClasses() {
         code.push_back(Op11x(kOpReturn, 0));
         t.direct_methods.push_back(MakeMethod("floatToInt", "I", {"F"}, code, 2, 1));
     }
-    // int doubleToInt(double a)  v0 kq, v1/v2 = a
+    // int doubleToInt(double a)  v0 result, v1/v2 = a
     {
         std::vector<uint16_t> code;
         code.push_back(Op12x(kOpDoubleToInt, 0, 1));
@@ -227,7 +226,7 @@ std::vector<ClassSpec> MakeTestClasses() {
         code.push_back(Op11x(kOpReturn, 0));
         t.direct_methods.push_back(MakeMethod("cmpgFloat", "I", {"F", "F"}, code, 3, 2));
     }
-    // int cmpLong(long a, long b)  v0 kq, v1=a, v3=b
+    // int cmpLong(long a, long b)  v0 result, v1=a, v3=b
     {
         std::vector<uint16_t> code;
         Op23x(&code, kOpCmpLong, 0, 1, 3);
@@ -256,22 +255,22 @@ std::vector<ClassSpec> MakeTestClasses() {
         t.direct_methods.push_back(MakeMethod("addLit8", "I", {"I"}, code, 2, 1));
     }
     // int sumLoop(int n) { int s = 0; for (int i = 0; i < n; i++) s += i; return s; }
-    // v0 = s, v1 = i, v2 = n (tham s )
+    // v0 = s, v1 = i, v2 = n (params)
     {
         std::vector<uint16_t> code;
         code.push_back(Op11n(kOpConst4, 0, 0));   // s = 0
         code.push_back(Op11n(kOpConst4, 1, 0));   // i = 0
         // loop: if (i >= n) goto end
-        Op22t(&code, kOpIfGe, 1, 2, 6);           // +6 code unit t i end
+        Op22t(&code, kOpIfGe, 1, 2, 6);           // +6 code units to end
         code.push_back(Op12x(kOpAddInt2Addr, 0, 1));  // s += i
         Op22b(&code, kOpAddIntLit8, 1, 1, 1);     // i = i + 1
-        // goto v  pc 2 (if-ge).  ang   pc 7   offset -5. D ng -4 s  nh y v o
-        // gi a instruction if-ge (2 code unit)   l p v  h n.
+        // goto back to pc 2 (if-ge). Currently at pc 7, so offset -5. Using -4
+        // would land mid-instruction in if-ge (2 code units): infinite loop.
         code.push_back(static_cast<uint16_t>(kOpGoto | ((-5 & 0xFF) << 8)));
         code.push_back(Op11x(kOpReturn, 0));      // end: return s
         t.direct_methods.push_back(MakeMethod("sumLoop", "I", {"I"}, code, 3, 1));
     }
-    // int constants()   ki m tra const/const-16/const
+    // int constants(): check const/const-16/const
     {
         std::vector<uint16_t> code;
         Op31i(&code, kOpConst, 0, 0x12345678);
@@ -322,7 +321,7 @@ std::printf("=== KuART Interpreter: ch y bytecode DEX th t ===\n");
 
     kudroid::kuart::Interpreter interp(&linker);
 
-    // G i method static, tr  v  DexValue.
+    // Call a static method, get back a DexValue.
     const auto call = [&](const char* name, const char* sig,
                           std::vector<DexValue> args) -> DexValue {
         interp.ClearPendingException();
@@ -335,13 +334,13 @@ std::printf("  FAIL not found method %s%s\n", name, sig);
         return interp.Execute(m, args.data(), args.size());
     };
 
-    // s  h c c  b n
+    // basic arithmetic
     Check(call("addInt", "(II)I", {DexValue::Int(3), DexValue::Int(4)}).i == 7,
           "addInt(3,4) == 7");
     Check(call("addInt", "(II)I", {DexValue::Int(-10), DexValue::Int(4)}).i == -6,
           "addInt(-10,4) == -6");
 
-    // C ng tr n ph i wrap, kh ng UB.
+    // Overflow must wrap, not UB.
     Check(call("addInt", "(II)I",
                {DexValue::Int(std::numeric_limits<int32_t>::max()), DexValue::Int(1)}).i ==
               std::numeric_limits<int32_t>::min(),
@@ -349,13 +348,13 @@ std::printf("  FAIL not found method %s%s\n", name, sig);
 
     Check(call("divInt", "(II)I", {DexValue::Int(20), DexValue::Int(3)}).i == 6,
           "divInt(20,3) == 6");
-    // Java l m tr n v  0, kh ng ph i v   m v  c c.
+    // Java rounds toward 0, not toward -inf.
     Check(call("divInt", "(II)I", {DexValue::Int(-20), DexValue::Int(3)}).i == -6,
 "divInt(-20,3) == -6 (l m tr n v  0)");
     Check(call("remInt", "(II)I", {DexValue::Int(-20), DexValue::Int(3)}).i == -2,
 "remInt(-20,3) == -2 (d u theo s  b  chia)");
 
-    // INT_MIN / -1: Java tr  INT_MIN, C++ thu n l  UB.
+    // INT_MIN / -1: Java returns INT_MIN, plain C++ is UB.
     Check(call("divInt", "(II)I",
                {DexValue::Int(std::numeric_limits<int32_t>::min()), DexValue::Int(-1)}).i ==
               std::numeric_limits<int32_t>::min(),
@@ -364,7 +363,7 @@ std::printf("  FAIL not found method %s%s\n", name, sig);
                {DexValue::Int(std::numeric_limits<int32_t>::min()), DexValue::Int(-1)}).i == 0,
           "remInt(INT_MIN,-1) == 0");
 
-    // chia cho 0 ph i n m exception, kh ng crash
+    // divide by zero must throw, not crash
     {
         interp.ClearPendingException();
         kudroid::kuart::DexMethod* m = klass->FindDirectMethod("divInt", "(II)I");
@@ -376,7 +375,7 @@ Check(interp.HasPendingException(), "divInt(1,0) n m exception");
         interp.ClearPendingException();
     }
 
-    // d ch bit: Java ch  d ng 5 bit th p
+    // shifts: Java uses only the low 5 bits
     Check(call("shlInt", "(II)I", {DexValue::Int(1), DexValue::Int(4)}).i == 16,
           "shlInt(1,4) == 16");
     Check(call("shlInt", "(II)I", {DexValue::Int(1), DexValue::Int(32)}).i == 1,
@@ -404,14 +403,14 @@ Check(interp.HasPendingException(), "divInt(1,0) n m exception");
     // ── float/double ──
     Check(call("divFloat", "(FF)F", {DexValue::Float(7.0f), DexValue::Float(2.0f)}).f == 3.5f,
           "divFloat(7,2) == 3.5");
-    // Chia 0 trong float KH NG n m exception (kh c int)   tr  v  Infinity.
+    // Float divide by zero throws NOTHING (unlike int); returns Infinity.
     Check(std::isinf(call("divFloat", "(FF)F",
                           {DexValue::Float(1.0f), DexValue::Float(0.0f)}).f),
 "divFloat(1,0) == Infinity (kh ng n m exception)");
     Check(call("addDouble", "(DD)D", {DexValue::Double(0.5), DexValue::Double(0.25)}).d == 0.75,
           "addDouble(0.5,0.25) == 0.75");
 
-    // i ki u: saturate + NaN
+    // conversions: saturate + NaN
     Check(call("floatToInt", "(F)I", {DexValue::Float(3.9f)}).i == 3,
           "floatToInt(3.9) == 3 (truncated to 0)");
     Check(call("floatToInt", "(F)I", {DexValue::Float(-3.9f)}).i == -3,

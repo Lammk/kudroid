@@ -1,13 +1,8 @@
 #!/usr/bin/env node
 
 /**
- * KuDroid Debug Bridge (KDB) - Host Server & Interactive Terminal CLI
- * 
- * Functions:
- * 1. Lightweight WebSocket & HTTP server on port 8080 (0 dependencies, pure Node.js).
- * 2. Interactive REPL terminal with commands: help, list, run, stop, install, debug, save, clear.
- * 3. Single Source of Truth: Log stream mirrored byte-for-byte from iPhone.
- * 4. Auto-save session log upon Ctrl+C in debug mode.
+ * KuDroid Debug Bridge (KDB): dependency-free WebSocket/HTTP host + REPL
+ * (help/list/run/stop/install/debug/save/clear). Mirrors the iPhone log stream.
  */
 
 const http = require('http');
@@ -28,7 +23,7 @@ if (!fs.existsSync(LOGS_DIR)) {
 
 function getLocalIpAddress() {
     const interfaces = os.networkInterfaces();
-    // Ưu tiên card mạng vật lý: Wi-Fi (wlan, wlp) hoặc Ethernet (eth, en)
+    // Prefer physical NICs: Wi-Fi (wlan, wlp) or Ethernet (eth, en)
     for (const name of Object.keys(interfaces)) {
         if (name.startsWith('w') || name.startsWith('e')) {
             for (const iface of interfaces[name]) {
@@ -462,7 +457,7 @@ async function handleRunSo(args) {
         return;
     }
 
-    // Tách các stage theo cờ --then hoặc &&
+    // Split stages on --then or &&
     const stages = [];
     let currentStage = [];
     for (const arg of args) {
@@ -546,7 +541,7 @@ async function executeSingleSoStage(args) {
         return;
     }
 
-    // Upload các dependency trước (nếu có)
+    // Upload dependencies first (if any)
     for (let i = 0; i < soFiles.length - 1; ++i) {
         const depPath = path.resolve(process.cwd(), soFiles[i]);
         if (!fs.existsSync(depPath)) {
@@ -559,7 +554,7 @@ async function executeSingleSoStage(args) {
         await uploadAndRunSoChunked(depName, depData, '__none__');
     }
 
-    // Upload và thực thi file target chính (file cuối cùng)
+    // Upload and run the main target file (the last one)
     const targetFile = soFiles[soFiles.length - 1];
     const resolvedPath = path.resolve(process.cwd(), targetFile);
     if (!fs.existsSync(resolvedPath)) {
@@ -583,12 +578,12 @@ async function executeSingleSoStage(args) {
         console.log(`\n=== REMOTE SO EXECUTION [${C.bold}${filename}${C.reset}]: ${statusTag} ===\n`);
         console.log(res.log);
 
-        // 1. Lưu file log riêng biệt theo tên file .so
+        // 1. Save a per-.so log file
         const perSoLogName = `${filename.replace('.so', '')}.log`;
         const perSoPath = path.join(LOGS_DIR, perSoLogName);
         fs.writeFileSync(perSoPath, res.log, 'utf8');
 
-        // 2. Đồng thời gom và nối dồn vào file tổng logs/test_so.log
+        // 2. Also append to the combined logs/test_so.log
         const collectivePath = path.join(LOGS_DIR, 'test_so.log');
         const header = `\n═══════════════════════════════════════════════════════════════════\n` +
                        `[${new Date().toISOString()}] EXECUTION: ${filename} (Status: ${res.success ? 'PASSED' : 'FAILED'})\n` +
@@ -631,7 +626,7 @@ async function handleTest(testName) {
         console.log(`\n=== TEST RESULT [${C.bold}${target.toUpperCase()}${C.reset}]: ${statusTag} ===\n`);
         console.log(res.log);
         
-        // Tự động lưu log về thư mục logs/
+        // Auto-save log to logs/
         const savedFile = res.file || `test_${target}.log`;
         const targetPath = path.join(LOGS_DIR, savedFile);
         fs.writeFileSync(targetPath, res.log, 'utf8');
@@ -661,7 +656,7 @@ async function handleDump(filename) {
         fs.writeFileSync(targetPath, buffer);
         console.log(`${C.green}✔ Pulled successfully (${(buffer.length / 1024).toFixed(2)} KB)! Saved to: ${C.bold}${targetPath}${C.reset}`);
         
-        // In xem trước 20 dòng cuối
+        // Preview the trailing lines
         if (res.content) {
             const lines = res.content.trim().split('\n');
             const tail = lines.slice(-25).join('\n');
@@ -730,7 +725,7 @@ async function handleInstall(apkPath) {
     const buffer = fs.readFileSync(resolved);
     console.log(`${C.cyan}📦 Uploading ${filename} (${(buffer.length / 1024 / 1024).toFixed(2)} MB) to iPhone...${C.reset}`);
     
-    // Gửi header cài đặt
+    // Send install header
     sendToClient({
         action: 'install',
         filename: filename,

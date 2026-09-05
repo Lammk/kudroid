@@ -1,17 +1,6 @@
 #!/usr/bin/env bash
-# Verify src/kuart/jni_trampoline.S against the real AAPCS64 ABI.
-#
-# The JNI float/double path is pure register plumbing, so the x86-64 host test
-# (test_kuart_jni_float) proves the SysV path only. The product target is arm64,
-# where the register files and the calling convention differ — this script
-# cross-compiles a freestanding harness and runs it under qemu so the arm64 path
-# is covered too.
-#
-# Freestanding on purpose: the toolchain ships an aarch64 cross-compiler but no
-# aarch64 libc sysroot, so the harness talks to the kernel via svc directly.
-#
-# Skips (exit 0) when the cross toolchain or qemu is unavailable, so it is safe
-# to call unconditionally from CI.
+# Verify jni_trampoline.S against the real AAPCS64 ABI (host test covers SysV only).
+# Freestanding harness under qemu; skips (exit 0) without toolchain/qemu.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"

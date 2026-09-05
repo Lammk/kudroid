@@ -273,15 +273,7 @@ public class ViewGroup extends View implements ViewParent {
     public interface OnHierarchyChangeListener {
     }
 
-    // ── ViewParent ───────────────────────────────────────────────────────────────────
-    //
-    // A child talks upwards through this interface rather than through ViewGroup, which is
-    // why View.getParent() has to return ViewParent: apps assign the result to a
-    // ViewParent variable, and a getParent() declared as returning ViewGroup does not
-    // satisfy that reference — it fails as a missing method on a method that looks present.
-    //
-    // requestLayout() and isLayoutRequested() are inherited from View, which already
-    // implements them for the top-down layout model; the rest are below.
+    // ViewParent.
 
     /**
      * A child's content changed.

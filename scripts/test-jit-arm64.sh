@@ -1,18 +1,7 @@
 #!/usr/bin/env bash
-# Execute the JIT's generated code on real arm64.
-#
-# test_kuart_jit checks the encoder against GNU as byte for byte, on whatever host it
-# runs on. That cannot catch a sequence that is validly encoded and computes the wrong
-# thing — a load from the wrong register offset, a clamp that loses the sign, a branch
-# patched to the wrong instruction. Running the bytes is the only way to know.
-#
-# Two stages: build the host dumper (which uses the real encoder from kudroid_core) to
-# emit the code as a header, then cross-compile a freestanding harness around it and run
-# that under qemu. Freestanding because the toolchain has an aarch64 compiler but no
-# aarch64 sysroot.
-#
-# Skips (exit 0) when the cross toolchain or qemu is missing, so CI can call it
-# unconditionally.
+# Execute the JIT's generated code on real arm64 (byte-correct can still compute wrong).
+# Dumps via the real encoder, cross-compiles a freestanding harness, runs under qemu.
+# Skips (exit 0) when the cross toolchain or qemu is missing.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"

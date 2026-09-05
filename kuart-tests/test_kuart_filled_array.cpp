@@ -1,18 +1,5 @@
-// Host test for filled-new-array / filled-new-array/range.
-//
-// Why this opcode gets its own test file: d8 emits it for every `new T[]{...}`
-// literal, and that includes the synthetic `$values()` method it generates for
-// EVERY enum. Decoding the shipped framework.dex shows 13 uses, among them
-// ActivityThread.handleLaunchActivity, Activity.setContentView and six
-// enum $values() methods. Before this opcode existed the interpreter hit its
-// default: case and threw UnsupportedOperationException, so no enum could run
-// its <clinit> — which is exactly the failure seen when launching a real APK.
-//
-// Two properties are easy to get wrong and are asserted explicitly here:
-//   1. VRegB is the ARRAY type ("[I"), not the element type. Resolving it and
-//      slicing the descriptor instead of reading component_type breaks "[[I".
-//   2. The result is read back with move-result-object (like an invoke), NOT
-//      written into a destination register.
+// Host test for filled-new-array / filled-new-array/range (every `new T[]{...}`,
+// incl. enum $values()). Pins VRegB as the ARRAY type and move-result-object semantics.
 #include "kudroid/kuart/DexClassLinker.h"
 #include "kudroid/kuart/Interpreter.h"
 

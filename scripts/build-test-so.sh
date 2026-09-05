@@ -1,23 +1,7 @@
 #!/usr/bin/env bash
 # Build the guest .so probes under tests/so/ for on-device testing with kdb.
-#
-# These are Android arm64 shared objects, loaded on the device through
-#
-#     so build/test-so/vfs_probe.so
-#
-# which uploads them and runs them under LibraryManager — so every libc call inside binds
-# to KuDroid's shim table exactly as a real guest app's would. That is the point: the host
-# tests cover the remapper's logic, but only a guest .so on a device exercises the symbol
-# routing, the bionic struct layouts, and the container path resolved at runtime.
-#
-# Built with the plain aarch64 cross compiler rather than the NDK, and -nostdlib, so the
-# objects carry no DT_NEEDED. A dependency on libc.so would send LibraryManager looking
-# for a library that does not exist on the device, and the failure would be about loading
-# rather than about what is being probed. The undefined symbols are resolved by KuDroid at
-# load time, which is what makes them a test of the shims.
-#
-# Skips (exit 0) when the cross toolchain is missing, so this can be called
-# unconditionally.
+# Loaded via `so build/test-so/<name>.so`; -nostdlib (no DT_NEEDED) so KuDroid resolves
+# every symbol through its shims at load time. Skips (exit 0) without toolchain.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"

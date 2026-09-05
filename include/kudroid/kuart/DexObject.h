@@ -1,8 +1,5 @@
 // Guest Java object: header + instance field data payload.
-//
-// Layout: [DexObject header][field bytes...]. Field offset t nh t   u ph n d
-// li u, n n object c a subclass ch  c n n i field m i v o sau field c a cha
-// con tr  t i subclass d ng  c nh  con tr  t i superclass m  kh ng c n d ch.
+// Field offsets count from the payload start, so subclass fields append after parent fields.
 #ifndef KUDROID_KUART_DEXOBJECT_H
 #define KUDROID_KUART_DEXOBJECT_H
 
@@ -34,8 +31,7 @@ public:
         return reinterpret_cast<const uint8_t*>(this) + sizeof(DexObject);
     }
 
-    // memcpy thay v  cast: field 8 byte kh ng ch c align 8 trong ph n d  li u,
-    // v  deref con tr  l ch align l  UB tr n arm64.
+    // memcpy instead of cast: 8-byte fields may be misaligned; misaligned deref is UB on arm64.
     template <typename T>
     T GetField(uint32_t offset) const {
         T v;
@@ -49,8 +45,7 @@ public:
     }
 };
 
-// M ng Java:   d i + ph n t  li n sau. Ph n t  l  ki u nguy n th y ho c
-// DexObject*, tu  component_type c a class.
+// Java array: length + inline elements (primitives or DexObject*).
 class DexArray : public DexObject {
 public:
     int32_t length = 0;

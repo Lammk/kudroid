@@ -58,7 +58,7 @@ public class GregorianCalendar extends Calendar {
         set(year, month, day, hour, minute, second);
     }
 
-    // ── conversion helpers ──
+    // Conversion helpers.
 
     /**
      * Days since 1970-01-01 for a civil date. Exact for any year; y/m/d may be out of
@@ -115,7 +115,7 @@ public class GregorianCalendar extends Calendar {
         return a - floorDiv(a, b) * b;
     }
 
-    // ── Calendar contract ──
+    // Calendar contract.
 
     @Override
     protected void computeTime() {

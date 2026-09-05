@@ -1,23 +1,5 @@
-// Probe: leaving the interpreter without unwinding the C++ stack, and receivers
-// whose class pointer came from native code.
-//
-// Both failures were found in the same Minecraft launch and both hid the real
-// problem rather than being the problem.
-//
-// 1. The JNI_OnLoad shield in kudroid_bridge.cpp siglongjmps out of a library that
-//    faults mid-callback. siglongjmp does not run destructors, so every
-//    Interpreter::Execute frame the library had entered kept its scope-guard entry:
-//    the call-stack vector held pointers into reclaimed C++ stack, the depth counter
-//    never came down, and the VM lock was never released. The next exception on that
-//    thread rendered a trace from the dead entries and took SIGSEGV inside
-//    BuildStackTrace — a crash in the code whose entire job was to explain the
-//    failure. MainActivity.onCreate died this way and its exception was never printed.
-//
-// 2. DexObject::clazz and DexClass::descriptor both sit at offset 0, so a jclass
-//    passed where a jobject was expected reads back the descriptor STRING pointer and
-//    it gets used as a class: SIGSEGV in FindVirtualMethod at 0x2f657074666172eb, the
-//    ASCII bytes "raftpe/". A stale handle gives the other shape — a clazz like 0x10,
-//    non-null so an ordinary null check waves it through, faulting at a small offset.
+// Probe: siglongjmp out of the interpreter must not strand frames, depth or the lock;
+// untrusted class pointers from native code must be rejected, not dereferenced.
 #include "kudroid/kuart/DexClassLinker.h"
 #include "kudroid/kuart/DexJniEnv.h"
 #include "kudroid/kuart/DexObject.h"

@@ -17,33 +17,8 @@ bool FieldMatch(const DexField& f, const char* name, const char* type_descriptor
     return type_descriptor == nullptr || std::strcmp(f.type_descriptor, type_descriptor) == 0;
 }
 
-// The best interface-declared method for `name`/`signature` reachable from `klass`.
-//
-// Two things are wanted from one walk, so both are returned:
-//
-//   *best_default  — the maximally specific CONCRETE default. This is what runs.
-//   *best_abstract — an abstract interface declaration, when no default exists. This is
-//                    still a valid RESOLUTION result and must not be discarded.
-//
-// The second output is not a nicety. JVMS separates resolution (5.4.3.3), which yields a
-// method reference and legitimately lands on an abstract interface declaration, from
-// selection (5.4.6), which picks the concrete body from the receiver's class at call time.
-// FindVirtualMethod serves both kinds of caller, so returning null for
-// `List.clear()` — abstract, no default anywhere — broke callers that only needed the
-// reference: Security.getProviders started handing back [Ljava/lang/Object; and the
-// SharedPreferences editor threw NullPointerException. Skipping abstract candidates while
-// searching for a default is right; dropping them from the result is not.
-//
-// "Maximally specific" is the JVMS term and it is not the same as "the first one found".
-// When a class implements both J and I, and I extends J overriding its default, I's version
-// must run regardless of the order the class lists them in. A depth-first search returns
-// whichever it reaches first, so on `class C implements J, I` it returned J's and the guest
-// silently ran the superseded implementation.
-//
-// Ambiguity between unrelated interfaces keeps the first candidate rather than raising
-// IncompatibleClassChangeError as a real JVM would: javac rejects the genuinely ambiguous
-// case at compile time, so an interpreter refusing to run code javac already accepted is
-// the worse failure.
+// Find the most specific concrete default and an abstract fallback.
+// Both are needed: resolution may legitimately return an abstract declaration.
 void FindInterfaceMethod(DexClass* klass, const char* name, const char* signature,
                          DexMethod** best_default, DexMethod** best_abstract) {
     if (klass == nullptr) return;
@@ -79,10 +54,7 @@ void FindInterfaceMethod(DexClass* klass, const char* name, const char* signatur
                 *best_abstract = declared;
             }
 
-            // Recurse regardless of what this interface declared. An abstract declaration
-            // here does not mean there is no default above it — that is precisely the
-            // `interface I extends J` shape, where I re-declares f() abstract and J
-            // supplies the body.
+// Recurse even after a declaration; a default may sit above an abstract one.
             FindInterfaceMethod(iface, name, signature, best_default, best_abstract);
         }
     }
@@ -90,27 +62,8 @@ void FindInterfaceMethod(DexClass* klass, const char* name, const char* signatur
 
 }  // namespace
 
-// Resolution for invoke-virtual and invoke-interface, following JVMS 5.4.3.3 and 5.4.6.
-//
-// Precedence, and every rank is load-bearing:
-//
-//   1. a CONCRETE method in the class chain — a class's own body always beats a default,
-//      which is what lets a class override one.
-//   2. the maximally specific CONCRETE interface default.
-//   3. an ABSTRACT declaration in the class chain.
-//   4. an ABSTRACT interface declaration.
-//
-// Rank 2 above rank 3 is the fix: the old code returned the first thing the class chain
-// matched, so an abstract declaration there hid a concrete default. And the selection among
-// interfaces was depth-first rather than maximally specific, so an overridden default could
-// run in place of the one that overrode it — silently, which is why nothing pointed at it.
-//
-// Ranks 3 and 4 exist because resolution and selection are different questions. Many callers
-// here only need the method REFERENCE — its signature, its declaring class, a vtable slot —
-// and for an interface method with no implementation anywhere the abstract declaration IS
-// the correct answer; the caller decides whether that is an error. Dropping rank 4 while
-// fixing rank 2 is a mistake I made and it broke Security.getProviders and the
-// SharedPreferences editor, neither of which involves a default method at all.
+// Resolution per JVMS 5.4.3.3 and 5.4.6.
+// Precedence: class concrete, interface default, class abstract, interface abstract.
 DexMethod* DexClass::FindVirtualMethod(const char* name, const char* signature) {
     DexMethod* abstract_in_chain = nullptr;
 

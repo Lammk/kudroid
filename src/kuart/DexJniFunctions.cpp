@@ -1,13 +1,6 @@
-// JNINativeInterface_ function table for KuART.
-//
-// Separated from DexJniEnv.cpp because this table alone has more than 200 functions. All functions are
-// static, get DexJniEnv via DexJniEnv::FromEnv(env) and then delegate.
-//
-// Handle convention (matches DexJniEnv.h):
-//   jobject/jstring/jarray -> DexObject* (cast directly)
-//   jclass -> DexClass* (NOT an object, not in the ref table)
-//   jmethodID              -> DexMethod*
-//   jfieldID               -> DexField*
+// JNI function table; all entries delegate via DexJniEnv::FromEnv.
+// Handle convention: jobject -> DexObject*, jclass -> DexClass*,
+// jmethodID -> DexMethod*, jfieldID -> DexField*.
 #include "kudroid/kuart/DexJniEnv.h"
 #include "kudroid/abi/GuestVarargs.h"
 
@@ -32,20 +25,7 @@ DexField* Fld(jfieldID f) { return reinterpret_cast<DexField*>(f); }
 DexString* Str(jstring s) { return reinterpret_cast<DexString*>(s); }
 DexArray* Arr(jarray a) { return reinterpret_cast<DexArray*>(a); }
 
-// The DexClass denoted by a handle that may name a class either way KuART
-// represents one: the raw DexClass* JNI uses as a jclass, or the heap
-// java.lang.Class instance (DexClassObject) bytecode and reflection use.
-//
-// On ART these are the same object, so a native `IsSameObject(a, b)` mixing the
-// two forms answers true. Here they are different pointers to the same class,
-// and a raw pointer comparison answers false — which is exactly how Unity's
-// generated proxy dispatch fails: it compares the incoming `clazz`
-// (from Method.getDeclaringClass(), a heap instance) against its cached
-// interface jclass (a raw DexClass*), finds them "different", and throws
-// NoSuchMethodError for a method that exists.
-//
-// Only set lookups, no dereference of the handle itself, so an arbitrary
-// non-class pointer safely resolves to null rather than faulting.
+// Resolve a class from either handle form (jclass or heap Class).
 DexClass* ClassOfHandle(DexJniEnv* self, DexObject* o) {
     if (o == nullptr || self == nullptr || self->linker() == nullptr) return nullptr;
     if (DexClass* represented = self->linker()->ClassFromObject(o)) return represented;
@@ -53,27 +33,12 @@ DexClass* ClassOfHandle(DexJniEnv* self, DexObject* o) {
     return self->linker()->IsRegisteredClass(k) ? const_cast<DexClass*>(k) : nullptr;
 }
 
-// A jclass, validated against the linker before it is dereferenced.
-//
-// jclass is a raw DexClass* by convention (see DexJniEnv.h), so a handle that is
-// not one — a jobject passed where a jclass was expected, a stale value, or a
-// pointer the library derived from something else — used to be dereferenced
-// directly. libminecraftpe.so did exactly that and took SIGSEGV inside
-// FindVirtualMethod at address 0x2f657074666172eb, which is the ASCII bytes
-// "raftpe/": a string pointer used as a class handle. Nothing in the log said which
-// call was at fault.
-//
-// Anything not registered with the linker is rejected here instead, so the caller
-// gets a Java exception naming the operation rather than a crash.
+// Validate jclass against the linker; reject unknown handles with an exception.
 DexClass* CheckedCls(DexJniEnv* self, jclass c) {
     DexClass* k = Cls(c);
     if (k == nullptr || self == nullptr) return nullptr;
     if (self->linker()->IsRegisteredClass(k)) return k;
-    // A java.lang.Class INSTANCE passed as a jclass. Native code obtains one from
-    // GetObjectArrayElement on a Class[], from a returned Class<?>, or from a field read
-    // — all of which yield the heap DexClassObject rather than the DexClass* that JNI
-    // uses as a jclass. Both denote the same class, so resolve it instead of rejecting a
-    // handle the caller was entitled to hold.
+    // Heap Class instance passed as jclass; resolve it rather than reject.
     if (DexClass* represented = self->linker()->ClassFromObject(Obj(c))) return represented;
     return nullptr;
 }
@@ -93,24 +58,15 @@ std::string ToDescriptor(const char* jni_name) {
     return d;
 }
 
-// ── version, class, exception ───────────────────── ──────────────────────
+// Version, class, exception.
 
 jint JNICALL GetVersion(JNIEnv*) { return JNI_VERSION_1_6; }
 
-// Raise a Java exception the way the JNI spec requires a failed lookup to.
-//
-// FindClass/GetMethodID/GetFieldID used to record a message in last_error() and
-// return null, with nothing pending. Native code follows the spec instead of
-// checking every return value — the standard shape is
+// Throw on failed lookup; silent nulls crash native callers that skip checks.
 //
 //     jclass c = env->FindClass("...");
 //     jmethodID m = env->GetMethodID(c, "...", "...");   // c assumed valid
 //     env->CallVoidMethod(obj, m);
-//
-// so a silent null becomes a segfault at a near-null address inside the library,
-// with no indication of which lookup failed. With an exception pending, a library
-// that checks ExceptionCheck() (most do, at least between phases) stops cleanly and
-// the name that could not be resolved is reported.
 void ThrowLookupFailure(DexJniEnv* self, const char* exception_descriptor,
                         const std::string& what) {
     if (self == nullptr) return;
@@ -186,18 +142,7 @@ jclass JNICALL GetObjectClass(JNIEnv* env, jobject obj) {
     DexObject* o = Obj(obj);
     if (o == nullptr || self == nullptr) return nullptr;
 
-    // A jclass passed where a jobject was expected must not be read as an object.
-    //
-    // Both handles are raw pointers, and DexObject::clazz and DexClass::descriptor
-    // both sit at offset 0 — so reading `o->clazz` off a DexClass yields the
-    // descriptor STRING pointer, which then gets used as a class. That is the fault
-    // KuDroid took inside FindVirtualMethod at address 0x2f657074666172eb: the ASCII
-    // bytes "raftpe/", a fragment of "Lcom/mojang/minecraftpe/MainActivity;".
-    //
-    // Native code does this legitimately: JNI allows GetObjectClass on any jobject,
-    // and a jclass IS a jobject in the JNI object model, so
-    // GetObjectClass(someClass) is expected to return java.lang.Class. Detect that
-    // case and answer with Class rather than misreading memory.
+    // A jclass shares offset 0 with DexObject::clazz; answer Class, do not misread.
     if (self->linker()->IsRegisteredClass(reinterpret_cast<const DexClass*>(o))) {
         if (JnibridgeTraceActive()) {
             std::fprintf(stderr, "[KuART][JNIBRIDGE] GetObjectClass -> java.lang.Class (jclass input)\n");
@@ -205,10 +150,7 @@ jclass JNICALL GetObjectClass(JNIEnv* env, jobject obj) {
         return ToJClass(self->linker()->FindClass("Ljava/lang/Class;"));
     }
 
-    // A java.lang.Class INSTANCE (from Class.forName or a const-class) is likewise a
-    // jobject whose class is java.lang.Class. ClassOfObject validates what it finds,
-    // so a stale handle whose clazz is non-null but not a class returns null here
-    // instead of being handed to the caller as a jclass.
+    // Validate Class instances; stale handles return null.
     DexClass* result = self->linker()->ClassOfObject(o);
     if (JnibridgeTraceActive()) {
         std::fprintf(stderr, "[KuART][JNIBRIDGE] GetObjectClass -> %s\n",
@@ -280,16 +222,9 @@ void JNICALL ExceptionDescribe(JNIEnv* env) {
 
 void JNICALL ExceptionClear(JNIEnv* env) {
     if (DexJniEnv* self = Self(env)) {
-        // Diagnostic: native dismissing a pending exception is where the real
-        // cause goes to die — Unity's JNIBridge clears the inner failure and its
-        // Java wrapper then throws a messageless NoSuchMethodError, so the
-        // uncaught trace names only the wrapper. The cleared exception's
-        // class+message names the actual missing API. Grep JNI-CLEAR.
+        // Log the cleared exception; it names the real missing API.
         if (DexObject* ex = self->pending_exception()) {
-            // Print both error slots: env's (set by JNI ThrowNew/lookup failure)
-            // and the interpreter's (set by ThrowException/guest THROW). If they
-            // agree, the thrower is identified; if they differ, the env slot is
-            // stale and the interpreter slot names the real thrower.
+            // Print both error slots to identify the thrower.
             const char* interp_err = "";
             if (Interpreter* interp = self->interpreter()) {
                 interp_err = interp->last_error().c_str();
@@ -317,7 +252,7 @@ void JNICALL FatalError(JNIEnv*, const char* msg) {
     std::abort();
 }
 
-// ── reference ─────────────────────────────────────────────────────────────
+// Reference.
 
 jint JNICALL PushLocalFrame(JNIEnv* env, jint) {
     if (DexJniEnv* self = Self(env)) self->PushLocalFrame();
@@ -394,7 +329,7 @@ jobjectRefType JNICALL GetObjectRefType(JNIEnv* env, jobject obj) {
     return self->IsGlobalRef(Obj(obj)) ? JNIGlobalRefType : JNILocalRefType;
 }
 
-// ── create object ────────────────────────────── ──────────────────────────────
+// Create object.
 
 jobject JNICALL AllocObject(JNIEnv* env, jclass clazz) {
     DexJniEnv* self = Self(env);
@@ -451,12 +386,7 @@ jobject JNICALL NewObject(JNIEnv* env, jclass clazz, jmethodID methodID, ...) {
     return r;
 }
 
-// ── method/field ID ───────────────────────────────────────────────────────
-//
-// A failed lookup throws (NoSuchMethodError / NoSuchFieldError) as the JNI spec
-// requires, instead of quietly returning null. Native code overwhelmingly assumes
-// these succeed and passes the result straight to Call*Method, so a silent null
-// crashed the library at a near-null address with no clue which name was missing.
+// Method/field ID: failed lookups throw per JNI spec, never return silent null.
 
 jmethodID JNICALL GetMethodID(JNIEnv* env, jclass clazz, const char* name, const char* sig) {
     DexJniEnv* self = Self(env);
@@ -565,8 +495,8 @@ jfieldID JNICALL GetStaticFieldID(JNIEnv* env, jclass clazz, const char* name, c
     return reinterpret_cast<jfieldID>(f);
 }
 
-// ── call method instance ───────────────────────── ──────────────────────────
-// Three variants (…, V, A) of 10 return types × 3 groups (virtual, nonvirtual,
+// Call method instance.
+// Three variants (..., V, A) of 10 return types x 3 groups (virtual, nonvirtual,
 // static) = 90 functions. Macro spawns them to avoid 90 similar blocks.
 
 #define DEXRT_CALL_BODY(RET_TYPE, FIELD, RECEIVER, METHOD, VIRTUAL, ARGS_CALL)      \
@@ -830,7 +760,7 @@ void JNICALL CallStaticVoidMethod(JNIEnv* env, jclass c, jmethodID mid, ...) {
     va_end(args);
 }
 
-// ── field instance ────────────────────────────────────────────────────────
+// Field instance.
 
 #define DEXRT_DEFINE_FIELD(NAME, RET_TYPE, CTYPE)                                   \
     RET_TYPE JNICALL Get##NAME##Field(JNIEnv*, jobject obj, jfieldID fid) {         \
@@ -886,9 +816,8 @@ void JNICALL SetObjectField(JNIEnv*, jobject obj, jfieldID fid, jobject v) {
     o->SetField<DexObject*>(f->offset_or_slot, Obj(v));
 }
 
-// ── field static ──────────────────────────────────────────────────────────
-// The value is in the static_values ​​of the field DECLARE class, not the class
-// passed in — the inherited field is still read in the right place.
+// Field static.
+// Static value lives in the declaring class, not the passed class.
 
 DexValue* StaticSlot(jfieldID fid) {
     DexField* f = Fld(fid);
@@ -929,7 +858,7 @@ void JNICALL SetStaticObjectField(JNIEnv*, jclass, jfieldID fid, jobject v) {
     if (DexValue* slot = StaticSlot(fid)) *slot = DexValue::Ref(Obj(v));
 }
 
-// ── string ──────────────────────────────── ─────────────────────────────────
+// String.
 
 jstring JNICALL NewStringUTF(JNIEnv* env, const char* utf) {
     DexJniEnv* self = Self(env);
@@ -1023,7 +952,7 @@ jlong JNICALL GetStringUTFLengthAsLong(JNIEnv*, jstring str) {
     return s != nullptr ? static_cast<jlong>(s->length) : 0;
 }
 
-// ── array ───────────────────────────────── ─────────────────────────────────
+// Array.
 
 jsize JNICALL GetArrayLength(JNIEnv*, jarray array) {
     DexArray* a = Arr(array);
@@ -1109,7 +1038,7 @@ void JNICALL SetObjectArrayElement(JNIEnv*, jobjectArray array, jsize index, job
     a->Set<DexObject*>(index, Obj(val));
 }
 
-// Get<Type>ArrayElements returns a STRAIGHT pointer to the array (no copy) — valid because
+// Get<Type>ArrayElements returns a STRAIGHT pointer to the array (no copy) - valid because
 // heap does not move objects. Release is therefore a no-op.
 #define DEXRT_DEFINE_ARRAY(NAME, ELEM_TYPE, ARRAY_TYPE)                              \
     ELEM_TYPE* JNICALL Get##NAME##ArrayElements(JNIEnv*, ARRAY_TYPE array,           \
@@ -1157,7 +1086,7 @@ void* JNICALL GetPrimitiveArrayCritical(JNIEnv*, jarray array, jboolean* isCopy)
 
 void JNICALL ReleasePrimitiveArrayCritical(JNIEnv*, jarray, void*, jint) {}
 
-// ── native method, monitor, VM ────────────────────────────────────────────
+// Native method, monitor, VM.
 
 jint JNICALL RegisterNatives(JNIEnv* env, jclass clazz, const JNINativeMethod* methods,
                             jint nMethods) {
@@ -1165,7 +1094,7 @@ jint JNICALL RegisterNatives(JNIEnv* env, jclass clazz, const JNINativeMethod* m
     if (self == nullptr) return JNI_ERR;
     // A bad handle here would walk the method lists of whatever the pointer
     // happens to address, and RegisterNatives is called from JNI_OnLoad before
-    // anything else has run — the worst place to corrupt state.
+    // anything else has run - the worst place to corrupt state.
     DexClass* k = CheckedCls(self, clazz);
     if (k == nullptr) {
         ThrowLookupFailure(self, "Ljava/lang/NoClassDefFoundError;",
@@ -1312,12 +1241,7 @@ jobject JNICALL ToReflectedMethod(JNIEnv* env, jclass clazz, jmethodID methodID,
     if (f_handle != nullptr) {
         obj->SetField<int64_t>(f_handle->offset_or_slot, reinterpret_cast<int64_t>(methodID));
     }
-    // A Method with null declaringClass/name is a trap: getName() returns null and
-    // toString() becomes "com.foo.Bar.null()", and Unity's JNIBridge turns that
-    // into NoSuchMethodError "java.lang.Runnable.null()" (cleared by native, then
-    // rethrown empty from bitter.jnibridge.a.invoke). Fill all three fields the
-    // same way LibCore::NewReflectObject does. The declaring class comes from the
-    // method itself (authoritative); the passed clazz is only a fallback.
+    // Fill declaringClass/name; null traps later reflective uses.
     DexClass* declaring = (m->declaring_class != nullptr) ? m->declaring_class
                          : CheckedCls(self, clazz);
     const DexField* f_decl = method_cls->FindInstanceField("declaringClass", "Ljava/lang/Class;");
@@ -1364,7 +1288,7 @@ jobject JNICALL GetModule(JNIEnv*, jclass) { return nullptr; }
 jboolean JNICALL IsVirtualThread(JNIEnv*, jobject) { return JNI_FALSE; }
 jboolean JNICALL HasIdentity(JNIEnv*, jobject) { return JNI_TRUE; }
 
-// ── JavaVM ────────────────────────────────────────────────────────────────
+// JavaVM.
 
 jint JNICALL DestroyJavaVM(JavaVM*) { return JNI_OK; }
 

@@ -210,19 +210,8 @@ public final class ActivityThread {
     }
 
     /**
-     * Run the part of app startup that precedes any Activity: create the declared
-     * AppComponentFactory, then the Application, then call Application.onCreate().
-     *
-     * Android does this before it launches a component, and apps rely on the
-     * ordering. Skipping it — which KuDroid used to — means the factory's and the
-     * Application's static initialisers never run, so any state they populate is
-     * empty when app code later reads it. The resulting failure appears in unrelated
-     * code with no reference to the step that was missed.
-     *
-     * Both names come from the manifest and either may be absent. A failure here is
-     * logged and does not stop the launch: an Activity that does not depend on the
-     * missing initialisation can still come up, which is more useful than refusing
-     * to start at all.
+     * Run pre-Activity startup: factory, then Application, then onCreate().
+     * Failures are logged without stopping the launch.
      */
     private void bootstrapApplication(String factoryName, String appClassName) {
         if (factoryName != null && !factoryName.isEmpty()) {
@@ -335,16 +324,8 @@ public final class ActivityThread {
     }
 
     /**
-     * Pull the missing class name out of a ClassNotFoundException / NoClassDefFoundError.
-     *
-     * KuART reports these with dotted names, sometimes with a ".method" suffix and a
-     * trailing explanation, e.g.
-     *   "java.util.regex.Pattern.compile (class not implemented in KuDroid framework)"
-     *   "java.text.SimpleDateFormat"
-     * Older messages used '/' separators. Both forms are accepted; the previous version
-     * only accepted '/' and therefore never matched anything KuART actually throws.
-     *
-     * Returns null when the throwable is not a missing-class error.
+     * Pull the missing class name from a missing-class error.
+     * Accepts dotted and slash forms; returns null when not such an error.
      */
     private static String extractMissingClassName(Throwable t) {
         for (Throwable c = t; c != null; c = c.getCause()) {

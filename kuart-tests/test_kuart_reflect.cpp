@@ -1,7 +1,7 @@
 // Host test for DexReflect + object java.lang.Class (const-class).
 //
-// K ch b n gi ng  ng ActivityThread d ng th t: Class.forName(t n c  d u ch m)
-// newInstance()   getMethod()   invoke(), g m c  dispatch  ng qua subclass.
+// Mirrors the real ActivityThread path: Class.forName(dotted name) -> newInstance()
+// -> getMethod() -> invoke(), including dispatch through a subclass.
 #include "kudroid/kuart/DexJniEnv.h"
 #include "kudroid/kuart/DexReflect.h"
 
@@ -56,16 +56,16 @@ struct Specs {
     MethodSpec object_ctor;
     MethodSpec base_ctor;
     MethodSpec base_clinit;
-    MethodSpec base_get;      // virtual: tr  v
-    MethodSpec base_set;      // virtual: v = tham s
-    MethodSpec base_twice;    // virtual: tr  v*2 (Sub override th nh v*3)
-    MethodSpec base_static;   // static: tr  5
+    MethodSpec base_get;      // virtual: return v
+    MethodSpec base_set;      // virtual: v = param
+    MethodSpec base_twice;    // virtual: return v*2 (Sub overrides to v*3)
+    MethodSpec base_static;   // static: return 5
     MethodSpec sub_ctor;
     MethodSpec sub_twice;
 
-    MethodSpec iface_ctor;    // Abs kh ng d ng nh ng c n cho ClassSpec
+    MethodSpec iface_ctor;    // Abs unused but needed for ClassSpec
 
-    MethodSpec my_class;      // static: const-class LBase; tr  object
+    MethodSpec my_class;      // static: const-class LBase; return object
 
     Specs() {
         object_ctor.name = "<init>";
@@ -162,7 +162,7 @@ std::printf("=== KuART b c 5: reflection + java.lang.Class ===\n");
     s.object_ctor.registers_size = 1;
     s.object_ctor.ins_size = 1;
 
-    // Base.<init>(): v = 7   ph n bi t object   qua constructor.
+    // Base.<init>(): v = 7 to tell objects apart by constructor.
     {
         std::vector<uint16_t> c;
         Op21s(&c, kOpConst16, 0, 7);
@@ -261,7 +261,7 @@ std::printf("=== KuART b c 5: reflection + java.lang.Class ===\n");
 
     using kudroid::kuart::DexReflect;
 
-    // chuy n  i t n
+    // name conversions
     Check(DexReflect::DottedToDescriptor("com.foo.Base") == "Lcom/foo/Base;",
           "DottedToDescriptor");
     Check(DexReflect::DottedToDescriptor("Lcom/foo/Base;") == "Lcom/foo/Base;",
@@ -315,7 +315,7 @@ Check(reflect.Invoke(get, obj, &self, 1).i == 99, "invoke method c  tham s ");
 "getMethod method kh ng c    null");
     }
 
-    // dispatch  ng qua reflection
+    // correct dispatch via reflection
     {
         kudroid::kuart::DexClass* base = reflect.ForName("com.foo.Base");
         kudroid::kuart::DexClass* sub = reflect.ForName("com.foo.Sub");
@@ -332,7 +332,7 @@ Check(reflect.Invoke(get, obj, &self, 1).i == 99, "invoke method c  tham s ");
 "C NG Method nh ng receiver Sub g i Sub.twice (dispatch  ng)");
     }
 
-    // kh ng instantiate  c
+    // cannot instantiate
     {
         Check(reflect.NewInstance(reflect.ForName("com.foo.Iface")) == nullptr,
 "newInstance tr n interface   null");
@@ -340,7 +340,7 @@ Check(reflect.Invoke(get, obj, &self, 1).i == 99, "invoke method c  tham s ");
 "newInstance tr n abstract class   null");
     }
 
-    // object java.lang.Class t  const-class
+    // java.lang.Class object from const-class
     {
         kudroid::kuart::DexClass* r = linker.FindClass("LR;");
         kudroid::kuart::DexMethod* m =

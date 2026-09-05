@@ -9,9 +9,8 @@
 
 namespace kudroid {
 
-/// register the mapped elf guest module (base/size/path) to crash handler
-///symbolicate is pc located in guest .so (dladdr doesn't know region due to
-///ELF loader mmap should have previously printed "no symbol"). Safety called multiple times.
+/// Register a mapped guest module so the crash handler can symbolicate guest PCs.
+/// Safe to call multiple times.
 extern "C" void kudroid_register_guest_module(void* base, std::size_t size,
                                               const char* path);
 
@@ -20,19 +19,7 @@ extern "C" void kudroid_register_guest_module(void* base, std::size_t size,
 extern "C" bool kudroid_lookup_guest_module(void* addr, char* out, std::size_t outSize);
 
 /// Report a guest module's program headers, for dl_iterate_phdr.
-///
-/// The guest's own libc++abi locates its unwind tables by walking dl_iterate_phdr and
-/// looking for PT_GNU_EH_FRAME. A stub that reports nothing means "no modules loaded", so
-/// _Unwind_RaiseException finds no FDE for the throwing frame and std::terminate runs —
-/// every C++ `throw` inside a guest library becomes an abort. On device that was four
-/// frames of libc++_shared.so above abort(), with no exception message, immediately after
-/// GameActivity_register.
-///
-/// registerEhFrame() cannot substitute: it registers with the HOST unwinder, while a
-/// statically linked guest libc++abi only ever asks dl_iterate_phdr.
-///
-/// `phdrs` must point at the mapped program header table inside the loaded image, and stays
-/// owned by the caller — the image outlives the registration.
+/// Lets the guest unwinder find its EH frames; `phdrs` stays caller-owned.
 extern "C" void kudroid_register_guest_phdrs(void* base, const void* phdrs,
                                             unsigned short phnum);
 
@@ -89,11 +76,7 @@ public:
     void* getSymbolAddress(const char* symbolName);
 
     /// Release the mapping of the ELF FILE, keeping the loaded image.
-    ///
-    /// The file mapping is only needed while parsing, relocating and resolving
-    /// symbols. Holding it for the life of the process doubles the footprint of every
-    /// library — for a 333 MB libminecraftpe.so that is 333 MB of address space kept
-    /// for nothing once the symbol index below has been built.
+    /// Only needed while parsing/relocating; holding it doubles the footprint.
     void releaseFileMapping();
 
     ///phase 2: test execution – call kudroid_add(40, 20) via dynamic notation.
@@ -111,12 +94,8 @@ public:
     void deregisterEhFrame();
 
 private:
-    // internal: map the ELF file read-only instead of copying it into the heap.
-    //
-    // A heap copy is dirty memory the kernel can never reclaim; a file mapping is
-    // clean, so under memory pressure iOS evicts the pages and reads them back from
-    // disk rather than killing the process. For libminecraftpe.so that is the
-    // difference between 333 MB of dirty footprint and none.
+    // Map the ELF file read-only instead of copying it into the heap.
+    // A file mapping stays clean so the kernel can evict it under pressure.
     bool mapFile();
 
     // Build a name -> st_value index from .dynsym, so getSymbolAddress no longer needs
@@ -129,7 +108,7 @@ private:
     std::string          path_;
     void*                base_     = nullptr;
     // The base of the original mmap region (before base_ is adjusted by -minVaddr),
-    // destructor c  th  munmap an to n.
+    // so the destructor can munmap safely.
     void*                allocBase_ = nullptr;
     std::size_t          allocSize_ = 0;
     std::uint64_t        entry_    = 0;
@@ -169,10 +148,6 @@ private:
     std::uint64_t        eh_frame_memsz_ = 0;
 
     // The program header table's own vaddr and count, for dl_iterate_phdr.
-    //
-    // Taken from PT_PHDR when present, else derived from e_phoff — the table is inside the
-    // first PT_LOAD segment, so it is mapped and readable in the loaded image. The guest's
-    // unwinder needs it to find PT_GNU_EH_FRAME; without it every guest `throw` aborts.
     std::uint64_t        phdr_vaddr_ = 0;
     std::uint16_t        phdr_count_ = 0;
 };
@@ -181,24 +156,23 @@ private:
 
 namespace kudroid {
 
-// / tr  v  t n c c th  vi n dt_needed t  m t  i t ng chia s  elf64.
+// Return DT_NEEDED library names from an elf64 shared object.
 std::vector<std::string> parse_elf_dependencies(const char* elf_path);
 
-// / tr ch xu t c c m c lib/arm64-v8a/*.so t  m t t p apk v o outputdirectory.
+// Extract lib/arm64-v8a/*.so entries from an APK into the output directory.
 bool extract_arm64_libs_from_apk(const char* apkPath, const char* outputDirectory,
                                  std::string* error = nullptr);
 
 class LibraryManager {
 public:
-    // / t i m t elf v  t t c  c c ph  thu c dt_needed t  th  m c c a n .
+    // Load an ELF plus all its DT_NEEDED dependencies.
     bool loadRecursive(const std::string& path);
-    // / tr  v  m t k  hi u t  b t k  elf n o  c t i, sau   bionicshim l m d  ph ng.
+    // Resolve a symbol from any loaded ELF, falling back to the bionic shim.
     void* resolveGlobalSymbol(const char* name) const;
-    // / tr  v  m t k  hi u c  th  t  th  vi n  ng d ng ch nh (th  t   n  nh).
+    // Resolve a symbol from the main app library.
     void* resolveAppSymbol(const char* name);
-    // / tr  v  k  hi u t  M I elf  c t i (  s p x p theo t n    n  nh)
-    // / Android g i JNI_OnLoad cho t ng th  vi n  c loadLibrary, n n runner
-    // / ph i g i cho t t c  th  vi n c  export, kh ng ch  lib  u ti n t y  .
+    // Return matches from every loaded ELF (sorted by name).
+    // Android calls JNI_OnLoad per loadLibrary, so the runner must try all exporting libs.
     std::vector<std::pair<std::string, void*>> resolveAllSymbols(const char* name) const;
     void* resolveSymbolInLib(const std::string& libPattern, const char* name) const;
     [[nodiscard]] const std::unordered_map<std::string, std::unique_ptr<ElfLoader>>& libraries() const {
@@ -207,11 +181,8 @@ public:
     [[nodiscard]] const std::string& lastError() const { return lastError_; }
 
 private:
-    // Sorted view of libraries_, rebuilt only when the set of libraries changes.
-    //
-    // Symbol resolution is called once per relocation, which for a game the size of
-    // Minecraft is hundreds of thousands of times. Sorting a fresh vector of eight
-    // std::strings on every one of those calls is pure overhead on the startup path.
+    // Sorted view of libraries_, rebuilt only when the set changes.
+    // Resolution runs per relocation, so re-sorting every call is overhead.
     const std::vector<std::string>& sortedKeys() const;
     void invalidateCaches();
 
@@ -223,17 +194,7 @@ private:
     mutable bool sortedKeysValid_ = false;
 
     // Resolved symbol addresses, including negative results.
-    //
-    // Repeated lookups of the same symbol are the norm, not the exception: one
-    // startup produced 55748 identical resolutions of
-    // _ZTVN10__cxxabiv120__si_class_type_infoE, each one a full scan of every
-    // loaded ELF plus a log line. That was 30 MB of stderr in which the same five
-    // lines accounted for 111k of 115k total, burying every real diagnostic.
-    //
-    // Caching a miss is as important as caching a hit — a symbol that is absent gets
-    // asked for just as often and costs the same full scan. Both maps are dropped
-    // whenever the library set changes, since a newly loaded ELF can turn a former
-    // miss into a hit.
+    // Both maps are dropped when the library set changes.
     mutable std::unordered_map<std::string, void*> globalSymbolCache_;
     mutable std::unordered_map<std::string, void*> appSymbolCache_;
 };

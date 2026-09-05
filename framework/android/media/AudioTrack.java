@@ -4,26 +4,7 @@ import java.nio.ByteBuffer;
 
 /**
  * Real PCM output, backed by the host's audio queue.
- *
- * Why this is not a stub. FMOD — which is what Unity games ship for audio — drives
- * AudioTrack directly from Java: getMinBufferSize, construct, getState, play, write.
- * The generated stub had a single empty constructor, so every one of those was
- * auto-stubbed to return 0, and FMOD read that as "buffer size 0, state uninitialised":
- *
- *     [KuART][MISSING-METHOD] Auto-stubbing: AudioTrack->getMinBufferSize(III)I
- *     [E/FMOD] AudioTrack failed to initialize (status 0)
- *
- * It then retried forever. The thread sampler caught the loop: pc moving inside
- * libsystem_malloc with lr in DexClassLinker::FindClass, five samples ten seconds apart,
- * CPU climbing — a spin, not a park. ULTRAKILL never reached its first frame.
- *
- * getState() is the specific check that matters: FMOD compares it against
- * STATE_INITIALIZED, so returning 0 is a permanent failure rather than a degraded mode,
- * and no amount of retrying can get past it.
- *
- * The native methods below reach AudioShim, which already owns a real CoreAudio
- * AudioQueue on iOS — the same path OpenSL ES and AAudio use. Sound is genuinely
- * produced; this is not a silence-shaped stub that merely lets FMOD continue.
+ * FMOD needs a valid buffer size and STATE_INITIALIZED; zero fails permanently.
  */
 public class AudioTrack {
 
@@ -62,7 +43,7 @@ public class AudioTrack {
     private final int mBufferSizeInBytes;
     private float mVolume = 1.0f;
 
-    // ── native bridge (implemented in src/kuart/LibCore.cpp) ─────────────────
+    // Native bridge.
 
     private static native int nativeGetMinBufferSize(int sampleRateInHz, int channelCount,
                                                      int audioFormat);
@@ -81,11 +62,9 @@ public class AudioTrack {
     private static native int nativeGetPlaybackHeadPosition(long track);
     private static native int nativeGetLatencyFrames(long track);
 
-    // ── channel configuration ────────────────────────────────────────────────
+    // Channel configuration.
 
-    // AudioFormat.CHANNEL_OUT_* is a bit mask, and the count is how many bits are set.
-    // FMOD passes CHANNEL_OUT_STEREO (0xC) and Unity's own code sometimes passes the
-    // deprecated CHANNEL_CONFIGURATION_* values, which have the same meaning.
+    // Channel mask bit count; unknown masks fall back to bit counting.
     private static int channelCountFromConfig(int channelConfig) {
         switch (channelConfig) {
             case AudioFormat.CHANNEL_OUT_MONO:   // 0x4
@@ -110,23 +89,17 @@ public class AudioTrack {
         }
     }
 
-    // ── construction ─────────────────────────────────────────────────────────
+    // Construction.
 
     /**
      * The minimum buffer size for these parameters, in bytes.
-     *
-     * Returning 0 or a negative value here is fatal to FMOD, which treats it as
-     * ERROR_BAD_VALUE and gives up on the device. The host decides the real figure —
-     * AudioShim knows the queue's period — and this only falls back to a conservative
-     * value if the host has nothing to say.
+     * Zero is fatal to FMOD, so fall back to a conservative size.
      */
     public static int getMinBufferSize(int sampleRateInHz, int channelConfig, int audioFormat) {
         final int channels = channelCountFromConfig(channelConfig);
         final int fromHost = nativeGetMinBufferSize(sampleRateInHz, channels, audioFormat);
         if (fromHost > 0) return fromHost;
-        // Roughly 20ms, rounded to a frame boundary. Chosen over ERROR_BAD_VALUE because
-        // a caller that gets an error stops, while a caller that gets a workable size
-        // plays audio.
+        // Roughly 20ms fallback; an error would stop the caller.
         final int frames = Math.max(sampleRateInHz, 8000) / 50;
         return frames * channels * bytesPerSample(audioFormat);
     }
@@ -165,7 +138,7 @@ public class AudioTrack {
         mState = nativeTrack != 0 ? STATE_INITIALIZED : STATE_UNINITIALIZED;
     }
 
-    // ── state ────────────────────────────────────────────────────────────────
+    // State.
 
     public int getState() { return mState; }
     public int getPlayState() { return mPlayState; }
@@ -184,12 +157,7 @@ public class AudioTrack {
         return mChannelCount == 1 ? AudioFormat.CHANNEL_OUT_MONO : AudioFormat.CHANNEL_OUT_STEREO;
     }
 
-    /**
-     * Frames consumed by the device so far.
-     *
-     * FMOD polls this to decide how much more to write, so a value frozen at 0 makes it
-     * believe the device never drains and it stops writing. The host counts real frames.
-     */
+    /** Frames consumed by the device so far. FMOD polls this to pace writes. */
     public int getPlaybackHeadPosition() {
         return nativeTrack != 0 ? nativeGetPlaybackHeadPosition(nativeTrack) : 0;
     }
@@ -202,7 +170,7 @@ public class AudioTrack {
         return rate > 0 ? rate : 48000;
     }
 
-    // ── transport ────────────────────────────────────────────────────────────
+    // Transport.
 
     public void play() throws IllegalStateException {
         if (mState != STATE_INITIALIZED) {
@@ -241,7 +209,7 @@ public class AudioTrack {
         mPlayState = PLAYSTATE_STOPPED;
     }
 
-    // ── writing ──────────────────────────────────────────────────────────────
+    // Writing.
 
     public int write(byte[] audioData, int offsetInBytes, int sizeInBytes) {
         if (mState != STATE_INITIALIZED || audioData == null) return ERROR_INVALID_OPERATION;
@@ -278,7 +246,7 @@ public class AudioTrack {
         return nativeWrite(nativeTrack, copy, 0, n);
     }
 
-    // ── volume ───────────────────────────────────────────────────────────────
+    // Volume.
 
     public int setVolume(float gain) {
         mVolume = gain;
@@ -309,7 +277,7 @@ public class AudioTrack {
         return nativeTrack != 0 ? nativeGetLatencyFrames(nativeTrack) : 0;
     }
 
-    // ── builder, for code that uses the modern API ───────────────────────────
+    // Builder.
 
     public static class Builder {
         private AudioFormat mFormat;

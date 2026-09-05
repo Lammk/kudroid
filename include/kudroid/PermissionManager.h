@@ -42,7 +42,7 @@ public:
     // Get the list of permission groups
     const std::vector<PermissionGroup>& getPermissionGroups() const;
 
-    // JSON export cho Swift Shell
+    // JSON export for Swift Shell
     std::string getAppPermissionsJson(const std::string& packageName);
     void setAppPermissionsFromJson(const std::string& packageName, const std::string& jsonStr);
 

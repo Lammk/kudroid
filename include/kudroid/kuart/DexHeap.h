@@ -1,12 +1,5 @@
-// Memory allocation for object/metadata c a DEX runtime.
-//
-// NO GC: allocated and kept until app exit. L  do ch p nh n  c   trong
-// KuDroid, code Java ch  ch y l c onCreate v  khi h ng touch event r i  y
-// xu ng C++; game loop n m ho n to n trong libminecraftpe.so. L ng r c Java
-// sinh ra kh ng  ng k  so v i v ng  i m t l n ch y app.
-//
-// C p theo block l n r i bump pointer: nhanh h n malloc t ng object v  gi
-// object c a c ng m t class g n nhau (locality t t cho interpreter).
+// Bump-pointer allocator for DEX objects/metadata (no GC; kept until app exit).
+// Java runs only briefly, so the retained memory stays bounded.
 #ifndef KUDROID_KUART_DEXHEAP_H
 #define KUDROID_KUART_DEXHEAP_H
 
@@ -25,7 +18,7 @@ public:
     DexHeap(const DexHeap&) = delete;
     DexHeap& operator=(const DexHeap&) = delete;
 
-    // Tr  v  v ng   zero-fill, align 8. nullptr n u h t b  nh .
+    // Return zero-filled, 8-aligned memory, or nullptr when out of memory.
     void* Allocate(size_t bytes);
 
     template <typename T>
@@ -34,7 +27,7 @@ public:
         return mem != nullptr ? new (mem) T() : nullptr;
     }
 
-    // Chu i cho descriptor/t n   copy v o heap   DexClass gi  con tr  b n.
+    // Descriptor/name strings are copied into the heap for stable pointers.
     const char* InternString(const char* s);
 
     size_t BytesAllocated() const { return bytes_allocated_; }

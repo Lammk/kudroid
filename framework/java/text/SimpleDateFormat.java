@@ -102,7 +102,7 @@ public class SimpleDateFormat extends DateFormat {
         creationYear = c.get(Calendar.YEAR) + 80;
     }
 
-    // ── formatting ──
+    // Formatting.
 
     @Override
     public StringBuffer format(Date date, StringBuffer buffer, FieldPosition field) {
@@ -288,7 +288,7 @@ public class SimpleDateFormat extends DateFormat {
         buffer.append(digits);
     }
 
-    // ── parsing ──
+    // Parsing.
 
     @Override
     public Date parse(String string) throws ParseException {

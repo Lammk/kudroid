@@ -1,17 +1,6 @@
-// Generate DEX 035 file from class/method/field spec   d ng cho host test c a dexrt.
-//
-// Dev machine does not have Android SDK n n kh ng th  javac+d8; builder n y thay th .
-// Only in tests/, not production code.
-//
-// Ph n kh  c a  nh d ng DEX l  c c b ng id ph i s p th  t  t ng d n theo ti u
-// ch  ri ng (spec y u c u, v  binary search c a libdexfile d a v o  ):
-// string_ids  : theo gi  tr  UTF-16 c a chu i
-//   type_ids    : theo descriptor_idx
-// proto_ids   : theo (return_type_idx, danh s ch tham s )
-//   field_ids   : theo (class_idx, name_idx, type_idx)
-//   method_ids  : theo (class_idx, name_idx, proto_idx)
-// Builder thu th p tr c, sort, r i m i c p index   n n caller khai b o theo
-// th  t  n o c ng  c.
+// Build DEX 035 files from class/method/field spec (no javac+d8 on dev machines).
+// Test-only. Id tables are collected, sorted per spec, then indexed, so callers
+// may declare entities in any order.
 #ifndef KUDROID_TESTS_DEX_BUILDER_H
 #define KUDROID_TESTS_DEX_BUILDER_H
 
@@ -62,7 +51,7 @@ struct MethodRefSpec {
 };
 
 struct CatchSpec {
-    std::string type;  // descriptor ki u exception; r ng = catch-all (finally)
+    std::string type;  // exception type descriptor; empty = catch-all (finally)
     uint16_t handler_pc = 0;
 };
 
@@ -78,7 +67,7 @@ struct MethodSpec {
     std::vector<std::string> params;
     uint32_t access_flags = 0x1;
 
-    // Bytecode d ng code unit (16-bit). R ng = method abstract/native.
+    // Bytecode in 16-bit code units. Empty = abstract/native method.
     std::vector<uint16_t> code;
     uint16_t registers_size = 0;
     uint16_t ins_size = 0;
@@ -96,7 +85,7 @@ struct MethodSpec {
     static char ShortyChar(const std::string& descriptor) {
         if (descriptor.empty()) return 'V';
         const char c = descriptor[0];
-        // M i ki u tham chi u (L.../[...)  u l  'L' trong shorty.
+        // Every reference type (L.../[...] maps to 'L' in shorty.
         return (c == '[' || c == 'L') ? 'L' : c;
     }
 };
@@ -118,9 +107,8 @@ struct ClassSpec {
     std::vector<MethodSpec> direct_methods;
     std::vector<MethodSpec> virtual_methods;
 
-    // Entity ch   c bytecode tham chi u (const-string "x", new-array [I)
-    // kh ng xu t hi n   field/method n o n n builder kh ng t  th y   khai b o
-    // y   ch ng v o b ng string_ids/type_ids.
+    // Entities only referenced by bytecode (const-string "x", new-array [I)
+    // appear in no field/method; declare them here so they enter string_ids/type_ids.
     std::vector<std::string> extra_strings;
     std::vector<std::string> extra_types;
 
@@ -138,8 +126,7 @@ public:
         return Emit(classes);
     }
 
-    // C c getter d i  y ch  h p l  SAU Build()   bytecode tham chi u entity
-    // b ng index, m  index ch  ch t  c sau khi   sort xong m i b ng.
+    // Getters below are valid only AFTER Build(): bytecode uses sorted-table indices.
     uint32_t StringIndexOf(const std::string& s) const { return string_idx_.at(s); }
     uint32_t TypeIndexOf(const std::string& descriptor) const {
         return type_idx_.at(descriptor);
@@ -199,9 +186,9 @@ private:
         }
     };
 
-    // Pha 1: thu th p
+    // Phase 1: collect
     void Collect(const std::vector<ClassSpec>& classes) {
-        // Chu i v  type tr c, v  proto/field/method d ng index c a ch ng.
+        // Strings and types first; proto/field/method use their indices.
         for (const ClassSpec& c : classes) {
             AddType(c.descriptor);
             if (!c.superclass.empty()) AddType(c.superclass);
@@ -242,13 +229,13 @@ private:
             }
         }
 
-        // Ch t index cho string v  type (  sort nh  std::set).
+        // Freeze string/type indices (already sorted via std::set).
         uint32_t idx = 0;
         for (const std::string& s : string_set_) string_idx_[s] = idx++;
         idx = 0;
         for (const std::string& t : type_set_) type_idx_[t] = idx++;
 
-        // Gi  m i d ng proto/field/method v  c n type_idx_   ch t.
+        // Build proto/field/method now; type_idx_ is frozen.
         for (const ClassSpec& c : classes) {
             const uint32_t class_type = type_idx_[c.descriptor];
             for (const FieldSpec& f : c.static_fields) AddFieldKey(class_type, f);
@@ -309,9 +296,9 @@ private:
         pending_methods_.push_back({class_type, key, string_idx_[m.name]});
     }
 
-    // ── Pha 2: ghi file ──
+    // ── Phase 2: emit file ──
     std::vector<uint8_t> Emit(const std::vector<ClassSpec>& classes) {
-        // proto_idx_   ch t n n method_set_ m i d ng  c.
+        // proto_idx_ is frozen, so method_set_ can now be built.
         for (const auto& pm : pending_methods_) {
             method_set_.insert(MethodKey{pm.class_idx, proto_idx_[pm.proto], pm.name_idx});
         }
@@ -350,7 +337,7 @@ private:
             data.push_back(0);
         }
 
-        // type_list cho proto c  tham s , v  cho interfaces c a class
+        // type_list for protos with params and for class interfaces
         std::map<std::vector<uint32_t>, uint32_t> type_list_offs;
         const auto emit_type_list = [&](const std::vector<uint32_t>& types) -> uint32_t {
             if (types.empty()) return 0;
@@ -376,7 +363,7 @@ private:
             interfaces_off[ci] = emit_type_list(iface_types);
         }
 
-        // code_item   sinh tr c class_data_item v  c n offset c a ch ng.
+        // code_item first; class_data_item needs their offsets.
         std::map<const MethodSpec*, uint32_t> code_offs;
         for (const ClassSpec& c : classes) {
             for (const auto* list : {&c.direct_methods, &c.virtual_methods}) {
@@ -391,15 +378,14 @@ private:
                     PutU32(&data, 0);  // debug_info_off
                     PutU32(&data, static_cast<uint32_t>(m.code.size()));
                     for (uint16_t u : m.code) PutU16(&data, u);
-                    // Padding ch  t n t i khi C  try_item (spec)   try_items ph i
-                    // align 4 m  insns c  th  l  s  code unit.
+                    // Padding only when try_items exist: they need 4-byte
+                    // alignment but insns may be an odd number of code units.
                     if (!m.tries.empty() && m.code.size() % 2 != 0) PutU16(&data, 0);
 
                     if (m.tries.empty()) continue;
 
-                    // handler_off_ t nh t   u encoded_catch_handler_list, m
-                    // list n m SAU m ng try_item   ph i sinh list ra buffer t m
-                    // tr c   bi t offset, r i m i ghi try_item.
+                    // Handler offsets are relative to the handler list after try_items,
+                    // so build the list in a temp buffer first, then write try_items.
                     std::vector<uint8_t> handler_list;
                     Leb128(&handler_list, static_cast<uint32_t>(m.tries.size()));
                     std::vector<uint32_t> handler_offs;
@@ -416,8 +402,8 @@ private:
                                 ++typed;
                             }
                         }
-                        // size > 0: ch  c  handler c  ki u. size <= 0: |size|
-                        // handler c  ki u r i t i catch_all_addr.
+                        // size > 0: typed handlers only. size <= 0: |size|
+                        // typed handlers then catch_all_addr.
                         SLeb128(&handler_list,
                                 catch_all ? -static_cast<int32_t>(typed)
                                           : static_cast<int32_t>(typed));
@@ -455,7 +441,7 @@ private:
             Leb128(&data, static_cast<uint32_t>(c.direct_methods.size()));
             Leb128(&data, static_cast<uint32_t>(c.virtual_methods.size()));
 
-            // Index trong class_data_item l u d ng hi u s  n n ph i s p t ng d n.
+            // class_data_item stores index diffs, so entries must be ascending.
             const auto emit_fields = [&](const std::vector<FieldSpec>& fields) {
                 std::vector<std::pair<uint32_t, const FieldSpec*>> sorted;
                 for (const FieldSpec& f : fields) {
@@ -524,8 +510,8 @@ private:
         out.reserve(file_size);
         const uint8_t kMagic[8] = {'d', 'e', 'x', '\n', '0', '3', '5', '\0'};
         out.insert(out.end(), kMagic, kMagic + 8);
-        PutU32(&out, 0);                  // checksum,  i n sau
-        out.resize(out.size() + 20, 0);   // signature SHA-1, kh ng ki m tra
+        PutU32(&out, 0);                  // checksum, filled in later
+        out.resize(out.size() + 20, 0);   // SHA-1 signature, not verified
         PutU32(&out, file_size);
         PutU32(&out, kHeaderSize);
         PutU32(&out, 0x12345678);
@@ -616,8 +602,8 @@ private:
         bool more = true;
         while (more) {
             uint8_t byte = value & 0x7F;
-            value >>= 7;  // d ch ph i c  d u: -1 lu n c n -1
-            // Bit d u c a byte ph i kh p d u ph n c n l i, n u kh ng c n th m byte.
+            value >>= 7;  // arithmetic shift: -1 stays -1
+            // The byte's sign bit must match the rest, else emit another byte.
             if ((value == 0 && (byte & 0x40) == 0) || (value == -1 && (byte & 0x40) != 0)) {
                 more = false;
             } else {

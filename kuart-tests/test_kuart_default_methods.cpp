@@ -1,32 +1,6 @@
-// test_kuart_default_methods.cpp — interface default method resolution.
-//
-// Why this exists. ULTRAKILL's log carried
-//
-//     JNIBridge error: Java interface default methods are only supported since Android Oreo
-//
-// on a runtime reporting SDK_INT 29, so the version gate was satisfied and the failure was
-// Unity discovering, by trying, that default methods do not work here. Two defects sat
-// behind it, and only one is fixed by this file — the other is java.lang.invoke, see the
-// note at the bottom.
-//
-// The resolution defect: DexClass::FindVirtualMethod walked the interface graph depth-first
-// and returned the FIRST match, but JVMS 5.4.3.3 requires the MAXIMALLY SPECIFIC one. For
-// `class C implements J, I` where `I extends J` and both declare `f()`, I's version is what
-// Java runs — verified against javac and a real JVM, which print I's value. Depth-first
-// order returned J's, so the guest silently ran the implementation that had been
-// overridden. A wrong answer rather than an error, which is why nothing pointed at it.
-//
-// A second point is pinned here without having been an observed failure: an ABSTRACT
-// declaration in the class chain must not outrank a concrete default. javac will not emit
-// the shape where that matters — it rejects
-// `abstract class B implements I { public abstract int f(); } class D extends B {}` with
-// "D is not abstract and does not override abstract method f()" — but KuART loads DEX from
-// any producer, and Kotlin, obfuscators and hand-written DEX are not bound by javac's
-// check. The tests below use exactly that shape, so they cover ground javac cannot reach.
-//
-// These are pinned with real bytecode rather than by calling FindVirtualMethod directly,
-// because the defect was only visible through a call: the resolver returning a plausible
-// DexMethod* is exactly what made it hard to see.
+// test_kuart_default_methods.cpp — interface default method resolution per JVMS 5.4.3.3.
+// Depth-first search returned the first match instead of the most specific, silently
+// running overridden bodies; abstract declarations must not outrank concrete defaults.
 #include "kudroid/framework_dex_bytes.h"
 #include "kudroid/kuart/DexClassLinker.h"
 #include "kudroid/kuart/DexJniEnv.h"

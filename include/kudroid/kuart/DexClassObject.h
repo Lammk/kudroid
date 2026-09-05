@@ -1,12 +1,6 @@
-// Object representing java.lang.Class cho bytecode.
-//
-// L U   ph n bi t hai c ch bi u di n class trong KuART:
-// - `jclass` c a JNI = DexClass* cast th ng (native ch  d ng l m handle).
-// - Gi  tr  Java ki u java.lang.Class = DexClassObject* (const-class,
-// Object.getClass(), Class.forName())   ph i l  DexObject th t v  bytecode
-// g i method tr n n  v  c  th  c t v o field/m ng.
-// M i DexClass c  t i  a M T DexClassObject (cache   DexClass::class_object)
-// n n `Foo.class == Foo.class` v n  ng.
+// Object representing java.lang.Class for bytecode.
+// Distinguishes JNI jclass (DexClass* handle) from Java Class values (real DexObject).
+// Each DexClass has at most one DexClassObject, so `Foo.class == Foo.class` holds.
 #ifndef KUDROID_KUART_DEXCLASSOBJECT_H
 #define KUDROID_KUART_DEXCLASSOBJECT_H
 
