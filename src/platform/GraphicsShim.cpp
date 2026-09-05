@@ -988,6 +988,13 @@ extern "C" uint32_t bionic_vkCreateSwapchainKHR(void* device, const void* create
     return r;
 }
 
+// Run-end reset: present/acquire numbering restarts so the next run's log
+// starts at #1 instead of continuing the previous run's sequence.
+extern "C" void kudroid_gpu_note_run_end(void) {
+    s_presentCount.store(0, std::memory_order_relaxed);
+    s_acquireCount.store(0, std::memory_order_relaxed);
+}
+
 extern "C" PFN_vkVoidFunction bionic_vkGetDeviceProcAddr(VkDevice device, const char* pName) {
     if (!pName) return nullptr;
     // Diagnostic: tap presents/acquires; pure passthrough, only for logs.

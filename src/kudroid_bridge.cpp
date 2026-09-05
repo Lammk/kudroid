@@ -10,10 +10,12 @@
 #include "kudroid/KuArtRuntime.h"
 #include "kudroid/platform/JavaCanvasRenderer.h"
 #include "kudroid/NativeCallTelemetry.h"
+#include "kudroid/abi/BlockingWaitRegistry.h"
 #include "kudroid/abi/GuestSignals.h"
 #include "kudroid/debug/FrameWalk.h"
 #include <cstdio>
 #include <cstdlib>
+#include <chrono>
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -1792,6 +1794,11 @@ extern "C" void kudroid_blit_canvas_to_layer(void* layer, const void* bits, int 
 
 static std::atomic<bool> s_isApkRunning{false};
 
+// One in-flight teardown: X, viewWillDisappear and deinit can each post DESTROY.
+// File scope so run end can re-arm it; resetting right after unbind allowed a
+// second DESTROY into a half-destroyed engine.
+static std::atomic<bool> s_stopping{false};
+
 extern "C" void kudroid_unbind_metal_layer(void) {
     g_metalLayer = nullptr;
     g_metalLayerWidth = 0;
@@ -2260,6 +2267,8 @@ int guestLibraryOwns(void* handle) {
 
 }  // namespace
 
+extern "C" void kudroid_gpu_note_run_end(void);
+
 extern "C" const char* kudroid_run_apk(const char* appName) {
     if (s_isApkRunning.exchange(true)) {
         kudroid_android_log_message(3, "kudroid_core", "kudroid_run_apk: APK is already running in background, ignoring duplicate launch request.");
@@ -2271,6 +2280,8 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
 
     kudroid::native_run_begin();
     kudroid::native_phase("apk-run-enter");
+    // Re-arm teardown: a wedged run may never reach run end to reset it.
+    s_stopping.store(false);
 
     std::string log;
     appendTestHeader(log, "Run APK Native Libraries", appName);
@@ -3067,6 +3078,12 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                           std::string(kuart_last_error()));
                         }
                         kudroid::native_phase("activity-thread-after-main");
+                        // Guest loop exited: drop run-scoped state so the next run
+                        // starts clean (counters, stale wait slots, teardown guard).
+                        // Safe now — no guest thread is alive to own this state.
+                        kudroid_gpu_note_run_end();
+                        kudroid::blocking_wait_reset_for_test();
+                        s_stopping.store(false);
                     }
                 }
             }
@@ -4141,15 +4158,16 @@ extern "C" void kudroid_stop_app(void) {
     // Guarded to one in-flight teardown: X, viewWillDisappear and deinit can each
     // post DESTROY, and a second post races the first's onDestroy->nativeDone,
     // destroying an engine that is already half destroyed.
-    static std::atomic<bool> s_stopping{false};
     bool expected = false;
     if (!s_stopping.compare_exchange_strong(expected, true)) return;
     std::thread([] {
         kuart_send_lifecycle_event(103); // DESTROY_ACTIVITY
-        // Unbind only after the guest has been told to stop, so a render still in
-        // flight does not have the layer pulled out from under it.
+        // Wait for any frame in flight before unbinding: pulling the layer
+        // mid-present left teardown wedged in nativeDone waiting on gfx drain.
+        for (int i = 0; i < 200 && kudroid::native_frame_in_flight() > 0; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
         kudroid_unbind_metal_layer();
-        s_stopping.store(false);
     }).detach();
 }
 

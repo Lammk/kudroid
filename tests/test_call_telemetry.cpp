@@ -61,6 +61,7 @@ using kudroid::java_call_should_trace;
 using kudroid::native_call_enter;
 using kudroid::native_call_exit;
 using kudroid::native_call_stage;
+using kudroid::native_frame_in_flight;
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -427,6 +428,25 @@ void test_null_names_do_not_crash() {
     java_call_exit();
 }
 
+void test_frame_in_flight_counts_renders() {
+    std::printf("[teardown] native_frame_in_flight tracks render frames\n");
+    call_telemetry_reset_for_test();
+
+    Check(native_frame_in_flight() == 0, "idle at start");
+    native_call_enter("Lcom/unity3d/player/UnityPlayer;", "nativeDone", "()Z", 0);
+    Check(native_frame_in_flight() == 0, "non-render calls are ignored");
+    native_call_enter("Lcom/unity3d/player/UnityPlayer;", "nativeRender", "()Z", 0);
+    Check(native_frame_in_flight() == 1, "render enter counts one frame");
+    native_call_enter("Lbitter/jnibridge/JNIBridge;", "invoke", "(I)V", 0);
+    Check(native_frame_in_flight() == 1, "nested non-render calls do not change it");
+    native_call_exit();
+    Check(native_frame_in_flight() == 1, "nested exit keeps the outer frame");
+    native_call_exit();
+    Check(native_frame_in_flight() == 0, "render exit clears it");
+    native_call_exit();
+    Check(native_frame_in_flight() == 0, "outer exit stays at zero");
+}
+
 // Overflowing the per-thread depth must degrade to losing the innermost names, never
 // to corrupting the outer frame — which is the one the report leads with.
 void test_depth_overflow_preserves_the_outer_frame() {
@@ -481,6 +501,7 @@ int main() {
     test_a_new_outer_call_gets_a_fresh_identity();
     test_unmatched_exit_is_safe();
     test_null_names_do_not_crash();
+    test_frame_in_flight_counts_renders();
     test_depth_overflow_preserves_the_outer_frame();
     test_java_trace_filter();
 

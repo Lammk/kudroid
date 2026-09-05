@@ -1971,7 +1971,19 @@ extern "C" bool bionic_handle_guest_syscall_trap(void* context) {
 
 // Wrappers previously bound to the dummy; on arm64/Linux these match the host signatures.
 extern "C" ssize_t bionic_pread64(int fd, void* buf, size_t count, off_t offset) {
-    return ::pread(fd, buf, count, offset);
+    const ssize_t ret = ::pread(fd, buf, count, offset);
+    // Diagnostic: short reads on asset/bank streaming corrupt async loads.
+    if ((ret >= 0 && static_cast<size_t>(ret) < count) || ret < 0) {
+        static std::atomic<int> s_logged{0};
+        if (s_logged.load() < 30) {
+            ++s_logged;
+            std::fprintf(stderr,
+                         "[KuDroidIO] pread64 fd=%d count=%zu offset=%lld ret=%zd%s\n",
+                         fd, count, static_cast<long long>(offset), ret,
+                         ret < 0 ? " ERR" : " SHORT");
+        }
+    }
+    return ret;
 }
 extern "C" ssize_t bionic_pwrite64(int fd, const void* buf, size_t count, off_t offset) {
     return ::pwrite(fd, buf, count, offset);

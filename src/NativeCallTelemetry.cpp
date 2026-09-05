@@ -171,6 +171,20 @@ void start_watchdog_once();
 
 }  // namespace
 
+namespace {
+
+// Render-frame tracking for teardown: incremented on nativeRender enter, cleared
+// on exit. Lives outside the anonymous block so other TUs can read it.
+bool is_render_frame(const char* method) {
+    return method != nullptr && std::strcmp(method, "nativeRender") == 0;
+}
+
+}  // namespace
+
+std::atomic<int> g_frame_in_flight{0};
+
+int native_frame_in_flight() { return g_frame_in_flight.load(std::memory_order_relaxed); }
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Snapshot
 // ─────────────────────────────────────────────────────────────────────────────
@@ -266,6 +280,7 @@ void call_telemetry_reset_for_test() {
     t_record = nullptr;
     g.fatal_signal.store(0, std::memory_order_relaxed);
     g.fatal_thread_id.store(0, std::memory_order_relaxed);
+    g_frame_in_flight.store(0, std::memory_order_relaxed);
 }
 
 namespace {
@@ -474,6 +489,9 @@ void native_call_enter(const char* class_name, const char* method,
     // Published last: the watchdog reads the depth with acquire before touching any
     // frame, so it can never see one that is still being filled in.
     r->native_depth.store(depth + 1, std::memory_order_release);
+    if (depth < kMaxNativeDepth && is_render_frame(method)) {
+        g_frame_in_flight.fetch_add(1, std::memory_order_relaxed);
+    }
 
     start_watchdog_once();
 }
@@ -506,6 +524,10 @@ void native_call_exit() {
     if (r == nullptr) return;
     const unsigned depth = r->native_depth.load(std::memory_order_relaxed);
     if (depth == 0) return;
+    // Same-thread read of our own record: only this thread writes it.
+    if (depth <= kMaxNativeDepth && is_render_frame(r->native[depth - 1].method)) {
+        g_frame_in_flight.fetch_sub(1, std::memory_order_relaxed);
+    }
     // Popping restores the enclosing frame by construction. That is the whole fix:
     // the outer call's identity was never saved, so it could not be restored, and the
     // watchdog reported the inner call's name against the outer call's clock.

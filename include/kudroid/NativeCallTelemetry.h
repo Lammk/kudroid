@@ -21,6 +21,10 @@ void native_call_enter(const char* class_name, const char* method,
 void native_call_stage(const char* stage);
 void native_call_exit();
 
+// Frames currently inside UnityPlayer.nativeRender. Teardown waits for zero
+// before pulling the GPU layer so no present lands on an unbound surface.
+int native_frame_in_flight();
+
 // Tell the watchdog a thread has taken a fatal signal.
 //
 // After this, a native call that never returns is a CRASH, not a hang, and the

@@ -7,6 +7,9 @@
 #include <cstdlib>
 #include <cstring>
 
+#include <atomic>
+#include <cstdio>
+
 namespace kudroid {
 namespace kuart {
 
@@ -1166,6 +1169,19 @@ void* JNICALL GetDirectBufferAddress(JNIEnv*, jobject buf) {
     const DexField* f_addr = obj->clazz->FindInstanceField("address", "J");
     if (f_addr != nullptr) {
         int64_t addr = obj->GetField<int64_t>(f_addr->offset_or_slot);
+        // Diagnostic: native writers mix through this pointer; 0 means crash.
+        static std::atomic<int> s_logged{0};
+        const int n = s_logged.load();
+        if (n < 8 || (addr == 0 && n < 20)) {
+            ++s_logged;
+            int32_t cap = -1;
+            if (const DexField* f_cap = obj->clazz->FindInstanceField("capacity", "I")) {
+                cap = obj->GetField<int32_t>(f_cap->offset_or_slot);
+            }
+            std::fprintf(stderr, "[KuDroidBuf] GetDirectBufferAddress addr=%p cap=%d%s\n",
+                         reinterpret_cast<void*>(static_cast<uintptr_t>(addr)), cap,
+                         addr == 0 ? " NULL-DEST" : "");
+        }
         return reinterpret_cast<void*>(addr);
     }
     return nullptr;
