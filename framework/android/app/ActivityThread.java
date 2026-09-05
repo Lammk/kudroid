@@ -766,7 +766,7 @@ public final class ActivityThread {
         }
         try {
             if (Looper.myLooper() != null) {
-                Looper.myLooper().quit();
+                Looper.myLooper().quitForTeardown();
             }
         } catch (Throwable ignored) {}
         sCurrentActivityThread = null;

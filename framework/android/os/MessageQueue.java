@@ -10,7 +10,29 @@ public final class MessageQueue {
     private Message mMessages; // head of the queue
     private boolean mQuitting = false;
 
-    MessageQueue() {}
+    /**
+     * False for the main looper: quitting it kills the process's event pump.
+     * Matches AOSP, where quit() on the main queue throws instead of silently
+     * ending the session (which is exactly how a stray quit becomes a mystery
+     * "session ended" with no exception anywhere).
+     */
+    private final boolean mQuitAllowed;
+    private final String mOwnerName;
+
+    MessageQueue() {
+        this(true);
+    }
+
+    MessageQueue(boolean quitAllowed) {
+        mQuitAllowed = quitAllowed;
+        String name;
+        try {
+            name = Thread.currentThread().getName();
+        } catch (Throwable t) {
+            name = "?";
+        }
+        mOwnerName = name;
+    }
 
     /**
      * Enqueue a message sorted by 'when' timestamp.
@@ -33,6 +55,8 @@ public final class MessageQueue {
         }
         synchronized (this) {
             if (mQuitting) {
+                android.util.Log.w("KuLooperQuit", "message what=" + msg.what
+                        + " dropped: queue of " + mOwnerName + " already quitting");
                 return false;
             }
 
@@ -191,8 +215,32 @@ public final class MessageQueue {
 
     /**
      * exit queue.
+     *
+     * Like AOSP, quitting the MAIN queue throws instead of silently returning
+     * null from next() forever: a stray quit (game, plugin, Swappy) then names
+     * itself in the exception instead of ending the session with no trace.
      */
     void quit() {
+        String caller;
+        try {
+            caller = Thread.currentThread().getName();
+        } catch (Throwable t) {
+            caller = "?";
+        }
+        android.util.Log.e("KuLooperQuit", "quit() queue of " + mOwnerName
+                + " from thread " + caller
+                + (mQuitAllowed ? " (allowed)" : " (MAIN: throwing)"));
+        if (!mQuitAllowed) {
+            throw new IllegalStateException("Main thread not allowed to quit.");
+        }
+        quitInternal();
+    }
+
+    /**
+     * Unconditional quit for KuDroid's own teardown (activity destroy on the way
+     * out). Never called by app code; the guard above stays total for those.
+     */
+    void quitInternal() {
         synchronized (this) {
             mQuitting = true;
             Message p = mMessages;

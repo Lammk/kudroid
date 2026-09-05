@@ -7,7 +7,7 @@ public final class Looper {
     final Thread mThread;
 
     private Looper(boolean quitAllowed) {
-        mQueue = new MessageQueue();
+        mQueue = new MessageQueue(quitAllowed);
         mThread = Thread.currentThread();
     }
     public static void prepare() {
@@ -61,6 +61,15 @@ public final class Looper {
     public static Looper myLooper() { return sThreadLocal.get(); }
     public void quit() { mQueue.quit(); }
     public void quitSafely() { mQueue.quit(); }
+    /**
+     * KuDroid teardown only (activity destroy on the way out): quits even the
+     * main looper. The guarded quit() above stays total for app code, exactly
+     * like AOSP where the main looper can never be quit by an app.
+     */
+    public void quitForTeardown() {
+        android.util.Log.e("KuLooperQuit", "teardown quit looper of " + mThread.getName());
+        mQueue.quitInternal();
+    }
     public Thread getThread() { return mThread; }
     public MessageQueue getQueue() { return mQueue; }
 }
