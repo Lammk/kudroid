@@ -5,6 +5,7 @@
 #include "kudroid/platform/MemoryInfo.h"
 
 #include <cerrno>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -551,6 +552,18 @@ std::string VFSPathRemapper::remap(const char* originalPath) const {
 }
 
 int vfs_open(const char* path, int flags, mode_t mode) {
+    // TEMP DIAGNOSTIC (ULTRAKILL audio crash): FMOD deterministically builds a
+    // voice with a null buffer row ~140 presents in. If its bank/stream file
+    // opens fail or misbehave here, that is the trigger. Log game-data opens.
+    const bool traceOpen = path != nullptr &&
+        (std::strstr(path, "assets/") != nullptr || std::strstr(path, ".apk") != nullptr ||
+         std::strstr(path, ".bank") != nullptr || std::strstr(path, ".fsb") != nullptr ||
+         std::strstr(path, ".mp3") != nullptr || std::strstr(path, ".ogg") != nullptr ||
+         std::strstr(path, ".wav") != nullptr || std::strstr(path, ".mp4") != nullptr ||
+         std::strstr(path, ".webm") != nullptr);
+    if (traceOpen) {
+        std::fprintf(stderr, "[KuDroidVFS] open(%s, flags=0x%x)\n", path, flags);
+    }
     if (path && (std::strcmp(path, "/dev/binder") == 0 || 
                  std::strcmp(path, "/dev/mali0") == 0 ||
                  std::strcmp(path, "/dev/kgsl-3d0") == 0 ||
@@ -607,6 +620,10 @@ int vfs_open(const char* path, int flags, mode_t mode) {
     const int result = (flags & O_CREAT) ? ::open(mapped.c_str(), flags, mode)
                                          : ::open(mapped.c_str(), flags);
     vfsTrace("open(" + mapped + ") -> " + std::to_string(result));
+    if (traceOpen) {
+        std::fprintf(stderr, "[KuDroidVFS] open -> %d (%s)\n", result,
+                     result >= 0 ? "OK" : std::strerror(errno));
+    }
     return result;
 }
 
@@ -626,6 +643,15 @@ FILE* vfs_fopen(const char* path, const char* mode) {
     FILE* result = std::fopen(mapped.c_str(), mode);
     vfsTrace("fopen(" + mapped + ", " + (mode ? mode : "<null>") + ") -> " +
            (result ? "OK" : std::strerror(errno)));
+    if (path != nullptr &&
+        (std::strstr(path, "assets/") != nullptr || std::strstr(path, ".apk") != nullptr ||
+         std::strstr(path, ".bank") != nullptr || std::strstr(path, ".fsb") != nullptr ||
+         std::strstr(path, ".mp3") != nullptr || std::strstr(path, ".ogg") != nullptr ||
+         std::strstr(path, ".wav") != nullptr || std::strstr(path, ".mp4") != nullptr ||
+         std::strstr(path, ".webm") != nullptr)) {
+        std::fprintf(stderr, "[KuDroidVFS] fopen(%s) -> %s\n", path,
+                     result ? "OK" : std::strerror(errno));
+    }
     return result;
 }
 
