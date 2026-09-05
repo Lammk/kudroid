@@ -9,11 +9,8 @@ public class DirectByteBuffer extends ByteBuffer {
         super(address, capacity, null, 0);
     }
 
-    // Backed by a real host malloc so GetDirectBufferAddress() returns a
-    // writable pointer. Previously the address was hardcoded to 0, which made
-    // every native writer (notably FMOD's fmodProcess) mix into NULL and die
-    // with SIGSEGV. Memory is never freed (no Cleaner infra); direct buffers
-    // in practice are few and long-lived (audio, graphics).
+    // Backed by a real host allocation so GetDirectBufferAddress() stays valid.
+    // Never freed; direct buffers are few and long-lived.
     private static native long nAllocate(int capacity);
     private static native byte nGet(long address, int index);
     private static native void nPut(long address, int index, byte b);

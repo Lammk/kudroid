@@ -646,11 +646,8 @@ extern "C" int bionic_pthread_cond_timedwait(void* cond, void* mutex, const stru
     pthread_cond_t* hostCond = static_cast<pthread_cond_t*>(get_or_init_sync(cond, SYNC_COND));
     HostMutex* host = host_mutex_for(mutex);
     if (!hostCond || !host) return EINVAL;
-    // TEMP DIAGNOSTIC (ULTRAKILL audio crash): Bionic vs host clock domain for
-    // absolute timeouts. If the guest passes MONOTONIC-based abstime while the
-    // host waits REALTIME (or vice versa), every timed wait either fires
-    // instantly (past deadline) or sleeps ~forever — silently breaking async
-    // handshakes (FMOD nonblocking loads) with zero log evidence otherwise.
+    // TEMP DIAGNOSTIC: guest-vs-host clock domain for absolute timeouts.
+    // A mismatch makes every timed wait fire instantly or sleep forever.
     {
         static std::atomic<int> s_logged{0};
         struct timespec rt{}, mo{};

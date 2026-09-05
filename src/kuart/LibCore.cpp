@@ -3282,7 +3282,7 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
     if (std::strcmp(desc, "Ljava/io/FileOutputStream;") == 0) return Invoke_java_io_FileOutputStream(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/io/PrintStream;") == 0) return Invoke_java_io_PrintStream(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/util/TimeZone;") == 0) return Invoke_java_util_TimeZone(interp, name, args, num_args, result);
-    // Direct buffers need a real host allocation or native writers (FMOD) mix into NULL.
+    // Direct buffers need a real backing store for native access.
     if (std::strcmp(desc, "Ljava/nio/DirectByteBuffer;") == 0) {
         return Invoke_java_nio_DirectByteBuffer(interp, name, args, num_args, result);
     }

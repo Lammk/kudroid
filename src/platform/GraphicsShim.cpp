@@ -850,6 +850,9 @@ extern "C" VkResult bionic_vkCreateAndroidSurfaceKHR(VkInstance instance,
 
         VkResult r = createMetalSurface(instance, &metalInfo, pAllocator, pSurface);
         KLOG(kInfo, "KuDroidGPU", "vkCreateMetalSurfaceEXT returned %d (surface=%p)", (int)r, (void*)*pSurface);
+        // Diagnostic: which layer the surface baked; compare with on-screen at present.
+        gpuLog("vkCreateSurface layer=%p -> surface=%p r=%d", actualLayer,
+               r == VK_SUCCESS ? (void*)*pSurface : nullptr, (int)r);
         if (r == VK_SUCCESS) return r;
     }
 
@@ -864,6 +867,8 @@ extern "C" VkResult bionic_vkCreateAndroidSurfaceKHR(VkInstance instance,
 
         VkResult r = createIOSSurface(instance, &iosInfo, pAllocator, pSurface);
         KLOG(kInfo, "KuDroidGPU", "vkCreateIOSSurfaceMVK returned %d (surface=%p)", (int)r, (void*)*pSurface);
+        gpuLog("vkCreateSurface layer=%p -> surface=%p r=%d", actualLayer,
+               r == VK_SUCCESS ? (void*)*pSurface : nullptr, (int)r);
         if (r == VK_SUCCESS) return r;
     }
 
@@ -927,6 +932,15 @@ extern "C" uint32_t bionic_vkQueuePresentKHR(void* queue, const void* present_in
     }
     gpuLog("vkQueuePresentKHR #%llu -> %u swap=%p image=%u",
            (unsigned long long)n, r, swapchain, image_index);
+    // Diagnostic: on-screen layer identity; a surface bakes its layer at
+    // creation, so a mismatch here means frames go to a hidden layer.
+    // 1000001003=SUBOPTIMAL 1000001004=OUT_OF_DATE.
+    if (n == 1 || r == 1000001003 || r == 1000001004 || (n % 120) == 0) {
+        const char* rname = r == 0 ? "SUCCESS" : (r == 1000001003 ? "SUBOPTIMAL"
+                                            : (r == 1000001004 ? "OUT_OF_DATE" : "OTHER"));
+        gpuLog("vkPresent #%llu %s onscreen_layer=%p window=%dx%d", (unsigned long long)n,
+               rname, g_metalLayer, g_metalLayerWidth, g_metalLayerHeight);
+    }
     return r;
 }
 
@@ -947,27 +961,36 @@ extern "C" uint32_t bionic_vkAcquireNextImageKHR(void* device, void* swapchain, 
 
 extern "C" uint32_t bionic_vkCreateSwapchainKHR(void* device, const void* create_info,
                                                const void* allocator, void** swapchain) {
-    // TEMP DIAGNOSTIC (ULTRAKILL Vulkan black): associate swapchain<->surface.
-    // VkSwapchainCreateInfoKHR 64-bit layout: sType(0) pNext(8) flags(16)
-    // surface(24) minImageCount(32).
+    // Diagnostic: full swapchain geometry (offsets for 64-bit
+    // VkSwapchainCreateInfoKHR). Portrait extent on a landscape game, or
+    // preTransform != IDENTITY, is the orientation-split signature.
     void* surface = nullptr;
+    uint32_t min_count = 0, format = 0, extent_w = 0, extent_h = 0;
+    int32_t pre_transform = -1, present_mode = -1;
     if (create_info != nullptr) {
-        surface = *(void* const*) (static_cast<const char*>(create_info) + 24);
+        const char* ci = static_cast<const char*>(create_info);
+        surface = *(void* const*)(ci + 24);
+        std::memcpy(&min_count, ci + 32, 4);
+        std::memcpy(&format, ci + 36, 4);
+        std::memcpy(&extent_w, ci + 44, 4);
+        std::memcpy(&extent_h, ci + 48, 4);
+        std::memcpy(&pre_transform, ci + 76, 4);
+        std::memcpy(&present_mode, ci + 84, 4);
     }
     void* created = nullptr;
     const uint32_t r = s_realCreateSwapchain != nullptr
                            ? s_realCreateSwapchain(device, create_info, allocator, &created)
                            : 0xFFFFFFFFu;
     if (swapchain != nullptr) *swapchain = created;
-    gpuLog("vkCreateSwapchainKHR surface=%p -> %u swap=%p", surface, r, created);
+    gpuLog("vkCreateSwapchainKHR surface=%p -> %u swap=%p extent=%ux%u fmt=%u preXform=%d mode=%d minImg=%u onscreen=%p",
+           surface, r, created, extent_w, extent_h, format, pre_transform, present_mode,
+           min_count, g_metalLayer);
     return r;
 }
 
 extern "C" PFN_vkVoidFunction bionic_vkGetDeviceProcAddr(VkDevice device, const char* pName) {
     if (!pName) return nullptr;
-    // TEMP DIAGNOSTIC (ULTRAKILL black screen): tap presents/acquires to prove
-    // whether Unity submits frames at all — both are otherwise pure passthrough
-    // and invisible in logs. Remove once first-frame visibility is understood.
+    // Diagnostic: tap presents/acquires; pure passthrough, only for logs.
     if (strcmp(pName, "vkQueuePresentKHR") == 0 && s_realQueuePresent == nullptr) {
         if (void* mvk = get_mvk_handle()) {
             s_realQueuePresent =
