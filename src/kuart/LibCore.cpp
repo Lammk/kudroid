@@ -1304,6 +1304,37 @@ bool Invoke_java_lang_reflect_Proxy(Interpreter* interp, const char* name,
         }
         // `h` is declared by java.lang.reflect.Proxy, which this class extends.
         SetRefField(proxy, "h", "Ljava/lang/reflect/InvocationHandler;", handler);
+        // TEMP DIAGNOSTIC (ULTRAKILL dead Runnable proxies): Unity's native bridge
+        // keeps the C++ peer for `ptr` and the proxy's interfaces must match what the
+        // peer was built for. Log both so a stranded peer can be correlated by ptr.
+        // Remove once the failing peer is identified.
+        if (DexClass* handler_class = linker->ClassOfObject(handler)) {
+            if (handler_class->descriptor != nullptr &&
+                std::strstr(handler_class->descriptor, "bitter/jnibridge") != nullptr) {
+                std::string names;
+                for (size_t i = 0; i < interfaces.size(); ++i) {
+                    if (i > 0) names += ",";
+                    names += interfaces[i] != nullptr ? interfaces[i]->PrettyName() : "?";
+                }
+                std::string ptrs;
+                for (DexClass* k = handler_class; k != nullptr; k = k->superclass) {
+                    for (DexField& f : k->instance_fields) {
+                        if (f.type_descriptor != nullptr &&
+                            std::strcmp(f.type_descriptor, "J") == 0) {
+                            int64_t v =
+                                handler->GetField<int64_t>(f.offset_or_slot);
+                            char field[48];
+                            std::snprintf(field, sizeof(field), " %s=0x%llx",
+                                          f.name != nullptr ? f.name : "?",
+                                          static_cast<unsigned long long>(v));
+                            ptrs += field;
+                        }
+                    }
+                }
+                std::fprintf(stderr, "[KuART][PROXY] new jnibridge proxy ifaces=[%s]%s\n",
+                             names.c_str(), ptrs.c_str());
+            }
+        }
         result->l = proxy;
         return true;
     }

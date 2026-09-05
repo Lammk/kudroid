@@ -40,6 +40,20 @@ public final class Looper {
         for (;;) {
             Message msg = queue.next();
             if (msg == null) return;
+            // TEMP DIAGNOSTIC (ULTRAKILL dead Runnable proxies): name the Handler that
+            // posts a proxy callback and the proxy's interfaces, so the stranded C++
+            // peer behind it can be traced to its subsystem. Remove once identified.
+            if (msg.callback != null
+                    && java.lang.reflect.Proxy.isProxyClass(msg.callback.getClass())) {
+                String ifaces = "";
+                Class<?>[] arr = msg.callback.getClass().getInterfaces();
+                for (int i = 0; i < arr.length; i++) {
+                    if (i > 0) ifaces += ",";
+                    ifaces += arr[i].getName();
+                }
+                android.util.Log.e("KuProxyPost", "target="
+                        + msg.target.getClass().getName() + " proxyIfaces=" + ifaces);
+            }
             msg.target.dispatchMessage(msg);
             msg.recycle();
         }
