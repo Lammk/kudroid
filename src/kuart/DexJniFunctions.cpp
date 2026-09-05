@@ -227,9 +227,17 @@ void JNICALL ExceptionClear(JNIEnv* env) {
         // uncaught trace names only the wrapper. The cleared exception's
         // class+message names the actual missing API. Grep JNI-CLEAR.
         if (DexObject* ex = self->pending_exception()) {
-            std::fprintf(stderr, "[KuART][JNI] ExceptionClear dropping %s (%s)\n",
+            // Print both error slots: env's (set by JNI ThrowNew/lookup failure)
+            // and the interpreter's (set by ThrowException/guest THROW). If they
+            // agree, the thrower is identified; if they differ, the env slot is
+            // stale and the interpreter slot names the real thrower.
+            const char* interp_err = "";
+            if (Interpreter* interp = self->interpreter()) {
+                interp_err = interp->last_error().c_str();
+            }
+            std::fprintf(stderr, "[KuART][JNI] ExceptionClear dropping %s (env: %s | interp: %s)\n",
                          ex->clazz != nullptr ? ex->clazz->PrettyName().c_str() : "?",
-                         self->last_error().c_str());
+                         self->last_error().c_str(), interp_err);
         }
         self->ClearException();
     }

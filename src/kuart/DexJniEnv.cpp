@@ -498,7 +498,26 @@ DexValue DexJniEnv::CallJavaA(DexObject* receiver, DexMethod* method, const jval
     if (virtual_dispatch && receiver != nullptr && linker_ != nullptr) {
         if (DexClass* receiver_class = linker_->ClassOfObject(receiver)) {
             DexMethod* found = receiver_class->FindVirtualMethod(method->name, method->signature);
-            if (found != nullptr) method = found;
+            if (found != nullptr) {
+                method = found;
+            } else {
+                // Was silent: falling through to a non-virtual call on the
+                // interface/abstract method (e.g. Runnable.run on a Proxy whose
+                // vtable lacks it) executes a bodiless method and dies far away.
+                // Log the miss so the receiver/method pair is on record.
+                const char* recv_name = (receiver_class->descriptor != nullptr)
+                                            ? receiver_class->descriptor
+                                            : "?";
+                std::fprintf(stderr,
+                             "[KuART][JNI] virtual dispatch MISS %s.%s%s on receiver %s\n",
+                             (method->declaring_class != nullptr &&
+                              method->declaring_class->descriptor != nullptr)
+                                 ? method->declaring_class->descriptor
+                                 : "?",
+                             method->name != nullptr ? method->name : "?",
+                             method->signature != nullptr ? method->signature : "",
+                             recv_name);
+            }
         } else {
             // Report it once per method: silently degrading to a non-virtual call
             // hides that a library is handing over bad handles, and the wrong
