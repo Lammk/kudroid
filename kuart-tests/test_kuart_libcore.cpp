@@ -7,6 +7,7 @@
 #include "kudroid/kuart/VmLock.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <thread>
@@ -159,8 +160,20 @@ std::vector<ClassSpec> BuildClasses() {
     monitor_state.superclass = "Ljava/lang/Throwable;";
     monitor_state.direct_methods = {Ctor()};
 
+    // DirectByteBuffer natives must back the buffer with a real host malloc:
+    // FMOD's fmodProcess mixes PCM through GetDirectBufferAddress().
+    ClassSpec dbb;
+    dbb.descriptor = "Ljava/nio/DirectByteBuffer;";
+    dbb.direct_methods = {
+        Native("nAllocate", "J", {"I"}, true),
+        Native("nGet", "B", {"J", "I"}, true),
+        Native("nPut", "V", {"J", "I", "B"}, true),
+        Native("nGetArray", "V", {"J", "I", "[B", "I", "I"}, true),
+        Native("nPutArray", "V", {"J", "I", "[B", "I", "I"}, true),
+    };
+
     return {object, string,  class_class, system,    math, dbl,
-            flt,    integer, point,       throwable, monitor_state};
+            flt,    integer, point,       throwable, monitor_state, dbb};
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -491,6 +504,48 @@ void TestMonitors(Vm& vm) {
     Monitor::Exit(lock);
 }
 
+void TestDirectByteBuffer(Vm& vm) {
+    std::printf("-- java.nio.DirectByteBuffer --\n");
+
+    const int64_t addr =
+        vm.Call("Ljava/nio/DirectByteBuffer;", "nAllocate", {DexValue::Int(64)}).j;
+    Check(addr != 0, "nAllocate(64) returns a real non-null address");
+
+    // Fresh allocation is zero-filled.
+    Check(vm.Call("Ljava/nio/DirectByteBuffer;", "nGet",
+                  {DexValue::Long(addr), DexValue::Int(0)}).i == 0,
+          "a fresh buffer reads back zero");
+
+    vm.Call("Ljava/nio/DirectByteBuffer;", "nPut",
+            {DexValue::Long(addr), DexValue::Int(5), DexValue::Int(0xAB)});
+    Check(vm.Call("Ljava/nio/DirectByteBuffer;", "nGet",
+                  {DexValue::Long(addr), DexValue::Int(5)}).i == -85,
+          "nPut/nGet round-trips a byte (0xAB sign-extends to -85)");
+    Check(vm.Call("Ljava/nio/DirectByteBuffer;", "nGet",
+                  {DexValue::Long(addr), DexValue::Int(6)}).i == 0,
+          "neighboring bytes are untouched");
+
+    // Bulk path used by FMOD's e.get(f, ...) / track.write pump.
+    DexClass* byte_array = vm.linker.FindClass("[B");
+    DexArray* arr =
+        byte_array != nullptr ? vm.linker.AllocArray(byte_array, 8) : nullptr;
+    Check(arr != nullptr, "AllocArray([B, 8) works");
+    if (arr != nullptr) {
+        for (int i = 0; i < 8; ++i) arr->Set<int8_t>(i, static_cast<int8_t>(i + 1));
+        vm.Call("Ljava/nio/DirectByteBuffer;", "nPutArray",
+                {DexValue::Long(addr), DexValue::Int(10), DexValue::Ref(arr),
+                 DexValue::Int(0), DexValue::Int(8)});
+        for (int i = 0; i < 8; ++i) arr->Set<int8_t>(i, 0);
+        vm.Call("Ljava/nio/DirectByteBuffer;", "nGetArray",
+                {DexValue::Long(addr), DexValue::Int(10), DexValue::Ref(arr),
+                 DexValue::Int(0), DexValue::Int(8)});
+        bool bulk_ok = true;
+        for (int i = 0; i < 8; ++i) bulk_ok &= arr->Get<int8_t>(i) == i + 1;
+        Check(bulk_ok, "nPutArray/nGetArray round-trips 8 bytes");
+        std::free(reinterpret_cast<void*>(static_cast<uintptr_t>(addr)));
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -512,6 +567,7 @@ int main() {
     TestMathAndBits(vm);
     TestClassNatives(vm);
     TestMonitors(vm);
+    TestDirectByteBuffer(vm);
 
     if (g_failures == 0) {
         std::printf("=== KuART libcore natives PASSED ===\n");

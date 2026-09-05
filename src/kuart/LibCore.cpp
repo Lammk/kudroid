@@ -3186,6 +3186,61 @@ bool Invoke_java_util_TimeZone(Interpreter* interp, const char* name,
     return false;
 }
 
+bool Invoke_java_nio_DirectByteBuffer(Interpreter* interp, const char* name, const DexValue* args,
+                                          size_t num_args, DexValue* result) {
+    if (std::strcmp(name, "nAllocate") == 0) {
+        int32_t capacity = num_args > 0 ? args[0].i : 0;
+        if (capacity < 0) capacity = 0;
+        // Zero-filled like a fresh direct buffer; at least 1 byte so the
+        // address is always usable (allocateDirect(0) edge case).
+        const size_t size = static_cast<size_t>(capacity > 0 ? capacity : 1);
+        void* mem = std::calloc(1, size);
+        if (mem == nullptr) {
+            if (interp != nullptr) {
+                interp->ThrowException("Ljava/lang/OutOfMemoryError;", "DirectByteBuffer malloc failed");
+            }
+            *result = DexValue::Long(0);
+            return true;
+        }
+        *result = DexValue::Long(static_cast<int64_t>(reinterpret_cast<uintptr_t>(mem)));
+        return true;
+    }
+    if (std::strcmp(name, "nGet") == 0) {
+        auto* mem = reinterpret_cast<const uint8_t*>(
+            static_cast<uintptr_t>(num_args > 0 ? args[0].j : 0));
+        const int32_t index = num_args > 1 ? args[1].i : 0;
+        // Bounds are enforced on the Java side; a null address here means the
+        // allocation failed and threw, so just avoid faulting the host.
+        *result = DexValue::Int(mem != nullptr ? static_cast<int8_t>(mem[index]) : 0);
+        return true;
+    }
+    if (std::strcmp(name, "nPut") == 0) {
+        auto* mem = reinterpret_cast<uint8_t*>(
+            static_cast<uintptr_t>(num_args > 0 ? args[0].j : 0));
+        const int32_t index = num_args > 1 ? args[1].i : 0;
+        if (mem != nullptr) mem[index] = static_cast<uint8_t>(num_args > 2 ? args[2].i : 0);
+        return true;
+    }
+    if (std::strcmp(name, "nGetArray") == 0 || std::strcmp(name, "nPutArray") == 0) {
+        auto* mem = reinterpret_cast<uint8_t*>(
+            static_cast<uintptr_t>(num_args > 0 ? args[0].j : 0));
+        const int32_t index = num_args > 1 ? args[1].i : 0;
+        auto* arr = num_args > 2 ? reinterpret_cast<DexArray*>(args[2].l) : nullptr;
+        const int32_t offset = num_args > 3 ? args[3].i : 0;
+        const int32_t length = num_args > 4 ? args[4].i : 0;
+        if (mem != nullptr && arr != nullptr && offset >= 0 && length >= 0 && index >= 0 &&
+            static_cast<int64_t>(offset) + length <= arr->length) {
+            if (std::strcmp(name, "nGetArray") == 0) {
+                std::memcpy(arr->Data() + offset, mem + index, static_cast<size_t>(length));
+            } else {
+                std::memcpy(mem + index, arr->Data() + offset, static_cast<size_t>(length));
+            }
+        }
+        return true;
+    }
+    return false;
+}
+
 bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue* args,
                    size_t num_args, DexValue* result) {
     if (method == nullptr || method->declaring_class == nullptr) return false;
@@ -3227,6 +3282,10 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
     if (std::strcmp(desc, "Ljava/io/FileOutputStream;") == 0) return Invoke_java_io_FileOutputStream(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/io/PrintStream;") == 0) return Invoke_java_io_PrintStream(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/util/TimeZone;") == 0) return Invoke_java_util_TimeZone(interp, name, args, num_args, result);
+    // Direct buffers need a real host allocation or native writers (FMOD) mix into NULL.
+    if (std::strcmp(desc, "Ljava/nio/DirectByteBuffer;") == 0) {
+        return Invoke_java_nio_DirectByteBuffer(interp, name, args, num_args, result);
+    }
     if (std::strcmp(desc, "Lsun/misc/Unsafe;") == 0) return Invoke_sun_misc_Unsafe(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ldalvik/system/BaseDexClassLoader;") == 0) {
         return Invoke_dalvik_system_BaseDexClassLoader(interp, name, args, num_args, result);
