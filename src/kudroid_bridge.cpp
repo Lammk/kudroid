@@ -4137,11 +4137,19 @@ extern "C" void kudroid_stop_app(void) {
     // Detached rather than joined: the point is that the caller must not wait. If the
     // guest is unrecoverably stuck the event may never be delivered, and that is
     // still better than taking the UI down with it.
+    //
+    // Guarded to one in-flight teardown: X, viewWillDisappear and deinit can each
+    // post DESTROY, and a second post races the first's onDestroy->nativeDone,
+    // destroying an engine that is already half destroyed.
+    static std::atomic<bool> s_stopping{false};
+    bool expected = false;
+    if (!s_stopping.compare_exchange_strong(expected, true)) return;
     std::thread([] {
         kuart_send_lifecycle_event(103); // DESTROY_ACTIVITY
         // Unbind only after the guest has been told to stop, so a render still in
         // flight does not have the layer pulled out from under it.
         kudroid_unbind_metal_layer();
+        s_stopping.store(false);
     }).detach();
 }
 
