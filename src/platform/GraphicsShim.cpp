@@ -330,6 +330,20 @@ extern "C" int bionic_ANativeWindow_lock(void* window, ANativeWindow_Buffer* out
     return 0;
 }
 
+// Surface->layer table: a swapchain bakes its layer at creation, so the canvas
+// must know which layer has an active swapchain to stop covering its drawables
+// with static contents. Platform-neutral (void* only); enforced on Apple.
+namespace {
+constexpr int kSurfaceLayers = 8;
+struct SurfaceLayer {
+    void* surface = nullptr;
+    void* layer = nullptr;
+};
+SurfaceLayer g_surfaceLayers[kSurfaceLayers];
+std::mutex g_surfaceLayersMtx;
+void* s_vulkanLayer = nullptr;
+}  // namespace
+
 #if defined(__APPLE__)
 #include <CoreGraphics/CoreGraphics.h>
 #include <objc/runtime.h>
@@ -337,6 +351,17 @@ extern "C" int bionic_ANativeWindow_lock(void* window, ANativeWindow_Buffer* out
 
 extern "C" void kudroid_blit_canvas_to_layer(void* layer, const void* bits, int width, int height) {
     if (!layer || !bits || width <= 0 || height <= 0) return;
+
+    // One producer per layer: a swapchain presents drawables, static contents
+    // would cover them (or lose to them) with SUCCESS on both sides.
+    {
+        std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
+        if (s_vulkanLayer != nullptr && layer == s_vulkanLayer) {
+            gpuLog("blit skipped on vulkan layer=%p %dx%d", layer, width, height);
+            return;
+        }
+    }
+    gpuLog("blit layer=%p %dx%d", layer, width, height);
 
     CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
     if (!colorSpace) return;
@@ -916,6 +941,16 @@ extern "C" VkResult bionic_vkCreateAndroidSurfaceKHR(VkInstance instance,
         // Diagnostic: which layer the surface baked; compare with on-screen at present.
         gpuLog("vkCreateSurface layer=%p -> surface=%p r=%d", actualLayer,
                r == VK_SUCCESS ? (void*)*pSurface : nullptr, (int)r);
+        if (r == VK_SUCCESS && *pSurface != nullptr) {
+            std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
+            for (auto& e : g_surfaceLayers) {
+                if (e.surface == nullptr) {
+                    e.surface = *pSurface;
+                    e.layer = actualLayer;
+                    break;
+                }
+            }
+        }
         if (r == VK_SUCCESS) return r;
     }
 
@@ -932,7 +967,17 @@ extern "C" VkResult bionic_vkCreateAndroidSurfaceKHR(VkInstance instance,
         KLOG(kInfo, "KuDroidGPU", "vkCreateIOSSurfaceMVK returned %d (surface=%p)", (int)r, (void*)*pSurface);
         gpuLog("vkCreateSurface layer=%p -> surface=%p r=%d", actualLayer,
                r == VK_SUCCESS ? (void*)*pSurface : nullptr, (int)r);
-        if (r == VK_SUCCESS) return r;
+        if (r == VK_SUCCESS) {
+            std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
+            for (auto& e : g_surfaceLayers) {
+                if (e.surface == nullptr) {
+                    e.surface = *pSurface;
+                    e.layer = actualLayer;
+                    break;
+                }
+            }
+            return r;
+        }
     }
 
     KLOG(kError, "KuDroidGPU", "ERROR: Neither vkCreateMetalSurfaceEXT nor vkCreateIOSSurfaceMVK succeeded");
@@ -1060,6 +1105,17 @@ extern "C" uint32_t bionic_vkCreateSwapchainKHR(void* device, const void* create
                            ? s_realCreateSwapchain(device, create_info, allocator, &created)
                            : 0xFFFFFFFFu;
     if (swapchain != nullptr) *swapchain = created;
+    // The swapchain's layer now owns the pixels: static canvas contents must
+    // stop covering its drawables (one producer per layer).
+    if (r == 0 && surface != nullptr) {
+        std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
+        for (const auto& e : g_surfaceLayers) {
+            if (e.surface == surface && e.layer != nullptr) {
+                s_vulkanLayer = e.layer;
+                break;
+            }
+        }
+    }
     gpuLog("vkCreateSwapchainKHR surface=%p -> %u swap=%p extent=%ux%u fmt=%u preXform=%d mode=%d minImg=%u onscreen=%p",
            surface, r, created, extent_w, extent_h, format, pre_transform, present_mode,
            min_count, g_metalLayer);
@@ -1095,6 +1151,12 @@ extern "C" uint32_t bionic_vkSurfaceCaps(void* phys, void* surface, void* caps) 
 extern "C" void kudroid_gpu_note_run_end(void) {
     s_presentCount.store(0, std::memory_order_relaxed);
     s_acquireCount.store(0, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
+    s_vulkanLayer = nullptr;
+    for (auto& e : g_surfaceLayers) {
+        e.surface = nullptr;
+        e.layer = nullptr;
+    }
 }
 
 extern "C" PFN_vkVoidFunction bionic_vkGetDeviceProcAddr(VkDevice device, const char* pName) {
