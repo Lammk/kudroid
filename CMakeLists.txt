@@ -41,6 +41,7 @@ add_library(kudroid_core STATIC
     src/VFSPathRemapper.cpp
     src/bionic_log_trampoline.S
     src/elf_loader.cpp
+    src/elf_x18.cpp
     src/library_manager.cpp
     src/platform/InputShim.cpp
     src/platform/AudioShim.cpp
@@ -223,6 +224,16 @@ else()
         )
         target_link_libraries(test_apk_extract PRIVATE kudroid_core)
         target_include_directories(test_apk_extract PRIVATE include)
+    endif()
+
+    # The x18 rewrite keeps async platform clobbering unobservable; a wrong
+    # rewrite corrupts every guest, so the decoder and skip rules are pinned.
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_elf_x18.cpp")
+        add_executable(test_elf_x18
+            tests/test_elf_x18.cpp
+        )
+        target_link_libraries(test_elf_x18 PRIVATE kudroid_core)
+        target_include_directories(test_elf_x18 PRIVATE include)
     endif()
 
     # A guest window must follow the CAMetalLayer the shell presents. The shell binds

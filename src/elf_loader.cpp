@@ -1,4 +1,5 @@
 #include "kudroid/elf_loader.hpp"
+#include "kudroid/ElfX18.h"
 #include "kudroid/BionicShim.h"
 
 #include <cerrno>
@@ -637,6 +638,23 @@ bool ElfLoader::map() {
         if (seg.memsz > seg.filesz) {
             memset(dst + seg.filesz, 0, seg.memsz - seg.filesz);
         }
+    }
+
+    // --- x18 rename (Darwin platform register) BEFORE the tpidr patcher: ---
+    // mrs x18 becomes mrs F, which the BRK patcher below matches by any target
+    // register. See ElfX18.h for the soundness rules.
+    {
+        X18Stats xst = kudroid::elf_x18_rewrite(base_, minVaddr, segments_,
+                                                reinterpret_cast<const std::uint8_t*>(fileData_),
+                                                fileSize_);
+        fprintf(stderr,
+                "[KuDroidELF] x18 rewrite %s: funcs=%llu rewritten=%llu sites=%llu "
+                "skip(noreg=%llu eh=%llu unknown=%llu range=%llu)\n",
+                path_.c_str(), (unsigned long long)xst.functions,
+                (unsigned long long)xst.rewritten, (unsigned long long)xst.sites,
+                (unsigned long long)xst.skippedNoReg, (unsigned long long)xst.skippedEh,
+                (unsigned long long)xst.skippedUnknown,
+                (unsigned long long)xst.skippedRange);
     }
 
     // --- aot patcher for tpidr_el0 (kudroid root class) ---
