@@ -495,6 +495,20 @@ bool guest_signal_dispatch(int host_signum, void* host_siginfo, void* host_ucont
 // owned path: every guest handler is reached through translation, never called with
 // host-shaped arguments.
 extern "C" void kudroid_guest_signal_trampoline(int host_signum, siginfo_t* info, void* uc) {
+    // Diagnostic: async delivery zeroes the platform register on this OS; a
+    // delivery landing inside guest x18-live code is fatal, so every delivery
+    // is named (capped) to attribute clobber crashes.
+    static std::mutex s_mtx;
+    static int s_n{0};
+    {
+        std::lock_guard<std::mutex> lock(s_mtx);
+        if (s_n < 12) {
+            ++s_n;
+            char msg[128];
+            std::snprintf(msg, sizeof(msg), "guest signal delivered host=%d", host_signum);
+            kudroid_android_log_message(4, "KuDroidSignal", msg);
+        }
+    }
     guest_signal_dispatch(host_signum, info, uc);
 }
 
@@ -851,11 +865,24 @@ int guest_kill(int pid, int guest_signum) {
 
 int guest_pthread_kill(unsigned long thread, int guest_signum) {
     pthread_t target;
-    std::memcpy(&target, &thread, sizeof(target) < sizeof(thread) ? sizeof(target)
+    std::memcpy(&target, &thread, sizeof(target) < sizeof(thread) ? sizeof(thread)
                                                                  : sizeof(thread));
     if (guest_signum == 0) return ::pthread_kill(target, 0) == 0 ? 0 : -1;
     const int host_signum = host_signum_for_send(guest_signum, "pthread_kill");
     if (host_signum == 0) return -1;
+    // Diagnostic: pairs with the delivery tap to attribute register-clobber crashes.
+    static std::mutex s_mtx;
+    static int s_n{0};
+    {
+        std::lock_guard<std::mutex> lock(s_mtx);
+        if (s_n < 12) {
+            ++s_n;
+            char msg[128];
+            std::snprintf(msg, sizeof(msg), "guest pthread_kill guest=%d host=%d",
+                          guest_signum, host_signum);
+            kudroid_android_log_message(4, "KuDroidSignal", msg);
+        }
+    }
     const int rc = ::pthread_kill(target, host_signum);
     if (rc != 0) {
         errno = rc;
