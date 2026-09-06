@@ -710,6 +710,15 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
         if (kudroid::bionic_handle_tpidr_trap(ucontext)) {
             return; // handled successfully, resuming execution!
         }
+        // Diagnostic: our BRK pattern but emulate declined, or a foreign
+        // breakpoint. Capped; startup TPIDR traps return above, so any line
+        // here near teardown is the death itself. Missing entirely at a
+        // teardown death means our disposition was replaced beforehand.
+        static std::atomic<int> s_trapUnhandled{0};
+        if (s_trapUnhandled.load() < 8) {
+            ++s_trapUnhandled;
+            kudroid_android_log_message(4, "KuDroidTrap", "SIGTRAP not emulated");
+        }
         // A SIGTRAP that is not one of KuDroid's TLS breakpoints belongs to whoever
         // installed a handler before us — a debugger bridge, a crash reporter, or
         // LiveContainer's own dyld interception, all of which use breakpoints for
@@ -3122,6 +3131,9 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                         // Guest loop exited: drop run-scoped state so the next run
                         // starts clean (counters, stale wait slots, teardown guard).
                         // Safe now — no guest thread is alive to own this state.
+                        // Unbind here, not at X: pulling the layer while nativeDone
+                        // runs teardown traps the guest on the torn surface.
+                        kudroid_unbind_metal_layer();
                         kudroid_gpu_note_run_end();
                         kudroid::blocking_wait_reset_for_test();
                         s_stopping.store(false);
@@ -4204,12 +4216,8 @@ extern "C" void kudroid_stop_app(void) {
     if (!s_stopping.compare_exchange_strong(expected, true)) return;
     std::thread([] {
         kuart_send_lifecycle_event(103); // DESTROY_ACTIVITY
-        // Wait for any frame in flight before unbinding: pulling the layer
-        // mid-present left teardown wedged in nativeDone waiting on gfx drain.
-        for (int i = 0; i < 200 && kudroid::native_frame_in_flight() > 0; ++i) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }
-        kudroid_unbind_metal_layer();
+        // Unbind happens at run end, not here: pulling the layer while
+        // nativeDone runs teardown traps the guest on the torn surface.
     }).detach();
 }
 
