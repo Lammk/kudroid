@@ -4942,10 +4942,16 @@ extern "C" int bionic_sem_init(sem_t* sem, int pshared, unsigned int value) {
     (void)pshared;
     auto s = std::make_shared<GuestSemaphore>();
     s->value = value;
+    std::shared_ptr<GuestSemaphore> old;
     {
         std::lock_guard<std::mutex> lock(g_semaphoresMtx);
+        auto it = g_semaphores.find(sem);
+        if (it != g_semaphores.end()) old = it->second;
         g_semaphores[sem] = s;  // re-init at the same address replaces the old state
     }
+    // Migrate parkers: waiters on the replaced object re-resolve the address on
+    // wake instead of hanging on orphaned state.
+    if (old) old->cv.notify_all();
     return 0;
 }
 
@@ -4978,22 +4984,43 @@ extern "C" int bionic_sem_wait(sem_t* sem) {
         errno = EINVAL;
         return -1;
     }
-    auto s = guest_sem_find(sem, /*create=*/true);
-    std::unique_lock<std::mutex> lock(s->mtx);
-    {
-        // A handshake whose post never arrives parks this thread for good. This is
-        // where Unity's helper threads wait, so it is the first thing worth naming
-        // when a launch stops making progress.
-        const BlockingWaitScope tracked(WaitKind::kSemaphore, sem,
-                                        guest_return_address(6));
-        s->cv.wait(lock, [&s] { return s->value > 0 || s->destroyed; });
+    // Bionic parks on the address, not on an object: destroy/reinit under a
+    // waiter is harmless there. Re-resolve instead of failing with EINVAL,
+    // which aborts guests that treat it as fatal.
+    for (;;) {
+        auto s = guest_sem_find(sem, /*create=*/true);
+        bool hasToken = false;
+        {
+            std::unique_lock<std::mutex> lock(s->mtx);
+            // A handshake whose post never arrives parks this thread for good. This is
+            // where Unity's helper threads wait, so it is the first thing worth naming
+            // when a launch stops making progress.
+            const BlockingWaitScope tracked(WaitKind::kSemaphore, sem,
+                                            guest_return_address(6));
+            s->cv.wait(lock, [&s] { return s->value > 0 || s->destroyed; });
+            if (s->value > 0) {
+                --s->value;
+                hasToken = true;
+            }
+        }
+        if (hasToken) return 0;
+        // Woken without a token: spurious, destroyed, or reinited. A spurious
+        // wakeup still parks on the live object; destroy/reinit migrates or ends.
+        bool current = false;
+        bool replaced = false;
+        {
+            std::lock_guard<std::mutex> lock(g_semaphoresMtx);
+            auto it = g_semaphores.find(sem);
+            current = (it != g_semaphores.end() && it->second == s);
+            replaced = (it != g_semaphores.end() && it->second != s);
+        }
+        if (current) continue;
+        if (replaced) continue;  // loop migrates to the new object
+        // Truly destroyed with no successor: succeed spuriously. EINVAL here
+        // aborts guests at shutdown; hanging wedges teardown. A token from
+        // nothing is the least harmful of the three in UB territory.
+        return 0;
     }
-    if (s->destroyed) {
-        errno = EINVAL;
-        return -1;
-    }
-    --s->value;
-    return 0;
 }
 
 extern "C" int bionic_sem_trywait(sem_t* sem) {
@@ -5049,49 +5076,67 @@ extern "C" int bionic_sem_timedwait(sem_t* sem, const struct timespec* abs_timeo
         errno = EINVAL;
         return -1;
     }
-    auto s = guest_sem_find(sem, /*create=*/true);
-
     // The deadline is absolute CLOCK_REALTIME; convert to a duration so it can be
     // waited on without assuming the host clock's epoch matches.
-    struct timespec now;
-    ::clock_gettime(CLOCK_REALTIME, &now);
-    int64_t remSec = int64_t(abs_timeout->tv_sec) - int64_t(now.tv_sec);
-    int64_t remNs = int64_t(abs_timeout->tv_nsec) - int64_t(now.tv_nsec);
-    if (remNs < 0) {
-        remSec -= 1;
-        remNs += 1000000000;
-    }
+    for (;;) {
+        struct timespec now;
+        ::clock_gettime(CLOCK_REALTIME, &now);
+        int64_t remSec = int64_t(abs_timeout->tv_sec) - int64_t(now.tv_sec);
+        int64_t remNs = int64_t(abs_timeout->tv_nsec) - int64_t(now.tv_nsec);
+        if (remNs < 0) {
+            remSec -= 1;
+            remNs += 1000000000;
+        }
 
-    std::unique_lock<std::mutex> lock(s->mtx);
-    auto ready = [&s] { return s->value > 0 || s->destroyed; };
-    if (remSec < 0) {
-        // Already expired. POSIX still requires the semaphore be taken if it is
-        // available, so check before reporting a timeout.
-        if (!ready()) {
-            errno = ETIMEDOUT;
-            return -1;
+        // Re-resolve every round: a destroy/reinit under us migrates the waiter
+        // to the new object instead of failing with EINVAL.
+        auto s = guest_sem_find(sem, /*create=*/true);
+        bool hasToken = false;
+        {
+            std::unique_lock<std::mutex> lock(s->mtx);
+            auto ready = [&s] { return s->value > 0 || s->destroyed; };
+            if (remSec < 0) {
+                // Already expired. POSIX still requires the semaphore be taken if it is
+                // available, so check before reporting a timeout.
+                if (!ready()) {
+                    errno = ETIMEDOUT;
+                    return -1;
+                }
+            } else {
+                if (remSec > 86400) remSec = 86400;  // cap so the duration cannot overflow
+                const auto duration =
+                    std::chrono::seconds(remSec) + std::chrono::nanoseconds(remNs);
+                const BlockingWaitScope tracked(WaitKind::kSemaphoreTimed, sem,
+                                                guest_return_address(6));
+                // Same reasoning as the timed futex: a wait inside its own deadline is doing
+                // what it asked for, and reporting it as stalled buries the real one.
+                blocking_wait_note_budget(static_cast<uint64_t>(remSec) * 1000ull +
+                                          static_cast<uint64_t>(remNs) / 1000000ull);
+                if (!s->cv.wait_for(lock, duration, ready)) {
+                    errno = ETIMEDOUT;
+                    return -1;
+                }
+            }
+            if (s->value > 0) {
+                --s->value;
+                hasToken = true;
+            }
         }
-    } else {
-        if (remSec > 86400) remSec = 86400;  // cap so the duration cannot overflow
-        const auto duration =
-            std::chrono::seconds(remSec) + std::chrono::nanoseconds(remNs);
-        const BlockingWaitScope tracked(WaitKind::kSemaphoreTimed, sem,
-                                        guest_return_address(6));
-        // Same reasoning as the timed futex: a wait inside its own deadline is doing
-        // what it asked for, and reporting it as stalled buries the real one.
-        blocking_wait_note_budget(static_cast<uint64_t>(remSec) * 1000ull +
-                                  static_cast<uint64_t>(remNs) / 1000000ull);
-        if (!s->cv.wait_for(lock, duration, ready)) {
-            errno = ETIMEDOUT;
-            return -1;
+        if (hasToken) return 0;
+        // Woken without a token: spurious, destroyed, or reinited. Same rule as
+        // sem_wait: spurious re-waits, reinit migrates, true destroy succeeds
+        // spuriously rather than EINVAL-aborting the guest.
+        bool current = false;
+        bool replaced = false;
+        {
+            std::lock_guard<std::mutex> lock(g_semaphoresMtx);
+            auto it = g_semaphores.find(sem);
+            current = (it != g_semaphores.end() && it->second == s);
+            replaced = (it != g_semaphores.end() && it->second != s);
         }
+        if (current || replaced) continue;  // loop re-resolves; deadline rechecked
+        return 0;
     }
-    if (s->destroyed) {
-        errno = EINVAL;
-        return -1;
-    }
-    --s->value;
-    return 0;
 }
 
 // Forward android.util.Log.println_native to standard KuDroid log pipeline.
