@@ -96,8 +96,12 @@ struct AudioPlayer {
     //
     // AudioTrack.getPlaybackHeadPosition is not cosmetic: FMOD polls it to decide how
     // much more to write, so a value frozen at zero reads as "the device never drains"
-    // and it stops writing entirely. Counted where playback completes — the output
+    // and it stops writing altogether. Counted where playback completes — the output
     // callback — so it reflects the device rather than what was submitted.
+    //
+    // Frames ever submitted. in-flight = written - played; in audio-ms it tells
+    // whether the mixer runs ahead of wall-clock (pacing diagnosis).
+    std::atomic<uint64_t> framesWritten{0};
     std::atomic<uint64_t> framesPlayed{0};
 
     // Fallback worker (non-Apple).
@@ -812,6 +816,26 @@ extern "C" int32_t bionic_kudroid_audiotrack_write(int64_t track, const void* da
         if (f <= 3) std::fprintf(stderr, "[KuDroidAudio] write FAILED #%d\n", f);
         return -1;  // ERROR
     }
+    const uint32_t bpf = player_bytes_per_frame(p.get());
+    const uint64_t written = p->framesWritten.fetch_add(
+                                 static_cast<uint64_t>(sizeInBytes) / bpf,
+                                 std::memory_order_relaxed) +
+                             static_cast<uint64_t>(sizeInBytes) / bpf;
+    // Diagnostic: in-flight audio-ms shows mixer-ahead-of-wallclock pacing drift.
+    {
+        static std::atomic<int> s_pace{0};
+        const uint64_t played = p->framesPlayed.load(std::memory_order_relaxed);
+        const double rate = p->sampleRate > 0 ? p->sampleRate : 44100.0;
+        const long long ms =
+            static_cast<long long>((written - played) * 1000.0 / rate);
+        const int n = s_pace.load();
+        if (n < 3 || (ms >= 500 && n < 23)) {
+            ++s_pace;
+            std::fprintf(stderr,
+                         "[KuDroidAudio] in-flight=%lldms written=%llu played=%llu\n",
+                         ms, written, played);
+        }
+    }
     const long long total = (s_bytes += sizeInBytes);
     if (total - sizeInBytes == 0 || (total / 10000000) != ((total - sizeInBytes) / 10000000)) {
         std::fprintf(stderr, "[KuDroidAudio] written %lld bytes total\n", total);
@@ -825,6 +849,9 @@ extern "C" int32_t bionic_kudroid_audiotrack_write(int64_t track, const void* da
         if (p->shutdown) return -6;  // ERROR_DEAD_OBJECT
         p->pending.emplace_back(data, static_cast<uint32_t>(sizeInBytes));
         p->pendingCount++;
+        p->framesWritten.fetch_add(
+            static_cast<uint64_t>(sizeInBytes) / player_bytes_per_frame(p.get()),
+            std::memory_order_relaxed);
         if (!p->workerRunning) {
             p->workerRunning = true;
             std::thread(audio_worker, p, p->iface).detach();

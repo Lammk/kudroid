@@ -42,6 +42,12 @@ extern "C" void kudroid_set_assets_dir(const char* dir) {
     g_assetsDir = dir;
 }
 
+// Valid until the next call; the caller must copy immediately.
+extern "C" const char* kudroid_get_assets_dir(void) {
+    std::lock_guard<std::mutex> lock(g_assetsMtx);
+    return g_assetsDir.c_str();
+}
+
 static std::string current_assets_dir() {
     std::lock_guard<std::mutex> lock(g_assetsMtx);
     return g_assetsDir;

@@ -3241,6 +3241,21 @@ bool Invoke_java_nio_DirectByteBuffer(Interpreter* interp, const char* name, con
     return false;
 }
 
+extern "C" const char* kudroid_get_assets_dir(void);
+
+bool Invoke_android_content_res_AssetManager(Interpreter* interp, const char* name,
+                                             const DexValue* /*args*/, size_t /*num_args*/,
+                                             DexValue* result) {
+    if (std::strcmp(name, "nativeGetAssetsDir") == 0) {
+        const char* dir = kudroid_get_assets_dir();
+        result->l = (interp != nullptr && interp->linker() != nullptr && dir != nullptr)
+                        ? reinterpret_cast<DexObject*>(interp->linker()->NewString(dir))
+                        : nullptr;
+        return true;
+    }
+    return false;
+}
+
 bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue* args,
                    size_t num_args, DexValue* result) {
     if (method == nullptr || method->declaring_class == nullptr) return false;
@@ -3285,6 +3300,9 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
     // Direct buffers need a real backing store for native access.
     if (std::strcmp(desc, "Ljava/nio/DirectByteBuffer;") == 0) {
         return Invoke_java_nio_DirectByteBuffer(interp, name, args, num_args, result);
+    }
+    if (std::strcmp(desc, "Landroid/content/res/AssetManager;") == 0) {
+        return Invoke_android_content_res_AssetManager(interp, name, args, num_args, result);
     }
     if (std::strcmp(desc, "Lsun/misc/Unsafe;") == 0) return Invoke_sun_misc_Unsafe(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ldalvik/system/BaseDexClassLoader;") == 0) {

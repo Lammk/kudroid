@@ -14,6 +14,25 @@ public final class URL implements Serializable {
 
     public URL(String spec) throws MalformedURLException {
         this.spec = spec;
+        int colon = spec.indexOf(':');
+        if (colon > 0) {
+            String proto = spec.substring(0, colon).toLowerCase();
+            if (proto.equals("http") || proto.equals("https") || proto.equals("file")
+                    || proto.equals("jar")) {
+                this.protocol = proto;
+                String rest = spec.substring(colon + 1);
+                if (proto.equals("file") || proto.equals("jar")) {
+                    this.host = "";
+                    this.port = -1;
+                    this.file = rest;
+                } else {
+                    this.host = "localhost";
+                    this.port = proto.equals("https") ? 443 : 80;
+                    this.file = "/";
+                }
+                return;
+            }
+        }
         this.protocol = spec.startsWith("https") ? "https" : "http";
         this.host = "localhost";
         this.port = spec.startsWith("https") ? 443 : 80;
@@ -30,7 +49,25 @@ public final class URL implements Serializable {
         this(protocol, host, -1, file);
     }
     public URL(URL context, String spec) throws MalformedURLException {
-        this(spec);
+        if (spec.indexOf(':') > 0) {
+            this.spec = spec;
+            URL parsed = new URL(spec);
+            this.protocol = parsed.protocol;
+            this.host = parsed.host;
+            this.port = parsed.port;
+            this.file = parsed.file;
+        } else if (context != null) {
+            String base = context.file;
+            int slash = base.lastIndexOf('/');
+            String dir = slash >= 0 ? base.substring(0, slash + 1) : "/";
+            this.protocol = context.protocol;
+            this.host = context.host;
+            this.port = context.port;
+            this.file = dir + spec;
+            this.spec = this.protocol + ":" + this.file;
+        } else {
+            throw new MalformedURLException("no context for relative URL " + spec);
+        }
     }
 
     public String getProtocol() { return protocol; }
@@ -42,6 +79,12 @@ public final class URL implements Serializable {
     public String getQuery() { return null; }
     public String getAuthority() { return host; }
     public URLConnection openConnection() throws IOException {
+        if (protocol.equals("file")) {
+            return new FileURLConnection(this);
+        }
+        if (protocol.equals("jar")) {
+            return new JarURLConnection(this);
+        }
         return new HttpURLConnection(this) {
             public void disconnect() {}
             public boolean usingProxy() { return false; }

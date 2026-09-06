@@ -172,8 +172,16 @@ std::vector<ClassSpec> BuildClasses() {
         Native("nPutArray", "V", {"J", "I", "[B", "I", "I"}, true),
     };
 
+    // AssetManager root backs jar:file:// reads of extracted assets.
+    ClassSpec assets;
+    assets.descriptor = "Landroid/content/res/AssetManager;";
+    assets.direct_methods = {
+        Native("nativeGetAssetsDir", "Ljava/lang/String;", {}, true),
+    };
+
     return {object, string,  class_class, system,    math, dbl,
-            flt,    integer, point,       throwable, monitor_state, dbb};
+            flt,    integer, point,       throwable, monitor_state, dbb,
+            assets};
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -546,6 +554,13 @@ void TestDirectByteBuffer(Vm& vm) {
     }
 }
 
+void TestAssetManager(Vm& vm) {
+    std::printf("-- android.content.res.AssetManager --\n");
+
+    DexValue dir = vm.Call("Landroid/content/res/AssetManager;", "nativeGetAssetsDir", {});
+    Check(dir.l != nullptr, "nativeGetAssetsDir() returns a string (empty when unset)");
+}
+
 }  // namespace
 
 int main() {
@@ -568,6 +583,7 @@ int main() {
     TestClassNatives(vm);
     TestMonitors(vm);
     TestDirectByteBuffer(vm);
+    TestAssetManager(vm);
 
     if (g_failures == 0) {
         std::printf("=== KuART libcore natives PASSED ===\n");
