@@ -746,6 +746,11 @@ static VkInstance s_activeVkInstance = nullptr;
 typedef uint32_t (*PFN_vkSurfaceCaps_fn)(void*, void*, void*);
 static PFN_vkSurfaceCaps_fn s_realSurfaceCaps = nullptr;
 extern "C" uint32_t bionic_vkSurfaceCaps(void* phys, void* surface, void* caps);
+// Swapchain creation also resolves here; the wrapper lives with the device taps.
+typedef uint32_t (*PFN_vkCreateSwapchainKHR_fn)(void*, const void*, const void*, void**);
+static PFN_vkCreateSwapchainKHR_fn s_realCreateSwapchain = nullptr;
+extern "C" uint32_t bionic_vkCreateSwapchainKHR(void* device, const void* create_info,
+                                                const void* allocator, void** swapchain);
 
 // Intercept vkCreateInstance: translate Android surface extension to iOS MoltenVK surface extension
 extern "C" VkResult bionic_vkCreateInstance(const VkInstanceCreateInfo* pCreateInfo,
@@ -910,6 +915,18 @@ extern "C" PFN_vkVoidFunction bionic_vkGetInstanceProcAddr(VkInstance instance, 
             return reinterpret_cast<PFN_vkVoidFunction>(&bionic_vkSurfaceCaps);
         }
     }
+    // Swapchain creation also arrives here (never via the device-proc tap), same wrap.
+    if (strcmp(pName, "vkCreateSwapchainKHR") == 0) {
+        if (s_realCreateSwapchain == nullptr) {
+            if (void* mvk = get_mvk_handle()) {
+                s_realCreateSwapchain = reinterpret_cast<PFN_vkCreateSwapchainKHR_fn>(
+                    ::dlsym(mvk, "vkCreateSwapchainKHR"));
+            }
+        }
+        if (s_realCreateSwapchain != nullptr) {
+            return reinterpret_cast<PFN_vkVoidFunction>(&bionic_vkCreateSwapchainKHR);
+        }
+    }
     auto real = get_real_vkGetInstanceProcAddr();
     if (real) {
         return real(instance, pName);
@@ -923,10 +940,8 @@ extern "C" PFN_vkVoidFunction bionic_vkGetInstanceProcAddr(VkInstance instance, 
 typedef uint32_t (*PFN_vkQueuePresentKHR_fn)(void*, const void*);
 typedef uint32_t (*PFN_vkAcquireNextImageKHR_fn)(void*, void*, uint64_t, void*, void*,
                                                  uint32_t*);
-typedef uint32_t (*PFN_vkCreateSwapchainKHR_fn)(void*, const void*, const void*, void**);
 static PFN_vkQueuePresentKHR_fn s_realQueuePresent = nullptr;
 static PFN_vkAcquireNextImageKHR_fn s_realAcquireNextImage = nullptr;
-static PFN_vkCreateSwapchainKHR_fn s_realCreateSwapchain = nullptr;
 static std::atomic<uint64_t> s_presentCount{0};
 static std::atomic<uint64_t> s_acquireCount{0};
 

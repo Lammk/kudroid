@@ -190,6 +190,12 @@ static bool ensure_audio_queue(AudioPlayer* p) {
     const OSStatus st = AudioQueueNewOutput(&asbd, audio_queue_output_cb, p->aqUserData,
                                             nullptr, nullptr, 0, &p->aq);
     if (st != noErr || !p->aq) {
+        static std::atomic<int> s_newFails{0};
+        if (s_newFails.load() < 5) {
+            ++s_newFails;
+            std::fprintf(stderr, "[KuDroidAudio] AudioQueueNewOutput failed st=%d\n",
+                         static_cast<int>(st));
+        }
         delete static_cast<std::shared_ptr<AudioPlayer>*>(p->aqUserData);
         p->aqUserData = nullptr;
         return false;
@@ -198,7 +204,18 @@ static bool ensure_audio_queue(AudioPlayer* p) {
     // (slPlaySetPlayState/requestStart occurs before first enqueue), must start at
     // here, otherwise the queue freezes and the sound is muted even though the game is "playing".
     if (p->playState == SL_PLAYSTATE_PLAYING) {
-        AudioQueueStart(p->aq, nullptr);
+        const OSStatus sst = AudioQueueStart(p->aq, nullptr);
+        static std::atomic<int> s_startLogged{0};
+        if (sst != noErr) {
+            if (s_startLogged.load() < 5) {
+                ++s_startLogged;
+                std::fprintf(stderr, "[KuDroidAudio] AudioQueueStart failed st=%d\n",
+                             static_cast<int>(sst));
+            }
+        } else if (s_startLogged.load() < 1) {
+            ++s_startLogged;
+            std::fprintf(stderr, "[KuDroidAudio] AudioQueue started\n");
+        }
     }
     return true;
 }
@@ -870,7 +887,15 @@ extern "C" int32_t bionic_kudroid_audiotrack_play(int64_t track) {
 #if defined(__APPLE__)
     // The queue is created lazily on the first write, so play() before any data must only
     // record the intent — ensure_audio_queue starts it when it appears.
-    if (p->aq) AudioQueueStart(p->aq, nullptr);
+    if (p->aq) {
+        const OSStatus sst = AudioQueueStart(p->aq, nullptr);
+        static std::atomic<int> s_playLogged{0};
+        if (s_playLogged.load() < 3) {
+            ++s_playLogged;
+            std::fprintf(stderr, "[KuDroidAudio] play() start st=%d\n",
+                         static_cast<int>(sst));
+        }
+    }
 #endif
     return 0;
 }
