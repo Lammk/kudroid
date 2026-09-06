@@ -720,6 +720,19 @@ int vfs_fclose(FILE* stream) {
     return std::fclose(stream);
 }
 
+int vfs_fseek(FILE* stream, long offset, int whence) {
+    const int rc = std::fseek(stream, offset, whence);
+    if (rc == 0 && is_apk_stream(stream)) {
+        static std::atomic<int> s_logged{0};
+        if (s_logged.load() < 20) {
+            ++s_logged;
+            std::fprintf(stderr, "[KuDroidApkF] fseek offset=%ld whence=%d\n", offset,
+                         whence);
+        }
+    }
+    return rc;
+}
+
 FILE* vfs_freopen(const char* path, const char* mode, FILE* stream) {
     const std::string mapped = VFSPathRemapper::getInstance().remap(path);
     return std::freopen(mapped.c_str(), mode, stream);

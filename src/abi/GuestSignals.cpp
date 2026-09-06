@@ -175,7 +175,10 @@ void mask_guest_to_host(uint64_t guest_mask, sigset_t* out) {
     for (int linux_sig = 1; linux_sig < 64; ++linux_sig) {
         if ((guest_mask & (1ull << (linux_sig - 1))) == 0) continue;
         const int host_sig = guest_signal_to_host(linux_sig);
-        if (host_sig != 0) sigaddset(out, host_sig);
+        // Never allow masking SIGTRAP (TLS emulation) or SIGSYS (syscall emulation)
+        if (host_sig != 0 && host_sig != SIGTRAP && host_sig != SIGSYS) {
+            sigaddset(out, host_sig);
+        }
     }
 }
 
@@ -592,20 +595,31 @@ int guest_sigaction(int guest_signum, const GuestSigaction* act, GuestSigaction*
     slot.guest_flags.store(act->sa_flags, std::memory_order_relaxed);
     slot.guest_mask.store(act->sa_mask, std::memory_order_relaxed);
     slot.restorer.store(reinterpret_cast<void*>(act->sa_restorer), std::memory_order_relaxed);
-    slot.handler.store(act->sa_handler_or_sigaction, std::memory_order_release);
+    void* h = act->sa_handler_or_sigaction;
+    slot.handler.store(h, std::memory_order_release);
 
     if (kudroid_owns(host_signum)) {
-        // Recorded, not installed. KuDroid's handler stays and reaches the guest's
-        // through guest_signal_dispatch. Installing the guest's here is precisely what
-        // broke ULTRAKILL: its handler replaced KuDroid's, so the SIGTRAP that supplies
-        // guest TLS and the SIGSEGV that writes the crash log both stopped working, and
-        // the log for that run contains no crash report at all.
-        char msg[192];
-        std::snprintf(msg, sizeof(msg),
-                      "guest sigaction(%d) recorded for host signal %d; KuDroid keeps the "
-                      "handler and will call the guest's",
-                      guest_signum, host_signum);
-        kudroid_android_log_message(4, "KuDroidSignal", msg);
+        if (!is_real_handler(h)) {
+            static std::mutex s_dflMtx;
+            static int s_dflLogged{0};
+            std::lock_guard<std::mutex> lock(s_dflMtx);
+            if (s_dflLogged < 6) {
+                ++s_dflLogged;
+                char msg[160];
+                std::snprintf(msg, sizeof(msg),
+                              "guest reset owned signal %d (host %d) to %s",
+                              guest_signum, host_signum,
+                              h == reinterpret_cast<void*>(SIG_IGN) ? "IGN" : "DFL");
+                kudroid_android_log_message(4, "KuDroidSignal", msg);
+            }
+        } else {
+            char msg[192];
+            std::snprintf(msg, sizeof(msg),
+                          "guest sigaction(%d) recorded for host signal %d; KuDroid keeps the "
+                          "handler and will call the guest's",
+                          guest_signum, host_signum);
+            kudroid_android_log_message(4, "KuDroidSignal", msg);
+        }
         return 0;
     }
 
@@ -618,7 +632,6 @@ int guest_sigaction(int guest_signum, const GuestSigaction* act, GuestSigaction*
     host_act.sa_flags = flags_guest_to_host(act->sa_flags) | SA_SIGINFO;
     mask_guest_to_host(act->sa_mask, &host_act.sa_mask);
 
-    void* h = act->sa_handler_or_sigaction;
     if (!is_real_handler(h)) {
         // SIG_DFL and SIG_IGN pass through as themselves: there is nothing to translate
         // and routing them through a trampoline would turn "ignore" into "call a

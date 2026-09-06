@@ -47,6 +47,7 @@ FILE* vfs_fopen64(const char* path, const char* mode);
 FILE* vfs_freopen(const char* path, const char* mode, FILE* stream);
 size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream);
 int vfs_fclose(FILE* stream);
+int vfs_fseek(FILE* stream, long offset, int whence);
 int vfs_access(const char* path, int mode);
 int vfs_stat(const char* path, void* info);
 int vfs_stat64(const char* path, void* info);

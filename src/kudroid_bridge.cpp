@@ -706,16 +706,25 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
     if (sig == SIGSYS && bionic_handle_guest_syscall_trap(ucontext)) {
         return;
     }
-    // Diagnostic: which fatal signal actually arrives. A teardown death with no
-    // line here means our disposition was replaced before the trap.
+    // Diagnostic: which fatal signal actually arrives. Per-signal caps: TRAP
+    // fires constantly (TLS emulation), the rest are rare.
     if (sig == SIGTRAP || sig == SIGILL || sig == SIGBUS || sig == SIGSEGV ||
         sig == SIGABRT) {
+        static std::atomic<int> s_trapSeen{0};
         static std::atomic<int> s_fatalSeen{0};
-        if (s_fatalSeen.load() < 6) {
+        bool log = false;
+        if (sig == SIGTRAP) {
+            if (s_trapSeen.load() < 3) {
+                ++s_trapSeen;
+                log = true;
+            }
+        } else if (s_fatalSeen.load() < 8) {
             ++s_fatalSeen;
+            log = true;
+        }
+        if (log) {
             char line[96];
-            std::snprintf(line, sizeof(line), "fatal signal %d #%d", sig,
-                          s_fatalSeen.load());
+            std::snprintf(line, sizeof(line), "fatal signal %d", sig);
             kudroid_android_log_message(4, "KuDroidTrap", line);
         }
     }
