@@ -65,6 +65,9 @@ extern "C" void* bionic_ALooper_prepare(int opts);
 extern "C" void* bionic_ALooper_forThread(void);
 extern "C" void bionic_ALooper_acquire(void* looper);
 extern "C" void bionic_ALooper_release(void* looper);
+extern "C" void bionic_ALooper_wake(void* looper);
+extern "C" int bionic_ALooper_pollOnce(int timeoutMillis, int* outFd, int* outEvents,
+                                       void** outData);
 extern "C" void* bionic_dlopen(const char* filename, int flags);
 extern "C" void* bionic_dlsym(void* handle, const char* symbol);
 extern "C" int bionic_dlclose(void* handle);
@@ -1174,6 +1177,26 @@ static void test_alooper_never_null() {
           "a balanced acquire/release leaves it alive");
 }
 
+// A wake must release a thread parked in pollOnce(-1): teardown joins workers
+// parked exactly there, and a no-op wake wedged nativeDone forever.
+static void test_alooper_wake_releases_poll() {
+    void* looper = bionic_ALooper_forThread();
+    CHECK(bionic_ALooper_pollOnce(0, nullptr, nullptr, nullptr) == -2,
+          "pollOnce(0) on an idle looper times out immediately");
+
+    std::atomic<int> result{-99};
+    std::thread waiter([&] {
+        result.store(bionic_ALooper_pollOnce(-1, nullptr, nullptr, nullptr));
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    bionic_ALooper_wake(looper);
+    waiter.join();
+    CHECK(result.load() == -3, "wake during pollOnce(-1) returns ALOOPER_POLL_WAKE");
+
+    CHECK(bionic_ALooper_pollOnce(0, nullptr, nullptr, nullptr) == -2,
+          "the wake is drained, the next poll times out again");
+}
+
 static void test_guest_library_handles() {
     std::printf("[dlfcn] guest .so gets its own handle\n");
 
@@ -1713,6 +1736,7 @@ int main() {
     test_guard_cross_thread_wait();
     test_guard_recursion_loop_cut();
     test_alooper_never_null();
+    test_alooper_wake_releases_poll();
     test_guest_library_handles();
     test_dl_iterate_phdr_reports_guest_modules();
     test_dl_iterate_phdr_skips_modules_without_headers();

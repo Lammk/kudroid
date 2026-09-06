@@ -741,6 +741,12 @@ static PFN_vkGetInstanceProcAddr get_real_vkGetInstanceProcAddr() {
 
 static VkInstance s_activeVkInstance = nullptr;
 
+// Passthrough tap for vkGetPhysicalDeviceSurfaceCapabilitiesKHR (hooked on the
+// instance-proc path, which the device-proc tap never sees).
+typedef uint32_t (*PFN_vkSurfaceCaps_fn)(void*, void*, void*);
+static PFN_vkSurfaceCaps_fn s_realSurfaceCaps = nullptr;
+extern "C" uint32_t bionic_vkSurfaceCaps(void* phys, void* surface, void* caps);
+
 // Intercept vkCreateInstance: translate Android surface extension to iOS MoltenVK surface extension
 extern "C" VkResult bionic_vkCreateInstance(const VkInstanceCreateInfo* pCreateInfo,
                                             const VkAllocationCallbacks* pAllocator,
@@ -892,6 +898,18 @@ extern "C" PFN_vkVoidFunction bionic_vkGetInstanceProcAddr(VkInstance instance, 
     if (strcmp(pName, "vkGetDeviceProcAddr") == 0) {
         return (PFN_vkVoidFunction)&bionic_vkGetDeviceProcAddr;
     }
+    // Capabilities bypass the device-proc tap (resolved here), so hook them here.
+    if (strcmp(pName, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR") == 0) {
+        if (s_realSurfaceCaps == nullptr) {
+            if (void* mvk = get_mvk_handle()) {
+                s_realSurfaceCaps = reinterpret_cast<PFN_vkSurfaceCaps_fn>(
+                    ::dlsym(mvk, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR"));
+            }
+        }
+        if (s_realSurfaceCaps != nullptr) {
+            return reinterpret_cast<PFN_vkVoidFunction>(&bionic_vkSurfaceCaps);
+        }
+    }
     auto real = get_real_vkGetInstanceProcAddr();
     if (real) {
         return real(instance, pName);
@@ -985,6 +1003,30 @@ extern "C" uint32_t bionic_vkCreateSwapchainKHR(void* device, const void* create
     gpuLog("vkCreateSwapchainKHR surface=%p -> %u swap=%p extent=%ux%u fmt=%u preXform=%d mode=%d minImg=%u onscreen=%p",
            surface, r, created, extent_w, extent_h, format, pre_transform, present_mode,
            min_count, g_metalLayer);
+    return r;
+}
+
+// Diagnostic: surface capabilities MoltenVK reports. Unity reads these through
+// vkGetInstanceProcAddr (bypassing the device-proc tap), so this hook lives on
+// the instance-proc path. VkSurfaceCapabilitiesKHR 64-bit layout:
+// minCount(0) maxCount(4) currentExtent(8: w,h) supportedTransforms(36)
+// currentTransform(40).
+extern "C" uint32_t bionic_vkSurfaceCaps(void* phys, void* surface, void* caps) {
+    const uint32_t r =
+        s_realSurfaceCaps != nullptr ? s_realSurfaceCaps(phys, surface, caps) : 0xFFFFFFFFu;
+    if (r == 0 && caps != nullptr) {
+        uint32_t w = 0, h = 0, min_c = 0, max_c = 0;
+        int32_t sup_xf = -1, cur_xf = -1;
+        const char* c = static_cast<const char*>(caps);
+        std::memcpy(&min_c, c + 0, 4);
+        std::memcpy(&max_c, c + 4, 4);
+        std::memcpy(&w, c + 8, 4);
+        std::memcpy(&h, c + 12, 4);
+        std::memcpy(&sup_xf, c + 36, 4);
+        std::memcpy(&cur_xf, c + 40, 4);
+        gpuLog("vkSurfaceCaps surface=%p extent=%ux%u curXform=%d supXform=%d min=%u max=%u",
+               surface, w, h, cur_xf, sup_xf, min_c, max_c);
+    }
     return r;
 }
 

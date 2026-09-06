@@ -62,6 +62,7 @@ enum class WaitKind : int {
     kRwlockWrite,    // pthread_rwlock_wrlock
     kOnce,           // pthread_once, waiting for another thread's initialiser
     kEpoll,          // epoll_wait with an indefinite timeout
+    kLooperPoll,     // ALooper_pollAll/pollOnce (fd set + wake pipe)
     // pthread_join: waits for another thread to exit, and therefore inherits whatever
     // is blocking that thread. A join is the one wait whose report is only half the
     // story on its own — the other half is the target's own stalled line.

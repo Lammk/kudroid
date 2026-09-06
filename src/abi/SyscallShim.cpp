@@ -4383,6 +4383,10 @@ struct ALooper {
     std::vector<ALooperFd> fds;
     std::mutex mtx;
     int refCount;
+    // Wake pipe: ALooper_wake writes a byte so a thread parked in poll(-1)
+    // returns ALOOPER_POLL_WAKE instead of sleeping through teardown joins.
+    int wakePipe[2] = {-1, -1};
+    bool wakeReady = false;
 };
 
 static ALooper* g_mainLooper = nullptr;
@@ -4507,8 +4511,17 @@ extern "C" int bionic_ALooper_removeFd(void* looper, int fd) {
 }
 
 extern "C" void bionic_ALooper_wake(void* looper) {
-    (void)looper;
-    // No-op; poll uses a timeout so wake is not strictly needed.
+    auto* l = static_cast<ALooper*>(looper != nullptr ? looper : g_mainLooper);
+    if (l == nullptr) return;
+    int wfd = -1;
+    {
+        std::lock_guard<std::mutex> lock(l->mtx);
+        if (l->wakeReady) wfd = l->wakePipe[1];
+    }
+    if (wfd < 0) return;
+    // Non-blocking: a wake landing on an already-awake looper is not an error.
+    const uint8_t byte = 1;
+    (void)::write(wfd, &byte, 1);
 }
 
 // Poll for events. Returns the ident of the first ready fd, or ALOOPER_POLL_TIMEOUT (-2)
@@ -4543,24 +4556,67 @@ extern "C" int bionic_ALooper_pollAll(int timeoutMillis, int* outFd, int* outEve
         pfds.push_back(pfd);
     }
 
-    if (pfds.empty()) {
-        // No fds registered; sleep for the timeout.
+    // Wake pipe first: with it ready there is always something to wait on, so
+    // poll(-1) parks until wake instead of returning instantly with no fds.
+    if (!l->wakeReady) {
+        int fds[2] = {-1, -1};
+        if (::pipe(fds) == 0) {
+            for (int i = 0; i < 2; ++i) {
+                const int fl = ::fcntl(fds[i], F_GETFL);
+                if (fl >= 0) ::fcntl(fds[i], F_SETFL, fl | O_NONBLOCK);
+            }
+            l->wakePipe[0] = fds[0];
+            l->wakePipe[1] = fds[1];
+            l->wakeReady = true;
+        }
+    }
+    if (pfds.empty() && !l->wakeReady) {
+        // No fds registered and no wake pipe; sleep for the timeout.
         if (timeoutMillis > 0) {
             struct timespec ts;
             ts.tv_sec = timeoutMillis / 1000;
             ts.tv_nsec = (timeoutMillis % 1000) * 1000000;
+            const BlockingWaitScope tracked(WaitKind::kLooperPoll, l,
+                                            guest_return_address(6));
+            blocking_wait_note_budget(static_cast<uint64_t>(timeoutMillis));
             nanosleep(&ts, nullptr);
         }
         return -2; // ALOOPER_POLL_TIMEOUT
+    }
+
+    int wakeIndex = -1;
+    if (l->wakeReady) {
+        struct pollfd wfd;
+        wfd.fd = l->wakePipe[0];
+        wfd.events = POLLIN;
+        wfd.revents = 0;
+        wakeIndex = static_cast<int>(pfds.size());
+        pfds.push_back(wfd);
     }
 
     // nfds_t is unsigned int on Darwin — clamp to avoid truncation.
     const nfds_t nfds = pfds.size() > static_cast<size_t>(INT_MAX)
                            ? static_cast<nfds_t>(INT_MAX)
                            : static_cast<nfds_t>(pfds.size());
-    int ret = ::poll(pfds.data(), nfds, timeoutMillis);
+    int ret = 0;
+    {
+        const BlockingWaitScope tracked(WaitKind::kLooperPoll, l,
+                                        guest_return_address(6));
+        if (timeoutMillis >= 0) {
+            blocking_wait_note_budget(static_cast<uint64_t>(timeoutMillis));
+        }
+        ret = ::poll(pfds.data(), nfds, timeoutMillis);
+    }
     if (ret < 0) return -1; // ALOOPER_POLL_ERROR
     if (ret == 0) return -2; // ALOOPER_POLL_TIMEOUT
+
+    // Woken: drain and report, so the waker never has to wake twice.
+    if (wakeIndex >= 0 && (pfds[static_cast<size_t>(wakeIndex)].revents & POLLIN) != 0) {
+        uint8_t drain[64];
+        while (::read(l->wakePipe[0], drain, sizeof(drain)) > 0) {
+        }
+        return -3; // ALOOPER_POLL_WAKE
+    }
 
     // Find the first ready fd.
     for (size_t i = 0; i < pfds.size(); ++i) {

@@ -99,6 +99,7 @@ const char* kind_name(WaitKind kind) {
         case WaitKind::kRwlockWrite: return "rwlock-wrlock";
         case WaitKind::kOnce: return "pthread-once";
         case WaitKind::kEpoll: return "epoll-wait";
+        case WaitKind::kLooperPoll: return "looper-poll";
         case WaitKind::kJoin: return "pthread-join";
         case WaitKind::kGuardSpin: return "cxa-guard-spin";
     }
