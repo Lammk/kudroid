@@ -5,8 +5,10 @@
 #include "kudroid/platform/MemoryInfo.h"
 
 #include <cerrno>
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <map>
 #include <mutex>
 #include <cstdlib>
 #include <cstring>
@@ -633,6 +635,9 @@ int vfs_open64(const char* path, int flags, mode_t mode) { return vfs_open(path,
 
 static void track_apk_stream(FILE* f);
 
+extern std::mutex g_freadVolMtx;
+extern std::map<FILE*, std::string> g_freadPaths;
+
 FILE* vfs_fopen(const char* path, const char* mode) {
     const std::string mapped = VFSPathRemapper::getInstance().remap(path);
     if (mode && (std::strchr(mode, 'w') || std::strchr(mode, 'a'))) {
@@ -660,6 +665,8 @@ FILE* vfs_fopen(const char* path, const char* mode) {
         if (len >= 8 && std::strcmp(path + len - 8, "base.apk") == 0) {
             track_apk_stream(result);
         }
+        std::lock_guard<std::mutex> vlock(g_freadVolMtx);
+        if (g_freadPaths.size() < 512) g_freadPaths[result] = mapped;
     }
     // Misses under /data are silent stalls when Unity looks in the wrong place.
     if (result == nullptr && !mapped.empty() &&
@@ -703,6 +710,17 @@ static bool is_apk_stream(FILE* f) {
     }
     return false;
 }
+
+// Read volume per FILE path: bulk flow through fread (Unity's main read path)
+// shows here. Open/close are rare, reads are hot: path recorded under lock at
+// open, lock-free map read per fread would still serialize — a single mutex is
+// fine (uncontended ~20ns vs microsecond reads).
+std::mutex g_freadVolMtx;
+std::map<FILE*, std::string> g_freadPaths;
+std::map<std::string, std::pair<uint64_t, uint64_t>> g_freadVol;
+uint64_t g_freadVolTotal = 0;
+uint64_t g_freadVolNextLog = 50ULL * 1024 * 1024;
+
 size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
     const size_t n = std::fread(buf, size, count, stream);
     if (n > 0 && is_apk_stream(stream)) {
@@ -710,6 +728,33 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
         if (s_logged.load() < 25) {
             ++s_logged;
             std::fprintf(stderr, "[KuDroidApkF] fread bytes=%zu\n", n * size);
+        }
+    }
+    if (n > 0) {
+        std::lock_guard<std::mutex> lock(g_freadVolMtx);
+        auto it = g_freadPaths.find(stream);
+        if (it != g_freadPaths.end()) {
+            auto& e = g_freadVol[it->second];
+            e.first += n * size;
+            e.second += 1;
+            g_freadVolTotal += n * size;
+            if (g_freadVolTotal >= g_freadVolNextLog) {
+                g_freadVolNextLog += 50ULL * 1024 * 1024;
+                using Entry = std::pair<std::string, std::pair<uint64_t, uint64_t>>;
+                std::vector<Entry> top(g_freadVol.begin(), g_freadVol.end());
+                std::sort(top.begin(), top.end(), [](const Entry& a, const Entry& b) {
+                    return a.second.first > b.second.first;
+                });
+                std::string line =
+                    "fread total=" + std::to_string(g_freadVolTotal) + "B";
+                for (size_t i = 0; i < top.size() && i < 5; ++i) {
+                    const std::string& p = top[i].first;
+                    line += " | " + (p.size() > 60 ? "..." + p.substr(p.size() - 57) : p) +
+                            "=" + std::to_string(top[i].second.first) + "B/" +
+                            std::to_string(top[i].second.second) + "ops";
+                }
+                std::fprintf(stderr, "[KuDroidIO] %s\n", line.c_str());
+            }
         }
     }
     if (n * size >= 1048576) {
@@ -731,6 +776,8 @@ int vfs_fclose(FILE* stream) {
                 g_apkStreams[i].store(0, std::memory_order_relaxed);
             }
         }
+        std::lock_guard<std::mutex> vlock(g_freadVolMtx);
+        g_freadPaths.erase(stream);
     }
     return std::fclose(stream);
 }
