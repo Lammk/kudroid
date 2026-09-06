@@ -5,7 +5,9 @@
 #include "kudroid/platform/MemoryInfo.h"
 
 #include <cerrno>
+#include <atomic>
 #include <cstdio>
+#include <mutex>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -629,6 +631,8 @@ int vfs_open(const char* path, int flags, mode_t mode) {
 
 int vfs_open64(const char* path, int flags, mode_t mode) { return vfs_open(path, flags, mode); }
 
+static void track_apk_stream(FILE* f);
+
 FILE* vfs_fopen(const char* path, const char* mode) {
     const std::string mapped = VFSPathRemapper::getInstance().remap(path);
     if (mode && (std::strchr(mode, 'w') || std::strchr(mode, 'a'))) {
@@ -652,10 +656,69 @@ FILE* vfs_fopen(const char* path, const char* mode) {
         std::fprintf(stderr, "[KuDroidVFS] fopen(%s) -> %s\n", path,
                      result ? "OK" : std::strerror(errno));
     }
+    if (result != nullptr && path != nullptr) {
+        const size_t len = std::strlen(path);
+        if (len >= 8 && std::strcmp(path + len - 8, "base.apk") == 0) {
+            track_apk_stream(result);
+        }
+    }
     return result;
 }
 
 FILE* vfs_fopen64(const char* path, const char* mode) { return vfs_fopen(path, mode); }
+
+// Tracked APK streams: guest fread bypasses the syscall layer, so volume on
+// base.apk (catalog/asset bytes) is otherwise invisible. Lock-free lookup,
+// locked mutation (open/close are rare, reads are hot).
+namespace {
+constexpr int kTrackedStreams = 8;
+std::atomic<uintptr_t> g_apkStreams[kTrackedStreams];
+std::mutex g_apkStreamsMtx;
+}  // namespace
+
+static void track_apk_stream(FILE* f) {
+    if (f == nullptr) return;
+    std::lock_guard<std::mutex> lock(g_apkStreamsMtx);
+    for (int i = 0; i < kTrackedStreams; ++i) {
+        uintptr_t empty = 0;
+        if (g_apkStreams[i].compare_exchange_strong(empty,
+                                                    reinterpret_cast<uintptr_t>(f))) {
+            return;
+        }
+    }
+}
+
+static bool is_apk_stream(FILE* f) {
+    const auto p = reinterpret_cast<uintptr_t>(f);
+    for (int i = 0; i < kTrackedStreams; ++i) {
+        if (g_apkStreams[i].load(std::memory_order_relaxed) == p) return true;
+    }
+    return false;
+}
+
+size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {    const size_t n = std::fread(buf, size, count, stream);
+    if (n > 0 && is_apk_stream(stream)) {
+        static std::atomic<int> s_logged{0};
+        if (s_logged.load() < 25) {
+            ++s_logged;
+            std::fprintf(stderr, "[KuDroidApkF] fread bytes=%zu\n", n * size);
+        }
+    }
+    return n;
+}
+
+int vfs_fclose(FILE* stream) {
+    if (stream != nullptr) {
+        std::lock_guard<std::mutex> lock(g_apkStreamsMtx);
+        for (int i = 0; i < kTrackedStreams; ++i) {
+            if (g_apkStreams[i].load(std::memory_order_relaxed) ==
+                reinterpret_cast<uintptr_t>(stream)) {
+                g_apkStreams[i].store(0, std::memory_order_relaxed);
+            }
+        }
+    }
+    return std::fclose(stream);
+}
 
 FILE* vfs_freopen(const char* path, const char* mode, FILE* stream) {
     const std::string mapped = VFSPathRemapper::getInstance().remap(path);

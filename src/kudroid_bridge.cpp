@@ -706,6 +706,19 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
     if (sig == SIGSYS && bionic_handle_guest_syscall_trap(ucontext)) {
         return;
     }
+    // Diagnostic: which fatal signal actually arrives. A teardown death with no
+    // line here means our disposition was replaced before the trap.
+    if (sig == SIGTRAP || sig == SIGILL || sig == SIGBUS || sig == SIGSEGV ||
+        sig == SIGABRT) {
+        static std::atomic<int> s_fatalSeen{0};
+        if (s_fatalSeen.load() < 6) {
+            ++s_fatalSeen;
+            char line[96];
+            std::snprintf(line, sizeof(line), "fatal signal %d #%d", sig,
+                          s_fatalSeen.load());
+            kudroid_android_log_message(4, "KuDroidTrap", line);
+        }
+    }
     if (sig == SIGTRAP) {
         if (kudroid::bionic_handle_tpidr_trap(ucontext)) {
             return; // handled successfully, resuming execution!
