@@ -2807,13 +2807,19 @@ extern "C" int bionic_futex(uint32_t *uaddr, int futex_op, uint32_t val, const s
         futex_leave(uaddr, q);
         return 0;
     } else if (cmd == FUTEX_WAKE || cmd == FUTEX_WAKE_BITSET) {
-        std::unique_lock<std::mutex> lock(g_futexGlobalMtx);
-        auto it = g_futexQueues.find(uaddr);
-        if (it != g_futexQueues.end()) {
-            std::unique_lock<std::mutex> qLock(it->second->mtx);
-            lock.unlock();
-            if (val == 1) it->second->cv.notify_one();
-            else it->second->cv.notify_all();
+        // Copy the queue under the global lock: a leaving waiter may erase the
+        // entry the moment it is released, so the iterator must not be touched
+        // after unlock (use-after-erase crashed notify_one on garbage).
+        std::shared_ptr<FutexWaitQueue> q;
+        {
+            std::unique_lock<std::mutex> lock(g_futexGlobalMtx);
+            auto it = g_futexQueues.find(uaddr);
+            if (it != g_futexQueues.end()) q = it->second;
+        }
+        if (q) {
+            std::lock_guard<std::mutex> qLock(q->mtx);
+            if (val == 1) q->cv.notify_one();
+            else q->cv.notify_all();
             return val;
         }
         return 0;
@@ -2821,13 +2827,16 @@ extern "C" int bionic_futex(uint32_t *uaddr, int futex_op, uint32_t val, const s
         // FUTEX_CMP_REQUEUE requires *uaddr == val3 before requeueing.
         if (cmd == FUTEX_CMP_REQUEUE && *uaddr != val3) { errno = EAGAIN; return -1; }
 
-        std::unique_lock<std::mutex> lock(g_futexGlobalMtx);
-        auto it = g_futexQueues.find(uaddr);
-        if (it != g_futexQueues.end()) {
-            std::unique_lock<std::mutex> qLock(it->second->mtx);
-            lock.unlock();
-            if (val == 1) it->second->cv.notify_one();
-            else it->second->cv.notify_all();
+        std::shared_ptr<FutexWaitQueue> q;
+        {
+            std::unique_lock<std::mutex> lock(g_futexGlobalMtx);
+            auto it = g_futexQueues.find(uaddr);
+            if (it != g_futexQueues.end()) q = it->second;
+        }
+        if (q) {
+            std::lock_guard<std::mutex> qLock(q->mtx);
+            if (val == 1) q->cv.notify_one();
+            else q->cv.notify_all();
             return val;
         }
         return 0;

@@ -732,10 +732,6 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
         if (kudroid::bionic_handle_tpidr_trap(ucontext)) {
             return; // handled successfully, resuming execution!
         }
-        // Diagnostic: our BRK pattern but emulate declined, or a foreign
-        // breakpoint. Capped; startup TPIDR traps return above, so any line
-        // here near teardown is the death itself. Missing entirely at a
-        // teardown death means our disposition was replaced beforehand.
         static std::atomic<int> s_trapUnhandled{0};
         if (s_trapUnhandled.load() < 8) {
             ++s_trapUnhandled;
@@ -747,6 +743,20 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
         // their own purposes. Reporting it as a KuDroid crash would both lose their
         // event and produce a misleading log.
         chainToPreviousHandler(sig);
+    }
+    // The same TLS breakpoints can arrive as SIGILL (observed at teardown while
+    // startup traps arrive as SIGTRAP). Pattern-gated like above: a genuine
+    // illegal instruction never matches our BRK range and falls through to the
+    // crash reporter untouched.
+    if (sig == SIGILL) {
+        if (kudroid::bionic_handle_tpidr_trap(ucontext)) {
+            static std::atomic<int> s_illEmulated{0};
+            if (s_illEmulated.load() < 5) {
+                ++s_illEmulated;
+                kudroid_android_log_message(4, "KuDroidTrap", "SIGILL emulated as TPIDR");
+            }
+            return;
+        }
     }
 
     // Record the fault BEFORE anyone gets a chance to swallow it.
