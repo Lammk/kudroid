@@ -216,7 +216,8 @@ static bool ensure_audio_queue(AudioPlayer* p) {
     // the first buffer lands (see enqueue_pcm), never on an empty queue.
     return true;
 }
-}
+
+// Push a PCM block into AudioQueue (common to OpenSL enqueue and AAudio write).
 
 // Push a PCM block into AudioQueue (common to OpenSL enqueue and AAudio write).
 static bool enqueue_pcm(AudioPlayer* p, const void* data, uint32_t size) {
