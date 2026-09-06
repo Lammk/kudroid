@@ -1612,6 +1612,7 @@ class NativeMetalViewController: UIViewController {
     private var isStarted = false
     fileprivate var metalView: NativeMetalView!
     private var crashCheckTimer: Timer?
+    private var keyboardObservers: [NSObjectProtocol] = []
     private var statusLabel: UILabel!
     private let motionManager = CMMotionManager()
     private var lastRequestedOrientation: Int32 = -1
@@ -1722,16 +1723,21 @@ class NativeMetalViewController: UIViewController {
         // Track the real keyboard state rather than assuming it followed the request:
         // iOS can dismiss it on its own (interactive dismiss, scene change), and the
         // guest reads this to lay out around the keyboard.
-        NotificationCenter.default.addObserver(
-            forName: NSNotification.Name(rawValue: "UIKeyboardDidShowNotification"), object: nil, queue: .main
-        ) { _ in
-            kudroid_set_soft_input_visible(1)
+        for token in keyboardObservers {
+            NotificationCenter.default.removeObserver(token)
         }
-        NotificationCenter.default.addObserver(
-            forName: NSNotification.Name(rawValue: "UIKeyboardDidHideNotification"), object: nil, queue: .main
-        ) { _ in
-            kudroid_set_soft_input_visible(0)
-        }
+        keyboardObservers = [
+            NotificationCenter.default.addObserver(
+                forName: NSNotification.Name(rawValue: "UIKeyboardDidShowNotification"), object: nil, queue: .main
+            ) { _ in
+                kudroid_set_soft_input_visible(1)
+            },
+            NotificationCenter.default.addObserver(
+                forName: NSNotification.Name(rawValue: "UIKeyboardDidHideNotification"), object: nil, queue: .main
+            ) { _ in
+                kudroid_set_soft_input_visible(0)
+            },
+        ]
 
         // Set up Permission Request Dialog Callback
         kudroid_set_permission_prompt_callback(onKuDroidPermissionPrompt)
@@ -1748,6 +1754,10 @@ class NativeMetalViewController: UIViewController {
         motionManager.stopAccelerometerUpdates()
         motionManager.stopGyroUpdates()
         crashCheckTimer?.invalidate()
+        for token in keyboardObservers {
+            NotificationCenter.default.removeObserver(token)
+        }
+        keyboardObservers = []
         kudroid_set_soft_input_callbacks(nil, nil)
         metalView?.resignFirstResponder()
         kudroid_set_soft_input_visible(0)

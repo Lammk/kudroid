@@ -65,8 +65,10 @@ class RemoteDebugClient: NSObject {
             self?.pingTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
                 self?.webSocketTask?.sendPing { error in
                     if let _ = error {
-                        self?.isConnected = false
-                        self?.onConnectionStatusChanged?(false)
+                        DispatchQueue.main.async { [weak self] in
+                            self?.isConnected = false
+                            self?.onConnectionStatusChanged?(false)
+                        }
                     }
                 }
             }

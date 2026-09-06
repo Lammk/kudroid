@@ -81,6 +81,7 @@ struct AudioPlayer {
     uint32_t playState = SL_PLAYSTATE_STOPPED;
     void* iface = nullptr;      // interface for the game (which is the player pointer)
     uint32_t pendingCount = 0;  // buffer enqueue but not yet played (GetState)
+    bool started = false;     // Prime+Start issued (Apple, after first buffer)
 
     // Format, needed on every platform rather than only under CoreAudio.
     //
@@ -119,8 +120,9 @@ struct AudioPlayer {
 static std::mutex g_players_mtx;
 static std::unordered_map<void*, std::shared_ptr<AudioPlayer>> g_players;
 
-static std::shared_ptr<AudioPlayer> find_player(void* iface) {
-    std::lock_guard<std::mutex> lock(g_players_mtx);
+static uint32_t player_bytes_per_frame(const AudioPlayer* p);
+
+static std::shared_ptr<AudioPlayer> find_player(void* iface) {    std::lock_guard<std::mutex> lock(g_players_mtx);
     auto it = g_players.find(iface);
     return it != g_players.end() ? it->second : nullptr;
 }
@@ -210,24 +212,10 @@ static bool ensure_audio_queue(AudioPlayer* p) {
         p->aqUserData = nullptr;
         return false;
     }
-    // The queue is created lazily on first enqueue — if the game has previously set PLAYING
-    // (slPlaySetPlayState/requestStart occurs before first enqueue), must start at
-    // here, otherwise the queue freezes and the sound is muted even though the game is "playing".
-    if (p->playState == SL_PLAYSTATE_PLAYING) {
-        const OSStatus sst = AudioQueueStart(p->aq, nullptr);
-        static std::atomic<int> s_startLogged{0};
-        if (sst != noErr) {
-            if (s_startLogged.load() < 5) {
-                ++s_startLogged;
-                std::fprintf(stderr, "[KuDroidAudio] AudioQueueStart failed st=%d\n",
-                             static_cast<int>(sst));
-            }
-        } else if (s_startLogged.load() < 1) {
-            ++s_startLogged;
-            std::fprintf(stderr, "[KuDroidAudio] AudioQueue started\n");
-        }
-    }
+    // The queue is created lazily on first enqueue; Prime+Start happen after
+    // the first buffer lands (see enqueue_pcm), never on an empty queue.
     return true;
+}
 }
 
 // Push a PCM block into AudioQueue (common to OpenSL enqueue and AAudio write).
@@ -248,6 +236,21 @@ static bool enqueue_pcm(AudioPlayer* p, const void* data, uint32_t size) {
         return false;
     }
     p->pendingCount++;
+    p->framesWritten.fetch_add(static_cast<uint64_t>(size) / player_bytes_per_frame(p),
+                               std::memory_order_relaxed);
+    // First buffer while playing: Prime decodes it before Start so playback
+    // begins immediately instead of dropping the head.
+    if (p->playState == SL_PLAYSTATE_PLAYING && !p->started) {
+        AudioQueuePrime(p->aq, 0, nullptr);
+        const OSStatus sst = AudioQueueStart(p->aq, nullptr);
+        p->started = (sst == noErr);
+        static std::atomic<int> s_startLogged{0};
+        if (s_startLogged.load() < 3) {
+            ++s_startLogged;
+            std::fprintf(stderr, "[KuDroidAudio] AudioQueue started st=%d\n",
+                         static_cast<int>(sst));
+        }
+    }
     return true;
 }
 
@@ -259,17 +262,30 @@ static void audio_worker(std::shared_ptr<AudioPlayer> p, void* iface) {
     for (;;) {
         std::pair<const void*, uint32_t> item;
         uint32_t bytesPerFrame = 4;
+        double sampleRate = 44100.0;
         {
             std::unique_lock<std::mutex> lock(p->mtx);
-            p->cv.wait(lock, [&] { return p->shutdown || !p->pending.empty(); });
+            // Paused data stays queued: consuming while paused would run the
+            // head ahead of the silent device.
+            p->cv.wait(lock, [&] {
+                return p->shutdown ||
+                       (!p->pending.empty() && p->playState == SL_PLAYSTATE_PLAYING);
+            });
             if (p->shutdown) return;
             item = p->pending.front();
             p->pending.pop_front();
+            p->pendingCount--;
             const uint32_t ch = p->channels > 0 ? p->channels : 2;
             bytesPerFrame = (p->bitsPerSample / 8) * ch;
             if (bytesPerFrame == 0) bytesPerFrame = 4;
+            if (p->sampleRate > 0) sampleRate = p->sampleRate;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        // Sleep the buffer's real duration, not a fixed tick.
+        const uint64_t ms =
+            bytesPerFrame > 0 ? (static_cast<uint64_t>(item.second) * 1000) /
+                                    (bytesPerFrame * static_cast<uint64_t>(sampleRate))
+                              : 10;
+        std::this_thread::sleep_for(std::chrono::milliseconds(ms));
 
         // The host build has no real device, but the frame counter still has to advance:
         // a caller that polls getPlaybackHeadPosition and sees it frozen concludes the
@@ -442,6 +458,10 @@ extern "C" SLresult bionic_slAndroidSimpleBufferQueueEnqueue(
     {
         std::lock_guard<std::mutex> lock(player->mtx);
         player->pending.emplace_back(pBuffer, size);
+        player->pendingCount++;
+        player->framesWritten.fetch_add(
+            static_cast<uint64_t>(size) / player_bytes_per_frame(player.get()),
+            std::memory_order_relaxed);
         if (!player->workerRunning) {
             player->workerRunning = true;
             std::thread(audio_worker, player, self).detach();
@@ -834,20 +854,22 @@ extern "C" int32_t bionic_kudroid_audiotrack_write(int64_t track, const void* da
     auto p = audiotrack_find(track);
     if (!p || sizeInBytes < 0) return -3;  // ERROR_INVALID_OPERATION
     if (sizeInBytes == 0) return 0;
-    // TEMP DIAGNOSTIC (ULTRAKILL silence): byte flow + failures.
+    // Byte flow + failures.
     static std::atomic<long long> s_bytes{0};
     static std::atomic<int> s_fails{0};
 #if defined(__APPLE__)
-    if (!enqueue_pcm(p.get(), data, static_cast<uint32_t>(sizeInBytes))) {
+    // Whole frames only: a trailing partial frame is unplayable and would
+    // desync the byte counter from what the device consumed.
+    const uint32_t bpf = player_bytes_per_frame(p.get());
+    const int32_t frames = sizeInBytes / static_cast<int32_t>(bpf);
+    const int32_t accepted = frames * static_cast<int32_t>(bpf);
+    if (accepted <= 0) return 0;
+    if (!enqueue_pcm(p.get(), data, static_cast<uint32_t>(accepted))) {
         const int f = ++s_fails;
         if (f <= 3) std::fprintf(stderr, "[KuDroidAudio] write FAILED #%d\n", f);
         return -1;  // ERROR
     }
-    const uint32_t bpf = player_bytes_per_frame(p.get());
-    const uint64_t written = p->framesWritten.fetch_add(
-                                 static_cast<uint64_t>(sizeInBytes) / bpf,
-                                 std::memory_order_relaxed) +
-                             static_cast<uint64_t>(sizeInBytes) / bpf;
+    const uint64_t written = p->framesWritten.load(std::memory_order_relaxed);
     // Diagnostic: in-flight audio-ms shows mixer-ahead-of-wallclock pacing drift.
     {
         static std::atomic<int> s_pace{0};
@@ -863,37 +885,49 @@ extern "C" int32_t bionic_kudroid_audiotrack_write(int64_t track, const void* da
                          ms, written, played);
         }
     }
-    const long long total = (s_bytes += sizeInBytes);
-    if (total - sizeInBytes == 0 || (total / 10000000) != ((total - sizeInBytes) / 10000000)) {
+    const long long total = (s_bytes += accepted);
+    if (total - accepted == 0 || (total / 10000000) != ((total - accepted) / 10000000)) {
         std::fprintf(stderr, "[KuDroidAudio] written %lld bytes total\n", total);
     }
-    return sizeInBytes;
+    return accepted;
 #else
     // Host build: hand it to the same worker the OpenSL path uses, so the callback and
     // frame counter behave identically and a test can observe them.
+    const uint32_t hostBpf = player_bytes_per_frame(p.get());
+    const int32_t hostFrames = sizeInBytes / static_cast<int32_t>(hostBpf);
+    const int32_t hostAccepted = hostFrames * static_cast<int32_t>(hostBpf);
+    if (hostAccepted <= 0) return 0;
     {
         std::lock_guard<std::mutex> lock(p->mtx);
         if (p->shutdown) return -6;  // ERROR_DEAD_OBJECT
-        p->pending.emplace_back(data, static_cast<uint32_t>(sizeInBytes));
+        p->pending.emplace_back(data, static_cast<uint32_t>(hostAccepted));
         p->pendingCount++;
-        p->framesWritten.fetch_add(
-            static_cast<uint64_t>(sizeInBytes) / player_bytes_per_frame(p.get()),
-            std::memory_order_relaxed);
+        p->framesWritten.fetch_add(static_cast<uint64_t>(hostFrames),
+                                   std::memory_order_relaxed);
         if (!p->workerRunning) {
             p->workerRunning = true;
             std::thread(audio_worker, p, p->iface).detach();
         }
     }
     p->cv.notify_all();
-    return sizeInBytes;
+    return hostAccepted;
 #endif
 }
 
 extern "C" int32_t bionic_kudroid_audiotrack_play(int64_t track) {
     auto p = audiotrack_find(track);
     if (!p) return -3;
-    std::lock_guard<std::mutex> lock(p->mtx);
-    p->playState = SL_PLAYSTATE_PLAYING;
+    {
+        std::lock_guard<std::mutex> lock(p->mtx);
+        p->playState = SL_PLAYSTATE_PLAYING;
+#if defined(__APPLE__)
+        // Late play with data already queued: prime and start now.
+        if (p->aq != nullptr && !p->started && p->pendingCount > 0) {
+            AudioQueuePrime(p->aq, 0, nullptr);
+            p->started = (AudioQueueStart(p->aq, nullptr) == noErr);
+        }
+#endif
+    }
 #if defined(__APPLE__)
     // The queue is created lazily on the first write, so play() before any data must only
     // record the intent — ensure_audio_queue starts it when it appears.
@@ -906,6 +940,8 @@ extern "C" int32_t bionic_kudroid_audiotrack_play(int64_t track) {
                          static_cast<int>(sst));
         }
     }
+#else
+    p->cv.notify_all();
 #endif
     return 0;
 }
@@ -932,6 +968,10 @@ extern "C" int32_t bionic_kudroid_audiotrack_stop(int64_t track) {
     // behaviour ("play the remaining data, then stop") rather than flush.
     if (p->aq) AudioQueueStop(p->aq, false);
 #endif
+    // Head resets on stop; next play re-primes from zero.
+    p->framesPlayed.store(0, std::memory_order_relaxed);
+    p->framesWritten.store(0, std::memory_order_relaxed);
+    p->started = false;
     return 0;
 }
 
@@ -944,6 +984,9 @@ extern "C" int32_t bionic_kudroid_audiotrack_flush(int64_t track) {
 #endif
     p->pending.clear();
     p->pendingCount = 0;
+    p->framesPlayed.store(0, std::memory_order_relaxed);
+    p->framesWritten.store(0, std::memory_order_relaxed);
+    p->started = false;
     return 0;
 }
 
@@ -1010,16 +1053,14 @@ extern "C" int32_t bionic_kudroid_audiotrack_head_position(int64_t track) {
 extern "C" int32_t bionic_kudroid_audiotrack_latency_frames(int64_t track) {
     auto p = audiotrack_find(track);
     if (!p) return 0;
-    // What is queued but not yet played, which is what a guest means by latency.
-    std::lock_guard<std::mutex> lock(p->mtx);
-    const uint32_t bytesPerFrame = player_bytes_per_frame(p.get());
-    (void)bytesPerFrame;
-    // pendingCount counts buffers rather than bytes; one AudioQueue buffer is one write,
-    // and reporting the count in frames would need per-buffer sizes kept. A period per
-    // outstanding buffer is the honest approximation, and the guest uses this for
-    // smoothing rather than for correctness.
-    const uint32_t framesPerPeriod = static_cast<uint32_t>(p->sampleRate) / 50;
-    return static_cast<int32_t>(p->pendingCount * framesPerPeriod);
+    // Queued but not yet played, measured in frames from the same counters the
+    // head position uses — no per-buffer-size estimation involved.
+    const uint64_t written = p->framesWritten.load(std::memory_order_relaxed);
+    const uint64_t played = p->framesPlayed.load(std::memory_order_relaxed);
+    const uint64_t queued = written >= played ? written - played : 0;
+    return static_cast<int32_t>(queued > static_cast<uint64_t>(INT32_MAX)
+                                    ? INT32_MAX
+                                    : queued);
 }
 
 const SymbolEntry kAudioSymbols[] = {

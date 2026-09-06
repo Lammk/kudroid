@@ -415,6 +415,30 @@ void test_playback_head_advances() {
     std::printf("       head position after 4 writes -> %d frames\n", after.i);
     Check(after.i > 0, "it advanced once the host consumed the buffers");
 
+    // stop() resets the head; latency is queued-minus-played, never estimated.
+    DexValue latency;
+    if (CallVirtual(track, "getLatencyFrames", "()I", {}, &latency, "latency while playing")) {
+        Check(latency.i >= 0, "latency is non-negative");
+    }
+    CallVirtual(track, "stop", "()V", {}, nullptr, "stop()");
+    DexValue stopped;
+    if (CallVirtual(track, "getPlaybackHeadPosition", "()I", {}, &stopped,
+                    "head position after stop")) {
+        Check(stopped.i == 0, "stop() resets the head to zero");
+    }
+
+    // A 513-byte write on stereo16 accepts 512 (whole frames only).
+    DexArray* odd = NewPcmBytes(513);
+    if (odd != nullptr) {
+        DexValue rc;
+        if (CallVirtual(track, "play", "()V", {}, nullptr, "play() again") &&
+            CallVirtual(track, "write", "([BII)I",
+                        {DexValue::Ref(odd), DexValue::Int(0), DexValue::Int(513)},
+                        &rc, "513-byte write")) {
+            Check(rc.i == 512, "a partial trailing frame is refused, whole frames accepted");
+        }
+    }
+
     CallVirtual(track, "release", "()V", {}, nullptr, "release");
 }
 

@@ -20,8 +20,12 @@ public abstract class AsyncTask<Params, Progress, Result> {
     protected void onProgressUpdate(Progress... values) {}
     protected void onCancelled(Result result) { onCancelled(); }
     protected void onCancelled() {}
-    public final boolean isCancelled() { return false; }
-    public final boolean cancel(boolean mayInterruptIfRunning) { return false; }
+    private volatile boolean mCancelled = false;
+    public final boolean isCancelled() { return mCancelled; }
+    public final boolean cancel(boolean mayInterruptIfRunning) {
+        mCancelled = true;
+        return true;
+    }
 
     @SafeVarargs
     public final AsyncTask<Params, Progress, Result> execute(Params... params) {
@@ -32,18 +36,32 @@ public abstract class AsyncTask<Params, Progress, Result> {
     public final AsyncTask<Params, Progress, Result> executeOnExecutor(Executor exec, final Params... params) {
         mStatus = Status.RUNNING;
         onPreExecute();
+        final Handler ui = new Handler(Looper.getMainLooper());
         exec.execute(new Runnable() {
             public void run() {
                 final Result r = doInBackground(params);
                 mStatus = Status.FINISHED;
-                onPostExecute(r);
+                // Callbacks touch Views: they must run on the UI thread.
+                ui.post(new Runnable() {
+                    public void run() {
+                        if (mCancelled) {
+                            onCancelled(r);
+                        } else {
+                            onPostExecute(r);
+                        }
+                    }
+                });
             }
         });
         return this;
     }
 
     @SafeVarargs
-    protected final void publishProgress(Progress... values) {
-        onProgressUpdate(values);
+    protected final void publishProgress(final Progress... values) {
+        new Handler(Looper.getMainLooper()).post(new Runnable() {
+            public void run() {
+                onProgressUpdate(values);
+            }
+        });
     }
 }

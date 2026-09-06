@@ -1052,8 +1052,8 @@ extern "C" uint32_t bionic_vkCreateSwapchainKHR(void* device, const void* create
         std::memcpy(&format, ci + 36, 4);
         std::memcpy(&extent_w, ci + 44, 4);
         std::memcpy(&extent_h, ci + 48, 4);
-        std::memcpy(&pre_transform, ci + 76, 4);
-        std::memcpy(&present_mode, ci + 84, 4);
+        std::memcpy(&pre_transform, ci + 80, 4);
+        std::memcpy(&present_mode, ci + 88, 4);
     }
     void* created = nullptr;
     const uint32_t r = s_realCreateSwapchain != nullptr

@@ -2788,8 +2788,7 @@ bool Invoke_android_media_AudioTrack(Interpreter* interp, const char* name,
         return true;
     }
     if (std::strcmp(name, "nativeWriteShorts") == 0) {
-        // (track, short[] data, offsetInShorts, sizeInShorts) - offsets are in ELEMENTS,
-        // and PCM 16-bit is what FMOD writes, so this is the hot path.
+        // (track, short[] data, offsetInShorts, sizeInShorts) - offsets are in ELEMENTS.
         if (num_args < 4) return false;
         auto* data = reinterpret_cast<DexArray*>(args[1].l);
         const int32_t offset = args[2].i;
