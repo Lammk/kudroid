@@ -1985,39 +1985,78 @@ extern "C" bool bionic_handle_guest_syscall_trap(void* context) {
 // Wrappers previously bound to the dummy; on arm64/Linux these match the host signatures.
 namespace {
 
-// Which host fds point at an APK: lets the pread tap attribute reads without
+// Which host fds point where: lets the pread tap attribute reads without
 // slowing every call (path resolved once per fd, forgotten at close).
+// Empty string = resolved non-APK; absent = unresolved.
 std::mutex g_apkFdMtx;
-std::unordered_map<int, bool> g_apkFd;
+std::map<int, std::string> g_apkFd;
 constexpr int kApkFdUntracked = 64;
 
-bool fd_is_apk(int fd) {
+// Read volume per path: bulk asset flow (bundles, scenes) shows here without
+// flooding the log with one line per read.
+std::mutex g_ioVolMtx;
+std::map<std::string, std::pair<uint64_t, uint64_t>> g_ioVol;
+uint64_t g_ioVolTotal = 0;
+uint64_t g_ioVolNextLog = 50ULL * 1024 * 1024;
+
+static std::string short_path(const std::string& p) {
+    return p.size() > 60 ? "..." + p.substr(p.size() - 57) : p;
+}
+
+const std::string& fd_path(int fd) {
     {
         std::lock_guard<std::mutex> lock(g_apkFdMtx);
         const auto it = g_apkFd.find(fd);
         if (it != g_apkFd.end()) return it->second;
-        if (g_apkFd.size() >= kApkFdUntracked * 16) return false;
+        if (g_apkFd.size() >= static_cast<size_t>(kApkFdUntracked) * 16) {
+            static const std::string kEmpty;
+            return kEmpty;
+        }
     }
-    char path[1024] = {0};
-    bool is_apk = false;
+    std::string path;
+    char buf[1024] = {0};
 #if defined(__APPLE__)
-    if (::fcntl(fd, F_GETPATH, path) != -1) {
-        const size_t n = std::strlen(path);
-        is_apk = n >= 8 && std::strcmp(path + n - 8, "base.apk") == 0;
-    }
+    if (::fcntl(fd, F_GETPATH, buf) != -1) path = buf;
 #else
     char proc[64];
     std::snprintf(proc, sizeof(proc), "/proc/self/fd/%d", fd);
-    const ssize_t n = ::readlink(proc, path, sizeof(path) - 1);
-    if (n > 0) {
-        path[n] = '\0';
-        const size_t len = static_cast<size_t>(n);
-        is_apk = len >= 8 && std::strcmp(path + len - 8, "base.apk") == 0;
-    }
+    const ssize_t n = ::readlink(proc, buf, sizeof(buf) - 1);
+    if (n > 0) path.assign(buf, static_cast<size_t>(n));
 #endif
     std::lock_guard<std::mutex> lock(g_apkFdMtx);
-    g_apkFd[fd] = is_apk;
-    return is_apk;
+    auto it = g_apkFd.find(fd);
+    if (it != g_apkFd.end()) return it->second;
+    return g_apkFd.emplace(fd, std::move(path)).first->second;
+}
+
+bool fd_is_apk(int fd) {
+    const std::string& p = fd_path(fd);
+    const size_t n = p.size();
+    return n >= 8 && p.compare(n - 8, 8, "base.apk") == 0;
+}
+
+static void io_volume_add(const std::string& path, uint64_t bytes) {
+    if (path.empty() || bytes == 0) return;
+    std::lock_guard<std::mutex> lock(g_ioVolMtx);
+    if (g_ioVol.size() >= 256 && g_ioVol.find(path) == g_ioVol.end()) return;
+    auto& e = g_ioVol[path];
+    e.first += bytes;
+    e.second += 1;
+    g_ioVolTotal += bytes;
+    if (g_ioVolTotal < g_ioVolNextLog) return;
+    g_ioVolNextLog += 50ULL * 1024 * 1024;
+    using Entry = std::pair<std::string, std::pair<uint64_t, uint64_t>>;
+    std::vector<Entry> top(g_ioVol.begin(), g_ioVol.end());
+    std::sort(top.begin(), top.end(), [](const Entry& a, const Entry& b) {
+        return a.second.first > b.second.first;
+    });
+    std::string line = "pread total=" + std::to_string(g_ioVolTotal) + "B";
+    for (size_t i = 0; i < top.size() && i < 5; ++i) {
+        line += " | " + short_path(top[i].first) + "=" +
+                std::to_string(top[i].second.first) + "B/" +
+                std::to_string(top[i].second.second) + "ops";
+    }
+    std::fprintf(stderr, "[KuDroidIO] %s\n", line.c_str());
 }
 
 void fd_forget_apk(int fd) {
@@ -2045,14 +2084,17 @@ extern "C" ssize_t bionic_pread64(int fd, void* buf, size_t count, off_t offset)
         }
     }
     // Diagnostic: reads on base.apk prove catalog/asset bytes actually flow.
-    if (ret > 0 && fd_is_apk(fd)) {
-        static std::atomic<int> s_apk{0};
-        if (s_apk.load() < 30) {
-            ++s_apk;
-            std::fprintf(stderr,
-                         "[KuDroidApk] pread fd=%d offset=%lld count=%zu ret=%zd took=%lldms\n",
-                         fd, static_cast<long long>(offset), count, ret, ms);
+    if (ret > 0) {
+        if (fd_is_apk(fd)) {
+            static std::atomic<int> s_apk{0};
+            if (s_apk.load() < 30) {
+                ++s_apk;
+                std::fprintf(stderr,
+                             "[KuDroidApk] pread fd=%d offset=%lld count=%zu ret=%zd took=%lldms\n",
+                             fd, static_cast<long long>(offset), count, ret, ms);
+            }
         }
+        io_volume_add(std::string(fd_path(fd)), static_cast<uint64_t>(ret));
     }
     // Diagnostic: slow asset reads starve async loaders (mixer hits pending voices).
     if (ms >= 5 && count >= 65536) {
