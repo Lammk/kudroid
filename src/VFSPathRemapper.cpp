@@ -725,9 +725,17 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
     const size_t n = std::fread(buf, size, count, stream);
     if (n > 0 && is_apk_stream(stream)) {
         static std::atomic<int> s_logged{0};
+        static std::atomic<unsigned long long> s_bytes{0};
+        const unsigned long long total =
+            s_bytes.fetch_add(n * size) + n * size;
+        // First 25 lines keep header detail; totals every 1MB after that so
+        // later content reads (catalog, bundles) stay visible past the sniff.
         if (s_logged.load() < 25) {
             ++s_logged;
             std::fprintf(stderr, "[KuDroidApkF] fread bytes=%zu\n", n * size);
+        } else if (total / (1024 * 1024) != (total - n * size) / (1024 * 1024)) {
+            std::fprintf(stderr, "[KuDroidApkF] fread total=%lluMB\n",
+                         total / (1024 * 1024));
         }
     }
     if (n > 0) {
@@ -786,7 +794,7 @@ int vfs_fseek(FILE* stream, long offset, int whence) {
     const int rc = std::fseek(stream, offset, whence);
     if (rc == 0 && is_apk_stream(stream)) {
         static std::atomic<int> s_logged{0};
-        if (s_logged.load() < 20) {
+        if (s_logged.load() < 40) {
             ++s_logged;
             std::fprintf(stderr, "[KuDroidApkF] fseek offset=%ld whence=%d\n", offset,
                          whence);
