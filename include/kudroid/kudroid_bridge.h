@@ -69,6 +69,11 @@ int kudroid_get_keep_screen_on(void);
 void kudroid_set_metal_layer(void* layer, int width, int height, float density);
 void kudroid_unbind_metal_layer(void);
 
+/// Java pause acknowledgment: teardown posts PAUSE before DESTROY and waits for
+/// this generation to advance so the player loop has stopped before nativeDone.
+void kudroid_note_java_paused(void);
+unsigned long long kudroid_paused_generation(void);
+
 ///run vfs and i/o redirection autotest; returns a malloc log.
 const char* kudroid_vfs_self_test_log(void);
 const char* kudroid_vfs_extended_test_log(void);

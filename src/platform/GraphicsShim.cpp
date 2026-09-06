@@ -435,7 +435,7 @@ typedef void* (*PFN_eglGetProcAddress)(const char* procname);
 extern "C" void* bionic_eglGetProcAddress(const char* procname) {
     if (!procname) return nullptr;
     KLOG(kDebug, "KuDroidGPU", "eglGetProcAddress: requested %s", procname);
-    
+
     size_t count = 0;
     const kudroid::SymbolEntry* symbols = kudroid::get_graphics_symbols(&count);
     for (size_t i = 0; i < count; ++i) {
@@ -445,6 +445,7 @@ extern "C" void* bionic_eglGetProcAddress(const char* procname) {
         }
     }
 
+    void* addr = nullptr;
     // Resolve from the ANGLE handle directly (loaded RTLD_LOCAL).
     static void* egl_handle = nullptr;
     if (!egl_handle) {
@@ -454,20 +455,21 @@ extern "C" void* bionic_eglGetProcAddress(const char* procname) {
     if (egl_handle) {
         auto host_func = (PFN_eglGetProcAddress) ::dlsym(egl_handle, "eglGetProcAddress");
         if (host_func) {
-            void* addr = host_func(procname);
+            addr = host_func(procname);
             KLOG(kDebug, "KuDroidGPU", "eglGetProcAddress: %s returned %s", procname, addr ? "VALID" : "NULL");
-            return addr;
         }
     }
-    // Fallback to RTLD_DEFAULT.
-    auto host_func = (PFN_eglGetProcAddress) ::dlsym(RTLD_DEFAULT, "eglGetProcAddress");
-    if (host_func) {
-        void* addr = host_func(procname);
-        KLOG(kDebug, "KuDroidGPU", "eglGetProcAddress: %s returned %s", procname, addr ? "VALID" : "NULL");
-        return addr;
+    if (!addr) {
+        // Fallback to RTLD_DEFAULT.
+        auto host_func = (PFN_eglGetProcAddress) ::dlsym(RTLD_DEFAULT, "eglGetProcAddress");
+        if (host_func) {
+            addr = host_func(procname);
+            KLOG(kDebug, "KuDroidGPU", "eglGetProcAddress: %s returned %s", procname, addr ? "VALID" : "NULL");
+        } else {
+            KLOG(kDebug, "KuDroidGPU", "eglGetProcAddress: host function not found");
+        }
     }
-    KLOG(kDebug, "KuDroidGPU", "eglGetProcAddress: host function not found");
-    return nullptr;
+    return addr;
 }
 
 } // namespace

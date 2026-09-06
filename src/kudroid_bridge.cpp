@@ -1437,6 +1437,26 @@ static void installCrashHandlers(void) {
 #endif
 }
 
+// Diagnostic: whose handler owns the fatal signals right now? Call at X and at
+// nativeDone entry to bracket a disposition change across teardown.
+extern "C" void kudroid_log_signal_disposition(const char* tag) {
+    static const int kSigs[] = {SIGTRAP, SIGILL, SIGBUS, SIGSEGV, SIGABRT};
+    for (int sig : kSigs) {
+        struct sigaction cur;
+        std::memset(&cur, 0, sizeof(cur));
+        if (::sigaction(sig, nullptr, &cur) != 0) continue;
+        const void* h = (cur.sa_flags & SA_SIGINFO)
+                            ? reinterpret_cast<const void*>(cur.sa_sigaction)
+                            : reinterpret_cast<const void*>(cur.sa_handler);
+        const bool ours = (cur.sa_flags & SA_SIGINFO) &&
+                          cur.sa_sigaction == crashHandler;
+        char line[128];
+        std::snprintf(line, sizeof(line), "%s sig=%d handler=%p %s", tag != nullptr ? tag : "?",
+                      sig, h, ours ? "OURS" : (h == SIG_DFL ? "DFL" : "FOREIGN"));
+        kudroid_android_log_message(4, "KuDroidTrap", line);
+    }
+}
+
 extern "C" void kudroid_set_log_dir(const char* dir) {
     if (!dir) return;
     g_mainThread = pthread_self();
@@ -1641,6 +1661,16 @@ static std::atomic<bool> s_isApkRunning{false};
 // File scope so run end can re-arm it; resetting right after unbind allowed a
 // second DESTROY into a half-destroyed engine.
 static std::atomic<bool> s_stopping{false};
+
+static std::atomic<unsigned long long> s_pausedGeneration{0};
+
+extern "C" void kudroid_note_java_paused(void) {
+    s_pausedGeneration.fetch_add(1, std::memory_order_relaxed);
+}
+
+extern "C" unsigned long long kudroid_paused_generation(void) {
+    return s_pausedGeneration.load(std::memory_order_relaxed);
+}
 
 // Install generation: bumped on every install/uninstall. Guest .so mappings live
 // for the process lifetime (unmapping under a detached thread aborts), so a run
@@ -4246,10 +4276,22 @@ extern "C" void kudroid_stop_app(void) {
     // destroying an engine that is already half destroyed.
     bool expected = false;
     if (!s_stopping.compare_exchange_strong(expected, true)) return;
+    kudroid_log_signal_disposition("stop-app");
     std::thread([] {
-        kuart_send_lifecycle_event(103); // DESTROY_ACTIVITY
-        // Unbind happens at run end, not here: pulling the layer while
-        // nativeDone runs teardown traps the guest on the torn surface.
+        // PAUSE first: the player loop must stop rendering before DESTROY runs
+        // nativeDone, or teardown races in-flight frames on a torn surface.
+        const unsigned long long pausedBefore = kudroid_paused_generation();
+        kuart_send_lifecycle_event(101);  // PAUSE_ACTIVITY
+        // Up to 2s for the Java pause handler to run (Unity's own pause timeout).
+        for (int i = 0; i < 400 && kudroid_paused_generation() == pausedBefore; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        // Drain frames already inside nativeRender (2s cap matches Unity's own
+        // pause timeout); unbind stays at run end.
+        for (int i = 0; i < 400 && kudroid::native_frame_in_flight() > 0; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        kuart_send_lifecycle_event(103);  // DESTROY_ACTIVITY
     }).detach();
 }
 

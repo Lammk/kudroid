@@ -2064,6 +2064,15 @@ extern "C" ssize_t bionic_pread64(int fd, void* buf, size_t count, off_t offset)
                          fd, count, ret, ms);
         }
     }
+    // Diagnostic: bulk flow (bundles, scenes). A stuck load shows no big reads.
+    if (count >= 1048576 && ret > 0) {
+        static std::atomic<int> s_big{0};
+        if (s_big.load() < 15) {
+            ++s_big;
+            std::fprintf(stderr, "[KuDroidIO] big pread64 fd=%d count=%zu ret=%zd\n", fd,
+                         count, ret);
+        }
+    }
     return ret;
 }
 extern "C" ssize_t bionic_pwrite64(int fd, const void* buf, size_t count, off_t offset) {

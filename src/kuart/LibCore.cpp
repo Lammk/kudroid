@@ -2570,10 +2570,19 @@ bool Invoke_android_graphics_Canvas(Interpreter* /*interp*/, const char* name, c
     return false;
 }
 
+bool Invoke_android_app_ActivityThread(Interpreter* /*interp*/, const char* name,
+                                         const DexValue* /*args*/, size_t /*num_args*/,
+                                         DexValue* /*result*/) {
+    if (std::strcmp(name, "kudroid_note_java_paused") == 0) {
+        kudroid_note_java_paused();
+        return true;
+    }
+    return false;
+}
+
 bool Invoke_android_app_Activity(Interpreter* /*interp*/, const char* name, const DexValue* args,
                                  size_t num_args, DexValue* /*result*/) {
-    if (std::strcmp(name, "setRequestedOrientation_native") == 0) {
-        kudroid_set_requested_orientation(args[0].i);
+    if (std::strcmp(name, "setRequestedOrientation_native") == 0) {        kudroid_set_requested_orientation(args[0].i);
         return true;
     }
     if (std::strcmp(name, "nativeRequestPermissions") == 0) {
@@ -3312,6 +3321,9 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
     if (std::strcmp(desc, "Landroid/util/Log;") == 0) return Invoke_android_util_Log(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Landroid/graphics/Canvas;") == 0) return Invoke_android_graphics_Canvas(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Landroid/app/Activity;") == 0) return Invoke_android_app_Activity(interp, name, args, num_args, result);
+    if (std::strcmp(desc, "Landroid/app/ActivityThread;") == 0) {
+        return Invoke_android_app_ActivityThread(interp, name, args, num_args, result);
+    }
     // Choreographer shares one frame source with NDK entry points.
     if (std::strcmp(desc, "Landroid/view/Choreographer;") == 0) {
         return Invoke_android_view_Choreographer(interp, name, args, num_args, result);

@@ -26,6 +26,8 @@ public final class ActivityThread {
     private java.util.ArrayList<String> mFrameworkGaps = new java.util.ArrayList<String>();
     private H mH;
 
+    private static native void kudroid_note_java_paused();
+
     /** The app's AppComponentFactory, when the manifest declares one. */
     private AppComponentFactory mComponentFactory;
     /** The app's Application instance, once bootstrapped. */
@@ -741,6 +743,7 @@ public final class ActivityThread {
         } catch (Throwable t) {
             t.printStackTrace();
         }
+        kudroid_note_java_paused();
     }
 
     private void handleResumeActivity() {

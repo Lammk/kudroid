@@ -646,8 +646,7 @@ FILE* vfs_fopen(const char* path, const char* mode) {
     }
     FILE* result = std::fopen(mapped.c_str(), mode);
     vfsTrace("fopen(" + mapped + ", " + (mode ? mode : "<null>") + ") -> " +
-           (result ? "OK" : std::strerror(errno)));
-    if (path != nullptr &&
+           (result ? "OK" : std::strerror(errno)));    if (path != nullptr &&
         (std::strstr(path, "assets/") != nullptr || std::strstr(path, ".apk") != nullptr ||
          std::strstr(path, ".bank") != nullptr || std::strstr(path, ".fsb") != nullptr ||
          std::strstr(path, ".mp3") != nullptr || std::strstr(path, ".ogg") != nullptr ||
@@ -660,6 +659,15 @@ FILE* vfs_fopen(const char* path, const char* mode) {
         const size_t len = std::strlen(path);
         if (len >= 8 && std::strcmp(path + len - 8, "base.apk") == 0) {
             track_apk_stream(result);
+        }
+    }
+    // Misses under /data are silent stalls when Unity looks in the wrong place.
+    if (result == nullptr && !mapped.empty() &&
+        mapped.rfind(VFSPathRemapper::getInstance().androidRoot(), 0) == 0) {
+        static std::atomic<int> s_miss{0};
+        if (s_miss.load() < 30) {
+            ++s_miss;
+            std::fprintf(stderr, "[KuDroidVFS] open miss: %s\n", mapped.c_str());
         }
     }
     return result;
@@ -695,13 +703,20 @@ static bool is_apk_stream(FILE* f) {
     }
     return false;
 }
-
-size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {    const size_t n = std::fread(buf, size, count, stream);
+size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
+    const size_t n = std::fread(buf, size, count, stream);
     if (n > 0 && is_apk_stream(stream)) {
         static std::atomic<int> s_logged{0};
         if (s_logged.load() < 25) {
             ++s_logged;
             std::fprintf(stderr, "[KuDroidApkF] fread bytes=%zu\n", n * size);
+        }
+    }
+    if (n * size >= 1048576) {
+        static std::atomic<int> s_big{0};
+        if (s_big.load() < 15) {
+            ++s_big;
+            std::fprintf(stderr, "[KuDroidIO] big fread bytes=%zu\n", n * size);
         }
     }
     return n;

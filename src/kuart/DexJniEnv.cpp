@@ -21,6 +21,8 @@
 #include "kudroid/kuart/LibCore.h"
 #include "kudroid/kuart/VmLock.h"
 
+extern "C" void kudroid_log_signal_disposition(const char* tag);
+
 namespace kudroid {
 namespace kuart {
 
@@ -330,6 +332,10 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
                   memory_before.low_memory ? 1 : 0);
     kudroid_persistent_breadcrumb(breadcrumb);
     native_call_enter(owner, method_name, method_sig, VmLockDepth());
+    // Disposition snapshot at teardown entry: brackets handler changes across X.
+    if (std::strcmp(method_name, "nativeDone") == 0) {
+        kudroid_log_signal_disposition("nativeDone-enter");
+    }
 
     const char* shorty = nullptr;
     if (method->dex_file != nullptr) {
