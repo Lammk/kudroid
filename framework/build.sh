@@ -150,8 +150,20 @@ echo "d8: $(echo "$CLASS_FILES" | wc -l | tr -d ' ') class → framework.dex"
 # min-api 29 (Android 10, the exact ART version that KuART ports from): from API 24 and up
 # Up to d8 there is NO desugar default/static interface method anymore, so no need for --lib
 # points to the JDK — but passing --lib to the new JDK causes d8 to die because of the major version.
+# Kotlin support: merge the pinned stdlib + coroutines jars so Kotlin apps
+# resolve kotlin.*/kotlinx.* at runtime (no overlap with framework sources).
+KOTLIN_JARS=""
+for kj in "$ROOT_DIR/third_party/kotlin/kotlin-stdlib-1.9.24.jar" \
+          "$ROOT_DIR/third_party/kotlin/kotlinx-coroutines-core-jvm-1.8.0.jar"; do
+    if [[ -f "$kj" ]]; then
+        KOTLIN_JARS="$KOTLIN_JARS $kj"
+    fi
+done
+if [[ -n "$KOTLIN_JARS" ]]; then
+    echo "d8: merging Kotlin jars:$KOTLIN_JARS"
+fi
 # shellcheck disable=SC2086
-$D8_CMD --min-api 29 --output "$BUILD_DIR" $CLASS_FILES
+$D8_CMD --min-api 29 --output "$BUILD_DIR" $CLASS_FILES $KOTLIN_JARS
 
 # d8 always names output classes.dex.
 if [[ ! -f "$DEX_PATH" ]]; then
