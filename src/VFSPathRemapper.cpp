@@ -7,6 +7,7 @@
 #include <cerrno>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <map>
 #include <mutex>
@@ -726,16 +727,22 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
     if (n > 0 && is_apk_stream(stream)) {
         static std::atomic<int> s_logged{0};
         static std::atomic<unsigned long long> s_bytes{0};
+        static const auto s_start = std::chrono::steady_clock::now();
         const unsigned long long total =
             s_bytes.fetch_add(n * size) + n * size;
+        const unsigned long long ms =
+            static_cast<unsigned long long>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - s_start)
+                    .count());
         // First 25 lines keep header detail; totals every 1MB after that so
         // later content reads (catalog, bundles) stay visible past the sniff.
         if (s_logged.load() < 25) {
             ++s_logged;
             std::fprintf(stderr, "[KuDroidApkF] fread bytes=%zu\n", n * size);
         } else if (total / (1024 * 1024) != (total - n * size) / (1024 * 1024)) {
-            std::fprintf(stderr, "[KuDroidApkF] fread total=%lluMB\n",
-                         total / (1024 * 1024));
+            std::fprintf(stderr, "[KuDroidApkF] fread total=%lluMB t=%llums\n",
+                         total / (1024 * 1024), ms);
         }
     }
     if (n > 0) {
