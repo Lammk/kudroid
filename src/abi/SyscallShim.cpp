@@ -945,7 +945,21 @@ extern "C" int bionic_openat(int dirfd, const char* pathname, int flags, mode_t 
             std::filesystem::create_directories(std::filesystem::path(remapped).parent_path(), ec);
         }
     }
-    return ::openat(host_dirfd, remapped.c_str(), host_flags, mode);
+    const int fd = ::openat(host_dirfd, remapped.c_str(), host_flags, mode);
+    // Open hits on game data: the last visibility gap (misses already log).
+    // A bundle opened but never read, or never opened at all, decides the stall.
+    if (remapped.find("/assets/") != std::string::npos ||
+        remapped.find("sharedassets") != std::string::npos ||
+        remapped.find("data.unity3d") != std::string::npos ||
+        remapped.find(".bundle") != std::string::npos ||
+        remapped.find("catalog.json") != std::string::npos) {
+        static std::atomic<int> s_logged{0};
+        if (s_logged.load() < 25) {
+            ++s_logged;
+            std::fprintf(stderr, "[KuDroidIO] open %s -> %d\n", remapped.c_str(), fd);
+        }
+    }
+    return fd;
 }
 
 struct bionic_stat64 {
