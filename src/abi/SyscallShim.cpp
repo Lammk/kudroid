@@ -1970,6 +1970,50 @@ extern "C" bool bionic_handle_guest_syscall_trap(void* context) {
 }
 
 // Wrappers previously bound to the dummy; on arm64/Linux these match the host signatures.
+namespace {
+
+// Which host fds point at an APK: lets the pread tap attribute reads without
+// slowing every call (path resolved once per fd, forgotten at close).
+std::mutex g_apkFdMtx;
+std::unordered_map<int, bool> g_apkFd;
+constexpr int kApkFdUntracked = 64;
+
+bool fd_is_apk(int fd) {
+    {
+        std::lock_guard<std::mutex> lock(g_apkFdMtx);
+        const auto it = g_apkFd.find(fd);
+        if (it != g_apkFd.end()) return it->second;
+        if (g_apkFd.size() >= kApkFdUntracked * 16) return false;
+    }
+    char path[1024] = {0};
+    bool is_apk = false;
+#if defined(__APPLE__)
+    if (::fcntl(fd, F_GETPATH, path) != -1) {
+        const size_t n = std::strlen(path);
+        is_apk = n >= 8 && std::strcmp(path + n - 8, "base.apk") == 0;
+    }
+#else
+    char proc[64];
+    std::snprintf(proc, sizeof(proc), "/proc/self/fd/%d", fd);
+    const ssize_t n = ::readlink(proc, path, sizeof(path) - 1);
+    if (n > 0) {
+        path[n] = '\0';
+        const size_t len = static_cast<size_t>(n);
+        is_apk = len >= 8 && std::strcmp(path + len - 8, "base.apk") == 0;
+    }
+#endif
+    std::lock_guard<std::mutex> lock(g_apkFdMtx);
+    g_apkFd[fd] = is_apk;
+    return is_apk;
+}
+
+void fd_forget_apk(int fd) {
+    std::lock_guard<std::mutex> lock(g_apkFdMtx);
+    g_apkFd.erase(fd);
+}
+
+}  // namespace
+
 extern "C" ssize_t bionic_pread64(int fd, void* buf, size_t count, off_t offset) {
     const auto t0 = std::chrono::steady_clock::now();
     const ssize_t ret = ::pread(fd, buf, count, offset);
@@ -1985,6 +2029,16 @@ extern "C" ssize_t bionic_pread64(int fd, void* buf, size_t count, off_t offset)
                          "[KuDroidIO] pread64 fd=%d count=%zu offset=%lld ret=%zd%s\n",
                          fd, count, static_cast<long long>(offset), ret,
                          ret < 0 ? " ERR" : " SHORT");
+        }
+    }
+    // Diagnostic: reads on base.apk prove catalog/asset bytes actually flow.
+    if (ret > 0 && fd_is_apk(fd)) {
+        static std::atomic<int> s_apk{0};
+        if (s_apk.load() < 30) {
+            ++s_apk;
+            std::fprintf(stderr,
+                         "[KuDroidApk] pread fd=%d offset=%lld count=%zu ret=%zd took=%lldms\n",
+                         fd, static_cast<long long>(offset), count, ret, ms);
         }
     }
     // Diagnostic: slow asset reads starve async loaders (mixer hits pending voices).
@@ -3129,6 +3183,7 @@ extern "C" int bionic_epoll_create1(int flags) {
 
 // close() wrapper — cleans up timerfd GCD timers when the fd is closed.
 extern "C" int bionic_close(int fd) {
+    fd_forget_apk(fd);
 #ifdef __APPLE__
     {
         std::lock_guard<std::mutex> lock(g_timerfds_mtx);

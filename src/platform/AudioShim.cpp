@@ -133,6 +133,16 @@ static void audio_queue_output_cb(void* userData, AudioQueueRef aq, AudioQueueBu
     const auto ref = static_cast<std::shared_ptr<AudioPlayer>*>(userData);
     const std::shared_ptr<AudioPlayer> p = *ref; // kept alive during callback
 
+    // Diagnostic: played stuck at 0 means this never fires (silent device).
+    {
+        static std::atomic<int> s_cb{0};
+        if (s_cb.load() < 3) {
+            ++s_cb;
+            std::fprintf(stderr, "[KuDroidAudio] output callback fired bytes=%u\n",
+                         buffer != nullptr ? buffer->mAudioDataByteSize : 0);
+        }
+    }
+
     void* cb = nullptr;
     void* ctx = nullptr;
     uint32_t bytesPerFrame = 4;

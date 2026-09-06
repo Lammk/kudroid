@@ -752,7 +752,6 @@ static PFN_vkCreateSwapchainKHR_fn s_realCreateSwapchain = nullptr;
 typedef uint32_t (*PFN_vkQueueSubmit_fn)(void*, uint32_t, const void*, void*);
 static PFN_vkQueueSubmit_fn s_realQueueSubmit = nullptr;
 static std::atomic<uint64_t> s_submitCount{0};
-static std::atomic<uint64_t> s_submitCmdBufs{0};
 extern "C" uint32_t bionic_vkQueueSubmit(void* queue, uint32_t submit_count,
                                          const void* submits, void* fence);
 extern "C" uint32_t bionic_vkCreateSwapchainKHR(void* device, const void* create_info,
@@ -1011,28 +1010,18 @@ extern "C" uint32_t bionic_vkAcquireNextImageKHR(void* device, void* swapchain, 
 }
 
 // Diagnostic: submit count proves whether Unity draws (submit>0) or only
-// clear-presents (submit==0). VkSubmitInfo 64-bit stride is 64 bytes with
-// commandBufferCount at +32.
+// clear-presents (submit==0). Command-buffer counts are left to validation
+// layers; only the batch count is observed here.
 extern "C" uint32_t bionic_vkQueueSubmit(void* queue, uint32_t submit_count,
                                          const void* submits, void* fence) {
-    uint64_t cmdbufs = 0;
-    if (submits != nullptr) {
-        const char* s = static_cast<const char*>(submits);
-        for (uint32_t i = 0; i < submit_count; ++i) {
-            uint32_t n = 0;
-            std::memcpy(&n, s + i * 64 + 32, 4);
-            cmdbufs += n;
-        }
-    }
     const uint64_t n =
         s_submitCount.fetch_add(submit_count, std::memory_order_relaxed) + submit_count;
-    s_submitCmdBufs.fetch_add(cmdbufs, std::memory_order_relaxed);
     const uint32_t r = s_realQueueSubmit != nullptr
                            ? s_realQueueSubmit(queue, submit_count, submits, fence)
                            : 0xFFFFFFFFu;
     if (n <= 5 || r != 0 || (n % 120) == 0) {
-        gpuLog("vkQueueSubmit #%llu -> %u batches=%u cmdbufs=%llu", (unsigned long long)n,
-               r, submit_count, (unsigned long long)cmdbufs);
+        gpuLog("vkQueueSubmit #%llu -> %u batches=%u", (unsigned long long)n, r,
+               submit_count);
     }
     return r;
 }
