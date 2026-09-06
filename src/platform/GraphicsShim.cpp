@@ -749,6 +749,12 @@ extern "C" uint32_t bionic_vkSurfaceCaps(void* phys, void* surface, void* caps);
 // Swapchain creation also resolves here; the wrapper lives with the device taps.
 typedef uint32_t (*PFN_vkCreateSwapchainKHR_fn)(void*, const void*, const void*, void**);
 static PFN_vkCreateSwapchainKHR_fn s_realCreateSwapchain = nullptr;
+typedef uint32_t (*PFN_vkQueueSubmit_fn)(void*, uint32_t, const void*, void*);
+static PFN_vkQueueSubmit_fn s_realQueueSubmit = nullptr;
+static std::atomic<uint64_t> s_submitCount{0};
+static std::atomic<uint64_t> s_submitCmdBufs{0};
+extern "C" uint32_t bionic_vkQueueSubmit(void* queue, uint32_t submit_count,
+                                         const void* submits, void* fence);
 extern "C" uint32_t bionic_vkCreateSwapchainKHR(void* device, const void* create_info,
                                                 const void* allocator, void** swapchain);
 
@@ -927,6 +933,17 @@ extern "C" PFN_vkVoidFunction bionic_vkGetInstanceProcAddr(VkInstance instance, 
             return reinterpret_cast<PFN_vkVoidFunction>(&bionic_vkCreateSwapchainKHR);
         }
     }
+    if (strcmp(pName, "vkQueueSubmit") == 0) {
+        if (s_realQueueSubmit == nullptr) {
+            if (void* mvk = get_mvk_handle()) {
+                s_realQueueSubmit = reinterpret_cast<PFN_vkQueueSubmit_fn>(
+                    ::dlsym(mvk, "vkQueueSubmit"));
+            }
+        }
+        if (s_realQueueSubmit != nullptr) {
+            return reinterpret_cast<PFN_vkVoidFunction>(&bionic_vkQueueSubmit);
+        }
+    }
     auto real = get_real_vkGetInstanceProcAddr();
     if (real) {
         return real(instance, pName);
@@ -963,8 +980,9 @@ extern "C" uint32_t bionic_vkQueuePresentKHR(void* queue, const void* present_in
         if (p_swap != nullptr) swapchain = const_cast<void*>(p_swap[0]);
         if (p_idx != nullptr) image_index = p_idx[0];
     }
-    gpuLog("vkQueuePresentKHR #%llu -> %u swap=%p image=%u",
-           (unsigned long long)n, r, swapchain, image_index);
+    gpuLog("vkQueuePresentKHR #%llu -> %u swap=%p image=%u submits=%llu",
+           (unsigned long long)n, r, swapchain, image_index,
+           (unsigned long long)s_submitCount.load(std::memory_order_relaxed));
     // Diagnostic: on-screen layer identity; a surface bakes its layer at
     // creation, so a mismatch here means frames go to a hidden layer.
     // 1000001003=SUBOPTIMAL 1000001004=OUT_OF_DATE.
@@ -988,6 +1006,33 @@ extern "C" uint32_t bionic_vkAcquireNextImageKHR(void* device, void* swapchain, 
     }
     if (n <= 5 || r != 0 || (n % 120) == 0) {
         gpuLog("vkAcquireNextImageKHR #%llu -> %u image=%u", (unsigned long long)n, r, index);
+    }
+    return r;
+}
+
+// Diagnostic: submit count proves whether Unity draws (submit>0) or only
+// clear-presents (submit==0). VkSubmitInfo 64-bit stride is 64 bytes with
+// commandBufferCount at +32.
+extern "C" uint32_t bionic_vkQueueSubmit(void* queue, uint32_t submit_count,
+                                         const void* submits, void* fence) {
+    uint64_t cmdbufs = 0;
+    if (submits != nullptr) {
+        const char* s = static_cast<const char*>(submits);
+        for (uint32_t i = 0; i < submit_count; ++i) {
+            uint32_t n = 0;
+            std::memcpy(&n, s + i * 64 + 32, 4);
+            cmdbufs += n;
+        }
+    }
+    const uint64_t n =
+        s_submitCount.fetch_add(submit_count, std::memory_order_relaxed) + submit_count;
+    s_submitCmdBufs.fetch_add(cmdbufs, std::memory_order_relaxed);
+    const uint32_t r = s_realQueueSubmit != nullptr
+                           ? s_realQueueSubmit(queue, submit_count, submits, fence)
+                           : 0xFFFFFFFFu;
+    if (n <= 5 || r != 0 || (n % 120) == 0) {
+        gpuLog("vkQueueSubmit #%llu -> %u batches=%u cmdbufs=%llu", (unsigned long long)n,
+               r, submit_count, (unsigned long long)cmdbufs);
     }
     return r;
 }
@@ -1081,6 +1126,15 @@ extern "C" PFN_vkVoidFunction bionic_vkGetDeviceProcAddr(VkDevice device, const 
     }
     if (strcmp(pName, "vkCreateSwapchainKHR") == 0 && s_realCreateSwapchain != nullptr) {
         return reinterpret_cast<PFN_vkVoidFunction>(&bionic_vkCreateSwapchainKHR);
+    }
+    if (strcmp(pName, "vkQueueSubmit") == 0 && s_realQueueSubmit == nullptr) {
+        if (void* mvk = get_mvk_handle()) {
+            s_realQueueSubmit = reinterpret_cast<PFN_vkQueueSubmit_fn>(
+                ::dlsym(mvk, "vkQueueSubmit"));
+        }
+    }
+    if (strcmp(pName, "vkQueueSubmit") == 0 && s_realQueueSubmit != nullptr) {
+        return reinterpret_cast<PFN_vkVoidFunction>(&bionic_vkQueueSubmit);
     }
     void* mvk = get_mvk_handle();
     if (mvk) {
@@ -1179,6 +1233,43 @@ void* get_vk_func(const char* name) {
     }
     if (strcmp(name, "vkEnumerateInstanceExtensionProperties") == 0) {
         return (void*)&bionic_vkEnumerateInstanceExtensionProperties;
+    }
+    // Submit/acquire/present/swapchain resolve through raw dlsym as well as the
+    // proc-addr hooks; tap them on every path or Unity's route stays invisible.
+    // Resolve the real function on demand so this path works even when the game
+    // never queries the proc-addr hooks for these names.
+    if (strcmp(name, "vkQueueSubmit") == 0 || strcmp(name, "vkQueuePresentKHR") == 0 ||
+        strcmp(name, "vkAcquireNextImageKHR") == 0 || strcmp(name, "vkCreateSwapchainKHR") == 0) {
+        void* mvk = get_mvk_handle();
+        if (strcmp(name, "vkQueueSubmit") == 0) {
+            if (s_realQueueSubmit == nullptr && mvk) {
+                s_realQueueSubmit = reinterpret_cast<PFN_vkQueueSubmit_fn>(
+                    ::dlsym(mvk, "vkQueueSubmit"));
+            }
+            if (s_realQueueSubmit != nullptr) return (void*)&bionic_vkQueueSubmit;
+        } else if (strcmp(name, "vkQueuePresentKHR") == 0) {
+            if (s_realQueuePresent == nullptr && mvk) {
+                s_realQueuePresent = reinterpret_cast<PFN_vkQueuePresentKHR_fn>(
+                    ::dlsym(mvk, "vkQueuePresentKHR"));
+            }
+            if (s_realQueuePresent != nullptr) return (void*)&bionic_vkQueuePresentKHR;
+        } else if (strcmp(name, "vkAcquireNextImageKHR") == 0) {
+            if (s_realAcquireNextImage == nullptr && mvk) {
+                s_realAcquireNextImage = reinterpret_cast<PFN_vkAcquireNextImageKHR_fn>(
+                    ::dlsym(mvk, "vkAcquireNextImageKHR"));
+            }
+            if (s_realAcquireNextImage != nullptr) {
+                return (void*)&bionic_vkAcquireNextImageKHR;
+            }
+        } else {
+            if (s_realCreateSwapchain == nullptr && mvk) {
+                s_realCreateSwapchain = reinterpret_cast<PFN_vkCreateSwapchainKHR_fn>(
+                    ::dlsym(mvk, "vkCreateSwapchainKHR"));
+            }
+            if (s_realCreateSwapchain != nullptr) {
+                return (void*)&bionic_vkCreateSwapchainKHR;
+            }
+        }
     }
     void* mvk = get_mvk_handle();
     if (mvk) {

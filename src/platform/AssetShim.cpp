@@ -8,6 +8,7 @@
 #include <cstring>
 #include <cerrno>
 #include <cstdint>
+#include <atomic>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -196,6 +197,13 @@ static AAssetImpl* open_asset(const char* filename) {
         message += "' under ";
         message += base;
         trace_shim(message.c_str());
+        // Misses are otherwise invisible outside crashes; a wrong prefix here
+        // stalls asset loads with no error on either side.
+        static std::atomic<int> s_missLogged{0};
+        if (s_missLogged.load() < 15) {
+            ++s_missLogged;
+            kudroid_android_log_message(4, "AssetShim", message.c_str());
+        }
         return nullptr;
     }
 
@@ -214,6 +222,17 @@ static AAssetImpl* open_asset(const char* filename) {
     asset->buffer = nullptr;
     asset->bufferSize = 0;
     asset->bufferMapped = false;
+    // Addressables-style manifest loads are rare; showing them proves the route.
+    if (rel.find(".json") != std::string::npos || rel.find("aa/") != std::string::npos) {
+        static std::atomic<int> s_hitLogged{0};
+        if (s_hitLogged.load() < 10) {
+            ++s_hitLogged;
+            char hit[512];
+            std::snprintf(hit, sizeof(hit), "AAssetManager_open: '%s' len=%ld",
+                          rel.c_str(), len);
+            kudroid_android_log_message(4, "AssetShim", hit);
+        }
+    }
     return asset;
 }
 
