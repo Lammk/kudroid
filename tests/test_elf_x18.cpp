@@ -48,14 +48,19 @@ struct SynthElf {
     std::vector<kudroid::ElfLoader::Segment> segs;
     std::size_t codeOff = 0;
 
-    SynthElf(const std::vector<std::uint32_t>& code, bool personality) {
+    SynthElf(const std::vector<std::uint32_t>& code, bool personality,
+             std::size_t fdeBytes = static_cast<std::size_t>(-1)) {
         codeOff = 0x1000;
         const std::size_t codeBytes = code.size() * 4;
         // eh_frame goes after the code in the same LOAD.
         const std::size_t ehOff = codeOff + codeBytes;
         EhBuilder eh;
         eh.cie(personality);
-        eh.fde(codeOff, codeBytes, ehOff);
+        // fdeBytes < codeBytes leaves the tail FDE-uncovered (gap path).
+        const std::size_t cov =
+            (fdeBytes == static_cast<std::size_t>(-1)) ? codeBytes : fdeBytes;
+        if (cov != codeBytes) eh.fde(0, codeOff, ehOff);  // gap starts at code
+        eh.fde(codeOff, cov, ehOff);
         // Section names.
         const std::string shstr("\0.shstrtab\0.eh_frame\0", 22);
         const std::size_t shstrOff = ehOff + eh.bytes.size();
@@ -276,6 +281,50 @@ void test_crash_loop_shape() {
           "control words untouched");
 }
 
+// Gap path (no FDE): loop-head define above the loop renames with the loop.
+void test_gap_loop_renamed() {
+    std::printf("[rewrite] gap loop with outside define is renamed\n");
+    std::vector<std::uint32_t> code = {
+        0x910041F2,  // 0: add x18, x15, #0x10 (feed define)
+        0xAA0B03E1,  // 1: mov x1, x11
+        0xF9400240,  // 2: ldr x0, [x18]
+        0x91008252,  // 3: add x18, x18, #0x20 (loop step)
+        0xF1002021,  // 4: subs x1, x1, #8
+        0x54FFFFA1,  // 5: b.ne -> 2
+        0xD65F03C0,  // 6: ret (value dies)
+        0x17FFFFF9,  // 7: b -> 0 (outside entry, keeps chunk split-free)
+    };
+    SynthElf elf(code, false, 0);  // FDE covers nothing: all gap
+    kudroid::X18Stats st = elf.run();
+    // Used: x0,x1,x11,x15 -> substitute x14, four sites consistently.
+    Check(st.rewritten == 1 && st.sites == 4, "gap loop rewritten, four sites");
+    Check(((elf.word(0) >> 0) & 31) == 14, "define Rd became x14");
+    Check(((elf.word(2) >> 5) & 31) == 14, "ldr base became x14");
+    Check(((elf.word(3) >> 0) & 31) == 14 && ((elf.word(3) >> 5) & 31) == 14,
+          "step Rd/Rn became x14");
+    Check(elf.word(1) == 0xAA0B03E1 && elf.word(4) == 0xF1002021 &&
+              elf.word(5) == 0x54FFFFA1 && elf.word(6) == 0xD65F03C0 &&
+              elf.word(7) == 0x17FFFFF9,
+          "control words untouched");
+}
+
+// Gap path: trailing define escaping to an unrenamed use is skipped.
+void test_gap_escape_skipped() {
+    std::printf("[rewrite] gap escape to unrenamed use is skipped\n");
+    std::vector<std::uint32_t> code = {
+        0x910041F2,  // 0: add x18, x15, #0x10
+        0x34000041,  // 1: cbz x1, -> 3
+        0xD65F03C0,  // 2: ret (dies here, escapes there)
+        0xF9400240,  // 3: ldr x0, [x18] (outside the define's range)
+        0xD65F03C0,  // 4: ret
+    };
+    SynthElf elf(code, false, 0);
+    kudroid::X18Stats st = elf.run();
+    Check(st.rewritten == 0 && st.sites == 0, "escape skipped");
+    for (std::size_t i = 0; i < code.size(); ++i)
+        Check(elf.word(i) == code[i], "bytes untouched");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -299,6 +348,8 @@ int main(int argc, char** argv) {
     test_mem_skips();
     test_personality_skips();
     test_crash_loop_shape();
+    test_gap_loop_renamed();
+    test_gap_escape_skipped();
     if (g_failures == 0) {
         std::printf("=== PASSED (%d checks) ===\n", g_checks);
         return 0;

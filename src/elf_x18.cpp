@@ -47,7 +47,7 @@ void markUseOnly(Decoded& d, unsigned bitoff, unsigned reg) {
 
 // Memory lane holding x18: the value crosses memory, so no in-chunk rename
 // can stay consistent with whoever wrote or will read it.
-void markMem(Decoded& d, unsigned bitoff, unsigned reg) {
+void markMem(Decoded& d, unsigned, unsigned reg) {
     markUsed(d, reg);
     if (reg == kX18) d.mem18 = true;
 }
@@ -400,7 +400,41 @@ void walkEhFrame(const std::uint8_t* eh, std::size_t ehLen, std::vector<FdeRange
     }
 }
 
-// ---- per-function rewrite --------------------------------------------------
+// ---- gap discovery -------------------------------------------------------
+// FDE-less code (hand-tuned DSP compiled without unwind tables) still needs
+// entries. Candidates: prologue shapes, thunk branches, and fallthrough
+// after terminal control flow. Every candidate is validated by code-likeness
+// (pools fail it) and by the span rules downstream.
+bool isEntryWord(std::uint32_t w) {
+    const unsigned b = w >> 24;
+    if ((w & 0xFFC003E0) == 0xA98003E0) return true;  // stp *,*,[sp,#-x] (spill)
+    if ((w & 0xFF0003FF) == 0xD10003FF) return true;  // sub sp,sp,#x
+    if ((w & 0xFFC003E0) == 0xF81003E0) return true;  // str *,[sp,#-x]
+    if (w == 0x910003FD) return true;                 // mov x29,sp
+    if (b == 0x90 || b == 0xB0 || b == 0xD0 || b == 0xF0) return true;  // adrp
+    if ((b & 0xFC) == 0x14) return true;              // b (thunk)
+    if (w == 0xD503237F || w == 0xD503245F) return true;  // pacibsp / bti c
+    return false;
+}
+
+bool isTerminal(std::uint32_t w) {
+    const unsigned b = w >> 24;
+    if (b == 0xD6) return true;  // br/blr/ret/eret
+    if ((b & 0xFC) == 0x14) return true;  // b (no fallthrough)
+    return false;
+}
+
+// Fraction of known-class words in the first few: real code scores high,
+// pools (addresses/floats/offsets) do not.
+bool looksLikeCode(const std::uint32_t* code, std::size_t nwords) {
+    std::size_t n = nwords < 8 ? nwords : 8;
+    if (n == 0) return false;
+    std::size_t known = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        if (decode(code[i]).known) ++known;
+    }
+    return known * 4 >= n * 3;
+}
 
 // Caller-saved integer candidates (x16/x17 excluded: linker veneers;
 // x29/x30/SP excluded structurally).
@@ -419,10 +453,159 @@ bool hasCall(std::uint32_t w) {
     return false;
 }
 
+// One word's x18 touch: define kills the incoming value, use reads it.
+// Memory traffic and unrecognized-but-x18-shaped words count as use.
+struct Touch {
+    bool known = true;
+    bool use = false;
+    bool def = false;
+};
+
+Touch touch18(std::uint32_t w) {
+    Touch t;
+    const Decoded d = decode(w);
+    t.known = d.known;
+    if (!d.known) {
+        t.use = ((w >> 0) & 31) == kX18 || ((w >> 5) & 31) == kX18 ||
+                ((w >> 16) & 31) == kX18 || ((w >> 10) & 31) == kX18;
+        return t;
+    }
+    if (d.mem18) {
+        t.use = true;
+        return t;
+    }
+    for (unsigned k = 0; k < d.npatch; ++k) {
+        if (((w >> d.at[k]) & 31) == kX18)
+            (((d.defmask >> k) & 1) ? t.def : t.use) = true;
+    }
+    for (unsigned k = 0; k < d.nuse; ++k) {
+        if (((w >> d.useonly[k]) & 31) == kX18) t.use = true;
+    }
+    if ((d.used & (1u << kX18)) && !t.def && !t.use) t.use = true;
+    return t;
+}
+
+// Successor walk for exit liveness. complete = whole function (FDE path):
+// exits die per NDK convention (return/tail-call kill scratch). Otherwise
+// (gap path) only ret/calls and jumps into FDE-covered functions die;
+// anything else leaving the window escapes.
+enum class Edge { Next, Dies, Escapes };
+
+bool coveredContains(
+    const std::vector<std::pair<std::size_t, std::size_t>>& covered,
+    std::size_t t) {
+    std::size_t lo = 0, hi = covered.size();
+    while (lo < hi) {
+        const std::size_t m = lo + (hi - lo) / 2;
+        if (covered[m].first <= t)
+            lo = m + 1;
+        else
+            hi = m;
+    }
+    return lo > 0 && covered[lo - 1].second > t;
+}
+
+Edge succEdge(const std::uint32_t* win, std::size_t n, std::size_t i,
+              std::vector<std::size_t>& out, bool complete,
+              const std::vector<std::pair<std::size_t, std::size_t>>* covered) {
+    const std::uint32_t w = win[i];
+    const unsigned b = w >> 24;
+    auto target = [&](long t) {
+        if (t >= 0 && static_cast<std::size_t>(t) < n) {
+            out.push_back(static_cast<std::size_t>(t));
+            return Edge::Next;
+        }
+        if (complete) return Edge::Dies;
+        if (covered != nullptr && t >= 0 &&
+            coveredContains(*covered, static_cast<std::size_t>(t)))
+            return Edge::Dies;  // tail-call into a known function
+        return Edge::Escapes;
+    };
+    if (b == 0xD6) {
+        // ret dies everywhere; blr is a call (scratch dies per NDK
+        // convention); br/eret jump unknown: tail-call dies in a whole
+        // function, but mid-gap they may land in unrenamed code.
+        if ((w & ~0x3E0u) == 0xD65F03C0u) return Edge::Dies;  // ret
+        if (((w >> 16) & 0xFF) == 0x3F) return Edge::Dies;    // blr(+auth)
+        if (((w >> 5) & 31) == 30) return Edge::Dies;  // br x30: return
+        return complete ? Edge::Dies : Edge::Escapes;  // br/eret
+    }
+    if ((b & 0xFC) == 0x94) return Edge::Dies;  // bl: scratch dies at call
+    if ((b & 0xFC) == 0x14) {
+        const std::int32_t imm =
+            static_cast<std::int32_t>((w & 0x03FFFFFF) << 6) >> 4;
+        return target(static_cast<long>(i) + imm / 4);
+    }
+    if (b == 0x54 || (b & 0x7F) == 0x34 || (b & 0x7F) == 0x35 ||
+        (b & 0x7E) == 0x36) {
+        std::int32_t off = 0;
+        if (b == 0x54)
+            off = static_cast<std::int32_t>(((w >> 5) & 0x7FFFF) << 13) >> 11;
+        else if ((b & 0x7E) == 0x36)
+            off = static_cast<std::int32_t>(((w >> 5) & 0x3FFF) << 18) >> 16;
+        else
+            off = static_cast<std::int32_t>(((w >> 5) & 0x7FFFF) << 13) >> 11;
+        Edge e = target(static_cast<long>(i) + off / 4);
+        if (e == Edge::Escapes) return Edge::Escapes;
+        return target(static_cast<long>(i) + 1);
+    }
+    if (!decode(w).known) {
+        // Every branch encoding (direct/indirect/exception) decodes, so an
+        // unrecognized word falls through; x18-shaped may hide a lane.
+        const Touch t = touch18(w);
+        if (t.use) return Edge::Escapes;
+    }
+    return target(static_cast<long>(i) + 1);
+}
+
+// Forward exit liveness: the value live after word d (absolute index, inside
+// [rs,re)) dies on every path iff no unrenamed use can observe it. Words in
+// [rs,re) are renamed (uses continue, defs kill); ret/calls kill per NDK
+// convention (caller-saved scratch); anything else leaving the window kills
+// the rewrite, not the value. Bounded: exhaustion is an escape.
+bool trailingDies(const std::uint32_t* win, std::size_t n, std::size_t rs,
+                  std::size_t re, std::size_t d, bool complete,
+                  const std::vector<std::pair<std::size_t, std::size_t>>*
+                      covered) {
+    std::vector<char> seen(n, 0);
+    std::vector<std::size_t> wl;
+    {
+        std::vector<std::size_t> first;
+        if (succEdge(win, n, d, first, complete, covered) == Edge::Escapes)
+            return false;
+        wl = std::move(first);
+    }
+    std::size_t visits = 0;
+    while (!wl.empty()) {
+        const std::size_t i = wl.back();
+        wl.pop_back();
+        if (i >= n || seen[i]) continue;
+        seen[i] = 1;
+        if (++visits > 2048) return false;
+        const Touch t = touch18(win[i]);
+        if (t.use && (i < rs || i >= re)) return false;  // unrenamed observer
+        // Unshaped unknowns fall through (all branch classes decode); shaped
+        // ones set t.use above. In-range words are pre-checked, so an
+        // in-range use reads the renamed value and stays live.
+        if (t.def) continue;  // redefined: this path carries a new value
+        std::vector<std::size_t> nx;
+        if (succEdge(win, n, i, nx, complete, covered) == Edge::Escapes)
+            return false;
+        for (std::size_t s : nx) {
+            if (!seen[s]) wl.push_back(s);
+        }
+    }
+    return true;
+}
+
 // Rewrite one function range in place. Returns sites renamed, or -1 to skip
 // (reason stored in why when provided).
 long rewriteRange(std::uint32_t* code, std::size_t nwords, X18Stats& st,
-                  const char** why = nullptr) {
+                  const char** why = nullptr,
+                  const std::uint32_t* full = nullptr, std::size_t absStart = 0,
+                  std::size_t fullN = 0, bool complete = true,
+                  const std::vector<std::pair<std::size_t, std::size_t>>*
+                      covered = nullptr) {
     if (nwords == 0) return 0;
     // Reachability: literal pools sit after unconditional control flow and
     // must never be patched as code. Mark from entry following branches.
@@ -440,7 +623,13 @@ long rewriteRange(std::uint32_t* code, std::size_t nwords, X18Stats& st,
             auto push = [&](std::size_t j) {
                 if (j < nwords && !live[j]) stack.push_back(j);
             };
-            if (b == 0xD6) continue;  // br/blr/ret/eret: no fallthrough
+            if (b == 0xD6) {
+                // br/ret/eret end flow; blr returns (bits[23:16] == 0x3F).
+                if (((w >> 16) & 0xFF) == 0x3F) {
+                    push(i + 1);
+                }
+                continue;
+            }
             if ((b & 0xFC) == 0x14 || (b & 0xFC) == 0x94) {
                 if ((b & 0xFC) == 0x14) {
                     // b: direct target only.
@@ -482,15 +671,23 @@ long rewriteRange(std::uint32_t* code, std::size_t nwords, X18Stats& st,
     std::vector<std::size_t> calls;
     std::uint32_t used = 0;
     std::vector<std::uint32_t> words(code, code + nwords);
+    static int traceBlock = -1;
+    if (traceBlock < 0) {
+        const char* v = std::getenv("KUDROID_X18_TRACE");
+        traceBlock = (v != nullptr && v[0] == '1') ? 1 : 0;
+    }
     for (std::size_t i = 0; i < nwords; ++i) {
-        // Unreachable words are data (literal pools), not code: an x18-shaped
-        // value in one must never be patched, so the function is skipped; and
-        // pool contents must not poison register-liveness either.
+        // Unreachable words are data (literal pools), not code: a word that
+        // really touches x18 aborts the rename (it may be code entered from
+        // outside); anything else cannot affect x18 flow and is ignored.
+        // Decode-aware: crude slot scans mistake offset bits for registers.
         if (!live[i]) {
-            if ((((words[i] >> 0) & 31) == kX18 || ((words[i] >> 5) & 31) == kX18 ||
-                 ((words[i] >> 16) & 31) == kX18 || ((words[i] >> 10) & 31) == kX18)) {
+            const Touch dt = touch18(words[i]);
+            if (dt.use || dt.def) {
                 ++st.skippedRange;
                 if (why) *why = "data";
+                if (traceBlock)
+                    std::fprintf(stderr, "[KuDroidELF] x18 block +%zx\n", i * 4);
                 return -1;
             }
             continue;
@@ -526,41 +723,56 @@ long rewriteRange(std::uint32_t* code, std::size_t nwords, X18Stats& st,
         if (hasCall(words[i])) calls.push_back(i);
     }
     if ((used & (1u << kX18)) == 0) return 0;  // x18-free: nothing to do
-    // Span check: every use must be fed by a define in-chunk (no live-in),
-    // every define consumed in-chunk (no live-out), and no call may sit
-    // inside a span (a caller-saved substitute would not survive it).
+    // Span check: every use must be fed by a define in-range (no live-in),
+    // no call may sit inside a span (a caller-saved substitute would not
+    // survive it), and the value live after the last x18 reference must die
+    // on every path (no unrenamed observer). Within one instruction, uses
+    // precede defines (add x18,x18 reads first).
     {
         long lastDef = -1;
-        bool lastWasDef = false;
+        long lastX18 = -1;
         struct Span {
             long a, b;
         };
         std::vector<Span> spans;
-        for (const auto& r : refs) {
+        std::size_t k = 0;
+        auto handle = [&](const Ref& r) {
             const std::uint32_t w = words[r.idx];
-            if (((w >> r.pos) & 31) != kX18) continue;
+            if (((w >> r.pos) & 31) != kX18) return true;
+            lastX18 = static_cast<long>(r.idx);
             if (r.isDef) {
                 lastDef = static_cast<long>(r.idx);
-                lastWasDef = true;
             } else {
                 if (lastDef < 0) {
                     ++st.skippedNoReg;
                     if (why) *why = "livein";
-                    return -1;
+                    return false;
                 }
                 spans.push_back({lastDef, static_cast<long>(r.idx)});
-                lastWasDef = false;
             }
+            return true;
+        };
+        bool okSpan = true;
+        while (k < refs.size()) {
+            const std::size_t idx = refs[k].idx;
+            std::size_t j = k;
+            while (j < refs.size() && refs[j].idx == idx) ++j;
+            for (std::size_t m = k; m < j && okSpan; ++m) {
+                if (!refs[m].isDef && !handle(refs[m])) okSpan = false;
+            }
+            for (std::size_t m = k; m < j && okSpan; ++m) {
+                if (refs[m].isDef && !handle(refs[m])) okSpan = false;
+            }
+            if (!okSpan) return -1;
+            k = j;
         }
-        if (lastWasDef) {
-            // A trailing define flows out — unless the range ends closed
-            // (return/unconditional branch out), where it is dead.
-            bool closed = false;
-            if (nwords > 0) {
-                const unsigned lb = words[nwords - 1] >> 24;
-                closed = (lb == 0xD6) || ((lb & 0xFC) == 0x14);
-            }
-            if (!closed) {
+        if (lastX18 >= 0) {
+            const std::uint32_t* win = (full != nullptr) ? full : code;
+            const std::size_t wn = (full != nullptr) ? fullN : nwords;
+            const std::size_t rs = (full != nullptr) ? absStart : 0;
+            if (!trailingDies(win, wn, rs, rs + nwords,
+                              rs + static_cast<std::size_t>(lastX18), complete,
+                              covered)) {
                 ++st.skippedNoReg;
                 if (why) *why = "liveout";
                 return -1;
@@ -726,6 +938,112 @@ X18Stats elf_x18_rewrite(const void* base, std::uint64_t minVaddr,
             std::fprintf(stderr, "[KuDroidELF] x18 range %llx skip=%s @%zx\n",
                          (unsigned long long)r.start, why, fileOff);
         }
+    }
+    // Gap pass: FDE-less code (hand-tuned DSP without unwind tables) gets
+    // entries from prologue shapes, ret-fallthrough, and computed targets.
+    // Each chunk is likeness-gated (pools fail it) and span-validated.
+    for (const auto& seg : segments) {
+        if ((seg.flags & 1) == 0) continue;
+        const std::uint64_t s0 = imgAddr + (seg.vaddr - minVaddr);
+        const std::size_t nwords = static_cast<std::size_t>(seg.filesz) / 4;
+        std::uint32_t* words = reinterpret_cast<std::uint32_t*>(
+            const_cast<std::uint8_t*>(img) + (seg.vaddr - minVaddr));
+        // Covered intervals from the FDE pass above, converted to word
+        // indices (ranges are byte addresses).
+        std::vector<std::pair<std::size_t, std::size_t>> covered;
+        for (const auto& r : ranges) {
+            if (r.end <= r.start) continue;
+            if (r.start >= s0 && r.end <= s0 + seg.filesz) {
+                covered.emplace_back(static_cast<std::size_t>(r.start - s0) / 4,
+                                     static_cast<std::size_t>(r.end - s0 + 3) / 4);
+            }
+        }
+        std::sort(covered.begin(), covered.end());
+        {
+            std::size_t mx = 0;
+            for (const auto& c : covered) mx = std::max(mx, c.second);
+            std::fprintf(stderr, "[KuDroidELF] covered=%zu maxend=%zu nwords=%zu\n",
+                         covered.size(), mx, nwords);
+        }
+        // Walk the segment; each maximal uncovered run is gap-processed.
+        std::size_t cur = 0;
+        auto flushGap = [&](std::size_t gs, std::size_t ge) {
+            if (ge <= gs + 4) return;  // need room for code, not noise
+            if (ge > nwords || gs >= nwords) {
+                std::fprintf(stderr,
+                             "[KuDroidELF] gap OOB gs=%zu ge=%zu nwords=%zu "
+                             "segv=%llx segfilesz=%zx ranges=%zu\n",
+                             gs, ge, nwords, (unsigned long long)seg.vaddr, seg.filesz,
+                             ranges.size());
+                return;
+            }
+            // Prologue-delimited ranges: one substitute per function-like
+            // range. x18 flows through loops, so splitting by branch would
+            // cut live values; the span + exit-liveness rules validate.
+            // Also split after terminal control flow (ret/uncond-b/br):
+            // what follows is data, a cold block, or a function entered
+            // from outside (tail-called code has no prologue spill).
+            // Inter-range flow stays sound: the exit-liveness walk follows
+            // it and escapes on any unrenamed observer.
+            std::vector<std::size_t> splits;
+            splits.push_back(gs);
+            for (std::size_t i = gs + 1; i < ge; ++i) {
+                const std::uint32_t w = words[i];
+                if (x18::isEntryWord(w)) {
+                    const unsigned b = w >> 24;
+                    if (b == 0x90 || b == 0xB0 || b == 0xD0 || b == 0xF0 ||
+                        (b & 0xFC) == 0x14)
+                        continue;  // adrp/b-thunks are flow, not entries
+                    splits.push_back(i);
+                    continue;
+                }
+                const std::uint32_t pw = words[i - 1];
+                const unsigned pb = pw >> 24;
+                const bool term =
+                    (pb == 0xD6 && ((pw >> 16) & 0xFF) != 0x3F) ||  // ret/br
+                    ((pb & 0xFC) == 0x14);                          // b
+                if (term && i < ge) splits.push_back(i);
+            }
+            splits.push_back(ge);
+            static int traceGap = -1;
+            if (traceGap < 0) {
+                const char* v = std::getenv("KUDROID_X18_TRACE");
+                traceGap = (v != nullptr && v[0] == '1') ? 1 : 0;
+            }
+            for (std::size_t s = 0; s + 1 < splits.size(); ++s) {
+                const std::size_t cs = splits[s];
+                const std::size_t ce = splits[s + 1];
+                if (ce <= cs + 1) continue;
+                if (!x18::looksLikeCode(words + cs, ce - cs)) {
+                    ++st.skippedRange;
+                    continue;
+                }
+                ++st.functions;
+                const char* why0 = "";
+                const long sites = x18::rewriteRange(
+                    words + cs, ce - cs, st, &why0, words + gs, cs - gs,
+                    ge - gs, false, &covered);
+                if (sites > 0) {
+                    ++st.rewritten;
+                    st.sites += static_cast<std::uint64_t>(sites);
+                }
+                if (traceGap) {
+                    const std::size_t fileOff = seg.offset + (cs * 4);
+                    if (sites > 0) {
+                        std::fprintf(stderr, "[KuDroidELF] x18 gap %zx sites=%ld\n",
+                                     fileOff, sites);
+                    } else {
+                        std::fprintf(stderr, "[KuDroidELF] x18 gap %zx skip=%s\n",
+                                     fileOff, why0);
+                    }
+                }
+            }
+        };
+        for (const auto& c : covered) {
+            if (c.first > cur) flushGap(cur, c.first);
+            if (c.second > cur) cur = c.second;
+        }
+        if (cur < nwords) flushGap(cur, nwords);
     }
     return st;
 }
