@@ -741,21 +741,68 @@ static PFN_vkGetInstanceProcAddr get_real_vkGetInstanceProcAddr() {
 
 static VkInstance s_activeVkInstance = nullptr;
 
-// Passthrough tap for vkGetPhysicalDeviceSurfaceCapabilitiesKHR (hooked on the
-// instance-proc path, which the device-proc tap never sees).
+// One table drives all three resolvers (instance-proc, device-proc, raw dlsym):
+// per-name resolve-then-wrap blocks drifted apart, which is how swapchain
+// creation stayed invisible for weeks.
 typedef uint32_t (*PFN_vkSurfaceCaps_fn)(void*, void*, void*);
-static PFN_vkSurfaceCaps_fn s_realSurfaceCaps = nullptr;
-extern "C" uint32_t bionic_vkSurfaceCaps(void* phys, void* surface, void* caps);
-// Swapchain creation also resolves here; the wrapper lives with the device taps.
 typedef uint32_t (*PFN_vkCreateSwapchainKHR_fn)(void*, const void*, const void*, void**);
-static PFN_vkCreateSwapchainKHR_fn s_realCreateSwapchain = nullptr;
 typedef uint32_t (*PFN_vkQueueSubmit_fn)(void*, uint32_t, const void*, void*);
+typedef uint32_t (*PFN_vkQueuePresentKHR_fn)(void*, const void*);
+typedef uint32_t (*PFN_vkAcquireNextImageKHR_fn)(void*, void*, uint64_t, void*, void*,
+                                                 uint32_t*);
+static PFN_vkSurfaceCaps_fn s_realSurfaceCaps = nullptr;
+static PFN_vkCreateSwapchainKHR_fn s_realCreateSwapchain = nullptr;
 static PFN_vkQueueSubmit_fn s_realQueueSubmit = nullptr;
-static std::atomic<uint64_t> s_submitCount{0};
+static PFN_vkQueuePresentKHR_fn s_realQueuePresent = nullptr;
+static PFN_vkAcquireNextImageKHR_fn s_realAcquireNextImage = nullptr;
+extern "C" uint32_t bionic_vkSurfaceCaps(void* phys, void* surface, void* caps);
 extern "C" uint32_t bionic_vkQueueSubmit(void* queue, uint32_t submit_count,
                                          const void* submits, void* fence);
+extern "C" uint32_t bionic_vkQueuePresentKHR(void* queue, const void* present_info);
+extern "C" uint32_t bionic_vkAcquireNextImageKHR(void* device, void* swapchain,
+                                                 uint64_t timeout, void* semaphore,
+                                                 void* fence, uint32_t* image_index);
 extern "C" uint32_t bionic_vkCreateSwapchainKHR(void* device, const void* create_info,
                                                 const void* allocator, void** swapchain);
+
+namespace {
+struct VkTapEntry {
+    const char* name;
+    PFN_vkVoidFunction wrapper;
+    void** realSlot;
+};
+VkTapEntry g_vkTaps[] = {
+    {"vkGetPhysicalDeviceSurfaceCapabilitiesKHR",
+     reinterpret_cast<PFN_vkVoidFunction>(&bionic_vkSurfaceCaps),
+     reinterpret_cast<void**>(&s_realSurfaceCaps)},
+    {"vkQueueSubmit", reinterpret_cast<PFN_vkVoidFunction>(&bionic_vkQueueSubmit),
+     reinterpret_cast<void**>(&s_realQueueSubmit)},
+    {"vkQueuePresentKHR", reinterpret_cast<PFN_vkVoidFunction>(&bionic_vkQueuePresentKHR),
+     reinterpret_cast<void**>(&s_realQueuePresent)},
+    {"vkAcquireNextImageKHR",
+     reinterpret_cast<PFN_vkVoidFunction>(&bionic_vkAcquireNextImageKHR),
+     reinterpret_cast<void**>(&s_realAcquireNextImage)},
+    {"vkCreateSwapchainKHR",
+     reinterpret_cast<PFN_vkVoidFunction>(&bionic_vkCreateSwapchainKHR),
+     reinterpret_cast<void**>(&s_realCreateSwapchain)},
+};
+
+// Resolve through MoltenVK on demand; null when the game never uses the name.
+PFN_vkVoidFunction lookupVkTap(const char* name) {
+    if (name == nullptr) return nullptr;
+    for (auto& tap : g_vkTaps) {
+        if (std::strcmp(name, tap.name) != 0) continue;
+        if (*tap.realSlot == nullptr) {
+            if (void* mvk = get_mvk_handle()) {
+                *tap.realSlot = reinterpret_cast<void*>(::dlsym(mvk, name));
+            }
+        }
+        return *tap.realSlot != nullptr ? tap.wrapper : nullptr;
+    }
+    return nullptr;
+}
+}  // namespace
+static std::atomic<uint64_t> s_submitCount{0};
 
 // Intercept vkCreateInstance: translate Android surface extension to iOS MoltenVK surface extension
 extern "C" VkResult bionic_vkCreateInstance(const VkInstanceCreateInfo* pCreateInfo,
@@ -908,40 +955,9 @@ extern "C" PFN_vkVoidFunction bionic_vkGetInstanceProcAddr(VkInstance instance, 
     if (strcmp(pName, "vkGetDeviceProcAddr") == 0) {
         return (PFN_vkVoidFunction)&bionic_vkGetDeviceProcAddr;
     }
-    // Capabilities bypass the device-proc tap (resolved here), so hook them here.
-    if (strcmp(pName, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR") == 0) {
-        if (s_realSurfaceCaps == nullptr) {
-            if (void* mvk = get_mvk_handle()) {
-                s_realSurfaceCaps = reinterpret_cast<PFN_vkSurfaceCaps_fn>(
-                    ::dlsym(mvk, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR"));
-            }
-        }
-        if (s_realSurfaceCaps != nullptr) {
-            return reinterpret_cast<PFN_vkVoidFunction>(&bionic_vkSurfaceCaps);
-        }
-    }
-    // Swapchain creation also arrives here (never via the device-proc tap), same wrap.
-    if (strcmp(pName, "vkCreateSwapchainKHR") == 0) {
-        if (s_realCreateSwapchain == nullptr) {
-            if (void* mvk = get_mvk_handle()) {
-                s_realCreateSwapchain = reinterpret_cast<PFN_vkCreateSwapchainKHR_fn>(
-                    ::dlsym(mvk, "vkCreateSwapchainKHR"));
-            }
-        }
-        if (s_realCreateSwapchain != nullptr) {
-            return reinterpret_cast<PFN_vkVoidFunction>(&bionic_vkCreateSwapchainKHR);
-        }
-    }
-    if (strcmp(pName, "vkQueueSubmit") == 0) {
-        if (s_realQueueSubmit == nullptr) {
-            if (void* mvk = get_mvk_handle()) {
-                s_realQueueSubmit = reinterpret_cast<PFN_vkQueueSubmit_fn>(
-                    ::dlsym(mvk, "vkQueueSubmit"));
-            }
-        }
-        if (s_realQueueSubmit != nullptr) {
-            return reinterpret_cast<PFN_vkVoidFunction>(&bionic_vkQueueSubmit);
-        }
+    // Capabilities/swapchain/submit resolve here, never via the device-proc tap.
+    if (PFN_vkVoidFunction tap = lookupVkTap(pName)) {
+        return tap;
     }
     auto real = get_real_vkGetInstanceProcAddr();
     if (real) {
@@ -950,14 +966,9 @@ extern "C" PFN_vkVoidFunction bionic_vkGetInstanceProcAddr(VkInstance instance, 
     return nullptr;
 }
 
-// Present/acquire tap (see diagnostic note at bionic_vkGetDeviceProcAddr).
-// Signatures use opaque pointers (no Vulkan headers here); only the result
-// code and counters are observed, arguments pass straight through.
-typedef uint32_t (*PFN_vkQueuePresentKHR_fn)(void*, const void*);
-typedef uint32_t (*PFN_vkAcquireNextImageKHR_fn)(void*, void*, uint64_t, void*, void*,
-                                                 uint32_t*);
-static PFN_vkQueuePresentKHR_fn s_realQueuePresent = nullptr;
-static PFN_vkAcquireNextImageKHR_fn s_realAcquireNextImage = nullptr;
+
+// Present/acquire tap. Signatures use opaque pointers (no Vulkan headers here);
+// only the result code and counters are observed, arguments pass straight through.
 static std::atomic<uint64_t> s_presentCount{0};
 static std::atomic<uint64_t> s_acquireCount{0};
 
@@ -1088,42 +1099,9 @@ extern "C" void kudroid_gpu_note_run_end(void) {
 
 extern "C" PFN_vkVoidFunction bionic_vkGetDeviceProcAddr(VkDevice device, const char* pName) {
     if (!pName) return nullptr;
-    // Diagnostic: tap presents/acquires; pure passthrough, only for logs.
-    if (strcmp(pName, "vkQueuePresentKHR") == 0 && s_realQueuePresent == nullptr) {
-        if (void* mvk = get_mvk_handle()) {
-            s_realQueuePresent =
-                reinterpret_cast<PFN_vkQueuePresentKHR_fn>(::dlsym(mvk, "vkQueuePresentKHR"));
-        }
-    }
-    if (strcmp(pName, "vkQueuePresentKHR") == 0 && s_realQueuePresent != nullptr) {
-        return reinterpret_cast<PFN_vkVoidFunction>(&bionic_vkQueuePresentKHR);
-    }
-    if (strcmp(pName, "vkAcquireNextImageKHR") == 0 && s_realAcquireNextImage == nullptr) {
-        if (void* mvk = get_mvk_handle()) {
-            s_realAcquireNextImage = reinterpret_cast<PFN_vkAcquireNextImageKHR_fn>(
-                ::dlsym(mvk, "vkAcquireNextImageKHR"));
-        }
-    }
-    if (strcmp(pName, "vkAcquireNextImageKHR") == 0 && s_realAcquireNextImage != nullptr) {
-        return reinterpret_cast<PFN_vkVoidFunction>(&bionic_vkAcquireNextImageKHR);
-    }
-    if (strcmp(pName, "vkCreateSwapchainKHR") == 0 && s_realCreateSwapchain == nullptr) {
-        if (void* mvk = get_mvk_handle()) {
-            s_realCreateSwapchain = reinterpret_cast<PFN_vkCreateSwapchainKHR_fn>(
-                ::dlsym(mvk, "vkCreateSwapchainKHR"));
-        }
-    }
-    if (strcmp(pName, "vkCreateSwapchainKHR") == 0 && s_realCreateSwapchain != nullptr) {
-        return reinterpret_cast<PFN_vkVoidFunction>(&bionic_vkCreateSwapchainKHR);
-    }
-    if (strcmp(pName, "vkQueueSubmit") == 0 && s_realQueueSubmit == nullptr) {
-        if (void* mvk = get_mvk_handle()) {
-            s_realQueueSubmit = reinterpret_cast<PFN_vkQueueSubmit_fn>(
-                ::dlsym(mvk, "vkQueueSubmit"));
-        }
-    }
-    if (strcmp(pName, "vkQueueSubmit") == 0 && s_realQueueSubmit != nullptr) {
-        return reinterpret_cast<PFN_vkVoidFunction>(&bionic_vkQueueSubmit);
+    // Diagnostic taps; pure passthrough, only for logs.
+    if (PFN_vkVoidFunction tap = lookupVkTap(pName)) {
+        return tap;
     }
     void* mvk = get_mvk_handle();
     if (mvk) {

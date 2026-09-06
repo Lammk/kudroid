@@ -254,7 +254,8 @@ bool Invoke_java_lang_Object(Interpreter* interp, const char* name, const DexVal
     }
     if (std::strcmp(name, "wait") == 0) {
         const int64_t millis = num_args > 1 ? args[1].j : 0;
-        if (!Monitor::Wait(self, millis, 0)) {
+        const int32_t nanos = num_args > 2 ? args[2].i : 0;
+        if (!Monitor::Wait(self, millis, nanos)) {
             interp->ThrowException("Ljava/lang/IllegalMonitorStateException;",
                                    "wait without owning the monitor");
         }
@@ -2076,9 +2077,9 @@ bool Invoke_java_lang_String(Interpreter* interp, const DexMethod* method,
         return true;
     }
     if (std::strcmp(name, "substring") == 0) {
-        const int32_t begin = args[1].i;
-        const int32_t end = args[2].i;
+        const int32_t begin = num_args > 1 ? args[1].i : 0;
         const int32_t len = static_cast<int32_t>(view.length());
+        const int32_t end = num_args > 2 ? args[2].i : len;
         if (begin < 0 || end > len || begin > end) {
             interp->ThrowException("Ljava/lang/StringIndexOutOfBoundsException;",
                                    "substring(" + std::to_string(begin) + ", " +

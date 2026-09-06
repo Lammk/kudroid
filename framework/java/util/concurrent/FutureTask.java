@@ -59,12 +59,12 @@ public class FutureTask<V> implements Future<V>, Runnable {
     }
 
     public synchronized V get(long timeout, TimeUnit unit)
-            throws InterruptedException, ExecutionException {
+            throws InterruptedException, ExecutionException, TimeoutException {
         long deadline = System.currentTimeMillis() + unit.toMillis(timeout);
         while (!done) {
             long remaining = deadline - System.currentTimeMillis();
             if (remaining <= 0) {
-                return null;
+                throw new TimeoutException();
             }
             wait(remaining);
         }

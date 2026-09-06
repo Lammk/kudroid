@@ -1669,8 +1669,21 @@ extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_
         case 23: // dup
             return ::dup(static_cast<int>(a1));
 
-        case 24: // dup3
-            return ::dup2(static_cast<int>(a1), static_cast<int>(a2));
+        case 24: { // dup3
+            // Unlike dup2, dup3 fails when old equals new and honors O_CLOEXEC.
+            const int oldfd = static_cast<int>(a1);
+            const int newfd = static_cast<int>(a2);
+            if (oldfd == newfd) {
+                errno = EINVAL;
+                return -1;
+            }
+            const int rc = ::dup2(oldfd, newfd);
+            if (rc >= 0 && (static_cast<int>(a3) & 0x80000) != 0) { // O_CLOEXEC
+                const int fl = ::fcntl(newfd, F_GETFD);
+                if (fl >= 0) ::fcntl(newfd, F_SETFD, fl | FD_CLOEXEC);
+            }
+            return rc;
+        }
 
         case 34: { // mkdirat
             const char* path = reinterpret_cast<const char*>(a2);
@@ -2095,12 +2108,12 @@ extern "C" int bionic_pipe2(int pipefd[2], int flags) {
 // clock_nanosleep: macOS has only relative nanosleep; use it for both clocks.
 extern "C" int bionic_clock_nanosleep(int clock_id, int flags, const struct timespec* req,
                                        struct timespec* rem) {
-    (void)clock_id;
     if (!req) { errno = EFAULT; return -1; }
     struct timespec r = *req;
     if (flags & 1) { // TIMER_ABSTIME
         struct timespec now;
-        ::clock_gettime(CLOCK_REALTIME, &now);
+        // Absolute deadlines run on the caller's clock, not always REALTIME.
+        ::clock_gettime(static_cast<clockid_t>(clock_id), &now);
         r.tv_sec -= now.tv_sec;
         r.tv_nsec -= now.tv_nsec;
         if (r.tv_nsec < 0) { r.tv_sec -= 1; r.tv_nsec += 1000000000; }

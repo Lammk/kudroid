@@ -9,29 +9,69 @@ import java.io.Serializable;
 public class SynchronousQueue<E> extends AbstractQueue<E> implements BlockingQueue<E>, Serializable {
     private static final long serialVersionUID = -3223113410248163686L;
 
+    // Single handoff slot: put waits for a taker, take waits for a putter.
+    private E item = null;
+    private boolean hasItem = false;
+
     public SynchronousQueue() {}
     public SynchronousQueue(boolean fair) {}
 
-    public void put(E e) throws InterruptedException {
+    public synchronized void put(E e) throws InterruptedException {
         if (e == null) throw new NullPointerException();
+        while (hasItem) wait();
+        item = e;
+        hasItem = true;
+        notifyAll();
+        while (hasItem) wait();
     }
 
-    public boolean offer(E e, long timeout, TimeUnit unit) throws InterruptedException {
+    public synchronized boolean offer(E e, long timeout, TimeUnit unit) throws InterruptedException {
         if (e == null) throw new NullPointerException();
-        return false;
+        long deadline = System.currentTimeMillis() + unit.toMillis(timeout);
+        while (hasItem) {
+            long remaining = deadline - System.currentTimeMillis();
+            if (remaining <= 0) return false;
+            wait(remaining);
+        }
+        item = e;
+        hasItem = true;
+        notifyAll();
+        return true;
     }
 
-    public boolean offer(E e) {
+    public synchronized boolean offer(E e) {
         if (e == null) throw new NullPointerException();
-        return false;
+        if (hasItem) return false;
+        item = e;
+        hasItem = true;
+        notifyAll();
+        return true;
     }
 
-    public E take() throws InterruptedException {
-        return null;
+    public synchronized E take() throws InterruptedException {
+        while (!hasItem) wait();
+        E e = item;
+        item = null;
+        hasItem = false;
+        notifyAll();
+        return e;
     }
 
-    public E poll(long timeout, TimeUnit unit) throws InterruptedException {
-        return null;
+    public synchronized E poll(long timeout, TimeUnit unit) throws InterruptedException {
+        if (!hasItem) {
+            long deadline = System.currentTimeMillis() + unit.toMillis(timeout);
+            long remaining = deadline - System.currentTimeMillis();
+            while (!hasItem && remaining > 0) {
+                wait(remaining);
+                remaining = deadline - System.currentTimeMillis();
+            }
+            if (!hasItem) return null;
+        }
+        E e = item;
+        item = null;
+        hasItem = false;
+        notifyAll();
+        return e;
     }
 
     public E poll() {
