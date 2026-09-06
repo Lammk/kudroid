@@ -720,7 +720,7 @@ std::mutex g_freadVolMtx;
 std::map<FILE*, std::string> g_freadPaths;
 std::map<std::string, std::pair<uint64_t, uint64_t>> g_freadVol;
 uint64_t g_freadVolTotal = 0;
-uint64_t g_freadVolNextLog = 50ULL * 1024 * 1024;
+uint64_t g_freadVolNextLog = 5ULL * 1024 * 1024;
 
 size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
     const size_t n = std::fread(buf, size, count, stream);
@@ -754,7 +754,7 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
             e.second += 1;
             g_freadVolTotal += n * size;
             if (g_freadVolTotal >= g_freadVolNextLog) {
-                g_freadVolNextLog += 50ULL * 1024 * 1024;
+                g_freadVolNextLog += 5ULL * 1024 * 1024;
                 using Entry = std::pair<std::string, std::pair<uint64_t, uint64_t>>;
                 std::vector<Entry> top(g_freadVol.begin(), g_freadVol.end());
                 std::sort(top.begin(), top.end(), [](const Entry& a, const Entry& b) {

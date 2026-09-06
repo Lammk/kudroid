@@ -1080,6 +1080,8 @@ extern "C" int bionic_fstatfs(int fd, struct bionic_statfs64* buf) {
 
 // Check in bionic_mmap: ashmem fd may only map with granted prot.
 static bool ashmem_prot_allows(int fd, int prot);
+extern "C" ssize_t bionic_read(int fd, void* buf, size_t count);
+extern "C" ssize_t bionic_pread64(int fd, void* buf, size_t count, off_t offset);
 // Fake ashmem fd (iOS fallback): return granted region or nullptr when not a fake fd.
 extern "C" void* bionic_ashmem_mmap_fd(int fd, size_t length);
 
@@ -1723,13 +1725,15 @@ extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_
             return ::lseek(static_cast<int>(a1), static_cast<off_t>(a2), static_cast<int>(a3));
 
         case 63: // read
-            return ::read(static_cast<int>(a1), reinterpret_cast<void*>(a2), static_cast<size_t>(a3));
+            return bionic_read(static_cast<int>(a1), reinterpret_cast<void*>(a2),
+                               static_cast<size_t>(a3));
 
         case 64: // write
             return ::write(static_cast<int>(a1), reinterpret_cast<const void*>(a2), static_cast<size_t>(a3));
 
         case 67: // pread64
-            return ::pread(static_cast<int>(a1), reinterpret_cast<void*>(a2), static_cast<size_t>(a3), static_cast<off_t>(a4));
+            return bionic_pread64(static_cast<int>(a1), reinterpret_cast<void*>(a2),
+                                  static_cast<size_t>(a3), static_cast<off_t>(a4));
 
         case 68: // pwrite64
             return ::pwrite(static_cast<int>(a1), reinterpret_cast<const void*>(a2), static_cast<size_t>(a3), static_cast<off_t>(a4));
@@ -1997,7 +2001,7 @@ constexpr int kApkFdUntracked = 64;
 std::mutex g_ioVolMtx;
 std::map<std::string, std::pair<uint64_t, uint64_t>> g_ioVol;
 uint64_t g_ioVolTotal = 0;
-uint64_t g_ioVolNextLog = 50ULL * 1024 * 1024;
+uint64_t g_ioVolNextLog = 5ULL * 1024 * 1024;
 
 static std::string short_path(const std::string& p) {
     return p.size() > 60 ? "..." + p.substr(p.size() - 57) : p;
@@ -2044,7 +2048,7 @@ static void io_volume_add(const std::string& path, uint64_t bytes) {
     e.second += 1;
     g_ioVolTotal += bytes;
     if (g_ioVolTotal < g_ioVolNextLog) return;
-    g_ioVolNextLog += 50ULL * 1024 * 1024;
+    g_ioVolNextLog += 5ULL * 1024 * 1024;
     using Entry = std::pair<std::string, std::pair<uint64_t, uint64_t>>;
     std::vector<Entry> top(g_ioVol.begin(), g_ioVol.end());
     std::sort(top.begin(), top.end(), [](const Entry& a, const Entry& b) {
@@ -2065,6 +2069,14 @@ void fd_forget_apk(int fd) {
 }
 
 }  // namespace
+
+extern "C" ssize_t bionic_read(int fd, void* buf, size_t count) {
+    const ssize_t ret = ::read(fd, buf, count);
+    if (ret > 0) {
+        io_volume_add(std::string(fd_path(fd)), static_cast<uint64_t>(ret));
+    }
+    return ret;
+}
 
 extern "C" ssize_t bionic_pread64(int fd, void* buf, size_t count, off_t offset) {
     const auto t0 = std::chrono::steady_clock::now();
