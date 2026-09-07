@@ -1983,13 +1983,11 @@ int main() {
                                          "(Ljava/lang/String;)Lcom/google/android/play/core/assetpacks/AssetPackLocation;",
                                          {Str("install_time_pack")}, &locOut,
                                          "AssetPackManager.getPackLocation");
-                Check(locOk && locOut.l != nullptr, "getPackLocation returns AssetPackLocation");
-                if (locOk && locOut.l != nullptr) {
-                    DexValue pathOut;
-                    bool pathOk = CallVirtual(locOut.l, "assetsPath", "()Ljava/lang/String;", {}, &pathOut,
-                                              "AssetPackLocation.assetsPath");
-                    Check(pathOk && pathOut.l != nullptr, "AssetPackLocation.assetsPath returns non-null path");
-                }
+                // install_time_pack does not exist on disk: real Play Core
+                // returns null for unavailable packs (it is getPackStates that
+                // reports NOT_INSTALLED). A non-null path here would be a lie
+                // that ends in ENOENT downstream.
+                Check(locOk && locOut.l == nullptr, "getPackLocation returns null for missing pack");
             }
         }
     }

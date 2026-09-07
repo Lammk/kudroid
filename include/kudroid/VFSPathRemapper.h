@@ -27,6 +27,15 @@ public:
     [[nodiscard]] bool initialize();
     [[nodiscard]] bool init_pseudo_files();
 
+    // Stable per-install ANDROID_ID (16 lowercase hex). Generated once into
+    // <androidRoot>/android_id; never the well-known emulator constant.
+    [[nodiscard]] std::string android_id();
+
+    // The running app's package for /proc/self/{cmdline,stat}. Pseudo-files
+    // saying com.kudroid.app break self-identification (crash reporters,
+    // license checks, Unity init); rewritten on the spot, not next init.
+    void setPackageName(const std::string& packageName);
+
 private:
     VFSPathRemapper();
     // Does the work initialize() guards. Called with initMutex_ held.
@@ -34,6 +43,7 @@ private:
 
     std::string documentsDirectory_;
     std::string androidRoot_;
+    std::string packageName_;
 
     mutable std::mutex initMutex_;
     bool initialized_ = false;

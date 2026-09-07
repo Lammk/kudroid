@@ -722,12 +722,23 @@ int guest_sigaltstack(const void* guest_ss, void* guest_oss) {
         return -1;
     }
 
+    // The host arms its own alternate stack for crash handling; the guest must
+    // never see it. Until the guest installs one, it has none (SS_DISABLE).
+    static thread_local bool guestInstalled = false;
+    if (gs != nullptr) {
+        guestInstalled = (gs->flags & SS_DISABLE) == 0;
+    }
+
     if (guest_oss != nullptr) {
         GuestStack* gos = static_cast<GuestStack*>(guest_oss);
         std::memset(gos, 0, sizeof(*gos));
-        gos->sp = host_oss.ss_sp;
-        gos->flags = host_oss.ss_flags;
-        gos->size = static_cast<uint64_t>(host_oss.ss_size);
+        if (!guestInstalled) {
+            gos->flags = SS_DISABLE;
+        } else {
+            gos->sp = host_oss.ss_sp;
+            gos->flags = host_oss.ss_flags;
+            gos->size = static_cast<uint64_t>(host_oss.ss_size);
+        }
     }
     return 0;
 }

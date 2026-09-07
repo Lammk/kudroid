@@ -85,6 +85,22 @@ public class SystemPackageManager extends PackageManager {
         }
     }
 
+    private static int sVersionCode = 1;
+    private static String sVersionName = "1.0.0";
+    private static long sFirstInstallTime = 0;
+    private static long sLastUpdateTime = 0;
+
+    /** Manifest-declared version + install times; 1.0.0/1/0 stays the fallback. */
+    public static synchronized void registerPackageInfo(String packageName, int versionCode,
+                                                        String versionName, long firstInstallTime,
+                                                        long lastUpdateTime) {
+        if (packageName != null) sPackageName = packageName;
+        sVersionCode = versionCode;
+        if (versionName != null) sVersionName = versionName;
+        sFirstInstallTime = firstInstallTime;
+        sLastUpdateTime = lastUpdateTime;
+    }
+
     public static synchronized String getRegisteredPackageName() {
         return sPackageName;
     }
@@ -112,12 +128,12 @@ public class SystemPackageManager extends PackageManager {
         PackageInfo pi = new PackageInfo();
         pi.packageName = packageName;
         pi.applicationInfo = getApplicationInfo(packageName, flags);
-        // Never leave these unset: Unity parses versionName at startup
-        // (split on "."), and a null here becomes an NPE/FormatException far
-        // from the real cause. The manifest value should be plumbed through
-        // registerPackage later; "1.0.0"/1 is the honest fallback until then.
-        pi.versionName = "1.0.0";
-        pi.versionCode = 1;
+        // Manifest values when plumbed, honest fallback otherwise (Unity splits
+        // versionName on "."; null becomes an NPE far from the cause).
+        pi.versionName = sVersionName;
+        pi.versionCode = sVersionCode;
+        pi.firstInstallTime = sFirstInstallTime;
+        pi.lastUpdateTime = sLastUpdateTime;
         return pi;
     }
 

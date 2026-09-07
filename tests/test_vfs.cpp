@@ -197,6 +197,50 @@ void TestPseudoFiles(kudroid::VFSPathRemapper& remapper) {
     Check(package == 0, "single-package topology reports 0");
 }
 
+void TestProcIdentity(kudroid::VFSPathRemapper& remapper) {
+    std::printf("-- proc identity --\n");
+
+    auto readAll = [](const std::string& path) {
+        std::string out;
+        if (FILE* file = std::fopen(path.c_str(), "r")) {
+            char buffer[512];
+            size_t n;
+            while ((n = std::fread(buffer, 1, sizeof(buffer), file)) > 0)
+                out.append(buffer, n);
+            std::fclose(file);
+        }
+        return out;
+    };
+
+    const std::string root = remapper.androidRoot();
+    remapper.setPackageName("com.example.procself");
+
+    const std::string cmdline =
+        readAll(root + "/proc/self/cmdline");
+    Check(cmdline == std::string("com.example.procself\0", 21),
+          "cmdline reports the running package");
+    const std::string stat = readAll(root + "/proc/self/stat");
+    Check(stat.find("(com.example.procself)") != std::string::npos,
+          "stat comm reports the running package");
+    const std::string status = readAll(root + "/proc/self/status");
+    Check(status.find("TracerPid:\t0") != std::string::npos,
+          "status reports TracerPid 0");
+    Check(status.find("SigCgt:\t00000000000085f8") != std::string::npos,
+          "status reports the stock debuggerd signal mask");
+    Check(status.find("Name:\tcom.example.procself") != std::string::npos,
+          "status Name reports the running package");
+
+    const std::string id1 = remapper.android_id();
+    const std::string id2 = remapper.android_id();
+    bool hex = id1.size() == 16;
+    for (char c : id1) {
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) hex = false;
+    }
+    Check(hex, "android_id is 16 lowercase hex");
+    Check(id1 == id2, "android_id is stable across calls");
+    Check(id1 != "9774d56d682e549c", "android_id is not the emulator constant");
+}
+
 void TestFileIo() {
     std::printf("-- file io through the shims --\n");
 
@@ -276,6 +320,7 @@ int main() {
     TestContainment(remapper, root);
     TestInitializeOnce(remapper);
     TestPseudoFiles(remapper);
+    TestProcIdentity(remapper);
     TestFileIo();
     TestUrlRemapping(remapper, root);
 

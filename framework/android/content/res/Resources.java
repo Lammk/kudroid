@@ -12,6 +12,7 @@ import android.util.AttributeSet;
 // what keeps it from coming back by accident.
 import android.util.DisplayMetrics;
 import android.util.TypedValue;
+import android.view.Display;
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 
@@ -21,7 +22,13 @@ public class Resources {
     private final AssetManager mAssets = new AssetManager();
     private final Theme mTheme = new Theme(this);
 
-    public Resources() {}
+    public Resources() {
+        // A fresh Resources must report the live display, not zeros: boot
+        // layout/DIP math divides by these before anyone calls setTo.
+        try {
+            new Display().getMetrics(mMetrics);
+        } catch (Throwable ignored) {}
+    }
     public Resources(AssetManager assets, DisplayMetrics metrics, Configuration config) {
         if (metrics != null) mMetrics.setTo(metrics);
         if (config != null) mConfiguration.setTo(config);

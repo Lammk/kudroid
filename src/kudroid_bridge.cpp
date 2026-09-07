@@ -3138,9 +3138,28 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                         {
                             std::vector<const char*> actPtrs;
                             for (const auto& a : manifestActivities) actPtrs.push_back(a.c_str());
+                            kudroid::VFSPathRemapper::getInstance().setPackageName(pkgName);
                             kuart_register_package(pkgName.c_str(),
                                                    actPtrs.empty() ? nullptr : actPtrs.data(),
                                                    static_cast<int>(actPtrs.size()));
+                            {
+                                int vcode = 1;
+                                try {
+                                    if (!manifestInfo.versionCode.empty())
+                                        vcode = std::stoi(manifestInfo.versionCode);
+                                } catch (...) {
+                                }
+                                const long long nowMs =
+                                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        std::chrono::system_clock::now().time_since_epoch())
+                                        .count();
+                                kuart_register_package_info(
+                                    pkgName.c_str(), vcode,
+                                    manifestInfo.versionName.empty()
+                                        ? "1.0.0"
+                                        : manifestInfo.versionName.c_str(),
+                                    nowMs, nowMs);
+                            }
 
                             // Registers keys/values as parallel arrays; the storage has
                             // to outlive the call, hence the vectors of c_str().

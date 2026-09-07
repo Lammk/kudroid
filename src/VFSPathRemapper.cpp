@@ -120,6 +120,90 @@ VFSPathRemapper& VFSPathRemapper::getInstance() {
     return instance;
 }
 
+void VFSPathRemapper::setPackageName(const std::string& packageName) {
+    if (packageName.empty()) return;
+    {
+        std::lock_guard<std::mutex> lock(initMutex_);
+        packageName_ = packageName;
+    }
+    // Write through immediately: init may have already materialized generics.
+    const std::string cmdline = androidRoot_ + "/proc/self/cmdline";
+    if (FILE* out = std::fopen(cmdline.c_str(), "w")) {
+        std::fwrite(packageName.c_str(), 1, packageName.size() + 1, out);
+        std::fclose(out);
+    }
+    const std::string stat =
+        androidRoot_ + "/proc/self/stat";
+    if (FILE* out = std::fopen(stat.c_str(), "w")) {
+        std::fprintf(out,
+                     "1 (%s) S 0 1 1 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 0 0 0 0 0 0 "
+                     "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+                     packageName.c_str());
+        std::fclose(out);
+    }
+    const std::string status = androidRoot_ + "/proc/self/status";
+    if (FILE* out = std::fopen(status.c_str(), "w")) {
+        std::fprintf(out,
+                     "Name:\t%s\nState:\tS (sleeping)\nTgid:\t1\nPid:\t1\nPPid:\t0\n"
+                     "TracerPid:\t0\nUid:\t10000\t10000\t10000\t10000\n"
+                     "Gid:\t10000\t10000\t10000\t10000\nThreads:\t1\n"
+                     "SigQ:\t0/2080\nSigPnd:\t0000000000000000\n"
+                     "SigBlk:\t0000000000000000\nSigIgn:\t0000000000001000\n"
+                     "SigCgt:\t00000000000085f8\n",
+                     packageName.c_str());
+        std::fclose(out);
+    }
+}
+
+std::string VFSPathRemapper::android_id() {
+    static std::mutex mtx;
+    static std::string cached;
+    std::lock_guard<std::mutex> lock(mtx);
+    if (!cached.empty()) return cached;
+    const std::string file = androidRoot_ + "/android_id";
+    {
+        char buffer[32] = {};
+        if (FILE* in = std::fopen(file.c_str(), "r")) {
+            const size_t n = std::fread(buffer, 1, sizeof(buffer) - 1, in);
+            std::fclose(in);
+            if (n == 16) {
+                bool hex = true;
+                for (size_t i = 0; i < 16; ++i) {
+                    const char c = buffer[i];
+                    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
+                        hex = false;
+                }
+                if (hex) {
+                    cached.assign(buffer, 16);
+                    return cached;
+                }
+            }
+        }
+    }
+    // Generate: 16 lowercase hex from /dev/urandom (never the blocklisted
+    // emulator constant).
+    char fresh[17];
+    {
+        unsigned char raw[8] = {};
+        if (FILE* ur = std::fopen("/dev/urandom", "r")) {
+            std::fread(raw, 1, sizeof(raw), ur);
+            std::fclose(ur);
+        }
+        static const char* digits = "0123456789abcdef";
+        for (int i = 0; i < 8; ++i) {
+            fresh[2 * i] = digits[(raw[i] >> 4) & 0xF];
+            fresh[2 * i + 1] = digits[raw[i] & 0xF];
+        }
+        fresh[16] = '\0';
+    }
+    if (FILE* out = std::fopen(file.c_str(), "w")) {
+        std::fwrite(fresh, 1, 16, out);
+        std::fclose(out);
+    }
+    cached.assign(fresh, 16);
+    return cached;
+}
+
 VFSPathRemapper::VFSPathRemapper()
     : documentsDirectory_(defaultDocumentsDirectory()),
       androidRoot_(documentsDirectory_ + "/android_root") {}
@@ -323,10 +407,26 @@ bool VFSPathRemapper::init_pseudo_files() {
     files.push_back({"proc/meminfo", BuildMemInfo(mem), true});
     files.push_back({"proc/version",
          "Linux version 5.15.0-kudroid (clang 17.0.0) #1 SMP PREEMPT 2026\n", false});
-    files.push_back({"proc/self/cmdline", std::string("com.kudroid.app\0", 16), false});
+    const std::string pkg =
+        packageName_.empty() ? "com.kudroid.app" : packageName_;
+    files.push_back({"proc/self/cmdline", std::string(pkg.c_str(), pkg.size() + 1), false});
     files.push_back({"proc/self/stat",
-         "1 (com.kudroid.app) S 0 1 1 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 0 0 0 0 0 0 "
-         "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n", false});
+         "1 (" + pkg +
+         ") S 0 1 1 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 0 0 0 0 0 0 "
+         "0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+         false});
+    // Stock debuggerd signal mask (ABRT/BUS/FPE/ILL/SEGV/STKFLT/TRAP) with
+    // nothing pending/blocked and TracerPid 0: what RASP scanners compare
+    // against. Guest-installed handlers are dispatched underneath regardless.
+    files.push_back({"proc/self/status",
+         "Name:\t" + pkg +
+         "\nState:\tS (sleeping)\nTgid:\t1\nPid:\t1\nPPid:\t0\n"
+         "TracerPid:\t0\nUid:\t10000\t10000\t10000\t10000\n"
+         "Gid:\t10000\t10000\t10000\t10000\nThreads:\t1\n"
+         "SigQ:\t0/2080\nSigPnd:\t0000000000000000\n"
+         "SigBlk:\t0000000000000000\nSigIgn:\t0000000000001000\n"
+         "SigCgt:\t00000000000085f8\n",
+         false});
     files.push_back({"sys/devices/system/cpu/possible", DecimalRange(cpu.total_cores), true});
     files.push_back({"sys/devices/system/cpu/present", DecimalRange(cpu.total_cores), true});
     files.push_back({"sys/devices/system/cpu/online", DecimalRange(cpu.total_cores), true});

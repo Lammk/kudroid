@@ -469,8 +469,7 @@ extern "C" void kuart_register_component_meta_data(const char* component_name,
 
 extern "C" void kuart_register_package(const char* package_name,
                                        const char* const* activities,
-                                       int activity_count) {
-    if (g_rt == nullptr || !g_rt->ready) return;
+                                       int activity_count) {    if (g_rt == nullptr || !g_rt->ready) return;
 
     DexArray* actArr = NewStringArray(activities, activity_count);
     if (actArr == nullptr) {
@@ -486,6 +485,26 @@ extern "C" void kuart_register_package(const char* package_name,
     };
     CallFrameworkStatic("Landroid/content/pm/SystemPackageManager;", "registerPackage",
                         "(Ljava/lang/String;[Ljava/lang/String;)V", args, 2);
+}
+
+extern "C" void kuart_register_package_info(const char* package_name, int version_code,
+                                            const char* version_name,
+                                            long long first_install_ms,
+                                            long long last_update_ms) {
+    if (g_rt == nullptr || !g_rt->ready) return;
+    DexObject* pkg = reinterpret_cast<DexObject*>(
+        g_rt->linker.NewString(package_name != nullptr ? package_name : ""));
+    DexObject* ver = reinterpret_cast<DexObject*>(
+        g_rt->linker.NewString(version_name != nullptr ? version_name : ""));
+    const DexValue args[5] = {
+        DexValue::Ref(pkg),
+        DexValue::Int(version_code),
+        DexValue::Ref(ver),
+        DexValue::Long(first_install_ms),
+        DexValue::Long(last_update_ms),
+    };
+    CallFrameworkStatic("Landroid/content/pm/SystemPackageManager;", "registerPackageInfo",
+                        "(Ljava/lang/String;ILjava/lang/String;JJ)V", args, 5);
 }
 
 extern "C" int kuart_launch_app(const char* package_name, const char* component_factory,

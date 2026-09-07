@@ -181,16 +181,18 @@ public class File implements Comparable<File> {
         return out;
     }
 
+    // Match StatFs (android.os.StatFs): same fictional volume, or space
+    // guards see 0 and abort writes while statfs reports tens of GB.
     public long getFreeSpace() {
-        return 0;
+        return 8388608L * 4096L;
     }
 
     public long getTotalSpace() {
-        return 0;
+        return 16777216L * 4096L;
     }
 
     public long getUsableSpace() {
-        return 0;
+        return 8388608L * 4096L;
     }
 
     public int compareTo(File other) {

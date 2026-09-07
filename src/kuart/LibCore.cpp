@@ -3252,6 +3252,20 @@ bool Invoke_java_nio_DirectByteBuffer(Interpreter* interp, const char* name, con
 
 extern "C" const char* kudroid_get_assets_dir(void);
 
+bool Invoke_android_provider_Settings(Interpreter* interp, const char* name,
+                                      const DexValue* /*args*/, size_t /*num_args*/,
+                                      DexValue* result) {
+    if (std::strcmp(name, "nativeGetAndroidId") == 0) {
+        const std::string id =
+            VFSPathRemapper::getInstance().android_id();
+        result->l = (interp != nullptr && interp->linker() != nullptr)
+                        ? reinterpret_cast<DexObject*>(interp->linker()->NewString(id.c_str()))
+                        : nullptr;
+        return true;
+    }
+    return false;
+}
+
 bool Invoke_android_content_res_AssetManager(Interpreter* interp, const char* name,
                                              const DexValue* /*args*/, size_t /*num_args*/,
                                              DexValue* result) {
@@ -3312,6 +3326,12 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
     }
     if (std::strcmp(desc, "Landroid/content/res/AssetManager;") == 0) {
         return Invoke_android_content_res_AssetManager(interp, name, args, num_args, result);
+    }
+    // The native method lives on the outer Settings class (inner classes call
+    // through it). Hook only that descriptor so later branches still run.
+    if (std::strcmp(desc, "Landroid/provider/Settings;") == 0) {
+        if (Invoke_android_provider_Settings(interp, name, args, num_args, result))
+            return true;
     }
     if (std::strcmp(desc, "Lsun/misc/Unsafe;") == 0) return Invoke_sun_misc_Unsafe(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ldalvik/system/BaseDexClassLoader;") == 0) {

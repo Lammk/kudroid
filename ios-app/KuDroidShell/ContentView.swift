@@ -378,6 +378,10 @@ struct AppsView: View {
     }
     
     private func runApp(name: String) {
+        // Re-activate on every launch: the onAppear session can be lost to
+        // interruptions or backgrounding long before the user taps an app,
+        // and an inactive session plays AudioQueue output silently.
+        activateAudioSession()
         guard let cString = kudroid_run_apk(name) else {
             fullLog = "[kudroid_core] ERROR: null result from kudroid_run_apk"
             return
@@ -962,10 +966,15 @@ func activateAudioSession() {
     // param only accepts String. Use raw constant string (correct ObjC value) —
     // compiles in Swift 4 mode; If you later upgrade to Swift 5, change back
     // AVAudioSession.Category.playback / AVAudioSession.Mode.default.
-    try? session.setCategory("AVAudioSessionCategoryPlayback",
-                             mode: "AVAudioSessionModeDefault",
-                             options: [])
-    try? session.setActive(true)
+    do {
+        try session.setCategory("AVAudioSessionCategoryPlayback",
+                                mode: "AVAudioSessionModeDefault",
+                                options: [])
+        try session.setActive(true)
+    } catch {
+        // Never silent: a failed session is exactly the consume-but-silent bug.
+        print("[KuDroidAudio] activateAudioSession failed: \(error)")
+    }
 }
 
 /// Read CFBundleShortVersionString from Info.plist (0.9.5).

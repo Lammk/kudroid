@@ -77,6 +77,12 @@ void kuart_register_package(const char* package_name,
                             const char* const* activities,
                             int activity_count);
 
+// Manifest version + install times. All fall back when unparseable.
+void kuart_register_package_info(const char* package_name, int version_code,
+                                 const char* version_name,
+                                 long long first_install_ms,
+                                 long long last_update_ms);
+
 // Launch the app: bootstrap AppComponentFactory + Application, then walk the
 // activity candidates.
 //

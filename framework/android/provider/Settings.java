@@ -4,11 +4,29 @@ import android.content.ContentResolver;
 import android.net.Uri;
 
 public final class Settings {
+    private static String sAndroidId;
+
+    private static synchronized String androidId() {
+        if (sAndroidId == null) {
+            try {
+                sAndroidId = nativeGetAndroidId();
+            } catch (UnsatisfiedLinkError e) {
+                sAndroidId = null;
+            }
+        }
+        return sAndroidId;
+    }
+
+    private static native String nativeGetAndroidId();
+
     public static final class System {
         public static final Uri CONTENT_URI = Uri.parse("content://settings/system");
         public static final String ANDROID_ID = "android_id";
         public static String getString(ContentResolver resolver, String name) {
-            if (ANDROID_ID.equals(name)) return "9774d56d682e549c";
+            if (ANDROID_ID.equals(name)) {
+                String id = androidId();
+                return id != null ? id : "";
+            }
             return "";
         }
         public static int getInt(ContentResolver cr, String name, int def) { return def; }
@@ -23,7 +41,10 @@ public final class Settings {
         public static final Uri CONTENT_URI = Uri.parse("content://settings/secure");
         public static final String ANDROID_ID = "android_id";
         public static String getString(ContentResolver resolver, String name) {
-            if (ANDROID_ID.equals(name)) return "9774d56d682e549c";
+            if (ANDROID_ID.equals(name)) {
+                String id = androidId();
+                return id != null ? id : "";
+            }
             return "";
         }
         public static int getInt(ContentResolver cr, String name, int def) { return def; }
