@@ -872,15 +872,22 @@ extern "C" int32_t bionic_kudroid_audiotrack_write(int64_t track, const void* da
     }
     const uint64_t written = p->framesWritten.load(std::memory_order_relaxed);
     // Diagnostic: in-flight audio-ms shows mixer-ahead-of-wallclock pacing drift.
+    // Time-throttled (not count-capped): a count cap goes blind mid-run, which is
+    // exactly when pacing questions get asked.
     {
-        static std::atomic<int> s_pace{0};
+        static std::atomic<uint64_t> s_lastLogMs{0};
         const uint64_t played = p->framesPlayed.load(std::memory_order_relaxed);
         const double rate = p->sampleRate > 0 ? p->sampleRate : 44100.0;
         const long long ms =
             static_cast<long long>((written - played) * 1000.0 / rate);
-        const int n = s_pace.load();
-        if (n < 3 || (ms >= 500 && n < 23)) {
-            ++s_pace;
+        const uint64_t nowMs = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch())
+                .count());
+        const uint64_t last = s_lastLogMs.load(std::memory_order_relaxed);
+        if (nowMs - last > 5000 &&
+            s_lastLogMs.compare_exchange_strong(last, nowMs,
+                                                std::memory_order_relaxed)) {
             std::fprintf(stderr,
                          "[KuDroidAudio] in-flight=%lldms written=%llu played=%llu\n",
                          ms, written, played);

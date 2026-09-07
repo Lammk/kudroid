@@ -1110,6 +1110,8 @@ extern "C" int bionic_connect(int sockfd, const struct sockaddr* addr, socklen_t
 extern "C" int getaddrinfo(const char* node, const char* service,
                            const struct addrinfo* hints, struct addrinfo** res);
 extern "C" const char* gai_strerror(int errcode);
+extern "C" int bionic_statx(int dirfd, const char* pathname, int flags,
+                            unsigned mask, void* statxbuf);
 extern "C" ssize_t bionic_pread64(int fd, void* buf, size_t count, off_t offset);
 // Fake ashmem fd (iOS fallback): return granted region or nullptr when not a fake fd.
 extern "C" void* bionic_ashmem_mmap_fd(int fd, size_t length);
@@ -1770,6 +1772,24 @@ extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_
         case 79: // newfstatat
             return bionic_newfstatat(static_cast<int>(a1), reinterpret_cast<const char*>(a2), reinterpret_cast<struct bionic_stat64*>(a3), static_cast<int>(a4));
 
+        case 48: { // faccessat: File.Exists probes reach here via raw SVC
+            const char* path = reinterpret_cast<const char*>(a2);
+            const int dirfd = static_cast<int>(a1);
+            const std::string remapped =
+                at_path_needs_remap(dirfd, path)
+                    ? kudroid::VFSPathRemapper::getInstance().remap(path)
+                    : std::string(path ? path : "");
+            const int host_dirfd = translate_linux_dirfd(dirfd);
+            return ::faccessat(host_dirfd, remapped.c_str(),
+                               static_cast<int>(a3), static_cast<int>(a4));
+        }
+
+        case 291: // statx: same remap as the symbol path, not raw host
+            return bionic_statx(static_cast<int>(a1), reinterpret_cast<const char*>(a2),
+                                static_cast<int>(a3), static_cast<unsigned>(a4),
+                                reinterpret_cast<void*>(a5));
+
+
         case 98: // futex
             return emulate_futex_direct(a1, a2, a3, a4, a5, a6);
 
@@ -2219,6 +2239,26 @@ extern "C" int bionic_getaddrinfo(const char* node, const char* service,
     std::fprintf(stderr, "[KuDroidNet] getaddrinfo(%s,%s) -> %d (%s)\n",
                  node ? node : "<null>", service ? service : "<null>", ret,
                  ret == 0 ? "OK" : gai_strerror(ret));
+#if defined(__APPLE__)
+    // Back-translate results to Linux layout in place (same sizes: 16/28):
+    // the guest reads ai_family/sockaddr as Linux, and Darwin values (family
+    // 30, sa_len header) poison connect/inet_ntop downstream.
+    if (ret == 0 && res != nullptr) {
+        for (struct addrinfo* ai = *res; ai != nullptr; ai = ai->ai_next) {
+            unsigned char* sa =
+                reinterpret_cast<unsigned char*>(ai->ai_addr);
+            if (sa == nullptr) continue;
+            if (ai->ai_family == 30) {  // AF_INET6 Darwin -> Linux
+                sa[0] = 10;
+                sa[1] = 0;
+                ai->ai_family = 10;
+            } else if (ai->ai_family == 2) {  // AF_INET: drop sa_len
+                sa[0] = 2;
+                sa[1] = 0;
+            }
+        }
+    }
+#endif
     return ret;
 }
 

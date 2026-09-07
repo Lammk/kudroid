@@ -511,6 +511,17 @@ std::string VFSPathRemapper::remap(const char* originalPath) const {
                     vfsTrace("Remapped JAR entry: " + std::string(originalPath) + " -> " + appCandidate);
                     return appCandidate;
                 }
+                // Always-on (capped): a jar: URL that resolves to nothing is a
+                // silent 404 downstream. The branch choice must be visible.
+                {
+                    static std::atomic<int> s_jarMiss{0};
+                    if (s_jarMiss.load() < 10) {
+                        ++s_jarMiss;
+                        std::fprintf(stderr,
+                                     "[KuDroidVFS] jar miss: %s (tried %s)\n",
+                                     originalPath, candidate.c_str());
+                    }
+                }
                 vfsTrace("Remapped JAR asset (default): " + std::string(originalPath) + " -> " + candidate);
                 return candidate;
             }
@@ -1030,13 +1041,25 @@ struct bionic_dirent_layout {
     char     d_name[256];
 };
 
+#if defined(__APPLE__)
+namespace {
+// One translated entry buffer per open DIR (see vfs_readdir). Erased on close.
+std::mutex g_readdir_mtx;
+std::map<DIR*, bionic_dirent_layout> g_readdir_entries;
+}  // namespace
+#endif
+
 struct dirent* vfs_readdir(DIR* directory) {
     if (!directory) return nullptr;
     struct dirent* host_entry = ::readdir(directory);
     if (!host_entry) return nullptr;
 
 #if defined(__APPLE__)
-    static thread_local bionic_dirent_layout bionic_entry;
+    // Not a thread-local singleton: nested or interleaved enumeration of two
+    // directories clobbered the first name before the guest copied it (valid
+    // return, garbage d_name, empty scans).
+    std::lock_guard<std::mutex> lock(g_readdir_mtx);
+    bionic_dirent_layout& bionic_entry = g_readdir_entries[directory];
     std::memset(&bionic_entry, 0, sizeof(bionic_entry));
     bionic_entry.d_ino = static_cast<uint64_t>(host_entry->d_fileno);
     bionic_entry.d_off = static_cast<int64_t>(host_entry->d_seekoff);
@@ -1048,7 +1071,16 @@ struct dirent* vfs_readdir(DIR* directory) {
     return host_entry;
 #endif
 }
-int vfs_closedir(DIR* directory) { return ::closedir(directory); }
+int vfs_closedir(DIR* directory) {
+    const int rc = ::closedir(directory);
+#if defined(__APPLE__)
+    if (rc == 0) {
+        std::lock_guard<std::mutex> lock(g_readdir_mtx);
+        g_readdir_entries.erase(directory);
+    }
+#endif
+    return rc;
+}
 ssize_t vfs_readlink(const char* path, char* buffer, size_t size) {
     return ::readlink(VFSPathRemapper::getInstance().remap(path).c_str(), buffer, size);
 }

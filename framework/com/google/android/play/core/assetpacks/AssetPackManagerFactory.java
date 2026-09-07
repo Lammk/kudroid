@@ -27,11 +27,20 @@ public final class AssetPackManagerFactory {
     }
 
     private static final class StubAssetPackManager implements AssetPackManager {
-        public AssetPackLocation getPackLocation(String packName) {
+        // Single source of truth: an install-time pack exists iff its dir is
+        // under the assets root. Everything below derives from that so states
+        // and locations can never contradict each other (COMPLETED + empty
+        // locations sent callers down ENOENT cascades).
+        private static String packDir(String packName) {
             String root = AssetManager.getAssetsDir();
             if (root == null) root = "";
             File dir = new File(root, packName);
-            String path = dir.exists() ? dir.getAbsolutePath() : (root.isEmpty() ? packName : root);
+            return dir.exists() ? dir.getAbsolutePath() : null;
+        }
+
+        public AssetPackLocation getPackLocation(String packName) {
+            String path = packDir(packName);
+            if (path == null) return null;
             return AssetPackLocation.create(path, path);
         }
 
@@ -43,13 +52,18 @@ public final class AssetPackManagerFactory {
             Map<String, AssetPackState> map = new HashMap<String, AssetPackState>();
             if (packNames != null) {
                 for (String name : packNames) {
-                    map.put(name, AssetPackState.create(name, AssetPackStatus.COMPLETED, AssetPackErrorCode.NO_ERROR, 0, 0, 100));
+                    if (packDir(name) != null) {
+                        map.put(name, AssetPackState.create(name, AssetPackStatus.COMPLETED, AssetPackErrorCode.NO_ERROR, 0, 0, 100));
+                    } else {
+                        map.put(name, AssetPackState.create(name, AssetPackStatus.NOT_INSTALLED, AssetPackErrorCode.PACK_UNAVAILABLE, 0, 0, 0));
+                    }
                 }
             }
             return Tasks.forResult(AssetPackStates.create(0, map));
         }
 
         public Task<AssetPackStates> fetch(List<String> packNames) {
+            // No delivery backend: report current truth, do not lie success.
             return getPackStates(packNames);
         }
 
