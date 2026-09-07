@@ -1354,6 +1354,13 @@ typedef EGLBoolean (*PFN_eglDestroySurface)(EGLDisplay, EGLSurface);
 static EGLSurface s_activeEglSurface = nullptr;
 static EGLDisplay s_activeEglDisplay = nullptr;
 
+// Frame census: draws/clears were invisible (silent forwards), so per-frame
+// activity could not be told apart from an idle swap loop. Counters only;
+// summary printed from eglSwapBuffers every 120 swaps.
+static uint64_t g_drawCalls = 0;
+static uint64_t g_clearCalls = 0;
+static uint64_t g_swapCalls = 0;
+
 extern "C" EGLSurface bionic_eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
                                                     EGLNativeWindowType win,
                                                     const EGLint* attrib_list) {
@@ -1607,6 +1614,11 @@ extern "C" EGLBoolean bionic_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) 
     gpuLog("eglSwapBuffers: calling ANGLE...");
     EGLBoolean r = f(dpy, surface);
     gpuLog("eglSwapBuffers(surface=%p) -> %s", (void*)surface, r ? "true" : "false");
+    if ((++g_swapCalls % 120) == 0) {
+        gpuLog("frame census: swaps=%llu draws=%llu clears=%llu",
+               (unsigned long long)g_swapCalls, (unsigned long long)g_drawCalls,
+               (unsigned long long)g_clearCalls);
+    }
     return r;
 }
 
@@ -1934,6 +1946,7 @@ extern "C" void bionic_glClear(unsigned int mask) {
     typedef void (*PFN)(unsigned int);
     auto f = (PFN)get_gl_func("glClear");
     if (!f) { EGL_FORWARD_ERR("glClear", ""); return; }
+    ++g_clearCalls;
     f(mask);
 }
 
@@ -1941,6 +1954,7 @@ extern "C" void bionic_glDrawArrays(unsigned int mode, int first, int count) {
     typedef void (*PFN)(unsigned int, int, int);
     auto f = (PFN)get_gl_func("glDrawArrays");
     if (!f) { EGL_FORWARD_ERR("glDrawArrays", ""); return; }
+    ++g_drawCalls;
     gpuLog("glDrawArrays(mode=0x%x first=%d count=%d): calling ANGLE...", mode, first, count);
 #if defined(__APPLE__)
     void* pool = objc_autoreleasePoolPush();
@@ -2066,6 +2080,7 @@ extern "C" void bionic_glDrawElements(unsigned int mode, int count, unsigned int
     typedef void (*PFN)(unsigned int, int, unsigned int, const void*);
     auto f = (PFN)get_gl_func("glDrawElements");
     if (!f) return;
+    ++g_drawCalls;
 #if defined(__APPLE__)
     void* pool = objc_autoreleasePoolPush();
     f(mode, count, type, indices);
@@ -2392,13 +2407,17 @@ extern "C" void bionic_glDrawArraysInstanced(unsigned int mode, int first, int c
     typedef void (*PFN)(unsigned int, int, int, int);
     auto f = (PFN)get_gl_func("glDrawArraysInstanced");
     if (!f) f = (PFN)get_gl_func("glDrawArraysInstancedANGLE");
-    if (f) f(mode, first, count, instancecount);
+    if (!f) return;
+    ++g_drawCalls;
+    f(mode, first, count, instancecount);
 }
 extern "C" void bionic_glDrawElementsInstanced(unsigned int mode, int count, unsigned int type, const void* indices, int instancecount) {
     typedef void (*PFN)(unsigned int, int, unsigned int, const void*, int);
     auto f = (PFN)get_gl_func("glDrawElementsInstanced");
     if (!f) f = (PFN)get_gl_func("glDrawElementsInstancedANGLE");
-    if (f) f(mode, count, type, indices, instancecount);
+    if (!f) return;
+    ++g_drawCalls;
+    f(mode, count, type, indices, instancecount);
 }
 extern "C" void bionic_glVertexAttribDivisor(unsigned int index, unsigned int divisor) {
     typedef void (*PFN)(unsigned int, unsigned int);

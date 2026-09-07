@@ -5675,6 +5675,7 @@ const SymbolEntry kSyscallSymbols[] = {
     {"open", reinterpret_cast<void*>(&vfs_open)},
     {"open64", reinterpret_cast<void*>(&vfs_open64)},
     {"close", reinterpret_cast<void*>(&bionic_close)},
+    {"read", reinterpret_cast<void*>(&bionic_read)},
     {"fopen", reinterpret_cast<void*>(&vfs_fopen)},
     {"fopen64", reinterpret_cast<void*>(&vfs_fopen64)},
     {"freopen", reinterpret_cast<void*>(&vfs_freopen)},
