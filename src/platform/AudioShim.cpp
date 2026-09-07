@@ -884,7 +884,7 @@ extern "C" int32_t bionic_kudroid_audiotrack_write(int64_t track, const void* da
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now().time_since_epoch())
                 .count());
-        const uint64_t last = s_lastLogMs.load(std::memory_order_relaxed);
+        uint64_t last = s_lastLogMs.load(std::memory_order_relaxed);
         if (nowMs - last > 5000 &&
             s_lastLogMs.compare_exchange_strong(last, nowMs,
                                                 std::memory_order_relaxed)) {

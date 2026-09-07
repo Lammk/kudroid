@@ -525,7 +525,7 @@ Edge succEdge(const std::uint32_t* win, std::size_t n, std::size_t i,
         // ret dies everywhere; blr is a call (scratch dies per NDK
         // convention); br/eret jump unknown: tail-call dies in a whole
         // function, but mid-gap they may land in unrenamed code.
-        if ((w & ~0x3E0u) == 0xD65F03C0u) return Edge::Dies;  // ret
+        if ((w & 0xFFFFFC1Fu) == 0xD65F0000u) return Edge::Dies;  // ret
         if (((w >> 16) & 0xFF) == 0x3F) return Edge::Dies;    // blr(+auth)
         if (((w >> 5) & 31) == 30) return Edge::Dies;  // br x30: return
         return complete ? Edge::Dies : Edge::Escapes;  // br/eret
