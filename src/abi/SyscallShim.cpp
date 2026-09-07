@@ -1102,6 +1102,9 @@ extern "C" int bionic_fstatfs(int fd, struct bionic_statfs64* buf) {
 static bool ashmem_prot_allows(int fd, int prot);
 extern "C" ssize_t bionic_read(int fd, void* buf, size_t count);
 extern "C" ssize_t bionic_write(int fd, const void* buf, size_t count);
+extern "C" int getaddrinfo(const char* node, const char* service,
+                           const struct addrinfo* hints, struct addrinfo** res);
+extern "C" const char* gai_strerror(int errcode);
 extern "C" ssize_t bionic_pread64(int fd, void* buf, size_t count, off_t offset);
 // Fake ashmem fd (iOS fallback): return granted region or nullptr when not a fake fd.
 extern "C" void* bionic_ashmem_mmap_fd(int fd, size_t length);
@@ -2104,6 +2107,66 @@ extern "C" ssize_t bionic_write(int fd, const void* buf, size_t count) {
     if (ret > 0) {
         io_volume_add(std::string(fd_path(fd)), static_cast<uint64_t>(ret));
     }
+    return ret;
+}
+
+// Socket visibility taps (delegating): guest sockets resolve to host BSD
+// sockets today, silently. Log attempts so a dead network is distinguishable
+// from an unused one. Layouts read here (AF_INET sockaddr) are POSIX-fixed.
+extern "C" int bionic_socket(int domain, int type, int protocol) {
+    const int fd = ::socket(domain, type, protocol);
+    std::fprintf(stderr, "[KuDroidNet] socket(domain=%d type=%d) -> %d\n",
+                 domain, type, fd);
+    return fd;
+}
+
+extern "C" int bionic_connect(int sockfd, const struct sockaddr* addr,
+                              socklen_t addrlen) {
+    // AF_INET layout is POSIX-fixed: family u16 @0, port BE u16 @2, ip @4.
+    // Linux and Darwin differ in the family header (Darwin has sa_len first),
+    // so translate IPv4 endpoints to host layout before delegating.
+    char dst[64] = {'?'};
+    unsigned char host[16] = {0};
+    const struct sockaddr* useAddr = addr;
+    socklen_t useLen = addrlen;
+    if (addr != nullptr && addrlen >= 8) {
+        const unsigned char* b = reinterpret_cast<const unsigned char*>(addr);
+        const unsigned fam = static_cast<unsigned>(b[0]) |
+                             (static_cast<unsigned>(b[1]) << 8);
+        if (fam == 2) {
+            const unsigned port = (static_cast<unsigned>(b[2]) << 8) |
+                                  static_cast<unsigned>(b[3]);
+            std::snprintf(dst, sizeof(dst), "%u.%u.%u.%u:%u", b[4], b[5], b[6],
+                          b[7], port);
+            host[0] = 16;
+            host[1] = 2;
+            host[2] = b[2];
+            host[3] = b[3];
+            host[4] = b[4];
+            host[5] = b[5];
+            host[6] = b[6];
+            host[7] = b[7];
+            useAddr = reinterpret_cast<const struct sockaddr*>(host);
+            useLen = 16;
+        } else {
+            std::snprintf(dst, sizeof(dst), "family=%u", fam);
+        }
+    } else if (addr == nullptr) {
+        std::snprintf(dst, sizeof(dst), "<null>");
+    }
+    const int ret = ::connect(sockfd, useAddr, useLen);
+    std::fprintf(stderr, "[KuDroidNet] connect(%s) -> %d (%s)\n", dst, ret,
+                 ret == 0 ? "OK" : std::strerror(errno));
+    return ret;
+}
+
+extern "C" int bionic_getaddrinfo(const char* node, const char* service,
+                                  const struct addrinfo* hints,
+                                  struct addrinfo** res) {
+    const int ret = getaddrinfo(node, service, hints, res);
+    std::fprintf(stderr, "[KuDroidNet] getaddrinfo(%s,%s) -> %d (%s)\n",
+                 node ? node : "<null>", service ? service : "<null>", ret,
+                 ret == 0 ? "OK" : gai_strerror(ret));
     return ret;
 }
 
@@ -5692,6 +5755,9 @@ const SymbolEntry kSyscallSymbols[] = {
     {"close", reinterpret_cast<void*>(&bionic_close)},
     {"read", reinterpret_cast<void*>(&bionic_read)},
     {"write", reinterpret_cast<void*>(&bionic_write)},
+    {"socket", reinterpret_cast<void*>(&bionic_socket)},
+    {"connect", reinterpret_cast<void*>(&bionic_connect)},
+    {"getaddrinfo", reinterpret_cast<void*>(&bionic_getaddrinfo)},
     {"fopen", reinterpret_cast<void*>(&vfs_fopen)},
     {"fopen64", reinterpret_cast<void*>(&vfs_fopen64)},
     {"freopen", reinterpret_cast<void*>(&vfs_freopen)},
