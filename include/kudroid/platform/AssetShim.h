@@ -22,6 +22,9 @@ extern "C" {
 // Set the directory containing extracted assets (called from kudroid_run_apk / kudroid_load_apk).
 void kudroid_set_assets_dir(const char* dir);
 
+// Get the directory containing extracted assets (or nullptr if not set).
+const char* kudroid_get_assets_dir(void);
+
 #ifdef __cplusplus
 }
 #endif

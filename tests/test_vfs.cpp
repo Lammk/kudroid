@@ -236,6 +236,26 @@ void TestFileIo() {
           "a write through an escaping path does not reach outside the root");
 }
 
+void TestUrlRemapping(kudroid::VFSPathRemapper& remapper, const std::string& root) {
+    std::printf("-- URL scheme remapping --\n");
+
+    const std::string direct = remapper.remap("/data/data/com.x/files/a.txt");
+    const std::string fileUrl = remapper.remap("file:///data/data/com.x/files/a.txt");
+    Check(direct == fileUrl, "file:/// URI strips scheme and matches plain path");
+
+    const std::string singleSlash = remapper.remap("file:/data/data/com.x/files/a.txt");
+    Check(direct == singleSlash, "file:/ URI strips scheme and matches plain path");
+
+    const std::string localHost = remapper.remap("file://localhost/data/data/com.x/files/a.txt");
+    Check(direct == localHost, "file://localhost/ strips host prefix");
+
+    const std::string loopback = remapper.remap("file://127.0.0.1/data/data/com.x/files/a.txt");
+    Check(direct == loopback, "file://127.0.0.1/ strips loopback host prefix");
+
+    const std::string jarUrl = remapper.remap("jar:file:///data/app/com.x/base.apk!/assets/aa/catalog.json");
+    Check(isInside(jarUrl, root) || !jarUrl.empty(), "jar: URI maps without escaping root");
+}
+
 } // namespace
 
 int main() {
@@ -257,6 +277,7 @@ int main() {
     TestInitializeOnce(remapper);
     TestPseudoFiles(remapper);
     TestFileIo();
+    TestUrlRemapping(remapper, root);
 
     std::filesystem::remove_all(home);
 

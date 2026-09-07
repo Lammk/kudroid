@@ -11,6 +11,10 @@ import android.os.Bundle;
  * kudroid's minimum, lifecycle methods are no-op that apps can override.
  */
 public class Activity extends ContextThemeWrapper {
+    public static final int RESULT_CANCELED = 0;
+    public static final int RESULT_OK = -1;
+    public static final int RESULT_FIRST_USER = 1;
+
     public static final int SCREEN_ORIENTATION_UNSPECIFIED = -1;
     public static final int SCREEN_ORIENTATION_LANDSCAPE = 0;
     public static final int SCREEN_ORIENTATION_PORTRAIT = 1;

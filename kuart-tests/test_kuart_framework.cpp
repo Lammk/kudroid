@@ -1962,6 +1962,36 @@ int main() {
                 }
             }
         }
+
+        // Play Core Asset Delivery generic stubs
+        DexClass* apmFactory = linker.FindClass("Lcom/google/android/play/core/assetpacks/AssetPackManagerFactory;");
+        Check(apmFactory != nullptr, "AssetPackManagerFactory is present in framework.dex");
+        if (apmFactory != nullptr && interp.EnsureInitialized(apmFactory)) {
+            DexObject* ctx = NewObject("Landroid/app/ApplicationContext;",
+                                       "(Ljava/lang/String;)V", {Str("com.example.probe")},
+                                       "new ApplicationContext for APM");
+            DexValue out;
+            bool ok = CallStatic("Lcom/google/android/play/core/assetpacks/AssetPackManagerFactory;",
+                                 "getInstance",
+                                 "(Landroid/content/Context;)Lcom/google/android/play/core/assetpacks/AssetPackManager;",
+                                 {DexValue::Ref(ctx)}, &out, "AssetPackManagerFactory.getInstance");
+            Check(ok && out.l != nullptr, "AssetPackManagerFactory.getInstance returns non-null AssetPackManager");
+            if (ok && out.l != nullptr) {
+                DexObject* apm = out.l;
+                DexValue locOut;
+                bool locOk = CallVirtual(apm, "getPackLocation",
+                                         "(Ljava/lang/String;)Lcom/google/android/play/core/assetpacks/AssetPackLocation;",
+                                         {Str("install_time_pack")}, &locOut,
+                                         "AssetPackManager.getPackLocation");
+                Check(locOk && locOut.l != nullptr, "getPackLocation returns AssetPackLocation");
+                if (locOk && locOut.l != nullptr) {
+                    DexValue pathOut;
+                    bool pathOk = CallVirtual(locOut.l, "assetsPath", "()Ljava/lang/String;", {}, &pathOut,
+                                              "AssetPackLocation.assetsPath");
+                    Check(pathOk && pathOut.l != nullptr, "AssetPackLocation.assetsPath returns non-null path");
+                }
+            }
+        }
     }
 
     std::printf("  executed %llu instructions\n",

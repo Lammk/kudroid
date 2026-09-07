@@ -1,6 +1,7 @@
 #include "kudroid/VFSPathRemapper.h"
 #include "kudroid/cacert_data.h"
 #include "kudroid/DeviceProfile.h"
+#include "kudroid/platform/AssetShim.h"
 #include "kudroid/platform/CpuInfo.h"
 #include "kudroid/platform/MemoryInfo.h"
 
@@ -480,11 +481,62 @@ bool VFSPathRemapper::init_pseudo_files() {
 std::string VFSPathRemapper::remap(const char* originalPath) const {
     if (!originalPath) return {};
 
+    // Resolve jar: and file:archive!/entry URLs to loose asset files.
+    if (std::strncmp(originalPath, "jar:", 4) == 0 || std::strstr(originalPath, "!/") != nullptr) {
+        const char* excl = std::strchr(originalPath, '!');
+        if (excl != nullptr) {
+            const char* sub = excl + 1;
+            while (*sub == '/') ++sub;
+            const char* entry = sub;
+            if (std::strncmp(entry, "assets/", 7) == 0) {
+                entry += 7;
+                while (*entry == '/') ++entry;
+            }
+            const char* assetsDir = kudroid_get_assets_dir();
+            if (assetsDir && *assetsDir) {
+                std::error_code ec;
+                std::string candidate = normalizePathString(std::string(assetsDir) + "/" + entry);
+                if (std::filesystem::exists(candidate, ec)) {
+                    vfsTrace("Remapped JAR asset: " + std::string(originalPath) + " -> " + candidate);
+                    return candidate;
+                }
+                std::string altCandidate = normalizePathString(std::string(assetsDir) + "/" + sub);
+                if (std::filesystem::exists(altCandidate, ec)) {
+                    vfsTrace("Remapped JAR asset (alt): " + std::string(originalPath) + " -> " + altCandidate);
+                    return altCandidate;
+                }
+                std::filesystem::path appDir = std::filesystem::path(assetsDir).parent_path();
+                std::string appCandidate = normalizePathString((appDir / sub).string());
+                if (std::filesystem::exists(appCandidate, ec)) {
+                    vfsTrace("Remapped JAR entry: " + std::string(originalPath) + " -> " + appCandidate);
+                    return appCandidate;
+                }
+                vfsTrace("Remapped JAR asset (default): " + std::string(originalPath) + " -> " + candidate);
+                return candidate;
+            }
+        }
+    }
+
+    // Strip file: URI scheme if present.
+    const char* pathWithoutScheme = originalPath;
+    if (std::strncmp(pathWithoutScheme, "file://", 7) == 0) {
+        pathWithoutScheme += 7;
+        if (std::strncmp(pathWithoutScheme, "localhost/", 10) == 0) pathWithoutScheme += 9;
+        else if (std::strncmp(pathWithoutScheme, "127.0.0.1/", 10) == 0) pathWithoutScheme += 9;
+    } else if (std::strncmp(pathWithoutScheme, "file:", 5) == 0) {
+        pathWithoutScheme += 5;
+    }
+    std::string pathBuffer;
+    if (*pathWithoutScheme != '/' && *pathWithoutScheme != '\0') {
+        pathBuffer = "/" + std::string(pathWithoutScheme);
+        pathWithoutScheme = pathBuffer.c_str();
+    }
+
     // Normalise before matching a prefix, not after. "/sdcard/../../x" must not be
     // treated as an sdcard path and then joined to the root with the ".." intact — the
     // kernel would resolve it outside android_root. After this, the path contains no
     // "." or ".." at all, so the join below cannot escape.
-    const std::string normalized = normalizePathString(std::string_view(originalPath));
+    const std::string normalized = normalizePathString(std::string_view(pathWithoutScheme));
     std::string_view original(normalized);
     
     // directly maps the server's root /dev/ devices to ios
@@ -687,12 +739,16 @@ FILE* vfs_fopen(const char* path, const char* mode) {
         if (g_freadPaths.size() < 512) g_freadPaths[result] = mapped;
     }
     // Misses under /data are silent stalls when Unity looks in the wrong place.
+    // Print guest-relative (the container UUID changes every install and only
+    // adds noise to the log).
     if (result == nullptr && !mapped.empty() &&
         mapped.rfind(VFSPathRemapper::getInstance().androidRoot(), 0) == 0) {
         static std::atomic<int> s_miss{0};
         if (s_miss.load() < 30) {
             ++s_miss;
-            std::fprintf(stderr, "[KuDroidVFS] open miss: %s\n", mapped.c_str());
+            std::fprintf(stderr, "[KuDroidVFS] open miss: ~%s\n",
+                         mapped.c_str() +
+                             VFSPathRemapper::getInstance().androidRoot().size());
         }
     }
     return result;

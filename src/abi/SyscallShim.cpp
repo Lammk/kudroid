@@ -39,6 +39,9 @@
 #include <chrono>
 #include <algorithm>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
 #include <condition_variable>
 #include <limits.h>
 #if defined(__APPLE__)
@@ -112,8 +115,6 @@ extern "C" void kudroid_set_app_permissions_json(const char* packageName, const 
 #include <cstdarg>
 #include <semaphore.h>
 #ifdef __APPLE__
-#include <arpa/inet.h>
-#include <netinet/in.h>
 #include <sys/event.h>
 #include <dispatch/dispatch.h>
 #else
@@ -154,6 +155,7 @@ struct android_epoll_event {
 #include <cstring>
 #include <cerrno>
 #include <pthread.h>
+#include <ifaddrs.h>
 #if !defined(__APPLE__)
 #include <sys/syscall.h>
 #endif
@@ -962,7 +964,8 @@ extern "C" int bionic_openat(int dirfd, const char* pathname, int flags, mode_t 
         static std::atomic<int> s_logged{0};
         if (s_logged.load() < 25) {
             ++s_logged;
-            std::fprintf(stderr, "[KuDroidIO] open %s -> %d\n", remapped.c_str(), fd);
+            // Guest path: stable across installs (host path embeds a UUID).
+            std::fprintf(stderr, "[KuDroidIO] open %s -> %d\n", orig.c_str(), fd);
         }
     }
     return fd;
@@ -1102,6 +1105,8 @@ extern "C" int bionic_fstatfs(int fd, struct bionic_statfs64* buf) {
 static bool ashmem_prot_allows(int fd, int prot);
 extern "C" ssize_t bionic_read(int fd, void* buf, size_t count);
 extern "C" ssize_t bionic_write(int fd, const void* buf, size_t count);
+extern "C" int bionic_socket(int domain, int type, int protocol);
+extern "C" int bionic_connect(int sockfd, const struct sockaddr* addr, socklen_t addrlen);
 extern "C" int getaddrinfo(const char* node, const char* service,
                            const struct addrinfo* hints, struct addrinfo** res);
 extern "C" const char* gai_strerror(int errcode);
@@ -1876,13 +1881,13 @@ extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_
             return result;
         }
         case 198: // socket
-            return ::socket(static_cast<int>(a1), static_cast<int>(a2), static_cast<int>(a3));
+            return bionic_socket(static_cast<int>(a1), static_cast<int>(a2), static_cast<int>(a3));
 
         case 200: // bind
             return ::bind(static_cast<int>(a1), reinterpret_cast<const struct sockaddr*>(a2), static_cast<socklen_t>(a3));
 
         case 203: // connect
-            return ::connect(static_cast<int>(a1), reinterpret_cast<const struct sockaddr*>(a2), static_cast<socklen_t>(a3));
+            return bionic_connect(static_cast<int>(a1), reinterpret_cast<const struct sockaddr*>(a2), static_cast<socklen_t>(a3));
 
         case 204: // getsockname
             return ::getsockname(static_cast<int>(a1), reinterpret_cast<struct sockaddr*>(a2), reinterpret_cast<socklen_t*>(a3));
@@ -2110,11 +2115,25 @@ extern "C" ssize_t bionic_write(int fd, const void* buf, size_t count) {
     return ret;
 }
 
+// Address family translation between Linux guest and Darwin host ABI.
+// Linux AF_INET6 is 10, Darwin AF_INET6 is 30.
+namespace {
+inline int guest_to_host_af(int af) {
+#if defined(__APPLE__)
+    if (af == 10 /* Linux AF_INET6 */) {
+        return AF_INET6;
+    }
+#endif
+    return af;
+}
+}  // namespace
+
 // Socket visibility taps (delegating): guest sockets resolve to host BSD
 // sockets today, silently. Log attempts so a dead network is distinguishable
 // from an unused one. Layouts read here (AF_INET sockaddr) are POSIX-fixed.
 extern "C" int bionic_socket(int domain, int type, int protocol) {
-    const int fd = ::socket(domain, type, protocol);
+    const int host_domain = guest_to_host_af(domain);
+    const int fd = ::socket(host_domain, type, protocol);
     std::fprintf(stderr, "[KuDroidNet] socket(domain=%d type=%d) -> %d\n",
                  domain, type, fd);
     return fd;
@@ -2124,30 +2143,45 @@ extern "C" int bionic_connect(int sockfd, const struct sockaddr* addr,
                               socklen_t addrlen) {
     // AF_INET layout is POSIX-fixed: family u16 @0, port BE u16 @2, ip @4.
     // Linux and Darwin differ in the family header (Darwin has sa_len first),
-    // so translate IPv4 endpoints to host layout before delegating.
+    // and Linux AF_INET6 (10) differs from Darwin AF_INET6 (30).
     char dst[64] = {'?'};
-    unsigned char host[16] = {0};
+#if defined(__APPLE__)
+    unsigned char host4[16] = {0};
+    unsigned char host6[28] = {0};
+#endif
     const struct sockaddr* useAddr = addr;
     socklen_t useLen = addrlen;
-    if (addr != nullptr && addrlen >= 8) {
+    if (addr != nullptr && addrlen >= 2) {
         const unsigned char* b = reinterpret_cast<const unsigned char*>(addr);
         const unsigned fam = static_cast<unsigned>(b[0]) |
                              (static_cast<unsigned>(b[1]) << 8);
-        if (fam == 2) {
+        if (fam == 2 && addrlen >= 8) {
             const unsigned port = (static_cast<unsigned>(b[2]) << 8) |
                                   static_cast<unsigned>(b[3]);
             std::snprintf(dst, sizeof(dst), "%u.%u.%u.%u:%u", b[4], b[5], b[6],
                           b[7], port);
-            host[0] = 16;
-            host[1] = 2;
-            host[2] = b[2];
-            host[3] = b[3];
-            host[4] = b[4];
-            host[5] = b[5];
-            host[6] = b[6];
-            host[7] = b[7];
-            useAddr = reinterpret_cast<const struct sockaddr*>(host);
+#if defined(__APPLE__)
+            host4[0] = 16;
+            host4[1] = AF_INET;
+            std::memcpy(host4 + 2, b + 2, 6);
+            useAddr = reinterpret_cast<const struct sockaddr*>(host4);
             useLen = 16;
+#endif
+        } else if (fam == 10 && addrlen >= 24) {
+            char ipbuf[INET6_ADDRSTRLEN] = {'?'};
+            ::inet_ntop(AF_INET6, b + 8, ipbuf, sizeof(ipbuf));
+            const unsigned port = (static_cast<unsigned>(b[2]) << 8) |
+                                  static_cast<unsigned>(b[3]);
+            std::snprintf(dst, sizeof(dst), "[%s]:%u", ipbuf, port);
+#if defined(__APPLE__)
+            if (addrlen >= 28) {
+                host6[0] = 28;
+                host6[1] = AF_INET6;
+                std::memcpy(host6 + 2, b + 2, 26);
+                useAddr = reinterpret_cast<const struct sockaddr*>(host6);
+                useLen = 28;
+            }
+#endif
         } else {
             std::snprintf(dst, sizeof(dst), "family=%u", fam);
         }
@@ -2160,14 +2194,133 @@ extern "C" int bionic_connect(int sockfd, const struct sockaddr* addr,
     return ret;
 }
 
+extern "C" const char* bionic_inet_ntop(int af, const void* src, char* dst,
+                                        socklen_t size) {
+    const int host_af = guest_to_host_af(af);
+    return ::inet_ntop(host_af, src, dst, size);
+}
+
+extern "C" int bionic_inet_pton(int af, const char* src, void* dst) {
+    const int host_af = guest_to_host_af(af);
+    return ::inet_pton(host_af, src, dst);
+}
+
 extern "C" int bionic_getaddrinfo(const char* node, const char* service,
                                   const struct addrinfo* hints,
                                   struct addrinfo** res) {
-    const int ret = getaddrinfo(node, service, hints, res);
+    struct addrinfo host_hints;
+    const struct addrinfo* use_hints = hints;
+    if (hints != nullptr) {
+        std::memcpy(&host_hints, hints, sizeof(host_hints));
+        host_hints.ai_family = guest_to_host_af(hints->ai_family);
+        use_hints = &host_hints;
+    }
+    const int ret = getaddrinfo(node, service, use_hints, res);
     std::fprintf(stderr, "[KuDroidNet] getaddrinfo(%s,%s) -> %d (%s)\n",
                  node ? node : "<null>", service ? service : "<null>", ret,
                  ret == 0 ? "OK" : gai_strerror(ret));
     return ret;
+}
+
+// getifaddrs with Linux layout: Darwin also reports AF_LINK/AF_SYSTEM
+// entries whose sockaddr Unity's enumerator feeds to inet_ntop, producing
+// "sa_addr inet_ntop() failed ... ENOLINK" noise (and wrong results for any
+// consumer). Keep AF_INET/AF_INET6 only, translated to Linux sockaddr layout
+// (family u16 LE, no sa_len). Field order of ifaddrs matches on both (arm64).
+struct GuestIfaddrs {
+    GuestIfaddrs* g_next;
+    char* g_name;
+    unsigned g_flags;
+    unsigned char* g_addr;
+    unsigned char* g_netmask;
+    unsigned char* g_broadaddr;
+    void* g_data;
+};
+
+namespace {
+#if defined(__APPLE__)
+unsigned char* translate_sockaddr(const unsigned char* d) {
+    if (d == nullptr) return nullptr;
+    const unsigned fam = d[1];  // Darwin: len @0, family @1
+    if (fam == 2) {             // AF_INET both
+        unsigned char* l = static_cast<unsigned char*>(std::malloc(16));
+        if (!l) return nullptr;
+        l[0] = 2;
+        l[1] = 0;
+        std::memcpy(l + 2, d + 2, 6);  // port + addr
+        std::memset(l + 8, 0, 8);
+        return l;
+    }
+    if (fam == 30) {  // AF_INET6 Darwin -> 10 Linux
+        unsigned char* l = static_cast<unsigned char*>(std::malloc(28));
+        if (!l) return nullptr;
+        l[0] = 10;
+        l[1] = 0;
+        std::memcpy(l + 2, d + 2, 26);  // port + flow + addr + scope
+        return l;
+    }
+    return nullptr;  // AF_LINK and the rest: not guest-visible
+}
+void free_guest_ifaddrs(GuestIfaddrs* head) {
+    while (head != nullptr) {
+        GuestIfaddrs* next = head->g_next;
+        std::free(head->g_name);
+        std::free(head->g_addr);
+        std::free(head->g_netmask);
+        std::free(head->g_broadaddr);
+        std::free(head);
+        head = next;
+    }
+}
+#endif
+}  // namespace
+
+extern "C" int bionic_getifaddrs(GuestIfaddrs** out) {
+    if (!out) return -1;
+    *out = nullptr;
+#if !defined(__APPLE__)
+    // Same ABI: delegate directly.
+    return ::getifaddrs(reinterpret_cast<struct ifaddrs**>(out));
+#else
+    struct ifaddrs* host = nullptr;
+    if (::getifaddrs(&host) != 0) return -1;
+    GuestIfaddrs* head = nullptr;
+    GuestIfaddrs** tail = &head;
+    unsigned kept = 0;
+    for (struct ifaddrs* h = host; h != nullptr; h = h->ifa_next) {
+        unsigned char* addr =
+            translate_sockaddr(reinterpret_cast<unsigned char*>(h->ifa_addr));
+        if (h->ifa_addr != nullptr && addr == nullptr) continue;  // skipped family
+        GuestIfaddrs* g =
+            static_cast<GuestIfaddrs*>(std::calloc(1, sizeof(GuestIfaddrs)));
+        if (!g) {
+            free(addr);
+            continue;
+        }
+        g->g_name = h->ifa_name ? ::strdup(h->ifa_name) : nullptr;
+        g->g_flags = h->ifa_flags;
+        g->g_addr = addr;
+        g->g_netmask = translate_sockaddr(
+            reinterpret_cast<unsigned char*>(h->ifa_netmask));
+        g->g_broadaddr = translate_sockaddr(
+            reinterpret_cast<unsigned char*>(h->ifa_broadaddr));
+        *tail = g;
+        tail = &g->g_next;
+        ++kept;
+    }
+    ::freeifaddrs(host);
+    *out = head;
+    std::fprintf(stderr, "[KuDroidNet] getifaddrs -> %u entries\n", kept);
+    return 0;
+#endif
+}
+
+extern "C" void bionic_freeifaddrs(GuestIfaddrs* head) {
+#if !defined(__APPLE__)
+    ::freeifaddrs(reinterpret_cast<struct ifaddrs*>(head));
+#else
+    free_guest_ifaddrs(head);
+#endif
 }
 
 extern "C" ssize_t bionic_pread64(int fd, void* buf, size_t count, off_t offset) {
@@ -5760,6 +5913,10 @@ const SymbolEntry kSyscallSymbols[] = {
     {"socket", reinterpret_cast<void*>(&bionic_socket)},
     {"connect", reinterpret_cast<void*>(&bionic_connect)},
     {"getaddrinfo", reinterpret_cast<void*>(&bionic_getaddrinfo)},
+    {"getifaddrs", reinterpret_cast<void*>(&bionic_getifaddrs)},
+    {"freeifaddrs", reinterpret_cast<void*>(&bionic_freeifaddrs)},
+    {"inet_ntop", reinterpret_cast<void*>(&bionic_inet_ntop)},
+    {"inet_pton", reinterpret_cast<void*>(&bionic_inet_pton)},
     {"fopen", reinterpret_cast<void*>(&vfs_fopen)},
     {"fopen64", reinterpret_cast<void*>(&vfs_fopen64)},
     {"freopen", reinterpret_cast<void*>(&vfs_freopen)},
