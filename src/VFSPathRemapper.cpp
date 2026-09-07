@@ -565,7 +565,9 @@ int vfs_open(const char* path, int flags, mode_t mode) {
          std::strstr(path, ".bank") != nullptr || std::strstr(path, ".fsb") != nullptr ||
          std::strstr(path, ".mp3") != nullptr || std::strstr(path, ".ogg") != nullptr ||
          std::strstr(path, ".wav") != nullptr || std::strstr(path, ".mp4") != nullptr ||
-         std::strstr(path, ".webm") != nullptr);
+         std::strstr(path, ".webm") != nullptr || std::strstr(path, "jar:") != nullptr ||
+         std::strstr(path, ".json") != nullptr || std::strstr(path, "catalog") != nullptr ||
+         std::strstr(path, "/files/") != nullptr || std::strstr(path, "/sdcard/") != nullptr);
     if (traceOpen) {
         std::fprintf(stderr, "[KuDroidVFS] open(%s, flags=0x%x)\n", path, flags);
     }
@@ -657,7 +659,9 @@ FILE* vfs_fopen(const char* path, const char* mode) {
          std::strstr(path, ".bank") != nullptr || std::strstr(path, ".fsb") != nullptr ||
          std::strstr(path, ".mp3") != nullptr || std::strstr(path, ".ogg") != nullptr ||
          std::strstr(path, ".wav") != nullptr || std::strstr(path, ".mp4") != nullptr ||
-         std::strstr(path, ".webm") != nullptr)) {
+         std::strstr(path, ".webm") != nullptr || std::strstr(path, "jar:") != nullptr ||
+         std::strstr(path, ".json") != nullptr || std::strstr(path, "catalog") != nullptr ||
+         std::strstr(path, "/files/") != nullptr || std::strstr(path, "/sdcard/") != nullptr)) {
         std::fprintf(stderr, "[KuDroidVFS] fopen(%s) -> %s\n", path,
                      result ? "OK" : std::strerror(errno));
     }

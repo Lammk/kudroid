@@ -948,11 +948,17 @@ extern "C" int bionic_openat(int dirfd, const char* pathname, int flags, mode_t 
     const int fd = ::openat(host_dirfd, remapped.c_str(), host_flags, mode);
     // Open hits on game data: the last visibility gap (misses already log).
     // A bundle opened but never read, or never opened at all, decides the stall.
-    if (remapped.find("/assets/") != std::string::npos ||
-        remapped.find("sharedassets") != std::string::npos ||
-        remapped.find("data.unity3d") != std::string::npos ||
-        remapped.find(".bundle") != std::string::npos ||
-        remapped.find("catalog.json") != std::string::npos) {
+    // Match the original path too: il2cpp/C# FileStream comes through openat,
+    // and remap mangles jar: URLs past recognition. Same list as vfs taps.
+    const std::string orig = pathname ? pathname : "";
+    auto hit = [&](const char* s) {
+        return orig.find(s) != std::string::npos ||
+               remapped.find(s) != std::string::npos;
+    };
+    if (hit("/assets/") || hit(".apk") || hit(".bank") || hit(".fsb") ||
+        hit(".mp3") || hit(".ogg") || hit(".wav") || hit(".mp4") ||
+        hit(".webm") || hit("jar:") || hit(".json") || hit("catalog") ||
+        hit("/files/") || hit("/sdcard/")) {
         static std::atomic<int> s_logged{0};
         if (s_logged.load() < 25) {
             ++s_logged;
@@ -1095,6 +1101,7 @@ extern "C" int bionic_fstatfs(int fd, struct bionic_statfs64* buf) {
 // Check in bionic_mmap: ashmem fd may only map with granted prot.
 static bool ashmem_prot_allows(int fd, int prot);
 extern "C" ssize_t bionic_read(int fd, void* buf, size_t count);
+extern "C" ssize_t bionic_write(int fd, const void* buf, size_t count);
 extern "C" ssize_t bionic_pread64(int fd, void* buf, size_t count, off_t offset);
 // Fake ashmem fd (iOS fallback): return granted region or nullptr when not a fake fd.
 extern "C" void* bionic_ashmem_mmap_fd(int fd, size_t length);
@@ -2086,6 +2093,14 @@ void fd_forget_apk(int fd) {
 
 extern "C" ssize_t bionic_read(int fd, void* buf, size_t count) {
     const ssize_t ret = ::read(fd, buf, count);
+    if (ret > 0) {
+        io_volume_add(std::string(fd_path(fd)), static_cast<uint64_t>(ret));
+    }
+    return ret;
+}
+
+extern "C" ssize_t bionic_write(int fd, const void* buf, size_t count) {
+    const ssize_t ret = ::write(fd, buf, count);
     if (ret > 0) {
         io_volume_add(std::string(fd_path(fd)), static_cast<uint64_t>(ret));
     }
@@ -5676,6 +5691,7 @@ const SymbolEntry kSyscallSymbols[] = {
     {"open64", reinterpret_cast<void*>(&vfs_open64)},
     {"close", reinterpret_cast<void*>(&bionic_close)},
     {"read", reinterpret_cast<void*>(&bionic_read)},
+    {"write", reinterpret_cast<void*>(&bionic_write)},
     {"fopen", reinterpret_cast<void*>(&vfs_fopen)},
     {"fopen64", reinterpret_cast<void*>(&vfs_fopen64)},
     {"freopen", reinterpret_cast<void*>(&vfs_freopen)},
