@@ -175,6 +175,26 @@ void TestPseudoFiles(kudroid::VFSPathRemapper& remapper) {
         Check(std::filesystem::exists(std::filesystem::path(root) / relative),
               std::string("pseudo file present: ") + relative);
     }
+
+    // Per-core scheduling files: guests probe these for capacity class.
+    const std::filesystem::path cap =
+        std::filesystem::path(root) / "sys/devices/system/cpu/cpu0/cpu_capacity";
+    int capacity = 0;
+    if (FILE* file = std::fopen(cap.c_str(), "r")) {
+        char buffer[32] = {};
+        if (std::fgets(buffer, sizeof(buffer), file)) capacity = std::atoi(buffer);
+        std::fclose(file);
+    }
+    Check(capacity >= 1 && capacity <= 1024, "cpu0 capacity in [1,1024]");
+    const std::filesystem::path pkg =
+        std::filesystem::path(root) / "sys/devices/system/cpu/cpu0/topology/physical_package_id";
+    int package = -1;
+    if (FILE* file = std::fopen(pkg.c_str(), "r")) {
+        char buffer[32] = {};
+        if (std::fgets(buffer, sizeof(buffer), file)) package = std::atoi(buffer);
+        std::fclose(file);
+    }
+    Check(package == 0, "single-package topology reports 0");
 }
 
 void TestFileIo() {

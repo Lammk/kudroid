@@ -344,7 +344,7 @@ bool VFSPathRemapper::init_pseudo_files() {
     // The paths are built into std::string and kept alive in `owned` — PseudoFile holds a
     // const char*, and a temporary would dangle before the write loop runs.
     std::vector<std::string> owned;
-    owned.reserve(static_cast<size_t>(cpu.total_cores) * 4);
+    owned.reserve(static_cast<size_t>(cpu.total_cores) * 6);
     for (uint32_t i = 0; i < cpu.total_cores; ++i) {
         const bool performance = i < cpu.performance_cores;
         const uint32_t max_khz =
@@ -364,6 +364,19 @@ bool VFSPathRemapper::init_pseudo_files() {
         files.push_back({owned.back().c_str(), std::to_string(cur_khz) + "\n", true});
         owned.push_back(base + "/online");
         files.push_back({owned.back().c_str(), "1\n", true});
+        // Capacity and package: the last per-core files guests probe for
+        // scheduling class. Capacity is relative (1024 = fastest class),
+        // scaled by ceiling frequency; single-package SoC reports 0.
+        const uint32_t capacity =
+            (performance || cpu.performance_max_khz == 0)
+                ? 1024
+                : std::max(1u, (1024u * cpu.efficiency_max_khz) /
+                                   cpu.performance_max_khz);
+        owned.push_back(base + "/cpu_capacity");
+        files.push_back({owned.back().c_str(),
+                         std::to_string(capacity) + "\n", true});
+        owned.push_back(base + "/topology/physical_package_id");
+        files.push_back({owned.back().c_str(), "0\n", true});
     }
 
     files.push_back({"proc/mounts",

@@ -4568,7 +4568,9 @@ extern "C" int bionic_statx(int dirfd, const char* pathname, int flags, unsigned
     if (!pathname || !statxbuf) { errno = EFAULT; return -1; }
     struct stat st;
     std::string path = pathname;
-    if (dirfd != AT_FDCWD && pathname[0] != '/') {
+    if (at_path_needs_remap(dirfd, pathname)) {
+        path = kudroid::VFSPathRemapper::getInstance().remap(pathname);
+    } else if (dirfd != AT_FDCWD && pathname[0] != '/') {
         // Relative path with dirfd — best-effort resolution via /proc/self/fd.
         char link[64];
         std::snprintf(link, sizeof(link), "/proc/self/fd/%d", dirfd);
