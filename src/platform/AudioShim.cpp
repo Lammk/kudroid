@@ -893,6 +893,38 @@ extern "C" int32_t bionic_kudroid_audiotrack_write(int64_t track, const void* da
                          ms, written, played);
         }
     }
+    // AudioTrack.write blocks on a full buffer on real Android, and that blocking is
+    // what paces FMOD's mixer to real time. Without it the mixer ran ~25x faster than
+    // playback: 12.7 minutes of audio queued into a 30-second session, the AudioQueue
+    // flooded with ~73MB of buffers, and the mixer thread spinning at full CPU. Yield
+    // until the device has drained enough that in-flight sits inside a mix window.
+    if (p->playState == SL_PLAYSTATE_PLAYING) {
+        const double rate = p->sampleRate > 0 ? p->sampleRate : 44100.0;
+        auto inflightMs = [&]() -> long long {
+            return static_cast<long long>(
+                (p->framesWritten.load(std::memory_order_relaxed) -
+                 p->framesPlayed.load(std::memory_order_relaxed)) * 1000.0 / rate);
+        };
+        if (inflightMs() > 400) {
+            static std::atomic<int> s_blocked{0};
+            const int n = s_blocked.fetch_add(1, std::memory_order_relaxed);
+            if (n < 5) {
+                std::fprintf(stderr, "[KuDroidAudio] write blocks: in-flight=%lldms\n",
+                             inflightMs());
+            }
+            // Bounded: if the device never drains again, an unbounded block here would
+            // hang the mixer exactly like the pacing bug it replaces — give up after
+            // ~1s and let the queue absorb it.
+            for (int slept = 0; slept < 250; ++slept) {
+                {
+                    std::lock_guard<std::mutex> lock(p->mtx);
+                    if (p->shutdown) break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(4));
+                if (inflightMs() <= 150) break;
+            }
+        }
+    }
     const long long total = (s_bytes += accepted);
     if (total - accepted == 0 || (total / 10000000) != ((total - accepted) / 10000000)) {
         std::fprintf(stderr, "[KuDroidAudio] written %lld bytes total\n", total);

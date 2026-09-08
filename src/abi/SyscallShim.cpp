@@ -2390,6 +2390,18 @@ extern "C" ssize_t bionic_pread64(int fd, void* buf, size_t count, off_t offset)
                              "[KuDroidApk] pread fd=%d offset=%lld count=%zu ret=%zd took=%lldms\n",
                              fd, static_cast<long long>(offset), count, ret, ms);
             }
+            // Per-MB totals, mirroring [KuDroidApkF]: the fread tracker goes blind once
+            // a loader switches to random access, which is exactly when the
+            // Addressables catalog question gets asked. Silence past ~3MB means the
+            // catalog fetch never reached the APK fd.
+            static std::atomic<uint64_t> s_apkTotal{0};
+            const uint64_t before =
+                s_apkTotal.fetch_add(static_cast<uint64_t>(ret), std::memory_order_relaxed);
+            if ((before / (1024 * 1024)) != ((before + static_cast<uint64_t>(ret)) / (1024 * 1024))) {
+                std::fprintf(stderr, "[KuDroidApk] pread total=%lluMB\n",
+                             static_cast<unsigned long long>(
+                                 (before + static_cast<uint64_t>(ret)) / (1024 * 1024)));
+            }
         }
         io_volume_add(std::string(fd_path(fd)), static_cast<uint64_t>(ret));
     }
