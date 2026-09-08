@@ -1612,8 +1612,22 @@ extern "C" EGLBoolean bionic_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) 
     tls_autorelease_pool = objc_autoreleasePoolPush();
 #endif
     gpuLog("eglSwapBuffers: calling ANGLE...");
+    const uint64_t swapT0 = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
     EGLBoolean r = f(dpy, surface);
+    const uint64_t swapMs = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count()) -
+        swapT0;
     gpuLog("eglSwapBuffers(surface=%p) -> %s", (void*)surface, r ? "true" : "false");
+    // Slow-swap detector: a present path that blocks (drawable starvation,
+    // vsync wedge) shows up here, not in Unity timings. Rare when healthy.
+    if (swapMs > 50) {
+        gpuLog("eglSwapBuffers slow: %llums", (unsigned long long)swapMs);
+    }
     if ((++g_swapCalls % 120) == 0) {
         gpuLog("frame census: swaps=%llu draws=%llu clears=%llu",
                (unsigned long long)g_swapCalls, (unsigned long long)g_drawCalls,
