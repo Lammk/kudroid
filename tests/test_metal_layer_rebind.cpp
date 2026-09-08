@@ -147,10 +147,38 @@ void test_rebind_with_no_windows() {
 
 }  // namespace
 
+// Rotation (same layer, new drawable size): a window that was following the
+// layer follows it; a window whose geometry the guest chose keeps it.
+// (fromSurface hands out one instance here, so the two cases run in sequence.)
+void test_rotation_resize_follows_layer() {
+    std::printf("[rebind] rotation resize follows the layer unless guest-owned\n");
+
+    kudroid_set_metal_layer(kLayerA, 828, 1792, 2.0f);
+    void* follower = bionic_ANativeWindow_fromSurface(nullptr, nullptr);
+    kudroid_set_metal_layer(kLayerA, 1792, 828, 2.0f);
+    Check(kudroid_gpu_native_window_layer(follower) == kLayerA, "same layer");
+    Check(bionic_ANativeWindow_getWidth(follower) == 1792,
+          "follower width tracks rotation");
+    Check(bionic_ANativeWindow_getHeight(follower) == 828,
+          "follower height tracks rotation");
+    bionic_ANativeWindow_release(follower);
+
+    kudroid_set_metal_layer(kLayerA, 828, 1792, 2.0f);
+    void* owned = bionic_ANativeWindow_fromSurface(nullptr, nullptr);
+    bionic_ANativeWindow_setBuffersGeometry(owned, 640, 480, 1);
+    kudroid_set_metal_layer(kLayerA, 1792, 828, 2.0f);
+    Check(bionic_ANativeWindow_getWidth(owned) == 640,
+          "guest-chosen width survives rotation");
+    Check(bionic_ANativeWindow_getHeight(owned) == 480,
+          "guest-chosen height survives rotation");
+    bionic_ANativeWindow_release(owned);
+}
+
 int main() {
     std::printf("=== metal layer rebind ===\n");
     test_guest_window_follows_second_layer();
     test_same_layer_is_not_disturbed();
+    test_rotation_resize_follows_layer();
     test_unbind_does_not_null_live_windows();
     test_release_refcount_is_symmetric();
     test_rebind_with_no_windows();

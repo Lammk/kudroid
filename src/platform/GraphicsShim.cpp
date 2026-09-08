@@ -207,6 +207,25 @@ extern "C" void kudroid_gpu_rebind_native_windows(void* layer, int width, int he
     }
 }
 
+// Resize windows that follow the layer (same rule as rebind: a guest that set
+// its own geometry via setBuffersGeometry keeps it). Rotation changes the
+// drawable under a live swapchain; without this the guest keeps presenting at
+// launch geometry into a layer that moved on.
+extern "C" void kudroid_gpu_resize_native_windows(void* layer, int oldW, int oldH,
+                                                  int width, int height) {
+    if (!layer || width <= 0 || height <= 0) return;
+    std::lock_guard<std::mutex> lock(g_nativeWindowsMutex);
+    for (KuDroidNativeWindow* nw : g_nativeWindows) {
+        if (!nw || nw->magic != 0x4B554457) continue;
+        if (nw->layer != layer) continue;
+        if (nw->width != oldW || nw->height != oldH) continue;  // guest-owned
+        gpuLog("resize window %p on layer %p: size %dx%d -> %dx%d", (void*)nw,
+               layer, nw->width, nw->height, width, height);
+        nw->width = width;
+        nw->height = height;
+    }
+}
+
 // Which CAMetalLayer a guest window currently points at. Exists so the rebind
 // above is observable — from a test, and from a log line when a black screen has
 // to be told apart from a guest that is not drawing at all.

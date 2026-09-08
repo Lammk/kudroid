@@ -1601,9 +1601,13 @@ extern "C" int kudroid_android_log_message(int priority, const char* tag, const 
 extern "C" void kudroid_gpu_warmup_egl(void);
 extern "C" void* bionic_ANativeWindow_fromSurface(void* env, void* surface);
 extern "C" void kudroid_gpu_rebind_native_windows(void* layer, int width, int height);
+extern "C" void kudroid_gpu_resize_native_windows(void* layer, int oldW, int oldH,
+                                                  int width, int height);
 
 extern "C" void kudroid_set_metal_layer(void* layer, int width, int height, float density) {
     void* const previousLayer = g_metalLayer;
+    const int previousWidth = g_metalLayerWidth;
+    const int previousHeight = g_metalLayerHeight;
     g_metalLayer = layer;
     g_metalLayerWidth = width;
     g_metalLayerHeight = height;
@@ -1633,6 +1637,14 @@ extern "C" void kudroid_set_metal_layer(void* layer, int width, int height, floa
     // nothing in any log pointing here.
     if (layer != nullptr && layer != previousLayer) {
         kudroid_gpu_rebind_native_windows(layer, width, height);
+    }
+    // Same layer, new size (rotation): windows still following the layer adopt
+    // it. A guest that called setBuffersGeometry chose its own resolution and
+    // keeps it — detected by size differing from what the layer had.
+    if (layer != nullptr && layer == previousLayer && width > 0 && height > 0 &&
+        (width != previousWidth || height != previousHeight)) {
+        kudroid_gpu_resize_native_windows(layer, previousWidth, previousHeight,
+                                          width, height);
     }
 
     // EGL warmup runs after the display is created.

@@ -1965,6 +1965,10 @@ class NativeMetalView: UIView {
         metalLayer.drawableSize = CGSize(width: bounds.width * scale, height: bounds.height * scale)
     }
 
+    // Last drawable size reported to the guest. layoutSubviews fires on rotation;
+    // without forwarding, the guest renders forever into the launch geometry.
+    private var lastReportedSize: CGSize = .zero
+
     override func layoutSubviews() {
         super.layoutSubviews()
         guard let metalLayer = self.layer as? CAMetalLayer else { return }
@@ -1972,6 +1976,12 @@ class NativeMetalView: UIView {
         let sz = CGSize(width: bounds.width * scale, height: bounds.height * scale)
         if sz.width > 0 && sz.height > 0 && metalLayer.drawableSize != sz {
             metalLayer.drawableSize = sz
+        }
+        if sz.width > 0 && sz.height > 0 && sz != lastReportedSize {
+            lastReportedSize = sz
+            let unmanaged = Unmanaged.passUnretained(metalLayer)
+            kudroid_set_metal_layer(unmanaged.toOpaque(), Int32(sz.width),
+                                    Int32(sz.height), Float(scale))
         }
     }
 
