@@ -19,6 +19,8 @@
 #include "kudroid/platform/MemoryInfo.h"
 
 extern "C" void kudroid_persistent_breadcrumb(const char* line);
+// SyscallShim: monotonic-ns of the last tracked I/O byte (read/pread/write).
+extern "C" uint64_t io_last_activity_ns();
 
 namespace kudroid {
 namespace {
@@ -301,6 +303,14 @@ void watchdog_main() {
     uint64_t next_sample_ms = kSampleAfterMs;
     uint64_t sampled_call_id = 0;
 
+    // I/O-silence trigger. Ten seconds with no tracked byte while the engine keeps
+    // rendering means a loader is wedged outside every shim; the samples that follow
+    // are the only thing that can say where. First three dumps at the threshold,
+    // then one per additional ten seconds so a long session stays bounded.
+    constexpr uint64_t kIoSilenceAfterMs = 10000;
+    int io_silence_seq = 0;
+    uint64_t io_silence_last_ns = 0;
+
     // Set once a fatal signal has been seen, so the announcement is made exactly once
     // while the loop itself keeps running.
     bool fatal_announced = false;
@@ -350,6 +360,43 @@ void watchdog_main() {
         // seconds, because the only reason to mention it at all is when a deadlock
         // turns out to involve a notifier that died.
         blocking_wait_report_idle(/*threshold_ms=*/30000);
+
+        // A load that stopped making I/O progress while the engine keeps rendering:
+        // the loader is wedged somewhere no shim observes, which is exactly the blind
+        // spot the thread sampler exists for and nothing was firing it into. The
+        // ULTRAKILL case: after Addressables resolved its jar: load path, NO path —
+        // fopen, pread, socket, AAsset — saw another byte, and the wedge left no trace
+        // in any log this process writes. Sample every ten seconds until I/O resumes;
+        // the first two samples are the diagnosis (spin = pc moves with cpu_ms
+        // climbing, park = pc frozen with cpu_ms flat).
+        {
+            const uint64_t lastNs = io_last_activity_ns();
+            const uint64_t nowNs = static_cast<uint64_t>(
+                std::chrono::steady_clock::now().time_since_epoch().count());
+            if (lastNs != 0 && nowNs > lastNs) {
+                const uint64_t silentMs = (nowNs - lastNs) / 1000000ull;
+                if (silentMs >= kIoSilenceAfterMs) {
+                    if (io_silence_seq == 0) {
+                        io_silence_last_ns = lastNs;
+                    } else if (lastNs != io_silence_last_ns) {
+                        // I/O resumed since the last dump; reset the trigger.
+                        io_silence_seq = 0;
+                        io_silence_last_ns = lastNs;
+                    }
+                    if (io_silence_seq < 3 ||
+                        silentMs >= kIoSilenceAfterMs + 10000ull * (io_silence_seq - 2)) {
+                        ++io_silence_seq;
+                        char reason[96];
+                        std::snprintf(reason, sizeof(reason), "io-silent-%llums",
+                                      static_cast<unsigned long long>(silentMs));
+                        thread_sample_report(reason);
+                    }
+                } else {
+                    io_silence_seq = 0;
+                    io_silence_last_ns = lastNs;
+                }
+            }
+        }
 
         const CallReport report = call_report_snapshot();
 

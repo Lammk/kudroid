@@ -2051,6 +2051,10 @@ std::mutex g_ioVolMtx;
 std::map<std::string, std::pair<uint64_t, uint64_t>> g_ioVol;
 uint64_t g_ioVolTotal = 0;
 uint64_t g_ioVolNextLog = 5ULL * 1024 * 1024;
+// Monotonic-ns of the last tracked I/O byte. Lock-free readers (the watchdog)
+// only need a race-tolerant hint, so an atomic store under the volume mutex is
+// enough — the write side already serializes.
+std::atomic<uint64_t> g_ioVolLastNs{0};
 
 static std::string short_path(const std::string& p) {
     return p.size() > 60 ? "..." + p.substr(p.size() - 57) : p;
@@ -2096,6 +2100,14 @@ static void io_volume_add(const std::string& path, uint64_t bytes) {
     e.first += bytes;
     e.second += 1;
     g_ioVolTotal += bytes;
+    // Last time ANY byte flowed. The watchdog reads this: a load that stops making
+    // I/O progress while the engine keeps rendering is the signature of a loader
+    // wedged somewhere no shim observes — the exact blind spot thread sampling
+    // exists for but nothing was firing it into.
+    g_ioVolLastNs.store(static_cast<uint64_t>(std::chrono::steady_clock::now()
+                                                .time_since_epoch()
+                                                .count()),
+                        std::memory_order_relaxed);
     if (g_ioVolTotal < g_ioVolNextLog) return;
     g_ioVolNextLog += 5ULL * 1024 * 1024;
     using Entry = std::pair<std::string, std::pair<uint64_t, uint64_t>>;
@@ -2118,6 +2130,14 @@ void fd_forget_apk(int fd) {
 }
 
 }  // namespace
+
+// Watchdog hook: monotonic-nanosecond timestamp of the last byte that flowed
+// through any tracked I/O path (read, pread64, write). Exposed so the watchdog
+// can dump thread stacks when loads stop making I/O progress on their own.
+// Outside the anonymous namespace: NativeCallTelemetry links against it by name.
+extern "C" uint64_t io_last_activity_ns() {
+    return g_ioVolLastNs.load(std::memory_order_relaxed);
+}
 
 extern "C" ssize_t bionic_read(int fd, void* buf, size_t count) {
     const ssize_t ret = ::read(fd, buf, count);
