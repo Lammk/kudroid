@@ -308,14 +308,17 @@ void test_frame_interval_matches_the_native_pacer() {
     Check(interval.j >= 4000000 && interval.j <= 41666667,
           "and it is a plausible display period (240Hz..24Hz)");
 
-    // A rate hint applied through the NDK entry point must be visible through the Java
-    // getter, which is the observable proof that one source backs both.
+    // A rate hint applied through the NDK entry point must NOT change the interval
+    // the Java getter reports: setFrameRate is a per-surface hint on Android, and
+    // the one frame source both APIs share is the display's vsync. The old contract
+    // (hint lengthens the interval) double-paced guests that hint 30 fps and pace
+    // themselves — the cadence collapse seen as ~3 fps.
     kudroid::frame_pacer_request_rate(30.0f);
     DexValue after;
     if (CallVirtual(instance.l, "getFrameIntervalNanos", "()J", {}, &after, "interval at 30fps")) {
-        Check(after.j > interval.j,
-              "a setFrameRate(30) through the NDK lengthens the interval the JAVA getter "
-              "reports — one frame source, not two");
+        Check(after.j == interval.j,
+              "a setFrameRate(30) through the NDK leaves the interval the JAVA getter "
+              "reports unchanged — one frame source, the display, not two");
     }
     kudroid::frame_pacer_request_rate(0.0f);
 }

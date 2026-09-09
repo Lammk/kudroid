@@ -8,6 +8,7 @@
 #include <cerrno>
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <map>
@@ -21,6 +22,7 @@
 #include <sstream>
 #include <unistd.h>
 #include <vector>
+#include <zlib.h>
 #include <sys/socket.h>
 #include <sys/mman.h>
 
@@ -578,6 +580,252 @@ bool VFSPathRemapper::init_pseudo_files() {
     return true;
 }
 
+// ── jar:/file:archive!/entry fallback: extract straight out of the archive ZIP ──
+//
+// The three loose-file candidates above assume every asset was extracted to disk.
+// A Unity game that ships its whole content stream inside the APK (Addressables
+// over Play Asset Delivery) has entries that exist in no loose directory: the URL
+// then 404s and the engine boots to a splash with nothing to load — ULTRAKILL's
+// GameBuildSettings.json was exactly this, and the 500 MB behind it never flowed.
+// The archive is a ZIP that is already on disk, so the entry can be served from it.
+
+constexpr uint64_t kJarEntryMaxUncompressed = 512ull * 1024 * 1024;  // 512 MB cap
+
+uint64_t fnv1a64_str(const std::string& s) {
+    uint64_t h = 1469598103934665603ull;
+    for (unsigned char c : s) {
+        h ^= c;
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
+std::string url_percent_decode(const std::string& in) {
+    auto hex = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    std::string out;
+    out.reserve(in.size());
+    for (size_t i = 0; i < in.size(); ++i) {
+        if (in[i] == '%' && i + 2 < in.size() && hex(in[i + 1]) >= 0 && hex(in[i + 2]) >= 0) {
+            out.push_back(static_cast<char>((hex(in[i + 1]) << 4) | hex(in[i + 2])));
+            i += 2;
+        } else {
+            out.push_back(in[i]);
+        }
+    }
+    return out;
+}
+
+// "jar:file:///a/b.apk!/x/y" -> {"/a/b.apk", "x/y"}; also "file:///a/b.apk!/x" and
+// "jar:/a/b.apk!/x". Both empty when the shape is none of these.
+std::pair<std::string, std::string> split_archive_url(const char* originalPath) {
+    std::string p = originalPath;
+    if (p.rfind("jar:", 0) == 0) p.erase(0, 4);
+    const size_t bang = p.find("!/");
+    if (bang == std::string::npos) return {};
+    std::string archive = url_percent_decode(p.substr(0, bang));
+    std::string entry = url_percent_decode(p.substr(bang + 2));
+    if (archive.rfind("file://", 0) == 0) archive.erase(0, 7);
+    else if (archive.rfind("file:", 0) == 0) archive.erase(0, 5);
+    while (!archive.empty() && archive.back() == '/') archive.pop_back();
+    while (!entry.empty() && entry[0] == '/') entry.erase(0, 1);
+    if (archive.empty() || entry.empty()) return {};
+    return {archive, entry};
+}
+
+uint16_t zip_read16(const std::uint8_t* b, size_t o) {
+    return static_cast<uint16_t>(b[o] | (b[o + 1] << 8));
+}
+uint32_t zip_read32(const std::uint8_t* b, size_t o) {
+    return static_cast<uint32_t>(b[o]) | (static_cast<uint32_t>(b[o + 1]) << 8) |
+           (static_cast<uint32_t>(b[o + 2]) << 16) | (static_cast<uint32_t>(b[o + 3]) << 24);
+}
+
+// Locate the End Of Central Directory record: its byte offset in the file, or npos.
+size_t zip_find_eocd(std::FILE* f, long long file_size) {
+    constexpr size_t kMaxComment = 65535;
+    const size_t kScan =
+        static_cast<size_t>(std::min<long long>(file_size, kMaxComment + 22));
+    std::vector<uint8_t> tail(kScan);
+    if (std::fseek(f, static_cast<long>(file_size - static_cast<long long>(kScan)), SEEK_SET) != 0)
+        return std::string::npos;
+    if (std::fread(tail.data(), 1, kScan, f) != kScan) return std::string::npos;
+    const size_t base = static_cast<size_t>(file_size - static_cast<long long>(kScan));
+    // EOCD is at least 22 bytes and sits at the very end, comment notwithstanding.
+    for (size_t i = kScan - 22;; --i) {
+        if (tail[i] == 0x50 && tail[i + 1] == 0x4B && tail[i + 2] == 0x05 && tail[i + 3] == 0x06) {
+            const uint16_t comment_len = zip_read16(tail.data(), i + 20);
+            if (base + i + 22 + comment_len == static_cast<size_t>(file_size)) {
+                return base + i;
+            }
+        }
+        if (i == 0) break;
+    }
+    return std::string::npos;
+}
+
+// Extract `entry` from the ZIP at `archivePath` into `destPath`. Returns the
+// uncompressed byte count, or 0 on any failure (missing entry, unsupported method,
+// IO error). A hand-rolled reader over stdio, not minizip: the extractor loads whole
+// archives into memory, which is right for install and wrong for serving a single
+// entry out of a 900 MB APK on demand.
+uint64_t zip_extract_entry(const std::string& archivePath, const std::string& entry,
+                           const std::string& destPath) {
+    std::FILE* f = std::fopen(archivePath.c_str(), "rb");
+    if (f == nullptr) return 0;
+    struct FileCloser {
+        std::FILE* f;
+        ~FileCloser() { std::fclose(f); }
+    } closer{f};
+
+    if (std::fseek(f, 0, SEEK_END) != 0) return 0;
+    const long long size = std::ftell(f);
+    if (size < 22) return 0;
+    const size_t eocd = zip_find_eocd(f, size);
+    if (eocd == std::string::npos) return 0;
+    uint8_t e[22];
+    if (std::fseek(f, static_cast<long>(eocd), SEEK_SET) != 0) return 0;
+    if (std::fread(e, 1, 22, f) != 22) return 0;
+    const uint16_t total_entries = zip_read16(e, 10);
+    const uint32_t cd_offset = zip_read32(e, 16);
+
+    struct Hit {
+        bool valid = false;
+        uint16_t method = 0;
+        uint32_t csize = 0;
+        uint32_t usize = 0;
+        uint32_t local_off = 0;
+    };
+    auto walk = [&](bool fold_case) -> Hit {
+        if (std::fseek(f, static_cast<long>(cd_offset), SEEK_SET) != 0) return {};
+        for (uint16_t n = 0; n < total_entries; ++n) {
+            uint8_t h[46];
+            if (std::fread(h, 1, 46, f) != 46) return {};
+            if (!(h[0] == 'P' && h[1] == 'K' && h[2] == 1 && h[3] == 2)) return {};
+            const uint16_t name_len = zip_read16(h, 28);
+            const uint16_t extra_len = zip_read16(h, 30);
+            const uint16_t comment_len = zip_read16(h, 32);
+            Hit hit;
+            hit.method = zip_read16(h, 10);
+            hit.csize = zip_read32(h, 20);
+            hit.usize = zip_read32(h, 24);
+            hit.local_off = zip_read32(h, 42);
+            std::string name(name_len, 0);
+            if (name_len > 0 && std::fread(name.data(), 1, name_len, f) != name_len) return {};
+            if (std::fseek(f, extra_len + comment_len, SEEK_CUR) != 0) return {};
+            const bool eq = fold_case
+                                ? name.size() == entry.size() &&
+                                      std::equal(name.begin(), name.end(), entry.begin(),
+                                                 [](char a, char b) {
+                                                     return std::tolower(static_cast<unsigned char>(a)) ==
+                                                            std::tolower(static_cast<unsigned char>(b));
+                                                 })
+                                : name == entry;
+            if (eq) {
+                hit.valid = true;
+                return hit;
+            }
+        }
+        return {};
+    };
+    Hit hit = walk(false);
+    if (!hit.valid) hit = walk(true);  // ZIP writers disagree on case; Android's FS does not
+    if (!hit.valid) return 0;
+    if (hit.usize > kJarEntryMaxUncompressed) return 0;
+
+    // Local header: sizes there can be zero when a data descriptor follows, so the
+    // central-directory figures are the ones used; the local header only yields the
+    // true start of the data.
+    if (std::fseek(f, static_cast<long>(hit.local_off), SEEK_SET) != 0) return 0;
+    uint8_t lh[30];
+    if (std::fread(lh, 1, 30, f) != 30) return 0;
+    if (!(lh[0] == 'P' && lh[1] == 'K' && lh[2] == 3 && lh[3] == 4)) return 0;
+    const uint16_t l_nlen = zip_read16(lh, 26);
+    const uint16_t l_elen = zip_read16(lh, 28);
+    if (std::fseek(f, static_cast<long>(l_nlen) + static_cast<long>(l_elen), SEEK_CUR) != 0)
+        return 0;
+
+    std::vector<uint8_t> comp(hit.csize);
+    if (hit.csize > 0 && std::fread(comp.data(), 1, hit.csize, f) != hit.csize) return 0;
+
+    std::vector<uint8_t> data;
+    if (hit.method == 0) {
+        data = std::move(comp);
+        data.resize(hit.usize);
+    } else if (hit.method == 8) {
+        data.resize(hit.usize > 0 ? hit.usize : 1);
+        z_stream zs = {};
+        zs.next_in = comp.data();
+        zs.avail_in = static_cast<uInt>(comp.size());
+        zs.next_out = data.data();
+        zs.avail_out = static_cast<uInt>(data.size());
+        if (inflateInit2(&zs, -MAX_WBITS) != Z_OK) return 0;
+        const int rc = inflate(&zs, Z_FINISH);
+        inflateEnd(&zs);
+        if (rc != Z_STREAM_END || zs.total_out != hit.usize) return 0;
+        data.resize(zs.total_out);
+    } else {
+        return 0;  // bzip2/encrypted: unsupported
+    }
+
+    std::FILE* out = std::fopen(destPath.c_str(), "wb");
+    if (out == nullptr) return 0;
+    const size_t wrote = data.empty() ? 0 : std::fwrite(data.data(), 1, data.size(), out);
+    std::fclose(out);
+    if (wrote != data.size()) {
+        std::remove(destPath.c_str());
+        return 0;
+    }
+    return data.size();
+}
+
+// Cache home for extracted jar entries. Lives under android_root/data/cache: inside
+// the VFS root, writable, and already a remapped prefix a guest cannot see.
+std::string extract_jar_entry_to_cache(const std::string& archivePath,
+                                       const std::string& entryName,
+                                       const std::string& androidRoot) {
+    std::error_code ec;
+    if (!std::filesystem::exists(archivePath, ec) ||
+        !std::filesystem::is_regular_file(archivePath, ec)) {
+        return {};
+    }
+    // Serialise extraction: the same URL can be resolved from several threads during
+    // startup, and double-extracting the same entry is wasted IO.
+    static std::mutex s_jarMtx;
+    std::lock_guard<std::mutex> lock(s_jarMtx);
+
+    const std::string dir = androidRoot + "/data/cache/jar_entries";
+    std::filesystem::create_directories(dir, ec);
+    if (ec) return {};
+
+    // One cache file per (archive, entry) pair. The hash keeps the tree flat; the
+    // entry's basename is kept so a log line reads like the asset it served.
+    std::string base = entryName;
+    const size_t slash = base.find_last_of('/');
+    if (slash != std::string::npos) base = base.substr(slash + 1);
+    if (base.size() > 64) base.resize(64);
+    char hex[17];
+    std::snprintf(hex, sizeof(hex), "%016llx",
+                  static_cast<unsigned long long>(fnv1a64_str(archivePath + "\x01" + entryName)));
+    const std::string dest = dir + "/" + hex + "_" + base;
+
+    if (std::filesystem::exists(dest, ec) && std::filesystem::is_regular_file(dest, ec)) {
+        return dest;
+    }
+    const uint64_t n = zip_extract_entry(archivePath, entryName, dest);
+    if (n == 0) {
+        // Leave no zero-byte marker: a stale cache file would be served forever after.
+        std::error_code rm;
+        std::filesystem::remove(dest, rm);
+        return {};
+    }
+    return dest;
+}
+
 std::string VFSPathRemapper::remap(const char* originalPath) const {
     if (!originalPath) return {};
 
@@ -611,8 +859,35 @@ std::string VFSPathRemapper::remap(const char* originalPath) const {
                     vfsTrace("Remapped JAR entry: " + std::string(originalPath) + " -> " + appCandidate);
                     return appCandidate;
                 }
-                // Always-on (capped): a jar: URL that resolves to nothing is a
-                // silent 404 downstream. The branch choice must be visible.
+                // The loose candidates all missed. The URL names an archive and an
+                // entry inside it, so serve the entry from the archive ZIP itself —
+                // extracted once into the VFS cache, then served as a plain file.
+                // Without this, content that exists only inside the APK is a silent
+                // 404: the engine boots to a splash and the loader starves with no
+                // error anywhere near the cause.
+                {
+                    const auto [archive, entry] = split_archive_url(originalPath);
+                    if (!archive.empty() && !entry.empty()) {
+                        // The archive half of the URL is an Android path — remap it
+                        // through the prefix table before touching the filesystem,
+                        // exactly as any other guest path would be.
+                        const std::string zpath = remap(archive.c_str());
+                        if (std::string served =
+                                extract_jar_entry_to_cache(zpath, entry, androidRoot_);
+                            !served.empty()) {
+                            static std::atomic<int> s_jarZip{0};
+                            if (s_jarZip.load() < 20) {
+                                ++s_jarZip;
+                                std::fprintf(stderr,
+                                             "[KuDroidVFS] jar served from archive: %s -> %s\n",
+                                             originalPath, served.c_str());
+                            }
+                            return served;
+                        }
+                    }
+                }
+                // Still nothing: the miss must stay visible — a silent 404 downstream
+                // was exactly how the black screen hid its cause.
                 {
                     static std::atomic<int> s_jarMiss{0};
                     if (s_jarMiss.load() < 10) {

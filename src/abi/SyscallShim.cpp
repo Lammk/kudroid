@@ -1115,6 +1115,11 @@ extern "C" int bionic_statx(int dirfd, const char* pathname, int flags,
 extern "C" ssize_t bionic_pread64(int fd, void* buf, size_t count, off_t offset);
 // Fake ashmem fd (iOS fallback): return granted region or nullptr when not a fake fd.
 extern "C" void* bionic_ashmem_mmap_fd(int fd, size_t length);
+// Defined next to the fd→path map further down; declared here because bionic_mmap
+// (earlier in this file) uses it for the mmap-on-APK diagnostics the pread tap
+// already provides. extern "C" so the name cannot be captured by the anonymous
+// namespaces the definition lives inside.
+extern "C" int kudroid_fd_is_apk(int fd);
 
 // Memory mapping wrappers to strip Linux specific flags
 extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
@@ -1180,6 +1185,73 @@ extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int
     if (clean_flags & LINUX_MAP_ANONYMOUS) {
         darwin_flags |= MAP_ANON;
         darwin_fd = -1;  // Darwin requires fd == -1 for anonymous mappings
+    }
+
+    // File-backed mapping with a sub-page-start offset.
+    //
+    // Linux pages are 4 KiB and Darwin's are 16 KiB, but bionic code was compiled
+    // against the Linux value and aligns offsets to it. A guest that mmaps a large
+    // file at offset 0x401000 hands Darwin an offset that is not a multiple of the
+    // host page size, and mmap answers EINVAL — which surfaces downstream as a read
+    // that silently never happens. Align the offset DOWN to the host page and return
+    // a pointer shifted by the difference, so the guest still reads from the address
+    // it asked for. The tail may map a page past the requested range; that is the
+    // same over-map a whole-page mapping does, and it is PROT_READ-tracked so it
+    // cannot write.
+    if (darwin_fd >= 0 && offset > 0) {
+        const long host_page = ::sysconf(_SC_PAGESIZE);
+        if (host_page > 0 && (offset % host_page) != 0) {
+            const off_t aligned = offset - (offset % host_page);
+            const off_t delta = offset - aligned;
+            void* p = ::mmap(addr, static_cast<size_t>(delta) + length, prot, darwin_flags,
+                             darwin_fd, aligned);
+            if (p == MAP_FAILED) {
+                if (kudroid_fd_is_apk(darwin_fd)) {
+                    static std::atomic<int> s_mmapFail{0};
+                    if (s_mmapFail.load() < 15) {
+                        ++s_mmapFail;
+                        std::fprintf(stderr,
+                                     "[KuDroidApk] mmap fail len=%zu offset=%lld aligned=%lld "
+                                     "errno=%d\n",
+                                     length, static_cast<long long>(offset),
+                                     static_cast<long long>(aligned), errno);
+                    }
+                }
+                return p;
+            }
+            if (kudroid_fd_is_apk(darwin_fd)) {
+                static std::atomic<int> s_mmapOk{0};
+                if (s_mmapOk.load() < 15) {
+                    ++s_mmapOk;
+                    std::fprintf(stderr,
+                                 "[KuDroidApk] mmap ok len=%zu offset=%lld aligned=%lld "
+                                 "delta=%lld total=%lluMB\n",
+                                 length, static_cast<long long>(offset),
+                                 static_cast<long long>(aligned), static_cast<long long>(delta),
+                                 static_cast<unsigned long long>(
+                                     (static_cast<uint64_t>(aligned) + length) / (1024ull * 1024ull)));
+                }
+            }
+            return static_cast<char*>(p) + delta;
+        }
+    }
+    if (darwin_fd >= 0 && offset == 0 && length > 0) {
+        void* p = ::mmap(addr, length, prot, darwin_flags, darwin_fd, offset);
+        if (p != MAP_FAILED && kudroid_fd_is_apk(darwin_fd)) {
+            static std::atomic<int> s_mmapZero{0};
+            if (s_mmapZero.load() < 5) {
+                ++s_mmapZero;
+                std::fprintf(stderr, "[KuDroidApk] mmap ok len=%zu offset=0\n", length);
+            }
+        } else if (p == MAP_FAILED && kudroid_fd_is_apk(darwin_fd)) {
+            static std::atomic<int> s_mmapZeroFail{0};
+            if (s_mmapZeroFail.load() < 5) {
+                ++s_mmapZeroFail;
+                std::fprintf(stderr, "[KuDroidApk] mmap fail len=%zu offset=0 errno=%d\n",
+                             length, errno);
+            }
+        }
+        return p;
     }
     return ::mmap(addr, length, prot, darwin_flags, darwin_fd, offset);
 #else
@@ -2091,6 +2163,10 @@ bool fd_is_apk(int fd) {
     const size_t n = p.size();
     return n >= 8 && p.compare(n - 8, 8, "base.apk") == 0;
 }
+
+// extern "C" bridge over the namespace-local predicate, for callers earlier in the
+// file (bionic_mmap) that sit outside this anonymous namespace.
+extern "C" int kudroid_fd_is_apk(int fd) { return fd_is_apk(fd) ? 1 : 0; }
 
 static void io_volume_add(const std::string& path, uint64_t bytes) {
     if (path.empty() || bytes == 0) return;

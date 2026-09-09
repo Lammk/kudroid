@@ -73,6 +73,23 @@ constexpr int kLooperEventInput = 0x0001;
 // and cannot be confused with the input queue's.
 constexpr int kFrameLooperIdent = 0x4B465250;  // 'KFRP'
 
+// Direct mode is the fallback that delivers a guest's frame callbacks from the pacer
+// thread itself. It must never beat a real poller to the punch, so it is earned only
+// after a sustained, unambiguous silence — not two frames during startup, which is
+// exactly when a guest legitimately leaves a post uncollected for an interval (its
+// poller thread may still be starting). ULTRAKILL misclassified here: its
+// SwappyChoreographer thread polls this process's single looper, but the first two
+// frames arrived before that poller ever saw the wake pipe, so direct mode latched,
+// the poller then starved, and the frame cadence fell to ~320 ms per callback.
+constexpr unsigned kDirectModeMinMissedFrames = 8;
+constexpr uint64_t kDirectModeMinSilenceMs = 2000;
+
+// Telemetry: one line every ~5 s with the delivery counts. The gap between the two
+// counters is the whole question when a guest renders at a fraction of its target
+// rate — a pacer delivering at 60 while the guest renders at 6 says the wake never
+// reaches the poller, and that is what made ULTRAKILL look like a GPU stall.
+constexpr uint64_t kTelemetryIntervalMs = 5000;
+
 void paceLog(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 void paceLog(const char* fmt, ...) {
     char buf[512];
@@ -140,6 +157,11 @@ struct Choreographer {
 
     int wake_pipe[2] = {-1, -1};
     bool pipe_registered = false;
+    // due_ns of the most recent callback this instance dispatched. The re-post
+    // alignment in post_frame_callback reads it so a guest that re-posts from inside
+    // a late callback lands on the next frame boundary instead of a full interval
+    // behind it — the phase error that halves an already-throttled frame rate.
+    uint64_t last_due_ns = 0;
 
     // Published without the lock so the pacer can skip an idle instance without
     // taking it. Kept in step with frame_callbacks.size().
@@ -209,6 +231,31 @@ thread_local int64_t t_current_frame_time_ns = 0;
 std::atomic<uint64_t> g_looper_deliveries{0};
 std::atomic<uint64_t> g_direct_deliveries{0};
 std::atomic<bool> g_direct_mode{false};
+// Monotonic ns of the last direct delivery, and how many have happened since
+// direct mode latched. Both feed the stricter latch condition below.
+// Monotonic ns of the FIRST direct delivery since the last reset — the start of the
+// sustained-silence window the strict direct-mode latch measures against.
+std::atomic<uint64_t> g_first_direct_ns{0};
+std::atomic<uint64_t> g_last_direct_ns{0};
+std::atomic<uint64_t> g_direct_missed{0};
+// Monotonic ms of the last telemetry line.
+std::atomic<uint64_t> g_last_telemetry_ms{0};
+
+void pacer_telemetry(bool force) {
+    const uint64_t now_ms =
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                  std::chrono::steady_clock::now().time_since_epoch())
+                                  .count());
+    uint64_t last = g_last_telemetry_ms.load(std::memory_order_relaxed);
+    if (!force && last != 0 && now_ms - last < kTelemetryIntervalMs) return;
+    if (!g_last_telemetry_ms.compare_exchange_strong(last, now_ms, std::memory_order_relaxed)) {
+        return;
+    }
+    paceLog("frames: looper=%llu direct=%llu mode=%s",
+            static_cast<unsigned long long>(g_looper_deliveries.load(std::memory_order_relaxed)),
+            static_cast<unsigned long long>(g_direct_deliveries.load(std::memory_order_relaxed)),
+            g_direct_mode.load(std::memory_order_relaxed) ? "direct" : "looper");
+}
 
 // ── display refresh rate ────────────────────────────────────────────────────
 
@@ -263,12 +310,16 @@ int64_t vsync_period_ns() {
 }
 
 int64_t interval_ns() {
-    const int64_t display = vsync_period_ns();
-    const int64_t requested = g_requested_period_ns.load(std::memory_order_relaxed);
-    // A hint can only ask for FEWER frames. Asking for more than the display can
-    // present would have the pacer deliver callbacks the display cannot honour, and a
-    // guest pacing itself from those timestamps would run ahead of the compositor.
-    return requested > display ? requested : display;
+    // The display's own period, full stop.
+    //
+    // ANativeWindow_setFrameRate is a per-surface HINT on Android: it tells the
+    // compositor which rate a surface prefers and never throttles the app's frame
+    // callbacks — a Choreographer callback arrives on vsync, and a guest that wants
+    // to render slower paces itself from the timestamps. Forcing every instance's
+    // interval to the hint fused two pacing layers into one: ULTRAKILL's Swappy
+    // requests 30 fps through setFrameRate and then does its own pacing on top, and
+    // the combined offsets produced the 600 ms beat the device rendered at.
+    return vsync_period_ns();
 }
 
 // ── instance management ─────────────────────────────────────────────────────
@@ -290,16 +341,18 @@ void ensure_pipe_locked(Choreographer* c) {
     ::fcntl(fds[1], F_SETFL, ::fcntl(fds[1], F_GETFL, 0) | O_NONBLOCK);
     c->wake_pipe[0] = fds[0];
     c->wake_pipe[1] = fds[1];
-}
-
-// Invoked by bionic_ALooper_pollAll on whichever guest thread is polling. `data` is
+}// Invoked by bionic_ALooper_pollAll on whichever guest thread is polling. `data` is
 // the instance, so the right queue is drained no matter which thread woke up —
 // KuDroid has one process-wide looper, so the poller is not necessarily the poster.
 int frame_pipe_looper_callback(int fd, int events, void* data) {
     (void)fd;
+
     (void)events;
     auto* c = static_cast<Choreographer*>(data);
-    if (c != nullptr) dispatch_instance(c);
+    if (c != nullptr) {
+        dispatch_instance(c);
+        pacer_telemetry(false);
+    }
     return 1;  // keep the fd registered
 }
 
@@ -314,16 +367,31 @@ void register_pipe_locked(Choreographer* c) {
 
 Choreographer* acquire_instance() {
     if (t_instance != nullptr) return t_instance;
+    Choreographer* chosen = nullptr;
     for (int i = 0; i < kMaxInstances; ++i) {
         bool expected = false;
         if (state().instances[i].claimed.compare_exchange_strong(expected, true,
                                                            std::memory_order_acq_rel)) {
-            state().instances[i].owner_thread.store(self_thread_id(), std::memory_order_relaxed);
-            t_instance = &state().instances[i];
-            return t_instance;
+            Choreographer* c = &state().instances[i];
+            c->owner_thread.store(self_thread_id(), std::memory_order_relaxed);
+            chosen = c;
+            break;
         }
     }
-    t_instance = &state().shared;
+    if (chosen == nullptr) chosen = &state().shared;
+    t_instance = chosen;
+    // Register the wake pipe with the looper of the thread that OWNS this instance,
+    // not the thread that happens to post. The pipe is what the owner's poll wakes
+    // on, so it must live in the owner's looper: posting happens on guest render
+    // threads whose looper nothing ever polls. KuDroid's looper is process-wide
+    // today, so this is currently a no-op — but if it ever becomes per-thread the
+    // old placement would starve the poller while direct mode watched the frames
+    // go by.
+    {
+        std::lock_guard<std::mutex> lock(chosen->mtx);
+        ensure_pipe_locked(chosen);
+        register_pipe_locked(chosen);
+    }
     return t_instance;
 }
 
@@ -362,6 +430,7 @@ int dispatch_instance(Choreographer* c) {
         }
         c->pending.store(static_cast<unsigned>(c->frame_callbacks.size()),
                          std::memory_order_release);
+        if (count > 0) c->last_due_ns = due[0].due_ns;
     }
 
     for (int i = 0; i < count; ++i) {
@@ -447,17 +516,35 @@ void pacer_main() {
             if (deliver_now) {
                 const int ran = dispatch_instance(c);
                 if (ran > 0) {
-                    const uint64_t total =
-                        g_direct_deliveries.fetch_add(static_cast<uint64_t>(ran),
-                                                      std::memory_order_relaxed) +
+                    g_direct_deliveries.fetch_add(static_cast<uint64_t>(ran),
+                                                  std::memory_order_relaxed);
+                    uint64_t expected = 0;
+                    g_first_direct_ns.compare_exchange_strong(expected, now,
+                                                              std::memory_order_relaxed);
+                    // Direct mode is a fallback for guests with no poller at all, so
+                    // it must not latch on startup jitter. It takes eight uncollected
+                    // frames AND two seconds of sustained silence — an instance with a
+                    // registered wake pipe is presumed to have a poller and is never
+                    // condemned. The old two-strikes rule fired during ULTRAKILL's
+                    // startup, starved its polling SwappyChoreographer thread, and
+                    // cost the game four fifths of its frame rate.
+                    const uint64_t direct_missed =
+                        g_direct_missed.fetch_add(static_cast<uint64_t>(ran),
+                                                  std::memory_order_relaxed) +
                         static_cast<uint64_t>(ran);
-                    // Two frames the guest never collected and none it ever did: it is
-                    // not polling. Stop granting grace.
-                    if (total >= 2 &&
-                        g_looper_deliveries.load(std::memory_order_relaxed) == 0 &&
-                        !g_direct_mode.exchange(true, std::memory_order_relaxed)) {
-                        paceLog("guest does not poll its looper for frames; delivering "
-                                "directly from the pacer thread");
+                    if (!g_direct_mode.load(std::memory_order_relaxed) &&
+                        c->wake_pipe[0] < 0 &&
+                        direct_missed >= kDirectModeMinMissedFrames) {
+                        const uint64_t first_ns = g_first_direct_ns.load(std::memory_order_relaxed);
+                        const uint64_t span_ms = first_ns != 0 ? (now - first_ns) / 1000000ull : 0;
+                        if (span_ms >= kDirectModeMinSilenceMs &&
+                            g_looper_deliveries.load(std::memory_order_relaxed) == 0 &&
+                            !g_direct_mode.exchange(true, std::memory_order_relaxed)) {
+                            paceLog("guest never collected %llu frames over %llu ms with no "
+                                    "wake pipe; delivering directly from the pacer thread",
+                                    static_cast<unsigned long long>(direct_missed),
+                                    static_cast<unsigned long long>(span_ms));
+                        }
                     }
                 }
             }
@@ -471,6 +558,7 @@ void pacer_main() {
             // Nothing queued anywhere: park until a post wakes us. A pacer that spun
             // at the frame rate with no frames requested would burn a core for as long
             // as an app sat on a menu.
+            pacer_telemetry(false);
             state().cv.wait(lock);
             continue;
         }
@@ -481,6 +569,7 @@ void pacer_main() {
             // even when the next frame is far off.
             constexpr uint64_t kMaxSleepNs = 100000000ull;  // 100ms
             if (delay > kMaxSleepNs) delay = kMaxSleepNs;
+            pacer_telemetry(false);
             state().cv.wait_for(lock, std::chrono::nanoseconds(delay));
         }
     }
@@ -510,8 +599,33 @@ void post_frame_callback(Choreographer* c, void* callback, void* data, uint64_t 
         // Aligned to the next frame boundary rather than fired the instant it is asked
         // for. A callback that runs immediately turns a guest's "render on the next
         // frame" into a busy loop, because the guest re-posts from inside it.
+        //
+        // The boundary is the instance's last dispatch, not "now": a guest that
+        // re-posts from inside a callback that fired LATE (or after a direct-mode
+        // delivery) already sits at a frame boundary. Adding a full interval to a
+        // stale `now` put every subsequent frame another interval behind — phase
+        // error that accumulates until the guest's own deadline math gives up. When
+        // there is no history (first post), the next boundary from now is correct.
         const uint64_t now = mono_ns();
-        e.due_ns = now + delay_ns + static_cast<uint64_t>(interval_ns());
+        const uint64_t interval = static_cast<uint64_t>(interval_ns());
+        uint64_t due = now + delay_ns + interval;
+        if (delay_ns == 0 && c->last_due_ns != 0) {
+            const uint64_t boundary = c->last_due_ns + interval;
+            if (boundary > now) {
+                due = boundary;
+            } else if (now - boundary < interval) {
+                // Just past the boundary — the previous frame was delivered late (a
+                // grace period, a busy poller). Fire at that boundary anyway: it is
+                // already due, and pushing a full interval here is what turned every
+                // late frame into a slipped one.
+                due = boundary;
+            } else {
+                // Badly stale (the guest stalled for many intervals): resume now.
+                // Replaying every missed boundary would be a burst of overdue frames.
+                due = now;
+            }
+        }
+        e.due_ns = due;
         e.nudged = false;
         c->frame_callbacks.push_back(e);
         c->pending.store(static_cast<unsigned>(c->frame_callbacks.size()),
@@ -519,6 +633,7 @@ void post_frame_callback(Choreographer* c, void* callback, void* data, uint64_t 
     }
     start_pacer_once();
     wake_pacer();
+    pacer_telemetry(false);
 }
 
 }  // namespace
@@ -580,9 +695,11 @@ void frame_pacer_request_rate(float frame_rate) {
     }
     const int64_t period = static_cast<int64_t>(1000000000.0f / frame_rate);
     g_requested_period_ns.store(period, std::memory_order_relaxed);
-    paceLog("setFrameRate: %.2f fps requested (period %lld ns); effective %lld ns",
-            static_cast<double>(frame_rate), static_cast<long long>(period),
-            static_cast<long long>(interval_ns()));
+    // Recorded and visible, but never a throttle: Choreographer callbacks keep the
+    // display's cadence. A guest that wants fewer frames paces itself from the
+    // timestamps it receives — the same contract Android gives it.
+    paceLog("setFrameRate: %.2f fps requested (hint, recorded; pacing stays at display rate)",
+            static_cast<double>(frame_rate));
     wake_pacer();
 }
 
@@ -685,6 +802,10 @@ void frame_pacer_reset_for_test() {
     g_looper_deliveries.store(0, std::memory_order_relaxed);
     g_direct_deliveries.store(0, std::memory_order_relaxed);
     g_direct_mode.store(false, std::memory_order_relaxed);
+    g_last_direct_ns.store(0, std::memory_order_relaxed);
+    g_direct_missed.store(0, std::memory_order_relaxed);
+    g_first_direct_ns.store(0, std::memory_order_relaxed);
+    g_last_telemetry_ms.store(0, std::memory_order_relaxed);
 }
 
 }  // namespace kudroid

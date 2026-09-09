@@ -98,8 +98,18 @@ void frame_callback(int64_t frameTimeNanos, void* data) {
 struct Reposter {
     static std::atomic<int> calls;
     static std::atomic<int> limit;
-    static void run(int64_t /*t*/, void* data) {
+    static std::atomic<bool> gaps_ok;
+    static int64_t last_time;
+    static void run(int64_t t, void* data) {
         const int n = calls.fetch_add(1, std::memory_order_acq_rel) + 1;
+        if (last_time != 0) {
+            const int64_t gap = t - last_time;
+            const int64_t interval = frame_pacer_interval_ns();
+            if (gap > interval + interval / 2) {
+                gaps_ok.store(false, std::memory_order_release);
+            }
+        }
+        last_time = t;
         if (n < limit.load(std::memory_order_relaxed)) {
             bionic_AChoreographer_postFrameCallback(data, reinterpret_cast<void*>(&run), data);
         }
@@ -107,6 +117,8 @@ struct Reposter {
 };
 std::atomic<int> Reposter::calls{0};
 std::atomic<int> Reposter::limit{0};
+std::atomic<bool> Reposter::gaps_ok{true};
+int64_t Reposter::last_time = 0;
 
 struct RefreshRecord {
     std::atomic<int> calls{0};
@@ -132,6 +144,8 @@ void reset() {
     g_refresh.last_data.store(nullptr, std::memory_order_relaxed);
     Reposter::calls.store(0, std::memory_order_relaxed);
     Reposter::limit.store(0, std::memory_order_relaxed);
+    Reposter::gaps_ok.store(true, std::memory_order_relaxed);
+    Reposter::last_time = 0;
 }
 
 // Poll until a condition holds or the deadline passes. Never a fixed sleep: the
@@ -269,6 +283,32 @@ void test_callback_may_repost_itself() {
           "deadlock, which it would if the callback ran with the queue lock held");
 }
 
+// Re-posting from inside a late callback must land on the NEXT frame boundary, not
+// a full interval behind "now". The old arithmetic (due = now + interval) accumulated
+// phase error: every frame after a late one slipped another interval, and a guest
+// that renders from these timestamps fell further behind until its own deadline math
+// gave up. ULTRAKILL's 300 ms beat was half this, half the 30 fps throttle.
+void test_repost_keeps_frame_phase() {
+    std::printf("[choreographer] a re-post from a late callback does not slip a whole interval\n");
+    reset();
+
+    void* c = bionic_AChoreographer_getInstance();
+    Reposter::limit.store(4, std::memory_order_relaxed);
+    bionic_AChoreographer_postFrameCallback(c, reinterpret_cast<void*>(&Reposter::run), c);
+
+    Check(wait_until([] { return Reposter::calls.load(std::memory_order_acquire) >= 4; },
+                     4000),
+          "four chained frames arrive");
+
+    // Each consecutive pair must be one interval apart, not more: a slipped frame
+    // shows up as a gap near 2x the display period.
+    const int64_t interval = frame_pacer_interval_ns();
+    const int64_t max_gap = interval + interval / 2;  // 1.5x: scheduling slack only
+    Check(Reposter::gaps_ok.load(std::memory_order_acquire),
+          std::string("every inter-frame gap <= 1.5x interval (") +
+              std::to_string(max_gap) + " ns) — a gap near 2x is the phase-slip regression");
+}
+
 void test_delayed_callback_waits() {
     std::printf("[choreographer] a delayed callback is not delivered early\n");
     reset();
@@ -371,8 +411,14 @@ void test_refresh_callback_unregisters_by_pair() {
 
 // ── setFrameRate ────────────────────────────────────────────────────────────
 
-void test_set_frame_rate_lowers_the_interval() {
-    std::printf("[framerate] a lower requested rate lengthens the frame interval\n");
+// ANativeWindow_setFrameRate is a per-surface HINT on Android, not a throttle: the
+// compositor learns what rate the surface prefers, while Choreographer callbacks
+// keep arriving on vsync. A guest that wants fewer frames paces itself from the
+// timestamps. KuDroid used to fuse the hint into every Choreographer's interval,
+// which double-paced ULTRAKILL's Swappy (it hints 30 fps and paces internally) and
+// collapsed the cadence to ~3 fps.
+void test_set_frame_rate_is_a_hint_not_a_throttle() {
+    std::printf("[framerate] the hint is recorded, but never throttles frame callbacks\n");
     reset();
 
     const int64_t display = display_vsync_period_ns();
@@ -381,20 +427,15 @@ void test_set_frame_rate_lowers_the_interval() {
 
     Check(bionic_ANativeWindow_setFrameRate(nullptr, 30.0f, 0) == 0,
           "setFrameRate reports success, as Android does");
-    const int64_t at30 = frame_pacer_interval_ns();
-    Check(at30 > display,
-          std::string("30 fps asks for a longer interval than the display's (") +
-              std::to_string(at30) + " > " + std::to_string(display) + ")");
-    // ~33.3ms, within a millisecond.
-    Check(at30 >= 32000000 && at30 <= 34500000,
-          std::string("and it is about 33 ms (") + std::to_string(at30) + " ns)");
+    Check(frame_pacer_interval_ns() == display,
+          std::string("30 fps does NOT lengthen the interval (") +
+              std::to_string(frame_pacer_interval_ns()) + " == " +
+              std::to_string(display) + ") — a guest that hints 30 and paces itself "
+              "must not be paced twice");
 }
 
-// A hint may only ask for FEWER frames. Honouring a higher rate would have the pacer
-// deliver callbacks the display cannot present, and a guest pacing itself from those
-// timestamps runs ahead of the compositor.
-void test_set_frame_rate_cannot_exceed_the_display() {
-    std::printf("[framerate] a rate above the display's is capped, not honoured\n");
+void test_set_frame_rate_above_display_is_harmless() {
+    std::printf("[framerate] a rate above the display's changes nothing\n");
     reset();
 
     const int64_t display = display_vsync_period_ns();
@@ -405,16 +446,16 @@ void test_set_frame_rate_cannot_exceed_the_display() {
 }
 
 void test_set_frame_rate_zero_clears_the_hint() {
-    std::printf("[framerate] 0 means 'no preference' and restores the display rate\n");
+    std::printf("[framerate] 0 means 'no preference'; nothing absurd leaks into pacing\n");
     reset();
 
     const int64_t display = display_vsync_period_ns();
     bionic_ANativeWindow_setFrameRate(nullptr, 24.0f, 0);
-    Check(frame_pacer_interval_ns() > display, "24 fps applies");
+    Check(frame_pacer_interval_ns() == display, "24 fps is a hint only; pacing unchanged");
 
     Check(bionic_ANativeWindow_setFrameRate(nullptr, 0.0f, 0) == 0, "clearing succeeds");
     Check(frame_pacer_interval_ns() == display,
-          "and the interval returns to the display's own");
+          "and the interval is still the display's own");
 
     // Negative and absurd values take the same path rather than producing a negative
     // interval, which would make every frame instantly overdue.
@@ -434,14 +475,15 @@ void test_set_frame_rate_with_strategy_matches() {
     Check(a == b, "both forms produce the same interval");
 }
 
-// The requested rate must actually govern delivery, not merely be stored. A hint that
-// changes a number nothing reads is indistinguishable from the dummy that returned 0.
+// The hint must never slow delivery. The regression here is the old behaviour: a
+// hint of 20 fps used to lengthen every interval to 50 ms, and a guest pacing itself
+// from the timestamps ran at 20 even while asking for every frame.
 void test_requested_rate_governs_delivery() {
-    std::printf("[framerate] the hint governs how often callbacks arrive\n");
+    std::printf("[framerate] the hint does not throttle how often callbacks arrive\n");
     reset();
 
     void* c = bionic_AChoreographer_getInstance();
-    bionic_ANativeWindow_setFrameRate(nullptr, 20.0f, 0);  // 50ms per frame
+    bionic_ANativeWindow_setFrameRate(nullptr, 20.0f, 0);  // a hint, per Android
 
     const uint64_t posted_at = mono_now_ns();
     bionic_AChoreographer_postFrameCallback(c, reinterpret_cast<void*>(&frame_callback),
@@ -453,9 +495,11 @@ void test_requested_rate_governs_delivery() {
     const int64_t at = g_frames.last_time.load(std::memory_order_relaxed);
     const uint64_t elapsed_ms =
         at > 0 ? (static_cast<uint64_t>(at) - posted_at) / 1000000ull : 0;
-    Check(elapsed_ms >= 45,
-          std::string("and not before the requested 50 ms interval (") +
-              std::to_string(elapsed_ms) + " ms >= 45) — the hint is applied, not just stored");
+    // One display interval, generously bounded: a 60 Hz panel delivers well inside
+    // 50 ms. Waiting the old 50 ms hint interval would be the regression itself.
+    Check(elapsed_ms < 45,
+          std::string("and promptly (") + std::to_string(elapsed_ms) +
+              " ms < 45) — the hint must not add a 50 ms wait to a display-rate frame");
 }
 
 // ── threads ─────────────────────────────────────────────────────────────────
@@ -639,12 +683,13 @@ int main(int argc, char** argv) {
     test_posted_callback_runs();
     test_callback_is_one_shot();
     test_callback_may_repost_itself();
+    test_repost_keeps_frame_phase();
     test_delayed_callback_waits();
     test_frame_time_is_on_clock_monotonic();
     test_refresh_callback_fires_on_registration();
     test_refresh_callback_unregisters_by_pair();
-    test_set_frame_rate_lowers_the_interval();
-    test_set_frame_rate_cannot_exceed_the_display();
+    test_set_frame_rate_is_a_hint_not_a_throttle();
+    test_set_frame_rate_above_display_is_harmless();
     test_set_frame_rate_zero_clears_the_hint();
     test_set_frame_rate_with_strategy_matches();
     test_requested_rate_governs_delivery();

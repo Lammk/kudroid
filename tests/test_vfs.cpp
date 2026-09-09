@@ -21,15 +21,21 @@
 
 #include "kudroid/VFSPathRemapper.h"
 #include "kudroid/DeviceProfile.h"
+#include "kudroid/platform/AssetShim.h"
 
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
+#include <vector>
 
 #include <unistd.h>
+#include <zlib.h>
 
 namespace {
 
@@ -280,6 +286,155 @@ void TestFileIo() {
           "a write through an escaping path does not reach outside the root");
 }
 
+// ── jar: URL → entry inside the archive ZIP ─────────────────────────────────
+//
+// A Unity game that ships its content stream inside the APK asks for assets with
+// jar:file:///data/app/<pkg>/base.apk!/assets/... URLs. The loose-file candidates
+// miss when the entry was never extracted, and the old miss path handed back a path
+// that does not exist — the silent 404 that left a game black after its splash.
+// The remapper now extracts the entry out of the archive ZIP into the VFS cache.
+// These tests build a real ZIP and walk the real remap() path.
+
+// Store-method entry: name, content. CRC32 filled by the builder.
+struct ZipEntrySpec {
+    std::string name;
+    std::string content;
+};
+
+std::vector<uint8_t> build_store_zip(const std::vector<ZipEntrySpec>& entries) {
+    auto put16 = [](std::vector<uint8_t>& v, uint16_t x) {
+        v.push_back(x & 0xFF);
+        v.push_back((x >> 8) & 0xFF);
+    };
+    auto put32 = [](std::vector<uint8_t>& v, uint32_t x) {
+        v.push_back(x & 0xFF);
+        v.push_back((x >> 8) & 0xFF);
+        v.push_back((x >> 16) & 0xFF);
+        v.push_back((x >> 24) & 0xFF);
+    };
+    std::vector<uint8_t> out;
+    struct Offset {
+        uint32_t local = 0;
+        uint32_t csize = 0;
+        uint32_t crc = 0;
+        std::string name;
+    };
+    std::vector<Offset> offsets;
+    for (const ZipEntrySpec& e : entries) {
+        const uint32_t crc = static_cast<uint32_t>(::crc32(0L, nullptr, 0));
+        Offset o;
+        o.crc = static_cast<uint32_t>(::crc32(crc, reinterpret_cast<const Bytef*>(e.content.data()),
+                                             static_cast<uInt>(e.content.size())));
+        o.csize = static_cast<uint32_t>(e.content.size());
+        o.name = e.name;
+        o.local = static_cast<uint32_t>(out.size());
+        put32(out, 0x04034B50);  // local file header
+        put16(out, 20);          // version needed
+        put16(out, 0);           // flags
+        put16(out, 0);           // method: store
+        put16(out, 0); put16(out, 0);  // dos time, date
+        put32(out, o.crc);
+        put32(out, o.csize);
+        put32(out, static_cast<uint32_t>(e.content.size()));
+        put16(out, static_cast<uint16_t>(e.name.size()));
+        put16(out, 0);           // extra len
+        out.insert(out.end(), e.name.begin(), e.name.end());
+        out.insert(out.end(), e.content.begin(), e.content.end());
+        offsets.push_back(o);
+    }
+    const uint32_t cd_start = static_cast<uint32_t>(out.size());
+    for (const Offset& o : offsets) {
+        put32(out, 0x02014B50);  // central directory header
+        put16(out, 20);          // version made by
+        put16(out, 20);          // version needed
+        put16(out, 0);           // flags
+        put16(out, 0);           // method: store
+        put16(out, 0); put16(out, 0);  // dos time, date
+        put32(out, o.crc);
+        put32(out, o.csize);
+        put32(out, o.csize);     // uncompressed (store)
+        put16(out, static_cast<uint16_t>(o.name.size()));
+        put16(out, 0);           // extra
+        put16(out, 0);           // comment
+        put16(out, 0);           // disk start
+        put16(out, 0);           // internal attrs
+        put32(out, 0);           // external attrs
+        put32(out, o.local);
+        out.insert(out.end(), o.name.begin(), o.name.end());
+    }
+    const uint32_t cd_size = static_cast<uint32_t>(out.size()) - cd_start;
+    put32(out, 0x06054B50);      // EOCD
+    put16(out, 0); put16(out, 0);
+    put16(out, static_cast<uint16_t>(offsets.size()));
+    put16(out, static_cast<uint16_t>(offsets.size()));
+    put32(out, cd_size);
+    put32(out, cd_start);
+    put16(out, 0);               // comment len
+    return out;
+}
+
+std::string read_file(const std::string& path) {
+    std::ifstream in(path, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
+void TestJarFromArchive(kudroid::VFSPathRemapper& remapper, const std::string& root) {
+    std::printf("-- jar: URL served from the archive ZIP --\n");
+
+    const std::filesystem::path apkDir = std::filesystem::path(root) / "data" / "app" / "com.test.game";
+    std::filesystem::create_directories(apkDir);
+    const std::string apkPath = (apkDir / "base.apk").string();
+
+    // The APK holds two entries; nothing is extracted loose, so only the archive
+    // path can serve them.
+    const std::vector<uint8_t> zip = build_store_zip({
+        {"assets/GameBuildSettings.json", "{\"build\":42}"},
+        {"assets/aa/catalog.json", "catalog-bytes-here"},
+    });
+    {
+        std::ofstream out(apkPath, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(zip.data()),
+                  static_cast<std::streamsize>(zip.size()));
+    }
+
+    // The jar branch only runs when the loose candidates miss, and those are joined
+    // onto kudroid_get_assets_dir() — point it at an empty directory inside the VFS.
+    const std::filesystem::path assetsDir = std::filesystem::path(root) / "data" / "app" / "com.test.game" / "assets_empty";
+    std::filesystem::create_directories(assetsDir);
+    kudroid_set_assets_dir(assetsDir.string().c_str());
+
+    const std::string served = remapper.remap(
+        "jar:file:///data/app/com.test.game/base.apk!/assets/GameBuildSettings.json");
+    Check(!served.empty() && served !=
+              "jar:file:///data/app/com.test.game/base.apk!/assets/GameBuildSettings.json",
+          "a jar: URL whose entry exists only in the APK resolves to a real file");
+    std::printf("       (served path: %s)\n", served.c_str());
+    Check(!served.empty() && served.find("jar_entries") != std::string::npos,
+          "and it lives in the VFS jar cache");
+    Check(!served.empty() && read_file(served) == "{\"build\":42}",
+          "and its bytes are the entry's bytes");
+
+    // The second URL must also serve (cache-key separation), and the URL shape with
+    // no loose candidate at all must not hang or crash.
+    const std::string served2 = remapper.remap(
+        "jar:file:///data/app/com.test.game/base.apk!/assets/aa/catalog.json");
+    Check(!served2.empty() && served2 != served && read_file(served2) == "catalog-bytes-here",
+          "a second entry is served separately");
+
+    // Repeat resolution is idempotent: the cache file is reused, not re-extracted.
+    const std::string served3 = remapper.remap(
+        "jar:file:///data/app/com.test.game/base.apk!/assets/GameBuildSettings.json");
+    Check(served3 == served, "a repeated URL resolves to the same cached file");
+
+    // An entry that exists nowhere must still return SOMETHING (the old miss path's
+    // default candidate), and must not create a cache file.
+    const std::string missing = remapper.remap(
+        "jar:file:///data/app/com.test.game/base.apk!/assets/nope.json");
+    Check(!missing.empty(), "a missing entry still returns the default candidate path");
+
+    kudroid_set_assets_dir("");
+}
+
 void TestUrlRemapping(kudroid::VFSPathRemapper& remapper, const std::string& root) {
     std::printf("-- URL scheme remapping --\n");
 
@@ -323,6 +478,7 @@ int main() {
     TestProcIdentity(remapper);
     TestFileIo();
     TestUrlRemapping(remapper, root);
+    TestJarFromArchive(remapper, root);
 
     std::filesystem::remove_all(home);
 

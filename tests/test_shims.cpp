@@ -1702,7 +1702,95 @@ static void test_guest_sigset_operations_use_linux_bit_positions() {
     CHECK(bionic_sigaddset(nullptr, 10) == -1 && errno == EINVAL, "a null set is rejected");
 }
 
-// ─── main ────────────────────────────────────────────────────────────────────
+// ─── bionic_mmap: file-backed offset alignment ──────────────────────────────
+//
+// Guest code aligns mmap offsets to the 4 KiB Linux page. On a 16 KiB-page host
+// (arm64 Darwin) an offset that is only a 4 KiB multiple is not a host multiple,
+// and a raw mmap answers EINVAL — which downstream reads as "no bytes", the silent
+// end of a content stream. The shim aligns the offset down and shifts the returned
+// pointer, so the guest still reads the bytes it asked for. On a 4 KiB host no
+// repair is ever needed; the Android behaviour must be left alone.
+extern "C" void* bionic_mmap(void* addr, size_t length, int prot, int flags, int fd,
+                             off_t offset);
+
+void test_mmap_file_backed_subpage_offset() {
+    std::printf("[mmap] file-backed mapping at a non-host-page-multiple offset\n");
+    const long page = ::sysconf(_SC_PAGESIZE);
+
+    // A 1 MiB file of recognizable bytes, so a wrong offset reads as wrong data.
+    const std::string path = "/tmp/kudroid_mmap_test_" + std::to_string(::getpid()) + ".bin";
+    std::vector<char> data(1024 * 1024);
+    for (size_t i = 0; i < data.size(); ++i) {
+        data[i] = static_cast<char>(i & 0xFF);
+    }
+    {
+        std::FILE* f = std::fopen(path.c_str(), "wb");
+        CHECK(f != nullptr, "temp file opens");
+        if (f != nullptr) {
+            std::fwrite(data.data(), 1, data.size(), f);
+            std::fclose(f);
+        }
+    }
+    const int fd = ::open(path.c_str(), O_RDONLY);
+    CHECK(fd >= 0, "temp file opens for reading");
+    if (fd < 0) {
+        std::remove(path.c_str());
+        return;
+    }
+
+    // First bytes of the file at offset 4096 are 0x00 0x10 — byte[i] of the file is
+    // (offset + i) & 0xFF, so byte[1] of a 1 MiB file at 4096 is (4097 & 0xFF) = 1.
+    if (page == 4096) {
+        void* p = bionic_mmap(nullptr, 4096, PROT_READ, MAP_PRIVATE, fd, 4096);
+        CHECK(p != MAP_FAILED, "4 KiB host: page-multiple offset maps as on Android");
+        if (p != MAP_FAILED) {
+            const unsigned char* bytes = static_cast<const unsigned char*>(p);
+            CHECK(bytes[0] == 0x00 && bytes[1] == 0x01,
+                  "and the first bytes are the file's bytes at that offset");
+            ::munmap(p, 4096);
+        }
+        ::close(fd);
+        std::remove(path.c_str());
+        return;
+    }
+
+    // 16 KiB host: offset 4096 is a host multiple too, so step to one that is a
+    // Linux multiple but not one here: page + 4096.
+    const off_t off = static_cast<off_t>(page) + 4096;
+    void* p = bionic_mmap(nullptr, 4096, PROT_READ, MAP_PRIVATE, fd, off);
+    CHECK(p != MAP_FAILED,
+          "a 4 KiB-aligned guest offset maps instead of EINVAL — a raw call fails on "
+          "16 KiB hosts, which is where the content stream went silent");
+    if (p != MAP_FAILED) {
+        const unsigned char* bytes = static_cast<const unsigned char*>(p);
+        CHECK(bytes[0] == (static_cast<unsigned>(off) & 0xFF) &&
+                  bytes[1] == (static_cast<unsigned>(off + 1) & 0xFF),
+              "and the pointer is shifted so the guest reads the bytes it asked for");
+        long sum = 0;
+        for (size_t i = 0; i < 4096; ++i) {
+            sum += bytes[i];
+        }
+        CHECK(sum >= 0, "the whole requested range is readable");
+        ::munmap(p, 4096);
+    }
+
+    // The Android rule that must not regress: a host-page-multiple offset is served
+    // unshifted, byte for byte.
+    void* q = bionic_mmap(nullptr, 4096, PROT_READ, MAP_PRIVATE, fd, page);
+    CHECK(q != MAP_FAILED, "a host-page-multiple offset still maps plainly");
+    if (q != MAP_FAILED) {
+        const unsigned char* bytes = static_cast<const unsigned char*>(q);
+        CHECK(bytes[0] == (static_cast<unsigned>(page) & 0xFF) &&
+                  bytes[1] == (static_cast<unsigned>(page + 1) & 0xFF),
+              "with no shift: the byte at offset == page reads first");
+        ::munmap(q, 4096);
+    }
+
+    ::close(fd);
+    std::remove(path.c_str());
+}
+
+// ─── main ────────────────────────────────────────────────────────────────────────
 
 int main() {
     std::printf("=== SyscallShim host tests ===\n");
@@ -1750,6 +1838,7 @@ int main() {
     test_getattr_np_stack_base_on_a_fresh_thread();
     test_outbound_signal_symbols_resolve_to_the_shim();
     test_guest_sigset_operations_use_linux_bit_positions();
+    test_mmap_file_backed_subpage_offset();
     std::printf("=== %d checks, %d failures ===\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }
