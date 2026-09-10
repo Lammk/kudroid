@@ -426,6 +426,13 @@ void TestJarFromArchive(kudroid::VFSPathRemapper& remapper, const std::string& r
         "jar:file:///data/app/com.test.game/base.apk!/assets/GameBuildSettings.json");
     Check(served3 == served, "a repeated URL resolves to the same cached file");
 
+    // Callers above prepend "/" before jar: URLs reach here (absolute-path
+    // normalization). The split must survive it: same entry, same file.
+    const std::string servedSlash = remapper.remap(
+        "/jar:file:///data/app/com.test.game/base.apk!/assets/GameBuildSettings.json");
+    Check(servedSlash == served && read_file(servedSlash) == "{\"build\":42}",
+          "a leading-slash jar: URL serves the same entry");
+
     // An entry that exists nowhere must still return SOMETHING (the old miss path's
     // default candidate), and must not create a cache file.
     const std::string missing = remapper.remap(

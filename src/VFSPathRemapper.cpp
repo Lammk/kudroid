@@ -624,6 +624,10 @@ std::string url_percent_decode(const std::string& in) {
 // "jar:/a/b.apk!/x". Both empty when the shape is none of these.
 std::pair<std::string, std::string> split_archive_url(const char* originalPath) {
     std::string p = originalPath;
+    // Callers above prepend "/" (absolute-path normalization) before jar: URLs
+    // reach here: "/jar:file://...". Strip it — a bare "/data/..." path never
+    // starts with "/jar:" so plain paths are unaffected.
+    while (p.size() > 4 && p[0] == '/' && p.rfind("/jar:", 0) == 0) p.erase(0, 1);
     if (p.rfind("jar:", 0) == 0) p.erase(0, 4);
     const size_t bang = p.find("!/");
     if (bang == std::string::npos) return {};
