@@ -314,13 +314,13 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
         std::strcmp(owner, "Lbitter/jnibridge/JNIBridge;") == 0 &&
         std::strcmp(method_name, "invoke") == 0;
     JnibridgeTraceGuard trace_guard(is_jnibridge_invoke);
-    if (is_jnibridge_invoke) {
+    if (is_jnibridge_invoke && log::jni_enabled()) {
         LogJnibridgeInvokeArgs(interpreter_ != nullptr ? interpreter_->linker() : nullptr,
                                args, num_args);
     }
     const auto native_start = std::chrono::steady_clock::now();
-    KLOGV("KuARTNative", "enter class=%s method=%s sig=%s args=%zu vm_depth=%d",
-          owner, method_name, method_sig, num_args, VmLockDepth());
+    KLOGJNI("KuARTNative", "enter class=%s method=%s sig=%s args=%zu vm_depth=%d",
+            owner, method_name, method_sig, num_args, VmLockDepth());
     char breadcrumb[2048];
     const SystemMemory memory_before = query_system_memory();
     std::snprintf(breadcrumb, sizeof(breadcrumb),
@@ -463,8 +463,8 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
 
     const auto native_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - native_start).count();
-    KLOGV("KuARTNative", "exit class=%s method=%s sig=%s duration_ms=%lld vm_depth=%d",
-          owner, method_name, method_sig, static_cast<long long>(native_ms), VmLockDepth());
+    KLOGJNI("KuARTNative", "exit class=%s method=%s sig=%s duration_ms=%lld vm_depth=%d",
+            owner, method_name, method_sig, static_cast<long long>(native_ms), VmLockDepth());
     const SystemMemory memory_after = query_system_memory();
     std::snprintf(breadcrumb, sizeof(breadcrumb),
                   "native-exit class=%s method=%s sig=%s duration_ms=%lld vm_depth=%d footprint=%llu process_headroom=%llu available=%llu low_memory=%d",

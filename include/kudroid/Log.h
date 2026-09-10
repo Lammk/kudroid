@@ -22,6 +22,13 @@ enum Level {
 void set_verbose(bool enabled);
 bool verbose_enabled();
 
+// Gate the per-JNI-call enter/exit lines (KuARTNative, FMOD, JNIBridge, ...).
+// One line pair per call at 60fps is thousands of lines a second — the log
+// pipeline itself was a visible fraction of frame cost. Default matches
+// verbose: on only for KUDROID_LOG_JNI=1 or kudroid_log_set_jni(true).
+void set_jni(bool enabled);
+bool jni_enabled();
+
 // Write via standard pipeline (stdout + file + crash buffer).
 void write(Level level, const char* tag, const char* fmt, ...)
     __attribute__((format(printf, 3, 4)));
@@ -46,6 +53,17 @@ using log::kError;
 #define KLOGV(tag, ...)                                                     \
     do {                                                                    \
         if (::kudroid::log::verbose_enabled()) {                            \
+            ::kudroid::log::write(::kudroid::log::kDebug, (tag), __VA_ARGS__); \
+        }                                                                   \
+    } while (0)
+
+// Per-JNI-call lines: verbose-gated AND jni-gated. The second gate exists so
+// verbose per-call logs elsewhere (dlsym, EGL) survive without the multi-kHz
+// enter/exit stream from the JNI boundary.
+#define KLOGJNI(tag, ...)                                                   \
+    do {                                                                    \
+        if (::kudroid::log::verbose_enabled() &&                            \
+            ::kudroid::log::jni_enabled()) {                                \
             ::kudroid::log::write(::kudroid::log::kDebug, (tag), __VA_ARGS__); \
         }                                                                   \
     } while (0)

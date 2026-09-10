@@ -16,11 +16,18 @@ namespace {
 std::mutex g_mtx;
 bool g_verbose = true;        // debugging real machine — enabled by default
 bool g_verbose_initialized = false;
+bool g_jni = false;           // per-JNI-call enter/exit: off by default, opt-in
+bool g_jni_initialized = false;
 
 bool env_verbose() {
     const char* v = std::getenv("KUDROID_LOG_VERBOSE");
     if (!v || !*v) return true;
     return v[0] != '0' && v[0] != 'n' && v[0] != 'N';
+}
+
+bool env_jni() {
+    const char* v = std::getenv("KUDROID_LOG_JNI");
+    return v != nullptr && *v && *v != '0' && *v != 'n' && *v != 'N';
 }
 } // namespace
 
@@ -37,6 +44,21 @@ bool verbose_enabled() {
         g_verbose_initialized = true;
     }
     return g_verbose;
+}
+
+void set_jni(bool enabled) {
+    std::lock_guard<std::mutex> lock(g_mtx);
+    g_jni = enabled;
+    g_jni_initialized = true;
+}
+
+bool jni_enabled() {
+    std::lock_guard<std::mutex> lock(g_mtx);
+    if (!g_jni_initialized) {
+        g_jni = env_jni();
+        g_jni_initialized = true;
+    }
+    return g_jni;
 }
 
 void write(Level level, const char* tag, const char* fmt, ...) {
