@@ -1110,12 +1110,6 @@ extern "C" int bionic_bind(int sockfd, const struct sockaddr* addr, socklen_t ad
 extern "C" int bionic_connect(int sockfd, const struct sockaddr* addr, socklen_t addrlen);
 extern "C" int bionic_getsockname(int sockfd, struct sockaddr* addr, socklen_t* addrlen);
 extern "C" int bionic_getpeername(int sockfd, struct sockaddr* addr, socklen_t* addrlen);
-#if defined(__APPLE__)
-static bool linux_to_darwin_sockaddr(const struct sockaddr* src, socklen_t srclen,
-                                     struct sockaddr_storage* dst, socklen_t* dstlen);
-static void darwin_to_linux_sockaddr(const struct sockaddr* src, socklen_t srclen,
-                                     struct sockaddr* dst, socklen_t* dstlen);
-#endif
 extern "C" int getaddrinfo(const char* node, const char* service,
                            const struct addrinfo* hints, struct addrinfo** res);
 extern "C" const char* gai_strerror(int errcode);
@@ -1758,6 +1752,71 @@ extern "C" int bionic_rt_sigaction(int signum, const void* act, void* oldact,
 // symbol table. Declared here because the syscall switch comes first in this file.
 extern "C" int bionic_tgkill(int pid, int tid, int sig);
 extern "C" int bionic_tkill(int tid, int sig);
+#if defined(__APPLE__)
+static bool linux_to_darwin_sockaddr(const struct sockaddr* src, socklen_t srclen,
+                                     struct sockaddr_storage* dst, socklen_t* dstlen) {
+    if (!src || srclen < 2 || !dst || !dstlen) return false;
+    const unsigned char* b = reinterpret_cast<const unsigned char*>(src);
+    const unsigned fam = static_cast<unsigned>(b[0]) | (static_cast<unsigned>(b[1]) << 8);
+    unsigned char* out = reinterpret_cast<unsigned char*>(dst);
+    std::memset(dst, 0, sizeof(*dst));
+    if (fam == 2 && srclen >= 8) {
+        out[0] = 16;
+        out[1] = AF_INET;
+        std::memcpy(out + 2, b + 2, std::min<size_t>(srclen - 2, 14));
+        *dstlen = 16;
+        return true;
+    } else if (fam == 10 && srclen >= 24) {
+        out[0] = 28;
+        out[1] = AF_INET6;
+        std::memcpy(out + 2, b + 2, std::min<size_t>(srclen - 2, 26));
+        *dstlen = 28;
+        return true;
+    } else if (fam == 1) {
+        out[0] = static_cast<unsigned char>(std::min<socklen_t>(srclen, sizeof(*dst)));
+        out[1] = AF_UNIX;
+        if (srclen > 2) {
+            std::memcpy(out + 2, b + 2, std::min<size_t>(srclen - 2, sizeof(*dst) - 2));
+        }
+        *dstlen = out[0];
+        return true;
+    }
+    return false;
+}
+
+static void darwin_to_linux_sockaddr(const struct sockaddr* src, socklen_t srclen,
+                                     struct sockaddr* dst, socklen_t* dstlen) {
+    if (!src || !dst || !dstlen || *dstlen < 2) return;
+    const unsigned char* s = reinterpret_cast<const unsigned char*>(src);
+    unsigned char* d = reinterpret_cast<unsigned char*>(dst);
+    const unsigned fam = s[1];
+    if (fam == AF_INET) {
+        socklen_t copy_len = std::min<socklen_t>(*dstlen, 16);
+        d[0] = 2;
+        d[1] = 0;
+        if (copy_len > 2) {
+            std::memcpy(d + 2, s + 2, copy_len - 2);
+        }
+        *dstlen = 16;
+    } else if (fam == AF_INET6) {
+        socklen_t copy_len = std::min<socklen_t>(*dstlen, 28);
+        d[0] = 10;
+        d[1] = 0;
+        if (copy_len > 2) {
+            std::memcpy(d + 2, s + 2, copy_len - 2);
+        }
+        *dstlen = 28;
+    } else {
+        socklen_t copy_len = std::min<socklen_t>(*dstlen, srclen);
+        d[0] = static_cast<unsigned char>(fam);
+        d[1] = 0;
+        if (copy_len > 2) {
+            std::memcpy(d + 2, s + 2, copy_len - 2);
+        }
+        *dstlen = srclen;
+    }
+}
+#endif
 
 extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5, uintptr_t a6) {
     uintptr_t entryX19 = 0;
@@ -2298,72 +2357,6 @@ inline int guest_to_host_af(int af) {
 #endif
     return af;
 }
-
-#if defined(__APPLE__)
-static bool linux_to_darwin_sockaddr(const struct sockaddr* src, socklen_t srclen,
-                                     struct sockaddr_storage* dst, socklen_t* dstlen) {
-    if (!src || srclen < 2 || !dst || !dstlen) return false;
-    const unsigned char* b = reinterpret_cast<const unsigned char*>(src);
-    const unsigned fam = static_cast<unsigned>(b[0]) | (static_cast<unsigned>(b[1]) << 8);
-    unsigned char* out = reinterpret_cast<unsigned char*>(dst);
-    std::memset(dst, 0, sizeof(*dst));
-    if (fam == 2 && srclen >= 8) {
-        out[0] = 16;
-        out[1] = AF_INET;
-        std::memcpy(out + 2, b + 2, std::min<size_t>(srclen - 2, 14));
-        *dstlen = 16;
-        return true;
-    } else if (fam == 10 && srclen >= 24) {
-        out[0] = 28;
-        out[1] = AF_INET6;
-        std::memcpy(out + 2, b + 2, std::min<size_t>(srclen - 2, 26));
-        *dstlen = 28;
-        return true;
-    } else if (fam == 1) {
-        out[0] = static_cast<unsigned char>(std::min<socklen_t>(srclen, sizeof(*dst)));
-        out[1] = AF_UNIX;
-        if (srclen > 2) {
-            std::memcpy(out + 2, b + 2, std::min<size_t>(srclen - 2, sizeof(*dst) - 2));
-        }
-        *dstlen = out[0];
-        return true;
-    }
-    return false;
-}
-
-static void darwin_to_linux_sockaddr(const struct sockaddr* src, socklen_t srclen,
-                                     struct sockaddr* dst, socklen_t* dstlen) {
-    if (!src || !dst || !dstlen || *dstlen < 2) return;
-    const unsigned char* s = reinterpret_cast<const unsigned char*>(src);
-    unsigned char* d = reinterpret_cast<unsigned char*>(dst);
-    const unsigned fam = s[1];
-    if (fam == AF_INET) {
-        socklen_t copy_len = std::min<socklen_t>(*dstlen, 16);
-        d[0] = 2;
-        d[1] = 0;
-        if (copy_len > 2) {
-            std::memcpy(d + 2, s + 2, copy_len - 2);
-        }
-        *dstlen = 16;
-    } else if (fam == AF_INET6) {
-        socklen_t copy_len = std::min<socklen_t>(*dstlen, 28);
-        d[0] = 10;
-        d[1] = 0;
-        if (copy_len > 2) {
-            std::memcpy(d + 2, s + 2, copy_len - 2);
-        }
-        *dstlen = 28;
-    } else {
-        socklen_t copy_len = std::min<socklen_t>(*dstlen, srclen);
-        d[0] = static_cast<unsigned char>(fam);
-        d[1] = 0;
-        if (copy_len > 2) {
-            std::memcpy(d + 2, s + 2, copy_len - 2);
-        }
-        *dstlen = srclen;
-    }
-}
-#endif
 }  // namespace
 
 extern "C" int bionic_socket(int domain, int type, int protocol) {
