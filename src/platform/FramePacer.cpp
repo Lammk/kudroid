@@ -350,7 +350,11 @@ int frame_pipe_looper_callback(int fd, int events, void* data) {
     (void)events;
     auto* c = static_cast<Choreographer*>(data);
     if (c != nullptr) {
-        dispatch_instance(c);
+        const int ran = dispatch_instance(c);
+        if (ran > 0) {
+            g_looper_deliveries.fetch_add(static_cast<uint64_t>(ran),
+                                          std::memory_order_relaxed);
+        }
         pacer_telemetry(false);
     }
     return 1;  // keep the fd registered
