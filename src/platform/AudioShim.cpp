@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cmath>
+#include <algorithm>
 #include <deque>
 #include <mutex>
 #include <condition_variable>
@@ -92,6 +93,10 @@ struct AudioPlayer {
     double sampleRate = 44100;
     uint32_t channels = 2;
     uint32_t bitsPerSample = 16;
+
+    // AudioTrack buffer capacity the guest asked for at create; write() blocks
+    // while the queue holds more than this, as on Android.
+    uint64_t bufferCapacityBytes = 0;
 
     // Frames the device has actually consumed.
     //
@@ -817,14 +822,13 @@ extern "C" int64_t bionic_kudroid_audiotrack_create(int32_t sampleRateInHz,
                                                     int32_t channelCount,
                                                     int32_t encoding,
                                                     int32_t bufferSizeInBytes) {
-    (void)bufferSizeInBytes;
-    // TEMP DIAGNOSTIC (ULTRAKILL silence): prove samples reach the shim.
+    // TEMP DIAGNOSTIC: prove samples reach the shim.
     static std::atomic<int> s_tracks{0};
     const int n = ++s_tracks;
     if (n <= 3) {
         std::fprintf(stderr,
-                     "[KuDroidAudio] AudioTrack create #%d rate=%d ch=%d enc=%d\n",
-                     n, sampleRateInHz, channelCount, encoding);
+                     "[KuDroidAudio] AudioTrack create #%d rate=%d ch=%d enc=%d buf=%d\n",
+                     n, sampleRateInHz, channelCount, encoding, bufferSizeInBytes);
     }
     if (sampleRateInHz <= 0 || channelCount <= 0) return 0;
 
@@ -833,6 +837,16 @@ extern "C" int64_t bionic_kudroid_audiotrack_create(int32_t sampleRateInHz,
     player->sampleRate = static_cast<double>(sampleRateInHz);
     player->channels = static_cast<uint32_t>(channelCount > 8 ? 8 : channelCount);
     player->bitsPerSample = android_bits_per_sample(encoding);
+    // Android requires bufferSizeInBytes >= getMinBufferSize(); floor it the same
+    // way so write() backpressure cannot degenerate into sub-period waits.
+    {
+        const uint32_t bpf = player_bytes_per_frame(player.get());
+        const uint64_t minBytes =
+            static_cast<uint64_t>(sampleRateInHz / 50) * bpf;
+        player->bufferCapacityBytes = bufferSizeInBytes > 0
+            ? std::max<uint64_t>(static_cast<uint64_t>(bufferSizeInBytes), minBytes)
+            : minBytes;
+    }
     // AudioTrack has no buffer-queue callback: the guest writes when it wants to. Leaving
     // `callback` null is what tells the output callback there is nobody to notify.
     {
@@ -865,6 +879,42 @@ extern "C" int32_t bionic_kudroid_audiotrack_write(int64_t track, const void* da
     const int32_t frames = sizeInBytes / static_cast<int32_t>(bpf);
     const int32_t accepted = frames * static_cast<int32_t>(bpf);
     if (accepted <= 0) return 0;
+    // AudioTrack.write blocks while the track buffer is full, and that backpressure
+    // is what paces a guest mixer to real time. Wait for room BEFORE enqueueing, one
+    // chunk at a time: waiting for room lasts ~one chunk, while the old enqueue-then-
+    // drain-to-low-water park held the caller for hundreds of ms with whatever engine
+    // lock it carried, and stalled every thread waiting on that lock.
+    if (p->playState == SL_PLAYSTATE_PLAYING) {
+        auto inflightBytes = [&]() -> uint64_t {
+            return static_cast<uint64_t>(
+                (p->framesWritten.load(std::memory_order_relaxed) -
+                 p->framesPlayed.load(std::memory_order_relaxed))) * bpf;
+        };
+        if (inflightBytes() + static_cast<uint64_t>(accepted) >
+            p->bufferCapacityBytes) {
+            static std::atomic<int> s_blocked{0};
+            const int n = s_blocked.fetch_add(1, std::memory_order_relaxed);
+            if (n < 5) {
+                std::fprintf(stderr, "[KuDroidAudio] write waits for room #%d\n", n);
+            }
+        }
+        // Bounded: if the device never drains again, give up after ~2s and let the
+        // queue absorb the chunk rather than hang the caller outright.
+        for (int slept = 0; slept < 500; ++slept) {
+            const uint64_t inflight = inflightBytes();
+            // Room for the whole chunk, or an empty queue: an oversized chunk still
+            // makes progress instead of deadlocking against its own size.
+            if (inflight == 0 ||
+                inflight + static_cast<uint64_t>(accepted) <= p->bufferCapacityBytes) {
+                break;
+            }
+            {
+                std::lock_guard<std::mutex> lock(p->mtx);
+                if (p->shutdown) break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(4));
+        }
+    }
     if (!enqueue_pcm(p.get(), data, static_cast<uint32_t>(accepted))) {
         const int f = ++s_fails;
         if (f <= 3) std::fprintf(stderr, "[KuDroidAudio] write FAILED #%d\n", f);
@@ -891,38 +941,6 @@ extern "C" int32_t bionic_kudroid_audiotrack_write(int64_t track, const void* da
             std::fprintf(stderr,
                          "[KuDroidAudio] in-flight=%lldms written=%llu played=%llu\n",
                          ms, written, played);
-        }
-    }
-    // AudioTrack.write blocks on a full buffer on real Android, and that blocking is
-    // what paces FMOD's mixer to real time. Without it the mixer ran ~25x faster than
-    // playback: 12.7 minutes of audio queued into a 30-second session, the AudioQueue
-    // flooded with ~73MB of buffers, and the mixer thread spinning at full CPU. Yield
-    // until the device has drained enough that in-flight sits inside a mix window.
-    if (p->playState == SL_PLAYSTATE_PLAYING) {
-        const double rate = p->sampleRate > 0 ? p->sampleRate : 44100.0;
-        auto inflightMs = [&]() -> long long {
-            return static_cast<long long>(
-                (p->framesWritten.load(std::memory_order_relaxed) -
-                 p->framesPlayed.load(std::memory_order_relaxed)) * 1000.0 / rate);
-        };
-        if (inflightMs() > 400) {
-            static std::atomic<int> s_blocked{0};
-            const int n = s_blocked.fetch_add(1, std::memory_order_relaxed);
-            if (n < 5) {
-                std::fprintf(stderr, "[KuDroidAudio] write blocks: in-flight=%lldms\n",
-                             inflightMs());
-            }
-            // Bounded: if the device never drains again, an unbounded block here would
-            // hang the mixer exactly like the pacing bug it replaces — give up after
-            // ~1s and let the queue absorb it.
-            for (int slept = 0; slept < 250; ++slept) {
-                {
-                    std::lock_guard<std::mutex> lock(p->mtx);
-                    if (p->shutdown) break;
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(4));
-                if (inflightMs() <= 150) break;
-            }
         }
     }
     const long long total = (s_bytes += accepted);
