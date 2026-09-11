@@ -153,20 +153,66 @@ Decoded decode(std::uint32_t w) {
             isLoad = ((w >> 22) & 1) != 0;
         if (!simd) markMem(d, 0, rd);
         markPatch(d, 5, rn, false);
-        if ((b & 0x3B) == 0x3A) markPatch(d, 16, rm, false);
+        // Register-offset forms (bit21 == 1, and not LSE which the branch
+        // above already recorded as Rs) carry a real integer Rm index.
+        // The old (b & 0x3B) == 0x3A test matched only the SIMD reg-offset
+        // top bytes; the integer ones (0x38/0x78/0xB8/0xF8) fell through
+        // unmarked, leaving a live x18 index behind every rename — the
+        // Melon_0 SIGBUS. Pre/post-index carry Rm=11111 (inert) instead.
+        if ((w & (1u << 21)) != 0 && !((b & 0x3B) == 0x38 && ((w >> 22) & 3) != 0)) {
+            markPatch(d, 16, rm, false);
+        }
         return d;
     }
     // Loads/stores, pair. Integer lanes share top bytes with SIMD lanes;
     // only Rn is an integer register in the SIMD form. Store forms (opc
     // bit22 clear) read their lanes; load forms define them.
     if ((b & 0x3F) == 0x28) {
-        markMem(d, 0, rd);
-        markMem(d, 10, ra);
+        // SIMD pairs (top bytes 0x2C/0x6C/0xAC/0xEC) reach neither here nor
+        // the integer mask below — handled by the (b & 0x3C) == 0x2C arm.
+        const bool simdPair = (w & (1u << 26)) != 0 && ((b & 0x3C) == 0x28);
+        if (!simdPair) {
+            markMem(d, 0, rd);
+            markMem(d, 10, ra);
+        }
         markPatch(d, 5, rn, false);
         return d;
     }
     if ((b & 0x3C) == 0x2C) {
         markPatch(d, 5, rn, false);
+        return d;
+    }
+    // Advanced SIMD / scalar-FP data processing. Vector forms (v18) touch no
+    // integer register; scalar forms cross between FP lanes and GPRs only at
+    // fmov/convert. Both live under top-byte low-5 == 0x0E (vector) or
+    // 0x1E (scalar); everything else here stays unknown.
+    const unsigned bLow5 = b & 0x1F;
+    if (bLow5 == 0x0E) {
+        // Vector-to-vector (fadd/tbl/fmov vector/...): Darwin preserves
+        // v18 across context switches, so register 18 in any lane is a
+        // vector register and needs nothing.
+        d.known = true;
+        return d;
+    }
+    if (bLow5 == 0x1E) {
+        // Scalar FP. Verified against the assembler: GPR fields split purely
+        // by bits[21:16] (kind), independent of opc/sf:
+        //   38 (fmov x,w / fmov w,s): FP->GPR, Rd defines
+        //   56 (fcvtzs/fcvtzu/fcvtas/...): FP->GPR, Rd defines
+        //   54 (fjcvtzs): FP->GPR, Rd defines
+        //   34 (scvtf/ucvtf), 39 (fmov s,w / fmov d,x): GPR->FP, Rn reads
+        // Every other kind (fmov fp-fp 32, fadd, fcmp, fcsel, fcvt fp-fp)
+        // touches only FP lanes.
+        d.known = true;
+        const unsigned kind = (w >> 16) & 0x3F;
+        if (kind == 38 || kind == 56 || kind == 54) {
+            markPatch(d, 0, rd, true);  // Rd is the integer destination
+            return d;
+        }
+        if (kind == 34 || kind == 39) {
+            markPatch(d, 5, rn, false);  // Rn is the integer source
+            return d;
+        }
         return d;
     }
     // System class: mrs defines Rt (bits[21:20] == 3, verified against the
@@ -177,10 +223,9 @@ Decoded decode(std::uint32_t w) {
     }
     // SVC/HVC/SMC/ERET/BRK/HLT/DCPS: immediates only.
     if (b == 0xD4) return d;
-    // FP/SIMD space is deliberately NOT decoded: scalar-FP and vector ops
-    // share prefixes/bits with integer-side moves (fmov/converts), so no
-    // bit pattern proves which side a register field belongs to. Everything here
-    // falls into the unknown bucket below (slot scan, skip-if-18, never patch).
+    // Remaining space (SVE, unallocated, exclusive LDXR/STXR which hide a
+    // value lane the bit shapes above do not prove): unknown — slot scan,
+    // skip-if-18, never patch.
     d.known = false;
     if (rd == kX18 || rn == kX18 || rm == kX18 || ra == kX18) d.used |= 1u << kX18;
     return d;
@@ -434,6 +479,62 @@ bool looksLikeCode(const std::uint32_t* code, std::size_t nwords) {
         if (decode(code[i]).known) ++known;
     }
     return known * 4 >= n * 3;
+}
+
+// Registers a word reads or writes (integer lanes only). Unknown words
+// report every register-shaped slot as a read — conservative for callers
+// that must not disturb a live value.
+struct RegTouch {
+    std::uint32_t defs = 0;
+    std::uint32_t uses = 0;
+};
+
+RegTouch regTouch(std::uint32_t w) {
+    RegTouch t;
+    const Decoded d = decode(w);
+    if (!d.known) {
+        t.uses = (1u << ((w >> 0) & 31)) | (1u << ((w >> 5) & 31)) |
+                 (1u << ((w >> 16) & 31)) | (1u << ((w >> 10) & 31));
+        t.uses &= 0x7FFFFFFFu;  // 31 is not a register
+        return t;
+    }
+    for (unsigned k = 0; k < d.npatch; ++k) {
+        const unsigned r = (w >> d.at[k]) & 31;
+        if (r >= 31) continue;
+        ((d.defmask >> k) & 1 ? t.defs : t.uses) |= 1u << r;
+    }
+    for (unsigned k = 0; k < d.nuse; ++k) {
+        const unsigned r = (w >> d.useonly[k]) & 31;
+        if (r < 31) t.uses |= 1u << r;
+    }
+    return t;
+}
+
+// A register is free for span [a, b] iff no instruction inside the window
+// touches it AND it has no live range crossing the window: defined before
+// the span and read after it (or read before and defined after — symmetric
+// hazard through the same physical register is impossible for a value both
+// written and read around an untouched window, but the def-before/read-after
+// shape is the one a rename would corrupt, and read-before/def-after is
+// harmless since the span's write would be overwritten first... it is NOT
+// harmless for the span's own value: the later def overwrites the substitute
+// mid-span? No — the def is outside the window; the span's uses all read the
+// substitute before it. Only def-before + use-after destroys a crossing
+// value). Calls inside the span are rejected before allocation, so clobber
+// survival is not a concern here.
+bool crossingLiveRange(const std::vector<std::uint32_t>& words, long a, long b,
+                       unsigned reg) {
+    const std::uint32_t bit = 1u << reg;
+    for (long i = 0; i < a && i < static_cast<long>(words.size()); ++i) {
+        if (regTouch(words[i]).defs & bit) {
+            for (long j = b + 1; j < static_cast<long>(words.size()); ++j) {
+                const RegTouch t = regTouch(words[j]);
+                if (t.uses & bit) return true;
+                if (t.defs & bit) break;  // redefined before any read
+            }
+        }
+    }
+    return false;
 }
 
 // Caller-saved integer candidates (x16/x17 excluded: linker veneers;
@@ -728,12 +829,14 @@ long rewriteRange(std::uint32_t* code, std::size_t nwords, X18Stats& st,
     // survive it), and the value live after the last x18 reference must die
     // on every path (no unrenamed observer). Within one instruction, uses
     // precede defines (add x18,x18 reads first).
+    struct Span {
+        long a, b;
+        unsigned sub;
+    };
+    std::vector<std::uint8_t> spanSub(nwords, 0xFFu);
     {
         long lastDef = -1;
         long lastX18 = -1;
-        struct Span {
-            long a, b;
-        };
         std::vector<Span> spans;
         std::size_t k = 0;
         auto handle = [&](const Ref& r) {
@@ -748,7 +851,7 @@ long rewriteRange(std::uint32_t* code, std::size_t nwords, X18Stats& st,
                     if (why) *why = "livein";
                     return false;
                 }
-                spans.push_back({lastDef, static_cast<long>(r.idx)});
+                spans.push_back({lastDef, static_cast<long>(r.idx), 31});
             }
             return true;
         };
@@ -777,27 +880,65 @@ long rewriteRange(std::uint32_t* code, std::size_t nwords, X18Stats& st,
                 if (why) *why = "liveout";
                 return -1;
             }
+            // A trailing define with no closing use (dead def) validated
+            // above still renames — its pseudo-span covers exactly its word.
+            bool closed = false;
+            for (const auto& s : spans) {
+                if (s.a <= lastX18 && lastX18 <= s.b) closed = true;
+            }
+            if (!closed) spans.push_back({lastX18, lastX18, 31});
         }
         for (const auto& s : spans) {
             for (std::size_t c : calls) {
-                if (static_cast<long>(c) > s.a && static_cast<long>(c) < s.b) {
+                if (c > static_cast<std::size_t>(s.a) &&
+                    c < static_cast<std::size_t>(s.b)) {
                     ++st.skippedNoReg;
                     if (why) *why = "callspan";
                     return -1;
                 }
             }
         }
-    }
-    const unsigned sub = pickFreeReg(used);
-    if (sub >= 31) {
-        ++st.skippedNoReg;
-        if (why) *why = "noreg";
-        return -1;
+        // Span-level allocation: each span borrows a caller-saved register
+        // that is free FOR THAT WINDOW — compiler temporaries are reused
+        // across a block, so one span may take x15 while a later span in the
+        // same function takes x14. Busy mask per span: every integer register
+        // any reachable instruction in [a, b] touches, plus any register
+        // whose live range crosses the window (defined before it and read
+        // after it) — a substitute colliding with a crossing value would
+        // corrupt the function.
+        for (auto& s : spans) {
+            std::uint32_t busy = 0;
+            for (long i = s.a; i <= s.b && i < static_cast<long>(nwords); ++i) {
+                if (i < 0 || !live[i]) continue;
+                busy |= decode(words[i]).used;
+            }
+            for (unsigned r = 0; r < 31; ++r) {
+                if (busy & (1u << r)) continue;
+                if (crossingLiveRange(words, s.a, s.b, r)) busy |= 1u << r;
+            }
+            s.sub = pickFreeReg(busy);
+            if (s.sub >= 31) {
+                ++st.skippedNoReg;
+                if (why) *why = "noreg";
+                return -1;
+            }
+        }
+        // Patch uses their span's substitute: map every word to the substitute
+        // of the span covering it. Words outside any span hold no patchable
+        // x18 reference (every use closes a span and every def opens one —
+        // validated above).
+        for (const auto& s : spans) {
+            for (long i = s.a; i <= s.b && i < static_cast<long>(nwords); ++i) {
+                if (i >= 0) spanSub[i] = static_cast<std::uint8_t>(s.sub);
+            }
+        }
     }
     // Pass 2: patch every recorded field holding 18 (reachable code only).
     long sites = 0;
     for (std::size_t i = 0; i < nwords; ++i) {
         if (!live[i]) continue;
+        const std::uint8_t sub = spanSub[i];
+        if (sub == 0xFFu) continue;  // no x18 span covers this word
         const Decoded d = decode(words[i]);
         std::uint32_t w = words[i];
         for (unsigned k = 0; k < d.npatch; ++k) {
