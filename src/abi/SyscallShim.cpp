@@ -1190,6 +1190,19 @@ extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int
         darwin_fd = -1;  // Darwin requires fd == -1 for anonymous mappings
     }
 
+    // Align unaligned MAP_FIXED anonymous mapping to host page size.
+    if (darwin_fd < 0 && (darwin_flags & MAP_FIXED) && addr != nullptr) {
+        const long host_page = ::sysconf(_SC_PAGESIZE);
+        const uintptr_t page_mask = (host_page > 0 ? static_cast<uintptr_t>(host_page) : 16384u) - 1;
+        const uintptr_t uaddr = reinterpret_cast<uintptr_t>(addr);
+        if ((uaddr & page_mask) != 0) {
+            const uintptr_t aligned_start = uaddr & ~page_mask;
+            const size_t diff = static_cast<size_t>(uaddr - aligned_start);
+            addr = reinterpret_cast<void*>(aligned_start);
+            length += diff;
+        }
+    }
+
     // File-backed mapping with a sub-page-start offset.
     //
     // Linux pages are 4 KiB and Darwin's are 16 KiB, but bionic code was compiled
@@ -1266,25 +1279,25 @@ extern "C" void* bionic_mmap64(void *addr, size_t length, int prot, int flags, i
     return bionic_mmap(addr, length, prot, flags, fd, offset);
 }
 
+static inline void align_range_to_host_page(void* addr, size_t len, void*& out_addr, size_t& out_len) {
+    const long host_page = ::sysconf(_SC_PAGESIZE);
+    const uintptr_t page_mask = (host_page > 0 ? static_cast<uintptr_t>(host_page) : 4096u) - 1;
+    const uintptr_t uaddr = reinterpret_cast<uintptr_t>(addr);
+    const uintptr_t aligned_start = uaddr & ~page_mask;
+    const uintptr_t aligned_end = (uaddr + len + page_mask) & ~page_mask;
+    out_addr = reinterpret_cast<void*>(aligned_start);
+    out_len = static_cast<size_t>(aligned_end - aligned_start);
+}
+
 extern "C" int bionic_mprotect(void *addr, size_t len, int prot) {
     if (!addr || len == 0) return 0;
-    int r = ::mprotect(addr, len, prot);
+    void* aligned_addr = nullptr;
+    size_t aligned_len = 0;
+    align_range_to_host_page(addr, len, aligned_addr, aligned_len);
+
+    int r = ::mprotect(aligned_addr, aligned_len, prot);
 #if defined(__APPLE__)
     if (r != 0 && (prot & PROT_EXEC)) {
-        // PROT_EXEC was refused, which on iOS means this process has no JIT
-        // entitlement and is not being debugged. Report the failure instead of
-        // downgrading to read/write and returning success.
-        //
-        // Silently succeeding is worse than failing here. A guest JIT (V8, Mono,
-        // IL2CPP mixed mode) takes the 0 as permission to write code into the region
-        // and jump to it, and the process then dies with SIGSEGV or SIGBUS at an
-        // address inside that region — no mention of mprotect, nothing to connect it
-        // to the missing entitlement. Under LiveContainer's JITLess mode this is the
-        // normal case, not a rare one.
-        //
-        // The region is left readable and writable (mprotect made no change on
-        // failure), so a caller that checks the return value can fall back to an
-        // interpreter, which is exactly the decision this lets it make.
         static std::once_flag once;
         std::call_once(once, [] {
             logAndroidMessage(6, "KuDroidSyscall",
@@ -1300,15 +1313,23 @@ extern "C" int bionic_mprotect(void *addr, size_t len, int prot) {
     return r;
 }
 
+extern "C" int bionic_munmap(void *addr, size_t len) {
+    if (!addr || len == 0) return 0;
+    void* aligned_addr = nullptr;
+    size_t aligned_len = 0;
+    align_range_to_host_page(addr, len, aligned_addr, aligned_len);
+    return ::munmap(aligned_addr, aligned_len);
+}
+
 extern "C" int bionic_madvise(void *addr, size_t length, int advice) {
+    if (!addr || length == 0) return 0;
 #ifdef __APPLE__
-    // MADV_DONTNEED in Linux is 4, in Darwin it is 4 as well, but others might differ.
-    // For safety in emulation, we return 0 for unsupported advice.
     if (advice > 10) return 0;
-    return ::madvise(addr, length, advice);
-#else
-    return ::madvise(addr, length, advice);
 #endif
+    void* aligned_addr = nullptr;
+    size_t aligned_len = 0;
+    align_range_to_host_page(addr, length, aligned_addr, aligned_len);
+    return ::madvise(aligned_addr, aligned_len, advice);
 }
 
 extern "C" int bionic_clock_gettime(int clock_id, struct timespec *tp) {
@@ -2126,7 +2147,7 @@ extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_
             return -1;
 
         case 215: // munmap
-            return ::munmap(reinterpret_cast<void*>(a1), static_cast<size_t>(a2));
+            return bionic_munmap(reinterpret_cast<void*>(a1), static_cast<size_t>(a2));
 
         case 222: // mmap
             return (long)bionic_mmap(reinterpret_cast<void*>(a1), static_cast<size_t>(a2), static_cast<int>(a3), static_cast<int>(a4), static_cast<int>(a5), static_cast<off_t>(a6));
@@ -6232,7 +6253,7 @@ const SymbolEntry kSyscallSymbols[] = {
     {"mmap64", reinterpret_cast<void*>(&bionic_mmap64)},
     {"mprotect", reinterpret_cast<void*>(&bionic_mprotect)},
     {"madvise", reinterpret_cast<void*>(&bionic_madvise)},
-    {"munmap", reinterpret_cast<void*>(&::munmap)},
+    {"munmap", reinterpret_cast<void*>(&bionic_munmap)},
     {"open", reinterpret_cast<void*>(&vfs_open)},
     {"open64", reinterpret_cast<void*>(&vfs_open64)},
     {"close", reinterpret_cast<void*>(&bionic_close)},

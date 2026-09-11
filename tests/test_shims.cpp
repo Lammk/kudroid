@@ -48,6 +48,9 @@ extern "C" int bionic_futex(uint32_t* uaddr, int futex_op, uint32_t val,
 extern "C" void* bionic_mremap(void* old_address, size_t old_size,
                                size_t new_size, int flags, void* new_address);
 extern "C" int bionic_sigaction(int signum, const void* act, void* oldact);
+extern "C" int bionic_mprotect(void* addr, size_t len, int prot);
+extern "C" int bionic_munmap(void* addr, size_t len);
+extern "C" int bionic_madvise(void* addr, size_t length, int advice);
 extern "C" long bionic_syscall(long number, ...);
 extern "C" int bionic_sigaltstack(const void* ss, void* oss);
 extern "C" int bionic_sched_getaffinity(pid_t pid, size_t cpusetsize, void* mask);
@@ -508,6 +511,30 @@ static void test_mremap_grow_with_maymove() {
               "first page content preserved after grow");
         ::munmap(grown, page * 4);
     }
+}
+
+static void test_mprotect_unaligned() {
+    std::printf("[mprotect] unaligned range is aligned to host pages\n");
+    const size_t page = static_cast<size_t>(::sysconf(_SC_PAGESIZE));
+    void* p = ::mmap(nullptr, page * 4, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) {
+        std::printf("  INFO: mmap failed errno=%d\n", errno);
+        ++g_failures;
+        ++g_checks;
+        return;
+    }
+    void* target = static_cast<char*>(p) + page + 128;
+    int rc = bionic_mprotect(target, 256, PROT_READ | PROT_WRITE);
+    CHECK(rc == 0, "bionic_mprotect with unaligned address succeeds");
+
+    static_cast<char*>(target)[0] = 0x42;
+    CHECK(static_cast<char*>(target)[0] == 0x42, "unaligned protected range is writable");
+
+    int madv_rc = bionic_madvise(target, 256, 0);
+    CHECK(madv_rc == 0, "bionic_madvise with unaligned address succeeds");
+
+    int unmap_rc = bionic_munmap(p, page * 4);
+    CHECK(unmap_rc == 0, "bionic_munmap succeeds");
 }
 
 // ─── 4. bionic_sigaction ─────────────────────────────────────────────────────
@@ -1863,6 +1890,7 @@ int main() {
     test_sem_rejects_null();
     test_mremap_shrink_in_place();
     test_mremap_grow_with_maymove();
+    test_mprotect_unaligned();
     test_sigaction_flag_roundtrip();
     test_guard_acquire_release();
     test_guard_same_tid_recursion_tolerated();

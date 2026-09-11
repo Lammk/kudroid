@@ -38,6 +38,7 @@ extern "C" const char* bionic_AAssetDir_getNextFileName(void* dir);
 extern "C" void bionic_AAssetDir_close(void* dir);
 extern "C" void* bionic_AAssetManager_openFd(void* manager, const char* filename, void* outStart, void* outLength);
 extern "C" int bionic_AAsset_openFileDescriptor(void* asset, void* outStart, void* outLength);
+extern "C" int bionic_AAsset_seek(void* asset, long offset, int whence);
 
 
 namespace {
@@ -403,6 +404,38 @@ void TestBaseApkFallback(const std::filesystem::path& appDir) {
     Check(sawUnity3d && sawSettings, "openDir reports both data.unity3d and settings.xml");
 }
 
+void TestAssetSeekAndRead(const std::filesystem::path& assetsDir) {
+    std::printf("-- seek and read consistency on extracted assets --\n");
+    const std::string content = "0123456789ABCDEF0123456789ABCDEF";
+    WriteFile(assetsDir / "sound.bin", content);
+    kudroid_set_assets_dir(assetsDir.string().c_str());
+
+    void* asset = bionic_AAssetManager_open(nullptr, "sound.bin", 0);
+    Check(asset != nullptr, "sound asset opens");
+
+    char buf[8] = {0};
+    bionic_AAsset_seek(asset, 10, SEEK_SET);
+    int n1 = bionic_AAsset_read(asset, buf, 6);
+    Check(n1 == 6 && std::string(buf, 6) == "ABCDEF", "read at offset 10 matches");
+
+    bionic_AAsset_seek(asset, 0, SEEK_SET);
+    int n2 = bionic_AAsset_read(asset, buf, 4);
+    Check(n2 == 4 && std::string(buf, 4) == "0123", "read at offset 0 matches after seek backwards");
+
+    off_t start = 0, len = 0;
+    int fd = bionic_AAsset_openFileDescriptor(asset, &start, &len);
+    Check(fd >= 0, "openFileDescriptor returns valid fd");
+    Check(start == 0, "start is 0 for loose asset");
+    Check(len == static_cast<off_t>(content.size()), "length matches file size");
+
+    char fdBuf[5] = {0};
+    ssize_t fdRead = ::read(fd, fdBuf, 4);
+    Check(fdRead == 4 && std::string(fdBuf, 4) == "0123", "fd read from start matches");
+    ::close(fd);
+
+    bionic_AAsset_close(asset);
+}
+
 } // namespace
 
 
@@ -422,6 +455,7 @@ int main() {
     TestOpenDirNesting(root / "dirs");
     TestGetBufferIsMapped(root / "buffers");
     TestBaseApkFallback(root / "apk_fallback");
+    TestAssetSeekAndRead(root / "seek_read");
 
     std::filesystem::remove_all(root);
 

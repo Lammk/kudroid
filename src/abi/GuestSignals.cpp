@@ -466,22 +466,35 @@ bool guest_signal_dispatch(int host_signum, void* host_siginfo, void* host_ucont
         fn(guest_signum, &s.info, &s.uc);
 
 #if defined(__APPLE__) && defined(__aarch64__)
-        // A handler that fixed the fault says so by moving pc — that is how a runtime
-        // patching up a null dereference resumes. Copy the guest's edits back and
-        // report that the fault is dealt with.
-        //
-        // A handler that left pc alone has NOT handled it, whatever it wrote elsewhere.
-        // Reporting success there would resume at the faulting instruction and fault
-        // again, forever: the exact loop that made ULTRAKILL spin at 100% of a core.
-        if (host_ucontext != nullptr && s.uc.uc_mcontext.pc != pc_before) {
+        static thread_local uint64_t t_last_fault_pc = 0;
+        static thread_local uint64_t t_last_fault_addr = 0;
+        static thread_local int t_same_fault_count = 0;
+
+        if (host_ucontext != nullptr) {
             ucontext_t* hu = static_cast<ucontext_t*>(host_ucontext);
             auto* ss = &hu->uc_mcontext->__ss;
-            for (int i = 0; i < 29; ++i) ss->__x[i] = s.uc.uc_mcontext.regs[i];
-            arm_thread_state64_set_fp(*ss, s.uc.uc_mcontext.regs[29]);
-            arm_thread_state64_set_lr_fptr(*ss, reinterpret_cast<void*>(s.uc.uc_mcontext.regs[30]));
-            arm_thread_state64_set_sp(*ss, s.uc.uc_mcontext.sp);
-            arm_thread_state64_set_pc_fptr(*ss, reinterpret_cast<void*>(s.uc.uc_mcontext.pc));
-            state_changed = true;
+            if (s.uc.uc_mcontext.pc != pc_before) {
+                for (int i = 0; i < 29; ++i) ss->__x[i] = s.uc.uc_mcontext.regs[i];
+                arm_thread_state64_set_fp(*ss, s.uc.uc_mcontext.regs[29]);
+                arm_thread_state64_set_lr_fptr(*ss, reinterpret_cast<void*>(s.uc.uc_mcontext.regs[30]));
+                arm_thread_state64_set_sp(*ss, s.uc.uc_mcontext.sp);
+                arm_thread_state64_set_pc_fptr(*ss, reinterpret_cast<void*>(s.uc.uc_mcontext.pc));
+                state_changed = true;
+                t_last_fault_pc = 0;
+                t_last_fault_addr = 0;
+                t_same_fault_count = 0;
+            } else {
+                // Allow in-place fault resolution (e.g. mprotect), with repeat limit to avoid loops.
+                const uint64_t cur_fault_addr = s.uc.uc_mcontext.fault_address;
+                if (pc_before == t_last_fault_pc && cur_fault_addr == t_last_fault_addr) {
+                    ++t_same_fault_count;
+                } else {
+                    t_last_fault_pc = pc_before;
+                    t_last_fault_addr = cur_fault_addr;
+                    t_same_fault_count = 1;
+                }
+                state_changed = (t_same_fault_count <= 2);
+            }
         }
 #endif
     }

@@ -296,8 +296,20 @@ extern "C" int bionic_AAsset_openFileDescriptor(void* asset, void* outStart, voi
     if (!a || !a->file) return -1;
     const int fd = ::dup(::fileno(a->file));
     if (fd < 0) return -1;
+    ::lseek(fd, static_cast<off_t>(a->startOffset), SEEK_SET);
     if (outStart) *static_cast<off_t*>(outStart) = static_cast<off_t>(a->startOffset);
     if (outLength) *static_cast<off_t*>(outLength) = static_cast<off_t>(a->length);
+    return fd;
+}
+
+extern "C" int bionic_AAsset_openFileDescriptor64(void* asset, void* outStart, void* outLength) {
+    auto* a = static_cast<AAssetImpl*>(asset);
+    if (!a || !a->file) return -1;
+    const int fd = ::dup(::fileno(a->file));
+    if (fd < 0) return -1;
+    ::lseek(fd, static_cast<off_t>(a->startOffset), SEEK_SET);
+    if (outStart) *static_cast<int64_t*>(outStart) = static_cast<int64_t>(a->startOffset);
+    if (outLength) *static_cast<int64_t*>(outLength) = static_cast<int64_t>(a->length);
     return fd;
 }
 
@@ -382,13 +394,11 @@ extern "C" int64_t bionic_AAsset_getRemainingLength64(void* asset) {
 
 extern "C" int bionic_AAsset_read(void* asset, void* buf, size_t count) {
     auto* a = static_cast<AAssetImpl*>(asset);
-    if (!a || !buf) return -1;
+    if (!a || !buf || !a->file) return -1;
     if (a->offset >= a->length) return 0;
     const size_t to_read = std::min<size_t>(count, static_cast<size_t>(a->length - a->offset));
     if (to_read == 0) return 0;
-    if (a->startOffset > 0) {
-        std::fseek(a->file, a->startOffset + a->offset, SEEK_SET);
-    }
+    ::fseeko(a->file, static_cast<off_t>(a->startOffset + a->offset), SEEK_SET);
     const size_t n = std::fread(buf, 1, to_read, a->file);
     a->offset += static_cast<long>(n);
     return static_cast<int>(n);
@@ -670,7 +680,7 @@ const SymbolEntry kAssetSymbols[] = {
     {"AAsset_getBuffer", reinterpret_cast<void*>(&bionic_AAsset_getBuffer)},
     {"AAsset_close", reinterpret_cast<void*>(&bionic_AAsset_close)},
     {"AAsset_openFileDescriptor", reinterpret_cast<void*>(&bionic_AAsset_openFileDescriptor)},
-    {"AAsset_openFileDescriptor64", reinterpret_cast<void*>(&bionic_AAsset_openFileDescriptor)},
+    {"AAsset_openFileDescriptor64", reinterpret_cast<void*>(&bionic_AAsset_openFileDescriptor64)},
     {"AAsset_isAllocated", reinterpret_cast<void*>(&bionic_AAsset_isAllocated)},
 
     // AConfiguration
