@@ -596,9 +596,10 @@ bool VFSPathRemapper::init_pseudo_files() {
         }
 
         if (current.empty() ||
-            (std::string(entry.path) == "system/build.prop" && current.find("ro.build.fingerprint") == std::string::npos)) {
+            (std::string(entry.path) == "system/build.prop" && current.find("ro.build.fingerprint") == std::string::npos && current.find("ro.custom.edit") == std::string::npos)) {
             current = entry.content;
         } else if (std::string(entry.path) == "proc/mounts") {
+
             std::string required = entry.content;
             std::istringstream existing(current);
             std::string line;

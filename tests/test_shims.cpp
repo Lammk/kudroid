@@ -35,8 +35,10 @@
 #include <sys/mman.h>
 #include <sched.h>
 #include <semaphore.h>
+#include <sys/socket.h>
 #include <sys/uio.h>
 #include <unistd.h>
+
 
 // ─── Shims under test (extern "C", defined in SyscallShim.cpp) ──────────────
 extern "C" int bionic_pthread_once(int* guest_once, void (*init_routine)(void));
