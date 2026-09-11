@@ -2539,7 +2539,20 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
             }
         }
 
-        const std::filesystem::path libDir = appDir / ("lib/" KUDROID_DEVICE_ABI);
+        // Android standard environment variables
+        ::setenv("ANDROID_ROOT", "/system", 1);
+        ::setenv("ANDROID_DATA", "/data", 1);
+        ::setenv("ANDROID_STORAGE", "/storage", 1);
+        ::setenv("EXTERNAL_STORAGE", "/sdcard", 1);
+        ::setenv("TMPDIR", "/data/local/tmp", 1);
+
+        std::filesystem::path libDir = appDir / ("lib/" KUDROID_DEVICE_ABI);
+        if (!std::filesystem::exists(libDir)) {
+            const auto aospLibDir = appDir / "lib/arm64";
+            if (std::filesystem::exists(aospLibDir)) {
+                libDir = aospLibDir;
+            }
+        }
         const std::filesystem::path assetsDir = appDir / "assets";
         kudroid_set_assets_dir(assetsDir.string().c_str());
         kudroid_set_native_lib_dir(libDir.string().c_str());
@@ -2737,9 +2750,15 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                         s_obbPath = "/sdcard/Android/obb/" + resolvedAppName;
 
                         std::error_code vfsEc;
-                        std::filesystem::create_directories(std::filesystem::path(remapper.androidRoot()) / "data/data" / resolvedAppName, vfsEc);
-                        std::filesystem::create_directories(std::filesystem::path(remapper.androidRoot()) / "sdcard/Android/data" / resolvedAppName, vfsEc);
-                        std::filesystem::create_directories(std::filesystem::path(remapper.androidRoot()) / "sdcard/Android/obb" / resolvedAppName, vfsEc);
+                        const auto rootPath = std::filesystem::path(remapper.androidRoot());
+                        std::filesystem::create_directories(rootPath / "data/data" / resolvedAppName / "files", vfsEc);
+                        std::filesystem::create_directories(rootPath / "data/data" / resolvedAppName / "cache", vfsEc);
+                        std::filesystem::create_directories(rootPath / "data/data" / resolvedAppName / "shared_prefs", vfsEc);
+                        std::filesystem::create_directories(rootPath / "data/data" / resolvedAppName / "databases", vfsEc);
+                        std::filesystem::create_directories(rootPath / "data/data" / resolvedAppName / "code_cache", vfsEc);
+                        std::filesystem::create_directories(rootPath / "sdcard/Android/data" / resolvedAppName / "files", vfsEc);
+                        std::filesystem::create_directories(rootPath / "sdcard/Android/data" / resolvedAppName / "cache", vfsEc);
+                        std::filesystem::create_directories(rootPath / "sdcard/Android/obb" / resolvedAppName, vfsEc);
 
                         static ANativeActivityCallbacks mock_callbacks = {};
                         static ANativeActivity mock_activity = {

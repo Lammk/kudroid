@@ -272,13 +272,31 @@ extern "C" int kuart_init(const char* app_dir) {
     if (app_dir != nullptr && app_dir[0] != '\0') {
         std::error_code ec;
         std::vector<std::filesystem::path> dex_paths;
-        for (const auto& entry : std::filesystem::directory_iterator(app_dir, ec)) {
+        std::filesystem::path dex_dir = std::filesystem::path(app_dir) / "oat";
+        if (!std::filesystem::exists(dex_dir, ec) || !std::filesystem::is_directory(dex_dir, ec)) {
+            dex_dir = app_dir;
+        }
+
+        for (const auto& entry : std::filesystem::directory_iterator(dex_dir, ec)) {
             if (ec) break;
             if (!entry.is_regular_file()) continue;
             const std::string name = entry.path().filename().string();
             if (name.size() > 4 && name.rfind("classes", 0) == 0 &&
                 name.compare(name.size() - 4, 4, ".dex") == 0) {
                 dex_paths.push_back(entry.path());
+            }
+        }
+        // Fallback to app_dir if oat/ had no .dex files
+        if (dex_paths.empty() && dex_dir != app_dir) {
+            ec.clear();
+            for (const auto& entry : std::filesystem::directory_iterator(app_dir, ec)) {
+                if (ec) break;
+                if (!entry.is_regular_file()) continue;
+                const std::string name = entry.path().filename().string();
+                if (name.size() > 4 && name.rfind("classes", 0) == 0 &&
+                    name.compare(name.size() - 4, 4, ".dex") == 0) {
+                    dex_paths.push_back(entry.path());
+                }
             }
         }
         // classes.dex before classes2.dex, classes3.dex... like real Android.

@@ -936,7 +936,6 @@ static bool extract_apk_impl(const std::string& apkPath, const std::string& targ
             }
         }
         else if (entry.size() >= 4 && entry.compare(entry.size() - 4, 4, ".dex") == 0) shouldExtract = true;
-        else if (entry.rfind("assets/", 0) == 0) shouldExtract = true;
         else if (entry == "AndroidManifest.xml" || entry == "resources.arsc") shouldExtract = true;
         else if (iconScore > bestIconScore) shouldExtract = true;
 
@@ -946,7 +945,6 @@ static bool extract_apk_impl(const std::string& apkPath, const std::string& targ
         if (entry.empty() || entry.back() == '/') {
             continue; // skip folder
         }
-        apkLog("Extracting: " + entry);
 
         found = true;
         if (entry == "AndroidManifest.xml") {
@@ -966,11 +964,18 @@ static bool extract_apk_impl(const std::string& apkPath, const std::string& targ
             extractZipEntryToMemory(apk, entryInfo, bestIconData);
         }
 
-        if (iconScore > 0 && entry != "AndroidManifest.xml" && entry != "resources.arsc" && entry.rfind("assets/", 0) != 0 && entry.rfind("lib/", 0) != 0 && !endsWithCi(entry, ".dex")) {
+        // Do not write resources.arsc or icons to disk at this step
+        if (entry == "resources.arsc" || (iconScore > 0 && entry != "AndroidManifest.xml" &&
+            entry.rfind("lib/", 0) != 0 && !endsWithCi(entry, ".dex"))) {
             continue;
         }
 
-        const auto destination = std::filesystem::path(targetDirectory) / entry;
+        apkLog("Extracting: " + entry);
+
+        // Save .dex files into oat/ subdirectory
+        const auto destination = endsWithCi(entry, ".dex")
+            ? std::filesystem::path(targetDirectory) / "oat" / std::filesystem::path(entry).filename()
+            : std::filesystem::path(targetDirectory) / entry;
         std::filesystem::create_directories(destination.parent_path(), error);
 
         if (!extractZipEntryToFile(apk, entryInfo, destination.string())) {
@@ -1005,6 +1010,19 @@ static bool extract_apk_impl(const std::string& apkPath, const std::string& targ
                KUDROID_DEVICE_ABI + ". KuDroid can only load " + KUDROID_DEVICE_ABI +
                " (the ELF loader relocates AArch64 only), so this APK's native code"
                " will be missing.");
+    }
+
+    // Symlink lib/arm64 to arm64-v8a for AOSP convention.
+    {
+        const auto libArm64V8a = std::filesystem::path(targetDirectory) / "lib/arm64-v8a";
+        const auto libArm64 = std::filesystem::path(targetDirectory) / "lib/arm64";
+        std::error_code linkEc;
+        if (std::filesystem::exists(libArm64V8a, linkEc) && !std::filesystem::exists(libArm64, linkEc)) {
+            std::filesystem::create_directory_symlink("arm64-v8a", libArm64, linkEc);
+            if (!linkEc) {
+                apkLog("  -> Created lib/arm64 symlink to arm64-v8a");
+            }
+        }
     }
 
     // Save app_icon.png if found

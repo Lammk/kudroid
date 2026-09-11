@@ -17,11 +17,14 @@
 #include "kudroid/platform/AssetShim.h"
 
 #include <cstdio>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <vector>
 #include <unistd.h>
+
 
 // ─── Shims under test (extern "C", defined in AssetShim.cpp) ────────────────
 extern "C" void* bionic_AAssetManager_open(void* manager, const char* filename, int mode);
@@ -33,6 +36,9 @@ extern "C" void bionic_AAsset_close(void* asset);
 extern "C" void* bionic_AAssetManager_openDir(void* manager, const char* dirName);
 extern "C" const char* bionic_AAssetDir_getNextFileName(void* dir);
 extern "C" void bionic_AAssetDir_close(void* dir);
+extern "C" void* bionic_AAssetManager_openFd(void* manager, const char* filename, void* outStart, void* outLength);
+extern "C" int bionic_AAsset_openFileDescriptor(void* asset, void* outStart, void* outLength);
+
 
 namespace {
 
@@ -260,7 +266,145 @@ void TestGetBufferIsMapped(const std::filesystem::path& assetsDir) {
     }
 }
 
+void put16(std::vector<uint8_t>& v, uint16_t x) {
+    v.push_back(static_cast<uint8_t>(x & 0xFF));
+    v.push_back(static_cast<uint8_t>(x >> 8));
+}
+void put32(std::vector<uint8_t>& v, uint32_t x) {
+    put16(v, static_cast<uint16_t>(x & 0xFFFF));
+    put16(v, static_cast<uint16_t>(x >> 16));
+}
+
+struct TestZipEntry {
+    std::string name;
+    std::string content;
+};
+
+std::vector<uint8_t> BuildTestZip(const std::vector<TestZipEntry>& entries) {
+    std::vector<uint8_t> out;
+    std::vector<uint32_t> localOffsets;
+
+    for (const auto& e : entries) {
+        localOffsets.push_back(static_cast<uint32_t>(out.size()));
+        put32(out, 0x04034b50);                                   // local header sig
+        put16(out, 20);                                           // version needed
+        put16(out, 0);                                            // flags
+        put16(out, 0);                                            // method: stored
+        put16(out, 0);                                            // time
+        put16(out, 0);                                            // date
+        put32(out, 0);                                            // crc32
+        put32(out, static_cast<uint32_t>(e.content.size()));      // compressed
+        put32(out, static_cast<uint32_t>(e.content.size()));      // uncompressed
+        put16(out, static_cast<uint16_t>(e.name.size()));
+        put16(out, 0);                                            // extra length
+        out.insert(out.end(), e.name.begin(), e.name.end());
+        out.insert(out.end(), e.content.begin(), e.content.end());
+    }
+
+    const uint32_t centralOffset = static_cast<uint32_t>(out.size());
+    for (size_t i = 0; i < entries.size(); ++i) {
+        const auto& e = entries[i];
+        put32(out, 0x02014b50);                                   // central header sig
+        put16(out, 20);                                           // version made by
+        put16(out, 20);                                           // version needed
+        put16(out, 0);                                            // flags
+        put16(out, 0);                                            // method: stored
+        put16(out, 0);                                            // time
+        put16(out, 0);                                            // date
+        put32(out, 0);                                            // crc32
+        put32(out, static_cast<uint32_t>(e.content.size()));
+        put32(out, static_cast<uint32_t>(e.content.size()));
+        put16(out, static_cast<uint16_t>(e.name.size()));
+        put16(out, 0);                                            // extra
+        put16(out, 0);                                            // comment
+        put16(out, 0);                                            // disk start
+        put16(out, 0);                                            // internal attrs
+        put32(out, 0);                                            // external attrs
+        put32(out, localOffsets[i]);
+        out.insert(out.end(), e.name.begin(), e.name.end());
+    }
+    const uint32_t centralSize = static_cast<uint32_t>(out.size()) - centralOffset;
+
+    put32(out, 0x06054b50);                                       // EOCD sig
+    put16(out, 0);                                                // this disk
+    put16(out, 0);                                                // central dir disk
+    put16(out, static_cast<uint16_t>(entries.size()));
+    put16(out, static_cast<uint16_t>(entries.size()));
+    put32(out, centralSize);
+    put32(out, centralOffset);
+    put16(out, 0);                                                // comment length
+    return out;
+}
+
+void TestBaseApkFallback(const std::filesystem::path& appDir) {
+    std::printf("-- fallback to base.apk when assets are not unpacked on disk --\n");
+
+    const auto assetsDir = appDir / "assets";
+    // Do not create assetsDir on disk!
+    const auto baseApkPath = appDir / "base.apk";
+
+    std::vector<TestZipEntry> entries = {
+        {"assets/bin/Data/data.unity3d", "UNITY_DATA_BLOB_STORED"},
+        {"assets/bin/Data/settings.xml", "<config>ok</config>"},
+        {"assets/sub/foo.txt", "bar"}
+    };
+    const auto zipBytes = BuildTestZip(entries);
+    std::filesystem::create_directories(appDir);
+    {
+        std::ofstream out(baseApkPath, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(zipBytes.data()), static_cast<std::streamsize>(zipBytes.size()));
+    }
+
+    kudroid_set_assets_dir(assetsDir.string().c_str());
+
+    // 1. Test reading asset stored inside base.apk
+    Check(ReadAsset("bin/Data/data.unity3d") == "UNITY_DATA_BLOB_STORED",
+          "ReadAsset resolves entry stored inside base.apk");
+    Check(ReadAsset("assets/bin/Data/settings.xml") == "<config>ok</config>",
+          "ReadAsset resolves entry with 'assets/' prefix from base.apk");
+
+    // 2. Test openFd and file descriptor reading
+    off_t start = -1, len = -1;
+    void* asset = bionic_AAssetManager_openFd(nullptr, "bin/Data/data.unity3d", &start, &len);
+    Check(asset != nullptr, "openFd returns non-null asset");
+    Check(start > 0, "openFd outStart is non-zero offset into base.apk");
+    Check(len == 22, "openFd outLength matches stored payload size");
+
+    if (asset != nullptr) {
+        off_t start2 = -1, len2 = -1;
+        int fd = bionic_AAsset_openFileDescriptor(asset, &start2, &len2);
+        Check(fd >= 0, "openFileDescriptor returns valid fd");
+        Check(start2 == start && len2 == len, "openFileDescriptor start/len match openFd");
+        if (fd >= 0) {
+            std::string buf(static_cast<size_t>(len2), '\0');
+            ::lseek(fd, start2, SEEK_SET);
+            const ssize_t bytesRead = ::read(fd, buf.data(), buf.size());
+            Check(bytesRead == len2, "read from base.apk fd at start offset matches len");
+            Check(buf == "UNITY_DATA_BLOB_STORED", "data read via openFileDescriptor fd matches content");
+            ::close(fd);
+        }
+        bionic_AAsset_close(asset);
+    }
+
+    // 3. Test openDir fallback to base.apk
+    void* dir = bionic_AAssetManager_openDir(nullptr, "bin/Data");
+    Check(dir != nullptr, "openDir returns dir handle from base.apk");
+    int count = 0;
+    bool sawUnity3d = false;
+    bool sawSettings = false;
+    for (const char* name = bionic_AAssetDir_getNextFileName(dir); name != nullptr;
+         name = bionic_AAssetDir_getNextFileName(dir)) {
+        ++count;
+        if (std::strcmp(name, "data.unity3d") == 0) sawUnity3d = true;
+        if (std::strcmp(name, "settings.xml") == 0) sawSettings = true;
+    }
+    bionic_AAssetDir_close(dir);
+    Check(count == 2, "openDir finds both entries in bin/Data from base.apk");
+    Check(sawUnity3d && sawSettings, "openDir reports both data.unity3d and settings.xml");
+}
+
 } // namespace
+
 
 int main() {
     const std::filesystem::path root =
@@ -277,8 +421,10 @@ int main() {
     TestMissingAndDegenerate(root / "missing");
     TestOpenDirNesting(root / "dirs");
     TestGetBufferIsMapped(root / "buffers");
+    TestBaseApkFallback(root / "apk_fallback");
 
     std::filesystem::remove_all(root);
+
 
     std::printf("=== %d checks, %d failures ===\n", g_checks, g_failures);
     if (g_failures != 0) {

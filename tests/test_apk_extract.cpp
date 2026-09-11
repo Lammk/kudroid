@@ -157,11 +157,12 @@ int main() {
                   std::string(reinterpret_cast<const char*>(zip.data()), zip.size()),
               "base.apk is byte-identical to the source archive");
 
-        // The loose extraction must still happen — the ELF loader reads .so files off
-        // disk, and app_info.json drives the launcher list.
-        Check(std::filesystem::exists(appDir / "classes.dex"), "classes.dex was extracted");
-        Check(std::filesystem::exists(appDir / "assets/bin/Data/unity_app_guid"),
-              "assets were extracted as loose files too");
+        // ELF loader reads .so files off disk, classes.dex is kept under oat/,
+        // and app_info.json drives the launcher list. Assets are NOT extracted loosely to disk
+        // because engines read them directly from base.apk, saving storage and install time.
+        Check(std::filesystem::exists(appDir / "oat/classes.dex"), "classes.dex was extracted to oat/");
+        Check(!std::filesystem::exists(appDir / "assets"),
+              "assets are not extracted as loose files (served via base.apk)");
         Check(std::filesystem::exists(appDir / "app_info.json"), "app_info.json was written");
     }
 
@@ -189,7 +190,7 @@ int main() {
     {
         const auto splitDir = root / "data" / "app" / "split_target";
         const std::vector<Entry> splitEntries = {
-            {"assets/split-only.txt", "split-payload"},
+            {"lib/arm64-v8a/libsplit.so", "split-payload"},
         };
         const std::vector<std::uint8_t> splitZip = BuildZip(splitEntries);
         const auto splitApk = root / "config.arm64_v8a.apk";
@@ -201,7 +202,7 @@ int main() {
 
         const bool ok = kudroid::APKExtractor::extract_split(splitApk.string(), splitDir.string());
         Check(ok, std::string("extract_split succeeded: ") + kudroid::APKExtractor::lastError());
-        Check(std::filesystem::exists(splitDir / "assets/split-only.txt"),
+        Check(std::filesystem::exists(splitDir / "lib/arm64-v8a/libsplit.so"),
               "the split's entries were extracted");
         Check(!std::filesystem::exists(splitDir / "base.apk"),
               "a split does not leave a base.apk behind");
@@ -233,8 +234,7 @@ int main() {
         Check(!std::filesystem::exists(orphanDex), "orphaned .dex from old app was purged on update");
 
         // Verify current APK's code files are still present
-        Check(std::filesystem::exists(appDir / "classes.dex"), "current classes.dex is preserved");
-        Check(std::filesystem::exists(appDir / "assets/bin/Data/unity_app_guid"), "current assets are preserved");
+        Check(std::filesystem::exists(appDir / "oat/classes.dex"), "current classes.dex is preserved");
     }
 
     std::filesystem::remove_all(root, ec);

@@ -175,11 +175,16 @@ void TestPseudoFiles(kudroid::VFSPathRemapper& remapper) {
           "build.prop reports the SDK level from DeviceProfile.h");
     Check(buildProp.find("ro.product.cpu.abi=" KUDROID_DEVICE_ABI) != std::string::npos,
           "build.prop reports the ABI from DeviceProfile.h");
+    Check(buildProp.find("ro.build.fingerprint=") != std::string::npos,
+          "build.prop reports standard ro.build.fingerprint");
+    Check(buildProp.find("ro.hardware=kudroid") != std::string::npos,
+          "build.prop reports ro.hardware");
 
     for (const char* relative : {"proc/cpuinfo", "proc/meminfo", "proc/self/cmdline",
-                                 "system/etc/hosts", "proc/mounts"}) {
+                                 "system/etc/hosts", "proc/mounts", "default.prop",
+                                 "vendor/build.prop", "data/user/0", "tmp"}) {
         Check(std::filesystem::exists(std::filesystem::path(root) / relative),
-              std::string("pseudo file present: ") + relative);
+              std::string("pseudo file / standard symlink present: ") + relative);
     }
 
     // Per-core scheduling files: guests probe these for capacity class.

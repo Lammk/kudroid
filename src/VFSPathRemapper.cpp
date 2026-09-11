@@ -64,6 +64,29 @@ std::string defaultDocumentsDirectory() {
     return ".";
 }
 
+static int translate_linux_open_flags(int flags) {
+#if defined(__APPLE__)
+    int host_flags = 0;
+    int acc = flags & 3;
+    if (acc == 0) host_flags |= O_RDONLY;
+    else if (acc == 1) host_flags |= O_WRONLY;
+    else if (acc == 2) host_flags |= O_RDWR;
+
+    if (flags & 0x40) host_flags |= O_CREAT;
+    if (flags & 0x80) host_flags |= O_EXCL;
+    if (flags & 0x100) host_flags |= O_NOCTTY;
+    if (flags & 0x200) host_flags |= O_TRUNC;
+    if (flags & 0x400) host_flags |= O_APPEND;
+    if (flags & 0x800) host_flags |= O_NONBLOCK;
+#if defined(O_CLOEXEC)
+    if (flags & 0x80000) host_flags |= O_CLOEXEC;
+#endif
+    return host_flags;
+#else
+    return flags;
+#endif
+}
+
 // Resolve ".", ".." and duplicate separators without touching the filesystem.
 //
 // This has to happen BEFORE the path is joined to android_root, because the kernel
@@ -236,10 +259,11 @@ bool VFSPathRemapper::initializeLocked() {
     // create base folders (android-like layout).
     for (const auto& relative : {
         "data/data", "data/app", "data/local/tmp", "data/cache",
+        "data/user", "data/user_de",
         "sdcard/Download", "sdcard/Documents", "sdcard/Pictures", "sdcard/DCIM",
         "sdcard/Music", "sdcard/Movies", "sdcard/Android/data", "sdcard/Android/obb", "sdcard/Android/media",
-        "system", "proc/self", "sys", "mnt", "storage/emulated", "dev",
-        "etc", "system/etc", "system/etc/security/cacerts", "system/etc/permissions"
+        "system", "proc/self", "sys", "mnt", "storage/emulated", "storage/self", "dev",
+        "vendor", "etc", "system/etc", "system/etc/security/cacerts", "system/etc/permissions"
     }) {
         std::filesystem::create_directories(std::filesystem::path(androidRoot_) / relative, error);
         if (error) {
@@ -249,20 +273,29 @@ bool VFSPathRemapper::initializeLocked() {
     }
     
     // create soft links
-    auto make_symlink = [&](const char* target, const char* linkpath) {
+    auto make_symlink = [&](const char* target, const char* linkpath, bool isDir = true) {
         std::error_code ec;
         std::filesystem::path fullLink = std::filesystem::path(androidRoot_) / linkpath;
-        if (!std::filesystem::exists(fullLink)) {
-            std::filesystem::create_directory_symlink(target, fullLink, ec);
+        if (!std::filesystem::exists(fullLink, ec)) {
+            if (isDir) {
+                std::filesystem::create_directory_symlink(target, fullLink, ec);
+            } else {
+                std::filesystem::create_symlink(target, fullLink, ec);
+            }
         }
     };
     
     make_symlink("../sdcard", "mnt/sdcard");
     make_symlink("../../sdcard", "storage/emulated/0");
     make_symlink("../../sdcard", "storage/self/primary");
+    make_symlink("../data", "data/user/0");
+    make_symlink("../data", "data/user_de/0");
+    make_symlink("data/local/tmp", "tmp");
     std::filesystem::remove(std::filesystem::path(androidRoot_) / "etc", error);
     make_symlink("system/etc", "etc");
     make_symlink("/dev/fd", "proc/self/fd");
+    make_symlink("system/build.prop", "default.prop", false);
+    make_symlink("../system/build.prop", "vendor/build.prop", false);
 
     return init_pseudo_files();
 }
@@ -398,13 +431,30 @@ bool VFSPathRemapper::init_pseudo_files() {
     files.push_back({"system/build.prop",
          "ro.build.version.release=" KUDROID_ANDROID_RELEASE "\n"
          "ro.build.version.sdk=" KUDROID_SDK_INT_STR "\n"
+         "ro.build.version.codename=REL\n"
+         "ro.build.version.incremental=6000000\n"
+         "ro.build.type=user\n"
+         "ro.build.tags=release-keys\n"
+         "ro.build.fingerprint=" KUDROID_DEVICE_BRAND "/" KUDROID_DEVICE_NAME "/" KUDROID_DEVICE_BOARD
+         ":" KUDROID_ANDROID_RELEASE "/QP1A.190711.020/6000000:user/release-keys\n"
          "ro.product.model=" KUDROID_DEVICE_MODEL "\n"
          "ro.product.manufacturer=" KUDROID_DEVICE_MANUFACTURER "\n"
          "ro.product.brand=" KUDROID_DEVICE_BRAND "\n"
          "ro.product.name=" KUDROID_DEVICE_NAME "\n"
          "ro.product.device=" KUDROID_DEVICE_BOARD "\n"
          "ro.product.cpu.abi=" KUDROID_DEVICE_ABI "\n"
-         "ro.product.cpu.abilist=" KUDROID_DEVICE_ABI "\n", false});
+         "ro.product.cpu.abilist=" KUDROID_DEVICE_ABI "\n"
+         "ro.product.cpu.abilist64=" KUDROID_DEVICE_ABI "\n"
+         "ro.hardware=kudroid\n"
+         "ro.board.platform=kudroid\n"
+         "ro.boot.hardware=kudroid\n"
+         "ro.sf.lcd_density=480\n"
+         "ro.opengles.version=196610\n"
+         "ro.debuggable=0\n"
+         "persist.sys.timezone=UTC\n"
+         "persist.sys.locale=en-US\n"
+         "sys.boot_completed=1\n"
+         "gsm.version.baseband=1.0\n", false});
     files.push_back({"proc/cpuinfo", BuildCpuInfo(cpu), true});
     files.push_back({"proc/meminfo", BuildMemInfo(mem), true});
     files.push_back({"proc/version",
@@ -545,7 +595,8 @@ bool VFSPathRemapper::init_pseudo_files() {
             input.close();
         }
 
-        if (current.empty()) {
+        if (current.empty() ||
+            (std::string(entry.path) == "system/build.prop" && current.find("ro.build.fingerprint") == std::string::npos)) {
             current = entry.content;
         } else if (std::string(entry.path) == "proc/mounts") {
             std::string required = entry.content;
@@ -785,6 +836,129 @@ uint64_t zip_extract_entry(const std::string& archivePath, const std::string& en
         return 0;
     }
     return data.size();
+}
+
+bool zip_stat_entry(const std::string& archivePath, const std::string& entry,
+                    uint64_t* outOffset, uint64_t* outSize, uint16_t* outMethod) {
+    std::FILE* f = std::fopen(archivePath.c_str(), "rb");
+    if (f == nullptr) return false;
+    struct FileCloser {
+        std::FILE* f;
+        ~FileCloser() { std::fclose(f); }
+    } closer{f};
+
+    if (std::fseek(f, 0, SEEK_END) != 0) return false;
+    const long long size = std::ftell(f);
+    if (size < 22) return false;
+    const size_t eocd = zip_find_eocd(f, size);
+    if (eocd == std::string::npos) return false;
+    uint8_t e[22];
+    if (std::fseek(f, static_cast<long>(eocd), SEEK_SET) != 0) return false;
+    if (std::fread(e, 1, 22, f) != 22) return false;
+    const uint16_t total_entries = zip_read16(e, 10);
+    const uint32_t cd_offset = zip_read32(e, 16);
+
+    struct Hit {
+        bool valid = false;
+        uint16_t method = 0;
+        uint32_t usize = 0;
+        uint32_t local_off = 0;
+    };
+    auto walk = [&](bool fold_case) -> Hit {
+        if (std::fseek(f, static_cast<long>(cd_offset), SEEK_SET) != 0) return {};
+        for (uint16_t n = 0; n < total_entries; ++n) {
+            uint8_t h[46];
+            if (std::fread(h, 1, 46, f) != 46) return {};
+            if (!(h[0] == 'P' && h[1] == 'K' && h[2] == 1 && h[3] == 2)) return {};
+            const uint16_t name_len = zip_read16(h, 28);
+            const uint16_t extra_len = zip_read16(h, 30);
+            const uint16_t comment_len = zip_read16(h, 32);
+            Hit hit;
+            hit.method = zip_read16(h, 10);
+            hit.usize = zip_read32(h, 24);
+            hit.local_off = zip_read32(h, 42);
+            std::string name(name_len, 0);
+            if (name_len > 0 && std::fread(name.data(), 1, name_len, f) != name_len) return {};
+            if (std::fseek(f, extra_len + comment_len, SEEK_CUR) != 0) return {};
+            const bool eq = fold_case
+                                ? name.size() == entry.size() &&
+                                      std::equal(name.begin(), name.end(), entry.begin(),
+                                                 [](char a, char b) {
+                                                     return std::tolower(static_cast<unsigned char>(a)) ==
+                                                            std::tolower(static_cast<unsigned char>(b));
+                                                 })
+                                : name == entry;
+            if (eq) {
+                hit.valid = true;
+                return hit;
+            }
+        }
+        return {};
+    };
+    Hit hit = walk(false);
+    if (!hit.valid) hit = walk(true);
+    if (!hit.valid) return false;
+
+    if (std::fseek(f, static_cast<long>(hit.local_off), SEEK_SET) != 0) return false;
+    uint8_t lh[30];
+    if (std::fread(lh, 1, 30, f) != 30) return false;
+    if (!(lh[0] == 'P' && lh[1] == 'K' && lh[2] == 3 && lh[3] == 4)) return false;
+    const uint16_t l_nlen = zip_read16(lh, 26);
+    const uint16_t l_elen = zip_read16(lh, 28);
+    const uint64_t payload_off = static_cast<uint64_t>(hit.local_off) + 30 + l_nlen + l_elen;
+
+    if (outOffset) *outOffset = payload_off;
+    if (outSize) *outSize = hit.usize;
+    if (outMethod) *outMethod = hit.method;
+    return true;
+}
+
+std::vector<std::string> zip_list_dir_entries(const std::string& archivePath,
+                                              const std::string& dirPrefix) {
+    std::vector<std::string> result;
+    std::FILE* f = std::fopen(archivePath.c_str(), "rb");
+    if (f == nullptr) return result;
+    struct FileCloser {
+        std::FILE* f;
+        ~FileCloser() { std::fclose(f); }
+    } closer{f};
+
+    if (std::fseek(f, 0, SEEK_END) != 0) return result;
+    const long long size = std::ftell(f);
+    if (size < 22) return result;
+    const size_t eocd = zip_find_eocd(f, size);
+    if (eocd == std::string::npos) return result;
+    uint8_t e[22];
+    if (std::fseek(f, static_cast<long>(eocd), SEEK_SET) != 0) return result;
+    if (std::fread(e, 1, 22, f) != 22) return result;
+    const uint16_t total_entries = zip_read16(e, 10);
+    const uint32_t cd_offset = zip_read32(e, 16);
+
+    std::string prefix = dirPrefix;
+    while (!prefix.empty() && prefix[0] == '/') prefix.erase(0, 1);
+    if (!prefix.empty() && prefix.back() != '/') prefix.push_back('/');
+
+    if (std::fseek(f, static_cast<long>(cd_offset), SEEK_SET) != 0) return result;
+    for (uint16_t n = 0; n < total_entries; ++n) {
+        uint8_t h[46];
+        if (std::fread(h, 1, 46, f) != 46) break;
+        if (!(h[0] == 'P' && h[1] == 'K' && h[2] == 1 && h[3] == 2)) break;
+        const uint16_t name_len = zip_read16(h, 28);
+        const uint16_t extra_len = zip_read16(h, 30);
+        const uint16_t comment_len = zip_read16(h, 32);
+        std::string name(name_len, 0);
+        if (name_len > 0 && std::fread(name.data(), 1, name_len, f) != name_len) break;
+        if (std::fseek(f, extra_len + comment_len, SEEK_CUR) != 0) break;
+
+        if (name.rfind(prefix, 0) == 0) {
+            std::string sub = name.substr(prefix.size());
+            if (!sub.empty() && sub.back() == '/') sub.pop_back();
+            if (!sub.empty() && sub.find('/') == std::string::npos) {
+                result.push_back(std::move(sub));
+            }
+        }
+    }
+    return result;
 }
 
 // Cache home for extracted jar entries. Lives under android_root/data/cache: inside
@@ -1074,13 +1248,14 @@ int vfs_open(const char* path, int flags, mode_t mode) {
     }
 
     const std::string mapped = VFSPathRemapper::getInstance().remap(path);
-    // for o_creat, make sure the root directory exists (avoid enoent problem).
-    if (flags & O_CREAT) {
+    const int host_flags = translate_linux_open_flags(flags);
+    // For O_CREAT, make sure the parent directory exists (avoid ENOENT problem).
+    if (host_flags & O_CREAT) {
         std::error_code ec;
         std::filesystem::create_directories(std::filesystem::path(mapped).parent_path(), ec);
     }
-    const int result = (flags & O_CREAT) ? ::open(mapped.c_str(), flags, mode)
-                                         : ::open(mapped.c_str(), flags);
+    const int result = (host_flags & O_CREAT) ? ::open(mapped.c_str(), host_flags, mode)
+                                              : ::open(mapped.c_str(), host_flags);
     vfsTrace("open(" + mapped + ") -> " + std::to_string(result));
     if (traceOpen) {
         std::fprintf(stderr, "[KuDroidVFS] open -> %d (%s)\n", result,

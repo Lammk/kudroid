@@ -2,6 +2,7 @@
 #include "kudroid/platform/ShimDefs.h"
 #include "kudroid/platform/MemoryInfo.h"
 #include "kudroid/DeviceProfile.h"
+#include "kudroid/VFSPathRemapper.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -120,12 +121,12 @@ struct AAssetImpl {
     FILE* file;
     long length;
     long offset;
+    long startOffset;  // base offset in file (for uncompressed APK assets)
     std::string name;
     void* buffer;      // cache for AAsset_getBuffer
     size_t bufferSize;
-    // True when `buffer` came from mmap rather than malloc, so close() knows how to
-    // release it. The two are not interchangeable: munmap on heap memory and free on a
-    // mapping are both undefined.
+    void* mmapBase;    // base pointer for page-aligned mmap
+    size_t mmapSize;   // total mapped size
     bool bufferMapped;
 };
 
@@ -187,18 +188,46 @@ static AAssetImpl* open_asset(const char* filename) {
 
     std::string rel;
     std::filesystem::path full;
+    long startOffset = 0;
+    long entryLength = 0;
+
     if (!resolve_asset_path(base, filename, &rel, &full)) {
-        // Name the path that was looked for, not just the fact of failure. The old message
-        // said only "not found", and the game's own log line prints the name it asked for
-        // — so when the two differ, as they did for every nested asset, nothing on either
-        // side showed the path that was actually tried.
+        // Fallback: Check if base.apk exists in parent directory of assets dir
+        const auto appDir = std::filesystem::path(base).parent_path();
+        const auto baseApk = appDir / "base.apk";
+        std::error_code ec;
+        if (std::filesystem::exists(baseApk, ec)) {
+            std::string entryName = filename;
+            if (entryName.rfind("assets/", 0) != 0) {
+                entryName = "assets/" + entryName;
+            }
+            uint64_t payloadOff = 0, payloadSize = 0;
+            uint16_t method = 0;
+            if (zip_stat_entry(baseApk.string(), entryName, &payloadOff, &payloadSize, &method)) {
+                if (method == 0) {
+                    rel = filename;
+                    full = baseApk;
+                    startOffset = static_cast<long>(payloadOff);
+                    entryLength = static_cast<long>(payloadSize);
+                } else {
+                    const auto& remapper = VFSPathRemapper::getInstance();
+                    const std::string cached = extract_jar_entry_to_cache(baseApk.string(), entryName, remapper.androidRoot());
+                    if (!cached.empty()) {
+                        rel = filename;
+                        full = cached;
+                    }
+                }
+            }
+        }
+    }
+
+    if (full.empty() || !std::filesystem::exists(full)) {
+        // Name the path that was looked for, not just the fact of failure.
         std::string message = "AAssetManager_open: not found '";
         message += filename;
         message += "' under ";
         message += base;
         trace_shim(message.c_str());
-        // Misses are otherwise invisible outside crashes; a wrong prefix here
-        // stalls asset loads with no error on either side.
         static std::atomic<int> s_missLogged{0};
         if (s_missLogged.load() < 15) {
             ++s_missLogged;
@@ -210,17 +239,25 @@ static AAssetImpl* open_asset(const char* filename) {
     FILE* f = std::fopen(full.string().c_str(), "rb");
     if (!f) return nullptr;
 
-    std::fseek(f, 0, SEEK_END);
-    const long len = std::ftell(f);
-    std::fseek(f, 0, SEEK_SET);
+    long len = entryLength;
+    if (len <= 0) {
+        std::fseek(f, 0, SEEK_END);
+        len = std::ftell(f);
+        std::fseek(f, 0, SEEK_SET);
+    } else {
+        std::fseek(f, startOffset, SEEK_SET);
+    }
 
     auto* asset = new AAssetImpl();
     asset->file = f;
     asset->length = len;
     asset->offset = 0;
+    asset->startOffset = startOffset;
     asset->name = rel;
     asset->buffer = nullptr;
     asset->bufferSize = 0;
+    asset->mmapBase = nullptr;
+    asset->mmapSize = 0;
     asset->bufferMapped = false;
     // Addressables-style manifest loads are rare; showing them proves the route.
     if (rel.find(".json") != std::string::npos || rel.find("aa/") != std::string::npos) {
@@ -247,12 +284,10 @@ extern "C" void* bionic_AAssetManager_open(void* /*manager*/, const char* filena
 
 extern "C" void* bionic_AAssetManager_openFd(void* /*manager*/, const char* filename,
                                              void* outStart, void* outLength) {
-    // The asset is already on disk as a separate file (not packaged in an APK), so
-    // fd points directly to the file and the offset is always 0 — in accordance with the API contract.
     auto* asset = open_asset(filename);
     if (!asset) return nullptr;
-    if (outStart) *static_cast<off_t*>(outStart) = 0;
-    if (outLength) *static_cast<off_t*>(outLength) = asset->length;
+    if (outStart) *static_cast<off_t*>(outStart) = static_cast<off_t>(asset->startOffset);
+    if (outLength) *static_cast<off_t*>(outLength) = static_cast<off_t>(asset->length);
     return asset;
 }
 
@@ -261,8 +296,8 @@ extern "C" int bionic_AAsset_openFileDescriptor(void* asset, void* outStart, voi
     if (!a || !a->file) return -1;
     const int fd = ::dup(::fileno(a->file));
     if (fd < 0) return -1;
-    if (outStart) *static_cast<off_t*>(outStart) = 0;
-    if (outLength) *static_cast<off_t*>(outLength) = a->length;
+    if (outStart) *static_cast<off_t*>(outStart) = static_cast<off_t>(a->startOffset);
+    if (outLength) *static_cast<off_t*>(outLength) = static_cast<off_t>(a->length);
     return fd;
 }
 
@@ -276,10 +311,6 @@ extern "C" void* bionic_AAssetManager_openDir(void* /*manager*/, const char* dir
     const std::string base = current_assets_dir();
     if (base.empty()) return dir;
 
-    // The same nesting rule as open_asset: the literal path first, the stripped form only
-    // as a fallback. Stripping unconditionally listed the wrong directory for a nested
-    // assets/ folder — and returned an EMPTY dir rather than an error, so a game
-    // enumerating its assets simply found nothing and reported no failure.
     std::error_code ec;
     const std::string requested = dirName ? dirName : "";
     auto full = requested.empty() ? std::filesystem::path(base)
@@ -287,11 +318,24 @@ extern "C" void* bionic_AAssetManager_openDir(void* /*manager*/, const char* dir
     if (!std::filesystem::is_directory(full, ec) && requested.rfind("assets/", 0) == 0) {
         full = std::filesystem::path(base) / requested.substr(7);
     }
-    if (!std::filesystem::is_directory(full, ec)) return dir;
-    for (const auto& entry : std::filesystem::directory_iterator(full, ec)) {
-        if (entry.is_regular_file(ec)) {
-            dir->names.push_back(entry.path().filename().string());
+    if (std::filesystem::is_directory(full, ec)) {
+        for (const auto& entry : std::filesystem::directory_iterator(full, ec)) {
+            if (entry.is_regular_file(ec)) {
+                dir->names.push_back(entry.path().filename().string());
+            }
         }
+        return dir;
+    }
+
+    // Fallback: enumerate entries directly from base.apk when assets/ is not on disk
+    const auto appDir = std::filesystem::path(base).parent_path();
+    const auto baseApk = appDir / "base.apk";
+    if (std::filesystem::exists(baseApk, ec)) {
+        std::string prefix = requested;
+        if (prefix.rfind("assets/", 0) != 0) {
+            prefix = "assets/" + prefix;
+        }
+        dir->names = zip_list_dir_entries(baseApk.string(), prefix);
     }
     return dir;
 }
@@ -339,7 +383,13 @@ extern "C" int64_t bionic_AAsset_getRemainingLength64(void* asset) {
 extern "C" int bionic_AAsset_read(void* asset, void* buf, size_t count) {
     auto* a = static_cast<AAssetImpl*>(asset);
     if (!a || !buf) return -1;
-    const size_t n = std::fread(buf, 1, count, a->file);
+    if (a->offset >= a->length) return 0;
+    const size_t to_read = std::min<size_t>(count, static_cast<size_t>(a->length - a->offset));
+    if (to_read == 0) return 0;
+    if (a->startOffset > 0) {
+        std::fseek(a->file, a->startOffset + a->offset, SEEK_SET);
+    }
+    const size_t n = std::fread(buf, 1, to_read, a->file);
     a->offset += static_cast<long>(n);
     return static_cast<int>(n);
 }
@@ -347,16 +397,36 @@ extern "C" int bionic_AAsset_read(void* asset, void* buf, size_t count) {
 extern "C" int bionic_AAsset_seek(void* asset, long offset, int whence) {
     auto* a = static_cast<AAssetImpl*>(asset);
     if (!a) return -1;
-    if (std::fseek(a->file, offset, whence) != 0) return -1;
-    a->offset = std::ftell(a->file);
-    return 0;
+    long target = 0;
+    if (whence == SEEK_SET) target = offset;
+    else if (whence == SEEK_CUR) target = a->offset + offset;
+    else if (whence == SEEK_END) target = a->length + offset;
+    else return -1;
+    if (target < 0) return -1;
+    a->offset = target;
+    if (a->startOffset > 0) {
+        std::fseek(a->file, a->startOffset + a->offset, SEEK_SET);
+    } else {
+        std::fseek(a->file, a->offset, SEEK_SET);
+    }
+    return static_cast<int>(a->offset);
 }
 
 extern "C" int64_t bionic_AAsset_seek64(void* asset, int64_t offset, int whence) {
     auto* a = static_cast<AAssetImpl*>(asset);
     if (!a) return -1;
-    if (::fseeko(a->file, static_cast<off_t>(offset), whence) != 0) return -1;
-    a->offset = static_cast<long>(::ftello(a->file));
+    int64_t target = 0;
+    if (whence == SEEK_SET) target = offset;
+    else if (whence == SEEK_CUR) target = static_cast<int64_t>(a->offset) + offset;
+    else if (whence == SEEK_END) target = static_cast<int64_t>(a->length) + offset;
+    else return -1;
+    if (target < 0) return -1;
+    a->offset = static_cast<long>(target);
+    if (a->startOffset > 0) {
+        ::fseeko(a->file, static_cast<off_t>(a->startOffset + a->offset), SEEK_SET);
+    } else {
+        ::fseeko(a->file, static_cast<off_t>(a->offset), SEEK_SET);
+    }
     return static_cast<int64_t>(a->offset);
 }
 
@@ -366,45 +436,30 @@ extern "C" const void* bionic_AAsset_getBuffer(void* asset) {
     if (a->buffer) return a->buffer;
     if (a->length <= 0) return nullptr;
 
-    // mmap, not malloc + read.
-    //
-    // The contract is a pointer to the whole asset, valid until AAsset_close, and a
-    // mapping satisfies it as well as a heap copy does — but the pages are CLEAN, so
-    // under memory pressure the kernel can evict them and read them back from disk.
-    // Heap pages are dirty; iOS does not swap, so they can only be reclaimed by killing
-    // the process.
-    //
-    // The scale is what makes this decisive rather than tidy. Minecraft ships 574 MB of
-    // assets across 36005 files, its largest single material is 20.9 MB, and
-    // libminecraftpe.so is already ~330 MB of image. A handful of buffers reaches the
-    // jetsam limit, and jetsam sends SIGKILL: no handler runs, no crash log is written,
-    // and nothing in the log says why the process vanished.
-    //
-    // MAP_PRIVATE so a guest writing through the buffer — which the API does not permit
-    // but does not prevent — cannot modify the extracted asset on disk.
     const int fd = ::fileno(a->file);
-    void* mapped = fd >= 0 ? ::mmap(nullptr, static_cast<size_t>(a->length), PROT_READ,
-                                    MAP_PRIVATE, fd, 0)
-                           : MAP_FAILED;
-    if (mapped != MAP_FAILED) {
-        a->buffer = mapped;
-        a->bufferSize = static_cast<size_t>(a->length);
-        a->bufferMapped = true;
-        // The API says the read cursor is unspecified after getBuffer; leaving it at the
-        // end matches what the copying implementation did, so a caller that mixes
-        // getBuffer with read() sees no change in behaviour.
-        a->offset = a->length;
-        trace_buffer("AAsset_getBuffer mapped", a->name,
-                     static_cast<uint64_t>(a->length), /*mapped=*/true);
-        return mapped;
+    if (fd >= 0) {
+        const long pageSize = ::sysconf(_SC_PAGE_SIZE);
+        const off_t pageOffset = (static_cast<off_t>(a->startOffset) / pageSize) * pageSize;
+        const off_t pageDiff = static_cast<off_t>(a->startOffset) - pageOffset;
+        const size_t mapSize = static_cast<size_t>(a->length + pageDiff);
+
+        void* mapped = ::mmap(nullptr, mapSize, PROT_READ, MAP_PRIVATE, fd, pageOffset);
+        if (mapped != MAP_FAILED) {
+            a->mmapBase = mapped;
+            a->mmapSize = mapSize;
+            a->buffer = static_cast<char*>(mapped) + pageDiff;
+            a->bufferSize = static_cast<size_t>(a->length);
+            a->bufferMapped = true;
+            a->offset = a->length;
+            trace_buffer("AAsset_getBuffer mapped", a->name,
+                         static_cast<uint64_t>(a->length), /*mapped=*/true);
+            return a->buffer;
+        }
     }
 
-    // Falling back to a copy keeps the API working where mmap cannot (a filesystem that
-    // does not support it). Logged as dirty, because that is the case that counts against
-    // the footprint.
     void* buf = std::malloc(static_cast<size_t>(a->length));
     if (!buf) return nullptr;
-    std::fseek(a->file, 0, SEEK_SET);
+    std::fseek(a->file, a->startOffset, SEEK_SET);
     const size_t got = std::fread(buf, 1, static_cast<size_t>(a->length), a->file);
     if (got != static_cast<size_t>(a->length)) {
         std::free(buf);
@@ -423,10 +478,11 @@ extern "C" void bionic_AAsset_close(void* asset) {
     auto* a = static_cast<AAssetImpl*>(asset);
     if (!a) return;
     if (a->buffer) {
-        // munmap and free are not interchangeable; using the wrong one is undefined and
-        // would corrupt the allocator or the address space rather than fail visibly.
-        if (a->bufferMapped) ::munmap(a->buffer, a->bufferSize);
-        else std::free(a->buffer);
+        if (a->bufferMapped && a->mmapBase) {
+            ::munmap(a->mmapBase, a->mmapSize);
+        } else if (!a->bufferMapped) {
+            std::free(a->buffer);
+        }
         untrace_buffer(static_cast<uint64_t>(a->bufferSize));
     }
     if (a->file) std::fclose(a->file);

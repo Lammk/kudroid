@@ -98,6 +98,21 @@ extern "C" int bionic_sigaddset(void* set, int sig);
 extern "C" int bionic_sigdelset(void* set, int sig);
 extern "C" int bionic_sigismember(const void* set, int sig);
 
+struct GuestIfaddrs {
+    GuestIfaddrs* g_next;
+    char* g_name;
+    unsigned g_flags;
+    unsigned char* g_addr;
+    unsigned char* g_netmask;
+    unsigned char* g_broadaddr;
+    void* g_data;
+};
+extern "C" int bionic_getifaddrs(GuestIfaddrs** out);
+extern "C" void bionic_freeifaddrs(GuestIfaddrs* head);
+extern "C" int bionic_bind(int sockfd, const struct sockaddr* addr, socklen_t addrlen);
+extern "C" int bionic_getsockname(int sockfd, struct sockaddr* addr, socklen_t* addrlen);
+extern "C" int bionic_getpeername(int sockfd, struct sockaddr* addr, socklen_t* addrlen);
+
 // The resolver a guest relocation goes through. What it returns for a name is what the
 // guest actually calls, which is the thing these tests have to check.
 namespace kudroid {
@@ -1790,10 +1805,38 @@ void test_mmap_file_backed_subpage_offset() {
     std::remove(path.c_str());
 }
 
+void test_bionic_getifaddrs() {
+    GuestIfaddrs* addrs = nullptr;
+    int rc = bionic_getifaddrs(&addrs);
+    CHECK(rc == 0, "bionic_getifaddrs succeeds");
+    int count = 0;
+    for (GuestIfaddrs* it = addrs; it != nullptr; it = it->g_next) {
+        ++count;
+        if (it->g_addr) {
+            unsigned short fam = static_cast<unsigned short>(it->g_addr[0]) |
+                                 (static_cast<unsigned short>(it->g_addr[1]) << 8);
+            CHECK(fam == 2 || fam == 10, "ifaddr family is strictly AF_INET or AF_INET6");
+        }
+    }
+    bionic_freeifaddrs(addrs);
+}
+
+void test_socket_symbols() {
+    CHECK(resolve_bionic_symbol("socket") != nullptr, "socket resolves to shim");
+    CHECK(resolve_bionic_symbol("bind") != nullptr, "bind resolves to shim");
+    CHECK(resolve_bionic_symbol("connect") != nullptr, "connect resolves to shim");
+    CHECK(resolve_bionic_symbol("getsockname") != nullptr, "getsockname resolves to shim");
+    CHECK(resolve_bionic_symbol("getpeername") != nullptr, "getpeername resolves to shim");
+    CHECK(resolve_bionic_symbol("getifaddrs") != nullptr, "getifaddrs resolves to shim");
+    CHECK(resolve_bionic_symbol("freeifaddrs") != nullptr, "freeifaddrs resolves to shim");
+}
+
 // ─── main ────────────────────────────────────────────────────────────────────────
 
 int main() {
     std::printf("=== SyscallShim host tests ===\n");
+    test_bionic_getifaddrs();
+    test_socket_symbols();
     test_pthread_once_nested();
     test_pthread_once_concurrent();
     test_futex_wait_wake();

@@ -4,6 +4,7 @@
 #include <dirent.h>
 #include <mutex>
 #include <string>
+#include <vector>
 #include <sys/stat.h>
 #include <sys/types.h>
 
@@ -75,6 +76,16 @@ struct dirent* vfs_readdir(DIR* directory);
 int vfs_closedir(DIR* directory);
 ssize_t vfs_readlink(const char* path, char* buffer, size_t size);
 char* vfs_realpath(const char* path, char* resolved);
+
+std::string extract_jar_entry_to_cache(const std::string& archivePath,
+                                       const std::string& entryName,
+                                       const std::string& androidRoot);
+
+bool zip_stat_entry(const std::string& archivePath, const std::string& entry,
+                    uint64_t* outOffset, uint64_t* outSize, uint16_t* outMethod);
+
+std::vector<std::string> zip_list_dir_entries(const std::string& archivePath,
+                                              const std::string& dirPrefix);
 
 std::string run_vfs_self_test();
 std::string run_vfs_extended_test();

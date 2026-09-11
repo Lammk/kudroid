@@ -1691,7 +1691,7 @@ bool Invoke_java_lang_System(Interpreter* interp, const char* name, const DexVal
         } else if (key == "path.separator") {
             value = ":";
         } else if (key == "java.io.tmpdir") {
-            value = "/tmp";
+            value = "/data/local/tmp";
         } else if (key == "user.dir" || key == "user.home") {
             value = "/";
         } else if (key == "java.vm.name") {
@@ -1720,7 +1720,7 @@ bool Invoke_java_lang_System(Interpreter* interp, const char* name, const DexVal
         } else if (key == "os.arch") {
             value = "aarch64";
         } else if (key == "os.version") {
-            value = "4.14.0";
+            value = "5.15.0";
         } else if (key == "file.encoding") {
             value = "UTF-8";
         }

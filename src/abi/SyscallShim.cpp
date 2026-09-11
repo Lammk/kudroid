@@ -1106,7 +1106,10 @@ static bool ashmem_prot_allows(int fd, int prot);
 extern "C" ssize_t bionic_read(int fd, void* buf, size_t count);
 extern "C" ssize_t bionic_write(int fd, const void* buf, size_t count);
 extern "C" int bionic_socket(int domain, int type, int protocol);
+extern "C" int bionic_bind(int sockfd, const struct sockaddr* addr, socklen_t addrlen);
 extern "C" int bionic_connect(int sockfd, const struct sockaddr* addr, socklen_t addrlen);
+extern "C" int bionic_getsockname(int sockfd, struct sockaddr* addr, socklen_t* addrlen);
+extern "C" int bionic_getpeername(int sockfd, struct sockaddr* addr, socklen_t* addrlen);
 extern "C" int getaddrinfo(const char* node, const char* service,
                            const struct addrinfo* hints, struct addrinfo** res);
 extern "C" const char* gai_strerror(int errcode);
@@ -1976,13 +1979,16 @@ extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_
             return bionic_socket(static_cast<int>(a1), static_cast<int>(a2), static_cast<int>(a3));
 
         case 200: // bind
-            return ::bind(static_cast<int>(a1), reinterpret_cast<const struct sockaddr*>(a2), static_cast<socklen_t>(a3));
+            return bionic_bind(static_cast<int>(a1), reinterpret_cast<const struct sockaddr*>(a2), static_cast<socklen_t>(a3));
 
         case 203: // connect
             return bionic_connect(static_cast<int>(a1), reinterpret_cast<const struct sockaddr*>(a2), static_cast<socklen_t>(a3));
 
         case 204: // getsockname
-            return ::getsockname(static_cast<int>(a1), reinterpret_cast<struct sockaddr*>(a2), reinterpret_cast<socklen_t*>(a3));
+            return bionic_getsockname(static_cast<int>(a1), reinterpret_cast<struct sockaddr*>(a2), reinterpret_cast<socklen_t*>(a3));
+
+        case 205: // getpeername
+            return bionic_getpeername(static_cast<int>(a1), reinterpret_cast<struct sockaddr*>(a2), reinterpret_cast<socklen_t*>(a3));
 
         case 206: // sendto
             return ::sendto(static_cast<int>(a1), reinterpret_cast<const void*>(a2), static_cast<size_t>(a3), static_cast<int>(a4), reinterpret_cast<const struct sockaddr*>(a5), static_cast<socklen_t>(a6));
@@ -2039,6 +2045,24 @@ extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_
 
         case 233: // madvise
             return ::madvise(reinterpret_cast<void*>(a1), static_cast<size_t>(a2), static_cast<int>(a3));
+
+        case 242: { // accept4
+            int fd = -1;
+#if defined(__APPLE__)
+            fd = ::accept(static_cast<int>(a1), reinterpret_cast<struct sockaddr*>(a2), reinterpret_cast<socklen_t*>(a3));
+            if (fd >= 0) {
+                const int fl = static_cast<int>(a4);
+                if (fl & 0x80000) ::fcntl(fd, F_SETFD, FD_CLOEXEC);
+                if (fl & 0x800) {
+                    int flags = ::fcntl(fd, F_GETFL, 0);
+                    ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+                }
+            }
+#else
+            fd = ::accept4(static_cast<int>(a1), reinterpret_cast<struct sockaddr*>(a2), reinterpret_cast<socklen_t*>(a3), static_cast<int>(a4));
+#endif
+            return fd;
+        }
 
         case 278: // getrandom
             return bionic_getrandom(reinterpret_cast<void*>(a1), static_cast<size_t>(a2), static_cast<unsigned int>(a3));
@@ -2242,17 +2266,119 @@ inline int guest_to_host_af(int af) {
 #endif
     return af;
 }
+
+#if defined(__APPLE__)
+static bool linux_to_darwin_sockaddr(const struct sockaddr* src, socklen_t srclen,
+                                     struct sockaddr_storage* dst, socklen_t* dstlen) {
+    if (!src || srclen < 2 || !dst || !dstlen) return false;
+    const unsigned char* b = reinterpret_cast<const unsigned char*>(src);
+    const unsigned fam = static_cast<unsigned>(b[0]) | (static_cast<unsigned>(b[1]) << 8);
+    unsigned char* out = reinterpret_cast<unsigned char*>(dst);
+    std::memset(dst, 0, sizeof(*dst));
+    if (fam == 2 && srclen >= 8) {
+        out[0] = 16;
+        out[1] = AF_INET;
+        std::memcpy(out + 2, b + 2, std::min<size_t>(srclen - 2, 14));
+        *dstlen = 16;
+        return true;
+    } else if (fam == 10 && srclen >= 24) {
+        out[0] = 28;
+        out[1] = AF_INET6;
+        std::memcpy(out + 2, b + 2, std::min<size_t>(srclen - 2, 26));
+        *dstlen = 28;
+        return true;
+    } else if (fam == 1) {
+        out[0] = static_cast<unsigned char>(std::min<socklen_t>(srclen, sizeof(*dst)));
+        out[1] = AF_UNIX;
+        if (srclen > 2) {
+            std::memcpy(out + 2, b + 2, std::min<size_t>(srclen - 2, sizeof(*dst) - 2));
+        }
+        *dstlen = out[0];
+        return true;
+    }
+    return false;
+}
+
+static void darwin_to_linux_sockaddr(const struct sockaddr* src, socklen_t srclen,
+                                     struct sockaddr* dst, socklen_t* dstlen) {
+    if (!src || !dst || !dstlen || *dstlen < 2) return;
+    const unsigned char* s = reinterpret_cast<const unsigned char*>(src);
+    unsigned char* d = reinterpret_cast<unsigned char*>(dst);
+    const unsigned fam = s[1];
+    if (fam == AF_INET) {
+        socklen_t copy_len = std::min<socklen_t>(*dstlen, 16);
+        d[0] = 2;
+        d[1] = 0;
+        if (copy_len > 2) {
+            std::memcpy(d + 2, s + 2, copy_len - 2);
+        }
+        *dstlen = 16;
+    } else if (fam == AF_INET6) {
+        socklen_t copy_len = std::min<socklen_t>(*dstlen, 28);
+        d[0] = 10;
+        d[1] = 0;
+        if (copy_len > 2) {
+            std::memcpy(d + 2, s + 2, copy_len - 2);
+        }
+        *dstlen = 28;
+    } else {
+        socklen_t copy_len = std::min<socklen_t>(*dstlen, srclen);
+        d[0] = static_cast<unsigned char>(fam);
+        d[1] = 0;
+        if (copy_len > 2) {
+            std::memcpy(d + 2, s + 2, copy_len - 2);
+        }
+        *dstlen = srclen;
+    }
+}
+#endif
 }  // namespace
 
-// Socket visibility taps (delegating): guest sockets resolve to host BSD
-// sockets today, silently. Log attempts so a dead network is distinguishable
-// from an unused one. Layouts read here (AF_INET sockaddr) are POSIX-fixed.
 extern "C" int bionic_socket(int domain, int type, int protocol) {
     const int host_domain = guest_to_host_af(domain);
     const int fd = ::socket(host_domain, type, protocol);
     std::fprintf(stderr, "[KuDroidNet] socket(domain=%d type=%d) -> %d\n",
                  domain, type, fd);
     return fd;
+}
+
+extern "C" int bionic_bind(int sockfd, const struct sockaddr* addr, socklen_t addrlen) {
+#if defined(__APPLE__)
+    struct sockaddr_storage ss;
+    socklen_t sslen = sizeof(ss);
+    if (linux_to_darwin_sockaddr(addr, addrlen, &ss, &sslen)) {
+        return ::bind(sockfd, reinterpret_cast<const struct sockaddr*>(&ss), sslen);
+    }
+#endif
+    return ::bind(sockfd, addr, addrlen);
+}
+
+extern "C" int bionic_getsockname(int sockfd, struct sockaddr* addr, socklen_t* addrlen) {
+#if defined(__APPLE__)
+    struct sockaddr_storage ss;
+    socklen_t sslen = sizeof(ss);
+    int rc = ::getsockname(sockfd, reinterpret_cast<struct sockaddr*>(&ss), &sslen);
+    if (rc == 0 && addr && addrlen) {
+        darwin_to_linux_sockaddr(reinterpret_cast<struct sockaddr*>(&ss), sslen, addr, addrlen);
+    }
+    return rc;
+#else
+    return ::getsockname(sockfd, addr, addrlen);
+#endif
+}
+
+extern "C" int bionic_getpeername(int sockfd, struct sockaddr* addr, socklen_t* addrlen) {
+#if defined(__APPLE__)
+    struct sockaddr_storage ss;
+    socklen_t sslen = sizeof(ss);
+    int rc = ::getpeername(sockfd, reinterpret_cast<struct sockaddr*>(&ss), &sslen);
+    if (rc == 0 && addr && addrlen) {
+        darwin_to_linux_sockaddr(reinterpret_cast<struct sockaddr*>(&ss), sslen, addr, addrlen);
+    }
+    return rc;
+#else
+    return ::getpeername(sockfd, addr, addrlen);
+#endif
 }
 
 extern "C" int bionic_connect(int sockfd, const struct sockaddr* addr,
@@ -2374,9 +2500,9 @@ struct GuestIfaddrs {
 };
 
 namespace {
-#if defined(__APPLE__)
 unsigned char* translate_sockaddr(const unsigned char* d) {
     if (d == nullptr) return nullptr;
+#if defined(__APPLE__)
     const unsigned fam = d[1];  // Darwin: len @0, family @1
     if (fam == 2) {             // AF_INET both
         unsigned char* l = static_cast<unsigned char*>(std::malloc(16));
@@ -2396,6 +2522,22 @@ unsigned char* translate_sockaddr(const unsigned char* d) {
         return l;
     }
     return nullptr;  // AF_LINK and the rest: not guest-visible
+#else
+    const unsigned fam = static_cast<unsigned>(d[0]) | (static_cast<unsigned>(d[1]) << 8);
+    if (fam == 2) {  // AF_INET
+        unsigned char* l = static_cast<unsigned char*>(std::malloc(16));
+        if (!l) return nullptr;
+        std::memcpy(l, d, 16);
+        return l;
+    }
+    if (fam == 10) {  // AF_INET6
+        unsigned char* l = static_cast<unsigned char*>(std::malloc(28));
+        if (!l) return nullptr;
+        std::memcpy(l, d, 28);
+        return l;
+    }
+    return nullptr;  // Filter out AF_PACKET (17) and other non-inet families
+#endif
 }
 void free_guest_ifaddrs(GuestIfaddrs* head) {
     while (head != nullptr) {
@@ -2408,16 +2550,11 @@ void free_guest_ifaddrs(GuestIfaddrs* head) {
         head = next;
     }
 }
-#endif
 }  // namespace
 
 extern "C" int bionic_getifaddrs(GuestIfaddrs** out) {
     if (!out) return -1;
     *out = nullptr;
-#if !defined(__APPLE__)
-    // Same ABI: delegate directly.
-    return ::getifaddrs(reinterpret_cast<struct ifaddrs**>(out));
-#else
     struct ifaddrs* host = nullptr;
     if (::getifaddrs(&host) != 0) return -1;
     GuestIfaddrs* head = nullptr;
@@ -2430,7 +2567,7 @@ extern "C" int bionic_getifaddrs(GuestIfaddrs** out) {
         GuestIfaddrs* g =
             static_cast<GuestIfaddrs*>(std::calloc(1, sizeof(GuestIfaddrs)));
         if (!g) {
-            free(addr);
+            std::free(addr);
             continue;
         }
         g->g_name = h->ifa_name ? ::strdup(h->ifa_name) : nullptr;
@@ -2448,15 +2585,10 @@ extern "C" int bionic_getifaddrs(GuestIfaddrs** out) {
     *out = head;
     std::fprintf(stderr, "[KuDroidNet] getifaddrs -> %u entries\n", kept);
     return 0;
-#endif
 }
 
 extern "C" void bionic_freeifaddrs(GuestIfaddrs* head) {
-#if !defined(__APPLE__)
-    ::freeifaddrs(reinterpret_cast<struct ifaddrs*>(head));
-#else
     free_guest_ifaddrs(head);
-#endif
 }
 
 extern "C" ssize_t bionic_pread64(int fd, void* buf, size_t count, off_t offset) {
@@ -6059,7 +6191,10 @@ const SymbolEntry kSyscallSymbols[] = {
     {"read", reinterpret_cast<void*>(&bionic_read)},
     {"write", reinterpret_cast<void*>(&bionic_write)},
     {"socket", reinterpret_cast<void*>(&bionic_socket)},
+    {"bind", reinterpret_cast<void*>(&bionic_bind)},
     {"connect", reinterpret_cast<void*>(&bionic_connect)},
+    {"getsockname", reinterpret_cast<void*>(&bionic_getsockname)},
+    {"getpeername", reinterpret_cast<void*>(&bionic_getpeername)},
     {"getaddrinfo", reinterpret_cast<void*>(&bionic_getaddrinfo)},
     {"getifaddrs", reinterpret_cast<void*>(&bionic_getifaddrs)},
     {"freeifaddrs", reinterpret_cast<void*>(&bionic_freeifaddrs)},
