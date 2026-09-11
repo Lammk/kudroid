@@ -23,6 +23,8 @@ struct Decoded {
     // Positions known to hold a register but never patched (opaque to us).
     std::uint8_t useonly[4] = {0, 0, 0, 0};
     std::uint8_t nuse = 0;
+    std::uint8_t defonly[4] = {0, 0, 0, 0};
+    std::uint8_t ndef = 0;
     bool mem18 = false;  // x18 crosses memory: unrewritable, skip
     bool known = true;  // false: encoding not recognized
 };
@@ -47,9 +49,16 @@ void markUseOnly(Decoded& d, unsigned bitoff, unsigned reg) {
 
 // Memory lane holding x18: the value crosses memory, so no in-chunk rename
 // can stay consistent with whoever wrote or will read it.
-void markMem(Decoded& d, unsigned, unsigned reg) {
+void markMem(Decoded& d, unsigned bitoff, unsigned reg, bool isDef) {
     markUsed(d, reg);
     if (reg == kX18) d.mem18 = true;
+    if (reg < 31) {
+        if (isDef) {
+            if (d.ndef < 4) d.defonly[d.ndef++] = static_cast<std::uint8_t>(bitoff);
+        } else {
+            if (d.nuse < 4) d.useonly[d.nuse++] = static_cast<std::uint8_t>(bitoff);
+        }
+    }
 }
 
 // Decode one instruction for integer-register use. Patch positions are only
@@ -151,7 +160,7 @@ Decoded decode(std::uint32_t w) {
             isLoad = ((w >> 23) & 1) != 0;
         else
             isLoad = ((w >> 22) & 1) != 0;
-        if (!simd) markMem(d, 0, rd);
+        if (!simd) markMem(d, 0, rd, isLoad);
         markPatch(d, 5, rn, false);
         // Register-offset forms (bit21 == 1, and not LSE which the branch
         // above already recorded as Rs) carry a real integer Rm index.
@@ -171,9 +180,10 @@ Decoded decode(std::uint32_t w) {
         // SIMD pairs (top bytes 0x2C/0x6C/0xAC/0xEC) reach neither here nor
         // the integer mask below — handled by the (b & 0x3C) == 0x2C arm.
         const bool simdPair = (w & (1u << 26)) != 0 && ((b & 0x3C) == 0x28);
+        const bool isPairLoad = ((w >> 22) & 1) != 0;
         if (!simdPair) {
-            markMem(d, 0, rd);
-            markMem(d, 10, ra);
+            markMem(d, 0, rd, isPairLoad);
+            markMem(d, 10, ra, isPairLoad);
         }
         markPatch(d, 5, rn, false);
         return d;
@@ -507,6 +517,10 @@ RegTouch regTouch(std::uint32_t w) {
         const unsigned r = (w >> d.useonly[k]) & 31;
         if (r < 31) t.uses |= 1u << r;
     }
+    for (unsigned k = 0; k < d.ndef; ++k) {
+        const unsigned r = (w >> d.defonly[k]) & 31;
+        if (r < 31) t.defs |= 1u << r;
+    }
     return t;
 }
 
@@ -525,14 +539,19 @@ RegTouch regTouch(std::uint32_t w) {
 bool crossingLiveRange(const std::vector<std::uint32_t>& words, long a, long b,
                        unsigned reg) {
     const std::uint32_t bit = 1u << reg;
+    bool liveBefore = false;
     for (long i = 0; i < a && i < static_cast<long>(words.size()); ++i) {
-        if (regTouch(words[i]).defs & bit) {
-            for (long j = b + 1; j < static_cast<long>(words.size()); ++j) {
-                const RegTouch t = regTouch(words[j]);
-                if (t.uses & bit) return true;
-                if (t.defs & bit) break;  // redefined before any read
-            }
+        const RegTouch t = regTouch(words[i]);
+        if ((t.defs & bit) || (t.uses & bit)) {
+            liveBefore = true;
+            break;
         }
+    }
+    if (!liveBefore) return false;
+    for (long j = b + 1; j < static_cast<long>(words.size()); ++j) {
+        const RegTouch t = regTouch(words[j]);
+        if (t.uses & bit) return true;
+        if (t.defs & bit) break;  // redefined before any read
     }
     return false;
 }
@@ -711,6 +730,7 @@ long rewriteRange(std::uint32_t* code, std::size_t nwords, X18Stats& st,
     // Reachability: literal pools sit after unconditional control flow and
     // must never be patched as code. Mark from entry following branches.
     std::vector<char> live(nwords, 0);
+    bool hasLoop = false;
     {
         std::vector<std::size_t> stack;
         stack.push_back(0);
@@ -737,7 +757,10 @@ long rewriteRange(std::uint32_t* code, std::size_t nwords, X18Stats& st,
                     std::int32_t imm =
                         static_cast<std::int32_t>((w & 0x03FFFFFF) << 6) >> 4;
                     const long t = static_cast<long>(i) + imm / 4;
-                    if (t >= 0) push(static_cast<std::size_t>(t));
+                    if (t >= 0) {
+                        if (static_cast<std::size_t>(t) <= i) hasLoop = true;
+                        push(static_cast<std::size_t>(t));
+                    }
                 } else {
                     push(i + 1);  // bl returns
                 }
@@ -754,7 +777,10 @@ long rewriteRange(std::uint32_t* code, std::size_t nwords, X18Stats& st,
                 else
                     off = static_cast<std::int32_t>(((w >> 5) & 0x7FFFF) << 13) >> 11;
                 const long t = static_cast<long>(i) + off / 4;
-                if (t >= 0) push(static_cast<std::size_t>(t));
+                if (t >= 0) {
+                    if (static_cast<std::size_t>(t) <= i) hasLoop = true;
+                    push(static_cast<std::size_t>(t));
+                }
                 push(i + 1);
                 continue;
             }
@@ -906,7 +932,13 @@ long rewriteRange(std::uint32_t* code, std::size_t nwords, X18Stats& st,
         // whose live range crosses the window (defined before it and read
         // after it) — a substitute colliding with a crossing value would
         // corrupt the function.
+        const unsigned wholeSub = pickFreeReg(used);
+        const bool useWhole = hasLoop;
         for (auto& s : spans) {
+            if (useWhole && wholeSub < 31) {
+                s.sub = wholeSub;
+                continue;
+            }
             std::uint32_t busy = 0;
             for (long i = s.a; i <= s.b && i < static_cast<long>(nwords); ++i) {
                 if (i < 0 || !live[i]) continue;
