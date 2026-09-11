@@ -676,17 +676,18 @@ static struct sigaction g_previousHandlers[NSIG];
 // re-raising is what lets a chained handler see the ORIGINAL machine state: calling its
 // function pointer directly would work for an SA_SIGINFO handler but not for a Mach
 // exception port, and re-raising covers both.
-static void chainToPreviousHandler(int sig) {
-    if (sig <= 0 || sig >= NSIG) return;
+static bool chainToPreviousHandler(int sig) {
+    if (sig <= 0 || sig >= NSIG) return false;
     const struct sigaction& previous = g_previousHandlers[sig];
     const bool hasHandler =
         (previous.sa_flags & SA_SIGINFO) ? previous.sa_sigaction != nullptr
                                          : (previous.sa_handler != nullptr &&
                                             previous.sa_handler != SIG_DFL &&
                                             previous.sa_handler != SIG_IGN);
-    if (!hasHandler) return;
+    if (!hasHandler) return false;
     sigaction(sig, &previous, nullptr);
     raise(sig);
+    return true;
 }
 
 // The OS thread id, the same number the watchdog, the stall reports and the thread
@@ -742,7 +743,9 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
         // LiveContainer's own dyld interception, all of which use breakpoints for
         // their own purposes. Reporting it as a KuDroid crash would both lose their
         // event and produce a misleading log.
-        chainToPreviousHandler(sig);
+        if (chainToPreviousHandler(sig)) {
+            return;
+        }
     }
     // The same TLS breakpoints can arrive as SIGILL (observed at teardown while
     // startup traps arrive as SIGTRAP). Pattern-gated like above: a genuine

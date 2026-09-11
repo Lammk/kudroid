@@ -1110,6 +1110,12 @@ extern "C" int bionic_bind(int sockfd, const struct sockaddr* addr, socklen_t ad
 extern "C" int bionic_connect(int sockfd, const struct sockaddr* addr, socklen_t addrlen);
 extern "C" int bionic_getsockname(int sockfd, struct sockaddr* addr, socklen_t* addrlen);
 extern "C" int bionic_getpeername(int sockfd, struct sockaddr* addr, socklen_t* addrlen);
+#if defined(__APPLE__)
+static bool linux_to_darwin_sockaddr(const struct sockaddr* src, socklen_t srclen,
+                                     struct sockaddr_storage* dst, socklen_t* dstlen);
+static void darwin_to_linux_sockaddr(const struct sockaddr* src, socklen_t srclen,
+                                     struct sockaddr* dst, socklen_t* dstlen);
+#endif
 extern "C" int getaddrinfo(const char* node, const char* service,
                            const struct addrinfo* hints, struct addrinfo** res);
 extern "C" const char* gai_strerror(int errcode);
@@ -1991,9 +1997,35 @@ extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_
             return bionic_getpeername(static_cast<int>(a1), reinterpret_cast<struct sockaddr*>(a2), reinterpret_cast<socklen_t*>(a3));
 
         case 206: // sendto
+#if defined(__APPLE__)
+            {
+                const struct sockaddr* src_sa = reinterpret_cast<const struct sockaddr*>(a5);
+                socklen_t src_len = static_cast<socklen_t>(a6);
+                struct sockaddr_storage ss;
+                socklen_t sslen = sizeof(ss);
+                if (src_sa && linux_to_darwin_sockaddr(src_sa, src_len, &ss, &sslen)) {
+                    return ::sendto(static_cast<int>(a1), reinterpret_cast<const void*>(a2), static_cast<size_t>(a3), static_cast<int>(a4), reinterpret_cast<const struct sockaddr*>(&ss), sslen);
+                }
+            }
+#endif
             return ::sendto(static_cast<int>(a1), reinterpret_cast<const void*>(a2), static_cast<size_t>(a3), static_cast<int>(a4), reinterpret_cast<const struct sockaddr*>(a5), static_cast<socklen_t>(a6));
 
         case 207: // recvfrom
+#if defined(__APPLE__)
+            {
+                struct sockaddr* dst_sa = reinterpret_cast<struct sockaddr*>(a5);
+                socklen_t* dst_len = reinterpret_cast<socklen_t*>(a6);
+                if (dst_sa && dst_len) {
+                    struct sockaddr_storage ss;
+                    socklen_t sslen = sizeof(ss);
+                    ssize_t rc = ::recvfrom(static_cast<int>(a1), reinterpret_cast<void*>(a2), static_cast<size_t>(a3), static_cast<int>(a4), reinterpret_cast<struct sockaddr*>(&ss), &sslen);
+                    if (rc >= 0) {
+                        darwin_to_linux_sockaddr(reinterpret_cast<struct sockaddr*>(&ss), sslen, dst_sa, dst_len);
+                    }
+                    return rc;
+                }
+            }
+#endif
             return ::recvfrom(static_cast<int>(a1), reinterpret_cast<void*>(a2), static_cast<size_t>(a3), static_cast<int>(a4), reinterpret_cast<struct sockaddr*>(a5), reinterpret_cast<socklen_t*>(a6));
 
         case 122: // sched_setaffinity (Linux arm64 syscall)
@@ -2482,6 +2514,29 @@ extern "C" int bionic_getaddrinfo(const char* node, const char* service,
     }
 #endif
     return ret;
+}
+
+extern "C" void bionic_freeaddrinfo(struct addrinfo* res) {
+#if defined(__APPLE__)
+    if (res != nullptr) {
+        for (struct addrinfo* ai = res; ai != nullptr; ai = ai->ai_next) {
+            unsigned char* sa = reinterpret_cast<unsigned char*>(ai->ai_addr);
+            if (sa == nullptr) continue;
+            if (ai->ai_family == 10) {  // AF_INET6 Linux -> Darwin
+                sa[0] = 28;
+                sa[1] = 30; // Darwin AF_INET6
+                ai->ai_family = 30;
+            } else if (ai->ai_family == 2) {  // AF_INET
+                sa[0] = 16;
+                sa[1] = 2;
+                ai->ai_family = 2;
+            }
+        }
+    }
+#endif
+    if (res != nullptr) {
+        ::freeaddrinfo(res);
+    }
 }
 
 // getifaddrs with Linux layout: Darwin also reports AF_LINK/AF_SYSTEM
@@ -6196,6 +6251,7 @@ const SymbolEntry kSyscallSymbols[] = {
     {"getsockname", reinterpret_cast<void*>(&bionic_getsockname)},
     {"getpeername", reinterpret_cast<void*>(&bionic_getpeername)},
     {"getaddrinfo", reinterpret_cast<void*>(&bionic_getaddrinfo)},
+    {"freeaddrinfo", reinterpret_cast<void*>(&bionic_freeaddrinfo)},
     {"getifaddrs", reinterpret_cast<void*>(&bionic_getifaddrs)},
     {"freeifaddrs", reinterpret_cast<void*>(&bionic_freeifaddrs)},
     {"inet_ntop", reinterpret_cast<void*>(&bionic_inet_ntop)},
