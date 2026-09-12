@@ -193,8 +193,6 @@ public class ViewGroup extends View implements ViewParent {
                 mTouchTarget = null;
             }
             if (consumed) return true;
-            // The targeted child no longer wants this gesture; fall through.
-            mTouchTarget = null;
         }
         return onTouchEvent(event);
     }

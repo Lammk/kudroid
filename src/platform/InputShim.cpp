@@ -61,9 +61,11 @@ static void ensure_wake_pipe(BionicInputQueue* q) {
     std::lock_guard<std::mutex> lock(q->mtx);
     if (q->pipeReady) return;
     if (::pipe(q->wakePipe) == 0) {
-        // Set read end non-blocking.
-        int flags = ::fcntl(q->wakePipe[0], F_GETFL, 0);
-        ::fcntl(q->wakePipe[0], F_SETFL, flags | O_NONBLOCK);
+        // Set both read and write ends non-blocking.
+        int flags0 = ::fcntl(q->wakePipe[0], F_GETFL, 0);
+        ::fcntl(q->wakePipe[0], F_SETFL, flags0 | O_NONBLOCK);
+        int flags1 = ::fcntl(q->wakePipe[1], F_GETFL, 0);
+        ::fcntl(q->wakePipe[1], F_SETFL, flags1 | O_NONBLOCK);
         q->pipeReady = true;
     }
 }
@@ -113,7 +115,6 @@ extern "C" void kudroid_inject_touch_event_multi(float x, float y, int32_t actio
                     *it = ev;
                     replaced = true;
                     break;
-                    
                 }
             }
         }
@@ -122,12 +123,14 @@ extern "C" void kudroid_inject_touch_event_multi(float x, float y, int32_t actio
         }
     }
 
-    // Wake the looper so it processes the new event.
-    ensure_wake_pipe(&g_inputQueue); // internal self-locking — thread-safe
-    if (g_inputQueue.pipeReady) {
-        uint8_t byte = 1;
-        ssize_t unused = ::write(g_inputQueue.wakePipe[1], &byte, 1);
-        (void)unused;
+    // Wake the looper only if a native looper is attached and polling the queue.
+    if (g_inputQueue.id != 0) {
+        ensure_wake_pipe(&g_inputQueue);
+        if (g_inputQueue.pipeReady) {
+            uint8_t byte = 1;
+            ssize_t unused = ::write(g_inputQueue.wakePipe[1], &byte, 1);
+            (void)unused;
+        }
     }
 
     // Also push the touch event to the Android Java interface tree. Reaching

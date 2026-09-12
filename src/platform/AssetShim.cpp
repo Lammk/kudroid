@@ -474,13 +474,14 @@ extern "C" int bionic_AAssetManager_openFd(void* /*manager*/, const char* filena
     if (outLength) *static_cast<off_t*>(outLength) = length;
     {
         static std::atomic<int> s_fdLogged{0};
-        if (s_fdLogged.load(std::memory_order_relaxed) < 12) {
+        if (s_fdLogged.load(std::memory_order_relaxed) < 20) {
             s_fdLogged.fetch_add(1, std::memory_order_relaxed);
             char line[512];
             std::snprintf(line, sizeof(line), "AAssetManager_openFd: '%s' fd=%d start=%ld len=%ld",
                           filename != nullptr ? filename : "?", fd,
                           static_cast<long>(start), static_cast<long>(length));
             trace_shim(line);
+            kudroid_android_log_message(4, "AssetShim", line);
         }
     }
     return fd;
