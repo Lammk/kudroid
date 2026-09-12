@@ -849,9 +849,16 @@ FaultSkipPlan fault_decode_skip(uint32_t w, uint64_t pc, uint64_t baseVal,
         return p;
     }
     if ((top & 0x3B) == 0x38 || (top & 0x3B) == 0x39) {
-        // Single transfer, integer lanes only (bit26 set = SIMD: refuse).
-        if ((w & (1u << 26)) != 0) return p;
+        // Single transfer. SIMD/FP lanes (bit26) share the encoding with
+        // integer lanes: Rt names a vector register (zeroed in __ns), Rn
+        // stays an integer base, and the addressing modes compute
+        // identically. Only the data-size rule differs (opc bit23 set =
+        // 128-bit Q register, else 8<<size). SIMD pairs and every other
+        // vector form stay refused — lanes, not whole registers, fault
+        // there and zeroing them is not semantics-preserving.
+        const bool simd = (w & (1u << 26)) != 0;
         // PRFM: a hint with no destination; skipping only drops the prefetch.
+        // Integer-only encoding (no SIMD PRFM exists), checked first.
         if (((w >> 23) & 0x1FF) == 0x1F3) {
             p.skippable = true;
             p.isLoad = false;
@@ -860,7 +867,15 @@ FaultSkipPlan fault_decode_skip(uint32_t w, uint64_t pc, uint64_t baseVal,
         // LSE atomics never reach the bit21==0 path (assembler-verified:
         // every LSE single-transfer form carries bit21==1), so no opc guard
         // is needed here — and none could be both correct and complete.
+        // (LSE is integer-only; the bits[11:10]==10 rule below excludes it
+        // structurally for both lanes.)
         p.isLoad = ((w >> 22) & 1) != 0;
+        p.isVector = simd;
+        const unsigned opc = (w >> 22) & 3;
+        const unsigned sizeLog = (w >> 30) & 3;
+        // Integer: one scale. SIMD: Q (opc bit 2) is 16 bytes, otherwise
+        // the lane width 8<<size. Assembler-verified across B/H/S/D/Q.
+        const unsigned scale = simd ? ((opc & 2) ? 4 : sizeLog) : sizeLog;
         if ((w & (1u << 21)) != 0) {
             // Register offset: bits[11:10] must be 10. This one test excludes
             // every LSE atomic and exclusive (verified: all carry bit21==1
@@ -869,7 +884,6 @@ FaultSkipPlan fault_decode_skip(uint32_t w, uint64_t pc, uint64_t baseVal,
             if (rm > 30) return p;  // 31 is not a valid index register
             const unsigned option = (w >> 13) & 7;
             const unsigned amount = (w >> 12) & 1;
-            const unsigned sizeLog = (w >> 30) & 3;  // 0=B 1=H 2=W 3=X
             uint64_t idx = 0;
             switch (option) {
                 case 0x3: idx = rmVal; break;  // LSL
@@ -883,13 +897,12 @@ FaultSkipPlan fault_decode_skip(uint32_t w, uint64_t pc, uint64_t baseVal,
                     break;
                 default: return p;  // 0x0/0x4: not a plain index
             }
-            const unsigned shift = amount ? sizeLog : 0;
+            const unsigned shift = amount ? scale : 0;
             p.effAddr = baseVal + (idx << shift);
         } else if (((w >> 24) & 1) != 0) {
             // Unsigned immediate: no writeback.
-            const unsigned sizeLog = (w >> 30) & 3;
             const uint64_t imm12 = (w >> 10) & 0xFFFu;
-            p.effAddr = baseVal + (imm12 << sizeLog);
+            p.effAddr = baseVal + (imm12 << scale);
         } else {
             // 0x_8 group: pre/post-index (writeback) or unscaled.
             // bits[11:10] 01 = post, 11 = pre: both update the base and
@@ -955,11 +968,20 @@ bool fault_skip_load_store(ucontext_t* uc, uintptr_t faultAddr, uint64_t* newPcO
     // The decode must explain the fault. Anything else is a mis-decode.
     if (p.effAddr != faultAddr) return false;
     if (p.isLoad) {
-        // 29/30 never take a transfer result in valid code, 31 is XZR
-        // (no effect): refuse rather than reason about them.
-        if (p.rt >= 29 || (p.isPair && p.rt2 >= 29)) return false;
-        uc->uc_mcontext->__ss.__x[p.rt] = 0;
-        if (p.isPair) uc->uc_mcontext->__ss.__x[p.rt2] = 0;
+        if (p.isVector) {
+            // SIMD/FP lane: all 32 vector registers exist (no XZR), so no
+            // destination gate is needed — zero the whole 128-bit lane in
+            // the NEON context (Darwin arm_neon_state64 __v).
+            if (p.rt > 31) return false;
+            std::memset(&uc->uc_mcontext->__ns.__v[p.rt], 0,
+                        sizeof(uc->uc_mcontext->__ns.__v[p.rt]));
+        } else {
+            // 29/30 never take a transfer result in valid code, 31 is XZR
+            // (no effect): refuse rather than reason about them.
+            if (p.rt >= 29 || (p.isPair && p.rt2 >= 29)) return false;
+            uc->uc_mcontext->__ss.__x[p.rt] = 0;
+            if (p.isPair) uc->uc_mcontext->__ss.__x[p.rt2] = 0;
+        }
     }
     *newPcOut = pc + 4;
     return true;

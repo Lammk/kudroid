@@ -923,12 +923,43 @@ void test_fault_skip_decoder() {
         Check(!fault_decode_skip(0xa9bf7bfd, 0x1000, 0x8000, 0).skippable,
               "stp pre-index refuses");
     }
-    // SIMD lanes, atomics, exclusives, branches refuse.
+    // SIMD/FP single transfers allow (vector lane zeroed in __ns):
+    // crash opcode ldr q0,[x1,x13,lsl#4] with the exact register values.
     {
-        Check(!fault_decode_skip(0x3dc00252, 0x1000, 0x5000, 0).skippable,
-              "SIMD single (ldr q18,[x18]) refuses");
+        FaultSkipPlan p =
+            fault_decode_skip(0x3ced7820, 0x1000, 0x380a90150ull, 0x081dd2960ull);
+        Check(p.skippable && p.isLoad && !p.isPair && p.isVector && p.rt == 0,
+              "crash ldr q0,[x1,x13,lsl#4] is skippable to v0");
+        Check(p.effAddr == 0xb9e7b9750ull, "its address matches the fault exactly");
+    }
+    {
+        FaultSkipPlan p = fault_decode_skip(0x3dc00420, 0x1000, 0x5000, 0);  // ldr q0,[x1,#16]
+        Check(p.skippable && p.isLoad && p.isVector && p.rt == 0 && p.effAddr == 0x5010,
+              "SIMD unsigned-immediate load allows at base+16");
+    }
+    {
+        FaultSkipPlan p = fault_decode_skip(0x3cad7820, 0x1000, 0x6000, 0x18);  // str q0,[x1,x18,lsl#4]
+        Check(p.skippable && !p.isLoad && p.isVector && p.effAddr == 0x6180,
+              "SIMD register-offset store allows (write dropped)");
+    }
+    {
+        FaultSkipPlan p = fault_decode_skip(0x3dc00252, 0x1000, 0x5000, 0);  // ldr q18,[x18]
+        Check(p.skippable && p.isLoad && p.isVector && p.rt == 18 && p.effAddr == 0x5000,
+              "SIMD lane v18 allows (was a whole-function skip before)");
+    }
+    // SIMD pairs and SIMD writeback still refuse.
+    {
         Check(!fault_decode_skip(0xad000640, 0x1000, 0x8000, 0).skippable,
               "SIMD pair (stp q0,q1,[x18]) refuses");
+        Check(!fault_decode_skip(0xad010440, 0x1000, 0x8000, 0).skippable,
+              "SIMD pair offset (stp q0,q1,[x2,#32]) refuses");
+        Check(!fault_decode_skip(0x3c810420, 0x1000, 0x5000, 0).skippable,
+              "SIMD post-index store refuses");
+        Check(!fault_decode_skip(0x3cc10c20, 0x1000, 0x5000, 0).skippable,
+              "SIMD pre-index load refuses");
+    }
+    // Atomics, exclusives, branches refuse.
+    {
         Check(!fault_decode_skip(0xb8200041, 0x1000, 0x5000, 0).skippable,
               "LSE ldadd refuses (bits[11:10] != 10)");
         Check(!fault_decode_skip(0xc85f7c20, 0x1000, 0x5000, 0).skippable,

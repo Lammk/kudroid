@@ -14,6 +14,7 @@ struct FaultSkipPlan {
     bool skippable = false;
     bool isLoad = false;   // false = store/PRFM: no register is touched
     bool isPair = false;   // LDP: rt2 is a second destination
+    bool isVector = false;  // SIMD/FP single: rt names __ns.__v, not __x
     unsigned rt = 31;
     unsigned rt2 = 31;
     uint64_t effAddr = 0;
@@ -21,8 +22,9 @@ struct FaultSkipPlan {
 
 // Decode one AArch64 word for the skip rules documented in kudroid_bridge.cpp:
 // plain integer loads/stores (unsigned/unscaled immediate, register offset,
-// literal, signed-offset pairs) and PRFM. Everything else — writeback forms,
-// exclusives, LSE atomics, SIMD/FP lanes, branches — reports unskippable.
+// literal, signed-offset pairs), SIMD/FP single transfers (same addressing
+// modes; Rt names a vector register), and PRFM. Everything else — writeback
+// forms, exclusives, LSE atomics, SIMD pairs, branches — reports unskippable.
 // baseVal/rmVal are the values the addressing mode reads (SP for Rn==31,
 // 0 for XZR); the caller supplies them from the signal context.
 FaultSkipPlan fault_decode_skip(uint32_t w, uint64_t pc, uint64_t baseVal,
