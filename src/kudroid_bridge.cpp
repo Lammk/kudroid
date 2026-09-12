@@ -44,6 +44,7 @@
 #if defined(__APPLE__)
 #include <mach/mach.h>
 #include <mach/task.h>
+#include <mach/thread_status.h>
 #else
 #include <sys/syscall.h>
 #endif
@@ -981,11 +982,13 @@ bool fault_skip_load_store(ucontext_t* uc, uintptr_t faultAddr, uint64_t* newPcO
 
     auto regVal = [&](unsigned r) -> uint64_t {
         if (r == 31) return 0;
-        if (r > 30) return 0;
+        if (r == 30) return arm_thread_state64_get_lr(uc->uc_mcontext->__ss);
+        if (r == 29) return arm_thread_state64_get_fp(uc->uc_mcontext->__ss);
+        if (r > 28) return 0;
         return uc->uc_mcontext->__ss.__x[r];
     };
     const uint64_t baseVal =
-        (rn == 31) ? uc->uc_mcontext->__ss.__sp : regVal(rn);
+        (rn == 31) ? arm_thread_state64_get_sp(uc->uc_mcontext->__ss) : regVal(rn);
     const uint64_t rmVal = regVal((w >> 16) & 31);
 
     const kudroid::FaultSkipPlan p = kudroid::fault_decode_skip(w, pc, baseVal, rmVal);
@@ -1020,7 +1023,8 @@ static bool kudroid_try_skip_fault(int /*sig*/, siginfo_t* info, void* ucontext)
     uint64_t newPc = 0;
     const uintptr_t faultAddr = reinterpret_cast<uintptr_t>(info->si_addr);
     if (!fault_skip_load_store(uc, faultAddr, &newPc)) return false;
-    uc->uc_mcontext->__ss.__pc = newPc;
+    arm_thread_state64_set_pc_fptr(uc->uc_mcontext->__ss,
+                                   reinterpret_cast<void*>(newPc));
     char mark[256];
     const int n = snprintf(mark, sizeof(mark),
                            "fault-skipped fault_addr=0x%llx resumed_at_pc=0x%llx",
@@ -1421,6 +1425,41 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
                     info->si_addr, info->si_code);
                 crashWriteLine(fd, sigline, m, sizeof(sigline));
             }
+
+#if (defined(__aarch64__) || defined(__arm64__)) && defined(__APPLE__)
+            if (ucontext && info) {
+                ucontext_t* uc = reinterpret_cast<ucontext_t*>(ucontext);
+                const uint64_t pc = uc->uc_mcontext->__ss.__pc;
+                char mod[256] = {0};
+                if (!kudroid::kudroid_lookup_guest_module(reinterpret_cast<void*>(pc), mod, sizeof(mod))) {
+                    m = snprintf(sigline, sizeof(sigline), "fault_skip_diag: pc not in guest module\n");
+                } else if ((pc & 3) != 0) {
+                    m = snprintf(sigline, sizeof(sigline), "fault_skip_diag: unaligned pc\n");
+                } else {
+                    const uint32_t w = *reinterpret_cast<const uint32_t*>(pc);
+                    auto regVal = [&](unsigned r) -> uint64_t {
+                        if (r == 31) return 0;
+                        if (r == 30) return arm_thread_state64_get_lr(uc->uc_mcontext->__ss);
+                        if (r == 29) return arm_thread_state64_get_fp(uc->uc_mcontext->__ss);
+                        if (r > 28) return 0;
+                        return uc->uc_mcontext->__ss.__x[r];
+                    };
+                    const unsigned rn = (w >> 5) & 31;
+                    const uint64_t baseVal = (rn == 31) ? arm_thread_state64_get_sp(uc->uc_mcontext->__ss) : regVal(rn);
+                    const uint64_t rmVal = regVal((w >> 16) & 31);
+                    const kudroid::FaultSkipPlan p = kudroid::fault_decode_skip(w, pc, baseVal, rmVal);
+                    if (!p.skippable) {
+                        m = snprintf(sigline, sizeof(sigline), "fault_skip_diag: instruction 0x%08x not skippable\n", w);
+                    } else if (p.effAddr != reinterpret_cast<uintptr_t>(info->si_addr)) {
+                        m = snprintf(sigline, sizeof(sigline), "fault_skip_diag: effAddr 0x%llx != si_addr %p\n",
+                                     (unsigned long long)p.effAddr, info->si_addr);
+                    } else {
+                        m = snprintf(sigline, sizeof(sigline), "fault_skip_diag: skippable plan ok (fatal thread or budget cap)\n");
+                    }
+                }
+                crashWriteLine(fd, sigline, m, sizeof(sigline));
+            }
+#endif
 
             // in thanh ghi pc (arm64)
 #if defined(__aarch64__) || defined(__arm64__)

@@ -257,25 +257,22 @@ int logAndroidMessage(int priority, const char* tag, const std::string& message)
 
     // Also append to a file in Documents for the user to easily read
     if (::g_kudroid_log_dir_ptr && ::g_kudroid_log_dir_ptr[0] != '\0') {
-        static FILE* s_android_log_fp = nullptr;
-        static char s_last_log_dir[1024] = {0};
-        if (s_android_log_fp == nullptr || std::strcmp(s_last_log_dir, ::g_kudroid_log_dir_ptr) != 0) {
-            if (s_android_log_fp) {
-                fclose(s_android_log_fp);
-                s_android_log_fp = nullptr;
-            }
-            snprintf(s_last_log_dir, sizeof(s_last_log_dir), "%s", ::g_kudroid_log_dir_ptr);
-            char log_path[1024];
-            snprintf(log_path, sizeof(log_path), "%s/kudroid_android_logs.txt", ::g_kudroid_log_dir_ptr);
-            s_android_log_fp = fopen(log_path, "a");
-        }
-        if (s_android_log_fp) {
+        char log_path[1024];
+        snprintf(log_path, sizeof(log_path), "%s/kudroid_android_logs.txt", ::g_kudroid_log_dir_ptr);
+        int log_fd = ::open(log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (log_fd >= 0) {
+            char line_buf[4096];
+            int n = 0;
             if (time_buf[0]) {
-                fprintf(s_android_log_fp, "[%s] [%s] %s\n", time_buf, tag ? tag : "unknown", message.c_str());
+                n = snprintf(line_buf, sizeof(line_buf), "[%s] [%s] %s\n", time_buf, tag ? tag : "unknown", message.c_str());
             } else {
-                fprintf(s_android_log_fp, "[%s] %s\n", tag ? tag : "unknown", message.c_str());
+                n = snprintf(line_buf, sizeof(line_buf), "[%s] %s\n", tag ? tag : "unknown", message.c_str());
             }
-            fflush(s_android_log_fp);
+            if (n > 0) {
+                if (static_cast<size_t>(n) > sizeof(line_buf) - 1) n = sizeof(line_buf) - 1;
+                (void)!::write(log_fd, line_buf, static_cast<size_t>(n));
+            }
+            ::close(log_fd);
         }
     }
 
@@ -1225,8 +1222,8 @@ extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int
         darwin_fd = -1;  // Darwin requires fd == -1 for anonymous mappings
     }
 
-    // Align unaligned MAP_FIXED anonymous mapping to host page size.
-    if (darwin_fd < 0 && (darwin_flags & MAP_FIXED) && addr != nullptr) {
+    // Align unaligned anonymous mapping with target addr to host page size.
+    if (darwin_fd < 0 && addr != nullptr) {
         const long host_page = ::sysconf(_SC_PAGESIZE);
         const uintptr_t page_mask = (host_page > 0 ? static_cast<uintptr_t>(host_page) : 16384u) - 1;
         const uintptr_t uaddr = reinterpret_cast<uintptr_t>(addr);
@@ -1235,6 +1232,16 @@ extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int
             const size_t diff = static_cast<size_t>(uaddr - aligned_start);
             addr = reinterpret_cast<void*>(aligned_start);
             length += diff;
+        }
+        // If the caller requested an address for anonymous memory without MAP_FIXED
+        // (common in Unity/Mono/V8 reserving an arena then committing pages within it),
+        // try mmap with MAP_FIXED first. If it succeeds, the reserved page is committed.
+        // If it fails, fall back to non-fixed so standard allocation succeeds.
+        if (!(darwin_flags & MAP_FIXED) && (prot != PROT_NONE)) {
+            void* fixed_p = ::mmap(addr, length, prot, darwin_flags | MAP_FIXED, darwin_fd, offset);
+            if (fixed_p != MAP_FAILED) {
+                return fixed_p;
+            }
         }
     }
 
