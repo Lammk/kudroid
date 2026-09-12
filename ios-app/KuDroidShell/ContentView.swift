@@ -1862,6 +1862,20 @@ class NativeMetalViewController: UIViewController {
             let reqOri = kudroid_get_requested_orientation()
             if reqOri != self.lastRequestedOrientation {
                 self.lastRequestedOrientation = reqOri
+                // requestGeometryUpdate refuses any orientation the view
+                // controller does not declare (observed: "Requested: portrait;
+                // Supported: landscapeLeft, landscapeRight" — the VC had
+                // already rotated to landscape, so its supported set was the
+                // OLD one and the back-to-portrait request was rejected,
+                // leaving the swap chain in a dead geometry: black screen
+                // with healthy eglSwapBuffers). Announcing the change first
+                // re-evaluates supportedInterfaceOrientations (which reads
+                // the same kudroid_get_requested_orientation value) so the
+                // request and the mask always agree.
+                if #available(iOS 16.0, *) {
+                    self.setNeedsUpdateOfSupportedInterfaceOrientations()
+                }
+                UIViewController.attemptRotationToDeviceOrientation()
                 if reqOri == 0 || reqOri == 6 || reqOri == 8 || reqOri == 11 {
                     // Landscape
                     NSLog("[KuDroid] Guest app requested LANDSCAPE orientation (%d)", reqOri)

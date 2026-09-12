@@ -447,6 +447,91 @@ void TestJarFromArchive(kudroid::VFSPathRemapper& remapper, const std::string& r
     kudroid_set_assets_dir("");
 }
 
+// ── zip index: O(1) stat + dir listing over a parsed-once archive ──────────
+//
+// zip_stat_entry used to fopen+EOCD+walk the whole central directory per query —
+// over 1,100 scans of base.apk on one cold start. It now builds an in-memory index
+// the first time an archive is touched and every later query is a hash lookup.
+// These checks pin the index's answers against the bytes the fixture ZIP was built
+// with, and time the repeated-query shape that used to be seconds of I/O.
+void TestZipIndex(const std::string& root) {
+    std::printf("-- zip central-directory index --\n");
+
+    const std::filesystem::path apkDir =
+        std::filesystem::path(root) / "data" / "app" / "com.test.zipidx";
+    std::filesystem::create_directories(apkDir);
+    const std::string apkPath = (apkDir / "base.apk").string();
+
+    const std::vector<uint8_t> zip = build_store_zip({
+        {"assets/root.json", "R"},
+        {"assets/shaders/a.glsl", "shader-a"},
+        {"assets/shaders/b.glsl", "shader-b"},
+        {"assets/shaders/sub/c.glsl", "shader-c"},
+    });
+    {
+        std::ofstream out(apkPath, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(zip.data()),
+                  static_cast<std::streamsize>(zip.size()));
+    }
+
+    uint64_t off = 0, size = 0;
+    uint16_t method = 0xFFFF;
+    Check(kudroid::zip_stat_entry(apkPath, "assets/shaders/a.glsl", &off, &size, &method),
+          "stat finds an entry the old walk served");
+    Check(size == 8 && method == 0, "stat reports the stored entry's size and method");
+    {
+        std::ifstream in(apkPath, std::ios::binary);
+        in.seekg(static_cast<std::streamoff>(off));
+        char buf[9] = {};
+        in.read(buf, 8);
+        Check(in.gcount() == 8 && std::string(buf, 8) == "shader-a",
+              "the reported payload offset points at the entry's bytes");
+    }
+
+    uint64_t off2 = 1;
+    Check(kudroid::zip_stat_entry(apkPath, "ASSETS/SHADERS/A.GLSL", &off2, nullptr, nullptr) &&
+              off2 == off,
+          "stat matches case-insensitively like the old walk");
+    Check(!kudroid::zip_stat_entry(apkPath, "assets/missing.glsl", nullptr, nullptr, nullptr),
+          "stat misses an entry that does not exist");
+
+    const std::vector<std::string> listing =
+        kudroid::zip_list_dir_entries(apkPath, "assets/shaders");
+    Check(listing.size() == 2, "a listing reports only the directory's immediate children");
+    const bool sawA = listing.size() == 2 && listing[0] == "a.glsl" && listing[1] == "b.glsl";
+    Check(sawA, "the listing keeps archive order and original name case");
+    Check(kudroid::zip_list_dir_entries(apkPath, "assets/shaders/").size() == 2,
+          "the listing accepts the prefix with a trailing slash");
+    Check(kudroid::zip_list_dir_entries(apkPath, "assets/shaders/sub").size() == 1 &&
+              kudroid::zip_list_dir_entries(apkPath, "assets/shaders/sub")[0] == "c.glsl",
+          "a nested directory lists its own children");
+    Check(kudroid::zip_list_dir_entries(apkPath, "nope").empty(),
+          "a missing directory lists empty");
+
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < 20000; ++i) {
+        kudroid::zip_stat_entry(apkPath, "assets/shaders/a.glsl", nullptr, nullptr, nullptr);
+    }
+    const auto elapsedUs =
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - t0)
+            .count();
+    // 20k queries through a full CD walk took seconds; through the index each query
+    // is a hash lookup. The bound only has to catch a regression to the walk.
+    Check(elapsedUs < 2'000'000,
+          "20k stats over one archive stay hash-lookup fast (took " +
+              std::to_string(elapsedUs) + "us)");
+
+    // A broken archive must cache its failure, not re-walk garbage at query rate.
+    const std::string junkPath = (apkDir / "junk.apk").string();
+    {
+        std::ofstream out(junkPath, std::ios::binary);
+        out << "definitely not a zip";
+    }
+    Check(!kudroid::zip_stat_entry(junkPath, "anything", nullptr, nullptr, nullptr),
+          "a non-zip file stats as missing");
+}
+
 void TestUrlRemapping(kudroid::VFSPathRemapper& remapper, const std::string& root) {
     std::printf("-- URL scheme remapping --\n");
 
@@ -491,6 +576,7 @@ int main() {
     TestFileIo();
     TestUrlRemapping(remapper, root);
     TestJarFromArchive(remapper, root);
+    TestZipIndex(root);
 
     std::filesystem::remove_all(home);
 

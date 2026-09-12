@@ -16,6 +16,7 @@
 
 #include "kudroid/platform/AssetShim.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
@@ -538,6 +539,56 @@ void TestResolveBytesInApk(const std::filesystem::path& appDir) {
 } // namespace
 
 
+// The cold-start shape: thousands of opens served from the same base.apk in one run.
+// Each open must be an O(1) index lookup over a cached fd, not a fresh open/EOCD/
+// central-directory scan of the archive — the version that did the latter measured
+// whole seconds of disk I/O before the first frame.
+void TestRepeatedArchiveOpens(const std::filesystem::path& appDir) {
+    std::printf("-- repeated opens against one archive (cold-start shape) --\n");
+
+    const auto assetsDir = appDir / "assets";
+    const auto baseApkPath = appDir / "base.apk";
+    std::vector<TestZipEntry> entries;
+    for (int i = 0; i < 200; ++i) {
+        entries.push_back({"assets/bulk/file" + std::to_string(i),
+                           "payload-" + std::to_string(i)});
+    }
+    const auto zipBytes = BuildTestZip(entries);
+    std::filesystem::create_directories(appDir);
+    {
+        std::ofstream out(baseApkPath, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(zipBytes.data()),
+                  static_cast<std::streamsize>(zipBytes.size()));
+    }
+    kudroid_set_assets_dir(assetsDir.string().c_str());
+
+    constexpr int kRepeats = 3;
+    const auto t0 = std::chrono::steady_clock::now();
+    for (int r = 0; r < kRepeats; ++r) {
+        for (int i = 0; i < 200; ++i) {
+            const std::string name = "bulk/file" + std::to_string(i);
+            const std::string expected = "payload-" + std::to_string(i);
+            if (ReadAsset(name.c_str()) != expected) {
+                Check(false, "bulk iteration r" + std::to_string(r) + " reads " + name +
+                                 " correctly");
+                kudroid_set_assets_dir("");
+                return;
+            }
+        }
+    }
+    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               std::chrono::steady_clock::now() - t0)
+                               .count();
+    Check(true, "600 repeated archive opens return correct bytes");
+    // No per-open correctness expectation on time, but the whole loop must stay far
+    // below the seconds the pre-index path cost. Generous margin so a loaded CI box
+    // never flaks the build.
+    Check(elapsedMs < 2000, "600 archive opens finish in under 2s (took " +
+                                std::to_string(elapsedMs) + "ms)");
+
+    kudroid_set_assets_dir("");
+}
+
 int main() {
     const std::filesystem::path root =
         std::filesystem::temp_directory_path() /
@@ -557,6 +608,7 @@ int main() {
     TestAssetSeekAndRead(root / "seek_read");
     TestResolveBytesLoose(root / "resolve_loose");
     TestResolveBytesInApk(root / "resolve_apk");
+    TestRepeatedArchiveOpens(root / "repeat_apk");
 
     std::filesystem::remove_all(root);
 

@@ -10,13 +10,16 @@
 #include <cerrno>
 #include <cstdint>
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <filesystem>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 
 namespace kudroid {
 
@@ -113,6 +116,151 @@ static void untrace_buffer(uint64_t bytes) {
     else g_bufferBytesLive = 0;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Read-only fd cache for archive-backed assets.
+//
+// A cold start opens the same archive for every asset it serves; without the cache that
+// is one open/close syscall pair per asset. The fd is validated by (st_dev, st_ino) and
+// dropped after a stale check fails, so replacing the archive invalidates it rather than
+// serving bytes from the old file.
+// ─────────────────────────────────────────────────────────────────────────────
+struct CachedFd {
+    int fd;
+    dev_t dev;
+    ino_t ino;
+};
+static std::mutex g_cachedFdMtx;
+static std::unordered_map<std::string, CachedFd> g_cachedFds;
+
+static bool stat_matches(int fd, dev_t dev, ino_t ino) {
+    struct stat st {};
+    return ::fstat(fd, &st) == 0 && st.st_dev == dev && st.st_ino == ino;
+}
+
+// Returns a read-only fd for `path`, cached across calls. The fd is owned by the cache
+// and must not be closed or dup'd by callers seeking elsewhere.
+static int cached_readonly_fd(const std::string& path) {
+    std::lock_guard<std::mutex> lock(g_cachedFdMtx);
+    const auto it = g_cachedFds.find(path);
+    if (it != g_cachedFds.end()) {
+        if (stat_matches(it->second.fd, it->second.dev, it->second.ino)) {
+            return it->second.fd;
+        }
+        ::close(it->second.fd);
+        g_cachedFds.erase(it);
+    }
+    const int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd < 0) return -1;
+    struct stat st {};
+    if (::fstat(fd, &st) != 0) {
+        ::close(fd);
+        return -1;
+    }
+    g_cachedFds.emplace(path, CachedFd{fd, st.st_dev, st.st_ino});
+    return fd;
+}
+
+// AAsset on a stream: a stdio FILE* whose reads are preads against the cached fd, so a
+// position lives in the stream rather than in the shared file description. Needed because
+// an fd handed out by openFileDescriptor must keep its own offset while the asset reads.
+struct PreadCookie {
+    int fd;
+    off_t pos;
+};
+
+static off_t pread_stream_size(int fd) {
+    struct stat st {};
+    return ::fstat(fd, &st) == 0 ? st.st_size : 0;
+}
+
+#if defined(__APPLE__)
+static int pread_readfn(void* cookie, char* buf, int len) {
+    auto* s = static_cast<PreadCookie*>(cookie);
+    if (len <= 0) return 0;
+    const ssize_t n = ::pread(s->fd, buf, static_cast<size_t>(len), s->pos);
+    if (n > 0) s->pos += static_cast<off_t>(n);
+    return static_cast<int>(n);
+}
+
+static off_t pread_seekfn(void* cookie, off_t offset, int whence) {
+    auto* s = static_cast<PreadCookie*>(cookie);
+    off_t target = s->pos;
+    if (whence == SEEK_SET) target = offset;
+    else if (whence == SEEK_CUR) target = s->pos + offset;
+    else if (whence == SEEK_END) target = pread_stream_size(s->fd) + offset;
+    else {
+        errno = EINVAL;
+        return -1;
+    }
+    if (target < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    s->pos = target;
+    return target;
+}
+
+static int pread_closefn(void* cookie) {
+    delete static_cast<PreadCookie*>(cookie);
+    return 0;
+}
+#else
+static ssize_t pread_cookie_read(void* cookie, char* buf, size_t len) {
+    auto* s = static_cast<PreadCookie*>(cookie);
+    if (len == 0) return 0;
+    const ssize_t n = ::pread(s->fd, buf, len, s->pos);
+    if (n > 0) s->pos += static_cast<off_t>(n);
+    return n;
+}
+
+static int pread_cookie_seek(void* cookie, off64_t* offsetp, int whence) {
+    auto* s = static_cast<PreadCookie*>(cookie);
+    off64_t target = s->pos;
+    if (whence == SEEK_SET) target = *offsetp;
+    else if (whence == SEEK_CUR) target = s->pos + *offsetp;
+    else if (whence == SEEK_END) target = pread_stream_size(s->fd) + *offsetp;
+    else {
+        errno = EINVAL;
+        return -1;
+    }
+    if (target < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    s->pos = target;
+    *offsetp = target;
+    return 0;
+}
+
+static int pread_cookie_close(void* cookie) {
+    delete static_cast<PreadCookie*>(cookie);
+    return 0;
+}
+#endif
+
+// Open `path` as a read-only FILE* backed by pread on the cached fd. *outFd (may be
+// null) receives the underlying fd so getBuffer can still mmap the archive slice —
+// mmap takes an explicit offset and does not disturb the shared file description.
+static FILE* open_pread_stream(const std::string& path, int* outFd) {
+    const int fd = cached_readonly_fd(path);
+    if (fd < 0) return nullptr;
+    auto* cookie = new PreadCookie{fd, 0};
+    FILE* f = nullptr;
+#if defined(__APPLE__)
+    f = ::funopen(cookie, pread_readfn, nullptr, pread_seekfn, pread_closefn);
+#else
+    static const cookie_io_functions_t kFns = {
+        pread_cookie_read, nullptr, pread_cookie_seek, pread_cookie_close};
+    f = ::fopencookie(cookie, "r", kFns);
+#endif
+    if (f == nullptr) {
+        delete cookie;
+        return nullptr;
+    }
+    if (outFd) *outFd = fd;
+    return f;
+}
+
 // Opaque handles (bionic returns cursor without revealing content).
 struct DummyAssetManager { int dummy; };
 static DummyAssetManager g_manager;
@@ -130,6 +278,9 @@ struct AAssetImpl {
     void* mmapBase;    // base pointer for page-aligned mmap
     size_t mmapSize;   // total mapped size
     bool bufferMapped;
+    // Valid only when `file` is a pread-backed stream over the fd cache; -1 for a
+    // plain fopen handle (whose fileno is used directly).
+    int streamFd = -1;
 };
 
 struct AAssetDirImpl {
@@ -238,7 +389,14 @@ static AAssetImpl* open_asset(const char* filename) {
         return nullptr;
     }
 
-    FILE* f = std::fopen(full.string().c_str(), "rb");
+    FILE* f = nullptr;
+    int streamFd = -1;
+    if (startOffset > 0) {
+        // Archive-backed slice: pread on a cached fd, no per-asset open/close.
+        f = open_pread_stream(full.string(), &streamFd);
+    } else {
+        f = std::fopen(full.string().c_str(), "rb");
+    }
     if (!f) return nullptr;
 
     long len = entryLength;
@@ -262,6 +420,7 @@ static AAssetImpl* open_asset(const char* filename) {
     asset->mmapBase = nullptr;
     asset->mmapSize = 0;
     asset->bufferMapped = false;
+    asset->streamFd = streamFd;
     // Addressables-style manifest loads are rare; showing them proves the route.
     if (rel.find(".json") != std::string::npos || rel.find("aa/") != std::string::npos) {
         static std::atomic<int> s_hitLogged{0};
@@ -461,7 +620,7 @@ extern "C" const void* bionic_AAsset_getBuffer(void* asset) {
     if (a->buffer) return a->buffer;
     if (a->length <= 0) return nullptr;
 
-    const int fd = ::fileno(a->file);
+    const int fd = a->streamFd >= 0 ? a->streamFd : ::fileno(a->file);
     if (fd >= 0) {
         const long pageSize = ::sysconf(_SC_PAGE_SIZE);
         const off_t pageOffset = (static_cast<off_t>(a->startOffset) / pageSize) * pageSize;

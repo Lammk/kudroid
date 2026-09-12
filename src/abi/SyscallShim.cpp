@@ -5905,7 +5905,17 @@ extern "C" int bionic___sprintf_chk(char* s, int flag, size_t slen, const char* 
     return r;
 }
 
+// Fortified string copies: Unity's error path builds messages from a JNI
+// string whose chars came back NULL (GetStringUTFChars on a cleared
+// exception), and host strncpy traps on the null source. An empty string is
+// what the copy would have produced from missing data — and exactly what the
+// caller's snprintf/append expects to find.
 extern "C" char* bionic___strncpy_chk(char* dst, const char* src, size_t n, size_t dst_len) {
+    if (!dst) return nullptr;
+    if (!src) {
+        if (dst_len > 0) dst[0] = '\0';
+        return dst;
+    }
     if (n > dst_len) {
         trace("__strncpy_chk: destination overflow (fortify)");
         n = dst_len; // clamp to prevent buffer overflow
@@ -5914,11 +5924,18 @@ extern "C" char* bionic___strncpy_chk(char* dst, const char* src, size_t n, size
 }
 
 extern "C" char* bionic___strcpy_chk(char* dst, const char* src, size_t dst_len) {
+    if (!dst) return nullptr;
+    if (!src) {
+        if (dst_len > 0) dst[0] = '\0';
+        return dst;
+    }
     if (::strlen(src) >= dst_len) trace("__strcpy_chk: destination overflow (fortify)");
     return ::strcpy(dst, src);
 }
 
 extern "C" char* bionic___strcat_chk(char* dst, const char* src, size_t dst_len) {
+    if (!dst) return nullptr;
+    if (!src) return dst;
     if (::strlen(dst) + ::strlen(src) >= dst_len) {
         trace("__strcat_chk: destination overflow (fortify)");
     }

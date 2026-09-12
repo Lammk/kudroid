@@ -13,6 +13,9 @@
 #include <cstdio>
 #include <map>
 #include <mutex>
+#include <functional>
+#include <string_view>
+#include <unordered_map>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -102,7 +105,30 @@ static int translate_linux_open_flags(int flags) {
 //
 // A ".." that would climb above the top of an absolute path is dropped, which is what
 // the kernel does at "/" as well.
+// Direct-mapped memo for normalizePathString: bounded to 512 entries, no eviction
+// policy. The guest re-normalizes the same long paths thousands of times on one cold
+// start (shader cache, per-asset remaps) and the split/join dominates that cost.
+struct NormalizeMemoSlot {
+    std::string input;
+    std::string output;
+};
+struct NormalizeMemo {
+    std::mutex mtx;
+    static constexpr size_t kSlots = 512;
+    NormalizeMemoSlot slots[kSlots];
+};
+
 std::string normalizePathString(std::string_view path) {
+    static NormalizeMemo memo;
+    const size_t idx = std::hash<std::string_view>{}(path) % NormalizeMemo::kSlots;
+    {
+        std::lock_guard<std::mutex> lock(memo.mtx);
+        const std::string& in = memo.slots[idx].input;
+        if (in.size() == path.size() && std::memcmp(in.data(), path.data(), path.size()) == 0) {
+            return memo.slots[idx].output;
+        }
+    }
+
     const bool absolute = !path.empty() && path[0] == '/';
     std::vector<std::string_view> parts;
     size_t i = 0;
@@ -131,6 +157,12 @@ std::string normalizePathString(std::string_view path) {
     for (size_t n = 0; n < parts.size(); ++n) {
         if (n != 0) result += '/';
         result.append(parts[n]);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(memo.mtx);
+        memo.slots[idx].input.assign(path);
+        memo.slots[idx].output = result;
     }
     return result;
 }
@@ -839,107 +871,47 @@ uint64_t zip_extract_entry(const std::string& archivePath, const std::string& en
     return data.size();
 }
 
-bool zip_stat_entry(const std::string& archivePath, const std::string& entry,
-                    uint64_t* outOffset, uint64_t* outSize, uint16_t* outMethod) {
-    std::FILE* f = std::fopen(archivePath.c_str(), "rb");
-    if (f == nullptr) return false;
-    struct FileCloser {
-        std::FILE* f;
-        ~FileCloser() { std::fclose(f); }
-    } closer{f};
+// A game resolves assets one file at a time, so the naive path here was fopen+EOCD+
+// central-directory walk per stat and per listing — over 1,100 scans of the same APK on
+// one cold start. One in-memory index per archive turns every later query into a hash
+// lookup and lets zip_list_dir_entries stop re-reading the directory at all.
+struct ZipEntryMeta {
+    uint64_t payloadOffset = 0;
+    uint32_t uncompressedSize = 0;
+    uint16_t compressionMethod = 0;
+};
+struct ZipArchiveIndex {
+    std::unordered_map<std::string, ZipEntryMeta> entries;
+    // Directory prefix ("assets/shaders/") -> immediate child names, exactly the slice
+    // zip_list_dir_entries serves. Built alongside the entry map so listings are free.
+    std::unordered_map<std::string, std::vector<std::string>> dirChildren;
+};
 
-    if (std::fseek(f, 0, SEEK_END) != 0) return false;
-    const long long size = std::ftell(f);
-    if (size < 22) return false;
-    const size_t eocd = zip_find_eocd(f, size);
-    if (eocd == std::string::npos) return false;
-    uint8_t e[22];
-    if (std::fseek(f, static_cast<long>(eocd), SEEK_SET) != 0) return false;
-    if (std::fread(e, 1, 22, f) != 22) return false;
-    const uint16_t total_entries = zip_read16(e, 10);
-    const uint32_t cd_offset = zip_read32(e, 16);
-
-    struct Hit {
-        bool valid = false;
-        uint16_t method = 0;
-        uint32_t usize = 0;
-        uint32_t local_off = 0;
-    };
-    auto walk = [&](bool fold_case) -> Hit {
-        if (std::fseek(f, static_cast<long>(cd_offset), SEEK_SET) != 0) return {};
-        for (uint16_t n = 0; n < total_entries; ++n) {
-            uint8_t h[46];
-            if (std::fread(h, 1, 46, f) != 46) return {};
-            if (!(h[0] == 'P' && h[1] == 'K' && h[2] == 1 && h[3] == 2)) return {};
-            const uint16_t name_len = zip_read16(h, 28);
-            const uint16_t extra_len = zip_read16(h, 30);
-            const uint16_t comment_len = zip_read16(h, 32);
-            Hit hit;
-            hit.method = zip_read16(h, 10);
-            hit.usize = zip_read32(h, 24);
-            hit.local_off = zip_read32(h, 42);
-            std::string name(name_len, 0);
-            if (name_len > 0 && std::fread(name.data(), 1, name_len, f) != name_len) return {};
-            if (std::fseek(f, extra_len + comment_len, SEEK_CUR) != 0) return {};
-            const bool eq = fold_case
-                                ? name.size() == entry.size() &&
-                                      std::equal(name.begin(), name.end(), entry.begin(),
-                                                 [](char a, char b) {
-                                                     return std::tolower(static_cast<unsigned char>(a)) ==
-                                                            std::tolower(static_cast<unsigned char>(b));
-                                                 })
-                                : name == entry;
-            if (eq) {
-                hit.valid = true;
-                return hit;
-            }
-        }
-        return {};
-    };
-    Hit hit = walk(false);
-    if (!hit.valid) hit = walk(true);
-    if (!hit.valid) return false;
-
-    if (std::fseek(f, static_cast<long>(hit.local_off), SEEK_SET) != 0) return false;
-    uint8_t lh[30];
-    if (std::fread(lh, 1, 30, f) != 30) return false;
-    if (!(lh[0] == 'P' && lh[1] == 'K' && lh[2] == 3 && lh[3] == 4)) return false;
-    const uint16_t l_nlen = zip_read16(lh, 26);
-    const uint16_t l_elen = zip_read16(lh, 28);
-    const uint64_t payload_off = static_cast<uint64_t>(hit.local_off) + 30 + l_nlen + l_elen;
-
-    if (outOffset) *outOffset = payload_off;
-    if (outSize) *outSize = hit.usize;
-    if (outMethod) *outMethod = hit.method;
-    return true;
+std::string zip_index_key(std::string_view entry) {
+    std::string key(entry);
+    std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return key;
 }
 
-std::vector<std::string> zip_list_dir_entries(const std::string& archivePath,
-                                              const std::string& dirPrefix) {
-    std::vector<std::string> result;
-    std::FILE* f = std::fopen(archivePath.c_str(), "rb");
-    if (f == nullptr) return result;
-    struct FileCloser {
-        std::FILE* f;
-        ~FileCloser() { std::fclose(f); }
-    } closer{f};
-
-    if (std::fseek(f, 0, SEEK_END) != 0) return result;
+// Entry names are matched case-insensitively below, so names reaching the index are
+// lower-cased too; dirChildren keys are lower-cased prefixes, values keep original case.
+ZipArchiveIndex build_zip_index(std::FILE* f) {
+    ZipArchiveIndex index;
+    if (std::fseek(f, 0, SEEK_END) != 0) return index;
     const long long size = std::ftell(f);
-    if (size < 22) return result;
+    if (size < 22) return index;
     const size_t eocd = zip_find_eocd(f, size);
-    if (eocd == std::string::npos) return result;
+    if (eocd == std::string::npos) return index;
     uint8_t e[22];
-    if (std::fseek(f, static_cast<long>(eocd), SEEK_SET) != 0) return result;
-    if (std::fread(e, 1, 22, f) != 22) return result;
+    if (std::fseek(f, static_cast<long>(eocd), SEEK_SET) != 0) return index;
+    if (std::fread(e, 1, 22, f) != 22) return index;
     const uint16_t total_entries = zip_read16(e, 10);
     const uint32_t cd_offset = zip_read32(e, 16);
+    index.entries.reserve(total_entries * 2 + 1);
 
-    std::string prefix = dirPrefix;
-    while (!prefix.empty() && prefix[0] == '/') prefix.erase(0, 1);
-    if (!prefix.empty() && prefix.back() != '/') prefix.push_back('/');
-
-    if (std::fseek(f, static_cast<long>(cd_offset), SEEK_SET) != 0) return result;
+    if (std::fseek(f, static_cast<long>(cd_offset), SEEK_SET) != 0) return index;
     for (uint16_t n = 0; n < total_entries; ++n) {
         uint8_t h[46];
         if (std::fread(h, 1, 46, f) != 46) break;
@@ -951,14 +923,87 @@ std::vector<std::string> zip_list_dir_entries(const std::string& archivePath,
         if (name_len > 0 && std::fread(name.data(), 1, name_len, f) != name_len) break;
         if (std::fseek(f, extra_len + comment_len, SEEK_CUR) != 0) break;
 
-        if (name.rfind(prefix, 0) == 0) {
-            std::string sub = name.substr(prefix.size());
-            if (!sub.empty() && sub.back() == '/') sub.pop_back();
-            if (!sub.empty() && sub.find('/') == std::string::npos) {
-                result.push_back(std::move(sub));
+        const bool is_dir = !name.empty() && name.back() == '/';
+        ZipEntryMeta meta;
+        meta.compressionMethod = zip_read16(h, 10);
+        meta.uncompressedSize = zip_read32(h, 24);
+        const uint32_t local_off = zip_read32(h, 42);
+
+        // The central directory does not say where the data starts — the local header
+        // does, and its name/extra lengths are allowed to differ from the CD's. Resolving
+        // the payload offset here keeps every later stat a pure memory lookup.
+        if (!is_dir) {
+            const long saved = std::ftell(f);
+            if (std::fseek(f, static_cast<long>(local_off), SEEK_SET) != 0) continue;
+            uint8_t lh[30];
+            if (std::fread(lh, 1, 30, f) != 30) continue;
+            if (!(lh[0] == 'P' && lh[1] == 'K' && lh[2] == 3 && lh[3] == 4)) continue;
+            const uint16_t l_nlen = zip_read16(lh, 26);
+            const uint16_t l_elen = zip_read16(lh, 28);
+            meta.payloadOffset = static_cast<uint64_t>(local_off) + 30 + l_nlen + l_elen;
+            std::fseek(f, saved, SEEK_SET);
+        }
+
+        // First occurrence wins, matching the old sequential walk's first match.
+        index.entries.try_emplace(zip_index_key(name), meta);
+        if (is_dir) {
+            std::string dir = name.substr(0, name.size() - 1);
+            if (!dir.empty()) {
+                const size_t slash = dir.rfind('/');
+                const std::string parent = slash == std::string::npos ? "" : dir.substr(0, slash + 1);
+                index.dirChildren[zip_index_key(parent)].push_back(dir.substr(slash + 1));
             }
+        } else if (const size_t slash = name.rfind('/'); slash != std::string::npos) {
+            index.dirChildren[zip_index_key(name.substr(0, slash + 1))].push_back(
+                name.substr(slash + 1));
         }
     }
+    return index;
+}
+
+// Build once per archive, guarded; a failed build is cached as an empty index so a
+// broken file is re-probed at stat rate, not re-parsed at stat rate.
+const ZipArchiveIndex* get_or_build_zip_index(const std::string& archivePath) {
+    struct Cache {
+        std::mutex mtx;
+        std::unordered_map<std::string, ZipArchiveIndex> byArchive;
+    };
+    static Cache cache;
+    std::lock_guard<std::mutex> lock(cache.mtx);
+    auto [it, inserted] = cache.byArchive.try_emplace(archivePath);
+    if (inserted) {
+        std::FILE* f = std::fopen(archivePath.c_str(), "rb");
+        if (f != nullptr) {
+            it->second = build_zip_index(f);
+            std::fclose(f);
+        }
+    }
+    return &it->second;
+}
+
+bool zip_stat_entry(const std::string& archivePath, const std::string& entry,
+                    uint64_t* outOffset, uint64_t* outSize, uint16_t* outMethod) {
+    const ZipArchiveIndex* index = get_or_build_zip_index(archivePath);
+    if (index == nullptr) return false;
+    const auto it = index->entries.find(zip_index_key(entry));
+    if (it == index->entries.end()) return false;
+    if (outOffset) *outOffset = it->second.payloadOffset;
+    if (outSize) *outSize = it->second.uncompressedSize;
+    if (outMethod) *outMethod = it->second.compressionMethod;
+    return true;
+}
+
+std::vector<std::string> zip_list_dir_entries(const std::string& archivePath,
+                                              const std::string& dirPrefix) {
+    std::vector<std::string> result;
+    const ZipArchiveIndex* index = get_or_build_zip_index(archivePath);
+    if (index == nullptr) return result;
+
+    std::string prefix = dirPrefix;
+    while (!prefix.empty() && prefix[0] == '/') prefix.erase(0, 1);
+    if (!prefix.empty() && prefix.back() != '/') prefix.push_back('/');
+    const auto it = index->dirChildren.find(zip_index_key(prefix));
+    if (it != index->dirChildren.end()) result = it->second;
     return result;
 }
 
