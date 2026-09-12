@@ -355,6 +355,10 @@ extern "C" void kudroid_note_guest_ui_thread(void) {
     g_guestUiThread.store(currentThreadIdForCrash(), std::memory_order_relaxed);
 }
 
+extern "C" unsigned long long kudroid_guest_ui_thread_id(void) {
+    return g_guestUiThread.load(std::memory_order_relaxed);
+}
+
 extern "C" void kudroid_note_render_thread(void) {
     const unsigned long long tid = currentThreadIdForCrash();
     for (auto& slot : g_renderThreads) {

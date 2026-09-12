@@ -16,6 +16,7 @@
 
 #include "kudroid/framework_dex_bytes.h"
 #include "kudroid/NativeCallTelemetry.h"
+#include "kudroid/platform/NativeTouchGate.h"
 #include "kudroid/kuart/DexClassLinker.h"
 #include "kudroid/kuart/DexJniEnv.h"
 #include "kudroid/kuart/DexReflect.h"
@@ -344,6 +345,7 @@ extern "C" int kuart_init(const char* app_dir) {
     rt->ready = true;
     g_rt = rt.release();
     g_current_app_dir = requested_dir;
+    kudroid_touch_source_gate_init();
 
     Log("KuART ready: %zu DEX", g_rt->linker.NumDexFiles());
     return 1;

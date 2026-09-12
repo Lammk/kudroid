@@ -44,6 +44,7 @@ add_library(kudroid_core STATIC
     src/elf_x18.cpp
     src/library_manager.cpp
     src/platform/InputShim.cpp
+    src/platform/NativeTouchGate.cpp
     src/platform/AudioShim.cpp
     src/platform/GraphicsShim.cpp
     # AChoreographer + ANativeWindow_setFrameRate. Kept out of GraphicsShim.cpp

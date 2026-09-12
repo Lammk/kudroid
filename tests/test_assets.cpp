@@ -38,7 +38,7 @@ extern "C" void bionic_AAsset_close(void* asset);
 extern "C" void* bionic_AAssetManager_openDir(void* manager, const char* dirName);
 extern "C" const char* bionic_AAssetDir_getNextFileName(void* dir);
 extern "C" void bionic_AAssetDir_close(void* dir);
-extern "C" void* bionic_AAssetManager_openFd(void* manager, const char* filename, void* outStart, void* outLength);
+extern "C" int bionic_AAssetManager_openFd(void* manager, const char* filename, void* outStart, void* outLength);
 extern "C" int bionic_AAsset_openFileDescriptor(void* asset, void* outStart, void* outLength);
 extern "C" int bionic_AAsset_seek(void* asset, long offset, int whence);
 extern "C" int kudroid_asset_resolve_bytes(const char* filename, char** outPath,
@@ -368,13 +368,23 @@ void TestBaseApkFallback(const std::filesystem::path& appDir) {
     Check(ReadAsset("assets/bin/Data/settings.xml") == "<config>ok</config>",
           "ReadAsset resolves entry with 'assets/' prefix from base.apk");
 
-    // 2. Test openFd and file descriptor reading
+    // 2. Test openFd: NDK ABI — returns an fd positioned at the payload, not a handle.
     off_t start = -1, len = -1;
-    void* asset = bionic_AAssetManager_openFd(nullptr, "bin/Data/data.unity3d", &start, &len);
-    Check(asset != nullptr, "openFd returns non-null asset");
+    int openFdDirect = bionic_AAssetManager_openFd(nullptr, "bin/Data/data.unity3d", &start, &len);
+    Check(openFdDirect >= 0, "openFd returns a real fd (non-negative)");
     Check(start > 0, "openFd outStart is non-zero offset into base.apk");
     Check(len == 22, "openFd outLength matches stored payload size");
+    if (openFdDirect >= 0) {
+        std::string buf(static_cast<size_t>(len), '\0');
+        const ssize_t bytesRead = ::pread(openFdDirect, buf.data(), buf.size(), start);
+        Check(bytesRead == static_cast<ssize_t>(len), "read from openFd fd at start offset matches len");
+        Check(buf == "UNITY_DATA_BLOB_STORED", "data read via openFd fd matches content");
+        ::close(openFdDirect);
+    }
 
+    // AAsset_openFileDescriptor stays the per-asset route and must agree.
+    void* asset = bionic_AAssetManager_open(nullptr, "bin/Data/data.unity3d", 0);
+    Check(asset != nullptr, "open returns non-null asset");
     if (asset != nullptr) {
         off_t start2 = -1, len2 = -1;
         int fd = bionic_AAsset_openFileDescriptor(asset, &start2, &len2);
@@ -518,21 +528,16 @@ void TestResolveBytesInApk(const std::filesystem::path& appDir) {
         std::free(path);
     }
 
-    // And the fd handed out alongside must read the same bytes.
+    // And openFd must hand back a real fd on the backing file at the payload.
     off_t fdStart = -1, fdLen = -1;
-    void* asset = bionic_AAssetManager_openFd(nullptr, "res/audio/shot.ogg", &fdStart, &fdLen);
-    Check(asset != nullptr, "openFd on an in-APK asset returns a handle");
-    if (asset != nullptr) {
-        int fd = bionic_AAsset_openFileDescriptor(asset, &fdStart, &fdLen);
-        Check(fd >= 0, "openFileDescriptor on an in-APK asset returns fd");
-        if (fd >= 0) {
-            std::string buf(static_cast<size_t>(fdLen), '\0');
-            const ssize_t got = ::pread(fd, buf.data(), buf.size(), fdStart);
-            Check(got == static_cast<ssize_t>(fdLen) && buf == "STORED_OGG_PAYLOAD",
-                  "the fd at the reported offset reads the payload");
-            ::close(fd);
-        }
-        bionic_AAsset_close(asset);
+    const int fd = bionic_AAssetManager_openFd(nullptr, "res/audio/shot.ogg", &fdStart, &fdLen);
+    Check(fd >= 0, "openFd on an in-APK asset returns a real fd");
+    if (fd >= 0) {
+        std::string buf(static_cast<size_t>(fdLen), '\0');
+        const ssize_t got = ::pread(fd, buf.data(), buf.size(), fdStart);
+        Check(got == static_cast<ssize_t>(fdLen) && buf == "STORED_OGG_PAYLOAD",
+              "the fd at the reported offset reads the payload");
+        ::close(fd);
     }
 }
 

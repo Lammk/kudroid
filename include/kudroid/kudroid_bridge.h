@@ -85,6 +85,8 @@ unsigned long long kudroid_paused_generation(void);
 /// shutdown, never the diagnosis.
 void kudroid_note_guest_ui_thread(void);
 void kudroid_note_render_thread(void);
+/// The recorded guest UI thread id, or 0 before ActivityThread.main runs.
+unsigned long long kudroid_guest_ui_thread_id(void);
 /// Record this thread's guest name (from prctl PR_SET_NAME) for fault
 /// isolation. Names containing Main/main/Render/GfxDevice mark engine-critical
 /// threads (UnityMain, RenderThread, ...), which are app-fatal like the UI

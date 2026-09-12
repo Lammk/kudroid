@@ -444,13 +444,25 @@ extern "C" void* bionic_AAssetManager_open(void* /*manager*/, const char* filena
     return open_asset(filename);
 }
 
-extern "C" void* bionic_AAssetManager_openFd(void* /*manager*/, const char* filename,
-                                             void* outStart, void* outLength) {
+// Defined below; openFd only needs the fd, not the asset object.
+static int open_independent_fd(const AAssetImpl* a);
+extern "C" void bionic_AAsset_close(void* asset);
+
+extern "C" int bionic_AAssetManager_openFd(void* /*manager*/, const char* filename,
+                                            void* outStart, void* outLength) {
+    // NDK ABI: returns an fd positioned at the entry payload, or -1. AAssetImpl
+    // stays internal — the guest only ever sees the integer fd.
     auto* asset = open_asset(filename);
-    if (!asset) return nullptr;
-    if (outStart) *static_cast<off_t*>(outStart) = static_cast<off_t>(asset->startOffset);
-    if (outLength) *static_cast<off_t*>(outLength) = static_cast<off_t>(asset->length);
-    return asset;
+    if (!asset) return -1;
+    const off_t start = static_cast<off_t>(asset->startOffset);
+    const off_t length = static_cast<off_t>(asset->length);
+    const int fd = open_independent_fd(asset);
+    bionic_AAsset_close(asset);
+    if (fd < 0) return -1;
+    ::lseek(fd, start, SEEK_SET);
+    if (outStart) *static_cast<off_t*>(outStart) = start;
+    if (outLength) *static_cast<off_t*>(outLength) = length;
+    return fd;
 }
 
 // dup(fileno) shares the open file description with the asset's FILE*, so an fd read
@@ -572,8 +584,17 @@ extern "C" int bionic_AAsset_read(void* asset, void* buf, size_t count) {
     if (a->offset >= a->length) return 0;
     const size_t to_read = std::min<size_t>(count, static_cast<size_t>(a->length - a->offset));
     if (to_read == 0) return 0;
-    ::fseeko(a->file, static_cast<off_t>(a->startOffset + a->offset), SEEK_SET);
-    const size_t n = std::fread(buf, 1, to_read, a->file);
+    // Archive-backed: pread the cached fd so the shared stream position is untouched
+    // (the fd handed out by openFileDescriptor must keep its own offset).
+    const off_t filePos = static_cast<off_t>(a->startOffset) + static_cast<off_t>(a->offset);
+    ssize_t n;
+    if (a->streamFd >= 0) {
+        n = ::pread(a->streamFd, buf, to_read, filePos);
+    } else {
+        ::fseeko(a->file, filePos, SEEK_SET);
+        n = std::fread(buf, 1, to_read, a->file);
+    }
+    if (n < 0) return -1;
     a->offset += static_cast<long>(n);
     return static_cast<int>(n);
 }
@@ -588,9 +609,11 @@ extern "C" int bionic_AAsset_seek(void* asset, long offset, int whence) {
     else return -1;
     if (target < 0) return -1;
     a->offset = target;
-    if (a->startOffset > 0) {
+    // Archive-backed with a pread stream: the FILE* holds the archive position
+    // with no asset framing, so only the loose-file case seeks here.
+    if (a->startOffset > 0 && a->streamFd < 0) {
         std::fseek(a->file, a->startOffset + a->offset, SEEK_SET);
-    } else {
+    } else if (a->startOffset <= 0) {
         std::fseek(a->file, a->offset, SEEK_SET);
     }
     return static_cast<int>(a->offset);
@@ -606,9 +629,11 @@ extern "C" int64_t bionic_AAsset_seek64(void* asset, int64_t offset, int whence)
     else return -1;
     if (target < 0) return -1;
     a->offset = static_cast<long>(target);
-    if (a->startOffset > 0) {
+    // Archive-backed with a pread stream: the FILE* holds the archive position
+    // with no asset framing, so only the loose-file case seeks here.
+    if (a->startOffset > 0 && a->streamFd < 0) {
         ::fseeko(a->file, static_cast<off_t>(a->startOffset + a->offset), SEEK_SET);
-    } else {
+    } else if (a->startOffset <= 0) {
         ::fseeko(a->file, static_cast<off_t>(a->offset), SEEK_SET);
     }
     return static_cast<int64_t>(a->offset);

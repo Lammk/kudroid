@@ -97,6 +97,7 @@ public final class ActivityThread {
                     break;
                 case TOUCH_EVENT:
                     if (mInitialActivity != null && msg.obj instanceof MotionEvent) {
+                        onTouchEventDispatched(msg);
                         mInitialActivity.dispatchTouchEvent((MotionEvent) msg.obj);
                     }
                     break;
@@ -138,13 +139,41 @@ public final class ActivityThread {
         }
     }
 
+    /**
+     * Coalesce touch floods: a drag produces 60-120 MOVE events/s, and each
+     * one as its own Looper message starves everything else on the main thread
+     * (render ticks, lifecycle). AOSP keeps at most one pending MOVE per
+     * connection; here the pending message is updated in place so the queue
+     * never holds more than one TOUCH_EVENT, and stale intermediate positions
+     * are dropped. DOWN/UP/CANCEL pass through untouched — their order matters.
+     */
+    private static final Object sTouchMsgLock = new Object();
+    private static Message sPendingTouch;
+
     public static void postTouchEvent(int action, float x, float y) {
-        if (sCurrentActivityThread != null && sCurrentActivityThread.mH != null) {
-            MotionEvent ev = MotionEvent.obtain(action, x, y, System.currentTimeMillis());
+        if (sCurrentActivityThread == null || sCurrentActivityThread.mH == null) return;
+        MotionEvent ev = MotionEvent.obtain(action, x, y, System.currentTimeMillis());
+        synchronized (sTouchMsgLock) {
+            final boolean isMove = (action & MotionEvent.ACTION_MASK) == MotionEvent.ACTION_MOVE;
+            if (isMove && sPendingTouch != null) {
+                // Replace the payload of the message still sitting in the queue.
+                MotionEvent old = (MotionEvent) sPendingTouch.obj;
+                sPendingTouch.obj = ev;
+                if (old != null) old.recycle();
+                return;
+            }
             Message msg = Message.obtain();
             msg.what = TOUCH_EVENT;
             msg.obj = ev;
+            if (isMove) sPendingTouch = msg;
             sCurrentActivityThread.mH.sendMessage(msg);
+        }
+    }
+
+    /** Called by H when a TOUCH_EVENT is dispatched, so the next MOVE posts fresh. */
+    private static void onTouchEventDispatched(Message msg) {
+        synchronized (sTouchMsgLock) {
+            if (sPendingTouch == msg) sPendingTouch = null;
         }
     }
 
