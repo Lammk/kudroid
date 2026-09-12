@@ -2785,9 +2785,6 @@ std::set<void*>& guestHandles() {
 void* guestLibraryOpen(const char* filename) {
     if (filename == nullptr || *filename == '\0') return nullptr;
 
-    // Match on the file name so every form works: an absolute Android path
-    // (/data/app/<pkg>/lib/arm64-v8a/libfoo.so), a bare "libfoo.so", or the real
-    // container path that findLibrary() hands out.
     const std::string wanted = std::filesystem::path(filename).filename().string();
     if (wanted.empty()) return nullptr;
 
@@ -2798,6 +2795,31 @@ void* guestLibraryOpen(const char* filename) {
         std::lock_guard<std::mutex> lock(guestHandleMutex());
         guestHandles().insert(handle);
         return handle;
+    }
+
+    // Load guest library on demand if present on disk.
+    std::filesystem::path candidate(filename);
+    std::error_code ec;
+    if (!std::filesystem::exists(candidate, ec)) {
+        std::string dir;
+        {
+            std::lock_guard<std::mutex> lock(g_nativeLibDirMtx);
+            dir = g_nativeLibDir;
+        }
+        if (!dir.empty()) {
+            candidate = std::filesystem::path(dir) / wanted;
+        }
+    }
+    if (std::filesystem::exists(candidate, ec)) {
+        if (manager.loadRecursive(candidate.string())) {
+            for (const auto& pair : manager.libraries()) {
+                if (std::filesystem::path(pair.first).filename().string() != wanted) continue;
+                void* handle = pair.second.get();
+                std::lock_guard<std::mutex> lock(guestHandleMutex());
+                guestHandles().insert(handle);
+                return handle;
+            }
+        }
     }
     return nullptr;
 }

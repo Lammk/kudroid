@@ -484,16 +484,29 @@ bool guest_signal_dispatch(int host_signum, void* host_siginfo, void* host_ucont
                 t_last_fault_addr = 0;
                 t_same_fault_count = 0;
             } else {
-                // Allow in-place fault resolution (e.g. mprotect), with repeat limit to avoid loops.
+                // In-place resolution (e.g. mprotect) only applies to page faults (SIGSEGV).
+                // Hardware traps (SIGBUS, SIGILL) cannot be resolved in-place.
                 const uint64_t cur_fault_addr = s.uc.uc_mcontext.fault_address;
-                if (pc_before == t_last_fault_pc && cur_fault_addr == t_last_fault_addr) {
-                    ++t_same_fault_count;
+                if (host_signum == SIGSEGV) {
+                    if (pc_before == t_last_fault_pc && cur_fault_addr == t_last_fault_addr) {
+                        ++t_same_fault_count;
+                    } else {
+                        t_last_fault_pc = pc_before;
+                        t_last_fault_addr = cur_fault_addr;
+                        t_same_fault_count = 1;
+                    }
+                    state_changed = (t_same_fault_count <= 1);
+                    if (!state_changed) {
+                        t_last_fault_pc = 0;
+                        t_last_fault_addr = 0;
+                        t_same_fault_count = 0;
+                    }
                 } else {
-                    t_last_fault_pc = pc_before;
-                    t_last_fault_addr = cur_fault_addr;
-                    t_same_fault_count = 1;
+                    state_changed = false;
+                    t_last_fault_pc = 0;
+                    t_last_fault_addr = 0;
+                    t_same_fault_count = 0;
                 }
-                state_changed = (t_same_fault_count <= 2);
             }
         }
 #endif

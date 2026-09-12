@@ -3599,27 +3599,23 @@ extern "C" void* bionic_dlopen(const char* filename, int flags) {
         return RTLD_DEFAULT;
     }
 
-    // Try a real host dlopen first for anything that might genuinely exist.
-    void* real = ::dlopen(filename, flags ? flags : RTLD_NOW);
-    if (real) {
-        logAndroidMessage(4, "KuDroidSyscall", std::string("bionic_dlopen: resolved to real host handle for ") + filename);
-        return real;
+    // A guest .so LibraryManager mapped gets its own handle so dlsym searches that library alone.
+    // Checked first: host dlopen cannot parse ELF binaries and crashes dyld on Darwin.
+    if (kudroid_guest_library_open != nullptr) {
+        if (void* guest = kudroid_guest_library_open(filename)) {
+            logAndroidMessage(4, "KuDroidSyscall",
+                              std::string("bionic_dlopen: resolved to guest library handle for ") + filename);
+            return guest;
+        }
     }
 
-    // Map Android GPU library requests directly to the embedded iOS frameworks.
-    // We return the EXACT handle from iOS dlopen so that bionic_dlsym can search 
-    // exactly within that framework's namespace, completely bypassing RTLD_DEFAULT issues.
+    // Map Android GPU library requests directly to embedded frameworks.
     if (strstr(filename, "libEGL.so") || strstr(filename, "libGLESv2.so") || 
         strstr(filename, "libGLESv1_CM.so") || strstr(filename, "libGLESv3.so")) {
-        // EGL and GLES are combined in the ANGLE frameworks, usually we'd load both, 
-        // but EGL is enough for eglGetProcAddress, or we can just load the specific one requested.
         const char* fw = strstr(filename, "libEGL") ? "libEGL.framework/libEGL"
                                                     : "libGLESv2.framework/libGLESv2";
 
         std::lock_guard<std::mutex> gpuLock(g_gpuFrameworkMtx);
-        // Goes through the shared loader so @loader_path is tried first: under
-        // LiveContainer the guest runs as a dylib and @executable_path points at
-        // LiveContainer's directory, not at the bundle holding these frameworks.
         void* handle = kudroid::dlopen_bundled_framework(fw, RTLD_NOW | RTLD_GLOBAL);
         if (handle) {
             logAndroidMessage(4, "KuDroidGPU", std::string("Successfully loaded ") + fw);
@@ -3637,23 +3633,18 @@ extern "C" void* bionic_dlopen(const char* filename, int flags) {
         }
     }
 
-#define DUMMY_HANDLE ((void*)0x4B5544524F494421ULL) // "KUDROID!" as a handle
-
-    // A guest .so LibraryManager already mapped gets its OWN handle, so a later
-    // dlsym searches that library and nothing else.
-    //
-    // Without this the call fell through to DUMMY_HANDLE, where dlsym scans every
-    // loaded guest library and returns the first match. Two libraries exporting the
-    // same symbol then resolve to whichever sorts first, which is not what a caller
-    // that named one library asked for. GameActivity does exactly that: it dlopens the
-    // .so from android.app.lib_name and pulls its entry points out of that handle.
-    if (kudroid_guest_library_open != nullptr) {
-        if (void* guest = kudroid_guest_library_open(filename)) {
-            logAndroidMessage(4, "KuDroidSyscall",
-                              std::string("bionic_dlopen: resolved to guest library handle for ") + filename);
-            return guest;
+    // Host dlopen: only for native host binaries (e.g. frameworks/dylibs).
+    // Never pass ELF .so files to host dyld.
+    const bool is_elf_so = (strstr(filename, ".so") != nullptr);
+    if (!is_elf_so) {
+        void* real = ::dlopen(filename, flags ? flags : RTLD_NOW);
+        if (real) {
+            logAndroidMessage(4, "KuDroidSyscall", std::string("bionic_dlopen: resolved to real host handle for ") + filename);
+            return real;
         }
     }
+
+#define DUMMY_HANDLE ((void*)0x4B5544524F494421ULL) // "KUDROID!" as a handle
 
     // Emulate the Android linker: pretend the requested library resolved.
     logAndroidMessage(4, "KuDroidSyscall", std::string("bionic_dlopen: fallback returning DUMMY_HANDLE for ") + filename);
