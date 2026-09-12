@@ -29,6 +29,15 @@ bool verbose_enabled();
 void set_jni(bool enabled);
 bool jni_enabled();
 
+// Gate persistent per-call breadcrumbs for hot native methods (FMOD mixer
+// ticks, JNIBridge.invoke dispatch). At thousands of calls/sec the 6-line
+// enter/stage/exit breadcrumb sequence per call saturated I/O (18k lines in
+// 59s, one open/write/close each). Default OFF: KUDROID_TRACE_HOT=1 restores
+// full tracing. RAM-only depth accounting (native_call_enter/exit, which the
+// watchdog reads) stays on; only the stage labels and memory snapshots of
+// gated calls are skipped.
+bool trace_hot();
+
 // Write via standard pipeline (stdout + file + crash buffer).
 void write(Level level, const char* tag, const char* fmt, ...)
     __attribute__((format(printf, 3, 4)));

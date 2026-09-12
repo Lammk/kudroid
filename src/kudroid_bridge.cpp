@@ -124,25 +124,46 @@ const char* g_kudroid_log_dir_ptr = g_logDir;
 // toward the kill it existed to explain.
 extern "C" void kudroid_persistent_breadcrumb(const char* line) {
     if (!line || !g_logDir[0]) return;
-    char path[sizeof(g_logDir) + 32];
-    const int n = snprintf(path, sizeof(path), "%s/native_breadcrumbs.log", g_logDir);
-    if (n <= 0 || static_cast<size_t>(n) >= sizeof(path)) return;
-    const int fd = ::open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
-    if (fd < 0) return;
+    // One warm file descriptor instead of open/write/close per line: at
+    // ~300 breadcrumbs/sec the per-line open+close dominated I/O time and
+    // serialized every thread through the filesystem. O_APPEND keeps each
+    // single write() atomic across threads, so no lock is needed; the fd is
+    // opened lazily (first call happens on a normal thread during startup,
+    // never inside a signal handler) and a failed open falls back to the
+    // old per-line behavior rather than dropping the line.
+    static int s_fd = -2;  // -2 = not tried yet
+    static char s_fdDir[sizeof(g_logDir)] = {0};
+    if (s_fd == -2 || std::strcmp(s_fdDir, g_logDir) != 0) {
+        if (s_fd >= 0) ::close(s_fd);
+        std::snprintf(s_fdDir, sizeof(s_fdDir), "%s", g_logDir);
+        char path[sizeof(g_logDir) + 32];
+        const int n = snprintf(path, sizeof(path), "%s/native_breadcrumbs.log", g_logDir);
+        if (n > 0 && static_cast<size_t>(n) < sizeof(path)) {
+            s_fd = ::open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+        } else {
+            s_fd = -1;
+        }
+    }
     struct timespec now;
     ::clock_gettime(CLOCK_MONOTONIC, &now);
     char record[2304];
     const int record_len = snprintf(record, sizeof(record), "t_ns=%lld %s\n",
                                     static_cast<long long>(now.tv_sec) * 1000000000LL +
                                         now.tv_nsec, line);
-    if (record_len <= 0) {
-        (void)::close(fd);
-        return;
-    }
+    if (record_len <= 0) return;
     const size_t len = static_cast<size_t>(record_len) < sizeof(record)
                            ? static_cast<size_t>(record_len) : sizeof(record) - 1;
-    // One write of one line to an O_APPEND fd: the record cannot interleave with a
-    // record from another thread, so no lock is needed.
+    if (s_fd >= 0) {
+        // One write of one line to an O_APPEND fd: the record cannot interleave with a
+        // record from another thread, so no lock is needed.
+        (void)::write(s_fd, record, len);
+        return;
+    }
+    char path[sizeof(g_logDir) + 32];
+    const int n = snprintf(path, sizeof(path), "%s/native_breadcrumbs.log", g_logDir);
+    if (n <= 0 || static_cast<size_t>(n) >= sizeof(path)) return;
+    const int fd = ::open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) return;
     (void)::write(fd, record, len);
     (void)::close(fd);
 }
@@ -265,6 +286,13 @@ static pthread_t g_mainThread = 0;
 static std::atomic<unsigned long long> g_guestUiThread{0};
 static std::atomic<unsigned long long> g_renderThreads[4] = {};
 static std::atomic<int> g_workerFaults{0};
+// Recovery budget for worker faults: a chunk-processing job over corrupt
+// data faults per element (observed: 4 faults/iteration), so a few dozen bad
+// elements need a triple-digit budget. Past it the thread is not progressing
+// and the fault is fatal. Each skip is microseconds; the cost of headroom is
+// a few hundred breadcrumb lines worst case, while too small a cap (16 fired
+// in 25ms) turns a survivable batch into a shutdown.
+static constexpr int kMaxWorkerRecoveries = 128;
 
 // Guest thread names (prctl PR_SET_NAME), for role recognition in the crash
 // handler. pthread_getname_np is NOT async-signal-safe, so names are recorded
@@ -1318,6 +1346,37 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
         siglongjmp(g_jniGuardJmp, 1);
     }
 
+    // Fast path for recoverable worker faults, BEFORE the crash dump below.
+    //
+    // A recovered fault killed nothing, but the dump path writes ~256KB per
+    // fault (full report + log buffer + stderr tail): 16 recovered faults
+    // produced a 4.7MB crash log in 25ms and saturated I/O for no diagnostic
+    // gain. A skipped fault gets one breadcrumb and resumes; only faults
+    // that actually park or crash pay for the full report.
+    //
+    // Placement is deliberate: after guest dispatch (Unity gets first
+    // refusal) and after the JNI-OnLoad guard (which longjmps out when
+    // active), but before fflush and the kudroid_crash.log dump. The
+    // watchdog stop above already ran and stays — a skipped fault still
+    // interrupted the call it is measured against.
+    {
+#if defined(__APPLE__)
+        const bool isHostMain = pthread_main_np() != 0;
+#else
+        const bool isHostMain =
+            g_mainThread != 0 && pthread_equal(pthread_self(), g_mainThread);
+#endif
+        const unsigned long long tid = currentThreadIdForCrash();
+        if (!kudroid_fault_is_fatal(tid, isHostMain) &&
+            g_workerFaults.load(std::memory_order_relaxed) <
+                kMaxWorkerRecoveries &&
+            (sig == SIGSEGV || sig == SIGBUS) &&
+            kudroid_try_skip_fault(sig, info, ucontext)) {
+            g_workerFaults.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+    }
+
     // Flush stdout/stderr streams to ensure buffered diagnostic messages
     // are not lost before termination.
     fflush(stdout);
@@ -1645,18 +1704,10 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
 
     // Mark crashed state and keep the last 30 log lines for the Swift warning.
     //
-    // Fault isolation: a worker fault parks that thread with a warning instead
-    // of stopping the app, but ONLY when the fault is not app-fatal (see
-    // kudroid_fault_is_fatal). The full crash report above was already
-    // written unconditionally — isolation skips the shutdown, never the
-    // diagnosis.
-    //
-    // A parked worker deadlocks the engine when the main thread waits on its
-    // job fence, so workers are resumed past the faulting instruction instead
-    // (fault_skip_load_store): a faulting load yields zero, a faulting store
-    // is dropped, pc advances one instruction. Anything the skip cannot prove
-    // safe falls through to the park below. Recovery is capped: past
-    // kMaxWorkerRecoveries the process is cascading and the fault is fatal.
+    // Reaching here means the fault was NOT recovered by the fast path above
+    // (fatal thread, over budget, unskippable instruction, or a non-memory
+    // signal): the full report above was worth writing. Fatal threads stop
+    // the app; anything else parks with a warning breadcrumb.
     {
 #if defined(__APPLE__)
         const bool isHostMain = pthread_main_np() != 0;
@@ -1664,19 +1715,12 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
         const bool isHostMain =
             g_mainThread != 0 && pthread_equal(pthread_self(), g_mainThread);
 #endif
-        static constexpr int kMaxWorkerRecoveries = 16;
         const unsigned long long tid = currentThreadIdForCrash();
         const bool fatal = kudroid_fault_is_fatal(tid, isHostMain) ||
                            g_workerFaults.load(std::memory_order_relaxed) >=
                                kMaxWorkerRecoveries;
         if (fatal) {
             g_hasCrashed.store(true);
-        } else if ((sig == SIGSEGV || sig == SIGBUS) &&
-                   kudroid_try_skip_fault(sig, info, ucontext)) {
-            // Resumed: the skip wrote its own breadcrumb. Count it against
-            // the cascade budget and return to the faulting thread.
-            g_workerFaults.fetch_add(1, std::memory_order_relaxed);
-            return;
         } else {
             g_workerFaults.fetch_add(1, std::memory_order_relaxed);
             char mark[256];

@@ -401,25 +401,39 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
     const auto native_start = std::chrono::steady_clock::now();
     KLOGJNI("KuARTNative", "enter class=%s method=%s sig=%s args=%zu vm_depth=%d",
             owner, method_name, method_sig, num_args, VmLockDepth());
+    // Hot-path filter: the FMOD mixer ticks and every JNIBridge dispatch run
+    // at kHz rates, and each call emits 6 persistent breadcrumbs
+    // (enter/exit + 4 stages). Gate all 6 behind KUDROID_TRACE_HOT; the
+    // RAM-only call telemetry (native_call_enter/exit depth accounting the
+    // watchdog reads) stays on for every call.
+    const bool hot_call =
+        (std::strcmp(owner, "Lorg/fmod/FMODAudioDevice;") == 0 ||
+         is_jnibridge_invoke) &&
+        !log::trace_hot();
     char breadcrumb[2048];
-    const SystemMemory memory_before = query_system_memory();
-    std::snprintf(breadcrumb, sizeof(breadcrumb),
-                  "native-enter class=%s method=%s sig=%s args=%zu vm_depth=%d footprint=%llu process_headroom=%llu available=%llu low_memory=%d",
-                  owner, method_name, method_sig, num_args, VmLockDepth(),
-                  static_cast<unsigned long long>(memory_before.process_resident_bytes),
-                  static_cast<unsigned long long>(memory_before.process_available_bytes),
-                  static_cast<unsigned long long>(memory_before.available_bytes),
-                  memory_before.low_memory ? 1 : 0);
-    // What the call was made WITH: an argument value is often the one fact that decides
-    // whether a following abort inside the native side is a crash or a reaction (e.g. a
-    // touch delivered to UnityPlayer.nativeInjectEvent while a scene is torn down).
-    // Gated on the JNI trace flag, which the log gate owns.
-    if (log::jni_enabled()) {
-        AppendObjectArgDescriptions(
-            interpreter_ != nullptr ? interpreter_->linker() : nullptr,
-            args, num_args, breadcrumb, sizeof(breadcrumb));
+    breadcrumb[0] = '\0';
+    if (!hot_call) {
+        // query_system_memory is sysctls per call: skip it with the breadcrumb
+        // it feeds on hot paths.
+        const SystemMemory memory_before = query_system_memory();
+        std::snprintf(breadcrumb, sizeof(breadcrumb),
+                      "native-enter class=%s method=%s sig=%s args=%zu vm_depth=%d footprint=%llu process_headroom=%llu available=%llu low_memory=%d",
+                      owner, method_name, method_sig, num_args, VmLockDepth(),
+                      static_cast<unsigned long long>(memory_before.process_resident_bytes),
+                      static_cast<unsigned long long>(memory_before.process_available_bytes),
+                      static_cast<unsigned long long>(memory_before.available_bytes),
+                      memory_before.low_memory ? 1 : 0);
+        // What the call was made WITH: an argument value is often the one fact that decides
+        // whether a following abort inside the native side is a crash or a reaction (e.g. a
+        // touch delivered to UnityPlayer.nativeInjectEvent while a scene is torn down).
+        // Gated on the JNI trace flag, which the log gate owns.
+        if (log::jni_enabled()) {
+            AppendObjectArgDescriptions(
+                interpreter_ != nullptr ? interpreter_->linker() : nullptr,
+                args, num_args, breadcrumb, sizeof(breadcrumb));
+        }
+        kudroid_persistent_breadcrumb(breadcrumb);
     }
-    kudroid_persistent_breadcrumb(breadcrumb);
     native_call_enter(owner, method_name, method_sig, VmLockDepth());
     // Disposition snapshot at teardown entry: brackets handler changes across X.
     if (std::strcmp(method_name, "nativeDone") == 0) {
@@ -543,27 +557,29 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
     uint64_t ret;
     {
         // Run native with VM lock released so blocking calls and callbacks work.
-        native_call_stage("before-vm-release");
+        if (!hot_call) native_call_stage("before-vm-release");
         VmLockRelease unlocked;
-        native_call_stage("before-trampoline");
+        if (!hot_call) native_call_stage("before-trampoline");
         ret = kudroid_jni_call(method->native_fn, gp, ngp, fp, nfp, &fp_ret);
-        native_call_stage("after-trampoline");
+        if (!hot_call) native_call_stage("after-trampoline");
     }
 
     const auto native_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - native_start).count();
     KLOGJNI("KuARTNative", "exit class=%s method=%s sig=%s duration_ms=%lld vm_depth=%d",
             owner, method_name, method_sig, static_cast<long long>(native_ms), VmLockDepth());
-    const SystemMemory memory_after = query_system_memory();
-    std::snprintf(breadcrumb, sizeof(breadcrumb),
-                  "native-exit class=%s method=%s sig=%s duration_ms=%lld vm_depth=%d footprint=%llu process_headroom=%llu available=%llu low_memory=%d",
-                  owner, method_name, method_sig, static_cast<long long>(native_ms), VmLockDepth(),
-                  static_cast<unsigned long long>(memory_after.process_resident_bytes),
-                  static_cast<unsigned long long>(memory_after.process_available_bytes),
-                  static_cast<unsigned long long>(memory_after.available_bytes),
-                  memory_after.low_memory ? 1 : 0);
-    kudroid_persistent_breadcrumb(breadcrumb);
-    native_call_stage("before-result-decode");
+    if (!hot_call) {
+        const SystemMemory memory_after = query_system_memory();
+        std::snprintf(breadcrumb, sizeof(breadcrumb),
+                      "native-exit class=%s method=%s sig=%s duration_ms=%lld vm_depth=%d footprint=%llu process_headroom=%llu available=%llu low_memory=%d",
+                      owner, method_name, method_sig, static_cast<long long>(native_ms), VmLockDepth(),
+                      static_cast<unsigned long long>(memory_after.process_resident_bytes),
+                      static_cast<unsigned long long>(memory_after.process_available_bytes),
+                      static_cast<unsigned long long>(memory_after.available_bytes),
+                      memory_after.low_memory ? 1 : 0);
+        kudroid_persistent_breadcrumb(breadcrumb);
+        native_call_stage("before-result-decode");
+    }
     switch (shorty[0]) {
         case 'V': break;
         case 'Z': result = DexValue::Int(ret != 0 ? 1 : 0); break;

@@ -1,5 +1,6 @@
 #include "kudroid/Log.h"
 
+#include <atomic>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -59,6 +60,25 @@ bool jni_enabled() {
         g_jni_initialized = true;
     }
     return g_jni;
+}
+
+bool trace_hot() {
+    // Lock-free after first call: the value never changes past init, so a
+    // relaxed cached read is enough (a mutex here would re-add per-call lock
+    // traffic on the exact hot path this gate exists to relieve).
+    static std::atomic<bool> cached{false};
+    static std::atomic<bool> done{false};
+    if (done.load(std::memory_order_acquire)) {
+        return cached.load(std::memory_order_relaxed);
+    }
+    std::lock_guard<std::mutex> lock(g_mtx);
+    if (!done.load(std::memory_order_relaxed)) {
+        const char* v = std::getenv("KUDROID_TRACE_HOT");
+        cached.store(v != nullptr && *v && *v != '0' && *v != 'n' && *v != 'N',
+                     std::memory_order_relaxed);
+        done.store(true, std::memory_order_release);
+    }
+    return cached.load(std::memory_order_relaxed);
 }
 
 void write(Level level, const char* tag, const char* fmt, ...) {
