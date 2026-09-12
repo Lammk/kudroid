@@ -218,8 +218,88 @@ extern "C" __attribute__((weak)) void kudroid_remote_log_broadcast(int level, co
 }
 #endif
 
+int logAndroidMessage(int priority, const char* tag, const std::string& message);
+static void emit_android_log_line(int priority, const char* tag, const std::string& message);
+
+// Repeat-collapse: bursts of byte-identical lines (per-draw GPU chatter,
+// per-clip asset errors) each pay open/write/close on the log file and say
+// nothing new. The first occurrence emits, consecutive repeats fold into a
+// count, and the next different line flushes one summary. Keyed on
+// tag+message; bounded table, linear scan — the distinct-line working set is
+// a few dozen tags.
+struct LogRepeatSlot {
+    uint64_t hash = 0;
+    int priority = 0;
+    int count = 0;   // 0 = idle, 1 = emitted once, N = N-1 repeats suppressed
+    std::string key; // tag + '\n' + message
+};
+constexpr size_t kMaxLogRepeatSlots = 48;
+static std::vector<LogRepeatSlot> g_logRepeatSlots;
+
+static uint64_t log_line_hash(const std::string& s) {
+    uint64_t h = 1469598103934665603ull;
+    for (char c : s) {
+        h ^= static_cast<uint8_t>(c);
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
 int logAndroidMessage(int priority, const char* tag, const std::string& message) {
     std::lock_guard<std::mutex> lock(g_logAndroidMutex);
+
+    const char* tg = tag ? tag : "";
+    std::string key;
+    key.reserve(std::strlen(tg) + message.size() + 1);
+    key += tg;
+    key += '\n';
+    key += message;
+    const uint64_t h = log_line_hash(key);
+
+    LogRepeatSlot* slot = nullptr;
+    for (auto& s : g_logRepeatSlots) {
+        if (s.hash == h && s.key == key) { slot = &s; break; }
+    }
+    if (slot != nullptr && slot->count > 0) {
+        ++slot->count;
+        return 0; // identical consecutive repeat: folded into the summary
+    }
+    // New content (or an old key reappearing): close every open burst with
+    // one summary line before emitting.
+    for (auto& s : g_logRepeatSlots) {
+        if (s.count > 1) {
+            const size_t sep = s.key.find('\n');
+            const std::string summary =
+                s.key.substr(sep + 1) + "   [x" + std::to_string(s.count) +
+                " repeats collapsed]";
+            emit_android_log_line(s.priority, s.key.substr(0, sep).c_str(), summary);
+        }
+        s.count = 0;
+    }
+    if (slot == nullptr) {
+        for (auto& s : g_logRepeatSlots) {
+            if (s.count == 0) { slot = &s; break; }
+        }
+        if (slot == nullptr) {
+            if (g_logRepeatSlots.size() < kMaxLogRepeatSlots) {
+                g_logRepeatSlots.emplace_back();
+                slot = &g_logRepeatSlots.back();
+            } else {
+                slot = &g_logRepeatSlots.front(); // evict oldest
+            }
+        }
+        slot->key = key;
+        slot->hash = h;
+    }
+    slot->priority = priority;
+    slot->count = 1;
+
+    emit_android_log_line(priority, tag, message);
+    return 0;
+}
+
+// Emit one formatted line to every sink. Caller holds g_logAndroidMutex.
+static void emit_android_log_line(int priority, const char* tag, const std::string& message) {
     char traceMessage[256];
     snprintf(traceMessage, sizeof(traceMessage),
                   "__android_log_print(priority=%d, tag=%s)", priority,
@@ -286,8 +366,6 @@ int logAndroidMessage(int priority, const char* tag, const std::string& message)
         full += '\n';
         kudroid_append_crash_log(full.data(), full.size());
     }
-
-    return 0;
 }
 
 #if defined(__aarch64__)

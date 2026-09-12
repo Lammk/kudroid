@@ -576,6 +576,63 @@ void TestZipIndex(const std::string& root) {
           "a non-zip file stats as missing");
 }
 
+// vfs_fopen caches ONE open file description for base.apk and hands every
+// fopen an independent pread-backed stream (position in the cookie). These
+// checks pin the two invariants that matter: streams never disturb each
+// other's position (the old shared-FILE* design interleaved reads), and
+// closing one stream cannot invalidate another.
+void TestApkStreamIndependence(const std::string& root) {
+    std::printf("-- cached-fd apk streams stay independent --\n");
+
+    const std::filesystem::path apkDir =
+        std::filesystem::path(root) / "data" / "app" / "com.test.streams";
+    std::filesystem::create_directories(apkDir);
+    const std::string apkPath = (apkDir / "base.apk").string();
+
+    const std::vector<uint8_t> zip = build_store_zip({
+        {"assets/root.json", "R"},
+        {"assets/shaders/a.glsl", "shader-a"},
+    });
+    {
+        std::ofstream out(apkPath, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(zip.data()),
+                  static_cast<std::streamsize>(zip.size()));
+    }
+
+    uint64_t rootOff = 0, shaderOff = 0;
+    uint64_t rootSize = 0, shaderSize = 0;
+    Check(kudroid::zip_stat_entry(apkPath, "assets/root.json", &rootOff, &rootSize, nullptr),
+          "fixture entry 1 stats");
+    Check(kudroid::zip_stat_entry(apkPath, "assets/shaders/a.glsl", &shaderOff, &shaderSize, nullptr),
+          "fixture entry 2 stats");
+
+    FILE* a = kudroid::vfs_fopen(apkPath.c_str(), "rb");
+    FILE* b = kudroid::vfs_fopen(apkPath.c_str(), "rb");
+    Check(a != nullptr && b != nullptr, "both apk opens succeed");
+    Check(a != b, "the two opens are distinct stdio streams, not one shared FILE*");
+
+    char buf[16] = {};
+    Check(std::fseek(a, static_cast<long>(rootOff), SEEK_SET) == 0, "stream A seeks");
+    Check(std::fread(buf, 1, 1, a) == 1 && buf[0] == 'R', "stream A reads entry 1's byte");
+
+    // B never moved: still at 0, reads the ZIP's first bytes.
+    Check(std::ftell(b) == 0, "stream B's position is untouched by A's seek+read");
+    Check(std::fread(buf, 1, 4, b) == 4 && std::memcmp(buf, "PK\x03\x04", 4) == 0,
+          "stream B reads the archive header from its own position");
+
+    Check(std::fseek(b, static_cast<long>(shaderOff), SEEK_SET) == 0, "stream B seeks");
+    Check(std::fread(buf, 1, shaderSize, b) == shaderSize &&
+              std::memcmp(buf, "shader-a", shaderSize) == 0,
+          "stream B reads entry 2's payload");
+
+    // A closes; B must survive and keep serving correct bytes.
+    Check(kudroid::vfs_fclose(a) == 0, "stream A closes");
+    Check(std::fseek(b, static_cast<long>(rootOff), SEEK_SET) == 0, "stream B still seeks");
+    Check(std::fread(buf, 1, 1, b) == 1 && buf[0] == 'R',
+          "stream B still reads correctly after A's fclose");
+    Check(kudroid::vfs_fclose(b) == 0, "stream B closes");
+}
+
 void TestUrlRemapping(kudroid::VFSPathRemapper& remapper, const std::string& root) {
     std::printf("-- URL scheme remapping --\n");
 
@@ -622,6 +679,7 @@ int main() {
     TestUrlRemapping(remapper, root);
     TestJarFromArchive(remapper, root);
     TestZipIndex(root);
+    TestApkStreamIndependence(root);
 
     std::filesystem::remove_all(home);
 

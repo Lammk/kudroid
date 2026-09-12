@@ -41,7 +41,23 @@ namespace {
 
 // Log the GPU through the standard pipeline (KLOG → stdout + file + crash buffer) to run
 // crash after "log up to crash" is no longer empty. Keep the same text/priority (debug).
+//
+// Sampled: a scene load emits per-draw glUseProgram/glVertexAttribPointer at hundreds
+// per frame — 12k lines in one 80-second ULTRAKILL load, and the log write sits on the
+// render thread between draws. Keep the first N (setup state is unique) and then one in
+// 64: the log stays a presence detector without taxing every draw. Pass
+// KUDROID_GPU_LOG_ALL=1 to restore the full stream for a session.
+static std::atomic<int> g_gpuLogCount{0};
+static bool gpu_log_all() {
+    static const bool all = [] {
+        const char* env = std::getenv("KUDROID_GPU_LOG_ALL");
+        return env != nullptr && env[0] == '1';
+    }();
+    return all;
+}
 static void gpuLog(const char* fmt, ...) {
+    const int n = g_gpuLogCount.fetch_add(1, std::memory_order_relaxed);
+    if (!gpu_log_all() && n >= 256 && (n - 256) % 64 != 0) return;
     char buf[512];
     va_list ap;
     va_start(ap, fmt);

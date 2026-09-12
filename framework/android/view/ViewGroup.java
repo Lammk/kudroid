@@ -12,6 +12,9 @@ public class ViewGroup extends View implements ViewParent {
     // protected so subclasses in this package tree can iterate children directly.
     protected View[] mChildren;
     protected int mChildCount = 0;
+    // Child that captured the current gesture (AOSP mFirstTouchTarget). Fixed
+    // at DOWN, cleared at UP/CANCEL.
+    private View mTouchTarget;
 
     public ViewGroup(Context context) {
         this(context, null);
@@ -171,20 +174,42 @@ public class ViewGroup extends View implements ViewParent {
     @Override
     public boolean dispatchTouchEvent(MotionEvent event) {
         if (!isShown() || event == null) return false;
-        float x = event.getX();
-        float y = event.getY();
-        for (int i = mChildCount - 1; i >= 0; i--) {
-            View child = mChildren[i];
-            if (child != null && child.isShown()) {
-                if (x >= child.getLeft() && x <= child.getRight() &&
-                    y >= child.getTop() && y <= child.getBottom()) {
-                    if (child.dispatchTouchEvent(event)) {
-                        return true;
-                    }
-                }
+        final int action = event.getActionMasked();
+
+        // AOSP touch-target rule: the DOWN hit-test fixes the target child, and
+        // MOVE/UP/CANCEL go to that child unchanged — even when the finger has
+        // left its bounds. Re-hit-testing every MOVE is what made a widget lose
+        // a drag the instant the finger slid off it (an audio slider could not
+        // be dragged). CANCEL clears the target; UP/CANCEL also end the gesture.
+        if (action == MotionEvent.ACTION_DOWN) {
+            mTouchTarget = findChildUnder(event.getX(), event.getY());
+        } else if (action == MotionEvent.ACTION_CANCEL) {
+            mTouchTarget = null;
+        }
+
+        if (mTouchTarget != null) {
+            final boolean consumed = mTouchTarget.dispatchTouchEvent(event);
+            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                mTouchTarget = null;
             }
+            if (consumed) return true;
+            // The targeted child no longer wants this gesture; fall through.
+            mTouchTarget = null;
         }
         return onTouchEvent(event);
+    }
+
+    /** Topmost shown child whose bounds contain (x, y), scanned back-to-front. */
+    private View findChildUnder(float x, float y) {
+        for (int i = mChildCount - 1; i >= 0; i--) {
+            View child = mChildren[i];
+            if (child != null && child.isShown() &&
+                x >= child.getLeft() && x <= child.getRight() &&
+                y >= child.getTop() && y <= child.getBottom()) {
+                return child;
+            }
+        }
+        return null;
     }
 
     @Override

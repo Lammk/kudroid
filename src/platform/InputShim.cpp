@@ -117,10 +117,9 @@ extern "C" void kudroid_inject_touch_event_multi(float x, float y, int32_t actio
                 }
             }
         }
-        if (replaced) {
-            return;
+        if (!replaced) {
+            g_inputQueue.events.push_back(ev);
         }
-        g_inputQueue.events.push_back(ev);
     }
 
     // Wake the looper so it processes the new event.
@@ -131,7 +130,10 @@ extern "C" void kudroid_inject_touch_event_multi(float x, float y, int32_t actio
         (void)unused;
     }
 
-    // Also push the touch event to the Android Java interface tree
+    // Also push the touch event to the Android Java interface tree. Reaching
+    // here for every event (a replaced MOVE included) is the contract: the
+    // Java side coalesces MOVEs into its one pending message, and swallowing
+    // this call is what made drags invisible to the guest UI.
     forward_touch_to_java_activity(action, x, y);
 }
 

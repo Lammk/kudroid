@@ -284,6 +284,11 @@ static pthread_t g_mainThread = 0;
 static std::atomic<unsigned long long> g_guestUiThread{0};
 static std::atomic<unsigned long long> g_renderThreads[4] = {};
 static std::atomic<int> g_workerFaults{0};
+// Steady-clock ns of the last skipped worker fault. Faults isolated in time
+// (minutes apart) mean the thread kept making progress between them, so the
+// recovery budget resets; a genuine fault storm skips in a tight burst and
+// never sees a reset.
+static std::atomic<long long> g_lastFaultSkipNs{0};
 // Recovery budget for worker faults: a chunk-processing job over corrupt
 // data faults per element (observed: 4 faults/iteration), so a few dozen bad
 // elements need a triple-digit budget. Past it the thread is not progressing
@@ -1377,6 +1382,20 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
                 kMaxWorkerRecoveries &&
             (sig == SIGSEGV || sig == SIGBUS) &&
             kudroid_try_skip_fault(sig, info, ucontext)) {
+            // Progress check: a gap of 30s+ since the previous skip means the
+            // thread survived and ran in between — those faults were isolated,
+            // not a storm. Reset the budget so a long session does not die on
+            // fault #129 that is no worse than fault #1. A real storm (faults
+            // microseconds apart) keeps the accumulated count and stays fatal.
+            const long long nowNs =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch())
+                    .count();
+            const long long lastNs = g_lastFaultSkipNs.load(std::memory_order_relaxed);
+            if (lastNs != 0 && nowNs - lastNs > 30000000000LL) {
+                g_workerFaults.store(0, std::memory_order_relaxed);
+            }
+            g_lastFaultSkipNs.store(nowNs, std::memory_order_relaxed);
             g_workerFaults.fetch_add(1, std::memory_order_relaxed);
             return;
         }

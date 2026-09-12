@@ -463,6 +463,28 @@ bool guest_signal_dispatch(int host_signum, void* host_siginfo, void* host_ucont
 #endif
 
         auto fn = reinterpret_cast<void (*)(int, void*, void*)>(handler);
+
+        // Last breadcrumb before handing the fault to the guest: fault class and
+        // pc. When Unity's handler decides the process is done and tears down
+        // from inside, this line is the only record of what it was handed —
+        // everything the guest does afterwards is its own logging.
+        static std::atomic<int> s_faultBc{0};
+        if (s_faultBc.load(std::memory_order_relaxed) < 8) {
+            s_faultBc.fetch_add(1, std::memory_order_relaxed);
+            char msg[192];
+            std::snprintf(msg, sizeof(msg),
+                          "guest fault handled sig=%d code=%d addr=%p pc=0x%llx",
+                          guest_signum,
+                          host_siginfo != nullptr
+                              ? static_cast<const siginfo_t*>(host_siginfo)->si_code
+                              : 0,
+                          host_siginfo != nullptr
+                              ? static_cast<const siginfo_t*>(host_siginfo)->si_addr
+                              : nullptr,
+                          static_cast<unsigned long long>(pc_before));
+            kudroid_android_log_message(4, "KuDroidSignal", msg);
+        }
+
         fn(guest_signum, &s.info, &s.uc);
 
 #if defined(__APPLE__) && defined(__aarch64__)
