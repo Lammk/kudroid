@@ -1520,6 +1520,30 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
             std::fprintf(stderr, "[KuDroidApkF] fread total=%lluMB t=%llums\n",
                          total / (1024 * 1024), ms);
         }
+        // Magic sniff: FMOD rejects every bank it is handed ("Error loading
+        // file") while meshes from the same APK render. The bytes are read
+        // from the buffer just filled — zero extra I/O — and ftell is
+        // userspace. Starts past 4MB of flow so startup probing (EOCD,
+        // central directory, catalog) does not consume the budget; what
+        // remains is bundle/clip territory. If clip reads land on
+        // FSB5/OggS, the bytes are right and FMOD is at fault
+        // environmentally; central-directory/EOCD/zeros instead means
+        // wrong-file/wrong-offset upstream.
+        static std::atomic<int> s_magic{0};
+        if (total > 4ULL * 1024 * 1024 && s_magic.load() < 30 && buf != nullptr &&
+            n * size >= 4) {
+            ++s_magic;
+            const long off = std::ftell(stream);
+            const auto* b = static_cast<const unsigned char*>(buf);
+            std::fprintf(stderr,
+                         "[KuDroidApkF] magic off=%ld n=%zu %02x%02x%02x%02x '%c%c%c%c'\n",
+                         off >= 0 ? off - static_cast<long>(n * size) : -1,
+                         n * size, b[0], b[1], b[2], b[3],
+                         b[0] >= 32 && b[0] < 127 ? b[0] : '.',
+                         b[1] >= 32 && b[1] < 127 ? b[1] : '.',
+                         b[2] >= 32 && b[2] < 127 ? b[2] : '.',
+                         b[3] >= 32 && b[3] < 127 ? b[3] : '.');
+        }
     }
     if (n > 0) {
         std::lock_guard<std::mutex> lock(g_freadVolMtx);
