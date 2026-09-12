@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 #include <filesystem>
+#include <fcntl.h>
 #include <unistd.h>
 #include <sys/mman.h>
 
@@ -123,6 +124,7 @@ struct AAssetImpl {
     long offset;
     long startOffset;  // base offset in file (for uncompressed APK assets)
     std::string name;
+    std::string path;  // file the handle reads from (loose file, cache copy, or base.apk)
     void* buffer;      // cache for AAsset_getBuffer
     size_t bufferSize;
     void* mmapBase;    // base pointer for page-aligned mmap
@@ -254,6 +256,7 @@ static AAssetImpl* open_asset(const char* filename) {
     asset->offset = 0;
     asset->startOffset = startOffset;
     asset->name = rel;
+    asset->path = full.string();
     asset->buffer = nullptr;
     asset->bufferSize = 0;
     asset->mmapBase = nullptr;
@@ -291,10 +294,22 @@ extern "C" void* bionic_AAssetManager_openFd(void* /*manager*/, const char* file
     return asset;
 }
 
+// dup(fileno) shares the open file description with the asset's FILE*, so an fd read
+// moves the position a later AAsset_read resumes from (and vice versa). A fresh fd on
+// the backing file has an independent offset; for an entry that only exists inside
+// base.apk that file IS base.apk, with the payload at startOffset.
+static int open_independent_fd(const AAssetImpl* a) {
+    if (!a->path.empty()) {
+        const int fd = ::open(a->path.c_str(), O_RDONLY);
+        if (fd >= 0) return fd;
+    }
+    return a->file ? ::dup(::fileno(a->file)) : -1;
+}
+
 extern "C" int bionic_AAsset_openFileDescriptor(void* asset, void* outStart, void* outLength) {
     auto* a = static_cast<AAssetImpl*>(asset);
     if (!a || !a->file) return -1;
-    const int fd = ::dup(::fileno(a->file));
+    const int fd = open_independent_fd(a);
     if (fd < 0) return -1;
     ::lseek(fd, static_cast<off_t>(a->startOffset), SEEK_SET);
     if (outStart) *static_cast<off_t*>(outStart) = static_cast<off_t>(a->startOffset);
@@ -305,7 +320,7 @@ extern "C" int bionic_AAsset_openFileDescriptor(void* asset, void* outStart, voi
 extern "C" int bionic_AAsset_openFileDescriptor64(void* asset, void* outStart, void* outLength) {
     auto* a = static_cast<AAssetImpl*>(asset);
     if (!a || !a->file) return -1;
-    const int fd = ::dup(::fileno(a->file));
+    const int fd = open_independent_fd(a);
     if (fd < 0) return -1;
     ::lseek(fd, static_cast<off_t>(a->startOffset), SEEK_SET);
     if (outStart) *static_cast<int64_t*>(outStart) = static_cast<int64_t>(a->startOffset);
@@ -482,6 +497,35 @@ extern "C" const void* bionic_AAsset_getBuffer(void* asset) {
     trace_buffer("AAsset_getBuffer copied", a->name, static_cast<uint64_t>(got),
                  /*mapped=*/false);
     return buf;
+}
+
+// Resolve an asset path the way open_asset() does and hand the C++ side the raw bytes:
+// loose file under the assets dir, or the archive entry — extracted to cache when it is
+// stored deflated, mmap-backed read from base.apk when stored uncompressed. Backs the
+// Java-side AssetManager.openFd, whose caller (ParcelFileDescriptor) needs a real file.
+// Returns 0 and fills nothing when the asset does not exist; -1 on extraction failure.
+extern "C" int kudroid_asset_resolve_bytes(const char* filename, char** outPath,
+                                            int64_t* outStart, int64_t* outLength) {
+    if (outPath) *outPath = nullptr;
+    if (outStart) *outStart = 0;
+    if (outLength) *outLength = 0;
+    auto* asset = open_asset(filename);
+    if (!asset) return 0;
+    const std::string path = asset->path;
+    const long start = asset->startOffset;
+    const long length = asset->length;
+    // Manual close (no buffers were created yet), so this helper can sit above
+    // bionic_AAsset_close without a forward declaration.
+    if (asset->file) std::fclose(asset->file);
+    delete asset;
+    if (length <= 0) return -1;
+    char* copy = static_cast<char*>(std::malloc(path.size() + 1));
+    if (!copy) return -1;
+    std::memcpy(copy, path.c_str(), path.size() + 1);
+    if (outPath) *outPath = copy;
+    if (outStart) *outStart = static_cast<int64_t>(start);
+    if (outLength) *outLength = static_cast<int64_t>(length);
+    return 1;
 }
 
 extern "C" void bionic_AAsset_close(void* asset) {

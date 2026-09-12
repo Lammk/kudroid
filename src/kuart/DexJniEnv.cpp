@@ -35,6 +35,65 @@ namespace {
 DexObject* AsObject(jobject ref) { return reinterpret_cast<DexObject*>(ref); }
 jobject AsHandle(DexObject* obj) { return reinterpret_cast<jobject>(obj); }
 
+// One-line decode of an object argument, for the native-enter breadcrumb. Unwraps
+// what a reader needs from the common Unity JNI payload shapes without knowing any
+// class name: wrapper values (Long/Integer/Boolean/...), a reflected Method, and any
+// object that exposes "artMethod" (J) whose declaring class names the Java method.
+// NULL stays NULL — that is what makes a null argument visible at all.
+std::string DescribeObjectArg(DexClassLinker* linker, DexObject* obj) {
+    if (obj == nullptr) return "null";
+    if (linker == nullptr) return "obj";
+    DexClass* cls = linker->ClassFromObject(obj);
+    if (cls == nullptr && linker->IsRegisteredClass(reinterpret_cast<const DexClass*>(obj))) {
+        cls = reinterpret_cast<DexClass*>(obj);
+    }
+    if (cls == nullptr) return "obj";
+    if (cls->is_array) {
+        return "[" + std::to_string(static_cast<DexArray*>(obj)->length) + "]";
+    }
+    if (const DexField* f = cls->FindInstanceField("value", "J")) {
+        return std::to_string(obj->GetField<int64_t>(f->offset_or_slot));
+    }
+    if (const DexField* f = cls->FindInstanceField("value", "I")) {
+        return std::to_string(obj->GetField<int32_t>(f->offset_or_slot));
+    }
+    if (const DexField* f = cls->FindInstanceField("value", "Z")) {
+        return obj->GetField<uint8_t>(f->offset_or_slot) ? "true" : "false";
+    }
+    if (const DexField* f = cls->FindInstanceField("value", "F")) {
+        return std::to_string(obj->GetField<float>(f->offset_or_slot));
+    }
+    if (const DexField* f = cls->FindInstanceField("artMethod", "J")) {
+        auto* m = reinterpret_cast<const DexMethod*>(
+            static_cast<uintptr_t>(obj->GetField<int64_t>(f->offset_or_slot)));
+        if (m != nullptr && m->declaring_class != nullptr && m->name != nullptr) {
+            return m->declaring_class->PrettyName() + "." + m->name;
+        }
+        return "(artMethod)";
+    }
+    return cls->PrettyName();
+}
+
+// Append " args[i]=<decoded>" for every reference argument, bounded so the line
+// stays one line. Called for the entry breadcrumb when JNI tracing is on.
+void AppendObjectArgDescriptions(DexClassLinker* linker, const DexValue* args,
+                                 size_t num_args, char* out, size_t cap) {
+    if (out == nullptr || cap == 0) return;
+    size_t used = std::strlen(out);
+    for (size_t i = 0; i < num_args && used + 1 < cap; ++i) {
+        if (args[i].l == nullptr) continue;  // keep non-object args unprefixed
+        std::string desc = DescribeObjectArg(linker, args[i].l);
+        if (desc.size() > 64) desc = desc.substr(0, 64) + "…";
+        int n = std::snprintf(out + used, cap - used, " args[%zu]=%s", i, desc.c_str());
+        if (n <= 0) break;
+        used += static_cast<size_t>(n);
+        if (used + 1 >= cap) {
+            out[cap - 1] = '\0';
+            break;
+        }
+    }
+}
+
 // Encode method names according to JNI convention: Java_<pkg>_<Class>_<method>.
 // '_' -> "_1", '/' -> '_', ';' -> "_2", '[' -> "_3".
 std::string MangleJniName(const char* descriptor, const char* method_name) {
@@ -330,6 +389,15 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
                   static_cast<unsigned long long>(memory_before.process_available_bytes),
                   static_cast<unsigned long long>(memory_before.available_bytes),
                   memory_before.low_memory ? 1 : 0);
+    // What the call was made WITH: an argument value is often the one fact that decides
+    // whether a following abort inside the native side is a crash or a reaction (e.g. a
+    // touch delivered to UnityPlayer.nativeInjectEvent while a scene is torn down).
+    // Gated on the JNI trace flag, which the log gate owns.
+    if (log::jni_enabled()) {
+        AppendObjectArgDescriptions(
+            interpreter_ != nullptr ? interpreter_->linker() : nullptr,
+            args, num_args, breadcrumb, sizeof(breadcrumb));
+    }
     kudroid_persistent_breadcrumb(breadcrumb);
     native_call_enter(owner, method_name, method_sig, VmLockDepth());
     // Disposition snapshot at teardown entry: brackets handler changes across X.

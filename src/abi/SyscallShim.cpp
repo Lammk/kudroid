@@ -2855,6 +2855,50 @@ extern "C" void bionic_abort(void) {
     ::abort();
 }
 
+// Captures what a guest that aborts WITHOUT a message means: libc++'s
+// __libcpp_verbose_abort (hardening checks) and the C standard assert().
+// A crash breadcrumb with no message cannot be told apart from an abort the
+// guest never explained; these are the entry points that know the reason.
+static void store_libc_abort_reason(const char* fmt, ...) {
+    char msg[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof(msg), fmt, ap);
+    va_end(ap);
+    kudroid_store_abort_message(msg);
+}
+
+// libc++ hardening trap: void __libcpp_verbose_abort(const char* format, ...)
+extern "C" void bionic___libcpp_verbose_abort(const char* format, ...) {
+    if (format && *format) {
+        va_list ap;
+        va_start(ap, format);
+        char msg[512];
+        vsnprintf(msg, sizeof(msg), format, ap);
+        va_end(ap);
+        kudroid_store_abort_message(msg);
+    }
+    bionic_abort();
+}
+
+// C assert(): void __assert_fail(const char*, const char*, unsigned int, const char*)
+extern "C" void bionic___assert_fail(const char* expr, const char* file, unsigned int line,
+                                      const char* function) {
+    store_libc_abort_reason("assertion failed: %s (%s:%u in %s)",
+                            expr ? expr : "?", file ? file : "?", line,
+                            function ? function : "?");
+    bionic_abort();
+}
+
+// macOS/BSD variant: void __assert_rtn(const char*, const char*, int, const char*)
+extern "C" void bionic___assert_rtn(const char* function, const char* file, int line,
+                                     const char* expr) {
+    store_libc_abort_reason("assertion failed: %s (%s:%d in %s)",
+                            expr ? expr : "?", file ? file : "?", line,
+                            function ? function : "?");
+    bionic_abort();
+}
+
 // sigprocmask / pthread_sigmask, where BOTH the mask and `how` need translating: Linux
 // numbers SIG_BLOCK/UNBLOCK/SETMASK 0/1/2 and Darwin numbers them 1/2/3, so forwarding
 // the guest's value selects a different operation rather than failing.
@@ -2950,7 +2994,8 @@ extern "C" void bionic___assert2(const char* file, int line, const char* functio
              function ? function : "?", file ? file : "?", line, message ? message : "");
     logAndroidMessage(6, "KuDroidAssert", buf);
     fprintf(stderr, "[KuDroidAssert] %s\n", buf);
-    abort();
+    kudroid_store_abort_message(buf);
+    bionic_abort();
 }
 
 // Report a guest assertion failure and abort, as bionic does.
@@ -6178,6 +6223,10 @@ const SymbolEntry kSyscallSymbols[] = {
     {"pthread_kill", reinterpret_cast<void*>(&bionic_pthread_kill)},
     {"tkill", reinterpret_cast<void*>(&bionic_tkill)},
     {"abort", reinterpret_cast<void*>(&bionic_abort)},
+    {"__libcpp_verbose_abort", reinterpret_cast<void*>(&bionic___libcpp_verbose_abort)},
+    {"__assert_fail", reinterpret_cast<void*>(&bionic___assert_fail)},
+    {"__assert_rtn", reinterpret_cast<void*>(&bionic___assert_rtn)},
+    {"__assert2", reinterpret_cast<void*>(&bionic___assert2)},
     {"signal", reinterpret_cast<void*>(&bionic_signal)},
     {"bsd_signal", reinterpret_cast<void*>(&bionic_signal)},
     {"sysv_signal", reinterpret_cast<void*>(&bionic_signal)},

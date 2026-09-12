@@ -18,6 +18,7 @@
 
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -39,6 +40,8 @@ extern "C" void bionic_AAssetDir_close(void* dir);
 extern "C" void* bionic_AAssetManager_openFd(void* manager, const char* filename, void* outStart, void* outLength);
 extern "C" int bionic_AAsset_openFileDescriptor(void* asset, void* outStart, void* outLength);
 extern "C" int bionic_AAsset_seek(void* asset, long offset, int whence);
+extern "C" int kudroid_asset_resolve_bytes(const char* filename, char** outPath,
+                                          int64_t* outStart, int64_t* outLength);
 
 
 namespace {
@@ -433,7 +436,103 @@ void TestAssetSeekAndRead(const std::filesystem::path& assetsDir) {
     Check(fdRead == 4 && std::string(fdBuf, 4) == "0123", "fd read from start matches");
     ::close(fd);
 
+    // The fd must be INDEPENDENT of the asset's FILE*: the shim seeks and reads that
+    // FILE on every AAsset_read, and on a shared open file description those moves land
+    // in the caller's fd too — a decoder streaming from the fd then reads from wherever
+    // the asset's cursor last was, which is exactly the corrupted audio symptom.
+    int fd2 = bionic_AAsset_openFileDescriptor(asset, &start, &len);
+    Check(fd2 >= 0, "a second openFileDescriptor returns valid fd");
+    if (fd2 >= 0) {
+        int n3 = bionic_AAsset_read(asset, buf, 4);  // continues at [4:8], moves the FILE
+        Check(n3 == 4 && std::string(buf, 4) == "4567", "the asset read continues from its own cursor");
+        char fdBuf2[5] = {0};
+        const ssize_t got2 = ::read(fd2, fdBuf2, 4);
+        Check(got2 == 4 && std::string(fdBuf2, 4) == "0123",
+              "an asset read does not move the caller's fd position");
+        ::close(fd2);
+    }
+
     bionic_AAsset_close(asset);
+}
+
+// The C helper behind Java's AssetManager.openFd: it must hand back a real file, its
+// in-file start offset and the payload length, for both the loose and the in-APK case.
+void TestResolveBytesLoose(const std::filesystem::path& assetsDir) {
+    std::printf("-- kudroid_asset_resolve_bytes: loose file --\n");
+    WriteFile(assetsDir / "clip.ogg", "OGGS_ON_DISK");
+    kudroid_set_assets_dir(assetsDir.string().c_str());
+
+    char* path = nullptr;
+    int64_t start = -1, length = -1;
+    const int rc = kudroid_asset_resolve_bytes("clip.ogg", &path, &start, &length);
+    Check(rc == 1, "a loose asset resolves");
+    Check(path != nullptr && std::strstr(path, "clip.ogg") != nullptr,
+          "the backing path names the file");
+    Check(start == 0, "the loose file's payload starts at 0");
+    Check(length == 12, "the payload length is the file size");
+    if (path != nullptr) {
+        std::ifstream in(path, std::ios::binary);
+        std::string got;
+        std::getline(in, got);
+        Check(got == "OGGS_ON_DISK", "the backing file holds the payload");
+        std::free(path);
+    }
+
+    Check(kudroid_asset_resolve_bytes("no/such.ogg", &path, &start, &length) == 0,
+          "a missing asset resolves to 0");
+}
+
+void TestResolveBytesInApk(const std::filesystem::path& appDir) {
+    std::printf("-- kudroid_asset_resolve_bytes: entry only inside base.apk --\n");
+    const auto assetsDir = appDir / "assets";  // deliberately not created
+    const auto baseApkPath = appDir / "base.apk";
+    std::filesystem::create_directories(appDir);
+
+    const std::vector<TestZipEntry> entries = {
+        {"assets/res/audio/shot.ogg", "STORED_OGG_PAYLOAD"},
+    };
+    const auto zipBytes = BuildTestZip(entries);
+    {
+        std::ofstream out(baseApkPath, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(zipBytes.data()),
+                  static_cast<std::streamsize>(zipBytes.size()));
+    }
+    kudroid_set_assets_dir(assetsDir.string().c_str());
+
+    char* path = nullptr;
+    int64_t start = -1, length = -1;
+    const int rc = kudroid_asset_resolve_bytes("res/audio/shot.ogg", &path, &start, &length);
+    Check(rc == 1, "an in-APK asset resolves");
+    Check(path != nullptr, "the backing path is returned");
+    if (path != nullptr) {
+        // A stored entry is served from base.apk itself at its payload offset — the
+        // same contract openFileDescriptor reports to the caller.
+        Check(start > 0, "the payload offset points into base.apk");
+        Check(length == 18, "the payload length matches the entry");
+        std::string buf(static_cast<size_t>(length), '\0');
+        std::ifstream in(path, std::ios::binary);
+        in.seekg(static_cast<std::streamoff>(start));
+        in.read(buf.data(), length);
+        Check(buf == "STORED_OGG_PAYLOAD", "reading the backing file at start yields the payload");
+        std::free(path);
+    }
+
+    // And the fd handed out alongside must read the same bytes.
+    off_t fdStart = -1, fdLen = -1;
+    void* asset = bionic_AAssetManager_openFd(nullptr, "res/audio/shot.ogg", &fdStart, &fdLen);
+    Check(asset != nullptr, "openFd on an in-APK asset returns a handle");
+    if (asset != nullptr) {
+        int fd = bionic_AAsset_openFileDescriptor(asset, &fdStart, &fdLen);
+        Check(fd >= 0, "openFileDescriptor on an in-APK asset returns fd");
+        if (fd >= 0) {
+            std::string buf(static_cast<size_t>(fdLen), '\0');
+            const ssize_t got = ::pread(fd, buf.data(), buf.size(), fdStart);
+            Check(got == static_cast<ssize_t>(fdLen) && buf == "STORED_OGG_PAYLOAD",
+                  "the fd at the reported offset reads the payload");
+            ::close(fd);
+        }
+        bionic_AAsset_close(asset);
+    }
 }
 
 } // namespace
@@ -456,6 +555,8 @@ int main() {
     TestGetBufferIsMapped(root / "buffers");
     TestBaseApkFallback(root / "apk_fallback");
     TestAssetSeekAndRead(root / "seek_read");
+    TestResolveBytesLoose(root / "resolve_loose");
+    TestResolveBytesInApk(root / "resolve_apk");
 
     std::filesystem::remove_all(root);
 

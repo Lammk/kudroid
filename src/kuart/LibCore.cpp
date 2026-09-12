@@ -3251,6 +3251,11 @@ bool Invoke_java_nio_DirectByteBuffer(Interpreter* interp, const char* name, con
 }
 
 extern "C" const char* kudroid_get_assets_dir(void);
+// Resolve an asset the way the AAssetManager shim does: loose file, archive entry
+// extracted to cache (deflated) or mmap-backed from base.apk (stored). Returns the
+// backing file plus its in-file offset and length. Defined in AssetShim.cpp.
+extern "C" int kudroid_asset_resolve_bytes(const char* filename, char** outPath,
+                                           int64_t* outStart, int64_t* outLength);
 
 bool Invoke_android_provider_Settings(Interpreter* interp, const char* name,
                                       const DexValue* /*args*/, size_t /*num_args*/,
@@ -3267,13 +3272,47 @@ bool Invoke_android_provider_Settings(Interpreter* interp, const char* name,
 }
 
 bool Invoke_android_content_res_AssetManager(Interpreter* interp, const char* name,
-                                             const DexValue* /*args*/, size_t /*num_args*/,
+                                             const DexValue* args, size_t num_args,
                                              DexValue* result) {
     if (std::strcmp(name, "nativeGetAssetsDir") == 0) {
         const char* dir = kudroid_get_assets_dir();
         result->l = (interp != nullptr && interp->linker() != nullptr && dir != nullptr)
                         ? reinterpret_cast<DexObject*>(interp->linker()->NewString(dir))
                         : nullptr;
+        return true;
+    }
+    // nativeResolveAsset(String): [String path, Long start, Long length] or null — the
+    // AAssetManager shim's answer for an asset that is only inside base.apk, so the
+    // Java side can hand a caller a real file (AssetFileDescriptor / FMOD).
+    if (std::strcmp(name, "nativeResolveAsset") == 0) {
+        if (interp == nullptr || interp->linker() == nullptr || num_args < 1 ||
+            args[0].l == nullptr) {
+            result->l = nullptr;
+            return true;
+        }
+        auto* str = reinterpret_cast<DexString*>(args[0].l);
+        const char* filename = str->utf8 ? str->utf8 : "";
+        char* path = nullptr;
+        int64_t start = 0, length = 0;
+        const int rc = kudroid_asset_resolve_bytes(filename, &path, &start, &length);
+        if (rc <= 0 || path == nullptr) {
+            result->l = nullptr;  // the Java caller throws FileNotFoundException
+            return true;
+        }
+        DexClassLinker* linker = interp->linker();
+        DexObject* path_str = reinterpret_cast<DexObject*>(linker->NewString(path));
+        std::free(path);
+        // Longs are boxed because the result array carries (path, start, length) and
+        // Java generic arrays cannot hold primitives.
+        DexObject* start_box = BoxValue(interp, "J", DexValue::Long(start));
+        DexObject* length_box = BoxValue(interp, "J", DexValue::Long(length));
+        if (path_str == nullptr || start_box == nullptr || length_box == nullptr) {
+            result->l = nullptr;
+            return true;
+        }
+        DexArray* arr = NewRefArray(linker, "[Ljava/lang/Object;",
+                                    {path_str, start_box, length_box});
+        result->l = arr ? reinterpret_cast<DexObject*>(arr) : nullptr;
         return true;
     }
     return false;

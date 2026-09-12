@@ -153,6 +153,9 @@ static char g_crashBuf[262144];
 static volatile sig_atomic_t g_crashLen = 0;
 static std::mutex g_crashBufMtx;
 static char g_abortMessage[1024] = {0};
+// si_code of the signal being reported, stored by the handler for tests and for
+// readers that want signalled-vs-faulted without parsing the whole line.
+static volatile int g_crash_signal_si_code = 0;
 
 // ── JNI_OnLoad abort() Shield ────────────────────────────────────────────────
 // Secondary libraries (conscrypt, HttpClient, maesdk, etc.) may call abort()
@@ -796,6 +799,12 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
 #else
         (void)pthread_getname_np(pthread_self(), tname, sizeof(tname));
 #endif
+        // Signalled (raise/pthread_kill/sigqueue) vs faulted (hardware): si_code is the
+        // only field that tells them apart, and which side decided to abort is exactly
+        // what a SIGABRT with pc inside libsystem leaves ambiguous.
+        int si_code_snap = 0;
+        if (info != nullptr) si_code_snap = info->si_code;
+        g_crash_signal_si_code = si_code_snap;
 
         // pc/lr, and the guest module they land in.
         //
@@ -883,7 +892,7 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
                          "fatal-signal signo=%d si_code=%d fault_addr=%p thread=%s "
                          "thread_id=%llu guest_handler=%d jni_guard=%d",
                          sig,
-                         info != nullptr ? info->si_code : 0,
+                         si_code_snap,
                          info != nullptr ? info->si_addr : nullptr,
                          tname[0] != '\0' ? tname : "?",
                          currentThreadIdForCrash(),
