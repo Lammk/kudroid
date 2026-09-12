@@ -7,6 +7,7 @@
 #include <jni.h>
 
 #include <cstdarg>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -107,8 +108,14 @@ public:
     void set_last_error(const std::string& e) { last_error_ = e; }
 
     size_t NumLocalRefs() const;
-    size_t NumGlobalRefs() const { return global_refs_.size(); }
-    bool IsGlobalRef(DexObject* obj) const { return global_refs_.count(obj) != 0; }
+    size_t NumGlobalRefs() const {
+        std::lock_guard<std::mutex> lock(global_refs_mutex_);
+        return global_refs_.size();
+    }
+    bool IsGlobalRef(DexObject* obj) const {
+        std::lock_guard<std::mutex> lock(global_refs_mutex_);
+        return global_refs_.count(obj) != 0;
+    }
 
 private:
     void InitFunctionTable();
@@ -130,11 +137,24 @@ private:
     Interpreter* interpreter_ = nullptr;
     SymbolLookup symbol_lookup_ = nullptr;
 
-    // Each frame holds a local-ref set; the outermost frame always exists.
-    std::vector<std::vector<DexObject*>> local_frames_;
+    // One DexJniEnv serves every guest thread (see KuArtRuntime), so the
+    // GLOBAL table below is shared across threads — UnityMain, the UI
+    // thread posting touch events, FMOD's mixer — and every accessor takes
+    // global_refs_mutex_ (the jni_globals_lock_ of this runtime). An
+    // unguarded std::unordered_set insert from two threads corrupts buckets
+    // into garbage pointers (observed: AddGlobalRef fault on a touch event).
+    // Leaf-level only: no other lock is ever held across these calls, so no
+    // lock ordering exists to violate.
+    //
+    // Local frames and the pending exception are NOT here: like ART's
+    // JNIEnvExt/ExceptionState they are thread-confined (thread_local in
+    // DexJniEnv.cpp), lock-free, and invisible across threads. The
+    // interpreter's own pending_exception_ is already thread_local, and the
+    // Set/pending/Clear trio below forwards to it — both slots are TLS so
+    // the merge stays thread-confined on every thread.
     std::unordered_set<DexObject*> global_refs_;
+    mutable std::mutex global_refs_mutex_;
 
-    DexObject* pending_exception_ = nullptr;
     std::string last_error_;
 };
 

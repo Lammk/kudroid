@@ -186,29 +186,47 @@ const char* DexJniEnv::MethodShorty(const DexMethod* method) {
 
 DexJniEnv::DexJniEnv(DexClassLinker* linker, Interpreter* interpreter)
     : linker_(linker), interpreter_(interpreter) {
-    local_frames_.emplace_back();
     InitFunctionTable();
 }
 
 DexJniEnv::~DexJniEnv() = default;
 
+namespace {
+// Per-thread local-ref frames (ART's JNIEnvExt equivalent): lock-free,
+// invisible across threads. The outermost frame is created lazily per
+// thread so a thread that never touches JNI allocates nothing.
+thread_local std::vector<std::vector<DexObject*>> t_local_frames;
+
+std::vector<std::vector<DexObject*>>& ThreadLocalFrames() {
+    if (t_local_frames.empty()) t_local_frames.emplace_back();
+    return t_local_frames;
+}
+
+// Per-thread pending exception (ART's Thread::Current()->GetException()
+// equivalent). The interpreter's own slot is already thread_local; both
+// slots are written/read together below, so the merge below stays
+// thread-confined on every thread.
+thread_local DexObject* t_pending_exception = nullptr;
+}  // namespace
+
 jobject DexJniEnv::AddLocalRef(DexObject* obj) {
     if (obj == nullptr) return nullptr;
-    if (local_frames_.empty()) local_frames_.emplace_back();
-    local_frames_.back().push_back(obj);
+    ThreadLocalFrames().back().push_back(obj);
     return AsHandle(obj);
 }
 
 jobject DexJniEnv::AddGlobalRef(DexObject* obj) {
     if (obj == nullptr) return nullptr;
+    std::lock_guard<std::mutex> lock(global_refs_mutex_);
     global_refs_.insert(obj);
     return AsHandle(obj);
 }
 
 void DexJniEnv::DeleteLocalRef(jobject ref) {
     DexObject* obj = AsObject(ref);
-    if (obj == nullptr || local_frames_.empty()) return;
-    auto& frame = local_frames_.back();
+    if (obj == nullptr) return;
+    auto& frames = ThreadLocalFrames();
+    auto& frame = frames.back();
     for (auto it = frame.rbegin(); it != frame.rend(); ++it) {
         if (*it == obj) {
             frame.erase(std::next(it).base());
@@ -219,34 +237,37 @@ void DexJniEnv::DeleteLocalRef(jobject ref) {
 
 void DexJniEnv::DeleteGlobalRef(jobject ref) {
     DexObject* obj = AsObject(ref);
-    if (obj != nullptr) global_refs_.erase(obj);
+    if (obj == nullptr) return;
+    std::lock_guard<std::mutex> lock(global_refs_mutex_);
+    global_refs_.erase(obj);
 }
 
-void DexJniEnv::PushLocalFrame() { local_frames_.emplace_back(); }
+void DexJniEnv::PushLocalFrame() { ThreadLocalFrames().emplace_back(); }
 
 void DexJniEnv::PopLocalFrame() {
     // The outermost frame must always remain so that AddLocalRef does not need to check for nullity.
-    if (local_frames_.size() > 1) local_frames_.pop_back();
+    auto& frames = ThreadLocalFrames();
+    if (frames.size() > 1) frames.pop_back();
 }
 
 size_t DexJniEnv::NumLocalRefs() const {
     size_t n = 0;
-    for (const auto& frame : local_frames_) n += frame.size();
+    for (const auto& frame : ThreadLocalFrames()) n += frame.size();
     return n;
 }
 
 void DexJniEnv::SetPendingException(DexObject* ex) {
-    pending_exception_ = ex;
+    t_pending_exception = ex;
     if (interpreter_ != nullptr) interpreter_->SetPendingException(ex);
 }
 
 DexObject* DexJniEnv::pending_exception() const {
-    if (pending_exception_ != nullptr) return pending_exception_;
+    if (t_pending_exception != nullptr) return t_pending_exception;
     return interpreter_ != nullptr ? interpreter_->pending_exception() : nullptr;
 }
 
 void DexJniEnv::ClearException() {
-    pending_exception_ = nullptr;
+    t_pending_exception = nullptr;
     if (interpreter_ != nullptr) interpreter_->ClearPendingException();
 }
 

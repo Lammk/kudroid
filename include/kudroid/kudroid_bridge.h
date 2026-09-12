@@ -77,12 +77,19 @@ unsigned long long kudroid_paused_generation(void);
 /// Thread-role registry for fault isolation. The crash handler treats a fault
 /// on the guest UI thread (runs ActivityThread.main), on a render thread
 /// (presents via eglSwapBuffers), or on the host main thread as app-fatal. A
-/// fault anywhere else parks that worker with a warning breadcrumb instead of
-/// stopping the app — engines keep rendering on surviving threads, and the
-/// first fault already wrote the full crash report. A second fault anywhere
-/// is fatal: cascading workers mean the process is going down regardless.
+/// fault anywhere else is resumed past the faulting load/store when the skip
+/// decoder can prove it safe (fault address matches the decoded effective
+/// address, guest text only), parked with a warning otherwise. Recovery is
+/// capped (16 faults): past that the process is cascading and the fault is
+/// fatal. The full crash report is always written; isolation only skips the
+/// shutdown, never the diagnosis.
 void kudroid_note_guest_ui_thread(void);
 void kudroid_note_render_thread(void);
+/// Record this thread's guest name (from prctl PR_SET_NAME) for fault
+/// isolation. Names containing Main/main/Render/GfxDevice mark engine-critical
+/// threads (UnityMain, RenderThread, ...), which are app-fatal like the UI
+/// thread above — a fault there must never be mistaken for a worker fault.
+void kudroid_note_thread_name(const char* name);
 
 ///run vfs and i/o redirection autotest; returns a malloc log.
 const char* kudroid_vfs_self_test_log(void);

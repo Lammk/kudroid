@@ -4,9 +4,11 @@
 #include "kudroid/abi/GuestVarargs.h"
 #include "kudroid/framework_dex_bytes.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "dex_builder.h"
@@ -590,6 +592,61 @@ Check(v.i == 7, "CallJavaA virtual tr  7");
         Check(out[0].i == 0x12345678, "out[0].i == 0x12345678");
         Check(out[1].j == static_cast<jlong>(0xabcdef0123456789ULL), "out[1].j retains all 64 bits");
         Check(out[2].l == reinterpret_cast<jobject>(0x5555), "out[2].l == 0x5555");
+    }
+
+    // Multi-threaded ref-table stress: the 12:22 touch crash was UnityMain
+    // racing the UI thread in AddGlobalRef on one shared unordered_set.
+    // Locals/exceptions are thread-confined (TLS), globals mutex-guarded.
+    // Each thread owns disjoint objects (global refs are process-wide: two
+    // threads adding/deleting the SAME object would race by design, and the
+    // test must not mistake that for an implementation bug).
+    {
+        constexpr int kThreads = 8, kPerThread = 4, kIters = 2000;
+        constexpr int kObjs = kThreads * kPerThread;
+        kudroid::kuart::DexObject* objs[kObjs];
+        for (int i = 0; i < kObjs; ++i) {
+            objs[i] = linker.AllocObject(nat);
+            Check(objs[i] != nullptr, "stress objects allocated");
+            if (objs[i] == nullptr) return 1;
+        }
+        std::atomic<int> failures{0};
+        std::atomic<int> failAt{0};
+        std::vector<std::thread> workers;
+        for (int t = 0; t < kThreads; ++t) {
+            workers.emplace_back([&, t] {
+                auto fail = [&](int code) {
+                    int z = 0;
+                    failAt.compare_exchange_strong(z, code);
+                    ++failures;
+                };
+                for (int i = 0; i < kIters; ++i) {
+                    kudroid::kuart::DexObject* o = objs[t * kPerThread + (i % kPerThread)];
+                    jobject g = jni.AddGlobalRef(o);
+                    if (g == nullptr) { fail(1); return; }
+                    if (!jni.IsGlobalRef(o)) { fail(2); return; }
+                    jobject l = jni.AddLocalRef(o);
+                    if (l == nullptr) { fail(3); return; }
+                    jni.PushLocalFrame();
+                    jobject l2 = jni.AddLocalRef(o);
+                    if (l2 == nullptr) { fail(4); return; }
+                    jni.PopLocalFrame();
+                    jni.SetPendingException(o);
+                    if (jni.pending_exception() != o) { fail(5); return; }
+                    jni.ClearException();
+                    if (jni.pending_exception() != nullptr) { fail(6); return; }
+                    jni.DeleteLocalRef(l);
+                    jni.DeleteGlobalRef(g);
+                }
+                // This thread's locals balanced; its exception slot is clear.
+                // Globals are shared: only the total is asserted below.
+                if (jni.NumLocalRefs() != 0) fail(7);
+                if (jni.pending_exception() != nullptr) fail(8);
+            });
+        }
+        for (auto& th : workers) th.join();
+        std::printf("       first failure at check %d\n", failAt.load());
+        Check(failures.load() == 0, "8 threads x 2000 ref/exception cycles, no mismatch");
+        Check(jni.NumGlobalRefs() == 0, "global table drains to zero after the storm");
     }
 
     std::printf("=== %s (%d error) ===\n", g_failures == 0 ? "PASSED" : "FAILED", g_failures);

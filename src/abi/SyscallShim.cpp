@@ -1,4 +1,5 @@
 #include "kudroid/BionicShim.h"
+#include "kudroid/kudroid_bridge.h"
 #include "kudroid/abi/SyscallShim.h"
 #include "kudroid/abi/GuestVarargs.h"
 #include "kudroid/abi/BlockingWaitRegistry.h"
@@ -832,14 +833,20 @@ extern "C" int bionic_ioctl(int fd, unsigned long request, ...) {
 extern "C" int bionic_prctl(int option, unsigned long arg2, unsigned long arg3, unsigned long arg4, unsigned long arg5) {
     (void)arg3; (void)arg4; (void)arg5;
     if (option == PR_SET_NAME) {
+        const char* name =
+            arg2 ? reinterpret_cast<const char*>(arg2) : "<null>";
         const int r =
 #ifdef __APPLE__
-            pthread_setname_np(reinterpret_cast<const char*>(arg2));
+            pthread_setname_np(name);
 #else
-            pthread_setname_np(pthread_self(), reinterpret_cast<const char*>(arg2));
+            pthread_setname_np(pthread_self(), name);
 #endif
+        // Fault isolation reads this (signal-safe table): engine-critical
+        // threads (UnityMain, RenderThread, ...) must never be mistaken for
+        // background workers when they fault.
+        if (arg2) kudroid_note_thread_name(reinterpret_cast<const char*>(arg2));
         logAndroidMessage(4, "KuDroidSyscall", "prctl(PR_SET_NAME, \"" +
-                          std::string(arg2 ? reinterpret_cast<const char*>(arg2) : "<null>") +
+                          std::string(name) +
                           "\") -> " + (r == 0 ? "0" : std::to_string(r) + " errno=" + std::to_string(errno)));
         return r;
     } else if (option == PR_GET_NAME) {

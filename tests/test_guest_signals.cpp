@@ -18,6 +18,7 @@
 // and Darwin diverge after SIGFPE), and ownership of the signals KuDroid needs to keep
 // working.
 #include "kudroid/abi/GuestSignals.h"
+#include "kudroid/FaultSkip.h"
 
 #include <atomic>
 #include <cstdio>
@@ -859,6 +860,90 @@ void test_an_unmappable_send_is_refused() {
     Check(kudroid::guest_raise(0) == 0, "raise(0) still succeeds as the no-op probe");
 }
 
+// ── AArch64 fault-skip decoder ──────────────────────────────────────────
+// Encodings below are aarch64-linux-gnu-as ground truth (see the .s/.o pair
+// used to verify the crashHandler skip), not hand-computed. base/rm values
+// are chosen so the effective address is non-trivial; the fault address must
+// match it exactly or the plan refuses.
+void test_fault_skip_decoder() {
+    std::printf("[fault-skip] decoder allows exactly the provable transfers\n");
+    using kudroid::fault_decode_skip;
+    using kudroid::FaultSkipPlan;
+
+    // The Melon_0-adjacent shape: ldr w12, [x2, x13, lsl #2] faulting at
+    // base + (idx << 2). Must allow, dest w12, computed address exact.
+    {
+        const uint64_t base = 0x380ac7e30ull, idx = 0x80ab8458ull;
+        FaultSkipPlan p =
+            fault_decode_skip(0xb86d784c, 0x1000, base, idx);
+        Check(p.skippable && p.isLoad && !p.isPair && p.rt == 12,
+              "crash shape ldr w12,[x2,x13,lsl#2] is skippable to w12");
+        Check(p.effAddr == base + (idx << 2),
+              "its effective address is base + idx*4");
+    }
+    // Unsigned/strb/ldur/literal/pair-offset allow with exact addresses.
+    {
+        FaultSkipPlan p = fault_decode_skip(0xf9400820, 0x1000, 0x5000, 0);  // ldr x0,[x1,#16]
+        Check(p.skippable && p.isLoad && p.rt == 0 && p.effAddr == 0x5010,
+              "unsigned-immediate load allows at base+16");
+    }
+    {
+        FaultSkipPlan p = fault_decode_skip(0x38326ace, 0x1000, 0x6000, 0x18);  // strb w14,[x22,x18]
+        Check(p.skippable && !p.isLoad && p.effAddr == 0x6018,
+              "register-offset store allows (write dropped)");
+    }
+    {
+        FaultSkipPlan p = fault_decode_skip(0xf8408020, 0x1000, 0x7000, 0);  // ldur x0,[x1,#8]
+        Check(p.skippable && p.isLoad && p.effAddr == 0x7008, "unscaled load allows");
+    }
+    {
+        FaultSkipPlan p = fault_decode_skip(0x58000040, 0x10000, 0, 0);  // ldr x0, lit(+8)
+        Check(p.skippable && p.isLoad && p.effAddr == 0x10008, "literal load allows at pc+8");
+    }
+    {
+        FaultSkipPlan p = fault_decode_skip(0xa9410440, 0x1000, 0x8000, 0);  // ldp x0,x1,[x2,#16]
+        Check(p.skippable && p.isLoad && p.isPair && p.rt == 0 && p.rt2 == 1 &&
+                  p.effAddr == 0x8010,
+              "signed-offset pair allows with both lanes");
+    }
+    {
+        FaultSkipPlan p = fault_decode_skip(0xf9802020, 0x1000, 0, 0);  // prfm
+        Check(p.skippable && !p.isLoad, "prfm allows (hint only)");
+    }
+    // Writeback forms refuse: the base update cannot be faked.
+    {
+        Check(!fault_decode_skip(0xf8010420, 0x1000, 0x5000, 0).skippable,
+              "post-index store refuses");
+        Check(!fault_decode_skip(0xf8410c20, 0x1000, 0x5000, 0).skippable,
+              "pre-index load refuses");
+        Check(!fault_decode_skip(0xa9c10440, 0x1000, 0x8000, 0).skippable,
+              "pre-index pair refuses");
+        Check(!fault_decode_skip(0xa8c10440, 0x1000, 0x8000, 0).skippable,
+              "post-index pair refuses");
+        Check(!fault_decode_skip(0xa9bf7bfd, 0x1000, 0x8000, 0).skippable,
+              "stp pre-index refuses");
+    }
+    // SIMD lanes, atomics, exclusives, branches refuse.
+    {
+        Check(!fault_decode_skip(0x3dc00252, 0x1000, 0x5000, 0).skippable,
+              "SIMD single (ldr q18,[x18]) refuses");
+        Check(!fault_decode_skip(0xad000640, 0x1000, 0x8000, 0).skippable,
+              "SIMD pair (stp q0,q1,[x18]) refuses");
+        Check(!fault_decode_skip(0xb8200041, 0x1000, 0x5000, 0).skippable,
+              "LSE ldadd refuses (bits[11:10] != 10)");
+        Check(!fault_decode_skip(0xc85f7c20, 0x1000, 0x5000, 0).skippable,
+              "exclusive ldxr refuses");
+        Check(!fault_decode_skip(0xd63f0240, 0x1000, 0, 0).skippable,
+              "blr refuses");
+        Check(!fault_decode_skip(0x14000001, 0x1000, 0, 0).skippable,
+              "b refuses");
+        Check(!fault_decode_skip(0x8b010012, 0x1000, 0, 0).skippable,
+              "add refuses");
+        Check(!fault_decode_skip(0x9e670241, 0x1000, 0, 0).skippable,
+              "fmov refuses (FP lane)");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -887,6 +972,7 @@ int main() {
     test_sigprocmask_translates_how_and_the_mask();
     test_signal_and_sigaction_share_one_registry();
     test_an_unmappable_send_is_refused();
+    test_fault_skip_decoder();
 
     std::printf("=== %d checks, %d failures ===\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

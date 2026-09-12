@@ -1,5 +1,6 @@
 #include "kudroid/kudroid_bridge.h"
 #include "kudroid/DeviceProfile.h"
+#include "kudroid/FaultSkip.h"
 #include "kudroid/elf_loader.hpp"
 #include "kudroid/BionicShim.h"
 #include "kudroid/VFSPathRemapper.h"
@@ -265,6 +266,65 @@ static std::atomic<unsigned long long> g_guestUiThread{0};
 static std::atomic<unsigned long long> g_renderThreads[4] = {};
 static std::atomic<int> g_workerFaults{0};
 
+// Guest thread names (prctl PR_SET_NAME), for role recognition in the crash
+// handler. pthread_getname_np is NOT async-signal-safe, so names are recorded
+// here at set-name time and the handler only reads: fixed slots, tid-tagged,
+// plain loads. A name containing Main/main/Render/GfxDevice marks an
+// engine-critical thread (UnityMain, RenderThread, ...), which is app-fatal.
+struct ThreadNameSlot {
+    std::atomic<unsigned long long> tid{0};
+    char name[32] = {0};
+};
+static ThreadNameSlot g_threadNames[32];
+static std::mutex g_threadNameMutex;  // normal context only, never the handler
+
+extern "C" void kudroid_note_thread_name(const char* name) {
+    if (name == nullptr || *name == '\0') return;
+    const unsigned long long tid = currentThreadIdForCrash();
+    std::lock_guard<std::mutex> lock(g_threadNameMutex);
+    for (auto& slot : g_threadNames) {
+        if (slot.tid.load(std::memory_order_relaxed) == tid) {
+            std::snprintf(slot.name, sizeof(slot.name), "%s", name);
+            return;
+        }
+    }
+    for (auto& slot : g_threadNames) {
+        unsigned long long empty = 0;
+        if (slot.tid.compare_exchange_strong(empty, tid,
+                                             std::memory_order_relaxed)) {
+            std::snprintf(slot.name, sizeof(slot.name), "%s", name);
+            return;
+        }
+    }
+}
+
+// Signal-handler side: substring match on the recorded name. Reads only.
+// The name is copied to a stack buffer with NUL padding first, so the
+// lookahead below can never overread even a full 31-char name.
+static bool thread_name_marks_critical(unsigned long long tid) {
+    if (tid == 0) return false;
+    for (auto& slot : g_threadNames) {
+        if (slot.tid.load(std::memory_order_relaxed) != tid) continue;
+        char n[40] = {0};
+        for (size_t i = 0; i < 31; ++i) n[i] = slot.name[i];
+        for (size_t i = 0; n[i] != '\0'; ++i) {
+            // "Main" / "main" / "Render" / "GfxDevice"
+            if ((n[i] == 'M' || n[i] == 'm') && n[i + 1] == 'a' &&
+                n[i + 2] == 'i' && n[i + 3] == 'n')
+                return true;
+            if (n[i] == 'R' && n[i + 1] == 'e' && n[i + 2] == 'n' &&
+                n[i + 3] == 'd' && n[i + 4] == 'e' && n[i + 5] == 'r')
+                return true;
+            if (n[i] == 'G' && n[i + 1] == 'f' && n[i + 2] == 'x' &&
+                n[i + 3] == 'D' && n[i + 4] == 'e' && n[i + 5] == 'v' &&
+                n[i + 6] == 'i' && n[i + 7] == 'c' && n[i + 8] == 'e')
+                return true;
+        }
+        return false;
+    }
+    return false;
+}
+
 extern "C" void kudroid_note_guest_ui_thread(void) {
     g_guestUiThread.store(currentThreadIdForCrash(), std::memory_order_relaxed);
 }
@@ -280,15 +340,18 @@ extern "C" void kudroid_note_render_thread(void) {
     }
 }
 
-// True when a fault on `tid` must stop the app: host main, guest UI, or any
-// render thread — or any second fault, which means cascading failure.
+// True when a fault on `tid` must stop the app: host main, guest UI, any
+// render thread, or any thread whose recorded name marks it engine-critical
+// (UnityMain, RenderThread, GfxDeviceWorker, ...). Worker recovery is capped
+// separately at the call site (kMaxWorkerRecoveries); past that the fault is
+// fatal there.
 static bool kudroid_fault_is_fatal(unsigned long long tid, bool isHostMain) {
     if (isHostMain) return true;
     if (tid != 0 && tid == g_guestUiThread.load(std::memory_order_relaxed)) return true;
     for (auto& slot : g_renderThreads) {
         if (tid != 0 && tid == slot.load(std::memory_order_relaxed)) return true;
     }
-    if (g_workerFaults.load(std::memory_order_relaxed) > 0) return true;
+    if (thread_name_marks_critical(tid)) return true;
     return false;
 }
 
@@ -739,6 +802,175 @@ static unsigned long long currentThreadIdForCrash(void) {
     return static_cast<unsigned long long>(::syscall(SYS_gettid));
 #endif
 }
+
+// ── AArch64 fault-instruction skip & worker resume ─────────────────────────
+// A faulted worker parked forever deadlocks the engine: the main thread waits
+// on the worker's job fence (JobHandle.Complete in libsystem cvwait) and the
+// picture freezes with input dead. For a faulting LOAD/STORE whose semantics
+// survive without the memory traffic, skipping the instruction lets the
+// worker finish its job and wake the waiter:
+//
+//   load (LDR/LDP/LDRB/...): destination register(s) := 0, pc += 4.
+//   store (STR/STP/...):     the write is dropped, pc += 4.
+//
+// Soundness rules (all checked before touching state):
+// - SIGSEGV/SIGBUS only. Anything else parks.
+// - pc must sit in a registered guest module: host text is never rewritten.
+// - Only plain transfers: unsigned/unscaled immediate, register-offset,
+//   literal loads, signed-offset pairs, PRFM. Pre/post-index (writeback),
+//   exclusives, LSE atomics, SIMD/FP lanes and everything else park —
+//   faking a base update or a synchronisation primitive corrupts silently,
+//   while a skipped plain transfer only loses one value.
+// - The computed effective address must equal si_addr: a decode that does
+//   not explain the fault is a mis-decode, and those park.
+// - Encoding shapes verified against aarch64-linux-gnu-as output, not the
+//   ARM ARM from memory: b86d784c ldr w12,[x2,x13,lsl#2] allows,
+//   a9c10440/a8c10440 ldp pre/post-index refuse, b8200041 ldadd refuses via
+//   the bits[11:10]==10 rule (every LSE form carries bit21==1 with
+//   bits[11:10] in {0,1,3}).
+// - All async-signal-safe: scalar reads/writes, no locks, no allocation.
+namespace kudroid {
+
+FaultSkipPlan fault_decode_skip(uint32_t w, uint64_t pc, uint64_t baseVal,
+                                uint64_t rmVal) {
+    FaultSkipPlan p;
+    const unsigned top = w >> 24;
+    const unsigned rt = (w >> 0) & 31;
+    const unsigned rm = (w >> 16) & 31;
+
+    if (top == 0x58 || top == 0xD8) {
+        // LDR literal (32/64-bit): pc-relative, no writeback.
+        const int32_t imm19 =
+            static_cast<int32_t>((w >> 5) & 0x7FFFFu) << 13 >> 13;
+        p.effAddr = pc + static_cast<int64_t>(imm19) * 4;
+        p.isLoad = true;
+        p.rt = rt;
+        p.skippable = true;
+        return p;
+    }
+    if ((top & 0x3B) == 0x38 || (top & 0x3B) == 0x39) {
+        // Single transfer, integer lanes only (bit26 set = SIMD: refuse).
+        if ((w & (1u << 26)) != 0) return p;
+        // PRFM: a hint with no destination; skipping only drops the prefetch.
+        if (((w >> 23) & 0x1FF) == 0x1F3) {
+            p.skippable = true;
+            p.isLoad = false;
+            return p;
+        }
+        // LSE atomics never reach the bit21==0 path (assembler-verified:
+        // every LSE single-transfer form carries bit21==1), so no opc guard
+        // is needed here — and none could be both correct and complete.
+        p.isLoad = ((w >> 22) & 1) != 0;
+        if ((w & (1u << 21)) != 0) {
+            // Register offset: bits[11:10] must be 10. This one test excludes
+            // every LSE atomic and exclusive (verified: all carry bit21==1
+            // with bits[11:10] in {0,1,3}, never 2).
+            if (((w >> 10) & 3) != 2) return p;
+            if (rm > 30) return p;  // 31 is not a valid index register
+            const unsigned option = (w >> 13) & 7;
+            const unsigned amount = (w >> 12) & 1;
+            const unsigned sizeLog = (w >> 30) & 3;  // 0=B 1=H 2=W 3=X
+            uint64_t idx = 0;
+            switch (option) {
+                case 0x3: idx = rmVal; break;  // LSL
+                case 0x2:                       // UXTW
+                case 0x1: idx = rmVal & 0xFFFFFFFFu; break;
+                case 0x6: idx = rmVal; break;  // UXTX
+                case 0x7: idx = rmVal; break;  // SXTX
+                case 0x5:                       // SXTW
+                    idx = static_cast<uint64_t>(
+                        static_cast<int64_t>(static_cast<int32_t>(rmVal & 0xFFFFFFFFu)));
+                    break;
+                default: return p;  // 0x0/0x4: not a plain index
+            }
+            const unsigned shift = amount ? sizeLog : 0;
+            p.effAddr = baseVal + (idx << shift);
+        } else if (((w >> 24) & 1) != 0) {
+            // Unsigned immediate: no writeback.
+            const unsigned sizeLog = (w >> 30) & 3;
+            const uint64_t imm12 = (w >> 10) & 0xFFFu;
+            p.effAddr = baseVal + (imm12 << sizeLog);
+        } else {
+            // 0x_8 group: pre/post-index (writeback) or unscaled.
+            // bits[11:10] 01 = post, 11 = pre: both update the base and
+            // must not be faked. Anything else is unscaled (no writeback).
+            const unsigned mode = (w >> 10) & 3;
+            if (mode == 1 || mode == 3) return p;
+            int32_t simm9 =
+                static_cast<int32_t>(((w >> 12) & 0x1FFu) << 23) >> 23;
+            p.effAddr = baseVal + static_cast<int64_t>(simm9);
+        }
+        p.rt = rt;
+        p.skippable = true;
+        return p;
+    }
+    if ((top & 0x3F) == 0x28 || (top & 0x3F) == 0x29) {
+        // Integer pair (bit26 set = SIMD pair: refuse). Indexing lives in
+        // bits[24:23] verified against the assembler as (w>>23)&3:
+        // 2 = signed offset, 3 = pre-index, 1 = post-index, 0 = unallocated.
+        if ((w & (1u << 26)) != 0) return p;
+        if (((w >> 23) & 3) != 2) return p;  // writeback/unallocated
+        p.isPair = true;
+        p.isLoad = ((w >> 22) & 1) != 0;
+        p.rt = rt;
+        p.rt2 = (w >> 10) & 31;
+        const unsigned scale = ((w >> 31) & 1) ? 3 : 2;  // 64- vs 32-bit lanes
+        int32_t simm7 = static_cast<int32_t>(((w >> 15) & 0x7Fu) << 25) >> 25;
+        p.effAddr = baseVal + (static_cast<int64_t>(simm7) << scale);
+        p.skippable = true;
+        return p;
+    }
+    return p;
+}
+
+}  // namespace kudroid
+
+#if (defined(__aarch64__) || defined(__arm64__)) && defined(__APPLE__)
+namespace {
+
+bool fault_skip_load_store(ucontext_t* uc, uintptr_t faultAddr, uint64_t* newPcOut) {
+    if (uc == nullptr || newPcOut == nullptr) return false;
+    const uint64_t pc = uc->uc_mcontext->__ss.__pc;
+    // Guest text only (see above). The lookup try-locks and gives up rather
+    // than blocking, so it is safe here.
+    char mod[256] = {0};
+    if (!kudroid::kudroid_lookup_guest_module(reinterpret_cast<void*>(pc), mod,
+                                              sizeof(mod))) {
+        return false;
+    }
+    const uint32_t w = *reinterpret_cast<const uint32_t*>(pc);
+    const unsigned rn = (w >> 5) & 31;
+
+    auto regVal = [&](unsigned r) -> uint64_t {
+        if (r == 31) return 0;
+        if (r > 30) return 0;
+        return uc->uc_mcontext->__ss.__x[r];
+    };
+    const uint64_t baseVal =
+        (rn == 31) ? uc->uc_mcontext->__ss.__sp : regVal(rn);
+    const uint64_t rmVal = regVal((w >> 16) & 31);
+
+    const FaultSkipPlan p = fault_decode_skip(w, pc, baseVal, rmVal);
+    if (!p.skippable) return false;
+    // The decode must explain the fault. Anything else is a mis-decode.
+    if (p.effAddr != faultAddr) return false;
+    if (p.isLoad) {
+        // 29/30 never take a transfer result in valid code, 31 is XZR
+        // (no effect): refuse rather than reason about them.
+        if (p.rt >= 29 || (p.isPair && p.rt2 >= 29)) return false;
+        uc->uc_mcontext->__ss.__x[p.rt] = 0;
+        if (p.isPair) uc->uc_mcontext->__ss.__x[p.rt2] = 0;
+    }
+    *newPcOut = pc + 4;
+    return true;
+}
+
+}  // namespace
+#else
+// Non-Apple or non-arm64 hosts never run guest AArch64 text in-process:
+// every worker fault parks.
+bool kudroid_try_skip_fault(int, siginfo_t*, void*) { return false; }
+#endif
 
 static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
     if (sig == SIGSYS && bionic_handle_guest_syscall_trap(ucontext)) {
@@ -1380,6 +1612,13 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
     // kudroid_fault_is_fatal). The full crash report above was already
     // written unconditionally — isolation skips the shutdown, never the
     // diagnosis.
+    //
+    // A parked worker deadlocks the engine when the main thread waits on its
+    // job fence, so workers are resumed past the faulting instruction instead
+    // (fault_skip_load_store): a faulting load yields zero, a faulting store
+    // is dropped, pc advances one instruction. Anything the skip cannot prove
+    // safe falls through to the park below. Recovery is capped: past
+    // kMaxWorkerRecoveries the process is cascading and the fault is fatal.
     {
 #if defined(__APPLE__)
         const bool isHostMain = pthread_main_np() != 0;
@@ -1387,9 +1626,19 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
         const bool isHostMain =
             g_mainThread != 0 && pthread_equal(pthread_self(), g_mainThread);
 #endif
+        static constexpr int kMaxWorkerRecoveries = 16;
         const unsigned long long tid = currentThreadIdForCrash();
-        if (kudroid_fault_is_fatal(tid, isHostMain)) {
+        const bool fatal = kudroid_fault_is_fatal(tid, isHostMain) ||
+                           g_workerFaults.load(std::memory_order_relaxed) >=
+                               kMaxWorkerRecoveries;
+        if (fatal) {
             g_hasCrashed.store(true);
+        } else if ((sig == SIGSEGV || sig == SIGBUS) &&
+                   kudroid_try_skip_fault(sig, info, ucontext)) {
+            // Resumed: the skip wrote its own breadcrumb. Count it against
+            // the cascade budget and return to the faulting thread.
+            g_workerFaults.fetch_add(1, std::memory_order_relaxed);
+            return;
         } else {
             g_workerFaults.fetch_add(1, std::memory_order_relaxed);
             char mark[256];
