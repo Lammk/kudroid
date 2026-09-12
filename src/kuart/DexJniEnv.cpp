@@ -403,20 +403,14 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
     const auto native_start = std::chrono::steady_clock::now();
     KLOGJNI("KuARTNative", "enter class=%s method=%s sig=%s args=%zu vm_depth=%d",
             owner, method_name, method_sig, num_args, VmLockDepth());
-    // Hot-path filter: the FMOD mixer ticks and every JNIBridge dispatch run
-    // at kHz rates, and each call emits 6 persistent breadcrumbs
-    // (enter/exit + 4 stages). Gate all 6 behind KUDROID_TRACE_HOT; the
-    // RAM-only call telemetry (native_call_enter/exit depth accounting the
-    // watchdog reads) stays on for every call.
-    const bool hot_call =
-        (std::strcmp(owner, "Lorg/fmod/FMODAudioDevice;") == 0 ||
-         is_jnibridge_invoke) &&
-        !log::trace_hot();
+    // Full breadcrumbs for every call including hot paths (FMOD ticks,
+    // JNIBridge dispatch): debugging needs the complete enter/stage/exit
+    // flow, and the fd-cached writer keeps per-line cost to one write().
+    // (A KUDROID_TRACE_HOT gate used to slim these; reverted — blind
+    // breadcrumbs cost more debugging time than they save in I/O.)
     char breadcrumb[2048];
     breadcrumb[0] = '\0';
-    if (!hot_call) {
-        // query_system_memory is sysctls per call: skip it with the breadcrumb
-        // it feeds on hot paths.
+    {
         const SystemMemory memory_before = query_system_memory();
         std::snprintf(breadcrumb, sizeof(breadcrumb),
                       "native-enter class=%s method=%s sig=%s args=%zu vm_depth=%d footprint=%llu process_headroom=%llu available=%llu low_memory=%d",
@@ -559,18 +553,18 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
     uint64_t ret;
     {
         // Run native with VM lock released so blocking calls and callbacks work.
-        if (!hot_call) native_call_stage("before-vm-release");
+        native_call_stage("before-vm-release");
         VmLockRelease unlocked;
-        if (!hot_call) native_call_stage("before-trampoline");
+        native_call_stage("before-trampoline");
         ret = kudroid_jni_call(method->native_fn, gp, ngp, fp, nfp, &fp_ret);
-        if (!hot_call) native_call_stage("after-trampoline");
+        native_call_stage("after-trampoline");
     }
 
     const auto native_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - native_start).count();
     KLOGJNI("KuARTNative", "exit class=%s method=%s sig=%s duration_ms=%lld vm_depth=%d",
             owner, method_name, method_sig, static_cast<long long>(native_ms), VmLockDepth());
-    if (!hot_call) {
+    {
         const SystemMemory memory_after = query_system_memory();
         std::snprintf(breadcrumb, sizeof(breadcrumb),
                       "native-exit class=%s method=%s sig=%s duration_ms=%lld vm_depth=%d footprint=%llu process_headroom=%llu available=%llu low_memory=%d",
