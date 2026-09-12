@@ -4,6 +4,7 @@
 #include <dirent.h>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -42,6 +43,11 @@ private:
     // Does the work initialize() guards. Called with initMutex_ held.
     bool initializeLocked();
 
+    // OBB fallback: guest path /sdcard/Android/obb/<pkg>/<file> whose mapped
+    // host file is absent. Scans data/app/<pkg>/ then any staged .obb
+    // carrying the package name. Empty when nothing matches (cached).
+    [[nodiscard]] std::string resolveObbFallback(const std::string& mapped) const;
+
     std::string documentsDirectory_;
     std::string androidRoot_;
     std::string packageName_;
@@ -49,6 +55,15 @@ private:
     mutable std::mutex initMutex_;
     bool initialized_ = false;
     bool initResult_ = false;
+
+    // OBB fallback cache: guest OBB path -> resolved host path. Filled on
+    // first miss so the directory scans below run once per install, not once
+    // per open. Mutex-guarded; remap() is const and re-entrant across guest
+    // threads.
+    mutable std::mutex obbMutex_;
+    mutable std::unordered_map<std::string, std::string> obbResolved_;
+    mutable bool obbScanned_ = false;
+    mutable std::vector<std::string> obbFiles_;  // host paths of known .obb files
 };
 
 int vfs_open(const char* path, int flags, mode_t mode = 0);

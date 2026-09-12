@@ -1,4 +1,5 @@
 #include "kudroid/KuArtRuntime.h"
+#include "kudroid/kudroid_bridge.h"
 
 #include <algorithm>
 #include <cstdarg>
@@ -572,6 +573,10 @@ extern "C" int kuart_launch_app(const char* package_name, const char* component_
         component_factory != nullptr ? component_factory : "",
         app_class != nullptr ? app_class : "", activity_name,
         total - kHeader - 1);
+    // This thread is the guest UI thread for fault isolation: input dispatch,
+    // activity lifecycle and player callbacks all run here, so a fault on it
+    // is app-fatal while a worker fault is not.
+    kudroid_note_guest_ui_thread();
     const DexValue arg = DexValue::Ref(args_array);
     const int ok = CallActivityThreadStatic("main", "([Ljava/lang/String;)V", &arg, 1) ? 1 : 0;
     kudroid::native_phase("activity-thread-main-exit");

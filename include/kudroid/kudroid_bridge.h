@@ -74,6 +74,16 @@ void kudroid_unbind_metal_layer(void);
 void kudroid_note_java_paused(void);
 unsigned long long kudroid_paused_generation(void);
 
+/// Thread-role registry for fault isolation. The crash handler treats a fault
+/// on the guest UI thread (runs ActivityThread.main), on a render thread
+/// (presents via eglSwapBuffers), or on the host main thread as app-fatal. A
+/// fault anywhere else parks that worker with a warning breadcrumb instead of
+/// stopping the app — engines keep rendering on surviving threads, and the
+/// first fault already wrote the full crash report. A second fault anywhere
+/// is fatal: cascading workers mean the process is going down regardless.
+void kudroid_note_guest_ui_thread(void);
+void kudroid_note_render_thread(void);
+
 ///run vfs and i/o redirection autotest; returns a malloc log.
 const char* kudroid_vfs_self_test_log(void);
 const char* kudroid_vfs_extended_test_log(void);

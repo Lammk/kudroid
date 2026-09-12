@@ -255,8 +255,42 @@ extern "C" const char* kudroid_build_stamp(void);
 
 // Gentle crash variables:
 static std::atomic<bool> g_hasCrashed{false};
+static unsigned long long currentThreadIdForCrash(void);
 static char g_lastCrashTail[16384] = {0};
 static pthread_t g_mainThread = 0;
+
+// Fault-isolation registry (see kudroid_bridge.h): numeric tids, plain atomic
+// loads in the signal handler, stores only from normal context.
+static std::atomic<unsigned long long> g_guestUiThread{0};
+static std::atomic<unsigned long long> g_renderThreads[4] = {};
+static std::atomic<int> g_workerFaults{0};
+
+extern "C" void kudroid_note_guest_ui_thread(void) {
+    g_guestUiThread.store(currentThreadIdForCrash(), std::memory_order_relaxed);
+}
+
+extern "C" void kudroid_note_render_thread(void) {
+    const unsigned long long tid = currentThreadIdForCrash();
+    for (auto& slot : g_renderThreads) {
+        if (slot.load(std::memory_order_relaxed) == tid) return;
+    }
+    for (auto& slot : g_renderThreads) {
+        unsigned long long empty = 0;
+        if (slot.compare_exchange_strong(empty, tid, std::memory_order_relaxed)) return;
+    }
+}
+
+// True when a fault on `tid` must stop the app: host main, guest UI, or any
+// render thread — or any second fault, which means cascading failure.
+static bool kudroid_fault_is_fatal(unsigned long long tid, bool isHostMain) {
+    if (isHostMain) return true;
+    if (tid != 0 && tid == g_guestUiThread.load(std::memory_order_relaxed)) return true;
+    for (auto& slot : g_renderThreads) {
+        if (tid != 0 && tid == slot.load(std::memory_order_relaxed)) return true;
+    }
+    if (g_workerFaults.load(std::memory_order_relaxed) > 0) return true;
+    return false;
+}
 
 static void extractLastLines(const char* src, size_t srcLen, char* dst, size_t dstCap, int maxLines = 30) {
     if (!src || srcLen == 0 || dstCap == 0) {
@@ -1340,7 +1374,33 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
     }
 
     // Mark crashed state and keep the last 30 log lines for the Swift warning.
-    g_hasCrashed.store(true);
+    //
+    // Fault isolation: a worker fault parks that thread with a warning instead
+    // of stopping the app, but ONLY when the fault is not app-fatal (see
+    // kudroid_fault_is_fatal). The full crash report above was already
+    // written unconditionally — isolation skips the shutdown, never the
+    // diagnosis.
+    {
+#if defined(__APPLE__)
+        const bool isHostMain = pthread_main_np() != 0;
+#else
+        const bool isHostMain =
+            g_mainThread != 0 && pthread_equal(pthread_self(), g_mainThread);
+#endif
+        const unsigned long long tid = currentThreadIdForCrash();
+        if (kudroid_fault_is_fatal(tid, isHostMain)) {
+            g_hasCrashed.store(true);
+        } else {
+            g_workerFaults.fetch_add(1, std::memory_order_relaxed);
+            char mark[256];
+            const int n = snprintf(
+                mark, sizeof(mark),
+                "worker-fault-isolated signo=%d thread_id=%llu "
+                "faults_so_far=%d (parked; app continues)",
+                sig, tid, g_workerFaults.load(std::memory_order_relaxed));
+            if (n > 0) kudroid_persistent_breadcrumb(mark);
+        }
+    }
     
     // Collect the last 30 log lines.
     extractLastLines(g_crashBuf, (size_t)g_crashLen, g_lastCrashTail, sizeof(g_lastCrashTail), 30);

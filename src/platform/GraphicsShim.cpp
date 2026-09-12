@@ -1,4 +1,5 @@
 #include "kudroid/platform/GraphicsShim.h"
+#include "kudroid/kudroid_bridge.h"
 #include "kudroid/platform/BundledFramework.h"
 #include "kudroid/platform/FramePacer.h"
 #include "kudroid/Log.h"
@@ -1623,6 +1624,10 @@ extern "C" EGLDisplay bionic_eglGetCurrentDisplay(void) {
 extern "C" EGLBoolean bionic_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     auto f = eglFn<EGLBoolean(EGLDisplay, EGLSurface)>("eglSwapBuffers");
     if (!f) { EGL_FORWARD_ERR("eglSwapBuffers", ""); return EGL_FALSE; }
+    // The presenting thread is a render thread for fault isolation: losing it
+    // loses the picture, so a fault on it is app-fatal. Cheap: one atomic
+    // load per present once the small set is full.
+    kudroid_note_render_thread();
 #if defined(__APPLE__)
     if (tls_autorelease_pool) {
         objc_autoreleasePoolPop(tls_autorelease_pool);

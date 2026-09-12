@@ -1050,6 +1050,82 @@ std::string extract_jar_entry_to_cache(const std::string& archivePath,
     return dest;
 }
 
+// OBB fallback resolution (see remap()). Separated for testability: takes
+// the already-mapped host path, returns the fallback host path or empty.
+std::string VFSPathRemapper::resolveObbFallback(const std::string& mapped) const {
+    {
+        std::lock_guard<std::mutex> lock(obbMutex_);
+        const auto hit = obbResolved_.find(mapped);
+        if (hit != obbResolved_.end()) return hit->second;
+    }
+    std::string found;
+    std::error_code ec;
+    // Guest path shape: <root>/sdcard/Android/obb/<pkg>/<file>.obb
+    const std::string kObb = "/sdcard/Android/obb/";
+    const size_t at = mapped.find(kObb);
+    std::string pkg, file;
+    if (at != std::string::npos) {
+        const std::string rest = mapped.substr(at + kObb.size());
+        const size_t slash = rest.find('/');
+        if (slash != std::string::npos) {
+            pkg = rest.substr(0, slash);
+            file = rest.substr(slash + 1);
+        }
+    }
+    if (!pkg.empty() && !file.empty()) {
+        // 1. Same-package app dir: sideloads stage the .obb next to the APK.
+        const std::string cand = androidRoot_ + "/data/app/" + pkg + "/" + file;
+        if (std::filesystem::exists(cand, ec) &&
+            std::filesystem::is_regular_file(cand, ec)) {
+            found = cand;
+        }
+    }
+    if (found.empty() && !pkg.empty()) {
+        // 2. One scan per install: any .obb whose path carries the package
+        // name (extractor staging, user copies). Cached in obbFiles_.
+        std::lock_guard<std::mutex> lock(obbMutex_);
+        if (!obbScanned_) {
+            obbScanned_ = true;
+            const std::string roots[] = {androidRoot_ + "/sdcard",
+                                         androidRoot_ + "/data/app"};
+            for (const auto& root : roots) {
+                if (!std::filesystem::exists(root, ec)) continue;
+                for (auto it = std::filesystem::recursive_directory_iterator(
+                         root, std::filesystem::directory_options::skip_permission_denied, ec);
+                     it != std::filesystem::recursive_directory_iterator(); ++it) {
+                    if (!it->is_regular_file(ec)) continue;
+                    const std::string p = it->path().string();
+                    if (p.size() >= 4 &&
+                        (p.compare(p.size() - 4, 4, ".obb") == 0 ||
+                         p.compare(p.size() - 4, 4, ".OBB") == 0)) {
+                        obbFiles_.push_back(p);
+                    }
+                }
+            }
+        }
+        for (const auto& p : obbFiles_) {
+            if (p.find(pkg) != std::string::npos) {
+                found = p;
+                break;
+            }
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(obbMutex_);
+        obbResolved_[mapped] = found;  // empty = known miss, do not rescan
+    }
+    if (!found.empty()) {
+        static std::atomic<int> s_obbFb{0};
+        if (s_obbFb.load() < 10) {
+            ++s_obbFb;
+            std::fprintf(stderr, "[KuDroidVFS] obb fallback: %s -> %s\n",
+                         mapped.c_str(), found.c_str());
+        }
+        vfsTrace("OBB fallback: " + mapped + " -> " + found);
+    }
+    return found;
+}
+
 std::string VFSPathRemapper::remap(const char* originalPath) const {
     if (!originalPath) return {};
 
@@ -1227,6 +1303,22 @@ std::string VFSPathRemapper::remap(const char* originalPath) const {
     }
 
     std::string mapped = androidRoot_ + "/" + std::string(rootName) + remainder;
+    // OBB fallback: /sdcard/Android/obb/<pkg>/<file>.obb often is not where
+    // the installer put it. Sideloaded installs leave the .obb next to the
+    // APK under data/app/<pkg>/, or anywhere the extractor staged it; the
+    // guest only ever looks in exactly one place and reports a GUID miss
+    // otherwise (Unity: "Unable to load GUID ... main.1.<pkg>.obb", then
+    // every streamed bank/clip downstream fails). Resolve once per install:
+    // same-directory data/app scan first, then any known .obb whose package
+    // segment matches, cached so the scans never repeat per open.
+    if (rootName == "sdcard" &&
+        remainder.compare(0, 13, "/Android/obb/") == 0) {
+        std::error_code ec;
+        if (!std::filesystem::exists(mapped, ec)) {
+            const std::string resolved = resolveObbFallback(mapped);
+            if (!resolved.empty()) return resolved;
+        }
+    }
     vfsTrace("Remapped: " + std::string(original) + " -> " + mapped);
     return mapped;
 }

@@ -61,6 +61,50 @@ bool isInside(const std::string& path, const std::string& root) {
     return normalized.size() == root.size() || normalized[root.size()] == '/';
 }
 
+void TestObbFallback(kudroid::VFSPathRemapper& remapper, const std::string& root) {
+    std::printf("-- obb fallback --\n");
+    // NOTE: resolution is cached once per install (missing stays missing), so
+    // each case below uses its own package — a miss cached for one package
+    // must not shadow another.
+    auto guestFor = [](const std::string& pkg) {
+        return "/sdcard/Android/obb/" + pkg + "/main.1." + pkg + ".obb";
+    };
+
+    // Case 1: nothing staged anywhere — the canonical path passes through
+    // (ENOENT downstream), never a fabricated location.
+    {
+        const std::string pkg = "com.test.obbfb.miss";
+        const std::string canon = root + "/sdcard/Android/obb/" + pkg + "/main.1." + pkg + ".obb";
+        Check(remapper.remap(guestFor(pkg).c_str()) == canon, "absent obb passes through");
+    }
+
+    // Case 2: .obb staged next to the APK in data/app/<pkg>/ — the sideload
+    // shape. The guest path must resolve to the staged file.
+    const std::string pkg = "com.test.obbfb";
+    const std::string obbName = "main.1.com.test.obbfb.obb";
+    const std::string guest = guestFor(pkg);
+    const std::filesystem::path appDir =
+        std::filesystem::path(root) / "data" / "app" / pkg;
+    std::filesystem::create_directories(appDir);
+    {
+        std::ofstream out(appDir / obbName, std::ios::binary);
+        out.write("OBB!", 4);
+    }
+    const std::string staged = (appDir / obbName).string();
+    Check(remapper.remap(guest.c_str()) == staged, "obb found beside the APK");
+
+    // Case 3: cached — removing the file must not change the answer (the
+    // resolution ran once per install, not per open).
+    std::filesystem::remove(appDir / obbName);
+    Check(remapper.remap(guest.c_str()) == staged, "obb resolution is cached");
+
+    // Case 4: a different package's obb must not leak across packages.
+    const std::string other =
+        remapper.remap("/sdcard/Android/obb/com.other.pkg/main.1.com.other.pkg.obb");
+    Check(other == root + "/sdcard/Android/obb/com.other.pkg/main.1.com.other.pkg.obb",
+          "other packages still miss");
+}
+
 void TestContainment(kudroid::VFSPathRemapper& remapper, const std::string& root) {
     std::printf("-- containment --\n");
 
@@ -572,6 +616,7 @@ int main() {
     TestContainment(remapper, root);
     TestInitializeOnce(remapper);
     TestPseudoFiles(remapper);
+    TestObbFallback(remapper, root);
     TestProcIdentity(remapper);
     TestFileIo();
     TestUrlRemapping(remapper, root);

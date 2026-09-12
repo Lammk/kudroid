@@ -1982,6 +1982,10 @@ class NativeMetalView: UIView {
     // Last drawable size reported to the guest. layoutSubviews fires on rotation;
     // without forwarding, the guest renders forever into the launch geometry.
     private var lastReportedSize: CGSize = .zero
+    // Guest orientation at the last forward. Rotation can arrive with identical
+    // bounds (scale-only change, or a rotate-then-rotate-back between layouts);
+    // the guest still needs the forward because its orientation value changed.
+    private var lastReportedOrientation: Int32 = -1
 
     override func layoutSubviews() {
         super.layoutSubviews()
@@ -1991,8 +1995,11 @@ class NativeMetalView: UIView {
         if sz.width > 0 && sz.height > 0 && metalLayer.drawableSize != sz {
             metalLayer.drawableSize = sz
         }
-        if sz.width > 0 && sz.height > 0 && sz != lastReportedSize {
+        let reqOri = kudroid_get_requested_orientation()
+        if sz.width > 0 && sz.height > 0 &&
+            (sz != lastReportedSize || reqOri != lastReportedOrientation) {
             lastReportedSize = sz
+            lastReportedOrientation = reqOri
             let unmanaged = Unmanaged.passUnretained(metalLayer)
             kudroid_set_metal_layer(unmanaged.toOpaque(), Int32(sz.width),
                                     Int32(sz.height), Float(scale))
