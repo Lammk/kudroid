@@ -244,7 +244,7 @@ jboolean JNICALL ExceptionCheck(JNIEnv* env) {
     DexJniEnv* self = Self(env);
     const jboolean r =
         (self != nullptr && self->pending_exception() != nullptr) ? JNI_TRUE : JNI_FALSE;
-    if (JnibridgeTraceActive()) {
+    if (r != JNI_FALSE && JnibridgeTraceActive()) {
         std::fprintf(stderr, "[KuART][JNIBRIDGE] ExceptionCheck -> %d\n", r);
     }
     return r;

@@ -1600,25 +1600,19 @@ extern "C" EGLBoolean bionic_eglMakeCurrent(EGLDisplay dpy, EGLSurface draw,
 extern "C" EGLContext bionic_eglGetCurrentContext(void) {
     auto f = eglFn<EGLContext(void)>("eglGetCurrentContext");
     if (!f) { EGL_FORWARD_ERR("eglGetCurrentContext", ""); return EGL_NO_CONTEXT; }
-    EGLContext c = f();
-    gpuLog("eglGetCurrentContext -> %p", (void*)c);
-    return c;
+    return f();
 }
 
 extern "C" EGLSurface bionic_eglGetCurrentSurface(EGLint readdraw) {
     auto f = eglFn<EGLSurface(EGLint)>("eglGetCurrentSurface");
     if (!f) { EGL_FORWARD_ERR("eglGetCurrentSurface", ""); return EGL_NO_SURFACE; }
-    EGLSurface s = f(readdraw);
-    gpuLog("eglGetCurrentSurface(0x%x) -> %p", (unsigned)readdraw, (void*)s);
-    return s;
+    return f(readdraw);
 }
 
 extern "C" EGLDisplay bionic_eglGetCurrentDisplay(void) {
     auto f = eglFn<EGLDisplay(void)>("eglGetCurrentDisplay");
     if (!f) { EGL_FORWARD_ERR("eglGetCurrentDisplay", ""); return EGL_NO_DISPLAY; }
-    EGLDisplay d = f();
-    gpuLog("eglGetCurrentDisplay -> %p", (void*)d);
-    return d;
+    return f();
 }
 
 extern "C" EGLBoolean bionic_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
@@ -1635,7 +1629,6 @@ extern "C" EGLBoolean bionic_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) 
     }
     tls_autorelease_pool = objc_autoreleasePoolPush();
 #endif
-    gpuLog("eglSwapBuffers: calling ANGLE...");
     const uint64_t swapT0 = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch())
@@ -2024,7 +2017,6 @@ extern "C" void bionic_glBindBuffer(unsigned int target, unsigned int buffer) {
     typedef void (*PFN)(unsigned int, unsigned int);
     auto f = (PFN)get_gl_func("glBindBuffer");
     if (!f) { EGL_FORWARD_ERR("glBindBuffer", ""); return; }
-    gpuLog("glBindBuffer(target=0x%x buf=%u)", target, buffer);
     f(target, buffer);
 }
 

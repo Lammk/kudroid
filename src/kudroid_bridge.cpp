@@ -124,24 +124,23 @@ const char* g_kudroid_log_dir_ptr = g_logDir;
 // toward the kill it existed to explain.
 extern "C" void kudroid_persistent_breadcrumb(const char* line) {
     if (!line || !g_logDir[0]) return;
-    // One warm file descriptor instead of open/write/close per line: at
-    // ~300 breadcrumbs/sec the per-line open+close dominated I/O time and
-    // serialized every thread through the filesystem. O_APPEND keeps each
-    // single write() atomic across threads, so no lock is needed; the fd is
-    // opened lazily (first call happens on a normal thread during startup,
-    // never inside a signal handler) and a failed open falls back to the
-    // old per-line behavior rather than dropping the line.
-    static int s_fd = -2;  // -2 = not tried yet
-    static char s_fdDir[sizeof(g_logDir)] = {0};
-    if (s_fd == -2 || std::strcmp(s_fdDir, g_logDir) != 0) {
-        if (s_fd >= 0) ::close(s_fd);
-        std::snprintf(s_fdDir, sizeof(s_fdDir), "%s", g_logDir);
+    static std::atomic<int> s_fd{-2};
+    int fd = s_fd.load(std::memory_order_relaxed);
+    if (fd == -2) {
         char path[sizeof(g_logDir) + 32];
         const int n = snprintf(path, sizeof(path), "%s/native_breadcrumbs.log", g_logDir);
         if (n > 0 && static_cast<size_t>(n) < sizeof(path)) {
-            s_fd = ::open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+            int opened = ::open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+            int expected = -2;
+            if (s_fd.compare_exchange_strong(expected, opened, std::memory_order_acq_rel)) {
+                fd = opened;
+            } else {
+                if (opened >= 0) ::close(opened);
+                fd = s_fd.load(std::memory_order_acquire);
+            }
         } else {
-            s_fd = -1;
+            s_fd.store(-1, std::memory_order_relaxed);
+            fd = -1;
         }
     }
     struct timespec now;
@@ -153,19 +152,17 @@ extern "C" void kudroid_persistent_breadcrumb(const char* line) {
     if (record_len <= 0) return;
     const size_t len = static_cast<size_t>(record_len) < sizeof(record)
                            ? static_cast<size_t>(record_len) : sizeof(record) - 1;
-    if (s_fd >= 0) {
-        // One write of one line to an O_APPEND fd: the record cannot interleave with a
-        // record from another thread, so no lock is needed.
-        (void)::write(s_fd, record, len);
+    if (fd >= 0) {
+        (void)::write(fd, record, len);
         return;
     }
     char path[sizeof(g_logDir) + 32];
     const int n = snprintf(path, sizeof(path), "%s/native_breadcrumbs.log", g_logDir);
     if (n <= 0 || static_cast<size_t>(n) >= sizeof(path)) return;
-    const int fd = ::open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
-    if (fd < 0) return;
-    (void)::write(fd, record, len);
-    (void)::close(fd);
+    const int fallback_fd = ::open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fallback_fd < 0) return;
+    (void)::write(fallback_fd, record, len);
+    (void)::close(fallback_fd);
 }
 
 // Previously 16KB was too small: ELF loading and verbose lines filled the

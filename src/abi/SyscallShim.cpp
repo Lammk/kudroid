@@ -230,9 +230,23 @@ int logAndroidMessage(int priority, const char* tag, const std::string& message)
         full += message;
         trace_shim(full.c_str());
     }
+
+    char time_buf[32] = {0};
+    struct timespec ts;
+    if (::clock_gettime(CLOCK_REALTIME, &ts) == 0) {
+        struct tm tm_buf;
+        localtime_r(&ts.tv_sec, &tm_buf);
+        int ms = static_cast<int>(ts.tv_nsec / 1000000);
+        snprintf(time_buf, sizeof(time_buf), "%02d:%02d:%02d.%03d",
+                 tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec, ms);
+    }
     
     // Dump to standard output (Xcode/syslog)
-    fprintf(stdout, "[AndroidLog][%s]: %s\n", tag ? tag : "unknown", message.c_str());
+    if (time_buf[0]) {
+        fprintf(stdout, "[%s] [AndroidLog][%s]: %s\n", time_buf, tag ? tag : "unknown", message.c_str());
+    } else {
+        fprintf(stdout, "[AndroidLog][%s]: %s\n", tag ? tag : "unknown", message.c_str());
+    }
     
     // Broadcast via KDB WebSocket if connected
 #if defined(__APPLE__)
@@ -243,12 +257,25 @@ int logAndroidMessage(int priority, const char* tag, const std::string& message)
 
     // Also append to a file in Documents for the user to easily read
     if (::g_kudroid_log_dir_ptr && ::g_kudroid_log_dir_ptr[0] != '\0') {
-        char log_path[1024];
-        snprintf(log_path, sizeof(log_path), "%s/kudroid_android_logs.txt", ::g_kudroid_log_dir_ptr);
-        FILE* fp = fopen(log_path, "a");
-        if (fp) {
-            fprintf(fp, "[%s] %s\n", tag ? tag : "unknown", message.c_str());
-            fclose(fp);
+        static FILE* s_android_log_fp = nullptr;
+        static char s_last_log_dir[1024] = {0};
+        if (s_android_log_fp == nullptr || std::strcmp(s_last_log_dir, ::g_kudroid_log_dir_ptr) != 0) {
+            if (s_android_log_fp) {
+                fclose(s_android_log_fp);
+                s_android_log_fp = nullptr;
+            }
+            snprintf(s_last_log_dir, sizeof(s_last_log_dir), "%s", ::g_kudroid_log_dir_ptr);
+            char log_path[1024];
+            snprintf(log_path, sizeof(log_path), "%s/kudroid_android_logs.txt", ::g_kudroid_log_dir_ptr);
+            s_android_log_fp = fopen(log_path, "a");
+        }
+        if (s_android_log_fp) {
+            if (time_buf[0]) {
+                fprintf(s_android_log_fp, "[%s] [%s] %s\n", time_buf, tag ? tag : "unknown", message.c_str());
+            } else {
+                fprintf(s_android_log_fp, "[%s] %s\n", tag ? tag : "unknown", message.c_str());
+            }
+            fflush(s_android_log_fp);
         }
     }
 
@@ -256,6 +283,7 @@ int logAndroidMessage(int priority, const char* tag, const std::string& message)
     // Provide diagnostic log buffer up to crash event.
     {
         std::string full;
+        if (time_buf[0]) { full += '['; full += time_buf; full += "] "; }
         if (tag) { full += '['; full += tag; full += "] "; }
         full += message;
         full += '\n';

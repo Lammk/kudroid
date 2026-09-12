@@ -161,7 +161,9 @@ DexJniEnv* DexJniEnv::FromEnv(JNIEnv* env) {
 
 thread_local bool t_jnibridge_trace = false;
 
-bool JnibridgeTraceActive() { return t_jnibridge_trace; }
+bool JnibridgeTraceActive() {
+    return t_jnibridge_trace && (log::trace_hot() || log::jni_enabled());
+}
 
 // RAII guard: restores the previous state so a nested native call (a Java callback
 // made inside invoke calling back out to another native) cannot leak the flag.
