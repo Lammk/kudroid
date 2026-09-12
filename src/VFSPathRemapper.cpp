@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <map>
 #include <mutex>
+#include <shared_mutex>
 #include <functional>
 #include <string_view>
 #include <unordered_map>
@@ -108,24 +109,32 @@ static int translate_linux_open_flags(int flags) {
 // Direct-mapped memo for normalizePathString: bounded to 512 entries, no eviction
 // policy. The guest re-normalizes the same long paths thousands of times on one cold
 // start (shader cache, per-asset remaps) and the split/join dominates that cost.
+// Sharded 16-way: every remap (every open/stat, every guest thread) hits this,
+// and one global mutex would serialize all guest I/O threads on each other.
 struct NormalizeMemoSlot {
     std::string input;
     std::string output;
 };
-struct NormalizeMemo {
+struct NormalizeMemoShard {
     std::mutex mtx;
-    static constexpr size_t kSlots = 512;
+    static constexpr size_t kSlots = 32;
     NormalizeMemoSlot slots[kSlots];
+};
+struct NormalizeMemo {
+    static constexpr size_t kShards = 16;
+    NormalizeMemoShard shards[kShards];
 };
 
 std::string normalizePathString(std::string_view path) {
     static NormalizeMemo memo;
-    const size_t idx = std::hash<std::string_view>{}(path) % NormalizeMemo::kSlots;
+    const size_t h = std::hash<std::string_view>{}(path);
+    NormalizeMemoShard& shard = memo.shards[h % NormalizeMemo::kShards];
+    const size_t idx = (h / NormalizeMemo::kShards) % NormalizeMemoShard::kSlots;
     {
-        std::lock_guard<std::mutex> lock(memo.mtx);
-        const std::string& in = memo.slots[idx].input;
+        std::lock_guard<std::mutex> lock(shard.mtx);
+        const std::string& in = shard.slots[idx].input;
         if (in.size() == path.size() && std::memcmp(in.data(), path.data(), path.size()) == 0) {
-            return memo.slots[idx].output;
+            return shard.slots[idx].output;
         }
     }
 
@@ -160,9 +169,9 @@ std::string normalizePathString(std::string_view path) {
     }
 
     {
-        std::lock_guard<std::mutex> lock(memo.mtx);
-        memo.slots[idx].input.assign(path);
-        memo.slots[idx].output = result;
+        std::lock_guard<std::mutex> lock(shard.mtx);
+        shard.slots[idx].input.assign(path);
+        shard.slots[idx].output = result;
     }
     return result;
 }
@@ -963,13 +972,20 @@ ZipArchiveIndex build_zip_index(std::FILE* f) {
 
 // Build once per archive, guarded; a failed build is cached as an empty index so a
 // broken file is re-probed at stat rate, not re-parsed at stat rate.
+// Read-mostly: shared_mutex lets concurrent statters proceed in parallel; only
+// the one-time build per archive takes the write lock.
 const ZipArchiveIndex* get_or_build_zip_index(const std::string& archivePath) {
     struct Cache {
-        std::mutex mtx;
+        std::shared_mutex mtx;
         std::unordered_map<std::string, ZipArchiveIndex> byArchive;
     };
     static Cache cache;
-    std::lock_guard<std::mutex> lock(cache.mtx);
+    {
+        std::shared_lock<std::shared_mutex> lock(cache.mtx);
+        const auto it = cache.byArchive.find(archivePath);
+        if (it != cache.byArchive.end()) return &it->second;
+    }
+    std::unique_lock<std::shared_mutex> lock(cache.mtx);
     auto [it, inserted] = cache.byArchive.try_emplace(archivePath);
     if (inserted) {
         std::FILE* f = std::fopen(archivePath.c_str(), "rb");
@@ -1489,14 +1505,76 @@ static bool is_apk_stream(FILE* f) {
 }
 
 // Read volume per FILE path: bulk flow through fread (Unity's main read path)
-// shows here. Open/close are rare, reads are hot: path recorded under lock at
-// open, lock-free map read per fread would still serialize — a single mutex is
-// fine (uncontended ~20ns vs microsecond reads).
+// shows here. The hot read path takes NO lock: each thread batches into a
+// thread-local slot keyed by stream, merged under the mutex at 256KB or on
+// stream change. A global fclose epoch guards FILE* address reuse — without
+// it a recycled address would silently attribute bytes to the dead file's
+// path. Open/close stay locked (rare); only the merge path locks.
 std::mutex g_freadVolMtx;
 std::map<FILE*, std::string> g_freadPaths;
 std::map<std::string, std::pair<uint64_t, uint64_t>> g_freadVol;
-uint64_t g_freadVolTotal = 0;
+std::atomic<uint64_t> g_freadVolTotal{0};
 uint64_t g_freadVolNextLog = 5ULL * 1024 * 1024;
+std::atomic<uint64_t> g_freadEpoch{0};
+
+namespace {
+// Merged under g_freadVolMtx. Copies the map for the top-5 sort OUTSIDE the
+// lock: sorting under it stalled every reader each 5MB.
+void fread_vol_report_locked() {
+    using Entry = std::pair<std::string, std::pair<uint64_t, uint64_t>>;
+    std::vector<Entry> top(g_freadVol.begin(), g_freadVol.end());
+    std::string total = std::to_string(g_freadVolTotal.load(std::memory_order_relaxed)) + "B";
+    {
+        std::lock_guard<std::mutex> lock(g_freadVolMtx);
+        top.assign(g_freadVol.begin(), g_freadVol.end());
+        total = std::to_string(g_freadVolTotal.load(std::memory_order_relaxed)) + "B";
+    }
+    std::sort(top.begin(), top.end(),
+              [](const Entry& a, const Entry& b) { return a.second.first > b.second.first; });
+    std::string line = "fread total=" + total;
+    for (size_t i = 0; i < top.size() && i < 5; ++i) {
+        const std::string& p = top[i].first;
+        line += " | " + (p.size() > 60 ? "..." + p.substr(p.size() - 57) : p) +
+                "=" + std::to_string(top[i].second.first) + "B/" +
+                std::to_string(top[i].second.second) + "ops";
+    }
+    std::fprintf(stderr, "[KuDroidIO] %s\n", line.c_str());
+}
+
+struct VolBatch {
+    FILE* stream = nullptr;
+    std::string path;
+    uint64_t epoch = 0;
+    uint64_t bytes = 0;
+    uint64_t ops = 0;
+};
+thread_local VolBatch t_volbatch;
+
+void fread_vol_flush() {
+    if (t_volbatch.bytes == 0 || t_volbatch.path.empty()) {
+        t_volbatch.bytes = 0;
+        t_volbatch.ops = 0;
+        return;
+    }
+    bool report = false;
+    {
+        std::lock_guard<std::mutex> lock(g_freadVolMtx);
+        auto& e = g_freadVol[t_volbatch.path];
+        e.first += t_volbatch.bytes;
+        e.second += t_volbatch.ops;
+        const uint64_t total =
+            g_freadVolTotal.fetch_add(t_volbatch.bytes, std::memory_order_relaxed) +
+            t_volbatch.bytes;
+        if (total >= g_freadVolNextLog) {
+            g_freadVolNextLog += 5ULL * 1024 * 1024;
+            report = true;
+        }
+    }
+    t_volbatch.bytes = 0;
+    t_volbatch.ops = 0;
+    if (report) fread_vol_report_locked();
+}
+}  // namespace
 
 size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
     const size_t n = std::fread(buf, size, count, stream);
@@ -1546,30 +1624,21 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
         }
     }
     if (n > 0) {
-        std::lock_guard<std::mutex> lock(g_freadVolMtx);
-        auto it = g_freadPaths.find(stream);
-        if (it != g_freadPaths.end()) {
-            auto& e = g_freadVol[it->second];
-            e.first += n * size;
-            e.second += 1;
-            g_freadVolTotal += n * size;
-            if (g_freadVolTotal >= g_freadVolNextLog) {
-                g_freadVolNextLog += 5ULL * 1024 * 1024;
-                using Entry = std::pair<std::string, std::pair<uint64_t, uint64_t>>;
-                std::vector<Entry> top(g_freadVol.begin(), g_freadVol.end());
-                std::sort(top.begin(), top.end(), [](const Entry& a, const Entry& b) {
-                    return a.second.first > b.second.first;
-                });
-                std::string line =
-                    "fread total=" + std::to_string(g_freadVolTotal) + "B";
-                for (size_t i = 0; i < top.size() && i < 5; ++i) {
-                    const std::string& p = top[i].first;
-                    line += " | " + (p.size() > 60 ? "..." + p.substr(p.size() - 57) : p) +
-                            "=" + std::to_string(top[i].second.first) + "B/" +
-                            std::to_string(top[i].second.second) + "ops";
-                }
-                std::fprintf(stderr, "[KuDroidIO] %s\n", line.c_str());
-            }
+        // Lock-free volume accounting (see above): resolve the path only on
+        // stream change or fclose epoch bump, batch bytes/ops thread-locally.
+        const uint64_t ep = g_freadEpoch.load(std::memory_order_relaxed);
+        if (t_volbatch.stream != stream || t_volbatch.epoch != ep) {
+            fread_vol_flush();
+            t_volbatch.stream = stream;
+            t_volbatch.epoch = ep;
+            std::lock_guard<std::mutex> lock(g_freadVolMtx);
+            const auto it = g_freadPaths.find(stream);
+            t_volbatch.path = (it != g_freadPaths.end()) ? it->second : std::string();
+        }
+        if (!t_volbatch.path.empty()) {
+            t_volbatch.bytes += n * size;
+            ++t_volbatch.ops;
+            if (t_volbatch.bytes >= 256ULL * 1024) fread_vol_flush();
         }
     }
     if (n * size >= 1048576) {
@@ -1584,6 +1653,11 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
 
 int vfs_fclose(FILE* stream) {
     if (stream != nullptr) {
+        // Flush this thread's batch for the stream before the map entry goes
+        // away, then bump the epoch so other threads' stale FILE* caches
+        // re-resolve instead of attributing to a recycled address.
+        if (t_volbatch.stream == stream) fread_vol_flush();
+        g_freadEpoch.fetch_add(1, std::memory_order_relaxed);
         std::lock_guard<std::mutex> lock(g_apkStreamsMtx);
         for (int i = 0; i < kTrackedStreams; ++i) {
             if (g_apkStreams[i].load(std::memory_order_relaxed) ==
