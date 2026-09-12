@@ -37,38 +37,9 @@ public final class Looper {
         final Looper me = myLooper();
         if (me == null) throw new RuntimeException("No Looper; Looper.prepare() wasn't called on this thread.");
         final MessageQueue queue = me.mQueue;
-        // TEMP DIAGNOSTIC (ULTRAKILL main-quit): something called quit() on the
-        // main queue mid-run. Log every MAIN-looper dispatch so the message that
-        // precedes a KuLooperQuit names its poster. Main traffic is sparse;
-        // worker loopers (UnityMain ticks) are deliberately excluded.
-        final boolean traceDispatch = (me == getMainLooper());
         for (;;) {
             Message msg = queue.next();
             if (msg == null) return;
-            if (traceDispatch) {
-                String what;
-                if (msg.callback != null) {
-                    what = "callback=" + msg.callback.getClass().getName();
-                } else {
-                    what = "what=" + msg.what;
-                }
-                android.util.Log.e("KuDispatch", "main " + what
-                        + " target=" + msg.target.getClass().getName());
-            }
-            // TEMP DIAGNOSTIC (ULTRAKILL dead Runnable proxies): name the Handler that
-            // posts a proxy callback and the proxy's interfaces, so the stranded C++
-            // peer behind it can be traced to its subsystem. Remove once identified.
-            if (msg.callback != null
-                    && java.lang.reflect.Proxy.isProxyClass(msg.callback.getClass())) {
-                String ifaces = "";
-                Class<?>[] arr = msg.callback.getClass().getInterfaces();
-                for (int i = 0; i < arr.length; i++) {
-                    if (i > 0) ifaces += ",";
-                    ifaces += arr[i].getName();
-                }
-                android.util.Log.e("KuProxyPost", "target="
-                        + msg.target.getClass().getName() + " proxyIfaces=" + ifaces);
-            }
             msg.target.dispatchMessage(msg);
             msg.recycle();
         }

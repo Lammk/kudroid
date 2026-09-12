@@ -366,6 +366,17 @@ std::string DecimalRange(uint32_t count) {
 // KuDroid presents, not the individual core — but the processor count follows the device.
 // A guest that counts "processor" lines and a guest that reads sysconf must agree.
 std::string BuildCpuInfo(const CpuTopology& cpu) {
+    // Engines re-read /proc/cpuinfo per worker thread (790 reads in one boot).
+    // The content depends only on the topology numbers, so key the cache on
+    // those (not the object address — reset-for-test mutates it in place).
+    static std::mutex cpuInfoMtx;
+    static std::string cpuInfoCache;
+    static uint32_t cachedTotal = 0, cachedPerf = 0, cachedEff = 0;
+    std::lock_guard<std::mutex> lock(cpuInfoMtx);
+    if (!cpuInfoCache.empty() && cachedTotal == cpu.total_cores &&
+        cachedPerf == cpu.performance_cores && cachedEff == cpu.efficiency_cores) {
+        return cpuInfoCache;
+    }
     static const char kFeatures[] =
         "BogoMIPS\t: 38.40\n"
         "Features\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp "
@@ -388,6 +399,10 @@ std::string BuildCpuInfo(const CpuTopology& cpu) {
         out += "CPU revision\t: 0\n\n";
     }
     out += "Hardware\t: KuDroid arm64\n";
+    cpuInfoCache = out;
+    cachedTotal = cpu.total_cores;
+    cachedPerf = cpu.performance_cores;
+    cachedEff = cpu.efficiency_cores;
     return out;
 }
 

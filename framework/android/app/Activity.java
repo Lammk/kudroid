@@ -506,7 +506,14 @@ public class Activity extends ContextThemeWrapper {
     public boolean dispatchTouchEvent(android.view.MotionEvent event) {
         if (mContentView != null) {
             boolean handled = mContentView.dispatchTouchEvent(event);
-            renderViewHierarchy();
+            // Full measure/layout/draw per touch (the old behaviour) re-rendered the
+            // whole view tree at 60-120 Hz on the main thread; a game's real pixels
+            // come from its SurfaceView, and apps that change their UI in response to
+            // a touch call invalidate()/requestLayout() themselves. Keep the paint
+            // step for touch, which is what that check is really about.
+            if (!containsSurfaceView(mContentView)) {
+                renderViewHierarchy();
+            }
             return handled;
         }
         return false;
@@ -587,7 +594,9 @@ public class Activity extends ContextThemeWrapper {
     public void runOnUiThread(Runnable action) {
         if (action != null) {
             action.run();
-            renderViewHierarchy();
+            if (!containsSurfaceView(mContentView)) {
+                renderViewHierarchy();
+            }
         }
     }
 

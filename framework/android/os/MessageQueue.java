@@ -61,20 +61,6 @@ public final class MessageQueue {
         if (msg.target == null) {
             throw new IllegalArgumentException("Message must have a target.");
         }
-        // TEMP DIAGNOSTIC (ULTRAKILL render stall): Unity's UnityMain looper is
-        // driven by message what=2269 carrying a w0 enum. Log every post so a
-        // missing tick (driver stopped) vs a lost tick (queue dropped) can be told
-        // apart. Remove once the stall is understood.
-        if (msg.what == 2269) {
-            String obj = (msg.obj != null) ? msg.obj.getClass().getName() : "null";
-            if (msg.obj != null) {
-                try {
-                    obj += ":" + msg.obj.toString();
-                } catch (Throwable ignored) {}
-            }
-            android.util.Log.e("KuTick", "post what=2269 obj=" + obj
-                    + " target=" + msg.target.getClass().getName());
-        }
         synchronized (this) {
             if (mQuitting) {
                 android.util.Log.w("KuLooperQuit", "message what=" + msg.what

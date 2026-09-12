@@ -1301,6 +1301,35 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
     // is what a mis-decoded sigaction struct did to ULTRAKILL, 100% of one core with pc
     // frozen at 0x18000004.
     if (kudroid::guest_signal_dispatch(sig, info, ucontext)) {
+        // The guest's own crash reporter (Unity's tombstone) took the signal and
+        // resumed, so the fatal path below never runs and kudroid_crash.log stays
+        // empty — yet the app may be dying inside (frozen screen, dead input).
+        // Leave a one-line record so a guest-handled fault is not invisible.
+        if (sig == SIGSEGV || sig == SIGABRT || sig == SIGBUS) {
+            static std::atomic<int> s_guestHandled{0};
+            if (s_guestHandled.fetch_add(1, std::memory_order_relaxed) < 8) {
+                char note[512];
+                const uintptr_t fa =
+                    info != nullptr ? reinterpret_cast<uintptr_t>(info->si_addr) : 0;
+                int n = std::snprintf(note, sizeof(note),
+                                      "guest-handler resolved fatal sig=%d fault=0x%llx\n",
+                                      sig, static_cast<unsigned long long>(fa));
+                if (n > 0) {
+                    kudroid_persistent_breadcrumb(note);
+                    // Also append to kudroid_crash.log itself.
+                    char path[1200];
+                    size_t dl = std::strlen(g_logDir);
+                    if (dl >= sizeof(path) - 32) dl = sizeof(path) - 32;
+                    std::memcpy(path, g_logDir, dl);
+                    std::memcpy(path + dl, "/kudroid_crash.log", 19);
+                    const int fd = ::open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+                    if (fd >= 0) {
+                        (void)!::write(fd, note, static_cast<size_t>(n));
+                        ::close(fd);
+                    }
+                }
+            }
+        }
         kudroid_persistent_breadcrumb("fatal-signal resolved-by-guest-handler");
         return;
     }

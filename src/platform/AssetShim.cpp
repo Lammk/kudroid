@@ -421,16 +421,23 @@ static AAssetImpl* open_asset(const char* filename) {
     asset->mmapSize = 0;
     asset->bufferMapped = false;
     asset->streamFd = streamFd;
-    // Addressables-style manifest loads are rare; showing them proves the route.
-    if (rel.find(".json") != std::string::npos || rel.find("aa/") != std::string::npos) {
+    // Rare loads worth proving the route for: manifests and audio assets
+    // (FMOD clips). Archive-backed slices show their startOffset so a wrong
+    // offset is visible in the log without a debugger.
+    static const char* kProbedExts[] = {
+        ".json", "aa/", ".bank", ".fsb", ".ogg", ".wav", ".mp3", ".bytes"};
+    for (const char* ext : kProbedExts) {
+        if (rel.find(ext) == std::string::npos) continue;
         static std::atomic<int> s_hitLogged{0};
-        if (s_hitLogged.load() < 10) {
+        if (s_hitLogged.load() < 20) {
             ++s_hitLogged;
             char hit[512];
-            std::snprintf(hit, sizeof(hit), "AAssetManager_open: '%s' len=%ld",
-                          rel.c_str(), len);
+            std::snprintf(hit, sizeof(hit), "AAssetManager_open: '%s' len=%ld start=%ld'%s",
+                          rel.c_str(), len, startOffset,
+                          streamFd >= 0 ? " pread" : "");
             kudroid_android_log_message(4, "AssetShim", hit);
         }
+        break;
     }
     return asset;
 }

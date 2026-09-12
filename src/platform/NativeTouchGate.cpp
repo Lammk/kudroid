@@ -22,8 +22,8 @@ struct SourceGate {
 
 SourceGate g_gate;
 
-constexpr int kMaxMovesPerWindow = 2;
-constexpr long long kWindowNs = 16666667;  // one 60 Hz frame
+constexpr int kMaxMovesPerWindow = 1;
+constexpr long long kWindowNs = 33333333;  // one 30 Hz window
 
 long long steady_now_ns() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
