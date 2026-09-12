@@ -1466,6 +1466,13 @@ static ssize_t apk_stream_read(void* cookie, char* buf, size_t size) {
 }
 
 #if defined(__APPLE__)
+// funopen's read callback takes int (Darwin); the shared pread helper takes
+// size_t — this adapter is the signature bridge.
+static int apk_stream_readfn(void* cookie, char* buf, int len) {
+    if (len <= 0) return 0;
+    return static_cast<int>(apk_stream_read(cookie, buf, static_cast<size_t>(len)));
+}
+
 static off_t apk_stream_seekfn(void* cookie, off_t offset, int whence) {
     auto* s = static_cast<ApkStreamCookie*>(cookie);
     off_t target = s->pos;
@@ -1521,7 +1528,7 @@ static FILE* apk_stream_fdopen(int fd) {
     auto* cookie = new ApkStreamCookie{fd, 0, st.st_size};
     FILE* f = nullptr;
 #if defined(__APPLE__)
-    f = ::funopen(cookie, apk_stream_read, nullptr, apk_stream_seekfn, apk_stream_close);
+    f = ::funopen(cookie, apk_stream_readfn, nullptr, apk_stream_seekfn, apk_stream_close);
 #else
     static const cookie_io_functions_t kFns = {
         apk_stream_cookie_read, nullptr, apk_stream_cookie_seek, apk_stream_close};
