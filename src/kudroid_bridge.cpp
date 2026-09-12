@@ -950,7 +950,7 @@ bool fault_skip_load_store(ucontext_t* uc, uintptr_t faultAddr, uint64_t* newPcO
         (rn == 31) ? uc->uc_mcontext->__ss.__sp : regVal(rn);
     const uint64_t rmVal = regVal((w >> 16) & 31);
 
-    const FaultSkipPlan p = fault_decode_skip(w, pc, baseVal, rmVal);
+    const kudroid::FaultSkipPlan p = kudroid::fault_decode_skip(w, pc, baseVal, rmVal);
     if (!p.skippable) return false;
     // The decode must explain the fault. Anything else is a mis-decode.
     if (p.effAddr != faultAddr) return false;
@@ -966,10 +966,26 @@ bool fault_skip_load_store(ucontext_t* uc, uintptr_t faultAddr, uint64_t* newPcO
 }
 
 }  // namespace
+
+static bool kudroid_try_skip_fault(int /*sig*/, siginfo_t* info, void* ucontext) {
+    if (info == nullptr || ucontext == nullptr) return false;
+    ucontext_t* uc = reinterpret_cast<ucontext_t*>(ucontext);
+    uint64_t newPc = 0;
+    const uintptr_t faultAddr = reinterpret_cast<uintptr_t>(info->si_addr);
+    if (!fault_skip_load_store(uc, faultAddr, &newPc)) return false;
+    uc->uc_mcontext->__ss.__pc = newPc;
+    char mark[256];
+    const int n = snprintf(mark, sizeof(mark),
+                           "fault-skipped fault_addr=0x%llx resumed_at_pc=0x%llx",
+                           (unsigned long long)faultAddr,
+                           (unsigned long long)newPc);
+    if (n > 0) kudroid_persistent_breadcrumb(mark);
+    return true;
+}
 #else
 // Non-Apple or non-arm64 hosts never run guest AArch64 text in-process:
 // every worker fault parks.
-bool kudroid_try_skip_fault(int, siginfo_t*, void*) { return false; }
+static bool kudroid_try_skip_fault(int, siginfo_t*, void*) { return false; }
 #endif
 
 static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
@@ -1772,8 +1788,10 @@ extern "C" void kudroid_log_signal_disposition(const char* tag) {
         const bool ours = (cur.sa_flags & SA_SIGINFO) &&
                           cur.sa_sigaction == crashHandler;
         char line[128];
+        const bool is_dfl = (cur.sa_flags & SA_SIGINFO) ? (cur.sa_sigaction == nullptr)
+                                                        : (cur.sa_handler == SIG_DFL);
         std::snprintf(line, sizeof(line), "%s sig=%d handler=%p %s", tag != nullptr ? tag : "?",
-                      sig, h, ours ? "OURS" : (h == SIG_DFL ? "DFL" : "FOREIGN"));
+                      sig, h, ours ? "OURS" : (is_dfl ? "DFL" : "FOREIGN"));
         kudroid_android_log_message(4, "KuDroidTrap", line);
     }
 }
