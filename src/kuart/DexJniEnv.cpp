@@ -608,9 +608,7 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
                           (method->name != nullptr ? method->name : "?");
             break;
     }
-    // TEMP DIAGNOSTIC (ULTRAKILL render stall): Unity's frame loop lives or dies
-    // on UnityPlayer.nativeRender()'s boolean - false quits the game. Log it.
-    if (std::strcmp(owner, "Lcom/unity3d/player/UnityPlayer;") == 0 && shorty != nullptr &&
+    if (log::jni_enabled() && std::strcmp(owner, "Lcom/unity3d/player/UnityPlayer;") == 0 && shorty != nullptr &&
         (shorty[0] == 'Z' || shorty[0] == 'I')) {
         std::fprintf(stderr, "[KuART][UNITYPLAYER] %s%s -> %d\n", method_name,
                      method_sig, result.i);
@@ -630,7 +628,7 @@ DexValue DexJniEnv::CallJavaA(DexObject* receiver, DexMethod* method, const jval
                      reinterpret_cast<const void*>(receiver));
         return result;
     }
-    if (t_jnibridge_trace) {
+    if (t_jnibridge_trace && log::jni_enabled()) {
         std::string recv = "(null)";
         if (receiver != nullptr && linker_ != nullptr) {
             if (DexClass* rc = linker_->ClassOfObject(receiver)) recv = rc->PrettyName();
@@ -643,11 +641,7 @@ DexValue DexJniEnv::CallJavaA(DexObject* receiver, DexMethod* method, const jval
                      method->signature != nullptr ? method->signature : "?",
                      virtual_dispatch ? 1 : 0, recv.c_str());
     }
-    // TEMP DIAGNOSTIC (ULTRAKILL no-Gfx): Unity 2021 drives Gfx setup through
-    // displayChanged/updateDisplayInternal/updateGLDisplay/sendSurfaceChangedEvent,
-    // and this run shows zero nativeRecreateGfxState. Log every such call so a
-    // missing driver (native never calls back) vs a swallowed call is visible.
-    if (method->declaring_class != nullptr && method->name != nullptr &&
+    if (log::jni_enabled() && method->declaring_class != nullptr && method->name != nullptr &&
         method->declaring_class->descriptor != nullptr &&
         std::strcmp(method->declaring_class->descriptor, "Lcom/unity3d/player/UnityPlayer;") == 0 &&
         (std::strcmp(method->name, "displayChanged") == 0 ||

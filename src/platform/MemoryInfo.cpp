@@ -2,6 +2,8 @@
 
 #include <cstdio>
 #include <cstring>
+#include <chrono>
+#include <mutex>
 
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
@@ -151,6 +153,19 @@ uint64_t ProcessResidentMemoryLinux() {
 }  // namespace
 
 SystemMemory query_system_memory() {
+    static std::mutex s_cache_mtx;
+    static SystemMemory s_cached_mem;
+    static auto s_last_query = std::chrono::steady_clock::time_point::min();
+
+    const auto now = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> lock(s_cache_mtx);
+        if (s_last_query != std::chrono::steady_clock::time_point::min() &&
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - s_last_query).count() < 200) {
+            return s_cached_mem;
+        }
+    }
+
     SystemMemory out;
 
 #if defined(__APPLE__)
@@ -212,6 +227,12 @@ SystemMemory query_system_memory() {
     // Available can exceed total on a fallback path; clamp so callers computing
     // used = total - available never see a negative.
     if (out.available_bytes > out.total_bytes) out.available_bytes = out.total_bytes;
+
+    {
+        std::lock_guard<std::mutex> lock(s_cache_mtx);
+        s_cached_mem = out;
+        s_last_query = now;
+    }
 
     return out;
 }

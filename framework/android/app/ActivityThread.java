@@ -149,19 +149,29 @@ public final class ActivityThread {
      */
     private static final Object sTouchMsgLock = new Object();
     private static Message sPendingTouch;
+    private static long sLastDownTime = 0;
 
     public static void postTouchEvent(int action, float x, float y) {
         if (sCurrentActivityThread == null || sCurrentActivityThread.mH == null) return;
-        MotionEvent ev = MotionEvent.obtain(action, x, y, System.currentTimeMillis());
+        final long now = android.os.SystemClock.uptimeMillis();
+        final int maskedAction = action & MotionEvent.ACTION_MASK;
         synchronized (sTouchMsgLock) {
-            final boolean isMove = (action & MotionEvent.ACTION_MASK) == MotionEvent.ACTION_MOVE;
+            if (maskedAction == MotionEvent.ACTION_DOWN || sLastDownTime == 0) {
+                sLastDownTime = now;
+            }
+            final long downTime = sLastDownTime;
+            if (maskedAction == MotionEvent.ACTION_UP || maskedAction == MotionEvent.ACTION_CANCEL) {
+                sLastDownTime = 0;
+            }
+
+            final boolean isMove = maskedAction == MotionEvent.ACTION_MOVE;
             if (isMove && sPendingTouch != null) {
-                // Replace the payload of the message still sitting in the queue.
                 MotionEvent old = (MotionEvent) sPendingTouch.obj;
-                sPendingTouch.obj = ev;
+                sPendingTouch.obj = MotionEvent.obtain(downTime, now, action, x, y, 0);
                 if (old != null) old.recycle();
                 return;
             }
+            MotionEvent ev = MotionEvent.obtain(downTime, now, action, x, y, 0);
             Message msg = Message.obtain();
             msg.what = TOUCH_EVENT;
             msg.obj = ev;

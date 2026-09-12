@@ -84,17 +84,19 @@ public final class MotionEvent extends InputEvent {
      */
     private static final int TOUCHSCREEN_DEVICE_ID = 1;
 
+    private final long mDownTime;
     private final int mAction;
     private final float mX;
     private final float mY;
     private final long mEventTime;
     private final int mPointerCount;
 
-    private MotionEvent(int action, float x, float y, long eventTime, int pointerCount) {
+    private MotionEvent(long downTime, long eventTime, int action, float x, float y, int pointerCount) {
+        mDownTime = downTime;
+        mEventTime = eventTime;
         mAction = action;
         mX = x;
         mY = y;
-        mEventTime = eventTime;
         mPointerCount = pointerCount;
     }
 
@@ -102,7 +104,11 @@ public final class MotionEvent extends InputEvent {
      * get a motion event.
      */
     public static MotionEvent obtain(int action, float x, float y, long eventTime) {
-        return new MotionEvent(action, x, y, eventTime, 1);
+        return new MotionEvent(eventTime, eventTime, action, x, y, 1);
+    }
+
+    public static MotionEvent obtain(long downTime, long eventTime, int action, float x, float y, int metaState) {
+        return new MotionEvent(downTime, eventTime, action, x, y, 1);
     }
 
     /**
@@ -112,7 +118,7 @@ public final class MotionEvent extends InputEvent {
      */
     public static MotionEvent obtain(MotionEvent other) {
         if (other == null) throw new IllegalArgumentException("other must not be null");
-        return new MotionEvent(other.mAction, other.mX, other.mY, other.mEventTime,
+        return new MotionEvent(other.mDownTime, other.mEventTime, other.mAction, other.mX, other.mY,
                 other.mPointerCount);
     }
 
@@ -195,7 +201,7 @@ public final class MotionEvent extends InputEvent {
      * returns down time.
      */
     public long getDownTime() {
-        return mEventTime;
+        return mDownTime;
     }
 
     /**

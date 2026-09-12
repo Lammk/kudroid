@@ -1441,127 +1441,6 @@ static void track_apk_stream(FILE* f);
 extern std::mutex g_freadVolMtx;
 extern std::map<FILE*, std::string> g_freadPaths;
 
-// Engines re-open the APK per read (1,281 fopen(base.apk) in one ULTRAKILL run) —
-// each one is an open(2) plus buffer allocation on the load path. Cache the
-// open file description and hand every fopen its OWN stdio stream on top:
-// fdopen a duplicate fd per call. Sharing one FILE* across threads was wrong
-// (stdio state — offset, buffer — is per-stream, so concurrent seek/read
-// interleave into each other's data, and one fclose kills the shared object
-// for everyone); dup alone would not fix it either, since duplicates share
-// the kernel file offset. Pread gives each stream a private position, so
-// streams stay independent while the open(2) cost is still paid once.
-// Invalidation watches (st_dev, st_ino) so a replaced archive is never
-// served stale.
-struct CachedApkFile {
-    std::string path;
-    int fd = -1;     // cached read-only file description
-    dev_t dev = 0;
-    ino_t ino = 0;
-};
-std::mutex g_apkFileMtx;
-CachedApkFile g_apkFile;
-
-// stdio cookie over the cached fd. The position lives INSIDE the cookie and
-// all I/O goes through pread, so the shared fd's kernel offset is never used:
-// one stream's seek/read cannot move another stream's position.
-struct ApkStreamCookie {
-    int fd;
-    off_t pos;
-    off_t size;
-};
-
-static ssize_t apk_stream_read(void* cookie, char* buf, size_t size) {
-    auto* s = static_cast<ApkStreamCookie*>(cookie);
-    ssize_t n;
-    do {
-        n = ::pread(s->fd, buf, size, s->pos);
-    } while (n < 0 && errno == EINTR);
-    if (n > 0) s->pos += static_cast<off_t>(n);
-    return n;
-}
-
-#if defined(__APPLE__)
-// funopen's read callback takes int (Darwin); the shared pread helper takes
-// size_t — this adapter is the signature bridge.
-static int apk_stream_readfn(void* cookie, char* buf, int len) {
-    if (len <= 0) return 0;
-    return static_cast<int>(apk_stream_read(cookie, buf, static_cast<size_t>(len)));
-}
-
-static off_t apk_stream_seekfn(void* cookie, off_t offset, int whence) {
-    auto* s = static_cast<ApkStreamCookie*>(cookie);
-    off_t target = s->pos;
-    if (whence == SEEK_SET) target = offset;
-    else if (whence == SEEK_CUR) target = s->pos + offset;
-    else if (whence == SEEK_END) target = s->size + offset;
-    else {
-        errno = EINVAL;
-        return -1;
-    }
-    if (target < 0) {
-        errno = EINVAL;
-        return -1;
-    }
-    s->pos = target;
-    return target;
-}
-#else
-static ssize_t apk_stream_cookie_read(void* cookie, char* buf, size_t len) {
-    return apk_stream_read(cookie, buf, len);
-}
-
-static int apk_stream_cookie_seek(void* cookie, off64_t* offsetp, int whence) {
-    auto* s = static_cast<ApkStreamCookie*>(cookie);
-    off64_t target = s->pos;
-    if (whence == SEEK_SET) target = *offsetp;
-    else if (whence == SEEK_CUR) target = s->pos + *offsetp;
-    else if (whence == SEEK_END) target = s->size + *offsetp;
-    else {
-        errno = EINVAL;
-        return -1;
-    }
-    if (target < 0) {
-        errno = EINVAL;
-        return -1;
-    }
-    s->pos = static_cast<off_t>(target);
-    *offsetp = target;
-    return 0;
-}
-#endif
-
-static int apk_stream_close(void* cookie) {
-    delete static_cast<ApkStreamCookie*>(cookie);
-    return 0;  // the cached fd outlives every stream
-}
-
-// Independent stdio stream over the cached fd. Position is per-stream (cookie);
-// fclose on one stream never affects another.
-static FILE* apk_stream_fdopen(int fd) {
-    struct stat st {};
-    if (::fstat(fd, &st) != 0) return nullptr;
-    auto* cookie = new ApkStreamCookie{fd, 0, st.st_size};
-    FILE* f = nullptr;
-#if defined(__APPLE__)
-    f = ::funopen(cookie, apk_stream_readfn, nullptr, apk_stream_seekfn, apk_stream_close);
-#else
-    static const cookie_io_functions_t kFns = {
-        apk_stream_cookie_read, nullptr, apk_stream_cookie_seek, apk_stream_close};
-    f = ::fopencookie(cookie, "r", kFns);
-#endif
-    if (f == nullptr) {
-        delete cookie;
-        return nullptr;
-    }
-    return f;
-}
-
-bool apk_file_identity_matches(const CachedApkFile& c, const std::string& path) {
-    struct stat st {};
-    if (::stat(path.c_str(), &st) != 0) return false;
-    return c.fd >= 0 && c.dev == st.st_dev && c.ino == st.st_ino && c.path == path;
-}
-
 FILE* vfs_fopen(const char* path, const char* mode) {
     const std::string mapped = VFSPathRemapper::getInstance().remap(path);
     if (mode && (std::strchr(mode, 'w') || std::strchr(mode, 'a'))) {
@@ -1573,38 +1452,7 @@ FILE* vfs_fopen(const char* path, const char* mode) {
             return nullptr;
         }
     }
-    FILE* result = nullptr;
-    if (mode != nullptr && std::strcmp(mode, "rb") == 0) {
-        // Read-only opens of an archive reuse the cached fd; each fopen gets
-        // its own independent stream above it (see CachedApkFile).
-        const size_t plen = path != nullptr ? std::strlen(path) : 0;
-        const bool looks_apk = plen >= 8 && std::strcmp(path + plen - 8, "base.apk") == 0;
-        if (looks_apk) {
-            {
-                std::lock_guard<std::mutex> lock(g_apkFileMtx);
-                if (!apk_file_identity_matches(g_apkFile, mapped)) {
-                    if (g_apkFile.fd >= 0) ::close(g_apkFile.fd);
-                    g_apkFile = CachedApkFile{};
-                    g_apkFile.fd = ::open(mapped.c_str(), O_RDONLY);
-                    if (g_apkFile.fd >= 0) {
-                        struct stat st {};
-                        if (::fstat(g_apkFile.fd, &st) == 0) {
-                            g_apkFile.path = mapped;
-                            g_apkFile.dev = st.st_dev;
-                            g_apkFile.ino = st.st_ino;
-                        } else {
-                            ::close(g_apkFile.fd);
-                            g_apkFile.fd = -1;
-                        }
-                    }
-                }
-            }
-            if (g_apkFile.fd >= 0) {
-                result = apk_stream_fdopen(g_apkFile.fd);  // independent stream
-            }
-        }
-    }
-    if (result == nullptr) result = std::fopen(mapped.c_str(), mode);
+    FILE* result = std::fopen(mapped.c_str(), mode);
     vfsTrace("fopen(" + mapped + ", " + (mode ? mode : "<null>") + ") -> " +
            (result ? "OK" : std::strerror(errno)));    if (path != nullptr &&
         (std::strstr(path, "assets/") != nullptr || std::strstr(path, ".apk") != nullptr ||
@@ -1851,6 +1699,18 @@ int vfs_fseek(FILE* stream, long offset, int whence) {
         }
     }
     return rc;
+}
+
+int vfs_fseeko(FILE* stream, off_t offset, int whence) {
+    return ::fseeko(stream, offset, whence);
+}
+
+long vfs_ftell(FILE* stream) {
+    return std::ftell(stream);
+}
+
+off_t vfs_ftello(FILE* stream) {
+    return ::ftello(stream);
 }
 
 FILE* vfs_freopen(const char* path, const char* mode, FILE* stream) {

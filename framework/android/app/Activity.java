@@ -562,17 +562,10 @@ public class Activity extends ContextThemeWrapper {
         if (mContentView == null) {
             return;
         }
-        // If this activity contains a SurfaceView (like 3D games with OpenGL/Metal),
-        // do not blit the 2D software canvas over the native hardware CAMetalLayer.
-        if (containsSurfaceView(mContentView)) {
-            return;
-        }
         try {
             android.graphics.Canvas canvas = new android.graphics.Canvas();
             final int width = canvas.getWidth();
             final int height = canvas.getHeight();
-
-            canvas.drawColor(0xFF181818);
 
             // EXACTLY: the root view gets the whole screen, nothing more or less.
             mContentView.measure(
@@ -581,6 +574,14 @@ public class Activity extends ContextThemeWrapper {
                     android.view.View.MeasureSpec.makeMeasureSpec(
                             height, android.view.View.MeasureSpec.EXACTLY));
             mContentView.layout(0, 0, width, height);
+
+            // If this activity contains a SurfaceView (like 3D games with OpenGL/Metal),
+            // do not blit the 2D software canvas over the native hardware CAMetalLayer.
+            if (containsSurfaceView(mContentView)) {
+                return;
+            }
+
+            canvas.drawColor(0xFF181818);
             mContentView.draw(canvas);
             canvas.flush();
         } catch (Throwable t) {
