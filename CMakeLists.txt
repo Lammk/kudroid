@@ -360,6 +360,11 @@ else()
         target_include_directories(test_vfs PRIVATE include)
     endif()
 
+    find_package(Threads REQUIRED)
+    add_executable(test_touch_event_queue tests/test_touch_event_queue.cpp)
+    target_include_directories(test_touch_event_queue PRIVATE include)
+    target_link_libraries(test_touch_event_queue PRIVATE Threads::Threads)
+
     # AAssetManager path resolution. An APK may nest a directory named assets/ inside its
     # assets, and an AAssetManager path is relative to the outer one — so the nested case
     # needs the literal path, not a rewritten one.

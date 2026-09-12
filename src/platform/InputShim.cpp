@@ -79,11 +79,7 @@ extern "C" void* kudroid_get_input_queue(void) {
 #include "kudroid/KuArtRuntime.h"
 
 static void forward_touch_to_java_activity(int action, float x, float y) {
-    if (!kuart_is_ready()) return;
-    // Source-side MOVE pacing: at most a couple per frame window reach the
-    // interpreted sink. The sink-side pending-slot merge above keeps
-    // correctness if several threads race here.
-    if ((action & 0xff) == 2 && kudroid_touch_source_gate_allow_move() == 0) return;
+    // Native enqueue only; the consumer handles VM access and session validity.
     kuart_post_touch_event(action, x, y);
 }
 
@@ -110,12 +106,10 @@ extern "C" void kudroid_inject_touch_event_multi(float x, float y, int32_t actio
         const bool is_move = (action & 0xff) == 2;  // ACTION_MOVE
         bool replaced = false;
         if (is_move && !g_inputQueue.events.empty()) {
-            for (auto it = g_inputQueue.events.rbegin(); it != g_inputQueue.events.rend(); ++it) {
-                if (it->type == 2 && (it->action & 0xff) == 2) {
-                    *it = ev;
-                    replaced = true;
-                    break;
-                }
+            auto& tail = g_inputQueue.events.back();
+            if (tail.type == 2 && (tail.action & 0xff) == 2) {
+                tail = ev;
+                replaced = true;
             }
         }
         if (!replaced) {

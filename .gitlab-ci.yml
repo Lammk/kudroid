@@ -1,0 +1,135 @@
+stages:
+  - test
+  - build-deps
+  - package
+
+variables:
+  GIT_SUBMODULE_STRATEGY: recursive
+  CCACHE_DIR: "$CI_PROJECT_DIR/.ccache"
+
+default:
+  interruptible: true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# KuART & Core Linux Unit Tests
+# ─────────────────────────────────────────────────────────────────────────────
+test-kuart-linux:
+  stage: test
+  image: ubuntu:24.04
+  cache:
+    key: "kuart-linux-ccache"
+    paths:
+      - .ccache/
+  before_script:
+    - apt-get update
+    - DEBIAN_FRONTEND=noninteractive apt-get install -y cmake g++ ccache zlib1g-dev gcc-aarch64-linux-gnu qemu-user-static curl
+    - export PATH="/usr/lib/ccache:$PATH"
+    - ccache -s
+  script:
+    - rm -rf build
+    - cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+    - cmake --build build --target art_dex kudroid_core --parallel
+    - cmake --build build --parallel
+    - cd build
+    - |
+      fail=0
+      count=0
+      for t in test_*; do
+        [ -x "$t" ] || continue
+        [ -f "$t" ] || continue
+        count=$((count + 1))
+        echo "──────── $t ────────"
+        if ./"$t"; then echo "PASS $t"; else echo "FAIL $t"; fail=1; fi
+      done
+      echo "ran $count test binaries"
+      if [ "$count" -eq 0 ]; then echo "no test binaries found"; exit 1; fi
+      exit $fail
+    - cd ..
+    - bash ./scripts/test-trampoline-arm64.sh
+    - bash ./scripts/test-vararg-arm64.sh
+    - bash ./scripts/test-jit-arm64.sh
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ANGLE for iOS ARM64
+# ─────────────────────────────────────────────────────────────────────────────
+build-angle-ios:
+  stage: build-deps
+  tags:
+    - saas-macos-medium-m1
+  cache:
+    key: "angle-ios-arm64"
+    paths:
+      - third_party/ANGLE/
+      - third_party/build-tools/
+  script:
+    - sw_vers
+    - xcodebuild -version
+    - xcrun --sdk iphoneos --show-sdk-version
+    - |
+      if [ -f "third_party/ANGLE/lib/ios-arm64/libEGL.a" ] && [ -f "third_party/ANGLE/lib/ios-arm64/libGLESv2.a" ]; then
+        echo "ANGLE libraries already built and cached."
+      else
+        chmod +x scripts/fetch-build-angle-ios.sh
+        sed -i '' "s|autoninja -C|ninja -j2 -C|g" scripts/fetch-build-angle-ios.sh
+        ./scripts/fetch-build-angle-ios.sh
+      fi
+    - ls -lh third_party/ANGLE/lib/ios-arm64/
+  artifacts:
+    name: "angle-ios-arm64"
+    paths:
+      - third_party/ANGLE/
+    expire_in: 7 days
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Full iOS Build — builds framework.dex, MoltenVK, kudroid_core & KuDroidShell.ipa
+# ─────────────────────────────────────────────────────────────────────────────
+build-ios-ipa:
+  stage: package
+  needs:
+    - build-angle-ios
+    - test-kuart-linux
+  tags:
+    - saas-macos-medium-m1
+  cache:
+    key: "ios-build-ccache"
+    paths:
+      - .ccache/
+  before_script:
+    - export PATH="/opt/homebrew/opt/ccache/libexec:$PATH"
+  script:
+    # 1. MoltenVK
+    - chmod +x scripts/fetch-moltenvk-ios.sh
+    - ./scripts/fetch-moltenvk-ios.sh
+
+    # 2. Build & embed framework.dex
+    - chmod +x scripts/fetch_pinned_d8.sh scripts/fetch_pinned_kotlin.sh
+    - bash scripts/fetch_pinned_d8.sh
+    - bash scripts/fetch_pinned_kotlin.sh
+    - KUDROID_D8_JAR="$CI_PROJECT_DIR/third_party/d8/r8.jar" bash framework/build.sh --require-d8
+    - python3 scripts/verify_framework_embed.py
+    - ls -lh framework/build/framework.dex
+    - ls -lh include/kudroid/framework_dex_bytes.h
+
+    # 3. Build Xcode project
+    - rm -rf build-ios
+    - cmake -B build-ios -G Xcode -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 -DCMAKE_BUILD_TYPE=Release
+    - cmake --build build-ios --config Release --parallel
+
+    # 4. Bundle app and package IPA
+    - mv build-ios/Release-iphoneos/KuDroidShell.app KuDroidShell.app
+    - bash scripts/bundle_assets.sh
+    - cp icon.png KuDroidShell.app/AppIcon60x60@2x.png || true
+    - cp icon.png KuDroidShell.app/AppIcon60x60@3x.png || true
+    - cp icon.png KuDroidShell.app/AppIcon.png || true
+    - cp ios-app/entitlements.plist KuDroidShell.app/entitlements.plist || true
+    - mkdir -p Payload
+    - cp -R KuDroidShell.app Payload/
+    - zip -r KuDroidShell.ipa Payload
+    - rm -rf Payload
+    - ls -lh KuDroidShell.ipa
+  artifacts:
+    name: "kudroid-ios-ipa"
+    paths:
+      - KuDroidShell.ipa
+      - build-ios/Release-iphoneos/libkudroid_core.a
+    expire_in: 30 days

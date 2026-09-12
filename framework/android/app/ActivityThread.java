@@ -165,6 +165,8 @@ public final class ActivityThread {
             }
 
             final boolean isMove = maskedAction == MotionEvent.ACTION_MOVE;
+            // Never merge a new gesture into a MOVE queued before UP/DOWN/CANCEL.
+            if (!isMove) sPendingTouch = null;
             if (isMove && sPendingTouch != null) {
                 MotionEvent old = (MotionEvent) sPendingTouch.obj;
                 sPendingTouch.obj = MotionEvent.obtain(downTime, now, action, x, y, 0);

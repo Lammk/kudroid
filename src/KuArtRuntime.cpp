@@ -11,6 +11,11 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#include <chrono>
+#include <thread>
+
+#include "kudroid/platform/TouchEventQueue.h"
+#include "kudroid/kuart/VmLock.h"
 
 #include "dex/dex_file-inl.h"
 
@@ -66,6 +71,12 @@ std::string g_current_app_dir;
 void (*g_log_cb)(const char*) = nullptr;
 void* (*g_symbol_lookup)(const char*) = nullptr;
 std::string g_last_error;
+
+// Process-lifetime queue: its waiting worker must outlive static teardown.
+kudroid::TouchEventQueue& TouchQueue() {
+    static auto* queue = new kudroid::TouchEventQueue();
+    return *queue;
+}
 
 void Log(const char* fmt, ...) {
     char buf[1024];
@@ -175,6 +186,35 @@ bool CallActivityThreadStatic(const char* name, const char* signature,
     return true;
 }
 
+void StartTouchWorker() {
+    static std::once_flag started;
+    std::call_once(started, [] {
+        auto* queue = &TouchQueue();
+        std::thread([queue] {
+            for (;;) {
+                const auto event = queue->waitPop();
+                {
+                    // Pin the runtime through dispatch; ingress never takes this lock.
+                    std::lock_guard<std::mutex> runtime_lock(g_mtx);
+                    if (!queue->isCurrent(event) || g_rt == nullptr || !g_rt->ready) continue;
+                    kudroid::kuart::VmLockGuard vm_lock;
+                    // Teardown can invalidate an event while this worker waits for the VM.
+                    if (!queue->isCurrent(event)) continue;
+                    const DexValue args[3] = {DexValue::Int(event.action),
+                                             DexValue::Float(event.x), DexValue::Float(event.y)};
+                    CallActivityThreadStatic("postTouchEvent", "(IFF)V", args, 3);
+                }
+                // Bound MOVE dispatch work without blocking ingress or dropping the latest point.
+                if ((event.action & 0xff) == 2) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(16));
+                } else {
+                    std::this_thread::yield();
+                }
+            }
+        }).detach();
+    });
+}
+
 // Call a static method on any framework class, reporting an exception as an error.
 bool CallFrameworkStatic(const char* descriptor, const char* name, const char* signature,
                          const DexValue* args, size_t num_args) {
@@ -246,6 +286,7 @@ extern "C" int kuart_init(const char* app_dir) {
         if (requested_dir.empty() || requested_dir == g_current_app_dir) {
             return 1;
         }
+        TouchQueue().reset(false);
         delete g_rt;
         g_rt = nullptr;
         g_current_app_dir.clear();
@@ -352,6 +393,7 @@ extern "C" int kuart_init(const char* app_dir) {
 }
 
 extern "C" void kuart_shutdown(void) {
+    TouchQueue().reset(false);
     std::lock_guard<std::mutex> lock(g_mtx);
     if (g_rt != nullptr && !g_rt->oat_path.empty() && !g_rt->oat.empty()) {
         // Save what this run learned. A failure is not worth reporting as an error: the
@@ -579,8 +621,11 @@ extern "C" int kuart_launch_app(const char* package_name, const char* component_
     // activity lifecycle and player callbacks all run here, so a fault on it
     // is app-fatal while a worker fault is not.
     kudroid_note_guest_ui_thread();
+    StartTouchWorker();
+    TouchQueue().reset(true);
     const DexValue arg = DexValue::Ref(args_array);
     const int ok = CallActivityThreadStatic("main", "([Ljava/lang/String;)V", &arg, 1) ? 1 : 0;
+    TouchQueue().reset(false);
     kudroid::native_phase("activity-thread-main-exit");
     return ok;
 }
@@ -597,8 +642,7 @@ extern "C" void kuart_send_lifecycle_event(int event_type) {
 }
 
 extern "C" void kuart_post_touch_event(int action, float x, float y) {
-    const DexValue args[3] = {DexValue::Int(action), DexValue::Float(x), DexValue::Float(y)};
-    CallActivityThreadStatic("postTouchEvent", "(IFF)V", args, 3);
+    TouchQueue().push(action, x, y);
 }
 
 // Text from the host keyboard.
