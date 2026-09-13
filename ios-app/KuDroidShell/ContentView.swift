@@ -2293,6 +2293,11 @@ public func kudroid_trigger_haptic(intensity: Int32) {
 @_cdecl("kudroid_notify_orientation_change")
 public func kudroid_notify_orientation_change(orientation: Int32) {
     DispatchQueue.main.async {
+        if #available(iOS 16.0, *) {
+            NativeMetalViewController.sCurrentRunnerVC?.setNeedsUpdateOfSupportedInterfaceOrientations()
+        }
+        UIViewController.attemptRotationToDeviceOrientation()
+
         if orientation == 0 || orientation == 6 || orientation == 8 || orientation == 11 {
             // Landscape
             NSLog("[KuDroid] kudroid_notify_orientation_change: LANDSCAPE (%d)", orientation)

@@ -122,20 +122,11 @@ static void forward_touch_to_java_activity(int action, float x, float y, int poi
 
 // Exported for Swift to inject touch events
 extern "C" void kudroid_inject_touch_event_multi(float x, float y, int32_t action, int32_t pointerId, int32_t pointerCount) {
-    int32_t finalAction = action;
     const int32_t baseAction = action & 0xff;
-
-    if (pointerId > 0) {
-        if (baseAction == 0) {
-            finalAction = (pointerId << 8) | 5; // ACTION_POINTER_DOWN
-        } else if (baseAction == 1) {
-            finalAction = (pointerId << 8) | 6; // ACTION_POINTER_UP
-        }
-    }
 
     BionicInputEvent ev;
     ev.type = 2; // AINPUT_EVENT_TYPE_MOTION
-    ev.action = finalAction;
+    ev.action = action;
     ev.x = x;
     ev.y = y;
     ev.eventTime = static_cast<int64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -146,6 +137,8 @@ extern "C" void kudroid_inject_touch_event_multi(float x, float y, int32_t actio
     }
     ev.source = 0x0002; // AINPUT_SOURCE_TOUCHSCREEN
     ev.flags = 0;
+
+    int32_t finalAction = action;
 
     {
         std::lock_guard<std::mutex> lock(g_inputQueue.mtx);
@@ -184,9 +177,12 @@ extern "C" void kudroid_inject_touch_event_multi(float x, float y, int32_t actio
 
         // Copy all currently active pointers into this event
         int outIndex = 0;
-        // The pointer triggering the action goes to slot 0 if possible, or matches pointer_index
+        int actionPointerIndex = 0;
         for (size_t i = 0; i < kMaxPointers && outIndex < ev.pointerCount; ++i) {
             if (g_activePointers[i].active) {
+                if (g_activePointers[i].id == pointerId) {
+                    actionPointerIndex = outIndex;
+                }
                 ev.pointers[outIndex].id = g_activePointers[i].id;
                 ev.pointers[outIndex].x = g_activePointers[i].x;
                 ev.pointers[outIndex].y = g_activePointers[i].y;
@@ -195,11 +191,24 @@ extern "C" void kudroid_inject_touch_event_multi(float x, float y, int32_t actio
         }
         // If tracking table had fewer slots than reported pointerCount, fill with primary coords
         while (outIndex < ev.pointerCount) {
+            if (outIndex == pointerId) {
+                actionPointerIndex = outIndex;
+            }
             ev.pointers[outIndex].id = outIndex;
             ev.pointers[outIndex].x = x;
             ev.pointers[outIndex].y = y;
             ++outIndex;
         }
+
+        // Encode actionIndex into finalAction for multi-touch (pointerIndex << 8) | baseAction
+        if (pointerId > 0) {
+            if (baseAction == 0) {
+                finalAction = (actionPointerIndex << 8) | 5; // ACTION_POINTER_DOWN
+            } else if (baseAction == 1) {
+                finalAction = (actionPointerIndex << 8) | 6; // ACTION_POINTER_UP
+            }
+        }
+        ev.action = finalAction;
 
         // Handle pointer removal on UP / POINTER_UP / CANCEL
         if (baseAction == 1 || baseAction == 3) {
@@ -246,13 +255,10 @@ extern "C" void kudroid_inject_touch_event_multi(float x, float y, int32_t actio
         }
     }
 
-    // For pure native apps (like Unity/GameActivity) that have attached a native looper
-    // to g_inputQueue, events are drained directly via AInputQueue_getEvent on the native
-    // thread. Forwarding every move to Java ActivityThread acquires VmLock and starves
-    // the render loop, causing frame drops and timeouts.
-    if (g_inputQueue.id == 0) {
-        forward_touch_to_java_activity(finalAction, x, y, ev.pointerCount);
-    }
+    // Forward touch events to Java Activity (e.g. Unity uGUI buttons like "Skip Tutorial").
+    // Non-move events (DOWN, UP, CANCEL) are always forwarded to ensure UI clicks trigger.
+    // MOVE events are rate-gated by NativeTouchGate to avoid stalling the render loop.
+    forward_touch_to_java_activity(finalAction, x, y, ev.pointerCount);
 }
 
 extern "C" void kudroid_inject_touch_event(float x, float y, int32_t action) {

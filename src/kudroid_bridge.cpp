@@ -1382,6 +1382,32 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
     kudroid::native_note_fatal_signal(sig,
                                       static_cast<unsigned long long>(currentThreadIdForCrash()));
 
+    // For worker threads (e.g. Unity Job.Worker), try instruction load/store skip FIRST.
+    // Unity's crash handler writes a tombstone without fixing memory or moving PC, which
+    // aborts the thread or crashes the process. Skipping the faulting instruction lets
+    // worker jobs safely finish without bringing down the game.
+    {
+#if defined(__APPLE__)
+        const bool isHostMain = pthread_main_np() != 0;
+#else
+        const bool isHostMain =
+            g_mainThread != 0 && pthread_equal(pthread_self(), g_mainThread);
+#endif
+        const unsigned long long tid = currentThreadIdForCrash();
+        WorkerBudget* budget =
+            (!kudroid_fault_is_fatal(tid, isHostMain) && (sig == SIGSEGV || sig == SIGBUS))
+                ? worker_budget_for(tid)
+                : nullptr;
+        if (worker_budget_peek(budget) && kudroid_try_skip_fault(sig, info, ucontext)) {
+            const long long nowNs =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch())
+                    .count();
+            worker_budget_note(budget, nowNs);
+            return;
+        }
+    }
+
     // The guest's own handler, for the signals KuDroid must keep installed.
     //
     // KuDroid owns SIGTRAP (it supplies guest TLS), SIGSYS (it emulates a raw `svc`)
