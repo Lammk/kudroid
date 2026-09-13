@@ -16,6 +16,7 @@
 #include <thread>
 
 #include "kudroid/platform/TouchEventQueue.h"
+#include "kudroid/platform/FramePacer.h"
 #include "kudroid/kuart/VmLock.h"
 
 #include "dex/dex_file-inl.h"
@@ -407,7 +408,12 @@ extern "C" int kuart_init(const char* app_dir) {
     {
         std::lock_guard<std::mutex> lock(g_mtx);
         g_shutdownRequested = false;
+        g_rtUsers.store(0, std::memory_order_release);
     }
+    // Fault isolation is per-app: stale tids/counts/names from the previous
+    // app misclassify (fail-closed budget exhaustion, false-critical on
+    // recycled tids) and hang or kill a healthy launch.
+    kudroid_fault_state_reset_for_app();
     g_rt = rt.release();
     g_current_app_dir = requested_dir;
     kudroid_touch_source_gate_init();
@@ -451,6 +457,13 @@ extern "C" void kuart_shutdown(void) {
     delete g_rt;
     g_rt = nullptr;
     g_current_app_dir.clear();
+    // The pacer thread outlives the runtime by design (detached); without a
+    // full stop here it keeps dispatching the dead runtime's callbacks —
+    // freed DexObjects — into whatever app launches next.
+    kudroid::frame_pacer_reset_for_relaunch();
+    // ResolveMethod's stub cache is keyed by DexClass* of the dead heap:
+    // serving it to the next app is a use-after-free. Drop it with the heap.
+    kudroid::kuart::ClearResolveCaches();
 }
 
 extern "C" int kuart_is_ready(void) { return (g_rt != nullptr && g_rt->ready) ? 1 : 0; }

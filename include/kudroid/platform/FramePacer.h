@@ -139,6 +139,10 @@ int frame_pacer_pending_count();
 // forget any setFrameRate hint. Not for use on a live guest.
 void frame_pacer_reset_for_test();
 
+// Relaunch path (kuart_shutdown): same full stop. Without it the detached
+// thread keeps dispatching the dead runtime's callbacks into the next app.
+void frame_pacer_reset_for_relaunch();
+
 // Deliver every frame callback that is due right now, on the calling thread,
 // without waiting for the pacer's next tick. Returns how many ran.
 //

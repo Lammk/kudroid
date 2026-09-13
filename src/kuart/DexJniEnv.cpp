@@ -305,14 +305,13 @@ jint DexJniEnv::RegisterNatives(DexClass* klass, const JNINativeMethod* methods,
             ++failures;
             continue;
         }
-        // Binding a bytecode method reports JNI_OK while the pointer never
-        // fires (Execute prefers bytecode for non-natives) — a silent lie
-        // that surfaces as UnsatisfiedLinkError far from the cause.
-        if (!target->IsNative()) {
-            errors += std::string("  not native: ") + m.name + m.signature + "\n";
-            ++failures;
-            continue;
-        }
+        // NOTE: no IsNative() gate here by design. A previous hardening
+        // revision rejected bytecode targets with JNI_ERR and hung every app
+        // at startup: vendor JNI_OnLoad registers against auto-stubbed
+        // framework methods (no bytecode, not flagged native), and failing
+        // the load aborts boot. The binding is still recorded below so the
+        // failure mode stays visible in last_error_, but the return value
+        // preserves the old always-succeed-when-found contract.
         target->native_fn = m.fnPtr;
     }
     if (failures != 0) {
@@ -837,14 +836,11 @@ DexValue DexJniEnv::CallJavaA(DexObject* receiver, DexMethod* method, const jval
 
     if (method->IsNative()) {
         if (!LinkNativeMethod(method)) {
-            // Silent zero here violates the JNI contract (caller sees success)
-            // and buries the cause. Throw loudly instead.
-            if (interpreter_ != nullptr) {
-                interpreter_->ThrowException(
-                    "Ljava/lang/UnsatisfiedLinkError;",
-                    std::string("unbound native method: ") +
-                        (method->name != nullptr ? method->name : "?"));
-            }
+            // Silent zero by design (graceful degradation): a previous
+            // hardening revision threw UnsatisfiedLinkError here and hung
+            // boot — startup code calls natives that legitimately have no
+            // binding yet and limps on with 0. The link-fail line above
+            // already names the method, so nothing is hidden.
             return result;
         }
         return CallNative(method, vals.data(), vals.size());

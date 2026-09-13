@@ -423,6 +423,20 @@ extern "C" unsigned long long kudroid_guest_ui_thread_id(void) {
     return g_guestUiThread.load(std::memory_order_relaxed);
 }
 
+extern "C" void kudroid_fault_state_reset_for_app(void) {
+    g_guestUiThread.store(0, std::memory_order_relaxed);
+    for (auto& slot : g_renderThreads) slot.store(0, std::memory_order_relaxed);
+    for (auto& slot : g_threadNames) {
+        slot.tid.store(0, std::memory_order_relaxed);
+        slot.gen.store(0, std::memory_order_relaxed);
+    }
+    for (auto& slot : g_workerBudgets) {
+        slot.tid.store(0, std::memory_order_relaxed);
+        slot.count.store(0, std::memory_order_relaxed);
+        slot.lastNs.store(0, std::memory_order_relaxed);
+    }
+}
+
 extern "C" void kudroid_note_render_thread(void) {
     const unsigned long long tid = currentThreadIdForCrash();
     for (auto& slot : g_renderThreads) {

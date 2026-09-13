@@ -274,6 +274,11 @@ private:
     static thread_local std::string pending_exception_trace_;
 };
 
+// Drop ResolveMethod's stub/missing caches. Called on shutdown: the entries
+// are keyed by the dying heap's DexClass* and would use-after-free the next
+// app's method table.
+void ClearResolveCaches();
+
 }  // namespace kuart
 }  // namespace kudroid
 

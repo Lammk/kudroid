@@ -87,6 +87,21 @@ int32_t CompareLong(T a, T b) {
 
 }  // namespace
 
+// ResolveMethod's stub + missing-log caches. Namespace scope (not
+// function-static) so ClearResolveCaches can drop them on shutdown: they are
+// keyed by DexClass* of the CURRENT heap, and serving them to the next app is
+// a use-after-free of its method table.
+std::map<std::tuple<const DexClass*, std::string, std::string>, std::unique_ptr<DexMethod>>
+    g_stubMethods;
+std::mutex g_stubMethodMtx;
+std::set<std::string> g_loggedMissingMethods;
+
+void ClearResolveCaches() {
+    std::lock_guard<std::mutex> lock(g_stubMethodMtx);
+    g_stubMethods.clear();
+    g_loggedMissingMethods.clear();
+}
+
 thread_local DexObject* Interpreter::pending_exception_ = nullptr;
 thread_local size_t Interpreter::depth_ = 0;
 thread_local uint64_t Interpreter::instructions_executed_ = 0;
@@ -404,22 +419,17 @@ DexMethod* Interpreter::ResolveMethod(const DexMethod* context, uint32_t method_
     };
 
     if (klass->dex_file == nullptr || isBootClasspathDescriptor(class_descriptor)) {
-        static std::map<std::tuple<const DexClass*, std::string, std::string>,
-                        std::unique_ptr<DexMethod>>
-            s_stubMethods;
-        static std::mutex s_stubMethodMtx;
-        static std::set<std::string> s_loggedMissingMethods;
-        std::lock_guard<std::mutex> lock(s_stubMethodMtx);
+        std::lock_guard<std::mutex> lock(g_stubMethodMtx);
 
         std::string methodKey = std::string(class_descriptor) + "->" + name + signature;
-        if (s_loggedMissingMethods.insert(methodKey).second) {
+        if (g_loggedMissingMethods.insert(methodKey).second) {
             std::fprintf(stderr, "[KuART][MISSING-METHOD] Auto-stubbing missing framework method: %s (dex index %u)\n",
                          methodKey.c_str(), method_idx);
         }
 
         auto key = std::make_tuple(klass, std::string(name), signature);
-        auto it = s_stubMethods.find(key);
-        if (it != s_stubMethods.end()) return it->second.get();
+        auto it = g_stubMethods.find(key);
+        if (it != g_stubMethods.end()) return it->second.get();
 
         auto stubM = std::make_unique<DexMethod>();
         stubM->name = name;
@@ -429,7 +439,7 @@ DexMethod* Interpreter::ResolveMethod(const DexMethod* context, uint32_t method_
         stubM->access_flags = art::kAccPublic;
         stubM->code_item = nullptr;
         DexMethod* res = stubM.get();
-        s_stubMethods.emplace(std::move(key), std::move(stubM));
+        g_stubMethods.emplace(std::move(key), std::move(stubM));
         return res;
     }
     return nullptr;

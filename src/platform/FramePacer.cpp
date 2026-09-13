@@ -772,7 +772,10 @@ int frame_pacer_dispatch_due() {
     return ran;
 }
 
-void frame_pacer_reset_for_test() {
+// Full stop: pacer thread, instances, pipes, counters. Test seam AND the
+// relaunch path (kuart_shutdown): without it the detached thread keeps
+// dispatching the dead runtime's callbacks into the next app.
+void frame_pacer_reset_for_relaunch() {
     {
         std::lock_guard<std::mutex> lock(state().mtx);
         state().stop = true;
@@ -822,6 +825,8 @@ void frame_pacer_reset_for_test() {
     g_first_direct_ns.store(0, std::memory_order_relaxed);
     g_last_telemetry_ms.store(0, std::memory_order_relaxed);
 }
+
+void frame_pacer_reset_for_test() { frame_pacer_reset_for_relaunch(); }
 
 }  // namespace kudroid
 
