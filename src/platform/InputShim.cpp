@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <cstring>
+#include <atomic>
 #include <mutex>
 #include <deque>
 #include <vector>
@@ -70,7 +71,7 @@ struct BionicInputQueue {
     // deletes an abandoned copy so leaks cannot accumulate.
     BionicInputEvent* activeCopy = nullptr;
     uint64_t nextSeq = 1;
-    int32_t id; // looper ident
+    std::atomic<int32_t> id; // looper ident; zero until a native looper attaches
     int wakePipe[2]; // pipe to wake the looper when events arrive
     bool pipeReady;
 
@@ -114,6 +115,11 @@ extern "C" void* kudroid_get_input_queue(void) {
 // silently dropped after the log said they were dispatched.
 static void forward_touch_to_java_activity(int action, float x, float y, int pointerCount) {
     if (kuart_is_ready() != 1) return;
+    // When a native looper is attached, the NDK AInputQueue path already delivers this
+    // event; forwarding it again would dispatch it to Java twice, and every MOVE would
+    // take the VM lock against the render loop. The Java forward exists for titles that
+    // never attach the native queue (the common Unity case).
+    if (g_inputQueue.id.load() != 0) return;
     const bool is_move = (action & 0xff) == 2;  // ACTION_MOVE
     if (is_move && kudroid_touch_source_gate_allow_move() != 1) return;
     // Native enqueue only; the consumer handles VM access and session validity.
@@ -246,7 +252,7 @@ extern "C" void kudroid_inject_touch_event_multi(float x, float y, int32_t actio
     }
 
     // Wake the looper only if a native looper is attached and polling the queue.
-    if (g_inputQueue.id != 0) {
+    if (g_inputQueue.id.load() != 0) {
         ensure_wake_pipe(&g_inputQueue);
         if (g_inputQueue.pipeReady) {
             uint8_t byte = 1;
@@ -318,7 +324,7 @@ extern "C" void bionic_AInputQueue_attachLooper(void* queue, void* looper, int i
                                                 void* callback, void* data) {
     if (!queue) return;
     BionicInputQueue* q = static_cast<BionicInputQueue*>(queue);
-    q->id = ident;
+    q->id.store(ident);
 
     // Register the wake pipe with the looper so poll() wakes on input.
     ensure_wake_pipe(q);

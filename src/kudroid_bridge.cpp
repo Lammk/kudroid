@@ -1139,6 +1139,34 @@ static bool kudroid_try_skip_fault(int /*sig*/, siginfo_t* info, void* ucontext)
                            (unsigned long long)faultAddr,
                            (unsigned long long)newPc);
     if (n > 0) kudroid_persistent_breadcrumb(mark);
+    // Recovered faults otherwise live only in native_breadcrumbs.log, so a storm that
+    // eventually exhausts the per-thread budget looks like a single fatal fault in the
+    // primary crash log (observed: 128 silent skips, then one fatal load in a Unity Job
+    // worker). Mirror the first few and every 16th to kudroid_crash.log so the run-up
+    // is visible where it is actually read. Async-signal-safe: open/write/close only.
+    {
+        static std::atomic<unsigned> s_skipLog{0};
+        const unsigned seen = s_skipLog.fetch_add(1, std::memory_order_relaxed);
+        if (seen < 8 || (seen % 16) == 0) {
+            if (g_logDir[0]) {
+                char rec[320];
+                const int m = snprintf(rec, sizeof(rec), "[fault-skip #%u] %s\n", seen + 1, mark);
+                if (m > 0) {
+                    char path[1200];
+                    size_t dl = std::strlen(g_logDir);
+                    if (dl >= sizeof(path) - 32) dl = sizeof(path) - 32;
+                    std::memcpy(path, g_logDir, dl);
+                    const char* suffix = "/kudroid_crash.log";
+                    std::memcpy(path + dl, suffix, std::strlen(suffix) + 1);
+                    const int fd = ::open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+                    if (fd >= 0) {
+                        (void)!::write(fd, rec, static_cast<size_t>(m));
+                        ::close(fd);
+                    }
+                }
+            }
+        }
+    }
     return true;
 }
 #else

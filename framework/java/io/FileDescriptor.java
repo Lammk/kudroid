@@ -14,10 +14,11 @@ public final class FileDescriptor {
     /**
      * The underlying descriptor number.
      *
-     * Package-private with the same names libcore uses, so the file streams can publish the
-     * descriptor they opened. Without it getFD() returns a FileDescriptor whose valid() is
-     * false even for an open file, and code that checks valid() before reading gives up.
+     * Public with the same names libcore uses. The file streams publish the descriptor
+     * they opened, and android.os.ParcelFileDescriptor (a different package) needs to
+     * read it back for getFd()/detachFd() — package-private made that impossible and
+     * left getFd() returning -1 to every native caller.
      */
-    int getInt$() { return descriptor; }
-    void setInt$(int fd) { this.descriptor = fd; }
+    public int getInt$() { return descriptor; }
+    public void setInt$(int fd) { this.descriptor = fd; }
 }

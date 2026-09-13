@@ -775,7 +775,19 @@ extern "C" int kudroid_asset_resolve_bytes(const char* filename, char** outPath,
     if (outStart) *outStart = 0;
     if (outLength) *outLength = 0;
     auto* asset = open_asset(filename);
-    if (!asset) return 0;
+    if (!asset) {
+        // Instrumentation funnel for the audio/video paths that only speak to the Java
+        // AssetManager (nativeResolveAsset): record every miss, since a missing bank or
+        // resource here is what makes an engine report a corrupt file downstream.
+        static std::atomic<int> s_miss{0};
+        if (s_miss.load() < 60) {
+            ++s_miss;
+            std::string msg = "nativeResolveAsset miss: ";
+            msg += filename != nullptr ? filename : "(null)";
+            kudroid_android_log_message(4, "AssetShim", msg.c_str());
+        }
+        return 0;
+    }
     const std::string path = asset->path;
     const long start = asset->startOffset;
     const long length = asset->length;
@@ -784,6 +796,23 @@ extern "C" int kudroid_asset_resolve_bytes(const char* filename, char** outPath,
     if (asset->file) std::fclose(asset->file);
     delete asset;
     if (length <= 0) return -1;
+    {
+        // Every successful resolve, first 60 then sampled: names the file and the exact
+        // slice handed back, so a wrong offset or a cache-vs-apk route is visible.
+        static std::atomic<int> s_seen{0};
+        static std::atomic<int> s_logged{0};
+        const int seen = s_seen.fetch_add(1, std::memory_order_relaxed) + 1;
+        const int logged = s_logged.load(std::memory_order_relaxed);
+        if (logged < 60 || (seen - logged) >= 256) {
+            s_logged.store(seen, std::memory_order_relaxed);
+            char line[640];
+            std::snprintf(line, sizeof(line),
+                          "nativeResolveAsset: %s -> %s start=%lld len=%lld",
+                          filename != nullptr ? filename : "(null)", path.c_str(),
+                          static_cast<long long>(start), static_cast<long long>(length));
+            kudroid_android_log_message(4, "AssetShim", line);
+        }
+    }
     char* copy = static_cast<char*>(std::malloc(path.size() + 1));
     if (!copy) return -1;
     std::memcpy(copy, path.c_str(), path.size() + 1);

@@ -2326,7 +2326,13 @@ bool Invoke_java_io_File(Interpreter* interp, const char* name, const DexValue* 
     }
 
     struct stat st;
-    int res = stat(path.c_str(), &st);
+    int res = 0;
+    {
+        // File syscalls can block (network-backed roots, slow storage); the VM lock must
+        // not be held across them or every Java thread, touch dispatch included, convoys.
+        VmLockRelease unlocked;
+        res = stat(path.c_str(), &st);
+    }
 
     if (std::strcmp(name, "exists") == 0) {
         *result = DexValue::Int(res == 0 ? 1 : 0);
@@ -2344,33 +2350,60 @@ bool Invoke_java_io_File(Interpreter* interp, const char* name, const DexValue* 
         // The destination needs the same remapping as the source, or a rename inside
         // /data/data would move a container file to a path outside it and fail.
         const std::string dest = RemapJavaPath(GetFilePath(num_args > 1 ? args[1] : DexValue()));
-        *result = DexValue::Int(
-            (!dest.empty() && std::rename(path.c_str(), dest.c_str()) == 0) ? 1 : 0);
+        int rc = -1;
+        {
+            VmLockRelease unlocked;
+            if (!dest.empty()) rc = std::rename(path.c_str(), dest.c_str());
+        }
+        *result = DexValue::Int(rc == 0 ? 1 : 0);
         return true;
     }
     if (std::strcmp(name, "list") == 0) {
-        DIR* dir = opendir(path.c_str());
-        if (dir == nullptr) {
+        // Collect names with the lock released; the DexObject allocation that follows
+        // must happen under it. readdir's buffer is reused, so copy each name out.
+        std::vector<std::string> names;
+        bool opened = false;
+        {
+            VmLockRelease unlocked;
+            DIR* dir = opendir(path.c_str());
+            if (dir != nullptr) {
+                opened = true;
+                while (dirent* entry = readdir(dir)) {
+                    if (std::strcmp(entry->d_name, ".") == 0 ||
+                        std::strcmp(entry->d_name, "..") == 0) {
+                        continue;
+                    }
+                    names.emplace_back(entry->d_name);
+                }
+                closedir(dir);
+            }
+        }
+        if (!opened) {
             result->l = nullptr;
             return true;
         }
-        std::vector<DexObject*> names;
-        while (dirent* entry = readdir(dir)) {
-            if (std::strcmp(entry->d_name, ".") == 0 || std::strcmp(entry->d_name, "..") == 0) {
-                continue;
-            }
-            names.push_back(interp->linker()->NewString(entry->d_name));
-        }
-        closedir(dir);
-        result->l = NewRefArray(interp->linker(), "[Ljava/lang/String;", names);
+        std::vector<DexObject*> objects;
+        objects.reserve(names.size());
+        for (const std::string& n : names) objects.push_back(interp->linker()->NewString(n.c_str()));
+        result->l = NewRefArray(interp->linker(), "[Ljava/lang/String;", objects);
         return true;
     }
     if (std::strcmp(name, "canRead") == 0) {
-        *result = DexValue::Int(access(path.c_str(), R_OK) == 0 ? 1 : 0);
+        int rc = -1;
+        {
+            VmLockRelease unlocked;
+            rc = access(path.c_str(), R_OK);
+        }
+        *result = DexValue::Int(rc == 0 ? 1 : 0);
         return true;
     }
     if (std::strcmp(name, "canWrite") == 0) {
-        *result = DexValue::Int(access(path.c_str(), W_OK) == 0 ? 1 : 0);
+        int rc = -1;
+        {
+            VmLockRelease unlocked;
+            rc = access(path.c_str(), W_OK);
+        }
+        *result = DexValue::Int(rc == 0 ? 1 : 0);
         return true;
     }
     if (std::strcmp(name, "length") == 0) {
@@ -2382,15 +2415,29 @@ bool Invoke_java_io_File(Interpreter* interp, const char* name, const DexValue* 
         return true;
     }
     if (std::strcmp(name, "delete") == 0) {
-        *result = DexValue::Int((unlink(path.c_str()) == 0 || rmdir(path.c_str()) == 0) ? 1 : 0);
+        int rc = -1;
+        {
+            VmLockRelease unlocked;
+            rc = (unlink(path.c_str()) == 0 || rmdir(path.c_str()) == 0) ? 0 : -1;
+        }
+        *result = DexValue::Int(rc == 0 ? 1 : 0);
         return true;
     }
     if (std::strcmp(name, "mkdir") == 0) {
-        *result = DexValue::Int(mkdir(path.c_str(), 0755) == 0 ? 1 : 0);
+        int rc = -1;
+        {
+            VmLockRelease unlocked;
+            rc = mkdir(path.c_str(), 0755);
+        }
+        *result = DexValue::Int(rc == 0 ? 1 : 0);
         return true;
     }
     if (std::strcmp(name, "createNewFile") == 0) {
-        int fd = open(path.c_str(), O_CREAT | O_EXCL | O_WRONLY, 0644);
+        int fd = -1;
+        {
+            VmLockRelease unlocked;
+            fd = open(path.c_str(), O_CREAT | O_EXCL | O_WRONLY, 0644);
+        }
         if (fd >= 0) {
             close(fd);
             *result = DexValue::Int(1);
@@ -2406,9 +2453,14 @@ bool Invoke_java_io_File(Interpreter* interp, const char* name, const DexValue* 
 bool Invoke_java_io_FileInputStream(Interpreter* /*interp*/, const char* name, const DexValue* args,
                                     size_t /*num_args*/, DexValue* result) {
     if (std::strcmp(name, "openNative") == 0) {
-        // Static native: args[0] is the path, not a receiver.
+        // Static native: args[0] is the path, not a receiver. Resolve the path under
+        // the lock; open() itself can block, so it runs with the lock released.
         const std::string path = RemapJavaPath(GetStringUtf8(args[0]));
-        int fd = path.empty() ? -1 : open(path.c_str(), O_RDONLY);
+        int fd = -1;
+        if (!path.empty()) {
+            VmLockRelease unlocked;
+            fd = open(path.c_str(), O_RDONLY);
+        }
         *result = DexValue::Int(fd);
         return true;
     }
@@ -2422,7 +2474,12 @@ bool Invoke_java_io_FileInputStream(Interpreter* /*interp*/, const char* name, c
             return true;
         }
         uint8_t* buf = reinterpret_cast<uint8_t*>(arr + 1) + off;
-        ssize_t n = read(fd, buf, static_cast<size_t>(len));
+        ssize_t n;
+        {
+            // Reading a large asset can take tens of ms; release the lock for it.
+            VmLockRelease unlocked;
+            n = read(fd, buf, static_cast<size_t>(len));
+        }
         *result = DexValue::Int(static_cast<int32_t>(n));
         return true;
     }
@@ -2433,16 +2490,27 @@ bool Invoke_java_io_FileInputStream(Interpreter* /*interp*/, const char* name, c
             *result = DexValue::Long(0);
             return true;
         }
-        const off_t before = lseek(fd, 0, SEEK_CUR);
-        const off_t after = lseek(fd, static_cast<off_t>(n), SEEK_CUR);
+        off_t before = -1;
+        off_t after = -1;
+        {
+            VmLockRelease unlocked;
+            before = lseek(fd, 0, SEEK_CUR);
+            after = lseek(fd, static_cast<off_t>(n), SEEK_CUR);
+        }
         *result = DexValue::Long(after < 0 || before < 0 ? 0 : static_cast<int64_t>(after - before));
         return true;
     }
     if (std::strcmp(name, "availableNative") == 0) {
         const int fd = args[0].i;
         struct stat st;
-        const off_t pos = fd >= 0 ? lseek(fd, 0, SEEK_CUR) : -1;
-        if (fd < 0 || pos < 0 || fstat(fd, &st) != 0) {
+        off_t pos = -1;
+        int rc = -1;
+        {
+            VmLockRelease unlocked;
+            pos = fd >= 0 ? lseek(fd, 0, SEEK_CUR) : -1;
+            rc = (fd < 0 || pos < 0) ? -1 : fstat(fd, &st);
+        }
+        if (rc != 0) {
             *result = DexValue::Int(0);
             return true;
         }
@@ -2464,7 +2532,11 @@ bool Invoke_java_io_FileOutputStream(Interpreter* /*interp*/, const char* name, 
         const std::string path = RemapJavaPath(GetStringUtf8(args[0]));
         bool append = args[1].i != 0;
         int flags = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
-        int fd = path.empty() ? -1 : open(path.c_str(), flags, 0644);
+        int fd = -1;
+        if (!path.empty()) {
+            VmLockRelease unlocked;
+            fd = open(path.c_str(), flags, 0644);
+        }
         *result = DexValue::Int(fd);
         return true;
     }
@@ -2475,7 +2547,11 @@ bool Invoke_java_io_FileOutputStream(Interpreter* /*interp*/, const char* name, 
         int32_t len = args[3].i;
         if (fd >= 0 && arr != nullptr && off >= 0 && len >= 0 && off + len <= arr->length) {
             uint8_t* buf = reinterpret_cast<uint8_t*>(arr + 1) + off;
-            ssize_t n = write(fd, buf, static_cast<size_t>(len));
+            ssize_t n;
+            {
+                VmLockRelease unlocked;
+                n = write(fd, buf, static_cast<size_t>(len));
+            }
             *result = DexValue::Int(static_cast<int32_t>(n));
         } else {
             *result = DexValue::Int(-1);
@@ -2497,6 +2573,7 @@ bool Invoke_java_io_PrintStream(Interpreter* /*interp*/, const char* name, const
         auto* arr = reinterpret_cast<DexArray*>(args[1].l);
         if (arr != nullptr) {
             uint8_t* buf = reinterpret_cast<uint8_t*>(arr + 1);
+            VmLockRelease unlocked;
             write(fd == 2 ? STDERR_FILENO : STDOUT_FILENO, buf, static_cast<size_t>(arr->length));
         }
         return true;
@@ -2623,6 +2700,29 @@ struct JavaFrameCallback {
 std::mutex g_java_frame_mutex;
 std::vector<JavaFrameCallback*> g_java_frame_contexts;
 
+// Drops the callback's global ref once the last queued context naming it is gone.
+// add/remove is refcounted implicitly by scanning the live context list: the same
+// Java object may be posted more than once, and deleting its ref while another copy
+// is still queued would break JNI reachability for that copy.
+void FrameCallbackReleaseGlobalRef(Interpreter* interp, DexObject* callback) {
+    if (interp == nullptr || callback == nullptr) return;
+    bool still_queued = false;
+    {
+        std::lock_guard<std::mutex> lock(g_java_frame_mutex);
+        for (JavaFrameCallback* c : g_java_frame_contexts) {
+            if (c->callback == callback) {
+                still_queued = true;
+                break;
+            }
+        }
+    }
+    if (!still_queued && interp->jni_env() != nullptr) {
+        // AsHandle()/AsObject() are identity casts in DexJniEnv; AddGlobalRef inserted
+        // this DexObject*, so the same pointer erases it.
+        interp->jni_env()->DeleteGlobalRef(reinterpret_cast<jobject>(callback));
+    }
+}
+
 // Invoked by the pacer - either on the guest thread that polled its looper, or on the
 // pacer thread. Runs bytecode, so it must take the VM lock, which Execute() does for
 // itself when the calling thread does not already hold it.
@@ -2666,6 +2766,7 @@ void JavaFrameCallbackTrampoline(int64_t frame_time_ns, void* data) {
             }
         }
     }
+    FrameCallbackReleaseGlobalRef(interp, callback);
     delete ctx;
 }
 
@@ -2724,6 +2825,11 @@ bool Invoke_android_view_Choreographer(Interpreter* interp, const char* name,
                     reinterpret_cast<void*>(&JavaFrameCallbackTrampoline), ctx) > 0) {
                 delete ctx;
             }
+        }
+        // All contexts for this object are gone (either deleted above or now owned by
+        // the trampoline, which releases too); drop the ref if no copy remains queued.
+        if (!matches.empty()) {
+            FrameCallbackReleaseGlobalRef(interp, callback);
         }
         return true;
     }
@@ -2977,12 +3083,20 @@ bool Invoke_java_lang_Runtime(Interpreter* interp, const char* name, const DexVa
         interp->ThrowException("Ljava/lang/UnsatisfiedLinkError;", "empty library name");
         return true;
     }
+    // Copy the name: dlopen/JNI_OnLoad runs arbitrary native init that can block on I/O
+    // or re-enter the interpreter, and the guest string must not be relied on across it.
+    const std::string lib_name(arg);
+    bool loaded = true;
     if (g_load_lib_cb != nullptr) {
-        if (!g_load_lib_cb(arg)) {
-            interp->ThrowException("Ljava/lang/UnsatisfiedLinkError;",
-                                   std::string("Couldn't load ") + arg);
-            return true;
-        }
+        // Drop the VM lock: loading a library can take arbitrarily long and its
+        // JNI_OnLoad may call back into Java (which needs to take the lock itself).
+        VmLockRelease unlocked;
+        loaded = g_load_lib_cb(lib_name.c_str());
+    }
+    if (!loaded) {
+        interp->ThrowException("Ljava/lang/UnsatisfiedLinkError;",
+                               std::string("Couldn't load ") + lib_name);
+        return true;
     }
     return true;
 }

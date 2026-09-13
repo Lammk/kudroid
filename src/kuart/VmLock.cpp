@@ -3,8 +3,10 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <mutex>
 #include <pthread.h>
+#include <thread>
 #if !defined(__APPLE__)
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -18,7 +20,61 @@ namespace kuart {
 
 namespace {
 
-std::recursive_mutex g_vm_lock;
+// FIFO recursive mutex.
+//
+// The VM lock used to be a std::recursive_mutex, which is not fair: an owner that
+// releases and immediately re-acquires (which the JNI downcall path does around every
+// native, and the FramePacer does every frame) can barge ahead of a parked waiter
+// indefinitely. The single touch-dispatch worker therefore queued behind the render
+// loop and the lag grew with load. Queuing waiters in arrival order bounds that wait.
+//
+// Uncontended acquire and same-thread recursion stay on the fast path (no allocation,
+// no condition variable); only genuine cross-thread contention allocates a queue slot.
+// Ownership is per-thread and recursive; unlock() is only honoured for the owner, and
+// releasing the last level wakes exactly the thread at the head of the queue.
+class FairRecursiveMutex {
+public:
+    void lock() {
+        std::unique_lock<std::mutex> lock(m_);
+        const std::thread::id self = std::this_thread::get_id();
+        if (count_ == 0 && waiters_.empty()) {
+            owner_ = self;
+            count_ = 1;
+            return;
+        }
+        if (count_ > 0 && owner_ == self) {
+            ++count_;
+            return;
+        }
+        // Arrival order: the tail of the queue is served last. A barging lock() cannot
+        // jump a non-empty queue because the first test requires waiters_ to be empty.
+        waiters_.push_back(self);
+        cv_.wait(lock, [this, &self] {
+            return count_ == 0 && !waiters_.empty() && waiters_.front() == self;
+        });
+        waiters_.pop_front();
+        owner_ = self;
+        count_ = 1;
+    }
+
+    void unlock() {
+        std::lock_guard<std::mutex> lock(m_);
+        if (count_ == 0 || owner_ != std::this_thread::get_id()) return;
+        if (--count_ == 0) {
+            owner_ = std::thread::id{};
+            cv_.notify_all();
+        }
+    }
+
+private:
+    std::mutex m_;
+    std::condition_variable cv_;
+    std::thread::id owner_{};
+    int count_ = 0;
+    std::deque<std::thread::id> waiters_;
+};
+
+FairRecursiveMutex g_vm_lock;
 
 // Recursion depth; main thread enters bytecode without VmLockGuard.
 thread_local int t_vm_lock_depth = 0;
