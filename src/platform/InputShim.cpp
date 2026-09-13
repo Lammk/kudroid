@@ -89,7 +89,15 @@ extern "C" void* kudroid_get_input_queue(void) {
 
 #include "kudroid/KuArtRuntime.h"
 
+// The gate exists to keep a drag from costing one VM-locked interpreted dispatch
+// per 60-120 Hz MOVE (see NativeTouchGate.cpp). It must also only run while a
+// runtime is live: kuart_post_touch_event queues regardless, but a queue pushed
+// before kuart_launch_app resets it with accepting_=false — those events were
+// silently dropped after the log said they were dispatched.
 static void forward_touch_to_java_activity(int action, float x, float y, int pointerCount) {
+    if (kuart_is_ready() != 1) return;
+    const bool is_move = (action & 0xff) == 2;  // ACTION_MOVE
+    if (is_move && kudroid_touch_source_gate_allow_move() != 1) return;
     // Native enqueue only; the consumer handles VM access and session validity.
     kuart_post_touch_event(action, x, y, pointerCount);
 }

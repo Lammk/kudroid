@@ -1107,12 +1107,16 @@ bool fault_skip_load_store(ucontext_t* uc, uintptr_t faultAddr, uint64_t* newPcO
             // 29/30 never take a transfer result in valid code, 31 is XZR
             // (no effect): refuse rather than reason about them.
             if (p.rt >= 29 || (p.isPair && p.rt2 >= 29)) return false;
-            // Poison 0xDEAD (zero-extended): unmapped as a pointer so misuse
-            // faults fast and attributably, small as a length so a corrupted
-            // trip count cannot explode, nonzero as a flag so taken branches
-            // stay visible. Zero would pass as plausible everywhere.
-            uc->uc_mcontext->__ss.__x[p.rt] = 0xDEADull;
-            if (p.isPair) uc->uc_mcontext->__ss.__x[p.rt2] = 0xDEADull;
+            // Zero, not a poison value: the register result feeds straight
+            // into later pointer arithmetic, and a poison like 0xDEAD turned
+            // "base + offset" into an unmapped address a few instructions
+            // later (observed live: x12=0xdead then SIGBUS on x14 load in a
+            // Unity Job.Worker). Zero is what the hardware faults read as on
+            // a null page, which is the semantics a faulting load leaves
+            // behind — an engine null-check then treats it as the missing
+            // data it already handles everywhere else.
+            uc->uc_mcontext->__ss.__x[p.rt] = 0;
+            if (p.isPair) uc->uc_mcontext->__ss.__x[p.rt2] = 0;
         }
     }
     *newPcOut = pc + 4;

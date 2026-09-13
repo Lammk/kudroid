@@ -1630,8 +1630,18 @@ FILE* vfs_fopen(const char* path, const char* mode) {
          std::strstr(path, ".bundle") != nullptr || std::strstr(path, ".resource") != nullptr ||
          std::strstr(path, "sharedassets") != nullptr || std::strstr(path, "data.unity3d") != nullptr ||
          std::strstr(path, "assets/bin/") != nullptr)) {
-        std::fprintf(stderr, "[KuDroidVFS] fopen(%s) -> %s\n", path,
-                     result ? "OK" : std::strerror(errno));
+        // Rate-limited: the engine opens base.apk thousands of times per session and
+        // each line is a synchronous stderr write on the reader's thread — plain log
+        // volume inside the hot asset path. First 40, then one per 256 further opens.
+        static std::atomic<int> s_fopenLogged{0};
+        static std::atomic<int> s_fopenSeen{0};
+        const int seen = s_fopenSeen.fetch_add(1, std::memory_order_relaxed) + 1;
+        const int logged = s_fopenLogged.load(std::memory_order_relaxed);
+        if (logged < 40 || (seen - logged) >= 256) {
+            s_fopenLogged.store(seen, std::memory_order_relaxed);
+            std::fprintf(stderr, "[KuDroidVFS] fopen(%s) -> %s (n=%d)\n", path,
+                         result ? "OK" : std::strerror(errno), seen);
+        }
     }
     if (result != nullptr && path != nullptr) {
         const size_t len = std::strlen(path);
@@ -1787,25 +1797,54 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
         // file") while meshes from the same APK render. The bytes are read
         // from the buffer just filled — zero extra I/O — and ftell is
         // userspace. Starts past 4MB of flow so startup probing (EOCD,
-        // central directory, catalog) does not consume the budget; what
-        // remains is bundle/clip territory. If clip reads land on
-        // FSB5/OggS, the bytes are right and FMOD is at fault
-        // environmentally; central-directory/EOCD/zeros instead means
-        // wrong-file/wrong-offset upstream.
-        static std::atomic<int> s_magic{0};
-        if (total > 4ULL * 1024 * 1024 && s_magic.load() < 30 && buf != nullptr &&
-            n * size >= 4) {
-            ++s_magic;
+        // central directory, catalog) does not consume the budget.
+        //
+        // Sampled every 16MB of flow, not "first 30": a fixed early budget was
+        // all eaten by bundle streaming before the audio-clip loads began, so
+        // the one window that mattered (Cannot load audio data at 17:31:27)
+        // had no samples left. A per-flow rate keeps samples landing across
+        // the whole session — audio included — at the same small log volume.
+        // The offset is mapped back to its ZIP entry via the in-memory index,
+        // so the line names the file the guest is actually reading, not just
+        // four bytes at a mystery offset.
+        static std::atomic<unsigned long long> s_nextSniff{4ULL * 1024 * 1024};
+        static std::atomic<int> s_magicCount{0};
+        if (total >= s_nextSniff.load(std::memory_order_relaxed) && s_magicCount.load() < 64 &&
+            buf != nullptr && n * size >= 4) {
+            s_magicCount.fetch_add(1, std::memory_order_relaxed);
+            s_nextSniff.fetch_add(16ULL * 1024 * 1024, std::memory_order_relaxed);
             const long off = std::ftell(stream);
+            const long start = off >= 0 ? off - static_cast<long>(n * size) : -1;
             const auto* b = static_cast<const unsigned char*>(buf);
+            // Which entry does this offset belong to? The stream path is the
+            // APK the tracker recorded; a miss (unindexed archive, offset past
+            // the entries) falls back to the raw-bytes line alone.
+            std::string entryName;
+            {
+                std::lock_guard<std::mutex> vlock(g_freadVolMtx);
+                const auto pit = g_freadPaths.find(stream);
+                if (pit != g_freadPaths.end()) {
+                    const auto index = get_or_build_zip_index(pit->second);
+                    if (index && start >= 0) {
+                        for (const auto& [name, meta] : index->entries) {
+                            if (start >= static_cast<long long>(meta.payloadOffset) &&
+                                start < static_cast<long long>(meta.payloadOffset +
+                                                               meta.uncompressedSize)) {
+                                entryName = name;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
             std::fprintf(stderr,
-                         "[KuDroidApkF] magic off=%ld n=%zu %02x%02x%02x%02x '%c%c%c%c'\n",
-                         off >= 0 ? off - static_cast<long>(n * size) : -1,
-                         n * size, b[0], b[1], b[2], b[3],
+                         "[KuDroidApkF] magic off=%ld n=%zu %02x%02x%02x%02x '%c%c%c%c'%s%s\n",
+                         start, n * size, b[0], b[1], b[2], b[3],
                          b[0] >= 32 && b[0] < 127 ? b[0] : '.',
                          b[1] >= 32 && b[1] < 127 ? b[1] : '.',
                          b[2] >= 32 && b[2] < 127 ? b[2] : '.',
-                         b[3] >= 32 && b[3] < 127 ? b[3] : '.');
+                         b[3] >= 32 && b[3] < 127 ? b[3] : '.',
+                         entryName.empty() ? "" : " entry=", entryName.c_str());
         }
     }
     if (n > 0) {

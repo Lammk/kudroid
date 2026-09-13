@@ -95,6 +95,25 @@ public class InputDevice {
     }
 
     /**
+     * The character map Unity's input init reads through. Its absence was a
+     * NoSuchMethodError on first device query, aborting the engine's input
+     * setup so later touch dispatches were dropped whole (live: 158 injects
+     * with zero movement in-game). An empty map is what a keyboard-less
+     * touchscreen answers.
+     */
+    public android.view.KeyCharacterMap getKeyCharacterMap() {
+        return android.view.KeyCharacterMap.load(KeyCharacterMap.BUILT_IN_KEYBOARD);
+    }
+
+    /** Which of the given key codes exist on this device: all, as the AOSP
+     *  virtual-device answer — callers index the result per input code. */
+    public boolean[] hasKeys(int... keyCodes) {
+        boolean[] result = new boolean[keyCodes == null ? 0 : keyCodes.length];
+        java.util.Arrays.fill(result, true);
+        return result;
+    }
+
+    /**
      * android.view.InputDevice$MotionRange — native input code enumerates this to
      * decide whether a device is a usable touchscreen. Without it (missing method
      * or empty ranges) Unity concludes there is no touchscreen and drops every
