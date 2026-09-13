@@ -323,10 +323,7 @@ jint DexJniEnv::RegisterNatives(DexClass* klass, const JNINativeMethod* methods,
 bool DexJniEnv::LinkNativeMethod(DexMethod* method) {
     if (method == nullptr) return false;
     if (method->native_fn != nullptr) return true;
-    if (method->link_refused) return false;
     if (LibCoreHasMethod(method)) return true;
-    // No lookup installed yet: do NOT mark refused — it may arrive (startup
-    // ordering), and a sticky refusal would break every later link.
     if (symbol_lookup_ == nullptr || method->declaring_class == nullptr) return false;
 
     const char* descriptor = method->declaring_class->descriptor;
@@ -343,7 +340,8 @@ bool DexJniEnv::LinkNativeMethod(DexMethod* method) {
         return true;
     }
     last_error_ = "native symbol not found: " + short_name;
-    method->link_refused = true;
+    // No negative cache: an early miss must not stick — libraries and symbols
+    // appear during startup, and a sticky refusal broke boot on 2f5486c..HEAD.
     // One-line confirmation for dead native bindings (e.g. vendor
     // UnityPlayer.nativeInjectEvent): the Java frames run but the body never
     // does, with no other trace. Rate-limited per method to survive floods.
@@ -714,17 +712,12 @@ DexValue DexJniEnv::CallJavaA(DexObject* receiver, DexMethod* method, const jval
     }
 
     // Validate native-supplied receiver; fall back to non-virtual on bad handles.
-    // A substituted jclass receiver remembers it was one: an instance method
-    // resolved against it below would otherwise execute on a Class object it
-    // was never written for (and fault deep inside its field reads).
-    bool receiver_was_jclass = false;
     if (receiver != nullptr && linker_ != nullptr &&
         linker_->IsRegisteredClass(reinterpret_cast<const DexClass*>(receiver))) {        // A jclass receiver is not a mistake. In the JNI object model a jclass IS the
         // A jclass is a valid Class object; substitute the heap instance.
         if (DexClassObject* as_object = linker_->GetClassObject(
                 const_cast<DexClass*>(reinterpret_cast<const DexClass*>(receiver)))) {
             receiver = as_object;
-            receiver_was_jclass = true;
         }
     }
 
@@ -733,13 +726,6 @@ DexValue DexJniEnv::CallJavaA(DexObject* receiver, DexMethod* method, const jval
             DexMethod* found = receiver_class->FindVirtualMethod(method->name, method->signature);
             if (found != nullptr) {
                 method = found;
-            } else if (receiver_was_jclass) {
-                // Graceful decline, not a dispatch: the method does not exist
-                // on java.lang.Class, and falling through would run it
-                // non-virtually on the substitute with a foreign receiver.
-                // Zero without a pending exception — the caller asked for
-                // best-effort, and noise here would poison its next call.
-                return result;
             } else {
                 // Was silent: falling through to a non-virtual call on the
                 // interface/abstract method (e.g. Runnable.run on a Proxy whose

@@ -514,17 +514,29 @@ bool guest_signal_dispatch(int host_signum, void* host_siginfo, void* host_ucont
             auto* ss = &hu->uc_mcontext->__ss;
             if (s.uc.uc_mcontext.pc != pc_before) {
                 // The guest redirected execution: validate before committing.
-                // An unmapped, host-text, or misaligned pc would resume into
-                // garbage (or host code) with guest register state — decline
-                // and let the crash path dump/park instead.
+                // Decline ONLY the clearly-bad cases (null, misaligned). A
+                // lookup miss does NOT decline: JIT trampolines, stack
+                // thunks and not-yet-mapped stubs are all legitimate redirect
+                // targets the module map does not know, and declining them
+                // resumes at the faulting PC into an immediate re-fault spin
+                // (which is exactly how a boot hang looked). The miss is
+                // logged once instead.
                 const uint64_t newPc = s.uc.uc_mcontext.pc;
-                char mod[256] = {0};
-                const bool pcOk = newPc != 0 && (newPc & 3) == 0 &&
-                                  kudroid_lookup_guest_module(
-                                      reinterpret_cast<void*>(newPc), mod, sizeof(mod));
-                if (!pcOk) {
+                if (newPc == 0 || (newPc & 3) != 0) {
                     state_changed = false;
                 } else {
+                    char mod[256] = {0};
+                    if (!kudroid_lookup_guest_module(
+                            reinterpret_cast<void*>(newPc), mod, sizeof(mod))) {
+                        static std::atomic<int> s_unmappedRedirect{0};
+                        if (s_unmappedRedirect.fetch_add(1, std::memory_order_relaxed) < 4) {
+                            char msg[128];
+                            std::snprintf(msg, sizeof(msg),
+                                          "guest redirect to unmapped pc=0x%llx allowed",
+                                          static_cast<unsigned long long>(newPc));
+                            kudroid_android_log_message(4, "KuDroidSignal", msg);
+                        }
+                    }
                     for (int i = 0; i < 29; ++i) ss->__x[i] = s.uc.uc_mcontext.regs[i];
                 arm_thread_state64_set_fp(*ss, s.uc.uc_mcontext.regs[29]);
                 arm_thread_state64_set_lr_fptr(*ss, reinterpret_cast<void*>(s.uc.uc_mcontext.regs[30]));

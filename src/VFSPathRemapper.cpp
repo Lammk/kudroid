@@ -980,8 +980,10 @@ uint64_t zip_extract_entry(const std::string& archivePath, const std::string& en
     }
     // verify, then commit: size AND central-directory CRC before the bytes
     // become servable. Rename is atomic; a crash anywhere above leaves at
-    // most the .part orphan, never a trusted partial.
-    if (ok && (written != hit.usize || crc != hit.crc)) ok = false;
+    // most the .part orphan, never a trusted partial. A zero CRC in the
+    // central directory means the writer never filled it (legal for streamed
+    // archives): size+fstat is the floor, crc only when known.
+    if (ok && (written != hit.usize || (hit.crc != 0 && crc != hit.crc))) ok = false;
     if (ok) {
         // A counter is not proof: ENOSPC or a torn page can leave fewer bytes
         // than counted. Flush, sync, then believe fstat — not the accumulator.

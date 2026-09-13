@@ -113,6 +113,10 @@ public final class MessageQueue {
      * Returns the next message ready to be executed, or null if the queue is quitting.
      */
     Message next() {
+        // Idle handlers run at most once per wakeup: without this a
+        // staying-registered handler re-runs every loop with no wait in
+        // between (spin). The flag resets on every wait below.
+        boolean idled = false;
         for (;;) {
             IdleHandler[] idle = null;
             long waitMs = 0;
@@ -153,20 +157,46 @@ public final class MessageQueue {
             // Outside the monitor: handlers run arbitrary interpreted code
             // that may itself synchronize or enqueue. Running them under the
             // queue monitor inverted lock order against every such path.
-            if (idle != null) {
+            if (idle != null && idle.length > 0 && !idled) {
                 runIdleHandlers(idle);
+                idled = true;
+                // Re-evaluate from the top: anything enqueued during the
+                // unlocked run is visible now. Falling straight into the wait
+                // below would lose its notify and hang.
+                continue;
             }
             synchronized (this) {
                 if (mQuitting) {
                     return null;
                 }
-                try {
-                    if (waitForever) {
-                        this.wait();
-                    } else if (waitMs > 0) {
-                        this.wait(waitMs);
+                // Re-check under the lock: an enqueue that landed between the
+                // first check and this lock has no waiter to wake yet, so its
+                // notifyAll is already spent — a blind wait here would sleep
+                // through it. Re-derive the timeout from the CURRENT head:
+                // a future-due message that arrived in the gap must wake us
+                // at its own `when`, not sleep unbounded on a stale
+                // waitForever flag (that was the boot hang).
+                Message head = mMessages;
+                if (head != null && SystemClock.uptimeMillis() >= head.when) {
+                    continue;
+                }
+                long remaining = waitForever ? -1 : waitMs;
+                if (head != null) {
+                    final long r = head.when - SystemClock.uptimeMillis();
+                    if (waitForever || r < remaining) {
+                        remaining = r;
                     }
-                } catch (InterruptedException ignored) {}
+                }
+                try {
+                    if (remaining < 0) {
+                        this.wait();
+                    } else if (remaining > 0) {
+                        this.wait(remaining);
+                    }
+                    idled = false;
+                } catch (InterruptedException ignored) {
+                    idled = false;
+                }
             }
         }
     }

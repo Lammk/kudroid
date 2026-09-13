@@ -205,13 +205,10 @@ DexClass* Interpreter::CallerClass() const {
 }
 
 void Interpreter::ThrowException(const char* descriptor, const std::string& message) {
-    // Preserve-first: a second throw while one is in flight (e.g. a clinit
-    // failure triggering another throw) must not destroy the original cause —
-    // the breadcrumb system exists to report root causes, not follow-on noise.
-    if (pending_exception_ != nullptr) {
-        last_error_ += " (while handling: " + std::string(descriptor) + ": " + message + ")";
-        return;
-    }
+    // Old contract: a throw always overwrites (the JVM propagates the NEW
+    // exception and suppresses the old). A preserve-first variant that kept
+    // the old exception hung clinit chains at boot: callers rely on the slot
+    // naming what just fired, and a cleanup throw must not be swallowed.
     last_error_ = std::string(descriptor) + ": " + message;
     pending_exception_trace_ = BuildStackTrace();
 
@@ -369,8 +366,21 @@ bool Interpreter::CheckInstanceField(DexObject* obj, DexField* field, uint32_t w
     const DexClass* clazz = obj->clazz;
     if (clazz == nullptr || field->declaring_class == nullptr ||
         !clazz->IsSubClassOf(field->declaring_class)) {
-        ThrowException("Ljava/lang/NoSuchFieldError;", "field class mismatch");
-        return false;
+        // Log once, do not throw: hierarchy bookkeeping (stub classes,
+        // unlinked superclasses during early linking) made legitimate boot
+        // accesses mismatch, and the NoSuchFieldError killed the init thread.
+        static std::mutex s_mtx;
+        static std::set<std::string> s_reported;
+        std::lock_guard<std::mutex> lock(s_mtx);
+        const std::string key = std::string(clazz && clazz->descriptor ? clazz->descriptor : "?") +
+                                "." + (field->name != nullptr ? field->name : "?");
+        if (s_reported.insert(key).second && clazz != nullptr && field->declaring_class != nullptr) {
+            std::fprintf(stderr,
+                         "[KuART][FIELD] offset check relaxed: %s not subclass of %s\n",
+                         clazz->descriptor ? clazz->descriptor : "?",
+                         field->declaring_class->descriptor ? field->declaring_class->descriptor : "?");
+        }
+        return true;
     }
     // object_size==0 means the layout was never computed (synthetic/test
     // classes): nothing to check against, so trust the offset. A computed
@@ -1009,7 +1019,6 @@ DexValue Interpreter::ExecuteFrame(DexFrame* frame) {
 
         frame->set_caught_exception(pending_exception_);
         ClearPendingException();
-        if (jni_env_ != nullptr) jni_env_->ClearException();
         frame->set_dex_pc(handler_pc);
     }
 }
@@ -2249,12 +2258,13 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                     ThrowException("Ljava/lang/NullPointerException;", "throw null");
                     return return_value;
                 }
-                // Both slots: the JNI env keeps its own TLS copy, and a THROW
-                // that sets only the interpreter slot is shadowed by a stale
-                // env slot on the next ExceptionCheck (wrong exception fires).
-                // The catch path below clears both symmetrically.
+                // Interpreter slot only, by design: a Java `throw` is caught
+                // by FindCatchHandler in this same interpreter. Mirroring it
+                // into the JNI env made a normal throw visible to a native
+                // ExceptionCheck on the call stack above and hung boot. The
+                // reverse gap (native throw invisible to bytecode) is covered
+                // by DexJniEnv::SetPendingException, which already forwards.
                 pending_exception_ = ex;
-                if (jni_env_ != nullptr) jni_env_->SetPendingException(ex);
                 last_error_ = std::string("throw ") +
                               (ex->clazz != nullptr ? ex->clazz->PrettyName() : "?");
                 // Guest `throw` skips ThrowException(), so the trace has to be

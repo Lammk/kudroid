@@ -61,12 +61,6 @@ struct DexMethod {
     // Linked native function pointer (RegisterNatives or dlsym).
     void* native_fn = nullptr;
 
-    // Negative link cache: a failed symbol lookup repeats mangling + host
-    // dlsym + the fail-log mutex on EVERY call otherwise. Refusal is stable
-    // (libraries do not appear mid-run), so remember it. Plain bool like the
-    // JIT state above: a race only repeats one lookup.
-    bool link_refused = false;
-
     // ── JIT state ──
     //
     // Kept on the method rather than in a side table because it is read on every call:
