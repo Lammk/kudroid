@@ -832,6 +832,7 @@ struct DebugView: View {
     @Binding var fullLog: String
     @Binding var jitStatus: String
     @State private var showCopyAlert = false
+    @State private var jniTraceOn = false
     @State private var kdbServerIP: String = UserDefaults.standard.string(forKey: "kdb_server_ip") ?? ""
     @State private var isKdbConnected: Bool = false
     
@@ -884,6 +885,18 @@ struct DebugView: View {
                             .font(.headline)
                             .foregroundColor(.white)
                         Spacer()
+                        // Per-JNI-call tracing. Off by default: thousands of
+                        // lines a second cost frames. Toggle takes effect
+                        // immediately, no rebuild, no env var.
+                        Toggle("JNI", isOn: $jniTraceOn)
+                            .font(.caption)
+                            .toggleStyle(.switch)
+                            .onChange(of: jniTraceOn) { on in
+                                kudroid_log_set_jni(on ? 1 : 0)
+                            }
+                            .onAppear {
+                                jniTraceOn = kudroid_log_get_jni() != 0
+                            }
                         Label(jitStatus, systemImage: jitStatus.contains("Enabled") ? "bolt.fill" : "bolt.slash.fill")
                             .font(.caption)
                             .padding(.horizontal, 8)

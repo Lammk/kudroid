@@ -51,6 +51,12 @@ const char* kudroid_jit_status(void);
 void kudroid_set_log_dir(const char* dir);
 void kudroid_clear_all_logs(void);
 
+/// Per-JNI-call tracing toggle for the Debug tab (KuARTNative enter/exit per
+/// call). Off by default: at thousands of calls a second the log pipeline
+/// itself costs frames. Takes effect immediately, no rebuild.
+void kudroid_log_set_jni(int enabled);
+int kudroid_log_get_jni(void);
+
 /// Record an iOS-side lifecycle/diagnostic marker in the persistent KuDroid log.
 void kudroid_ios_diagnostic_phase(const char* phase);
 

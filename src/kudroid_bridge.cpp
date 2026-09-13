@@ -14,6 +14,7 @@
 #include "kudroid/abi/BlockingWaitRegistry.h"
 #include "kudroid/abi/GuestSignals.h"
 #include "kudroid/debug/FrameWalk.h"
+#include "kudroid/Log.h"
 #include <cstdio>
 #include <cstdlib>
 #include <chrono>
@@ -2064,9 +2065,18 @@ extern "C" void kudroid_set_log_dir(const char* dir) {
     kuart_set_missing_class_log_path(classesLogPath.c_str());
 }
 
+// Debug-tab toggle for per-JNI-call tracing (replaces the TEMP-DEBUG hardcode
+// and the Xcode-scheme env var, neither of which survives a real workflow).
+extern "C" void kudroid_log_set_jni(int enabled) {
+    kudroid::log::set_jni(enabled != 0);
+}
+
+extern "C" int kudroid_log_get_jni(void) {
+    return kudroid::log::jni_enabled() ? 1 : 0;
+}
+
 extern "C" void kudroid_clear_all_logs(void) {
     if (!g_logDir[0]) return;
-
     std::error_code ec;
 
     // 1. Wipe all files in logs directory
