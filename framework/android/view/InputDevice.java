@@ -34,6 +34,17 @@ public class InputDevice {
     public static final int KEYBOARD_TYPE_NON_ALPHABETIC = 1;
     public static final int KEYBOARD_TYPE_ALPHABETIC = 2;
 
+    // Axis codes are Android's; native input code looks them up by number.
+    public static final int AXIS_X = 0;
+    public static final int AXIS_Y = 1;
+    public static final int AXIS_PRESSURE = 2;
+    public static final int AXIS_SIZE = 3;
+    public static final int AXIS_TOUCH_MAJOR = 4;
+    public static final int AXIS_TOUCH_MINOR = 5;
+    public static final int AXIS_TOOL_MAJOR = 6;
+    public static final int AXIS_TOOL_MINOR = 7;
+    public static final int AXIS_ORIENTATION = 8;
+
     private static final InputDevice sTouchDevice = new InputDevice(1, "KuDroid Touchscreen", SOURCE_TOUCHSCREEN);
 
     private final int mId;
@@ -81,5 +92,133 @@ public class InputDevice {
 
     public boolean isVirtual() {
         return false;
+    }
+
+    /**
+     * android.view.InputDevice$MotionRange — native input code enumerates this to
+     * decide whether a device is a usable touchscreen. Without it (missing method
+     * or empty ranges) Unity concludes there is no touchscreen and drops every
+     * touch its own injectEvent receives. Bounds come from the default display so
+     * they match the pixel space MotionEvent coordinates live in.
+     */
+    public static final class MotionRange {
+        private final int mAxis;
+        private final int mSource;
+        private final float mMin;
+        private final float mMax;
+        private final float mFlat;
+        private final float mFuzz;
+
+        MotionRange(int axis, int source, float min, float max, float flat, float fuzz) {
+            mAxis = axis;
+            mSource = source;
+            mMin = min;
+            mMax = max;
+            mFlat = flat;
+            mFuzz = fuzz;
+        }
+
+        public int getAxis() {
+            return mAxis;
+        }
+
+        public int getSource() {
+            return mSource;
+        }
+
+        public float getMin() {
+            return mMin;
+        }
+
+        public float getMax() {
+            return mMax;
+        }
+
+        public float getRange() {
+            return mMax - mMin;
+        }
+
+        public float getFlat() {
+            return mFlat;
+        }
+
+        public float getFuzz() {
+            return mFuzz;
+        }
+
+        public float getResolution() {
+            return 0;
+        }
+    }
+
+    private static float sRangeMaxX = -1;
+    private static float sRangeMaxY = -1;
+
+    private static float rangeMaxX() {
+        if (sRangeMaxX <= 0) {
+            try {
+                sRangeMaxX = new Display().getWidth();
+            } catch (Throwable ignored) {
+                sRangeMaxX = 1080;
+            }
+            if (sRangeMaxX <= 0) sRangeMaxX = 1080;
+        }
+        return sRangeMaxX;
+    }
+
+    private static float rangeMaxY() {
+        if (sRangeMaxY <= 0) {
+            try {
+                sRangeMaxY = new Display().getHeight();
+            } catch (Throwable ignored) {
+                sRangeMaxY = 1920;
+            }
+            if (sRangeMaxY <= 0) sRangeMaxY = 1920;
+        }
+        return sRangeMaxY;
+    }
+
+    public MotionRange getMotionRange(int axis) {
+        return getMotionRange(axis, mSources);
+    }
+
+    public MotionRange getMotionRange(int axis, int source) {
+        switch (axis) {
+            case AXIS_X:
+                return new MotionRange(axis, source, 0, rangeMaxX(), 0, 0);
+            case AXIS_Y:
+                return new MotionRange(axis, source, 0, rangeMaxY(), 0, 0);
+            case AXIS_PRESSURE:
+            case AXIS_SIZE:
+                return new MotionRange(axis, source, 0, 1, 0, 0);
+            case AXIS_TOUCH_MAJOR:
+            case AXIS_TOUCH_MINOR:
+            case AXIS_TOOL_MAJOR:
+            case AXIS_TOOL_MINOR:
+                return new MotionRange(axis, source, 0, rangeMaxX() > rangeMaxY()
+                        ? rangeMaxX() : rangeMaxY(), 0, 0);
+            default:
+                return null;
+        }
+    }
+
+    public MotionRange[] getMotionRanges() {
+        return new MotionRange[] {
+            getMotionRange(AXIS_X),
+            getMotionRange(AXIS_Y),
+            getMotionRange(AXIS_PRESSURE),
+        };
+    }
+
+    public int getProductId() {
+        return 1;
+    }
+
+    public int getVendorId() {
+        return 1;
+    }
+
+    public String getDescriptor() {
+        return "KuDroid Touchscreen";
     }
 }

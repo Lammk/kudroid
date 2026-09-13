@@ -43,6 +43,21 @@ int main() {
           "consecutive MOVEs fold into one with newest coords");
     Check(!queue.tryPop(event), "MOVE flood leaves no residue");
 
+    queue.reset(true);
+    queue.push(0, 0, 0);
+    for (int i = 1; i <= 300; ++i) queue.push(2, float(i), float(i));
+    queue.push(1, 300, 300);
+    event = queue.popCoalesced();
+    Check(event.action == 0, "popCoalesced keeps DOWN first");
+    event = queue.popCoalesced();
+    Check(event.action == 2 && event.x == 300.0f, "popCoalesced folds the MOVE run");
+    event = queue.popCoalesced();
+    Check(event.action == 1, "popCoalesced stops at UP");
+
+    queue.reset(true);
+    queue.push(0, 0, 0, 2);
+    Check(queue.tryPop(event) && event.pointerCount == 2, "pointerCount survives the queue");
+
     const int actions[] = {0, 2, 1, 0, 2, 3};
     for (int action : actions) queue.push(action, 0, 0);
     for (int action : actions) {

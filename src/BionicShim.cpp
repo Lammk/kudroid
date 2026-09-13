@@ -4,6 +4,7 @@
 #include "kudroid/platform/GraphicsShim.h"
 #include "kudroid/platform/InputShim.h"
 #include "kudroid/platform/AudioShim.h"
+#include "kudroid/platform/MediaShim.h"
 #include "kudroid/platform/AssetShim.h"
 
 #include <string>
@@ -112,6 +113,11 @@ void* resolve_bionic_symbol(const char* name) {
         }
 
         if (!resolved) {
+            const SymbolEntry* media = get_media_symbols(&count);
+            resolved = resolve_from_list(media, count, name);
+        }
+
+        if (!resolved) {
             const SymbolEntry* assets = get_asset_symbols(&count);
             resolved = resolve_from_list(assets, count, name);
         }
@@ -173,6 +179,10 @@ void* resolve_bionic_symbol(const char* name) {
                 if (!resolved) {
                     const SymbolEntry* audio2 = get_audio_symbols(&count);
                     resolved = resolve_from_list(audio2, count, fnName.c_str());
+                }
+                if (!resolved) {
+                    const SymbolEntry* media2 = get_media_symbols(&count);
+                    resolved = resolve_from_list(media2, count, fnName.c_str());
                 }
                 if (!resolved) {
                     const SymbolEntry* assets2 = get_asset_symbols(&count);

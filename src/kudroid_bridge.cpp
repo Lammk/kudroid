@@ -939,9 +939,12 @@ FaultSkipPlan fault_decode_skip(uint32_t w, uint64_t pc, uint64_t baseVal,
             const uint64_t imm12 = (w >> 10) & 0xFFFu;
             p.effAddr = baseVal + (imm12 << scale);
         } else {
-            // 0x_8 group: pre/post-index (writeback) or unscaled.
-            // bits[11:10] 01 = post, 11 = pre: both update the base and
-            // must not be faked. Anything else is unscaled (no writeback).
+            // 0x_8 group (bit24==0; the entry mask already excludes the
+            // post/pre-index bit patterns, which live elsewhere): the low two
+            // bits select the form. 00 = LDUR/STUR and 10 = LDTR/STTR are both
+            // unscaled with no writeback (assembler-verified against capstone
+            // across B/H/W/X). 01/11 are post/pre-index with a base writeback
+            // that cannot be faked: refuse.
             const unsigned mode = (w >> 10) & 3;
             if (mode == 1 || mode == 3) return p;
             int32_t simm9 =

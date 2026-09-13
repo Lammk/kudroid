@@ -192,7 +192,7 @@ void StartTouchWorker() {
         auto* queue = &TouchQueue();
         std::thread([queue] {
             for (;;) {
-                const auto event = queue->waitPop();
+                const auto event = queue->popCoalesced();
                 {
                     // Pin the runtime through dispatch; ingress never takes this lock.
                     std::lock_guard<std::mutex> runtime_lock(g_mtx);
@@ -200,9 +200,16 @@ void StartTouchWorker() {
                     kudroid::kuart::VmLockGuard vm_lock;
                     // Teardown can invalidate an event while this worker waits for the VM.
                     if (!queue->isCurrent(event)) continue;
-                    const DexValue args[3] = {DexValue::Int(event.action),
+                    const DexValue args[4] = {DexValue::Int(event.action),
+                                             DexValue::Int(event.pointerCount),
                                              DexValue::Float(event.x), DexValue::Float(event.y)};
-                    CallActivityThreadStatic("postTouchEvent", "(IFF)V", args, 3);
+                    if ((event.action & 0xff) != 2) {
+                        std::fprintf(stderr,
+                                     "[KuTouch] dispatch action=%d count=%d x=%.1f y=%.1f folded_moves=%llu\n",
+                                     event.action, event.pointerCount, event.x, event.y,
+                                     static_cast<unsigned long long>(queue->takeFoldedMoves()));
+                    }
+                    CallActivityThreadStatic("postTouchEvent", "(IIFF)V", args, 4);
                 }
                 std::this_thread::yield();
             }
@@ -636,8 +643,12 @@ extern "C" void kuart_send_lifecycle_event(int event_type) {
     CallActivityThreadStatic("postLifecycleEvent", "(ILjava/lang/String;)V", args, 2);
 }
 
-extern "C" void kuart_post_touch_event(int action, float x, float y) {
-    TouchQueue().push(action, x, y);
+extern "C" void kuart_post_touch_event(int action, float x, float y, int pointerCount) {
+    if ((action & 0xff) != 2) {
+        std::fprintf(stderr, "[KuTouch] ingress action=%d count=%d x=%.1f y=%.1f\n",
+                     action, pointerCount, x, y);
+    }
+    TouchQueue().push(action, x, y, pointerCount);
 }
 
 // Text from the host keyboard.

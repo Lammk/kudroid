@@ -78,9 +78,9 @@ extern "C" void* kudroid_get_input_queue(void) {
 
 #include "kudroid/KuArtRuntime.h"
 
-static void forward_touch_to_java_activity(int action, float x, float y) {
+static void forward_touch_to_java_activity(int action, float x, float y, int pointerCount) {
     // Native enqueue only; the consumer handles VM access and session validity.
-    kuart_post_touch_event(action, x, y);
+    kuart_post_touch_event(action, x, y, pointerCount);
 }
 
 // Exported for Swift to inject touch events
@@ -136,7 +136,7 @@ extern "C" void kudroid_inject_touch_event_multi(float x, float y, int32_t actio
     }
 
     // Also push the touch event to the Android Java interface tree.
-    forward_touch_to_java_activity(finalAction, x, y);
+    forward_touch_to_java_activity(finalAction, x, y, ev.pointerCount);
 }
 
 extern "C" void kudroid_inject_touch_event(float x, float y, int32_t action) {

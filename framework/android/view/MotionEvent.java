@@ -114,6 +114,12 @@ public final class MotionEvent extends InputEvent {
         return new MotionEvent(downTime, eventTime, action, x, y, 1);
     }
 
+    public static MotionEvent obtain(long downTime, long eventTime, int action, float x, float y,
+            int metaState, int pointerCount) {
+        if (pointerCount < 1) pointerCount = 1;
+        return new MotionEvent(downTime, eventTime, action, x, y, pointerCount);
+    }
+
     /**
      * Copy an event. Our touch pipeline (ActivityThread.postTouchEvent)
      * copies every event before dispatch; without this it died as

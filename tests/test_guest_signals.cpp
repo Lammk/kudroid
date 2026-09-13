@@ -897,6 +897,11 @@ void test_fault_skip_decoder() {
         Check(p.skippable && p.isLoad && p.effAddr == 0x7008, "unscaled load allows");
     }
     {
+        // Unprivileged unscaled: no writeback, same skip rules as LDUR/STUR.
+        FaultSkipPlan p = fault_decode_skip(0xf8010820, 0x1000, 0x7000, 0);  // sttr x0,[x1,#16]
+        Check(p.skippable && !p.isLoad && p.effAddr == 0x7010, "sttr allows (write dropped)");
+    }
+    {
         FaultSkipPlan p = fault_decode_skip(0x58000040, 0x10000, 0, 0);  // ldr x0, lit(+8)
         Check(p.skippable && p.isLoad && p.effAddr == 0x10008, "literal load allows at pc+8");
     }
@@ -910,10 +915,17 @@ void test_fault_skip_decoder() {
         FaultSkipPlan p = fault_decode_skip(0xf9802020, 0x1000, 0, 0);  // prfm
         Check(p.skippable && !p.isLoad, "prfm allows (hint only)");
     }
-    // Writeback forms refuse: the base update cannot be faked.
+    // Writeback forms refuse: the base update cannot be faked. Opcodes are
+    // capstone ground truth (post/pre-index share bits[25:24]==00 with the
+    // unscaled group; bits[11:10] select: 01 post, 11 pre, 00 LDUR/STUR,
+    // 10 LDTR/STTR).
     {
         Check(!fault_decode_skip(0xf8010420, 0x1000, 0x5000, 0).skippable,
               "post-index store refuses");
+        Check(!fault_decode_skip(0x3800152a, 0x1000, 0x0, 0).skippable,
+              "post-index strb crash shape refuses");
+        Check(!fault_decode_skip(0x38010c20, 0x1000, 0x5000, 0).skippable,
+              "pre-index strb refuses");
         Check(!fault_decode_skip(0xf8410c20, 0x1000, 0x5000, 0).skippable,
               "pre-index load refuses");
         Check(!fault_decode_skip(0xa9c10440, 0x1000, 0x8000, 0).skippable,

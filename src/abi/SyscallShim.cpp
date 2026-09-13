@@ -11,6 +11,7 @@
 #include "kudroid/platform/GraphicsShim.h"
 #include "kudroid/platform/InputShim.h"
 #include "kudroid/platform/AudioShim.h"
+#include "kudroid/platform/MediaShim.h"
 #include "kudroid/platform/CpuInfo.h"
 #include "kudroid/platform/MemoryInfo.h"
 #include "kudroid/VFSPathRemapper.h"
@@ -3825,6 +3826,13 @@ extern "C" void* bionic_dlsym(void* handle, const char* symbol) {
     for (size_t i = 0; i < count; ++i) {
         if (strcmp(symbols[i].name, symbol) == 0) {
             logAndroidMessage(2, "KuDroidSyscall", std::string("bionic_dlsym: [") + symbol + "] resolved via AudioShim");
+            return symbols[i].address;
+        }
+    }
+    symbols = get_media_symbols(&count);
+    for (size_t i = 0; i < count; ++i) {
+        if (strcmp(symbols[i].name, symbol) == 0) {
+            logAndroidMessage(2, "KuDroidSyscall", std::string("bionic_dlsym: [") + symbol + "] resolved via MediaShim");
             return symbols[i].address;
         }
     }

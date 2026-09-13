@@ -152,10 +152,19 @@ public final class ActivityThread {
     private static long sLastDownTime = 0;
     private static Message sPendingMoveMsg = null;
 
-    public static void postTouchEvent(int action, float x, float y) {
+    public static void postTouchEvent(int action, int pointerCount, float x, float y) {
         if (sCurrentActivityThread == null || sCurrentActivityThread.mH == null) return;
         final long now = android.os.SystemClock.uptimeMillis();
         final int maskedAction = action & MotionEvent.ACTION_MASK;
+        if (pointerCount < 1) pointerCount = 1;
+        // Never emit a pointer index the event's own count cannot back: native input
+        // code indexes per-pointer arrays by it, and index >= count corrupts memory.
+        // A second finger whose count got lost upstream still lands as a valid event.
+        final int actionIndex = (action & MotionEvent.ACTION_POINTER_INDEX_MASK)
+                >> MotionEvent.ACTION_POINTER_INDEX_SHIFT;
+        if (actionIndex >= pointerCount) {
+            pointerCount = actionIndex + 1;
+        }
         long downTime;
         synchronized (sTouchMsgLock) {
             if (maskedAction == MotionEvent.ACTION_DOWN || sLastDownTime == 0) {
@@ -175,7 +184,7 @@ public final class ActivityThread {
                 return;
             }
         }
-        MotionEvent ev = MotionEvent.obtain(downTime, now, action, x, y, 0);
+        MotionEvent ev = MotionEvent.obtain(downTime, now, action, x, y, 0, pointerCount);
         Message msg = Message.obtain();
         msg.what = TOUCH_EVENT;
         msg.obj = ev;

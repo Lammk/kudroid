@@ -37,8 +37,57 @@ final class SharedMetalContainer {
     }
 }
 
-struct GlobalMetalViewRepresentable: UIViewRepresentable {
-    func makeUIView(context: Context) -> GlobalMetalView {
+/// Stable multi-touch pointer identities for the guest.
+///
+/// UIKit hands us unordered *changed* sets per callback, so neither the set order
+/// nor `touches.count` identifies a finger: the second finger down arrived as
+/// another ACTION_DOWN with count 1, and a finger's slot flipped between callbacks.
+/// The guest (and Android's contract) needs: one stable id per finger, DOWN only
+/// for the first finger (POINTER_DOWN after), and the true total finger count.
+/// Ids are the smallest free slot, so they stay dense; the Java layer additionally
+/// clamps count >= index+1 as a backstop.
+final class TouchPointerTracker {
+    private var ids: [ObjectIdentifier: Int32] = [:]
+    private var next: Int32 = 0
+
+    var activeCount: Int32 { Int32(ids.count) }
+
+    /// Assign (or recall) the slot for a finger going down. Returns (id, totalAfter).
+    func begin(_ touch: UITouch) -> (Int32, Int32) {
+        let key = ObjectIdentifier(touch)
+        if let existing = ids[key] {
+            return (existing, Int32(ids.count))
+        }
+        // Smallest free slot: scan from 0 so ids stay dense.
+        var candidate: Int32 = 0
+        let used = Set(ids.values)
+        while used.contains(candidate) { candidate += 1 }
+        if candidate == next { next += 1 }
+        var hole = candidate
+        if ids.count > 10 {
+            // Safety: UIKit reliably pairs began/ended; a leak here means stale
+            // entries, so reset rather than grow unbounded.
+            ids.removeAll()
+            next = 0
+            hole = 0
+        }
+        ids[key] = hole
+        return (hole, Int32(ids.count))
+    }
+
+    func id(of touch: UITouch) -> Int32? {
+        return ids[ObjectIdentifier(touch)]
+    }
+
+    /// Release a finger. Returns (id, totalBeforeRemoval) or nil if unknown.
+    func end(_ touch: UITouch) -> (Int32, Int32)? {
+        let key = ObjectIdentifier(touch)
+        guard let id = ids.removeValue(forKey: key) else { return nil }
+        return (id, Int32(ids.count) + 1)
+    }
+}
+
+struct GlobalMetalViewRepresentable: UIViewRepresentable {    func makeUIView(context: Context) -> GlobalMetalView {
         let v = SharedMetalContainer.shared.view
         if let metalLayer = v.layer as? CAMetalLayer {
             let scale = UIScreen.main.scale
@@ -59,6 +108,8 @@ class GlobalMetalView: UIView {
         return CAMetalLayer.self
     }
 
+    private let touchTracker = TouchPointerTracker()
+
     override func layoutSubviews() {
         super.layoutSubviews()
         if let metalLayer = self.layer as? CAMetalLayer {
@@ -75,12 +126,23 @@ class GlobalMetalView: UIView {
 
     private func injectTouch(_ touches: Set<UITouch>, action: Int32) {
         let scale = UIScreen.main.scale
-        let totalCount = Int32(touches.count)
-        var pointerIdx: Int32 = 0
         for touch in touches {
             let location = touch.location(in: self)
-            kudroid_inject_touch_event_multi(Float(location.x * scale), Float(location.y * scale), action, pointerIdx, totalCount)
-            pointerIdx += 1
+            let x = Float(location.x * scale)
+            let y = Float(location.y * scale)
+            switch action {
+            case 0: // began: first finger DOWN, later fingers POINTER_DOWN via shim
+                let (id, count) = touchTracker.begin(touch)
+                kudroid_inject_touch_event_multi(x, y, 0, id, count)
+            case 2: // moved: Android MOVE carries no index; count is authoritative
+                let id = touchTracker.id(of: touch) ?? 0
+                kudroid_inject_touch_event_multi(x, y, 2, id, touchTracker.activeCount)
+            case 1, 3: // ended/cancelled: last finger UP, others POINTER_UP via shim
+                guard let (id, count) = touchTracker.end(touch) else { continue }
+                kudroid_inject_touch_event_multi(x, y, action, id, count)
+            default:
+                continue
+            }
         }
     }
 

@@ -1982,6 +1982,8 @@ class NativeMetalView: UIView {
     // Last drawable size reported to the guest. layoutSubviews fires on rotation;
     // without forwarding, the guest renders forever into the launch geometry.
     private var lastReportedSize: CGSize = .zero
+    // Stable finger identities for the guest (see TouchPointerTracker).
+    private let touchTracker = TouchPointerTracker()
     // Guest orientation at the last forward. Rotation can arrive with identical
     // bounds (scale-only change, or a rotate-then-rotate-back between layouts);
     // the guest still needs the forward because its orientation value changed.
@@ -2008,12 +2010,23 @@ class NativeMetalView: UIView {
 
     private func injectTouch(_ touches: Set<UITouch>, action: Int32) {
         let scale = UIScreen.main.scale
-        let totalCount = Int32(touches.count)
-        var pointerIdx: Int32 = 0
         for touch in touches {
             let location = touch.location(in: self)
-            kudroid_inject_touch_event_multi(Float(location.x * scale), Float(location.y * scale), action, pointerIdx, totalCount)
-            pointerIdx += 1
+            let x = Float(location.x * scale)
+            let y = Float(location.y * scale)
+            switch action {
+            case 0: // began: first finger DOWN, later fingers POINTER_DOWN via shim
+                let (id, count) = touchTracker.begin(touch)
+                kudroid_inject_touch_event_multi(x, y, 0, id, count)
+            case 2: // moved: Android MOVE carries no index; count is authoritative
+                let id = touchTracker.id(of: touch) ?? 0
+                kudroid_inject_touch_event_multi(x, y, 2, id, touchTracker.activeCount)
+            case 1, 3: // ended/cancelled: last finger UP, others POINTER_UP via shim
+                guard let (id, count) = touchTracker.end(touch) else { continue }
+                kudroid_inject_touch_event_multi(x, y, action, id, count)
+            default:
+                continue
+            }
         }
     }
 

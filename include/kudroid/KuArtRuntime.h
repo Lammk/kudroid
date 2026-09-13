@@ -107,8 +107,9 @@ int kuart_launch_activity(const char* activity_name, const char* const* extra_ca
 // Dispatch lifecycle events.
 void kuart_send_lifecycle_event(int event_type);
 
-// Dispatch touch events.
-void kuart_post_touch_event(int action, float x, float y);
+// Dispatch touch events. pointerCount is fingers down including this event's own
+// pointer; never smaller than the action's pointer index + 1 (see TouchEventQueue).
+void kuart_post_touch_event(int action, float x, float y, int pointerCount);
 
 // Take the in-flight Java exception of the CALLING thread, if any, and clear it.
 //
