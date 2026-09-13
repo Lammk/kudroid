@@ -405,11 +405,8 @@ extern "C" int kuart_init(const char* app_dir) {
     }
 
     rt->ready = true;
-    {
-        std::lock_guard<std::mutex> lock(g_mtx);
-        g_shutdownRequested = false;
-        g_rtUsers.store(0, std::memory_order_release);
-    }
+    g_shutdownRequested = false;
+    g_rtUsers.store(0, std::memory_order_release);
     // Fault isolation is per-app: stale tids/counts/names from the previous
     // app misclassify (fail-closed budget exhaustion, false-critical on
     // recycled tids) and hang or kill a healthy launch.
