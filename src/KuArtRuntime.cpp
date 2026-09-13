@@ -204,12 +204,7 @@ void StartTouchWorker() {
                                              DexValue::Float(event.x), DexValue::Float(event.y)};
                     CallActivityThreadStatic("postTouchEvent", "(IFF)V", args, 3);
                 }
-                // Bound MOVE dispatch work without blocking ingress or dropping the latest point.
-                if ((event.action & 0xff) == 2) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(16));
-                } else {
-                    std::this_thread::yield();
-                }
+                std::this_thread::yield();
             }
         }).detach();
     });

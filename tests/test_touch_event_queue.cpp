@@ -21,10 +21,19 @@ int main() {
     for (int i = 1; i <= 10000; ++i) queue.push(2, float(i), float(i));
     queue.push(1, 10000, 10000);
     Check(queue.tryPop(event) && event.action == 0, "DOWN stays first");
-    Check(queue.tryPop(event) && event.action == 2 && event.x == 10000,
-          "MOVE flood retains the newest point");
-    Check(queue.tryPop(event) && event.action == 1, "UP follows the final MOVE");
-    Check(!queue.tryPop(event), "MOVE flood does not grow the queue");
+    int moveCount = 0;
+    float lastMoveX = 0;
+    while (queue.tryPop(event)) {
+        if (event.action == 1) break;
+        if (event.action == 2) {
+            ++moveCount;
+            lastMoveX = event.x;
+        }
+    }
+    Check(lastMoveX == 10000.0f, "MOVE stream retains the newest point");
+    Check(event.action == 1, "UP follows the final MOVE");
+    Check(moveCount <= static_cast<int>(kudroid::TouchEventQueue::kMaxQueueSize),
+          "MOVE flood stays bounded by max queue size");
 
     const int actions[] = {0, 2, 1, 0, 2, 3};
     for (int action : actions) queue.push(action, 0, 0);

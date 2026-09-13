@@ -235,6 +235,10 @@ public final class MotionEvent extends InputEvent {
         return TOUCHSCREEN_DEVICE_ID;
     }
 
+    public InputDevice getDevice() {
+        return InputDevice.getDevice(TOUCHSCREEN_DEVICE_ID);
+    }
+
     public int getSource() {
         return InputDevice.SOURCE_TOUCHSCREEN;
     }

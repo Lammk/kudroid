@@ -17,6 +17,8 @@ public:
         uint64_t generation = 0;
     };
 
+    static constexpr size_t kMaxQueueSize = 256;
+
     void reset(bool accepting) {
         std::lock_guard<std::mutex> lock(mutex_);
         ++generation_;
@@ -28,13 +30,16 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (!accepting_) return;
-            Event event{action, x, y, generation_};
-            if ((action & 0xff) == 2 && !events_.empty() &&
-                (events_.back().action & 0xff) == 2) {
-                events_.back() = event;
-            } else {
-                events_.push_back(event);
+            if (events_.size() >= kMaxQueueSize) {
+                // Drop oldest MOVE if queue exceeds capacity to prevent unbounded growth.
+                for (auto it = events_.begin(); it != events_.end(); ++it) {
+                    if ((it->action & 0xff) == 2) {
+                        events_.erase(it);
+                        break;
+                    }
+                }
             }
+            events_.push_back(Event{action, x, y, generation_});
         }
         ready_.notify_one();
     }

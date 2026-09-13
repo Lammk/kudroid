@@ -148,45 +148,31 @@ public final class ActivityThread {
      * are dropped. DOWN/UP/CANCEL pass through untouched — their order matters.
      */
     private static final Object sTouchMsgLock = new Object();
-    private static Message sPendingTouch;
     private static long sLastDownTime = 0;
 
     public static void postTouchEvent(int action, float x, float y) {
         if (sCurrentActivityThread == null || sCurrentActivityThread.mH == null) return;
         final long now = android.os.SystemClock.uptimeMillis();
         final int maskedAction = action & MotionEvent.ACTION_MASK;
+        long downTime;
         synchronized (sTouchMsgLock) {
             if (maskedAction == MotionEvent.ACTION_DOWN || sLastDownTime == 0) {
                 sLastDownTime = now;
             }
-            final long downTime = sLastDownTime;
+            downTime = sLastDownTime;
             if (maskedAction == MotionEvent.ACTION_UP || maskedAction == MotionEvent.ACTION_CANCEL) {
                 sLastDownTime = 0;
             }
-
-            final boolean isMove = maskedAction == MotionEvent.ACTION_MOVE;
-            // Never merge a new gesture into a MOVE queued before UP/DOWN/CANCEL.
-            if (!isMove) sPendingTouch = null;
-            if (isMove && sPendingTouch != null) {
-                MotionEvent old = (MotionEvent) sPendingTouch.obj;
-                sPendingTouch.obj = MotionEvent.obtain(downTime, now, action, x, y, 0);
-                if (old != null) old.recycle();
-                return;
-            }
-            MotionEvent ev = MotionEvent.obtain(downTime, now, action, x, y, 0);
-            Message msg = Message.obtain();
-            msg.what = TOUCH_EVENT;
-            msg.obj = ev;
-            if (isMove) sPendingTouch = msg;
-            sCurrentActivityThread.mH.sendMessage(msg);
         }
+        MotionEvent ev = MotionEvent.obtain(downTime, now, action, x, y, 0);
+        Message msg = Message.obtain();
+        msg.what = TOUCH_EVENT;
+        msg.obj = ev;
+        sCurrentActivityThread.mH.sendMessage(msg);
     }
 
-    /** Called by H when a TOUCH_EVENT is dispatched, so the next MOVE posts fresh. */
+    /** Called by H when a TOUCH_EVENT is dispatched. */
     private static void onTouchEventDispatched(Message msg) {
-        synchronized (sTouchMsgLock) {
-            if (sPendingTouch == msg) sPendingTouch = null;
-        }
     }
 
     private static class CrashHandler implements Thread.UncaughtExceptionHandler {

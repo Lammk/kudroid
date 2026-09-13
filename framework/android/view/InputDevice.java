@@ -34,27 +34,44 @@ public class InputDevice {
     public static final int KEYBOARD_TYPE_NON_ALPHABETIC = 1;
     public static final int KEYBOARD_TYPE_ALPHABETIC = 2;
 
-    public InputDevice() {}
+    private static final InputDevice sTouchDevice = new InputDevice(1, "KuDroid Touchscreen", SOURCE_TOUCHSCREEN);
 
-    /** No enumerable input devices: KuDroid synthesises events rather than owning devices. */
+    private final int mId;
+    private final String mName;
+    private final int mSources;
+
+    public InputDevice() {
+        this(1, "KuDroid Touchscreen", SOURCE_TOUCHSCREEN);
+    }
+
+    public InputDevice(int id, String name, int sources) {
+        mId = id;
+        mName = name;
+        mSources = sources;
+    }
+
+    /** Return touchscreen device ID 1. */
     public static int[] getDeviceIds() {
-        return new int[0];
+        return new int[] { 1 };
     }
 
     public static InputDevice getDevice(int id) {
+        if (id == 1 || id == 0) {
+            return sTouchDevice;
+        }
         return null;
     }
 
     public int getId() {
-        return 0;
+        return mId;
     }
 
     public String getName() {
-        return "KuDroid Touchscreen";
+        return mName;
     }
 
     public int getSources() {
-        return SOURCE_TOUCHSCREEN;
+        return mSources;
     }
 
     /** A soft keyboard only, which is what KEYBOARD_TYPE_NONE means on Android. */
