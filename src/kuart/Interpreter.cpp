@@ -954,11 +954,13 @@ bool Interpreter::TryJit(DexFrame* frame, DexValue* out, uint32_t* resume_pc) {
             // Once per method, and only for methods hot enough to be worth compiling:
             // this names the opcode to implement next, which is the only actionable
             // output the JIT produces.
+#ifdef KUDROID_DEBUG_JIT
             std::fprintf(stderr, "[KuART][JIT] not compiled: %s.%s (%s)\n",
                          method->declaring_class != nullptr
                              ? method->declaring_class->PrettyName().c_str()
                              : "?",
                          method->name != nullptr ? method->name : "?", reason.c_str());
+#endif
             return false;
         }
         method->jit_code = reinterpret_cast<void*>(entry);

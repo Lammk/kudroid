@@ -990,7 +990,7 @@ func activateAudioSession() {
     }
 }
 
-/// Read CFBundleShortVersionString from Info.plist (0.9.5).
+/// Read CFBundleShortVersionString from Info.plist (T1.0.0).
 func appVersion() -> String {
     if let v = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String {
         return v

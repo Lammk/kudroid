@@ -221,12 +221,6 @@ void StartTouchWorker() {
                     const DexValue args[4] = {DexValue::Int(event.action),
                                              DexValue::Int(event.pointerCount),
                                              DexValue::Float(event.x), DexValue::Float(event.y)};
-                    if ((event.action & 0xff) != 2) {
-                        std::fprintf(stderr,
-                                     "[KuTouch] dispatch action=%d count=%d x=%.1f y=%.1f folded_moves=%llu\n",
-                                     event.action, event.pointerCount, event.x, event.y,
-                                     static_cast<unsigned long long>(queue->takeFoldedMoves()));
-                    }
                     CallActivityThreadStatic("postTouchEvent", "(IIFF)V", args, 4);
                 }
                 --g_rtUsers;
@@ -693,10 +687,6 @@ extern "C" void kuart_send_lifecycle_event(int event_type) {
 }
 
 extern "C" void kuart_post_touch_event(int action, float x, float y, int pointerCount) {
-    if ((action & 0xff) != 2) {
-        std::fprintf(stderr, "[KuTouch] ingress action=%d count=%d x=%.1f y=%.1f\n",
-                     action, pointerCount, x, y);
-    }
     TouchQueue().push(action, x, y, pointerCount);
 }
 

@@ -968,6 +968,7 @@ extern "C" int32_t bionic_kudroid_audiotrack_write(int64_t track, const void* da
     // Diagnostic: in-flight audio-ms shows mixer-ahead-of-wallclock pacing drift.
     // Time-throttled (not count-capped): a count cap goes blind mid-run, which is
     // exactly when pacing questions get asked.
+#ifdef KUDROID_DEBUG_AUDIO
     {
         static std::atomic<uint64_t> s_lastLogMs{0};
         const uint64_t played = p->framesPlayed.load(std::memory_order_relaxed);
@@ -991,6 +992,7 @@ extern "C" int32_t bionic_kudroid_audiotrack_write(int64_t track, const void* da
     if (total - accepted == 0 || (total / 10000000) != ((total - accepted) / 10000000)) {
         std::fprintf(stderr, "[KuDroidAudio] written %lld bytes total\n", total);
     }
+#endif
     return accepted;
 #else
     // Host build: hand it to the same worker the OpenSL path uses, so the callback and

@@ -21,6 +21,14 @@ namespace {
 // ─────────────────────────────────────────────────────────────────────────────
 // AInputEvent / AMotionEvent simulated structure
 // ─────────────────────────────────────────────────────────────────────────────
+constexpr size_t kMaxPointers = 10;
+
+struct PointerCoord {
+    float x = 0.0f;
+    float y = 0.0f;
+    int32_t id = 0;
+};
+
 struct BionicInputEvent {
     int32_t type;   // 2 = AINPUT_EVENT_TYPE_MOTION
     int32_t action;
@@ -30,8 +38,18 @@ struct BionicInputEvent {
     int32_t pointerCount;
     int32_t source;
     int32_t flags;
+    PointerCoord pointers[kMaxPointers];
     uint64_t seq = 0;  // queue sequence; matches copies back to deque entries
 };
+
+// Tracks active fingers across events so getX/getY can query any finger by index.
+struct PointerSlot {
+    bool active = false;
+    int32_t id = 0;
+    float x = 0.0f;
+    float y = 0.0f;
+};
+static PointerSlot g_activePointers[kMaxPointers];
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AInputQueue — a mutex-protected FIFO of input events.
@@ -105,14 +123,16 @@ static void forward_touch_to_java_activity(int action, float x, float y, int poi
 // Exported for Swift to inject touch events
 extern "C" void kudroid_inject_touch_event_multi(float x, float y, int32_t action, int32_t pointerId, int32_t pointerCount) {
     int32_t finalAction = action;
+    const int32_t baseAction = action & 0xff;
+
     if (pointerId > 0) {
-        const int32_t baseAction = action & 0xff;
         if (baseAction == 0) {
             finalAction = (pointerId << 8) | 5; // ACTION_POINTER_DOWN
         } else if (baseAction == 1) {
             finalAction = (pointerId << 8) | 6; // ACTION_POINTER_UP
         }
     }
+
     BionicInputEvent ev;
     ev.type = 2; // AINPUT_EVENT_TYPE_MOTION
     ev.action = finalAction;
@@ -121,11 +141,82 @@ extern "C" void kudroid_inject_touch_event_multi(float x, float y, int32_t actio
     ev.eventTime = static_cast<int64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count());
     ev.pointerCount = pointerCount > 0 ? pointerCount : 1;
+    if (ev.pointerCount > static_cast<int32_t>(kMaxPointers)) {
+        ev.pointerCount = static_cast<int32_t>(kMaxPointers);
+    }
     ev.source = 0x0002; // AINPUT_SOURCE_TOUCHSCREEN
     ev.flags = 0;
 
     {
         std::lock_guard<std::mutex> lock(g_inputQueue.mtx);
+
+        // Update active pointer tracking table
+        if (baseAction == 0 || baseAction == 5) {
+            // DOWN or POINTER_DOWN
+            int freeSlot = -1;
+            int foundSlot = -1;
+            for (size_t i = 0; i < kMaxPointers; ++i) {
+                if (g_activePointers[i].active && g_activePointers[i].id == pointerId) {
+                    foundSlot = static_cast<int>(i);
+                    break;
+                }
+                if (!g_activePointers[i].active && freeSlot == -1) {
+                    freeSlot = static_cast<int>(i);
+                }
+            }
+            int slot = (foundSlot != -1) ? foundSlot : freeSlot;
+            if (slot != -1) {
+                g_activePointers[slot].active = true;
+                g_activePointers[slot].id = pointerId;
+                g_activePointers[slot].x = x;
+                g_activePointers[slot].y = y;
+            }
+        } else if (baseAction == 2) {
+            // MOVE: update position of moving pointer
+            for (size_t i = 0; i < kMaxPointers; ++i) {
+                if (g_activePointers[i].active && g_activePointers[i].id == pointerId) {
+                    g_activePointers[i].x = x;
+                    g_activePointers[i].y = y;
+                    break;
+                }
+            }
+        }
+
+        // Copy all currently active pointers into this event
+        int outIndex = 0;
+        // The pointer triggering the action goes to slot 0 if possible, or matches pointer_index
+        for (size_t i = 0; i < kMaxPointers && outIndex < ev.pointerCount; ++i) {
+            if (g_activePointers[i].active) {
+                ev.pointers[outIndex].id = g_activePointers[i].id;
+                ev.pointers[outIndex].x = g_activePointers[i].x;
+                ev.pointers[outIndex].y = g_activePointers[i].y;
+                ++outIndex;
+            }
+        }
+        // If tracking table had fewer slots than reported pointerCount, fill with primary coords
+        while (outIndex < ev.pointerCount) {
+            ev.pointers[outIndex].id = outIndex;
+            ev.pointers[outIndex].x = x;
+            ev.pointers[outIndex].y = y;
+            ++outIndex;
+        }
+
+        // Handle pointer removal on UP / POINTER_UP / CANCEL
+        if (baseAction == 1 || baseAction == 3) {
+            // UP or CANCEL: all fingers released
+            for (size_t i = 0; i < kMaxPointers; ++i) {
+                g_activePointers[i].active = false;
+            }
+        } else if (baseAction == 6) {
+            // POINTER_UP: remove specific pointer
+            for (size_t i = 0; i < kMaxPointers; ++i) {
+                if (g_activePointers[i].active && g_activePointers[i].id == pointerId) {
+                    g_activePointers[i].active = false;
+                    break;
+                }
+            }
+        }
+
         // Coalesce MOVE floods in the NDK queue: replace the pending MOVE instead
         // of enqueuing another event per touch. Unity drains the queue every frame
         // and interpolates; intermediate positions are dead weight. DOWN/UP/CANCEL
@@ -155,8 +246,13 @@ extern "C" void kudroid_inject_touch_event_multi(float x, float y, int32_t actio
         }
     }
 
-    // Also push the touch event to the Android Java interface tree.
-    forward_touch_to_java_activity(finalAction, x, y, ev.pointerCount);
+    // For pure native apps (like Unity/GameActivity) that have attached a native looper
+    // to g_inputQueue, events are drained directly via AInputQueue_getEvent on the native
+    // thread. Forwarding every move to Java ActivityThread acquires VmLock and starves
+    // the render loop, causing frame drops and timeouts.
+    if (g_inputQueue.id == 0) {
+        forward_touch_to_java_activity(finalAction, x, y, ev.pointerCount);
+    }
 }
 
 extern "C" void kudroid_inject_touch_event(float x, float y, int32_t action) {
@@ -270,15 +366,21 @@ extern "C" int32_t bionic_AMotionEvent_getAction(const void* event) {
 }
 
 extern "C" float bionic_AMotionEvent_getX(const void* event, size_t pointer_index) {
-    (void)pointer_index; // Single touch for now
     if (!event) return 0.0f;
-    return static_cast<const BionicInputEvent*>(event)->x;
+    const auto* ev = static_cast<const BionicInputEvent*>(event);
+    if (pointer_index < static_cast<size_t>(ev->pointerCount) && pointer_index < kMaxPointers) {
+        return ev->pointers[pointer_index].x;
+    }
+    return ev->x;
 }
 
 extern "C" float bionic_AMotionEvent_getY(const void* event, size_t pointer_index) {
-    (void)pointer_index;
     if (!event) return 0.0f;
-    return static_cast<const BionicInputEvent*>(event)->y;
+    const auto* ev = static_cast<const BionicInputEvent*>(event);
+    if (pointer_index < static_cast<size_t>(ev->pointerCount) && pointer_index < kMaxPointers) {
+        return ev->pointers[pointer_index].y;
+    }
+    return ev->y;
 }
 
 extern "C" float bionic_AMotionEvent_getXByIndex(const void* event, size_t pointer_index) {
@@ -305,7 +407,11 @@ extern "C" size_t bionic_AMotionEvent_getPointerCount(const void* event) {
 }
 
 extern "C" int32_t bionic_AMotionEvent_getPointerId(const void* event, size_t pointer_index) {
-    (void)event;
+    if (!event) return static_cast<int32_t>(pointer_index);
+    const auto* ev = static_cast<const BionicInputEvent*>(event);
+    if (pointer_index < static_cast<size_t>(ev->pointerCount) && pointer_index < kMaxPointers) {
+        return ev->pointers[pointer_index].id;
+    }
     return static_cast<int32_t>(pointer_index);
 }
 
@@ -558,6 +664,7 @@ const SymbolEntry kInputSymbols[] = {
     {"AMotionEvent_getX", reinterpret_cast<void*>(&bionic_AMotionEvent_getX)},
     {"AMotionEvent_getY", reinterpret_cast<void*>(&bionic_AMotionEvent_getY)},
     {"AMotionEvent_getPointerCount", reinterpret_cast<void*>(&bionic_AMotionEvent_getPointerCount)},
+    {"AMotionEvent_getPointerId", reinterpret_cast<void*>(&bionic_AMotionEvent_getPointerId)},
     {"AMotionEvent_getXByIndex", reinterpret_cast<void*>(&bionic_AMotionEvent_getXByIndex)},
     {"AMotionEvent_getYByIndex", reinterpret_cast<void*>(&bionic_AMotionEvent_getYByIndex)},
     {"AMotionEvent_getPressure", reinterpret_cast<void*>(&bionic_AMotionEvent_getPressure)},
