@@ -219,11 +219,11 @@ public final class MotionEvent extends InputEvent {
      * IDs for a stream that only ever holds one pointer would not be.
      */
     public int getPointerId(int pointerIndex) {
-        return 0;
+        return pointerIndex;
     }
 
     public int findPointerIndex(int pointerId) {
-        return pointerId == 0 ? 0 : -1;
+        return (pointerId >= 0 && pointerId < mPointerCount) ? pointerId : -1;
     }
 
     /** A finger, since the only input KuDroid synthesises is touch. */

@@ -153,11 +153,18 @@ public class Activity extends ContextThemeWrapper {
         onPause();
     }
 
+    private boolean mHasWindowFocus = true;
+
+    public boolean hasWindowFocus() {
+        return mHasWindowFocus;
+    }
+
     /**
      * Called when the current Window of the activity gains or loses focus.
      * Essential for game engines (AGDK/GameActivity/Unity) to resume rendering loops.
      */
     public void onWindowFocusChanged(boolean hasFocus) {
+        mHasWindowFocus = hasFocus;
     }
 
     /**
@@ -505,16 +512,7 @@ public class Activity extends ContextThemeWrapper {
 
     public boolean dispatchTouchEvent(android.view.MotionEvent event) {
         if (mContentView != null) {
-            boolean handled = mContentView.dispatchTouchEvent(event);
-            // Full measure/layout/draw per touch (the old behaviour) re-rendered the
-            // whole view tree at 60-120 Hz on the main thread; a game's real pixels
-            // come from its SurfaceView, and apps that change their UI in response to
-            // a touch call invalidate()/requestLayout() themselves. Keep the paint
-            // step for touch, which is what that check is really about.
-            if (!containsSurfaceView(mContentView)) {
-                renderViewHierarchy();
-            }
-            return handled;
+            return mContentView.dispatchTouchEvent(event);
         }
         return false;
     }
@@ -540,6 +538,11 @@ public class Activity extends ContextThemeWrapper {
     private static boolean containsSurfaceView(android.view.View view) {
         if (view == null) return false;
         if (view instanceof android.view.SurfaceView) return true;
+        final String name = view.getClass().getName();
+        if (name.contains("Unity") || name.contains("Surface") || name.contains("Texture") ||
+            name.contains("GL") || name.contains("Metal")) {
+            return true;
+        }
         if (view instanceof android.view.ViewGroup) {
             android.view.ViewGroup vg = (android.view.ViewGroup) view;
             final int count = vg.getChildCount();

@@ -1477,6 +1477,11 @@ extern "C" void kudroid_gpu_cleanup_on_test_exit(void) {
     gpuLog("kudroid_gpu_cleanup_on_test_exit: GPU state cleaned up successfully");
 }
 
+extern "C" bool kudroid_gpu_has_active_surface(void) {
+    std::lock_guard<std::mutex> lock(g_nativeWindowsMutex);
+    return s_activeEglSurface != nullptr || !g_nativeWindows.empty();
+}
+
 // ── EGL 1.x entry points missing — forward straight to ANGLE ────────────────
 
 #define EGL_FORWARD_ERR(name, what) gpuLog("%s: ANGLE %s not available", name, what)

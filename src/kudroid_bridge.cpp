@@ -2402,6 +2402,7 @@ extern "C" JNIEXPORT void JNICALL Java_android_app_Activity_setRequestedOrientat
 }
 
 extern "C" void kudroid_blit_canvas_to_layer(void* layer, const void* bits, int width, int height);
+extern "C" bool kudroid_gpu_has_active_surface(void);
 
 extern "C" void kudroid_unbind_metal_layer(void) {
     g_metalLayer = nullptr;
@@ -2508,6 +2509,7 @@ extern "C" JNIEXPORT void JNICALL Java_android_graphics_Canvas_native_1drawBitma
 
 extern "C" JNIEXPORT void JNICALL Java_android_graphics_Canvas_native_1flush(JNIEnv* env, jclass clazz) {
     (void)env; (void)clazz;
+    if (kudroid_gpu_has_active_surface()) return;
     std::lock_guard<std::mutex> lock(s_canvasMutex);
     if (g_metalLayer && s_softwareFrameBuffer && s_softwareWidth > 0 && s_softwareHeight > 0) {
         kudroid_blit_canvas_to_layer(g_metalLayer, s_softwareFrameBuffer, s_softwareWidth, s_softwareHeight);

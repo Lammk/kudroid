@@ -85,10 +85,18 @@ static void forward_touch_to_java_activity(int action, float x, float y) {
 
 // Exported for Swift to inject touch events
 extern "C" void kudroid_inject_touch_event_multi(float x, float y, int32_t action, int32_t pointerId, int32_t pointerCount) {
-    (void)pointerId;
+    int32_t finalAction = action;
+    if (pointerId > 0) {
+        const int32_t baseAction = action & 0xff;
+        if (baseAction == 0) {
+            finalAction = (pointerId << 8) | 5; // ACTION_POINTER_DOWN
+        } else if (baseAction == 1) {
+            finalAction = (pointerId << 8) | 6; // ACTION_POINTER_UP
+        }
+    }
     BionicInputEvent ev;
     ev.type = 2; // AINPUT_EVENT_TYPE_MOTION
-    ev.action = action;
+    ev.action = finalAction;
     ev.x = x;
     ev.y = y;
     ev.eventTime = static_cast<int64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -103,7 +111,7 @@ extern "C" void kudroid_inject_touch_event_multi(float x, float y, int32_t actio
         // of enqueuing another event per touch. Unity drains the queue every frame
         // and interpolates; intermediate positions are dead weight. DOWN/UP/CANCEL
         // always enqueue — ordering there is semantic.
-        const bool is_move = (action & 0xff) == 2;  // ACTION_MOVE
+        const bool is_move = (finalAction & 0xff) == 2;  // ACTION_MOVE
         bool replaced = false;
         if (is_move && !g_inputQueue.events.empty()) {
             auto& tail = g_inputQueue.events.back();
@@ -127,11 +135,8 @@ extern "C" void kudroid_inject_touch_event_multi(float x, float y, int32_t actio
         }
     }
 
-    // Also push the touch event to the Android Java interface tree. Reaching
-    // here for every event (a replaced MOVE included) is the contract: the
-    // Java side coalesces MOVEs into its one pending message, and swallowing
-    // this call is what made drags invisible to the guest UI.
-    forward_touch_to_java_activity(action, x, y);
+    // Also push the touch event to the Android Java interface tree.
+    forward_touch_to_java_activity(finalAction, x, y);
 }
 
 extern "C" void kudroid_inject_touch_event(float x, float y, int32_t action) {

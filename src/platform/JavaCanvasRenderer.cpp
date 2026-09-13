@@ -13,6 +13,7 @@
 extern void* g_metalLayer;
 extern int g_metalLayerWidth;
 extern int g_metalLayerHeight;
+extern "C" bool kudroid_gpu_has_active_surface(void);
 
 #if defined(__APPLE__)
 extern "C" __attribute__((weak)) void kudroid_blit_canvas_to_layer(void* layer, const void* bits, int width, int height);
@@ -202,6 +203,7 @@ void JavaCanvasRenderer::drawBitmap(const uint32_t* pixels, int width, int heigh
 
 void JavaCanvasRenderer::flush() {
     if (!framebuffer_ || width_ <= 0 || height_ <= 0) return;
+    if (kudroid_gpu_has_active_surface()) return;
 #if defined(__APPLE__)
     if (g_metalLayer && kudroid_blit_canvas_to_layer) {
         kudroid_blit_canvas_to_layer(g_metalLayer, framebuffer_, width_, height_);

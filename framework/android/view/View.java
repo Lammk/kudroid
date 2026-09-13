@@ -379,6 +379,10 @@ public class View {
         return mHasFocus;
     }
 
+    public boolean hasWindowFocus() {
+        return true;
+    }
+
     public boolean isFocused() {
         return mHasFocus;
     }
