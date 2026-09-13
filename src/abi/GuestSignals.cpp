@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <mutex>
 #include <signal.h>
+#include <unistd.h>
 
 #if defined(__APPLE__)
 #include <sys/ucontext.h>
@@ -328,8 +329,8 @@ thread_local DispatchScratch t_scratch;
 
 // Recursion guard. A guest handler that faults would otherwise re-enter here and
 // recurse until the stack is gone — the same shape as the bug this file fixes, and the
-// reason it must be impossible by construction rather than by care.
-thread_local int t_depth = 0;
+// reason it must be impossible by construction rather than by catch.
+thread_local int t_depth[2] = {0, 0};
 
 // The approximate stack position of the dispatch frame that raised the guard.
 //
@@ -347,7 +348,7 @@ thread_local int t_depth = 0;
 // observation about whether the earlier frame still exists, which is exactly the question.
 //
 // arm64 and x86-64 both grow down; there is no upward-growing platform in play here.
-thread_local uintptr_t t_depth_frame = 0;
+thread_local uintptr_t t_depth_frame[2] = {0, 0};
 
 // A local's address, as a stand-in for "where this frame is".
 //
@@ -399,17 +400,32 @@ bool guest_signal_dispatch(int host_signum, void* host_siginfo, void* host_ucont
     // The frame position answers it. Recursion runs deeper than the frame that raised the
     // guard — a lower address on a downward-growing stack. A jump out unwound that frame,
     // so this call runs at the same position or shallower.
+    //
+    // Stack identity matters: the "<" test is meaningless across DIFFERENT stacks
+    // (alt-stack dispatch vs normal-stack dispatch have incomparable addresses —
+    // every cross-stack comparison was a false recursion or a false reset). The
+    // guard is therefore per-stack: sigaltstack(2) is async-signal-safe, and
+    // dispatches are rare enough that one query here costs nothing.
     const uintptr_t frame = current_frame_position();
-    if (t_depth != 0) {
-        if (frame < t_depth_frame) {
+    int stack_id = 0;
+    {
+        stack_t oss;
+        if (::sigaltstack(nullptr, &oss) == 0 && !(oss.ss_flags & SS_DISABLE) &&
+            oss.ss_sp != nullptr && frame >= reinterpret_cast<uintptr_t>(oss.ss_sp) &&
+            frame < reinterpret_cast<uintptr_t>(oss.ss_sp) + oss.ss_size) {
+            stack_id = 1;
+        }
+    }
+    if (t_depth[stack_id] != 0) {
+        if (frame < t_depth_frame[stack_id]) {
             return false;  // deeper: the guest handler itself faulted
         }
         // The frame that raised the guard is gone. Reset rather than decline, or this
         // thread never dispatches to the guest again.
-        t_depth = 0;
+        t_depth[stack_id] = 0;
     }
-    ++t_depth;
-    t_depth_frame = frame;
+    ++t_depth[stack_id];
+    t_depth_frame[stack_id] = frame;
 
     const int guest_signum = host_signal_to_guest(host_signum);
     const int guest_flags = slot.guest_flags.load(std::memory_order_relaxed);
@@ -496,7 +512,19 @@ bool guest_signal_dispatch(int host_signum, void* host_siginfo, void* host_ucont
             ucontext_t* hu = static_cast<ucontext_t*>(host_ucontext);
             auto* ss = &hu->uc_mcontext->__ss;
             if (s.uc.uc_mcontext.pc != pc_before) {
-                for (int i = 0; i < 29; ++i) ss->__x[i] = s.uc.uc_mcontext.regs[i];
+                // The guest redirected execution: validate before committing.
+                // An unmapped, host-text, or misaligned pc would resume into
+                // garbage (or host code) with guest register state — decline
+                // and let the crash path dump/park instead.
+                const uint64_t newPc = s.uc.uc_mcontext.pc;
+                char mod[256] = {0};
+                const bool pcOk = newPc != 0 && (newPc & 3) == 0 &&
+                                  kudroid_lookup_guest_module(
+                                      reinterpret_cast<void*>(newPc), mod, sizeof(mod));
+                if (!pcOk) {
+                    state_changed = false;
+                } else {
+                    for (int i = 0; i < 29; ++i) ss->__x[i] = s.uc.uc_mcontext.regs[i];
                 arm_thread_state64_set_fp(*ss, s.uc.uc_mcontext.regs[29]);
                 arm_thread_state64_set_lr_fptr(*ss, reinterpret_cast<void*>(s.uc.uc_mcontext.regs[30]));
                 arm_thread_state64_set_sp(*ss, s.uc.uc_mcontext.sp);
@@ -505,6 +533,7 @@ bool guest_signal_dispatch(int host_signum, void* host_siginfo, void* host_ucont
                 t_last_fault_pc = 0;
                 t_last_fault_addr = 0;
                 t_same_fault_count = 0;
+                }  // validated guest redirect committed
             } else {
                 // In-place resolution (e.g. mprotect) only applies to page faults (SIGSEGV).
                 // Hardware traps (SIGBUS, SIGILL) cannot be resolved in-place.
@@ -534,8 +563,8 @@ bool guest_signal_dispatch(int host_signum, void* host_siginfo, void* host_ucont
 #endif
     }
 
-    --t_depth;
-    t_depth_frame = 0;
+    --t_depth[stack_id];
+    t_depth_frame[stack_id] = 0;
     return state_changed;
 }
 
@@ -545,17 +574,32 @@ bool guest_signal_dispatch(int host_signum, void* host_siginfo, void* host_ucont
 extern "C" void kudroid_guest_signal_trampoline(int host_signum, siginfo_t* info, void* uc) {
     // Diagnostic: async delivery zeroes the platform register on this OS; a
     // delivery landing inside guest x18-live code is fatal, so every delivery
-    // is named (capped) to attribute clobber crashes.
-    static std::mutex s_mtx;
-    static int s_n{0};
-    {
-        std::lock_guard<std::mutex> lock(s_mtx);
-        if (s_n < 12) {
-            ++s_n;
-            char msg[128];
-            std::snprintf(msg, sizeof(msg), "guest signal delivered host=%d", host_signum);
-            kudroid_android_log_message(4, "KuDroidSignal", msg);
+    // is named (capped) to attribute clobber crashes. Lock-free: this IS a
+    // signal handler, and a mutex here self-deadlocks when the signal lands
+    // while another thread holds it. Counter + raw write only.
+    static std::atomic<int> s_n{0};
+    if (s_n.fetch_add(1, std::memory_order_relaxed) < 12) {
+        char msg[64];
+        int len = 0;
+        const char* pre = "guest signal delivered host=";
+        while (pre[len] != '\0') {
+            msg[len] = pre[len];
+            ++len;
         }
+        int v = host_signum;
+        char digits[12];
+        int nd = 0;
+        if (v <= 0) {
+            digits[nd++] = '0';
+        } else {
+            while (v > 0 && nd < 11) {
+                digits[nd++] = static_cast<char>('0' + (v % 10));
+                v /= 10;
+            }
+        }
+        while (nd > 0 && len < 62) msg[len++] = digits[--nd];
+        msg[len++] = '\n';
+        (void)::write(STDERR_FILENO, msg, static_cast<size_t>(len));
     }
     guest_signal_dispatch(host_signum, info, uc);
 }
@@ -748,10 +792,17 @@ int guest_sigaltstack(const void* guest_ss, void* guest_oss) {
     std::memset(&host_oss, 0, sizeof(host_oss));
 
     const GuestStack* gs = static_cast<const GuestStack*>(guest_ss);
+    // Linux and Darwin spell the flags differently (Linux SS_DISABLE=2, Darwin
+    // SS_DISABLE=4; SS_ONSTACK=1 on both). Copying the raw value used to arm a
+    // stack the guest meant to disable.
+    constexpr uint32_t kLinuxSsOnStack = 1;
+    constexpr uint32_t kLinuxSsDisable = 2;
     if (gs != nullptr) {
         host_ss.ss_sp = gs->sp;
         host_ss.ss_size = static_cast<size_t>(gs->size);
-        host_ss.ss_flags = gs->flags;
+        host_ss.ss_flags = 0;
+        if (gs->flags & kLinuxSsOnStack) host_ss.ss_flags |= SS_ONSTACK;
+        if (gs->flags & kLinuxSsDisable) host_ss.ss_flags |= SS_DISABLE;
 #if defined(__APPLE__)
         // Darwin requires at least MINSIGSTKSZ and rejects anything smaller. A guest
         // sizing its stack for Linux may pass less; growing it is safe, because the
@@ -774,17 +825,19 @@ int guest_sigaltstack(const void* guest_ss, void* guest_oss) {
     // never see it. Until the guest installs one, it has none (SS_DISABLE).
     static thread_local bool guestInstalled = false;
     if (gs != nullptr) {
-        guestInstalled = (gs->flags & SS_DISABLE) == 0;
+        guestInstalled = (gs->flags & kLinuxSsDisable) == 0;
     }
 
     if (guest_oss != nullptr) {
         GuestStack* gos = static_cast<GuestStack*>(guest_oss);
         std::memset(gos, 0, sizeof(*gos));
         if (!guestInstalled) {
-            gos->flags = SS_DISABLE;
+            gos->flags = kLinuxSsDisable;
         } else {
             gos->sp = host_oss.ss_sp;
-            gos->flags = host_oss.ss_flags;
+            gos->flags = 0;
+            if (host_oss.ss_flags & SS_ONSTACK) gos->flags |= kLinuxSsOnStack;
+            if (host_oss.ss_flags & SS_DISABLE) gos->flags |= kLinuxSsDisable;
             gos->size = static_cast<uint64_t>(host_oss.ss_size);
         }
     }
@@ -799,8 +852,10 @@ void guest_signal_reset_for_test() {
         g_slots[i].guest_mask.store(0, std::memory_order_relaxed);
         g_slots[i].restorer.store(nullptr, std::memory_order_relaxed);
     }
-    t_depth = 0;
-    t_depth_frame = 0;
+    t_depth[0] = 0;
+    t_depth[1] = 0;
+    t_depth_frame[0] = 0;
+    t_depth_frame[1] = 0;
 }
 
 // ── Sending a signal ─────────────────────────────────────────────────────────

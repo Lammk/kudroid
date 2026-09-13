@@ -107,6 +107,21 @@ bool readZipEntries(std::ifstream& f, std::streamsize fileSize, std::vector<ZipE
     if (eocd == tailLen) { gLastError = "ZIP end record not found"; return false; }
     const std::uint16_t entryCount = read16b(tail.data(), eocd + 10);
     const std::uint32_t centralOffset = read32b(tail.data(), eocd + 16);
+    const std::uint16_t commentLen = read16b(tail.data(), eocd + 20);
+    // Not Zip64 (sentinels point at a Zip64 EOCD locator this reader does not
+    // parse), and the EOCD must actually sit at the end: without the length
+    // check a false 0x06054b50 inside compressed data mis-parses the tail.
+    // Not a size cap (APKs are ~1GB); Zip64 is the explicit error.
+    if (entryCount == 0xFFFF || centralOffset == 0xFFFFFFFFu) {
+        gLastError = "Zip64 archive not supported";
+        return false;
+    }
+    const std::uint64_t eocdAbs =
+        static_cast<std::uint64_t>(fileSize - static_cast<std::streamsize>(tailLen)) + eocd;
+    if (eocdAbs + 22 + commentLen != static_cast<std::uint64_t>(fileSize)) {
+        gLastError = "ZIP end record not at end of file";
+        return false;
+    }
 
     f.seekg(centralOffset);
     for (std::uint16_t index = 0; index < entryCount; ++index) {
@@ -133,6 +148,10 @@ bool readZipEntries(std::ifstream& f, std::streamsize fileSize, std::vector<ZipE
 }
 
 bool extractZipEntryToMemory(std::ifstream& f, const ZipEntryInfo& e, std::vector<std::uint8_t>& output) {
+    // Bounded before allocating: a lying header otherwise turns into a 4GB
+    // vector (bad_alloc/OOM) during install. Manifests/icons/dex here are KBs.
+    constexpr std::uint32_t kMaxMemoryEntry = 512u * 1024 * 1024;
+    if (e.uncompressedSize > kMaxMemoryEntry || e.compressedSize > kMaxMemoryEntry) return false;
     f.seekg(e.localOffset);
     char lh[30];
     if (!readExact(f, lh, 30) || read32b(lh, 0) != 0x04034b50) return false;
@@ -213,6 +232,25 @@ bool endsWithCi(const std::string& s, const char* suffix) {
             std::tolower(static_cast<unsigned char>(suffix[i]))) return false;
     }
     return true;
+}
+
+// Zip-Slip guard: entry names are attacker-controlled. Reject absolute paths,
+// ".." components and NUL bytes, then verify the joined destination still
+// sits under the target directory (symlink- and case-insensitive filesystems
+// can otherwise still escape the prefix check).
+bool zip_dest_within(const std::filesystem::path& targetDir,
+                     const std::filesystem::path& dest) {
+    std::error_code ec;
+    if (dest.string().find('\0') != std::string::npos) return false;
+    for (const auto& part : dest) {
+        if (part == "..") return false;
+    }
+    const auto normTarget = targetDir.lexically_normal();
+    const auto normDest = dest.lexically_normal();
+    const std::string t = normTarget.string();
+    const std::string d = normDest.string();
+    return d.size() > t.size() && d.compare(0, t.size(), t) == 0 &&
+           (d[t.size()] == '/' || t.back() == '/');
 }
 // entire lowercase (used to filter split by name).
 std::string toLower(const std::string& s) {
@@ -476,6 +514,10 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
                 }
 
                 std::size_t attrCur = attrsBase;
+                // attrSize below a full attribute entry means the typed-value
+                // reads below would run on misaligned/short data: stop, don't
+                // parse garbage as manifest fields.
+                if (attrSize < 20) break;
                 for (std::uint16_t a = 0; a < attrCount && attrCur + attrSize <= cur + chunkSize; ++a, attrCur += attrSize) {
                     const std::uint32_t attrNameIdx = read32(data, attrCur + 4);
                     const std::uint32_t attrRawValIdx = read32(data, attrCur + 8);
@@ -976,6 +1018,11 @@ static bool extract_apk_impl(const std::string& apkPath, const std::string& targ
         const auto destination = endsWithCi(entry, ".dex")
             ? std::filesystem::path(targetDirectory) / "oat" / std::filesystem::path(entry).filename()
             : std::filesystem::path(targetDirectory) / entry;
+        if (!zip_dest_within(targetDirectory, destination)) {
+            gLastError = "Refusing to extract outside target: " + entry;
+            apkLog(gLastError);
+            return false;
+        }
         std::filesystem::create_directories(destination.parent_path(), error);
 
         if (!extractZipEntryToFile(apk, entryInfo, destination.string())) {
@@ -1263,6 +1310,15 @@ bool APKExtractor::extract_bundle(const std::string& containerPath, const std::s
         const auto slash = rel.find('/');
         if (slash != std::string::npos) {
             pkg = rel.substr(0, slash);
+        }
+        // Package names are [A-Za-z0-9._]+ — anything else is a traversal attempt.
+        if (pkg.empty() ||
+            pkg.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._") !=
+                std::string::npos) {
+            gLastError = "Refusing suspicious OBB package: " + pkg;
+            apkLog(gLastError);
+            ok = false;
+            break;
         }
         const auto obbDir = obbRoot / pkg;
         std::error_code obbError;

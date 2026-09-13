@@ -199,6 +199,10 @@ struct PacerState {
     std::condition_variable cv;
     bool started = false;
     bool stop = false;
+    // Bumped on every post/stop: the scan-then-wait below drops the mutex in
+    // between, so a bare wait() could sleep through a wake that landed in the
+    // gap. Predicate waits on this version cannot lose it.
+    uint64_t post_seq = 0;
 
     // Cleared by the pacer thread on its way out. The test seam waits on this rather
     // than joining, because the thread is detached.
@@ -468,9 +472,11 @@ void pacer_main() {
     } running_flag;
 
     while (true) {
+        uint64_t seen_seq;
         {
             std::unique_lock<std::mutex> lock(state().mtx);
             if (state().stop) return;
+            seen_seq = state().post_seq;
         }
 
         const uint64_t now = mono_ns();
@@ -558,12 +564,13 @@ void pacer_main() {
 
         std::unique_lock<std::mutex> lock(state().mtx);
         if (state().stop) return;
+        auto posted = [&] { return state().stop || state().post_seq != seen_seq; };
         if (next_wake == 0) {
             // Nothing queued anywhere: park until a post wakes us. A pacer that spun
             // at the frame rate with no frames requested would burn a core for as long
             // as an app sat on a menu.
             pacer_telemetry(false);
-            state().cv.wait(lock);
+            state().cv.wait(lock, posted);
             continue;
         }
         const uint64_t after = mono_ns();
@@ -574,7 +581,7 @@ void pacer_main() {
             constexpr uint64_t kMaxSleepNs = 100000000ull;  // 100ms
             if (delay > kMaxSleepNs) delay = kMaxSleepNs;
             pacer_telemetry(false);
-            state().cv.wait_for(lock, std::chrono::nanoseconds(delay));
+            state().cv.wait_for(lock, std::chrono::nanoseconds(delay), posted);
         }
     }
 }
@@ -588,7 +595,11 @@ void start_pacer_once() {
     std::thread(pacer_main).detach();
 }
 
-void wake_pacer() { state().cv.notify_all(); }
+void wake_pacer() {
+    std::lock_guard<std::mutex> lock(state().mtx);
+    ++state().post_seq;
+    state().cv.notify_all();
+}
 
 void post_frame_callback(Choreographer* c, void* callback, void* data, uint64_t delay_ns) {
     if (callback == nullptr) return;

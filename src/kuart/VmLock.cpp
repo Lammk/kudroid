@@ -51,6 +51,12 @@ uint64_t os_tid_for(uint32_t id) {
 
 }  // namespace
 
+// Threads currently parked in a monitor Enter/Wait. kuart_shutdown waits these
+// out (bounded): deleting the runtime heap under a parked waiter that re-touches
+// the object on wake is a use-after-free. Defined here (not in the anonymous
+// namespace above) to match the header declaration.
+std::atomic<int> g_monitorWaiters{0};
+
 VmLockGuard::VmLockGuard() {
     g_vm_lock.lock();
     ++t_vm_lock_depth;
@@ -119,7 +125,9 @@ void Enter(DexObject* obj) {
     const BlockingWaitScope tracked(WaitKind::kJavaMonitor, obj, guest_return_address(6));
     std::unique_lock<std::mutex> lock(g_monitor_mutex);
     blocking_wait_note_owner(os_tid_for(obj->lock_owner_tid));
+    ++g_monitorWaiters;
     g_monitor_cv.wait(lock, [obj] { return obj->lock_owner_tid == 0; });
+    --g_monitorWaiters;
     obj->lock_owner_tid = self;
     obj->lock_count = 1;
 }
@@ -143,11 +151,16 @@ bool Wait(DexObject* obj, int64_t millis, int32_t nanos) {
     const uint32_t self = SelfThreadId();
 
     uint32_t saved_count;
+    // Capture BEFORE releasing: a notify landing between the release above and
+    // the wait below must still wake us. Sampling after re-lock (the old code)
+    // lost exactly that notify and hung indefinite waits forever.
+    uint32_t seq_at_release;
     {
         std::unique_lock<std::mutex> lock(g_monitor_mutex);
         if (obj->lock_owner_tid != self || obj->lock_count == 0) return false;
         // wait() releases the monitor fully and restores depth on return.
         saved_count = obj->lock_count;
+        seq_at_release = obj->notify_seq;
         obj->lock_owner_tid = 0;
         obj->lock_count = 0;
     }
@@ -164,8 +177,8 @@ bool Wait(DexObject* obj, int64_t millis, int32_t nanos) {
         std::unique_lock<std::mutex> lock(g_monitor_mutex);
 
         // Wake on notify or free monitor; spurious wakeups re-check.
-        const uint32_t seq_at_entry = obj->notify_seq;
-        auto notified = [obj, seq_at_entry] { return obj->notify_seq != seq_at_entry; };
+        auto notified = [obj, seq_at_release] { return obj->notify_seq != seq_at_release; };
+        ++g_monitorWaiters;
         if (millis <= 0 && nanos <= 0) {
             g_monitor_cv.wait(lock, notified);
         } else {
@@ -175,6 +188,7 @@ bool Wait(DexObject* obj, int64_t millis, int32_t nanos) {
         }
 
         g_monitor_cv.wait(lock, [obj] { return obj->lock_owner_tid == 0; });
+        --g_monitorWaiters;
         obj->lock_owner_tid = self;
         obj->lock_count = saved_count;
     }

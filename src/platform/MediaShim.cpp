@@ -215,7 +215,11 @@ extern "C" GuestMediaFormat* bionic_AMediaExtractor_getTrackFormat(GuestMediaExt
     return nullptr;
 }
 extern "C" int bionic_AMediaExtractor_selectTrack(GuestMediaExtractor* extractor, size_t /*idx*/) {
-    return extractor != nullptr ? kMediaOk : -1;
+    // Zero tracks exist, so any select is an error: succeeding would let the
+    // guest drive a codec and spin on TRY_AGAIN forever instead of taking its
+    // unsupported path.
+    (void)extractor;
+    return -1;
 }
 extern "C" int bionic_AMediaExtractor_unselectTrack(GuestMediaExtractor* extractor, size_t /*idx*/) {
     return extractor != nullptr ? kMediaOk : -1;
@@ -239,6 +243,7 @@ extern "C" int bionic_AMediaExtractor_seekTo(GuestMediaExtractor* extractor, int
 
 struct GuestMediaCodec {
     std::string name;
+    GuestMediaFormat* cachedFormat = nullptr;
 };
 
 extern "C" GuestMediaCodec* bionic_AMediaCodec_createDecoderByType(const char* mime) {
@@ -257,6 +262,7 @@ extern "C" GuestMediaCodec* bionic_AMediaCodec_createCodecByName(const char* nam
     return codec;
 }
 extern "C" int bionic_AMediaCodec_delete(GuestMediaCodec* codec) {
+    if (codec != nullptr) delete codec->cachedFormat;
     delete codec;
     return kMediaOk;
 }
@@ -306,7 +312,10 @@ extern "C" uint8_t* bionic_AMediaCodec_getOutputBuffer(GuestMediaCodec* /*codec*
 }
 extern "C" GuestMediaFormat* bionic_AMediaCodec_getOutputFormat(GuestMediaCodec* codec) {
     if (codec == nullptr) return nullptr;
-    return new GuestMediaFormat();
+    // One owned format per codec, not per call: per-frame pollers would leak
+    // a format every frame otherwise.
+    if (codec->cachedFormat == nullptr) codec->cachedFormat = new GuestMediaFormat();
+    return codec->cachedFormat;
 }
 
 #define MEDIA_FN(name) {#name, reinterpret_cast<void*>(&bionic_##name)}

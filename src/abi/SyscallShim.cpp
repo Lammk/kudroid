@@ -1071,12 +1071,25 @@ extern "C" int bionic_openat(int dirfd, const char* pathname, int flags, mode_t 
     if (hit("/assets/") || hit(".apk") || hit(".bank") || hit(".fsb") ||
         hit(".mp3") || hit(".ogg") || hit(".wav") || hit(".mp4") ||
         hit(".webm") || hit("jar:") || hit(".json") || hit("catalog") ||
-        hit("/files/") || hit("/sdcard/")) {
-        static std::atomic<int> s_logged{0};
-        if (s_logged.load() < 25) {
-            ++s_logged;
-            // Guest path: stable across installs (host path embeds a UUID).
-            std::fprintf(stderr, "[KuDroidIO] open %s -> %d\n", orig.c_str(), fd);
+        hit("/files/") || hit("/sdcard/") || hit(".bundle") ||
+        hit(".resource") || hit("sharedassets") || hit("data.unity3d") ||
+        hit("assets/bin/") || hit("/level")) {
+        // Failures are the signal: a bundle open that fails is an empty scene,
+        // silent audio and a trackless video with no other trace. Log every
+        // failure; cap only the success noise.
+        if (fd < 0) {
+            static std::atomic<int> s_failLogged{0};
+            if (s_failLogged.load() < 60) {
+                ++s_failLogged;
+                std::fprintf(stderr, "[KuDroidIO] open FAIL %s -> %d\n", orig.c_str(), fd);
+            }
+        } else {
+            static std::atomic<int> s_logged{0};
+            if (s_logged.load() < 80) {
+                ++s_logged;
+                // Guest path: stable across installs (host path embeds a UUID).
+                std::fprintf(stderr, "[KuDroidIO] open %s -> %d\n", orig.c_str(), fd);
+            }
         }
     }
     return fd;
@@ -2379,7 +2392,11 @@ static std::string short_path(const std::string& p) {
     return p.size() > 60 ? "..." + p.substr(p.size() - 57) : p;
 }
 
-const std::string& fd_path(int fd) {
+// Returned BY VALUE on purpose: the reference version dangled when a
+// concurrent close erased the map entry (or the fd number was recycled),
+// turning volume accounting into a heap UAF. One small string copy per
+// read/pread is cheaper than that.
+std::string fd_path(int fd) {
     {
         std::lock_guard<std::mutex> lock(g_apkFdMtx);
         const auto it = g_apkFd.find(fd);
@@ -2417,28 +2434,49 @@ extern "C" int kudroid_fd_is_apk(int fd) { return fd_is_apk(fd) ? 1 : 0; }
 
 static void io_volume_add(const std::string& path, uint64_t bytes) {
     if (path.empty() || bytes == 0) return;
-    std::lock_guard<std::mutex> lock(g_ioVolMtx);
-    if (g_ioVol.size() >= 256 && g_ioVol.find(path) == g_ioVol.end()) return;
-    auto& e = g_ioVol[path];
-    e.first += bytes;
-    e.second += 1;
-    g_ioVolTotal += bytes;
-    // Last time ANY byte flowed. The watchdog reads this: a load that stops making
-    // I/O progress while the engine keeps rendering is the signature of a loader
-    // wedged somewhere no shim observes — the exact blind spot thread sampling
-    // exists for but nothing was firing it into.
-    g_ioVolLastNs.store(static_cast<uint64_t>(std::chrono::steady_clock::now()
-                                                .time_since_epoch()
-                                                .count()),
-                        std::memory_order_relaxed);
-    if (g_ioVolTotal < g_ioVolNextLog) return;
-    g_ioVolNextLog += 5ULL * 1024 * 1024;
+    // Copy the table for the top-5 sort OUTSIDE the lock: sorting up to 256
+    // entries under it stalled every reader each 5MB.
+    bool report = false;
     using Entry = std::pair<std::string, std::pair<uint64_t, uint64_t>>;
-    std::vector<Entry> top(g_ioVol.begin(), g_ioVol.end());
+    std::vector<Entry> top;
+    uint64_t total = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_ioVolMtx);
+        if (g_ioVol.size() >= 256 && g_ioVol.find(path) == g_ioVol.end()) return;
+        // First bytes from a path: names exactly which files the engine pulls.
+        // A run where bundles never appear here is a run where content never
+        // arrived, whatever the engine logs claim about loading.
+        if (g_ioVol.find(path) == g_ioVol.end()) {
+            static int s_firstLogged = 0;
+            if (s_firstLogged < 80) {
+                ++s_firstLogged;
+                std::fprintf(stderr, "[KuDroidIO] first-read %s\n", short_path(path).c_str());
+            }
+        }
+        auto& e = g_ioVol[path];
+        e.first += bytes;
+        e.second += 1;
+        g_ioVolTotal += bytes;
+        // Last time ANY byte flowed. The watchdog reads this: a load that stops making
+        // I/O progress while the engine keeps rendering is the signature of a loader
+        // wedged somewhere no shim observes — the exact blind spot thread sampling
+        // exists for but nothing was firing it into.
+        g_ioVolLastNs.store(static_cast<uint64_t>(std::chrono::steady_clock::now()
+                                                    .time_since_epoch()
+                                                    .count()),
+                            std::memory_order_relaxed);
+        if (g_ioVolTotal >= g_ioVolNextLog) {
+            g_ioVolNextLog += 5ULL * 1024 * 1024;
+            top.assign(g_ioVol.begin(), g_ioVol.end());
+            total = g_ioVolTotal;
+            report = true;
+        }
+    }
+    if (!report) return;
     std::sort(top.begin(), top.end(), [](const Entry& a, const Entry& b) {
         return a.second.first > b.second.first;
     });
-    std::string line = "pread total=" + std::to_string(g_ioVolTotal) + "B";
+    std::string line = "pread total=" + std::to_string(total) + "B";
     for (size_t i = 0; i < top.size() && i < 5; ++i) {
         line += " | " + short_path(top[i].first) + "=" +
                 std::to_string(top[i].second.first) + "B/" +
@@ -5223,23 +5261,19 @@ extern "C" int bionic_statx(int dirfd, const char* pathname, int flags, unsigned
     (void)mask;
     if (!pathname || !statxbuf) { errno = EFAULT; return -1; }
     struct stat st;
-    std::string path = pathname;
+    int rc;
+    const int atflags = (flags & AT_SYMLINK_NOFOLLOW) ? AT_SYMLINK_NOFOLLOW : 0;
     if (at_path_needs_remap(dirfd, pathname)) {
-        path = kudroid::VFSPathRemapper::getInstance().remap(pathname);
-    } else if (dirfd != AT_FDCWD && pathname[0] != '/') {
-        // Relative path with dirfd — best-effort resolution via /proc/self/fd.
-        char link[64];
-        std::snprintf(link, sizeof(link), "/proc/self/fd/%d", dirfd);
-        char resolved[PATH_MAX];
-        const ssize_t n = ::readlink(link, resolved, sizeof(resolved) - 1);
-        if (n > 0) {
-            resolved[n] = '\0';
-            path = std::string(resolved) + "/" + pathname;
-        }
+        // Remapped absolute path: stat it directly.
+        const std::string path = kudroid::VFSPathRemapper::getInstance().remap(pathname);
+        rc = ::fstatat(AT_FDCWD, path.c_str(), &st, atflags);
+    } else {
+        // Native dirfd-relative lookup. The old code resolved dirfd through
+        // /proc/self/fd, which does not exist on iOS, so every dirfd-relative
+        // statx failed with ENOENT. fstatat takes the dirfd directly.
+        const int host_dirfd = translate_linux_dirfd(dirfd);
+        rc = ::fstatat(host_dirfd, pathname, &st, atflags);
     }
-    const int rc = (flags & AT_SYMLINK_NOFOLLOW)
-                       ? ::lstat(path.c_str(), &st)
-                       : ::stat(path.c_str(), &st);
     if (rc != 0) return -1; // errno already set
     fill_statx_from_stat(static_cast<GuestStatx*>(statxbuf), st);
     return 0;

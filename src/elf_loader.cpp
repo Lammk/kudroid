@@ -1007,8 +1007,36 @@ bool ElfLoader::applyProtections() {
     // Since all ELF relocations, GOT updates, and initial data writes have ALREADY
     // been performed into the mapping while it was writable, strip PROT_WRITE from
     // any page that contains executable code (PROT_EXEC) so that it remains cleanly RX.
+    //
+    // Shared-page hazard (16K host pages vs 4K-oriented ELF layout): an RX tail and
+    // an RW head can share one host page. RX must win (code has to execute), but
+    // any RUNTIME-writable bytes on that page (.data/.bss, not RELRO which is
+    // read-only after the relocations above) will fault on store — previously
+    // misattributed to guest bugs and hidden by the fault skipper. Count and name
+    // those pages loudly instead of silently picking RX.
     for (size_t i = 0; i < numPages; ++i) {
         if (pageProts[i] & PROT_EXEC) {
+            if (pageProts[i] & PROT_WRITE) {
+                bool runtimeWritable = false;
+                const uint64_t pageStart = minVaddr + i * pageSize;
+                const uint64_t pageEnd = pageStart + pageSize;
+                for (const auto& seg : segments_) {
+                    if (!(seg.flags & 2)) continue;  // not writable: RELRO/RO fine as RX
+                    const uint64_t s = seg.vaddr;
+                    const uint64_t e = s + seg.memsz;
+                    if (s < pageEnd && e > pageStart) {
+                        runtimeWritable = true;
+                        break;
+                    }
+                }
+                if (runtimeWritable) {
+                    std::fprintf(stderr,
+                                 "[KuDroidELF] W^X conflict page %zu: RX wins, runtime-writable "
+                                 "bytes on it will fault on store (relocate the library with "
+                                 "page-aligned segments if this fires)\n",
+                                 i);
+                }
+            }
             pageProts[i] &= ~PROT_WRITE;
             pageProts[i] |= (PROT_READ | PROT_EXEC);
         }

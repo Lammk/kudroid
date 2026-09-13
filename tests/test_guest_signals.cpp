@@ -913,7 +913,7 @@ void test_fault_skip_decoder() {
     }
     {
         FaultSkipPlan p = fault_decode_skip(0xf9802020, 0x1000, 0, 0);  // prfm
-        Check(p.skippable && !p.isLoad, "prfm allows (hint only)");
+        Check(!p.skippable, "prfm refuses (faulting hint hides a bad address)");
     }
     // Writeback forms refuse: the base update cannot be faked. Opcodes are
     // capstone ground truth (post/pre-index share bits[25:24]==00 with the
@@ -926,6 +926,10 @@ void test_fault_skip_decoder() {
               "post-index strb crash shape refuses");
         Check(!fault_decode_skip(0x38010c20, 0x1000, 0x5000, 0).skippable,
               "pre-index strb refuses");
+        // Atomics never become plain transfers: LDADD carries bit21==1 but
+        // mode 00, so the register-offset gate (mode==10 only) refuses it.
+        Check(!fault_decode_skip(0xb8200020, 0x1000, 0x5000, 0x18).skippable,
+              "ldadd refuses (never a plain transfer)");
         Check(!fault_decode_skip(0xf8410c20, 0x1000, 0x5000, 0).skippable,
               "pre-index load refuses");
         Check(!fault_decode_skip(0xa9c10440, 0x1000, 0x8000, 0).skippable,

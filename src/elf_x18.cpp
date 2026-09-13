@@ -72,9 +72,24 @@ Decoded decode(std::uint32_t w) {
     const unsigned rm = (w >> 16) & 31;
     const unsigned ra = (w >> 10) & 31;
 
-    // Branches with register: br/blr/ret + authenticated variants (read).
+    // Branches with register: br/blr/ret read Rn@9:5 only (bits[20:16] are
+    // fixed opcode bits, not a register — left alone).
     if (b == 0xD6) {
         markPatch(d, 5, rn, false);
+        return d;
+    }
+    // Authenticated branches: BRAA/BRAAZ/BLRAA/BLRAAZ/RETAA/RETAB/ERETAA.
+    // Layout (capstone-verified: 0xD71F0812 = braa x0, x18): target Rn@9:5,
+    // modifier Rm@4:0 — NOT @20:16 (those bits are fixed opcode 11111, and
+    // there is no third register despite the audit's Rm@16 claim). Both
+    // patch sites fire only when the field actually reads x18. Z/ERET forms
+    // read nothing. Without this case they fell to unknown and skipped the
+    // whole function (safe but lost rewrites); worse, a future reader of
+    // this table could misplace the modifier and leave a live x18 that async
+    // delivery zeroes.
+    if (b == 0xD7) {
+        markPatch(d, 5, rn, false);
+        markPatch(d, 0, rd, false);
         return d;
     }
     // b/bl span four top bytes each (condition/offset bits, no registers).
@@ -916,6 +931,13 @@ long rewriteRange(std::uint32_t* code, std::size_t nwords, X18Stats& st,
         }
         for (const auto& s : spans) {
             for (std::size_t c : calls) {
+                // Strict interior only: an endpoint call always coincides with
+                // an x18 word (spans are built from x18 refs, so a non-x18
+                // call can never BE an endpoint), and there the substitute is
+                // consumed by the call itself — blr x18 terminators must
+                // rewrite, not skip. A call the substitute is live ACROSS is
+                // exactly the strict-interior case, refused here, with any
+                // live-out past the span caught by the liveout check.
                 if (c > static_cast<std::size_t>(s.a) &&
                     c < static_cast<std::size_t>(s.b)) {
                     ++st.skippedNoReg;

@@ -333,6 +333,10 @@ static void* s_canvasBits = nullptr;
 static size_t s_canvasBitsSize = 0;
 static int s_canvasWidth = 1080;
 static int s_canvasHeight = 1920;
+// Guards the canvas triple: without it two lock() calls race realloc (one
+// thread's outBuffer->bits freed under it) and unlockAndPost can read a
+// half-reallocated buffer.
+static std::mutex s_canvasMtx;
 
 extern "C" int bionic_ANativeWindow_lock(void* window, ANativeWindow_Buffer* outBuffer,
                                          void* inOutDirtyRect) {
@@ -348,6 +352,7 @@ extern "C" int bionic_ANativeWindow_lock(void* window, ANativeWindow_Buffer* out
         w = 1080;
         h = 1920;
     }
+    std::lock_guard<std::mutex> lock(s_canvasMtx);
     s_canvasWidth = w;
     s_canvasHeight = h;
     const size_t needed = static_cast<size_t>(w) * static_cast<size_t>(h) * 4;
@@ -402,7 +407,22 @@ extern "C" void kudroid_blit_canvas_to_layer(void* layer, const void* bits, int 
     CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
     if (!colorSpace) return;
 
-    CGDataProviderRef provider = CGDataProviderCreateWithData(nullptr, bits, (size_t)width * height * 4, nullptr);
+    // Snapshot: the provider does not copy, and the async setContents below
+    // runs later on the main thread — a realloc of s_canvasBits in between
+    // would make the provider read freed memory. The copy is owned by the
+    // provider and freed by its release callback.
+    const size_t rowBytes = static_cast<size_t>(width) * 4;
+    const size_t byteCount = rowBytes * static_cast<size_t>(height);
+    void* snapshot = malloc(byteCount);
+    if (!snapshot) {
+        CGColorSpaceRelease(colorSpace);
+        return;
+    }
+    std::memcpy(snapshot, bits, byteCount);
+    CGDataProviderRef provider = CGDataProviderCreateWithData(
+        snapshot, snapshot, byteCount, [](void* info, const void*, size_t) {
+            std::free(info);
+        });
     if (!provider) {
         CGColorSpaceRelease(colorSpace);
         return;
@@ -452,10 +472,20 @@ extern "C" void kudroid_blit_canvas_to_layer(void* layer, const void* bits, int 
 
 extern "C" int bionic_ANativeWindow_unlockAndPost(void* window) {
     (void)window;
-    if (!s_canvasBits || s_canvasWidth <= 0 || s_canvasHeight <= 0) return 0;
+    // Copy the triple under the mutex; blit snapshots the bytes synchronously,
+    // so the lock is not held across the main-thread dispatch.
+    void* bits = nullptr;
+    int w = 0, h = 0;
+    {
+        std::lock_guard<std::mutex> lock(s_canvasMtx);
+        bits = s_canvasBits;
+        w = s_canvasWidth;
+        h = s_canvasHeight;
+    }
+    if (!bits || w <= 0 || h <= 0) return 0;
 #if defined(__APPLE__)
     if (g_metalLayer) {
-        kudroid_blit_canvas_to_layer(g_metalLayer, s_canvasBits, s_canvasWidth, s_canvasHeight);
+        kudroid_blit_canvas_to_layer(g_metalLayer, bits, w, h);
     }
 #endif
     return 0;
@@ -1057,8 +1087,13 @@ static std::atomic<uint64_t> s_acquireCount{0};
 
 extern "C" uint32_t bionic_vkQueuePresentKHR(void* queue, const void* present_info) {
     const uint64_t n = ++s_presentCount;
+    // Fail loud, never fake SUCCESS: with no real present behind us the frame
+    // went nowhere, and logging SUCCESS for a black screen misdirects every
+    // later diagnosis. VK_ERROR_INITIALIZATION_FAILED is a valid VkResult the
+    // guest's switch handles; 0xFFFFFFFF was not.
+    constexpr uint32_t kVkErrorInit = 0xFFFFFFFDu;  // VK_ERROR_INITIALIZATION_FAILED (-3)
     const uint32_t r =
-        s_realQueuePresent != nullptr ? s_realQueuePresent(queue, present_info) : 0;
+        s_realQueuePresent != nullptr ? s_realQueuePresent(queue, present_info) : kVkErrorInit;
     // Log every present: result + target swapchain/image (standard
     // VkPresentInfoKHR 64-bit layout) so a present stream that stops, fails,
     // or switches swapchain mid-run is visible. ~30 lines/s while running.
@@ -1092,7 +1127,9 @@ extern "C" uint32_t bionic_vkAcquireNextImageKHR(void* device, void* swapchain, 
                                                 void* semaphore, void* fence,
                                                 uint32_t* image_index) {    const uint64_t n = ++s_acquireCount;
     uint32_t index = 0xFFFFFFFFu;
-    uint32_t r = 0xFFFFFFFFu;
+    // Valid VkResults only: 0xFFFFFFFF matches no VK_ERROR_* (small negatives)
+    // and falls through guest switches into retry-forever. -3 init-failed.
+    uint32_t r = 0xFFFFFFFDu;
     if (s_realAcquireNextImage != nullptr) {
         r = s_realAcquireNextImage(device, swapchain, timeout, semaphore, fence, &index);
         if (image_index != nullptr) *image_index = index;
@@ -1112,7 +1149,7 @@ extern "C" uint32_t bionic_vkQueueSubmit(void* queue, uint32_t submit_count,
         s_submitCount.fetch_add(submit_count, std::memory_order_relaxed) + submit_count;
     const uint32_t r = s_realQueueSubmit != nullptr
                            ? s_realQueueSubmit(queue, submit_count, submits, fence)
-                           : 0xFFFFFFFFu;
+                           : 0xFFFFFFFDu;  // valid VkResult, see above
     if (n <= 5 || r != 0 || (n % 120) == 0) {
         gpuLog("vkQueueSubmit #%llu -> %u batches=%u", (unsigned long long)n, r,
                submit_count);
@@ -1141,7 +1178,7 @@ extern "C" uint32_t bionic_vkCreateSwapchainKHR(void* device, const void* create
     void* created = nullptr;
     const uint32_t r = s_realCreateSwapchain != nullptr
                            ? s_realCreateSwapchain(device, create_info, allocator, &created)
-                           : 0xFFFFFFFFu;
+                           : 0xFFFFFFFDu;  // valid VkResult, see above
     if (swapchain != nullptr) *swapchain = created;
     // The swapchain's layer now owns the pixels: static canvas contents must
     // stop covering its drawables (one producer per layer).
@@ -1167,7 +1204,7 @@ extern "C" uint32_t bionic_vkCreateSwapchainKHR(void* device, const void* create
 // currentTransform(40).
 extern "C" uint32_t bionic_vkSurfaceCaps(void* phys, void* surface, void* caps) {
     const uint32_t r =
-        s_realSurfaceCaps != nullptr ? s_realSurfaceCaps(phys, surface, caps) : 0xFFFFFFFFu;
+        s_realSurfaceCaps != nullptr ? s_realSurfaceCaps(phys, surface, caps) : 0xFFFFFFFDu;
     if (r == 0 && caps != nullptr) {
         uint32_t w = 0, h = 0, min_c = 0, max_c = 0;
         int32_t sup_xf = -1, cur_xf = -1;
@@ -1703,7 +1740,9 @@ extern "C" EGLBoolean bionic_eglQuerySurface(EGLDisplay dpy, EGLSurface surface,
 
 extern "C" EGLint bionic_eglGetError(void) {
     auto f = eglFn<EGLint(void)>("eglGetError");
-    if (!f) { EGL_FORWARD_ERR("eglGetError", ""); return EGL_SUCCESS; }
+    // No backend: report NOT_INITIALIZED, not SUCCESS — a SUCCESS here masks
+    // every earlier failure and sends the guest down the success path blind.
+    if (!f) { EGL_FORWARD_ERR("eglGetError", ""); return 0x3001; }
     EGLint e = f();
     gpuLog("eglGetError -> %s (0x%x)", e == EGL_SUCCESS ? "EGL_SUCCESS" : "ERROR", (unsigned)e);
     return e;

@@ -113,8 +113,11 @@ public final class MessageQueue {
      * Returns the next message ready to be executed, or null if the queue is quitting.
      */
     Message next() {
-        synchronized (this) {
-            for (;;) {
+        for (;;) {
+            IdleHandler[] idle = null;
+            long waitMs = 0;
+            boolean waitForever = false;
+            synchronized (this) {
                 if (mQuitting) {
                     return null;
                 }
@@ -124,16 +127,12 @@ public final class MessageQueue {
 
                 if (msg != null) {
                     if (now < msg.when) {
-                        // Head is in the future: run idle handlers first (AOSP
-                        // does), then wait out the remainder. Handlers that
-                        // enqueue work wake this wait via notifyAll.
-                        dispatchIdleHandlers();
-                        long timeout = msg.when - SystemClock.uptimeMillis();
-                        if (timeout > 0) {
-                            try {
-                                this.wait(timeout);
-                            } catch (InterruptedException ignored) {}
-                        }
+                        // Head is in the future: snapshot idle handlers to run
+                        // OUTSIDE the monitor below, then wait out the
+                        // remainder. Handlers that enqueue work wake this wait
+                        // via notifyAll.
+                        idle = snapshotIdleHandlersLocked();
+                        waitMs = msg.when - SystemClock.uptimeMillis();
                     } else {
                         // Message is ready to dispatch
                         mMessages = msg.next;
@@ -142,15 +141,32 @@ public final class MessageQueue {
                         return msg;
                     }
                 } else {
-                    // Idle: run idle handlers, then wait unbounded for
-                    // notification. Unlike AOSP (which re-polls immediately
-                    // and can spin on a staying-registered handler), one pass
-                    // per wake keeps CPU bounded; any enqueue wakes us.
-                    dispatchIdleHandlers();
-                    try {
-                        this.wait();
-                    } catch (InterruptedException ignored) {}
+                    // Idle: snapshot handlers, run them unlocked, then wait
+                    // unbounded for notification. Unlike AOSP (which re-polls
+                    // immediately and can spin on a staying-registered
+                    // handler), one pass per wake keeps CPU bounded; any
+                    // enqueue wakes us.
+                    idle = snapshotIdleHandlersLocked();
+                    waitForever = true;
                 }
+            }
+            // Outside the monitor: handlers run arbitrary interpreted code
+            // that may itself synchronize or enqueue. Running them under the
+            // queue monitor inverted lock order against every such path.
+            if (idle != null) {
+                runIdleHandlers(idle);
+            }
+            synchronized (this) {
+                if (mQuitting) {
+                    return null;
+                }
+                try {
+                    if (waitForever) {
+                        this.wait();
+                    } else if (waitMs > 0) {
+                        this.wait(waitMs);
+                    }
+                } catch (InterruptedException ignored) {}
             }
         }
     }
@@ -171,23 +187,33 @@ public final class MessageQueue {
     }
 
     /**
-     * Runs registered idle handlers. Called from next() when the queue has no
-     * message ready (empty, or head still in the future). A handler returning
-     * false is unregistered, matching AOSP. Runs under the queue monitor like
-     * AOSP so add/remove cannot interleave mid-dispatch.
+     * Copy of the handler list, caller holding the queue monitor. The handlers
+     * themselves run outside it (see next()).
      */
-    private void dispatchIdleHandlers() {
+    private IdleHandler[] snapshotIdleHandlersLocked() {
         int count = mIdleHandlers.size();
+        IdleHandler[] out = new IdleHandler[count];
         for (int i = 0; i < count; i++) {
-            IdleHandler handler = mIdleHandlers.get(i);
+            out[i] = mIdleHandlers.get(i);
+        }
+        return out;
+    }
+
+    /**
+     * Runs a snapshot outside the queue monitor. A handler returning false is
+     * unregistered, matching AOSP. Removals go through removeIdleHandler, so a
+     * handler removed concurrently just runs once more — same as AOSP.
+     */
+    private void runIdleHandlers(IdleHandler[] handlers) {
+        for (int i = 0; i < handlers.length; i++) {
+            IdleHandler handler = handlers[i];
+            if (handler == null) continue;
             boolean keep = false;
             try {
                 keep = handler.queueIdle();
             } catch (Throwable ignored) {}
             if (!keep) {
-                mIdleHandlers.remove(handler);
-                i--;
-                count--;
+                removeIdleHandler(handler);
             }
         }
     }

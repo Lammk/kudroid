@@ -179,6 +179,12 @@ private:
     DexField* ResolveField(const DexMethod* context, uint32_t field_idx, bool is_static);
     DexMethod* ResolveMethod(const DexMethod* context, uint32_t method_idx);
 
+    // Instance-field safety: the object's class must be the field's class or a
+    // subclass, and [off, off+width) must lie inside the object. A stale or
+    // confused field id otherwise reads/writes arbitrary heap. Throws
+    // NoSuchFieldError on violation, returns false.
+    bool CheckInstanceField(DexObject* obj, DexField* field, uint32_t width);
+
     // Name an unimplemented field, once per distinct field, in classes.log and on
     // stderr. Unlike a missing method a field cannot be stubbed — object layout is
     // fixed by LinkClass — so naming it is the only remedy.

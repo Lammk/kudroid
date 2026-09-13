@@ -2,6 +2,7 @@
 #include "kudroid/kudroid_bridge.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
@@ -67,6 +68,12 @@ struct Runtime {
 
 Runtime* g_rt = nullptr;
 std::mutex g_mtx;
+// Dispatch pin count: workers increment under g_mtx and dispatch WITHOUT it,
+// so re-entrant kuart_* calls on the dispatch thread cannot self-deadlock on
+// the non-recursive g_mtx, and shutdown waits out in-flight dispatch instead
+// of deleting the runtime under it. Bounded wait (see kuart_shutdown).
+std::atomic<int> g_rtUsers{0};
+bool g_shutdownRequested = false;
 std::string g_current_app_dir;
 void (*g_log_cb)(const char*) = nullptr;
 void* (*g_symbol_lookup)(const char*) = nullptr;
@@ -194,12 +201,22 @@ void StartTouchWorker() {
             for (;;) {
                 const auto event = queue->popCoalesced();
                 {
-                    // Pin the runtime through dispatch; ingress never takes this lock.
+                    // Pin under the mutex, dispatch without it (see g_rtUsers).
                     std::lock_guard<std::mutex> runtime_lock(g_mtx);
-                    if (!queue->isCurrent(event) || g_rt == nullptr || !g_rt->ready) continue;
+                    if (g_shutdownRequested || !queue->isCurrent(event) || g_rt == nullptr ||
+                        !g_rt->ready) {
+                        if (g_shutdownRequested) return;
+                        continue;
+                    }
+                    ++g_rtUsers;
+                }
+                {
                     kudroid::kuart::VmLockGuard vm_lock;
                     // Teardown can invalidate an event while this worker waits for the VM.
-                    if (!queue->isCurrent(event)) continue;
+                    if (!queue->isCurrent(event)) {
+                        --g_rtUsers;
+                        continue;
+                    }
                     const DexValue args[4] = {DexValue::Int(event.action),
                                              DexValue::Int(event.pointerCount),
                                              DexValue::Float(event.x), DexValue::Float(event.y)};
@@ -211,6 +228,7 @@ void StartTouchWorker() {
                     }
                     CallActivityThreadStatic("postTouchEvent", "(IIFF)V", args, 4);
                 }
+                --g_rtUsers;
                 std::this_thread::yield();
             }
         }).detach();
@@ -386,6 +404,10 @@ extern "C" int kuart_init(const char* app_dir) {
     }
 
     rt->ready = true;
+    {
+        std::lock_guard<std::mutex> lock(g_mtx);
+        g_shutdownRequested = false;
+    }
     g_rt = rt.release();
     g_current_app_dir = requested_dir;
     kudroid_touch_source_gate_init();
@@ -396,7 +418,24 @@ extern "C" int kuart_init(const char* app_dir) {
 
 extern "C" void kuart_shutdown(void) {
     TouchQueue().reset(false);
+    {
+        std::lock_guard<std::mutex> lock(g_mtx);
+        g_shutdownRequested = true;
+    }
+    // Wait out pinned dispatch (bounded): deleting g_rt under a running
+    // Execute is a UAF; waiting forever on a wedged handler is a hang.
+    for (int i = 0; i < 200 && g_rtUsers.load(std::memory_order_acquire) > 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    // Same for threads parked in monitor Enter/Wait: they re-touch DexObjects
+    // on wake, which kuart_shutdown is about to free.
+    for (int i = 0;
+         i < 200 && kudroid::kuart::g_monitorWaiters.load(std::memory_order_acquire) > 0;
+         ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
     std::lock_guard<std::mutex> lock(g_mtx);
+    g_shutdownRequested = false;
     if (g_rt != nullptr && !g_rt->oat_path.empty() && !g_rt->oat.empty()) {
         // Save what this run learned. A failure is not worth reporting as an error: the
         // consequence is a slower start next time, not a broken one.

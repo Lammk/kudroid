@@ -43,9 +43,75 @@ public final class AssetManager implements AutoCloseable {
         return open(fileName, 0);
     }
     public InputStream open(String fileName, int accessMode) throws IOException {
+        return openAssetStream(fileName);
+    }
+
+    /**
+     * Stream an asset wherever it lives: loose file first, then the entry inside
+     * base.apk via the native resolver (stored entries read as a bounded slice of
+     * the APK, deflated ones from the extraction cache). Without the fallback every
+     * APK-embedded asset — bundles, resources, catalog — is a FileNotFoundException
+     * and the game boots contentless: black screen, silent audio, trackless video.
+     */
+    public static InputStream openAssetStream(String fileName) throws IOException {
         File f = assetFile(fileName);
-        if (!f.isFile()) throw new FileNotFoundException(fileName);
-        return new FileInputStream(f);
+        if (f.isFile()) return new FileInputStream(f);
+        Object[] resolved = nativeResolveAsset(fileName);
+        if (resolved != null && resolved.length == 3 &&
+                resolved[0] instanceof String && resolved[1] instanceof Long &&
+                resolved[2] instanceof Long) {
+            File backing = new File((String) resolved[0]);
+            long start = (Long) resolved[1];
+            long length = (Long) resolved[2];
+            if (backing.isFile() && length > 0) {
+                FileInputStream in = new FileInputStream(backing);
+                long skipped = 0;
+                while (skipped < start) {
+                    long n = in.skip(start - skipped);
+                    if (n <= 0) break;
+                    skipped += n;
+                }
+                if (skipped == start) {
+                    return new BoundedInputStream(in, length);
+                }
+                in.close();
+            }
+        }
+        throw new FileNotFoundException(fileName);
+    }
+
+    /** FileInputStream capped at length bytes, then EOF. */
+    public static class BoundedInputStream extends java.io.FilterInputStream {
+        private long mRemaining;
+
+        public BoundedInputStream(FileInputStream in, long length) {
+            super(in);
+            mRemaining = length;
+        }
+
+        public long getLength() {
+            return mRemaining;
+        }
+
+        public int read() throws IOException {
+            if (mRemaining <= 0) return -1;
+            int b = super.read();
+            if (b >= 0) mRemaining--;
+            return b;
+        }
+
+        public int read(byte[] b, int off, int len) throws IOException {
+            if (mRemaining <= 0) return -1;
+            int n = super.read(b, off, (int) Math.min(len, mRemaining));
+            if (n > 0) mRemaining -= n;
+            return n;
+        }
+
+        public long skip(long n) throws IOException {
+            long k = super.skip(Math.min(n, mRemaining));
+            mRemaining -= k;
+            return k;
+        }
     }
     public AssetFileDescriptor openFd(String fileName) throws IOException {
         File f = assetFile(fileName);

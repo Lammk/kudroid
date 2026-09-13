@@ -32,6 +32,7 @@
 #include "kudroid/kuart/Interpreter.h"
 #include "kudroid/kuart/VmLock.h"
 #include "kudroid/platform/MemoryInfo.h"
+#include "kudroid/platform/AssetShim.h"
 #include "kudroid/platform/CpuInfo.h"
 #include "kudroid/platform/AudioShim.h"
 #include "kudroid/platform/FramePacer.h"
@@ -3275,9 +3276,9 @@ bool Invoke_android_content_res_AssetManager(Interpreter* interp, const char* na
                                              const DexValue* args, size_t num_args,
                                              DexValue* result) {
     if (std::strcmp(name, "nativeGetAssetsDir") == 0) {
-        const char* dir = kudroid_get_assets_dir();
-        result->l = (interp != nullptr && interp->linker() != nullptr && dir != nullptr)
-                        ? reinterpret_cast<DexObject*>(interp->linker()->NewString(dir))
+        const std::string dir = kudroid::kudroid_get_assets_dir_cpp();
+        result->l = (interp != nullptr && interp->linker() != nullptr)
+                        ? reinterpret_cast<DexObject*>(interp->linker()->NewString(dir.c_str()))
                         : nullptr;
         return true;
     }

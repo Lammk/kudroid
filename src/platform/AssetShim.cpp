@@ -48,11 +48,32 @@ extern "C" void kudroid_set_assets_dir(const char* dir) {
     g_assetsDir = dir;
 }
 
-// Valid until the next call; the caller must copy immediately.
+// Returned by value: the old c_str() dangled on the next set_assets_dir and
+// raced every reader. Set once at startup, but correctness should not depend
+// on that staying true.
+std::string kudroid_get_assets_dir_cpp(void) {
+    std::lock_guard<std::mutex> lock(g_assetsMtx);
+    return g_assetsDir;
+}
+
 extern "C" const char* kudroid_get_assets_dir(void) {
+    // Legacy C accessor; valid only until the next set. Prefer the C++ copy.
     std::lock_guard<std::mutex> lock(g_assetsMtx);
     return g_assetsDir.c_str();
 }
+
+}  // namespace (anonymous)
+
+// Returned by value: the old c_str() dangled on the next set_assets_dir and
+// raced every reader. Set once at startup, but correctness should not depend
+// on that staying true. Out here (not in the anonymous namespace above) so it
+// has external linkage.
+std::string kudroid_get_assets_dir_cpp(void) {
+    std::lock_guard<std::mutex> lock(g_assetsMtx);
+    return g_assetsDir;
+}
+
+namespace {
 
 static std::string current_assets_dir() {
     std::lock_guard<std::mutex> lock(g_assetsMtx);
@@ -157,6 +178,14 @@ static int cached_readonly_fd(const std::string& path) {
         return -1;
     }
     g_cachedFds.emplace(path, CachedFd{fd, st.st_dev, st.st_ino});
+    // Bounded: an ever-growing path set (distinct jar-cache files) would leak
+    // fds. Evict an arbitrary entry past the cap; it re-opens on demand.
+    constexpr size_t kMaxCachedFds = 64;
+    if (g_cachedFds.size() > kMaxCachedFds) {
+        auto it = g_cachedFds.begin();
+        ::close(it->second.fd);
+        g_cachedFds.erase(it);
+    }
     return fd;
 }
 
@@ -201,7 +230,9 @@ static off_t pread_seekfn(void* cookie, off_t offset, int whence) {
 }
 
 static int pread_closefn(void* cookie) {
-    delete static_cast<PreadCookie*>(cookie);
+    auto* s = static_cast<PreadCookie*>(cookie);
+    if (s != nullptr) ::close(s->fd);
+    delete s;
     return 0;
 }
 #else
@@ -233,7 +264,9 @@ static int pread_cookie_seek(void* cookie, off64_t* offsetp, int whence) {
 }
 
 static int pread_cookie_close(void* cookie) {
-    delete static_cast<PreadCookie*>(cookie);
+    auto* s = static_cast<PreadCookie*>(cookie);
+    if (s != nullptr) ::close(s->fd);
+    delete s;
     return 0;
 }
 #endif
@@ -241,10 +274,18 @@ static int pread_cookie_close(void* cookie) {
 // Open `path` as a read-only FILE* backed by pread on the cached fd. *outFd (may be
 // null) receives the underlying fd so getBuffer can still mmap the archive slice —
 // mmap takes an explicit offset and does not disturb the shared file description.
+//
+// The cookie owns a dup() of the cached fd, not the cached number itself: the
+// cache may close-and-replace its fd on a stale check while streams are live,
+// and the bare number could then be recycled for another file (silent
+// wrong-file reads). A dup pins the open file description, so replacement is
+// safe by construction.
 static FILE* open_pread_stream(const std::string& path, int* outFd) {
     const int fd = cached_readonly_fd(path);
     if (fd < 0) return nullptr;
-    auto* cookie = new PreadCookie{fd, 0};
+    const int mine = ::dup(fd);
+    if (mine < 0) return nullptr;
+    auto* cookie = new PreadCookie{mine, 0};
     FILE* f = nullptr;
 #if defined(__APPLE__)
     f = ::funopen(cookie, pread_readfn, nullptr, pread_seekfn, pread_closefn);
@@ -254,10 +295,14 @@ static FILE* open_pread_stream(const std::string& path, int* outFd) {
     f = ::fopencookie(cookie, "r", kFns);
 #endif
     if (f == nullptr) {
+        ::close(cookie->fd);
         delete cookie;
         return nullptr;
     }
-    if (outFd) *outFd = fd;
+    // Hand out the dup, not the cached number: reads and mmaps through it stay
+    // on the right inode even if the cache replaces its fd, and its lifetime
+    // is the stream's (closed by the cookie close above).
+    if (outFd) *outFd = mine;
     return f;
 }
 
@@ -392,6 +437,16 @@ static AAssetImpl* open_asset(const char* filename) {
     FILE* f = nullptr;
     int streamFd = -1;
     if (startOffset > 0) {
+        // Archive-backed slice: validate the central-directory figures against
+        // the real file first. A truncated/lying directory used to mmap and
+        // fault past EOF as SIGBUS on the guest thread (then misattributed to
+        // the engine), or silently serve a short slice.
+        struct stat st;
+        if (::stat(full.string().c_str(), &st) != 0) return nullptr;
+        const auto fsize = static_cast<uint64_t>(st.st_size);
+        const auto off = static_cast<uint64_t>(startOffset);
+        const auto want = static_cast<uint64_t>(entryLength);
+        if (want > fsize || off > fsize - want) return nullptr;
         // Archive-backed slice: pread on a cached fd, no per-asset open/close.
         f = open_pread_stream(full.string(), &streamFd);
     } else {
@@ -604,7 +659,11 @@ extern "C" int bionic_AAsset_read(void* asset, void* buf, size_t count) {
     auto* a = static_cast<AAssetImpl*>(asset);
     if (!a || !buf || !a->file) return -1;
     if (a->offset >= a->length) return 0;
-    const size_t to_read = std::min<size_t>(count, static_cast<size_t>(a->length - a->offset));
+    // Single reads cap at INT_MAX: pread/ssize_t/int returns cannot express
+    // more, and the caller loops for the rest.
+    size_t capped = count;
+    if (capped > static_cast<size_t>(INT32_MAX)) capped = static_cast<size_t>(INT32_MAX);
+    const size_t to_read = std::min<size_t>(capped, static_cast<size_t>(a->length - a->offset));
     if (to_read == 0) return 0;
     // Archive-backed: pread the cached fd so the shared stream position is untouched
     // (the fd handed out by openFileDescriptor must keep its own offset).

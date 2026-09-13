@@ -17,7 +17,10 @@ public:
         // Fingers down including this event's own pointer. Native input code indexes
         // per-pointer arrays by the action's pointer index, so this must never be
         // smaller than index+1 — otherwise a second finger corrupts the heap.
+        // Upper-bounded: nobody has that many fingers, and an absurd count would
+        // size downstream arrays.
         int pointerCount = 1;
+        static constexpr int kMaxPointerCount = 16;
         uint64_t generation = 0;
     };
 
@@ -36,6 +39,7 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             if (!accepting_) return;
             if (pointerCount < 1) pointerCount = 1;
+            if (pointerCount > Event::kMaxPointerCount) pointerCount = Event::kMaxPointerCount;
             // Coalesce the flood at ingress: a drag produces 60-120 MOVEs/s and each
             // one costs a full interpreted dispatch under the VM lock downstream.
             // Folding a MOVE into a queued trailing MOVE keeps the latest finger
@@ -60,6 +64,13 @@ public:
                         break;
                     }
                 }
+            }
+            // Hard cap even with no MOVE to fold: a DOWN-spam flood (faulty or
+            // hostile producer) must not grow the deque — and buy a VM-locked
+            // dispatch per entry — without bound. Newest wins; a drop counter
+            // would only add a log line to a flood.
+            if (events_.size() >= kMaxQueueSize) {
+                events_.pop_front();
             }
             events_.push_back(Event{action, x, y, pointerCount, generation_});
         }

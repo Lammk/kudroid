@@ -8,12 +8,17 @@
 #ifndef KUDROID_KUART_VMLOCK_H
 #define KUDROID_KUART_VMLOCK_H
 
+#include <atomic>
 #include <cstdint>
 
 namespace kudroid {
 namespace kuart {
 
 class DexObject;
+
+// Threads currently parked in a monitor Enter/Wait. Shutdown waits these out
+// (bounded) before freeing the runtime heap they re-touch on wake.
+extern std::atomic<int> g_monitorWaiters;
 
 // Held for the whole duration of a bytecode call made from outside the
 // interpreter (Interpreter::Execute at depth 0, and each Java thread body).

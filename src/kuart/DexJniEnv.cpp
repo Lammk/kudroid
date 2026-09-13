@@ -214,7 +214,19 @@ thread_local DexObject* t_pending_exception = nullptr;
 
 jobject DexJniEnv::AddLocalRef(DexObject* obj) {
     if (obj == nullptr) return nullptr;
-    ThreadLocalFrames().back().push_back(obj);
+    // Unbounded frames are a slow leak on JNI-heavy paths (per-element array
+    // access without deletes). Cap generously — real frames stay far below —
+    // and fail loudly instead of growing forever.
+    constexpr size_t kMaxLocalRefs = 8192;
+    auto& frame = ThreadLocalFrames().back();
+    if (frame.size() >= kMaxLocalRefs) {
+        if (interpreter_ != nullptr) {
+            interpreter_->ThrowException("Ljava/lang/OutOfMemoryError;",
+                                         "local reference table overflow");
+        }
+        return nullptr;
+    }
+    frame.push_back(obj);
     return AsHandle(obj);
 }
 
@@ -278,21 +290,33 @@ jint DexJniEnv::RegisterNatives(DexClass* klass, const JNINativeMethod* methods,
     if (klass == nullptr || methods == nullptr) return JNI_ERR;
 
     jint failures = 0;
+    std::string errors;
     for (jint i = 0; i < count; ++i) {
         const JNINativeMethod& m = methods[i];
         if (m.name == nullptr || m.signature == nullptr || m.fnPtr == nullptr) {
+            errors += "  null name/signature/fnPtr\n";
             ++failures;
             continue;
         }
         DexMethod* target = klass->FindDirectMethod(m.name, m.signature);
         if (target == nullptr) target = klass->FindVirtualMethod(m.name, m.signature);
         if (target == nullptr) {
-            last_error_ = std::string("RegisterNatives: no method ") + m.name +
-                          m.signature + " in " + klass->PrettyName();
+            errors += std::string("  no method ") + m.name + m.signature + "\n";
+            ++failures;
+            continue;
+        }
+        // Binding a bytecode method reports JNI_OK while the pointer never
+        // fires (Execute prefers bytecode for non-natives) — a silent lie
+        // that surfaces as UnsatisfiedLinkError far from the cause.
+        if (!target->IsNative()) {
+            errors += std::string("  not native: ") + m.name + m.signature + "\n";
             ++failures;
             continue;
         }
         target->native_fn = m.fnPtr;
+    }
+    if (failures != 0) {
+        last_error_ = "RegisterNatives failures in " + klass->PrettyName() + ":\n" + errors;
     }
     return failures == 0 ? JNI_OK : JNI_ERR;
 }
@@ -300,7 +324,10 @@ jint DexJniEnv::RegisterNatives(DexClass* klass, const JNINativeMethod* methods,
 bool DexJniEnv::LinkNativeMethod(DexMethod* method) {
     if (method == nullptr) return false;
     if (method->native_fn != nullptr) return true;
+    if (method->link_refused) return false;
     if (LibCoreHasMethod(method)) return true;
+    // No lookup installed yet: do NOT mark refused — it may arrive (startup
+    // ordering), and a sticky refusal would break every later link.
     if (symbol_lookup_ == nullptr || method->declaring_class == nullptr) return false;
 
     const char* descriptor = method->declaring_class->descriptor;
@@ -317,6 +344,7 @@ bool DexJniEnv::LinkNativeMethod(DexMethod* method) {
         return true;
     }
     last_error_ = "native symbol not found: " + short_name;
+    method->link_refused = true;
     // One-line confirmation for dead native bindings (e.g. vendor
     // UnityPlayer.nativeInjectEvent): the Java frames run but the body never
     // does, with no other trace. Rate-limited per method to survive floods.
@@ -395,7 +423,13 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
 
 
     // self-written libcore without native_fn; Call directly in C++.
-    if (LibCoreInvoke(interpreter_, method, args, num_args, &result)) return result;
+    if (LibCoreInvoke(interpreter_, method, args, num_args, &result)) {
+        // A LibCore native that threw reports success with garbage result
+        // unless checked: the pending exception would detonate at an unrelated
+        // later site instead of here.
+        if (interpreter_ != nullptr && interpreter_->HasPendingException()) return DexValue();
+        return result;
+    }
     if (method->native_fn == nullptr) return result;
 
     // This breadcrumb is deliberately emitted before entering guest code.  A
@@ -618,6 +652,12 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
         }
         case 'L':
         case '[':
+            // A thrown-inside-native call must not also deliver a fabricated
+            // object: the next iget on it is an OOB. Pending wins over ret.
+            if (interpreter_ != nullptr && interpreter_->HasPendingException()) {
+                result = DexValue::Ref(nullptr);
+                break;
+            }
             result = DexValue::Ref(reinterpret_cast<DexObject*>(ret));
             break;
         default:
@@ -675,12 +715,17 @@ DexValue DexJniEnv::CallJavaA(DexObject* receiver, DexMethod* method, const jval
     }
 
     // Validate native-supplied receiver; fall back to non-virtual on bad handles.
+    // A substituted jclass receiver remembers it was one: an instance method
+    // resolved against it below would otherwise execute on a Class object it
+    // was never written for (and fault deep inside its field reads).
+    bool receiver_was_jclass = false;
     if (receiver != nullptr && linker_ != nullptr &&
         linker_->IsRegisteredClass(reinterpret_cast<const DexClass*>(receiver))) {        // A jclass receiver is not a mistake. In the JNI object model a jclass IS the
         // A jclass is a valid Class object; substitute the heap instance.
         if (DexClassObject* as_object = linker_->GetClassObject(
                 const_cast<DexClass*>(reinterpret_cast<const DexClass*>(receiver)))) {
             receiver = as_object;
+            receiver_was_jclass = true;
         }
     }
 
@@ -689,6 +734,13 @@ DexValue DexJniEnv::CallJavaA(DexObject* receiver, DexMethod* method, const jval
             DexMethod* found = receiver_class->FindVirtualMethod(method->name, method->signature);
             if (found != nullptr) {
                 method = found;
+            } else if (receiver_was_jclass) {
+                // Graceful decline, not a dispatch: the method does not exist
+                // on java.lang.Class, and falling through would run it
+                // non-virtually on the substitute with a foreign receiver.
+                // Zero without a pending exception — the caller asked for
+                // best-effort, and noise here would poison its next call.
+                return result;
             } else {
                 // Was silent: falling through to a non-virtual call on the
                 // interface/abstract method (e.g. Runnable.run on a Proxy whose
@@ -784,7 +836,17 @@ DexValue DexJniEnv::CallJavaA(DexObject* receiver, DexMethod* method, const jval
     }
 
     if (method->IsNative()) {
-        if (!LinkNativeMethod(method)) return result;
+        if (!LinkNativeMethod(method)) {
+            // Silent zero here violates the JNI contract (caller sees success)
+            // and buries the cause. Throw loudly instead.
+            if (interpreter_ != nullptr) {
+                interpreter_->ThrowException(
+                    "Ljava/lang/UnsatisfiedLinkError;",
+                    std::string("unbound native method: ") +
+                        (method->name != nullptr ? method->name : "?"));
+            }
+            return result;
+        }
         return CallNative(method, vals.data(), vals.size());
     }
     return interpreter_->Execute(method, vals.data(), vals.size());

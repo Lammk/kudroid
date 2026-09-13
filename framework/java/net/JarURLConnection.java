@@ -8,42 +8,67 @@ import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 
-// jar:<inner-url>!/<entry>. APK entries under assets/ are extracted loose, so
-// jar:file://.../base.apk!/assets/aa/x reads the loose file instead of the zip.
+// jar:<inner-url>!/<entry>. Loose files first; anything else inside base.apk
+// streams through AssetManager's resolver (stored entries as a bounded APK
+// slice, deflated ones from the extraction cache). Without the fallback every
+// bundle/resource/catalog fetch is a FileNotFoundException and Addressables
+// boots contentless.
 class JarURLConnection extends URLConnection {
+    private final String entry;
     private final File file;
+    private long entryLength = -1;
 
     JarURLConnection(URL url) throws MalformedURLException {
         super(url);
         String spec = url.getFile();
         int sep = spec.indexOf("!/");
         if (sep < 0) throw new MalformedURLException("no !/ in " + url);
-        String entry = spec.substring(sep + 2);
+        String e = spec.substring(sep + 2);
         String root = AssetManager.getAssetsDir();
-        if (entry.startsWith("assets/")) entry = entry.substring("assets/".length());
-        while (entry.startsWith("/")) entry = entry.substring(1);
-        if (entry.isEmpty() || root.isEmpty()) {
+        if (e.startsWith("assets/")) e = e.substring("assets/".length());
+        while (e.startsWith("/")) e = e.substring(1);
+        if (e.isEmpty() || root.isEmpty()) {
             throw new MalformedURLException("unresolvable " + url);
         }
-        this.file = new File(root + "/" + entry);
+        this.entry = e;
+        this.file = new File(root + "/" + e);
     }
 
     public void connect() throws IOException {
-        if (!file.isFile()) throw new FileNotFoundException(url.toString());
+        if (file.isFile()) {
+            entryLength = file.length();
+            connected = true;
+            return;
+        }
+        // Probe the APK backing without consuming: openAssetStream throws
+        // FileNotFoundException when the entry is in neither place.
+        InputStream probe = AssetManager.openAssetStream(entry);
+        try {
+            if (probe instanceof AssetManager.BoundedInputStream) {
+                entryLength = ((AssetManager.BoundedInputStream) probe).getLength();
+            }
+        } finally {
+            try {
+                probe.close();
+            } catch (IOException ignored) {}
+        }
         connected = true;
     }
 
     public InputStream getInputStream() throws IOException {
         connect();
-        return new FileInputStream(file);
+        if (file.isFile()) return new FileInputStream(file);
+        return AssetManager.openAssetStream(entry);
     }
 
     public int getContentLength() {
-        long len = file.length();
+        long len = getContentLengthLong();
         return len > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) len;
     }
 
     public long getContentLengthLong() {
-        return file.length();
+        if (entryLength >= 0) return entryLength;
+        if (file.isFile()) return file.length();
+        return -1;
     }
 }

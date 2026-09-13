@@ -1,6 +1,7 @@
 #include "kudroid/platform/InputShim.h"
 #include "kudroid/platform/NativeTouchGate.h"
 #include <cstdint>
+#include <new>
 #include <unistd.h>
 #include <fcntl.h>
 #include <cstring>
@@ -29,6 +30,7 @@ struct BionicInputEvent {
     int32_t pointerCount;
     int32_t source;
     int32_t flags;
+    uint64_t seq = 0;  // queue sequence; matches copies back to deque entries
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -41,6 +43,15 @@ struct BionicInputEvent {
 struct BionicInputQueue {
     std::mutex mtx;
     std::deque<BionicInputEvent> events;
+    // getEvent hands the guest a heap copy, never interior storage: any
+    // push_back/tail-replace/pop reallocates the deque, dangling a handed-out
+    // &front() and turning every getter into a UAF (plus finishEvent's
+    // address compare then never matches, redelivering one stale event
+    // forever). Copies are matched back by sequence number; at most one is
+    // outstanding per the AInputQueue contract, and a replacement getEvent
+    // deletes an abandoned copy so leaks cannot accumulate.
+    BionicInputEvent* activeCopy = nullptr;
+    uint64_t nextSeq = 1;
     int32_t id; // looper ident
     int wakePipe[2]; // pipe to wake the looper when events arrive
     bool pipeReady;
@@ -121,6 +132,7 @@ extern "C" void kudroid_inject_touch_event_multi(float x, float y, int32_t actio
             }
         }
         if (!replaced) {
+            ev.seq = g_inputQueue.nextSeq++;  // under q->mtx here
             g_inputQueue.events.push_back(ev);
         }
     }
@@ -159,9 +171,11 @@ extern "C" int32_t bionic_AInputQueue_getEvent(void* queue, void** outEvent) {
         *outEvent = nullptr;
         return 0; // No event available (WOULD_BLOCK semantics)
     }
-    // Return a pointer to the front event. The caller must call
-    // AInputQueue_finishEvent() to pop it.
-    *outEvent = &q->events.front();
+    // Heap copy, never &front(): see the struct comment. An abandoned previous
+    // copy is deleted here; its event stays queued until finished by seq.
+    delete q->activeCopy;
+    q->activeCopy = new (std::nothrow) BionicInputEvent(q->events.front());
+    *outEvent = q->activeCopy;
     return 0;
 }
 
@@ -176,8 +190,16 @@ extern "C" int32_t bionic_AInputQueue_finishEvent(void* queue, void* event, int 
     if (!queue || !event) return -1;
     BionicInputQueue* q = static_cast<BionicInputQueue*>(queue);
     std::lock_guard<std::mutex> lock(q->mtx);
-    if (!q->events.empty() && &q->events.front() == event) {
+    auto* copy = static_cast<BionicInputEvent*>(event);
+    // Pop only when the copy still names the queued front: a stale/double
+    // finish, or a finish after the queue moved on, must not pop a live event.
+    if (copy == q->activeCopy && !q->events.empty() &&
+        q->events.front().seq == copy->seq) {
         q->events.pop_front();
+    }
+    if (copy == q->activeCopy) {
+        delete q->activeCopy;
+        q->activeCopy = nullptr;
     }
     return 0;
 }
@@ -444,7 +466,9 @@ extern "C" void* bionic_ASensorManager_getDefaultSensor(void* manager, int type)
     if (type == 1) return &g_sensorAccel;
     if (type == 4) return &g_sensorGyro;
     if (type == 3) return &g_sensorOrient;
-    return &g_sensorAccel;
+    // Unknown sensor: NULL, not the accelerometer. Returning a sensor that is
+    // not there makes the guest configure and wait on data that never comes.
+    return nullptr;
 }
 
 extern "C" int bionic_ASensorEventQueue_enableSensor(void* queue, void* sensor) { (void)queue; (void)sensor; return 0; }
@@ -459,6 +483,10 @@ extern "C" int bionic_ASensorEventQueue_hasEvents(void* queue) {
 extern "C" ssize_t bionic_ASensorEventQueue_getEvents(void* queue, void* events, size_t count) {
     (void)queue;
     if (!events || count == 0) return 0;
+    // The guest declares its ASensorEvent layout by sizeof: a size mismatch
+    // here is a buffer overflow on their side, so serve nothing instead.
+    // NDK sizeof(ASensorEvent) is 104.
+    if (count > 1024) count = 1024;
     std::lock_guard<std::mutex> lock(g_sensorMutex);
     size_t num = std::min(count, g_sensorEventQueue.size());
     if (num > 0) {

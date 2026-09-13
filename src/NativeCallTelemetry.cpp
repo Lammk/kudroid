@@ -142,7 +142,10 @@ ThreadRecord* acquire_record() {
         bool expected = false;
         if (g_threads[i].claimed.compare_exchange_strong(expected, true,
                                                          std::memory_order_acq_rel)) {
-            g_threads[i].thread_id.store(thread_id(), std::memory_order_relaxed);
+            // Published before the id is stored: store release so a watchdog
+            // that observe the claim then acquire-loads the id never
+            // attributes the slot to tid 0 or the previous owner.
+            g_threads[i].thread_id.store(thread_id(), std::memory_order_release);
             t_record = &g_threads[i];
             return t_record;
         }
@@ -203,9 +206,13 @@ CallReport call_report_snapshot() {
     uint64_t java_oldest = 0;
 
     for (int i = 0; i < kMaxThreadSlots; ++i) {
-        const ThreadRecord& r = g_threads[i];
+        ThreadRecord& r = const_cast<ThreadRecord&>(g_threads[i]);
         if (!r.claimed.load(std::memory_order_acquire)) continue;
 
+        // Pick-then-copy under the record mutex: the pre-lock peek above
+        // could otherwise read start_ns mid-fill (or mid-recycle) and
+        // misattribute the stall.
+        std::lock_guard<std::mutex> lock(r.mutex);
         if (r.native_depth.load(std::memory_order_acquire) != 0) {
             const uint64_t started = r.native[0].start_ns;
             if (started != 0 && (native_pick == nullptr || started < native_oldest)) {
@@ -534,7 +541,11 @@ void native_call_enter(const char* class_name, const char* method,
         f.start_ns = now_ns();
     }
     // Published last: the watchdog reads the depth with acquire before touching any
-    // frame, so it can never see one that is still being filled in.
+    // frame, so it can never see one that is still being filled in. The counter
+    // is intentionally NOT saturated: it balances enters against exits, and all
+    // frame indexing clamps to the table (see the depth<=kMax guards at the
+    // write/stage/exit sites). Saturating it here would lose overflowed enters
+    // and unwind past zero into a skewed stack.
     r->native_depth.store(depth + 1, std::memory_order_release);
     if (depth < kMaxNativeDepth && is_render_frame(method)) {
         g_frame_in_flight.fetch_add(1, std::memory_order_relaxed);

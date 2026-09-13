@@ -190,6 +190,13 @@ DexClass* Interpreter::CallerClass() const {
 }
 
 void Interpreter::ThrowException(const char* descriptor, const std::string& message) {
+    // Preserve-first: a second throw while one is in flight (e.g. a clinit
+    // failure triggering another throw) must not destroy the original cause —
+    // the breadcrumb system exists to report root causes, not follow-on noise.
+    if (pending_exception_ != nullptr) {
+        last_error_ += " (while handling: " + std::string(descriptor) + ": " + message + ")";
+        return;
+    }
     last_error_ = std::string(descriptor) + ": " + message;
     pending_exception_trace_ = BuildStackTrace();
 
@@ -217,6 +224,10 @@ void Interpreter::ThrowException(const char* descriptor, const std::string& mess
 
 DexClass* Interpreter::ResolveClass(const DexMethod* context, uint32_t type_idx) {
     if (context == nullptr || context->dex_file == nullptr || linker_ == nullptr) return nullptr;
+    // Raw dex indices: validate before use (release libdex skips DCHECKs, and
+    // the uint16 truncation below would alias a large index onto an unrelated
+    // type). Malformed dex resolves to null, which every caller already handles.
+    if (type_idx >= context->dex_file->NumTypeIds()) return nullptr;
     const char* descriptor =
         context->dex_file->StringByTypeIdx(art::dex::TypeIndex(static_cast<uint16_t>(type_idx)));
     if (descriptor == nullptr) return nullptr;
@@ -227,6 +238,7 @@ DexField* Interpreter::ResolveField(const DexMethod* context, uint32_t field_idx
                                     bool is_static) {
     if (context == nullptr || context->dex_file == nullptr) return nullptr;
     const art::DexFile& dex_file = *context->dex_file;
+    if (field_idx >= dex_file.NumFieldIds()) return nullptr;
     const art::dex::FieldId& field_id = dex_file.GetFieldId(field_idx);
 
     const char* class_descriptor = dex_file.GetFieldDeclaringClassDescriptor(field_id);
@@ -337,9 +349,30 @@ void Interpreter::ReportUnresolvableMethod(const DexMethod* context, uint32_t me
     DexClassLinker::LogMissingMember("MISSING_FRAMEWORK_METHOD", detail);
 }
 
-DexMethod* Interpreter::ResolveMethod(const DexMethod* context, uint32_t method_idx) {
-    if (context == nullptr || context->dex_file == nullptr) return nullptr;
+bool Interpreter::CheckInstanceField(DexObject* obj, DexField* field, uint32_t width) {
+    if (obj == nullptr || field == nullptr) return false;
+    const DexClass* clazz = obj->clazz;
+    if (clazz == nullptr || field->declaring_class == nullptr ||
+        !clazz->IsSubClassOf(field->declaring_class)) {
+        ThrowException("Ljava/lang/NoSuchFieldError;", "field class mismatch");
+        return false;
+    }
+    // object_size==0 means the layout was never computed (synthetic/test
+    // classes): nothing to check against, so trust the offset. A computed
+    // layout with an out-of-range offset is a hard error.
+    if (clazz->object_size != 0) {
+        const uint64_t end = static_cast<uint64_t>(field->offset_or_slot) + width;
+        if (end > clazz->object_size) {
+            ThrowException("Ljava/lang/NoSuchFieldError;", "field offset out of object");
+            return false;
+        }
+    }
+    return true;
+}
+
+DexMethod* Interpreter::ResolveMethod(const DexMethod* context, uint32_t method_idx) {    if (context == nullptr || context->dex_file == nullptr) return nullptr;
     const art::DexFile& dex_file = *context->dex_file;
+    if (method_idx >= dex_file.NumMethodIds()) return nullptr;
     const art::dex::MethodId& method_id = dex_file.GetMethodId(method_idx);
 
     const char* class_descriptor =
@@ -697,9 +730,14 @@ DexValue Interpreter::Execute(const DexMethod* method, const DexValue* args, siz
     // Native methods have no bytecode; handle before the code check.
     if (method->IsNative()) {
         auto* target = const_cast<DexMethod*>(method);
-        if (LibCoreInvoke(this, target, args, num_args, &result)) return result;
+        if (LibCoreInvoke(this, target, args, num_args, &result)) {
+            if (HasPendingException()) return DexValue();
+            return result;
+        }
         if (jni_env_ != nullptr && jni_env_->LinkNativeMethod(target)) {
-            return jni_env_->CallNative(target, args, num_args);
+            const DexValue native_result = jni_env_->CallNative(target, args, num_args);
+            if (HasPendingException()) return DexValue();
+            return native_result;
         }
         ThrowException("Ljava/lang/UnsatisfiedLinkError;",
                        std::string("unbound native method: ") +
@@ -961,6 +999,7 @@ DexValue Interpreter::ExecuteFrame(DexFrame* frame) {
 
         frame->set_caught_exception(pending_exception_);
         ClearPendingException();
+        if (jni_env_ != nullptr) jni_env_->ClearException();
         frame->set_dex_pc(handler_pc);
     }
 }
@@ -1687,8 +1726,13 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
 
             // Constant string and constant class.
             case Instruction::CONST_STRING: {
+                const uint32_t sidx = inst->VRegB_21c();
+                if (sidx >= method->dex_file->NumStringIds()) {
+                    ThrowException("Ljava/lang/InternalError;", "const-string index out of range");
+                    return return_value;
+                }
                 const char* s = method->dex_file->StringDataByIdx(
-                    art::dex::StringIndex(inst->VRegB_21c()));
+                    art::dex::StringIndex(sidx));
                 frame->SetRef(inst->VRegA_21c(), linker_->InternString(s));
                 break;
             }
@@ -1808,9 +1852,27 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                     return return_value;
                 }
                 DexField* field = ResolveField(method, inst->VRegC_22c(), /*is_static=*/false);
-                if (field == nullptr) {
-                    ThrowException("Ljava/lang/NoSuchFieldError;",
-                                   DescribeFieldRef(method, inst->VRegC_22c(), "iget"));
+                uint32_t igetWidth = 4;
+                switch (inst->Opcode()) {
+                    case Instruction::IGET_WIDE:
+                        igetWidth = 8;
+                        break;
+                    case Instruction::IGET_BOOLEAN:
+                    case Instruction::IGET_BYTE:
+                        igetWidth = 1;
+                        break;
+                    case Instruction::IGET_CHAR:
+                    case Instruction::IGET_SHORT:
+                        igetWidth = 2;
+                        break;
+                    default:
+                        break;
+                }
+                if (field == nullptr || !CheckInstanceField(obj, field, igetWidth)) {
+                    if (field == nullptr) {
+                        ThrowException("Ljava/lang/NoSuchFieldError;",
+                                       DescribeFieldRef(method, inst->VRegC_22c(), "iget"));
+                    }
                     return return_value;
                 }
                 const uint32_t off = field->offset_or_slot;
@@ -1852,9 +1914,27 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                     return return_value;
                 }
                 DexField* field = ResolveField(method, inst->VRegC_22c(), /*is_static=*/false);
-                if (field == nullptr) {
-                    ThrowException("Ljava/lang/NoSuchFieldError;",
-                                   DescribeFieldRef(method, inst->VRegC_22c(), "iput"));
+                uint32_t iputWidth = 4;
+                switch (inst->Opcode()) {
+                    case Instruction::IPUT_WIDE:
+                        iputWidth = 8;
+                        break;
+                    case Instruction::IPUT_BOOLEAN:
+                    case Instruction::IPUT_BYTE:
+                        iputWidth = 1;
+                        break;
+                    case Instruction::IPUT_CHAR:
+                    case Instruction::IPUT_SHORT:
+                        iputWidth = 2;
+                        break;
+                    default:
+                        break;
+                }
+                if (field == nullptr || !CheckInstanceField(obj, field, iputWidth)) {
+                    if (field == nullptr) {
+                        ThrowException("Ljava/lang/NoSuchFieldError;",
+                                       DescribeFieldRef(method, inst->VRegC_22c(), "iput"));
+                    }
                     return return_value;
                 }
                 const uint32_t off = field->offset_or_slot;
@@ -2045,31 +2125,65 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                 }
                 break;
 
-            // Switch.
+            // Switch. Payload and targets are validated against the code item:
+            // a crafted offset/count otherwise reads out of bounds and escapes
+            // the PC from the method. Units are 16-bit code units throughout.
             case Instruction::PACKED_SWITCH: {
                 const int32_t test = frame->GetInt(inst->VRegA_31t());
-                const uint16_t* payload = insns + dex_pc + inst->VRegB_31t();
+                const int32_t off = inst->VRegB_31t();
+                const uint32_t base = static_cast<uint32_t>(dex_pc);
+                const uint32_t pbase = base + static_cast<uint32_t>(off);
+                // Header is ident + size + first_key = 4 units.
+                if (off < 0 || pbase + 4 > insns_size) {
+                    ThrowException("Ljava/lang/InternalError;", "packed-switch payload out of range");
+                    return return_value;
+                }
+                const uint16_t* payload = insns + pbase;
                 const auto* ps =
                     reinterpret_cast<const Instruction::PackedSwitchPayload*>(payload);
                 const int32_t delta = test - ps->first_key;
-                if (delta >= 0 && delta < static_cast<int32_t>(ps->case_count)) {
-                    dex_pc += ps->targets[delta];
-                    continue;
+                if (delta >= 0 && delta < static_cast<int32_t>(ps->case_count) &&
+                    pbase + 4u + static_cast<uint32_t>(delta) * 2u + 2u <= insns_size) {
+                    const int32_t target = ps->targets[delta];
+                    const int64_t dest = static_cast<int64_t>(base) + target;
+                    if (dest >= 0 && dest <= static_cast<int64_t>(insns_size)) {
+                        dex_pc = static_cast<uint32_t>(dest);
+                        continue;
+                    }
                 }
                 break;
             }
             case Instruction::SPARSE_SWITCH: {
                 const int32_t test = frame->GetInt(inst->VRegA_31t());
-                const uint16_t* payload = insns + dex_pc + inst->VRegB_31t();
+                const int32_t off = inst->VRegB_31t();
+                const uint32_t base = static_cast<uint32_t>(dex_pc);
+                const uint32_t pbase = base + static_cast<uint32_t>(off);
+                // Header is ident + case_count = 2 units; keys/targets follow.
+                if (off < 0 || pbase + 2 > insns_size) {
+                    ThrowException("Ljava/lang/InternalError;", "sparse-switch payload out of range");
+                    return return_value;
+                }
+                const uint16_t* payload = insns + pbase;
                 const auto* ss =
                     reinterpret_cast<const Instruction::SparseSwitchPayload*>(payload);
+                // keys are case_count int32s, then targets are case_count int32s.
+                const uint64_t need =
+                    static_cast<uint64_t>(pbase) + 2u +
+                    static_cast<uint64_t>(ss->case_count) * 4u;
+                if (need > insns_size) {
+                    ThrowException("Ljava/lang/InternalError;", "sparse-switch cases out of range");
+                    return return_value;
+                }
                 const int32_t* keys = ss->GetKeys();
                 const int32_t* targets = ss->GetTargets();
                 bool matched = false;
                 for (uint16_t i = 0; i < ss->case_count; ++i) {
                     if (keys[i] == test) {
-                        dex_pc += targets[i];
-                        matched = true;
+                        const int64_t dest = static_cast<int64_t>(base) + targets[i];
+                        if (dest >= 0 && dest <= static_cast<int64_t>(insns_size)) {
+                            dex_pc = static_cast<uint32_t>(dest);
+                            matched = true;
+                        }
                         break;
                     }
                 }
@@ -2083,11 +2197,34 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                     ThrowException("Ljava/lang/NullPointerException;", "fill-array-data on null");
                     return return_value;
                 }
-                const uint16_t* payload = insns + dex_pc + inst->VRegB_31t();
+                // Payload bounds first: ident + width + count, then the bytes.
+                const int32_t off = inst->VRegB_31t();
+                const uint32_t base = static_cast<uint32_t>(dex_pc);
+                const uint32_t pbase = base + static_cast<uint32_t>(off);
+                if (off < 0 || pbase + 4 > insns_size) {
+                    ThrowException("Ljava/lang/InternalError;", "fill-array-data out of range");
+                    return return_value;
+                }
+                const uint16_t* payload = insns + pbase;
                 const auto* ad = reinterpret_cast<const Instruction::ArrayDataPayload*>(payload);
-                if (static_cast<int32_t>(ad->element_count) > arr->length) {
+                // Width must match the array's real element size: a width=8
+                // payload on a byte array would copy 8x the allocation.
+                const uint32_t elem_size =
+                    arr->clazz != nullptr && arr->clazz->component_type != nullptr
+                        ? DexClassLinker::ElementSize(arr->clazz->component_type)
+                        : 0;
+                if (elem_size == 0 || ad->element_width != elem_size ||
+                    static_cast<int32_t>(ad->element_count) > arr->length) {
                     ThrowException("Ljava/lang/ArrayIndexOutOfBoundsException;",
                                    "fill-array-data is longer than array");
+                    return return_value;
+                }
+                // Payload bytes must also fit: count*width bytes from data.
+                const uint64_t blob =
+                    static_cast<uint64_t>(ad->element_count) * ad->element_width;
+                if (static_cast<uint64_t>(pbase) + 8 + blob >
+                    static_cast<uint64_t>(insns_size) * 2) {
+                    ThrowException("Ljava/lang/InternalError;", "fill-array-data overruns code");
                     return return_value;
                 }
                 std::memcpy(arr->Data(), ad->data,
@@ -2102,7 +2239,12 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
                     ThrowException("Ljava/lang/NullPointerException;", "throw null");
                     return return_value;
                 }
+                // Both slots: the JNI env keeps its own TLS copy, and a THROW
+                // that sets only the interpreter slot is shadowed by a stale
+                // env slot on the next ExceptionCheck (wrong exception fires).
+                // The catch path below clears both symmetrically.
                 pending_exception_ = ex;
+                if (jni_env_ != nullptr) jni_env_->SetPendingException(ex);
                 last_error_ = std::string("throw ") +
                               (ex->clazz != nullptr ? ex->clazz->PrettyName() : "?");
                 // Guest `throw` skips ThrowException(), so the trace has to be

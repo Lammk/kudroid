@@ -41,6 +41,7 @@ typedef int32_t SLresult;
 #define SL_RESULT_SUCCESS 0
 #define SL_RESULT_PARAMETER_INVALID 2
 #define SL_RESULT_RESOURCE_ERROR 4
+#define SL_RESULT_BUFFER_INSUFFICIENT 8
 #define SL_RESULT_CONTENT_UNSUPPORTED 9
 
 // OpenSL ES object/interface types (opaque).
@@ -225,21 +226,28 @@ static bool ensure_audio_queue(AudioPlayer* p) {
 // Push a PCM block into AudioQueue (common to OpenSL enqueue and AAudio write).
 
 // Push a PCM block into AudioQueue (common to OpenSL enqueue and AAudio write).
-static bool enqueue_pcm(AudioPlayer* p, const void* data, uint32_t size) {
+// 0 = queued, 1 = queue full (retry), -1 = hard error.
+static int enqueue_pcm(AudioPlayer* p, const void* data, uint32_t size) {
     std::lock_guard<std::mutex> lock(p->mtx);
-    if (p->shutdown) return false;
-    if (!ensure_audio_queue(p)) return false;
-    if (size == 0) return true;
+    if (p->shutdown) return -1;
+    if (!ensure_audio_queue(p)) return -1;
+    if (size == 0) return 0;
+    // Backpressure: every call allocates a device buffer, so an undrained
+    // flood grows memory and latency without bound. Cap queued buffers; the
+    // caller retries (SL_RESULT_BUFFER_INSUFFICIENT), exactly like a full
+    // AudioTrack buffer.
+    constexpr uint32_t kMaxPendingBuffers = 128;
+    if (p->pendingCount >= kMaxPendingBuffers) return 1;
 
     AudioQueueBufferRef buf = nullptr;
     OSStatus st = AudioQueueAllocateBuffer(p->aq, size, &buf);
-    if (st != noErr || !buf) return false;
+    if (st != noErr || !buf) return -1;
     if (data) std::memcpy(buf->mAudioData, data, size);
     buf->mAudioDataByteSize = size;
     st = AudioQueueEnqueueBuffer(p->aq, buf, 0, nullptr);
     if (st != noErr) {
         AudioQueueFreeBuffer(p->aq, buf);
-        return false;
+        return -1;
     }
     p->pendingCount++;
     p->framesWritten.fetch_add(static_cast<uint64_t>(size) / player_bytes_per_frame(p),
@@ -257,7 +265,7 @@ static bool enqueue_pcm(AudioPlayer* p, const void* data, uint32_t size) {
                          static_cast<int>(sst));
         }
     }
-    return true;
+    return 0;
 }
 
 #endif // __APPLE__
@@ -458,12 +466,19 @@ extern "C" SLresult bionic_slAndroidSimpleBufferQueueEnqueue(
     auto player = find_player(self);
     if (!player) return SL_RESULT_PARAMETER_INVALID;
 #if defined(__APPLE__)
-    if (!enqueue_pcm(player.get(), pBuffer, size)) return SL_RESULT_RESOURCE_ERROR;
+    const int enc = enqueue_pcm(player.get(), pBuffer, size);
+    if (enc > 0) return SL_RESULT_BUFFER_INSUFFICIENT;
+    if (enc < 0) return SL_RESULT_RESOURCE_ERROR;
     return SL_RESULT_SUCCESS;
 #else
     {
         std::lock_guard<std::mutex> lock(player->mtx);
-        player->pending.emplace_back(pBuffer, size);
+        (void)pBuffer;  // size-only queue entry; the worker never reads sample bytes
+        // The host worker never reads sample bytes (no device: it sleeps the
+        // buffer duration and advances the head), so retain the SIZE only —
+        // keeping the guest's pointer would read stack/freed memory if the
+        // worker ever dereferenced it later.
+        player->pending.emplace_back(nullptr, size);
         player->pendingCount++;
         player->framesWritten.fetch_add(
             static_cast<uint64_t>(size) / player_bytes_per_frame(player.get()),
@@ -568,7 +583,16 @@ struct AAudioBuilderState {
     int32_t format = AAUDIO_FORMAT_PCM_I16;
 };
 
-static AAudioBuilderState g_builderState;
+// NDK aaudio_result_t values (aaudio/AAudio.h).
+constexpr int32_t kAAudioOk = 0;
+constexpr int32_t kAAudioErrorInvalidHandle = -892;
+constexpr int32_t kAAudioErrorUnimplemented = -906;
+
+// One global builder used to mean two concurrent builders (output+input)
+// clobbered each other's rate/channels/format. State is per-builder now.
+static std::mutex g_builderMtx;
+static std::unordered_map<void*, AAudioBuilderState> g_builderStates;
+static int g_builderIds = 0;
 static std::mutex g_streams_mtx;
 static std::unordered_map<void*, std::shared_ptr<AAudioStreamImpl>> g_streams;
 
@@ -578,12 +602,19 @@ static std::shared_ptr<AAudioStreamImpl> find_stream(void* stream) {
     return it != g_streams.end() ? it->second : nullptr;
 }
 
+static AAudioBuilderState* builder_state(void* builder) {
+    std::lock_guard<std::mutex> lock(g_builderMtx);
+    auto it = g_builderStates.find(builder);
+    return it != g_builderStates.end() ? &it->second : nullptr;
+}
+
 extern "C" int32_t bionic_AAudio_createStreamBuilder(void** builder) {
     if (!builder) return 1;
-    static int dummyBuilder = 1;
-    g_builderState = AAudioBuilderState();
-    *builder = &dummyBuilder;
-    return 0; // AAUDIO_OK
+    std::lock_guard<std::mutex> lock(g_builderMtx);
+    void* id = reinterpret_cast<void*>(static_cast<uintptr_t>(++g_builderIds));
+    g_builderStates[id] = AAudioBuilderState();
+    *builder = id;
+    return kAAudioOk;
 }
 
 extern "C" int32_t bionic_AAudioStreamBuilder_setDirection(void* builder, int32_t direction) {
@@ -597,36 +628,41 @@ extern "C" int32_t bionic_AAudioStreamBuilder_setPerformanceMode(void* builder, 
 }
 
 extern "C" int32_t bionic_AAudioStreamBuilder_setSampleRate(void* builder, int32_t sampleRate) {
-    (void)builder;
-    g_builderState.sampleRate = sampleRate;
+    if (AAudioBuilderState* st = builder_state(builder)) st->sampleRate = sampleRate;
     return 0;
 }
 
 extern "C" int32_t bionic_AAudioStreamBuilder_setChannelCount(void* builder, int32_t channelCount) {
-    (void)builder;
-    g_builderState.channels = channelCount;
+    if (AAudioBuilderState* st = builder_state(builder)) st->channels = channelCount;
     return 0;
 }
 
 extern "C" int32_t bionic_AAudioStreamBuilder_setFormat(void* builder, int32_t format) {
-    (void)builder;
-    g_builderState.format = format;
+    if (AAudioBuilderState* st = builder_state(builder)) st->format = format;
     return 0;
 }
 
 extern "C" int32_t bionic_AAudioStreamBuilder_setDataCallback(void* builder, void* callback, void* userData) {
-    // The callback-pull model is not yet supported — games using the write model still run.
     (void)builder; (void)callback; (void)userData;
-    return 0;
+    // The callback-pull model is not supported: returning OK would make the
+    // guest wait for callbacks that never come (silent hang). UNIMPLEMENTED
+    // lets it fall back to the write model, which runs.
+    return kAAudioErrorUnimplemented;
 }
 
 extern "C" int32_t bionic_AAudioStreamBuilder_openStream(void* builder, void** stream) {
-    (void)builder;
     if (!stream) return 1;
+    AAudioBuilderState st;
+    {
+        std::lock_guard<std::mutex> lock(g_builderMtx);
+        auto it = g_builderStates.find(builder);
+        if (it == g_builderStates.end()) return kAAudioErrorInvalidHandle;
+        st = it->second;
+    }
     auto impl = std::make_shared<AAudioStreamImpl>();
-    impl->sampleRate = g_builderState.sampleRate;
-    impl->channels = g_builderState.channels;
-    impl->format = g_builderState.format;
+    impl->sampleRate = st.sampleRate;
+    impl->channels = st.channels;
+    impl->format = st.format;
     auto player = std::make_shared<AudioPlayer>();
     player->iface = player.get();
     player->sampleRate = impl->sampleRate > 0 ? static_cast<double>(impl->sampleRate) : 44100.0;
@@ -648,7 +684,8 @@ extern "C" int32_t bionic_AAudioStreamBuilder_openStream(void* builder, void** s
 }
 
 extern "C" int32_t bionic_AAudioStreamBuilder_delete(void* builder) {
-    (void)builder;
+    std::lock_guard<std::mutex> lock(g_builderMtx);
+    g_builderStates.erase(builder);
     return 0;
 }
 
@@ -728,7 +765,9 @@ extern "C" int32_t bionic_AAudioStream_write(void* stream, const void* buffer,
     const size_t bytesPerFrame = ((impl->format == AAUDIO_FORMAT_PCM_FLOAT) ? 4u : 2u) *
                                  static_cast<size_t>(impl->channels > 0 ? impl->channels : 2);
     const uint32_t byteSize = static_cast<uint32_t>(static_cast<size_t>(numFrames) * bytesPerFrame);
-    if (!enqueue_pcm(impl->player.get(), buffer, byteSize)) return 0;
+    // Full (1) is backpressure, not failure: report 0 frames so the mixer
+    // retries, exactly like a non-blocking full device buffer.
+    if (enqueue_pcm(impl->player.get(), buffer, byteSize) != 0) return 0;
     return numFrames;
 #else
     (void)buffer;
@@ -886,9 +925,12 @@ extern "C" int32_t bionic_kudroid_audiotrack_write(int64_t track, const void* da
     // lock it carried, and stalled every thread waiting on that lock.
     if (p->playState == SL_PLAYSTATE_PLAYING) {
         auto inflightBytes = [&]() -> uint64_t {
-            return static_cast<uint64_t>(
-                (p->framesWritten.load(std::memory_order_relaxed) -
-                 p->framesPlayed.load(std::memory_order_relaxed))) * bpf;
+            // Unsigned subtraction wraps to ~2^64 when stop/flush zeroes the
+            // counters mid-flight (written < played transiently) — a ~2s
+            // stall. Clamp: negative means empty.
+            const uint64_t written = p->framesWritten.load(std::memory_order_relaxed);
+            const uint64_t played = p->framesPlayed.load(std::memory_order_relaxed);
+            return (written >= played ? written - played : 0) * bpf;
         };
         if (inflightBytes() + static_cast<uint64_t>(accepted) >
             p->bufferCapacityBytes) {
@@ -915,11 +957,13 @@ extern "C" int32_t bionic_kudroid_audiotrack_write(int64_t track, const void* da
             std::this_thread::sleep_for(std::chrono::milliseconds(4));
         }
     }
-    if (!enqueue_pcm(p.get(), data, static_cast<uint32_t>(accepted))) {
+    const int enca = enqueue_pcm(p.get(), data, static_cast<uint32_t>(accepted));
+    if (enca < 0) {
         const int f = ++s_fails;
         if (f <= 3) std::fprintf(stderr, "[KuDroidAudio] write FAILED #%d\n", f);
         return -1;  // ERROR
     }
+    if (enca > 0) return 0;  // full after the bounded wait: retry, not error
     const uint64_t written = p->framesWritten.load(std::memory_order_relaxed);
     // Diagnostic: in-flight audio-ms shows mixer-ahead-of-wallclock pacing drift.
     // Time-throttled (not count-capped): a count cap goes blind mid-run, which is
@@ -929,7 +973,7 @@ extern "C" int32_t bionic_kudroid_audiotrack_write(int64_t track, const void* da
         const uint64_t played = p->framesPlayed.load(std::memory_order_relaxed);
         const double rate = p->sampleRate > 0 ? p->sampleRate : 44100.0;
         const long long ms =
-            static_cast<long long>((written - played) * 1000.0 / rate);
+            static_cast<long long>((written >= played ? written - played : 0) * 1000.0 / rate);
         const uint64_t nowMs = static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now().time_since_epoch())
@@ -951,6 +995,7 @@ extern "C" int32_t bionic_kudroid_audiotrack_write(int64_t track, const void* da
 #else
     // Host build: hand it to the same worker the OpenSL path uses, so the callback and
     // frame counter behave identically and a test can observe them.
+    (void)data;  // size-only queue entry; the worker never reads sample bytes
     const uint32_t hostBpf = player_bytes_per_frame(p.get());
     const int32_t hostFrames = sizeInBytes / static_cast<int32_t>(hostBpf);
     const int32_t hostAccepted = hostFrames * static_cast<int32_t>(hostBpf);
@@ -958,7 +1003,7 @@ extern "C" int32_t bionic_kudroid_audiotrack_write(int64_t track, const void* da
     {
         std::lock_guard<std::mutex> lock(p->mtx);
         if (p->shutdown) return -6;  // ERROR_DEAD_OBJECT
-        p->pending.emplace_back(data, static_cast<uint32_t>(hostAccepted));
+        p->pending.emplace_back(nullptr, static_cast<uint32_t>(hostAccepted));
         p->pendingCount++;
         p->framesWritten.fetch_add(static_cast<uint64_t>(hostFrames),
                                    std::memory_order_relaxed);

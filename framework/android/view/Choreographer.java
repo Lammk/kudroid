@@ -103,7 +103,12 @@ public final class Choreographer {
             list.add(r);
         }
         android.os.Message msg = android.os.Message.obtain(mHandler, r);
-        mHandler.sendMessageAtTime(msg, dueF / 1000000L);
+        // Round UP, not down: the queue orders in whole millis off the same
+        // nanoTime base (SystemClock.uptimeMillis is nanoTime/1e6, so no clock
+        // skew), and truncation would deliver up to 1ms BEFORE the pacer
+        // phase the native alignment just computed. Late by <1ms keeps phase;
+        // early breaks it.
+        mHandler.sendMessageAtTime(msg, (dueF + 999999L) / 1000000L);
     }
 
     private synchronized void forgetRunnable(FrameCallback callback, Runnable r) {

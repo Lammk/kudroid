@@ -173,6 +173,11 @@ DexClass* DexClassLinker::FindClass(const char* descriptor) {
         return CreatePrimitiveClass(descriptor, art::Primitive::GetType(descriptor[0]));
     }
     if (descriptor[0] == '[') {
+        // Depth cap (JVM allows 255): a hostile "[[[[..." descriptor recurses
+        // one FindClass per bracket and blows the C++ stack.
+        size_t depth = 0;
+        while (depth <= 255 && descriptor[depth] == '[') ++depth;
+        if (depth > 255) return nullptr;
         return CreateArrayClass(descriptor);
     }
 
@@ -482,10 +487,14 @@ DexObject* DexClassLinker::AllocObject(DexClass* klass) {
 }
 
 DexArray* DexClassLinker::AllocArray(DexClass* array_class, int32_t length) {
-    if (array_class == nullptr || length < 0) return nullptr;
+    if (array_class == nullptr || !array_class->is_array || length < 0) return nullptr;
     const uint32_t elem_size = ElementSize(array_class->component_type);
-    void* mem = heap_.Allocate(sizeof(DexArray) +
-                               static_cast<size_t>(length) * elem_size);
+    if (elem_size == 0) return nullptr;
+    // Checked multiply: length * elem_size must not wrap into a small heap
+    // allocation that later AGET/APUT overruns.
+    const uint64_t total = static_cast<uint64_t>(length) * elem_size;
+    if (total > static_cast<uint64_t>(INT32_MAX)) return nullptr;
+    void* mem = heap_.Allocate(sizeof(DexArray) + static_cast<size_t>(total));
     if (mem == nullptr) return nullptr;
     auto* arr = new (mem) DexArray();
     arr->clazz = array_class;

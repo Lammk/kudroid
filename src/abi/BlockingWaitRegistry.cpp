@@ -195,7 +195,7 @@ void blocking_wait_begin(WaitKind kind, const void* object, const void* caller) 
     s->kind.store(static_cast<int>(kind), std::memory_order_relaxed);
     s->object.store(object, std::memory_order_relaxed);
     s->caller.store(caller, std::memory_order_relaxed);
-    s->started_ns.store(now_ns(), std::memory_order_relaxed);
+    s->started_ns.store(now_ns(), std::memory_order_release);
     s->iterations.store(0, std::memory_order_relaxed);
     s->owner.store(0, std::memory_order_relaxed);
     s->budget_ms.store(0, std::memory_order_relaxed);
@@ -216,14 +216,14 @@ void blocking_wait_note_owner(uint64_t owner) {
     Slot* s = t_slot;
     if (s == nullptr) return;
     if (!s->in_wait.load(std::memory_order_relaxed)) return;
-    s->owner.store(owner, std::memory_order_relaxed);
+    s->owner.store(owner, std::memory_order_release);
 }
 
 void blocking_wait_note_budget(uint64_t budget_ms) {
     Slot* s = t_slot;
     if (s == nullptr) return;
     if (!s->in_wait.load(std::memory_order_relaxed)) return;
-    s->budget_ms.store(budget_ms, std::memory_order_relaxed);
+    s->budget_ms.store(budget_ms, std::memory_order_release);
 }
 
 void blocking_wait_end() {
@@ -262,7 +262,7 @@ int blocking_wait_report_stalled(uint64_t threshold_ms) {
         if (!s.in_wait.load(std::memory_order_acquire)) continue;
         if (s.reported.load(std::memory_order_relaxed)) continue;
 
-        const uint64_t started = s.started_ns.load(std::memory_order_relaxed);
+        const uint64_t started = s.started_ns.load(std::memory_order_acquire);
         if (started == 0 || now < started) continue;
         const uint64_t elapsed_ms = (now - started) / 1000000ull;
         if (elapsed_ms < threshold_ms) continue;
@@ -276,7 +276,7 @@ int blocking_wait_report_stalled(uint64_t threshold_ms) {
         // into a nativeRender that never returned — produced nothing. One false line
         // and one missing line, and the false one is worse: it is what a reader
         // chases.
-        const uint64_t budget = s.budget_ms.load(std::memory_order_relaxed);
+        const uint64_t budget = s.budget_ms.load(std::memory_order_acquire);
         if (budget != 0 && elapsed_ms < budget) continue;
 
         // An unbounded Object.wait() is a thread with nothing to do, not a stall.
@@ -321,8 +321,11 @@ int blocking_wait_report_stalled(uint64_t threshold_ms) {
 
         // Re-read in_wait after claiming: the thread may have woken between the
         // check above and here, in which case the entry is stale and reporting it
-        // would be a false alarm.
+        // would be a false alarm. Re-read the notes too: owner/budget published
+        // after the first read would otherwise report a timed wait as unbounded
+        // (false stall) or a monitor wait as ownerless.
         if (!s.in_wait.load(std::memory_order_acquire)) continue;
+        const uint64_t owner = s.owner.load(std::memory_order_acquire);
 
         const void* caller = s.caller.load(std::memory_order_relaxed);
         char where[256] = "unknown";
@@ -344,7 +347,7 @@ int blocking_wait_report_stalled(uint64_t threshold_ms) {
                       static_cast<unsigned long long>(elapsed_ms),
                       static_cast<unsigned long long>(budget),
                       static_cast<unsigned long long>(iterations),
-                      static_cast<unsigned long long>(s.owner.load(std::memory_order_relaxed)),
+                      static_cast<unsigned long long>(owner),
                       where);
         kudroid_persistent_breadcrumb(line);
         // Also to the Android log: that is the file a user attaches to a report,
@@ -374,14 +377,14 @@ int blocking_wait_report_idle(uint64_t threshold_ms) {
             continue;
         }
 
-        const uint64_t started = s.started_ns.load(std::memory_order_relaxed);
+        const uint64_t started = s.started_ns.load(std::memory_order_acquire);
         if (started == 0 || now < started) continue;
         const uint64_t elapsed_ms = (now - started) / 1000000ull;
         if (elapsed_ms < threshold_ms) continue;
 
         // A timed wait belongs to the stall scan, not here: overrunning a deadline it
         // set itself is an anomaly, and the two scans must not both claim it.
-        const uint64_t budget = s.budget_ms.load(std::memory_order_relaxed);
+        const uint64_t budget = s.budget_ms.load(std::memory_order_acquire);
         if (budget != 0) continue;
 
         bool expected = false;

@@ -282,13 +282,7 @@ static pthread_t g_mainThread = 0;
 // Fault-isolation registry (see kudroid_bridge.h): numeric tids, plain atomic
 // loads in the signal handler, stores only from normal context.
 static std::atomic<unsigned long long> g_guestUiThread{0};
-static std::atomic<unsigned long long> g_renderThreads[4] = {};
-static std::atomic<int> g_workerFaults{0};
-// Steady-clock ns of the last skipped worker fault. Faults isolated in time
-// (minutes apart) mean the thread kept making progress between them, so the
-// recovery budget resets; a genuine fault storm skips in a tight burst and
-// never sees a reset.
-static std::atomic<long long> g_lastFaultSkipNs{0};
+static std::atomic<unsigned long long> g_renderThreads[8] = {};
 // Recovery budget for worker faults: a chunk-processing job over corrupt
 // data faults per element (observed: 4 faults/iteration), so a few dozen bad
 // elements need a triple-digit budget. Past it the thread is not progressing
@@ -296,6 +290,62 @@ static std::atomic<long long> g_lastFaultSkipNs{0};
 // a few hundred breadcrumb lines worst case, while too small a cap (16 fired
 // in 25ms) turns a survivable batch into a shutdown.
 static constexpr int kMaxWorkerRecoveries = 128;
+// Per-worker recovery budgets: the old single global counter let one hot
+// worker eat the budget for all, and its 30s reset raced (one thread's stale
+// read zeroed another's accumulated count → unbounded skips). Slots are keyed
+// by tid, atomics-only (signal context: no locks, no alloc). More distinct
+// faulting workers than slots fails CLOSED (no slot = no skip).
+struct WorkerBudget {
+    std::atomic<unsigned long long> tid{0};
+    std::atomic<int> count{0};
+    // Steady-clock ns of this thread's last skipped fault. A 30s+ gap means
+    // the thread ran fine in between — isolated faults, not a storm — so the
+    // budget resets. A genuine storm faults microseconds apart and never
+    // sees a reset.
+    std::atomic<long long> lastNs{0};
+};
+static WorkerBudget g_workerBudgets[8];
+
+static WorkerBudget* worker_budget_for(unsigned long long tid) {
+    if (tid == 0) return nullptr;
+    for (auto& s : g_workerBudgets) {
+        if (s.tid.load(std::memory_order_relaxed) == tid) return &s;
+    }
+    for (auto& s : g_workerBudgets) {
+        unsigned long long z = 0;
+        if (s.tid.compare_exchange_strong(z, tid, std::memory_order_relaxed)) return &s;
+        if (z == tid) return &s;
+    }
+    return nullptr;
+}
+
+// Records this thread's skip at nowNs; returns false when its budget is spent.
+// Only the timestamp-CAS winner zeroes (stale-gap reset), so a concurrent
+// increment is never lost into a fresh zero.
+static bool worker_budget_note(WorkerBudget* s, long long nowNs) {
+    const long long last = s->lastNs.load(std::memory_order_relaxed);
+    if (last != 0 && nowNs - last > 30000000000LL) {
+        long long expect = last;
+        if (s->lastNs.compare_exchange_strong(expect, nowNs, std::memory_order_relaxed)) {
+            s->count.store(0, std::memory_order_relaxed);
+        }
+    } else {
+        s->lastNs.store(nowNs, std::memory_order_relaxed);
+    }
+    if (s->count.load(std::memory_order_relaxed) >= kMaxWorkerRecoveries) return false;
+    s->count.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+
+// Peek without recording: the skip itself mutates guest context, so the budget
+// must gate the attempt, not follow it. Single-threaded per slot in practice
+// (one thread's handler cannot run concurrently with itself), so peek→try→note
+// cannot interleave against itself; cross-tid slot sharing only follows OS tid
+// reuse after a thread died.
+static bool worker_budget_peek(WorkerBudget* s) {
+    return s != nullptr &&
+           s->count.load(std::memory_order_relaxed) < kMaxWorkerRecoveries;
+}
 
 // Guest thread names (prctl PR_SET_NAME), for role recognition in the crash
 // handler. pthread_getname_np is NOT async-signal-safe, so names are recorded
@@ -304,6 +354,10 @@ static constexpr int kMaxWorkerRecoveries = 128;
 // engine-critical thread (UnityMain, RenderThread, ...), which is app-fatal.
 struct ThreadNameSlot {
     std::atomic<unsigned long long> tid{0};
+    // Seqlock: odd while the writer (under mutex, normal context) updates the
+    // name; the handler snapshots without locking and retries/discards on a
+    // torn read instead of classifying on half-written bytes.
+    std::atomic<unsigned> gen{0};
     char name[32] = {0};
 };
 static ThreadNameSlot g_threadNames[32];
@@ -315,7 +369,9 @@ extern "C" void kudroid_note_thread_name(const char* name) {
     std::lock_guard<std::mutex> lock(g_threadNameMutex);
     for (auto& slot : g_threadNames) {
         if (slot.tid.load(std::memory_order_relaxed) == tid) {
+            slot.gen.fetch_add(1, std::memory_order_relaxed);
             std::snprintf(slot.name, sizeof(slot.name), "%s", name);
+            slot.gen.fetch_add(1, std::memory_order_relaxed);
             return;
         }
     }
@@ -323,34 +379,36 @@ extern "C" void kudroid_note_thread_name(const char* name) {
         unsigned long long empty = 0;
         if (slot.tid.compare_exchange_strong(empty, tid,
                                              std::memory_order_relaxed)) {
+            slot.gen.fetch_add(1, std::memory_order_relaxed);
             std::snprintf(slot.name, sizeof(slot.name), "%s", name);
+            slot.gen.fetch_add(1, std::memory_order_relaxed);
             return;
         }
     }
 }
 
-// Signal-handler side: substring match on the recorded name. Reads only.
+// Signal-handler side: exact/prefix match on the recorded name. Reads only,
+// seqlock-guarded against torn writes (a write in flight reads as unknown,
+// i.e. worker, never as a half-written critical). Deliberately NOT a "Main"
+// substring: that also matched DomainMain/Remain-style names. Observed Unity
+// critical names: UnityMain, RenderThread, UnityGfxDeviceW.
 // The name is copied to a stack buffer with NUL padding first, so the
 // lookahead below can never overread even a full 31-char name.
 static bool thread_name_marks_critical(unsigned long long tid) {
     if (tid == 0) return false;
     for (auto& slot : g_threadNames) {
         if (slot.tid.load(std::memory_order_relaxed) != tid) continue;
+        const unsigned g0 = slot.gen.load(std::memory_order_acquire);
         char n[40] = {0};
         for (size_t i = 0; i < 31; ++i) n[i] = slot.name[i];
-        for (size_t i = 0; n[i] != '\0'; ++i) {
-            // "Main" / "main" / "Render" / "GfxDevice"
-            if ((n[i] == 'M' || n[i] == 'm') && n[i + 1] == 'a' &&
-                n[i + 2] == 'i' && n[i + 3] == 'n')
-                return true;
-            if (n[i] == 'R' && n[i + 1] == 'e' && n[i + 2] == 'n' &&
-                n[i + 3] == 'd' && n[i + 4] == 'e' && n[i + 5] == 'r')
-                return true;
-            if (n[i] == 'G' && n[i + 1] == 'f' && n[i + 2] == 'x' &&
-                n[i + 3] == 'D' && n[i + 4] == 'e' && n[i + 5] == 'v' &&
-                n[i + 6] == 'i' && n[i + 7] == 'c' && n[i + 8] == 'e')
-                return true;
-        }
+        const unsigned g1 = slot.gen.load(std::memory_order_acquire);
+        if ((g0 & 1) != 0 || g0 != g1) return false;  // torn: unknown, not critical
+        // Exact engine-main names.
+        if (std::strcmp(n, "UnityMain") == 0 || std::strcmp(n, "MainThread") == 0) return true;
+        // Render-thread family by prefix (RenderThread and vendor variants).
+        if (std::strncmp(n, "Render", 6) == 0) return true;
+        // Gfx device worker by distinctive infix (UnityGfxDeviceW, ...).
+        if (std::strstr(n, "GfxDevice") != nullptr) return true;
         return false;
     }
     return false;
@@ -884,6 +942,15 @@ FaultSkipPlan fault_decode_skip(uint32_t w, uint64_t pc, uint64_t baseVal,
         return p;
     }
     if ((top & 0x3B) == 0x38 || (top & 0x3B) == 0x39) {
+        // Structural exclusion, not assembler luck: every atomic/exclusive/LSE
+        // form (LDAR/STLR/LDAXP/STLXP/LDADD/SWP/CAS/CASP/LDAPR) carries
+        // bits[29:24] in {001000, 011100}, i.e. bit27==0, while this branch
+        // requires bits29,28,27==1. The check below makes the invariant
+        // explicit so a future mask edit cannot silently admit an RMW into
+        // the load-zero/store-drop path (faking an atomic is silent
+        // corruption, worse than the crash).
+        const unsigned major = (w >> 24) & 0x3F;
+        if (major == 0x08 || major == 0x1C) return p;  // exclusive/LSE, LDAPR
         // Single transfer. SIMD/FP lanes (bit26) share the encoding with
         // integer lanes: Rt names a vector register (zeroed in __ns), Rn
         // stays an integer base, and the addressing modes compute
@@ -892,11 +959,11 @@ FaultSkipPlan fault_decode_skip(uint32_t w, uint64_t pc, uint64_t baseVal,
         // vector form stay refused — lanes, not whole registers, fault
         // there and zeroing them is not semantics-preserving.
         const bool simd = (w & (1u << 26)) != 0;
-        // PRFM: a hint with no destination; skipping only drops the prefetch.
-        // Integer-only encoding (no SIMD PRFM exists), checked first.
+        // PRFM: refused, not skipped. It is a hint with no destination, so a
+        // skip would be harmless — but a faulting PRFM means its address is
+        // bad, and silently advancing hides a real problem the very next
+        // instruction will trip on anyway with a full report.
         if (((w >> 23) & 0x1FF) == 0x1F3) {
-            p.skippable = true;
-            p.isLoad = false;
             return p;
         }
         // LSE atomics never reach the bit21==0 path (assembler-verified:
@@ -1007,20 +1074,30 @@ bool fault_skip_load_store(ucontext_t* uc, uintptr_t faultAddr, uint64_t* newPcO
     if (!p.skippable) return false;
     // The decode must explain the fault. Anything else is a mis-decode.
     if (p.effAddr != faultAddr) return false;
+    // No per-PC strike cap here by design: observed survivable storms fault
+    // 128 times at ONE pc (a chunk loop advancing its index each iteration),
+    // and capping them early parks a worker the game still needs. Storm
+    // control is the per-thread 128 budget; poison below keeps each skip
+    // attributable instead of silently zero.
     if (p.isLoad) {
         if (p.isVector) {
             // SIMD/FP lane: all 32 vector registers exist (no XZR), so no
-            // destination gate is needed — zero the whole 128-bit lane in
-            // the NEON context (Darwin arm_neon_state64 __v).
+            // destination gate is needed. Poison, not zero: 0xCD bytes are
+            // visibly wrong in any lane interpretation, while zero is a valid
+            // pointer/length that hides corruption for 128 faults.
             if (p.rt > 31) return false;
-            std::memset(&uc->uc_mcontext->__ns.__v[p.rt], 0,
+            std::memset(&uc->uc_mcontext->__ns.__v[p.rt], 0xCD,
                         sizeof(uc->uc_mcontext->__ns.__v[p.rt]));
         } else {
             // 29/30 never take a transfer result in valid code, 31 is XZR
             // (no effect): refuse rather than reason about them.
             if (p.rt >= 29 || (p.isPair && p.rt2 >= 29)) return false;
-            uc->uc_mcontext->__ss.__x[p.rt] = 0;
-            if (p.isPair) uc->uc_mcontext->__ss.__x[p.rt2] = 0;
+            // Poison 0xDEAD (zero-extended): unmapped as a pointer so misuse
+            // faults fast and attributably, small as a length so a corrupted
+            // trip count cannot explode, nonzero as a flag so taken branches
+            // stay visible. Zero would pass as plausible everywhere.
+            uc->uc_mcontext->__ss.__x[p.rt] = 0xDEADull;
+            if (p.isPair) uc->uc_mcontext->__ss.__x[p.rt2] = 0xDEADull;
         }
     }
     *newPcOut = pc + 4;
@@ -1409,35 +1486,26 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
             g_mainThread != 0 && pthread_equal(pthread_self(), g_mainThread);
 #endif
         const unsigned long long tid = currentThreadIdForCrash();
-        if (!kudroid_fault_is_fatal(tid, isHostMain) &&
-            g_workerFaults.load(std::memory_order_relaxed) <
-                kMaxWorkerRecoveries &&
-            (sig == SIGSEGV || sig == SIGBUS) &&
-            kudroid_try_skip_fault(sig, info, ucontext)) {
-            // Progress check: a gap of 30s+ since the previous skip means the
-            // thread survived and ran in between — those faults were isolated,
-            // not a storm. Reset the budget so a long session does not die on
-            // fault #129 that is no worse than fault #1. A real storm (faults
-            // microseconds apart) keeps the accumulated count and stays fatal.
+        WorkerBudget* budget =
+            (!kudroid_fault_is_fatal(tid, isHostMain) && (sig == SIGSEGV || sig == SIGBUS))
+                ? worker_budget_for(tid)
+                : nullptr;
+        // Budget gates the attempt: try_skip mutates guest context (pc advance,
+        // load zeroing), so a withheld skip must never follow a successful one.
+        if (worker_budget_peek(budget) && kudroid_try_skip_fault(sig, info, ucontext)) {
+            // Per-thread progress check lives in worker_budget_note: a 30s+
+            // gap since this thread's previous skip resets its budget, so a
+            // long session does not die on an isolated fault #129. A storm
+            // keeps its count and stays fatal.
             const long long nowNs =
                 std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::steady_clock::now().time_since_epoch())
                     .count();
-            const long long lastNs = g_lastFaultSkipNs.load(std::memory_order_relaxed);
-            if (lastNs != 0 && nowNs - lastNs > 30000000000LL) {
-                g_workerFaults.store(0, std::memory_order_relaxed);
-            }
-            g_lastFaultSkipNs.store(nowNs, std::memory_order_relaxed);
-            g_workerFaults.fetch_add(1, std::memory_order_relaxed);
+            worker_budget_note(budget, nowNs);
             return;
         }
     }
 
-    // Flush stdout/stderr streams to ensure buffered diagnostic messages
-    // are not lost before termination.
-    fflush(stdout);
-    fflush(stderr);
-    
     if (g_logDir[0]) {
         // construct '<dir>/kudroid_crash.log' path without heap allocation.
         char path[1200];
@@ -1807,19 +1875,23 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
             g_mainThread != 0 && pthread_equal(pthread_self(), g_mainThread);
 #endif
         const unsigned long long tid = currentThreadIdForCrash();
-        const bool fatal = kudroid_fault_is_fatal(tid, isHostMain) ||
-                           g_workerFaults.load(std::memory_order_relaxed) >=
-                               kMaxWorkerRecoveries;
+        // Fatal threads never consume a budget slot; workers look theirs up
+        // (claiming if new). No slot left fails closed: spent reads as max.
+        const bool roleFatal = kudroid_fault_is_fatal(tid, isHostMain);
+        WorkerBudget* budget = roleFatal ? nullptr : worker_budget_for(tid);
+        const int spent =
+            budget != nullptr ? budget->count.load(std::memory_order_relaxed) : kMaxWorkerRecoveries;
+        const bool fatal = roleFatal || spent >= kMaxWorkerRecoveries;
         if (fatal) {
             g_hasCrashed.store(true);
         } else {
-            g_workerFaults.fetch_add(1, std::memory_order_relaxed);
+            if (budget != nullptr) budget->count.fetch_add(1, std::memory_order_relaxed);
             char mark[256];
             const int n = snprintf(
                 mark, sizeof(mark),
                 "worker-fault-isolated signo=%d thread_id=%llu "
                 "faults_so_far=%d (parked; app continues)",
-                sig, tid, g_workerFaults.load(std::memory_order_relaxed));
+                sig, tid, spent + 1);
             if (n > 0) kudroid_persistent_breadcrumb(mark);
         }
     }

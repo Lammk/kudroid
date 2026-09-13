@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstdio>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <functional>
@@ -764,7 +765,7 @@ size_t zip_find_eocd(std::FILE* f, long long file_size) {
     const size_t kScan =
         static_cast<size_t>(std::min<long long>(file_size, kMaxComment + 22));
     std::vector<uint8_t> tail(kScan);
-    if (std::fseek(f, static_cast<long>(file_size - static_cast<long long>(kScan)), SEEK_SET) != 0)
+    if (::fseeko(f, file_size - static_cast<long long>(kScan), SEEK_SET) != 0)
         return std::string::npos;
     if (std::fread(tail.data(), 1, kScan, f) != kScan) return std::string::npos;
     const size_t base = static_cast<size_t>(file_size - static_cast<long long>(kScan));
@@ -796,25 +797,34 @@ uint64_t zip_extract_entry(const std::string& archivePath, const std::string& en
     } closer{f};
 
     if (std::fseek(f, 0, SEEK_END) != 0) return 0;
-    const long long size = std::ftell(f);
+    const long long size = ::ftello(f);
     if (size < 22) return 0;
     const size_t eocd = zip_find_eocd(f, size);
     if (eocd == std::string::npos) return 0;
     uint8_t e[22];
-    if (std::fseek(f, static_cast<long>(eocd), SEEK_SET) != 0) return 0;
+    if (::fseeko(f, static_cast<off_t>(eocd), SEEK_SET) != 0) return 0;
     if (std::fread(e, 1, 22, f) != 22) return 0;
     const uint16_t total_entries = zip_read16(e, 10);
     const uint32_t cd_offset = zip_read32(e, 16);
+    // Zip64 uses 0xFFFF/0xFFFFFFFF sentinels pointing at a Zip64 EOCD locator
+    // this reader does not parse: say so loudly instead of walking garbage as
+    // a central directory and 404ing every entry in it.
+    if (total_entries == 0xFFFF || cd_offset == 0xFFFFFFFFu) {
+        std::fprintf(stderr, "[KuDroidVFS] zip64 archive not supported: %s\n",
+                     archivePath.c_str());
+        return 0;
+    }
 
     struct Hit {
         bool valid = false;
         uint16_t method = 0;
+        uint32_t crc = 0;
         uint32_t csize = 0;
         uint32_t usize = 0;
         uint32_t local_off = 0;
     };
     auto walk = [&](bool fold_case) -> Hit {
-        if (std::fseek(f, static_cast<long>(cd_offset), SEEK_SET) != 0) return {};
+        if (::fseeko(f, static_cast<off_t>(cd_offset), SEEK_SET) != 0) return {};
         for (uint16_t n = 0; n < total_entries; ++n) {
             uint8_t h[46];
             if (std::fread(h, 1, 46, f) != 46) return {};
@@ -824,6 +834,7 @@ uint64_t zip_extract_entry(const std::string& archivePath, const std::string& en
             const uint16_t comment_len = zip_read16(h, 32);
             Hit hit;
             hit.method = zip_read16(h, 10);
+            hit.crc = zip_read32(h, 16);  // central dir: crc32 at 16 (14 is mod date)
             hit.csize = zip_read32(h, 20);
             hit.usize = zip_read32(h, 24);
             hit.local_off = zip_read32(h, 42);
@@ -853,47 +864,151 @@ uint64_t zip_extract_entry(const std::string& archivePath, const std::string& en
     // Local header: sizes there can be zero when a data descriptor follows, so the
     // central-directory figures are the ones used; the local header only yields the
     // true start of the data.
-    if (std::fseek(f, static_cast<long>(hit.local_off), SEEK_SET) != 0) return 0;
+    if (::fseeko(f, static_cast<off_t>(hit.local_off), SEEK_SET) != 0) return 0;
     uint8_t lh[30];
     if (std::fread(lh, 1, 30, f) != 30) return 0;
     if (!(lh[0] == 'P' && lh[1] == 'K' && lh[2] == 3 && lh[3] == 4)) return 0;
     const uint16_t l_nlen = zip_read16(lh, 26);
     const uint16_t l_elen = zip_read16(lh, 28);
-    if (std::fseek(f, static_cast<long>(l_nlen) + static_cast<long>(l_elen), SEEK_CUR) != 0)
+    if (::fseeko(f, static_cast<off_t>(l_nlen) + static_cast<off_t>(l_elen), SEEK_CUR) != 0)
         return 0;
+    const long long dataOff = ::ftello(f);
+    if (dataOff < 0) return 0;
+    // Cap the compressed input too: the usize cap below does not bound csize,
+    // and a lying header would otherwise malloc first and fail later.
+    if (hit.csize > 512ull * 1024 * 1024) return 0;
 
-    std::vector<uint8_t> comp(hit.csize);
-    if (hit.csize > 0 && std::fread(comp.data(), 1, hit.csize, f) != hit.csize) return 0;
+    // STORED input streams straight off the archive in 1MB chunks (no full
+    // copy: a 500MB entry would cost 500MB of heap). DEFLATED still buffers
+    // its input — bounded by the cap above — while output streams.
+    std::vector<uint8_t> comp;
+    if (hit.method == 8 && hit.csize > 0) {
+        comp.resize(hit.csize);
+        if (std::fread(comp.data(), 1, hit.csize, f) != hit.csize) return 0;
+    }
 
-    std::vector<uint8_t> data;
+    // Stream to a side file and rename over the destination only after the
+    // bytes verify: a crash or kill mid-extract must never leave a partial
+    // file that the next run serves as good. That was the "loads a few
+    // segments then dies forever after" shape — one torn 108MB bundle cached
+    // once, trusted on every later hit by mere existence. Chunked 1MB writes
+    // also cap RAM (the old code held compressed+output fully: ~1GB for
+    // data.unity3d). Resume is at file granularity and automatic: a torn run
+    // leaves only the .part orphan, and the next open re-extracts from the
+    // archive. Byte-level resume across runs would need a crash-safe offset
+    // journal for a local-disk copy that takes seconds — not worth the
+    // failure modes it adds.
+    const std::string part = destPath + ".part";
+    std::remove(part.c_str());
+    std::FILE* out = std::fopen(part.c_str(), "wb");
+    if (out == nullptr) return 0;
+    bool ok = false;
+    uint64_t written = 0;
+    uint32_t crc = crc32(0L, Z_NULL, 0);
+    constexpr size_t kChunk = 1 << 20;
+    std::vector<uint8_t> chunk(kChunk);
     if (hit.method == 0) {
-        data = std::move(comp);
-        data.resize(hit.usize);
+        ok = true;
+        uint64_t remaining = hit.csize;
+        long long pos = dataOff;
+        while (ok && remaining > 0) {
+            const size_t n = static_cast<size_t>(
+                std::min<uint64_t>(kChunk, remaining));
+            if (::fseeko(f, static_cast<off_t>(pos), SEEK_SET) != 0) {
+                ok = false;
+                break;
+            }
+            const size_t got = std::fread(chunk.data(), 1, n, f);
+            if (got == 0) {
+                ok = false;
+                break;
+            }
+            if (std::fwrite(chunk.data(), 1, got, out) != got) {
+                ok = false;
+                break;
+            }
+            crc = crc32(crc, chunk.data(), static_cast<uInt>(got));
+            pos += static_cast<long long>(got);
+            remaining -= got;
+            written += got;
+        }
+        // STORED entries whose central size runs past EOF pad as zeros.
+        while (ok && written < hit.usize) {
+            const size_t n = static_cast<size_t>(
+                std::min<uint64_t>(kChunk, hit.usize - written));
+            std::memset(chunk.data(), 0, n);
+            if (std::fwrite(chunk.data(), 1, n, out) != n) {
+                ok = false;
+                break;
+            }
+            crc = crc32(crc, chunk.data(), static_cast<uInt>(n));
+            written += n;
+        }
     } else if (hit.method == 8) {
-        data.resize(hit.usize > 0 ? hit.usize : 1);
         z_stream zs = {};
         zs.next_in = comp.data();
         zs.avail_in = static_cast<uInt>(comp.size());
-        zs.next_out = data.data();
-        zs.avail_out = static_cast<uInt>(data.size());
-        if (inflateInit2(&zs, -MAX_WBITS) != Z_OK) return 0;
-        const int rc = inflate(&zs, Z_FINISH);
-        inflateEnd(&zs);
-        if (rc != Z_STREAM_END || zs.total_out != hit.usize) return 0;
-        data.resize(zs.total_out);
+        if (inflateInit2(&zs, -MAX_WBITS) == Z_OK) {
+            ok = true;
+            int rc = Z_OK;
+            while (ok && rc != Z_STREAM_END) {
+                zs.next_out = chunk.data();
+                zs.avail_out = static_cast<uInt>(chunk.size());
+                rc = inflate(&zs, Z_NO_FLUSH);
+                if (rc != Z_OK && rc != Z_STREAM_END && rc != Z_BUF_ERROR) {
+                    ok = false;
+                    break;
+                }
+                const size_t have = chunk.size() - zs.avail_out;
+                if (have > 0) {
+                    if (std::fwrite(chunk.data(), 1, have, out) != have) {
+                        ok = false;
+                        break;
+                    }
+                    crc = crc32(crc, chunk.data(), static_cast<uInt>(have));
+                    written += have;
+                }
+                if (rc == Z_BUF_ERROR && zs.avail_in == 0) break;
+            }
+            inflateEnd(&zs);
+            if (rc != Z_STREAM_END || written != hit.usize) ok = false;
+        }
     } else {
+        std::fclose(out);
+        std::remove(part.c_str());
         return 0;  // bzip2/encrypted: unsupported
     }
-
-    std::FILE* out = std::fopen(destPath.c_str(), "wb");
-    if (out == nullptr) return 0;
-    const size_t wrote = data.empty() ? 0 : std::fwrite(data.data(), 1, data.size(), out);
+    // verify, then commit: size AND central-directory CRC before the bytes
+    // become servable. Rename is atomic; a crash anywhere above leaves at
+    // most the .part orphan, never a trusted partial.
+    if (ok && (written != hit.usize || crc != hit.crc)) ok = false;
+    if (ok) {
+        // A counter is not proof: ENOSPC or a torn page can leave fewer bytes
+        // than counted. Flush, sync, then believe fstat — not the accumulator.
+        if (std::fflush(out) != 0) ok = false;
+#if !defined(_WIN32)
+        if (ok && ::fsync(fileno(out)) != 0) ok = false;
+#endif
+        if (ok) {
+            struct stat st;
+            if (::fstat(fileno(out), &st) != 0 ||
+                static_cast<uint64_t>(st.st_size) != written) {
+                ok = false;
+            }
+        }
+    }
     std::fclose(out);
-    if (wrote != data.size()) {
-        std::remove(destPath.c_str());
+    if (!ok) {
+        std::remove(part.c_str());
         return 0;
     }
-    return data.size();
+    std::error_code renameEc;
+    std::filesystem::rename(part, destPath, renameEc);
+    if (renameEc) {
+        std::remove(part.c_str());
+        return 0;
+    }
+    return written;
 }
 
 // A game resolves assets one file at a time, so the naive path here was fopen+EOCD+
@@ -925,18 +1040,22 @@ std::string zip_index_key(std::string_view entry) {
 ZipArchiveIndex build_zip_index(std::FILE* f) {
     ZipArchiveIndex index;
     if (std::fseek(f, 0, SEEK_END) != 0) return index;
-    const long long size = std::ftell(f);
+    const long long size = ::ftello(f);
     if (size < 22) return index;
     const size_t eocd = zip_find_eocd(f, size);
     if (eocd == std::string::npos) return index;
     uint8_t e[22];
-    if (std::fseek(f, static_cast<long>(eocd), SEEK_SET) != 0) return index;
+    if (::fseeko(f, static_cast<off_t>(eocd), SEEK_SET) != 0) return index;
     if (std::fread(e, 1, 22, f) != 22) return index;
     const uint16_t total_entries = zip_read16(e, 10);
     const uint32_t cd_offset = zip_read32(e, 16);
+    if (total_entries == 0xFFFF || cd_offset == 0xFFFFFFFFu) {
+        std::fprintf(stderr, "[KuDroidVFS] zip64 archive not supported (index build)\n");
+        return index;
+    }
     index.entries.reserve(total_entries * 2 + 1);
 
-    if (std::fseek(f, static_cast<long>(cd_offset), SEEK_SET) != 0) return index;
+    if (::fseeko(f, static_cast<off_t>(cd_offset), SEEK_SET) != 0) return index;
     for (uint16_t n = 0; n < total_entries; ++n) {
         uint8_t h[46];
         if (std::fread(h, 1, 46, f) != 46) break;
@@ -958,15 +1077,15 @@ ZipArchiveIndex build_zip_index(std::FILE* f) {
         // does, and its name/extra lengths are allowed to differ from the CD's. Resolving
         // the payload offset here keeps every later stat a pure memory lookup.
         if (!is_dir) {
-            const long saved = std::ftell(f);
-            if (std::fseek(f, static_cast<long>(local_off), SEEK_SET) != 0) continue;
+            const off_t saved = ::ftello(f);
+            if (::fseeko(f, static_cast<off_t>(local_off), SEEK_SET) != 0) continue;
             uint8_t lh[30];
             if (std::fread(lh, 1, 30, f) != 30) continue;
             if (!(lh[0] == 'P' && lh[1] == 'K' && lh[2] == 3 && lh[3] == 4)) continue;
             const uint16_t l_nlen = zip_read16(lh, 26);
             const uint16_t l_elen = zip_read16(lh, 28);
             meta.payloadOffset = static_cast<uint64_t>(local_off) + 30 + l_nlen + l_elen;
-            std::fseek(f, saved, SEEK_SET);
+            ::fseeko(f, saved, SEEK_SET);
         }
 
         // First occurrence wins, matching the old sequential walk's first match.
@@ -989,34 +1108,38 @@ ZipArchiveIndex build_zip_index(std::FILE* f) {
 // Build once per archive, guarded; a failed build is cached as an empty index so a
 // broken file is re-probed at stat rate, not re-parsed at stat rate.
 // Read-mostly: shared_mutex lets concurrent statters proceed in parallel; only
-// the one-time build per archive takes the write lock.
-const ZipArchiveIndex* get_or_build_zip_index(const std::string& archivePath) {
+// the one-time build per archive takes the write lock. Indices are shared_ptr:
+// a raw interior pointer would dangle when another archive's try_emplace rehashes
+// the map while a first thread still reads its index.
+std::shared_ptr<const ZipArchiveIndex> get_or_build_zip_index(const std::string& archivePath) {
     struct Cache {
         std::shared_mutex mtx;
-        std::unordered_map<std::string, ZipArchiveIndex> byArchive;
+        std::unordered_map<std::string, std::shared_ptr<const ZipArchiveIndex>> byArchive;
     };
     static Cache cache;
     {
         std::shared_lock<std::shared_mutex> lock(cache.mtx);
         const auto it = cache.byArchive.find(archivePath);
-        if (it != cache.byArchive.end()) return &it->second;
+        if (it != cache.byArchive.end()) return it->second;
     }
     std::unique_lock<std::shared_mutex> lock(cache.mtx);
     auto [it, inserted] = cache.byArchive.try_emplace(archivePath);
     if (inserted) {
+        auto built = std::make_shared<ZipArchiveIndex>();
         std::FILE* f = std::fopen(archivePath.c_str(), "rb");
         if (f != nullptr) {
-            it->second = build_zip_index(f);
+            *built = build_zip_index(f);
             std::fclose(f);
         }
+        it->second = std::move(built);
     }
-    return &it->second;
+    return it->second;
 }
 
 bool zip_stat_entry(const std::string& archivePath, const std::string& entry,
                     uint64_t* outOffset, uint64_t* outSize, uint16_t* outMethod) {
-    const ZipArchiveIndex* index = get_or_build_zip_index(archivePath);
-    if (index == nullptr) return false;
+    const auto index = get_or_build_zip_index(archivePath);
+    if (!index) return false;
     const auto it = index->entries.find(zip_index_key(entry));
     if (it == index->entries.end()) return false;
     if (outOffset) *outOffset = it->second.payloadOffset;
@@ -1028,8 +1151,8 @@ bool zip_stat_entry(const std::string& archivePath, const std::string& entry,
 std::vector<std::string> zip_list_dir_entries(const std::string& archivePath,
                                               const std::string& dirPrefix) {
     std::vector<std::string> result;
-    const ZipArchiveIndex* index = get_or_build_zip_index(archivePath);
-    if (index == nullptr) return result;
+    const auto index = get_or_build_zip_index(archivePath);
+    if (!index) return result;
 
     std::string prefix = dirPrefix;
     while (!prefix.empty() && prefix[0] == '/') prefix.erase(0, 1);
@@ -1049,28 +1172,60 @@ std::string extract_jar_entry_to_cache(const std::string& archivePath,
         !std::filesystem::is_regular_file(archivePath, ec)) {
         return {};
     }
-    // Serialise extraction: the same URL can be resolved from several threads during
-    // startup, and double-extracting the same entry is wasted IO.
-    static std::mutex s_jarMtx;
-    std::lock_guard<std::mutex> lock(s_jarMtx);
+    // Serialise per entry, not globally: the same URL can be resolved from
+    // several threads during startup (double-extracting it is wasted IO), but
+    // a single mutex around a 500MB inflate stalls every other asset behind
+    // it. Striped by entry hash, with double-checked existence inside.
+    static std::mutex s_jarStripes[16];
+    std::mutex& stripe =
+        s_jarStripes[fnv1a64_str(archivePath + "\x01" + entryName) % 16];
+    std::lock_guard<std::mutex> lock(stripe);
 
     const std::string dir = androidRoot + "/data/cache/jar_entries";
     std::filesystem::create_directories(dir, ec);
     if (ec) return {};
 
-    // One cache file per (archive, entry) pair. The hash keeps the tree flat; the
-    // entry's basename is kept so a log line reads like the asset it served.
+    // One cache file per (archive identity, entry) pair. Identity folds in the
+    // archive's size+mtime — not just its path — so an updated APK with a
+    // same-size entry cannot serve stale bytes forever (the old file simply
+    // stops being addressed; it is not deleted, which keeps the extractor
+    // lock-free on the cleanup path).
+    struct stat archiveSt;
+    uint64_t archiveIdHi = 0, archiveIdLo = 0;
+    if (::stat(archivePath.c_str(), &archiveSt) == 0) {
+        archiveIdHi = static_cast<uint64_t>(archiveSt.st_size);
+#if defined(__APPLE__)
+        archiveIdLo = static_cast<uint64_t>(archiveSt.st_mtimespec.tv_sec);
+#else
+        archiveIdLo = static_cast<uint64_t>(archiveSt.st_mtime);
+#endif
+    }
     std::string base = entryName;
     const size_t slash = base.find_last_of('/');
     if (slash != std::string::npos) base = base.substr(slash + 1);
     if (base.size() > 64) base.resize(64);
     char hex[17];
     std::snprintf(hex, sizeof(hex), "%016llx",
-                  static_cast<unsigned long long>(fnv1a64_str(archivePath + "\x01" + entryName)));
+                  static_cast<unsigned long long>(fnv1a64_str(
+                      archivePath + "\x01" + std::to_string(archiveIdHi) + "\x01" +
+                      std::to_string(archiveIdLo) + "\x01" + entryName)));
     const std::string dest = dir + "/" + hex + "_" + base;
 
     if (std::filesystem::exists(dest, ec) && std::filesystem::is_regular_file(dest, ec)) {
-        return dest;
+        // Trust but verify: a torn cache file (killed mid-extract by an older
+        // build, before atomic commit) would otherwise be served forever. Size
+        // is the cheap check against the central directory; a mismatch deletes
+        // and re-extracts below. Content CRC was verified at commit time, and
+        // only the atomic rename makes a file servable, so no full reread here.
+        uint64_t payloadOff = 0, payloadSize = 0;
+        uint16_t method = 0;
+        std::error_code sizeEc;
+        const uint64_t cachedSize = std::filesystem::file_size(dest, sizeEc);
+        if (!sizeEc && zip_stat_entry(archivePath, entryName, &payloadOff, &payloadSize, &method) &&
+            cachedSize == payloadSize) {
+            return dest;
+        }
+        std::filesystem::remove(dest, ec);
     }
     const uint64_t n = zip_extract_entry(archivePath, entryName, dest);
     if (n == 0) {
@@ -1145,6 +1300,9 @@ std::string VFSPathRemapper::resolveObbFallback(const std::string& mapped) const
     {
         std::lock_guard<std::mutex> lock(obbMutex_);
         obbResolved_[mapped] = found;  // empty = known miss, do not rescan
+        // Bounded: guest-enumerable paths would otherwise grow this forever.
+        constexpr size_t kMaxObbResolved = 1024;
+        if (obbResolved_.size() > kMaxObbResolved) obbResolved_.clear();
     }
     if (!found.empty()) {
         static std::atomic<int> s_obbFb{0};
@@ -1162,7 +1320,11 @@ std::string VFSPathRemapper::remap(const char* originalPath) const {
     if (!originalPath) return {};
 
     // Resolve jar: and file:archive!/entry URLs to loose asset files.
-    if (std::strncmp(originalPath, "jar:", 4) == 0 || std::strstr(originalPath, "!/") != nullptr) {
+    // Callers sometimes prepend a '/' ("...open(\"/jar:file:///...\"") — seen live
+    // as a jar miss for GameBuildSettings.json — so test past it, not just at [0].
+    const char* jarTest = originalPath;
+    while (*jarTest == '/') ++jarTest;
+    if (std::strncmp(jarTest, "jar:", 4) == 0 || std::strstr(originalPath, "!/") != nullptr) {
         const char* excl = std::strchr(originalPath, '!');
         if (excl != nullptr) {
             const char* sub = excl + 1;
@@ -1172,15 +1334,15 @@ std::string VFSPathRemapper::remap(const char* originalPath) const {
                 entry += 7;
                 while (*entry == '/') ++entry;
             }
-            const char* assetsDir = kudroid_get_assets_dir();
-            if (assetsDir && *assetsDir) {
+            const std::string assetsDir = kudroid::kudroid_get_assets_dir_cpp();
+            if (!assetsDir.empty()) {
                 std::error_code ec;
-                std::string candidate = normalizePathString(std::string(assetsDir) + "/" + entry);
+                std::string candidate = normalizePathString(assetsDir + "/" + entry);
                 if (std::filesystem::exists(candidate, ec)) {
                     vfsTrace("Remapped JAR asset: " + std::string(originalPath) + " -> " + candidate);
                     return candidate;
                 }
-                std::string altCandidate = normalizePathString(std::string(assetsDir) + "/" + sub);
+                std::string altCandidate = normalizePathString(assetsDir + "/" + sub);
                 if (std::filesystem::exists(altCandidate, ec)) {
                     vfsTrace("Remapped JAR asset (alt): " + std::string(originalPath) + " -> " + altCandidate);
                     return altCandidate;
@@ -1383,9 +1545,10 @@ int vfs_open(const char* path, int flags, mode_t mode) {
     }
     
     if (path && std::strcmp(path, "/dev/ashmem") == 0) {
-        static int ashmem_counter = 0;
+        static std::atomic<int> ashmem_counter{0};
         char name[64];
-        std::snprintf(name, sizeof(name), "/kudroid_ashmem_%d_%d", ::getpid(), ashmem_counter++);
+        std::snprintf(name, sizeof(name), "/kudroid_ashmem_%d_%d", ::getpid(),
+                      ashmem_counter.fetch_add(1, std::memory_order_relaxed));
         int fd = shm_open(name, O_RDWR | O_CREAT | O_EXCL, 0600);
         if (fd >= 0) {
             shm_unlink(name);
@@ -1461,7 +1624,10 @@ FILE* vfs_fopen(const char* path, const char* mode) {
          std::strstr(path, ".wav") != nullptr || std::strstr(path, ".mp4") != nullptr ||
          std::strstr(path, ".webm") != nullptr || std::strstr(path, "jar:") != nullptr ||
          std::strstr(path, ".json") != nullptr || std::strstr(path, "catalog") != nullptr ||
-         std::strstr(path, "/files/") != nullptr || std::strstr(path, "/sdcard/") != nullptr)) {
+         std::strstr(path, "/files/") != nullptr || std::strstr(path, "/sdcard/") != nullptr ||
+         std::strstr(path, ".bundle") != nullptr || std::strstr(path, ".resource") != nullptr ||
+         std::strstr(path, "sharedassets") != nullptr || std::strstr(path, "data.unity3d") != nullptr ||
+         std::strstr(path, "assets/bin/") != nullptr)) {
         std::fprintf(stderr, "[KuDroidVFS] fopen(%s) -> %s\n", path,
                      result ? "OK" : std::strerror(errno));
     }
@@ -1715,7 +1881,20 @@ off_t vfs_ftello(FILE* stream) {
 
 FILE* vfs_freopen(const char* path, const char* mode, FILE* stream) {
     const std::string mapped = VFSPathRemapper::getInstance().remap(path);
-    return std::freopen(mapped.c_str(), mode, stream);
+    FILE* result = std::freopen(mapped.c_str(), mode, stream);
+    // Keep the volume map truthful: freopen reuses the FILE* address for a
+    // different path, and stale attribution is worse than none.
+    if (result != nullptr) {
+        std::lock_guard<std::mutex> vlock(g_freadVolMtx);
+        g_freadPaths[result] = mapped;
+        if (path != nullptr) {
+            const size_t len = std::strlen(path);
+            if (len >= 8 && std::strcmp(path + len - 8, "base.apk") == 0) {
+                track_apk_stream(result);
+            }
+        }
+    }
+    return result;
 }
 
 int vfs_access(const char* path, int mode) {

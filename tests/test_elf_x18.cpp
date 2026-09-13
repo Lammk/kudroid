@@ -266,6 +266,35 @@ void test_branch_renamed() {
     Check(((elf.word(1) >> 5) & 31) == 15, "br target became x15");
 }
 
+// braa x0, x18: layout is target Rn@9:5, modifier Rm@4:0 (capstone:
+// 0xD71F0812). The 0xD7 decoder must rename the modifier; a missed field
+// leaves a live x18 that async delivery zeroes.
+void test_braa_modifier_renamed() {
+    std::printf("[rewrite] braa modifier x18 is renamed\n");
+    const std::uint32_t add = 0x8B010000 | (1u << 16) | (0u << 5) | 18u;  // add x18,x0,x1
+    const std::uint32_t braa = 0xD71F0812;  // braa x0, x18
+    SynthElf elf({add, braa}, false);
+    kudroid::X18Stats st = elf.run();
+    Check(st.rewritten == 1, "rewritten, def + modifier use");
+    Check(((elf.word(0) >> 0) & 31) == 15, "add Rd became x15");
+    Check(((elf.word(1) >> 0) & 31) == 15, "braa modifier became x15");
+    Check(((elf.word(1) >> 5) & 31) == 0, "braa target untouched");
+}
+
+// A call that coincides with the span endpoint is the span's own x18 use
+// (blr x18 terminator): the substitute is consumed by the call, not live
+// across it, so it rewrites. Strict-interior calls still skip (see above).
+void test_callspan_endpoint_rewrites() {
+    std::printf("[rewrite] call at the span endpoint rewrites\n");
+    const std::uint32_t add = 0x8B010000 | (1u << 16) | (0u << 5) | 18u;  // add x18,x0,x1
+    const std::uint32_t blr = 0xD63F0000 | (18u << 5);  // blr x18
+    SynthElf elf({add, blr}, false);
+    kudroid::X18Stats st = elf.run();
+    Check(st.rewritten == 1, "endpoint terminator rewritten");
+    Check(((elf.word(0) >> 0) & 31) == 15, "add Rd became x15");
+    Check(((elf.word(1) >> 5) & 31) == 15, "blr Rn became x15");
+}
+
 // br x18 alone reads a value from outside: must skip, not rename.
 void test_branch_bare_skips() {
     std::printf("[rewrite] lone br x18 is skipped\n");
@@ -557,9 +586,11 @@ int main(int argc, char** argv) {
     test_no_free_reg_skips();
     test_pressure_outside_span_borrows();
     test_branch_renamed();
+    test_braa_modifier_renamed();
     test_branch_bare_skips();
     test_liveout_skips();
     test_callspan_skips();
+    test_callspan_endpoint_rewrites();
     test_mem_skips();
     test_personality_skips();
     test_crash_loop_shape();
