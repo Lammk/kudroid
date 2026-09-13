@@ -86,9 +86,12 @@ public final class MotionEvent extends InputEvent {
 
     private final long mDownTime;
     private final int mAction;
-    private final float mX;
-    private final float mY;
-    private final long mEventTime;
+    // Mutable on purpose: ActivityThread.postTouchEvent coalesces a drag by updating the
+    // single pending MOVE in place instead of queueing 60-120 messages/s. mDownTime/mAction
+    // stay final — only the latest finger position and time move.
+    private float mX;
+    private float mY;
+    private long mEventTime;
     private final int mPointerCount;
 
     private MotionEvent(long downTime, long eventTime, int action, float x, float y, int pointerCount) {
@@ -120,6 +123,17 @@ public final class MotionEvent extends InputEvent {
         if (other == null) throw new IllegalArgumentException("other must not be null");
         return new MotionEvent(other.mDownTime, other.mEventTime, other.mAction, other.mX, other.mY,
                 other.mPointerCount);
+    }
+
+    /**
+     * Coalesce a drag: fold a newer MOVE sample into this pending event.
+     * Called only for ACTION_MOVE on an event still sitting in the Looper queue —
+     * never on one already dispatched.
+     */
+    public void updateCoalescedMove(float x, float y, long eventTime) {
+        mX = x;
+        mY = y;
+        mEventTime = eventTime;
     }
 
     /**

@@ -30,6 +30,18 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (!accepting_) return;
+            // Coalesce the flood at ingress: a drag produces 60-120 MOVEs/s and each
+            // one costs a full interpreted dispatch under the VM lock downstream.
+            // Folding a MOVE into a queued trailing MOVE keeps the latest finger
+            // position while bounding worker wakeups to gesture boundaries.
+            if ((action & 0xff) == 2 && !events_.empty() &&
+                (events_.back().action & 0xff) == 2 &&
+                events_.back().generation == generation_) {
+                events_.back().x = x;
+                events_.back().y = y;
+                ready_.notify_one();
+                return;
+            }
             if (events_.size() >= kMaxQueueSize) {
                 // Drop oldest MOVE if queue exceeds capacity to prevent unbounded growth.
                 for (auto it = events_.begin(); it != events_.end(); ++it) {

@@ -12,6 +12,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <unordered_set>
 
 #include "dex/dex_file-inl.h"
 #include "dex/modifiers.h"
@@ -316,6 +317,22 @@ bool DexJniEnv::LinkNativeMethod(DexMethod* method) {
         return true;
     }
     last_error_ = "native symbol not found: " + short_name;
+    // One-line confirmation for dead native bindings (e.g. vendor
+    // UnityPlayer.nativeInjectEvent): the Java frames run but the body never
+    // does, with no other trace. Rate-limited per method to survive floods.
+    {
+        static std::mutex link_fail_mtx;
+        static std::unordered_set<std::string> link_fail_seen;
+        const std::string key =
+            (descriptor != nullptr ? descriptor : "?") + std::string(".") +
+            (method->name != nullptr ? method->name : "?") +
+            (method->signature != nullptr ? method->signature : "?");
+        std::lock_guard<std::mutex> lock(link_fail_mtx);
+        if (link_fail_seen.insert(key).second) {
+            std::fprintf(stderr, "[KuTouchConfirm] link-native-fail %s (tried %s)\n",
+                         key.c_str(), short_name.c_str());
+        }
+    }
     return false;
 }
 

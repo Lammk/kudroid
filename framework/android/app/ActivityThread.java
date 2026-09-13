@@ -142,13 +142,15 @@ public final class ActivityThread {
     /**
      * Coalesce touch floods: a drag produces 60-120 MOVE events/s, and each
      * one as its own Looper message starves everything else on the main thread
-     * (render ticks, lifecycle). AOSP keeps at most one pending MOVE per
-     * connection; here the pending message is updated in place so the queue
-     * never holds more than one TOUCH_EVENT, and stale intermediate positions
-     * are dropped. DOWN/UP/CANCEL pass through untouched — their order matters.
+     * (render ticks, lifecycle) while holding the VM lock through a full
+     * interpreted dispatch. AOSP keeps at most one pending MOVE per
+     * connection; here the pending MOVE message is updated in place so the
+     * queue holds at most one, and stale intermediate positions are dropped.
+     * DOWN/UP/CANCEL pass through untouched — their order matters.
      */
     private static final Object sTouchMsgLock = new Object();
     private static long sLastDownTime = 0;
+    private static Message sPendingMoveMsg = null;
 
     public static void postTouchEvent(int action, float x, float y) {
         if (sCurrentActivityThread == null || sCurrentActivityThread.mH == null) return;
@@ -163,16 +165,37 @@ public final class ActivityThread {
             if (maskedAction == MotionEvent.ACTION_UP || maskedAction == MotionEvent.ACTION_CANCEL) {
                 sLastDownTime = 0;
             }
+            if (maskedAction == MotionEvent.ACTION_MOVE && sPendingMoveMsg != null
+                    && sPendingMoveMsg.obj instanceof MotionEvent) {
+                // A MOVE is still queued: fold the newest sample into it and skip
+                // enqueueing. Worst case the fold lands just as the Looper picks the
+                // message up — then the dispatch sees slightly newer coordinates,
+                // which is still a valid drag sample.
+                ((MotionEvent) sPendingMoveMsg.obj).updateCoalescedMove(x, y, now);
+                return;
+            }
         }
         MotionEvent ev = MotionEvent.obtain(downTime, now, action, x, y, 0);
         Message msg = Message.obtain();
         msg.what = TOUCH_EVENT;
         msg.obj = ev;
+        if (maskedAction == MotionEvent.ACTION_MOVE) {
+            synchronized (sTouchMsgLock) {
+                sPendingMoveMsg = msg;
+            }
+        }
         sCurrentActivityThread.mH.sendMessage(msg);
     }
 
     /** Called by H when a TOUCH_EVENT is dispatched. */
     private static void onTouchEventDispatched(Message msg) {
+        if (msg.what == TOUCH_EVENT) {
+            synchronized (sTouchMsgLock) {
+                if (sPendingMoveMsg == msg) {
+                    sPendingMoveMsg = null;
+                }
+            }
+        }
     }
 
     private static class CrashHandler implements Thread.UncaughtExceptionHandler {

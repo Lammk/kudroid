@@ -35,6 +35,14 @@ int main() {
     Check(moveCount <= static_cast<int>(kudroid::TouchEventQueue::kMaxQueueSize),
           "MOVE flood stays bounded by max queue size");
 
+    queue.reset(true);
+    queue.push(0, 0, 0);
+    for (int i = 1; i <= 500; ++i) queue.push(2, float(i), float(i));
+    Check(queue.tryPop(event) && event.action == 0, "coalesce keeps DOWN first");
+    Check(queue.tryPop(event) && event.action == 2 && event.x == 500.0f && event.y == 500.0f,
+          "consecutive MOVEs fold into one with newest coords");
+    Check(!queue.tryPop(event), "MOVE flood leaves no residue");
+
     const int actions[] = {0, 2, 1, 0, 2, 3};
     for (int action : actions) queue.push(action, 0, 0);
     for (int action : actions) {
