@@ -1,4 +1,5 @@
 #include "kudroid/abi/GuestSignals.h"
+#include "kudroid/elf_loader.hpp"
 
 #include <atomic>
 #include <cstddef>
