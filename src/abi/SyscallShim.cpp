@@ -6574,10 +6574,14 @@ const SymbolEntry kSyscallSymbols[] = {
     {"dlerror", reinterpret_cast<void*>(&bionic_dlerror)},
     {"android_dlopen_ext", reinterpret_cast<void*>(&bionic_android_dlopen_ext)},
 
-    // 64-bit file operations
+    // File operations (32/64-bit unified on 64-bit host)
+    {"lseek", reinterpret_cast<void*>(&bionic_lseek64)},
     {"lseek64", reinterpret_cast<void*>(&bionic_lseek64)},
+    {"pread", reinterpret_cast<void*>(&bionic_pread64)},
     {"pread64", reinterpret_cast<void*>(&bionic_pread64)},
+    {"pwrite", reinterpret_cast<void*>(&bionic_pwrite64)},
     {"pwrite64", reinterpret_cast<void*>(&bionic_pwrite64)},
+    {"ftruncate", reinterpret_cast<void*>(&bionic_ftruncate64)},
     {"ftruncate64", reinterpret_cast<void*>(&bionic_ftruncate64)},
     {"pipe2", reinterpret_cast<void*>(&bionic_pipe2)},
     {"clock_nanosleep", reinterpret_cast<void*>(&bionic_clock_nanosleep)},
