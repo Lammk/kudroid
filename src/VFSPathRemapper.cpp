@@ -1852,6 +1852,12 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
         // still failed" from "Unity never read the FSB at all". Rate-limited
         // hard: an FSB is large and its header appears once per clip load.
         static std::atomic<int> s_fsbCount{0};
+        // How many post-FSB5 reads remain interesting on this stream. Not
+        // keyed by FILE*: the tracker's stream→path map already serialises by
+        // epoch, and FMOD serialises its bank opens on one loader thread, so
+        // a single countdown is unambiguous for the decisive first two reads
+        // after each served header.
+        static std::atomic<int> s_fsbFollowup{0};
         if (buf != nullptr && n * size >= 4 && s_fsbCount.load() < 24) {
             const auto* f = static_cast<const unsigned char*>(buf);
             if (f[0] == 'F' && f[1] == 'S' && f[2] == 'B' && f[3] == '5') {
@@ -1861,7 +1867,24 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                 std::fprintf(stderr,
                              "[KuDroidFmod] served FSB5 at apk_off=%ld size=%zu\n",
                              start, n * size);
+                // Decisive follow-up: when FMOD accepts the bank it re-reads
+                // the whole payload through this stream; when it rejects the
+                // slice it reads nothing or a few probe bytes. Logging the
+                // next reads on this stream separates "bytes are good, FMOD
+                // failed" from "only the header was ever served" — without
+                // touching FMOD.
+                s_fsbFollowup.store(6, std::memory_order_relaxed);
             }
+        }
+        int follow = s_fsbFollowup.load(std::memory_order_relaxed);
+        while (follow > 0 &&
+               !s_fsbFollowup.compare_exchange_weak(follow, follow - 1,
+                                                    std::memory_order_relaxed)) {
+        }
+        if (follow > 0) {
+            std::fprintf(stderr,
+                         "[KuDroidFmod] post-FSB5 read bytes=%zu pos=%ld\n",
+                         n * size, std::ftell(stream));
         }
     }
     if (n > 0) {

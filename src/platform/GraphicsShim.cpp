@@ -2022,7 +2022,12 @@ extern "C" void bionic_glVertexAttribPointer(unsigned int index, int size, unsig
     typedef void (*PFN)(unsigned int, int, unsigned int, unsigned char, int, const void*);
     auto f = (PFN)get_gl_func("glVertexAttribPointer");
     if (!f) { EGL_FORWARD_ERR("glVertexAttribPointer", ""); return; }
-    gpuLog("glVertexAttribPointer(index=%u size=%d stride=%d ptr=%p)", index, size, stride, pointer);
+    // Not logged: per-attribute per-draw state, sampled or not it was 2144 of
+    // 3856 lines in one run's crash buffer and pushed real faults out of it.
+    // Only KUDROID_GPU_LOG_ALL=1 (debug session) records it.
+    if (gpu_log_all()) {
+        gpuLog("glVertexAttribPointer(index=%u size=%d stride=%d ptr=%p)", index, size, stride, pointer);
+    }
     f(index, size, type, normalized, stride, pointer);
 }
 

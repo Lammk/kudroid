@@ -392,6 +392,7 @@ static bool worker_budget_peek(WorkerBudget* s, unsigned long long pc,
     if (worker_fault_is_walk(s, pc, addr)) {
         return s->walk.load(std::memory_order_relaxed) < kMaxWalkRecoveries;
     }
+    // A retired walk re-enters here with count at its cap: fail closed.
     return s->count.load(std::memory_order_relaxed) < kMaxWorkerRecoveries;
 }
 
@@ -1481,6 +1482,19 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
 #endif
         const unsigned long long faultAddr =
             info != nullptr ? reinterpret_cast<unsigned long long>(info->si_addr) : 0;
+        // Emergency stop for a walked-off-the-cliff walk: past 512 steps of
+        // the same load over uncommitted memory the walk is not recovering
+        // anything — every skip poisons one destination and walks further into
+        // the reservation. Retire the skip path here (budget reads spent, so
+        // the second block parks the thread like any other exhausted worker)
+        // instead of feeding the storm thousands more skips and a SIGBUS at
+        // the cliff edge. Cap < kMaxWalkRecoveries keeps ordinary bounded
+        // walks (which terminate) unaffected.
+        static constexpr int kMaxSaneWalk = 512;
+        if (budget != nullptr &&
+            budget->walk.load(std::memory_order_relaxed) >= kMaxSaneWalk) {
+            budget = nullptr;
+        }
         if (worker_budget_peek(budget, faultPc, faultAddr) &&
             kudroid_try_skip_fault(sig, info, ucontext)) {
             const long long nowNs =
@@ -1627,8 +1641,6 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
 #endif
         const unsigned long long faultAddr =
             info != nullptr ? reinterpret_cast<unsigned long long>(info->si_addr) : 0;
-        // Budget gates the attempt: try_skip mutates guest context (pc advance,
-        // load zeroing), so a withheld skip must never follow a successful one.
         if (worker_budget_peek(budget, faultPc, faultAddr) &&
             kudroid_try_skip_fault(sig, info, ucontext)) {
             // Per-thread progress check lives in worker_budget_note: a 30s+
@@ -2019,9 +2031,18 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
         WorkerBudget* budget = roleFatal ? nullptr : worker_budget_for(tid);
         const int spent =
             budget != nullptr ? budget->count.load(std::memory_order_relaxed) : kMaxWorkerRecoveries;
-        const bool fatal = roleFatal || spent >= kMaxWorkerRecoveries;
+        // Walk storm = fatal. The walk budget lets one bounded table walk live
+        // thousands of skips long, but a walk that far exceeds any plausible
+        // relocation table has a broken source pointer (observed live: 4000+
+        // skips at one pc over an uncommitted 0x392000000 region, faulting
+        // every 0x80 bytes) — report it as a crash so the shell shows the
+        // modal instead of leaving a dead worker inside a running app.
+        const int walked = budget != nullptr ? budget->walk.load(std::memory_order_relaxed) : 0;
+        const bool fatal = roleFatal || spent >= kMaxWorkerRecoveries ||
+                           walked >= kMaxWalkRecoveries;
         if (fatal) {
             g_hasCrashed.store(true);
+            g_lastCrashTail[0] = '\0';  // filled below from g_crashBuf
         } else {
             if (budget != nullptr) budget->count.fetch_add(1, std::memory_order_relaxed);
             char mark[256];

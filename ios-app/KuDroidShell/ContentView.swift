@@ -1892,7 +1892,16 @@ class NativeMetalViewController: UIViewController {
                 if reqOri == 0 || reqOri == 6 || reqOri == 8 || reqOri == 11 {
                     // Landscape
                     NSLog("[KuDroid] Guest app requested LANDSCAPE orientation (%d)", reqOri)
-                    if #available(iOS 16.0, *) {
+                    // Skip when the scene already sits in this geometry: a
+                    // redundant request triggers the guest's pause/resume
+                    // handshake (a 2s Unity pause timeout per occurrence) for
+                    // no visual change. See the portrait branch for the storm
+                    // this stopped.
+                    if let scene = self.view.window?.windowScene,
+                       scene.interfaceOrientation.isLandscape {
+                        // Already landscape: skip the redundant request (and the
+                        // guest pause handshake it triggers).
+                    } else if #available(iOS 16.0, *) {
                         if let windowScene = self.view.window?.windowScene {
                             let geometryPreferences = UIWindowScene.GeometryPreferences.iOS(interfaceOrientations: .landscape)
                             windowScene.requestGeometryUpdate(geometryPreferences) { error in
@@ -1903,7 +1912,18 @@ class NativeMetalViewController: UIViewController {
                 } else if reqOri == 1 || reqOri == 7 || reqOri == 9 || reqOri == 12 {
                     // Portrait
                     NSLog("[KuDroid] Guest app requested PORTRAIT orientation (%d)", reqOri)
-                    if #available(iOS 16.0, *) {
+                    // No-op when the guest re-asserts the orientation the app is
+                    // already showing (ULTRAKILL calls setRequestedOrientation on
+                    // every touch-driven UI transition). A second
+                    // requestGeometryUpdate to the current geometry pauses the
+                    // Unity engine for the 2s handshake that follows and then
+                    // times out — the "Timeout (2000 ms) while trying to pause"
+                    // storm at the end of the last run.
+                    if let scene = self.view.window?.windowScene,
+                       scene.interfaceOrientation.isPortrait {
+                        // Already portrait: skip the redundant request (and the
+                        // guest pause handshake it triggers).
+                    } else if #available(iOS 16.0, *) {
                         if let windowScene = self.view.window?.windowScene {
                             let geometryPreferences = UIWindowScene.GeometryPreferences.iOS(interfaceOrientations: .portrait)
                             windowScene.requestGeometryUpdate(geometryPreferences) { error in
