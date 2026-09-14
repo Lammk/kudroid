@@ -45,6 +45,10 @@ add_library(kudroid_core STATIC
     src/library_manager.cpp
     src/platform/InputShim.cpp
     src/platform/NativeTouchGate.cpp
+    # MessageQueue's native wake slot. Separate file: it needs <condition_variable>,
+    # which must not share a translation unit with jni.h's <stdio.h> (glibc 13
+    # compiles bits/stdio.h against an incomplete FILE when it does).
+    src/platform/NativeLooper.cpp
     src/platform/AudioShim.cpp
     src/platform/MediaShim.cpp
     src/platform/GraphicsShim.cpp

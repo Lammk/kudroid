@@ -7,7 +7,6 @@
 #include <cstring>
 #include <atomic>
 #include <mutex>
-#include <condition_variable>
 #include <deque>
 #include <vector>
 #include <chrono>
@@ -17,77 +16,10 @@ extern "C" int bionic_ALooper_addFd(void* looper, int fd, int ident, int events,
                                     void* callback, void* data);
 extern "C" void bionic_ALooper_markInputPipe(void* looper, int fd);
 
-// ─────────────────────────────────────────────────────────────────────────────
-// AOSP-style looper wake slot.
-//
-// AOSP's MessageQueue blocks in native epoll and registers the window's input
-// channel fd as another wake source, so input is delivered to the Looper thread
-// by native code (InputEventReceiver.dispatchInputEvent). KuDroid's Java
-// MessageQueue instead blocked in Object.wait(), which can only be woken by a
-// Java notify — i.e. an interpreted call that needs the global VM lock. Touch
-// delivery therefore needed a second thread holding that lock, serializing
-// touch against the renderer and dropping frames.
-//
-// This slot is the native condition the Java queue waits on. A message enqueue
-// and a touch injection both set `pending` and signal it, so only the Looper
-// thread ever runs Java for touch.
-struct LooperWaitSlot {
-    std::mutex mtx;
-    std::condition_variable cv;
-    bool pending = false;
-};
-static std::atomic<LooperWaitSlot*> g_mainLooperSlot{nullptr};
-
-extern "C" int64_t kudroid_looper_init(void) {
-    return reinterpret_cast<int64_t>(new (std::nothrow) LooperWaitSlot());
-}
-
-extern "C" void kudroid_looper_poll(int64_t ptr, int64_t timeout_millis) {
-    auto* slot = reinterpret_cast<LooperWaitSlot*>(ptr);
-    if (slot == nullptr) return;
-    std::unique_lock<std::mutex> lock(slot->mtx);
-    // Consume an already-set wake first: an enqueue or touch that landed before
-    // this wait must not be slept through.
-    if (slot->pending) {
-        slot->pending = false;
-        return;
-    }
-    if (timeout_millis < 0) {
-        slot->cv.wait(lock, [slot] { return slot->pending; });
-    } else if (timeout_millis > 0) {
-        slot->cv.wait_for(lock, std::chrono::milliseconds(timeout_millis),
-                          [slot] { return slot->pending; });
-    }
-    slot->pending = false;
-}
-
-extern "C" void kudroid_looper_wake(int64_t ptr) {
-    auto* slot = reinterpret_cast<LooperWaitSlot*>(ptr);
-    if (slot == nullptr) return;
-    {
-        std::lock_guard<std::mutex> lock(slot->mtx);
-        slot->pending = true;
-    }
-    slot->cv.notify_all();
-}
-
-extern "C" void kudroid_looper_set_main(int64_t ptr) {
-    g_mainLooperSlot.store(reinterpret_cast<LooperWaitSlot*>(ptr), std::memory_order_release);
-}
-
-extern "C" void kudroid_looper_reset_main(void) {
-    g_mainLooperSlot.store(nullptr, std::memory_order_release);
-}
-
-extern "C" void kudroid_looper_wake_main(void) {
-    kudroid_looper_wake(
-        reinterpret_cast<int64_t>(g_mainLooperSlot.load(std::memory_order_acquire)));
-}
-
-extern "C" int kudroid_looper_is_main(int64_t ptr) {
-    return reinterpret_cast<LooperWaitSlot*>(ptr) ==
-           g_mainLooperSlot.load(std::memory_order_acquire);
-}
+// The MessageQueue wake slot lives in NativeLooper.cpp (see the note there for
+// why it is not in this file). Touch injection only needs to wake the main
+// queue; the Looper thread drains and builds the MotionEvent itself.
+extern "C" void kudroid_looper_wake_main(void);
 
 namespace kudroid {
 namespace {
