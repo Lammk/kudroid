@@ -336,12 +336,28 @@ static void emit_android_log_line(int priority, const char* tag, const std::stri
     }
 #endif
 
-    // Also append to a file in Documents for the user to easily read
+    // Also append to a file in Documents for the user to easily read.
+    //
+    // The descriptor is cached across calls. This runs for every guest log line
+    // (Unity's per-clip audio errors, GPU chatter, per-syscall traces) while
+    // holding g_logAndroidMutex, so an open/close pair per line serialized the
+    // log file behind every thread in the process and turned a burst of errors
+    // into a stall. Reopen only when the log directory changes or a write fails.
     if (::g_kudroid_log_dir_ptr && ::g_kudroid_log_dir_ptr[0] != '\0') {
-        char log_path[1024];
-        snprintf(log_path, sizeof(log_path), "%s/kudroid_android_logs.txt", ::g_kudroid_log_dir_ptr);
-        int log_fd = ::open(log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
-        if (log_fd >= 0) {
+        static int s_logFd = -1;
+        static char s_logFdDir[1024] = {0};
+        if (s_logFd < 0 || std::strcmp(s_logFdDir, ::g_kudroid_log_dir_ptr) != 0) {
+            if (s_logFd >= 0) {
+                ::close(s_logFd);
+                s_logFd = -1;
+            }
+            char log_path[1024];
+            snprintf(log_path, sizeof(log_path), "%s/kudroid_android_logs.txt",
+                     ::g_kudroid_log_dir_ptr);
+            s_logFd = ::open(log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+            snprintf(s_logFdDir, sizeof(s_logFdDir), "%s", ::g_kudroid_log_dir_ptr);
+        }
+        if (s_logFd >= 0) {
             char line_buf[4096];
             int n = 0;
             if (time_buf[0]) {
@@ -351,9 +367,13 @@ static void emit_android_log_line(int priority, const char* tag, const std::stri
             }
             if (n > 0) {
                 if (static_cast<size_t>(n) > sizeof(line_buf) - 1) n = sizeof(line_buf) - 1;
-                (void)!::write(log_fd, line_buf, static_cast<size_t>(n));
+                if (::write(s_logFd, line_buf, static_cast<size_t>(n)) < 0) {
+                    // A removed directory or full disk must not wedge logging:
+                    // drop the cached fd and let the next line try to reopen.
+                    ::close(s_logFd);
+                    s_logFd = -1;
+                }
             }
-            ::close(log_fd);
         }
     }
 
@@ -1248,10 +1268,44 @@ extern "C" void* bionic_ashmem_mmap_fd(int fd, size_t length);
 // namespaces the definition lives inside.
 extern "C" int kudroid_fd_is_apk(int fd);
 
+// Result trace for mmap, deliberately separate from the request line: the request
+// already appears in the KuDroidSyscall stream, but only the RESULT explains a
+// missing allocation. A commit that failed, or landed somewhere other than the
+// requested hint, is the difference between a working heap and a null structure.
+namespace {
+void log_mmap_result(void* result, size_t length, int prot, int flags, int fd,
+                     off_t offset, const void* requested) {
+    if (result == MAP_FAILED) {
+        static std::atomic<int> n{0};
+        if (n.fetch_add(1, std::memory_order_relaxed) < 40) {
+            std::fprintf(stderr,
+                         "[KuDroidMmap] FAIL len=%zu prot=0x%x flags=0x%x fd=%d off=%lld "
+                         "req=%p errno=%d (%s)\n",
+                         length, prot, flags, fd, static_cast<long long>(offset), requested,
+                         errno, std::strerror(errno));
+        }
+        return;
+    }
+    // Success: surface what matters for placement — file-backed maps and the big
+    // reservations/commits — without printing every small anonymous mapping.
+    if (fd >= 0 || length >= (1u << 20) || requested != nullptr) {
+        static std::atomic<int> n{0};
+        if (n.fetch_add(1, std::memory_order_relaxed) < 120) {
+            std::fprintf(stderr,
+                         "[KuDroidMmap] ok len=%zu prot=0x%x flags=0x%x fd=%d off=%lld "
+                         "req=%p -> %p\n",
+                         length, prot, flags, fd, static_cast<long long>(offset), requested,
+                         result);
+        }
+    }
+}
+}  // namespace
+
 // Memory mapping wrappers to strip Linux specific flags
 extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
     // ashmem fd: only mappable with granted prot.
     if (!ashmem_prot_allows(fd, prot)) {
+        log_mmap_result(MAP_FAILED, length, prot, flags, fd, offset, addr);
         errno = EACCES;
         return MAP_FAILED;
     }
@@ -1267,6 +1321,7 @@ extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int
 
     // ashmem fake fd (iOS fallback): return granted region; no flag translation needed.
     if (void* region = bionic_ashmem_mmap_fd(fd, length)) {
+        log_mmap_result(region, length, prot, flags, fd, offset, addr);
         logAndroidMessage(3, "KuDroidSyscall", "mmap -> ashmem region " +
                           std::to_string(reinterpret_cast<uintptr_t>(region)) + " (fake fd)");
         return region;
@@ -1345,6 +1400,7 @@ extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int
             const off_t delta = offset - aligned;
             void* p = ::mmap(addr, static_cast<size_t>(delta) + length, prot, darwin_flags,
                              darwin_fd, aligned);
+            log_mmap_result(p, length, prot, flags, fd, offset, addr);
             if (p == MAP_FAILED) {
                 if (kudroid_fd_is_apk(darwin_fd)) {
                     static std::atomic<int> s_mmapFail{0};
@@ -1377,6 +1433,7 @@ extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int
     }
     if (darwin_fd >= 0 && offset == 0 && length > 0) {
         void* p = ::mmap(addr, length, prot, darwin_flags, darwin_fd, offset);
+        log_mmap_result(p, length, prot, flags, fd, offset, addr);
         if (p != MAP_FAILED && kudroid_fd_is_apk(darwin_fd)) {
             static std::atomic<int> s_mmapZero{0};
             if (s_mmapZero.load() < 5) {
@@ -1393,9 +1450,19 @@ extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int
         }
         return p;
     }
-    return ::mmap(addr, length, prot, darwin_flags, darwin_fd, offset);
+    {
+        void* p = ::mmap(addr, length, prot, darwin_flags, darwin_fd, offset);
+        // A failing commit inside Unity's reserved heap is invisible today: the
+        // caller only sees a null/short allocation later, which then surfaces as
+        // a null structure (e.g. the pointer array a worker writes into). Log
+        // the actual failure here so the allocator, not the crash, is the clue.
+        log_mmap_result(p, length, prot, flags, fd, offset, addr);
+        return p;
+    }
 #else
-    return ::mmap(addr, length, prot, flags, fd, offset);
+    void* p = ::mmap(addr, length, prot, flags, fd, offset);
+    log_mmap_result(p, length, prot, flags, fd, offset, addr);
+    return p;
 #endif
 }
 
@@ -1434,6 +1501,17 @@ extern "C" int bionic_mprotect(void *addr, size_t len, int prot) {
         return -1;
     }
 #endif
+    if (r != 0) {
+        // Unity commits heap pages by flipping a PROT_NONE reservation to RW.
+        // A failed mprotect leaves the allocation unusable with no other trace.
+        static std::atomic<int> s_mprotFail{0};
+        if (s_mprotFail.load() < 20) {
+            ++s_mprotFail;
+            std::fprintf(stderr,
+                         "[KuDroidMmap] mprotect FAILED addr=%p len=%zu prot=0x%x errno=%d (%s)\n",
+                         aligned_addr, aligned_len, prot, errno, std::strerror(errno));
+        }
+    }
     return r;
 }
 

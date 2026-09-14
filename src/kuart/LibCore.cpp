@@ -37,6 +37,15 @@
 #include "kudroid/platform/AudioShim.h"
 #include "kudroid/platform/FramePacer.h"
 #include "kudroid/platform/JavaCanvasRenderer.h"
+#include "kudroid/KuArtRuntime.h"
+
+// Native side of MessageQueue's AOSP-style wake primitive and Looper-touch
+// drain (implemented in platform/InputShim.cpp and KuArtRuntime.cpp).
+extern "C" int64_t kudroid_looper_init(void);
+extern "C" void kudroid_looper_poll(int64_t ptr, int64_t timeout_millis);
+extern "C" void kudroid_looper_wake(int64_t ptr);
+extern "C" void kudroid_looper_set_main(int64_t ptr);
+extern "C" int kudroid_looper_is_main(int64_t ptr);
 
 namespace kudroid {
 namespace kuart {
@@ -3433,6 +3442,45 @@ bool Invoke_android_content_res_AssetManager(Interpreter* interp, const char* na
     return false;
 }
 
+// android.os.MessageQueue native surface. The queue blocks on a native wait
+// slot (AOSP epoll stand-in) instead of Object.wait(), so a message enqueue and
+// a touch injection can both wake the Looper thread without an interpreted Java
+// notify. nativeDrainInput builds pending touch on that same thread.
+bool Invoke_android_os_MessageQueue(Interpreter* /*interp*/, const char* name,
+                                    const DexValue* args, size_t num_args,
+                                    DexValue* result) {
+    if (std::strcmp(name, "nativeInit") == 0) {
+        result->j = kudroid_looper_init();
+        return true;
+    }
+    if (std::strcmp(name, "nativePollOnce") == 0) {
+        if (num_args >= 2) {
+            // Release the VM lock for the wait, exactly as Monitor::Wait does.
+            // Otherwise an idle Looper would hold the global lock while it
+            // sleeps and no other thread (render, workers) could run.
+            kudroid::kuart::VmLockRelease unlocked;
+            kudroid_looper_poll(args[0].j, args[1].j);
+        }
+        return true;
+    }
+    if (std::strcmp(name, "nativeWake") == 0) {
+        if (num_args >= 1) kudroid_looper_wake(args[0].j);
+        return true;
+    }
+    if (std::strcmp(name, "nativeSetMainQueue") == 0) {
+        if (num_args >= 1) kudroid_looper_set_main(args[0].j);
+        return true;
+    }
+    if (std::strcmp(name, "nativeDrainInput") == 0) {
+        // Only the main queue owns touch; worker loopers must not steal it.
+        if (num_args >= 1 && kudroid_looper_is_main(args[0].j)) {
+            kuart_touch_drain_pending();
+        }
+        return true;
+    }
+    return false;
+}
+
 bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue* args,
                    size_t num_args, DexValue* result) {
     if (method == nullptr || method->declaring_class == nullptr) return false;
@@ -3503,6 +3551,11 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
         return Invoke_android_view_Choreographer(interp, name, args, num_args, result);
     }
     if (std::strcmp(desc, "Landroid/os/Vibrator;") == 0) return Invoke_android_os_Vibrator(interp, name, args, num_args, result);
+    // MessageQueue owns the native Looper wake slot; touch wakes it and the
+    // Looper thread drains input itself.
+    if (std::strcmp(desc, "Landroid/os/MessageQueue;") == 0) {
+        return Invoke_android_os_MessageQueue(interp, name, args, num_args, result);
+    }
     // AudioTrack is the Java audio path used by FMOD.
     if (std::strcmp(desc, "Landroid/media/AudioTrack;") == 0) {
         return Invoke_android_media_AudioTrack(interp, name, args, num_args, result);
@@ -3539,6 +3592,7 @@ bool LibCoreHasMethod(const DexMethod* method) {
             std::strcmp(desc, "Landroid/app/ActivityManager;") == 0 ||
             std::strcmp(desc, "Landroid/os/Debug;") == 0 ||
             std::strcmp(desc, "Landroid/os/Vibrator;") == 0 ||
+            std::strcmp(desc, "Landroid/os/MessageQueue;") == 0 ||
             std::strcmp(desc, "Landroid/media/AudioTrack;") == 0 ||
             std::strcmp(desc, "Landroid/view/Window;") == 0 ||
             std::strcmp(desc, "Landroid/view/View;") == 0 ||

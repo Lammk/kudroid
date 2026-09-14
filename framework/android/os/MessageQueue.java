@@ -10,6 +10,18 @@ public final class MessageQueue {
     private Message mMessages; // head of the queue
     private boolean mQuitting = false;
 
+    // Native wait slot (AOSP-style wake primitive). The queue blocks on this
+    // instead of Object.wait(), so a native wake — message enqueue or touch
+    // injection — returns to the Looper thread without any interpreted Java
+    // notify call. Touch is then built and dispatched on the Looper thread.
+    private long mPtr;
+
+    private static native long nativeInit();
+    private static native void nativePollOnce(long ptr, long timeoutMillis);
+    private static native void nativeWake(long ptr);
+    private static native void nativeSetMainQueue(long ptr);
+    private static native void nativeDrainInput(long ptr);
+
     /**
      * Idle callbacks. Unity registers one on the UnityMain queue at startup
      * (and Choreographer-style pumps use them for vsync-adjacent work); with
@@ -42,6 +54,7 @@ public final class MessageQueue {
 
     MessageQueue(boolean quitAllowed) {
         mQuitAllowed = quitAllowed;
+        mPtr = nativeInit();
         String name;
         try {
             name = Thread.currentThread().getName();
@@ -49,6 +62,14 @@ public final class MessageQueue {
             name = "?";
         }
         mOwnerName = name;
+    }
+
+    /**
+     * Marks this queue as the process main queue so touch injection wakes it.
+     * Called by Looper.prepareMainLooper.
+     */
+    void setAsMainQueue() {
+        if (mPtr != 0) nativeSetMainQueue(mPtr);
     }
 
     /**
@@ -87,6 +108,7 @@ public final class MessageQueue {
                 msg.next = p;
                 mMessages = msg;
                 this.notifyAll();
+                if (mPtr != 0) nativeWake(mPtr);
                 return true;
             }
 
@@ -105,6 +127,7 @@ public final class MessageQueue {
                 prev.next = msg;
             }
             this.notifyAll();
+            if (mPtr != 0) nativeWake(mPtr);
             return true;
         }
     }
@@ -165,14 +188,15 @@ public final class MessageQueue {
                 // below would lose its notify and hang.
                 continue;
             }
+            long remaining;
             synchronized (this) {
                 if (mQuitting) {
                     return null;
                 }
                 // Re-check under the lock: an enqueue that landed between the
                 // first check and this lock has no waiter to wake yet, so its
-                // notifyAll is already spent — a blind wait here would sleep
-                // through it. Re-derive the timeout from the CURRENT head:
+                // nativeWake/notify is already spent — a blind wait here would
+                // sleep through it. Re-derive the timeout from the CURRENT head:
                 // a future-due message that arrived in the gap must wake us
                 // at its own `when`, not sleep unbounded on a stale
                 // waitForever flag (that was the boot hang).
@@ -180,22 +204,42 @@ public final class MessageQueue {
                 if (head != null && SystemClock.uptimeMillis() >= head.when) {
                     continue;
                 }
-                long remaining = waitForever ? -1 : waitMs;
+                remaining = waitForever ? -1 : waitMs;
                 if (head != null) {
                     final long r = head.when - SystemClock.uptimeMillis();
                     if (waitForever || r < remaining) {
                         remaining = r;
                     }
                 }
-                try {
-                    if (remaining < 0) {
-                        this.wait();
-                    } else if (remaining > 0) {
-                        this.wait(remaining);
+            }
+            // Wait OUTSIDE the Java monitor. The native slot is woken by a
+            // message enqueue and by touch injection, so the Looper thread
+            // returns here without any interpreted notify call. Idle handlers
+            // and touch both run on this thread; the Java wait path remains
+            // only as a fallback for a queue with no native slot.
+            if (mPtr != 0) {
+                nativePollOnce(mPtr, remaining);
+                // Build pending MotionEvents on the Looper thread. This is the
+                // AOSP InputEventReceiver shape: touch is constructed and
+                // dispatched where the frame loop already runs, never on a
+                // second thread contending for the VM lock.
+                nativeDrainInput(mPtr);
+                idled = false;
+            } else {
+                synchronized (this) {
+                    if (mQuitting) {
+                        return null;
                     }
-                    idled = false;
-                } catch (InterruptedException ignored) {
-                    idled = false;
+                    try {
+                        if (remaining < 0) {
+                            this.wait();
+                        } else if (remaining > 0) {
+                            this.wait(remaining);
+                        }
+                        idled = false;
+                    } catch (InterruptedException ignored) {
+                        idled = false;
+                    }
                 }
             }
         }
@@ -361,6 +405,7 @@ public final class MessageQueue {
             }
             mMessages = null;
             this.notifyAll();
+            if (mPtr != 0) nativeWake(mPtr);
         }
     }
 }

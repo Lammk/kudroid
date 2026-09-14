@@ -111,6 +111,11 @@ void kuart_send_lifecycle_event(int event_type);
 // pointer; never smaller than the action's pointer index + 1 (see TouchEventQueue).
 void kuart_post_touch_event(int action, float x, float y, int pointerCount);
 
+// Drain queued touch on the CALLING thread and post it to ActivityThread. Called
+// by the Looper (MessageQueue.nativeDrainInput) so touch is built and dispatched
+// on the UI thread, never on a separate VM-locked worker. Returns events drained.
+int kuart_touch_drain_pending(void);
+
 // Take the in-flight Java exception of the CALLING thread, if any, and clear it.
 //
 // A native library called from Java (System.loadLibrary -> JNI_OnLoad) can call

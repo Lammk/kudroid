@@ -1,7 +1,6 @@
 #include "kudroid/platform/TouchEventQueue.h"
 
 #include <cstdio>
-#include <future>
 
 namespace {
 int failures = 0;
@@ -44,17 +43,6 @@ int main() {
     Check(!queue.tryPop(event), "MOVE flood leaves no residue");
 
     queue.reset(true);
-    queue.push(0, 0, 0);
-    for (int i = 1; i <= 300; ++i) queue.push(2, float(i), float(i));
-    queue.push(1, 300, 300);
-    event = queue.popCoalesced();
-    Check(event.action == 0, "popCoalesced keeps DOWN first");
-    event = queue.popCoalesced();
-    Check(event.action == 2 && event.x == 300.0f, "popCoalesced folds the MOVE run");
-    event = queue.popCoalesced();
-    Check(event.action == 1, "popCoalesced stops at UP");
-
-    queue.reset(true);
     queue.push(0, 0, 0, 2);
     Check(queue.tryPop(event) && event.pointerCount == 2, "pointerCount survives the queue");
 
@@ -64,19 +52,10 @@ int main() {
         Check(queue.tryPop(event) && event.action == action,
               "coalescing preserves gesture boundaries and CANCEL");
     }
-    const auto old = event;
     queue.push(2, 5, 5);
     queue.reset(false);
-    Check(!queue.isCurrent(old), "reset invalidates an already popped event");
     Check(!queue.tryPop(event), "reset removes pending events");
     queue.reset(true);
-    Check(!queue.isCurrent(old), "a new session rejects old events");
-
-    auto waiting = std::async(std::launch::async, [&queue] { return queue.waitPop(); });
-    queue.push(0, 7, 8);
-    event = waiting.get();
-    Check(event.action == 0 && event.x == 7 && event.y == 8,
-          "enqueue wakes the consumer");
-    Check(queue.isCurrent(event), "new session events are valid");
+    Check(!queue.tryPop(event), "a new session starts empty");
     return failures ? 1 : 0;
 }

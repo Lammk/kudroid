@@ -27,6 +27,9 @@ public final class Looper {
             }
             sMainLooper = myLooper();
         }
+        // Register the main queue as the touch wake target: injection wakes its
+        // native slot, and the UI thread drains/constructs touch itself.
+        sMainLooper.mQueue.setAsMainQueue();
     }
     public static Looper getMainLooper() {
         synchronized (Looper.class) {

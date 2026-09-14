@@ -69,22 +69,22 @@ struct Runtime {
 
 Runtime* g_rt = nullptr;
 std::mutex g_mtx;
-// Dispatch pin count: workers increment under g_mtx and dispatch WITHOUT it,
-// so re-entrant kuart_* calls on the dispatch thread cannot self-deadlock on
-// the non-recursive g_mtx, and shutdown waits out in-flight dispatch instead
-// of deleting the runtime under it. Bounded wait (see kuart_shutdown).
-std::atomic<int> g_rtUsers{0};
-bool g_shutdownRequested = false;
 std::string g_current_app_dir;
 void (*g_log_cb)(const char*) = nullptr;
 void* (*g_symbol_lookup)(const char*) = nullptr;
 std::string g_last_error;
 
-// Process-lifetime queue: its waiting worker must outlive static teardown.
+// Process-lifetime queue: UIKit injects into it at any point in the app
+// lifecycle, so it must outlive the per-run runtime.
 kudroid::TouchEventQueue& TouchQueue() {
     static auto* queue = new kudroid::TouchEventQueue();
     return *queue;
 }
+
+// Looper wake slot (platform/InputShim.cpp): the main slot is cleared at
+// shutdown so a dead run's parked looper can never be woken into a freed
+// runtime.
+extern "C" void kudroid_looper_reset_main(void);
 
 void Log(const char* fmt, ...) {
     char buf[1024];
@@ -194,40 +194,37 @@ bool CallActivityThreadStatic(const char* name, const char* signature,
     return true;
 }
 
-void StartTouchWorker() {
-    static std::once_flag started;
-    std::call_once(started, [] {
-        auto* queue = &TouchQueue();
-        std::thread([queue] {
-            for (;;) {
-                const auto event = queue->popCoalesced();
-                {
-                    // Pin under the mutex, dispatch without it (see g_rtUsers).
-                    std::lock_guard<std::mutex> runtime_lock(g_mtx);
-                    if (g_shutdownRequested || !queue->isCurrent(event) || g_rt == nullptr ||
-                        !g_rt->ready) {
-                        if (g_shutdownRequested) return;
-                        continue;
-                    }
-                    ++g_rtUsers;
-                }
-                {
-                    kudroid::kuart::VmLockGuard vm_lock;
-                    // Teardown can invalidate an event while this worker waits for the VM.
-                    if (!queue->isCurrent(event)) {
-                        --g_rtUsers;
-                        continue;
-                    }
-                    const DexValue args[4] = {DexValue::Int(event.action),
-                                             DexValue::Int(event.pointerCount),
-                                             DexValue::Float(event.x), DexValue::Float(event.y)};
-                    CallActivityThreadStatic("postTouchEvent", "(IIFF)V", args, 4);
-                }
-                --g_rtUsers;
-                std::this_thread::yield();
-            }
-        }).detach();
-    });
+// Drain pending touch on the calling thread. Invoked from MessageQueue.next()
+// through nativeDrainInput, i.e. always on the Looper/UI thread, which already
+// owns the VM lock because it is executing Java. This is the AOSP
+// InputEventReceiver shape: no worker thread, no second VM-lock acquisition,
+// and therefore nothing for touch to serialize against the renderer.
+extern "C" int kuart_touch_drain_pending(void) {
+    if (g_rt == nullptr || !g_rt->ready) return 0;
+    auto& queue = TouchQueue();
+    int drained = 0;
+    const auto t0 = std::chrono::steady_clock::now();
+    kudroid::TouchEventQueue::Event event;
+    while (drained < 64 && queue.tryPop(event)) {
+        const DexValue args[4] = {DexValue::Int(event.action),
+                                  DexValue::Int(event.pointerCount),
+                                  DexValue::Float(event.x), DexValue::Float(event.y)};
+        CallActivityThreadStatic("postTouchEvent", "(IIFF)V", args, 4);
+        ++drained;
+    }
+    // Building MotionEvents now happens on the Looper thread, so this is the
+    // touch cost that actually competes with frames. One line when it is large.
+    const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - t0)
+                             .count();
+    if (drained > 0 && ms >= 8) {
+        static std::atomic<int> s_slow{0};
+        if (s_slow.fetch_add(1, std::memory_order_relaxed) < 40) {
+            Log("[KuDroidTouch] drain n=%d took %lldms (UI thread)", drained,
+                static_cast<long long>(ms));
+        }
+    }
+    return drained;
 }
 
 // Call a static method on any framework class, reporting an exception as an error.
@@ -302,6 +299,9 @@ extern "C" int kuart_init(const char* app_dir) {
             return 1;
         }
         TouchQueue().reset(false);
+        // Same slot hazard as kuart_shutdown: the previous run's looper may
+        // still be parked in nativePollOnce on a dead runtime.
+        kudroid_looper_reset_main();
         delete g_rt;
         g_rt = nullptr;
         g_current_app_dir.clear();
@@ -399,8 +399,6 @@ extern "C" int kuart_init(const char* app_dir) {
     }
 
     rt->ready = true;
-    g_shutdownRequested = false;
-    g_rtUsers.store(0, std::memory_order_release);
     // Fault isolation is per-app: stale tids/counts/names from the previous
     // app misclassify (fail-closed budget exhaustion, false-critical on
     // recycled tids) and hang or kill a healthy launch.
@@ -415,24 +413,17 @@ extern "C" int kuart_init(const char* app_dir) {
 
 extern "C" void kuart_shutdown(void) {
     TouchQueue().reset(false);
-    {
-        std::lock_guard<std::mutex> lock(g_mtx);
-        g_shutdownRequested = true;
-    }
-    // Wait out pinned dispatch (bounded): deleting g_rt under a running
-    // Execute is a UAF; waiting forever on a wedged handler is a hang.
-    for (int i = 0; i < 200 && g_rtUsers.load(std::memory_order_acquire) > 0; ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    // Same for threads parked in monitor Enter/Wait: they re-touch DexObjects
-    // on wake, which kuart_shutdown is about to free.
+    // Touch injection wakes the global main slot; clear it before freeing the
+    // runtime so a crashed run's still-parked looper can never wake into it.
+    kudroid_looper_reset_main();
+    // Threads parked in monitor Enter/Wait re-touch DexObjects on wake, which
+    // kuart_shutdown is about to free.
     for (int i = 0;
          i < 200 && kudroid::kuart::g_monitorWaiters.load(std::memory_order_acquire) > 0;
          ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     std::lock_guard<std::mutex> lock(g_mtx);
-    g_shutdownRequested = false;
     if (g_rt != nullptr && !g_rt->oat_path.empty() && !g_rt->oat.empty()) {
         // Save what this run learned. A failure is not worth reporting as an error: the
         // consequence is a slower start next time, not a broken one.
@@ -666,7 +657,8 @@ extern "C" int kuart_launch_app(const char* package_name, const char* component_
     // activity lifecycle and player callbacks all run here, so a fault on it
     // is app-fatal while a worker fault is not.
     kudroid_note_guest_ui_thread();
-    StartTouchWorker();
+    // Touch is delivered by the Looper thread itself now (MessageQueue drains
+    // the native queue via nativeDrainInput), so there is no worker to start.
     TouchQueue().reset(true);
     const DexValue arg = DexValue::Ref(args_array);
     const int ok = CallActivityThreadStatic("main", "([Ljava/lang/String;)V", &arg, 1) ? 1 : 0;

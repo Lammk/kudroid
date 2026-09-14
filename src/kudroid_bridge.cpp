@@ -291,6 +291,20 @@ static std::atomic<unsigned long long> g_renderThreads[8] = {};
 // a few hundred breadcrumb lines worst case, while too small a cap (16 fired
 // in 25ms) turns a survivable batch into a shutdown.
 static constexpr int kMaxWorkerRecoveries = 128;
+// A different shape of storm is a bounded indexing loop: Unity's serialized
+// pointer-relocation pass walks a relocation table and stores one pointer per
+// entry into an output array, e.g.
+//   str x17, [x18, x16, lsl #3]   // x16 = 0..0xfe, x18 = output array
+// When that array field is null the store faults on every iteration and the
+// address advances by 8 each time until the loop terminates. That loop is
+// self-terminating (fixed trip count), so the general 128 budget kills a run
+// that was about to finish. Forward walks at one pc get a separate, larger
+// ceiling; anything that repeats or regresses an address still charges the
+// normal budget and bails, so a genuine infinite loop cannot hide here.
+static constexpr int kMaxWalkRecoveries = 8192;
+// Largest per-step advance still treated as one contiguous walk. A stride that
+// jumps further is not a bounded table walk and must not inherit this budget.
+static constexpr unsigned long long kWalkStepMax = 1ULL << 20;
 // Per-worker recovery budgets: the old single global counter let one hot
 // worker eat the budget for all, and its 30s reset raced (one thread's stale
 // read zeroed another's accumulated count → unbounded skips). Slots are keyed
@@ -304,8 +318,22 @@ struct WorkerBudget {
     // budget resets. A genuine storm faults microseconds apart and never
     // sees a reset.
     std::atomic<long long> lastNs{0};
+    // Last skipped fault (pc, address) and how many consecutive same-pc
+    // forward steps it has taken. See kMaxWalkRecoveries.
+    std::atomic<unsigned long long> lastPc{0};
+    std::atomic<unsigned long long> lastAddr{0};
+    std::atomic<int> walk{0};
 };
 static WorkerBudget g_workerBudgets[8];
+
+// True when this fault continues a bounded same-pc forward walk.
+static bool worker_fault_is_walk(const WorkerBudget* s, unsigned long long pc,
+                                 unsigned long long addr) {
+    if (s == nullptr || pc == 0) return false;
+    const unsigned long long lp = s->lastPc.load(std::memory_order_relaxed);
+    const unsigned long long la = s->lastAddr.load(std::memory_order_relaxed);
+    return lp == pc && addr > la && (addr - la) <= kWalkStepMax;
+}
 
 static WorkerBudget* worker_budget_for(unsigned long long tid) {
     if (tid == 0) return nullptr;
@@ -323,18 +351,33 @@ static WorkerBudget* worker_budget_for(unsigned long long tid) {
 // Records this thread's skip at nowNs; returns false when its budget is spent.
 // Only the timestamp-CAS winner zeroes (stale-gap reset), so a concurrent
 // increment is never lost into a fresh zero.
-static bool worker_budget_note(WorkerBudget* s, long long nowNs) {
+static bool worker_budget_note(WorkerBudget* s, long long nowNs,
+                               unsigned long long pc, unsigned long long addr) {
     const long long last = s->lastNs.load(std::memory_order_relaxed);
     if (last != 0 && nowNs - last > 30000000000LL) {
         long long expect = last;
         if (s->lastNs.compare_exchange_strong(expect, nowNs, std::memory_order_relaxed)) {
             s->count.store(0, std::memory_order_relaxed);
+            s->walk.store(0, std::memory_order_relaxed);
+            s->lastPc.store(0, std::memory_order_relaxed);
+            s->lastAddr.store(0, std::memory_order_relaxed);
         }
     } else {
         s->lastNs.store(nowNs, std::memory_order_relaxed);
     }
-    if (s->count.load(std::memory_order_relaxed) >= kMaxWorkerRecoveries) return false;
-    s->count.fetch_add(1, std::memory_order_relaxed);
+    // A same-pc forward step is a bounded table walk, not a stuck storm: charge
+    // the dedicated walk budget (and count the walk length) instead of the
+    // general one. Any other shape charges count, which is what eventually
+    // parks a genuinely broken worker.
+    if (worker_fault_is_walk(s, pc, addr)) {
+        s->walk.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        s->walk.store(1, std::memory_order_relaxed);
+        if (s->count.load(std::memory_order_relaxed) >= kMaxWorkerRecoveries) return false;
+        s->count.fetch_add(1, std::memory_order_relaxed);
+    }
+    s->lastPc.store(pc, std::memory_order_relaxed);
+    s->lastAddr.store(addr, std::memory_order_relaxed);
     return true;
 }
 
@@ -343,9 +386,13 @@ static bool worker_budget_note(WorkerBudget* s, long long nowNs) {
 // (one thread's handler cannot run concurrently with itself), so peek→try→note
 // cannot interleave against itself; cross-tid slot sharing only follows OS tid
 // reuse after a thread died.
-static bool worker_budget_peek(WorkerBudget* s) {
-    return s != nullptr &&
-           s->count.load(std::memory_order_relaxed) < kMaxWorkerRecoveries;
+static bool worker_budget_peek(WorkerBudget* s, unsigned long long pc,
+                               unsigned long long addr) {
+    if (s == nullptr) return false;
+    if (worker_fault_is_walk(s, pc, addr)) {
+        return s->walk.load(std::memory_order_relaxed) < kMaxWalkRecoveries;
+    }
+    return s->count.load(std::memory_order_relaxed) < kMaxWorkerRecoveries;
 }
 
 // Guest thread names (prctl PR_SET_NAME), for role recognition in the crash
@@ -1426,12 +1473,21 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
             (!kudroid_fault_is_fatal(tid, isHostMain) && (sig == SIGSEGV || sig == SIGBUS))
                 ? worker_budget_for(tid)
                 : nullptr;
-        if (worker_budget_peek(budget) && kudroid_try_skip_fault(sig, info, ucontext)) {
+        unsigned long long faultPc = 0;
+#if (defined(__aarch64__) || defined(__arm64__)) && defined(__APPLE__)
+        if (ucontext != nullptr) {
+            faultPc = static_cast<ucontext_t*>(ucontext)->uc_mcontext->__ss.__pc;
+        }
+#endif
+        const unsigned long long faultAddr =
+            info != nullptr ? reinterpret_cast<unsigned long long>(info->si_addr) : 0;
+        if (worker_budget_peek(budget, faultPc, faultAddr) &&
+            kudroid_try_skip_fault(sig, info, ucontext)) {
             const long long nowNs =
                 std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::steady_clock::now().time_since_epoch())
                     .count();
-            worker_budget_note(budget, nowNs);
+            worker_budget_note(budget, nowNs, faultPc, faultAddr);
             return;
         }
     }
@@ -1563,9 +1619,18 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
             (!kudroid_fault_is_fatal(tid, isHostMain) && (sig == SIGSEGV || sig == SIGBUS))
                 ? worker_budget_for(tid)
                 : nullptr;
+        unsigned long long faultPc = 0;
+#if (defined(__aarch64__) || defined(__arm64__)) && defined(__APPLE__)
+        if (ucontext != nullptr) {
+            faultPc = static_cast<ucontext_t*>(ucontext)->uc_mcontext->__ss.__pc;
+        }
+#endif
+        const unsigned long long faultAddr =
+            info != nullptr ? reinterpret_cast<unsigned long long>(info->si_addr) : 0;
         // Budget gates the attempt: try_skip mutates guest context (pc advance,
         // load zeroing), so a withheld skip must never follow a successful one.
-        if (worker_budget_peek(budget) && kudroid_try_skip_fault(sig, info, ucontext)) {
+        if (worker_budget_peek(budget, faultPc, faultAddr) &&
+            kudroid_try_skip_fault(sig, info, ucontext)) {
             // Per-thread progress check lives in worker_budget_note: a 30s+
             // gap since this thread's previous skip resets its budget, so a
             // long session does not die on an isolated fault #129. A storm
@@ -1574,7 +1639,7 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
                 std::chrono::duration_cast<std::chrono::nanoseconds>(
                     std::chrono::steady_clock::now().time_since_epoch())
                     .count();
-            worker_budget_note(budget, nowNs);
+            worker_budget_note(budget, nowNs, faultPc, faultAddr);
             return;
         }
     }
@@ -4551,10 +4616,22 @@ extern "C" int kudroid_delete_app_progress(const char* package_name,
         std::filesystem::path(androidRoot) / "data/app" / package_name;
     const std::filesystem::path appDataPath =
         std::filesystem::path(androidRoot) / "data/data" / package_name;
+    // External storage the app owns. /sdcard maps to <androidRoot>/sdcard, so an
+    // uninstall that only removed data/data left the game's saves, obb and media
+    // behind (stale caches then poisoned the next install).
+    const std::filesystem::path extDataPath =
+        std::filesystem::path(androidRoot) / "sdcard/Android/data" / package_name;
+    const std::filesystem::path extObbPath =
+        std::filesystem::path(androidRoot) / "sdcard/Android/obb" / package_name;
+    const std::filesystem::path extMediaPath =
+        std::filesystem::path(androidRoot) / "sdcard/Android/media" / package_name;
     const std::filesystem::path dalvikRoot =
         std::filesystem::path(androidRoot) / "data/dalvik-cache";
     uninstallDbg("code:   " + describePath(appCodePath));
     uninstallDbg("data:   " + describePath(appDataPath));
+    uninstallDbg("ext:    " + describePath(extDataPath));
+    uninstallDbg("obb:    " + describePath(extObbPath));
+    uninstallDbg("media:  " + describePath(extMediaPath));
     uninstallDbg("dalvik: " + describePath(dalvikRoot));
 
     // Avoid recursive tree byte scanning; progress is tracked across top-level folders.
@@ -4571,16 +4648,23 @@ extern "C" int kudroid_delete_app_progress(const char* package_name,
     uninstallDbg("dalvikMatches=" + std::to_string(dalvikMatches.size()));
 
     int success = 1;
-    // Chia %: code 0-45, data 45-70, dalvik 70-100.
+    // Chia %: code 0-30, data 30-50, external data 50-68, obb 68-80,
+    // media 80-88, dalvik 88-100.
     removeTreeWithProgress(appCodePath, "Removing app files",
-                           cb, userdata, 0.0, 45.0, 0);
+                           cb, userdata, 0.0, 30.0, 0);
     removeTreeWithProgress(appDataPath, "Removing app data",
-                           cb, userdata, 45.0, 25.0, 0);
+                           cb, userdata, 30.0, 20.0, 0);
+    removeTreeWithProgress(extDataPath, "Removing external data",
+                           cb, userdata, 50.0, 18.0, 0);
+    removeTreeWithProgress(extObbPath, "Removing OBB files",
+                           cb, userdata, 68.0, 12.0, 0);
+    removeTreeWithProgress(extMediaPath, "Removing external media",
+                           cb, userdata, 80.0, 8.0, 0);
 
-    if (cb) cb("Removing compiled cache", 70, userdata);
+    if (cb) cb("Removing compiled cache", 88, userdata);
     for (const auto& m : dalvikMatches) {
         removeTreeWithProgress(m, "Removing compiled cache",
-                               cb, userdata, 70.0, 30.0, 0);
+                               cb, userdata, 88.0, 12.0, 0);
     }
     if (cb) cb("Done", 100, userdata);
     uninstallDbg("=== UNINSTALL DONE success=" + std::to_string(success) + " ===");

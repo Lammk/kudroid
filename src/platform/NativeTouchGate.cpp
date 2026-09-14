@@ -6,11 +6,16 @@
 // A drag arrives at 60-120 Hz and every delivered MOVE costs one interpreted
 // JNI hop (kuart_post_touch_event -> ActivityThread.postTouchEvent), each
 // grabbing the VM lock against the render/main threads. Gate MOVEs at the
-// source: at most two per 60 Hz window pass through, extra ones are dropped —
-// the newest already replaces the pending one at the sinks (InputShim queue,
-// ActivityThread message), so an intermediate position carries no information
-// the app still needs. DOWN/UP/CANCEL never pass through here; their ordering
-// is what the app reasons about.
+// source: extra ones are dropped — the newest already replaces the pending one
+// at the sinks (InputShim queue, ActivityThread message), so an intermediate
+// position carries no information the app still needs. DOWN/UP/CANCEL never
+// pass through here; their ordering is what the app reasons about.
+//
+// Deliberately conservative: the dispatch is expensive and contending with the
+// render loop costs frames, so this errs toward dropping a sample. Raising it
+// without making the dispatch cheaper trades lag for FPS. The
+// [KuDroidTouch] timing line says which side is actually hurting before this
+// constant is touched again.
 
 namespace {
 

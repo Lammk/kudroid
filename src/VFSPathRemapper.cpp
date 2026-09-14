@@ -1846,6 +1846,23 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                          b[3] >= 32 && b[3] < 127 ? b[3] : '.',
                          entryName.empty() ? "" : " entry=", entryName.c_str());
         }
+        // FSB5 probe: Unity hands an AudioClip's FSB slice to FMOD from the
+        // resource it just read. If a read begins at an FSB5 header, record the
+        // exact geometry once so we can tell "FMOD was given good bytes and
+        // still failed" from "Unity never read the FSB at all". Rate-limited
+        // hard: an FSB is large and its header appears once per clip load.
+        static std::atomic<int> s_fsbCount{0};
+        if (buf != nullptr && n * size >= 4 && s_fsbCount.load() < 24) {
+            const auto* f = static_cast<const unsigned char*>(buf);
+            if (f[0] == 'F' && f[1] == 'S' && f[2] == 'B' && f[3] == '5') {
+                s_fsbCount.fetch_add(1, std::memory_order_relaxed);
+                const long off = std::ftell(stream);
+                const long start = off >= 0 ? off - static_cast<long>(n * size) : -1;
+                std::fprintf(stderr,
+                             "[KuDroidFmod] served FSB5 at apk_off=%ld size=%zu\n",
+                             start, n * size);
+            }
+        }
     }
     if (n > 0) {
         // Lock-free volume accounting (see above): resolve the path only on
