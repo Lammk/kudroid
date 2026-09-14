@@ -521,6 +521,10 @@ public class Activity extends ContextThemeWrapper {
         return mContentView;
     }
 
+    public String getCallingPackage() {
+        return null;
+    }
+
     public boolean isInMultiWindowMode() {
         return false;
     }

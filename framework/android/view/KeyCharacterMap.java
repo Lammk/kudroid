@@ -3,12 +3,7 @@ package android.view;
 /**
  * android.view.KeyCharacterMap — key-to-character mapping.
  *
- * Unity's input pipeline asks the InputDevice for this on startup; a missing
- * method raises NoSuchMethodError inside the input init path and every later
- * touch dispatch dies in the same engine branch (observed live as touch
- * delivery that reaches the Activity but never moves the player). The device
- * here has no hardware keyboard, so an empty binding set with the AOSP
- * fallback behaviors is the honest answer.
+ * No hardware keyboard is attached, so this is an empty binding set.
  */
 public final class KeyCharacterMap {
     public static final int VIRTUAL_KEYBOARD = -1;
@@ -44,7 +39,7 @@ public final class KeyCharacterMap {
     }
 
     /** Empty table: no key produces characters. */
-    public char get(int keyCode, int metaState) {
+    public int get(int keyCode, int metaState) {
         return 0;
     }
 

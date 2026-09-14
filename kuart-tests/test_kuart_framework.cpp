@@ -1963,6 +1963,54 @@ int main() {
             }
         }
 
+        // Input entry points used before the first frame.
+        {
+            DexObject* activity = NewObject("Landroid/app/Activity;", "()V", {},
+                                            "new Activity for caller lookup");
+            if (activity != nullptr) {
+                DexValue pkg;
+                const bool ok = CallVirtual(activity, "getCallingPackage",
+                                            "()Ljava/lang/String;", {}, &pkg,
+                                            "Activity.getCallingPackage");
+                Check(ok && pkg.l == nullptr,
+                      "getCallingPackage is null when nothing started this activity");
+            }
+        }
+        {
+            DexValue kcmOut;
+            const bool ok = CallStatic("Landroid/view/KeyCharacterMap;", "load",
+                                       "(I)Landroid/view/KeyCharacterMap;",
+                                       {DexValue::Int(-1)}, &kcmOut,
+                                       "KeyCharacterMap.load");
+            Check(ok && kcmOut.l != nullptr, "KeyCharacterMap.load returns a map");
+            if (ok && kcmOut.l != nullptr) {
+                DexValue ch;
+                const bool got = CallVirtual(kcmOut.l, "get", "(II)I",
+                                             {DexValue::Int(0), DexValue::Int(0)}, &ch,
+                                             "KeyCharacterMap.get");
+                Check(got && ch.i == 0, "empty KeyCharacterMap returns zero");
+            }
+        }
+        {
+            DexValue bmpOut;
+            const bool made = CallStatic("Landroid/graphics/Bitmap;", "createBitmap",
+                                         "(III)Landroid/graphics/Bitmap;",
+                                         {DexValue::Int(4), DexValue::Int(4),
+                                          DexValue::Int(0)},
+                                         &bmpOut, "Bitmap.createBitmap");
+            Check(made && bmpOut.l != nullptr, "cursor bitmap exists");
+            if (made && bmpOut.l != nullptr) {
+                DexValue iconOut;
+                const bool created = CallStatic(
+                    "Landroid/view/PointerIcon;", "create",
+                    "(Landroid/graphics/Bitmap;FF)Landroid/view/PointerIcon;",
+                    {DexValue::Ref(bmpOut.l), DexValue::Float(1.0f),
+                     DexValue::Float(1.0f)},
+                    &iconOut, "PointerIcon.create");
+                Check(created && iconOut.l != nullptr, "PointerIcon.create returns an icon");
+            }
+        }
+
         // Play Core Asset Delivery generic stubs
         DexClass* apmFactory = linker.FindClass("Lcom/google/android/play/core/assetpacks/AssetPackManagerFactory;");
         Check(apmFactory != nullptr, "AssetPackManagerFactory is present in framework.dex");
