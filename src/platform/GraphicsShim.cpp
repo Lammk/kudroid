@@ -35,6 +35,11 @@ extern void* g_metalLayer;
 extern int g_metalLayerWidth;
 extern int g_metalLayerHeight;
 
+// Frame-liveness hook (defined in kudroid_bridge.cpp): stamps the last
+// successful present so the watchdog can tell a dead frame loop from a busy
+// one even when no tracked I/O is flowing.
+extern "C" void kudroid_note_frame_presented(void);
+
 namespace kudroid {
 
 namespace {
@@ -1692,6 +1697,7 @@ extern "C" EGLBoolean bionic_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) 
             std::chrono::steady_clock::now().time_since_epoch())
             .count());
     EGLBoolean r = f(dpy, surface);
+    if (r) kudroid_note_frame_presented();
     const uint64_t swapMs = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch())

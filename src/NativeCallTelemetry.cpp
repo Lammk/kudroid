@@ -21,6 +21,7 @@
 extern "C" void kudroid_persistent_breadcrumb(const char* line);
 // SyscallShim: monotonic-ns of the last tracked I/O byte (read/pread/write).
 extern "C" uint64_t io_last_activity_ns();
+extern "C" uint64_t kudroid_last_frame_presented_ns();
 
 namespace kudroid {
 namespace {
@@ -318,6 +319,16 @@ void watchdog_main() {
     int io_silence_seq = 0;
     uint64_t io_silence_last_ns = 0;
 
+    // Frame-silence trigger. The I/O-silence trigger cannot see the engine's
+    // fread path (libc, not the syscall shim), so a freeze with no tracked I/O
+    // flowing looked identical to a healthy pause between loads. A missing
+    // present is ground truth: once one swap has succeeded, five seconds with
+    // no swap at all means the frame loop is dead whatever every thread's own
+    // state claims. Same dump schedule as I/O-silence.
+    constexpr uint64_t kFrameSilenceAfterMs = 5000;
+    int frame_silence_seq = 0;
+    uint64_t frame_silence_last_ns = 0;
+
     // Set once a fatal signal has been seen, so the announcement is made exactly once
     // while the loop itself keeps running.
     bool fatal_announced = false;
@@ -401,6 +412,41 @@ void watchdog_main() {
                 } else {
                     io_silence_seq = 0;
                     io_silence_last_ns = lastNs;
+                }
+            }
+        }
+
+        // Frame-silence check (see the declaration above for why it exists).
+        {
+            const uint64_t lastSwap = kudroid_last_frame_presented_ns();
+            const uint64_t nowNs = static_cast<uint64_t>(
+                std::chrono::steady_clock::now().time_since_epoch().count());
+            if (lastSwap != 0 && nowNs > lastSwap) {
+                const uint64_t silentMs = (nowNs - lastSwap) / 1000000ull;
+                if (silentMs >= kFrameSilenceAfterMs) {
+                    if (frame_silence_seq == 0) {
+                        frame_silence_last_ns = lastSwap;
+                    } else if (lastSwap != frame_silence_last_ns) {
+                        frame_silence_seq = 0;
+                        frame_silence_last_ns = lastSwap;
+                    }
+                    if (frame_silence_seq < 3 ||
+                        silentMs >= kFrameSilenceAfterMs + 10000ull * (frame_silence_seq - 2)) {
+                        ++frame_silence_seq;
+                        char reason[96];
+                        std::snprintf(reason, sizeof(reason), "frame-silent-%llums",
+                                      static_cast<unsigned long long>(silentMs));
+                        thread_sample_report(reason);
+                        if (frame_silence_seq <= 2) {
+                            std::fprintf(stderr,
+                                         "[KuDroidWatchdog] frame-silent %llums — "
+                                         "thread dump written to native_breadcrumbs.log\n",
+                                         static_cast<unsigned long long>(silentMs));
+                        }
+                    }
+                } else {
+                    frame_silence_seq = 0;
+                    frame_silence_last_ns = lastSwap;
                 }
             }
         }

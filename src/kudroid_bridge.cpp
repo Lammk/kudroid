@@ -544,6 +544,28 @@ extern "C" void kudroid_note_render_thread(void) {
     }
 }
 
+// Watchdog hook: completion time of the last successful eglSwapBuffers. The
+// guest cannot lie about this one — no swaps for seconds means the frame loop
+// is dead no matter what any other timestamp says.
+static std::atomic<uint64_t> g_lastSwapNs{0};
+
+extern "C" void kudroid_note_frame_presented(void) {
+    g_lastSwapNs.store(
+        static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch())
+                .count()),
+        std::memory_order_relaxed);
+}
+
+extern "C" uint64_t kudroid_last_frame_presented_ns(void) {
+    return g_lastSwapNs.load(std::memory_order_relaxed);
+}
+
+extern "C" void kudroid_frame_presented_reset(void) {
+    g_lastSwapNs.store(0, std::memory_order_relaxed);
+}
+
 // True when a fault on `tid` must stop the app: host main, guest UI, any
 // render thread, or any thread whose recorded name marks it engine-critical
 // (UnityMain, RenderThread, GfxDeviceWorker, ...). Worker recovery is capped
@@ -3229,6 +3251,10 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
 
     // Clear all old logs before launching guest app so logs start fresh for this run
     kudroid_clear_all_logs();
+
+    // Fresh frame-liveness clock: the watchdog's frame-silence trigger must
+    // measure THIS run's presents, not the previous session's last swap.
+    kudroid_frame_presented_reset();
 
     kudroid::native_run_begin();
     kudroid::native_phase("apk-run-enter");
