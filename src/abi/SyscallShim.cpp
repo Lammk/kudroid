@@ -249,6 +249,13 @@ static uint64_t log_line_hash(const std::string& s) {
 int logAndroidMessage(int priority, const char* tag, const std::string& message) {
     std::lock_guard<std::mutex> lock(g_logAndroidMutex);
 
+    // kudroid_clear_all_logs() removes and recreates kudroid_android_logs.txt
+    // (a fresh inode) before every guest run, and stderr.log is dup2'd over.
+    // The cached file fd below kept pointing at the deleted inode — its O_APPEND
+    // writes landed in an unlinked file and kudroid_android_logs.txt stayed
+    // frozen at the one process-start line clear_all_logs wrote itself. The
+    // reopen is forced by kudroid_android_log_force_reopen, called from
+    // kudroid_clear_all_logs after it recreates the files.
     const char* tg = tag ? tag : "";
     std::string key;
     key.reserve(std::strlen(tg) + message.size() + 1);
@@ -294,9 +301,28 @@ int logAndroidMessage(int priority, const char* tag, const std::string& message)
     }
     slot->priority = priority;
     slot->count = 1;
-
     emit_android_log_line(priority, tag, message);
     return 0;
+}
+
+// The kudroid_android_logs.txt sink's cached descriptor lives at file scope so
+// kudroid_android_log_force_reopen can drop it: kudroid_clear_all_logs()
+// removes and recreates the file (fresh inode) before every guest run, and an
+// O_APPEND write to the cached fd keeps landing in the unlinked old inode.
+static int g_androidLogFd = -1;
+static char g_androidLogFdDir[1024] = {0};
+static void android_log_close_cached_fd() {
+    if (g_androidLogFd >= 0) {
+        ::close(g_androidLogFd);
+        g_androidLogFd = -1;
+    }
+    g_androidLogFdDir[0] = '\0';
+}
+
+extern "C" void kudroid_android_log_force_reopen(void) {
+    std::lock_guard<std::mutex> lock(g_logAndroidMutex);
+    android_log_close_cached_fd();
+    g_logRepeatSlots.clear();
 }
 
 // Emit one formatted line to every sink. Caller holds g_logAndroidMutex.
@@ -344,20 +370,20 @@ static void emit_android_log_line(int priority, const char* tag, const std::stri
     // log file behind every thread in the process and turned a burst of errors
     // into a stall. Reopen only when the log directory changes or a write fails.
     if (::g_kudroid_log_dir_ptr && ::g_kudroid_log_dir_ptr[0] != '\0') {
-        static int s_logFd = -1;
-        static char s_logFdDir[1024] = {0};
-        if (s_logFd < 0 || std::strcmp(s_logFdDir, ::g_kudroid_log_dir_ptr) != 0) {
-            if (s_logFd >= 0) {
-                ::close(s_logFd);
-                s_logFd = -1;
+        if (g_androidLogFd < 0 ||
+            std::strcmp(g_androidLogFdDir, ::g_kudroid_log_dir_ptr) != 0) {
+            if (g_androidLogFd >= 0) {
+                ::close(g_androidLogFd);
+                g_androidLogFd = -1;
             }
             char log_path[1024];
             snprintf(log_path, sizeof(log_path), "%s/kudroid_android_logs.txt",
                      ::g_kudroid_log_dir_ptr);
-            s_logFd = ::open(log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
-            snprintf(s_logFdDir, sizeof(s_logFdDir), "%s", ::g_kudroid_log_dir_ptr);
+            g_androidLogFd = ::open(log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+            snprintf(g_androidLogFdDir, sizeof(g_androidLogFdDir), "%s",
+                     ::g_kudroid_log_dir_ptr);
         }
-        if (s_logFd >= 0) {
+        if (g_androidLogFd >= 0) {
             char line_buf[4096];
             int n = 0;
             if (time_buf[0]) {
@@ -367,11 +393,10 @@ static void emit_android_log_line(int priority, const char* tag, const std::stri
             }
             if (n > 0) {
                 if (static_cast<size_t>(n) > sizeof(line_buf) - 1) n = sizeof(line_buf) - 1;
-                if (::write(s_logFd, line_buf, static_cast<size_t>(n)) < 0) {
+                if (::write(g_androidLogFd, line_buf, static_cast<size_t>(n)) < 0) {
                     // A removed directory or full disk must not wedge logging:
                     // drop the cached fd and let the next line try to reopen.
-                    ::close(s_logFd);
-                    s_logFd = -1;
+                    android_log_close_cached_fd();
                 }
             }
         }

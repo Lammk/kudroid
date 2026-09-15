@@ -2290,6 +2290,8 @@ extern "C" int kudroid_log_get_jni(void) {
     return kudroid::log::jni_enabled() ? 1 : 0;
 }
 
+extern "C" void kudroid_android_log_force_reopen(void);
+
 extern "C" void kudroid_clear_all_logs(void) {
     if (!g_logDir[0]) return;
     std::error_code ec;
@@ -2334,6 +2336,11 @@ extern "C" void kudroid_clear_all_logs(void) {
         fclose(afp);
         ::chmod(aPath, 0644);
     }
+
+    // The android-log sink caches its descriptor by directory name; the remove
+    // + recreate above swapped the file's inode under it, so every later log
+    // line kept appending to the unlinked old file. Force the reopen.
+    kudroid_android_log_force_reopen();
 
 #if defined(__APPLE__)
     // 5. Truncate/create fresh stderr.log
