@@ -3,7 +3,7 @@
 > **KuDroid is not an emulator.**
 
 ### What is KuDroid?
-KuDroid is a high-performance translation compatibility layer and runtime that allows iOS to run Android applications and ARM64 native binaries directly **without an emulator**, unleashing maximum performance at native speed.
+KuDroid is a translation layer for ios to run android's apps
 
 ---
 
@@ -29,6 +29,5 @@ This project is **vibecoded** by AI, with me leading the architecture, design, a
 ---
 
 ### Credits & Acknowledgements
-- **Special thanks to `sakayorii`** for inspiration and foundational knowledge.
-
+- **Special thanks to `sakayorii`** 
 Note:please enable JIT 
