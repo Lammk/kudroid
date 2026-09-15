@@ -326,6 +326,54 @@ struct WorkerBudget {
 };
 static WorkerBudget g_workerBudgets[8];
 
+// Process-wide per-pc skip ledger. Per-thread budgets are blind to a storm
+// spread across sibling workers: ~16 Job.Workers walked the SAME load in
+// lockstep, each staying far under its own cap while the fleet burned ~3000
+// skips into one uncommitted reservation and ended in SIGBUS at the cliff.
+// One load skipped more than a few hundred times process-wide is not
+// recovering anything — every skip poisons a destination register and steps
+// the walk deeper. Fixed table, atomics only (signal context: no locks, no
+// alloc). Untracked (table full of other pcs) fails open: per-thread budgets
+// still bound those.
+static constexpr int kMaxSkipsPerPc = 1024;
+struct PcSkipSlot {
+    std::atomic<unsigned long long> pc{0};
+    std::atomic<int> count{0};
+};
+static PcSkipSlot g_pcSkips[32];
+static bool pc_skip_peek(unsigned long long pc) {
+    if (pc == 0) return true;
+    for (const auto& s : g_pcSkips) {
+        if (s.pc.load(std::memory_order_relaxed) == pc) {
+            return s.count.load(std::memory_order_relaxed) < kMaxSkipsPerPc;
+        }
+    }
+    return true;
+}
+static void pc_skip_note(unsigned long long pc) {
+    if (pc == 0) return;
+    for (auto& s : g_pcSkips) {
+        if (s.pc.load(std::memory_order_relaxed) == pc) {
+            const int before = s.count.fetch_add(1, std::memory_order_relaxed);
+            if (before + 1 == kMaxSkipsPerPc) {
+                char msg[96];
+                std::snprintf(msg, sizeof(msg),
+                              "skip-storm: pc 0x%llx retired after %d skips",
+                              static_cast<unsigned long long>(pc), kMaxSkipsPerPc);
+                kudroid_android_log_message(4, "KuDroidSignal", msg);
+            }
+            return;
+        }
+    }
+    for (auto& s : g_pcSkips) {
+        unsigned long long z = 0;
+        if (s.pc.compare_exchange_strong(z, pc, std::memory_order_relaxed)) {
+            s.count.store(1, std::memory_order_relaxed);
+            return;
+        }
+    }
+}
+
 // True when this fault continues a bounded same-pc forward walk.
 static bool worker_fault_is_walk(const WorkerBudget* s, unsigned long long pc,
                                  unsigned long long addr) {
@@ -1495,6 +1543,14 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
             budget->walk.load(std::memory_order_relaxed) >= kMaxSaneWalk) {
             budget = nullptr;
         }
+        // Distributed-storm gate: per-thread budgets cannot see a lockstep
+        // fleet walking one load. Retire the skip path for this pc process-
+        // wide once its global budget is spent, so the fault falls through to
+        // the fatal path and the shell sees the crash instead of a soft-locked
+        // engine that is silently corrupting itself.
+        if (budget != nullptr && !pc_skip_peek(faultPc)) {
+            budget = nullptr;
+        }
         if (worker_budget_peek(budget, faultPc, faultAddr) &&
             kudroid_try_skip_fault(sig, info, ucontext)) {
             const long long nowNs =
@@ -1502,6 +1558,7 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
                     std::chrono::steady_clock::now().time_since_epoch())
                     .count();
             worker_budget_note(budget, nowNs, faultPc, faultAddr);
+            pc_skip_note(faultPc);
             return;
         }
     }

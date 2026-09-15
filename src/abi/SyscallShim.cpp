@@ -1288,9 +1288,18 @@ void log_mmap_result(void* result, size_t length, int prot, int flags, int fd,
     }
     // Success: surface what matters for placement — file-backed maps and the big
     // reservations/commits — without printing every small anonymous mapping.
+    // The old single 120-line cap went silent five lines into a session (five
+    // big reservations total in one crash log) and left the decisive question
+    // "was this 512MB PROT_NONE region ever committed?" unanswerable. Big
+    // mappings get their own, much higher budget: they are rare events and
+    // each one is a heap-provenance fact.
     if (fd >= 0 || length >= (1u << 20) || requested != nullptr) {
-        static std::atomic<int> n{0};
-        if (n.fetch_add(1, std::memory_order_relaxed) < 120) {
+        static std::atomic<int> n_small{0};
+        static std::atomic<int> n_big{0};
+        const bool big = length >= (1u << 20);
+        auto& n = big ? n_big : n_small;
+        const int cap = big ? 2000 : 120;
+        if (n.fetch_add(1, std::memory_order_relaxed) < cap) {
             std::fprintf(stderr,
                          "[KuDroidMmap] ok len=%zu prot=0x%x flags=0x%x fd=%d off=%lld "
                          "req=%p -> %p\n",
@@ -1510,6 +1519,19 @@ extern "C" int bionic_mprotect(void *addr, size_t len, int prot) {
             std::fprintf(stderr,
                          "[KuDroidMmap] mprotect FAILED addr=%p len=%zu prot=0x%x errno=%d (%s)\n",
                          aligned_addr, aligned_len, prot, errno, std::strerror(errno));
+        }
+    } else if ((prot & PROT_WRITE) && aligned_len >= (1u << 20)) {
+        // A successful big RW commit answers the other half of the same
+        // question: if the guest flipped a reservation to RW, the pages are
+        // valid and a later fault inside them is an allocator-walk bug, not a
+        // missing commit. Only failures used to be logged, so this half of
+        // the story was invisible. Cap: commits are batched, not per-page.
+        static std::atomic<int> s_commit{0};
+        if (s_commit.load(std::memory_order_relaxed) < 200) {
+            s_commit.fetch_add(1, std::memory_order_relaxed);
+            std::fprintf(stderr,
+                         "[KuDroidMmap] mprotect RW addr=%p len=%zu prot=0x%x\n",
+                         aligned_addr, aligned_len, prot);
         }
     }
     return r;
