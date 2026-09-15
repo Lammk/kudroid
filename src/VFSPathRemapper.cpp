@@ -1020,6 +1020,7 @@ uint64_t zip_extract_entry(const std::string& archivePath, const std::string& en
 struct ZipEntryMeta {
     uint64_t payloadOffset = 0;
     uint32_t uncompressedSize = 0;
+    uint32_t crc32 = 0;
     uint16_t compressionMethod = 0;
 };
 struct ZipArchiveIndex {
@@ -1073,6 +1074,7 @@ ZipArchiveIndex build_zip_index(std::FILE* f) {
         ZipEntryMeta meta;
         meta.compressionMethod = zip_read16(h, 10);
         meta.uncompressedSize = zip_read32(h, 24);
+        meta.crc32 = zip_read32(h, 16);
         const uint32_t local_off = zip_read32(h, 42);
 
         // The central directory does not say where the data starts — the local header
@@ -1852,6 +1854,56 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                          b[3] >= 32 && b[3] < 127 ? b[3] : '.',
                          entryName.empty() ? "" : " entry=", entryName.c_str());
         }
+        // Per-stream FSB5 slice tracking. Unity assembles each audio blob
+        // from this stream and hands it to FMOD from memory; streaming stops
+        // where the slice ends. Header-declared size vs bytes actually served
+        // decides "truncated blob" from "complete blob refused anyway".
+        struct FsbSlice {
+            long lastEnd = -1;
+            uint64_t got = 0;
+            uint64_t expected = 0;
+            uint32_t crcGot = 0;
+            uint32_t crcExpect = 0;
+        };
+        static std::map<FILE*, FsbSlice> s_fsbSlices;
+        // Advance/retire an active slice BEFORE detecting a new header: the
+        // read that ends one slice is often the header read of the next.
+        {
+            std::lock_guard<std::mutex> vlock(g_freadVolMtx);
+            const long pos = std::ftell(stream);
+            const long start = pos >= 0 ? pos - static_cast<long>(n * size) : -1;
+            auto sit = s_fsbSlices.find(stream);
+            if (sit != s_fsbSlices.end() && start >= 0) {
+                FsbSlice& st = sit->second;
+                if (start == st.lastEnd) {
+                    st.got += n * size;
+                    st.lastEnd = pos;
+                    st.crcGot = static_cast<uint32_t>(::crc32(
+                        st.crcGot, static_cast<const Bytef*>(buf),
+                        static_cast<uInt>(n * size)));
+                    if (st.got >= st.expected) {
+                        const bool crcOk = st.crcExpect == 0 || st.crcGot == st.crcExpect;
+                        std::fprintf(stderr,
+                                     "[KuDroidFmod] fsb-slice complete off=%ld got=%llu "
+                                     "expected=%llu crc=%08x/%08x %s\n",
+                                     start, static_cast<unsigned long long>(st.got),
+                                     static_cast<unsigned long long>(st.expected), st.crcGot,
+                                     st.crcExpect, crcOk ? "OK" : "MISMATCH");
+                        s_fsbSlices.erase(sit);
+                    }
+                } else {
+                    const long long delta = static_cast<long long>(st.expected) -
+                                            static_cast<long long>(st.got);
+                    std::fprintf(stderr,
+                                 "[KuDroidFmod] fsb-slice end off=%ld got=%llu "
+                                 "expected=%llu delta=%lld%s\n",
+                                 start, static_cast<unsigned long long>(st.got),
+                                 static_cast<unsigned long long>(st.expected), delta,
+                                 delta > 0 ? " TRUNCATED" : "");
+                    s_fsbSlices.erase(sit);
+                }
+            }
+        }
         // FSB5 probe: Unity hands an AudioClip's FSB slice to FMOD from the
         // resource it just read. If a read begins at an FSB5 header, record
         // the exact geometry so we can tell "FMOD was given good bytes and
@@ -1870,6 +1922,7 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                 std::string entry;
                 uint16_t method = 0xFFFF;
                 uint32_t usize = 0;
+                uint32_t entryCrc = 0;
                 if (start >= 0) {
                     std::string archivePath;
                     {
@@ -1887,23 +1940,67 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                                     entry = name;
                                     method = meta.compressionMethod;
                                     usize = meta.uncompressedSize;
+                                    entryCrc = meta.crc32;
                                     break;
                                 }
                             }
                         }
                     }
                 }
+                // Header fields: u32 version, u32 numSamples, [u64 nameTableLen
+                // when version >= 0x40000], u32 dataSize, u32 mode. File size
+                // on disk = headerEnd + dataSize + nameTableLen.
+                uint32_t ver = 0, samples = 0, dataSize = 0, mode = 0;
+                uint64_t nameLen = 0, expected = 0;
+                bool parsed = false;
+                if (n * size >= 20) {
+                    auto rd32 = [&](size_t o) -> uint32_t {
+                        return static_cast<uint32_t>(f[o]) |
+                               (static_cast<uint32_t>(f[o + 1]) << 8) |
+                               (static_cast<uint32_t>(f[o + 2]) << 16) |
+                               (static_cast<uint32_t>(f[o + 3]) << 24);
+                    };
+                    ver = rd32(4);
+                    samples = rd32(8);
+                    size_t dataOff = 12;
+                    if (ver >= 0x40000 && n * size >= 32) {
+                        nameLen = static_cast<uint64_t>(rd32(12)) |
+                                  (static_cast<uint64_t>(rd32(16)) << 32);
+                        dataOff = 20;
+                    }
+                    if (n * size >= dataOff + 8) {
+                        dataSize = rd32(dataOff);
+                        mode = rd32(dataOff + 4);
+                        expected = static_cast<uint64_t>(dataOff) + 8 + nameLen + dataSize;
+                        parsed = true;
+                    }
+                }
                 std::fprintf(stderr,
                              "[KuDroidFmod] served FSB5 at apk_off=%ld size=%zu "
-                             "method=%u usize=%u entry=%s\n",
-                             start, n * size, method, usize,
+                             "method=%u usize=%u ver=%u samples=%u dataSize=%u "
+                             "nameLen=%llu mode=%u expected=%llu entry=%s\n",
+                             start, n * size, method, usize, ver, samples, dataSize,
+                             static_cast<unsigned long long>(nameLen), mode,
+                             static_cast<unsigned long long>(expected),
                              entry.empty() ? "(none)" : entry.c_str());
                 // Decisive follow-up: when FMOD accepts the bank it streams
                 // through THIS handle; when it rejects the slice it reads
                 // little or nothing on it. Keyed by handle so unrelated
                 // concurrent streams cannot mask the FSB stream's reads.
-                std::lock_guard<std::mutex> vlock(g_freadVolMtx);
-                g_fsbFollowup[stream] = 8;
+                {
+                    std::lock_guard<std::mutex> vlock(g_freadVolMtx);
+                    g_fsbFollowup[stream] = 8;
+                    if (parsed && start >= 0) {
+                        FsbSlice& st = s_fsbSlices[stream];
+                        st.lastEnd = start + static_cast<long>(n * size);
+                        st.got = n * size;
+                        st.expected = expected;
+                        st.crcGot = static_cast<uint32_t>(::crc32(
+                            0L, static_cast<const Bytef*>(buf),
+                            static_cast<uInt>(n * size)));
+                        st.crcExpect = entryCrc;
+                    }
+                }
             }
         }
         bool followLine = false;
@@ -1981,6 +2078,14 @@ int vfs_fseek(FILE* stream, long offset, int whence) {
             ++s_logged;
             std::fprintf(stderr, "[KuDroidApkF] fseek offset=%ld whence=%d\n", offset,
                          whence);
+        }
+        // SEEK_END resolves to the whole-archive size; a consumer taking it
+        // as the current entry's size streams garbage past the entry end.
+        static std::atomic<int> s_endLogged{0};
+        if (whence == SEEK_END && s_endLogged.load() < 16) {
+            ++s_endLogged;
+            std::fprintf(stderr, "[KuDroidApkF] fseek END on apk stream -> %ld\n",
+                         std::ftell(stream));
         }
     }
     return rc;
