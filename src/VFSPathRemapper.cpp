@@ -1947,13 +1947,17 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                         }
                     }
                 }
-                // Header fields: u32 version, u32 numSamples, [u64 nameTableLen
-                // when version >= 0x40000], u32 dataSize, u32 mode. File size
-                // on disk = headerEnd + dataSize + nameTableLen.
-                uint32_t ver = 0, samples = 0, dataSize = 0, mode = 0;
-                uint64_t nameLen = 0, expected = 0;
+                // FSB5 header: magic(4), version u32@4, numSamples u32@8,
+                // sampleHeadersSize u32@12, nameTableSize u32@16, dataSize
+                // u32@20, mode u32@24. Header total is 60 bytes (zero u64@
+                // 28, hash 16B@36, dummy u64@52); blob size = 60 + shs +
+                // nts + dataSize. mode names the codec — a codec this FMOD
+                // build lacks would reject every blob regardless of bytes.
+                uint32_t ver = 0, numSamples = 0, shs = 0, nts = 0;
+                uint32_t dataSize = 0, mode = 0;
+                uint64_t blobTotal = 0;
                 bool parsed = false;
-                if (n * size >= 20) {
+                if (n * size >= 28) {
                     auto rd32 = [&](size_t o) -> uint32_t {
                         return static_cast<uint32_t>(f[o]) |
                                (static_cast<uint32_t>(f[o + 1]) << 8) |
@@ -1961,28 +1965,56 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                                (static_cast<uint32_t>(f[o + 3]) << 24);
                     };
                     ver = rd32(4);
-                    samples = rd32(8);
-                    size_t dataOff = 12;
-                    if (ver >= 0x40000 && n * size >= 32) {
-                        nameLen = static_cast<uint64_t>(rd32(12)) |
-                                  (static_cast<uint64_t>(rd32(16)) << 32);
-                        dataOff = 20;
+                    numSamples = rd32(8);
+                    shs = rd32(12);
+                    nts = rd32(16);
+                    dataSize = rd32(20);
+                    mode = rd32(24);
+                    blobTotal = 60ull + shs + nts + dataSize;
+                    parsed = true;
+                }
+                // Chain check from the same buffer: .resource files pack
+                // blobs back to back, so a valid second header this close
+                // proves the resource data itself is well-formed.
+                char nextDesc[96] = "n/a";
+                if (blobTotal > 0 && blobTotal + 28 <= n * size) {
+                    const auto* g = f + blobTotal;
+                    const bool magic2 = g[0] == 'F' && g[1] == 'S' && g[2] == 'B' && g[3] == '5';
+                    auto rd32at = [&](const unsigned char* p, size_t o) -> uint32_t {
+                        return static_cast<uint32_t>(p[o]) |
+                               (static_cast<uint32_t>(p[o + 1]) << 8) |
+                               (static_cast<uint32_t>(p[o + 2]) << 16) |
+                               (static_cast<uint32_t>(p[o + 3]) << 24);
+                    };
+                    if (magic2) {
+                        std::snprintf(nextDesc, sizeof(nextDesc),
+                                      "FSB5@%llu num=%u dataSize=%u mode=%u",
+                                      static_cast<unsigned long long>(blobTotal),
+                                      rd32at(g, 8), rd32at(g, 20), rd32at(g, 24));
+                    } else {
+                        std::snprintf(nextDesc, sizeof(nextDesc),
+                                      "none@%llu (%02x%02x%02x%02x)",
+                                      static_cast<unsigned long long>(blobTotal),
+                                      g[0], g[1], g[2], g[3]);
                     }
-                    if (n * size >= dataOff + 8) {
-                        dataSize = rd32(dataOff);
-                        mode = rd32(dataOff + 4);
-                        expected = static_cast<uint64_t>(dataOff) + 8 + nameLen + dataSize;
-                        parsed = true;
+                }
+                char hex[100] = {0};
+                {
+                    const size_t hb = n * size < 32 ? n * size : 32;
+                    size_t o = 0;
+                    for (size_t i = 0; i < hb; ++i) {
+                        o += static_cast<size_t>(
+                            std::snprintf(hex + o, sizeof(hex) - o, "%02x", f[i]));
                     }
                 }
                 std::fprintf(stderr,
                              "[KuDroidFmod] served FSB5 at apk_off=%ld size=%zu "
-                             "method=%u usize=%u ver=%u samples=%u dataSize=%u "
-                             "nameLen=%llu mode=%u expected=%llu entry=%s\n",
-                             start, n * size, method, usize, ver, samples, dataSize,
-                             static_cast<unsigned long long>(nameLen), mode,
-                             static_cast<unsigned long long>(expected),
-                             entry.empty() ? "(none)" : entry.c_str());
+                             "method=%u usize=%u ver=%u num=%u shs=%u nts=%u "
+                             "dataSize=%u mode=%u blobTotal=%llu next=[%s] hex=%s "
+                             "entry=%s\n",
+                             start, n * size, method, usize, ver, numSamples, shs, nts,
+                             dataSize, mode, static_cast<unsigned long long>(blobTotal),
+                             nextDesc, hex, entry.empty() ? "(none)" : entry.c_str());
                 // Decisive follow-up: when FMOD accepts the bank it streams
                 // through THIS handle; when it rejects the slice it reads
                 // little or nothing on it. Keyed by handle so unrelated
@@ -1990,11 +2022,11 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                 {
                     std::lock_guard<std::mutex> vlock(g_freadVolMtx);
                     g_fsbFollowup[stream] = 8;
-                    if (parsed && start >= 0) {
+                    if (parsed && start >= 0 && blobTotal > 0) {
                         FsbSlice& st = s_fsbSlices[stream];
                         st.lastEnd = start + static_cast<long>(n * size);
                         st.got = n * size;
-                        st.expected = expected;
+                        st.expected = blobTotal;
                         st.crcGot = static_cast<uint32_t>(::crc32(
                             0L, static_cast<const Bytef*>(buf),
                             static_cast<uInt>(n * size)));

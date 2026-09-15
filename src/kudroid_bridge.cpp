@@ -2101,12 +2101,19 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
             g_hasCrashed.store(true);
             g_lastCrashTail[0] = '\0';  // filled below from g_crashBuf
         } else {
+            // The parked worker below never runs again: the engine deadlocks the
+            // first time it synchronises on this thread's fence (observed: frames
+            // keep swapping for two minutes, then the screen freezes with three
+            // more threads dead and no modal). A parked thread is a dead thread —
+            // the session is over, so report it as a crash instead of timing it.
+            g_hasCrashed.store(true);
+            g_lastCrashTail[0] = '\0';
             if (budget != nullptr) budget->count.fetch_add(1, std::memory_order_relaxed);
             char mark[256];
             const int n = snprintf(
                 mark, sizeof(mark),
                 "worker-fault-isolated signo=%d thread_id=%llu "
-                "faults_so_far=%d (parked; app continues)",
+                "faults_so_far=%d (parked; session reported as crashed)",
                 sig, tid, spent + 1);
             if (n > 0) kudroid_persistent_breadcrumb(mark);
         }
