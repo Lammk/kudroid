@@ -58,6 +58,16 @@ public:
     // downgrades a previous positive result. Returns the current fetchability.
     static bool Reprobe();
 
+    // Diagnostics. True when the device is estimated to enforce the TXM/SPTM
+    // regime (iOS 26+ on A13+/M1+), where a debugger attach alone is not enough
+    // and every executable region must be prepared over the debug connection.
+    // The estimate comes from OS version + SoC; the prepare handshake itself is
+    // the authoritative answer. False on non-Apple and on the Simulator.
+    static bool TxmPresent();
+
+    // One-line environment summary for logs: "ios=<ver> machine=<id> txm~=<0|1>".
+    static const char* RuntimeSummary();
+
     // Platform page size used to round allocations.
     static size_t PageSize();
 

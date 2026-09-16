@@ -2643,12 +2643,54 @@ extern "C" int kudroid_is_jit_enabled(void) {
     // check. Tools like StikDebug grant JIT permission by attaching after launch,
     // so the first probe legitimately failed; the newly-set CS_DEBUGGED flag is
     // the kernel's own signal that its view changed and the probe must run again.
-    if (kudroid::ExecMemory::IsFetchable()) return 1;
+    const bool txm = kudroid::ExecMemory::TxmPresent();
+    const bool fetchable = kudroid::ExecMemory::IsFetchable();
     unsigned int flags = 0;
-    if (csops(getpid(), CS_OPS_STATUS, &flags, sizeof(flags)) == 0 &&
-        (flags & CS_DEBUGGED) != 0) {
-        return kudroid::ExecMemory::Reprobe() ? 1 : 0;
+    const bool csDebugged =
+        csops(getpid(), CS_OPS_STATUS, &flags, sizeof(flags)) == 0 &&
+        (flags & CS_DEBUGGED) != 0;
+
+    // Diagnostics: one line per verdict change (the UI polls), plus one per
+    // re-probe, so a run shows whether the probe failed on a TXM device or the
+    // permission simply never arrived.
+    static std::atomic<int> s_lastVerdict{-1};
+    auto report = [&](int verdict, const char* why) {
+        if (s_lastVerdict.exchange(verdict) != verdict) {
+            std::fprintf(stderr,
+                         "[KuDroidJIT] jit=%d fetchable=%d cs_debugged=%d txm~=%d"
+                         " (%s) %s\n",
+                         verdict, fetchable ? 1 : 0, csDebugged ? 1 : 0, txm ? 1 : 0,
+                         why, kudroid::ExecMemory::RuntimeSummary());
+        }
+    };
+
+    if (fetchable) {
+        report(1, "probe");
+        return 1;
     }
+    if (!csDebugged) {
+        report(0, "no-debugger");
+        return 0;
+    }
+
+    // A debugger is attached yet exec memory still isn't fetchable (the iOS 26+
+    // TXM case: the region was never prepared over the debug connection, so no
+    // strategy can pass). Re-probe, but at most once a second — the UI polls and
+    // each re-probe runs the whole probe.
+    static std::atomic<int64_t> s_lastReprobeMs{0};
+    const int64_t nowMs =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    if (nowMs - s_lastReprobeMs.load(std::memory_order_relaxed) >= 1000) {
+        s_lastReprobeMs.store(nowMs, std::memory_order_relaxed);
+        const bool ok = kudroid::ExecMemory::Reprobe();
+        std::fprintf(stderr, "[KuDroidJIT] reprobe after debugger attach -> %d (txm~=%d)\n",
+                     ok ? 1 : 0, txm ? 1 : 0);
+        report(ok ? 1 : 0, "reprobe");
+        return ok ? 1 : 0;
+    }
+    report(0, "reprobe-throttled");
     return 0;
 #else
     return 1;

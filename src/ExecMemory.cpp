@@ -4,6 +4,7 @@
 #include <csetjmp>
 #include <cstdio>
 #include <cstring>
+#include <string>
 
 #include <signal.h>
 #include <sys/mman.h>
@@ -20,6 +21,7 @@
 #include <dlfcn.h>
 #include <pthread.h>
 #include <libkern/OSCacheControl.h>
+#include <sys/sysctl.h>
 #include "kudroid/MachVmDecls.h"
 #elif defined(__linux__)
 #include <sys/syscall.h>
@@ -166,6 +168,79 @@ bool FetchProbe(void* exec) {
     return ok;
 }
 
+// ── Diagnostics (no behavior change) ────────────────────────────────────────
+// The TXM/SPTM regime on iOS 26+ (A13+/M1+) rejects fetches from exec memory a
+// debug script has not prepared, so the capability probe legitimately fails there
+// no matter what attached. Report the environment so a run can tell "probe failed
+// on a TXM device" from "probe never ran / permission never arrived".
+
+#if defined(__APPLE__)
+// csops() is a private but stable API for code-signing status.
+extern "C" int csops(pid_t pid, unsigned int ops, void* useraddr, size_t usersize);
+
+std::string SysctlString(const char* name) {
+    size_t size = 0;
+    if (::sysctlbyname(name, nullptr, &size, nullptr, 0) != 0 || size == 0) return {};
+    std::string value(size, '\0');
+    if (::sysctlbyname(name, value.data(), &size, nullptr, 0) != 0) return {};
+    if (!value.empty() && value.back() == '\0') value.pop_back();
+    return value;
+}
+
+int OsMajorVersion() {
+    const std::string v = SysctlString("kern.osproductversion");
+    int major = 0;
+    std::sscanf(v.c_str(), "%d", &major);
+    return major;
+}
+
+// A13+ / Apple-silicon SoCs carry the TXM monitor; older ones do not, and there a
+// debugger attach alone still enables JIT. Device identifiers: iPhone12,x is A13,
+// iPad12,x is A13. The Simulator enforces no such regime.
+bool TxmEstimate() {
+#if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+    if (OsMajorVersion() < 26) return false;
+    const std::string mach = SysctlString("hw.machine");
+    int n = 0;
+    if (mach.rfind("iPhone", 0) == 0) {
+        std::sscanf(mach.c_str() + 6, "%d", &n);
+        return n >= 12;
+    }
+    if (mach.rfind("iPad", 0) == 0) {
+        std::sscanf(mach.c_str() + 4, "%d", &n);
+        return n >= 12;
+    }
+    // Macs running the same regime are all Apple silicon (M1+).
+    return mach.rfind("Mac", 0) == 0;
+#else
+    return false;
+#endif
+}
+
+bool CsDebugged() {
+    constexpr unsigned int kStatus = 0;             // CS_OPS_STATUS
+    constexpr unsigned int kDebugged = 0x10000000;  // CS_DEBUGGED
+    unsigned int flags = 0;
+    return ::csops(::getpid(), kStatus, &flags, sizeof(flags)) == 0 &&
+           (flags & kDebugged) != 0;
+}
+
+const char* RuntimeSummaryInner() {
+    static const std::string s = [] {
+        std::string v = SysctlString("kern.osproductversion");
+        std::string m = SysctlString("hw.machine");
+        return "ios=" + (v.empty() ? std::string("?") : v) +
+               " machine=" + (m.empty() ? std::string("?") : m) +
+               " txm~=" + (TxmEstimate() ? "1" : "0");
+    }();
+    return s.c_str();
+}
+#else
+bool TxmEstimate() { return false; }
+bool CsDebugged() { return false; }
+const char* RuntimeSummaryInner() { return "ios=n/a machine=n/a txm~=0"; }
+#endif  // __APPLE__
+
 // Select the strategy by asking the kernel, once. Order: dual-map (no toggles,
 // survives hardware-W^X regimes), toggle (official MAP_JIT pattern), legacy
 // (anonymous RW -> RX; iOS 18-and-earlier behavior).
@@ -177,12 +252,16 @@ ExecMemMode ProbeMode(bool* fetchableOut) {
 #if KUDROID_EXECMEM_PROBE_EXEC
     {
         void* backing = nullptr;
-        if (TryMapJit(&backing, kProbeSize)) {
-            void* alias = nullptr;
-            if (TryDualMap(backing, kProbeSize, &alias)) {
+        const bool mapJit = TryMapJit(&backing, kProbeSize);
+        void* alias = nullptr;
+        bool remap = false, fetch = false;
+        if (mapJit) {
+            remap = TryDualMap(backing, kProbeSize, &alias);
+            if (remap) {
                 std::memcpy(backing, kProbeCode, sizeof(kProbeCode));
                 FlushIcache(alias, sizeof(kProbeCode));
-                if (FetchProbe(alias)) {
+                fetch = FetchProbe(alias);
+                if (fetch) {
                     selected = ExecMemMode::kDualMap;
                     *fetchableOut = true;
                 }
@@ -190,20 +269,32 @@ ExecMemMode ProbeMode(bool* fetchableOut) {
             }
             munmap(backing, kProbeSize);
         }
+        if (!*fetchableOut) {
+            std::fprintf(stderr, "[KuDroidExecMem] probe dual-map: map_jit=%d remap=%d fetch=%d\n",
+                         mapJit ? 1 : 0, remap ? 1 : 0, fetch ? 1 : 0);
+        }
     }
     if (!*fetchableOut) {
         void* backing = nullptr;
-        if (ToggleWritesAvailable() && TryMapJit(&backing, kProbeSize)) {
+        const bool haveFn = ToggleWritesAvailable();
+        const bool mapJit = haveFn && TryMapJit(&backing, kProbeSize);
+        bool fetch = false;
+        if (mapJit) {
             EnableJitWrites(true);   // writes allowed on this thread
             std::memcpy(backing, kProbeCode, sizeof(kProbeCode));
             FlushIcache(backing, sizeof(kProbeCode));
             EnableJitWrites(false);  // fetch state
-            if (FetchProbe(backing)) {
+            fetch = FetchProbe(backing);
+            if (fetch) {
                 selected = ExecMemMode::kToggle;
                 *fetchableOut = true;
                 EnableJitWrites(true);  // leave writable for callers
             }
             munmap(backing, kProbeSize);
+        }
+        if (!*fetchableOut) {
+            std::fprintf(stderr, "[KuDroidExecMem] probe toggle: func=%d map_jit=%d fetch=%d\n",
+                         haveFn ? 1 : 0, mapJit ? 1 : 0, fetch ? 1 : 0);
         }
     }
 #endif  // KUDROID_EXECMEM_PROBE_EXEC
@@ -212,22 +303,30 @@ ExecMemMode ProbeMode(bool* fetchableOut) {
     if (!*fetchableOut) {
         void* p = ::mmap(nullptr, kProbeSize, PROT_READ | PROT_WRITE,
                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        bool mprot = false, fetch = false;
         if (p != MAP_FAILED) {
             std::memcpy(p, kProbeCode, sizeof(kProbeCode));
             if (mprotect(p, kProbeSize, PROT_READ | PROT_EXEC) == 0) {
+                mprot = true;
 #if KUDROID_EXECMEM_PROBE_EXEC
                 FlushIcache(p, sizeof(kProbeCode));
                 if (FetchProbe(p)) {
                     selected = ExecMemMode::kLegacy;
                     *fetchableOut = true;
+                    fetch = true;
                 }
 #else
                 // Non-arm64 host: mprotect success is the best answer we can get.
                 selected = ExecMemMode::kLegacy;
                 *fetchableOut = true;
+                fetch = true;
 #endif
             }
             munmap(p, kProbeSize);
+        }
+        if (!*fetchableOut) {
+            std::fprintf(stderr, "[KuDroidExecMem] probe legacy: mprotect=%d fetch=%d\n",
+                         mprot ? 1 : 0, fetch ? 1 : 0);
         }
     }
 
@@ -243,12 +342,14 @@ struct ProbeState {
 ProbeState& ProbeStateInstance() {
     static ProbeState state;
     if (!state.initialized) {
+        std::fprintf(stderr, "[KuDroidExecMem] probe %s cs_debugged=%d\n",
+                     RuntimeSummaryInner(), CsDebugged() ? 1 : 0);
         state.mode = ProbeMode(&state.fetchable);
         state.initialized = true;
-        std::fprintf(stderr, "[KuDroidExecMem] mode=%s fetchable=%d\n",
+        std::fprintf(stderr, "[KuDroidExecMem] mode=%s fetchable=%d %s\n",
                      state.mode == ExecMemMode::kDualMap ? "dual-map"
                      : state.mode == ExecMemMode::kToggle ? "toggle" : "legacy",
-                     state.fetchable ? 1 : 0);
+                     state.fetchable ? 1 : 0, RuntimeSummaryInner());
     }
     return state;
 }
@@ -290,6 +391,14 @@ bool ExecMemory::Reprobe() {
     st.initialized = false;
     const ProbeState& fresh = ProbeStateInstance();
     return fresh.fetchable;
+}
+
+bool ExecMemory::TxmPresent() {
+    return TxmEstimate();
+}
+
+const char* ExecMemory::RuntimeSummary() {
+    return RuntimeSummaryInner();
 }
 
 ExecMemory::Region ExecMemory::Allocate(size_t size, bool exec) {
