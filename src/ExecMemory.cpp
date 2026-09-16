@@ -19,8 +19,7 @@
 #if defined(__APPLE__)
 #include <pthread.h>
 #include <libkern/OSCacheControl.h>
-#include <mach/mach.h>
-#include <mach/mach_vm.h>
+#include "kudroid/MachVmDecls.h"
 #elif defined(__linux__)
 #include <sys/syscall.h>
 #endif
@@ -58,9 +57,13 @@ void EnableJitWrites(bool enable) {
 // runtime permission transition is ever performed.
 bool TryDualMap(void* backing, size_t size, void** outAlias) {
     mach_vm_address_t alias = 0;
+    vm_prot_t curProt = VM_PROT_NONE, maxProt = VM_PROT_NONE;
     kern_return_t kr = mach_vm_remap(mach_task_self(), &alias,
+                                     size, 0, VM_FLAGS_ANYWHERE,
+                                     mach_task_self(),
                                      reinterpret_cast<mach_vm_address_t>(backing),
-                                     size, 0, VM_FLAGS_ANYWHERE, VM_INHERIT_DEFAULT);
+                                     FALSE, &curProt, &maxProt,
+                                     VM_INHERIT_DEFAULT);
     if (kr != KERN_SUCCESS) return false;
     kr = mach_vm_protect(mach_task_self(), alias, size, FALSE,
                          VM_PROT_READ | VM_PROT_EXECUTE);

@@ -53,8 +53,7 @@
 #if defined(__APPLE__)
 #include <libkern/OSCacheControl.h>
 #include <TargetConditionals.h>
-#include <mach/mach.h>
-#include <mach/mach_vm.h>
+#include "kudroid/MachVmDecls.h"
 #if TARGET_OS_OSX
 #include <pthread.h>
 #endif
@@ -714,10 +713,18 @@ bool ElfLoader::map() {
         kern_return_t kr = mach_vm_deallocate(
             mach_task_self(), aliasAddr, splitOff);
         if (kr == KERN_SUCCESS) {
+            vm_prot_t curProt = VM_PROT_NONE, maxProt = VM_PROT_NONE;
             kr = mach_vm_remap(mach_task_self(), &aliasAddr,
-                               reinterpret_cast<mach_vm_address_t>(backing.writeView),
                                splitOff, 0, VM_FLAGS_FIXED,
-                               VM_PROT_READ | VM_PROT_EXECUTE);
+                               mach_task_self(),
+                               reinterpret_cast<mach_vm_address_t>(backing.writeView),
+                               FALSE, &curProt, &maxProt,
+                               VM_INHERIT_DEFAULT);
+            if (kr == KERN_SUCCESS) {
+                // The alias inherits the source's RW protection; tighten it to RX.
+                kr = mach_vm_protect(mach_task_self(), aliasAddr, splitOff, FALSE,
+                                     VM_PROT_READ | VM_PROT_EXECUTE);
+            }
         }
         if (kr != KERN_SUCCESS) {
             ExecMemory::Free(backing);
