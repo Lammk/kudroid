@@ -17,6 +17,7 @@
 #endif
 
 #if defined(__APPLE__)
+#include <dlfcn.h>
 #include <pthread.h>
 #include <libkern/OSCacheControl.h>
 #include "kudroid/MachVmDecls.h"
@@ -46,10 +47,30 @@ void FlushIcache(void* start, size_t len) {
 }
 
 #if defined(__APPLE__)
+using JitProtectFn = void (*)(int);
+
+// macOS declares pthread_jit_write_protect_np directly. iOS marks it
+// unavailable in the SDK headers even though the symbol ships in libpthread,
+// so resolve it at runtime and treat absence as "toggle mode cannot run".
+JitProtectFn JitProtectFnInstance() {
+#if TARGET_OS_OSX
+    return &pthread_jit_write_protect_np;
+#else
+    static JitProtectFn fn =
+        reinterpret_cast<JitProtectFn>(::dlsym(RTLD_DEFAULT,
+                                               "pthread_jit_write_protect_np"));
+    return fn;
+#endif
+}
+
+bool ToggleWritesAvailable() { return JitProtectFnInstance() != nullptr; }
+
 // Thread-local JIT write-enable; ISB per the platform's toggle contract.
 void EnableJitWrites(bool enable) {
-    pthread_jit_write_protect_np(enable ? 0 : 1);
-    asm volatile("isb sy" ::: "memory");
+    if (JitProtectFn fn = JitProtectFnInstance()) {
+        fn(enable ? 0 : 1);
+        asm volatile("isb sy" ::: "memory");
+    }
 }
 
 // Alias the same backing pages at a second virtual address with RX protection.
@@ -172,7 +193,7 @@ ExecMemMode ProbeMode(bool* fetchableOut) {
     }
     if (!*fetchableOut) {
         void* backing = nullptr;
-        if (TryMapJit(&backing, kProbeSize)) {
+        if (ToggleWritesAvailable() && TryMapJit(&backing, kProbeSize)) {
             EnableJitWrites(true);   // writes allowed on this thread
             std::memcpy(backing, kProbeCode, sizeof(kProbeCode));
             FlushIcache(backing, sizeof(kProbeCode));
