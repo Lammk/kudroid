@@ -1,5 +1,6 @@
 #include "kudroid/kuart/JitCache.h"
 
+#include <atomic>
 #include <cstdio>
 
 namespace kudroid {
@@ -27,15 +28,19 @@ JitCache::~JitCache() {
 }
 
 bool JitCache::IsAvailable() {
-    // Cached; the probe result is fixed at exec: which memory strategies the
-    // kernel sanctions cannot change while the process runs. The probe executes
-    // written code, so its answer covers the whole pipeline this cache serves.
-    static const bool available = ExecMemory::IsFetchable();
+    // No separate cache here: ExecMemory::IsFetchable() is one load, and its
+    // answer can legitimately flip from false to true when a debugger attaches
+    // after launch (StikDebug), which re-probes through the bridge. A static
+    // copy of the startup verdict would keep the DEX JIT off forever.
+    const bool available = ExecMemory::IsFetchable();
     if (!available) {
-        std::fprintf(stderr,
-                     "[KuART][JIT] executable memory unavailable; running"
-                     " interpreter only. Enable JIT (debugger attached,"
-                     " LiveContainer JIT mode, or TrollStore) for compiled code.\n");
+        static std::atomic<int> reported{0};
+        if (reported.fetch_add(1) < 1) {
+            std::fprintf(stderr,
+                         "[KuART][JIT] executable memory unavailable; running"
+                         " interpreter only. Enable JIT (debugger attached,"
+                         " LiveContainer JIT mode, or TrollStore) for compiled code.\n");
+        }
     }
     return available;
 }
