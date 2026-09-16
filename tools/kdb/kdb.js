@@ -2,7 +2,7 @@
 
 /**
  * KuDroid Debug Bridge (KDB): dependency-free WebSocket/HTTP host + REPL
- * (help/list/run/stop/install/debug/save/clear). Mirrors the iPhone log stream.
+ * (help/list/debug/version). Mirrors the iPhone log stream.
  */
 
 const http = require('http');
@@ -209,7 +209,7 @@ server.on('upgrade', (req, socket, head) => {
     socket.on('close', handleDisconnect);
     socket.on('error', handleDisconnect);
 
-    console.log(`\n${C.green}✔ [KDB] iPhone connected via WebSocket!${C.reset}`);
+    console.log(`\n${C.green}[KDB] iPhone connected via WebSocket.${C.reset}`);
     prompt();
 });
 
@@ -217,12 +217,10 @@ function handleDisconnect() {
     if (connectedSocket) {
         connectedSocket = null;
         clientDeviceInfo = null;
-        console.log(`\n${C.yellow}⚠ [KDB] iPhone disconnected.${C.reset}`);
+        console.log(`\n${C.yellow}[KDB] iPhone disconnected.${C.reset}`);
         prompt();
     }
 }
-
-let isExecutingSo = false;
 
 // ── LOG & EVENT PROCESSOR ───────────────────────────────────────────────────
 function handleIncomingMessage(text) {
@@ -236,8 +234,8 @@ function handleIncomingMessage(text) {
             prompt();
         } else if (msg.type === 'log') {
             const line = msg.message;
-            if (isDebugMode || isExecutingSo) {
-                if (isDebugMode) debugSessionLogs.push(line);
+            if (isDebugMode) {
+                debugSessionLogs.push(line);
                 formatAndPrintLog(msg.level, msg.tag, line);
             }
         } else if (msg.type === 'response') {
@@ -318,54 +316,13 @@ async function handleCommandLine(line) {
             await handleList();
             break;
 
-        case 'run':
-            if (args.length === 0) {
-                console.log(`${C.red}Usage: run <app_id>${C.reset}`);
-            } else {
-                await handleRun(args[0]);
-            }
-            break;
-
-        case 'stop':
-            await handleStop();
-            break;
-
-        case 'install':
-            if (args.length === 0) {
-                console.log(`${C.red}Usage: install <path_to_apk_on_pc>${C.reset}`);
-            } else {
-                await handleInstall(args[0]);
-            }
-            break;
-
         case 'debug':
             startDebugMode();
             return;
 
-        case 'test':
-            await handleTest(args[0]);
-            break;
-
-        case 'so':
-        case 'run_so':
-            await handleRunSo(args);
-            break;
-
         case 'version':
         case 'ver':
             await handleVersion();
-            break;
-
-        case 'dump':
-            await handleDump(args[0] || 'kudroid_crash');
-            break;
-
-        case 'save':
-            handleSave(args[0]);
-            break;
-
-        case 'clear':
-            handleClear(args);
             break;
 
         case 'exit':
@@ -393,28 +350,17 @@ function handleSigInt() {
 // ── COMMAND HANDLERS ────────────────────────────────────────────────────────
 function printHelp() {
     console.log(`
-${C.bold}${C.cyan}=== KuDroid Debug Bridge (KDB) Commands ===${C.reset}
-
-  ${C.green}help${C.reset}                     Hiển thị bảng hướng dẫn này
-  ${C.green}version / ver${C.reset}            Kiểm tra hash commit / phiên bản build của app trên iPhone
-  ${C.green}so <path_to_so> [entry]${C.reset}  🚀 Gửi và chạy trực tiếp file .so test từ PC sang iPhone (${C.yellow}Hot-Reload, không cần cài lại IPA!${C.reset})
-  ${C.green}test [name]${C.reset}              Chạy trực tiếp các bài test cô lập có sẵn trên iPhone
-                           (ví dụ: ${C.yellow}test gpu${C.reset}, ${C.yellow}test audio${C.reset}, ${C.yellow}test bionic${C.reset}, ${C.yellow}test jni${C.reset}, ${C.yellow}test syscall${C.reset}, ${C.yellow}test vfs${C.reset}, ${C.yellow}test all${C.reset})
-  ${C.green}list${C.reset}                     Liệt kê danh sách APK đã cài đặt trên iPhone
-  ${C.green}run <app_id>${C.reset}             Mở app trực tiếp trên màn hình iPhone & stream log
-  ${C.green}stop${C.reset}                     Đóng app đang chạy, quay về màn hình Launcher
-  ${C.green}install <file.apk>${C.reset}       Gửi file APK từ PC sang iPhone và cài đặt
-  ${C.green}debug${C.reset}                    Bật chế độ nghe log 'thập cẩm' All-in-One (${C.yellow}Ctrl+C để thoát & lưu log${C.reset})
-  ${C.green}dump [file_name]${C.reset}         Kéo file log gốc từ iPhone (Documents/logs) về PC (vd: dump kudroid_crash, dump stderr, dump classes)
-  ${C.green}save [crash|log]${C.reset}         Lưu dump log hoặc crash snapshot về máy tính
-  ${C.green}clear <cache|all>${C.reset}        Xóa bộ nhớ đệm / dalvik-cache trên iPhone
-  ${C.green}exit / quit${C.reset}              Thoát KDB
+  ${C.green}help${C.reset}              Show this command list
+  ${C.green}version / ver${C.reset}     Check the build commit hash / version of the app on the iPhone
+  ${C.green}list${C.reset}              List APKs installed on the iPhone
+  ${C.green}debug${C.reset}             Start the all-in-one log stream (${C.yellow}Ctrl+C to stop & save logs${C.reset})
+  ${C.green}exit / quit${C.reset}       Exit KDB
 `);
 }
 
 async function handleVersion() {
     if (!connectedSocket) {
-        console.log(`${C.red}❌ No iPhone connected. Connect iPhone to KDB first.${C.reset}`);
+        console.log(`${C.red}No iPhone connected. Connect iPhone to KDB first.${C.reset}`);
         return;
     }
 
@@ -426,251 +372,30 @@ async function handleVersion() {
         localShort = execSync('git rev-parse --short HEAD', { encoding: 'utf8' }).trim();
     } catch (e) {}
 
-    console.log(`\n${C.cyan}🔍 Querying build version from iPhone...${C.reset}`);
+    console.log(`\n${C.cyan}Querying build version from iPhone...${C.reset}`);
     const res = await sendCommandWithTimeout({ action: 'version' }, 5000);
     const bInfo = (res && res.buildInfo) ? res.buildInfo : (clientBuildInfo || {});
     const devCommit = bInfo.commit || 'unknown';
     const devShort = bInfo.short_commit || (devCommit !== 'unknown' ? devCommit.substring(0, 7) : 'unknown');
     const devTime = bInfo.build_date || bInfo.build_time || 'N/A';
 
-    console.log(`\n${C.bold}=== KuDroid App Version & Build Status ===${C.reset}`);
-    console.log(`  📱 ${C.bold}iPhone Build Hash${C.reset}  : ${C.yellow}${devShort}${C.reset} (${devCommit})`);
-    console.log(`  🕒 ${C.bold}Build Timestamp${C.reset}    : ${devTime}`);
-    console.log(`  💻 ${C.bold}Local PC Git Hash${C.reset}  : ${C.cyan}${localShort}${C.reset} (${localCommit})\n`);
+    console.log(`\n${C.bold}KuDroid App Version & Build Status${C.reset}`);
+    console.log(`  ${C.bold}iPhone Build Hash${C.reset}  : ${C.yellow}${devShort}${C.reset} (${devCommit})`);
+    console.log(`  ${C.bold}Build Timestamp${C.reset}    : ${devTime}`);
+    console.log(`  ${C.bold}Local PC Git Hash${C.reset}  : ${C.cyan}${localShort}${C.reset} (${localCommit})\n`);
 
     if (devCommit !== 'unknown' && localCommit !== 'unknown') {
         if (devCommit === localCommit || devShort === localShort) {
-            console.log(`  ${C.green}✔ PERFECT MATCH: iPhone is running the exact latest build!${C.reset}\n`);
+            console.log(`  ${C.green}PERFECT MATCH: iPhone is running the exact latest build.${C.reset}\n`);
         } else {
-            console.log(`  ${C.yellow}⚠ MISMATCH: iPhone build (${devShort}) differs from local commit (${localShort}).${C.reset}\n`);
+            console.log(`  ${C.yellow}MISMATCH: iPhone build (${devShort}) differs from local commit (${localShort}).${C.reset}\n`);
         }
-    }
-}
-
-async function handleRunSo(args) {
-    if (!connectedSocket) {
-        console.log(`${C.red}❌ No iPhone connected. Connect iPhone to KDB first.${C.reset}`);
-        return;
-    }
-    if (!args || args.length === 0) {
-        console.log(`${C.yellow}Usage: so <path_to_so> [dep2.so ...] [entrypoint] [--then <next_so_group> ...]${C.reset}`);
-        return;
-    }
-
-    // Split stages on --then or &&
-    const stages = [];
-    let currentStage = [];
-    for (const arg of args) {
-        if (arg === '--then' || arg === '&&') {
-            if (currentStage.length > 0) {
-                stages.push(currentStage);
-                currentStage = [];
-            }
-        } else {
-            currentStage.push(arg);
-        }
-    }
-    if (currentStage.length > 0) {
-        stages.push(currentStage);
-    }
-
-    for (let s = 0; s < stages.length; ++s) {
-        const stageArgs = stages[s];
-        if (stages.length > 1) {
-            console.log(`\n${C.magenta}═════════════════════════════════════════════════════${C.reset}`);
-            console.log(`${C.bold}${C.magenta}▶ STAGE [${s + 1}/${stages.length}]: so ${stageArgs.join(' ')}${C.reset}`);
-            console.log(`${C.magenta}═════════════════════════════════════════════════════${C.reset}`);
-        }
-        await executeSingleSoStage(stageArgs);
-    }
-}
-
-async function uploadAndRunSoChunked(filename, fileData, entrypoint) {
-    const CHUNK_SIZE = 32 * 1024; // 32KB per chunk
-    const totalChunks = Math.ceil(fileData.length / CHUNK_SIZE);
-    const sizeKb = (fileData.length / 1024).toFixed(2);
-
-    console.log(`\n${C.cyan}🚀 Uploading '${filename}' (${sizeKb} KB) in ${totalChunks} chunks to iPhone...${C.reset}`);
-
-    let lastRes = null;
-    for (let c = 0; c < totalChunks; ++c) {
-        const start = c * CHUNK_SIZE;
-        const end = Math.min(start + CHUNK_SIZE, fileData.length);
-        const chunkBuf = fileData.slice(start, end);
-        const isLast = (c === totalChunks - 1);
-
-        const payload = {
-            action: 'run_so_chunk',
-            filename: filename,
-            chunkIndex: c,
-            totalChunks: totalChunks,
-            dataBase64: chunkBuf.toString('base64'),
-            entrypoint: isLast ? entrypoint : '__none__'
-        };
-
-        const timeoutMs = isLast ? 30000 : 10000;
-        lastRes = await sendCommandWithTimeout(payload, timeoutMs);
-        if (!lastRes || !lastRes.success) {
-            console.log(`\n${C.red}❌ Chunk upload failed at [${c + 1}/${totalChunks}]: ${lastRes ? lastRes.error : 'timeout'}${C.reset}`);
-            return lastRes;
-        }
-
-        if (!isLast) {
-            console.log(`${C.dim}   Uploading progress: [${c + 1}/${totalChunks}] ${(((c + 1)/totalChunks)*100).toFixed(0)}%${C.reset}`);
-        } else {
-            console.log(`${C.dim}   Uploading progress: [${c + 1}/${totalChunks}] 100% -> 🚀 Executing on iPhone...${C.reset}`);
-        }
-    }
-    return lastRes;
-}
-
-async function executeSingleSoStage(args) {
-    const soFiles = [];
-    let entrypoint = null;
-
-    for (const arg of args) {
-        if (arg.endsWith('.so') || fs.existsSync(path.resolve(process.cwd(), arg))) {
-            soFiles.push(arg);
-        } else {
-            entrypoint = arg;
-        }
-    }
-
-    if (soFiles.length === 0) {
-        console.log(`${C.red}❌ No valid .so files specified in stage${C.reset}`);
-        return;
-    }
-
-    // Upload dependencies first (if any)
-    for (let i = 0; i < soFiles.length - 1; ++i) {
-        const depPath = path.resolve(process.cwd(), soFiles[i]);
-        if (!fs.existsSync(depPath)) {
-            console.log(`${C.red}❌ Dependency not found on PC: ${depPath}${C.reset}`);
-            return;
-        }
-        const depName = path.basename(depPath);
-        const depData = fs.readFileSync(depPath);
-        console.log(`${C.cyan}📦 Uploading dependency [${i+1}/${soFiles.length-1}]: '${depName}' (${(depData.length/1024).toFixed(2)} KB)...${C.reset}`);
-        await uploadAndRunSoChunked(depName, depData, '__none__');
-    }
-
-    // Upload and run the main target file (the last one)
-    const targetFile = soFiles[soFiles.length - 1];
-    const resolvedPath = path.resolve(process.cwd(), targetFile);
-    if (!fs.existsSync(resolvedPath)) {
-        console.log(`${C.red}❌ Target file not found on PC: ${resolvedPath}${C.reset}`);
-        return;
-    }
-
-    const filename = path.basename(resolvedPath);
-    const fileData = fs.readFileSync(resolvedPath);
-
-    isExecutingSo = true;
-    let res = null;
-    try {
-        res = await uploadAndRunSoChunked(filename, fileData, entrypoint);
-    } finally {
-        isExecutingSo = false;
-    }
-
-    if (res && res.log) {
-        const statusTag = res.success ? `${C.green}✔ TEST PASSED${C.reset}` : `${C.red}❌ TEST FAILED / RUNTIME ERROR${C.reset}`;
-        console.log(`\n=== REMOTE SO EXECUTION [${C.bold}${filename}${C.reset}]: ${statusTag} ===\n`);
-        console.log(res.log);
-
-        // 1. Save a per-.so log file
-        const perSoLogName = `${filename.replace('.so', '')}.log`;
-        const perSoPath = path.join(LOGS_DIR, perSoLogName);
-        fs.writeFileSync(perSoPath, res.log, 'utf8');
-
-        // 2. Also append to the combined logs/test_so.log
-        const collectivePath = path.join(LOGS_DIR, 'test_so.log');
-        const header = `\n═══════════════════════════════════════════════════════════════════\n` +
-                       `[${new Date().toISOString()}] EXECUTION: ${filename} (Status: ${res.success ? 'PASSED' : 'FAILED'})\n` +
-                       `═══════════════════════════════════════════════════════════════════\n`;
-        fs.appendFileSync(collectivePath, header + res.log + '\n', 'utf8');
-
-        console.log(`\n${C.green}💾 Log saved to: ${C.bold}${perSoPath}${C.reset} ${C.dim}(and appended to ${collectivePath})${C.reset}\n`);
-    } else {
-        const err = res && res.error ? res.error : "Timeout or failed to execute SO";
-        console.log(`${C.red}❌ Remote execution failed: ${err}${C.reset}`);
-    }
-}
-
-async function handleTest(testName) {
-    if (!connectedSocket) {
-        console.log(`${C.red}❌ No iPhone connected. Connect iPhone to KDB first.${C.reset}`);
-        return;
-    }
-    const target = (testName || 'gpu').toLowerCase();
-    if (target === 'list' || target === 'help') {
-        console.log(`\n${C.bold}Available KuDroid Tests:${C.reset}`);
-        console.log(`  - ${C.yellow}gpu${C.reset}        : Host-Native GPU EGL & Shader Compiler Test`);
-        console.log(`  - ${C.yellow}audio${C.reset}      : AudioShim OpenSL ES & AAudio Pipeline Test`);
-        console.log(`  - ${C.yellow}bionic${C.reset}     : Bionic Execution Test (test_bionic_lib.so)`);
-        console.log(`  - ${C.yellow}jni${C.reset}        : JNI Massive 200+ symbols test (test_jni_massive.so)`);
-        console.log(`  - ${C.yellow}jvm${C.reset}        : Avian JVM initialization test`);
-        console.log(`  - ${C.yellow}syscall${C.reset}    : Syscall Traps Test (test_syscalls.so)`);
-        console.log(`  - ${C.yellow}multi_elf${C.reset}  : Multi-ELF Linker Dependency Test`);
-        console.log(`  - ${C.yellow}opengl_so${C.reset}  : GPU OpenGL .so module test`);
-        console.log(`  - ${C.yellow}vulkan_so${C.reset}  : GPU Vulkan .so module test`);
-        console.log(`  - ${C.yellow}vfs${C.reset}        : Virtual File System Extended Path Remapper Test`);
-        console.log(`  - ${C.yellow}all${C.reset}        : Run all subsystem tests sequentially\n`);
-        return;
-    }
-
-    console.log(`\n${C.cyan}🚀 Triggering test '${target}' on iPhone...${C.reset}`);
-    const res = await sendCommandWithTimeout({ action: 'test', name: target }, 15000);
-    if (res && res.log) {
-        const statusTag = res.success ? `${C.green}✔ PASSED${C.reset}` : `${C.red}❌ FAILED / ISSUES DETECTED${C.reset}`;
-        console.log(`\n=== TEST RESULT [${C.bold}${target.toUpperCase()}${C.reset}]: ${statusTag} ===\n`);
-        console.log(res.log);
-        
-        // Auto-save log to logs/
-        const savedFile = res.file || `test_${target}.log`;
-        const targetPath = path.join(LOGS_DIR, savedFile);
-        fs.writeFileSync(targetPath, res.log, 'utf8');
-        console.log(`\n${C.green}💾 Test log auto-saved to: ${C.bold}${targetPath}${C.reset}\n`);
-    } else {
-        console.log(`${C.red}❌ Test command timed out or failed to execute.${C.reset}`);
-    }
-}
-
-async function handleDump(filename) {
-    if (!connectedSocket) {
-        console.log(`${C.red}❌ No iPhone connected. Connect iPhone to KDB first.${C.reset}`);
-        return;
-    }
-    const target = filename || 'kudroid_crash';
-    console.log(`${C.cyan}📥 Fetching '${target}' from iPhone Documents/logs...${C.reset}`);
-    const res = await sendCommandWithTimeout({ action: 'dump', file: target }, 10000);
-    if (res && res.success) {
-        const savedFile = res.file || `${target}.log`;
-        const targetPath = path.join(LOGS_DIR, savedFile);
-        let buffer;
-        if (res.dataBase64) {
-            buffer = Buffer.from(res.dataBase64, 'base64');
-        } else {
-            buffer = Buffer.from(res.content || '', 'utf8');
-        }
-        fs.writeFileSync(targetPath, buffer);
-        console.log(`${C.green}✔ Pulled successfully (${(buffer.length / 1024).toFixed(2)} KB)! Saved to: ${C.bold}${targetPath}${C.reset}`);
-        
-        // Preview the trailing lines
-        if (res.content) {
-            const lines = res.content.trim().split('\n');
-            const tail = lines.slice(-25).join('\n');
-            console.log(`\n${C.yellow}--- Log Tail (${savedFile}) ---${C.reset}\n${C.gray}${tail}${C.reset}\n`);
-        }
-    } else {
-        const err = res && res.error ? res.error : "Timeout or failed to retrieve file";
-        console.log(`${C.red}❌ Dump failed: ${err}${C.reset}`);
     }
 }
 
 async function handleList() {
     if (!connectedSocket) {
-        console.log(`${C.red}❌ No iPhone connected. Connect iPhone to KDB first.${C.reset}`);
+        console.log(`${C.red}No iPhone connected. Connect iPhone to KDB first.${C.reset}`);
         return;
     }
     console.log(`${C.gray}Fetching installed apps from iPhone...${C.reset}`);
@@ -686,53 +411,8 @@ async function handleList() {
             console.log();
         }
     } else {
-        console.log(`${C.red}❌ Failed to retrieve apps list (Timeout or error).${C.reset}`);
+        console.log(`${C.red}Failed to retrieve apps list (Timeout or error).${C.reset}`);
     }
-}
-
-async function handleRun(appId) {
-    if (!connectedSocket) {
-        console.log(`${C.red}❌ No iPhone connected.${C.reset}`);
-        return;
-    }
-    console.log(`${C.cyan}🚀 Launching '${appId}' on iPhone screen...${C.reset}`);
-    sendToClient({ action: 'run', appId: appId });
-    console.log(`${C.green}✔ Command sent! Auto-entering live debug stream (Press Ctrl+C to detach)...${C.reset}\n`);
-    startDebugMode();
-}
-
-async function handleStop() {
-    if (!connectedSocket) {
-        console.log(`${C.red}❌ No iPhone connected.${C.reset}`);
-        return;
-    }
-    console.log(`${C.yellow}Stopping guest app and returning to Launcher...${C.reset}`);
-    sendToClient({ action: 'stop' });
-    console.log(`${C.green}✔ Returned to Launcher.${C.reset}`);
-}
-
-async function handleInstall(apkPath) {
-    if (!connectedSocket) {
-        console.log(`${C.red}❌ No iPhone connected.${C.reset}`);
-        return;
-    }
-    const resolved = path.resolve(apkPath);
-    if (!fs.existsSync(resolved)) {
-        console.log(`${C.red}❌ File not found: ${resolved}${C.reset}`);
-        return;
-    }
-    const filename = path.basename(resolved);
-    const buffer = fs.readFileSync(resolved);
-    console.log(`${C.cyan}📦 Uploading ${filename} (${(buffer.length / 1024 / 1024).toFixed(2)} MB) to iPhone...${C.reset}`);
-    
-    // Send install header
-    sendToClient({
-        action: 'install',
-        filename: filename,
-        dataBase64: buffer.toString('base64')
-    });
-    console.log(`${C.green}✔ APK stream pushed. Auto-monitoring installation progress...${C.reset}\n`);
-    startDebugMode();
 }
 
 function startDebugMode() {
@@ -744,39 +424,18 @@ function startDebugMode() {
 
 function stopDebugMode() {
     isDebugMode = false;
-    console.log(`\n${C.yellow}⏹ Debug stream stopped.${C.reset}`);
-    
+    console.log(`\n${C.yellow}Debug stream stopped.${C.reset}`);
+
     if (debugSessionLogs.length > 0) {
         const nowStr = new Date().toISOString().replace(/[:.]/g, '-');
         const filename = `debug_${nowStr}.log`;
         const targetPath = path.join(LOGS_DIR, filename);
         fs.writeFileSync(targetPath, debugSessionLogs.join('\n'), 'utf8');
-        console.log(`${C.green}💾 Session log saved (${debugSessionLogs.length} lines): ${C.bold}${targetPath}${C.reset}\n`);
+        console.log(`${C.green}Session log saved (${debugSessionLogs.length} lines): ${C.bold}${targetPath}${C.reset}\n`);
     } else {
         console.log(`${C.gray}No logs recorded in this session.${C.reset}\n`);
     }
     prompt();
-}
-
-function handleSave(type) {
-    const nowStr = new Date().toISOString().replace(/[:.]/g, '-');
-    const targetFile = path.join(LOGS_DIR, `snapshot_${type || 'all'}_${nowStr}.log`);
-    if (debugSessionLogs.length > 0) {
-        fs.writeFileSync(targetFile, debugSessionLogs.join('\n'), 'utf8');
-        console.log(`${C.green}💾 Snapshot saved: ${targetFile}${C.reset}`);
-    } else {
-        console.log(`${C.yellow}No recent log buffer to save. Run 'debug' first.${C.reset}`);
-    }
-}
-
-function handleClear(args) {
-    if (!connectedSocket) {
-        console.log(`${C.red}❌ No iPhone connected.${C.reset}`);
-        return;
-    }
-    const target = args[0] || 'all';
-    sendToClient({ action: 'clear', target: target });
-    console.log(`${C.green}✔ Clear command (${target}) sent to iPhone.${C.reset}`);
 }
 
 function sendCommandWithTimeout(payload, timeoutMs = 5000) {
@@ -800,13 +459,7 @@ function sendCommandWithTimeout(payload, timeoutMs = 5000) {
 // ── START SERVER ────────────────────────────────────────────────────────────
 server.listen(PORT, '0.0.0.0', () => {
     console.clear();
-    console.log(`
-${C.bold}${C.green}╔═══════════════════════════════════════════════════════════════╗
-║             KuDroid Debug Bridge (KDB) Host Server            ║
-║              Port: ${PORT} | WebSocket: ws://0.0.0.0:${PORT}          ║
-╚═══════════════════════════════════════════════════════════════╝${C.reset}
-
-${C.cyan}Type ${C.bold}'help'${C.reset}${C.cyan} for command list. Waiting for iPhone connection...${C.reset}
-`);
+    console.log(`\n${C.bold}${C.green}${getLocalIpAddress()}:${PORT}${C.reset}\n`);
+    console.log(`${C.cyan}Type ${C.bold}'help'${C.reset}${C.cyan} for command list. Waiting for iPhone connection...${C.reset}\n`);
     prompt();
 });
