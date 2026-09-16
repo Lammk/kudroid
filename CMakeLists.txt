@@ -41,6 +41,7 @@ add_library(kudroid_core STATIC
     src/VFSPathRemapper.cpp
     src/bionic_log_trampoline.S
     src/elf_loader.cpp
+    src/ExecMemory.cpp
     src/elf_x18.cpp
     src/library_manager.cpp
     src/platform/InputShim.cpp

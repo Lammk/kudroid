@@ -1,45 +1,9 @@
 #include "kudroid/kuart/JitCache.h"
 
 #include <cstdio>
-#include <cstring>
-#include <sys/mman.h>
-#include <unistd.h>
-
-#if defined(__APPLE__)
-#include <TargetConditionals.h>
-#include <libkern/OSCacheControl.h>
-#include <pthread.h>
-#endif
 
 namespace kudroid {
 namespace kuart {
-namespace {
-
-size_t PageSize() {
-    const long v = ::sysconf(_SC_PAGESIZE);
-    return v > 0 ? static_cast<size_t>(v) : 4096u;
-}
-
-size_t RoundUp(size_t n, size_t align) {
-    return (n + align - 1) & ~(align - 1);
-}
-
-// Map executable memory, or nullptr.
-void* MapExecutable(size_t size) {
-    const int prot = PROT_READ | PROT_WRITE;
-    int flags = MAP_PRIVATE | MAP_ANON;
-    void* mem = MAP_FAILED;
-#if defined(__APPLE__) && TARGET_OS_OSX
-    mem = ::mmap(nullptr, size, prot, flags | MAP_JIT, -1, 0);
-    if (mem != MAP_FAILED) return mem;
-#endif
-    mem = ::mmap(nullptr, size, prot, flags, -1, 0);
-    if (mem == MAP_FAILED) return nullptr;
-
-    return mem;
-}
-
-}  // namespace
 
 JitCache& JitCache::Instance() {
     static JitCache instance;
@@ -57,99 +21,66 @@ size_t JitCache::EffectiveBudgetBytes(const SystemMemory& memory) {
 
 JitCache::~JitCache() {
     for (Block& b : blocks_) {
-        if (b.memory != nullptr) ::munmap(b.memory, b.capacity);
+        ExecMemory::Free(b.region);
     }
     blocks_.clear();
 }
 
 bool JitCache::IsAvailable() {
-    // Cached; code-signing status is fixed at exec.
-    static const bool available = [] {
-        const size_t size = PageSize();
-        void* probe = MapExecutable(size);
-        if (probe == nullptr) {
-            std::fprintf(stderr,
-                         "[KuART][JIT] executable memory unavailable; running"
-                         " interpreter only. Enable JIT (debugger attached,"
-                         " LiveContainer JIT mode, or TrollStore) for compiled code.\n");
-            return false;
-        }
-        // Probe the Commit transition, never RWX.
-        const bool executable = ::mprotect(probe, size, PROT_READ | PROT_EXEC) == 0;
-        if (executable) {
-            (void)::mprotect(probe, size, PROT_READ | PROT_WRITE);
-        }
-        ::munmap(probe, size);
-        if (!executable) {
-            std::fprintf(stderr, "[KuART][JIT] executable transition unavailable; running interpreter only.\n");
-            return false;
-        }
-        std::fprintf(stderr, "[KuART][JIT] executable memory available\n");
-        return true;
-    }();
+    // Cached; the probe result is fixed at exec: which memory strategies the
+    // kernel sanctions cannot change while the process runs. The probe executes
+    // written code, so its answer covers the whole pipeline this cache serves.
+    static const bool available = ExecMemory::IsFetchable();
+    if (!available) {
+        std::fprintf(stderr,
+                     "[KuART][JIT] executable memory unavailable; running"
+                     " interpreter only. Enable JIT (debugger attached,"
+                     " LiveContainer JIT mode, or TrollStore) for compiled code.\n");
+    }
     return available;
 }
 
-void* JitCache::Allocate(size_t size) {
-    if (size == 0) return nullptr;
-    if (!IsAvailable()) return nullptr;
+ExecMemory::Region JitCache::Allocate(size_t size) {
+    if (size == 0) return {};
+    if (!IsAvailable()) return {};
 
-    // One page-aligned allocation per method; sharing RX pages would fault.
-    const size_t pageSize = PageSize();
-    const size_t need = RoundUp(size, pageSize);
-    if (need > kBlockSize) return nullptr;
+    // One page-aligned allocation per method; sharing pages would seal a later
+    // method's memory when an earlier one commits.
+    const size_t pageSize = ExecMemory::PageSize();
+    const size_t need = (size + pageSize - 1) & ~(pageSize - 1);
+    if (need > kBlockSize) return {};
 
     std::lock_guard<std::mutex> lock(mutex_);
     const size_t budget = EffectiveBudgetBytes(query_system_memory());
-    if (budget == 0 || bytes_allocated_ + need > budget) return nullptr;
+    if (budget == 0 || bytes_allocated_ + need > budget) return {};
 
     if (!blocks_.empty()) {
         Block& tail = blocks_.back();
-        if (tail.used + need <= tail.capacity) {
-            uint8_t* p = tail.memory + tail.used;
+        if (tail.used + need <= tail.region.size) {
+            uint8_t* base = static_cast<uint8_t*>(tail.region.writeView);
+            uint8_t* p = base + tail.used;
             tail.used += need;
             bytes_allocated_ += need;
-            return p;
+            return ExecMemory::Slice(tail.region, p, need);
         }
     }
 
-    const size_t capacity = RoundUp(kBlockSize, pageSize);
-    auto* memory = static_cast<uint8_t*>(MapExecutable(capacity));
-    if (memory == nullptr) return nullptr;
+    ExecMemory::Region block = ExecMemory::Allocate(kBlockSize, /*exec=*/true);
+    if (block.writeView == nullptr) return {};
 
-    blocks_.push_back(Block{memory, need, capacity});
+    uint8_t* p = static_cast<uint8_t*>(block.writeView);
+    blocks_.push_back(Block{block, need});
     bytes_allocated_ += need;
-    return memory;
+    return ExecMemory::Slice(block, p, need);
 }
 
-bool JitCache::Commit(void* code, size_t size) {
-    if (code == nullptr || size == 0) return false;
-
-    // Page-align outwards for mprotect; covers only this method.
-    const size_t pageSize = PageSize();
-    auto addr = reinterpret_cast<uintptr_t>(code);
-    const uintptr_t start = addr & ~(pageSize - 1);
-    const uintptr_t end = RoundUp(addr + size, pageSize);
-
-#if defined(__APPLE__) && TARGET_OS_OSX
-    // Under MAP_JIT, restore write-protect after emitting code.
-    pthread_jit_write_protect_np(1);
-#endif
-
-    if (::mprotect(reinterpret_cast<void*>(start), end - start,
-                   PROT_READ | PROT_EXEC) != 0) {
-        std::fprintf(stderr, "[KuART][JIT] mprotect(PROT_EXEC) failed: %s\n",
-                     std::strerror(errno));
-        return false;
+void* JitCache::Commit(const ExecMemory::Region& region, void* code, size_t size) {
+    if (region.writeView == nullptr || code == nullptr || size == 0) return nullptr;
+    if (!ExecMemory::Commit(region, code, size)) {
+        std::fprintf(stderr, "[KuART][JIT] executable transition failed\n");
+        return nullptr;
     }
-
-    // Flush caches so the CPU fetches the bytes just written.
-#if defined(__APPLE__)
-    sys_icache_invalidate(reinterpret_cast<void*>(start), end - start);
-#else
-    __builtin___clear_cache(reinterpret_cast<char*>(start), reinterpret_cast<char*>(end));
-#endif
-    return true;
+    return ExecMemory::ExecPointer(region, code);
 }
 
 size_t JitCache::BytesAllocated() const {

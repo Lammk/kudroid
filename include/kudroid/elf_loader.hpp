@@ -7,6 +7,8 @@
 #include <vector>
 #include <mutex>
 
+#include "kudroid/ExecMemory.h"
+
 namespace kudroid {
 
 /// Register a mapped guest module so the crash handler can symbolicate guest PCs.
@@ -105,12 +107,37 @@ private:
     // Apply final W^X safe segment protections after relocations have completed.
     bool applyProtections();
 
+    // Writable host address for guest image offset `vaddr` (ELF vaddr). Under
+    // split-image mapping the exec prefix is written through the backing view,
+    // the data suffix through the guest-visible mapping itself.
+    char* writePtrAt(std::uint64_t vaddr);
+
+    // Seal the split-image layout after relocations (icache flush only; the
+    // RX alias was established at map time).
+    bool applyProtectionsSplit();
+
     std::string          path_;
     void*                base_     = nullptr;
+    // Executable view of the loaded image (kudroid::ExecMemory). Equals base_
+    // on every strategy except dual-map aliasing, where code must be fetched
+    // through a separate RX mapping of the same backing pages.
+    void*                execBase_ = nullptr;
+    // Split-image mapping (dual-map platforms only): the exec prefix is a
+    // remapped RX alias of the MAP_JIT backing; the data suffix is a plain RW
+    // mapping placed adjacent so guest virtual addresses stay contiguous.
+    void*                writeBase_ = nullptr;   // loader writes for the prefix (adjusted space)
+    void*                spanBase_ = nullptr;    // guest-visible contiguous span (unadjusted)
+    std::uint64_t        prefixBytes_ = 0;       // image bytes covered by the alias
+    std::uint64_t        minVaddr_ = 0;          // lowest p_vaddr of this image
+    bool                 splitImage_ = false;
     // The base of the original mmap region (before base_ is adjusted by -minVaddr),
     // so the destructor can munmap safely.
     void*                allocBase_ = nullptr;
     std::size_t          allocSize_ = 0;
+    // Facility-owned allocations backing the image (split-image layout).
+    kudroid::ExecMemory::Region allocRegion_;
+    void*                dataMap_ = nullptr;      // plain mmap'd data suffix
+    std::size_t          dataMapSize_ = 0;
     std::uint64_t        entry_    = 0;
     std::vector<Segment> segments_;
     bool                 parsed_   = false;

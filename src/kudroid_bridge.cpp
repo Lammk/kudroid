@@ -2,6 +2,7 @@
 #include "kudroid/DeviceProfile.h"
 #include "kudroid/FaultSkip.h"
 #include "kudroid/elf_loader.hpp"
+#include "kudroid/ExecMemory.h"
 #include "kudroid/BionicShim.h"
 #include "kudroid/VFSPathRemapper.h"
 #include "kudroid/APKExtractor.h"
@@ -2633,56 +2634,13 @@ extern "C" int csops(pid_t pid, unsigned int ops, void* useraddr, size_t usersiz
 // Return 1 when JIT memory is available, 0 otherwise.
 extern "C" int kudroid_is_jit_enabled(void) {
 #if defined(__APPLE__)
-    // Ask the kernel: map a page and try to make it executable.
+    // Ask the kernel the way the exec-memory facility does: execute written code
+    // (ADRP + RET) under a fault guard. Every route that grants the permission
+    // ends in fetchable written memory, and a succeeded mprotect alone no longer
+    // proves that — on hardware-W^X regimes it can succeed while the fetch faults.
     //
-    // This is not one signal among several — it is the question itself. Every route that
-    // grants the permission (a TrollStore install, an attached debugger, the allow-jit
-    // entitlement, LiveContainer's JIT mode) ends in the same place: mprotect(PROT_EXEC)
-    // succeeds. And if it fails, the process cannot execute memory it wrote, whatever any
-    // other indicator says.
-    //
-    // So a negative result is returned as-is. An earlier version consulted the proxies
-    // below after a negative probe, on the theory that a false negative would wrongly
-    // refuse to launch. That was backwards: mprotect cannot report a false negative for
-    // the operation it just performed, while the proxies report false POSITIVES readily —
-    // /Applications/TrollStore.app exists whenever TrollStore is installed on the device,
-    // which says nothing about how THIS app was signed. The result was an app sideloaded
-    // without JIT reporting "JIT: Enabled" on a device that happens to have TrollStore.
-    //
-    // Cached: code-signing status is fixed at exec, and this is asked repeatedly.
-    static const int probed = [] {
-        const size_t len = static_cast<size_t>(getpagesize());
-        void* page = ::mmap(nullptr, len, PROT_READ | PROT_WRITE,
-                            MAP_PRIVATE | MAP_ANON, -1, 0);
-        if (page == MAP_FAILED) return -1;  // out of memory: no answer, not a "no"
-        const int rc = ::mprotect(page, len, PROT_READ | PROT_EXEC);
-        ::munmap(page, len);
-        return rc == 0 ? 1 : 0;
-    }();
-    if (probed >= 0) return probed;
-
-    // Only reached when the probe could not run at all, which means the process could not
-    // allocate one page. The proxies are guesses, used here because a guess beats nothing.
-
-    // CS_DEBUGGED: a debugger is attached (AltStore, SideStore, Sideloadly, Xcode,
-    // StikDebug, Jitterbug) — the state that permits RW -> RX.
-    unsigned int flags = 0;
-    if (csops(getpid(), CS_OPS_STATUS, &flags, sizeof(flags)) == 0) {
-        if (flags & CS_DEBUGGED) {
-            return 1;
-        }
-    }
-
-    // TrollStore installs are signed with unrestricted entitlements. Checked through paths
-    // that are safe to stat; anything privileged here would risk SIGKILL. Note this only
-    // establishes that TrollStore exists on the device, so it is deliberately last and
-    // only consulted when the kernel could not be asked.
-    if (access("/Applications/TrollStore.app", F_OK) == 0 ||
-        access("/var/mobile/Library/TrollStore", F_OK) == 0 ||
-        getenv("TROLLSTORE_ENABLED") != nullptr) {
-        return 1;
-    }
-    return 0; // Definitely no JIT on this device.
+    // Cached: the answer cannot change while the process runs.
+    return ExecMemory::IsFetchable() ? 1 : 0;
 #else
     return 1;
 #endif
@@ -2697,10 +2655,9 @@ extern "C" const char* kudroid_jit_status(void) {
     const char* text = "JIT: Disabled";
 #if defined(__APPLE__)
     if (kudroid_is_jit_enabled()) {
-        unsigned int flags = 0;
-        const bool debugged = csops(getpid(), CS_OPS_STATUS, &flags, sizeof(flags)) == 0 &&
-                              (flags & CS_DEBUGGED) != 0;
-        text = debugged ? "JIT: Enabled (debugger)" : "JIT: Enabled";
+        static char buf[64];
+        std::snprintf(buf, sizeof(buf), "JIT: Enabled (%s)", ExecMemory::ModeName());
+        text = buf;
     }
 #else
     if (kudroid_is_jit_enabled()) text = "JIT: Enabled";

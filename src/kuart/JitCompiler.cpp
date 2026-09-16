@@ -227,14 +227,16 @@ size_t JitCompiler::RefusedCount() { return g_refused.load(); }
 void* JitCompiler::AllocateAndCommit(const std::vector<uint32_t>& code) {
     if (code.empty()) return nullptr;
     const size_t bytes = code.size() * sizeof(uint32_t);
-    void* mem = JitCache::Instance().Allocate(bytes);
-    if (mem == nullptr) {
+    ExecMemory::Region region = JitCache::Instance().Allocate(bytes);
+    if (region.writeView == nullptr) {
         std::fprintf(stderr, "[KuART][JIT] allocation refused by executable-memory or pressure budget\n");
         return nullptr;
     }
+    void* mem = region.writeView;
+    ExecMemory::BeginWrite();
     std::memcpy(mem, code.data(), bytes);
-    if (!JitCache::Instance().Commit(mem, bytes)) return nullptr;
-    return mem;
+    void* exec = JitCache::Instance().Commit(region, mem, bytes);
+    return exec;
 }
 
 JitEntry JitCompiler::Compile(const DexMethod* method, std::string* reason) {

@@ -1,5 +1,11 @@
 // Executable memory for KuART's JIT.
 //
+// Executable memory is provided by kudroid::ExecMemory, which selects a strategy
+// by probing the kernel once (dual-map aliasing, MAP_JIT write-toggle, or legacy
+// RW->RX mprotect) — no OS version checks. Callers write code through the region's
+// writeView and execute it through execView; on every strategy except dual-map the
+// two views are the same pointer.
+//
 // iOS refuses PROT_EXEC on anonymous memory unless the process is being debugged or
 // carries the JIT entitlement, and under LiveContainer's JITLess mode neither holds.
 // That is not an error to work around — it is a permission the platform declines to
@@ -18,6 +24,7 @@
 #include <mutex>
 #include <vector>
 
+#include "kudroid/ExecMemory.h"
 #include "kudroid/platform/MemoryInfo.h"
 
 namespace kudroid {
@@ -29,13 +36,8 @@ public:
     // caches would each pay the per-block minimum.
     static JitCache& Instance();
 
-    // True when this process may execute memory it wrote.
-    //
-    // Probed once by actually mapping a page and calling mprotect, because that is the
-    // question being asked. Indirect checks (CS_DEBUGGED, an entitlement in the
-    // signature) can disagree with the kernel in either direction, and under
-    // LiveContainer the guest inherits the host's signing status, so KuDroid's own
-    // entitlements say nothing about what it is allowed to do.
+    // True when this process may execute memory it wrote — proven by executing it,
+    // not by permission probes that can report false positives.
     static bool IsAvailable();
 
     // Return the current append-only budget. A zero process headroom means the
@@ -46,24 +48,25 @@ public:
     // Reserve writable memory for at least `size` bytes of code.
     //
     // The returned block is page-aligned and owns its pages exclusively, because
-    // Commit() can only change protection a page at a time: if two methods shared a
-    // page, committing the first would make the second's memory read-only before it was
-    // written. The remainder of the last page is left unused, which costs address space
-    // and nothing else.
+    // committing can seal pages read-only: if two methods shared a page, committing
+    // the first would seal the second's memory before it was written. The remainder
+    // of the last page is left unused, which costs address space and nothing else.
     //
-    // Returns nullptr when JIT is unavailable, when `size` exceeds what a block can
-    // hold, or when the total budget is exhausted. The memory is writable but NOT yet
-    // executable — call Commit() when the code is complete.
-    void* Allocate(size_t size);
+    // Returns an empty Region when JIT is unavailable, when `size` exceeds what a
+    // block can hold, or when the total budget is exhausted. The writeView is
+    // writable but the code is NOT yet executable — call Commit() when complete.
+    ExecMemory::Region Allocate(size_t size);
 
-    // Make previously allocated code executable and flush the instruction cache.
+    // Make previously written code executable and flush the instruction cache.
     //
     // arm64 has split instruction and data caches: freshly written code sits in the
     // data cache while the instruction cache still holds whatever was there before, so
     // without the flush the CPU executes stale bytes. That is a fault with no
     // diagnostic — the pc lands in the middle of an instruction that was never
     // written.
-    bool Commit(void* code, size_t size);
+    //
+    // Returns the pointer to execute (the region's exec view), or nullptr on failure.
+    void* Commit(const ExecMemory::Region& region, void* code, size_t size);
 
     size_t BytesAllocated() const;
     size_t BlockCount() const;
@@ -82,9 +85,8 @@ private:
     static constexpr size_t kBlockSize = 256u * 1024u;
 
     struct Block {
-        uint8_t* memory = nullptr;
+        ExecMemory::Region region;
         size_t used = 0;
-        size_t capacity = 0;
     };
 
     mutable std::mutex mutex_;

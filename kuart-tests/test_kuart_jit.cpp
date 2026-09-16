@@ -21,6 +21,7 @@ void Check(bool ok, const std::string& what) {
     if (!ok) ++g_failures;
 }
 
+using kudroid::ExecMemory;
 using kudroid::kuart::JitCache;
 using kudroid::kuart::JitCompiler;
 using kudroid::kuart::OatFile;
@@ -185,17 +186,18 @@ void TestJitCache() {
           "off arm64 the compiler declines even when executable memory exists");
 #endif
 
-    void* p = cache.Allocate(64);
+    ExecMemory::Region p = cache.Allocate(64);
     if (available) {
-        Check(p != nullptr, "Allocate returns memory when JIT is available");
-        if (p != nullptr) {
-            Check((reinterpret_cast<uintptr_t>(p) & 3u) == 0,
+        Check(p.writeView != nullptr, "Allocate returns memory when JIT is available");
+        if (p.writeView != nullptr) {
+            Check((reinterpret_cast<uintptr_t>(p.writeView) & 3u) == 0,
                   "allocation is 4-byte aligned for arm64 instructions");
             // Write a ret and commit, which is the smallest thing that proves the
             // memory really became executable rather than merely being reported so.
             const uint32_t ret = 0xD65F03C0u;
-            std::memcpy(p, &ret, sizeof(ret));
-            Check(cache.Commit(p, sizeof(ret)), "Commit makes the code executable");
+            std::memcpy(p.writeView, &ret, sizeof(ret));
+            void* exec = cache.Commit(p, p.writeView, sizeof(ret));
+            Check(exec != nullptr, "Commit makes the code executable");
         }
 
         // Two methods in a row: the second must be writable AFTER the first is
@@ -210,42 +212,43 @@ void TestJitCache() {
         // Nothing here is arm64-specific: JitCache only maps and protects memory, so
         // this reproduces on any host where mprotect works, which is where it should
         // have been caught before shipping.
-        void* first = cache.Allocate(16);
-        if (first != nullptr) {
+        ExecMemory::Region first = cache.Allocate(16);
+        if (first.writeView != nullptr) {
             const uint32_t ret = 0xD65F03C0u;
-            std::memcpy(first, &ret, sizeof(ret));
-            Check(cache.Commit(first, sizeof(ret)), "first method commits");
+            std::memcpy(first.writeView, &ret, sizeof(ret));
+            Check(cache.Commit(first, first.writeView, sizeof(ret)) != nullptr,
+                  "first method commits");
 
-            void* second = cache.Allocate(16);
-            Check(second != nullptr, "a second method can be allocated after a commit");
-            if (second != nullptr) {
+            ExecMemory::Region second = cache.Allocate(16);
+            Check(second.writeView != nullptr, "a second method can be allocated after a commit");
+            if (second.writeView != nullptr) {
                 const size_t page = static_cast<size_t>(::sysconf(_SC_PAGESIZE));
-                const uintptr_t a = reinterpret_cast<uintptr_t>(first);
-                const uintptr_t b = reinterpret_cast<uintptr_t>(second);
+                const uintptr_t a = reinterpret_cast<uintptr_t>(first.writeView);
+                const uintptr_t b = reinterpret_cast<uintptr_t>(second.writeView);
                 Check((a & (page - 1)) == 0, "an allocation starts on a page boundary");
                 Check((a / page) != (b / page),
                       "two allocations never share a page (Commit would seal the second)");
                 // The write that faulted on device. Reaching the Check below at all is
                 // the result being tested.
-                std::memcpy(second, &ret, sizeof(ret));
-                Check(cache.Commit(second, sizeof(ret)),
+                std::memcpy(second.writeView, &ret, sizeof(ret));
+                Check(cache.Commit(second, second.writeView, sizeof(ret)) != nullptr,
                       "second method is still writable, then commits");
             }
         }
 
         // A request larger than a block cannot be satisfied by bump allocation and
         // must be refused rather than silently truncated.
-        Check(cache.Allocate(JitCache::kMaxTotalBytes * 2) == nullptr,
+        Check(cache.Allocate(JitCache::kMaxTotalBytes * 2).writeView == nullptr,
               "an oversized request is refused, not truncated");
     } else {
         // The path that matters on a stock iOS install and under LiveContainer JITLess.
-        Check(p == nullptr, "Allocate returns null when JIT is unavailable");
-        Check(!cache.Commit(nullptr, 0), "Commit(null) is safe");
+        Check(p.writeView == nullptr, "Allocate returns null when JIT is unavailable");
+        Check(cache.Commit({}, nullptr, 0) == nullptr, "Commit(null) is safe");
         Check(!JitCompiler::IsAvailable(), "the compiler reports itself unavailable too");
     }
 
-    Check(cache.Allocate(0) == nullptr, "a zero-size request is refused");
-    Check(!cache.Commit(nullptr, 16), "Commit rejects a null pointer");
+    Check(cache.Allocate(0).writeView == nullptr, "a zero-size request is refused");
+    Check(cache.Commit({}, nullptr, 16) == nullptr, "Commit rejects a null pointer");
 }
 
 void TestCompilerRefusal() {

@@ -1,6 +1,7 @@
 #include "kudroid/elf_loader.hpp"
 #include "kudroid/ElfX18.h"
 #include "kudroid/BionicShim.h"
+#include "kudroid/ExecMemory.h"
 
 #include <cerrno>
 #include <cstdio>
@@ -107,9 +108,25 @@ ElfLoader::ElfLoader(std::string path)
 
 ElfLoader::~ElfLoader() {
     releaseFileMapping();
-    if (allocBase_) {
+    if (splitImage_) {
+        // One deallocate covers the whole span: RX alias prefix + RW data suffix.
+        if (spanBase_) {
+            ::munmap(spanBase_, prefixBytes_ + dataMapSize_);
+        }
+        ExecMemory::Free(allocRegion_);
+        spanBase_ = nullptr;
+        dataMap_ = nullptr;
+        dataMapSize_ = 0;
+        prefixBytes_ = 0;
+        splitImage_ = false;
+    } else if (allocBase_) {
         ::munmap(allocBase_, allocSize_);
     }
+    allocBase_ = nullptr;
+    allocSize_ = 0;
+    base_ = nullptr;
+    execBase_ = nullptr;
+    writeBase_ = nullptr;
 }
 
 void ElfLoader::releaseFileMapping() {
@@ -126,8 +143,17 @@ void ElfLoader::releaseFileMapping() {
 ElfLoader::ElfLoader(ElfLoader&& other) noexcept
     : path_(std::move(other.path_)),
       base_(other.base_),
+      execBase_(other.execBase_),
+      writeBase_(other.writeBase_),
+      spanBase_(other.spanBase_),
+      prefixBytes_(other.prefixBytes_),
+      minVaddr_(other.minVaddr_),
+      splitImage_(other.splitImage_),
       allocBase_(other.allocBase_),
       allocSize_(other.allocSize_),
+      allocRegion_(other.allocRegion_),
+      dataMap_(other.dataMap_),
+      dataMapSize_(other.dataMapSize_),
       entry_(other.entry_),
       segments_(std::move(other.segments_)),
       parsed_(other.parsed_),
@@ -153,18 +179,35 @@ ElfLoader::ElfLoader(ElfLoader&& other) noexcept
     other.allocBase_ = nullptr;
     other.allocSize_ = 0;
     other.base_ = nullptr;
+    other.execBase_ = nullptr;
+    other.writeBase_ = nullptr;
+    other.spanBase_ = nullptr;
+    other.prefixBytes_ = 0;
+    other.splitImage_ = false;
+    other.dataMap_ = nullptr;
+    other.dataMapSize_ = 0;
+    other.allocRegion_ = {};
 }
 
 ElfLoader& ElfLoader::operator=(ElfLoader&& other) noexcept {
     if (this != &other) {
         releaseFileMapping();
         if (allocBase_) {
-            ::munmap(allocBase_, allocSize_);
+            ExecMemory::Free(allocRegion_);
         }
         path_ = std::move(other.path_);
         base_ = other.base_;
+        execBase_ = other.execBase_;
+        writeBase_ = other.writeBase_;
+        spanBase_ = other.spanBase_;
+        prefixBytes_ = other.prefixBytes_;
+        minVaddr_ = other.minVaddr_;
+        splitImage_ = other.splitImage_;
         allocBase_ = other.allocBase_;
         allocSize_ = other.allocSize_;
+        allocRegion_ = other.allocRegion_;
+        dataMap_ = other.dataMap_;
+        dataMapSize_ = other.dataMapSize_;
         entry_ = other.entry_;
         segments_ = std::move(other.segments_);
         parsed_ = other.parsed_;
@@ -189,6 +232,14 @@ ElfLoader& ElfLoader::operator=(ElfLoader&& other) noexcept {
         other.allocBase_ = nullptr;
         other.allocSize_ = 0;
         other.base_ = nullptr;
+        other.execBase_ = nullptr;
+        other.writeBase_ = nullptr;
+        other.spanBase_ = nullptr;
+        other.prefixBytes_ = 0;
+        other.splitImage_ = false;
+        other.dataMap_ = nullptr;
+        other.dataMapSize_ = 0;
+        other.allocRegion_ = {};
         other.fileData_ = nullptr;
         other.fileSize_ = 0;
     }
@@ -592,45 +643,161 @@ bool ElfLoader::map() {
     }
     const uint64_t pageSize = static_cast<uint64_t>(pageSizeValue);
     uint64_t totalSize = maxVaddr - minVaddr;
-    totalSize = (totalSize + pageSize - 1) & ~(pageSize - 1);
-
-    // allocate a contiguous block of memory (with map_jit on apple silicon)
+    totalSize = (totalSize + pageSize - 1) & ~(pageSize - 1);    // ---- Address-space layout ----
+    //
+    // Under dual-map (hardware-monitored W^X regimes), one mapping cannot be both
+    // writable and fetchable, yet the ELF image is a single vaddr space: guest
+    // pointers must reach executable AND data bytes through arithmetic on base_.
+    // So the image lives in one CONTIGUOUS span built from two mappings:
+    //
+    //   [span .. span+prefix)  RX alias of a MAP_JIT backing (loader writes there)
+    //   [span+prefix .. end)   plain RW mapping (writable data)
+    //
+    // prefix = page-align-down of the first non-writable executable PT_LOAD, so
+    // every byte that must be fetched is behind the alias and every byte that must
+    // be written at runtime keeps a writable host mapping. base_ (slid) points at
+    // the span, so relocated pointers land in fetchable memory for code and at the
+    // right bytes for data — one base for both, exactly like a single mapping.
+    //
+    // Everywhere else (kernel allows the RW->RX transition — iOS 18 and earlier,
+    // macOS without the hardware monitor, Linux), a single anonymous RW mapping
+    // with the historical layout is used and all permission decisions stay in
+    // applyProtections(). The choice comes from the kernel probe, not OS versions.
     fprintf(stderr, "[KuDroidELF] Mapping ELF segments for %s (size: %zu)\n", path_.c_str(), (size_t)totalSize);
-    int prot = PROT_READ | PROT_WRITE;
-    int flags = MAP_PRIVATE | MAP_ANONYMOUS;
-    [[maybe_unused]] bool usedMapJit = false;
-#if defined(__APPLE__) && TARGET_OS_OSX
-    // preferred path (hardened runtime): map_jit pages, written only during
-    // The stream's jit write protection is disabled.
-    base_ = mmap(nullptr, totalSize, prot, flags | MAP_JIT, -1, 0);
-    if (base_ != MAP_FAILED) {
-        usedMapJit = true;
-    } else {
-        base_ = mmap(nullptr, totalSize, prot, flags, -1, 0);
+
+    uint64_t firstExecOff = UINT64_MAX;
+    for (const auto& seg : segments_) {
+        if ((seg.flags & 1) && !(seg.flags & 2)) {
+            if (seg.vaddr - minVaddr < firstExecOff) firstExecOff = seg.vaddr - minVaddr;
+        }
     }
+    const uint64_t pageMask = static_cast<uint64_t>(pageSize) - 1;
+
+    const bool wantSplit = ExecMemory::Mode() == ExecMemMode::kDualMap &&
+                           firstExecOff != UINT64_MAX;
+    if (wantSplit) {
+        const uint64_t splitOff = firstExecOff & ~pageMask;
+        if (splitOff == 0) {
+            lastError_ = "image has no writable prefix for split mapping";
+            base_ = nullptr;
+            return false;
+        }
+        if (splitOff >= totalSize) {
+            lastError_ = "image has no writable suffix for split mapping";
+            base_ = nullptr;
+            return false;
+        }
+
+        // Reserve one contiguous VM range for the whole image.
+        char* span = static_cast<char*>(
+            ::mmap(nullptr, totalSize, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+        if (span == MAP_FAILED) {
+            lastError_ = "mmap failed: span reservation unavailable";
+            base_ = nullptr;
+            return false;
+        }
+        ExecMemory::Region backing = ExecMemory::AllocateBacking(splitOff);
+        if (backing.writeView == nullptr) {
+            ::munmap(span, totalSize);
+            lastError_ = "mmap failed (no JIT?): backing unavailable";
+            base_ = nullptr;
+            return false;
+        }
+
+#if defined(__APPLE__)
+        // Free the reserved prefix range and remap the backing's pages into it as
+        // RX. mach_vm_remap shares the physical pages: writes through the backing
+        // view are fetchable through the alias without any permission transition.
+        mach_vm_address_t aliasAddr = reinterpret_cast<mach_vm_address_t>(span);
+        kern_return_t kr = mach_vm_deallocate(
+            mach_task_self(), aliasAddr, splitOff);
+        if (kr == KERN_SUCCESS) {
+            kr = mach_vm_remap(mach_task_self(), &aliasAddr,
+                               reinterpret_cast<mach_vm_address_t>(backing.writeView),
+                               splitOff, 0, VM_FLAGS_FIXED,
+                               VM_PROT_READ | VM_PROT_EXECUTE);
+        }
+        if (kr != KERN_SUCCESS) {
+            ExecMemory::Free(backing);
+            ::munmap(span, totalSize);
+            lastError_ = "mach_vm_remap exec alias failed (fixed placement)";
+            base_ = nullptr;
+            return false;
+        }
 #else
-    base_ = mmap(nullptr, totalSize, prot, flags, -1, 0);
-#endif
-    if (base_ == MAP_FAILED) {
-        lastError_ = "mmap failed (no JIT?): " + std::string(strerror(errno));
+        // Dual-map mode is only selected on Apple platforms.
+        ExecMemory::Free(backing);
+        ::munmap(span, totalSize);
+        lastError_ = "dual-map mode unavailable on this platform";
         base_ = nullptr;
         return false;
-    }
-    // Save the initial allocated region base to the safe munmap destructor (base_ device
-    // adjusted backwards by -minVaddr at the end of this function).
-    allocBase_ = base_;
-    allocSize_ = totalSize;
-
-#if defined(__APPLE__) && TARGET_OS_OSX
-    if (usedMapJit) pthread_jit_write_protect_np(0);
 #endif
+
+        // Place the writable data suffix right after the alias, inside the span.
+        void* dataMap = ::mmap(span + splitOff, totalSize - splitOff,
+                               PROT_READ | PROT_WRITE,
+                               MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+        if (dataMap == MAP_FAILED) {
+#if defined(__APPLE__)
+            mach_vm_deallocate(mach_task_self(),
+                               reinterpret_cast<mach_vm_address_t>(span), splitOff);
+#endif
+            ExecMemory::Free(backing);
+            ::munmap(span, totalSize);
+            lastError_ = "mmap failed: data mapping unavailable";
+            base_ = nullptr;
+            return false;
+        }
+
+        minVaddr_ = minVaddr;
+        prefixBytes_ = splitOff;
+        splitImage_ = true;
+        spanBase_ = span;                 // image-offset space (unslid)
+        base_ = span;                     // slid below, same shape as single mapping
+        execBase_ = span;
+        writeBase_ = backing.writeView;   // loader writes for the prefix (unslid)
+        allocRegion_ = backing;           // RW backing, freed in the dtor
+        dataMap_ = dataMap;               // data suffix, munmap'd in the dtor
+        dataMapSize_ = totalSize - splitOff;
+        allocBase_ = nullptr;
+        allocSize_ = 0;
+    } else {
+        base_ = ::mmap(nullptr, totalSize, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (base_ == MAP_FAILED) {
+            lastError_ = "mmap failed (no JIT?): " + std::string(strerror(errno));
+            base_ = nullptr;
+            return false;
+        }
+        execBase_ = base_;
+        allocBase_ = base_;
+        allocSize_ = totalSize;
+        splitImage_ = false;
+        writeBase_ = nullptr;
+        spanBase_ = nullptr;
+        prefixBytes_ = 0;
+        minVaddr_ = minVaddr;
+    }
+
+    // Writes below go through writeBase_ (split prefix) or base_ (single mapping).
+    ExecMemory::BeginWrite();
+
+    // Loader-side write addresses. Under split-image the prefix is written through
+    // the backing view (same pages the exec alias exposes); the suffix is written
+    // directly in the guest-visible span.
+    auto segWriteDst = [&](uint64_t off) -> char* {
+        if (splitImage_ && off < prefixBytes_) {
+            return static_cast<char*>(writeBase_) + off;
+        }
+        return static_cast<char*>(base_) + off;
+    };
 
     // copies the data of each pt_load segment from the file buffer into mapped memory
     for (const auto& seg : segments_) {
         fprintf(stderr, "[KuDroidELF] Segment: vaddr=0x%llx, offset=0x%llx, filesz=0x%llx, memsz=0x%llx, flags=%d\n",
                 (unsigned long long)seg.vaddr, (unsigned long long)seg.offset,
                 (unsigned long long)seg.filesz, (unsigned long long)seg.memsz, seg.flags);
-        char* dst = static_cast<char*>(base_) + (seg.vaddr - minVaddr);
+        char* dst = segWriteDst(seg.vaddr - minVaddr);
         if (seg.offset + seg.filesz <= fileSize_) {
             memcpy(dst, fileData_ + seg.offset, seg.filesz);
         }
@@ -643,8 +810,13 @@ bool ElfLoader::map() {
     // --- x18 rename (Darwin platform register) BEFORE the tpidr patcher: ---
     // mrs x18 becomes mrs F, which the BRK patcher below matches by any target
     // register. See ElfX18.h for the soundness rules.
+    //
+    // Rewrites only touch exec segments, which live in the split prefix, so the
+    // pass runs on the writable backing view in split mode (the span's prefix is
+    // an RX alias — writes there would fault).
     {
-        X18Stats xst = kudroid::elf_x18_rewrite(base_, minVaddr, segments_,
+        void* rewriteView = splitImage_ ? writeBase_ : base_;
+        X18Stats xst = kudroid::elf_x18_rewrite(rewriteView, minVaddr, segments_,
                                                 reinterpret_cast<const std::uint8_t*>(fileData_),
                                                 fileSize_);
         fprintf(stderr,
@@ -667,7 +839,7 @@ bool ElfLoader::map() {
     // lock will cause fault. Relocking is performed immediately after the loop.
     for (const auto& seg : segments_) {
         if (seg.flags & 1) { // PROT_EXEC
-            uint32_t* insts = reinterpret_cast<uint32_t*>(static_cast<char*>(base_) + (seg.vaddr - minVaddr));
+            uint32_t* insts = reinterpret_cast<uint32_t*>(segWriteDst(seg.vaddr - minVaddr));
             size_t num_insts = seg.filesz / 4;
             for (size_t i = 0; i < num_insts; i++) {
                 uint32_t inst = insts[i];
@@ -680,9 +852,13 @@ bool ElfLoader::map() {
         }
     }
 
+    ExecMemory::EndWrite();
+
     // Adjust base_ to point to logical address 0
-    // (let base_ + st_value = real address)
+    // (let base_ + st_value = real address). Under split-image base_ points at the
+    // span, whose layout mirrors the image: the same -minVaddr slide applies.
     base_ = static_cast<char*>(base_) - minVaddr;
+    execBase_ = base_;
 
     // Register the module's TLS template to the runtime's per-thread TLS blocks
     // can copy it to the corresponding tprel location (see kudroid_tls_module_offset).
@@ -722,6 +898,9 @@ bool ElfLoader::relocate() {
     // JIT area, so write-protect must be temporarily disabled during this process.
     pthread_jit_write_protect_np(0);
 #endif
+    // Split mode seals nothing until applyProtections(); the data suffix is plain
+    // RW and the prefix is written through the backing view, so writes below need
+    // no extra toggling.
     const auto* ehdr = reinterpret_cast<const Elf64Ehdr*>(fileData_);
     const auto* phdrs = reinterpret_cast<const Elf64Phdr*>(
         fileData_ + ehdr->e_phoff);
@@ -809,6 +988,13 @@ bool ElfLoader::relocate() {
 #define R_AARCH64_TLS_TPREL64 1030
 #endif
 
+    // Relocation STORES go through the writable view (split-image aware);
+    // relocated VALUES are exec-view addresses (base_), matching what the
+    // guest computes and fetches.
+    auto writeAt = [&](uint64_t imageOff) -> char* {
+        return writePtrAt(imageOff);
+    };
+
     auto applyRelocations = [&](uint64_t vaddr, uint64_t size) -> bool {
         if (size == 0) return true;
         const uint64_t offset = vaddrToFileOffset(vaddr);
@@ -823,7 +1009,7 @@ bool ElfLoader::relocate() {
             const uint32_t type = static_cast<uint32_t>(relocs[i].r_info & 0xffffffffu);
             const uint32_t symbolIndex = static_cast<uint32_t>(relocs[i].r_info >> 32);
             auto* target = reinterpret_cast<uint64_t*>(
-                static_cast<char*>(base_) + relocs[i].r_offset);
+                writeAt(relocs[i].r_offset - minVaddr_));
             if (type == R_AARCH64_RELATIVE) {
                 *target = reinterpret_cast<uintptr_t>(base_) + relocs[i].r_addend;
             } else if (type == R_AARCH64_IRELATIVE) {
@@ -936,13 +1122,13 @@ bool ElfLoader::relocate() {
                 for (uint64_t bit = 1; bit < 64; ++bit) {
                     if (entry & (1ULL << bit)) {
                         const uint64_t vaddr = base + bit * 8;
-                        *reinterpret_cast<uint64_t*>(static_cast<char*>(base_) + vaddr) += bias;
+                        *reinterpret_cast<uint64_t*>(writeAt(vaddr - minVaddr_)) += bias;
                     }
                 }
                 lastAddr = base + 63 * 8;
             } else {
                 const uint64_t vaddr = entry;
-                *reinterpret_cast<uint64_t*>(static_cast<char*>(base_) + vaddr) += bias;
+                *reinterpret_cast<uint64_t*>(writeAt(vaddr - minVaddr_)) += bias;
                 lastAddr = vaddr;
             }
         }
@@ -970,7 +1156,25 @@ bool ElfLoader::relocate() {
     return ok;
 }
 
+/// Writable host address for guest image offset `vaddr` (ELF vaddr, unslid).
+/// Under split-image mapping the exec prefix is written through the backing
+/// view; the data suffix through the guest-visible mapping itself. Relocation
+/// targets in the prefix are read back through the RX alias so values are the
+/// same bytes the guest will fetch.
+char* ElfLoader::writePtrAt(std::uint64_t vaddr) {
+    if (splitImage_) {
+        if (vaddr < prefixBytes_) {
+            return static_cast<char*>(writeBase_) + vaddr;
+        }
+        return static_cast<char*>(spanBase_) + vaddr;
+    }
+    return static_cast<char*>(base_) + vaddr;
+}
+
 bool ElfLoader::applyProtections() {
+    if (splitImage_) {
+        return applyProtectionsSplit();
+    }
     if (!allocBase_ || allocSize_ == 0) return true;
 
     const long pageSizeValue = sysconf(_SC_PAGESIZE);
@@ -1066,6 +1270,53 @@ bool ElfLoader::applyProtections() {
     sys_icache_invalidate(mapStart, allocSize_);
 #else
     __builtin___clear_cache(mapStart, mapStart + allocSize_);
+#endif
+
+    return true;
+}
+
+// Split-image sealing. The prefix pages are already fetched through the RX alias
+// and writable bytes keep the plain RW suffix mapping, so there is nothing to
+// flip per page; only the icache flush stands between written bytes and fetch.
+bool ElfLoader::applyProtectionsSplit() {
+    if (!spanBase_ || dataMapSize_ == 0) return false;
+
+    const long pageSizeValue = sysconf(_SC_PAGESIZE);
+    if (pageSizeValue <= 0) return false;
+    const size_t pageSize = static_cast<size_t>(pageSizeValue);
+
+    uint64_t minVaddr = UINT64_MAX;
+    for (const auto& seg : segments_) {
+        if (seg.vaddr < minVaddr) minVaddr = seg.vaddr;
+    }
+    if (minVaddr == UINT64_MAX) minVaddr = 0;
+
+    // W^X-conflict report for the boundary page: exec material and writable data
+    // share it, so runtime stores into that page's data bytes will fault (same
+    // contract as the single-mapping path, unchanged by the split).
+    const uint64_t boundaryPage = prefixBytes_ / pageSize;
+    for (const auto& seg : segments_) {
+        if (!(seg.flags & 2)) continue;
+        const uint64_t s = seg.vaddr - minVaddr;
+        const uint64_t e = s + seg.memsz;
+        if (s < prefixBytes_ && e > prefixBytes_) {
+            std::fprintf(stderr,
+                         "[KuDroidELF] W^X conflict page %llu: exec/data share the "
+                         "split boundary page; runtime-writable bytes on it will "
+                         "fault on store\n",
+                         (unsigned long long)boundaryPage);
+        }
+    }
+
+#if defined(__APPLE__)
+    // Flush the fetch view: everything the loader wrote through the backing.
+    sys_icache_invalidate(spanBase_, prefixBytes_);
+    // The data suffix was never written as code; a plain write barrier is enough
+    // to order the stores the loader made there.
+    asm volatile("dmb ish" ::: "memory");
+#else
+    __builtin___clear_cache(static_cast<char*>(spanBase_),
+                            static_cast<char*>(spanBase_) + prefixBytes_);
 #endif
 
     return true;
