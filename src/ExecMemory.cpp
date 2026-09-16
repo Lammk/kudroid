@@ -4,6 +4,7 @@
 #include <csetjmp>
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <string>
 
 #include <signal.h>
@@ -344,43 +345,161 @@ const char* RuntimeSummaryInner() { return "ios=n/a machine=n/a txm~=0"; }
 #endif  // __APPLE__
 
 #if defined(__APPLE__)
-// Build and prepare the exec arena. True only when the whole chain succeeded: a
-// MAP_JIT-independent RW backing, an RX alias of it, the debug script's prepare
-// over that exact alias, a fetch proved through it, and the detach. A partial
-// chain leaves nothing half-prepared.
+// Current/max protection of the VM region holding `addr`. Executes nothing, so
+// unlike FetchProbe it cannot kill the process on a TXM device (where a refused
+// execute fetch is a codesigning SIGKILL, not a catchable fault).
+bool RegionProt(const void* addr, vm_prot_t* cur, vm_prot_t* max) {
+    if (addr == nullptr) return false;
+    mach_vm_address_t a = reinterpret_cast<mach_vm_address_t>(addr);
+    mach_vm_size_t sz = 0;
+    kudroid_vm_region_basic_info_64_t info{};
+    mach_msg_type_number_t count = KUDROID_VM_REGION_BASIC_INFO_64_COUNT;
+    mach_port_t obj = MACH_PORT_NULL;
+    const kern_return_t kr = mach_vm_region(
+        mach_task_self(), &a, &sz, KUDROID_VM_REGION_BASIC_INFO_64_FLAVOR,
+        reinterpret_cast<vm_region_info_t>(&info), &count, &obj);
+    if (obj != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), obj);
+    if (kr != KERN_SUCCESS) return false;
+    if (cur) *cur = info.protection;
+    if (max) *max = info.max_protection;
+    return true;
+}
+
+const char* ProtStr(vm_prot_t p) {
+    static thread_local char b[4];
+    b[0] = (p & VM_PROT_READ) ? 'r' : '-';
+    b[1] = (p & VM_PROT_WRITE) ? 'w' : '-';
+    b[2] = (p & VM_PROT_EXECUTE) ? 'x' : '-';
+    b[3] = '\0';
+    return b;
+}
+
+// Print a mapping's current/max protection. `ok` is false when the region query
+// itself failed, which the survey reports separately.
+void PrintProt(const char* what, const void* addr) {
+    vm_prot_t cur = 0, max = 0;
+    if (RegionProt(addr, &cur, &max)) {
+        std::fprintf(stderr, "[KuDroidExecMem] %s: cur=%s max=%s\n",
+                     what, ProtStr(cur), ProtStr(max));
+    } else {
+        std::fprintf(stderr, "[KuDroidExecMem] %s: region query failed\n", what);
+    }
+}
+
+// True when the region's MAX protection includes execute — the honest "this page
+// can ever be fetched" answer. A succeeded mprotect does not imply it (it can be
+// silently clamped), but max_protection cannot lie.
+bool RegionMaxExec(const void* addr) {
+    vm_prot_t max = 0;
+    return RegionProt(addr, nullptr, &max) && (max & VM_PROT_EXECUTE) != 0;
+}
+
+// One-shot survey of what this device lets us allocate, executing nothing. The
+// result decides how the loader maps guest code under TXM. Self-checks the region
+// layout against our own executable text first, so bogus numbers are never read
+// as real.
+void RunCapabilitySurvey() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        {
+            vm_prot_t cur = 0, max = 0;
+            const bool ok = RegionProt(
+                reinterpret_cast<const void*>(&RunCapabilitySurvey), &cur, &max);
+            std::fprintf(stderr,
+                         "[KuDroidExecMem] survey self-check %s own-text cur=%s max=%s\n",
+                         (ok && (max & VM_PROT_EXECUTE)) ? "ok" : "FAILED",
+                         ok ? ProtStr(cur) : "?", ok ? ProtStr(max) : "?");
+        }
+        const size_t ps = PageSize();
+        struct Cand { const char* name; int prot; };
+        const Cand cands[] = {
+            {"anon-rw", PROT_READ | PROT_WRITE},
+            {"anon-rwx", PROT_READ | PROT_WRITE | PROT_EXEC},
+            {"anon-rx", PROT_READ | PROT_EXEC},
+        };
+        for (const Cand& c : cands) {
+            void* p = ::mmap(nullptr, ps, c.prot, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (p == MAP_FAILED) {
+                std::fprintf(stderr, "[KuDroidExecMem] survey %s: mmap failed (%s)\n",
+                             c.name, std::strerror(errno));
+                continue;
+            }
+            PrintProt(c.name, p);
+            ::munmap(p, ps);
+        }
+        {
+            void* p = ::mmap(nullptr, ps, PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+            if (p != MAP_FAILED) {
+                const int mr = ::mprotect(p, ps, PROT_READ | PROT_EXEC);
+                std::fprintf(stderr, "[KuDroidExecMem] survey rw->mprotect(rx): ret=%d\n", mr);
+                PrintProt("rw->mprotect(rx)", p);
+                ::munmap(p, ps);
+            }
+        }
+        {
+            void* p = ::mmap(nullptr, ps, PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE | MAP_ANONYMOUS | MAP_JIT, -1, 0);
+            if (p == MAP_FAILED) {
+                std::fprintf(stderr, "[KuDroidExecMem] survey map-jit: mmap failed (%s)\n",
+                             std::strerror(errno));
+            } else {
+                PrintProt("map-jit", p);
+                ::munmap(p, ps);
+            }
+        }
+    });
+}
+#endif  // __APPLE__
+
+#if defined(__APPLE__)
+// Build and prepare the exec arena. Readiness is the prepare handshake plus the
+// region's MAX protection including execute — never a probe fetch, which on TXM
+// is a codesigning kill rather than a catchable fault.
 bool CreatePreparedArena(size_t size) {
     PreparedArena& a = ArenaState();
     if (a.active) return true;
     if (!(TxmEstimate() && CsDebugged())) return false;
 
-    // Plain RW backing, not MAP_JIT: mmap(MAP_JIT) was denied on iOS 27, and the
-    // alias is created and prepared explicitly below.
-    void* backing = ::mmap(nullptr, size, PROT_READ | PROT_WRITE,
+    // Ask for execute at ALLOCATION time: max protection is fixed then, and a
+    // region allocated without PROT_EXEC can never be made executable later
+    // (mprotect then clamps silently, which is what made the old arena's alias
+    // r--/rw-). Fall back to RW only if the kernel refuses the request outright.
+    void* backing = ::mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC,
                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    const char* route = "rwx";
     if (backing == MAP_FAILED) {
-        std::fprintf(stderr, "[KuDroidExecMem] arena: rw backing failed: %s\n",
+        backing = ::mmap(nullptr, size, PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        route = "rw";
+    }
+    if (backing == MAP_FAILED) {
+        std::fprintf(stderr, "[KuDroidExecMem] arena: backing mmap failed: %s\n",
                      std::strerror(errno));
         return false;
     }
+    PrintProt("arena backing", backing);
+
     void* alias = nullptr;
     if (!TryDualMap(backing, size, &alias)) {
         std::fprintf(stderr, "[KuDroidExecMem] arena: rx alias failed\n");
         ::munmap(backing, size);
         return false;
     }
+    PrintProt("arena alias", alias);
+
     if (!PrepareExecRegion(alias, size)) {
         std::fprintf(stderr, "[KuDroidExecMem] arena: prepare failed\n");
         ::munmap(alias, size);
         ::munmap(backing, size);
         return false;
     }
+    PrintProt("arena alias after prepare", alias);
 
-    // The prepare must make fetches through the alias legal. Prove it on the exact
-    // region that will be used, not a throwaway page.
-    std::memcpy(backing, kProbeCode, sizeof(kProbeCode));
-    FlushIcache(alias, sizeof(kProbeCode));
-    if (!FetchProbe(alias)) {
-        std::fprintf(stderr, "[KuDroidExecMem] arena: fetch probe failed after prepare\n");
+    if (!RegionMaxExec(alias)) {
+        std::fprintf(stderr,
+                     "[KuDroidExecMem] arena: prepare ok but max protection has no "
+                     "execute (route=%s); this device cannot fetch here\n", route);
         ::munmap(alias, size);
         ::munmap(backing, size);
         return false;
@@ -389,16 +508,15 @@ bool CreatePreparedArena(size_t size) {
     // The region set is final: nothing executable is created after this point.
     DetachJitScript();
 
-    // Decisive for the loader. If prepared-ness follows a further alias of these
-    // pages, a per-image span can remap an arena slice into its exec prefix and
-    // prepare is paid once. If not, every image alias must be prepared while the
-    // script is attached, before this detach.
+    // Decisive for the loader, and execution-free: does an ADDITIONAL alias of the
+    // prepared pages report execute in its max protection? If yes, a per-image
+    // span can remap an arena slice into its exec prefix and prepare is paid once.
+    // If no, every image alias must be prepared while the script is attached.
     {
         void* second = nullptr;
         if (TryDualMap(alias, PageSize(), &second)) {
-            std::memcpy(backing, kProbeCode, sizeof(kProbeCode));
-            FlushIcache(second, sizeof(kProbeCode));
-            const bool follows = FetchProbe(second);
+            const bool follows = RegionMaxExec(second);
+            PrintProt("arena prepared-ness follows alias", second);
             std::fprintf(stderr, "[KuDroidExecMem] prepared-ness follows alias=%d\n",
                          follows ? 1 : 0);
             ::munmap(second, PageSize());
@@ -412,7 +530,8 @@ bool CreatePreparedArena(size_t size) {
     a.size = size;
     a.used = 0;
     a.active = true;
-    std::fprintf(stderr, "[KuDroidExecMem] prepared arena %zu MiB ready\n", size >> 20);
+    std::fprintf(stderr, "[KuDroidExecMem] prepared arena %zu MiB ready (route=%s)\n",
+                 size >> 20, route);
     return true;
 }
 #endif  // __APPLE__
@@ -431,6 +550,17 @@ ExecMemMode ProbeMode(bool* fetchableOut) {
     if (ExecMemory::TxmScriptReady() && CreatePreparedArena(kArenaSize)) {
         *fetchableOut = true;
         return ExecMemMode::kPrepared;
+    }
+    if (TxmEstimate()) {
+        // Every strategy below proves itself by executing written code. On TXM a
+        // refused fetch is a codesigning SIGKILL, so none of them may run — the
+        // survey reports what the kernel allows without executing anything, and
+        // the arena (above) is the only path that can succeed here.
+        RunCapabilitySurvey();
+        std::fprintf(stderr,
+                     "[KuDroidExecMem] txm: no prepared arena; probe strategies "
+                     "skipped (executing to test would kill the process)\n");
+        return ExecMemMode::kLegacy;
     }
 #endif
 #if defined(__APPLE__)
