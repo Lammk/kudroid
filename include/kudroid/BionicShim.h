@@ -52,6 +52,12 @@ void trace_shim(const char* message);
 // Returns true if handled.
 bool bionic_handle_tpidr_trap(void* ucontext);
 
+// Handle SIGTRAP from the iOS 26+ TXM JIT protocol breakpoint (`brk #0xf00d`).
+// The debug script owns this stop while it is attached; reaching the handler
+// means no script service it, so step over the breakpoint and report the
+// operation as unprepared (x0 = 0). Returns true if handled.
+bool bionic_handle_jit26_trap(void* ucontext);
+
 } // namespace kudroid
 
 #endif

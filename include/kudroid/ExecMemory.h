@@ -68,6 +68,21 @@ public:
     // One-line environment summary for logs: "ios=<ver> machine=<id> txm~=<0|1>".
     static const char* RuntimeSummary();
 
+    // True when the TXM regime is present AND a debugger is attached — the only
+    // state in which the prepare handshake can be attempted. Attempting a
+    // protocol brk without an attached script raises a real SIGTRAP.
+    static bool TxmScriptReady();
+
+    // Hand `alias` (an RX mapping aliasing writable backing pages) to the debug
+    // script for preparation under TXM. On every other platform this returns
+    // false and the caller uses the plain aliasing path. Success still has to be
+    // proven by fetching through the region.
+    static bool PrepareRegion(void* alias, size_t size);
+
+    // Tells the script the executable-region set is final. No further exec
+    // region may be created after this call on a TXM device.
+    static void DetachScript();
+
     // Platform page size used to round allocations.
     static size_t PageSize();
 

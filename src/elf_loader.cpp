@@ -666,20 +666,26 @@ bool ElfLoader::map() {
     // applyProtections(). The choice comes from the kernel probe, not OS versions.
     fprintf(stderr, "[KuDroidELF] Mapping ELF segments for %s (size: %zu)\n", path_.c_str(), (size_t)totalSize);
 
-    uint64_t firstExecOff = UINT64_MAX;
+    // Split point: the first writable PT_LOAD. Everything below it (headers,
+    // rodata, the executable segments) must be fetchable and lives behind the RX
+    // alias; everything at/above it is runtime-writable and gets the plain RW
+    // suffix. Page-align DOWN so no writable byte ever lands on the RX alias — a
+    // writable byte mapped RX faults the first time the engine stores it.
+    uint64_t firstWritableOff = UINT64_MAX;
     for (const auto& seg : segments_) {
-        if ((seg.flags & 1) && !(seg.flags & 2)) {
-            if (seg.vaddr - minVaddr < firstExecOff) firstExecOff = seg.vaddr - minVaddr;
+        if (seg.flags & 2) {
+            const uint64_t off = seg.vaddr - minVaddr;
+            if (off < firstWritableOff) firstWritableOff = off;
         }
     }
     const uint64_t pageMask = static_cast<uint64_t>(pageSize) - 1;
 
     const bool wantSplit = ExecMemory::Mode() == ExecMemMode::kDualMap &&
-                           firstExecOff != UINT64_MAX;
+                           firstWritableOff != UINT64_MAX;
     if (wantSplit) {
-        const uint64_t splitOff = firstExecOff & ~pageMask;
+        const uint64_t splitOff = firstWritableOff & ~pageMask;
         if (splitOff == 0) {
-            lastError_ = "image has no writable prefix for split mapping";
+            lastError_ = "image has no non-writable prefix for split mapping";
             base_ = nullptr;
             return false;
         }
@@ -687,6 +693,22 @@ bool ElfLoader::map() {
             lastError_ = "image has no writable suffix for split mapping";
             base_ = nullptr;
             return false;
+        }
+
+        // Every executable byte must sit below the boundary to be fetchable
+        // through the RX alias. The host page is 16 KiB on iOS while the linker
+        // aligns segments to 4 KiB, so the first writable page also holds the tail
+        // of the executable segment and no page boundary separates them. Refuse
+        // here rather than build a mapping whose code is not fetchable.
+        for (const auto& seg : segments_) {
+            if (!(seg.flags & 1)) continue;
+            const uint64_t execEnd = (seg.vaddr - minVaddr) + seg.filesz;
+            if (execEnd > splitOff) {
+                lastError_ = "executable segment shares a page with writable data "
+                             "(host page size); split mapping unavailable";
+                base_ = nullptr;
+                return false;
+            }
         }
 
         // Reserve one contiguous VM range for the whole image.

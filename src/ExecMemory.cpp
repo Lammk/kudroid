@@ -27,6 +27,12 @@
 #include <sys/syscall.h>
 #endif
 
+#if defined(__APPLE__)
+// csops() is a private but stable API for code-signing status. Declared at global
+// scope (the call sites use the `::`-qualified name).
+extern "C" int csops(pid_t pid, unsigned int ops, void* useraddr, size_t usersize);
+#endif
+
 namespace kudroid {
 
 namespace {
@@ -105,6 +111,52 @@ bool TryMapJit(void** out, size_t size) {
     *out = p;
     return true;
 }
+
+// ── iOS 26+ TXM/SPTM breakpoint protocol ────────────────────────────────────
+//
+// On the hardware-monitored W^X regimes (iOS 26+, A13+/M1+) a debugger attach is
+// not enough: every executable region must be "prepared" over the debug
+// connection before any instruction is fetched from it. StikDebug attaches with
+// the universal script, which services these traps (x16 selects the command):
+//
+//   mov x16,#1 ; brk #0xf00d   prepare [x0, x0+x1) RX; return the same x0
+//   mov x16,#0 ; brk #0xf00d   detach (the region set is final)
+//
+// The script does NOT allocate when x0 is non-null — it only *prepares* the
+// mapping it is handed (x0==0 asks the server to allocate one, but then the
+// server owns the pages and our writes would not alias them). So the engine must
+// create the RX alias itself (mach_vm_remap of the MAP_JIT backing) and pass it
+// here for preparation. Success is then proven by fetching through the returned
+// address, not by the trap returning.
+//
+// The debugger owns the stop while attached, so the process never sees these
+// traps. An attach WITHOUT the script delivers them to us as SIGTRAP; see
+// bionic_handle_jit26_trap, which steps over them so such a run degrades instead
+// of dying on a breakpoint it never intended to service.
+extern "C" __attribute__((naked, noinline)) void* kudroid_jit26_prepare(void*, size_t) {
+    __asm__ volatile(
+        "mov x16, #1\n"
+        "brk #0xf00d\n"
+        "ret\n");
+}
+
+extern "C" __attribute__((naked, noinline)) void kudroid_jit26_detach(void) {
+    __asm__ volatile(
+        "mov x16, #0\n"
+        "brk #0xf00d\n"
+        "ret\n");
+}
+
+// Hand `alias` (an existing RX mapping aliasing writable backing pages) to the
+// debug script for preparation. Returns false only when the call clearly did not
+// prepare (wrong address back, or no script) — the caller still has to fetch-probe.
+bool PrepareExecRegion(void* alias, size_t size) {
+    if (alias == nullptr || size == 0) return false;
+    void* got = kudroid_jit26_prepare(alias, size);
+    return got == alias;
+}
+
+void DetachJitScript() { kudroid_jit26_detach(); }
 #elif defined(__linux__)
 // Dual-map on Linux: one memfd backing both views. Writes through the RW
 // mapping land in the same pages the RX mapping fetches from — W^X applies to
@@ -175,9 +227,6 @@ bool FetchProbe(void* exec) {
 // on a TXM device" from "probe never ran / permission never arrived".
 
 #if defined(__APPLE__)
-// csops() is a private but stable API for code-signing status.
-extern "C" int csops(pid_t pid, unsigned int ops, void* useraddr, size_t usersize);
-
 std::string SysctlString(const char* name) {
     size_t size = 0;
     if (::sysctlbyname(name, nullptr, &size, nullptr, 0) != 0 || size == 0) return {};
@@ -399,6 +448,30 @@ bool ExecMemory::TxmPresent() {
 
 const char* ExecMemory::RuntimeSummary() {
     return RuntimeSummaryInner();
+}
+
+bool ExecMemory::TxmScriptReady() {
+#if defined(__APPLE__)
+    return TxmEstimate() && CsDebugged();
+#else
+    return false;
+#endif
+}
+
+bool ExecMemory::PrepareRegion(void* alias, size_t size) {
+#if defined(__APPLE__)
+    return PrepareExecRegion(alias, size);
+#else
+    (void)alias;
+    (void)size;
+    return false;
+#endif
+}
+
+void ExecMemory::DetachScript() {
+#if defined(__APPLE__)
+    DetachJitScript();
+#endif
 }
 
 ExecMemory::Region ExecMemory::Allocate(size_t size, bool exec) {

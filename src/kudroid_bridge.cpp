@@ -1324,6 +1324,16 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
         if (kudroid::bionic_handle_tpidr_trap(ucontext)) {
             return; // handled successfully, resuming execution!
         }
+        if (kudroid::bionic_handle_jit26_trap(ucontext)) {
+            static std::atomic<int> s_jit26Seen{0};
+            if (s_jit26Seen.load() < 5) {
+                ++s_jit26Seen;
+                kudroid_android_log_message(4, "KuDroidTrap",
+                                            "JIT26 prepare/detach trap with no script; "
+                                            "stepped over (unprepared)");
+            }
+            return;
+        }
         static std::atomic<int> s_trapUnhandled{0};
         if (s_trapUnhandled.load() < 8) {
             ++s_trapUnhandled;

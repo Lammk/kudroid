@@ -4645,6 +4645,30 @@ bool bionic_handle_tpidr_trap(void* ucontext) {
 } // namespace kudroid
 
 namespace kudroid {
+bool bionic_handle_jit26_trap(void* ucontext) {
+    (void)ucontext;
+#if defined(__APPLE__) && defined(__aarch64__)
+    if (!ucontext) return false;
+    ucontext_t* uc = static_cast<ucontext_t*>(ucontext);
+    uint32_t* pc = reinterpret_cast<uint32_t*>(uc->uc_mcontext->__ss.__pc);
+    const uint32_t inst = *pc;
+    // BRK encoding: 0xD4200000 | (imm16 << 5). The TXM JIT protocol uses
+    // imm16 == 0xf00d; KuDroid's TLS emulation uses 0x1000..0x101f.
+    if ((inst & 0xFFE0001F) == 0xD4200000 && ((inst >> 5) & 0xFFFF) == 0xf00d) {
+        // The debug script services this stop while attached, so reaching here
+        // means no script is present. Report the operation as unprepared
+        // (x0 = 0) and step over the breakpoint; a run without JIT then
+        // degrades instead of dying on a trap it never intended to service.
+        uc->uc_mcontext->__ss.__x[0] = 0;
+        uc->uc_mcontext->__ss.__pc += 4;
+        return true;
+    }
+#endif
+    return false;
+}
+} // namespace kudroid
+
+namespace kudroid {
 namespace {
 
 static void* bionic_thread_wrapper(void* rawArgs) {
