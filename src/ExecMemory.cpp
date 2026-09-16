@@ -44,6 +44,10 @@ constexpr size_t kProbeSize = 4096;
 // the size covers every guest exec prefix plus JIT code at no resident cost.
 constexpr size_t kArenaSize = 256ull << 20;
 
+// Defined below, used by the arena helpers above them.
+size_t PageSize();
+size_t RoundUp(size_t n, size_t align);
+
 // adrp x8, #0 ; ret — the ADRP matters: page-relative addressing inside freshly
 // written memory is exactly the instruction class hardware monitors on strict-W^X
 // regimes, so a probe without it can pass where real guest code faults.
@@ -424,7 +428,7 @@ ExecMemMode ProbeMode(bool* fetchableOut) {
     // TXM/SPTM (iOS 26+): a debugger attach is not enough; the region must be
     // prepared over the debug connection. The arena does that and is the only
     // path that can fetch there, so try it before the attach-only strategies.
-    if (TxmScriptReady() && CreatePreparedArena(kArenaSize)) {
+    if (ExecMemory::TxmScriptReady() && CreatePreparedArena(kArenaSize)) {
         *fetchableOut = true;
         return ExecMemMode::kPrepared;
     }
