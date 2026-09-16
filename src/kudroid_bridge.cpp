@@ -2639,8 +2639,17 @@ extern "C" int kudroid_is_jit_enabled(void) {
     // ends in fetchable written memory, and a succeeded mprotect alone no longer
     // proves that — on hardware-W^X regimes it can succeed while the fetch faults.
     //
-    // Cached: the answer cannot change while the process runs.
-    return kudroid::ExecMemory::IsFetchable() ? 1 : 0;
+    // The answer is cached — except when a debugger has attached since the last
+    // check. Tools like StikDebug grant JIT permission by attaching after launch,
+    // so the first probe legitimately failed; the newly-set CS_DEBUGGED flag is
+    // the kernel's own signal that its view changed and the probe must run again.
+    if (kudroid::ExecMemory::IsFetchable()) return 1;
+    unsigned int flags = 0;
+    if (csops(getpid(), CS_OPS_STATUS, &flags, sizeof(flags)) == 0 &&
+        (flags & CS_DEBUGGED) != 0) {
+        return kudroid::ExecMemory::Reprobe() ? 1 : 0;
+    }
+    return 0;
 #else
     return 1;
 #endif

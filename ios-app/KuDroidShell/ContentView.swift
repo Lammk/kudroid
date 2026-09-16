@@ -835,18 +835,18 @@ struct DebugView: View {
     @State private var jniTraceOn = false
     @State private var kdbServerIP: String = UserDefaults.standard.string(forKey: "kdb_server_ip") ?? ""
     @State private var isKdbConnected: Bool = false
-    
+
     private var previewLog: String {
         let lines = fullLog.components(separatedBy: "\n")
         if lines.count <= 35 { return fullLog }
         return lines.suffix(35).joined(separator: "\n")
     }
-    
+
     var body: some View {
         NavigationView {
             ZStack {
                 Color.black.ignoresSafeArea()
-                
+
                 VStack(spacing: 12) {
                     // Remote KDB Bridge connection bar
                     HStack(spacing: 8) {
@@ -958,6 +958,11 @@ struct DebugView: View {
                 }
             }
             .navigationBarHidden(true)
+            .onAppear {
+                // JIT permission can arrive after launch (StikDebug attaches
+                // mid-run), so re-ask instead of keeping the startup verdict.
+                jitStatus = runJitStatus()
+            }
             .alert("Copied!", isPresented: $showCopyAlert) {
                 Button("OK", role: .cancel) {}
             } message: {

@@ -52,6 +52,12 @@ public:
     // code. Allocation for executable regions refuses when this is false.
     static bool IsFetchable();
 
+    // Re-run the capability probe. For processes whose JIT permission arrives
+    // after launch (a debugger attaching mid-run), the first probe legitimately
+    // failed and must be retried once the kernel's view has changed. Never
+    // downgrades a previous positive result. Returns the current fetchability.
+    static bool Reprobe();
+
     // Platform page size used to round allocations.
     static size_t PageSize();
 

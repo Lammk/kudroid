@@ -281,6 +281,17 @@ bool ExecMemory::IsFetchable() {
     return ProbeStateInstance().fetchable;
 }
 
+bool ExecMemory::Reprobe() {
+    ProbeState& st = ProbeStateInstance();
+    if (st.fetchable) return true;  // never downgrade a positive result
+    // A debugger attaching mid-run grants JIT permissions the first probe
+    // legitimately lacked. Reset and ask the kernel again; the cached mode is
+    // recomputed with it.
+    st.initialized = false;
+    const ProbeState& fresh = ProbeStateInstance();
+    return fresh.fetchable;
+}
+
 ExecMemory::Region ExecMemory::Allocate(size_t size, bool exec) {
     Region r;
     if (size == 0) return r;
