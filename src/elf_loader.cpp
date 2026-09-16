@@ -53,6 +53,8 @@
 #if defined(__APPLE__)
 #include <libkern/OSCacheControl.h>
 #include <TargetConditionals.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
 #if TARGET_OS_OSX
 #include <pthread.h>
 #endif

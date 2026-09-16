@@ -2640,7 +2640,7 @@ extern "C" int kudroid_is_jit_enabled(void) {
     // proves that — on hardware-W^X regimes it can succeed while the fetch faults.
     //
     // Cached: the answer cannot change while the process runs.
-    return ExecMemory::IsFetchable() ? 1 : 0;
+    return kudroid::ExecMemory::IsFetchable() ? 1 : 0;
 #else
     return 1;
 #endif
@@ -2656,7 +2656,7 @@ extern "C" const char* kudroid_jit_status(void) {
 #if defined(__APPLE__)
     if (kudroid_is_jit_enabled()) {
         static char buf[64];
-        std::snprintf(buf, sizeof(buf), "JIT: Enabled (%s)", ExecMemory::ModeName());
+        std::snprintf(buf, sizeof(buf), "JIT: Enabled (%s)", kudroid::ExecMemory::ModeName());
         text = buf;
     }
 #else

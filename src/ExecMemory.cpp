@@ -20,6 +20,9 @@
 #include <pthread.h>
 #include <libkern/OSCacheControl.h>
 #include <mach/mach.h>
+#include <mach/mach_vm.h>
+#elif defined(__linux__)
+#include <sys/syscall.h>
 #endif
 
 namespace kudroid {
@@ -76,7 +79,41 @@ bool TryMapJit(void** out, size_t size) {
     *out = p;
     return true;
 }
-#endif  // __APPLE__
+#elif defined(__linux__)
+// Dual-map on Linux: one memfd backing both views. Writes through the RW
+// mapping land in the same pages the RX mapping fetches from — W^X applies to
+// mappings, not inodes, so no runtime permission transition ever occurs.
+// MAP_PRIVATE would COW on write and break write visibility, so both mappings
+// are MAP_SHARED.
+bool TryDualMap(void* backing, size_t size, void** outAlias) {
+    const int fd = static_cast<int>(::syscall(SYS_memfd_create, "kudroid-exec", 0));
+    if (fd < 0) return false;
+    if (::ftruncate(fd, static_cast<off_t>(size)) != 0) {
+        ::close(fd);
+        return false;
+    }
+    void* alias = ::mmap(nullptr, size, PROT_READ | PROT_EXEC, MAP_SHARED,
+                         fd, 0);
+    if (alias == MAP_FAILED) {
+        ::close(fd);
+        return false;
+    }
+    // Re-map the caller's backing over the memfd so both views share pages.
+    void* rw = ::mmap(backing, size, PROT_READ | PROT_WRITE,
+                      MAP_SHARED | MAP_FIXED, fd, 0);
+    if (rw != backing) {
+        ::munmap(alias, size);
+        ::close(fd);
+        return false;
+    }
+    ::close(fd);
+    *outAlias = alias;
+    return true;
+}
+#else
+// No aliasing primitive on this platform; dual-map is unavailable.
+bool TryDualMap(void*, size_t, void**) { return false; }
+#endif  // __APPLE__ / __linux__
 
 // Execute the probe code through `exec` under a SIGBUS/SIGSEGV guard. Returns
 // true only if the fetch and both instructions completed.
@@ -342,7 +379,7 @@ ExecMemory::Region ExecMemory::AllocateBacking(size_t size) {
 }
 
 bool ExecMemory::RemapExecAlias(void* backing, size_t size, void** outAlias) {
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(__linux__)
     return TryDualMap(backing, size, outAlias);
 #else
     (void)backing;
