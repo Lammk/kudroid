@@ -40,6 +40,10 @@ namespace {
 // One probe page is enough: the test function is two instructions.
 constexpr size_t kProbeSize = 4096;
 
+// Virtual reservation for the prepared exec arena. Only touched pages commit, so
+// the size covers every guest exec prefix plus JIT code at no resident cost.
+constexpr size_t kArenaSize = 256ull << 20;
+
 // adrp x8, #0 ; ret — the ADRP matters: page-relative addressing inside freshly
 // written memory is exactly the instruction class hardware monitors on strict-W^X
 // regimes, so a probe without it can pass where real guest code faults.
@@ -193,6 +197,51 @@ bool TryDualMap(void* backing, size_t size, void** outAlias) {
 bool TryDualMap(void*, size_t, void**) { return false; }
 #endif  // __APPLE__ / __linux__
 
+// ── Prepared exec arena (iOS 26+ TXM/SPTM) ──────────────────────────────────
+//
+// One RW backing aliased RX, prepared over the debug connection once and then
+// detached. Callers carve writable/executable sub-regions from it, so no exec
+// region is ever created after the detach. Present only where prepare works; the
+// accessors no-op elsewhere so the rest of the file compiles unchanged.
+struct PreparedArena {
+    void* backing = nullptr;  // RW view
+    void* alias = nullptr;    // RX view, prepared
+    size_t size = 0;
+    size_t used = 0;
+    bool active = false;
+};
+
+#if defined(__APPLE__)
+PreparedArena& ArenaState() {
+    static PreparedArena arena;
+    return arena;
+}
+
+bool ArenaCarve(size_t size, void** outWrite, void** outExec, size_t* outSize) {
+    PreparedArena& a = ArenaState();
+    if (!a.active) return false;
+    const size_t rounded = RoundUp(size, PageSize());
+    if (a.used + rounded > a.size) return false;
+    *outWrite = static_cast<char*>(a.backing) + a.used;
+    *outExec = static_cast<char*>(a.alias) + a.used;
+    *outSize = rounded;
+    a.used += rounded;
+    return true;
+}
+
+bool ArenaContains(const void* p) {
+    const PreparedArena& a = ArenaState();
+    if (!a.active || p == nullptr) return false;
+    const char* c = static_cast<const char*>(p);
+    return c >= static_cast<const char*>(a.backing) &&
+           c < static_cast<const char*>(a.backing) + a.size;
+}
+
+#else
+bool ArenaCarve(size_t, void**, void**, size_t*) { return false; }
+bool ArenaContains(const void*) { return false; }
+#endif  // __APPLE__
+
 // Execute the probe code through `exec` under a SIGBUS/SIGSEGV guard. Returns
 // true only if the fetch and both instructions completed.
 bool FetchProbe(void* exec) {
@@ -290,6 +339,80 @@ bool CsDebugged() { return false; }
 const char* RuntimeSummaryInner() { return "ios=n/a machine=n/a txm~=0"; }
 #endif  // __APPLE__
 
+#if defined(__APPLE__)
+// Build and prepare the exec arena. True only when the whole chain succeeded: a
+// MAP_JIT-independent RW backing, an RX alias of it, the debug script's prepare
+// over that exact alias, a fetch proved through it, and the detach. A partial
+// chain leaves nothing half-prepared.
+bool CreatePreparedArena(size_t size) {
+    PreparedArena& a = ArenaState();
+    if (a.active) return true;
+    if (!(TxmEstimate() && CsDebugged())) return false;
+
+    // Plain RW backing, not MAP_JIT: mmap(MAP_JIT) was denied on iOS 27, and the
+    // alias is created and prepared explicitly below.
+    void* backing = ::mmap(nullptr, size, PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (backing == MAP_FAILED) {
+        std::fprintf(stderr, "[KuDroidExecMem] arena: rw backing failed: %s\n",
+                     std::strerror(errno));
+        return false;
+    }
+    void* alias = nullptr;
+    if (!TryDualMap(backing, size, &alias)) {
+        std::fprintf(stderr, "[KuDroidExecMem] arena: rx alias failed\n");
+        ::munmap(backing, size);
+        return false;
+    }
+    if (!PrepareExecRegion(alias, size)) {
+        std::fprintf(stderr, "[KuDroidExecMem] arena: prepare failed\n");
+        ::munmap(alias, size);
+        ::munmap(backing, size);
+        return false;
+    }
+
+    // The prepare must make fetches through the alias legal. Prove it on the exact
+    // region that will be used, not a throwaway page.
+    std::memcpy(backing, kProbeCode, sizeof(kProbeCode));
+    FlushIcache(alias, sizeof(kProbeCode));
+    if (!FetchProbe(alias)) {
+        std::fprintf(stderr, "[KuDroidExecMem] arena: fetch probe failed after prepare\n");
+        ::munmap(alias, size);
+        ::munmap(backing, size);
+        return false;
+    }
+
+    // The region set is final: nothing executable is created after this point.
+    DetachJitScript();
+
+    // Decisive for the loader. If prepared-ness follows a further alias of these
+    // pages, a per-image span can remap an arena slice into its exec prefix and
+    // prepare is paid once. If not, every image alias must be prepared while the
+    // script is attached, before this detach.
+    {
+        void* second = nullptr;
+        if (TryDualMap(alias, PageSize(), &second)) {
+            std::memcpy(backing, kProbeCode, sizeof(kProbeCode));
+            FlushIcache(second, sizeof(kProbeCode));
+            const bool follows = FetchProbe(second);
+            std::fprintf(stderr, "[KuDroidExecMem] prepared-ness follows alias=%d\n",
+                         follows ? 1 : 0);
+            ::munmap(second, PageSize());
+        } else {
+            std::fprintf(stderr, "[KuDroidExecMem] prepared-ness follows alias=n/a\n");
+        }
+    }
+
+    a.backing = backing;
+    a.alias = alias;
+    a.size = size;
+    a.used = 0;
+    a.active = true;
+    std::fprintf(stderr, "[KuDroidExecMem] prepared arena %zu MiB ready\n", size >> 20);
+    return true;
+}
+#endif  // __APPLE__
+
 // Select the strategy by asking the kernel, once. Order: dual-map (no toggles,
 // survives hardware-W^X regimes), toggle (official MAP_JIT pattern), legacy
 // (anonymous RW -> RX; iOS 18-and-earlier behavior).
@@ -297,6 +420,15 @@ ExecMemMode ProbeMode(bool* fetchableOut) {
     *fetchableOut = false;
     ExecMemMode selected = ExecMemMode::kLegacy;
 
+#if defined(__APPLE__)
+    // TXM/SPTM (iOS 26+): a debugger attach is not enough; the region must be
+    // prepared over the debug connection. The arena does that and is the only
+    // path that can fetch there, so try it before the attach-only strategies.
+    if (TxmScriptReady() && CreatePreparedArena(kArenaSize)) {
+        *fetchableOut = true;
+        return ExecMemMode::kPrepared;
+    }
+#endif
 #if defined(__APPLE__)
 #if KUDROID_EXECMEM_PROBE_EXEC
     {
@@ -397,7 +529,8 @@ ProbeState& ProbeStateInstance() {
         state.initialized = true;
         std::fprintf(stderr, "[KuDroidExecMem] mode=%s fetchable=%d %s\n",
                      state.mode == ExecMemMode::kDualMap ? "dual-map"
-                     : state.mode == ExecMemMode::kToggle ? "toggle" : "legacy",
+                     : state.mode == ExecMemMode::kToggle ? "toggle"
+                     : state.mode == ExecMemMode::kPrepared ? "prepared" : "legacy",
                      state.fetchable ? 1 : 0, RuntimeSummaryInner());
     }
     return state;
@@ -422,6 +555,7 @@ const char* ExecMemory::ModeName() {
     switch (ProbeStateInstance().mode) {
         case ExecMemMode::kDualMap: return "dual-map";
         case ExecMemMode::kToggle:  return "toggle";
+        case ExecMemMode::kPrepared: return "prepared";
         case ExecMemMode::kLegacy:  return "legacy";
     }
     return "legacy";
@@ -483,6 +617,17 @@ ExecMemory::Region ExecMemory::Allocate(size_t size, bool exec) {
     const size_t rounded = RoundUp(size, PageSize());
 
 #if defined(__APPLE__)
+    if (exec && st.mode == ExecMemMode::kPrepared) {
+        void* w = nullptr;
+        void* e = nullptr;
+        size_t s = 0;
+        if (ArenaCarve(rounded, &w, &e, &s)) {
+            r.writeView = w;
+            r.execView = e;
+            r.size = s;
+        }
+        return r;  // arena lifetime is process-long; no per-region mapping
+    }
     if (exec && (st.mode == ExecMemMode::kDualMap || st.mode == ExecMemMode::kToggle)) {
         void* backing = nullptr;
         if (!TryMapJit(&backing, rounded)) return r;
@@ -517,6 +662,8 @@ ExecMemory::Region ExecMemory::Allocate(size_t size, bool exec) {
 
 void ExecMemory::Free(const Region& region) {
     if (region.writeView == nullptr || region.size == 0) return;
+    // Arena sub-regions share one mapping; releasing one would break the rest.
+    if (ArenaContains(region.writeView)) return;
     if (region.execView != nullptr && region.execView != region.writeView) {
         munmap(region.execView, region.size);
     }
@@ -576,6 +723,17 @@ ExecMemory::Region ExecMemory::AllocateBacking(size_t size) {
     const size_t rounded = RoundUp(size, PageSize());
     const ProbeState& st = ProbeStateInstance();
 #if defined(__APPLE__)
+    if (st.mode == ExecMemMode::kPrepared) {
+        void* w = nullptr;
+        void* e = nullptr;
+        size_t s = 0;
+        if (ArenaCarve(rounded, &w, &e, &s)) {
+            r.writeView = w;
+            r.execView = e;
+            r.size = s;
+        }
+        return r;
+    }
     void* backing = nullptr;
     if (TryMapJit(&backing, rounded)) {
         r.writeView = backing;
@@ -596,6 +754,17 @@ ExecMemory::Region ExecMemory::AllocateBacking(size_t size) {
 }
 
 bool ExecMemory::RemapExecAlias(void* backing, size_t size, void** outAlias) {
+#if defined(__APPLE__)
+    // Arena sub-regions are already aliased and prepared: the alias is the same
+    // offset into the arena's RX view.
+    if (ProbeStateInstance().mode == ExecMemMode::kPrepared &&
+        ArenaContains(backing) && outAlias != nullptr) {
+        const PreparedArena& a = ArenaState();
+        *outAlias = static_cast<char*>(a.alias) +
+                    (static_cast<char*>(backing) - static_cast<char*>(a.backing));
+        return true;
+    }
+#endif
 #if defined(__APPLE__) || defined(__linux__)
     return TryDualMap(backing, size, outAlias);
 #else

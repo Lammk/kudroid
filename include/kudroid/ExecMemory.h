@@ -13,6 +13,9 @@
 //             thread-local JIT write-enable pattern).
 //   kLegacy   Plain anonymous RW pages flipped to RX with mprotect — the behavior
 //             of iOS 18 and earlier, macOS without hardened runtime, and Linux.
+//   kPrepared iOS 26+ TXM/SPTM: one RW backing aliased RX, prepared over the
+//             debug connection (JIT26PrepareRegion) before any fetch, then
+//             detached. No permission transition is performed at runtime.
 //
 // The probe executes real instructions (including an ADRP) from the transitioned
 // memory under a SIGBUS/SIGSEGV recovery guard, because a succeeded mprotect does not
@@ -26,9 +29,10 @@
 namespace kudroid {
 
 enum class ExecMemMode {
-    kLegacy = 0,  // anonymous RW -> mprotect RX
-    kToggle = 1,  // MAP_JIT + pthread_jit_write_protect_np
-    kDualMap = 2, // MAP_JIT backing + RX alias via mach_vm_remap
+    kLegacy = 0,   // anonymous RW -> mprotect RX
+    kToggle = 1,   // MAP_JIT + pthread_jit_write_protect_np
+    kDualMap = 2,  // MAP_JIT backing + RX alias via mach_vm_remap
+    kPrepared = 3, // TXM: RW backing + RX alias prepared over the debug connection
 };
 
 class ExecMemory {
