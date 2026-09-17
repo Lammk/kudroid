@@ -1658,21 +1658,31 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
 
     // The guest's own handler, for the signals KuDroid must keep installed.
     //
-    // KuDroid owns SIGTRAP (it supplies guest TLS), SIGSYS (it emulates a raw `svc`)
-    // and the fault signals (crash reporting, the JNI_OnLoad abort shield). A guest
-    // that installs handlers for those — a crash reporter does, and so does a runtime
-    // that patches up faults — cannot be given the signal outright without breaking
-    // the emulator, so guest_sigaction records it and this is where it is honoured.
-    //
-    // The KuDroid-internal cases above run first, and deliberately: a BRK that supplies
-    // TLS is not a fault the guest should ever see.
-    //
-    // Dispatch returns true only when the guest handler MOVED pc — a handler saying it
-    // fixed the fault and where to resume. A handler that returns without moving pc has
-    // not handled anything, whatever else it did, and resuming would re-execute the
-    // faulting instruction and fault again forever. That loop is not hypothetical: it
-    // is what a mis-decoded sigaction struct did to ULTRAKILL, 100% of one core with pc
-    // frozen at 0x18000004.
+    // Gate on the faulting pc being in a registered guest module. A fault in host
+    // text (the shell itself, KuART) is a KuDroid bug and must go down the fatal
+    // path below: handing it to the guest reporter makes the guest write a
+    // tombstone for OUR bug and resume into the same fault — the screen freezes
+    // with the crash logged but no modal, exactly the invisible-crash report.
+    // (Observed: SIGSEGV in kuart::DexClass::IsSubClassOf while the guest had a
+    // handler installed; the host fault never reached kudroid_crash handling.)
+    {
+        void* faultPcHost = nullptr;
+#if (defined(__aarch64__) || defined(__arm64__)) && defined(__APPLE__)
+        if (ucontext != nullptr) {
+            faultPcHost = reinterpret_cast<void*>(
+                static_cast<ucontext_t*>(ucontext)->uc_mcontext->__ss.__pc);
+        }
+#endif
+        char modBuf[128];
+        const bool pcInGuest = faultPcHost != nullptr &&
+                               kudroid::kudroid_lookup_guest_module(faultPcHost, modBuf,
+                                                                    sizeof(modBuf));
+        if (!pcInGuest) {
+            kudroid_persistent_breadcrumb(
+                "host-pc fault: guest handler skipped, taking fatal path");
+            goto host_fatal_path;
+        }
+    }
     if (kudroid::guest_signal_dispatch(sig, info, ucontext)) {
         // The guest's own crash reporter (Unity's tombstone) took the signal and
         // resumed, so the fatal path below never runs and kudroid_crash.log stays
@@ -1704,8 +1714,20 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
             }
         }
         kudroid_persistent_breadcrumb("fatal-signal resolved-by-guest-handler");
+        // The guest handled it, but the faulting thread rarely continues usefully
+        // (it resumed into the same fault last time this path ran). The shell's
+        // 0.25s poll reads g_hasCrashed to show the modal and run teardown, so
+        // a guest-handled fatal must not stay invisible.
+        if (sig == SIGSEGV || sig == SIGABRT || sig == SIGBUS) {
+            g_hasCrashed.store(true);
+            g_lastCrashTail[0] = '\0';
+            extractLastLines(g_crashBuf, (size_t)g_crashLen, g_lastCrashTail,
+                             sizeof(g_lastCrashTail), 30);
+        }
         return;
     }
+
+host_fatal_path:;
 
     // Inside a guarded JNI_OnLoad invocation: if this library aborts/segfaults,
     // skip it rather than killing the entire process. Only async-signal-safe calls used here;

@@ -363,7 +363,30 @@ void Interpreter::ReportUnresolvableMethod(const DexMethod* context, uint32_t me
 
 bool Interpreter::CheckInstanceField(DexObject* obj, DexField* field, uint32_t width) {
     if (obj == nullptr || field == nullptr) return false;
+    // A wild clazz pointer kills the process one LDRB later (observed: fault at
+    // IsSubClassOf+0x4c reading obj->clazz->is_primitive, SEGV_ACCERR on a
+    // 0x1004xxxxx pointer with no mapping). Report it and fail the access so the
+    // interpreter unwinds instead of faulting in KuDroid's own text.
     const DexClass* clazz = obj->clazz;
+    if (clazz != nullptr && linker_ != nullptr &&
+        !linker_->IsRegisteredClass(reinterpret_cast<const DexClass*>(clazz))) {
+        static std::mutex s_wild_mtx;
+        static std::set<std::string> s_wild_reported;
+        {
+            std::lock_guard<std::mutex> lock(s_wild_mtx);
+            const std::string key = "wild-clazz-0x" +
+                std::to_string(reinterpret_cast<uintptr_t>(clazz));
+            if (s_wild_reported.insert(key).second) {
+                std::fprintf(stderr,
+                             "[KuART][FIELD] wild clazz pointer %p on object %p "
+                             "(not in live_classes_)\n",
+                             reinterpret_cast<const void*>(clazz),
+                             reinterpret_cast<const void*>(obj));
+            }
+        }
+        ThrowException("Ljava/lang/NoSuchFieldError;", "object header corrupt");
+        return false;
+    }
     if (clazz == nullptr || field->declaring_class == nullptr ||
         !clazz->IsSubClassOf(field->declaring_class)) {
         // Log once, do not throw: hierarchy bookkeeping (stub classes,
