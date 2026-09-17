@@ -1266,8 +1266,6 @@ bool fault_skip_load_store(ucontext_t* uc, uintptr_t faultAddr, uint64_t* newPcO
     return true;
 }
 
-}  // namespace
-
 static bool kudroid_try_skip_fault(int /*sig*/, siginfo_t* info, void* ucontext) {
     if (info == nullptr || ucontext == nullptr) return false;
     ucontext_t* uc = reinterpret_cast<ucontext_t*>(ucontext);
@@ -1653,6 +1651,38 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
             worker_budget_note(budget, nowNs, faultPc, faultAddr);
             pc_skip_note(faultPc);
             return;
+        }
+    }
+
+    // A SIGSEGV at pc=0 (or any unmapped low pc) after a null-probe skip means
+    // the fabricated zero fed an indirect call: `blr xN` jumped to 0 and lr
+    // points right after the call. Resuming is impossible (there is no
+    // instruction to return to) and parking the thread without a report hides
+    // the chain, so write the connection down and let the fatal path run —
+    // the modal tells the user the skip caused the crash, not just "signal 11".
+    // (Observed live, skip-tutorial: skip #1 fabricated x8=0; the very next
+    // instruction was blr x8; crash pc=0x0, lr = skip_pc + 4, x8 = 0.)
+    {
+        unsigned long long crashPc = 0;
+        unsigned long long crashLr = 0;
+#if (defined(__aarch64__) || defined(__arm64__)) && defined(__APPLE__)
+        if (ucontext != nullptr) {
+            crashPc = static_cast<ucontext_t*>(ucontext)->uc_mcontext->__ss.__pc;
+            crashLr = static_cast<unsigned long long>(
+                static_cast<ucontext_t*>(ucontext)->uc_mcontext->__ss.__lr);
+        }
+#endif
+        if ((sig == SIGSEGV || sig == SIGBUS) && crashPc < 0x10000) {
+            char mark[192];
+            const int m = std::snprintf(
+                mark, sizeof(mark),
+                "null-call crash: pc=0x%llx lr=0x%llx — indirect call through a "
+                "pointer a null-probe skip fabricated",
+                crashPc, crashLr);
+            if (m > 0) kudroid_persistent_breadcrumb(mark);
+            // Ensure the report below is treated as fatal regardless of role.
+            g_hasCrashed.store(true);
+            g_lastCrashTail[0] = '\0';
         }
     }
 
@@ -2228,8 +2258,22 @@ host_fatal_path:;
         // every 0x80 bytes) — report it as a crash so the shell shows the
         // modal instead of leaving a dead worker inside a running app.
         const int walked = budget != nullptr ? budget->walk.load(std::memory_order_relaxed) : 0;
+        // A crash whose pc sits in the first page is an indirect call through a
+        // null pointer — with lr pointing right after a `blr`, that call was
+        // fed by a fabricated zero from the null-probe skip above. The thread
+        // cannot resume (there is nothing to return to), so a parked-worker
+        // budget is meaningless: report the crash so the modal appears and the
+        // teardown runs instead of freezing the game behind a dead worker.
+        unsigned long long fatalPc = 0;
+#if (defined(__aarch64__) || defined(__arm64__)) && defined(__APPLE__)
+        if (ucontext != nullptr) {
+            fatalPc = static_cast<ucontext_t*>(ucontext)->uc_mcontext->__ss.__pc;
+        }
+#endif
+        const bool nullCall =
+            (sig == SIGSEGV || sig == SIGBUS) && fatalPc != 0 && fatalPc < 0x10000;
         const bool fatal = roleFatal || spent >= kMaxWorkerRecoveries ||
-                           walked >= kMaxWalkRecoveries;
+                           walked >= kMaxWalkRecoveries || nullCall;
         if (fatal) {
             g_hasCrashed.store(true);
             g_lastCrashTail[0] = '\0';  // filled below from g_crashBuf
