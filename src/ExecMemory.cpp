@@ -365,25 +365,26 @@ bool RegionProt(const void* addr, vm_prot_t* cur, vm_prot_t* max) {
     return true;
 }
 
-const char* ProtStr(vm_prot_t p) {
-    static thread_local char b[4];
-    b[0] = (p & VM_PROT_READ) ? 'r' : '-';
-    b[1] = (p & VM_PROT_WRITE) ? 'w' : '-';
-    b[2] = (p & VM_PROT_EXECUTE) ? 'x' : '-';
-    b[3] = '\0';
-    return b;
+void ProtStr(vm_prot_t p, char out[4]) {
+    out[0] = (p & VM_PROT_READ) ? 'r' : '-';
+    out[1] = (p & VM_PROT_WRITE) ? 'w' : '-';
+    out[2] = (p & VM_PROT_EXECUTE) ? 'x' : '-';
+    out[3] = '\0';
 }
 
-// Print a mapping's current/max protection. `ok` is false when the region query
-// itself failed, which the survey reports separately.
+// Print a mapping's current/max protection. Two buffers: ProtStr into one
+// thread-local slot twice would let both %s read the second value.
 void PrintProt(const char* what, const void* addr) {
     vm_prot_t cur = 0, max = 0;
     if (RegionProt(addr, &cur, &max)) {
-        std::fprintf(stderr, "[KuDroidExecMem] %s: cur=%s max=%s\n",
-                     what, ProtStr(cur), ProtStr(max));
+        char cs[4], ms[4];
+        ProtStr(cur, cs);
+        ProtStr(max, ms);
+        std::fprintf(stderr, "[KuDroidExecMem] %s: cur=%s max=%s\n", what, cs, ms);
     } else {
         std::fprintf(stderr, "[KuDroidExecMem] %s: region query failed\n", what);
     }
+    std::fflush(stderr);
 }
 
 // True when the region's MAX protection includes execute — the honest "this page
@@ -399,17 +400,19 @@ bool RegionMaxExec(const void* addr) {
 // layout against our own executable text first, so bogus numbers are never read
 // as real.
 void RunCapabilitySurvey() {
-    static std::once_flag once;
-    std::call_once(once, [] {
-        {
-            vm_prot_t cur = 0, max = 0;
-            const bool ok = RegionProt(
-                reinterpret_cast<const void*>(&RunCapabilitySurvey), &cur, &max);
-            std::fprintf(stderr,
-                         "[KuDroidExecMem] survey self-check %s own-text cur=%s max=%s\n",
-                         (ok && (max & VM_PROT_EXECUTE)) ? "ok" : "FAILED",
-                         ok ? ProtStr(cur) : "?", ok ? ProtStr(max) : "?");
-        }
+    static bool done = false;
+    if (done) return;
+    done = true;
+    {
+        vm_prot_t cur = 0, max = 0;
+        const bool ok = RegionProt(
+            reinterpret_cast<const void*>(&RunCapabilitySurvey), &cur, &max);
+        char cs[4] = "?", ms[4] = "?";
+        if (ok) { ProtStr(cur, cs); ProtStr(max, ms); }
+        std::fprintf(stderr,
+                     "[KuDroidExecMem] survey self-check %s own-text cur=%s max=%s\n",
+                     (ok && (max & VM_PROT_EXECUTE)) ? "ok" : "FAILED", cs, ms);
+    }
         const size_t ps = PageSize();
         struct Cand { const char* name; int prot; };
         const Cand cands[] = {
@@ -448,7 +451,7 @@ void RunCapabilitySurvey() {
                 ::munmap(p, ps);
             }
         }
-    });
+    std::fflush(stderr);
 }
 #endif  // __APPLE__
 
@@ -463,58 +466,38 @@ bool CreatePreparedArena(size_t size) {
 
     // Ask for execute at ALLOCATION time: max protection is fixed then, and a
     // region allocated without PROT_EXEC can never be made executable later
-    // (mprotect then clamps silently, which is what made the old arena's alias
-    // r--/rw-). Fall back to RW only if the kernel refuses the request outright.
+    // (mprotect clamps silently).
     void* backing = ::mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC,
                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    const char* route = "rwx";
     if (backing == MAP_FAILED) {
-        backing = ::mmap(nullptr, size, PROT_READ | PROT_WRITE,
-                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        route = "rw";
-    }
-    if (backing == MAP_FAILED) {
-        std::fprintf(stderr, "[KuDroidExecMem] arena: backing mmap failed: %s\n",
+        std::fprintf(stderr, "[KuDroidExecMem] arena: rwx backing failed: %s\n",
                      std::strerror(errno));
         return false;
     }
     PrintProt("arena backing", backing);
 
-    void* alias = nullptr;
-    if (!TryDualMap(backing, size, &alias)) {
-        std::fprintf(stderr, "[KuDroidExecMem] arena: rx alias failed\n");
-        ::munmap(backing, size);
-        return false;
-    }
-    PrintProt("arena alias", alias);
+    // No alias. mach_vm_remap of a writable anonymous region returns max=rw-
+    // (execute is dropped and cannot be raised again by mprotect or the prepare
+    // script), so an aliased exec view can never be fetchable on TXM. Execute
+    // through this same mapping instead; its max is rwx.
+    void* exec = backing;
 
-    if (!PrepareExecRegion(alias, size)) {
+    if (!PrepareExecRegion(exec, size)) {
         std::fprintf(stderr, "[KuDroidExecMem] arena: prepare failed\n");
-        ::munmap(alias, size);
+        DetachJitScript();  // never leave the script attached: the debugger keeps
+                            // stopping every thread until it detaches
         ::munmap(backing, size);
         return false;
     }
-    PrintProt("arena alias after prepare", alias);
-
-    if (!RegionMaxExec(alias)) {
-        std::fprintf(stderr,
-                     "[KuDroidExecMem] arena: prepare ok but max protection has no "
-                     "execute (route=%s); this device cannot fetch here\n", route);
-        ::munmap(alias, size);
-        ::munmap(backing, size);
-        return false;
-    }
-
-    // The region set is final: nothing executable is created after this point.
-    DetachJitScript();
+    PrintProt("arena after prepare", exec);
 
     // Decisive for the loader, and execution-free: does an ADDITIONAL alias of the
     // prepared pages report execute in its max protection? If yes, a per-image
     // span can remap an arena slice into its exec prefix and prepare is paid once.
-    // If no, every image alias must be prepared while the script is attached.
+    // If no, execution must stay on this single mapping.
     {
         void* second = nullptr;
-        if (TryDualMap(alias, PageSize(), &second)) {
+        if (TryDualMap(exec, PageSize(), &second)) {
             const bool follows = RegionMaxExec(second);
             PrintProt("arena prepared-ness follows alias", second);
             std::fprintf(stderr, "[KuDroidExecMem] prepared-ness follows alias=%d\n",
@@ -525,13 +508,24 @@ bool CreatePreparedArena(size_t size) {
         }
     }
 
+    // The region set is final: nothing executable is created after this point.
+    DetachJitScript();
+
+    if (!RegionMaxExec(exec)) {
+        std::fprintf(stderr,
+                     "[KuDroidExecMem] arena: prepared region's max has no execute; "
+                     "this device cannot fetch here\n");
+        ::munmap(backing, size);
+        return false;
+    }
+
     a.backing = backing;
-    a.alias = alias;
+    a.alias = exec;
     a.size = size;
     a.used = 0;
     a.active = true;
-    std::fprintf(stderr, "[KuDroidExecMem] prepared arena %zu MiB ready (route=%s)\n",
-                 size >> 20, route);
+    std::fprintf(stderr, "[KuDroidExecMem] prepared arena %zu MiB ready (single-mapping)\n",
+                 size >> 20);
     return true;
 }
 #endif  // __APPLE__
