@@ -14,6 +14,7 @@
 #include "kudroid/PermissionManager.h"
 #include "kudroid/Log.h"
 
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -23,6 +24,8 @@
 #include <sstream>
 #include <string>
 #include <vector>
+
+#include <unistd.h>
 
 extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
 void installCrashHandlers(void);
