@@ -122,7 +122,12 @@ ElfLoader::~ElfLoader() {
         splitImage_ = false;
     } else if (allocBase_) {
         ::munmap(allocBase_, allocSize_);
+    } else if (allocRegion_.writeView) {
+        // Arena-backed image (kPrepared): Free skips arena members, so this only
+        // clears the Region; the arena itself is process-long.
+        ExecMemory::Free(allocRegion_);
     }
+    allocRegion_ = {};
     allocBase_ = nullptr;
     allocSize_ = 0;
     base_ = nullptr;
@@ -792,7 +797,33 @@ bool ElfLoader::map() {
         dataMapSize_ = totalSize - splitOff;
         allocBase_ = nullptr;
         allocSize_ = 0;
-    } else {
+    } else
+#if defined(__APPLE__)
+    // TXM (iOS 26+): the image must live in the prepared arena. It is the only
+    // memory whose max protection includes execute (a fresh RW mmap clamps
+    // mprotect(RX) to rw- and the first fetch faults, SIGBUS), and its pages were
+    // prepared over the debug connection. The arena is already RWX and prepared,
+    // so the image is referenced directly with no per-segment protection step.
+    if (ExecMemory::Mode() == ExecMemMode::kPrepared) {
+        ExecMemory::Region region = ExecMemory::AllocateBacking(totalSize);
+        if (region.writeView == nullptr) {
+            lastError_ = "prepared arena has no room for image";
+            base_ = nullptr;
+            return false;
+        }
+        base_ = region.writeView;
+        execBase_ = region.execView;
+        allocRegion_ = region;
+        allocBase_ = nullptr;
+        allocSize_ = 0;
+        splitImage_ = false;
+        writeBase_ = nullptr;
+        spanBase_ = nullptr;
+        prefixBytes_ = 0;
+        minVaddr_ = minVaddr;
+    } else
+#endif
+    {
         base_ = ::mmap(nullptr, totalSize, PROT_READ | PROT_WRITE,
                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (base_ == MAP_FAILED) {
