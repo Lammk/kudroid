@@ -130,6 +130,10 @@ private:
     std::uint64_t        prefixBytes_ = 0;       // image bytes covered by the alias
     std::uint64_t        minVaddr_ = 0;          // lowest p_vaddr of this image
     bool                 splitImage_ = false;
+    // TXM prepared arena image: writeBase_ is the RW alias, base_ is the server
+    // RX view the guest fetches through. No protection step — the two mappings
+    // already carry the right permissions.
+    bool                 preparedImage_ = false;
     // The base of the original mmap region (before base_ is adjusted by -minVaddr),
     // so the destructor can munmap safely.
     void*                allocBase_ = nullptr;

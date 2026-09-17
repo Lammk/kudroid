@@ -155,6 +155,7 @@ ElfLoader::ElfLoader(ElfLoader&& other) noexcept
       prefixBytes_(other.prefixBytes_),
       minVaddr_(other.minVaddr_),
       splitImage_(other.splitImage_),
+      preparedImage_(other.preparedImage_),
       allocBase_(other.allocBase_),
       allocSize_(other.allocSize_),
       allocRegion_(other.allocRegion_),
@@ -190,6 +191,7 @@ ElfLoader::ElfLoader(ElfLoader&& other) noexcept
     other.spanBase_ = nullptr;
     other.prefixBytes_ = 0;
     other.splitImage_ = false;
+    other.preparedImage_ = false;
     other.dataMap_ = nullptr;
     other.dataMapSize_ = 0;
     other.allocRegion_ = {};
@@ -209,6 +211,7 @@ ElfLoader& ElfLoader::operator=(ElfLoader&& other) noexcept {
         prefixBytes_ = other.prefixBytes_;
         minVaddr_ = other.minVaddr_;
         splitImage_ = other.splitImage_;
+        preparedImage_ = other.preparedImage_;
         allocBase_ = other.allocBase_;
         allocSize_ = other.allocSize_;
         allocRegion_ = other.allocRegion_;
@@ -243,6 +246,7 @@ ElfLoader& ElfLoader::operator=(ElfLoader&& other) noexcept {
         other.spanBase_ = nullptr;
         other.prefixBytes_ = 0;
         other.splitImage_ = false;
+        other.preparedImage_ = false;
         other.dataMap_ = nullptr;
         other.dataMapSize_ = 0;
         other.allocRegion_ = {};
@@ -811,13 +815,18 @@ bool ElfLoader::map() {
             base_ = nullptr;
             return false;
         }
-        base_ = region.writeView;
+        // Writes go through the arena's RW alias (writeBase_); the guest executes
+        // through the server-allocated RX view, so base_ is the exec view. The two
+        // share pages, so a byte written through writeBase_ is the byte fetched at
+        // the matching base_ offset — one image, two permissions.
+        base_ = region.execView;
         execBase_ = region.execView;
+        writeBase_ = region.writeView;
         allocRegion_ = region;
         allocBase_ = nullptr;
         allocSize_ = 0;
         splitImage_ = false;
-        writeBase_ = nullptr;
+        preparedImage_ = true;
         spanBase_ = nullptr;
         prefixBytes_ = 0;
         minVaddr_ = minVaddr;
@@ -851,6 +860,9 @@ bool ElfLoader::map() {
         if (splitImage_ && off < prefixBytes_) {
             return static_cast<char*>(writeBase_) + off;
         }
+        if (preparedImage_) {
+            return static_cast<char*>(writeBase_) + off;
+        }
         return static_cast<char*>(base_) + off;
     };
 
@@ -877,7 +889,7 @@ bool ElfLoader::map() {
     // pass runs on the writable backing view in split mode (the span's prefix is
     // an RX alias — writes there would fault).
     {
-        void* rewriteView = splitImage_ ? writeBase_ : base_;
+        void* rewriteView = (splitImage_ || preparedImage_) ? writeBase_ : base_;
         X18Stats xst = kudroid::elf_x18_rewrite(rewriteView, minVaddr, segments_,
                                                 reinterpret_cast<const std::uint8_t*>(fileData_),
                                                 fileSize_);
@@ -1230,6 +1242,9 @@ char* ElfLoader::writePtrAt(std::uint64_t vaddr) {
         }
         return static_cast<char*>(spanBase_) + vaddr;
     }
+    if (preparedImage_) {
+        return static_cast<char*>(writeBase_) + vaddr;
+    }
     return static_cast<char*>(base_) + vaddr;
 }
 
@@ -1237,6 +1252,11 @@ bool ElfLoader::applyProtections() {
     if (splitImage_) {
         return applyProtectionsSplit();
     }
+    // Prepared (TXM) image: the exec view is the server-allocated RX mapping and
+    // the write view is a plain RW alias of the same pages, so the permissions are
+    // already exactly right and nothing may be mprotected afterwards (a transition
+    // would also invalidate the server's prepare).
+    if (preparedImage_) return true;
     // The image mapping: a plain mmap (allocBase_) below TXM, or an arena slice
     // (allocRegion_) under kPrepared. Both are contiguous and image-relative from
     // their start, so the page math below is identical.

@@ -166,6 +166,37 @@ bool PrepareExecRegion(void* alias, size_t size) {
 }
 
 void DetachJitScript() { kudroid_jit26_detach(); }
+
+// Ask the debug script to allocate the executable region (x0=0 -> server
+// `_M<size>,rx`). On iOS 26/27 only memory the debug server allocates is actually
+// fetchable — an engine-created mapping is refused at fetch even when prepared, so
+// the engine must not allocate the exec side itself. Returns the RX address, or
+// nullptr when no script is attached.
+void* PrepareRegionAlloc(size_t size) {
+    return kudroid_jit26_prepare(nullptr, size);
+}
+
+// Writable alias of `src` sharing its physical pages at a new virtual address.
+// The engine owns this half of W^X: writes land here, the server RX mapping
+// fetches them. mach_vm_protect only lowers, and the alias' max is rw-, so RW is
+// always within reach.
+bool RemapWritable(void* src, size_t size, void** outRW) {
+    mach_vm_address_t addr = 0;
+    vm_prot_t cur = VM_PROT_NONE, max = VM_PROT_NONE;
+    kern_return_t kr = mach_vm_remap(mach_task_self(), &addr, size, 0,
+                                     VM_FLAGS_ANYWHERE, mach_task_self(),
+                                     reinterpret_cast<mach_vm_address_t>(src),
+                                     FALSE, &cur, &max, VM_INHERIT_DEFAULT);
+    if (kr != KERN_SUCCESS) return false;
+    kr = mach_vm_protect(mach_task_self(), addr, size, FALSE,
+                         VM_PROT_READ | VM_PROT_WRITE);
+    if (kr != KERN_SUCCESS) {
+        mach_vm_deallocate(mach_task_self(), addr, size);
+        return false;
+    }
+    *outRW = reinterpret_cast<void*>(static_cast<uintptr_t>(addr));
+    return true;
+}
 #elif defined(__linux__)
 // Dual-map on Linux: one memfd backing both views. Writes through the RW
 // mapping land in the same pages the RX mapping fetches from — W^X applies to
@@ -464,67 +495,37 @@ bool CreatePreparedArena(size_t size) {
     if (a.active) return true;
     if (!(TxmEstimate() && CsDebugged())) return false;
 
-    // Ask for execute at ALLOCATION time: max protection is fixed then, and a
-    // region allocated without PROT_EXEC can never be made executable later
-    // (mprotect clamps silently).
-    void* backing = ::mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC,
-                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (backing == MAP_FAILED) {
-        std::fprintf(stderr, "[KuDroidExecMem] arena: rwx backing failed: %s\n",
-                     std::strerror(errno));
+    // Let the debug script allocate the executable region. An engine-created
+    // mapping — even one prepared over the connection — is still refused at fetch
+    // on iOS 26/27 (device: SIGBUS on the first instruction of an arena image), so
+    // the exec side must be server-allocated. The engine owns the writable alias.
+    void* rx = PrepareRegionAlloc(size);
+    if (!rx) {
+        std::fprintf(stderr, "[KuDroidExecMem] arena: server rx alloc failed "
+                             "(no script?)\n");
+        DetachJitScript();  // never leave the script attached
         return false;
     }
-    PrintProt("arena backing", backing);
+    PrintProt("arena exec (server rx)", rx);
 
-    // No alias. mach_vm_remap of a writable anonymous region returns max=rw-
-    // (execute is dropped and cannot be raised again by mprotect or the prepare
-    // script), so an aliased exec view can never be fetchable on TXM. Execute
-    // through this same mapping instead; its max is rwx.
-    void* exec = backing;
-
-    if (!PrepareExecRegion(exec, size)) {
-        std::fprintf(stderr, "[KuDroidExecMem] arena: prepare failed\n");
-        DetachJitScript();  // never leave the script attached: the debugger keeps
-                            // stopping every thread until it detaches
-        ::munmap(backing, size);
+    void* rw = nullptr;
+    if (!RemapWritable(rx, size, &rw)) {
+        std::fprintf(stderr, "[KuDroidExecMem] arena: rw alias of exec region failed\n");
+        DetachJitScript();
         return false;
     }
-    PrintProt("arena after prepare", exec);
-
-    // Decisive for the loader, and execution-free: does an ADDITIONAL alias of the
-    // prepared pages report execute in its max protection? If yes, a per-image
-    // span can remap an arena slice into its exec prefix and prepare is paid once.
-    // If no, execution must stay on this single mapping.
-    {
-        void* second = nullptr;
-        if (TryDualMap(exec, PageSize(), &second)) {
-            const bool follows = RegionMaxExec(second);
-            PrintProt("arena prepared-ness follows alias", second);
-            std::fprintf(stderr, "[KuDroidExecMem] prepared-ness follows alias=%d\n",
-                         follows ? 1 : 0);
-            ::munmap(second, PageSize());
-        } else {
-            std::fprintf(stderr, "[KuDroidExecMem] prepared-ness follows alias=n/a\n");
-        }
-    }
+    PrintProt("arena write alias", rw);
 
     // The region set is final: nothing executable is created after this point.
     DetachJitScript();
 
-    if (!RegionMaxExec(exec)) {
-        std::fprintf(stderr,
-                     "[KuDroidExecMem] arena: prepared region's max has no execute; "
-                     "this device cannot fetch here\n");
-        ::munmap(backing, size);
-        return false;
-    }
-
-    a.backing = backing;
-    a.alias = exec;
+    a.backing = rw;   // writes go here
+    a.alias = rx;     // fetches go here
     a.size = size;
     a.used = 0;
     a.active = true;
-    std::fprintf(stderr, "[KuDroidExecMem] prepared arena %zu MiB ready (single-mapping)\n",
+    std::fprintf(stderr,
+                 "[KuDroidExecMem] prepared arena %zu MiB ready (server rx + rw alias)\n",
                  size >> 20);
     return true;
 }
