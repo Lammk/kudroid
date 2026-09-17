@@ -25,6 +25,28 @@ if(NOT KUDROID_GIT_HASH)
     set(KUDROID_GIT_HASH "UNKNOWN")
 endif()
 
+# The framework DEX header (382k lines) is generated, not tracked: fresh
+# clones embed the pinned framework/build/framework.dex on first configure.
+set(KUDROID_DEX_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/include/kudroid/framework_dex_bytes.h")
+set(KUDROID_DEX_BINARY "${CMAKE_CURRENT_SOURCE_DIR}/framework/build/framework.dex")
+if(NOT EXISTS "${KUDROID_DEX_HEADER}")
+    if(EXISTS "${KUDROID_DEX_BINARY}")
+        message(STATUS "Generating framework_dex_bytes.h from framework/build/framework.dex")
+        execute_process(
+            COMMAND python3 "${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed_framework_dex.py"
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+            RESULT_VARIABLE KUDROID_DEX_EMBED_RESULT
+        )
+        if(NOT KUDROID_DEX_EMBED_RESULT EQUAL 0)
+            message(FATAL_ERROR "Failed to generate framework_dex_bytes.h from framework.dex")
+        endif()
+    else()
+        message(FATAL_ERROR
+            "Missing ${KUDROID_DEX_HEADER} and ${KUDROID_DEX_BINARY}. "
+            "Run: bash framework/build.sh")
+    endif()
+endif()
+
 # ARM64 iOS cross-compile settings (when targeting iOS device/simulator)
 # Usage: cmake -B build -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS")

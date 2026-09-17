@@ -1,7 +1,12 @@
-build/
-framework/build/
+/build/
+framework/build/*
+# The pinned DEX is tracked: fresh clones embed it without the JDK/d8 chain.
+!framework/build/framework.dex
 logs/
 tests/
 *.log
 *.tmp
 .DS_Store
+
+# Generated: embedded framework DEX (regenerate from framework/build/framework.dex)
+include/kudroid/framework_dex_bytes.h
