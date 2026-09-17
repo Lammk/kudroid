@@ -85,6 +85,13 @@ add_library(kudroid_core STATIC
     src/platform/AssetShim.cpp
     src/platform/BundledFramework.cpp
     src/platform/JavaCanvasRenderer.cpp
+    src/bridge/BridgeState.cpp
+    src/bridge/BridgeShared.cpp
+    src/bridge/CrashHandling.cpp
+    src/bridge/ShellUI.cpp
+    src/bridge/GuestLibrary.cpp
+    src/bridge/AppLifecycle.cpp
+    src/bridge/DiagnosticTests.cpp
     src/kudroid_bridge.cpp
     src/gpu_test.cpp
     # KuART — micro ART: load DEX directly, without going through dex2jar/JVM.
