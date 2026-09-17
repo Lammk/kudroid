@@ -1237,7 +1237,12 @@ bool ElfLoader::applyProtections() {
     if (splitImage_) {
         return applyProtectionsSplit();
     }
-    if (!allocBase_ || allocSize_ == 0) return true;
+    // The image mapping: a plain mmap (allocBase_) below TXM, or an arena slice
+    // (allocRegion_) under kPrepared. Both are contiguous and image-relative from
+    // their start, so the page math below is identical.
+    void* mapBase = allocBase_ ? allocBase_ : allocRegion_.writeView;
+    size_t mapSize = allocBase_ ? allocSize_ : allocRegion_.size;
+    if (!mapBase || mapSize == 0) return true;
 
     const long pageSizeValue = sysconf(_SC_PAGESIZE);
     if (pageSizeValue <= 0) return false;
@@ -1249,7 +1254,7 @@ bool ElfLoader::applyProtections() {
     }
     if (minVaddr == UINT64_MAX) minVaddr = 0;
 
-    const size_t numPages = allocSize_ / pageSize;
+    const size_t numPages = mapSize / pageSize;
     std::vector<int> pageProts(numPages, 0);
 
     for (const auto& seg : segments_) {
@@ -1308,7 +1313,7 @@ bool ElfLoader::applyProtections() {
         }
     }
 
-    char* mapStart = static_cast<char*>(allocBase_);
+    char* mapStart = static_cast<char*>(mapBase);
     size_t groupStart = 0;
     while (groupStart < numPages) {
         int currentProt = pageProts[groupStart];
@@ -1329,7 +1334,7 @@ bool ElfLoader::applyProtections() {
     }
 
 #if defined(__APPLE__)
-    sys_icache_invalidate(mapStart, allocSize_);
+    sys_icache_invalidate(mapStart, mapSize);
 #else
     __builtin___clear_cache(mapStart, mapStart + allocSize_);
 #endif
