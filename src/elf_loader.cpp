@@ -1252,15 +1252,14 @@ bool ElfLoader::applyProtections() {
     if (splitImage_) {
         return applyProtectionsSplit();
     }
-    // Prepared (TXM) image: the exec view is the server-allocated RX mapping and
-    // the write view is a plain RW alias of the same pages, so the permissions are
-    // already exactly right and nothing may be mprotected afterwards (a transition
-    // would also invalidate the server's prepare).
-    if (preparedImage_) return true;
-    // The image mapping: a plain mmap (allocBase_) below TXM, or an arena slice
-    // (allocRegion_) under kPrepared. Both are contiguous and image-relative from
-    // their start, so the page math below is identical.
-    void* mapBase = allocBase_ ? allocBase_ : allocRegion_.writeView;
+    // Prepared (TXM): the guest has ONE address space — it fetches code and stores
+    // data through the same server-allocated exec view, so that view needs per-page
+    // RX (text) / RW (data). Text pages stay RX and keep the server's prepare; only
+    // the writable pages are opened. The engine's own writes went through the RW
+    // alias and are untouched here.
+    void* mapBase = allocBase_ ? allocBase_
+                               : (preparedImage_ ? allocRegion_.execView
+                                                 : allocRegion_.writeView);
     size_t mapSize = allocBase_ ? allocSize_ : allocRegion_.size;
     if (!mapBase || mapSize == 0) return true;
 
