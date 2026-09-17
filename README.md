@@ -21,10 +21,14 @@ This project is **vibecoded** by AI, with me leading the architecture, design, a
 ---
 
 ### Key Technical Highlights
-- **KuART (KuDroid Android Runtime)**: Standalone, lightweight DEX bytecode interpreter tailored for Apple Silicon (ARM64), reading directly from `.apk` without intermediate translation.
-- **Native Metal Graphics**: Bridges Android Surface / OpenGL ES 3.0 via ANGLE directly to Apple's CAMetalLayer for 60 FPS rendering.
+- **KuART (KuDroid Android Runtime)**: Standalone, lightweight DEX bytecode interpreter tailored for Apple Silicon (ARM64), reading directly from `.apk`.
+- **Native Metal Graphics**: Bridges Android Surface / OpenGL ES 3.0 via ANGLE directly to Apple's CAMetalLayer for best rendering.
 - **Low-Latency Audio**: Seamless translation from Android OpenSL ES / AAudio to iOS CoreAudio (AudioToolbox).
 - **Bionic Translation Shim**: Re-links Android ELF shared libraries (`.so`) to Mach-O POSIX syscalls on Darwin.
+
+---
+### For iOS 26,27
+- Attract universal.js script in stikdebug to make JIT work again
 
 ---
 

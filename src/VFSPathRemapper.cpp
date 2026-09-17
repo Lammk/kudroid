@@ -1720,6 +1720,55 @@ std::atomic<uint64_t> g_freadEpoch{0};
 // counter and the probe showed the wrong stream.
 std::map<FILE*, int> g_fsbFollowup;
 
+// Audio-blob coverage, keyed by (archive, [blobStart, blobEnd)).
+//
+// Unity hands FMOD one FSB5 slice per clip and reads it out of the .resource
+// entry in 2048-byte chunks, re-opening base.apk for almost every chunk. A
+// per-FILE* chain therefore breaks on nearly every read and reported every
+// blob as TRUNCATED -- a handle-churn artifact, not a fact about the bytes.
+// The window is the stable thing, so coverage is counted per window across all
+// handles and the verdict names the blob FMOD was actually handed.
+struct FsbWindow {
+    long start = 0;
+    long end = 0;
+    uint64_t expected = 0;
+    uint64_t blocks = 0;            // distinct 2048-byte blocks seen
+    std::vector<uint64_t> covered;  // bitmap, one bit per block
+};
+std::map<std::string, std::vector<FsbWindow>> g_fsbWindows;  // g_freadVolMtx
+
+// Call with g_freadVolMtx held. Reports and drops every window whose declared
+// bytes are all accounted for; `enforceCap` then reports the oldest unfinished
+// window SHORT until the live set is under the cap, so a blob whose bytes never
+// arrived is not silently forgotten.
+void fsb_windows_report_locked(const std::string& path, bool enforceCap) {
+    const auto it = g_fsbWindows.find(path);
+    if (it == g_fsbWindows.end()) return;
+    auto& list = it->second;
+    for (size_t i = 0; i < list.size();) {
+        const FsbWindow& w = list[i];
+        if (w.blocks * 2048 >= w.expected) {
+            std::fprintf(stderr,
+                         "[KuDroidFmod] blob off=%ld size=%llu covered=%llu COMPLETE\n",
+                         w.start, static_cast<unsigned long long>(w.expected),
+                         static_cast<unsigned long long>(w.expected));
+            list.erase(list.begin() + static_cast<long>(i));
+        } else {
+            ++i;
+        }
+    }
+    while (enforceCap && list.size() >= 16) {
+        const FsbWindow& w = list.front();
+        const uint64_t covered = w.blocks * 2048;
+        std::fprintf(stderr, "[KuDroidFmod] blob off=%ld size=%llu covered=%llu SHORT\n",
+                     w.start, static_cast<unsigned long long>(w.expected),
+                     static_cast<unsigned long long>(
+                         covered > w.expected ? w.expected : covered));
+        list.erase(list.begin());
+    }
+    if (list.empty()) g_fsbWindows.erase(it);
+}
+
 namespace {
 // Merged under g_freadVolMtx. Copies the map for the top-5 sort OUTSIDE the
 // lock: sorting under it stalled every reader each 5MB.
@@ -1854,53 +1903,37 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                          b[3] >= 32 && b[3] < 127 ? b[3] : '.',
                          entryName.empty() ? "" : " entry=", entryName.c_str());
         }
-        // Per-stream FSB5 slice tracking. Unity assembles each audio blob
-        // from this stream and hands it to FMOD from memory; streaming stops
-        // where the slice ends. Header-declared size vs bytes actually served
-        // decides "truncated blob" from "complete blob refused anyway".
-        struct FsbSlice {
-            long lastEnd = -1;
-            uint64_t got = 0;
-            uint64_t expected = 0;
-            uint32_t crcGot = 0;
-            uint32_t crcExpect = 0;
-        };
-        static std::map<FILE*, FsbSlice> s_fsbSlices;
-        // Advance/retire an active slice BEFORE detecting a new header: the
-        // read that ends one slice is often the header read of the next.
+        // Account this read's bytes into any audio-blob window on the same
+        // archive, whichever handle carried them.
         {
             std::lock_guard<std::mutex> vlock(g_freadVolMtx);
             const long pos = std::ftell(stream);
             const long start = pos >= 0 ? pos - static_cast<long>(n * size) : -1;
-            auto sit = s_fsbSlices.find(stream);
-            if (sit != s_fsbSlices.end() && start >= 0) {
-                FsbSlice& st = sit->second;
-                if (start == st.lastEnd) {
-                    st.got += n * size;
-                    st.lastEnd = pos;
-                    st.crcGot = static_cast<uint32_t>(::crc32(
-                        st.crcGot, static_cast<const Bytef*>(buf),
-                        static_cast<uInt>(n * size)));
-                    if (st.got >= st.expected) {
-                        const bool crcOk = st.crcExpect == 0 || st.crcGot == st.crcExpect;
-                        std::fprintf(stderr,
-                                     "[KuDroidFmod] fsb-slice complete off=%ld got=%llu "
-                                     "expected=%llu crc=%08x/%08x %s\n",
-                                     start, static_cast<unsigned long long>(st.got),
-                                     static_cast<unsigned long long>(st.expected), st.crcGot,
-                                     st.crcExpect, crcOk ? "OK" : "MISMATCH");
-                        s_fsbSlices.erase(sit);
+            const auto pit = g_freadPaths.find(stream);
+            if (pit != g_freadPaths.end() && start >= 0) {
+                auto wit = g_fsbWindows.find(pit->second);
+                if (wit != g_fsbWindows.end()) {
+                    for (auto& w : wit->second) {
+                        if (start >= w.end || pos <= w.start) continue;
+                        const long lo = start > w.start ? start : w.start;
+                        const long hi = pos < w.end ? pos : w.end;
+                        const uint64_t blocks = (w.expected + 2047) / 2048;
+                        if (w.covered.empty()) {
+                            w.covered.assign(static_cast<size_t>(blocks / 64 + 1), 0);
+                        }
+                        for (long b = (lo - w.start) / 2048;
+                             b <= (hi - 1 - w.start) / 2048 &&
+                             static_cast<uint64_t>(b) < blocks;
+                             ++b) {
+                            uint64_t& word = w.covered[static_cast<size_t>(b) >> 6];
+                            const uint64_t bit = 1ull << (static_cast<unsigned>(b) & 63);
+                            if (!(word & bit)) {
+                                word |= bit;
+                                ++w.blocks;
+                            }
+                        }
                     }
-                } else {
-                    const long long delta = static_cast<long long>(st.expected) -
-                                            static_cast<long long>(st.got);
-                    std::fprintf(stderr,
-                                 "[KuDroidFmod] fsb-slice end off=%ld got=%llu "
-                                 "expected=%llu delta=%lld%s\n",
-                                 start, static_cast<unsigned long long>(st.got),
-                                 static_cast<unsigned long long>(st.expected), delta,
-                                 delta > 0 ? " TRUNCATED" : "");
-                    s_fsbSlices.erase(sit);
+                    fsb_windows_report_locked(pit->second, false);
                 }
             }
         }
@@ -1922,7 +1955,6 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                 std::string entry;
                 uint16_t method = 0xFFFF;
                 uint32_t usize = 0;
-                uint32_t entryCrc = 0;
                 if (start >= 0) {
                     std::string archivePath;
                     {
@@ -1940,7 +1972,6 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                                     entry = name;
                                     method = meta.compressionMethod;
                                     usize = meta.uncompressedSize;
-                                    entryCrc = meta.crc32;
                                     break;
                                 }
                             }
@@ -2022,15 +2053,17 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                 {
                     std::lock_guard<std::mutex> vlock(g_freadVolMtx);
                     g_fsbFollowup[stream] = 8;
-                    if (parsed && start >= 0 && blobTotal > 0) {
-                        FsbSlice& st = s_fsbSlices[stream];
-                        st.lastEnd = start + static_cast<long>(n * size);
-                        st.got = n * size;
-                        st.expected = blobTotal;
-                        st.crcGot = static_cast<uint32_t>(::crc32(
-                            0L, static_cast<const Bytef*>(buf),
-                            static_cast<uInt>(n * size)));
-                        st.crcExpect = entryCrc;
+                    if (parsed && start >= 0 && blobTotal > 0 &&
+                        blobTotal <= (32u << 20)) {
+                        const auto pit2 = g_freadPaths.find(stream);
+                        if (pit2 != g_freadPaths.end()) {
+                            fsb_windows_report_locked(pit2->second, true);
+                            FsbWindow w;
+                            w.start = start;
+                            w.end = start + static_cast<long>(blobTotal);
+                            w.expected = blobTotal;
+                            g_fsbWindows[pit2->second].push_back(w);
+                        }
                     }
                 }
             }

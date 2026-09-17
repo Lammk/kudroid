@@ -1544,7 +1544,9 @@ extern "C" EGLBoolean bionic_eglInitialize(EGLDisplay dpy, EGLint* major, EGLint
     EGLint localMajor = 0, localMinor = 0;
     gpuLog("eglInitialize: calling ANGLE eglInitialize(dpy=%p, major=%s, minor=%s)...",
            (void*)dpy, major ? "ptr" : "NULL", minor ? "ptr" : "NULL");
+    kudroid_boot_mark("eglInitialize-enter");
     const EGLBoolean r = f(dpy, major ? major : &localMajor, minor ? minor : &localMinor);
+    kudroid_boot_mark("eglInitialize-exit");
     gpuLog("eglInitialize -> %s (major=%d minor=%d)", r ? "true" : "false",
            major ? *major : localMajor, minor ? *minor : localMinor);
     return r;
@@ -1704,6 +1706,13 @@ extern "C" EGLBoolean bionic_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) 
             .count()) -
         swapT0;
     gpuLog("eglSwapBuffers(surface=%p) -> %s", (void*)surface, r ? "true" : "false");
+    {
+        // First present is the end of boot: everything before it is startup.
+        static std::atomic<bool> s_first{false};
+        if (!s_first.exchange(true, std::memory_order_relaxed)) {
+            kudroid_boot_mark("first-swap");
+        }
+    }
     // Slow-swap detector: a present path that blocks (drawable starvation,
     // vsync wedge) shows up here, not in Unity timings. Rare when healthy.
     if (swapMs > 50) {

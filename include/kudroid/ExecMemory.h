@@ -140,6 +140,15 @@ public:
     ExecMemory() = delete;
 };
 
+// Current/max protection of the VM region holding `addr`, each formatted as
+// three characters plus NUL ("rwx", "---", ...). Fills the region's base and
+// size when the out pointers are non-null. Returns false when `addr` is in no
+// region (a wild pointer) or the query itself fails. Apple platforms only;
+// always false elsewhere.
+bool QueryRegionProt(const void* addr, char cur[4], char max[4],
+                     uint64_t* regionBase = nullptr,
+                     uint64_t* regionSize = nullptr);
+
 }  // namespace kudroid
 
 #endif  // KUDROID_EXECMEMORY_H

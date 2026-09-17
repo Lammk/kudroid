@@ -676,6 +676,39 @@ size_t RoundUp(size_t n, size_t align) {
 
 }  // namespace
 
+// Exported form of the region probe for signal-handler diagnostics: the fault
+// handler needs to know whether a faulting address is mapped, and with which
+// permissions, to tell a missing commit (cur lacks the needed bit, max has it)
+// from a wild pointer (no region at all).
+#if defined(__APPLE__)
+bool QueryRegionProt(const void* addr, char cur[4], char max[4],
+                     uint64_t* regionBase, uint64_t* regionSize) {
+    if (addr == nullptr) return false;
+    mach_vm_address_t a = reinterpret_cast<mach_vm_address_t>(addr);
+    mach_vm_size_t sz = 0;
+    kudroid_vm_region_basic_info_64_t info{};
+    mach_msg_type_number_t count = KUDROID_VM_REGION_BASIC_INFO_64_COUNT;
+    mach_port_t obj = MACH_PORT_NULL;
+    const kern_return_t kr = mach_vm_region(
+        mach_task_self(), &a, &sz, KUDROID_VM_REGION_BASIC_INFO_64_FLAVOR,
+        reinterpret_cast<vm_region_info_t>(&info), &count, &obj);
+    if (obj != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), obj);
+    if (kr != KERN_SUCCESS) return false;
+    ProtStr(info.protection, cur);
+    ProtStr(info.max_protection, max);
+    if (regionBase) *regionBase = static_cast<uint64_t>(a);
+    if (regionSize) *regionSize = static_cast<uint64_t>(sz);
+    return true;
+}
+#else
+bool QueryRegionProt(const void*, char cur[4], char max[4],
+                     uint64_t*, uint64_t*) {
+    if (cur != nullptr) cur[0] = '\0';
+    if (max != nullptr) max[0] = '\0';
+    return false;
+}
+#endif
+
 ExecMemMode ExecMemory::Mode() {
     return ProbeStateInstance().mode;
 }

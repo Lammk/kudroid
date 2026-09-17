@@ -55,6 +55,28 @@ extern "C" int kudroid_android_log_message(int priority, const char* tag, const 
 extern "C" void kudroid_persistent_breadcrumb(const char* line);
 extern "C" bool bionic_handle_guest_syscall_trap(void* context);
 
+// Boot phase marker, written to both sinks with milliseconds since the first
+// call. stderr carries the loader and per-file I/O lines but no timestamps, so
+// a multi-second gap between two of them cannot be attributed to a phase; the
+// android-log sink has the timestamps but not those lines. One marker per
+// phase brackets whatever sits between them, on one timeline.
+extern "C" void kudroid_boot_mark(const char* phase) {
+    static std::atomic<long long> s_t0{0};
+    const long long ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             std::chrono::steady_clock::now().time_since_epoch())
+                             .count();
+    long long t0 = s_t0.load(std::memory_order_relaxed);
+    if (t0 == 0) {
+        s_t0.store(ns, std::memory_order_relaxed);
+        t0 = ns;
+    }
+    char line[192];
+    std::snprintf(line, sizeof(line), "[KuDroidBoot] t=%lldms %s",
+                  (ns - t0) / 1000000, phase ? phase : "?");
+    std::fprintf(stderr, "%s\n", line);
+    kudroid_android_log_message(4, "KuDroidBoot", line);
+}
+
 extern "C" void kudroid_ios_diagnostic_phase(const char* phase) {
 #if defined(__APPLE__)
     char line[512];
@@ -1180,7 +1202,8 @@ FaultSkipPlan fault_decode_skip(uint32_t w, uint64_t pc, uint64_t baseVal,
 #if (defined(__aarch64__) || defined(__arm64__)) && defined(__APPLE__)
 namespace {
 
-bool fault_skip_load_store(ucontext_t* uc, uintptr_t faultAddr, uint64_t* newPcOut) {
+bool fault_skip_load_store(ucontext_t* uc, uintptr_t faultAddr, uint64_t* newPcOut,
+                           bool* isLoadOut) {
     if (uc == nullptr || newPcOut == nullptr) return false;
     const uint64_t pc = uc->uc_mcontext->__ss.__pc;
     // Guest text only (see above). The lookup try-locks and gives up rather
@@ -1208,19 +1231,19 @@ bool fault_skip_load_store(ucontext_t* uc, uintptr_t faultAddr, uint64_t* newPcO
     if (!p.skippable) return false;
     // The decode must explain the fault. Anything else is a mis-decode.
     if (p.effAddr != faultAddr) return false;
-    // No per-PC strike cap here by design: observed survivable storms fault
-    // 128 times at ONE pc (a chunk loop advancing its index each iteration),
-    // and capping them early parks a worker the game still needs. Storm
-    // control is the per-thread 128 budget; poison below keeps each skip
-    // attributable instead of silently zero.
+    // Reached only for faults inside kNullProbeLimit, so the fabricated result
+    // below lands in a register whose only sane value a null read could have
+    // produced anyway. Storm control stays in the per-thread budget.
     if (p.isLoad) {
         if (p.isVector) {
             // SIMD/FP lane: all 32 vector registers exist (no XZR), so no
-            // destination gate is needed. Poison, not zero: 0xCD bytes are
-            // visibly wrong in any lane interpretation, while zero is a valid
-            // pointer/length that hides corruption for 128 faults.
+            // destination gate is needed. Zero, like the scalar case below: a
+            // null-page read is the only fault that reaches here, so the value
+            // the guest would have seen is zero bytes. A poison pattern is
+            // worse, not better -- 0xCD bytes reinterpreted as four pointers
+            // are four wild addresses.
             if (p.rt > 31) return false;
-            std::memset(&uc->uc_mcontext->__ns.__v[p.rt], 0xCD,
+            std::memset(&uc->uc_mcontext->__ns.__v[p.rt], 0,
                         sizeof(uc->uc_mcontext->__ns.__v[p.rt]));
         } else {
             // 29/30 never take a transfer result in valid code, 31 is XZR
@@ -1239,6 +1262,7 @@ bool fault_skip_load_store(ucontext_t* uc, uintptr_t faultAddr, uint64_t* newPcO
         }
     }
     *newPcOut = pc + 4;
+    if (isLoadOut != nullptr) *isLoadOut = p.isLoad;
     return true;
 }
 
@@ -1248,8 +1272,22 @@ static bool kudroid_try_skip_fault(int /*sig*/, siginfo_t* info, void* ucontext)
     if (info == nullptr || ucontext == nullptr) return false;
     ucontext_t* uc = reinterpret_cast<ucontext_t*>(ucontext);
     uint64_t newPc = 0;
+    bool isLoad = false;
     const uintptr_t faultAddr = reinterpret_cast<uintptr_t>(info->si_addr);
-    if (!fault_skip_load_store(uc, faultAddr, &newPc)) return false;
+    // A fault may only be silently recovered when it looks like a null-page
+    // probe: the guest dereferences a pointer whose null check it got wrong.
+    // That is the one case where inventing a result cannot corrupt live state,
+    // because nothing the guest owns lives below the first page. Anywhere else
+    // the fault is a real bad access, and fabricating a load result feeds
+    // garbage into the structures the guest is walking -- observed live as a
+    // hash-table loop that stored a poisoned SIMD lane (0xCD) into a live
+    // array, kept walking with the poisoned index and finally wrote 33GB off
+    // the heap. Refuse those: a crash on the real address, with the region and
+    // permissions logged, is diagnosable; thousands of silent corruptions are
+    // not.
+    constexpr uintptr_t kNullProbeLimit = 0x10000;  // first 64KB
+    if (faultAddr >= kNullProbeLimit) return false;
+    if (!fault_skip_load_store(uc, faultAddr, &newPc, &isLoad)) return false;
     arm_thread_state64_set_pc_fptr(uc->uc_mcontext->__ss,
                                    reinterpret_cast<void*>(newPc));
     char mark[256];
@@ -1268,8 +1306,30 @@ static bool kudroid_try_skip_fault(int /*sig*/, siginfo_t* info, void* ucontext)
         const unsigned seen = s_skipLog.fetch_add(1, std::memory_order_relaxed);
         if (seen < 8 || (seen % 16) == 0) {
             if (g_logDir[0]) {
-                char rec[320];
-                const int m = snprintf(rec, sizeof(rec), "[fault-skip #%u] %s\n", seen + 1, mark);
+                // Which mapping the fault came from decides the fix: a region
+                // that exists with insufficient cur protection is a commit we
+                // failed to make, while no region at all (or one whose max
+                // protection cannot grant the access) is a wild address.
+                char reg[160];
+                {
+                    char cur[4] = "???", max[4] = "???";
+                    uint64_t rbase = 0, rsize = 0;
+                    if (kudroid::QueryRegionProt(
+                            reinterpret_cast<const void*>(faultAddr), cur, max,
+                            &rbase, &rsize)) {
+                        std::snprintf(reg, sizeof(reg),
+                                      " region=0x%llx+0x%llx cur=%s max=%s",
+                                      (unsigned long long)rbase,
+                                      (unsigned long long)rsize, cur, max);
+                    } else {
+                        std::snprintf(reg, sizeof(reg), " region=<none>");
+                    }
+                }
+                char rec[480];
+                const int m = std::snprintf(rec, sizeof(rec),
+                                            "[fault-skip #%u] %s kind=%s%s\n",
+                                            seen + 1, mark,
+                                            isLoad ? "load" : "store", reg);
                 if (m > 0) {
                     char path[1200];
                     size_t dl = std::strlen(g_logDir);
@@ -1787,6 +1847,24 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
                     "fault_addr = %p\nsi_code = %d\n",
                     info->si_addr, info->si_code);
                 crashWriteLine(fd, sigline, m, sizeof(sigline));
+                {
+                    // Region and permissions of the faulting address: separates
+                    // "mapped but not committed with this access" from "no such
+                    // mapping" without needing a live debugger.
+                    char cur[4] = "???", max[4] = "???";
+                    uint64_t rbase = 0, rsize = 0;
+                    if (kudroid::QueryRegionProt(info->si_addr, cur, max,
+                                                 &rbase, &rsize)) {
+                        m = snprintf(sigline, sizeof(sigline),
+                            "fault_region = 0x%llx+0x%llx cur=%s max=%s\n",
+                            (unsigned long long)rbase,
+                            (unsigned long long)rsize, cur, max);
+                    } else {
+                        m = snprintf(sigline, sizeof(sigline),
+                                     "fault_region = <none>\n");
+                    }
+                    crashWriteLine(fd, sigline, m, sizeof(sigline));
+                }
             }
 
 #if (defined(__aarch64__) || defined(__arm64__)) && defined(__APPLE__)
@@ -2394,6 +2472,7 @@ extern "C" void kudroid_clear_all_logs(void) {
         ::chmod(errPath, 0644);
         fprintf(stderr, "[kudroid_core] process-start Build: %s\n", kudroid_build_stamp());
         fprintf(stderr, "[kudroid_core] log directory: %s\n", g_logDir);
+        kudroid_boot_mark("start");
     }
 #endif
 
@@ -3497,6 +3576,9 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                         appendAndEcho("[kudroid_core] LOAD FAILED for " + soPath + ": " + manager.lastError());
                     } else {
                         appendAndEcho("[kudroid_core] LOAD SUCCESS for " + soPath);
+                        kudroid_boot_mark(
+                            ("elf-loaded " + std::filesystem::path(soPath).filename().string())
+                                .c_str());
                     }
                 }
                 
@@ -3550,6 +3632,9 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                         snprintf(msg, sizeof(msg), "[kudroid_core] JNI_OnLoad(%s) returned version: %d", filename.c_str(), version);
                                         logCoreLine(4, msg);
                                         std::fprintf(stderr, "%s\n", msg);
+                                        kudroid_boot_mark(
+                                            ("jni-onload " + std::filesystem::path(filename).filename().string())
+                                                .c_str());
                                     } else if (guardRc < 0) {
                                         snprintf(msg, sizeof(msg), "[kudroid_core] WARNING: Native exception in JNI_OnLoad for %s", filename.c_str());
                                         logCoreLine(5, msg);

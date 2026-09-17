@@ -197,6 +197,12 @@ void kudroid_dispatch_delete_backward(void);
 /// can name a library that exists on disk but was never loaded.
 void kudroid_set_native_lib_dir(const char* dir);
 
+/// Boot phase marker: writes one "[KuDroidBoot] t=<ms> <phase>" line to stderr
+/// and the android log, timed from the first call. Cheap enough to call at
+/// every phase boundary; use it to attribute the gaps in the untimestamped
+/// stderr stream (loader, VFS, audio) to the phase that caused them.
+void kudroid_boot_mark(const char* phase);
+
 /// Absolute host path of the guest native library called `name`, for
 /// BaseDexClassLoader.findLibrary().
 ///
