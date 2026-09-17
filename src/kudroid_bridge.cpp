@@ -1266,6 +1266,8 @@ bool fault_skip_load_store(ucontext_t* uc, uintptr_t faultAddr, uint64_t* newPcO
     return true;
 }
 
+}  // namespace
+
 static bool kudroid_try_skip_fault(int /*sig*/, siginfo_t* info, void* ucontext) {
     if (info == nullptr || ucontext == nullptr) return false;
     ucontext_t* uc = reinterpret_cast<ucontext_t*>(ucontext);
