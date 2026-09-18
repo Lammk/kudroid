@@ -160,9 +160,14 @@ static constexpr int kMaxWalkRecoveries = 8192;
 // A null-base loop is never a reservation walk: below 0x10000 there is nothing
 // to commit, so every skip only pushes the corruption further (observed: a
 // null memset dropped store-by-store, then a SIGBUS through a garbage register
-// far from the loop). Same-pc null faults get a tiny run, not the walk
-// ceiling — the report must name the loop, not its aftermath.
+// far from the loop). Same-pc null faults arriving back-to-back get a tiny
+// run, not the walk ceiling — the report must name the loop, not its
+// aftermath. Back-to-back is load-bearing: the same pc faulting once per
+// frame is a recurring bad object, not a loop, and must not accumulate.
+// Loop iterations are microseconds apart (each skip is microseconds) while
+// frames are milliseconds apart, so a 1ms gap restarts the run.
 static constexpr int kMaxNullRun = 4;
+static constexpr long long kMaxNullGapNs = 1000000LL;
 // Largest per-step advance still treated as one contiguous walk. A stride that
 // jumps further is not a bounded table walk and must not inherit this budget.
 static constexpr unsigned long long kWalkStepMax = 1ULL << 20;
@@ -296,9 +301,13 @@ static bool worker_budget_note(WorkerBudget* s, long long nowNs,
         if (s->count.load(std::memory_order_relaxed) >= kMaxWorkerRecoveries) return false;
         s->count.fetch_add(1, std::memory_order_relaxed);
     }
-    // Null-page run tracking (see kMaxNullRun): consecutive same-pc faults
-    // below 0x10000 are a null-base loop. Read lastPc before overwriting it.
-    if (pc != 0 && pc == s->lastPc.load(std::memory_order_relaxed) && addr < 0x10000) {
+    // Null-page run tracking (see kMaxNullRun): same-pc faults below 0x10000
+    // arriving back-to-back are a null-base loop. `last` is the previous
+    // fault's timestamp, read before this one overwrote it. Read lastPc
+    // before overwriting it too.
+    const bool tight = last != 0 && nowNs - last <= kMaxNullGapNs && pc != 0 &&
+                       pc == s->lastPc.load(std::memory_order_relaxed) && addr < 0x10000;
+    if (tight) {
         const int run = s->nullRun.fetch_add(1, std::memory_order_relaxed) + 1;
         if (run == kMaxNullRun) {
             char msg[96];
@@ -324,10 +333,17 @@ static bool worker_budget_peek(WorkerBudget* s, unsigned long long pc,
     if (s == nullptr) return false;
     // Null-base loop breaker (see kMaxNullRun): once the run is spent the
     // skip is refused, so the fatal path reports the loop instead of masking
-    // it into downstream garbage.
+    // it into downstream garbage. Time-gated like the counter: a spent run
+    // from an earlier burst must not refuse a fresh fault (lastNs is the
+    // previous fault's timestamp; clock_gettime is signal-safe).
     if (pc != 0 && pc == s->lastPc.load(std::memory_order_relaxed) && addr < 0x10000 &&
         s->nullRun.load(std::memory_order_relaxed) >= kMaxNullRun) {
-        return false;
+        const long long nowNs =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch())
+                .count();
+        const long long prevNs = s->lastNs.load(std::memory_order_relaxed);
+        if (prevNs != 0 && nowNs - prevNs <= kMaxNullGapNs) return false;
     }
     if (worker_fault_is_walk(s, pc, addr)) {
         return s->walk.load(std::memory_order_relaxed) < kMaxWalkRecoveries;
@@ -629,8 +645,10 @@ static bool chainToPreviousHandler(int sig) {
 // - SIGSEGV/SIGBUS only. Anything else parks.
 // - pc must sit in a registered guest module: host text is never rewritten.
 // - Only plain transfers: unsigned/unscaled immediate, register-offset,
-//   literal loads, signed-offset pairs, PRFM. Pre/post-index (writeback),
-//   exclusives, LSE atomics, SIMD/FP lanes and everything else park —
+//   literal loads, signed-offset pairs, PRFM, and whole-register SIMD
+//   structure transfers with no offset (LD1/ST1 x1-4, LD2/ST2, LD3/ST3,
+//   LD4/ST4, LD1R). Pre/post-index (writeback), exclusives, LSE atomics,
+//   SIMD lane-indexed and pair forms, and everything else park —
 //   faking a base update or a synchronisation primitive corrupts silently,
 //   while a skipped plain transfer only loses one value.
 // - The computed effective address must equal si_addr: a decode that does
@@ -684,9 +702,11 @@ FaultSkipPlan fault_decode_skip(uint32_t w, uint64_t pc, uint64_t baseVal,
         // integer lanes: Rt names a vector register (zeroed in __ns), Rn
         // stays an integer base, and the addressing modes compute
         // identically. Only the data-size rule differs (opc bit23 set =
-        // 128-bit Q register, else 8<<size). SIMD pairs and every other
-        // vector form stay refused — lanes, not whole registers, fault
-        // there and zeroing them is not semantics-preserving.
+        // 128-bit Q register, else 8<<size). SIMD lane-indexed and pair
+        // forms stay refused — lanes, not whole registers, fault there and
+        // zeroing them is not semantics-preserving. Whole-register structure
+        // forms (LD1/ST1 x1-4, LD2/3/4, ST2/3/4, LD1R) are decoded in their
+        // own branches below.
         const bool simd = (w & (1u << 26)) != 0;
         // PRFM: refused, not skipped. It is a hint with no destination, so a
         // skip would be harmless — but a faulting PRFM means its address is
@@ -767,6 +787,54 @@ FaultSkipPlan fault_decode_skip(uint32_t w, uint64_t pc, uint64_t baseVal,
         p.skippable = true;
         return p;
     }
+    if (top == 0x0C || top == 0x4C) {
+        // AdvSIMD multiple structures, no offset (LD1/ST1 x1-4, LD2/ST2,
+        // LD3/ST3, LD4/ST4): whole vector registers move, so a faulting one
+        // zeroes (loads) or drops (stores) exactly like a scalar pair.
+        // Assembler-verified: 0c008a5e st2 {v30.2s,v31.2s},[x18] (live
+        // crash), 4c002800 st1 x4, 4c40a800 ld1 x2, 4c400800 ld4, 0c000800 st4.
+        // Writeback forms carry the post-index register in bits[20:16]
+        // (4cdf7800 ld1,[x0],#16 has Rm=31 there; 0c818800 st2,[x0],x1 has
+        // Rm=1): a faked base update corrupts silently, so any nonzero there
+        // refuses, same rule as scalar post/pre-index.
+        if (((w >> 16) & 0x1F) != 0) return p;
+        const unsigned opc = (w >> 12) & 0xF;
+        unsigned n = 0;
+        switch (opc) {
+            case 0x7: n = 1; break;
+            case 0xA: case 0x8: n = 2; break;
+            case 0x6: case 0x4: n = 3; break;
+            case 0x2: case 0x0: n = 4; break;
+            default: return p;  // unallocated in the no-offset form
+        }
+        if (rt + n > 32) return p;  // register list must not wrap
+        p.isLoad = ((w >> 22) & 1) != 0;
+        p.isVector = true;
+        p.rt = rt;
+        p.rtCount = n;
+        p.effAddr = baseVal;
+        p.skippable = true;
+        return p;
+    }
+    if (top == 0x0D || top == 0x4D) {
+        // AdvSIMD single structure (LD1R plus one-lane LD1/ST1). Only LD1R
+        // moves a whole register (replicated); lane forms touch part of one,
+        // and zeroing the rest is not semantics-preserving, so they refuse.
+        // LD1R-vs-lane verified against all 60 lane forms (every size, index,
+        // LD+ST): none carries opcode 0xC, so it selects LD1R exactly.
+        // Stores here are always lane forms (no ST1R exists): refuse.
+        // Assembler-verified: 0d40c905 ld1r {v5.2s},[x8] allows; 4d408000
+        // ld1 {v0.s}[2],[x0] and 4d004862 st1 {v2.h}[5],[x3] refuse.
+        if (((w >> 22) & 1) == 0) return p;
+        if (((w >> 12) & 0xF) != 0xC) return p;
+        p.isLoad = true;
+        p.isVector = true;
+        p.rt = rt;
+        p.rtCount = 1;
+        p.effAddr = baseVal;
+        p.skippable = true;
+        return p;
+    }
     return p;
 }
 
@@ -803,7 +871,13 @@ bool fault_skip_load_store(ucontext_t* uc, uintptr_t faultAddr, uint64_t* newPcO
     const kudroid::FaultSkipPlan p = kudroid::fault_decode_skip(w, pc, baseVal, rmVal);
     if (!p.skippable) return false;
     // The decode must explain the fault. Anything else is a mis-decode.
-    if (p.effAddr != faultAddr) return false;
+    // Null-page imprecision: a faulting multi-register SIMD access in the
+    // first page may report si_addr as the page rather than the faulting byte
+    // (observed: st2 [x18=0x1f8] reported as 0x0). Inside the first page the
+    // exact byte carries no safety signal — nothing is mapped there — so
+    // same-page equality suffices; everywhere else it stays exact.
+    if (p.effAddr != faultAddr &&
+        (p.effAddr >= 0x1000u || faultAddr >= 0x1000u)) return false;
     // The fabricated result must not become a control-flow target. When the
     // word right after the faulting load branches through the register this
     // skip would zero, resuming there calls address 0 instead: the thread hops
@@ -819,6 +893,13 @@ bool fault_skip_load_store(ucontext_t* uc, uintptr_t faultAddr, uint64_t* newPcO
                 via = p.rt;
             } else if (p.isPair && kudroid::fault_skip_branches_through(next, p.rt2)) {
                 via = p.rt2;
+            } else if (p.isVector) {
+                for (unsigned i = 1; i < p.rtCount; ++i) {
+                    if (kudroid::fault_skip_branches_through(next, p.rt + i)) {
+                        via = p.rt + i;
+                        break;
+                    }
+                }
             }
             if (via < 32) {
                 char nb[192];
@@ -842,10 +923,14 @@ bool fault_skip_load_store(ucontext_t* uc, uintptr_t faultAddr, uint64_t* newPcO
             // null-page read is the only fault that reaches here, so the value
             // the guest would have seen is zero bytes. A poison pattern is
             // worse, not better -- 0xCD bytes reinterpreted as four pointers
-            // are four wild addresses.
-            if (p.rt > 31) return false;
-            std::memset(&uc->uc_mcontext->__ns.__v[p.rt], 0,
-                        sizeof(uc->uc_mcontext->__ns.__v[p.rt]));
+            // are four wild addresses. Structure loads zero every consecutive
+            // destination (rtCount); the decoder already refused a wrapping list.
+            if (p.rt > 31 || p.rtCount < 1 || p.rtCount > 4 ||
+                p.rt + p.rtCount > 32) return false;
+            for (unsigned i = 0; i < p.rtCount; ++i) {
+                std::memset(&uc->uc_mcontext->__ns.__v[p.rt + i], 0,
+                            sizeof(uc->uc_mcontext->__ns.__v[0]));
+            }
         } else {
             // 29/30 never take a transfer result in valid code, 31 is XZR
             // (no effect): refuse rather than reason about them.

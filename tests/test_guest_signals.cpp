@@ -974,6 +974,72 @@ void test_fault_skip_decoder() {
         Check(!fault_decode_skip(0x3cc10c20, 0x1000, 0x5000, 0).skippable,
               "SIMD pre-index load refuses");
     }
+    // SIMD whole-register structure transfers allow, no-offset only (opcodes
+    // assembler-verified with aarch64-linux-gnu-as; the ST2 word is a live
+    // crash: st2 {v30.2s,v31.2s},[x18=0x1f8] reported as fault 0x0).
+    {
+        FaultSkipPlan p = fault_decode_skip(0x0c008a5e, 0x1000, 0x1f8, 0);
+        Check(p.skippable && !p.isLoad && p.isVector && p.rt == 30 && p.rtCount == 2 &&
+                  p.effAddr == 0x1f8,
+              "crash st2 {v30.2s,v31.2s},[x18] is skippable (store dropped)");
+    }
+    {
+        FaultSkipPlan p = fault_decode_skip(0x4c407800, 0x1000, 0x5000, 0);  // ld1 {v0.4s},[x0]
+        Check(p.skippable && p.isLoad && p.isVector && p.rt == 0 && p.rtCount == 1 &&
+                  p.effAddr == 0x5000,
+              "ld1 one-register allows");
+    }
+    {
+        FaultSkipPlan p = fault_decode_skip(0x4c002800, 0x1000, 0x5000, 0);  // st1 {v0.4s-v3.4s},[x0]
+        Check(p.skippable && !p.isLoad && p.isVector && p.rt == 0 && p.rtCount == 4 &&
+                  p.effAddr == 0x5000,
+              "st1 four-register allows");
+    }
+    {
+        FaultSkipPlan p = fault_decode_skip(0x0c40ac00, 0x1000, 0x5000, 0);  // ld1 {v0.1d-v1.1d},[x0]
+        Check(p.skippable && p.isLoad && p.isVector && p.rtCount == 2 && p.effAddr == 0x5000,
+              "ld1 two-register (1D) allows");
+    }
+    {
+        FaultSkipPlan p = fault_decode_skip(0x4c004800, 0x1000, 0x5000, 0);  // st3 {v0.4s-v2.4s},[x0]
+        Check(p.skippable && !p.isLoad && p.isVector && p.rtCount == 3 && p.effAddr == 0x5000,
+              "st3 allows");
+    }
+    {
+        FaultSkipPlan p = fault_decode_skip(0x4c400800, 0x1000, 0x5000, 0);  // ld4 {v0.4s-v3.4s},[x0]
+        Check(p.skippable && p.isLoad && p.isVector && p.rtCount == 4 && p.effAddr == 0x5000,
+              "ld4 allows");
+    }
+    {
+        FaultSkipPlan p = fault_decode_skip(0x0d40c905, 0x1000, 0x5000, 0);  // ld1r {v5.2s},[x8]
+        Check(p.skippable && p.isLoad && p.isVector && p.rt == 5 && p.rtCount == 1 &&
+                  p.effAddr == 0x5000,
+              "ld1r allows");
+    }
+    {
+        FaultSkipPlan p = fault_decode_skip(0x4d40cc40, 0x1000, 0x5000, 0);  // ld1r {v0.2d},[x2]
+        Check(p.skippable && p.isLoad && p.isVector && p.rt == 0 && p.rtCount == 1,
+              "ld1r (2D) allows");
+    }
+    // Structure writeback, lane-indexed, and bad-opcode forms refuse.
+    {
+        Check(!fault_decode_skip(0x4cdf7800, 0x1000, 0x5000, 0).skippable,
+              "structure post-index immediate (ld1 [x0],#16) refuses");
+        Check(!fault_decode_skip(0x0c818800, 0x1000, 0x5000, 0x18).skippable,
+              "structure post-index register (st2 [x0],x1) refuses");
+        Check(!fault_decode_skip(0x4cc17800, 0x1000, 0x5000, 0x18).skippable,
+              "structure post-index register (ld1 [x0],x1) refuses");
+        Check(!fault_decode_skip(0x4d408000, 0x1000, 0x5000, 0).skippable,
+              "lane-indexed ld1 {v0.s}[2] refuses");
+        Check(!fault_decode_skip(0x4d004862, 0x1000, 0x5000, 0).skippable,
+              "lane-indexed st1 {v2.h}[5] refuses");
+        Check(!fault_decode_skip(0x0d400c00, 0x1000, 0x5000, 0).skippable,
+              "lane-indexed ld1 {v0.b}[3] refuses (opcode lookalike, not LD1R)");
+        Check(!fault_decode_skip(0x0c005800, 0x1000, 0x5000, 0).skippable,
+              "unallocated structure opcode refuses");
+        Check(!fault_decode_skip(0x0c008a5f, 0x1000, 0x5000, 0).skippable,
+              "wrapping register list (st2 from v31) refuses");
+    }
     // Atomics, exclusives, branches refuse.
     {
         Check(!fault_decode_skip(0xb8200041, 0x1000, 0x5000, 0).skippable,
