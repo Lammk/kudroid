@@ -1946,6 +1946,20 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                 if (wit != g_fsbWindows.end()) {
                     for (auto& w : wit->second) {
                         if (start >= w.end || pos <= w.start) continue;
+                        // Every read inside a blob is one line, capped: the FMOD
+                        // parse sequence lives or dies between these reads, and
+                        // an absent data-read is the fact that convicts the
+                        // parser (it stopped asking) over the stream (it
+                        // served wrong bytes). Without this, silence between
+                        // the header read and the error is unattributable.
+                        static std::atomic<int> s_inblobLogged{0};
+                        if (s_inblobLogged.load(std::memory_order_relaxed) < 60) {
+                            s_inblobLogged.fetch_add(1, std::memory_order_relaxed);
+                            std::fprintf(stderr,
+                                         "[KuDroidFmod] in-blob read off=%ld size=%zu pos=%ld blob=[%ld+%llu]\n",
+                                         start, n * size, pos, w.start,
+                                         static_cast<unsigned long long>(w.expected));
+                        }
                         fsb_window_cover(w, start, pos);
                     }
                     fsb_windows_report_locked(pit->second, false);
@@ -2051,21 +2065,56 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                                       g[0], g[1], g[2], g[3]);
                     }
                 }
-                char hex[100] = {0};
+                char hex[324] = {0};
                 {
-                    const size_t hb = n * size < 32 ? n * size : 32;
+                    // 128 bytes: FSB5 header (60) + sample header area, where the
+                    // Vorbis setup chunk lives. The old 32-byte dump never reached it.
+                    const size_t hb = n * size < 128 ? n * size : 128;
                     size_t o = 0;
                     for (size_t i = 0; i < hb; ++i) {
                         o += static_cast<size_t>(
                             std::snprintf(hex + o, sizeof(hex) - o, "%02x", f[i]));
                     }
                 }
+                // Sample header (first numSamples u64s after the 60-byte header):
+                // bit 0 = next-chunk flag, bits 1-4 = frequency, bit 5 = channels-1,
+                // bits 6-33 = dataOffset/16, bits 34-63 = sample count. The chunk
+                // list follows; Vorbis clips must carry a VORBISDATA chunk, and a
+                // sample whose dataOffset pushes past dataSize is what turns
+                // "valid header, FMOD fails" into a parse-level fact.
+                char sampleDesc[128] = "n/a";
+                if (parsed && numSamples >= 1 && blobTotal + 28 <= n * size) {
+                    const auto* sh = f + 60;
+                    auto rd64 = [&](size_t o) {
+                        uint64_t v = 0;
+                        for (int k = 7; k >= 0; --k) v = (v << 8) | sh[o + k];
+                        return v;
+                    };
+                    const uint64_t raw0 = rd64(0);
+                    const uint32_t freq = static_cast<uint32_t>((raw0 >> 1) & 0xF);
+                    const uint32_t channels = static_cast<uint32_t>(((raw0 >> 5) & 0x1)) + 1;
+                    const uint32_t dataOff = static_cast<uint32_t>((raw0 >> 6) & 0x3FFFFFFF) * 16;
+                    const uint32_t nSamples = static_cast<uint32_t>((raw0 >> 34) & 0x3FFFFFFF);
+                    uint32_t chunkType = 0, chunkSize = 0;
+                    if (shs >= 12) {
+                        const uint32_t cw = rd64(8) & 0xFFFFFFFF;
+                        chunkSize = (cw >> 1) & 0x7FFFFF;
+                        chunkType = (cw >> 24) & 0x7F;
+                    }
+                    std::snprintf(sampleDesc, sizeof(sampleDesc),
+                                  "freq=%u ch=%u dataOff=%u(%sdataSize) n=%u chunk1=%u/%u%s",
+                                  freq, channels, dataOff,
+                                  dataOff < dataSize ? "<=" : ">>",
+                                  nSamples, chunkType, chunkSize,
+                                  chunkType == 11 ? " VORBISDATA" : "");
+                    (void)0;
+                }
                 std::fprintf(stderr,
                              "[KuDroidFmod] served FSB5 at apk_off=%ld size=%zu "
                              "method=%u usize=%u entryOff=%lld entryRem=%lld "
                              "ver=%u num=%u shs=%u nts=%u "
                              "dataSize=%u mode=%u blobTotal=%llu next=[%s] hex=%s "
-                             "entry=%s\n",
+                             "sample=[%s] entry=%s\n",
                              start, n * size, method, usize, entryOff,
                              entryOff >= 0
                                  ? static_cast<long long>(usize) - entryOff -
@@ -2073,7 +2122,7 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                                  : -1,
                              ver, numSamples, shs, nts,
                              dataSize, mode, static_cast<unsigned long long>(blobTotal),
-                             nextDesc, hex, entry.empty() ? "(none)" : entry.c_str());
+                             nextDesc, hex, sampleDesc, entry.empty() ? "(none)" : entry.c_str());
                 // Decisive follow-up: when FMOD accepts the bank it streams
                 // through THIS handle; when it rejects the slice it reads
                 // little or nothing on it. Keyed by handle so unrelated
@@ -2187,13 +2236,43 @@ int vfs_fclose(FILE* stream) {
 }
 
 int vfs_fseek(FILE* stream, long offset, int whence) {
+    const long before = std::ftell(stream);
     const int rc = std::fseek(stream, offset, whence);
     if (rc == 0 && is_apk_stream(stream)) {
+        // Seeks are how FMOD walks its FSB (header read, then jump to the Vorbis
+        // setup/data). A seek that lands outside the blob it was reading is the
+        // exact moment the parse goes wrong, so position, target, and result are
+        // all part of one line. Capped per process: header hunting alone can
+        // seek thousands of times before the first FSB appears.
         static std::atomic<int> s_logged{0};
         if (s_logged.load() < 40) {
             ++s_logged;
             std::fprintf(stderr, "[KuDroidApkF] fseek offset=%ld whence=%d\n", offset,
                          whence);
+        }
+        {
+            std::lock_guard<std::mutex> vlock(g_freadVolMtx);
+            const auto pit = g_freadPaths.find(stream);
+            if (pit != g_freadPaths.end()) {
+                auto wit = g_fsbWindows.find(pit->second);
+                if (wit != g_fsbWindows.end()) {
+                    for (const auto& w : wit->second) {
+                        if ((before >= w.start && before < w.end) ||
+                            (offset >= w.start && offset < w.end) ||
+                            (before >= w.start && before < w.end + 65536)) {
+                            static std::atomic<int> s_inblobSeek{0};
+                            if (s_inblobSeek.load(std::memory_order_relaxed) < 60) {
+                                s_inblobSeek.fetch_add(1, std::memory_order_relaxed);
+                                std::fprintf(stderr,
+                                             "[KuDroidFmod] in-blob seek %ld -> %ld whence=%d blob=[%ld+%llu]\n",
+                                             before, offset, whence, w.start,
+                                             static_cast<unsigned long long>(w.expected));
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
         }
         // SEEK_END resolves to the whole-archive size; a consumer taking it
         // as the current entry's size streams garbage past the entry end.

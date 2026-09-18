@@ -257,12 +257,14 @@ extern "C" int kuart_touch_drain_pending(void) {
                 g_touchXBuf->Set<float>(i, event.pointerXs[i]);
                 g_touchYBuf->Set<float>(i, event.pointerYs[i]);
             }
-            const DexValue args[5] = {DexValue::Int(event.action),
+            const DexValue args[7] = {DexValue::Int(event.action),
                                       DexValue::Int(count),
                                       DexValue::Ref(reinterpret_cast<DexObject*>(g_touchIdBuf)),
                                       DexValue::Ref(reinterpret_cast<DexObject*>(g_touchXBuf)),
-                                      DexValue::Ref(reinterpret_cast<DexObject*>(g_touchYBuf))};
-            CallActivityThreadStatic("postTouchEvent", "(II[I[F[F)V", args, 5);
+                                      DexValue::Ref(reinterpret_cast<DexObject*>(g_touchYBuf)),
+                                      DexValue::Float(event.pointerXs[0]),
+                                      DexValue::Float(event.pointerYs[0])};
+            CallActivityThreadStatic("postTouchEvent", "(II[I[F[FFF)V", args, 7);
             ++drained;
             continue;
         }
