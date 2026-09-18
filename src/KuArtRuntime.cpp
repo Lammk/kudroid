@@ -199,6 +199,44 @@ bool CallActivityThreadStatic(const char* name, const char* signature,
 // owns the VM lock because it is executing Java. This is the AOSP
 // InputEventReceiver shape: no worker thread, no second VM-lock acquisition,
 // and therefore nothing for touch to serialize against the renderer.
+// Reused hand-off buffers for the per-pointer touch arrays.
+//
+// postTouchEvent copies the values into the MotionEvent it builds (both the event
+// constructor and the coalescing fold copy), so one buffer per type is enough and keeps
+// three heap objects per touch event out of a heap that is only released at teardown.
+namespace {
+DexArray* g_touchIdBuf = nullptr;
+DexArray* g_touchXBuf = nullptr;
+DexArray* g_touchYBuf = nullptr;
+
+// Allocation floor: one gesture's worth of pointers. The size below is what actually
+// governs — it grows to the largest event seen and never shrinks (the buffers live until
+// teardown), so a device that reports more fingers than any constant predicts still gets
+// every one of them into the event the app reads.
+constexpr int kTouchBufferFloor = 8;
+
+bool EnsureTouchBuffers(int count) {
+    if (g_rt == nullptr) return false;
+    if (count < 1) count = 1;
+    if (g_touchIdBuf != nullptr && g_touchXBuf != nullptr && g_touchYBuf != nullptr &&
+        g_touchIdBuf->length >= count) {
+        return true;
+    }
+    DexClass* intArray = g_rt->linker.FindClass("[I");
+    DexClass* floatArray = g_rt->linker.FindClass("[F");
+    if (intArray == nullptr || floatArray == nullptr) return false;
+    const int slots = count < kTouchBufferFloor ? kTouchBufferFloor : count;
+    DexArray* ids = g_rt->linker.AllocArray(intArray, slots);
+    DexArray* xs = g_rt->linker.AllocArray(floatArray, slots);
+    DexArray* ys = g_rt->linker.AllocArray(floatArray, slots);
+    if (ids == nullptr || xs == nullptr || ys == nullptr) return false;
+    g_touchIdBuf = ids;
+    g_touchXBuf = xs;
+    g_touchYBuf = ys;
+    return true;
+}
+}  // namespace
+
 extern "C" int kuart_touch_drain_pending(void) {
     if (g_rt == nullptr || !g_rt->ready) return 0;
     auto& queue = TouchQueue();
@@ -206,8 +244,32 @@ extern "C" int kuart_touch_drain_pending(void) {
     const auto t0 = std::chrono::steady_clock::now();
     kudroid::TouchEventQueue::Event event;
     while (drained < 64 && queue.tryPop(event)) {
+        int count = event.pointerCount;
+        if (count < 1) count = 1;
+        // Self-consistency only: the event's own table is the bound, never a constant,
+        // so a finger is dropped here only if the event never carried it.
+        if (count > static_cast<int>(event.pointerIds.size())) {
+            count = static_cast<int>(event.pointerIds.size());
+        }
+        if (count >= 1 && EnsureTouchBuffers(count)) {
+            for (int i = 0; i < count; ++i) {
+                g_touchIdBuf->Set<int32_t>(i, event.pointerIds[i]);
+                g_touchXBuf->Set<float>(i, event.pointerXs[i]);
+                g_touchYBuf->Set<float>(i, event.pointerYs[i]);
+            }
+            const DexValue args[5] = {DexValue::Int(event.action),
+                                      DexValue::Int(count),
+                                      DexValue::Ref(reinterpret_cast<DexObject*>(g_touchIdBuf)),
+                                      DexValue::Ref(reinterpret_cast<DexObject*>(g_touchXBuf)),
+                                      DexValue::Ref(reinterpret_cast<DexObject*>(g_touchYBuf))};
+            CallActivityThreadStatic("postTouchEvent", "(II[I[F[F)V", args, 5);
+            ++drained;
+            continue;
+        }
+        // Buffer allocation impossible: keep touch alive with the single-position
+        // signature rather than dropping the event.
         const DexValue args[4] = {DexValue::Int(event.action),
-                                  DexValue::Int(event.pointerCount),
+                                  DexValue::Int(count),
                                   DexValue::Float(event.x), DexValue::Float(event.y)};
         CallActivityThreadStatic("postTouchEvent", "(IIFF)V", args, 4);
         ++drained;
@@ -680,6 +742,21 @@ extern "C" void kuart_send_lifecycle_event(int event_type) {
 
 extern "C" void kuart_post_touch_event(int action, float x, float y, int pointerCount) {
     TouchQueue().push(action, x, y, pointerCount);
+}
+
+// Same hand-off with the producer's pointer table: index i is pointer i of the event
+// (the order the action's pointer index refers to), with its own id and position.
+extern "C" void kuart_post_touch_event_ex(int action, int pointerCount, const int* pointerIds,
+                                          const float* xs, const float* ys) {
+    float x = 0.0f;
+    float y = 0.0f;
+    if (pointerCount >= 1 && xs != nullptr && ys != nullptr) {
+        x = xs[0];
+        y = ys[0];
+    } else {
+        pointerCount = 1;
+    }
+    TouchQueue().push(action, x, y, pointerCount, pointerIds, xs, ys);
 }
 
 // Text from the host keyboard.

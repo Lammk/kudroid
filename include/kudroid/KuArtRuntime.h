@@ -111,6 +111,11 @@ void kuart_send_lifecycle_event(int event_type);
 // pointer; never smaller than the action's pointer index + 1 (see TouchEventQueue).
 void kuart_post_touch_event(int action, float x, float y, int pointerCount);
 
+// Dispatch one event carrying every live finger: ids/xs/ys are indexed the same way as
+// the event's pointer array, so index i is the pointer the action's index refers to.
+void kuart_post_touch_event_ex(int action, int pointerCount, const int* pointerIds,
+                               const float* xs, const float* ys);
+
 // Drain queued touch on the CALLING thread and post it to ActivityThread. Called
 // by the Looper (MessageQueue.nativeDrainInput) so touch is built and dispatched
 // on the UI thread, never on a separate VM-locked worker. Returns events drained.

@@ -45,6 +45,30 @@ int main() {
     queue.reset(true);
     queue.push(0, 0, 0, 2);
     Check(queue.tryPop(event) && event.pointerCount == 2, "pointerCount survives the queue");
+    Check(event.pointerIds.size() == 2 && event.pointerXs.size() == 2 &&
+              event.pointerYs.size() == 2,
+          "the single-position form sizes the table to the event");
+
+    // More fingers than a fixed table would hold must survive intact, each with its own
+    // id and position: a clamped event reads as another finger's position in the app.
+    queue.reset(true);
+    const int manyIds[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11};
+    float manyXs[12];
+    float manyYs[12];
+    for (int i = 0; i < 12; ++i) {
+        manyXs[i] = 100.0f + static_cast<float>(i);
+        manyYs[i] = 200.0f + static_cast<float>(i);
+    }
+    queue.push(0, 100.0f, 200.0f, 12, manyIds, manyXs, manyYs);
+    Check(queue.tryPop(event) && event.pointerCount == 12,
+          "a twelve-finger event keeps every pointer");
+    bool intact = event.pointerIds.size() == 12 && event.pointerXs.size() == 12 &&
+                  event.pointerYs.size() == 12;
+    for (int i = 0; i < 12 && intact; ++i) {
+        intact = event.pointerIds[i] == i && event.pointerXs[i] == manyXs[i] &&
+                 event.pointerYs[i] == manyYs[i];
+    }
+    Check(intact, "every pointer keeps its own id and position");
 
     const int actions[] = {0, 2, 1, 0, 2, 3};
     for (int action : actions) queue.push(action, 0, 0);

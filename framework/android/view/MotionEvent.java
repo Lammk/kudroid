@@ -87,12 +87,22 @@ public final class MotionEvent extends InputEvent {
     private final long mDownTime;
     private final int mAction;
     // Mutable on purpose: ActivityThread.postTouchEvent coalesces a drag by updating the
-    // single pending MOVE in place instead of queueing 60-120 messages/s. mDownTime/mAction
-    // stay final — only the latest finger position and time move.
+    // pending MOVE in place instead of queueing 60-120 messages/s. mDownTime/mAction
+    // stay final — only the latest finger positions and time move.
     private float mX;
     private float mY;
     private long mEventTime;
     private final int mPointerCount;
+    // Per-pointer state, one entry per index in the event's pointer array.
+    //
+    // Android's contract is getPointerId(i) / getX(i) / getY(i) per pointer. Carrying a
+    // single (x, y) for the whole event made every finger report the same position, so a
+    // two-finger drag pushed the stick and the camera to the same place: multi-touch
+    // could not work at all. mX/mY remain pointer 0's position, which is what the
+    // index-less getX()/getY() mean on Android.
+    private final int[] mPointerIds;
+    private final float[] mPointerXs;
+    private final float[] mPointerYs;
 
     private MotionEvent(long downTime, long eventTime, int action, float x, float y, int pointerCount) {
         mDownTime = downTime;
@@ -100,7 +110,40 @@ public final class MotionEvent extends InputEvent {
         mAction = action;
         mX = x;
         mY = y;
+        if (pointerCount < 1) pointerCount = 1;
         mPointerCount = pointerCount;
+        mPointerIds = new int[pointerCount];
+        mPointerXs = new float[pointerCount];
+        mPointerYs = new float[pointerCount];
+        for (int i = 0; i < pointerCount; i++) {
+            mPointerIds[i] = i;
+            mPointerXs[i] = x;
+            mPointerYs[i] = y;
+        }
+    }
+
+    /**
+     * Build an event whose pointers carry their own identity and position.
+     *
+     * Used by the array-carrying postTouchEvent: the native layer tracks every live
+     * finger, so the event it hands over already knows each pointer's id and where it is.
+     */
+    public static MotionEvent obtainWithPointers(long downTime, long eventTime, int action,
+            int[] ids, float[] xs, float[] ys, int pointerCount) {
+        if (pointerCount < 1) pointerCount = 1;
+        if (ids == null || xs == null || ys == null || ids.length < pointerCount
+                || xs.length < pointerCount || ys.length < pointerCount) {
+            return new MotionEvent(downTime, eventTime, action, 0f, 0f, pointerCount);
+        }
+        MotionEvent ev = new MotionEvent(downTime, eventTime, action, xs[0], ys[0], pointerCount);
+        for (int i = 0; i < pointerCount; i++) {
+            ev.mPointerIds[i] = ids[i];
+            ev.mPointerXs[i] = xs[i];
+            ev.mPointerYs[i] = ys[i];
+        }
+        ev.mX = ev.mPointerXs[0];
+        ev.mY = ev.mPointerYs[0];
+        return ev;
     }
 
     /**
@@ -121,14 +164,32 @@ public final class MotionEvent extends InputEvent {
     }
 
     /**
+     * Android's own constant, kept for guests that size arrays by it.
+     *
+     * Nothing here truncates to it: an event carries the fingers the device reported, and
+     * a finger missing from the event is one the app cannot see (its index reads as another
+     * finger's position). Android's framework asserts on more fingers than this; a translation
+     * layer that drops them silently is worse than one that passes them through.
+     */
+    public static final int MAX_POINTERS = 16;
+
+    /**
      * Copy an event. Our touch pipeline (ActivityThread.postTouchEvent)
      * copies every event before dispatch; without this it died as
      * NoSuchMethodError and no touch ever reached the game.
      */
     public static MotionEvent obtain(MotionEvent other) {
         if (other == null) throw new IllegalArgumentException("other must not be null");
-        return new MotionEvent(other.mDownTime, other.mEventTime, other.mAction, other.mX, other.mY,
-                other.mPointerCount);
+        MotionEvent ev = new MotionEvent(other.mDownTime, other.mEventTime, other.mAction,
+                other.mX, other.mY, other.mPointerCount);
+        // A copy must carry the per-pointer state too, or every downstream consumer of
+        // the copy sees all fingers on pointer 0's position again.
+        for (int i = 0; i < other.mPointerCount; i++) {
+            ev.mPointerIds[i] = other.mPointerIds[i];
+            ev.mPointerXs[i] = other.mPointerXs[i];
+            ev.mPointerYs[i] = other.mPointerYs[i];
+        }
+        return ev;
     }
 
     /**
@@ -139,7 +200,34 @@ public final class MotionEvent extends InputEvent {
     public void updateCoalescedMove(float x, float y, long eventTime) {
         mX = x;
         mY = y;
+        mPointerXs[0] = x;
+        mPointerYs[0] = y;
         mEventTime = eventTime;
+    }
+
+    /**
+     * Fold a newer multi-finger MOVE sample: every pointer moves, not just the first.
+     * Returns false when the pointer set does not match this event, which happens when a
+     * finger went down or up between the two samples — the caller must queue a new event
+     * instead of folding, or the lost finger would keep a stale position forever.
+     */
+    public boolean updateCoalescedMove(int pointerCount, int[] ids, float[] xs, float[] ys,
+            long eventTime) {
+        if (ids == null || xs == null || ys == null) return false;
+        if (pointerCount < 1 || pointerCount > mPointerCount) return false;
+        if (ids.length < pointerCount || xs.length < pointerCount || ys.length < pointerCount) {
+            return false;
+        }
+        if (pointerCount != mPointerCount) return false;
+        for (int i = 0; i < pointerCount; i++) {
+            mPointerIds[i] = ids[i];
+            mPointerXs[i] = xs[i];
+            mPointerYs[i] = ys[i];
+        }
+        mX = mPointerXs[0];
+        mY = mPointerYs[0];
+        mEventTime = eventTime;
+        return true;
     }
 
     /**
@@ -170,7 +258,16 @@ public final class MotionEvent extends InputEvent {
      * returns the x coordinate for a pointer.
      */
     public float getX(int pointerIndex) {
-        return mX;
+        return mPointerXs[clampIndex(pointerIndex)];
+    }
+
+    // Out-of-range indices clamp instead of throwing: the guest's index comes from the
+    // action it just read, and a stale index would otherwise abort the process. Real
+    // Android asserts here, but an aborted translation layer is worse than a clamped read.
+    private int clampIndex(int pointerIndex) {
+        if (pointerIndex < 0) return 0;
+        if (pointerIndex >= mPointerCount) return mPointerCount - 1;
+        return pointerIndex;
     }
 
     /**
@@ -184,7 +281,7 @@ public final class MotionEvent extends InputEvent {
      * returns the y coordinate for a pointer.
      */
     public float getY(int pointerIndex) {
-        return mY;
+        return mPointerYs[clampIndex(pointerIndex)];
     }
 
     /**
@@ -203,11 +300,11 @@ public final class MotionEvent extends InputEvent {
     }
 
     public float getRawX(int pointerIndex) {
-        return mX;
+        return getX(pointerIndex);
     }
 
     public float getRawY(int pointerIndex) {
-        return mY;
+        return getY(pointerIndex);
     }
 
     /**
@@ -234,16 +331,19 @@ public final class MotionEvent extends InputEvent {
     /**
      * Identifier that follows one finger across a gesture.
      *
-     * Always 0, matching the single pointer this class carries. A guest tracking pointers
-     * by ID sees one finger appear and disappear, which is consistent; inventing distinct
-     * IDs for a stream that only ever holds one pointer would not be.
+     * Stable for as long as that finger is down, and never reused for a different finger
+     * within one gesture — a guest that tracks pointers by ID (Unity does) matches each
+     * finger's samples to the finger it is holding.
      */
     public int getPointerId(int pointerIndex) {
-        return pointerIndex;
+        return mPointerIds[clampIndex(pointerIndex)];
     }
 
     public int findPointerIndex(int pointerId) {
-        return (pointerId >= 0 && pointerId < mPointerCount) ? pointerId : -1;
+        for (int i = 0; i < mPointerCount; i++) {
+            if (mPointerIds[i] == pointerId) return i;
+        }
+        return -1;
     }
 
     /** A finger, since the only input KuDroid synthesises is touch. */
@@ -312,11 +412,11 @@ public final class MotionEvent extends InputEvent {
     }
 
     public float getHistoricalX(int pointerIndex, int pos) {
-        return mX;
+        return getX(pointerIndex);
     }
 
     public float getHistoricalY(int pointerIndex, int pos) {
-        return mY;
+        return getY(pointerIndex);
     }
 
     public float getHistoricalAxisValue(int axis, int pointerIndex, int pos) {
@@ -396,8 +496,8 @@ public final class MotionEvent extends InputEvent {
 
     public float getAxisValue(int axis, int pointerIndex) {
         switch (axis) {
-            case AXIS_X: return mX;
-            case AXIS_Y: return mY;
+            case AXIS_X: return getX(pointerIndex);
+            case AXIS_Y: return getY(pointerIndex);
             case AXIS_PRESSURE: return 1.0f;
             case AXIS_SIZE: return 1.0f;
             default: return 0.0f;

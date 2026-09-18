@@ -309,6 +309,18 @@ else()
         target_include_directories(test_frame_pacer PRIVATE include)
     endif()
 
+    # Multi-finger input. The pointer table used to be a fixed array, so a batch wider
+    # than it was clamped and the guest read another finger's position at the indices past
+    # the clamp; a lift among fingers still down was reported as ACTION_UP, ending the
+    # gesture for the finger that was staying down.
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_touch_pointers.cpp")
+        add_executable(test_touch_pointers
+            tests/test_touch_pointers.cpp
+        )
+        target_link_libraries(test_touch_pointers PRIVATE kudroid_core)
+        target_include_directories(test_touch_pointers PRIVATE include)
+    endif()
+
     # What the watchdog reports while a call is wedged. Native calls nest, and the
     # record used to be one global slot that was never restored on the way out — so
     # after JNIBridge.invoke returned in 435 microseconds, 47 seconds of watchdog lines

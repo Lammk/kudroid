@@ -3,19 +3,15 @@
 #include <chrono>
 #include <mutex>
 
-// A drag arrives at 60-120 Hz and every delivered MOVE costs one interpreted
-// JNI hop (kuart_post_touch_event -> ActivityThread.postTouchEvent), each
-// grabbing the VM lock against the render/main threads. Gate MOVEs at the
-// source: extra ones are dropped — the newest already replaces the pending one
-// at the sinks (InputShim queue, ActivityThread message), so an intermediate
-// position carries no information the app still needs. DOWN/UP/CANCEL never
-// pass through here; their ordering is what the app reasons about.
+// A drag arrives at 60-120 Hz. The dispatch used to cost one VM-locked
+// interpreted hop per sample from a worker thread; it now runs on the Looper
+// thread (kuart_touch_drain_pending) and the queue plus ActivityThread both fold
+// a pending MOVE, so the rate is bounded where it matters. This gate is now only
+// a floor against a flood, not a rate cap: at 30 Hz it was silently limiting the
+// app's own input, which is felt as a drag that trails the finger.
 //
-// Deliberately conservative: the dispatch is expensive and contending with the
-// render loop costs frames, so this errs toward dropping a sample. Raising it
-// without making the dispatch cheaper trades lag for FPS. The
-// [KuDroidTouch] timing line says which side is actually hurting before this
-// constant is touched again.
+// [KuDroidTouch] drain timing is the check that the dispatch is still cheap: a
+// line there means this constant is the smaller problem.
 
 namespace {
 
@@ -27,8 +23,10 @@ struct SourceGate {
 
 SourceGate g_gate;
 
-constexpr int kMaxMovesPerWindow = 1;
-constexpr long long kWindowNs = 33333333;  // one 30 Hz window
+// 2 moves per 8 ms is ~250/s: every sample of a 120 Hz drag passes through, and
+// a flood still cannot buy more than that many dispatches.
+constexpr int kMaxMovesPerWindow = 2;
+constexpr long long kWindowNs = 8000000;  // 8 ms
 
 long long steady_now_ns() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(

@@ -1,8 +1,10 @@
 #pragma once
 
 #include <cstdint>
+#include <cstring>
 #include <deque>
 #include <mutex>
+#include <vector>
 
 namespace kudroid {
 
@@ -19,10 +21,30 @@ public:
         // Fingers down including this event's own pointer. Native input code indexes
         // per-pointer arrays by the action's pointer index, so this must never be
         // smaller than index+1 — otherwise a second finger corrupts the heap.
-        // Upper-bounded: nobody has that many fingers, and an absurd count would
-        // size downstream arrays.
         int pointerCount = 1;
-        static constexpr int kMaxPointerCount = 16;
+        // One entry per index in the event's pointer array. Android delivers every live
+        // finger in one event, each with its own id and position; a queue entry carrying
+        // only the primary coordinate cannot represent a multi-finger drag at all.
+        //
+        // Sized by the event, not by a constant: a fixed table has to clamp, and a
+        // clamped event is one whose tails the app cannot see (the finger is there on
+        // the digitiser, missing from the event). Anything the device reports is kept.
+        std::vector<int32_t> pointerIds;
+        std::vector<float> pointerXs;
+        std::vector<float> pointerYs;
+
+        // Single-position form: pointer i is id i at (x, y).
+        void setUniform(int a, float x_, float y_, int count) {
+            action = a;
+            x = x_;
+            y = y_;
+            if (count < 1) count = 1;
+            pointerCount = count;
+            pointerIds.assign(static_cast<size_t>(count), 0);
+            pointerXs.assign(static_cast<size_t>(count), x_);
+            pointerYs.assign(static_cast<size_t>(count), y_);
+            for (int i = 0; i < count; ++i) pointerIds[i] = i;
+        }
     };
 
     static constexpr size_t kMaxQueueSize = 256;
@@ -34,20 +56,42 @@ public:
     }
 
     void push(int action, float x, float y, int pointerCount = 1) {
+        push(action, x, y, pointerCount, nullptr, nullptr, nullptr);
+    }
+
+    // Push with the producer's own pointer table (ids/xs/ys indexed by the action's
+    // pointer index). A table shorter than pointerCount is ignored in favour of the
+    // single-position form: a malformed producer must not invent pointers.
+    void push(int action, float x, float y, int pointerCount, const int* ids, const float* xs,
+              const float* ys) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (!accepting_) return;
         if (pointerCount < 1) pointerCount = 1;
-        if (pointerCount > Event::kMaxPointerCount) pointerCount = Event::kMaxPointerCount;
+        const bool haveTable = ids != nullptr && xs != nullptr && ys != nullptr;
         // Coalesce the flood at ingress: a drag produces 60-120 MOVEs/s and each
         // one costs a full interpreted dispatch under the VM lock downstream.
         // Folding a MOVE into a queued trailing MOVE keeps the latest finger
-        // position while bounding dispatches to gesture boundaries.
+        // positions while bounding dispatches to gesture boundaries. The fold needs
+        // the same pointer set on both sides — a MOVE that gained or lost a finger is
+        // a different gesture state and is enqueued instead.
         if ((action & 0xff) == 2 && !events_.empty() &&
-            (events_.back().action & 0xff) == 2) {
-            events_.back().x = x;
-            events_.back().y = y;
-            if (pointerCount > events_.back().pointerCount) {
-                events_.back().pointerCount = pointerCount;
+            (events_.back().action & 0xff) == 2 && events_.back().pointerCount == pointerCount) {
+            Event& back = events_.back();
+            back.x = x;
+            back.y = y;
+            if (haveTable) {
+                back.pointerIds.resize(static_cast<size_t>(pointerCount));
+                back.pointerXs.resize(static_cast<size_t>(pointerCount));
+                back.pointerYs.resize(static_cast<size_t>(pointerCount));
+                for (int i = 0; i < pointerCount; ++i) {
+                    back.pointerIds[i] = ids[i];
+                    back.pointerXs[i] = xs[i];
+                    back.pointerYs[i] = ys[i];
+                }
+                back.x = back.pointerXs[0];
+                back.y = back.pointerYs[0];
+            } else {
+                back.setUniform(back.action, x, y, pointerCount);
             }
             return;
         }
@@ -67,7 +111,18 @@ public:
         if (events_.size() >= kMaxQueueSize) {
             events_.pop_front();
         }
-        events_.push_back(Event{action, x, y, pointerCount});
+        Event ev;
+        ev.setUniform(action, x, y, pointerCount);
+        if (haveTable) {
+            for (int i = 0; i < pointerCount; ++i) {
+                ev.pointerIds[i] = ids[i];
+                ev.pointerXs[i] = xs[i];
+                ev.pointerYs[i] = ys[i];
+            }
+            ev.x = ev.pointerXs[0];
+            ev.y = ev.pointerYs[0];
+        }
+        events_.push_back(ev);
     }
 
     bool tryPop(Event& event) {

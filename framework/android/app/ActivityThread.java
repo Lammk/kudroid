@@ -153,10 +153,26 @@ public final class ActivityThread {
     private static Message sPendingMoveMsg = null;
 
     public static void postTouchEvent(int action, int pointerCount, float x, float y) {
+        postTouchEvent(action, pointerCount, null, null, null, x, y);
+    }
+
+    /**
+     * Touch event carrying every live finger.
+     *
+     * The single-coordinate form cannot describe multi-touch: a two-finger drag needs two
+     * positions in one event, and every frame of a drag needs each finger's own. ids/xs/ys
+     * are the native layer's pointer table, ordered so index i is that pointer's slot —
+     * the same order the action's pointer index refers to.
+     */
+    public static void postTouchEvent(int action, int pointerCount, int[] ids, float[] xs,
+            float[] ys, float x, float y) {
         if (sCurrentActivityThread == null || sCurrentActivityThread.mH == null) return;
         final long now = android.os.SystemClock.uptimeMillis();
         final int maskedAction = action & MotionEvent.ACTION_MASK;
         if (pointerCount < 1) pointerCount = 1;
+        final boolean havePointers = ids != null && xs != null && ys != null
+                && ids.length >= pointerCount && xs.length >= pointerCount
+                && ys.length >= pointerCount;
         // Never emit a pointer index the event's own count cannot back: native input
         // code indexes per-pointer arrays by it, and index >= count corrupts memory.
         // A second finger whose count got lost upstream still lands as a valid event.
@@ -165,6 +181,8 @@ public final class ActivityThread {
         if (actionIndex >= pointerCount) {
             pointerCount = actionIndex + 1;
         }
+        float primX = (havePointers && pointerCount >= 1) ? xs[0] : x;
+        float primY = (havePointers && pointerCount >= 1) ? ys[0] : y;
         long downTime;
         synchronized (sTouchMsgLock) {
             if (maskedAction == MotionEvent.ACTION_DOWN || sLastDownTime == 0) {
@@ -179,12 +197,21 @@ public final class ActivityThread {
                 // A MOVE is still queued: fold the newest sample into it and skip
                 // enqueueing. Worst case the fold lands just as the Looper picks the
                 // message up — then the dispatch sees slightly newer coordinates,
-                // which is still a valid drag sample.
-                ((MotionEvent) sPendingMoveMsg.obj).updateCoalescedMove(x, y, now);
-                return;
+                // which is still a valid drag sample. The fold must carry every pointer:
+                // updating one leaves the other finger's position frozen for the whole
+                // drag, which is what made two-finger dragging fight itself.
+                MotionEvent pending = (MotionEvent) sPendingMoveMsg.obj;
+                if (havePointers) {
+                    if (pending.updateCoalescedMove(pointerCount, ids, xs, ys, now)) return;
+                } else if (pending.getPointerCount() == pointerCount) {
+                    pending.updateCoalescedMove(primX, primY, now);
+                    return;
+                }
             }
         }
-        MotionEvent ev = MotionEvent.obtain(downTime, now, action, x, y, 0, pointerCount);
+        MotionEvent ev = havePointers
+                ? MotionEvent.obtainWithPointers(downTime, now, action, ids, xs, ys, pointerCount)
+                : MotionEvent.obtain(downTime, now, action, x, y, 0, pointerCount);
         Message msg = Message.obtain();
         msg.what = TOUCH_EVENT;
         msg.obj = ev;

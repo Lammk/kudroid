@@ -2046,42 +2046,64 @@ class NativeMetalView: UIView {
         }
     }
 
-    private func injectTouch(_ touches: Set<UITouch>, action: Int32) {
+    /// Forward one callback as one event carrying every live finger.
+    ///
+    /// `action` is the guest action base (0 DOWN, 1 UP, 2 MOVE, 3 CANCEL); the shim picks
+    /// DOWN vs POINTER_DOWN and UP vs POINTER_UP from how many fingers are down. A lifting
+    /// finger stays in the table sent for UP — that is the slot POINTER_UP's index refers
+    /// to — and leaves right after.
+    private func injectTouch(_ touches: Set<UITouch>, action: Int32, event: UIEvent?) {
         let scale = UIScreen.main.scale
-        for touch in touches {
+        // Every live finger, not only the ones this callback names: a MOVE has to carry the
+        // other fingers' positions too, and UIKit reports them all through allTouches.
+        let live = event?.allTouches ?? touches
+        touchTracker.prune(live: live, current: touches)
+        if action == 0 {
+            for touch in touches { _ = touchTracker.begin(touch) }
+        }
+        var entries: [(id: Int32, x: Float, y: Float)] = []
+        entries.reserveCapacity(live.count)
+        for touch in live {
+            guard let id = touchTracker.id(of: touch) else { continue }
             let location = touch.location(in: self)
-            let x = Float(location.x * scale)
-            let y = Float(location.y * scale)
-            switch action {
-            case 0: // began: first finger DOWN, later fingers POINTER_DOWN via shim
-                let (id, count) = touchTracker.begin(touch)
-                kudroid_inject_touch_event_multi(x, y, 0, id, count)
-            case 2: // moved: Android MOVE carries no index; count is authoritative
-                let id = touchTracker.id(of: touch) ?? 0
-                kudroid_inject_touch_event_multi(x, y, 2, id, touchTracker.activeCount)
-            case 1, 3: // ended/cancelled: last finger UP, others POINTER_UP via shim
-                guard let (id, count) = touchTracker.end(touch) else { continue }
-                kudroid_inject_touch_event_multi(x, y, action, id, count)
-            default:
-                continue
-            }
+            entries.append((id, Float(location.x * scale), Float(location.y * scale)))
+        }
+        guard !entries.isEmpty else { return }
+        // Pointer 0 is the finger that has been down longest and the action's index refers
+        // to this order, so it must not be left to Set iteration order.
+        entries.sort { $0.id < $1.id }
+        var ids = [Int32]()
+        var xs = [Float]()
+        var ys = [Float]()
+        ids.reserveCapacity(entries.count)
+        xs.reserveCapacity(entries.count)
+        ys.reserveCapacity(entries.count)
+        for entry in entries {
+            ids.append(entry.id)
+            xs.append(entry.x)
+            ys.append(entry.y)
+        }
+        let primary = touches.first.flatMap { touchTracker.id(of: $0) } ?? ids[0]
+        kudroid_inject_touch_batch(action, primary, Int32(ids.count), ids, xs, ys)
+        if action == 1 || action == 3 {
+            for touch in touches { _ = touchTracker.end(touch) }
         }
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        injectTouch(touches, action: 0) // ACTION_DOWN
+        injectTouch(touches, action: 0, event: event) // ACTION_DOWN
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-        injectTouch(touches, action: 2) // ACTION_MOVE
+        injectTouch(touches, action: 2, event: event) // ACTION_MOVE
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        injectTouch(touches, action: 1) // ACTION_UP
+        injectTouch(touches, action: 1, event: event) // ACTION_UP
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-        injectTouch(touches, action: 3) // ACTION_CANCEL
+        injectTouch(touches, action: 3, event: event) // ACTION_CANCEL
     }
 }
 

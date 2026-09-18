@@ -46,44 +46,56 @@ final class SharedMetalContainer {
 /// for the first finger (POINTER_DOWN after), and the true total finger count.
 /// Ids are the smallest free slot, so they stay dense; the Java layer additionally
 /// clamps count >= index+1 as a backstop.
+/// Stable finger identities for the guest.
+///
+/// The table is keyed by the touch object, not by a slot count: whatever the digitiser
+/// reports is passed on. Entries leave when the finger lifts, and anything the event no
+/// longer reports is reconciled away (see `prune`) instead of being capped.
 final class TouchPointerTracker {
     private var ids: [ObjectIdentifier: Int32] = [:]
     private var next: Int32 = 0
 
-    var activeCount: Int32 { Int32(ids.count) }
-
-    /// Assign (or recall) the slot for a finger going down. Returns (id, totalAfter).
-    func begin(_ touch: UITouch) -> (Int32, Int32) {
+    /// Assign (or recall) the slot for a finger going down.
+    func begin(_ touch: UITouch) -> Int32 {
         let key = ObjectIdentifier(touch)
         if let existing = ids[key] {
-            return (existing, Int32(ids.count))
+            return existing
         }
-        // Smallest free slot: scan from 0 so ids stay dense.
+        // Smallest free slot: scan from 0 so ids stay dense and the oldest finger keeps
+        // the lowest id, which is the order Android's pointer array uses.
         var candidate: Int32 = 0
         let used = Set(ids.values)
         while used.contains(candidate) { candidate += 1 }
         if candidate == next { next += 1 }
-        var hole = candidate
-        if ids.count > 10 {
-            // Safety: UIKit reliably pairs began/ended; a leak here means stale
-            // entries, so reset rather than grow unbounded.
-            ids.removeAll()
-            next = 0
-            hole = 0
-        }
-        ids[key] = hole
-        return (hole, Int32(ids.count))
+        ids[key] = candidate
+        return candidate
     }
 
     func id(of touch: UITouch) -> Int32? {
         return ids[ObjectIdentifier(touch)]
     }
 
-    /// Release a finger. Returns (id, totalBeforeRemoval) or nil if unknown.
-    func end(_ touch: UITouch) -> (Int32, Int32)? {
-        let key = ObjectIdentifier(touch)
-        guard let id = ids.removeValue(forKey: key) else { return nil }
-        return (id, Int32(ids.count) + 1)
+    /// Release a finger. Returns its id, or nil if it was not tracked.
+    func end(_ touch: UITouch) -> Int32? {
+        return ids.removeValue(forKey: ObjectIdentifier(touch))
+    }
+
+    /// Reconcile with the event's own touch set.
+    ///
+    /// `live` is every touch the event reports; `current` is the batch being handled.
+    /// A touch in `current` may already be ended while it is still the finger this event
+    /// is about (that is what an ended callback is), so it is kept until the caller
+    /// releases it explicitly. Anything neither live nor current is gone.
+    func prune(live: Set<UITouch>, current: Set<UITouch>) {
+        guard !ids.isEmpty else { return }
+        var keep = Set<ObjectIdentifier>()
+        keep.reserveCapacity(live.count + current.count)
+        for touch in live where touch.phase != .ended && touch.phase != .cancelled {
+            keep.insert(ObjectIdentifier(touch))
+        }
+        for touch in current { keep.insert(ObjectIdentifier(touch)) }
+        if keep.count >= ids.count && ids.keys.allSatisfy({ keep.contains($0) }) { return }
+        ids = ids.filter { keep.contains($0.key) }
     }
 }
 
@@ -124,42 +136,64 @@ class GlobalMetalView: UIView {
         }
     }
 
-    private func injectTouch(_ touches: Set<UITouch>, action: Int32) {
+    /// Forward one callback as one event carrying every live finger.
+    ///
+    /// `action` is the guest action base (0 DOWN, 1 UP, 2 MOVE, 3 CANCEL); the shim picks
+    /// DOWN vs POINTER_DOWN and UP vs POINTER_UP from how many fingers are down. A lifting
+    /// finger stays in the table sent for UP — that is the slot POINTER_UP's index refers
+    /// to — and leaves right after.
+    private func injectTouch(_ touches: Set<UITouch>, action: Int32, event: UIEvent?) {
         let scale = UIScreen.main.scale
-        for touch in touches {
+        // Every live finger, not only the ones this callback names: a MOVE has to carry the
+        // other fingers' positions too, and UIKit reports them all through allTouches.
+        let live = event?.allTouches ?? touches
+        touchTracker.prune(live: live, current: touches)
+        if action == 0 {
+            for touch in touches { _ = touchTracker.begin(touch) }
+        }
+        var entries: [(id: Int32, x: Float, y: Float)] = []
+        entries.reserveCapacity(live.count)
+        for touch in live {
+            guard let id = touchTracker.id(of: touch) else { continue }
             let location = touch.location(in: self)
-            let x = Float(location.x * scale)
-            let y = Float(location.y * scale)
-            switch action {
-            case 0: // began: first finger DOWN, later fingers POINTER_DOWN via shim
-                let (id, count) = touchTracker.begin(touch)
-                kudroid_inject_touch_event_multi(x, y, 0, id, count)
-            case 2: // moved: Android MOVE carries no index; count is authoritative
-                let id = touchTracker.id(of: touch) ?? 0
-                kudroid_inject_touch_event_multi(x, y, 2, id, touchTracker.activeCount)
-            case 1, 3: // ended/cancelled: last finger UP, others POINTER_UP via shim
-                guard let (id, count) = touchTracker.end(touch) else { continue }
-                kudroid_inject_touch_event_multi(x, y, action, id, count)
-            default:
-                continue
-            }
+            entries.append((id, Float(location.x * scale), Float(location.y * scale)))
+        }
+        guard !entries.isEmpty else { return }
+        // Pointer 0 is the finger that has been down longest and the action's index refers
+        // to this order, so it must not be left to Set iteration order.
+        entries.sort { $0.id < $1.id }
+        var ids = [Int32]()
+        var xs = [Float]()
+        var ys = [Float]()
+        ids.reserveCapacity(entries.count)
+        xs.reserveCapacity(entries.count)
+        ys.reserveCapacity(entries.count)
+        for entry in entries {
+            ids.append(entry.id)
+            xs.append(entry.x)
+            ys.append(entry.y)
+        }
+        let primary = touches.first.flatMap { touchTracker.id(of: $0) } ?? ids[0]
+        kudroid_inject_touch_batch(action, primary, Int32(ids.count), ids, xs, ys)
+        if action == 1 || action == 3 {
+            for touch in touches { _ = touchTracker.end(touch) }
         }
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        injectTouch(touches, action: 0) // ACTION_DOWN
+        injectTouch(touches, action: 0, event: event) // ACTION_DOWN
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-        injectTouch(touches, action: 2) // ACTION_MOVE
+        injectTouch(touches, action: 2, event: event) // ACTION_MOVE
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        injectTouch(touches, action: 1) // ACTION_UP
+        injectTouch(touches, action: 1, event: event) // ACTION_UP
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-        injectTouch(touches, action: 3) // ACTION_CANCEL
+        injectTouch(touches, action: 3, event: event) // ACTION_CANCEL
     }
 }
 

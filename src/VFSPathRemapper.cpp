@@ -2130,9 +2130,12 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
             }
         }
         if (followLine) {
+            // req= names what the reader ASKED for, not just what arrived: a blob
+            // reported SHORT is either a reader that stops asking (req is one small
+            // chunk) or a stream that ends early (req is the whole blob, n is short).
             std::fprintf(stderr,
-                         "[KuDroidFmod] post-FSB5 read bytes=%zu pos=%ld\n",
-                         n * size, std::ftell(stream));
+                         "[KuDroidFmod] post-FSB5 read req=%zu x %zu -> %zu bytes pos=%ld\n",
+                         size, count, n, std::ftell(stream));
         }
     }
     if (n > 0) {

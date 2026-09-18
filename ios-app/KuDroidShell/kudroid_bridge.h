@@ -92,6 +92,11 @@ int kudroid_get_keep_screen_on(void);
 /// @param action 0=down, 1=up, 2=move (mapped to android's amotion_event_action)
 void kudroid_inject_touch_event(float x, float y, int action);
 void kudroid_inject_touch_event_multi(float x, float y, int action, int pointerId, int pointerCount);
+// Every live finger in one call: ids/xs/ys are the full pointer table, primaryId is the
+// finger this callback is about (for ACTION_POINTER_UP/DOWN's index). For a lifting finger
+// the caller sends it as still present and drops it after this call returns.
+void kudroid_inject_touch_batch(int action, int primaryId, int count,
+                               const int* ids, const float* xs, const float* ys);
 
 /// send java application lifecycle events (101=pause, 102=resume) to ui stream
 void kudroid_send_lifecycle_event(int eventType);
