@@ -157,6 +157,12 @@ static constexpr int kMaxWorkerRecoveries = 128;
 // ceiling; anything that repeats or regresses an address still charges the
 // normal budget and bails, so a genuine infinite loop cannot hide here.
 static constexpr int kMaxWalkRecoveries = 8192;
+// A null-base loop is never a reservation walk: below 0x10000 there is nothing
+// to commit, so every skip only pushes the corruption further (observed: a
+// null memset dropped store-by-store, then a SIGBUS through a garbage register
+// far from the loop). Same-pc null faults get a tiny run, not the walk
+// ceiling — the report must name the loop, not its aftermath.
+static constexpr int kMaxNullRun = 4;
 // Largest per-step advance still treated as one contiguous walk. A stride that
 // jumps further is not a bounded table walk and must not inherit this budget.
 static constexpr unsigned long long kWalkStepMax = 1ULL << 20;
@@ -178,6 +184,8 @@ struct WorkerBudget {
     std::atomic<unsigned long long> lastPc{0};
     std::atomic<unsigned long long> lastAddr{0};
     std::atomic<int> walk{0};
+    // Consecutive same-pc faults in the null page. See kMaxNullRun.
+    std::atomic<int> nullRun{0};
 };
 static WorkerBudget g_workerBudgets[8];
 
@@ -186,6 +194,7 @@ void crashResetWorkerBudgets(void) {
         slot.tid.store(0, std::memory_order_relaxed);
         slot.count.store(0, std::memory_order_relaxed);
         slot.lastNs.store(0, std::memory_order_relaxed);
+        slot.nullRun.store(0, std::memory_order_relaxed);
     }
 }
 
@@ -287,6 +296,19 @@ static bool worker_budget_note(WorkerBudget* s, long long nowNs,
         if (s->count.load(std::memory_order_relaxed) >= kMaxWorkerRecoveries) return false;
         s->count.fetch_add(1, std::memory_order_relaxed);
     }
+    // Null-page run tracking (see kMaxNullRun): consecutive same-pc faults
+    // below 0x10000 are a null-base loop. Read lastPc before overwriting it.
+    if (pc != 0 && pc == s->lastPc.load(std::memory_order_relaxed) && addr < 0x10000) {
+        const int run = s->nullRun.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (run == kMaxNullRun) {
+            char msg[96];
+            std::snprintf(msg, sizeof(msg), "null-run: pc 0x%llx retired after %d null faults",
+                          pc, kMaxNullRun);
+            kudroid_android_log_message(4, "KuDroidSignal", msg);
+        }
+    } else {
+        s->nullRun.store(addr < 0x10000 ? 1 : 0, std::memory_order_relaxed);
+    }
     s->lastPc.store(pc, std::memory_order_relaxed);
     s->lastAddr.store(addr, std::memory_order_relaxed);
     return true;
@@ -300,6 +322,13 @@ static bool worker_budget_note(WorkerBudget* s, long long nowNs,
 static bool worker_budget_peek(WorkerBudget* s, unsigned long long pc,
                                unsigned long long addr) {
     if (s == nullptr) return false;
+    // Null-base loop breaker (see kMaxNullRun): once the run is spent the
+    // skip is refused, so the fatal path reports the loop instead of masking
+    // it into downstream garbage.
+    if (pc != 0 && pc == s->lastPc.load(std::memory_order_relaxed) && addr < 0x10000 &&
+        s->nullRun.load(std::memory_order_relaxed) >= kMaxNullRun) {
+        return false;
+    }
     if (worker_fault_is_walk(s, pc, addr)) {
         return s->walk.load(std::memory_order_relaxed) < kMaxWalkRecoveries;
     }
