@@ -963,12 +963,51 @@ void test_fault_skip_decoder() {
         Check(p.skippable && p.isLoad && p.isVector && p.rt == 18 && p.effAddr == 0x5000,
               "SIMD lane v18 allows (was a whole-function skip before)");
     }
-    // SIMD pairs and SIMD writeback still refuse.
+    // SIMD pairs allow, signed-offset only (opcodes assembler-verified with
+    // aarch64-linux-gnu-as; the first word is a live crash: ldp q21,q23
+    // through a null base, non-consecutive dests).
     {
-        Check(!fault_decode_skip(0xad000640, 0x1000, 0x8000, 0).skippable,
-              "SIMD pair (stp q0,q1,[x18]) refuses");
-        Check(!fault_decode_skip(0xad010440, 0x1000, 0x8000, 0).skippable,
-              "SIMD pair offset (stp q0,q1,[x2,#32]) refuses");
+        FaultSkipPlan p = fault_decode_skip(0xad7f5e55, 0x1000, 0x0, 0);
+        Check(p.skippable && p.isLoad && p.isPair && p.isVector && p.rt == 21 &&
+                  p.rt2 == 23 && p.effAddr == 0xFFFFFFFFFFFFFFE0ull,
+              "crash ldp q21,q23,[x18,#-32] is skippable (lanes zeroed)");
+    }
+    {
+        FaultSkipPlan p = fault_decode_skip(0xad000640, 0x1000, 0x8000, 0);  // stp q0,q1,[x18]
+        Check(p.skippable && !p.isLoad && p.isPair && p.isVector && p.rt == 0 &&
+                  p.rt2 == 1 && p.effAddr == 0x8000,
+              "SIMD pair store (stp q0,q1,[x18]) allows (write dropped)");
+    }
+    {
+        FaultSkipPlan p = fault_decode_skip(0xad010440, 0x1000, 0x8000, 0);  // stp q0,q1,[x2,#32]
+        Check(p.skippable && !p.isLoad && p.isPair && p.isVector && p.effAddr == 0x8020,
+              "SIMD pair offset (stp q0,q1,[x2,#32]) allows");
+    }
+    {
+        FaultSkipPlan p = fault_decode_skip(0x2d408c02, 0x1000, 0x5000, 0);  // ldp s2,s3,[x0,#4]
+        Check(p.skippable && p.isLoad && p.isPair && p.isVector && p.rt == 2 &&
+                  p.rt2 == 3 && p.effAddr == 0x5004,
+              "SIMD pair S-form scales by 4");
+    }
+    {
+        FaultSkipPlan p = fault_decode_skip(0x6d7f0c02, 0x1000, 0x5000, 0);  // ldp d2,d3,[x0,#-16]
+        Check(p.skippable && p.isLoad && p.isPair && p.isVector && p.effAddr == 0x4FF0,
+              "SIMD pair D-form scales by 8");
+    }
+    {
+        FaultSkipPlan p = fault_decode_skip(0xad011404, 0x1000, 0x5000, 0);  // stp q4,q5,[x0,#32]
+        Check(p.skippable && !p.isLoad && p.isPair && p.isVector && p.rt == 4 &&
+                  p.rt2 == 5 && p.effAddr == 0x5020,
+              "SIMD pair Q-form scales by 16");
+    }
+    // SIMD pair writeback, unallocated opc, and SIMD scalar writeback refuse.
+    {
+        Check(!fault_decode_skip(0xad808400, 0x1000, 0x8000, 0).skippable,
+              "SIMD pair pre-index refuses");
+        Check(!fault_decode_skip(0xacc10c02, 0x1000, 0x8000, 0).skippable,
+              "SIMD pair post-index refuses");
+        Check(!fault_decode_skip(0xed400400, 0x1000, 0x8000, 0).skippable,
+              "SIMD pair unallocated opc==3 refuses");
         Check(!fault_decode_skip(0x3c810420, 0x1000, 0x5000, 0).skippable,
               "SIMD post-index store refuses");
         Check(!fault_decode_skip(0x3cc10c20, 0x1000, 0x5000, 0).skippable,

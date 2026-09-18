@@ -168,6 +168,13 @@ static constexpr int kMaxWalkRecoveries = 8192;
 // frames are milliseconds apart, so a 1ms gap restarts the run.
 static constexpr int kMaxNullRun = 4;
 static constexpr long long kMaxNullGapNs = 1000000LL;
+// Nullish address: below the first page, or just below zero (a null base
+// with a negative structure offset — observed: ldp [x18=0,#-32] faulting at
+// -32). Nothing is mapped at either extreme, so inventing a result there is
+// exactly as safe as on the null page.
+static bool fault_addr_is_nullish(unsigned long long addr) {
+    return addr < 0x10000u || addr >= (0ull - 0x10000ull);
+}
 // Largest per-step advance still treated as one contiguous walk. A stride that
 // jumps further is not a bounded table walk and must not inherit this budget.
 static constexpr unsigned long long kWalkStepMax = 1ULL << 20;
@@ -306,7 +313,8 @@ static bool worker_budget_note(WorkerBudget* s, long long nowNs,
     // fault's timestamp, read before this one overwrote it. Read lastPc
     // before overwriting it too.
     const bool tight = last != 0 && nowNs - last <= kMaxNullGapNs && pc != 0 &&
-                       pc == s->lastPc.load(std::memory_order_relaxed) && addr < 0x10000;
+                       pc == s->lastPc.load(std::memory_order_relaxed) &&
+                       fault_addr_is_nullish(addr);
     if (tight) {
         const int run = s->nullRun.fetch_add(1, std::memory_order_relaxed) + 1;
         if (run == kMaxNullRun) {
@@ -316,7 +324,7 @@ static bool worker_budget_note(WorkerBudget* s, long long nowNs,
             kudroid_android_log_message(4, "KuDroidSignal", msg);
         }
     } else {
-        s->nullRun.store(addr < 0x10000 ? 1 : 0, std::memory_order_relaxed);
+        s->nullRun.store(fault_addr_is_nullish(addr) ? 1 : 0, std::memory_order_relaxed);
     }
     s->lastPc.store(pc, std::memory_order_relaxed);
     s->lastAddr.store(addr, std::memory_order_relaxed);
@@ -336,7 +344,8 @@ static bool worker_budget_peek(WorkerBudget* s, unsigned long long pc,
     // it into downstream garbage. Time-gated like the counter: a spent run
     // from an earlier burst must not refuse a fresh fault (lastNs is the
     // previous fault's timestamp; clock_gettime is signal-safe).
-    if (pc != 0 && pc == s->lastPc.load(std::memory_order_relaxed) && addr < 0x10000 &&
+    if (pc != 0 && pc == s->lastPc.load(std::memory_order_relaxed) &&
+        fault_addr_is_nullish(addr) &&
         s->nullRun.load(std::memory_order_relaxed) >= kMaxNullRun) {
         const long long nowNs =
             std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -645,10 +654,11 @@ static bool chainToPreviousHandler(int sig) {
 // - SIGSEGV/SIGBUS only. Anything else parks.
 // - pc must sit in a registered guest module: host text is never rewritten.
 // - Only plain transfers: unsigned/unscaled immediate, register-offset,
-//   literal loads, signed-offset pairs, PRFM, and whole-register SIMD
-//   structure transfers with no offset (LD1/ST1 x1-4, LD2/ST2, LD3/ST3,
-//   LD4/ST4, LD1R). Pre/post-index (writeback), exclusives, LSE atomics,
-//   SIMD lane-indexed and pair forms, and everything else park —
+//   literal loads, signed-offset pairs, PRFM, whole-register SIMD structure
+//   transfers with no offset (LD1/ST1 x1-4, LD2/ST2, LD3/ST3, LD4/ST4, LD1R),
+//   and SIMD pairs with no writeback (STP/LDP s/d/q). Pre/post-index
+//   (writeback), exclusives, LSE atomics, SIMD lane-indexed forms, and
+//   everything else park —
 //   faking a base update or a synchronisation primitive corrupts silently,
 //   while a skipped plain transfer only loses one value.
 // - The computed effective address must equal si_addr: a decode that does
@@ -702,11 +712,10 @@ FaultSkipPlan fault_decode_skip(uint32_t w, uint64_t pc, uint64_t baseVal,
         // integer lanes: Rt names a vector register (zeroed in __ns), Rn
         // stays an integer base, and the addressing modes compute
         // identically. Only the data-size rule differs (opc bit23 set =
-        // 128-bit Q register, else 8<<size). SIMD lane-indexed and pair
-        // forms stay refused — lanes, not whole registers, fault there and
-        // zeroing them is not semantics-preserving. Whole-register structure
-        // forms (LD1/ST1 x1-4, LD2/3/4, ST2/3/4, LD1R) are decoded in their
-        // own branches below.
+        // 128-bit Q register, else 8<<size). SIMD lane-indexed forms stay
+        // refused — lanes, not whole registers, fault there and zeroing them
+        // is not semantics-preserving. Whole-register structure and pair
+        // forms are decoded in their own branches below.
         const bool simd = (w & (1u << 26)) != 0;
         // PRFM: refused, not skipped. It is a hint with no destination, so a
         // skip would be harmless — but a faulting PRFM means its address is
@@ -771,17 +780,34 @@ FaultSkipPlan fault_decode_skip(uint32_t w, uint64_t pc, uint64_t baseVal,
         p.skippable = true;
         return p;
     }
-    if ((top & 0x3F) == 0x28 || (top & 0x3F) == 0x29) {
-        // Integer pair (bit26 set = SIMD pair: refuse). Indexing lives in
-        // bits[24:23] verified against the assembler as (w>>23)&3:
-        // 2 = signed offset, 3 = pre-index, 1 = post-index, 0 = unallocated.
-        if ((w & (1u << 26)) != 0) return p;
+    if ((top & 0x3F) == 0x28 || (top & 0x3F) == 0x29 ||
+        (top & 0x3F) == 0x2C || (top & 0x3F) == 0x2D) {
+        // Integer pair, or SIMD&FP pair with bit26 set (STP/LDP s/d/q): two
+        // explicit destinations, signed offset, no writeback. The vector
+        // shape moves whole registers, so it zeroes like the integer pair.
+        // Assembler-verified: ad7f5e55 ldp q21,q23,[x18,#-32] (live crash),
+        // 2d408c02 ldp s2,s3,[x0,#4], 6d7f0c02 ldp d2,d3,[x0,#-16],
+        // ad011404 stp q4,q5,[x0,#32], ad7e1fe6 ldp q6,q7,[sp,#-64].
+        // Scale is opc+2 (S=4B, D=8B, Q=16B); opc==3 is unallocated.
+        // Indexing lives in bits[24:23] verified against the assembler as
+        // (w>>23)&3: 2 = signed offset, 3 = pre-index, 1 = post-index,
+        // 0 = unallocated (ad808400 pre-index and acc10c02 post-index refuse).
         if (((w >> 23) & 3) != 2) return p;  // writeback/unallocated
+        const bool simdPair = (w & (1u << 26)) != 0;
+        unsigned scale;
+        if (simdPair) {
+            const unsigned opc = (w >> 30) & 3;
+            if (opc == 3) return p;
+            scale = opc + 2;
+        } else {
+            scale = ((w >> 31) & 1) ? 3 : 2;  // 64- vs 32-bit lanes
+        }
         p.isPair = true;
         p.isLoad = ((w >> 22) & 1) != 0;
         p.rt = rt;
         p.rt2 = (w >> 10) & 31;
-        const unsigned scale = ((w >> 31) & 1) ? 3 : 2;  // 64- vs 32-bit lanes
+        p.isVector = simdPair;
+        p.rtCount = 1;
         int32_t simm7 = static_cast<int32_t>(((w >> 15) & 0x7Fu) << 25) >> 25;
         p.effAddr = baseVal + (static_cast<int64_t>(simm7) << scale);
         p.skippable = true;
@@ -913,9 +939,8 @@ bool fault_skip_load_store(ucontext_t* uc, uintptr_t faultAddr, uint64_t* newPcO
             }
         }
     }
-    // Reached only for faults inside kNullProbeLimit, so the fabricated result
-    // below lands in a register whose only sane value a null read could have
-    // produced anyway. Storm control stays in the per-thread budget.
+    // Reached only for nullish faults, so the fabricated result below lands
+    // in a register whose only sane value a null read could have produced anyway. Storm control stays in the per-thread budget.
     if (p.isLoad) {
         if (p.isVector) {
             // SIMD/FP lane: all 32 vector registers exist (no XZR), so no
@@ -924,11 +949,18 @@ bool fault_skip_load_store(ucontext_t* uc, uintptr_t faultAddr, uint64_t* newPcO
             // the guest would have seen is zero bytes. A poison pattern is
             // worse, not better -- 0xCD bytes reinterpreted as four pointers
             // are four wild addresses. Structure loads zero every consecutive
-            // destination (rtCount); the decoder already refused a wrapping list.
+            // destination (rtCount); a pair's second dest is explicit, not
+            // rt+1 (observed: ldp q21,q23). The decoder already refused a
+            // wrapping structure list; 5-bit pair fields cannot wrap.
             if (p.rt > 31 || p.rtCount < 1 || p.rtCount > 4 ||
                 p.rt + p.rtCount > 32) return false;
+            if (p.isPair && p.rt2 > 31) return false;
             for (unsigned i = 0; i < p.rtCount; ++i) {
                 std::memset(&uc->uc_mcontext->__ns.__v[p.rt + i], 0,
+                            sizeof(uc->uc_mcontext->__ns.__v[0]));
+            }
+            if (p.isPair) {
+                std::memset(&uc->uc_mcontext->__ns.__v[p.rt2], 0,
                             sizeof(uc->uc_mcontext->__ns.__v[0]));
             }
         } else {
@@ -963,16 +995,16 @@ static bool kudroid_try_skip_fault(int /*sig*/, siginfo_t* info, void* ucontext)
     // A fault may only be silently recovered when it looks like a null-page
     // probe: the guest dereferences a pointer whose null check it got wrong.
     // That is the one case where inventing a result cannot corrupt live state,
-    // because nothing the guest owns lives below the first page. Anywhere else
-    // the fault is a real bad access, and fabricating a load result feeds
+    // because nothing the guest owns lives below the first page — or just
+    // below zero, for a null base with a negative structure offset. Anywhere
+    // else the fault is a real bad access, and fabricating a load result feeds
     // garbage into the structures the guest is walking -- observed live as a
     // hash-table loop that stored a poisoned SIMD lane (0xCD) into a live
     // array, kept walking with the poisoned index and finally wrote 33GB off
     // the heap. Refuse those: a crash on the real address, with the region and
     // permissions logged, is diagnosable; thousands of silent corruptions are
     // not.
-    constexpr uintptr_t kNullProbeLimit = 0x10000;  // first 64KB
-    if (faultAddr >= kNullProbeLimit) return false;
+    if (!fault_addr_is_nullish(faultAddr)) return false;
     if (!fault_skip_load_store(uc, faultAddr, &newPc, &isLoad)) return false;
     arm_thread_state64_set_pc_fptr(uc->uc_mcontext->__ss,
                                    reinterpret_cast<void*>(newPc));
