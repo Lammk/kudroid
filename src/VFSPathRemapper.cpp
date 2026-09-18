@@ -1673,9 +1673,12 @@ FILE* vfs_fopen64(const char* path, const char* mode) { return vfs_fopen(path, m
 
 // Tracked APK streams: guest fread bypasses the syscall layer, so volume on
 // base.apk (catalog/asset bytes) is otherwise invisible. Lock-free lookup,
-// locked mutation (open/close are rare, reads are hot).
+// locked mutation (open/close are rare, reads are hot). The table is small and
+// recycled on fclose; a session that keeps more handles open than slots loses
+// the FSB5 probe on the surplus, so it is sized for the engine's parallel
+// reader count rather than for a single stream.
 namespace {
-constexpr int kTrackedStreams = 8;
+constexpr int kTrackedStreams = 32;
 std::atomic<uintptr_t> g_apkStreams[kTrackedStreams];
 std::mutex g_apkStreamsMtx;
 
@@ -1736,6 +1739,34 @@ struct FsbWindow {
     std::vector<uint64_t> covered;  // bitmap, one bit per block
 };
 std::map<std::string, std::vector<FsbWindow>> g_fsbWindows;  // g_freadVolMtx
+
+// Mark [lo, hi) of a window's byte range as covered. Call with g_freadVolMtx
+// held. Shared by the read path and by the serve path, which seeds the window
+// with the read that revealed the header: a window created after its own first
+// block was accounted can never reach its declared size, so a blob read end to
+// end still verdicts SHORT — the exact mis-read that made every audio run look
+// like "the blob was never read".
+void fsb_window_cover(FsbWindow& w, long lo, long hi) {
+    if (hi <= lo) return;
+    if (lo < w.start) lo = w.start;
+    if (hi > w.end) hi = w.end;
+    if (hi <= lo) return;
+    const uint64_t blocks = (w.expected + 2047) / 2048;
+    if (blocks == 0) return;
+    if (w.covered.empty()) {
+        w.covered.assign(static_cast<size_t>(blocks / 64 + 1), 0);
+    }
+    for (long b = (lo - w.start) / 2048; b <= (hi - 1 - w.start) / 2048; ++b) {
+        const uint64_t ub = static_cast<uint64_t>(b);
+        if (ub >= blocks) break;
+        uint64_t& word = w.covered[static_cast<size_t>(ub) >> 6];
+        const uint64_t bit = 1ull << (static_cast<unsigned>(ub) & 63);
+        if (!(word & bit)) {
+            word |= bit;
+            ++w.blocks;
+        }
+    }
+}
 
 // Call with g_freadVolMtx held. Reports and drops every window whose declared
 // bytes are all accounted for; `enforceCap` then reports the oldest unfinished
@@ -1915,23 +1946,7 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                 if (wit != g_fsbWindows.end()) {
                     for (auto& w : wit->second) {
                         if (start >= w.end || pos <= w.start) continue;
-                        const long lo = start > w.start ? start : w.start;
-                        const long hi = pos < w.end ? pos : w.end;
-                        const uint64_t blocks = (w.expected + 2047) / 2048;
-                        if (w.covered.empty()) {
-                            w.covered.assign(static_cast<size_t>(blocks / 64 + 1), 0);
-                        }
-                        for (long b = (lo - w.start) / 2048;
-                             b <= (hi - 1 - w.start) / 2048 &&
-                             static_cast<uint64_t>(b) < blocks;
-                             ++b) {
-                            uint64_t& word = w.covered[static_cast<size_t>(b) >> 6];
-                            const uint64_t bit = 1ull << (static_cast<unsigned>(b) & 63);
-                            if (!(word & bit)) {
-                                word |= bit;
-                                ++w.blocks;
-                            }
-                        }
+                        fsb_window_cover(w, start, pos);
                     }
                     fsb_windows_report_locked(pit->second, false);
                 }
@@ -1955,6 +1970,11 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                 std::string entry;
                 uint16_t method = 0xFFFF;
                 uint32_t usize = 0;
+                // Distance from the blob to its ZIP entry's bounds. A blob that
+                // runs past the entry end is a slice FMOD can never read whole,
+                // which is the one geometry that turns a valid FSB5 into
+                // "Error loading file" without the bytes being wrong.
+                long long entryOff = -1;
                 if (start >= 0) {
                     std::string archivePath;
                     {
@@ -1972,6 +1992,8 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                                     entry = name;
                                     method = meta.compressionMethod;
                                     usize = meta.uncompressedSize;
+                                    entryOff = static_cast<long long>(start) -
+                                               static_cast<long long>(meta.payloadOffset);
                                     break;
                                 }
                             }
@@ -2040,10 +2062,16 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                 }
                 std::fprintf(stderr,
                              "[KuDroidFmod] served FSB5 at apk_off=%ld size=%zu "
-                             "method=%u usize=%u ver=%u num=%u shs=%u nts=%u "
+                             "method=%u usize=%u entryOff=%lld entryRem=%lld "
+                             "ver=%u num=%u shs=%u nts=%u "
                              "dataSize=%u mode=%u blobTotal=%llu next=[%s] hex=%s "
                              "entry=%s\n",
-                             start, n * size, method, usize, ver, numSamples, shs, nts,
+                             start, n * size, method, usize, entryOff,
+                             entryOff >= 0
+                                 ? static_cast<long long>(usize) - entryOff -
+                                       static_cast<long long>(blobTotal)
+                                 : -1,
+                             ver, numSamples, shs, nts,
                              dataSize, mode, static_cast<unsigned long long>(blobTotal),
                              nextDesc, hex, entry.empty() ? "(none)" : entry.c_str());
                 // Decisive follow-up: when FMOD accepts the bank it streams
@@ -2057,12 +2085,32 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                         blobTotal <= (32u << 20)) {
                         const auto pit2 = g_freadPaths.find(stream);
                         if (pit2 != g_freadPaths.end()) {
-                            fsb_windows_report_locked(pit2->second, true);
+                            auto& list = g_fsbWindows[pit2->second];
+                            // A new blob supersedes the previous one on this
+                            // archive, so verdict it now either way: COMPLETE
+                            // means the whole blob reached the reader, SHORT
+                            // means the clip's bytes were never all read — the
+                            // distinction this investigation has needed and
+                            // never had (verdicts used to wait for a 16-window
+                            // backlog that a session never reaches).
+                            for (const auto& prev : list) {
+                                const uint64_t covered = prev.blocks * 2048;
+                                std::fprintf(
+                                    stderr,
+                                    "[KuDroidFmod] blob off=%ld size=%llu covered=%llu %s\n",
+                                    prev.start,
+                                    static_cast<unsigned long long>(prev.expected),
+                                    static_cast<unsigned long long>(
+                                        covered > prev.expected ? prev.expected : covered),
+                                    prev.blocks * 2048 >= prev.expected ? "COMPLETE" : "SHORT");
+                            }
+                            list.clear();
                             FsbWindow w;
                             w.start = start;
                             w.end = start + static_cast<long>(blobTotal);
                             w.expected = blobTotal;
-                            g_fsbWindows[pit2->second].push_back(w);
+                            fsb_window_cover(w, start, start + static_cast<long>(n * size));
+                            list.push_back(w);
                         }
                     }
                 }

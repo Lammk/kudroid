@@ -614,6 +614,16 @@ static bool chainToPreviousHandler(int sig) {
 // - All async-signal-safe: scalar reads/writes, no locks, no allocation.
 namespace kudroid {
 
+bool fault_skip_branches_through(uint32_t nextWord, unsigned reg) {
+    // 0xD6/0xD7 group with bits[24:21] == 0 is exactly the branch-to-register
+    // family: BR, BLR, RET, ERET, DRPS and their authenticated variants. One
+    // mask covers all of them, so a new pointer-auth form cannot slip past.
+    if ((nextWord & 0xFE000000u) != 0xD6000000u) return false;
+    // ERET/DRPS encode XZR in Rn; a fabricated destination is never 31 (the
+    // decoder refuses rt >= 29), so they can never match a real skip.
+    return ((nextWord >> 5) & 31u) == reg;
+}
+
 FaultSkipPlan fault_decode_skip(uint32_t w, uint64_t pc, uint64_t baseVal,
                                 uint64_t rmVal) {
     FaultSkipPlan p;
@@ -765,6 +775,34 @@ bool fault_skip_load_store(ucontext_t* uc, uintptr_t faultAddr, uint64_t* newPcO
     if (!p.skippable) return false;
     // The decode must explain the fault. Anything else is a mis-decode.
     if (p.effAddr != faultAddr) return false;
+    // The fabricated result must not become a control-flow target. When the
+    // word right after the faulting load branches through the register this
+    // skip would zero, resuming there calls address 0 instead: the thread hops
+    // to pc=0 and the report names that, not the load whose base was wrong
+    // (observed live on a null-base load followed by `blr x8`). Refuse the
+    // skip so the fault is reported where it happened. pc+4 is fetchable
+    // whenever it stays inside pc's page, and pc is executing right now.
+    if (p.isLoad) {
+        if ((pc & 0xFFFu) + 4 < 0x1000u) {
+            const uint32_t next = *reinterpret_cast<const uint32_t*>(pc + 4);
+            unsigned via = 32;  // >= 32: no register this skip fabricates
+            if (kudroid::fault_skip_branches_through(next, p.rt)) {
+                via = p.rt;
+            } else if (p.isPair && kudroid::fault_skip_branches_through(next, p.rt2)) {
+                via = p.rt2;
+            }
+            if (via < 32) {
+                char nb[192];
+                const int cn = std::snprintf(
+                    nb, sizeof(nb),
+                    "null-probe skip refused: next insn branches through r%u, the "
+                    "register the skip would fabricate",
+                    via);
+                if (cn > 0) kudroid_persistent_breadcrumb(nb);
+                return false;
+            }
+        }
+    }
     // Reached only for faults inside kNullProbeLimit, so the fabricated result
     // below lands in a register whose only sane value a null read could have
     // produced anyway. Storm control stays in the per-thread budget.
@@ -848,9 +886,17 @@ static bool kudroid_try_skip_fault(int /*sig*/, siginfo_t* info, void* ucontext)
                 {
                     char cur[4] = "???", max[4] = "???";
                     uint64_t rbase = 0, rsize = 0;
+                    // A lookup that returns a region the address is not inside
+                    // is not the fault's region: for an address below the first
+                    // mapping the kernel answers with the first region in the
+                    // space (observed: fault_addr=0x28 reported as a region at
+                    // 0x100850000). Reporting that as "the region" reads as a
+                    // committed-but-unprotected page and sends the next
+                    // investigation the wrong way, so require containment.
                     if (kudroid::QueryRegionProt(
                             reinterpret_cast<const void*>(faultAddr), cur, max,
-                            &rbase, &rsize)) {
+                            &rbase, &rsize) &&
+                        faultAddr >= rbase && faultAddr < rbase + rsize) {
                         std::snprintf(reg, sizeof(reg),
                                       " region=0x%llx+0x%llx cur=%s max=%s",
                                       (unsigned long long)rbase,

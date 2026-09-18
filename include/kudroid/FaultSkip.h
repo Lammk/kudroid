@@ -20,6 +20,13 @@ struct FaultSkipPlan {
     uint64_t effAddr = 0;
 };
 
+// True when `nextWord` is a register branch — BR/BLR/RET and every
+// pointer-authenticated form (BRAA/BRAB/BLRAA/BLRAB/RETAA/RETAB) — whose target
+// register is `reg`. A skip that fabricates a load result into `reg` must not
+// resume on such an instruction: the fabricated value becomes the callee
+// address, so the thread jumps to it instead of reporting the real fault.
+bool fault_skip_branches_through(uint32_t nextWord, unsigned reg);
+
 // Decode one AArch64 word for the skip rules documented in kudroid_bridge.cpp:
 // plain integer loads/stores (unsigned/unscaled immediate, register offset,
 // literal, signed-offset pairs), SIMD/FP single transfers (same addressing
