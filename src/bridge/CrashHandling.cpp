@@ -934,6 +934,12 @@ static bool kudroid_try_skip_fault(int /*sig*/, siginfo_t* info, void* ucontext)
 static bool kudroid_try_skip_fault(int, siginfo_t*, void*) { return false; }
 #endif
 
+// SIGUSR2 interrupter for the fatal-path park below. Empty on purpose: its job
+// is turning the default-terminate disposition into EINTR, so a main thread
+// blocked in the engine wait returns to its loop, where the shell poll sees
+// g_hasCrashed and shows the modal. Safe in a handler by doing nothing.
+static void kudroid_wake_handler(int) {}
+
 static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
     if (sig == SIGSYS && bionic_handle_guest_syscall_trap(ucontext)) {
         return;
@@ -1912,6 +1918,34 @@ host_fatal_path:;
         sigset_t block_all;
         sigfillset(&block_all);
         pthread_sigmask(SIG_BLOCK, &block_all, nullptr);
+        // Parking the worker alone leaves the engine running on a dead thread:
+        // the frames log keeps scrolling while the screen is frozen and no modal
+        // ever appears, because the shell's poll checks g_hasCrashed but the
+        // main thread never observes the crash itself. Everything that reaches
+        // this park has already written its report and set g_hasCrashed (both
+        // the fatal branch and the worker-isolated branch above), so wake the
+        // main thread: its wait fails with EINTR and the loop reaches the modal
+        // path with the report on disk.
+        // Only inside a live guest session (kudroid_set_log_dir also records a
+        // main thread in hosts that merely exercise this reporter, e.g. the
+        // breadcrumb test, and those depend on the park-and-hold behaviour).
+        // Only into a disposition we own or the default: the guest sigaction
+        // shim installs its trampoline over ours without chaining, and waking
+        // into a foreign handler would run guest/debugger code on the main
+        // thread instead of interrupting it. Default still terminates, which
+        // beats a freeze with the report already on disk.
+        if (g_hasCrashed.load(std::memory_order_relaxed) && s_isApkRunning.load(std::memory_order_relaxed) &&
+            g_mainThread != 0 && !pthread_equal(pthread_self(), g_mainThread)) {
+            struct sigaction cur;
+            std::memset(&cur, 0, sizeof(cur));
+            const bool known = ::sigaction(SIGUSR2, nullptr, &cur) == 0;
+            const bool ours = known && (cur.sa_flags & SA_SIGINFO) == 0 &&
+                              cur.sa_handler == kudroid_wake_handler;
+            const bool dfl = known && cur.sa_handler == SIG_DFL;
+            if (ours || dfl) {
+                pthread_kill(g_mainThread, SIGUSR2);
+            }
+        }
         for (;;) {
             pause();
             // pause() also returns for a signal that is merely unblocked-and-ignored,
@@ -1920,7 +1954,8 @@ host_fatal_path:;
             nanosleep(&forever, nullptr);
         }
     } else {
-        // Nu crash ngay trn main thread, write nhn v kt thc an ton
+        // Crash on the main thread itself: restore default and re-raise so the
+        // process dies at once instead of parking the thread the shell runs on.
         signal(sig, SIG_DFL);
         raise(sig);
     }
@@ -1978,11 +2013,33 @@ void installCrashHandlers(void) {
     // Android/bionic ignores SIGPIPE by default (writes fail with EPIPE instead of killing).
     ::signal(SIGPIPE, SIG_IGN);
 
+    // The fatal-path park wakes the main thread with SIGUSR2 (see above). The
+    // interrupter installed below turns default-terminate into EINTR so the
+    // engine wait returns and the shell poll reaches the modal; without it the
+    // process dies before the modal can show. Plain sa_handler, no SA_RESTART:
+    // restarting the wait would defeat the wake. A guest SIGUSR2 handler
+    // displaces this one (the shim does not chain), and the park checks the
+    // disposition before sending, so it never fires into the guest trampoline.
+
+    // SIGUSR2 interrupter for the fatal-path park (defined above crashHandler).
+    {
+        struct sigaction wake;
+        std::memset(&wake, 0, sizeof(wake));
+        wake.sa_handler = kudroid_wake_handler;
+        sigemptyset(&wake.sa_mask);
+        ::sigaction(SIGUSR2, &wake, nullptr);
+    }
+
 #if defined(__APPLE__)
     // Catch abort reasons as they happen: uncaught ObjC exceptions + C++ terminate.
     NSSetUncaughtExceptionHandler(&kudroid_uncaught_objc_handler);
     std::set_terminate(&kudroid_terminate_handler);
 #endif
+
+    // g_mainThread is deliberately NOT recorded here: kudroid_set_log_dir
+    // installs these handlers in test hosts too, and a recorded main thread
+    // makes the fatal park wake the test process itself. The app bridge records
+    // it through crashNoteMainThread() instead.
 }
 
 // Diagnostic: whose handler owns the fatal signals right now? Call at X and at

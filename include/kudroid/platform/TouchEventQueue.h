@@ -77,8 +77,6 @@ public:
         if ((action & 0xff) == 2 && !events_.empty() &&
             (events_.back().action & 0xff) == 2 && events_.back().pointerCount == pointerCount) {
             Event& back = events_.back();
-            back.x = x;
-            back.y = y;
             if (haveTable) {
                 back.pointerIds.resize(static_cast<size_t>(pointerCount));
                 back.pointerXs.resize(static_cast<size_t>(pointerCount));
@@ -91,6 +89,9 @@ public:
                 back.x = back.pointerXs[0];
                 back.y = back.pointerYs[0];
             } else {
+                // No table: the single-position form puts every finger at (x, y),
+                // so rebuild the tables — the consumer reads pointerXs, not x/y,
+                // and x/y alone would leave the fingers at the previous sample.
                 back.setUniform(back.action, x, y, pointerCount);
             }
             return;

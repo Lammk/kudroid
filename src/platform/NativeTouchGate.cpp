@@ -1,7 +1,7 @@
 #include "kudroid/platform/NativeTouchGate.h"
 
+#include <atomic>
 #include <chrono>
-#include <mutex>
 
 // A drag arrives at 60-120 Hz. The dispatch used to cost one VM-locked
 // interpreted hop per sample from a worker thread; it now runs on the Looper
@@ -12,16 +12,15 @@
 //
 // [KuDroidTouch] drain timing is the check that the dispatch is still cheap: a
 // line there means this constant is the smaller problem.
+//
+// The budget is a pair of relaxed atomics, not a mutex: this runs on every MOVE
+// of every finger on the UI thread, and contending the mutex there steals frame
+// budget from the same loop that is supposed to drain the queue.
 
 namespace {
 
-struct SourceGate {
-    std::mutex mtx;
-    int used = 0;               // MOVE budget consumed in the current window
-    long long window_start = 0; // steady-clock ns
-};
-
-SourceGate g_gate;
+std::atomic<int> g_used{0};
+std::atomic<long long> g_windowStart{0};
 
 // 2 moves per 8 ms is ~250/s: every sample of a 120 Hz drag passes through, and
 // a flood still cannot buy more than that many dispatches.
@@ -37,19 +36,21 @@ long long steady_now_ns() {
 }  // namespace
 
 extern "C" void kudroid_touch_source_gate_init(void) {
-    std::lock_guard<std::mutex> lock(g_gate.mtx);
-    g_gate.used = 0;
-    g_gate.window_start = steady_now_ns();
+    g_used.store(0, std::memory_order_relaxed);
+    g_windowStart.store(steady_now_ns(), std::memory_order_relaxed);
 }
 
 extern "C" int kudroid_touch_source_gate_allow_move(void) {
-    std::lock_guard<std::mutex> lock(g_gate.mtx);
     const long long now = steady_now_ns();
-    if (now - g_gate.window_start >= kWindowNs) {
-        g_gate.window_start = now;
-        g_gate.used = 0;
+    long long win = g_windowStart.load(std::memory_order_relaxed);
+    if (now - win >= kWindowNs) {
+        // CAS winner resets the window; losers keep their budget decision in
+        // the old window, which is fine — the floor exists for floods.
+        if (g_windowStart.compare_exchange_strong(win, now, std::memory_order_relaxed)) {
+            g_used.store(0, std::memory_order_relaxed);
+        }
     }
-    if (g_gate.used >= kMaxMovesPerWindow) return 0;
-    ++g_gate.used;
-    return 1;
+    int used = g_used.load(std::memory_order_relaxed);
+    if (used >= kMaxMovesPerWindow) return 0;
+    return g_used.compare_exchange_strong(used, used + 1, std::memory_order_relaxed) ? 1 : 0;
 }

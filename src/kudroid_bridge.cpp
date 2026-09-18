@@ -88,7 +88,9 @@ extern "C" void kudroid_ios_diagnostic_memory(const char* phase) {
 
 extern "C" void kudroid_set_log_dir(const char* dir) {
     if (!dir) return;
-    g_mainThread = pthread_self();
+    // Recorded before installCrashHandlers below: the fatal-path park needs
+    // the main thread to wake it with SIGUSR2 when a worker dies reported.
+    crashNoteMainThread();
 
     // The host passes Documents; logs go into a subdirectory of it. Keeping the two
     // apart is the whole point — Documents also holds put_apk_here/, android_root/,
@@ -114,7 +116,6 @@ extern "C" void kudroid_set_log_dir(const char* dir) {
     }
 
     installCrashHandlers();
-
     // Write the build stamp to its own file so the running version can be checked
     // without reading a log, which answers "is the iPhone still on the old build?".
     const char* stamp = kudroid_build_stamp();
