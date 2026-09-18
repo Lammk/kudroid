@@ -391,6 +391,15 @@ bool RegionProt(const void* addr, vm_prot_t* cur, vm_prot_t* max) {
         reinterpret_cast<vm_region_info_t>(&info), &count, &obj);
     if (obj != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), obj);
     if (kr != KERN_SUCCESS) return false;
+    // mach_vm_region answers a gap address with the NEXT region: require
+    // containment, or an unmapped address reads as its successor's mapping.
+    // Subtraction form, so a wrapping base+size cannot pass.
+    {
+        const uint64_t base = static_cast<uint64_t>(a);
+        const uint64_t size = static_cast<uint64_t>(sz);
+        const uint64_t fault = reinterpret_cast<uint64_t>(addr);
+        if (fault < base || fault - base >= size) return false;
+    }
     if (cur) *cur = info.protection;
     if (max) *max = info.max_protection;
     return true;
@@ -694,6 +703,15 @@ bool QueryRegionProt(const void* addr, char cur[4], char max[4],
         reinterpret_cast<vm_region_info_t>(&info), &count, &obj);
     if (obj != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), obj);
     if (kr != KERN_SUCCESS) return false;
+    // Same gap quirk as RegionProt above: a null-page fault would otherwise
+    // report as the main binary's r-x (observed: fault 0x160 diagnosed as
+    // region 0x100bec000 cur=r-x).
+    {
+        const uint64_t base = static_cast<uint64_t>(a);
+        const uint64_t size = static_cast<uint64_t>(sz);
+        const uint64_t fault = reinterpret_cast<uint64_t>(addr);
+        if (fault < base || fault - base >= size) return false;
+    }
     ProtStr(info.protection, cur);
     ProtStr(info.max_protection, max);
     if (regionBase) *regionBase = static_cast<uint64_t>(a);
