@@ -2162,8 +2162,23 @@ extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_
         case 59: // pipe2
             return bionic_pipe2(reinterpret_cast<int*>(a1), static_cast<int>(a2));
 
-        case 62: // lseek
-            return ::lseek(static_cast<int>(a1), static_cast<off_t>(a2), static_cast<int>(a3));
+        case 62: { // lseek
+            const int lfd = static_cast<int>(a1);
+            const off_t res = ::lseek(lfd, static_cast<off_t>(a2), static_cast<int>(a3));
+            // The zip-reader pairs lseek(offset)+read() on base.apk: without the
+            // seek half of the pair the read trace has no offsets to geolocate.
+            if (res >= 0 && kudroid_fd_is_apk(lfd)) {
+                static std::atomic<int> s_apkSeeks{0};
+                if (s_apkSeeks.load(std::memory_order_relaxed) < 200) {
+                    s_apkSeeks.fetch_add(1, std::memory_order_relaxed);
+                    std::fprintf(stderr,
+                                 "[KuDroidApk] lseek fd=%d to=%lld whence=%d ret=%lld\n",
+                                 lfd, static_cast<long long>(a2), static_cast<int>(a3),
+                                 static_cast<long long>(res));
+                }
+            }
+            return res;
+        }
 
         case 63: // read
             return bionic_read(static_cast<int>(a1), reinterpret_cast<void*>(a2),
@@ -2629,6 +2644,19 @@ extern "C" ssize_t bionic_read(int fd, void* buf, size_t count) {
     const ssize_t ret = ::read(fd, buf, count);
     if (ret > 0) {
         io_volume_add(std::string(fd_path(fd)), static_cast<uint64_t>(ret));
+        // Trace the APK itself: Unity's zip-reader drains base.apk through raw
+        // read() (1793 ops / 46MB in one session with zero pread64 traffic),
+        // and no per-op trace existed here — the widest remaining blind spot
+        // for locating which consumer reads which offset region.
+        if (kudroid_fd_is_apk(fd)) {
+            static std::atomic<int> s_apkReads{0};
+            if (s_apkReads.load(std::memory_order_relaxed) < 200) {
+                s_apkReads.fetch_add(1, std::memory_order_relaxed);
+                std::fprintf(stderr,
+                             "[KuDroidApk] read fd=%d count=%zu ret=%zd\n",
+                             fd, count, ret);
+            }
+        }
     }
     return ret;
 }

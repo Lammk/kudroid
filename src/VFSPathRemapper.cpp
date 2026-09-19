@@ -1915,9 +1915,18 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                     const auto index = get_or_build_zip_index(pit->second);
                     if (index && start >= 0) {
                         for (const auto& [name, meta] : index->entries) {
-                            if (start >= static_cast<long long>(meta.payloadOffset) &&
-                                start < static_cast<long long>(meta.payloadOffset +
-                                                               meta.uncompressedSize)) {
+                            const long long eOff =
+                                static_cast<long long>(meta.payloadOffset);
+                            // Bounded on both ends: a payloadOffset alone does
+                            // not imply containment — without the upper bound
+                            // every audio blob attributed to whichever entry
+                            // sorted just below it (observed: FSB5 blobs
+                            // reported as runtimeinitializeonloads.json and
+                            // global-metadata.dat).
+                            if (start >= eOff &&
+                                start < eOff +
+                                            static_cast<long long>(
+                                                meta.uncompressedSize)) {
                                 entryName = name;
                                 break;
                             }
@@ -2000,9 +2009,14 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                         const auto index = get_or_build_zip_index(archivePath);
                         if (index) {
                             for (const auto& [name, meta] : index->entries) {
-                                if (start >= static_cast<long long>(meta.payloadOffset) &&
-                                    start < static_cast<long long>(meta.payloadOffset +
-                                                                   meta.uncompressedSize)) {
+                                const long long eOff =
+                                    static_cast<long long>(meta.payloadOffset);
+                                // Both-ends containment: same mis-attribution
+                                // as the magic sniffer above.
+                                if (start >= eOff &&
+                                    start < eOff +
+                                                static_cast<long long>(
+                                                    meta.uncompressedSize)) {
                                     entry = name;
                                     method = meta.compressionMethod;
                                     usize = meta.uncompressedSize;
