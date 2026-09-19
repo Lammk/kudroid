@@ -23,14 +23,25 @@ extern "C" int kudroid_android_log_message(int priority, const char* tag, const 
 
 namespace kudroid {
 namespace {
-thread_local std::string gShimTrace;
+// Trace used to be thread_local: entries written on a thread nobody flushed
+// (FMOD's file thread, asset workers) never reached any report, so the exact
+// path a failing subsystem took was invisible in the logs. A mutex-guarded
+// global ring keeps the last entries from every thread; ";\n" is an unlikely
+// boundary so consumers splitting on it stay correct.
+constexpr size_t kShimTraceRing = 64;
+std::mutex gShimTraceMtx;
+std::string gShimTraceRing[kShimTraceRing];
+size_t gShimTraceHead = 0;
+size_t gShimTraceCount = 0;
 } // namespace
 
 void trace_shim(const char* message) {
-    if (!message) return;
-    gShimTrace += "[BionicShim] ";
-    gShimTrace += message;
-    gShimTrace += '\n';
+    if (!message || !*message) return;
+    std::lock_guard<std::mutex> lock(gShimTraceMtx);
+    gShimTraceRing[gShimTraceHead] = "[BionicShim] ";
+    gShimTraceRing[gShimTraceHead] += message;
+    gShimTraceHead = (gShimTraceHead + 1) % kShimTraceRing;
+    if (gShimTraceCount < kShimTraceRing) ++gShimTraceCount;
 }
 
 namespace {
@@ -243,11 +254,29 @@ void* resolve_bionic_symbol(const char* name) {
 }
 
 void bionic_shim_reset_trace() {
-    gShimTrace.clear();
+    std::lock_guard<std::mutex> lock(gShimTraceMtx);
+    for (auto& s : gShimTraceRing) s.clear();
+    gShimTraceHead = 0;
+    gShimTraceCount = 0;
 }
 
 const char* bionic_shim_trace() {
-    return gShimTrace.c_str();
+    // Static: the return value must stay valid after the lock releases (the
+    // crash handler reads it while other threads may still trace).
+    static std::string joined;
+    // try_lock, never block: a fault on the tracing thread while it held the
+    // mutex must not deadlock the crash report inside the signal handler — a
+    // report without trace beats no report at all.
+    std::unique_lock<std::mutex> lock(gShimTraceMtx, std::try_to_lock);
+    if (!lock.owns_lock()) return "[BionicShim] trace ring busy\n";
+    joined.clear();
+    for (size_t i = 0; i < gShimTraceCount; ++i) {
+        const size_t idx =
+            (gShimTraceHead + kShimTraceRing - gShimTraceCount + i) % kShimTraceRing;
+        joined += gShimTraceRing[idx];
+        joined += ";\n";
+    }
+    return joined.c_str();
 }
 
 } // namespace kudroid

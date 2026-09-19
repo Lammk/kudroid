@@ -479,12 +479,14 @@ static AAssetImpl* open_asset(const char* filename) {
     // Rare loads worth proving the route for: manifests and audio assets
     // (FMOD clips). Archive-backed slices show their startOffset so a wrong
     // offset is visible in the log without a debugger.
+    // FSB5 buffers are also served through this path — without listing them
+    // an FMOD load routed here was invisible in the android log.
     static const char* kProbedExts[] = {
-        ".json", "aa/", ".bank", ".fsb", ".ogg", ".wav", ".mp3", ".bytes"};
+        ".json", "aa/", ".bank", ".fsb", ".ogg", ".wav", ".mp3", ".bytes", ".fsbpro"};
     for (const char* ext : kProbedExts) {
         if (rel.find(ext) == std::string::npos) continue;
         static std::atomic<int> s_hitLogged{0};
-        if (s_hitLogged.load() < 20) {
+        if (s_hitLogged.load() < 60) {
             ++s_hitLogged;
             char hit[512];
             std::snprintf(hit, sizeof(hit), "AAssetManager_open: '%s' len=%ld start=%ld'%s",
@@ -529,7 +531,7 @@ extern "C" int bionic_AAssetManager_openFd(void* /*manager*/, const char* filena
     if (outLength) *static_cast<off_t*>(outLength) = length;
     {
         static std::atomic<int> s_fdLogged{0};
-        if (s_fdLogged.load(std::memory_order_relaxed) < 20) {
+        if (s_fdLogged.load(std::memory_order_relaxed) < 60) {
             s_fdLogged.fetch_add(1, std::memory_order_relaxed);
             char line[512];
             std::snprintf(line, sizeof(line), "AAssetManager_openFd: '%s' fd=%d start=%ld len=%ld",
@@ -562,6 +564,14 @@ extern "C" int bionic_AAsset_openFileDescriptor(void* asset, void* outStart, voi
     ::lseek(fd, static_cast<off_t>(a->startOffset), SEEK_SET);
     if (outStart) *static_cast<off_t*>(outStart) = static_cast<off_t>(a->startOffset);
     if (outLength) *static_cast<off_t*>(outLength) = static_cast<off_t>(a->length);
+    static std::atomic<int> s_ofdLogged{0};
+    if (s_ofdLogged.load(std::memory_order_relaxed) < 60) {
+        s_ofdLogged.fetch_add(1, std::memory_order_relaxed);
+        char line[512];
+        std::snprintf(line, sizeof(line), "AAsset_openFileDescriptor: start=%ld len=%ld fd=%d",
+                      static_cast<long>(a->startOffset), static_cast<long>(a->length), fd);
+        kudroid_android_log_message(4, "AssetShim", line);
+    }
     return fd;
 }
 

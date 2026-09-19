@@ -2075,15 +2075,20 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                         o += static_cast<size_t>(
                             std::snprintf(hex + o, sizeof(hex) - o, "%02x", f[i]));
                     }
-                }
-                // Sample header (first numSamples u64s after the 60-byte header):
-                // bit 0 = next-chunk flag, bits 1-4 = frequency, bit 5 = channels-1,
-                // bits 6-33 = dataOffset/16, bits 34-63 = sample count. The chunk
-                // list follows; Vorbis clips must carry a VORBISDATA chunk, and a
-                // sample whose dataOffset pushes past dataSize is what turns
-                // "valid header, FMOD fails" into a parse-level fact.
-                char sampleDesc[128] = "n/a";
-                if (parsed && numSamples >= 1 && blobTotal + 28 <= n * size) {
+                }                // Sample header (first numSamples u64s after the 60-byte FSB5
+                // v1 header): bit 0 = next-chunk flag, bits 1-4 = frequency,
+                // bit 5 = channels-1, bits 6-33 = dataOffset/16, bits 34-63 =
+                // sample count (python-fsb5 __init__.py). The chunk list
+                // follows: u32 [next:1][size:24][type:7], VORBISDATA (11)
+                // carries crc32 + unknown. Verifying crc membership and
+                // chunk presence turns "valid header, FMOD fails" into a
+                // parse-level fact.
+                char sampleDesc[160] = "n/a";
+                // 76 bytes reach: 60-byte header + u64 sample field + chunk
+                // word + VORBISDATA crc. The old guard demanded blobTotal+28
+                // served bytes — a streaming reader never satisfies that, so
+                // every run logged sample=[n/a] no matter what it read.
+                if (parsed && numSamples >= 1 && n * size >= 76) {
                     const auto* sh = f + 60;
                     auto rd64 = [&](size_t o) {
                         uint64_t v = 0;
@@ -2091,22 +2096,28 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                         return v;
                     };
                     const uint64_t raw0 = rd64(0);
-                    const uint32_t freq = static_cast<uint32_t>((raw0 >> 1) & 0xF);
+                    const uint32_t freqIdx = static_cast<uint32_t>((raw0 >> 1) & 0xF);
+                    static const uint32_t kFreqTable[10] = {0,  8000,  11000, 11025, 16000,
+                                                            22050, 24000, 32000, 44100, 48000};
+                    const uint32_t freq = freqIdx < 10 ? kFreqTable[freqIdx] : 0;
                     const uint32_t channels = static_cast<uint32_t>(((raw0 >> 5) & 0x1)) + 1;
-                    const uint32_t dataOff = static_cast<uint32_t>((raw0 >> 6) & 0x3FFFFFFF) * 16;
+                    const uint32_t dataOff = static_cast<uint32_t>((raw0 >> 6) & 0xFFFFFFF) * 16;
                     const uint32_t nSamples = static_cast<uint32_t>((raw0 >> 34) & 0x3FFFFFFF);
-                    uint32_t chunkType = 0, chunkSize = 0;
+                    uint32_t chunkType = 0, chunkSize = 0, crc32 = 0;
                     if (shs >= 12) {
                         const uint32_t cw = rd64(8) & 0xFFFFFFFF;
                         chunkSize = (cw >> 1) & 0x7FFFFF;
-                        chunkType = (cw >> 24) & 0x7F;
+                        chunkType = (cw >> 25) & 0x7F;
+                    }
+                    if (chunkType == 11 && shs >= 16) {
+                        crc32 = static_cast<uint32_t>(rd64(12) & 0xFFFFFFFF);
                     }
                     std::snprintf(sampleDesc, sizeof(sampleDesc),
-                                  "freq=%u ch=%u dataOff=%u(%sdataSize) n=%u chunk1=%u/%u%s",
+                                  "freq=%u ch=%u dataOff=%u(%sdataSize) n=%u chunk1=%u/%u%s crc=%08X",
                                   freq, channels, dataOff,
-                                  dataOff < dataSize ? "<=" : ">>",
+                                  dataOff <= dataSize ? "<=" : ">>",
                                   nSamples, chunkType, chunkSize,
-                                  chunkType == 11 ? " VORBISDATA" : "");
+                                  chunkType == 11 ? " VORBISDATA" : "", crc32);
                     (void)0;
                 }
                 std::fprintf(stderr,
