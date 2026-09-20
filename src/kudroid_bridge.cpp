@@ -38,21 +38,46 @@
 
 extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
 
-extern "C" void kudroid_boot_mark(const char* phase) {
-    static std::atomic<long long> s_t0{0};
+// Boot-relative clock shared by the phase marks and by every trace line, so a
+// VFS/audio line lands on the same timeline as the [KuDroidBoot] marks around it.
+static std::atomic<long long> g_bootT0Ns{0};
+
+static long long boot_now_ms(void) {
     const long long ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                              std::chrono::steady_clock::now().time_since_epoch())
                              .count();
-    long long t0 = s_t0.load(std::memory_order_relaxed);
+    long long t0 = g_bootT0Ns.load(std::memory_order_relaxed);
     if (t0 == 0) {
-        s_t0.store(ns, std::memory_order_relaxed);
+        g_bootT0Ns.store(ns, std::memory_order_relaxed);
         t0 = ns;
     }
+    return (ns - t0) / 1000000;
+}
+
+extern "C" void kudroid_boot_mark(const char* phase) {
     char line[192];
     std::snprintf(line, sizeof(line), "[KuDroidBoot] t=%lldms %s",
-                  (ns - t0) / 1000000, phase ? phase : "?");
+                  boot_now_ms(), phase ? phase : "?");
     std::fprintf(stderr, "%s\n", line);
     kudroid_android_log_message(4, "KuDroidBoot", line);
+}
+
+// Prefix for one diagnostic line: boot-relative time plus the guest thread name.
+// bionic_prctl(PR_SET_NAME) forwards the guest's name to the host thread, so the
+// name is the guest's own ("UnityMain", "FMOD stream thread", "Job.Worker 3") and
+// a trace line can be attributed to the engine thread that produced it. Without
+// this the stderr stream has no time and no thread, and its lines cannot be put
+// next to a Unity log line at all.
+extern "C" const char* kudroid_trace_stamp(void) {
+    static thread_local char buf[80];
+    char name[64] = "?";
+#if defined(__APPLE__)
+    pthread_getname_np(pthread_self(), name, sizeof(name));
+#else
+    (void)pthread_getname_np(pthread_self(), name, sizeof(name));
+#endif
+    std::snprintf(buf, sizeof(buf), "[t=%lldms th=%s] ", boot_now_ms(), name);
+    return buf;
 }
 
 extern "C" void kudroid_ios_diagnostic_phase(const char* phase) {

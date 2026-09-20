@@ -203,6 +203,12 @@ void kudroid_set_native_lib_dir(const char* dir);
 /// stderr stream (loader, VFS, audio) to the phase that caused them.
 void kudroid_boot_mark(const char* phase);
 
+/// Prefix for one diagnostic trace line: boot-relative time and the guest thread
+/// name, e.g. "[t=12345ms th=UnityMain] ". Shares kudroid_boot_mark's clock origin,
+/// so VFS/audio lines can be placed between the phase marks. Returns a
+/// thread-local buffer that is valid until the next call on the same thread.
+const char* kudroid_trace_stamp(void);
+
 /// Absolute host path of the guest native library called `name`, for
 /// BaseDexClassLoader.findLibrary().
 ///

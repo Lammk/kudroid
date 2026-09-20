@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cstdarg>
 #include <cstdio>
 #include <map>
 #include <memory>
@@ -32,20 +33,39 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 
+#include "kudroid/kudroid_bridge.h"
+
 // Defined in SyscallShim.cpp. Declared here rather than through a header because the
 // remapper otherwise has no reason to depend on the syscall layer; it needs this only to
 // record what device figures the pseudo-files were written from.
 extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
 
+// One diagnostic line: boot-relative time and the guest thread name in front of the
+// caller's text, so the VFS/audio stream can be placed between the [KuDroidBoot] phase
+// marks and beside the Unity side of the log. A single fprintf keeps the line whole —
+// two writes would let another thread interleave into the middle of it. The formats
+// already end in '\n'.
+#if defined(__GNUC__)
+__attribute__((format(printf, 1, 2)))
+#endif
+static void ktraceLine(const char* fmt, ...) {
+    char body[2048];
+    va_list ap;
+    va_start(ap, fmt);
+    std::vsnprintf(body, sizeof(body), fmt, ap);
+    va_end(ap);
+    std::fprintf(stderr, "%s%s", kudroid_trace_stamp(), body);
+}
+
 namespace kudroid {
 namespace {
 
 void vfsLog(const std::string& message) {
-    std::fprintf(stderr, "[kudroid_vfs] %s\n", message.c_str());
+    ktraceLine("[kudroid_vfs] %s\n", message.c_str());
 }
 void vfsTrace(const std::string& message) {
 #ifdef KUDROID_DEBUG
-    std::fprintf(stderr, "[kudroid_vfs] %s\n", message.c_str());
+    ktraceLine("[kudroid_vfs] %s\n", message.c_str());
 #else
     (void)message;
 #endif
@@ -810,7 +830,7 @@ uint64_t zip_extract_entry(const std::string& archivePath, const std::string& en
     // this reader does not parse: say so loudly instead of walking garbage as
     // a central directory and 404ing every entry in it.
     if (total_entries == 0xFFFF || cd_offset == 0xFFFFFFFFu) {
-        std::fprintf(stderr, "[KuDroidVFS] zip64 archive not supported: %s\n",
+        ktraceLine("[KuDroidVFS] zip64 archive not supported: %s\n",
                      archivePath.c_str());
         return 0;
     }
@@ -1020,6 +1040,7 @@ uint64_t zip_extract_entry(const std::string& archivePath, const std::string& en
 struct ZipEntryMeta {
     uint64_t payloadOffset = 0;
     uint32_t uncompressedSize = 0;
+    uint32_t compressedSize = 0;
     uint32_t crc32 = 0;
     uint16_t compressionMethod = 0;
 };
@@ -1038,6 +1059,37 @@ std::string zip_index_key(std::string_view entry) {
     return key;
 }
 
+// Most-specific entry whose on-disk span contains `start`.
+//
+// The span is PHYSICAL (payloadOffset + compressedSize): a deflated entry
+// occupies csize bytes in the archive, and spanning it by usize swallowed the
+// entries that follow it — audio blobs were reported as global-metadata.dat
+// because that deflated entry's uncompressed size reached past them. Among
+// overlapping candidates (duplicate names in a repacked archive) the smallest
+// span is the one whose bytes the read actually lands in.
+static bool zip_entry_containing(const std::shared_ptr<const ZipArchiveIndex>& index,
+                                 long long start, std::string& outName,
+                                 ZipEntryMeta& outMeta) {
+    if (!index) return false;
+    bool found = false;
+    long long bestSpan = 0;
+    for (const auto& [name, meta] : index->entries) {
+        const long long span = static_cast<long long>(
+            meta.compressedSize != 0 ? meta.compressedSize : meta.uncompressedSize);
+        if (span <= 0) continue;
+        const long long eOff = static_cast<long long>(meta.payloadOffset);
+        if (start >= eOff && start < eOff + span) {
+            if (!found || span < bestSpan) {
+                found = true;
+                bestSpan = span;
+                outName = name;
+                outMeta = meta;
+            }
+        }
+    }
+    return found;
+}
+
 // Entry names are matched case-insensitively below, so names reaching the index are
 // lower-cased too; dirChildren keys are lower-cased prefixes, values keep original case.
 ZipArchiveIndex build_zip_index(std::FILE* f) {
@@ -1053,7 +1105,7 @@ ZipArchiveIndex build_zip_index(std::FILE* f) {
     const uint16_t total_entries = zip_read16(e, 10);
     const uint32_t cd_offset = zip_read32(e, 16);
     if (total_entries == 0xFFFF || cd_offset == 0xFFFFFFFFu) {
-        std::fprintf(stderr, "[KuDroidVFS] zip64 archive not supported (index build)\n");
+        ktraceLine("[KuDroidVFS] zip64 archive not supported (index build)\n");
         return index;
     }
     index.entries.reserve(total_entries * 2 + 1);
@@ -1073,6 +1125,7 @@ ZipArchiveIndex build_zip_index(std::FILE* f) {
         const bool is_dir = !name.empty() && name.back() == '/';
         ZipEntryMeta meta;
         meta.compressionMethod = zip_read16(h, 10);
+        meta.compressedSize = zip_read32(h, 20);
         meta.uncompressedSize = zip_read32(h, 24);
         meta.crc32 = zip_read32(h, 16);
         const uint32_t local_off = zip_read32(h, 42);
@@ -1312,7 +1365,7 @@ std::string VFSPathRemapper::resolveObbFallback(const std::string& mapped) const
         static std::atomic<int> s_obbFb{0};
         if (s_obbFb.load() < 10) {
             ++s_obbFb;
-            std::fprintf(stderr, "[KuDroidVFS] obb fallback: %s -> %s\n",
+            ktraceLine("[KuDroidVFS] obb fallback: %s -> %s\n",
                          mapped.c_str(), found.c_str());
         }
         vfsTrace("OBB fallback: " + mapped + " -> " + found);
@@ -1376,7 +1429,7 @@ std::string VFSPathRemapper::remap(const char* originalPath) const {
                             static std::atomic<int> s_jarZip{0};
                             if (s_jarZip.load() < 20) {
                                 ++s_jarZip;
-                                std::fprintf(stderr,
+                                ktraceLine(
                                              "[KuDroidVFS] jar served from archive: %s -> %s\n",
                                              originalPath, served.c_str());
                             }
@@ -1390,7 +1443,7 @@ std::string VFSPathRemapper::remap(const char* originalPath) const {
                     static std::atomic<int> s_jarMiss{0};
                     if (s_jarMiss.load() < 10) {
                         ++s_jarMiss;
-                        std::fprintf(stderr,
+                        ktraceLine(
                                      "[KuDroidVFS] jar miss: %s (tried %s)\n",
                                      originalPath, candidate.c_str());
                     }
@@ -1534,7 +1587,7 @@ int vfs_open(const char* path, int flags, mode_t mode) {
          std::strstr(path, ".json") != nullptr || std::strstr(path, "catalog") != nullptr ||
          std::strstr(path, "/files/") != nullptr || std::strstr(path, "/sdcard/") != nullptr);
     if (traceOpen) {
-        std::fprintf(stderr, "[KuDroidVFS] open(%s, flags=0x%x)\n", path, flags);
+        ktraceLine("[KuDroidVFS] open(%s, flags=0x%x)\n", path, flags);
     }
     if (path && (std::strcmp(path, "/dev/binder") == 0 || 
                  std::strcmp(path, "/dev/mali0") == 0 ||
@@ -1595,7 +1648,7 @@ int vfs_open(const char* path, int flags, mode_t mode) {
                                               : ::open(mapped.c_str(), host_flags);
     vfsTrace("open(" + mapped + ") -> " + std::to_string(result));
     if (traceOpen) {
-        std::fprintf(stderr, "[KuDroidVFS] open -> %d (%s)\n", result,
+        ktraceLine("[KuDroidVFS] open -> %d (%s)\n", result,
                      result >= 0 ? "OK" : std::strerror(errno));
     }
     return result;
@@ -1641,7 +1694,7 @@ FILE* vfs_fopen(const char* path, const char* mode) {
         const int logged = s_fopenLogged.load(std::memory_order_relaxed);
         if (logged < 40 || (seen - logged) >= 256) {
             s_fopenLogged.store(seen, std::memory_order_relaxed);
-            std::fprintf(stderr, "[KuDroidVFS] fopen(%s) -> %s (n=%d)\n", path,
+            ktraceLine("[KuDroidVFS] fopen(%s) -> %s (n=%d)\n", path,
                          result ? "OK" : std::strerror(errno), seen);
         }
     }
@@ -1661,7 +1714,7 @@ FILE* vfs_fopen(const char* path, const char* mode) {
         static std::atomic<int> s_miss{0};
         if (s_miss.load() < 30) {
             ++s_miss;
-            std::fprintf(stderr, "[KuDroidVFS] open miss: ~%s\n",
+            ktraceLine("[KuDroidVFS] open miss: ~%s\n",
                          mapped.c_str() +
                              VFSPathRemapper::getInstance().androidRoot().size());
         }
@@ -1680,6 +1733,8 @@ FILE* vfs_fopen64(const char* path, const char* mode) { return vfs_fopen(path, m
 namespace {
 constexpr int kTrackedStreams = 32;
 std::atomic<uintptr_t> g_apkStreams[kTrackedStreams];
+std::atomic<uint64_t> g_apkStreamOps[kTrackedStreams] = {};
+std::atomic<int> g_apkStreamShortLogged[kTrackedStreams] = {};
 std::mutex g_apkStreamsMtx;
 
 }  // namespace
@@ -1691,9 +1746,17 @@ static void track_apk_stream(FILE* f) {
         uintptr_t empty = 0;
         if (g_apkStreams[i].compare_exchange_strong(empty,
                                                     reinterpret_cast<uintptr_t>(f))) {
+            g_apkStreamOps[i].store(0, std::memory_order_relaxed);
+            g_apkStreamShortLogged[i].store(0, std::memory_order_relaxed);
+            // Lifecycle line: one apk stream is one consumer session (a clip
+            // load, a bundle stream). open/close paired with the per-op trace
+            // below names which session did what, and a full table explains
+            // suddenly-missing IO visibility.
+            ktraceLine("[KuDroidApkS] sid=%d open\n", i);
             return;
         }
     }
+    ktraceLine("[KuDroidApkS] stream table full — apk stream untracked\n");
 }
 
 static bool is_apk_stream(FILE* f) {
@@ -1702,6 +1765,14 @@ static bool is_apk_stream(FILE* f) {
         if (g_apkStreams[i].load(std::memory_order_relaxed) == p) return true;
     }
     return false;
+}
+
+static int apk_stream_id(FILE* f) {
+    const auto p = reinterpret_cast<uintptr_t>(f);
+    for (int i = 0; i < kTrackedStreams; ++i) {
+        if (g_apkStreams[i].load(std::memory_order_relaxed) == p) return i;
+    }
+    return -1;
 }
 
 // Read volume per FILE path: bulk flow through fread (Unity's main read path)
@@ -1779,7 +1850,7 @@ void fsb_windows_report_locked(const std::string& path, bool enforceCap) {
     for (size_t i = 0; i < list.size();) {
         const FsbWindow& w = list[i];
         if (w.blocks * 2048 >= w.expected) {
-            std::fprintf(stderr,
+            ktraceLine(
                          "[KuDroidFmod] blob off=%ld size=%llu covered=%llu COMPLETE\n",
                          w.start, static_cast<unsigned long long>(w.expected),
                          static_cast<unsigned long long>(w.expected));
@@ -1791,7 +1862,7 @@ void fsb_windows_report_locked(const std::string& path, bool enforceCap) {
     while (enforceCap && list.size() >= 16) {
         const FsbWindow& w = list.front();
         const uint64_t covered = w.blocks * 2048;
-        std::fprintf(stderr, "[KuDroidFmod] blob off=%ld size=%llu covered=%llu SHORT\n",
+        ktraceLine("[KuDroidFmod] blob off=%ld size=%llu covered=%llu SHORT\n",
                      w.start, static_cast<unsigned long long>(w.expected),
                      static_cast<unsigned long long>(
                          covered > w.expected ? w.expected : covered));
@@ -1821,7 +1892,7 @@ void fread_vol_report_locked() {
                 "=" + std::to_string(top[i].second.first) + "B/" +
                 std::to_string(top[i].second.second) + "ops";
     }
-    std::fprintf(stderr, "[KuDroidIO] %s\n", line.c_str());
+    ktraceLine("[KuDroidIO] %s\n", line.c_str());
 }
 
 struct VolBatch {
@@ -1860,8 +1931,49 @@ void fread_vol_flush() {
 }  // namespace
 
 size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
+    const bool apk = is_apk_stream(stream);
+    const std::chrono::steady_clock::time_point t0 =
+        apk ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     const size_t n = std::fread(buf, size, count, stream);
-    if (n > 0 && is_apk_stream(stream)) {
+    if (apk) {
+        const long long tookMs =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - t0)
+                .count();
+        const int sid = apk_stream_id(stream);
+        uint64_t op = 0;
+        if (sid >= 0) op = g_apkStreamOps[sid].fetch_add(1, std::memory_order_relaxed) + 1;
+        // First ops of every stream: a clip load / bundle stream shows its
+        // whole IO shape here (open -> seek -> header read -> data reads).
+        // Per-volume counters and 16MB sampling cannot see this pattern.
+        if (sid >= 0 && op <= 16) {
+            ktraceLine(
+                         "[KuDroidApkS] sid=%d op=%llu fread want=%zu got=%zu pos=%ld\n",
+                         sid, static_cast<unsigned long long>(op), size * count, n * size,
+                         std::ftell(stream));
+        }
+        // Short read: fewer elements than asked. On the archive stream that is
+        // a truncated slice — the exact geometry that turns a valid FSB5 into
+        // FMOD_ERR_FILE_BAD. Rare and decisive, so logged (capped per stream).
+        if (n < count && sid >= 0 &&
+            g_apkStreamShortLogged[sid].fetch_add(1, std::memory_order_relaxed) < 6) {
+            ktraceLine(
+                         "[KuDroidApkS] sid=%d SHORT want=%zu got=%zu pos=%ld eof=%d errno=%d\n",
+                         sid, size * count, n * size, std::ftell(stream),
+                         std::feof(stream) ? 1 : 0, errno);
+        }
+        // Slow read: the 90 s scene-load stall surfaced only as a gap between
+        // volume milestones; naming the op that ate the wall-clock removes the
+        // guesswork (locked VFS work, host FS pressure, guest-side spin).
+        static std::atomic<int> s_slowLogged{0};
+        if (tookMs >= 50 && s_slowLogged.load(std::memory_order_relaxed) < 24) {
+            s_slowLogged.fetch_add(1, std::memory_order_relaxed);
+            ktraceLine(
+                         "[KuDroidApkS] sid=%d SLOW %lldms want=%zu got=%zu pos=%ld\n",
+                         sid, tookMs, size * count, n * size, std::ftell(stream));
+        }
+    }
+    if (n > 0 && apk) {
         static std::atomic<int> s_logged{0};
         static std::atomic<unsigned long long> s_bytes{0};
         static const auto s_start = std::chrono::steady_clock::now();
@@ -1876,9 +1988,9 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
         // later content reads (catalog, bundles) stay visible past the sniff.
         if (s_logged.load() < 25) {
             ++s_logged;
-            std::fprintf(stderr, "[KuDroidApkF] fread bytes=%zu\n", n * size);
+            ktraceLine("[KuDroidApkF] fread bytes=%zu\n", n * size);
         } else if (total / (1024 * 1024) != (total - n * size) / (1024 * 1024)) {
-            std::fprintf(stderr, "[KuDroidApkF] fread total=%lluMB t=%llums\n",
+            ktraceLine("[KuDroidApkF] fread total=%lluMB t=%llums\n",
                          total / (1024 * 1024), ms);
         }
         // Magic sniff: FMOD rejects every bank it is handed ("Error loading
@@ -1914,27 +2026,15 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                 if (pit != g_freadPaths.end()) {
                     const auto index = get_or_build_zip_index(pit->second);
                     if (index && start >= 0) {
-                        for (const auto& [name, meta] : index->entries) {
-                            const long long eOff =
-                                static_cast<long long>(meta.payloadOffset);
-                            // Bounded on both ends: a payloadOffset alone does
-                            // not imply containment — without the upper bound
-                            // every audio blob attributed to whichever entry
-                            // sorted just below it (observed: FSB5 blobs
-                            // reported as runtimeinitializeonloads.json and
-                            // global-metadata.dat).
-                            if (start >= eOff &&
-                                start < eOff +
-                                            static_cast<long long>(
-                                                meta.uncompressedSize)) {
-                                entryName = name;
-                                break;
-                            }
+                        std::string name;
+                        ZipEntryMeta meta;
+                        if (zip_entry_containing(index, start, name, meta)) {
+                            entryName = name;
                         }
                     }
                 }
             }
-            std::fprintf(stderr,
+            ktraceLine(
                          "[KuDroidApkF] magic off=%ld n=%zu %02x%02x%02x%02x '%c%c%c%c'%s%s\n",
                          start, n * size, b[0], b[1], b[2], b[3],
                          b[0] >= 32 && b[0] < 127 ? b[0] : '.',
@@ -1964,9 +2064,9 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                         static std::atomic<int> s_inblobLogged{0};
                         if (s_inblobLogged.load(std::memory_order_relaxed) < 60) {
                             s_inblobLogged.fetch_add(1, std::memory_order_relaxed);
-                            std::fprintf(stderr,
-                                         "[KuDroidFmod] in-blob read off=%ld size=%zu pos=%ld blob=[%ld+%llu]\n",
-                                         start, n * size, pos, w.start,
+                            ktraceLine(
+                                         "[KuDroidFmod] in-blob read sid=%d off=%ld size=%zu pos=%ld blob=[%ld+%llu]\n",
+                                         apk_stream_id(stream), start, n * size, pos, w.start,
                                          static_cast<unsigned long long>(w.expected));
                         }
                         fsb_window_cover(w, start, pos);
@@ -1993,6 +2093,7 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                 std::string entry;
                 uint16_t method = 0xFFFF;
                 uint32_t usize = 0;
+                const int sid = apk_stream_id(stream);
                 // Distance from the blob to its ZIP entry's bounds. A blob that
                 // runs past the entry end is a slice FMOD can never read whole,
                 // which is the one geometry that turns a valid FSB5 into
@@ -2007,24 +2108,14 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                     }
                     if (!archivePath.empty()) {
                         const auto index = get_or_build_zip_index(archivePath);
-                        if (index) {
-                            for (const auto& [name, meta] : index->entries) {
-                                const long long eOff =
-                                    static_cast<long long>(meta.payloadOffset);
-                                // Both-ends containment: same mis-attribution
-                                // as the magic sniffer above.
-                                if (start >= eOff &&
-                                    start < eOff +
-                                                static_cast<long long>(
-                                                    meta.uncompressedSize)) {
-                                    entry = name;
-                                    method = meta.compressionMethod;
-                                    usize = meta.uncompressedSize;
-                                    entryOff = static_cast<long long>(start) -
-                                               static_cast<long long>(meta.payloadOffset);
-                                    break;
-                                }
-                            }
+                        std::string name;
+                        ZipEntryMeta meta;
+                        if (zip_entry_containing(index, start, name, meta)) {
+                            entry = name;
+                            method = meta.compressionMethod;
+                            usize = meta.uncompressedSize;
+                            entryOff = static_cast<long long>(start) -
+                                       static_cast<long long>(meta.payloadOffset);
                         }
                     }
                 }
@@ -2134,13 +2225,13 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                                   chunkType == 11 ? " VORBISDATA" : "", crc32);
                     (void)0;
                 }
-                std::fprintf(stderr,
-                             "[KuDroidFmod] served FSB5 at apk_off=%ld size=%zu "
+                ktraceLine(
+                             "[KuDroidFmod] served FSB5 sid=%d at apk_off=%ld size=%zu "
                              "method=%u usize=%u entryOff=%lld entryRem=%lld "
                              "ver=%u num=%u shs=%u nts=%u "
                              "dataSize=%u mode=%u blobTotal=%llu next=[%s] hex=%s "
                              "sample=[%s] entry=%s\n",
-                             start, n * size, method, usize, entryOff,
+                             sid, start, n * size, method, usize, entryOff,
                              entryOff >= 0
                                  ? static_cast<long long>(usize) - entryOff -
                                        static_cast<long long>(blobTotal)
@@ -2207,7 +2298,7 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
             // req= names what the reader ASKED for, not just what arrived: a blob
             // reported SHORT is either a reader that stops asking (req is one small
             // chunk) or a stream that ends early (req is the whole blob, n is short).
-            std::fprintf(stderr,
+            ktraceLine(
                          "[KuDroidFmod] post-FSB5 read req=%zu x %zu -> %zu bytes pos=%ld\n",
                          size, count, n, std::ftell(stream));
         }
@@ -2234,7 +2325,7 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
         static std::atomic<int> s_big{0};
         if (s_big.load() < 15) {
             ++s_big;
-            std::fprintf(stderr, "[KuDroidIO] big fread bytes=%zu\n", n * size);
+            ktraceLine("[KuDroidIO] big fread bytes=%zu\n", n * size);
         }
     }
     return n;
@@ -2251,7 +2342,11 @@ int vfs_fclose(FILE* stream) {
         for (int i = 0; i < kTrackedStreams; ++i) {
             if (g_apkStreams[i].load(std::memory_order_relaxed) ==
                 reinterpret_cast<uintptr_t>(stream)) {
+                ktraceLine("[KuDroidApkS] sid=%d close after %llu ops\n", i,
+                             static_cast<unsigned long long>(
+                                 g_apkStreamOps[i].load(std::memory_order_relaxed)));
                 g_apkStreams[i].store(0, std::memory_order_relaxed);
+                break;
             }
         }
         std::lock_guard<std::mutex> vlock(g_freadVolMtx);
@@ -2264,6 +2359,18 @@ int vfs_fseek(FILE* stream, long offset, int whence) {
     const long before = std::ftell(stream);
     const int rc = std::fseek(stream, offset, whence);
     if (rc == 0 && is_apk_stream(stream)) {
+        // Per-stream op trace (shared counter with fread): the first ops of a
+        // stream show the seek pattern that headers and clip data produce.
+        const int sid = apk_stream_id(stream);
+        if (sid >= 0) {
+            const uint64_t op = g_apkStreamOps[sid].fetch_add(1, std::memory_order_relaxed) + 1;
+            if (op <= 16) {
+                ktraceLine(
+                             "[KuDroidApkS] sid=%d op=%llu seek %ld whence=%d -> %ld\n",
+                             sid, static_cast<unsigned long long>(op), offset, whence,
+                             std::ftell(stream));
+            }
+        }
         // Seeks are how FMOD walks its FSB (header read, then jump to the Vorbis
         // setup/data). A seek that lands outside the blob it was reading is the
         // exact moment the parse goes wrong, so position, target, and result are
@@ -2272,7 +2379,7 @@ int vfs_fseek(FILE* stream, long offset, int whence) {
         static std::atomic<int> s_logged{0};
         if (s_logged.load() < 40) {
             ++s_logged;
-            std::fprintf(stderr, "[KuDroidApkF] fseek offset=%ld whence=%d\n", offset,
+            ktraceLine("[KuDroidApkF] fseek offset=%ld whence=%d\n", offset,
                          whence);
         }
         {
@@ -2288,9 +2395,9 @@ int vfs_fseek(FILE* stream, long offset, int whence) {
                             static std::atomic<int> s_inblobSeek{0};
                             if (s_inblobSeek.load(std::memory_order_relaxed) < 60) {
                                 s_inblobSeek.fetch_add(1, std::memory_order_relaxed);
-                                std::fprintf(stderr,
-                                             "[KuDroidFmod] in-blob seek %ld -> %ld whence=%d blob=[%ld+%llu]\n",
-                                             before, offset, whence, w.start,
+                                ktraceLine(
+                                             "[KuDroidFmod] in-blob seek sid=%d %ld -> %ld whence=%d blob=[%ld+%llu]\n",
+                                             sid, before, offset, whence, w.start,
                                              static_cast<unsigned long long>(w.expected));
                             }
                             break;
@@ -2304,7 +2411,7 @@ int vfs_fseek(FILE* stream, long offset, int whence) {
         static std::atomic<int> s_endLogged{0};
         if (whence == SEEK_END && s_endLogged.load() < 16) {
             ++s_endLogged;
-            std::fprintf(stderr, "[KuDroidApkF] fseek END on apk stream -> %ld\n",
+            ktraceLine("[KuDroidApkF] fseek END on apk stream -> %ld\n",
                          std::ftell(stream));
         }
     }
