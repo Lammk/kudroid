@@ -26,6 +26,28 @@ namespace kudroid {
 // Defined in SyscallShim.cpp. Declared here rather than pulled in through a header because
 // the asset shim otherwise has no reason to depend on the syscall layer.
 extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
+// Defined in elf_loader.cpp; declared here for the caller tag on the asset trace.
+extern "C" bool kudroid_lookup_guest_module(void* addr, char* out, std::size_t outSize);
+
+// " from=libunity.so+0x1a2b40" for the guest frame that asked for this asset.
+//
+// AAsset_openFileDescriptor and AAssetManager_openFd are bound straight to these
+// functions, so __builtin_return_address(0) inside them is the guest's return address —
+// the reader, not just the read. Unity's own asset manager and FMOD asking for a bank
+// slice look identical otherwise.
+static const char* asset_caller_text(const void* ra) {
+    if (ra == nullptr) return "";
+    static thread_local char text[192];
+    char full[384];
+    full[0] = '\0';
+    if (kudroid_lookup_guest_module(const_cast<void*>(ra), full, sizeof(full))) {
+        const char* slash = std::strrchr(full, '/');
+        std::snprintf(text, sizeof(text), " from=%s", slash != nullptr ? slash + 1 : full);
+    } else {
+        std::snprintf(text, sizeof(text), " from=host:%p", ra);
+    }
+    return text;
+}
 
 namespace {
 
@@ -534,9 +556,11 @@ extern "C" int bionic_AAssetManager_openFd(void* /*manager*/, const char* filena
         if (s_fdLogged.load(std::memory_order_relaxed) < 60) {
             s_fdLogged.fetch_add(1, std::memory_order_relaxed);
             char line[512];
-            std::snprintf(line, sizeof(line), "AAssetManager_openFd: '%s' fd=%d start=%ld len=%ld",
+            std::snprintf(line, sizeof(line),
+                          "AAssetManager_openFd: '%s' fd=%d start=%ld len=%ld%s",
                           filename != nullptr ? filename : "?", fd,
-                          static_cast<long>(start), static_cast<long>(length));
+                          static_cast<long>(start), static_cast<long>(length),
+                          asset_caller_text(__builtin_return_address(0)));
             trace_shim(line);
             kudroid_android_log_message(4, "AssetShim", line);
         }
@@ -568,8 +592,10 @@ extern "C" int bionic_AAsset_openFileDescriptor(void* asset, void* outStart, voi
     if (s_ofdLogged.load(std::memory_order_relaxed) < 60) {
         s_ofdLogged.fetch_add(1, std::memory_order_relaxed);
         char line[512];
-        std::snprintf(line, sizeof(line), "AAsset_openFileDescriptor: start=%ld len=%ld fd=%d",
-                      static_cast<long>(a->startOffset), static_cast<long>(a->length), fd);
+        std::snprintf(line, sizeof(line),
+                      "AAsset_openFileDescriptor: start=%ld len=%ld fd=%d%s",
+                      static_cast<long>(a->startOffset), static_cast<long>(a->length), fd,
+                      asset_caller_text(__builtin_return_address(0)));
         kudroid_android_log_message(4, "AssetShim", line);
     }
     return fd;
@@ -817,9 +843,10 @@ extern "C" int kudroid_asset_resolve_bytes(const char* filename, char** outPath,
             s_logged.store(seen, std::memory_order_relaxed);
             char line[640];
             std::snprintf(line, sizeof(line),
-                          "nativeResolveAsset: %s -> %s start=%lld len=%lld",
+                          "nativeResolveAsset: %s -> %s start=%lld len=%lld%s",
                           filename != nullptr ? filename : "(null)", path.c_str(),
-                          static_cast<long long>(start), static_cast<long long>(length));
+                          static_cast<long long>(start), static_cast<long long>(length),
+                          asset_caller_text(__builtin_return_address(0)));
             kudroid_android_log_message(4, "AssetShim", line);
         }
     }

@@ -57,6 +57,31 @@ static void ktraceLine(const char* fmt, ...) {
     std::fprintf(stderr, "%s%s", kudroid_trace_stamp(), body);
 }
 
+// Declared in elf_loader.cpp; spelled C so the name cannot be captured by a namespace.
+extern "C" bool kudroid_lookup_guest_module(void* addr, char* out, std::size_t outSize);
+
+// " from=libunity.so+0x1a2b40" for the guest frame that called into the file layer.
+//
+// The guest's fopen/fread/open/lseek are bound straight to the functions below (see the
+// symbol table in SyscallShim), so __builtin_return_address(0) *there* is the guest's own
+// return address — the code that asked for the file. Without it a file trace says what was
+// read but never who read it, and for audio that is the whole question: Unity's resource
+// reader and FMOD's own loader look byte-for-byte identical in the trace. The loader
+// already knows the module ranges, so this is a lookup, not a per-app guess.
+static const char* trace_caller_text(const void* ra) {
+    if (ra == nullptr) return "";
+    static thread_local char text[192];
+    char full[384];
+    full[0] = '\0';
+    if (kudroid_lookup_guest_module(const_cast<void*>(ra), full, sizeof(full))) {
+        const char* slash = std::strrchr(full, '/');
+        std::snprintf(text, sizeof(text), " from=%s", slash != nullptr ? slash + 1 : full);
+    } else {
+        std::snprintf(text, sizeof(text), " from=host:%p", ra);
+    }
+    return text;
+}
+
 namespace kudroid {
 namespace {
 
@@ -1586,8 +1611,9 @@ int vfs_open(const char* path, int flags, mode_t mode) {
          std::strstr(path, ".webm") != nullptr || std::strstr(path, "jar:") != nullptr ||
          std::strstr(path, ".json") != nullptr || std::strstr(path, "catalog") != nullptr ||
          std::strstr(path, "/files/") != nullptr || std::strstr(path, "/sdcard/") != nullptr);
+    const void* const caller = __builtin_return_address(0);
     if (traceOpen) {
-        ktraceLine("[KuDroidVFS] open(%s, flags=0x%x)\n", path, flags);
+        ktraceLine("[KuDroidVFS] open(%s, flags=0x%x)%s\n", path, flags, trace_caller_text(caller));
     }
     if (path && (std::strcmp(path, "/dev/binder") == 0 || 
                  std::strcmp(path, "/dev/mali0") == 0 ||
@@ -1648,8 +1674,8 @@ int vfs_open(const char* path, int flags, mode_t mode) {
                                               : ::open(mapped.c_str(), host_flags);
     vfsTrace("open(" + mapped + ") -> " + std::to_string(result));
     if (traceOpen) {
-        ktraceLine("[KuDroidVFS] open -> %d (%s)\n", result,
-                     result >= 0 ? "OK" : std::strerror(errno));
+        ktraceLine("[KuDroidVFS] open -> %d (%s)%s\n", result,
+                     result >= 0 ? "OK" : std::strerror(errno), trace_caller_text(caller));
     }
     return result;
 }
@@ -1662,6 +1688,7 @@ extern std::mutex g_freadVolMtx;
 extern std::map<FILE*, std::string> g_freadPaths;
 
 FILE* vfs_fopen(const char* path, const char* mode) {
+    const void* const caller = __builtin_return_address(0);
     const std::string mapped = VFSPathRemapper::getInstance().remap(path);
     if (mode && (std::strchr(mode, 'w') || std::strchr(mode, 'a'))) {
         std::error_code error;
@@ -1694,8 +1721,9 @@ FILE* vfs_fopen(const char* path, const char* mode) {
         const int logged = s_fopenLogged.load(std::memory_order_relaxed);
         if (logged < 40 || (seen - logged) >= 256) {
             s_fopenLogged.store(seen, std::memory_order_relaxed);
-            ktraceLine("[KuDroidVFS] fopen(%s) -> %s (n=%d)\n", path,
-                         result ? "OK" : std::strerror(errno), seen);
+            ktraceLine("[KuDroidVFS] fopen(%s) -> %s (n=%d)%s\n", path,
+                         result ? "OK" : std::strerror(errno), seen,
+                         trace_caller_text(caller));
         }
     }
     if (result != nullptr && path != nullptr) {
@@ -1714,9 +1742,10 @@ FILE* vfs_fopen(const char* path, const char* mode) {
         static std::atomic<int> s_miss{0};
         if (s_miss.load() < 30) {
             ++s_miss;
-            ktraceLine("[KuDroidVFS] open miss: ~%s\n",
+            ktraceLine("[KuDroidVFS] open miss: ~%s%s\n",
                          mapped.c_str() +
-                             VFSPathRemapper::getInstance().androidRoot().size());
+                             VFSPathRemapper::getInstance().androidRoot().size(),
+                         trace_caller_text(caller));
         }
     }
     return result;
@@ -1942,6 +1971,7 @@ void fread_vol_flush() {
 }  // namespace
 
 size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
+    const void* const caller = __builtin_return_address(0);
     const bool apk = is_apk_stream(stream);
     const std::chrono::steady_clock::time_point t0 =
         apk ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
@@ -2077,9 +2107,11 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                         if (s_inblobLogged.load(std::memory_order_relaxed) < 60) {
                             s_inblobLogged.fetch_add(1, std::memory_order_relaxed);
                             ktraceLine(
-                                         "[KuDroidFmod] in-blob read sid=%d off=%ld size=%zu pos=%ld blob=[%ld+%llu]\n",
+                                         "[KuDroidFmod] in-blob read sid=%d off=%ld size=%zu pos=%ld "
+                                         "blob=[%ld+%llu]%s\n",
                                          apk_stream_id(stream), start, n * size, pos, w.start,
-                                         static_cast<unsigned long long>(w.expected));
+                                         static_cast<unsigned long long>(w.expected),
+                                         trace_caller_text(caller));
                         }
                         fsb_window_cover(w, start, pos);
                     }
@@ -2242,7 +2274,7 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                              "method=%u usize=%u entryOff=%lld entryRem=%lld "
                              "ver=%u num=%u shs=%u nts=%u "
                              "dataSize=%u mode=%u blobTotal=%llu next=[%s] hex=%s "
-                             "sample=[%s] entry=%s\n",
+                             "sample=[%s] entry=%s%s\n",
                              sid, start, n * size, method, usize, entryOff,
                              entryOff >= 0
                                  ? static_cast<long long>(usize) - entryOff -
@@ -2250,7 +2282,8 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                                  : -1,
                              ver, numSamples, shs, nts,
                              dataSize, mode, static_cast<unsigned long long>(blobTotal),
-                             nextDesc, hex, sampleDesc, entry.empty() ? "(none)" : entry.c_str());
+                             nextDesc, hex, sampleDesc, entry.empty() ? "(none)" : entry.c_str(),
+                             trace_caller_text(caller));
                 // Decisive follow-up: when FMOD accepts the bank it streams
                 // through THIS handle; when it rejects the slice it reads
                 // little or nothing on it. Keyed by handle so unrelated
@@ -2311,8 +2344,8 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
             // reported SHORT is either a reader that stops asking (req is one small
             // chunk) or a stream that ends early (req is the whole blob, n is short).
             ktraceLine(
-                         "[KuDroidFmod] post-FSB5 read req=%zu x %zu -> %zu bytes pos=%ld\n",
-                         size, count, n, std::ftell(stream));
+                         "[KuDroidFmod] post-FSB5 read req=%zu x %zu -> %zu bytes pos=%ld%s\n",
+                         size, count, n, std::ftell(stream), trace_caller_text(caller));
         }
     }
     if (n > 0) {
@@ -2370,6 +2403,7 @@ int vfs_fclose(FILE* stream) {
 }
 
 int vfs_fseek(FILE* stream, long offset, int whence) {
+    const void* const caller = __builtin_return_address(0);
     const long before = std::ftell(stream);
     const int rc = std::fseek(stream, offset, whence);
     if (rc == 0 && is_apk_stream(stream)) {
@@ -2411,9 +2445,11 @@ int vfs_fseek(FILE* stream, long offset, int whence) {
                             if (s_inblobSeek.load(std::memory_order_relaxed) < 60) {
                                 s_inblobSeek.fetch_add(1, std::memory_order_relaxed);
                                 ktraceLine(
-                                             "[KuDroidFmod] in-blob seek sid=%d %ld -> %ld whence=%d blob=[%ld+%llu]\n",
+                                             "[KuDroidFmod] in-blob seek sid=%d %ld -> %ld whence=%d "
+                                             "blob=[%ld+%llu]%s\n",
                                              sid, before, offset, whence, w.start,
-                                             static_cast<unsigned long long>(w.expected));
+                                             static_cast<unsigned long long>(w.expected),
+                                             trace_caller_text(caller));
                             }
                             break;
                         }
