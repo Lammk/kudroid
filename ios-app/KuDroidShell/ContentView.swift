@@ -2339,6 +2339,11 @@ public func kudroid_trigger_haptic(intensity: Int32) {
 
 @_cdecl("kudroid_notify_orientation_change")
 public func kudroid_notify_orientation_change(orientation: Int32) {
+    // After a fatal guest fault the teardown is discarding the session. Rotating the
+    // window resizes the guest's surface, and the dead engine answers that by trying
+    // to pause — which is the freeze the user sees instead of the app closing. The
+    // orientation is restored by the next session, which requests its own.
+    if kudroid_has_crashed() != 0 { return }
     DispatchQueue.main.async {
         if #available(iOS 16.0, *) {
             NativeMetalViewController.sCurrentRunnerVC?.setNeedsUpdateOfSupportedInterfaceOrientations()

@@ -1,6 +1,7 @@
 #include "kudroid/platform/InputShim.h"
 #include "kudroid/platform/NativeTouchGate.h"
 #include <cstdint>
+#include <cstdio>
 #include <new>
 #include <unistd.h>
 #include <fcntl.h>
@@ -85,6 +86,68 @@ static int pointerIndexInTable(int32_t id) {
     }
     return 0;
 }
+
+// Touch cost telemetry.
+//
+// Only two places can turn a touch into cost for this process: the host-side
+// inject (this thread, i.e. UIKit's) and the Java hand-off (the guest UI thread,
+// which is where an interpreted dispatch runs). The log said "touch is slow" for
+// dozens of commits without a number behind it; this prints the two numbers, one
+// line per second of touch activity, bounded so a session stays readable.
+extern "C" const char* kudroid_trace_stamp(void);
+
+namespace {
+std::atomic<uint64_t> g_touchCount{0};
+std::atomic<uint64_t> g_touchInjectNs{0};
+std::atomic<uint64_t> g_touchInjectMaxNs{0};
+std::atomic<uint64_t> g_touchForwardNs{0};
+std::atomic<uint64_t> g_touchJavaForwarded{0};
+std::atomic<long long> g_touchWindowNs{0};
+std::atomic<int> g_touchReported{0};
+
+inline uint64_t touch_now_ns() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+// One call per injected event: inject_ns is the whole ingress, forward_ns the Java
+// hand-off inside it (zero when this event took the native AInputQueue path).
+void touch_telemetry(uint64_t inject_ns, uint64_t forward_ns) {
+    const bool forwarded = forward_ns != 0;
+    g_touchCount.fetch_add(1, std::memory_order_relaxed);
+    g_touchInjectNs.fetch_add(inject_ns, std::memory_order_relaxed);
+    if (forwarded) g_touchForwardNs.fetch_add(forward_ns, std::memory_order_relaxed);
+    if (forwarded) g_touchJavaForwarded.fetch_add(1, std::memory_order_relaxed);
+    uint64_t seen_max = g_touchInjectMaxNs.load(std::memory_order_relaxed);
+    while (inject_ns > seen_max &&
+           !g_touchInjectMaxNs.compare_exchange_weak(seen_max, inject_ns,
+                                                     std::memory_order_relaxed)) {
+    }
+    const long long now = static_cast<long long>(touch_now_ns());
+    long long window = g_touchWindowNs.load(std::memory_order_relaxed);
+    if (window == 0) {
+        g_touchWindowNs.store(now, std::memory_order_relaxed);
+        return;
+    }
+    if (now - window < 1000000000LL) return;
+    if (!g_touchWindowNs.compare_exchange_strong(window, now, std::memory_order_relaxed)) return;
+    const uint64_t n = g_touchCount.exchange(0, std::memory_order_relaxed);
+    const uint64_t inject = g_touchInjectNs.exchange(0, std::memory_order_relaxed);
+    const uint64_t fwd = g_touchForwardNs.exchange(0, std::memory_order_relaxed);
+    const uint64_t max_ns = g_touchInjectMaxNs.exchange(0, std::memory_order_relaxed);
+    const uint64_t java_n = g_touchJavaForwarded.exchange(0, std::memory_order_relaxed);
+    if (n == 0) return;
+    if (g_touchReported.fetch_add(1, std::memory_order_relaxed) >= 60) return;
+    std::fprintf(stderr,
+                 "%s[KuDroidTouch] inject n=%llu java=%llu avg=%lluus max=%lluus "
+                 "forward-avg=%lluus\n",
+                 kudroid_trace_stamp(),
+                 static_cast<unsigned long long>(n), static_cast<unsigned long long>(java_n),
+                 static_cast<unsigned long long>(inject / (n * 1000)),
+                 static_cast<unsigned long long>(max_ns / 1000),
+                 static_cast<unsigned long long>(java_n ? (fwd / (java_n * 1000)) : 0));
+}
+}  // namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
 // AInputQueue — a mutex-protected FIFO of input events.
@@ -232,7 +295,16 @@ static void buildTouchEventLocked(int32_t baseAction, int32_t primaryId, int32_t
     if (is_move && !g_inputQueue.events.empty()) {
         auto& tail = g_inputQueue.events.back();
         if (tail.type == 2 && (tail.action & 0xff) == 2) {
+            // The seq is the identity AInputQueue_finishEvent matches by. Keeping it
+            // lets the guest pop this entry when it finishes the copy it holds;
+            // overwriting it with the fresh event's zero left the entry queued, so
+            // every coalesce handed the same MOVE out twice and the queue could not
+            // report itself empty. Folding replaces the sample the guest may already
+            // be holding, which is what coalescing means — the UP that ends a gesture
+            // carries the finger table, so the final position is never lost.
+            const uint64_t seq = tail.seq;
             tail = ev;
+            tail.seq = seq;
             replaced = true;
         }
     }
@@ -249,15 +321,18 @@ static void buildTouchEventLocked(int32_t baseAction, int32_t primaryId, int32_t
 // runtime is live: kuart_post_touch_event queues regardless, but a queue pushed
 // before kuart_launch_app resets it with accepting_=false — those events were
 // silently dropped after the log said they were dispatched.
-static void forward_touch_to_java_activity(int action, const BionicInputEvent& ev) {
-    if (kuart_is_ready() != 1) return;
+//
+// Returns the nanoseconds spent in the hand-off, or 0 when this event did not take
+// the Java path (not ready, native queue attached, or gated out).
+static uint64_t forward_touch_to_java_activity(int action, const BionicInputEvent& ev) {
+    if (kuart_is_ready() != 1) return 0;
     // When a native looper is attached, the NDK AInputQueue path already delivers this
     // event; forwarding it again would dispatch it to Java twice, and every MOVE would
     // take the VM lock against the render loop. The Java forward exists for titles that
     // never attach the native queue (the common Unity case).
-    if (g_inputQueue.id.load() != 0) return;
+    if (g_inputQueue.id.load() != 0) return 0;
     const bool is_move = (action & 0xff) == 2;  // ACTION_MOVE
-    if (is_move && kudroid_touch_source_gate_allow_move() != 1) return;
+    if (is_move && kudroid_touch_source_gate_allow_move() != 1) return 0;
     // Native enqueue, then wake the Looper's native wait. The UI/Looper thread
     // drains and builds the MotionEvent itself (see MessageQueue.nativeDrainInput),
     // so no second thread ever takes the VM lock for touch. The whole pointer table
@@ -265,21 +340,31 @@ static void forward_touch_to_java_activity(int action, const BionicInputEvent& e
     // single (x, y) can only ever describe one of them.
     // Every finger this event carries, in array order — the order the action's pointer
     // index refers to. Sized from the event, so no finger is left behind.
-    std::vector<int32_t> ids;
-    std::vector<float> xs;
-    std::vector<float> ys;
-    ids.reserve(ev.pointers.size());
-    xs.reserve(ev.pointers.size());
-    ys.reserve(ev.pointers.size());
-    for (const auto& p : ev.pointers) {
-        ids.push_back(p.id);
-        xs.push_back(p.x);
-        ys.push_back(p.y);
+    //
+    // Reused per-thread buffers: this runs once per MOVE inside the UIKit callback,
+    // and three fresh vectors per sample is heap traffic a drag does not need. The
+    // callee (TouchQueue::push) copies out of them before returning.
+    static thread_local std::vector<int32_t> ids;
+    static thread_local std::vector<float> xs;
+    static thread_local std::vector<float> ys;
+    const size_t count = ev.pointers.size();
+    ids.resize(count);
+    xs.resize(count);
+    ys.resize(count);
+    for (size_t i = 0; i < count; ++i) {
+        ids[i] = ev.pointers[i].id;
+        xs[i] = ev.pointers[i].x;
+        ys[i] = ev.pointers[i].y;
     }
-    if (ids.empty()) return;
+    if (ids.empty()) return 0;
+    const uint64_t forward_start = touch_now_ns();
     kuart_post_touch_event_ex(action, static_cast<int>(ids.size()), ids.data(), xs.data(),
                               ys.data());
     kudroid_looper_wake_main();
+    // Never zero: a hand-off that finished inside the clock's resolution is still a
+    // hand-off, and the counter is what says which path this build is on.
+    const uint64_t spent = touch_now_ns() - forward_start;
+    return spent == 0 ? 1 : spent;
 }
 
 // Single-position transport: one finger's new position per call; the rest of the table
@@ -287,6 +372,7 @@ static void forward_touch_to_java_activity(int action, const BionicInputEvent& e
 // for callers that drive a finger at a time.
 extern "C" void kudroid_inject_touch_event_multi(float x, float y, int32_t action,
                                                  int32_t pointerId, int32_t pointerCount) {
+    const uint64_t inject_start = touch_now_ns();
     const int32_t baseAction = action & 0xff;
     BionicInputEvent ev;
     {
@@ -334,7 +420,8 @@ extern "C" void kudroid_inject_touch_event_multi(float x, float y, int32_t actio
     // Forward touch events to Java Activity (e.g. Unity uGUI buttons like "Skip Tutorial").
     // Non-move events (DOWN, UP, CANCEL) are always forwarded to ensure UI clicks trigger.
     // MOVE events are rate-gated by NativeTouchGate to avoid stalling the render loop.
-    forward_touch_to_java_activity(ev.action, ev);
+    const uint64_t forwarded_ns = forward_touch_to_java_activity(ev.action, ev);
+    touch_telemetry(touch_now_ns() - inject_start, forwarded_ns);
 }
 
 // Batch transport: the caller (UIKit) hands over every live finger at once.
@@ -347,6 +434,7 @@ extern "C" void kudroid_inject_touch_event_multi(float x, float y, int32_t actio
 // the caller includes a lifting finger in the batch it sends for UP and drops it afterwards.
 extern "C" void kudroid_inject_touch_batch(int32_t action, int32_t primaryId, int32_t count,
                                            const int32_t* ids, const float* xs, const float* ys) {
+    const uint64_t inject_start = touch_now_ns();
     const int32_t baseAction = action & 0xff;
     BionicInputEvent ev;
     {
@@ -378,7 +466,8 @@ extern "C" void kudroid_inject_touch_batch(int32_t action, int32_t primaryId, in
     }
 
     wakeInputLooper();
-    forward_touch_to_java_activity(ev.action, ev);
+    const uint64_t forwarded_ns = forward_touch_to_java_activity(ev.action, ev);
+    touch_telemetry(touch_now_ns() - inject_start, forwarded_ns);
 }
 
 extern "C" void kudroid_inject_touch_event(float x, float y, int32_t action) {

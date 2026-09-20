@@ -112,17 +112,25 @@ public:
         if (events_.size() >= kMaxQueueSize) {
             events_.pop_front();
         }
+        // Built straight from the producer's table. Going through setUniform first
+        // sized three vectors from the uniform position and then overwrote every
+        // entry, doubling the per-event heap traffic for nothing.
         Event ev;
-        ev.setUniform(action, x, y, pointerCount);
+        ev.action = action;
+        ev.pointerCount = pointerCount;
+        const size_t slots = static_cast<size_t>(pointerCount);
         if (haveTable) {
-            for (int i = 0; i < pointerCount; ++i) {
-                ev.pointerIds[i] = ids[i];
-                ev.pointerXs[i] = xs[i];
-                ev.pointerYs[i] = ys[i];
-            }
-            ev.x = ev.pointerXs[0];
-            ev.y = ev.pointerYs[0];
+            ev.pointerIds.assign(ids, ids + slots);
+            ev.pointerXs.assign(xs, xs + slots);
+            ev.pointerYs.assign(ys, ys + slots);
+        } else {
+            ev.pointerIds.assign(slots, 0);
+            ev.pointerXs.assign(slots, x);
+            ev.pointerYs.assign(slots, y);
+            for (int i = 0; i < pointerCount; ++i) ev.pointerIds[i] = i;
         }
+        ev.x = ev.pointerXs[0];
+        ev.y = ev.pointerYs[0];
         events_.push_back(ev);
     }
 

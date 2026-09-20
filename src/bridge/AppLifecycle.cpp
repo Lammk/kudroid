@@ -503,9 +503,22 @@ extern "C" void kudroid_clear_crash_state(void) {
 extern "C" void kudroid_stop_app(void) {
     // Teardown that does not run bytecode happens on the caller's thread, so the
     // shell sees the app marked stopped the moment ✕ is pressed.
+    //
+    // A fatal guest fault is a different kind of stop: the shell's crash path calls
+    // this from handleCrash and then reads the report with kudroid_get_last_crash_tail,
+    // so the report must survive this call (that reader clears it).
+    const bool crashed = g_hasCrashed.load(std::memory_order_relaxed);
     s_isApkRunning.store(false);
-    kudroid_clear_crash_state();
-    kudroid_set_requested_orientation(1); // SCREEN_ORIENTATION_PORTRAIT
+    if (!crashed) {
+        kudroid_clear_crash_state();
+    }
+    // Rotating the window here changes the guest's surface size, which re-enters the
+    // activity's configuration path. On a crashed session that is a dead engine being
+    // asked to reconfigure itself, and the guest's own answer is a multi-second pause
+    // attempt. The next session sets its own orientation when it starts.
+    if (!crashed) {
+        kudroid_set_requested_orientation(1); // SCREEN_ORIENTATION_PORTRAIT
+    }
 
     // DESTROY_ACTIVITY runs Java, and Interpreter::Execute takes the global VM lock.
     // This is called from the iOS main thread, so doing it here froze the whole UI
@@ -523,19 +536,30 @@ extern "C" void kudroid_stop_app(void) {
     bool expected = false;
     if (!s_stopping.compare_exchange_strong(expected, true)) return;
     kudroid_log_signal_disposition("stop-app");
-    std::thread([] {
-        // PAUSE first: the player loop must stop rendering before DESTROY runs
-        // nativeDone, or teardown races in-flight frames on a torn surface.
-        const unsigned long long pausedBefore = kudroid_paused_generation();
-        kuart_send_lifecycle_event(101);  // PAUSE_ACTIVITY
-        // Up to 2s for the Java pause handler to run (Unity's own pause timeout).
-        for (int i = 0; i < 400 && kudroid_paused_generation() == pausedBefore; ++i) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        }
-        // Drain frames already inside nativeRender (2s cap matches Unity's own
-        // pause timeout); unbind stays at run end.
-        for (int i = 0; i < 400 && kudroid::native_frame_in_flight() > 0; ++i) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    std::thread([crashed] {
+        if (!crashed) {
+            // PAUSE first: the player loop must stop rendering before DESTROY runs
+            // nativeDone, or teardown races in-flight frames on a torn surface.
+            const unsigned long long pausedBefore = kudroid_paused_generation();
+            kuart_send_lifecycle_event(101);  // PAUSE_ACTIVITY
+            // Up to 2s for the Java pause handler to run (Unity's own pause timeout).
+            for (int i = 0; i < 400 && kudroid_paused_generation() == pausedBefore; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+            // Drain frames already inside nativeRender (2s cap matches Unity's own
+            // pause timeout); unbind stays at run end.
+            for (int i = 0; i < 400 && kudroid::native_frame_in_flight() > 0; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+        } else {
+            // The player loop is already gone (no frame has been presented for seconds
+            // when the fault lands), so the pause handshake above can only burn its full
+            // 4s of timeouts — that wait is the freeze the user sees instead of the app
+            // closing. Go straight to DESTROY: onDestroy is what quits the looper, and it
+            // is the one step teardown cannot skip.
+            fprintf(stderr,
+                    "[KuDroidCore] crash teardown: skipping the pause handshake "
+                    "(engine already stopped presenting)\n");
         }
         kuart_send_lifecycle_event(103);  // DESTROY_ACTIVITY
     }).detach();

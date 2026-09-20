@@ -57,11 +57,17 @@ extern "C" void kudroid_looper_poll(int64_t ptr, int64_t timeout_millis) {
 extern "C" void kudroid_looper_wake(int64_t ptr) {
     auto* slot = reinterpret_cast<LooperWaitSlot*>(ptr);
     if (slot == nullptr) return;
+    bool alreadyPending = false;
     {
         std::lock_guard<std::mutex> lock(slot->mtx);
+        alreadyPending = slot->pending;
         slot->pending = true;
     }
-    slot->cv.notify_all();
+    // A drag sets this hundreds of times a second. A waiter that has not consumed
+    // the flag yet is already going to wake and see the flag set, so the second
+    // futex wake (and the scheduling nudge it gives the UI thread mid-frame) buys
+    // nothing; only the false->true transition has a thread to wake.
+    if (!alreadyPending) slot->cv.notify_all();
 }
 
 extern "C" void kudroid_looper_set_main(int64_t ptr) {

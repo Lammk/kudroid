@@ -1735,6 +1735,13 @@ constexpr int kTrackedStreams = 32;
 std::atomic<uintptr_t> g_apkStreams[kTrackedStreams];
 std::atomic<uint64_t> g_apkStreamOps[kTrackedStreams] = {};
 std::atomic<int> g_apkStreamShortLogged[kTrackedStreams] = {};
+// Op-by-op tracing is limited to the first few stream instances. A session recycles
+// these slots thousands of times (the engine opens the apk once per asset read), and
+// sixteen lines each made this trace the largest section of the log while saying the
+// same thing every time. Short reads and slow ops keep their own budgets below.
+constexpr int kOpTracedStreams = 16;
+std::atomic<int> g_apkStreamTraceNo[kTrackedStreams] = {};
+std::atomic<int> g_apkStreamInstances{0};
 std::mutex g_apkStreamsMtx;
 
 }  // namespace
@@ -1748,11 +1755,15 @@ static void track_apk_stream(FILE* f) {
                                                     reinterpret_cast<uintptr_t>(f))) {
             g_apkStreamOps[i].store(0, std::memory_order_relaxed);
             g_apkStreamShortLogged[i].store(0, std::memory_order_relaxed);
+            const int instance = g_apkStreamInstances.fetch_add(1, std::memory_order_relaxed);
+            g_apkStreamTraceNo[i].store(instance, std::memory_order_relaxed);
             // Lifecycle line: one apk stream is one consumer session (a clip
             // load, a bundle stream). open/close paired with the per-op trace
             // below names which session did what, and a full table explains
             // suddenly-missing IO visibility.
-            ktraceLine("[KuDroidApkS] sid=%d open\n", i);
+            if (instance < kOpTracedStreams) {
+                ktraceLine("[KuDroidApkS] sid=%d open instance=%d\n", i, instance);
+            }
             return;
         }
     }
@@ -1946,7 +1957,8 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
         // First ops of every stream: a clip load / bundle stream shows its
         // whole IO shape here (open -> seek -> header read -> data reads).
         // Per-volume counters and 16MB sampling cannot see this pattern.
-        if (sid >= 0 && op <= 16) {
+        if (sid >= 0 && op <= 16 &&
+            g_apkStreamTraceNo[sid].load(std::memory_order_relaxed) < kOpTracedStreams) {
             ktraceLine(
                          "[KuDroidApkS] sid=%d op=%llu fread want=%zu got=%zu pos=%ld\n",
                          sid, static_cast<unsigned long long>(op), size * count, n * size,
@@ -2342,9 +2354,11 @@ int vfs_fclose(FILE* stream) {
         for (int i = 0; i < kTrackedStreams; ++i) {
             if (g_apkStreams[i].load(std::memory_order_relaxed) ==
                 reinterpret_cast<uintptr_t>(stream)) {
-                ktraceLine("[KuDroidApkS] sid=%d close after %llu ops\n", i,
-                             static_cast<unsigned long long>(
-                                 g_apkStreamOps[i].load(std::memory_order_relaxed)));
+                if (g_apkStreamTraceNo[i].load(std::memory_order_relaxed) < kOpTracedStreams) {
+                    ktraceLine("[KuDroidApkS] sid=%d close after %llu ops\n", i,
+                               static_cast<unsigned long long>(
+                                   g_apkStreamOps[i].load(std::memory_order_relaxed)));
+                }
                 g_apkStreams[i].store(0, std::memory_order_relaxed);
                 break;
             }
@@ -2364,7 +2378,8 @@ int vfs_fseek(FILE* stream, long offset, int whence) {
         const int sid = apk_stream_id(stream);
         if (sid >= 0) {
             const uint64_t op = g_apkStreamOps[sid].fetch_add(1, std::memory_order_relaxed) + 1;
-            if (op <= 16) {
+            if (op <= 16 &&
+                g_apkStreamTraceNo[sid].load(std::memory_order_relaxed) < kOpTracedStreams) {
                 ktraceLine(
                              "[KuDroidApkS] sid=%d op=%llu seek %ld whence=%d -> %ld\n",
                              sid, static_cast<unsigned long long>(op), offset, whence,
