@@ -479,7 +479,11 @@ bool isEntryWord(std::uint32_t w) {
     const unsigned b = w >> 24;
     if ((w & 0xFFC003E0) == 0xA98003E0) return true;  // stp *,*,[sp,#-x] (spill)
     if ((w & 0xFF0003FF) == 0xD10003FF) return true;  // sub sp,sp,#x
-    if ((w & 0xFFC003E0) == 0xF81003E0) return true;  // str *,[sp,#-x]
+    // Store (64-bit) with Rn=SP: the mask clears imm9, the index bits and Rt, so this
+    // covers the unscaled/pre/post-index forms. The constant used to be 0xF81003E0, which
+    // has bit 20 set — inside the masked-out range — so the test was never true (gcc
+    // reports the tautology) and this prologue shape was never recognised.
+    if ((w & 0xFFC003E0) == 0xF80003E0) return true;  // str *,[sp,#-x]
     if (w == 0x910003FD) return true;                 // mov x29,sp
     if (b == 0x90 || b == 0xB0 || b == 0xD0 || b == 0xF0) return true;  // adrp
     if ((b & 0xFC) == 0x14) return true;              // b (thunk)

@@ -88,6 +88,16 @@ extern "C" int bionic_pthread_mutexattr_destroy(void* attr);
 extern "C" int bionic_pthread_getattr_np(pthread_t thread, void* attr);
 extern "C" int bionic_pthread_attr_getstack(void* attr, void** stackaddr, size_t* stacksize);
 
+// FORTIFY (__*_chk) wrappers. Each takes the object size the guest's compiler measured
+// for the destination and must not write past it.
+extern "C" void* bionic___memcpy_chk(void* dst, const void* src, size_t n, size_t dst_len);
+extern "C" void* bionic___memmove_chk(void* dst, const void* src, size_t n, size_t dst_len);
+extern "C" void* bionic___memset_chk(void* s, int c, size_t n, size_t s_len);
+extern "C" char* bionic___strncpy_chk(char* dst, const char* src, size_t n, size_t dst_len);
+extern "C" char* bionic___strcpy_chk(char* dst, const char* src, size_t dst_len);
+extern "C" char* bionic___strcat_chk(char* dst, const char* src, size_t dst_len);
+extern "C" int bionic___sprintf_chk(char* s, int flag, size_t slen, const char* format, ...);
+
 // Outbound signal senders and mask operations. Absent from the symbol table until now,
 // which is the whole bug: a guest binding to "raise" got the host's.
 extern "C" int bionic_raise(int sig);
@@ -1862,6 +1872,77 @@ void test_socket_symbols() {
 
 // ─── main ────────────────────────────────────────────────────────────────────────
 
+// ─── FORTIFY wrappers stop at the declared destination size ─────────────────
+//
+// Each of these is handed the destination's object size as measured by the guest's
+// compiler. They used to log the overflow and then perform it anyway, which writes past
+// that object and corrupts the guest heap — the crash then surfaces somewhere unrelated.
+// (size_t)-1 is what the compiler passes when it cannot size the destination at all (a
+// trailing flexible-array member, an unknown pointer), and must stay a pass-through so a
+// legitimate copy is not truncated.
+static void test_fortify_wrappers_clamp_to_the_declared_bound() {
+    struct Buf {
+        char dst[8];
+        char canary[8];
+    };
+    const char* kLong = "0123456789abcdef";
+    const size_t kUnknown = static_cast<size_t>(-1);
+
+    {
+        Buf b;
+        std::memset(&b, 0x7F, sizeof(b));
+        bionic___strcpy_chk(b.dst, kLong, sizeof(b.dst));
+        CHECK(std::strlen(b.dst) == sizeof(b.dst) - 1, "strcpy_chk stops one short of the bound");
+        CHECK(std::memcmp(b.dst, kLong, sizeof(b.dst) - 1) == 0, "and keeps the leading bytes");
+        CHECK(b.canary[0] == 0x7F, "and writes nothing past the destination");
+    }
+    {
+        Buf b;
+        std::memset(&b, 0x7F, sizeof(b));
+        std::strcpy(b.dst, "ab");
+        bionic___strcat_chk(b.dst, kLong, sizeof(b.dst));
+        CHECK(std::strncmp(b.dst, "ab01234", sizeof(b.dst) - 1) == 0, "strcat_chk appends what fits");
+        CHECK(b.canary[0] == 0x7F, "strcat_chk writes nothing past the destination");
+    }
+    {
+        Buf b;
+        std::memset(&b, 0x7F, sizeof(b));
+        bionic___strncpy_chk(b.dst, kLong, sizeof(kLong) + 1, sizeof(b.dst));
+        CHECK(b.canary[0] == 0x7F, "strncpy_chk writes nothing past the destination");
+    }
+    {
+        Buf b;
+        std::memset(&b, 0x7F, sizeof(b));
+        bionic___memcpy_chk(b.dst, kLong, 16, sizeof(b.dst));
+        CHECK(std::memcmp(b.dst, kLong, sizeof(b.dst)) == 0, "memcpy_chk copies up to the bound");
+        CHECK(b.canary[0] == 0x7F, "memcpy_chk leaves the byte after the destination alone");
+    }
+    {
+        Buf b;
+        std::memset(&b, 0x7F, sizeof(b));
+        bionic___memmove_chk(b.dst, kLong, 16, sizeof(b.dst));
+        CHECK(std::memcmp(b.dst, kLong, sizeof(b.dst)) == 0, "memmove_chk copies up to the bound");
+        CHECK(b.canary[0] == 0x7F, "memmove_chk leaves the byte after the destination alone");
+    }
+    {
+        Buf b;
+        std::memset(&b, 0x7F, sizeof(b));
+        bionic___memset_chk(b.dst, 0x11, 16, sizeof(b.dst));
+        CHECK(b.dst[7] == 0x11, "memset_chk fills up to the bound");
+        CHECK(b.canary[0] == 0x7F, "memset_chk writes nothing past the destination");
+    }
+    {
+        // Unknown bound: the copy the guest asked for must arrive intact.
+        char big[64];
+        bionic___strcpy_chk(big, kLong, kUnknown);
+        CHECK(std::strcmp(big, kLong) == 0, "strcpy_chk passes an unknown bound through");
+        char fmt[64];
+        const int n = bionic___sprintf_chk(fmt, 0, kUnknown, "%s=%d", "k", 42);
+        CHECK(n == 4 && std::strcmp(fmt, "k=42") == 0,
+              "sprintf_chk with an unknown bound still formats");
+    }
+}
+
 int main() {
     std::printf("=== SyscallShim host tests ===\n");
     test_bionic_getifaddrs();
@@ -1912,6 +1993,7 @@ int main() {
     test_outbound_signal_symbols_resolve_to_the_shim();
     test_guest_sigset_operations_use_linux_bit_positions();
     test_mmap_file_backed_subpage_offset();
+    test_fortify_wrappers_clamp_to_the_declared_bound();
     std::printf("=== %d checks, %d failures ===\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

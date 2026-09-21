@@ -91,6 +91,8 @@ constexpr uint8_t kOpIntToDouble = 0x83;
 constexpr uint8_t kOpLongToInt = 0x84;
 constexpr uint8_t kOpFloatToInt = 0x87;
 constexpr uint8_t kOpDoubleToInt = 0x8a;
+constexpr uint8_t kOpNegInt = 0x7b;
+constexpr uint8_t kOpNegLong = 0x7d;
 constexpr uint8_t kOpIntToByte = 0x8d;
 constexpr uint8_t kOpIntToChar = 0x8e;
 constexpr uint8_t kOpAddInt = 0x90;
@@ -155,6 +157,20 @@ std::vector<ClassSpec> MakeTestClasses() {
         Op23x(&code, kOpRemInt, 0, 1, 2);
         code.push_back(Op11x(kOpReturn, 0));
         t.direct_methods.push_back(MakeMethod("remInt", "I", {"I", "I"}, code, 3, 2));
+    }
+    // int negInt(int a) { return -a; }
+    {
+        std::vector<uint16_t> code;
+        code.push_back(Op12x(kOpNegInt, 0, 1));
+        code.push_back(Op11x(kOpReturn, 0));
+        t.direct_methods.push_back(MakeMethod("negInt", "I", {"I"}, code, 2, 1));
+    }
+    // long negLong(long a) { return -a; }  v0/v1 result, v2/v3 = a
+    {
+        std::vector<uint16_t> code;
+        code.push_back(Op12x(kOpNegLong, 0, 2));
+        code.push_back(Op11x(kOpReturnWide, 0));
+        t.direct_methods.push_back(MakeMethod("negLong", "J", {"J"}, code, 4, 2));
     }
     // int shlInt(int a, int b) { return a << b; }
     {
@@ -362,6 +378,20 @@ std::printf("  FAIL not found method %s%s\n", name, sig);
     Check(call("remInt", "(II)I",
                {DexValue::Int(std::numeric_limits<int32_t>::min()), DexValue::Int(-1)}).i == 0,
           "remInt(INT_MIN,-1) == 0");
+
+    // neg-int / neg-long must wrap like Java: -INT_MIN is INT_MIN, not UB.
+    Check(call("negInt", "(I)I", {DexValue::Int(5)}).i == -5, "negInt(5) == -5");
+    Check(call("negInt", "(I)I", {DexValue::Int(std::numeric_limits<int32_t>::min())}).i ==
+              std::numeric_limits<int32_t>::min(),
+          "negInt(INT_MIN) == INT_MIN (wrap, khong UB)");
+    Check(call("negLong", "(J)J", {DexValue::Long(-7)}).j == 7, "negLong(-7) == 7");
+    Check(call("negLong", "(J)J", {DexValue::Long(std::numeric_limits<int64_t>::min())}).j ==
+              std::numeric_limits<int64_t>::min(),
+          "negLong(LONG_MIN) == LONG_MIN (wrap, khong UB)");
+    Check(call("divLong", "(JJ)J",
+               {DexValue::Long(std::numeric_limits<int64_t>::min()), DexValue::Long(-1)}).j ==
+              std::numeric_limits<int64_t>::min(),
+          "divLong(LONG_MIN,-1) == LONG_MIN (khong UB)");
 
     // divide by zero must throw, not crash
     {

@@ -1043,7 +1043,6 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                         }
 
                         // PRIORITY 4: heuristic guessing from package name only when prior sources fail.
-                        std::string guessBase; // shared base name for fallback list
                         // Prefer any manifest-declared activity over a guess: the
                         // manifest is what Android itself reads.
                         if (targetActivity.empty() && !manifestActivities.empty()) {

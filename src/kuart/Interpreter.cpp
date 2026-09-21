@@ -31,8 +31,10 @@ using art::Instruction;
 
 // Integer division in Java: INT_MIN / -1 overflows (result not representable)
 // but Java defines return INT_MIN itself, while C++ defines UB. Must block separately.
+// The result is written through unsigned arithmetic: -a is itself UB when a is the
+// minimum, and for b == -1 only a == INT_MIN reaches here with that value.
 int32_t JavaIntDiv(int32_t a, int32_t b) {
-    if (b == -1) return -a;
+    if (b == -1) return static_cast<int32_t>(0u - static_cast<uint32_t>(a));
     return a / b;
 }
 int32_t JavaIntRem(int32_t a, int32_t b) {
@@ -40,7 +42,7 @@ int32_t JavaIntRem(int32_t a, int32_t b) {
     return a % b;
 }
 int64_t JavaLongDiv(int64_t a, int64_t b) {
-    if (b == -1) return -a;
+    if (b == -1) return static_cast<int64_t>(0ull - static_cast<uint64_t>(a));
     return a / b;
 }
 int64_t JavaLongRem(int64_t a, int64_t b) {
@@ -1252,13 +1254,20 @@ DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccess
 
             // An operand.
             case Instruction::NEG_INT:
-                frame->SetInt(inst->VRegA_12x(), -frame->GetInt(inst->VRegB_12x()));
+                // Java's neg-int wraps: -INT_MIN is INT_MIN. Written unsigned because the
+                // signed negation of INT_MIN is UB in C++ and clang is free to exploit that.
+                frame->SetInt(inst->VRegA_12x(),
+                              static_cast<int32_t>(
+                                  0u - static_cast<uint32_t>(frame->GetInt(inst->VRegB_12x()))));
                 break;
             case Instruction::NOT_INT:
                 frame->SetInt(inst->VRegA_12x(), ~frame->GetInt(inst->VRegB_12x()));
                 break;
             case Instruction::NEG_LONG:
-                frame->SetLong(inst->VRegA_12x(), -frame->GetLong(inst->VRegB_12x()));
+                // Same wrap for long: -LONG_MIN is LONG_MIN.
+                frame->SetLong(inst->VRegA_12x(),
+                               static_cast<int64_t>(
+                                   0ull - static_cast<uint64_t>(frame->GetLong(inst->VRegB_12x()))));
                 break;
             case Instruction::NOT_LONG:
                 frame->SetLong(inst->VRegA_12x(), ~frame->GetLong(inst->VRegB_12x()));

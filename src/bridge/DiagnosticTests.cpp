@@ -837,10 +837,13 @@ extern "C" const char* kudroid_jni_massive_so_test(const char* path) {
                 int (*test_func)(void*) = reinterpret_cast<int (*)(void*)>(address);
 
                 // configure callbacks
-                static std::string* g_jni_test_log = &log;
+                // Starts null: the pointer aims at this frame's string and must not be
+                // left set after the function returns, or a later log callback writes
+                // through a dead stack frame. It is cleared with the callback below.
+                static std::string* g_jni_test_log = nullptr;
                 g_jni_test_log = &log;
                 kuart_set_log_callback([](const char* msg) {
-                    if (g_jni_test_log) {
+                    if (g_jni_test_log != nullptr) {
                         *g_jni_test_log += "[KuART] ";
                         *g_jni_test_log += msg;
                         *g_jni_test_log += "\n";
@@ -855,8 +858,9 @@ extern "C" const char* kudroid_jni_massive_so_test(const char* path) {
                 log += "[kudroid_jni] TEST RESULT: " +
                        (result == 0 ? std::string("0 (SUCCESS)") : std::to_string(result) + " (FAILED)") + "\n";
                 mirrorCrash(log);
-                log += "[kudroid_jni] TEST RESULT: " +
-                       (result == 0 ? std::string("0 (SUCCESS)") : std::to_string(result) + " (FAILED)") + "\n";
+                // Detach before leaving the frame the callback points into.
+                kuart_set_log_callback(nullptr);
+                g_jni_test_log = nullptr;
             }
         }
     }

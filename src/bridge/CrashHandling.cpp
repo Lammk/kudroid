@@ -1471,7 +1471,10 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
                     std::memcpy(path + dl, "/kudroid_crash.log", 19);
                     const int fd = ::open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
                     if (fd >= 0) {
-                        (void)!::write(fd, note, static_cast<size_t>(n));
+                        // snprintf's return is the length it would have written; passing
+                        // it to write() unclamped reads past the buffer when the note is
+                        // truncated. crashWriteLine exists exactly for this.
+                        crashWriteLine(fd, note, n, sizeof(note));
                         ::close(fd);
                     }
                 }

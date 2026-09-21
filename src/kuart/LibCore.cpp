@@ -1543,8 +1543,6 @@ bool Invoke_java_lang_invoke_MethodHandles(Interpreter* interp, const char* name
 bool Invoke_java_lang_invoke_Lookup(Interpreter* interp, const char* name,
                                     const DexValue* args, size_t num_args,
                                     DexValue* result) {
-    DexClassLinker* linker = interp->linker();
-
     // unreflect / unreflectSpecial / unreflectConstructor: the Method or Constructor object
     // already carries the resolved DexMethod, so there is nothing to search for.
     const bool is_unreflect = std::strcmp(name, "unreflect") == 0;
@@ -1676,16 +1674,21 @@ bool Invoke_java_lang_System(Interpreter* interp, const char* name, const DexVal
         auto* src_arr = reinterpret_cast<DexArray*>(src_obj);
         auto* dst_arr = reinterpret_cast<DexArray*>(dst_obj);
 
+        // Sum in 64 bits: src_pos + length wraps in int32 for a large length, which used
+        // to pass the range test and then read past the end of the array.
+        const int64_t src_end = static_cast<int64_t>(src_pos) + length;
+        const int64_t dst_end = static_cast<int64_t>(dst_pos) + length;
         if (src_pos < 0 || dst_pos < 0 || length < 0 ||
-            src_pos + length > src_arr->length ||
-            dst_pos + length > dst_arr->length) {
+            src_end > src_arr->length || dst_end > dst_arr->length) {
             interp->ThrowException("Ljava/lang/ArrayIndexOutOfBoundsException;", "arraycopy range invalid");
             return true;
         }
 
         uint32_t elem_size = interp->linker()->ElementSize(src_arr->clazz->component_type);
-        uint8_t* src_data = reinterpret_cast<uint8_t*>(src_arr + 1) + src_pos * elem_size;
-        uint8_t* dst_data = reinterpret_cast<uint8_t*>(dst_arr + 1) + dst_pos * elem_size;
+        uint8_t* src_data =
+            reinterpret_cast<uint8_t*>(src_arr + 1) + static_cast<size_t>(src_pos) * elem_size;
+        uint8_t* dst_data =
+            reinterpret_cast<uint8_t*>(dst_arr + 1) + static_cast<size_t>(dst_pos) * elem_size;
         std::memmove(dst_data, src_data, static_cast<size_t>(length) * elem_size);
         return true;
     }

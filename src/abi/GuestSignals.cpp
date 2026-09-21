@@ -991,9 +991,13 @@ int guest_kill(int pid, int guest_signum) {
 }
 
 int guest_pthread_kill(unsigned long thread, int guest_signum) {
-    pthread_t target;
-    std::memcpy(&target, &thread, sizeof(target) < sizeof(thread) ? sizeof(thread)
-                                                                 : sizeof(thread));
+    // A guest pthread_t is an unsigned long; the host's is usually the same size but the
+    // standard does not promise that, so only the bytes that fit are copied. Both arms of
+    // the branch that used to be here read sizeof(thread), which wrote past the end of a
+    // narrower host pthread_t.
+    pthread_t target{};
+    std::memcpy(&target, &thread,
+                sizeof(target) < sizeof(thread) ? sizeof(target) : sizeof(thread));
     if (guest_signum == 0) return ::pthread_kill(target, 0) == 0 ? 0 : -1;
     const int host_signum = host_signum_for_send(guest_signum, "pthread_kill");
     if (host_signum == 0) return -1;
@@ -1025,6 +1029,7 @@ int guest_tgkill(int tgid, int tid, int guest_signum) {
     // the same way at the call sites.
     (void)tgid;
     (void)tid;
+    (void)guest_signum;
     errno = ENOSYS;
     return -1;
 }

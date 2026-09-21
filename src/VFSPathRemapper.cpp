@@ -2377,12 +2377,20 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
 }
 
 int vfs_fclose(FILE* stream) {
-    if (stream != nullptr) {
-        // Flush this thread's batch for the stream before the map entry goes
-        // away, then bump the epoch so other threads' stale FILE* caches
-        // re-resolve instead of attributing to a recycled address.
-        if (t_volbatch.stream == stream) fread_vol_flush();
-        g_freadEpoch.fetch_add(1, std::memory_order_relaxed);
+    // fclose(NULL) is undefined behaviour — both host libcs trap on it — so the guard
+    // has to cover the call as well as the tracking below it. Returning EOF keeps the
+    // guard's promise instead of defeating it: the old code tested for null and then
+    // called fclose(NULL) anyway.
+    if (stream == nullptr) {
+        errno = EINVAL;
+        return EOF;
+    }
+    // Flush this thread's batch for the stream before the map entry goes
+    // away, then bump the epoch so other threads' stale FILE* caches
+    // re-resolve instead of attributing to a recycled address.
+    if (t_volbatch.stream == stream) fread_vol_flush();
+    g_freadEpoch.fetch_add(1, std::memory_order_relaxed);
+    {
         std::lock_guard<std::mutex> lock(g_apkStreamsMtx);
         for (int i = 0; i < kTrackedStreams; ++i) {
             if (g_apkStreams[i].load(std::memory_order_relaxed) ==
@@ -2396,6 +2404,8 @@ int vfs_fclose(FILE* stream) {
                 break;
             }
         }
+    }
+    {
         std::lock_guard<std::mutex> vlock(g_freadVolMtx);
         g_freadPaths.erase(stream);
     }

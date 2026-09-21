@@ -6179,20 +6179,45 @@ extern "C" int kudroid_android_log_message(int priority, const char* tag, const 
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Real FORTIFY (__*_chk) implementations to prevent silent data corruption.
+//
+// The size the compiler passes is the object size it measured for the destination.
+// bionic aborts on a violation; KuDroid is a translator and does not get to kill the
+// guest, so the write is clamped to that bound instead — the same thing the strncpy
+// wrapper below has always done. Without the clamp the wrapper's own diagnostic is the
+// only thing that changes: it reports the overflow and then performs it, which lands on
+// the guest's heap as corruption that surfaces later as an unrelated crash.
+//
+// (size_t)-1 means "size unknown": a trailing flexible-array member or a pointer whose
+// object size could not be computed both report that value, and clamping to it would
+// truncate a legitimate copy. The call then goes through unchanged, which is also what
+// _FORTIFY_SOURCE documents for an unknown size.
 // ─────────────────────────────────────────────────────────────────────────────
 
+static bool fortifyHaveBound(size_t declared_len) {
+    return declared_len != static_cast<size_t>(-1);
+}
+
 extern "C" void* bionic___memcpy_chk(void* dst, const void* src, size_t n, size_t dst_len) {
-    if (n > dst_len) trace("__memcpy_chk: destination overflow (fortify)");
+    if (fortifyHaveBound(dst_len) && n > dst_len) {
+        trace("__memcpy_chk: destination overflow (fortify), clamped");
+        n = dst_len;
+    }
     return ::memcpy(dst, src, n);
 }
 
 extern "C" void* bionic___memmove_chk(void* dst, const void* src, size_t n, size_t dst_len) {
-    if (n > dst_len) trace("__memmove_chk: destination overflow (fortify)");
+    if (fortifyHaveBound(dst_len) && n > dst_len) {
+        trace("__memmove_chk: destination overflow (fortify), clamped");
+        n = dst_len;
+    }
     return ::memmove(dst, src, n);
 }
 
 extern "C" void* bionic___memset_chk(void* s, int c, size_t n, size_t s_len) {
-    if (n > s_len) trace("__memset_chk: destination overflow (fortify)");
+    if (fortifyHaveBound(s_len) && n > s_len) {
+        trace("__memset_chk: destination overflow (fortify), clamped");
+        n = s_len;
+    }
     return ::memset(s, c, n);
 }
 
@@ -6220,7 +6245,12 @@ extern "C" int bionic___sprintf_chk(char* s, int flag, size_t slen, const char* 
     (void)flag;
     va_list args;
     va_start(args, format);
-    const int r = ::vsnprintf(s, slen, format, args);
+    // slen == (size_t)-1 means the compiler could not size the destination, and the
+    // documented behaviour is then an unbounded format. Handing that value to vsnprintf
+    // instead is a size the host cannot honour: it fails the call (or returns -1) rather
+    // than writing the string the guest asked for.
+    const int r = slen == static_cast<size_t>(-1) ? ::vsprintf(s, format, args)
+                                                  : ::vsnprintf(s, slen, format, args);
     va_end(args);
     return r;
 }
@@ -6236,8 +6266,8 @@ extern "C" char* bionic___strncpy_chk(char* dst, const char* src, size_t n, size
         if (dst_len > 0) dst[0] = '\0';
         return dst;
     }
-    if (n > dst_len) {
-        trace("__strncpy_chk: destination overflow (fortify)");
+    if (fortifyHaveBound(dst_len) && n > dst_len) {
+        trace("__strncpy_chk: destination overflow (fortify), clamped");
         n = dst_len; // clamp to prevent buffer overflow
     }
     return ::strncpy(dst, src, n);
@@ -6249,15 +6279,29 @@ extern "C" char* bionic___strcpy_chk(char* dst, const char* src, size_t dst_len)
         if (dst_len > 0) dst[0] = '\0';
         return dst;
     }
-    if (::strlen(src) >= dst_len) trace("__strcpy_chk: destination overflow (fortify)");
+    // Needs strlen(src) + 1 bytes, so the string itself must be shorter than dst_len.
+    if (fortifyHaveBound(dst_len) && ::strlen(src) >= dst_len) {
+        trace("__strcpy_chk: destination overflow (fortify), truncated");
+        if (dst_len == 0) return dst;
+        std::memcpy(dst, src, dst_len - 1);
+        dst[dst_len - 1] = '\0';
+        return dst;
+    }
     return ::strcpy(dst, src);
 }
 
 extern "C" char* bionic___strcat_chk(char* dst, const char* src, size_t dst_len) {
     if (!dst) return nullptr;
     if (!src) return dst;
-    if (::strlen(dst) + ::strlen(src) >= dst_len) {
-        trace("__strcat_chk: destination overflow (fortify)");
+    if (fortifyHaveBound(dst_len)) {
+        const size_t have = ::strlen(dst);
+        if (have + ::strlen(src) >= dst_len) {
+            trace("__strcat_chk: destination overflow (fortify), truncated");
+            if (have + 1 >= dst_len) return dst;  // no room left for more than the NUL
+            std::memcpy(dst + have, src, dst_len - have - 1);
+            dst[dst_len - 1] = '\0';
+            return dst;
+        }
     }
     return ::strcat(dst, src);
 }

@@ -124,7 +124,15 @@ extern "C" void kudroid_set_log_dir(const char* dir) {
     strncpy(g_docsDir, dir, sizeof(g_docsDir) - 1);
     g_docsDir[sizeof(g_docsDir) - 1] = '\0';
 
-    snprintf(g_logDir, sizeof(g_logDir), "%s/logs", g_docsDir);
+    // A path that does not fit is not "Documents/logs" — it is a chopped path that may
+    // name nothing, and every log file then fails to open. Keep the whole Documents
+    // directory in that case, the same fallback used when the subdirectory cannot be
+    // created below.
+    const int logDirLen = snprintf(g_logDir, sizeof(g_logDir), "%s/logs", g_docsDir);
+    if (logDirLen < 0 || static_cast<size_t>(logDirLen) >= sizeof(g_logDir)) {
+        strncpy(g_logDir, g_docsDir, sizeof(g_logDir) - 1);
+        g_logDir[sizeof(g_logDir) - 1] = '\0';
+    }
 
     // Must exist before anything opens a file in it. The crash handler in particular
     // cannot create directories — it is restricted to async-signal-safe calls — so a

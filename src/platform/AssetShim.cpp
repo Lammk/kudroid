@@ -850,10 +850,15 @@ extern "C" int kudroid_asset_resolve_bytes(const char* filename, char** outPath,
             kudroid_android_log_message(4, "AssetShim", line);
         }
     }
-    char* copy = static_cast<char*>(std::malloc(path.size() + 1));
-    if (!copy) return -1;
-    std::memcpy(copy, path.c_str(), path.size() + 1);
-    if (outPath) *outPath = copy;
+    // Only allocate when the caller asked for the path. The copy is handed over as an
+    // owned string the caller frees, so with a null outPath it was unreachable and
+    // leaked — a guest passes null for the outputs it does not want.
+    if (outPath) {
+        char* copy = static_cast<char*>(std::malloc(path.size() + 1));
+        if (!copy) return -1;
+        std::memcpy(copy, path.c_str(), path.size() + 1);
+        *outPath = copy;
+    }
     if (outStart) *outStart = static_cast<int64_t>(start);
     if (outLength) *outLength = static_cast<int64_t>(length);
     return 1;
