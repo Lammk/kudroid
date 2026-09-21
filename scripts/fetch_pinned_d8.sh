@@ -9,12 +9,14 @@ BASE="https://dl.google.com/dl/android/maven2/com/android/tools/r8/$VERSION/r8-$
 
 mkdir -p "$(dirname "$JAR")"
 if [[ ! -f "$JAR" ]]; then
-    curl --fail --location --retry 3 --output "$JAR" "$BASE"
+    curl --fail --location --retry 3 --retry-delay 5 --retry-all-errors --output "$JAR" "$BASE"
 fi
 
 # Maven Central publishes the pinned SHA-1 sidecar. Verify the downloaded
 # artifact before it is used by javac/d8; this also makes CI failures explicit.
-curl --fail --location --retry 3 --output "$JAR.sha1" "$BASE.sha1"
+# --retry-all-errors also retries HTTP 5xx; plain --retry only covers network errors,
+# so a transient gateway error from the CDN failed the build instead of being reissued.
+curl --fail --location --retry 5 --retry-delay 5 --retry-all-errors --output "$JAR.sha1" "$BASE.sha1"
 EXPECTED="$(tr -d '[:space:]' < "$JAR.sha1")"
 if command -v sha1sum > /dev/null 2>&1; then
     ACTUAL="$(sha1sum "$JAR" | cut -d' ' -f1)"

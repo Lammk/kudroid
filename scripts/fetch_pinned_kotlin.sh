@@ -10,11 +10,13 @@ BASE="https://repo1.maven.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/$VERSION
 mkdir -p "$(dirname "$JAR")"
 if [[ ! -f "$JAR" ]]; then
     echo "Downloading kotlin-stdlib $VERSION..."
-    curl --fail --location --retry 3 --output "$JAR" "$BASE"
+    curl --fail --location --retry 3 --retry-delay 5 --retry-all-errors --output "$JAR" "$BASE"
 fi
 
 # Maven Central publishes the pinned SHA-1 sidecar. Verify checksum.
-curl --fail --location --retry 3 --output "$JAR.sha1" "$BASE.sha1"
+# --retry-all-errors also retries HTTP 5xx; plain --retry only covers network errors,
+# so a transient gateway error from the CDN failed the build instead of being reissued.
+curl --fail --location --retry 5 --retry-delay 5 --retry-all-errors --output "$JAR.sha1" "$BASE.sha1"
 EXPECTED="$(tr -d '[:space:]' < "$JAR.sha1")"
 if command -v sha1sum > /dev/null 2>&1; then
     ACTUAL="$(sha1sum "$JAR" | cut -d' ' -f1)"
