@@ -967,6 +967,28 @@ bool fault_skip_load_store(ucontext_t* uc, uintptr_t faultAddr, uint64_t* newPcO
             // 29/30 never take a transfer result in valid code, 31 is XZR
             // (no effect): refuse rather than reason about them.
             if (p.rt >= 29 || (p.isPair && p.rt2 >= 29)) return false;
+            // 18 is the platform register: guest code keeps live addresses in it
+            // across calls (a compiler that reserves it treats it as callee-saved),
+            // and a fabricated zero is stored into structures and dereferenced far
+            // away from here. Observed live: a job loop stored x18 into a record,
+            // then dereferenced that field at +0x28 in the next statement
+            // (fault_addr=0x28, x18=0 in the dump). Inventing a value for the
+            // register the guest cannot re-derive is not a recovery, it is a
+            // delayed crash with no connection to the fault; report the real one.
+            if (p.rt == 18 || (p.isPair && p.rt2 == 18)) {
+                static std::atomic<int> s_r18{0};
+                if (s_r18.fetch_add(1, std::memory_order_relaxed) < 4) {
+                    char nb[192];
+                    const int cn = std::snprintf(
+                        nb, sizeof(nb),
+                        "skip refused: fabricated destination is the platform "
+                        "register (pc=0x%llx fault_addr=0x%llx)",
+                        static_cast<unsigned long long>(pc),
+                        static_cast<unsigned long long>(faultAddr));
+                    if (cn > 0) kudroid_persistent_breadcrumb(nb);
+                }
+                return false;
+            }
             // Zero, not a poison value: the register result feeds straight
             // into later pointer arithmetic, and a poison like 0xDEAD turned
             // "base + offset" into an unmapped address a few instructions

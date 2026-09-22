@@ -542,6 +542,20 @@ bool guest_signal_dispatch(int host_signum, void* host_siginfo, void* host_ucont
                 arm_thread_state64_set_lr_fptr(*ss, reinterpret_cast<void*>(s.uc.uc_mcontext.regs[30]));
                 arm_thread_state64_set_sp(*ss, s.uc.uc_mcontext.sp);
                 arm_thread_state64_set_pc_fptr(*ss, reinterpret_cast<void*>(s.uc.uc_mcontext.pc));
+                // Same measurement as the trampoline, on the other side of the
+                // guest handler: this context is what resumes guest code, so a
+                // zero x18 here is a clobber the delivery path introduced.
+                {
+                    static std::atomic<int> s_redirX18{0};
+                    if (s_redirX18.fetch_add(1, std::memory_order_relaxed) < 4) {
+                        char msg[160];
+                        std::snprintf(msg, sizeof(msg),
+                                      "guest redirect committed pc=0x%llx x18=0x%llx",
+                                      static_cast<unsigned long long>(s.uc.uc_mcontext.pc),
+                                      static_cast<unsigned long long>(s.uc.uc_mcontext.regs[18]));
+                        kudroid_android_log_message(4, "KuDroidSignal", msg);
+                    }
+                }
                 state_changed = true;
                 t_last_fault_pc = 0;
                 t_last_fault_addr = 0;
@@ -581,18 +595,36 @@ bool guest_signal_dispatch(int host_signum, void* host_siginfo, void* host_ucont
     return state_changed;
 }
 
+// Async-signal-safe hex append: no allocation, no stdio, bounded at cap-1.
+// Returns the new length.
+int appendHex(char* out, int len, int cap, const char* prefix, uint64_t v) {
+    while (*prefix != '\0' && len < cap - 1) out[len++] = *prefix++;
+    char tmp[16];
+    int n = 0;
+    if (v == 0) {
+        tmp[n++] = '0';
+    } else {
+        while (v != 0 && n < 16) {
+            tmp[n++] = "0123456789abcdef"[v & 0xF];
+            v >>= 4;
+        }
+    }
+    while (n > 0 && len < cap - 1) out[len++] = tmp[--n];
+    return len;
+}
+
 // The host handler installed for any signal KuDroid does not own. Uniform with the
 // owned path: every guest handler is reached through translation, never called with
 // host-shaped arguments.
 extern "C" void kudroid_guest_signal_trampoline(int host_signum, siginfo_t* info, void* uc) {
-    // Diagnostic: async delivery zeroes the platform register on this OS; a
-    // delivery landing inside guest x18-live code is fatal, so every delivery
-    // is named (capped) to attribute clobber crashes. Lock-free: this IS a
-    // signal handler, and a mutex here self-deadlocks when the signal lands
-    // while another thread holds it. Counter + raw write only.
+    // Name every delivery (capped): the platform register holds live guest
+    // addresses across calls, so a delivery is the only event that can destroy
+    // one, and the value it was destroyed to is what identifies the culprit.
+    // Lock-free: this IS a signal handler, and a mutex here self-deadlocks when
+    // the signal lands while another thread holds it. Counter + raw write only.
     static std::atomic<int> s_n{0};
     if (s_n.fetch_add(1, std::memory_order_relaxed) < 12) {
-        char msg[64];
+        char msg[96];
         int len = 0;
         const char* pre = "guest signal delivered host=";
         while (pre[len] != '\0') {
@@ -610,7 +642,20 @@ extern "C" void kudroid_guest_signal_trampoline(int host_signum, siginfo_t* info
                 v /= 10;
             }
         }
-        while (nd > 0 && len < 62) msg[len++] = digits[--nd];
+        while (nd > 0 && len < 40) msg[len++] = digits[--nd];
+        // pc and x18 exactly as the platform saved them for the interrupted
+        // guest. x18 == 0 here means the delivery itself destroyed the guest's
+        // platform register and no guest-side handling can restore it; a live
+        // value here means the zeroing happens later, on the way back in.
+#if defined(__APPLE__) && defined(__aarch64__)
+        if (uc != nullptr) {
+            const ucontext_t* hu = static_cast<const ucontext_t*>(uc);
+            len = appendHex(msg, len, sizeof(msg), " pc=0x",
+                            static_cast<uint64_t>(hu->uc_mcontext->__ss.__pc));
+            len = appendHex(msg, len, sizeof(msg), " x18=0x",
+                            static_cast<uint64_t>(hu->uc_mcontext->__ss.__x[18]));
+        }
+#endif
         msg[len++] = '\n';
         (void)::write(STDERR_FILENO, msg, static_cast<size_t>(len));
     }
