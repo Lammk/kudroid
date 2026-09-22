@@ -18,6 +18,13 @@ void crashNoteMainThread(void);  // records pthread_self as the main thread
 // Install the process-wide signal handlers. Idempotent: the first call wins.
 void installCrashHandlers(void);
 
+// One-shot boot probe: does a signal delivery preserve x18? Guest binaries
+// reserve x18 for a live address and nothing on the guest side can rebuild a
+// destroyed value, so the answer decides whether guest code needs x18 lowered
+// away or a delivery can be trusted to leave the register alone. Logs one line;
+// no-op off Apple/arm64.
+void kudroid_probe_platform_register(void);
+
 // Reset the handler-owned worker budgets for a new app.
 void crashResetWorkerBudgets(void);
 

@@ -149,6 +149,10 @@ extern "C" void kudroid_set_log_dir(const char* dir) {
     }
 
     installCrashHandlers();
+    // Answer the platform-register question once, before any guest code runs:
+    // guest binaries reserve x18 for a live address, and the fix for that
+    // depends on whether a delivery preserves it.
+    kudroid_probe_platform_register();
     // Write the build stamp to its own file so the running version can be checked
     // without reading a log, which answers "is the iPhone still on the old build?".
     const char* stamp = kudroid_build_stamp();

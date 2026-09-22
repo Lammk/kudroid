@@ -2132,6 +2132,72 @@ host_fatal_path:;
     }
 }
 
+#if defined(__APPLE__) && defined(__aarch64__)
+namespace {
+extern "C" void platformProbeHandler(int) {
+    // Empty on purpose: the kernel's signal frame is what the interrupted code
+    // sees on return, so whatever this handler does to x18 is not the question.
+}
+}  // namespace
+
+void kudroid_probe_platform_register(void) {
+    static bool done = false;
+    if (done) return;
+    done = true;
+
+    const int sig = SIGUSR2;
+    struct sigaction sa;
+    std::memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = platformProbeHandler;
+    sigemptyset(&sa.sa_mask);
+    struct sigaction old;
+    if (sigaction(sig, &sa, &old) != 0) return;
+
+    const long pid = static_cast<long>(::getpid());
+    const uint64_t sentinel = 0x5150C0DE12345678ULL;
+    uint64_t afterSyscall = 0;
+    uint64_t afterDelivery = 0;
+    // Both measurements are inline syscalls (Darwin arm64: getpid=20, kill=37)
+    // rather than C calls, so the only thing between writing x18 and reading it
+    // back is the kernel path being measured.
+    __asm__ __volatile__(
+        "mov x18, %1\n\t"
+        "mov x16, #20\n\t"
+        "svc #0x80\n\t"
+        "mov %0, x18\n\t"
+        : "=r"(afterSyscall)
+        : "r"(sentinel)
+        : "x0", "x16", "memory", "cc");
+    __asm__ __volatile__(
+        "mov x18, %1\n\t"
+        "mov w0, %w2\n\t"
+        "mov w1, %w3\n\t"
+        "mov x16, #37\n\t"
+        "svc #0x80\n\t"
+        "mov %0, x18\n\t"
+        : "=r"(afterDelivery)
+        : "r"(sentinel), "r"(pid), "r"(static_cast<long>(sig))
+        : "x0", "x1", "x16", "memory", "cc");
+    (void)sigaction(sig, &old, nullptr);
+
+    char msg[192];
+    std::snprintf(msg, sizeof(msg),
+                  "x18: syscall=0x%llx delivery=0x%llx sentinel=0x%llx -> %s",
+                  static_cast<unsigned long long>(afterSyscall),
+                  static_cast<unsigned long long>(afterDelivery),
+                  static_cast<unsigned long long>(sentinel),
+                  afterSyscall != sentinel ? "syscall path"
+                                           : (afterDelivery == sentinel ? "preserved"
+                                                                        : "delivery zeroes it"));
+    kudroid_android_log_message(4, "KuDroidProbe", msg);
+    char line[224];
+    const int n = std::snprintf(line, sizeof(line), "[KuDroidProbe] %s\n", msg);
+    if (n > 0) (void)::write(STDERR_FILENO, line, static_cast<size_t>(n));
+}
+#else
+void kudroid_probe_platform_register(void) {}
+#endif
+
 void installCrashHandlers(void) {
     static bool installed = false;
     if (installed) return;
