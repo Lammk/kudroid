@@ -407,6 +407,15 @@ else()
         target_include_directories(test_vfs PRIVATE include)
     endif()
 
+    # IO trace for the audio thread: FMOD's own reads/seeks must be traced (and
+    # only those), in both the FILE* layer and the fd layer.
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_audio_trace.cpp")
+        find_package(Threads REQUIRED)
+        add_executable(test_audio_trace tests/test_audio_trace.cpp)
+        target_link_libraries(test_audio_trace PRIVATE kudroid_core Threads::Threads)
+        target_include_directories(test_audio_trace PRIVATE include)
+    endif()
+
     find_package(Threads REQUIRED)
     add_executable(test_touch_event_queue tests/test_touch_event_queue.cpp)
     target_include_directories(test_touch_event_queue PRIVATE include)

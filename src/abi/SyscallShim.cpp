@@ -50,6 +50,7 @@
 #include <mach/mach.h>
 #include <mach/vm_region.h>
 #include <malloc/malloc.h>
+#include "kudroid/MachVmDecls.h"
 #else
 #include <malloc.h>
 #endif
@@ -1333,6 +1334,43 @@ void log_mmap_result(void* result, size_t length, int prot, int flags, int fd,
         }
     }
 }
+
+#if defined(__APPLE__)
+static bool can_use_fixed_placement(void* addr, size_t length) {
+    if (addr == nullptr || length == 0) return false;
+    const long host_page = ::sysconf(_SC_PAGESIZE);
+    const uintptr_t page_mask = (host_page > 0 ? static_cast<uintptr_t>(host_page) : 16384u) - 1;
+    const uintptr_t uaddr = reinterpret_cast<uintptr_t>(addr);
+    if ((uaddr & page_mask) != 0) return false;
+
+    mach_vm_address_t a = static_cast<mach_vm_address_t>(uaddr);
+    const mach_vm_address_t target_end = a + static_cast<mach_vm_address_t>(length);
+    while (a < target_end) {
+        mach_vm_address_t cur_a = a;
+        mach_vm_size_t sz = 0;
+        kudroid_vm_region_basic_info_64_t info{};
+        mach_msg_type_number_t count = KUDROID_VM_REGION_BASIC_INFO_64_COUNT;
+        mach_port_t obj = MACH_PORT_NULL;
+        const kern_return_t kr = mach_vm_region(
+            mach_task_self(), &cur_a, &sz, KUDROID_VM_REGION_BASIC_INFO_64_FLAVOR,
+            reinterpret_cast<vm_region_info_t>(&info), &count, &obj);
+        if (obj != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), obj);
+        if (kr != KERN_SUCCESS) {
+            return true;
+        }
+        if (cur_a > a) {
+            if (cur_a >= target_end) return true;
+            a = cur_a;
+        }
+        if (info.protection != VM_PROT_NONE) {
+            return false;
+        }
+        if (sz == 0) return false;
+        a += sz;
+    }
+    return true;
+}
+#endif
 }  // namespace
 
 // Memory mapping wrappers to strip Linux specific flags
@@ -1387,6 +1425,9 @@ extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int
         0x100000  | // MAP_FIXED_NOREPLACE
         0x40000000; // MAP_UNINITIALIZED
 
+    constexpr int LINUX_MAP_FIXED_NOREPLACE = 0x100000;
+    const bool fixed_noreplace = (flags & LINUX_MAP_FIXED_NOREPLACE) != 0;
+
     // IMPORTANT: strip Linux-only flags from the input flags, not from darwin_flags
     // after mapping — both use bit 0x1000, so stripping after would drop MAP_ANON.
     const int clean_flags = flags & ~(LINUX_ONLY_MAP_FLAGS | 0xFC000000);
@@ -1401,6 +1442,17 @@ extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int
     if (clean_flags & LINUX_MAP_ANONYMOUS) {
         darwin_flags |= MAP_ANON;
         darwin_fd = -1;  // Darwin requires fd == -1 for anonymous mappings
+    }
+
+    // Honor address hint for anonymous allocations if target range is unmapped or PROT_NONE reservation
+    if (darwin_fd < 0 && addr != nullptr && !(darwin_flags & MAP_FIXED)) {
+        if (can_use_fixed_placement(addr, length)) {
+            darwin_flags |= MAP_FIXED;
+        } else if (fixed_noreplace) {
+            errno = EEXIST;
+            log_mmap_result(MAP_FAILED, length, prot, flags, fd, offset, addr);
+            return MAP_FAILED;
+        }
     }
 
     // Align unaligned MAP_FIXED anonymous mapping to host page size.
@@ -2088,6 +2140,27 @@ static void darwin_to_linux_sockaddr(const struct sockaddr* src, socklen_t srcle
 }
 #endif
 
+namespace {
+// Defined with the fd-path map further down; declared here because the lseek
+// case sits above that definition.
+std::string fd_path(int fd);
+}  // namespace
+
+// Audio-side fd tracing. FMOD does its bank IO on its own thread, and by then the
+// preload-era caps on the fd traces below are long spent, so the audio path's own
+// reads/seeks were invisible exactly when a createSound fails. Audio IO therefore
+// gets its own budget: per-thread identity plus a bounded op count, so one clip
+// load keeps a complete trace without flooding the log.
+extern "C" bool kudroid_audio_thread(void);
+static std::atomic<int> g_audioFdOps{0};
+constexpr int kAudioFdOpBudget = 1500;
+static bool audio_fd_trace_take() {
+    if (g_audioFdOps.load(std::memory_order_relaxed) >= kAudioFdOpBudget) return false;
+    if (!kudroid_audio_thread()) return false;
+    g_audioFdOps.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+
 extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_t a3, uintptr_t a4, uintptr_t a5, uintptr_t a6) {
     uintptr_t entryX19 = 0;
 #if defined(__aarch64__)
@@ -2176,6 +2249,15 @@ extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_
                                  lfd, static_cast<long long>(a2), static_cast<int>(a3),
                                  static_cast<long long>(res));
                 }
+            }
+            if (audio_fd_trace_take()) {
+                const std::string p = fd_path(lfd);
+                std::fprintf(stderr,
+                             "%s[KuDroidFd] AUDIO lseek fd=%d apk=%d path=%s to=%lld "
+                             "whence=%d ret=%lld\n",
+                             kudroid_trace_stamp(), lfd, kudroid_fd_is_apk(lfd) ? 1 : 0,
+                             p.empty() ? "?" : p.c_str(), static_cast<long long>(a2),
+                             static_cast<int>(a3), static_cast<long long>(res));
             }
             return res;
         }
@@ -2658,6 +2740,13 @@ extern "C" ssize_t bionic_read(int fd, void* buf, size_t count) {
             }
         }
     }
+    if (audio_fd_trace_take()) {
+        const std::string p = fd_path(fd);
+        std::fprintf(stderr,
+                     "%s[KuDroidFd] AUDIO read fd=%d apk=%d path=%s count=%zu ret=%zd\n",
+                     kudroid_trace_stamp(), fd, kudroid_fd_is_apk(fd) ? 1 : 0,
+                     p.empty() ? "?" : p.c_str(), count, ret);
+    }
     return ret;
 }
 
@@ -3003,6 +3092,17 @@ extern "C" ssize_t bionic_pread64(int fd, void* buf, size_t count, off_t offset)
             }
         }
         io_volume_add(std::string(fd_path(fd)), static_cast<uint64_t>(ret));
+    }
+    // Audio thread: traced on any fd and regardless of result, because a clip load
+    // that fails is exactly the case where the failing offset matters.
+    if (audio_fd_trace_take()) {
+        const std::string p = fd_path(fd);
+        std::fprintf(stderr,
+                     "%s[KuDroidFd] AUDIO pread fd=%d apk=%d path=%s offset=%lld count=%zu "
+                     "ret=%zd took=%lldms\n",
+                     kudroid_trace_stamp(), fd, kudroid_fd_is_apk(fd) ? 1 : 0,
+                     p.empty() ? "?" : p.c_str(), static_cast<long long>(offset), count,
+                     ret, ms);
     }
     // Diagnostic: slow asset reads starve async loaders (mixer hits pending voices).
     if (ms >= 5 && count >= 65536) {

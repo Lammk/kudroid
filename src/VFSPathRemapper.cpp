@@ -25,6 +25,7 @@
 #include <fstream>
 #include <fcntl.h>
 #include <limits.h>
+#include <pthread.h>
 #include <sstream>
 #include <unistd.h>
 #include <vector>
@@ -1684,6 +1685,11 @@ int vfs_open64(const char* path, int flags, mode_t mode) { return vfs_open(path,
 
 static void track_apk_stream(FILE* f);
 
+// Audio-side tracing (defined next to the stream table): FMOD's own thread does
+// not go through the per-instance op gate, so it is identified by thread name.
+static bool audio_thread();
+static bool audio_trace_take(int sid);
+
 extern std::mutex g_freadVolMtx;
 extern std::map<FILE*, std::string> g_freadPaths;
 
@@ -1725,6 +1731,13 @@ FILE* vfs_fopen(const char* path, const char* mode) {
                          result ? "OK" : std::strerror(errno), seen,
                          trace_caller_text(caller));
         }
+    }
+    // Audio thread opens are traced unconditionally (bounded by the audio budget,
+    // not by the asset-path rate limiter above): a clip load that fails starts at
+    // the open, and the generic gate would hide it past the first 40 lines.
+    if (audio_trace_take(-1)) {
+        ktraceLine("[KuDroidVFS] AUDIO fopen(%s) -> %s%s\n", path ? path : "?",
+                     result ? "OK" : std::strerror(errno), trace_caller_text(caller));
     }
     if (result != nullptr && path != nullptr) {
         const size_t len = std::strlen(path);
@@ -1773,7 +1786,55 @@ std::atomic<int> g_apkStreamTraceNo[kTrackedStreams] = {};
 std::atomic<int> g_apkStreamInstances{0};
 std::mutex g_apkStreamsMtx;
 
+// Audio-side op tracing. FMOD reads banks from its own thread, and by then the
+// stream table has recycled far past kOpTracedStreams, so the per-instance gate
+// above shows nothing of the audio path. Audio IO is named per thread instead:
+// every op from an FMOD thread is traced until both budgets run out (per stream,
+// then per process), which bounds the log while still covering one whole
+// createSound from open to the failing read.
+constexpr int kAudioOpCapPerStream = 400;
+constexpr int kAudioOpBudget = 3000;
+std::atomic<int> g_audioStreamOps[kTrackedStreams] = {};
+std::atomic<int> g_audioOpsTraced{0};
+
 }  // namespace
+
+// Thread names come from the host pthread (bionic_prctl forwards the guest's name
+// request to it). Cached per thread because this runs on the read path; a thread
+// may be named after its first op, so the cache expires every 256 calls rather
+// than being taken once.
+static bool audio_thread() {
+    static thread_local unsigned calls = 0;
+    static thread_local bool audio = false;
+    if ((calls++ & 0xFFu) == 0) {
+        char name[64] = {};
+#if defined(__APPLE__)
+        pthread_getname_np(pthread_self(), name, sizeof(name));
+#else
+        (void)pthread_getname_np(pthread_self(), name, sizeof(name));
+#endif
+        audio = name[0] != '\0' && std::strstr(name, "FMOD") != nullptr;
+    }
+    return audio;
+}
+
+// Same answer for the fd layer (SyscallShim), which cannot see this TU's statics.
+extern "C" bool kudroid_audio_thread(void) { return audio_thread(); }
+
+// True when this op should be traced, consuming one slot of both budgets.
+// sid < 0 means "no stream yet" (open): only the process budget applies.
+static bool audio_trace_take(int sid) {
+    if (sid >= kTrackedStreams) return false;
+    if (!audio_thread()) return false;
+    if (sid >= 0 &&
+        g_audioStreamOps[sid].load(std::memory_order_relaxed) >= kAudioOpCapPerStream) {
+        return false;
+    }
+    if (g_audioOpsTraced.load(std::memory_order_relaxed) >= kAudioOpBudget) return false;
+    if (sid >= 0) g_audioStreamOps[sid].fetch_add(1, std::memory_order_relaxed);
+    g_audioOpsTraced.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
 
 static void track_apk_stream(FILE* f) {
     if (f == nullptr) return;
@@ -1784,6 +1845,7 @@ static void track_apk_stream(FILE* f) {
                                                     reinterpret_cast<uintptr_t>(f))) {
             g_apkStreamOps[i].store(0, std::memory_order_relaxed);
             g_apkStreamShortLogged[i].store(0, std::memory_order_relaxed);
+            g_audioStreamOps[i].store(0, std::memory_order_relaxed);
             const int instance = g_apkStreamInstances.fetch_add(1, std::memory_order_relaxed);
             g_apkStreamTraceNo[i].store(instance, std::memory_order_relaxed);
             // Lifecycle line: one apk stream is one consumer session (a clip
@@ -1991,6 +2053,12 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
             g_apkStreamTraceNo[sid].load(std::memory_order_relaxed) < kOpTracedStreams) {
             ktraceLine(
                          "[KuDroidApkS] sid=%d op=%llu fread want=%zu got=%zu pos=%ld\n",
+                         sid, static_cast<unsigned long long>(op), size * count, n * size,
+                         std::ftell(stream));
+        } else if (audio_trace_take(sid)) {
+            // Audio thread: its own sample of the same shape, past the instance cap.
+            ktraceLine(
+                         "[KuDroidApkS] sid=%d AUDIO op=%llu fread want=%zu got=%zu pos=%ld\n",
                          sid, static_cast<unsigned long long>(op), size * count, n * size,
                          std::ftell(stream));
         }
@@ -2296,31 +2364,23 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                         const auto pit2 = g_freadPaths.find(stream);
                         if (pit2 != g_freadPaths.end()) {
                             auto& list = g_fsbWindows[pit2->second];
-                            // A new blob supersedes the previous one on this
-                            // archive, so verdict it now either way: COMPLETE
-                            // means the whole blob reached the reader, SHORT
-                            // means the clip's bytes were never all read — the
-                            // distinction this investigation has needed and
-                            // never had (verdicts used to wait for a 16-window
-                            // backlog that a session never reaches).
-                            for (const auto& prev : list) {
-                                const uint64_t covered = prev.blocks * 2048;
-                                std::fprintf(
-                                    stderr,
-                                    "[KuDroidFmod] blob off=%ld size=%llu covered=%llu %s\n",
-                                    prev.start,
-                                    static_cast<unsigned long long>(prev.expected),
-                                    static_cast<unsigned long long>(
-                                        covered > prev.expected ? prev.expected : covered),
-                                    prev.blocks * 2048 >= prev.expected ? "COMPLETE" : "SHORT");
+                            bool already = false;
+                            for (auto& existing : list) {
+                                if (existing.start == start) {
+                                    fsb_window_cover(existing, start, start + static_cast<long>(n * size));
+                                    already = true;
+                                    break;
+                                }
                             }
-                            list.clear();
-                            FsbWindow w;
-                            w.start = start;
-                            w.end = start + static_cast<long>(blobTotal);
-                            w.expected = blobTotal;
-                            fsb_window_cover(w, start, start + static_cast<long>(n * size));
-                            list.push_back(w);
+                            if (!already) {
+                                fsb_windows_report_locked(pit2->second, true);
+                                FsbWindow w;
+                                w.start = start;
+                                w.end = start + static_cast<long>(blobTotal);
+                                w.expected = blobTotal;
+                                fsb_window_cover(w, start, start + static_cast<long>(n * size));
+                                list.push_back(w);
+                            }
                         }
                     }
                 }
@@ -2373,6 +2433,13 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
             ktraceLine("[KuDroidIO] big fread bytes=%zu\n", n * size);
         }
     }
+    // Audio thread on a stream that is not the archive: FMOD also reads banks it
+    // opened itself (extracted cache, loose .fsb/.bank). Traced so a failing
+    // createSound keeps a complete picture whichever file it actually read from.
+    if (!apk && audio_trace_take(-1)) {
+        ktraceLine("[KuDroidApkS] sid=-1 AUDIO fread want=%zu got=%zu pos=%ld\n", size * count,
+                     n * size, std::ftell(stream));
+    }
     return n;
 }
 
@@ -2395,10 +2462,14 @@ int vfs_fclose(FILE* stream) {
         for (int i = 0; i < kTrackedStreams; ++i) {
             if (g_apkStreams[i].load(std::memory_order_relaxed) ==
                 reinterpret_cast<uintptr_t>(stream)) {
+                const uint64_t ops =
+                    g_apkStreamOps[i].load(std::memory_order_relaxed);
                 if (g_apkStreamTraceNo[i].load(std::memory_order_relaxed) < kOpTracedStreams) {
                     ktraceLine("[KuDroidApkS] sid=%d close after %llu ops\n", i,
-                               static_cast<unsigned long long>(
-                                   g_apkStreamOps[i].load(std::memory_order_relaxed)));
+                               static_cast<unsigned long long>(ops));
+                } else if (audio_thread()) {
+                    ktraceLine("[KuDroidApkS] sid=%d AUDIO close after %llu ops\n", i,
+                               static_cast<unsigned long long>(ops));
                 }
                 g_apkStreams[i].store(0, std::memory_order_relaxed);
                 break;
@@ -2426,6 +2497,11 @@ int vfs_fseek(FILE* stream, long offset, int whence) {
                 g_apkStreamTraceNo[sid].load(std::memory_order_relaxed) < kOpTracedStreams) {
                 ktraceLine(
                              "[KuDroidApkS] sid=%d op=%llu seek %ld whence=%d -> %ld\n",
+                             sid, static_cast<unsigned long long>(op), offset, whence,
+                             std::ftell(stream));
+            } else if (audio_trace_take(sid)) {
+                ktraceLine(
+                             "[KuDroidApkS] sid=%d AUDIO op=%llu seek %ld whence=%d -> %ld\n",
                              sid, static_cast<unsigned long long>(op), offset, whence,
                              std::ftell(stream));
             }
@@ -2475,6 +2551,16 @@ int vfs_fseek(FILE* stream, long offset, int whence) {
             ktraceLine("[KuDroidApkF] fseek END on apk stream -> %ld\n",
                          std::ftell(stream));
         }
+    } else {
+        // Audio-thread seeks outside the tracked-apk case: FMOD also seeks streams it
+        // opened itself (extracted cache, separate banks), and a failed seek is as
+        // informative as a successful one.
+        const int sid = apk_stream_id(stream);
+        if (audio_trace_take(sid)) {
+            ktraceLine(
+                         "[KuDroidApkS] sid=%d AUDIO seek %ld whence=%d from=%ld -> %ld rc=%d\n",
+                         sid, offset, whence, before, std::ftell(stream), rc);
+        }
     }
     return rc;
 }
@@ -2492,6 +2578,7 @@ off_t vfs_ftello(FILE* stream) {
 }
 
 FILE* vfs_freopen(const char* path, const char* mode, FILE* stream) {
+    const void* const caller = __builtin_return_address(0);
     const std::string mapped = VFSPathRemapper::getInstance().remap(path);
     FILE* result = std::freopen(mapped.c_str(), mode, stream);
     // Keep the volume map truthful: freopen reuses the FILE* address for a
@@ -2505,6 +2592,10 @@ FILE* vfs_freopen(const char* path, const char* mode, FILE* stream) {
                 track_apk_stream(result);
             }
         }
+    }
+    if (audio_trace_take(-1)) {
+        ktraceLine("[KuDroidVFS] AUDIO freopen(%s) -> %s%s\n", path ? path : "?",
+                     result ? "OK" : std::strerror(errno), trace_caller_text(caller));
     }
     return result;
 }
