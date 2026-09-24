@@ -6029,7 +6029,7 @@ extern "C" int bionic_AndroidBitmap_unlockPixels(void* env, void* jbitmap) {
 
 extern "C" char* bionic___gnu_strerror_r(int errnum, char* buf, size_t buflen) {
     if (!buf || buflen == 0) return const_cast<char*>("");
-    strerror_r(errnum, buf, buflen);
+    if (strerror_r(errnum, buf, buflen)) {}
     return buf;
 }
 

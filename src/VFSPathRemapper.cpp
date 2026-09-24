@@ -1868,9 +1868,6 @@ static void track_apk_stream(FILE* f) {
     ktraceLine("[KuDroidApkS] stream table full — apk stream untracked\n");
 }
 
-[[maybe_unused]] static bool is_apk_stream(FILE* f) {
-    return apk_stream_id(f) >= 0;
-}
 
 static int apk_stream_id(FILE* f) {
     const auto p = reinterpret_cast<uintptr_t>(f);
@@ -1878,6 +1875,9 @@ static int apk_stream_id(FILE* f) {
         if (g_apkStreams[i].load(std::memory_order_relaxed) == p) return i;
     }
     return -1;
+}
+[[maybe_unused]] static bool is_apk_stream(FILE* f) {
+    return apk_stream_id(f) >= 0;
 }
 
 // Read volume per FILE path: bulk flow through fread (Unity's main read path)
