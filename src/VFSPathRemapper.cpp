@@ -1741,7 +1741,9 @@ FILE* vfs_fopen(const char* path, const char* mode) {
     }
     if (result != nullptr && path != nullptr) {
         const size_t len = std::strlen(path);
-        if (len >= 8 && std::strcmp(path + len - 8, "base.apk") == 0) {
+        if ((len >= 8 && std::strcmp(path + len - 8, "base.apk") == 0) ||
+            (len >= 4 && std::strcmp(path + len - 4, ".apk") == 0) ||
+            (len >= 4 && std::strcmp(path + len - 4, ".obb") == 0)) {
             track_apk_stream(result);
         }
         std::lock_guard<std::mutex> vlock(g_freadVolMtx);
@@ -1768,30 +1770,26 @@ FILE* vfs_fopen64(const char* path, const char* mode) { return vfs_fopen(path, m
 
 // Tracked APK streams: guest fread bypasses the syscall layer, so volume on
 // base.apk (catalog/asset bytes) is otherwise invisible. Lock-free lookup,
-// locked mutation (open/close are rare, reads are hot). The table is small and
-// recycled on fclose; a session that keeps more handles open than slots loses
-// the FSB5 probe on the surplus, so it is sized for the engine's parallel
-// reader count rather than for a single stream.
+// locked mutation (open/close are rare, reads are hot). Sized for parallel readers.
 namespace {
 constexpr int kTrackedStreams = 32;
 std::atomic<uintptr_t> g_apkStreams[kTrackedStreams];
+std::atomic<int> g_apkStreamFd[kTrackedStreams] = {};
+std::atomic<off_t> g_apkStreamSize[kTrackedStreams] = {};
+std::atomic<uint32_t> g_apkStreamEpoch[kTrackedStreams] = {};
+std::atomic<off_t> g_apkStreamSharedPos[kTrackedStreams] = {};
 std::atomic<uint64_t> g_apkStreamOps[kTrackedStreams] = {};
 std::atomic<int> g_apkStreamShortLogged[kTrackedStreams] = {};
-// Op-by-op tracing is limited to the first few stream instances. A session recycles
-// these slots thousands of times (the engine opens the apk once per asset read), and
-// sixteen lines each made this trace the largest section of the log while saying the
-// same thing every time. Short reads and slow ops keep their own budgets below.
 constexpr int kOpTracedStreams = 16;
 std::atomic<int> g_apkStreamTraceNo[kTrackedStreams] = {};
 std::atomic<int> g_apkStreamInstances{0};
 std::mutex g_apkStreamsMtx;
 
-// Audio-side op tracing. FMOD reads banks from its own thread, and by then the
-// stream table has recycled far past kOpTracedStreams, so the per-instance gate
-// above shows nothing of the audio path. Audio IO is named per thread instead:
-// every op from an FMOD thread is traced until both budgets run out (per stream,
-// then per process), which bounds the log while still covering one whole
-// createSound from open to the failing read.
+thread_local off_t tl_apk_stream_pos[kTrackedStreams] = {};
+thread_local uint32_t tl_apk_stream_epoch[kTrackedStreams] = {};
+thread_local bool tl_apk_stream_eof[kTrackedStreams] = {};
+thread_local bool tl_apk_stream_err[kTrackedStreams] = {};
+
 constexpr int kAudioOpCapPerStream = 400;
 constexpr int kAudioOpBudget = 3000;
 std::atomic<int> g_audioStreamOps[kTrackedStreams] = {};
@@ -1838,22 +1836,31 @@ static bool audio_trace_take(int sid) {
 
 static void track_apk_stream(FILE* f) {
     if (f == nullptr) return;
+    const int fd = ::fileno(f);
+    off_t fsize = 0;
+    if (fd >= 0) {
+        struct stat st{};
+        if (::fstat(fd, &st) == 0) {
+            fsize = st.st_size;
+        }
+    }
     std::lock_guard<std::mutex> lock(g_apkStreamsMtx);
     for (int i = 0; i < kTrackedStreams; ++i) {
         uintptr_t empty = 0;
         if (g_apkStreams[i].compare_exchange_strong(empty,
                                                     reinterpret_cast<uintptr_t>(f))) {
+            g_apkStreamFd[i].store(fd, std::memory_order_relaxed);
+            g_apkStreamSize[i].store(fsize, std::memory_order_relaxed);
+            g_apkStreamSharedPos[i].store(0, std::memory_order_relaxed);
+            g_apkStreamEpoch[i].fetch_add(1, std::memory_order_acq_rel);
             g_apkStreamOps[i].store(0, std::memory_order_relaxed);
             g_apkStreamShortLogged[i].store(0, std::memory_order_relaxed);
             g_audioStreamOps[i].store(0, std::memory_order_relaxed);
             const int instance = g_apkStreamInstances.fetch_add(1, std::memory_order_relaxed);
             g_apkStreamTraceNo[i].store(instance, std::memory_order_relaxed);
-            // Lifecycle line: one apk stream is one consumer session (a clip
-            // load, a bundle stream). open/close paired with the per-op trace
-            // below names which session did what, and a full table explains
-            // suddenly-missing IO visibility.
             if (instance < kOpTracedStreams) {
-                ktraceLine("[KuDroidApkS] sid=%d open instance=%d\n", i, instance);
+                ktraceLine("[KuDroidApkS] sid=%d open instance=%d (fd=%d size=%lld)\n",
+                           i, instance, fd, static_cast<long long>(fsize));
             }
             return;
         }
@@ -1861,12 +1868,8 @@ static void track_apk_stream(FILE* f) {
     ktraceLine("[KuDroidApkS] stream table full — apk stream untracked\n");
 }
 
-static bool is_apk_stream(FILE* f) {
-    const auto p = reinterpret_cast<uintptr_t>(f);
-    for (int i = 0; i < kTrackedStreams; ++i) {
-        if (g_apkStreams[i].load(std::memory_order_relaxed) == p) return true;
-    }
-    return false;
+[[maybe_unused]] static bool is_apk_stream(FILE* f) {
+    return apk_stream_id(f) >= 0;
 }
 
 static int apk_stream_id(FILE* f) {
@@ -2034,16 +2037,49 @@ void fread_vol_flush() {
 
 size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
     const void* const caller = __builtin_return_address(0);
-    const bool apk = is_apk_stream(stream);
+    const int sid = apk_stream_id(stream);
+    const bool apk = (sid >= 0);
     const std::chrono::steady_clock::time_point t0 =
         apk ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-    const size_t n = std::fread(buf, size, count, stream);
+
+    size_t n = 0;
+    if (apk) {
+        const int fd = g_apkStreamFd[sid].load(std::memory_order_relaxed);
+        const uint32_t epoch = g_apkStreamEpoch[sid].load(std::memory_order_acquire);
+        if (tl_apk_stream_epoch[sid] != epoch) {
+            tl_apk_stream_epoch[sid] = epoch;
+            tl_apk_stream_pos[sid] = g_apkStreamSharedPos[sid].load(std::memory_order_relaxed);
+            tl_apk_stream_eof[sid] = false;
+            tl_apk_stream_err[sid] = false;
+        }
+        const off_t cur_pos = tl_apk_stream_pos[sid];
+        const size_t total_want = size * count;
+        if (total_want == 0 || size == 0) return 0;
+
+        ssize_t rd = 0;
+        if (fd >= 0) {
+            rd = ::pread(fd, buf, total_want, cur_pos);
+        }
+        if (rd < 0) {
+            tl_apk_stream_err[sid] = true;
+            n = 0;
+        } else {
+            if (static_cast<size_t>(rd) < total_want) {
+                tl_apk_stream_eof[sid] = true;
+            }
+            tl_apk_stream_pos[sid] = cur_pos + rd;
+            g_apkStreamSharedPos[sid].store(cur_pos + rd, std::memory_order_relaxed);
+            n = static_cast<size_t>(rd) / size;
+        }
+    } else {
+        n = std::fread(buf, size, count, stream);
+    }
+
     if (apk) {
         const long long tookMs =
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - t0)
                 .count();
-        const int sid = apk_stream_id(stream);
         uint64_t op = 0;
         if (sid >= 0) op = g_apkStreamOps[sid].fetch_add(1, std::memory_order_relaxed) + 1;
         // First ops of every stream: a clip load / bundle stream shows its
@@ -2054,13 +2090,13 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
             ktraceLine(
                          "[KuDroidApkS] sid=%d op=%llu fread want=%zu got=%zu pos=%ld\n",
                          sid, static_cast<unsigned long long>(op), size * count, n * size,
-                         std::ftell(stream));
+                         vfs_ftell(stream));
         } else if (audio_trace_take(sid)) {
             // Audio thread: its own sample of the same shape, past the instance cap.
             ktraceLine(
                          "[KuDroidApkS] sid=%d AUDIO op=%llu fread want=%zu got=%zu pos=%ld\n",
                          sid, static_cast<unsigned long long>(op), size * count, n * size,
-                         std::ftell(stream));
+                         vfs_ftell(stream));
         }
         // Short read: fewer elements than asked. On the archive stream that is
         // a truncated slice — the exact geometry that turns a valid FSB5 into
@@ -2069,8 +2105,8 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
             g_apkStreamShortLogged[sid].fetch_add(1, std::memory_order_relaxed) < 6) {
             ktraceLine(
                          "[KuDroidApkS] sid=%d SHORT want=%zu got=%zu pos=%ld eof=%d errno=%d\n",
-                         sid, size * count, n * size, std::ftell(stream),
-                         std::feof(stream) ? 1 : 0, errno);
+                         sid, size * count, n * size, vfs_ftell(stream),
+                         vfs_feof(stream) ? 1 : 0, errno);
         }
         // Slow read: the 90 s scene-load stall surfaced only as a gap between
         // volume milestones; naming the op that ate the wall-clock removes the
@@ -2080,7 +2116,7 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
             s_slowLogged.fetch_add(1, std::memory_order_relaxed);
             ktraceLine(
                          "[KuDroidApkS] sid=%d SLOW %lldms want=%zu got=%zu pos=%ld\n",
-                         sid, tookMs, size * count, n * size, std::ftell(stream));
+                         sid, tookMs, size * count, n * size, vfs_ftell(stream));
         }
     }
     if (n > 0 && apk) {
@@ -2123,7 +2159,7 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
             buf != nullptr && n * size >= 4) {
             s_magicCount.fetch_add(1, std::memory_order_relaxed);
             s_nextSniff.fetch_add(16ULL * 1024 * 1024, std::memory_order_relaxed);
-            const long off = std::ftell(stream);
+            const long off = vfs_ftell(stream);
             const long start = off >= 0 ? off - static_cast<long>(n * size) : -1;
             const auto* b = static_cast<const unsigned char*>(buf);
             // Which entry does this offset belong to? The stream path is the
@@ -2157,7 +2193,7 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
         // archive, whichever handle carried them.
         {
             std::lock_guard<std::mutex> vlock(g_freadVolMtx);
-            const long pos = std::ftell(stream);
+            const long pos = vfs_ftell(stream);
             const long start = pos >= 0 ? pos - static_cast<long>(n * size) : -1;
             const auto pit = g_freadPaths.find(stream);
             if (pit != g_freadPaths.end() && start >= 0) {
@@ -2200,7 +2236,7 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
             const auto* f = static_cast<const unsigned char*>(buf);
             if (f[0] == 'F' && f[1] == 'S' && f[2] == 'B' && f[3] == '5') {
                 s_fsbCount.fetch_add(1, std::memory_order_relaxed);
-                const long off = std::ftell(stream);
+                const long off = vfs_ftell(stream);
                 const long start = off >= 0 ? off - static_cast<long>(n * size) : -1;
                 std::string entry;
                 uint16_t method = 0xFFFF;
@@ -2405,7 +2441,7 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
             // chunk) or a stream that ends early (req is the whole blob, n is short).
             ktraceLine(
                          "[KuDroidFmod] post-FSB5 read req=%zu x %zu -> %zu bytes pos=%ld%s\n",
-                         size, count, n, std::ftell(stream), trace_caller_text(caller));
+                         size, count, n, vfs_ftell(stream), trace_caller_text(caller));
         }
     }
     if (n > 0) {
@@ -2471,7 +2507,10 @@ int vfs_fclose(FILE* stream) {
                     ktraceLine("[KuDroidApkS] sid=%d AUDIO close after %llu ops\n", i,
                                static_cast<unsigned long long>(ops));
                 }
-                g_apkStreams[i].store(0, std::memory_order_relaxed);
+                g_apkStreamFd[i].store(-1, std::memory_order_relaxed);
+                g_apkStreamSize[i].store(0, std::memory_order_relaxed);
+                g_apkStreamEpoch[i].fetch_add(1, std::memory_order_acq_rel);
+                g_apkStreams[i].store(0, std::memory_order_release);
                 break;
             }
         }
@@ -2483,38 +2522,91 @@ int vfs_fclose(FILE* stream) {
     return std::fclose(stream);
 }
 
-int vfs_fseek(FILE* stream, long offset, int whence) {
+off_t vfs_ftello(FILE* stream) {
+    if (!stream) {
+        errno = EBADF;
+        return -1;
+    }
+    const int sid = apk_stream_id(stream);
+    if (sid >= 0) {
+        const uint32_t epoch = g_apkStreamEpoch[sid].load(std::memory_order_acquire);
+        if (tl_apk_stream_epoch[sid] != epoch) {
+            tl_apk_stream_epoch[sid] = epoch;
+            tl_apk_stream_pos[sid] = g_apkStreamSharedPos[sid].load(std::memory_order_relaxed);
+            tl_apk_stream_eof[sid] = false;
+            tl_apk_stream_err[sid] = false;
+        }
+        return tl_apk_stream_pos[sid];
+    }
+    return ::ftello(stream);
+}
+
+long vfs_ftell(FILE* stream) {
+    return static_cast<long>(vfs_ftello(stream));
+}
+
+int vfs_fseeko(FILE* stream, off_t offset, int whence) {
+    if (!stream) {
+        errno = EBADF;
+        return -1;
+    }
     const void* const caller = __builtin_return_address(0);
-    const long before = std::ftell(stream);
-    const int rc = std::fseek(stream, offset, whence);
-    if (rc == 0 && is_apk_stream(stream)) {
-        // Per-stream op trace (shared counter with fread): the first ops of a
-        // stream show the seek pattern that headers and clip data produce.
-        const int sid = apk_stream_id(stream);
+    const int sid = apk_stream_id(stream);
+    const bool apk = (sid >= 0);
+    const off_t before = vfs_ftello(stream);
+    int rc = 0;
+
+    if (apk) {
+        const uint32_t epoch = g_apkStreamEpoch[sid].load(std::memory_order_acquire);
+        if (tl_apk_stream_epoch[sid] != epoch) {
+            tl_apk_stream_epoch[sid] = epoch;
+            tl_apk_stream_pos[sid] = g_apkStreamSharedPos[sid].load(std::memory_order_relaxed);
+            tl_apk_stream_eof[sid] = false;
+            tl_apk_stream_err[sid] = false;
+        }
+        off_t new_pos = 0;
+        if (whence == SEEK_SET) {
+            new_pos = offset;
+        } else if (whence == SEEK_CUR) {
+            new_pos = tl_apk_stream_pos[sid] + offset;
+        } else if (whence == SEEK_END) {
+            new_pos = g_apkStreamSize[sid].load(std::memory_order_relaxed) + offset;
+        } else {
+            errno = EINVAL;
+            return -1;
+        }
+        if (new_pos < 0) {
+            errno = EINVAL;
+            return -1;
+        }
+        tl_apk_stream_pos[sid] = new_pos;
+        g_apkStreamSharedPos[sid].store(new_pos, std::memory_order_relaxed);
+        tl_apk_stream_eof[sid] = false;
+        rc = 0;
+    } else {
+        rc = ::fseeko(stream, offset, whence);
+    }
+
+    if (rc == 0 && apk) {
         if (sid >= 0) {
             const uint64_t op = g_apkStreamOps[sid].fetch_add(1, std::memory_order_relaxed) + 1;
             if (op <= 16 &&
                 g_apkStreamTraceNo[sid].load(std::memory_order_relaxed) < kOpTracedStreams) {
                 ktraceLine(
-                             "[KuDroidApkS] sid=%d op=%llu seek %ld whence=%d -> %ld\n",
-                             sid, static_cast<unsigned long long>(op), offset, whence,
-                             std::ftell(stream));
+                             "[KuDroidApkS] sid=%d op=%llu seek %lld whence=%d -> %lld\n",
+                             sid, static_cast<unsigned long long>(op), static_cast<long long>(offset), whence,
+                             static_cast<long long>(vfs_ftello(stream)));
             } else if (audio_trace_take(sid)) {
                 ktraceLine(
-                             "[KuDroidApkS] sid=%d AUDIO op=%llu seek %ld whence=%d -> %ld\n",
-                             sid, static_cast<unsigned long long>(op), offset, whence,
-                             std::ftell(stream));
+                             "[KuDroidApkS] sid=%d AUDIO op=%llu seek %lld whence=%d -> %lld\n",
+                             sid, static_cast<unsigned long long>(op), static_cast<long long>(offset), whence,
+                             static_cast<long long>(vfs_ftello(stream)));
             }
         }
-        // Seeks are how FMOD walks its FSB (header read, then jump to the Vorbis
-        // setup/data). A seek that lands outside the blob it was reading is the
-        // exact moment the parse goes wrong, so position, target, and result are
-        // all part of one line. Capped per process: header hunting alone can
-        // seek thousands of times before the first FSB appears.
         static std::atomic<int> s_logged{0};
         if (s_logged.load() < 40) {
             ++s_logged;
-            ktraceLine("[KuDroidApkF] fseek offset=%ld whence=%d\n", offset,
+            ktraceLine("[KuDroidApkF] fseek offset=%lld whence=%d\n", static_cast<long long>(offset),
                          whence);
         }
         {
@@ -2531,9 +2623,9 @@ int vfs_fseek(FILE* stream, long offset, int whence) {
                             if (s_inblobSeek.load(std::memory_order_relaxed) < 60) {
                                 s_inblobSeek.fetch_add(1, std::memory_order_relaxed);
                                 ktraceLine(
-                                             "[KuDroidFmod] in-blob seek sid=%d %ld -> %ld whence=%d "
+                                             "[KuDroidFmod] in-blob seek sid=%d %lld -> %lld whence=%d "
                                              "blob=[%ld+%llu]%s\n",
-                                             sid, before, offset, whence, w.start,
+                                             sid, static_cast<long long>(before), static_cast<long long>(offset), whence, w.start,
                                              static_cast<unsigned long long>(w.expected),
                                              trace_caller_text(caller));
                             }
@@ -2543,38 +2635,74 @@ int vfs_fseek(FILE* stream, long offset, int whence) {
                 }
             }
         }
-        // SEEK_END resolves to the whole-archive size; a consumer taking it
-        // as the current entry's size streams garbage past the entry end.
         static std::atomic<int> s_endLogged{0};
         if (whence == SEEK_END && s_endLogged.load() < 16) {
             ++s_endLogged;
-            ktraceLine("[KuDroidApkF] fseek END on apk stream -> %ld\n",
-                         std::ftell(stream));
+            ktraceLine("[KuDroidApkF] fseek END on apk stream -> %lld\n",
+                         static_cast<long long>(vfs_ftello(stream)));
         }
-    } else {
-        // Audio-thread seeks outside the tracked-apk case: FMOD also seeks streams it
-        // opened itself (extracted cache, separate banks), and a failed seek is as
-        // informative as a successful one.
-        const int sid = apk_stream_id(stream);
+    } else if (!apk) {
         if (audio_trace_take(sid)) {
             ktraceLine(
-                         "[KuDroidApkS] sid=%d AUDIO seek %ld whence=%d from=%ld -> %ld rc=%d\n",
-                         sid, offset, whence, before, std::ftell(stream), rc);
+                         "[KuDroidApkS] sid=%d AUDIO seek %lld whence=%d from=%lld -> %lld rc=%d\n",
+                         sid, static_cast<long long>(offset), whence, static_cast<long long>(before),
+                         static_cast<long long>(vfs_ftello(stream)), rc);
         }
     }
     return rc;
 }
 
-int vfs_fseeko(FILE* stream, off_t offset, int whence) {
-    return ::fseeko(stream, offset, whence);
+int vfs_fseek(FILE* stream, long offset, int whence) {
+    return vfs_fseeko(stream, offset, whence);
 }
 
-long vfs_ftell(FILE* stream) {
-    return std::ftell(stream);
+int vfs_feof(FILE* stream) {
+    if (!stream) return 0;
+    const int sid = apk_stream_id(stream);
+    if (sid >= 0) {
+        const uint32_t epoch = g_apkStreamEpoch[sid].load(std::memory_order_acquire);
+        if (tl_apk_stream_epoch[sid] != epoch) {
+            tl_apk_stream_epoch[sid] = epoch;
+            tl_apk_stream_pos[sid] = g_apkStreamSharedPos[sid].load(std::memory_order_relaxed);
+            tl_apk_stream_eof[sid] = false;
+            tl_apk_stream_err[sid] = false;
+        }
+        return (tl_apk_stream_eof[sid] || tl_apk_stream_pos[sid] >= g_apkStreamSize[sid].load(std::memory_order_relaxed)) ? 1 : 0;
+    }
+    return std::feof(stream);
 }
 
-off_t vfs_ftello(FILE* stream) {
-    return ::ftello(stream);
+int vfs_ferror(FILE* stream) {
+    if (!stream) return 0;
+    const int sid = apk_stream_id(stream);
+    if (sid >= 0) {
+        const uint32_t epoch = g_apkStreamEpoch[sid].load(std::memory_order_acquire);
+        if (tl_apk_stream_epoch[sid] != epoch) return 0;
+        return tl_apk_stream_err[sid] ? 1 : 0;
+    }
+    return std::ferror(stream);
+}
+
+void vfs_clearerr(FILE* stream) {
+    if (!stream) return;
+    const int sid = apk_stream_id(stream);
+    if (sid >= 0) {
+        tl_apk_stream_eof[sid] = false;
+        tl_apk_stream_err[sid] = false;
+        return;
+    }
+    std::clearerr(stream);
+}
+
+void vfs_rewind(FILE* stream) {
+    if (!stream) return;
+    const int sid = apk_stream_id(stream);
+    if (sid >= 0) {
+        vfs_fseeko(stream, 0, SEEK_SET);
+        vfs_clearerr(stream);
+        return;
+    }
+    std::rewind(stream);
 }
 
 FILE* vfs_freopen(const char* path, const char* mode, FILE* stream) {

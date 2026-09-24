@@ -1336,37 +1336,34 @@ void log_mmap_result(void* result, size_t length, int prot, int flags, int fd,
 }
 
 #if defined(__APPLE__)
-static bool can_use_fixed_placement(void* addr, size_t length) {
-    if (addr == nullptr || length == 0) return false;
-    const long host_page = ::sysconf(_SC_PAGESIZE);
-    const uintptr_t page_mask = (host_page > 0 ? static_cast<uintptr_t>(host_page) : 16384u) - 1;
-    const uintptr_t uaddr = reinterpret_cast<uintptr_t>(addr);
-    if ((uaddr & page_mask) != 0) return false;
-
-    mach_vm_address_t a = static_cast<mach_vm_address_t>(uaddr);
-    const mach_vm_address_t target_end = a + static_cast<mach_vm_address_t>(length);
-    while (a < target_end) {
-        mach_vm_address_t cur_a = a;
+static bool can_use_fixed_placement(uintptr_t start, size_t length) {
+    if (start == 0 || length == 0) return false;
+    uintptr_t curr = start;
+    const uintptr_t target_end = start + length;
+    while (curr < target_end) {
+        mach_vm_address_t region_addr = static_cast<mach_vm_address_t>(curr);
         mach_vm_size_t sz = 0;
         kudroid_vm_region_basic_info_64_t info{};
         mach_msg_type_number_t count = KUDROID_VM_REGION_BASIC_INFO_64_COUNT;
         mach_port_t obj = MACH_PORT_NULL;
         const kern_return_t kr = mach_vm_region(
-            mach_task_self(), &cur_a, &sz, KUDROID_VM_REGION_BASIC_INFO_64_FLAVOR,
+            mach_task_self(), &region_addr, &sz, KUDROID_VM_REGION_BASIC_INFO_64_FLAVOR,
             reinterpret_cast<vm_region_info_t>(&info), &count, &obj);
         if (obj != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), obj);
         if (kr != KERN_SUCCESS) {
             return true;
         }
-        if (cur_a > a) {
-            if (cur_a >= target_end) return true;
-            a = cur_a;
+        if (region_addr > curr) {
+            if (region_addr >= target_end) return true;
+            curr = static_cast<uintptr_t>(region_addr);
         }
         if (info.protection != VM_PROT_NONE) {
             return false;
         }
         if (sz == 0) return false;
-        a += sz;
+        const uintptr_t region_end = static_cast<uintptr_t>(region_addr + sz);
+        if (region_end <= curr) return false;
+        curr = region_end;
     }
     return true;
 }
@@ -1444,10 +1441,20 @@ extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int
         darwin_fd = -1;  // Darwin requires fd == -1 for anonymous mappings
     }
 
+    void* const orig_addr = addr;
+    const long host_page = ::sysconf(_SC_PAGESIZE);
+    const uintptr_t page_mask = (host_page > 0 ? static_cast<uintptr_t>(host_page) : 16384u) - 1;
+
     // Honor address hint for anonymous allocations if target range is unmapped or PROT_NONE reservation
     if (darwin_fd < 0 && addr != nullptr && !(darwin_flags & MAP_FIXED)) {
-        if (can_use_fixed_placement(addr, length)) {
+        const uintptr_t uaddr = reinterpret_cast<uintptr_t>(addr);
+        const uintptr_t aligned_start = uaddr & ~page_mask;
+        const uintptr_t aligned_end = (uaddr + length + page_mask) & ~page_mask;
+        const size_t aligned_len = static_cast<size_t>(aligned_end - aligned_start);
+        if (can_use_fixed_placement(aligned_start, aligned_len)) {
             darwin_flags |= MAP_FIXED;
+            addr = reinterpret_cast<void*>(aligned_start);
+            length = aligned_len;
         } else if (fixed_noreplace) {
             errno = EEXIST;
             log_mmap_result(MAP_FAILED, length, prot, flags, fd, offset, addr);
@@ -1457,14 +1464,12 @@ extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int
 
     // Align unaligned MAP_FIXED anonymous mapping to host page size.
     if (darwin_fd < 0 && (darwin_flags & MAP_FIXED) && addr != nullptr) {
-        const long host_page = ::sysconf(_SC_PAGESIZE);
-        const uintptr_t page_mask = (host_page > 0 ? static_cast<uintptr_t>(host_page) : 16384u) - 1;
         const uintptr_t uaddr = reinterpret_cast<uintptr_t>(addr);
         if ((uaddr & page_mask) != 0) {
             const uintptr_t aligned_start = uaddr & ~page_mask;
-            const size_t diff = static_cast<size_t>(uaddr - aligned_start);
+            const uintptr_t aligned_end = (uaddr + length + page_mask) & ~page_mask;
             addr = reinterpret_cast<void*>(aligned_start);
-            length += diff;
+            length = static_cast<size_t>(aligned_end - aligned_start);
         }
     }
 
@@ -1534,6 +1539,9 @@ extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int
                              length, errno);
             }
         }
+        if (p != MAP_FAILED && (darwin_flags & MAP_FIXED) && orig_addr != nullptr) {
+            return const_cast<void*>(orig_addr);
+        }
         return p;
     }
     {
@@ -1543,6 +1551,9 @@ extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int
         // a null structure (e.g. the pointer array a worker writes into). Log
         // the actual failure here so the allocator, not the crash, is the clue.
         log_mmap_result(p, length, prot, flags, fd, offset, addr);
+        if (p != MAP_FAILED && (darwin_flags & MAP_FIXED) && orig_addr != nullptr) {
+            return const_cast<void*>(orig_addr);
+        }
         return p;
     }
 #else
@@ -1616,10 +1627,20 @@ extern "C" int bionic_mprotect(void *addr, size_t len, int prot) {
 
 extern "C" int bionic_munmap(void *addr, size_t len) {
     if (!addr || len == 0) return 0;
-    void* aligned_addr = nullptr;
-    size_t aligned_len = 0;
-    align_range_to_host_page(addr, len, aligned_addr, aligned_len);
-    return ::munmap(aligned_addr, aligned_len);
+    const long host_page = ::sysconf(_SC_PAGESIZE);
+    const uintptr_t page_mask = (host_page > 0 ? static_cast<uintptr_t>(host_page) : 16384u) - 1;
+    const uintptr_t uaddr = reinterpret_cast<uintptr_t>(addr);
+    const uintptr_t inward_start = (uaddr + page_mask) & ~page_mask;
+    const uintptr_t inward_end = (uaddr + len) & ~page_mask;
+    if (inward_end > inward_start) {
+        ::munmap(reinterpret_cast<void*>(inward_start), inward_end - inward_start);
+    }
+#if defined(__APPLE__)
+    ::madvise(addr, len, MADV_FREE_REUSABLE);
+#else
+    ::madvise(addr, len, MADV_DONTNEED);
+#endif
+    return 0;
 }
 
 extern "C" int bionic_madvise(void *addr, size_t length, int advice) {
@@ -6812,10 +6833,10 @@ const SymbolEntry kSyscallSymbols[] = {
     {"ftello", reinterpret_cast<void*>(&vfs_ftello)},
     {"ftello64", reinterpret_cast<void*>(&vfs_ftello)},
     {"fileno", reinterpret_cast<void*>(&fileno)},
-    {"feof", reinterpret_cast<void*>(&feof)},
-    {"ferror", reinterpret_cast<void*>(&ferror)},
-    {"clearerr", reinterpret_cast<void*>(&clearerr)},
-    {"rewind", reinterpret_cast<void*>(&rewind)},
+    {"feof", reinterpret_cast<void*>(&vfs_feof)},
+    {"ferror", reinterpret_cast<void*>(&vfs_ferror)},
+    {"clearerr", reinterpret_cast<void*>(&vfs_clearerr)},
+    {"rewind", reinterpret_cast<void*>(&vfs_rewind)},
     {"access", reinterpret_cast<void*>(&vfs_access)},
     {"stat", reinterpret_cast<void*>(&vfs_stat)},
     {"stat64", reinterpret_cast<void*>(&vfs_stat64)},
