@@ -2260,12 +2260,32 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
         // wrong, is instantly visible. Rate-limited: an FSB header appears
         // once per clip load.
         static std::atomic<int> s_fsbCount{0};
-        if (buf != nullptr && n * size >= 4 && s_fsbCount.load() < 24) {
-            const auto* f = static_cast<const unsigned char*>(buf);
-            if (f[0] == 'F' && f[1] == 'S' && f[2] == 'B' && f[3] == '5') {
-                s_fsbCount.fetch_add(1, std::memory_order_relaxed);
-                const long off = vfs_ftell(stream);
-                const long start = off >= 0 ? off - static_cast<long>(n * size) : -1;
+        if (buf != nullptr && n * size >= 4) {
+            const auto* base = static_cast<const unsigned char*>(buf);
+            const size_t readBytes = n * size;
+            const long pos = vfs_ftell(stream);
+            const long readStart = pos >= 0 ? pos - static_cast<long>(readBytes) : -1;
+            // The first FSB5 header anywhere in the buffer, not only at its start.
+            // Unity streams .resource and data.unity3d in 32KB-360KB reads, so a
+            // clip's blob nearly always begins somewhere inside the read. Testing
+            // offset 0 alone logged 11 headers in a run that failed 641 clip loads,
+            // which reads as "FMOD never read the clips" when the truth is that
+            // most of those reads were never examined.
+            const unsigned char* f = nullptr;
+            long start = -1;
+            for (size_t i = 0; i + 4 <= readBytes; ++i) {
+                if (base[i] != 'F' || std::memcmp(base + i, "FSB5", 4) != 0) continue;
+                f = base + i;
+                start = readStart >= 0 ? readStart + static_cast<long>(i) : -1;
+                break;
+            }
+            if (f != nullptr) {
+                // Bytes from this header to the end of the read: the geometry
+                // below must not reach past what was actually served.
+                const size_t avail = readBytes - static_cast<size_t>(f - base);
+                if (s_fsbCount.load() < 24) {
+                    s_fsbCount.fetch_add(1, std::memory_order_relaxed);
+                }
                 std::string entry;
                 uint16_t method = 0xFFFF;
                 uint32_t usize = 0;
@@ -2305,7 +2325,7 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                 uint32_t dataSize = 0, mode = 0;
                 uint64_t blobTotal = 0;
                 bool parsed = false;
-                if (n * size >= 28) {
+                if (avail >= 28) {
                     auto rd32 = [&](size_t o) -> uint32_t {
                         return static_cast<uint32_t>(f[o]) |
                                (static_cast<uint32_t>(f[o + 1]) << 8) |
@@ -2325,7 +2345,7 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                 // blobs back to back, so a valid second header this close
                 // proves the resource data itself is well-formed.
                 char nextDesc[96] = "n/a";
-                if (blobTotal > 0 && blobTotal + 28 <= n * size) {
+                if (blobTotal > 0 && blobTotal + 28 <= avail) {
                     const auto* g = f + blobTotal;
                     const bool magic2 = g[0] == 'F' && g[1] == 'S' && g[2] == 'B' && g[3] == '5';
                     auto rd32at = [&](const unsigned char* p, size_t o) -> uint32_t {
@@ -2350,7 +2370,7 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                 {
                     // 128 bytes: FSB5 header (60) + sample header area, where the
                     // Vorbis setup chunk lives. The old 32-byte dump never reached it.
-                    const size_t hb = n * size < 128 ? n * size : 128;
+                    const size_t hb = avail < 128 ? avail : 128;
                     size_t o = 0;
                     for (size_t i = 0; i < hb; ++i) {
                         o += static_cast<size_t>(
@@ -2369,7 +2389,7 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                 // word + VORBISDATA crc. The old guard demanded blobTotal+28
                 // served bytes — a streaming reader never satisfies that, so
                 // every run logged sample=[n/a] no matter what it read.
-                if (parsed && numSamples >= 1 && n * size >= 76) {
+                if (parsed && numSamples >= 1 && avail >= 76) {
                     const auto* sh = f + 60;
                     auto rd64 = [&](size_t o) {
                         uint64_t v = 0;
@@ -2407,7 +2427,7 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                              "ver=%u num=%u shs=%u nts=%u "
                              "dataSize=%u mode=%u blobTotal=%llu next=[%s] hex=%s "
                              "sample=[%s] entry=%s%s\n",
-                             sid, start, n * size, method, usize, entryOff,
+                             sid, start, avail, method, usize, entryOff,
                              entryOff >= 0
                                  ? static_cast<long long>(usize) - entryOff -
                                        static_cast<long long>(blobTotal)
@@ -2431,19 +2451,77 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                             bool already = false;
                             for (auto& existing : list) {
                                 if (existing.start == start) {
-                                    fsb_window_cover(existing, start, start + static_cast<long>(n * size));
+                                    fsb_window_cover(existing, start, start + static_cast<long>(avail));
                                     already = true;
                                     break;
                                 }
                             }
                             if (!already) {
+                                // The report can empty the list, and it drops the map
+                                // entry when it does -- so `list` is dangling the moment
+                                // it returns. Pushing through it wrote a window into
+                                // freed heap and left the archive with no tracked
+                                // window at all, which is why no in-blob read and no
+                                // COMPLETE/SHORT verdict ever appeared: the first
+                                // header read of each archive unregistered it again.
                                 fsb_windows_report_locked(pit2->second, true);
+                                auto& fresh = g_fsbWindows[pit2->second];
                                 FsbWindow w;
                                 w.start = start;
                                 w.end = start + static_cast<long>(blobTotal);
                                 w.expected = blobTotal;
-                                fsb_window_cover(w, start, start + static_cast<long>(n * size));
-                                list.push_back(w);
+                                fsb_window_cover(w, start, start + static_cast<long>(avail));
+                                fresh.push_back(w);
+                            }
+                            // .resource entries pack blobs back to back, so a single
+                            // read can carry several of them. Register the rest of
+                            // the chain from the same buffer: a blob with no window
+                            // can never have its reads accounted, so every clip that
+                            // shared a read with the first one stayed invisible --
+                            // and "invisible" and "never read" look identical in the
+                            // log, which is the question this whole path exists to
+                            // answer.
+                            if (parsed) {
+                                auto rd32at = [&](const unsigned char* p, size_t o) -> uint32_t {
+                                    return static_cast<uint32_t>(p[o]) |
+                                           (static_cast<uint32_t>(p[o + 1]) << 8) |
+                                           (static_cast<uint32_t>(p[o + 2]) << 16) |
+                                           (static_cast<uint32_t>(p[o + 3]) << 24);
+                                };
+                                // Offsets from here are relative to this header,
+                                // which is what `f` points at -- mixing in the
+                                // header's own offset inside the read would step
+                                // into the middle of the next blob.
+                                size_t at = static_cast<size_t>(blobTotal);
+                                for (unsigned extra = 0; extra < 64 && at + 28 <= avail; ++extra) {
+                                    if (std::memcmp(f + at, "FSB5", 4) != 0) break;
+                                    const uint64_t total = 60ull + rd32at(f, at + 12) +
+                                                          rd32at(f, at + 16) +
+                                                          rd32at(f, at + 20);
+                                    if (total == 0 || total > (32u << 20)) break;
+                                    const long wstart = start + static_cast<long>(at);
+                                    fsb_windows_report_locked(pit2->second, false);
+                                    auto& chain = g_fsbWindows[pit2->second];
+                                    bool known = false;
+                                    for (const auto& existing : chain) {
+                                        if (existing.start == wstart) {
+                                            known = true;
+                                            break;
+                                        }
+                                    }
+                                    if (!known) {
+                                        FsbWindow cw;
+                                        cw.start = wstart;
+                                        cw.end = wstart + static_cast<long>(total);
+                                        cw.expected = total;
+                                        // This read served every byte from here to
+                                        // the end of the buffer.
+                                        fsb_window_cover(cw, wstart,
+                                                         start + static_cast<long>(avail));
+                                        chain.push_back(cw);
+                                    }
+                                    at += static_cast<size_t>(total);
+                                }
                             }
                         }
                     }

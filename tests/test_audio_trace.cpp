@@ -28,6 +28,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -172,16 +173,48 @@ struct ReadRecord {
 };
 
 std::vector<ReadRecord> g_records[2];
-pthread_barrier_t g_start;
 FILE* g_sharedStream = nullptr;
 std::atomic<int> g_recordsBad{0};
+
+// Start gate for the reader threads.
+//
+// pthread barriers are an optional part of POSIX and macOS does not implement
+// them -- there is no pthread_barrier_t in its libc, which is where the macOS
+// arm64 build of this test failed. A participant count plus a flag is the
+// portable equivalent, and the counter is what makes the opener wait for every
+// thread instead of releasing the stragglers early.
+std::atomic<int> g_gateArrived{0};
+std::atomic<bool> g_gateOpen{false};
+
+void GateArm() {
+    g_gateArrived.store(0, std::memory_order_relaxed);
+    g_gateOpen.store(false, std::memory_order_relaxed);
+}
+
+void GateWait() {
+    g_gateArrived.fetch_add(1, std::memory_order_acq_rel);
+    while (!g_gateOpen.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+}
+
+// The opener's side of the barrier: arrive, wait for everyone else, then release.
+// It must not call GateWait() -- only this side sets the flag, so a participant
+// that waits for it deadlocks against itself.
+void GateRelease(int participants) {
+    g_gateArrived.fetch_add(1, std::memory_order_acq_rel);
+    while (g_gateArrived.load(std::memory_order_acquire) < participants) {
+        std::this_thread::yield();
+    }
+    g_gateOpen.store(true, std::memory_order_release);
+}
 
 // One thread's share of the stream: plain sequential reads, no seeks, so every
 // read depends entirely on the cursor the other thread last advanced. The
 // argument names the slot whose records this thread appends to (null = slot 0).
 void* SharedCursorThread(void* arg) {
     const int slot = arg == nullptr ? 0 : *static_cast<const int*>(arg);
-    pthread_barrier_wait(&g_start);
+    GateWait();
     for (int i = 0; i < 8; ++i) {
         ReadRecord rec;
         rec.n = kudroid::vfs_fread(rec.data, 1, kChunk, g_sharedStream);
@@ -211,9 +244,46 @@ unsigned char g_oneRead[kChunk] = {};
 size_t g_oneReadN = 0;
 
 void* OneReadThread(void*) {
-    pthread_barrier_wait(&g_start);
+    GateWait();
     g_oneReadN = kudroid::vfs_fread(g_oneRead, 1, kChunk, g_sharedStream);
     return nullptr;
+}
+
+// --- FSB blob coverage windows ---------------------------------------------
+//
+// The coverage windows answer "did the engine read the clip it was handed", so
+// they have to survive their own creation. They did not: the serve path held a
+// reference into the window map, then called the reporter, which drops the map
+// entry when the list empties -- and the first header read of every archive
+// empties it. The push after that wrote into freed heap and left the archive
+// with no window at all, so no in-blob read and no COMPLETE/SHORT verdict could
+// ever be logged. Detection had the matching gap: a read beginning with 'F' was
+// the only shape recognised, while Unity streams clips in reads far larger than
+// one blob, so a clip starting inside a read was never seen at all.
+
+const char* kFsbApkGuestPath = "/data/app/com.kudroid.test/fsbprobe.apk";
+constexpr size_t kFsbBlobSize = 60 + 32 + 0 + 4096;  // header + sample headers + data
+constexpr size_t kFsbBlobs = 3;
+constexpr size_t kFsbPrefix = 700;                    // filler before the first blob
+
+// FSB5 v1: magic, version, numSamples, sampleHeadersSize, nameTableSize,
+// dataSize, mode. blobTotal = 60 + shs + nts + dataSize, which is what the
+// probe and the window both derive.
+void PutFsbHeader(unsigned char* p, uint32_t shs, uint32_t dataSize) {
+    std::memset(p, 0, 60);
+    std::memcpy(p, "FSB5", 4);
+    auto put32 = [&](size_t o, uint32_t v) {
+        p[o] = static_cast<unsigned char>(v);
+        p[o + 1] = static_cast<unsigned char>(v >> 8);
+        p[o + 2] = static_cast<unsigned char>(v >> 16);
+        p[o + 3] = static_cast<unsigned char>(v >> 24);
+    };
+    put32(4, 1);        // version
+    put32(8, 1);        // numSamples
+    put32(12, shs);     // sampleHeadersSize
+    put32(16, 0);       // nameTableSize
+    put32(20, dataSize);
+    put32(24, 15);      // mode: Vorbis
 }
 
 }  // namespace
@@ -300,12 +370,11 @@ int main() {
     g_sharedStream = kudroid::vfs_fopen(kApkGuestPath, "rb");
     Check(g_sharedStream != nullptr, "apk stream opened for the shared-cursor checks");
     if (g_sharedStream != nullptr) {
-        pthread_barrier_init(&g_start, nullptr, 2);
+        GateArm();
         pthread_t one;
         pthread_create(&one, nullptr, OneReadThread, nullptr);
-        pthread_barrier_wait(&g_start);
+        GateRelease(2);
         pthread_join(one, nullptr);
-        pthread_barrier_destroy(&g_start);
         Check(g_oneReadN == kChunk, "other thread's read returned a full chunk");
         Check(kudroid::vfs_ftello(g_sharedStream) == static_cast<off_t>(kChunk),
               "another thread sees the stream position the read left");
@@ -332,12 +401,11 @@ int main() {
         // stale the moment another thread touches the stream, and the thread that
         // picks the slice up next resumes from an offset nobody is at.
         const off_t beforeThird = kudroid::vfs_ftello(g_sharedStream);
-        pthread_barrier_init(&g_start, nullptr, 2);
+        GateArm();
         pthread_t third;
         pthread_create(&third, nullptr, OneReadThread, nullptr);
-        pthread_barrier_wait(&g_start);
+        GateRelease(2);
         pthread_join(third, nullptr);
-        pthread_barrier_destroy(&g_start);
         Check(kudroid::vfs_ftello(g_sharedStream) == beforeThird + static_cast<off_t>(kChunk),
               "position tracks a read made by another thread after this one looked");
 
@@ -346,16 +414,15 @@ int main() {
         g_records[1].clear();
         g_recordsBad = 0;
         kudroid::vfs_fseeko(g_sharedStream, 0, SEEK_SET);
-        pthread_barrier_init(&g_start, nullptr, 3);
+        GateArm();
         pthread_t ta, tb;
         const int secondSlot = 1;
         pthread_create(&ta, nullptr, SharedCursorThread, nullptr);
         pthread_create(&tb, nullptr, SharedCursorThread,
                        const_cast<int*>(&secondSlot));
-        pthread_barrier_wait(&g_start);
+        GateRelease(3);
         pthread_join(ta, nullptr);
         pthread_join(tb, nullptr);
-        pthread_barrier_destroy(&g_start);
         Check(g_recordsBad == 0, "concurrent reads each returned a full chunk");
         std::vector<long> offsets;
         for (int slot = 0; slot < 2; ++slot) {
@@ -371,6 +438,64 @@ int main() {
               "stream position accounts for every byte both threads read");
         kudroid::vfs_fclose(g_sharedStream);
         g_sharedStream = nullptr;
+    }
+
+    // FSB coverage windows: a blob chain that does not start at the beginning of
+    // a read must still be tracked, covered and verdicted.
+    {
+        const std::string fsbHost = kudroid::VFSPathRemapper::getInstance().remap(kFsbApkGuestPath);
+        std::error_code ec;
+        std::filesystem::create_directories(std::filesystem::path(fsbHost).parent_path(), ec);
+        std::vector<unsigned char> image(kFsbPrefix + kFsbBlobs * kFsbBlobSize, 0xAB);
+        for (size_t i = 0; i < kFsbBlobs; ++i) {
+            PutFsbHeader(&image[kFsbPrefix + i * kFsbBlobSize], 32, 4096);
+        }
+        FILE* w = std::fopen(fsbHost.c_str(), "wb");
+        Check(w != nullptr, "fsb probe file created");
+        if (w != nullptr) {
+            std::fwrite(image.data(), 1, image.size(), w);
+            std::fclose(w);
+        }
+
+        // One read covering the whole chain, the way Unity streams a .resource:
+        // the first blob starts mid-buffer and the other two follow it. A second
+        // pass then re-reads it, which is what exercises the accounting path --
+        // the windows are created after the first read's own accounting has
+        // already run, so only a later read can be charged to them.
+        CaptureStart();
+        FILE* f = kudroid::vfs_fopen(kFsbApkGuestPath, "rb");
+        Check(f != nullptr, "fsb probe stream opened");
+        if (f != nullptr) {
+            std::vector<unsigned char> got(image.size());
+            Check(kudroid::vfs_fread(got.data(), 1, got.size(), f) == got.size(),
+                  "whole-chain read returned every byte");
+            Check(kudroid::vfs_fseeko(f, 0, SEEK_SET) == 0, "re-read seeks to the chain start");
+            Check(kudroid::vfs_fread(got.data(), 1, got.size(), f) == got.size(),
+                  "second whole-chain read returned every byte");
+            kudroid::vfs_fclose(f);
+        }
+        const std::string out = CaptureStop();
+        Check(out.find("served FSB5") != std::string::npos,
+              "a blob starting inside a read is recognised");
+        Check(out.find("in-blob read") != std::string::npos,
+              "reads inside a tracked blob are accounted");
+        // Every blob start in the chain must get a verdict. Compared as a set of
+        // offsets, not a line count: a re-read legitimately re-reports a blob it
+        // already tracked, and the point is coverage, not how often it is said.
+        std::vector<long> verdicts;
+        for (size_t at = out.find("blob off="); at != std::string::npos;) {
+            verdicts.push_back(std::strtol(out.c_str() + at + 9, nullptr, 10));
+            at = out.find("blob off=", at + 9);
+        }
+        std::sort(verdicts.begin(), verdicts.end());
+        verdicts.erase(std::unique(verdicts.begin(), verdicts.end()), verdicts.end());
+        bool allVerdicted = true;
+        for (size_t i = 0; i < kFsbBlobs; ++i) {
+            const long want = static_cast<long>(kFsbPrefix + i * kFsbBlobSize);
+            if (!std::binary_search(verdicts.begin(), verdicts.end(), want)) allVerdicted = false;
+        }
+        Check(allVerdicted,
+              "every blob in the chain is tracked and verdicted COMPLETE");
     }
 
     std::filesystem::remove_all(tmp);
