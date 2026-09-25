@@ -1129,8 +1129,58 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
             log = true;
         }
         if (log) {
-            char line[96];
-            std::snprintf(line, sizeof(line), "fatal signal %d", sig);
+            char line[384];
+            int n = std::snprintf(line, sizeof(line), "fatal signal %d", sig);
+            (void)n;  // consumed only under the arm64 detail block below
+            // The android log is the only channel a captured run reliably shows, while
+            // the fault identity (si_addr, pc, lr) normally lives only in the on-device
+            // breadcrumb file. Detail here costs nothing extra for a hardware fault:
+            // scalar reads plus the try-lock guest-module lookup already used by the
+            // fatal-signal breadcrumb below. SIGTRAP stays bare: it fires per TLS
+            // emulation and its pc is KuDroid's own trap site.
+#if (defined(__aarch64__) || defined(__arm64__)) && (defined(__APPLE__) || defined(__linux__))
+            if (sig != SIGTRAP && n > 0 && static_cast<size_t>(n) < sizeof(line)) {
+                if (info != nullptr) {
+                    n += std::snprintf(line + n, sizeof(line) - static_cast<size_t>(n),
+                                       " fault=%p", info->si_addr);
+                }
+                if (ucontext != nullptr &&
+                    n > 0 && static_cast<size_t>(n) < sizeof(line)) {
+                    uint64_t tpc = 0, tlr = 0;
+#if defined(__APPLE__)
+                    const ucontext_t* uc = static_cast<const ucontext_t*>(ucontext);
+                    tpc = uc->uc_mcontext->__ss.__pc;
+                    tlr = uc->uc_mcontext->__ss.__lr;
+#elif defined(__linux__)
+                    const ucontext_t* uc = static_cast<const ucontext_t*>(ucontext);
+                    tpc = uc->uc_mcontext.pc;
+                    tlr = uc->uc_mcontext.regs[30];
+#endif
+                    char pcMod[160] = {0};
+                    if (tpc != 0) {
+                        if (!kudroid::kudroid_lookup_guest_module(reinterpret_cast<void*>(tpc),
+                                                                  pcMod, sizeof(pcMod))) {
+                            std::snprintf(pcMod, sizeof(pcMod), "0x%llx (host)",
+                                          static_cast<unsigned long long>(tpc));
+                        }
+                    }
+                    char lrMod[160] = {0};
+                    if (tlr != 0) {
+                        if (!kudroid::kudroid_lookup_guest_module(reinterpret_cast<void*>(tlr),
+                                                                  lrMod, sizeof(lrMod))) {
+                            std::snprintf(lrMod, sizeof(lrMod), "0x%llx (host)",
+                                          static_cast<unsigned long long>(tlr));
+                        }
+                    }
+                    if (pcMod[0] != '\0' || lrMod[0] != '\0') {
+                        std::snprintf(line + n, sizeof(line) - static_cast<size_t>(n),
+                                      " pc=%s lr=%s",
+                                      pcMod[0] != '\0' ? pcMod : "?",
+                                      lrMod[0] != '\0' ? lrMod : "?");
+                    }
+                }
+            }
+#endif
             kudroid_android_log_message(4, "KuDroidTrap", line);
         }
     }
