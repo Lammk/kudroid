@@ -3,6 +3,7 @@
 #include "kudroid/BionicShim.h"
 #include "kudroid/ExecMemory.h"
 
+#include <atomic>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
@@ -1553,7 +1554,50 @@ struct GuestModule {
 };
 std::mutex g_guestMtx;
 std::vector<GuestModule> g_guestModules;
+
+// Lock-free mirror of the module ranges.
+//
+// The vector above is the source of truth but needs g_guestMtx, and the only
+// consumer that cannot afford to wait for it is the fatal-signal path: a fault
+// handler asking "is this pc guest code?" must not block behind a dlopen that
+// is itself wedged. A fixed array of published [base, end) pairs answers that
+// question with plain atomic loads -- no lock, no allocation, nothing that can
+// touch storage a concurrent dlopen might be reallocating. A real run registers
+// eight modules; the cap is headroom, and a guest with more than this still gets
+// correct answers for the first kGuestRangeMax and the same diagnostics the
+// vector gives.
+constexpr int kGuestRangeMax = 256;
+std::atomic<std::uintptr_t> g_guestRangeBase[kGuestRangeMax];
+std::atomic<std::uintptr_t> g_guestRangeEnd[kGuestRangeMax];
+std::atomic<int> g_guestRangeCount{0};
+
+void guest_range_publish(std::uintptr_t base, std::size_t size) {
+    const int n = g_guestRangeCount.load(std::memory_order_relaxed);
+    for (int i = 0; i < n; ++i) {
+        if (g_guestRangeBase[i].load(std::memory_order_relaxed) == base) {
+            g_guestRangeEnd[i].store(base + size, std::memory_order_release);
+            return;
+        }
+    }
+    if (n >= kGuestRangeMax) return;
+    g_guestRangeBase[n].store(base, std::memory_order_relaxed);
+    g_guestRangeEnd[n].store(base + size, std::memory_order_relaxed);
+    // Release: a reader that sees the new count also sees the pair above it.
+    g_guestRangeCount.store(n + 1, std::memory_order_release);
+}
 } // namespace
+
+extern "C" bool kudroid_guest_module_contains(void* addr) {
+    if (!addr) return false;
+    const auto a = reinterpret_cast<std::uintptr_t>(addr);
+    const int n = g_guestRangeCount.load(std::memory_order_acquire);
+    for (int i = 0; i < n; ++i) {
+        const auto base = g_guestRangeBase[i].load(std::memory_order_relaxed);
+        const auto end = g_guestRangeEnd[i].load(std::memory_order_relaxed);
+        if (a >= base && a < end) return true;
+    }
+    return false;
+}
 
 extern "C" void kudroid_register_guest_module(void* base, std::size_t size,
                                               const char* path) {
@@ -1564,10 +1608,12 @@ extern "C" void kudroid_register_guest_module(void* base, std::size_t size,
         if (m.base == addr) {  // same module reloaded: update instead of duplicating
             m.size = size;
             m.path = path;
+            guest_range_publish(addr, size);
             return;
         }
     }
     g_guestModules.push_back({addr, size, std::string(path)});
+    guest_range_publish(addr, size);
 }
 
 extern "C" void kudroid_register_guest_phdrs(void* base, const void* phdrs,
@@ -1586,6 +1632,7 @@ extern "C" void kudroid_register_guest_phdrs(void* base, const void* phdrs,
     // the loader does not, but recording them is better than dropping them.
     GuestModule module{addr, 0, std::string(), phdrs, phnum};
     g_guestModules.push_back(std::move(module));
+    guest_range_publish(addr, 0);
 }
 
 // bionic's dl_phdr_info, as a guest compiled against <link.h> expects it.
@@ -1657,9 +1704,20 @@ extern "C" bool kudroid_lookup_guest_module(void* addr, char* out, std::size_t o
     for (const auto& m : g_guestModules) {
         if (a >= m.base && a < m.base + m.size) {
             const auto off = a - m.base;
-            const int n = snprintf(out, outSize, "0x%llx %s+0x%llx",
-                                   (unsigned long long)a, m.path.c_str(),
-                                   (unsigned long long)off);
+            int n = snprintf(out, outSize, "0x%llx %s+0x%llx",
+                             (unsigned long long)a, m.path.c_str(),
+                             (unsigned long long)off);
+            if (n > 0 && static_cast<std::size_t>(n) < outSize) return true;
+            // Found, but the caller's buffer cannot hold the full path. Reporting
+            // that as "not a guest module" is what made a guest SIGSEGV take the
+            // host-fatal path: the container's install path alone is longer than
+            // the crash gate's buffer. Retry with the file name, which is what
+            // identifies the module anyway, and only give up if even that fails.
+            const char* name = m.path.c_str();
+            const char* const slash = std::strrchr(name, '/');
+            if (slash != nullptr) name = slash + 1;
+            n = snprintf(out, outSize, "0x%llx %s+0x%llx",
+                         (unsigned long long)a, name, (unsigned long long)off);
             return n > 0 && static_cast<std::size_t>(n) < outSize;
         }
     }

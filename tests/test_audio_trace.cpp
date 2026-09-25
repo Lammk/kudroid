@@ -20,12 +20,15 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 
+#include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -119,6 +122,100 @@ void* PlainThreadMain(void*) {
     return nullptr;
 }
 
+// --- One FILE*, one cursor ------------------------------------------------
+//
+// Unity hands FMOD the loader's own FILE* for an FSB slice and both threads
+// read it, so the archive stream's cursor is shared state: whoever reads next
+// continues where the previous read stopped. A per-thread cursor satisfies each
+// thread locally and still hands FMOD bytes from the wrong offset, which is how
+// a full-length read turns into "Error loading file". These checks pin the two
+// properties that fix has to keep: the position is visible across threads, and
+// two threads reading at once consume the file once, not twice.
+
+const char* kApkGuestPath = "/data/app/com.kudroid.test/base.apk";
+constexpr size_t kApkSize = 4096;
+constexpr size_t kChunk = 64;
+
+// File content: an LCG's high bits, so no 64-byte window repeats anywhere in
+// the file. That is what makes the offset a chunk was served from recoverable
+// from its bytes -- a per-thread cursor re-reads the same window, and a shared
+// one never does.
+std::vector<unsigned char> g_apkBytes;
+
+void BuildApkBytes() {
+    g_apkBytes.assign(kApkSize, 0);
+    uint32_t s = 0x12345678u;
+    for (size_t i = 0; i < kApkSize; ++i) {
+        s = s * 1103515245u + 12345u;
+        g_apkBytes[i] = static_cast<unsigned char>((s >> 16) & 0xFF);
+    }
+}
+
+unsigned char ApkByte(size_t i) { return i < g_apkBytes.size() ? g_apkBytes[i] : 0; }
+
+// How many 64-byte windows in the file are unique; 1 means an offset is
+// recoverable from the bytes alone.
+size_t UniqueWindows() {
+    std::vector<std::string> seen;
+    size_t dup = 0;
+    for (size_t off = 0; off + kChunk <= kApkSize; ++off) {
+        const std::string w(reinterpret_cast<const char*>(&g_apkBytes[off]), kChunk);
+        if (std::find(seen.begin(), seen.end(), w) != seen.end()) ++dup;
+        else seen.push_back(w);
+    }
+    return (kApkSize - kChunk + 1) - dup;
+}
+
+struct ReadRecord {
+    unsigned char data[kChunk] = {};
+    size_t n = 0;
+};
+
+std::vector<ReadRecord> g_records[2];
+pthread_barrier_t g_start;
+FILE* g_sharedStream = nullptr;
+std::atomic<int> g_recordsBad{0};
+
+// One thread's share of the stream: plain sequential reads, no seeks, so every
+// read depends entirely on the cursor the other thread last advanced. The
+// argument names the slot whose records this thread appends to (null = slot 0).
+void* SharedCursorThread(void* arg) {
+    const int slot = arg == nullptr ? 0 : *static_cast<const int*>(arg);
+    pthread_barrier_wait(&g_start);
+    for (int i = 0; i < 8; ++i) {
+        ReadRecord rec;
+        rec.n = kudroid::vfs_fread(rec.data, 1, kChunk, g_sharedStream);
+        if (rec.n != kChunk) ++g_recordsBad;
+        g_records[slot].push_back(rec);
+    }
+    return nullptr;
+}
+
+// The offset a chunk was read from cannot be sampled with a separate ftello:
+// between that call and the read the other thread is free to advance the
+// cursor. Recover it from the bytes instead -- with unique windows, exactly one
+// offset matches, and that is the offset the stream actually served.
+long MatchedOffset(const ReadRecord& rec) {
+    long found = -1;
+    for (size_t off = 0; off + kChunk <= kApkSize; ++off) {
+        size_t b = 0;
+        while (b < kChunk && rec.data[b] == g_apkBytes[off + b]) ++b;
+        if (b != kChunk) continue;
+        if (found >= 0) return -1;  // ambiguous: cannot attribute this chunk
+        found = static_cast<long>(off);
+    }
+    return found;
+}
+
+unsigned char g_oneRead[kChunk] = {};
+size_t g_oneReadN = 0;
+
+void* OneReadThread(void*) {
+    pthread_barrier_wait(&g_start);
+    g_oneReadN = kudroid::vfs_fread(g_oneRead, 1, kChunk, g_sharedStream);
+    return nullptr;
+}
+
 }  // namespace
 
 int main() {
@@ -179,6 +276,101 @@ int main() {
         const std::string out = CaptureStop();
         Check(out.find("th=FMOD-io]") == std::string::npos,
               "no line is attributed to the audio thread when it is idle");
+    }
+
+    // A tracked archive stream, as the audio path opens it.
+    BuildApkBytes();
+    Check(UniqueWindows() == kApkSize - kChunk + 1,
+          "every 64-byte window of the probe file is unique, so a served chunk names its offset");
+    const std::string apkHost = kudroid::VFSPathRemapper::getInstance().remap(kApkGuestPath);
+    Check(!apkHost.empty(), "apk guest path resolves inside the VFS");
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(std::filesystem::path(apkHost).parent_path(), ec);
+        FILE* w = std::fopen(apkHost.c_str(), "wb");
+        Check(w != nullptr, "apk probe file created");
+        if (w != nullptr) {
+            std::fwrite(g_apkBytes.data(), 1, g_apkBytes.size(), w);
+            std::fclose(w);
+        }
+    }
+
+    // A read on one thread must be visible as the stream's position to the next
+    // thread, and a relative seek there must build on it.
+    g_sharedStream = kudroid::vfs_fopen(kApkGuestPath, "rb");
+    Check(g_sharedStream != nullptr, "apk stream opened for the shared-cursor checks");
+    if (g_sharedStream != nullptr) {
+        pthread_barrier_init(&g_start, nullptr, 2);
+        pthread_t one;
+        pthread_create(&one, nullptr, OneReadThread, nullptr);
+        pthread_barrier_wait(&g_start);
+        pthread_join(one, nullptr);
+        pthread_barrier_destroy(&g_start);
+        Check(g_oneReadN == kChunk, "other thread's read returned a full chunk");
+        Check(kudroid::vfs_ftello(g_sharedStream) == static_cast<off_t>(kChunk),
+              "another thread sees the stream position the read left");
+        bool contentOk = true;
+        for (size_t b = 0; b < g_oneReadN; ++b) {
+            if (g_oneRead[b] != ApkByte(b)) contentOk = false;
+        }
+        Check(contentOk, "bytes read by the other thread match the file");
+        Check(kudroid::vfs_fseeko(g_sharedStream, 16, SEEK_CUR) == 0,
+              "relative seek accepted on the shared cursor");
+        Check(kudroid::vfs_ftello(g_sharedStream) == static_cast<off_t>(kChunk + 16),
+              "relative seek continues from the shared cursor");
+        unsigned char tail[kChunk] = {};
+        Check(kudroid::vfs_fread(tail, 1, kChunk, g_sharedStream) == kChunk,
+              "read after the relative seek returns a full chunk");
+        bool tailOk = true;
+        for (size_t b = 0; b < kChunk; ++b) {
+            if (tail[b] != ApkByte(kChunk + 16 + b)) tailOk = false;
+        }
+        Check(tailOk, "bytes after the relative seek match the file");
+
+        // A thread that already looked at the position must keep seeing it move.
+        // This is the failure the fix exists for: a cursor cached per thread goes
+        // stale the moment another thread touches the stream, and the thread that
+        // picks the slice up next resumes from an offset nobody is at.
+        const off_t beforeThird = kudroid::vfs_ftello(g_sharedStream);
+        pthread_barrier_init(&g_start, nullptr, 2);
+        pthread_t third;
+        pthread_create(&third, nullptr, OneReadThread, nullptr);
+        pthread_barrier_wait(&g_start);
+        pthread_join(third, nullptr);
+        pthread_barrier_destroy(&g_start);
+        Check(kudroid::vfs_ftello(g_sharedStream) == beforeThird + static_cast<off_t>(kChunk),
+              "position tracks a read made by another thread after this one looked");
+
+        // Concurrent implicit reads must tile the stream, never overlap it.
+        g_records[0].clear();
+        g_records[1].clear();
+        g_recordsBad = 0;
+        kudroid::vfs_fseeko(g_sharedStream, 0, SEEK_SET);
+        pthread_barrier_init(&g_start, nullptr, 3);
+        pthread_t ta, tb;
+        const int secondSlot = 1;
+        pthread_create(&ta, nullptr, SharedCursorThread, nullptr);
+        pthread_create(&tb, nullptr, SharedCursorThread,
+                       const_cast<int*>(&secondSlot));
+        pthread_barrier_wait(&g_start);
+        pthread_join(ta, nullptr);
+        pthread_join(tb, nullptr);
+        pthread_barrier_destroy(&g_start);
+        Check(g_recordsBad == 0, "concurrent reads each returned a full chunk");
+        std::vector<long> offsets;
+        for (int slot = 0; slot < 2; ++slot) {
+            for (const auto& rec : g_records[slot]) offsets.push_back(MatchedOffset(rec));
+        }
+        std::sort(offsets.begin(), offsets.end());
+        bool tiled = offsets.size() == 16;
+        for (size_t i = 0; i < offsets.size() && tiled; ++i) {
+            if (offsets[i] != static_cast<long>(i * kChunk)) tiled = false;
+        }
+        Check(tiled, "two threads consumed the stream once, in order, without overlap");
+        Check(kudroid::vfs_ftello(g_sharedStream) == static_cast<off_t>(16 * kChunk),
+              "stream position accounts for every byte both threads read");
+        kudroid::vfs_fclose(g_sharedStream);
+        g_sharedStream = nullptr;
     }
 
     std::filesystem::remove_all(tmp);

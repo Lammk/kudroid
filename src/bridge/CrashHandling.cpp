@@ -1156,20 +1156,33 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
                     tpc = uc->uc_mcontext.pc;
                     tlr = uc->uc_mcontext.regs[30];
 #endif
-                    char pcMod[160] = {0};
+                    // Short buffers on purpose: this line goes to logcat, and the
+                    // module name is what identifies the fault. A long install path
+                    // no longer costs the name (the lookup falls back to the file
+                    // name), and a lookup that still fails is labelled from the
+                    // lock-free range test instead of being called host text.
+                    char pcMod[96] = {0};
                     if (tpc != 0) {
-                        if (!kudroid::kudroid_lookup_guest_module(reinterpret_cast<void*>(tpc),
-                                                                  pcMod, sizeof(pcMod))) {
-                            std::snprintf(pcMod, sizeof(pcMod), "0x%llx (host)",
-                                          static_cast<unsigned long long>(tpc));
+                        if (!kudroid::kudroid_lookup_guest_module(
+                                reinterpret_cast<void*>(tpc), pcMod, sizeof(pcMod))) {
+                            std::snprintf(pcMod, sizeof(pcMod), "0x%llx (%s)",
+                                          static_cast<unsigned long long>(tpc),
+                                          kudroid::kudroid_guest_module_contains(
+                                              reinterpret_cast<void*>(tpc))
+                                              ? "guest"
+                                              : "host");
                         }
                     }
-                    char lrMod[160] = {0};
+                    char lrMod[96] = {0};
                     if (tlr != 0) {
-                        if (!kudroid::kudroid_lookup_guest_module(reinterpret_cast<void*>(tlr),
-                                                                  lrMod, sizeof(lrMod))) {
-                            std::snprintf(lrMod, sizeof(lrMod), "0x%llx (host)",
-                                          static_cast<unsigned long long>(tlr));
+                        if (!kudroid::kudroid_lookup_guest_module(
+                                reinterpret_cast<void*>(tlr), lrMod, sizeof(lrMod))) {
+                            std::snprintf(lrMod, sizeof(lrMod), "0x%llx (%s)",
+                                          static_cast<unsigned long long>(tlr),
+                                          kudroid::kudroid_guest_module_contains(
+                                              reinterpret_cast<void*>(tlr))
+                                              ? "guest"
+                                              : "host");
                         }
                     }
                     if (pcMod[0] != '\0' || lrMod[0] != '\0') {
@@ -1509,10 +1522,16 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
                 static_cast<ucontext_t*>(ucontext)->uc_mcontext->__ss.__pc);
         }
 #endif
-        char modBuf[128];
+        // Containment, not formatting. This gate used to ask for the module's text
+        // into a 128-byte buffer, and the container's install path alone is longer
+        // than that, so every guest fault in a real install answered "not in a
+        // guest module" and took the host-fatal path below -- the guest's own
+        // SIGSEGV handler never ran, and the report blamed host text. The lookup
+        // also gives up rather than block on the loader mutex, which is the same
+        // answer for the wrong reason. kudroid_guest_module_contains() answers from
+        // a lock-free range mirror, so only a genuinely unmapped pc lands here.
         const bool pcInGuest = faultPcHost != nullptr &&
-                               kudroid::kudroid_lookup_guest_module(faultPcHost, modBuf,
-                                                                    sizeof(modBuf));
+                               kudroid::kudroid_guest_module_contains(faultPcHost);
         if (!pcInGuest) {
             kudroid_persistent_breadcrumb(
                 "host-pc fault: guest handler skipped, taking fatal path");
@@ -1755,6 +1774,15 @@ host_fatal_path:;
                     } else if (p.effAddr != reinterpret_cast<uintptr_t>(info->si_addr)) {
                         m = snprintf(sigline, sizeof(sigline), "fault_skip_diag: effAddr 0x%llx != si_addr %p\n",
                                      (unsigned long long)p.effAddr, info->si_addr);
+                    } else if (!fault_addr_is_nullish(
+                                   reinterpret_cast<uintptr_t>(info->si_addr))) {
+                        // A decodable transfer is not a recoverable fault: the skip
+                        // path only invents results for null-page probes, so name that
+                        // instead of the thread/budget guess it used to print.
+                        m = snprintf(sigline, sizeof(sigline),
+                                     "fault_skip_diag: plan decodes, fault addr 0x%llx is not nullish"
+                                     " (recovery refused)\n",
+                                     (unsigned long long)reinterpret_cast<uintptr_t>(info->si_addr));
                     } else {
                         m = snprintf(sigline, sizeof(sigline), "fault_skip_diag: skippable plan ok (fatal thread or budget cap)\n");
                     }

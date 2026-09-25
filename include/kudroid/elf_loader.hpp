@@ -20,6 +20,11 @@ extern "C" void kudroid_register_guest_module(void* base, std::size_t size,
 /// returns true if found. Used in crash handler (read only, not locked).
 extern "C" bool kudroid_lookup_guest_module(void* addr, char* out, std::size_t outSize);
 
+/// true when addr falls inside a registered guest module. Answers from a lock-free
+/// range mirror, so a signal handler can classify a faulting pc without blocking
+/// on the loader mutex and without depending on how much text fits in a buffer.
+extern "C" bool kudroid_guest_module_contains(void* addr);
+
 /// Report a guest module's program headers, for dl_iterate_phdr.
 /// Lets the guest unwinder find its EH frames; `phdrs` stays caller-owned.
 extern "C" void kudroid_register_guest_phdrs(void* base, const void* phdrs,

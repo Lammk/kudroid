@@ -1776,19 +1776,34 @@ constexpr int kTrackedStreams = 32;
 std::atomic<uintptr_t> g_apkStreams[kTrackedStreams];
 std::atomic<int> g_apkStreamFd[kTrackedStreams] = {};
 std::atomic<off_t> g_apkStreamSize[kTrackedStreams] = {};
-std::atomic<uint32_t> g_apkStreamEpoch[kTrackedStreams] = {};
-std::atomic<off_t> g_apkStreamSharedPos[kTrackedStreams] = {};
+// One cursor per FILE*, not one per thread.
+//
+// A C FILE has exactly one file position, and bionic serialises every operation
+// on it behind an internal lock, so two guest threads sharing a FILE* take turns
+// advancing the same cursor. The guest depends on that: Unity hands FMOD the
+// loader's own handle for an FSB slice and both threads read it (observed live --
+// sid=2 read by Loading.PreloadManager and by the FMOD nonblocking thread), and
+// each thread's next implicit fread has to continue where the stream actually is.
+// A per-thread cursor gave each thread a private position instead, so a thread
+// picking up the stream mid-slice continued from a stale offset and read
+// well-formed bytes from the wrong place -- FMOD's "Error loading file" with no
+// short read anywhere in the trace. An authoritative cursor under a per-stream
+// lock reproduces the host's semantics, and the lock also makes each op's
+// read-then-advance atomic, which the old shared atomic could not do.
+std::atomic<off_t> g_apkStreamPos[kTrackedStreams] = {};
+std::atomic<int> g_apkStreamEof[kTrackedStreams] = {};
+std::atomic<int> g_apkStreamErr[kTrackedStreams] = {};
 std::atomic<uint64_t> g_apkStreamOps[kTrackedStreams] = {};
 std::atomic<int> g_apkStreamShortLogged[kTrackedStreams] = {};
+std::mutex g_apkStreamMtx[kTrackedStreams];
 constexpr int kOpTracedStreams = 16;
 std::atomic<int> g_apkStreamTraceNo[kTrackedStreams] = {};
 std::atomic<int> g_apkStreamInstances{0};
 std::mutex g_apkStreamsMtx;
 
-thread_local off_t tl_apk_stream_pos[kTrackedStreams] = {};
-thread_local uint32_t tl_apk_stream_epoch[kTrackedStreams] = {};
-thread_local bool tl_apk_stream_eof[kTrackedStreams] = {};
-thread_local bool tl_apk_stream_err[kTrackedStreams] = {};
+// Reserved-slot marker. A slot publishes the FILE* only after its record is
+// complete, so a reader can never match a half-initialised stream.
+constexpr uintptr_t kApkStreamReserved = 1;
 
 constexpr int kAudioOpCapPerStream = 400;
 constexpr int kAudioOpBudget = 3000;
@@ -1847,17 +1862,23 @@ static void track_apk_stream(FILE* f) {
     std::lock_guard<std::mutex> lock(g_apkStreamsMtx);
     for (int i = 0; i < kTrackedStreams; ++i) {
         uintptr_t empty = 0;
-        if (g_apkStreams[i].compare_exchange_strong(empty,
-                                                    reinterpret_cast<uintptr_t>(f))) {
+        if (g_apkStreams[i].compare_exchange_strong(empty, kApkStreamReserved,
+                                                    std::memory_order_acq_rel)) {
+            {
+                std::lock_guard<std::mutex> slock(g_apkStreamMtx[i]);
+                g_apkStreamPos[i].store(0, std::memory_order_relaxed);
+                g_apkStreamEof[i].store(0, std::memory_order_relaxed);
+                g_apkStreamErr[i].store(0, std::memory_order_relaxed);
+            }
             g_apkStreamFd[i].store(fd, std::memory_order_relaxed);
             g_apkStreamSize[i].store(fsize, std::memory_order_relaxed);
-            g_apkStreamSharedPos[i].store(0, std::memory_order_relaxed);
-            g_apkStreamEpoch[i].fetch_add(1, std::memory_order_acq_rel);
             g_apkStreamOps[i].store(0, std::memory_order_relaxed);
             g_apkStreamShortLogged[i].store(0, std::memory_order_relaxed);
             g_audioStreamOps[i].store(0, std::memory_order_relaxed);
             const int instance = g_apkStreamInstances.fetch_add(1, std::memory_order_relaxed);
             g_apkStreamTraceNo[i].store(instance, std::memory_order_relaxed);
+            // Release: a thread that resolves this FILE* to sid sees the record above.
+            g_apkStreams[i].store(reinterpret_cast<uintptr_t>(f), std::memory_order_release);
             if (instance < kOpTracedStreams) {
                 ktraceLine("[KuDroidApkS] sid=%d open instance=%d (fd=%d size=%lld)\n",
                            i, instance, fd, static_cast<long long>(fsize));
@@ -1866,6 +1887,15 @@ static void track_apk_stream(FILE* f) {
         }
     }
     ktraceLine("[KuDroidApkS] stream table full — apk stream untracked\n");
+}
+
+
+// The slot still holds this FILE*: fclose can release a slot while a reader is
+// inside the syscall, and a slot that has since been reused must not absorb the
+// dead stream's read.
+static bool apk_stream_live(int sid, FILE* f) {
+    return g_apkStreams[sid].load(std::memory_order_acquire) ==
+           reinterpret_cast<uintptr_t>(f);
 }
 
 
@@ -2044,31 +2074,29 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
 
     size_t n = 0;
     if (apk) {
-        const int fd = g_apkStreamFd[sid].load(std::memory_order_relaxed);
-        const uint32_t epoch = g_apkStreamEpoch[sid].load(std::memory_order_acquire);
-        if (tl_apk_stream_epoch[sid] != epoch) {
-            tl_apk_stream_epoch[sid] = epoch;
-            tl_apk_stream_pos[sid] = g_apkStreamSharedPos[sid].load(std::memory_order_relaxed);
-            tl_apk_stream_eof[sid] = false;
-            tl_apk_stream_err[sid] = false;
-        }
-        const off_t cur_pos = tl_apk_stream_pos[sid];
         const size_t total_want = size * count;
         if (total_want == 0 || size == 0) return 0;
-
+        const int fd = g_apkStreamFd[sid].load(std::memory_order_relaxed);
+        // Read and advance under the stream lock: two threads sharing this FILE*
+        // must consume one cursor between them, never the same bytes twice.
+        std::lock_guard<std::mutex> slock(g_apkStreamMtx[sid]);
+        if (!apk_stream_live(sid, stream)) {
+            errno = EBADF;
+            return 0;
+        }
+        const off_t cur_pos = g_apkStreamPos[sid].load(std::memory_order_relaxed);
         ssize_t rd = 0;
         if (fd >= 0) {
             rd = ::pread(fd, buf, total_want, cur_pos);
         }
         if (rd < 0) {
-            tl_apk_stream_err[sid] = true;
+            g_apkStreamErr[sid].store(1, std::memory_order_relaxed);
             n = 0;
         } else {
             if (static_cast<size_t>(rd) < total_want) {
-                tl_apk_stream_eof[sid] = true;
+                g_apkStreamEof[sid].store(1, std::memory_order_relaxed);
             }
-            tl_apk_stream_pos[sid] = cur_pos + rd;
-            g_apkStreamSharedPos[sid].store(cur_pos + rd, std::memory_order_relaxed);
+            g_apkStreamPos[sid].store(cur_pos + rd, std::memory_order_relaxed);
             n = static_cast<size_t>(rd) / size;
         }
     } else {
@@ -2507,10 +2535,19 @@ int vfs_fclose(FILE* stream) {
                     ktraceLine("[KuDroidApkS] sid=%d AUDIO close after %llu ops\n", i,
                                static_cast<unsigned long long>(ops));
                 }
-                g_apkStreamFd[i].store(-1, std::memory_order_relaxed);
-                g_apkStreamSize[i].store(0, std::memory_order_relaxed);
-                g_apkStreamEpoch[i].fetch_add(1, std::memory_order_acq_rel);
-                g_apkStreams[i].store(0, std::memory_order_release);
+                // Retire the slot under the stream lock, so a reader that is
+                // already inside an op finishes against this record and a reader
+                // that arrives afterwards fails the apk_stream_live() check
+                // instead of writing into whatever file reuses the slot.
+                {
+                    std::lock_guard<std::mutex> slock(g_apkStreamMtx[i]);
+                    g_apkStreamFd[i].store(-1, std::memory_order_relaxed);
+                    g_apkStreamSize[i].store(0, std::memory_order_relaxed);
+                    g_apkStreamPos[i].store(0, std::memory_order_relaxed);
+                    g_apkStreamEof[i].store(0, std::memory_order_relaxed);
+                    g_apkStreamErr[i].store(0, std::memory_order_relaxed);
+                    g_apkStreams[i].store(0, std::memory_order_release);
+                }
                 break;
             }
         }
@@ -2529,14 +2566,7 @@ off_t vfs_ftello(FILE* stream) {
     }
     const int sid = apk_stream_id(stream);
     if (sid >= 0) {
-        const uint32_t epoch = g_apkStreamEpoch[sid].load(std::memory_order_acquire);
-        if (tl_apk_stream_epoch[sid] != epoch) {
-            tl_apk_stream_epoch[sid] = epoch;
-            tl_apk_stream_pos[sid] = g_apkStreamSharedPos[sid].load(std::memory_order_relaxed);
-            tl_apk_stream_eof[sid] = false;
-            tl_apk_stream_err[sid] = false;
-        }
-        return tl_apk_stream_pos[sid];
+        return g_apkStreamPos[sid].load(std::memory_order_relaxed);
     }
     return ::ftello(stream);
 }
@@ -2557,18 +2587,19 @@ int vfs_fseeko(FILE* stream, off_t offset, int whence) {
     int rc = 0;
 
     if (apk) {
-        const uint32_t epoch = g_apkStreamEpoch[sid].load(std::memory_order_acquire);
-        if (tl_apk_stream_epoch[sid] != epoch) {
-            tl_apk_stream_epoch[sid] = epoch;
-            tl_apk_stream_pos[sid] = g_apkStreamSharedPos[sid].load(std::memory_order_relaxed);
-            tl_apk_stream_eof[sid] = false;
-            tl_apk_stream_err[sid] = false;
+        std::lock_guard<std::mutex> slock(g_apkStreamMtx[sid]);
+        if (!apk_stream_live(sid, stream)) {
+            errno = EBADF;
+            return -1;
         }
         off_t new_pos = 0;
         if (whence == SEEK_SET) {
             new_pos = offset;
         } else if (whence == SEEK_CUR) {
-            new_pos = tl_apk_stream_pos[sid] + offset;
+            // Relative to the stream's one cursor, not this thread's last guess:
+            // the thread that gets the stream next must land where the thread that
+            // had it left off.
+            new_pos = g_apkStreamPos[sid].load(std::memory_order_relaxed) + offset;
         } else if (whence == SEEK_END) {
             new_pos = g_apkStreamSize[sid].load(std::memory_order_relaxed) + offset;
         } else {
@@ -2579,9 +2610,8 @@ int vfs_fseeko(FILE* stream, off_t offset, int whence) {
             errno = EINVAL;
             return -1;
         }
-        tl_apk_stream_pos[sid] = new_pos;
-        g_apkStreamSharedPos[sid].store(new_pos, std::memory_order_relaxed);
-        tl_apk_stream_eof[sid] = false;
+        g_apkStreamPos[sid].store(new_pos, std::memory_order_relaxed);
+        g_apkStreamEof[sid].store(0, std::memory_order_relaxed);
         rc = 0;
     } else {
         rc = ::fseeko(stream, offset, whence);
@@ -2660,14 +2690,15 @@ int vfs_feof(FILE* stream) {
     if (!stream) return 0;
     const int sid = apk_stream_id(stream);
     if (sid >= 0) {
-        const uint32_t epoch = g_apkStreamEpoch[sid].load(std::memory_order_acquire);
-        if (tl_apk_stream_epoch[sid] != epoch) {
-            tl_apk_stream_epoch[sid] = epoch;
-            tl_apk_stream_pos[sid] = g_apkStreamSharedPos[sid].load(std::memory_order_relaxed);
-            tl_apk_stream_eof[sid] = false;
-            tl_apk_stream_err[sid] = false;
-        }
-        return (tl_apk_stream_eof[sid] || tl_apk_stream_pos[sid] >= g_apkStreamSize[sid].load(std::memory_order_relaxed)) ? 1 : 0;
+        // Under the stream lock so the flag and the position come from one op:
+        // read separately, a read that has just set eof can be seen before its
+        // position update lands.
+        std::lock_guard<std::mutex> slock(g_apkStreamMtx[sid]);
+        return (g_apkStreamEof[sid].load(std::memory_order_relaxed) ||
+                g_apkStreamPos[sid].load(std::memory_order_relaxed) >=
+                    g_apkStreamSize[sid].load(std::memory_order_relaxed))
+                   ? 1
+                   : 0;
     }
     return std::feof(stream);
 }
@@ -2676,9 +2707,7 @@ int vfs_ferror(FILE* stream) {
     if (!stream) return 0;
     const int sid = apk_stream_id(stream);
     if (sid >= 0) {
-        const uint32_t epoch = g_apkStreamEpoch[sid].load(std::memory_order_acquire);
-        if (tl_apk_stream_epoch[sid] != epoch) return 0;
-        return tl_apk_stream_err[sid] ? 1 : 0;
+        return g_apkStreamErr[sid].load(std::memory_order_relaxed) ? 1 : 0;
     }
     return std::ferror(stream);
 }
@@ -2687,8 +2716,9 @@ void vfs_clearerr(FILE* stream) {
     if (!stream) return;
     const int sid = apk_stream_id(stream);
     if (sid >= 0) {
-        tl_apk_stream_eof[sid] = false;
-        tl_apk_stream_err[sid] = false;
+        std::lock_guard<std::mutex> slock(g_apkStreamMtx[sid]);
+        g_apkStreamEof[sid].store(0, std::memory_order_relaxed);
+        g_apkStreamErr[sid].store(0, std::memory_order_relaxed);
         return;
     }
     std::clearerr(stream);
