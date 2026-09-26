@@ -2016,7 +2016,11 @@ void fsb_windows_report_locked(const std::string& path, bool enforceCap) {
             if (live < 16 || oldest == list.size()) break;
             const FsbWindow& w = list[oldest];
             const uint64_t covered = w.blocks * 2048;
-            ktraceLine("[KuDroidFmod] blob off=%ld size=%llu covered=%llu SHORT\n",
+            // EVICTED, not SHORT: these are the windows the live-set cap
+            // retires before their bytes arrived, not a short read on the
+            // APK. Every audio run this quarter read "SHORT" here and went
+            // looking for a mis-read that never existed.
+            ktraceLine("[KuDroidFmod] blob off=%ld size=%llu covered=%llu EVICTED\n",
                        w.start, static_cast<unsigned long long>(w.expected),
                        static_cast<unsigned long long>(
                            covered > w.expected ? w.expected : covered));

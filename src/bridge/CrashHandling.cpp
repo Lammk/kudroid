@@ -1831,9 +1831,54 @@ host_fatal_path:;
                     const bool storeEligible =
                         !fault_addr_is_nullish(reinterpret_cast<uintptr_t>(info->si_addr)) &&
                         unmapped_addr_is_store_safe(reinterpret_cast<uintptr_t>(info->si_addr));
+                    // Same-page tolerance as the decoder gate below: inside the
+                    // first page the exact byte carries no signal (nothing is
+                    // mapped there), so demanding equality here reported the
+                    // wrong reason for plan-shaped null faults.
+                    const uintptr_t fa = reinterpret_cast<uintptr_t>(info->si_addr);
+                    const bool decodeExplains =
+                        p.effAddr == fa || (p.effAddr < 0x1000u && fa < 0x1000u);
+                    // Mirror of the branch-through-fabricated-register gate in
+                    // fault_skip_load_store: a load whose result the next word
+                    // branches through is refused even when the plan decodes —
+                    // this crash was exactly that shape (ldr x8,[x9,#0x28];
+                    // blr x8, x9=0). Without naming it, the diag printed the
+                    // budget-cap line and sent the investigation the wrong way.
+                    auto nextBranchesThroughPlanReg = [&]() {
+                        if (!p.isLoad || p.rt >= 32) return false;
+                        if ((pc & 0xFFFu) + 4 >= 0x1000u) return false;
+                        const uint32_t next =
+                            *reinterpret_cast<const uint32_t*>(pc + 4);
+                        if (kudroid::fault_skip_branches_through(next, p.rt))
+                            return true;
+                        if (p.isPair && p.rt2 < 32 &&
+                            kudroid::fault_skip_branches_through(next, p.rt2))
+                            return true;
+                        if (p.isVector) {
+                            for (unsigned i = 1; i < p.rtCount && p.rt + i < 32; ++i) {
+                                if (kudroid::fault_skip_branches_through(next,
+                                                                         p.rt + i))
+                                    return true;
+                            }
+                        }
+                        return false;
+                    };
                     if (!p.skippable) {
                         m = snprintf(sigline, sizeof(sigline), "fault_skip_diag: instruction 0x%08x not skippable\n", w);
-                    } else if (p.effAddr != reinterpret_cast<uintptr_t>(info->si_addr)) {
+                    } else if (nextBranchesThroughPlanReg()) {
+                        m = snprintf(sigline, sizeof(sigline),
+                                     "fault_skip_diag: next insn branches through fabricated r%u (call-via-null); real fault reported\n",
+                                     p.rt);
+                    } else if (p.isLoad && !p.isVector &&
+                               (p.rt >= 29 || (p.isPair && p.rt2 >= 29))) {
+                        m = snprintf(sigline, sizeof(sigline),
+                                     "fault_skip_diag: fabricated destination r%u is not a transfer result register; real fault reported\n",
+                                     p.rt >= 29 ? p.rt : p.rt2);
+                    } else if (p.isLoad && !p.isVector &&
+                               (p.rt == 18 || (p.isPair && p.rt2 == 18))) {
+                        m = snprintf(sigline, sizeof(sigline),
+                                     "fault_skip_diag: fabricated destination is the platform register r18; real fault reported\n");
+                    } else if (!decodeExplains) {
                         m = snprintf(sigline, sizeof(sigline), "fault_skip_diag: effAddr 0x%llx != si_addr %p\n",
                                      (unsigned long long)p.effAddr, info->si_addr);
                     } else if (!fault_addr_is_nullish(

@@ -959,12 +959,20 @@ extern "C" int32_t bionic_kudroid_audiotrack_write(int64_t track, const void* da
                         std::chrono::steady_clock::now() - waitStart)
                         .count();
         static std::atomic<long long> s_nextReportNs{0};
+        // Log only an abnormal stall: one chunk at 4KB/24kHz-stereo is ~43ms,
+        // so a healthy paced write always lands in 35..60ms — logging every
+        // one of those lines flooded stderr at ~2 lines/s for the whole run
+        // and buried the real signal. The band accommodates other sane chunk
+        // geometries; anything outside it (waiting many chunks, or 0 wait on
+        // a drained queue after a burst) reports the state the pacing story
+        // cannot explain.
+        const bool stallLike = blockedMs > 60 || (blockedMs > 0 && blockedMs < 35);
         const long long nowNs =
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now().time_since_epoch())
                 .count();
         long long due = s_nextReportNs.load(std::memory_order_relaxed);
-        if (nowNs >= due &&
+        if (stallLike && nowNs >= due &&
             s_nextReportNs.compare_exchange_strong(due, nowNs + 500LL * 1000 * 1000,
                                                    std::memory_order_relaxed)) {
             std::fprintf(stderr,

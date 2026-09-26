@@ -64,6 +64,7 @@ const C = {
 let connectedSocket = null;
 let clientDeviceInfo = null;
 let isDebugMode = false;
+let debugNoSave = false; // debug --no-save: stream only, discard on Ctrl+C
 let debugSessionLogs = [];
 let debugSessionStart = null;
 let pendingCommandResolver = null;
@@ -235,7 +236,7 @@ function handleIncomingMessage(text) {
         } else if (msg.type === 'log') {
             const line = msg.message;
             if (isDebugMode) {
-                debugSessionLogs.push(line);
+                if (debugSessionLogs) debugSessionLogs.push(line);
                 formatAndPrintLog(msg.level, msg.tag, line);
             }
         } else if (msg.type === 'response') {
@@ -247,7 +248,7 @@ function handleIncomingMessage(text) {
     } catch (e) {
         // Raw text line
         if (isDebugMode) {
-            debugSessionLogs.push(text);
+            if (debugSessionLogs) debugSessionLogs.push(text);
             console.log(`${C.gray}${text}${C.reset}`);
         }
     }
@@ -317,7 +318,7 @@ async function handleCommandLine(line) {
             break;
 
         case 'debug':
-            startDebugMode();
+            startDebugMode(args);
             return;
 
         case 'version':
@@ -354,6 +355,7 @@ function printHelp() {
   ${C.green}version / ver${C.reset}     Check the build commit hash / version of the app on the iPhone
   ${C.green}list${C.reset}              List APKs installed on the iPhone
   ${C.green}debug${C.reset}             Start the all-in-one log stream (${C.yellow}Ctrl+C to stop & save logs${C.reset})
+  ${C.green}debug --no-save${C.reset}   Stream only; Ctrl+C stops without writing a log file
   ${C.green}exit / quit${C.reset}       Exit KDB
 `);
 }
@@ -415,18 +417,27 @@ async function handleList() {
     }
 }
 
-function startDebugMode() {
+function startDebugMode(args = []) {
     isDebugMode = true;
-    debugSessionLogs = [];
+    debugNoSave = args.some((a) => a === '--no-save' || a === '-n');
+    debugSessionLogs = debugNoSave ? null : [];
     debugSessionStart = new Date();
-    console.log(`${C.bgBlue} KDB ALL-IN-ONE DEBUG STREAM ACTIVE (Press Ctrl+C to stop & auto-save) ${C.reset}\n`);
+    const tail = debugNoSave
+        ? `${C.gray}(--no-save: logs will NOT be written on Ctrl+C)${C.reset}`
+        : `${C.gray}(Ctrl+C stops and saves to logs/)${C.reset}`;
+    console.log(`${C.bgBlue} KDB ALL-IN-ONE DEBUG STREAM ACTIVE ${C.reset} ${tail}\n`);
 }
 
 function stopDebugMode() {
     isDebugMode = false;
     console.log(`\n${C.yellow}Debug stream stopped.${C.reset}`);
 
-    if (debugSessionLogs.length > 0) {
+    if (debugNoSave) {
+        console.log(`${C.gray}--no-save: session log discarded.${C.reset}\n`);
+        prompt();
+        return;
+    }
+    if (debugSessionLogs && debugSessionLogs.length > 0) {
         const nowStr = new Date().toISOString().replace(/[:.]/g, '-');
         const filename = `debug_${nowStr}.log`;
         const targetPath = path.join(LOGS_DIR, filename);
