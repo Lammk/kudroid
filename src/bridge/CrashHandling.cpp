@@ -175,6 +175,36 @@ static constexpr long long kMaxNullGapNs = 1000000LL;
 static bool fault_addr_is_nullish(unsigned long long addr) {
     return addr < 0x10000u || addr >= (0ull - 0x10000ull);
 }
+
+// Unmapped-away-from-everything: false for a nullish address (the load-zero
+// path owns those), false when any mapping answers (then the store-drop path
+// must NOT apply — a committed-but-protected page is a live object this
+// handler cannot classify; the containment requirement also defeats the
+// mach_vm_region gap quirk that would answer with the first region for an
+// address below all mappings), false inside the thread's own stack bounds
+// and one guard page beyond them. Between heap, stack and the null page the
+// rest of the 64-bit space is reservation nobody committed: dropping one
+// write there poisons no readable state.
+//
+// QueryRegionProt and query_thread_stack_bounds are the probes the fatal path
+// already uses for diagnostics, so a fresh worker fault pays only what the
+// crash report would have paid anyway.
+static bool unmapped_addr_is_store_safe(unsigned long long addr) {
+    if (fault_addr_is_nullish(addr)) return false;
+    char cur[4] = "???", max[4] = "???";
+    uint64_t rbase = 0, rsize = 0;
+    if (kudroid::QueryRegionProt(reinterpret_cast<const void*>(addr), cur, max,
+                                 &rbase, &rsize) &&
+        addr >= rbase && addr < rbase + rsize) {
+        return false;  // a real region answers: not our shape
+    }
+    const kudroid::StackBounds st = kudroid::query_thread_stack_bounds();
+    if (st.valid) {
+        constexpr uintptr_t kStackGuard = 0x10000;
+        if (addr >= st.low - kStackGuard && addr < st.high + kStackGuard) return false;
+    }
+    return true;
+}
 // Largest per-step advance still treated as one contiguous walk. A stride that
 // jumps further is not a bounded table walk and must not inherit this budget.
 static constexpr unsigned long long kWalkStepMax = 1ULL << 20;
@@ -296,6 +326,18 @@ static bool worker_budget_note(WorkerBudget* s, long long nowNs,
         }
     } else {
         s->lastNs.store(nowNs, std::memory_order_relaxed);
+    }
+    // Store-drop shaping: a frame-spaced unmapped store is a new bad object,
+    // not progress on an old one, so give it a fresh budget. A tight same-pc
+    // sequence is a live write loop whose dropped stores are corrupting state
+    // every frame — kMaxStoreRun drops, then peek refuses and the fatal path
+    // surfaces the loop. Runs before the charge below so a spent budget still
+    // reaches this reset.
+    if (!fault_addr_is_nullish(addr) &&
+        !(last != 0 && nowNs - last <= kMaxNullGapNs && pc != 0 &&
+          pc == s->lastPc.load(std::memory_order_relaxed))) {
+        s->count.store(0, std::memory_order_relaxed);
+        s->walk.store(0, std::memory_order_relaxed);
     }
     // A same-pc forward step is a bounded table walk, not a stuck storm: charge
     // the dedicated walk budget (and count the walk length) instead of the
@@ -1014,25 +1056,42 @@ static bool kudroid_try_skip_fault(int /*sig*/, siginfo_t* info, void* ucontext)
     uint64_t newPc = 0;
     bool isLoad = false;
     const uintptr_t faultAddr = reinterpret_cast<uintptr_t>(info->si_addr);
-    // A fault may only be silently recovered when it looks like a null-page
-    // probe: the guest dereferences a pointer whose null check it got wrong.
-    // That is the one case where inventing a result cannot corrupt live state,
-    // because nothing the guest owns lives below the first page — or just
-    // below zero, for a null base with a negative structure offset. Anywhere
-    // else the fault is a real bad access, and fabricating a load result feeds
-    // garbage into the structures the guest is walking -- observed live as a
-    // hash-table loop that stored a poisoned SIMD lane (0xCD) into a live
-    // array, kept walking with the poisoned index and finally wrote 33GB off
-    // the heap. Refuse those: a crash on the real address, with the region and
-    // permissions logged, is diagnosable; thousands of silent corruptions are
-    // not.
-    if (!fault_addr_is_nullish(faultAddr)) return false;
+    // A fault may only be silently recovered in two shapes.
+    //
+    // Null-page probe (loads and stores below the first page): the guest
+    // dereferences a pointer whose null check it got wrong, and inventing a
+    // result cannot corrupt live state because nothing the guest owns lives
+    // there — or just below zero, for a null base with a negative structure
+    // offset. Anywhere mapped, fabricating a load result feeds garbage into
+    // the structures the guest is walking — observed live as a hash-table loop
+    // that stored a poisoned SIMD lane (0xCD) into a live array, kept walking
+    // with the poisoned index and finally wrote 33GB off the heap.
+    //
+    // Unmapped store drop: a STORE whose fault address has no mapping at all,
+    // outside the thread's own stack and the null page. Dropping the write
+    // fabricates nothing — no register changes, memory keeps its previous
+    // bytes — so no readable state is poisoned. The cost is one lost update
+    // (a worker's collision-index store), against the alternative: the whole
+    // engine dying on a fault whose recovery is provably inert. Observed
+    // 2026-09-26: Job.Worker 1 took SEGV_ACCERR at 0x716c2ec7b4, region <none>,
+    // plan decoded, recovery refused on the nullish gate only; the game died
+    // 2m16s into the run. Decoding, branch and register guards still apply
+    // below; atomics/exclusives never decode as skippable.
+    const bool storeDropEligible =
+        !fault_addr_is_nullish(faultAddr) && unmapped_addr_is_store_safe(faultAddr);
+    if (!fault_addr_is_nullish(faultAddr) && !storeDropEligible) return false;
     if (!fault_skip_load_store(uc, faultAddr, &newPc, &isLoad)) return false;
+    // Only the admitted shapes proceed: a nullish load/store, or a genuinely
+    // unmapped store. A nullish address can never be store-drop (the helper
+    // refuses it), so a fabricated-zero load never hides inside this gate.
+    if (!fault_addr_is_nullish(faultAddr) && isLoad) return false;
     arm_thread_state64_set_pc_fptr(uc->uc_mcontext->__ss,
                                    reinterpret_cast<void*>(newPc));
     char mark[256];
     const int n = snprintf(mark, sizeof(mark),
-                           "fault-skipped fault_addr=0x%llx resumed_at_pc=0x%llx",
+                           "fault-skipped kind=%s fault_addr=0x%llx resumed_at_pc=0x%llx",
+                           (fault_addr_is_nullish(faultAddr) ? "null-page"
+                                                             : "store-unmapped"),
                            (unsigned long long)faultAddr,
                            (unsigned long long)newPc);
     if (n > 0) kudroid_persistent_breadcrumb(mark);
@@ -1769,6 +1828,9 @@ host_fatal_path:;
                     const uint64_t baseVal = (rn == 31) ? arm_thread_state64_get_sp(uc->uc_mcontext->__ss) : regVal(rn);
                     const uint64_t rmVal = regVal((w >> 16) & 31);
                     const kudroid::FaultSkipPlan p = kudroid::fault_decode_skip(w, pc, baseVal, rmVal);
+                    const bool storeEligible =
+                        !fault_addr_is_nullish(reinterpret_cast<uintptr_t>(info->si_addr)) &&
+                        unmapped_addr_is_store_safe(reinterpret_cast<uintptr_t>(info->si_addr));
                     if (!p.skippable) {
                         m = snprintf(sigline, sizeof(sigline), "fault_skip_diag: instruction 0x%08x not skippable\n", w);
                     } else if (p.effAddr != reinterpret_cast<uintptr_t>(info->si_addr)) {
@@ -1776,13 +1838,15 @@ host_fatal_path:;
                                      (unsigned long long)p.effAddr, info->si_addr);
                     } else if (!fault_addr_is_nullish(
                                    reinterpret_cast<uintptr_t>(info->si_addr))) {
-                        // A decodable transfer is not a recoverable fault: the skip
-                        // path only invents results for null-page probes, so name that
-                        // instead of the thread/budget guess it used to print.
-                        m = snprintf(sigline, sizeof(sigline),
-                                     "fault_skip_diag: plan decodes, fault addr 0x%llx is not nullish"
-                                     " (recovery refused)\n",
-                                     (unsigned long long)reinterpret_cast<uintptr_t>(info->si_addr));
+                        if (storeEligible) {
+                            m = snprintf(sigline, sizeof(sigline),
+                                         "fault_skip_diag: unmapped store, drop path available\n");
+                        } else {
+                            m = snprintf(sigline, sizeof(sigline),
+                                         "fault_skip_diag: plan decodes, fault addr 0x%llx is not nullish"
+                                         " (recovery refused)\n",
+                                         (unsigned long long)reinterpret_cast<uintptr_t>(info->si_addr));
+                        }
                     } else {
                         m = snprintf(sigline, sizeof(sigline), "fault_skip_diag: skippable plan ok (fatal thread or budget cap)\n");
                     }
