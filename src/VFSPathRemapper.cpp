@@ -1943,6 +1943,14 @@ struct FsbWindow {
     uint64_t expected = 0;
     uint64_t blocks = 0;            // distinct 2048-byte blocks seen
     std::vector<uint64_t> covered;  // bitmap, one bit per block
+    // Verdict already announced. A guest that fails to play a clip re-reads the
+    // same blob for as long as it keeps retrying, and erasing the window on
+    // COMPLETE made every retry re-register and re-announce it: one 576-byte
+    // blob was reported 262 times in a single run, two unbuffered stderr lines
+    // each, on the guest's synchronous read path, while the player was trying to
+    // respond to a touch. The window is kept instead, so the registration path
+    // recognises the blob and leaves it alone.
+    bool reported = false;
 };
 std::map<std::string, std::vector<FsbWindow>> g_fsbWindows;  // g_freadVolMtx
 
@@ -1982,26 +1990,53 @@ void fsb_windows_report_locked(const std::string& path, bool enforceCap) {
     const auto it = g_fsbWindows.find(path);
     if (it == g_fsbWindows.end()) return;
     auto& list = it->second;
-    for (size_t i = 0; i < list.size();) {
-        const FsbWindow& w = list[i];
+    // Announce each window whose declared bytes are all accounted for -- once
+    // per window. Marked, not erased: erasing let every re-read of the same blob
+    // re-register it and announce it again, which turned a guest's clip-load
+    // retry loop into an unbounded log loop on its synchronous read path.
+    for (auto& w : list) {
+        if (w.reported) continue;
         if (w.blocks * 2048 >= w.expected) {
             ktraceLine(
                          "[KuDroidFmod] blob off=%ld size=%llu covered=%llu COMPLETE\n",
                          w.start, static_cast<unsigned long long>(w.expected),
                          static_cast<unsigned long long>(w.expected));
-            list.erase(list.begin() + static_cast<long>(i));
-        } else {
-            ++i;
+            w.reported = true;
         }
     }
-    while (enforceCap && list.size() >= 16) {
-        const FsbWindow& w = list.front();
-        const uint64_t covered = w.blocks * 2048;
-        ktraceLine("[KuDroidFmod] blob off=%ld size=%llu covered=%llu SHORT\n",
-                     w.start, static_cast<unsigned long long>(w.expected),
-                     static_cast<unsigned long long>(
-                         covered > w.expected ? w.expected : covered));
-        list.erase(list.begin());
+    if (enforceCap) {
+        for (;;) {
+            std::size_t live = 0;
+            std::size_t oldest = list.size();
+            for (std::size_t i = 0; i < list.size(); ++i) {
+                if (list[i].reported) continue;
+                ++live;
+                if (oldest == list.size()) oldest = i;
+            }
+            if (live < 16 || oldest == list.size()) break;
+            const FsbWindow& w = list[oldest];
+            const uint64_t covered = w.blocks * 2048;
+            ktraceLine("[KuDroidFmod] blob off=%ld size=%llu covered=%llu SHORT\n",
+                       w.start, static_cast<unsigned long long>(w.expected),
+                       static_cast<unsigned long long>(
+                           covered > w.expected ? w.expected : covered));
+            list[oldest].reported = true;
+        }
+    }
+    // Announced windows exist only to make a re-read a no-op, so they are what
+    // gets dropped when the list grows. A window still waiting for its bytes is
+    // never dropped.
+    constexpr std::size_t kKeptReported = 256;
+    while (list.size() > kKeptReported) {
+        std::size_t victim = list.size();
+        for (std::size_t i = 0; i < list.size(); ++i) {
+            if (list[i].reported) {
+                victim = i;
+                break;
+            }
+        }
+        if (victim == list.size()) break;
+        list.erase(list.begin() + static_cast<std::ptrdiff_t>(victim));
     }
     if (list.empty()) g_fsbWindows.erase(it);
 }
@@ -2454,7 +2489,6 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                 // concurrent streams cannot mask the FSB stream's reads.
                 {
                     std::lock_guard<std::mutex> vlock(g_freadVolMtx);
-                    g_fsbFollowup[stream] = 8;
                     if (parsed && start >= 0 && blobTotal > 0 &&
                         blobTotal <= (32u << 20)) {
                         const auto pit2 = g_freadPaths.find(stream);
@@ -2469,6 +2503,12 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                                 }
                             }
                             if (!already) {
+                                // Armed only for a blob seen for the first time.
+                                // Re-arming on every hit let a retrying guest log the
+                                // next eight reads of the same handle each time it
+                                // asked again, which is a second unbounded log loop on
+                                // the same path.
+                                g_fsbFollowup[stream] = 8;
                                 // The report can empty the list, and it drops the map
                                 // entry when it does -- so `list` is dangling the moment
                                 // it returns. Pushing through it wrote a window into

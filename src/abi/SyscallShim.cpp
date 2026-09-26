@@ -2783,6 +2783,24 @@ extern "C" ssize_t bionic_write(int fd, const void* buf, size_t count) {
     return ret;
 }
 
+// stdio writes, which never reach bionic_write: the guest's fwrite is the host's
+// fwrite, and that lands on the host write(2) directly. So a save through
+// fopen/fwrite -- which is how Unity persists PlayerPrefs and save files -- was
+// invisible: the path showed "first-read" and never a write, and "my flag did
+// not save" and "the flag was never written" were indistinguishable.
+extern "C" size_t kudroid_fwrite(const void* buf, size_t size, size_t nmemb,
+                                 FILE* stream) {
+    const size_t ret = std::fwrite(buf, size, nmemb, stream);
+    if (ret > 0 && stream != nullptr) {
+        const int fd = ::fileno(stream);
+        if (fd >= 0) {
+            io_volume_add(std::string(fd_path(fd)),
+                          static_cast<uint64_t>(ret) * size, "write");
+        }
+    }
+    return ret;
+}
+
 // Address family translation between Linux guest and Darwin host ABI.
 // Linux AF_INET6 is 10, Darwin AF_INET6 is 30.
 namespace {
@@ -6829,6 +6847,9 @@ const SymbolEntry kSyscallSymbols[] = {
     {"fopen64", reinterpret_cast<void*>(&vfs_fopen64)},
     {"freopen", reinterpret_cast<void*>(&vfs_freopen)},
     {"fread", reinterpret_cast<void*>(&vfs_fread)},
+    // fwrite is NOT vfs: the FILE* is already a host stream on a remapped path,
+    // so this only adds the tracing that makes a save visible.
+    {"fwrite", reinterpret_cast<void*>(&kudroid_fwrite)},
     {"fclose", reinterpret_cast<void*>(&vfs_fclose)},
     {"fseek", reinterpret_cast<void*>(&vfs_fseek)},
     {"fseeko", reinterpret_cast<void*>(&vfs_fseeko)},

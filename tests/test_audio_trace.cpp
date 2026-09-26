@@ -480,8 +480,8 @@ int main() {
         Check(out.find("in-blob read") != std::string::npos,
               "reads inside a tracked blob are accounted");
         // Every blob start in the chain must get a verdict. Compared as a set of
-        // offsets, not a line count: a re-read legitimately re-reports a blob it
-        // already tracked, and the point is coverage, not how often it is said.
+        // offsets, not a line count: a re-read legitimately re-covers a blob, and
+        // the point is coverage, not how often it is said.
         std::vector<long> verdicts;
         for (size_t at = out.find("blob off="); at != std::string::npos;) {
             verdicts.push_back(std::strtol(out.c_str() + at + 9, nullptr, 10));
@@ -496,6 +496,27 @@ int main() {
         }
         Check(allVerdicted,
               "every blob in the chain is tracked and verdicted COMPLETE");
+
+        // ...and exactly once each. A guest that cannot play a clip re-reads the
+        // same blob for as long as it retries; announcing it again on every pass
+        // turns that retry loop into an unbounded log loop on the guest's
+        // synchronous read path (observed: one 576-byte blob announced 262 times
+        // in a single run, two unbuffered stderr lines each).
+        std::size_t announced = 0;
+        for (size_t at = out.find("COMPLETE"); at != std::string::npos;
+             at = out.find("COMPLETE", at + 1)) {
+            // ktraceLine stamps every line with "[t=<ms> th=<name>] ", so the
+            // verdict is found by substring, not by line offset.
+            const size_t lineStart = out.rfind('\n', at);
+            const std::string line =
+                out.substr(lineStart == std::string::npos ? 0 : lineStart + 1,
+                           (lineStart == std::string::npos ? at : at - lineStart - 1));
+            if (line.find("blob off=") != std::string::npos) ++announced;
+        }
+        Check(announced == verdicts.size(),
+              "a re-read of the same blob does not announce it again (" +
+                  std::to_string(announced) + " lines for " +
+                  std::to_string(verdicts.size()) + " blobs)");
     }
 
     std::filesystem::remove_all(tmp);
