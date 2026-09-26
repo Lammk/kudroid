@@ -4732,6 +4732,26 @@ struct BionicThreadArgs {
 
 static void* bionic_thread_wrapper(void* rawArgs);
 
+// Match Android's bionic FPCR for all guest threads: FZ (bit 24) flushes
+// denormals to zero and DN (bit 25) collapses NaN payloads to the Default NaN.
+// Darwin leaves both clear, so guest SIMD code written against bionic
+// semantics — denormal-flushed, NaN-quieting — observes values Android never
+// produces (observed shape: rank corruption in PhysX radix sorts after
+// denormal-bearing SIMD ops). Only these two bits are set; sticky IDC/IXC/Ofc
+// cumulative flags are preserved untouched. Runs on the thread itself: MSR
+// FPCR is not signal-handler safe and this must apply before guest code.
+// Defined before both callers (bionic_init_main_thread_tls here,
+// bionic_thread_wrapper below) — a use-before-declaration that only the
+// Apple arm64 CI saw, because every other host compiles the block out.
+#if defined(__aarch64__)
+static void apply_guest_fpcr(void) {
+    uint64_t fpcr = 0;
+    __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
+    fpcr |= (1ULL << 24) | (1ULL << 25);  // FZ | DN
+    __asm__ volatile("msr fpcr, %0" : : "r"(fpcr));
+}
+#endif
+
 extern "C" void bionic_init_main_thread_tls(void) {
 #if defined(__aarch64__)
     apply_guest_fpcr();
@@ -4844,23 +4864,6 @@ bool bionic_handle_jit26_trap(void* ucontext) {
 
 namespace kudroid {
 namespace {
-
-// Match Android's bionic FPCR for all guest threads: FZ (bit 24) flushes
-// denormals to zero and DN (bit 25) collapses NaN payloads to the Default NaN.
-// Darwin leaves both clear, so guest SIMD code written against bionic
-// semantics — denormal-flushed, NaN-quieting — observes values Android never
-// produces (observed shape: rank corruption in PhysX radix sorts after
-// denormal-bearing SIMD ops). Only these two bits are set; sticky IDC/IXC/Ofc
-// cumulative flags are preserved untouched. Runs on the thread itself: MSR
-// FPCR is not signal-handler safe and this must apply before guest code.
-#if defined(__aarch64__)
-static void apply_guest_fpcr(void) {
-    uint64_t fpcr = 0;
-    __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
-    fpcr |= (1ULL << 24) | (1ULL << 25);  // FZ | DN
-    __asm__ volatile("msr fpcr, %0" : : "r"(fpcr));
-}
-#endif
 
 static void* bionic_thread_wrapper(void* rawArgs) {
     BionicThreadArgs* args = static_cast<BionicThreadArgs*>(rawArgs);
