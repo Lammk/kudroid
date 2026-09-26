@@ -161,6 +161,24 @@ extern "C" void kudroid_set_log_dir(const char* dir) {
     // KuART's classes.log belongs with the other diagnostics, not in Documents.
     std::string classesLogPath = (std::filesystem::path(g_logDir) / "classes.log").string();
     kuart_set_missing_class_log_path(classesLogPath.c_str());
+
+    // The breadcrumb journal is the only place silently-recovered faults
+    // (fault-skipped, null-run, skip refused) and the watchdog's thread dumps
+    // are recorded, so its absence is what makes an intermittent crash
+    // uninvestigable after the fact. Prove it is writable now, while this is
+    // ordinary code, rather than letting the fatal path discover it cannot
+    // write -- the breadcrumb writer itself is called from the signal handler
+    // and so cannot do this reporting itself.
+    {
+        const std::string probe = std::string(g_logDir) + "/native_breadcrumbs.log";
+        const int fd = ::open(probe.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (fd < 0) {
+            fprintf(stderr, "[kudroid_core] breadcrumb journal not writable: %s (%s)\n",
+                    probe.c_str(), std::strerror(errno));
+        } else {
+            ::close(fd);
+        }
+    }
 }
 
 // Debug-tab toggle for per-JNI-call tracing (replaces the TEMP-DEBUG hardcode

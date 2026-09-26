@@ -58,7 +58,7 @@ extern "C" void kudroid_persistent_breadcrumb(const char* line) {
     if (fd == -2) {
         char path[sizeof(g_logDir) + 32];
         const int n = snprintf(path, sizeof(path), "%s/native_breadcrumbs.log", g_logDir);
-        if (n > 0 && static_cast<size_t>(n) < sizeof(path)) {
+        if (n > 0 && static_cast<std::size_t>(n) < sizeof(path)) {
             int opened = ::open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
             int expected = -2;
             if (s_fd.compare_exchange_strong(expected, opened, std::memory_order_acq_rel)) {
@@ -72,6 +72,11 @@ extern "C" void kudroid_persistent_breadcrumb(const char* line) {
             fd = -1;
         }
     }
+    // No reporting here: this function is reached from the fatal signal
+    // handler, and anything it called that takes a lock or touches stdio could
+    // deadlock inside the very report meant to explain the fault. Whether the
+    // journal is writable is checked once in kudroid_set_log_dir instead, which
+    // runs in normal context.
     struct timespec now;
     ::clock_gettime(CLOCK_MONOTONIC, &now);
     char record[2304];

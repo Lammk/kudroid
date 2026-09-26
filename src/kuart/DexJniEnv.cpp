@@ -451,11 +451,16 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
     const auto native_start = std::chrono::steady_clock::now();
     KLOGJNI("KuARTNative", "enter class=%s method=%s sig=%s args=%zu vm_depth=%d",
             owner, method_name, method_sig, num_args, VmLockDepth());
-    // Full breadcrumbs for every call including hot paths (FMOD ticks,
-    // JNIBridge dispatch): debugging needs the complete enter/stage/exit
-    // flow, and the fd-cached writer keeps per-line cost to one write().
-    // (A KUDROID_TRACE_HOT gate used to slim these; reverted — blind
-    // breadcrumbs cost more debugging time than they save in I/O.)
+    // Breadcrumbs: one synchronous unbuffered write() each into a single
+    // process-wide O_APPEND file, so they cost a syscall per record and
+    // serialize every thread in the process on that inode. The enter/exit pair
+    // is what a crash investigation needs and it is always written. The three
+    // stage labels around the trampoline are the redundant middle of that pair
+    // and are gated on KUDROID_TRACE_HOT (Log.h), which takes it from six
+    // writes per native call to two. The memory snapshots ride along with the
+    // pair, so query_system_memory() stays on the same two calls it was on
+    // before, rather than four.
+    const bool hotTrace = log::trace_hot();
     char breadcrumb[2048];
     breadcrumb[0] = '\0';
     {
@@ -601,11 +606,11 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
     uint64_t ret;
     {
         // Run native with VM lock released so blocking calls and callbacks work.
-        native_call_stage("before-vm-release");
+        if (hotTrace) native_call_stage("before-vm-release");
         VmLockRelease unlocked;
-        native_call_stage("before-trampoline");
+        if (hotTrace) native_call_stage("before-trampoline");
         ret = kudroid_jni_call(method->native_fn, gp, ngp, fp, nfp, &fp_ret);
-        native_call_stage("after-trampoline");
+        if (hotTrace) native_call_stage("after-trampoline");
     }
 
     const auto native_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -622,7 +627,7 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
                       static_cast<unsigned long long>(memory_after.available_bytes),
                       memory_after.low_memory ? 1 : 0);
         kudroid_persistent_breadcrumb(breadcrumb);
-        native_call_stage("before-result-decode");
+        if (hotTrace) native_call_stage("before-result-decode");
     }
     switch (shorty[0]) {
         case 'V': break;

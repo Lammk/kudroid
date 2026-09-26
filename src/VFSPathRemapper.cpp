@@ -2260,7 +2260,10 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
         // wrong, is instantly visible. Rate-limited: an FSB header appears
         // once per clip load.
         static std::atomic<int> s_fsbCount{0};
-        if (buf != nullptr && n * size >= 4) {
+        // Archive streams only: the window map below is keyed by archive path,
+        // so a hit on any other stream can never be accounted, and a
+        // shader-cache or /proc read has no business being scanned for FSB5.
+        if (apk && buf != nullptr && n * size >= 4) {
             const auto* base = static_cast<const unsigned char*>(buf);
             const size_t readBytes = n * size;
             const long pos = vfs_ftell(stream);
@@ -2283,9 +2286,15 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                 // Bytes from this header to the end of the read: the geometry
                 // below must not reach past what was actually served.
                 const size_t avail = readBytes - static_cast<size_t>(f - base);
-                if (s_fsbCount.load() < 24) {
-                    s_fsbCount.fetch_add(1, std::memory_order_relaxed);
-                }
+                // Detection and window accounting run for every hit, so coverage
+                // stays complete. Only the DESCRIPTION is budgeted: the zip
+                // lookup, the 128-byte hex dump and the ~600-byte trace line are
+                // per-hit work on the guest's synchronous read path, and stderr
+                // here is unbuffered (one write syscall each). Left unbounded
+                // this produced 1508 such lines in one 2.3s audio burst, which is
+                // the stutter, not the diagnosis.
+                const int seen = s_fsbCount.fetch_add(1, std::memory_order_relaxed);
+                const bool describe = seen < 24;
                 std::string entry;
                 uint16_t method = 0xFFFF;
                 uint32_t usize = 0;
@@ -2295,7 +2304,7 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                 // which is the one geometry that turns a valid FSB5 into
                 // "Error loading file" without the bytes being wrong.
                 long long entryOff = -1;
-                if (start >= 0) {
+                if (describe && start >= 0) {
                     std::string archivePath;
                     {
                         std::lock_guard<std::mutex> vlock(g_freadVolMtx);
@@ -2367,9 +2376,10 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                     }
                 }
                 char hex[324] = {0};
-                {
+                if (describe) {
                     // 128 bytes: FSB5 header (60) + sample header area, where the
-                    // Vorbis setup chunk lives. The old 32-byte dump never reached it.
+                    // Vorbis setup chunk lives. 128 individual snprintf calls per
+                    // hit is audit work, not per-read work.
                     const size_t hb = avail < 128 ? avail : 128;
                     size_t o = 0;
                     for (size_t i = 0; i < hb; ++i) {
@@ -2389,7 +2399,7 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                 // word + VORBISDATA crc. The old guard demanded blobTotal+28
                 // served bytes — a streaming reader never satisfies that, so
                 // every run logged sample=[n/a] no matter what it read.
-                if (parsed && numSamples >= 1 && avail >= 76) {
+                if (describe && parsed && numSamples >= 1 && avail >= 76) {
                     const auto* sh = f + 60;
                     auto rd64 = [&](size_t o) {
                         uint64_t v = 0;
@@ -2421,21 +2431,23 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                                   chunkType == 11 ? " VORBISDATA" : "", crc32);
                     (void)0;
                 }
-                ktraceLine(
-                             "[KuDroidFmod] served FSB5 sid=%d at apk_off=%ld size=%zu "
-                             "method=%u usize=%u entryOff=%lld entryRem=%lld "
-                             "ver=%u num=%u shs=%u nts=%u "
-                             "dataSize=%u mode=%u blobTotal=%llu next=[%s] hex=%s "
-                             "sample=[%s] entry=%s%s\n",
-                             sid, start, avail, method, usize, entryOff,
-                             entryOff >= 0
-                                 ? static_cast<long long>(usize) - entryOff -
-                                       static_cast<long long>(blobTotal)
-                                 : -1,
-                             ver, numSamples, shs, nts,
-                             dataSize, mode, static_cast<unsigned long long>(blobTotal),
-                             nextDesc, hex, sampleDesc, entry.empty() ? "(none)" : entry.c_str(),
-                             trace_caller_text(caller));
+                if (describe) {
+                    ktraceLine(
+                                 "[KuDroidFmod] served FSB5 sid=%d at apk_off=%ld size=%zu "
+                                 "method=%u usize=%u entryOff=%lld entryRem=%lld "
+                                 "ver=%u num=%u shs=%u nts=%u "
+                                 "dataSize=%u mode=%u blobTotal=%llu next=[%s] hex=%s "
+                                 "sample=[%s] entry=%s%s\n",
+                                 sid, start, avail, method, usize, entryOff,
+                                 entryOff >= 0
+                                     ? static_cast<long long>(usize) - entryOff -
+                                           static_cast<long long>(blobTotal)
+                                     : -1,
+                                 ver, numSamples, shs, nts,
+                                 dataSize, mode, static_cast<unsigned long long>(blobTotal),
+                                 nextDesc, hex, sampleDesc, entry.empty() ? "(none)" : entry.c_str(),
+                                 trace_caller_text(caller));
+                }
                 // Decisive follow-up: when FMOD accepts the bank it streams
                 // through THIS handle; when it rejects the slice it reads
                 // little or nothing on it. Keyed by handle so unrelated

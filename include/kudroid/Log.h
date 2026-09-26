@@ -29,13 +29,16 @@ bool verbose_enabled();
 void set_jni(bool enabled);
 bool jni_enabled();
 
-// Gate persistent per-call breadcrumbs for hot native methods (FMOD mixer
-// ticks, JNIBridge.invoke dispatch). At thousands of calls/sec the 6-line
-// enter/stage/exit breadcrumb sequence per call saturated I/O (18k lines in
-// 59s, one open/write/close each). Default OFF: KUDROID_TRACE_HOT=1 restores
-// full tracing. RAM-only depth accounting (native_call_enter/exit, which the
-// watchdog reads) stays on; only the stage labels and memory snapshots of
-// gated calls are skipped.
+// Gate the redundant per-call stage labels around the native trampoline
+// (before-vm-release / before-trampoline / after-trampoline /
+// before-result-decode). The native-enter and native-exit breadcrumbs are
+// always written -- they are the record a crash investigation needs, and
+// losing them is how an intermittent fault becomes uninvestigable. The four
+// stage labels in between are the redundant middle of that pair, and they cost
+// one synchronous unbuffered write() each into a process-wide O_APPEND file
+// (native_breadcrumbs.log), so they are off by default and on under
+// KUDROID_TRACE_HOT=1. RAM-only depth accounting
+// (native_call_enter/exit, which the watchdog reads) is always on.
 bool trace_hot();
 
 // Write via standard pipeline (stdout + file + crash buffer).

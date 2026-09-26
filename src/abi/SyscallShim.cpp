@@ -2675,7 +2675,10 @@ bool fd_is_apk(int fd) {
 // file (bionic_mmap) that sit outside this anonymous namespace.
 extern "C" int kudroid_fd_is_apk(int fd) { return fd_is_apk(fd) ? 1 : 0; }
 
-static void io_volume_add(const std::string& path, uint64_t bytes) {
+// dir: "read" or "write". A save that never lands and a load that never
+// happens look identical when both are reported as a read, which is exactly
+// the question a PlayerPrefs-style "my flag did not save" report turns on.
+static void io_volume_add(const std::string& path, uint64_t bytes, const char* dir) {
     if (path.empty() || bytes == 0) return;
     // Copy the table for the top-5 sort OUTSIDE the lock: sorting up to 256
     // entries under it stalled every reader each 5MB.
@@ -2693,7 +2696,8 @@ static void io_volume_add(const std::string& path, uint64_t bytes) {
             static int s_firstLogged = 0;
             if (s_firstLogged < 80) {
                 ++s_firstLogged;
-                std::fprintf(stderr, "[KuDroidIO] first-read %s\n", short_path(path).c_str());
+                std::fprintf(stderr, "[KuDroidIO] first-%s %s\n", dir,
+                             short_path(path).c_str());
             }
         }
         auto& e = g_ioVol[path];
@@ -2746,7 +2750,7 @@ extern "C" uint64_t io_last_activity_ns() {
 extern "C" ssize_t bionic_read(int fd, void* buf, size_t count) {
     const ssize_t ret = ::read(fd, buf, count);
     if (ret > 0) {
-        io_volume_add(std::string(fd_path(fd)), static_cast<uint64_t>(ret));
+        io_volume_add(std::string(fd_path(fd)), static_cast<uint64_t>(ret), "read");
         // Trace the APK itself: Unity's zip-reader drains base.apk through raw
         // read() (1793 ops / 46MB in one session with zero pread64 traffic),
         // and no per-op trace existed here — the widest remaining blind spot
@@ -2774,7 +2778,7 @@ extern "C" ssize_t bionic_read(int fd, void* buf, size_t count) {
 extern "C" ssize_t bionic_write(int fd, const void* buf, size_t count) {
     const ssize_t ret = ::write(fd, buf, count);
     if (ret > 0) {
-        io_volume_add(std::string(fd_path(fd)), static_cast<uint64_t>(ret));
+        io_volume_add(std::string(fd_path(fd)), static_cast<uint64_t>(ret), "write");
     }
     return ret;
 }
@@ -3112,7 +3116,7 @@ extern "C" ssize_t bionic_pread64(int fd, void* buf, size_t count, off_t offset)
                                  (before + static_cast<uint64_t>(ret)) / (1024 * 1024)));
             }
         }
-        io_volume_add(std::string(fd_path(fd)), static_cast<uint64_t>(ret));
+        io_volume_add(std::string(fd_path(fd)), static_cast<uint64_t>(ret), "read");
     }
     // Audio thread: traced on any fd and regardless of result, because a clip load
     // that fails is exactly the case where the failing offset matters.

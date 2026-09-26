@@ -932,14 +932,13 @@ extern "C" int32_t bionic_kudroid_audiotrack_write(int64_t track, const void* da
             const uint64_t played = p->framesPlayed.load(std::memory_order_relaxed);
             return (written >= played ? written - played : 0) * bpf;
         };
-        if (inflightBytes() + static_cast<uint64_t>(accepted) >
-            p->bufferCapacityBytes) {
-            static std::atomic<int> s_blocked{0};
-            const int n = s_blocked.fetch_add(1, std::memory_order_relaxed);
-            if (n < 5) {
-                std::fprintf(stderr, "[KuDroidAudio] write waits for room #%d\n", n);
-            }
-        }
+        // Time-throttled, not count-capped: a 5-line cap goes blind for the rest
+        // of the session, which is why a run whose audio stalled for 90s said
+        // nothing after the first second. One line per 500ms carries what the
+        // wait actually cost, which is the difference between "the guest mixer
+        // is slow" and "the guest is parked on our output backpressure".
+        const auto waitStart = std::chrono::steady_clock::now();
+        long long blockedMs = 0;
         // Bounded: if the device never drains again, give up after ~2s and let the
         // queue absorb the chunk rather than hang the caller outright.
         for (int slept = 0; slept < 500; ++slept) {
@@ -955,6 +954,26 @@ extern "C" int32_t bionic_kudroid_audiotrack_write(int64_t track, const void* da
                 if (p->shutdown) break;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(4));
+        }
+        blockedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - waitStart)
+                        .count();
+        static std::atomic<long long> s_nextReportNs{0};
+        const long long nowNs =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch())
+                .count();
+        long long due = s_nextReportNs.load(std::memory_order_relaxed);
+        if (nowNs >= due &&
+            s_nextReportNs.compare_exchange_strong(due, nowNs + 500LL * 1000 * 1000,
+                                                   std::memory_order_relaxed)) {
+            std::fprintf(stderr,
+                         "[KuDroidAudio] backpressure blocked_ms=%lld inflight=%llu "
+                         "cap=%llu rate=%u bytes=%d\n",
+                         blockedMs,
+                         static_cast<unsigned long long>(inflightBytes()),
+                         static_cast<unsigned long long>(p->bufferCapacityBytes),
+                         p->sampleRate, accepted);
         }
     }
     const int enca = enqueue_pcm(p.get(), data, static_cast<uint32_t>(accepted));
