@@ -570,6 +570,154 @@ void test_writeback_preindex() {
 
 }  // namespace
 
+// Advanced SIMD structure load/store. Every encoding below was produced by the
+// aarch64 assembler (aarch64-linux-gnu-as) and read back with objdump, so the
+// constants are what shipped code actually contains -- not hand-assembled bit
+// patterns. The family carries one integer register, the base; Rt is a vector
+// register and must survive untouched.
+//
+// Each case opens with "mov x18, x0" because the pass refuses a live-in x18 by
+// design (every use must be fed by a define in the same function); a lone
+// "ld1 ..., [x18]" would be skipped for that reason and prove nothing about the
+// decoder. The crash word itself is reached in real code with exactly such a
+// define earlier in the function, and before this arm existed the decode made
+// the whole function undecodable anyway.
+void test_simd_structure_ldst() {
+    std::printf("[rewrite] Advanced SIMD structure load/store renames the base\n");
+    const std::uint32_t kDef = 0xAA000012;  // mov x18, x0
+    const std::uint32_t kRet = 0xD65F03C0;  // ret
+
+    // ld1 {v18.s}[1], [x18] -- the word from the live crash (libunity+0xcf6140).
+    // Rn = x18 and Rt = v18 at the same time: the base must be renamed and the
+    // vector lane must not.
+    {
+        std::vector<std::uint32_t> code = {
+            kDef,         // 0: mov x18, x0
+            0x0D409252,   // 1: ld1 {v18.s}[1], [x18]
+            kRet,         // 2: ret
+        };
+        SynthElf elf(code, false);
+        kudroid::X18Stats st = elf.run();
+        Check(st.rewritten == 1 && st.sites == 2, "ld1 {v18.s}[1],[x18] renamed");
+        Check(((elf.word(1) >> 5) & 31) == 15, "structure base x18 became x15");
+        Check(((elf.word(1) >> 0) & 31) == 18, "vector lane v18 untouched");
+    }
+
+    // st1 {v0.4s}, [x18] -- store form. (An earlier draft of this test used
+    // 0x4c007240; the assembler emits 0x4c007a40.)
+    {
+        std::vector<std::uint32_t> code = {
+            kDef,         // 0: mov x18, x0
+            0x4C007A40,   // 1: st1 {v0.4s}, [x18]
+            kRet,         // 2: ret
+        };
+        SynthElf elf(code, false);
+        kudroid::X18Stats st = elf.run();
+        Check(st.rewritten == 1 && st.sites == 2, "st1 {v0.4s},[x18] renamed");
+        Check(((elf.word(1) >> 5) & 31) == 15, "store base x18 became x15");
+    }
+
+    // Post-index whose only x18 is Rm: [x0], x18.
+    {
+        std::vector<std::uint32_t> code = {
+            kDef,         // 0: mov x18, x0
+            0x4CD27800,   // 1: ld1 {v0.4s}, [x0], x18
+            kRet,         // 2: ret
+        };
+        SynthElf elf(code, false);
+        kudroid::X18Stats st = elf.run();
+        Check(st.rewritten == 1 && st.sites == 2, "post-index Rm x18 renamed");
+        Check(((elf.word(1) >> 16) & 31) == 15, "post-index Rm became x15");
+        Check(((elf.word(1) >> 5) & 31) == 0, "base x0 untouched");
+    }
+
+    // Post-index where the base is x18 and Rm is a different register: only the
+    // base is a site, and Rm must not be dragged along.
+    {
+        std::vector<std::uint32_t> code = {
+            kDef,         // 0: mov x18, x0
+            0x4CC17A40,   // 1: ld1 {v0.4s}, [x18], x1
+            kRet,         // 2: ret
+        };
+        SynthElf elf(code, false);
+        kudroid::X18Stats st = elf.run();
+        Check(st.rewritten == 1 && st.sites == 2, "post-index base renamed alone");
+        Check(((elf.word(1) >> 5) & 31) == 15, "post-index base became x15");
+        Check(((elf.word(1) >> 16) & 31) == 1, "Rm x1 untouched");
+    }
+
+    // Both integer registers are x18, in the 0x0C top byte with the post-index
+    // bit set -- proof the post-index bit is bit 23 and not the top byte.
+    {
+        std::vector<std::uint32_t> code = {
+            kDef,         // 0: mov x18, x0
+            0x0CD27640,   // 1: ld1 {v0.4h}, [x18], x18
+            kRet,         // 2: ret
+        };
+        SynthElf elf(code, false);
+        kudroid::X18Stats st = elf.run();
+        Check(st.rewritten == 1 && st.sites == 3, "base and Rm both renamed");
+        Check(((elf.word(1) >> 5) & 31) == 15, "base became x15");
+        Check(((elf.word(1) >> 16) & 31) == 15, "Rm became the same substitute");
+    }
+
+    // Post-index immediate: Rm is pinned to 31 and holds an encoded offset, not
+    // a register. Rewriting it would corrupt the addressing, so the field must
+    // survive as 31 and count no site.
+    {
+        std::vector<std::uint32_t> code = {
+            kDef,         // 0: mov x18, x0
+            0x4CDF7800,   // 1: ld1 {v0.4s}, [x0], #16
+            kRet,         // 2: ret
+        };
+        SynthElf elf(code, false);
+        kudroid::X18Stats st = elf.run();
+        Check(st.rewritten == 1 && st.sites == 1,
+              "function with a post-index immediate is still rewritten");
+        Check(((elf.word(1) >> 16) & 31) == 31,
+              "post-index immediate field left as Rm=31, not treated as a register");
+    }
+
+    // Multi-register structures and the replicate forms.
+    {
+        std::vector<std::uint32_t> code = {
+            kDef,         // 0: mov x18, x0
+            0x4C408A40,   // 1: ld2 {v0.4s-v1.4s}, [x18]
+            0x4D40CA40,   // 2: ld1r {v0.4s}, [x18]
+            0x4C890A40,   // 3: st4 {v0.4s-v3.4s}, [x18], x9
+            kRet,         // 4: ret
+        };
+        SynthElf elf(code, false);
+        kudroid::X18Stats st = elf.run();
+        Check(st.rewritten == 1 && st.sites == 4, "ld2/ld1r/st4 bases renamed");
+        Check(((elf.word(1) >> 5) & 31) == 15, "ld2 base became x15");
+        Check(((elf.word(2) >> 5) & 31) == 15, "ld1r base became the same substitute");
+        Check(((elf.word(3) >> 5) & 31) == 15, "st4 base became the same substitute");
+        Check(((elf.word(3) >> 16) & 31) == 9, "st4 Rm x9 untouched");
+    }
+
+    // The neighbouring top bytes are not this family. 0x8C is undefined and 0x2C
+    // is a non-temporal pair: neither may be absorbed by the new arm. A mask
+    // loose enough to cover the family would claim the 0x8C word, and a "known"
+    // word is one the pass may then patch.
+    {
+        const std::uint32_t undefWord = 0x8C407400u | (18u << 5);
+        SynthElf undef({undefWord, kRet}, false);
+        kudroid::X18Stats stU = undef.run();
+        Check(stU.rewritten == 0 && stU.skippedUnknown == 1,
+              "undefined 0x8C word with an x18 base still skipped as unknown");
+        Check(undef.word(0) == undefWord, "undefined word bytes untouched");
+
+        // ldnp with an x18 base: a real pair, handled by the pre-existing arm
+        // the new one sits next to.
+        const std::uint32_t ldnp = 0x2C407400u | (18u << 5);
+        SynthElf pair({kDef, ldnp, kRet}, false);
+        kudroid::X18Stats stP = pair.run();
+        Check(stP.rewritten == 1 && stP.sites == 2, "ldnp base still renamed");
+        Check(((pair.word(1) >> 5) & 31) == 15, "ldnp base became x15");
+    }
+}
+
 int main(int argc, char** argv) {
     // Ops mode: rewrite stats for a real .so (map() runs the loader hook).
     if (argc > 1) {
@@ -602,6 +750,7 @@ int main(int argc, char** argv) {
     test_simd_lane_vs_base();
     test_fmov_crossover();
     test_writeback_preindex();
+    test_simd_structure_ldst();
     if (g_failures == 0) {
         std::printf("=== PASSED (%d checks) ===\n", g_checks);
         return 0;
