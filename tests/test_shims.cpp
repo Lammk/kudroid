@@ -998,7 +998,10 @@ static void test_sem_uninitialised_yields_instead_of_parking() {
     CHECK(bionic_sem_wait(&sem) == 0, "wait takes the token instead of parking");
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - t0).count();
-    CHECK(ms < 200, "and returns promptly (took " + std::to_string(ms) + "ms)");
+    char took[64];
+    std::snprintf(took, sizeof(took), "and returns promptly (took %lldms)",
+                  static_cast<long long>(ms));
+    CHECK(ms < 200, took);
 
     // A post that arrives while the waiter is yielding must still be seen: the
     // waiter must not have given up before the producer ran.
