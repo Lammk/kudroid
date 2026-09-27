@@ -1937,12 +1937,28 @@ std::map<FILE*, int> g_fsbFollowup;
 // blob as TRUNCATED -- a handle-churn artifact, not a fact about the bytes.
 // The window is the stable thing, so coverage is counted per window across all
 // handles and the verdict names the blob FMOD was actually handed.
+constexpr int kFsbBlock = 2048;
+// How long a blob may go untouched before it is announced SHORT and retired. Long
+// enough to cover a clip the guest loads later (a bank is walked in order, so early
+// clips are touched minutes before the last one), short enough that the list stays
+// bounded over a long session.
+constexpr uint64_t kFsbStaleMs = 120000;
+// Chain walk inside one read: a packed bank has hundreds of blobs, and the guest
+// typically reads one blob at a time, so this only has to cover a read that happens
+// to span many headers.
+constexpr unsigned kFsbChainMax = 4096;
 struct FsbWindow {
     long start = 0;
     long end = 0;
     uint64_t expected = 0;
-    uint64_t blocks = 0;            // distinct 2048-byte blocks seen
+    uint64_t blocks = 0;            // distinct kFsbBlock-byte blocks seen
     std::vector<uint64_t> covered;  // bitmap, one bit per block
+    // The blob's own header, kept so reads that overlap only a few bytes of a blob
+    // are charged to that blob and not to a neighbour that starts at the same 2048
+    // block. The bitmap does that job only while every block boundary is aligned to
+    // the blob's start; unaligned it did not, and the accounting was off by whole
+    // blocks.
+    uint8_t hdr[60];
     // Verdict already announced. A guest that fails to play a clip re-reads the
     // same blob for as long as it keeps retrying, and erasing the window on
     // COMPLETE made every retry re-register and re-announce it: one 576-byte
@@ -1951,8 +1967,62 @@ struct FsbWindow {
     // respond to a touch. The window is kept instead, so the registration path
     // recognises the blob and leaves it alone.
     bool reported = false;
+    // Boot-relative ms of the last read or seek that touched this blob, and the
+    // per-blob read/seek line budgets. The budgets are per window rather than
+    // per process: a process-global budget is spent by the first few clips of a
+    // bank and then every later clip loads unobserved, which is how a whole
+    // burst of failing clips left no trace in the log.
+    uint64_t last_touch = 0;
+    int reads_logged = 0;
+    int seeks_logged = 0;
 };
+// A whole FSB5 header: magic(4), version u32@4, numSamples u32@8,
+// sampleHeadersSize u32@12, nameTableSize u32@16, dataSize u32@20, mode u32@24,
+// zero u64@28, hash 16B@36, dummy u64@52. Blob size = 60 + shs + nts + dataSize.
+// A blob the guest never reads to the end is a clip it could not play, and the
+// walk is the only place a late blob's length is learned.
+struct FsbHeader {
+    uint32_t version = 0, numSamples = 0, shs = 0, nts = 0, dataSize = 0, mode = 0;
+    uint64_t total = 0;  // 0 = not enough bytes to parse
+};
+inline uint32_t fsb_rd32(const uint8_t* p) {
+    return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
+           (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
+}
+inline FsbHeader fsb_parse_header(const uint8_t* p) {
+    FsbHeader h;
+    if (std::memcmp(p, "FSB5", 4) != 0) return h;
+    h.version = fsb_rd32(p + 4);
+    h.numSamples = fsb_rd32(p + 8);
+    h.shs = fsb_rd32(p + 12);
+    h.nts = fsb_rd32(p + 16);
+    h.dataSize = fsb_rd32(p + 20);
+    h.mode = fsb_rd32(p + 24);
+    h.total = 60ull + h.shs + h.nts + h.dataSize;
+    return h;
+}
+// Largest plausible blob, so a run of header-shaped noise in arbitrary data cannot
+// turn one read into an unbounded walk.
+constexpr uint64_t kFsbBlobMax = 32ull << 20;
 std::map<std::string, std::vector<FsbWindow>> g_fsbWindows;  // g_freadVolMtx
+
+// What the guest actually asked for versus what reached it, for one archive.
+// "complete" blobs had every declared byte served; "unread" did not.
+struct FsbArchiveStats {
+    int windows = 0;
+    int complete = 0;
+    int unread = 0;
+    long long first_unread_off = -1;
+};
+FsbArchiveStats fsb_archive_stats_locked(const std::string& path);
+
+// Boot-relative milliseconds, for window age. Same clock as ktraceLine's stamp.
+uint64_t fsb_now_ms() {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+}
 
 // Mark [lo, hi) of a window's byte range as covered. Call with g_freadVolMtx
 // held. Shared by the read path and by the serve path, which seeds the window
@@ -1965,12 +2035,13 @@ void fsb_window_cover(FsbWindow& w, long lo, long hi) {
     if (lo < w.start) lo = w.start;
     if (hi > w.end) hi = w.end;
     if (hi <= lo) return;
-    const uint64_t blocks = (w.expected + 2047) / 2048;
+    w.last_touch = fsb_now_ms();
+    const uint64_t blocks = (w.expected + kFsbBlock - 1) / kFsbBlock;
     if (blocks == 0) return;
     if (w.covered.empty()) {
         w.covered.assign(static_cast<size_t>(blocks / 64 + 1), 0);
     }
-    for (long b = (lo - w.start) / 2048; b <= (hi - 1 - w.start) / 2048; ++b) {
+    for (long b = (lo - w.start) / kFsbBlock; b <= (hi - 1 - w.start) / kFsbBlock; ++b) {
         const uint64_t ub = static_cast<uint64_t>(b);
         if (ub >= blocks) break;
         uint64_t& word = w.covered[static_cast<size_t>(ub) >> 6];
@@ -1982,21 +2053,85 @@ void fsb_window_cover(FsbWindow& w, long lo, long hi) {
     }
 }
 
-// Call with g_freadVolMtx held. Reports and drops every window whose declared
-// bytes are all accounted for; `enforceCap` then reports the oldest unfinished
-// window SHORT until the live set is under the cap, so a blob whose bytes never
-// arrived is not silently forgotten.
-void fsb_windows_report_locked(const std::string& path, bool enforceCap) {
+// Register a blob at `start` unless it is already tracked. `hdr` is its 60-byte
+// header. `bodyLo`/`bodyHi`, when given, is a span of its BODY the current read
+// carried -- the header itself is never part of that span, or a header-only read
+// would count as reading a clip's audio. Call with g_freadVolMtx held.
+void fsb_window_register(std::vector<FsbWindow>& list, long start, const FsbHeader& h,
+                         const uint8_t* hdr, long bodyLo, long bodyHi) {
+    for (auto& existing : list) {
+        if (existing.start == start) {
+            fsb_window_cover(existing, start, start + 60);
+            return;
+        }
+    }
+    FsbWindow w;
+    w.start = start;
+    w.end = start + static_cast<long>(h.total);
+    w.expected = h.total;
+    std::memcpy(w.hdr, hdr, sizeof(w.hdr));
+    fsb_window_cover(w, start, start + 60);
+    if (bodyHi > bodyLo) fsb_window_cover(w, bodyLo, bodyHi);
+    list.push_back(w);
+}
+
+// The blob a read or seek over [lo, hi) belongs to. Windows are sorted by start, so
+// the search is a binary search on the last header at or before `lo`, and the
+// header bytes decide the two neighbours: a packed bank places the next blob's
+// header inside the previous blob's last block, and a range test alone charged
+// those header bytes to the previous blob. Call with g_freadVolMtx held.
+FsbWindow* fsb_window_at(std::vector<FsbWindow>& list, long lo, long hi) {
+    if (list.empty()) return nullptr;
+    std::size_t lo_i = 0, hi_i = list.size();
+    while (lo_i < hi_i) {
+        const std::size_t mid = lo_i + (hi_i - lo_i) / 2;
+        if (list[mid].start <= lo) lo_i = mid + 1; else hi_i = mid;
+    }
+    if (lo_i == 0) {
+        // The range begins before the first blob: charged to the first one when it
+        // reaches into it (a read of the whole resource from offset 0).
+        return hi > list[0].start ? &list[0] : nullptr;
+    }
+    FsbWindow& cand = list[lo_i - 1];
+    const long candEnd = cand.start + 60;
+    if (hi > cand.start && lo < candEnd) return &cand;
+    // Bytes past this blob's header belong to it, unless the NEXT blob's header
+    // starts inside the range: a packed bank places it in the previous blob's last
+    // block, and those header bytes are not the previous clip's audio.
+    if (lo < cand.end) {
+        if (lo_i >= list.size()) return &cand;
+        const FsbWindow& next = list[lo_i];
+        if (next.start >= hi) return &cand;
+        return next.start >= candEnd ? &list[lo_i] : &cand;
+    }
+    // The read began in the gap between two blobs: it is the next blob's header.
+    if (lo_i < list.size() && hi > list[lo_i].start) return &list[lo_i];
+    return nullptr;
+}
+
+int fsb_window_log_read(FsbWindow& w) {
+    if (w.reads_logged >= 8) return 0;
+    ++w.reads_logged;
+    return 1;
+}
+int fsb_window_log_seek(FsbWindow& w) {
+    if (w.seeks_logged >= 4) return 0;
+    ++w.seeks_logged;
+    return 1;
+}
+
+// Announce each window whose declared bytes are all accounted for -- once per
+// window. Marked, not erased: erasing let every re-read of the same blob
+// re-register it and announce it again, which turned a guest's clip-load
+// retry loop into an unbounded log loop on its synchronous read path.
+// Call with g_freadVolMtx held.
+void fsb_windows_report_locked(const std::string& path) {
     const auto it = g_fsbWindows.find(path);
     if (it == g_fsbWindows.end()) return;
     auto& list = it->second;
-    // Announce each window whose declared bytes are all accounted for -- once
-    // per window. Marked, not erased: erasing let every re-read of the same blob
-    // re-register it and announce it again, which turned a guest's clip-load
-    // retry loop into an unbounded log loop on its synchronous read path.
     for (auto& w : list) {
         if (w.reported) continue;
-        if (w.blocks * 2048 >= w.expected) {
+        if (w.blocks * kFsbBlock >= w.expected) {
             ktraceLine(
                          "[KuDroidFmod] blob off=%ld size=%llu covered=%llu COMPLETE\n",
                          w.start, static_cast<unsigned long long>(w.expected),
@@ -2004,45 +2139,48 @@ void fsb_windows_report_locked(const std::string& path, bool enforceCap) {
             w.reported = true;
         }
     }
-    if (enforceCap) {
-        for (;;) {
-            std::size_t live = 0;
-            std::size_t oldest = list.size();
-            for (std::size_t i = 0; i < list.size(); ++i) {
-                if (list[i].reported) continue;
-                ++live;
-                if (oldest == list.size()) oldest = i;
-            }
-            if (live < 16 || oldest == list.size()) break;
-            const FsbWindow& w = list[oldest];
-            const uint64_t covered = w.blocks * 2048;
-            // EVICTED, not SHORT: these are the windows the live-set cap
-            // retires before their bytes arrived, not a short read on the
-            // APK. Every audio run this quarter read "SHORT" here and went
-            // looking for a mis-read that never existed.
-            ktraceLine("[KuDroidFmod] blob off=%ld size=%llu covered=%llu EVICTED\n",
-                       w.start, static_cast<unsigned long long>(w.expected),
-                       static_cast<unsigned long long>(
-                           covered > w.expected ? w.expected : covered));
-            list[oldest].reported = true;
-        }
-    }
-    // Announced windows exist only to make a re-read a no-op, so they are what
-    // gets dropped when the list grows. A window still waiting for its bytes is
-    // never dropped.
-    constexpr std::size_t kKeptReported = 256;
-    while (list.size() > kKeptReported) {
-        std::size_t victim = list.size();
-        for (std::size_t i = 0; i < list.size(); ++i) {
-            if (list[i].reported) {
-                victim = i;
-                break;
-            }
-        }
-        if (victim == list.size()) break;
-        list.erase(list.begin() + static_cast<std::ptrdiff_t>(victim));
+    // Bounded by SIZE, not by how many have been announced. A bank is a few
+    // hundred clips and every one of them is a fact the per-blob lines and the
+    // bank summary are asked about; pruning to a fixed number of announced
+    // windows dropped the tail of a 300-clip bank and its reads became
+    // unaccounted. Age retires them (fsb_windows_evict_locked), and this is the
+    // backstop for an archive that never ages out.
+    constexpr std::size_t kMaxWindows = 4096;
+    if (list.size() > kMaxWindows) {
+        // Oldest first: blobs are appended in read order and a bank is walked in
+        // order, so the front of the list is the part a guest is done with.
+        const std::size_t drop = list.size() - kMaxWindows;
+        list.erase(list.begin(), list.begin() + static_cast<std::ptrdiff_t>(drop));
     }
     if (list.empty()) g_fsbWindows.erase(it);
+}
+
+// Retire blobs whose bytes never arrived. The trigger is AGE, not a live-set
+// count: a count retires the blob a guest is reading right now the moment a
+// bank-sized clip set fills the list, and then reports that as a read problem
+// when it is bookkeeping. Age cannot do that — a blob touched by the last read
+// is live by definition. Only called from fclose and the FSB5 serve path, never
+// from the read path the guest is blocked in.
+// Call with g_freadVolMtx held.
+void fsb_windows_evict_locked(const std::string& path, uint64_t stale_ms) {
+    const auto it = g_fsbWindows.find(path);
+    if (it == g_fsbWindows.end()) return;
+    auto& list = it->second;
+    const uint64_t now = fsb_now_ms();
+    for (std::size_t i = 0; i < list.size(); ++i) {
+        FsbWindow& w = list[i];
+        if (!w.reported && now >= w.last_touch && now - w.last_touch > stale_ms) {
+            const uint64_t covered = w.blocks * kFsbBlock;
+            ktraceLine("[KuDroidFmod] blob off=%ld size=%llu covered=%llu SHORT "
+                       "retired_after_idle=%llums\n",
+                       w.start, static_cast<unsigned long long>(w.expected),
+                       static_cast<unsigned long long>(
+                           covered > w.expected ? w.expected : covered),
+                       static_cast<unsigned long long>(now - w.last_touch));
+            w.reported = true;
+        }
+    }
+    fsb_windows_report_locked(path);
 }
 
 namespace {
@@ -2265,29 +2403,34 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
             const auto pit = g_freadPaths.find(stream);
             if (pit != g_freadPaths.end() && start >= 0) {
                 auto wit = g_fsbWindows.find(pit->second);
+                bool matched = false;
                 if (wit != g_fsbWindows.end()) {
-                    for (auto& w : wit->second) {
-                        if (start >= w.end || pos <= w.start) continue;
-                        // Every read inside a blob is one line, capped: the FMOD
-                        // parse sequence lives or dies between these reads, and
-                        // an absent data-read is the fact that convicts the
-                        // parser (it stopped asking) over the stream (it
-                        // served wrong bytes). Without this, silence between
-                        // the header read and the error is unattributable.
-                        static std::atomic<int> s_inblobLogged{0};
-                        if (s_inblobLogged.load(std::memory_order_relaxed) < 60) {
-                            s_inblobLogged.fetch_add(1, std::memory_order_relaxed);
+                    // The read is charged to the blob that OWNS those bytes, and a
+                    // packed bank puts the next blob's header inside the previous
+                    // blob's last block, so a range test alone charged those header
+                    // bytes to the previous clip. The header bytes decide.
+                    FsbWindow* w = fsb_window_at(wit->second, start, pos);
+                    if (w != nullptr) {
+                        matched = true;
+                        // The FMOD parse sequence lives or dies between these reads,
+                        // and an absent data-read is the fact that convicts the
+                        // parser (it stopped asking) over the stream (it served
+                        // wrong bytes). Budget per blob, not per process: a
+                        // process-global budget is spent by the first clips of the
+                        // bank and every later clip then loads unobserved.
+                        if (fsb_window_log_read(*w)) {
                             ktraceLine(
                                          "[KuDroidFmod] in-blob read sid=%d off=%ld size=%zu pos=%ld "
                                          "blob=[%ld+%llu]%s\n",
-                                         apk_stream_id(stream), start, n * size, pos, w.start,
-                                         static_cast<unsigned long long>(w.expected),
+                                         apk_stream_id(stream), start, n * size, pos, w->start,
+                                         static_cast<unsigned long long>(w->expected),
                                          trace_caller_text(caller));
                         }
-                        fsb_window_cover(w, start, pos);
+                        fsb_window_cover(*w, start, pos);
                     }
-                    fsb_windows_report_locked(pit->second, false);
+                    fsb_windows_report_locked(pit->second);
                 }
+                if (!matched) vfs_fsb_note_unmatched(pit->second.c_str(), n * size);
             }
         }
         // FSB5 probe: Unity hands an AudioClip's FSB slice to FMOD from the
@@ -2307,24 +2450,30 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
             const size_t readBytes = n * size;
             const long pos = vfs_ftell(stream);
             const long readStart = pos >= 0 ? pos - static_cast<long>(readBytes) : -1;
-            // The first FSB5 header anywhere in the buffer, not only at its start.
-            // Unity streams .resource and data.unity3d in 32KB-360KB reads, so a
-            // clip's blob nearly always begins somewhere inside the read. Testing
-            // offset 0 alone logged 11 headers in a run that failed 641 clip loads,
-            // which reads as "FMOD never read the clips" when the truth is that
-            // most of those reads were never examined.
-            const unsigned char* f = nullptr;
-            long start = -1;
-            for (size_t i = 0; i + 4 <= readBytes; ++i) {
+            // EVERY FSB5 header in the buffer, not the first: a packed bank puts
+            // dozens of blob headers in one read, and only the first was ever
+            // examined, so every later clip of the read stayed unaccounted. The
+            // scan is a byte loop; a memmem is not available here and a hand-rolled
+            // one is not worth it next to a 60-byte parse per hit.
+            std::vector<std::pair<size_t, FsbHeader>> hits;  // (offset in read, header)
+            std::vector<const uint8_t*> hitPtr;
+            size_t i = 0;
+            for (; i + 4 <= readBytes && hits.size() < kFsbChainMax; ++i) {
                 if (base[i] != 'F' || std::memcmp(base + i, "FSB5", 4) != 0) continue;
-                f = base + i;
-                start = readStart >= 0 ? readStart + static_cast<long>(i) : -1;
-                break;
+                if (readBytes - i < 28) continue;  // header split across reads: no geometry yet
+                if (readStart < 0) break;
+                const FsbHeader h = fsb_parse_header(base + i);
+                if (h.total < 60 || h.total > kFsbBlobMax) continue;
+                hits.emplace_back(i, h);
+                hitPtr.push_back(base + i);
+                // Skip this blob: a body byte sequence that happens to spell FSB5
+                // must not be parsed as a header. The for-increment covers the last
+                // byte of the blob, so the next check starts at its successor.
+                const size_t span = static_cast<size_t>(h.total);
+                if (span >= readBytes - i) break;
+                i += span - 1;
             }
-            if (f != nullptr) {
-                // Bytes from this header to the end of the read: the geometry
-                // below must not reach past what was actually served.
-                const size_t avail = readBytes - static_cast<size_t>(f - base);
+            if (!hits.empty()) {
                 // Detection and window accounting run for every hit, so coverage
                 // stays complete. Only the DESCRIPTION is budgeted: the zip
                 // lookup, the 128-byte hex dump and the ~600-byte trace line are
@@ -2334,6 +2483,9 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                 // the stutter, not the diagnosis.
                 const int seen = s_fsbCount.fetch_add(1, std::memory_order_relaxed);
                 const bool describe = seen < 24;
+                const long start = readStart + static_cast<long>(hits.front().first);
+                const FsbHeader& h0 = hits.front().second;
+                const size_t avail = readBytes - hits.front().first;
                 std::string entry;
                 uint16_t method = 0xFFFF;
                 uint32_t usize = 0;
@@ -2363,54 +2515,22 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                         }
                     }
                 }
-                // FSB5 header: magic(4), version u32@4, numSamples u32@8,
-                // sampleHeadersSize u32@12, nameTableSize u32@16, dataSize
-                // u32@20, mode u32@24. Header total is 60 bytes (zero u64@
-                // 28, hash 16B@36, dummy u64@52); blob size = 60 + shs +
-                // nts + dataSize. mode names the codec — a codec this FMOD
-                // build lacks would reject every blob regardless of bytes.
-                uint32_t ver = 0, numSamples = 0, shs = 0, nts = 0;
-                uint32_t dataSize = 0, mode = 0;
-                uint64_t blobTotal = 0;
-                bool parsed = false;
-                if (avail >= 28) {
-                    auto rd32 = [&](size_t o) -> uint32_t {
-                        return static_cast<uint32_t>(f[o]) |
-                               (static_cast<uint32_t>(f[o + 1]) << 8) |
-                               (static_cast<uint32_t>(f[o + 2]) << 16) |
-                               (static_cast<uint32_t>(f[o + 3]) << 24);
-                    };
-                    ver = rd32(4);
-                    numSamples = rd32(8);
-                    shs = rd32(12);
-                    nts = rd32(16);
-                    dataSize = rd32(20);
-                    mode = rd32(24);
-                    blobTotal = 60ull + shs + nts + dataSize;
-                    parsed = true;
-                }
-                // Chain check from the same buffer: .resource files pack
-                // blobs back to back, so a valid second header this close
-                // proves the resource data itself is well-formed.
+                // Chain check from the same buffer: a valid second header at the
+                // first blob's declared end proves the resource data itself is
+                // well-formed and that the declared length is right.
                 char nextDesc[96] = "n/a";
-                if (blobTotal > 0 && blobTotal + 28 <= avail) {
-                    const auto* g = f + blobTotal;
-                    const bool magic2 = g[0] == 'F' && g[1] == 'S' && g[2] == 'B' && g[3] == '5';
-                    auto rd32at = [&](const unsigned char* p, size_t o) -> uint32_t {
-                        return static_cast<uint32_t>(p[o]) |
-                               (static_cast<uint32_t>(p[o + 1]) << 8) |
-                               (static_cast<uint32_t>(p[o + 2]) << 16) |
-                               (static_cast<uint32_t>(p[o + 3]) << 24);
-                    };
-                    if (magic2) {
+                if (h0.total + 28 <= avail) {
+                    const auto* g = hitPtr.front() + h0.total;
+                    if (std::memcmp(g, "FSB5", 4) == 0) {
+                        const FsbHeader hn = fsb_parse_header(g);
                         std::snprintf(nextDesc, sizeof(nextDesc),
                                       "FSB5@%llu num=%u dataSize=%u mode=%u",
-                                      static_cast<unsigned long long>(blobTotal),
-                                      rd32at(g, 8), rd32at(g, 20), rd32at(g, 24));
+                                      static_cast<unsigned long long>(h0.total),
+                                      hn.numSamples, hn.dataSize, hn.mode);
                     } else {
                         std::snprintf(nextDesc, sizeof(nextDesc),
                                       "none@%llu (%02x%02x%02x%02x)",
-                                      static_cast<unsigned long long>(blobTotal),
+                                      static_cast<unsigned long long>(h0.total),
                                       g[0], g[1], g[2], g[3]);
                     }
                 }
@@ -2423,9 +2543,10 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                     size_t o = 0;
                     for (size_t i = 0; i < hb; ++i) {
                         o += static_cast<size_t>(
-                            std::snprintf(hex + o, sizeof(hex) - o, "%02x", f[i]));
+                            std::snprintf(hex + o, sizeof(hex) - o, "%02x", hitPtr.front()[i]));
                     }
-                }                // Sample header (first numSamples u64s after the 60-byte FSB5
+                }
+                // Sample header (first numSamples u64s after the 60-byte FSB5
                 // v1 header): bit 0 = next-chunk flag, bits 1-4 = frequency,
                 // bit 5 = channels-1, bits 6-33 = dataOffset/16, bits 34-63 =
                 // sample count (python-fsb5 __init__.py). The chunk list
@@ -2438,8 +2559,8 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                 // word + VORBISDATA crc. The old guard demanded blobTotal+28
                 // served bytes — a streaming reader never satisfies that, so
                 // every run logged sample=[n/a] no matter what it read.
-                if (describe && parsed && numSamples >= 1 && avail >= 76) {
-                    const auto* sh = f + 60;
+                if (describe && h0.numSamples >= 1 && avail >= 76) {
+                    const auto* sh = hitPtr.front() + 60;
                     auto rd64 = [&](size_t o) {
                         uint64_t v = 0;
                         for (int k = 7; k >= 0; --k) v = (v << 8) | sh[o + k];
@@ -2454,36 +2575,35 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                     const uint32_t dataOff = static_cast<uint32_t>((raw0 >> 6) & 0xFFFFFFF) * 16;
                     const uint32_t nSamples = static_cast<uint32_t>((raw0 >> 34) & 0x3FFFFFFF);
                     uint32_t chunkType = 0, chunkSize = 0, crc32 = 0;
-                    if (shs >= 12) {
+                    if (h0.shs >= 12) {
                         const uint32_t cw = rd64(8) & 0xFFFFFFFF;
                         chunkSize = (cw >> 1) & 0x7FFFFF;
                         chunkType = (cw >> 25) & 0x7F;
                     }
-                    if (chunkType == 11 && shs >= 16) {
+                    if (chunkType == 11 && h0.shs >= 16) {
                         crc32 = static_cast<uint32_t>(rd64(12) & 0xFFFFFFFF);
                     }
                     std::snprintf(sampleDesc, sizeof(sampleDesc),
                                   "freq=%u ch=%u dataOff=%u(%sdataSize) n=%u chunk1=%u/%u%s crc=%08X",
                                   freq, channels, dataOff,
-                                  dataOff <= dataSize ? "<=" : ">>",
+                                  dataOff <= h0.dataSize ? "<=" : ">>",
                                   nSamples, chunkType, chunkSize,
                                   chunkType == 11 ? " VORBISDATA" : "", crc32);
-                    (void)0;
                 }
                 if (describe) {
                     ktraceLine(
-                                 "[KuDroidFmod] served FSB5 sid=%d at apk_off=%ld size=%zu "
+                                 "[KuDroidFmod] served FSB5 sid=%d at apk_off=%ld size=%zu hits=%zu "
                                  "method=%u usize=%u entryOff=%lld entryRem=%lld "
                                  "ver=%u num=%u shs=%u nts=%u "
                                  "dataSize=%u mode=%u blobTotal=%llu next=[%s] hex=%s "
                                  "sample=[%s] entry=%s%s\n",
-                                 sid, start, avail, method, usize, entryOff,
+                                 sid, start, avail, hits.size(), method, usize, entryOff,
                                  entryOff >= 0
                                      ? static_cast<long long>(usize) - entryOff -
-                                           static_cast<long long>(blobTotal)
+                                           static_cast<long long>(h0.total)
                                      : -1,
-                                 ver, numSamples, shs, nts,
-                                 dataSize, mode, static_cast<unsigned long long>(blobTotal),
+                                 h0.version, h0.numSamples, h0.shs, h0.nts,
+                                 h0.dataSize, h0.mode, static_cast<unsigned long long>(h0.total),
                                  nextDesc, hex, sampleDesc, entry.empty() ? "(none)" : entry.c_str(),
                                  trace_caller_text(caller));
                 }
@@ -2493,92 +2613,52 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                 // concurrent streams cannot mask the FSB stream's reads.
                 {
                     std::lock_guard<std::mutex> vlock(g_freadVolMtx);
-                    if (parsed && start >= 0 && blobTotal > 0 &&
-                        blobTotal <= (32u << 20)) {
-                        const auto pit2 = g_freadPaths.find(stream);
-                        if (pit2 != g_freadPaths.end()) {
-                            auto& list = g_fsbWindows[pit2->second];
-                            bool already = false;
-                            for (auto& existing : list) {
-                                if (existing.start == start) {
-                                    fsb_window_cover(existing, start, start + static_cast<long>(avail));
-                                    already = true;
-                                    break;
+                    const auto pit2 = g_freadPaths.find(stream);
+                    if (pit2 != g_freadPaths.end()) {
+                        bool newBlob = false;
+                        for (std::size_t k = 0; k < hits.size(); ++k) {
+                            const long wstart = readStart + static_cast<long>(hits[k].first);
+                            // A blob the guest is reading in THIS call is live by
+                            // definition; retirement is by age, from fclose and the
+                            // first-header path only, never from here.
+                            const size_t bodyLo = hits[k].first + 60;
+                            const size_t bodyEnd = std::min(
+                                hits[k].first + static_cast<size_t>(hits[k].second.total), readBytes);
+                            const bool bodyInThisRead = bodyEnd > bodyLo;
+                            FsbWindow* known = fsb_window_at(g_fsbWindows[pit2->second],
+                                                            wstart, wstart + 60);
+                            if (known == nullptr || known->start != wstart) {
+                                // The report can empty the list and drop the map
+                                // entry, so the list is re-fetched after it.
+                                fsb_windows_evict_locked(pit2->second, kFsbStaleMs);
+                                newBlob = true;
+                                auto& list = g_fsbWindows[pit2->second];
+                                fsb_window_register(list, wstart, hits[k].second, hitPtr[k],
+                                                    bodyInThisRead ? readStart + static_cast<long>(bodyLo) : 0,
+                                                    bodyInThisRead ? readStart + static_cast<long>(bodyEnd) : 0);
+                                fsb_windows_report_locked(pit2->second);
+                            } else {
+                                // An existing window may not have had its header
+                                // captured (registered from a body hit in an older
+                                // build): capture it now so the next read's header
+                                // attribution works.
+                                if (std::memcmp(known->hdr, hitPtr[k], 60) != 0) {
+                                    std::memcpy(known->hdr, hitPtr[k], 60);
+                                }
+                                fsb_window_cover(*known, wstart, wstart + 60);
+                                if (bodyInThisRead) {
+                                    fsb_window_cover(*known, readStart + static_cast<long>(bodyLo),
+                                                     readStart + static_cast<long>(bodyEnd));
                                 }
                             }
-                            if (!already) {
-                                // Armed only for a blob seen for the first time.
-                                // Re-arming on every hit let a retrying guest log the
-                                // next eight reads of the same handle each time it
-                                // asked again, which is a second unbounded log loop on
-                                // the same path.
-                                g_fsbFollowup[stream] = 8;
-                                // The report can empty the list, and it drops the map
-                                // entry when it does -- so `list` is dangling the moment
-                                // it returns. Pushing through it wrote a window into
-                                // freed heap and left the archive with no tracked
-                                // window at all, which is why no in-blob read and no
-                                // COMPLETE/SHORT verdict ever appeared: the first
-                                // header read of each archive unregistered it again.
-                                fsb_windows_report_locked(pit2->second, true);
-                                auto& fresh = g_fsbWindows[pit2->second];
-                                FsbWindow w;
-                                w.start = start;
-                                w.end = start + static_cast<long>(blobTotal);
-                                w.expected = blobTotal;
-                                fsb_window_cover(w, start, start + static_cast<long>(avail));
-                                fresh.push_back(w);
-                            }
-                            // .resource entries pack blobs back to back, so a single
-                            // read can carry several of them. Register the rest of
-                            // the chain from the same buffer: a blob with no window
-                            // can never have its reads accounted, so every clip that
-                            // shared a read with the first one stayed invisible --
-                            // and "invisible" and "never read" look identical in the
-                            // log, which is the question this whole path exists to
-                            // answer.
-                            if (parsed) {
-                                auto rd32at = [&](const unsigned char* p, size_t o) -> uint32_t {
-                                    return static_cast<uint32_t>(p[o]) |
-                                           (static_cast<uint32_t>(p[o + 1]) << 8) |
-                                           (static_cast<uint32_t>(p[o + 2]) << 16) |
-                                           (static_cast<uint32_t>(p[o + 3]) << 24);
-                                };
-                                // Offsets from here are relative to this header,
-                                // which is what `f` points at -- mixing in the
-                                // header's own offset inside the read would step
-                                // into the middle of the next blob.
-                                size_t at = static_cast<size_t>(blobTotal);
-                                for (unsigned extra = 0; extra < 64 && at + 28 <= avail; ++extra) {
-                                    if (std::memcmp(f + at, "FSB5", 4) != 0) break;
-                                    const uint64_t total = 60ull + rd32at(f, at + 12) +
-                                                          rd32at(f, at + 16) +
-                                                          rd32at(f, at + 20);
-                                    if (total == 0 || total > (32u << 20)) break;
-                                    const long wstart = start + static_cast<long>(at);
-                                    fsb_windows_report_locked(pit2->second, false);
-                                    auto& chain = g_fsbWindows[pit2->second];
-                                    bool known = false;
-                                    for (const auto& existing : chain) {
-                                        if (existing.start == wstart) {
-                                            known = true;
-                                            break;
-                                        }
-                                    }
-                                    if (!known) {
-                                        FsbWindow cw;
-                                        cw.start = wstart;
-                                        cw.end = wstart + static_cast<long>(total);
-                                        cw.expected = total;
-                                        // This read served every byte from here to
-                                        // the end of the buffer.
-                                        fsb_window_cover(cw, wstart,
-                                                         start + static_cast<long>(avail));
-                                        chain.push_back(cw);
-                                    }
-                                    at += static_cast<size_t>(total);
-                                }
-                            }
+                        }
+                        if (newBlob) {
+                            // Armed only for a blob seen for the first time.
+                            // Re-arming on every hit let a retrying guest log the
+                            // next eight reads of the same handle each time it
+                            // asked again, which is a second unbounded log loop on
+                            // the same path.
+                            g_fsbFollowup[stream] = 8;
                         }
                     }
                 }
@@ -2641,6 +2721,33 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
     return n;
 }
 
+int kudroid_test_fsb_window_count(const char* archivePath) {
+    if (!archivePath) return 0;
+    std::lock_guard<std::mutex> lock(g_freadVolMtx);
+    const auto it = g_fsbWindows.find(archivePath);
+    return it == g_fsbWindows.end() ? 0 : static_cast<int>(it->second.size());
+}
+
+long long kudroid_test_fsb_first_uncovered(const char* archivePath, int nth) {
+    if (!archivePath || nth < 0) return -1;
+    std::lock_guard<std::mutex> lock(g_freadVolMtx);
+    const auto it = g_fsbWindows.find(archivePath);
+    if (it == g_fsbWindows.end()) return -1;
+    const auto& list = it->second;
+    if (static_cast<std::size_t>(nth) >= list.size()) return -1;
+    const FsbWindow& w = list[static_cast<std::size_t>(nth)];
+    const uint64_t blocks = (w.expected + kFsbBlock - 1) / kFsbBlock;
+    for (uint64_t b = 0; b < blocks; ++b) {
+        const uint64_t word = (static_cast<std::size_t>(b >> 6) < w.covered.size())
+                                  ? w.covered[b >> 6]
+                                  : 0;
+        if (!(word & (1ull << (b & 63)))) {
+            return static_cast<long long>(w.start) + static_cast<long long>(b * kFsbBlock);
+        }
+    }
+    return -1;
+}
+
 int vfs_fclose(FILE* stream) {
     // fclose(NULL) is undefined behaviour — both host libcs trap on it — so the guard
     // has to cover the call as well as the tracking below it. Returning EOF keeps the
@@ -2688,6 +2795,25 @@ int vfs_fclose(FILE* stream) {
     }
     {
         std::lock_guard<std::mutex> vlock(g_freadVolMtx);
+        const auto pit = g_freadPaths.find(stream);
+        if (pit != g_freadPaths.end()) {
+            // The guest closed this handle; blobs it stopped reading are retired
+            // here rather than from the read path it is blocked in.
+            fsb_windows_evict_locked(pit->second, kFsbStaleMs);
+            // The verdict for the whole bank, once the handle that walked it is
+            // gone. One line per close on an archive that has blobs, answering
+            // "which clip did the guest never finish reading" — the question the
+            // per-blob lines can only answer for the blobs that got a trace.
+            static std::atomic<int> s_dump{0};
+            if (!g_fsbWindows[pit->second].empty() &&
+                s_dump.fetch_add(1, std::memory_order_relaxed) < 8) {
+                // vfs_fsb_stats takes g_freadVolMtx, which is already held here.
+                const FsbArchiveStats bs = fsb_archive_stats_locked(pit->second);
+                ktraceLine("[KuDroidFmod] bank windows=%d complete=%d unread=%d "
+                           "first_unread_off=%lld\n",
+                           bs.windows, bs.complete, bs.unread, bs.first_unread_off);
+            }
+        }
         g_freadPaths.erase(stream);
     }
     return std::fclose(stream);
@@ -2779,22 +2905,24 @@ int vfs_fseeko(FILE* stream, off_t offset, int whence) {
             if (pit != g_freadPaths.end()) {
                 auto wit = g_fsbWindows.find(pit->second);
                 if (wit != g_fsbWindows.end()) {
-                    for (const auto& w : wit->second) {
-                        if ((before >= w.start && before < w.end) ||
-                            (offset >= w.start && offset < w.end) ||
-                            (before >= w.start && before < w.end + 65536)) {
-                            static std::atomic<int> s_inblobSeek{0};
-                            if (s_inblobSeek.load(std::memory_order_relaxed) < 60) {
-                                s_inblobSeek.fetch_add(1, std::memory_order_relaxed);
-                                ktraceLine(
-                                             "[KuDroidFmod] in-blob seek sid=%d %lld -> %lld whence=%d "
-                                             "blob=[%ld+%llu]%s\n",
-                                             sid, static_cast<long long>(before), static_cast<long long>(offset), whence, w.start,
-                                             static_cast<unsigned long long>(w.expected),
-                                             trace_caller_text(caller));
-                            }
-                            break;
+                    // A seek inside a blob is that blob's read; a seek into the gap
+                    // between two packed blobs is the next blob's header. A "+64K
+                    // from any blob" test also matched every seek in the gap and
+                    // named the wrong clip.
+                    const long lo = before < offset ? before : offset;
+                    const long hi = before < offset ? offset : before;
+                    FsbWindow* w = fsb_window_at(wit->second, lo, hi);
+                    if (w == nullptr && lo != hi) w = fsb_window_at(wit->second, hi, lo + 1);
+                    if (w != nullptr) {
+                        if (fsb_window_log_seek(*w)) {
+                            ktraceLine(
+                                         "[KuDroidFmod] in-blob seek sid=%d %lld -> %lld whence=%d "
+                                         "blob=[%ld+%llu]%s\n",
+                                         sid, static_cast<long long>(before), static_cast<long long>(offset), whence, w->start,
+                                         static_cast<unsigned long long>(w->expected),
+                                         trace_caller_text(caller));
                         }
+                        fsb_window_cover(*w, lo, hi);
                     }
                 }
             }
@@ -3210,6 +3338,80 @@ std::string run_vfs_extended_test() {
     if (randomFile) std::fclose(randomFile);
     result(4, "native /dev/null and /dev/urandom", devicePass, devicePass ? "native paths preserved" : std::strerror(errno));
     return log;
+}
+
+// ── FSB5 blob tracker diagnostics ─────────────────────────────────────────────
+//
+// What the guest actually asked for versus what reached it. The tracker can only
+// say "this blob's declared bytes were all served" once every read on its archive
+// is accounted; the counter of unaccounted reads is the number that separates "the
+// guest read the wrong stream" from "the stream was right and the guest gave up".
+//
+// Two counters, because the two failures look identical from outside: `unmatched`
+// is a read that landed on no blob at all, and `unread` is a blob whose bytes the
+// guest never asked for. A slice the guest rejects after a handful of bytes ends
+// with `unread`, not with `unmatched`.
+// Call with g_freadVolMtx held.
+FsbArchiveStats fsb_archive_stats_locked(const std::string& path) {
+    FsbArchiveStats out;
+    auto wit = g_fsbWindows.find(path);
+    if (wit == g_fsbWindows.end()) return out;
+    for (const auto& w : wit->second) {
+        ++out.windows;
+        const uint64_t blocks = (w.expected + kFsbBlock - 1) / kFsbBlock;
+        if (w.blocks >= blocks) {
+            ++out.complete;
+        } else {
+            ++out.unread;
+            if (out.first_unread_off < 0) {
+                for (uint64_t b = 0; b < blocks; ++b) {
+                    const uint64_t word = (static_cast<std::size_t>(b >> 6) < w.covered.size())
+                                              ? w.covered[b >> 6]
+                                              : 0;
+                    if (!(word & (1ull << (b & 63)))) {
+                        out.first_unread_off =
+                            static_cast<long long>(w.start) + static_cast<long long>(b * kFsbBlock);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    return out;
+}
+
+// Unmatched reads since the last snapshot, keyed by archive.
+std::mutex g_fsbUnmatchedMtx;
+std::map<std::string, std::pair<uint64_t, uint64_t>> g_fsbUnmatched;  // path -> (reads, bytes)
+
+void vfs_fsb_note_unmatched(const char* archivePath, size_t bytes) {
+    if (!archivePath) return;
+    std::lock_guard<std::mutex> lock(g_fsbUnmatchedMtx);
+    auto& e = g_fsbUnmatched[archivePath];
+    ++e.first;
+    e.second += bytes;
+}
+
+std::string vfs_fsb_stats(const char* archivePath, int snapshot) {
+    if (!archivePath) return {};
+    std::string out;
+    {
+        std::lock_guard<std::mutex> lock(g_freadVolMtx);
+        const FsbArchiveStats s = fsb_archive_stats_locked(archivePath);
+        char line[256];
+        std::snprintf(line, sizeof(line),
+                      "windows=%d complete=%d unread=%d first_unread_off=%lld",
+                      s.windows, s.complete, s.unread, s.first_unread_off);
+        out = line;
+    }
+    std::lock_guard<std::mutex> lock(g_fsbUnmatchedMtx);
+    auto it = g_fsbUnmatched.find(archivePath);
+    if (it == g_fsbUnmatched.end()) return out;
+    if (!snapshot) return out;
+    out += " unmatched_reads=" + std::to_string(it->second.first) +
+           " unmatched_bytes=" + std::to_string(it->second.second);
+    it->second = {0, 0};
+    return out;
 }
 
 } // namespace kudroid

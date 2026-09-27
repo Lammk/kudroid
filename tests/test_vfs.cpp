@@ -653,6 +653,151 @@ void TestUrlRemapping(kudroid::VFSPathRemapper& remapper, const std::string& roo
     Check(isInside(jarUrl, root) || !jarUrl.empty(), "jar: URI maps without escaping root");
 }
 
+// FSB5 audio banks are packed: clip N's blob starts exactly where clip N-1 ends, so
+// a guest that wants a late clip must first walk every earlier blob. The blob tracker
+// therefore has to register the WHOLE chain from the first header it sees, and it has
+// to do that without retiring the blob the guest is reading in the very call. A live
+// -set cap enforced on the serving read path did both wrong: a bank-sized clip set
+// filled the list within a second, every later clip was retired before its bytes
+// arrived, and the verdicts said "evicted" where the truth was "not read".
+void TestFsb5Chain(const std::string& root) {
+    std::printf("-- FSB5 chain registration --\n");
+
+    // Well past the old 64-blob chain cap.
+    constexpr int kBlobs = 300;
+    constexpr uint32_t kDataSize = 4096;
+    auto put32 = [](std::string& s, uint32_t v) {
+        s.push_back(static_cast<char>(v & 0xFF));
+        s.push_back(static_cast<char>((v >> 8) & 0xFF));
+        s.push_back(static_cast<char>((v >> 16) & 0xFF));
+        s.push_back(static_cast<char>((v >> 24) & 0xFF));
+    };
+    std::string resource;
+    for (int i = 0; i < kBlobs; ++i) {
+        // A blob's own length is a function of its data size; a 28-byte header is
+        // only parseable when the 60-byte header follows in the same read, and a
+        // fixed length with a 60-byte header does not hold for every size.
+        const uint32_t dataSize = kDataSize - (i % 2) * 256;
+        resource += "FSB5";
+        put32(resource, 1);         // version
+        put32(resource, 120216);    // numSamples
+        put32(resource, 64);        // sampleHeadersSize
+        put32(resource, 0);         // nameTableSize
+        put32(resource, dataSize);  // dataSize
+        put32(resource, 15);        // mode
+        // 60-byte header (4 + 6*u32 + zero u64 + 16B hash + dummy u64) plus the
+        // 64-byte sample-header area the blob's declared length accounts for.
+        resource.append(32 + 64, '\0');
+        resource.append(dataSize, static_cast<char>('a' + (i % 26)));
+    }
+    // Offsets of each blob, from the same data sizes the fixture writes.
+    std::vector<long> blobStart(kBlobs);
+    std::vector<uint32_t> blobLen(kBlobs);
+    {
+        long at = 0;
+        for (int i = 0; i < kBlobs; ++i) {
+            blobStart[i] = at;
+            blobLen[i] = 60 + 64 + (kDataSize - (i % 2) * 256);
+            at += blobLen[i];
+        }
+    }
+
+    const std::filesystem::path apkDir =
+        std::filesystem::path(root) / "data" / "app" / "com.test.fsb";
+    std::filesystem::create_directories(apkDir);
+    const std::string apkPath = (apkDir / "base.apk").string();
+    const std::vector<uint8_t> zip = build_store_zip({
+        {"assets/bin/data/sharedassets0.resource", resource},
+    });
+    {
+        std::ofstream out(apkPath, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(zip.data()),
+                  static_cast<std::streamsize>(zip.size()));
+    }
+
+    uint64_t entryOff = 0, entrySize = 0;
+    Check(kudroid::zip_stat_entry(apkPath, "assets/bin/data/sharedassets0.resource", &entryOff,
+                                  &entrySize, nullptr),
+          "fsb fixture entry stats");
+    Check(entrySize == resource.size(), "fsb fixture entry is the packed bank");
+
+    // A read that spans every blob is the only shape that exercises the whole-chain
+    // walk in a single call. A size=1 read still lands in the same probe: the header
+    // search is over the bytes served, not over the element size.
+    FILE* f = kudroid::vfs_fopen(apkPath.c_str(), "rb");
+    Check(f != nullptr, "fsb archive opens");
+    if (f == nullptr) return;
+    std::vector<char> buf(resource.size());
+    Check(kudroid::vfs_fseek(f, static_cast<long>(entryOff), SEEK_SET) == 0, "fsb stream seeks");
+    const size_t got = kudroid::vfs_fread(buf.data(), 1, buf.size(), f);
+    Check(got == buf.size(), "fsb stream serves every byte of the bank");
+    const int windows = kudroid::kudroid_test_fsb_window_count(apkPath.c_str());
+    Check(windows == kBlobs,
+          "every blob in the packed chain is registered (got " + std::to_string(windows) +
+              ", want " + std::to_string(kBlobs) + ")");
+    // The big read carried every blob's body, so every blob is fully served and
+    // none has an unread byte. This is the invariant a header-only read must not
+    // break: the body is what has to be counted, not the header.
+    const long long lateFirst = kudroid::kudroid_test_fsb_first_uncovered(apkPath.c_str(), kBlobs - 1);
+    Check(lateFirst == -1, "the last blob is fully served by the big read (got " +
+                               std::to_string(lateFirst) + ")");
+    const long long secondFirst = kudroid::kudroid_test_fsb_first_uncovered(apkPath.c_str(), 1);
+    Check(secondFirst == -1, "every chain blob's body was served (got " +
+                                 std::to_string(secondFirst) + ")");
+
+    Check(kudroid::vfs_fclose(f) == 0, "fsb stream closes");
+    Check(kudroid::kudroid_test_fsb_window_count(apkPath.c_str()) == kBlobs,
+          "closing the stream does not retire live blobs");
+
+    // The other shape, and the one a real guest produces: it reads a blob's header,
+    // then one 2048-byte chunk at a time, and it only starts blob N after blob N-1
+    // is done. Every read is 2048 bytes, so a blob longer than one chunk is
+    // incomplete until its last chunk arrives — and the tracker has to keep its
+    // window through all of that instead of retiring it once the list is long.
+    const std::string apk2 = (apkDir / "base2.apk").string();
+    {
+        std::ofstream out(apk2, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(zip.data()),
+                  static_cast<std::streamsize>(zip.size()));
+    }
+    uint64_t off2 = 0, size2 = 0;
+    kudroid::zip_stat_entry(apk2, "assets/bin/data/sharedassets0.resource", &off2, &size2,
+                            nullptr);
+    FILE* g = kudroid::vfs_fopen(apk2.c_str(), "rb");
+    Check(g != nullptr, "fsb archive (per-blob reads) opens");
+    if (g == nullptr) return;
+    std::vector<char> chunk(2048);
+    int windowsAfterFirst = 0;
+    bool allServed = true;
+    bool stayedLive = true;
+    for (int i = 0; i < kBlobs; ++i) {
+        const long at = static_cast<long>(off2) + blobStart[i];
+        for (long off = 0; off < blobLen[i]; off += 2048) {
+            kudroid::vfs_fseek(g, at + off, SEEK_SET);
+            const size_t want = std::min<size_t>(2048, blobLen[i] - off);
+            if (kudroid::vfs_fread(chunk.data(), 1, want, g) != want) {
+                allServed = false;
+                break;
+            }
+            if (off == 0 && std::memcmp(chunk.data(), "FSB5", 4) != 0) allServed = false;
+        }
+        if (!allServed) break;
+        // The window for the blob just finished must still be there, and the
+        // tracker must not have grown without bound either.
+        const int n = kudroid::kudroid_test_fsb_window_count(apk2.c_str());
+        if (i == 0) windowsAfterFirst = n;
+        if (n < i + 1) stayedLive = false;
+    }
+    Check(allServed, "per-blob chunked reads serve every byte of every blob");
+    Check(stayedLive, "no blob's window is retired while the bank is still being read");
+    Check(kudroid::kudroid_test_fsb_first_uncovered(apk2.c_str(), 0) == -1,
+          "a fully chunk-read blob has no unread byte");
+    Check(kudroid::kudroid_test_fsb_window_count(apk2.c_str()) == kBlobs,
+          "the chunked walk registers every blob exactly once (got " +
+              std::to_string(kudroid::kudroid_test_fsb_window_count(apk2.c_str())) + ")");
+    kudroid::vfs_fclose(g);
+}
+
 } // namespace
 
 int main() {
@@ -680,6 +825,7 @@ int main() {
     TestJarFromArchive(remapper, root);
     TestZipIndex(root);
     TestApkStreamIndependence(root);
+    TestFsb5Chain(root);
 
     std::filesystem::remove_all(home);
 

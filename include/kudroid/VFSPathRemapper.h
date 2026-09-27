@@ -112,6 +112,23 @@ std::vector<std::string> zip_list_dir_entries(const std::string& archivePath,
 std::string run_vfs_self_test();
 std::string run_vfs_extended_test();
 
+// Test hooks for the FSB5 audio-blob tracker (tests/test_vfs.cpp). Both take the
+// HOST archive path vfs_fopen was given. 0 means the archive has no blob windows.
+int kudroid_test_fsb_window_count(const char* archivePath);
+// Offset of the nth registered blob's first byte still uncovered, or -1 when the
+// blob is unknown, fully covered, or past the end of the registered list.
+long long kudroid_test_fsb_first_uncovered(const char* archivePath, int nth);
+
+// What the guest actually asked for versus what reached it, for one archive (the
+// HOST path vfs_fopen was given). "windows" blobs are registered, "complete" of
+// them had every declared byte served, "unread" did not. "unmatched" counts reads
+// that landed on no blob at all, since the last snapshot; a slice the guest
+// rejects after a few bytes ends with "unread", not with "unmatched".
+// One line, so it goes to stderr in the middle of a run; `snapshot` also resets
+// the unmatched counter.
+std::string vfs_fsb_stats(const char* archivePath, int snapshot);
+void vfs_fsb_note_unmatched(const char* archivePath, size_t bytes);
+
 } // namespace kudroid
 
 extern "C" void kudroid_run_vfs_self_test(void);
