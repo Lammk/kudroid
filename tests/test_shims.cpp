@@ -978,6 +978,36 @@ static void test_sem_post_releases_one_waiter() {
     bionic_sem_destroy(&sem);
 }
 
+// A semaphore that was never sem_init'd. An engine that uses one to hand work
+// between job workers — wait, post, wait, post, with no init through the PLT —
+// met a condition-variable wait on an object initialised to 0, so the waiter
+// parked and the poster, waiting on the same shape, never ran. Every worker
+// stopped at once. The uninitialised path yields a bounded window first, so a
+// handshake that is already satisfied returns immediately and one that is not
+// still finds its post.
+static void test_sem_uninitialised_yields_instead_of_parking() {
+    std::printf("[semaphore] uninitialised semaphore yields instead of parking forever\n");
+
+    // Post first, then wait: on a semaphore we never saw initialised this must
+    // succeed, because the token is there. A plain condition-variable wait here
+    // would never be woken and this check would hang.
+    sem_t sem;
+    std::memset(&sem, 0, sizeof(sem));
+    CHECK(bionic_sem_post(&sem) == 0, "post on an uninitialised semaphore succeeds");
+    const auto t0 = std::chrono::steady_clock::now();
+    CHECK(bionic_sem_wait(&sem) == 0, "wait takes the token instead of parking");
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - t0).count();
+    CHECK(ms < 200, "and returns promptly (took " + std::to_string(ms) + "ms)");
+
+    // A post that arrives while the waiter is yielding must still be seen: the
+    // waiter must not have given up before the producer ran.
+    CHECK(bionic_sem_post(&sem) == 0, "second post succeeds");
+    CHECK(bionic_sem_wait(&sem) == 0, "the token is consumed");
+
+    bionic_sem_destroy(&sem);
+}
+
 static void test_sem_timedwait_deadline() {
     std::printf("[semaphore] timedwait honours its absolute deadline\n");
 
@@ -1966,6 +1996,7 @@ int main() {
     test_sem_counting_semantics();
     test_sem_blocks_until_posted();
     test_sem_post_releases_one_waiter();
+    test_sem_uninitialised_yields_instead_of_parking();
     test_sem_timedwait_deadline();
     test_sem_destroy_releases_waiters();
     test_sem_rejects_null();

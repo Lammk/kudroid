@@ -51,9 +51,16 @@ char g_docsDir[1024] = {0};
 char g_logDir[1024] = {0};
 const char* g_kudroid_log_dir_ptr = g_logDir;
 
+namespace {
+// The breadcrumb journal's descriptor, cached for the process. -2 = not opened
+// yet, -1 = cannot be opened. Shared with kudroid_breadcrumb_invalidate_fd, which
+// has to retire it after the logs are cleared.
+std::atomic<int> g_breadcrumbFd{-2};
+}  // namespace
+
 extern "C" void kudroid_persistent_breadcrumb(const char* line) {
     if (!line || !g_logDir[0]) return;
-    static std::atomic<int> s_fd{-2};
+    std::atomic<int>& s_fd = g_breadcrumbFd;
     int fd = s_fd.load(std::memory_order_relaxed);
     if (fd == -2) {
         char path[sizeof(g_logDir) + 32];
@@ -97,6 +104,18 @@ extern "C" void kudroid_persistent_breadcrumb(const char* line) {
     if (fallback_fd < 0) return;
     (void)::write(fallback_fd, record, len);
     (void)::close(fallback_fd);
+}
+
+// Drop the cached descriptor so the next breadcrumb reopens the file. The writer
+// caches one descriptor for the process; clearing the logs unlinks the file
+// under it, and every later breadcrumb then went to the unlinked inode, so the
+// journal stayed empty on disk for the rest of the session while the watchdog
+// kept reporting "thread dump written to native_breadcrumbs.log".
+void kudroid_breadcrumb_invalidate_fd() {
+    int oldFd = g_breadcrumbFd.exchange(-2, std::memory_order_acq_rel);
+    if (oldFd >= 0) {
+        ::close(oldFd);
+    }
 }
 // Previously 16KB was too small: ELF loading and verbose lines filled the
 // buffer, pushing crucial pre-crash context (e.g. EGL initialization) out.

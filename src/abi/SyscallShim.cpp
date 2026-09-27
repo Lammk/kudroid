@@ -6118,17 +6118,34 @@ static std::mutex g_semaphoresMtx;
 // treated as a semaphore initialised to 0, which is what a handshake uses and the
 // only interpretation that can be correct; it is logged once because it means an
 // init slipped past this shim.
+// A semaphore that was never sem_init'd, or whose init arrived after a wait, is
+// the shape a game engine's yield-style semaphore has: wait, post, wait, post, on
+// an address the shim has no init for. Treating it as a blocking handshake parked
+// the waiter for as long as the poster waited, and both threads stopped. A
+// bounded try-wait keeps a real handshake working (the token is there when the
+// post is ordered before the wait) and keeps a yield spinning.
+static std::atomic<int> s_semUninitialised{0};
+static std::atomic<int> s_semUninitialisedWarns{0};
+static std::atomic<long long> s_semSpins{0};
+static std::atomic<int> s_semSpinsWarned{0};
+
 static std::shared_ptr<GuestSemaphore> guest_sem_find(const void* sem, bool create) {
     std::lock_guard<std::mutex> lock(g_semaphoresMtx);
     auto it = g_semaphores.find(sem);
     if (it != g_semaphores.end()) return it->second;
     if (!create) return nullptr;
-    static std::once_flag once;
-    std::call_once(once, [] {
+    const int n = s_semUninitialised.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (n <= 3) {
         logAndroidMessage(5, "KuDroidSyscall",
                           "sem_wait/sem_post on a semaphore that was never sem_init'd;"
-                          " treating it as initialised to 0");
-    });
+                          " treating it as initialised to 0 and spinning (waiters so far: "
+                          + std::to_string(n) + ")");
+    } else if (n == 64 && s_semUninitialisedWarns.fetch_add(1, std::memory_order_relaxed) < 2) {
+        logAndroidMessage(4, "KuDroidSyscall",
+                          "sem_wait on uninitialised semaphores has passed 63 instances"
+                          " (this one is #" + std::to_string(n) + "); a guest that expects"
+                          " a blocking handshake here will spin instead of parking");
+    }
     auto created = std::make_shared<GuestSemaphore>();
     g_semaphores.emplace(sem, created);
     return created;
@@ -6182,6 +6199,54 @@ extern "C" int bionic_sem_destroy(sem_t* sem) {
     return 0;
 }
 
+// A wait on a semaphore we never saw sem_init'd: yield with backoff. A
+// condition-variable wait would park the thread for as long as the poster waits,
+// and an engine that uses this semaphore to hand work between job workers
+// (wait, post, wait, post, never initialised through the PLT) would then have
+// every worker parked at once. Yielding keeps the handshake working when the post
+// is already there and costs nothing when it is not; the backoff keeps a real
+// producer's post from being missed.
+static int bionic_sem_wait_uninitialised(const void* sem) {
+    constexpr int kSpins = 64;
+    for (int i = 0; i < kSpins; ++i) {
+        if (i < 8) {
+            std::this_thread::yield();
+        } else {
+            std::this_thread::sleep_for(std::chrono::microseconds(50));
+        }
+        {
+            auto s = guest_sem_find(sem, /*create=*/true);
+            std::lock_guard<std::mutex> lock(s->mtx);
+            if (s->value > 0) {
+                --s->value;
+                return 0;
+            }
+        }
+    }
+    // Parked, and named: a yield loop that ends in a park is a real wait, and a
+    // stall report has to say so rather than time out silently.
+    const long long spins = s_semSpins.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (spins == 1 || spins == 8 || (spins > 8 && (spins & 7) == 0 &&
+        s_semSpinsWarned.fetch_add(1, std::memory_order_relaxed) < 64)) {
+        logAndroidMessage(5, "KuDroidSyscall",
+                          "sem_wait on an uninitialised semaphore exhausted its "
+                          "yield window and is now parked (parkings so far: " +
+                              std::to_string(spins) + "); a stall report names the caller");
+    }
+    auto s = guest_sem_find(sem, /*create=*/true);
+    std::unique_lock<std::mutex> lock(s->mtx);
+    {
+        const BlockingWaitScope tracked(WaitKind::kSemaphore, sem, guest_return_address(6));
+        for (int i = 0; i < kSpins; ++i) blocking_wait_note_iteration();
+        s->cv.wait(lock, [&s] { return s->value > 0 || s->destroyed; });
+    }
+    if (s->value > 0) {
+        --s->value;
+        return 0;
+    }
+    return 0;  // destroyed or re-init'd: the loop in the initialised path re-resolves
+}
+
 extern "C" int bionic_sem_wait(sem_t* sem) {
     if (!sem) {
         errno = EINVAL;
@@ -6191,7 +6256,13 @@ extern "C" int bionic_sem_wait(sem_t* sem) {
     // waiter is harmless there. Re-resolve instead of failing with EINVAL,
     // which aborts guests that treat it as fatal.
     for (;;) {
-        auto s = guest_sem_find(sem, /*create=*/true);
+        bool known = false;
+        {
+            std::lock_guard<std::mutex> lock(g_semaphoresMtx);
+            known = g_semaphores.find(sem) != g_semaphores.end();
+        }
+        if (!known) return bionic_sem_wait_uninitialised(sem);
+        auto s = guest_sem_find(sem, /*create=*/false);
         bool hasToken = false;
         {
             std::unique_lock<std::mutex> lock(s->mtx);

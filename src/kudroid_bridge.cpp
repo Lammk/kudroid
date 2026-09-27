@@ -242,6 +242,10 @@ extern "C" void kudroid_clear_all_logs(void) {
     // + recreate above swapped the file's inode under it, so every later log
     // line kept appending to the unlinked old file. Force the reopen.
     kudroid_android_log_force_reopen();
+    // Same thing for the breadcrumb journal: the remove above unlinked its file
+    // under the cached descriptor, so every later breadcrumb went to the unlinked
+    // inode and the file on disk stayed empty for the rest of the session.
+    kudroid_breadcrumb_invalidate_fd();
 
 #if defined(__APPLE__)
     // 5. Truncate/create fresh stderr.log

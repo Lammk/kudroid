@@ -49,6 +49,9 @@ unsigned long long currentThreadIdForCrash(void);
 // Append-only write(2) journal for diagnostics that must survive SIGKILL —
 // see BridgeState.cpp for why fsync is deliberately NOT used here.
 extern "C" void kudroid_persistent_breadcrumb(const char* line);
+// Close the cached breadcrumb descriptor so the next write reopens the file.
+// Called after the logs are cleared, which unlinks the file under it.
+extern "C" void kudroid_breadcrumb_invalidate_fd();
 
 // ── Thread registry ──────────────────────────────────────────────────────────
 //
