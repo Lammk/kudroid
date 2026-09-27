@@ -140,12 +140,12 @@ int kudroid_call_jni_onload_guarded(jint (*fn)(JavaVM*, void*),
 extern "C" const char* kudroid_build_stamp(void);
 
 // Recovery budget for worker faults: a chunk-processing job over corrupt
-// data faults per element (observed: 4 faults/iteration), so a few dozen bad
-// elements need a triple-digit budget. Past it the thread is not progressing
-// and the fault is fatal. Each skip is microseconds; the cost of headroom is
-// a few hundred breadcrumb lines worst case, while too small a cap (16 fired
-// in 25ms) turns a survivable batch into a shutdown.
-static constexpr int kMaxWorkerRecoveries = 128;
+// data faults per element (observed: 4-5 faults/iteration across 50-200 elements),
+// so chunk jobs need a four-digit budget to complete without dying midway. Past it
+// the thread is not progressing and the fault is fatal. Each skip is microseconds;
+// the cost of headroom is minimal while too small a cap turns a survivable batch
+// into an engine shutdown.
+static constexpr int kMaxWorkerRecoveries = 1024;
 // A different shape of storm is a bounded indexing loop: Unity's serialized
 // pointer-relocation pass walks a relocation table and stores one pointer per
 // entry into an output array, e.g.
