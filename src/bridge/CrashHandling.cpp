@@ -157,7 +157,7 @@ static constexpr int kMaxWorkerRecoveries = 1024;
 // ceiling; anything that repeats or regresses an address still charges the
 // normal budget and bails, so a genuine infinite loop cannot hide here.
 static constexpr int kMaxWalkRecoveries = 8192;
-// A null-base loop is never a reservation walk: below 0x10000 there is nothing
+// Null-base loop is never a reservation walk: below 0x10000 there is nothing
 // to commit, so every skip only pushes the corruption further (observed: a
 // null memset dropped store-by-store, then a SIGBUS through a garbage register
 // far from the loop). Same-pc null faults arriving back-to-back get a tiny
@@ -168,6 +168,17 @@ static constexpr int kMaxWalkRecoveries = 8192;
 // frames are milliseconds apart, so a 1ms gap restarts the run.
 static constexpr int kMaxNullRun = 4;
 static constexpr long long kMaxNullGapNs = 1000000LL;
+// The pc-rotating variant of the same storm (observed: `ldrb w6,[x10]` over a
+// null struct, fault_addr cycling 0x0/0x1/0x2/0x3/0x34/0x80, four pcs chasing
+// each other in a tight loop, 129 skips in microseconds until the 128 cap).
+// Same-pc run tracking cannot see it — the pc never repeats often enough —
+// and the count budget only delays the same fatal by (cap / burst) rounds.
+// This counter counts the skips themselves, pc-blind, within the same 1ms
+// tightness window: that many nullish faults back-to-back is a dead loop
+// regardless of shape. An inter-frame burst never reaches 1% of it, and every
+// member of the burst being nullish is what distinguishes it from a genuine
+// forward walk (which touches real, advancing addresses).
+static constexpr int kMaxNullBurst = 256;
 // Nullish address: below the first page, or just below zero (a null base
 // with a negative structure offset — observed: ldp [x18=0,#-32] faulting at
 // -32). Nothing is mapped at either extreme, so inventing a result there is
@@ -228,6 +239,8 @@ struct WorkerBudget {
     std::atomic<int> walk{0};
     // Consecutive same-pc faults in the null page. See kMaxNullRun.
     std::atomic<int> nullRun{0};
+    // Nullish faults back-to-back regardless of pc. See kMaxNullBurst.
+    std::atomic<int> nullBurst{0};
 };
 static WorkerBudget g_workerBudgets[8];
 
@@ -237,6 +250,7 @@ void crashResetWorkerBudgets(void) {
         slot.count.store(0, std::memory_order_relaxed);
         slot.lastNs.store(0, std::memory_order_relaxed);
         slot.nullRun.store(0, std::memory_order_relaxed);
+        slot.nullBurst.store(0, std::memory_order_relaxed);
     }
 }
 
@@ -368,6 +382,21 @@ static bool worker_budget_note(WorkerBudget* s, long long nowNs,
     } else {
         s->nullRun.store(fault_addr_is_nullish(addr) ? 1 : 0, std::memory_order_relaxed);
     }
+    // pc-blind null-burst tracking (see kMaxNullBurst): within the same 1ms
+    // tightness window, any nullish fault extends the burst; anything else —
+    // time gap, a mapped fault address, a reset — starts it over.
+    if (fault_addr_is_nullish(addr) && last != 0 && nowNs - last <= kMaxNullGapNs) {
+        const int burst = s->nullBurst.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (burst == kMaxNullBurst) {
+            char msg[96];
+            std::snprintf(msg, sizeof(msg),
+                          "null-burst: %d null skips in a row retired this worker",
+                          kMaxNullBurst);
+            kudroid_android_log_message(4, "KuDroidSignal", msg);
+        }
+    } else {
+        s->nullBurst.store(0, std::memory_order_relaxed);
+    }
     s->lastPc.store(pc, std::memory_order_relaxed);
     s->lastAddr.store(addr, std::memory_order_relaxed);
     return true;
@@ -398,6 +427,21 @@ static bool worker_budget_peek(WorkerBudget* s, unsigned long long pc,
     }
     if (worker_fault_is_walk(s, pc, addr)) {
         return s->walk.load(std::memory_order_relaxed) < kMaxWalkRecoveries;
+    }
+    // A live pc-rotating null storm (a tight run of nullish faults within the
+    // 1ms window) is refused outright — the count budget must not be what
+    // stops it, because that turns the crash into a slow-motion rerun at
+    // 8x the skips. A burst that ages past the window re-enters the normal
+    // budget path: isolated recurring null faults are a bad object, and the
+    // count budget is exactly the tool for that.
+    if (fault_addr_is_nullish(addr) &&
+        s->nullBurst.load(std::memory_order_relaxed) >= kMaxNullBurst) {
+        const long long nowNs =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch())
+                .count();
+        const long long prevNs = s->lastNs.load(std::memory_order_relaxed);
+        if (prevNs != 0 && nowNs - prevNs <= kMaxNullGapNs) return false;
     }
     // A retired walk re-enters here with count at its cap: fail closed.
     return s->count.load(std::memory_order_relaxed) < kMaxWorkerRecoveries;

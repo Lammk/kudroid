@@ -479,8 +479,24 @@ static inline unsigned long long current_thread_id() {
 }
 
 static void sync_diag(const char* operation, void* object, void* mutex, int result) {
-    static std::atomic<unsigned> emitted{0};
-    if (emitted.fetch_add(1, std::memory_order_relaxed) >= 256) return;
+    // Time-throttled, not lifetime-capped: a fixed 256-line budget was all
+    // spent in the one-second burst when Unity spawns its 22 Job.Workers, and
+    // the tail of that burst then sat in the crash ring — 177 of the last
+    // ~200 lines before a crash 3 minutes later were thread-sync noise,
+    // pushing out everything the crash actually needed. One line per second
+    // still traces a sync-object story across a whole session while capping
+    // the ring cost at ~8KB/minute.
+    static std::atomic<long long> s_nextNs{0};
+    const long long nowNs =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    long long due = s_nextNs.load(std::memory_order_relaxed);
+    if (nowNs < due ||
+        !s_nextNs.compare_exchange_strong(due, nowNs + 1000LL * 1000 * 1000,
+                                          std::memory_order_relaxed)) {
+        return;
+    }
     char message[256];
     std::snprintf(message, sizeof(message),
                   "thread-sync op=%s cond=%p mutex=%p tid=%llu result=%d",
