@@ -2004,6 +2004,24 @@ inline FsbHeader fsb_parse_header(const uint8_t* p) {
 // Largest plausible blob, so a run of header-shaped noise in arbitrary data cannot
 // turn one read into an unbounded walk.
 constexpr uint64_t kFsbBlobMax = 32ull << 20;
+
+// Whether this FSB5 header shape has not been described yet. Shape is what
+// decides whether a blob can be decoded at all, so describing one blob per shape
+// describes every blob that shares it. A flat cap of the first 24 blobs instead
+// spent the whole budget on arrival order: a run with 455 blobs described only
+// the 24 that came first, which left a bank that loads and a bank that fails
+// impossible to compare. Fixed table, bounded output.
+bool fsb_shape_is_new(const char* key) {
+    static std::mutex mtx;
+    static std::string seen[16];
+    static size_t count = 0;
+    std::lock_guard<std::mutex> lk(mtx);
+    for (size_t i = 0; i < count; ++i) {
+        if (seen[i] == key) return false;
+    }
+    if (count < 16) seen[count++] = key;
+    return true;
+}
 std::map<std::string, std::vector<FsbWindow>> g_fsbWindows;  // g_freadVolMtx
 
 // What the guest actually asked for versus what reached it, for one archive.
@@ -2482,10 +2500,19 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                 // this produced 1508 such lines in one 2.3s audio burst, which is
                 // the stutter, not the diagnosis.
                 const int seen = s_fsbCount.fetch_add(1, std::memory_order_relaxed);
-                const bool describe = seen < 24;
                 const long start = readStart + static_cast<long>(hits.front().first);
                 const FsbHeader& h0 = hits.front().second;
                 const size_t avail = readBytes - hits.front().first;
+                // First 24 blobs by arrival, then only a blob whose header shape is
+                // new (see fsb_shape_is_new): the description budget follows what
+                // decides decodability instead of which blob was read first. The
+                // shape is registered even when the blob is described anyway, so a
+                // shape that first appeared in the first 24 is not seen as new later.
+                char shape[96];
+                std::snprintf(shape, sizeof(shape), "v%u/m%u/shs%u/nts%u/num%u",
+                              h0.version, h0.mode, h0.shs, h0.nts, h0.numSamples);
+                const bool newShape = fsb_shape_is_new(shape);
+                const bool describe = seen < 24 || newShape;
                 std::string entry;
                 uint16_t method = 0xFFFF;
                 uint32_t usize = 0;
@@ -2592,19 +2619,20 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
                 }
                 if (describe) {
                     ktraceLine(
-                                 "[KuDroidFmod] served FSB5 sid=%d at apk_off=%ld size=%zu hits=%zu "
+                                 "[KuDroidFmod] served FSB5 sid=%d at apk_off=%ld size=%zu hits=%zu seen=%d "
                                  "method=%u usize=%u entryOff=%lld entryRem=%lld "
                                  "ver=%u num=%u shs=%u nts=%u "
                                  "dataSize=%u mode=%u blobTotal=%llu next=[%s] hex=%s "
-                                 "sample=[%s] entry=%s%s\n",
-                                 sid, start, avail, hits.size(), method, usize, entryOff,
+                                 "sample=[%s] shape=%s entry=%s%s\n",
+                                 sid, start, avail, hits.size(), seen, method, usize, entryOff,
                                  entryOff >= 0
                                      ? static_cast<long long>(usize) - entryOff -
                                            static_cast<long long>(h0.total)
                                      : -1,
                                  h0.version, h0.numSamples, h0.shs, h0.nts,
                                  h0.dataSize, h0.mode, static_cast<unsigned long long>(h0.total),
-                                 nextDesc, hex, sampleDesc, entry.empty() ? "(none)" : entry.c_str(),
+                                 nextDesc, hex, sampleDesc, shape,
+                                 entry.empty() ? "(none)" : entry.c_str(),
                                  trace_caller_text(caller));
                 }
                 // Decisive follow-up: when FMOD accepts the bank it streams

@@ -1094,11 +1094,108 @@ bool fault_skip_load_store(ucontext_t* uc, uintptr_t faultAddr, uint64_t* newPcO
 
 }  // namespace
 
+// Steady-clock nanoseconds: signal-safe, and the clock every window and throttle
+// in this file already reads.
+static long long fault_steady_ns() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+// Append one line to <logDir>/kudroid_crash.log. Async-signal-safe: open/write/
+// close only, no heap. The fault-skip mirror and the episode report below share
+// it so a recovered fault and the fault it led to land in the same file.
+static void crashAppendLogLine(const char* line, int n) {
+    if (line == nullptr || n <= 0 || !g_logDir[0]) return;
+    char path[1200];
+    size_t dl = std::strlen(g_logDir);
+    if (dl >= sizeof(path) - 32) dl = sizeof(path) - 32;
+    std::memcpy(path, g_logDir, dl);
+    const char* suffix = "/kudroid_crash.log";
+    std::memcpy(path + dl, suffix, std::strlen(suffix) + 1);
+    const int fd = ::open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    if (fd < 0) return;
+    (void)!::write(fd, line, static_cast<size_t>(n));
+    ::close(fd);
+}
+
+// Last dropped store per thread. A store drop changes no register and no memory,
+// so it leaves no trace in the guest's state: without a note here a fault the
+// drop may have caused one iteration later reads as an unrelated crash.
+// One slot per thread, atomics only (signal context: no locks, no alloc).
+struct StoreDropSlot {
+    std::atomic<unsigned long long> tid{0};
+    std::atomic<unsigned long long> pc{0};
+    std::atomic<long long> ns{0};
+};
+static StoreDropSlot g_storeDrops[8];
+
+// How far and how late the follow-up fault may arrive and still count as the
+// same loop. A broken loop is small and its iteration is quick; the bounds admit
+// a slow body while a pc 256 bytes away is a different code path.
+static constexpr unsigned long long kStoreDropPcRange = 256;
+static constexpr long long kStoreDropEpisodeNs = 100000000LL;  // 100 ms
+
+static void store_drop_note(unsigned long long tid, unsigned long long pc) {
+    if (tid == 0 || pc == 0) return;
+    const long long now = fault_steady_ns();
+    for (auto& s : g_storeDrops) {
+        if (s.tid.load(std::memory_order_relaxed) == tid) {
+            s.pc.store(pc, std::memory_order_relaxed);
+            s.ns.store(now, std::memory_order_relaxed);
+            return;
+        }
+    }
+    for (auto& s : g_storeDrops) {
+        unsigned long long z = 0;
+        if (s.tid.compare_exchange_strong(z, tid, std::memory_order_relaxed)) {
+            s.pc.store(pc, std::memory_order_relaxed);
+            s.ns.store(now, std::memory_order_relaxed);
+            return;
+        }
+    }
+}
+
+// Report a dropped store and a fault that followed it from the same loop as one
+// episode, at most once: the slot is cleared whether or not it matched, so a
+// drop with no follow-up costs nothing and a storm cannot repeat the line.
+static void store_drop_report(unsigned long long tid, unsigned long long pc,
+                              unsigned long long faultAddr) {
+    if (tid == 0) return;
+    for (auto& s : g_storeDrops) {
+        if (s.tid.load(std::memory_order_relaxed) != tid) continue;
+        const unsigned long long dropPc = s.pc.load(std::memory_order_relaxed);
+        const long long dropNs = s.ns.load(std::memory_order_relaxed);
+        s.tid.store(0, std::memory_order_relaxed);
+        s.pc.store(0, std::memory_order_relaxed);
+        s.ns.store(0, std::memory_order_relaxed);
+        if (dropPc == 0 || pc == 0) return;
+        const unsigned long long gap = pc > dropPc ? pc - dropPc : dropPc - pc;
+        if (gap > kStoreDropPcRange) return;
+        const long long now = fault_steady_ns();
+        if (dropNs == 0 || now - dropNs > kStoreDropEpisodeNs) return;
+        char mark[256];
+        const int n = std::snprintf(
+            mark, sizeof(mark),
+            "store-drop episode: dropped store pc=0x%llx, next fault pc=0x%llx "
+            "fault_addr=0x%llx pc_gap=%lluB after=%lldus\n",
+            dropPc, pc, faultAddr, gap, (now - dropNs) / 1000);
+        if (n > 0) {
+            kudroid_persistent_breadcrumb(mark);
+            crashAppendLogLine(mark, n);
+        }
+        return;
+    }
+}
+
 static bool kudroid_try_skip_fault(int /*sig*/, siginfo_t* info, void* ucontext) {
     if (info == nullptr || ucontext == nullptr) return false;
     ucontext_t* uc = reinterpret_cast<ucontext_t*>(ucontext);
     uint64_t newPc = 0;
     bool isLoad = false;
+    // Read before the resume pc is written: the drop note below names the
+    // instruction that faulted, not the one execution resumed at.
+    const uint64_t faultPc = uc->uc_mcontext->__ss.__pc;
     const uintptr_t faultAddr = reinterpret_cast<uintptr_t>(info->si_addr);
     // A fault may only be silently recovered in two shapes.
     //
@@ -1181,21 +1278,15 @@ static bool kudroid_try_skip_fault(int /*sig*/, siginfo_t* info, void* ucontext)
                                             "[fault-skip #%u] %s kind=%s%s\n",
                                             seen + 1, mark,
                                             isLoad ? "load" : "store", reg);
-                if (m > 0) {
-                    char path[1200];
-                    size_t dl = std::strlen(g_logDir);
-                    if (dl >= sizeof(path) - 32) dl = sizeof(path) - 32;
-                    std::memcpy(path, g_logDir, dl);
-                    const char* suffix = "/kudroid_crash.log";
-                    std::memcpy(path + dl, suffix, std::strlen(suffix) + 1);
-                    const int fd = ::open(path, O_WRONLY | O_CREAT | O_APPEND, 0644);
-                    if (fd >= 0) {
-                        (void)!::write(fd, rec, static_cast<size_t>(m));
-                        ::close(fd);
-                    }
-                }
+                if (m > 0) crashAppendLogLine(rec, m);
             }
         }
+    }
+    // A store drop is the one recovery that changes neither register nor memory,
+    // so this note is its only trace: it lets crashHandler report a fault
+    // arriving from the same loop as the pair it is (see store_drop_report).
+    if (!fault_addr_is_nullish(faultAddr)) {
+        store_drop_note(currentThreadIdForCrash(), faultPc);
     }
     return true;
 }
@@ -1543,6 +1634,15 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
 #endif
         const unsigned long long faultAddr =
             info != nullptr ? reinterpret_cast<unsigned long long>(info->si_addr) : 0;
+        // A dropped store one iteration earlier and this fault from the same loop
+        // are one episode. Report the pair before the skip attempt decides whether
+        // this fault is recovered too, so an episode that ends in a skip is still
+        // visible in the crash log.
+#if (defined(__aarch64__) || defined(__arm64__)) && defined(__APPLE__)
+        if (sig == SIGSEGV || sig == SIGBUS) {
+            store_drop_report(tid, faultPc, faultAddr);
+        }
+#endif
         // Emergency stop for a walked-off-the-cliff walk: past 512 steps of
         // the same load over uncommitted memory the walk is not recovering
         // anything — every skip poisons one destination and walks further into
@@ -1927,14 +2027,36 @@ host_fatal_path:;
                                      (unsigned long long)p.effAddr, info->si_addr);
                     } else if (!fault_addr_is_nullish(
                                    reinterpret_cast<uintptr_t>(info->si_addr))) {
-                        if (storeEligible) {
+                        // The drop path admits stores only, so a decoded non-nullish
+                        // load is refused by the load gate in kudroid_try_skip_fault
+                        // and never reaches a drop. Reporting it through the store
+                        // branch named a recovery the engine had already refused.
+                        // Observed live: `ldr w12,[x2,x13,lsl #2]` with a garbage
+                        // index into an address far outside every mapping, reported
+                        // as an unmapped store. `rm` is the index register of the
+                        // register-offset form, which is where a walk goes wrong.
+                        if (p.isLoad) {
                             m = snprintf(sigline, sizeof(sigline),
-                                         "fault_skip_diag: unmapped store, drop path available\n");
+                                         "fault_skip_diag: wild load, recovery refused"
+                                         " (drop path is store-only) effAddr=0x%llx"
+                                         " base=r%u:0x%llx rm=r%u:0x%llx\n",
+                                         (unsigned long long)p.effAddr, rn,
+                                         (unsigned long long)baseVal, (w >> 16) & 31u,
+                                         (unsigned long long)rmVal);
+                        } else if (storeEligible) {
+                            m = snprintf(sigline, sizeof(sigline),
+                                         "fault_skip_diag: unmapped store, drop path available"
+                                         " effAddr=0x%llx base=r%u:0x%llx rm=r%u:0x%llx\n",
+                                         (unsigned long long)p.effAddr, rn,
+                                         (unsigned long long)baseVal, (w >> 16) & 31u,
+                                         (unsigned long long)rmVal);
                         } else {
                             m = snprintf(sigline, sizeof(sigline),
                                          "fault_skip_diag: plan decodes, fault addr 0x%llx is not nullish"
-                                         " (recovery refused)\n",
-                                         (unsigned long long)reinterpret_cast<uintptr_t>(info->si_addr));
+                                         " (recovery refused) effAddr=0x%llx base=r%u:0x%llx\n",
+                                         (unsigned long long)reinterpret_cast<uintptr_t>(info->si_addr),
+                                         (unsigned long long)p.effAddr, rn,
+                                         (unsigned long long)baseVal);
                         }
                     } else {
                         m = snprintf(sigline, sizeof(sigline), "fault_skip_diag: skippable plan ok (fatal thread or budget cap)\n");
