@@ -5,9 +5,22 @@
 #include <cstring>
 #include <cstdio>
 
+#if defined(__APPLE__)
+#include <libkern/OSCacheControl.h>
+#endif
+
 namespace kudroid {
 
 namespace {
+
+static void flush_icache(void* start, size_t len) {
+#if defined(__APPLE__)
+    sys_icache_invalidate(start, len);
+#else
+    __builtin___clear_cache(reinterpret_cast<char*>(start),
+                            reinterpret_cast<char*>(start) + len);
+#endif
+}
 
 struct FmodVorbisEntry {
     const void* p1;
@@ -7655,10 +7668,8 @@ void install_fmod_vorbis_fallback(ElfLoader* loader) {
                 *pPatch = bInsn;
                 ::mprotect(patchPage, pageSize, PROT_READ | PROT_EXEC);
 
-                __builtin___clear_cache(reinterpret_cast<char*>(patchPage),
-                                        reinterpret_cast<char*>(patchPage) + pageSize);
-                __builtin___clear_cache(reinterpret_cast<char*>(stubMem),
-                                        reinterpret_cast<char*>(stubMem) + pageSize);
+                flush_icache(patchPage, pageSize);
+                flush_icache(stubMem, pageSize);
 
                 std::fprintf(stderr,
                              "[KuDroidFmod] Installed Vorbis fallback stub at %p -> %p (targetFound=%p)\n",
