@@ -20,9 +20,11 @@ jobs:
         # gcc-aarch64-linux-gnu + qemu-user-static are for the AAPCS64 trampoline
         # check: the JNI float/double path is register plumbing, so the x86-64
         # runner only exercises the SysV variant. arm64 is the product target.
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake g++ ccache zlib1g-dev \
+          sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30
+          sudo apt-get install -y --no-install-recommends cmake g++ ccache zlib1g-dev \
             gcc-aarch64-linux-gnu qemu-user-static
 
       - name: Setup ccache
@@ -209,7 +211,7 @@ jobs:
   # and the SwiftUI shell.
   # ─────────────────────────────────────────────────────────────────────────────
   ios-build:
-    needs: [build-angle-ios, build-kuart]
+    needs: [build-angle-ios]
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
