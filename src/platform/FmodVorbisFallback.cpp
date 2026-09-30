@@ -1,26 +1,21 @@
 #include "kudroid/FmodVorbisFallback.h"
-#include "kudroid/elf_loader.hpp"
 #include <sys/mman.h>
 #include <unistd.h>
 #include <cstring>
 #include <cstdio>
+#include <atomic>
 
 #if defined(__APPLE__)
 #include <libkern/OSCacheControl.h>
+#include <signal.h>
+#elif defined(__linux__)
+#include <signal.h>
+#include <ucontext.h>
 #endif
 
 namespace kudroid {
 
 namespace {
-
-static void flush_icache(void* start, size_t len) {
-#if defined(__APPLE__)
-    sys_icache_invalidate(start, len);
-#else
-    __builtin___clear_cache(reinterpret_cast<char*>(start),
-                            reinterpret_cast<char*>(start) + len);
-#endif
-}
 
 struct FmodVorbisEntry {
     const void* p1;
@@ -7577,9 +7572,18 @@ alignas(16) FmodVorbisEntry g_fmod_entries[128] = {
     { g_fmod_vorbis_data + 118562, 3077u, 0x84CA616Cu, g_fmod_vorbis_data + 46001, 3006, 28 },
 };
 
+struct FmodVorbisTrapSite {
+    uintptr_t patchAddr;
+    uintptr_t targetFound;
+    uintptr_t targetAfter;
+};
+static constexpr size_t kMaxTrapSites = 4;
+static std::atomic<size_t> g_fmod_num_sites{0};
+static FmodVorbisTrapSite g_fmod_sites[kMaxTrapSites];
+
 } // namespace
 
-extern "C" const void* kudroid_fmod_vorbis_lookup(uint32_t crc) {
+const void* kudroid_fmod_vorbis_lookup(uint32_t crc) {
     for (int i = 0; i < 128; ++i) {
         if (g_fmod_entries[i].crc == crc) {
             // FMOD expects pointer to entry + 0x10 in x28
@@ -7589,96 +7593,97 @@ extern "C" const void* kudroid_fmod_vorbis_lookup(uint32_t crc) {
     return nullptr;
 }
 
-void install_fmod_vorbis_fallback(ElfLoader* loader) {
-    if (!loader || !loader->isLoaded()) return;
-
-    void* base = loader->baseAddress();
-    const auto& segments = loader->segments();
-
-    // Pattern in FMOD FSB5 Vorbis table search:
-    // ldur w9, [x28, #-4] (0xb85fc389)
-    // cmp w9, w25         (0x6b19013f)
-    const uint8_t kPat[8] = { 0x89, 0xc3, 0x5f, 0xb8, 0x3f, 0x01, 0x19, 0x6b };
-
-    for (const auto& seg : segments) {
-        if (!(seg.flags & 1)) continue; // Must be executable (PF_X)
-        if (seg.memsz < 64) continue;
-
-        const uint8_t* start = reinterpret_cast<const uint8_t*>(base) + seg.vaddr;
-        const size_t size = seg.filesz;
-
-        for (size_t off = 0; off + 64 <= size; off += 4) {
-            if (std::memcmp(start + off, kPat, 8) != 0) continue;
-
-            const uintptr_t patAddr = reinterpret_cast<uintptr_t>(start + off);
-            const uint32_t bEqInsn = *reinterpret_cast<const uint32_t*>(patAddr + 8);
-            if ((bEqInsn & 0xff00001f) != 0x54000000) continue; // b.eq check
-
-            int32_t imm19 = static_cast<int32_t>((bEqInsn >> 5) & 0x7ffff);
-            if (imm19 & 0x40000) imm19 |= ~0x7ffff;
-            const uintptr_t targetFound = (patAddr + 8) + (static_cast<intptr_t>(imm19) << 2);
-            const uintptr_t patchAddr = patAddr + 0x1c;
-            const uintptr_t targetAfterNotFound = patAddr + 0x20;
-
-            // Allocate an RX page near module for trampoline stub
-            const size_t pageSize = static_cast<size_t>(sysconf(_SC_PAGESIZE));
-            void* hint = reinterpret_cast<void*>((patAddr + 0x1000000) & ~(pageSize - 1));
-            void* stubMem = ::mmap(hint, pageSize, PROT_READ | PROT_WRITE | PROT_EXEC,
-                                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-            if (stubMem == MAP_FAILED) {
-                stubMem = ::mmap(nullptr, pageSize, PROT_READ | PROT_WRITE | PROT_EXEC,
-                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-            }
-            if (stubMem == MAP_FAILED) return;
-
-            const uint32_t stubCode[16] = {
-                0xd10043ff, // sub sp, sp, #16
-                0xa90007e0, // stp x0, x1, [sp]
-                0x2a1903e0, // mov w0, w25
-                0x580001a1, // ldr x1, [pc, #52] -> lookup_fn
-                0xd63f0020, // blr x1
-                0xb40000c0, // cbz x0, [pc, #24] -> .Lnot_found
-                0xaa0003fc, // mov x28, x0
-                0xa94007e0, // ldp x0, x1, [sp]
-                0x910043ff, // add sp, sp, #16
-                0x58000130, // ldr x16, [pc, #36] -> target_found
-                0xd61f0200, // br x16
-                0xa94007e0, // ldp x0, x1, [sp]
-                0x910043ff, // add sp, sp, #16
-                0xf9400348, // ldr x8, [x26]
-                0x580000d0, // ldr x16, [pc, #24] -> target_after
-                0xd61f0200  // br x16
-            };
-
-            uint8_t* pStub = reinterpret_cast<uint8_t*>(stubMem);
-            std::memcpy(pStub, stubCode, sizeof(stubCode));
-            const uint64_t lookupAddr = reinterpret_cast<uint64_t>(&kudroid_fmod_vorbis_lookup);
-            std::memcpy(pStub + 64, &lookupAddr, 8);
-            std::memcpy(pStub + 72, &targetFound, 8);
-            std::memcpy(pStub + 80, &targetAfterNotFound, 8);
-
-            const intptr_t branchDiff = reinterpret_cast<intptr_t>(stubMem) - static_cast<intptr_t>(patchAddr);
-            if (branchDiff >= -0x8000000 && branchDiff <= 0x7ffffff) {
-                const uint32_t bInsn = 0x14000000 | (static_cast<uint32_t>(branchDiff >> 2) & 0x03ffffff);
-                uint32_t* pPatch = reinterpret_cast<uint32_t*>(patchAddr);
-
-                // Ensure memory is writable
-                void* patchPage = reinterpret_cast<void*>(patchAddr & ~(pageSize - 1));
-                ::mprotect(patchPage, pageSize, PROT_READ | PROT_WRITE | PROT_EXEC);
-                *pPatch = bInsn;
-                ::mprotect(patchPage, pageSize, PROT_READ | PROT_EXEC);
-
-                flush_icache(patchPage, pageSize);
-                flush_icache(stubMem, pageSize);
-
-                std::fprintf(stderr,
-                             "[KuDroidFmod] Installed Vorbis fallback stub at %p -> %p (targetFound=%p)\n",
-                             reinterpret_cast<void*>(patchAddr), stubMem,
-                             reinterpret_cast<void*>(targetFound));
-            }
-            return;
-        }
+void kudroid_arm_fmod_vorbis_trap(uintptr_t patchAddr, uintptr_t targetFound, uintptr_t targetAfter) {
+    size_t idx = g_fmod_num_sites.fetch_add(1, std::memory_order_relaxed);
+    if (idx < kMaxTrapSites) {
+        g_fmod_sites[idx] = { patchAddr, targetFound, targetAfter };
     }
+}
+
+bool bionic_handle_fmod_vorbis_trap(void* ucontext) {
+    if (!ucontext) return false;
+#if defined(__aarch64__)
+#if defined(__APPLE__)
+    ucontext_t* uc = static_cast<ucontext_t*>(ucontext);
+    if (!uc || !uc->uc_mcontext) return false;
+    uintptr_t pc_val = static_cast<uintptr_t>(uc->uc_mcontext->__ss.__pc);
+    if (!pc_val || (pc_val & 3) != 0) return false;
+    uint32_t inst = *reinterpret_cast<const uint32_t*>(pc_val);
+    // BRK #0x464d (FM) encoding: 0xd4200000 | (0x464d << 5)
+    if ((inst & 0xFFE0001F) == 0xD4200000 && ((inst >> 5) & 0xFFFF) == 0x464d) {
+        uintptr_t targetFound = 0;
+        uintptr_t targetAfter = 0;
+        size_t count = g_fmod_num_sites.load(std::memory_order_relaxed);
+        for (size_t s = 0; s < count && s < kMaxTrapSites; ++s) {
+            if (g_fmod_sites[s].patchAddr == pc_val) {
+                targetFound = g_fmod_sites[s].targetFound;
+                targetAfter = g_fmod_sites[s].targetAfter;
+                break;
+            }
+        }
+        if (targetFound == 0 && count > 0) {
+            targetFound = g_fmod_sites[0].targetFound;
+            targetAfter = g_fmod_sites[0].targetAfter;
+        }
+        if (targetFound == 0) return false;
+
+        uint32_t crc = static_cast<uint32_t>(uc->uc_mcontext->__ss.__x[25]);
+        const void* p = kudroid_fmod_vorbis_lookup(crc);
+        if (p) {
+            uc->uc_mcontext->__ss.__x[28] = reinterpret_cast<uint64_t>(p);
+            uc->uc_mcontext->__ss.__pc = targetFound;
+            std::fprintf(stderr, "[KuDroidFmod] Resolved missing Vorbis CRC 0x%08X -> resuming decoder\n", crc);
+            return true;
+        }
+        // Not found in fallback: emulate overwritten instruction `ldr x8, [x26]`
+        uint64_t addr26 = uc->uc_mcontext->__ss.__x[26];
+        if (addr26 != 0) {
+            uc->uc_mcontext->__ss.__x[8] = *reinterpret_cast<const uint64_t*>(addr26);
+        }
+        uc->uc_mcontext->__ss.__pc = targetAfter;
+        return true;
+    }
+#elif defined(__linux__)
+    ucontext_t* uc = static_cast<ucontext_t*>(ucontext);
+    if (!uc) return false;
+    uintptr_t pc_val = static_cast<uintptr_t>(uc->uc_mcontext.pc);
+    if (!pc_val || (pc_val & 3) != 0) return false;
+    uint32_t inst = *reinterpret_cast<const uint32_t*>(pc_val);
+    if ((inst & 0xFFE0001F) == 0xD4200000 && ((inst >> 5) & 0xFFFF) == 0x464d) {
+        uintptr_t targetFound = 0;
+        uintptr_t targetAfter = 0;
+        size_t count = g_fmod_num_sites.load(std::memory_order_relaxed);
+        for (size_t s = 0; s < count && s < kMaxTrapSites; ++s) {
+            if (g_fmod_sites[s].patchAddr == pc_val) {
+                targetFound = g_fmod_sites[s].targetFound;
+                targetAfter = g_fmod_sites[s].targetAfter;
+                break;
+            }
+        }
+        if (targetFound == 0 && count > 0) {
+            targetFound = g_fmod_sites[0].targetFound;
+            targetAfter = g_fmod_sites[0].targetAfter;
+        }
+        if (targetFound == 0) return false;
+
+        uint32_t crc = static_cast<uint32_t>(uc->uc_mcontext.regs[25]);
+        const void* p = kudroid_fmod_vorbis_lookup(crc);
+        if (p) {
+            uc->uc_mcontext.regs[28] = reinterpret_cast<uint64_t>(p);
+            uc->uc_mcontext.pc = targetFound;
+            std::fprintf(stderr, "[KuDroidFmod] Resolved missing Vorbis CRC 0x%08X -> resuming decoder\n", crc);
+            return true;
+        }
+        uint64_t addr26 = uc->uc_mcontext.regs[26];
+        if (addr26 != 0) {
+            uc->uc_mcontext.regs[8] = *reinterpret_cast<const uint64_t*>(addr26);
+        }
+        uc->uc_mcontext.pc = targetAfter;
+        return true;
+    }
+#endif
+#endif
+    return false;
 }
 
 } // namespace kudroid

@@ -10,6 +10,7 @@
 #include "kudroid/KuArtRuntime.h"
 #include "kudroid/elf_loader.hpp"
 #include "kudroid/NativeCallTelemetry.h"
+#include "kudroid/FmodVorbisFallback.h"
 
 #include <chrono>
 #include <csignal>
@@ -1395,6 +1396,9 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
         if (kudroid::bionic_handle_tpidr_trap(ucontext)) {
             return; // handled successfully, resuming execution!
         }
+        if (kudroid::bionic_handle_fmod_vorbis_trap(ucontext)) {
+            return;
+        }
         if (kudroid::bionic_handle_jit26_trap(ucontext)) {
             static std::atomic<int> s_jit26Seen{0};
             if (s_jit26Seen.load() < 5) {
@@ -1430,6 +1434,9 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
                 ++s_illEmulated;
                 kudroid_android_log_message(4, "KuDroidTrap", "SIGILL emulated as TPIDR");
             }
+            return;
+        }
+        if (kudroid::bionic_handle_fmod_vorbis_trap(ucontext)) {
             return;
         }
     }

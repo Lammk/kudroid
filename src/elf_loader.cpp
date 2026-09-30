@@ -923,6 +923,22 @@ bool ElfLoader::map() {
                     uint32_t reg = inst & 0x1F;
                     uint32_t brk_inst = 0xD4200000 | ((0x1000 + reg) << 5);
                     insts[i] = brk_inst;
+                } else if (inst == 0xb85fc389 && i + 8 < num_insts && insts[i + 1] == 0x6b19013f) {
+                    uint32_t b_eq = insts[i + 2];
+                    if ((b_eq & 0xff00001f) == 0x54000000 && insts[i + 7] == 0xf9400348) {
+                        int32_t imm19 = static_cast<int32_t>((b_eq >> 5) & 0x7ffff);
+                        if (imm19 & 0x40000) imm19 |= ~0x7ffff;
+                        uintptr_t patAddr = reinterpret_cast<uintptr_t>(static_cast<char*>(base_) - minVaddr + seg.vaddr + (i * 4));
+                        uintptr_t targetFound = patAddr + 8 + (static_cast<intptr_t>(imm19) << 2);
+                        uintptr_t targetAfter = patAddr + 0x20;
+                        kudroid_arm_fmod_vorbis_trap(patAddr + 0x1c, targetFound, targetAfter);
+                        insts[i + 7] = 0xd4200000 | (0x464d << 5); // brk #0x464d
+                        std::fprintf(stderr,
+                                     "[KuDroidFmod] Armed Vorbis fallback BRK trap at %p (targetFound=%p, targetAfter=%p)\n",
+                                     reinterpret_cast<void*>(patAddr + 0x1c),
+                                     reinterpret_cast<void*>(targetFound),
+                                     reinterpret_cast<void*>(targetAfter));
+                    }
                 }
             }
         }
@@ -1224,7 +1240,6 @@ bool ElfLoader::relocate() {
 
     if (ok) {
         applyProtections();
-        install_fmod_vorbis_fallback(this);
     }
 
 #if defined(__APPLE__) && TARGET_OS_OSX
