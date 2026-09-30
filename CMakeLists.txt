@@ -84,6 +84,7 @@ add_library(kudroid_core STATIC
     src/abi/GuestSignals.cpp
     src/platform/AssetShim.cpp
     src/platform/BundledFramework.cpp
+    src/platform/FmodVorbisFallback.cpp
     src/platform/JavaCanvasRenderer.cpp
     src/bridge/BridgeState.cpp
     src/bridge/BridgeShared.cpp

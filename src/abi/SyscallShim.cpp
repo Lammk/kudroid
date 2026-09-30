@@ -1104,6 +1104,18 @@ static bool at_path_needs_remap(int dirfd, const char* pathname) {
     return translate_linux_dirfd(dirfd) == AT_FDCWD;
 }
 
+// Defined further down with the audio fd-trace budget; declared here because the
+// open path is the one place FMOD's fd handles become visible.
+extern "C" bool kudroid_audio_thread(void);
+extern "C" int kudroid_fd_is_apk(int fd);
+static std::atomic<int> g_audioFdOpsEarly{0};
+static bool audio_open_trace_take() {
+    if (g_audioFdOpsEarly.load(std::memory_order_relaxed) >= 200) return false;
+    if (!kudroid_audio_thread()) return false;
+    g_audioFdOpsEarly.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
+
 extern "C" int bionic_openat(int dirfd, const char* pathname, int flags, mode_t mode) {
     if (!pathname) return -1;
     const int host_dirfd = translate_linux_dirfd(dirfd);
@@ -1121,6 +1133,21 @@ extern "C" int bionic_openat(int dirfd, const char* pathname, int flags, mode_t 
         }
     }
     const int fd = ::openat(host_dirfd, remapped.c_str(), host_flags, mode);
+    // FMOD's fd path probes the size of the file it is about to stream: the
+    // bytes-per-clip math is st_size minus how much the loader already read
+    // through its own handles. A probe handle on base.apk (the guest sizes
+    // clips through st_size even though every clip is an entry INSIDE it) is
+    // where the size goes wrong, so name the fd, the path and the number the
+    // guest will see on the audio thread. Nothing else logs that open.
+    if (audio_open_trace_take()) {
+        struct stat ost;
+        const bool haveStat = fd >= 0 && ::fstat(fd, &ost) == 0;
+        std::fprintf(stderr,
+                     "%s[KuDroidFd] AUDIO open fd=%d apk=%d flags=0x%x path=%s size=%lld\n",
+                     kudroid_trace_stamp(), fd, fd >= 0 && kudroid_fd_is_apk(fd) ? 1 : 0,
+                     flags, remapped.c_str(),
+                     haveStat ? static_cast<long long>(ost.st_size) : -1LL);
+    }
     // Open hits on game data: the last visibility gap (misses already log).
     // A bundle opened but never read, or never opened at all, decides the stall.
     // Match the original path too: il2cpp/C# FileStream comes through openat,
@@ -6282,9 +6309,6 @@ extern "C" int bionic_sem_wait(sem_t* sem) {
         bool hasToken = false;
         {
             std::unique_lock<std::mutex> lock(s->mtx);
-            // A handshake whose post never arrives parks this thread for good. This is
-            // where Unity's helper threads wait, so it is the first thing worth naming
-            // when a launch stops making progress.
             const BlockingWaitScope tracked(WaitKind::kSemaphore, sem,
                                             guest_return_address(6));
             s->cv.wait(lock, [&s] { return s->value > 0 || s->destroyed; });

@@ -40,6 +40,7 @@
 // remapper otherwise has no reason to depend on the syscall layer; it needs this only to
 // record what device figures the pseudo-files were written from.
 extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
+extern "C" const char* kudroid_trace_stamp(void);
 
 // One diagnostic line: boot-relative time and the guest thread name in front of the
 // caller's text, so the VFS/audio stream can be placed between the [KuDroidBoot] phase
@@ -1826,7 +1827,9 @@ static bool audio_thread() {
 #else
         (void)pthread_getname_np(pthread_self(), name, sizeof(name));
 #endif
-        audio = name[0] != '\0' && std::strstr(name, "FMOD") != nullptr;
+        audio = name[0] != '\0' && (std::strstr(name, "FMOD") != nullptr ||
+                                    std::strstr(name, "Preload") != nullptr ||
+                                    std::strstr(name, "Audio") != nullptr);
     }
     return audio;
 }
@@ -2950,7 +2953,6 @@ int vfs_fseeko(FILE* stream, off_t offset, int whence) {
                                          static_cast<unsigned long long>(w->expected),
                                          trace_caller_text(caller));
                         }
-                        fsb_window_cover(*w, lo, hi);
                     }
                 }
             }
@@ -3151,7 +3153,28 @@ int vfs_lstat64(const char* path, void* info) { return vfs_lstat(path, info); }
 extern "C" int vfs_fstat(int fd, void* info) {
     struct stat host_st;
     int res = ::fstat(fd, &host_st);
-    if (res == 0) copy_stat((struct android_stat*)info, &host_st);
+    if (res == 0) {
+        copy_stat((struct android_stat*)info, &host_st);
+        // FMOD's fd path sizes its clip math from st_size on this same fd kind:
+        // a raw base.apk fd makes every clip size off by the whole-file offset
+        // (observed: an 884832-byte entry sized 889515831 minus its payload
+        // offset). Name the question and the answer on the audio thread — the
+        // AUDIO lines are the only window onto FMOD's own probe handles.
+        static std::atomic<int> s_apkFstat{0};
+        bool apkFd = false;
+        {
+            std::lock_guard<std::mutex> lock(g_apkStreamsMtx);
+            for (int i = 0; i < kTrackedStreams && !apkFd; ++i) {
+                apkFd = g_apkStreamFd[i].load(std::memory_order_relaxed) == fd;
+            }
+        }
+        if (apkFd && s_apkFstat.load(std::memory_order_relaxed) < 80) {
+            s_apkFstat.fetch_add(1, std::memory_order_relaxed);
+            std::fprintf(stderr, "%s[KuDroidFd] AUDIO fstat fd=%d size=%lld\n",
+                         kudroid_trace_stamp(), fd,
+                         static_cast<long long>(host_st.st_size));
+        }
+    }
     return res;
 }
 extern "C" int vfs_fstat64(int fd, void* info) { return vfs_fstat(fd, info); }

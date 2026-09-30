@@ -2,6 +2,7 @@
 #include "kudroid/ElfX18.h"
 #include "kudroid/BionicShim.h"
 #include "kudroid/ExecMemory.h"
+#include "kudroid/FmodVorbisFallback.h"
 
 #include <atomic>
 #include <cerrno>
@@ -1223,6 +1224,7 @@ bool ElfLoader::relocate() {
 
     if (ok) {
         applyProtections();
+        install_fmod_vorbis_fallback(this);
     }
 
 #if defined(__APPLE__) && TARGET_OS_OSX
