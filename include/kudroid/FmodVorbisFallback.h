@@ -9,8 +9,12 @@ namespace kudroid {
 // Returns pointer to (&entry + 0x10) if found, nullptr otherwise.
 const void* kudroid_fmod_vorbis_lookup(uint32_t crc);
 
-// Arms the FMOD Vorbis fallback trap parameters.
-void kudroid_arm_fmod_vorbis_trap(uintptr_t patchAddr, uintptr_t targetFound, uintptr_t targetAfter);
+// Arms the FMOD Vorbis fallback trap. patchAddr is the BRK site, targetFound the
+// decoder's "setup found" continuation, resumeAfter where execution continues when
+// the fallback has no entry, origInst the instruction the BRK replaced (emulated on
+// a miss) and probe true for the lookup loop head, which only reports the asked CRC.
+void kudroid_arm_fmod_vorbis_trap(uintptr_t patchAddr, uintptr_t targetFound,
+                                  uintptr_t resumeAfter, uint32_t origInst, bool probe);
 
 // Handles the BRK #0x464d trap when FMOD cannot find a Vorbis CRC in its builtin table.
 bool bionic_handle_fmod_vorbis_trap(void* ucontext);

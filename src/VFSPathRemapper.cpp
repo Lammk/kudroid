@@ -1810,6 +1810,15 @@ constexpr int kAudioOpCapPerStream = 400;
 constexpr int kAudioOpBudget = 3000;
 std::atomic<int> g_audioStreamOps[kTrackedStreams] = {};
 std::atomic<int> g_audioOpsTraced{0};
+// The decoder's own threads get a separate budget: the preload burst spends the
+// shared one in its first seconds, after which a clip load that fails for a
+// file-level reason would be untraceable for the rest of the session. FMOD's I/O
+// is what names the geometry it was handed, so it stays visible on its own cap.
+constexpr int kFmodOpCapPerStream = 120;
+constexpr int kFmodOpBudget = 800;
+std::atomic<int> g_fmodStreamOps[kTrackedStreams] = {};
+std::atomic<int> g_fmodOpsTraced{0};
+std::atomic<int> g_apkStreamDeadLogged[kTrackedStreams] = {};
 
 }  // namespace
 
@@ -1834,6 +1843,22 @@ static bool audio_thread() {
     return audio;
 }
 
+// Decoder threads only. Same cached classification as audio_thread().
+static bool fmod_thread() {
+    static thread_local unsigned calls = 0;
+    static thread_local bool fmod = false;
+    if ((calls++ & 0xFFu) == 0) {
+        char name[64] = {};
+#if defined(__APPLE__)
+        pthread_getname_np(pthread_self(), name, sizeof(name));
+#else
+        (void)pthread_getname_np(pthread_self(), name, sizeof(name));
+#endif
+        fmod = name[0] != '\0' && std::strstr(name, "FMOD") != nullptr;
+    }
+    return fmod;
+}
+
 // Same answer for the fd layer (SyscallShim), which cannot see this TU's statics.
 extern "C" bool kudroid_audio_thread(void) { return audio_thread(); }
 
@@ -1842,6 +1867,16 @@ extern "C" bool kudroid_audio_thread(void) { return audio_thread(); }
 static bool audio_trace_take(int sid) {
     if (sid >= kTrackedStreams) return false;
     if (!audio_thread()) return false;
+    if (fmod_thread()) {
+        if (sid >= 0 &&
+            g_fmodStreamOps[sid].load(std::memory_order_relaxed) >= kFmodOpCapPerStream) {
+            return false;
+        }
+        if (g_fmodOpsTraced.load(std::memory_order_relaxed) >= kFmodOpBudget) return false;
+        if (sid >= 0) g_fmodStreamOps[sid].fetch_add(1, std::memory_order_relaxed);
+        g_fmodOpsTraced.fetch_add(1, std::memory_order_relaxed);
+        return true;
+    }
     if (sid >= 0 &&
         g_audioStreamOps[sid].load(std::memory_order_relaxed) >= kAudioOpCapPerStream) {
         return false;
@@ -2279,6 +2314,13 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
         // must consume one cursor between them, never the same bytes twice.
         std::lock_guard<std::mutex> slock(g_apkStreamMtx[sid]);
         if (!apk_stream_live(sid, stream)) {
+            // The slot no longer names this FILE*, so the read is unservable and
+            // returns zero bytes -- the one read failure the SHORT trace cannot
+            // report, because it returns before the trace block.
+            if (g_apkStreamDeadLogged[sid].fetch_add(1, std::memory_order_relaxed) < 4) {
+                ktraceLine("[KuDroidApkS] sid=%d DEAD read size=%zu%s\n", sid, size * count,
+                           trace_caller_text(caller));
+            }
             errno = EBADF;
             return 0;
         }
