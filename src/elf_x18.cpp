@@ -175,7 +175,13 @@ Decoded decode(std::uint32_t w) {
             isLoad = ((w >> 23) & 1) != 0;
         else
             isLoad = ((w >> 22) & 1) != 0;
-        if (!simd) markMem(d, 0, rd, isLoad);
+        if (!simd) {
+            if (isLoad) {
+                markPatch(d, 0, rd, true);
+            } else {
+                markMem(d, 0, rd, false);
+            }
+        }
         markPatch(d, 5, rn, false);
         // Register-offset forms (bit21 == 1, and not LSE which the branch
         // above already recorded as Rs) carry a real integer Rm index.
@@ -188,6 +194,18 @@ Decoded decode(std::uint32_t w) {
         }
         return d;
     }
+    // Load register (literal): PC-relative literal load into Rt (integer forms).
+    if ((b & 0x3F) == 0x18) {
+        const unsigned opc = (w >> 30) & 3;
+        if (opc != 3) {
+            markPatch(d, 0, rd, true);
+        }
+        return d;
+    }
+    if ((b & 0x3F) == 0x1C) {
+        // SIMD literal load: target is vector register (Vt), Darwin preserves v18.
+        return d;
+    }
     // Loads/stores, pair. Integer lanes share top bytes with SIMD lanes;
     // only Rn is an integer register in the SIMD form. Store forms (opc
     // bit22 clear) read their lanes; load forms define them.
@@ -197,8 +215,13 @@ Decoded decode(std::uint32_t w) {
         const bool simdPair = (w & (1u << 26)) != 0 && ((b & 0x3C) == 0x28);
         const bool isPairLoad = ((w >> 22) & 1) != 0;
         if (!simdPair) {
-            markMem(d, 0, rd, isPairLoad);
-            markMem(d, 10, ra, isPairLoad);
+            if (isPairLoad) {
+                markPatch(d, 0, rd, true);
+                markPatch(d, 10, ra, true);
+            } else {
+                markMem(d, 0, rd, false);
+                markMem(d, 10, ra, false);
+            }
         }
         markPatch(d, 5, rn, false);
         return d;
@@ -589,19 +612,27 @@ RegTouch regTouch(std::uint32_t w) {
 // substitute before it. Only def-before + use-after destroys a crossing
 // value). Calls inside the span are rejected before allocation, so clobber
 // survival is not a concern here.
+bool hasCall(std::uint32_t w) {
+    const unsigned b = w >> 24;
+    if ((b & 0xFC) == 0x94 || b == 0xD6) return true;  // bl / blr(+auth)
+    return false;
+}
+
 bool crossingLiveRange(const std::vector<std::uint32_t>& words, long a, long b,
                        unsigned reg) {
     const std::uint32_t bit = 1u << reg;
     bool liveBefore = false;
-    for (long i = 0; i < a && i < static_cast<long>(words.size()); ++i) {
+    for (long i = a - 1; i >= 0; --i) {
+        if (hasCall(words[i])) break;  // AAPCS: call clobbers scratch registers
         const RegTouch t = regTouch(words[i]);
-        if ((t.defs & bit) || (t.uses & bit)) {
+        if (t.defs & bit) {
             liveBefore = true;
             break;
         }
     }
     if (!liveBefore) return false;
     for (long j = b + 1; j < static_cast<long>(words.size()); ++j) {
+        if (hasCall(words[j])) break;  // call clobbers scratch before any later use
         const RegTouch t = regTouch(words[j]);
         if (t.uses & bit) return true;
         if (t.defs & bit) break;  // redefined before any read
@@ -618,12 +649,6 @@ unsigned pickFreeReg(std::uint32_t used) {
         if ((used & (1u << r)) == 0) return r;
     }
     return 31;
-}
-
-bool hasCall(std::uint32_t w) {
-    const unsigned b = w >> 24;
-    if ((b & 0xFC) == 0x94 || b == 0xD6) return true;  // bl / blr(+auth)
-    return false;
 }
 
 // One word's x18 touch: define kills the incoming value, use reads it.

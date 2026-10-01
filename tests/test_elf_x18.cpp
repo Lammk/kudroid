@@ -718,6 +718,18 @@ void test_simd_structure_ldst() {
     }
 }
 
+// LDR defining x18 from stack followed by compare is rewritten.
+void test_ldr_x18_renamed() {
+    std::printf("[rewrite] ldr x18 destination is renamed\n");
+    const std::uint32_t ldr = 0xb94057f2;  // ldr w18, [sp, #0x54]
+    const std::uint32_t cmp = 0x6b12013f;  // cmp w9, w18 (subs wzr, w9, w18)
+    SynthElf elf({ldr, cmp, 0xD65F03C0}, false);
+    kudroid::X18Stats st = elf.run();
+    Check(st.rewritten == 1 && st.sites == 2, "ldr x18 rewritten, def + use");
+    Check((elf.word(0) & 31) == 15, "ldr target became x15");
+    Check(((elf.word(1) >> 16) & 31) == 15, "cmp source became x15");
+}
+
 int main(int argc, char** argv) {
     // Ops mode: rewrite stats for a real .so (map() runs the loader hook).
     if (argc > 1) {
@@ -751,6 +763,7 @@ int main(int argc, char** argv) {
     test_fmov_crossover();
     test_writeback_preindex();
     test_simd_structure_ldst();
+    test_ldr_x18_renamed();
     if (g_failures == 0) {
         std::printf("=== PASSED (%d checks) ===\n", g_checks);
         return 0;
