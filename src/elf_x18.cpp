@@ -614,27 +614,24 @@ RegTouch regTouch(std::uint32_t w) {
 // survival is not a concern here.
 bool hasCall(std::uint32_t w) {
     const unsigned b = w >> 24;
-    if ((b & 0xFC) == 0x94 || b == 0xD6) return true;  // bl / blr(+auth)
-    return false;
+    return (b & 0xFC) == 0x94 ||
+           (w & 0xFFFFFC1F) == 0xD63F0000 ||
+           (w & 0xFFFFFC00) == 0xD73F0800 ||
+           (w & 0xFFFFFC00) == 0xD73F0C00 ||
+           (w & 0xFFFFFC1F) == 0xD63F081F ||
+           (w & 0xFFFFFC1F) == 0xD63F0C1F;
 }
 
 bool crossingLiveRange(const std::vector<std::uint32_t>& words, long a, long b,
                        unsigned reg) {
+    (void)a;
     const std::uint32_t bit = 1u << reg;
-    bool liveBefore = false;
-    for (long i = a - 1; i >= 0; --i) {
-        if (hasCall(words[i])) break;  // AAPCS: call clobbers scratch registers
-        const RegTouch t = regTouch(words[i]);
-        if (t.defs & bit) {
-            liveBefore = true;
-            break;
-        }
-    }
-    if (!liveBefore) return false;
+    // A later read observes the incoming value even without a local definition.
     for (long j = b + 1; j < static_cast<long>(words.size()); ++j) {
-        if (hasCall(words[j])) break;  // call clobbers scratch before any later use
         const RegTouch t = regTouch(words[j]);
         if (t.uses & bit) return true;
+        // Check register targets and arguments before applying call clobbers.
+        if (hasCall(words[j])) return reg < 9;
         if (t.defs & bit) break;  // redefined before any read
     }
     return false;

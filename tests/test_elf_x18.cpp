@@ -467,7 +467,7 @@ void test_two_spans_one_block() {
         0xAA000012,       // 0: mov x18, x0          (span 1 def)
         0xB8326841,       // 1: str w1, [x2, x18]    (span 1 use)
         0xB0000012,       // 2: adrp x18, #0         (span 2 def)
-        0x910001EF,       // 3: add x15, x15, #0     (x15 busy in span 2 only)
+        0xD280000F,       // 3: mov x15, #0          (kills incoming x15)
         0xF9400A46,       // 4: ldr x6, [x18, #0x10] (span 2 use)
         0xD65F03C0,       // 5: ret
     };
@@ -730,6 +730,17 @@ void test_ldr_x18_renamed() {
     Check(((elf.word(1) >> 16) & 31) == 15, "cmp source became x15");
 }
 
+void test_live_in_substitute_preserved() {
+    SynthElf elf({0xAA000012, 0x8B120001, 0xAA0F03E2, 0xD65F03C0}, false);
+    const auto st = elf.run();
+    Check(st.rewritten == 1, "live-in substitute case rewrites");
+    Check((elf.word(0) & 31) != 15, "incoming x15 is not overwritten");
+
+    SynthElf target({0xAA000012, 0x8B120001, 0xD63F01E0, 0xD65F03C0}, false);
+    target.run();
+    Check((target.word(0) & 31) != 15, "indirect call target x15 is not overwritten");
+}
+
 int main(int argc, char** argv) {
     // Ops mode: rewrite stats for a real .so (map() runs the loader hook).
     if (argc > 1) {
@@ -764,6 +775,7 @@ int main(int argc, char** argv) {
     test_writeback_preindex();
     test_simd_structure_ldst();
     test_ldr_x18_renamed();
+    test_live_in_substitute_preserved();
     if (g_failures == 0) {
         std::printf("=== PASSED (%d checks) ===\n", g_checks);
         return 0;

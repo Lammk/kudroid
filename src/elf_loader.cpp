@@ -929,18 +929,25 @@ bool ElfLoader::map() {
                         int32_t imm19 = static_cast<int32_t>((b_eq >> 5) & 0x7ffff);
                         if (imm19 & 0x40000) imm19 |= ~0x7ffff;
                         uintptr_t patAddr = reinterpret_cast<uintptr_t>(static_cast<char*>(base_) - minVaddr + seg.vaddr + (i * 4));
-                        uintptr_t targetFound = patAddr + 8 + (static_cast<intptr_t>(imm19) << 2);
+                        uintptr_t targetFound = patAddr + 8 + static_cast<intptr_t>(imm19) * 4;
                         const uint32_t brk = 0xd4200000 | (0x464d << 5);
                         // Two sites: the loop head names the codebook the decoder
                         // is looking for, and the fall-through after the scan is
                         // where a codebook FMOD's own table lacks has to be served
                         // from the fallback table.
-                        kudroid_arm_fmod_vorbis_trap(patAddr, targetFound, patAddr + 4,
-                                                     insts[i], true);
-                        kudroid_arm_fmod_vorbis_trap(patAddr + 0x1c, targetFound,
-                                                     patAddr + 0x20, insts[i + 7], false);
-                        insts[i] = brk;
-                        insts[i + 7] = brk;
+                        const bool site0 = kudroid_arm_fmod_vorbis_trap(
+                            patAddr, targetFound, patAddr + 4, insts[i], true);
+                        const bool site1 = kudroid_arm_fmod_vorbis_trap(
+                            patAddr + 0x1c, targetFound, patAddr + 0x20, insts[i + 7], false);
+                        if (site0 && site1) {
+                            insts[i] = brk;
+                            insts[i + 7] = brk;
+                        } else {
+                            std::fprintf(stderr,
+                                         "[KuDroidFmod] Vorbis fallback site table full; "
+                                         "leaving decoder instructions unpatched\n");
+                            continue;
+                        }
                         std::fprintf(stderr,
                                      "[KuDroidFmod] Armed Vorbis fallback BRK trap at %p (targetFound=%p, targetAfter=%p)\n",
                                      reinterpret_cast<void*>(patAddr + 0x1c),

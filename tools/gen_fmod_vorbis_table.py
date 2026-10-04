@@ -122,7 +122,10 @@ def main():
         entries.append((p1, len1, crc, p2, off2, len2))
     # The blob keeps libunity's own layout for the setup regions: one flat copy
     # starting at the first entry's p1. Every pointer is rebased onto it, so
-    # offsets are addr - blob_base.
+    # offsets are addr - blob_base. p1 is the short per-entry patch and p2 is
+    # the shared setup template; len1 is the reconstructed setup length while
+    # len2 is the patch length. Do not swap these lengths when computing the
+    # source spans: p1+len2 and p2+len1 are the two actual source ranges.
     blob_base = min(e[0] for e in entries if e[0])
     for p1, len1, _crc, p2, _off2, len2 in entries:
         need_end = max(need_end, p1 - blob_base + len2)
