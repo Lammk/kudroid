@@ -243,8 +243,8 @@ extern "C" int kuart_touch_drain_pending(void) {
     int drained = 0;
     const auto t0 = std::chrono::steady_clock::now();
     std::vector<kudroid::TouchEventQueue::Event> events;
-    events.reserve(16);
-    queue.drainCoalesced(events, 16);
+    events.reserve(32);
+    queue.drainCoalesced(events, kudroid::TouchEventQueue::kMaxQueueSize);
     for (const auto& event : events) {
         int count = event.pointerCount;
         if (count < 1) count = 1;

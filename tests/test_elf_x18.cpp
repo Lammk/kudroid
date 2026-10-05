@@ -741,6 +741,42 @@ void test_live_in_substitute_preserved() {
     Check((target.word(0) & 31) != 15, "indirect call target x15 is not overwritten");
 }
 
+void test_ldp_stp_signed_offset() {
+    std::printf("[rewrite] ldp/stp signed offset with x18 base and target is rewritten\n");
+    const std::uint32_t def_x18 = 0x8B010000 | (1u << 16) | (0u << 5) | 18u;  // add x18, x0, x1
+    const std::uint32_t stp_base = 0xA9010640;                                // stp x0, x1, [x18, #16]
+    SynthElf elf({def_x18, stp_base, 0xD65F03C0}, false);
+    kudroid::X18Stats st = elf.run();
+    Check(st.rewritten == 1 && st.sites == 2, "stp signed offset base rewritten");
+    Check(((elf.word(1) >> 5) & 31) == 15, "stp Rn became x15");
+
+    const std::uint32_t ldp_def = 0xA9410BE0 | 18u;  // ldp x18, x2, [sp, #16]
+    const std::uint32_t use_x18 = 0x8B120000;        // add x0, x0, x18
+    SynthElf elf2({ldp_def, use_x18, 0xD65F03C0}, false);
+    kudroid::X18Stats st2 = elf2.run();
+    Check(st2.rewritten == 1 && st2.sites == 2, "ldp signed offset target rewritten");
+    Check(((elf2.word(0) >> 0) & 31) == 15, "ldp Rt became x15");
+    Check(((elf2.word(1) >> 16) & 31) == 15, "add Rm became x15");
+}
+
+void test_x30_fallback_picked() {
+    std::printf("[rewrite] x30 picked as fallback when x0-x15 busy before call\n");
+    std::vector<std::uint32_t> code;
+    code.push_back(0x8B010000 | (1u << 16) | (0u << 5) | 18u);  // add x18, x0, x1 (def)
+    for (unsigned r = 0; r <= 15; ++r) {
+        // add x_r, x_r, #0 — every caller-saved register busy inside the span
+        code.push_back(0x91000000 | (r << 0) | (r << 5));
+    }
+    code.push_back(0x8B020240);  // add x0, x18, x2 (use)
+    code.push_back(0x94000001);  // bl #4 (call clobbers x30 and caller-saved)
+    code.push_back(0xD65F03C0);  // ret
+    SynthElf elf(code, false);
+    kudroid::X18Stats st = elf.run();
+    Check(st.rewritten == 1 && st.sites == 2, "rewritten using x30 fallback");
+    Check(((elf.word(0) >> 0) & 31) == 30, "span picked x30 (Rd)");
+    Check(((elf.word(17) >> 5) & 31) == 30, "span picked x30 (Rn)");
+}
+
 int main(int argc, char** argv) {
     // Ops mode: rewrite stats for a real .so (map() runs the loader hook).
     if (argc > 1) {
@@ -776,6 +812,8 @@ int main(int argc, char** argv) {
     test_simd_structure_ldst();
     test_ldr_x18_renamed();
     test_live_in_substitute_preserved();
+    test_ldp_stp_signed_offset();
+    test_x30_fallback_picked();
     if (g_failures == 0) {
         std::printf("=== PASSED (%d checks) ===\n", g_checks);
         return 0;

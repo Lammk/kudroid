@@ -145,7 +145,7 @@ public:
     // Drain queued events into `out`, coalescing consecutive MOVE events that share
     // the same pointer count so the engine only processes the latest sample in each
     // motion sequence while preserving all gesture boundary transitions (DOWN/UP).
-    size_t drainCoalesced(std::vector<Event>& out, size_t maxEvents = 16) {
+    size_t drainCoalesced(std::vector<Event>& out, size_t maxEvents = kMaxQueueSize) {
         std::lock_guard<std::mutex> lock(mutex_);
         if (events_.empty() || maxEvents == 0) return 0;
         size_t produced = 0;

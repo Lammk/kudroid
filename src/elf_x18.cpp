@@ -209,19 +209,14 @@ Decoded decode(std::uint32_t w) {
     // Loads/stores, pair. Integer lanes share top bytes with SIMD lanes;
     // only Rn is an integer register in the SIMD form. Store forms (opc
     // bit22 clear) read their lanes; load forms define them.
-    if ((b & 0x3F) == 0x28) {
-        // SIMD pairs (top bytes 0x2C/0x6C/0xAC/0xEC) reach neither here nor
-        // the integer mask below — handled by the (b & 0x3C) == 0x2C arm.
-        const bool simdPair = (w & (1u << 26)) != 0 && ((b & 0x3C) == 0x28);
+    if ((b & 0x3E) == 0x28) {
         const bool isPairLoad = ((w >> 22) & 1) != 0;
-        if (!simdPair) {
-            if (isPairLoad) {
-                markPatch(d, 0, rd, true);
-                markPatch(d, 10, ra, true);
-            } else {
-                markMem(d, 0, rd, false);
-                markMem(d, 10, ra, false);
-            }
+        if (isPairLoad) {
+            markPatch(d, 0, rd, true);
+            markPatch(d, 10, ra, true);
+        } else {
+            markMem(d, 0, rd, false);
+            markMem(d, 10, ra, false);
         }
         markPatch(d, 5, rn, false);
         return d;
@@ -630,18 +625,18 @@ bool crossingLiveRange(const std::vector<std::uint32_t>& words, long a, long b,
     for (long j = b + 1; j < static_cast<long>(words.size()); ++j) {
         const RegTouch t = regTouch(words[j]);
         if (t.uses & bit) return true;
-        // Check register targets and arguments before applying call clobbers.
-        if (hasCall(words[j])) return reg < 9;
+        // Calls clobber caller-saved scratch registers before any later read.
+        if (hasCall(words[j])) break;
         if (t.defs & bit) break;  // redefined before any read
     }
     return false;
 }
 
 // Caller-saved integer candidates (x16/x17 excluded: linker veneers;
-// x29/x30/SP excluded structurally).
+// x29/SP excluded structurally, x30 as last-resort fallback).
 unsigned pickFreeReg(std::uint32_t used) {
     static const unsigned kOrder[] = {15, 14, 13, 12, 11, 10, 9, 8,
-                                      7,  6,  5,  4,  3,  2,  1,  0};
+                                      7,  6,  5,  4,  3,  2,  1,  0, 30};
     for (unsigned r : kOrder) {
         if ((used & (1u << r)) == 0) return r;
     }

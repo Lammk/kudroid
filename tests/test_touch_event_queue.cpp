@@ -95,5 +95,16 @@ int main() {
           "coalesced MOVE carries latest coordinates");
     Check(drainedEvents[2].action == 1, "third event is UP");
 
+    // drainCoalesced drains more than 16 events without truncation.
+    queue.reset(true);
+    for (int i = 0; i < 20; ++i) {
+        queue.push(0, float(i), float(i));
+        queue.push(1, float(i), float(i));
+    }
+    std::vector<kudroid::TouchEventQueue::Event> manyEvents;
+    size_t manyCount = queue.drainCoalesced(manyEvents);
+    Check(manyCount == 40 && manyEvents.size() == 40, "drainCoalesced drains full batch past 16 events");
+    Check(manyEvents.back().action == 1, "final UP event is retained");
+
     return failures ? 1 : 0;
 }
