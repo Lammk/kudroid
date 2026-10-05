@@ -81,5 +81,19 @@ int main() {
     Check(!queue.tryPop(event), "reset removes pending events");
     queue.reset(true);
     Check(!queue.tryPop(event), "a new session starts empty");
+
+    // drainCoalesced batches and collapses consecutive MOVEs into the latest point.
+    queue.reset(true);
+    queue.push(0, 0, 0);  // DOWN
+    for (int i = 1; i <= 100; ++i) queue.push(2, float(i), float(i));  // 100 MOVEs
+    queue.push(1, 100.0f, 100.0f);  // UP
+    std::vector<kudroid::TouchEventQueue::Event> drainedEvents;
+    size_t count = queue.drainCoalesced(drainedEvents, 16);
+    Check(count == 3 && drainedEvents.size() == 3, "drainCoalesced collapses MOVE stream to 3 events");
+    Check(drainedEvents[0].action == 0, "first event is DOWN");
+    Check(drainedEvents[1].action == 2 && drainedEvents[1].x == 100.0f && drainedEvents[1].y == 100.0f,
+          "coalesced MOVE carries latest coordinates");
+    Check(drainedEvents[2].action == 1, "third event is UP");
+
     return failures ? 1 : 0;
 }

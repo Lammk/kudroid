@@ -11,7 +11,7 @@
 #include <libkern/OSCacheControl.h>
 #include <signal.h>
 #include <mach/mach.h>
-#include <mach/mach_vm.h>
+#include <mach/vm_map.h>
 #elif defined(__linux__)
 #include <signal.h>
 #include <ucontext.h>
@@ -7761,10 +7761,11 @@ namespace {
 // Kernel-mediated reads fail cleanly instead of recursively faulting in a handler.
 bool trap_read(uintptr_t address, void* out, size_t size) {
 #if defined(__APPLE__)
-    mach_vm_size_t copied = 0;
-    return mach_vm_read_overwrite(mach_task_self(), address, size,
-                                 reinterpret_cast<mach_vm_address_t>(out), &copied) ==
-               KERN_SUCCESS && copied == size;
+    vm_size_t copied = 0;
+    return vm_read_overwrite(mach_task_self(), static_cast<vm_address_t>(address),
+                             static_cast<vm_size_t>(size),
+                             reinterpret_cast<vm_address_t>(out), &copied) ==
+               KERN_SUCCESS && copied == static_cast<vm_size_t>(size);
 #elif defined(__linux__) && defined(SYS_process_vm_readv)
     const int saved = errno;
     iovec local{out, size};

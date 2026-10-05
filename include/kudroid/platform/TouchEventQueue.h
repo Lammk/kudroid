@@ -142,6 +142,35 @@ public:
         return true;
     }
 
+    // Drain queued events into `out`, coalescing consecutive MOVE events that share
+    // the same pointer count so the engine only processes the latest sample in each
+    // motion sequence while preserving all gesture boundary transitions (DOWN/UP).
+    size_t drainCoalesced(std::vector<Event>& out, size_t maxEvents = 16) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (events_.empty() || maxEvents == 0) return 0;
+        size_t produced = 0;
+        while (!events_.empty() && produced < maxEvents) {
+            Event ev = std::move(events_.front());
+            events_.pop_front();
+            const int act = ev.action & 0xff;
+            if (act == 2) {
+                // Peek and swallow any consecutive MOVEs with the same pointer count.
+                while (!events_.empty()) {
+                    const Event& next = events_.front();
+                    if ((next.action & 0xff) == 2 && next.pointerCount == ev.pointerCount) {
+                        ev = std::move(events_.front());
+                        events_.pop_front();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            out.push_back(std::move(ev));
+            ++produced;
+        }
+        return produced;
+    }
+
 private:
     std::mutex mutex_;
     std::deque<Event> events_;
