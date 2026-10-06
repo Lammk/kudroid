@@ -288,7 +288,11 @@ struct AppsView: View {
                         }
                     }
                     if let label = json["label"] as? String, !label.isEmpty {
-                        displayName = prettifyAppName(label)
+                        if label.contains(".") || label.lowercased().hasSuffix(".apk") {
+                            displayName = prettifyAppName(label)
+                        } else {
+                            displayName = label
+                        }
                     }
                     if let ver = json["version"] as? String, !ver.isEmpty && ver != "1.0.0" {
                         version = ver
@@ -325,8 +329,17 @@ struct AppsView: View {
 
         // 1. Separate package name if any (eg "com.discord" -> "discord")
         if s.contains(".") {
-            if let last = s.split(separator: ".").last {
-                s = String(last)
+            let parts = s.split(separator: ".")
+            var chosen = parts.last
+            let flavorSuffixes: Set<String> = [
+                "google", "android", "store", "play", "release",
+                "debug", "beta", "alpha", "taptap", "bilibili", "amazon", "dist"
+            ]
+            if parts.count > 1, let lastStr = chosen, flavorSuffixes.contains(lastStr.lowercased()) {
+                chosen = parts[parts.count - 2]
+            }
+            if let chosen = chosen {
+                s = String(chosen)
             }
         }
 

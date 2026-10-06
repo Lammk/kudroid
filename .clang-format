@@ -11,9 +11,3 @@ SortIncludes: true
 IncludeBlocks: Regroup
 NamespaceIndentation: None
 AccessModifierOffset: -4
-
-</parameter>
-<parameter=filePath>
-/home/kuzei/Documents/Kudroid/.clang-format
-</parameter>
-</invoke>

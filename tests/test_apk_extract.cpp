@@ -237,6 +237,44 @@ int main() {
         Check(std::filesystem::exists(appDir / "oat/classes.dex"), "current classes.dex is preserved");
     }
 
+    // ── flavor suffixes like .google must not become the app label ──
+    {
+        const auto flavorApkPath = root / "com.example.mygame.google.apk";
+        const std::vector<Entry> flavorEntries = {
+            {"classes.dex", "dex-code"},
+        };
+        const std::vector<std::uint8_t> flavorZip = BuildZip(flavorEntries);
+        {
+            std::ofstream f(flavorApkPath, std::ios::binary);
+            f.write(reinterpret_cast<const char*>(flavorZip.data()),
+                    static_cast<std::streamsize>(flavorZip.size()));
+        }
+
+        const auto flavorAppDir = root / "data" / "app" / "com.example.mygame.google";
+        const bool ok = kudroid::APKExtractor::extract_apk(flavorApkPath.string(), flavorAppDir.string());
+        Check(ok, "extract_apk for flavor package succeeded");
+
+        const auto infoPath = flavorAppDir / "app_info.json";
+        Check(std::filesystem::exists(infoPath), "app_info.json exists for flavor apk");
+
+        const std::string infoContent = ReadFile(infoPath);
+        Check(infoContent.find("\"label\": \"Mygame\"") != std::string::npos,
+              "flavor suffix .google was skipped: label is Mygame rather than Google");
+    }
+
+    // ── resources.arsc extraction must correctly resolve app_name ──
+    const std::filesystem::path sampleApk = "/home/kuzei/Downloads/ru.zdevs.zarchiver_1.0.10.apk";
+    if (std::filesystem::exists(sampleApk)) {
+        const auto sampleAppDir = root / "data" / "app" / "ru.zdevs.zarchiver";
+        const bool ok = kudroid::APKExtractor::extract_apk(sampleApk.string(), sampleAppDir.string());
+        Check(ok, "extract_apk for sample arsc apk succeeded");
+        const auto sampleInfoPath = sampleAppDir / "app_info.json";
+        Check(std::filesystem::exists(sampleInfoPath), "app_info.json exists for sample arsc apk");
+        const std::string content = ReadFile(sampleInfoPath);
+        Check(content.find("\"label\": \"ZArchiver\"") != std::string::npos,
+              "resources.arsc app_name correctly extracted as ZArchiver");
+    }
+
     std::filesystem::remove_all(root, ec);
 
     std::printf("=== %s (%d error) ===\n", g_failures == 0 ? "PASSED" : "FAILED", g_failures);

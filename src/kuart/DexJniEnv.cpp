@@ -726,7 +726,8 @@ DexValue DexJniEnv::CallJavaA(DexObject* receiver, DexMethod* method, const jval
         }
     }
 
-    if (virtual_dispatch && receiver != nullptr && linker_ != nullptr) {
+    const bool is_special = method->name != nullptr && method->name[0] == '<';
+    if (virtual_dispatch && !is_special && receiver != nullptr && linker_ != nullptr) {
         if (DexClass* receiver_class = linker_->ClassOfObject(receiver)) {
             DexMethod* found = receiver_class->FindVirtualMethod(method->name, method->signature);
             if (found != nullptr) {

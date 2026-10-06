@@ -10,6 +10,7 @@
 #include <iterator>
 #include <algorithm>
 #include <set>
+#include <unordered_set>
 #include <sys/stat.h>
 #include <sstream>
 #include <vector>
@@ -341,8 +342,16 @@ static std::vector<std::string> parseStringPool(const std::vector<std::uint8_t>&
             std::string s;
             for (std::uint32_t c = 0; c < charLen && cur + 2 <= data.size(); ++c, cur += 2) {
                 std::uint16_t ch = data[cur] | (data[cur + 1] << 8);
-                if (ch < 128) s.push_back(static_cast<char>(ch));
-                else s.push_back('?');
+                if (ch < 0x80) {
+                    s.push_back(static_cast<char>(ch));
+                } else if (ch < 0x800) {
+                    s.push_back(static_cast<char>(0xC0 | (ch >> 6)));
+                    s.push_back(static_cast<char>(0x80 | (ch & 0x3F)));
+                } else {
+                    s.push_back(static_cast<char>(0xE0 | (ch >> 12)));
+                    s.push_back(static_cast<char>(0x80 | ((ch >> 6) & 0x3F)));
+                    s.push_back(static_cast<char>(0x80 | (ch & 0x3F)));
+                }
             }
             stringPool.push_back(s);
         }
@@ -720,7 +729,7 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
     return info;
 }
 
-static std::string parseArscAppName(const std::vector<std::uint8_t>& data) {
+static std::string parseArscAppName(const std::vector<std::uint8_t>& data, std::uint32_t targetResId = 0) {
     if (data.size() < 12 || read16(data, 0) != 0x0002) return "";
 
     const std::size_t poolOffset = read16(data, 2);
@@ -730,64 +739,127 @@ static std::string parseArscAppName(const std::vector<std::uint8_t>& data) {
     if (globalStrings.empty()) return "";
 
     std::size_t cur = poolOffset + read32(data, poolOffset + 4);
+    std::string bestName;
+    std::string fallbackName;
+
+    const std::uint8_t targetTypeId = (targetResId >> 16) & 0xFF;
+    const std::uint16_t targetEntryId = targetResId & 0xFFFF;
+
     while (cur + 8 <= data.size()) {
         const std::uint16_t chunkType = read16(data, cur);
         const std::uint32_t chunkSize = read32(data, cur + 4);
         if (chunkSize < 8 || cur + chunkSize > data.size()) break;
 
-        if (chunkType == 0x0200) { // RES_TABLE_PACKAGE_TYPE
-            if (cur + 288 <= data.size()) {
-                const std::uint32_t keyStringsOffset = cur + read32(data, cur + 284);
-                if (keyStringsOffset < cur + chunkSize && keyStringsOffset + 28 <= data.size()) {
-                    std::vector<std::string> keyStrings = parseStringPool(data, keyStringsOffset);
-                    int targetKeyIndex = -1;
-                    for (std::size_t k = 0; k < keyStrings.size(); ++k) {
-                        const std::string lower = toLower(keyStrings[k]);
-                        if (lower == "app_name" || lower == "app_label" || lower == "application_name" || lower == "title_activity_main") {
-                            targetKeyIndex = static_cast<int>(k);
-                            break;
-                        }
+        if (chunkType == 0x0200 && cur + 284 <= data.size()) { // RES_TABLE_PACKAGE_TYPE
+            const std::uint32_t keyStringsRel = read32(data, cur + 276);
+            if (keyStringsRel < chunkSize && cur + keyStringsRel + 28 <= data.size()) {
+                const std::vector<std::string> keyStrings = parseStringPool(data, cur + keyStringsRel);
+                std::unordered_set<std::uint32_t> targetKeyIndices;
+                for (std::size_t k = 0; k < keyStrings.size(); ++k) {
+                    const std::string lower = toLower(keyStrings[k]);
+                    if (lower == "app_name" || lower == "app_label" || lower == "application_name" ||
+                        lower == "title_activity_main" || lower == "activity_main_title" ||
+                        lower == "game_name") {
+                        targetKeyIndices.insert(static_cast<std::uint32_t>(k));
                     }
+                }
 
-                    if (targetKeyIndex >= 0) {
-                        std::size_t subCur = cur + read16(data, cur + 2);
-                        while (subCur + 16 <= cur + chunkSize && subCur + 16 <= data.size()) {
-                            const std::uint16_t entrySize = read16(data, subCur);
-                            const std::uint16_t flags = read16(data, subCur + 2);
-                            const std::uint32_t keyIndex = read32(data, subCur + 4);
+                const std::uint16_t pkgHdrSize = read16(data, cur + 2);
+                std::size_t subCur = cur + (pkgHdrSize >= 284 ? pkgHdrSize : 288);
+                const std::size_t pkgEnd = cur + chunkSize;
 
-                            if (keyIndex == static_cast<std::uint32_t>(targetKeyIndex) && !(flags & 0x0001 /* FLAG_COMPLEX */)) {
-                                const std::size_t valOffset = subCur + entrySize;
-                                if (valOffset + 8 <= data.size()) {
-                                    const std::uint8_t dataType = data[valOffset + 3];
-                                    const std::uint32_t dataVal = read32(data, valOffset + 4);
-                                    if (dataType == 0x03 /* TYPE_STRING */ && dataVal < globalStrings.size()) {
-                                        const std::string& found = globalStrings[dataVal];
-                                        if (!found.empty() && found.rfind("http", 0) != 0 && found.find('/') == std::string::npos) {
-                                            return found;
+                while (subCur + 8 <= pkgEnd && subCur + 8 <= data.size()) {
+                    const std::uint16_t subType = read16(data, subCur);
+                    const std::uint16_t subHdrSize = read16(data, subCur + 2);
+                    const std::uint32_t subSize = read32(data, subCur + 4);
+                    if (subSize < 8 || subCur + subSize > pkgEnd || subCur + subSize > data.size()) break;
+
+                    if (subType == 0x0201 && subCur + 20 <= pkgEnd) { // RES_TABLE_TYPE_TYPE
+                        const std::uint8_t typeId = data[subCur + 8];
+                        const std::uint32_t entryCount = read32(data, subCur + 12);
+                        const std::uint32_t entriesStart = read32(data, subCur + 16);
+
+                        bool isDefaultLocale = true;
+                        if (subHdrSize >= 32 && subCur + 32 <= pkgEnd) {
+                            const char lang0 = static_cast<char>(data[subCur + 28]);
+                            const char lang1 = static_cast<char>(data[subCur + 29]);
+                            if ((lang0 != 0 || lang1 != 0) && (lang0 != 'e' || lang1 != 'n')) {
+                                isDefaultLocale = false;
+                            }
+                        }
+
+                        // 1. Direct match by target resource ID if provided
+                        if (targetResId != 0 && typeId == targetTypeId && targetEntryId < entryCount) {
+                            const std::size_t offPos = subCur + subHdrSize + static_cast<std::size_t>(targetEntryId) * 4;
+                            if (offPos + 4 <= subCur + subSize) {
+                                const std::uint32_t entryOff = read32(data, offPos);
+                                if (entryOff != 0xFFFFFFFF) {
+                                    const std::size_t entryPtr = subCur + entriesStart + entryOff;
+                                    if (entryPtr + 8 <= subCur + subSize) {
+                                        const std::uint16_t entrySize = read16(data, entryPtr);
+                                        const std::uint16_t flags = read16(data, entryPtr + 2);
+                                        if (!(flags & 0x0001 /* FLAG_COMPLEX */)) {
+                                            const std::size_t valOffset = entryPtr + entrySize;
+                                            if (valOffset + 8 <= subCur + subSize) {
+                                                const std::uint8_t dataType = data[valOffset + 3];
+                                                const std::uint32_t dataVal = read32(data, valOffset + 4);
+                                                if (dataType == 0x03 /* TYPE_STRING */ && dataVal < globalStrings.size()) {
+                                                    const std::string& found = globalStrings[dataVal];
+                                                    if (!found.empty() && found.rfind("http", 0) != 0 && found.find('/') == std::string::npos) {
+                                                        if (isDefaultLocale) return found;
+                                                        if (bestName.empty()) bestName = found;
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }
                             }
-                            subCur += (entrySize >= 8 ? entrySize : 8);
+                        }
+
+                        // 2. Scan entries matching known app name keys
+                        if (!targetKeyIndices.empty() && (targetResId == 0 || bestName.empty())) {
+                            for (std::uint32_t e = 0; e < entryCount; ++e) {
+                                const std::size_t offPos = subCur + subHdrSize + static_cast<std::size_t>(e) * 4;
+                                if (offPos + 4 > subCur + subSize) break;
+                                const std::uint32_t entryOff = read32(data, offPos);
+                                if (entryOff == 0xFFFFFFFF) continue;
+
+                                const std::size_t entryPtr = subCur + entriesStart + entryOff;
+                                if (entryPtr + 8 > subCur + subSize) continue;
+
+                                const std::uint16_t entrySize = read16(data, entryPtr);
+                                const std::uint16_t flags = read16(data, entryPtr + 2);
+                                const std::uint32_t keyIndex = read32(data, entryPtr + 4);
+
+                                if (targetKeyIndices.count(keyIndex) && !(flags & 0x0001 /* FLAG_COMPLEX */)) {
+                                    const std::size_t valOffset = entryPtr + entrySize;
+                                    if (valOffset + 8 <= subCur + subSize) {
+                                        const std::uint8_t dataType = data[valOffset + 3];
+                                        const std::uint32_t dataVal = read32(data, valOffset + 4);
+                                        if (dataType == 0x03 /* TYPE_STRING */ && dataVal < globalStrings.size()) {
+                                            const std::string& found = globalStrings[dataVal];
+                                            if (!found.empty() && found.rfind("http", 0) != 0 && found.find('/') == std::string::npos) {
+                                                if (isDefaultLocale) {
+                                                    if (bestName.empty()) bestName = found;
+                                                } else {
+                                                    if (fallbackName.empty()) fallbackName = found;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
+                    subCur += (subSize >= 8 ? subSize : 8);
                 }
             }
         }
         cur += chunkSize;
     }
 
-    // No app-name resource: report nothing rather than guess.
-    //
-    // This used to scan the whole global string pool for the names of specific apps
-    // ("minecraft", "discord", "ultrakill", "rolling sky") and return a match from
-    // anywhere in the table — a mod-menu label, a server address, a credits line. An
-    // unrelated app that merely mentioned one of those words was relabelled as it.
-    //
-    // The caller (prettifyAppName) derives a name from the package or the file name
-    // when this returns empty, which is correct for every app rather than four.
-    return "";
+    return !bestName.empty() ? bestName : fallbackName;
 }
 } // namespace
 
@@ -795,11 +867,24 @@ static std::string prettifyAppName(const std::string& raw) {
     if (raw.empty()) return "Android App";
     std::string s = raw;
 
-    // 1. Separate the package name if there is one (for example "com.discord" or "com.hammerandchisel.discord")
+    // 1. Separate package name if there is one (e.g. "com.example.app.google")
     if (s.find('.') != std::string::npos) {
-        auto lastDot = s.rfind('.');
-        if (lastDot != std::string::npos && lastDot + 1 < s.size()) {
-            s = s.substr(lastDot + 1);
+        std::vector<std::string> parts;
+        std::stringstream ss(s);
+        std::string seg;
+        while (std::getline(ss, seg, '.')) {
+            if (!seg.empty()) parts.push_back(seg);
+        }
+        if (!parts.empty()) {
+            std::size_t chosenIdx = parts.size() - 1;
+            static const std::unordered_set<std::string> flavorSuffixes = {
+                "google", "android", "store", "play", "release", "debug",
+                "beta", "alpha", "taptap", "bilibili", "amazon", "dist"
+            };
+            if (parts.size() > 1 && flavorSuffixes.count(toLower(parts.back()))) {
+                chosenIdx = parts.size() - 2;
+            }
+            s = parts[chosenIdx];
         }
     }
 
@@ -951,6 +1036,7 @@ static bool extract_apk_impl(const std::string& apkPath, const std::string& targ
     std::vector<std::uint8_t> bestIconData;
     ManifestInfo manifestInfo;
     std::string arscAppName;
+    std::vector<std::uint8_t> arscData;
 
     // Which ABIs the APK ships, so an unsupported one can be named.
     //
@@ -995,10 +1081,7 @@ static bool extract_apk_impl(const std::string& apkPath, const std::string& targ
                 manifestInfo = parseAxml(output);
             }
         } else if (entry == "resources.arsc") {
-            std::vector<std::uint8_t> output;
-            if (extractZipEntryToMemory(apk, entryInfo, output)) {
-                arscAppName = parseArscAppName(output);
-            }
+            extractZipEntryToMemory(apk, entryInfo, arscData);
         }
 
         if (iconScore > bestIconScore) {
@@ -1121,6 +1204,21 @@ static bool extract_apk_impl(const std::string& apkPath, const std::string& targ
                 apkLog("  -> Kept APK as " + apkDest.string());
             }
         }
+    }
+
+    if (!arscData.empty()) {
+        std::uint32_t targetResId = 0;
+        if (!manifestInfo.appLabel.empty() && manifestInfo.appLabel.front() == '@') {
+            const auto hexPos = manifestInfo.appLabel.find("0x");
+            if (hexPos != std::string::npos) {
+                try {
+                    targetResId = static_cast<std::uint32_t>(std::stoul(manifestInfo.appLabel.substr(hexPos), nullptr, 16));
+                } catch (...) {}
+            }
+        }
+        arscAppName = parseArscAppName(arscData, targetResId);
+        arscData.clear();
+        arscData.shrink_to_fit();
     }
 
     // Save app_info.json (metadata: version, label, package)

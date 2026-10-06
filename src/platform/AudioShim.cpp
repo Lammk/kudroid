@@ -94,6 +94,7 @@ struct AudioPlayer {
     double sampleRate = 44100;
     uint32_t channels = 2;
     uint32_t bitsPerSample = 16;
+    float volume = 1.0f;
 
     // AudioTrack buffer capacity the guest asked for at create; write() blocks
     // while the queue holds more than this, as on Android.
@@ -220,6 +221,7 @@ static bool ensure_audio_queue(AudioPlayer* p) {
     }
     // The queue is created lazily on first enqueue; Prime+Start happen after
     // the first buffer lands (see enqueue_pcm), never on an empty queue.
+    AudioQueueSetParameter(p->aq, kAudioQueueParam_Volume, p->volume);
     return true;
 }
 
@@ -545,15 +547,14 @@ extern "C" SLresult bionic_slVolumeSetVolumeLevel(SLVolumeItf self, int32_t mill
     (void)millibel;
     auto player = find_player(self);
     if (!player) return SL_RESULT_PARAMETER_INVALID;
-#if defined(__APPLE__)
+    // millibels = 100 * dB; 0 mB = unity (1.0). AudioQueue volume is LINEAR
+    // 0..1, not dB — set the dB value directly (eg -6) as negative volume → mute.
+    const float db = static_cast<float>(millibel) / 100.0f;
+    const float linear = (db >= -150.0f) ? std::pow(10.0f, db / 20.0f) : 0.0f;
     std::lock_guard<std::mutex> lock(player->mtx);
-    if (player->aq) {
-        // millibels = 100 * dB; 0 mB = unity (1.0). AudioQueue volume is LINEAR
-        // 0..1, not dB — set the dB value directly (eg -6) as negative volume → mute.
-        const float db = static_cast<float>(millibel) / 100.0f;
-        const float linear = (db >= -150.0f) ? std::pow(10.0f, db / 20.0f) : 0.0f;
-        AudioQueueSetParameter(player->aq, kAudioQueueParam_Volume, linear);
-    }
+    player->volume = linear;
+#if defined(__APPLE__)
+    if (player->aq) AudioQueueSetParameter(player->aq, kAudioQueueParam_Volume, linear);
 #endif
     return SL_RESULT_SUCCESS;
 }
@@ -981,7 +982,7 @@ extern "C" int32_t bionic_kudroid_audiotrack_write(int64_t track, const void* da
                          blockedMs,
                          static_cast<unsigned long long>(inflightBytes()),
                          static_cast<unsigned long long>(p->bufferCapacityBytes),
-                         p->sampleRate, accepted);
+                         static_cast<unsigned>(p->sampleRate), accepted);
         }
     }
     const int enca = enqueue_pcm(p.get(), data, static_cast<uint32_t>(accepted));
@@ -1162,11 +1163,10 @@ extern "C" int32_t bionic_kudroid_audiotrack_set_volume(int64_t track, float vol
     if (!p) return -3;
     if (volume < 0.0f) volume = 0.0f;
     if (volume > 1.0f) volume = 1.0f;
-#if defined(__APPLE__)
     std::lock_guard<std::mutex> lock(p->mtx);
+    p->volume = volume;
+#if defined(__APPLE__)
     if (p->aq) AudioQueueSetParameter(p->aq, kAudioQueueParam_Volume, volume);
-#else
-    (void)volume;
 #endif
     return 0;
 }
