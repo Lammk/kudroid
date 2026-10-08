@@ -169,4 +169,113 @@ public final class Parcel {
         if (mReadPos < 0 || mReadPos >= mItems.size()) return null;
         return mItems.get(mReadPos++);
     }
+
+    public Bundle readBundle(ClassLoader loader) {
+        Object o = next();
+        if (o instanceof Bundle) {
+            Bundle b = (Bundle) o;
+            if (loader != null) b.setClassLoader(loader);
+            return b;
+        }
+        return null;
+    }
+
+    @SuppressWarnings("unchecked")
+    public <T extends Parcelable> T readParcelable(ClassLoader loader) {
+        Object name = next();
+        if (name == null) return null;
+        try {
+            Class<?> clazz = (loader != null) ? Class.forName((String) name, true, loader) : Class.forName((String) name);
+            java.lang.reflect.Field field = clazz.getField("CREATOR");
+            Parcelable.Creator<?> creator = (Parcelable.Creator<?>) field.get(null);
+            return (T) creator.createFromParcel(this);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    public void writeSerializable(java.io.Serializable s) {
+        mItems.add(s);
+    }
+
+    public java.io.Serializable readSerializable() {
+        Object o = next();
+        return (o instanceof java.io.Serializable) ? (java.io.Serializable) o : null;
+    }
+
+    public void writeStringList(List<String> val) {
+        if (val == null) {
+            writeInt(-1);
+            return;
+        }
+        writeInt(val.size());
+        for (String s : val) {
+            writeString(s);
+        }
+    }
+
+    public void readStringList(List<String> list) {
+        int n = readInt();
+        if (n < 0 || list == null) return;
+        list.clear();
+        for (int i = 0; i < n; i++) {
+            list.add(readString());
+        }
+    }
+
+    public ArrayList<String> createStringArrayList() {
+        int n = readInt();
+        if (n < 0) return null;
+        ArrayList<String> list = new ArrayList<String>(n);
+        for (int i = 0; i < n; i++) {
+            list.add(readString());
+        }
+        return list;
+    }
+
+    public <T extends Parcelable> void writeTypedList(List<T> val) {
+        if (val == null) {
+            writeInt(-1);
+            return;
+        }
+        writeInt(val.size());
+        for (T item : val) {
+            if (item != null) {
+                writeInt(1);
+                item.writeToParcel(this, 0);
+            } else {
+                writeInt(0);
+            }
+        }
+    }
+
+    public <T> ArrayList<T> createTypedArrayList(Parcelable.Creator<T> c) {
+        int n = readInt();
+        if (n < 0) return null;
+        ArrayList<T> list = new ArrayList<T>(n);
+        for (int i = 0; i < n; i++) {
+            if (readInt() != 0) {
+                list.add(c.createFromParcel(this));
+            } else {
+                list.add(null);
+            }
+        }
+        return list;
+    }
+
+    public byte[] createByteArray() {
+        return readByteArray();
+    }
+
+    public int[] createIntArray() {
+        return readIntArray();
+    }
+
+    public boolean[] createBooleanArray() {
+        return readBooleanArray();
+    }
+
+    public String[] createStringArray() {
+        return readStringArray();
+    }
 }

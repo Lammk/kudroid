@@ -9,6 +9,7 @@ public abstract class PackageManager {
     public static final int GET_SERVICES = 4;
     public static final int GET_PERMISSIONS = 4096;
     public static final int GET_SIGNATURES = 64;
+    public static final int GET_SIGNING_CERTIFICATES = 0x08000000;
     public static final int MATCH_DEFAULT_ONLY = 65536;
 
     /**

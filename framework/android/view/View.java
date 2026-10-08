@@ -11,7 +11,7 @@ import android.os.Bundle;
  * base class for all ui widgets. for kudroid minimal framework, this
  * provides basic layout/drawing simulations.
  */
-public class View {
+public class View implements KeyEvent.Callback {
     /** view visibility: visible. */
     public static final int VISIBLE = 0;
     /** view visibility: invisible. */
@@ -402,15 +402,27 @@ public class View {
             mOnKeyListener.onKey(this, event.getKeyCode(), event)) {
             return true;
         }
-        return onKeyDown(event.getKeyCode(), event);
+        return event.dispatch(this, getKeyDispatcherState(), this);
     }
 
     public boolean onKeyDown(int keyCode, KeyEvent event) {
         return false;
     }
 
+    public boolean onKeyLongPress(int keyCode, KeyEvent event) {
+        return false;
+    }
+
     public boolean onKeyUp(int keyCode, KeyEvent event) {
         return false;
+    }
+
+    public boolean onKeyMultiple(int keyCode, int count, KeyEvent event) {
+        return false;
+    }
+
+    public KeyEvent.DispatcherState getKeyDispatcherState() {
+        return null;
     }
 
     // System UI visibility (deprecated in API 30 but still read by compat code).

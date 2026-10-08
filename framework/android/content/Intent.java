@@ -9,7 +9,7 @@ import android.os.Bundle;
  * kudroid minimal framework, we store component/class names and any
  * any additional packages.
  */
-public class Intent {
+public class Intent implements android.os.Parcelable, Cloneable {
     /** activity action. */
     public static final String ACTION_MAIN = "android.intent.action.MAIN";
     /** view action. */
@@ -257,5 +257,127 @@ public class Intent {
     public String toString() {
         return "Intent{action=" + mAction + ", component=" +
                (mComponent != null ? mComponent.flattenToString() : mClassName) + "}";
+    }
+
+    public static final String CATEGORY_DEFAULT = "android.intent.category.DEFAULT";
+    public static final String CATEGORY_LAUNCHER = "android.intent.category.LAUNCHER";
+    public static final String CATEGORY_HOME = "android.intent.category.HOME";
+    public static final String CATEGORY_BROWSABLE = "android.intent.category.BROWSABLE";
+
+    public static final int FLAG_ACTIVITY_NEW_TASK = 0x10000000;
+    public static final int FLAG_ACTIVITY_SINGLE_TOP = 0x20000000;
+    public static final int FLAG_ACTIVITY_CLEAR_TOP = 0x04000000;
+    public static final int FLAG_ACTIVITY_CLEAR_TASK = 0x00008000;
+    public static final int FLAG_ACTIVITY_NO_ANIMATION = 0x00010000;
+    public static final int FLAG_GRANT_READ_URI_PERMISSION = 0x00000001;
+    public static final int FLAG_GRANT_WRITE_URI_PERMISSION = 0x00000002;
+
+    private String mType;
+    private final java.util.HashSet<String> mCategories = new java.util.HashSet<String>();
+
+    public Intent putExtra(String name, Bundle value) {
+        if (mExtras == null) mExtras = new Bundle();
+        mExtras.putBundle(name, value);
+        return this;
+    }
+
+    public Intent putExtra(String name, android.os.Parcelable value) {
+        if (mExtras == null) mExtras = new Bundle();
+        mExtras.putParcelable(name, value);
+        return this;
+    }
+
+    public Intent putExtra(String name, java.io.Serializable value) {
+        if (mExtras == null) mExtras = new Bundle();
+        mExtras.putSerializable(name, value);
+        return this;
+    }
+
+    public Intent putExtra(String name, String[] value) {
+        if (mExtras == null) mExtras = new Bundle();
+        mExtras.putStringArray(name, value);
+        return this;
+    }
+
+    public Intent putExtra(String name, int[] value) {
+        if (mExtras == null) mExtras = new Bundle();
+        mExtras.putIntArray(name, value);
+        return this;
+    }
+
+    public Intent putExtra(String name, boolean[] value) {
+        if (mExtras == null) mExtras = new Bundle();
+        mExtras.putBooleanArray(name, value);
+        return this;
+    }
+
+    @SuppressWarnings("unchecked")
+    public <T extends android.os.Parcelable> T getParcelableExtra(String name) {
+        return mExtras != null ? (T) mExtras.getParcelable(name) : null;
+    }
+
+    public java.io.Serializable getSerializableExtra(String name) {
+        return mExtras != null ? mExtras.getSerializable(name) : null;
+    }
+
+    public String[] getStringArrayExtra(String name) {
+        return mExtras != null ? mExtras.getStringArray(name) : null;
+    }
+
+    public int[] getIntArrayExtra(String name) {
+        return mExtras != null ? mExtras.getIntArray(name) : null;
+    }
+
+    public boolean[] getBooleanArrayExtra(String name) {
+        return mExtras != null ? mExtras.getBooleanArray(name) : null;
+    }
+
+    public Intent addCategory(String category) {
+        if (category != null) mCategories.add(category);
+        return this;
+    }
+
+    public void removeCategory(String category) {
+        if (category != null) mCategories.remove(category);
+    }
+
+    public boolean hasCategory(String category) {
+        return category != null && mCategories.contains(category);
+    }
+
+    public java.util.Set<String> getCategories() {
+        return mCategories;
+    }
+
+    public Intent setType(String type) {
+        mType = type;
+        return this;
+    }
+
+    public String getType() {
+        return mType;
+    }
+
+    public Intent setDataAndType(android.net.Uri data, String type) {
+        mData = data;
+        mType = type;
+        return this;
+    }
+
+    @Override
+    public Object clone() {
+        return new Intent(this);
+    }
+
+    @Override
+    public int describeContents() {
+        return 0;
+    }
+
+    @Override
+    public void writeToParcel(android.os.Parcel parcel, int flags) {
+        parcel.writeString(mAction);
+        parcel.writeBundle(mExtras);
+        parcel.writeInt(mFlags);
     }
 }

@@ -56,6 +56,8 @@ public class KeyEvent extends InputEvent {
     private final int mMetaState;
     private final int mUnicodeChar;
 
+    private int mFlags = FLAG_SOFT_KEYBOARD;
+
     public KeyEvent(int action, int keyCode) {
         this(action, keyCode, 0);
     }
@@ -94,7 +96,7 @@ public class KeyEvent extends InputEvent {
     }
 
     public boolean isCanceled() {
-        return false;
+        return (mFlags & FLAG_CANCELED) != 0;
     }
 
     public int getDeviceId() {
@@ -110,7 +112,7 @@ public class KeyEvent extends InputEvent {
     }
 
     public int getFlags() {
-        return FLAG_SOFT_KEYBOARD;
+        return mFlags;
     }
 
     public int getMetaState() {
@@ -146,6 +148,110 @@ public class KeyEvent extends InputEvent {
 
     public int getUnicodeChar(int metaState) {
         return mUnicodeChar;
+    }
+
+    public static final int FLAG_CANCELED = 0x20;
+    public static final int FLAG_TRACKING = 0x200;
+    public static final int FLAG_LONG_PRESS = 0x80;
+    public static final int FLAG_START_TRACKING = 0x40000000;
+
+    public interface Callback {
+        boolean onKeyDown(int keyCode, KeyEvent event);
+        boolean onKeyLongPress(int keyCode, KeyEvent event);
+        boolean onKeyUp(int keyCode, KeyEvent event);
+        boolean onKeyMultiple(int keyCode, int count, KeyEvent event);
+    }
+
+    public static class DispatcherState {
+        private int mDownKeyCode;
+        private Object mDownTarget;
+        private final android.util.SparseIntArray mActiveLongPresses = new android.util.SparseIntArray();
+
+        public void reset() {
+            mDownKeyCode = 0;
+            mDownTarget = null;
+            mActiveLongPresses.clear();
+        }
+
+        public void reset(Object target) {
+            if (mDownTarget == target) {
+                mDownKeyCode = 0;
+                mDownTarget = null;
+            }
+        }
+
+        public void startTracking(KeyEvent event, Object target) {
+            if (event.getAction() != ACTION_DOWN) {
+                throw new IllegalArgumentException("Can only start tracking on a down event");
+            }
+            mDownKeyCode = event.getKeyCode();
+            mDownTarget = target;
+        }
+
+        public boolean isTracking(KeyEvent event) {
+            return mDownKeyCode == event.getKeyCode();
+        }
+
+        public void performedLongPress(KeyEvent event) {
+            mActiveLongPresses.put(event.getKeyCode(), 1);
+        }
+
+        public void handleUpEvent(KeyEvent event) {
+            final int keyCode = event.getKeyCode();
+            mActiveLongPresses.delete(keyCode);
+            if (mDownKeyCode == keyCode) {
+                mDownKeyCode = 0;
+                mDownTarget = null;
+            }
+        }
+    }
+
+    public void startTracking() {
+        mFlags |= FLAG_START_TRACKING;
+    }
+
+    public boolean isTracking() {
+        return (mFlags & FLAG_TRACKING) != 0;
+    }
+
+    public boolean isLongPress() {
+        return (mFlags & FLAG_LONG_PRESS) != 0;
+    }
+
+    public final boolean dispatch(Callback receiver, DispatcherState state, Object target) {
+        switch (mAction) {
+            case ACTION_DOWN: {
+                mFlags &= ~FLAG_START_TRACKING;
+                boolean res = receiver.onKeyDown(mKeyCode, this);
+                if (state != null) {
+                    if (res && mRepeatCount == 0 && (mFlags & FLAG_START_TRACKING) != 0) {
+                        state.startTracking(this, target);
+                    } else if (isLongPress() && state.isTracking(this)) {
+                        try {
+                            if (receiver.onKeyLongPress(mKeyCode, this)) {
+                                state.performedLongPress(this);
+                                res = true;
+                            }
+                        } catch (AbstractMethodError ignored) {
+                        }
+                    }
+                }
+                return res;
+            }
+            case ACTION_UP:
+                if (state != null) {
+                    state.handleUpEvent(this);
+                }
+                return receiver.onKeyUp(mKeyCode, this);
+            case ACTION_MULTIPLE:
+                final int count = mRepeatCount;
+                final int code = mKeyCode;
+                if (receiver.onKeyMultiple(code, count, this)) {
+                    return true;
+                }
+                return false;
+        }
+        return false;
     }
 
     public boolean isShiftPressed() {

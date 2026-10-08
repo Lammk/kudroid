@@ -6,6 +6,25 @@ public class Shader {
         TileMode(int nativeInt) { this.nativeInt = nativeInt; }
         final int nativeInt;
     }
-    public boolean getLocalMatrix(Matrix localM) { return false; }
-    public void setLocalMatrix(Matrix localM) {}
+
+    private Matrix mLocalMatrix;
+
+    public boolean getLocalMatrix(Matrix localM) {
+        if (mLocalMatrix != null && localM != null) {
+            localM.set(mLocalMatrix);
+            return !mLocalMatrix.isIdentity();
+        }
+        return false;
+    }
+
+    public void setLocalMatrix(Matrix localM) {
+        if (localM == null || localM.isIdentity()) {
+            mLocalMatrix = null;
+        } else {
+            if (mLocalMatrix == null) {
+                mLocalMatrix = new Matrix();
+            }
+            mLocalMatrix.set(localM);
+        }
+    }
 }

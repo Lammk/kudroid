@@ -10,7 +10,7 @@ import android.os.Bundle;
  * provides the lifecycle callbacks expected by the original games. for framework
  * kudroid's minimum, lifecycle methods are no-op that apps can override.
  */
-public class Activity extends ContextThemeWrapper {
+public class Activity extends ContextThemeWrapper implements android.view.Window.Callback, android.view.KeyEvent.Callback {
     public static final int RESULT_CANCELED = 0;
     public static final int RESULT_OK = -1;
     public static final int RESULT_FIRST_USER = 1;
@@ -46,6 +46,7 @@ public class Activity extends ContextThemeWrapper {
      */
     public void attach(Context base) {
         attachBaseContext(base);
+        getWindow().setCallback(this);
     }
 
     public void setRequestedOrientation(int requestedOrientation) {
@@ -180,6 +181,7 @@ public class Activity extends ContextThemeWrapper {
      */
     public void performDestroy() {
         mCreated = false;
+        mDestroyed = true;
         onDestroy();
     }
 
@@ -205,6 +207,7 @@ public class Activity extends ContextThemeWrapper {
     }
 
     private boolean mFinishing;
+    private boolean mDestroyed;
     private boolean mChangingConfigurations;
 
     /**
@@ -212,6 +215,18 @@ public class Activity extends ContextThemeWrapper {
      */
     public void finish() {
         mFinishing = true;
+    }
+
+    public void finishAfterTransition() {
+        finish();
+    }
+
+    public void onBackPressed() {
+        finishAfterTransition();
+    }
+
+    public boolean isDestroyed() {
+        return mDestroyed;
     }
 
     /**
@@ -242,14 +257,18 @@ public class Activity extends ContextThemeWrapper {
 
     /**
      * Key events, routed the way Android routes them.
-     *
-     * dispatchKeyEvent is the entry point the window calls; onKeyDown/onKeyUp are what an
-     * app overrides. Dispatching here rather than reporting "unhandled" is what makes an
-     * app's own key handling run at all — five of six corpus APKs reference this method,
-     * and the ones that override onKeyDown would never be called without it.
      */
     public boolean dispatchKeyEvent(android.view.KeyEvent event) {
         if (event == null) return false;
+        onUserInteraction();
+        android.view.Window win = getWindow();
+        if (win != null && win.superDispatchKeyEvent(event)) {
+            return true;
+        }
+        final android.view.View decor = (win != null) ? win.peekDecorView() : null;
+        if (event.dispatch(this, decor != null ? decor.getKeyDispatcherState() : null, this)) {
+            return true;
+        }
         final android.view.View focus = getCurrentFocus();
         if (focus != null && focus.dispatchKeyEvent(event)) return true;
         if (event.getAction() == android.view.KeyEvent.ACTION_DOWN) {
@@ -270,8 +289,92 @@ public class Activity extends ContextThemeWrapper {
         return false;
     }
 
-    public boolean onKeyUp(int keyCode, android.view.KeyEvent event) {
+    public boolean onKeyLongPress(int keyCode, android.view.KeyEvent event) {
         return false;
+    }
+
+    public boolean onKeyUp(int keyCode, android.view.KeyEvent event) {
+        if (keyCode == android.view.KeyEvent.KEYCODE_BACK) {
+            onBackPressed();
+            return true;
+        }
+        return false;
+    }
+
+    public boolean onKeyMultiple(int keyCode, int count, android.view.KeyEvent event) {
+        return false;
+    }
+
+    public boolean dispatchTrackballEvent(android.view.MotionEvent event) {
+        return false;
+    }
+
+    public boolean dispatchGenericMotionEvent(android.view.MotionEvent event) {
+        return false;
+    }
+
+    public boolean dispatchPopulateAccessibilityEvent(android.view.accessibility.AccessibilityEvent event) {
+        return false;
+    }
+
+    public android.view.View onCreatePanelView(int featureId) {
+        return null;
+    }
+
+    public boolean onCreatePanelMenu(int featureId, android.view.Menu menu) {
+        return false;
+    }
+
+    public boolean onPreparePanel(int featureId, android.view.View view, android.view.Menu menu) {
+        return true;
+    }
+
+    public boolean onMenuOpened(int featureId, android.view.Menu menu) {
+        return true;
+    }
+
+    public boolean onMenuItemSelected(int featureId, android.view.MenuItem item) {
+        return false;
+    }
+
+    public void onWindowAttributesChanged(android.view.WindowManager.LayoutParams attrs) {
+    }
+
+    public void onContentChanged() {
+    }
+
+    public void onAttachedToWindow() {
+    }
+
+    public void onDetachedFromWindow() {
+    }
+
+    public void onPanelClosed(int featureId, android.view.Menu menu) {
+    }
+
+    public boolean onSearchRequested() {
+        return false;
+    }
+
+    public boolean onSearchRequested(android.view.SearchEvent searchEvent) {
+        return onSearchRequested();
+    }
+
+    public android.view.ActionMode onWindowStartingActionMode(android.view.ActionMode.Callback callback) {
+        return null;
+    }
+
+    public android.view.ActionMode onWindowStartingActionMode(android.view.ActionMode.Callback callback, int type) {
+        return onWindowStartingActionMode(callback);
+    }
+
+    public void onActionModeStarted(android.view.ActionMode mode) {
+    }
+
+    public void onActionModeFinished(android.view.ActionMode mode) {
+    }
+
+    public void onPointerCaptureChanged(boolean hasCapture) {
     }
 
     /**
@@ -511,9 +614,20 @@ public class Activity extends ContextThemeWrapper {
     }
 
     public boolean dispatchTouchEvent(android.view.MotionEvent event) {
-        if (mContentView != null) {
-            return mContentView.dispatchTouchEvent(event);
+        if (event != null && event.getAction() == android.view.MotionEvent.ACTION_DOWN) {
+            onUserInteraction();
         }
+        android.view.Window win = getWindow();
+        if (win != null && win.superDispatchTouchEvent(event)) {
+            return true;
+        }
+        if (mContentView != null && mContentView.dispatchTouchEvent(event)) {
+            return true;
+        }
+        return onTouchEvent(event);
+    }
+
+    public boolean onTouchEvent(android.view.MotionEvent event) {
         return false;
     }
 

@@ -19,6 +19,31 @@
 
 #if defined(__APPLE__)
 #include <AudioToolbox/AudioToolbox.h>
+#include <objc/runtime.h>
+#include <objc/message.h>
+
+static void apple_ensure_audio_session_active() {
+    static std::atomic<bool> s_done{false};
+    if (s_done.exchange(true)) return;
+    Class cls = objc_getClass("AVAudioSession");
+    if (!cls) return;
+    SEL selShared = sel_registerName("sharedInstance");
+    id session = reinterpret_cast<id (*)(Class, SEL)>(objc_msgSend)(cls, selShared);
+    if (!session) return;
+
+    Class strCls = objc_getClass("NSString");
+    SEL selUtf8 = sel_registerName("stringWithUTF8String:");
+    id catStr = reinterpret_cast<id (*)(Class, SEL, const char*)>(objc_msgSend)(
+        strCls, selUtf8, "AVAudioSessionCategoryPlayback");
+
+    SEL selSetCat = sel_registerName("setCategory:withOptions:error:");
+    reinterpret_cast<BOOL (*)(id, SEL, id, unsigned long, void*)>(objc_msgSend)(
+        session, selSetCat, catStr, 1UL /* AVAudioSessionCategoryOptionMixWithOthers */, nullptr);
+
+    SEL selSetActive = sel_registerName("setActive:error:");
+    reinterpret_cast<BOOL (*)(id, SEL, BOOL, void*)>(objc_msgSend)(
+        session, selSetActive, YES, nullptr);
+}
 #endif
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -184,6 +209,9 @@ static void audio_queue_output_cb(void* userData, AudioQueueRef aq, AudioQueueBu
 // player right inside the callback).
 static bool ensure_audio_queue(AudioPlayer* p) {
     if (p->aq) return true;
+#if defined(__APPLE__)
+    apple_ensure_audio_session_active();
+#endif
 
     AudioStreamBasicDescription asbd = {};
     asbd.mSampleRate = p->sampleRate;
@@ -991,8 +1019,37 @@ extern "C" int32_t bionic_kudroid_audiotrack_write(int64_t track, const void* da
         if (f <= 3) std::fprintf(stderr, "[KuDroidAudio] write FAILED #%d\n", f);
         return -1;  // ERROR
     }
-    if (enca > 0) return 0;  // full after the bounded wait: retry, not error
+    if (enca > 0) return 0;
     const uint64_t written = p->framesWritten.load(std::memory_order_relaxed);
+    {
+        static std::atomic<uint64_t> s_lastAmpReportMs{0};
+        static std::atomic<int> s_peakAmp{0};
+        static std::atomic<uint64_t> s_nonzeroCount{0};
+        const uint64_t nowMs = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+
+        if (data != nullptr && p->bitsPerSample == 16) {
+            const int16_t* samples = reinterpret_cast<const int16_t*>(data);
+            const size_t sampleCount = static_cast<size_t>(accepted) / sizeof(int16_t);
+            int localPeak = 0;
+            for (size_t i = 0; i < sampleCount; ++i) {
+                int a = std::abs(static_cast<int>(samples[i]));
+                if (a > localPeak) localPeak = a;
+            }
+            if (localPeak > 0) s_nonzeroCount.fetch_add(1, std::memory_order_relaxed);
+            int curPeak = s_peakAmp.load(std::memory_order_relaxed);
+            while (localPeak > curPeak && !s_peakAmp.compare_exchange_weak(curPeak, localPeak, std::memory_order_relaxed)) {}
+        }
+
+        uint64_t lastMs = s_lastAmpReportMs.load(std::memory_order_relaxed);
+        if (nowMs - lastMs >= 5000 && s_lastAmpReportMs.compare_exchange_strong(lastMs, nowMs, std::memory_order_relaxed)) {
+            const int peak = s_peakAmp.exchange(0, std::memory_order_relaxed);
+            const uint64_t nonzeros = s_nonzeroCount.exchange(0, std::memory_order_relaxed);
+            std::fprintf(stderr, "[KuDroidAudio] write probe: peak_amp=%d nonzero_chunks=%llu\n",
+                         peak, static_cast<unsigned long long>(nonzeros));
+        }
+    }
     // Diagnostic: in-flight audio-ms shows mixer-ahead-of-wallclock pacing drift.
     // Time-throttled (not count-capped): a count cap goes blind mid-run, which is
     // exactly when pacing questions get asked.

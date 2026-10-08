@@ -298,9 +298,48 @@ public class Window {
     }
 
     public interface Callback {
+        public boolean dispatchKeyEvent(KeyEvent event);
+        public boolean dispatchKeyShortcutEvent(KeyEvent event);
+        public boolean dispatchTouchEvent(MotionEvent event);
+        public boolean dispatchTrackballEvent(MotionEvent event);
+        public boolean dispatchGenericMotionEvent(MotionEvent event);
+        public boolean dispatchPopulateAccessibilityEvent(android.view.accessibility.AccessibilityEvent event);
+        public View onCreatePanelView(int featureId);
+        public boolean onCreatePanelMenu(int featureId, Menu menu);
+        public boolean onPreparePanel(int featureId, View view, Menu menu);
+        public boolean onMenuOpened(int featureId, Menu menu);
+        public boolean onMenuItemSelected(int featureId, MenuItem item);
+        public void onWindowAttributesChanged(WindowManager.LayoutParams attrs);
+        public void onContentChanged();
+        public void onWindowFocusChanged(boolean hasFocus);
+        public void onAttachedToWindow();
+        public void onDetachedFromWindow();
+        public void onPanelClosed(int featureId, Menu menu);
+        public boolean onSearchRequested();
+        public boolean onSearchRequested(SearchEvent searchEvent);
+        public ActionMode onWindowStartingActionMode(ActionMode.Callback callback);
+        public ActionMode onWindowStartingActionMode(ActionMode.Callback callback, int type);
+        public void onActionModeStarted(ActionMode mode);
+        public void onActionModeFinished(ActionMode mode);
+        default public void onPointerCaptureChanged(boolean hasCapture) {}
     }
 
     public interface OnFrameMetricsAvailableListener {
     }
 
+    public boolean superDispatchKeyEvent(KeyEvent event) {
+        ViewGroup decor = decorGroup();
+        if (decor != null) {
+            return decor.dispatchKeyEvent(event);
+        }
+        return false;
+    }
+
+    public boolean superDispatchTouchEvent(MotionEvent event) {
+        ViewGroup decor = decorGroup();
+        if (decor != null) {
+            return decor.dispatchTouchEvent(event);
+        }
+        return false;
+    }
 }

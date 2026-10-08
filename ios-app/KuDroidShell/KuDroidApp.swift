@@ -220,6 +220,7 @@ struct KuDroidApp: App {
     init() {
         IOSDiagnostics.shared.start()
         IOSDiagnostics.shared.applicationPhase("app-init")
+        activateAudioSession()
     }
 
     var body: some Scene {

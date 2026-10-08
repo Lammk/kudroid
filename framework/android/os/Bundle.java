@@ -1,159 +1,147 @@
 package android.os;
 
-import java.util.HashMap;
-import java.util.Map;
-import java.util.Set;
+import android.util.ArrayMap;
+import android.util.SparseArray;
+import java.io.Serializable;
+import java.util.ArrayList;
 
 /**
- * minimal android.os.bundle implementation.
- *
- * maps from string keys to differently typed values. used for data transmission
- * between activities and intents. for kudroid minimal framework we support it
- * equals a hashmap.
+ * A mapping from String keys to various Parcelable values following AOSP contract.
  */
-public final class Bundle {
-    private Map<String, Object> mMap;
+public final class Bundle extends BaseBundle implements Cloneable, Parcelable {
+
+    public static final Bundle EMPTY;
+
+    static {
+        EMPTY = new Bundle();
+        EMPTY.mMap = new ArrayMap<String, Object>();
+    }
+
+    public static final Parcelable.Creator<Bundle> CREATOR = new Parcelable.Creator<Bundle>() {
+        @Override
+        public Bundle createFromParcel(Parcel in) {
+            return in.readBundle();
+        }
+
+        @Override
+        public Bundle[] newArray(int size) {
+            return new Bundle[size];
+        }
+    };
 
     public Bundle() {
-        mMap = new HashMap<String, Object>();
+        super();
+    }
+
+    public Bundle(ClassLoader loader) {
+        super(loader);
+    }
+
+    public Bundle(int capacity) {
+        super(capacity);
     }
 
     public Bundle(Bundle b) {
-        mMap = new HashMap<String, Object>();
-        if (b != null && b.mMap != null) {
-            mMap.putAll(b.mMap);
-        }
+        super(b);
     }
 
-    public void putString(String key, String value) {
-        mMap.put(key, value);
+    public Bundle(PersistableBundle b) {
+        super(b);
     }
 
-    public String getString(String key) {
-        Object v = mMap.get(key);
-        return (v instanceof String) ? (String) v : null;
-    }
-
-    public String getString(String key, String defaultValue) {
-        String v = getString(key);
-        return (v != null) ? v : defaultValue;
-    }
-
-    public void putInt(String key, int value) {
-        mMap.put(key, Integer.valueOf(value));
-    }
-
-    public int getInt(String key) {
-        return getInt(key, 0);
-    }
-
-    public int getInt(String key, int defaultValue) {
-        Object v = mMap.get(key);
-        return (v instanceof Integer) ? ((Integer) v).intValue() : defaultValue;
-    }
-
-    public void putLong(String key, long value) {
-        mMap.put(key, Long.valueOf(value));
-    }
-
-    public long getLong(String key) {
-        return getLong(key, 0L);
-    }
-
-    public long getLong(String key, long defaultValue) {
-        Object v = mMap.get(key);
-        return (v instanceof Long) ? ((Long) v).longValue() : defaultValue;
-    }
-
-    public void putBoolean(String key, boolean value) {
-        mMap.put(key, Boolean.valueOf(value));
-    }
-
-    public boolean getBoolean(String key) {
-        return getBoolean(key, false);
-    }
-
-    public boolean getBoolean(String key, boolean defaultValue) {
-        Object v = mMap.get(key);
-        return (v instanceof Boolean) ? ((Boolean) v).booleanValue() : defaultValue;
-    }
-
-    public void putFloat(String key, float value) {
-        mMap.put(key, Float.valueOf(value));
-    }
-
-    public float getFloat(String key) {
-        return getFloat(key, 0.0f);
-    }
-
-    public float getFloat(String key, float defaultValue) {
-        Object v = mMap.get(key);
-        return (v instanceof Float) ? ((Float) v).floatValue() : defaultValue;
-    }
-
-    public void putDouble(String key, double value) {
-        mMap.put(key, Double.valueOf(value));
-    }
-
-    public double getDouble(String key) {
-        return getDouble(key, 0.0);
-    }
-
-    public double getDouble(String key, double defaultValue) {
-        Object v = mMap.get(key);
-        return (v instanceof Double) ? ((Double) v).doubleValue() : defaultValue;
-    }
-
-    public void putSerializable(String key, java.io.Serializable value) {
-        mMap.put(key, value);
-    }
-
-    /**
-     * copies all mappings from the given bundle into this bundle.
-     */
     public void putAll(Bundle bundle) {
         if (bundle != null && bundle.mMap != null) {
             mMap.putAll(bundle.mMap);
         }
     }
 
-    public java.io.Serializable getSerializable(String key) {
-        Object v = mMap.get(key);
-        return (v instanceof java.io.Serializable) ? (java.io.Serializable) v : null;
+    public boolean hasFileDescriptors() {
+        return false;
+    }
+
+    public void putParcelable(String key, Parcelable value) {
+        mMap.put(key, value);
+    }
+
+    @SuppressWarnings("unchecked")
+    public <T extends Parcelable> T getParcelable(String key) {
+        Object o = mMap.get(key);
+        return (o instanceof Parcelable) ? (T) o : null;
+    }
+
+    public void putParcelableArray(String key, Parcelable[] value) {
+        mMap.put(key, value);
+    }
+
+    public Parcelable[] getParcelableArray(String key) {
+        Object o = mMap.get(key);
+        return (o instanceof Parcelable[]) ? (Parcelable[]) o : null;
+    }
+
+    public void putParcelableArrayList(String key, ArrayList<? extends Parcelable> value) {
+        mMap.put(key, value);
+    }
+
+    @SuppressWarnings("unchecked")
+    public <T extends Parcelable> ArrayList<T> getParcelableArrayList(String key) {
+        Object o = mMap.get(key);
+        return (o instanceof ArrayList) ? (ArrayList<T>) o : null;
+    }
+
+    public void putSparseParcelableArray(String key, SparseArray<? extends Parcelable> value) {
+        mMap.put(key, value);
+    }
+
+    @SuppressWarnings("unchecked")
+    public <T extends Parcelable> SparseArray<T> getSparseParcelableArray(String key) {
+        Object o = mMap.get(key);
+        return (o instanceof SparseArray) ? (SparseArray<T>) o : null;
+    }
+
+    public void putBundle(String key, Bundle value) {
+        mMap.put(key, value);
     }
 
     public Bundle getBundle(String key) {
-        Object v = mMap.get(key);
-        return (v instanceof Bundle) ? (Bundle) v : null;
+        Object o = mMap.get(key);
+        return (o instanceof Bundle) ? (Bundle) o : null;
     }
 
-    public Bundle putBundle(String key, Bundle value) {
+    public void putBinder(String key, IBinder value) {
         mMap.put(key, value);
-        return this;
     }
 
-    /** Removing a key is how Intent.removeExtra works; without it an extra could only grow. */
-    public void remove(String key) {
-        mMap.remove(key);
+    public IBinder getBinder(String key) {
+        Object o = mMap.get(key);
+        return (o instanceof IBinder) ? (IBinder) o : null;
     }
 
-    public boolean containsKey(String key) {
-        return mMap.containsKey(key);
+    @Override
+    public Object clone() {
+        return new Bundle(this);
     }
 
-    public Set<String> keySet() {
-        return mMap.keySet();
+    public Bundle deepCopy() {
+        Bundle copy = new Bundle();
+        copy.copyInternal(this, true);
+        return copy;
     }
 
-    public boolean isEmpty() {
-        return mMap.isEmpty();
+    @Override
+    public int describeContents() {
+        return 0;
     }
 
-    public int size() {
-        return mMap.size();
+    @Override
+    public void writeToParcel(Parcel parcel, int flags) {
+        parcel.writeBundle(this);
     }
 
-    public void clear() {
-        mMap.clear();
+    public void readFromParcel(Parcel parcel) {
+        Bundle b = parcel.readBundle();
+        if (b != null) {
+            mMap.clear();
+            mMap.putAll(b.mMap);
+        }
     }
 }

@@ -98,4 +98,12 @@ public class AudioManager {
     public static final int GET_DEVICES_ALL = GET_DEVICES_OUTPUTS | GET_DEVICES_INPUTS;
 
     public void unregisterAudioDeviceCallback(AudioDeviceCallback callback) {}
+
+    public int requestAudioFocus(AudioFocusRequest afr) {
+        return AUDIOFOCUS_REQUEST_GRANTED;
+    }
+
+    public int abandonAudioFocusRequest(AudioFocusRequest afr) {
+        return AUDIOFOCUS_REQUEST_GRANTED;
+    }
 }

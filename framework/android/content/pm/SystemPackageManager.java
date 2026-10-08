@@ -134,6 +134,9 @@ public class SystemPackageManager extends PackageManager {
         pi.versionCode = sVersionCode;
         pi.firstInstallTime = sFirstInstallTime;
         pi.lastUpdateTime = sLastUpdateTime;
+        Signature sig = new Signature(new byte[] { 0x30, (byte) 0x82, 0x01 });
+        pi.signatures = new Signature[] { sig };
+        pi.signingInfo = new SigningInfo(pi.signatures);
         return pi;
     }
 

@@ -16,6 +16,7 @@ public class PackageInfo implements Parcelable {
     public String[] requestedPermissions;
     public int[] requestedPermissionsFlags;
     public Signature[] signatures;
+    public SigningInfo signingInfo = new SigningInfo();
 
     public PackageInfo() {}
     public long getLongVersionCode() { return ((long) versionCodeMajor << 32) | (versionCode & 0xFFFFFFFFL); }

@@ -78,6 +78,11 @@ public final class Collections {
         return out;
     }
 
+    public static <E> Set<E> newSetFromMap(Map<E, Boolean> map) {
+        if (map == null) throw new NullPointerException("map == null");
+        return map.keySet();
+    }
+
     public static <K, V> Map<K, V> singletonMap(K key, V value) {
         HashMap<K, V> out = new HashMap<K, V>(1);
         out.put(key, value);

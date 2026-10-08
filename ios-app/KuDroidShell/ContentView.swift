@@ -1000,7 +1000,7 @@ func activateAudioSession() {
     do {
         try session.setCategory("AVAudioSessionCategoryPlayback",
                                 mode: "AVAudioSessionModeDefault",
-                                options: [])
+                                options: [.mixWithOthers])
         try session.setActive(true)
     } catch {
         // Never silent: a failed session is exactly the consume-but-silent bug.
@@ -1689,6 +1689,7 @@ class NativeMetalViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        activateAudioSession()
         self.view.backgroundColor = .black
         metalView.backgroundColor = .black
 
@@ -1844,6 +1845,7 @@ class NativeMetalViewController: UIViewController {
     func startAppIfNeeded() {
         guard !isStarted else { return }
         if NativeMetalViewController.isGlobalAppRunning { return }
+        activateAudioSession()
         NativeMetalViewController.isGlobalAppRunning = true
         isStarted = true
 

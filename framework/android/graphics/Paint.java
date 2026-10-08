@@ -238,4 +238,86 @@ public class Paint {
         public String toString() { return mName; }
     }
 
+
+    public enum Style {
+        FILL(0),
+        STROKE(1),
+        FILL_AND_STROKE(2);
+
+        Style(int ni) { nativeInt = ni; }
+        final int nativeInt;
+    }
+
+    public enum Align {
+        LEFT(0),
+        CENTER(1),
+        RIGHT(2);
+
+        Align(int ni) { nativeInt = ni; }
+        final int nativeInt;
+    }
+
+    private Style mEnumStyle = Style.FILL;
+    private Align mEnumAlign = Align.LEFT;
+    private Cap mCap = Cap.BUTT;
+    private Join mJoin = Join.MITER;
+    private Shader mShader = null;
+    private Xfermode mXfermode = null;
+
+    public void setStyle(Style style) {
+        mEnumStyle = style != null ? style : Style.FILL;
+        mStyle = mEnumStyle.nativeInt;
+    }
+
+    public Style getStyleEnum() {
+        return mEnumStyle;
+    }
+
+    public void setTextAlign(Align align) {
+        mEnumAlign = align != null ? align : Align.LEFT;
+        mTextAlign = mEnumAlign.nativeInt;
+    }
+
+    public Align getTextAlignEnum() {
+        return mEnumAlign;
+    }
+
+    public void setStrokeCap(Cap cap) {
+        mCap = cap != null ? cap : Cap.BUTT;
+    }
+
+    public Cap getStrokeCap() {
+        return mCap;
+    }
+
+    public void setStrokeJoin(Join join) {
+        mJoin = join != null ? join : Join.MITER;
+    }
+
+    public Join getStrokeJoin() {
+        return mJoin;
+    }
+
+    public void setShader(Shader shader) {
+        mShader = shader;
+    }
+
+    public Shader getShader() {
+        return mShader;
+    }
+
+    public void setXfermode(Xfermode xfermode) {
+        mXfermode = xfermode;
+    }
+
+    public Xfermode getXfermode() {
+        return mXfermode;
+    }
+
+    public void getTextBounds(String text, int start, int end, Rect bounds) {
+        if (bounds != null) {
+            float width = measureText(text != null ? text.substring(start, end) : "");
+            bounds.set(0, -(int) mTextSize, (int) width, 0);
+        }
+    }
 }
