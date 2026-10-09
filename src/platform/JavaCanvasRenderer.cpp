@@ -26,6 +26,10 @@ JavaCanvasRenderer& JavaCanvasRenderer::getInstance() {
     return instance;
 }
 
+bool JavaCanvasRenderer::hasBoundMetalSurface() const {
+    return g_metalLayer != nullptr && g_metalLayerWidth > 0 && g_metalLayerHeight > 0;
+}
+
 JavaCanvasRenderer::JavaCanvasRenderer() {
     init(g_metalLayerWidth > 0 ? g_metalLayerWidth : 1080,
          g_metalLayerHeight > 0 ? g_metalLayerHeight : 1920);

@@ -17,7 +17,6 @@
 // on: a message enqueue and a touch injection both set `pending` and signal it,
 // so only the Looper thread ever runs Java for touch.
 
-#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -29,7 +28,8 @@ struct LooperWaitSlot {
     std::condition_variable cv;
     bool pending = false;
 };
-static std::atomic<LooperWaitSlot*> g_mainLooperSlot{nullptr};
+static std::mutex g_mainLooperMutex;
+static LooperWaitSlot* g_mainLooperSlot = nullptr;
 
 extern "C" int64_t kudroid_looper_init(void) {
     return reinterpret_cast<int64_t>(new (std::nothrow) LooperWaitSlot());
@@ -71,19 +71,33 @@ extern "C" void kudroid_looper_wake(int64_t ptr) {
 }
 
 extern "C" void kudroid_looper_set_main(int64_t ptr) {
-    g_mainLooperSlot.store(reinterpret_cast<LooperWaitSlot*>(ptr), std::memory_order_release);
+    std::lock_guard<std::mutex> lock(g_mainLooperMutex);
+    g_mainLooperSlot = reinterpret_cast<LooperWaitSlot*>(ptr);
 }
 
 extern "C" void kudroid_looper_reset_main(void) {
-    g_mainLooperSlot.store(nullptr, std::memory_order_release);
+    std::lock_guard<std::mutex> lock(g_mainLooperMutex);
+    g_mainLooperSlot = nullptr;
 }
 
 extern "C" void kudroid_looper_wake_main(void) {
-    kudroid_looper_wake(
-        reinterpret_cast<int64_t>(g_mainLooperSlot.load(std::memory_order_acquire)));
+    // Keep the slot protected until its wake has finished. destroy() clears the
+    // pointer under this mutex before freeing it, so input cannot wake freed memory.
+    std::lock_guard<std::mutex> lock(g_mainLooperMutex);
+    kudroid_looper_wake(reinterpret_cast<int64_t>(g_mainLooperSlot));
 }
 
 extern "C" int kudroid_looper_is_main(int64_t ptr) {
-    return reinterpret_cast<LooperWaitSlot*>(ptr) ==
-           g_mainLooperSlot.load(std::memory_order_acquire);
+    std::lock_guard<std::mutex> lock(g_mainLooperMutex);
+    return reinterpret_cast<LooperWaitSlot*>(ptr) == g_mainLooperSlot;
+}
+
+extern "C" void kudroid_looper_destroy(int64_t ptr) {
+    auto* slot = reinterpret_cast<LooperWaitSlot*>(ptr);
+    if (slot == nullptr) return;
+    {
+        std::lock_guard<std::mutex> lock(g_mainLooperMutex);
+        if (g_mainLooperSlot == slot) g_mainLooperSlot = nullptr;
+    }
+    delete slot;
 }

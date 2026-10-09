@@ -83,6 +83,8 @@ add_library(kudroid_core STATIC
     src/abi/BlockingWaitRegistry.cpp
     src/abi/GuestSignals.cpp
     src/platform/AssetShim.cpp
+    src/platform/ResourceTable.cpp
+    src/platform/ResourceCompat.cpp
     src/platform/BundledFramework.cpp
     src/platform/FmodVorbisFallback.cpp
     src/platform/JavaCanvasRenderer.cpp
@@ -522,12 +524,26 @@ else()
         test_kuart_default_methods
         test_kuart_method_handles
         test_kuart_choreographer
+        test_kuart_runtime
+        test_kuart_resources
+        test_kuart_resource_compat
+        test_kuart_ime
         test_kuart_audiotrack
     )
         if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/${kuart_test}.cpp")
             add_executable(${kuart_test} kuart-tests/${kuart_test}.cpp)
             target_link_libraries(${kuart_test} PRIVATE kudroid_core art_dex ZLIB::ZLIB)
             target_include_directories(${kuart_test} PRIVATE include kuart-tests)
+            if(kuart_test STREQUAL "test_kuart_runtime")
+                target_include_directories(${kuart_test} PRIVATE src/bridge)
+            endif()
+        endif()
+    endforeach()
+
+    foreach(kuart_test IN ITEMS test_kuart_runtime test_kuart_choreographer)
+        if(TARGET ${kuart_test})
+            set_target_properties(${kuart_test} PROPERTIES
+                RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/kuart-tests")
         endif()
     endforeach()
 
@@ -545,5 +561,12 @@ else()
         add_executable(kuart_verify tools/kuart_verify.cpp)
         target_link_libraries(kuart_verify PRIVATE kudroid_core art_dex ZLIB::ZLIB)
         target_include_directories(kuart_verify PRIVATE include third_party/art_dex)
+    endif()
+
+    # Local resource-table compatibility audit for APK and raw resources.arsc inputs.
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/kuart_resource_compat.cpp")
+        add_executable(kuart_resource_compat tools/kuart_resource_compat.cpp)
+        target_link_libraries(kuart_resource_compat PRIVATE kudroid_core art_dex ZLIB::ZLIB)
+        target_include_directories(kuart_resource_compat PRIVATE include)
     endif()
 endif()

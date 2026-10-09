@@ -17,6 +17,7 @@ public final class MessageQueue {
     private long mPtr;
 
     private static native long nativeInit();
+    private static native void nativeDestroy(long ptr);
     private static native void nativePollOnce(long ptr, long timeoutMillis);
     private static native void nativeWake(long ptr);
     private static native void nativeSetMainQueue(long ptr);
@@ -70,6 +71,34 @@ public final class MessageQueue {
      */
     void setAsMainQueue() {
         if (mPtr != 0) nativeSetMainQueue(mPtr);
+    }
+
+    boolean isQuitting() {
+        synchronized (this) {
+            return mQuitting;
+        }
+    }
+
+    /**
+     * Retires this queue after its Looper has returned. The queue monitor
+     * serializes pointer clearing with enqueueMessage's native wake call.
+     */
+    void disposeAfterLoop() {
+        long ptr;
+        synchronized (this) {
+            mQuitting = true;
+            Message p = mMessages;
+            while (p != null) {
+                Message n = p.next;
+                p.recycle();
+                p = n;
+            }
+            mMessages = null;
+            ptr = mPtr;
+            mPtr = 0;
+            this.notifyAll();
+        }
+        if (ptr != 0) nativeDestroy(ptr);
     }
 
     /**

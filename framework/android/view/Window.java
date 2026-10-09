@@ -1,6 +1,11 @@
 package android.view;
 
 import android.content.Context;
+import android.graphics.Canvas;
+import android.graphics.Rect;
+import android.widget.FrameLayout;
+
+import java.util.ArrayList;
 
 /**
  * minimal android.view.window implementation.
@@ -25,15 +30,59 @@ public class Window {
     public static final int FEATURE_ACTIVITY_TRANSITIONS = 13;
 
     private final Context mContext;
-    private View mDecorView;
+    private DecorView mDecorView;
+    private FrameLayout mContentParent;
     private View mContentView;
     private int mFlags;
+    private volatile int mWidth;
+    private volatile int mHeight;
+    private volatile boolean mSurfaceReady;
+    private volatile boolean mSurfaceCreated;
+    private final Object mSurfaceLock = new Object();
+    private final ArrayList<SurfaceCallbackState> mSurfaceCallbacks =
+            new ArrayList<SurfaceCallbackState>();
+    private SurfaceHolder.Callback mTakeSurfaceCallback;
+    private SurfaceHolder.Callback mActivitySurfaceCallback;
+    private final Surface mSurface = new Surface();
+    private SurfaceHolder mSurfaceHolder;
+
+    /** The root of a Window's view hierarchy. */
+    public static class DecorView extends FrameLayout {
+        public DecorView(Context context) {
+            super(context);
+        }
+    }
+
+    private static final class SurfaceCallbackState {
+        final SurfaceHolder.Callback callback;
+        boolean created;
+        int width;
+        int height;
+
+        SurfaceCallbackState(SurfaceHolder.Callback callback) {
+            this.callback = callback;
+        }
+    }
 
     public Window(Context context) {
         mContext = context;
     }
 
-    public void takeSurface(android.view.SurfaceHolder.Callback2 callback) {}
+    public void takeSurface(android.view.SurfaceHolder.Callback2 callback) {
+        if (mTakeSurfaceCallback == callback) return;
+        if (mTakeSurfaceCallback != null) removeSurfaceCallback(mTakeSurfaceCallback);
+        mTakeSurfaceCallback = callback;
+        if (callback != null) addSurfaceCallback(callback);
+    }
+
+    /** Register the Activity's Window-surface callbacks when it implements them. */
+    public void setActivitySurfaceCallback(SurfaceHolder.Callback callback) {
+        if (mActivitySurfaceCallback == callback) return;
+        if (mActivitySurfaceCallback != null) removeSurfaceCallback(mActivitySurfaceCallback);
+        mActivitySurfaceCallback = callback;
+        if (callback != null) addSurfaceCallback(callback);
+    }
+
     public void takeInputQueue(android.view.InputQueue.Callback callback) {}
 
     /**
@@ -54,12 +103,19 @@ public class Window {
      */
     public void setContentView(View view) {
         mContentView = view;
-        // Android parents the content view under the decor view rather than replacing
-        // it. Keeping them separate matters because getDecorView() is what window
-        // insets, system-UI visibility and IME attachment are all read from.
+        final FrameLayout content = contentParent();
+        content.removeAllViews();
         if (view != null) {
-            final ViewGroup decor = decorGroup();
-            if (decor != null && view.getParent() != decor) decor.addView(view);
+            ViewParent parent = view.getParent();
+            if (parent instanceof ViewGroup && parent != content) {
+                ((ViewGroup) parent).removeView(view);
+            }
+            if (view.getLayoutParams() == null) {
+                view.setLayoutParams(new FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT));
+            }
+            content.addView(view);
         }
     }
 
@@ -83,35 +139,192 @@ public class Window {
      * caller can observe a null.
      */
     public View getDecorView() {
-        return decorGroup();
+        return ensureDecorView();
     }
 
     public View findViewById(int id) {
-        ViewGroup decor = decorGroup();
-        if (decor != null) {
-            if (decor.getId() == id) return decor;
-            View v = decor.findViewById(id);
-            if (v != null) return v;
-            if (id == android.R.id.content || id == 0x01020002) {
-                return decor;
-            }
-        }
-        return null;
+        if (id == android.R.id.content || id == 0x01020002) return contentParent();
+        return ensureDecorView().findViewById(id);
     }
 
-    private ViewGroup mDecorGroup;
-
-    private ViewGroup decorGroup() {
-        if (mDecorGroup == null) {
-            android.widget.FrameLayout decor = new android.widget.FrameLayout(mContext);
-            decor.setId(android.R.id.content);
-            decor.setLayoutParams(new ViewGroup.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT));
-            mDecorGroup = decor;
-            mDecorView = decor;
+    private DecorView ensureDecorView() {
+        if (mDecorView == null) {
+            mDecorView = new DecorView(mContext);
+            mDecorView.setLayoutParams(new ViewGroup.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            mContentParent = new FrameLayout(mContext);
+            mContentParent.setId(android.R.id.content);
+            mContentParent.setLayoutParams(new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+            mDecorView.addView(mContentParent);
         }
-        return mDecorGroup;
+        return mDecorView;
+    }
+
+    private FrameLayout contentParent() {
+        ensureDecorView();
+        return mContentParent;
+    }
+
+    /** Update the Window bounds from the host's live Metal framebuffer. */
+    public void updateSurfaceSize(int width, int height, boolean surfaceReady) {
+        final boolean ready = surfaceReady && width > 0 && height > 0;
+        mSurfaceReady = ready;
+        mWidth = ready ? width : 0;
+        mHeight = ready ? height : 0;
+        if (!ready && mSurfaceCreated) dispatchSurfaceDestroyed();
+    }
+
+    public int getWidth() {
+        return mWidth;
+    }
+
+    public int getHeight() {
+        return mHeight;
+    }
+
+    public boolean hasSurface() {
+        return mSurfaceReady && mWidth > 0 && mHeight > 0;
+    }
+
+    /** Measure and lay out the full decor hierarchy at the actual surface size. */
+    public boolean measureAndLayout() {
+        if (!hasSurface()) return false;
+        DecorView decor = ensureDecorView();
+        final int widthSpec = View.MeasureSpec.makeMeasureSpec(mWidth, View.MeasureSpec.EXACTLY);
+        final int heightSpec = View.MeasureSpec.makeMeasureSpec(mHeight, View.MeasureSpec.EXACTLY);
+        decor.measure(widthSpec, heightSpec);
+        decor.layout(0, 0, mWidth, mHeight);
+        return true;
+    }
+
+    /** Deliver the current real Window surface state to Window callbacks. */
+    public void dispatchSurfaceReady() {
+        if (!hasSurface()) return;
+        DecorView decor = ensureDecorView();
+        if (!decor.isLaidOut() || decor.getWidth() != mWidth || decor.getHeight() != mHeight) return;
+        mSurface.setSurfaceSize(mWidth, mHeight);
+        SurfaceCallbackState[] callbacks;
+        synchronized (mSurfaceLock) {
+            mSurfaceCreated = true;
+            callbacks = mSurfaceCallbacks.toArray(new SurfaceCallbackState[mSurfaceCallbacks.size()]);
+        }
+        for (SurfaceCallbackState state : callbacks) dispatchSurfaceState(state);
+    }
+
+    /** Deliver Window-surface destruction before the Activity is destroyed. */
+    public void dispatchSurfaceDestroyed() {
+        SurfaceCallbackState[] callbacks;
+        synchronized (mSurfaceLock) {
+            if (!mSurfaceCreated) {
+                mSurface.clearSurface();
+                return;
+            }
+            mSurfaceCreated = false;
+            callbacks = mSurfaceCallbacks.toArray(new SurfaceCallbackState[mSurfaceCallbacks.size()]);
+        }
+        mSurface.clearSurface();
+        for (SurfaceCallbackState state : callbacks) {
+            boolean notify;
+            synchronized (mSurfaceLock) {
+                notify = state.created && mSurfaceCallbacks.contains(state);
+                state.created = false;
+                state.width = 0;
+                state.height = 0;
+            }
+            if (notify) invokeSurfaceDestroyed(state.callback);
+        }
+    }
+
+    public SurfaceHolder getSurfaceHolder() {
+        if (mSurfaceHolder == null) mSurfaceHolder = new WindowSurfaceHolder();
+        return mSurfaceHolder;
+    }
+
+    private void addSurfaceCallback(SurfaceHolder.Callback callback) {
+        if (callback == null) return;
+        SurfaceCallbackState state = null;
+        synchronized (mSurfaceLock) {
+            for (int i = 0; i < mSurfaceCallbacks.size(); i++) {
+                if (mSurfaceCallbacks.get(i).callback == callback) return;
+            }
+            state = new SurfaceCallbackState(callback);
+            mSurfaceCallbacks.add(state);
+        }
+        if (mSurfaceCreated) {
+            final SurfaceCallbackState pending = state;
+            ensureDecorView().post(new Runnable() {
+                @Override
+                public void run() {
+                    dispatchSurfaceState(pending);
+                }
+            });
+        }
+    }
+
+    private void removeSurfaceCallback(SurfaceHolder.Callback callback) {
+        synchronized (mSurfaceLock) {
+            for (int i = mSurfaceCallbacks.size() - 1; i >= 0; i--) {
+                if (mSurfaceCallbacks.get(i).callback == callback) mSurfaceCallbacks.remove(i);
+            }
+        }
+    }
+
+    private void dispatchSurfaceState(SurfaceCallbackState state) {
+        boolean created;
+        boolean changed;
+        synchronized (mSurfaceLock) {
+            if (!mSurfaceCreated || !mSurfaceCallbacks.contains(state)) return;
+            created = !state.created;
+            changed = created || state.width != mWidth || state.height != mHeight;
+            state.created = true;
+            state.width = mWidth;
+            state.height = mHeight;
+        }
+        if (created) invokeSurfaceCreated(state.callback);
+        if (changed) {
+            invokeSurfaceChanged(state.callback, mWidth, mHeight);
+            if (state.callback instanceof SurfaceHolder.Callback2) {
+                invokeSurfaceRedrawNeeded((SurfaceHolder.Callback2) state.callback);
+            }
+        }
+    }
+
+    private void invokeSurfaceCreated(SurfaceHolder.Callback callback) {
+        try { callback.surfaceCreated(getSurfaceHolder()); }
+        catch (Throwable t) { android.util.Log.e("Window", "surfaceCreated failed: " + t); }
+    }
+
+    private void invokeSurfaceChanged(SurfaceHolder.Callback callback, int width, int height) {
+        try { callback.surfaceChanged(getSurfaceHolder(), 0, width, height); }
+        catch (Throwable t) { android.util.Log.e("Window", "surfaceChanged failed: " + t); }
+    }
+
+    private void invokeSurfaceRedrawNeeded(SurfaceHolder.Callback2 callback) {
+        try { callback.surfaceRedrawNeeded(getSurfaceHolder()); }
+        catch (Throwable t) { android.util.Log.e("Window", "surfaceRedrawNeeded failed: " + t); }
+    }
+
+    private void invokeSurfaceDestroyed(SurfaceHolder.Callback callback) {
+        try { callback.surfaceDestroyed(getSurfaceHolder()); }
+        catch (Throwable t) { android.util.Log.e("Window", "surfaceDestroyed failed: " + t); }
+    }
+
+    private final class WindowSurfaceHolder implements SurfaceHolder {
+        @Override public void addCallback(SurfaceHolder.Callback callback) { addSurfaceCallback(callback); }
+        @Override public void removeCallback(SurfaceHolder.Callback callback) { removeSurfaceCallback(callback); }
+        @Override public Surface getSurface() { return mSurface; }
+        @Override public Rect getSurfaceFrame() { return new Rect(0, 0, mWidth, mHeight); }
+        @Override public boolean isCreating() { return false; }
+        @Override public void setType(int type) {}
+        @Override public void setFixedSize(int width, int height) {}
+        @Override public void setSizeFromLayout() {}
+        @Override public void setFormat(int format) {}
+        @Override public void setKeepScreenOn(boolean screenOn) {}
+        @Override public Canvas lockCanvas() { return mSurface.lockCanvas(); }
+        @Override public Canvas lockCanvas(Rect dirty) { return mSurface.lockCanvas(dirty); }
+        @Override public void unlockCanvasAndPost(Canvas canvas) { mSurface.unlockCanvasAndPost(canvas); }
+        @Override public Canvas lockCanvasAndroidOnly(Rect dirty) { return mSurface.lockCanvas(dirty); }
     }
 
     private static native void setKeepScreenOnNative(boolean keepOn);
@@ -294,7 +507,7 @@ public class Window {
      * always answers yes.
      */
     public View peekDecorView() {
-        return getContentView();
+        return mDecorView;
     }
 
     public interface Callback {
@@ -328,7 +541,7 @@ public class Window {
     }
 
     public boolean superDispatchKeyEvent(KeyEvent event) {
-        ViewGroup decor = decorGroup();
+        ViewGroup decor = ensureDecorView();
         if (decor != null) {
             return decor.dispatchKeyEvent(event);
         }
@@ -336,7 +549,7 @@ public class Window {
     }
 
     public boolean superDispatchTouchEvent(MotionEvent event) {
-        ViewGroup decor = decorGroup();
+        ViewGroup decor = ensureDecorView();
         if (decor != null) {
             return decor.dispatchTouchEvent(event);
         }

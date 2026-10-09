@@ -173,9 +173,7 @@ void kudroid_set_soft_input_callbacks(kudroid_soft_input_show_cb show,
                                       kudroid_soft_input_hide_cb hide);
 
 /// Called from the guest (InputMethodManager) to raise or dismiss the keyboard.
-/// Returns 1 when a host callback was registered and invoked, 0 otherwise — the
-/// guest reports success either way, because an app told the keyboard cannot be
-/// shown disables its own text entry.
+/// Returns 1 when a host callback was registered and invoked, 0 otherwise.
 int kudroid_show_soft_input(int flags);
 int kudroid_hide_soft_input(void);
 

@@ -412,6 +412,25 @@ void test_remove_null_is_harmless() {
     g_interp->ClearPendingException();
 }
 
+void test_reset_recreates_thread_instance() {
+    std::printf("[choreographer] relaunch reset clears the thread-bound instance\n");
+    DexValue before;
+    if (!CallStatic("Landroid/view/Choreographer;", "getInstance",
+                    "()Landroid/view/Choreographer;", {}, &before, "before reset")) {
+        return;
+    }
+    if (!CallStatic("Landroid/view/Choreographer;", "resetForRelaunch", "()V",
+                    {}, nullptr, "resetForRelaunch")) {
+        return;
+    }
+    DexValue after;
+    if (CallStatic("Landroid/view/Choreographer;", "getInstance",
+                   "()Landroid/view/Choreographer;", {}, &after, "after reset")) {
+        Check(after.l != nullptr && after.l != before.l,
+              "resetForRelaunch removes the old thread instance");
+    }
+}
+
 // A posted callback must actually reach Java. Everything above proves the methods
 // exist; this proves the frame arrives and doFrame runs with the frame's timestamp.
 //
@@ -516,6 +535,80 @@ void test_removed_callback_does_not_fire(DexObject* callback, DexField* last_fra
     std::this_thread::sleep_for(std::chrono::milliseconds(600));
     Check(cb_class->static_values[last_frame_time->offset_or_slot].j == 0,
           "doFrame never ran, well past the delay it was posted with");
+}
+
+void test_callbacks_bind_to_the_current_looper(DexObject* callback,
+                                               DexField* last_frame_time) {
+    std::printf("[choreographer] Java callbacks bind to the current Looper queue\n");
+    if (callback == nullptr || last_frame_time == nullptr) {
+        Check(false, "test callback object was built");
+        return;
+    }
+    if (!CallStatic("Landroid/os/Looper;", "prepareMainLooper", "()V", {}, nullptr,
+                    "prepareMainLooper")) {
+        return;
+    }
+
+    DexValue main_looper_value;
+    DexValue choreographer_value;
+    if (!CallStatic("Landroid/os/Looper;", "getMainLooper", "()Landroid/os/Looper;", {},
+                    &main_looper_value, "getMainLooper") ||
+        !CallStatic("Landroid/view/Choreographer;", "getInstance",
+                    "()Landroid/view/Choreographer;", {}, &choreographer_value,
+                    "getInstance")) {
+        return;
+    }
+    auto* main_looper = reinterpret_cast<DexObject*>(main_looper_value.l);
+    auto* choreographer = reinterpret_cast<DexObject*>(choreographer_value.l);
+
+    last_frame_time->declaring_class->static_values[last_frame_time->offset_or_slot] =
+        DexValue::Long(0);
+    if (!CallVirtual(choreographer, "postFrameCallbackDelayed",
+                     "(Landroid/view/Choreographer$FrameCallback;J)V",
+                     {DexValue::Ref(callback), DexValue::Long(500)}, nullptr,
+                     "postFrameCallbackDelayed on prepared Looper")) {
+        return;
+    }
+
+    DexField* handler_field = choreographer->clazz->FindInstanceField(
+        "mHandler", "Landroid/os/Handler;");
+    DexObject* handler = handler_field != nullptr
+                             ? choreographer->GetField<DexObject*>(handler_field->offset_or_slot)
+                             : nullptr;
+    DexValue target_looper;
+    const bool got_target = handler != nullptr &&
+                            CallVirtual(handler, "getLooper", "()Landroid/os/Looper;", {},
+                                        &target_looper, "Choreographer Handler.getLooper");
+    Check(got_target && target_looper.l == main_looper,
+          "the Choreographer Handler targets the current Looper");
+
+    DexField* queue_field = main_looper->clazz->FindInstanceField(
+        "mQueue", "Landroid/os/MessageQueue;");
+    DexObject* queue = queue_field != nullptr
+                           ? main_looper->GetField<DexObject*>(queue_field->offset_or_slot)
+                           : nullptr;
+    DexField* messages_field = queue != nullptr
+                                   ? queue->clazz->FindInstanceField(
+                                         "mMessages", "Landroid/os/Message;")
+                                   : nullptr;
+    Check(messages_field != nullptr &&
+              queue->GetField<DexObject*>(messages_field->offset_or_slot) != nullptr,
+          "the frame callback is enqueued on the Java MessageQueue");
+
+    CallVirtual(choreographer, "removeFrameCallback",
+                "(Landroid/view/Choreographer$FrameCallback;)V",
+                {DexValue::Ref(callback)}, nullptr, "removeFrameCallback from current queue");
+    Check(messages_field != nullptr &&
+              queue->GetField<DexObject*>(messages_field->offset_or_slot) == nullptr,
+          "removing the callback clears the Java queue entry");
+    Check(last_frame_time->declaring_class->static_values[last_frame_time->offset_or_slot].j == 0,
+          "the canceled Java callback has not run");
+
+    if (queue != nullptr) {
+        CallVirtual(queue, "quitInternal", "()V", {}, nullptr, "quit Java MessageQueue");
+        CallStatic("Landroid/os/Looper;", "loop", "()V", {}, nullptr,
+                   "dispose prepared Java Looper");
+    }
 }
 
 // The property above is about methods that EXIST. This one drives the auto-stub path
@@ -799,8 +892,10 @@ int main() {
     test_frame_time_is_monotonic_nanos();
     test_posted_callback_reaches_java(callback, last_frame_time);
     test_removed_callback_does_not_fire(callback, last_frame_time);
+    test_callbacks_bind_to_the_current_looper(callback, last_frame_time);
     test_null_callback_throws();
     test_remove_null_is_harmless();
+    test_reset_recreates_thread_instance();
     test_getsystemservice_class_overload_exists();
     test_signature_lookup_is_exact();
     test_autostubbed_overload_does_not_hijack_a_real_one(probe_bad_overload);

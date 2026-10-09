@@ -19,34 +19,63 @@ import java.io.InputStream;
 public class Resources {
     private final DisplayMetrics mMetrics = new DisplayMetrics();
     private final Configuration mConfiguration = new Configuration();
-    private final AssetManager mAssets = new AssetManager();
+    private final AssetManager mAssets;
     private final Theme mTheme = new Theme(this);
 
+    private static native int nativeGetIdentifier(String name, String type, String packageName);
+    private static native String nativeGetString(int id, String locale);
+    private static native int nativeGetColor(int id, String locale);
+
     public Resources() {
+        this(new AssetManager(), null, null);
+    }
+
+    public Resources(AssetManager assets, DisplayMetrics metrics, Configuration config) {
+        mAssets = assets != null ? assets : new AssetManager();
         // A fresh Resources must report the live display, not zeros: boot
         // layout/DIP math divides by these before anyone calls setTo.
-        try {
-            new Display().getMetrics(mMetrics);
-        } catch (Throwable ignored) {}
-    }
-    public Resources(AssetManager assets, DisplayMetrics metrics, Configuration config) {
         if (metrics != null) mMetrics.setTo(metrics);
+        else {
+            try { new Display().getMetrics(mMetrics); } catch (Throwable ignored) {}
+        }
         if (config != null) mConfiguration.setTo(config);
+        else deriveConfiguration(mConfiguration, mMetrics);
     }
     public static Resources getSystem() { return new Resources(); }
     public DisplayMetrics getDisplayMetrics() { return mMetrics; }
     public Configuration getConfiguration() { return mConfiguration; }
     public AssetManager getAssets() { return mAssets; }
-    public String getString(int id) { return ""; }
-    public String getString(int id, Object... formatArgs) { return ""; }
+    public String getString(int id) {
+        String locale = mConfiguration.locale != null ? mConfiguration.locale.toString() : "";
+        String value = nativeGetString(id, locale);
+        if (value == null) {
+            throw new NotFoundException("string resource 0x" + Integer.toHexString(id));
+        }
+        return value;
+    }
+    public String getString(int id, Object... formatArgs) {
+        String value = getString(id);
+        java.util.Locale locale = mConfiguration.locale != null
+                ? mConfiguration.locale : java.util.Locale.getDefault();
+        return String.format(locale, value, formatArgs);
+    }
     public String[] getStringArray(int id) { return new String[0]; }
-    public CharSequence getText(int id) { return ""; }
-    public CharSequence getText(int id, CharSequence def) { return def; }
+    public CharSequence getText(int id) { return getString(id); }
+    public CharSequence getText(int id, CharSequence def) {
+        String locale = mConfiguration.locale != null ? mConfiguration.locale.toString() : "";
+        String value = nativeGetString(id, locale);
+        return value != null ? value : def;
+    }
     public CharSequence[] getTextArray(int id) { return new CharSequence[0]; }
     public int[] getIntArray(int id) { return new int[0]; }
-    public int getIdentifier(String name, String defType, String defPackage) { return 0; }
-    public int getColor(int id) { return 0xFF000000; }
-    public int getColor(int id, Theme theme) { return 0xFF000000; }
+    public int getIdentifier(String name, String defType, String defPackage) {
+        return nativeGetIdentifier(name, defType, defPackage);
+    }
+    public int getColor(int id) {
+        String locale = mConfiguration.locale != null ? mConfiguration.locale.toString() : "";
+        return nativeGetColor(id, locale);
+    }
+    public int getColor(int id, Theme theme) { return getColor(id); }
     public ColorStateList getColorStateList(int id) { return null; }
     public ColorStateList getColorStateList(int id, Theme theme) { return null; }
     public float getDimension(int id) { return 0.0f; }
@@ -130,8 +159,22 @@ public class Resources {
     }
 
     public void updateConfiguration(Configuration config, DisplayMetrics metrics) {
-        if (config != null) mConfiguration.setTo(config);
         if (metrics != null) mMetrics.setTo(metrics);
+        if (config != null) mConfiguration.setTo(config);
+        else if (metrics != null) deriveConfiguration(mConfiguration, mMetrics);
+    }
+
+    private static void deriveConfiguration(Configuration out, DisplayMetrics metrics) {
+        float density = metrics.density > 0.0f ? metrics.density : 1.0f;
+        int widthDp = Math.max(1, Math.round(metrics.widthPixels / density));
+        int heightDp = Math.max(1, Math.round(metrics.heightPixels / density));
+        out.densityDpi = metrics.densityDpi > 0
+                ? metrics.densityDpi : Math.round(density * 160.0f);
+        out.screenWidthDp = widthDp;
+        out.screenHeightDp = heightDp;
+        out.smallestScreenWidthDp = Math.min(widthDp, heightDp);
+        out.orientation = widthDp > heightDp
+                ? Configuration.ORIENTATION_LANDSCAPE : Configuration.ORIENTATION_PORTRAIT;
     }
 
     public final void flushLayoutCache() {}

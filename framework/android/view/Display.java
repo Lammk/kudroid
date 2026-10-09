@@ -18,6 +18,8 @@ public class Display {
     private float mDensity = 2.0f;
     private int mDensityDpi = 320;
 
+    private static native float nativeGetDensity();
+
     public Display() {}
 
     public int getDisplayId() {
@@ -80,9 +82,12 @@ public class Display {
             int h = getHeight();
             outMetrics.widthPixels = w;
             outMetrics.heightPixels = h;
-            float density = 3.0f;
-            if (Math.min(w, h) <= 750) density = 2.0f;
-            else if (Math.min(w, h) >= 1200) density = 3.0f;
+            float density = 1.0f;
+            try {
+                float hostDensity = nativeGetDensity();
+                if (hostDensity > 0.0f && !Float.isInfinite(hostDensity) &&
+                        !Float.isNaN(hostDensity)) density = hostDensity;
+            } catch (Throwable ignored) {}
             int dpi = (int)(density * 160.0f);
             outMetrics.density = density;
             outMetrics.densityDpi = dpi;

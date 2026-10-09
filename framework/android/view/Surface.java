@@ -16,13 +16,16 @@ public class Surface {
     public static final int ROTATION_3 = 3;
 
     public long mNativeObject = 0;
-    private boolean mValid = true;
+    private boolean mValid;
+    private int mWidth;
+    private int mHeight;
 
     public Surface() {
     }
 
     public Surface(long nativeObject) {
         this.mNativeObject = nativeObject;
+        this.mValid = nativeObject != 0;
     }
 
     /** Checks that the surface is still valid for drawing. */
@@ -32,7 +35,21 @@ public class Surface {
 
     public void release() {
         mValid = false;
+        mWidth = 0;
+        mHeight = 0;
         mNativeObject = 0;
+    }
+
+    void setSurfaceSize(int width, int height) {
+        mWidth = Math.max(0, width);
+        mHeight = Math.max(0, height);
+        mValid = mWidth > 0 && mHeight > 0;
+    }
+
+    void clearSurface() {
+        mValid = false;
+        mWidth = 0;
+        mHeight = 0;
     }
 
     /** Locks the software canvas for 2D drawing. */
@@ -56,10 +73,10 @@ public class Surface {
     }
 
     public int getWidth() {
-        return 0;
+        return mWidth;
     }
 
     public int getHeight() {
-        return 0;
+        return mHeight;
     }
 }

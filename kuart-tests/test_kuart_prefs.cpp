@@ -402,6 +402,10 @@ void TestPreferencesPersist(const std::string& androidRoot) {
                             "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/SharedPreferences$Editor;",
                             {Str("back\\slash"), Str("semi;colon")}, nullptr,
                             "putString(escapes)");
+                CallVirtual(e2.l, "putString",
+                            "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/SharedPreferences$Editor;",
+                            {Str("xml<&\"key"), Str("<value & \"quotes\">\nsecond line")}, nullptr,
+                            "putString(xml escapes)");
                 CallVirtual(e2.l, "commit", "()Z", {}, nullptr, "commit(tricky)");
             }
             DexObject* reread = NewPrefs(guestDir, "tricky", "reopen prefs(tricky)");
@@ -418,6 +422,13 @@ void TestPreferencesPersist(const std::string& androidRoot) {
                                 {Str("back\\slash"), Str("LOST")}, &v2, "getString(\\)")) {
                     Check(std::strcmp(Utf8Of(v2), "semi;colon") == 0,
                           "a backslash in a key and a ';' in a value round-trip");
+                }
+                DexValue v3;
+                if (CallVirtual(reread, "getString",
+                                "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+                                {Str("xml<&\"key"), Str("LOST")}, &v3, "getString(xml)")) {
+                    Check(std::strcmp(Utf8Of(v3), "<value & \"quotes\">\nsecond line") == 0,
+                          "XML metacharacters and line breaks round-trip");
                 }
             }
         }
@@ -594,24 +605,99 @@ void TestPreferencesPersist(const std::string& androidRoot) {
     }
 }
 
-// The prefs file must be a real file on the host, under android_root. Checking only through
-// Java would pass even if both sides were consistently wrong about where it lives.
+// The prefs file must be Android XML on the host, under android_root. Checking only through
+// Java would pass even if both sides were consistently wrong about its format or location.
 void TestPrefsFileOnDisk(const std::string& androidRoot) {
     std::printf("-- the prefs file is where it should be --\n");
     const std::string path =
-        androidRoot + "/data/data/com.kudroid.test/shared_prefs/settings.prefs";
+        androidRoot + "/data/data/com.kudroid.test/shared_prefs/settings.xml";
     Check(std::filesystem::exists(path),
-          "settings.prefs exists under android_root/data/data/<pkg>/shared_prefs");
+          "settings.xml exists under android_root/data/data/<pkg>/shared_prefs");
     if (std::filesystem::exists(path)) {
         std::ifstream in(path);
         const std::string text((std::istreambuf_iterator<char>(in)), {});
-        Check(text.find("device_id") != std::string::npos,
-              "the file contains the key that was written");
+        Check(text.find("<?xml") != std::string::npos && text.find("<map>") != std::string::npos,
+              "the file has the Android XML declaration and map root");
+        Check(text.find("<string name=\"device_id\">") != std::string::npos,
+              "the file contains the Android string tag and key");
         Check(text.find("6ba7b810-9dad-11d1-80b4-00c04fd430c8") != std::string::npos,
               "the file contains the value that was written");
+        Check(!std::filesystem::exists(path.substr(0, path.size() - 4) + ".prefs"),
+              "the new XML store does not leave a legacy file");
         // The temporary file used for the atomic replace must not be left behind.
         Check(!std::filesystem::exists(path + ".tmp"),
               "the temporary file was renamed away, not left on disk");
+    }
+    const std::string trickyPath =
+        androidRoot + "/data/data/com.kudroid.test/shared_prefs/tricky.xml";
+    if (std::filesystem::exists(trickyPath)) {
+        std::ifstream in(trickyPath);
+        const std::string text((std::istreambuf_iterator<char>(in)), {});
+        Check(text.find("&lt;value &amp; &quot;quotes&quot;&gt;&#10;second line") !=
+                      std::string::npos && text.find("xml&lt;&amp;&quot;key") != std::string::npos,
+              "XML text and attribute metacharacters are escaped on disk");
+    } else {
+        Check(false, "tricky.xml exists for XML escaping assertions");
+    }
+}
+
+void TestLegacyPrefsMigration(const std::string& androidRoot) {
+    std::printf("-- legacy preferences migrate to XML --\n");
+    const std::string hostDir = androidRoot + "/data/data/com.kudroid.test/shared_prefs";
+    std::filesystem::create_directories(hostDir);
+    const std::string legacyPath = hostDir + "/migration.prefs";
+    const std::string xmlPath = hostDir + "/migration.xml";
+    std::filesystem::remove(legacyPath);
+    std::filesystem::remove(xmlPath);
+    {
+        std::ofstream out(legacyPath);
+        out << "s:legacy_name=old\\=format\n"
+               "i:launch_count=7\n"
+               "S:features=touch;frame\n";
+    }
+    DexObject* migrated = NewPrefs("/data/data/com.kudroid.test/shared_prefs", "migration",
+                                   "new prefs(migration)");
+    if (migrated == nullptr) return;
+    DexValue stringValue, intValue, setValue;
+    if (CallVirtual(migrated, "getString",
+                    "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+                    {Str("legacy_name"), Str("missing")}, &stringValue, "legacy string")) {
+        Check(std::strcmp(Utf8Of(stringValue), "old=format") == 0,
+              "legacy strings are decoded before migration");
+    }
+    if (CallVirtual(migrated, "getInt", "(Ljava/lang/String;I)I",
+                    {Str("launch_count"), DexValue::Int(0)}, &intValue, "legacy int")) {
+        Check(intValue.i == 7, "legacy integer values load");
+    }
+    if (CallVirtual(migrated, "getStringSet", "(Ljava/lang/String;Ljava/util/Set;)Ljava/util/Set;",
+                    {Str("features"), DexValue::Ref(nullptr)}, &setValue, "legacy set") &&
+        setValue.l != nullptr) {
+        DexValue size;
+        if (CallVirtual(setValue.l, "size", "()I", {}, &size, "legacy set size")) {
+            Check(size.i == 2, "legacy set members load");
+        }
+    }
+    DexValue editor, committed;
+    if (CallVirtual(migrated, "edit", "()Landroid/content/SharedPreferences$Editor;", {},
+                    &editor, "migration editor")) {
+        CallVirtual(editor.l, "putBoolean",
+                    "(Ljava/lang/String;Z)Landroid/content/SharedPreferences$Editor;",
+                    {Str("migrated"), DexValue::Int(1)}, nullptr, "migration put");
+        if (CallVirtual(editor.l, "commit", "()Z", {}, &committed, "migration commit")) {
+            Check(committed.i == 1, "commit reports successful XML persistence");
+        }
+    }
+    Check(std::filesystem::exists(xmlPath), "migration writes the Android XML file");
+    Check(!std::filesystem::exists(legacyPath),
+          "legacy file is removed only after successful XML replacement");
+    if (std::filesystem::exists(xmlPath)) {
+        std::ifstream in(xmlPath);
+        const std::string text((std::istreambuf_iterator<char>(in)), {});
+        Check(text.find("old=format") != std::string::npos &&
+                  text.find("launch_count") != std::string::npos &&
+                  text.find("features") != std::string::npos &&
+                  text.find("migrated") != std::string::npos,
+              "XML migration preserves old values and includes the new edit");
     }
 }
 
@@ -653,6 +739,19 @@ void TestContextReturnsOneInstance() {
                     {Str("other_prefs"), DexValue::Int(0)}, &other, "getSharedPreferences 3")) {
         Check(other.l != nullptr && other.l != first.l,
               "a different name returns a different object");
+    }
+
+    DexObject* otherPackage = NewObject("Landroid/app/ApplicationContext;", "(Ljava/lang/String;)V",
+                                        {Str("com.kudroid.other")}, "new second package context");
+    if (otherPackage != nullptr) {
+        DexValue scoped;
+        if (CallVirtual(otherPackage, "getSharedPreferences",
+                        "(Ljava/lang/String;I)Landroid/content/SharedPreferences;",
+                        {Str("ctx_prefs"), DexValue::Int(0)}, &scoped,
+                        "getSharedPreferences(other package)")) {
+            Check(scoped.l != nullptr && scoped.l != first.l,
+                  "same preference name in another package has a separate instance");
+        }
     }
 
     // Write through the first handle and read through the second. With a fresh instance per
@@ -781,6 +880,7 @@ int main() {
     TestFileWriteThenRead(androidRoot);
     TestPreferencesPersist(androidRoot);
     TestPrefsFileOnDisk(androidRoot);
+    TestLegacyPrefsMigration(androidRoot);
     TestContextReturnsOneInstance();
 
     std::filesystem::remove_all(home);

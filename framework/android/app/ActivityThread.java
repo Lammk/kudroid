@@ -253,44 +253,59 @@ public final class ActivityThread {
     }
 
     public static void main(String[] args) {
-        Thread.setDefaultUncaughtExceptionHandler(new CrashHandler());
+        // KuART keeps its Java heap and static fields between shell sessions.
+        // Clear only state owned by this guest UI thread before preparing a new run.
+        Looper.resetMainLooperForRelaunch();
+        android.view.Choreographer.resetForRelaunch();
+        sPendingMoveMsg = null;
+        sLastDownTime = 0;
+        sCurrentActivityThread = null;
+        sPackageName = "";
 
-        Looper.prepareMainLooper();
-        ActivityThread thread = new ActivityThread();
-        thread.attach();
-
-        // args carry what the C++ layer read out of AndroidManifest.xml. Nothing is
-        // guessed or hardcoded: entries the manifest does not declare arrive empty.
-        //   args[0]      package name
-        //   args[1]      android:appComponentFactory, or "" if absent
-        //   args[2]      android:name on <application>, or "" if absent
-        //   args[3..]    activity candidates in launch order, args[3] the launcher
-        final String packageName = (args != null && args.length > 0) ? args[0] : "";
-        final String factoryName = (args != null && args.length > 1) ? args[1] : "";
-        final String appClassName = (args != null && args.length > 2) ? args[2] : "";
-
-        String[] candidates = new String[0];
-        if (args != null && args.length > 3) {
-            candidates = new String[args.length - 3];
-            for (int i = 3; i < args.length; i++) candidates[i - 3] = args[i];
-        }
-
-        if (packageName != null && !packageName.isEmpty()) sPackageName = packageName;
-
-        thread.bootstrapApplication(factoryName, appClassName);
-
-        if (candidates.length > 0 && candidates[0] != null && !candidates[0].isEmpty()) {
-            android.util.Log.i("ActivityThread", "Launching target Activity immediately: " + candidates[0]);
-            thread.handleLaunchActivity(candidates);
-        }
-
-        // Main UI event loop
         try {
-            Looper.loop();
-        } catch (Throwable t) {
-            android.util.Log.e("ActivityThread", "Handled exception in main looper: " + t.toString());
-            t.printStackTrace();
+            Thread.setDefaultUncaughtExceptionHandler(new CrashHandler());
+
+            Looper.prepareMainLooper();
+            ActivityThread thread = new ActivityThread();
+            thread.attach();
+
+            // args carry what the C++ layer read out of AndroidManifest.xml. Nothing is
+            // guessed or hardcoded: entries the manifest does not declare arrive empty.
+            //   args[0]      package name
+            //   args[1]      android:appComponentFactory, or "" if absent
+            //   args[2]      android:name on <application>, or "" if absent
+            //   args[3..]    activity candidates in launch order, args[3] the launcher
+            final String packageName = (args != null && args.length > 0) ? args[0] : "";
+            final String factoryName = (args != null && args.length > 1) ? args[1] : "";
+            final String appClassName = (args != null && args.length > 2) ? args[2] : "";
+
+            String[] candidates = new String[0];
+            if (args != null && args.length > 3) {
+                candidates = new String[args.length - 3];
+                for (int i = 3; i < args.length; i++) candidates[i - 3] = args[i];
+            }
+
+            if (packageName != null && !packageName.isEmpty()) sPackageName = packageName;
+
+            thread.bootstrapApplication(factoryName, appClassName);
+
+            if (candidates.length > 0 && candidates[0] != null && !candidates[0].isEmpty()) {
+                android.util.Log.i("ActivityThread", "Launching target Activity immediately: " + candidates[0]);
+                thread.handleLaunchActivity(candidates);
+            }
+
+            // Main UI event loop
+            try {
+                Looper.loop();
+            } catch (Throwable t) {
+                android.util.Log.e("ActivityThread", "Handled exception in main looper: " + t.toString());
+                t.printStackTrace();
+            }
         } finally {
+            android.view.Choreographer.resetForRelaunch();
+            Looper.resetMainLooperForRelaunch();
+            sPendingMoveMsg = null;
+            sLastDownTime = 0;
             sCurrentActivityThread = null;
             sPackageName = "";
             android.util.Log.i("ActivityThread", "Main Looper exited. ActivityThread terminated.");
@@ -590,29 +605,18 @@ public final class ActivityThread {
                 try {
                     mInitialActivity.attach(new ApplicationContext());
                 } catch (Throwable ignored) {}
-                android.util.Log.i("ActivityThread", "Calling onCreate()...");
-                mInitialActivity.onCreate(null);
-                android.util.Log.i("ActivityThread", "Calling onStart()...");
-                mInitialActivity.onStart();
-                android.util.Log.i("ActivityThread", "Calling onResume()...");
-                mInitialActivity.onResume();
-                mInitialActivity.onWindowFocusChanged(true);
+                android.util.Log.i("ActivityThread", "Calling performCreate()...");
+                mInitialActivity.performCreate(null);
+                android.util.Log.i("ActivityThread", "Calling performStart()...");
+                mInitialActivity.performStart();
+                android.util.Log.i("ActivityThread", "Calling performResume()...");
+                mInitialActivity.performResume();
 
-                // Dispatch surface lifecycle callbacks immediately and also post to main loop
+                // Layout uses the bound host framebuffer. Surface callbacks and focus
+                // are delivered only after this pass has produced real view bounds.
+                mInitialActivity.renderViewHierarchy();
                 dispatchSurfaceCallbacks(mInitialActivity);
-                if (mH != null) {
-                    mH.post(new Runnable() {
-                        @Override
-                        public void run() {
-                            dispatchSurfaceCallbacks(mInitialActivity);
-                        }
-                    });
-                }
-
-                if (mInitialActivity.getContentView() != null) {
-                    mInitialActivity.renderViewHierarchy();
-                }
-                android.util.Log.i("ActivityThread", "Activity launch complete! UI is live and rendered to Metal canvas.");
+                android.util.Log.i("ActivityThread", "Activity launch complete.");
             } catch (Throwable t) {
                 android.util.Log.e("ActivityThread", "NON-FATAL in Activity lifecycle: " + t.toString());
                 for (Throwable c = t.getCause(); c != null; c = c.getCause()) {
@@ -653,80 +657,27 @@ public final class ActivityThread {
             }
         }
 
-        // Start Android's Main Event Loop
-        android.util.Log.i("ActivityThread", "Entering Looper.loop() main event loop...");
-        android.os.Looper.loop();
+        // main() owns the only UI event loop. Returning here lets launch setup
+        // finish before that loop begins and avoids nesting a second Looper.loop().
     }
 
     private void dispatchSurfaceCallbacks(final Activity activity) {
         if (activity == null) return;
         try {
+            android.view.Window window = activity.getWindow();
+            android.graphics.Canvas canvas = new android.graphics.Canvas();
+            final int width = canvas.getWidth();
+            final int height = canvas.getHeight();
+            final boolean surfaceReady = android.graphics.Canvas.isSurfaceReady();
+            window.updateSurfaceSize(width, height, surfaceReady);
+            if (!window.measureAndLayout()) return;
+
             android.view.SurfaceView foundSv = findSurfaceView(activity);
-            android.util.Log.e("KuSurface", "dispatch foundSv="
-                    + (foundSv != null ? foundSv.getClass().getName() : "null")
-                    + " activity=" + activity.getClass().getName()
-                    + " reqOri=" + activity.getRequestedOrientation());
             if (foundSv != null) {
-                android.util.Log.i("ActivityThread", "Found SurfaceView in hierarchy -> dispatching surfaceCreated");
-                foundSv.dispatchSurfaceCreated();
+                foundSv.dispatchSurfaceReady(foundSv.getWidth(), foundSv.getHeight());
             }
-
-            int realW = 1080;
-            int realH = 1920;
-            try {
-                android.graphics.Canvas c = new android.graphics.Canvas();
-                if (c.getWidth() > 0 && c.getHeight() > 0) {
-                    realW = c.getWidth();
-                    realH = c.getHeight();
-                }
-            } catch (Throwable ignored) {}
-
-            int surfaceW = realW;
-            int surfaceH = realH;
-            int reqOri = activity.getRequestedOrientation();
-
-            if (reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE ||
-                reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE ||
-                reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE ||
-                reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE) {
-                surfaceW = Math.max(realW, realH);
-                surfaceH = Math.min(realW, realH);
-            } else if (reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT ||
-                       reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT ||
-                       reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT ||
-                       reqOri == android.content.pm.ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT) {
-                surfaceW = Math.min(realW, realH);
-                surfaceH = Math.max(realW, realH);
-            }
-
-            if (activity instanceof android.view.SurfaceHolder.Callback) {
-                android.view.SurfaceHolder.Callback cb = (android.view.SurfaceHolder.Callback) activity;
-                android.view.SurfaceHolder holder = (foundSv != null) ? foundSv.getHolder() :
-                    (((Object) activity instanceof android.view.SurfaceView) ?
-                        ((android.view.SurfaceView) (Object) activity).getHolder() :
-                        new android.view.SurfaceView(activity).getHolder());
-                android.util.Log.i("ActivityThread", "Activity implements SurfaceHolder.Callback -> dispatching surfaceChanged(" + surfaceW + "x" + surfaceH + ")");
-                if (foundSv != null) {
-                    // No dedupe here either: Unity tolerates repeated
-                    // created/changed (swapchain rebuilds are idempotent
-                    // when nothing changed) but starves without them.
-                    android.util.Log.e("KuSurface", "direct changedOnce "
-                            + cb.getClass().getName() + " " + surfaceW + "x" + surfaceH);
-                    cb.surfaceCreated(holder);
-                    cb.surfaceChanged(holder, 0, surfaceW, surfaceH);
-                    if (cb instanceof android.view.SurfaceHolder.Callback2) {
-                        ((android.view.SurfaceHolder.Callback2) cb).surfaceRedrawNeeded(holder);
-                    }
-                } else {
-                    cb.surfaceCreated(holder);
-                    cb.surfaceChanged(holder, 0, surfaceW, surfaceH);
-                    if (cb instanceof android.view.SurfaceHolder.Callback2) {
-                        ((android.view.SurfaceHolder.Callback2) cb).surfaceRedrawNeeded(holder);
-                    }
-                }
-            }
-
-            activity.onWindowFocusChanged(true);
+            window.dispatchSurfaceReady();
+            if (!activity.hasWindowFocus()) activity.performWindowFocusChanged(true);
         } catch (Throwable st) {
             android.util.Log.e("ActivityThread", "NON-FATAL surface callback: " + st.toString());
         }
@@ -734,9 +685,6 @@ public final class ActivityThread {
 
     private static android.view.SurfaceView findSurfaceView(Activity activity) {
         if (activity == null) return null;
-        if ((Object) activity instanceof android.view.SurfaceView) {
-            return (android.view.SurfaceView) (Object) activity;
-        }
         android.view.View root = activity.getContentView();
         return findSurfaceViewInView(root);
     }
@@ -824,7 +772,10 @@ public final class ActivityThread {
     private void handlePauseActivity() {
         try {
             if (mInitialActivity != null) {
-                mInitialActivity.onPause();
+                if (mInitialActivity.hasWindowFocus()) {
+                    mInitialActivity.performWindowFocusChanged(false);
+                }
+                if (mInitialActivity.isResumed()) mInitialActivity.performPause();
             }
         } catch (Throwable t) {
             t.printStackTrace();
@@ -835,7 +786,10 @@ public final class ActivityThread {
     private void handleResumeActivity() {
         try {
             if (mInitialActivity != null) {
-                mInitialActivity.onResume();
+                if (!mInitialActivity.isStarted()) mInitialActivity.performStart();
+                if (!mInitialActivity.isResumed()) mInitialActivity.performResume();
+                mInitialActivity.renderViewHierarchy();
+                dispatchSurfaceCallbacks(mInitialActivity);
             }
         } catch (Throwable t) {
             t.printStackTrace();
@@ -845,12 +799,27 @@ public final class ActivityThread {
     private void handleDestroyActivity() {
         try {
             if (mInitialActivity != null) {
-                mInitialActivity.onDestroy();
+                if (mInitialActivity.hasWindowFocus()) {
+                    mInitialActivity.performWindowFocusChanged(false);
+                }
+                if (mInitialActivity.isResumed()) mInitialActivity.performPause();
+                if (mInitialActivity.isStarted()) mInitialActivity.performStop();
+                android.view.Window window = mInitialActivity.getWindow();
+                window.updateSurfaceSize(0, 0, false);
+                android.view.SurfaceView surfaceView = findSurfaceView(mInitialActivity);
+                if (surfaceView != null) surfaceView.dispatchSurfaceDestroyed();
+                mInitialActivity.performDestroy();
                 mInitialActivity = null;
             }
         } catch (Throwable t) {
             t.printStackTrace();
         }
+        try {
+            android.view.inputmethod.InputMethodManager.resetForRelaunch();
+        } catch (Throwable ignored) {}
+        try {
+            android.view.Choreographer.resetForRelaunch();
+        } catch (Throwable ignored) {}
         try {
             if (Looper.myLooper() != null) {
                 Looper.myLooper().quitForTeardown();

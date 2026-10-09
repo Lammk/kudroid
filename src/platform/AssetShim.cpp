@@ -1,4 +1,5 @@
 #include "kudroid/platform/AssetShim.h"
+#include "kudroid/ResourceTable.h"
 #include "kudroid/platform/ShimDefs.h"
 #include "kudroid/platform/MemoryInfo.h"
 #include "kudroid/DeviceProfile.h"
@@ -66,16 +67,64 @@ static std::mutex g_assetsMtx;
 
 extern "C" void kudroid_set_assets_dir(const char* dir) {
     if (!dir) return;
-    std::lock_guard<std::mutex> lock(g_assetsMtx);
-    g_assetsDir = dir;
+    {
+        std::lock_guard<std::mutex> lock(g_assetsMtx);
+        g_assetsDir = dir;
+    }
+    kudroid::reset_resource_table_cache();
 }
 
-// Returned by value: the old c_str() dangled on the next set_assets_dir and
-// raced every reader. Set once at startup, but correctness should not depend
-// on that staying true.
-std::string kudroid_get_assets_dir_cpp(void) {
-    std::lock_guard<std::mutex> lock(g_assetsMtx);
-    return g_assetsDir;
+extern "C" int kudroid_package_resolve_bytes(const char* entry, char** outPath,
+                                               int64_t* outOffset, int64_t* outLength) {
+    if (outPath) *outPath = nullptr;
+    if (outOffset) *outOffset = 0;
+    if (outLength) *outLength = 0;
+    if (entry == nullptr || entry[0] == '\0' || std::strchr(entry, '/') != nullptr ||
+        std::strchr(entry, '\\') != nullptr) return 0;
+
+    const std::string assetsDir = kudroid::kudroid_get_assets_dir_cpp();
+    if (assetsDir.empty()) return 0;
+    const std::filesystem::path appDir = std::filesystem::path(assetsDir).parent_path();
+    const std::filesystem::path loose = appDir / entry;
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(loose, ec)) {
+        const auto size = std::filesystem::file_size(loose, ec);
+        if (ec || size == 0 || size > static_cast<uint64_t>(INT64_MAX)) return 0;
+        const std::string path = loose.string();
+        char* copy = static_cast<char*>(std::malloc(path.size() + 1));
+        if (copy == nullptr) return -1;
+        std::memcpy(copy, path.c_str(), path.size() + 1);
+        if (outPath) *outPath = copy;
+        else std::free(copy);
+        if (outLength) *outLength = static_cast<int64_t>(size);
+        return 1;
+    }
+
+    const std::filesystem::path apk = appDir / "base.apk";
+    if (!std::filesystem::is_regular_file(apk, ec)) return 0;
+    uint64_t offset = 0, size = 0;
+    uint16_t method = 0;
+    if (!zip_stat_entry(apk.string(), entry, &offset, &size, &method) || size == 0 ||
+        size > static_cast<uint64_t>(INT64_MAX) || offset > static_cast<uint64_t>(INT64_MAX)) return 0;
+
+    std::string backingPath;
+    int64_t backingOffset = 0;
+    if (method == 0) {
+        backingPath = apk.string();
+        backingOffset = static_cast<int64_t>(offset);
+    } else {
+        backingPath = extract_jar_entry_to_cache(
+                apk.string(), entry, VFSPathRemapper::getInstance().androidRoot());
+        if (backingPath.empty()) return -1;
+    }
+    char* copy = static_cast<char*>(std::malloc(backingPath.size() + 1));
+    if (copy == nullptr) return -1;
+    std::memcpy(copy, backingPath.c_str(), backingPath.size() + 1);
+    if (outPath) *outPath = copy;
+    else std::free(copy);
+    if (outOffset) *outOffset = backingOffset;
+    if (outLength) *outLength = static_cast<int64_t>(size);
+    return 1;
 }
 
 extern "C" const char* kudroid_get_assets_dir(void) {

@@ -19,6 +19,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -34,9 +35,8 @@ extern "C" void kuart_send_lifecycle_event(int event);
 extern "C" void kudroid_gpu_note_run_end(void);
 extern "C" void kudroid_frame_presented_reset(void);
 
-// One in-flight teardown: X, viewWillDisappear and deinit can each post DESTROY.
-// File scope so run end can re-arm it; resetting right after unbind allowed a
-// second DESTROY into a half-destroyed engine.
+// `s_stopping` in BridgeShared serializes teardown with run completion. It stays
+// latched until GuestLibrary's completion guard releases the run after cleanup.
 
 
 extern "C" void kudroid_note_java_paused(void) {
@@ -281,7 +281,6 @@ extern "C" void kudroid_unbind_metal_layer(void) {
     g_metalLayer = nullptr;
     g_metalLayerWidth = 0;
     g_metalLayerHeight = 0;
-    s_isApkRunning.store(false);
     kudroid_android_log_message(2, "KuDroidGPU", "kudroid_unbind_metal_layer: GPU surface unbound cleanly.");
 }
 
@@ -444,28 +443,42 @@ extern "C" JNIEXPORT void JNICALL Java_android_os_PowerManager_00024WakeLock_set
 
 static kudroid_soft_input_show_cb s_softInputShow = nullptr;
 static kudroid_soft_input_hide_cb s_softInputHide = nullptr;
+static std::mutex s_softInputCallbackMutex;
 
 extern "C" void kudroid_set_soft_input_callbacks(kudroid_soft_input_show_cb show,
                                                 kudroid_soft_input_hide_cb hide) {
-    s_softInputShow = show;
-    s_softInputHide = hide;
+    {
+        std::lock_guard<std::mutex> lock(s_softInputCallbackMutex);
+        s_softInputShow = show;
+        s_softInputHide = hide;
+    }
     fprintf(stderr, "[KuDroidCore] soft input callbacks %s\n",
             (show != nullptr || hide != nullptr) ? "registered" : "cleared");
 }
 
 extern "C" int kudroid_show_soft_input(int flags) {
+    kudroid_soft_input_show_cb callback = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(s_softInputCallbackMutex);
+        callback = s_softInputShow;
+    }
     fprintf(stderr, "[KuDroidCore] kudroid_show_soft_input(flags=0x%x) host=%s\n",
-            flags, s_softInputShow != nullptr ? "yes" : "none");
-    if (s_softInputShow == nullptr) return 0;
-    s_softInputShow(flags);
+            flags, callback != nullptr ? "yes" : "none");
+    if (callback == nullptr) return 0;
+    callback(flags);
     return 1;
 }
 
 extern "C" int kudroid_hide_soft_input(void) {
+    kudroid_soft_input_hide_cb callback = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(s_softInputCallbackMutex);
+        callback = s_softInputHide;
+    }
     fprintf(stderr, "[KuDroidCore] kudroid_hide_soft_input() host=%s\n",
-            s_softInputHide != nullptr ? "yes" : "none");
-    if (s_softInputHide == nullptr) return 0;
-    s_softInputHide();
+            callback != nullptr ? "yes" : "none");
+    if (callback == nullptr) return 0;
+    callback();
     return 1;
 }
 
@@ -501,14 +514,14 @@ extern "C" void kudroid_clear_crash_state(void) {
 }
 
 extern "C" void kudroid_stop_app(void) {
-    // Teardown that does not run bytecode happens on the caller's thread, so the
-    // shell sees the app marked stopped the moment ✕ is pressed.
-    //
     // A fatal guest fault is a different kind of stop: the shell's crash path calls
     // this from handleCrash and then reads the report with kudroid_get_last_crash_tail,
     // so the report must survive this call (that reader clears it).
     const bool crashed = g_hasCrashed.load(std::memory_order_relaxed);
-    s_isApkRunning.store(false);
+    // Serialize stop requests with run completion so a late request cannot latch
+    // stopping after a new run has acquired the shared runtime.
+    if (!request_apk_stop()) return;
+
     if (!crashed) {
         kudroid_clear_crash_state();
     }
@@ -533,30 +546,30 @@ extern "C" void kudroid_stop_app(void) {
     // Guarded to one in-flight teardown: X, viewWillDisappear and deinit can each
     // post DESTROY, and a second post races the first's onDestroy->nativeDone,
     // destroying an engine that is already half destroyed.
-    bool expected = false;
-    if (!s_stopping.compare_exchange_strong(expected, true)) return;
     kudroid_log_signal_disposition("stop-app");
     std::thread([crashed] {
         if (!crashed) {
             // PAUSE first: the player loop must stop rendering before DESTROY runs
             // nativeDone, or teardown races in-flight frames on a torn surface.
+            const auto deadline = std::chrono::steady_clock::now() +
+                                  std::chrono::milliseconds(300);
             const unsigned long long pausedBefore = kudroid_paused_generation();
             kuart_send_lifecycle_event(101);  // PAUSE_ACTIVITY
-            // Up to 2s for the Java pause handler to run (Unity's own pause timeout).
-            for (int i = 0; i < 400 && kudroid_paused_generation() == pausedBefore; ++i) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            // PAUSE acknowledgement and frame drain share one bounded budget.
+            while (kudroid_paused_generation() == pausedBefore &&
+                   std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
-            // Drain frames already inside nativeRender (2s cap matches Unity's own
-            // pause timeout); unbind stays at run end.
-            for (int i = 0; i < 400 && kudroid::native_frame_in_flight() > 0; ++i) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            // Drain frames already inside nativeRender using only remaining time.
+            while (kudroid::native_frame_in_flight() > 0 &&
+                   std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
         } else {
             // The player loop is already gone (no frame has been presented for seconds
-            // when the fault lands), so the pause handshake above can only burn its full
-            // 4s of timeouts — that wait is the freeze the user sees instead of the app
-            // closing. Go straight to DESTROY: onDestroy is what quits the looper, and it
-            // is the one step teardown cannot skip.
+            // when the fault lands), so a pause handshake only adds delay. Go straight to
+            // DESTROY: onDestroy is what quits the looper, and it is the one step teardown
+            // cannot skip.
             fprintf(stderr,
                     "[KuDroidCore] crash teardown: skipping the pause handshake "
                     "(engine already stopped presenting)\n");

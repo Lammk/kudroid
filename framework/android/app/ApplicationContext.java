@@ -62,7 +62,7 @@ public class ApplicationContext extends Context {
 
     @Override
     public Resources getResources() {
-        if (mResources == null) mResources = new Resources();
+        if (mResources == null) mResources = new Resources(getAssets(), null, null);
         return mResources;
     }
 
@@ -95,7 +95,7 @@ public class ApplicationContext extends Context {
     }
 
     /**
-     * Preferences, cached by name.
+     * Preferences, cached by package and name.
      *
      * A fresh instance per call is a bug that hides as a persistence problem: two calls
      * return two independent stores, so a value written through one is absent from the
@@ -108,12 +108,13 @@ public class ApplicationContext extends Context {
 
     @Override
     public SharedPreferences getSharedPreferences(String name, int mode) {
-        final String key = name != null ? name : "default";
+        final String preferenceName = name != null ? name : "default";
+        final String key = mPackageName.length() + ":" + mPackageName + preferenceName;
         synchronized (sPrefs) {
             SharedPreferences existing = sPrefs.get(key);
             if (existing != null) return existing;
             SharedPreferences created = new android.content.SharedPreferencesImpl(
-                    key, ensure(new File("/data/data/" + mPackageName + "/shared_prefs")));
+                    preferenceName, ensure(new File("/data/data/" + mPackageName + "/shared_prefs")));
             sPrefs.put(key, created);
             return created;
         }

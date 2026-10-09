@@ -32,6 +32,8 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
     private boolean mCreated = false;
     private boolean mStarted = false;
     private boolean mResumed = false;
+    private Thread mUiThread;
+    private android.os.Handler mUiHandler;
 
     public Activity() {
     }
@@ -46,7 +48,17 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
      */
     public void attach(Context base) {
         attachBaseContext(base);
+        android.os.Looper mainLooper = android.os.Looper.getMainLooper();
+        if (mainLooper != null) {
+            synchronized (this) {
+                mUiThread = mainLooper.getThread();
+                mUiHandler = new android.os.Handler(mainLooper);
+            }
+        }
         getWindow().setCallback(this);
+        if (this instanceof android.view.SurfaceHolder.Callback) {
+            getWindow().setActivitySurfaceCallback((android.view.SurfaceHolder.Callback) this);
+        }
     }
 
     public void setRequestedOrientation(int requestedOrientation) {
@@ -154,7 +166,7 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
         onPause();
     }
 
-    private boolean mHasWindowFocus = true;
+    private boolean mHasWindowFocus;
 
     public boolean hasWindowFocus() {
         return mHasWindowFocus;
@@ -166,6 +178,12 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
      */
     public void onWindowFocusChanged(boolean hasFocus) {
         mHasWindowFocus = hasFocus;
+    }
+
+    /** Dispatch a focus transition while keeping framework focus state authoritative. */
+    public void performWindowFocusChanged(boolean hasFocus) {
+        mHasWindowFocus = hasFocus;
+        onWindowFocusChanged(hasFocus);
     }
 
     /**
@@ -595,7 +613,13 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
         // androidx reads window insets and system-UI flags off the decor view, and an
         // app that sets its content through the Activity expects the Window to agree.
         getWindow().setContentView(view);
-        renderViewHierarchy();
+        if (mResumed && mUiHandler != null) {
+            mUiHandler.post(new Runnable() {
+                @Override public void run() {
+                    if (mResumed) renderViewHierarchy();
+                }
+            });
+        }
     }
 
     /**
@@ -603,7 +627,7 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
      */
     public android.view.View findViewById(int id) {
         if (id == android.R.id.content || id == 0x01020002) {
-            return getWindow().getDecorView();
+            return getWindow().findViewById(id);
         }
         if (mContentView != null) {
             if (mContentView.getId() == id) return mContentView;
@@ -680,30 +704,25 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
      * top of itself in the top-left corner.
      */
     public void renderViewHierarchy() {
-        if (mContentView == null) {
-            return;
-        }
         try {
             android.graphics.Canvas canvas = new android.graphics.Canvas();
             final int width = canvas.getWidth();
             final int height = canvas.getHeight();
 
-            // EXACTLY: the root view gets the whole screen, nothing more or less.
-            mContentView.measure(
-                    android.view.View.MeasureSpec.makeMeasureSpec(
-                            width, android.view.View.MeasureSpec.EXACTLY),
-                    android.view.View.MeasureSpec.makeMeasureSpec(
-                            height, android.view.View.MeasureSpec.EXACTLY));
-            mContentView.layout(0, 0, width, height);
+            android.view.Window window = getWindow();
+            window.updateSurfaceSize(width, height, android.graphics.Canvas.isSurfaceReady());
+            if (!window.measureAndLayout()) return;
+            android.view.View decor = window.getDecorView();
+            if (decor == null) return;
 
             // If this activity contains a SurfaceView (like 3D games with OpenGL/Metal),
             // do not blit the 2D software canvas over the native hardware CAMetalLayer.
-            if (containsSurfaceView(mContentView)) {
+            if (containsSurfaceView(decor)) {
                 return;
             }
 
             canvas.drawColor(0xFF181818);
-            mContentView.draw(canvas);
+            decor.draw(canvas);
             canvas.flush();
         } catch (Throwable t) {
             t.printStackTrace();
@@ -713,8 +732,35 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
     /**
      * runs on the UI thread.
      */
-    public void runOnUiThread(Runnable action) {
-        if (action != null) {
+    public void runOnUiThread(final Runnable action) {
+        if (action == null) return;
+
+        android.os.Looper mainLooper = android.os.Looper.getMainLooper();
+        if (mainLooper == null) return;
+        final android.os.Handler handler;
+        final Thread uiThread;
+        synchronized (this) {
+            if (mUiHandler == null || mUiHandler.getLooper() != mainLooper) {
+                mUiHandler = new android.os.Handler(mainLooper);
+                mUiThread = mainLooper.getThread();
+            } else if (mUiThread == null) {
+                mUiThread = mainLooper.getThread();
+            }
+            handler = mUiHandler;
+            uiThread = mUiThread;
+        }
+
+        if (Thread.currentThread() != uiThread) {
+            handler.post(new Runnable() {
+                @Override
+                public void run() {
+                    action.run();
+                    if (!containsSurfaceView(mContentView)) {
+                        renderViewHierarchy();
+                    }
+                }
+            });
+        } else {
             action.run();
             if (!containsSurfaceView(mContentView)) {
                 renderViewHierarchy();

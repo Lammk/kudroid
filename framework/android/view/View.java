@@ -34,6 +34,7 @@ public class View implements KeyEvent.Callback {
     private int mVisibility = VISIBLE;
     private int mId = -1;
     private ViewGroup mParent;
+    private android.os.Handler mRunQueue;
     private OnClickListener mOnClickListener;
     private OnLongClickListener mOnLongClickListener;
     private OnTouchListener mOnTouchListener;
@@ -805,12 +806,36 @@ public class View implements KeyEvent.Callback {
         }
     }
 
+    private synchronized android.os.Handler getRunQueue() {
+        android.os.Looper mainLooper = android.os.Looper.getMainLooper();
+        if (mainLooper == null) return null;
+        if (mRunQueue == null || mRunQueue.getLooper() != mainLooper) {
+            mRunQueue = new android.os.Handler(mainLooper);
+        }
+        return mRunQueue;
+    }
+
     /**
-     * post a runnable to the ui stream.
+     * Enqueue work for the UI thread. Posted actions never run inline.
      */
     public boolean post(Runnable action) {
-        action.run();
-        return true;
+        if (action == null) return false;
+        android.os.Handler handler = getRunQueue();
+        return handler != null && handler.post(action);
+    }
+
+    /** Enqueue work for the UI thread after the requested delay. */
+    public boolean postDelayed(Runnable action, long delayMillis) {
+        if (action == null) return false;
+        android.os.Handler handler = getRunQueue();
+        return handler != null && handler.postDelayed(action, delayMillis);
+    }
+
+    /** Remove queued instances of a Runnable posted through this View. */
+    public void removeCallbacks(Runnable action) {
+        if (action == null) return;
+        android.os.Handler handler = getRunQueue();
+        if (handler != null) handler.removeCallbacks(action);
     }
 
     // Tags.

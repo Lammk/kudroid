@@ -4,17 +4,10 @@ import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Rect;
 
-/**
- * Minimum stub of android.view.SurfaceView for KuDroid.
- *
- * Android game standard pattern:
- *   class MainActivity extends SurfaceView implements SurfaceHolder.Callback2
- * MCPE's MainActivity inherits this class so the JVM needs to resolve the entire hierarchy
- * when loading. onDraw is a no-op because the actual rendering runs through the native Metal pipeline.
- */
+/** A lightweight SurfaceView whose holder follows the laid out host surface. */
 public class SurfaceView extends View implements SurfaceHolder.Callback2 {
 
-    private SurfaceHolder mHolder;
+    private final SimpleSurfaceHolder mHolder;
 
     public SurfaceView(Context context) {
         this(context, null);
@@ -28,175 +21,193 @@ public class SurfaceView extends View implements SurfaceHolder.Callback2 {
         this(context, attrs, defStyleAttr, 0);
     }
 
-    public SurfaceView(Context context, android.util.AttributeSet attrs, int defStyleAttr, int defStyleRes) {
+    public SurfaceView(Context context, android.util.AttributeSet attrs, int defStyleAttr,
+                       int defStyleRes) {
         super(context, attrs, defStyleAttr, defStyleRes);
-        init();
-    }
-
-    private void init() {
         mHolder = new SimpleSurfaceHolder(this);
     }
 
     public SurfaceHolder getHolder() {
-        if (mHolder == null) {
-            mHolder = new SimpleSurfaceHolder(this);
-        }
         return mHolder;
     }
 
     public void setZOrderMediaOverlay(boolean isMediaOverlay) {}
     public void setZOrderOnTop(boolean onTop) {}
 
-    @Override
-    public void surfaceCreated(SurfaceHolder holder) {}
+    @Override public void surfaceCreated(SurfaceHolder holder) {}
+    @Override public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {}
+    @Override public void surfaceDestroyed(SurfaceHolder holder) {}
+    @Override public void surfaceRedrawNeeded(SurfaceHolder holder) {}
 
-    @Override
-    public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {}
-
-    @Override
-    public void surfaceDestroyed(SurfaceHolder holder) {}
-
-    @Override
-    public void surfaceRedrawNeeded(SurfaceHolder holder) {}
-
-    public void dispatchSurfaceCreated() {
-        if (mHolder instanceof SimpleSurfaceHolder) {
-            ((SimpleSurfaceHolder) mHolder).dispatchSurfaceCreated();
+    /** Called by Window after the view has been measured against the real framebuffer. */
+    public void dispatchSurfaceReady(int width, int height) {
+        if (width <= 0 || height <= 0 || !isLaidOut() || getWidth() <= 0 || getHeight() <= 0) {
+            return;
         }
+        mHolder.dispatchSurfaceReady(width, height);
+    }
+
+    /** Called before the owning Activity is destroyed or its host surface is lost. */
+    public void dispatchSurfaceDestroyed() {
+        mHolder.dispatchSurfaceDestroyed();
     }
 
     @Override
     protected void onDraw(Canvas canvas) {}
 
-    private static class SimpleSurfaceHolder implements SurfaceHolder {
-        private final View mView;
-        private final Surface mSurface = new Surface();
-        private final java.util.ArrayList<Callback> mCallbacks = new java.util.ArrayList<Callback>();
+    private static final class CallbackState {
+        final SurfaceHolder.Callback callback;
+        boolean created;
+        int width;
+        int height;
 
-        public SimpleSurfaceHolder(View view) {
+        CallbackState(SurfaceHolder.Callback callback) {
+            this.callback = callback;
+        }
+    }
+
+    private static final class SimpleSurfaceHolder implements SurfaceHolder {
+        private final SurfaceView mView;
+        private final Surface mSurface = new Surface();
+        private final java.util.ArrayList<CallbackState> mCallbacks =
+                new java.util.ArrayList<CallbackState>();
+        private volatile boolean mCreated;
+        private volatile int mWidth;
+        private volatile int mHeight;
+
+        SimpleSurfaceHolder(SurfaceView view) {
             mView = view;
         }
 
-        public void dispatchSurfaceCreated() {
-            Object[] cbs;
+        void dispatchSurfaceReady(int width, int height) {
+            if (mView == null || !mView.isLaidOut() || width <= 0 || height <= 0) return;
+            mCreated = true;
+            mWidth = width;
+            mHeight = height;
+            mSurface.setSurfaceSize(width, height);
+            CallbackState[] callbacks;
             synchronized (mCallbacks) {
-                cbs = mCallbacks.toArray();
+                callbacks = mCallbacks.toArray(new CallbackState[mCallbacks.size()]);
             }
-            int w = mView != null ? mView.getWidth() : 0;
-            int h = mView != null ? mView.getHeight() : 0;
-            if (w <= 0 || h <= 0) {
-                try {
-                    android.graphics.Canvas canvas = new android.graphics.Canvas();
-                    w = canvas.getWidth();
-                    h = canvas.getHeight();
-                } catch (Throwable ignored) {}
+            for (CallbackState state : callbacks) dispatchToCallback(state);
+        }
+
+        void dispatchSurfaceDestroyed() {
+            if (!mCreated) {
+                mSurface.clearSurface();
+                mWidth = 0;
+                mHeight = 0;
+                return;
             }
-            for (Object obj : cbs) {
-                if (obj instanceof Callback) {
-                    Callback cb = (Callback) obj;
-                    // Deliberately no dedupe here: Unity recovers from repeated
-                    // created/changed (it rebuilt its swapchain 4x and rendered
-                    // fine), but it cannot recover from a changed it never
-                    // gets — suppressing redelivery starved Gfx init entirely
-                    // (zero recreates, zero renders). See ActivityThread.
-                    try {
-                        cb.surfaceCreated(this);
-                        cb.surfaceChanged(this, 0, w, h);
-                        if (cb instanceof Callback2) {
-                            ((Callback2) cb).surfaceRedrawNeeded(this);
-                        }
-                    } catch (Throwable t) {
-                        android.util.Log.e("SurfaceHolder", "Error in dispatchSurfaceCreated: " + t);
-                    }
+            mCreated = false;
+            mSurface.clearSurface();
+            mWidth = 0;
+            mHeight = 0;
+            CallbackState[] callbacks;
+            synchronized (mCallbacks) {
+                callbacks = mCallbacks.toArray(new CallbackState[mCallbacks.size()]);
+            }
+            for (CallbackState state : callbacks) {
+                boolean notify;
+                synchronized (mCallbacks) {
+                    notify = state.created && mCallbacks.contains(state);
+                    state.created = false;
+                    state.width = 0;
+                    state.height = 0;
+                }
+                if (notify) invokeDestroyed(state.callback);
+            }
+        }
+
+        private void dispatchToCallback(CallbackState state) {
+            boolean created;
+            boolean changed;
+            final int width;
+            final int height;
+            synchronized (mCallbacks) {
+                if (!mCreated || !mCallbacks.contains(state)) return;
+                created = !state.created;
+                changed = created || state.width != mWidth || state.height != mHeight;
+                state.created = true;
+                state.width = mWidth;
+                state.height = mHeight;
+                width = mWidth;
+                height = mHeight;
+            }
+            if (created) invokeCreated(state.callback);
+            if (changed) {
+                invokeChanged(state.callback, width, height);
+                if (state.callback instanceof SurfaceHolder.Callback2) {
+                    invokeRedraw((SurfaceHolder.Callback2) state.callback);
                 }
             }
         }
 
         @Override
-        public void addCallback(Callback callback) {
+        public void addCallback(SurfaceHolder.Callback callback) {
             if (callback == null) return;
-            android.util.Log.e("KuSurface", "addCallback " + callback.getClass().getName());
-            boolean isNew = false;
+            final CallbackState state;
             synchronized (mCallbacks) {
-                if (!mCallbacks.contains(callback)) {
-                    mCallbacks.add(callback);
-                    isNew = true;
+                for (CallbackState existing : mCallbacks) {
+                    if (existing.callback == callback) return;
                 }
+                state = new CallbackState(callback);
+                mCallbacks.add(state);
             }
-            if (isNew) {
-                int w = mView != null ? mView.getWidth() : 0;
-                int h = mView != null ? mView.getHeight() : 0;
-                if (w <= 0 || h <= 0) {
-                    try {
-                        android.graphics.Canvas canvas = new android.graphics.Canvas();
-                        w = canvas.getWidth();
-                        h = canvas.getHeight();
-                    } catch (Throwable ignored) {}
-                }
-                if (w <= 0) w = 1080;
-                if (h <= 0) h = 1920;
-                // No dedupe (see dispatchSurfaceCreated above): the immediate
-                // fire on registration is the only delivery a late registrant
-                // may ever get.
-                try {
-                    callback.surfaceCreated(this);
-                    callback.surfaceChanged(this, 0, w, h);
-                    if (callback instanceof Callback2) {
-                        ((Callback2) callback).surfaceRedrawNeeded(this);
-                    }
-                } catch (Throwable t) {
-                    android.util.Log.e("SurfaceHolder", "Error in immediate addCallback surface dispatch: " + t);
-                }
+            // Android delivers state to a late registrant asynchronously on the UI thread.
+            if (mCreated) {
+                mView.post(new Runnable() {
+                    @Override public void run() { dispatchToCallback(state); }
+                });
             }
         }
 
         @Override
-        public void removeCallback(Callback callback) {
+        public void removeCallback(SurfaceHolder.Callback callback) {
             if (callback == null) return;
             synchronized (mCallbacks) {
-                mCallbacks.remove(callback);
+                for (int i = mCallbacks.size() - 1; i >= 0; i--) {
+                    if (mCallbacks.get(i).callback == callback) mCallbacks.remove(i);
+                }
             }
         }
 
-        @Override
-        public Surface getSurface() {
-            return mSurface;
+        private void invokeCreated(SurfaceHolder.Callback callback) {
+            try { callback.surfaceCreated(this); }
+            catch (Throwable t) { android.util.Log.e("SurfaceHolder", "surfaceCreated failed: " + t); }
         }
+
+        private void invokeChanged(SurfaceHolder.Callback callback, int width, int height) {
+            try { callback.surfaceChanged(this, 0, width, height); }
+            catch (Throwable t) { android.util.Log.e("SurfaceHolder", "surfaceChanged failed: " + t); }
+        }
+
+        private void invokeRedraw(SurfaceHolder.Callback2 callback) {
+            try { callback.surfaceRedrawNeeded(this); }
+            catch (Throwable t) { android.util.Log.e("SurfaceHolder", "surfaceRedrawNeeded failed: " + t); }
+        }
+
+        private void invokeDestroyed(SurfaceHolder.Callback callback) {
+            try { callback.surfaceDestroyed(this); }
+            catch (Throwable t) { android.util.Log.e("SurfaceHolder", "surfaceDestroyed failed: " + t); }
+        }
+
+        @Override public Surface getSurface() { return mSurface; }
 
         @Override
         public Rect getSurfaceFrame() {
-            int w = mView != null ? mView.getWidth() : 0;
-            int h = mView != null ? mView.getHeight() : 0;
-            if (w <= 0 || h <= 0) {
-                try {
-                    android.graphics.Canvas canvas = new android.graphics.Canvas();
-                    w = canvas.getWidth();
-                    h = canvas.getHeight();
-                } catch (Throwable ignored) {}
-            }
-            return new Rect(0, 0, w, h);
+            return mCreated ? new Rect(0, 0, mWidth, mHeight) : new Rect(0, 0, 0, 0);
         }
 
-        @Override
-        public boolean isCreating() { return false; }
-        @Override
-        public void setType(int type) {}
-        @Override
-        public void setFixedSize(int width, int height) {}
-        @Override
-        public void setSizeFromLayout() {}
-        @Override
-        public void setFormat(int format) {}
-        @Override
-        public void setKeepScreenOn(boolean screenOn) {}
-
-        @Override
-        public Canvas lockCanvas() { return mSurface.lockCanvas(); }
-        @Override
-        public Canvas lockCanvas(Rect dirty) { return mSurface.lockCanvas(dirty); }
-        @Override
-        public void unlockCanvasAndPost(Canvas canvas) { mSurface.unlockCanvasAndPost(canvas); }
-        @Override
-        public Canvas lockCanvasAndroidOnly(Rect dirty) { return mSurface.lockCanvas(dirty); }
+        @Override public boolean isCreating() { return false; }
+        @Override public void setType(int type) {}
+        @Override public void setFixedSize(int width, int height) {}
+        @Override public void setSizeFromLayout() {}
+        @Override public void setFormat(int format) {}
+        @Override public void setKeepScreenOn(boolean screenOn) {}
+        @Override public Canvas lockCanvas() { return mSurface.lockCanvas(); }
+        @Override public Canvas lockCanvas(Rect dirty) { return mSurface.lockCanvas(dirty); }
+        @Override public void unlockCanvasAndPost(Canvas canvas) { mSurface.unlockCanvasAndPost(canvas); }
+        @Override public Canvas lockCanvasAndroidOnly(Rect dirty) { return mSurface.lockCanvas(dirty); }
     }
 }

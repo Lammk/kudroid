@@ -33,6 +33,7 @@
 #include "kudroid/kuart/VmLock.h"
 #include "kudroid/platform/MemoryInfo.h"
 #include "kudroid/platform/AssetShim.h"
+#include "kudroid/ResourceTable.h"
 #include "kudroid/platform/CpuInfo.h"
 #include "kudroid/platform/AudioShim.h"
 #include "kudroid/platform/FramePacer.h"
@@ -46,6 +47,8 @@ extern "C" void kudroid_looper_poll(int64_t ptr, int64_t timeout_millis);
 extern "C" void kudroid_looper_wake(int64_t ptr);
 extern "C" void kudroid_looper_set_main(int64_t ptr);
 extern "C" int kudroid_looper_is_main(int64_t ptr);
+extern "C" void kudroid_looper_destroy(int64_t ptr);
+extern "C" float g_metalLayerDensity;
 
 namespace kudroid {
 namespace kuart {
@@ -2657,6 +2660,11 @@ bool Invoke_android_graphics_Canvas(Interpreter* /*interp*/, const char* name, c
         *result = DexValue::Int(JavaCanvasRenderer::getInstance().getHeight());
         return true;
     }
+    if (std::strcmp(name, "native_isSurfaceReady") == 0) {
+        *result = DexValue::Int(
+            JavaCanvasRenderer::getInstance().hasBoundMetalSurface() ? 1 : 0);
+        return true;
+    }
     return false;
 }
 
@@ -3445,6 +3453,60 @@ bool Invoke_android_content_res_AssetManager(Interpreter* interp, const char* na
     return false;
 }
 
+bool Invoke_android_content_res_Resources(Interpreter* interp, const char* name,
+                                          const DexValue* args, size_t num_args,
+                                          DexValue* result) {
+    if (std::strcmp(name, "nativeGetIdentifier") == 0) {
+        if (num_args < 3) { *result = DexValue::Int(0); return true; }
+        uint32_t id = 0;
+        const bool found = kudroid::resource_get_identifier(
+                GetStringUtf8(args[0]), GetStringUtf8(args[1]), GetStringUtf8(args[2]), &id);
+        *result = DexValue::Int(found ? static_cast<int32_t>(id) : 0);
+        return true;
+    }
+    if (std::strcmp(name, "nativeGetString") == 0) {
+        if (interp == nullptr || interp->linker() == nullptr || num_args < 2) {
+            result->l = nullptr;
+            return true;
+        }
+        std::string value;
+        const uint32_t id = static_cast<uint32_t>(args[0].i);
+        if (!kudroid::resource_get_string(id, GetStringUtf8(args[1]), &value)) {
+            result->l = nullptr;
+            return true;
+        }
+        result->l = reinterpret_cast<DexObject*>(interp->linker()->NewString(value.c_str()));
+        return true;
+    }
+    if (std::strcmp(name, "nativeGetColor") == 0) {
+        if (num_args < 2) {
+            if (interp != nullptr) interp->ThrowException(
+                    "Landroid/content/res/Resources$NotFoundException;", "color resource not found");
+            *result = DexValue::Int(0);
+            return true;
+        }
+        uint32_t color = 0;
+        if (!kudroid::resource_get_color(static_cast<uint32_t>(args[0].i),
+                                         GetStringUtf8(args[1]), &color)) {
+            if (interp != nullptr) interp->ThrowException(
+                    "Landroid/content/res/Resources$NotFoundException;",
+                    "color resource not found or is not a color");
+            *result = DexValue::Int(0);
+            return true;
+        }
+        *result = DexValue::Int(static_cast<int32_t>(color));
+        return true;
+    }
+    return false;
+}
+
+bool Invoke_android_view_Display(const char* name, DexValue* result) {
+    if (std::strcmp(name, "nativeGetDensity") != 0) return false;
+    const float density = g_metalLayerDensity;
+    result->f = std::isfinite(density) && density > 0.0f ? density : 1.0f;
+    return true;
+}
+
 // android.os.MessageQueue native surface. The queue blocks on a native wait
 // slot (AOSP epoll stand-in) instead of Object.wait(), so a message enqueue and
 // a touch injection can both wake the Looper thread without an interpreted Java
@@ -3454,6 +3516,10 @@ bool Invoke_android_os_MessageQueue(Interpreter* /*interp*/, const char* name,
                                     DexValue* result) {
     if (std::strcmp(name, "nativeInit") == 0) {
         result->j = kudroid_looper_init();
+        return true;
+    }
+    if (std::strcmp(name, "nativeDestroy") == 0) {
+        if (num_args >= 1) kudroid_looper_destroy(args[0].j);
         return true;
     }
     if (std::strcmp(name, "nativePollOnce") == 0) {
@@ -3532,6 +3598,12 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
     if (std::strcmp(desc, "Landroid/content/res/AssetManager;") == 0) {
         return Invoke_android_content_res_AssetManager(interp, name, args, num_args, result);
     }
+    if (std::strcmp(desc, "Landroid/content/res/Resources;") == 0) {
+        return Invoke_android_content_res_Resources(interp, name, args, num_args, result);
+    }
+    if (std::strcmp(desc, "Landroid/view/Display;") == 0) {
+        return Invoke_android_view_Display(name, result);
+    }
     // The native method lives on the outer Settings class (inner classes call
     // through it). Hook only that descriptor so later branches still run.
     if (std::strcmp(desc, "Landroid/provider/Settings;") == 0) {
@@ -3596,6 +3668,8 @@ bool LibCoreHasMethod(const DexMethod* method) {
             std::strcmp(desc, "Landroid/os/Debug;") == 0 ||
             std::strcmp(desc, "Landroid/os/Vibrator;") == 0 ||
             std::strcmp(desc, "Landroid/os/MessageQueue;") == 0 ||
+            std::strcmp(desc, "Landroid/content/res/Resources;") == 0 ||
+            std::strcmp(desc, "Landroid/view/Display;") == 0 ||
             std::strcmp(desc, "Landroid/media/AudioTrack;") == 0 ||
             std::strcmp(desc, "Landroid/view/Window;") == 0 ||
             std::strcmp(desc, "Landroid/view/View;") == 0 ||

@@ -13,11 +13,8 @@ import android.view.View;
  * {@link #deliverText} and is applied to whichever InputConnection is currently
  * registered — see {@link #setCurrentInputConnection}.
  *
- * Every query answers optimistically ("yes, input is available"). That is the useful
- * shape rather than an honest "no": an app that sees {@code isActive()} return false,
- * or {@code showSoftInput()} return false, disables its own text entry outright,
- * whereas answering yes leaves the UI working even in the moment before the host has
- * a keyboard up.
+ * Activity and editor state belongs to one guest run. These values are cleared when
+ * that Activity is destroyed so a later app launch cannot inherit the old editor.
  *
  * Obtained through {@code getSystemService(Context.INPUT_METHOD_SERVICE)}. That
  * mapping was missing while this class existed, which an app cannot tell apart from
@@ -85,6 +82,7 @@ public final class InputMethodManager {
                                                              InputConnection connection) {
         sCurrentView = view;
         sCurrentConnection = connection;
+        if (sInstance != null) sInstance.mServedView = view;
     }
 
     public static synchronized InputConnection getCurrentInputConnection() {
@@ -139,12 +137,23 @@ public final class InputMethodManager {
     // IME API.
 
     public boolean isActive(View view) {
-        return view != null;
+        synchronized (InputMethodManager.class) {
+            return view != null && view == mServedView && view == sCurrentView;
+        }
     }
 
-    public boolean isActive() { return true; }
+    public boolean isActive() {
+        synchronized (InputMethodManager.class) {
+            return mServedView != null && mServedView == sCurrentView;
+        }
+    }
 
-    public boolean isAcceptingText() { return true; }
+    public boolean isAcceptingText() {
+        synchronized (InputMethodManager.class) {
+            return mServedView != null && mServedView == sCurrentView &&
+                    sCurrentConnection != null;
+        }
+    }
 
     /**
      * True while the host keyboard is on screen.
@@ -163,24 +172,20 @@ public final class InputMethodManager {
     }
 
     /**
-     * Raise the keyboard for `view`.
-     *
-     * Returns true even when the host has no keyboard to show. That is deliberate: the
-     * return value is read as "does this platform support text input", and a false
-     * makes an app disable its text UI permanently rather than retry.
+     * Raise the keyboard for {@code view}. The result reports whether the host accepted
+     * the request, while editor state remains available for a retry if UIKit is not ready.
      */
     public boolean showSoftInput(View view, int flags) {
-        if (view != null) {
-            mServedView = view;
-            attach(view);
-        }
+        if (view == null) return false;
+        synchronized (InputMethodManager.class) { mServedView = view; }
+        attach(view);
         try {
-            showSoftInputNative(flags);
+            return showSoftInputNative(flags);
         } catch (Throwable t) {
             android.util.Log.w("InputMethodManager",
                     "showSoftInput could not reach the host: " + t.toString());
+            return false;
         }
-        return true;
     }
 
     public boolean showSoftInput(View view, int flags, ResultReceiver resultReceiver) {
@@ -189,12 +194,12 @@ public final class InputMethodManager {
 
     public boolean hideSoftInputFromWindow(IBinder windowToken, int flags) {
         try {
-            hideSoftInputNative();
+            return hideSoftInputNative();
         } catch (Throwable t) {
             android.util.Log.w("InputMethodManager",
                     "hideSoftInputFromWindow could not reach the host: " + t.toString());
+            return false;
         }
-        return true;
     }
 
     public boolean hideSoftInputFromWindow(IBinder windowToken, int flags,
@@ -223,6 +228,7 @@ public final class InputMethodManager {
      */
     private void attach(View view) {
         if (view == null) return;
+        setCurrentInputConnection(view, null);
         try {
             EditorInfo attrs = new EditorInfo();
             attrs.packageName = view.getContext() != null
@@ -230,8 +236,23 @@ public final class InputMethodManager {
             InputConnection ic = view.onCreateInputConnection(attrs);
             if (ic != null) setCurrentInputConnection(view, ic);
         } catch (Throwable t) {
+            setCurrentInputConnection(view, null);
             android.util.Log.e("InputMethodManager",
                     "onCreateInputConnection threw: " + t.toString());
+        }
+    }
+
+    /** Drop the served editor at the end of a guest run. */
+    public static void resetForRelaunch() {
+        final InputMethodManager manager;
+        synchronized (InputMethodManager.class) { manager = sInstance; }
+        if (manager != null && manager.isSoftInputVisible()) {
+            manager.hideSoftInputFromWindow(null, 0);
+        }
+        synchronized (InputMethodManager.class) {
+            sCurrentConnection = null;
+            sCurrentView = null;
+            if (sInstance != null) sInstance.mServedView = null;
         }
     }
 
@@ -244,7 +265,7 @@ public final class InputMethodManager {
      */
     public void restartInput(View view) {
         if (view == null) return;
-        mServedView = view;
+        synchronized (InputMethodManager.class) { mServedView = view; }
         attach(view);
     }
 

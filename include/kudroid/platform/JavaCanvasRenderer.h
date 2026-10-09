@@ -18,6 +18,7 @@ public:
 
     int getWidth() const { return width_; }
     int getHeight() const { return height_; }
+    bool hasBoundMetalSurface() const;
     const uint32_t* getBuffer() const { return framebuffer_; }
 
 private:

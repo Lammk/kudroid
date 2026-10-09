@@ -20,11 +20,24 @@ public final class Looper {
         sThreadLocal.set(new Looper(quitAllowed));
     }
     public static void prepareMainLooper() {
-        prepare(false);
+        Looper current = sThreadLocal.get();
+        if (current != null) {
+            if (current.mQueue.isQuitting()) {
+                sThreadLocal.remove();
+            } else {
+                throw new RuntimeException("Only one Looper may be created per thread");
+            }
+        }
         synchronized (Looper.class) {
             if (sMainLooper != null) {
-                throw new IllegalStateException("The main Looper has already been prepared.");
+                if (sMainLooper.mQueue.isQuitting()) {
+                    if (sThreadLocal.get() == sMainLooper) sThreadLocal.remove();
+                    sMainLooper = null;
+                } else {
+                    throw new IllegalStateException("The main Looper has already been prepared.");
+                }
             }
+            prepare(false);
             sMainLooper = myLooper();
         }
         // Register the main queue as the touch wake target: injection wakes its
@@ -36,15 +49,33 @@ public final class Looper {
             return sMainLooper;
         }
     }
+    /**
+     * Clears the main Looper retained by KuDroid's host VM between app runs.
+     * ThreadLocal.remove() only affects the current (owning) guest thread.
+     */
+    public static void resetMainLooperForRelaunch() {
+        synchronized (Looper.class) {
+            sMainLooper = null;
+        }
+        sThreadLocal.remove();
+    }
     public static void loop() {
         final Looper me = myLooper();
         if (me == null) throw new RuntimeException("No Looper; Looper.prepare() wasn't called on this thread.");
         final MessageQueue queue = me.mQueue;
-        for (;;) {
-            Message msg = queue.next();
-            if (msg == null) return;
-            msg.target.dispatchMessage(msg);
-            msg.recycle();
+        try {
+            for (;;) {
+                Message msg = queue.next();
+                if (msg == null) return;
+                msg.target.dispatchMessage(msg);
+                msg.recycle();
+            }
+        } finally {
+            queue.disposeAfterLoop();
+            synchronized (Looper.class) {
+                if (sMainLooper == me) sMainLooper = null;
+            }
+            if (sThreadLocal.get() == me) sThreadLocal.remove();
         }
     }
     public static Looper myLooper() { return sThreadLocal.get(); }
@@ -61,6 +92,10 @@ public final class Looper {
     public void quitForTeardown() {
         android.util.Log.e("KuLooperQuit", "teardown quit looper of " + mThread.getName());
         mQueue.quitInternal();
+        synchronized (Looper.class) {
+            if (sMainLooper == this) sMainLooper = null;
+        }
+        if (sThreadLocal.get() == this) sThreadLocal.remove();
     }
     public Thread getThread() { return mThread; }
     public MessageQueue getQueue() { return mQueue; }

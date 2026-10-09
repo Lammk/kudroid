@@ -5,7 +5,10 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <mutex>
 #include <pthread.h>
 
 // ── CrashHandling state, shared with AppLifecycle ────────────────────────────
@@ -25,6 +28,14 @@ extern pthread_t g_mainThread;
 extern std::atomic<bool> s_isApkRunning;
 // Cooperative stop flag: poll loops check it and bail out early.
 extern std::atomic<bool> s_stopping;
+enum class ApkRunStartResult {
+    Acquired,
+    AlreadyActive,
+    TeardownTimedOut,
+};
+ApkRunStartResult begin_apk_run(std::chrono::milliseconds teardown_wait);
+bool request_apk_stop();
+void complete_apk_run();
 // Bumped when the Java side pauses; lets a run notice it was backgrounded.
 extern std::atomic<unsigned long long> s_pausedGeneration;
 // Bumped by kudroid_install_apk; a resident-library generation below it means

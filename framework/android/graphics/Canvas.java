@@ -22,6 +22,7 @@ public class Canvas {
     // computed for the wrong extent and everything past the real width was clipped.
     private static native int native_getSurfaceWidth();
     private static native int native_getSurfaceHeight();
+    private static native boolean native_isSurfaceReady();
 
     /** Fallback used only if the native surface has not been bound yet. */
     private static final int DEFAULT_WIDTH = 1080;
@@ -57,6 +58,15 @@ public class Canvas {
 
     public int getHeight() {
         return mHeight;
+    }
+
+    /** True only after the host has attached a real framebuffer, not fallback dimensions. */
+    public static boolean isSurfaceReady() {
+        try {
+            return native_isSurfaceReady();
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 
     public void drawColor(int color) {

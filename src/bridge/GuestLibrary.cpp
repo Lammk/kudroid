@@ -15,9 +15,11 @@
 #include "kudroid/DeviceProfile.h"
 #include "kudroid/platform/AssetShim.h"
 #include "kudroid/platform/InputShim.h"
+#include "kudroid/platform/FramePacer.h"
 #include "kudroid/Log.h"
 
 #include <cstdio>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
@@ -29,6 +31,7 @@
 
 extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
 extern "C" void* bionic_ANativeWindow_fromSurface(void* env, void* surface);
+extern "C" void kudroid_looper_reset_main(void);
 
 // CrashHandling.h seam: test entry points install the handlers themselves.
 void installCrashHandlers(void);
@@ -315,16 +318,29 @@ int guestLibraryOwns(void* handle) {
 extern "C" void kudroid_gpu_note_run_end(void);
 
 extern "C" const char* kudroid_run_apk(const char* appName) {
-    if (s_isApkRunning.exchange(true)) {
+    const ApkRunStartResult start = begin_apk_run(std::chrono::milliseconds(1000));
+    if (start == ApkRunStartResult::AlreadyActive) {
         kudroid_android_log_message(3, "kudroid_core", "kudroid_run_apk: APK is already running in background, ignoring duplicate launch request.");
         return strdup("[kudroid_core] APK is already running.\n");
     }
+    if (start == ApkRunStartResult::TeardownTimedOut) {
+        kudroid_android_log_message(3, "kudroid_core", "kudroid_run_apk: previous app is still stopping.");
+        return strdup("[kudroid_core] Previous app is still stopping. Please retry shortly.\n");
+    }
+
+    struct RunCompletionGuard {
+        ~RunCompletionGuard() {
+            kudroid_looper_reset_main();
+            kudroid::frame_pacer_reset_for_relaunch();
+            complete_apk_run();
+        }
+    } runCompletionGuard;
+    kudroid::frame_pacer_reset_for_relaunch();
 
     // Stale native mappings survive installs (unmapping under detached threads
     // aborts), so a post-install run in this process would mix old code with new
     // files. Refuse with instructions instead of crashing mysteriously.
     if (s_libsResident.load() && s_libsGeneration.load() != s_installGeneration.load()) {
-        s_isApkRunning.store(false);
         return strdup("[kudroid_core] ERROR: installed or removed an app since the last run.\n"
                       "[kudroid_core] Native libraries from before are still mapped in this process.\n"
                       "[kudroid_core] Please restart KuDroidShell, then run again.\n");
@@ -339,8 +355,6 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
 
     kudroid::native_run_begin();
     kudroid::native_phase("apk-run-enter");
-    // Re-arm teardown: a wedged run may never reach run end to reset it.
-    s_stopping.store(false);
 
     std::string log;
     appendTestHeader(log, "Run APK Native Libraries", appName);
@@ -376,9 +390,6 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
         std::fputs(log.c_str(), stderr);
         logCoreLine(6, "[kudroid_core] launch refused: JIT not enabled");
         mirrorCrash(log);
-        // Released here: the launch never began, so a retry after enabling JIT must not
-        // be rejected as a duplicate by the guard at the top of this function.
-        s_isApkRunning.store(false);
         return strdup(log.c_str());
     }
 
@@ -1191,7 +1202,6 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                         kudroid_unbind_metal_layer();
                         kudroid_gpu_note_run_end();
                         kudroid::blocking_wait_reset_for_test();
-                        s_stopping.store(false);
                     }
                 }
             }
@@ -1205,7 +1215,6 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
     }
 
     writeLogFile("kudroid_run_apk.txt", log);
-    s_isApkRunning.store(false);
     char* result = static_cast<char*>(malloc(log.size() + 1));
     if (result) memcpy(result, log.c_str(), log.size() + 1);
     return result;

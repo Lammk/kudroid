@@ -49,6 +49,29 @@ public final class Choreographer {
         return sThreadInstance.get();
     }
 
+    /** Clears thread-bound callbacks and Handler state when an app run ends. */
+    public static void resetForRelaunch() {
+        Choreographer choreographer = sThreadInstance.get();
+        if (choreographer != null) {
+            synchronized (choreographer) {
+                android.os.Handler handler = choreographer.mHandler;
+                if (handler != null) {
+                    for (java.util.ArrayList<Runnable> pending :
+                            choreographer.mPending.values()) {
+                        for (int i = 0; i < pending.size(); i++) {
+                            handler.removeCallbacks(pending.get(i));
+                        }
+                    }
+                }
+                choreographer.mPending.clear();
+                choreographer.mLastDueNanos = 0L;
+                choreographer.nativeInstance = 0L;
+                choreographer.mHandler = null;
+            }
+        }
+        sThreadInstance.remove();
+    }
+
     /** Run {@code callback} once, on the next frame. */
     public void postFrameCallback(FrameCallback callback) {
         postFrameCallbackDelayed(callback, 0L);
@@ -65,50 +88,64 @@ public final class Choreographer {
             throw new IllegalArgumentException("callback must not be null");
         }
         if (delayMillis < 0L) delayMillis = 0L;
-        if (android.os.Looper.myLooper() == null) {
-            // No queue on this thread: fall back to pacer-thread delivery.
+        android.os.Looper looper = android.os.Looper.myLooper();
+        if (looper == null) looper = android.os.Looper.getMainLooper();
+        if (looper == null) {
+            // No Java queue exists in this runtime context; retain the native
+            // pacer delivery path rather than dropping the callback.
             nativePostFrameCallback(callback, delayMillis);
             return;
         }
-        if (mHandler == null) mHandler = new android.os.Handler();
         final long now = System.nanoTime();
         final long interval = nativeGetFrameIntervalNanos();
-        long due = now + delayMillis * 1000000L + interval;
-        if (delayMillis == 0L && mLastDueNanos != 0L) {
-            final long boundary = mLastDueNanos + interval;
-            if (boundary > now) {
-                due = boundary;
-            } else if (now - boundary < interval) {
-                due = boundary;
-            } else {
-                due = now;
-            }
-        }
-        final long dueF = due;
+        final long earliestDue = now + delayMillis * 1000000L + interval;
+        final long[] dueHolder = new long[1];
         final FrameCallback cbF = callback;
         final Choreographer self = this;
         Runnable r = new Runnable() {
             public void run() {
-                self.mLastDueNanos = dueF;
-                self.forgetRunnable(cbF, this);
+                synchronized (self) {
+                    self.mLastDueNanos = dueHolder[0];
+                    self.forgetRunnable(cbF, this);
+                }
                 cbF.doFrame(self.getFrameTimeNanos());
             }
         };
         synchronized (this) {
+            if (mHandler == null || mHandler.getLooper() != looper) {
+                mHandler = new android.os.Handler(looper);
+            }
+            final long due;
+            if (delayMillis == 0L && mLastDueNanos != 0L) {
+                final long boundary = mLastDueNanos + interval;
+                if (boundary > now) {
+                    due = boundary;
+                } else if (now - boundary < interval) {
+                    due = boundary;
+                } else {
+                    due = now;
+                }
+            } else {
+                due = earliestDue;
+            }
+            final long dueF = due;
+            dueHolder[0] = dueF;
             java.util.ArrayList<Runnable> list = mPending.get(callback);
             if (list == null) {
                 list = new java.util.ArrayList<Runnable>();
                 mPending.put(callback, list);
             }
             list.add(r);
+            android.os.Message msg = android.os.Message.obtain(mHandler, r);
+            // Round UP, not down: the queue orders in whole millis off the same
+            // nanoTime base (SystemClock.uptimeMillis is nanoTime/1e6, so no clock
+            // skew), and truncation would deliver up to 1ms BEFORE the pacer
+            // phase the native alignment just computed. Late by <1ms keeps phase;
+            // early breaks it.
+            if (!mHandler.sendMessageAtTime(msg, (dueF + 999999L) / 1000000L)) {
+                forgetRunnable(callback, r);
+            }
         }
-        android.os.Message msg = android.os.Message.obtain(mHandler, r);
-        // Round UP, not down: the queue orders in whole millis off the same
-        // nanoTime base (SystemClock.uptimeMillis is nanoTime/1e6, so no clock
-        // skew), and truncation would deliver up to 1ms BEFORE the pacer
-        // phase the native alignment just computed. Late by <1ms keeps phase;
-        // early breaks it.
-        mHandler.sendMessageAtTime(msg, (dueF + 999999L) / 1000000L);
     }
 
     private synchronized void forgetRunnable(FrameCallback callback, Runnable r) {
@@ -122,13 +159,15 @@ public final class Choreographer {
     /** Cancel a pending callback (matched by identity). */
     public void removeFrameCallback(FrameCallback callback) {
         if (callback == null) return;
-        java.util.ArrayList<Runnable> list;
+        java.util.ArrayList<Runnable> list = null;
+        android.os.Handler handler;
         synchronized (this) {
             list = mPending.remove(callback);
-        }
-        if (list != null && mHandler != null) {
-            for (int i = 0; i < list.size(); i++) {
-                mHandler.removeCallbacks(list.get(i));
+            handler = mHandler;
+            if (list != null && handler != null) {
+                for (int i = 0; i < list.size(); i++) {
+                    handler.removeCallbacks(list.get(i));
+                }
             }
         }
         nativeRemoveFrameCallback(callback);
