@@ -44,12 +44,30 @@ public class AudioManager {
     }
 
     public int requestAudioFocus(OnAudioFocusChangeListener l, int streamType, int durationHint) {
+        if (l != null) {
+            try {
+                l.onAudioFocusChange(AUDIOFOCUS_GAIN);
+            } catch (Throwable ignored) {}
+        }
         return AUDIOFOCUS_REQUEST_GRANTED;
     }
 
     public int abandonAudioFocus(OnAudioFocusChangeListener l) {
+        if (l != null) {
+            try {
+                l.onAudioFocusChange(AUDIOFOCUS_LOSS);
+            } catch (Throwable ignored) {}
+        }
         return AUDIOFOCUS_REQUEST_GRANTED;
     }
+
+    public static final int RINGER_MODE_SILENT = 0;
+    public static final int RINGER_MODE_VIBRATE = 1;
+    public static final int RINGER_MODE_NORMAL = 2;
+
+    public int getRingerMode() { return RINGER_MODE_NORMAL; }
+    public int getRingerModeInternal() { return RINGER_MODE_NORMAL; }
+    public boolean isVolumeFixed() { return false; }
 
     public int getMode() { return MODE_NORMAL; }
     public void setMode(int mode) {}
@@ -101,10 +119,20 @@ public class AudioManager {
     public void unregisterAudioDeviceCallback(AudioDeviceCallback callback) {}
 
     public int requestAudioFocus(AudioFocusRequest afr) {
+        if (afr != null && afr.getOnAudioFocusChangeListener() != null) {
+            try {
+                afr.getOnAudioFocusChangeListener().onAudioFocusChange(AUDIOFOCUS_GAIN);
+            } catch (Throwable ignored) {}
+        }
         return AUDIOFOCUS_REQUEST_GRANTED;
     }
 
     public int abandonAudioFocusRequest(AudioFocusRequest afr) {
+        if (afr != null && afr.getOnAudioFocusChangeListener() != null) {
+            try {
+                afr.getOnAudioFocusChangeListener().onAudioFocusChange(AUDIOFOCUS_LOSS);
+            } catch (Throwable ignored) {}
+        }
         return AUDIOFOCUS_REQUEST_GRANTED;
     }
 }

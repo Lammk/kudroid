@@ -1669,12 +1669,10 @@ class NativeMetalViewController: UIViewController {
     }
 
     override func loadView() {
-        let root = UIView(frame: UIScreen.main.bounds)
-        root.backgroundColor = .black
-        metalView = NativeMetalView(frame: root.bounds)
+        metalView = NativeMetalView(frame: UIScreen.main.bounds)
         metalView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        root.addSubview(metalView)
-        self.view = root
+        metalView.backgroundColor = .clear
+        self.view = metalView
     }
 
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
@@ -1690,8 +1688,8 @@ class NativeMetalViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         activateAudioSession()
-        self.view.backgroundColor = .black
-        metalView.backgroundColor = .black
+        self.view.backgroundColor = .clear
+        metalView.backgroundColor = .clear
 
         // On-screen status indicator for immediate feedback
         statusLabel = UILabel()
@@ -1826,15 +1824,28 @@ class NativeMetalViewController: UIViewController {
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
-        if !isStarted, let metalLayer = metalView?.layer as? CAMetalLayer {
+        if let metalLayer = metalView?.layer as? CAMetalLayer {
             let scale = UIScreen.main.scale
             let bounds = view.bounds.size.width > 0 ? view.bounds : UIScreen.main.bounds
             let targetSize = CGSize(width: bounds.width * scale, height: bounds.height * scale)
-            if metalLayer.drawableSize != targetSize {
+            if metalLayer.drawableSize != targetSize && targetSize.width > 0 && targetSize.height > 0 {
                 metalLayer.drawableSize = targetSize
+                if isStarted {
+                    let unmanaged = Unmanaged.passUnretained(metalLayer)
+                    kudroid_set_metal_layer(unmanaged.toOpaque(), Int32(targetSize.width),
+                                            Int32(targetSize.height), Float(scale))
+                }
             }
         }
         startAppIfNeeded()
+    }
+
+    override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
+        super.viewWillTransition(to: size, with: coordinator)
+        coordinator.animate(alongsideTransition: nil) { [weak self] _ in
+            self?.view.setNeedsLayout()
+            self?.view.layoutIfNeeded()
+        }
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -2014,6 +2025,7 @@ class NativeMetalView: UIView {
     }
 
     private func setupLayer() {
+        self.backgroundColor = .clear
         self.isMultipleTouchEnabled = true
         self.isUserInteractionEnabled = true
         guard let metalLayer = self.layer as? CAMetalLayer else { return }
