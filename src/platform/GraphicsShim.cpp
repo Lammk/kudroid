@@ -463,10 +463,16 @@ static void kudroid_ensure_vulkan_layer_attached(void* vk_layer) {
             setSize(vk, sel_registerName("setDrawableSize:"), CGSizeMake(w, h));
         }
 
-        if (g_metalLayer && vk_layer != g_metalLayer) {
+        if (g_metalLayer) {
             id host = reinterpret_cast<id>(g_metalLayer);
             if (isKindOf(host, sel_registerName("isKindOfClass:"), clsCALayer)) {
                 setId(host, sel_registerName("setContents:"), nullptr);
+            }
+        }
+
+        if (g_metalLayer && vk_layer != g_metalLayer) {
+            id host = reinterpret_cast<id>(g_metalLayer);
+            if (isKindOf(host, sel_registerName("isKindOfClass:"), clsCALayer)) {
                 id curSuper = idRet(vk, sel_registerName("superlayer"));
                 if (curSuper != host) {
                     typedef void (*VoidFn)(id, SEL);
@@ -1985,6 +1991,23 @@ extern "C" EGLBoolean bionic_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) 
         static std::atomic<bool> s_first{false};
         if (!s_first.exchange(true, std::memory_order_relaxed)) {
             kudroid_boot_mark("first-swap");
+#if defined(__APPLE__)
+            if (g_metalLayer) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    Class clsCALayer = objc_getClass("CALayer");
+                    if (clsCALayer && g_metalLayer) {
+                        id host = reinterpret_cast<id>(g_metalLayer);
+                        typedef BOOL (*IsKindOfFn)(id, SEL, Class);
+                        auto isKindOf = reinterpret_cast<IsKindOfFn>(objc_msgSend);
+                        if (isKindOf(host, sel_registerName("isKindOfClass:"), clsCALayer)) {
+                            typedef void (*SetIdFn)(id, SEL, id);
+                            auto setId = reinterpret_cast<SetIdFn>(objc_msgSend);
+                            setId(host, sel_registerName("setContents:"), nullptr);
+                        }
+                    }
+                });
+            }
+#endif
         }
     }
     // Slow-swap detector: a present path that blocks (drawable starvation,

@@ -16,16 +16,17 @@ public class Surface {
     public static final int ROTATION_3 = 3;
 
     public long mNativeObject = 0;
-    private boolean mValid;
+    private boolean mValid = true;
     private int mWidth;
     private int mHeight;
 
     public Surface() {
+        this.mValid = true;
     }
 
     public Surface(long nativeObject) {
         this.mNativeObject = nativeObject;
-        this.mValid = nativeObject != 0;
+        this.mValid = true;
     }
 
     /** Checks that the surface is still valid for drawing. */
@@ -43,7 +44,7 @@ public class Surface {
     void setSurfaceSize(int width, int height) {
         mWidth = Math.max(0, width);
         mHeight = Math.max(0, height);
-        mValid = mWidth > 0 && mHeight > 0;
+        mValid = true;
     }
 
     void clearSurface() {

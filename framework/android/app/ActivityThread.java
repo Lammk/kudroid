@@ -670,12 +670,30 @@ public final class ActivityThread {
             final int height = canvas.getHeight();
             final boolean surfaceReady = android.graphics.Canvas.isSurfaceReady();
             window.updateSurfaceSize(width, height, surfaceReady);
-            if (!window.measureAndLayout()) return;
+            window.measureAndLayout();
 
             android.view.SurfaceView foundSv = findSurfaceView(activity);
             if (foundSv != null) {
                 foundSv.dispatchSurfaceReady(foundSv.getWidth(), foundSv.getHeight());
             }
+
+            if (activity instanceof android.view.SurfaceHolder.Callback) {
+                android.view.SurfaceHolder.Callback cb = (android.view.SurfaceHolder.Callback) activity;
+                android.view.SurfaceHolder holder = (foundSv != null) ? foundSv.getHolder() :
+                    (((Object) activity instanceof android.view.SurfaceView) ?
+                        ((android.view.SurfaceView) (Object) activity).getHolder() :
+                        new android.view.SurfaceView(activity).getHolder());
+                int surfaceW = foundSv != null && foundSv.getWidth() > 0 ? foundSv.getWidth() : width;
+                int surfaceH = foundSv != null && foundSv.getHeight() > 0 ? foundSv.getHeight() : height;
+                if (surfaceW <= 0) surfaceW = 1080;
+                if (surfaceH <= 0) surfaceH = 1920;
+                cb.surfaceCreated(holder);
+                cb.surfaceChanged(holder, 0, surfaceW, surfaceH);
+                if (cb instanceof android.view.SurfaceHolder.Callback2) {
+                    ((android.view.SurfaceHolder.Callback2) cb).surfaceRedrawNeeded(holder);
+                }
+            }
+
             window.dispatchSurfaceReady();
             if (!activity.hasWindowFocus()) activity.performWindowFocusChanged(true);
         } catch (Throwable st) {
@@ -685,6 +703,9 @@ public final class ActivityThread {
 
     private static android.view.SurfaceView findSurfaceView(Activity activity) {
         if (activity == null) return null;
+        if ((Object) activity instanceof android.view.SurfaceView) {
+            return (android.view.SurfaceView) (Object) activity;
+        }
         android.view.View root = activity.getContentView();
         return findSurfaceViewInView(root);
     }

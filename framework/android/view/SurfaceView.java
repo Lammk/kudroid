@@ -41,10 +41,20 @@ public class SurfaceView extends View implements SurfaceHolder.Callback2 {
 
     /** Called by Window after the view has been measured against the real framebuffer. */
     public void dispatchSurfaceReady(int width, int height) {
-        if (width <= 0 || height <= 0 || !isLaidOut() || getWidth() <= 0 || getHeight() <= 0) {
-            return;
+        if (width <= 0 || height <= 0) {
+            try {
+                android.graphics.Canvas canvas = new android.graphics.Canvas();
+                width = canvas.getWidth();
+                height = canvas.getHeight();
+            } catch (Throwable ignored) {}
         }
+        if (width <= 0) width = 1080;
+        if (height <= 0) height = 1920;
         mHolder.dispatchSurfaceReady(width, height);
+    }
+
+    public void dispatchSurfaceCreated() {
+        dispatchSurfaceReady(getWidth(), getHeight());
     }
 
     /** Called before the owning Activity is destroyed or its host surface is lost. */
@@ -80,7 +90,15 @@ public class SurfaceView extends View implements SurfaceHolder.Callback2 {
         }
 
         void dispatchSurfaceReady(int width, int height) {
-            if (mView == null || !mView.isLaidOut() || width <= 0 || height <= 0) return;
+            if (width <= 0 || height <= 0) {
+                try {
+                    android.graphics.Canvas canvas = new android.graphics.Canvas();
+                    width = canvas.getWidth();
+                    height = canvas.getHeight();
+                } catch (Throwable ignored) {}
+            }
+            if (width <= 0) width = 1080;
+            if (height <= 0) height = 1920;
             mCreated = true;
             mWidth = width;
             mHeight = height;
@@ -147,18 +165,34 @@ public class SurfaceView extends View implements SurfaceHolder.Callback2 {
         public void addCallback(SurfaceHolder.Callback callback) {
             if (callback == null) return;
             final CallbackState state;
+            boolean isNew = false;
             synchronized (mCallbacks) {
                 for (CallbackState existing : mCallbacks) {
                     if (existing.callback == callback) return;
                 }
                 state = new CallbackState(callback);
                 mCallbacks.add(state);
+                isNew = true;
             }
-            // Android delivers state to a late registrant asynchronously on the UI thread.
-            if (mCreated) {
-                mView.post(new Runnable() {
-                    @Override public void run() { dispatchToCallback(state); }
-                });
+            if (isNew) {
+                if (!mCreated) {
+                    int w = mView != null ? mView.getWidth() : 0;
+                    int h = mView != null ? mView.getHeight() : 0;
+                    if (w <= 0 || h <= 0) {
+                        try {
+                            android.graphics.Canvas canvas = new android.graphics.Canvas();
+                            w = canvas.getWidth();
+                            h = canvas.getHeight();
+                        } catch (Throwable ignored) {}
+                    }
+                    if (w <= 0) w = 1080;
+                    if (h <= 0) h = 1920;
+                    mCreated = true;
+                    mWidth = w;
+                    mHeight = h;
+                    mSurface.setSurfaceSize(w, h);
+                }
+                dispatchToCallback(state);
             }
         }
 
