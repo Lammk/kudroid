@@ -758,6 +758,10 @@ public class View implements KeyEvent.Callback {
                                 : android.content.res.Resources.getSystem();
     }
 
+    public Display getDisplay() {
+        return new Display();
+    }
+
     /**
      * set the background of the view.
      */

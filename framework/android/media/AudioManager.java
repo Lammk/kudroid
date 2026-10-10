@@ -23,6 +23,7 @@ public class AudioManager {
     public boolean isWiredHeadsetOn() { return false; }
     public boolean isBluetoothScoOn() { return false; }
     public void setBluetoothScoOn(boolean on) {}
+    public boolean isBluetoothA2dpOn() { return false; }
     public AudioDeviceInfo[] getDevices(int flags) {
         return new AudioDeviceInfo[] { new AudioDeviceInfo(AudioDeviceInfo.TYPE_BUILTIN_SPEAKER, 1) };
     }
