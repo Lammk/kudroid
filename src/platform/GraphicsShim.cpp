@@ -2120,6 +2120,111 @@ extern "C" unsigned int bionic_eglQueryContext(void* dpy, void* ctx, unsigned in
     return r;
 }
 
+struct KuDroidGLSurfaceState {
+    EGLDisplay dpy = nullptr;
+    EGLConfig config = nullptr;
+    EGLContext ctx = nullptr;
+    EGLSurface surf = nullptr;
+    KuDroidNativeWindow* nw = nullptr;
+};
+
+extern "C" int64_t bionic_kudroid_gl_surface_create(int32_t client_version, int32_t depth_size, int32_t stencil_size) {
+    EGLDisplay dpy = bionic_eglGetDisplay((EGLNativeDisplayType)0);
+    if (!dpy) {
+        gpuLog("kudroid_gl_surface: eglGetDisplay failed");
+        return 0;
+    }
+    EGLint major = 0, minor = 0;
+    if (!bionic_eglInitialize(dpy, &major, &minor)) {
+        gpuLog("kudroid_gl_surface: eglInitialize failed");
+        return 0;
+    }
+    bionic_eglBindAPI(0x30A0 /* EGL_OPENGL_ES_API */);
+
+    EGLint renderable = (client_version >= 3) ? 0x40 /* EGL_OPENGL_ES3_BIT */ : 0x4 /* EGL_OPENGL_ES2_BIT */;
+    const EGLint attribs[] = {
+        0x3040 /* EGL_RENDERABLE_TYPE */, renderable,
+        0x3033 /* EGL_SURFACE_TYPE */, 0x4 /* EGL_WINDOW_BIT */,
+        0x3024 /* EGL_RED_SIZE */, 8,
+        0x3023 /* EGL_GREEN_SIZE */, 8,
+        0x3022 /* EGL_BLUE_SIZE */, 8,
+        0x3021 /* EGL_ALPHA_SIZE */, 8,
+        0x3025 /* EGL_DEPTH_SIZE */, depth_size > 0 ? depth_size : 16,
+        0x3026 /* EGL_STENCIL_SIZE */, stencil_size > 0 ? stencil_size : 8,
+        0x3038 /* EGL_NONE */
+    };
+    EGLConfig config = nullptr;
+    EGLint numConfigs = 0;
+    if (!bionic_eglChooseConfig(dpy, attribs, &config, 1, &numConfigs) || numConfigs < 1) {
+        const EGLint relaxedAttribs[] = {
+            0x3040, renderable,
+            0x3033, 0x4,
+            0x3024, 8,
+            0x3023, 8,
+            0x3022, 8,
+            0x3038
+        };
+        if (!bionic_eglChooseConfig(dpy, relaxedAttribs, &config, 1, &numConfigs) || numConfigs < 1) {
+            gpuLog("kudroid_gl_surface: eglChooseConfig found no matching config");
+            return 0;
+        }
+    }
+
+    const EGLint ctxAttribs[] = {
+        0x3098 /* EGL_CONTEXT_CLIENT_VERSION */, client_version > 0 ? client_version : 2,
+        0x3038
+    };
+    EGLContext ctx = bionic_eglCreateContext(dpy, config, nullptr, ctxAttribs);
+    if (!ctx) {
+        gpuLog("kudroid_gl_surface: eglCreateContext failed");
+        return 0;
+    }
+
+    void* win = bionic_ANativeWindow_fromSurface(nullptr, nullptr);
+    EGLSurface surf = bionic_eglCreateWindowSurface(dpy, config, (EGLNativeWindowType)win, nullptr);
+    if (!surf) {
+        gpuLog("kudroid_gl_surface: eglCreateWindowSurface failed");
+        bionic_eglDestroyContext(dpy, ctx);
+        return 0;
+    }
+
+    bionic_eglSwapInterval(dpy, 1);
+
+    auto* state = new KuDroidGLSurfaceState();
+    state->dpy = dpy;
+    state->config = config;
+    state->ctx = ctx;
+    state->surf = surf;
+    state->nw = static_cast<KuDroidNativeWindow*>(win);
+    gpuLog("kudroid_gl_surface: created state=%p (dpy=%p ctx=%p surf=%p win=%p)",
+           (void*)state, (void*)dpy, (void*)ctx, (void*)surf, win);
+    return reinterpret_cast<int64_t>(state);
+}
+
+extern "C" int32_t bionic_kudroid_gl_surface_make_current(int64_t handle) {
+    auto* state = reinterpret_cast<KuDroidGLSurfaceState*>(handle);
+    if (!state || !state->dpy || !state->surf || !state->ctx) return 0;
+    return bionic_eglMakeCurrent(state->dpy, state->surf, state->surf, state->ctx) ? 1 : 0;
+}
+
+extern "C" int32_t bionic_kudroid_gl_surface_swap(int64_t handle) {
+    auto* state = reinterpret_cast<KuDroidGLSurfaceState*>(handle);
+    if (!state || !state->dpy || !state->surf) return 0;
+    return bionic_eglSwapBuffers(state->dpy, state->surf) ? 1 : 0;
+}
+
+extern "C" void bionic_kudroid_gl_surface_destroy(int64_t handle) {
+    auto* state = reinterpret_cast<KuDroidGLSurfaceState*>(handle);
+    if (!state) return;
+    gpuLog("kudroid_gl_surface: destroying state=%p", (void*)state);
+    if (state->dpy) {
+        bionic_eglMakeCurrent(state->dpy, nullptr, nullptr, nullptr);
+        if (state->surf) bionic_eglDestroySurface(state->dpy, state->surf);
+        if (state->ctx) bionic_eglDestroyContext(state->dpy, state->ctx);
+    }
+    delete state;
+}
+
 extern "C" void bionic_glMemoryBarrier(unsigned int barriers) {
     typedef void (*PFN)(unsigned int);
     auto f = (PFN)get_gl_func("glMemoryBarrier");

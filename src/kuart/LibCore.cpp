@@ -38,6 +38,7 @@
 #include "kudroid/platform/AudioShim.h"
 #include "kudroid/platform/FramePacer.h"
 #include "kudroid/platform/JavaCanvasRenderer.h"
+#include "kudroid/platform/GraphicsShim.h"
 #include "kudroid/KuArtRuntime.h"
 
 // Native side of MessageQueue's AOSP-style wake primitive and Looper-touch
@@ -3020,6 +3021,34 @@ bool Invoke_android_media_AudioTrack(Interpreter* interp, const char* name,
     return false;
 }
 
+// GLSurfaceView manages EGL context and swapchain via GraphicsShim.
+bool Invoke_android_opengl_GLSurfaceView(Interpreter* interp, const char* name,
+                                         const DexValue* args, size_t num_args,
+                                         DexValue* result) {
+    if (std::strcmp(name, "nativeEglCreate") == 0) {
+        if (num_args < 3) return false;
+        *result = DexValue::Long(bionic_kudroid_gl_surface_create(args[0].i, args[1].i, args[2].i));
+        return true;
+    }
+    if (std::strcmp(name, "nativeEglMakeCurrent") == 0) {
+        if (num_args < 1) return false;
+        *result = DexValue::Int(bionic_kudroid_gl_surface_make_current(args[0].j) ? 1 : 0);
+        return true;
+    }
+    if (std::strcmp(name, "nativeEglSwap") == 0) {
+        if (num_args < 1) return false;
+        *result = DexValue::Int(bionic_kudroid_gl_surface_swap(args[0].j) ? 1 : 0);
+        return true;
+    }
+    if (std::strcmp(name, "nativeEglDestroy") == 0) {
+        if (num_args < 1) return false;
+        bionic_kudroid_gl_surface_destroy(args[0].j);
+        return true;
+    }
+    (void)interp;
+    return false;
+}
+
 // Forward keyboard requests to the host; report whether host listened.
 bool Invoke_android_view_inputmethod_InputMethodManager(Interpreter* /*interp*/,
                                                         const char* name,
@@ -3679,6 +3708,9 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
         return Invoke_android_view_inputmethod_InputMethodManager(interp, name, args,
                                                                  num_args, result);
     }
+    if (std::strcmp(desc, "Landroid/opengl/GLSurfaceView;") == 0) {
+        return Invoke_android_opengl_GLSurfaceView(interp, name, args, num_args, result);
+    }
 
     return false;
 }
@@ -3704,6 +3736,7 @@ bool LibCoreHasMethod(const DexMethod* method) {
             std::strcmp(desc, "Landroid/view/Window;") == 0 ||
             std::strcmp(desc, "Landroid/view/View;") == 0 ||
             std::strcmp(desc, "Landroid/view/inputmethod/InputMethodManager;") == 0 ||
+            std::strcmp(desc, "Landroid/opengl/GLSurfaceView;") == 0 ||
             std::strcmp(desc, "Landroid/os/PowerManager$WakeLock;") == 0);
 }
 

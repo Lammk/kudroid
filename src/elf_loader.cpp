@@ -931,16 +931,11 @@ bool ElfLoader::map() {
                         uintptr_t patAddr = reinterpret_cast<uintptr_t>(static_cast<char*>(base_) - minVaddr + seg.vaddr + (i * 4));
                         uintptr_t targetFound = patAddr + 8 + static_cast<intptr_t>(imm19) * 4;
                         const uint32_t brk = 0xd4200000 | (0x464d << 5);
-                        // Two sites: the loop head names the codebook the decoder
-                        // is looking for, and the fall-through after the scan is
-                        // where a codebook FMOD's own table lacks has to be served
-                        // from the fallback table.
-                        const bool site0 = kudroid_arm_fmod_vorbis_trap(
-                            patAddr, targetFound, patAddr + 4, insts[i], true);
+                        // Only patch the miss site (insts[i + 7]): native lookup runs unmodified
+                        // at full speed and finds builtin codebooks without clobbering.
                         const bool site1 = kudroid_arm_fmod_vorbis_trap(
                             patAddr + 0x1c, targetFound, patAddr + 0x20, insts[i + 7], false);
-                        if (site0 && site1) {
-                            insts[i] = brk;
+                        if (site1) {
                             insts[i + 7] = brk;
                         } else {
                             std::fprintf(stderr,

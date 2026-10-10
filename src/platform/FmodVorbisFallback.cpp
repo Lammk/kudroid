@@ -7798,10 +7798,10 @@ bool fmod_vorbis_trap_apply(GetX getX, SetX setX, GetPC getPC, SetPC setPC) {
 
     const uint32_t crc = static_cast<uint32_t>(getX(25));
     const void* entry = kudroid_fmod_vorbis_lookup(crc);
-    if (entry != nullptr) {
+    if (!site->probe && entry != nullptr) {
         setX(28, reinterpret_cast<uint64_t>(entry));
         setPC(site->targetFound);
-        fmod_vorbis_log_crc(crc, site->probe != 0, true);
+        fmod_vorbis_log_crc(crc, false, true);
         return true;
     }
     // Probes observe the builtin lookup; only the miss site substitutes data.

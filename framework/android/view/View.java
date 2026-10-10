@@ -674,6 +674,12 @@ public class View implements KeyEvent.Callback {
     protected void onDraw(Canvas canvas) {
     }
 
+    protected void onAttachedToWindow() {
+    }
+
+    protected void onDetachedFromWindow() {
+    }
+
     /**
      * draw view (called by parent).
      */
