@@ -4,6 +4,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
 import android.os.Bundle;
+import android.content.Intent;
 import android.view.MotionEvent;
 
 /**
@@ -828,6 +829,68 @@ public final class ActivityThread {
             }
         } catch (Throwable t) {
             t.printStackTrace();
+        }
+    }
+
+    void handleStartActivity(final Activity from, final Intent intent) {
+        if (intent == null) return;
+        String target = null;
+        if (intent.getComponent() != null) {
+            target = intent.getComponent().getClassName();
+        }
+        if (target == null || target.isEmpty()) {
+            return;
+        }
+        if (target.startsWith(".")) {
+            target = (sPackageName != null ? sPackageName : "") + target;
+        } else if (!target.contains(".") && sPackageName != null && !sPackageName.isEmpty()) {
+            target = sPackageName + "." + target;
+        }
+        final String resolvedTarget = target;
+        android.util.Log.i("ActivityThread", "Transitioning to target Activity: " + resolvedTarget);
+        Runnable r = new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Class<?> nextClass = Class.forName(resolvedTarget);
+                    if (!Activity.class.isAssignableFrom(nextClass)) {
+                        android.util.Log.e("ActivityThread", "Target class is not an Activity: " + resolvedTarget);
+                        return;
+                    }
+                    if (from != null) {
+                        if (from.hasWindowFocus()) from.performWindowFocusChanged(false);
+                        if (from.isResumed()) from.performPause();
+                        if (from.isStarted()) from.performStop();
+                        if (from.isFinishing()) from.performDestroy();
+                    }
+                    Activity next;
+                    if (mComponentFactory != null) {
+                        next = mComponentFactory.instantiateActivity(
+                                ClassLoader.getSystemClassLoader(), nextClass.getName(), intent);
+                    } else {
+                        next = (Activity) nextClass.newInstance();
+                    }
+                    try {
+                        next.attach(new ApplicationContext());
+                    } catch (Throwable ignored) {}
+                    mInitialActivity = next;
+                    mInitialActivityName = resolvedTarget;
+                    next.performCreate(null);
+                    next.performStart();
+                    next.performResume();
+                    next.renderViewHierarchy();
+                    dispatchSurfaceCallbacks(next);
+                    next.performWindowFocusChanged(true);
+                    android.util.Log.i("ActivityThread", "Target Activity transitioned successfully: " + resolvedTarget);
+                } catch (Throwable t) {
+                    android.util.Log.e("ActivityThread", "Failed to start activity " + resolvedTarget + ": " + t);
+                }
+            }
+        };
+        if (mH != null) {
+            mH.post(r);
+        } else {
+            r.run();
         }
     }
 

@@ -85,6 +85,15 @@ public abstract class PackageManager {
         return null;
     }
 
+    public android.graphics.drawable.Drawable getApplicationIcon(ApplicationInfo info) {
+        return new android.graphics.drawable.ColorDrawable(0xFF444444);
+    }
+
+    public android.graphics.drawable.Drawable getApplicationIcon(String packageName)
+            throws NameNotFoundException {
+        return new android.graphics.drawable.ColorDrawable(0xFF444444);
+    }
+
     public static class NameNotFoundException extends Exception {
         public NameNotFoundException() { super(); }
         public NameNotFoundException(String name) { super(name); }

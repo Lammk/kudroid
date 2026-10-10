@@ -609,9 +609,9 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
      */
     public void setContentView(android.view.View view) {
         mContentView = view;
-        // Mirror it onto the Window so getDecorView() reflects what is on screen.
-        // androidx reads window insets and system-UI flags off the decor view, and an
-        // app that sets its content through the Activity expects the Window to agree.
+        android.util.Log.i("Activity", "setContentView view=" +
+                (view != null ? view.getClass().getName() : "null") +
+                " resumed=" + mResumed);
         getWindow().setContentView(view);
         if (mResumed) {
             renderViewHierarchy();
@@ -619,6 +619,41 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
             if (at != null) {
                 at.dispatchSurfaceCallbacks(this);
             }
+        }
+    }
+
+    public void setContentView(android.view.View view, android.view.ViewGroup.LayoutParams params) {
+        if (view != null && params != null) {
+            view.setLayoutParams(params);
+        }
+        setContentView(view);
+    }
+
+    public void addContentView(android.view.View view, android.view.ViewGroup.LayoutParams params) {
+        if (view != null && params != null) {
+            view.setLayoutParams(params);
+        }
+        getWindow().addContentView(view, params);
+        if (mResumed) {
+            renderViewHierarchy();
+            ActivityThread at = ActivityThread.currentActivityThread();
+            if (at != null) {
+                at.dispatchSurfaceCallbacks(this);
+            }
+        }
+    }
+
+    @Override
+    public void startActivity(Intent intent) {
+        startActivity(intent, null);
+    }
+
+    @Override
+    public void startActivity(Intent intent, android.os.Bundle options) {
+        if (intent == null) return;
+        ActivityThread at = ActivityThread.currentActivityThread();
+        if (at != null) {
+            at.handleStartActivity(this, intent);
         }
     }
 

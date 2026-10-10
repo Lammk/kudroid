@@ -463,13 +463,6 @@ static void kudroid_ensure_vulkan_layer_attached(void* vk_layer) {
             setSize(vk, sel_registerName("setDrawableSize:"), CGSizeMake(w, h));
         }
 
-        if (g_metalLayer) {
-            id host = reinterpret_cast<id>(g_metalLayer);
-            if (isKindOf(host, sel_registerName("isKindOfClass:"), clsCALayer)) {
-                setId(host, sel_registerName("setContents:"), nullptr);
-            }
-        }
-
         if (g_metalLayer && vk_layer != g_metalLayer) {
             id host = reinterpret_cast<id>(g_metalLayer);
             if (isKindOf(host, sel_registerName("isKindOfClass:"), clsCALayer)) {
@@ -530,10 +523,10 @@ extern "C" void kudroid_gpu_attach_vulkan_layer(void* hostLayer) {
         id host = reinterpret_cast<id>(hostLayer);
         if (!isKindOf(host, sel_registerName("isKindOfClass:"), clsCALayer)) return;
 
-        setId(host, sel_registerName("setContents:"), nullptr);
         setBool(host, sel_registerName("setHidden:"), NO);
 
         if (!vk || vk == hostLayer) return;
+        setId(host, sel_registerName("setContents:"), nullptr);
         id sub = reinterpret_cast<id>(vk);
         if (!isKindOf(sub, sel_registerName("isKindOfClass:"), clsCALayer)) return;
 
@@ -574,7 +567,7 @@ extern "C" void kudroid_blit_canvas_to_layer(void* layer, const void* bits, int 
     // One producer per layer: if Vulkan is active, do not cover drawables
     {
         std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
-        if (s_vulkanLayer != nullptr) {
+        if (s_vulkanLayer != nullptr && layer == s_vulkanLayer) {
             gpuLog("blit skipped on vulkan layer=%p %dx%d", layer, width, height);
             return;
         }
@@ -1160,13 +1153,8 @@ extern "C" VkResult bionic_vkCreateAndroidSurfaceKHR(VkInstance instance,
     void* actualLayer = g_metalLayer;
     if (pCreateInfo->window && pCreateInfo->window != (void*)1) {
         auto* nw = static_cast<KuDroidNativeWindow*>(pCreateInfo->window);
-        if (nw->magic == 0x4B554457) {
-            if (g_metalLayer != nullptr) {
-                actualLayer = g_metalLayer;
-                nw->layer = g_metalLayer;
-            } else if (nw->layer) {
-                actualLayer = nw->layer;
-            }
+        if (nw->magic == 0x4B554457 && nw->layer) {
+            actualLayer = nw->layer;
         } else {
             actualLayer = pCreateInfo->window;
         }
@@ -1793,13 +1781,6 @@ extern "C" void kudroid_gpu_cleanup_on_test_exit(void) {
 }
 
 extern "C" bool kudroid_gpu_has_active_surface(void) {
-    {
-        std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
-        if (s_vulkanLayer != nullptr) return true;
-        for (const auto& e : g_surfaceLayers) {
-            if (e.surface != nullptr) return true;
-        }
-    }
     std::lock_guard<std::mutex> lock(g_nativeWindowsMutex);
     return s_activeEglSurface != nullptr || !g_nativeWindows.empty();
 }
@@ -1991,23 +1972,6 @@ extern "C" EGLBoolean bionic_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) 
         static std::atomic<bool> s_first{false};
         if (!s_first.exchange(true, std::memory_order_relaxed)) {
             kudroid_boot_mark("first-swap");
-#if defined(__APPLE__)
-            if (g_metalLayer) {
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    Class clsCALayer = objc_getClass("CALayer");
-                    if (clsCALayer && g_metalLayer) {
-                        id host = reinterpret_cast<id>(g_metalLayer);
-                        typedef BOOL (*IsKindOfFn)(id, SEL, Class);
-                        auto isKindOf = reinterpret_cast<IsKindOfFn>(objc_msgSend);
-                        if (isKindOf(host, sel_registerName("isKindOfClass:"), clsCALayer)) {
-                            typedef void (*SetIdFn)(id, SEL, id);
-                            auto setId = reinterpret_cast<SetIdFn>(objc_msgSend);
-                            setId(host, sel_registerName("setContents:"), nullptr);
-                        }
-                    }
-                });
-            }
-#endif
         }
     }
     // Slow-swap detector: a present path that blocks (drawable starvation,

@@ -523,6 +523,70 @@ void test_volume_is_accepted_and_clamped() {
     CallVirtual(track, "release", "()V", {}, nullptr, "release");
 }
 
+void test_fmod_classes() {
+    std::printf("[fmod] FMOD and AudioDevice Java layer\n");
+    DexClass* fmodCls = g_linker->FindClass("Lorg/fmod/FMOD;");
+    Check(fmodCls != nullptr && !fmodCls->is_stub, "Lorg/fmod/FMOD; is in framework.dex");
+
+    int32_t val = 0;
+    Check(CallStaticInt("Lorg/fmod/FMOD;", "checkInit", "()Z", {}, &val, "FMOD.checkInit") && val != 0,
+          "FMOD.checkInit() returns true");
+
+    Check(CallStaticInt("Lorg/fmod/FMOD;", "getOutputSampleRate", "()I", {}, &val, "FMOD.getOutputSampleRate") && val > 0,
+          "FMOD.getOutputSampleRate() returns valid sample rate");
+
+    Check(CallStaticInt("Lorg/fmod/FMOD;", "getOutputBlockSize", "()I", {}, &val, "FMOD.getOutputBlockSize") && val == 1024,
+          "FMOD.getOutputBlockSize() returns 1024");
+
+    Check(CallStaticInt("Lorg/fmod/FMOD;", "supportsLowLatency", "()Z", {}, &val, "FMOD.supportsLowLatency") && val == 0,
+          "FMOD.supportsLowLatency() returns false by default (Java mode)");
+
+    // Test OpenSL toggle
+    DexMethod* setOpenSL = fmodCls ? fmodCls->FindDirectMethod("setUseOpenSL", "(Z)V") : nullptr;
+    if (setOpenSL) {
+        std::vector<DexValue> args1 = {DexValue::Int(1)};
+        g_interp->Execute(setOpenSL, args1.data(), args1.size());
+        CallStaticInt("Lorg/fmod/FMOD;", "supportsLowLatency", "()Z", {}, &val, "FMOD.supportsLowLatency (OpenSL)");
+        Check(val != 0, "FMOD.supportsLowLatency() returns true when OpenSL is enabled");
+        std::vector<DexValue> args0 = {DexValue::Int(0)};
+        g_interp->Execute(setOpenSL, args0.data(), args0.size());
+    }
+
+    DexClass* devCls = g_linker->FindClass("Lorg/fmod/AudioDevice;");
+    Check(devCls != nullptr && !devCls->is_stub, "Lorg/fmod/AudioDevice; is in framework.dex");
+
+    DexObject* devObj = devCls ? g_linker->AllocObject(devCls) : nullptr;
+    Check(devObj != nullptr, "AudioDevice instance allocated");
+    DexMethod* devCtor = devCls ? devCls->FindDirectMethod("<init>", "()V") : nullptr;
+    if (devCtor && devObj) {
+        std::vector<DexValue> ctorArgs = {DexValue::Ref(devObj)};
+        g_interp->Execute(devCtor, ctorArgs.data(), ctorArgs.size());
+    }
+
+    DexValue rc;
+    bool initOk = CallVirtual(devObj, "init", "(IIII)Z",
+                              {DexValue::Int(2), DexValue::Int(44100),
+                               DexValue::Int(1024), DexValue::Int(4)},
+                              &rc, "AudioDevice.init");
+    Check(initOk && rc.i != 0, "AudioDevice.init(2, 44100, 1024, 4) returns true");
+
+    DexClass* shortArrCls = g_linker->FindClass("[S");
+    DexArray* shortArr = shortArrCls ? g_linker->AllocArray(shortArrCls, 2048) : nullptr;
+    Check(shortArr != nullptr, "short array allocated");
+    if (shortArr && devObj) {
+        bool wrote = CallVirtual(devObj, "write", "([SI)V",
+                                 {DexValue::Ref(reinterpret_cast<DexObject*>(shortArr)), DexValue::Int(2048)},
+                                 nullptr, "AudioDevice.write");
+        Check(wrote, "AudioDevice.write(short[], 2048) succeeded");
+    }
+
+    bool closed = CallVirtual(devObj, "close", "()V", {}, nullptr, "AudioDevice.close");
+    Check(closed, "AudioDevice.close() succeeded");
+
+    DexClass* codecCls = g_linker->FindClass("Lorg/fmod/MediaCodec;");
+    Check(codecCls != nullptr && !codecCls->is_stub, "Lorg/fmod/MediaCodec; is in framework.dex");
+}
+
 }  // namespace
 
 int main() {
@@ -552,6 +616,7 @@ int main() {
     test_an_impossible_format_reports_failure();
     test_use_after_release_is_refused();
     test_volume_is_accepted_and_clamped();
+    test_fmod_classes();
 
     std::printf("=== %d checks, %d failures ===\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

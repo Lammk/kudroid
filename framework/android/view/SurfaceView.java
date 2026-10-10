@@ -90,15 +90,7 @@ public class SurfaceView extends View implements SurfaceHolder.Callback2 {
         }
 
         void dispatchSurfaceReady(int width, int height) {
-            if (width <= 0 || height <= 0) {
-                try {
-                    android.graphics.Canvas canvas = new android.graphics.Canvas();
-                    width = canvas.getWidth();
-                    height = canvas.getHeight();
-                } catch (Throwable ignored) {}
-            }
-            if (width <= 0) width = 1080;
-            if (height <= 0) height = 1920;
+            if (mView == null || !mView.isLaidOut() || width <= 0 || height <= 0) return;
             mCreated = true;
             mWidth = width;
             mHeight = height;
@@ -139,11 +131,13 @@ public class SurfaceView extends View implements SurfaceHolder.Callback2 {
 
         private void dispatchToCallback(CallbackState state) {
             boolean created;
+            boolean changed;
             final int width;
             final int height;
             synchronized (mCallbacks) {
                 if (!mCreated || !mCallbacks.contains(state)) return;
                 created = !state.created;
+                changed = created || state.width != mWidth || state.height != mHeight;
                 state.created = true;
                 state.width = mWidth;
                 state.height = mHeight;
@@ -151,8 +145,8 @@ public class SurfaceView extends View implements SurfaceHolder.Callback2 {
                 height = mHeight;
             }
             if (created) invokeCreated(state.callback);
-            invokeChanged(state.callback, width, height);
-            if (state.callback instanceof SurfaceHolder.Callback2) {
+            if (changed) invokeChanged(state.callback, width, height);
+            if (changed && state.callback instanceof SurfaceHolder.Callback2) {
                 invokeRedraw((SurfaceHolder.Callback2) state.callback);
             }
         }
@@ -161,34 +155,17 @@ public class SurfaceView extends View implements SurfaceHolder.Callback2 {
         public void addCallback(SurfaceHolder.Callback callback) {
             if (callback == null) return;
             final CallbackState state;
-            boolean isNew = false;
             synchronized (mCallbacks) {
                 for (CallbackState existing : mCallbacks) {
                     if (existing.callback == callback) return;
                 }
                 state = new CallbackState(callback);
                 mCallbacks.add(state);
-                isNew = true;
             }
-            if (isNew) {
-                if (!mCreated) {
-                    int w = mView != null ? mView.getWidth() : 0;
-                    int h = mView != null ? mView.getHeight() : 0;
-                    if (w <= 0 || h <= 0) {
-                        try {
-                            android.graphics.Canvas canvas = new android.graphics.Canvas();
-                            w = canvas.getWidth();
-                            h = canvas.getHeight();
-                        } catch (Throwable ignored) {}
-                    }
-                    if (w <= 0) w = 1080;
-                    if (h <= 0) h = 1920;
-                    mCreated = true;
-                    mWidth = w;
-                    mHeight = h;
-                    mSurface.setSurfaceSize(w, h);
-                }
-                dispatchToCallback(state);
+            if (mCreated) {
+                mView.post(new Runnable() {
+                    @Override public void run() { dispatchToCallback(state); }
+                });
             }
         }
 

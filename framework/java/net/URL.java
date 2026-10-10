@@ -85,6 +85,16 @@ public final class URL implements Serializable {
         if (protocol.equals("jar")) {
             return new JarURLConnection(this);
         }
+        if (protocol.equals("https")) {
+            return new javax.net.ssl.HttpsURLConnection(this) {
+                public void disconnect() {}
+                public boolean usingProxy() { return false; }
+                public void connect() throws IOException {}
+                public String getCipherSuite() { return "TLS_AES_128_GCM_SHA256"; }
+                public java.security.cert.Certificate[] getLocalCertificates() { return null; }
+                public java.security.cert.Certificate[] getServerCertificates() { return new java.security.cert.Certificate[0]; }
+            };
+        }
         return new HttpURLConnection(this) {
             public void disconnect() {}
             public boolean usingProxy() { return false; }

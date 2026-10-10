@@ -119,6 +119,23 @@ public class Window {
         }
     }
 
+    public void setContentView(View view, ViewGroup.LayoutParams params) {
+        if (view != null && params != null) {
+            view.setLayoutParams(params);
+        }
+        setContentView(view);
+    }
+
+    public void addContentView(View view, ViewGroup.LayoutParams params) {
+        if (view != null) {
+            if (params != null) {
+                view.setLayoutParams(params);
+            }
+            final FrameLayout content = contentParent();
+            content.addView(view);
+        }
+    }
+
     public View getContentView() {
         return mContentView;
     }
@@ -201,6 +218,8 @@ public class Window {
     /** Deliver the current real Window surface state to Window callbacks. */
     public void dispatchSurfaceReady() {
         if (!hasSurface()) return;
+        DecorView decor = ensureDecorView();
+        if (!decor.isLaidOut() || decor.getWidth() != mWidth || decor.getHeight() != mHeight) return;
         mSurface.setSurfaceSize(mWidth, mHeight);
         SurfaceCallbackState[] callbacks;
         synchronized (mSurfaceLock) {
@@ -264,21 +283,21 @@ public class Window {
 
     private void dispatchSurfaceState(SurfaceCallbackState state) {
         boolean created;
-        final int width;
-        final int height;
+        boolean changed;
         synchronized (mSurfaceLock) {
             if (!mSurfaceCreated || !mSurfaceCallbacks.contains(state)) return;
             created = !state.created;
+            changed = created || state.width != mWidth || state.height != mHeight;
             state.created = true;
             state.width = mWidth;
             state.height = mHeight;
-            width = mWidth;
-            height = mHeight;
         }
         if (created) invokeSurfaceCreated(state.callback);
-        invokeSurfaceChanged(state.callback, width, height);
-        if (state.callback instanceof SurfaceHolder.Callback2) {
-            invokeSurfaceRedrawNeeded((SurfaceHolder.Callback2) state.callback);
+        if (changed) {
+            invokeSurfaceChanged(state.callback, mWidth, mHeight);
+            if (state.callback instanceof SurfaceHolder.Callback2) {
+                invokeSurfaceRedrawNeeded((SurfaceHolder.Callback2) state.callback);
+            }
         }
     }
 

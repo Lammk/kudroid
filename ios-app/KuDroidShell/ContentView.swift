@@ -1669,10 +1669,12 @@ class NativeMetalViewController: UIViewController {
     }
 
     override func loadView() {
-        metalView = NativeMetalView(frame: UIScreen.main.bounds)
+        let root = UIView(frame: UIScreen.main.bounds)
+        root.backgroundColor = .black
+        metalView = NativeMetalView(frame: root.bounds)
         metalView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-        metalView.backgroundColor = .clear
-        self.view = metalView
+        root.addSubview(metalView)
+        self.view = root
     }
 
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
@@ -1688,8 +1690,8 @@ class NativeMetalViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         activateAudioSession()
-        self.view.backgroundColor = .clear
-        metalView.backgroundColor = .clear
+        self.view.backgroundColor = .black
+        metalView.backgroundColor = .black
 
         // On-screen status indicator for immediate feedback
         statusLabel = UILabel()
@@ -2025,7 +2027,6 @@ class NativeMetalView: UIView {
     }
 
     private func setupLayer() {
-        self.backgroundColor = .clear
         self.isMultipleTouchEnabled = true
         self.isUserInteractionEnabled = true
         guard let metalLayer = self.layer as? CAMetalLayer else { return }
@@ -2185,7 +2186,6 @@ extension NativeMetalView: UIKeyInput {
 // Blit a CPU-drawn 2D buffer from C++ straight to the iOS screen (CALayer)
 @_cdecl("kudroid_blit_canvas_to_layer")
 public func kudroid_blit_canvas_to_layer(layerPtr: UnsafeMutableRawPointer?, bits: UnsafeRawPointer?, width: Int32, height: Int32) {
-    if kudroid_gpu_has_active_surface() { return }
     guard let layerPtr = layerPtr, let bits = bits, width > 0, height > 0 else { return }
     let layer = Unmanaged<CALayer>.fromOpaque(layerPtr).takeUnretainedValue()
     let w = Int(width)
