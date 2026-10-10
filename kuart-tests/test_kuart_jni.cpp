@@ -573,7 +573,36 @@ Check(obj.l != nullptr, "CallJavaA static tr  object");
 
         kudroid::kuart::DexMethod* getter = nat->FindVirtualMethod("getValue", "()I");
         const DexValue v = jni.CallJavaA(obj.l, getter, nullptr, /*virtual_dispatch=*/true);
-Check(v.i == 7, "CallJavaA virtual tr  7");
+        Check(v.i == 7, "CallJavaA virtual trả 7");
+
+        // Null receiver on instance method throws NullPointerException
+        interp.ClearPendingException();
+        jni.ClearException();
+        jni.CallJavaA(nullptr, getter, nullptr, /*virtual_dispatch=*/true);
+        Check(interp.HasPendingException(), "CallJavaA null receiver sets exception");
+        if (interp.pending_exception() != nullptr) {
+            Check(std::strcmp(interp.pending_exception()->clazz->descriptor,
+                              "Ljava/lang/NullPointerException;") == 0,
+                  "Throws NullPointerException on null receiver");
+        }
+        interp.ClearPendingException();
+        jni.ClearException();
+
+        // Incompatible receiver throws IncompatibleClassChangeError
+        kudroid::kuart::DexClass* byte_arr_class = linker.FindClass("[B");
+        kudroid::kuart::DexArray* arr =
+            byte_arr_class != nullptr ? linker.AllocArray(byte_arr_class, 4) : nullptr;
+        Check(arr != nullptr, "AllocArray byte[] succeeds");
+        jni.CallJavaA(reinterpret_cast<kudroid::kuart::DexObject*>(arr), getter, nullptr,
+                      /*virtual_dispatch=*/true);
+        Check(interp.HasPendingException(), "CallJavaA incompatible receiver sets exception");
+        if (interp.pending_exception() != nullptr) {
+            Check(std::strcmp(interp.pending_exception()->clazz->descriptor,
+                              "Ljava/lang/IncompatibleClassChangeError;") == 0,
+                  "Throws IncompatibleClassChangeError on virtual dispatch miss");
+        }
+        interp.ClearPendingException();
+        jni.ClearException();
     }
 
     // Test AAPCS64 Register Unpacking to JValues

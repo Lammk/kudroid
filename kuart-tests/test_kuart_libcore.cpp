@@ -283,6 +283,17 @@ void TestString(Vm& vm) {
               reinterpret_cast<uint16_t*>(char_array + 1)[0] == 'H',
           "toCharArray()[0] == 'H'");
 
+    // Type safety: passing a non-String receiver to String method throws ClassCastException without crashing.
+    vm.Call("Ljava/lang/String;", "indexOf",
+            {DexValue::Ref(byte_array), DexValue::Int('l'), DexValue::Int(0)});
+    Check(vm.interp.HasPendingException(), "indexOf on non-String receiver throws exception");
+    if (vm.interp.pending_exception() != nullptr) {
+        Check(std::strcmp(vm.interp.pending_exception()->clazz->descriptor,
+                          "Ljava/lang/ClassCastException;") == 0,
+              "throws ClassCastException on non-String receiver");
+    }
+    vm.interp.ClearPendingException();
+
     // Non-ASCII: byte length and UTF-16 length differ, so the fast path must not
     // be used and indices must be code units.
     DexString* viet = vm.Str("Xin chào");

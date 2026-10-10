@@ -283,6 +283,7 @@ DexObject* DexJniEnv::pending_exception() const {
 
 void DexJniEnv::ClearException() {
     t_pending_exception = nullptr;
+    last_error_.clear();
     if (interpreter_ != nullptr) interpreter_->ClearPendingException();
 }
 
@@ -717,13 +718,23 @@ DexValue DexJniEnv::CallJavaA(DexObject* receiver, DexMethod* method, const jval
     }
 
     // Validate native-supplied receiver; fall back to non-virtual on bad handles.
+    bool was_jclass = false;
     if (receiver != nullptr && linker_ != nullptr &&
-        linker_->IsRegisteredClass(reinterpret_cast<const DexClass*>(receiver))) {        // A jclass receiver is not a mistake. In the JNI object model a jclass IS the
+        linker_->IsRegisteredClass(reinterpret_cast<const DexClass*>(receiver))) {
+        was_jclass = true;
         // A jclass is a valid Class object; substitute the heap instance.
         if (DexClassObject* as_object = linker_->GetClassObject(
                 const_cast<DexClass*>(reinterpret_cast<const DexClass*>(receiver)))) {
             receiver = as_object;
         }
+    }
+
+    if (!method->IsStatic() && receiver == nullptr) {
+        if (interpreter_ != nullptr) {
+            interpreter_->ThrowException("Ljava/lang/NullPointerException;",
+                                         "call instance method on null receiver");
+        }
+        return result;
     }
 
     const bool is_special = method->name != nullptr && method->name[0] == '<';
@@ -732,11 +743,10 @@ DexValue DexJniEnv::CallJavaA(DexObject* receiver, DexMethod* method, const jval
             DexMethod* found = receiver_class->FindVirtualMethod(method->name, method->signature);
             if (found != nullptr) {
                 method = found;
-            } else {
-                // Was silent: falling through to a non-virtual call on the
-                // interface/abstract method (e.g. Runnable.run on a Proxy whose
-                // vtable lacks it) executes a bodiless method and dies far away.
-                // Log the miss so the receiver/method pair is on record.
+            } else if (!receiver_class->is_proxy) {
+                if (was_jclass) {
+                    return result;
+                }
                 const char* recv_name = (receiver_class->descriptor != nullptr)
                                             ? receiver_class->descriptor
                                             : "?";
@@ -749,11 +759,22 @@ DexValue DexJniEnv::CallJavaA(DexObject* receiver, DexMethod* method, const jval
                              method->name != nullptr ? method->name : "?",
                              method->signature != nullptr ? method->signature : "",
                              recv_name);
+                if (interpreter_ != nullptr) {
+                    std::string detail = "Incompatible receiver class ";
+                    detail += recv_name;
+                    detail += " for method ";
+                    if (method->declaring_class != nullptr) {
+                        detail += method->declaring_class->PrettyName();
+                        detail += ".";
+                    }
+                    detail += method->name != nullptr ? method->name : "?";
+                    if (method->signature != nullptr) detail += method->signature;
+                    interpreter_->ThrowException(
+                        "Ljava/lang/IncompatibleClassChangeError;", detail);
+                }
+                return result;
             }
         } else {
-            // Report it once per method: silently degrading to a non-virtual call
-            // hides that a library is handing over bad handles, and the wrong
-            // override may then run for the rest of the session.
             static std::mutex s_mtx;
             static std::set<const DexMethod*> s_reported;
             bool first = false;
@@ -768,6 +789,13 @@ DexValue DexJniEnv::CallJavaA(DexObject* receiver, DexMethod* method, const jval
                              method->signature != nullptr ? method->signature : "",
                              linker_->DescribeBadReceiver(receiver).c_str());
             }
+            if (interpreter_ != nullptr) {
+                interpreter_->ThrowException(
+                    "Ljava/lang/IllegalArgumentException;",
+                    "invalid receiver for virtual dispatch: " +
+                        linker_->DescribeBadReceiver(receiver));
+            }
+            return result;
         }
     }
 

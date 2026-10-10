@@ -639,7 +639,22 @@ bool Interpreter::InvokeMethod(DexFrame* frame, const art::Instruction* inst, bo
         if (receiver_class != nullptr) {
             DexMethod* resolved =
                 receiver_class->FindVirtualMethod(target->name, target->signature);
-            if (resolved != nullptr) target = resolved;
+            if (resolved != nullptr) {
+                target = resolved;
+            } else if (!receiver_class->is_proxy) {
+                std::string detail = "invoke ";
+                if (target->declaring_class != nullptr) {
+                    detail += target->declaring_class->PrettyName();
+                    detail += ".";
+                }
+                detail += target->name != nullptr ? target->name : "?";
+                if (target->signature != nullptr) detail += target->signature;
+                detail += " — receiver class ";
+                detail += receiver_class->descriptor != nullptr ? receiver_class->descriptor : "?";
+                detail += " does not implement method";
+                ThrowException("Ljava/lang/IncompatibleClassChangeError;", detail);
+                return false;
+            }
         } else if (receiver != nullptr) {
             // Name both the method and the bad receiver for diagnosis.
             std::string detail = "invoke ";

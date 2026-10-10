@@ -167,6 +167,10 @@ class Utf16View {
 public:
     explicit Utf16View(DexString* str) {
         if (str == nullptr || str->utf8 == nullptr) return;
+        if (str->clazz != nullptr && str->clazz->descriptor != nullptr &&
+            std::strcmp(str->clazz->descriptor, "Ljava/lang/String;") != 0) {
+            return;
+        }
         ascii_ = str->ascii;
         if (ascii_) {
             bytes_ = str->utf8;
@@ -1998,6 +2002,14 @@ bool Invoke_java_lang_String(Interpreter* interp, const DexMethod* method,
         interp->ThrowException("Ljava/lang/NullPointerException;", "null string receiver");
         return true;
     }
+    if (linker != nullptr) {
+        DexClass* str_class = linker->FindClass("Ljava/lang/String;");
+        if (str_class != nullptr && self->clazz != str_class) {
+            interp->ThrowException("Ljava/lang/ClassCastException;",
+                                   "receiver is not java.lang.String");
+            return true;
+        }
+    }
 
     if (std::strcmp(name, "intern") == 0) {
         result->l = linker->InternString(self->utf8 ? self->utf8 : "");
@@ -2053,6 +2065,18 @@ bool Invoke_java_lang_String(Interpreter* interp, const DexMethod* method,
             return true;
         }
 
+        if (args[1].l == nullptr) {
+            interp->ThrowException("Ljava/lang/NullPointerException;", "needle null");
+            return true;
+        }
+        if (linker != nullptr) {
+            DexClass* str_class = linker->FindClass("Ljava/lang/String;");
+            if (str_class != nullptr && args[1].l->clazz != str_class) {
+                interp->ThrowException("Ljava/lang/ClassCastException;",
+                                       "needle is not java.lang.String");
+                return true;
+            }
+        }
         Utf16View needle(AsString(args[1]));
         const int32_t nlen = static_cast<int32_t>(needle.length());
         int32_t found = -1;
@@ -2179,7 +2203,8 @@ bool Invoke_java_lang_String(Interpreter* interp, const DexMethod* method,
     }
     if (std::strcmp(name, "equalsIgnoreCase") == 0) {
         DexString* other = AsString(args[1]);
-        if (other == nullptr) {
+        DexClass* str_class = linker != nullptr ? linker->FindClass("Ljava/lang/String;") : nullptr;
+        if (other == nullptr || (str_class != nullptr && other->clazz != str_class)) {
             *result = DexValue::Int(0);
             return true;
         }
@@ -2206,6 +2231,11 @@ bool Invoke_java_lang_String(Interpreter* interp, const DexMethod* method,
         DexString* other = AsString(args[1]);
         if (other == nullptr) {
             interp->ThrowException("Ljava/lang/NullPointerException;", "compareTo null");
+            return true;
+        }
+        DexClass* str_class = linker != nullptr ? linker->FindClass("Ljava/lang/String;") : nullptr;
+        if (str_class != nullptr && other->clazz != str_class) {
+            interp->ThrowException("Ljava/lang/ClassCastException;", "compareTo non-string");
             return true;
         }
         Utf16View rhs(other);
