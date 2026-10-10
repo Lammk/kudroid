@@ -34,6 +34,7 @@ static thread_local void* tls_autorelease_pool = nullptr;
 extern void* g_metalLayer;
 extern int g_metalLayerWidth;
 extern int g_metalLayerHeight;
+extern float g_metalLayerDensity;
 
 // Frame-liveness hook (defined in kudroid_bridge.cpp): stamps the last
 // successful present so the watchdog can tell a dead frame loop from a busy
@@ -72,6 +73,7 @@ static void gpuLog(const char* fmt, ...) {
 }
 
 #if defined(__APPLE__)
+#include <CoreGraphics/CoreGraphics.h>
 #include <objc/runtime.h>
 #include <objc/message.h>
 
