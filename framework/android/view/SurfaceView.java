@@ -139,13 +139,11 @@ public class SurfaceView extends View implements SurfaceHolder.Callback2 {
 
         private void dispatchToCallback(CallbackState state) {
             boolean created;
-            boolean changed;
             final int width;
             final int height;
             synchronized (mCallbacks) {
                 if (!mCreated || !mCallbacks.contains(state)) return;
                 created = !state.created;
-                changed = created || state.width != mWidth || state.height != mHeight;
                 state.created = true;
                 state.width = mWidth;
                 state.height = mHeight;
@@ -153,11 +151,9 @@ public class SurfaceView extends View implements SurfaceHolder.Callback2 {
                 height = mHeight;
             }
             if (created) invokeCreated(state.callback);
-            if (changed) {
-                invokeChanged(state.callback, width, height);
-                if (state.callback instanceof SurfaceHolder.Callback2) {
-                    invokeRedraw((SurfaceHolder.Callback2) state.callback);
-                }
+            invokeChanged(state.callback, width, height);
+            if (state.callback instanceof SurfaceHolder.Callback2) {
+                invokeRedraw((SurfaceHolder.Callback2) state.callback);
             }
         }
 

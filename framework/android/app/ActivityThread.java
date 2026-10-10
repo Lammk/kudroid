@@ -616,12 +616,14 @@ public final class ActivityThread {
                 // are delivered only after this pass has produced real view bounds.
                 mInitialActivity.renderViewHierarchy();
                 dispatchSurfaceCallbacks(mInitialActivity);
+                mInitialActivity.performWindowFocusChanged(true);
                 if (mH != null) {
                     mH.post(new Runnable() {
                         @Override
                         public void run() {
                             if (mInitialActivity != null) {
                                 dispatchSurfaceCallbacks(mInitialActivity);
+                                mInitialActivity.performWindowFocusChanged(true);
                             }
                         }
                     });
@@ -684,7 +686,9 @@ public final class ActivityThread {
 
             android.view.SurfaceView foundSv = findSurfaceView(activity);
             if (foundSv != null) {
-                foundSv.dispatchSurfaceReady(foundSv.getWidth(), foundSv.getHeight());
+                int svW = foundSv.getWidth() > 0 ? foundSv.getWidth() : width;
+                int svH = foundSv.getHeight() > 0 ? foundSv.getHeight() : height;
+                foundSv.dispatchSurfaceReady(svW, svH);
             }
 
             if (activity instanceof android.view.SurfaceHolder.Callback) {
@@ -705,7 +709,7 @@ public final class ActivityThread {
             }
 
             window.dispatchSurfaceReady();
-            if (!activity.hasWindowFocus()) activity.performWindowFocusChanged(true);
+            activity.performWindowFocusChanged(true);
         } catch (Throwable st) {
             android.util.Log.e("ActivityThread", "NON-FATAL surface callback: " + st.toString());
         }

@@ -250,13 +250,7 @@ public class Window {
             mSurfaceCallbacks.add(state);
         }
         if (mSurfaceCreated) {
-            final SurfaceCallbackState pending = state;
-            ensureDecorView().post(new Runnable() {
-                @Override
-                public void run() {
-                    dispatchSurfaceState(pending);
-                }
-            });
+            dispatchSurfaceState(state);
         }
     }
 
@@ -270,21 +264,21 @@ public class Window {
 
     private void dispatchSurfaceState(SurfaceCallbackState state) {
         boolean created;
-        boolean changed;
+        final int width;
+        final int height;
         synchronized (mSurfaceLock) {
             if (!mSurfaceCreated || !mSurfaceCallbacks.contains(state)) return;
             created = !state.created;
-            changed = created || state.width != mWidth || state.height != mHeight;
             state.created = true;
             state.width = mWidth;
             state.height = mHeight;
+            width = mWidth;
+            height = mHeight;
         }
         if (created) invokeSurfaceCreated(state.callback);
-        if (changed) {
-            invokeSurfaceChanged(state.callback, mWidth, mHeight);
-            if (state.callback instanceof SurfaceHolder.Callback2) {
-                invokeSurfaceRedrawNeeded((SurfaceHolder.Callback2) state.callback);
-            }
+        invokeSurfaceChanged(state.callback, width, height);
+        if (state.callback instanceof SurfaceHolder.Callback2) {
+            invokeSurfaceRedrawNeeded((SurfaceHolder.Callback2) state.callback);
         }
     }
 
