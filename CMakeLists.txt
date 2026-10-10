@@ -29,9 +29,9 @@ endif()
 # clones embed the pinned framework/build/framework.dex on first configure.
 set(KUDROID_DEX_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/include/kudroid/framework_dex_bytes.h")
 set(KUDROID_DEX_BINARY "${CMAKE_CURRENT_SOURCE_DIR}/framework/build/framework.dex")
-if(NOT EXISTS "${KUDROID_DEX_HEADER}")
-    if(EXISTS "${KUDROID_DEX_BINARY}")
-        message(STATUS "Generating framework_dex_bytes.h from framework/build/framework.dex")
+if(EXISTS "${KUDROID_DEX_BINARY}")
+    if(NOT EXISTS "${KUDROID_DEX_HEADER}" OR "${KUDROID_DEX_BINARY}" IS_NEWER_THAN "${KUDROID_DEX_HEADER}")
+        message(STATUS "Regenerating framework_dex_bytes.h from framework/build/framework.dex")
         execute_process(
             COMMAND python3 "${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed_framework_dex.py"
             WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
@@ -40,7 +40,9 @@ if(NOT EXISTS "${KUDROID_DEX_HEADER}")
         if(NOT KUDROID_DEX_EMBED_RESULT EQUAL 0)
             message(FATAL_ERROR "Failed to generate framework_dex_bytes.h from framework.dex")
         endif()
-    else()
+    endif()
+else()
+    if(NOT EXISTS "${KUDROID_DEX_HEADER}")
         message(FATAL_ERROR
             "Missing ${KUDROID_DEX_HEADER} and ${KUDROID_DEX_BINARY}. "
             "Run: bash framework/build.sh")

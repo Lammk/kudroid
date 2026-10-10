@@ -201,8 +201,6 @@ public class Window {
     /** Deliver the current real Window surface state to Window callbacks. */
     public void dispatchSurfaceReady() {
         if (!hasSurface()) return;
-        DecorView decor = ensureDecorView();
-        if (!decor.isLaidOut() || decor.getWidth() != mWidth || decor.getHeight() != mHeight) return;
         mSurface.setSurfaceSize(mWidth, mHeight);
         SurfaceCallbackState[] callbacks;
         synchronized (mSurfaceLock) {

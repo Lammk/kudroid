@@ -613,12 +613,10 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
         // androidx reads window insets and system-UI flags off the decor view, and an
         // app that sets its content through the Activity expects the Window to agree.
         getWindow().setContentView(view);
-        if (mResumed && mUiHandler != null) {
-            mUiHandler.post(new Runnable() {
-                @Override public void run() {
-                    if (mResumed) renderViewHierarchy();
-                }
-            });
+        renderViewHierarchy();
+        ActivityThread at = ActivityThread.currentActivityThread();
+        if (at != null) {
+            at.dispatchSurfaceCallbacks(this);
         }
     }
 

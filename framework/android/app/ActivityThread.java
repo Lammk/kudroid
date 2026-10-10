@@ -616,6 +616,16 @@ public final class ActivityThread {
                 // are delivered only after this pass has produced real view bounds.
                 mInitialActivity.renderViewHierarchy();
                 dispatchSurfaceCallbacks(mInitialActivity);
+                if (mH != null) {
+                    mH.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (mInitialActivity != null) {
+                                dispatchSurfaceCallbacks(mInitialActivity);
+                            }
+                        }
+                    });
+                }
                 android.util.Log.i("ActivityThread", "Activity launch complete.");
             } catch (Throwable t) {
                 android.util.Log.e("ActivityThread", "NON-FATAL in Activity lifecycle: " + t.toString());
@@ -661,7 +671,7 @@ public final class ActivityThread {
         // finish before that loop begins and avoids nesting a second Looper.loop().
     }
 
-    private void dispatchSurfaceCallbacks(final Activity activity) {
+    void dispatchSurfaceCallbacks(final Activity activity) {
         if (activity == null) return;
         try {
             android.view.Window window = activity.getWindow();
