@@ -1121,9 +1121,7 @@ int main() {
                   "an unknown service name returns null without throwing");
         }
 
-        // The methods Minecraft calls on the IME right after obtaining it. Each one
-        // must answer optimistically: a false from isActive() or showSoftInput()
-        // makes an app disable its own text entry.
+        // Verify initial IME state before any view is served or host callback registered.
         {
             DexObject* imm = nullptr;
             if (ctx != nullptr) {
@@ -1137,20 +1135,20 @@ int main() {
             if (imm != nullptr) {
                 DexValue r;
                 if (CallVirtual(imm, "isAcceptingText", "()Z", {}, &r, "isAcceptingText")) {
-                    Check(r.i != 0, "IMM.isAcceptingText() is true");
+                    Check(r.i == 0, "IMM.isAcceptingText() is false when idle");
                 }
                 if (CallVirtual(imm, "isActive", "()Z", {}, &r, "isActive")) {
-                    Check(r.i != 0, "IMM.isActive() is true");
+                    Check(r.i == 0, "IMM.isActive() is false when idle");
                 }
                 if (CallVirtual(imm, "showSoftInput", "(Landroid/view/View;I)Z",
                                 {DexValue::Ref(nullptr), DexValue::Int(0)}, &r,
                                 "showSoftInput")) {
-                    Check(r.i != 0, "IMM.showSoftInput() reports success");
+                    Check(r.i == 0, "IMM.showSoftInput(null) reports false");
                 }
                 if (CallVirtual(imm, "hideSoftInputFromWindow", "(Landroid/os/IBinder;I)Z",
                                 {DexValue::Ref(nullptr), DexValue::Int(0)}, &r,
                                 "hideSoftInputFromWindow")) {
-                    Check(r.i != 0, "IMM.hideSoftInputFromWindow() reports success");
+                    Check(r.i == 0, "IMM.hideSoftInputFromWindow() reports false when no host callback");
                 }
             }
         }

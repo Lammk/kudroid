@@ -71,6 +71,7 @@ void kudroid_set_documents_dir(const char* dir);
 /// (3.0 for @3x) — pushed to Java's DisplayMetrics at JVM initialization.
 void kudroid_set_metal_layer(void* layer, int width, int height, float density);
 void kudroid_unbind_metal_layer(void);
+bool kudroid_gpu_has_active_surface(void);
 
 /// set and get required screen orientation from Activity (0=Landscape, 1=Portrait, -1=Unspecified)
 void kudroid_set_requested_orientation(int orientation);

@@ -641,6 +641,9 @@ bool Interpreter::InvokeMethod(DexFrame* frame, const art::Instruction* inst, bo
                 receiver_class->FindVirtualMethod(target->name, target->signature);
             if (resolved != nullptr) {
                 target = resolved;
+            } else if (target->declaring_class != nullptr &&
+                       receiver_class->IsSubClassOf(target->declaring_class)) {
+                // Target is declared on an implemented interface or base class; keep target.
             } else if (!receiver_class->is_proxy) {
                 std::string detail = "invoke ";
                 if (target->declaring_class != nullptr) {

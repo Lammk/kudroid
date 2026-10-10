@@ -740,39 +740,46 @@ DexValue DexJniEnv::CallJavaA(DexObject* receiver, DexMethod* method, const jval
     const bool is_special = method->name != nullptr && method->name[0] == '<';
     if (virtual_dispatch && !is_special && receiver != nullptr && linker_ != nullptr) {
         if (DexClass* receiver_class = linker_->ClassOfObject(receiver)) {
-            DexMethod* found = receiver_class->FindVirtualMethod(method->name, method->signature);
+            DexMethod* found = !method->IsDirect()
+                                   ? receiver_class->FindVirtualMethod(method->name, method->signature)
+                                   : nullptr;
             if (found != nullptr) {
                 method = found;
             } else if (!receiver_class->is_proxy) {
                 if (was_jclass) {
                     return result;
                 }
-                const char* recv_name = (receiver_class->descriptor != nullptr)
-                                            ? receiver_class->descriptor
-                                            : "?";
-                std::fprintf(stderr,
-                             "[KuART][JNI] virtual dispatch MISS %s.%s%s on receiver %s\n",
-                             (method->declaring_class != nullptr &&
-                              method->declaring_class->descriptor != nullptr)
-                                 ? method->declaring_class->descriptor
-                                 : "?",
-                             method->name != nullptr ? method->name : "?",
-                             method->signature != nullptr ? method->signature : "",
-                             recv_name);
-                if (interpreter_ != nullptr) {
-                    std::string detail = "Incompatible receiver class ";
-                    detail += recv_name;
-                    detail += " for method ";
-                    if (method->declaring_class != nullptr) {
-                        detail += method->declaring_class->PrettyName();
-                        detail += ".";
+                if (method->declaring_class != nullptr &&
+                    receiver_class->IsSubClassOf(method->declaring_class)) {
+                    // Valid receiver instance of declaring class; keep method.
+                } else {
+                    const char* recv_name = (receiver_class->descriptor != nullptr)
+                                                ? receiver_class->descriptor
+                                                : "?";
+                    std::fprintf(stderr,
+                                 "[KuART][JNI] virtual dispatch MISS %s.%s%s on receiver %s\n",
+                                 (method->declaring_class != nullptr &&
+                                  method->declaring_class->descriptor != nullptr)
+                                     ? method->declaring_class->descriptor
+                                     : "?",
+                                 method->name != nullptr ? method->name : "?",
+                                 method->signature != nullptr ? method->signature : "",
+                                 recv_name);
+                    if (interpreter_ != nullptr) {
+                        std::string detail = "Incompatible receiver class ";
+                        detail += recv_name;
+                        detail += " for method ";
+                        if (method->declaring_class != nullptr) {
+                            detail += method->declaring_class->PrettyName();
+                            detail += ".";
+                        }
+                        detail += method->name != nullptr ? method->name : "?";
+                        if (method->signature != nullptr) detail += method->signature;
+                        interpreter_->ThrowException(
+                            "Ljava/lang/IncompatibleClassChangeError;", detail);
                     }
-                    detail += method->name != nullptr ? method->name : "?";
-                    if (method->signature != nullptr) detail += method->signature;
-                    interpreter_->ThrowException(
-                        "Ljava/lang/IncompatibleClassChangeError;", detail);
+                    return result;
                 }
-                return result;
             }
         } else {
             static std::mutex s_mtx;

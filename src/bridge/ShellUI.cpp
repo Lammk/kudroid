@@ -33,6 +33,7 @@ extern "C" void* bionic_ANativeWindow_fromSurface(void* env, void* surface);
 extern "C" void kudroid_gpu_rebind_native_windows(void* layer, int width, int height);
 extern "C" void kudroid_gpu_resize_native_windows(void* layer, int oldW, int oldH,
                                                   int width, int height);
+extern "C" void kudroid_gpu_attach_vulkan_layer(void* hostLayer);
 
 extern "C" void kudroid_set_metal_layer(void* layer, int width, int height, float density) {
     void* const previousLayer = g_metalLayer;
@@ -54,6 +55,10 @@ extern "C" void kudroid_set_metal_layer(void* layer, int width, int height, floa
     // actual screen instead of the old hardcoded 1080x1920.
     if (width > 0 && height > 0) {
         kudroid::JavaCanvasRenderer::getInstance().init(width, height);
+    }
+
+    if (layer != nullptr) {
+        kudroid_gpu_attach_vulkan_layer(layer);
     }
 
     // Move any window the guest already holds onto this layer.

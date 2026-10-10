@@ -69,6 +69,7 @@ struct Specs {
     MethodSpec call_native;    // static: call nativeAdd
     MethodSpec call_probe;     // static: call nativeProbe
     MethodSpec make_nat;       // static: new Nat, set value, return object
+    MethodSpec private_val;    // private instance method
 
     Specs() {
         nat_ctor.name = "<init>";
@@ -76,6 +77,10 @@ struct Specs {
 
         get_value.name = "getValue";
         get_value.return_type = "I";
+
+        private_val.name = "privateVal";
+        private_val.return_type = "I";
+        private_val.access_flags = 0x2;
 
         native_add.name = "nativeAdd";
         native_add.return_type = "I";
@@ -128,7 +133,8 @@ std::vector<ClassSpec> BuildClasses(const Specs& s) {
     nat.instance_fields = {s.value};
     nat.static_fields = {s.total};
     nat.direct_methods = {s.nat_ctor,   s.native_add,  s.native_probe,
-                          s.call_native, s.call_probe, s.make_nat};
+                          s.call_native, s.call_probe, s.make_nat,
+                          s.private_val};
     nat.virtual_methods = {s.get_value};
 
     return {object, string, nat};
@@ -442,6 +448,9 @@ int main() {
         s.get_value.code = c;
         s.get_value.registers_size = 2;
         s.get_value.ins_size = 1;
+        s.private_val.code = c;
+        s.private_val.registers_size = 2;
+        s.private_val.ins_size = 1;
     }
     // Nat.callNative(int a, int b) { return nativeAdd(a, b); }
     {
@@ -600,6 +609,28 @@ Check(obj.l != nullptr, "CallJavaA static tr  object");
             Check(std::strcmp(interp.pending_exception()->clazz->descriptor,
                               "Ljava/lang/IncompatibleClassChangeError;") == 0,
                   "Throws IncompatibleClassChangeError on virtual dispatch miss");
+        }
+        interp.ClearPendingException();
+        jni.ClearException();
+
+        // Direct/private method invocation on valid receiver does not throw
+        kudroid::kuart::DexMethod* priv = nat->FindDirectMethod("privateVal", "()I");
+        Check(priv != nullptr, "FindDirectMethod privateVal");
+        Check(priv != nullptr && priv->IsDirect(), "privateVal is direct");
+        const DexValue v_priv = jni.CallJavaA(obj.l, priv, nullptr, /*virtual_dispatch=*/true);
+        Check(!interp.HasPendingException(),
+              "CallJavaA direct method with virtual_dispatch=true does not throw");
+        Check(v_priv.i == 7, "CallJavaA direct method returns correct value");
+
+        // Direct method on incompatible receiver throws IncompatibleClassChangeError
+        jni.CallJavaA(reinterpret_cast<kudroid::kuart::DexObject*>(arr), priv, nullptr,
+                      /*virtual_dispatch=*/true);
+        Check(interp.HasPendingException(),
+              "CallJavaA direct method on incompatible receiver sets exception");
+        if (interp.pending_exception() != nullptr) {
+            Check(std::strcmp(interp.pending_exception()->clazz->descriptor,
+                              "Ljava/lang/IncompatibleClassChangeError;") == 0,
+                  "Throws IncompatibleClassChangeError on direct method with bad receiver");
         }
         interp.ClearPendingException();
         jni.ClearException();

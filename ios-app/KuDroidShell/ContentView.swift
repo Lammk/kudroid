@@ -2173,6 +2173,7 @@ extension NativeMetalView: UIKeyInput {
 // Blit a CPU-drawn 2D buffer from C++ straight to the iOS screen (CALayer)
 @_cdecl("kudroid_blit_canvas_to_layer")
 public func kudroid_blit_canvas_to_layer(layerPtr: UnsafeMutableRawPointer?, bits: UnsafeRawPointer?, width: Int32, height: Int32) {
+    if kudroid_gpu_has_active_surface() { return }
     guard let layerPtr = layerPtr, let bits = bits, width > 0, height > 0 else { return }
     let layer = Unmanaged<CALayer>.fromOpaque(layerPtr).takeUnretainedValue()
     let w = Int(width)

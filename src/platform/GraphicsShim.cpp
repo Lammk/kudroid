@@ -75,9 +75,10 @@ static void gpuLog(const char* fmt, ...) {
 #include <objc/runtime.h>
 #include <objc/message.h>
 
+static void* s_fallbackLayer = nullptr;
+
 static void* get_or_create_fallback_metal_layer() {
     if (g_metalLayer) return g_metalLayer;
-    static void* s_fallbackLayer = nullptr;
     if (s_fallbackLayer) return s_fallbackLayer;
 
     Class clsLayer = objc_getClass("CAMetalLayer");
@@ -102,10 +103,30 @@ static void* get_or_create_fallback_metal_layer() {
             setDevFn(layerInstance, sel_registerName("setDevice:"), reinterpret_cast<id>(dev));
         }
     }
+    const int w = g_metalLayerWidth > 0 ? g_metalLayerWidth : 1080;
+    const int h = g_metalLayerHeight > 0 ? g_metalLayerHeight : 1920;
+    const float scale = g_metalLayerDensity > 0.0f ? g_metalLayerDensity : 2.0f;
+    typedef void (*SetBoolFn)(id, SEL, BOOL);
+    typedef void (*SetFloatFn)(id, SEL, double);
+    typedef void (*SetRectFn)(id, SEL, struct CGRect);
+    typedef void (*SetSizeFn)(id, SEL, struct CGSize);
+    auto setBoolFn = reinterpret_cast<SetBoolFn>(objc_msgSend);
+    auto setFloatFn = reinterpret_cast<SetFloatFn>(objc_msgSend);
+    auto setRectFn = reinterpret_cast<SetRectFn>(objc_msgSend);
+    auto setSizeFn = reinterpret_cast<SetSizeFn>(objc_msgSend);
+
+    setBoolFn(layerInstance, sel_registerName("setOpaque:"), YES);
+    setBoolFn(layerInstance, sel_registerName("setHidden:"), NO);
+    setFloatFn(layerInstance, sel_registerName("setContentsScale:"), scale);
+    setRectFn(layerInstance, sel_registerName("setBounds:"), CGRectMake(0, 0, w / scale, h / scale));
+    setSizeFn(layerInstance, sel_registerName("setDrawableSize:"), CGSizeMake(w, h));
+
     s_fallbackLayer = reinterpret_cast<void*>(layerInstance);
-    gpuLog("Created fallback headless CAMetalLayer: %p", s_fallbackLayer);
+    gpuLog("Created fallback headless CAMetalLayer: %p (%dx%d)", s_fallbackLayer, w, h);
     return s_fallbackLayer;
 }
+#else
+[[maybe_unused]] static void* s_fallbackLayer = nullptr;
 #endif
 
 // Standard ANativeWindow structure for KuDroid
@@ -395,14 +416,157 @@ void* s_vulkanLayer = nullptr;
 #include <objc/runtime.h>
 #include <objc/message.h>
 
+static void kudroid_ensure_vulkan_layer_attached(void* vk_layer) {
+    if (!vk_layer) return;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        Class clsCALayer = objc_getClass("CALayer");
+        if (!clsCALayer) return;
+        typedef BOOL (*IsKindOfFn)(id, SEL, Class);
+        typedef void (*SetIdFn)(id, SEL, id);
+        typedef void (*SetBoolFn)(id, SEL, BOOL);
+        typedef void (*SetFloatFn)(id, SEL, double);
+        typedef void (*SetRectFn)(id, SEL, struct CGRect);
+        typedef void (*SetSizeFn)(id, SEL, struct CGSize);
+        typedef id (*IdRetFn)(id, SEL);
+        typedef struct CGRect (*GetRectFn)(id, SEL);
+
+        auto isKindOf = reinterpret_cast<IsKindOfFn>(objc_msgSend);
+        auto setId = reinterpret_cast<SetIdFn>(objc_msgSend);
+        auto setBool = reinterpret_cast<SetBoolFn>(objc_msgSend);
+        auto setFloat = reinterpret_cast<SetFloatFn>(objc_msgSend);
+        auto setRect = reinterpret_cast<SetRectFn>(objc_msgSend);
+        auto setSize = reinterpret_cast<SetSizeFn>(objc_msgSend);
+        auto idRet = reinterpret_cast<IdRetFn>(objc_msgSend);
+        auto getBounds = reinterpret_cast<GetRectFn>(objc_msgSend);
+
+        id vk = reinterpret_cast<id>(vk_layer);
+        if (!isKindOf(vk, sel_registerName("isKindOfClass:"), clsCALayer)) return;
+
+        setId(vk, sel_registerName("setContents:"), nullptr);
+        setBool(vk, sel_registerName("setHidden:"), NO);
+        setFloat(vk, sel_registerName("setOpacity:"), 1.0);
+
+        const int w = g_metalLayerWidth > 0 ? g_metalLayerWidth : 1080;
+        const int h = g_metalLayerHeight > 0 ? g_metalLayerHeight : 1920;
+        const float scale = g_metalLayerDensity > 0.0f ? g_metalLayerDensity : 2.0f;
+
+        CGRect curBounds = getBounds(vk, sel_registerName("bounds"));
+        if (CGRectIsEmpty(curBounds)) {
+            setRect(vk, sel_registerName("setBounds:"), CGRectMake(0, 0, w / scale, h / scale));
+            setFloat(vk, sel_registerName("setContentsScale:"), scale);
+        }
+
+        Class clsMetal = objc_getClass("CAMetalLayer");
+        if (clsMetal && isKindOf(vk, sel_registerName("isKindOfClass:"), clsMetal)) {
+            setSize(vk, sel_registerName("setDrawableSize:"), CGSizeMake(w, h));
+        }
+
+        if (g_metalLayer && vk_layer != g_metalLayer) {
+            id host = reinterpret_cast<id>(g_metalLayer);
+            if (isKindOf(host, sel_registerName("isKindOfClass:"), clsCALayer)) {
+                setId(host, sel_registerName("setContents:"), nullptr);
+                id curSuper = idRet(vk, sel_registerName("superlayer"));
+                if (curSuper != host) {
+                    typedef void (*VoidFn)(id, SEL);
+                    auto voidCall = reinterpret_cast<VoidFn>(objc_msgSend);
+                    voidCall(vk, sel_registerName("removeFromSuperlayer"));
+                    setId(host, sel_registerName("addSublayer:"), vk);
+                }
+                CGRect hostBounds = getBounds(host, sel_registerName("bounds"));
+                if (!CGRectIsEmpty(hostBounds)) {
+                    setRect(vk, sel_registerName("setFrame:"), hostBounds);
+                } else {
+                    setRect(vk, sel_registerName("setFrame:"), CGRectMake(0, 0, w / scale, h / scale));
+                }
+                typedef double (*GetFloatFn)(id, SEL);
+                auto getFloat = reinterpret_cast<GetFloatFn>(objc_msgSend);
+                double hostScale = getFloat(host, sel_registerName("contentsScale"));
+                if (hostScale > 0.0) {
+                    setFloat(vk, sel_registerName("setContentsScale:"), hostScale);
+                }
+            }
+        }
+    });
+}
+
+extern "C" void kudroid_gpu_attach_vulkan_layer(void* hostLayer) {
+    if (!hostLayer) return;
+    void* vk = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
+        vk = s_vulkanLayer ? s_vulkanLayer : s_fallbackLayer;
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        Class clsCALayer = objc_getClass("CALayer");
+        if (!clsCALayer) return;
+        typedef BOOL (*IsKindOfFn)(id, SEL, Class);
+        typedef void (*SetIdFn)(id, SEL, id);
+        typedef void (*SetBoolFn)(id, SEL, BOOL);
+        typedef void (*SetFloatFn)(id, SEL, double);
+        typedef void (*SetRectFn)(id, SEL, struct CGRect);
+        typedef void (*SetSizeFn)(id, SEL, struct CGSize);
+        typedef id (*IdRetFn)(id, SEL);
+        typedef struct CGRect (*GetRectFn)(id, SEL);
+        typedef void (*VoidFn)(id, SEL);
+
+        auto isKindOf = reinterpret_cast<IsKindOfFn>(objc_msgSend);
+        auto setId = reinterpret_cast<SetIdFn>(objc_msgSend);
+        auto setBool = reinterpret_cast<SetBoolFn>(objc_msgSend);
+        auto setFloat = reinterpret_cast<SetFloatFn>(objc_msgSend);
+        auto setRect = reinterpret_cast<SetRectFn>(objc_msgSend);
+        auto setSize = reinterpret_cast<SetSizeFn>(objc_msgSend);
+        auto idRet = reinterpret_cast<IdRetFn>(objc_msgSend);
+        auto getBounds = reinterpret_cast<GetRectFn>(objc_msgSend);
+        auto voidCall = reinterpret_cast<VoidFn>(objc_msgSend);
+
+        id host = reinterpret_cast<id>(hostLayer);
+        if (!isKindOf(host, sel_registerName("isKindOfClass:"), clsCALayer)) return;
+
+        setId(host, sel_registerName("setContents:"), nullptr);
+        setBool(host, sel_registerName("setHidden:"), NO);
+
+        if (!vk || vk == hostLayer) return;
+        id sub = reinterpret_cast<id>(vk);
+        if (!isKindOf(sub, sel_registerName("isKindOfClass:"), clsCALayer)) return;
+
+        id curSuper = idRet(sub, sel_registerName("superlayer"));
+        if (curSuper != host) {
+            voidCall(sub, sel_registerName("removeFromSuperlayer"));
+            setId(host, sel_registerName("addSublayer:"), sub);
+        }
+
+        CGRect hostBounds = getBounds(host, sel_registerName("bounds"));
+        const int w = g_metalLayerWidth > 0 ? g_metalLayerWidth : 1080;
+        const int h = g_metalLayerHeight > 0 ? g_metalLayerHeight : 1920;
+        const float scale = g_metalLayerDensity > 0.0f ? g_metalLayerDensity : 2.0f;
+        if (!CGRectIsEmpty(hostBounds)) {
+            setRect(sub, sel_registerName("setFrame:"), hostBounds);
+        } else {
+            setRect(sub, sel_registerName("setFrame:"), CGRectMake(0, 0, w / scale, h / scale));
+        }
+
+        typedef double (*GetFloatFn)(id, SEL);
+        auto getFloat = reinterpret_cast<GetFloatFn>(objc_msgSend);
+        double hostScale = getFloat(host, sel_registerName("contentsScale"));
+        setFloat(sub, sel_registerName("setContentsScale:"), hostScale > 0.0 ? hostScale : scale);
+        setBool(sub, sel_registerName("setHidden:"), NO);
+        setFloat(sub, sel_registerName("setOpacity:"), 1.0);
+        setId(sub, sel_registerName("setContents:"), nullptr);
+
+        Class clsMetal = objc_getClass("CAMetalLayer");
+        if (clsMetal && isKindOf(sub, sel_registerName("isKindOfClass:"), clsMetal)) {
+            setSize(sub, sel_registerName("setDrawableSize:"), CGSizeMake(w, h));
+        }
+    });
+}
+
 extern "C" void kudroid_blit_canvas_to_layer(void* layer, const void* bits, int width, int height) {
     if (!layer || !bits || width <= 0 || height <= 0) return;
 
-    // One producer per layer: a swapchain presents drawables, static contents
-    // would cover them (or lose to them) with SUCCESS on both sides.
+    // One producer per layer: if Vulkan is active, do not cover drawables
     {
         std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
-        if (s_vulkanLayer != nullptr && layer == s_vulkanLayer) {
+        if (s_vulkanLayer != nullptr) {
             gpuLog("blit skipped on vulkan layer=%p %dx%d", layer, width, height);
             return;
         }
@@ -470,6 +634,8 @@ extern "C" void kudroid_blit_canvas_to_layer(void* layer, const void* bits, int 
     });
 }
 #else
+static void kudroid_ensure_vulkan_layer_attached(void* vk_layer) { (void)vk_layer; }
+extern "C" void kudroid_gpu_attach_vulkan_layer(void* hostLayer) { (void)hostLayer; }
 extern "C" void kudroid_blit_canvas_to_layer(void* layer, const void* bits, int width, int height) {
     (void)layer; (void)bits; (void)width; (void)height;
 }
@@ -986,8 +1152,13 @@ extern "C" VkResult bionic_vkCreateAndroidSurfaceKHR(VkInstance instance,
     void* actualLayer = g_metalLayer;
     if (pCreateInfo->window && pCreateInfo->window != (void*)1) {
         auto* nw = static_cast<KuDroidNativeWindow*>(pCreateInfo->window);
-        if (nw->magic == 0x4B554457 && nw->layer) {
-            actualLayer = nw->layer;
+        if (nw->magic == 0x4B554457) {
+            if (g_metalLayer != nullptr) {
+                actualLayer = g_metalLayer;
+                nw->layer = g_metalLayer;
+            } else if (nw->layer) {
+                actualLayer = nw->layer;
+            }
         } else {
             actualLayer = pCreateInfo->window;
         }
@@ -995,6 +1166,39 @@ extern "C" VkResult bionic_vkCreateAndroidSurfaceKHR(VkInstance instance,
 #if defined(__APPLE__)
     if (!actualLayer) {
         actualLayer = get_or_create_fallback_metal_layer();
+    }
+    if (actualLayer) {
+        const int w = g_metalLayerWidth > 0 ? g_metalLayerWidth : 1080;
+        const int h = g_metalLayerHeight > 0 ? g_metalLayerHeight : 1920;
+        const float scale = g_metalLayerDensity > 0.0f ? g_metalLayerDensity : 2.0f;
+        Class clsCALayer = objc_getClass("CALayer");
+        if (clsCALayer) {
+            typedef BOOL (*IsKindOfFn)(id, SEL, Class);
+            typedef void (*SetRectFn)(id, SEL, struct CGRect);
+            typedef void (*SetFloatFn)(id, SEL, double);
+            typedef void (*SetBoolFn)(id, SEL, BOOL);
+            typedef struct CGRect (*GetRectFn)(id, SEL);
+            typedef double (*GetFloatFn)(id, SEL);
+
+            auto isKindOf = reinterpret_cast<IsKindOfFn>(objc_msgSend);
+            auto setRect = reinterpret_cast<SetRectFn>(objc_msgSend);
+            auto setFloat = reinterpret_cast<SetFloatFn>(objc_msgSend);
+            auto setBool = reinterpret_cast<SetBoolFn>(objc_msgSend);
+            auto getBounds = reinterpret_cast<GetRectFn>(objc_msgSend);
+            auto getFloat = reinterpret_cast<GetFloatFn>(objc_msgSend);
+
+            id cal = reinterpret_cast<id>(actualLayer);
+            if (isKindOf(cal, sel_registerName("isKindOfClass:"), clsCALayer)) {
+                if (CGRectIsEmpty(getBounds(cal, sel_registerName("bounds")))) {
+                    setRect(cal, sel_registerName("setBounds:"), CGRectMake(0, 0, w / scale, h / scale));
+                }
+                if (getFloat(cal, sel_registerName("contentsScale")) <= 0.0) {
+                    setFloat(cal, sel_registerName("setContentsScale:"), scale);
+                }
+                setBool(cal, sel_registerName("setHidden:"), NO);
+                setFloat(cal, sel_registerName("setOpacity:"), 1.0);
+            }
+        }
     }
 #endif
 
@@ -1015,16 +1219,20 @@ extern "C" VkResult bionic_vkCreateAndroidSurfaceKHR(VkInstance instance,
         gpuLog("vkCreateSurface layer=%p -> surface=%p r=%d", actualLayer,
                r == VK_SUCCESS ? (void*)*pSurface : nullptr, (int)r);
         if (r == VK_SUCCESS && *pSurface != nullptr) {
-            std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
-            for (auto& e : g_surfaceLayers) {
-                if (e.surface == nullptr) {
-                    e.surface = *pSurface;
-                    e.layer = actualLayer;
-                    break;
+            {
+                std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
+                s_vulkanLayer = actualLayer;
+                for (auto& e : g_surfaceLayers) {
+                    if (e.surface == nullptr) {
+                        e.surface = *pSurface;
+                        e.layer = actualLayer;
+                        break;
+                    }
                 }
             }
+            kudroid_ensure_vulkan_layer_attached(actualLayer);
+            return r;
         }
-        if (r == VK_SUCCESS) return r;
     }
 
     // 2. Try MoltenVK's iOS function: vkCreateIOSSurfaceMVK
@@ -1040,15 +1248,19 @@ extern "C" VkResult bionic_vkCreateAndroidSurfaceKHR(VkInstance instance,
         KLOG(kInfo, "KuDroidGPU", "vkCreateIOSSurfaceMVK returned %d (surface=%p)", (int)r, (void*)*pSurface);
         gpuLog("vkCreateSurface layer=%p -> surface=%p r=%d", actualLayer,
                r == VK_SUCCESS ? (void*)*pSurface : nullptr, (int)r);
-        if (r == VK_SUCCESS) {
-            std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
-            for (auto& e : g_surfaceLayers) {
-                if (e.surface == nullptr) {
-                    e.surface = *pSurface;
-                    e.layer = actualLayer;
-                    break;
+        if (r == VK_SUCCESS && *pSurface != nullptr) {
+            {
+                std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
+                s_vulkanLayer = actualLayer;
+                for (auto& e : g_surfaceLayers) {
+                    if (e.surface == nullptr) {
+                        e.surface = *pSurface;
+                        e.layer = actualLayer;
+                        break;
+                    }
                 }
             }
+            kudroid_ensure_vulkan_layer_attached(actualLayer);
             return r;
         }
     }
@@ -1116,6 +1328,16 @@ extern "C" uint32_t bionic_vkQueuePresentKHR(void* queue, const void* present_in
     gpuLog("vkQueuePresentKHR #%llu -> %u swap=%p image=%u submits=%llu",
            (unsigned long long)n, r, swapchain, image_index,
            (unsigned long long)s_submitCount.load(std::memory_order_relaxed));
+    if (n == 1) {
+        void* target = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
+            target = s_vulkanLayer ? s_vulkanLayer : g_metalLayer;
+        }
+        if (target != nullptr) {
+            kudroid_ensure_vulkan_layer_attached(target);
+        }
+    }
     // Diagnostic: on-screen layer identity; a surface bakes its layer at
     // creation, so a mismatch here means frames go to a hidden layer.
     // 1000001003=SUBOPTIMAL 1000001004=OUT_OF_DATE.
@@ -1187,13 +1409,22 @@ extern "C" uint32_t bionic_vkCreateSwapchainKHR(void* device, const void* create
     if (swapchain != nullptr) *swapchain = created;
     // The swapchain's layer now owns the pixels: static canvas contents must
     // stop covering its drawables (one producer per layer).
-    if (r == 0 && surface != nullptr) {
-        std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
-        for (const auto& e : g_surfaceLayers) {
-            if (e.surface == surface && e.layer != nullptr) {
-                s_vulkanLayer = e.layer;
-                break;
+    if (r == 0) {
+        void* target = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
+            if (surface != nullptr) {
+                for (const auto& e : g_surfaceLayers) {
+                    if (e.surface == surface && e.layer != nullptr) {
+                        s_vulkanLayer = e.layer;
+                        break;
+                    }
+                }
             }
+            target = s_vulkanLayer ? s_vulkanLayer : g_metalLayer;
+        }
+        if (target != nullptr) {
+            kudroid_ensure_vulkan_layer_attached(target);
         }
     }
     gpuLog("vkCreateSwapchainKHR surface=%p -> %u swap=%p extent=%ux%u fmt=%u preXform=%d mode=%d minImg=%u onscreen=%p",
@@ -1213,13 +1444,25 @@ extern "C" uint32_t bionic_vkSurfaceCaps(void* phys, void* surface, void* caps) 
     if (r == 0 && caps != nullptr) {
         uint32_t w = 0, h = 0, min_c = 0, max_c = 0;
         int32_t sup_xf = -1, cur_xf = -1;
-        const char* c = static_cast<const char*>(caps);
+        char* c = static_cast<char*>(caps);
         std::memcpy(&min_c, c + 0, 4);
         std::memcpy(&max_c, c + 4, 4);
         std::memcpy(&w, c + 8, 4);
         std::memcpy(&h, c + 12, 4);
         std::memcpy(&sup_xf, c + 36, 4);
         std::memcpy(&cur_xf, c + 40, 4);
+        if (w == 0 || h == 0) {
+            w = g_metalLayerWidth > 0 ? static_cast<uint32_t>(g_metalLayerWidth) : 1080u;
+            h = g_metalLayerHeight > 0 ? static_cast<uint32_t>(g_metalLayerHeight) : 1920u;
+            std::memcpy(c + 8, &w, 4);
+            std::memcpy(c + 12, &h, 4);
+            uint32_t max_w = 0, max_h = 0;
+            std::memcpy(&max_w, c + 24, 4);
+            std::memcpy(&max_h, c + 28, 4);
+            if (max_w < w) std::memcpy(c + 24, &w, 4);
+            if (max_h < h) std::memcpy(c + 28, &h, 4);
+            gpuLog("vkSurfaceCaps clamped zero extent to %ux%u", w, h);
+        }
         gpuLog("vkSurfaceCaps surface=%p extent=%ux%u curXform=%d supXform=%d min=%u max=%u",
                surface, w, h, cur_xf, sup_xf, min_c, max_c);
     }
@@ -1231,12 +1474,34 @@ extern "C" uint32_t bionic_vkSurfaceCaps(void* phys, void* surface, void* caps) 
 extern "C" void kudroid_gpu_note_run_end(void) {
     s_presentCount.store(0, std::memory_order_relaxed);
     s_acquireCount.store(0, std::memory_order_relaxed);
-    std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
-    s_vulkanLayer = nullptr;
-    for (auto& e : g_surfaceLayers) {
-        e.surface = nullptr;
-        e.layer = nullptr;
+    void* oldVkLayer = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
+        oldVkLayer = s_vulkanLayer;
+        s_vulkanLayer = nullptr;
+        for (auto& e : g_surfaceLayers) {
+            e.surface = nullptr;
+            e.layer = nullptr;
+        }
     }
+    (void)oldVkLayer;
+#if defined(__APPLE__)
+    if (oldVkLayer) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            Class clsCALayer = objc_getClass("CALayer");
+            if (!clsCALayer) return;
+            typedef BOOL (*IsKindOfFn)(id, SEL, Class);
+            typedef void (*VoidFn)(id, SEL);
+            auto isKindOf = reinterpret_cast<IsKindOfFn>(objc_msgSend);
+            auto voidCall = reinterpret_cast<VoidFn>(objc_msgSend);
+
+            id vk = reinterpret_cast<id>(oldVkLayer);
+            if (isKindOf(vk, sel_registerName("isKindOfClass:"), clsCALayer)) {
+                voidCall(vk, sel_registerName("removeFromSuperlayer"));
+            }
+        });
+    }
+#endif
 }
 
 extern "C" PFN_vkVoidFunction bionic_vkGetDeviceProcAddr(VkDevice device, const char* pName) {
@@ -1520,6 +1785,13 @@ extern "C" void kudroid_gpu_cleanup_on_test_exit(void) {
 }
 
 extern "C" bool kudroid_gpu_has_active_surface(void) {
+    {
+        std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
+        if (s_vulkanLayer != nullptr) return true;
+        for (const auto& e : g_surfaceLayers) {
+            if (e.surface != nullptr) return true;
+        }
+    }
     std::lock_guard<std::mutex> lock(g_nativeWindowsMutex);
     return s_activeEglSurface != nullptr || !g_nativeWindows.empty();
 }

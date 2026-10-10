@@ -9,3 +9,4 @@ void* get_vk_func(const char* name);
 }
 
 extern "C" bool kudroid_gpu_has_active_surface(void);
+extern "C" void kudroid_gpu_attach_vulkan_layer(void* hostLayer);
