@@ -157,6 +157,14 @@ public class Display {
         return new Mode(1);
     }
 
+    public boolean isHdr() {
+        return false;
+    }
+
+    public boolean isMinimalPostProcessingSupported() {
+        return false;
+    }
+
     /**
      * Nanoseconds by which this display's vsync is offset from the timestamp Choreographer
      * reports.

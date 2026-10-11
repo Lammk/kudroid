@@ -65,8 +65,10 @@ public class Throwable {
 
     public void printStackTrace() {
         System.err.println(toString());
-        for (int i = 0; i < stackTrace.length; i++) {
-            System.err.println("\tat " + stackTrace[i]);
+        if (stackTrace != null) {
+            for (int i = 0; i < stackTrace.length; i++) {
+                System.err.println("\tat " + stackTrace[i]);
+            }
         }
         if (cause != null) {
             System.err.println("Caused by: ");

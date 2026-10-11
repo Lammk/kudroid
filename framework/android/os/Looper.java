@@ -67,7 +67,12 @@ public final class Looper {
             for (;;) {
                 Message msg = queue.next();
                 if (msg == null) return;
-                msg.target.dispatchMessage(msg);
+                try {
+                    msg.target.dispatchMessage(msg);
+                } catch (Throwable t) {
+                    android.util.Log.e("Looper", "Uncaught exception in message dispatch: " + t.toString());
+                    t.printStackTrace();
+                }
                 msg.recycle();
             }
         } finally {
@@ -80,7 +85,8 @@ public final class Looper {
     }
     public static Looper myLooper() { return sThreadLocal.get(); }
     public static MessageQueue myQueue() {
-        return myLooper().getQueue();
+        Looper me = myLooper();
+        return (me != null) ? me.getQueue() : null;
     }
     public void quit() { mQueue.quit(); }
     public void quitSafely() { mQueue.quit(); }

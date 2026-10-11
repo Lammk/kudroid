@@ -58,8 +58,14 @@ public class Handler {
      * constructor with an explicit iterator and callback.
      */
     public Handler(Looper looper, Callback callback) {
+        if (looper == null) {
+            looper = Looper.myLooper();
+            if (looper == null) {
+                looper = Looper.getMainLooper();
+            }
+        }
         mLooper = looper;
-        mQueue = looper.getQueue();
+        mQueue = (looper != null) ? looper.getQueue() : null;
         mCallback = callback;
     }
 

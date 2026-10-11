@@ -1745,6 +1745,23 @@ int main() {
                             {DexValue::Int(0x7f0a0002)}, &r, "getTag(unset key)")) {
                 Check(r.l == nullptr, "an unset keyed tag is null");
             }
+
+            Check(CallVirtual(view, "requestApplyInsets", "()V", {}, nullptr,
+                              "requestApplyInsets"), "requestApplyInsets exists and callable");
+            CallVirtual(view, "setFitsSystemWindows", "(Z)V", {DexValue::Int(1)}, nullptr,
+                        "setFitsSystemWindows(true)");
+            DexValue fits;
+            if (CallVirtual(view, "fitsSystemWindows", "()Z", {}, &fits, "fitsSystemWindows")) {
+                Check(fits.i == 1, "fitsSystemWindows returns true after set");
+            }
+        }
+
+        DexObject* display = NewObject("Landroid/view/Display;", "()V", {}, "new Display");
+        if (display != nullptr) {
+            DexValue isHdr;
+            if (CallVirtual(display, "isHdr", "()Z", {}, &isHdr, "Display.isHdr")) {
+                Check(isHdr.i == 0, "Display.isHdr returns false");
+            }
         }
 
         // generateViewId must stay below 0x7f000000, where aapt allocates resource

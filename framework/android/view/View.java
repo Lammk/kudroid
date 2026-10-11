@@ -118,7 +118,7 @@ public class View implements KeyEvent.Callback {
      * Callback applies window insets (status bar / notch).
      */
     public interface OnApplyWindowInsetsListener {
-        Object onApplyWindowInsets(View v, Object insets);
+        WindowInsets onApplyWindowInsets(View v, WindowInsets insets);
     }
 
     /**
@@ -942,6 +942,7 @@ public class View implements KeyEvent.Callback {
     // Window insets.
 
     private OnApplyWindowInsetsListener mOnApplyWindowInsetsListener;
+    private boolean mFitsSystemWindows = false;
 
     /** Install a listener that consumes window insets before this view does. */
     public void setOnApplyWindowInsetsListener(OnApplyWindowInsetsListener listener) {
@@ -950,6 +951,44 @@ public class View implements KeyEvent.Callback {
 
     public OnApplyWindowInsetsListener getOnApplyWindowInsetsListener() {
         return mOnApplyWindowInsetsListener;
+    }
+
+    public void requestApplyInsets() {
+        requestFitSystemWindows();
+    }
+
+    public void requestFitSystemWindows() {
+        if (mParent instanceof View) {
+            ((View) mParent).requestFitSystemWindows();
+        }
+    }
+
+    public WindowInsets onApplyWindowInsets(WindowInsets insets) {
+        return insets;
+    }
+
+    public WindowInsets dispatchApplyWindowInsets(WindowInsets insets) {
+        if (mOnApplyWindowInsetsListener != null) {
+            WindowInsets result = mOnApplyWindowInsetsListener.onApplyWindowInsets(this, insets);
+            return result != null ? result : insets;
+        }
+        return onApplyWindowInsets(insets);
+    }
+
+    public WindowInsets getRootWindowInsets() {
+        return null;
+    }
+
+    public WindowInsets computeSystemWindowInsets(WindowInsets in, android.graphics.Rect outLocalInsets) {
+        return in;
+    }
+
+    public boolean fitsSystemWindows() {
+        return mFitsSystemWindows;
+    }
+
+    public void setFitsSystemWindows(boolean fitSystemWindows) {
+        mFitsSystemWindows = fitSystemWindows;
     }
 
     private boolean mKeepScreenOn = false;
