@@ -1690,6 +1690,29 @@ int main() {
         }
     }
 
+    {
+        DexClass* audio = linker.FindClass("Lorg/fmod/FMODAudioDevice;");
+        Check(audio != nullptr && !audio->is_stub, "FMOD audio device is available");
+        if (audio != nullptr) {
+            Check(audio->FindVirtualMethod("startAudioRecord", "(III)I") != nullptr,
+                  "FMOD output initialization can resolve startAudioRecord");
+            Check(audio->FindVirtualMethod("stopAudioRecord", "()V") != nullptr,
+                  "FMOD output initialization can resolve stopAudioRecord");
+            Check(audio->FindVirtualMethod("fmodProcessMicData", "(Ljava/nio/ByteBuffer;I)I") != nullptr,
+                  "FMOD microphone native registration can resolve its target");
+        }
+        DexObject* device = NewObject("Lorg/fmod/FMODAudioDevice;", "()V", {}, "new audio device");
+        if (device != nullptr) {
+            DexValue result;
+            if (CallVirtual(device, "startAudioRecord", "(III)I",
+                            {DexValue::Int(48000), DexValue::Int(16), DexValue::Int(2)},
+                            &result, "unsupported microphone request")) {
+                Check(result.i == 0, "unavailable recording returns no buffer");
+            }
+            CallVirtual(device, "stopAudioRecord", "()V", {}, nullptr, "stop unavailable recording");
+        }
+    }
+
     // ── the stubs GameActivity called on the way through onCreate ──
     //
     // Each was being auto-stubbed, which means it silently did nothing. Individually

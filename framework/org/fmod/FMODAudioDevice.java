@@ -16,6 +16,7 @@ public class FMODAudioDevice implements Runnable {
 
     public native int fmodGetInfo(int which);
     public native int fmodProcess(ByteBuffer buffer);
+    public native int fmodProcessMicData(ByteBuffer buffer, int length);
 
     public FMODAudioDevice() {}
 
@@ -51,6 +52,14 @@ public class FMODAudioDevice implements Runnable {
 
     public boolean isRunning() {
         return mRunning;
+    }
+
+    // Recording is unavailable; report failure without blocking output initialization.
+    public synchronized int startAudioRecord(int sampleRate, int channelConfig, int audioFormat) {
+        return 0;
+    }
+
+    public synchronized void stopAudioRecord() {
     }
 
     @Override

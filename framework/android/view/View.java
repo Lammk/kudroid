@@ -46,6 +46,7 @@ public class View implements KeyEvent.Callback {
     private long mTouchDownTime;
     private boolean mLongClickFired;
     private boolean mLaidOut;
+    private java.util.ArrayList<OnLayoutChangeListener> mLayoutChangeListeners;
     private int mMeasuredWidth;
     private int mMeasuredHeight;
     protected int mScrollX = 0;
@@ -80,6 +81,23 @@ public class View implements KeyEvent.Callback {
      */
     public interface OnFocusChangeListener {
         void onFocusChange(View v, boolean hasFocus);
+    }
+
+    public interface OnLayoutChangeListener {
+        void onLayoutChange(View v, int left, int top, int right, int bottom,
+                            int oldLeft, int oldTop, int oldRight, int oldBottom);
+    }
+
+    public void addOnLayoutChangeListener(OnLayoutChangeListener listener) {
+        if (listener == null) return;
+        if (mLayoutChangeListeners == null) {
+            mLayoutChangeListeners = new java.util.ArrayList<OnLayoutChangeListener>();
+        }
+        if (!mLayoutChangeListeners.contains(listener)) mLayoutChangeListeners.add(listener);
+    }
+
+    public void removeOnLayoutChangeListener(OnLayoutChangeListener listener) {
+        if (mLayoutChangeListeners != null) mLayoutChangeListeners.remove(listener);
     }
 
     /**
@@ -269,12 +287,31 @@ public class View implements KeyEvent.Callback {
      */
     public void layout(int l, int t, int r, int b) {
         final boolean changed = (l != mLeft) || (t != mTop) || (r != mRight) || (b != mBottom);
+        final int oldLeft = mLeft, oldTop = mTop, oldRight = mRight, oldBottom = mBottom;
+        final int oldWidth = mRight - mLeft;
+        final int oldHeight = mBottom - mTop;
         mLeft = l;
         mTop = t;
         mRight = r;
         mBottom = b;
         mLaidOut = true;
+        final int width = r - l;
+        final int height = b - t;
+        if (width != oldWidth || height != oldHeight) {
+            onSizeChanged(width, height, oldWidth, oldHeight);
+        }
         onLayout(changed, l, t, r, b);
+        if (changed && mLayoutChangeListeners != null) {
+            OnLayoutChangeListener[] listeners = mLayoutChangeListeners.toArray(
+                    new OnLayoutChangeListener[mLayoutChangeListeners.size()]);
+            for (OnLayoutChangeListener listener : listeners) {
+                listener.onLayoutChange(this, l, t, r, b, oldLeft, oldTop, oldRight, oldBottom);
+            }
+        }
+    }
+
+    /** Notify subclasses of new dimensions before laying out their children. */
+    protected void onSizeChanged(int w, int h, int oldw, int oldh) {
     }
 
     /**
@@ -948,9 +985,6 @@ public class View implements KeyEvent.Callback {
     }
 
     public interface OnHoverListener {
-    }
-
-    public interface OnLayoutChangeListener {
     }
 
     public interface OnSystemUiVisibilityChangeListener {

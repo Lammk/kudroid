@@ -195,6 +195,16 @@ static void RunVaListChecks(char* buf, size_t size) {
     guest_vlog(buf, size, "%d", 42);
     CheckText(buf, "42", "a va_list yields the register value, not its own bytes");
 
+    guest_vlog(buf, size, "image_%02d.png", 1);
+    CheckText(buf, "image_01.png", "va_list preserves zero-padded asset indices");
+    kudroid_snprintf_trampoline(buf, size, "%05d|%-5d|%+05d|%#06x", -7, 7, 7, 42);
+    CheckText(buf, "-0007|7    |+0007|0x002a", "integer padding follows signs and prefixes");
+    guest_vlog(buf, size, "%08.3d|%*.0d|%#o", 7, -4, 0, 0);
+    CheckText(buf, "     007|    |0", "integer precision overrides zero padding and negative width aligns left");
+    Check(guest_vlog(buf, 5, "%08d", 1) == 8,
+          "padded formatting returns the full length when truncated");
+    CheckText(buf, "0000", "padded formatting respects the output buffer");
+
     /* The device signature: a %s whose argument is a real string. Reading the va_list
      * struct as a cursor printed the low bytes of its `stack` field instead. */
     guest_vlog(buf, size, "%s", "assets/gui/hud.png");

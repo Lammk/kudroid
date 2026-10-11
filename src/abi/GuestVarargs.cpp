@@ -22,6 +22,14 @@ public:
         for (size_t i = 0; i < length; ++i) Put(text[i]);
     }
 
+    void Repeat(char c, size_t count) {
+        const size_t available = out_ != nullptr && size_ > 0 && written_ < size_ - 1
+                                     ? size_ - 1 - written_ : 0;
+        const size_t stored = count < available ? count : available;
+        for (size_t i = 0; i < stored; ++i) out_[written_ + i] = c;
+        written_ += count;
+    }
+
     void PutCString(const char* text) {
         while (*text != '\0') Put(*text++);
     }
@@ -51,15 +59,35 @@ void PutUnsigned(Sink& sink, uint64_t value, unsigned base, bool upper = false) 
     while (length > 0) sink.Put(buffer[--length]);
 }
 
-void PutSigned(Sink& sink, int64_t value) {
-    if (value < 0) {
-        sink.Put('-');
-        // Negating INT64_MIN overflows; cast first, which gives the right magnitude in
-        // two's complement.
-        PutUnsigned(sink, ~static_cast<uint64_t>(value) + 1u, 10);
-        return;
+void PutInteger(Sink& sink, uint64_t value, unsigned base, bool upper,
+                char sign, bool alternate, int width, int precision,
+                bool left, bool zero) {
+    char digits[64];
+    const char* alphabet = upper ? "0123456789ABCDEF" : "0123456789abcdef";
+    size_t length = 0;
+    const uint64_t original = value;
+    if (value != 0 || precision != 0) {
+        do {
+            digits[length++] = alphabet[value % base];
+            value /= base;
+        } while (value != 0);
     }
-    PutUnsigned(sink, static_cast<uint64_t>(value), 10);
+    size_t zeros = precision > static_cast<int>(length) ? precision - length : 0;
+    if (alternate && base == 8 && zeros == 0 && (length == 0 || original != 0)) ++zeros;
+    const bool prefix = alternate && base == 16 && original != 0;
+    const size_t content = length + zeros + (sign ? 1 : 0) + (prefix ? 2 : 0);
+    const size_t padding = static_cast<size_t>(width) > content ? width - content : 0;
+    if (!left && !(zero && precision < 0)) {
+        sink.Repeat(' ', padding);
+    }
+    if (sign) sink.Put(sign);
+    if (prefix) sink.PutCString(upper ? "0X" : "0x");
+    if (!left && zero && precision < 0) zeros += padding;
+    sink.Repeat('0', zeros);
+    while (length > 0) sink.Put(digits[--length]);
+    if (left) {
+        sink.Repeat(' ', padding);
+    }
 }
 
 // Fixed-point formatting for %f, by hand.
@@ -625,16 +653,31 @@ size_t FormatGuestVarargs(char* out, size_t size, const char* format,
             break;
         }
 
+        bool left = false, plus = false, space = false, alternate = false, zero = false;
         while (*cursor == '-' || *cursor == '+' || *cursor == ' ' ||
-               *cursor == '#' || *cursor == '0' || *cursor == '\'') ++cursor;
+               *cursor == '#' || *cursor == '0' || *cursor == '\'') {
+            left |= *cursor == '-';
+            plus |= *cursor == '+';
+            space |= *cursor == ' ';
+            alternate |= *cursor == '#';
+            zero |= *cursor == '0';
+            ++cursor;
+        }
 
         // Width. '*' takes an integer argument; skipping that consumption would shift
         // every later argument by one.
+        int width = 0;
         if (*cursor == '*') {
-            (void)args.NextInt();
+            const int32_t raw = static_cast<int32_t>(args.NextInt());
+            left |= raw < 0;
+            const int64_t magnitude = raw < 0 ? -static_cast<int64_t>(raw) : raw;
+            width = magnitude > 2147483647 ? 2147483647 : static_cast<int>(magnitude);
             ++cursor;
         } else {
-            while (*cursor >= '0' && *cursor <= '9') ++cursor;
+            while (*cursor >= '0' && *cursor <= '9') {
+                const int digit = *cursor++ - '0';
+                width = width > (2147483647 - digit) / 10 ? 2147483647 : width * 10 + digit;
+            }
         }
 
         int precision = -1;
@@ -646,7 +689,9 @@ size_t FormatGuestVarargs(char* out, size_t size, const char* format,
             } else {
                 precision = 0;
                 while (*cursor >= '0' && *cursor <= '9') {
-                    precision = precision * 10 + (*cursor - '0');
+                    const int digit = *cursor - '0';
+                    precision = precision > (2147483647 - digit) / 10
+                                    ? 2147483647 : precision * 10 + digit;
                     ++cursor;
                 }
             }
@@ -693,13 +738,21 @@ size_t FormatGuestVarargs(char* out, size_t size, const char* format,
 
         switch (*cursor) {
             case 'd':
-            case 'i':
-                PutSigned(sink, nextSigned());
+            case 'i': {
+                const int64_t value = nextSigned();
+                const char sign = value < 0 ? '-' : plus ? '+' : space ? ' ' : '\0';
+                const uint64_t magnitude = value < 0 ? ~static_cast<uint64_t>(value) + 1u
+                                                     : static_cast<uint64_t>(value);
+                PutInteger(sink, magnitude, 10, false, sign, false, width, precision, left, zero);
                 break;
-            case 'u': PutUnsigned(sink, nextUnsigned(), 10); break;
-            case 'o': PutUnsigned(sink, nextUnsigned(), 8); break;
-            case 'x': PutUnsigned(sink, nextUnsigned(), 16); break;
-            case 'X': PutUnsigned(sink, nextUnsigned(), 16, /*upper=*/true); break;
+            }
+            case 'u':
+            case 'o':
+            case 'x':
+            case 'X':
+                PutInteger(sink, nextUnsigned(), *cursor == 'u' ? 10 : *cursor == 'o' ? 8 : 16,
+                           *cursor == 'X', '\0', alternate, width, precision, left, zero);
+                break;
             case 'p':
                 // A pointer is always 64-bit, whatever the modifier said.
                 sink.PutCString("0x");
