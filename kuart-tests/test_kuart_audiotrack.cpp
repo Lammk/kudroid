@@ -585,6 +585,23 @@ void test_fmod_classes() {
 
     DexClass* codecCls = g_linker->FindClass("Lorg/fmod/MediaCodec;");
     Check(codecCls != nullptr && !codecCls->is_stub, "Lorg/fmod/MediaCodec; is in framework.dex");
+
+    DexClass* fmodExDevCls = g_linker->FindClass("Lorg/fmod/FMODAudioDevice;");
+    Check(fmodExDevCls != nullptr && !fmodExDevCls->is_stub, "Lorg/fmod/FMODAudioDevice; is in framework.dex");
+    if (fmodExDevCls) {
+        DexObject* fmodExObj = g_linker->AllocObject(fmodExDevCls);
+        Check(fmodExObj != nullptr, "FMODAudioDevice instance allocated");
+        DexMethod* ctor = fmodExDevCls->FindDirectMethod("<init>", "()V");
+        if (ctor && fmodExObj) {
+            std::vector<DexValue> ctorArgs = {DexValue::Ref(fmodExObj)};
+            g_interp->Execute(ctor, ctorArgs.data(), ctorArgs.size());
+        }
+        DexValue running;
+        if (CallVirtual(fmodExObj, "isRunning", "()Z", {}, &running, "FMODAudioDevice.isRunning")) {
+            Check(running.i == 0, "FMODAudioDevice.isRunning() initially false");
+        }
+        CallVirtual(fmodExObj, "close", "()V", {}, nullptr, "FMODAudioDevice.close");
+    }
 }
 
 }  // namespace

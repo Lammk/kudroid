@@ -446,6 +446,46 @@ int main() {
         }
     }
 
+    // ── java.util.UUID ──
+    {
+        DexClass* uuidCls = linker.FindClass("Ljava/util/UUID;");
+        Check(uuidCls != nullptr && !uuidCls->is_stub, "UUID is real, not a stub");
+
+        DexValue parsed;
+        if (CallStatic("Ljava/util/UUID;", "fromString",
+                       "(Ljava/lang/String;)Ljava/util/UUID;",
+                       {Str("c0ffee00-1234-5678-9abc-def012345678")}, &parsed,
+                       "UUID.fromString")) {
+            Check(parsed.l != nullptr, "UUID.fromString returned non-null");
+            if (parsed.l != nullptr) {
+                DexValue str;
+                if (CallVirtual(parsed.l, "toString", "()Ljava/lang/String;", {}, &str, "UUID.toString")) {
+                    Check(std::strcmp(Utf8Of(str), "c0ffee00-1234-5678-9abc-def012345678") == 0,
+                          std::string("UUID.toString matches input, got ") + Utf8Of(str));
+                }
+            }
+        }
+
+        DexClass* byteArrayCls = linker.FindClass("[B");
+        if (byteArrayCls != nullptr) {
+            auto* bArr = linker.AllocArray(byteArrayCls, 4);
+            auto* p = reinterpret_cast<int8_t*>(bArr->Data());
+            p[0] = 't'; p[1] = 'e'; p[2] = 's'; p[3] = 't';
+            DexValue named;
+            if (CallStatic("Ljava/util/UUID;", "nameUUIDFromBytes",
+                           "([B)Ljava/util/UUID;", {DexValue::Ref(bArr)}, &named,
+                           "UUID.nameUUIDFromBytes")) {
+                Check(named.l != nullptr, "UUID.nameUUIDFromBytes returned non-null");
+                if (named.l != nullptr) {
+                    DexValue str;
+                    if (CallVirtual(named.l, "toString", "()Ljava/lang/String;", {}, &str, "UUID.toString")) {
+                        Check(std::strlen(Utf8Of(str)) == 36, "UUID.toString has length 36");
+                    }
+                }
+            }
+        }
+    }
+
     // ── app bootstrap: AppComponentFactory + Application + package-derived paths ──
     //
     // Android runs the declared factory and the Application before any component, so
