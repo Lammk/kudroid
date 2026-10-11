@@ -19,6 +19,8 @@ public final class AudioFormat implements Parcelable {
     public static final int CHANNEL_OUT_FRONT_RIGHT = 0x8;
     public static final int CHANNEL_OUT_MONO = CHANNEL_OUT_FRONT_LEFT;
     public static final int CHANNEL_OUT_STEREO = (CHANNEL_OUT_FRONT_LEFT | CHANNEL_OUT_FRONT_RIGHT);
+    public static final int CHANNEL_OUT_5POINT1 = 0xFC;
+    public static final int CHANNEL_OUT_7POINT1_SURROUND = 0x14FC;
     public static final int CHANNEL_IN_MONO = 0x10;
     public static final int CHANNEL_IN_STEREO = 0xC;
 

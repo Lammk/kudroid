@@ -5,7 +5,7 @@
 #include <cstring>
 #include <cmath>
 #include <algorithm>
-#include <deque>
+#include <vector>
 #include <mutex>
 #include <condition_variable>
 #include <thread>
@@ -14,7 +14,6 @@
 #include <memory>
 #include <atomic>
 #include <cstdio>
-#include <atomic>
 #include <string>
 
 #if defined(__APPLE__)
@@ -47,16 +46,11 @@ static void apple_ensure_audio_session_active() {
 #endif
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AudioShim — OpenSL ES / AAudio.
+// AudioShim — Unified CoreAudio Ring Buffer Output.
 //
-// On iOS: translate to CoreAudio (AudioQueue) — the PCM that the game enqueues into
-// SLAndroidSimpleBufferQueue is pushed into the real AudioQueue; when a buffer is transmitted
-// finished, AudioQueueOutputCallback calls back the game's callback (correct semantics
-// SLAndroidSimpleBufferQueueCallback) so the game's audio loop runs for real.
-// AAudioStream_write pushes straight into the same AudioQueue.
-//
-// On another platform (test Linux): fake worker consumes buffer and calls callback
-// so the game doesn't freeze (sound is muted — no CoreAudio there).
+// Shared pipeline for OpenSL ES, AAudio, and android.media.AudioTrack.
+// Fixed pre-allocated AudioQueue buffers on iOS with zero dynamic allocation
+// in playback loop. Paced by CoreAudio hardware consumption via Ring Buffer.
 // ─────────────────────────────────────────────────────────────────────────────
 
 namespace kudroid {
@@ -69,7 +63,6 @@ typedef int32_t SLresult;
 #define SL_RESULT_BUFFER_INSUFFICIENT 8
 #define SL_RESULT_CONTENT_UNSUPPORTED 9
 
-// OpenSL ES object/interface types (opaque).
 typedef void* SLObjectItf;
 typedef void* SLEngineItf;
 typedef void* SLAndroidSimpleBufferQueueItf;
@@ -78,11 +71,10 @@ typedef void* SLVolumeItf;
 typedef void* SLInterfaceID;
 typedef void* SLboolean;
 
-// Actual layout of SLDataFormat_PCM / SLDataSource (game .so compiled with bionic header).
 struct SLDataFormat_PCM {
     uint32_t formatType;      // SL_DATAFORMAT_PCM = 3
     uint32_t numChannels;
-    uint32_t samplesPerSec;   // milliHz in OpenSL ES!
+    uint32_t samplesPerSec;   // milliHz in OpenSL ES
     uint32_t bitsPerSample;
     uint32_t containerSize;
     uint32_t channelMask;
@@ -97,7 +89,10 @@ struct SLDataSource {
 #define SL_PLAYSTATE_PAUSED  1
 #define SL_PLAYSTATE_PLAYING 2
 
-// ── Audio player ──
+constexpr size_t kRingBufferFrames = 8192;
+constexpr int kAudioQueueNumBuffers = 3;
+constexpr size_t kAudioQueueFramesPerBuffer = 1024;
+
 struct AudioPlayer {
     std::mutex mtx;
     std::condition_variable cv;
@@ -106,45 +101,33 @@ struct AudioPlayer {
     void* callback = nullptr;   // SLAndroidSimpleBufferQueueCallback
     void* context = nullptr;
     uint32_t playState = SL_PLAYSTATE_STOPPED;
-    void* iface = nullptr;      // interface for the game (which is the player pointer)
-    uint32_t pendingCount = 0;  // buffer enqueue but not yet played (GetState)
-    bool started = false;     // Prime+Start issued (Apple, after first buffer)
+    void* iface = nullptr;
+    uint32_t pendingCount = 0;
 
-    // Format, needed on every platform rather than only under CoreAudio.
-    //
-    // These used to live inside the Apple block, because only ensure_audio_queue read
-    // them. AudioTrack needs them everywhere: it reports getBufferSizeInFrames and
-    // getPlaybackHeadPosition in FRAMES, and converting bytes to frames requires the
-    // channel count and sample width on the host build too.
-    double sampleRate = 44100;
+    double sampleRate = 48000.0;
     uint32_t channels = 2;
     uint32_t bitsPerSample = 16;
     float volume = 1.0f;
 
-    // AudioTrack buffer capacity the guest asked for at create; write() blocks
-    // while the queue holds more than this, as on Android.
     uint64_t bufferCapacityBytes = 0;
 
-    // Frames the device has actually consumed.
-    //
-    // AudioTrack.getPlaybackHeadPosition is not cosmetic: FMOD polls it to decide how
-    // much more to write, so a value frozen at zero reads as "the device never drains"
-    // and it stops writing altogether. Counted where playback completes — the output
-    // callback — so it reflects the device rather than what was submitted.
-    //
-    // Frames ever submitted. in-flight = written - played; in audio-ms it tells
-    // whether the mixer runs ahead of wall-clock (pacing diagnosis).
     std::atomic<uint64_t> framesWritten{0};
     std::atomic<uint64_t> framesPlayed{0};
 
-    // Fallback worker (non-Apple).
-    std::deque<std::pair<const void*, uint32_t>> pending;
+    // Interleaved 16-bit PCM ring buffer.
+    std::vector<int16_t> ring;
+    size_t ringHead = 0;
+    size_t ringCount = 0;
+
+    // Linear interpolation state for low rates (24kHz -> 48kHz).
+    int16_t upsamplePrev[8] = {0};
+    bool hasUpsamplePrev = false;
+
+    bool started = false;
 
 #if defined(__APPLE__)
     AudioQueueRef aq = nullptr;
-    // userData passed to AudioQueueNewOutput: pointer to a copy
-    // shared_ptr — keeps the player alive while the callback is running (even if
-    // The game self-destructs the player right inside the callback).
+    AudioQueueBufferRef aqBuffers[kAudioQueueNumBuffers] = {nullptr};
     void* aqUserData = nullptr;
 #endif
 };
@@ -152,80 +135,129 @@ struct AudioPlayer {
 static std::mutex g_players_mtx;
 static std::unordered_map<void*, std::shared_ptr<AudioPlayer>> g_players;
 
-static uint32_t player_bytes_per_frame(const AudioPlayer* p);
-
-static std::shared_ptr<AudioPlayer> find_player(void* iface) {    std::lock_guard<std::mutex> lock(g_players_mtx);
+static std::shared_ptr<AudioPlayer> find_player(void* iface) {
+    std::lock_guard<std::mutex> lock(g_players_mtx);
     auto it = g_players.find(iface);
     return it != g_players.end() ? it->second : nullptr;
 }
 
-#if defined(__APPLE__)
+static uint32_t player_bytes_per_frame(const AudioPlayer* p) {
+    const uint32_t ch = (p->channels > 0 && p->channels <= 8) ? p->channels : 2;
+    const uint32_t bytes = (p->bitsPerSample > 0 ? (p->bitsPerSample / 8) : 2) * ch;
+    return bytes > 0 ? bytes : 4;
+}
 
-// AudioQueue returns the buffer that has finished playing → calls the game callback (literally
-// SLAndroidSimpleBufferQueueCallback: "buffer consumed, send buffer again").
-static void audio_queue_output_cb(void* userData, AudioQueueRef aq, AudioQueueBufferRef buffer) {
-    const auto ref = static_cast<std::shared_ptr<AudioPlayer>*>(userData);
-    const std::shared_ptr<AudioPlayer> p = *ref; // kept alive during callback
+#if !defined(__APPLE__)
+static void audio_worker(void* iface) {
+    auto p = find_player(iface);
+    if (!p) return;
 
-    // Diagnostic: played stuck at 0 means this never fires (silent device).
-    {
-        static std::atomic<int> s_cb{0};
-        if (s_cb.load() < 3) {
-            ++s_cb;
-            std::fprintf(stderr, "[KuDroidAudio] output callback fired bytes=%u\n",
-                         buffer != nullptr ? buffer->mAudioDataByteSize : 0);
+    while (true) {
+        size_t framesToConsume = 0;
+        double rate = 48000.0;
+        void* cb = nullptr;
+        void* ctx = nullptr;
+
+        {
+            std::unique_lock<std::mutex> lock(p->mtx);
+            p->cv.wait(lock, [&] {
+                return p->shutdown || (p->ringCount > 0 && p->playState == SL_PLAYSTATE_PLAYING);
+            });
+            if (p->shutdown) return;
+
+            framesToConsume = std::min(p->ringCount, kAudioQueueFramesPerBuffer);
+            p->ringHead = (p->ringHead + framesToConsume) % kRingBufferFrames;
+            p->ringCount -= framesToConsume;
+            if (p->pendingCount > 0) p->pendingCount--;
+
+            rate = (p->sampleRate > 0) ? p->sampleRate : 48000.0;
+            cb = p->callback;
+            ctx = p->context;
+        }
+
+        const uint64_t ms = (rate > 0 && framesToConsume > 0)
+            ? (framesToConsume * 1000) / static_cast<uint64_t>(rate)
+            : 10;
+        std::this_thread::sleep_for(std::chrono::milliseconds(ms > 0 ? ms : 1));
+
+        p->framesPlayed.fetch_add(framesToConsume, std::memory_order_relaxed);
+        p->cv.notify_all();
+
+        if (cb) {
+            reinterpret_cast<void (*)(void*, void*)>(cb)(iface, ctx);
         }
     }
+}
+#endif
+
+#if defined(__APPLE__)
+static void audio_queue_output_cb(void* userData, AudioQueueRef aq, AudioQueueBufferRef buffer) {
+    const auto ref = static_cast<std::shared_ptr<AudioPlayer>*>(userData);
+    const std::shared_ptr<AudioPlayer> p = *ref;
+    if (!p) return;
 
     void* cb = nullptr;
     void* ctx = nullptr;
-    uint32_t bytesPerFrame = 4;
+    const uint32_t ch = (p->channels > 0 && p->channels <= 8) ? p->channels : 2;
+    const size_t wantFrames = kAudioQueueFramesPerBuffer;
+    int16_t* out = static_cast<int16_t*>(buffer->mAudioData);
+    size_t takeFrames = 0;
+
     {
         std::lock_guard<std::mutex> lock(p->mtx);
-        if (!p->shutdown) {
+        if (!p->shutdown && p->playState == SL_PLAYSTATE_PLAYING && !p->ring.empty()) {
+            takeFrames = std::min(p->ringCount, wantFrames);
+            for (size_t f = 0; f < takeFrames; ++f) {
+                const size_t ringIdx = ((p->ringHead + f) % kRingBufferFrames) * ch;
+                for (size_t c = 0; c < ch; ++c) {
+                    out[f * ch + c] = p->ring[ringIdx + c];
+                }
+            }
+            p->ringHead = (p->ringHead + takeFrames) % kRingBufferFrames;
+            p->ringCount -= takeFrames;
+            if (p->pendingCount > 0 && takeFrames > 0) {
+                p->pendingCount--;
+            }
             cb = p->callback;
             ctx = p->context;
-            if (p->pendingCount > 0) p->pendingCount--;
         }
-        const uint32_t ch = p->channels > 0 ? p->channels : 2;
-        bytesPerFrame = (p->bitsPerSample / 8) * ch;
-        if (bytesPerFrame == 0) bytesPerFrame = 4;
     }
-    // Counted HERE, where playback finished, not at enqueue: AudioTrack's
-    // getPlaybackHeadPosition means "frames the device has consumed", and FMOD sizes its
-    // next write from the difference. Counting at submission would report frames that are
-    // still queued and make it write ahead of the device.
-    p->framesPlayed.fetch_add(buffer->mAudioDataByteSize / bytesPerFrame,
-                              std::memory_order_relaxed);
+
+    if (takeFrames < wantFrames) {
+        std::memset(out + takeFrames * ch, 0, (wantFrames - takeFrames) * ch * sizeof(int16_t));
+    }
+    buffer->mAudioDataByteSize = static_cast<UInt32>(wantFrames * ch * sizeof(int16_t));
+
+    p->cv.notify_all();
+    p->framesPlayed.fetch_add(takeFrames > 0 ? takeFrames : wantFrames, std::memory_order_relaxed);
+
     if (cb) {
         reinterpret_cast<void (*)(void*, void*)>(cb)(p->iface, ctx);
     }
-    AudioQueueFreeBuffer(aq, buffer);
+
+    AudioQueueEnqueueBuffer(aq, buffer, 0, nullptr);
 }
 
-// Create AudioQueue for the first time (lazy) according to the format saved from SLDataFormat_PCM.
-// userData of AudioQueueNewOutput is a copy of shared_ptr taken from g_players
-// — keeps the player alive while the output callback is running (even if the game cancels
-// player right inside the callback).
-static bool ensure_audio_queue(AudioPlayer* p) {
+static bool open_audio_queue(AudioPlayer* p) {
     if (p->aq) return true;
-#if defined(__APPLE__)
     apple_ensure_audio_session_active();
-#endif
+
+    double targetRate = (p->sampleRate > 0) ? p->sampleRate : 48000.0;
+    if (targetRate <= 24000.0) {
+        targetRate *= 2.0;
+    }
+    if (targetRate < 44100.0) targetRate = 44100.0;
+    const uint32_t ch = (p->channels > 0 && p->channels <= 8) ? p->channels : 2;
 
     AudioStreamBasicDescription asbd = {};
-    asbd.mSampleRate = p->sampleRate;
+    asbd.mSampleRate = targetRate;
     asbd.mFormatID = kAudioFormatLinearPCM;
-    asbd.mChannelsPerFrame = p->channels;
-    asbd.mBitsPerChannel = p->bitsPerSample;
-    asbd.mBytesPerFrame = static_cast<UInt32>((p->bitsPerSample / 8) * p->channels);
+    asbd.mFormatFlags = kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked;
+    asbd.mBitsPerChannel = 16;
+    asbd.mChannelsPerFrame = ch;
     asbd.mFramesPerPacket = 1;
+    asbd.mBytesPerFrame = ch * 2;
     asbd.mBytesPerPacket = asbd.mBytesPerFrame;
-    if (p->bitsPerSample == 32) {
-        asbd.mFormatFlags = kLinearPCMFormatFlagIsFloat | kLinearPCMFormatFlagIsPacked;
-    } else {
-        asbd.mFormatFlags = kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked;
-    }
 
     {
         std::lock_guard<std::mutex> lock(g_players_mtx);
@@ -234,123 +266,154 @@ static bool ensure_audio_queue(AudioPlayer* p) {
         p->aqUserData = new std::shared_ptr<AudioPlayer>(it->second);
     }
 
-    const OSStatus st = AudioQueueNewOutput(&asbd, audio_queue_output_cb, p->aqUserData,
-                                            nullptr, nullptr, 0, &p->aq);
+    OSStatus st = AudioQueueNewOutput(&asbd, audio_queue_output_cb, p->aqUserData,
+                                      nullptr, nullptr, 0, &p->aq);
     if (st != noErr || !p->aq) {
-        static std::atomic<int> s_newFails{0};
-        if (s_newFails.load() < 5) {
-            ++s_newFails;
-            std::fprintf(stderr, "[KuDroidAudio] AudioQueueNewOutput failed st=%d\n",
-                         static_cast<int>(st));
-        }
         delete static_cast<std::shared_ptr<AudioPlayer>*>(p->aqUserData);
         p->aqUserData = nullptr;
         return false;
     }
-    // The queue is created lazily on first enqueue; Prime+Start happen after
-    // the first buffer lands (see enqueue_pcm), never on an empty queue.
+
+    p->ring.assign(kRingBufferFrames * ch, 0);
+    p->ringHead = 0;
+    p->ringCount = 0;
+
+    const UInt32 bufBytes = static_cast<UInt32>(kAudioQueueFramesPerBuffer * ch * 2);
+    for (int i = 0; i < kAudioQueueNumBuffers; ++i) {
+        st = AudioQueueAllocateBuffer(p->aq, bufBytes, &p->aqBuffers[i]);
+        if (st == noErr && p->aqBuffers[i]) {
+            std::memset(p->aqBuffers[i]->mAudioData, 0, bufBytes);
+            p->aqBuffers[i]->mAudioDataByteSize = bufBytes;
+            AudioQueueEnqueueBuffer(p->aq, p->aqBuffers[i], 0, nullptr);
+        }
+    }
+
     AudioQueueSetParameter(p->aq, kAudioQueueParam_Volume, p->volume);
+    st = AudioQueueStart(p->aq, nullptr);
+    p->started = (st == noErr);
     return true;
 }
+#endif
 
-// Push a PCM block into AudioQueue (common to OpenSL enqueue and AAudio write).
+static int32_t player_write_pcm(AudioPlayer* p, const void* data, uint32_t sizeBytes) {
+    if (!p || sizeBytes == 0 || !data) return 0;
 
-// Push a PCM block into AudioQueue (common to OpenSL enqueue and AAudio write).
-// 0 = queued, 1 = queue full (retry), -1 = hard error.
-static int enqueue_pcm(AudioPlayer* p, const void* data, uint32_t size) {
-    std::lock_guard<std::mutex> lock(p->mtx);
-    if (p->shutdown) return -1;
-    if (!ensure_audio_queue(p)) return -1;
-    if (size == 0) return 0;
-    // Backpressure: every call allocates a device buffer, so an undrained
-    // flood grows memory and latency without bound. Cap queued buffers; the
-    // caller retries (SL_RESULT_BUFFER_INSUFFICIENT), exactly like a full
-    // AudioTrack buffer.
-    constexpr uint32_t kMaxPendingBuffers = 128;
-    if (p->pendingCount >= kMaxPendingBuffers) return 1;
+    const uint32_t ch = (p->channels > 0 && p->channels <= 8) ? p->channels : 2;
+    const uint32_t bytesPerSample = (p->bitsPerSample > 0) ? (p->bitsPerSample / 8) : 2;
+    const uint32_t bytesPerFrame = bytesPerSample * ch;
+    if (bytesPerFrame == 0) return 0;
 
-    AudioQueueBufferRef buf = nullptr;
-    OSStatus st = AudioQueueAllocateBuffer(p->aq, size, &buf);
-    if (st != noErr || !buf) return -1;
-    if (data) std::memcpy(buf->mAudioData, data, size);
-    buf->mAudioDataByteSize = size;
-    st = AudioQueueEnqueueBuffer(p->aq, buf, 0, nullptr);
-    if (st != noErr) {
-        AudioQueueFreeBuffer(p->aq, buf);
-        return -1;
-    }
-    p->pendingCount++;
-    p->framesWritten.fetch_add(static_cast<uint64_t>(size) / player_bytes_per_frame(p),
-                               std::memory_order_relaxed);
-    // First buffer while playing: Prime decodes it before Start so playback
-    // begins immediately instead of dropping the head.
-    if (p->playState == SL_PLAYSTATE_PLAYING && !p->started) {
-        AudioQueuePrime(p->aq, 0, nullptr);
-        const OSStatus sst = AudioQueueStart(p->aq, nullptr);
-        p->started = (sst == noErr);
-        static std::atomic<int> s_startLogged{0};
-        if (s_startLogged.load() < 3) {
-            ++s_startLogged;
-            std::fprintf(stderr, "[KuDroidAudio] AudioQueue started st=%d\n",
-                         static_cast<int>(sst));
+    const size_t inFrames = sizeBytes / bytesPerFrame;
+    if (inFrames == 0) return 0;
+
+    const bool needUpsample = (p->sampleRate > 0 && p->sampleRate <= 24000.0);
+    std::vector<int16_t> converted;
+
+    if (p->bitsPerSample == 16) {
+        const int16_t* src = static_cast<const int16_t*>(data);
+        if (needUpsample) {
+            converted.resize(inFrames * 2 * ch);
+            for (size_t f = 0; f < inFrames; ++f) {
+                for (size_t c = 0; c < ch; ++c) {
+                    int16_t cur = src[f * ch + c];
+                    int16_t prev = (f > 0) ? src[(f - 1) * ch + c]
+                                           : (p->hasUpsamplePrev ? p->upsamplePrev[c] : cur);
+                    converted[(2 * f) * ch + c] = static_cast<int16_t>(((int)prev + (int)cur) / 2);
+                    converted[(2 * f + 1) * ch + c] = cur;
+                }
+            }
+            for (size_t c = 0; c < ch; ++c) {
+                p->upsamplePrev[c] = src[(inFrames - 1) * ch + c];
+            }
+            p->hasUpsamplePrev = true;
+        } else {
+            converted.assign(src, src + inFrames * ch);
+        }
+    } else if (p->bitsPerSample == 32) {
+        const float* src = static_cast<const float*>(data);
+        converted.resize(inFrames * ch);
+        for (size_t i = 0; i < inFrames * ch; ++i) {
+            float val = src[i];
+            if (val > 1.0f) val = 1.0f;
+            else if (val < -1.0f) val = -1.0f;
+            converted[i] = static_cast<int16_t>(val * 32767.0f);
+        }
+    } else {
+        const uint8_t* src = static_cast<const uint8_t*>(data);
+        converted.resize(inFrames * ch);
+        for (size_t i = 0; i < inFrames * ch; ++i) {
+            converted[i] = static_cast<int16_t>((static_cast<int>(src[i]) - 128) << 8);
         }
     }
-    return 0;
+
+    const size_t totalFramesToWrite = needUpsample ? (inFrames * 2) : inFrames;
+
+#if defined(__APPLE__)
+    if (!open_audio_queue(p)) return -1;
+
+    size_t writtenFrames = 0;
+    while (writtenFrames < totalFramesToWrite) {
+        std::unique_lock<std::mutex> lock(p->mtx);
+        if (p->shutdown) return -1;
+
+        while (p->ringCount >= kRingBufferFrames && !p->shutdown) {
+            if (p->cv.wait_for(lock, std::chrono::milliseconds(50)) == std::cv_status::timeout) {
+                break;
+            }
+        }
+        if (p->shutdown) return -1;
+
+        const size_t room = (p->ringCount < kRingBufferFrames) ? (kRingBufferFrames - p->ringCount) : 0;
+        if (room == 0) break;
+
+        const size_t toWrite = std::min(totalFramesToWrite - writtenFrames, room);
+        const size_t tail = (p->ringHead + p->ringCount) % kRingBufferFrames;
+        for (size_t f = 0; f < toWrite; ++f) {
+            const size_t destIdx = ((tail + f) % kRingBufferFrames) * ch;
+            const size_t srcIdx = (writtenFrames + f) * ch;
+            for (size_t c = 0; c < ch; ++c) {
+                p->ring[destIdx + c] = converted[srcIdx + c];
+            }
+        }
+        p->ringCount += toWrite;
+        writtenFrames += toWrite;
+        p->framesWritten.fetch_add(inFrames, std::memory_order_relaxed);
+    }
+#else
+    {
+        std::unique_lock<std::mutex> lock(p->mtx);
+        if (p->ring.empty()) {
+            p->ring.resize(kRingBufferFrames * ch, 0);
+        }
+        const size_t room = (p->ringCount < kRingBufferFrames) ? (kRingBufferFrames - p->ringCount) : 0;
+        const size_t toWrite = std::min(totalFramesToWrite, room > 0 ? room : totalFramesToWrite);
+        const size_t tail = (p->ringHead + p->ringCount) % kRingBufferFrames;
+        for (size_t f = 0; f < toWrite; ++f) {
+            const size_t destIdx = ((tail + f) % kRingBufferFrames) * ch;
+            const size_t srcIdx = f * ch;
+            for (size_t c = 0; c < ch; ++c) {
+                p->ring[destIdx + c] = converted[srcIdx + c];
+            }
+        }
+        p->ringCount += toWrite;
+        p->pendingCount++;
+        p->framesWritten.fetch_add(inFrames, std::memory_order_relaxed);
+
+        if (!p->workerRunning) {
+            p->workerRunning = true;
+            std::thread(audio_worker, p->iface).detach();
+        }
+        p->cv.notify_all();
+    }
+#endif
+
+    return static_cast<int32_t>(inFrames * bytesPerFrame);
 }
 
-#endif // __APPLE__
+// ─────────────────────────────────────────────────────────────────────────────
+// OpenSL ES Implementations
+// ─────────────────────────────────────────────────────────────────────────────
 
-#if !defined(__APPLE__)
-// Worker fallback (non-Apple): consumes the simulated buffer and then calls the callback.
-static void audio_worker(std::shared_ptr<AudioPlayer> p, void* iface) {
-    for (;;) {
-        std::pair<const void*, uint32_t> item;
-        uint32_t bytesPerFrame = 4;
-        double sampleRate = 44100.0;
-        {
-            std::unique_lock<std::mutex> lock(p->mtx);
-            // Paused data stays queued: consuming while paused would run the
-            // head ahead of the silent device.
-            p->cv.wait(lock, [&] {
-                return p->shutdown ||
-                       (!p->pending.empty() && p->playState == SL_PLAYSTATE_PLAYING);
-            });
-            if (p->shutdown) return;
-            item = p->pending.front();
-            p->pending.pop_front();
-            p->pendingCount--;
-            const uint32_t ch = p->channels > 0 ? p->channels : 2;
-            bytesPerFrame = (p->bitsPerSample / 8) * ch;
-            if (bytesPerFrame == 0) bytesPerFrame = 4;
-            if (p->sampleRate > 0) sampleRate = p->sampleRate;
-        }
-        // Sleep the buffer's real duration, not a fixed tick.
-        const uint64_t ms =
-            bytesPerFrame > 0 ? (static_cast<uint64_t>(item.second) * 1000) /
-                                    (bytesPerFrame * static_cast<uint64_t>(sampleRate))
-                              : 10;
-        std::this_thread::sleep_for(std::chrono::milliseconds(ms));
-
-        // The host build has no real device, but the frame counter still has to advance:
-        // a caller that polls getPlaybackHeadPosition and sees it frozen concludes the
-        // device is dead and stops writing, which is a hang rather than silence.
-        p->framesPlayed.fetch_add(item.second / bytesPerFrame, std::memory_order_relaxed);
-
-        void* cb = nullptr;
-        void* ctx = nullptr;
-        {
-            std::lock_guard<std::mutex> lock(p->mtx);
-            cb = p->callback;
-            ctx = p->context;
-        }
-        if (cb) {
-            reinterpret_cast<void (*)(void*, void*)>(cb)(iface, ctx);
-        }
-    }
-}
-#endif // !defined(__APPLE__)
-
-// Engine create — the main entry point that the game calls.
 extern "C" SLresult bionic_slCreateEngine(SLObjectItf* pEngine, uint32_t numOptions,
                                           const void* pEngineOptions,
                                           uint32_t numInterfaces,
@@ -376,10 +439,7 @@ extern "C" void bionic_slObjectDestroy(SLObjectItf self) {
         }
     }
     if (!player) return;
-    // NO DEADLOCK: lock is only used to set the shutdown flag — released before
-    // AudioQueueDispose. If dispose is in lock, callback audio
-    // (audio_queue_output_cb, runs on CoreAudio thread) wait p->mtx will not
-    // never exits because Dispose waits for that thread to stop → deadlock.
+
     {
         std::lock_guard<std::mutex> lock(player->mtx);
         player->shutdown = true;
@@ -394,13 +454,11 @@ extern "C" void bionic_slObjectDestroy(SLObjectItf self) {
         userData = player->aqUserData;
         player->aq = nullptr;
         player->aqUserData = nullptr;
+        for (int i = 0; i < kAudioQueueNumBuffers; ++i) {
+            player->aqBuffers[i] = nullptr;
+        }
     }
     if (aq) {
-        // immediate=true: Dispose synchronously stops the queue and waits for the internal thread
-        // AudioQueue finishes processing before returning → no more callbacks run
-        // after this point → delete userData (shared_ptr owner) is safe. Callback
-        // While running keeps a copy of shared_ptr so the player is not free
-        // midway.
         AudioQueueDispose(aq, true);
         delete static_cast<std::shared_ptr<AudioPlayer>*>(userData);
     }
@@ -412,7 +470,6 @@ extern "C" SLresult bionic_slObjectRealize(SLObjectItf self, SLboolean async) {
     return SL_RESULT_SUCCESS;
 }
 
-// Return the object itself as the interface so that future calls can look up by self.
 extern "C" SLresult bionic_slObjectGetInterface(SLObjectItf self,
                                                 const SLInterfaceID iid,
                                                 void* pInterface) {
@@ -436,16 +493,11 @@ extern "C" SLresult bionic_slEngineCreateAudioPlayer(SLEngineItf self,
     auto player = std::make_shared<AudioPlayer>();
     player->iface = player.get();
 
-    // Read the PCM format that the game declares in SLDataSource.
-    //
-    // Outside the Apple guard now: the format is what converts bytes to frames, and every
-    // platform needs that for the frame-based reporting AudioTrack does.
     {
         const auto* src = static_cast<const SLDataSource*>(pSrc);
         if (src && src->pFormat) {
             const auto* fmt = static_cast<const SLDataFormat_PCM*>(src->pFormat);
             if (fmt->numChannels > 0) player->channels = fmt->numChannels;
-            // samplesPerSec in milliHz in OpenSL ES (44100 -> 44100000).
             if (fmt->samplesPerSec > 1000000) {
                 player->sampleRate = static_cast<double>(fmt->samplesPerSec) / 1000.0;
             } else if (fmt->samplesPerSec > 0) {
@@ -495,32 +547,9 @@ extern "C" SLresult bionic_slAndroidSimpleBufferQueueEnqueue(
     SLAndroidSimpleBufferQueueItf self, const void* pBuffer, uint32_t size) {
     auto player = find_player(self);
     if (!player) return SL_RESULT_PARAMETER_INVALID;
-#if defined(__APPLE__)
-    const int enc = enqueue_pcm(player.get(), pBuffer, size);
-    if (enc > 0) return SL_RESULT_BUFFER_INSUFFICIENT;
-    if (enc < 0) return SL_RESULT_RESOURCE_ERROR;
+    int32_t res = player_write_pcm(player.get(), pBuffer, size);
+    if (res < 0) return SL_RESULT_RESOURCE_ERROR;
     return SL_RESULT_SUCCESS;
-#else
-    {
-        std::lock_guard<std::mutex> lock(player->mtx);
-        (void)pBuffer;  // size-only queue entry; the worker never reads sample bytes
-        // The host worker never reads sample bytes (no device: it sleeps the
-        // buffer duration and advances the head), so retain the SIZE only —
-        // keeping the guest's pointer would read stack/freed memory if the
-        // worker ever dereferenced it later.
-        player->pending.emplace_back(nullptr, size);
-        player->pendingCount++;
-        player->framesWritten.fetch_add(
-            static_cast<uint64_t>(size) / player_bytes_per_frame(player.get()),
-            std::memory_order_relaxed);
-        if (!player->workerRunning) {
-            player->workerRunning = true;
-            std::thread(audio_worker, player, self).detach();
-        }
-        player->cv.notify_all();
-    }
-    return SL_RESULT_SUCCESS;
-#endif
 }
 
 extern "C" SLresult bionic_slAndroidSimpleBufferQueueClear(
@@ -528,7 +557,9 @@ extern "C" SLresult bionic_slAndroidSimpleBufferQueueClear(
     auto player = find_player(self);
     if (!player) return SL_RESULT_PARAMETER_INVALID;
     std::lock_guard<std::mutex> lock(player->mtx);
-    player->pending.clear();
+    player->ringHead = 0;
+    player->ringCount = 0;
+    player->pendingCount = 0;
     return SL_RESULT_SUCCESS;
 }
 
@@ -544,9 +575,9 @@ extern "C" SLresult bionic_slAndroidSimpleBufferQueueGetState(
 extern "C" SLresult bionic_slPlaySetPlayState(SLPlayItf self, uint32_t state) {
     auto player = find_player(self);
     if (!player) return SL_RESULT_PARAMETER_INVALID;
-#if defined(__APPLE__)
     std::lock_guard<std::mutex> lock(player->mtx);
     player->playState = state;
+#if defined(__APPLE__)
     if (player->aq) {
         if (state == SL_PLAYSTATE_PLAYING) {
             AudioQueueStart(player->aq, nullptr);
@@ -556,10 +587,8 @@ extern "C" SLresult bionic_slPlaySetPlayState(SLPlayItf self, uint32_t state) {
             AudioQueueStop(player->aq, false);
         }
     }
-#else
-    std::lock_guard<std::mutex> lock(player->mtx);
-    player->playState = state;
 #endif
+    player->cv.notify_all();
     return SL_RESULT_SUCCESS;
 }
 
@@ -572,11 +601,8 @@ extern "C" SLresult bionic_slPlayGetPlayState(SLPlayItf self, uint32_t* pState) 
 }
 
 extern "C" SLresult bionic_slVolumeSetVolumeLevel(SLVolumeItf self, int32_t millibel) {
-    (void)millibel;
     auto player = find_player(self);
     if (!player) return SL_RESULT_PARAMETER_INVALID;
-    // millibels = 100 * dB; 0 mB = unity (1.0). AudioQueue volume is LINEAR
-    // 0..1, not dB — set the dB value directly (eg -6) as negative volume → mute.
     const float db = static_cast<float>(millibel) / 100.0f;
     const float linear = (db >= -150.0f) ? std::pow(10.0f, db / 20.0f) : 0.0f;
     std::lock_guard<std::mutex> lock(player->mtx);
@@ -594,31 +620,28 @@ extern "C" SLresult bionic_slVolumeGetVolumeLevel(SLVolumeItf self, int32_t* pLe
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// AAudio — write model pushed directly into AudioQueue (like OpenSL enqueue).
+// AAudio Implementations
 // ─────────────────────────────────────────────────────────────────────────────
 #define AAUDIO_FORMAT_PCM_I16 1
 #define AAUDIO_FORMAT_PCM_FLOAT 2
 
 struct AAudioStreamImpl {
     std::shared_ptr<AudioPlayer> player;
-    int32_t sampleRate = 44100;
+    int32_t sampleRate = 48000;
     int32_t channels = 2;
     int32_t format = AAUDIO_FORMAT_PCM_I16;
 };
 
 struct AAudioBuilderState {
-    int32_t sampleRate = 44100;
+    int32_t sampleRate = 48000;
     int32_t channels = 2;
     int32_t format = AAUDIO_FORMAT_PCM_I16;
 };
 
-// NDK aaudio_result_t values (aaudio/AAudio.h).
 constexpr int32_t kAAudioOk = 0;
 constexpr int32_t kAAudioErrorInvalidHandle = -892;
 constexpr int32_t kAAudioErrorUnimplemented = -906;
 
-// One global builder used to mean two concurrent builders (output+input)
-// clobbered each other's rate/channels/format. State is per-builder now.
 static std::mutex g_builderMtx;
 static std::unordered_map<void*, AAudioBuilderState> g_builderStates;
 static int g_builderIds = 0;
@@ -673,9 +696,6 @@ extern "C" int32_t bionic_AAudioStreamBuilder_setFormat(void* builder, int32_t f
 
 extern "C" int32_t bionic_AAudioStreamBuilder_setDataCallback(void* builder, void* callback, void* userData) {
     (void)builder; (void)callback; (void)userData;
-    // The callback-pull model is not supported: returning OK would make the
-    // guest wait for callbacks that never come (silent hang). UNIMPLEMENTED
-    // lets it fall back to the write model, which runs.
     return kAAudioErrorUnimplemented;
 }
 
@@ -694,7 +714,7 @@ extern "C" int32_t bionic_AAudioStreamBuilder_openStream(void* builder, void** s
     impl->format = st.format;
     auto player = std::make_shared<AudioPlayer>();
     player->iface = player.get();
-    player->sampleRate = impl->sampleRate > 0 ? static_cast<double>(impl->sampleRate) : 44100.0;
+    player->sampleRate = impl->sampleRate > 0 ? static_cast<double>(impl->sampleRate) : 48000.0;
     player->channels = impl->channels > 0 ? static_cast<uint32_t>(impl->channels) : 2;
     player->bitsPerSample = (impl->format == AAUDIO_FORMAT_PCM_FLOAT) ? 32 : 16;
     impl->player = player;
@@ -702,8 +722,6 @@ extern "C" int32_t bionic_AAudioStreamBuilder_openStream(void* builder, void** s
         std::lock_guard<std::mutex> lock(g_streams_mtx);
         g_streams[player.get()] = impl;
     }
-    // Also subscribe to g_players so ensure_audio_queue can be found (get a copy
-    // shared_ptr as AudioQueue's safe userData).
     {
         std::lock_guard<std::mutex> lock(g_players_mtx);
         g_players[player.get()] = player;
@@ -721,20 +739,21 @@ extern "C" int32_t bionic_AAudioStreamBuilder_delete(void* builder) {
 extern "C" int32_t bionic_AAudioStream_requestStart(void* stream) {
     auto impl = find_stream(stream);
     if (!impl) return 1;
-#if defined(__APPLE__)
     std::lock_guard<std::mutex> lock(impl->player->mtx);
     impl->player->playState = SL_PLAYSTATE_PLAYING;
+#if defined(__APPLE__)
     if (impl->player->aq) AudioQueueStart(impl->player->aq, nullptr);
 #endif
+    impl->player->cv.notify_all();
     return 0;
 }
 
 extern "C" int32_t bionic_AAudioStream_requestStop(void* stream) {
     auto impl = find_stream(stream);
     if (!impl) return 1;
-#if defined(__APPLE__)
     std::lock_guard<std::mutex> lock(impl->player->mtx);
     impl->player->playState = SL_PLAYSTATE_STOPPED;
+#if defined(__APPLE__)
     if (impl->player->aq) AudioQueueStop(impl->player->aq, false);
 #endif
     return 0;
@@ -772,7 +791,7 @@ extern "C" int32_t bionic_AAudioStream_close(void* stream) {
 
 extern "C" int32_t bionic_AAudioStream_getSampleRate(void* stream) {
     auto impl = find_stream(stream);
-    return impl ? impl->sampleRate : 44100;
+    return impl ? impl->sampleRate : 48000;
 }
 
 extern "C" int32_t bionic_AAudioStream_getChannelCount(void* stream) {
@@ -790,46 +809,17 @@ extern "C" int32_t bionic_AAudioStream_write(void* stream, const void* buffer,
     (void)timeoutNanoseconds;
     auto impl = find_stream(stream);
     if (!impl) return 0;
-#if defined(__APPLE__)
     const size_t bytesPerFrame = ((impl->format == AAUDIO_FORMAT_PCM_FLOAT) ? 4u : 2u) *
                                  static_cast<size_t>(impl->channels > 0 ? impl->channels : 2);
     const uint32_t byteSize = static_cast<uint32_t>(static_cast<size_t>(numFrames) * bytesPerFrame);
-    // Full (1) is backpressure, not failure: report 0 frames so the mixer
-    // retries, exactly like a non-blocking full device buffer.
-    if (enqueue_pcm(impl->player.get(), buffer, byteSize) != 0) return 0;
-    return numFrames;
-#else
-    (void)buffer;
-    return numFrames; // dummy: accept all
-#endif
+    int32_t writtenBytes = player_write_pcm(impl->player.get(), buffer, byteSize);
+    return (writtenBytes > 0) ? (writtenBytes / static_cast<int32_t>(bytesPerFrame)) : 0;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// android.media.AudioTrack — the Java audio path, on the same output.
-//
-// Why this exists alongside OpenSL ES and AAudio. FMOD, which is what Unity games ship,
-// does not use either from native code: it drives AudioTrack from JAVA. The generated
-// framework stub had one empty constructor, so getMinBufferSize, getState and the rest
-// were auto-stubbed to 0, and FMOD read that as a device it could not open:
-//
-//     [KuART][MISSING-METHOD] Auto-stubbing: AudioTrack->getMinBufferSize(III)I
-//     [E/FMOD] AudioTrack failed to initialize (status 0)
-//
-// It retried forever. The thread sampler caught the loop — pc moving inside
-// libsystem_malloc with lr in DexClassLinker::FindClass across five samples ten seconds
-// apart, CPU climbing rather than flat — which is a spin, not a park. ULTRAKILL reached
-// Vulkan, created its swapchain, and then never produced a frame.
-//
-// These entry points reuse AudioPlayer and the CoreAudio queue rather than opening a
-// second output: the callback, the frame counter and the format handling are all the same
-// code the other two APIs go through, so there is one place where audio can be wrong.
-//
-// The Java side works in FRAMES for position and BYTES for writes. The conversion lives
-// here, with the format, rather than in Java where the sample width would have to be
-// guessed.
+// android.media.AudioTrack Native Bindings
 // ─────────────────────────────────────────────────────────────────────────────
 
-// android.media.AudioFormat encodings, as the guest passes them.
 #define ANDROID_ENCODING_PCM_16BIT 2
 #define ANDROID_ENCODING_PCM_8BIT  3
 #define ANDROID_ENCODING_PCM_FLOAT 4
@@ -843,45 +833,18 @@ static uint32_t android_bits_per_sample(int32_t encoding) {
     }
 }
 
-// The device's preferred output rate, for AudioTrack.getNativeOutputSampleRate.
-//
-// A guest that asks and gets a wrong answer resamples every buffer for the life of the
-// process, so this is worth reading from the host rather than assuming 44100.
 static int32_t host_output_sample_rate() {
-#if defined(__APPLE__)
-    // AVAudioSession would be the direct answer but pulls in an Objective-C dependency
-    // this file does not otherwise need. 48000 is what every iOS device since the iPhone 6
-    // actually runs at, and CoreAudio resamples transparently when a queue asks for
-    // something else, so a wrong guess costs quality rather than correctness.
     return 48000;
-#else
-    return 48000;
-#endif
-}
-
-// bytes -> frames, for this player's format. Zero-safe: a format that would divide by
-// zero is treated as 16-bit stereo rather than producing a division fault inside audio.
-static uint32_t player_bytes_per_frame(const AudioPlayer* p) {
-    const uint32_t ch = p->channels > 0 ? p->channels : 2;
-    const uint32_t bytes = (p->bitsPerSample / 8) * ch;
-    return bytes > 0 ? bytes : 4;
 }
 
 extern "C" int32_t bionic_kudroid_audiotrack_min_buffer_size(int32_t sampleRateInHz,
                                                             int32_t channelCount,
                                                             int32_t encoding) {
-    // The Java side asks for the device rate with encoding == -1, so one native method
-    // serves both queries and AudioTrack needs no second binding for it.
     if (encoding < 0) return host_output_sample_rate();
-
     if (sampleRateInHz <= 0 || channelCount <= 0) return 0;
     const uint32_t bytesPerFrame = (android_bits_per_sample(encoding) / 8) *
                                    static_cast<uint32_t>(channelCount);
     if (bytesPerFrame == 0) return 0;
-
-    // 20ms, which is what AudioTrack reports on a real device for a low-latency stream and
-    // comfortably above the AudioQueue period. Returning something too small is worse than
-    // too large: FMOD sizes its mixer from this and underruns for the rest of the run.
     const uint32_t frames = static_cast<uint32_t>(sampleRateInHz) / 50;
     return static_cast<int32_t>(frames * bytesPerFrame);
 }
@@ -890,14 +853,6 @@ extern "C" int64_t bionic_kudroid_audiotrack_create(int32_t sampleRateInHz,
                                                     int32_t channelCount,
                                                     int32_t encoding,
                                                     int32_t bufferSizeInBytes) {
-    // TEMP DIAGNOSTIC: prove samples reach the shim.
-    static std::atomic<int> s_tracks{0};
-    const int n = ++s_tracks;
-    if (n <= 3) {
-        std::fprintf(stderr,
-                     "[KuDroidAudio] AudioTrack create #%d rate=%d ch=%d enc=%d buf=%d\n",
-                     n, sampleRateInHz, channelCount, encoding, bufferSizeInBytes);
-    }
     if (sampleRateInHz <= 0 || channelCount <= 0) return 0;
 
     auto player = std::make_shared<AudioPlayer>();
@@ -905,18 +860,13 @@ extern "C" int64_t bionic_kudroid_audiotrack_create(int32_t sampleRateInHz,
     player->sampleRate = static_cast<double>(sampleRateInHz);
     player->channels = static_cast<uint32_t>(channelCount > 8 ? 8 : channelCount);
     player->bitsPerSample = android_bits_per_sample(encoding);
-    // Android requires bufferSizeInBytes >= getMinBufferSize(); floor it the same
-    // way so write() backpressure cannot degenerate into sub-period waits.
     {
         const uint32_t bpf = player_bytes_per_frame(player.get());
-        const uint64_t minBytes =
-            static_cast<uint64_t>(sampleRateInHz / 50) * bpf;
+        const uint64_t minBytes = static_cast<uint64_t>(sampleRateInHz / 50) * bpf;
         player->bufferCapacityBytes = bufferSizeInBytes > 0
             ? std::max<uint64_t>(static_cast<uint64_t>(bufferSizeInBytes), minBytes)
             : minBytes;
     }
-    // AudioTrack has no buffer-queue callback: the guest writes when it wants to. Leaving
-    // `callback` null is what tells the output callback there is nobody to notify.
     {
         std::lock_guard<std::mutex> lock(g_players_mtx);
         g_players[player.get()] = player;
@@ -924,9 +874,6 @@ extern "C" int64_t bionic_kudroid_audiotrack_create(int32_t sampleRateInHz,
     return static_cast<int64_t>(reinterpret_cast<uintptr_t>(player.get()));
 }
 
-// Every entry point below takes the handle the constructor returned. A handle that is no
-// longer in the table — released, or never valid — returns an error rather than
-// dereferencing it.
 static std::shared_ptr<AudioPlayer> audiotrack_find(int64_t track) {
     if (track == 0) return nullptr;
     return find_player(reinterpret_cast<void*>(static_cast<uintptr_t>(track)));
@@ -937,171 +884,7 @@ extern "C" int32_t bionic_kudroid_audiotrack_write(int64_t track, const void* da
     auto p = audiotrack_find(track);
     if (!p || sizeInBytes < 0) return -3;  // ERROR_INVALID_OPERATION
     if (sizeInBytes == 0) return 0;
-    // Byte flow + failures.
-    static std::atomic<long long> s_bytes{0};
-    static std::atomic<int> s_fails{0};
-#if defined(__APPLE__)
-    // Whole frames only: a trailing partial frame is unplayable and would
-    // desync the byte counter from what the device consumed.
-    const uint32_t bpf = player_bytes_per_frame(p.get());
-    const int32_t frames = sizeInBytes / static_cast<int32_t>(bpf);
-    const int32_t accepted = frames * static_cast<int32_t>(bpf);
-    if (accepted <= 0) return 0;
-    // AudioTrack.write blocks while the track buffer is full, and that backpressure
-    // is what paces a guest mixer to real time. Wait for room BEFORE enqueueing, one
-    // chunk at a time: waiting for room lasts ~one chunk, while the old enqueue-then-
-    // drain-to-low-water park held the caller for hundreds of ms with whatever engine
-    // lock it carried, and stalled every thread waiting on that lock.
-    if (p->playState == SL_PLAYSTATE_PLAYING) {
-        auto inflightBytes = [&]() -> uint64_t {
-            // Unsigned subtraction wraps to ~2^64 when stop/flush zeroes the
-            // counters mid-flight (written < played transiently) — a ~2s
-            // stall. Clamp: negative means empty.
-            const uint64_t written = p->framesWritten.load(std::memory_order_relaxed);
-            const uint64_t played = p->framesPlayed.load(std::memory_order_relaxed);
-            return (written >= played ? written - played : 0) * bpf;
-        };
-        // Time-throttled, not count-capped: a 5-line cap goes blind for the rest
-        // of the session, which is why a run whose audio stalled for 90s said
-        // nothing after the first second. One line per 500ms carries what the
-        // wait actually cost, which is the difference between "the guest mixer
-        // is slow" and "the guest is parked on our output backpressure".
-        const auto waitStart = std::chrono::steady_clock::now();
-        long long blockedMs = 0;
-        // Bounded: if the device never drains again, give up after ~2s and let the
-        // queue absorb the chunk rather than hang the caller outright.
-        for (int slept = 0; slept < 500; ++slept) {
-            const uint64_t inflight = inflightBytes();
-            // Room for the whole chunk, or an empty queue: an oversized chunk still
-            // makes progress instead of deadlocking against its own size.
-            if (inflight == 0 ||
-                inflight + static_cast<uint64_t>(accepted) <= p->bufferCapacityBytes) {
-                break;
-            }
-            {
-                std::lock_guard<std::mutex> lock(p->mtx);
-                if (p->shutdown) break;
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(4));
-        }
-        blockedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - waitStart)
-                        .count();
-        static std::atomic<long long> s_nextReportNs{0};
-        // Log only an abnormal stall: one chunk at 4KB/24kHz-stereo is ~43ms,
-        // so a healthy paced write always lands in 35..60ms — logging every
-        // one of those lines flooded stderr at ~2 lines/s for the whole run
-        // and buried the real signal. The band accommodates other sane chunk
-        // geometries; anything outside it (waiting many chunks, or 0 wait on
-        // a drained queue after a burst) reports the state the pacing story
-        // cannot explain.
-        const bool stallLike = blockedMs > 60 || (blockedMs > 0 && blockedMs < 35);
-        const long long nowNs =
-            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now().time_since_epoch())
-                .count();
-        long long due = s_nextReportNs.load(std::memory_order_relaxed);
-        if (stallLike && nowNs >= due &&
-            s_nextReportNs.compare_exchange_strong(due, nowNs + 500LL * 1000 * 1000,
-                                                   std::memory_order_relaxed)) {
-            std::fprintf(stderr,
-                         "[KuDroidAudio] backpressure blocked_ms=%lld inflight=%llu "
-                         "cap=%llu rate=%u bytes=%d\n",
-                         blockedMs,
-                         static_cast<unsigned long long>(inflightBytes()),
-                         static_cast<unsigned long long>(p->bufferCapacityBytes),
-                         static_cast<unsigned>(p->sampleRate), accepted);
-        }
-    }
-    const int enca = enqueue_pcm(p.get(), data, static_cast<uint32_t>(accepted));
-    if (enca < 0) {
-        const int f = ++s_fails;
-        if (f <= 3) std::fprintf(stderr, "[KuDroidAudio] write FAILED #%d\n", f);
-        return -1;  // ERROR
-    }
-    if (enca > 0) return 0;
-    const uint64_t written = p->framesWritten.load(std::memory_order_relaxed);
-    {
-        static std::atomic<uint64_t> s_lastAmpReportMs{0};
-        static std::atomic<int> s_peakAmp{0};
-        static std::atomic<uint64_t> s_nonzeroCount{0};
-        const uint64_t nowMs = static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count());
-
-        if (data != nullptr && p->bitsPerSample == 16) {
-            const int16_t* samples = reinterpret_cast<const int16_t*>(data);
-            const size_t sampleCount = static_cast<size_t>(accepted) / sizeof(int16_t);
-            int localPeak = 0;
-            for (size_t i = 0; i < sampleCount; ++i) {
-                int a = std::abs(static_cast<int>(samples[i]));
-                if (a > localPeak) localPeak = a;
-            }
-            if (localPeak > 0) s_nonzeroCount.fetch_add(1, std::memory_order_relaxed);
-            int curPeak = s_peakAmp.load(std::memory_order_relaxed);
-            while (localPeak > curPeak && !s_peakAmp.compare_exchange_weak(curPeak, localPeak, std::memory_order_relaxed)) {}
-        }
-
-        uint64_t lastMs = s_lastAmpReportMs.load(std::memory_order_relaxed);
-        if (nowMs - lastMs >= 5000 && s_lastAmpReportMs.compare_exchange_strong(lastMs, nowMs, std::memory_order_relaxed)) {
-            const int peak = s_peakAmp.exchange(0, std::memory_order_relaxed);
-            const uint64_t nonzeros = s_nonzeroCount.exchange(0, std::memory_order_relaxed);
-            std::fprintf(stderr, "[KuDroidAudio] write probe: peak_amp=%d nonzero_chunks=%llu\n",
-                         peak, static_cast<unsigned long long>(nonzeros));
-        }
-    }
-    // Diagnostic: in-flight audio-ms shows mixer-ahead-of-wallclock pacing drift.
-    // Time-throttled (not count-capped): a count cap goes blind mid-run, which is
-    // exactly when pacing questions get asked.
-#ifdef KUDROID_DEBUG_AUDIO
-    {
-        static std::atomic<uint64_t> s_lastLogMs{0};
-        const uint64_t played = p->framesPlayed.load(std::memory_order_relaxed);
-        const double rate = p->sampleRate > 0 ? p->sampleRate : 44100.0;
-        const long long ms =
-            static_cast<long long>((written >= played ? written - played : 0) * 1000.0 / rate);
-        const uint64_t nowMs = static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now().time_since_epoch())
-                .count());
-        uint64_t last = s_lastLogMs.load(std::memory_order_relaxed);
-        if (nowMs - last > 5000 &&
-            s_lastLogMs.compare_exchange_strong(last, nowMs,
-                                                std::memory_order_relaxed)) {
-            std::fprintf(stderr,
-                         "[KuDroidAudio] in-flight=%lldms written=%llu played=%llu\n",
-                         ms, written, played);
-        }
-    }
-    const long long total = (s_bytes += accepted);
-    if (total - accepted == 0 || (total / 10000000) != ((total - accepted) / 10000000)) {
-        std::fprintf(stderr, "[KuDroidAudio] written %lld bytes total\n", total);
-    }
-#endif
-    return accepted;
-#else
-    // Host build: hand it to the same worker the OpenSL path uses, so the callback and
-    // frame counter behave identically and a test can observe them.
-    (void)data;  // size-only queue entry; the worker never reads sample bytes
-    const uint32_t hostBpf = player_bytes_per_frame(p.get());
-    const int32_t hostFrames = sizeInBytes / static_cast<int32_t>(hostBpf);
-    const int32_t hostAccepted = hostFrames * static_cast<int32_t>(hostBpf);
-    if (hostAccepted <= 0) return 0;
-    {
-        std::lock_guard<std::mutex> lock(p->mtx);
-        if (p->shutdown) return -6;  // ERROR_DEAD_OBJECT
-        p->pending.emplace_back(nullptr, static_cast<uint32_t>(hostAccepted));
-        p->pendingCount++;
-        p->framesWritten.fetch_add(static_cast<uint64_t>(hostFrames),
-                                   std::memory_order_relaxed);
-        if (!p->workerRunning) {
-            p->workerRunning = true;
-            std::thread(audio_worker, p, p->iface).detach();
-        }
-    }
-    p->cv.notify_all();
-    return hostAccepted;
-#endif
+    return player_write_pcm(p.get(), data, sizeInBytes);
 }
 
 extern "C" int32_t bionic_kudroid_audiotrack_play(int64_t track) {
@@ -1111,24 +894,15 @@ extern "C" int32_t bionic_kudroid_audiotrack_play(int64_t track) {
         std::lock_guard<std::mutex> lock(p->mtx);
         p->playState = SL_PLAYSTATE_PLAYING;
 #if defined(__APPLE__)
-        // Late play with data already queued: prime and start now.
-        if (p->aq != nullptr && !p->started && p->pendingCount > 0) {
-            AudioQueuePrime(p->aq, 0, nullptr);
-            p->started = (AudioQueueStart(p->aq, nullptr) == noErr);
+        if (p->aq != nullptr && !p->started) {
+            AudioQueueStart(p->aq, nullptr);
+            p->started = true;
         }
 #endif
     }
 #if defined(__APPLE__)
-    // The queue is created lazily on the first write, so play() before any data must only
-    // record the intent — ensure_audio_queue starts it when it appears.
     if (p->aq) {
-        const OSStatus sst = AudioQueueStart(p->aq, nullptr);
-        static std::atomic<int> s_playLogged{0};
-        if (s_playLogged.load() < 3) {
-            ++s_playLogged;
-            std::fprintf(stderr, "[KuDroidAudio] play() start st=%d\n",
-                         static_cast<int>(sst));
-        }
+        AudioQueueStart(p->aq, nullptr);
     }
 #else
     p->cv.notify_all();
@@ -1142,7 +916,6 @@ extern "C" int32_t bionic_kudroid_audiotrack_pause(int64_t track) {
     std::lock_guard<std::mutex> lock(p->mtx);
     p->playState = SL_PLAYSTATE_PAUSED;
 #if defined(__APPLE__)
-    // Pause, not Stop: AudioTrack.pause() keeps queued data, and Stop would discard it.
     if (p->aq) AudioQueuePause(p->aq);
 #endif
     return 0;
@@ -1154,11 +927,10 @@ extern "C" int32_t bionic_kudroid_audiotrack_stop(int64_t track) {
     std::lock_guard<std::mutex> lock(p->mtx);
     p->playState = SL_PLAYSTATE_STOPPED;
 #if defined(__APPLE__)
-    // false: let queued buffers finish, which is AudioTrack.stop()'s documented
-    // behaviour ("play the remaining data, then stop") rather than flush.
     if (p->aq) AudioQueueStop(p->aq, false);
 #endif
-    // Head resets on stop; next play re-primes from zero.
+    p->ringCount = 0;
+    p->ringHead = 0;
     p->framesPlayed.store(0, std::memory_order_relaxed);
     p->framesWritten.store(0, std::memory_order_relaxed);
     p->started = false;
@@ -1172,7 +944,8 @@ extern "C" int32_t bionic_kudroid_audiotrack_flush(int64_t track) {
 #if defined(__APPLE__)
     if (p->aq) AudioQueueFlush(p->aq);
 #endif
-    p->pending.clear();
+    p->ringCount = 0;
+    p->ringHead = 0;
     p->pendingCount = 0;
     p->framesPlayed.store(0, std::memory_order_relaxed);
     p->framesWritten.store(0, std::memory_order_relaxed);
@@ -1194,10 +967,11 @@ extern "C" int32_t bionic_kudroid_audiotrack_release(int64_t track) {
         p->aq = nullptr;
         p->aqUserData = nullptr;
         p->shutdown = true;
+        for (int i = 0; i < kAudioQueueNumBuffers; ++i) {
+            p->aqBuffers[i] = nullptr;
+        }
     }
     if (aq) {
-        // true: synchronous, so the output callback cannot still be running when the
-        // shared_ptr it holds is deleted below.
         AudioQueueDispose(aq, true);
         delete static_cast<std::shared_ptr<AudioPlayer>*>(userData);
     }
@@ -1231,10 +1005,6 @@ extern "C" int32_t bionic_kudroid_audiotrack_set_volume(int64_t track, float vol
 extern "C" int32_t bionic_kudroid_audiotrack_head_position(int64_t track) {
     auto p = audiotrack_find(track);
     if (!p) return 0;
-    // Frames, and it must keep climbing: FMOD computes how much to write next from the
-    // difference between successive reads, so a frozen value stops it writing altogether.
-    // The counter is 64-bit internally and AudioTrack reports a 32-bit frame position, so
-    // it wraps exactly as the platform's does.
     const uint64_t frames = p->framesPlayed.load(std::memory_order_relaxed);
     return static_cast<int32_t>(static_cast<uint32_t>(frames));
 }
@@ -1242,14 +1012,10 @@ extern "C" int32_t bionic_kudroid_audiotrack_head_position(int64_t track) {
 extern "C" int32_t bionic_kudroid_audiotrack_latency_frames(int64_t track) {
     auto p = audiotrack_find(track);
     if (!p) return 0;
-    // Queued but not yet played, measured in frames from the same counters the
-    // head position uses — no per-buffer-size estimation involved.
     const uint64_t written = p->framesWritten.load(std::memory_order_relaxed);
     const uint64_t played = p->framesPlayed.load(std::memory_order_relaxed);
     const uint64_t queued = written >= played ? written - played : 0;
-    return static_cast<int32_t>(queued > static_cast<uint64_t>(INT32_MAX)
-                                    ? INT32_MAX
-                                    : queued);
+    return static_cast<int32_t>(queued > static_cast<uint64_t>(INT32_MAX) ? INT32_MAX : queued);
 }
 
 const SymbolEntry kAudioSymbols[] = {
@@ -1304,28 +1070,28 @@ const SymbolEntry* get_audio_symbols(size_t* count) {
 extern "C" const char* kudroid_test_audio(void) {
     std::string log = "=== KuDroid AudioShim (OpenSL ES & AAudio) Subsystem Test ===\n";
 
-    log += "⏳ Step 1: Testing OpenSL ES slCreateEngine...\n";
+    log += "Step 1: Testing OpenSL ES slCreateEngine...\n";
     SLObjectItf engineObj = nullptr;
     SLresult res = bionic_slCreateEngine(&engineObj, 0, nullptr, 0, nullptr, nullptr);
     if (res != SL_RESULT_SUCCESS || !engineObj) {
-        log += "❌ ERROR: slCreateEngine failed with result: " + std::to_string(res) + "\n";
+        log += "ERROR: slCreateEngine failed with result: " + std::to_string(res) + "\n";
         return strdup(log.c_str());
     }
-    log += "✔ slCreateEngine created engine object: " + std::to_string(reinterpret_cast<uintptr_t>(engineObj)) + "\n";
+    log += "slCreateEngine created engine object: " + std::to_string(reinterpret_cast<uintptr_t>(engineObj)) + "\n";
 
     res = bionic_slObjectRealize(engineObj, 0);
-    log += "✔ slObjectRealize -> " + std::string(res == SL_RESULT_SUCCESS ? "SUCCESS" : "FAILED") + "\n";
+    log += "slObjectRealize -> " + std::string(res == SL_RESULT_SUCCESS ? "SUCCESS" : "FAILED") + "\n";
 
     SLEngineItf engine = nullptr;
     res = bionic_slObjectGetInterface(engineObj, (SLInterfaceID)1 /* SL_IID_ENGINE */, &engine);
-    log += "✔ slObjectGetInterface(SL_IID_ENGINE) -> " + std::string(res == SL_RESULT_SUCCESS ? "SUCCESS" : "FAILED") + "\n";
+    log += "slObjectGetInterface(SL_IID_ENGINE) -> " + std::string(res == SL_RESULT_SUCCESS ? "SUCCESS" : "FAILED") + "\n";
 
-    log += "⏳ Step 2: Testing Output Mix & Audio Player creation...\n";
+    log += "Step 2: Testing Output Mix & Audio Player creation...\n";
     SLObjectItf outputMix = nullptr;
     res = bionic_slEngineCreateOutputMix(engine, &outputMix, 0, nullptr, nullptr);
-    log += "✔ slEngineCreateOutputMix -> " + std::string(res == SL_RESULT_SUCCESS ? "SUCCESS" : "FAILED") + "\n";
+    log += "slEngineCreateOutputMix -> " + std::string(res == SL_RESULT_SUCCESS ? "SUCCESS" : "FAILED") + "\n";
 
-    log += "⏳ Step 3: Testing AAudio Stream Builder & Pipeline...\n";
+    log += "Step 3: Testing AAudio Stream Builder & Pipeline...\n";
     void* builder = nullptr;
     int ares = bionic_AAudio_createStreamBuilder(&builder);
     if (ares == 0 && builder) {
@@ -1334,12 +1100,11 @@ extern "C" const char* kudroid_test_audio(void) {
         bionic_AAudioStreamBuilder_setFormat(builder, 1 /* PCM_16BIT */);
         void* stream = nullptr;
         ares = bionic_AAudioStreamBuilder_openStream(builder, &stream);
-        log += "✔ AAudioStreamBuilder_openStream -> " + std::string(ares == 0 ? "SUCCESS" : "FAILED") + "\n";
+        log += "AAudioStreamBuilder_openStream -> " + std::string(ares == 0 ? "SUCCESS" : "FAILED") + "\n";
         if (stream) {
             ares = bionic_AAudioStream_requestStart(stream);
-            log += "✔ AAudioStream_requestStart -> " + std::string(ares == 0 ? "SUCCESS" : "FAILED") + "\n";
+            log += "AAudioStream_requestStart -> " + std::string(ares == 0 ? "SUCCESS" : "FAILED") + "\n";
 
-            // Generate 0.1s test sound wave (Sine wave 440Hz)
             int16_t pcmBuffer[4410 * 2];
             for (int i = 0; i < 4410; ++i) {
                 int16_t val = static_cast<int16_t>(sin(2.0 * M_PI * 440.0 * i / 44100.0) * 16000.0);
@@ -1347,7 +1112,7 @@ extern "C" const char* kudroid_test_audio(void) {
                 pcmBuffer[i * 2 + 1] = val;
             }
             int written = bionic_AAudioStream_write(stream, pcmBuffer, 4410, 0);
-            log += "✔ AAudioStream_write enqueued " + std::to_string(written) + " frames to AudioQueue!\n";
+            log += "AAudioStream_write enqueued " + std::to_string(written) + " frames!\n";
 
             bionic_AAudioStream_requestStop(stream);
             bionic_AAudioStream_close(stream);
@@ -1355,7 +1120,7 @@ extern "C" const char* kudroid_test_audio(void) {
         bionic_AAudioStreamBuilder_delete(builder);
     }
 
-    log += "🎉 SUCCESS: KuDroid AudioShim initialized and verified on iOS CoreAudio!\n";
+    log += "SUCCESS: KuDroid AudioShim initialized and verified!\n";
     return strdup(log.c_str());
 }
 

@@ -11,11 +11,19 @@ public class AudioDevice {
 
     public AudioDevice() {}
 
+    private int fetchChannelConfigFromCount(int channels) {
+        if (channels == 1) return AudioFormat.CHANNEL_OUT_MONO;
+        if (channels == 2) return AudioFormat.CHANNEL_OUT_STEREO;
+        if (channels == 6) return AudioFormat.CHANNEL_OUT_5POINT1;
+        if (channels == 8) return AudioFormat.CHANNEL_OUT_7POINT1_SURROUND;
+        return AudioFormat.CHANNEL_OUT_STEREO;
+    }
+
     public synchronized boolean init(int channels, int sampleRate, int bufferLength, int bufferCount) {
         close();
         mChannels = channels > 0 ? channels : 2;
         mSampleRate = sampleRate > 0 ? sampleRate : 48000;
-        int channelConfig = (mChannels == 1) ? AudioFormat.CHANNEL_OUT_MONO : AudioFormat.CHANNEL_OUT_STEREO;
+        int channelConfig = fetchChannelConfigFromCount(mChannels);
         int bufferBytes = bufferLength * bufferCount * mChannels * 2;
         int minBuf = AudioTrack.getMinBufferSize(mSampleRate, channelConfig, AudioFormat.ENCODING_PCM_16BIT);
         if (bufferBytes < minBuf) {
