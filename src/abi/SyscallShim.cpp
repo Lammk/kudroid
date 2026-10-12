@@ -1323,6 +1323,12 @@ extern "C" int bionic_bind(int sockfd, const struct sockaddr* addr, socklen_t ad
 extern "C" int bionic_connect(int sockfd, const struct sockaddr* addr, socklen_t addrlen);
 extern "C" int bionic_getsockname(int sockfd, struct sockaddr* addr, socklen_t* addrlen);
 extern "C" int bionic_getpeername(int sockfd, struct sockaddr* addr, socklen_t* addrlen);
+struct GuestMsghdr;
+struct GuestMmsghdr;
+extern "C" ssize_t bionic_sendmsg(int fd, const GuestMsghdr* msg, int flags);
+extern "C" ssize_t bionic_recvmsg(int fd, GuestMsghdr* msg, int flags);
+extern "C" int bionic_sendmmsg(int fd, GuestMmsghdr* msgvec, unsigned int vlen, int flags);
+extern "C" int bionic_recvmmsg(int fd, GuestMmsghdr* msgvec, unsigned int vlen, int flags, void* timeout);
 extern "C" int getaddrinfo(const char* node, const char* service,
                            const struct addrinfo* hints, struct addrinfo** res);
 extern "C" const char* gai_strerror(int errcode);
@@ -2518,6 +2524,18 @@ extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_
 #endif
             return ::recvfrom(static_cast<int>(a1), reinterpret_cast<void*>(a2), static_cast<size_t>(a3), static_cast<int>(a4), reinterpret_cast<struct sockaddr*>(a5), reinterpret_cast<socklen_t*>(a6));
 
+        case 211: // sendmsg
+            return bionic_sendmsg(static_cast<int>(a1), reinterpret_cast<const GuestMsghdr*>(a2), static_cast<int>(a3));
+
+        case 212: // recvmsg
+            return bionic_recvmsg(static_cast<int>(a1), reinterpret_cast<GuestMsghdr*>(a2), static_cast<int>(a3));
+
+        case 243: // recvmmsg
+            return bionic_recvmmsg(static_cast<int>(a1), reinterpret_cast<GuestMmsghdr*>(a2), static_cast<unsigned int>(a3), static_cast<int>(a4), reinterpret_cast<void*>(a5));
+
+        case 269: // sendmmsg
+            return bionic_sendmmsg(static_cast<int>(a1), reinterpret_cast<GuestMmsghdr*>(a2), static_cast<unsigned int>(a3), static_cast<int>(a4));
+
         case 122: // sched_setaffinity (Linux arm64 syscall)
             // iOS does not support binding threads to CPU cores; return 0 (success)
             return 0;
@@ -2957,6 +2975,137 @@ extern "C" int bionic_connect(int sockfd, const struct sockaddr* addr,
     std::fprintf(stderr, "[KuDroidNet] connect(%s) -> %d (%s)\n", dst, ret,
                  ret == 0 ? "OK" : std::strerror(errno));
     return ret;
+}
+
+struct GuestMsghdr {
+    void* msg_name;
+    uint32_t msg_namelen;
+    uint32_t __pad;
+    struct iovec* msg_iov;
+    size_t msg_iovlen;
+    void* msg_control;
+    size_t msg_controllen;
+    int msg_flags;
+};
+
+struct GuestMmsghdr {
+    GuestMsghdr msg_hdr;
+    unsigned int msg_len;
+};
+
+namespace {
+inline int guest_msg_flags_to_host(int flags) {
+#if defined(__APPLE__)
+    int host_flags = 0;
+    if (flags & 0x01) host_flags |= MSG_OOB;
+    if (flags & 0x02) host_flags |= MSG_PEEK;
+    if (flags & 0x04) host_flags |= MSG_DONTROUTE;
+    if (flags & 0x40) host_flags |= MSG_DONTWAIT;
+    if (flags & 0x20) host_flags |= MSG_WAITALL;
+    return host_flags;
+#else
+    return flags;
+#endif
+}
+}  // namespace
+
+extern "C" ssize_t bionic_sendmsg(int fd, const GuestMsghdr* g, int flags) {
+    if (!g) {
+        errno = EFAULT;
+        return -1;
+    }
+    struct msghdr h;
+    std::memset(&h, 0, sizeof(h));
+#if defined(__APPLE__)
+    struct sockaddr_storage ss;
+    socklen_t sslen = sizeof(ss);
+    if (g->msg_name && g->msg_namelen > 0) {
+        if (linux_to_darwin_sockaddr(reinterpret_cast<const struct sockaddr*>(g->msg_name),
+                                     g->msg_namelen, &ss, &sslen)) {
+            h.msg_name = &ss;
+            h.msg_namelen = sslen;
+        } else {
+            errno = EAFNOSUPPORT;
+            return -1;
+        }
+    }
+#else
+    h.msg_name = g->msg_name;
+    h.msg_namelen = g->msg_namelen;
+#endif
+    h.msg_iov = g->msg_iov;
+    h.msg_iovlen = static_cast<decltype(h.msg_iovlen)>(g->msg_iovlen);
+    return ::sendmsg(fd, &h, guest_msg_flags_to_host(flags));
+}
+
+extern "C" ssize_t bionic_recvmsg(int fd, GuestMsghdr* g, int flags) {
+    if (!g) {
+        errno = EFAULT;
+        return -1;
+    }
+    struct msghdr h;
+    std::memset(&h, 0, sizeof(h));
+#if defined(__APPLE__)
+    struct sockaddr_storage ss;
+    if (g->msg_name && g->msg_namelen > 0) {
+        h.msg_name = &ss;
+        h.msg_namelen = sizeof(ss);
+    }
+#else
+    h.msg_name = g->msg_name;
+    h.msg_namelen = g->msg_namelen;
+#endif
+    h.msg_iov = g->msg_iov;
+    h.msg_iovlen = static_cast<decltype(h.msg_iovlen)>(g->msg_iovlen);
+
+    const ssize_t rc = ::recvmsg(fd, &h, guest_msg_flags_to_host(flags));
+    if (rc >= 0) {
+#if defined(__APPLE__)
+        if (g->msg_name && g->msg_namelen > 0) {
+            darwin_to_linux_sockaddr(reinterpret_cast<struct sockaddr*>(&ss), h.msg_namelen,
+                                     reinterpret_cast<struct sockaddr*>(g->msg_name), &g->msg_namelen);
+        }
+#else
+        g->msg_namelen = h.msg_namelen;
+#endif
+        g->msg_controllen = 0;
+        g->msg_flags = h.msg_flags;
+    }
+    return rc;
+}
+
+extern "C" int bionic_sendmmsg(int fd, GuestMmsghdr* v, unsigned int vlen, int flags) {
+    if (!v && vlen > 0) {
+        errno = EFAULT;
+        return -1;
+    }
+    unsigned int count = 0;
+    for (; count < vlen; ++count) {
+        const ssize_t r = bionic_sendmsg(fd, &v[count].msg_hdr, flags);
+        if (r < 0) {
+            return count > 0 ? static_cast<int>(count) : -1;
+        }
+        v[count].msg_len = static_cast<unsigned int>(r);
+    }
+    return static_cast<int>(count);
+}
+
+extern "C" int bionic_recvmmsg(int fd, GuestMmsghdr* v, unsigned int vlen, int flags, void* timeout) {
+    (void)timeout;
+    if (!v && vlen > 0) {
+        errno = EFAULT;
+        return -1;
+    }
+    unsigned int count = 0;
+    for (; count < vlen; ++count) {
+        const int cur_flags = (count > 0) ? (flags | 0x40) : flags;
+        const ssize_t r = bionic_recvmsg(fd, &v[count].msg_hdr, cur_flags);
+        if (r < 0) {
+            return count > 0 ? static_cast<int>(count) : -1;
+        }
+        v[count].msg_len = static_cast<unsigned int>(r);
+    }
+    return static_cast<int>(count);
 }
 
 extern "C" const char* bionic_inet_ntop(int af, const void* src, char* dst,
@@ -4250,6 +4399,17 @@ extern "C" void* bionic_android_dlopen_ext(const char* filename, int flags, cons
     return bionic_dlopen(filename, flags);
 }
 
+extern "C" void* bionic_loader_dlopen(const char* filename, int flags, const void* caller_addr) {
+    (void)caller_addr;
+    return bionic_dlopen(filename, flags);
+}
+
+extern "C" void* bionic_loader_android_dlopen_ext(const char* filename, int flags, const void* extinfo, const void* caller_addr) {
+    (void)extinfo;
+    (void)caller_addr;
+    return bionic_dlopen(filename, flags);
+}
+
 extern "C" int bionic_dlclose(void* handle) {
     // DUMMY_HANDLE is a fake handle for Android libs missing on the host.
     if (!handle || handle == RTLD_DEFAULT || handle == DUMMY_HANDLE) return 0;
@@ -4952,23 +5112,26 @@ static void* bionic_thread_wrapper(void* rawArgs) {
 
 extern "C" int bionic_pthread_create(pthread_t* thread, void* attr, void* (*start_routine)(void*), void* arg) {
     BionicThreadArgs* args = new BionicThreadArgs{start_routine, arg};
-    if (!attr) {
-        const int res = ::pthread_create(thread, nullptr, bionic_thread_wrapper, args);
-        if (res != 0) delete args;
-        sync_diag("thread-create", reinterpret_cast<void*>(start_routine), nullptr, res);
-        return res;
-    }
 
-    // Forward stack size + detach state from the guest attr when present.
-    const auto* a = static_cast<const BionicPthreadAttr*>(attr);
+    // Ensure adequate guest thread stack size for runtime interpreters and deep engine frames.
+    // Darwin default stack is only 512KB.
+    constexpr size_t kMinGuestStackSize = 16 * 1024 * 1024;
     pthread_attr_t hostAttr;
     ::pthread_attr_init(&hostAttr);
-    if (a->stack_size != 0) {
-        ::pthread_attr_setstacksize(&hostAttr, a->stack_size);
+
+    size_t stackSize = kMinGuestStackSize;
+    if (attr) {
+        const auto* a = static_cast<const BionicPthreadAttr*>(attr);
+        if (a->stack_size > kMinGuestStackSize) {
+            stackSize = a->stack_size;
+        }
+        if (a->flags & 0x1) { // PTHREAD_CREATE_DETACHED
+            ::pthread_attr_setdetachstate(&hostAttr, PTHREAD_CREATE_DETACHED);
+        }
     }
-    if (a->flags & 0x1) { // PTHREAD_CREATE_DETACHED
-        ::pthread_attr_setdetachstate(&hostAttr, PTHREAD_CREATE_DETACHED);
-    }
+    stackSize = (stackSize + 16383) & ~static_cast<size_t>(16383);
+    ::pthread_attr_setstacksize(&hostAttr, stackSize);
+
     const int res = ::pthread_create(thread, &hostAttr, bionic_thread_wrapper, args);
     ::pthread_attr_destroy(&hostAttr);
     if (res != 0) delete args;
@@ -6975,6 +7138,10 @@ const SymbolEntry kSyscallSymbols[] = {
     {"connect", reinterpret_cast<void*>(&bionic_connect)},
     {"getsockname", reinterpret_cast<void*>(&bionic_getsockname)},
     {"getpeername", reinterpret_cast<void*>(&bionic_getpeername)},
+    {"sendmsg", reinterpret_cast<void*>(&bionic_sendmsg)},
+    {"recvmsg", reinterpret_cast<void*>(&bionic_recvmsg)},
+    {"sendmmsg", reinterpret_cast<void*>(&bionic_sendmmsg)},
+    {"recvmmsg", reinterpret_cast<void*>(&bionic_recvmmsg)},
     {"getaddrinfo", reinterpret_cast<void*>(&bionic_getaddrinfo)},
     {"freeaddrinfo", reinterpret_cast<void*>(&bionic_freeaddrinfo)},
     {"getifaddrs", reinterpret_cast<void*>(&bionic_getifaddrs)},
@@ -7120,6 +7287,8 @@ const SymbolEntry kSyscallSymbols[] = {
     {"dlclose", reinterpret_cast<void*>(&bionic_dlclose)},
     {"dlerror", reinterpret_cast<void*>(&bionic_dlerror)},
     {"android_dlopen_ext", reinterpret_cast<void*>(&bionic_android_dlopen_ext)},
+    {"__loader_dlopen", reinterpret_cast<void*>(&bionic_loader_dlopen)},
+    {"__loader_android_dlopen_ext", reinterpret_cast<void*>(&bionic_loader_android_dlopen_ext)},
 
     // File operations (32/64-bit unified on 64-bit host)
     {"lseek", reinterpret_cast<void*>(&bionic_lseek64)},
