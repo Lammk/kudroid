@@ -326,7 +326,7 @@ void test_callspan_skips() {
     Check(elf.word(0) == add && elf.word(2) == use, "bytes untouched");
 }
 
-// x18 through memory: provenance unprovable, skip.
+// x18 through memory without define: provenance unprovable, skip.
 void test_mem_skips() {
     std::printf("[rewrite] x18 memory lane is skipped\n");
     const std::uint32_t str = 0xF9000000 | (18u << 0) | (0u << 5);  // str x18,[x0]
@@ -334,6 +334,17 @@ void test_mem_skips() {
     kudroid::X18Stats st = elf.run();
     Check(st.rewritten == 0, "mem skipped");
     Check(elf.word(0) == str, "bytes untouched");
+}
+
+void test_str_x18_renamed() {
+    std::printf("[rewrite] str x18 is renamed when defined in function\n");
+    const std::uint32_t add = 0x8B010000 | (1u << 16) | (0u << 5) | 18u;  // add x18, x0, x1
+    const std::uint32_t str = 0xF9000800 | 18u | (31u << 5);             // str x18, [sp, #16]
+    SynthElf elf({add, str}, false);
+    kudroid::X18Stats st = elf.run();
+    Check(st.rewritten == 1, "str rewritten");
+    Check(((elf.word(0) >> 0) & 31) == 15, "add Rd became x15");
+    Check(((elf.word(1) >> 0) & 31) == 15, "str Rt became x15");
 }
 
 // Personality CIE: skipped even with x18 present.
@@ -777,6 +788,14 @@ void test_x30_fallback_picked() {
     Check(((elf.word(17) >> 5) & 31) == 30, "span picked x30 (Rn)");
 }
 
+void test_layer2_virtual_x18() {
+    std::printf("[rewrite] layer 2 virtual x18 getter/setter\n");
+    kudroid::elf_x18_set(0x12345678deadbeefull);
+    Check(kudroid::elf_x18_get() == 0x12345678deadbeefull, "vx18 set and read back correctly");
+    kudroid::elf_x18_set(0);
+    Check(kudroid::elf_x18_get() == 0, "vx18 cleared");
+}
+
 int main(int argc, char** argv) {
     // Ops mode: rewrite stats for a real .so (map() runs the loader hook).
     if (argc > 1) {
@@ -799,6 +818,7 @@ int main(int argc, char** argv) {
     test_callspan_skips();
     test_callspan_endpoint_rewrites();
     test_mem_skips();
+    test_str_x18_renamed();
     test_personality_skips();
     test_crash_loop_shape();
     test_gap_loop_renamed();
@@ -814,6 +834,7 @@ int main(int argc, char** argv) {
     test_live_in_substitute_preserved();
     test_ldp_stp_signed_offset();
     test_x30_fallback_picked();
+    test_layer2_virtual_x18();
     if (g_failures == 0) {
         std::printf("=== PASSED (%d checks) ===\n", g_checks);
         return 0;

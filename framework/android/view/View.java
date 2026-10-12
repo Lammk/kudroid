@@ -497,6 +497,10 @@ public class View implements KeyEvent.Callback {
         mOnSystemUiVisibilityChangeListener = l;
     }
 
+    public boolean isInEditMode() {
+        return false;
+    }
+
     // Layout params.
     private ViewGroup.LayoutParams mLayoutParams;
 

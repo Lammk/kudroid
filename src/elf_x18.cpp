@@ -1,10 +1,13 @@
 // AOT x18 rewrite (see ElfX18.h for the soundness rules).
 #include "kudroid/ElfX18.h"
+#include "kudroid/ExecMemory.h"
 
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
+#include <pthread.h>
 #include <string>
 #include <vector>
 
@@ -25,7 +28,6 @@ struct Decoded {
     std::uint8_t nuse = 0;
     std::uint8_t defonly[4] = {0, 0, 0, 0};
     std::uint8_t ndef = 0;
-    bool mem18 = false;  // x18 crosses memory: unrewritable, skip
     bool known = true;  // false: encoding not recognized
 };
 
@@ -45,20 +47,6 @@ void markPatch(Decoded& d, unsigned bitoff, unsigned reg, bool isDef) {
 void markUseOnly(Decoded& d, unsigned bitoff, unsigned reg) {
     markUsed(d, reg);
     if (d.nuse < 4) d.useonly[d.nuse++] = static_cast<std::uint8_t>(bitoff);
-}
-
-// Memory lane holding x18: the value crosses memory, so no in-chunk rename
-// can stay consistent with whoever wrote or will read it.
-void markMem(Decoded& d, unsigned bitoff, unsigned reg, bool isDef) {
-    markUsed(d, reg);
-    if (reg == kX18) d.mem18 = true;
-    if (reg < 31) {
-        if (isDef) {
-            if (d.ndef < 4) d.defonly[d.ndef++] = static_cast<std::uint8_t>(bitoff);
-        } else {
-            if (d.nuse < 4) d.useonly[d.nuse++] = static_cast<std::uint8_t>(bitoff);
-        }
-    }
 }
 
 // Decode one instruction for integer-register use. Patch positions are only
@@ -176,11 +164,7 @@ Decoded decode(std::uint32_t w) {
         else
             isLoad = ((w >> 22) & 1) != 0;
         if (!simd) {
-            if (isLoad) {
-                markPatch(d, 0, rd, true);
-            } else {
-                markMem(d, 0, rd, false);
-            }
+            markPatch(d, 0, rd, isLoad);
         }
         markPatch(d, 5, rn, false);
         // Register-offset forms (bit21 == 1, and not LSE which the branch
@@ -211,13 +195,8 @@ Decoded decode(std::uint32_t w) {
     // bit22 clear) read their lanes; load forms define them.
     if ((b & 0x3E) == 0x28) {
         const bool isPairLoad = ((w >> 22) & 1) != 0;
-        if (isPairLoad) {
-            markPatch(d, 0, rd, true);
-            markPatch(d, 10, ra, true);
-        } else {
-            markMem(d, 0, rd, false);
-            markMem(d, 10, ra, false);
-        }
+        markPatch(d, 0, rd, isPairLoad);
+        markPatch(d, 10, ra, isPairLoad);
         markPatch(d, 5, rn, false);
         return d;
     }
@@ -543,13 +522,6 @@ bool isEntryWord(std::uint32_t w) {
     return false;
 }
 
-bool isTerminal(std::uint32_t w) {
-    const unsigned b = w >> 24;
-    if (b == 0xD6) return true;  // br/blr/ret/eret
-    if ((b & 0xFC) == 0x14) return true;  // b (no fallthrough)
-    return false;
-}
-
 // Fraction of known-class words in the first few: real code scores high,
 // pools (addresses/floats/offsets) do not.
 bool looksLikeCode(const std::uint32_t* code, std::size_t nwords) {
@@ -658,10 +630,6 @@ Touch touch18(std::uint32_t w) {
     if (!d.known) {
         t.use = ((w >> 0) & 31) == kX18 || ((w >> 5) & 31) == kX18 ||
                 ((w >> 16) & 31) == kX18 || ((w >> 10) & 31) == kX18;
-        return t;
-    }
-    if (d.mem18) {
-        t.use = true;
         return t;
     }
     for (unsigned k = 0; k < d.npatch; ++k) {
@@ -891,16 +859,7 @@ long rewriteRange(std::uint32_t* code, std::size_t nwords, X18Stats& st,
         }
         const Decoded d = decode(words[i]);
         used |= d.used;
-        if (d.mem18) {
-            // Value crosses memory: no in-chunk rename stays consistent.
-            ++st.skippedNoReg;
-            if (why) *why = "mem";
-            return -1;
-        }
-        if (!d.known && (((words[i] >> 0) & 31) == kX18 ||
-                         ((words[i] >> 5) & 31) == kX18 ||
-                         ((words[i] >> 16) & 31) == kX18 ||
-                         ((words[i] >> 10) & 31) == kX18)) {
+        if (!d.known && maybeX18(words[i])) {
             ++st.skippedUnknown;
             if (why) *why = "unknown";
             return -1;
@@ -1060,6 +1019,180 @@ long rewriteRange(std::uint32_t* code, std::size_t nwords, X18Stats& st,
         code[i] = w;
     }
     return sites;
+}
+
+// -----------------------------------------------------------------------------
+// Layer 2: Virtual-x18 Trampoline Stubs (Husk-style TSD fallback)
+// -----------------------------------------------------------------------------
+
+constexpr size_t kStubBytes = 64;
+
+#if defined(__APPLE__) && defined(__aarch64__)
+static int64_t g_vx18_off = -1;
+static bool vx18_init() {
+    if (g_vx18_off >= 0) return true;
+    pthread_key_t key;
+    if (pthread_key_create(&key, nullptr) != 0) return false;
+    const uintptr_t sentinel = (uintptr_t)0x5a5a1234deadbeefull;
+    pthread_setspecific(key, reinterpret_cast<void*>(sentinel));
+    uintptr_t base;
+    __asm__ volatile("mrs %0, tpidrro_el0" : "=r"(base));
+    base &= ~static_cast<uintptr_t>(7);
+    const volatile uintptr_t* tsd = reinterpret_cast<const volatile uintptr_t*>(base);
+    int64_t off = -1;
+    for (int i = 0; i < 520; ++i) {
+        if (tsd[i] == sentinel) {
+            off = static_cast<int64_t>(i * 8);
+            break;
+        }
+    }
+    pthread_setspecific(key, nullptr);
+    if (off < 0 || off > 32760) {
+        pthread_key_delete(key);
+        return false;
+    }
+    g_vx18_off = off;
+    return true;
+}
+#else
+static int64_t g_vx18_off = 32;
+static thread_local uint64_t g_fallback_vx18 = 0;
+static bool vx18_init() {
+    return true;
+}
+#endif
+
+static inline uint32_t e_stur(unsigned rt, int imm) {
+    return 0xF8000000u | ((static_cast<uint32_t>(imm) & 0x1FFu) << 12) | (31u << 5) | rt;
+}
+static inline uint32_t e_ldur(unsigned rt, int imm) {
+    return 0xF8400000u | ((static_cast<uint32_t>(imm) & 0x1FFu) << 12) | (31u << 5) | rt;
+}
+static inline uint32_t e_mrs_tsd(unsigned rt) {
+    return 0xD53BD060u | rt;
+}
+static inline uint32_t e_and_tsd(unsigned r) {
+    return 0x927DF000u | (r << 5) | r;
+}
+static inline uint32_t e_ldr_slot(unsigned rt, unsigned rn, int64_t off) {
+    return 0xF9400000u | ((static_cast<uint32_t>(off / 8) & 0xFFFu) << 10) | (rn << 5) | rt;
+}
+static inline uint32_t e_str_slot(unsigned rt, unsigned rn, int64_t off) {
+    return 0xF9000000u | ((static_cast<uint32_t>(off / 8) & 0xFFFu) << 10) | (rn << 5) | rt;
+}
+static int e_mov64(uint32_t* out, unsigned rd, uint64_t v) {
+    int n = 0;
+    out[n++] = 0xD2800000u | (static_cast<uint32_t>(v & 0xFFFF) << 5) | rd;
+    for (int sh = 1; sh < 4; ++sh) {
+        uint64_t part = (v >> (16 * sh)) & 0xFFFF;
+        if (part) out[n++] = 0xF2800000u | (static_cast<uint32_t>(sh) << 21) | (static_cast<uint32_t>(part) << 5) | rd;
+    }
+    return n;
+}
+static inline bool in_range_b(const uint8_t* from, const uint8_t* to) {
+    int64_t o = (reinterpret_cast<int64_t>(to) - reinterpret_cast<int64_t>(from)) / 4;
+    return o > -(1 << 25) && o < (1 << 25);
+}
+static inline uint32_t e_b(const uint8_t* from, const uint8_t* to) {
+    return 0x14000000u | (static_cast<uint32_t>((reinterpret_cast<int64_t>(to) - reinterpret_cast<int64_t>(from)) / 4) & 0x03FFFFFFu);
+}
+static unsigned pick_scratch(uint32_t used, unsigned avoid) {
+    static const unsigned order[] = {16, 17, 15, 14, 13, 12, 11, 10, 9};
+    for (unsigned r : order) {
+        if (!(used & (1u << r)) && r != avoid) return r;
+    }
+    return 31;
+}
+static uint32_t subst_x18(uint32_t insn, const Decoded& d, unsigned to) {
+    uint32_t out = insn;
+    for (unsigned k = 0; k < d.npatch; ++k) {
+        unsigned pos = d.at[k];
+        if (((out >> pos) & 31u) == kX18) {
+            out = (out & ~(31u << pos)) | ((to & 31u) << pos);
+        }
+    }
+    return out;
+}
+
+static bool emit_x18_stub(uint32_t insn, const Decoded& d, const uint8_t* pcExec,
+                          uint8_t* stubWrite, const uint8_t* stubExec, size_t& stubUsed, size_t stubCap) {
+    if (!vx18_init() || g_vx18_off < 0) return false;
+    if (stubUsed + kStubBytes > stubCap) return false;
+
+    uint8_t* rw = stubWrite + stubUsed;
+    const uint8_t* rx = stubExec + stubUsed;
+    if (!in_range_b(pcExec, rx)) return false;
+
+    uint32_t c[kStubBytes / 4];
+    int n = 0;
+    const uint8_t* back = pcExec + 4;
+    uint32_t used = d.used;
+
+#define EMIT(w) do { c[n++] = (w); } while(0)
+#define EMIT_B(to) do { c[n] = e_b(rx + n * 4, (to)); ++n; } while(0)
+
+    if ((insn & 0x9F000000u) == 0x90000000u || (insn & 0x9F000000u) == 0x10000000u || (insn & 0xBF000000u) == 0x18000000u) {
+        uint64_t value = 0;
+        if ((insn & 0x9F000000u) == 0x90000000u || (insn & 0x9F000000u) == 0x10000000u) {
+            bool page = (insn & 0x80000000u) != 0;
+            int64_t imm = static_cast<int64_t>((((insn >> 5) & 0x7FFFFu) << 2) | ((insn >> 29) & 3u));
+            if (imm & 0x100000) imm -= 0x200000;
+            uintptr_t tp = page ? (reinterpret_cast<uintptr_t>(pcExec) & ~static_cast<uintptr_t>(0xFFF)) + static_cast<uintptr_t>(imm * 4096)
+                                : reinterpret_cast<uintptr_t>(pcExec) + static_cast<uintptr_t>(imm);
+            value = tp;
+        } else {
+            int64_t imm = static_cast<int64_t>((insn >> 5) & 0x7FFFFu);
+            if (imm & 0x40000) imm -= 0x80000;
+            const uint8_t* src = pcExec + imm * 4;
+            value = (insn & 0x40000000u) ? *reinterpret_cast<const uint64_t*>(src)
+                                         : static_cast<uint64_t>(*reinterpret_cast<const uint32_t*>(src));
+        }
+        unsigned S = 16, T = 17;
+        EMIT(e_stur(S, -16)); EMIT(e_stur(T, -8));
+        n += e_mov64(c + n, S, value);
+        EMIT(e_mrs_tsd(T)); EMIT(e_and_tsd(T)); EMIT(e_str_slot(S, T, g_vx18_off));
+        EMIT(e_ldur(T, -8)); EMIT(e_ldur(S, -16));
+        EMIT_B(back);
+    } else if ((insn & 0xFFFFFC1Fu) == 0xD61F0000u) {  // br x18
+        EMIT(e_mrs_tsd(17)); EMIT(e_and_tsd(17)); EMIT(e_ldr_slot(17, 17, g_vx18_off));
+        EMIT(0xD61F0000u | (17u << 5));
+    } else if ((insn & 0x7E000000u) == 0x34000000u || (insn & 0x7E000000u) == 0x36000000u) {  // cbz/cbnz/tbz/tbnz
+        bool is_tb = (insn & 0x7E000000u) == 0x36000000u;
+        int64_t imm = is_tb ? static_cast<int64_t>((insn >> 5) & 0x3FFFu) : static_cast<int64_t>((insn >> 5) & 0x7FFFFu);
+        int64_t sign = is_tb ? 0x2000 : 0x40000;
+        if (imm & sign) imm -= sign * 2;
+        const uint8_t* target = pcExec + imm * 4;
+        unsigned S = 16;
+        EMIT(e_stur(S, -16));
+        EMIT(e_mrs_tsd(S)); EMIT(e_and_tsd(S)); EMIT(e_ldr_slot(S, S, g_vx18_off));
+        uint32_t field_mask = is_tb ? (0x3FFFu << 5) : (0x7FFFFu << 5);
+        EMIT((insn & ~(field_mask | 0x1Fu)) | (3u << 5) | S);
+        EMIT(e_ldur(S, -16));
+        EMIT_B(back);
+        EMIT(e_ldur(S, -16));
+        if (!in_range_b(rx + n * 4, target)) return false;
+        EMIT_B(target);
+    } else {
+        unsigned S = pick_scratch(used, 31);
+        unsigned T = pick_scratch(used, S);
+        if (S >= 31 || T >= 31) return false;
+        EMIT(e_stur(S, -16)); EMIT(e_stur(T, -8));
+        EMIT(e_mrs_tsd(S)); EMIT(e_and_tsd(S)); EMIT(e_ldr_slot(S, S, g_vx18_off));
+        EMIT(subst_x18(insn, d, S));
+        EMIT(e_mrs_tsd(T)); EMIT(e_and_tsd(T)); EMIT(e_str_slot(S, T, g_vx18_off));
+        EMIT(e_ldur(T, -8)); EMIT(e_ldur(S, -16));
+        EMIT_B(back);
+    }
+
+#undef EMIT
+#undef EMIT_B
+
+    std::memcpy(rw, c, static_cast<size_t>(n) * 4);
+    for (int i = n; i < static_cast<int>(kStubBytes / 4); ++i) {
+        reinterpret_cast<uint32_t*>(rw)[i] = 0xD503201Fu;  // nop
+    }
+    stubUsed += kStubBytes;
+    return true;
 }
 
 }  // namespace
@@ -1295,7 +1428,76 @@ X18Stats elf_x18_rewrite(const void* base, std::uint64_t minVaddr,
         }
         if (cur < nwords) flushGap(cur, nwords);
     }
+
+    // ---- Layer 2: Virtual-x18 Trampoline Stubs (Husk-style TSD fallback) ----
+    // Any remaining instruction in executable segments that still touches x18
+    // after Layer 1 (AOT rename) is intercepted by a trampoline stub operating
+    // on virtual x18 stored in thread-specific data.
+    struct StubPoolHolder {
+        ExecMemory::Region region;
+        size_t used = 0;
+    };
+    static StubPoolHolder s_stubPool;
+    static std::mutex s_stubMtx;
+
+    for (const auto& seg : segments) {
+        if ((seg.flags & 1) == 0) continue;
+        const uint64_t segStart = imgAddr + (seg.vaddr - minVaddr);
+        const uint8_t* segWriteBase = img + (seg.vaddr - minVaddr);
+        const size_t segNwords = seg.filesz / 4;
+        uint32_t* segWords = reinterpret_cast<uint32_t*>(const_cast<uint8_t*>(segWriteBase));
+
+        for (size_t i = 0; i < segNwords; ++i) {
+            uint32_t w = segWords[i];
+            if (((w >> 0) & 31) != x18::kX18 && ((w >> 5) & 31) != x18::kX18 &&
+                ((w >> 16) & 31) != x18::kX18 && ((w >> 10) & 31) != x18::kX18) {
+                continue;
+            }
+            const x18::Decoded d = x18::decode(w);
+            if (!d.known || (d.used & (1u << x18::kX18)) == 0) continue;
+
+            const uint8_t* pcExec = reinterpret_cast<const uint8_t*>(segStart + i * 4);
+            std::lock_guard<std::mutex> lock(s_stubMtx);
+            if (s_stubPool.region.writeView == nullptr || s_stubPool.used + x18::kStubBytes > s_stubPool.region.size) {
+                s_stubPool.region = ExecMemory::Allocate(64 * 1024, true);
+                s_stubPool.used = 0;
+            }
+            if (s_stubPool.region.writeView == nullptr) break;
+
+            const size_t stubAt = s_stubPool.used;
+            uint8_t* stubWrite = static_cast<uint8_t*>(s_stubPool.region.writeView);
+            const uint8_t* stubExec = static_cast<const uint8_t*>(s_stubPool.region.execView);
+
+            if (x18::emit_x18_stub(w, d, pcExec, stubWrite, stubExec, s_stubPool.used, s_stubPool.region.size)) {
+                segWords[i] = x18::e_b(pcExec, stubExec + stubAt);
+                ++st.stubbedSites;
+            }
+        }
+    }
+
     return st;
+}
+
+std::uint64_t elf_x18_get() {
+#if defined(__APPLE__) && defined(__aarch64__)
+    if (!x18::vx18_init() || x18::g_vx18_off < 0) return 0;
+    uintptr_t base;
+    __asm__ volatile("mrs %0, tpidrro_el0" : "=r"(base));
+    return *reinterpret_cast<const volatile uint64_t*>((base & ~static_cast<uintptr_t>(7)) + static_cast<uintptr_t>(x18::g_vx18_off));
+#else
+    return x18::g_fallback_vx18;
+#endif
+}
+
+void elf_x18_set(std::uint64_t val) {
+#if defined(__APPLE__) && defined(__aarch64__)
+    if (!x18::vx18_init() || x18::g_vx18_off < 0) return;
+    uintptr_t base;
+    __asm__ volatile("mrs %0, tpidrro_el0" : "=r"(base));
+    *reinterpret_cast<volatile uint64_t*>((base & ~static_cast<uintptr_t>(7)) + static_cast<uintptr_t>(x18::g_vx18_off)) = val;
+#else
+    x18::g_fallback_vx18 = val;
+#endif
 }
 
 }  // namespace kudroid

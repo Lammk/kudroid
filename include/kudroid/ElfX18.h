@@ -22,11 +22,16 @@ struct X18Stats {
     std::uint64_t functions = 0;      // FDE ranges processed
     std::uint64_t rewritten = 0;      // functions with x18 renamed
     std::uint64_t sites = 0;          // x18 references renamed
+    std::uint64_t stubbedSites = 0;   // x18 references redirected to virtual-x18 stubs
     std::uint64_t skippedNoReg = 0;   // no free caller-saved register / spill+call
     std::uint64_t skippedEh = 0;      // personality (landing pads restore regs)
     std::uint64_t skippedUnknown = 0;  // undecodable instruction w/ possible x18
     std::uint64_t skippedRange = 0;   // bytes outside known executable ranges
 };
+
+// Thread-local virtual x18 accessors for signal frames and runtime state.
+std::uint64_t elf_x18_get();
+void elf_x18_set(std::uint64_t val);
 
 // Rewrite x18 uses in EXEC segments to per-function free registers.
 // base is the loader's mapping (pre-adjust: base[vaddr-minVaddr]); fileData
