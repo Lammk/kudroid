@@ -13,9 +13,23 @@ func kudroid_remote_log_broadcast(level: Int32, tag: UnsafePointer<CChar>?, mess
 class RemoteDebugClient: NSObject {
     static let shared = RemoteDebugClient()
 
-    private var webSocketTask: URLSessionWebSocketTask?
-    private var isConnected = false
+    // The connection state is touched from the main thread (connect/disconnect), the
+    // URLSession delegate queue (receive failure) and every logging thread
+    // (broadcastLog). A Swift class reference read while another thread replaces it is
+    // a retain/release race, so all of it goes through one lock.
+    private let stateLock = NSLock()
+    private var _webSocketTask: URLSessionWebSocketTask?
+    private var _isConnected = false
+    private var webSocketTask: URLSessionWebSocketTask? {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _webSocketTask }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _webSocketTask = newValue }
+    }
+    private var isConnected: Bool {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _isConnected }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _isConnected = newValue }
+    }
     private var serverURL: URL?
+    // Main thread only: Timer must be invalidated on the thread that scheduled it.
     private var pingTimer: Timer?
     private var appSession: AppSession?
 
@@ -48,12 +62,17 @@ class RemoteDebugClient: NSObject {
     }
 
     func disconnect() {
-        pingTimer?.invalidate()
-        pingTimer = nil
-        webSocketTask?.cancel(with: .goingAway, reason: nil)
-        webSocketTask = nil
-        isConnected = false
+        // Take the task out under the lock so a concurrent sender either sees the old
+        // task (cancelled, its send fails harmlessly) or none.
+        stateLock.lock()
+        let task = _webSocketTask
+        _webSocketTask = nil
+        _isConnected = false
+        stateLock.unlock()
+        task?.cancel(with: .goingAway, reason: nil)
         DispatchQueue.main.async { [weak self] in
+            self?.pingTimer?.invalidate()
+            self?.pingTimer = nil
             self?.appSession?.isSoRunning = false
             self?.onConnectionStatusChanged?(false)
         }
@@ -491,6 +510,7 @@ class RemoteDebugClient: NSObject {
             return
         }
         let message = URLSessionWebSocketTask.Message.string(jsonStr)
-        webSocketTask?.send(message) { _ in }
+        let task = webSocketTask
+        task?.send(message) { _ in }
     }
 }

@@ -167,7 +167,7 @@ public class ViewGroup extends View implements ViewParent {
         for (int i = 0; i < mChildCount; i++) {
             View child = mChildren[i];
             if (child == null || child.getVisibility() == GONE) continue;
-            child.layout(l, t, l + child.getMeasuredWidth(), t + child.getMeasuredHeight());
+            child.layout(0, 0, child.getMeasuredWidth(), child.getMeasuredHeight());
         }
     }
 
@@ -175,39 +175,37 @@ public class ViewGroup extends View implements ViewParent {
     public boolean dispatchTouchEvent(MotionEvent event) {
         if (!isShown() || event == null) return false;
         final int action = event.getActionMasked();
-
-        // AOSP touch-target rule: the DOWN hit-test fixes the target child, and
-        // MOVE/UP/CANCEL go to that child unchanged — even when the finger has
-        // left its bounds. Re-hit-testing every MOVE is what made a widget lose
-        // a drag the instant the finger slid off it (an audio slider could not
-        // be dragged). CANCEL clears the target; UP/CANCEL also end the gesture.
         if (action == MotionEvent.ACTION_DOWN) {
-            mTouchTarget = findChildUnder(event.getX(), event.getY());
-        } else if (action == MotionEvent.ACTION_CANCEL) {
             mTouchTarget = null;
-        }
-
-        if (mTouchTarget != null) {
-            final boolean consumed = mTouchTarget.dispatchTouchEvent(event);
+            final float x = event.getX() + mScrollX;
+            final float y = event.getY() + mScrollY;
+            for (int i = mChildCount - 1; i >= 0; --i) {
+                View child = mChildren[i];
+                if (child == null || !child.isShown() || x < child.getLeft() ||
+                    x >= child.getRight() || y < child.getTop() || y >= child.getBottom()) continue;
+                if (dispatchToChild(child, event)) {
+                    mTouchTarget = child;
+                    return true;
+                }
+            }
+        } else if (mTouchTarget != null) {
+            View child = mTouchTarget;
             if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
                 mTouchTarget = null;
             }
-            if (consumed) return true;
+            return dispatchToChild(child, event);
         }
-        return onTouchEvent(event);
+        return super.dispatchTouchEvent(event);
     }
 
-    /** Topmost shown child whose bounds contain (x, y), scanned back-to-front. */
-    private View findChildUnder(float x, float y) {
-        for (int i = mChildCount - 1; i >= 0; i--) {
-            View child = mChildren[i];
-            if (child != null && child.isShown() &&
-                x >= child.getLeft() && x <= child.getRight() &&
-                y >= child.getTop() && y <= child.getBottom()) {
-                return child;
-            }
+    private boolean dispatchToChild(View child, MotionEvent event) {
+        MotionEvent local = MotionEvent.obtain(event);
+        local.offsetLocation(mScrollX - child.getLeft(), mScrollY - child.getTop());
+        try {
+            return child.dispatchTouchEvent(local);
+        } finally {
+            local.recycle();
         }
-        return null;
     }
 
     @Override

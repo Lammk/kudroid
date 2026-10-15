@@ -12,6 +12,15 @@
 #include <vector>
 
 namespace kudroid {
+namespace {
+std::mutex& s_tlsStubMutex() {
+    static std::mutex mtx;
+    return mtx;
+}
+}  // namespace
+}  // namespace kudroid
+
+namespace kudroid {
 namespace x18 {
 namespace {
 
@@ -106,17 +115,22 @@ Decoded decode(std::uint32_t w) {
         markPatch(d, 5, rn, false);
         return d;
     }
-    // Data-processing immediate group needs the op field.
-    if (((w >> 25) & 7) == 1) {
+    // Data-processing immediate group (bits[28:25] == 1001: logical, move wide,
+    // bitfield, extract) needs the op field. Bit 28 matters: without it any
+    // word with bits[27:25] == 001, such as a float constant in a literal pool,
+    // decodes as an instruction and gets rewritten.
+    if (((w >> 25) & 0xF) == 9) {
         const unsigned op = (w >> 23) & 3;
         if (op == 1) {
-            markPatch(d, 0, rd, true);  // mov wide: Rd only
+            if (((w >> 29) & 3) == 3) markPatch(d, 0, rd, false);
+            markPatch(d, 0, rd, true);  // mov wide
         } else if (op == 3) {
             markPatch(d, 0, rd, true);  // extr
             markPatch(d, 5, rn, false);
             markPatch(d, 16, rm, false);
         } else {
-            markPatch(d, 0, rd, true);  // logical-imm / bitfield: Rd + Rn
+            if (op == 2 && ((w >> 29) & 3) == 1) markPatch(d, 0, rd, false);
+            markPatch(d, 0, rd, true);  // logical-imm / bitfield
             markPatch(d, 5, rn, false);
         }
         return d;
@@ -134,48 +148,60 @@ Decoded decode(std::uint32_t w) {
         markPatch(d, 16, rm, false);
         return d;
     }
+    // ADCS/SBCS (bit 22 clear) and CCMN/CCMP (bit 22 set). The immediate form of
+    // CCMN/CCMP keeps imm5 in bits[20:16], which is not a register.
+    if ((b & 0x3F) == 0x3A) {
+        if (((w >> 22) & 1) != 0) {
+            markPatch(d, 5, rn, false);
+            if ((w & (1u << 11)) == 0) markPatch(d, 16, rm, false);
+        } else {
+            markPatch(d, 0, rd, true);
+            markPatch(d, 5, rn, false);
+            markPatch(d, 16, rm, false);
+        }
+        return d;
+    }
     // Conditional select / multiply: Ra field is real, except fixed patterns
     // (sdiv Ra=11111) which never equal 18 and are safe to leave marked.
     if (b == 0x1A || b == 0x5A || b == 0x9A || b == 0xDA || b == 0x1B || b == 0x9B) {
         markPatch(d, 0, rd, true);
         markPatch(d, 5, rn, false);
         markPatch(d, 16, rm, false);
-        markUseOnly(d, 10, ra);
+        // Multiply-add (madd/msub/smaddl/umaddl...) names a real accumulator register
+        // in bits[14:10]; the select/adc group keeps condition and opcode bits there.
+        if (b == 0x1B || b == 0x9B) markPatch(d, 10, ra, false);
+        else markUseOnly(d, 10, ra);
         return d;
     }
-    // Loads/stores, single (unsigned/unscaled/pre/post/reg-offset/prfm/LSE).
-    if ((b & 0x3B) == 0x38 || (b & 0x3B) == 0x39 || (b & 0x3B) == 0x3A) {
+    // Loads/stores, single: size 111 V 00 (unscaled/pre/post/reg-offset/LSE)
+    // and size 111 V 01 (unsigned offset). Bit 25 set is not a load/store
+    // (ccmp, adcs, ...), which is why the mask keeps bit 1 clear.
+    if ((b & 0x3A) == 0x38) {
         const bool simd = (w & (1u << 26)) != 0;
-        // PRFM immediate: bits[31:23] fixed, Rn base, no Rt destination.
-        if (((w >> 23) & 0x1FF) == 0x1F3) {
+        const bool unsignedOff = (b & 1) != 0;
+        const bool bit21 = (w & (1u << 21)) != 0;
+        const unsigned op2 = (w >> 10) & 3;
+        const unsigned opc = (w >> 22) & 3;
+        // PRFM / PRFUM: Rt is a prefetch operation, not a register.
+        const bool prefetch = !simd && (b & 0xC0) == 0xC0 && opc == 2 &&
+                              (unsignedOff || (!bit21 && op2 == 0) || (bit21 && op2 == 2));
+        if (prefetch) {
             markPatch(d, 5, rn, false);
+            if (bit21 && op2 == 2) markPatch(d, 16, rm, false);
             return d;
         }
-        // LSE atomics share the unscaled top bytes with opc != 0 and carry an
-        // Rs source the plain form lacks (Rs reads, Rt defines, Rn reads).
-        if ((b & 0x3B) == 0x38 && ((w >> 22) & 3) != 0) {
-            markPatch(d, 16, rm, false);
-        }
-        // Destination-ness by class: unsigned/reg-offset bit22 (STR 0/LDR 1),
-        // unscaled bit23 (STUR 0/LDUR 1). Verified against shipped bytes.
-        bool isLoad = false;
-        if ((b & 0x3B) == 0x38)
-            isLoad = ((w >> 23) & 1) != 0;
-        else
-            isLoad = ((w >> 22) & 1) != 0;
-        if (!simd) {
-            markPatch(d, 0, rd, isLoad);
-        }
+        // LSE atomics (integer only, bit 21 set, bits[11:10] == 00) carry an Rs
+        // source the plain forms lack. Plain unscaled forms keep an offset in
+        // bits[20:12]; the unsigned-offset form keeps one in bits[21:10].
+        const bool lse = !unsignedOff && !simd && bit21 && op2 == 0;
+        // Register offset: bit 21 set with bits[11:10] == 10.
+        const bool regOffset = !unsignedOff && bit21 && op2 == 2;
+        // Nonzero opc selects a load, including sign-extending forms.
+        const bool isLoad = opc != 0;
+        if (lse) markPatch(d, 16, rm, false);
+        if (!simd) markPatch(d, 0, rd, isLoad);
         markPatch(d, 5, rn, false);
-        // Register-offset forms (bit21 == 1, and not LSE which the branch
-        // above already recorded as Rs) carry a real integer Rm index.
-        // The old (b & 0x3B) == 0x3A test matched only the SIMD reg-offset
-        // top bytes; the integer ones (0x38/0x78/0xB8/0xF8) fell through
-        // unmarked, leaving a live x18 index behind every rename — the
-        // Melon_0 SIGBUS. Pre/post-index carry Rm=11111 (inert) instead.
-        if ((w & (1u << 21)) != 0 && !((b & 0x3B) == 0x38 && ((w >> 22) & 3) != 0)) {
-            markPatch(d, 16, rm, false);
-        }
+        if (regOffset) markPatch(d, 16, rm, false);
         return d;
     }
     // Load register (literal): PC-relative literal load into Rt (integer forms).
@@ -200,7 +226,9 @@ Decoded decode(std::uint32_t w) {
         markPatch(d, 5, rn, false);
         return d;
     }
-    if ((b & 0x3C) == 0x2C) {
+    // SIMD pairs (ldnp/stnp/ldp/stp): top bytes 0x2C/0x2D and the 0x6C/0xAC
+    // size variants. 0x2E/0x2F share the high bits but are vector arithmetic.
+    if ((b & 0x3E) == 0x2C) {
         markPatch(d, 5, rn, false);
         return d;
     }
@@ -239,35 +267,62 @@ Decoded decode(std::uint32_t w) {
         return d;
     }
     // Advanced SIMD / scalar-FP data processing. Vector forms (v18) touch no
-    // integer register; scalar forms cross between FP lanes and GPRs only at
-    // fmov/convert. Both live under top-byte low-5 == 0x0E (vector) or
-    // 0x1E (scalar); everything else here stays unknown.
+    // integer register except the SIMD<->GPR moves; scalar FP crosses between
+    // FP lanes and GPRs only in the conversion classes.
     const unsigned bLow5 = b & 0x1F;
     if (bLow5 == 0x0E) {
-        // Vector-to-vector (fadd/tbl/fmov vector/...): Darwin preserves
-        // v18 across context switches, so register 18 in any lane is a
-        // vector register and needs nothing.
+        // Advanced SIMD copy with a general register: DUP/INS (Rn reads) and
+        // SMOV/UMOV (Rd defines). Bit 29 (op) must be clear; set it is INS
+        // element, which is vector-to-vector. Darwin preserves v18, so register
+        // 18 in any vector lane needs nothing.
+        d.known = true;
+        if ((w & 0xBFE08400u) == 0x0E000400u) {
+            const unsigned imm4 = (w >> 11) & 0xF;
+            if (imm4 == 1 || imm4 == 3) markPatch(d, 5, rn, false);
+            else if (imm4 == 5 || imm4 == 7) markPatch(d, 0, rd, true);
+        }
+        return d;
+    }
+    // Advanced SIMD by-element, shift-by-immediate and modified-immediate forms
+    // (top bytes 0x0F/0x2F/0x4F/0x6F) and their scalar counterparts (0x5F/0x7F): vector
+    // registers and immediates only. A field equal to 18 here is v18 or an immediate
+    // bit, and treating it as unrecognised made every function containing one skip the
+    // rewrite and keep its real x18 uses.
+    if (((b & 0x9F) == 0x0F) || b == 0x5F || b == 0x7F) {
         d.known = true;
         return d;
     }
-    if (bLow5 == 0x1E) {
-        // Scalar FP. Verified against the assembler: GPR fields split purely
-        // by bits[21:16] (kind), independent of opc/sf:
-        //   38 (fmov x,w / fmov w,s): FP->GPR, Rd defines
-        //   56 (fcvtzs/fcvtzu/fcvtas/...): FP->GPR, Rd defines
-        //   54 (fjcvtzs): FP->GPR, Rd defines
-        //   34 (scvtf/ucvtf), 39 (fmov s,w / fmov d,x): GPR->FP, Rn reads
-        // Every other kind (fmov fp-fp 32, fadd, fcmp, fcsel, fcvt fp-fp)
-        // touches only FP lanes.
+    // Advanced SIMD scalar (top bytes 0x5E/0x7E): FP lanes only.
+    if (b == 0x5E || b == 0x7E) {
         d.known = true;
-        const unsigned kind = (w >> 16) & 0x3F;
-        if (kind == 38 || kind == 56 || kind == 54) {
-            markPatch(d, 0, rd, true);  // Rd is the integer destination
+        return d;
+    }
+    if ((b & 0x7F) == 0x1E) {
+        // Scalar FP. Only the FP<->integer conversion classes name a GPR; every
+        // other class (fadd, fcmp, fcsel, fmov imm, fcvt fp-fp) has bit 21 set
+        // and a nonzero bits[15:10], and its Rm is an FP register that must not
+        // be read as a GPR.
+        //   bit 21 set, bits[15:10] == 0: convert/fmov, opcode = bits[18:16]
+        //   bit 21 clear: fixed-point convert, opcode = bits[18:16]
+        // Opcodes 0/1/4/5/6 write a GPR (fcvt*, fmov to GPR); 2/3/7 read one
+        // (scvtf/ucvtf, fmov from GPR).
+        d.known = true;
+        const bool bit21 = (w & (1u << 21)) != 0;
+        if (bit21 && ((w >> 10) & 0x3F) != 0) return d;
+        const unsigned opcode = (w >> 16) & 7;
+        if (bit21) {
+            if (opcode <= 1 || opcode == 4 || opcode == 5 || opcode == 6) {
+                markPatch(d, 0, rd, true);
+            } else {
+                markPatch(d, 5, rn, false);
+            }
             return d;
         }
-        if (kind == 34 || kind == 39) {
-            markPatch(d, 5, rn, false);  // Rn is the integer source
-            return d;
+        const unsigned rmode = (w >> 19) & 3;
+        if (rmode == 3 && opcode <= 1) {
+            markPatch(d, 0, rd, true);  // fcvtzs/fcvtzu (fixed-point)
+        } else if (rmode == 0 && (opcode == 2 || opcode == 3)) {
+            markPatch(d, 5, rn, false);  // scvtf/ucvtf (fixed-point)
         }
         return d;
     }
@@ -522,16 +577,17 @@ bool isEntryWord(std::uint32_t w) {
     return false;
 }
 
-// Fraction of known-class words in the first few: real code scores high,
-// pools (addresses/floats/offsets) do not.
+// Fraction of known-class words over the chunk (first 256): real code scores
+// above 95%, pools and embedded data blobs (addresses, floats, high-entropy
+// words) score about half.
 bool looksLikeCode(const std::uint32_t* code, std::size_t nwords) {
-    std::size_t n = nwords < 8 ? nwords : 8;
+    std::size_t n = nwords < 256 ? nwords : 256;
     if (n == 0) return false;
     std::size_t known = 0;
     for (std::size_t i = 0; i < n; ++i) {
         if (decode(code[i]).known) ++known;
     }
-    return known * 4 >= n * 3;
+    return known * 100 >= n * 85;
 }
 
 // Registers a word reads or writes (integer lanes only). Unknown words
@@ -587,21 +643,6 @@ bool hasCall(std::uint32_t w) {
            (w & 0xFFFFFC00) == 0xD73F0C00 ||
            (w & 0xFFFFFC1F) == 0xD63F081F ||
            (w & 0xFFFFFC1F) == 0xD63F0C1F;
-}
-
-bool crossingLiveRange(const std::vector<std::uint32_t>& words, long a, long b,
-                       unsigned reg) {
-    (void)a;
-    const std::uint32_t bit = 1u << reg;
-    // A later read observes the incoming value even without a local definition.
-    for (long j = b + 1; j < static_cast<long>(words.size()); ++j) {
-        const RegTouch t = regTouch(words[j]);
-        if (t.uses & bit) return true;
-        // Calls clobber caller-saved scratch registers before any later read.
-        if (hasCall(words[j])) break;
-        if (t.defs & bit) break;  // redefined before any read
-    }
-    return false;
 }
 
 // Caller-saved integer candidates (x16/x17 excluded: linker veneers;
@@ -756,6 +797,35 @@ bool trailingDies(const std::uint32_t* win, std::size_t n, std::size_t rs,
     return true;
 }
 
+// True when control can leave the window at word i other than through a
+// return or a call: a direct branch to an address outside it, an indirect
+// jump, or a fall-through off the end. Register values at such an exit are
+// consumed by code this pass cannot see.
+bool exitsWindow(const std::uint32_t* code, std::size_t n, std::size_t i) {
+    const std::uint32_t w = code[i];
+    const unsigned b = w >> 24;
+    auto outside = [&](long t) { return t < 0 || static_cast<std::size_t>(t) >= n; };
+    if (b == 0xD6) {
+        if ((w & 0xFFFFFC1Fu) == 0xD65F0000u) return false;  // ret
+        if (((w >> 16) & 0xFF) == 0x3F) return false;        // blr: a call
+        return ((w >> 5) & 31) != 30;                        // br x30 returns
+    }
+    if ((b & 0xFC) == 0x94) return false;  // bl
+    if ((b & 0xFC) == 0x14) {
+        const std::int32_t imm = static_cast<std::int32_t>((w & 0x03FFFFFF) << 6) >> 4;
+        return outside(static_cast<long>(i) + imm / 4);
+    }
+    if (b == 0x54 || (b & 0x7F) == 0x34 || (b & 0x7F) == 0x35 || (b & 0x7E) == 0x36) {
+        std::int32_t off = 0;
+        if ((b & 0x7E) == 0x36)
+            off = static_cast<std::int32_t>(((w >> 5) & 0x3FFF) << 18) >> 16;
+        else
+            off = static_cast<std::int32_t>(((w >> 5) & 0x7FFFF) << 13) >> 11;
+        return outside(static_cast<long>(i) + off / 4) || i + 1 >= n;
+    }
+    return i + 1 >= n;
+}
+
 // Rewrite one function range in place. Returns sites renamed, or -1 to skip
 // (reason stored in why when provided).
 long rewriteRange(std::uint32_t* code, std::size_t nwords, X18Stats& st,
@@ -763,12 +833,12 @@ long rewriteRange(std::uint32_t* code, std::size_t nwords, X18Stats& st,
                   const std::uint32_t* full = nullptr, std::size_t absStart = 0,
                   std::size_t fullN = 0, bool complete = true,
                   const std::vector<std::pair<std::size_t, std::size_t>>*
-                      covered = nullptr) {
+                      covered = nullptr,
+                  std::size_t* dataAt = nullptr) {
     if (nwords == 0) return 0;
     // Reachability: literal pools sit after unconditional control flow and
     // must never be patched as code. Mark from entry following branches.
     std::vector<char> live(nwords, 0);
-    bool hasLoop = false;
     {
         std::vector<std::size_t> stack;
         stack.push_back(0);
@@ -796,7 +866,6 @@ long rewriteRange(std::uint32_t* code, std::size_t nwords, X18Stats& st,
                         static_cast<std::int32_t>((w & 0x03FFFFFF) << 6) >> 4;
                     const long t = static_cast<long>(i) + imm / 4;
                     if (t >= 0) {
-                        if (static_cast<std::size_t>(t) <= i) hasLoop = true;
                         push(static_cast<std::size_t>(t));
                     }
                 } else {
@@ -816,7 +885,6 @@ long rewriteRange(std::uint32_t* code, std::size_t nwords, X18Stats& st,
                     off = static_cast<std::int32_t>(((w >> 5) & 0x7FFFF) << 13) >> 11;
                 const long t = static_cast<long>(i) + off / 4;
                 if (t >= 0) {
-                    if (static_cast<std::size_t>(t) <= i) hasLoop = true;
                     push(static_cast<std::size_t>(t));
                 }
                 push(i + 1);
@@ -851,6 +919,7 @@ long rewriteRange(std::uint32_t* code, std::size_t nwords, X18Stats& st,
             if (dt.use || dt.def) {
                 ++st.skippedRange;
                 if (why) *why = "data";
+                if (dataAt) *dataAt = i;
                 if (traceBlock)
                     std::fprintf(stderr, "[KuDroidELF] x18 block +%zx\n", i * 4);
                 return -1;
@@ -862,6 +931,9 @@ long rewriteRange(std::uint32_t* code, std::size_t nwords, X18Stats& st,
         if (!d.known && maybeX18(words[i])) {
             ++st.skippedUnknown;
             if (why) *why = "unknown";
+            if (traceBlock)
+                std::fprintf(stderr, "[KuDroidELF] x18 unknown word %08x +%zx\n", words[i],
+                             i * 4);
             return -1;
         }
         for (unsigned k = 0; k < d.npatch; ++k) {
@@ -879,127 +951,126 @@ long rewriteRange(std::uint32_t* code, std::size_t nwords, X18Stats& st,
         if (hasCall(words[i])) calls.push_back(i);
     }
     if ((used & (1u << kX18)) == 0) return 0;  // x18-free: nothing to do
-    // Span check: every use must be fed by a define in-range (no live-in),
-    // no call may sit inside a span (a caller-saved substitute would not
-    // survive it), and the value live after the last x18 reference must die
-    // on every path (no unrenamed observer). Within one instruction, uses
-    // precede defines (add x18,x18 reads first).
-    struct Span {
-        long a, b;
-        unsigned sub;
+    // Allocate one register for each value connected by control-flow edges.
+    std::vector<std::vector<std::size_t>> next(nwords), previous(nwords);
+    std::vector<RegTouch> touches(nwords);
+    std::vector<Touch> virtualTouch(nwords);
+    long lastX18 = -1;
+    for (std::size_t i = 0; i < nwords; ++i) {
+        if (!live[i]) continue;
+        touches[i] = regTouch(words[i]);
+        virtualTouch[i] = touch18(words[i]);
+        if (virtualTouch[i].use || virtualTouch[i].def) lastX18 = static_cast<long>(i);
+        if (hasCall(words[i])) {
+            touches[i].uses |= 0xFFu;
+            touches[i].defs |= 0x4007FFFFu;
+            if (i + 1 < nwords && live[i + 1]) next[i].push_back(i + 1);
+        } else {
+            if ((words[i] & 0xFFFFFC1Fu) == 0xD65F0000u) touches[i].uses |= 3u;
+            // Whatever the code past a window exit reads is live here: the
+            // argument registers for a tail call out of a whole function,
+            // anything at all when the window is only a slice of one.
+            if (exitsWindow(words.data(), nwords, i))
+                touches[i].uses |= complete ? 0xFFu : 0x7FFFFFFFu;
+            succEdge(words.data(), nwords, i, next[i], complete, nullptr);
+        }
+        for (std::size_t j : next[i]) previous[j].push_back(i);
+    }
+    if (lastX18 >= 0) {
+        const std::uint32_t* win = full != nullptr ? full : code;
+        const std::size_t wn = full != nullptr ? fullN : nwords;
+        const std::size_t rs = full != nullptr ? absStart : 0;
+        if (!trailingDies(win, wn, rs, rs + nwords,
+                          rs + static_cast<std::size_t>(lastX18), complete, covered)) {
+            ++st.skippedNoReg;
+            if (why) *why = "liveout";
+            return -1;
+        }
+    }
+
+    std::vector<std::uint32_t> in(nwords), out(nwords);
+    std::vector<char> vxIn(nwords), vxOut(nwords), queued(nwords);
+    std::vector<std::size_t> work;
+    for (std::size_t i = 0; i < nwords; ++i) {
+        if (live[i]) { work.push_back(i); queued[i] = 1; }
+    }
+    while (!work.empty()) {
+        const std::size_t i = work.back();
+        work.pop_back();
+        queued[i] = 0;
+        std::uint32_t newOut = 0;
+        bool newVxOut = false;
+        for (std::size_t j : next[i]) {
+            newOut |= in[j];
+            newVxOut |= vxIn[j] != 0;
+        }
+        const std::uint32_t newIn = touches[i].uses | (newOut & ~touches[i].defs);
+        const bool newVxIn = virtualTouch[i].use || (newVxOut && !virtualTouch[i].def);
+        out[i] = newOut;
+        vxOut[i] = newVxOut;
+        if (newIn == in[i] && newVxIn == (vxIn[i] != 0)) continue;
+        in[i] = newIn;
+        vxIn[i] = newVxIn;
+        for (std::size_t j : previous[i]) {
+            if (!queued[j]) { work.push_back(j); queued[j] = 1; }
+        }
+    }
+    if (vxIn[0]) {
+        ++st.skippedNoReg;
+        if (why) *why = "livein";
+        return -1;
+    }
+    for (std::size_t i : calls) {
+        if (vxIn[i] && vxOut[i]) {
+            ++st.skippedNoReg;
+            if (why) *why = "callspan";
+            return -1;
+        }
+    }
+
+    // Before/after states merge at joins and across read-modify-write operands.
+    std::vector<std::size_t> parent(nwords * 2);
+    for (std::size_t i = 0; i < parent.size(); ++i) parent[i] = i;
+    auto root = [&](std::size_t i) {
+        while (parent[i] != i) {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        return i;
     };
+    auto join = [&](std::size_t a, std::size_t b) {
+        parent[root(a)] = root(b);
+    };
+    for (std::size_t i = 0; i < nwords; ++i) {
+        if (!live[i]) continue;
+        const Touch& t = virtualTouch[i];
+        if ((vxIn[i] && vxOut[i] && !t.def) || (t.use && t.def)) join(2 * i, 2 * i + 1);
+        if (vxOut[i]) {
+            for (std::size_t j : next[i]) {
+                if (vxIn[j]) join(2 * i + 1, 2 * j);
+            }
+        }
+    }
+    std::vector<std::uint32_t> busy(nwords * 2);
+    std::vector<unsigned> replacement(nwords * 2, 31);
+    for (std::size_t i = 0; i < nwords; ++i) {
+        if (!live[i]) continue;
+        const std::uint32_t touched = decode(words[i]).used | in[i] | out[i];
+        if (vxIn[i] || virtualTouch[i].use) busy[root(2 * i)] |= touched;
+        if (vxOut[i] || virtualTouch[i].def) busy[root(2 * i + 1)] |= touched;
+    }
     std::vector<std::uint8_t> spanSub(nwords, 0xFFu);
-    {
-        long lastDef = -1;
-        long lastX18 = -1;
-        std::vector<Span> spans;
-        std::size_t k = 0;
-        auto handle = [&](const Ref& r) {
-            const std::uint32_t w = words[r.idx];
-            if (((w >> r.pos) & 31) != kX18) return true;
-            lastX18 = static_cast<long>(r.idx);
-            if (r.isDef) {
-                lastDef = static_cast<long>(r.idx);
-            } else {
-                if (lastDef < 0) {
-                    ++st.skippedNoReg;
-                    if (why) *why = "livein";
-                    return false;
-                }
-                spans.push_back({lastDef, static_cast<long>(r.idx), 31});
-            }
-            return true;
-        };
-        bool okSpan = true;
-        while (k < refs.size()) {
-            const std::size_t idx = refs[k].idx;
-            std::size_t j = k;
-            while (j < refs.size() && refs[j].idx == idx) ++j;
-            for (std::size_t m = k; m < j && okSpan; ++m) {
-                if (!refs[m].isDef && !handle(refs[m])) okSpan = false;
-            }
-            for (std::size_t m = k; m < j && okSpan; ++m) {
-                if (refs[m].isDef && !handle(refs[m])) okSpan = false;
-            }
-            if (!okSpan) return -1;
-            k = j;
+    for (const Ref& r : refs) {
+        if (((words[r.idx] >> r.pos) & 31) != kX18) continue;
+        const std::size_t group = root(2 * r.idx + (r.isDef ? 1 : 0));
+        unsigned& sub = replacement[group];
+        if (sub == 31) sub = pickFreeReg(busy[group]);
+        if (sub == 31) {
+            ++st.skippedNoReg;
+            if (why) *why = "noreg";
+            return -1;
         }
-        if (lastX18 >= 0) {
-            const std::uint32_t* win = (full != nullptr) ? full : code;
-            const std::size_t wn = (full != nullptr) ? fullN : nwords;
-            const std::size_t rs = (full != nullptr) ? absStart : 0;
-            if (!trailingDies(win, wn, rs, rs + nwords,
-                              rs + static_cast<std::size_t>(lastX18), complete,
-                              covered)) {
-                ++st.skippedNoReg;
-                if (why) *why = "liveout";
-                return -1;
-            }
-            // A trailing define with no closing use (dead def) validated
-            // above still renames — its pseudo-span covers exactly its word.
-            bool closed = false;
-            for (const auto& s : spans) {
-                if (s.a <= lastX18 && lastX18 <= s.b) closed = true;
-            }
-            if (!closed) spans.push_back({lastX18, lastX18, 31});
-        }
-        for (const auto& s : spans) {
-            for (std::size_t c : calls) {
-                // Strict interior only: an endpoint call always coincides with
-                // an x18 word (spans are built from x18 refs, so a non-x18
-                // call can never BE an endpoint), and there the substitute is
-                // consumed by the call itself — blr x18 terminators must
-                // rewrite, not skip. A call the substitute is live ACROSS is
-                // exactly the strict-interior case, refused here, with any
-                // live-out past the span caught by the liveout check.
-                if (c > static_cast<std::size_t>(s.a) &&
-                    c < static_cast<std::size_t>(s.b)) {
-                    ++st.skippedNoReg;
-                    if (why) *why = "callspan";
-                    return -1;
-                }
-            }
-        }
-        // Span-level allocation: each span borrows a caller-saved register
-        // that is free FOR THAT WINDOW — compiler temporaries are reused
-        // across a block, so one span may take x15 while a later span in the
-        // same function takes x14. Busy mask per span: every integer register
-        // any reachable instruction in [a, b] touches, plus any register
-        // whose live range crosses the window (defined before it and read
-        // after it) — a substitute colliding with a crossing value would
-        // corrupt the function.
-        const unsigned wholeSub = pickFreeReg(used);
-        const bool useWhole = hasLoop;
-        for (auto& s : spans) {
-            if (useWhole && wholeSub < 31) {
-                s.sub = wholeSub;
-                continue;
-            }
-            std::uint32_t busy = 0;
-            for (long i = s.a; i <= s.b && i < static_cast<long>(nwords); ++i) {
-                if (i < 0 || !live[i]) continue;
-                busy |= decode(words[i]).used;
-            }
-            for (unsigned r = 0; r < 31; ++r) {
-                if (busy & (1u << r)) continue;
-                if (crossingLiveRange(words, s.a, s.b, r)) busy |= 1u << r;
-            }
-            s.sub = pickFreeReg(busy);
-            if (s.sub >= 31) {
-                ++st.skippedNoReg;
-                if (why) *why = "noreg";
-                return -1;
-            }
-        }
-        // Patch uses their span's substitute: map every word to the substitute
-        // of the span covering it. Words outside any span hold no patchable
-        // x18 reference (every use closes a span and every def opens one —
-        // validated above).
-        for (const auto& s : spans) {
-            for (long i = s.a; i <= s.b && i < static_cast<long>(nwords); ++i) {
-                if (i >= 0) spanSub[i] = static_cast<std::uint8_t>(s.sub);
-            }
-        }
+        spanSub[r.idx] = static_cast<std::uint8_t>(sub);
     }
     // Pass 2: patch every recorded field holding 18 (reachable code only).
     long sites = 0;
@@ -1021,38 +1092,124 @@ long rewriteRange(std::uint32_t* code, std::size_t nwords, X18Stats& st,
     return sites;
 }
 
+// Collect only reachable instruction sites; executable segments also contain data.
+void collectVirtualSites(const std::uint32_t* code, std::size_t nwords,
+                         std::size_t imageOffset, std::vector<std::size_t>& sites) {
+    std::vector<char> seen(nwords);
+    std::vector<std::size_t> work{0};
+    std::vector<std::size_t> collected;
+    bool computedBranch = false;
+
+    // Returns false when the function cannot be stubbed at all: a virtual x18 lives
+    // only in the thread slot, so a function is either stubbed completely or not.
+    static const bool traceVirtual = [] {
+        const char* v = std::getenv("KUDROID_X18_TRACE");
+        return v != nullptr && v[0] == '1';
+    }();
+    auto fail = [&](std::size_t i, const char* why) {
+        if (traceVirtual)
+            std::fprintf(stderr, "[KuDroidELF] x18 virtual abort %s word=%08x at=%zx\n", why,
+                         code[i], imageOffset + i * 4);
+        return false;
+    };
+    auto consider = [&](std::size_t i) {
+        const Decoded d = decode(code[i]);
+        bool patchable = false;
+        for (unsigned k = 0; k < d.npatch; ++k) {
+            patchable |= ((code[i] >> d.at[k]) & 31u) == kX18;
+        }
+        if (!d.known && maybeX18(code[i])) return fail(i, "unknown");
+        for (unsigned k = 0; k < d.nuse; ++k) {
+            if (((code[i] >> d.useonly[k]) & 31u) == kX18) return fail(i, "opaque");
+        }
+        if (patchable) {
+            // Calls and stack writeback need more than a single-instruction stub.
+            // `br x18` has its own stub (load the virtual value, jump); every other
+            // branch through the register is a call or authenticated form.
+            const bool plainBrX18 = (code[i] & 0xFFFFFC1Fu) == 0xD61F0000u &&
+                                    ((code[i] >> 5) & 31u) == kX18;
+            if (!plainBrX18 && ((code[i] >> 24) == 0xD6 || (code[i] >> 24) == 0xD7))
+                return fail(i, "branch");
+            const unsigned rn = (code[i] >> 5) & 31u;
+            const unsigned rd = code[i] & 31u;
+            const unsigned b = code[i] >> 24;
+            if (rd == 31 && (b == 0x91 || b == 0xD1)) return fail(i, "sp-arith");
+            if (rn == 31 && (b & 0x3B) == 0x38 && !(code[i] & (1u << 21))) {
+                const int offset = static_cast<std::int32_t>(code[i] << 11) >> 23;
+                if (((code[i] >> 10) & 3u) != 0 || offset < 0) return fail(i, "sp-writeback");
+            }
+            if (rn == 31 && (b & 0x3E) == 0x28) {
+                if (((code[i] >> 23) & 3u) != 2 || (code[i] & (1u << 21))) return fail(i, "sp-pair");
+            }
+            if (rn == 31 && ((b & 0xBF) == 0x0C || (b & 0xBF) == 0x0D)) return fail(i, "sp-simd");
+            collected.push_back(imageOffset + i * 4);
+        }
+        return true;
+    };
+
+    while (!work.empty()) {
+        const std::size_t i = work.back();
+        work.pop_back();
+        if (i >= nwords || seen[i]) continue;
+        seen[i] = 1;
+        if (!consider(i)) return;
+        // A jump through a register (switch table) reaches blocks no direct edge
+        // names; those blocks read the same virtual x18 and need the same stubs.
+        if ((code[i] & 0xFFFFFC1Fu) == 0xD61F0000u && ((code[i] >> 5) & 31u) != 30u) {
+            computedBranch = true;
+        }
+        if (hasCall(code[i])) {
+            if (i + 1 < nwords) work.push_back(i + 1);
+        } else {
+            std::vector<std::size_t> successors;
+            succEdge(code, nwords, i, successors, true, nullptr);
+            work.insert(work.end(), successors.begin(), successors.end());
+        }
+    }
+    if (computedBranch) {
+        // Switch tables live in read-only data, not in the text, so every word left
+        // over here is an unreachable-by-edge instruction of this function. Any that
+        // touches x18 must be stubbed too; one that cannot be aborts the function.
+        for (std::size_t i = 0; i < nwords; ++i) {
+            if (seen[i]) continue;
+            const Touch t = touch18(code[i]);
+            if (!t.use && !t.def) continue;
+            if (!consider(i)) return;
+        }
+    }
+    sites.insert(sites.end(), collected.begin(), collected.end());
+}
+
 // -----------------------------------------------------------------------------
-// Layer 2: Virtual-x18 Trampoline Stubs (Husk-style TSD fallback)
+// Virtual x18 stubs for ranges without a safe replacement register.
 // -----------------------------------------------------------------------------
 
 constexpr size_t kStubBytes = 64;
 
 #if defined(__APPLE__) && defined(__aarch64__)
 static int64_t g_vx18_off = -1;
+static std::once_flag g_vx18_once;
 static bool vx18_init() {
-    if (g_vx18_off >= 0) return true;
-    pthread_key_t key;
-    if (pthread_key_create(&key, nullptr) != 0) return false;
-    const uintptr_t sentinel = (uintptr_t)0x5a5a1234deadbeefull;
-    pthread_setspecific(key, reinterpret_cast<void*>(sentinel));
-    uintptr_t base;
-    __asm__ volatile("mrs %0, tpidrro_el0" : "=r"(base));
-    base &= ~static_cast<uintptr_t>(7);
-    const volatile uintptr_t* tsd = reinterpret_cast<const volatile uintptr_t*>(base);
-    int64_t off = -1;
-    for (int i = 0; i < 520; ++i) {
-        if (tsd[i] == sentinel) {
-            off = static_cast<int64_t>(i * 8);
-            break;
+    std::call_once(g_vx18_once, [] {
+        pthread_key_t key;
+        if (pthread_key_create(&key, nullptr) != 0) return;
+        const uintptr_t sentinel = 0x5a5a1234deadbeefull;
+        if (pthread_setspecific(key, reinterpret_cast<void*>(sentinel)) != 0) {
+            pthread_key_delete(key);
+            return;
         }
-    }
-    pthread_setspecific(key, nullptr);
-    if (off < 0 || off > 32760) {
-        pthread_key_delete(key);
-        return false;
-    }
-    g_vx18_off = off;
-    return true;
+        uintptr_t base;
+        __asm__ volatile("mrs %0, tpidrro_el0" : "=r"(base));
+        const auto* tsd = reinterpret_cast<const volatile uintptr_t*>(base & ~uintptr_t(7));
+        int64_t off = -1;
+        for (int i = 0; i < 520; ++i) {
+            if (tsd[i] == sentinel) { off = static_cast<int64_t>(i * 8); break; }
+        }
+        pthread_setspecific(key, nullptr);
+        if (off < 0 || off > 32760) { pthread_key_delete(key); return; }
+        g_vx18_off = off;
+    });
+    return g_vx18_off >= 0;
 }
 #else
 static int64_t g_vx18_off = 32;
@@ -1128,11 +1285,12 @@ static bool emit_x18_stub(uint32_t insn, const Decoded& d, const uint8_t* pcExec
     const uint8_t* back = pcExec + 4;
     uint32_t used = d.used;
 
-#define EMIT(w) do { c[n++] = (w); } while(0)
-#define EMIT_B(to) do { c[n] = e_b(rx + n * 4, (to)); ++n; } while(0)
+#define EMIT(w) do { if (n >= static_cast<int>(kStubBytes / 4)) return false; c[n++] = (w); } while(0)
+#define EMIT_B(to) do { if (!in_range_b(rx + n * 4, (to))) return false; EMIT(e_b(rx + n * 4, (to))); } while(0)
 
     if ((insn & 0x9F000000u) == 0x90000000u || (insn & 0x9F000000u) == 0x10000000u || (insn & 0xBF000000u) == 0x18000000u) {
         uint64_t value = 0;
+        bool literalLoad = false;
         if ((insn & 0x9F000000u) == 0x90000000u || (insn & 0x9F000000u) == 0x10000000u) {
             bool page = (insn & 0x80000000u) != 0;
             int64_t imm = static_cast<int64_t>((((insn >> 5) & 0x7FFFFu) << 2) | ((insn >> 29) & 3u));
@@ -1143,13 +1301,15 @@ static bool emit_x18_stub(uint32_t insn, const Decoded& d, const uint8_t* pcExec
         } else {
             int64_t imm = static_cast<int64_t>((insn >> 5) & 0x7FFFFu);
             if (imm & 0x40000) imm -= 0x80000;
-            const uint8_t* src = pcExec + imm * 4;
-            value = (insn & 0x40000000u) ? *reinterpret_cast<const uint64_t*>(src)
-                                         : static_cast<uint64_t>(*reinterpret_cast<const uint32_t*>(src));
+            value = reinterpret_cast<std::uint64_t>(pcExec + imm * 4);
+            literalLoad = true;
         }
         unsigned S = 16, T = 17;
         EMIT(e_stur(S, -16)); EMIT(e_stur(T, -8));
         n += e_mov64(c + n, S, value);
+        if (literalLoad) {
+            EMIT(((insn & 0x40000000u) ? 0xF9400000u : 0xB9400000u) | (S << 5) | S);
+        }
         EMIT(e_mrs_tsd(T)); EMIT(e_and_tsd(T)); EMIT(e_str_slot(S, T, g_vx18_off));
         EMIT(e_ldur(T, -8)); EMIT(e_ldur(S, -16));
         EMIT_B(back);
@@ -1212,7 +1372,8 @@ bool elf_x18_enabled() {
 
 X18Stats elf_x18_rewrite(const void* base, std::uint64_t minVaddr,
                          const std::vector<ElfLoader::Segment>& segments,
-                         const std::uint8_t* fileData, std::size_t fileSize) {
+                         const std::uint8_t* fileData, std::size_t fileSize,
+                         const void* execBase) {
     X18Stats st;
     if (!elf_x18_enabled() || base == nullptr || fileData == nullptr || fileSize < 64) {
         return st;
@@ -1256,6 +1417,25 @@ X18Stats elf_x18_rewrite(const void* base, std::uint64_t minVaddr,
     x18::walkEhFrame(ehMap, ehLen, ranges);
     const std::uint8_t* img = static_cast<const std::uint8_t*>(base);
     const std::uint64_t imgAddr = reinterpret_cast<std::uint64_t>(img);
+    const auto* execImg = execBase != nullptr ? static_cast<const std::uint8_t*>(execBase) : img;
+    // Executable sections (SHF_EXECINSTR), in file vaddr coordinates. .rodata and
+    // .eh_frame often share the RX segment but are data.
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> execSpans;
+    if (shoff != 0 && shentsize >= 64 && shnum > 0 &&
+        shoff + static_cast<std::uint64_t>(shnum) * shentsize <= fileSize) {
+        for (std::uint16_t i = 0; i < shnum; ++i) {
+            const std::uint8_t* e = fileData + shoff + i * shentsize;
+            std::uint32_t type = 0;
+            std::uint64_t flags = 0, addr = 0, size = 0;
+            std::memcpy(&type, e + 4, 4);
+            std::memcpy(&flags, e + 8, 8);
+            std::memcpy(&addr, e + 16, 8);
+            std::memcpy(&size, e + 32, 8);
+            if (type == 8 /* SHT_NOBITS */ || (flags & 4) == 0 || size == 0) continue;
+            execSpans.emplace_back(addr, addr + size);
+        }
+    }
+    std::vector<std::size_t> virtualSites;
     (void)minVaddr;  // addressing is done in runtime coordinates throughout
     for (const auto& r : ranges) {
         if (r.end <= r.start || r.start < imgAddr) {
@@ -1264,6 +1444,15 @@ X18Stats elf_x18_rewrite(const void* base, std::uint64_t minVaddr,
         }
         if (r.personality) {
             ++st.skippedEh;
+            static const bool traceEh = [] {
+                const char* v = std::getenv("KUDROID_X18_TRACE");
+                return v != nullptr && v[0] == '1';
+            }();
+            if (traceEh) {
+                std::fprintf(stderr, "[KuDroidELF] x18 eh %llx-%llx\n",
+                             static_cast<unsigned long long>(r.start - imgAddr),
+                             static_cast<unsigned long long>(r.end - imgAddr));
+            }
             continue;
         }
         // Clip to an EXEC segment (runtime coordinates throughout).
@@ -1297,6 +1486,9 @@ X18Stats elf_x18_rewrite(const void* base, std::uint64_t minVaddr,
         if (sites > 0) {
             ++st.rewritten;
             st.sites += static_cast<std::uint64_t>(sites);
+        } else {
+            x18::collectVirtualSites(reinterpret_cast<const std::uint32_t*>(segBase + segOff),
+                                     len / 4, static_cast<std::size_t>(r.start - imgAddr), virtualSites);
         }
         static int traceOn = -1;
         if (traceOn < 0) {
@@ -1350,13 +1542,14 @@ X18Stats elf_x18_rewrite(const void* base, std::uint64_t minVaddr,
         }
         // Walk the segment; each maximal uncovered run is gap-processed.
         std::size_t cur = 0;
-        auto flushGap = [&](std::size_t gs, std::size_t ge) {
+        auto processGap = [&](std::size_t gs, std::size_t ge) {
             if (ge <= gs + 4) return;  // need room for code, not noise
             if (ge > nwords || gs >= nwords) {
                 std::fprintf(stderr,
                              "[KuDroidELF] gap OOB gs=%zu ge=%zu nwords=%zu "
                              "segv=%llx segfilesz=%zx ranges=%zu\n",
-                             gs, ge, nwords, (unsigned long long)seg.vaddr, seg.filesz,
+                             gs, ge, nwords, (unsigned long long)seg.vaddr,
+                             static_cast<std::size_t>(seg.filesz),
                              ranges.size());
                 return;
             }
@@ -1393,22 +1586,54 @@ X18Stats elf_x18_rewrite(const void* base, std::uint64_t minVaddr,
                 const char* v = std::getenv("KUDROID_X18_TRACE");
                 traceGap = (v != nullptr && v[0] == '1') ? 1 : 0;
             }
-            for (std::size_t s = 0; s + 1 < splits.size(); ++s) {
-                const std::size_t cs = splits[s];
-                const std::size_t ce = splits[s + 1];
+            // Chunks are split at prologues and terminal flow, but a leaf routine has
+            // no prologue, so a chunk can swallow a second routine that only a call
+            // from elsewhere reaches. Its words look unreachable from the chunk start;
+            // when one touches x18 the chunk is split after the terminal instruction
+            // that precedes it and both halves are retried.
+            std::vector<std::pair<std::size_t, std::size_t>> chunks;
+            for (std::size_t s2 = splits.size() - 1; s2 > 0; --s2) {
+                chunks.emplace_back(splits[s2 - 1], splits[s2]);
+            }
+            while (!chunks.empty()) {
+                const std::size_t cs = chunks.back().first;
+                const std::size_t ce = chunks.back().second;
+                chunks.pop_back();
                 if (ce <= cs + 1) continue;
                 if (!x18::looksLikeCode(words + cs, ce - cs)) {
                     ++st.skippedRange;
                     continue;
                 }
-                ++st.functions;
                 const char* why0 = "";
+                std::size_t dataAt = static_cast<std::size_t>(-1);
+                X18Stats attempt = st;
                 const long sites = x18::rewriteRange(
-                    words + cs, ce - cs, st, &why0, words + gs, cs - gs,
-                    ge - gs, false, &covered);
+                    words + cs, ce - cs, attempt, &why0, words + gs, cs - gs,
+                    ge - gs, false, &covered, &dataAt);
+                if (sites <= 0 && dataAt != static_cast<std::size_t>(-1) && dataAt > 0) {
+                    std::size_t cut = 0;
+                    for (std::size_t i = dataAt; i > 0; --i) {
+                        const std::uint32_t pw = words[cs + i - 1];
+                        const unsigned pb = pw >> 24;
+                        if ((pb == 0xD6 && ((pw >> 16) & 0xFF) != 0x3F) || (pb & 0xFC) == 0x14) {
+                            cut = i;
+                            break;
+                        }
+                    }
+                    if (cut > 0 && cut < ce - cs) {
+                        chunks.emplace_back(cs + cut, ce);
+                        chunks.emplace_back(cs, cs + cut);
+                        continue;
+                    }
+                }
+                st = attempt;
+                ++st.functions;
                 if (sites > 0) {
                     ++st.rewritten;
                     st.sites += static_cast<std::uint64_t>(sites);
+                } else {
+                    x18::collectVirtualSites(words + cs, ce - cs,
+                        static_cast<std::size_t>(seg.vaddr - minVaddr) + cs * 4, virtualSites);
                 }
                 if (traceGap) {
                     const std::size_t fileOff = seg.offset + (cs * 4);
@@ -1422,6 +1647,22 @@ X18Stats elf_x18_rewrite(const void* base, std::uint64_t minVaddr,
                 }
             }
         };
+        // Gaps are clipped to executable sections; without section headers the
+        // whole run is used.
+        auto flushGap = [&](std::size_t gs, std::size_t ge) {
+            if (execSpans.empty()) {
+                processGap(gs, ge);
+                return;
+            }
+            for (const auto& span : execSpans) {
+                if (span.second <= seg.vaddr || span.first >= seg.vaddr + seg.filesz) continue;
+                const std::uint64_t a = std::max<std::uint64_t>(span.first, seg.vaddr + gs * 4);
+                const std::uint64_t e = std::min<std::uint64_t>(span.second, seg.vaddr + ge * 4);
+                if (e <= a) continue;
+                processGap(static_cast<std::size_t>((a - seg.vaddr + 3) / 4),
+                           static_cast<std::size_t>((e - seg.vaddr) / 4));
+            }
+        };
         for (const auto& c : covered) {
             if (c.first > cur) flushGap(cur, c.first);
             if (c.second > cur) cur = c.second;
@@ -1429,52 +1670,145 @@ X18Stats elf_x18_rewrite(const void* base, std::uint64_t minVaddr,
         if (cur < nwords) flushGap(cur, nwords);
     }
 
-    // ---- Layer 2: Virtual-x18 Trampoline Stubs (Husk-style TSD fallback) ----
-    // Any remaining instruction in executable segments that still touches x18
-    // after Layer 1 (AOT rename) is intercepted by a trampoline stub operating
-    // on virtual x18 stored in thread-specific data.
+    // Redirect reachable x18 instructions through thread-local virtual state.
     struct StubPoolHolder {
         ExecMemory::Region region;
         size_t used = 0;
     };
-    static StubPoolHolder s_stubPool;
     static std::mutex s_stubMtx;
+    std::lock_guard<std::mutex> stubLock(s_stubMtx);
+    StubPoolHolder pool;
+    std::vector<std::pair<std::uint32_t*, std::uint32_t>> pending;
+    auto commitPool = [&] {
+        if (pending.empty()) return;
+        if (!ExecMemory::Commit(pool.region, pool.region.writeView, pool.used)) {
+            ExecMemory::BeginWrite();
+            for (const auto& patch : pending) *patch.first = patch.second;
+            st.stubbedSites -= pending.size();
+        }
+        ExecMemory::BeginWrite();
+        pending.clear();
+    };
 
-    for (const auto& seg : segments) {
-        if ((seg.flags & 1) == 0) continue;
-        const uint64_t segStart = imgAddr + (seg.vaddr - minVaddr);
-        const uint8_t* segWriteBase = img + (seg.vaddr - minVaddr);
-        const size_t segNwords = seg.filesz / 4;
-        uint32_t* segWords = reinterpret_cast<uint32_t*>(const_cast<uint8_t*>(segWriteBase));
-
-        for (size_t i = 0; i < segNwords; ++i) {
-            uint32_t w = segWords[i];
-            if (((w >> 0) & 31) != x18::kX18 && ((w >> 5) & 31) != x18::kX18 &&
-                ((w >> 16) & 31) != x18::kX18 && ((w >> 10) & 31) != x18::kX18) {
-                continue;
-            }
-            const x18::Decoded d = x18::decode(w);
-            if (!d.known || (d.used & (1u << x18::kX18)) == 0) continue;
-
-            const uint8_t* pcExec = reinterpret_cast<const uint8_t*>(segStart + i * 4);
-            std::lock_guard<std::mutex> lock(s_stubMtx);
-            if (s_stubPool.region.writeView == nullptr || s_stubPool.used + x18::kStubBytes > s_stubPool.region.size) {
-                s_stubPool.region = ExecMemory::Allocate(64 * 1024, true);
-                s_stubPool.used = 0;
-            }
-            if (s_stubPool.region.writeView == nullptr) break;
-
-            const size_t stubAt = s_stubPool.used;
-            uint8_t* stubWrite = static_cast<uint8_t*>(s_stubPool.region.writeView);
-            const uint8_t* stubExec = static_cast<const uint8_t*>(s_stubPool.region.execView);
-
-            if (x18::emit_x18_stub(w, d, pcExec, stubWrite, stubExec, s_stubPool.used, s_stubPool.region.size)) {
-                segWords[i] = x18::e_b(pcExec, stubExec + stubAt);
-                ++st.stubbedSites;
-            }
+    std::sort(virtualSites.begin(), virtualSites.end());
+    virtualSites.erase(std::unique(virtualSites.begin(), virtualSites.end()), virtualSites.end());
+    for (std::size_t offset : virtualSites) {
+        auto* word = reinterpret_cast<std::uint32_t*>(const_cast<std::uint8_t*>(img) + offset);
+        const std::uint32_t w = *word;
+        const x18::Decoded d = x18::decode(w);
+        const std::uint8_t* pcExec = execImg + offset;
+        if (pool.region.writeView == nullptr ||
+            pool.used + x18::kStubBytes > pool.region.size) {
+            commitPool();
+            pool.region = ExecMemory::Allocate(64 * 1024, true);
+            pool.used = 0;
+        }
+        if (pool.region.writeView == nullptr) break;
+        const std::size_t stubAt = pool.used;
+        auto* stubWrite = static_cast<std::uint8_t*>(pool.region.writeView);
+        const auto* stubExec = static_cast<const std::uint8_t*>(pool.region.execView);
+        ExecMemory::BeginWrite();
+        if (x18::emit_x18_stub(w, d, pcExec, stubWrite, stubExec,
+                               pool.used, pool.region.size)) {
+            pending.emplace_back(word, w);
+            *word = x18::e_b(pcExec, stubExec + stubAt);
+            ++st.stubbedSites;
         }
     }
+    commitPool();
 
+    return st;
+}
+
+TlsStubStats elf_tls_stub_rewrite(void* writeBase, const void* execBase, std::uint64_t minVaddr,
+                                  const std::vector<ElfLoader::Segment>& segments,
+                                  std::int64_t tsdSlotOffset, std::int64_t tlsPointerOffset) {
+    TlsStubStats st;
+#if defined(__APPLE__) && defined(__aarch64__)
+    if (writeBase == nullptr || execBase == nullptr || tsdSlotOffset < 0 ||
+        tsdSlotOffset > 32760 || (tsdSlotOffset & 7) != 0) {
+        return st;
+    }
+    // `add xN, xN, #off`, built for N == 0 and given its register below.
+    std::uint32_t addTemplate;
+    if (tlsPointerOffset >= 0 && tlsPointerOffset < 4096) {
+        addTemplate = 0x91000000u | (static_cast<std::uint32_t>(tlsPointerOffset) << 10);
+    } else if (tlsPointerOffset > 0 && tlsPointerOffset % 4096 == 0 &&
+               tlsPointerOffset / 4096 < 4096) {
+        addTemplate = 0x91400000u |
+                      (static_cast<std::uint32_t>(tlsPointerOffset / 4096) << 10);
+    } else {
+        return st;
+    }
+
+    struct Site {
+        std::uint32_t* word;
+        const std::uint8_t* exec;
+        unsigned reg;
+    };
+    std::vector<Site> sites;
+    for (const auto& seg : segments) {
+        if ((seg.flags & 1) == 0) continue;
+        const std::uint64_t rel = seg.vaddr - minVaddr;
+        auto* words = reinterpret_cast<std::uint32_t*>(static_cast<std::uint8_t*>(writeBase) + rel);
+        const auto* exec = static_cast<const std::uint8_t*>(execBase) + rel;
+        const std::size_t n = static_cast<std::size_t>(seg.filesz) / 4;
+        for (std::size_t i = 0; i < n; ++i) {
+            if ((words[i] & 0xFFE0001Fu) != 0xD4200000u) continue;
+            const unsigned imm = (words[i] >> 5) & 0xFFFFu;
+            if (imm < 0x1000u || imm >= 0x1020u) continue;
+            sites.push_back({&words[i], exec + i * 4, imm - 0x1000u});
+        }
+    }
+    st.sites = sites.size();
+    if (sites.empty()) return st;
+
+    constexpr std::size_t kTlsStubBytes = 32;
+    std::lock_guard<std::mutex> lock(s_tlsStubMutex());
+    ExecMemory::Region region = ExecMemory::Allocate(sites.size() * kTlsStubBytes, true);
+    if (region.writeView == nullptr || region.execView == nullptr ||
+        region.size < sites.size() * kTlsStubBytes) {
+        return st;
+    }
+    ExecMemory::BeginWrite();
+    auto* stubWrite = static_cast<std::uint8_t*>(region.writeView);
+    const auto* stubExec = static_cast<const std::uint8_t*>(region.execView);
+    std::vector<std::pair<std::uint32_t*, std::uint32_t>> patched;
+    std::size_t used = 0;
+    for (const Site& site : sites) {
+        const std::uint8_t* at = stubExec + used;
+        if (!x18::in_range_b(site.exec, at) || !x18::in_range_b(at + 20, site.exec + 4) ||
+            !x18::in_range_b(at + 28, site.exec + 4)) {
+            ++st.outOfRange;
+            continue;
+        }
+        const unsigned r = site.reg;
+        std::uint32_t code[kTlsStubBytes / 4];
+        code[0] = x18::e_mrs_tsd(r);
+        code[1] = x18::e_and_tsd(r);
+        code[2] = x18::e_ldr_slot(r, r, tsdSlotOffset);
+        code[3] = 0xB4000000u | (3u << 5) | r;  // cbz xN, slow path
+        code[4] = addTemplate | (r << 5) | r;
+        code[5] = x18::e_b(at + 20, site.exec + 4);
+        code[6] = 0xD4200000u | ((0x1000u + r) << 5);  // slow path: the trap handler fills xN
+        code[7] = x18::e_b(at + 28, site.exec + 4);
+        std::memcpy(stubWrite + used, code, sizeof(code));
+        patched.emplace_back(site.word, *site.word);
+        *site.word = x18::e_b(site.exec, at);
+        used += kTlsStubBytes;
+    }
+    if (used == 0) return st;
+    if (!ExecMemory::Commit(region, region.writeView, used)) {
+        ExecMemory::BeginWrite();
+        for (const auto& patch : patched) *patch.first = patch.second;
+        return st;
+    }
+    ExecMemory::BeginWrite();
+    st.stubbed = patched.size();
+#else
+    (void)writeBase; (void)execBase; (void)minVaddr; (void)segments;
+    (void)tsdSlotOffset; (void)tlsPointerOffset;
+#endif
     return st;
 }
 

@@ -70,6 +70,7 @@ public final class InputMethodManager {
     private static native boolean showSoftInputNative(int flags);
     private static native boolean hideSoftInputNative();
     private static native boolean isSoftInputVisibleNative();
+    private static native void setSoftInputTraitsNative(int inputType, int imeOptions);
 
     /**
      * Register the connection host keystrokes should be applied to.
@@ -87,6 +88,21 @@ public final class InputMethodManager {
 
     public static synchronized InputConnection getCurrentInputConnection() {
         return sCurrentConnection;
+    }
+
+    /**
+     * Stop routing text to {@code view}, if it is the current editor.
+     *
+     * Called when an editor loses focus: text typed afterwards must not land in a
+     * field the user has left.
+     */
+    public void detach(View view) {
+        synchronized (InputMethodManager.class) {
+            if (sCurrentView != view) return;
+            sCurrentView = null;
+            sCurrentConnection = null;
+            if (mServedView == view) mServedView = null;
+        }
     }
 
     /**
@@ -111,6 +127,17 @@ public final class InputMethodManager {
             return;
         }
         try {
+            // Return is a key, not text: a single-line field turns it into its editor
+            // action, which commitText("\n") would never do. A connection that does not
+            // take the key gets the line break as text instead.
+            if ("\n".equals(text)) {
+                final boolean down = ic.sendKeyEvent(new android.view.KeyEvent(
+                        android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_ENTER));
+                ic.sendKeyEvent(new android.view.KeyEvent(
+                        android.view.KeyEvent.ACTION_UP, android.view.KeyEvent.KEYCODE_ENTER));
+                if (!down) ic.commitText(text, 1);
+                return;
+            }
             // newCursorPosition = 1: the cursor follows the inserted text, which is
             // what a keyboard insertion means.
             ic.commitText(text, 1);
@@ -234,7 +261,16 @@ public final class InputMethodManager {
             attrs.packageName = view.getContext() != null
                     ? view.getContext().getPackageName() : null;
             InputConnection ic = view.onCreateInputConnection(attrs);
-            if (ic != null) setCurrentInputConnection(view, ic);
+            if (ic != null) {
+                setCurrentInputConnection(view, ic);
+                // The keyboard's layout, secure entry and return key follow this field.
+                try {
+                    setSoftInputTraitsNative(attrs.inputType, attrs.imeOptions);
+                } catch (Throwable t) {
+                    android.util.Log.w("InputMethodManager",
+                            "keyboard traits could not reach the host: " + t.toString());
+                }
+            }
         } catch (Throwable t) {
             setCurrentInputConnection(view, null);
             android.util.Log.e("InputMethodManager",

@@ -27,6 +27,11 @@ class FileURLConnection extends URLConnection {
         return new FileInputStream(file);
     }
 
+    public String getContentType() {
+        String t = guessContentTypeFromName(file.getName());
+        return t != null ? t : "application/octet-stream";
+    }
+
     public int getContentLength() {
         long len = file.length();
         return len > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) len;

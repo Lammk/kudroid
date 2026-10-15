@@ -19,6 +19,12 @@ public final class ActivityThread {
     public static final int TOUCH_EVENT = 104;
     public static final int TEXT_INPUT = 105;
     public static final int DELETE_BACKWARD = 106;
+    private static final int SURFACE_CHANGED = 107;
+    private static final int PERMISSION_RESULT = 108;
+    private static final int CAMERA_EVENTS = 109;
+    private static final int NETWORK_CHANGED = 110;
+    private static boolean sNetworkChangeQueued;
+    private static boolean sCameraEventsQueued;
 
     private static ActivityThread sCurrentActivityThread;
     private Activity mInitialActivity;
@@ -110,6 +116,117 @@ public final class ActivityThread {
                 case DELETE_BACKWARD:
                     android.view.inputmethod.InputMethodManager.deliverDeleteBackward();
                     break;
+                case SURFACE_CHANGED:
+                    performSurfaceTraversal();
+                    break;
+                case NETWORK_CHANGED:
+                    sNetworkChangeQueued = false;
+                    android.net.ConnectivityManager.dispatchNetworkChange();
+                    break;
+                case CAMERA_EVENTS:
+                    sCameraEventsQueued = false;
+                    android.hardware.Camera.dispatchPending();
+                    break;
+                case PERMISSION_RESULT:
+                    if (msg.obj instanceof String[]) deliverPermissionResult(msg.arg1, (String[]) msg.obj);
+                    break;
+            }
+        }
+    }
+
+    /**
+     * Queue the outcome of Activity.requestPermissions.
+     *
+     * Both lists are comma separated and parallel: permission names, and
+     * PERMISSION_GRANTED (0) / PERMISSION_DENIED (-1) for each.
+     */
+    public static void postPermissionResult(int requestCode, String permissionsCsv,
+                                            String resultsCsv) {
+        ActivityThread thread = sCurrentActivityThread;
+        if (thread == null || thread.mH == null) return;
+        Message msg = Message.obtain();
+        msg.what = PERMISSION_RESULT;
+        msg.arg1 = requestCode;
+        msg.obj = new String[] { permissionsCsv, resultsCsv };
+        thread.mH.sendMessage(msg);
+    }
+
+    private void deliverPermissionResult(int requestCode, String[] csvs) {
+        if (mInitialActivity == null || csvs[0] == null || csvs[1] == null) return;
+        String[] permissions = csvs[0].split(",");
+        String[] results = csvs[1].split(",");
+        int[] grantResults = new int[permissions.length];
+        for (int i = 0; i < grantResults.length; ++i) {
+            grantResults[i] = i < results.length && "0".equals(results[i].trim())
+                    ? android.content.pm.PackageManager.PERMISSION_GRANTED
+                    : android.content.pm.PackageManager.PERMISSION_DENIED;
+        }
+        mInitialActivity.onRequestPermissionsResult(requestCode, permissions, grantResults);
+    }
+
+    /** Queue the host's network path change for ConnectivityManager callbacks; Looper thread only. */
+    public static void postNetworkChanged() {
+        ActivityThread thread = sCurrentActivityThread;
+        if (thread == null || thread.mH == null || sNetworkChangeQueued) return;
+        sNetworkChangeQueued = true;
+        thread.mH.sendEmptyMessage(NETWORK_CHANGED);
+    }
+
+    /** Queue camera frames, photos and errors the host delivered; Looper thread only. */
+    public static void postCameraEvents() {
+        ActivityThread thread = sCurrentActivityThread;
+        if (thread == null || thread.mH == null || sCameraEventsQueued) return;
+        sCameraEventsQueued = true;
+        thread.mH.sendEmptyMessage(CAMERA_EVENTS);
+    }
+
+    public static void postSurfaceChanged() {
+        ActivityThread thread = sCurrentActivityThread;
+        if (thread != null && thread.mH != null) {
+            thread.mH.sendEmptyMessage(SURFACE_CHANGED);
+        }
+    }
+
+    private void performSurfaceTraversal() {
+        if (mInitialActivity == null || mInitialActivity.isDestroyed()) return;
+        mInitialActivity.renderViewHierarchy();
+        android.view.Window window = mInitialActivity.getWindow();
+        updateViewSurfaces(window.getDecorView(), window.hasSurface());
+        window.dispatchSurfaceReady();
+    }
+
+    /** Complete UI layout before a renderer reads its initial dimensions. */
+    public static boolean awaitSurfaceLayout() {
+        final ActivityThread thread = sCurrentActivityThread;
+        if (thread == null || thread.mH == null) return true;
+        if (Looper.myLooper() == thread.mH.getLooper()) {
+            thread.performSurfaceTraversal();
+            return true;
+        }
+        final java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(1);
+        if (!thread.mH.post(new Runnable() {
+            @Override public void run() {
+                try { thread.performSurfaceTraversal(); }
+                finally { done.countDown(); }
+            }
+        })) return false;
+        try {
+            return done.await(5, java.util.concurrent.TimeUnit.SECONDS);
+        } catch (InterruptedException interrupted) {
+            return false;
+        }
+    }
+
+    private static void updateViewSurfaces(android.view.View view, boolean ready) {
+        if (view instanceof android.view.SurfaceView) {
+            android.view.SurfaceView surface = (android.view.SurfaceView) view;
+            if (ready) surface.dispatchSurfaceReady(surface.getWidth(), surface.getHeight());
+            else surface.dispatchSurfaceDestroyed();
+        }
+        if (view instanceof android.view.ViewGroup) {
+            android.view.ViewGroup group = (android.view.ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); ++i) {
+                updateViewSurfaces(group.getChildAt(i), ready);
             }
         }
     }
@@ -832,8 +949,57 @@ public final class ActivityThread {
         }
     }
 
+    /**
+     * The URL a component-less VIEW/DIAL/SENDTO intent asks the system to open, or null when
+     * the intent targets something else. Schemes that point at the app's own storage are
+     * never forwarded.
+     */
+    public static String externalUrl(Intent intent) {
+        if (intent == null || intent.getComponent() != null) return null;
+        String action = intent.getAction();
+        if (action == null) return null;
+        if (!Intent.ACTION_VIEW.equals(action)
+                && !"android.intent.action.DIAL".equals(action)
+                && !"android.intent.action.SENDTO".equals(action)) {
+            return null;
+        }
+        android.net.Uri data = intent.getData();
+        if (data == null) return null;
+        String url = data.toString();
+        String scheme = data.getScheme();
+        if (url == null || scheme == null) return null;
+        scheme = scheme.toLowerCase();
+        if (scheme.equals("file") || scheme.equals("content") || scheme.equals("javascript")
+                || scheme.equals("android.resource")) {
+            return null;
+        }
+        String rest = url.substring(scheme.length() + 1);
+        if (rest.startsWith("//")) rest = rest.substring(2);
+        if (scheme.equals("market")) {
+            return "https://play.google.com/store/apps/" + rest;
+        }
+        if (scheme.equals("vnd.youtube")) {
+            return "https://www.youtube.com/watch?v=" + rest;
+        }
+        return url;
+    }
+
+    /** Hands a URL intent to the host's browser/mail/phone handler. */
+    public static boolean openExternal(Intent intent) {
+        String url = externalUrl(intent);
+        if (url == null) return false;
+        try {
+            Activity.nativeOpenUrl(url);
+            return true;
+        } catch (Throwable t) {
+            android.util.Log.e("ActivityThread", "openExternal failed: " + t);
+            return false;
+        }
+    }
+
     void handleStartActivity(final Activity from, final Intent intent) {
         if (intent == null) return;
+        if (openExternal(intent)) return;
         String target = null;
         if (intent.getComponent() != null) {
             target = intent.getComponent().getClassName();

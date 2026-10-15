@@ -50,9 +50,9 @@ public class AudioTrack {
     private static native long nativeCreate(int sampleRateInHz, int channelCount,
                                             int audioFormat, int bufferSizeInBytes);
     private static native int nativeWrite(long track, byte[] data, int offsetInBytes,
-                                          int sizeInBytes);
+                                          int sizeInBytes, int writeMode);
     private static native int nativeWriteShorts(long track, short[] data, int offsetInShorts,
-                                                int sizeInShorts);
+                                                int sizeInShorts, int writeMode);
     private static native int nativePlay(long track);
     private static native int nativePause(long track);
     private static native int nativeStop(long track);
@@ -176,7 +176,9 @@ public class AudioTrack {
         if (mState != STATE_INITIALIZED) {
             throw new IllegalStateException("play() called on uninitialized AudioTrack");
         }
-        nativePlay(nativeTrack);
+        if (nativePlay(nativeTrack) != SUCCESS) {
+            throw new IllegalStateException("Audio output failed to start");
+        }
         mPlayState = PLAYSTATE_PLAYING;
     }
 
@@ -212,38 +214,43 @@ public class AudioTrack {
     // Writing.
 
     public int write(byte[] audioData, int offsetInBytes, int sizeInBytes) {
-        if (mState != STATE_INITIALIZED || audioData == null) return ERROR_INVALID_OPERATION;
-        if (offsetInBytes < 0 || sizeInBytes < 0 ||
-            offsetInBytes + sizeInBytes > audioData.length) {
-            return ERROR_BAD_VALUE;
-        }
-        return nativeWrite(nativeTrack, audioData, offsetInBytes, sizeInBytes);
+        return write(audioData, offsetInBytes, sizeInBytes, WRITE_BLOCKING);
     }
 
     public int write(byte[] audioData, int offsetInBytes, int sizeInBytes, int writeMode) {
-        return write(audioData, offsetInBytes, sizeInBytes);
+        if (mState != STATE_INITIALIZED || audioData == null) return ERROR_INVALID_OPERATION;
+        if ((writeMode != WRITE_BLOCKING && writeMode != WRITE_NON_BLOCKING) ||
+            offsetInBytes < 0 || sizeInBytes < 0 || offsetInBytes > audioData.length ||
+            sizeInBytes > audioData.length - offsetInBytes) return ERROR_BAD_VALUE;
+        return nativeWrite(nativeTrack, audioData, offsetInBytes, sizeInBytes, writeMode);
     }
 
     public int write(short[] audioData, int offsetInShorts, int sizeInShorts) {
-        if (mState != STATE_INITIALIZED || audioData == null) return ERROR_INVALID_OPERATION;
-        if (offsetInShorts < 0 || sizeInShorts < 0 ||
-            offsetInShorts + sizeInShorts > audioData.length) {
-            return ERROR_BAD_VALUE;
-        }
-        return nativeWriteShorts(nativeTrack, audioData, offsetInShorts, sizeInShorts);
+        return write(audioData, offsetInShorts, sizeInShorts, WRITE_BLOCKING);
     }
 
     public int write(short[] audioData, int offsetInShorts, int sizeInShorts, int writeMode) {
-        return write(audioData, offsetInShorts, sizeInShorts);
+        if (mState != STATE_INITIALIZED || audioData == null) return ERROR_INVALID_OPERATION;
+        if ((writeMode != WRITE_BLOCKING && writeMode != WRITE_NON_BLOCKING) ||
+            offsetInShorts < 0 || sizeInShorts < 0 || offsetInShorts > audioData.length ||
+            sizeInShorts > audioData.length - offsetInShorts) return ERROR_BAD_VALUE;
+        return nativeWriteShorts(nativeTrack, audioData, offsetInShorts, sizeInShorts, writeMode);
     }
 
     public int write(ByteBuffer audioData, int sizeInBytes, int writeMode) {
         if (mState != STATE_INITIALIZED || audioData == null) return ERROR_INVALID_OPERATION;
+        if (sizeInBytes < 0 || (writeMode != WRITE_BLOCKING && writeMode != WRITE_NON_BLOCKING)) {
+            return ERROR_BAD_VALUE;
+        }
         final int n = Math.min(sizeInBytes, audioData.remaining());
-        if (n <= 0) return 0;
+        if (n == 0) return 0;
+        final int position = audioData.position();
         final byte[] copy = new byte[n];
         audioData.get(copy, 0, n);
-        return nativeWrite(nativeTrack, copy, 0, n);
+        audioData.position(position);
+        final int written = nativeWrite(nativeTrack, copy, 0, n, writeMode);
+        if (written > 0) audioData.position(position + written);
+        return written;
     }
 
     // Volume.

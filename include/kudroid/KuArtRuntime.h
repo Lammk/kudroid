@@ -120,6 +120,17 @@ void kuart_post_touch_event_ex(int action, int pointerCount, const int* pointerI
 // by the Looper (MessageQueue.nativeDrainInput) so touch is built and dispatched
 // on the UI thread, never on a separate VM-locked worker. Returns events drained.
 int kuart_touch_drain_pending(void);
+void kuart_post_surface_changed(void);
+void kuart_surface_drain_pending(void);
+
+// Hand pending camera frames, photos and errors to the guest. Main Looper thread only.
+void kuart_camera_drain_pending(void);
+
+// Tell the guest the host's network path changed. Main Looper thread only.
+void kuart_network_drain_pending(void);
+
+// Apply queued keyboard input and permission results. Main Looper thread only.
+void kuart_host_events_drain(void);
 
 // Take the in-flight Java exception of the CALLING thread, if any, and clear it.
 //
@@ -157,12 +168,10 @@ int kuart_take_pending_exception(const char** out);
 void kuart_save_thread_state(size_t out_state[KUART_THREAD_STATE_WORDS]);
 void kuart_restore_thread_state(const size_t state[KUART_THREAD_STATE_WORDS]);
 
-// Dispatch text typed on the host keyboard into the guest's focused
-// InputConnection.
-//
-// Goes through ActivityThread rather than straight into the connection so it lands
-// on the Looper thread: an InputConnection edits the same buffer the app's UI reads,
-// and iOS delivers key input on its own main thread. `utf8` may hold more than one
+// Queue text typed on the host keyboard for the guest's focused InputConnection. Safe
+// from any thread and never waits on the VM: the main Looper applies it
+// (kuart_host_events_drain), since an InputConnection edits the same buffer the app's UI
+// reads and iOS delivers key input on its own main thread. `utf8` may hold more than one
 // character — autocorrect replacements, paste, and astral-plane emoji all arrive as
 // a single insertion.
 void kuart_dispatch_text_input(const char* utf8);
@@ -170,6 +179,12 @@ void kuart_dispatch_text_input(const char* utf8);
 // Backspace from the host keyboard. Separate from text input because it deletes
 // relative to the cursor rather than inserting.
 void kuart_dispatch_delete_backward(void);
+
+// Deliver the outcome of Activity.requestPermissions to the Activity on the Looper
+// thread. `permissionsCsv` and `resultsCsv` are parallel, comma-separated lists; each
+// result is 0 (granted) or -1 (denied).
+void kuart_dispatch_permission_result(int requestCode, const char* permissionsCsv,
+                                      const char* resultsCsv);
 
 const char* kuart_last_error(void);
 

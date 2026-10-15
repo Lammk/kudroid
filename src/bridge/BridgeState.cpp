@@ -112,9 +112,15 @@ extern "C" void kudroid_persistent_breadcrumb(const char* line) {
 // journal stayed empty on disk for the rest of the session while the watchdog
 // kept reporting "thread dump written to native_breadcrumbs.log".
 void kudroid_breadcrumb_invalidate_fd() {
-    int oldFd = g_breadcrumbFd.exchange(-2, std::memory_order_acq_rel);
+    // A lock-free writer may still hold the descriptor it loaded just before this
+    // swap. Closing it now lets the next open() reuse the number, so that stale write
+    // would land in an unrelated file. Retire it instead and close the one retired by
+    // the previous call, long past any in-flight write.
+    static std::atomic<int> s_retiredFd{-1};
+    const int oldFd = g_breadcrumbFd.exchange(-2, std::memory_order_acq_rel);
     if (oldFd >= 0) {
-        ::close(oldFd);
+        const int previous = s_retiredFd.exchange(oldFd, std::memory_order_acq_rel);
+        if (previous >= 0) ::close(previous);
     }
 }
 // Previously 16KB was too small: ELF loading and verbose lines filled the
@@ -300,7 +306,10 @@ void extractLastLines(const char* src, size_t srcLen, char* dst, size_t dstCap, 
 extern "C" void kudroid_append_crash_log(const char* text, size_t len) {
     if (!text || len == 0) return;
     if (len > 8192) len = 8192; // single line length limit
-    std::lock_guard<std::mutex> lock(g_crashBufMtx);
+    // The crash buffer is a best-effort mirror: a contended append is dropped rather
+    // than waited for, so the log path never blocks on a snapshot or a parked thread.
+    std::unique_lock<std::mutex> lock(g_crashBufMtx, std::try_to_lock);
+    if (!lock.owns_lock()) return;
     size_t cur = static_cast<size_t>(g_crashLen);
     const size_t cap = sizeof(g_crashBuf) - 1;
     if (len > cap - cur) {

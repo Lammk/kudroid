@@ -16,7 +16,9 @@
 #include <thread>
 
 #include "kudroid/platform/TouchEventQueue.h"
+#include "kudroid/platform/CameraShim.h"
 #include "kudroid/platform/FramePacer.h"
+#include "kudroid/platform/NetworkState.h"
 #include "kudroid/kuart/VmLock.h"
 
 #include "dex/dex_file-inl.h"
@@ -30,6 +32,8 @@
 #include "kudroid/kuart/Interpreter.h"
 #include "kudroid/kuart/LibCore.h"
 #include "kudroid/kuart/OatFile.h"
+
+extern "C" void kudroid_looper_wake_main(void);
 
 namespace {
 
@@ -68,6 +72,7 @@ struct Runtime {
 };
 
 Runtime* g_rt = nullptr;
+std::atomic<bool> g_surfaceChangePending{false};
 std::mutex g_mtx;
 std::string g_current_app_dir;
 void (*g_log_cb)(const char*) = nullptr;
@@ -236,6 +241,29 @@ bool EnsureTouchBuffers(int count) {
     return true;
 }
 }  // namespace
+
+extern "C" void kuart_post_surface_changed(void) {
+    g_surfaceChangePending.store(true, std::memory_order_release);
+    kudroid_looper_wake_main();
+}
+
+extern "C" void kuart_surface_drain_pending(void) {
+    if (g_surfaceChangePending.exchange(false, std::memory_order_acq_rel)) {
+        CallActivityThreadStatic("postSurfaceChanged", "()V", nullptr, 0);
+    }
+}
+
+extern "C" void kuart_camera_drain_pending(void) {
+    if (kudroid_camera_has_pending()) {
+        CallActivityThreadStatic("postCameraEvents", "()V", nullptr, 0);
+    }
+}
+
+extern "C" void kuart_network_drain_pending(void) {
+    if (kudroid_network_has_pending()) {
+        CallActivityThreadStatic("postNetworkChanged", "()V", nullptr, 0);
+    }
+}
 
 extern "C" int kuart_touch_drain_pending(void) {
     if (g_rt == nullptr || !g_rt->ready) return 0;
@@ -763,23 +791,83 @@ extern "C" void kuart_post_touch_event_ex(int action, int pointerCount, const in
     TouchQueue().push(action, x, y, pointerCount, pointerIds, xs, ys);
 }
 
-// Text from the host keyboard.
+// Input and results from the host UI thread.
 //
-// Routed through ActivityThread.postTextInput so it is queued on the Looper thread
-// rather than applied from whatever thread UIKit called on. The InputConnection edits
-// the same buffer the app's UI reads, and there is no lock between them — KuART
-// serialises bytecode with the VM lock, but that does not make an edit ordered with
-// respect to a draw already in progress.
+// The host thread only queues: entering the interpreter there would wait on the VM lock
+// behind whatever bytecode is running (a stalled keyboard), and would allocate on the
+// guest heap with no lock held. The main Looper drains the queue on its own thread
+// (kuart_host_events_drain, called from MessageQueue.nativeDrainInput) and hands each
+// event to ActivityThread, which applies it on the Looper thread — the only thread an
+// app expects its text and permission callbacks on.
+namespace {
+
+struct HostEvent {
+    enum Kind { kText, kBackspace, kPermission } kind;
+    int code = 0;
+    std::string first;
+    std::string second;
+};
+
+std::mutex g_hostEventMutex;
+std::vector<HostEvent> g_hostEvents;
+
+void PushHostEvent(HostEvent event) {
+    {
+        std::lock_guard<std::mutex> lock(g_hostEventMutex);
+        g_hostEvents.push_back(std::move(event));
+    }
+    kudroid_looper_wake_main();
+}
+
+}  // namespace
+
 extern "C" void kuart_dispatch_text_input(const char* utf8) {
-    if (g_rt == nullptr || !g_rt->ready || utf8 == nullptr || utf8[0] == '\0') return;
-    DexObject* text = reinterpret_cast<DexObject*>(g_rt->linker.NewString(utf8));
-    const DexValue arg = DexValue::Ref(text);
-    CallActivityThreadStatic("postTextInput", "(Ljava/lang/String;)V", &arg, 1);
+    if (utf8 == nullptr || utf8[0] == '\0') return;
+    PushHostEvent({HostEvent::kText, 0, utf8, std::string()});
 }
 
 extern "C" void kuart_dispatch_delete_backward(void) {
+    PushHostEvent({HostEvent::kBackspace, 0, std::string(), std::string()});
+}
+
+extern "C" void kuart_dispatch_permission_result(int requestCode, const char* permissionsCsv,
+                                                 const char* resultsCsv) {
+    if (permissionsCsv == nullptr || resultsCsv == nullptr) return;
+    PushHostEvent({HostEvent::kPermission, requestCode, permissionsCsv, resultsCsv});
+}
+
+extern "C" void kuart_host_events_drain(void) {
     if (g_rt == nullptr || !g_rt->ready) return;
-    CallActivityThreadStatic("postDeleteBackward", "()V", nullptr, 0);
+    std::vector<HostEvent> events;
+    {
+        std::lock_guard<std::mutex> lock(g_hostEventMutex);
+        events.swap(g_hostEvents);
+    }
+    for (const HostEvent& event : events) {
+        switch (event.kind) {
+            case HostEvent::kText: {
+                const DexValue arg = DexValue::Ref(
+                    reinterpret_cast<DexObject*>(g_rt->linker.NewString(event.first.c_str())));
+                CallActivityThreadStatic("postTextInput", "(Ljava/lang/String;)V", &arg, 1);
+                break;
+            }
+            case HostEvent::kBackspace:
+                CallActivityThreadStatic("postDeleteBackward", "()V", nullptr, 0);
+                break;
+            case HostEvent::kPermission: {
+                const DexValue args[3] = {
+                    DexValue::Int(event.code),
+                    DexValue::Ref(reinterpret_cast<DexObject*>(
+                        g_rt->linker.NewString(event.first.c_str()))),
+                    DexValue::Ref(reinterpret_cast<DexObject*>(
+                        g_rt->linker.NewString(event.second.c_str()))),
+                };
+                CallActivityThreadStatic("postPermissionResult",
+                                         "(ILjava/lang/String;Ljava/lang/String;)V", args, 3);
+                break;
+            }
+        }
+    }
 }
 
 extern "C" int kuart_take_pending_exception(const char** out) {

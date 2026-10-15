@@ -203,7 +203,9 @@ public class SystemPackageManager extends PackageManager {
     }
 
     @Override
-    public int checkPermission(String permName, String pkgName) { return PERMISSION_GRANTED; }
+    public int checkPermission(String permName, String pkgName) {
+        return RuntimePermissions.check(pkgName, permName);
+    }
 
     /**
      * Whether the device has a named feature.
@@ -211,9 +213,7 @@ public class SystemPackageManager extends PackageManager {
      * "true for everything" is wrong for the features an app acts on rather than merely
      * reports. FEATURE_GAMEPAD is the clearest: a game told a gamepad is present hides its
      * touch controls and then receives no input, because nothing here bridges iOS's
-     * GameController.framework. The same reasoning covers the camera and the microphone —
-     * both are absent from KuDroid, and claiming them makes an app open a capture session
-     * that fails much later.
+     * GameController.framework.
      *
      * Everything not named below still returns true. That default is deliberate: the
      * overwhelming majority of feature queries gate on graphics or platform capabilities
@@ -230,8 +230,11 @@ public class SystemPackageManager extends PackageManager {
         if (name.equals(FEATURE_GAMEPAD)) {
             return false;
         }
-        // No capture path exists for either.
-        if (name.equals(FEATURE_CAMERA) || name.equals(FEATURE_MICROPHONE)) {
+        // Camera and microphone are real, but only the original camera API is bridged:
+        // no flash control, and none of the Camera2 capability levels.
+        if (name.equals("android.hardware.camera.flash") ||
+                name.startsWith("android.hardware.camera.level.") ||
+                name.startsWith("android.hardware.camera.capability.")) {
             return false;
         }
         // Low-latency and pro audio describe guarantees KuDroid cannot make: audio goes
@@ -265,7 +268,14 @@ public class SystemPackageManager extends PackageManager {
         final ComponentName component = intent.getComponent();
         if (component == null) {
             // An implicit Intent needs intent-filter matching, which KuDroid does not
-            // parse. Null is the honest answer and is what apps check for.
+            // parse. The only implicit intents answered are URL ones, which the host opens.
+            if (android.app.ActivityThread.externalUrl(intent) != null) {
+                ResolveInfo ri = new ResolveInfo();
+                ri.activityInfo = new ActivityInfo();
+                ri.activityInfo.name = "com.android.browser.BrowserActivity";
+                ri.activityInfo.packageName = "com.android.browser";
+                return ri;
+            }
             return null;
         }
         try {

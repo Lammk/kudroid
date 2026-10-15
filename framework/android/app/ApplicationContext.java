@@ -45,6 +45,16 @@ public class ApplicationContext extends Context {
     }
 
     @Override
+    public void startActivity(android.content.Intent intent) {
+        ActivityThread.openExternal(intent);
+    }
+
+    @Override
+    public void startActivity(android.content.Intent intent, android.os.Bundle options) {
+        ActivityThread.openExternal(intent);
+    }
+
+    @Override
     public String getPackageCodePath() {
         return "/data/app/" + mPackageName + "/base.apk";
     }

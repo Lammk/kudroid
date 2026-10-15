@@ -1317,6 +1317,9 @@ int main() {
                                     {DexValue::Ref(nullptr)}, "new View(null)");
         if (view != nullptr) {
             DexValue r;
+            if (CallVirtual(view, "isInEditMode", "()Z", {}, &r, "View.isInEditMode")) {
+                Check(r.i == 0, "runtime views are outside editor mode");
+            }
             if (CallVirtual(view, "setSystemUiVisibility", "(I)V",
                             {DexValue::Int(0x00000504)}, &r, "setSystemUiVisibility") &&
                 CallVirtual(view, "getSystemUiVisibility", "()I", {}, &r,
@@ -1756,6 +1759,17 @@ int main() {
             }
         }
 
+        DexObject* surfaceView = NewObject("Landroid/view/SurfaceView;",
+                                           "(Landroid/content/Context;)V",
+                                           {DexValue::Ref(nullptr)}, "new SurfaceView");
+        if (surfaceView != nullptr) {
+            DexValue editMode;
+            if (CallVirtual(surfaceView, "isInEditMode", "()Z", {}, &editMode,
+                            "inherited SurfaceView.isInEditMode")) {
+                Check(editMode.i == 0, "surface views inherit runtime editor-mode behavior");
+            }
+        }
+
         DexObject* display = NewObject("Landroid/view/Display;", "()V", {}, "new Display");
         if (display != nullptr) {
             DexValue isHdr;
@@ -2087,6 +2101,48 @@ int main() {
                     &iconOut, "PointerIcon.create");
                 Check(created && iconOut.l != nullptr, "PointerIcon.create returns an icon");
             }
+        }
+
+        {
+            DexObject* paint = NewObject("Landroid/graphics/Paint;", "()V", {}, "new Paint");
+            DexValue color, oldTypeface, width;
+            Check(CallVirtual(paint, "setARGB", "(IIII)V",
+                    {DexValue::Int(255), DexValue::Int(17), DexValue::Int(34), DexValue::Int(51)},
+                    nullptr, "Paint.setARGB") &&
+                  CallVirtual(paint, "getColor", "()I", {}, &color, "Paint.getColor") &&
+                  static_cast<uint32_t>(color.i) == 0xff112233u, "Paint stores ARGB channels");
+            Check(CallVirtual(paint, "setTypeface", "(Landroid/graphics/Typeface;)Landroid/graphics/Typeface;",
+                              {DexValue::Ref(nullptr)}, &oldTypeface, "Paint.setTypeface") &&
+                  oldTypeface.l == nullptr, "Paint has the platform's returning setTypeface signature");
+            Check(CallVirtual(paint, "measureText", "(Ljava/lang/String;II)F",
+                              {Str("abcd"), DexValue::Int(1), DexValue::Int(3)}, &width,
+                              "Paint.measureText range") && width.f > 0, "text range has nonzero width");
+            Check(CallVirtual(paint, "setShadowLayer", "(FFFI)V",
+                              {DexValue::Float(2), DexValue::Float(1), DexValue::Float(1),
+                               DexValue::Int(0xff000000)}, nullptr, "Paint.setShadowLayer"),
+                  "Paint shadow API is executable");
+            DexValue bitmap, buffer;
+            Check(CallStatic("Landroid/graphics/Bitmap;", "createBitmap", "(III)Landroid/graphics/Bitmap;",
+                             {DexValue::Int(2), DexValue::Int(1), DexValue::Int(0)}, &bitmap,
+                             "texture bitmap") && bitmap.l, "texture bitmap is allocated");
+            DexObject* canvas = NewObject("Landroid/graphics/Canvas;", "(Landroid/graphics/Bitmap;)V",
+                                          {bitmap}, "bitmap Canvas");
+            Check(CallVirtual(canvas, "drawColor", "(I)V", {color}, nullptr, "bitmap Canvas.drawColor"),
+                  "Canvas draws into a texture bitmap");
+            Check(CallStatic("Ljava/nio/ByteBuffer;", "allocateDirect", "(I)Ljava/nio/ByteBuffer;",
+                             {DexValue::Int(8)}, &buffer, "pixel buffer") && buffer.l,
+                  "direct pixel buffer is allocated");
+            Check(CallVirtual(bitmap.l, "copyPixelsToBuffer", "(Ljava/nio/Buffer;)V",
+                              {buffer}, nullptr, "Bitmap.copyPixelsToBuffer"),
+                  "bitmap exports pixels into a direct buffer");
+            DexValue red, green, blue, alpha, position;
+            Check(CallVirtual(buffer.l, "get", "(I)B", {DexValue::Int(0)}, &red, "pixel red") &&
+                  CallVirtual(buffer.l, "get", "(I)B", {DexValue::Int(1)}, &green, "pixel green") &&
+                  CallVirtual(buffer.l, "get", "(I)B", {DexValue::Int(2)}, &blue, "pixel blue") &&
+                  CallVirtual(buffer.l, "get", "(I)B", {DexValue::Int(3)}, &alpha, "pixel alpha") &&
+                  CallVirtual(buffer.l, "position", "()I", {}, &position, "pixel buffer position") &&
+                  (red.i & 255) == 17 && (green.i & 255) == 34 && (blue.i & 255) == 51 &&
+                  (alpha.i & 255) == 255 && position.i == 8, "texture contains real RGBA pixels");
         }
 
         // Play Core Asset Delivery generic stubs

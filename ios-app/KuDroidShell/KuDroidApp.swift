@@ -221,6 +221,7 @@ struct KuDroidApp: App {
         IOSDiagnostics.shared.start()
         IOSDiagnostics.shared.applicationPhase("app-init")
         activateAudioSession()
+        KuDroidNetworkMonitor.shared.start()
     }
 
     var body: some Scene {
@@ -229,9 +230,6 @@ struct KuDroidApp: App {
                 if !session.activeGuestApp.isEmpty {
                     DedicatedAppRunnerView(
                         appName: session.activeGuestApp,
-                        onExit: {
-                            session.activeGuestApp = ""
-                        },
                         onCrash: { appName, tailLog in
                             session.activeGuestApp = ""
                             session.crashInfo = CrashInfo(appName: appName, tailLog: tailLog)

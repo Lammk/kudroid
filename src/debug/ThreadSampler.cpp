@@ -115,6 +115,35 @@ void describe_address(uint64_t addr, char* out, size_t outSize) {
     std::snprintf(out, outSize, "unknown");
 }
 
+// Frames walked per thread. Guest engines compile with frame pointers, so the chain
+// of saved fp/lr pairs is the call stack.
+constexpr int kMaxFrames = 24;
+
+// Parked in a wait that carries no information about why the process is stuck.
+bool is_idle_wait(const char* pc_text) {
+    static const char* const kIdle[] = {"psynch_cvwait", "workq_kernreturn", "mach_msg",
+                                        "semwait_signal", "kevent", "__select"};
+    for (const char* marker : kIdle) {
+        if (std::strstr(pc_text, marker) != nullptr) return true;
+    }
+    return false;
+}
+
+// Read one saved {fp, lr} pair from another thread's stack. vm_read_overwrite
+// fails cleanly on an unmapped address, which a bare dereference would not, and the
+// target is running, so a torn read is possible and every value is checked.
+bool read_frame(uint64_t fp, uint64_t* pair) {
+    if (fp == 0 || (fp & 0xf) != 0 || fp >= 0x0000ffffffffffffull) return false;
+    vm_size_t got = 0;
+    if (vm_read_overwrite(mach_task_self(), static_cast<vm_address_t>(fp),
+                          sizeof(uint64_t) * 2, reinterpret_cast<vm_address_t>(pair),
+                          &got) != KERN_SUCCESS ||
+        got != sizeof(uint64_t) * 2) {
+        return false;
+    }
+    return pair[1] != 0 && pair[1] < 0x0000ffffffffffffull;
+}
+
 #endif  // __APPLE__ && __aarch64__
 
 [[maybe_unused]] std::atomic<unsigned> g_sequence{0};
@@ -246,6 +275,31 @@ int thread_sample_report(const char* reason) {
         std::snprintf(line, sizeof(line), "thread-where seq=%u tid=%llu pc=%s lr=%s", seq,
                       static_cast<unsigned long long>(raw[i].tid), pc_text, lr_text);
         emit(line);
+
+        // Callers, for threads that are doing something. A parked worker's stack says
+        // nothing; a spinning thread or one blocked on a mutex is the one whose guest
+        // callers explain the hang.
+        // A parked thread reports only the guest frames that put it there: the wait
+        // site is what tells a stuck handshake from an idle worker.
+        const bool idle = is_idle_wait(pc_text);
+        int guestFrames = 0;
+        uint64_t frame = raw[i].fp;
+        for (int depth = 0; depth < kMaxFrames; ++depth) {
+            uint64_t pair[2] = {0, 0};
+            if (!read_frame(frame, pair)) break;
+            char text[320];
+            describe_address(pair[1], text, sizeof(text));
+            if (!idle || std::strstr(text, ".so+0x") != nullptr) {
+                char frame_line[480];
+                std::snprintf(frame_line, sizeof(frame_line),
+                              "thread-frame seq=%u tid=%llu #%d %s", seq,
+                              static_cast<unsigned long long>(raw[i].tid), depth, text);
+                emit(frame_line);
+                if (idle && ++guestFrames >= 4) break;
+            }
+            if (pair[0] <= frame) break;
+            frame = pair[0];
+        }
     }
 
     char footer[128];

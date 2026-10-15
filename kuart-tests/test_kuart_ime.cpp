@@ -186,6 +186,93 @@ int main() {
           "show and hide report false when the host has no registered callback");
     CallStatic("Landroid/view/inputmethod/InputMethodManager;", "resetForRelaunch", "()V", {}, nullptr);
 
+    // EditText end to end: focus, keyboard text, Return, cursor, and routing.
+    kudroid_set_soft_input_callbacks(ShowCallback, HideCallback);
+    g_showCalls = 0;
+    g_hideCalls = 0;
+    auto textOf = [](DexObject* editText) -> std::string {
+        DexValue editable, text;
+        if (!CallVirtual(editText, "getText", "()Landroid/text/Editable;", {}, &editable) ||
+            editable.l == nullptr) {
+            return "(null)";
+        }
+        CallVirtual(editable.l, "toString", "()Ljava/lang/String;", {}, &text);
+        return Utf8(text);
+    };
+    auto intOf = [](DexObject* object, const char* name) -> int {
+        DexValue v;
+        CallVirtual(object, name, "()I", {}, &v);
+        return v.i;
+    };
+    auto type = [](const char* text) {
+        CallStatic("Landroid/view/inputmethod/InputMethodManager;", "deliverText",
+                   "(Ljava/lang/String;)V", {Str(text)}, nullptr);
+    };
+    DexObject* edit = NewObject("Landroid/widget/EditText;", "(Landroid/content/Context;)V",
+                                {DexValue::Ref(context)});
+    DexObject* other = NewObject("Landroid/widget/EditText;", "(Landroid/content/Context;)V",
+                                 {DexValue::Ref(context)});
+    Check(edit != nullptr && other != nullptr, "EditText instances are available");
+
+    DexValue textEditor;
+    CallVirtual(edit, "onCheckIsTextEditor", "()Z", {}, &textEditor);
+    Check(textEditor.i == 1, "an EditText is a text editor");
+
+    DexValue touched;
+    DexValue down, up;
+    CallStatic("Landroid/view/MotionEvent;", "obtain", "(IFFJ)Landroid/view/MotionEvent;",
+               {DexValue::Int(0), DexValue::Float(5), DexValue::Float(5), DexValue::Long(1)}, &down);
+    CallStatic("Landroid/view/MotionEvent;", "obtain", "(IFFJ)Landroid/view/MotionEvent;",
+               {DexValue::Int(1), DexValue::Float(5), DexValue::Float(5), DexValue::Long(2)}, &up);
+    CallVirtual(edit, "onTouchEvent", "(Landroid/view/MotionEvent;)Z", {down}, &touched);
+    Check(touched.i == 1 && g_showCalls == 0, "touch DOWN is claimed and does not show the keyboard yet");
+    CallVirtual(edit, "onTouchEvent", "(Landroid/view/MotionEvent;)Z", {up}, &touched);
+    DexValue focused, accepting2;
+    CallVirtual(edit, "isFocused", "()Z", {}, &focused);
+    CallVirtual(manager, "isAcceptingText", "()Z", {}, &accepting2);
+    Check(touched.i == 1 && focused.i == 1 && g_showCalls == 1 && accepting2.i == 1,
+          "a tap focuses the EditText, raises the keyboard, and attaches its connection");
+
+    type("ab");
+    Check(textOf(edit) == "ab" && intOf(edit, "getSelectionStart") == 2,
+          "keyboard text lands in the EditText and the cursor follows it");
+    CallStatic("Landroid/view/inputmethod/InputMethodManager;", "deliverDeleteBackward", "()V", {},
+               nullptr);
+    Check(textOf(edit) == "a", "backspace removes the character before the cursor");
+    type("\n");
+    Check(textOf(edit) == "a\n", "Return in a multi-line field inserts a line break");
+
+    CallVirtual(edit, "setSingleLine", "(Z)V", {DexValue::Int(1)}, nullptr);
+    const int hidesBefore = g_hideCalls;
+    type("\n");
+    Check(textOf(edit) == "a\n" && g_hideCalls == hidesBefore + 1,
+          "Return in a single-line field is the Done action: no text, keyboard dismissed");
+
+    CallVirtual(edit, "setText", "(Ljava/lang/CharSequence;)V", {Str("xyz")}, nullptr);
+    Check(textOf(edit) == "xyz" && intOf(edit, "getSelectionStart") == 3,
+          "setText replaces the content and puts the cursor after it");
+    type("1");
+    CallVirtual(edit, "append", "(Ljava/lang/CharSequence;)V", {Str("!")}, nullptr);
+    Check(textOf(edit) == "xyz1!", "append adds at the end and typing continues after setText");
+
+    DexValue focusedOther;
+    CallVirtual(other, "requestFocus", "()Z", {}, nullptr);
+    CallVirtual(edit, "isFocused", "()Z", {}, &focused);
+    CallVirtual(other, "isFocused", "()Z", {}, &focusedOther);
+    Check(focused.i == 0 && focusedOther.i == 1, "focus is exclusive between EditTexts");
+    type("Q");
+    Check(textOf(other) == "Q" && textOf(edit) == "xyz1!",
+          "keyboard text goes to the focused EditText only");
+
+    CallVirtual(other, "setInputType", "(I)V", {DexValue::Int(0x81)}, nullptr);
+    CallVirtual(other, "setImeOptions", "(I)V", {DexValue::Int(3)}, nullptr);
+    CallVirtual(manager, "restartInput", "(Landroid/view/View;)V", {DexValue::Ref(other)}, nullptr);
+    Check(kudroid_get_soft_input_type() == 0x81 &&
+              (kudroid_get_soft_input_ime_options() & 0xff) == 3,
+          "the focused field's input type and action reach the host for the keyboard layout");
+    CallStatic("Landroid/view/inputmethod/InputMethodManager;", "resetForRelaunch", "()V", {}, nullptr);
+    kudroid_set_soft_input_callbacks(nullptr, nullptr);
+
     std::printf("=== %d checks, %d failures ===\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -197,6 +198,20 @@ void kudroid_set_permission_prompt_callback(kudroid_permission_prompt_cb cb);
 void kudroid_prompt_permission_request(const char* packageName, const char* permissionsCsv, int requestCode, void* activityHandle);
 void kudroid_submit_permission_response(void* activityHandle, int requestCode, const char* permissionsCsv, int granted);
 
+/// Authorization the host OS reports for a sensor the guest wants.
+/// kind: 0 = microphone, 1 = camera. status: 0 = not determined, 1 = authorized,
+/// 2 = denied or restricted.
+void kudroid_set_host_authorization(int kind, int status);
+int kudroid_get_host_authorization(int kind);
+
+/// 1 when the guest app may use `permission` now. RECORD_AUDIO and CAMERA need both the
+/// app's own grant and the host authorization; every other permission is granted.
+int kudroid_runtime_permission_granted(const char* packageName, const char* permission);
+
+/// Number of open microphone recorders. While non-zero the host audio session must
+/// allow input.
+int kudroid_audio_capture_active(void);
+
 // ── soft keyboard ────────────────────────────────────────────────────────────
 //
 // KuDroid ships no on-screen keyboard, so the guest's InputMethodManager forwards to
@@ -216,10 +231,23 @@ void kudroid_set_soft_input_callbacks(kudroid_soft_input_show_cb show,
 int kudroid_show_soft_input(int flags);
 int kudroid_hide_soft_input(void);
 
+/// Opens a URL (http, https, mailto, tel, ...) in the system handler. The host registers the
+/// callback; the guest reaches it through startActivity(ACTION_VIEW). Returns 1 when a
+/// callback was registered and invoked.
+typedef void (*kudroid_open_url_cb)(const char* url);
+void kudroid_set_open_url_callback(kudroid_open_url_cb cb);
+int kudroid_open_url(const char* url);
+
 /// Real keyboard visibility, published by the host. iOS can dismiss the keyboard on
 /// its own, so the guest must read the state rather than assume its request stuck.
 int kudroid_is_soft_input_visible(void);
 void kudroid_set_soft_input_visible(int visible);
+
+/// The focused guest field's EditorInfo.inputType and imeOptions. Read when raising the
+/// keyboard, to pick its layout, secure entry and return-key label.
+void kudroid_set_soft_input_traits(int inputType, int imeOptions);
+int kudroid_get_soft_input_type(void);
+int kudroid_get_soft_input_ime_options(void);
 
 /// Text the user typed, delivered to the guest's focused InputConnection. UTF-8, and
 /// may be more than one character: autocorrect, paste and astral-plane emoji all
@@ -229,6 +257,50 @@ void kudroid_dispatch_text_input(const char* utf8);
 /// Backspace from the host keyboard. Separate from text input because it deletes
 /// relative to the cursor rather than inserting.
 void kudroid_dispatch_delete_backward(void);
+
+
+// ── camera ───────────────────────────────────────────────────────────────────
+//
+// Keep identical to include/kudroid/platform/CameraShim.h (host-facing part).
+
+typedef struct KuDroidCameraHost {
+    int (*count)(void);
+    // facing: 0 back, 1 front. orientation: clockwise degrees the raw frame needs to be
+    // upright with the device in its natural orientation. Returns 0 on success.
+    int (*info)(int cameraId, int* facing, int* orientation);
+    int (*open)(int cameraId);
+    void (*close)(void);
+    int (*start)(int width, int height);
+    void (*stop)(void);
+    int (*take_picture)(void);
+    // Show or hide the live preview over the guest's surface. `displayRotation` is the
+    // clockwise rotation the app asked for through setDisplayOrientation.
+    void (*set_preview)(int visible, int displayRotation);
+} KuDroidCameraHost;
+
+void kudroid_set_camera_host(const KuDroidCameraHost* host);
+
+// Host to guest.
+
+// One video frame as bi-planar 4:2:0 (a Y plane and an interleaved Cb/Cr plane).
+// `rotate180` rotates the stored frame, for sensors mounted upside down relative to
+// the orientation reported for the camera.
+void kudroid_camera_push_frame(const uint8_t* yPlane, int yStride, const uint8_t* cbcrPlane,
+                               int cbcrStride, int width, int height, int rotate180);
+// An encoded JPEG for the last takePicture. `length` <= 0 reports a failed capture.
+void kudroid_camera_push_photo(const uint8_t* jpeg, int length);
+// A fatal capture error; 1 is CAMERA_ERROR_UNKNOWN.
+void kudroid_camera_report_error(int error);
+
+// True while frames, photos or errors wait for the guest.
+int kudroid_camera_has_pending(void);
+
+
+// ── network ──────────────────────────────────────────────────────────────────
+//
+// The host's default network path. `transport` is ConnectivityManager.TYPE_*: 0 cellular,
+// 1 Wi-Fi, 9 Ethernet. Keep identical to include/kudroid/platform/NetworkState.h.
+void kudroid_set_network_state(int connected, int transport, int metered, int constrained);
 
 #ifdef __cplusplus
 }

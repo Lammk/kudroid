@@ -263,7 +263,7 @@ void* guestLibraryOpen(const char* filename) {
     kudroid::LibraryManager& manager = globalLibraryManager();
     for (const auto& pair : manager.libraries()) {
         if (std::filesystem::path(pair.first).filename().string() != wanted) continue;
-        void* handle = pair.second.get();
+        void* handle = pair.second;
         std::lock_guard<std::mutex> lock(guestHandleMutex());
         guestHandles().insert(handle);
         return handle;
@@ -286,7 +286,7 @@ void* guestLibraryOpen(const char* filename) {
         if (manager.loadRecursive(candidate.string())) {
             for (const auto& pair : manager.libraries()) {
                 if (std::filesystem::path(pair.first).filename().string() != wanted) continue;
-                void* handle = pair.second.get();
+                void* handle = pair.second;
                 std::lock_guard<std::mutex> lock(guestHandleMutex());
                 guestHandles().insert(handle);
                 return handle;
@@ -316,6 +316,8 @@ int guestLibraryOwns(void* handle) {
 // ── Run entry ────────────────────────────────────────────────────────────────
 
 extern "C" void kudroid_gpu_note_run_end(void);
+extern "C" void kudroid_audio_capture_release_all(void);
+extern "C" void kudroid_camera_reset(void);
 
 extern "C" const char* kudroid_run_apk(const char* appName) {
     const ApkRunStartResult start = begin_apk_run(std::chrono::milliseconds(1000));
@@ -1201,6 +1203,8 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                         // runs teardown traps the guest on the torn surface.
                         kudroid_unbind_metal_layer();
                         kudroid_gpu_note_run_end();
+                        kudroid_audio_capture_release_all();
+                        kudroid_camera_reset();
                         kudroid::blocking_wait_reset_for_test();
                     }
                 }

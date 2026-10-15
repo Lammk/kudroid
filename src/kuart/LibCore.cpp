@@ -1,5 +1,6 @@
 #include "kudroid/kuart/LibCore.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -20,6 +21,10 @@
 #include <thread>
 #include <unistd.h>
 #include <vector>
+#if defined(__APPLE__)
+#include <memory>
+#include <pthread.h>
+#endif
 
 #include "kudroid/kudroid_bridge.h"
 #include "kudroid/VFSPathRemapper.h"
@@ -36,6 +41,9 @@
 #include "kudroid/ResourceTable.h"
 #include "kudroid/platform/CpuInfo.h"
 #include "kudroid/platform/AudioShim.h"
+#include "kudroid/platform/AudioCapture.h"
+#include "kudroid/platform/CameraShim.h"
+#include "kudroid/platform/NetworkState.h"
 #include "kudroid/platform/FramePacer.h"
 #include "kudroid/platform/JavaCanvasRenderer.h"
 #include "kudroid/platform/GraphicsShim.h"
@@ -308,6 +316,26 @@ int64_t GetLongField(DexObject* obj, const char* name) {
     if (obj == nullptr || obj->clazz == nullptr) return 0;
     DexField* f = obj->clazz->FindInstanceField(name, "J");
     return f != nullptr ? obj->GetField<int64_t>(f->offset_or_slot) : 0;
+}
+
+int32_t GetIntField(DexObject* obj, const char* name, int32_t fallback) {
+    if (obj == nullptr || obj->clazz == nullptr) return fallback;
+    DexField* f = obj->clazz->FindInstanceField(name, "I");
+    return f != nullptr ? obj->GetField<int32_t>(f->offset_or_slot) : fallback;
+}
+
+// Maps java.lang.Thread priority to a host scheduling class for the calling thread.
+// Only raises: a normal-priority thread keeps the default class.
+void ApplyHostThreadPriority(int32_t javaPriority) {
+#if defined(__APPLE__)
+    if (javaPriority >= 10) {
+        pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+    } else if (javaPriority >= 7) {
+        pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
+    }
+#else
+    (void)javaPriority;
+#endif
 }
 
 // Splits a DEX method signature into parameter descriptors: "(ILjava/lang/String;[I)V"
@@ -2323,16 +2351,47 @@ bool Invoke_java_lang_Thread(Interpreter* interp, const char* name, const DexVal
             return true;
         }
 
-        std::thread worker([interp, self, body]() {
-            t_current_thread = self;
-            DexValue arg = DexValue::Ref(self);
-            // Execute takes the VM lock itself at depth 0.
-            interp->Execute(body, &arg, 1);
-            interp->ClearPendingException();
-        });
+        // Read on the starting thread, which holds the VM lock.
+        const int32_t priority = GetIntField(self, "priority", 5);
+
+        // A Java thread runs interpreter frames and whatever guest code its natives
+        // call (an audio mixer's DSP graph, for one) on one host stack. The host
+        // default of 512KB overflows there and the guard page raises a fault inside
+        // the guest. Match the stack guest pthreads get.
+        struct ThreadStart {
+            Interpreter* interp;
+            DexObject* self;
+            DexMethod* body;
+            int32_t priority;
+        };
+        constexpr size_t kJavaThreadStackSize = 16u * 1024u * 1024u;
+        auto* start = new ThreadStart{interp, self, body, priority};
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        pthread_attr_setstacksize(&attr, kJavaThreadStackSize);
+        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+        pthread_t worker;
+        const int rc = pthread_create(
+            &worker, &attr,
+            [](void* raw) -> void* {
+                std::unique_ptr<ThreadStart> t(static_cast<ThreadStart*>(raw));
+                ApplyHostThreadPriority(t->priority);
+                t_current_thread = t->self;
+                DexValue arg = DexValue::Ref(t->self);
+                // Execute takes the VM lock itself at depth 0.
+                t->interp->Execute(t->body, &arg, 1);
+                t->interp->ClearPendingException();
+                return nullptr;
+            },
+            start);
+        pthread_attr_destroy(&attr);
+        if (rc != 0) {
+            delete start;
+            interp->ThrowException("Ljava/lang/OutOfMemoryError;", "pthread_create failed");
+            return true;
+        }
         SetLongField(self, "nativePeer",
-                     static_cast<int64_t>(std::hash<std::thread::id>{}(worker.get_id())));
-        worker.detach();
+                     static_cast<int64_t>(reinterpret_cast<uintptr_t>(worker)));
         return true;
     }
     return false;
@@ -2667,6 +2726,18 @@ bool Invoke_android_graphics_Canvas(Interpreter* /*interp*/, const char* name, c
             args[4].f);
         return true;
     }
+    if (std::strcmp(name, "native_drawBitmapText") == 0) {
+        auto* pixels = reinterpret_cast<DexArray*>(args[0].l);
+        const int width = args[1].i, height = args[2].i;
+        if (pixels != nullptr && width > 0 && height > 0 &&
+            static_cast<int64_t>(width) * height <= pixels->length) {
+            JavaCanvasRenderer::drawBitmapText(reinterpret_cast<uint32_t*>(pixels->Data()),
+                width, height, GetStringUtf8(args[3]), args[4].f, args[5].f,
+                static_cast<uint32_t>(args[6].i), args[7].f, args[8].f, args[9].f,
+                args[10].f, static_cast<uint32_t>(args[11].i));
+        }
+        return true;
+    }
     if (std::strcmp(name, "native_drawBitmap") == 0) {
         auto* arr = reinterpret_cast<DexArray*>(args[0].l);
         if (arr != nullptr) {
@@ -2714,11 +2785,287 @@ bool Invoke_android_app_Activity(Interpreter* /*interp*/, const char* name, cons
     if (std::strcmp(name, "setRequestedOrientation_native") == 0) {        kudroid_set_requested_orientation(args[0].i);
         return true;
     }
+    if (std::strcmp(name, "nativeOpenUrl") == 0) {
+        if (num_args < 1) return false;
+        const std::string url = GetStringUtf8(args[0]);
+        VmLockRelease unlocked;
+        kudroid_open_url(url.c_str());
+        return true;
+    }
     if (std::strcmp(name, "nativeRequestPermissions") == 0) {
-        DexObject* act = num_args > 0 ? args[0].l : nullptr;
-        const char* csv = num_args > 1 ? GetStringUtf8(args[1]) : "";
-        int reqCode = num_args > 2 ? args[2].i : 0;
-        kudroid_prompt_permission_request("", csv, reqCode, act);
+        // (activity, packageName, permissionsCsv, requestCode)
+        if (num_args < 4) return false;
+        DexObject* act = args[0].l;
+        const std::string pkg = GetStringUtf8(args[1]);
+        const std::string csv = GetStringUtf8(args[2]);
+        const int reqCode = args[3].i;
+        // The host may show UI and answer from another thread; the result comes back
+        // through the Looper, so nothing here waits on it.
+        VmLockRelease unlocked;
+        kudroid_prompt_permission_request(pkg.c_str(), csv.c_str(), reqCode, act);
+        return true;
+    }
+    return false;
+}
+
+bool Invoke_android_media_AudioRecord(Interpreter* /*interp*/, const char* name,
+                                      const DexValue* args, size_t num_args,
+                                      DexValue* result) {
+    if (std::strcmp(name, "nativeGetMinBufferSize") == 0) {
+        if (num_args < 2) return false;
+        *result = DexValue::Int(bionic_kudroid_audiorecord_min_buffer_size(args[0].i, args[1].i));
+        return true;
+    }
+    if (std::strcmp(name, "nativeCreate") == 0) {
+        if (num_args < 3) return false;
+        VmLockRelease unlocked;
+        *result = DexValue::Long(bionic_kudroid_audiorecord_create(args[0].i, args[1].i, args[2].i));
+        return true;
+    }
+    if (num_args < 1) return false;
+    const int64_t rec = args[0].j;
+    if (std::strcmp(name, "nativeStart") == 0) {
+        VmLockRelease unlocked;
+        *result = DexValue::Int(bionic_kudroid_audiorecord_start(rec));
+        return true;
+    }
+    if (std::strcmp(name, "nativeStop") == 0) {
+        VmLockRelease unlocked;
+        *result = DexValue::Int(bionic_kudroid_audiorecord_stop(rec));
+        return true;
+    }
+    if (std::strcmp(name, "nativeRelease") == 0) {
+        VmLockRelease unlocked;
+        *result = DexValue::Int(bionic_kudroid_audiorecord_release(rec));
+        return true;
+    }
+    const bool isBytes = std::strcmp(name, "nativeRead") == 0;
+    if (isBytes || std::strcmp(name, "nativeReadShorts") == 0) {
+        // (rec, array, offset, size, blocking); offset and size count array elements.
+        if (num_args < 5) return false;
+        auto* data = reinterpret_cast<DexArray*>(args[1].l);
+        const int32_t offset = args[2].i;
+        const int32_t count = args[3].i;
+        if (data == nullptr) {
+            *result = DexValue::Int(-3);  // ERROR_INVALID_OPERATION
+            return true;
+        }
+        const size_t elem = isBytes ? 1 : sizeof(int16_t);
+        if (offset < 0 || count < 0 || offset > data->length || count > data->length - offset ||
+            static_cast<size_t>(count) > static_cast<size_t>(INT32_MAX) / elem) {
+            *result = DexValue::Int(-2);  // ERROR_BAD_VALUE
+            return true;
+        }
+        std::vector<uint8_t> pcm(static_cast<size_t>(count) * elem);
+        int32_t got;
+        {
+            VmLockRelease unlocked;
+            got = bionic_kudroid_audiorecord_read(rec, pcm.data(),
+                                                  static_cast<int32_t>(pcm.size()), args[4].i != 0);
+        }
+        if (got > 0) {
+            std::memcpy(data->Data() + static_cast<size_t>(offset) * elem, pcm.data(),
+                        static_cast<size_t>(got));
+        }
+        *result = DexValue::Int(got > 0 ? got / static_cast<int32_t>(elem) : got);
+        return true;
+    }
+    return false;
+}
+
+bool Invoke_android_hardware_Camera(Interpreter* /*interp*/, const char* name,
+                                    const DexValue* args, size_t num_args, DexValue* result) {
+    if (std::strcmp(name, "nativeCount") == 0) {
+        *result = DexValue::Int(bionic_kudroid_camera_count());
+        return true;
+    }
+    if (std::strcmp(name, "nativeInfo") == 0) {
+        if (num_args < 1) return false;
+        *result = DexValue::Int(bionic_kudroid_camera_info(args[0].i));
+        return true;
+    }
+    // Session control crosses into the host, which may take a while to answer.
+    if (std::strcmp(name, "nativeOpen") == 0) {
+        if (num_args < 1) return false;
+        VmLockRelease unlocked;
+        *result = DexValue::Int(bionic_kudroid_camera_open(args[0].i));
+        return true;
+    }
+    if (std::strcmp(name, "nativeClose") == 0) {
+        VmLockRelease unlocked;
+        bionic_kudroid_camera_close();
+        return true;
+    }
+    if (std::strcmp(name, "nativeStart") == 0) {
+        if (num_args < 2) return false;
+        VmLockRelease unlocked;
+        *result = DexValue::Int(bionic_kudroid_camera_start(args[0].i, args[1].i));
+        return true;
+    }
+    if (std::strcmp(name, "nativeStop") == 0) {
+        VmLockRelease unlocked;
+        bionic_kudroid_camera_stop();
+        return true;
+    }
+    if (std::strcmp(name, "nativeTakePicture") == 0) {
+        VmLockRelease unlocked;
+        *result = DexValue::Int(bionic_kudroid_camera_take_picture());
+        return true;
+    }
+    if (std::strcmp(name, "nativeSetPreviewDisplay") == 0) {
+        if (num_args < 2) return false;
+        VmLockRelease unlocked;
+        bionic_kudroid_camera_set_preview(args[0].i, args[1].i);
+        return true;
+    }
+    if (std::strcmp(name, "nativeEvents") == 0) {
+        *result = DexValue::Int(bionic_kudroid_camera_events());
+        return true;
+    }
+    if (std::strcmp(name, "nativeFrameSize") == 0) {
+        *result = DexValue::Int(bionic_kudroid_camera_frame_size());
+        return true;
+    }
+    if (std::strcmp(name, "nativePhotoSize") == 0) {
+        *result = DexValue::Int(bionic_kudroid_camera_photo_size());
+        return true;
+    }
+    if (std::strcmp(name, "nativeTakeError") == 0) {
+        *result = DexValue::Int(bionic_kudroid_camera_take_error());
+        return true;
+    }
+    const bool isFrame = std::strcmp(name, "nativeCopyFrame") == 0;
+    if (isFrame || std::strcmp(name, "nativeCopyPhoto") == 0) {
+        if (num_args < 1) return false;
+        auto* dst = reinterpret_cast<DexArray*>(args[0].l);
+        if (dst == nullptr) {
+            *result = DexValue::Int(0);
+            return true;
+        }
+        *result = DexValue::Int(isFrame ? bionic_kudroid_camera_copy_frame(dst->Data(), dst->length)
+                                        : bionic_kudroid_camera_copy_photo(dst->Data(), dst->length));
+        return true;
+    }
+    return false;
+}
+
+// Bitmap pixel work too heavy for interpreted loops. Pixels are ARGB ints; the byte layouts
+// below are Bitmap.Config's (ARGB_8888 is premultiplied R, G, B, A in memory).
+bool Invoke_android_graphics_Bitmap(Interpreter* interp, const char* name, const DexValue* args,
+                                    size_t num_args, DexValue* /*result*/) {
+    if (std::strcmp(name, "nativeFill") == 0) {
+        if (num_args < 2) return false;
+        auto* pixels = reinterpret_cast<DexArray*>(args[0].l);
+        if (pixels == nullptr) {
+            interp->ThrowException("Ljava/lang/NullPointerException;", "pixels");
+            return true;
+        }
+        auto* data = reinterpret_cast<int32_t*>(pixels->Data());
+        std::fill(data, data + pixels->length, args[1].i);
+        return true;
+    }
+    if (std::strcmp(name, "nativeFillRect") == 0) {
+        // (int[] pixels, int stride, int left, int top, int right, int bottom, int color);
+        // the Java caller has already clipped the rectangle to the bitmap.
+        if (num_args < 7) return false;
+        auto* pixels = reinterpret_cast<DexArray*>(args[0].l);
+        if (pixels == nullptr) {
+            interp->ThrowException("Ljava/lang/NullPointerException;", "pixels");
+            return true;
+        }
+        const int32_t stride = args[1].i, left = args[2].i, top = args[3].i;
+        const int32_t right = args[4].i, bottom = args[5].i;
+        if (stride <= 0 || left < 0 || top < 0 || left >= right || top >= bottom || right > stride ||
+            static_cast<int64_t>(bottom) * stride > pixels->length) {
+            interp->ThrowException("Ljava/lang/ArrayIndexOutOfBoundsException;", "fillRect range");
+            return true;
+        }
+        auto* data = reinterpret_cast<int32_t*>(pixels->Data());
+        for (int32_t y = top; y < bottom; ++y) {
+            std::fill(data + static_cast<int64_t>(y) * stride + left,
+                      data + static_cast<int64_t>(y) * stride + right, args[6].i);
+        }
+        return true;
+    }
+    if (std::strcmp(name, "nativeCopyPixels") == 0) {
+        // (int[] src, int config, byte[] dst, int dstOffset); config 0 ARGB_8888,
+        // 1 ALPHA_8, 2 RGB_565, 3 ARGB_4444.
+        if (num_args < 4) return false;
+        auto* src = reinterpret_cast<DexArray*>(args[0].l);
+        auto* dst = reinterpret_cast<DexArray*>(args[2].l);
+        const int config = args[1].i;
+        const int32_t offset = args[3].i;
+        if (src == nullptr || dst == nullptr) {
+            interp->ThrowException("Ljava/lang/NullPointerException;", "bitmap copy");
+            return true;
+        }
+        const size_t bpp = config == 0 ? 4 : config == 1 ? 1 : 2;
+        if (config < 0 || config > 3 || offset < 0 ||
+            static_cast<size_t>(src->length) * bpp > static_cast<size_t>(dst->length - offset)) {
+            interp->ThrowException("Ljava/lang/ArrayIndexOutOfBoundsException;", "bitmap copy range");
+            return true;
+        }
+        const auto* in = reinterpret_cast<const uint32_t*>(src->Data());
+        uint8_t* out = dst->Data() + offset;
+        for (int32_t i = 0; i < src->length; ++i) {
+            const uint32_t p = in[i];
+            const uint32_t a = p >> 24;
+            const uint32_t r = ((p >> 16) & 255) * a / 255;
+            const uint32_t g = ((p >> 8) & 255) * a / 255;
+            const uint32_t b = (p & 255) * a / 255;
+            switch (config) {
+                case 0:
+                    out[0] = static_cast<uint8_t>(r);
+                    out[1] = static_cast<uint8_t>(g);
+                    out[2] = static_cast<uint8_t>(b);
+                    out[3] = static_cast<uint8_t>(a);
+                    break;
+                case 1:
+                    out[0] = static_cast<uint8_t>(a);
+                    break;
+                case 2: {
+                    const uint32_t v = (((p >> 19) & 31) << 11) | (((p >> 10) & 63) << 5) |
+                                       ((p >> 3) & 31);
+                    out[0] = static_cast<uint8_t>(v);
+                    out[1] = static_cast<uint8_t>(v >> 8);
+                    break;
+                }
+                default: {
+                    const uint32_t v = ((a >> 4) << 12) | ((r >> 4) << 8) | ((g >> 4) << 4) |
+                                       (b >> 4);
+                    out[0] = static_cast<uint8_t>(v);
+                    out[1] = static_cast<uint8_t>(v >> 8);
+                    break;
+                }
+            }
+            out += bpp;
+        }
+        return true;
+    }
+    return false;
+}
+
+bool Invoke_android_net_ConnectivityManager(Interpreter* /*interp*/, const char* name,
+                                            const DexValue* /*args*/, size_t /*num_args*/,
+                                            DexValue* result) {
+    if (std::strcmp(name, "nativeState") == 0) {
+        *result = DexValue::Int(bionic_kudroid_network_state());
+        return true;
+    }
+    if (std::strcmp(name, "nativeTakeChange") == 0) {
+        *result = DexValue::Int(bionic_kudroid_network_take_change());
+        return true;
+    }
+    return false;
+}
+
+bool Invoke_android_content_pm_RuntimePermissions(Interpreter* /*interp*/, const char* name,
+                                                  const DexValue* args, size_t num_args,
+                                                  DexValue* result) {
+    if (std::strcmp(name, "isGrantedNative") == 0) {
+        if (num_args < 2) return false;
+        *result = DexValue::Int(kudroid_runtime_permission_granted(GetStringUtf8(args[0]),
+                                                                    GetStringUtf8(args[1])));
         return true;
     }
     return false;
@@ -2950,8 +3297,14 @@ bool Invoke_android_media_AudioTrack(Interpreter* interp, const char* name,
             *result = DexValue::Int(-2);  // ERROR_BAD_VALUE
             return true;
         }
-        *result = DexValue::Int(bionic_kudroid_audiotrack_write(
-            args[0].j, data->Data() + offset, size));
+        const int64_t track = args[0].j;
+        const bool blocking = num_args < 5 || args[4].i == 0;
+        std::vector<uint8_t> pcm(data->Data() + offset, data->Data() + offset + size);
+        {
+            VmLockRelease unlocked;
+            *result = DexValue::Int(bionic_kudroid_audiotrack_write_mode(
+                track, pcm.data(), size, blocking));
+        }
         return true;
     }
     if (std::strcmp(name, "nativeWriteShorts") == 0) {
@@ -2969,9 +3322,20 @@ bool Invoke_android_media_AudioTrack(Interpreter* interp, const char* name,
             *result = DexValue::Int(-2);
             return true;
         }
-        const int32_t written = bionic_kudroid_audiotrack_write(
-            args[0].j, data->Data() + static_cast<size_t>(offset) * sizeof(int16_t),
-            count * static_cast<int32_t>(sizeof(int16_t)));
+        if (count > INT32_MAX / 2) {
+            *result = DexValue::Int(-2);
+            return true;
+        }
+        const int64_t track = args[0].j;
+        const bool blocking = num_args < 5 || args[4].i == 0;
+        const auto* begin = data->Data() + static_cast<size_t>(offset) * sizeof(int16_t);
+        std::vector<uint8_t> pcm(begin, begin + count * sizeof(int16_t));
+        int32_t written;
+        {
+            VmLockRelease unlocked;
+            written = bionic_kudroid_audiotrack_write_mode(track, pcm.data(),
+                                                        count * 2, blocking);
+        }
         // Back to elements, because that is what the Java caller passed and expects.
         *result = DexValue::Int(written < 0 ? written
                                             : written / static_cast<int32_t>(sizeof(int16_t)));
@@ -2979,26 +3343,31 @@ bool Invoke_android_media_AudioTrack(Interpreter* interp, const char* name,
     }
     if (std::strcmp(name, "nativePlay") == 0) {
         if (num_args < 1) return false;
+        VmLockRelease unlocked;
         *result = DexValue::Int(bionic_kudroid_audiotrack_play(args[0].j));
         return true;
     }
     if (std::strcmp(name, "nativePause") == 0) {
         if (num_args < 1) return false;
+        VmLockRelease unlocked;
         *result = DexValue::Int(bionic_kudroid_audiotrack_pause(args[0].j));
         return true;
     }
     if (std::strcmp(name, "nativeStop") == 0) {
         if (num_args < 1) return false;
+        VmLockRelease unlocked;
         *result = DexValue::Int(bionic_kudroid_audiotrack_stop(args[0].j));
         return true;
     }
     if (std::strcmp(name, "nativeFlush") == 0) {
         if (num_args < 1) return false;
+        VmLockRelease unlocked;
         *result = DexValue::Int(bionic_kudroid_audiotrack_flush(args[0].j));
         return true;
     }
     if (std::strcmp(name, "nativeRelease") == 0) {
         if (num_args < 1) return false;
+        VmLockRelease unlocked;
         *result = DexValue::Int(bionic_kudroid_audiotrack_release(args[0].j));
         return true;
     }
@@ -3027,21 +3396,25 @@ bool Invoke_android_opengl_GLSurfaceView(Interpreter* interp, const char* name,
                                          DexValue* result) {
     if (std::strcmp(name, "nativeEglCreate") == 0) {
         if (num_args < 3) return false;
+        VmLockRelease unlocked;
         *result = DexValue::Long(bionic_kudroid_gl_surface_create(args[0].i, args[1].i, args[2].i));
         return true;
     }
     if (std::strcmp(name, "nativeEglMakeCurrent") == 0) {
         if (num_args < 1) return false;
+        VmLockRelease unlocked;
         *result = DexValue::Int(bionic_kudroid_gl_surface_make_current(args[0].j) ? 1 : 0);
         return true;
     }
     if (std::strcmp(name, "nativeEglSwap") == 0) {
         if (num_args < 1) return false;
+        VmLockRelease unlocked;
         *result = DexValue::Int(bionic_kudroid_gl_surface_swap(args[0].j) ? 1 : 0);
         return true;
     }
     if (std::strcmp(name, "nativeEglDestroy") == 0) {
         if (num_args < 1) return false;
+        VmLockRelease unlocked;
         bionic_kudroid_gl_surface_destroy(args[0].j);
         return true;
     }
@@ -3066,6 +3439,10 @@ bool Invoke_android_view_inputmethod_InputMethodManager(Interpreter* /*interp*/,
     }
     if (std::strcmp(name, "isSoftInputVisibleNative") == 0) {
         *result = DexValue::Int(kudroid_is_soft_input_visible() != 0 ? 1 : 0);
+        return true;
+    }
+    if (std::strcmp(name, "setSoftInputTraitsNative") == 0) {
+        if (num_args >= 2) kudroid_set_soft_input_traits(args[0].i, args[1].i);
         return true;
     }
     return false;
@@ -3602,6 +3979,10 @@ bool Invoke_android_os_MessageQueue(Interpreter* /*interp*/, const char* name,
     if (std::strcmp(name, "nativeDrainInput") == 0) {
         // Only the main queue owns touch; worker loopers must not steal it.
         if (num_args >= 1 && kudroid_looper_is_main(args[0].j)) {
+            kuart_surface_drain_pending();
+            kuart_camera_drain_pending();
+            kuart_network_drain_pending();
+            kuart_host_events_drain();
             kuart_touch_drain_pending();
         }
         return true;
@@ -3690,6 +4071,30 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
     if (std::strcmp(desc, "Landroid/os/MessageQueue;") == 0) {
         return Invoke_android_os_MessageQueue(interp, name, args, num_args, result);
     }
+    if (std::strcmp(desc, "Landroid/content/pm/RuntimePermissions;") == 0) {
+        return Invoke_android_content_pm_RuntimePermissions(interp, name, args, num_args, result);
+    }
+    if (std::strcmp(desc, "Landroid/media/AudioRecord;") == 0) {
+        return Invoke_android_media_AudioRecord(interp, name, args, num_args, result);
+    }
+    if (std::strcmp(desc, "Landroid/hardware/Camera;") == 0) {
+        return Invoke_android_hardware_Camera(interp, name, args, num_args, result);
+    }
+    if (std::strcmp(desc, "Landroid/graphics/Bitmap;") == 0) {
+        return Invoke_android_graphics_Bitmap(interp, name, args, num_args, result);
+    }
+    if (std::strcmp(desc, "Landroid/net/ConnectivityManager;") == 0) {
+        return Invoke_android_net_ConnectivityManager(interp, name, args, num_args, result);
+    }
+    if (std::strcmp(desc, "Llibcore/io/KuNet;") == 0) {
+        return Invoke_libcore_io_KuNet(interp, name, args, num_args, result);
+    }
+    if (std::strcmp(desc, "Llibcore/io/KuTls;") == 0) {
+        return Invoke_libcore_io_KuTls(interp, name, args, num_args, result);
+    }
+    if (std::strcmp(desc, "Llibcore/io/KuZlib;") == 0) {
+        return Invoke_libcore_io_KuZlib(interp, name, args, num_args, result);
+    }
     // AudioTrack is the Java audio path used by FMOD.
     if (std::strcmp(desc, "Landroid/media/AudioTrack;") == 0) {
         return Invoke_android_media_AudioTrack(interp, name, args, num_args, result);
@@ -3733,6 +4138,14 @@ bool LibCoreHasMethod(const DexMethod* method) {
             std::strcmp(desc, "Landroid/content/res/Resources;") == 0 ||
             std::strcmp(desc, "Landroid/view/Display;") == 0 ||
             std::strcmp(desc, "Landroid/media/AudioTrack;") == 0 ||
+            std::strcmp(desc, "Landroid/content/pm/RuntimePermissions;") == 0 ||
+            std::strcmp(desc, "Landroid/media/AudioRecord;") == 0 ||
+            std::strcmp(desc, "Landroid/hardware/Camera;") == 0 ||
+            std::strcmp(desc, "Landroid/graphics/Bitmap;") == 0 ||
+            std::strcmp(desc, "Landroid/net/ConnectivityManager;") == 0 ||
+            std::strcmp(desc, "Llibcore/io/KuNet;") == 0 ||
+            std::strcmp(desc, "Llibcore/io/KuTls;") == 0 ||
+            std::strcmp(desc, "Llibcore/io/KuZlib;") == 0 ||
             std::strcmp(desc, "Landroid/view/Window;") == 0 ||
             std::strcmp(desc, "Landroid/view/View;") == 0 ||
             std::strcmp(desc, "Landroid/view/inputmethod/InputMethodManager;") == 0 ||

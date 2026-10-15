@@ -139,6 +139,12 @@ void JNICALL CallBackAndBump(JNIEnv*, jclass) {
     g_interp->Execute(g_bump_method, nullptr, 0);
 }
 
+// Creates far more local references than the table holds and never deletes them: the
+// runtime has to release them when the native method returns.
+void JNICALL LeakRefs(JNIEnv* env, jclass) {
+    for (int i = 0; i < 5000; ++i) env->NewStringUTF("leak");
+}
+
 struct Specs {
     dexbuild::FieldSpec counter{"counter", "I", 0x9};  // public static
 
@@ -147,6 +153,8 @@ struct Specs {
     MethodSpec signal_setup;     // static native: sets the flag
     MethodSpec call_back;        // static native: re-enters the interpreter
     MethodSpec call_bump;        // static native: re-enters and mutates static state
+    MethodSpec leak_refs;        // static native: creates local refs without deleting them
+    MethodSpec java_leak;        // static: calls leakRefs
     MethodSpec java_wait;        // static: calls waitForSetup
     MethodSpec java_signal;      // static: calls signalSetup
     MethodSpec java_callback;    // static: calls callBack
@@ -169,6 +177,12 @@ struct Specs {
 
         call_bump.name = "callBump";
         call_bump.access_flags = kAccPublicStaticNative;
+
+        leak_refs.name = "leakRefs";
+        leak_refs.access_flags = kAccPublicStaticNative;
+
+        java_leak.name = "javaLeak";
+        java_leak.access_flags = 0x9;
 
         java_wait.name = "javaWait";
         java_wait.access_flags = 0x9;
@@ -224,7 +238,8 @@ std::vector<ClassSpec> BuildClasses(const Specs& s) {
     t.descriptor = "LT;";
     t.static_fields = {s.counter};
     t.direct_methods = {s.ctor,          s.wait_for_setup, s.signal_setup,
-                        s.call_back,     s.call_bump,      s.java_wait,
+                        s.call_back,     s.call_bump,      s.leak_refs,
+                        s.java_leak,     s.java_wait,
                         s.java_signal,   s.java_callback,  s.java_bump_outer,
                         s.bump,          s.plain};
 
@@ -247,6 +262,8 @@ int main() {
         static_cast<uint16_t>(index_builder.MethodIndexOf("LT;", probe.call_back));
     const uint16_t kCallBumpIdx =
         static_cast<uint16_t>(index_builder.MethodIndexOf("LT;", probe.call_bump));
+    const uint16_t kLeakIdx =
+        static_cast<uint16_t>(index_builder.MethodIndexOf("LT;", probe.leak_refs));
     const uint16_t kCounterIdx =
         static_cast<uint16_t>(index_builder.FieldIndexOf("LT;", probe.counter));
 
@@ -290,6 +307,15 @@ int main() {
         s.java_bump_outer.code = c;
         s.java_bump_outer.registers_size = 1;
         s.java_bump_outer.outs_size = 1;
+    }
+    // void javaLeak() { leakRefs(); }
+    {
+        std::vector<uint16_t> c;
+        Op35c(&c, kOpInvokeStatic, kLeakIdx, {});
+        c.push_back(Op11x(kOpReturnVoid, 0));
+        s.java_leak.code = c;
+        s.java_leak.registers_size = 1;
+        s.java_leak.outs_size = 1;
     }
     // void bump() { counter = counter + 1; }
     //
@@ -337,14 +363,16 @@ int main() {
         char n2[] = "signalSetup";
         char n3[] = "callBack";
         char n4[] = "callBump";
+        char n5[] = "leakRefs";
         char sig[] = "()V";
         const JNINativeMethod natives[] = {
             {n1, sig, reinterpret_cast<void*>(&WaitForSetup)},
             {n2, sig, reinterpret_cast<void*>(&SignalSetup)},
             {n3, sig, reinterpret_cast<void*>(&CallBackIntoJava)},
             {n4, sig, reinterpret_cast<void*>(&CallBackAndBump)},
+            {n5, sig, reinterpret_cast<void*>(&LeakRefs)},
         };
-        Check(jni.RegisterNatives(t, natives, 4) == JNI_OK, "RegisterNatives");
+        Check(jni.RegisterNatives(t, natives, 5) == JNI_OK, "RegisterNatives");
     }
 
     kudroid::kuart::DexMethod* java_wait = t->FindDirectMethod("javaWait", "()V");
@@ -353,6 +381,8 @@ int main() {
     kudroid::kuart::DexMethod* java_bump_outer = t->FindDirectMethod("javaBumpOuter", "()V");
     kudroid::kuart::DexMethod* bump = t->FindDirectMethod("bump", "()V");
     kudroid::kuart::DexMethod* plain = t->FindDirectMethod("plain", "()I");
+    kudroid::kuart::DexMethod* java_leak = t->FindDirectMethod("javaLeak", "()V");
+    Check(java_leak != nullptr, "javaLeak resolved");
     Check(java_wait != nullptr && java_signal != nullptr && java_callback != nullptr &&
               java_bump_outer != nullptr && bump != nullptr && plain != nullptr,
           "test methods resolved");
@@ -448,6 +478,24 @@ int main() {
         Check(kudroid::kuart::VmLockDepth() == 0, "the VM lock is unheld afterwards");
     }
 
+    // A native method's local references die with the call. Every call here makes 5000,
+    // so without the release the 8192-entry table overflows on the second call and the
+    // Java thread gets an OutOfMemoryError.
+    std::printf("-- local references are released when a native method returns --\n");
+    if (java_leak != nullptr) {
+        bool threw = false;
+        for (int i = 0; i < 20; ++i) {
+            interp.Execute(java_leak, nullptr, 0);
+            if (interp.HasPendingException()) {
+                threw = true;
+                interp.ClearPendingException();
+                break;
+            }
+        }
+        Check(!threw, "repeated native calls creating local refs never overflow the table");
+        Check(jni.NumLocalRefs() == 0, "no local references outlive the native calls");
+    }
+
     // ── VmLockDepth() reports what is held ─────────────────────────────────
     //
     // The re-entry above is decided from this counter, so it has to be right. It used to
@@ -490,6 +538,28 @@ int main() {
         }
         Check(other_got_it.load(), "another thread acquired the lock while it was released");
         Check(kudroid::kuart::VmLockDepth() == 1, "this thread has it back");
+    }
+
+    // JNIEnv entries touch the linker, heap and ref tables, and native threads call them
+    // without holding the VM lock: each one has to wait for whoever does hold it.
+    std::printf("-- JNIEnv calls from a thread without the VM lock --\n");
+    {
+        JNIEnv* env = jni.env();
+        std::atomic<bool> done{false};
+        std::atomic<bool> found{false};
+        std::thread native_thread;
+        {
+            kudroid::kuart::VmLockGuard guard;
+            native_thread = std::thread([&] {
+                found.store(env->FindClass("T") != nullptr);
+                done.store(true);
+            });
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            Check(!done.load(), "FindClass waits while another thread holds the VM lock");
+        }
+        native_thread.join();
+        Check(done.load() && found.load(), "FindClass completes once the lock is released");
+        Check(kudroid::kuart::VmLockDepth() == 0, "the JNI entry leaves no lock held");
     }
 
     // Concurrent Java threads still serialise. Releasing around native calls must not have

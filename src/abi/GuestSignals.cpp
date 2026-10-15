@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <mutex>
 #include <signal.h>
+#include <time.h>
 #include <unistd.h>
 
 #if defined(__APPLE__)
@@ -17,6 +18,7 @@
 #endif
 
 extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
+extern "C" void kudroid_persistent_breadcrumb(const char* line);
 
 namespace kudroid {
 
@@ -384,6 +386,50 @@ bool guest_signal_has_handler(int host_signum) {
     return is_real_handler(g_slots[host_signum].handler.load(std::memory_order_acquire));
 }
 
+namespace {
+// Threads currently parked in (or running) a guest handler for an asynchronous signal.
+std::atomic<int> g_asyncHandlers{0};
+std::atomic<uint64_t> g_asyncLastEnterNs{0};
+thread_local int t_asyncDepth = 0;
+
+uint64_t async_now_ns() {
+    struct timespec ts;
+    ::clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<uint64_t>(ts.tv_sec) * 1000000000ull + static_cast<uint64_t>(ts.tv_nsec);
+}
+
+// Synchronous faults are raised by the thread's own instruction; they never park a
+// thread on behalf of another one.
+bool is_sync_fault_signal(int host_signum) {
+    return host_signum == SIGSEGV || host_signum == SIGBUS || host_signum == SIGILL ||
+           host_signum == SIGFPE || host_signum == SIGTRAP || host_signum == SIGABRT ||
+           host_signum == SIGSYS;
+}
+
+struct AsyncHandlerScope {
+    bool counted = false;
+    explicit AsyncHandlerScope(int host_signum) {
+        if (is_sync_fault_signal(host_signum)) return;
+        counted = true;
+        if (t_asyncDepth++ == 0) g_asyncHandlers.fetch_add(1, std::memory_order_acq_rel);
+        g_asyncLastEnterNs.store(async_now_ns(), std::memory_order_relaxed);
+    }
+    ~AsyncHandlerScope() {
+        if (counted && --t_asyncDepth == 0) {
+            g_asyncHandlers.fetch_sub(1, std::memory_order_acq_rel);
+        }
+    }
+};
+}  // namespace
+
+bool guest_async_handler_active() {
+    if (g_asyncHandlers.load(std::memory_order_acquire) <= 0) return false;
+    // A handler that longjmps out never runs its scope exit; bound how long a stale
+    // count can keep diagnostics off.
+    constexpr uint64_t kMaxStaleNs = 10ull * 1000000000ull;
+    return async_now_ns() - g_asyncLastEnterNs.load(std::memory_order_relaxed) < kMaxStaleNs;
+}
+
 bool guest_signal_dispatch(int host_signum, void* host_siginfo, void* host_ucontext) {
     if (host_signum <= 0 || host_signum >= NSIG) return false;
 
@@ -427,6 +473,7 @@ bool guest_signal_dispatch(int host_signum, void* host_siginfo, void* host_ucont
     }
     ++t_depth[stack_id];
     t_depth_frame[stack_id] = frame;
+    const AsyncHandlerScope asyncScope(host_signum);
 
     const int guest_signum = host_signal_to_guest(host_signum);
     const int guest_flags = slot.guest_flags.load(std::memory_order_relaxed);
@@ -499,7 +546,9 @@ bool guest_signal_dispatch(int host_signum, void* host_siginfo, void* host_ucont
                               ? static_cast<const siginfo_t*>(host_siginfo)->si_addr
                               : nullptr,
                           static_cast<unsigned long long>(pc_before));
-            kudroid_android_log_message(4, "KuDroidSignal", msg);
+            // Handler context: the log mutex may be held by the thread this signal
+            // interrupted, so only the lock-free journal is safe here.
+            kudroid_persistent_breadcrumb(msg);
         }
 
         fn(guest_signum, &s.info, &s.uc);
@@ -534,7 +583,7 @@ bool guest_signal_dispatch(int host_signum, void* host_siginfo, void* host_ucont
                             std::snprintf(msg, sizeof(msg),
                                           "guest redirect to unmapped pc=0x%llx allowed",
                                           static_cast<unsigned long long>(newPc));
-                            kudroid_android_log_message(4, "KuDroidSignal", msg);
+                            kudroid_persistent_breadcrumb(msg);
                         }
                     }
                     for (int i = 0; i < 29; ++i) ss->__x[i] = s.uc.uc_mcontext.regs[i];
@@ -553,7 +602,7 @@ bool guest_signal_dispatch(int host_signum, void* host_siginfo, void* host_ucont
                                       "guest redirect committed pc=0x%llx x18=0x%llx",
                                       static_cast<unsigned long long>(s.uc.uc_mcontext.pc),
                                       static_cast<unsigned long long>(s.uc.uc_mcontext.regs[18]));
-                        kudroid_android_log_message(4, "KuDroidSignal", msg);
+                        kudroid_persistent_breadcrumb(msg);
                     }
                 }
                 state_changed = true;
@@ -1043,21 +1092,23 @@ int guest_pthread_kill(unsigned long thread, int guest_signum) {
     pthread_t target{};
     std::memcpy(&target, &thread,
                 sizeof(target) < sizeof(thread) ? sizeof(target) : sizeof(thread));
-    if (guest_signum == 0) return ::pthread_kill(target, 0) == 0 ? 0 : -1;
+    if (guest_signum == 0) {
+        const int rc0 = ::pthread_kill(target, 0);
+        if (rc0 == 0) return 0;
+        errno = rc0;
+        return -1;
+    }
     const int host_signum = host_signum_for_send(guest_signum, "pthread_kill");
     if (host_signum == 0) return -1;
     // Diagnostic: pairs with the delivery tap to attribute register-clobber crashes.
-    static std::mutex s_mtx;
-    static int s_n{0};
-    {
-        std::lock_guard<std::mutex> lock(s_mtx);
-        if (s_n < 12) {
-            ++s_n;
-            char msg[128];
-            std::snprintf(msg, sizeof(msg), "guest pthread_kill guest=%d host=%d",
-                          guest_signum, host_signum);
-            kudroid_android_log_message(4, "KuDroidSignal", msg);
-        }
+    // The sender is often the collector mid stop-the-world, with other threads
+    // already parked; the journal is lock-free, the log mutex is not.
+    static std::atomic<int> s_n{0};
+    if (s_n.fetch_add(1, std::memory_order_relaxed) < 12) {
+        char msg[128];
+        std::snprintf(msg, sizeof(msg), "guest pthread_kill guest=%d host=%d",
+                      guest_signum, host_signum);
+        kudroid_persistent_breadcrumb(msg);
     }
     const int rc = ::pthread_kill(target, host_signum);
     if (rc != 0) {

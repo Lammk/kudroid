@@ -63,6 +63,8 @@
     <true/>
     <key>LSSupportsOpeningDocumentsInPlace</key>
     <true/>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>KuDroid lets guest Android applications reach devices on your local network.</string>
     <key>NSCameraUsageDescription</key>
     <string>KuDroid needs camera access for guest Android applications.</string>
     <key>NSMicrophoneUsageDescription</key>

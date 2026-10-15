@@ -365,6 +365,33 @@ void test_owned_signal_reaches_the_guest_through_dispatch() {
           "fault is still unresolved and crash reporting must continue");
 }
 
+std::atomic<int> g_active_inside{-1};
+void probe_active_handler(int) {
+    g_active_inside.store(kudroid::guest_async_handler_active() ? 1 : 0);
+}
+
+void test_async_handler_is_visible_to_other_code() {
+    std::printf("[stop-the-world] a parked async handler gates diagnostics\n");
+    guest_signal_reset_for_test();
+
+    GuestSigaction act;
+    std::memset(&act, 0, sizeof(act));
+    act.sa_handler_or_sigaction = reinterpret_cast<void*>(&probe_active_handler);
+    Check(guest_sigaction(10 /* SIGUSR1 */, &act, nullptr) == 0, "guest installs an async handler");
+    Check(guest_sigaction(kGuestSIGSEGV, &act, nullptr) == 0, "and a fault handler");
+
+    Check(!kudroid::guest_async_handler_active(), "idle before any dispatch");
+    g_active_inside.store(-1);
+    guest_signal_dispatch(guest_signal_to_host(10), nullptr, nullptr);
+    Check(g_active_inside.load() == 1, "active while the async handler runs");
+    Check(!kudroid::guest_async_handler_active(), "and cleared once it returns");
+
+    g_active_inside.store(-1);
+    guest_signal_dispatch(SIGSEGV, nullptr, nullptr);
+    Check(g_active_inside.load() == 0,
+          "a synchronous fault handler does not count: crash diagnostics must still log");
+}
+
 void test_dispatch_without_a_handler_does_nothing() {
     std::printf("[ownership] no guest handler means dispatch declines\n");
     guest_signal_reset_for_test();
@@ -733,6 +760,43 @@ void test_a_sent_signal_arrives_where_the_handler_was_installed() {
         ::usleep(1000);
     }
     Check(g_sent_hits.load() == 1, "and it too reached the guest's handler");
+}
+
+extern "C" int bionic_pthread_kill(pthread_t thread, int sig);
+
+void* exit_immediately(void*) { return nullptr; }
+
+// libc pthread_kill returns the error NUMBER. Returning the syscall's -1 made a
+// collector treat "thread already exited" as a hard failure and abort.
+void test_pthread_kill_returns_the_error_number() {
+    std::printf("[send] pthread_kill follows the libc contract\n");
+    guest_signal_reset_for_test();
+
+    const int guest_sig = find_a_translated_signal();
+    if (guest_sig == 0) {
+        Check(false, "this host has no signal whose number differs — cannot test");
+        return;
+    }
+    GuestSigaction act;
+    std::memset(&act, 0, sizeof(act));
+    act.sa_handler_or_sigaction = reinterpret_cast<void*>(&recording_handler);
+    Check(guest_sigaction(guest_sig, &act, nullptr) == 0, "handler installed");
+
+    g_sent_hits.store(0);
+    Check(bionic_pthread_kill(::pthread_self(), guest_sig) == 0, "a live thread: 0");
+    for (int i = 0; i < 200 && g_sent_hits.load() == 0; ++i) ::usleep(1000);
+
+    pthread_t t;
+    Check(::pthread_create(&t, nullptr, exit_immediately, nullptr) == 0, "helper thread starts");
+    ::usleep(100000);  // exited, not yet joined
+    // ESRCH on Darwin; glibc still reports 0 for an unjoined thread. Never -1.
+    const int exited_rc = bionic_pthread_kill(t, guest_sig);
+    Check(exited_rc == 0 || exited_rc == ESRCH,
+          "an exited thread: 0 or ESRCH itself, not -1");
+    ::pthread_join(t, nullptr);
+
+    Check(bionic_pthread_kill(::pthread_self(), 9999) == EINVAL,
+          "an unmappable signal: EINVAL itself, not -1");
 }
 
 // The untranslated send, demonstrated rather than described: the same signal number sent
@@ -1110,6 +1174,7 @@ int main() {
     test_uncatchable_signals_are_refused();
     test_owned_signals_are_recorded_not_installed();
     test_owned_signal_reaches_the_guest_through_dispatch();
+    test_async_handler_is_visible_to_other_code();
     test_dispatch_without_a_handler_does_nothing();
     test_sig_ign_and_sig_dfl_are_not_called();
     test_oldact_round_trips();
@@ -1121,6 +1186,7 @@ int main() {
     test_recursion_is_still_declined_after_a_jump_out();
     test_a_sent_signal_arrives_where_the_handler_was_installed();
     test_the_untranslated_send_does_not_arrive();
+    test_pthread_kill_returns_the_error_number();
     test_sigprocmask_translates_how_and_the_mask();
     test_signal_and_sigaction_share_one_registry();
     test_an_unmappable_send_is_refused();

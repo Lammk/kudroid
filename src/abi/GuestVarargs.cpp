@@ -939,6 +939,58 @@ extern "C" int kudroid_sprintf_chk_from_registers(const uint64_t* frame) {
                                     /*firstGpIndex=*/4));
 }
 
+// ── printing to a stream ─────────────────────────────────────────────────────
+//
+// fprintf/printf and their _FORTIFY_SOURCE forms. Without these they fell through to the
+// host's implementation, which reads variadic arguments from the stack while the guest
+// passed them in registers: a "%s" printed the bytes of a stack pointer. Formatting is
+// done here; the stream write is the shim's, because it needs <cstdio>.
+extern "C" void kudroid_guest_stdio_write(void* stream, const char* data, size_t len);
+
+namespace {
+int PrintGuestToStream(void* stream, const char* format, const kudroid::GuestVarargs* registers,
+                       unsigned firstGpIndex) {
+    char buffer[2048];
+    const size_t would = kudroid::FormatGuestVarargs(buffer, sizeof(buffer),
+                                                     format != nullptr ? format : "",
+                                                     registers, firstGpIndex);
+    // Output beyond the buffer is dropped; the return value still reports the full length.
+    const size_t len = would < sizeof(buffer) ? would : sizeof(buffer) - 1;
+    kudroid_guest_stdio_write(stream, buffer, len);
+    return static_cast<int>(would);
+}
+}  // namespace
+
+// fprintf(stream, format, ...)
+extern "C" int kudroid_fprintf_from_registers(const uint64_t* frame) {
+    const auto* registers = reinterpret_cast<const kudroid::GuestVarargs*>(frame);
+    return PrintGuestToStream(reinterpret_cast<void*>(registers->gp[0]),
+                              reinterpret_cast<const char*>(registers->gp[1]), registers,
+                              /*firstGpIndex=*/2);
+}
+
+// printf(format, ...) writes to stdout; a null stream selects it in the shim.
+extern "C" int kudroid_printf_from_registers(const uint64_t* frame) {
+    const auto* registers = reinterpret_cast<const kudroid::GuestVarargs*>(frame);
+    return PrintGuestToStream(nullptr, reinterpret_cast<const char*>(registers->gp[0]),
+                              registers, /*firstGpIndex=*/1);
+}
+
+// __fprintf_chk(stream, flag, format, ...)
+extern "C" int kudroid_fprintf_chk_from_registers(const uint64_t* frame) {
+    const auto* registers = reinterpret_cast<const kudroid::GuestVarargs*>(frame);
+    return PrintGuestToStream(reinterpret_cast<void*>(registers->gp[0]),
+                              reinterpret_cast<const char*>(registers->gp[2]), registers,
+                              /*firstGpIndex=*/3);
+}
+
+// __printf_chk(flag, format, ...)
+extern "C" int kudroid_printf_chk_from_registers(const uint64_t* frame) {
+    const auto* registers = reinterpret_cast<const kudroid::GuestVarargs*>(frame);
+    return PrintGuestToStream(nullptr, reinterpret_cast<const char*>(registers->gp[1]),
+                              registers, /*firstGpIndex=*/2);
+}
+
 // ── scanning from a string ───────────────────────────────────────────────────
 //
 // The character source for sscanf/vsscanf. fscanf's source needs <cstdio> and so lives in

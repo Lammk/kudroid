@@ -765,6 +765,37 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
     }
 
     /**
+     * Repaint the software-drawn UI soon.
+     *
+     * For a change made after the last render (typed text, focus) that nothing else
+     * would paint. Calls made before the repaint runs coalesce into one, and a UI that
+     * has a SurfaceView is left alone: it draws itself.
+     */
+    private boolean mRenderPending;
+
+    public void requestRender() {
+        final android.os.Looper mainLooper = android.os.Looper.getMainLooper();
+        if (mainLooper == null) return;
+        final android.os.Handler handler;
+        synchronized (this) {
+            if (mRenderPending) return;
+            if (mUiHandler == null || mUiHandler.getLooper() != mainLooper) {
+                mUiHandler = new android.os.Handler(mainLooper);
+                mUiThread = mainLooper.getThread();
+            }
+            mRenderPending = true;
+            handler = mUiHandler;
+        }
+        handler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                synchronized (Activity.this) { mRenderPending = false; }
+                if (!containsSurfaceView(mContentView)) renderViewHierarchy();
+            }
+        }, 16);
+    }
+
+    /**
      * runs on the UI thread.
      */
     public void runOnUiThread(final Runnable action) {
@@ -803,7 +834,9 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
         }
     }
 
-    private static native void nativeRequestPermissions(Activity activity, String permissionsCsv, int requestCode);
+    static native void nativeOpenUrl(String url);
+
+    private static native void nativeRequestPermissions(Activity activity, String packageName, String permissionsCsv, int requestCode);
 
     /**
      * requires runtime permissions (Android 6.0+).
@@ -816,7 +849,7 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
             sb.append(permissions[i]);
         }
         try {
-            nativeRequestPermissions(this, sb.toString(), requestCode);
+            nativeRequestPermissions(this, getPackageName(), sb.toString(), requestCode);
         } catch (Throwable t) {
             int[] grantResults = new int[permissions.length];
             for (int i = 0; i < permissions.length; ++i) {

@@ -90,6 +90,14 @@ bool guest_signal_dispatch(int host_signum, void* host_siginfo, void* host_ucont
 // caller that wants to know before doing expensive work.
 bool guest_signal_has_handler(int host_signum);
 
+// True while some thread is inside a guest handler for an asynchronous signal.
+// A managed runtime parks every thread in exactly such a handler to stop the world,
+// and a parked thread keeps whatever lock it held. Code that runs meanwhile on the
+// remaining threads (the collector itself) must not take diagnostic locks or touch
+// stdio: it would wait on a lock whose owner only resumes after the collector is done.
+// Lock-free; safe from any context.
+bool guest_async_handler_active();
+
 // The guest's sigaltstack. Separate from the host's because Linux's stack_t is
 // {sp, flags, size} and Darwin's is {sp, size, flags} — read through the wrong one, a
 // guest asking for a 64KB alternate stack passes ss_flags=65536, the host rejects it,

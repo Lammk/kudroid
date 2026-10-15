@@ -210,6 +210,24 @@ std::vector<std::vector<DexObject*>>& ThreadLocalFrames() {
 // slots are written/read together below, so the merge below stays
 // thread-confined on every thread.
 thread_local DexObject* t_pending_exception = nullptr;
+
+// Releases every local reference a native method created once it returns, as the
+// JNI spec requires. Without it a thread that keeps calling into native code (a
+// frame callback that goes through a bridge each frame) fills its table and the
+// next JNI call fails with a local-table overflow.
+struct LocalRefScope {
+    size_t depth;
+    size_t count;
+    LocalRefScope()
+        : depth(ThreadLocalFrames().size()), count(ThreadLocalFrames().back().size()) {}
+    ~LocalRefScope() {
+        auto& frames = ThreadLocalFrames();
+        while (frames.size() > depth) frames.pop_back();
+        if (frames.back().size() > count) frames.back().resize(count);
+    }
+    LocalRefScope(const LocalRefScope&) = delete;
+    LocalRefScope& operator=(const LocalRefScope&) = delete;
+};
 }  // namespace
 
 jobject DexJniEnv::AddLocalRef(DexObject* obj) {
@@ -429,6 +447,7 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
         return result;
     }
     if (method->native_fn == nullptr) return result;
+    const LocalRefScope local_refs;
 
     // This breadcrumb is deliberately emitted before entering guest code.  A
     // SIGKILL does not run the crash handler, so the last durable line in the

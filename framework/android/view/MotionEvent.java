@@ -91,6 +91,8 @@ public final class MotionEvent extends InputEvent {
     // stay final — only the latest finger positions and time move.
     private float mX;
     private float mY;
+    private float mOffsetX;
+    private float mOffsetY;
     private long mEventTime;
     private final int mPointerCount;
     // Per-pointer state, one entry per index in the event's pointer array.
@@ -189,7 +191,20 @@ public final class MotionEvent extends InputEvent {
             ev.mPointerXs[i] = other.mPointerXs[i];
             ev.mPointerYs[i] = other.mPointerYs[i];
         }
+        ev.mOffsetX = other.mOffsetX;
+        ev.mOffsetY = other.mOffsetY;
         return ev;
+    }
+
+    public void offsetLocation(float dx, float dy) {
+        mX += dx;
+        mY += dy;
+        mOffsetX += dx;
+        mOffsetY += dy;
+        for (int i = 0; i < mPointerCount; ++i) {
+            mPointerXs[i] += dx;
+            mPointerYs[i] += dy;
+        }
     }
 
     /**
@@ -284,27 +299,21 @@ public final class MotionEvent extends InputEvent {
         return mPointerYs[clampIndex(pointerIndex)];
     }
 
-    /**
-     * Coordinates relative to the screen rather than the view.
-     *
-     * The same values as getX/getY: KuDroid runs the guest activity full-screen with no
-     * window offset, so the two frames coincide. They would differ only once a guest view
-     * could be positioned inside a larger window.
-     */
+    /** Coordinates before translation into a child view. */
     public float getRawX() {
-        return mX;
+        return mX - mOffsetX;
     }
 
     public float getRawY() {
-        return mY;
+        return mY - mOffsetY;
     }
 
     public float getRawX(int pointerIndex) {
-        return getX(pointerIndex);
+        return getX(pointerIndex) - mOffsetX;
     }
 
     public float getRawY(int pointerIndex) {
-        return getY(pointerIndex);
+        return getY(pointerIndex) - mOffsetY;
     }
 
     /**

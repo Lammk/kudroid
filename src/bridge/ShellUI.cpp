@@ -5,6 +5,7 @@
 #include "ShellUI.h"
 #include "kudroid/platform/JavaCanvasRenderer.h"
 #include "kudroid/VFSPathRemapper.h"
+#include "kudroid/KuArtRuntime.h"
 
 #include <cstdio>
 #include <cstring>
@@ -34,6 +35,7 @@ extern "C" void kudroid_gpu_rebind_native_windows(void* layer, int width, int he
 extern "C" void kudroid_gpu_resize_native_windows(void* layer, int oldW, int oldH,
                                                   int width, int height);
 extern "C" void kudroid_gpu_attach_vulkan_layer(void* hostLayer);
+extern "C" void kudroid_gpu_sync_gl_layers(void* hostLayer, int width, int height, float density);
 
 extern "C" void kudroid_set_metal_layer(void* layer, int width, int height, float density) {
     void* const previousLayer = g_metalLayer;
@@ -59,6 +61,8 @@ extern "C" void kudroid_set_metal_layer(void* layer, int width, int height, floa
 
     if (layer != nullptr) {
         kudroid_gpu_attach_vulkan_layer(layer);
+        // GL presents into a sublayer of this one; keep it fitted through rotation.
+        kudroid_gpu_sync_gl_layers(layer, width, height, g_metalLayerDensity);
     }
 
     // Move any window the guest already holds onto this layer.
@@ -84,6 +88,9 @@ extern "C" void kudroid_set_metal_layer(void* layer, int width, int height, floa
 
     // EGL warmup runs after the display is created.
     // kudroid_gpu_warmup_egl();
+    if (layer != previousLayer || width != previousWidth || height != previousHeight) {
+        kuart_post_surface_changed();
+    }
 }
 
 extern "C" const char* kudroid_vfs_self_test_log(void) {

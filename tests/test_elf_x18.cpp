@@ -796,6 +796,233 @@ void test_layer2_virtual_x18() {
     Check(kudroid::elf_x18_get() == 0, "vx18 cleared");
 }
 
+// A slice of a function (gap path) that branches into the next slice hands it
+// every register: x15 is read there, so it must not be the substitute here.
+void test_window_exit_keeps_registers_live() {
+    std::printf("[rewrite] window exit keeps registers live\n");
+    const std::uint32_t kAddX18 = 0x8B1001D2u;  // add x18, x14, x16
+    std::vector<std::uint32_t> code = {
+        kAddX18,      // 0: add x18, x14, x16
+        0xEB12023Fu,  // 1: cmp x17, x18
+        0x54000062u,  // 2: b.cs -> 5 (next slice)
+        0xAA1F03F0u,  // 3: mov x16, xzr
+        0x14000003u,  // 4: b -> 7 (ends the slice)
+        0x927DF1F0u,  // 5: and x16, x15, #~7 (reads x15)
+        0xAA1003F2u,  // 6: mov x18, x16
+        0xD65F03C0u,  // 7: ret
+    };
+    SynthElf elf(code, false, 0);
+    elf.run();
+    Check(((elf.word(0) >> 0) & 31) != 15, "x15 live into the next slice is not overwritten");
+}
+
+// Vector by-element / modified-immediate forms carry v18 or immediate bits in the
+// field a scalar slot scan reads as x18. They used to make the whole function
+// "unknown" and skip it, leaving its real x18 uses exposed to async clobbering.
+void test_simd_immediate_forms_do_not_block_rewrite() {
+    std::printf("[rewrite] SIMD by-element and immediate forms do not block the rewrite\n");
+    const std::uint32_t kFmulElem = 0x4FA79247u;  // fmul v7.4s, v18.4s, v7.s[1]
+    const std::uint32_t kMvni = 0x6F000642u;      // mvni v2.4s, #0x12
+    const std::uint32_t kMovi = 0x4F042412u;      // movi v18.4s, #0x80, lsl #8
+    const std::uint32_t kShl = 0x4F0C5612u;       // shl v18.16b, v16.16b, #4
+    SynthElf elf({kFmulElem, kMvni, kMovi, kShl,
+                  0x91001012u,   // add x18, x0, #4
+                  0xF9400241u,   // ldr x1, [x18]
+                  0xD65F03C0u},  // ret
+                 false);
+    const auto st = elf.run();
+    Check(st.rewritten == 1, "the function is rewritten, not skipped as unknown");
+    Check(elf.word(0) == kFmulElem && elf.word(1) == kMvni && elf.word(2) == kMovi &&
+              elf.word(3) == kShl,
+          "vector words are untouched");
+    Check((elf.word(4) & 31u) != 18u && ((elf.word(5) >> 5) & 31u) != 18u,
+          "the scalar x18 define and use are renamed");
+}
+
+// madd/msub name a real accumulator register in bits[14:10]. Treating it as an
+// opaque slot made any function with `madd ..., x18` impossible to rewrite or stub.
+void test_multiply_add_accumulator_renamed() {
+    std::printf("[rewrite] madd accumulator x18 is renamed with its definition\n");
+    SynthElf elf({0xAA0003F2u,   // mov x18, x0
+                  0x9B034841u,   // madd x1, x2, x3, x18
+                  0xD65F03C0u},  // ret
+                 false);
+    const auto st = elf.run();
+    Check(st.rewritten == 1, "the function is rewritten");
+    const unsigned def = elf.word(0) & 31u;
+    const unsigned acc = (elf.word(1) >> 10) & 31u;
+    Check(def != 18u && acc == def, "definition and accumulator share the replacement");
+}
+
+// A routine with no prologue that follows a `ret` behind an `adrp` is not split off by
+// the prologue scan, so its words look unreachable from the chunk start. Its x18 uses
+// must still be rewritten, not abandoned as "data".
+void test_leaf_routine_after_adrp_is_split_off() {
+    std::printf("[rewrite] a prologue-less routine behind an adrp is rewritten\n");
+    SynthElf elf({0xD2800020u,   // mov x0, #1
+                  0xD65F03C0u,   // ret
+                  0x90000011u,   // adrp x17, #0
+                  0xAA0103F2u,   // mov x18, x1
+                  0x91001240u,   // add x0, x18, #4
+                  0xD65F03C0u},  // ret
+                 false, 0);      // no FDE: gap path
+    const auto st = elf.run();
+    Check(st.rewritten == 1, "the second routine is rewritten");
+    Check((elf.word(3) & 31u) != 18u && ((elf.word(4) >> 5) & 31u) != 18u,
+          "its x18 define and use are renamed");
+}
+
+void test_loop_preserves_live_mask() {
+    std::printf("[rewrite] backward edges preserve live replacement candidates\n");
+    std::vector<std::uint32_t> code;
+    for (unsigned r = 0; r < 15; ++r) {
+        code.push_back(0x91000000u | (r << 5) | r);  // add xN, xN, #0
+    }
+    code.insert(code.end(), {
+        0xD28000EFu,  // mov x15, #7
+        0xD2800042u,  // mov x2, #2
+        0x8A0F0021u,  // and x1, x1, x15
+        0xAA000012u,  // mov x18, x0
+        0x91000640u,  // add x0, x18, #1
+        0xF1000442u,  // subs x2, x2, #1
+        0x54FFFF81u,  // b.ne -16
+        0xD65F03C0u,  // ret
+    });
+    SynthElf elf(code, false);
+    const auto st = elf.run();
+    Check(st.rewritten == 1, "loop has a safe replacement");
+    Check((elf.word(18) & 31u) != 15,
+          "temporary does not overwrite the mask used on the next iteration");
+    Check((elf.word(18) & 31u) == ((elf.word(19) >> 5) & 31u),
+          "definition and use share a replacement");
+}
+
+void test_branch_definitions_share_replacement() {
+    std::printf("[rewrite] joined definitions share one replacement\n");
+    SynthElf elf({
+        0xB4000060u,  // cbz x0, +12
+        0xAA0103F2u,  // mov x18, x1
+        0x14000002u,  // b +8
+        0xAA0203F2u,  // mov x18, x2
+        0x8B030240u,  // add x0, x18, x3
+        0xD65F03C0u,  // ret
+    }, false);
+    const auto st = elf.run();
+    Check(st.rewritten == 1, "both branch definitions can be renamed");
+    const unsigned replacement = (elf.word(4) >> 5) & 31u;
+    Check(replacement != 18 && (elf.word(1) & 31u) == replacement &&
+          (elf.word(3) & 31u) == replacement,
+          "either branch supplies the register read at the join");
+}
+
+// Words whose Rd/Rn/Rm field holds 18 but names a vector register, an FP register or
+// an immediate/offset field. Decoding any of them as x18 renames bits that are not a
+// register and corrupts the code (a constant 32-sample decoder window, float struct
+// loads at large offsets). Every word must come through byte-identical.
+void test_non_gpr_18_untouched() {
+    std::printf("[rewrite] FP/SIMD/offset fields equal to 18 are not x18\n");
+    const std::uint32_t words[] = {
+        0x1E273A52,  // fsub s18, s18, s7   (Rm=7 matches the old scvtf/fmov "kind")
+        0x1E263A52,  // fsub s18, s18, s6   (Rm=6)
+        0x1E363A52,  // fsub s18, s18, s22  (Rm=22)
+        0x1E222A44,  // fadd s4, s18, s2    (Rm=2)
+        0x1E383872,  // fsub s18, s3, s24   (Rm=24)
+        0x6E21DE58,  // fmul v24.4s, v18.4s, v1.4s (vector arithmetic, top byte 0x6E)
+        0x6E124252,  // ext v18.16b, v18.16b, v18.16b, #8
+        0x6E180643,  // mov v3.d[1], v18.d[0]      (INS element, bit 29 set)
+        0x2EB11E43,  // bit v3.8b, v18.8b, v17.8b
+        0x7E21DA52,  // ucvtf s18, s18             (Advanced SIMD scalar)
+        0x1E622250,  // fcmpe d18, d2
+        0x9EAE0240,  // fmov x0, v18.d[1]
+        0x9EAF0012,  // fmov v18.d[1], x0
+        0x4E040C32,  // dup v18.4s, w1
+        0xAD404C12,  // ldp q18, q19, [x0]
+        0x3C9203A1,  // stur q1, [x29, #-224]  (imm9 bits[20:16] == 18)
+        0x3CD203A0,  // ldur q0, [x29, #-224]
+        0xF8520281,  // ldur x1, [x20, #-224]
+        0xBD72BC04,  // ldr s4, [x0, #12988]   (imm12 bits[20:16] == 18)
+        0xBD328281,  // str s1, [x20, #12928]
+        0x39722021,  // ldrb w1, [x1, #3208]
+        0xFA520800,  // ccmp x0, #18, #0, eq   (imm5, not Rm)
+        0xBA521800,  // ccmn x0, #18, #0, ne
+    };
+    for (std::uint32_t w : words) {
+        SynthElf elf({w, 0xD65F03C0}, false);
+        kudroid::X18Stats st = elf.run();
+        char what[64];
+        std::snprintf(what, sizeof(what), "0x%08X left untouched", static_cast<unsigned>(w));
+        Check(st.rewritten == 0 && st.sites == 0 && st.stubbedSites == 0 &&
+                  st.skippedUnknown == 0 && elf.word(0) == w,
+              what);
+    }
+}
+
+// The same families where x18 IS a general register: SIMD<->GPR moves, fixed-point
+// converts, flag-setting carry/compare and LSE atomics. A def-only word is renamed in
+// place; a use needs a preceding def so x18 is not live-in.
+void test_gpr_18_in_simd_fp_and_flags() {
+    std::printf("[rewrite] x18 in SIMD<->GPR, fixed-point, ccmp and LSE forms renames\n");
+    struct Def { std::uint32_t w; const char* name; };
+    const Def defs[] = {
+        {0x4E183C72, "umov x18, v3.d[1]"},
+        {0x4E0C2C32, "smov x18, v1.s[1]"},
+        {0x0E073C12, "umov w18, v0.b[3]"},
+        {0x0E0A2C12, "smov w18, v0.h[2]"},
+        {0x1E18F412, "fcvtzs w18, s0, #3"},
+        {0x9E59E452, "fcvtzu x18, d2, #7"},
+    };
+    for (const Def& c : defs) {
+        SynthElf elf({c.w, 0xD65F03C0}, false);
+        kudroid::X18Stats st = elf.run();
+        Check(st.rewritten == 1 && st.sites == 1 && ((elf.word(0) >> 0) & 31) == 15, c.name);
+    }
+    struct Use { std::uint32_t w; unsigned field; const char* name; };
+    const Use uses[] = {
+        {0x4E040E40, 5, "dup v0.4s, w18"},
+        {0x4E0C1E40, 5, "ins v0.s[1], w18"},
+        {0x9E02F640, 5, "scvtf s0, x18, #3"},
+        {0x1E43EE41, 5, "ucvtf d1, w18, #5"},
+        {0xFA410240, 5, "ccmp x18, x1, #0, eq"},
+        {0xFA520020, 16, "ccmp x1, x18, #0, eq"},
+        {0xBA020240, 5, "adcs x0, x18, x2"},
+        {0xF8320041, 16, "ldadd x18, x1, [x2]"},
+    };
+    for (const Use& c : uses) {
+        SynthElf elf({0xAA000012, c.w, 0xD65F03C0}, false);  // mov x18, x0 first
+        kudroid::X18Stats st = elf.run();
+        Check(st.rewritten == 1 && st.sites == 2 && ((elf.word(1) >> c.field) & 31) == 15,
+              c.name);
+    }
+}
+
+// A literal pool or an embedded blob in uncovered code is data. Float constants such as
+// 420.0f (0x43D20000) have bits[27:25] == 001 and bits[20:16] == 18; decoding them as
+// bitfield/extract instructions made the gap pass rewrite them into branches.
+void test_gap_data_words_untouched() {
+    std::printf("[rewrite] data words in an uncovered run are not rewritten\n");
+    const std::uint32_t data[] = {
+        0x43D20000, 0x43B20000, 0x43928000, 0x43F28000,
+        0x43D20000, 0x43B20000, 0x43928000, 0x43F28000,
+    };
+    std::vector<std::uint32_t> code = {0xAA0103E0, 0xD65F03C0};  // mov x0, x1; ret
+    for (std::uint32_t w : data) code.push_back(w);
+    SynthElf elf(code, false, 8);  // FDE covers only the two instructions
+    kudroid::X18Stats st = elf.run();
+    bool intact = true;
+    for (std::size_t i = 0; i < code.size(); ++i) intact = intact && elf.word(i) == code[i];
+    Check(intact, "every word is byte-identical");
+    Check(st.rewritten == 0 && st.sites == 0 && st.stubbedSites == 0, "nothing rewritten or stubbed");
+
+    // The same constants reached from covered code (a pool inside a function body).
+    for (std::uint32_t w : data) {
+        SynthElf pool({w, 0xD65F03C0}, false);
+        kudroid::X18Stats ps = pool.run();
+        char what[64];
+        std::snprintf(what, sizeof(what), "pool word 0x%08X untouched", static_cast<unsigned>(w));
+        Check(pool.word(0) == w && ps.stubbedSites == 0 && ps.sites == 0, what);
+    }
+}
+
 int main(int argc, char** argv) {
     // Ops mode: rewrite stats for a real .so (map() runs the loader hook).
     if (argc > 1) {
@@ -835,6 +1062,15 @@ int main(int argc, char** argv) {
     test_ldp_stp_signed_offset();
     test_x30_fallback_picked();
     test_layer2_virtual_x18();
+    test_loop_preserves_live_mask();
+    test_multiply_add_accumulator_renamed();
+    test_leaf_routine_after_adrp_is_split_off();
+    test_simd_immediate_forms_do_not_block_rewrite();
+    test_window_exit_keeps_registers_live();
+    test_branch_definitions_share_replacement();
+    test_non_gpr_18_untouched();
+    test_gpr_18_in_simd_fp_and_flags();
+    test_gap_data_words_untouched();
     if (g_failures == 0) {
         std::printf("=== PASSED (%d checks) ===\n", g_checks);
         return 0;

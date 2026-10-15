@@ -1,5 +1,6 @@
 #include "kudroid/ExecMemory.h"
 
+#include <atomic>
 #include <cerrno>
 #include <csetjmp>
 #include <cstdio>
@@ -653,23 +654,39 @@ ExecMemMode ProbeMode(bool* fetchableOut) {
 }
 
 struct ProbeState {
-    ExecMemMode mode = ExecMemMode::kLegacy;
-    bool fetchable = false;
-    bool initialized = false;
+    std::atomic<ExecMemMode> mode{ExecMemMode::kLegacy};
+    std::atomic<bool> fetchable{false};
+    std::atomic<bool> initialized{false};
 };
+
+// The probe swaps process-wide fault handlers and uses one jump buffer, so only
+// one thread may run it at a time.
+std::recursive_mutex& ProbeMutex() {
+    static std::recursive_mutex mtx;
+    return mtx;
+}
+
+// Caller holds ProbeMutex().
+void RunProbeLocked(ProbeState& state) {
+    std::fprintf(stderr, "[KuDroidExecMem] probe %s cs_debugged=%d\n",
+                 RuntimeSummaryInner(), CsDebugged() ? 1 : 0);
+    bool fetchable = false;
+    const ExecMemMode mode = ProbeMode(&fetchable);
+    state.mode.store(mode, std::memory_order_release);
+    state.fetchable.store(fetchable, std::memory_order_release);
+    state.initialized.store(true, std::memory_order_release);
+    std::fprintf(stderr, "[KuDroidExecMem] mode=%s fetchable=%d %s\n",
+                 mode == ExecMemMode::kDualMap ? "dual-map"
+                 : mode == ExecMemMode::kToggle ? "toggle"
+                 : mode == ExecMemMode::kPrepared ? "prepared" : "legacy",
+                 fetchable ? 1 : 0, RuntimeSummaryInner());
+}
 
 ProbeState& ProbeStateInstance() {
     static ProbeState state;
-    if (!state.initialized) {
-        std::fprintf(stderr, "[KuDroidExecMem] probe %s cs_debugged=%d\n",
-                     RuntimeSummaryInner(), CsDebugged() ? 1 : 0);
-        state.mode = ProbeMode(&state.fetchable);
-        state.initialized = true;
-        std::fprintf(stderr, "[KuDroidExecMem] mode=%s fetchable=%d %s\n",
-                     state.mode == ExecMemMode::kDualMap ? "dual-map"
-                     : state.mode == ExecMemMode::kToggle ? "toggle"
-                     : state.mode == ExecMemMode::kPrepared ? "prepared" : "legacy",
-                     state.fetchable ? 1 : 0, RuntimeSummaryInner());
+    if (!state.initialized.load(std::memory_order_acquire)) {
+        std::lock_guard<std::recursive_mutex> lock(ProbeMutex());
+        if (!state.initialized.load(std::memory_order_relaxed)) RunProbeLocked(state);
     }
     return state;
 }
@@ -747,13 +764,14 @@ bool ExecMemory::IsFetchable() {
 
 bool ExecMemory::Reprobe() {
     ProbeState& st = ProbeStateInstance();
-    if (st.fetchable) return true;  // never downgrade a positive result
+    if (st.fetchable.load(std::memory_order_acquire)) return true;  // never downgrade
     // A debugger attaching mid-run grants JIT permissions the first probe
-    // legitimately lacked. Reset and ask the kernel again; the cached mode is
-    // recomputed with it.
-    st.initialized = false;
-    const ProbeState& fresh = ProbeStateInstance();
-    return fresh.fetchable;
+    // legitimately lacked. Ask the kernel again under the probe lock; a concurrent
+    // caller that already succeeded makes this a no-op.
+    std::lock_guard<std::recursive_mutex> lock(ProbeMutex());
+    if (st.fetchable.load(std::memory_order_relaxed)) return true;
+    RunProbeLocked(st);
+    return st.fetchable.load(std::memory_order_acquire);
 }
 
 bool ExecMemory::TxmPresent() {

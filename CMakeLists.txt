@@ -49,6 +49,46 @@ else()
     endif()
 endif()
 
+# Recompile Java changes before embedding the framework into native targets.
+find_package(Java QUIET COMPONENTS Development)
+find_file(KUDROID_D8_JAR NAMES r8.jar d8.jar
+    PATHS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/d8"
+    NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH)
+if(Java_FOUND AND KUDROID_D8_JAR)
+    file(GLOB_RECURSE KUDROID_FRAMEWORK_JAVA CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/framework/*.java")
+    file(GLOB KUDROID_FRAMEWORK_KOTLIN CONFIGURE_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/kotlin/*.jar")
+    get_filename_component(KUDROID_JAVA_BIN "${Java_JAVAC_EXECUTABLE}" DIRECTORY)
+    get_filename_component(KUDROID_JAVA_HOME "${KUDROID_JAVA_BIN}" DIRECTORY)
+    add_custom_command(
+        OUTPUT "${KUDROID_DEX_BINARY}" "${KUDROID_DEX_HEADER}"
+        COMMAND "${CMAKE_COMMAND}" -E env
+            "JAVA_HOME=${KUDROID_JAVA_HOME}" "KUDROID_D8_JAR=${KUDROID_D8_JAR}"
+            bash "${CMAKE_CURRENT_SOURCE_DIR}/framework/build.sh" --require-d8
+        DEPENDS ${KUDROID_FRAMEWORK_JAVA} ${KUDROID_FRAMEWORK_KOTLIN}
+            "${KUDROID_D8_JAR}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/framework/build.sh"
+            "${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed_framework_dex.py"
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        COMMENT "Building and embedding Java framework"
+        VERBATIM
+    )
+elseif(EXISTS "${KUDROID_DEX_BINARY}")
+    add_custom_command(
+        OUTPUT "${KUDROID_DEX_HEADER}"
+        COMMAND python3 "${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed_framework_dex.py"
+        DEPENDS "${KUDROID_DEX_BINARY}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed_framework_dex.py"
+        VERBATIM
+    )
+endif()
+if(Java_FOUND AND KUDROID_D8_JAR)
+    add_custom_target(kudroid_framework_dex DEPENDS "${KUDROID_DEX_BINARY}" "${KUDROID_DEX_HEADER}")
+else()
+    add_custom_target(kudroid_framework_dex DEPENDS "${KUDROID_DEX_HEADER}")
+endif()
+
 # ARM64 iOS cross-compile settings (when targeting iOS device/simulator)
 # Usage: cmake -B build -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
@@ -75,12 +115,16 @@ add_library(kudroid_core STATIC
     # compiles bits/stdio.h against an incomplete FILE when it does).
     src/platform/NativeLooper.cpp
     src/platform/AudioShim.cpp
+    src/platform/AudioCapture.cpp
+    src/platform/CameraShim.cpp
+    src/platform/NetworkState.cpp
     src/platform/MediaShim.cpp
     src/platform/GraphicsShim.cpp
     # AChoreographer + ANativeWindow_setFrameRate. Kept out of GraphicsShim.cpp
     # because it owns a thread and a set of pipes, and nothing else in there does.
     src/platform/FramePacer.cpp
     src/abi/SyscallShim.cpp
+    src/abi/SocketAbi.cpp
     src/abi/GuestVarargs.cpp
     src/abi/BlockingWaitRegistry.cpp
     src/abi/GuestSignals.cpp
@@ -111,6 +155,9 @@ add_library(kudroid_core STATIC
     src/kuart/jni_trampoline.S
     src/kuart/DexReflect.cpp
     src/kuart/LibCore.cpp
+    src/kuart/LibNet.cpp
+    src/kuart/LibTls.cpp
+    src/kuart/LibZip.cpp
     src/kuart/JitCache.cpp
     src/kuart/JitCompiler.cpp
     # JitCache queries the platform memory policy. Keep this provider after the
@@ -131,8 +178,25 @@ add_library(kudroid_core STATIC
 )
 
 find_package(ZLIB REQUIRED)
+add_dependencies(kudroid_core kudroid_framework_dex)
 target_link_libraries(kudroid_core PRIVATE ZLIB::ZLIB)
 target_link_libraries(kudroid_core PUBLIC art_dex)
+
+# TLS for java.net: SecureTransport on Apple, OpenSSL on a Linux host (where it is exercised by
+# the tests); a host with neither builds a stub that reports TLS as unavailable.
+if(APPLE)
+    target_sources(kudroid_core PRIVATE src/platform/TlsSessionApple.cpp)
+    target_link_libraries(kudroid_core PUBLIC "-framework Security")
+else()
+    find_package(OpenSSL QUIET)
+    if(OpenSSL_FOUND)
+        target_sources(kudroid_core PRIVATE src/platform/TlsSessionOpenSsl.cpp)
+        target_link_libraries(kudroid_core PUBLIC OpenSSL::SSL OpenSSL::Crypto)
+        target_compile_definitions(kudroid_core PUBLIC KUDROID_HAS_OPENSSL=1)
+    else()
+        target_sources(kudroid_core PRIVATE src/platform/TlsSessionStub.cpp)
+    endif()
+endif()
 
 target_compile_definitions(kudroid_core PRIVATE
     KUDROID_GIT_HASH="${KUDROID_GIT_HASH}"
@@ -187,6 +251,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
         ios-app/KuDroidShell/ContentView.swift
         ios-app/KuDroidShell/RemoteDebugClient.swift
         ios-app/KuDroidShell/IOSDiagnostics.swift
+        ios-app/KuDroidShell/CameraBridge.swift
+        ios-app/KuDroidShell/NetworkBridge.swift
         ios-app/KuDroidShell/kudroid_bridge.h
     )
 
@@ -214,6 +280,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
         "-framework UIKit"
         "-framework CoreGraphics"
         "-framework IOSurface"
+        "-framework AVFoundation"
+        "-framework CoreMedia"
+        "-framework CoreVideo"
+        "-framework Network"
+        "-framework Security"
         # The guest's native code checks the framework's native method with
         # dlsym(dlopen(0), "Java_..."). Mach-O does not include symbols from static lib
         # dynamic symbol table so must export_dynamic. DO NOT use
@@ -236,6 +307,12 @@ else()
         )
         target_link_libraries(test_shims PRIVATE kudroid_core)
         target_include_directories(test_shims PRIVATE include)
+    endif()
+
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_net_shims.cpp")
+        add_executable(test_net_shims tests/test_net_shims.cpp)
+        target_link_libraries(test_net_shims PRIVATE kudroid_core)
+        target_include_directories(test_net_shims PRIVATE include)
     endif()
 
     # Host-side test for AndroidManifest.xml (AXML) LAUNCHER-activity parsing.
@@ -422,6 +499,16 @@ else()
     endif()
 
     find_package(Threads REQUIRED)
+    if (NOT APPLE)
+        add_executable(test_audio_pipeline tests/test_audio_pipeline.cpp)
+        target_include_directories(test_audio_pipeline PRIVATE include)
+        target_link_libraries(test_audio_pipeline PRIVATE Threads::Threads)
+        add_executable(test_egl_layer_ownership tests/test_egl_layer_ownership.cpp)
+        target_link_libraries(test_egl_layer_ownership PRIVATE kudroid_core)
+        target_link_options(test_egl_layer_ownership PRIVATE -rdynamic)
+    endif()
+    add_executable(test_socket_abi tests/test_socket_abi.cpp src/abi/SocketAbi.cpp)
+    target_include_directories(test_socket_abi PRIVATE include)
     add_executable(test_touch_event_queue tests/test_touch_event_queue.cpp)
     target_include_directories(test_touch_event_queue PRIVATE include)
     target_link_libraries(test_touch_event_queue PRIVATE Threads::Threads)
@@ -531,6 +618,11 @@ else()
         test_kuart_resource_compat
         test_kuart_ime
         test_kuart_audiotrack
+        test_kuart_capture
+        test_kuart_camera
+        test_kuart_network_bitmap
+        test_kuart_openurl
+        test_kuart_net
     )
         if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/${kuart_test}.cpp")
             add_executable(${kuart_test} kuart-tests/${kuart_test}.cpp)
@@ -541,6 +633,26 @@ else()
             endif()
         endif()
     endforeach()
+
+    # java.net HTTP/TLS scenarios: Java test classes dexed against the framework, driven by a
+    # native harness that provides the servers.
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/test_kuart_netjava.cpp")
+        set(KUART_JAVA_TEST_SOURCES
+            ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/TestSupport.java
+            ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/HttpTests.java
+            ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/TlsTests.java)
+        set(KUART_JAVA_TEST_DEX "${CMAKE_BINARY_DIR}/kuart_java_tests.dex")
+        add_custom_command(OUTPUT "${KUART_JAVA_TEST_DEX}"
+            COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/build-java-test.sh "${KUART_JAVA_TEST_DEX}" ${KUART_JAVA_TEST_SOURCES}
+            DEPENDS ${KUART_JAVA_TEST_SOURCES} kudroid_framework_dex
+            COMMENT "Building java.net test classes")
+        add_custom_target(kuart_java_tests_dex DEPENDS "${KUART_JAVA_TEST_DEX}")
+        add_executable(test_kuart_netjava kuart-tests/test_kuart_netjava.cpp)
+        target_link_libraries(test_kuart_netjava PRIVATE kudroid_core art_dex ZLIB::ZLIB)
+        target_include_directories(test_kuart_netjava PRIVATE include kuart-tests)
+        target_compile_definitions(test_kuart_netjava PRIVATE KUART_JAVA_TEST_DEX="${KUART_JAVA_TEST_DEX}")
+        add_dependencies(test_kuart_netjava kuart_java_tests_dex)
+    endif()
 
     foreach(kuart_test IN ITEMS test_kuart_runtime test_kuart_choreographer)
         if(TARGET ${kuart_test})

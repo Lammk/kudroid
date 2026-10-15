@@ -1,12 +1,17 @@
 package android.widget;
 
 import android.content.Context;
+import android.view.MotionEvent;
+import android.view.inputmethod.InputMethodManager;
 
 /**
  * android.widget.EditText — TextView allows editing content.
+ *
+ * The text is a live Editable (see TextView): edits from app code and from the host
+ * keyboard both reach it, fire TextWatchers and move the cursor. A tap focuses the
+ * field and raises the keyboard.
  */
 public class EditText extends TextView {
-    private CharSequence mHint = "";
 
     public EditText(Context context) {
         this(context, null);
@@ -24,16 +29,9 @@ public class EditText extends TextView {
         super(context, attrs, defStyleAttr, defStyleRes);
     }
 
-    public void setHint(CharSequence hint) {
-        mHint = hint != null ? hint : "";
-    }
-
-    public void setHint(int resId) {
-        mHint = "";
-    }
-
-    public CharSequence getHint() {
-        return mHint;
+    @Override
+    protected boolean isEditable() {
+        return true;
     }
 
     /**
@@ -41,56 +39,54 @@ public class EditText extends TextView {
      *
      * EditText NARROWS TextView's return type: apps reference
      * {@code EditText.getText()Landroid/text/Editable;} and immediately call editing methods
-     * on it. Inheriting TextView's CharSequence version left that reference unresolved — a
-     * missing method on a method that was obviously present, needed by five of six corpus
-     * APKs.
-     *
-     * Backed by the same SpannableStringBuilder each time, and written back through
-     * setText, so an app that edits what it gets from here sees the change reflected. A
-     * fresh wrapper per call would accept edits and silently discard them.
+     * on it. It is the view's own buffer, so an edit made through it is the edit.
      */
-    private android.text.SpannableStringBuilder mEditable;
-
     @Override
     public android.text.Editable getText() {
-        final CharSequence current = super.getText();
-        if (mEditable == null) {
-            mEditable = new android.text.SpannableStringBuilder(current);
-        } else if (!mEditable.toString().contentEquals(current)) {
-            // setText was called behind our back; resynchronise rather than hand back stale
-            // content.
-            mEditable = new android.text.SpannableStringBuilder(current);
-        }
-        return mEditable;
+        return getEditableBuffer();
     }
 
     public android.text.Editable getEditableText() {
-        return getText();
+        return getEditableBuffer();
     }
 
     public void setSelection(int index) {
+        setSelectionRange(index, index);
     }
 
     public void setSelection(int start, int stop) {
-    }
-
-    public int getSelectionStart() {
-        return getText().length();
-    }
-
-    public int getSelectionEnd() {
-        return getText().length();
+        setSelectionRange(start, stop);
     }
 
     public void selectAll() {
+        setSelectionRange(0, length());
     }
 
-    public void setInputType(int type) {
+    public void extendSelection(int index) {
+        setSelectionRange(getSelectionStart(), index);
     }
 
-    public void setSingleLine(boolean singleLine) {
-    }
-
-    public void setSingleLine() {
+    /**
+     * A tap focuses the field, puts the cursor after the text and raises the keyboard.
+     *
+     * DOWN is claimed so the matching UP reaches this view; without that the parent
+     * drops the gesture and the keyboard never appears.
+     */
+    @Override
+    public boolean onTouchEvent(MotionEvent event) {
+        if (event == null) return false;
+        final int action = event.getAction();
+        if (action == MotionEvent.ACTION_DOWN) {
+            super.onTouchEvent(event);
+            return true;
+        }
+        if (action == MotionEvent.ACTION_UP) {
+            super.onTouchEvent(event);
+            requestFocus();
+            setSelectionRange(length(), length());
+            InputMethodManager.getInstance().showSoftInput(this, 0);
+            return true;
+        }
+        return super.onTouchEvent(event);
     }
 }

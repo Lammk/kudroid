@@ -118,17 +118,15 @@ public abstract class Context {
     /**
      * Whether this app holds a permission.
      *
-     * Granted, which matches what PermissionManager reports elsewhere in KuDroid and what
-     * an installed-by-the-user app would see on Android. Denying here would send apps down
-     * their request-permission path, which needs UI KuDroid does not present — so they
-     * would wait for a dialog that never appears.
+     * Everything is granted except the microphone and camera, which follow the app's
+     * grant and the host's authorization so an app asks before it opens a capture device.
      */
     public int checkCallingOrSelfPermission(String permission) {
-        return android.content.pm.PackageManager.PERMISSION_GRANTED;
+        return android.content.pm.RuntimePermissions.check(getPackageName(), permission);
     }
 
     public int checkPermission(String permission, int pid, int uid) {
-        return android.content.pm.PackageManager.PERMISSION_GRANTED;
+        return android.content.pm.RuntimePermissions.check(getPackageName(), permission);
     }
 
     /** The main thread's Looper, which every lifecycle callback runs on. */
@@ -413,7 +411,9 @@ public abstract class Context {
         Resources r = getResources();
         return r != null ? r.getString(resId, formatArgs) : "";
     }
-    public int checkSelfPermission(String permission) { return PackageManager.PERMISSION_GRANTED; }
+    public int checkSelfPermission(String permission) {
+        return android.content.pm.RuntimePermissions.check(getPackageName(), permission);
+    }
     public Intent registerReceiver(BroadcastReceiver receiver, IntentFilter filter) { return null; }
     public void unregisterReceiver(BroadcastReceiver receiver) {}
     public void sendBroadcast(Intent intent) {}

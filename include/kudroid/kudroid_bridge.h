@@ -151,6 +151,20 @@ void kudroid_set_permission_prompt_callback(kudroid_permission_prompt_cb cb);
 void kudroid_prompt_permission_request(const char* packageName, const char* permissionsCsv, int requestCode, void* activityHandle);
 void kudroid_submit_permission_response(void* activityHandle, int requestCode, const char* permissionsCsv, int granted);
 
+/// Authorization the host OS reports for a sensor the guest wants.
+/// kind: 0 = microphone, 1 = camera. status: 0 = not determined, 1 = authorized,
+/// 2 = denied or restricted.
+void kudroid_set_host_authorization(int kind, int status);
+int kudroid_get_host_authorization(int kind);
+
+/// 1 when the guest app may use `permission` now. RECORD_AUDIO and CAMERA need both the
+/// app's own grant and the host authorization; every other permission is granted.
+int kudroid_runtime_permission_granted(const char* packageName, const char* permission);
+
+/// Number of open microphone recorders. While non-zero the host audio session must
+/// allow input.
+int kudroid_audio_capture_active(void);
+
 // ── soft keyboard ────────────────────────────────────────────────────────────
 //
 // The guest asks for a keyboard through InputMethodManager; the host owns the only
@@ -177,10 +191,24 @@ void kudroid_set_soft_input_callbacks(kudroid_soft_input_show_cb show,
 int kudroid_show_soft_input(int flags);
 int kudroid_hide_soft_input(void);
 
+/// Opens a URL (http, https, mailto, tel, ...) in the system handler. The host registers the
+/// callback; the guest reaches it through startActivity(ACTION_VIEW). Returns 1 when a
+/// callback was registered and invoked.
+typedef void (*kudroid_open_url_cb)(const char* url);
+void kudroid_set_open_url_callback(kudroid_open_url_cb cb);
+int kudroid_open_url(const char* url);
+
 /// True while the host reports the keyboard as visible. Lets the guest answer
 /// isActive()/isAcceptingText() with the real state instead of a constant.
 int kudroid_is_soft_input_visible(void);
 void kudroid_set_soft_input_visible(int visible);
+
+/// The focused guest field's EditorInfo.inputType and imeOptions. Set by the guest when
+/// a field takes input; read by the host when it raises the keyboard, to pick the
+/// keyboard layout, secure entry and return-key label.
+void kudroid_set_soft_input_traits(int inputType, int imeOptions);
+int kudroid_get_soft_input_type(void);
+int kudroid_get_soft_input_ime_options(void);
 
 /// Text the user typed on the host keyboard, delivered to the guest's focused
 /// InputConnection. UTF-8; may be more than one character (autocorrect, paste, an

@@ -14,10 +14,13 @@
 #include <vector>
 #include <atomic>
 #include <mutex>
+#include <unordered_map>
 
 #if defined(__APPLE__)
 #include <pthread.h>
 #include <dispatch/dispatch.h>
+#include <objc/runtime.h>
+#include <objc/message.h>
 extern "C" void* objc_autoreleasePoolPush(void);
 extern "C" void objc_autoreleasePoolPop(void* pool);
 // Thread-local autorelease pool for ANGLE Metal.
@@ -40,6 +43,9 @@ extern float g_metalLayerDensity;
 // successful present so the watchdog can tell a dead frame loop from a busy
 // one even when no tracked I/O is flowing.
 extern "C" void kudroid_note_frame_presented(void);
+
+// Log directory owned by the bridge; weak so the shim also links on its own.
+extern const char* g_kudroid_log_dir_ptr __attribute__((weak));
 
 namespace kudroid {
 
@@ -411,12 +417,202 @@ struct SurfaceLayer {
 SurfaceLayer g_surfaceLayers[kSurfaceLayers];
 std::mutex g_surfaceLayersMtx;
 void* s_vulkanLayer = nullptr;
+std::unordered_map<void*, void*> g_eglLayers;
+// Host layer -> the sublayer GL presents into (see gl_layer_for_host).
+std::unordered_map<void*, void*> g_glLayers;
+
+bool hardware_owns_layer(void* layer) {
+    if (s_vulkanLayer && s_vulkanLayer == layer) return true;
+    for (const auto& entry : g_eglLayers) {
+        if (entry.second == layer) return true;
+    }
+    return false;
+}
 }  // namespace
+
+extern "C" bool kudroid_gpu_canvas_allowed(void* layer) {
+    std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
+    return !hardware_owns_layer(layer);
+}
+
+static void register_egl_layer(void* surface, void* layer) {
+    {
+        std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
+        g_eglLayers[surface] = layer;
+    }
+#if defined(__APPLE__)
+    dispatch_async(dispatch_get_main_queue(), ^{
+        std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
+        if (!hardware_owns_layer(layer)) return;
+        reinterpret_cast<void (*)(id, SEL, id)>(objc_msgSend)(
+            reinterpret_cast<id>(layer), sel_registerName("setContents:"), nullptr);
+    });
+#endif
+}
+
+static void drop_gl_layer_for_host(void* host);
+
+static void unregister_egl_layer(void* surface) {
+    void* host = nullptr;
+    bool hostStillHasGl = false;
+    {
+        std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
+        auto it = g_eglLayers.find(surface);
+        if (it == g_eglLayers.end()) return;
+        host = it->second;
+        g_eglLayers.erase(it);
+        for (const auto& entry : g_eglLayers) {
+            if (entry.second == host) { hostStillHasGl = true; break; }
+        }
+    }
+    // The GL sublayer would otherwise stay on top and cover whatever draws next.
+    if (!hostStillHasGl) drop_gl_layer_for_host(host);
+}
 
 #if defined(__APPLE__)
 #include <CoreGraphics/CoreGraphics.h>
 #include <objc/runtime.h>
 #include <objc/message.h>
+
+// ── Dedicated GL layer ───────────────────────────────────────────────────────
+// ANGLE draws into a CAMetalLayer. Given the shell view's backing layer (which
+// also receives software-canvas contents) its drawables never became visible, so
+// GL presents into a plain CAMetalLayer sublayer of its own. One producer per
+// layer: the host layer stays a container that supplies bounds and scale.
+
+// Main thread only. Fits |gl| to |host|: same bounds, host scale, matching drawable.
+static void gl_layer_sync_geometry(id gl, id host, int w, int h, float density) {
+    typedef CGRect (*GetRectFn)(id, SEL);
+    typedef double (*GetFloatFn)(id, SEL);
+    typedef void (*SetRectFn)(id, SEL, CGRect);
+    typedef void (*SetFloatFn)(id, SEL, double);
+    typedef void (*SetSizeFn)(id, SEL, CGSize);
+    typedef void (*VoidFn)(id, SEL);
+    typedef void (*SetBoolFn)(id, SEL, BOOL);
+    auto getRect = reinterpret_cast<GetRectFn>(objc_msgSend);
+    auto getFloat = reinterpret_cast<GetFloatFn>(objc_msgSend);
+    auto setRect = reinterpret_cast<SetRectFn>(objc_msgSend);
+    auto setFloat = reinterpret_cast<SetFloatFn>(objc_msgSend);
+    auto setSize = reinterpret_cast<SetSizeFn>(objc_msgSend);
+    auto voidCall = reinterpret_cast<VoidFn>(objc_msgSend);
+    auto setBool = reinterpret_cast<SetBoolFn>(objc_msgSend);
+
+    double scale = getFloat(host, sel_registerName("contentsScale"));
+    if (scale <= 0.0) scale = density > 0.0f ? density : 2.0;
+    const CGRect hostBounds = getRect(host, sel_registerName("bounds"));
+    double bw = hostBounds.size.width;
+    double bh = hostBounds.size.height;
+    if (bw <= 0.0 || bh <= 0.0) {  // host not laid out yet
+        bw = (w > 0 ? w : 1080) / scale;
+        bh = (h > 0 ? h : 1920) / scale;
+    }
+
+    // Implicit animations would glide the layer to its new size.
+    Class clsTxn = objc_getClass("CATransaction");
+    if (clsTxn) {
+        voidCall(reinterpret_cast<id>(clsTxn), sel_registerName("begin"));
+        setBool(reinterpret_cast<id>(clsTxn), sel_registerName("setDisableActions:"), YES);
+    }
+    setRect(gl, sel_registerName("setFrame:"), CGRectMake(0, 0, bw, bh));
+    setFloat(gl, sel_registerName("setContentsScale:"), scale);
+    setSize(gl, sel_registerName("setDrawableSize:"), CGSizeMake(bw * scale, bh * scale));
+    if (clsTxn) voidCall(reinterpret_cast<id>(clsTxn), sel_registerName("commit"));
+}
+
+// Main thread only.
+static void gl_layer_create_on_main(void* hostPtr) {
+    {
+        std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
+        if (g_glLayers.count(hostPtr)) return;
+    }
+    Class clsCALayer = objc_getClass("CALayer");
+    Class clsMetal = objc_getClass("CAMetalLayer");
+    if (!clsCALayer || !clsMetal) return;
+    typedef BOOL (*IsKindOfFn)(id, SEL, Class);
+    typedef id (*IdRetFn)(id, SEL);
+    typedef void (*SetBoolFn)(id, SEL, BOOL);
+    typedef void (*SetIdFn)(id, SEL, id);
+    auto isKindOf = reinterpret_cast<IsKindOfFn>(objc_msgSend);
+    auto idRet = reinterpret_cast<IdRetFn>(objc_msgSend);
+    auto setBool = reinterpret_cast<SetBoolFn>(objc_msgSend);
+    auto setId = reinterpret_cast<SetIdFn>(objc_msgSend);
+
+    id host = reinterpret_cast<id>(hostPtr);
+    if (!isKindOf(host, sel_registerName("isKindOfClass:"), clsCALayer)) return;
+    id gl = idRet(reinterpret_cast<id>(clsMetal), sel_registerName("layer"));
+    if (!gl) return;
+    idRet(gl, sel_registerName("retain"));  // balanced in drop_gl_layer_for_host
+    setBool(gl, sel_registerName("setOpaque:"), YES);
+    gl_layer_sync_geometry(gl, host, g_metalLayerWidth, g_metalLayerHeight, g_metalLayerDensity);
+    setId(host, sel_registerName("addSublayer:"), gl);
+    {
+        std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
+        g_glLayers[hostPtr] = gl;
+    }
+    gpuLog("GL layer %p attached under host %p", (void*)gl, hostPtr);
+}
+
+// The layer ANGLE should present into for |host|; |host| itself if one cannot be made.
+// Called from the guest's render thread, so creation hops to the main thread.
+static void* gl_layer_for_host(void* host) {
+    if (!host) return nullptr;
+    auto existing = [host]() -> void* {
+        std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
+        auto it = g_glLayers.find(host);
+        return it == g_glLayers.end() ? nullptr : it->second;
+    };
+    if (void* gl = existing()) return gl;
+    if (pthread_main_np()) {
+        gl_layer_create_on_main(host);
+    } else {
+        dispatch_semaphore_t done = dispatch_semaphore_create(0);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            gl_layer_create_on_main(host);
+            dispatch_semaphore_signal(done);
+        });
+        // Not released on timeout: the block may still signal it.
+        if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC)) == 0) {
+            dispatch_release(done);
+        } else {
+            gpuLog("GL layer creation timed out for host %p; presenting into host", host);
+        }
+    }
+    void* gl = existing();
+    return gl ? gl : host;
+}
+
+static void drop_gl_layer_for_host(void* host) {
+    void* gl = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
+        auto it = g_glLayers.find(host);
+        if (it == g_glLayers.end()) return;
+        gl = it->second;
+        g_glLayers.erase(it);
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        typedef void (*VoidFn)(id, SEL);
+        auto voidCall = reinterpret_cast<VoidFn>(objc_msgSend);
+        voidCall(reinterpret_cast<id>(gl), sel_registerName("removeFromSuperlayer"));
+        voidCall(reinterpret_cast<id>(gl), sel_registerName("release"));
+    });
+}
+
+// Follows the host through resize/rotation. Called by kudroid_set_metal_layer.
+extern "C" void kudroid_gpu_sync_gl_layers(void* host, int w, int h, float density) {
+    if (!host) return;
+    auto apply = ^{
+        void* gl = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
+            auto it = g_glLayers.find(host);
+            if (it != g_glLayers.end()) gl = it->second;
+        }
+        if (gl) gl_layer_sync_geometry(reinterpret_cast<id>(gl), reinterpret_cast<id>(host), w, h, density);
+    };
+    if (pthread_main_np()) apply();
+    else dispatch_async(dispatch_get_main_queue(), apply);
+}
 
 static void kudroid_ensure_vulkan_layer_attached(void* vk_layer) {
     if (!vk_layer) return;
@@ -567,8 +763,8 @@ extern "C" void kudroid_blit_canvas_to_layer(void* layer, const void* bits, int 
     // One producer per layer: if Vulkan is active, do not cover drawables
     {
         std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
-        if (s_vulkanLayer != nullptr && layer == s_vulkanLayer) {
-            gpuLog("blit skipped on vulkan layer=%p %dx%d", layer, width, height);
+        if (hardware_owns_layer(layer)) {
+            gpuLog("blit skipped on hardware layer=%p %dx%d", layer, width, height);
             return;
         }
     }
@@ -612,6 +808,11 @@ extern "C" void kudroid_blit_canvas_to_layer(void* layer, const void* bits, int 
 
     // Assign CGImage directly to CALayer/CAMetalLayer on Main Thread
     dispatch_async(dispatch_get_main_queue(), ^{
+        std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
+        if (hardware_owns_layer(layer)) {
+            CGImageRelease(image);
+            return;
+        }
         Class clsCATransaction = objc_getClass("CATransaction");
         if (clsCATransaction) {
             typedef void (*TransBeginFn)(id, SEL);
@@ -635,6 +836,11 @@ extern "C" void kudroid_blit_canvas_to_layer(void* layer, const void* bits, int 
     });
 }
 #else
+static void* gl_layer_for_host(void* host) { return host; }
+static void drop_gl_layer_for_host(void* host) { (void)host; }
+extern "C" void kudroid_gpu_sync_gl_layers(void* host, int w, int h, float density) {
+    (void)host; (void)w; (void)h; (void)density;
+}
 static void kudroid_ensure_vulkan_layer_attached(void* vk_layer) { (void)vk_layer; }
 extern "C" void kudroid_gpu_attach_vulkan_layer(void* hostLayer) { (void)hostLayer; }
 extern "C" void kudroid_blit_canvas_to_layer(void* layer, const void* bits, int width, int height) {
@@ -732,6 +938,20 @@ void* get_gl_func(const char* name) {
     return func;
 }
 
+
+// Per-call-site cache for GL entry points named by a string literal: the wrappers run
+// thousands of times a frame and a dlsym per call is pure overhead. A miss is retried.
+#define GL_FUNC_CACHED(NAME)                                                         \
+    ([]() -> void* {                                                                 \
+        static std::atomic<void*> cached{nullptr};                                   \
+        void* fn = cached.load(std::memory_order_relaxed);                           \
+        if (!fn) {                                                                   \
+            fn = get_gl_func(NAME);                                                  \
+            if (fn) cached.store(fn, std::memory_order_relaxed);                     \
+        }                                                                            \
+        return fn;                                                                   \
+    }())
+
 void* get_egl_func(const char* name) {
     if (!name) return nullptr;
     static void* egl_handle = nullptr;
@@ -803,7 +1023,7 @@ extern "C" void kudroid_gpu_warmup_egl(void) {
     auto create_pbuffer = (PFN_eglCreatePbufferSurface) get_egl_func("eglCreatePbufferSurface");
     auto create_context = (PFN_eglCreateContext) get_egl_func("eglCreateContext");
     auto make_current = (PFN_eglMakeCurrent) get_egl_func("eglMakeCurrent");
-    auto gl_clear = (void (*)(unsigned int)) get_gl_func("glClear");
+    auto gl_clear = (void (*)(unsigned int)) GL_FUNC_CACHED("glClear");
     if (!get_display || !init || !choose_config || !create_pbuffer ||
         !create_context || !make_current || !gl_clear) {
         gpuLog("warmup: egl entry points missing (get_display=%p init=%p "
@@ -1471,6 +1691,7 @@ extern "C" void kudroid_gpu_note_run_end(void) {
     s_presentCount.store(0, std::memory_order_relaxed);
     s_acquireCount.store(0, std::memory_order_relaxed);
     void* oldVkLayer = nullptr;
+    std::vector<void*> glHosts;
     {
         std::lock_guard<std::mutex> lock(g_surfaceLayersMtx);
         oldVkLayer = s_vulkanLayer;
@@ -1479,7 +1700,11 @@ extern "C" void kudroid_gpu_note_run_end(void) {
             e.surface = nullptr;
             e.layer = nullptr;
         }
+        // The run's EGL surfaces are gone; stale entries would keep a layer "owned".
+        g_eglLayers.clear();
+        for (const auto& entry : g_glLayers) glHosts.push_back(entry.first);
     }
+    for (void* host : glHosts) drop_gl_layer_for_host(host);
     (void)oldVkLayer;
 #if defined(__APPLE__)
     if (oldVkLayer) {
@@ -1719,20 +1944,25 @@ extern "C" EGLSurface bionic_eglCreateWindowSurface(EGLDisplay dpy, EGLConfig co
             resolvedLayer = get_or_create_fallback_metal_layer();
         }
 #endif
-        EGLNativeWindowType nativeWin = (EGLNativeWindowType)resolvedLayer;
-        gpuLog("eglCreateWindowSurface: calling ANGLE with layer=%p...", (void*)nativeWin);
+        // ANGLE presents into a sublayer of its own; resolvedLayer stays the host
+        // that ownership and canvas decisions are keyed on.
+        EGLNativeWindowType nativeWin = (EGLNativeWindowType)gl_layer_for_host(resolvedLayer);
+        gpuLog("eglCreateWindowSurface: calling ANGLE with layer=%p (host=%p)...", (void*)nativeWin, resolvedLayer);
 #if defined(__APPLE__)
         void* pool = objc_autoreleasePoolPush();
         EGLSurface s = host_func(dpy, config, nativeWin, attrib_list);
         if (!s && s_activeEglSurface && host_destroy) {
             gpuLog("eglCreateWindowSurface failed, auto-recycling stale EGLSurface %p on layer %p...", s_activeEglSurface, (void*)nativeWin);
             host_destroy(s_activeEglDisplay ? s_activeEglDisplay : dpy, s_activeEglSurface);
+            unregister_egl_layer(s_activeEglSurface);
             s_activeEglSurface = nullptr;
+            nativeWin = (EGLNativeWindowType)gl_layer_for_host(resolvedLayer);  // may have been dropped
             s = host_func(dpy, config, nativeWin, attrib_list);
         }
         objc_autoreleasePoolPop(pool);
         gpuLog("eglCreateWindowSurface returned %p", (void*)s);
         if (s) {
+            register_egl_layer(s, resolvedLayer);
             s_activeEglSurface = s;
             s_activeEglDisplay = dpy;
         }
@@ -1742,11 +1972,14 @@ extern "C" EGLSurface bionic_eglCreateWindowSurface(EGLDisplay dpy, EGLConfig co
         if (!s && s_activeEglSurface && host_destroy) {
             gpuLog("eglCreateWindowSurface failed, auto-recycling stale EGLSurface %p on layer %p...", s_activeEglSurface, (void*)nativeWin);
             host_destroy(s_activeEglDisplay ? s_activeEglDisplay : dpy, s_activeEglSurface);
+            unregister_egl_layer(s_activeEglSurface);
             s_activeEglSurface = nullptr;
+            nativeWin = (EGLNativeWindowType)gl_layer_for_host(resolvedLayer);
             s = host_func(dpy, config, nativeWin, attrib_list);
         }
         gpuLog("eglCreateWindowSurface returned %p", (void*)s);
         if (s) {
+            register_egl_layer(s, resolvedLayer);
             s_activeEglSurface = s;
             s_activeEglDisplay = dpy;
         }
@@ -1768,6 +2001,7 @@ extern "C" void kudroid_gpu_cleanup_on_test_exit(void) {
     if (s_activeEglSurface && fnDestroySurface) {
         gpuLog("kudroid_gpu_cleanup_on_test_exit: destroying stale surface %p", s_activeEglSurface);
         fnDestroySurface(s_activeEglDisplay ? s_activeEglDisplay : (EGLDisplay)1, s_activeEglSurface);
+        unregister_egl_layer(s_activeEglSurface);
         s_activeEglSurface = nullptr;
         s_activeEglDisplay = nullptr;
     }
@@ -1882,11 +2116,12 @@ extern "C" EGLSurface bionic_eglCreatePbufferSurface(EGLDisplay dpy, EGLConfig c
 extern "C" EGLBoolean bionic_eglDestroySurface(EGLDisplay dpy, EGLSurface surface) {
     auto f = eglFn<EGLBoolean(EGLDisplay, EGLSurface)>("eglDestroySurface");
     if (!f) { EGL_FORWARD_ERR("eglDestroySurface", ""); return EGL_FALSE; }
-    if (surface == s_activeEglSurface) {
+    EGLBoolean r = f(dpy, surface);
+    if (r) unregister_egl_layer(surface);
+    if (r && surface == s_activeEglSurface) {
         s_activeEglSurface = nullptr;
         s_activeEglDisplay = nullptr;
     }
-    EGLBoolean r = f(dpy, surface);
     gpuLog("eglDestroySurface(%p) -> %s", (void*)surface, r ? "true" : "false");
     return r;
 }
@@ -1941,6 +2176,105 @@ extern "C" EGLDisplay bionic_eglGetCurrentDisplay(void) {
     return f();
 }
 
+// KUDROID_GPU_DIAG: separates "GL drew black" from "the compositor hid the frame".
+// Samples the bound framebuffer before present and reports texture upload contents.
+// Off by default; glGetError here consumes the guest's pending error flag.
+static bool gpu_diag_enabled() {
+    static const bool enabled = [] {
+        const char* v = std::getenv("KUDROID_GPU_DIAG");
+        return v && *v && *v != '0';
+    }();
+    return enabled;
+}
+
+// Writes the whole bound framebuffer as a binary PPM (rows flipped upright) to the log
+// directory, so what GL actually rendered can be inspected directly.
+static void gpu_diag_dump_framebuffer(void* readPixelsFn, int w, int h, uint64_t swapIndex) {
+    const char* dump = std::getenv("KUDROID_GPU_DUMP_FRAMES");
+    if (!dump || !*dump || *dump == '0') return;
+    typedef void (*PFN_ReadPixels)(int, int, int, int, unsigned int, unsigned int, void*);
+    auto readPixels = reinterpret_cast<PFN_ReadPixels>(readPixelsFn);
+    if (!readPixels || w <= 0 || h <= 0 || w > 8192 || h > 8192) return;
+    const char* dir = std::getenv("KUDROID_GPU_DIAG_DIR");
+    if ((!dir || !*dir) && &g_kudroid_log_dir_ptr && g_kudroid_log_dir_ptr) dir = g_kudroid_log_dir_ptr;
+    char path[1024];
+    std::snprintf(path, sizeof(path), "%s/fb_swap%llu.ppm", dir && *dir ? dir : ".",
+                  static_cast<unsigned long long>(swapIndex));
+    std::vector<unsigned char> rgba(static_cast<size_t>(w) * h * 4);
+    readPixels(0, 0, w, h, 0x1908 /* GL_RGBA */, 0x1401 /* GL_UNSIGNED_BYTE */, rgba.data());
+    std::FILE* f = std::fopen(path, "wb");
+    if (!f) return;
+    std::fprintf(f, "P6\n%d %d\n255\n", w, h);
+    std::vector<unsigned char> row(static_cast<size_t>(w) * 3);
+    for (int y = h - 1; y >= 0; --y) {
+        const unsigned char* src = rgba.data() + static_cast<size_t>(y) * w * 4;
+        for (int x = 0; x < w; ++x) {
+            row[x * 3] = src[x * 4];
+            row[x * 3 + 1] = src[x * 4 + 1];
+            row[x * 3 + 2] = src[x * 4 + 2];
+        }
+        std::fwrite(row.data(), 1, row.size(), f);
+    }
+    std::fclose(f);
+    ::kudroid::log::write(::kudroid::log::kInfo, "KuDroidGPU", "diag framebuffer dumped to %s", path);
+}
+
+static void gpu_diag_sample_backbuffer(EGLDisplay dpy, EGLSurface surface, uint64_t swapIndex) {
+    typedef void (*PFN_ReadPixels)(int, int, int, int, unsigned int, unsigned int, void*);
+    typedef unsigned int (*PFN_GetError)(void);
+    typedef void (*PFN_GetIntegerv)(unsigned int, int*);
+    auto readPixels = (PFN_ReadPixels)GL_FUNC_CACHED("glReadPixels");
+    auto getError = (PFN_GetError)GL_FUNC_CACHED("glGetError");
+    auto getIntegerv = (PFN_GetIntegerv)GL_FUNC_CACHED("glGetIntegerv");
+    auto query = eglFn<EGLBoolean(EGLDisplay, EGLSurface, EGLint, EGLint*)>("eglQuerySurface");
+    if (!readPixels || !getError || !query) return;
+    EGLint w = 0, h = 0;
+    query(dpy, surface, 0x3057 /* EGL_WIDTH */, &w);
+    query(dpy, surface, 0x3056 /* EGL_HEIGHT */, &h);
+    if (w <= 0 || h <= 0) return;
+    int fbo = -1;
+    if (getIntegerv) getIntegerv(0x8CA6 /* GL_FRAMEBUFFER_BINDING */, &fbo);
+    const int pts[5][2] = {{w / 2, h / 2}, {w / 4, h / 4}, {3 * w / 4, h / 4},
+                           {w / 4, 3 * h / 4}, {3 * w / 4, 3 * h / 4}};
+    unsigned char px[5][4] = {};
+    for (int i = 0; i < 5; ++i) {
+        readPixels(pts[i][0], pts[i][1], 1, 1, 0x1908 /* GL_RGBA */, 0x1401 /* GL_UNSIGNED_BYTE */, px[i]);
+    }
+    if (swapIndex == 120 || swapIndex == 480) {
+        gpu_diag_dump_framebuffer(reinterpret_cast<void*>(readPixels), w, h, swapIndex);
+    }
+    const unsigned int err = getError();
+    ::kudroid::log::write(::kudroid::log::kInfo, "KuDroidGPU",
+        "diag swap#%llu fbo=%d surface=%dx%d center=%u,%u,%u,%u c1=%u,%u,%u,%u c2=%u,%u,%u,%u "
+        "c3=%u,%u,%u,%u c4=%u,%u,%u,%u glError=0x%x",
+        static_cast<unsigned long long>(swapIndex), fbo, w, h,
+        px[0][0], px[0][1], px[0][2], px[0][3], px[1][0], px[1][1], px[1][2], px[1][3],
+        px[2][0], px[2][1], px[2][2], px[2][3], px[3][0], px[3][1], px[3][2], px[3][3],
+        px[4][0], px[4][1], px[4][2], px[4][3], err);
+}
+
+// Logs the first uploads with a non-zero byte count, so empty textures are visible.
+static void gpu_diag_texture_upload(const char* what, unsigned int target, int level, int width,
+                                    int height, unsigned int format, unsigned int type,
+                                    const void* pixels) {
+    static std::atomic<int> count{0};
+    if (count.fetch_add(1, std::memory_order_relaxed) >= 128) return;
+    size_t bpp = 4;
+    if (type == 0x8363 || type == 0x8033 || type == 0x8034) bpp = 2;  // packed 16-bit
+    else if (format == 0x1907) bpp = 3;                               // GL_RGB
+    else if (format == 0x190A) bpp = 2;                               // GL_LUMINANCE_ALPHA
+    else if (format == 0x1906 || format == 0x1909) bpp = 1;           // GL_ALPHA / GL_LUMINANCE
+    size_t nonzero = 0;
+    const size_t total = pixels && width > 0 && height > 0
+        ? static_cast<size_t>(width) * static_cast<size_t>(height) * bpp : 0;
+    const size_t scan = std::min<size_t>(total, 1u << 20);
+    const auto* bytes = static_cast<const unsigned char*>(pixels);
+    for (size_t i = 0; i < scan; ++i) nonzero += bytes[i] != 0;
+    ::kudroid::log::write(::kudroid::log::kInfo, "KuDroidGPU",
+        "diag %s target=0x%x level=%d %dx%d format=0x%x type=0x%x pixels=%s nonzero=%zu/%zu",
+        what, target, level, width, height, format, type, pixels ? "yes" : "null", nonzero, scan);
+}
+
 extern "C" EGLBoolean bionic_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     auto f = eglFn<EGLBoolean(EGLDisplay, EGLSurface)>("eglSwapBuffers");
     if (!f) { EGL_FORWARD_ERR("eglSwapBuffers", ""); return EGL_FALSE; }
@@ -1955,6 +2289,9 @@ extern "C" EGLBoolean bionic_eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) 
     }
     tls_autorelease_pool = objc_autoreleasePoolPush();
 #endif
+    if (gpu_diag_enabled() && (g_swapCalls % 120) == 0) {
+        gpu_diag_sample_backbuffer(dpy, surface, g_swapCalls);
+    }
     const uint64_t swapT0 = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch())
@@ -2188,8 +2525,6 @@ extern "C" int64_t bionic_kudroid_gl_surface_create(int32_t client_version, int3
         return 0;
     }
 
-    bionic_eglSwapInterval(dpy, 1);
-
     auto* state = new KuDroidGLSurfaceState();
     state->dpy = dpy;
     state->config = config;
@@ -2204,7 +2539,9 @@ extern "C" int64_t bionic_kudroid_gl_surface_create(int32_t client_version, int3
 extern "C" int32_t bionic_kudroid_gl_surface_make_current(int64_t handle) {
     auto* state = reinterpret_cast<KuDroidGLSurfaceState*>(handle);
     if (!state || !state->dpy || !state->surf || !state->ctx) return 0;
-    return bionic_eglMakeCurrent(state->dpy, state->surf, state->surf, state->ctx) ? 1 : 0;
+    if (!bionic_eglMakeCurrent(state->dpy, state->surf, state->surf, state->ctx)) return 0;
+    bionic_eglSwapInterval(state->dpy, 1);
+    return 1;
 }
 
 extern "C" int32_t bionic_kudroid_gl_surface_swap(int64_t handle) {
@@ -2227,7 +2564,7 @@ extern "C" void bionic_kudroid_gl_surface_destroy(int64_t handle) {
 
 extern "C" void bionic_glMemoryBarrier(unsigned int barriers) {
     typedef void (*PFN)(unsigned int);
-    auto f = (PFN)get_gl_func("glMemoryBarrier");
+    auto f = (PFN)GL_FUNC_CACHED("glMemoryBarrier");
     if (!f) { EGL_FORWARD_ERR("glMemoryBarrier", ""); return; }
     gpuLog("glMemoryBarrier(barriers=0x%x)", barriers);
     f(barriers);
@@ -2238,7 +2575,7 @@ extern "C" void bionic_glBindImageTexture(unsigned int unit, unsigned int textur
                                           unsigned int access, unsigned int format) {
     typedef void (*PFN)(unsigned int, unsigned int, int, unsigned char, int,
                         unsigned int, unsigned int);
-    auto f = (PFN)get_gl_func("glBindImageTexture");
+    auto f = (PFN)GL_FUNC_CACHED("glBindImageTexture");
     if (!f) { EGL_FORWARD_ERR("glBindImageTexture", ""); return; }
     gpuLog("glBindImageTexture(unit=%u texture=%u level=%d layered=%u layer=%d)",
            unit, texture, level, layered, layer);
@@ -2247,7 +2584,7 @@ extern "C" void bionic_glBindImageTexture(unsigned int unit, unsigned int textur
 
 extern "C" void bionic_glFramebufferParameteri(unsigned int target, unsigned int pname, int param) {
     typedef void (*PFN)(unsigned int, unsigned int, int);
-    auto f = (PFN)get_gl_func("glFramebufferParameteri");
+    auto f = (PFN)GL_FUNC_CACHED("glFramebufferParameteri");
     if (!f) { EGL_FORWARD_ERR("glFramebufferParameteri", ""); return; }
     gpuLog("glFramebufferParameteri(target=0x%x pname=0x%x param=%d)", target, pname, param);
     f(target, pname, param);
@@ -2255,7 +2592,7 @@ extern "C" void bionic_glFramebufferParameteri(unsigned int target, unsigned int
 
 extern "C" unsigned int bionic_glCreateShader(unsigned int type) {
     typedef unsigned int (*PFN)(unsigned int);
-    auto f = (PFN)get_gl_func("glCreateShader");
+    auto f = (PFN)GL_FUNC_CACHED("glCreateShader");
     if (!f) { EGL_FORWARD_ERR("glCreateShader", ""); return 0; }
     gpuLog("glCreateShader(type=0x%x): calling ANGLE...", type);
     unsigned int s = f(type);
@@ -2265,7 +2602,7 @@ extern "C" unsigned int bionic_glCreateShader(unsigned int type) {
 
 extern "C" void bionic_glShaderSource(unsigned int shader, int count, const char* const* string, const int* length) {
     typedef void (*PFN)(unsigned int, int, const char* const*, const int*);
-    auto f = (PFN)get_gl_func("glShaderSource");
+    auto f = (PFN)GL_FUNC_CACHED("glShaderSource");
     if (!f) { EGL_FORWARD_ERR("glShaderSource", ""); return; }
 
     gpuLog("glShaderSource(shader=%u count=%d): marshalling guest memory to host buffer...", shader, count);
@@ -2311,7 +2648,7 @@ extern "C" void bionic_glShaderSource(unsigned int shader, int count, const char
 
 extern "C" void bionic_glCompileShader(unsigned int shader) {
     typedef void (*PFN)(unsigned int);
-    auto f = (PFN)get_gl_func("glCompileShader");
+    auto f = (PFN)GL_FUNC_CACHED("glCompileShader");
     if (!f) { EGL_FORWARD_ERR("glCompileShader", ""); return; }
     gpuLog("glCompileShader(shader=%u): calling ANGLE...", shader);
     f(shader);
@@ -2320,7 +2657,7 @@ extern "C" void bionic_glCompileShader(unsigned int shader) {
 
 extern "C" void bionic_glGetShaderiv(unsigned int shader, unsigned int pname, int* params) {
     typedef void (*PFN)(unsigned int, unsigned int, int*);
-    auto f = (PFN)get_gl_func("glGetShaderiv");
+    auto f = (PFN)GL_FUNC_CACHED("glGetShaderiv");
     if (!f) { EGL_FORWARD_ERR("glGetShaderiv", ""); return; }
     f(shader, pname, params);
     gpuLog("glGetShaderiv(shader=%u pname=0x%x param=%d)", shader, pname, params ? *params : 0);
@@ -2328,7 +2665,7 @@ extern "C" void bionic_glGetShaderiv(unsigned int shader, unsigned int pname, in
 
 extern "C" void bionic_glGetShaderInfoLog(unsigned int shader, int maxLength, int* length, char* infoLog) {
     typedef void (*PFN)(unsigned int, int, int*, char*);
-    auto f = (PFN)get_gl_func("glGetShaderInfoLog");
+    auto f = (PFN)GL_FUNC_CACHED("glGetShaderInfoLog");
     if (!f) { EGL_FORWARD_ERR("glGetShaderInfoLog", ""); return; }
     f(shader, maxLength, length, infoLog);
     gpuLog("glGetShaderInfoLog(shader=%u log='%s')", shader, infoLog ? infoLog : "");
@@ -2336,7 +2673,7 @@ extern "C" void bionic_glGetShaderInfoLog(unsigned int shader, int maxLength, in
 
 extern "C" unsigned int bionic_glCreateProgram(void) {
     typedef unsigned int (*PFN)(void);
-    auto f = (PFN)get_gl_func("glCreateProgram");
+    auto f = (PFN)GL_FUNC_CACHED("glCreateProgram");
     if (!f) { EGL_FORWARD_ERR("glCreateProgram", ""); return 0; }
     gpuLog("glCreateProgram: calling ANGLE...");
     unsigned int p = f();
@@ -2346,7 +2683,7 @@ extern "C" unsigned int bionic_glCreateProgram(void) {
 
 extern "C" void bionic_glAttachShader(unsigned int program, unsigned int shader) {
     typedef void (*PFN)(unsigned int, unsigned int);
-    auto f = (PFN)get_gl_func("glAttachShader");
+    auto f = (PFN)GL_FUNC_CACHED("glAttachShader");
     if (!f) { EGL_FORWARD_ERR("glAttachShader", ""); return; }
     gpuLog("glAttachShader(prog=%u, shader=%u)", program, shader);
     f(program, shader);
@@ -2354,7 +2691,7 @@ extern "C" void bionic_glAttachShader(unsigned int program, unsigned int shader)
 
 extern "C" void bionic_glLinkProgram(unsigned int program) {
     typedef void (*PFN)(unsigned int);
-    auto f = (PFN)get_gl_func("glLinkProgram");
+    auto f = (PFN)GL_FUNC_CACHED("glLinkProgram");
     if (!f) { EGL_FORWARD_ERR("glLinkProgram", ""); return; }
     gpuLog("glLinkProgram(program=%u): calling ANGLE...", program);
 #if defined(__APPLE__)
@@ -2369,7 +2706,7 @@ extern "C" void bionic_glLinkProgram(unsigned int program) {
 
 extern "C" void bionic_glGetProgramiv(unsigned int program, unsigned int pname, int* params) {
     typedef void (*PFN)(unsigned int, unsigned int, int*);
-    auto f = (PFN)get_gl_func("glGetProgramiv");
+    auto f = (PFN)GL_FUNC_CACHED("glGetProgramiv");
     if (!f) { EGL_FORWARD_ERR("glGetProgramiv", ""); return; }
     f(program, pname, params);
     gpuLog("glGetProgramiv(prog=%u pname=0x%x param=%d)", program, pname, params ? *params : 0);
@@ -2377,7 +2714,7 @@ extern "C" void bionic_glGetProgramiv(unsigned int program, unsigned int pname, 
 
 extern "C" void bionic_glUseProgram(unsigned int program) {
     typedef void (*PFN)(unsigned int);
-    auto f = (PFN)get_gl_func("glUseProgram");
+    auto f = (PFN)GL_FUNC_CACHED("glUseProgram");
     if (!f) { EGL_FORWARD_ERR("glUseProgram", ""); return; }
     gpuLog("glUseProgram(prog=%u)", program);
     f(program);
@@ -2385,7 +2722,7 @@ extern "C" void bionic_glUseProgram(unsigned int program) {
 
 extern "C" int bionic_glGetAttribLocation(unsigned int program, const char* name) {
     typedef int (*PFN)(unsigned int, const char*);
-    auto f = (PFN)get_gl_func("glGetAttribLocation");
+    auto f = (PFN)GL_FUNC_CACHED("glGetAttribLocation");
     if (!f) { EGL_FORWARD_ERR("glGetAttribLocation", ""); return -1; }
     int loc = f(program, name);
     gpuLog("glGetAttribLocation(prog=%u name='%s') -> %d", program, name ? name : "", loc);
@@ -2394,14 +2731,14 @@ extern "C" int bionic_glGetAttribLocation(unsigned int program, const char* name
 
 extern "C" void bionic_glEnableVertexAttribArray(unsigned int index) {
     typedef void (*PFN)(unsigned int);
-    auto f = (PFN)get_gl_func("glEnableVertexAttribArray");
+    auto f = (PFN)GL_FUNC_CACHED("glEnableVertexAttribArray");
     if (!f) { EGL_FORWARD_ERR("glEnableVertexAttribArray", ""); return; }
     f(index);
 }
 
 extern "C" void bionic_glVertexAttribPointer(unsigned int index, int size, unsigned int type, unsigned char normalized, int stride, const void* pointer) {
     typedef void (*PFN)(unsigned int, int, unsigned int, unsigned char, int, const void*);
-    auto f = (PFN)get_gl_func("glVertexAttribPointer");
+    auto f = (PFN)GL_FUNC_CACHED("glVertexAttribPointer");
     if (!f) { EGL_FORWARD_ERR("glVertexAttribPointer", ""); return; }
     // Not logged: per-attribute per-draw state, sampled or not it was 2144 of
     // 3856 lines in one run's crash buffer and pushed real faults out of it.
@@ -2414,14 +2751,14 @@ extern "C" void bionic_glVertexAttribPointer(unsigned int index, int size, unsig
 
 extern "C" void bionic_glClearColor(float red, float green, float blue, float alpha) {
     typedef void (*PFN)(float, float, float, float);
-    auto f = (PFN)get_gl_func("glClearColor");
+    auto f = (PFN)GL_FUNC_CACHED("glClearColor");
     if (!f) { EGL_FORWARD_ERR("glClearColor", ""); return; }
     f(red, green, blue, alpha);
 }
 
 extern "C" void bionic_glClear(unsigned int mask) {
     typedef void (*PFN)(unsigned int);
-    auto f = (PFN)get_gl_func("glClear");
+    auto f = (PFN)GL_FUNC_CACHED("glClear");
     if (!f) { EGL_FORWARD_ERR("glClear", ""); return; }
     ++g_clearCalls;
     f(mask);
@@ -2429,7 +2766,7 @@ extern "C" void bionic_glClear(unsigned int mask) {
 
 extern "C" void bionic_glDrawArrays(unsigned int mode, int first, int count) {
     typedef void (*PFN)(unsigned int, int, int);
-    auto f = (PFN)get_gl_func("glDrawArrays");
+    auto f = (PFN)GL_FUNC_CACHED("glDrawArrays");
     if (!f) { EGL_FORWARD_ERR("glDrawArrays", ""); return; }
     ++g_drawCalls;
     gpuLog("glDrawArrays(mode=0x%x first=%d count=%d): calling ANGLE...", mode, first, count);
@@ -2445,7 +2782,7 @@ extern "C" void bionic_glDrawArrays(unsigned int mode, int first, int count) {
 
 extern "C" void bionic_glViewport(int x, int y, int width, int height) {
     typedef void (*PFN)(int, int, int, int);
-    auto f = (PFN)get_gl_func("glViewport");
+    auto f = (PFN)GL_FUNC_CACHED("glViewport");
     if (!f) { EGL_FORWARD_ERR("glViewport", ""); return; }
     gpuLog("glViewport(%d, %d, %d, %d)", x, y, width, height);
     f(x, y, width, height);
@@ -2453,7 +2790,7 @@ extern "C" void bionic_glViewport(int x, int y, int width, int height) {
 
 extern "C" void bionic_glGenBuffers(int n, unsigned int* buffers) {
     typedef void (*PFN)(int, unsigned int*);
-    auto f = (PFN)get_gl_func("glGenBuffers");
+    auto f = (PFN)GL_FUNC_CACHED("glGenBuffers");
     if (!f) { EGL_FORWARD_ERR("glGenBuffers", ""); return; }
     f(n, buffers);
     gpuLog("glGenBuffers(n=%d) -> buf=%u", n, (buffers && n > 0) ? buffers[0] : 0);
@@ -2461,14 +2798,14 @@ extern "C" void bionic_glGenBuffers(int n, unsigned int* buffers) {
 
 extern "C" void bionic_glBindBuffer(unsigned int target, unsigned int buffer) {
     typedef void (*PFN)(unsigned int, unsigned int);
-    auto f = (PFN)get_gl_func("glBindBuffer");
+    auto f = (PFN)GL_FUNC_CACHED("glBindBuffer");
     if (!f) { EGL_FORWARD_ERR("glBindBuffer", ""); return; }
     f(target, buffer);
 }
 
 extern "C" void bionic_glBufferData(unsigned int target, long size, const void* data, unsigned int usage) {
     typedef void (*PFN)(unsigned int, long, const void*, unsigned int);
-    auto f = (PFN)get_gl_func("glBufferData");
+    auto f = (PFN)GL_FUNC_CACHED("glBufferData");
     if (!f) { EGL_FORWARD_ERR("glBufferData", ""); return; }
     gpuLog("glBufferData(target=0x%x size=%ld usage=0x%x)", target, size, usage);
     f(target, size, data, usage);
@@ -2477,84 +2814,90 @@ extern "C" void bionic_glBufferData(unsigned int target, long size, const void* 
 // ── Textures ────────────────────────────────────────────────────────────────
 extern "C" void bionic_glGenTextures(int n, unsigned int* textures) {
     typedef void (*PFN)(int, unsigned int*);
-    auto f = (PFN)get_gl_func("glGenTextures");
+    auto f = (PFN)GL_FUNC_CACHED("glGenTextures");
     if (f) f(n, textures);
 }
 extern "C" void bionic_glBindTexture(unsigned int target, unsigned int texture) {
     typedef void (*PFN)(unsigned int, unsigned int);
-    auto f = (PFN)get_gl_func("glBindTexture");
+    auto f = (PFN)GL_FUNC_CACHED("glBindTexture");
     if (f) f(target, texture);
 }
 extern "C" void bionic_glDeleteTextures(int n, const unsigned int* textures) {
     typedef void (*PFN)(int, const unsigned int*);
-    auto f = (PFN)get_gl_func("glDeleteTextures");
+    auto f = (PFN)GL_FUNC_CACHED("glDeleteTextures");
     if (f) f(n, textures);
 }
 extern "C" void bionic_glTexImage2D(unsigned int target, int level, int internalformat, int width, int height, int border, unsigned int format, unsigned int type, const void* pixels) {
     typedef void (*PFN)(unsigned int, int, int, int, int, int, unsigned int, unsigned int, const void*);
-    auto f = (PFN)get_gl_func("glTexImage2D");
+    auto f = (PFN)GL_FUNC_CACHED("glTexImage2D");
+    if (gpu_diag_enabled()) {
+        gpu_diag_texture_upload("glTexImage2D", target, level, width, height, format, type, pixels);
+    }
     if (f) f(target, level, internalformat, width, height, border, format, type, pixels);
 }
 extern "C" void bionic_glTexSubImage2D(unsigned int target, int level, int xoffset, int yoffset, int width, int height, unsigned int format, unsigned int type, const void* pixels) {
     typedef void (*PFN)(unsigned int, int, int, int, int, int, unsigned int, unsigned int, const void*);
-    auto f = (PFN)get_gl_func("glTexSubImage2D");
+    auto f = (PFN)GL_FUNC_CACHED("glTexSubImage2D");
+    if (gpu_diag_enabled()) {
+        gpu_diag_texture_upload("glTexSubImage2D", target, level, width, height, format, type, pixels);
+    }
     if (f) f(target, level, xoffset, yoffset, width, height, format, type, pixels);
 }
 extern "C" void bionic_glTexParameteri(unsigned int target, unsigned int pname, int param) {
     typedef void (*PFN)(unsigned int, unsigned int, int);
-    auto f = (PFN)get_gl_func("glTexParameteri");
+    auto f = (PFN)GL_FUNC_CACHED("glTexParameteri");
     if (f) f(target, pname, param);
 }
 extern "C" void bionic_glTexParameterf(unsigned int target, unsigned int pname, float param) {
     typedef void (*PFN)(unsigned int, unsigned int, float);
-    auto f = (PFN)get_gl_func("glTexParameterf");
+    auto f = (PFN)GL_FUNC_CACHED("glTexParameterf");
     if (f) f(target, pname, param);
 }
 extern "C" void bionic_glTexParameteriv(unsigned int target, unsigned int pname, const int* params) {
     typedef void (*PFN)(unsigned int, unsigned int, const int*);
-    auto f = (PFN)get_gl_func("glTexParameteriv");
+    auto f = (PFN)GL_FUNC_CACHED("glTexParameteriv");
     if (f) f(target, pname, params);
 }
 extern "C" void bionic_glTexParameterfv(unsigned int target, unsigned int pname, const float* params) {
     typedef void (*PFN)(unsigned int, unsigned int, const float*);
-    auto f = (PFN)get_gl_func("glTexParameterfv");
+    auto f = (PFN)GL_FUNC_CACHED("glTexParameterfv");
     if (f) f(target, pname, params);
 }
 extern "C" void bionic_glActiveTexture(unsigned int texture) {
     typedef void (*PFN)(unsigned int);
-    auto f = (PFN)get_gl_func("glActiveTexture");
+    auto f = (PFN)GL_FUNC_CACHED("glActiveTexture");
     if (f) f(texture);
 }
 extern "C" void bionic_glGenerateMipmap(unsigned int target) {
     typedef void (*PFN)(unsigned int);
-    auto f = (PFN)get_gl_func("glGenerateMipmap");
+    auto f = (PFN)GL_FUNC_CACHED("glGenerateMipmap");
     if (f) f(target);
 }
 extern "C" void bionic_glPixelStorei(unsigned int pname, int param) {
     typedef void (*PFN)(unsigned int, int);
-    auto f = (PFN)get_gl_func("glPixelStorei");
+    auto f = (PFN)GL_FUNC_CACHED("glPixelStorei");
     if (f) f(pname, param);
 }
 extern "C" void bionic_glCompressedTexImage2D(unsigned int target, int level, unsigned int internalformat, int width, int height, int border, int imageSize, const void* data) {
     typedef void (*PFN)(unsigned int, int, unsigned int, int, int, int, int, const void*);
-    auto f = (PFN)get_gl_func("glCompressedTexImage2D");
+    auto f = (PFN)GL_FUNC_CACHED("glCompressedTexImage2D");
     if (f) f(target, level, internalformat, width, height, border, imageSize, data);
 }
 
 // ── Buffers & Elements ──────────────────────────────────────────────────────
 extern "C" void bionic_glDeleteBuffers(int n, const unsigned int* buffers) {
     typedef void (*PFN)(int, const unsigned int*);
-    auto f = (PFN)get_gl_func("glDeleteBuffers");
+    auto f = (PFN)GL_FUNC_CACHED("glDeleteBuffers");
     if (f) f(n, buffers);
 }
 extern "C" void bionic_glBufferSubData(unsigned int target, long offset, long size, const void* data) {
     typedef void (*PFN)(unsigned int, long, long, const void*);
-    auto f = (PFN)get_gl_func("glBufferSubData");
+    auto f = (PFN)GL_FUNC_CACHED("glBufferSubData");
     if (f) f(target, offset, size, data);
 }
 extern "C" void bionic_glDrawElements(unsigned int mode, int count, unsigned int type, const void* indices) {
     typedef void (*PFN)(unsigned int, int, unsigned int, const void*);
-    auto f = (PFN)get_gl_func("glDrawElements");
+    auto f = (PFN)GL_FUNC_CACHED("glDrawElements");
     if (!f) return;
     ++g_drawCalls;
 #if defined(__APPLE__)
@@ -2567,433 +2910,433 @@ extern "C" void bionic_glDrawElements(unsigned int mode, int count, unsigned int
 }
 extern "C" void bionic_glDisableVertexAttribArray(unsigned int index) {
     typedef void (*PFN)(unsigned int);
-    auto f = (PFN)get_gl_func("glDisableVertexAttribArray");
+    auto f = (PFN)GL_FUNC_CACHED("glDisableVertexAttribArray");
     if (f) f(index);
 }
 
 // ── Vertex Array Objects (VAO) ──────────────────────────────────────────────
 extern "C" void bionic_glGenVertexArrays(int n, unsigned int* arrays) {
     typedef void (*PFN)(int, unsigned int*);
-    auto f = (PFN)get_gl_func("glGenVertexArrays");
-    if (!f) f = (PFN)get_gl_func("glGenVertexArraysOES");
+    auto f = (PFN)GL_FUNC_CACHED("glGenVertexArrays");
+    if (!f) f = (PFN)GL_FUNC_CACHED("glGenVertexArraysOES");
     if (f) f(n, arrays);
 }
 extern "C" void bionic_glBindVertexArray(unsigned int array) {
     typedef void (*PFN)(unsigned int);
-    auto f = (PFN)get_gl_func("glBindVertexArray");
-    if (!f) f = (PFN)get_gl_func("glBindVertexArrayOES");
+    auto f = (PFN)GL_FUNC_CACHED("glBindVertexArray");
+    if (!f) f = (PFN)GL_FUNC_CACHED("glBindVertexArrayOES");
     if (f) f(array);
 }
 extern "C" void bionic_glDeleteVertexArrays(int n, const unsigned int* arrays) {
     typedef void (*PFN)(int, const unsigned int*);
-    auto f = (PFN)get_gl_func("glDeleteVertexArrays");
-    if (!f) f = (PFN)get_gl_func("glDeleteVertexArraysOES");
+    auto f = (PFN)GL_FUNC_CACHED("glDeleteVertexArrays");
+    if (!f) f = (PFN)GL_FUNC_CACHED("glDeleteVertexArraysOES");
     if (f) f(n, arrays);
 }
 
 // ── Framebuffers & Renderbuffers ────────────────────────────────────────────
 extern "C" void bionic_glGenFramebuffers(int n, unsigned int* framebuffers) {
     typedef void (*PFN)(int, unsigned int*);
-    auto f = (PFN)get_gl_func("glGenFramebuffers");
+    auto f = (PFN)GL_FUNC_CACHED("glGenFramebuffers");
     if (f) f(n, framebuffers);
 }
 extern "C" void bionic_glBindFramebuffer(unsigned int target, unsigned int framebuffer) {
     typedef void (*PFN)(unsigned int, unsigned int);
-    auto f = (PFN)get_gl_func("glBindFramebuffer");
+    auto f = (PFN)GL_FUNC_CACHED("glBindFramebuffer");
     if (f) f(target, framebuffer);
 }
 extern "C" void bionic_glDeleteFramebuffers(int n, const unsigned int* framebuffers) {
     typedef void (*PFN)(int, const unsigned int*);
-    auto f = (PFN)get_gl_func("glDeleteFramebuffers");
+    auto f = (PFN)GL_FUNC_CACHED("glDeleteFramebuffers");
     if (f) f(n, framebuffers);
 }
 extern "C" void bionic_glFramebufferTexture2D(unsigned int target, unsigned int attachment, unsigned int textarget, unsigned int texture, int level) {
     typedef void (*PFN)(unsigned int, unsigned int, unsigned int, unsigned int, int);
-    auto f = (PFN)get_gl_func("glFramebufferTexture2D");
+    auto f = (PFN)GL_FUNC_CACHED("glFramebufferTexture2D");
     if (f) f(target, attachment, textarget, texture, level);
 }
 extern "C" unsigned int bionic_glCheckFramebufferStatus(unsigned int target) {
     typedef unsigned int (*PFN)(unsigned int);
-    auto f = (PFN)get_gl_func("glCheckFramebufferStatus");
+    auto f = (PFN)GL_FUNC_CACHED("glCheckFramebufferStatus");
     if (f) return f(target);
     return 0;
 }
 extern "C" void bionic_glGenRenderbuffers(int n, unsigned int* renderbuffers) {
     typedef void (*PFN)(int, unsigned int*);
-    auto f = (PFN)get_gl_func("glGenRenderbuffers");
+    auto f = (PFN)GL_FUNC_CACHED("glGenRenderbuffers");
     if (f) f(n, renderbuffers);
 }
 extern "C" void bionic_glBindRenderbuffer(unsigned int target, unsigned int renderbuffer) {
     typedef void (*PFN)(unsigned int, unsigned int);
-    auto f = (PFN)get_gl_func("glBindRenderbuffer");
+    auto f = (PFN)GL_FUNC_CACHED("glBindRenderbuffer");
     if (f) f(target, renderbuffer);
 }
 extern "C" void bionic_glDeleteRenderbuffers(int n, const unsigned int* renderbuffers) {
     typedef void (*PFN)(int, const unsigned int*);
-    auto f = (PFN)get_gl_func("glDeleteRenderbuffers");
+    auto f = (PFN)GL_FUNC_CACHED("glDeleteRenderbuffers");
     if (f) f(n, renderbuffers);
 }
 extern "C" void bionic_glRenderbufferStorage(unsigned int target, unsigned int internalformat, int width, int height) {
     typedef void (*PFN)(unsigned int, unsigned int, int, int);
-    auto f = (PFN)get_gl_func("glRenderbufferStorage");
+    auto f = (PFN)GL_FUNC_CACHED("glRenderbufferStorage");
     if (f) f(target, internalformat, width, height);
 }
 extern "C" void bionic_glFramebufferRenderbuffer(unsigned int target, unsigned int attachment, unsigned int renderbuffertarget, unsigned int renderbuffer) {
     typedef void (*PFN)(unsigned int, unsigned int, unsigned int, unsigned int);
-    auto f = (PFN)get_gl_func("glFramebufferRenderbuffer");
+    auto f = (PFN)GL_FUNC_CACHED("glFramebufferRenderbuffer");
     if (f) f(target, attachment, renderbuffertarget, renderbuffer);
 }
 
 // ── Uniforms ────────────────────────────────────────────────────────────────
 extern "C" int bionic_glGetUniformLocation(unsigned int program, const char* name) {
     typedef int (*PFN)(unsigned int, const char*);
-    auto f = (PFN)get_gl_func("glGetUniformLocation");
+    auto f = (PFN)GL_FUNC_CACHED("glGetUniformLocation");
     if (f) return f(program, name);
     return -1;
 }
 extern "C" void bionic_glUniform1f(int location, float v0) {
     typedef void (*PFN)(int, float);
-    auto f = (PFN)get_gl_func("glUniform1f");
+    auto f = (PFN)GL_FUNC_CACHED("glUniform1f");
     if (f) f(location, v0);
 }
 extern "C" void bionic_glUniform2f(int location, float v0, float v1) {
     typedef void (*PFN)(int, float, float);
-    auto f = (PFN)get_gl_func("glUniform2f");
+    auto f = (PFN)GL_FUNC_CACHED("glUniform2f");
     if (f) f(location, v0, v1);
 }
 extern "C" void bionic_glUniform3f(int location, float v0, float v1, float v2) {
     typedef void (*PFN)(int, float, float, float);
-    auto f = (PFN)get_gl_func("glUniform3f");
+    auto f = (PFN)GL_FUNC_CACHED("glUniform3f");
     if (f) f(location, v0, v1, v2);
 }
 extern "C" void bionic_glUniform4f(int location, float v0, float v1, float v2, float v3) {
     typedef void (*PFN)(int, float, float, float, float);
-    auto f = (PFN)get_gl_func("glUniform4f");
+    auto f = (PFN)GL_FUNC_CACHED("glUniform4f");
     if (f) f(location, v0, v1, v2, v3);
 }
 extern "C" void bionic_glUniform1i(int location, int v0) {
     typedef void (*PFN)(int, int);
-    auto f = (PFN)get_gl_func("glUniform1i");
+    auto f = (PFN)GL_FUNC_CACHED("glUniform1i");
     if (f) f(location, v0);
 }
 extern "C" void bionic_glUniform2i(int location, int v0, int v1) {
     typedef void (*PFN)(int, int, int);
-    auto f = (PFN)get_gl_func("glUniform2i");
+    auto f = (PFN)GL_FUNC_CACHED("glUniform2i");
     if (f) f(location, v0, v1);
 }
 extern "C" void bionic_glUniform3i(int location, int v0, int v1, int v2) {
     typedef void (*PFN)(int, int, int, int);
-    auto f = (PFN)get_gl_func("glUniform3i");
+    auto f = (PFN)GL_FUNC_CACHED("glUniform3i");
     if (f) f(location, v0, v1, v2);
 }
 extern "C" void bionic_glUniform4i(int location, int v0, int v1, int v2, int v3) {
     typedef void (*PFN)(int, int, int, int, int);
-    auto f = (PFN)get_gl_func("glUniform4i");
+    auto f = (PFN)GL_FUNC_CACHED("glUniform4i");
     if (f) f(location, v0, v1, v2, v3);
 }
 extern "C" void bionic_glUniform1fv(int location, int count, const float* value) {
     typedef void (*PFN)(int, int, const float*);
-    auto f = (PFN)get_gl_func("glUniform1fv");
+    auto f = (PFN)GL_FUNC_CACHED("glUniform1fv");
     if (f) f(location, count, value);
 }
 extern "C" void bionic_glUniform2fv(int location, int count, const float* value) {
     typedef void (*PFN)(int, int, const float*);
-    auto f = (PFN)get_gl_func("glUniform2fv");
+    auto f = (PFN)GL_FUNC_CACHED("glUniform2fv");
     if (f) f(location, count, value);
 }
 extern "C" void bionic_glUniform3fv(int location, int count, const float* value) {
     typedef void (*PFN)(int, int, const float*);
-    auto f = (PFN)get_gl_func("glUniform3fv");
+    auto f = (PFN)GL_FUNC_CACHED("glUniform3fv");
     if (f) f(location, count, value);
 }
 extern "C" void bionic_glUniform4fv(int location, int count, const float* value) {
     typedef void (*PFN)(int, int, const float*);
-    auto f = (PFN)get_gl_func("glUniform4fv");
+    auto f = (PFN)GL_FUNC_CACHED("glUniform4fv");
     if (f) f(location, count, value);
 }
 extern "C" void bionic_glUniform1iv(int location, int count, const int* value) {
     typedef void (*PFN)(int, int, const int*);
-    auto f = (PFN)get_gl_func("glUniform1iv");
+    auto f = (PFN)GL_FUNC_CACHED("glUniform1iv");
     if (f) f(location, count, value);
 }
 extern "C" void bionic_glUniform2iv(int location, int count, const int* value) {
     typedef void (*PFN)(int, int, const int*);
-    auto f = (PFN)get_gl_func("glUniform2iv");
+    auto f = (PFN)GL_FUNC_CACHED("glUniform2iv");
     if (f) f(location, count, value);
 }
 extern "C" void bionic_glUniform3iv(int location, int count, const int* value) {
     typedef void (*PFN)(int, int, const int*);
-    auto f = (PFN)get_gl_func("glUniform3iv");
+    auto f = (PFN)GL_FUNC_CACHED("glUniform3iv");
     if (f) f(location, count, value);
 }
 extern "C" void bionic_glUniform4iv(int location, int count, const int* value) {
     typedef void (*PFN)(int, int, const int*);
-    auto f = (PFN)get_gl_func("glUniform4iv");
+    auto f = (PFN)GL_FUNC_CACHED("glUniform4iv");
     if (f) f(location, count, value);
 }
 extern "C" void bionic_glUniformMatrix2fv(int location, int count, unsigned char transpose, const float* value) {
     typedef void (*PFN)(int, int, unsigned char, const float*);
-    auto f = (PFN)get_gl_func("glUniformMatrix2fv");
+    auto f = (PFN)GL_FUNC_CACHED("glUniformMatrix2fv");
     if (f) f(location, count, transpose, value);
 }
 extern "C" void bionic_glUniformMatrix3fv(int location, int count, unsigned char transpose, const float* value) {
     typedef void (*PFN)(int, int, unsigned char, const float*);
-    auto f = (PFN)get_gl_func("glUniformMatrix3fv");
+    auto f = (PFN)GL_FUNC_CACHED("glUniformMatrix3fv");
     if (f) f(location, count, transpose, value);
 }
 extern "C" void bionic_glUniformMatrix4fv(int location, int count, unsigned char transpose, const float* value) {
     typedef void (*PFN)(int, int, unsigned char, const float*);
-    auto f = (PFN)get_gl_func("glUniformMatrix4fv");
+    auto f = (PFN)GL_FUNC_CACHED("glUniformMatrix4fv");
     if (f) f(location, count, transpose, value);
 }
 
 // ── Render States & Capabilities ────────────────────────────────────────────
 extern "C" void bionic_glEnable(unsigned int cap) {
     typedef void (*PFN)(unsigned int);
-    auto f = (PFN)get_gl_func("glEnable");
+    auto f = (PFN)GL_FUNC_CACHED("glEnable");
     if (f) f(cap);
 }
 extern "C" void bionic_glDisable(unsigned int cap) {
     typedef void (*PFN)(unsigned int);
-    auto f = (PFN)get_gl_func("glDisable");
+    auto f = (PFN)GL_FUNC_CACHED("glDisable");
     if (f) f(cap);
 }
 extern "C" unsigned char bionic_glIsEnabled(unsigned int cap) {
     typedef unsigned char (*PFN)(unsigned int);
-    auto f = (PFN)get_gl_func("glIsEnabled");
+    auto f = (PFN)GL_FUNC_CACHED("glIsEnabled");
     if (f) return f(cap);
     return 0;
 }
 extern "C" void bionic_glBlendFunc(unsigned int sfactor, unsigned int dfactor) {
     typedef void (*PFN)(unsigned int, unsigned int);
-    auto f = (PFN)get_gl_func("glBlendFunc");
+    auto f = (PFN)GL_FUNC_CACHED("glBlendFunc");
     if (f) f(sfactor, dfactor);
 }
 extern "C" void bionic_glBlendFuncSeparate(unsigned int srcRGB, unsigned int dstRGB, unsigned int srcAlpha, unsigned int dstAlpha) {
     typedef void (*PFN)(unsigned int, unsigned int, unsigned int, unsigned int);
-    auto f = (PFN)get_gl_func("glBlendFuncSeparate");
+    auto f = (PFN)GL_FUNC_CACHED("glBlendFuncSeparate");
     if (f) f(srcRGB, dstRGB, srcAlpha, dstAlpha);
 }
 extern "C" void bionic_glBlendEquation(unsigned int mode) {
     typedef void (*PFN)(unsigned int);
-    auto f = (PFN)get_gl_func("glBlendEquation");
+    auto f = (PFN)GL_FUNC_CACHED("glBlendEquation");
     if (f) f(mode);
 }
 extern "C" void bionic_glBlendEquationSeparate(unsigned int modeRGB, unsigned int modeAlpha) {
     typedef void (*PFN)(unsigned int, unsigned int);
-    auto f = (PFN)get_gl_func("glBlendEquationSeparate");
+    auto f = (PFN)GL_FUNC_CACHED("glBlendEquationSeparate");
     if (f) f(modeRGB, modeAlpha);
 }
 extern "C" void bionic_glDepthFunc(unsigned int func) {
     typedef void (*PFN)(unsigned int);
-    auto f = (PFN)get_gl_func("glDepthFunc");
+    auto f = (PFN)GL_FUNC_CACHED("glDepthFunc");
     if (f) f(func);
 }
 extern "C" void bionic_glDepthMask(unsigned char flag) {
     typedef void (*PFN)(unsigned char);
-    auto f = (PFN)get_gl_func("glDepthMask");
+    auto f = (PFN)GL_FUNC_CACHED("glDepthMask");
     if (f) f(flag);
 }
 extern "C" void bionic_glCullFace(unsigned int mode) {
     typedef void (*PFN)(unsigned int);
-    auto f = (PFN)get_gl_func("glCullFace");
+    auto f = (PFN)GL_FUNC_CACHED("glCullFace");
     if (f) f(mode);
 }
 extern "C" void bionic_glFrontFace(unsigned int mode) {
     typedef void (*PFN)(unsigned int);
-    auto f = (PFN)get_gl_func("glFrontFace");
+    auto f = (PFN)GL_FUNC_CACHED("glFrontFace");
     if (f) f(mode);
 }
 extern "C" void bionic_glScissor(int x, int y, int width, int height) {
     typedef void (*PFN)(int, int, int, int);
-    auto f = (PFN)get_gl_func("glScissor");
+    auto f = (PFN)GL_FUNC_CACHED("glScissor");
     if (f) f(x, y, width, height);
 }
 extern "C" void bionic_glColorMask(unsigned char red, unsigned char green, unsigned char blue, unsigned char alpha) {
     typedef void (*PFN)(unsigned char, unsigned char, unsigned char, unsigned char);
-    auto f = (PFN)get_gl_func("glColorMask");
+    auto f = (PFN)GL_FUNC_CACHED("glColorMask");
     if (f) f(red, green, blue, alpha);
 }
 extern "C" void bionic_glFlush(void) {
     typedef void (*PFN)(void);
-    auto f = (PFN)get_gl_func("glFlush");
+    auto f = (PFN)GL_FUNC_CACHED("glFlush");
     if (f) f();
 }
 extern "C" void bionic_glFinish(void) {
     typedef void (*PFN)(void);
-    auto f = (PFN)get_gl_func("glFinish");
+    auto f = (PFN)GL_FUNC_CACHED("glFinish");
     if (f) f();
 }
 extern "C" void bionic_glGetIntegerv(unsigned int pname, int* params) {
     typedef void (*PFN)(unsigned int, int*);
-    auto f = (PFN)get_gl_func("glGetIntegerv");
+    auto f = (PFN)GL_FUNC_CACHED("glGetIntegerv");
     if (f) f(pname, params);
 }
 extern "C" void bionic_glGetFloatv(unsigned int pname, float* params) {
     typedef void (*PFN)(unsigned int, float*);
-    auto f = (PFN)get_gl_func("glGetFloatv");
+    auto f = (PFN)GL_FUNC_CACHED("glGetFloatv");
     if (f) f(pname, params);
 }
 extern "C" void bionic_glGetBooleanv(unsigned int pname, unsigned char* params) {
     typedef void (*PFN)(unsigned int, unsigned char*);
-    auto f = (PFN)get_gl_func("glGetBooleanv");
+    auto f = (PFN)GL_FUNC_CACHED("glGetBooleanv");
     if (f) f(pname, params);
 }
 extern "C" const char* bionic_glGetString(unsigned int name) {
     typedef const char* (*PFN)(unsigned int);
-    auto f = (PFN)get_gl_func("glGetString");
+    auto f = (PFN)GL_FUNC_CACHED("glGetString");
     if (f) return f(name);
     return "";
 }
 extern "C" const char* bionic_glGetStringi(unsigned int name, unsigned int index) {
     typedef const char* (*PFN)(unsigned int, unsigned int);
-    auto f = (PFN)get_gl_func("glGetStringi");
+    auto f = (PFN)GL_FUNC_CACHED("glGetStringi");
     if (f) return f(name, index);
     return "";
 }
 extern "C" unsigned int bionic_glGetError(void) {
     typedef unsigned int (*PFN)(void);
-    auto f = (PFN)get_gl_func("glGetError");
+    auto f = (PFN)GL_FUNC_CACHED("glGetError");
     if (f) return f();
     return 0;
 }
 extern "C" void bionic_glReadPixels(int x, int y, int width, int height, unsigned int format, unsigned int type, void* pixels) {
     typedef void (*PFN)(int, int, int, int, unsigned int, unsigned int, void*);
-    auto f = (PFN)get_gl_func("glReadPixels");
+    auto f = (PFN)GL_FUNC_CACHED("glReadPixels");
     if (f) f(x, y, width, height, format, type, pixels);
 }
 extern "C" void bionic_glDeleteShader(unsigned int shader) {
     typedef void (*PFN)(unsigned int);
-    auto f = (PFN)get_gl_func("glDeleteShader");
+    auto f = (PFN)GL_FUNC_CACHED("glDeleteShader");
     if (f) f(shader);
 }
 extern "C" void bionic_glDeleteProgram(unsigned int program) {
     typedef void (*PFN)(unsigned int);
-    auto f = (PFN)get_gl_func("glDeleteProgram");
+    auto f = (PFN)GL_FUNC_CACHED("glDeleteProgram");
     if (f) f(program);
 }
 extern "C" void bionic_glDetachShader(unsigned int program, unsigned int shader) {
     typedef void (*PFN)(unsigned int, unsigned int);
-    auto f = (PFN)get_gl_func("glDetachShader");
+    auto f = (PFN)GL_FUNC_CACHED("glDetachShader");
     if (f) f(program, shader);
 }
 
 // ── GLES 3.0/3.1 Advanced: Instancing ───────────────────────────────────────
 extern "C" void bionic_glDrawArraysInstanced(unsigned int mode, int first, int count, int instancecount) {
     typedef void (*PFN)(unsigned int, int, int, int);
-    auto f = (PFN)get_gl_func("glDrawArraysInstanced");
-    if (!f) f = (PFN)get_gl_func("glDrawArraysInstancedANGLE");
+    auto f = (PFN)GL_FUNC_CACHED("glDrawArraysInstanced");
+    if (!f) f = (PFN)GL_FUNC_CACHED("glDrawArraysInstancedANGLE");
     if (!f) return;
     ++g_drawCalls;
     f(mode, first, count, instancecount);
 }
 extern "C" void bionic_glDrawElementsInstanced(unsigned int mode, int count, unsigned int type, const void* indices, int instancecount) {
     typedef void (*PFN)(unsigned int, int, unsigned int, const void*, int);
-    auto f = (PFN)get_gl_func("glDrawElementsInstanced");
-    if (!f) f = (PFN)get_gl_func("glDrawElementsInstancedANGLE");
+    auto f = (PFN)GL_FUNC_CACHED("glDrawElementsInstanced");
+    if (!f) f = (PFN)GL_FUNC_CACHED("glDrawElementsInstancedANGLE");
     if (!f) return;
     ++g_drawCalls;
     f(mode, count, type, indices, instancecount);
 }
 extern "C" void bionic_glVertexAttribDivisor(unsigned int index, unsigned int divisor) {
     typedef void (*PFN)(unsigned int, unsigned int);
-    auto f = (PFN)get_gl_func("glVertexAttribDivisor");
-    if (!f) f = (PFN)get_gl_func("glVertexAttribDivisorANGLE");
+    auto f = (PFN)GL_FUNC_CACHED("glVertexAttribDivisor");
+    if (!f) f = (PFN)GL_FUNC_CACHED("glVertexAttribDivisorANGLE");
     if (f) f(index, divisor);
 }
 
 // ── GLES 3.0: Buffer Mapping ────────────────────────────────────────────────
 extern "C" void* bionic_glMapBufferRange(unsigned int target, long offset, long length, unsigned int access) {
     typedef void* (*PFN)(unsigned int, long, long, unsigned int);
-    auto f = (PFN)get_gl_func("glMapBufferRange");
+    auto f = (PFN)GL_FUNC_CACHED("glMapBufferRange");
     if (f) return f(target, offset, length, access);
     return nullptr;
 }
 extern "C" unsigned char bionic_glUnmapBuffer(unsigned int target) {
     typedef unsigned char (*PFN)(unsigned int);
-    auto f = (PFN)get_gl_func("glUnmapBuffer");
+    auto f = (PFN)GL_FUNC_CACHED("glUnmapBuffer");
     if (f) return f(target);
     return 0;
 }
 extern "C" void bionic_glFlushMappedBufferRange(unsigned int target, long offset, long length) {
     typedef void (*PFN)(unsigned int, long, long);
-    auto f = (PFN)get_gl_func("glFlushMappedBufferRange");
+    auto f = (PFN)GL_FUNC_CACHED("glFlushMappedBufferRange");
     if (f) f(target, offset, length);
 }
 
 // ── GLES 3.0: 3D Textures & Immutable Storage & Samplers ────────────────────
 extern "C" void bionic_glTexImage3D(unsigned int target, int level, int internalformat, int width, int height, int depth, int border, unsigned int format, unsigned int type, const void* pixels) {
     typedef void (*PFN)(unsigned int, int, int, int, int, int, int, unsigned int, unsigned int, const void*);
-    auto f = (PFN)get_gl_func("glTexImage3D");
+    auto f = (PFN)GL_FUNC_CACHED("glTexImage3D");
     if (f) f(target, level, internalformat, width, height, depth, border, format, type, pixels);
 }
 extern "C" void bionic_glTexSubImage3D(unsigned int target, int level, int xoffset, int yoffset, int zoffset, int width, int height, int depth, unsigned int format, unsigned int type, const void* pixels) {
     typedef void (*PFN)(unsigned int, int, int, int, int, int, int, int, unsigned int, unsigned int, const void*);
-    auto f = (PFN)get_gl_func("glTexSubImage3D");
+    auto f = (PFN)GL_FUNC_CACHED("glTexSubImage3D");
     if (f) f(target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels);
 }
 extern "C" void bionic_glTexStorage2D(unsigned int target, int levels, unsigned int internalformat, int width, int height) {
     typedef void (*PFN)(unsigned int, int, unsigned int, int, int);
-    auto f = (PFN)get_gl_func("glTexStorage2D");
+    auto f = (PFN)GL_FUNC_CACHED("glTexStorage2D");
     if (f) f(target, levels, internalformat, width, height);
 }
 extern "C" void bionic_glTexStorage3D(unsigned int target, int levels, unsigned int internalformat, int width, int height, int depth) {
     typedef void (*PFN)(unsigned int, int, unsigned int, int, int, int);
-    auto f = (PFN)get_gl_func("glTexStorage3D");
+    auto f = (PFN)GL_FUNC_CACHED("glTexStorage3D");
     if (f) f(target, levels, internalformat, width, height, depth);
 }
 extern "C" void bionic_glGenSamplers(int count, unsigned int* samplers) {
     typedef void (*PFN)(int, unsigned int*);
-    auto f = (PFN)get_gl_func("glGenSamplers");
+    auto f = (PFN)GL_FUNC_CACHED("glGenSamplers");
     if (f) f(count, samplers);
 }
 extern "C" void bionic_glBindSampler(unsigned int unit, unsigned int sampler) {
     typedef void (*PFN)(unsigned int, unsigned int);
-    auto f = (PFN)get_gl_func("glBindSampler");
+    auto f = (PFN)GL_FUNC_CACHED("glBindSampler");
     if (f) f(unit, sampler);
 }
 extern "C" void bionic_glDeleteSamplers(int count, const unsigned int* samplers) {
     typedef void (*PFN)(int, const unsigned int*);
-    auto f = (PFN)get_gl_func("glDeleteSamplers");
+    auto f = (PFN)GL_FUNC_CACHED("glDeleteSamplers");
     if (f) f(count, samplers);
 }
 extern "C" void bionic_glSamplerParameteri(unsigned int sampler, unsigned int pname, int param) {
     typedef void (*PFN)(unsigned int, unsigned int, int);
-    auto f = (PFN)get_gl_func("glSamplerParameteri");
+    auto f = (PFN)GL_FUNC_CACHED("glSamplerParameteri");
     if (f) f(sampler, pname, param);
 }
 extern "C" void bionic_glSamplerParameterf(unsigned int sampler, unsigned int pname, float param) {
     typedef void (*PFN)(unsigned int, unsigned int, float);
-    auto f = (PFN)get_gl_func("glSamplerParameterf");
+    auto f = (PFN)GL_FUNC_CACHED("glSamplerParameterf");
     if (f) f(sampler, pname, param);
 }
 
 // ── GLES 3.0: Sync Objects & Fences ─────────────────────────────────────────
 extern "C" void* bionic_glFenceSync(unsigned int condition, unsigned int flags) {
     typedef void* (*PFN)(unsigned int, unsigned int);
-    auto f = (PFN)get_gl_func("glFenceSync");
+    auto f = (PFN)GL_FUNC_CACHED("glFenceSync");
     if (f) return f(condition, flags);
     return nullptr;
 }
 extern "C" unsigned int bionic_glClientWaitSync(void* sync, unsigned int flags, uint64_t timeout) {
     typedef unsigned int (*PFN)(void*, unsigned int, uint64_t);
-    auto f = (PFN)get_gl_func("glClientWaitSync");
+    auto f = (PFN)GL_FUNC_CACHED("glClientWaitSync");
     if (f) return f(sync, flags, timeout);
     return 0;
 }
 extern "C" void bionic_glWaitSync(void* sync, unsigned int flags, uint64_t timeout) {
     typedef void (*PFN)(void*, unsigned int, uint64_t);
-    auto f = (PFN)get_gl_func("glWaitSync");
+    auto f = (PFN)GL_FUNC_CACHED("glWaitSync");
     if (f) f(sync, flags, timeout);
 }
 extern "C" void bionic_glDeleteSync(void* sync) {
     typedef void (*PFN)(void*);
-    auto f = (PFN)get_gl_func("glDeleteSync");
+    auto f = (PFN)GL_FUNC_CACHED("glDeleteSync");
     if (f) f(sync);
 }
 extern "C" unsigned char bionic_glIsSync(void* sync) {
     typedef unsigned char (*PFN)(void*);
-    auto f = (PFN)get_gl_func("glIsSync");
+    auto f = (PFN)GL_FUNC_CACHED("glIsSync");
     if (f) return f(sync);
     return 0;
 }
@@ -3001,84 +3344,84 @@ extern "C" unsigned char bionic_glIsSync(void* sync) {
 // ── GLES 3.0: MRT & Blit Framebuffer ────────────────────────────────────────
 extern "C" void bionic_glDrawBuffers(int n, const unsigned int* bufs) {
     typedef void (*PFN)(int, const unsigned int*);
-    auto f = (PFN)get_gl_func("glDrawBuffers");
+    auto f = (PFN)GL_FUNC_CACHED("glDrawBuffers");
     if (f) f(n, bufs);
 }
 extern "C" void bionic_glReadBuffer(unsigned int src) {
     typedef void (*PFN)(unsigned int);
-    auto f = (PFN)get_gl_func("glReadBuffer");
+    auto f = (PFN)GL_FUNC_CACHED("glReadBuffer");
     if (f) f(src);
 }
 extern "C" void bionic_glBlitFramebuffer(int srcX0, int srcY0, int srcX1, int srcY1, int dstX0, int dstY0, int dstX1, int dstY1, unsigned int mask, unsigned int filter) {
     typedef void (*PFN)(int, int, int, int, int, int, int, int, unsigned int, unsigned int);
-    auto f = (PFN)get_gl_func("glBlitFramebuffer");
+    auto f = (PFN)GL_FUNC_CACHED("glBlitFramebuffer");
     if (f) f(srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter);
 }
 extern "C" void bionic_glRenderbufferStorageMultisample(unsigned int target, int samples, unsigned int internalformat, int width, int height) {
     typedef void (*PFN)(unsigned int, int, unsigned int, int, int);
-    auto f = (PFN)get_gl_func("glRenderbufferStorageMultisample");
+    auto f = (PFN)GL_FUNC_CACHED("glRenderbufferStorageMultisample");
     if (f) f(target, samples, internalformat, width, height);
 }
 
 // ── GLES 3.0/3.1: Uniform Buffer Objects (UBO) & SSBO ───────────────────────
 extern "C" unsigned int bionic_glGetUniformBlockIndex(unsigned int program, const char* uniformBlockName) {
     typedef unsigned int (*PFN)(unsigned int, const char*);
-    auto f = (PFN)get_gl_func("glGetUniformBlockIndex");
+    auto f = (PFN)GL_FUNC_CACHED("glGetUniformBlockIndex");
     if (f) return f(program, uniformBlockName);
     return 0xFFFFFFFF;
 }
 extern "C" void bionic_glUniformBlockBinding(unsigned int program, unsigned int uniformBlockIndex, unsigned int uniformBlockBinding) {
     typedef void (*PFN)(unsigned int, unsigned int, unsigned int);
-    auto f = (PFN)get_gl_func("glUniformBlockBinding");
+    auto f = (PFN)GL_FUNC_CACHED("glUniformBlockBinding");
     if (f) f(program, uniformBlockIndex, uniformBlockBinding);
 }
 extern "C" void bionic_glBindBufferBase(unsigned int target, unsigned int index, unsigned int buffer) {
     typedef void (*PFN)(unsigned int, unsigned int, unsigned int);
-    auto f = (PFN)get_gl_func("glBindBufferBase");
+    auto f = (PFN)GL_FUNC_CACHED("glBindBufferBase");
     if (f) f(target, index, buffer);
 }
 extern "C" void bionic_glBindBufferRange(unsigned int target, unsigned int index, unsigned int buffer, long offset, long size) {
     typedef void (*PFN)(unsigned int, unsigned int, unsigned int, long, long);
-    auto f = (PFN)get_gl_func("glBindBufferRange");
+    auto f = (PFN)GL_FUNC_CACHED("glBindBufferRange");
     if (f) f(target, index, buffer, offset, size);
 }
 
 // ── GLES 3.1: Compute Shaders ───────────────────────────────────────────────
 extern "C" void bionic_glDispatchCompute(unsigned int num_groups_x, unsigned int num_groups_y, unsigned int num_groups_z) {
     typedef void (*PFN)(unsigned int, unsigned int, unsigned int);
-    auto f = (PFN)get_gl_func("glDispatchCompute");
+    auto f = (PFN)GL_FUNC_CACHED("glDispatchCompute");
     if (f) f(num_groups_x, num_groups_y, num_groups_z);
 }
 extern "C" void bionic_glDispatchComputeIndirect(long indirect) {
     typedef void (*PFN)(long);
-    auto f = (PFN)get_gl_func("glDispatchComputeIndirect");
+    auto f = (PFN)GL_FUNC_CACHED("glDispatchComputeIndirect");
     if (f) f(indirect);
 }
 
 // ── GLES 3.0: Transform Feedback ────────────────────────────────────────────
 extern "C" void bionic_glGenTransformFeedbacks(int n, unsigned int* ids) {
     typedef void (*PFN)(int, unsigned int*);
-    auto f = (PFN)get_gl_func("glGenTransformFeedbacks");
+    auto f = (PFN)GL_FUNC_CACHED("glGenTransformFeedbacks");
     if (f) f(n, ids);
 }
 extern "C" void bionic_glBindTransformFeedback(unsigned int target, unsigned int id) {
     typedef void (*PFN)(unsigned int, unsigned int);
-    auto f = (PFN)get_gl_func("glBindTransformFeedback");
+    auto f = (PFN)GL_FUNC_CACHED("glBindTransformFeedback");
     if (f) f(target, id);
 }
 extern "C" void bionic_glDeleteTransformFeedbacks(int n, const unsigned int* ids) {
     typedef void (*PFN)(int, const unsigned int*);
-    auto f = (PFN)get_gl_func("glDeleteTransformFeedbacks");
+    auto f = (PFN)GL_FUNC_CACHED("glDeleteTransformFeedbacks");
     if (f) f(n, ids);
 }
 extern "C" void bionic_glBeginTransformFeedback(unsigned int primitiveMode) {
     typedef void (*PFN)(unsigned int);
-    auto f = (PFN)get_gl_func("glBeginTransformFeedback");
+    auto f = (PFN)GL_FUNC_CACHED("glBeginTransformFeedback");
     if (f) f(primitiveMode);
 }
 extern "C" void bionic_glEndTransformFeedback(void) {
     typedef void (*PFN)(void);
-    auto f = (PFN)get_gl_func("glEndTransformFeedback");
+    auto f = (PFN)GL_FUNC_CACHED("glEndTransformFeedback");
     if (f) f();
 }
 

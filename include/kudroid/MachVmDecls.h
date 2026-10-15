@@ -30,6 +30,25 @@ typedef struct kudroid_vm_region_basic_info_64 {
     unsigned short _kudroid_pad;
 } kudroid_vm_region_basic_info_64_t;
 
+// VM_REGION_EXTENDED_INFO adds what basic info cannot say: whether the region is
+// backed by a file pager (external_pager) and how it is shared. Mirrors XNU's
+// vm_region_extended_info: seven ints, a short, two bytes, one more int (36 bytes).
+#define KUDROID_VM_REGION_EXTENDED_INFO_FLAVOR 13
+#define KUDROID_VM_REGION_EXTENDED_INFO_COUNT 9
+typedef struct kudroid_vm_region_extended_info {
+    vm_prot_t protection;
+    unsigned int user_tag;
+    unsigned int pages_resident;
+    unsigned int pages_shared_now_private;
+    unsigned int pages_swapped_out;
+    unsigned int pages_dirtied;
+    unsigned int ref_count;
+    unsigned short shadow_depth;
+    unsigned char external_pager;
+    unsigned char share_mode;
+    unsigned int pages_reusable;
+} kudroid_vm_region_extended_info_t;
+
 #if defined(__APPLE__)
 #if TARGET_OS_IPHONE && !TARGET_OS_OSX
 #ifdef __cplusplus

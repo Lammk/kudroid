@@ -91,8 +91,10 @@ public class AudioManager {
             return null;
         }
         if (key.equals(PROPERTY_OUTPUT_SAMPLE_RATE)) {
-            return Integer.toString(
+            final String rate = Integer.toString(
                     android.media.AudioTrack.getNativeOutputSampleRate(STREAM_MUSIC));
+            android.util.Log.i("KuDroidAudio", "getProperty(OUTPUT_SAMPLE_RATE) -> " + rate);
+            return rate;
         }
         if (key.equals(PROPERTY_OUTPUT_FRAMES_PER_BUFFER)) {
             // Frames, not bytes — that is what the key means, and passing bytes here would
@@ -101,7 +103,9 @@ public class AudioManager {
             final int bytes = android.media.AudioTrack.getMinBufferSize(
                     rate, AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_16BIT);
             final int frames = bytes > 0 ? bytes / 4 : 0;  // 2 channels * 2 bytes
-            return Integer.toString(frames > 0 ? frames : 256);
+            final String value = Integer.toString(frames > 0 ? frames : 256);
+            android.util.Log.i("KuDroidAudio", "getProperty(OUTPUT_FRAMES_PER_BUFFER) -> " + value);
+            return value;
         }
         if (key.equals(PROPERTY_SUPPORT_MIC_NEAR_ULTRASOUND)
                 || key.equals(PROPERTY_SUPPORT_SPEAKER_NEAR_ULTRASOUND)

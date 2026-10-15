@@ -130,6 +130,8 @@ struct FrameCallbackEntry {
     void* fn = nullptr;
     void* data = nullptr;
     uint64_t due_ns = 0;
+    // When the callback was posted: a frame's timestamp is never earlier than that.
+    uint64_t posted_ns = 0;
     // Set once the pacer has written to the wake pipe for this entry, so it is not
     // nudged again every tick while the guest gets round to polling.
     bool nudged = false;
@@ -446,11 +448,16 @@ int dispatch_instance(Choreographer* c) {
         // Published for the duration of the call so getFrameTimeNanos() can answer
         // from inside the callback, and cleared afterwards so it cannot report a stale
         // frame to code that asks outside one.
-        t_current_frame_time_ns = static_cast<int64_t>(now);
+        // The frame's own boundary, not the wake-up time: a display-synchronised
+        // source reports the vsync, and a guest pacing from these stamps must not
+        // inherit scheduler jitter.
+        uint64_t stamp = due[i].due_ns < due[i].posted_ns ? due[i].posted_ns : due[i].due_ns;
+        if (stamp > now) stamp = now;
+        const int64_t frame_time = static_cast<int64_t>(stamp);
+        t_current_frame_time_ns = frame_time;
         // void(long frameTimeNanos, void* data) — the 32-bit and 64-bit NDK forms
         // share this ABI on arm64, where long is 64-bit.
-        reinterpret_cast<void (*)(int64_t, void*)>(due[i].fn)(static_cast<int64_t>(now),
-                                                             due[i].data);
+        reinterpret_cast<void (*)(int64_t, void*)>(due[i].fn)(frame_time, due[i].data);
         t_current_frame_time_ns = 0;
     }
     return count;
@@ -459,6 +466,11 @@ int dispatch_instance(Choreographer* c) {
 // ── pacer thread ────────────────────────────────────────────────────────────
 
 void pacer_main() {
+#if defined(__APPLE__)
+    // Frame delivery is latency-critical; default QoS lets the scheduler coalesce
+    // this thread's timer wakes.
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+#endif
     // Guest TLS before anything else. A frame callback is guest code, and guest code
     // built for Android reads tpidr_el0 directly; the loader rewrites those reads into
     // BRK traps a handler services lazily, but paying a trap per access on the one
@@ -641,6 +653,7 @@ void post_frame_callback(Choreographer* c, void* callback, void* data, uint64_t 
             }
         }
         e.due_ns = due;
+        e.posted_ns = now;
         e.nudged = false;
         c->frame_callbacks.push_back(e);
         c->pending.store(static_cast<unsigned>(c->frame_callbacks.size()),

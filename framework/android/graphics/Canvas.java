@@ -14,6 +14,9 @@ public class Canvas {
     private static native void native_drawColor(int color);
     private static native void native_drawRect(float left, float top, float right, float bottom, int color);
     private static native void native_drawText(String text, float x, float y, int color, float textSize);
+    private static native void native_drawBitmapText(int[] pixels, int width, int height,
+            String text, float x, float y, int color, float textSize,
+            float shadowRadius, float shadowDx, float shadowDy, int shadowColor);
     private static native void native_drawBitmap(int[] pixels, int width, int height, float x, float y);
     private static native void native_flush();
 
@@ -70,6 +73,10 @@ public class Canvas {
     }
 
     public void drawColor(int color) {
+        if (mBitmap != null) {
+            mBitmap.eraseColor(color);
+            return;
+        }
         try {
             native_drawColor(color);
         } catch (Throwable t) {}
@@ -81,6 +88,14 @@ public class Canvas {
 
     public void drawRect(float left, float top, float right, float bottom, Paint paint) {
         int color = (paint != null) ? paint.getColor() : 0xFFFFFFFF;
+        if (mBitmap != null) {
+            final int l = Math.max(0, (int) (left + mTranslateX));
+            final int t = Math.max(0, (int) (top + mTranslateY));
+            final int r = Math.min(mWidth, (int) (right + mTranslateX));
+            final int b = Math.min(mHeight, (int) (bottom + mTranslateY));
+            mBitmap.fillRect(l, t, r, b, color);
+            return;
+        }
         try {
             native_drawRect(left + mTranslateX, top + mTranslateY, right + mTranslateX, bottom + mTranslateY, color);
         } catch (Throwable t) {}
@@ -96,6 +111,15 @@ public class Canvas {
         if (text == null || text.isEmpty()) return;
         int color = (paint != null) ? paint.getColor() : 0xFFFFFFFF;
         float textSize = (paint != null) ? paint.getTextSize() : 16.0f;
+        if (mBitmap != null) {
+            native_drawBitmapText(mBitmap.getPixels(), mWidth, mHeight, text,
+                    x + mTranslateX, y + mTranslateY, color, textSize,
+                    paint != null ? paint.getShadowRadius() : 0,
+                    paint != null ? paint.getShadowDx() : 0,
+                    paint != null ? paint.getShadowDy() : 0,
+                    paint != null ? paint.getShadowColor() : 0);
+            return;
+        }
         try {
             native_drawText(text, x + mTranslateX, y + mTranslateY, color, textSize);
         } catch (Throwable t) {}
@@ -103,6 +127,14 @@ public class Canvas {
 
     public void drawBitmap(Bitmap bitmap, float left, float top, Paint paint) {
         if (bitmap == null) return;
+        if (mBitmap != null) {
+            int dx = (int) (left + mTranslateX), dy = (int) (top + mTranslateY);
+            int[] source = bitmap.getPixels();
+            if (bitmap == mBitmap) source = source.clone();
+            mBitmap.setPixels(source, 0, bitmap.getWidth(), dx, dy, bitmap.getWidth(),
+                    bitmap.getHeight());
+            return;
+        }
         int[] pixels = bitmap.getPixels();
         if (pixels != null) {
             try {
@@ -145,6 +177,7 @@ public class Canvas {
     }
 
     public void flush() {
+        if (mBitmap != null) return;
         try {
             native_flush();
         } catch (Throwable t) {}

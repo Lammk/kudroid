@@ -26,6 +26,18 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
 // Whether `method` has a libcore implementation; used to fail early with UnsatisfiedLinkError.
 bool LibCoreHasMethod(const DexMethod* method);
 
+// libcore.io.KuNet natives (src/kuart/LibNet.cpp): the sockets and DNS behind java.net.
+bool Invoke_libcore_io_KuNet(Interpreter* interp, const char* name, const DexValue* args,
+                             size_t num_args, DexValue* result);
+
+// libcore.io.KuZlib natives (src/kuart/LibZip.cpp): zlib streams and checksums.
+bool Invoke_libcore_io_KuZlib(Interpreter* interp, const char* name, const DexValue* args,
+                              size_t num_args, DexValue* result);
+
+// libcore.io.KuTls natives (src/kuart/LibTls.cpp): TLS sessions behind javax.net.ssl.
+bool Invoke_libcore_io_KuTls(Interpreter* interp, const char* name, const DexValue* args,
+                             size_t num_args, DexValue* result);
+
 // Object plumbing shared with the interpreter.
 // Read a reference instance field, or null when the object or field is absent.
 DexObject* LibCoreGetRefField(DexObject* obj, const char* name, const char* type);

@@ -264,6 +264,15 @@ void crashResetWorkerBudgets(void) {
 // the walk deeper. Fixed table, atomics only (signal context: no locks, no
 // alloc). Untracked (table full of other pcs) fails open: per-thread budgets
 // still bound those.
+static void signal_safe_log(const char* tag, const char* msg) {
+    char out[512];
+    const int n = std::snprintf(out, sizeof(out), "[%s] %s\n", tag ? tag : "KuDroidTrap", msg ? msg : "");
+    if (n > 0) {
+        (void)::write(STDERR_FILENO, out, static_cast<size_t>(n));
+        kudroid_persistent_breadcrumb(out);
+    }
+}
+
 static constexpr int kMaxSkipsPerPc = 1024;
 struct PcSkipSlot {
     std::atomic<unsigned long long> pc{0};
@@ -289,7 +298,7 @@ static void pc_skip_note(unsigned long long pc) {
                 std::snprintf(msg, sizeof(msg),
                               "skip-storm: pc 0x%llx retired after %d skips",
                               static_cast<unsigned long long>(pc), kMaxSkipsPerPc);
-                kudroid_android_log_message(4, "KuDroidSignal", msg);
+                signal_safe_log("KuDroidSignal", msg);
             }
             return;
         }
@@ -378,7 +387,7 @@ static bool worker_budget_note(WorkerBudget* s, long long nowNs,
             char msg[96];
             std::snprintf(msg, sizeof(msg), "null-run: pc 0x%llx retired after %d null faults",
                           pc, kMaxNullRun);
-            kudroid_android_log_message(4, "KuDroidSignal", msg);
+            signal_safe_log("KuDroidSignal", msg);
         }
     } else {
         s->nullRun.store(fault_addr_is_nullish(addr) ? 1 : 0, std::memory_order_relaxed);
@@ -393,7 +402,7 @@ static bool worker_budget_note(WorkerBudget* s, long long nowNs,
             std::snprintf(msg, sizeof(msg),
                           "null-burst: %d null skips in a row retired this worker",
                           kMaxNullBurst);
-            kudroid_android_log_message(4, "KuDroidSignal", msg);
+            signal_safe_log("KuDroidSignal", msg);
         }
     } else {
         s->nullBurst.store(0, std::memory_order_relaxed);
@@ -1303,6 +1312,64 @@ static bool kudroid_try_skip_fault(int, siginfo_t*, void*) { return false; }
 // g_hasCrashed and shows the modal. Safe in a handler by doing nothing.
 static void kudroid_wake_handler(int) {}
 
+#if defined(__APPLE__) && defined(__arm64__)
+// Fault context for a fatal hardware fault: general registers, the thread's
+// stack bounds, the region of the fault address, and for each register that
+// points into readable memory a short peek at the pointee. Signal-safe: only
+// snprintf, write, and vm_read_overwrite (which fails instead of faulting).
+static void log_fault_context(const void* ucontext, const void* faultAddr) {
+    if (ucontext == nullptr) return;
+    const ucontext_t* uc = static_cast<const ucontext_t*>(ucontext);
+    const auto& ss = uc->uc_mcontext->__ss;
+    char line[400];
+    for (int base = 0; base < 29; base += 4) {
+        int n = std::snprintf(line, sizeof(line), "fault-regs");
+        for (int i = base; i < base + 4 && i < 29; ++i) {
+            n += std::snprintf(line + n, sizeof(line) - static_cast<size_t>(n),
+                               " x%d=0x%llx", i,
+                               static_cast<unsigned long long>(ss.__x[i]));
+        }
+        signal_safe_log("KuDroidTrap", line);
+    }
+    const kudroid::StackBounds st = kudroid::query_thread_stack_bounds();
+    char cur[4] = "???", max[4] = "???";
+    uint64_t rbase = 0, rsize = 0;
+    const bool haveRegion = kudroid::QueryRegionProt(faultAddr, cur, max, &rbase, &rsize);
+    std::snprintf(line, sizeof(line),
+                  "fault-ctx sp=0x%llx fp=0x%llx stack=[0x%llx,0x%llx) valid=%d "
+                  "region=%s [0x%llx,0x%llx) prot=%s/%s",
+                  static_cast<unsigned long long>(ss.__sp),
+                  static_cast<unsigned long long>(ss.__fp),
+                  static_cast<unsigned long long>(st.low),
+                  static_cast<unsigned long long>(st.high), st.valid ? 1 : 0,
+                  haveRegion ? "yes" : "none",
+                  static_cast<unsigned long long>(rbase),
+                  static_cast<unsigned long long>(rbase + rsize), cur, max);
+    signal_safe_log("KuDroidTrap", line);
+    for (int i = 0; i < 29; ++i) {
+        const uint64_t p = ss.__x[i];
+        if (p < 0x100000000ULL || (p & 7) != 0) continue;
+        uint64_t w[12];
+        vm_size_t got = 0;
+        if (vm_read_overwrite(mach_task_self(), p + 64, sizeof(w),
+                              reinterpret_cast<vm_address_t>(w), &got) != KERN_SUCCESS ||
+            got != sizeof(w)) {
+            continue;
+        }
+        std::snprintf(line, sizeof(line),
+                      "fault-peek x%d+64: %016llx %016llx %016llx %016llx %016llx %016llx "
+                      "%016llx %016llx %016llx %016llx %016llx %016llx",
+                      i, static_cast<unsigned long long>(w[0]), static_cast<unsigned long long>(w[1]),
+                      static_cast<unsigned long long>(w[2]), static_cast<unsigned long long>(w[3]),
+                      static_cast<unsigned long long>(w[4]), static_cast<unsigned long long>(w[5]),
+                      static_cast<unsigned long long>(w[6]), static_cast<unsigned long long>(w[7]),
+                      static_cast<unsigned long long>(w[8]), static_cast<unsigned long long>(w[9]),
+                      static_cast<unsigned long long>(w[10]), static_cast<unsigned long long>(w[11]));
+        signal_safe_log("KuDroidTrap", line);
+    }
+}
+#endif
+
 static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
     if (sig == SIGSYS && bionic_handle_guest_syscall_trap(ucontext)) {
         return;
@@ -1389,7 +1456,12 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
                 }
             }
 #endif
-            kudroid_android_log_message(4, "KuDroidTrap", line);
+            signal_safe_log("KuDroidTrap", line);
+#if defined(__APPLE__) && defined(__arm64__)
+            if (sig == SIGBUS || sig == SIGSEGV) {
+                log_fault_context(ucontext, info != nullptr ? info->si_addr : nullptr);
+            }
+#endif
         }
     }
     if (sig == SIGTRAP) {
@@ -1403,16 +1475,16 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
             static std::atomic<int> s_jit26Seen{0};
             if (s_jit26Seen.load() < 5) {
                 ++s_jit26Seen;
-                kudroid_android_log_message(4, "KuDroidTrap",
-                                            "JIT26 prepare/detach trap with no script; "
-                                            "stepped over (unprepared)");
+                signal_safe_log("KuDroidTrap",
+                                "JIT26 prepare/detach trap with no script; "
+                                "stepped over (unprepared)");
             }
             return;
         }
         static std::atomic<int> s_trapUnhandled{0};
         if (s_trapUnhandled.load() < 8) {
             ++s_trapUnhandled;
-            kudroid_android_log_message(4, "KuDroidTrap", "SIGTRAP not emulated");
+            signal_safe_log("KuDroidTrap", "SIGTRAP not emulated");
         }
         // A SIGTRAP that is not one of KuDroid's TLS breakpoints belongs to whoever
         // installed a handler before us — a debugger bridge, a crash reporter, or
@@ -1432,7 +1504,7 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
             static std::atomic<int> s_illEmulated{0};
             if (s_illEmulated.load() < 5) {
                 ++s_illEmulated;
-                kudroid_android_log_message(4, "KuDroidTrap", "SIGILL emulated as TPIDR");
+                signal_safe_log("KuDroidTrap", "SIGILL emulated as TPIDR");
             }
             return;
         }
@@ -2657,7 +2729,7 @@ extern "C" void kudroid_log_signal_disposition(const char* tag) {
                                                         : (cur.sa_handler == SIG_DFL);
         std::snprintf(line, sizeof(line), "%s sig=%d handler=%p %s", tag != nullptr ? tag : "?",
                       sig, h, ours ? "OURS" : (is_dfl ? "DFL" : "FOREIGN"));
-        kudroid_android_log_message(4, "KuDroidTrap", line);
+        signal_safe_log("KuDroidTrap", line);
     }
 }
 

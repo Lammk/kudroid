@@ -2,6 +2,7 @@
 // Handle convention: jobject -> DexObject*, jclass -> DexClass*,
 // jmethodID -> DexMethod*, jfieldID -> DexField*.
 #include "kudroid/kuart/DexJniEnv.h"
+#include "kudroid/kuart/VmLock.h"
 #include "kudroid/abi/GuestVarargs.h"
 
 #include <cstdlib>
@@ -1532,6 +1533,21 @@ jobject kudroid_jni_new_object_from_registers(const uint64_t* frame) {
 }
 #endif
 
+// Native code reaches the linker, heap and ref tables through these entries on threads
+// that do not hold the VM lock (native calls run with it released), so each non-variadic
+// entry takes it for its duration. Variadic entries go through the call trampolines,
+// which take it when they enter the interpreter.
+template <auto F>
+struct LockedEntry;
+template <typename R, typename... A, R (JNICALL* F)(A...)>
+struct LockedEntry<F> {
+    static R JNICALL call(A... args) {
+        VmLockGuard guard;
+        return F(args...);
+    }
+};
+#define KU_LOCKED(fn) (&LockedEntry<&fn>::call)
+
 void DexJniEnv::InitFunctionTable() {
     // static: table shared by all DexJniEnv, initialized only once.
     static JNINativeInterface_ fns = {};
@@ -1539,47 +1555,47 @@ void DexJniEnv::InitFunctionTable() {
     static bool initialized = false;
 
     if (!initialized) {
-        fns.GetVersion = jnifns::GetVersion;
-        fns.DefineClass = jnifns::DefineClass;
-        fns.FindClass = jnifns::FindClass;
-        fns.FromReflectedMethod = jnifns::FromReflectedMethod;
-        fns.FromReflectedField = jnifns::FromReflectedField;
-        fns.ToReflectedMethod = jnifns::ToReflectedMethod;
-        fns.GetSuperclass = jnifns::GetSuperclass;
-        fns.IsAssignableFrom = jnifns::IsAssignableFrom;
-        fns.ToReflectedField = jnifns::ToReflectedField;
-        fns.Throw = jnifns::Throw;
-        fns.ThrowNew = jnifns::ThrowNew;
-        fns.ExceptionOccurred = jnifns::ExceptionOccurred;
-        fns.ExceptionDescribe = jnifns::ExceptionDescribe;
-        fns.ExceptionClear = jnifns::ExceptionClear;
-        fns.FatalError = jnifns::FatalError;
-        fns.PushLocalFrame = jnifns::PushLocalFrame;
-        fns.PopLocalFrame = jnifns::PopLocalFrame;
-        fns.NewGlobalRef = jnifns::NewGlobalRef;
-        fns.DeleteGlobalRef = jnifns::DeleteGlobalRef;
-        fns.DeleteLocalRef = jnifns::DeleteLocalRef;
-        fns.IsSameObject = jnifns::IsSameObject;
-        fns.NewLocalRef = jnifns::NewLocalRef;
-        fns.EnsureLocalCapacity = jnifns::EnsureLocalCapacity;
-        fns.AllocObject = jnifns::AllocObject;
+        fns.GetVersion = KU_LOCKED(jnifns::GetVersion);
+        fns.DefineClass = KU_LOCKED(jnifns::DefineClass);
+        fns.FindClass = KU_LOCKED(jnifns::FindClass);
+        fns.FromReflectedMethod = KU_LOCKED(jnifns::FromReflectedMethod);
+        fns.FromReflectedField = KU_LOCKED(jnifns::FromReflectedField);
+        fns.ToReflectedMethod = KU_LOCKED(jnifns::ToReflectedMethod);
+        fns.GetSuperclass = KU_LOCKED(jnifns::GetSuperclass);
+        fns.IsAssignableFrom = KU_LOCKED(jnifns::IsAssignableFrom);
+        fns.ToReflectedField = KU_LOCKED(jnifns::ToReflectedField);
+        fns.Throw = KU_LOCKED(jnifns::Throw);
+        fns.ThrowNew = KU_LOCKED(jnifns::ThrowNew);
+        fns.ExceptionOccurred = KU_LOCKED(jnifns::ExceptionOccurred);
+        fns.ExceptionDescribe = KU_LOCKED(jnifns::ExceptionDescribe);
+        fns.ExceptionClear = KU_LOCKED(jnifns::ExceptionClear);
+        fns.FatalError = KU_LOCKED(jnifns::FatalError);
+        fns.PushLocalFrame = KU_LOCKED(jnifns::PushLocalFrame);
+        fns.PopLocalFrame = KU_LOCKED(jnifns::PopLocalFrame);
+        fns.NewGlobalRef = KU_LOCKED(jnifns::NewGlobalRef);
+        fns.DeleteGlobalRef = KU_LOCKED(jnifns::DeleteGlobalRef);
+        fns.DeleteLocalRef = KU_LOCKED(jnifns::DeleteLocalRef);
+        fns.IsSameObject = KU_LOCKED(jnifns::IsSameObject);
+        fns.NewLocalRef = KU_LOCKED(jnifns::NewLocalRef);
+        fns.EnsureLocalCapacity = KU_LOCKED(jnifns::EnsureLocalCapacity);
+        fns.AllocObject = KU_LOCKED(jnifns::AllocObject);
         fns.NewObject = jnifns::NewObject;
-        fns.NewObjectV = jnifns::NewObjectV;
-        fns.NewObjectA = jnifns::NewObjectA;
-        fns.GetObjectClass = jnifns::GetObjectClass;
-        fns.IsInstanceOf = jnifns::IsInstanceOf;
-        fns.GetMethodID = jnifns::GetMethodID;
+        fns.NewObjectV = KU_LOCKED(jnifns::NewObjectV);
+        fns.NewObjectA = KU_LOCKED(jnifns::NewObjectA);
+        fns.GetObjectClass = KU_LOCKED(jnifns::GetObjectClass);
+        fns.IsInstanceOf = KU_LOCKED(jnifns::IsInstanceOf);
+        fns.GetMethodID = KU_LOCKED(jnifns::GetMethodID);
 
 #define DEXRT_BIND_CALLS(NAME)                                                      \
         fns.Call##NAME##Method = jnifns::Call##NAME##Method;                        \
-        fns.Call##NAME##MethodV = jnifns::Call##NAME##MethodV;                      \
-        fns.Call##NAME##MethodA = jnifns::Call##NAME##MethodA;                      \
+        fns.Call##NAME##MethodV = KU_LOCKED(jnifns::Call##NAME##MethodV);                      \
+        fns.Call##NAME##MethodA = KU_LOCKED(jnifns::Call##NAME##MethodA);                      \
         fns.CallNonvirtual##NAME##Method = jnifns::CallNonvirtual##NAME##Method;     \
-        fns.CallNonvirtual##NAME##MethodV = jnifns::CallNonvirtual##NAME##MethodV;   \
-        fns.CallNonvirtual##NAME##MethodA = jnifns::CallNonvirtual##NAME##MethodA;   \
+        fns.CallNonvirtual##NAME##MethodV = KU_LOCKED(jnifns::CallNonvirtual##NAME##MethodV);   \
+        fns.CallNonvirtual##NAME##MethodA = KU_LOCKED(jnifns::CallNonvirtual##NAME##MethodA);   \
         fns.CallStatic##NAME##Method = jnifns::CallStatic##NAME##Method;             \
-        fns.CallStatic##NAME##MethodV = jnifns::CallStatic##NAME##MethodV;           \
-        fns.CallStatic##NAME##MethodA = jnifns::CallStatic##NAME##MethodA;
+        fns.CallStatic##NAME##MethodV = KU_LOCKED(jnifns::CallStatic##NAME##MethodV);           \
+        fns.CallStatic##NAME##MethodA = KU_LOCKED(jnifns::CallStatic##NAME##MethodA);
 
         DEXRT_BIND_CALLS(Object)
         DEXRT_BIND_CALLS(Boolean)
@@ -1630,15 +1646,15 @@ void DexJniEnv::InitFunctionTable() {
         fns.CallNonvirtualDoubleMethod = reinterpret_cast<jdouble (JNICALL *)(JNIEnv*, jobject, jclass, jmethodID, ...)>(kudroid_jni_call_nonvirtual_double_trampoline);
 #endif
 
-        fns.GetFieldID = jnifns::GetFieldID;
-        fns.GetStaticMethodID = jnifns::GetStaticMethodID;
-        fns.GetStaticFieldID = jnifns::GetStaticFieldID;
+        fns.GetFieldID = KU_LOCKED(jnifns::GetFieldID);
+        fns.GetStaticMethodID = KU_LOCKED(jnifns::GetStaticMethodID);
+        fns.GetStaticFieldID = KU_LOCKED(jnifns::GetStaticFieldID);
 
 #define DEXRT_BIND_FIELD(NAME)                                          \
-        fns.Get##NAME##Field = jnifns::Get##NAME##Field;                \
-        fns.Set##NAME##Field = jnifns::Set##NAME##Field;                 \
-        fns.GetStatic##NAME##Field = jnifns::GetStatic##NAME##Field;     \
-        fns.SetStatic##NAME##Field = jnifns::SetStatic##NAME##Field;
+        fns.Get##NAME##Field = KU_LOCKED(jnifns::Get##NAME##Field);                \
+        fns.Set##NAME##Field = KU_LOCKED(jnifns::Set##NAME##Field);                 \
+        fns.GetStatic##NAME##Field = KU_LOCKED(jnifns::GetStatic##NAME##Field);     \
+        fns.SetStatic##NAME##Field = KU_LOCKED(jnifns::SetStatic##NAME##Field);
 
         DEXRT_BIND_FIELD(Object)
         DEXRT_BIND_FIELD(Boolean)
@@ -1651,31 +1667,31 @@ void DexJniEnv::InitFunctionTable() {
         DEXRT_BIND_FIELD(Double)
 #undef DEXRT_BIND_FIELD
 
-        fns.NewString = jnifns::NewString;
-        fns.GetStringLength = jnifns::GetStringLength;
-        fns.GetStringChars = jnifns::GetStringChars;
-        fns.ReleaseStringChars = jnifns::ReleaseStringChars;
-        fns.NewStringUTF = jnifns::NewStringUTF;
-        fns.GetStringUTFLength = jnifns::GetStringUTFLength;
-        fns.GetStringUTFChars = jnifns::GetStringUTFChars;
-        fns.ReleaseStringUTFChars = jnifns::ReleaseStringUTFChars;
-        fns.GetStringRegion = jnifns::GetStringRegion;
-        fns.GetStringUTFRegion = jnifns::GetStringUTFRegion;
-        fns.GetStringCritical = jnifns::GetStringCritical;
-        fns.ReleaseStringCritical = jnifns::ReleaseStringCritical;
-        fns.GetStringUTFLengthAsLong = jnifns::GetStringUTFLengthAsLong;
+        fns.NewString = KU_LOCKED(jnifns::NewString);
+        fns.GetStringLength = KU_LOCKED(jnifns::GetStringLength);
+        fns.GetStringChars = KU_LOCKED(jnifns::GetStringChars);
+        fns.ReleaseStringChars = KU_LOCKED(jnifns::ReleaseStringChars);
+        fns.NewStringUTF = KU_LOCKED(jnifns::NewStringUTF);
+        fns.GetStringUTFLength = KU_LOCKED(jnifns::GetStringUTFLength);
+        fns.GetStringUTFChars = KU_LOCKED(jnifns::GetStringUTFChars);
+        fns.ReleaseStringUTFChars = KU_LOCKED(jnifns::ReleaseStringUTFChars);
+        fns.GetStringRegion = KU_LOCKED(jnifns::GetStringRegion);
+        fns.GetStringUTFRegion = KU_LOCKED(jnifns::GetStringUTFRegion);
+        fns.GetStringCritical = KU_LOCKED(jnifns::GetStringCritical);
+        fns.ReleaseStringCritical = KU_LOCKED(jnifns::ReleaseStringCritical);
+        fns.GetStringUTFLengthAsLong = KU_LOCKED(jnifns::GetStringUTFLengthAsLong);
 
-        fns.GetArrayLength = jnifns::GetArrayLength;
-        fns.NewObjectArray = jnifns::NewObjectArray;
-        fns.GetObjectArrayElement = jnifns::GetObjectArrayElement;
-        fns.SetObjectArrayElement = jnifns::SetObjectArrayElement;
+        fns.GetArrayLength = KU_LOCKED(jnifns::GetArrayLength);
+        fns.NewObjectArray = KU_LOCKED(jnifns::NewObjectArray);
+        fns.GetObjectArrayElement = KU_LOCKED(jnifns::GetObjectArrayElement);
+        fns.SetObjectArrayElement = KU_LOCKED(jnifns::SetObjectArrayElement);
 
 #define DEXRT_BIND_ARRAY(NAME)                                                          \
-        fns.New##NAME##Array = jnifns::New##NAME##Array;                                \
-        fns.Get##NAME##ArrayElements = jnifns::Get##NAME##ArrayElements;                 \
-        fns.Release##NAME##ArrayElements = jnifns::Release##NAME##ArrayElements;         \
-        fns.Get##NAME##ArrayRegion = jnifns::Get##NAME##ArrayRegion;                     \
-        fns.Set##NAME##ArrayRegion = jnifns::Set##NAME##ArrayRegion;
+        fns.New##NAME##Array = KU_LOCKED(jnifns::New##NAME##Array);                                \
+        fns.Get##NAME##ArrayElements = KU_LOCKED(jnifns::Get##NAME##ArrayElements);                 \
+        fns.Release##NAME##ArrayElements = KU_LOCKED(jnifns::Release##NAME##ArrayElements);         \
+        fns.Get##NAME##ArrayRegion = KU_LOCKED(jnifns::Get##NAME##ArrayRegion);                     \
+        fns.Set##NAME##ArrayRegion = KU_LOCKED(jnifns::Set##NAME##ArrayRegion);
 
         DEXRT_BIND_ARRAY(Boolean)
         DEXRT_BIND_ARRAY(Byte)
@@ -1687,23 +1703,23 @@ void DexJniEnv::InitFunctionTable() {
         DEXRT_BIND_ARRAY(Double)
 #undef DEXRT_BIND_ARRAY
 
-        fns.RegisterNatives = jnifns::RegisterNatives;
-        fns.UnregisterNatives = jnifns::UnregisterNatives;
-        fns.MonitorEnter = jnifns::MonitorEnter;
-        fns.MonitorExit = jnifns::MonitorExit;
-        fns.GetJavaVM = jnifns::GetJavaVM;
-        fns.GetPrimitiveArrayCritical = jnifns::GetPrimitiveArrayCritical;
-        fns.ReleasePrimitiveArrayCritical = jnifns::ReleasePrimitiveArrayCritical;
-        fns.NewWeakGlobalRef = jnifns::NewWeakGlobalRef;
-        fns.DeleteWeakGlobalRef = jnifns::DeleteWeakGlobalRef;
-        fns.ExceptionCheck = jnifns::ExceptionCheck;
-        fns.NewDirectByteBuffer = jnifns::NewDirectByteBuffer;
-        fns.GetDirectBufferAddress = jnifns::GetDirectBufferAddress;
-        fns.GetDirectBufferCapacity = jnifns::GetDirectBufferCapacity;
-        fns.GetObjectRefType = jnifns::GetObjectRefType;
-        fns.GetModule = jnifns::GetModule;
-        fns.IsVirtualThread = jnifns::IsVirtualThread;
-        fns.HasIdentity = jnifns::HasIdentity;
+        fns.RegisterNatives = KU_LOCKED(jnifns::RegisterNatives);
+        fns.UnregisterNatives = KU_LOCKED(jnifns::UnregisterNatives);
+        fns.MonitorEnter = KU_LOCKED(jnifns::MonitorEnter);
+        fns.MonitorExit = KU_LOCKED(jnifns::MonitorExit);
+        fns.GetJavaVM = KU_LOCKED(jnifns::GetJavaVM);
+        fns.GetPrimitiveArrayCritical = KU_LOCKED(jnifns::GetPrimitiveArrayCritical);
+        fns.ReleasePrimitiveArrayCritical = KU_LOCKED(jnifns::ReleasePrimitiveArrayCritical);
+        fns.NewWeakGlobalRef = KU_LOCKED(jnifns::NewWeakGlobalRef);
+        fns.DeleteWeakGlobalRef = KU_LOCKED(jnifns::DeleteWeakGlobalRef);
+        fns.ExceptionCheck = KU_LOCKED(jnifns::ExceptionCheck);
+        fns.NewDirectByteBuffer = KU_LOCKED(jnifns::NewDirectByteBuffer);
+        fns.GetDirectBufferAddress = KU_LOCKED(jnifns::GetDirectBufferAddress);
+        fns.GetDirectBufferCapacity = KU_LOCKED(jnifns::GetDirectBufferCapacity);
+        fns.GetObjectRefType = KU_LOCKED(jnifns::GetObjectRefType);
+        fns.GetModule = KU_LOCKED(jnifns::GetModule);
+        fns.IsVirtualThread = KU_LOCKED(jnifns::IsVirtualThread);
+        fns.HasIdentity = KU_LOCKED(jnifns::HasIdentity);
 
         vm_fns.DestroyJavaVM = jnifns::DestroyJavaVM;
         vm_fns.AttachCurrentThread = jnifns::AttachCurrentThread;

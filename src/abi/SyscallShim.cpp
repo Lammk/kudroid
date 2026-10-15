@@ -1,6 +1,7 @@
 #include "kudroid/BionicShim.h"
 #include "kudroid/kudroid_bridge.h"
 #include "kudroid/abi/SyscallShim.h"
+#include "kudroid/abi/SocketAbi.h"
 #include "kudroid/abi/GuestVarargs.h"
 #include "kudroid/abi/BlockingWaitRegistry.h"
 #include "kudroid/abi/GuestSignals.h"
@@ -24,6 +25,7 @@
 #include <unistd.h>
 #include <dirent.h>
 #include <poll.h>
+#include <sys/ioctl.h>
 #include <sched.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -213,6 +215,56 @@ void appendUnsigned(std::string& output, uint64_t value, unsigned base) {
 }
 
 static std::mutex g_logAndroidMutex;
+extern "C" void kudroid_persistent_breadcrumb(const char* line);
+
+// Console sink: never block on a full pipe whose reader has stalled. A blocked
+// write here would hold the log lock and freeze every thread that logs.
+// Each chunk stays under PIPE_BUF so a writable poll guarantees a non-blocking
+// write; a not-ready console drops the rest of the line.
+static void console_write_nonblocking(const char* data, size_t len) {
+    constexpr size_t kChunk = 480;
+    while (len > 0) {
+        struct pollfd pfd = {STDOUT_FILENO, POLLOUT, 0};
+        if (::poll(&pfd, 1, 0) <= 0 || (pfd.revents & POLLOUT) == 0) return;
+        const size_t n = len < kChunk ? len : kChunk;
+        const ssize_t w = ::write(STDOUT_FILENO, data, n);
+        if (w <= 0) return;
+        data += w;
+        len -= static_cast<size_t>(w);
+    }
+}
+
+// Bounded wait for the log lock. A sink that wedges while holding it must not
+// take the watchdog and every guest thread down with it: after the bound the
+// line is dropped, and while the lock looks wedged later callers only try once.
+static std::atomic<uint64_t> g_logWedgedUntilNs{0};
+// Who holds the log mutex and what it is writing, for the wedge report. Written
+// only by the holder; read racily by a waiter that gave up, which is enough for a
+// diagnostic.
+static char g_logHolderText[160];
+static std::atomic<uint64_t> g_logHolderTid{0};
+static uint64_t log_now_ns() {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+static bool lock_log_bounded(std::mutex& mtx) {
+    if (mtx.try_lock()) return true;
+    const uint64_t start = log_now_ns();
+    if (start < g_logWedgedUntilNs.load(std::memory_order_relaxed)) return false;
+    constexpr uint64_t kBoundNs = 200ull * 1000000ull;
+    while (log_now_ns() - start < kBoundNs) {
+        ::usleep(200);
+        if (mtx.try_lock()) return true;
+    }
+    g_logWedgedUntilNs.store(log_now_ns() + 1000ull * 1000000ull, std::memory_order_relaxed);
+    char report[256];
+    std::snprintf(report, sizeof(report), "log-lock-wedged: holder tid=%llu line=%.150s",
+                  static_cast<unsigned long long>(g_logHolderTid.load(std::memory_order_relaxed)),
+                  g_logHolderText);
+    kudroid_persistent_breadcrumb(report);
+    return false;
+}
 
 #if defined(__APPLE__)
 extern "C" __attribute__((weak)) void kudroid_remote_log_broadcast(int level, const char* tag, const char* message) {
@@ -247,8 +299,31 @@ static uint64_t log_line_hash(const std::string& s) {
     return h;
 }
 
+// Logging is diagnostics only and must never wait on a thread that is parked.
+// Drop the line when (a) this thread is already inside the logger (a fault handler
+// that logs while the logger runs would self-deadlock on the non-recursive mutex) or
+// (b) the world may be stopped: a thread parked by the guest runtime's suspend
+// handler keeps the log mutex it held, and the collector, running meanwhile, would
+// wait on it forever.
+static thread_local bool t_inLogMessage = false;
+
 int logAndroidMessage(int priority, const char* tag, const std::string& message) {
-    std::lock_guard<std::mutex> lock(g_logAndroidMutex);
+    if (t_inLogMessage || kudroid::guest_async_handler_active()) return 0;
+    if (!lock_log_bounded(g_logAndroidMutex)) return 0;
+    std::lock_guard<std::mutex> lock(g_logAndroidMutex, std::adopt_lock);
+    struct ReentryFlag {
+        ReentryFlag() { t_inLogMessage = true; }
+        ~ReentryFlag() { t_inLogMessage = false; }
+    } reentryFlag;
+    {
+        uint64_t tid = 0;
+#if defined(__APPLE__)
+        ::pthread_threadid_np(nullptr, &tid);
+#endif
+        g_logHolderTid.store(tid, std::memory_order_relaxed);
+        std::snprintf(g_logHolderText, sizeof(g_logHolderText), "[%s] %s", tag ? tag : "",
+                      message.c_str());
+    }
 
     // kudroid_clear_all_logs() removes and recreates kudroid_android_logs.txt
     // (a fresh inode) before every guest run, and stderr.log is dup2'd over.
@@ -350,10 +425,20 @@ static void emit_android_log_line(int priority, const char* tag, const std::stri
     }
     
     // Dump to standard output (Xcode/syslog)
-    if (time_buf[0]) {
-        fprintf(stdout, "[%s] [AndroidLog][%s]: %s\n", time_buf, tag ? tag : "unknown", message.c_str());
-    } else {
-        fprintf(stdout, "[AndroidLog][%s]: %s\n", tag ? tag : "unknown", message.c_str());
+    {
+        char console_line[512];
+        int cn = time_buf[0]
+            ? snprintf(console_line, sizeof(console_line), "[%s] [AndroidLog][%s]: %s\n",
+                       time_buf, tag ? tag : "unknown", message.c_str())
+            : snprintf(console_line, sizeof(console_line), "[AndroidLog][%s]: %s\n",
+                       tag ? tag : "unknown", message.c_str());
+        if (cn > 0) {
+            if (static_cast<size_t>(cn) > sizeof(console_line) - 1) {
+                cn = sizeof(console_line) - 1;
+                console_line[cn - 1] = '\n';
+            }
+            console_write_nonblocking(console_line, static_cast<size_t>(cn));
+        }
     }
     
     // Broadcast via KDB WebSocket if connected
@@ -423,6 +508,18 @@ extern "C" int kudroid_snprintf_trampoline();
 extern "C" int kudroid_sprintf_trampoline();
 extern "C" int kudroid_snprintf_chk_trampoline();
 extern "C" int kudroid_sprintf_chk_trampoline();
+extern "C" int kudroid_fprintf_trampoline();
+extern "C" int kudroid_printf_trampoline();
+extern "C" int kudroid_fprintf_chk_trampoline();
+extern "C" int kudroid_printf_chk_trampoline();
+
+// Stream sink for the fprintf/printf handlers in GuestVarargs.cpp. A null stream is stdout.
+extern "C" void kudroid_guest_stdio_write(void* stream, const char* data, size_t len) {
+    FILE* out = stream != nullptr ? static_cast<FILE*>(stream) : stdout;
+    if (!len) return;
+    if (out == stdout) { console_write_nonblocking(data, len); return; }
+    std::fwrite(data, 1, len, out);
+}
 
 extern "C" int kudroid_android_log_print_from_registers(const uint64_t* frame) {
     const auto* registers = reinterpret_cast<const GuestVarargs*>(frame);
@@ -630,13 +727,53 @@ static inline void destroy_sync_obj(void* host_obj, int type) {
     std::free(host_obj);
 }
 
+// Error numbers as the guest's libc defines them (Linux). A guest compares errno and
+// pthread return codes against its own constants, and the host's differ for several:
+// EAGAIN 35/11, EDEADLK 11/35, ETIMEDOUT 60/110. A shim that reports a failure itself
+// must therefore use these, or a guest that only tolerates a timeout (110) aborts on
+// the host's number instead.
+static inline int guest_errno(int hostErrno) {
+#if defined(__APPLE__)
+    if (hostErrno == EDEADLK) return 35;
+    return kudroid::SocketErrnoToGuest(hostErrno);
+#else
+    return hostErrno;
+#endif
+}
+
+// Bumped whenever a registered object is replaced or destroyed, so per-thread lookup
+// caches never hand out a pointer that was retired.
+static std::atomic<uint64_t> gSyncGeneration{1};
+
+// Direct-mapped per-thread cache in front of the registry: lock/unlock run thousands of
+// times a frame and every one of them used to take the shared registry lock.
+struct SyncLookupCache {
+    static constexpr unsigned kSlots = 128;
+    uint64_t generation = 0;
+    void* guest[kSlots] = {};
+    void* host[kSlots] = {};
+};
+static thread_local SyncLookupCache t_syncCache;
+
 static inline void* get_or_init_sync(void* guest_ptr, int type) {
     if (!guest_ptr) return nullptr;
-    
+
+    SyncLookupCache& cache = t_syncCache;
+    const uint64_t generation = gSyncGeneration.load(std::memory_order_acquire);
+    if (cache.generation != generation) {
+        std::memset(cache.guest, 0, sizeof(cache.guest));
+        cache.generation = generation;
+    }
+    const unsigned slot = static_cast<unsigned>(
+        (reinterpret_cast<uintptr_t>(guest_ptr) >> 3) % SyncLookupCache::kSlots);
+    if (cache.guest[slot] == guest_ptr) return cache.host[slot];
+
     {
         std::shared_lock<std::shared_mutex> lock(gSyncRegistryLock);
         auto it = gSyncRegistry.find(guest_ptr);
         if (it != gSyncRegistry.end()) {
+            cache.guest[slot] = guest_ptr;
+            cache.host[slot] = it->second;
             return it->second;
         }
     }
@@ -668,6 +805,7 @@ static inline void register_sync(void* guest_ptr, void* host_obj, int type) {
     if (it != gSyncRegistry.end()) {
         destroy_sync_obj(it->second, type);
         it->second = host_obj;
+        gSyncGeneration.fetch_add(1, std::memory_order_release);
         return;
     }
     gSyncRegistry[guest_ptr] = host_obj;
@@ -681,6 +819,7 @@ static inline void destroy_sync(void* guest_ptr, int type) {
     if (it != gSyncRegistry.end()) {
         destroy_sync_obj(it->second, type);
         gSyncRegistry.erase(it);
+        gSyncGeneration.fetch_add(1, std::memory_order_release);
     }
 }
 
@@ -693,7 +832,7 @@ extern "C" int bionic_pthread_mutex_init(void* guestMutex, const void* attr) {
     if (attr) kind = static_cast<int>((*static_cast<const uint32_t*>(attr)) & 0x3u);
 
     void* hostMutex = create_mutex_obj(kind);
-    if (!hostMutex) return EAGAIN;
+    if (!hostMutex) return guest_errno(EAGAIN);
 
     register_sync(guestMutex, hostMutex, SYNC_MUTEX);
     return 0;
@@ -703,7 +842,7 @@ extern "C" int bionic_pthread_cond_init(void* cond, const void* attr) {
     (void)attr;
     if (!cond) return EINVAL;
     void* hostCond = create_sync_obj(SYNC_COND);
-    if (!hostCond) return EAGAIN;
+    if (!hostCond) return guest_errno(EAGAIN);
 
     register_sync(cond, hostCond, SYNC_COND);
     return 0;
@@ -713,7 +852,7 @@ extern "C" int bionic_pthread_rwlock_init(void* rwlock, const void* attr) {
     (void)attr;
     if (!rwlock) return EINVAL;
     void* hostRwlock = create_sync_obj(SYNC_RWLOCK);
-    if (!hostRwlock) return EAGAIN;
+    if (!hostRwlock) return guest_errno(EAGAIN);
 
     register_sync(rwlock, hostRwlock, SYNC_RWLOCK);
     return 0;
@@ -750,11 +889,14 @@ extern "C" int bionic_pthread_mutex_lock(void* guestMutex) {
         // EDEADLK — the guest's error path runs and the thread stays alive.
         if (host->owner.load(std::memory_order_relaxed) == current_thread_id()) {
             mutex_deadlock_diag(guestMutex);
-            return EDEADLK;
+            return guest_errno(EDEADLK);
         }
     }
 
-    const int rc = [&] {
+    // Uncontended locks take the fast path: the wait registry and the caller walk are
+    // only worth their cost when this thread is about to block.
+    int rc = ::pthread_mutex_trylock(&host->mutex);
+    if (rc == EBUSY) rc = [&] {
         // Tracked: a mutex whose holder never releases it parks this thread forever,
         // and nothing else in the log would say so.
         const BlockingWaitScope tracked(WaitKind::kMutex, guestMutex,
@@ -767,7 +909,7 @@ extern "C" int bionic_pthread_mutex_lock(void* guestMutex) {
         // An ERRORCHECK mutex reaches this instead of the check above.
         mutex_deadlock_diag(guestMutex);
     }
-    return rc;
+    return rc != 0 ? guest_errno(rc) : 0;
 }
 
 extern "C" int bionic_pthread_mutex_unlock(void* guestMutex) {
@@ -846,7 +988,7 @@ extern "C" int bionic_pthread_cond_timedwait(void* cond, void* mutex, const stru
     sync_diag("cond-timedwait-return", cond, mutex, result);
     // The mutex is reacquired on timeout too, so ownership is restored either way.
     if (track) host->owner.store(current_thread_id(), std::memory_order_relaxed);
-    return result;
+    return result != 0 ? guest_errno(result) : 0;
 }
 extern "C" int bionic_pthread_cond_signal(void* cond) {
     pthread_cond_t* hostCond = static_cast<pthread_cond_t*>(get_or_init_sync(cond, SYNC_COND));
@@ -985,9 +1127,27 @@ extern "C" int bionic_pthread_getattr_np(pthread_t thread, void* attr) {
 namespace kudroid {
 namespace {
 
-extern "C" int bionic_ioctl(int fd, unsigned long request, ...) {
-    (void)fd; (void)request;
+// The third argument is a fixed parameter: a Linux guest passes it in a register, while a
+// host varargs read would take it from the stack.
+extern "C" int bionic_ioctl(int fd, unsigned long request, void* arg) {
+#if defined(__APPLE__)
+    // Linux FIONBIO / FIONREAD on sockets and pipes.
+    if (request == 0x5421 /* FIONBIO */ && arg != nullptr) {
+        const int fl = ::fcntl(fd, F_GETFL);
+        if (fl < 0) return -1;
+        const int next = *static_cast<int*>(arg) ? (fl | O_NONBLOCK) : (fl & ~O_NONBLOCK);
+        return ::fcntl(fd, F_SETFL, next);
+    }
+    if (request == 0x541B /* FIONREAD */ && arg != nullptr) {
+        return ::ioctl(fd, FIONREAD, arg);
+    }
+#else
+    if ((request == 0x5421 || request == 0x541B) && arg != nullptr) {
+        return ::ioctl(fd, request, arg);
+    }
+#endif
     // Unsupported ioctl: return explicit ENOTTY instead of false 0 success.
+    (void)request; (void)fd; (void)arg;
     errno = ENOTTY;
     return -1;
 }
@@ -995,6 +1155,28 @@ extern "C" int bionic_ioctl(int fd, unsigned long request, ...) {
 #define PR_SET_NAME 15
 #define PR_GET_NAME 16
 #define PR_SET_VMA  0x53564d41
+
+#ifdef __APPLE__
+// Scheduling class from the thread's role as its name states it: the frame loop and
+// the render thread must not share an E-core with loaders and workers. Unnamed or
+// unrecognised threads keep the default class.
+static void apply_thread_qos_for_name(const char* name) {
+    if (!name) return;
+    qos_class_t qos = QOS_CLASS_UNSPECIFIED;
+    if (std::strstr(name, "Background") || std::strstr(name, "Loading.") ||
+        std::strstr(name, "GarbageCollector") || std::strstr(name, "BatchDelete") ||
+        std::strstr(name, "Finalizer")) {
+        qos = QOS_CLASS_UTILITY;
+    } else if (std::strstr(name, "UnityMain") || std::strstr(name, "UnityGfx") ||
+               std::strstr(name, "Swappy") || std::strstr(name, "RenderThread") ||
+               std::strstr(name, "GLThread") || std::strstr(name, "mixer")) {
+        qos = QOS_CLASS_USER_INTERACTIVE;
+    } else if (std::strstr(name, "Job.Worker") || std::strstr(name, "FMOD")) {
+        qos = QOS_CLASS_USER_INITIATED;
+    }
+    if (qos != QOS_CLASS_UNSPECIFIED) pthread_set_qos_class_self_np(qos, 0);
+}
+#endif
 
 extern "C" int bionic_prctl(int option, unsigned long arg2, unsigned long arg3, unsigned long arg4, unsigned long arg5) {
     (void)arg3; (void)arg4; (void)arg5;
@@ -1011,6 +1193,9 @@ extern "C" int bionic_prctl(int option, unsigned long arg2, unsigned long arg3, 
         // threads (UnityMain, RenderThread, ...) must never be mistaken for
         // background workers when they fault.
         if (arg2) kudroid_note_thread_name(reinterpret_cast<const char*>(arg2));
+#ifdef __APPLE__
+        apply_thread_qos_for_name(arg2 ? name : nullptr);
+#endif
         logAndroidMessage(4, "KuDroidSyscall", "prctl(PR_SET_NAME, \"" +
                           std::string(name) +
                           "\") -> " + (r == 0 ? "0" : std::to_string(r) + " errno=" + std::to_string(errno)));
@@ -1323,6 +1508,21 @@ extern "C" int bionic_bind(int sockfd, const struct sockaddr* addr, socklen_t ad
 extern "C" int bionic_connect(int sockfd, const struct sockaddr* addr, socklen_t addrlen);
 extern "C" int bionic_getsockname(int sockfd, struct sockaddr* addr, socklen_t* addrlen);
 extern "C" int bionic_getpeername(int sockfd, struct sockaddr* addr, socklen_t* addrlen);
+extern "C" int bionic_socketpair(int domain, int type, int protocol, int sv[2]);
+extern "C" int bionic_accept4(int fd, struct sockaddr* addr, socklen_t* addrlen, int flags);
+extern "C" int bionic_listen(int fd, int backlog);
+extern "C" int bionic_shutdown(int fd, int how);
+extern "C" int bionic_setsockopt(int fd, int level, int name, const void* value, socklen_t len);
+extern "C" int bionic_getsockopt(int fd, int level, int name, void* value, socklen_t* len);
+extern "C" ssize_t bionic_sendto(int fd, const void* buf, size_t len, int flags,
+                                 const struct sockaddr* addr, socklen_t addrlen);
+extern "C" ssize_t bionic_recvfrom(int fd, void* buf, size_t len, int flags,
+                                   struct sockaddr* addr, socklen_t* addrlen);
+extern "C" int bionic_ppoll(struct pollfd* fds, unsigned long nfds, const struct timespec* tmo,
+                            const void* sigmask);
+extern "C" int bionic_pselect(int nfds, void* readfds, void* writefds, void* exceptfds,
+                              const struct timespec* tmo, const void* sigmask);
+extern "C" int bionic_dup3(int oldfd, int newfd, int flags);
 struct GuestMsghdr;
 struct GuestMmsghdr;
 extern "C" ssize_t bionic_sendmsg(int fd, const GuestMsghdr* msg, int flags);
@@ -1350,6 +1550,7 @@ extern "C" int kudroid_fd_is_apk(int fd);
 namespace {
 void log_mmap_result(void* result, size_t length, int prot, int flags, int fd,
                      off_t offset, const void* requested) {
+    if (kudroid::guest_async_handler_active()) return;
     if (result == MAP_FAILED) {
         static std::atomic<int> n{0};
         if (n.fetch_add(1, std::memory_order_relaxed) < 40) {
@@ -1427,10 +1628,13 @@ extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int
         errno = EACCES;
         return MAP_FAILED;
     }
-    if (prot & PROT_EXEC) {
+    // No diagnostics (allocation, log lock, stdio) while the world may be stopped:
+    // the collector maps memory in that window.
+    const bool quiet = kudroid::guest_async_handler_active();
+    if (!quiet && (prot & PROT_EXEC)) {
         logAndroidMessage(4, "KuDroidSyscall", "bionic_mmap: allocating executable memory (JIT/library), length=" + std::to_string(length));
     }
-    logAndroidMessage(3, "KuDroidSyscall", "mmap(addr=" + (addr ? std::to_string((uintptr_t)addr) : std::string("NULL")) +
+    if (!quiet) logAndroidMessage(3, "KuDroidSyscall", "mmap(addr=" + (addr ? std::to_string((uintptr_t)addr) : std::string("NULL")) +
                       ", len=" + std::to_string(length) + ", prot=0x" +
                       [](int p){ char b[16]; snprintf(b, sizeof(b), "%x", p); return std::string(b); }(prot) +
                       ", flags=0x" +
@@ -1633,6 +1837,7 @@ extern "C" int bionic_mprotect(void *addr, size_t len, int prot) {
     align_range_to_host_page(addr, len, aligned_addr, aligned_len);
 
     int r = ::mprotect(aligned_addr, aligned_len, prot);
+    const bool quiet = kudroid::guest_async_handler_active();
 #if defined(__APPLE__)
     if (r != 0 && (prot & PROT_EXEC)) {
         static std::once_flag once;
@@ -1647,7 +1852,9 @@ extern "C" int bionic_mprotect(void *addr, size_t len, int prot) {
         return -1;
     }
 #endif
-    if (r != 0) {
+    if (quiet) {
+        // see bionic_mmap
+    } else if (r != 0) {
         // Unity commits heap pages by flipping a PROT_NONE reservation to RW.
         // A failed mprotect leaves the allocation unusable with no other trace.
         static std::atomic<int> s_mprotFail{0};
@@ -1692,15 +1899,116 @@ extern "C" int bionic_munmap(void *addr, size_t len) {
     return 0;
 }
 
+#ifdef __APPLE__
+static size_t prot_prefix_len(uintptr_t addr, size_t len, vm_prot_t required);
+
+// Linux MADV_DONTNEED discards private anonymous pages: the next read sees zeros. Darwin's
+// MADV_DONTNEED is only advisory and keeps the contents. Allocators decommit with
+// `mprotect(PROT_NONE)` + `madvise(DONTNEED)` and recommit with mprotect(RW), expecting
+// zero-filled memory; on Darwin they read their old data back as live fields.
+//
+// Whole host pages inside the range are replaced by fresh anonymous pages; the partial
+// pages at either end are zeroed in place. File-backed and shared regions keep the
+// advisory call.
+static void linux_madv_dontneed(void* addr, size_t length) {
+    const long host_page = ::sysconf(_SC_PAGESIZE);
+    const uintptr_t page_mask = (host_page > 0 ? static_cast<uintptr_t>(host_page) : 16384u) - 1;
+    const uintptr_t begin = reinterpret_cast<uintptr_t>(addr);
+    const uintptr_t finish = begin + length;
+    const uintptr_t inner_begin = (begin + page_mask) & ~page_mask;
+    const uintptr_t inner_end = finish & ~page_mask;
+
+    auto zero_edge = [](uintptr_t from, uintptr_t to) {
+        if (to <= from) return;
+        const size_t writable = prot_prefix_len(from, to - from, VM_PROT_READ | VM_PROT_WRITE);
+        if (writable > 0) std::memset(reinterpret_cast<void*>(from), 0, writable);
+    };
+    if (inner_end <= inner_begin) {
+        zero_edge(begin, finish);
+        return;
+    }
+    zero_edge(begin, inner_begin);
+    zero_edge(inner_end, finish);
+
+    uintptr_t cur = inner_begin;
+    while (cur < inner_end) {
+        mach_vm_address_t region_addr = static_cast<mach_vm_address_t>(cur);
+        mach_vm_size_t region_size = 0;
+        kudroid_vm_region_basic_info_64_t basic{};
+        mach_msg_type_number_t basic_count = KUDROID_VM_REGION_BASIC_INFO_64_COUNT;
+        mach_port_t object = MACH_PORT_NULL;
+        if (mach_vm_region(mach_task_self(), &region_addr, &region_size,
+                           KUDROID_VM_REGION_BASIC_INFO_64_FLAVOR,
+                           reinterpret_cast<vm_region_info_t>(&basic), &basic_count,
+                           &object) != KERN_SUCCESS) {
+            return;
+        }
+        if (object != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), object);
+        if (region_addr >= inner_end) return;
+        if (region_addr > cur) cur = static_cast<uintptr_t>(region_addr);  // unmapped gap
+
+        kudroid_vm_region_extended_info_t ext{};
+        mach_msg_type_number_t ext_count = KUDROID_VM_REGION_EXTENDED_INFO_COUNT;
+        mach_vm_address_t ext_addr = static_cast<mach_vm_address_t>(cur);
+        mach_vm_size_t ext_size = 0;
+        const bool have_ext =
+            mach_vm_region(mach_task_self(), &ext_addr, &ext_size,
+                           KUDROID_VM_REGION_EXTENDED_INFO_FLAVOR,
+                           reinterpret_cast<vm_region_info_t>(&ext), &ext_count,
+                           &object) == KERN_SUCCESS;
+        if (object != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), object);
+
+        uintptr_t seg_end = static_cast<uintptr_t>(region_addr + region_size);
+        if (seg_end > inner_end) seg_end = inner_end;
+        const bool anonymous_private = !basic.shared && have_ext && !ext.external_pager;
+        if (anonymous_private && seg_end > cur) {
+            ::mmap(reinterpret_cast<void*>(cur), seg_end - cur, basic.protection,
+                   MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
+        } else if (seg_end > cur) {
+            ::madvise(reinterpret_cast<void*>(cur), seg_end - cur, MADV_DONTNEED);
+        }
+        cur = seg_end;
+    }
+}
+#endif
+
+// Linux and Darwin number madvise advice differently from 5 up (Linux MADV_FREE is 8,
+// Darwin's 8 is MADV_FREE_REUSE), so the value is translated, not forwarded.
+// Pure hints with no Darwin counterpart succeed without doing anything.
 extern "C" int bionic_madvise(void *addr, size_t length, int advice) {
     if (!addr || length == 0) return 0;
+    constexpr int kLinuxMadvDontneed = 4;
+    constexpr int kLinuxMadvFree = 8;
+    constexpr int kLinuxMadvRemove = 9;
 #ifdef __APPLE__
-    if (advice > 10) return 0;
-#endif
+    if (advice == kLinuxMadvDontneed) {
+        linux_madv_dontneed(addr, length);
+        return 0;
+    }
+    int host_advice;
+    if (advice >= 0 && advice <= 3) {
+        host_advice = advice;  // NORMAL, RANDOM, SEQUENTIAL, WILLNEED agree
+    } else if (advice == kLinuxMadvFree) {
+        host_advice = MADV_FREE;
+    } else if (advice == kLinuxMadvRemove) {
+        errno = EINVAL;
+        return -1;
+    } else {
+        return 0;
+    }
+    void* aligned_addr = nullptr;
+    size_t aligned_len = 0;
+    align_range_to_host_page(addr, length, aligned_addr, aligned_len);
+    ::madvise(aligned_addr, aligned_len, host_advice);
+    return 0;
+#else
+    (void)kLinuxMadvFree;
+    (void)kLinuxMadvRemove;
     void* aligned_addr = nullptr;
     size_t aligned_len = 0;
     align_range_to_host_page(addr, length, aligned_addr, aligned_len);
     return ::madvise(aligned_addr, aligned_len, advice);
+#endif
 }
 
 extern "C" int bionic_clock_gettime(int clock_id, struct timespec *tp) {
@@ -1727,6 +2035,50 @@ extern "C" int bionic_clock_gettime(int clock_id, struct timespec *tp) {
 
 extern "C" int bionic_clock_gettime64(int clock_id, struct timespec *tp) {
     return bionic_clock_gettime(clock_id, tp);
+}
+
+// clock_getres with the guest's clock ids. Without it the call went to the host with a
+// Linux id the host rejects, and runtime code that probes CLOCK_MONOTONIC support
+// through it concluded there was none and timed itself from the wall clock instead.
+extern "C" int bionic_clock_getres(int clock_id, struct timespec* res) {
+    int darwin_clock_id = clock_id;
+#ifdef __APPLE__
+    switch (clock_id) {
+        case 0: darwin_clock_id = 0; break;    // CLOCK_REALTIME
+        case 2: darwin_clock_id = 12; break;   // CLOCK_PROCESS_CPUTIME_ID
+        case 3: darwin_clock_id = 16; break;   // CLOCK_THREAD_CPUTIME_ID
+        case 4: darwin_clock_id = 4; break;    // CLOCK_MONOTONIC_RAW
+        case 5: darwin_clock_id = 0; break;    // CLOCK_REALTIME_COARSE
+        default: darwin_clock_id = 6; break;   // MONOTONIC, MONOTONIC_COARSE, BOOTTIME, ...
+    }
+#endif
+    struct timespec host{};
+    if (::clock_getres(static_cast<clockid_t>(darwin_clock_id), &host) != 0) {
+        host.tv_sec = 0;
+        host.tv_nsec = 1000;  // a clock the host cannot size still has a usable tick
+    }
+    if (res) *res = host;
+    return 0;
+}
+
+// bionic's struct timeval is {long tv_sec; long tv_usec;}. The host's microseconds field
+// is 32 bits, so a host gettimeofday into the guest's buffer left the upper half of
+// tv_usec as whatever the guest's stack held. Callers that read it as 64 bits then saw
+// "now" shifted by a stack-dependent multiple of 4295 seconds, which turned a 5-second
+// timer into a multi-day wait.
+extern "C" int bionic_gettimeofday(void* tv, void* tz) {
+    if (tv) {
+        struct timeval host{};
+        if (::gettimeofday(&host, nullptr) != 0) return -1;
+        const int64_t out[2] = {static_cast<int64_t>(host.tv_sec),
+                                static_cast<int64_t>(host.tv_usec)};
+        std::memcpy(tv, out, sizeof(out));
+    }
+    if (tz) {
+        const int32_t zone[2] = {0, 0};  // struct timezone is obsolete; report UTC, no DST
+        std::memcpy(tz, zone, sizeof(zone));
+    }
+    return 0;
 }
 
 #ifdef __APPLE__
@@ -2255,21 +2607,8 @@ extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_
         case 23: // dup
             return ::dup(static_cast<int>(a1));
 
-        case 24: { // dup3
-            // Unlike dup2, dup3 fails when old equals new and honors O_CLOEXEC.
-            const int oldfd = static_cast<int>(a1);
-            const int newfd = static_cast<int>(a2);
-            if (oldfd == newfd) {
-                errno = EINVAL;
-                return -1;
-            }
-            const int rc = ::dup2(oldfd, newfd);
-            if (rc >= 0 && (static_cast<int>(a3) & 0x80000) != 0) { // O_CLOEXEC
-                const int fl = ::fcntl(newfd, F_GETFD);
-                if (fl >= 0) ::fcntl(newfd, F_SETFD, fl | FD_CLOEXEC);
-            }
-            return rc;
-        }
+        case 24: // dup3
+            return bionic_dup3(static_cast<int>(a1), static_cast<int>(a2), static_cast<int>(a3));
 
         case 34: { // mkdirat
             const char* path = reinterpret_cast<const char*>(a2);
@@ -2376,6 +2715,9 @@ extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_
         case 113: // clock_gettime
             return bionic_clock_gettime(static_cast<int>(a1), reinterpret_cast<struct timespec*>(a2));
 
+        case 114: // clock_getres
+            return bionic_clock_getres(static_cast<int>(a1), reinterpret_cast<struct timespec*>(a2));
+
         case 124: // sched_yield
             return ::sched_yield();
 
@@ -2448,7 +2790,7 @@ extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_
             return bionic_prctl(static_cast<int>(a1), a2, a3, a4, a5);
 
         case 169: // gettimeofday
-            return ::gettimeofday(reinterpret_cast<struct timeval*>(a1), reinterpret_cast<struct timezone*>(a2));
+            return bionic_gettimeofday(reinterpret_cast<void*>(a1), reinterpret_cast<void*>(a2));
 
         case 172: // getpid
             return static_cast<long>(::getpid());
@@ -2492,37 +2834,35 @@ extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_
         case 205: // getpeername
             return bionic_getpeername(static_cast<int>(a1), reinterpret_cast<struct sockaddr*>(a2), reinterpret_cast<socklen_t*>(a3));
 
+        case 199: // socketpair
+            return bionic_socketpair(static_cast<int>(a1), static_cast<int>(a2), static_cast<int>(a3), reinterpret_cast<int*>(a4));
+
+        case 201: // listen
+            return bionic_listen(static_cast<int>(a1), static_cast<int>(a2));
+
+        case 202: // accept
+            return bionic_accept4(static_cast<int>(a1), reinterpret_cast<struct sockaddr*>(a2), reinterpret_cast<socklen_t*>(a3), 0);
+
+        case 208: // setsockopt
+            return bionic_setsockopt(static_cast<int>(a1), static_cast<int>(a2), static_cast<int>(a3), reinterpret_cast<const void*>(a4), static_cast<socklen_t>(a5));
+
+        case 209: // getsockopt
+            return bionic_getsockopt(static_cast<int>(a1), static_cast<int>(a2), static_cast<int>(a3), reinterpret_cast<void*>(a4), reinterpret_cast<socklen_t*>(a5));
+
+        case 210: // shutdown
+            return bionic_shutdown(static_cast<int>(a1), static_cast<int>(a2));
+
         case 206: // sendto
-#if defined(__APPLE__)
-            {
-                const struct sockaddr* src_sa = reinterpret_cast<const struct sockaddr*>(a5);
-                socklen_t src_len = static_cast<socklen_t>(a6);
-                struct sockaddr_storage ss;
-                socklen_t sslen = sizeof(ss);
-                if (src_sa && linux_to_darwin_sockaddr(src_sa, src_len, &ss, &sslen)) {
-                    return ::sendto(static_cast<int>(a1), reinterpret_cast<const void*>(a2), static_cast<size_t>(a3), static_cast<int>(a4), reinterpret_cast<const struct sockaddr*>(&ss), sslen);
-                }
-            }
-#endif
-            return ::sendto(static_cast<int>(a1), reinterpret_cast<const void*>(a2), static_cast<size_t>(a3), static_cast<int>(a4), reinterpret_cast<const struct sockaddr*>(a5), static_cast<socklen_t>(a6));
+            return bionic_sendto(static_cast<int>(a1), reinterpret_cast<const void*>(a2), static_cast<size_t>(a3), static_cast<int>(a4), reinterpret_cast<const struct sockaddr*>(a5), static_cast<socklen_t>(a6));
 
         case 207: // recvfrom
-#if defined(__APPLE__)
-            {
-                struct sockaddr* dst_sa = reinterpret_cast<struct sockaddr*>(a5);
-                socklen_t* dst_len = reinterpret_cast<socklen_t*>(a6);
-                if (dst_sa && dst_len) {
-                    struct sockaddr_storage ss;
-                    socklen_t sslen = sizeof(ss);
-                    ssize_t rc = ::recvfrom(static_cast<int>(a1), reinterpret_cast<void*>(a2), static_cast<size_t>(a3), static_cast<int>(a4), reinterpret_cast<struct sockaddr*>(&ss), &sslen);
-                    if (rc >= 0) {
-                        darwin_to_linux_sockaddr(reinterpret_cast<struct sockaddr*>(&ss), sslen, dst_sa, dst_len);
-                    }
-                    return rc;
-                }
-            }
-#endif
-            return ::recvfrom(static_cast<int>(a1), reinterpret_cast<void*>(a2), static_cast<size_t>(a3), static_cast<int>(a4), reinterpret_cast<struct sockaddr*>(a5), reinterpret_cast<socklen_t*>(a6));
+            return bionic_recvfrom(static_cast<int>(a1), reinterpret_cast<void*>(a2), static_cast<size_t>(a3), static_cast<int>(a4), reinterpret_cast<struct sockaddr*>(a5), reinterpret_cast<socklen_t*>(a6));
+
+        case 72: // pselect6 (the sixth argument is a {sigset, size} pair the shim ignores)
+            return bionic_pselect(static_cast<int>(a1), reinterpret_cast<void*>(a2), reinterpret_cast<void*>(a3), reinterpret_cast<void*>(a4), reinterpret_cast<const struct timespec*>(a5), nullptr);
+
+        case 73: // ppoll
+            return bionic_ppoll(reinterpret_cast<struct pollfd*>(a1), static_cast<unsigned long>(a2), reinterpret_cast<const struct timespec*>(a3), nullptr);
 
         case 211: // sendmsg
             return bionic_sendmsg(static_cast<int>(a1), reinterpret_cast<const GuestMsghdr*>(a2), static_cast<int>(a3));
@@ -2586,23 +2926,8 @@ extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_
         case 233: // madvise
             return ::madvise(reinterpret_cast<void*>(a1), static_cast<size_t>(a2), static_cast<int>(a3));
 
-        case 242: { // accept4
-            int fd = -1;
-#if defined(__APPLE__)
-            fd = ::accept(static_cast<int>(a1), reinterpret_cast<struct sockaddr*>(a2), reinterpret_cast<socklen_t*>(a3));
-            if (fd >= 0) {
-                const int fl = static_cast<int>(a4);
-                if (fl & 0x80000) ::fcntl(fd, F_SETFD, FD_CLOEXEC);
-                if (fl & 0x800) {
-                    int flags = ::fcntl(fd, F_GETFL, 0);
-                    ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-                }
-            }
-#else
-            fd = ::accept4(static_cast<int>(a1), reinterpret_cast<struct sockaddr*>(a2), reinterpret_cast<socklen_t*>(a3), static_cast<int>(a4));
-#endif
-            return fd;
-        }
+        case 242: // accept4
+            return bionic_accept4(static_cast<int>(a1), reinterpret_cast<struct sockaddr*>(a2), reinterpret_cast<socklen_t*>(a3), static_cast<int>(a4));
 
         case 278: // getrandom
             return bionic_getrandom(reinterpret_cast<void*>(a1), static_cast<size_t>(a2), static_cast<unsigned int>(a3));
@@ -2808,8 +3133,35 @@ extern "C" uint64_t io_last_activity_ns() {
     return g_ioVolLastNs.load(std::memory_order_relaxed);
 }
 
+// A guest reads errno as Linux numbers (EAGAIN 11, EINPROGRESS 115, ...); the host sets
+// Darwin's. Socket failures are translated on the way out so a client can tell "try again"
+// and "connect in progress" from a real error.
+template <typename T>
+static inline T net_result(T rc) {
+#if defined(__APPLE__)
+    if (rc < 0) errno = kudroid::SocketErrnoToGuest(errno);
+#endif
+    return rc;
+}
+
+// Socket fds the guest owns, so reads/writes/polls on them can be traced by result.
+static std::atomic<unsigned char> g_netFd[1024];
+static inline bool net_fd(int fd) {
+    return fd >= 0 && fd < 1024 && g_netFd[fd].load(std::memory_order_relaxed) != 0;
+}
+static inline void net_fd_set(int fd, bool on) {
+    if (fd >= 0 && fd < 1024) g_netFd[fd].store(on ? 1 : 0, std::memory_order_relaxed);
+}
+
+// Bounded per-process trace of socket traffic results.
+static bool net_trace_take() {
+    static std::atomic<int> left{400};
+    return left.fetch_sub(1, std::memory_order_relaxed) > 0;
+}
+
 extern "C" ssize_t bionic_read(int fd, void* buf, size_t count) {
     const ssize_t ret = ::read(fd, buf, count);
+    const int hostErr = errno;
     if (ret > 0) {
         io_volume_add(std::string(fd_path(fd)), static_cast<uint64_t>(ret), "read");
         // Trace the APK itself: Unity's zip-reader drains base.apk through raw
@@ -2833,15 +3185,42 @@ extern "C" ssize_t bionic_read(int fd, void* buf, size_t count) {
                      kudroid_trace_stamp(), fd, kudroid_fd_is_apk(fd) ? 1 : 0,
                      p.empty() ? "?" : p.c_str(), count, ret);
     }
-    return ret;
+    if (net_fd(fd) && net_trace_take()) {
+        std::fprintf(stderr, "[KuDroidNet] read fd=%d count=%zu -> %zd errno=%d\n", fd, count,
+                     ret, ret < 0 ? hostErr : 0);
+    }
+    errno = hostErr;
+    return net_result(ret);
 }
 
 extern "C" ssize_t bionic_write(int fd, const void* buf, size_t count) {
     const ssize_t ret = ::write(fd, buf, count);
+    const int hostErr = errno;
     if (ret > 0) {
         io_volume_add(std::string(fd_path(fd)), static_cast<uint64_t>(ret), "write");
     }
-    return ret;
+    if (net_fd(fd) && net_trace_take()) {
+        std::fprintf(stderr, "[KuDroidNet] write fd=%d count=%zu -> %zd errno=%d\n", fd, count,
+                     ret, ret < 0 ? hostErr : 0);
+    }
+    errno = hostErr;
+    return net_result(ret);
+}
+
+// poll() takes the host path unchanged (same pollfd layout and event bits); the shim only
+// reports results for sockets, since a connect that never completes shows up here.
+extern "C" int bionic_poll(struct pollfd* fds, unsigned long nfds, int timeout) {
+    const int rc = ::poll(fds, static_cast<nfds_t>(nfds), timeout);
+    const int hostErr = errno;
+    if (fds != nullptr && nfds > 0 && net_fd(fds[0].fd) && (rc != 0 || timeout >= 1000) &&
+        net_trace_take()) {
+        std::fprintf(stderr,
+                     "[KuDroidNet] poll n=%lu fd=%d ev=0x%x timeout=%d -> %d rev=0x%x\n", nfds,
+                     fds[0].fd, static_cast<unsigned>(fds[0].events), timeout, rc,
+                     static_cast<unsigned>(fds[0].revents));
+    }
+    errno = hostErr;
+    return net_result(rc);
 }
 
 // stdio writes, which never reach bionic_write: the guest's fwrite is the host's
@@ -2875,12 +3254,38 @@ inline int guest_to_host_af(int af) {
 }
 }  // namespace
 
+// Writing to a closed peer raises SIGPIPE on Darwin unless the socket opts out, and a
+// guest that expects EPIPE (or passes MSG_NOSIGNAL) must not be able to kill the host.
+static inline void net_no_sigpipe(int fd) {
+#if defined(__APPLE__)
+    int one = 1;
+    ::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+#else
+    (void)fd;
+#endif
+}
+
 extern "C" int bionic_socket(int domain, int type, int protocol) {
     const int host_domain = guest_to_host_af(domain);
-    const int fd = ::socket(host_domain, type, protocol);
+    // Linux folds SOCK_NONBLOCK (0x800) and SOCK_CLOEXEC (0x80000) into the type; Darwin
+    // has no such flags and would reject the call.
+    const bool nonblock = (type & 0x800) != 0;
+    const bool cloexec = (type & 0x80000) != 0;
+    const int fd = ::socket(host_domain, type & 0xF, protocol);
+    int err = errno;
+    if (fd >= 0) {
+        net_fd_set(fd, true);
+        net_no_sigpipe(fd);
+        if (nonblock) {
+            const int fl = ::fcntl(fd, F_GETFL);
+            if (fl >= 0) ::fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+        }
+        if (cloexec) ::fcntl(fd, F_SETFD, FD_CLOEXEC);
+    }
     std::fprintf(stderr, "[KuDroidNet] socket(domain=%d type=%d) -> %d\n",
                  domain, type, fd);
-    return fd;
+    errno = err;
+    return net_result(fd);
 }
 
 extern "C" int bionic_bind(int sockfd, const struct sockaddr* addr, socklen_t addrlen) {
@@ -2888,10 +3293,10 @@ extern "C" int bionic_bind(int sockfd, const struct sockaddr* addr, socklen_t ad
     struct sockaddr_storage ss;
     socklen_t sslen = sizeof(ss);
     if (linux_to_darwin_sockaddr(addr, addrlen, &ss, &sslen)) {
-        return ::bind(sockfd, reinterpret_cast<const struct sockaddr*>(&ss), sslen);
+        return net_result(::bind(sockfd, reinterpret_cast<const struct sockaddr*>(&ss), sslen));
     }
 #endif
-    return ::bind(sockfd, addr, addrlen);
+    return net_result(::bind(sockfd, addr, addrlen));
 }
 
 extern "C" int bionic_getsockname(int sockfd, struct sockaddr* addr, socklen_t* addrlen) {
@@ -2902,7 +3307,7 @@ extern "C" int bionic_getsockname(int sockfd, struct sockaddr* addr, socklen_t* 
     if (rc == 0 && addr && addrlen) {
         darwin_to_linux_sockaddr(reinterpret_cast<struct sockaddr*>(&ss), sslen, addr, addrlen);
     }
-    return rc;
+    return net_result(rc);
 #else
     return ::getsockname(sockfd, addr, addrlen);
 #endif
@@ -2916,7 +3321,7 @@ extern "C" int bionic_getpeername(int sockfd, struct sockaddr* addr, socklen_t* 
     if (rc == 0 && addr && addrlen) {
         darwin_to_linux_sockaddr(reinterpret_cast<struct sockaddr*>(&ss), sslen, addr, addrlen);
     }
-    return rc;
+    return net_result(rc);
 #else
     return ::getpeername(sockfd, addr, addrlen);
 #endif
@@ -2974,7 +3379,358 @@ extern "C" int bionic_connect(int sockfd, const struct sockaddr* addr,
     const int ret = ::connect(sockfd, useAddr, useLen);
     std::fprintf(stderr, "[KuDroidNet] connect(%s) -> %d (%s)\n", dst, ret,
                  ret == 0 ? "OK" : std::strerror(errno));
-    return ret;
+    return net_result(ret);
+}
+
+// ── socket calls the host libc would otherwise receive with Linux numbers ────────────
+
+extern "C" int bionic_setsockopt(int fd, int level, int name, const void* value, socklen_t len) {
+#if defined(__APPLE__)
+    int hostLevel = 0, hostName = 0;
+    if (!kudroid::SocketOptionToHost(level, name, &hostLevel, &hostName)) {
+        errno = ENOPROTOOPT;
+        return net_result(-1);
+    }
+    return net_result(::setsockopt(fd, hostLevel, hostName, value, len));
+#else
+    return ::setsockopt(fd, level, name, value, len);
+#endif
+}
+
+extern "C" int bionic_getsockopt(int fd, int level, int name, void* value, socklen_t* len) {
+#if defined(__APPLE__)
+    int hostLevel = 0, hostName = 0;
+    if (!kudroid::SocketOptionToHost(level, name, &hostLevel, &hostName)) {
+        errno = ENOPROTOOPT;
+        return net_result(-1);
+    }
+    const int rc = ::getsockopt(fd, hostLevel, hostName, value, len);
+    // SO_ERROR reports a pending errno, which the guest compares against Linux's numbers.
+    if (rc == 0 && level == 1 && name == 4 && value != nullptr && len != nullptr &&
+        *len >= sizeof(int)) {
+        int pending = 0;
+        std::memcpy(&pending, value, sizeof(pending));
+        if (net_trace_take()) {
+            std::fprintf(stderr, "[KuDroidNet] getsockopt(fd=%d, SO_ERROR) -> %d\n", fd, pending);
+        }
+        pending = kudroid::SocketErrnoToGuest(pending);
+        std::memcpy(value, &pending, sizeof(pending));
+    }
+    return net_result(rc);
+#else
+    return ::getsockopt(fd, level, name, value, len);
+#endif
+}
+
+// Not variadic here: the guest passes the argument in a register, and the host's variadic
+// fcntl would read it from the stack.
+extern "C" int bionic_fcntl(int fd, int cmd, long arg) {
+#if defined(__APPLE__)
+    const int hostCmd = kudroid::FcntlCommandToHost(cmd);
+    if (hostCmd < 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    switch (cmd) {
+        case 3: {  // F_GETFL
+            const int flags = ::fcntl(fd, F_GETFL);
+            return flags < 0 ? net_result(flags) : kudroid::StatusFlagsToGuest(flags);
+        }
+        case 4:  // F_SETFL
+            return net_result(::fcntl(fd, F_SETFL, kudroid::StatusFlagsToHost(static_cast<int>(arg))));
+        case 5:    // F_GETLK
+        case 6:    // F_SETLK
+        case 7: {  // F_SETLKW
+            auto* guest = reinterpret_cast<kudroid::LinuxFlock*>(arg);
+            if (guest == nullptr) {
+                errno = EFAULT;
+                return -1;
+            }
+            kudroid::DarwinFlock translated;
+            kudroid::FlockToHost(*guest, &translated);
+            struct flock lock;
+            std::memset(&lock, 0, sizeof(lock));
+            lock.l_start = translated.l_start;
+            lock.l_len = translated.l_len;
+            lock.l_pid = translated.l_pid;
+            lock.l_type = translated.l_type;
+            lock.l_whence = translated.l_whence;
+            const int rc = ::fcntl(fd, hostCmd, &lock);
+            if (rc == 0 && cmd == 5) {
+                translated.l_start = lock.l_start;
+                translated.l_len = lock.l_len;
+                translated.l_pid = lock.l_pid;
+                translated.l_type = lock.l_type;
+                translated.l_whence = lock.l_whence;
+                kudroid::FlockToGuest(translated, guest);
+            }
+            return net_result(rc);
+        }
+        default:
+            return net_result(::fcntl(fd, hostCmd, static_cast<int>(arg)));
+    }
+#else
+    return ::fcntl(fd, cmd, arg);
+#endif
+}
+
+extern "C" ssize_t bionic_send(int fd, const void* buf, size_t len, int flags) {
+#if defined(__APPLE__)
+    const ssize_t rc = ::send(fd, buf, len, kudroid::SocketMsgFlagsToHost(flags));
+    if (net_trace_take()) {
+        std::fprintf(stderr, "[KuDroidNet] send fd=%d len=%zu -> %zd errno=%d\n", fd, len, rc,
+                     rc < 0 ? errno : 0);
+    }
+    return net_result(rc);
+#else
+    return ::send(fd, buf, len, flags);
+#endif
+}
+
+extern "C" ssize_t bionic_recv(int fd, void* buf, size_t len, int flags) {
+#if defined(__APPLE__)
+    const ssize_t rc = ::recv(fd, buf, len, kudroid::SocketMsgFlagsToHost(flags));
+    if (net_trace_take()) {
+        std::fprintf(stderr, "[KuDroidNet] recv fd=%d len=%zu -> %zd errno=%d\n", fd, len, rc,
+                     rc < 0 ? errno : 0);
+    }
+    return net_result(rc);
+#else
+    return ::recv(fd, buf, len, flags);
+#endif
+}
+
+extern "C" ssize_t bionic_sendto(int fd, const void* buf, size_t len, int flags,
+                                 const struct sockaddr* addr, socklen_t addrlen) {
+#if defined(__APPLE__)
+    const int hostFlags = kudroid::SocketMsgFlagsToHost(flags);
+    if (addr != nullptr) {
+        struct sockaddr_storage ss;
+        socklen_t sslen = sizeof(ss);
+        if (!linux_to_darwin_sockaddr(addr, addrlen, &ss, &sslen)) {
+            errno = EAFNOSUPPORT;
+            return net_result(-1);
+        }
+        return net_result(::sendto(fd, buf, len, hostFlags,
+                                   reinterpret_cast<const struct sockaddr*>(&ss), sslen));
+    }
+    return net_result(::sendto(fd, buf, len, hostFlags, nullptr, 0));
+#else
+    return ::sendto(fd, buf, len, flags, addr, addrlen);
+#endif
+}
+
+extern "C" ssize_t bionic_recvfrom(int fd, void* buf, size_t len, int flags,
+                                   struct sockaddr* addr, socklen_t* addrlen) {
+#if defined(__APPLE__)
+    const int hostFlags = kudroid::SocketMsgFlagsToHost(flags);
+    if (addr != nullptr && addrlen != nullptr) {
+        struct sockaddr_storage ss;
+        socklen_t sslen = sizeof(ss);
+        const ssize_t rc = ::recvfrom(fd, buf, len, hostFlags,
+                                      reinterpret_cast<struct sockaddr*>(&ss), &sslen);
+        if (rc >= 0) {
+            darwin_to_linux_sockaddr(reinterpret_cast<struct sockaddr*>(&ss), sslen, addr, addrlen);
+        }
+        return net_result(rc);
+    }
+    return net_result(::recvfrom(fd, buf, len, hostFlags, nullptr, nullptr));
+#else
+    return ::recvfrom(fd, buf, len, flags, addr, addrlen);
+#endif
+}
+
+extern "C" int bionic_accept4(int fd, struct sockaddr* addr, socklen_t* addrlen, int flags) {
+#if defined(__APPLE__)
+    int accepted;
+    if (addr != nullptr && addrlen != nullptr) {
+        struct sockaddr_storage ss;
+        socklen_t sslen = sizeof(ss);
+        accepted = ::accept(fd, reinterpret_cast<struct sockaddr*>(&ss), &sslen);
+        if (accepted >= 0) {
+            darwin_to_linux_sockaddr(reinterpret_cast<struct sockaddr*>(&ss), sslen, addr, addrlen);
+        }
+    } else {
+        accepted = ::accept(fd, nullptr, nullptr);
+    }
+    if (accepted >= 0) {
+        net_fd_set(accepted, true);
+        net_no_sigpipe(accepted);
+        if (flags & 0x800) {
+            const int fl = ::fcntl(accepted, F_GETFL);
+            if (fl >= 0) ::fcntl(accepted, F_SETFL, fl | O_NONBLOCK);
+        }
+        if (flags & 0x80000) ::fcntl(accepted, F_SETFD, FD_CLOEXEC);
+    }
+    return net_result(accepted);
+#else
+    return ::accept4(fd, addr, addrlen, flags);
+#endif
+}
+
+extern "C" int bionic_accept(int fd, struct sockaddr* addr, socklen_t* addrlen) {
+    return bionic_accept4(fd, addr, addrlen, 0);
+}
+
+extern "C" int bionic_listen(int fd, int backlog) {
+    return net_result(::listen(fd, backlog));
+}
+
+extern "C" int bionic_shutdown(int fd, int how) {
+    return net_result(::shutdown(fd, how));
+}
+
+extern "C" int bionic_socketpair(int domain, int type, int protocol, int sv[2]) {
+#if defined(__APPLE__)
+    // SOCK_NONBLOCK / SOCK_CLOEXEC ride in the type on Linux and do not exist here.
+    const int rc = ::socketpair(guest_to_host_af(domain), type & 0xF, protocol, sv);
+    const int err = errno;
+    if (rc == 0) {
+        for (int i = 0; i < 2; ++i) {
+            net_no_sigpipe(sv[i]);
+            if (type & 0x800) {
+                const int fl = ::fcntl(sv[i], F_GETFL);
+                if (fl >= 0) ::fcntl(sv[i], F_SETFL, fl | O_NONBLOCK);
+            }
+            if (type & 0x80000) ::fcntl(sv[i], F_SETFD, FD_CLOEXEC);
+        }
+    }
+    errno = err;
+    return net_result(rc);
+#else
+    return ::socketpair(domain, type, protocol, sv);
+#endif
+}
+
+// Name resolution in reverse. The caller's sockaddr is Linux-shaped.
+extern "C" int bionic_getnameinfo(const struct sockaddr* sa, socklen_t salen, char* host,
+                                  socklen_t hostlen, char* serv, socklen_t servlen, int flags) {
+#if defined(__APPLE__)
+    struct sockaddr_storage ss;
+    socklen_t sslen = sizeof(ss);
+    if (sa == nullptr || !linux_to_darwin_sockaddr(sa, salen, &ss, &sslen)) return EAI_FAMILY;
+    return ::getnameinfo(reinterpret_cast<const struct sockaddr*>(&ss), sslen, host, hostlen,
+                         serv, servlen, flags);
+#else
+    return ::getnameinfo(sa, salen, host, hostlen, serv, servlen, flags);
+#endif
+}
+
+// hostent keeps its layout across the two libcs; only the AF_INET6 number differs.
+static struct hostent* hostent_to_guest(struct hostent* h) {
+#if defined(__APPLE__)
+    if (h != nullptr && h->h_addrtype == AF_INET6) h->h_addrtype = 10;
+#endif
+    return h;
+}
+
+extern "C" struct hostent* bionic_gethostbyname(const char* name) {
+    return hostent_to_guest(::gethostbyname(name));
+}
+
+extern "C" struct hostent* bionic_gethostbyname2(const char* name, int af) {
+    return hostent_to_guest(::gethostbyname2(name, guest_to_host_af(af)));
+}
+
+extern "C" struct hostent* bionic_gethostbyaddr(const void* addr, socklen_t len, int af) {
+    return hostent_to_guest(::gethostbyaddr(addr, len, guest_to_host_af(af)));
+}
+
+// Darwin has no gethostbyname_r, so it is built on getaddrinfo and copied into the
+// caller's buffer.
+extern "C" int bionic_gethostbyname_r(const char* name, struct hostent* ret, char* buf,
+                                      size_t buflen, struct hostent** result, int* h_errnop) {
+    if (result != nullptr) *result = nullptr;
+    if (name == nullptr || ret == nullptr || buf == nullptr) {
+        if (h_errnop != nullptr) *h_errnop = 1;  // HOST_NOT_FOUND
+        return EINVAL;
+    }
+    struct addrinfo hints;
+    std::memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_CANONNAME;
+    struct addrinfo* res = nullptr;
+    if (::getaddrinfo(name, nullptr, &hints, &res) != 0 || res == nullptr) {
+        if (res != nullptr) ::freeaddrinfo(res);
+        if (h_errnop != nullptr) *h_errnop = 1;  // HOST_NOT_FOUND
+        return 0;
+    }
+    std::vector<unsigned char> addrBytes;
+    for (struct addrinfo* ai = res; ai != nullptr; ai = ai->ai_next) {
+        if (ai->ai_family != AF_INET || ai->ai_addr == nullptr) continue;
+        const unsigned char* sa = reinterpret_cast<const unsigned char*>(ai->ai_addr);
+        addrBytes.insert(addrBytes.end(), sa + 4, sa + 8);  // sin_addr
+    }
+    std::vector<char*> addrList;
+    for (size_t i = 0; i + 4 <= addrBytes.size(); i += 4) {
+        addrList.push_back(reinterpret_cast<char*>(&addrBytes[i]));
+    }
+    addrList.push_back(nullptr);
+    char* aliases[1] = {nullptr};
+    std::string canonical = res->ai_canonname != nullptr ? res->ai_canonname : name;
+    kudroid::GuestHostent src;
+    src.h_name = &canonical[0];
+    src.h_aliases = aliases;
+    src.h_addrtype = 2;
+    src.h_length = 4;
+    src.h_addr_list = addrList.data();
+    ::freeaddrinfo(res);
+    kudroid::GuestHostent out;
+    const int rc = kudroid::HostentCopy(src, 2, &out, buf, buflen);
+    if (rc != 0) {
+        if (h_errnop != nullptr) *h_errnop = 0;
+        return rc;
+    }
+    std::memcpy(ret, &out, sizeof(out));
+    if (result != nullptr) *result = ret;
+    return 0;
+}
+
+// ppoll/pselect take a timespec and a signal mask; the mask is ignored, and a nanosecond
+// timeout is rounded up to whole milliseconds so a short wait never becomes a spin.
+extern "C" int bionic_ppoll(struct pollfd* fds, unsigned long nfds, const struct timespec* tmo,
+                            const void* sigmask) {
+    (void)sigmask;
+    int timeoutMs = -1;
+    if (tmo != nullptr) {
+        const long long ms = static_cast<long long>(tmo->tv_sec) * 1000 +
+                             (static_cast<long long>(tmo->tv_nsec) + 999999) / 1000000;
+        timeoutMs = ms > 0x7fffffff ? 0x7fffffff : static_cast<int>(ms);
+    }
+    return bionic_poll(fds, nfds, timeoutMs);
+}
+
+extern "C" int bionic_pselect(int nfds, void* readfds, void* writefds, void* exceptfds,
+                              const struct timespec* tmo, const void* sigmask) {
+    (void)sigmask;
+    const int rc = ::pselect(nfds, static_cast<fd_set*>(readfds), static_cast<fd_set*>(writefds),
+                             static_cast<fd_set*>(exceptfds), tmo, nullptr);
+    return net_result(rc);
+}
+
+extern "C" ssize_t bionic_readv(int fd, const struct iovec* iov, int iovcnt) {
+    const ssize_t rc = ::readv(fd, iov, iovcnt);
+    return net_result(rc);
+}
+
+extern "C" ssize_t bionic_writev(int fd, const struct iovec* iov, int iovcnt) {
+    const ssize_t rc = ::writev(fd, iov, iovcnt);
+    return net_result(rc);
+}
+
+// Unlike dup2, dup3 fails when old equals new and honors O_CLOEXEC; Darwin has no dup3.
+extern "C" int bionic_dup3(int oldfd, int newfd, int flags) {
+    if (oldfd == newfd) {
+        errno = EINVAL;
+        return -1;
+    }
+    const int rc = ::dup2(oldfd, newfd);
+    if (rc >= 0 && (flags & 0x80000) != 0) {  // O_CLOEXEC
+        const int fl = ::fcntl(newfd, F_GETFD);
+        if (fl >= 0) ::fcntl(newfd, F_SETFD, fl | FD_CLOEXEC);
+    }
+    return rc;
 }
 
 struct GuestMsghdr {
@@ -2996,13 +3752,7 @@ struct GuestMmsghdr {
 namespace {
 inline int guest_msg_flags_to_host(int flags) {
 #if defined(__APPLE__)
-    int host_flags = 0;
-    if (flags & 0x01) host_flags |= MSG_OOB;
-    if (flags & 0x02) host_flags |= MSG_PEEK;
-    if (flags & 0x04) host_flags |= MSG_DONTROUTE;
-    if (flags & 0x40) host_flags |= MSG_DONTWAIT;
-    if (flags & 0x20) host_flags |= MSG_WAITALL;
-    return host_flags;
+    return kudroid::SocketMsgFlagsToHost(flags);
 #else
     return flags;
 #endif
@@ -3035,7 +3785,7 @@ extern "C" ssize_t bionic_sendmsg(int fd, const GuestMsghdr* g, int flags) {
 #endif
     h.msg_iov = g->msg_iov;
     h.msg_iovlen = static_cast<decltype(h.msg_iovlen)>(g->msg_iovlen);
-    return ::sendmsg(fd, &h, guest_msg_flags_to_host(flags));
+    return net_result(::sendmsg(fd, &h, guest_msg_flags_to_host(flags)));
 }
 
 extern "C" ssize_t bionic_recvmsg(int fd, GuestMsghdr* g, int flags) {
@@ -3071,7 +3821,7 @@ extern "C" ssize_t bionic_recvmsg(int fd, GuestMsghdr* g, int flags) {
         g->msg_controllen = 0;
         g->msg_flags = h.msg_flags;
     }
-    return rc;
+    return net_result(rc);
 }
 
 extern "C" int bionic_sendmmsg(int fd, GuestMmsghdr* v, unsigned int vlen, int flags) {
@@ -3127,6 +3877,7 @@ extern "C" int bionic_getaddrinfo(const char* node, const char* service,
     if (hints != nullptr) {
         std::memcpy(&host_hints, hints, sizeof(host_hints));
         host_hints.ai_family = guest_to_host_af(hints->ai_family);
+        host_hints.ai_flags = kudroid::AddrInfoFlagsToHost(hints->ai_flags);
         use_hints = &host_hints;
     }
     const int ret = getaddrinfo(node, service, use_hints, res);
@@ -3458,11 +4209,16 @@ extern "C" int bionic_kill(pid_t pid, int sig) {
     return kudroid::guest_kill(static_cast<int>(pid), sig);
 }
 
+// libc contract, unlike the syscall senders: 0 or the error NUMBER, never -1. A
+// collector suspending threads tells "thread already gone" (ESRCH) from a real failure
+// by that number, and aborts on anything else.
 extern "C" int bionic_pthread_kill(pthread_t thread, int sig) {
     unsigned long thread_bits = 0;
     std::memcpy(&thread_bits, &thread,
                 sizeof(thread_bits) < sizeof(thread) ? sizeof(thread_bits) : sizeof(thread));
-    return kudroid::guest_pthread_kill(thread_bits, sig);
+    errno = 0;
+    if (kudroid::guest_pthread_kill(thread_bits, sig) == 0) return 0;
+    return errno != 0 ? errno : EINVAL;
 }
 
 extern "C" int bionic_tkill(int tid, int sig) {
@@ -4010,6 +4766,69 @@ static void futex_leave(uint32_t* uaddr, const std::shared_ptr<FutexWaitQueue>& 
 #define FUTEX_CLOCK_REALTIME 256
 #define FUTEX_BITSET_MATCH_ANY 0xffffffff
 
+// Bounded trace of futex waits. Threads that implement timers are always traced (their
+// wait is the whole story when a timed callback never fires); every other thread is
+// traced only for long waits, from a small shared budget so the log cannot flood.
+static std::atomic<int> g_futexTraceBudget{40};
+static std::atomic<int> g_futexTimerBudget{400};
+static std::atomic<uint32_t*> g_timerFutexAddr{nullptr};
+
+// 0 = ordinary thread, 1 = thread-pool worker, 2 = the timer scheduler. Cached once the
+// thread has a name.
+static int futex_thread_class() {
+    static thread_local int cls = -1;
+    if (cls >= 0) return cls;
+    char name[32] = {0};
+    pthread_getname_np(pthread_self(), name, sizeof(name));
+    if (name[0] == '\0') return 0;
+    cls = std::strcmp(name, "Timer-Scheduler") == 0 ? 2 : std::strstr(name, "Threadpool") ? 1 : 0;
+    return cls;
+}
+
+static bool futex_trace_enter(uint32_t* uaddr, uint32_t val, const struct timespec* timeout,
+                              const char* kind) {
+    const int cls = futex_thread_class();
+    const long long ms = timeout ? static_cast<long long>(timeout->tv_sec) * 1000 +
+                                       timeout->tv_nsec / 1000000
+                                 : -1;
+    if (cls == 0) {
+        if (ms < 20) return false;
+        if (g_futexTraceBudget.fetch_sub(1, std::memory_order_relaxed) <= 0) return false;
+    } else if (g_futexTimerBudget.fetch_sub(1, std::memory_order_relaxed) <= 0) {
+        return false;
+    }
+    if (cls == 2) g_timerFutexAddr.store(uaddr, std::memory_order_relaxed);
+    char name[32] = {0};
+    pthread_getname_np(pthread_self(), name, sizeof(name));
+    char msg[192];
+    snprintf(msg, sizeof(msg), "futex-%s enter name=%s uaddr=%p val=%u timeout_ms=%lld", kind,
+             name, static_cast<void*>(uaddr), val, ms);
+    kudroid_persistent_breadcrumb(msg);
+    return true;
+}
+static void futex_trace_exit(uint32_t* uaddr, const char* how,
+                             std::chrono::steady_clock::time_point t0) {
+    const long long el = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - t0).count();
+    char name[32] = {0};
+    pthread_getname_np(pthread_self(), name, sizeof(name));
+    char msg[160];
+    snprintf(msg, sizeof(msg), "futex-wait exit name=%s uaddr=%p %s elapsed_ms=%lld", name,
+             static_cast<void*>(uaddr), how, el);
+    kudroid_persistent_breadcrumb(msg);
+}
+static void futex_trace_wake(uint32_t* uaddr, uint32_t count, int woken) {
+    if (uaddr != g_timerFutexAddr.load(std::memory_order_relaxed)) return;
+    static std::atomic<int> budget{200};
+    if (budget.fetch_sub(1, std::memory_order_relaxed) <= 0) return;
+    char name[32] = {0};
+    pthread_getname_np(pthread_self(), name, sizeof(name));
+    char msg[160];
+    snprintf(msg, sizeof(msg), "futex-wake on timer addr=%p by=%s count=%u queue=%s",
+             static_cast<void*>(uaddr), name, count, woken ? "present" : "absent");
+    kudroid_persistent_breadcrumb(msg);
+}
+
 extern "C" int bionic_futex(uint32_t *uaddr, int futex_op, uint32_t val, const struct timespec *timeout, uint32_t *uaddr2, uint32_t val3) {
     int cmd = futex_op & 127; // remove private flag
     (void)uaddr2;
@@ -4033,7 +4852,7 @@ extern "C" int bionic_futex(uint32_t *uaddr, int futex_op, uint32_t val, const s
         if (*uaddr != val) {
             qLock.unlock(); // th queue-mtx before khi ly global (th t kha)
             futex_leave(uaddr, q);
-            errno = EAGAIN;
+            errno = guest_errno(EAGAIN);
             return -1;
         }
 
@@ -4083,12 +4902,16 @@ extern "C" int bionic_futex(uint32_t *uaddr, int futex_op, uint32_t val, const s
                     static_cast<uint64_t>(timeout->tv_nsec) / 1000000ull);
                 const auto duration = std::chrono::seconds(timeout->tv_sec) +
                                       std::chrono::nanoseconds(timeout->tv_nsec);
+                const bool traced = futex_trace_enter(uaddr, val, timeout, "timed");
+                const auto t0 = std::chrono::steady_clock::now();
                 if (q->cv.wait_for(qLock, duration) == std::cv_status::timeout) {
                     qLock.unlock();
                     futex_leave(uaddr, q);
-                    errno = ETIMEDOUT;
+                    if (traced) futex_trace_exit(uaddr, "timeout", t0);
+                    errno = guest_errno(ETIMEDOUT);
                     return -1;
                 }
+                if (traced) futex_trace_exit(uaddr, "woken", t0);
             } else {
                 // Absolute: re-derive the remaining time on every pass. Waiting on a
                 // capped slice and looping keeps a far-future deadline from either
@@ -4104,7 +4927,7 @@ extern "C" int bionic_futex(uint32_t *uaddr, int futex_op, uint32_t val, const s
                     if (remSec < 0) {
                         qLock.unlock();
                         futex_leave(uaddr, q);
-                        errno = ETIMEDOUT;
+                        errno = guest_errno(ETIMEDOUT);
                         return -1;
                     }
                     // The budget is the time remaining ON THE FIRST PASS, which is the
@@ -4128,7 +4951,7 @@ extern "C" int bionic_futex(uint32_t *uaddr, int futex_op, uint32_t val, const s
                     if (!partial) {
                         qLock.unlock();
                         futex_leave(uaddr, q);
-                        errno = ETIMEDOUT;
+                        errno = guest_errno(ETIMEDOUT);
                         return -1;
                     }
                     // A slice expired but the deadline has not: keep waiting.
@@ -4140,7 +4963,10 @@ extern "C" int bionic_futex(uint32_t *uaddr, int futex_op, uint32_t val, const s
             // the registry exists to make visible.
             const BlockingWaitScope tracked(WaitKind::kFutex, uaddr,
                                             guest_return_address(6));
+            const bool traced = futex_trace_enter(uaddr, val, nullptr, "untimed");
+            const auto t0 = std::chrono::steady_clock::now();
             q->cv.wait(qLock);
+            if (traced) futex_trace_exit(uaddr, "woken", t0);
         }
         qLock.unlock();
         futex_leave(uaddr, q);
@@ -4155,6 +4981,7 @@ extern "C" int bionic_futex(uint32_t *uaddr, int futex_op, uint32_t val, const s
             auto it = g_futexQueues.find(uaddr);
             if (it != g_futexQueues.end()) q = it->second;
         }
+        futex_trace_wake(uaddr, val, q ? 1 : 0);
         if (q) {
             std::lock_guard<std::mutex> qLock(q->mtx);
             if (val == 1) q->cv.notify_one();
@@ -4164,7 +4991,7 @@ extern "C" int bionic_futex(uint32_t *uaddr, int futex_op, uint32_t val, const s
         return 0;
     } else if (cmd == FUTEX_REQUEUE || cmd == FUTEX_CMP_REQUEUE) {
         // FUTEX_CMP_REQUEUE requires *uaddr == val3 before requeueing.
-        if (cmd == FUTEX_CMP_REQUEUE && *uaddr != val3) { errno = EAGAIN; return -1; }
+        if (cmd == FUTEX_CMP_REQUEUE && *uaddr != val3) { errno = guest_errno(EAGAIN); return -1; }
 
         std::shared_ptr<FutexWaitQueue> q;
         {
@@ -4554,6 +5381,10 @@ extern "C" int bionic_epoll_create1(int flags) {
 // close() wrapper — cleans up timerfd GCD timers when the fd is closed.
 extern "C" int bionic_close(int fd) {
     fd_forget_apk(fd);
+    if (net_fd(fd)) {
+        net_fd_set(fd, false);
+        if (net_trace_take()) std::fprintf(stderr, "[KuDroidNet] close fd=%d\n", fd);
+    }
 #ifdef __APPLE__
     {
         std::lock_guard<std::mutex> lock(g_timerfds_mtx);
@@ -4711,6 +5542,13 @@ extern "C" int bionic_epoll_wait(int epfd, void *events_ptr, int maxevents, int 
     }
     return ::epoll_wait(epfd, reinterpret_cast<struct epoll_event*>(events_ptr), maxevents, timeout);
 #endif
+}
+
+// The signal mask is not applied; the wait itself is epoll_wait.
+extern "C" int bionic_epoll_pwait(int epfd, void* events_ptr, int maxevents, int timeout,
+                                  const void* sigmask) {
+    (void)sigmask;
+    return bionic_epoll_wait(epfd, events_ptr, maxevents, timeout);
 }
 
 extern "C" int bionic_pthread_condattr_init(void* attr) { (void)attr; return 0; }
@@ -4994,6 +5832,36 @@ extern "C" void bionic_init_main_thread_tls(void) {
         fprintf(stderr, "[TLS_DIAG] write %s\n", 
                 (new_tpidr == (uint64_t)tls_ptr) ? "SUCCESS" : "FAILED");
     }
+#endif
+}
+
+// Where a thread's guest TLS pointer can be read without a trap: the byte offset of
+// the TLS key's slot in the thread-specific-data array that tpidrro_el0 points at, and
+// the offset to add to the stored block to get the guest thread pointer. The host
+// kernel does not preserve tpidr_el0, so this is the only per-thread state a guest TLS
+// read can rely on. Returns 0 on success, -1 where it cannot be determined.
+extern "C" int kudroid_tls_stub_params(int64_t* tsdSlotOffset, int64_t* tlsPointerOffset) {
+#if defined(__APPLE__) && defined(__aarch64__)
+    if (!tsdSlotOffset || !tlsPointerOffset) return -1;
+    ::pthread_once(&tls_key_once, init_tls_key);
+    void* const previous = ::pthread_getspecific(tls_key);
+    const uintptr_t sentinel = 0x5a5a4321cafef00dull;
+    if (::pthread_setspecific(tls_key, reinterpret_cast<void*>(sentinel)) != 0) return -1;
+    uintptr_t base;
+    __asm__ volatile("mrs %0, tpidrro_el0" : "=r"(base));
+    const auto* tsd = reinterpret_cast<const volatile uintptr_t*>(base & ~uintptr_t(7));
+    int64_t found = -1;
+    for (int i = 0; i < 520; ++i) {
+        if (tsd[i] == sentinel) { found = static_cast<int64_t>(i) * 8; break; }
+    }
+    ::pthread_setspecific(tls_key, previous);
+    if (found < 0 || found > 32760) return -1;
+    *tsdSlotOffset = found;
+    *tlsPointerOffset = static_cast<int64_t>(kTlsSlotOffset);
+    return 0;
+#else
+    (void)tsdSlotOffset; (void)tlsPointerOffset;
+    return -1;
 #endif
 }
 
@@ -5287,7 +6155,12 @@ extern "C" int bionic_vfprintf(FILE* stream, const char* format, va_list ap) {
     char buffer[2048];
     const size_t would =
         kudroid_format_guest_va_list(buffer, sizeof(buffer), format, guestVaListPointer(ap));
-    std::fputs(buffer, stream ? stream : stderr);
+    FILE* out = stream ? stream : stderr;
+    if (out == stdout) {
+        console_write_nonblocking(buffer, std::strlen(buffer));
+    } else {
+        std::fputs(buffer, out);
+    }
     return static_cast<int>(would);
 }
 
@@ -6508,7 +7381,7 @@ extern "C" int bionic_sem_trywait(sem_t* sem) {
     auto s = guest_sem_find(sem, /*create=*/true);
     std::unique_lock<std::mutex> lock(s->mtx);
     if (s->value == 0) {
-        errno = EAGAIN;
+        errno = guest_errno(EAGAIN);
         return -1;
     }
     --s->value;
@@ -6576,7 +7449,7 @@ extern "C" int bionic_sem_timedwait(sem_t* sem, const struct timespec* abs_timeo
                 // Already expired. POSIX still requires the semaphore be taken if it is
                 // available, so check before reporting a timeout.
                 if (!ready()) {
-                    errno = ETIMEDOUT;
+                    errno = guest_errno(ETIMEDOUT);
                     return -1;
                 }
             } else {
@@ -6590,7 +7463,7 @@ extern "C" int bionic_sem_timedwait(sem_t* sem, const struct timespec* abs_timeo
                 blocking_wait_note_budget(static_cast<uint64_t>(remSec) * 1000ull +
                                           static_cast<uint64_t>(remNs) / 1000000ull);
                 if (!s->cv.wait_for(lock, duration, ready)) {
-                    errno = ETIMEDOUT;
+                    errno = guest_errno(ETIMEDOUT);
                     return -1;
                 }
             }
@@ -7113,6 +7986,10 @@ const SymbolEntry kSyscallSymbols[] = {
 #if defined(__aarch64__)
     {"snprintf", reinterpret_cast<void*>(&kudroid_snprintf_trampoline)},
     {"sprintf", reinterpret_cast<void*>(&kudroid_sprintf_trampoline)},
+    {"fprintf", reinterpret_cast<void*>(&kudroid_fprintf_trampoline)},
+    {"printf", reinterpret_cast<void*>(&kudroid_printf_trampoline)},
+    {"__fprintf_chk", reinterpret_cast<void*>(&kudroid_fprintf_chk_trampoline)},
+    {"__printf_chk", reinterpret_cast<void*>(&kudroid_printf_chk_trampoline)},
 #else
     {"snprintf", reinterpret_cast<void*>(&snprintf)},
     {"sprintf", reinterpret_cast<void*>(&sprintf)},
@@ -7136,6 +8013,17 @@ const SymbolEntry kSyscallSymbols[] = {
     {"socket", reinterpret_cast<void*>(&bionic_socket)},
     {"bind", reinterpret_cast<void*>(&bionic_bind)},
     {"connect", reinterpret_cast<void*>(&bionic_connect)},
+    {"setsockopt", reinterpret_cast<void*>(&bionic_setsockopt)},
+    {"getsockopt", reinterpret_cast<void*>(&bionic_getsockopt)},
+    {"fcntl", reinterpret_cast<void*>(&bionic_fcntl)},
+    {"send", reinterpret_cast<void*>(&bionic_send)},
+    {"recv", reinterpret_cast<void*>(&bionic_recv)},
+    {"sendto", reinterpret_cast<void*>(&bionic_sendto)},
+    {"recvfrom", reinterpret_cast<void*>(&bionic_recvfrom)},
+    {"accept", reinterpret_cast<void*>(&bionic_accept)},
+    {"accept4", reinterpret_cast<void*>(&bionic_accept4)},
+    {"listen", reinterpret_cast<void*>(&bionic_listen)},
+    {"shutdown", reinterpret_cast<void*>(&bionic_shutdown)},
     {"getsockname", reinterpret_cast<void*>(&bionic_getsockname)},
     {"getpeername", reinterpret_cast<void*>(&bionic_getpeername)},
     {"sendmsg", reinterpret_cast<void*>(&bionic_sendmsg)},
@@ -7186,6 +8074,19 @@ const SymbolEntry kSyscallSymbols[] = {
     {"fstatfs", reinterpret_cast<void*>(&bionic_fstatfs)},
     {"fstatfs64", reinterpret_cast<void*>(&bionic_fstatfs)},
     {"ioctl", reinterpret_cast<void*>(&bionic_ioctl)},
+    {"poll", reinterpret_cast<void*>(&bionic_poll)},
+    {"ppoll", reinterpret_cast<void*>(&bionic_ppoll)},
+    {"pselect", reinterpret_cast<void*>(&bionic_pselect)},
+    {"epoll_pwait", reinterpret_cast<void*>(&bionic_epoll_pwait)},
+    {"socketpair", reinterpret_cast<void*>(&bionic_socketpair)},
+    {"getnameinfo", reinterpret_cast<void*>(&bionic_getnameinfo)},
+    {"gethostbyname", reinterpret_cast<void*>(&bionic_gethostbyname)},
+    {"gethostbyname2", reinterpret_cast<void*>(&bionic_gethostbyname2)},
+    {"gethostbyaddr", reinterpret_cast<void*>(&bionic_gethostbyaddr)},
+    {"gethostbyname_r", reinterpret_cast<void*>(&bionic_gethostbyname_r)},
+    {"readv", reinterpret_cast<void*>(&bionic_readv)},
+    {"writev", reinterpret_cast<void*>(&bionic_writev)},
+    {"dup3", reinterpret_cast<void*>(&bionic_dup3)},
     {"prctl", reinterpret_cast<void*>(&bionic_prctl)},
     {"uname", reinterpret_cast<void*>(&bionic_uname)},
     {"__uname", reinterpret_cast<void*>(&bionic_uname)},
@@ -7199,7 +8100,8 @@ const SymbolEntry kSyscallSymbols[] = {
     {"clock_gettime", reinterpret_cast<void*>(&bionic_clock_gettime)},
     {"__clock_gettime", reinterpret_cast<void*>(&bionic_clock_gettime)},
     {"clock_gettime64", reinterpret_cast<void*>(&bionic_clock_gettime64)},
-    {"gettimeofday", reinterpret_cast<void*>(&::gettimeofday)},
+    {"gettimeofday", reinterpret_cast<void*>(&bionic_gettimeofday)},
+    {"clock_getres", reinterpret_cast<void*>(&bionic_clock_getres)},
     {"ashmem_create_region", reinterpret_cast<void*>(&bionic_ashmem_create_region)},
     {"ashmem_set_prot_region", reinterpret_cast<void*>(&bionic_ashmem_set_prot_region)},
     {"ashmem_set_name", reinterpret_cast<void*>(&bionic_ashmem_set_name)},

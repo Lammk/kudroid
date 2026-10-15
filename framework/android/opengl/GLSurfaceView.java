@@ -401,6 +401,11 @@ public class GLSurfaceView extends SurfaceView implements SurfaceHolder.Callback
                             break;
                         }
 
+                        if (!mHasSurface && mEglState != 0) {
+                            nativeEglDestroy(mEglState);
+                            mEglState = 0;
+                        }
+
                         if (mPaused || !mHasSurface || mWidth <= 0 || mHeight <= 0) {
                             try {
                                 mLock.wait();
@@ -444,7 +449,20 @@ public class GLSurfaceView extends SurfaceView implements SurfaceHolder.Callback
                 if (needInit) {
                     mEglState = nativeEglCreate(mClientVersion, mDepthSize, mStencilSize);
                     if (mEglState != 0) {
-                        nativeEglMakeCurrent(mEglState);
+                        boolean layoutReady = android.app.ActivityThread.awaitSurfaceLayout();
+                        synchronized (mLock) {
+                            layoutReady = layoutReady && !mExited && mHasSurface && !mPaused;
+                        }
+                        if (!layoutReady) {
+                            nativeEglDestroy(mEglState);
+                            mEglState = 0;
+                            continue;
+                        }
+                        if (!nativeEglMakeCurrent(mEglState)) {
+                            nativeEglDestroy(mEglState);
+                            mEglState = 0;
+                            continue;
+                        }
                         try {
                             mRenderer.onSurfaceCreated(gl, config);
                         } catch (Throwable t) {

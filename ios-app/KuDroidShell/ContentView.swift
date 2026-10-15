@@ -1,6 +1,7 @@
 import SwiftUI
 import UIKit
 import AVFAudio
+import AVFoundation
 import Metal
 import QuartzCore
 import CoreMotion
@@ -998,14 +999,57 @@ func activateAudioSession() {
     // compiles in Swift 4 mode; If you later upgrade to Swift 5, change back
     // AVAudioSession.Category.playback / AVAudioSession.Mode.default.
     do {
-        try session.setCategory("AVAudioSessionCategoryPlayback",
-                                mode: "AVAudioSessionModeDefault",
-                                options: [.mixWithOthers])
+        // An open microphone recorder needs a record-capable category; reasserting
+        // playback here would cut it off.
+        if kudroid_audio_capture_active() > 0 {
+            try session.setCategory(.playAndRecord,
+                                    mode: .default,
+                                    options: [.mixWithOthers, .allowBluetooth, .defaultToSpeaker])
+        } else {
+            try session.setCategory(.playback,
+                                    mode: .default,
+                                    options: [.mixWithOthers])
+        }
         try session.setActive(true)
     } catch {
         // Never silent: a failed session is exactly the consume-but-silent bug.
         print("[KuDroidAudio] activateAudioSession failed: \(error)")
     }
+}
+
+/// Publish the OS authorization of the sensors a guest can ask for, so the guest's
+/// permission checks reflect what iOS will actually allow.
+func refreshHostAuthorizations() {
+    switch AVAudioSession.sharedInstance().recordPermission {
+    case .granted: kudroid_set_host_authorization(0, 1)
+    case .denied: kudroid_set_host_authorization(0, 2)
+    default: kudroid_set_host_authorization(0, 0)
+    }
+    switch AVCaptureDevice.authorizationStatus(for: .video) {
+    case .authorized: kudroid_set_host_authorization(1, 1)
+    case .notDetermined: kudroid_set_host_authorization(1, 0)
+    default: kudroid_set_host_authorization(1, 2)
+    }
+}
+
+/// Ask iOS for the sensors named in `permissions`, then publish the answers.
+private func requestHostAuthorizations(for permissions: [String], completion: @escaping () -> Void) {
+    let pending = DispatchGroup()
+    if permissions.contains("android.permission.RECORD_AUDIO") {
+        pending.enter()
+        AVAudioSession.sharedInstance().requestRecordPermission { granted in
+            kudroid_set_host_authorization(0, granted ? 1 : 2)
+            pending.leave()
+        }
+    }
+    if permissions.contains("android.permission.CAMERA") {
+        pending.enter()
+        AVCaptureDevice.requestAccess(for: .video) { granted in
+            kudroid_set_host_authorization(1, granted ? 1 : 2)
+            pending.leave()
+        }
+    }
+    pending.notify(queue: .main, execute: completion)
 }
 
 /// Read CFBundleShortVersionString from Info.plist (T1.0.0).
@@ -1578,11 +1622,10 @@ func executeKuDroidTest(name: String) -> (success: Bool, log: String, logFilenam
 // mark: - Full screen exclusive executable (Dedicated Clean Container)
 struct DedicatedAppRunnerView: UIViewControllerRepresentable {
     let appName: String
-    let onExit: () -> Void
     let onCrash: (String, String) -> Void
 
     func makeUIViewController(context: Context) -> NativeMetalViewController {
-        let vc = NativeMetalViewController(appName: appName, onExit: onExit, onCrash: onCrash)
+        let vc = NativeMetalViewController(appName: appName, onCrash: onCrash)
         return vc
     }
 
@@ -1597,10 +1640,33 @@ private func onKuDroidSoftInputShow(_ flags: Int32) {
     DispatchQueue.main.async {
         guard let vc = NativeMetalViewController.sCurrentRunnerVC else { return }
         NSLog("[KuDroid] guest requested soft keyboard (flags=0x%x)", flags)
-        if !vc.metalView.isFirstResponder {
+        // The focused field's type decides the layout; a keyboard that is already up
+        // must be rebuilt for a field of a different kind.
+        vc.metalView.applyGuestInputTraits(inputType: kudroid_get_soft_input_type(),
+                                           imeOptions: kudroid_get_soft_input_ime_options())
+        if vc.metalView.isFirstResponder {
+            vc.metalView.reloadInputViews()
+        } else {
             vc.metalView.becomeFirstResponder()
         }
         kudroid_set_soft_input_visible(vc.metalView.isFirstResponder ? 1 : 0)
+    }
+}
+
+// Opens links the guest asks for (browser, mail, phone) in the system handler. Local-file
+// and script schemes are never opened.
+private func onKuDroidOpenURL(_ urlC: UnsafePointer<CChar>?) {
+    guard let urlC = urlC else { return }
+    let text = String(cString: urlC)
+    DispatchQueue.main.async {
+        guard let url = URL(string: text),
+              let scheme = url.scheme?.lowercased(),
+              !["file", "content", "javascript", "data"].contains(scheme) else {
+            NSLog("[KuDroid] refused to open url: %@", text)
+            return
+        }
+        NSLog("[KuDroid] opening url: %@", text)
+        UIApplication.shared.open(url, options: [:], completionHandler: nil)
     }
 }
 
@@ -1617,11 +1683,36 @@ private func onKuDroidPermissionPrompt(pkgNameC: UnsafePointer<CChar>?,
                                       permsCsvC: UnsafePointer<CChar>?,
                                       reqCode: Int32,
                                       actHandle: UnsafeMutableRawPointer?) {
+    // Copied now: the C strings are only valid for the duration of this call.
     let csv = permsCsvC != nil ? String(cString: permsCsvC!) : ""
     let appTitle = NativeMetalViewController.sCurrentRunnerVC?.appName ?? "Android App"
+    let respond: (Int32) -> Void = { granted in
+        csv.withCString { kudroid_submit_permission_response(actHandle, reqCode, $0, granted) }
+    }
     DispatchQueue.main.async {
-        let items = csv.split(separator: ",").map { perm -> String in
-            let p = String(perm)
+        let perms = csv.split(separator: ",").map(String.init)
+        // iOS never asks twice: once the user has refused, only Settings can undo it.
+        let refusedByHost = perms.contains {
+            ($0 == "android.permission.RECORD_AUDIO" && kudroid_get_host_authorization(0) == 2) ||
+            ($0 == "android.permission.CAMERA" && kudroid_get_host_authorization(1) == 2)
+        }
+        if refusedByHost {
+            let alert = UIAlertController(
+                title: "Access turned off",
+                message: "\(appTitle) needs the microphone or camera, but access is turned off for KuDroid in iOS Settings.",
+                preferredStyle: .alert
+            )
+            alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in respond(0) })
+            alert.addAction(UIAlertAction(title: "Open Settings", style: .default) { _ in
+                if let url = URL(string: UIApplication.openSettingsURLString) {
+                    UIApplication.shared.open(url)
+                }
+                respond(0)
+            })
+            NativeMetalViewController.sCurrentRunnerVC?.present(alert, animated: true)
+            return
+        }
+        let items = perms.map { p -> String in
             if p.contains("CAMERA") { return "📷 Camera Access" }
             if p.contains("AUDIO") || p.contains("RECORD") { return "🎙️ Microphone & Audio" }
             if p.contains("STORAGE") || p.contains("EXTERNAL") { return "📁 Storage & Files (/sdcard)" }
@@ -1636,18 +1727,25 @@ private func onKuDroidPermissionPrompt(pkgNameC: UnsafePointer<CChar>?,
             preferredStyle: .alert
         )
         alert.addAction(UIAlertAction(title: "Deny", style: .destructive) { _ in
-            kudroid_submit_permission_response(actHandle, reqCode, permsCsvC, 0)
+            respond(0)
         })
         alert.addAction(UIAlertAction(title: "Allow", style: .default) { _ in
-            kudroid_submit_permission_response(actHandle, reqCode, permsCsvC, 1)
+            // The app's grant is not enough: iOS has its own prompt for the mic and camera.
+            requestHostAuthorizations(for: perms) { respond(1) }
         })
         NativeMetalViewController.sCurrentRunnerVC?.present(alert, animated: true)
     }
 }
 
+/// Show a camera preview layer over the running guest's surface, or remove it.
+func kudroidSetGuestPreviewLayer(_ layer: CALayer?) {
+    DispatchQueue.main.async {
+        NativeMetalViewController.sCurrentRunnerVC?.metalView.setGuestPreviewLayer(layer)
+    }
+}
+
 class NativeMetalViewController: UIViewController {
     let appName: String
-    let onExit: () -> Void
     let onCrash: (String, String) -> Void
     private var isStarted = false
     fileprivate var metalView: NativeMetalView!
@@ -1657,9 +1755,8 @@ class NativeMetalViewController: UIViewController {
     private let motionManager = CMMotionManager()
     private var lastRequestedOrientation: Int32 = -1
 
-    init(appName: String, onExit: @escaping () -> Void, onCrash: @escaping (String, String) -> Void) {
+    init(appName: String, onCrash: @escaping (String, String) -> Void) {
         self.appName = appName
-        self.onExit = onExit
         self.onCrash = onCrash
         super.init(nibName: nil, bundle: nil)
     }
@@ -1693,9 +1790,10 @@ class NativeMetalViewController: UIViewController {
         self.view.backgroundColor = .black
         metalView.backgroundColor = .black
 
-        // On-screen status indicator for immediate feedback
+        // Status line stays hidden until the session ends.
         statusLabel = UILabel()
-        statusLabel.text = "KuDroid: Initializing \(appName)..."
+        statusLabel.text = ""
+        statusLabel.alpha = 0.0
         statusLabel.textColor = UIColor.green.withAlphaComponent(0.8)
         statusLabel.font = UIFont.monospacedSystemFont(ofSize: 12, weight: .semibold)
         statusLabel.backgroundColor = UIColor.black.withAlphaComponent(0.6)
@@ -1705,37 +1803,12 @@ class NativeMetalViewController: UIViewController {
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(statusLabel)
 
-        // Floating Exit Button allows users to return to Launcher at any time
-        let closeButton = UIButton(type: .custom)
-        let config = UIImage.SymbolConfiguration(pointSize: 24, weight: .bold)
-        closeButton.setImage(UIImage(systemName: "xmark.circle.fill", withConfiguration: config), for: .normal)
-        closeButton.tintColor = UIColor.white.withAlphaComponent(0.85)
-        closeButton.backgroundColor = UIColor.black.withAlphaComponent(0.5)
-        closeButton.layer.cornerRadius = 22
-        closeButton.layer.masksToBounds = true
-        closeButton.isUserInteractionEnabled = true
-        closeButton.translatesAutoresizingMaskIntoConstraints = false
-        closeButton.addTarget(self, action: #selector(handleExitButton), for: .touchUpInside)
-        view.addSubview(closeButton)
-
         NSLayoutConstraint.activate([
             statusLabel.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -16),
             statusLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             statusLabel.heightAnchor.constraint(equalToConstant: 28),
-            statusLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 180),
-
-            closeButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 10),
-            closeButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
-            closeButton.widthAnchor.constraint(equalToConstant: 44),
-            closeButton.heightAnchor.constraint(equalToConstant: 44)
+            statusLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 180)
         ])
-
-        // Automatically dim status labels after 3 seconds
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
-            UIView.animate(withDuration: 0.5) {
-                self?.statusLabel.alpha = 0.0
-            }
-        }
 
         // Start CoreMotion to transmit sensor data to the KuDroid bridge
         if motionManager.isAccelerometerAvailable {
@@ -1760,6 +1833,7 @@ class NativeMetalViewController: UIViewController {
         // here rather than in the C++ layer because kudroid_core is a static library
         // and cannot touch UIKit.
         kudroid_set_soft_input_callbacks(onKuDroidSoftInputShow, onKuDroidSoftInputHide)
+        kudroid_set_open_url_callback(onKuDroidOpenURL)
 
         // Track the real keyboard state rather than assuming it followed the request:
         // iOS can dismiss it on its own (interactive dismiss, scene change), and the
@@ -1782,6 +1856,14 @@ class NativeMetalViewController: UIViewController {
 
         // Set up Permission Request Dialog Callback
         kudroid_set_permission_prompt_callback(onKuDroidPermissionPrompt)
+        registerKuDroidCameraHost()
+        // The user can change microphone/camera access in Settings while the app is away.
+        refreshHostAuthorizations()
+        keyboardObservers.append(NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { _ in
+            refreshHostAuthorizations()
+        })
 
         startAppIfNeeded()
     }
@@ -1800,6 +1882,7 @@ class NativeMetalViewController: UIViewController {
         }
         keyboardObservers = []
         kudroid_set_soft_input_callbacks(nil, nil)
+        kudroid_set_open_url_callback(nil)
         metalView?.resignFirstResponder()
         kudroid_set_soft_input_visible(0)
         kudroid_stop_app()
@@ -1813,11 +1896,6 @@ class NativeMetalViewController: UIViewController {
         } else {
             UIDevice.current.setValue(UIInterfaceOrientation.portrait.rawValue, forKey: "orientation")
         }
-    }
-
-    @objc private func handleExitButton() {
-        cleanupAndResetOrientation()
-        onExit()
     }
 
     deinit {
@@ -1968,8 +2046,10 @@ class NativeMetalViewController: UIViewController {
             }
         }
 
-        // Run Android APK with highest Interactive UI priority
-        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+        // Run Android APK with highest Interactive UI priority, on a thread of its own:
+        // the guest's main thread runs the interpreter and guest static initialisers,
+        // and a GCD worker's 512 KB stack is too small for that.
+        let guestMainThread = Thread { [weak self] in
             guard let self = self else { return }
             NSLog("[KuDroid] Starting kudroid_run_apk(%@)...", self.appName)
             let cString = kudroid_run_apk(self.appName)
@@ -1986,11 +2066,15 @@ class NativeMetalViewController: UIViewController {
                 } else {
                     // App finished without crashing
                     self.statusLabel.alpha = 1.0
-                    self.statusLabel.text = "Session ended. Tap ✕ to close."
+                    self.statusLabel.text = "Session ended. Close KuDroid from the app switcher."
                     self.statusLabel.textColor = .yellow
                 }
             }
         }
+        guestMainThread.name = "KuDroidGuestMain"
+        guestMainThread.stackSize = 16 * 1024 * 1024
+        guestMainThread.qualityOfService = .userInteractive
+        guestMainThread.start()
     }
 
     private func handleCrash(fallbackLog: String = "") {
@@ -2014,6 +2098,29 @@ class NativeMetalViewController: UIViewController {
 class NativeMetalView: UIView {
     override class var layerClass: AnyClass {
         return CAMetalLayer.self
+    }
+
+    // Keyboard traits the guest's focused field asked for; the UITextInputTraits
+    // properties in the UIKeyInput extension read and write these.
+    fileprivate var guestKeyboardType: UIKeyboardType = .default
+    fileprivate var guestReturnKeyType: UIReturnKeyType = .default
+    fileprivate var guestSecureEntry = false
+    fileprivate var guestAutocorrection: UITextAutocorrectionType = .no
+    fileprivate var guestAutocapitalization: UITextAutocapitalizationType = .none
+
+    // Camera preview shown over the guest's surface; kept at the view's size.
+    private var guestPreviewLayer: CALayer?
+
+    fileprivate func setGuestPreviewLayer(_ preview: CALayer?) {
+        if guestPreviewLayer !== preview {
+            guestPreviewLayer?.removeFromSuperlayer()
+            guestPreviewLayer = preview
+            if let preview = preview {
+                preview.zPosition = 1
+                layer.addSublayer(preview)
+            }
+        }
+        guestPreviewLayer?.frame = bounds
     }
 
     override init(frame: CGRect) {
@@ -2057,6 +2164,7 @@ class NativeMetalView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        guestPreviewLayer?.frame = bounds
         guard let metalLayer = self.layer as? CAMetalLayer else { return }
         let scale = UIScreen.main.scale
         let sz = CGSize(width: bounds.width * scale, height: bounds.height * scale)
@@ -2160,61 +2268,89 @@ extension NativeMetalView: UIKeyInput {
         kudroid_dispatch_delete_backward()
     }
 
+    // Keyboard traits follow the guest's focused field (see applyGuestInputTraits).
     // Games render their own text, so iOS must not also draw an insertion caret or
-    // selection over the Metal surface.
+    // selection over the Metal surface; the traits only shape the keyboard itself.
     var keyboardType: UIKeyboardType {
-        get { .default }
-        set { }
+        get { guestKeyboardType }
+        set { guestKeyboardType = newValue }
+    }
+
+    var returnKeyType: UIReturnKeyType {
+        get { guestReturnKeyType }
+        set { guestReturnKeyType = newValue }
+    }
+
+    var isSecureTextEntry: Bool {
+        get { guestSecureEntry }
+        set { guestSecureEntry = newValue }
     }
 
     var autocorrectionType: UITextAutocorrectionType {
-        get { .no }
-        set { }
+        get { guestAutocorrection }
+        set { guestAutocorrection = newValue }
     }
 
     var autocapitalizationType: UITextAutocapitalizationType {
-        get { .none }
-        set { }
+        get { guestAutocapitalization }
+        set { guestAutocapitalization = newValue }
     }
 
     var spellCheckingType: UITextSpellCheckingType {
         get { .no }
         set { }
     }
-}
 
-// Blit a CPU-drawn 2D buffer from C++ straight to the iOS screen (CALayer)
-@_cdecl("kudroid_blit_canvas_to_layer")
-public func kudroid_blit_canvas_to_layer(layerPtr: UnsafeMutableRawPointer?, bits: UnsafeRawPointer?, width: Int32, height: Int32) {
-    guard let layerPtr = layerPtr, let bits = bits, width > 0, height > 0 else { return }
-    let layer = Unmanaged<CALayer>.fromOpaque(layerPtr).takeUnretainedValue()
-    let w = Int(width)
-    let h = Int(height)
-    let bytesPerRow = w * 4
-    let colorSpace = CGColorSpaceCreateDeviceRGB()
-    let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue)
-    guard let dataProvider = CGDataProvider(dataInfo: nil, data: bits, size: w * h * 4, releaseData: { _, _, _ in }) else { return }
-    guard let cgImage = CGImage(
-        width: w,
-        height: h,
-        bitsPerComponent: 8,
-        bitsPerPixel: 32,
-        bytesPerRow: bytesPerRow,
-        space: colorSpace,
-        bitmapInfo: bitmapInfo,
-        provider: dataProvider,
-        decode: nil,
-        shouldInterpolate: false,
-        intent: .defaultIntent
-    ) else { return }
+    /// Map the guest field's EditorInfo (inputType / imeOptions) onto UIKit's traits.
+    func applyGuestInputTraits(inputType: Int32, imeOptions: Int32) {
+        let cls = inputType & 0xf
+        let variation = inputType & 0xff0
+        let flags = inputType & 0x00fff000
 
-    DispatchQueue.main.async {
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        layer.contents = cgImage
-        CATransaction.commit()
+        var keyboard: UIKeyboardType = .default
+        var secure = false
+        switch cls {
+        case 1:  // text
+            switch variation {
+            case 0x10: keyboard = .URL
+            case 0x20, 0xd0: keyboard = .emailAddress
+            case 0x80, 0xe0: secure = true
+            case 0x90: keyboard = .asciiCapable
+            default: break
+            }
+        case 2:  // number
+            keyboard = (flags & 0x2000) != 0 ? .decimalPad : .numberPad
+            secure = variation == 0x10
+        case 3: keyboard = .phonePad
+        case 4: keyboard = .numbersAndPunctuation
+        default: break
+        }
+
+        var returnKey: UIReturnKeyType = .default
+        switch imeOptions & 0xff {
+        case 2: returnKey = .go
+        case 3: returnKey = .search
+        case 4: returnKey = .send
+        case 5: returnKey = .next
+        case 6: returnKey = .done
+        default: break
+        }
+
+        var capitalization: UITextAutocapitalizationType = .none
+        if cls == 1 {
+            if (flags & 0x1000) != 0 { capitalization = .allCharacters }
+            else if (flags & 0x2000) != 0 { capitalization = .words }
+            else if (flags & 0x4000) != 0 { capitalization = .sentences }
+        }
+
+        guestKeyboardType = keyboard
+        guestReturnKeyType = returnKey
+        guestSecureEntry = secure
+        guestAutocapitalization = capitalization
+        guestAutocorrection = (cls == 1 && (flags & 0x8000) != 0 && !secure) ? .yes : .no
     }
 }
+
 
 // mark: - Smart Gentle Crash alert modal
 struct CrashAlertView: View {

@@ -57,7 +57,7 @@ public class FrameLayout extends ViewGroup {
             int ch = child.getMeasuredHeight();
             if (cw <= 0) cw = r - l;
             if (ch <= 0) ch = b - t;
-            child.layout(l, t, l + cw, t + ch);
+            child.layout(0, 0, cw, ch);
         }
     }
 

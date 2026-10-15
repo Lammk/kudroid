@@ -20,6 +20,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <mutex>
 #include <chrono>
 #include <filesystem>
 #include <string>
@@ -113,6 +114,12 @@ extern "C" void kudroid_ios_diagnostic_memory(const char* phase) {
 
 extern "C" void kudroid_set_log_dir(const char* dir) {
     if (!dir) return;
+    // Setup is once per process and directory. The host re-runs it every time its
+    // root view appears, and by then guest threads are reading the paths it would
+    // rewrite and the files it would reopen.
+    static std::mutex s_setupMutex;
+    std::lock_guard<std::mutex> setupLock(s_setupMutex);
+    if (g_logDir[0] != '\0' && std::strcmp(g_docsDir, dir) == 0) return;
     // Recorded before installCrashHandlers below: the fatal-path park needs
     // the main thread to wake it with SIGUSR2 when a worker dies reported.
     crashNoteMainThread();
@@ -274,6 +281,13 @@ extern "C" void kudroid_clear_all_logs(void) {
 
 extern "C" void kudroid_set_documents_dir(const char* dir) {
     if (dir && dir[0] != '\0') {
+        // Once per directory: the remapper's root is read by guest threads without a
+        // lock, and re-applying it also resets the pseudo-files under it.
+        static std::mutex s_documentsMutex;
+        static std::string s_appliedDir;
+        std::lock_guard<std::mutex> documentsLock(s_documentsMutex);
+        if (s_appliedDir == dir) return;
+        s_appliedDir = dir;
         kudroid::VFSPathRemapper::getInstance().setDocumentsDirectory(dir);
         kudroid::PermissionManager::getInstance().init(dir);
 

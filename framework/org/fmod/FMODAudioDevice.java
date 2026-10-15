@@ -2,6 +2,7 @@ package org.fmod;
 
 import android.media.AudioFormat;
 import android.media.AudioManager;
+import android.media.AudioRecord;
 import android.media.AudioTrack;
 import java.nio.ByteBuffer;
 
@@ -13,6 +14,9 @@ public class FMODAudioDevice implements Runnable {
     private volatile boolean mRunning = false;
     private Thread mThread;
     private AudioTrack mTrack;
+    private AudioRecord mRecorder;
+    private Thread mRecordThread;
+    private volatile boolean mRecording;
 
     public native int fmodGetInfo(int which);
     public native int fmodProcess(ByteBuffer buffer);
@@ -33,6 +37,7 @@ public class FMODAudioDevice implements Runnable {
     }
 
     public synchronized void close() {
+        stopAudioRecord();
         if (!mRunning) return;
         mRunning = false;
         if (mThread != null) {
@@ -54,12 +59,63 @@ public class FMODAudioDevice implements Runnable {
         return mRunning;
     }
 
-    // Recording is unavailable; report failure without blocking output initialization.
+    /**
+     * Start capturing the microphone and feed it to FMOD through fmodProcessMicData.
+     * Returns the capture buffer size in bytes, or 0 when recording could not start
+     * (no permission, or no input), which keeps output initialization unaffected.
+     */
     public synchronized int startAudioRecord(int sampleRate, int channelConfig, int audioFormat) {
-        return 0;
+        if (mRecorder != null) return 0;
+        final int minBuf = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat);
+        if (minBuf <= 0) return 0;
+        final AudioRecord recorder;
+        final ByteBuffer buffer;
+        try {
+            recorder = new AudioRecord(1, sampleRate, channelConfig, audioFormat, minBuf * 2);
+            if (recorder.getState() != AudioRecord.STATE_INITIALIZED) {
+                recorder.release();
+                return 0;
+            }
+            buffer = ByteBuffer.allocateDirect(minBuf);
+            recorder.startRecording();
+        } catch (Throwable t) {
+            return 0;
+        }
+        mRecorder = recorder;
+        mRecording = true;
+        mRecordThread = new Thread(new Runnable() {
+            @Override public void run() {
+                while (mRecording) {
+                    final int n = recorder.read(buffer, minBuf);
+                    if (n > 0) {
+                        try {
+                            fmodProcessMicData(buffer, n);
+                        } catch (Throwable t) {
+                            break;
+                        }
+                    } else if (n < 0) {
+                        break;
+                    }
+                }
+            }
+        }, "FMODAudioRecord");
+        mRecordThread.start();
+        return minBuf;
     }
 
     public synchronized void stopAudioRecord() {
+        mRecording = false;
+        if (mRecorder != null) {
+            try { mRecorder.stop(); } catch (Throwable ignored) {}
+        }
+        if (mRecordThread != null) {
+            try { mRecordThread.join(500); } catch (InterruptedException ignored) {}
+            mRecordThread = null;
+        }
+        if (mRecorder != null) {
+            try { mRecorder.release(); } catch (Throwable ignored) {}
+            mRecorder = null;
+        }
     }
 
     @Override

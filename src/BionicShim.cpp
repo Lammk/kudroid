@@ -37,7 +37,9 @@ size_t gShimTraceCount = 0;
 
 void trace_shim(const char* message) {
     if (!message || !*message) return;
-    std::lock_guard<std::mutex> lock(gShimTraceMtx);
+    // Diagnostics only: never wait on a lock a parked thread may hold.
+    std::unique_lock<std::mutex> lock(gShimTraceMtx, std::try_to_lock);
+    if (!lock.owns_lock()) return;
     gShimTraceRing[gShimTraceHead] = "[BionicShim] ";
     gShimTraceRing[gShimTraceHead] += message;
     gShimTraceHead = (gShimTraceHead + 1) % kShimTraceRing;

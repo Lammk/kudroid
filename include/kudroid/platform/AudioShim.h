@@ -42,6 +42,8 @@ int64_t bionic_kudroid_audiotrack_create(int32_t sampleRateInHz, int32_t channel
 
 // Submit PCM. Returns the byte count accepted, or a negative AudioTrack error.
 int32_t bionic_kudroid_audiotrack_write(int64_t track, const void* data, int32_t sizeInBytes);
+int32_t bionic_kudroid_audiotrack_write_mode(int64_t track, const void* data,
+                                          int32_t sizeInBytes, bool blocking);
 
 int32_t bionic_kudroid_audiotrack_play(int64_t track);
 int32_t bionic_kudroid_audiotrack_pause(int64_t track);

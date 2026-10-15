@@ -7,8 +7,18 @@ import java.security.Principal;
 
 public abstract class HttpsURLConnection extends HttpURLConnection {
     protected HostnameVerifier hostnameVerifier;
+    // The default checks the server's certificate against the host name, as the platform's does.
     private static HostnameVerifier defaultHostnameVerifier = new HostnameVerifier() {
-        public boolean verify(String hostname, SSLSession session) { return true; }
+        public boolean verify(String hostname, SSLSession session) {
+            try {
+                java.security.cert.Certificate[] certs = session.getPeerCertificates();
+                return certs.length > 0 && certs[0] instanceof java.security.cert.X509Certificate
+                        && libcore.net.ssl.HostnameChecker.matches(hostname,
+                                (java.security.cert.X509Certificate) certs[0]);
+            } catch (SSLPeerUnverifiedException e) {
+                return false;
+            }
+        }
     };
     private static SSLSocketFactory defaultSSLSocketFactory = (SSLSocketFactory) SSLSocketFactory.getDefault();
     private SSLSocketFactory sslSocketFactory = defaultSSLSocketFactory;

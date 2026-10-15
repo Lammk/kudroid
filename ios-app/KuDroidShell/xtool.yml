@@ -1,0 +1,4 @@
+version: 1
+bundleID: com.kudroid.shell
+iconPath: ../../icon.png
+infoPath: Info.plist

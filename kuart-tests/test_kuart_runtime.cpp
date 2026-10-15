@@ -5,6 +5,7 @@
 #include "kudroid/kuart/DexObject.h"
 #include "kudroid/kuart/Interpreter.h"
 #include "BridgeShared.h"
+#include "kudroid/kudroid_bridge.h"
 #include "dex_builder.h"
 
 #include <chrono>
@@ -383,6 +384,65 @@ int SurfaceCallbackValue(DexClass* callback_class, const char* name) {
             ? callback_class->FindStaticField(name, "I") : nullptr;
     return field != nullptr
             ? callback_class->static_values[field->offset_or_slot].i : -1;
+}
+
+void test_host_surface_traversal() {
+    Check(CallStatic("Landroid/os/Looper;", "prepareMainLooper", "()V"),
+          "surface traversal prepares a UI Looper");
+    DexObject* activity = NewObject("Landroid/app/Activity;", "()V");
+    DexObject* thread = NewObject("Landroid/app/ActivityThread;", "()V");
+    DexObject* handler = NewObject("Landroid/app/ActivityThread$H;",
+            "(Landroid/app/ActivityThread;)V", {DexValue::Ref(thread)});
+    DexObject* view = NewObject("Landroid/view/SurfaceView;",
+            "(Landroid/content/Context;)V", {DexValue::Ref(activity)});
+    DexObject* callback = g_linker->AllocObject(g_linker->FindClass("Lcom/kudroid/SurfaceCallbackProbe;"));
+    DexClass* at = g_linker->FindClass("Landroid/app/ActivityThread;");
+    DexClass* probe = callback ? callback->clazz : nullptr;
+    auto* activity_field = at->FindInstanceField("mInitialActivity", "Landroid/app/Activity;");
+    auto* handler_field = at->FindInstanceField("mH", "Landroid/app/ActivityThread$H;");
+    auto* current_field = at->FindStaticField("sCurrentActivityThread", "Landroid/app/ActivityThread;");
+    Check(activity && thread && handler && view && callback && activity_field && handler_field && current_field,
+          "surface traversal fixtures are available");
+    if (!activity || !thread || !handler || !view || !callback || !activity_field ||
+        !handler_field || !current_field) return;
+    thread->SetField<DexObject*>(activity_field->offset_or_slot, activity);
+    thread->SetField<DexObject*>(handler_field->offset_or_slot, handler);
+    const DexValue previous = at->static_values[current_field->offset_or_slot];
+    at->static_values[current_field->offset_or_slot] = DexValue::Ref(thread);
+    for (const char* name : {"created", "changed", "redraw", "destroyed", "width", "height", "sequence"}) {
+        auto* field = probe->FindStaticField(name, "I");
+        probe->static_values[field->offset_or_slot] = DexValue::Int(0);
+    }
+    DexValue window, holder;
+    Check(CallVirtual(activity, "getWindow", "()Landroid/view/Window;", {}, &window) &&
+          CallVirtual(window.l, "setContentView", "(Landroid/view/View;)V", {DexValue::Ref(view)}) &&
+          CallVirtual(view, "getHolder", "()Landroid/view/SurfaceHolder;", {}, &holder) &&
+          CallVirtual(holder.l, "addCallback", "(Landroid/view/SurfaceHolder$Callback;)V",
+                      {DexValue::Ref(callback)}), "surface traversal installs view and callback");
+    int layer;
+    kudroid_set_metal_layer(&layer, 360, 640, 1);
+    DexValue ready;
+    Check(CallStatic("Landroid/app/ActivityThread;", "awaitSurfaceLayout", "()Z", &ready) && ready.i,
+          "UI traversal can complete inline before renderer initialization");
+    kudroid_set_metal_layer(&layer, 640, 360, 1);
+    Check(CallStatic("Landroid/app/ActivityThread;", "postSurfaceChanged", "()V"),
+          "host resize queues a surface traversal on the UI handler");
+    DexObject* quit = NewRunnable("Lcom/kudroid/TeardownRunnable;");
+    bool awaited = false;
+    std::thread renderer([&] {
+        DexValue result;
+        awaited = CallStatic("Landroid/app/ActivityThread;", "awaitSurfaceLayout", "()Z", &result) && result.i;
+        CallVirtual(handler, "post", "(Ljava/lang/Runnable;)Z", {DexValue::Ref(quit)});
+    });
+    Check(CallStatic("Landroid/os/Looper;", "loop", "()V"),
+          "UI loop dispatches renderer's layout barrier");
+    renderer.join();
+    Check(awaited && SurfaceCallbackValue(probe, "created") == 1 &&
+          SurfaceCallbackValue(probe, "changed") == 2 &&
+          SurfaceCallbackValue(probe, "width") == 640 && SurfaceCallbackValue(probe, "height") == 360,
+          "renderer resumes after UI updates landscape layout and surface size");
+    at->static_values[current_field->offset_or_slot] = previous;
+    kudroid_unbind_metal_layer();
 }
 
 void test_window_and_surface_lifecycle() {
@@ -908,6 +968,7 @@ int main() {
     test_window_and_surface_lifecycle();
     test_view_post_uses_main_queue();
     test_activity_run_on_ui_thread_dispatch();
+    test_host_surface_traversal();
     test_run_completion_barrier();
     std::printf("=== %d checks, %d failures ===\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

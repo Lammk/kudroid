@@ -3,6 +3,7 @@
 #include "kudroid/BionicShim.h"
 #include "kudroid/ExecMemory.h"
 #include "kudroid/FmodVorbisFallback.h"
+extern "C" int kudroid_tls_stub_params(std::int64_t* tsdSlotOffset, std::int64_t* tlsPointerOffset);
 
 #include <atomic>
 #include <cerrno>
@@ -894,12 +895,13 @@ bool ElfLoader::map() {
         void* rewriteView = (splitImage_ || preparedImage_) ? writeBase_ : base_;
         X18Stats xst = kudroid::elf_x18_rewrite(rewriteView, minVaddr, segments_,
                                                 reinterpret_cast<const std::uint8_t*>(fileData_),
-                                                fileSize_);
+                                                fileSize_, base_);
         fprintf(stderr,
                 "[KuDroidELF] x18 rewrite %s: funcs=%llu rewritten=%llu sites=%llu "
-                "skip(noreg=%llu eh=%llu unknown=%llu range=%llu)\n",
+                "stubbed=%llu skip(noreg=%llu eh=%llu unknown=%llu range=%llu)\n",
                 path_.c_str(), (unsigned long long)xst.functions,
                 (unsigned long long)xst.rewritten, (unsigned long long)xst.sites,
+                (unsigned long long)xst.stubbedSites,
                 (unsigned long long)xst.skippedNoReg, (unsigned long long)xst.skippedEh,
                 (unsigned long long)xst.skippedUnknown,
                 (unsigned long long)xst.skippedRange);
@@ -951,6 +953,25 @@ bool ElfLoader::map() {
                     }
                 }
             }
+        }
+    }
+
+    // Most guest TLS reads sit in stack-protector prologues, so one trap per call into
+    // a protected function is a large share of the CPU time. Route them through stubs
+    // that read the thread's TLS block straight from thread-specific data; the BRKs
+    // stay as the slow path and as the fallback for any site a stub cannot reach.
+    {
+        std::int64_t tsdSlotOffset = -1;
+        std::int64_t tlsPointerOffset = 0;
+        if (kudroid_tls_stub_params(&tsdSlotOffset, &tlsPointerOffset) == 0) {
+            void* const rewriteView = (splitImage_ || preparedImage_) ? writeBase_ : base_;
+            const TlsStubStats ts = kudroid::elf_tls_stub_rewrite(
+                rewriteView, base_, minVaddr, segments_, tsdSlotOffset, tlsPointerOffset);
+            std::fprintf(stderr,
+                         "[KuDroidELF] tls stubs %s: sites=%llu stubbed=%llu out_of_range=%llu\n",
+                         path_.c_str(), static_cast<unsigned long long>(ts.sites),
+                         static_cast<unsigned long long>(ts.stubbed),
+                         static_cast<unsigned long long>(ts.outOfRange));
         }
     }
 

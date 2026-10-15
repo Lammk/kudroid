@@ -39,6 +39,8 @@ public final class Choreographer {
     // Phase anchor, mirroring the pacer's last_due: re-posts from inside doFrame
     // align to the previous boundary instead of drifting a grace per frame.
     private long mLastDueNanos = 0;
+    // Frame timestamp while a callback runs on this thread, else 0.
+    private long mCurrentFrameNanos = 0;
 
     private Choreographer() {}
 
@@ -104,11 +106,23 @@ public final class Choreographer {
         final Choreographer self = this;
         Runnable r = new Runnable() {
             public void run() {
+                final long frameTime;
                 synchronized (self) {
                     self.mLastDueNanos = dueHolder[0];
                     self.forgetRunnable(cbF, this);
+                    long stamp = dueHolder[0] < now ? now : dueHolder[0];
+                    final long current = System.nanoTime();
+                    frameTime = stamp > current ? current : stamp;
                 }
-                cbF.doFrame(self.getFrameTimeNanos());
+                // The frame's own boundary, as a display-synchronised source reports:
+                // wake-up jitter must not leak into the timestamps a guest paces from.
+                final long previous = self.mCurrentFrameNanos;
+                self.mCurrentFrameNanos = frameTime;
+                try {
+                    cbF.doFrame(frameTime);
+                } finally {
+                    self.mCurrentFrameNanos = previous;
+                }
             }
         };
         synchronized (this) {
@@ -180,7 +194,8 @@ public final class Choreographer {
 
     /** Timestamp of the frame being rendered, or now when none is. */
     public long getFrameTimeNanos() {
-        return nativeGetFrameTimeNanos();
+        final long current = mCurrentFrameNanos;
+        return current != 0L ? current : nativeGetFrameTimeNanos();
     }
 
     public long getFrameTime() {

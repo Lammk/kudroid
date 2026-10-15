@@ -425,13 +425,39 @@ public class View implements KeyEvent.Callback {
         return mHasFocus;
     }
 
-    /** Change focus state and fire callback if there is a real change. */
+    /** The view that holds focus. One per process, as there is one window. */
+    private static View sFocusedView;
+
+    /** The view that currently holds focus, or null. */
+    protected static View getFocusedView() {
+        return sFocusedView;
+    }
+
+    /** Change focus state and fire callbacks if there is a real change. */
     public void setFocus(boolean hasFocus) {
         if (mHasFocus == hasFocus) return;
+        if (hasFocus) {
+            // Focus is exclusive: the previous owner loses it before this view gains it.
+            final View previous = sFocusedView;
+            sFocusedView = this;
+            if (previous != null && previous != this) previous.setFocus(false);
+        } else if (sFocusedView == this) {
+            sFocusedView = null;
+        }
         mHasFocus = hasFocus;
+        onFocusChanged(hasFocus, 0, null);
         if (mOnFocusChangeListener != null) {
             mOnFocusChangeListener.onFocusChange(this, hasFocus);
         }
+    }
+
+    /** Called when this view gains or loses focus. */
+    protected void onFocusChanged(boolean gainFocus, int direction,
+                                  android.graphics.Rect previouslyFocusedRect) {
+    }
+
+    public void clearFocus() {
+        setFocus(false);
     }
 
     public boolean dispatchKeyEvent(KeyEvent event) {

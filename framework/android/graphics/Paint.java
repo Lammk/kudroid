@@ -29,6 +29,8 @@ public class Paint {
     private boolean mAntiAlias = false;
     private Typeface mTypeface = null;
     private ColorFilter mColorFilter = null;
+    private float mShadowRadius, mShadowDx, mShadowDy;
+    private int mShadowColor;
 
     public Paint() {
     }
@@ -46,6 +48,10 @@ public class Paint {
             mAntiAlias = paint.mAntiAlias;
             mTypeface = paint.mTypeface;
             mColorFilter = paint.mColorFilter;
+            mShadowRadius = paint.mShadowRadius;
+            mShadowDx = paint.mShadowDx;
+            mShadowDy = paint.mShadowDy;
+            mShadowColor = paint.mShadowColor;
         }
     }
 
@@ -56,6 +62,23 @@ public class Paint {
     public int getColor() {
         return mColor;
     }
+
+    public void setARGB(int a, int r, int g, int b) {
+        setColor(((a & 255) << 24) | ((r & 255) << 16) | ((g & 255) << 8) | (b & 255));
+    }
+
+    public void setShadowLayer(float radius, float dx, float dy, int color) {
+        mShadowRadius = Math.max(0, radius);
+        mShadowDx = dx;
+        mShadowDy = dy;
+        mShadowColor = color;
+    }
+
+    public void clearShadowLayer() { mShadowRadius = 0; }
+    public float getShadowRadius() { return mShadowRadius; }
+    public float getShadowDx() { return mShadowDx; }
+    public float getShadowDy() { return mShadowDy; }
+    public int getShadowColor() { return mShadowColor; }
 
     public void setStyle(int style) {
         mStyle = style;
@@ -97,8 +120,10 @@ public class Paint {
         return mAntiAlias;
     }
 
-    public void setTypeface(Typeface typeface) {
+    public Typeface setTypeface(Typeface typeface) {
+        Typeface previous = mTypeface;
         mTypeface = typeface;
+        return previous;
     }
 
     public Typeface getTypeface() {
@@ -118,6 +143,12 @@ public class Paint {
      */
     public float measureText(String text) {
         return text != null ? text.length() * mTextSize * 0.5f : 0.0f;
+    }
+
+    public float measureText(String text, int start, int end) {
+        if (text == null) throw new IllegalArgumentException("text is null");
+        if (start < 0 || end < start || end > text.length()) throw new IndexOutOfBoundsException();
+        return measureText(text.substring(start, end));
     }
 
     /**

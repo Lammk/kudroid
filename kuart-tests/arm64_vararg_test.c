@@ -16,6 +16,12 @@ extern int kudroid_snprintf_chk_trampoline(char* buf, size_t maxlen, int flag, s
                                            const char* fmt, ...);
 extern int kudroid_sprintf_chk_trampoline(char* buf, int flag, size_t slen,
                                           const char* fmt, ...);
+/* The stream-printing forms. The stream pointer is a fixed argument ahead of the varargs,
+ * so the starting register index differs between all four. */
+extern int kudroid_fprintf_trampoline(void* stream, const char* fmt, ...);
+extern int kudroid_printf_trampoline(const char* fmt, ...);
+extern int kudroid_fprintf_chk_trampoline(void* stream, int flag, const char* fmt, ...);
+extern int kudroid_printf_chk_trampoline(int flag, const char* fmt, ...);
 
 /* The va_list path, declared the way a guest declares __android_log_vprint.
  *
@@ -58,6 +64,21 @@ int kudroid_log_assert_from_registers(const u64* frame) { (void)frame; return 0;
  * exercises the identical argument placement — same trampoline macro, same starting
  * register index. */
 int kudroid_fscanf_from_registers(const u64* frame) { (void)frame; return 0; }
+
+/* The stream sink the fprintf/printf handlers write through. The real one forwards to
+ * stdio in SyscallShim.cpp; here it records what was written and to which stream. */
+static char g_sink[512];
+static unsigned long g_sink_len = 0;
+static void* g_sink_stream = (void*)1;
+void kudroid_guest_stdio_write(void* stream, const char* data, size_t len) {
+    g_sink_stream = stream;
+    g_sink_len = 0;
+    while (g_sink_len < len && g_sink_len < sizeof(g_sink) - 1) {
+        g_sink[g_sink_len] = data[g_sink_len];
+        ++g_sink_len;
+    }
+    g_sink[g_sink_len] = '\0';
+}
 
 /* The JNI variadic handlers, stubbed.
  *
@@ -287,6 +308,36 @@ static int guard_intact(const unsigned char* p, unsigned long n) {
 #define INIT_GUARDS(g) do { fill_guard((g).pad_lo, 8); fill_guard((g).pad_hi, 8); \
                             (g).v = 0; } while (0)
 #define GUARDS_OK(g) (guard_intact((g).pad_lo, 8) && guard_intact((g).pad_hi, 8))
+
+static void RunStdioChecks(void) {
+    puts_("-- fprintf / printf and the _chk forms --\n");
+    void* const stream = (void*)0x1234;
+
+    /* The libpng warning that printed a stack pointer instead of its message. */
+    kudroid_fprintf_trampoline(stream, "libpng warning: %s", "iCCP: known incorrect sRGB profile");
+    CheckText(g_sink, "libpng warning: iCCP: known incorrect sRGB profile",
+              "fprintf formats a string argument from its register");
+    Check(g_sink_stream == stream, "fprintf hands the stream through untouched");
+
+    kudroid_fprintf_trampoline(stream, "%d %s %.2f", 42, "ab", 1.5);
+    CheckText(g_sink, "42 ab 1.50", "fprintf mixes integer, string and double varargs");
+
+    /* stream + format take two registers, leaving x2-x7: six integers fit exactly, the
+     * seventh must come from the overflow area. */
+    kudroid_fprintf_trampoline(stream, "%d %d %d %d %d %d %d", 1, 2, 3, 4, 5, 6, 7);
+    CheckText(g_sink, "1 2 3 4 5 6 7", "fprintf integers span registers and stack");
+
+    kudroid_printf_trampoline("%s=%d", "n", 9);
+    CheckText(g_sink, "n=9", "printf starts varargs at the second register");
+    Check(g_sink_stream == (void*)0, "printf selects stdout with a null stream");
+
+    kudroid_fprintf_chk_trampoline(stream, 1, "%s|%d", "chk", 5);
+    CheckText(g_sink, "chk|5", "__fprintf_chk skips the flag argument");
+    Check(g_sink_stream == stream, "__fprintf_chk hands the stream through");
+
+    kudroid_printf_chk_trampoline(1, "%s|%d", "pchk", 6);
+    CheckText(g_sink, "pchk|6", "__printf_chk skips the flag argument");
+}
 
 static void RunScanChecks(void) {
     puts_("-- scanf: output pointers in x2-x7 --\n");
@@ -652,6 +703,7 @@ int main(void) {
     CheckText(buf, "9-y", "__sprintf_chk finds its first vararg at x4");
 
     RunVaListChecks(buf, sizeof(buf));
+    RunStdioChecks();
     RunScanChecks();
 
     puts_("\n");

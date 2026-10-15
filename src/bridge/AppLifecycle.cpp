@@ -20,8 +20,11 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <sstream>
 #include <string>
+#include <system_error>
 #include <thread>
+#include <vector>
 
 #include <fcntl.h>
 #include <pthread.h>
@@ -482,9 +485,45 @@ extern "C" int kudroid_hide_soft_input(void) {
     return 1;
 }
 
+static kudroid_open_url_cb s_openUrlCb = nullptr;
+static std::mutex s_openUrlMutex;
+
+extern "C" void kudroid_set_open_url_callback(kudroid_open_url_cb cb) {
+    std::lock_guard<std::mutex> lock(s_openUrlMutex);
+    s_openUrlCb = cb;
+}
+
+extern "C" int kudroid_open_url(const char* url) {
+    if (url == nullptr || url[0] == '\0') return 0;
+    kudroid_open_url_cb cb = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(s_openUrlMutex);
+        cb = s_openUrlCb;
+    }
+    fprintf(stderr, "[KuDroidCore] open url host=%s\n", cb != nullptr ? "yes" : "none");
+    if (cb == nullptr) return 0;
+    cb(url);
+    return 1;
+}
+
 extern "C" int kudroid_is_soft_input_visible(void) {
     return s_softInputVisible.load();
 }
+
+// What the focused guest field asked of the keyboard (EditorInfo.inputType/imeOptions).
+// The host reads it when it raises the keyboard, so layout, secure entry and the
+// return-key label follow the field instead of being fixed.
+static std::atomic<int> s_softInputType{0};
+static std::atomic<int> s_softInputImeOptions{0};
+
+extern "C" void kudroid_set_soft_input_traits(int inputType, int imeOptions) {
+    s_softInputType.store(inputType);
+    s_softInputImeOptions.store(imeOptions);
+}
+
+extern "C" int kudroid_get_soft_input_type(void) { return s_softInputType.load(); }
+
+extern "C" int kudroid_get_soft_input_ime_options(void) { return s_softInputImeOptions.load(); }
 
 extern "C" void kudroid_set_soft_input_visible(int visible) {
     const int v = visible != 0 ? 1 : 0;
@@ -511,6 +550,39 @@ extern "C" int kudroid_has_crashed(void) {
 extern "C" void kudroid_clear_crash_state(void) {
     g_hasCrashed.store(false);
     g_lastCrashTail[0] = '\0';
+}
+
+// Runs on a detached thread: DESTROY executes Java and must not stall the caller.
+static void* stop_app_teardown(void* arg) {
+    const bool crashed = arg != nullptr;
+    if (!crashed) {
+        // PAUSE first: the player loop must stop rendering before DESTROY runs
+        // nativeDone, or teardown races in-flight frames on a torn surface.
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(300);
+        const unsigned long long pausedBefore = kudroid_paused_generation();
+        kuart_send_lifecycle_event(101);  // PAUSE_ACTIVITY
+        // PAUSE acknowledgement and frame drain share one bounded budget.
+        while (kudroid_paused_generation() == pausedBefore &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        // Drain frames already inside nativeRender using only remaining time.
+        while (kudroid::native_frame_in_flight() > 0 &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    } else {
+        // The player loop is already gone (no frame has been presented for seconds
+        // when the fault lands), so a pause handshake only adds delay. Go straight to
+        // DESTROY: onDestroy is what quits the looper, and it is the one step teardown
+        // cannot skip.
+        fprintf(stderr,
+                "[KuDroidCore] crash teardown: skipping the pause handshake "
+                "(engine already stopped presenting)\n");
+    }
+    kuart_send_lifecycle_event(103);  // DESTROY_ACTIVITY
+    return nullptr;
 }
 
 extern "C" void kudroid_stop_app(void) {
@@ -547,35 +619,15 @@ extern "C" void kudroid_stop_app(void) {
     // post DESTROY, and a second post races the first's onDestroy->nativeDone,
     // destroying an engine that is already half destroyed.
     kudroid_log_signal_disposition("stop-app");
-    std::thread([crashed] {
-        if (!crashed) {
-            // PAUSE first: the player loop must stop rendering before DESTROY runs
-            // nativeDone, or teardown races in-flight frames on a torn surface.
-            const auto deadline = std::chrono::steady_clock::now() +
-                                  std::chrono::milliseconds(300);
-            const unsigned long long pausedBefore = kudroid_paused_generation();
-            kuart_send_lifecycle_event(101);  // PAUSE_ACTIVITY
-            // PAUSE acknowledgement and frame drain share one bounded budget.
-            while (kudroid_paused_generation() == pausedBefore &&
-                   std::chrono::steady_clock::now() < deadline) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-            // Drain frames already inside nativeRender using only remaining time.
-            while (kudroid::native_frame_in_flight() > 0 &&
-                   std::chrono::steady_clock::now() < deadline) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            }
-        } else {
-            // The player loop is already gone (no frame has been presented for seconds
-            // when the fault lands), so a pause handshake only adds delay. Go straight to
-            // DESTROY: onDestroy is what quits the looper, and it is the one step teardown
-            // cannot skip.
-            fprintf(stderr,
-                    "[KuDroidCore] crash teardown: skipping the pause handshake "
-                    "(engine already stopped presenting)\n");
-        }
-        kuart_send_lifecycle_event(103);  // DESTROY_ACTIVITY
-    }).detach();
+    // Created detached: a later detach() on an already-finished thread fails, and the
+    // std::thread wrapper then terminates the process from its destructor.
+    pthread_attr_t attr;
+    if (pthread_attr_init(&attr) != 0) return;
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pthread_t tid;
+    pthread_create(&tid, &attr, stop_app_teardown,
+                   reinterpret_cast<void*>(static_cast<uintptr_t>(crashed ? 1 : 0)));
+    pthread_attr_destroy(&attr);
 }
 
 extern "C" const char* kudroid_get_last_crash_tail(void) {
@@ -589,30 +641,101 @@ extern "C" const char* kudroid_get_last_crash_tail(void) {
 // ─────────────────────────────────────────────────────────────────────────────
 static kudroid_permission_prompt_cb g_permission_prompt_cb = nullptr;
 
+// Package of the request in flight; the response carries no package of its own.
+static std::mutex s_permissionMutex;
+static std::string s_permissionPackage;
+
+// Host authorization per sensor: 0 = not determined, 1 = authorized, 2 = denied.
+static constexpr int kHostAuthKinds = 2;
+static std::atomic<int> s_hostAuthorization[kHostAuthKinds] = {};
+
+static constexpr const char* kPermRecordAudio = "android.permission.RECORD_AUDIO";
+static constexpr const char* kPermCamera = "android.permission.CAMERA";
+
+// Host sensor a permission is gated on, or -1 when the permission is not host gated.
+static int host_auth_kind(const std::string& permission) {
+    if (permission == kPermRecordAudio) return 0;
+    if (permission == kPermCamera) return 1;
+    return -1;
+}
+
+static std::vector<std::string> split_permissions(const char* csv) {
+    std::vector<std::string> perms;
+    if (csv == nullptr) return perms;
+    std::istringstream stream(csv);
+    std::string token;
+    while (std::getline(stream, token, ',')) {
+        if (!token.empty()) perms.push_back(token);
+    }
+    return perms;
+}
+
+extern "C" void kudroid_set_host_authorization(int kind, int status) {
+    if (kind < 0 || kind >= kHostAuthKinds) return;
+    s_hostAuthorization[kind].store(status);
+}
+
+extern "C" int kudroid_get_host_authorization(int kind) {
+    if (kind < 0 || kind >= kHostAuthKinds) return 0;
+    return s_hostAuthorization[kind].load();
+}
+
+extern "C" int kudroid_runtime_permission_granted(const char* packageName, const char* permission) {
+    if (permission == nullptr) return 0;
+    const int kind = host_auth_kind(permission);
+    if (kind < 0) return 1;
+    if (s_hostAuthorization[kind].load() != 1) return 0;
+    return kudroid::PermissionManager::getInstance().checkPermission(
+               packageName != nullptr ? packageName : "", permission) ==
+                   kudroid::PERMISSION_GRANTED
+               ? 1 : 0;
+}
+
 extern "C" void kudroid_set_permission_prompt_callback(kudroid_permission_prompt_cb cb) {
     g_permission_prompt_cb = cb;
 }
 
 extern "C" void kudroid_prompt_permission_request(const char* packageName, const char* permissionsCsv, int requestCode, void* activityHandle) {
-    if (g_permission_prompt_cb != nullptr) {
-        g_permission_prompt_cb(packageName, permissionsCsv, requestCode, activityHandle);
-    } else {
-        kudroid_submit_permission_response(activityHandle, requestCode, permissionsCsv, 1);
+    const std::string pkg = packageName != nullptr ? packageName : "";
+    {
+        std::lock_guard<std::mutex> lock(s_permissionMutex);
+        s_permissionPackage = pkg;
     }
+    // Android shows nothing for a request whose permissions are all held already.
+    bool allGranted = true;
+    for (const std::string& perm : split_permissions(permissionsCsv)) {
+        if (!kudroid_runtime_permission_granted(pkg.c_str(), perm.c_str())) allGranted = false;
+    }
+    if (allGranted || g_permission_prompt_cb == nullptr) {
+        kudroid_submit_permission_response(activityHandle, requestCode, permissionsCsv, 1);
+        return;
+    }
+    g_permission_prompt_cb(packageName, permissionsCsv, requestCode, activityHandle);
 }
 
-extern "C" void kudroid_submit_permission_response(void* activityHandle, int requestCode, const char* permissionsCsv, int granted) {
-    if (activityHandle == nullptr || permissionsCsv == nullptr) return;
-    std::string csv = permissionsCsv;
-    std::vector<std::string> perms;
-    std::string token;
-    std::istringstream tokenStream(csv);
-    while (std::getline(tokenStream, token, ',')) {
-        if (!token.empty()) perms.push_back(token);
-    }
+// `granted` is the user's answer. The result reported for each permission is what the
+// app can actually use afterwards, so a sensor the host refused reads as denied.
+extern "C" void kudroid_submit_permission_response(void* /*activityHandle*/, int requestCode, const char* permissionsCsv, int granted) {
+    const std::vector<std::string> perms = split_permissions(permissionsCsv);
     if (perms.empty()) return;
 
-    // Log permission grant result
-    std::fprintf(stderr, "[PermissionManager] Permission response for request %d (%zu perms): %s\n",
-                 requestCode, perms.size(), granted ? "GRANTED" : "DENIED");
+    std::string pkg;
+    {
+        std::lock_guard<std::mutex> lock(s_permissionMutex);
+        pkg = s_permissionPackage;
+    }
+    std::string permsCsv;
+    std::string resultsCsv;
+    for (size_t i = 0; i < perms.size(); ++i) {
+        if (host_auth_kind(perms[i]) >= 0) {
+            kudroid::PermissionManager::getInstance().setPermission(pkg, perms[i], granted != 0);
+        }
+        const bool ok = kudroid_runtime_permission_granted(pkg.c_str(), perms[i].c_str()) != 0;
+        if (i > 0) { permsCsv += ','; resultsCsv += ','; }
+        permsCsv += perms[i];
+        resultsCsv += ok ? "0" : "-1";
+    }
+    std::fprintf(stderr, "[PermissionManager] request %d: %s -> %s\n", requestCode,
+                 permsCsv.c_str(), resultsCsv.c_str());
+    kuart_dispatch_permission_result(requestCode, permsCsv.c_str(), resultsCsv.c_str());
 }

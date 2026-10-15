@@ -1026,7 +1026,7 @@ static void test_sem_timedwait_deadline() {
     past.tv_sec -= 1;
     errno = 0;
     const auto t0 = std::chrono::steady_clock::now();
-    CHECK(bionic_sem_timedwait(&sem, &past) == -1 && errno == ETIMEDOUT,
+    CHECK(bionic_sem_timedwait(&sem, &past) == -1 && errno == 110 /* guest ETIMEDOUT */,
           "an already-expired deadline reports ETIMEDOUT");
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                              std::chrono::steady_clock::now() - t0).count();
@@ -1044,7 +1044,7 @@ static void test_sem_timedwait_deadline() {
     if (soon.tv_nsec >= 1000000000) { soon.tv_sec += 1; soon.tv_nsec -= 1000000000; }
     errno = 0;
     const auto t1 = std::chrono::steady_clock::now();
-    CHECK(bionic_sem_timedwait(&sem, &soon) == -1 && errno == ETIMEDOUT,
+    CHECK(bionic_sem_timedwait(&sem, &soon) == -1 && errno == 110 /* guest ETIMEDOUT */,
           "a future deadline on an empty semaphore times out");
     const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::steady_clock::now() - t1).count();
@@ -1976,6 +1976,68 @@ static void test_fortify_wrappers_clamp_to_the_declared_bound() {
     }
 }
 
+// bionic's timeval carries 64-bit fields. The host's microseconds field is 32 bits, so
+// a host gettimeofday left the upper half of the guest's tv_usec as stack garbage; a
+// caller reading it as 64 bits saw time shifted by multiples of 4295 seconds.
+extern "C" int bionic_gettimeofday(void* tv, void* tz);
+extern "C" int bionic_clock_getres(int clock_id, struct timespec* res);
+static void test_gettimeofday_fills_both_64_bit_fields() {
+    std::printf("[time] gettimeofday writes full 64-bit seconds and microseconds\n");
+    int64_t buf[2] = {0x7777777777777777ll, 0x7777777777777777ll};  // poisoned
+    CHECK(bionic_gettimeofday(buf, nullptr) == 0, "the call succeeds");
+    CHECK(buf[1] >= 0 && buf[1] < 1000000, "tv_usec is a real microsecond count, no stale upper half");
+    CHECK(buf[0] > 1600000000ll && buf[0] < 4000000000ll, "tv_sec is a plausible epoch time");
+    int32_t zone[2] = {0x5555, 0x5555};
+    CHECK(bionic_gettimeofday(buf, zone) == 0 && zone[0] == 0 && zone[1] == 0,
+          "the obsolete timezone argument is filled, not left uninitialised");
+    CHECK(bionic_gettimeofday(nullptr, nullptr) == 0, "a null timeval is accepted");
+
+    struct timespec res{};
+    CHECK(bionic_clock_getres(1 /* CLOCK_MONOTONIC */, &res) == 0,
+          "clock_getres succeeds for the guest's CLOCK_MONOTONIC id");
+    CHECK(res.tv_sec == 0 && res.tv_nsec > 0, "and reports a non-zero resolution");
+}
+
+// Linux MADV_DONTNEED hands back zero pages; allocators decommit with it and recommit
+// expecting zeros. Darwin's version keeps the data, so the shim has to supply the zeroes.
+static void test_madvise_dontneed_zero_fills() {
+    std::printf("[madvise] DONTNEED discards private anonymous pages\n");
+    constexpr size_t kLen = 4u << 20;
+    void* region = bionic_mmap(nullptr, kLen, 0x3 /* RW */, 0x22 /* PRIVATE|ANON */, -1, 0);
+    CHECK(region != MAP_FAILED, "anonymous region maps");
+    if (region == MAP_FAILED) return;
+    unsigned char* bytes = static_cast<unsigned char*>(region);
+    std::memset(bytes, 0xAB, kLen);
+
+    // Interior of the range, whole host pages at both ends.
+    const size_t host_page = static_cast<size_t>(::sysconf(_SC_PAGESIZE));
+    const size_t kOffset = 2 * host_page;
+    const size_t kSpan = kLen - 4 * host_page;
+    CHECK(bionic_madvise(bytes + kOffset, kSpan, 4 /* Linux MADV_DONTNEED */) == 0,
+          "madvise(DONTNEED) succeeds");
+    bool zeroed = true;
+    for (size_t i = kOffset; i < kOffset + kSpan; ++i) {
+        if (bytes[i] != 0) { zeroed = false; break; }
+    }
+    CHECK(zeroed, "the discarded range reads back as zeros");
+    CHECK(bytes[0] == 0xAB && bytes[kOffset - 1] == 0xAB,
+          "bytes before the range are untouched");
+    CHECK(bytes[kOffset + kSpan] == 0xAB && bytes[kLen - 1] == 0xAB,
+          "bytes after the range are untouched");
+
+    // Decommit then recommit, the way a virtual allocator does.
+    std::memset(bytes, 0xCD, kLen);
+    CHECK(bionic_mprotect(bytes, kLen, 0) == 0, "range decommitted");
+    CHECK(bionic_madvise(bytes, kLen, 4) == 0, "DONTNEED on the PROT_NONE range succeeds");
+    CHECK(bionic_mprotect(bytes, kLen, 0x3) == 0, "range recommitted");
+    bool clean = true;
+    for (size_t i = 0; i < kLen; i += 4096) {
+        if (bytes[i] != 0) { clean = false; break; }
+    }
+    CHECK(clean, "recommitted pages carry no stale data");
+    bionic_munmap(region, kLen);
+}
+
 int main() {
     std::printf("=== SyscallShim host tests ===\n");
     test_bionic_getifaddrs();
@@ -2028,6 +2090,8 @@ int main() {
     test_guest_sigset_operations_use_linux_bit_positions();
     test_mmap_file_backed_subpage_offset();
     test_fortify_wrappers_clamp_to_the_declared_bound();
+    test_madvise_dontneed_zero_fills();
+    test_gettimeofday_fills_both_64_bit_fields();
     std::printf("=== %d checks, %d failures ===\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

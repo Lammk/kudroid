@@ -211,8 +211,15 @@ public:
     // Android calls JNI_OnLoad per loadLibrary, so the runner must try all exporting libs.
     std::vector<std::pair<std::string, void*>> resolveAllSymbols(const char* name) const;
     void* resolveSymbolInLib(const std::string& libPattern, const char* name) const;
-    [[nodiscard]] const std::unordered_map<std::string, std::unique_ptr<ElfLoader>>& libraries() const {
-        return libraries_;
+    // A snapshot, not a view: a guest dlopen from JNI_OnLoad inserts into libraries_
+    // while callers are still walking it, and a rehash under a live iterator is
+    // undefined behaviour. The loaders themselves are never destroyed while loaded.
+    [[nodiscard]] std::vector<std::pair<std::string, ElfLoader*>> libraries() const {
+        std::lock_guard<std::recursive_mutex> lock(mtx_);
+        std::vector<std::pair<std::string, ElfLoader*>> out;
+        out.reserve(libraries_.size());
+        for (const auto& entry : libraries_) out.emplace_back(entry.first, entry.second.get());
+        return out;
     }
     [[nodiscard]] const std::string& lastError() const { return lastError_; }
 

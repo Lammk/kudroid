@@ -61,6 +61,10 @@ class JarURLConnection extends URLConnection {
         return AssetManager.openAssetStream(entry);
     }
 
+    public String getContentType() {
+        return "application/octet-stream";
+    }
+
     public int getContentLength() {
         long len = getContentLengthLong();
         return len > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) len;
