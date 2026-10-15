@@ -1,0 +1,2369 @@
+#include "kudroid/kuart/Interpreter.h"
+
+#include <algorithm>
+#include <atomic>
+#include <cmath>
+#include <cstring>
+#include <limits>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <set>
+#include <tuple>
+
+#include "dex/code_item_accessors-inl.h"
+#include "dex/dex_file_exception_helpers.h"
+#include "dex/dex_instruction.h"
+#include "dex/dex_instruction-inl.h"
+
+#include "kudroid/kuart/DexClassLinker.h"
+#include "kudroid/kuart/DexJniEnv.h"
+#include "kudroid/kuart/LibCore.h"
+#include "kudroid/kuart/VmLock.h"
+#include "kudroid/NativeCallTelemetry.h"
+
+namespace kudroid {
+namespace kuart {
+
+namespace {
+
+using art::Instruction;
+
+// Integer division in Java: INT_MIN / -1 overflows (result not representable)
+// but Java defines return INT_MIN itself, while C++ defines UB. Must block separately.
+// The result is written through unsigned arithmetic: -a is itself UB when a is the
+// minimum, and for b == -1 only a == INT_MIN reaches here with that value.
+int32_t JavaIntDiv(int32_t a, int32_t b) {
+    if (b == -1) return static_cast<int32_t>(0u - static_cast<uint32_t>(a));
+    return a / b;
+}
+int32_t JavaIntRem(int32_t a, int32_t b) {
+    if (b == -1) return 0;
+    return a % b;
+}
+int64_t JavaLongDiv(int64_t a, int64_t b) {
+    if (b == -1) return static_cast<int64_t>(0ull - static_cast<uint64_t>(a));
+    return a / b;
+}
+int64_t JavaLongRem(int64_t a, int64_t b) {
+    if (b == -1) return 0;
+    return a % b;
+}
+
+// Bit shifting in Java only uses the 5 low bits (int) or the low 6 bits (long) of
+// operand; C++ lets the translation amount >= width be UB.
+int32_t JavaShl(int32_t v, int32_t s) { return static_cast<int32_t>(static_cast<uint32_t>(v) << (s & 31)); }
+int32_t JavaShr(int32_t v, int32_t s) { return v >> (s & 31); }
+int32_t JavaUshr(int32_t v, int32_t s) { return static_cast<int32_t>(static_cast<uint32_t>(v) >> (s & 31)); }
+int64_t JavaShlLong(int64_t v, int32_t s) { return static_cast<int64_t>(static_cast<uint64_t>(v) << (s & 63)); }
+int64_t JavaShrLong(int64_t v, int32_t s) { return v >> (s & 63); }
+int64_t JavaUshrLong(int64_t v, int32_t s) { return static_cast<int64_t>(static_cast<uint64_t>(v) >> (s & 63)); }
+
+// float/double -> int/long: Java forces saturate to MIN/MAX and NaN -> 0, but cast
+// of C++ is UB when the value is out of range.
+template <typename Int, typename Float>
+Int JavaFloatToInt(Float f) {
+    if (std::isnan(f)) return 0;
+    constexpr Int kMin = std::numeric_limits<Int>::min();
+    constexpr Int kMax = std::numeric_limits<Int>::max();
+    if (f <= static_cast<Float>(kMin)) return kMin;
+    if (f >= static_cast<Float>(kMax)) return kMax;
+    return static_cast<Int>(f);
+}
+
+// cmpl/cmpg: different results when NaN is present (-1 for cmpl, 1 for cmpg).
+template <typename T>
+int32_t CompareFloat(T a, T b, int32_t nan_result) {
+    if (std::isnan(a) || std::isnan(b)) return nan_result;
+    if (a < b) return -1;
+    if (a > b) return 1;
+    return 0;
+}
+
+template <typename T>
+int32_t CompareLong(T a, T b) {
+    if (a < b) return -1;
+    if (a > b) return 1;
+    return 0;
+}
+
+}  // namespace
+
+// ResolveMethod's stub + missing-log caches. Namespace scope (not
+// function-static) so ClearResolveCaches can drop them on shutdown: they are
+// keyed by DexClass* of the CURRENT heap, and serving them to the next app is
+// a use-after-free of its method table.
+std::map<std::tuple<const DexClass*, std::string, std::string>, std::unique_ptr<DexMethod>>
+    g_stubMethods;
+std::mutex g_stubMethodMtx;
+std::set<std::string> g_loggedMissingMethods;
+
+void ClearResolveCaches() {
+    std::lock_guard<std::mutex> lock(g_stubMethodMtx);
+    g_stubMethods.clear();
+    g_loggedMissingMethods.clear();
+}
+
+thread_local DexObject* Interpreter::pending_exception_ = nullptr;
+thread_local size_t Interpreter::depth_ = 0;
+thread_local uint64_t Interpreter::instructions_executed_ = 0;
+thread_local std::vector<Interpreter::StackSlot> Interpreter::call_stack_;
+thread_local std::string Interpreter::pending_exception_trace_;
+
+namespace {
+
+// "Lcom/foo/Bar;" -> "com.foo.Bar"; leaves anything else untouched.
+std::string DescriptorToDotted(const char* descriptor) {
+    if (descriptor == nullptr) return "?";
+    std::string s(descriptor);
+    if (s.size() > 2 && s.front() == 'L' && s.back() == ';') {
+        s = s.substr(1, s.size() - 2);
+    }
+    std::replace(s.begin(), s.end(), '/', '.');
+    return s;
+}
+
+// Render one frame like Throwable; method comes from the slot, not the frame.
+std::string DescribeFrame(const Interpreter::StackSlot& slot) {
+    const DexMethod* method = slot.method;
+    if (method == nullptr) return "    at <null method>";
+
+    std::string cls = method->declaring_class != nullptr
+                          ? method->declaring_class->PrettyName()
+                          : DescriptorToDotted(nullptr);
+    const char* name = method->name != nullptr ? method->name : "?";
+
+    const uint32_t dex_pc = slot.frame != nullptr ? slot.frame->dex_pc() : 0;
+
+    std::string where;
+    const char* source = nullptr;
+    if (method->dex_file != nullptr && method->declaring_class != nullptr &&
+        method->declaring_class->class_def != nullptr) {
+        source = method->dex_file->GetSourceFile(*method->declaring_class->class_def);
+    }
+
+    uint32_t line = 0;
+    bool have_line = false;
+    if (method->dex_file != nullptr && method->code_item != nullptr) {
+        art::CodeItemDebugInfoAccessor accessor(*method->dex_file, method->code_item,
+                                                method->dex_method_index);
+        have_line = accessor.GetLineNumForPc(dex_pc, &line);
+    }
+
+    if (source != nullptr && have_line) {
+        where = std::string(source) + ":" + std::to_string(line);
+    } else if (source != nullptr) {
+        where = std::string(source) + ":pc=" + std::to_string(dex_pc);
+    } else {
+        where = "pc=" + std::to_string(dex_pc);
+    }
+    return "    at " + cls + "." + name + "(" + where + ")";
+}
+
+}  // namespace
+
+Interpreter::ThreadState Interpreter::CaptureThreadState() {
+    return ThreadState{depth_, call_stack_.size(), VmLockDepth()};
+}
+
+void Interpreter::RestoreThreadState(const ThreadState& state) {
+    if (call_stack_.size() > state.frames) call_stack_.resize(state.frames);
+    if (depth_ > state.depth) depth_ = state.depth;
+    VmLockUnwindTo(state.vm_lock_depth);
+}
+
+std::string Interpreter::BuildStackTrace() const {
+    std::string out;
+    // Innermost frame first, matching the JVM.
+    for (size_t i = call_stack_.size(); i-- > 0;) {
+        out += DescribeFrame(call_stack_[i]);
+        out += '\n';
+    }
+    return out;
+}
+
+std::string Interpreter::DescribePendingException() const {
+    if (pending_exception_ == nullptr) return {};
+    std::string out = pending_exception_->clazz != nullptr
+                          ? pending_exception_->clazz->PrettyName()
+                          : std::string("<unknown exception>");
+    if (!last_error_.empty()) {
+        out += " (";
+        out += last_error_;
+        out += ")";
+    }
+    if (!pending_exception_trace_.empty()) {
+        out += '\n';
+        out += pending_exception_trace_;
+    }
+    return out;
+}
+
+// Innermost Java frame's class; null when called from native with no frame.
+DexClass* Interpreter::CallerClass() const {
+    if (call_stack_.empty()) return nullptr;
+    const DexMethod* method = call_stack_.back().method;
+    return method != nullptr ? method->declaring_class : nullptr;
+}
+
+void Interpreter::ThrowException(const char* descriptor, const std::string& message) {
+    // Old contract: a throw always overwrites (the JVM propagates the NEW
+    // exception and suppresses the old). A preserve-first variant that kept
+    // the old exception hung clinit chains at boot: callers rely on the slot
+    // naming what just fired, and a cleanup throw must not be swallowed.
+    last_error_ = std::string(descriptor) + ": " + message;
+    pending_exception_trace_ = BuildStackTrace();
+
+    // Record only; the owner logs caught vs uncaught later.
+    std::fprintf(stderr, "[KuART][EXCEPTION] %s: %s\n", descriptor, message.c_str());
+
+    DexClass* klass = linker_ != nullptr ? linker_->FindClass(descriptor) : nullptr;
+    if (klass != nullptr) {
+        pending_exception_ = linker_->AllocObject(klass);
+        if (pending_exception_ != nullptr && !message.empty()) {
+            const DexField* f_msg = klass->FindInstanceField("message", "Ljava/lang/String;");
+            if (f_msg != nullptr) {
+                DexObject* msgObj = reinterpret_cast<DexObject*>(linker_->NewString(message.c_str()));
+                pending_exception_->SetField<DexObject*>(f_msg->offset_or_slot, msgObj);
+            }
+        }
+    }
+    if (pending_exception_ == nullptr) {
+        // No class exception in classpath (framework not loaded) -
+        // You still have to stop the method, using an empty object as a flag.
+        static DexObject placeholder;
+        pending_exception_ = &placeholder;
+    }
+}
+
+DexClass* Interpreter::ResolveClass(const DexMethod* context, uint32_t type_idx) {
+    if (context == nullptr || context->dex_file == nullptr || linker_ == nullptr) return nullptr;
+    // Raw dex indices: validate before use (release libdex skips DCHECKs, and
+    // the uint16 truncation below would alias a large index onto an unrelated
+    // type). Malformed dex resolves to null, which every caller already handles.
+    if (type_idx >= context->dex_file->NumTypeIds()) return nullptr;
+    const char* descriptor =
+        context->dex_file->StringByTypeIdx(art::dex::TypeIndex(static_cast<uint16_t>(type_idx)));
+    if (descriptor == nullptr) return nullptr;
+    return linker_->FindClass(descriptor);
+}
+
+DexField* Interpreter::ResolveField(const DexMethod* context, uint32_t field_idx,
+                                    bool is_static) {
+    if (context == nullptr || context->dex_file == nullptr) return nullptr;
+    const art::DexFile& dex_file = *context->dex_file;
+    if (field_idx >= dex_file.NumFieldIds()) return nullptr;
+    const art::dex::FieldId& field_id = dex_file.GetFieldId(field_idx);
+
+    const char* class_descriptor = dex_file.GetFieldDeclaringClassDescriptor(field_id);
+    DexClass* klass = linker_->FindClass(class_descriptor);
+    if (klass == nullptr) return nullptr;
+
+    const char* name = dex_file.GetFieldName(field_id);
+    const char* type = dex_file.GetFieldTypeDescriptor(field_id);
+    DexField* field = is_static ? klass->FindStaticField(name, type)
+                                : klass->FindInstanceField(name, type);
+    if (field == nullptr) {
+        ReportMissingField(klass, name, type, is_static);
+    }
+    return field;
+}
+
+// Report a missing field once; fields cannot be auto-stubbed like methods.
+void Interpreter::ReportMissingField(const DexClass* klass, const char* name,
+                                     const char* type, bool is_static) {
+    if (klass == nullptr) return;
+    const std::string detail = klass->PrettyName() + "." + (name != nullptr ? name : "?") +
+                               " : " + (type != nullptr ? type : "?") +
+                               (is_static ? " (static)" : "");
+
+    static std::mutex s_mtx;
+    static std::set<std::string> s_reported;
+    {
+        std::lock_guard<std::mutex> lock(s_mtx);
+        if (!s_reported.insert(detail).second) return;
+    }
+
+    // Distinguish the two cases, because the fix differs: a stub class needs the
+    // whole class written, while a real class is merely incomplete.
+    const char* kind = klass->is_stub ? "MISSING_FRAMEWORK_CLASS_FIELD"
+                                      : "MISSING_FRAMEWORK_FIELD";
+    std::fprintf(stderr, "[KuART][MISSING-FIELD] ⚠ %s: %s%s\n", kind, detail.c_str(),
+                 klass->is_stub ? " (declaring class is an auto-stub)" : "");
+    DexClassLinker::LogMissingMember(kind, detail);
+}
+
+// Describe a field reference so failures name the field.
+std::string Interpreter::DescribeFieldRef(const DexMethod* context, uint32_t field_idx,
+                                          const char* opcode) const {
+    std::string out = opcode != nullptr ? opcode : "field";
+    if (context == nullptr || context->dex_file == nullptr) return out;
+    const art::DexFile& dex_file = *context->dex_file;
+    const art::dex::FieldId& field_id = dex_file.GetFieldId(field_idx);
+    const char* cls = dex_file.GetFieldDeclaringClassDescriptor(field_id);
+    const char* name = dex_file.GetFieldName(field_id);
+    const char* type = dex_file.GetFieldTypeDescriptor(field_id);
+
+    out += " ";
+    out += DescriptorToDotted(cls);
+    out += ".";
+    out += name != nullptr ? name : "?";
+    out += " : ";
+    out += type != nullptr ? type : "?";
+    return out;
+}
+
+// Describe a method reference so failures name the method.
+std::string Interpreter::DescribeMethodRef(const DexMethod* context,
+                                          uint32_t method_idx) const {
+    if (context == nullptr || context->dex_file == nullptr) {
+        return "method index " + std::to_string(method_idx);
+    }
+    const art::DexFile& dex_file = *context->dex_file;
+    const art::dex::MethodId& method_id = dex_file.GetMethodId(method_idx);
+    const char* cls =
+        dex_file.StringByTypeIdx(art::dex::TypeIndex(method_id.class_idx_.index_));
+    const char* name = dex_file.GetMethodName(method_id);
+    const std::string signature = dex_file.GetMethodSignature(method_id).ToString();
+
+    std::string out = DescriptorToDotted(cls);
+    out += ".";
+    out += name != nullptr ? name : "?";
+    out += signature;
+    return out;
+}
+
+// Log unresolvable methods so stubs can be added.
+void Interpreter::ReportUnresolvableMethod(const DexMethod* context, uint32_t method_idx) {
+    if (context == nullptr || context->dex_file == nullptr) return;
+    const art::DexFile& dex_file = *context->dex_file;
+    const art::dex::MethodId& method_id = dex_file.GetMethodId(method_idx);
+    const char* cls =
+        dex_file.StringByTypeIdx(art::dex::TypeIndex(method_id.class_idx_.index_));
+    const char* name = dex_file.GetMethodName(method_id);
+    const std::string signature = dex_file.GetMethodSignature(method_id).ToString();
+
+    // Note whether the declaring class itself is missing or stubbed.
+    DexClass* klass = linker_ != nullptr ? linker_->FindClass(cls) : nullptr;
+    std::string detail = std::string(cls != nullptr ? cls : "?") + "->" +
+                         (name != nullptr ? name : "?") + signature;
+    if (klass == nullptr) {
+        detail += " (declaring class did not load)";
+    } else if (klass->is_stub) {
+        detail += " (declaring class is an auto-stub)";
+    }
+
+    static std::mutex s_mtx;
+    static std::set<std::string> s_reported;
+    {
+        std::lock_guard<std::mutex> lock(s_mtx);
+        if (!s_reported.insert(detail).second) return;
+    }
+    std::fprintf(stderr, "[KuART][MISSING-METHOD] ⚠ UNRESOLVABLE: %s\n", detail.c_str());
+    DexClassLinker::LogMissingMember("MISSING_FRAMEWORK_METHOD", detail);
+}
+
+bool Interpreter::CheckInstanceField(DexObject* obj, DexField* field, uint32_t width) {
+    if (obj == nullptr || field == nullptr) return false;
+    // A wild clazz pointer kills the process one LDRB later (observed: fault at
+    // IsSubClassOf+0x4c reading obj->clazz->is_primitive, SEGV_ACCERR on a
+    // 0x1004xxxxx pointer with no mapping). Report it and fail the access so the
+    // interpreter unwinds instead of faulting in KuDroid's own text.
+    const DexClass* clazz = obj->clazz;
+    if (clazz != nullptr && linker_ != nullptr &&
+        !linker_->IsRegisteredClass(reinterpret_cast<const DexClass*>(clazz))) {
+        static std::mutex s_wild_mtx;
+        static std::set<std::string> s_wild_reported;
+        {
+            std::lock_guard<std::mutex> lock(s_wild_mtx);
+            const std::string key = "wild-clazz-0x" +
+                std::to_string(reinterpret_cast<uintptr_t>(clazz));
+            if (s_wild_reported.insert(key).second) {
+                std::fprintf(stderr,
+                             "[KuART][FIELD] wild clazz pointer %p on object %p "
+                             "(not in live_classes_)\n",
+                             reinterpret_cast<const void*>(clazz),
+                             reinterpret_cast<const void*>(obj));
+            }
+        }
+        ThrowException("Ljava/lang/NoSuchFieldError;", "object header corrupt");
+        return false;
+    }
+    if (clazz == nullptr || field->declaring_class == nullptr ||
+        !clazz->IsSubClassOf(field->declaring_class)) {
+        // Log once, do not throw: hierarchy bookkeeping (stub classes,
+        // unlinked superclasses during early linking) made legitimate boot
+        // accesses mismatch, and the NoSuchFieldError killed the init thread.
+        static std::mutex s_mtx;
+        static std::set<std::string> s_reported;
+        std::lock_guard<std::mutex> lock(s_mtx);
+        const std::string key = std::string(clazz && clazz->descriptor ? clazz->descriptor : "?") +
+                                "." + (field->name != nullptr ? field->name : "?");
+        if (s_reported.insert(key).second && clazz != nullptr && field->declaring_class != nullptr) {
+            std::fprintf(stderr,
+                         "[KuART][FIELD] offset check relaxed: %s not subclass of %s\n",
+                         clazz->descriptor ? clazz->descriptor : "?",
+                         field->declaring_class->descriptor ? field->declaring_class->descriptor : "?");
+        }
+        return true;
+    }
+    // object_size==0 means the layout was never computed (synthetic/test
+    // classes): nothing to check against, so trust the offset. A computed
+    // layout with an out-of-range offset is a hard error.
+    if (clazz->object_size != 0) {
+        const uint64_t end = static_cast<uint64_t>(field->offset_or_slot) + width;
+        if (end > clazz->object_size) {
+            ThrowException("Ljava/lang/NoSuchFieldError;", "field offset out of object");
+            return false;
+        }
+    }
+    return true;
+}
+
+DexMethod* Interpreter::ResolveMethod(const DexMethod* context, uint32_t method_idx) {    if (context == nullptr || context->dex_file == nullptr) return nullptr;
+    const art::DexFile& dex_file = *context->dex_file;
+    if (method_idx >= dex_file.NumMethodIds()) return nullptr;
+    const art::dex::MethodId& method_id = dex_file.GetMethodId(method_idx);
+
+    const char* class_descriptor =
+        dex_file.StringByTypeIdx(art::dex::TypeIndex(method_id.class_idx_.index_));
+    DexClass* klass = linker_->FindClass(class_descriptor);
+    if (klass == nullptr) return nullptr;
+
+    const char* name = dex_file.GetMethodName(method_id);
+    const std::string signature = dex_file.GetMethodSignature(method_id).ToString();
+
+    if (DexMethod* m = klass->FindDirectMethod(name, signature.c_str())) return m;
+    if (DexMethod* m = klass->FindVirtualMethod(name, signature.c_str())) return m;
+
+    auto isBootClasspathDescriptor = [](const char* desc) -> bool {
+        if (!desc || desc[0] != 'L') return false;
+        return (std::strncmp(desc, "Landroid/", 9) == 0 ||
+                std::strncmp(desc, "Landroidx/", 10) == 0 ||
+                std::strncmp(desc, "Ljava/", 6) == 0 ||
+                std::strncmp(desc, "Ljavax/", 7) == 0 ||
+                std::strncmp(desc, "Ldalvik/", 8) == 0 ||
+                std::strncmp(desc, "Lsun/", 5) == 0 ||
+                std::strncmp(desc, "Llibcore/", 9) == 0 ||
+                std::strncmp(desc, "Lcom/android/", 13) == 0 ||
+                std::strncmp(desc, "Lorg/apache/harmony/", 20) == 0 ||
+                std::strncmp(desc, "Lorg/w3c/dom/", 13) == 0 ||
+                std::strncmp(desc, "Lorg/xml/sax/", 13) == 0 ||
+                std::strncmp(desc, "Lorg/xmlpull/", 13) == 0 ||
+                std::strncmp(desc, "Lorg/json/", 10) == 0);
+    };
+
+    if (klass->dex_file == nullptr || isBootClasspathDescriptor(class_descriptor)) {
+        std::lock_guard<std::mutex> lock(g_stubMethodMtx);
+
+        std::string methodKey = std::string(class_descriptor) + "->" + name + signature;
+        if (g_loggedMissingMethods.insert(methodKey).second) {
+            std::fprintf(stderr, "[KuART][MISSING-METHOD] Auto-stubbing missing framework method: %s (dex index %u)\n",
+                         methodKey.c_str(), method_idx);
+        }
+
+        auto key = std::make_tuple(klass, std::string(name), signature);
+        auto it = g_stubMethods.find(key);
+        if (it != g_stubMethods.end()) return it->second.get();
+
+        auto stubM = std::make_unique<DexMethod>();
+        stubM->name = name;
+        // Signature must be recorded; null matches any overload by name.
+        stubM->signature = linker_->heap().InternString(signature.c_str());
+        stubM->declaring_class = klass;
+        stubM->access_flags = art::kAccPublic;
+        stubM->code_item = nullptr;
+        DexMethod* res = stubM.get();
+        g_stubMethods.emplace(std::move(key), std::move(stubM));
+        return res;
+    }
+    return nullptr;
+}
+
+// Forward proxy calls to the InvocationHandler; reachable from both invoke sites.
+bool Interpreter::InvokeProxyMethod(DexObject* proxy, DexMethod* method,
+                                    const DexValue* args, size_t num_args,
+                                    DexValue* out) {
+    if (linker_ == nullptr || proxy == nullptr || method == nullptr) return false;
+
+    DexObject* handler = LibCoreGetRefField(proxy, "h",
+                                           "Ljava/lang/reflect/InvocationHandler;");
+    if (handler == nullptr) {
+        ThrowException("Ljava/lang/NullPointerException;",
+                       "proxy has no InvocationHandler");
+        return true;
+    }
+
+    DexClass* handler_class = linker_->ClassOfObject(handler);
+    if (handler_class == nullptr) {
+        ThrowException("Ljava/lang/IllegalStateException;",
+                       "proxy handler is not a usable object");
+        return true;
+    }
+    DexMethod* invoke = handler_class->FindVirtualMethod(
+        "invoke",
+        "(Ljava/lang/Object;Ljava/lang/reflect/Method;[Ljava/lang/Object;)Ljava/lang/Object;");
+    if (invoke == nullptr) {
+        ThrowException("Ljava/lang/AbstractMethodError;",
+                       handler_class->PrettyName() + " does not implement InvocationHandler.invoke");
+        return true;
+    }
+
+    // A real java.lang.reflect.Method for the interface method being proxied. Passing
+    // null here would be simpler but breaks the common handler shape, which switches
+    // on method.getName() and inspects getParameterTypes().
+    DexObject* method_object = LibCoreNewMethodObject(linker_, method);
+
+    // Arguments arrive with the receiver at index 0 for an instance method; the
+    // handler expects only the declared parameters, each boxed.
+    const size_t first = method->IsStatic() ? 0 : 1;
+    std::vector<DexObject*> boxed;
+    const std::vector<std::string> params = LibCoreSplitParams(method->signature);
+    boxed.reserve(params.size());
+    size_t arg_index = first;
+    for (const std::string& param : params) {
+        if (arg_index >= num_args) break;
+        boxed.push_back(LibCoreBoxValue(this, param.c_str(), args[arg_index]));
+        // A long or double occupies two DexValue slots in the incoming array.
+        arg_index += (param == "J" || param == "D") ? 2 : 1;
+    }
+
+    DexArray* arg_array = LibCoreNewRefArray(linker_, "[Ljava/lang/Object;", boxed);
+
+    DexValue call_args[4];
+    call_args[0] = DexValue::Ref(handler);
+    call_args[1] = DexValue::Ref(proxy);
+    call_args[2] = DexValue::Ref(method_object);
+    call_args[3] = DexValue::Ref(reinterpret_cast<DexObject*>(arg_array));
+
+    const DexValue boxed_result = Execute(invoke, call_args, 4);
+    if (HasPendingException()) return true;
+
+    // Unbox to return type; null for primitives yields zero, not failure.
+    const char* ret = method->signature != nullptr ? std::strchr(method->signature, ')') : nullptr;
+    if (ret != nullptr) ++ret;
+    if (ret == nullptr || ret[0] == 'V') {
+        *out = DexValue();
+        return true;
+    }
+    if (ret[0] == 'L' || ret[0] == '[') {
+        *out = DexValue::Ref(boxed_result.l);
+        return true;
+    }
+    DexValue unboxed;
+    if (!LibCoreUnboxValue(this, ret, boxed_result.l, &unboxed)) {
+        unboxed = DexValue();
+    }
+    *out = unboxed;
+    return true;
+}
+
+bool Interpreter::InvokeMethod(DexFrame* frame, const art::Instruction* inst, bool is_range,
+                              Instruction::Code opcode) {
+    const uint32_t method_idx = is_range ? inst->VRegB_3rc() : inst->VRegB_35c();
+    DexMethod* target = ResolveMethod(frame->method(), method_idx);
+    if (target == nullptr) {
+        // Name the method; a raw DEX index alone cannot be acted on.
+        ReportUnresolvableMethod(frame->method(), method_idx);
+        ThrowException("Ljava/lang/NoSuchMethodError;",
+                       DescribeMethodRef(frame->method(), method_idx));
+        return false;
+    }
+
+    // Collect register containing parameters. The /range form uses a continuous range, the normal form
+    // Use a list of up to 5 discrete registers.
+    uint32_t arg_regs[art::Instruction::kMaxVarArgRegs];
+    uint32_t arg_count;
+    uint32_t first_reg = 0;
+    if (is_range) {
+        arg_count = inst->VRegA_3rc();
+        first_reg = inst->VRegC_3rc();
+    } else {
+        arg_count = inst->GetVarArgs(arg_regs);
+    }
+
+    const bool is_static = opcode == Instruction::INVOKE_STATIC ||
+                           opcode == Instruction::INVOKE_STATIC_RANGE;
+
+    // Static call triggers class initialization.
+    if (is_static) {
+        EnsureInitialized(target->declaring_class);
+        if (HasPendingException()) return false;
+    }
+
+    // Wide values use two slots but one register; skip the second slot.
+    const char* shorty = nullptr;
+    if (target->dex_file != nullptr) {
+        shorty = target->dex_file->GetMethodShorty(
+            target->dex_file->GetMethodId(target->dex_method_index));
+    }
+
+    std::vector<DexValue> args;
+    args.reserve(arg_count);
+
+    uint32_t slot = 0;
+    const auto reg_at = [&](uint32_t i) {
+        return is_range ? first_reg + i : arg_regs[i];
+    };
+
+    DexObject* receiver = nullptr;
+    if (!is_static) {
+        if (arg_count == 0) {
+            ThrowException("Ljava/lang/VerifyError;", "invoke instance missing receiver");
+            return false;
+        }
+        receiver = frame->GetRef(reg_at(0));
+        if (receiver == nullptr) {
+            ThrowException("Ljava/lang/NullPointerException;",
+                           std::string("call ") + target->name + " on null");
+            return false;
+        }
+        args.push_back(DexValue::Ref(receiver));
+        slot = 1;
+    }
+
+    if (shorty != nullptr) {
+        for (const char* p = shorty + 1; *p != '\0' && slot < arg_count; ++p) {
+            args.push_back(frame->Get(reg_at(slot)));
+            slot += (*p == 'J' || *p == 'D') ? 2 : 1;
+        }
+    }
+
+    // Dispatch virtually on the validated receiver class.
+    if (opcode == Instruction::INVOKE_VIRTUAL ||
+        opcode == Instruction::INVOKE_VIRTUAL_RANGE ||
+        opcode == Instruction::INVOKE_INTERFACE ||
+        opcode == Instruction::INVOKE_INTERFACE_RANGE) {
+        DexClass* receiver_class =
+            linker_ != nullptr ? linker_->ClassOfObject(receiver) : nullptr;
+        if (receiver_class != nullptr) {
+            DexMethod* resolved =
+                receiver_class->FindVirtualMethod(target->name, target->signature);
+            if (resolved != nullptr) {
+                target = resolved;
+            } else if (target->declaring_class != nullptr &&
+                       receiver_class->IsSubClassOf(target->declaring_class)) {
+                // Target is declared on an implemented interface or base class; keep target.
+            } else if (!receiver_class->is_proxy) {
+                std::string detail = "invoke ";
+                if (target->declaring_class != nullptr) {
+                    detail += target->declaring_class->PrettyName();
+                    detail += ".";
+                }
+                detail += target->name != nullptr ? target->name : "?";
+                if (target->signature != nullptr) detail += target->signature;
+                detail += " — receiver class ";
+                detail += receiver_class->descriptor != nullptr ? receiver_class->descriptor : "?";
+                detail += " does not implement method";
+                ThrowException("Ljava/lang/IncompatibleClassChangeError;", detail);
+                return false;
+            }
+        } else if (receiver != nullptr) {
+            // Name both the method and the bad receiver for diagnosis.
+            std::string detail = "invoke ";
+            if (target->declaring_class != nullptr) {
+                detail += target->declaring_class->PrettyName();
+                detail += ".";
+            }
+            detail += target->name != nullptr ? target->name : "?";
+            if (target->signature != nullptr) detail += target->signature;
+            detail += " — ";
+            detail += linker_->DescribeBadReceiver(receiver);
+            ThrowException("Ljava/lang/IllegalStateException;", detail);
+            return false;
+        }
+    }
+
+    if (target->IsNative()) {
+        // Libcore natives run directly in C++, bypassing the JNI ABI.
+        DexValue lib_result;
+        if (LibCoreInvoke(this, target, args.data(), args.size(), &lib_result)) {
+            if (HasPendingException()) return false;
+            frame->set_result(lib_result);
+            return true;
+        }
+        if (jni_env_ == nullptr || !jni_env_->LinkNativeMethod(target)) {
+            ThrowException("Ljava/lang/UnsatisfiedLinkError;",
+                           std::string("unbound native method: ") + target->name);
+            return false;
+        }
+        const DexValue native_result = jni_env_->CallNative(target, args.data(), args.size());
+        if (HasPendingException()) return false;
+        frame->set_result(native_result);
+        return true;
+    }
+
+    const DexValue result = Execute(target, args.data(), args.size());
+    if (HasPendingException()) return false;
+    frame->set_result(result);
+    return true;
+}
+
+// filled-new-array writes frame result, like an invoke, for move-result.
+bool Interpreter::FilledNewArray(DexFrame* frame, const art::Instruction* inst, bool is_range) {
+    const DexMethod* method = frame->method();
+
+    // VRegB is the ARRAY type ("[I"), not the element type - take component_type
+    // from the resolved class rather than slicing the descriptor, so that
+    // multi-dimensional arrays ("[[I") stay correct.
+    const uint32_t type_idx = is_range ? inst->VRegB_3rc() : inst->VRegB_35c();
+    DexClass* array_class = ResolveClass(method, type_idx);
+    if (array_class == nullptr || !array_class->is_array) {
+        ThrowException("Ljava/lang/ClassNotFoundException;", "filled-new-array type");
+        return false;
+    }
+
+    uint32_t arg_regs[art::Instruction::kMaxVarArgRegs];
+    uint32_t count;
+    uint32_t first_reg = 0;
+    if (is_range) {
+        count = inst->VRegA_3rc();
+        first_reg = inst->VRegC_3rc();
+    } else {
+        count = inst->GetVarArgs(arg_regs);
+    }
+
+    DexArray* arr = linker_->AllocArray(array_class, static_cast<int32_t>(count));
+    if (arr == nullptr) {
+        ThrowException("Ljava/lang/OutOfMemoryError;", "filled-new-array");
+        return false;
+    }
+
+    // Element width follows component_type, matching DexClassLinker::ElementSize
+    // used by AllocArray - writing a wider type here would run past the allocation.
+    const DexClass* component = array_class->component_type;
+    const char kind = (component != nullptr && component->is_primitive &&
+                       component->descriptor != nullptr)
+                          ? component->descriptor[0]
+                          : 'L';
+
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint32_t vreg = is_range ? first_reg + i : arg_regs[i];
+        const int32_t index = static_cast<int32_t>(i);
+        switch (kind) {
+            case 'Z':
+            case 'B':
+                arr->Set<int8_t>(index, static_cast<int8_t>(frame->GetInt(vreg)));
+                break;
+            case 'C':
+                arr->Set<uint16_t>(index, static_cast<uint16_t>(frame->GetInt(vreg)));
+                break;
+            case 'S':
+                arr->Set<int16_t>(index, static_cast<int16_t>(frame->GetInt(vreg)));
+                break;
+            case 'J':
+            case 'D':
+                // Wide elements: each argument register holds the whole 64-bit
+                // value (KuART's one-slot-per-vreg convention), so no pairing.
+                arr->Set<int64_t>(index, frame->GetLong(vreg));
+                break;
+            case 'I':
+            case 'F':
+                arr->Set<int32_t>(index, frame->GetInt(vreg));
+                break;
+            default:
+                arr->Set<DexObject*>(index, frame->GetRef(vreg));
+                break;
+        }
+    }
+
+    frame->set_result(DexValue::Ref(arr));
+    return true;
+}
+
+DexValue Interpreter::Execute(const DexMethod* method, const DexValue* args, size_t num_args) {
+    // Report uncaught exceptions on exit when no Java frame caught them.
+    struct UncaughtReporter {
+        Interpreter* self;
+        ~UncaughtReporter() {
+            if (self->depth_ == 0) self->ReportUncaughtException();
+        }
+    } uncaught_reporter{this};
+
+    DexValue result;
+    if (method == nullptr) {
+        ThrowException("Ljava/lang/NullPointerException;", "method null");
+        return result;
+    }
+    if (depth_ >= kMaxCallDepth) {
+        ThrowException("Ljava/lang/StackOverflowError;", "maximum call depth exceeded");
+        return result;
+    }
+
+    // Native methods have no bytecode; handle before the code check.
+    if (method->IsNative()) {
+        auto* target = const_cast<DexMethod*>(method);
+        if (LibCoreInvoke(this, target, args, num_args, &result)) {
+            if (HasPendingException()) return DexValue();
+            return result;
+        }
+        if (jni_env_ != nullptr && jni_env_->LinkNativeMethod(target)) {
+            const DexValue native_result = jni_env_->CallNative(target, args, num_args);
+            if (HasPendingException()) return DexValue();
+            return native_result;
+        }
+        ThrowException("Ljava/lang/UnsatisfiedLinkError;",
+                       std::string("unbound native method: ") +
+                           (method->name != nullptr ? method->name : "?"));
+        return result;
+    }
+
+    if (method->code_item == nullptr) {
+        // Proxy calls go to the handler; check before stub handling.
+        if (!method->IsStatic() && num_args > 0 && linker_ != nullptr) {
+            DexObject* receiver = args[0].l;
+            DexClass* receiver_class = linker_->ClassOfObject(receiver);
+            if (receiver_class != nullptr && receiver_class->is_proxy) {
+                DexValue proxy_result;
+                if (InvokeProxyMethod(receiver, const_cast<DexMethod*>(method), args,
+                                      num_args, &proxy_result)) {
+                    return proxy_result;
+                }
+            }
+        }
+
+        // Stub methods have no body; report the missing class.
+        if (method->declaring_class != nullptr && method->declaring_class->is_stub) {
+            ThrowException("Ljava/lang/NoClassDefFoundError;",
+                           method->declaring_class->PrettyName() + "." +
+                               (method->name != nullptr ? method->name : "?") +
+                               " (class not implemented in KuDroid framework)");
+            return result;
+        }
+        if (method->dex_file == nullptr || (method->declaring_class != nullptr && method->declaring_class->dex_file == nullptr)) {
+            return result;
+        }
+        ThrowException("Ljava/lang/AbstractMethodError;",
+                       std::string("method without body: ") + (method->name ? method->name : "?"));
+        return result;
+    }
+
+    DexFrame frame(method);
+    const char* shorty = nullptr;
+    if (method->dex_file != nullptr) {
+        shorty = method->dex_file->GetMethodShorty(
+            method->dex_file->GetMethodId(method->dex_method_index));
+    }
+    frame.LoadArguments(args, num_args, shorty, method->IsStatic());
+
+    // Instruction limit is per top-level call, not cumulative.
+    if (depth_ == 0) instructions_executed_ = 0;
+
+    // Serialize bytecode; key on lock held, not call depth, for callbacks.
+    std::unique_ptr<VmLockGuard> vm_lock;
+    if (VmLockDepth() == 0) vm_lock = std::make_unique<VmLockGuard>();
+
+    // Publish frame and depth; unwind by resizing to survive longjmps.
+    struct StackEntry {
+        size_t saved_frames;
+        size_t saved_depth;
+        StackEntry(const DexMethod* m, const DexFrame* f)
+            : saved_frames(call_stack_.size()), saved_depth(depth_) {
+            call_stack_.push_back(StackSlot{m, f});
+            ++depth_;
+        }
+        ~StackEntry() {
+            if (call_stack_.size() > saved_frames) call_stack_.resize(saved_frames);
+            depth_ = saved_depth;
+        }
+    } stack_entry(method, &frame);
+
+    const bool trace_java = kudroid::java_call_should_trace(method->name, depth_ - 1);
+    if (trace_java) {
+        kudroid::java_call_enter(
+            method->declaring_class != nullptr ? method->declaring_class->descriptor : "?",
+            method->name, method->signature, depth_ - 1);
+    }
+    struct JavaTelemetryExit {
+        bool active;
+        explicit JavaTelemetryExit(bool value) : active(value) {}
+        ~JavaTelemetryExit() { if (active) kudroid::java_call_exit(); }
+    } java_telemetry_exit(trace_java);
+    result = ExecuteFrame(&frame);
+    return result;
+}
+
+bool Interpreter::FindCatchHandler(const art::CodeItemDataAccessor& accessor,
+                                   const DexMethod* method, uint32_t dex_pc,
+                                   uint32_t* handler_pc) {
+    if (accessor.TriesSize() == 0 || pending_exception_ == nullptr) return false;
+
+    DexClass* ex_class = pending_exception_->clazz;
+    for (art::CatchHandlerIterator it(accessor, dex_pc); it.HasNext(); it.Next()) {
+        const art::dex::TypeIndex type_idx = it.GetHandlerTypeIndex();
+        // kDexNoIndex16 = catch-all (finally), catches everything.
+        if (type_idx.index_ == art::DexFile::kDexNoIndex16) {
+            *handler_pc = it.GetHandlerAddress();
+            return true;
+        }
+        DexClass* catch_class = ResolveClass(method, type_idx.index_);
+        // If the class handler cannot be loaded, then that handler is ignored and is not considered captured
+        // Yes - otherwise the exception will be thrown in the wrong place.
+        if (catch_class == nullptr) continue;
+        if (ex_class != nullptr && ex_class->IsSubClassOf(catch_class)) {
+            *handler_pc = it.GetHandlerAddress();
+            return true;
+        }
+    }
+    return false;
+}
+
+bool Interpreter::EnsureInitialized(DexClass* klass) {
+    if (klass == nullptr) return false;
+    if (klass->status == DexClass::Status::kInitialized) return true;
+    if (klass->status == DexClass::Status::kError) return false;
+    if (linker_ != nullptr && !linker_->LinkClass(klass)) return false;
+
+    // Set kInitialized BEFORE running <clinit>: <clinit> is often referenced
+    // that class itself (sputs into its static field) and will recur infinitely.
+    klass->status = DexClass::Status::kInitialized;
+
+    // The parent must be initialized before the child (JVM rule).
+    if (klass->superclass != nullptr) EnsureInitialized(klass->superclass);
+
+    DexMethod* clinit = klass->FindDirectMethod("<clinit>", "()V");
+    if (clinit == nullptr || clinit->code_item == nullptr) return true;
+
+    Execute(clinit, nullptr, 0);
+    if (HasPendingException()) {
+        klass->status = DexClass::Status::kError;
+        return false;
+    }
+    return true;
+}
+
+// JIT dispatch
+
+namespace {
+std::atomic<uint64_t> g_jit_compiled_methods{0};
+std::atomic<uint64_t> g_jit_entries{0};
+}  // namespace
+
+uint64_t Interpreter::jit_compiled_methods() { return g_jit_compiled_methods.load(); }
+uint64_t Interpreter::jit_entries() { return g_jit_entries.load(); }
+
+bool Interpreter::TryJit(DexFrame* frame, DexValue* out, uint32_t* resume_pc) {
+    *resume_pc = 0;
+    auto* method = const_cast<DexMethod*>(frame->method());
+    if (method == nullptr) return false;
+
+    // Nothing to do when the platform will not let us execute what we write. Checked
+    // first and cached inside JitCache, so this costs one load on the common path.
+    if (!JitCompiler::IsAvailable()) return false;
+
+    if (method->jit_state == DexMethod::JitState::kRefused) return false;
+
+    if (method->jit_state == DexMethod::JitState::kNotCompiled) {
+        // A profile from the previous run turns a hot method into a first-call compile.
+        // Without it, kJitThreshold calls must be interpreted before the counter trips -
+        // a cost paid again on every launch, which is precisely what an ahead-of-time
+        // cache exists to remove.
+        bool compileNow = false;
+        const uint32_t checksum =
+            method->dex_file != nullptr ? method->dex_file->GetLocationChecksum() : 0;
+        if (oat_profile_ != nullptr && checksum != 0) {
+            switch (oat_profile_->Lookup(checksum, method->dex_method_index)) {
+                case OatFile::MethodState::kHot:
+                    compileNow = true;
+                    break;
+                case OatFile::MethodState::kRefused:
+                    // The compiler declined this bytecode last run and the bytecode has
+                    // not changed (the checksum matched), so it will decline again.
+                    method->jit_state = DexMethod::JitState::kRefused;
+                    return false;
+                case OatFile::MethodState::kUnknown:
+                    break;
+            }
+        }
+
+        if (!compileNow) {
+            // Saturate rather than wrap: a method called four billion times must not
+            // fall back below the threshold and be recompiled.
+            if (method->call_count < kJitThreshold) {
+                ++method->call_count;
+                return false;
+            }
+            compileNow = true;
+        }
+
+        std::string reason;
+        JitEntry entry = JitCompiler::Compile(method, &reason);
+        if (entry == nullptr) {
+            method->jit_state = DexMethod::JitState::kRefused;
+            if (oat_profile_ != nullptr && checksum != 0) {
+                oat_profile_->Note(checksum, method->dex_method_index,
+                                   OatFile::MethodState::kRefused);
+            }
+            // Once per method, and only for methods hot enough to be worth compiling:
+            // this names the opcode to implement next, which is the only actionable
+            // output the JIT produces.
+#ifdef KUDROID_DEBUG_JIT
+            std::fprintf(stderr, "[KuART][JIT] not compiled: %s.%s (%s)\n",
+                         method->declaring_class != nullptr
+                             ? method->declaring_class->PrettyName().c_str()
+                             : "?",
+                         method->name != nullptr ? method->name : "?", reason.c_str());
+#endif
+            return false;
+        }
+        method->jit_code = reinterpret_cast<void*>(entry);
+        method->jit_state = DexMethod::JitState::kCompiled;
+        g_jit_compiled_methods.fetch_add(1);
+        if (oat_profile_ != nullptr && checksum != 0) {
+            oat_profile_->Note(checksum, method->dex_method_index,
+                               OatFile::MethodState::kHot);
+        }
+        std::fprintf(stderr, "[KuART][JIT] compiled %s.%s\n",
+                     method->declaring_class != nullptr
+                         ? method->declaring_class->PrettyName().c_str()
+                         : "?",
+                     method->name != nullptr ? method->name : "?");
+    }
+
+    if (method->jit_code == nullptr) return false;
+
+    // Compiled code reads and writes the frame's register array directly, so the frame
+    // remains authoritative at every instruction boundary. That is what makes the bail
+    // below correct: the interpreter can pick up at any dex_pc and see exactly the state
+    // the compiled code left.
+    auto entry = reinterpret_cast<JitEntry>(method->jit_code);
+    DexValue result;
+    uint32_t bail_pc = 0;
+    g_jit_entries.fetch_add(1);
+    const int32_t rc = entry(frame->registers(), &result, &bail_pc);
+    if (rc >= 0) {
+        *out = result;
+        return true;
+    }
+    *resume_pc = bail_pc;
+    return false;
+}
+
+DexValue Interpreter::ExecuteFrame(DexFrame* frame) {
+    const DexMethod* method = frame->method();
+    art::CodeItemDataAccessor accessor(*method->dex_file, method->code_item);
+
+    // Compiled code first, if this method has any. A bail sets the dex_pc the
+    // interpreter should continue from - compiled code and the interpreter share the
+    // frame's register array, so resuming mid-method needs no state transfer.
+    {
+        DexValue jitResult;
+        uint32_t resume_pc = 0;
+        if (TryJit(frame, &jitResult, &resume_pc)) return jitResult;
+        if (resume_pc != 0) frame->set_dex_pc(resume_pc);
+    }
+
+    for (;;) {
+        const DexValue result = RunBytecode(frame, accessor);
+        if (!HasPendingException()) return result;
+
+        // Exception thrown at frame->dex_pc(); if this method has an overlay handler
+        // That place is captured here, otherwise transmitted to the caller.
+        uint32_t handler_pc = 0;
+        if (!FindCatchHandler(accessor, method, frame->dex_pc(), &handler_pc)) return result;
+
+        frame->set_caught_exception(pending_exception_);
+        ClearPendingException();
+        frame->set_dex_pc(handler_pc);
+    }
+}
+
+// Report uncaught exceptions exiting to native code with their trace.
+void Interpreter::ReportUncaughtException() {
+    if (!HasPendingException()) return;
+    std::fprintf(stderr, "[KuART][EXCEPTION] 💥 uncaught: %s\n", last_error_.c_str());
+    // Also print Throwable.message, which last_error_ omits.
+    if (pending_exception_ != nullptr && pending_exception_->clazz != nullptr) {
+        if (DexField* f_msg = pending_exception_->clazz->FindInstanceField(
+                "message", "Ljava/lang/String;")) {
+            DexObject* msg_obj =
+                pending_exception_->GetField<DexObject*>(f_msg->offset_or_slot);
+            if (msg_obj != nullptr && msg_obj->clazz != nullptr &&
+                msg_obj->clazz->descriptor != nullptr &&
+                std::strcmp(msg_obj->clazz->descriptor, "Ljava/lang/String;") == 0) {
+                const char* utf8 = reinterpret_cast<DexString*>(msg_obj)->utf8;
+                if (utf8 != nullptr && utf8[0] != '\0') {
+                    std::fprintf(stderr, "[KuART][EXCEPTION] message: %s\n", utf8);
+                }
+            }
+        }
+    }
+    if (!pending_exception_trace_.empty()) {
+        std::fputs(pending_exception_trace_.c_str(), stderr);
+    }
+}
+
+DexValue Interpreter::RunBytecode(DexFrame* frame, const art::CodeItemDataAccessor& accessor) {
+    DexValue return_value;
+    const DexMethod* method = frame->method();
+
+    const uint16_t* insns = accessor.Insns();
+    uint32_t dex_pc = frame->dex_pc();
+    const uint32_t insns_size = accessor.InsnsSizeInCodeUnits();
+
+    while (dex_pc < insns_size) {
+        if (instruction_limit_ != UINT64_MAX && ++instructions_executed_ > instruction_limit_) {
+            ThrowException("Ljava/lang/InternalError;", "instruction number limit exceeded");
+            return return_value;
+        }
+
+        // Record dex_pc before running so handlers know the throwing instruction.
+        frame->set_dex_pc(dex_pc);
+
+        const Instruction* inst = Instruction::At(insns + dex_pc);
+        const uint32_t next_pc =
+            dex_pc + static_cast<uint32_t>(inst->SizeInCodeUnits());
+
+        switch (inst->Opcode()) {
+            case Instruction::NOP:
+                break;
+
+            // Move.
+            case Instruction::MOVE:
+            case Instruction::MOVE_OBJECT:
+                frame->Set(inst->VRegA_12x(), frame->Get(inst->VRegB_12x()));
+                break;
+            case Instruction::MOVE_FROM16:
+            case Instruction::MOVE_OBJECT_FROM16:
+                frame->Set(inst->VRegA_22x(), frame->Get(inst->VRegB_22x()));
+                break;
+            case Instruction::MOVE_16:
+            case Instruction::MOVE_OBJECT_16:
+                frame->Set(inst->VRegA_32x(), frame->Get(inst->VRegB_32x()));
+                break;
+            case Instruction::MOVE_WIDE:
+                frame->Set(inst->VRegA_12x(), frame->Get(inst->VRegB_12x()));
+                break;
+            case Instruction::MOVE_WIDE_FROM16:
+                frame->Set(inst->VRegA_22x(), frame->Get(inst->VRegB_22x()));
+                break;
+            case Instruction::MOVE_WIDE_16:
+                frame->Set(inst->VRegA_32x(), frame->Get(inst->VRegB_32x()));
+                break;
+
+            case Instruction::MOVE_RESULT:
+            case Instruction::MOVE_RESULT_WIDE:
+            case Instruction::MOVE_RESULT_OBJECT:
+                frame->Set(inst->VRegA_11x(), frame->result());
+                break;
+
+            // Only valid at the beginning of the catch handler; ExecuteFrame is already set.
+            case Instruction::MOVE_EXCEPTION:
+                frame->SetRef(inst->VRegA_11x(), frame->caught_exception());
+                frame->set_caught_exception(nullptr);
+                break;
+
+            // Const.
+            case Instruction::CONST_4:
+                frame->SetInt(inst->VRegA_11n(), inst->VRegB_11n());
+                break;
+            case Instruction::CONST_16:
+                frame->SetInt(inst->VRegA_21s(), inst->VRegB_21s());
+                break;
+            case Instruction::CONST:
+                frame->SetInt(inst->VRegA_31i(), inst->VRegB_31i());
+                break;
+            case Instruction::CONST_HIGH16:
+                frame->SetInt(inst->VRegA_21h(),
+                              static_cast<int32_t>(inst->VRegB_21h()) << 16);
+                break;
+            case Instruction::CONST_WIDE_16:
+                frame->SetLong(inst->VRegA_21s(), inst->VRegB_21s());
+                break;
+            case Instruction::CONST_WIDE_32:
+                frame->SetLong(inst->VRegA_31i(), inst->VRegB_31i());
+                break;
+            case Instruction::CONST_WIDE:
+                frame->SetLong(inst->VRegA_51l(),
+                               static_cast<int64_t>(inst->WideVRegB()));
+                break;
+            case Instruction::CONST_WIDE_HIGH16:
+                frame->SetLong(inst->VRegA_21h(),
+                               static_cast<int64_t>(inst->VRegB_21h()) << 48);
+                break;
+
+            // Return.
+            case Instruction::RETURN_VOID:
+            case Instruction::RETURN_VOID_NO_BARRIER:
+                return return_value;
+            case Instruction::RETURN:
+            case Instruction::RETURN_WIDE:
+            case Instruction::RETURN_OBJECT:
+                return frame->Get(inst->VRegA_11x());
+
+            // Compare.
+            case Instruction::CMPL_FLOAT:
+                frame->SetInt(inst->VRegA_23x(),
+                              CompareFloat(frame->GetFloat(inst->VRegB_23x()),
+                                           frame->GetFloat(inst->VRegC_23x()), -1));
+                break;
+            case Instruction::CMPG_FLOAT:
+                frame->SetInt(inst->VRegA_23x(),
+                              CompareFloat(frame->GetFloat(inst->VRegB_23x()),
+                                           frame->GetFloat(inst->VRegC_23x()), 1));
+                break;
+            case Instruction::CMPL_DOUBLE:
+                frame->SetInt(inst->VRegA_23x(),
+                              CompareFloat(frame->GetDouble(inst->VRegB_23x()),
+                                           frame->GetDouble(inst->VRegC_23x()), -1));
+                break;
+            case Instruction::CMPG_DOUBLE:
+                frame->SetInt(inst->VRegA_23x(),
+                              CompareFloat(frame->GetDouble(inst->VRegB_23x()),
+                                           frame->GetDouble(inst->VRegC_23x()), 1));
+                break;
+            case Instruction::CMP_LONG:
+                frame->SetInt(inst->VRegA_23x(),
+                              CompareLong(frame->GetLong(inst->VRegB_23x()),
+                                          frame->GetLong(inst->VRegC_23x())));
+                break;
+
+            // Jump.
+            case Instruction::GOTO:
+                dex_pc += inst->VRegA_10t();
+                continue;
+            case Instruction::GOTO_16:
+                dex_pc += inst->VRegA_20t();
+                continue;
+            case Instruction::GOTO_32:
+                dex_pc += inst->VRegA_30t();
+                continue;
+
+            case Instruction::IF_EQ: case Instruction::IF_NE:
+            case Instruction::IF_LT: case Instruction::IF_GE:
+            case Instruction::IF_GT: case Instruction::IF_LE: {
+                const int32_t a = frame->GetInt(inst->VRegA_22t());
+                const int32_t b = frame->GetInt(inst->VRegB_22t());
+                bool taken = false;
+                switch (inst->Opcode()) {
+                    case Instruction::IF_EQ: taken = a == b; break;
+                    case Instruction::IF_NE: taken = a != b; break;
+                    case Instruction::IF_LT: taken = a < b; break;
+                    case Instruction::IF_GE: taken = a >= b; break;
+                    case Instruction::IF_GT: taken = a > b; break;
+                    default:                 taken = a <= b; break;
+                }
+                if (taken) {
+                    dex_pc += inst->VRegC_22t();
+                    continue;
+                }
+                break;
+            }
+
+            case Instruction::IF_EQZ: case Instruction::IF_NEZ:
+            case Instruction::IF_LTZ: case Instruction::IF_GEZ:
+            case Instruction::IF_GTZ: case Instruction::IF_LEZ: {
+                const int32_t a = frame->GetInt(inst->VRegA_21t());
+                bool taken = false;
+                switch (inst->Opcode()) {
+                    case Instruction::IF_EQZ: taken = a == 0; break;
+                    case Instruction::IF_NEZ: taken = a != 0; break;
+                    case Instruction::IF_LTZ: taken = a < 0; break;
+                    case Instruction::IF_GEZ: taken = a >= 0; break;
+                    case Instruction::IF_GTZ: taken = a > 0; break;
+                    default:                  taken = a <= 0; break;
+                }
+                if (taken) {
+                    dex_pc += inst->VRegB_21t();
+                    continue;
+                }
+                break;
+            }
+
+            // An operand.
+            case Instruction::NEG_INT:
+                // Java's neg-int wraps: -INT_MIN is INT_MIN. Written unsigned because the
+                // signed negation of INT_MIN is UB in C++ and clang is free to exploit that.
+                frame->SetInt(inst->VRegA_12x(),
+                              static_cast<int32_t>(
+                                  0u - static_cast<uint32_t>(frame->GetInt(inst->VRegB_12x()))));
+                break;
+            case Instruction::NOT_INT:
+                frame->SetInt(inst->VRegA_12x(), ~frame->GetInt(inst->VRegB_12x()));
+                break;
+            case Instruction::NEG_LONG:
+                // Same wrap for long: -LONG_MIN is LONG_MIN.
+                frame->SetLong(inst->VRegA_12x(),
+                               static_cast<int64_t>(
+                                   0ull - static_cast<uint64_t>(frame->GetLong(inst->VRegB_12x()))));
+                break;
+            case Instruction::NOT_LONG:
+                frame->SetLong(inst->VRegA_12x(), ~frame->GetLong(inst->VRegB_12x()));
+                break;
+            case Instruction::NEG_FLOAT:
+                frame->SetFloat(inst->VRegA_12x(), -frame->GetFloat(inst->VRegB_12x()));
+                break;
+            case Instruction::NEG_DOUBLE:
+                frame->SetDouble(inst->VRegA_12x(), -frame->GetDouble(inst->VRegB_12x()));
+                break;
+
+            // Change style.
+            case Instruction::INT_TO_LONG:
+                frame->SetLong(inst->VRegA_12x(), frame->GetInt(inst->VRegB_12x()));
+                break;
+            case Instruction::INT_TO_FLOAT:
+                frame->SetFloat(inst->VRegA_12x(),
+                                static_cast<float>(frame->GetInt(inst->VRegB_12x())));
+                break;
+            case Instruction::INT_TO_DOUBLE:
+                frame->SetDouble(inst->VRegA_12x(), frame->GetInt(inst->VRegB_12x()));
+                break;
+            case Instruction::LONG_TO_INT:
+                frame->SetInt(inst->VRegA_12x(),
+                              static_cast<int32_t>(frame->GetLong(inst->VRegB_12x())));
+                break;
+            case Instruction::LONG_TO_FLOAT:
+                frame->SetFloat(inst->VRegA_12x(),
+                                static_cast<float>(frame->GetLong(inst->VRegB_12x())));
+                break;
+            case Instruction::LONG_TO_DOUBLE:
+                frame->SetDouble(inst->VRegA_12x(),
+                                 static_cast<double>(frame->GetLong(inst->VRegB_12x())));
+                break;
+            case Instruction::FLOAT_TO_INT:
+                frame->SetInt(inst->VRegA_12x(),
+                              JavaFloatToInt<int32_t>(frame->GetFloat(inst->VRegB_12x())));
+                break;
+            case Instruction::FLOAT_TO_LONG:
+                frame->SetLong(inst->VRegA_12x(),
+                               JavaFloatToInt<int64_t>(frame->GetFloat(inst->VRegB_12x())));
+                break;
+            case Instruction::FLOAT_TO_DOUBLE:
+                frame->SetDouble(inst->VRegA_12x(), frame->GetFloat(inst->VRegB_12x()));
+                break;
+            case Instruction::DOUBLE_TO_INT:
+                frame->SetInt(inst->VRegA_12x(),
+                              JavaFloatToInt<int32_t>(frame->GetDouble(inst->VRegB_12x())));
+                break;
+            case Instruction::DOUBLE_TO_LONG:
+                frame->SetLong(inst->VRegA_12x(),
+                               JavaFloatToInt<int64_t>(frame->GetDouble(inst->VRegB_12x())));
+                break;
+            case Instruction::DOUBLE_TO_FLOAT:
+                frame->SetFloat(inst->VRegA_12x(),
+                                static_cast<float>(frame->GetDouble(inst->VRegB_12x())));
+                break;
+            case Instruction::INT_TO_BYTE:
+                frame->SetInt(inst->VRegA_12x(),
+                              static_cast<int8_t>(frame->GetInt(inst->VRegB_12x())));
+                break;
+            case Instruction::INT_TO_CHAR:
+                frame->SetInt(inst->VRegA_12x(),
+                              static_cast<uint16_t>(frame->GetInt(inst->VRegB_12x())));
+                break;
+            case Instruction::INT_TO_SHORT:
+                frame->SetInt(inst->VRegA_12x(),
+                              static_cast<int16_t>(frame->GetInt(inst->VRegB_12x())));
+                break;
+
+            // Int arithmetic, two operands (23x).
+            case Instruction::ADD_INT:
+                frame->SetInt(inst->VRegA_23x(),
+                              static_cast<int32_t>(
+                                  static_cast<uint32_t>(frame->GetInt(inst->VRegB_23x())) +
+                                  static_cast<uint32_t>(frame->GetInt(inst->VRegC_23x()))));
+                break;
+            case Instruction::SUB_INT:
+                frame->SetInt(inst->VRegA_23x(),
+                              static_cast<int32_t>(
+                                  static_cast<uint32_t>(frame->GetInt(inst->VRegB_23x())) -
+                                  static_cast<uint32_t>(frame->GetInt(inst->VRegC_23x()))));
+                break;
+            case Instruction::MUL_INT:
+                frame->SetInt(inst->VRegA_23x(),
+                              static_cast<int32_t>(
+                                  static_cast<uint32_t>(frame->GetInt(inst->VRegB_23x())) *
+                                  static_cast<uint32_t>(frame->GetInt(inst->VRegC_23x()))));
+                break;
+            case Instruction::DIV_INT: {
+                const int32_t b = frame->GetInt(inst->VRegC_23x());
+                if (b == 0) {
+                    ThrowException("Ljava/lang/ArithmeticException;", "divide by zero");
+                    return return_value;
+                }
+                frame->SetInt(inst->VRegA_23x(), JavaIntDiv(frame->GetInt(inst->VRegB_23x()), b));
+                break;
+            }
+            case Instruction::REM_INT: {
+                const int32_t b = frame->GetInt(inst->VRegC_23x());
+                if (b == 0) {
+                    ThrowException("Ljava/lang/ArithmeticException;", "divide by zero");
+                    return return_value;
+                }
+                frame->SetInt(inst->VRegA_23x(), JavaIntRem(frame->GetInt(inst->VRegB_23x()), b));
+                break;
+            }
+            case Instruction::AND_INT:
+                frame->SetInt(inst->VRegA_23x(), frame->GetInt(inst->VRegB_23x()) &
+                                                     frame->GetInt(inst->VRegC_23x()));
+                break;
+            case Instruction::OR_INT:
+                frame->SetInt(inst->VRegA_23x(), frame->GetInt(inst->VRegB_23x()) |
+                                                     frame->GetInt(inst->VRegC_23x()));
+                break;
+            case Instruction::XOR_INT:
+                frame->SetInt(inst->VRegA_23x(), frame->GetInt(inst->VRegB_23x()) ^
+                                                     frame->GetInt(inst->VRegC_23x()));
+                break;
+            case Instruction::SHL_INT:
+                frame->SetInt(inst->VRegA_23x(), JavaShl(frame->GetInt(inst->VRegB_23x()),
+                                                         frame->GetInt(inst->VRegC_23x())));
+                break;
+            case Instruction::SHR_INT:
+                frame->SetInt(inst->VRegA_23x(), JavaShr(frame->GetInt(inst->VRegB_23x()),
+                                                         frame->GetInt(inst->VRegC_23x())));
+                break;
+            case Instruction::USHR_INT:
+                frame->SetInt(inst->VRegA_23x(), JavaUshr(frame->GetInt(inst->VRegB_23x()),
+                                                          frame->GetInt(inst->VRegC_23x())));
+                break;
+
+            // Long arithmetic.
+            case Instruction::ADD_LONG:
+                frame->SetLong(inst->VRegA_23x(),
+                               static_cast<int64_t>(
+                                   static_cast<uint64_t>(frame->GetLong(inst->VRegB_23x())) +
+                                   static_cast<uint64_t>(frame->GetLong(inst->VRegC_23x()))));
+                break;
+            case Instruction::SUB_LONG:
+                frame->SetLong(inst->VRegA_23x(),
+                               static_cast<int64_t>(
+                                   static_cast<uint64_t>(frame->GetLong(inst->VRegB_23x())) -
+                                   static_cast<uint64_t>(frame->GetLong(inst->VRegC_23x()))));
+                break;
+            case Instruction::MUL_LONG:
+                frame->SetLong(inst->VRegA_23x(),
+                               static_cast<int64_t>(
+                                   static_cast<uint64_t>(frame->GetLong(inst->VRegB_23x())) *
+                                   static_cast<uint64_t>(frame->GetLong(inst->VRegC_23x()))));
+                break;
+            case Instruction::DIV_LONG: {
+                const int64_t b = frame->GetLong(inst->VRegC_23x());
+                if (b == 0) {
+                    ThrowException("Ljava/lang/ArithmeticException;", "divide by zero");
+                    return return_value;
+                }
+                frame->SetLong(inst->VRegA_23x(), JavaLongDiv(frame->GetLong(inst->VRegB_23x()), b));
+                break;
+            }
+            case Instruction::REM_LONG: {
+                const int64_t b = frame->GetLong(inst->VRegC_23x());
+                if (b == 0) {
+                    ThrowException("Ljava/lang/ArithmeticException;", "divide by zero");
+                    return return_value;
+                }
+                frame->SetLong(inst->VRegA_23x(), JavaLongRem(frame->GetLong(inst->VRegB_23x()), b));
+                break;
+            }
+            case Instruction::AND_LONG:
+                frame->SetLong(inst->VRegA_23x(), frame->GetLong(inst->VRegB_23x()) &
+                                                      frame->GetLong(inst->VRegC_23x()));
+                break;
+            case Instruction::OR_LONG:
+                frame->SetLong(inst->VRegA_23x(), frame->GetLong(inst->VRegB_23x()) |
+                                                      frame->GetLong(inst->VRegC_23x()));
+                break;
+            case Instruction::XOR_LONG:
+                frame->SetLong(inst->VRegA_23x(), frame->GetLong(inst->VRegB_23x()) ^
+                                                      frame->GetLong(inst->VRegC_23x()));
+                break;
+            case Instruction::SHL_LONG:
+                frame->SetLong(inst->VRegA_23x(), JavaShlLong(frame->GetLong(inst->VRegB_23x()),
+                                                              frame->GetInt(inst->VRegC_23x())));
+                break;
+            case Instruction::SHR_LONG:
+                frame->SetLong(inst->VRegA_23x(), JavaShrLong(frame->GetLong(inst->VRegB_23x()),
+                                                              frame->GetInt(inst->VRegC_23x())));
+                break;
+            case Instruction::USHR_LONG:
+                frame->SetLong(inst->VRegA_23x(), JavaUshrLong(frame->GetLong(inst->VRegB_23x()),
+                                                               frame->GetInt(inst->VRegC_23x())));
+                break;
+
+            // Float/double arithmetic.
+            case Instruction::ADD_FLOAT:
+                frame->SetFloat(inst->VRegA_23x(), frame->GetFloat(inst->VRegB_23x()) +
+                                                       frame->GetFloat(inst->VRegC_23x()));
+                break;
+            case Instruction::SUB_FLOAT:
+                frame->SetFloat(inst->VRegA_23x(), frame->GetFloat(inst->VRegB_23x()) -
+                                                       frame->GetFloat(inst->VRegC_23x()));
+                break;
+            case Instruction::MUL_FLOAT:
+                frame->SetFloat(inst->VRegA_23x(), frame->GetFloat(inst->VRegB_23x()) *
+                                                       frame->GetFloat(inst->VRegC_23x()));
+                break;
+            case Instruction::DIV_FLOAT:
+                frame->SetFloat(inst->VRegA_23x(), frame->GetFloat(inst->VRegB_23x()) /
+                                                       frame->GetFloat(inst->VRegC_23x()));
+                break;
+            case Instruction::REM_FLOAT:
+                frame->SetFloat(inst->VRegA_23x(), std::fmod(frame->GetFloat(inst->VRegB_23x()),
+                                                             frame->GetFloat(inst->VRegC_23x())));
+                break;
+            case Instruction::ADD_DOUBLE:
+                frame->SetDouble(inst->VRegA_23x(), frame->GetDouble(inst->VRegB_23x()) +
+                                                        frame->GetDouble(inst->VRegC_23x()));
+                break;
+            case Instruction::SUB_DOUBLE:
+                frame->SetDouble(inst->VRegA_23x(), frame->GetDouble(inst->VRegB_23x()) -
+                                                        frame->GetDouble(inst->VRegC_23x()));
+                break;
+            case Instruction::MUL_DOUBLE:
+                frame->SetDouble(inst->VRegA_23x(), frame->GetDouble(inst->VRegB_23x()) *
+                                                        frame->GetDouble(inst->VRegC_23x()));
+                break;
+            case Instruction::DIV_DOUBLE:
+                frame->SetDouble(inst->VRegA_23x(), frame->GetDouble(inst->VRegB_23x()) /
+                                                        frame->GetDouble(inst->VRegC_23x()));
+                break;
+            case Instruction::REM_DOUBLE:
+                frame->SetDouble(inst->VRegA_23x(), std::fmod(frame->GetDouble(inst->VRegB_23x()),
+                                                              frame->GetDouble(inst->VRegC_23x())));
+                break;
+
+            // Form /2addr: destination is also the first operand.
+            case Instruction::ADD_INT_2ADDR:
+                frame->SetInt(inst->VRegA_12x(),
+                              static_cast<int32_t>(
+                                  static_cast<uint32_t>(frame->GetInt(inst->VRegA_12x())) +
+                                  static_cast<uint32_t>(frame->GetInt(inst->VRegB_12x()))));
+                break;
+            case Instruction::SUB_INT_2ADDR:
+                frame->SetInt(inst->VRegA_12x(),
+                              static_cast<int32_t>(
+                                  static_cast<uint32_t>(frame->GetInt(inst->VRegA_12x())) -
+                                  static_cast<uint32_t>(frame->GetInt(inst->VRegB_12x()))));
+                break;
+            case Instruction::MUL_INT_2ADDR:
+                frame->SetInt(inst->VRegA_12x(),
+                              static_cast<int32_t>(
+                                  static_cast<uint32_t>(frame->GetInt(inst->VRegA_12x())) *
+                                  static_cast<uint32_t>(frame->GetInt(inst->VRegB_12x()))));
+                break;
+            case Instruction::DIV_INT_2ADDR: {
+                const int32_t b = frame->GetInt(inst->VRegB_12x());
+                if (b == 0) {
+                    ThrowException("Ljava/lang/ArithmeticException;", "divide by zero");
+                    return return_value;
+                }
+                frame->SetInt(inst->VRegA_12x(), JavaIntDiv(frame->GetInt(inst->VRegA_12x()), b));
+                break;
+            }
+            case Instruction::REM_INT_2ADDR: {
+                const int32_t b = frame->GetInt(inst->VRegB_12x());
+                if (b == 0) {
+                    ThrowException("Ljava/lang/ArithmeticException;", "divide by zero");
+                    return return_value;
+                }
+                frame->SetInt(inst->VRegA_12x(), JavaIntRem(frame->GetInt(inst->VRegA_12x()), b));
+                break;
+            }
+            case Instruction::AND_INT_2ADDR:
+                frame->SetInt(inst->VRegA_12x(),
+                              frame->GetInt(inst->VRegA_12x()) & frame->GetInt(inst->VRegB_12x()));
+                break;
+            case Instruction::OR_INT_2ADDR:
+                frame->SetInt(inst->VRegA_12x(),
+                              frame->GetInt(inst->VRegA_12x()) | frame->GetInt(inst->VRegB_12x()));
+                break;
+            case Instruction::XOR_INT_2ADDR:
+                frame->SetInt(inst->VRegA_12x(),
+                              frame->GetInt(inst->VRegA_12x()) ^ frame->GetInt(inst->VRegB_12x()));
+                break;
+            case Instruction::SHL_INT_2ADDR:
+                frame->SetInt(inst->VRegA_12x(), JavaShl(frame->GetInt(inst->VRegA_12x()),
+                                                         frame->GetInt(inst->VRegB_12x())));
+                break;
+            case Instruction::SHR_INT_2ADDR:
+                frame->SetInt(inst->VRegA_12x(), JavaShr(frame->GetInt(inst->VRegA_12x()),
+                                                         frame->GetInt(inst->VRegB_12x())));
+                break;
+            case Instruction::USHR_INT_2ADDR:
+                frame->SetInt(inst->VRegA_12x(), JavaUshr(frame->GetInt(inst->VRegA_12x()),
+                                                          frame->GetInt(inst->VRegB_12x())));
+                break;
+            case Instruction::ADD_LONG_2ADDR:
+                frame->SetLong(inst->VRegA_12x(),
+                               static_cast<int64_t>(
+                                   static_cast<uint64_t>(frame->GetLong(inst->VRegA_12x())) +
+                                   static_cast<uint64_t>(frame->GetLong(inst->VRegB_12x()))));
+                break;
+            case Instruction::SUB_LONG_2ADDR:
+                frame->SetLong(inst->VRegA_12x(),
+                               static_cast<int64_t>(
+                                   static_cast<uint64_t>(frame->GetLong(inst->VRegA_12x())) -
+                                   static_cast<uint64_t>(frame->GetLong(inst->VRegB_12x()))));
+                break;
+            case Instruction::MUL_LONG_2ADDR:
+                frame->SetLong(inst->VRegA_12x(),
+                               static_cast<int64_t>(
+                                   static_cast<uint64_t>(frame->GetLong(inst->VRegA_12x())) *
+                                   static_cast<uint64_t>(frame->GetLong(inst->VRegB_12x()))));
+                break;
+            case Instruction::DIV_LONG_2ADDR: {
+                const int64_t b = frame->GetLong(inst->VRegB_12x());
+                if (b == 0) {
+                    ThrowException("Ljava/lang/ArithmeticException;", "divide by zero");
+                    return return_value;
+                }
+                frame->SetLong(inst->VRegA_12x(), JavaLongDiv(frame->GetLong(inst->VRegA_12x()), b));
+                break;
+            }
+            case Instruction::REM_LONG_2ADDR: {
+                const int64_t b = frame->GetLong(inst->VRegB_12x());
+                if (b == 0) {
+                    ThrowException("Ljava/lang/ArithmeticException;", "divide by zero");
+                    return return_value;
+                }
+                frame->SetLong(inst->VRegA_12x(), JavaLongRem(frame->GetLong(inst->VRegA_12x()), b));
+                break;
+            }
+            case Instruction::AND_LONG_2ADDR:
+                frame->SetLong(inst->VRegA_12x(), frame->GetLong(inst->VRegA_12x()) &
+                                                      frame->GetLong(inst->VRegB_12x()));
+                break;
+            case Instruction::OR_LONG_2ADDR:
+                frame->SetLong(inst->VRegA_12x(), frame->GetLong(inst->VRegA_12x()) |
+                                                      frame->GetLong(inst->VRegB_12x()));
+                break;
+            case Instruction::XOR_LONG_2ADDR:
+                frame->SetLong(inst->VRegA_12x(), frame->GetLong(inst->VRegA_12x()) ^
+                                                      frame->GetLong(inst->VRegB_12x()));
+                break;
+            case Instruction::SHL_LONG_2ADDR:
+                frame->SetLong(inst->VRegA_12x(), JavaShlLong(frame->GetLong(inst->VRegA_12x()),
+                                                              frame->GetInt(inst->VRegB_12x())));
+                break;
+            case Instruction::SHR_LONG_2ADDR:
+                frame->SetLong(inst->VRegA_12x(), JavaShrLong(frame->GetLong(inst->VRegA_12x()),
+                                                              frame->GetInt(inst->VRegB_12x())));
+                break;
+            case Instruction::USHR_LONG_2ADDR:
+                frame->SetLong(inst->VRegA_12x(), JavaUshrLong(frame->GetLong(inst->VRegA_12x()),
+                                                               frame->GetInt(inst->VRegB_12x())));
+                break;
+            case Instruction::ADD_FLOAT_2ADDR:
+                frame->SetFloat(inst->VRegA_12x(), frame->GetFloat(inst->VRegA_12x()) +
+                                                       frame->GetFloat(inst->VRegB_12x()));
+                break;
+            case Instruction::SUB_FLOAT_2ADDR:
+                frame->SetFloat(inst->VRegA_12x(), frame->GetFloat(inst->VRegA_12x()) -
+                                                       frame->GetFloat(inst->VRegB_12x()));
+                break;
+            case Instruction::MUL_FLOAT_2ADDR:
+                frame->SetFloat(inst->VRegA_12x(), frame->GetFloat(inst->VRegA_12x()) *
+                                                       frame->GetFloat(inst->VRegB_12x()));
+                break;
+            case Instruction::DIV_FLOAT_2ADDR:
+                frame->SetFloat(inst->VRegA_12x(), frame->GetFloat(inst->VRegA_12x()) /
+                                                       frame->GetFloat(inst->VRegB_12x()));
+                break;
+            case Instruction::REM_FLOAT_2ADDR:
+                frame->SetFloat(inst->VRegA_12x(), std::fmod(frame->GetFloat(inst->VRegA_12x()),
+                                                             frame->GetFloat(inst->VRegB_12x())));
+                break;
+            case Instruction::ADD_DOUBLE_2ADDR:
+                frame->SetDouble(inst->VRegA_12x(), frame->GetDouble(inst->VRegA_12x()) +
+                                                        frame->GetDouble(inst->VRegB_12x()));
+                break;
+            case Instruction::SUB_DOUBLE_2ADDR:
+                frame->SetDouble(inst->VRegA_12x(), frame->GetDouble(inst->VRegA_12x()) -
+                                                        frame->GetDouble(inst->VRegB_12x()));
+                break;
+            case Instruction::MUL_DOUBLE_2ADDR:
+                frame->SetDouble(inst->VRegA_12x(), frame->GetDouble(inst->VRegA_12x()) *
+                                                        frame->GetDouble(inst->VRegB_12x()));
+                break;
+            case Instruction::DIV_DOUBLE_2ADDR:
+                frame->SetDouble(inst->VRegA_12x(), frame->GetDouble(inst->VRegA_12x()) /
+                                                        frame->GetDouble(inst->VRegB_12x()));
+                break;
+            case Instruction::REM_DOUBLE_2ADDR:
+                frame->SetDouble(inst->VRegA_12x(), std::fmod(frame->GetDouble(inst->VRegA_12x()),
+                                                              frame->GetDouble(inst->VRegB_12x())));
+                break;
+
+            // Int with constant.
+            case Instruction::ADD_INT_LIT16:
+                frame->SetInt(inst->VRegA_22s(),
+                              static_cast<int32_t>(
+                                  static_cast<uint32_t>(frame->GetInt(inst->VRegB_22s())) +
+                                  static_cast<uint32_t>(inst->VRegC_22s())));
+                break;
+            case Instruction::RSUB_INT:
+                frame->SetInt(inst->VRegA_22s(),
+                              static_cast<int32_t>(
+                                  static_cast<uint32_t>(inst->VRegC_22s()) -
+                                  static_cast<uint32_t>(frame->GetInt(inst->VRegB_22s()))));
+                break;
+            case Instruction::MUL_INT_LIT16:
+                frame->SetInt(inst->VRegA_22s(),
+                              static_cast<int32_t>(
+                                  static_cast<uint32_t>(frame->GetInt(inst->VRegB_22s())) *
+                                  static_cast<uint32_t>(inst->VRegC_22s())));
+                break;
+            case Instruction::DIV_INT_LIT16: {
+                const int32_t b = inst->VRegC_22s();
+                if (b == 0) {
+                    ThrowException("Ljava/lang/ArithmeticException;", "divide by zero");
+                    return return_value;
+                }
+                frame->SetInt(inst->VRegA_22s(), JavaIntDiv(frame->GetInt(inst->VRegB_22s()), b));
+                break;
+            }
+            case Instruction::REM_INT_LIT16: {
+                const int32_t b = inst->VRegC_22s();
+                if (b == 0) {
+                    ThrowException("Ljava/lang/ArithmeticException;", "divide by zero");
+                    return return_value;
+                }
+                frame->SetInt(inst->VRegA_22s(), JavaIntRem(frame->GetInt(inst->VRegB_22s()), b));
+                break;
+            }
+            case Instruction::AND_INT_LIT16:
+                frame->SetInt(inst->VRegA_22s(),
+                              frame->GetInt(inst->VRegB_22s()) & inst->VRegC_22s());
+                break;
+            case Instruction::OR_INT_LIT16:
+                frame->SetInt(inst->VRegA_22s(),
+                              frame->GetInt(inst->VRegB_22s()) | inst->VRegC_22s());
+                break;
+            case Instruction::XOR_INT_LIT16:
+                frame->SetInt(inst->VRegA_22s(),
+                              frame->GetInt(inst->VRegB_22s()) ^ inst->VRegC_22s());
+                break;
+
+            case Instruction::ADD_INT_LIT8:
+                frame->SetInt(inst->VRegA_22b(),
+                              static_cast<int32_t>(
+                                  static_cast<uint32_t>(frame->GetInt(inst->VRegB_22b())) +
+                                  static_cast<uint32_t>(inst->VRegC_22b())));
+                break;
+            case Instruction::RSUB_INT_LIT8:
+                frame->SetInt(inst->VRegA_22b(),
+                              static_cast<int32_t>(
+                                  static_cast<uint32_t>(inst->VRegC_22b()) -
+                                  static_cast<uint32_t>(frame->GetInt(inst->VRegB_22b()))));
+                break;
+            case Instruction::MUL_INT_LIT8:
+                frame->SetInt(inst->VRegA_22b(),
+                              static_cast<int32_t>(
+                                  static_cast<uint32_t>(frame->GetInt(inst->VRegB_22b())) *
+                                  static_cast<uint32_t>(inst->VRegC_22b())));
+                break;
+            case Instruction::DIV_INT_LIT8: {
+                const int32_t b = inst->VRegC_22b();
+                if (b == 0) {
+                    ThrowException("Ljava/lang/ArithmeticException;", "divide by zero");
+                    return return_value;
+                }
+                frame->SetInt(inst->VRegA_22b(), JavaIntDiv(frame->GetInt(inst->VRegB_22b()), b));
+                break;
+            }
+            case Instruction::REM_INT_LIT8: {
+                const int32_t b = inst->VRegC_22b();
+                if (b == 0) {
+                    ThrowException("Ljava/lang/ArithmeticException;", "divide by zero");
+                    return return_value;
+                }
+                frame->SetInt(inst->VRegA_22b(), JavaIntRem(frame->GetInt(inst->VRegB_22b()), b));
+                break;
+            }
+            case Instruction::AND_INT_LIT8:
+                frame->SetInt(inst->VRegA_22b(),
+                              frame->GetInt(inst->VRegB_22b()) & inst->VRegC_22b());
+                break;
+            case Instruction::OR_INT_LIT8:
+                frame->SetInt(inst->VRegA_22b(),
+                              frame->GetInt(inst->VRegB_22b()) | inst->VRegC_22b());
+                break;
+            case Instruction::XOR_INT_LIT8:
+                frame->SetInt(inst->VRegA_22b(),
+                              frame->GetInt(inst->VRegB_22b()) ^ inst->VRegC_22b());
+                break;
+            case Instruction::SHL_INT_LIT8:
+                frame->SetInt(inst->VRegA_22b(),
+                              JavaShl(frame->GetInt(inst->VRegB_22b()), inst->VRegC_22b()));
+                break;
+            case Instruction::SHR_INT_LIT8:
+                frame->SetInt(inst->VRegA_22b(),
+                              JavaShr(frame->GetInt(inst->VRegB_22b()), inst->VRegC_22b()));
+                break;
+            case Instruction::USHR_INT_LIT8:
+                frame->SetInt(inst->VRegA_22b(),
+                              JavaUshr(frame->GetInt(inst->VRegB_22b()), inst->VRegC_22b()));
+                break;
+
+            // Constant string and constant class.
+            case Instruction::CONST_STRING: {
+                const uint32_t sidx = inst->VRegB_21c();
+                if (sidx >= method->dex_file->NumStringIds()) {
+                    ThrowException("Ljava/lang/InternalError;", "const-string index out of range");
+                    return return_value;
+                }
+                const char* s = method->dex_file->StringDataByIdx(
+                    art::dex::StringIndex(sidx));
+                frame->SetRef(inst->VRegA_21c(), linker_->InternString(s));
+                break;
+            }
+            case Instruction::CONST_STRING_JUMBO: {
+                const char* s = method->dex_file->StringDataByIdx(
+                    art::dex::StringIndex(inst->VRegB_31c()));
+                frame->SetRef(inst->VRegA_31c(), linker_->InternString(s));
+                break;
+            }
+            case Instruction::CONST_CLASS: {
+                DexClass* klass = ResolveClass(method, inst->VRegB_21c());
+                if (klass == nullptr) {
+                    ThrowException("Ljava/lang/ClassNotFoundException;", "const-class");
+                    return return_value;
+                }
+                frame->SetRef(inst->VRegA_21c(), linker_->GetClassObject(klass));
+                break;
+            }
+
+            // Create objects and arrays.
+            case Instruction::NEW_INSTANCE: {
+                DexClass* klass = ResolveClass(method, inst->VRegB_21c());
+                if (klass == nullptr) {
+                    ThrowException("Ljava/lang/ClassNotFoundException;", "new-instance");
+                    return return_value;
+                }
+                // Stub instantiation fails fast with NoClassDefFoundError.
+                if (klass->is_stub) {
+                    ThrowException("Ljava/lang/NoClassDefFoundError;", klass->PrettyName());
+                    return return_value;
+                }
+                EnsureInitialized(klass);
+                if (HasPendingException()) return return_value;
+                DexObject* obj = linker_->AllocObject(klass);
+                if (obj == nullptr) {
+                    ThrowException("Ljava/lang/OutOfMemoryError;", klass->PrettyName());
+                    return return_value;
+                }
+                frame->SetRef(inst->VRegA_21c(), obj);
+                break;
+            }
+            case Instruction::NEW_ARRAY: {
+                const int32_t length = frame->GetInt(inst->VRegB_22c());
+                if (length < 0) {
+                    ThrowException("Ljava/lang/NegativeArraySizeException;",
+                                   std::to_string(length));
+                    return return_value;
+                }
+                DexClass* array_class = ResolveClass(method, inst->VRegC_22c());
+                if (array_class == nullptr) {
+                    ThrowException("Ljava/lang/ClassNotFoundException;", "new-array");
+                    return return_value;
+                }
+                DexArray* arr = linker_->AllocArray(array_class, length);
+                if (arr == nullptr) {
+                    ThrowException("Ljava/lang/OutOfMemoryError;", "new-array");
+                    return return_value;
+                }
+                frame->SetRef(inst->VRegA_22c(), arr);
+                break;
+            }
+            case Instruction::FILLED_NEW_ARRAY:
+                if (!FilledNewArray(frame, inst, /*is_range=*/false)) {
+                    return return_value;
+                }
+                break;
+            case Instruction::FILLED_NEW_ARRAY_RANGE:
+                if (!FilledNewArray(frame, inst, /*is_range=*/true)) {
+                    return return_value;
+                }
+                break;
+            case Instruction::ARRAY_LENGTH: {
+                auto* arr = static_cast<DexArray*>(frame->GetRef(inst->VRegB_12x()));
+                if (arr == nullptr) {
+                    ThrowException("Ljava/lang/NullPointerException;", "array-length on null");
+                    return return_value;
+                }
+                frame->SetInt(inst->VRegA_12x(), arr->length);
+                break;
+            }
+
+            // Check the type.
+            case Instruction::INSTANCE_OF: {
+                DexObject* obj = frame->GetRef(inst->VRegB_22c());
+                DexClass* target = ResolveClass(method, inst->VRegC_22c());
+                const bool ok = obj != nullptr && obj->clazz != nullptr && target != nullptr &&
+                                obj->clazz->IsSubClassOf(target);
+                frame->SetInt(inst->VRegA_22c(), ok ? 1 : 0);
+                break;
+            }
+            case Instruction::CHECK_CAST: {
+                DexObject* obj = frame->GetRef(inst->VRegA_21c());
+                if (obj == nullptr) break;  // cast null is always valid
+                DexClass* target = ResolveClass(method, inst->VRegB_21c());
+                if (target == nullptr || obj->clazz == nullptr ||
+                    !obj->clazz->IsSubClassOf(target)) {
+                    ThrowException("Ljava/lang/ClassCastException;",
+                                   (obj->clazz != nullptr ? obj->clazz->PrettyName() : "?") +
+                                       " not " +
+                                       (target != nullptr ? target->PrettyName() : "?"));
+                    return return_value;
+                }
+                break;
+            }
+
+            // Field instance.
+            case Instruction::IGET:
+            case Instruction::IGET_WIDE:
+            case Instruction::IGET_OBJECT:
+            case Instruction::IGET_BOOLEAN:
+            case Instruction::IGET_BYTE:
+            case Instruction::IGET_CHAR:
+            case Instruction::IGET_SHORT: {
+                DexObject* obj = frame->GetRef(inst->VRegB_22c());
+                if (obj == nullptr) {
+                    ThrowException("Ljava/lang/NullPointerException;", "iget on null");
+                    return return_value;
+                }
+                DexField* field = ResolveField(method, inst->VRegC_22c(), /*is_static=*/false);
+                uint32_t igetWidth = 4;
+                switch (inst->Opcode()) {
+                    case Instruction::IGET_WIDE:
+                        igetWidth = 8;
+                        break;
+                    case Instruction::IGET_BOOLEAN:
+                    case Instruction::IGET_BYTE:
+                        igetWidth = 1;
+                        break;
+                    case Instruction::IGET_CHAR:
+                    case Instruction::IGET_SHORT:
+                        igetWidth = 2;
+                        break;
+                    default:
+                        break;
+                }
+                if (field == nullptr || !CheckInstanceField(obj, field, igetWidth)) {
+                    if (field == nullptr) {
+                        ThrowException("Ljava/lang/NoSuchFieldError;",
+                                       DescribeFieldRef(method, inst->VRegC_22c(), "iget"));
+                    }
+                    return return_value;
+                }
+                const uint32_t off = field->offset_or_slot;
+                const uint32_t vreg = inst->VRegA_22c();
+                switch (inst->Opcode()) {
+                    case Instruction::IGET_BOOLEAN:
+                    case Instruction::IGET_BYTE:
+                        frame->SetInt(vreg, obj->GetField<int8_t>(off));
+                        break;
+                    case Instruction::IGET_CHAR:
+                        frame->SetInt(vreg, obj->GetField<uint16_t>(off));
+                        break;
+                    case Instruction::IGET_SHORT:
+                        frame->SetInt(vreg, obj->GetField<int16_t>(off));
+                        break;
+                    case Instruction::IGET_WIDE:
+                        frame->SetLong(vreg, obj->GetField<int64_t>(off));
+                        break;
+                    case Instruction::IGET_OBJECT:
+                        frame->SetRef(vreg, obj->GetField<DexObject*>(off));
+                        break;
+                    default:
+                        frame->SetInt(vreg, obj->GetField<int32_t>(off));
+                        break;
+                }
+                break;
+            }
+
+            case Instruction::IPUT:
+            case Instruction::IPUT_WIDE:
+            case Instruction::IPUT_OBJECT:
+            case Instruction::IPUT_BOOLEAN:
+            case Instruction::IPUT_BYTE:
+            case Instruction::IPUT_CHAR:
+            case Instruction::IPUT_SHORT: {
+                DexObject* obj = frame->GetRef(inst->VRegB_22c());
+                if (obj == nullptr) {
+                    ThrowException("Ljava/lang/NullPointerException;", "iput on null");
+                    return return_value;
+                }
+                DexField* field = ResolveField(method, inst->VRegC_22c(), /*is_static=*/false);
+                uint32_t iputWidth = 4;
+                switch (inst->Opcode()) {
+                    case Instruction::IPUT_WIDE:
+                        iputWidth = 8;
+                        break;
+                    case Instruction::IPUT_BOOLEAN:
+                    case Instruction::IPUT_BYTE:
+                        iputWidth = 1;
+                        break;
+                    case Instruction::IPUT_CHAR:
+                    case Instruction::IPUT_SHORT:
+                        iputWidth = 2;
+                        break;
+                    default:
+                        break;
+                }
+                if (field == nullptr || !CheckInstanceField(obj, field, iputWidth)) {
+                    if (field == nullptr) {
+                        ThrowException("Ljava/lang/NoSuchFieldError;",
+                                       DescribeFieldRef(method, inst->VRegC_22c(), "iput"));
+                    }
+                    return return_value;
+                }
+                const uint32_t off = field->offset_or_slot;
+                const uint32_t vreg = inst->VRegA_22c();
+                switch (inst->Opcode()) {
+                    case Instruction::IPUT_BOOLEAN:
+                    case Instruction::IPUT_BYTE:
+                        obj->SetField<int8_t>(off, static_cast<int8_t>(frame->GetInt(vreg)));
+                        break;
+                    case Instruction::IPUT_CHAR:
+                        obj->SetField<uint16_t>(off, static_cast<uint16_t>(frame->GetInt(vreg)));
+                        break;
+                    case Instruction::IPUT_SHORT:
+                        obj->SetField<int16_t>(off, static_cast<int16_t>(frame->GetInt(vreg)));
+                        break;
+                    case Instruction::IPUT_WIDE:
+                        obj->SetField<int64_t>(off, frame->GetLong(vreg));
+                        break;
+                    case Instruction::IPUT_OBJECT:
+                        obj->SetField<DexObject*>(off, frame->GetRef(vreg));
+                        break;
+                    default:
+                        obj->SetField<int32_t>(off, frame->GetInt(vreg));
+                        break;
+                }
+                break;
+            }
+
+            // Field static.
+            case Instruction::SGET:
+            case Instruction::SGET_WIDE:
+            case Instruction::SGET_OBJECT:
+            case Instruction::SGET_BOOLEAN:
+            case Instruction::SGET_BYTE:
+            case Instruction::SGET_CHAR:
+            case Instruction::SGET_SHORT: {
+                DexField* field = ResolveField(method, inst->VRegB_21c(), /*is_static=*/true);
+                if (field == nullptr || field->declaring_class == nullptr) {
+                    ThrowException("Ljava/lang/NoSuchFieldError;",
+                                   DescribeFieldRef(method, inst->VRegB_21c(), "sget"));
+                    return return_value;
+                }
+                EnsureInitialized(field->declaring_class);
+                if (HasPendingException()) return return_value;
+                auto& values = field->declaring_class->static_values;
+                const uint32_t slot = field->offset_or_slot;
+                if (slot >= values.size()) {
+                    ThrowException("Ljava/lang/NoSuchFieldError;",
+                                   DescribeFieldRef(method, inst->VRegB_21c(), "sget slot out of range"));
+                    return return_value;
+                }
+                frame->Set(inst->VRegA_21c(), values[slot]);
+                break;
+            }
+
+            case Instruction::SPUT:
+            case Instruction::SPUT_WIDE:
+            case Instruction::SPUT_OBJECT:
+            case Instruction::SPUT_BOOLEAN:
+            case Instruction::SPUT_BYTE:
+            case Instruction::SPUT_CHAR:
+            case Instruction::SPUT_SHORT: {
+                DexField* field = ResolveField(method, inst->VRegB_21c(), /*is_static=*/true);
+                if (field == nullptr || field->declaring_class == nullptr) {
+                    ThrowException("Ljava/lang/NoSuchFieldError;",
+                                   DescribeFieldRef(method, inst->VRegB_21c(), "sput"));
+                    return return_value;
+                }
+                EnsureInitialized(field->declaring_class);
+                if (HasPendingException()) return return_value;
+                auto& values = field->declaring_class->static_values;
+                const uint32_t slot = field->offset_or_slot;
+                if (slot >= values.size()) {
+                    ThrowException("Ljava/lang/NoSuchFieldError;",
+                                   DescribeFieldRef(method, inst->VRegB_21c(), "sput slot out of range"));
+                    return return_value;
+                }
+                values[slot] = frame->Get(inst->VRegA_21c());
+                break;
+            }
+
+            // Array element.
+            case Instruction::AGET:
+            case Instruction::AGET_WIDE:
+            case Instruction::AGET_OBJECT:
+            case Instruction::AGET_BOOLEAN:
+            case Instruction::AGET_BYTE:
+            case Instruction::AGET_CHAR:
+            case Instruction::AGET_SHORT: {
+                auto* arr = static_cast<DexArray*>(frame->GetRef(inst->VRegB_23x()));
+                if (arr == nullptr) {
+                    ThrowException("Ljava/lang/NullPointerException;", "aget on null");
+                    return return_value;
+                }
+                const int32_t index = frame->GetInt(inst->VRegC_23x());
+                if (index < 0 || index >= arr->length) {
+                    ThrowException("Ljava/lang/ArrayIndexOutOfBoundsException;",
+                                   "index " + std::to_string(index) + " length " +
+                                       std::to_string(arr->length));
+                    return return_value;
+                }
+                const uint32_t vreg = inst->VRegA_23x();
+                switch (inst->Opcode()) {
+                    case Instruction::AGET_BOOLEAN:
+                    case Instruction::AGET_BYTE:
+                        frame->SetInt(vreg, arr->Get<int8_t>(index));
+                        break;
+                    case Instruction::AGET_CHAR:
+                        frame->SetInt(vreg, arr->Get<uint16_t>(index));
+                        break;
+                    case Instruction::AGET_SHORT:
+                        frame->SetInt(vreg, arr->Get<int16_t>(index));
+                        break;
+                    case Instruction::AGET_WIDE:
+                        frame->SetLong(vreg, arr->Get<int64_t>(index));
+                        break;
+                    case Instruction::AGET_OBJECT:
+                        frame->SetRef(vreg, arr->Get<DexObject*>(index));
+                        break;
+                    default:
+                        frame->SetInt(vreg, arr->Get<int32_t>(index));
+                        break;
+                }
+                break;
+            }
+
+            case Instruction::APUT:
+            case Instruction::APUT_WIDE:
+            case Instruction::APUT_OBJECT:
+            case Instruction::APUT_BOOLEAN:
+            case Instruction::APUT_BYTE:
+            case Instruction::APUT_CHAR:
+            case Instruction::APUT_SHORT: {
+                auto* arr = static_cast<DexArray*>(frame->GetRef(inst->VRegB_23x()));
+                if (arr == nullptr) {
+                    ThrowException("Ljava/lang/NullPointerException;", "aput on null");
+                    return return_value;
+                }
+                const int32_t index = frame->GetInt(inst->VRegC_23x());
+                if (index < 0 || index >= arr->length) {
+                    ThrowException("Ljava/lang/ArrayIndexOutOfBoundsException;",
+                                   "index " + std::to_string(index) + " length " +
+                                       std::to_string(arr->length));
+                    return return_value;
+                }
+                const uint32_t vreg = inst->VRegA_23x();
+                switch (inst->Opcode()) {
+                    case Instruction::APUT_BOOLEAN:
+                    case Instruction::APUT_BYTE:
+                        arr->Set<int8_t>(index, static_cast<int8_t>(frame->GetInt(vreg)));
+                        break;
+                    case Instruction::APUT_CHAR:
+                        arr->Set<uint16_t>(index, static_cast<uint16_t>(frame->GetInt(vreg)));
+                        break;
+                    case Instruction::APUT_SHORT:
+                        arr->Set<int16_t>(index, static_cast<int16_t>(frame->GetInt(vreg)));
+                        break;
+                    case Instruction::APUT_WIDE:
+                        arr->Set<int64_t>(index, frame->GetLong(vreg));
+                        break;
+                    case Instruction::APUT_OBJECT:
+                        arr->Set<DexObject*>(index, frame->GetRef(vreg));
+                        break;
+                    default:
+                        arr->Set<int32_t>(index, frame->GetInt(vreg));
+                        break;
+                }
+                break;
+            }
+
+            // Call method.
+            case Instruction::INVOKE_VIRTUAL:
+            case Instruction::INVOKE_SUPER:
+            case Instruction::INVOKE_DIRECT:
+            case Instruction::INVOKE_STATIC:
+            case Instruction::INVOKE_INTERFACE:
+                if (!InvokeMethod(frame, inst, /*is_range=*/false, inst->Opcode())) {
+                    return return_value;
+                }
+                break;
+            case Instruction::INVOKE_VIRTUAL_RANGE:
+            case Instruction::INVOKE_SUPER_RANGE:
+            case Instruction::INVOKE_DIRECT_RANGE:
+            case Instruction::INVOKE_STATIC_RANGE:
+            case Instruction::INVOKE_INTERFACE_RANGE:
+                if (!InvokeMethod(frame, inst, /*is_range=*/true, inst->Opcode())) {
+                    return return_value;
+                }
+                break;
+
+            // Switch. Payload and targets are validated against the code item:
+            // a crafted offset/count otherwise reads out of bounds and escapes
+            // the PC from the method. Units are 16-bit code units throughout.
+            case Instruction::PACKED_SWITCH: {
+                const int32_t test = frame->GetInt(inst->VRegA_31t());
+                const int32_t off = inst->VRegB_31t();
+                const uint32_t base = static_cast<uint32_t>(dex_pc);
+                const uint32_t pbase = base + static_cast<uint32_t>(off);
+                // Header is ident + size + first_key = 4 units.
+                if (off < 0 || pbase + 4 > insns_size) {
+                    ThrowException("Ljava/lang/InternalError;", "packed-switch payload out of range");
+                    return return_value;
+                }
+                const uint16_t* payload = insns + pbase;
+                const auto* ps =
+                    reinterpret_cast<const Instruction::PackedSwitchPayload*>(payload);
+                const int32_t delta = test - ps->first_key;
+                if (delta >= 0 && delta < static_cast<int32_t>(ps->case_count) &&
+                    pbase + 4u + static_cast<uint32_t>(delta) * 2u + 2u <= insns_size) {
+                    const int32_t target = ps->targets[delta];
+                    const int64_t dest = static_cast<int64_t>(base) + target;
+                    if (dest >= 0 && dest <= static_cast<int64_t>(insns_size)) {
+                        dex_pc = static_cast<uint32_t>(dest);
+                        continue;
+                    }
+                }
+                break;
+            }
+            case Instruction::SPARSE_SWITCH: {
+                const int32_t test = frame->GetInt(inst->VRegA_31t());
+                const int32_t off = inst->VRegB_31t();
+                const uint32_t base = static_cast<uint32_t>(dex_pc);
+                const uint32_t pbase = base + static_cast<uint32_t>(off);
+                // Header is ident + case_count = 2 units; keys/targets follow.
+                if (off < 0 || pbase + 2 > insns_size) {
+                    ThrowException("Ljava/lang/InternalError;", "sparse-switch payload out of range");
+                    return return_value;
+                }
+                const uint16_t* payload = insns + pbase;
+                const auto* ss =
+                    reinterpret_cast<const Instruction::SparseSwitchPayload*>(payload);
+                // keys are case_count int32s, then targets are case_count int32s.
+                const uint64_t need =
+                    static_cast<uint64_t>(pbase) + 2u +
+                    static_cast<uint64_t>(ss->case_count) * 4u;
+                if (need > insns_size) {
+                    ThrowException("Ljava/lang/InternalError;", "sparse-switch cases out of range");
+                    return return_value;
+                }
+                const int32_t* keys = ss->GetKeys();
+                const int32_t* targets = ss->GetTargets();
+                bool matched = false;
+                for (uint16_t i = 0; i < ss->case_count; ++i) {
+                    if (keys[i] == test) {
+                        const int64_t dest = static_cast<int64_t>(base) + targets[i];
+                        if (dest >= 0 && dest <= static_cast<int64_t>(insns_size)) {
+                            dex_pc = static_cast<uint32_t>(dest);
+                            matched = true;
+                        }
+                        break;
+                    }
+                }
+                if (matched) continue;
+                break;
+            }
+
+            case Instruction::FILL_ARRAY_DATA: {
+                auto* arr = static_cast<DexArray*>(frame->GetRef(inst->VRegA_31t()));
+                if (arr == nullptr) {
+                    ThrowException("Ljava/lang/NullPointerException;", "fill-array-data on null");
+                    return return_value;
+                }
+                // Payload bounds first: ident + width + count, then the bytes.
+                const int32_t off = inst->VRegB_31t();
+                const uint32_t base = static_cast<uint32_t>(dex_pc);
+                const uint32_t pbase = base + static_cast<uint32_t>(off);
+                if (off < 0 || pbase + 4 > insns_size) {
+                    ThrowException("Ljava/lang/InternalError;", "fill-array-data out of range");
+                    return return_value;
+                }
+                const uint16_t* payload = insns + pbase;
+                const auto* ad = reinterpret_cast<const Instruction::ArrayDataPayload*>(payload);
+                // Width must match the array's real element size: a width=8
+                // payload on a byte array would copy 8x the allocation.
+                const uint32_t elem_size =
+                    arr->clazz != nullptr && arr->clazz->component_type != nullptr
+                        ? DexClassLinker::ElementSize(arr->clazz->component_type)
+                        : 0;
+                if (elem_size == 0 || ad->element_width != elem_size ||
+                    static_cast<int32_t>(ad->element_count) > arr->length) {
+                    ThrowException("Ljava/lang/ArrayIndexOutOfBoundsException;",
+                                   "fill-array-data is longer than array");
+                    return return_value;
+                }
+                // Payload bytes must also fit: count*width bytes from data.
+                const uint64_t blob =
+                    static_cast<uint64_t>(ad->element_count) * ad->element_width;
+                if (static_cast<uint64_t>(pbase) + 8 + blob >
+                    static_cast<uint64_t>(insns_size) * 2) {
+                    ThrowException("Ljava/lang/InternalError;", "fill-array-data overruns code");
+                    return return_value;
+                }
+                std::memcpy(arr->Data(), ad->data,
+                            static_cast<size_t>(ad->element_count) * ad->element_width);
+                break;
+            }
+
+            // Exception.
+            case Instruction::THROW: {
+                DexObject* ex = frame->GetRef(inst->VRegA_11x());
+                if (ex == nullptr) {
+                    ThrowException("Ljava/lang/NullPointerException;", "throw null");
+                    return return_value;
+                }
+                // Interpreter slot only, by design: a Java `throw` is caught
+                // by FindCatchHandler in this same interpreter. Mirroring it
+                // into the JNI env made a normal throw visible to a native
+                // ExceptionCheck on the call stack above and hung boot. The
+                // reverse gap (native throw invisible to bytecode) is covered
+                // by DexJniEnv::SetPendingException, which already forwards.
+                pending_exception_ = ex;
+                last_error_ = std::string("throw ") +
+                              (ex->clazz != nullptr ? ex->clazz->PrettyName() : "?");
+                // Guest `throw` skips ThrowException(), so the trace has to be
+                // captured here too or an app-thrown exception would arrive with no
+                // location at all.
+                pending_exception_trace_ = BuildStackTrace();
+                return return_value;
+            }
+
+            // There are no real threads so the monitor only counts; enough for single-thread code
+            // and don't make mistakes, the code is correct.
+            case Instruction::MONITOR_ENTER: {
+                DexObject* obj = frame->GetRef(inst->VRegA_11x());
+                if (obj == nullptr) {
+                    ThrowException("Ljava/lang/NullPointerException;", "monitor-enter on null");
+                    return return_value;
+                }
+                Monitor::Enter(obj);
+                break;
+            }
+            case Instruction::MONITOR_EXIT: {
+                DexObject* obj = frame->GetRef(inst->VRegA_11x());
+                if (obj == nullptr) {
+                    ThrowException("Ljava/lang/NullPointerException;", "monitor-exit on null");
+                    return return_value;
+                }
+                if (!Monitor::Exit(obj)) {
+                    ThrowException("Ljava/lang/IllegalMonitorStateException;",
+                                   "monitor-exit without owning the monitor");
+                    return return_value;
+                }
+                break;
+            }
+
+            default:
+                ThrowException("Ljava/lang/UnsupportedOperationException;",
+                               std::string("opcode not yet implemented: ") + inst->Name());
+                return return_value;
+        }
+        if (HasPendingException()) return return_value;
+        dex_pc = next_pc;
+    }
+
+    // Falling out of the end of the method without returning - bytecode error.
+    ThrowException("Ljava/lang/VerifyError;", "run out of bytecode without return");
+    return return_value;
+}
+
+}  // namespace kuart
+}  // namespace kudroid

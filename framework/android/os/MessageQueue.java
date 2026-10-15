@@ -1,0 +1,440 @@
+package android.os;
+
+/**
+ * Android MessageQueue implementation for KuDroid.
+ *
+ * Maintains a linked list of Messages ordered by timestamp (when).
+ * Prevents loops/cycles, supports timed wait/notify, and provides clean message cancellation.
+ */
+public final class MessageQueue {
+    private Message mMessages; // head of the queue
+    private boolean mQuitting = false;
+
+    // Native wait slot (AOSP-style wake primitive). The queue blocks on this
+    // instead of Object.wait(), so a native wake — message enqueue or touch
+    // injection — returns to the Looper thread without any interpreted Java
+    // notify call. Touch is then built and dispatched on the Looper thread.
+    private long mPtr;
+
+    private static native long nativeInit();
+    private static native void nativeDestroy(long ptr);
+    private static native void nativePollOnce(long ptr, long timeoutMillis);
+    private static native void nativeWake(long ptr);
+    private static native void nativeSetMainQueue(long ptr);
+    private static native void nativeDrainInput(long ptr);
+
+    /**
+     * Idle callbacks. Unity registers one on the UnityMain queue at startup
+     * (and Choreographer-style pumps use them for vsync-adjacent work); with
+     * no IdleHandler type the registration died as NPE-on-null and took the
+     * whole UnityMain thread down before the first frame.
+     */
+    public static interface IdleHandler {
+        /**
+         * Called when the queue has nothing ready to dispatch. Return false
+         * to unregister, true to stay registered.
+         */
+        boolean queueIdle();
+    }
+
+    private final java.util.ArrayList<IdleHandler> mIdleHandlers =
+            new java.util.ArrayList<IdleHandler>();
+
+    /**
+     * False for the main looper: quitting it kills the process's event pump.
+     * Matches AOSP, where quit() on the main queue throws instead of silently
+     * ending the session (which is exactly how a stray quit becomes a mystery
+     * "session ended" with no exception anywhere).
+     */
+    private final boolean mQuitAllowed;
+    private final String mOwnerName;
+
+    MessageQueue() {
+        this(true);
+    }
+
+    MessageQueue(boolean quitAllowed) {
+        mQuitAllowed = quitAllowed;
+        mPtr = nativeInit();
+        String name;
+        try {
+            name = Thread.currentThread().getName();
+        } catch (Throwable t) {
+            name = "?";
+        }
+        mOwnerName = name;
+    }
+
+    /**
+     * Marks this queue as the process main queue so touch injection wakes it.
+     * Called by Looper.prepareMainLooper.
+     */
+    void setAsMainQueue() {
+        if (mPtr != 0) nativeSetMainQueue(mPtr);
+    }
+
+    boolean isQuitting() {
+        synchronized (this) {
+            return mQuitting;
+        }
+    }
+
+    /**
+     * Retires this queue after its Looper has returned. The queue monitor
+     * serializes pointer clearing with enqueueMessage's native wake call.
+     */
+    void disposeAfterLoop() {
+        long ptr;
+        synchronized (this) {
+            mQuitting = true;
+            Message p = mMessages;
+            while (p != null) {
+                Message n = p.next;
+                p.recycle();
+                p = n;
+            }
+            mMessages = null;
+            ptr = mPtr;
+            mPtr = 0;
+            this.notifyAll();
+        }
+        if (ptr != 0) nativeDestroy(ptr);
+    }
+
+    /**
+     * Enqueue a message sorted by 'when' timestamp.
+     */
+    boolean enqueueMessage(Message msg, long when) {
+        if (msg == null) {
+            return false;
+        }
+        if (msg.target == null) {
+            throw new IllegalArgumentException("Message must have a target.");
+        }
+        synchronized (this) {
+            if (mQuitting) {
+                android.util.Log.w("KuLooperQuit", "message what=" + msg.what
+                        + " dropped: queue of " + mOwnerName + " already quitting");
+                return false;
+            }
+
+            // Check if message is already in the queue to prevent cycles
+            Message cur = mMessages;
+            while (cur != null) {
+                if (cur == msg) {
+                    return true; // Already enqueued
+                }
+                cur = cur.next;
+            }
+
+            msg.inUse = true;
+            msg.when = when;
+            msg.next = null;
+
+            Message p = mMessages;
+            if (p == null || when == 0 || when < p.when) {
+                // Insert at the head
+                msg.next = p;
+                mMessages = msg;
+                this.notifyAll();
+                if (mPtr != 0) nativeWake(mPtr);
+                return true;
+            }
+
+            // Insert in order of 'when'
+            Message prev = null;
+            while (p != null && p.when <= when) {
+                if (p == msg) {
+                    return true; // Prevent cycle
+                }
+                prev = p;
+                p = p.next;
+            }
+
+            msg.next = p;
+            if (prev != null) {
+                prev.next = msg;
+            }
+            this.notifyAll();
+            if (mPtr != 0) nativeWake(mPtr);
+            return true;
+        }
+    }
+
+    /**
+     * Returns the next message ready to be executed, or null if the queue is quitting.
+     */
+    Message next() {
+        // Idle handlers run at most once per wakeup: without this a
+        // staying-registered handler re-runs every loop with no wait in
+        // between (spin). The flag resets on every wait below.
+        boolean idled = false;
+        for (;;) {
+            IdleHandler[] idle = null;
+            long waitMs = 0;
+            boolean waitForever = false;
+            synchronized (this) {
+                if (mQuitting) {
+                    return null;
+                }
+
+                final long now = SystemClock.uptimeMillis();
+                Message msg = mMessages;
+
+                if (msg != null) {
+                    if (now < msg.when) {
+                        // Head is in the future: snapshot idle handlers to run
+                        // OUTSIDE the monitor below, then wait out the
+                        // remainder. Handlers that enqueue work wake this wait
+                        // via notifyAll.
+                        idle = snapshotIdleHandlersLocked();
+                        waitMs = msg.when - SystemClock.uptimeMillis();
+                    } else {
+                        // Message is ready to dispatch
+                        mMessages = msg.next;
+                        msg.next = null;
+                        msg.inUse = false;
+                        return msg;
+                    }
+                } else {
+                    // Idle: snapshot handlers, run them unlocked, then wait
+                    // unbounded for notification. Unlike AOSP (which re-polls
+                    // immediately and can spin on a staying-registered
+                    // handler), one pass per wake keeps CPU bounded; any
+                    // enqueue wakes us.
+                    idle = snapshotIdleHandlersLocked();
+                    waitForever = true;
+                }
+            }
+            // Outside the monitor: handlers run arbitrary interpreted code
+            // that may itself synchronize or enqueue. Running them under the
+            // queue monitor inverted lock order against every such path.
+            if (idle != null && idle.length > 0 && !idled) {
+                runIdleHandlers(idle);
+                idled = true;
+                // Re-evaluate from the top: anything enqueued during the
+                // unlocked run is visible now. Falling straight into the wait
+                // below would lose its notify and hang.
+                continue;
+            }
+            long remaining;
+            synchronized (this) {
+                if (mQuitting) {
+                    return null;
+                }
+                // Re-check under the lock: an enqueue that landed between the
+                // first check and this lock has no waiter to wake yet, so its
+                // nativeWake/notify is already spent — a blind wait here would
+                // sleep through it. Re-derive the timeout from the CURRENT head:
+                // a future-due message that arrived in the gap must wake us
+                // at its own `when`, not sleep unbounded on a stale
+                // waitForever flag (that was the boot hang).
+                Message head = mMessages;
+                if (head != null && SystemClock.uptimeMillis() >= head.when) {
+                    continue;
+                }
+                remaining = waitForever ? -1 : waitMs;
+                if (head != null) {
+                    final long r = head.when - SystemClock.uptimeMillis();
+                    if (waitForever || r < remaining) {
+                        remaining = r;
+                    }
+                }
+            }
+            // Wait OUTSIDE the Java monitor. The native slot is woken by a
+            // message enqueue and by touch injection, so the Looper thread
+            // returns here without any interpreted notify call. Idle handlers
+            // and touch both run on this thread; the Java wait path remains
+            // only as a fallback for a queue with no native slot.
+            if (mPtr != 0) {
+                nativePollOnce(mPtr, remaining);
+                // Build pending MotionEvents on the Looper thread. This is the
+                // AOSP InputEventReceiver shape: touch is constructed and
+                // dispatched where the frame loop already runs, never on a
+                // second thread contending for the VM lock.
+                nativeDrainInput(mPtr);
+                idled = false;
+            } else {
+                synchronized (this) {
+                    if (mQuitting) {
+                        return null;
+                    }
+                    try {
+                        if (remaining < 0) {
+                            this.wait();
+                        } else if (remaining > 0) {
+                            this.wait(remaining);
+                        }
+                        idled = false;
+                    } catch (InterruptedException ignored) {
+                        idled = false;
+                    }
+                }
+            }
+        }
+    }
+
+    public void addIdleHandler(IdleHandler handler) {
+        if (handler == null) {
+            throw new NullPointerException("IdleHandler must not be null");
+        }
+        synchronized (this) {
+            mIdleHandlers.add(handler);
+        }
+    }
+
+    public void removeIdleHandler(IdleHandler handler) {
+        synchronized (this) {
+            mIdleHandlers.remove(handler);
+        }
+    }
+
+    /**
+     * Copy of the handler list, caller holding the queue monitor. The handlers
+     * themselves run outside it (see next()).
+     */
+    private IdleHandler[] snapshotIdleHandlersLocked() {
+        int count = mIdleHandlers.size();
+        IdleHandler[] out = new IdleHandler[count];
+        for (int i = 0; i < count; i++) {
+            out[i] = mIdleHandlers.get(i);
+        }
+        return out;
+    }
+
+    /**
+     * Runs a snapshot outside the queue monitor. A handler returning false is
+     * unregistered, matching AOSP. Removals go through removeIdleHandler, so a
+     * handler removed concurrently just runs once more — same as AOSP.
+     */
+    private void runIdleHandlers(IdleHandler[] handlers) {
+        for (int i = 0; i < handlers.length; i++) {
+            IdleHandler handler = handlers[i];
+            if (handler == null) continue;
+            boolean keep = false;
+            try {
+                keep = handler.queueIdle();
+            } catch (Throwable ignored) {}
+            if (!keep) {
+                removeIdleHandler(handler);
+            }
+        }
+    }
+
+    void removeCallbacksAndMessages(Handler h, Object token) {
+        if (h == null) return;
+        synchronized (this) {
+            Message p = mMessages;
+            while (p != null && p.target == h && (token == null || p.obj == token)) {
+                Message n = p.next;
+                mMessages = n;
+                p.recycle();
+                p = n;
+            }
+            while (p != null) {
+                Message n = p.next;
+                if (n != null) {
+                    if (n.target == h && (token == null || n.obj == token)) {
+                        Message nn = n.next;
+                        n.recycle();
+                        p.next = nn;
+                        continue;
+                    }
+                }
+                p = n;
+            }
+        }
+    }
+
+    void removeMessages(Handler h, int what, Object object) {
+        if (h == null) return;
+        synchronized (this) {
+            Message p = mMessages;
+            while (p != null && p.target == h && p.what == what && (object == null || p.obj == object)) {
+                Message n = p.next;
+                mMessages = n;
+                p.recycle();
+                p = n;
+            }
+            while (p != null) {
+                Message n = p.next;
+                if (n != null) {
+                    if (n.target == h && n.what == what && (object == null || n.obj == object)) {
+                        Message nn = n.next;
+                        n.recycle();
+                        p.next = nn;
+                        continue;
+                    }
+                }
+                p = n;
+            }
+        }
+    }
+
+    void removeCallbacks(Handler h, Runnable r, Object token) {
+        if (h == null || r == null) return;
+        synchronized (this) {
+            Message p = mMessages;
+            while (p != null && p.target == h && p.callback == r && (token == null || p.obj == token)) {
+                Message n = p.next;
+                mMessages = n;
+                p.recycle();
+                p = n;
+            }
+            while (p != null) {
+                Message n = p.next;
+                if (n != null) {
+                    if (n.target == h && n.callback == r && (token == null || n.obj == token)) {
+                        Message nn = n.next;
+                        n.recycle();
+                        p.next = nn;
+                        continue;
+                    }
+                }
+                p = n;
+            }
+        }
+    }
+
+    /**
+     * exit queue.
+     *
+     * Like AOSP, quitting the MAIN queue throws instead of silently returning
+     * null from next() forever: a stray quit (game, plugin, Swappy) then names
+     * itself in the exception instead of ending the session with no trace.
+     */
+    void quit() {
+        String caller;
+        try {
+            caller = Thread.currentThread().getName();
+        } catch (Throwable t) {
+            caller = "?";
+        }
+        android.util.Log.e("KuLooperQuit", "quit() queue of " + mOwnerName
+                + " from thread " + caller
+                + (mQuitAllowed ? " (allowed)" : " (MAIN: throwing)"));
+        if (!mQuitAllowed) {
+            throw new IllegalStateException("Main thread not allowed to quit.");
+        }
+        quitInternal();
+    }
+
+    /**
+     * Unconditional quit for KuDroid's own teardown (activity destroy on the way
+     * out). Never called by app code; the guard above stays total for those.
+     */
+    void quitInternal() {
+        synchronized (this) {
+            mQuitting = true;
+            Message p = mMessages;
+            while (p != null) {
+                Message n = p.next;
+                p.recycle();
+                p = n;
+            }
+            mMessages = null;
+            this.notifyAll();
+            if (mPtr != 0) nativeWake(mPtr);
+        }
+    }
+}

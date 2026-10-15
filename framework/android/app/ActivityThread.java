@@ -1,0 +1,1094 @@
+package android.app;
+
+import android.os.Handler;
+import android.os.Looper;
+import android.os.Message;
+import android.os.Bundle;
+import android.content.Intent;
+import android.view.MotionEvent;
+
+/**
+ * manage application lifecycle and main ui flow according to android standards.
+ * use looper and handler for safe coordination.
+ */
+public final class ActivityThread {
+    public static final int LAUNCH_ACTIVITY = 100;
+    public static final int PAUSE_ACTIVITY = 101;
+    public static final int RESUME_ACTIVITY = 102;
+    public static final int DESTROY_ACTIVITY = 103;
+    public static final int TOUCH_EVENT = 104;
+    public static final int TEXT_INPUT = 105;
+    public static final int DELETE_BACKWARD = 106;
+    private static final int SURFACE_CHANGED = 107;
+    private static final int PERMISSION_RESULT = 108;
+    private static final int CAMERA_EVENTS = 109;
+    private static final int NETWORK_CHANGED = 110;
+    private static boolean sNetworkChangeQueued;
+    private static boolean sCameraEventsQueued;
+
+    private static ActivityThread sCurrentActivityThread;
+    private Activity mInitialActivity;
+    private String mInitialActivityName;
+    /** Framework classes the launch attempt found missing; shown in the fallback UI. */
+    private java.util.ArrayList<String> mFrameworkGaps = new java.util.ArrayList<String>();
+    private H mH;
+
+    private static native void kudroid_note_java_paused();
+
+    /** The app's AppComponentFactory, when the manifest declares one. */
+    private AppComponentFactory mComponentFactory;
+    /** The app's Application instance, once bootstrapped. */
+    private Application mApplication;
+
+    /**
+     * Package name from AndroidManifest.xml.
+     *
+     * Static because Context implementations need it before any ActivityThread
+     * instance is reachable, and because there is exactly one app per process.
+     */
+    private static String sPackageName = "";
+
+    public static String getPackageName() {
+        return sPackageName;
+    }
+
+    /**
+     * The running ActivityThread, or null before attach().
+     *
+     * Native libraries reach the Application through this static — the JNI pattern
+     * is ActivityThread.currentActivityThread().getApplication() to obtain a Context
+     * without being handed one. It is standard enough that SDKs which never see an
+     * Activity (telemetry, networking, crash reporters) depend on it.
+     */
+    public static ActivityThread currentActivityThread() {
+        return sCurrentActivityThread;
+    }
+
+    /** The Application instance, or null when the app declares none and none was created. */
+    public Application getApplication() {
+        return mApplication;
+    }
+
+    public static Application currentApplication() {
+        ActivityThread t = sCurrentActivityThread;
+        return (t != null) ? t.mApplication : null;
+    }
+
+    /**
+     * The Activity this thread launched, or null before it exists.
+     *
+     * KuDroid runs one Activity, so "the current Activity" is unambiguous here in a way it
+     * is not on Android. Exposed because code that was handed no Context asks for one this
+     * way — Fragment.getActivity() with no fragment manager to attach it, and SDKs that
+     * reach for an Activity to show UI over.
+     */
+    public static Activity currentActivity() {
+        ActivityThread t = sCurrentActivityThread;
+        return (t != null) ? t.mInitialActivity : null;
+    }
+
+    private class H extends Handler {
+        public void handleMessage(Message msg) {
+            switch (msg.what) {
+                case LAUNCH_ACTIVITY:
+                    handleLaunchActivity(new String[] { (String) msg.obj });
+                    break;
+                case PAUSE_ACTIVITY:
+                    handlePauseActivity();
+                    break;
+                case RESUME_ACTIVITY:
+                    handleResumeActivity();
+                    break;
+                case DESTROY_ACTIVITY:
+                    handleDestroyActivity();
+                    break;
+                case TOUCH_EVENT:
+                    if (mInitialActivity != null && msg.obj instanceof MotionEvent) {
+                        onTouchEventDispatched(msg);
+                        mInitialActivity.dispatchTouchEvent((MotionEvent) msg.obj);
+                    }
+                    break;
+                case TEXT_INPUT:
+                    if (msg.obj instanceof String) {
+                        android.view.inputmethod.InputMethodManager.deliverText((String) msg.obj);
+                    }
+                    break;
+                case DELETE_BACKWARD:
+                    android.view.inputmethod.InputMethodManager.deliverDeleteBackward();
+                    break;
+                case SURFACE_CHANGED:
+                    performSurfaceTraversal();
+                    break;
+                case NETWORK_CHANGED:
+                    sNetworkChangeQueued = false;
+                    android.net.ConnectivityManager.dispatchNetworkChange();
+                    break;
+                case CAMERA_EVENTS:
+                    sCameraEventsQueued = false;
+                    android.hardware.Camera.dispatchPending();
+                    break;
+                case PERMISSION_RESULT:
+                    if (msg.obj instanceof String[]) deliverPermissionResult(msg.arg1, (String[]) msg.obj);
+                    break;
+            }
+        }
+    }
+
+    /**
+     * Queue the outcome of Activity.requestPermissions.
+     *
+     * Both lists are comma separated and parallel: permission names, and
+     * PERMISSION_GRANTED (0) / PERMISSION_DENIED (-1) for each.
+     */
+    public static void postPermissionResult(int requestCode, String permissionsCsv,
+                                            String resultsCsv) {
+        ActivityThread thread = sCurrentActivityThread;
+        if (thread == null || thread.mH == null) return;
+        Message msg = Message.obtain();
+        msg.what = PERMISSION_RESULT;
+        msg.arg1 = requestCode;
+        msg.obj = new String[] { permissionsCsv, resultsCsv };
+        thread.mH.sendMessage(msg);
+    }
+
+    private void deliverPermissionResult(int requestCode, String[] csvs) {
+        if (mInitialActivity == null || csvs[0] == null || csvs[1] == null) return;
+        String[] permissions = csvs[0].split(",");
+        String[] results = csvs[1].split(",");
+        int[] grantResults = new int[permissions.length];
+        for (int i = 0; i < grantResults.length; ++i) {
+            grantResults[i] = i < results.length && "0".equals(results[i].trim())
+                    ? android.content.pm.PackageManager.PERMISSION_GRANTED
+                    : android.content.pm.PackageManager.PERMISSION_DENIED;
+        }
+        mInitialActivity.onRequestPermissionsResult(requestCode, permissions, grantResults);
+    }
+
+    /** Queue the host's network path change for ConnectivityManager callbacks; Looper thread only. */
+    public static void postNetworkChanged() {
+        ActivityThread thread = sCurrentActivityThread;
+        if (thread == null || thread.mH == null || sNetworkChangeQueued) return;
+        sNetworkChangeQueued = true;
+        thread.mH.sendEmptyMessage(NETWORK_CHANGED);
+    }
+
+    /** Queue camera frames, photos and errors the host delivered; Looper thread only. */
+    public static void postCameraEvents() {
+        ActivityThread thread = sCurrentActivityThread;
+        if (thread == null || thread.mH == null || sCameraEventsQueued) return;
+        sCameraEventsQueued = true;
+        thread.mH.sendEmptyMessage(CAMERA_EVENTS);
+    }
+
+    public static void postSurfaceChanged() {
+        ActivityThread thread = sCurrentActivityThread;
+        if (thread != null && thread.mH != null) {
+            thread.mH.sendEmptyMessage(SURFACE_CHANGED);
+        }
+    }
+
+    private void performSurfaceTraversal() {
+        if (mInitialActivity == null || mInitialActivity.isDestroyed()) return;
+        mInitialActivity.renderViewHierarchy();
+        android.view.Window window = mInitialActivity.getWindow();
+        updateViewSurfaces(window.getDecorView(), window.hasSurface());
+        window.dispatchSurfaceReady();
+    }
+
+    /** Complete UI layout before a renderer reads its initial dimensions. */
+    public static boolean awaitSurfaceLayout() {
+        final ActivityThread thread = sCurrentActivityThread;
+        if (thread == null || thread.mH == null) return true;
+        if (Looper.myLooper() == thread.mH.getLooper()) {
+            thread.performSurfaceTraversal();
+            return true;
+        }
+        final java.util.concurrent.CountDownLatch done = new java.util.concurrent.CountDownLatch(1);
+        if (!thread.mH.post(new Runnable() {
+            @Override public void run() {
+                try { thread.performSurfaceTraversal(); }
+                finally { done.countDown(); }
+            }
+        })) return false;
+        try {
+            return done.await(5, java.util.concurrent.TimeUnit.SECONDS);
+        } catch (InterruptedException interrupted) {
+            return false;
+        }
+    }
+
+    private static void updateViewSurfaces(android.view.View view, boolean ready) {
+        if (view instanceof android.view.SurfaceView) {
+            android.view.SurfaceView surface = (android.view.SurfaceView) view;
+            if (ready) surface.dispatchSurfaceReady(surface.getWidth(), surface.getHeight());
+            else surface.dispatchSurfaceDestroyed();
+        }
+        if (view instanceof android.view.ViewGroup) {
+            android.view.ViewGroup group = (android.view.ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); ++i) {
+                updateViewSurfaces(group.getChildAt(i), ready);
+            }
+        }
+    }
+
+    /**
+     * Queue text the user typed on the host keyboard.
+     *
+     * Called from the native side (kuart_dispatch_text_input) on whatever thread the
+     * host's keyboard runs on. Going through the Handler puts the edit on the Looper
+     * thread, which is the only thread the app expects its text to change on.
+     */
+    public static void postTextInput(String text) {
+        if (text == null || text.isEmpty()) return;
+        if (sCurrentActivityThread != null && sCurrentActivityThread.mH != null) {
+            Message msg = Message.obtain();
+            msg.what = TEXT_INPUT;
+            msg.obj = text;
+            sCurrentActivityThread.mH.sendMessage(msg);
+        }
+    }
+
+    /** Queue a backspace from the host keyboard. */
+    public static void postDeleteBackward() {
+        if (sCurrentActivityThread != null && sCurrentActivityThread.mH != null) {
+            Message msg = Message.obtain();
+            msg.what = DELETE_BACKWARD;
+            sCurrentActivityThread.mH.sendMessage(msg);
+        }
+    }
+
+    /**
+     * Coalesce touch floods: a drag produces 60-120 MOVE events/s, and each
+     * one as its own Looper message starves everything else on the main thread
+     * (render ticks, lifecycle) while holding the VM lock through a full
+     * interpreted dispatch. AOSP keeps at most one pending MOVE per
+     * connection; here the pending MOVE message is updated in place so the
+     * queue holds at most one, and stale intermediate positions are dropped.
+     * DOWN/UP/CANCEL pass through untouched — their order matters.
+     */
+    private static final Object sTouchMsgLock = new Object();
+    private static long sLastDownTime = 0;
+    private static Message sPendingMoveMsg = null;
+
+    public static void postTouchEvent(int action, int pointerCount, float x, float y) {
+        postTouchEvent(action, pointerCount, null, null, null, x, y);
+    }
+
+    /**
+     * Touch event carrying every live finger.
+     *
+     * The single-coordinate form cannot describe multi-touch: a two-finger drag needs two
+     * positions in one event, and every frame of a drag needs each finger's own. ids/xs/ys
+     * are the native layer's pointer table, ordered so index i is that pointer's slot —
+     * the same order the action's pointer index refers to.
+     */
+    public static void postTouchEvent(int action, int pointerCount, int[] ids, float[] xs,
+            float[] ys, float x, float y) {
+        if (sCurrentActivityThread == null || sCurrentActivityThread.mH == null) return;
+        final long now = android.os.SystemClock.uptimeMillis();
+        final int maskedAction = action & MotionEvent.ACTION_MASK;
+        if (pointerCount < 1) pointerCount = 1;
+        final boolean havePointers = ids != null && xs != null && ys != null
+                && ids.length >= pointerCount && xs.length >= pointerCount
+                && ys.length >= pointerCount;
+        // Never emit a pointer index the event's own count cannot back: native input
+        // code indexes per-pointer arrays by it, and index >= count corrupts memory.
+        // A second finger whose count got lost upstream still lands as a valid event.
+        final int actionIndex = (action & MotionEvent.ACTION_POINTER_INDEX_MASK)
+                >> MotionEvent.ACTION_POINTER_INDEX_SHIFT;
+        if (actionIndex >= pointerCount) {
+            pointerCount = actionIndex + 1;
+        }
+        float primX = (havePointers && pointerCount >= 1) ? xs[0] : x;
+        float primY = (havePointers && pointerCount >= 1) ? ys[0] : y;
+        long downTime;
+        synchronized (sTouchMsgLock) {
+            if (maskedAction == MotionEvent.ACTION_DOWN || sLastDownTime == 0) {
+                sLastDownTime = now;
+            }
+            downTime = sLastDownTime;
+            if (maskedAction == MotionEvent.ACTION_UP || maskedAction == MotionEvent.ACTION_CANCEL) {
+                sLastDownTime = 0;
+            }
+            if (maskedAction == MotionEvent.ACTION_MOVE && sPendingMoveMsg != null
+                    && sPendingMoveMsg.obj instanceof MotionEvent) {
+                // A MOVE is still queued: fold the newest sample into it and skip
+                // enqueueing. Worst case the fold lands just as the Looper picks the
+                // message up — then the dispatch sees slightly newer coordinates,
+                // which is still a valid drag sample. The fold must carry every pointer:
+                // updating one leaves the other finger's position frozen for the whole
+                // drag, which is what made two-finger dragging fight itself.
+                MotionEvent pending = (MotionEvent) sPendingMoveMsg.obj;
+                if (havePointers) {
+                    if (pending.updateCoalescedMove(pointerCount, ids, xs, ys, now)) return;
+                } else if (pending.getPointerCount() == pointerCount) {
+                    pending.updateCoalescedMove(primX, primY, now);
+                    return;
+                }
+            }
+        }
+        MotionEvent ev = havePointers
+                ? MotionEvent.obtainWithPointers(downTime, now, action, ids, xs, ys, pointerCount)
+                : MotionEvent.obtain(downTime, now, action, x, y, 0, pointerCount);
+        Message msg = Message.obtain();
+        msg.what = TOUCH_EVENT;
+        msg.obj = ev;
+        if (maskedAction == MotionEvent.ACTION_MOVE) {
+            synchronized (sTouchMsgLock) {
+                sPendingMoveMsg = msg;
+            }
+        }
+        sCurrentActivityThread.mH.sendMessage(msg);
+    }
+
+    /** Called by H when a TOUCH_EVENT is dispatched. */
+    private static void onTouchEventDispatched(Message msg) {
+        if (msg.what == TOUCH_EVENT) {
+            synchronized (sTouchMsgLock) {
+                if (sPendingMoveMsg == msg) {
+                    sPendingMoveMsg = null;
+                }
+            }
+        }
+    }
+
+    private static class CrashHandler implements Thread.UncaughtExceptionHandler {
+        @Override
+        public void uncaughtException(Thread t, Throwable e) {
+            String threadName = (t != null ? t.getName() : "unknown");
+            android.util.Log.e("KuDroidCrashHandler", "=== UNCAUGHT JAVA EXCEPTION on thread [" + threadName + "] ===");
+            if (e != null) {
+                android.util.Log.e("KuDroidCrashHandler", e.getClass().getName() + ": " + e.getMessage());
+                StackTraceElement[] trace = e.getStackTrace();
+                if (trace != null) {
+                    for (StackTraceElement ste : trace) {
+                        android.util.Log.e("KuDroidCrashHandler", "    at " + ste.toString());
+                    }
+                }
+            }
+            android.util.Log.e("KuDroidCrashHandler", "=======================================================");
+        }
+    }
+
+    public static void main(String[] args) {
+        // KuART keeps its Java heap and static fields between shell sessions.
+        // Clear only state owned by this guest UI thread before preparing a new run.
+        Looper.resetMainLooperForRelaunch();
+        android.view.Choreographer.resetForRelaunch();
+        sPendingMoveMsg = null;
+        sLastDownTime = 0;
+        sCurrentActivityThread = null;
+        sPackageName = "";
+
+        try {
+            Thread.setDefaultUncaughtExceptionHandler(new CrashHandler());
+
+            Looper.prepareMainLooper();
+            ActivityThread thread = new ActivityThread();
+            thread.attach();
+
+            // args carry what the C++ layer read out of AndroidManifest.xml. Nothing is
+            // guessed or hardcoded: entries the manifest does not declare arrive empty.
+            //   args[0]      package name
+            //   args[1]      android:appComponentFactory, or "" if absent
+            //   args[2]      android:name on <application>, or "" if absent
+            //   args[3..]    activity candidates in launch order, args[3] the launcher
+            final String packageName = (args != null && args.length > 0) ? args[0] : "";
+            final String factoryName = (args != null && args.length > 1) ? args[1] : "";
+            final String appClassName = (args != null && args.length > 2) ? args[2] : "";
+
+            String[] candidates = new String[0];
+            if (args != null && args.length > 3) {
+                candidates = new String[args.length - 3];
+                for (int i = 3; i < args.length; i++) candidates[i - 3] = args[i];
+            }
+
+            if (packageName != null && !packageName.isEmpty()) sPackageName = packageName;
+
+            thread.bootstrapApplication(factoryName, appClassName);
+
+            if (candidates.length > 0 && candidates[0] != null && !candidates[0].isEmpty()) {
+                android.util.Log.i("ActivityThread", "Launching target Activity immediately: " + candidates[0]);
+                thread.handleLaunchActivity(candidates);
+            }
+
+            // Main UI event loop
+            try {
+                Looper.loop();
+            } catch (Throwable t) {
+                android.util.Log.e("ActivityThread", "Handled exception in main looper: " + t.toString());
+                t.printStackTrace();
+            }
+        } finally {
+            android.view.Choreographer.resetForRelaunch();
+            Looper.resetMainLooperForRelaunch();
+            sPendingMoveMsg = null;
+            sLastDownTime = 0;
+            sCurrentActivityThread = null;
+            sPackageName = "";
+            android.util.Log.i("ActivityThread", "Main Looper exited. ActivityThread terminated.");
+        }
+    }
+
+    /**
+     * Run pre-Activity startup: factory, then Application, then onCreate().
+     * Failures are logged without stopping the launch.
+     */
+    private void bootstrapApplication(String factoryName, String appClassName) {
+        if (factoryName != null && !factoryName.isEmpty()) {
+            try {
+                Class<?> fc = Class.forName(factoryName);
+                Object instance = (fc != null) ? fc.newInstance() : null;
+                if (instance instanceof AppComponentFactory) {
+                    mComponentFactory = (AppComponentFactory) instance;
+                    android.util.Log.i("ActivityThread",
+                            "AppComponentFactory ready: " + factoryName);
+                } else if (instance != null) {
+                    // Declared but not a factory: Android would throw. Carrying on
+                    // without it is better than aborting, but say so.
+                    android.util.Log.e("ActivityThread", "appComponentFactory '" + factoryName +
+                            "' is not an android.app.AppComponentFactory; ignoring");
+                }
+            } catch (Throwable t) {
+                noteFrameworkGap(t);
+                android.util.Log.e("ActivityThread",
+                        "appComponentFactory '" + factoryName + "' failed: " + describeChain(t));
+            }
+        }
+
+        // No <application android:name>: Android still creates a plain Application,
+        // and getApplicationContext() has to return something.
+        final String appName = (appClassName != null && !appClassName.isEmpty())
+                ? appClassName : "android.app.Application";
+        try {
+            if (mComponentFactory != null) {
+                mApplication = mComponentFactory.instantiateApplication(
+                        ClassLoader.getSystemClassLoader(), appName);
+            } else {
+                Class<?> ac = Class.forName(appName);
+                Object instance = (ac != null) ? ac.newInstance() : null;
+                mApplication = (instance instanceof Application) ? (Application) instance : null;
+            }
+        } catch (Throwable t) {
+            noteFrameworkGap(t);
+            android.util.Log.e("ActivityThread",
+                    "Application '" + appName + "' could not be created: " + describeChain(t));
+        }
+
+        if (mApplication == null) {
+            try {
+                mApplication = new Application();
+            } catch (Throwable ignored) {}
+        }
+        if (mApplication == null) return;
+
+        try {
+            mApplication.attach(new ApplicationContext());
+        } catch (Throwable t) {
+            android.util.Log.e("ActivityThread", "Application.attach failed: " + t.toString());
+        }
+        try {
+            mApplication.onCreate();
+            android.util.Log.i("ActivityThread", "Application.onCreate() done: " + appName);
+        } catch (Throwable t) {
+            noteFrameworkGap(t);
+            android.util.Log.e("ActivityThread",
+                    "Application.onCreate() failed: " + describeChain(t));
+        }
+    }
+
+    /** Record a missing framework class so the diagnostic screen can list it. */
+    private void noteFrameworkGap(Throwable t) {
+        final String gap = frameworkGapOf(t);
+        if (gap == null) return;
+        if (!mFrameworkGaps.contains(gap)) mFrameworkGaps.add(gap);
+        android.util.Log.e("ActivityThread",
+                "FRAMEWORK CLASS MISSING: " + gap +
+                " (add it under framework/ and rebuild framework.dex)");
+    }
+
+    private void attach() {
+        sCurrentActivityThread = this;
+        mH = new H();
+    }
+
+    /**
+     * True if clazz is android.app.Activity or a subclass of it.
+     *
+     * Walks the superclass chain rather than using isAssignableFrom so it works even
+     * when a candidate's own hierarchy is partly stubbed: a missing intermediate
+     * class stops the walk and the candidate is rejected, instead of throwing from
+     * the middle of a cast.
+     */
+    private static boolean isActivitySubclass(Class<?> clazz) {
+        try {
+            for (Class<?> c = clazz; c != null; c = c.getSuperclass()) {
+                if ("android.app.Activity".equals(c.getName())) return true;
+            }
+        } catch (Throwable ignored) {}
+        return false;
+    }
+
+    /** Packages KuDroid itself is responsible for shipping (the boot classpath). */
+    private static final String[] BOOT_PACKAGES = {
+        "java.", "javax.", "android.", "androidx.", "dalvik.", "sun.", "libcore.",
+        "com.android.", "org.json.", "org.xml.sax.", "org.w3c.dom.", "org.xmlpull.",
+        "org.apache.harmony.",
+    };
+
+    private static boolean isBootClasspathClass(String name) {
+        if (name == null) return false;
+        for (int i = 0; i < BOOT_PACKAGES.length; i++) {
+            if (name.startsWith(BOOT_PACKAGES[i])) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Pull the missing class name from a missing-class error.
+     * Accepts dotted and slash forms; returns null when not such an error.
+     */
+    private static String extractMissingClassName(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            String msg = c.getMessage();
+            if (msg != null && !msg.isEmpty()) {
+                String m = msg.trim();
+                int space = m.indexOf(' ');
+                if (space > 0) m = m.substring(0, space);
+                m = m.replace('/', '.');
+                if (m.indexOf('.') > 0) return stripMethodSuffix(m);
+            }
+            if (c.getCause() == c) break;
+        }
+        return null;
+    }
+
+    /**
+     * "java.util.regex.Pattern.compile" -> "java.util.regex.Pattern".
+     *
+     * The class name ends at the first segment that starts with an upper-case letter,
+     * since package segments are lower-case by convention and a trailing method name
+     * follows the class. Fully obfuscated names have no upper-case segment, in which
+     * case the whole string is returned unchanged.
+     */
+    private static String stripMethodSuffix(String dotted) {
+        int start = 0;
+        while (start < dotted.length()) {
+            int dot = dotted.indexOf('.', start);
+            int segEnd = (dot < 0) ? dotted.length() : dot;
+            if (segEnd > start && Character.isUpperCase(dotted.charAt(start))) {
+                return dotted.substring(0, segEnd);
+            }
+            if (dot < 0) break;
+            start = dot + 1;
+        }
+        return dotted;
+    }
+
+    /**
+     * If this failure was caused by a class KuDroid does not ship, return that class
+     * name; otherwise null.
+     *
+     * The distinction decides what to do next, and getting it wrong is what produced a
+     * blank screen: a missing framework class is KuDroid's own gap, so moving on to the
+     * next manifest candidate just lands on some SDK Activity (a billing proxy, an OAuth
+     * browser shim) that renders nothing. A genuinely wrong candidate — an app class that
+     * does not exist — is the only case where trying the next one helps.
+     */
+    private static String frameworkGapOf(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            final String type = c.getClass().getName();
+            if ("java.lang.NoClassDefFoundError".equals(type)
+                    || "java.lang.ClassNotFoundException".equals(type)
+                    || "java.lang.UnsatisfiedLinkError".equals(type)
+                    || "java.lang.AbstractMethodError".equals(type)) {
+                String missing = extractMissingClassName(c);
+                if (isBootClasspathClass(missing)) return missing;
+            }
+            if (c.getCause() == c) break;
+        }
+        return null;
+    }
+
+    private static String describeChain(Throwable t) {
+        StringBuilder chain = new StringBuilder();
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (chain.length() > 0) chain.append(" <- ");
+            chain.append(c.getClass().getName());
+            String m = c.getMessage();
+            if (m != null && m.length() > 0) chain.append(": ").append(m);
+            if (c.getCause() == c) break;
+        }
+        return chain.toString();
+    }
+
+    public static void postLifecycleEvent(int eventType, String arg) {
+        if (sCurrentActivityThread != null && sCurrentActivityThread.mH != null) {
+            Message msg = Message.obtain();
+            msg.what = eventType;
+            msg.obj = arg;
+            sCurrentActivityThread.mH.sendMessage(msg);
+        }
+    }
+
+    private void handleLaunchActivity(String[] candidates) {
+        Class<?> clazz = null;
+        String resolvedName = null;
+
+        // Candidates come from AndroidManifest.xml, resolved by the C++ layer.
+        //
+        // Nothing is guessed here any more. This used to append invented names built
+        // from the package prefix (".Main", ".ui.MainActivity", ".Home"...), which
+        // could only ever succeed by coincidence and otherwise filled the log with
+        // ClassNotFoundException for classes no app ever declared. Android launches
+        // what the manifest declares; so does KuDroid.
+        if (candidates == null || candidates.length == 0) {
+            android.util.Log.e("ActivityThread", "No activity candidates supplied");
+        }
+
+        // Names of framework classes KuDroid does not ship, collected while trying
+        // candidates. If the FIRST (launcher) candidate fails only because of these,
+        // the app is not at fault and no other candidate will do better.
+        java.util.ArrayList<String> frameworkGaps = new java.util.ArrayList<String>();
+
+        for (int i = 0; candidates != null && i < candidates.length; i++) {
+            String name = candidates[i];
+            if (name == null || name.isEmpty()) continue;
+            try {
+                Class<?> found = Class.forName(name);
+                if (found == null) continue;
+                // A manifest can declare non-Activity components, and an obfuscated
+                // app can name anything anything. Checking the type here means a bad
+                // candidate moves to the next one instead of blowing up on the cast.
+                if (!isActivitySubclass(found)) {
+                    android.util.Log.e("ActivityThread",
+                            "Candidate '" + name + "' is not an Activity subclass, skipping");
+                    continue;
+                }
+                clazz = found;
+                resolvedName = name;
+                android.util.Log.i("ActivityThread", "Resolved Activity Class: " + name);
+                break;
+            } catch (Throwable t) {
+                final String gap = frameworkGapOf(t);
+                android.util.Log.e("ActivityThread",
+                        "Candidate '" + name + "' failed: " + describeChain(t));
+
+                if (gap == null) {
+                    // A real app class that does not exist: the candidate is simply
+                    // wrong, so the next one is worth a try.
+                    continue;
+                }
+
+                if (!frameworkGaps.contains(gap)) frameworkGaps.add(gap);
+                android.util.Log.e("ActivityThread",
+                        "FRAMEWORK CLASS MISSING: " + gap +
+                        " (add it under framework/ and rebuild framework.dex)");
+
+                // The launcher activity is the one the app is designed to start. When
+                // it fails on a KuDroid gap, walking the rest of the manifest only
+                // reaches SDK activities — billing proxies, OAuth browser shims,
+                // notification trampolines — none of which draw the app's UI. Stopping
+                // here keeps the real cause on screen instead of burying it behind a
+                // blank Activity that happened to load.
+                if (i == 0) {
+                    android.util.Log.e("ActivityThread",
+                            "Launcher activity '" + name + "' needs framework classes KuDroid " +
+                            "does not implement yet; not falling back to other manifest " +
+                            "entries because they are SDK components, not the app UI.");
+                    break;
+                }
+            }
+        }
+        if (resolvedName != null) {
+            mInitialActivityName = resolvedName;
+        }
+        mFrameworkGaps = frameworkGaps;
+
+        if (clazz != null) {
+            try {
+                android.util.Log.i("ActivityThread", "Instantiating Activity: " +
+                        (mInitialActivityName != null ? mInitialActivityName : clazz.getName()));
+                // Route through the declared factory when there is one: an app that
+                // ships an AppComponentFactory expects every component to come from
+                // it, and androidx's wraps the instance to install its own state.
+                if (mComponentFactory != null) {
+                    mInitialActivity = mComponentFactory.instantiateActivity(
+                            ClassLoader.getSystemClassLoader(), clazz.getName(), null);
+                } else {
+                    mInitialActivity = (Activity) clazz.newInstance();
+                }
+                // The Activity is a Context and needs the same base as the
+                // Application, or every path it derives points somewhere else.
+                try {
+                    mInitialActivity.attach(new ApplicationContext());
+                } catch (Throwable ignored) {}
+                android.util.Log.i("ActivityThread", "Calling performCreate()...");
+                mInitialActivity.performCreate(null);
+                android.util.Log.i("ActivityThread", "Calling performStart()...");
+                mInitialActivity.performStart();
+                android.util.Log.i("ActivityThread", "Calling performResume()...");
+                mInitialActivity.performResume();
+
+                // Layout uses the bound host framebuffer. Surface callbacks and focus
+                // are delivered only after this pass has produced real view bounds.
+                mInitialActivity.renderViewHierarchy();
+                dispatchSurfaceCallbacks(mInitialActivity);
+                mInitialActivity.performWindowFocusChanged(true);
+                if (mH != null) {
+                    mH.post(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (mInitialActivity != null) {
+                                dispatchSurfaceCallbacks(mInitialActivity);
+                                mInitialActivity.performWindowFocusChanged(true);
+                            }
+                        }
+                    });
+                }
+                android.util.Log.i("ActivityThread", "Activity launch complete.");
+            } catch (Throwable t) {
+                android.util.Log.e("ActivityThread", "NON-FATAL in Activity lifecycle: " + t.toString());
+                for (Throwable c = t.getCause(); c != null; c = c.getCause()) {
+                    android.util.Log.e("ActivityThread", "  caused by: " + c.toString());
+                    if (c.getCause() == c) break;
+                }
+                StackTraceElement[] trace = t.getStackTrace();
+                if (trace != null) {
+                    for (StackTraceElement ste : trace) {
+                        android.util.Log.e("ActivityThread", "    at " + ste.toString());
+                    }
+                }
+                final String gap = frameworkGapOf(t);
+                if (gap != null) {
+                    if (!mFrameworkGaps.contains(gap)) mFrameworkGaps.add(gap);
+                    android.util.Log.e("ActivityThread",
+                            "FRAMEWORK CLASS MISSING: " + gap +
+                            " (add it under framework/ and rebuild framework.dex)");
+                }
+                // The Activity exists but could not finish onCreate, so it has no
+                // content view to draw. Show what stopped it rather than an empty screen.
+                if (mInitialActivity == null || mInitialActivity.getContentView() == null) {
+                    mInitialActivity = new Activity();
+                    showDiagnosticScreen(mInitialActivity,
+                            mInitialActivityName != null ? mInitialActivityName : "(unknown)",
+                            t);
+                } else {
+                    mInitialActivity.renderViewHierarchy();
+                }
+            }
+        } else {
+            System.err.println("[ActivityThread] Could not resolve any Activity; showing diagnostics.");
+            try {
+                mInitialActivity = new Activity();
+                showDiagnosticScreen(mInitialActivity, "(none resolved)", null);
+            } catch (Throwable t) {
+                t.printStackTrace();
+            }
+        }
+
+        // main() owns the only UI event loop. Returning here lets launch setup
+        // finish before that loop begins and avoids nesting a second Looper.loop().
+    }
+
+    void dispatchSurfaceCallbacks(final Activity activity) {
+        if (activity == null) return;
+        try {
+            android.view.Window window = activity.getWindow();
+            android.graphics.Canvas canvas = new android.graphics.Canvas();
+            final int width = canvas.getWidth();
+            final int height = canvas.getHeight();
+            final boolean surfaceReady = android.graphics.Canvas.isSurfaceReady();
+            window.updateSurfaceSize(width, height, surfaceReady);
+            window.measureAndLayout();
+
+            android.view.SurfaceView foundSv = findSurfaceView(activity);
+            if (foundSv != null) {
+                int svW = foundSv.getWidth() > 0 ? foundSv.getWidth() : width;
+                int svH = foundSv.getHeight() > 0 ? foundSv.getHeight() : height;
+                foundSv.dispatchSurfaceReady(svW, svH);
+            }
+
+            if (activity instanceof android.view.SurfaceHolder.Callback) {
+                android.view.SurfaceHolder.Callback cb = (android.view.SurfaceHolder.Callback) activity;
+                android.view.SurfaceHolder holder = (foundSv != null) ? foundSv.getHolder() :
+                    (((Object) activity instanceof android.view.SurfaceView) ?
+                        ((android.view.SurfaceView) (Object) activity).getHolder() :
+                        new android.view.SurfaceView(activity).getHolder());
+                int surfaceW = foundSv != null && foundSv.getWidth() > 0 ? foundSv.getWidth() : width;
+                int surfaceH = foundSv != null && foundSv.getHeight() > 0 ? foundSv.getHeight() : height;
+                if (surfaceW <= 0) surfaceW = 1080;
+                if (surfaceH <= 0) surfaceH = 1920;
+                cb.surfaceCreated(holder);
+                cb.surfaceChanged(holder, 0, surfaceW, surfaceH);
+                if (cb instanceof android.view.SurfaceHolder.Callback2) {
+                    ((android.view.SurfaceHolder.Callback2) cb).surfaceRedrawNeeded(holder);
+                }
+            }
+
+            window.dispatchSurfaceReady();
+            activity.performWindowFocusChanged(true);
+        } catch (Throwable st) {
+            android.util.Log.e("ActivityThread", "NON-FATAL surface callback: " + st.toString());
+        }
+    }
+
+    private static android.view.SurfaceView findSurfaceView(Activity activity) {
+        if (activity == null) return null;
+        if ((Object) activity instanceof android.view.SurfaceView) {
+            return (android.view.SurfaceView) (Object) activity;
+        }
+        android.view.View root = activity.getContentView();
+        return findSurfaceViewInView(root);
+    }
+
+    private static android.view.SurfaceView findSurfaceViewInView(android.view.View view) {
+        if (view == null) return null;
+        if (view instanceof android.view.SurfaceView) {
+            return (android.view.SurfaceView) view;
+        }
+        if (view instanceof android.view.ViewGroup) {
+            android.view.ViewGroup vg = (android.view.ViewGroup) view;
+            final int count = vg.getChildCount();
+            for (int i = 0; i < count; i++) {
+                android.view.SurfaceView found = findSurfaceViewInView(vg.getChildAt(i));
+                if (found != null) return found;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * On-screen report of why the app did not start.
+     *
+     * This replaces a mock "file explorer" that showed hardcoded folder names: it looked
+     * like something was working while telling nothing about the actual failure. What is
+     * useful on a blank screen is the name of the activity that was tried, the exception
+     * that stopped it, and above all which framework classes KuDroid still has to
+     * implement — that list is exactly the next piece of work.
+     */
+    private void showDiagnosticScreen(Activity host, String attempted, Throwable error) {
+        android.widget.LinearLayout root = new android.widget.LinearLayout(host);
+        root.setBackgroundColor(0xFF101014);
+
+        android.widget.TextView title = new android.widget.TextView(host);
+        title.setText("KuDroid could not start this app");
+        title.setTextColor(0xFFFF7043);
+        title.setTextSize(22.0f);
+        root.addView(title);
+
+        android.widget.TextView act = new android.widget.TextView(host);
+        act.setText("\nActivity tried:\n  " + attempted);
+        act.setTextColor(0xFFB0BEC5);
+        act.setTextSize(14.0f);
+        root.addView(act);
+
+        if (mFrameworkGaps != null && !mFrameworkGaps.isEmpty()) {
+            android.widget.TextView head = new android.widget.TextView(host);
+            head.setText("\nMissing framework classes (" + mFrameworkGaps.size() + "):");
+            head.setTextColor(0xFFFFD54F);
+            head.setTextSize(16.0f);
+            root.addView(head);
+
+            for (int i = 0; i < mFrameworkGaps.size(); i++) {
+                android.widget.TextView item = new android.widget.TextView(host);
+                item.setText("  " + mFrameworkGaps.get(i));
+                item.setTextColor(0xFF81D4FA);
+                item.setTextSize(14.0f);
+                root.addView(item);
+            }
+
+            android.widget.TextView hint = new android.widget.TextView(host);
+            hint.setText("\nAdd these under framework/ then run framework/build.sh");
+            hint.setTextColor(0xFF78909C);
+            hint.setTextSize(13.0f);
+            root.addView(hint);
+        }
+
+        if (error != null) {
+            android.widget.TextView err = new android.widget.TextView(host);
+            err.setText("\nError:\n  " + describeChain(error));
+            err.setTextColor(0xFFEF9A9A);
+            err.setTextSize(13.0f);
+            root.addView(err);
+        }
+
+        android.widget.TextView tail = new android.widget.TextView(host);
+        tail.setText("\nFull detail is in stderr.log and classes.log.");
+        tail.setTextColor(0xFF546E7A);
+        tail.setTextSize(13.0f);
+        root.addView(tail);
+
+        host.setContentView(root);
+    }
+
+    private void handlePauseActivity() {
+        try {
+            if (mInitialActivity != null) {
+                if (mInitialActivity.hasWindowFocus()) {
+                    mInitialActivity.performWindowFocusChanged(false);
+                }
+                if (mInitialActivity.isResumed()) mInitialActivity.performPause();
+            }
+        } catch (Throwable t) {
+            t.printStackTrace();
+        }
+        kudroid_note_java_paused();
+    }
+
+    private void handleResumeActivity() {
+        try {
+            if (mInitialActivity != null) {
+                if (!mInitialActivity.isStarted()) mInitialActivity.performStart();
+                if (!mInitialActivity.isResumed()) mInitialActivity.performResume();
+                mInitialActivity.renderViewHierarchy();
+                dispatchSurfaceCallbacks(mInitialActivity);
+            }
+        } catch (Throwable t) {
+            t.printStackTrace();
+        }
+    }
+
+    /**
+     * The URL a component-less VIEW/DIAL/SENDTO intent asks the system to open, or null when
+     * the intent targets something else. Schemes that point at the app's own storage are
+     * never forwarded.
+     */
+    public static String externalUrl(Intent intent) {
+        if (intent == null || intent.getComponent() != null) return null;
+        String action = intent.getAction();
+        if (action == null) return null;
+        if (!Intent.ACTION_VIEW.equals(action)
+                && !"android.intent.action.DIAL".equals(action)
+                && !"android.intent.action.SENDTO".equals(action)) {
+            return null;
+        }
+        android.net.Uri data = intent.getData();
+        if (data == null) return null;
+        String url = data.toString();
+        String scheme = data.getScheme();
+        if (url == null || scheme == null) return null;
+        scheme = scheme.toLowerCase();
+        if (scheme.equals("file") || scheme.equals("content") || scheme.equals("javascript")
+                || scheme.equals("android.resource")) {
+            return null;
+        }
+        String rest = url.substring(scheme.length() + 1);
+        if (rest.startsWith("//")) rest = rest.substring(2);
+        if (scheme.equals("market")) {
+            return "https://play.google.com/store/apps/" + rest;
+        }
+        if (scheme.equals("vnd.youtube")) {
+            return "https://www.youtube.com/watch?v=" + rest;
+        }
+        return url;
+    }
+
+    /** Hands a URL intent to the host's browser/mail/phone handler. */
+    public static boolean openExternal(Intent intent) {
+        String url = externalUrl(intent);
+        if (url == null) return false;
+        try {
+            Activity.nativeOpenUrl(url);
+            return true;
+        } catch (Throwable t) {
+            android.util.Log.e("ActivityThread", "openExternal failed: " + t);
+            return false;
+        }
+    }
+
+    void handleStartActivity(final Activity from, final Intent intent) {
+        if (intent == null) return;
+        if (openExternal(intent)) return;
+        String target = null;
+        if (intent.getComponent() != null) {
+            target = intent.getComponent().getClassName();
+        }
+        if (target == null || target.isEmpty()) {
+            return;
+        }
+        if (target.startsWith(".")) {
+            target = (sPackageName != null ? sPackageName : "") + target;
+        } else if (!target.contains(".") && sPackageName != null && !sPackageName.isEmpty()) {
+            target = sPackageName + "." + target;
+        }
+        final String resolvedTarget = target;
+        android.util.Log.i("ActivityThread", "Transitioning to target Activity: " + resolvedTarget);
+        Runnable r = new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Class<?> nextClass = Class.forName(resolvedTarget);
+                    if (!Activity.class.isAssignableFrom(nextClass)) {
+                        android.util.Log.e("ActivityThread", "Target class is not an Activity: " + resolvedTarget);
+                        return;
+                    }
+                    if (from != null) {
+                        if (from.hasWindowFocus()) from.performWindowFocusChanged(false);
+                        if (from.isResumed()) from.performPause();
+                        if (from.isStarted()) from.performStop();
+                        if (from.isFinishing()) from.performDestroy();
+                    }
+                    Activity next;
+                    if (mComponentFactory != null) {
+                        next = mComponentFactory.instantiateActivity(
+                                ClassLoader.getSystemClassLoader(), nextClass.getName(), intent);
+                    } else {
+                        next = (Activity) nextClass.newInstance();
+                    }
+                    try {
+                        next.attach(new ApplicationContext());
+                    } catch (Throwable ignored) {}
+                    mInitialActivity = next;
+                    mInitialActivityName = resolvedTarget;
+                    next.performCreate(null);
+                    next.performStart();
+                    next.performResume();
+                    next.renderViewHierarchy();
+                    dispatchSurfaceCallbacks(next);
+                    next.performWindowFocusChanged(true);
+                    android.util.Log.i("ActivityThread", "Target Activity transitioned successfully: " + resolvedTarget);
+                } catch (Throwable t) {
+                    android.util.Log.e("ActivityThread", "Failed to start activity " + resolvedTarget + ": " + t);
+                }
+            }
+        };
+        if (mH != null) {
+            mH.post(r);
+        } else {
+            r.run();
+        }
+    }
+
+    private void handleDestroyActivity() {
+        try {
+            if (mInitialActivity != null) {
+                if (mInitialActivity.hasWindowFocus()) {
+                    mInitialActivity.performWindowFocusChanged(false);
+                }
+                if (mInitialActivity.isResumed()) mInitialActivity.performPause();
+                if (mInitialActivity.isStarted()) mInitialActivity.performStop();
+                android.view.Window window = mInitialActivity.getWindow();
+                window.updateSurfaceSize(0, 0, false);
+                android.view.SurfaceView surfaceView = findSurfaceView(mInitialActivity);
+                if (surfaceView != null) surfaceView.dispatchSurfaceDestroyed();
+                mInitialActivity.performDestroy();
+                mInitialActivity = null;
+            }
+        } catch (Throwable t) {
+            t.printStackTrace();
+        }
+        try {
+            android.view.inputmethod.InputMethodManager.resetForRelaunch();
+        } catch (Throwable ignored) {}
+        try {
+            android.view.Choreographer.resetForRelaunch();
+        } catch (Throwable ignored) {}
+        try {
+            if (Looper.myLooper() != null) {
+                Looper.myLooper().quitForTeardown();
+            }
+        } catch (Throwable ignored) {}
+        sCurrentActivityThread = null;
+    }
+}

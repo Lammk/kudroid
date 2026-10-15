@@ -2,23 +2,118 @@ name: Build
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main, master, develop, 'feature/**']
   pull_request:
-    branches: [main]
+    branches: [main, master, 'feature/**']
 
 jobs:
-  build-linux:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # KuART — micro ART của KuDroid (art_dex + src/kuart). Chạy riêng trên Linux
+  # vì đây là code thuần C++ không phụ thuộc iOS; bắt lỗi nhanh hơn chờ job iOS.
+  # ─────────────────────────────────────────────────────────────────────────────
+  build-kuart:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake g++
+        # gcc-aarch64-linux-gnu + qemu-user-static are for the AAPCS64 trampoline
+        # check: the JNI float/double path is register plumbing, so the x86-64
+        # runner only exercises the SysV variant. arm64 is the product target.
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30
+          sudo apt-get install -y --no-install-recommends cmake g++ ccache zlib1g-dev \
+            gcc-aarch64-linux-gnu qemu-user-static
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ${{ runner.os }}-kuart
 
       - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+        run: |
+          rm -rf build
+          cmake -B build -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
-      - name: Build
+      - name: Build KuART
+        run: cmake --build build --target art_dex kudroid_core --parallel
+
+      # Build and run EVERY test target, discovered from the build directory.
+      #
+      # This used to be two hand-written lists, and they drifted the way hand-written
+      # lists do: test_guest_signals was absent the entire time it was the regression
+      # test for a live crash, and test_kuart_proxy — which covers a jclass being read as
+      # a string, a fault that reached a user — was never run here either. Six binaries
+      # were missing in total. A test that CI does not run is not a test.
+      #
+      # `--target all` builds them because CMake defines each test as an executable, so
+      # a new tests/*.cpp file is picked up with no change to this file.
+      - name: Build KuART tests
+        run: cmake --build build --parallel
+
+      - name: Run KuART tests
+        working-directory: build
+        run: |
+          fail=0
+          count=0
+          for t in test_*; do
+            [ -x "$t" ] || continue
+            [ -f "$t" ] || continue
+            count=$((count + 1))
+            echo "──────── $t ────────"
+            if ./"$t"; then echo "PASS $t"; else echo "FAIL $t"; fail=1; fi
+          done
+          echo "ran $count test binaries"
+          # No tests found means the discovery above broke, which must not look like success.
+          if [ "$count" -eq 0 ]; then echo "no test binaries found"; exit 1; fi
+          exit $fail
+
+      # Cross-compiled + qemu: covers the arm64 half of the JNI float/double ABI,
+      # which the native x86-64 test above cannot reach. Skips itself cleanly if
+      # the cross toolchain is missing.
+      - name: Verify AAPCS64 JNI trampoline (arm64 under qemu)
+        run: ./scripts/test-trampoline-arm64.sh
+
+      # Guest varargs arrive in x0-x7/v0-v7 under Linux AAPCS64 but on the stack under
+      # Apple's arm64 ABI, so a shimmed snprintf that forwards to the host reads the wrong
+      # place and prints plausible garbage. Nothing on x86-64 can see that.
+      - name: Verify guest vararg trampolines (arm64 under qemu)
+        run: ./scripts/test-vararg-arm64.sh
+
+      # The golden-byte test above proves the JIT encoder matches GNU as; this runs the
+      # generated code so a sequence that is validly encoded but computes the wrong
+      # value is caught too. Skips itself cleanly without the cross toolchain.
+      - name: Execute JIT-generated code (arm64 under qemu)
+        run: ./scripts/test-jit-arm64.sh
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake g++ ccache zip
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ${{ runner.os }}-build-linux
+
+      - name: Clean stale CMake cache
+        run: rm -rf build build-ios build-test
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+      - name: Build Kudroid
         run: cmake --build build --parallel
 
   build-macos-arm64:
@@ -26,14 +121,201 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ${{ runner.os }}-build-macos-arm64
+
+      - name: Clean stale CMake cache
+        run: rm -rf build build-ios build-test
+
       - name: Configure (ARM64)
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
       - name: Build
         run: cmake --build build --parallel
 
-</parameter>
-<parameter=filePath>
-/home/kuzei/Documents/Kudroid/.github/workflows/build.yml
-</parameter>
-</invoke>
+  # ─────────────────────────────────────────────────────────────────────────────
+  # ANGLE iOS ARM64 — built in its own job with aggressive cache.
+  # ANGLE is huge (~1600 CXX files); GitHub Actions free runners only have
+  # ~7 GB RAM and 2-3 cores, so we limit parallelism to avoid OOM kills.
+  # The built libs are uploaded as an artifact and cached across runs.
+  # ─────────────────────────────────────────────────────────────────────────────
+  build-angle-ios:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      # Cache the final ANGLE static libs + headers so we skip the build entirely
+      # on subsequent runs (as long as the script and pinned commit are unchanged).
+      - name: Cache ANGLE built artifacts
+        id: angle-cache
+        uses: actions/cache@v4
+        with:
+          path: third_party/ANGLE
+          key: angle-ios-arm64-built-${{ runner.os }}-${{ hashFiles('scripts/fetch-build-angle-ios.sh') }}
+          restore-keys: |
+            angle-ios-arm64-built-${{ runner.os }}-
+
+      # Also cache the massive source checkout + depot_tools to speed up rebuilds.
+      - name: Cache ANGLE source and depot_tools
+        if: steps.angle-cache.outputs.cache-hit != 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/angle-src
+            third_party/build-tools
+          key: angle-ios-src-${{ runner.os }}-${{ hashFiles('scripts/fetch-build-angle-ios.sh') }}
+          restore-keys: |
+            angle-ios-src-${{ runner.os }}-
+
+      - name: Build ANGLE (Vulkan backend, iOS ARM64)
+        if: steps.angle-cache.outputs.cache-hit != 'true'
+        env:
+          # Limit ninja parallelism to 2 jobs so peak RSS stays under ~7 GB.
+          # ANGLE .cc files individually can use 1–2 GB during compilation.
+          NINJA_JOBS: 2
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          chmod +x scripts/fetch-build-angle-ios.sh
+          # Patch autoninja call to respect our parallelism limit
+          sed -i '' "s|autoninja -C|ninja -j${NINJA_JOBS} -C|g" scripts/fetch-build-angle-ios.sh
+          ./scripts/fetch-build-angle-ios.sh
+
+      - name: Verify ANGLE build output
+        if: steps.angle-cache.outputs.cache-hit != 'true'
+        run: |
+          echo "=== ANGLE libs ==="
+          ls -lh third_party/ANGLE/lib/ios-arm64/ || { echo "ANGLE libs missing — cache miss and build skipped"; exit 1; }
+          file third_party/ANGLE/lib/ios-arm64/libEGL.a
+          file third_party/ANGLE/lib/ios-arm64/libGLESv2.a
+
+      - name: Upload ANGLE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: angle-ios-arm64
+          path: third_party/ANGLE
+  # ─────────────────────────────────────────────────────────────────────────────
+  # iOS Build — downloads pre-built ANGLE + MoltenVK, compiles only kudroid_core
+  # and the SwiftUI shell.
+  # ─────────────────────────────────────────────────────────────────────────────
+  ios-build:
+    needs: [build-angle-ios]
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      # Always download the ANGLE artifact built by build-angle-ios so the iOS
+      # build always has ANGLE available (independent of cache state).
+      - name: Download ANGLE artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: angle-ios-arm64
+          path: third_party/ANGLE
+
+      - name: Install MoltenVK (prebuilt release download)
+        run: |
+          chmod +x scripts/fetch-moltenvk-ios.sh
+          ./scripts/fetch-moltenvk-ios.sh
+
+      - name: Verify graphics dependencies
+        run: |
+          echo "=== ANGLE ==="
+          ls -lh third_party/ANGLE/lib/ios-arm64/
+          echo "=== MoltenVK ==="
+          ls -lh third_party/MoltenVK/MoltenVK/static/MoltenVK.xcframework/ios-arm64/libMoltenVK.a
+
+      # framework.dex phải sinh lại ở đây rồi nhúng thành header C++: KuART đọc
+      # framework từ binary chứ không từ file, nên header cũ = framework cũ.
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Build and embed framework.dex
+        run: |
+          # Runner của GitHub có Android SDK sẵn; build.sh tự tìm d8 qua
+          # ANDROID_HOME/ANDROID_SDK_ROOT.
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          bash scripts/fetch_pinned_d8.sh
+          bash scripts/fetch_pinned_kotlin.sh
+          KUDROID_D8_JAR="$GITHUB_WORKSPACE/third_party/d8/r8.jar" \
+            bash framework/build.sh --require-d8
+          python3 scripts/verify_framework_embed.py
+          ls -lh framework/build/framework.dex
+          ls -lh include/kudroid/framework_dex_bytes.h
+
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ${{ runner.os }}-ios-build
+
+      - name: Clean stale CMake cache
+        run: rm -rf build build-ios build-test
+
+      - name: Build kudroid_core static library (iOS ARM64)
+        run: |
+          # Use the Xcode generator so Swift (KuDroidShell app) is supported.
+          cmake -B build-ios -G Xcode \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          cmake --build build-ios --config Release --parallel
+
+          # The Xcode generator build already produced the app bundle.
+          # Move it to the expected location FIRST so we can bundle .so files.
+          mv build-ios/Release-iphoneos/KuDroidShell.app KuDroidShell.app
+
+          # Run asset bundling script
+          bash scripts/bundle_assets.sh          
+
+
+      - name: Add App Icon
+        run: |
+          cp icon.png KuDroidShell.app/AppIcon60x60@2x.png
+          cp icon.png KuDroidShell.app/AppIcon60x60@3x.png
+          cp icon.png KuDroidShell.app/AppIcon.png
+
+      - name: Embed JIT entitlements for sideload
+        run: |
+          # Copy the entitlements into the app bundle so sideload tools
+          # (e.g. ldid, Sideloadly, AltStore) can sign with them.
+          cp ios-app/entitlements.plist KuDroidShell.app/entitlements.plist
+          echo "Embedded entitlements.plist into app bundle"
+
+      - name: Package unsigned IPA
+        run: |
+          mkdir -p Payload
+          cp -R KuDroidShell.app Payload/
+          zip -r KuDroidShell.ipa Payload
+          rm -rf Payload
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kudroid-ios-unsigned
+          path: |
+            KuDroidShell.ipa
+            build-ios/Release-iphoneos/libkudroid_core.a

@@ -1,0 +1,260 @@
+package android.content.res;
+
+import android.util.AttributeSet;
+// android.util.DisplayMetrics, explicitly.
+//
+// There used to be a second DisplayMetrics in this package. Being in the same package, it
+// won name resolution here without an import, so getDisplayMetrics() returned
+// android.content.res.DisplayMetrics — while every app references
+// Resources.getDisplayMetrics()Landroid/util/DisplayMetrics;. The method looked present and
+// the reference resolved to nothing: a NoSuchMethodError whose cause was the return type.
+// Five of six APKs in the corpus needed it. The duplicate class is gone; this import is
+// what keeps it from coming back by accident.
+import android.util.DisplayMetrics;
+import android.util.TypedValue;
+import android.view.Display;
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
+
+public class Resources {
+    private final DisplayMetrics mMetrics = new DisplayMetrics();
+    private final Configuration mConfiguration = new Configuration();
+    private final AssetManager mAssets;
+    private final Theme mTheme = new Theme(this);
+
+    private static native int nativeGetIdentifier(String name, String type, String packageName);
+    private static native String nativeGetString(int id, String locale);
+    private static native int nativeGetColor(int id, String locale);
+
+    public Resources() {
+        this(new AssetManager(), null, null);
+    }
+
+    public Resources(AssetManager assets, DisplayMetrics metrics, Configuration config) {
+        mAssets = assets != null ? assets : new AssetManager();
+        // A fresh Resources must report the live display, not zeros: boot
+        // layout/DIP math divides by these before anyone calls setTo.
+        if (metrics != null) mMetrics.setTo(metrics);
+        else {
+            try { new Display().getMetrics(mMetrics); } catch (Throwable ignored) {}
+        }
+        if (config != null) mConfiguration.setTo(config);
+        else deriveConfiguration(mConfiguration, mMetrics);
+    }
+    public static Resources getSystem() { return new Resources(); }
+    public DisplayMetrics getDisplayMetrics() { return mMetrics; }
+    public Configuration getConfiguration() { return mConfiguration; }
+    public AssetManager getAssets() { return mAssets; }
+    public String getString(int id) {
+        String locale = mConfiguration.locale != null ? mConfiguration.locale.toString() : "";
+        String value = nativeGetString(id, locale);
+        if (value == null) {
+            throw new NotFoundException("string resource 0x" + Integer.toHexString(id));
+        }
+        return value;
+    }
+    public String getString(int id, Object... formatArgs) {
+        String value = getString(id);
+        java.util.Locale locale = mConfiguration.locale != null
+                ? mConfiguration.locale : java.util.Locale.getDefault();
+        return String.format(locale, value, formatArgs);
+    }
+    public String[] getStringArray(int id) { return new String[0]; }
+    public CharSequence getText(int id) { return getString(id); }
+    public CharSequence getText(int id, CharSequence def) {
+        String locale = mConfiguration.locale != null ? mConfiguration.locale.toString() : "";
+        String value = nativeGetString(id, locale);
+        return value != null ? value : def;
+    }
+    public CharSequence[] getTextArray(int id) { return new CharSequence[0]; }
+    public int[] getIntArray(int id) { return new int[0]; }
+    public int getIdentifier(String name, String defType, String defPackage) {
+        return nativeGetIdentifier(name, defType, defPackage);
+    }
+    public int getColor(int id) {
+        String locale = mConfiguration.locale != null ? mConfiguration.locale.toString() : "";
+        return nativeGetColor(id, locale);
+    }
+    public int getColor(int id, Theme theme) { return getColor(id); }
+    public ColorStateList getColorStateList(int id) { return null; }
+    public ColorStateList getColorStateList(int id, Theme theme) { return null; }
+    public float getDimension(int id) { return 0.0f; }
+    public int getDimensionPixelSize(int id) { return 0; }
+    public int getDimensionPixelOffset(int id) { return 0; }
+    public boolean getBoolean(int id) { return false; }
+    public int getInteger(int id) { return 0; }
+    public float getFraction(int id, int base, int pbase) { return 0.0f; }
+    public InputStream openRawResource(int id) { return new ByteArrayInputStream(new byte[0]); }
+    public InputStream openRawResource(int id, TypedValue value) {
+        return new ByteArrayInputStream(new byte[0]);
+    }
+    public AssetFileDescriptor openRawResourceFd(int id) { return null; }
+
+    public android.graphics.drawable.Drawable getDrawable(int id) { return null; }
+    public android.graphics.drawable.Drawable getDrawable(int id, Theme theme) { return null; }
+
+    /**
+     * Resource name lookup.
+     *
+     * KuDroid does not parse compiled resources, so nothing can be named. Android
+     * throws NotFoundException for an unknown id and callers are written for that;
+     * returning a made-up name would be worse, since these end up in log messages
+     * and crash reports that then point at a resource that does not exist.
+     */
+    public String getResourceName(int resid) throws NotFoundException {
+        throw new NotFoundException("resource id 0x" + Integer.toHexString(resid));
+    }
+
+    public String getResourceTypeName(int resid) throws NotFoundException {
+        throw new NotFoundException("resource id 0x" + Integer.toHexString(resid));
+    }
+
+    public String getResourceEntryName(int resid) throws NotFoundException {
+        throw new NotFoundException("resource id 0x" + Integer.toHexString(resid));
+    }
+
+    public String getResourcePackageName(int resid) throws NotFoundException {
+        throw new NotFoundException("resource id 0x" + Integer.toHexString(resid));
+    }
+
+    public void getValue(int id, TypedValue outValue, boolean resolveRefs)
+            throws NotFoundException {
+        if (outValue != null) outValue.type = TypedValue.TYPE_NULL;
+    }
+
+    public void getValue(String name, TypedValue outValue, boolean resolveRefs)
+            throws NotFoundException {
+        if (outValue != null) outValue.type = TypedValue.TYPE_NULL;
+    }
+
+    public XmlResourceParser getXml(int id) throws NotFoundException {
+        return new XmlResourceParser();
+    }
+
+    public XmlResourceParser getLayout(int id) throws NotFoundException {
+        return new XmlResourceParser();
+    }
+
+    public XmlResourceParser getAnimation(int id) throws NotFoundException {
+        return new XmlResourceParser();
+    }
+
+    /** The theme this Resources hands out; never null, so callers can chain. */
+    public Theme newTheme() { return new Theme(this); }
+
+    /**
+     * The shared default theme.
+     *
+     * Context.getTheme() returns this when nothing has overridden it. Public because
+     * android.content and android.content.res are separate packages.
+     */
+    public Theme getDefaultTheme() { return mTheme; }
+
+    public TypedArray obtainAttributes(AttributeSet set, int[] attrs) {
+        return new TypedArray(this, attrs);
+    }
+
+    public TypedArray obtainTypedArray(int id) throws NotFoundException {
+        return new TypedArray(this, new int[0]);
+    }
+
+    public void updateConfiguration(Configuration config, DisplayMetrics metrics) {
+        if (metrics != null) mMetrics.setTo(metrics);
+        if (config != null) mConfiguration.setTo(config);
+        else if (metrics != null) deriveConfiguration(mConfiguration, mMetrics);
+    }
+
+    private static void deriveConfiguration(Configuration out, DisplayMetrics metrics) {
+        float density = metrics.density > 0.0f ? metrics.density : 1.0f;
+        int widthDp = Math.max(1, Math.round(metrics.widthPixels / density));
+        int heightDp = Math.max(1, Math.round(metrics.heightPixels / density));
+        out.densityDpi = metrics.densityDpi > 0
+                ? metrics.densityDpi : Math.round(density * 160.0f);
+        out.screenWidthDp = widthDp;
+        out.screenHeightDp = heightDp;
+        out.smallestScreenWidthDp = Math.min(widthDp, heightDp);
+        out.orientation = widthDp > heightDp
+                ? Configuration.ORIENTATION_LANDSCAPE : Configuration.ORIENTATION_PORTRAIT;
+    }
+
+    public final void flushLayoutCache() {}
+
+    /**
+     * A resolved theme.
+     *
+     * This class did not exist, so {@code Activity.getTheme()} was auto-stubbed to
+     * null and anything calling through it died with a NullPointerException. That is
+     * not an edge case: androidx.core.splashscreen calls
+     * {@code getTheme().resolveAttribute(...)} from its install() path, which apps
+     * invoke as the first statement of onCreate, and every AppCompat activity calls
+     * {@code getTheme().obtainStyledAttributes(...)} while inflating.
+     *
+     * KuDroid resolves no attributes, so resolveAttribute() reports failure and
+     * obtainStyledAttributes() returns an empty TypedArray. Both are states real
+     * Android produces for an attribute absent from the current theme, so callers
+     * already handle them — unlike a null theme, which nothing handles.
+     */
+    public static final class Theme {
+
+        private final Resources mResources;
+
+        Theme() { mResources = null; }
+
+        Theme(Resources resources) { mResources = resources; }
+
+        public Resources getResources() {
+            return mResources != null ? mResources : Resources.getSystem();
+        }
+
+        /**
+         * Look up an attribute in this theme.
+         *
+         * Returns false — not found — and leaves outValue as TYPE_NULL. Callers test
+         * the return value before reading, which is exactly why reporting failure is
+         * safe and claiming success would not be.
+         */
+        public boolean resolveAttribute(int resid, TypedValue outValue, boolean resolveRefs) {
+            if (outValue != null) {
+                outValue.type = TypedValue.TYPE_NULL;
+                outValue.data = TypedValue.DATA_NULL_UNDEFINED;
+                outValue.resourceId = 0;
+                outValue.string = null;
+            }
+            return false;
+        }
+
+        public TypedArray obtainStyledAttributes(int[] attrs) {
+            return new TypedArray(mResources, attrs);
+        }
+
+        public TypedArray obtainStyledAttributes(int resid, int[] attrs)
+                throws NotFoundException {
+            return new TypedArray(mResources, attrs);
+        }
+
+        public TypedArray obtainStyledAttributes(AttributeSet set, int[] attrs,
+                                                 int defStyleAttr, int defStyleRes) {
+            return new TypedArray(mResources, attrs);
+        }
+
+        public void applyStyle(int resId, boolean force) {}
+
+        public void setTo(Theme other) {}
+
+        public int getChangingConfigurations() { return 0; }
+
+        public void dump(int priority, String tag, String prefix) {}
+
+        public void rebase() {}
+
+        @Override
+        public String toString() {
+            return "Resources$Theme{}";
+        }
+    }
+
+    public static class NotFoundException extends RuntimeException {
+        public NotFoundException() { super(); }
+        public NotFoundException(String name) { super(name); }
+    }
+}

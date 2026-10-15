@@ -1,0 +1,103 @@
+// Native wait primitive behind android.os.MessageQueue, plus the touch wake.
+//
+// Kept in its own translation unit on purpose: this code needs
+// <condition_variable>, whose include chain reaches <wchar.h> and leaves FILE
+// only forward-declared. If a file that also pulls in jni.h (-> <stdio.h>)
+// includes <condition_variable> first, libstdc++/glibc 13 compiles
+// <bits/stdio.h> against an incomplete FILE and the build fails. Nothing here
+// includes jni.h, so the two never mix.
+//
+// AOSP's MessageQueue blocks in native epoll and registers the window's input
+// channel fd as a second wake source, so input is delivered to the Looper
+// thread by native code (InputEventReceiver.dispatchInputEvent). KuDroid's Java
+// MessageQueue used to block in Object.wait(), which can only be woken by a
+// Java notify — an interpreted call that needs the global VM lock. Touch
+// delivery therefore needed a second thread holding that lock, serializing
+// touch against the renderer. This slot is the native condition the queue waits
+// on: a message enqueue and a touch injection both set `pending` and signal it,
+// so only the Looper thread ever runs Java for touch.
+
+#include <chrono>
+#include <condition_variable>
+#include <cstdint>
+#include <mutex>
+#include <new>
+
+struct LooperWaitSlot {
+    std::mutex mtx;
+    std::condition_variable cv;
+    bool pending = false;
+};
+static std::mutex g_mainLooperMutex;
+static LooperWaitSlot* g_mainLooperSlot = nullptr;
+
+extern "C" int64_t kudroid_looper_init(void) {
+    return reinterpret_cast<int64_t>(new (std::nothrow) LooperWaitSlot());
+}
+
+extern "C" void kudroid_looper_poll(int64_t ptr, int64_t timeout_millis) {
+    auto* slot = reinterpret_cast<LooperWaitSlot*>(ptr);
+    if (slot == nullptr) return;
+    std::unique_lock<std::mutex> lock(slot->mtx);
+    // Consume an already-set wake first: an enqueue or touch that landed before
+    // this wait must not be slept through.
+    if (slot->pending) {
+        slot->pending = false;
+        return;
+    }
+    if (timeout_millis < 0) {
+        slot->cv.wait(lock, [slot] { return slot->pending; });
+    } else if (timeout_millis > 0) {
+        slot->cv.wait_for(lock, std::chrono::milliseconds(timeout_millis),
+                          [slot] { return slot->pending; });
+    }
+    slot->pending = false;
+}
+
+extern "C" void kudroid_looper_wake(int64_t ptr) {
+    auto* slot = reinterpret_cast<LooperWaitSlot*>(ptr);
+    if (slot == nullptr) return;
+    bool alreadyPending = false;
+    {
+        std::lock_guard<std::mutex> lock(slot->mtx);
+        alreadyPending = slot->pending;
+        slot->pending = true;
+    }
+    // A drag sets this hundreds of times a second. A waiter that has not consumed
+    // the flag yet is already going to wake and see the flag set, so the second
+    // futex wake (and the scheduling nudge it gives the UI thread mid-frame) buys
+    // nothing; only the false->true transition has a thread to wake.
+    if (!alreadyPending) slot->cv.notify_all();
+}
+
+extern "C" void kudroid_looper_set_main(int64_t ptr) {
+    std::lock_guard<std::mutex> lock(g_mainLooperMutex);
+    g_mainLooperSlot = reinterpret_cast<LooperWaitSlot*>(ptr);
+}
+
+extern "C" void kudroid_looper_reset_main(void) {
+    std::lock_guard<std::mutex> lock(g_mainLooperMutex);
+    g_mainLooperSlot = nullptr;
+}
+
+extern "C" void kudroid_looper_wake_main(void) {
+    // Keep the slot protected until its wake has finished. destroy() clears the
+    // pointer under this mutex before freeing it, so input cannot wake freed memory.
+    std::lock_guard<std::mutex> lock(g_mainLooperMutex);
+    kudroid_looper_wake(reinterpret_cast<int64_t>(g_mainLooperSlot));
+}
+
+extern "C" int kudroid_looper_is_main(int64_t ptr) {
+    std::lock_guard<std::mutex> lock(g_mainLooperMutex);
+    return reinterpret_cast<LooperWaitSlot*>(ptr) == g_mainLooperSlot;
+}
+
+extern "C" void kudroid_looper_destroy(int64_t ptr) {
+    auto* slot = reinterpret_cast<LooperWaitSlot*>(ptr);
+    if (slot == nullptr) return;
+    {
+        std::lock_guard<std::mutex> lock(g_mainLooperMutex);
+        if (g_mainLooperSlot == slot) g_mainLooperSlot = nullptr;
+    }
+    delete slot;
+}

@@ -1,0 +1,66 @@
+#pragma once
+
+// AOT x18 rewrite: Darwin reserves x18 as a platform register and does not
+// preserve it (async delivery zeroes it), while Android NDK code uses it as a
+// normal scratch register. Any guest x18 value live across a delivery dies,
+// faulting later at an unrelated instruction (observed: mixer zero-fill loop).
+//
+// This pass renames every x18 reference inside known functions to a register
+// that is unused in that function, so x18 is never observed live. It runs at
+// load time on mapped RW memory, before protections are applied, for every
+// guest .so. Generic across apps: no per-app offsets or behavior.
+#include <cstddef>
+#include <cstdint>
+#include <vector>
+
+#include "kudroid/elf_loader.hpp"
+
+namespace kudroid {
+
+// Per-library rewrite statistics, logged once per .so.
+struct X18Stats {
+    std::uint64_t functions = 0;      // FDE ranges processed
+    std::uint64_t rewritten = 0;      // functions with x18 renamed
+    std::uint64_t sites = 0;          // x18 references renamed
+    std::uint64_t stubbedSites = 0;   // x18 references redirected to virtual-x18 stubs
+    std::uint64_t skippedNoReg = 0;   // no free caller-saved register / spill+call
+    std::uint64_t skippedEh = 0;      // personality (landing pads restore regs)
+    std::uint64_t skippedUnknown = 0;  // undecodable instruction w/ possible x18
+    std::uint64_t skippedRange = 0;   // bytes outside known executable ranges
+};
+
+// Thread-local virtual x18 accessors for signal frames and runtime state.
+std::uint64_t elf_x18_get();
+void elf_x18_set(std::uint64_t val);
+
+// Rewrite x18 uses in EXEC segments to per-function free registers.
+// base is the loader's mapping (pre-adjust: base[vaddr-minVaddr]); fileData
+// locates .eh_frame via section headers. RW memory required.
+// execBase supplies the instruction addresses when the writable view is aliased.
+X18Stats elf_x18_rewrite(const void* base, std::uint64_t minVaddr,
+                         const std::vector<ElfLoader::Segment>& segments,
+                         const std::uint8_t* fileData, std::size_t fileSize,
+                         const void* execBase = nullptr);
+
+// Guest TLS reads (`mrs xN, tpidr_el0`, which the loader turns into BRK traps because
+// the host does not preserve that register) redirected through a short stub that reads
+// the thread's TLS block from thread-specific data instead. The BRK stays inside the
+// stub as the slow path for a thread that has no block yet. A site whose stub cannot
+// be reached by a direct branch keeps its BRK.
+struct TlsStubStats {
+    std::uint64_t sites = 0;
+    std::uint64_t stubbed = 0;
+    std::uint64_t outOfRange = 0;
+};
+
+// writeBase/execBase: the loader's views of the image before the logical-zero slide
+// (equal unless the image is split); minVaddr as for elf_x18_rewrite. Must run after
+// the loader's BRK patcher and inside its write session.
+TlsStubStats elf_tls_stub_rewrite(void* writeBase, const void* execBase, std::uint64_t minVaddr,
+                                  const std::vector<ElfLoader::Segment>& segments,
+                                  std::int64_t tsdSlotOffset, std::int64_t tlsPointerOffset);
+
+// Kill-switch: KUDROID_X18_REWRITE=0 disables the pass (logs once).
+bool elf_x18_enabled();
+
+}  // namespace kudroid

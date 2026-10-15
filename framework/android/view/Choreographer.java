@@ -1,0 +1,213 @@
+package android.view;
+
+/**
+ * Frame callbacks, the Java half.
+ * Shares one frame source with the NDK pacer so both APIs see the same timestamps.
+ */
+public final class Choreographer {
+
+    /**
+     * A frame callback.
+     * Time is nanoseconds on the same timeline as System.nanoTime().
+     */
+    public interface FrameCallback {
+        void doFrame(long frameTimeNanos);
+    }
+
+    /**
+     * One instance per thread, as on Android.
+     */
+    private static final ThreadLocal<Choreographer> sThreadInstance =
+            new ThreadLocal<Choreographer>() {
+                @Override
+                protected Choreographer initialValue() {
+                    return new Choreographer();
+                }
+            };
+
+    /** Handle to the native frame queue. Zero until the first post. */
+    private long nativeInstance;
+
+    // Java-side delivery. The NDK pacer cannot reach a guest thread parked in
+    // MessageQueue.next(): its wake pipe feeds an NDK looper nobody polls, so
+    // every Java callback fell back to pacer-thread direct delivery with a full
+    // grace interval of slip (~23fps instead of 60). Posted here instead as a
+    // timestamped Message, the callback runs on this thread when due.
+    private android.os.Handler mHandler;
+    private final java.util.HashMap<FrameCallback, java.util.ArrayList<Runnable>>
+            mPending = new java.util.HashMap<FrameCallback, java.util.ArrayList<Runnable>>();
+    // Phase anchor, mirroring the pacer's last_due: re-posts from inside doFrame
+    // align to the previous boundary instead of drifting a grace per frame.
+    private long mLastDueNanos = 0;
+    // Frame timestamp while a callback runs on this thread, else 0.
+    private long mCurrentFrameNanos = 0;
+
+    private Choreographer() {}
+
+    /**
+     * This thread's Choreographer. Never null.
+     */
+    public static Choreographer getInstance() {
+        return sThreadInstance.get();
+    }
+
+    /** Clears thread-bound callbacks and Handler state when an app run ends. */
+    public static void resetForRelaunch() {
+        Choreographer choreographer = sThreadInstance.get();
+        if (choreographer != null) {
+            synchronized (choreographer) {
+                android.os.Handler handler = choreographer.mHandler;
+                if (handler != null) {
+                    for (java.util.ArrayList<Runnable> pending :
+                            choreographer.mPending.values()) {
+                        for (int i = 0; i < pending.size(); i++) {
+                            handler.removeCallbacks(pending.get(i));
+                        }
+                    }
+                }
+                choreographer.mPending.clear();
+                choreographer.mLastDueNanos = 0L;
+                choreographer.nativeInstance = 0L;
+                choreographer.mHandler = null;
+            }
+        }
+        sThreadInstance.remove();
+    }
+
+    /** Run {@code callback} once, on the next frame. */
+    public void postFrameCallback(FrameCallback callback) {
+        postFrameCallbackDelayed(callback, 0L);
+    }
+
+    /**
+     * Run {@code callback} on the first frame at least {@code delayMillis} from now.
+     *
+     * Delivered through this thread's MessageQueue (not the NDK pacer), so the
+     * callback runs on the guest thread that posted it, at pacer phase.
+     */
+    public void postFrameCallbackDelayed(FrameCallback callback, long delayMillis) {
+        if (callback == null) {
+            throw new IllegalArgumentException("callback must not be null");
+        }
+        if (delayMillis < 0L) delayMillis = 0L;
+        android.os.Looper looper = android.os.Looper.myLooper();
+        if (looper == null) looper = android.os.Looper.getMainLooper();
+        if (looper == null) {
+            // No Java queue exists in this runtime context; retain the native
+            // pacer delivery path rather than dropping the callback.
+            nativePostFrameCallback(callback, delayMillis);
+            return;
+        }
+        final long now = System.nanoTime();
+        final long interval = nativeGetFrameIntervalNanos();
+        final long earliestDue = now + delayMillis * 1000000L + interval;
+        final long[] dueHolder = new long[1];
+        final FrameCallback cbF = callback;
+        final Choreographer self = this;
+        Runnable r = new Runnable() {
+            public void run() {
+                final long frameTime;
+                synchronized (self) {
+                    self.mLastDueNanos = dueHolder[0];
+                    self.forgetRunnable(cbF, this);
+                    long stamp = dueHolder[0] < now ? now : dueHolder[0];
+                    final long current = System.nanoTime();
+                    frameTime = stamp > current ? current : stamp;
+                }
+                // The frame's own boundary, as a display-synchronised source reports:
+                // wake-up jitter must not leak into the timestamps a guest paces from.
+                final long previous = self.mCurrentFrameNanos;
+                self.mCurrentFrameNanos = frameTime;
+                try {
+                    cbF.doFrame(frameTime);
+                } finally {
+                    self.mCurrentFrameNanos = previous;
+                }
+            }
+        };
+        synchronized (this) {
+            if (mHandler == null || mHandler.getLooper() != looper) {
+                mHandler = new android.os.Handler(looper);
+            }
+            final long due;
+            if (delayMillis == 0L && mLastDueNanos != 0L) {
+                final long boundary = mLastDueNanos + interval;
+                if (boundary > now) {
+                    due = boundary;
+                } else if (now - boundary < interval) {
+                    due = boundary;
+                } else {
+                    due = now;
+                }
+            } else {
+                due = earliestDue;
+            }
+            final long dueF = due;
+            dueHolder[0] = dueF;
+            java.util.ArrayList<Runnable> list = mPending.get(callback);
+            if (list == null) {
+                list = new java.util.ArrayList<Runnable>();
+                mPending.put(callback, list);
+            }
+            list.add(r);
+            android.os.Message msg = android.os.Message.obtain(mHandler, r);
+            // Round UP, not down: the queue orders in whole millis off the same
+            // nanoTime base (SystemClock.uptimeMillis is nanoTime/1e6, so no clock
+            // skew), and truncation would deliver up to 1ms BEFORE the pacer
+            // phase the native alignment just computed. Late by <1ms keeps phase;
+            // early breaks it.
+            if (!mHandler.sendMessageAtTime(msg, (dueF + 999999L) / 1000000L)) {
+                forgetRunnable(callback, r);
+            }
+        }
+    }
+
+    private synchronized void forgetRunnable(FrameCallback callback, Runnable r) {
+        java.util.ArrayList<Runnable> list = mPending.get(callback);
+        if (list != null) {
+            list.remove(r);
+            if (list.isEmpty()) mPending.remove(callback);
+        }
+    }
+
+    /** Cancel a pending callback (matched by identity). */
+    public void removeFrameCallback(FrameCallback callback) {
+        if (callback == null) return;
+        java.util.ArrayList<Runnable> list = null;
+        android.os.Handler handler;
+        synchronized (this) {
+            list = mPending.remove(callback);
+            handler = mHandler;
+            if (list != null && handler != null) {
+                for (int i = 0; i < list.size(); i++) {
+                    handler.removeCallbacks(list.get(i));
+                }
+            }
+        }
+        nativeRemoveFrameCallback(callback);
+    }
+
+    /** The display's frame interval in nanoseconds. */
+    public long getFrameIntervalNanos() {
+        return nativeGetFrameIntervalNanos();
+    }
+
+    /** Timestamp of the frame being rendered, or now when none is. */
+    public long getFrameTimeNanos() {
+        final long current = mCurrentFrameNanos;
+        return current != 0L ? current : nativeGetFrameTimeNanos();
+    }
+
+    public long getFrameTime() {
+        return getFrameTimeNanos() / 1000000L;
+    }
+
+    // Native side shares one frame source with the NDK entry points.
+    private native void nativePostFrameCallback(FrameCallback callback, long delayMillis);
+
+    private native void nativeRemoveFrameCallback(FrameCallback callback);
+
+    private native long nativeGetFrameIntervalNanos();
+
+    private native long nativeGetFrameTimeNanos();
+}

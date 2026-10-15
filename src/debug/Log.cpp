@@ -1,0 +1,95 @@
+#include "kudroid/Log.h"
+
+#include <atomic>
+#include <cstdarg>
+#include <cstdio>
+#include <cstdlib>
+#include <mutex>
+
+// Standard pipeline (stdout + kudroid_android_logs.txt + crash buffer) — defined
+// meaning in SyscallShim.cpp, which is the "C version" for kudroid_jni/GraphicsShim.
+extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
+
+namespace kudroid {
+namespace log {
+
+namespace {
+std::mutex g_mtx;
+bool g_verbose = true;        // debugging real machine — enabled by default
+bool g_verbose_initialized = false;
+bool g_jni = false;           // per-JNI-call enter/exit: off by default, opt-in
+bool g_jni_initialized = false;
+
+bool env_verbose() {
+    const char* v = std::getenv("KUDROID_LOG_VERBOSE");
+    if (!v || !*v) return true;
+    return v[0] != '0' && v[0] != 'n' && v[0] != 'N';
+}
+
+bool env_jni() {
+    const char* v = std::getenv("KUDROID_LOG_JNI");
+    return v != nullptr && *v && *v != '0' && *v != 'n' && *v != 'N';
+}
+} // namespace
+
+void set_verbose(bool enabled) {
+    std::lock_guard<std::mutex> lock(g_mtx);
+    g_verbose = enabled;
+    g_verbose_initialized = true;
+}
+
+bool verbose_enabled() {
+    std::lock_guard<std::mutex> lock(g_mtx);
+    if (!g_verbose_initialized) {
+        g_verbose = env_verbose();
+        g_verbose_initialized = true;
+    }
+    return g_verbose;
+}
+
+void set_jni(bool enabled) {
+    std::lock_guard<std::mutex> lock(g_mtx);
+    g_jni = enabled;
+    g_jni_initialized = true;
+}
+
+bool jni_enabled() {
+    std::lock_guard<std::mutex> lock(g_mtx);
+    if (!g_jni_initialized) {
+        g_jni = env_jni();
+        g_jni_initialized = true;
+    }
+    return g_jni;
+}
+
+bool trace_hot() {
+    // Lock-free after first call: the value never changes past init, so a
+    // relaxed cached read is enough (a mutex here would re-add per-call lock
+    // traffic on the exact hot path this gate exists to relieve).
+    static std::atomic<bool> cached{false};
+    static std::atomic<bool> done{false};
+    if (done.load(std::memory_order_acquire)) {
+        return cached.load(std::memory_order_relaxed);
+    }
+    std::lock_guard<std::mutex> lock(g_mtx);
+    if (!done.load(std::memory_order_relaxed)) {
+        const char* v = std::getenv("KUDROID_TRACE_HOT");
+        cached.store(v != nullptr && *v && *v != '0' && *v != 'n' && *v != 'N',
+                     std::memory_order_relaxed);
+        done.store(true, std::memory_order_release);
+    }
+    return cached.load(std::memory_order_relaxed);
+}
+
+void write(Level level, const char* tag, const char* fmt, ...) {
+    if (!fmt || !*fmt) return;
+    char buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    kudroid_android_log_message(static_cast<int>(level), tag ? tag : "", buf);
+}
+
+} // namespace log
+} // namespace kudroid

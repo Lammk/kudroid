@@ -1,0 +1,2551 @@
+import SwiftUI
+import UIKit
+import AVFAudio
+import AVFoundation
+import Metal
+import QuartzCore
+import CoreMotion
+
+struct ContentView: View {
+    @State private var fullLog = "KuDroid Core Status"
+    @State private var jitStatus = "JIT: Unknown"
+    
+    var body: some View {
+        TabView {
+            AppsView(fullLog: $fullLog)
+                .tabItem {
+                    Label("Apps", systemImage: "square.grid.2x2.fill")
+                }
+            
+            PermissionsView()
+                .tabItem {
+                    Label("Permissions", systemImage: "lock.shield.fill")
+                }
+            
+            DebugView(fullLog: $fullLog, jitStatus: $jitStatus)
+                .tabItem {
+                    Label("Debug", systemImage: "terminal.fill")
+                }
+        }
+        .preferredColorScheme(.dark)
+        .onAppear {
+            setupLogDir()
+            jitStatus = runJitStatus()
+            activateAudioSession()
+        }
+    }
+}
+
+struct AppItem: Identifiable {
+    let id: String // folder name (e.g. "rolling-sky-5-5-8")
+    let displayName: String // display name (e.g. "Rolling Sky")
+    let version: String // version (e.g. "5.5.8")
+    let iconImage: UIImage?
+}
+
+// mark: - application tab
+struct AppsView: View {
+    @EnvironmentObject private var session: AppSession
+    @Binding var fullLog: String
+    @State private var installedApps: [AppItem] = []
+    @State private var showAPKInstaller = false
+    @State private var showRenameAlert = false
+    // App deletion status — shows progress instead of freeze UI.
+    @State private var deletingApp: String? = nil
+    @State private var deletePhase = ""
+    @State private var deletePercent: Double = 0
+    // [DEBUG] count callbacks from native — watchdog based on this instead of percent
+    // (percent remains 0 when deleting many small files even though native is running).
+    @State private var deleteCbCount = 0
+    @State private var renamingAppId: String = ""
+    @State private var newAppName: String = ""
+    
+    private var androidRootAppsURL: URL? {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("android_root/data/app", isDirectory: true)
+    }
+    
+    var body: some View {
+        NavigationView {
+            ZStack {
+                Color.black.ignoresSafeArea()
+                
+                VStack(spacing: 0) {
+                    // title
+                    HStack {
+                        Image(systemName: "cpu")
+                            .font(.title)
+                            .foregroundColor(.green)
+                        Text("KuDroid")
+                            .font(.title2.bold())
+                        // Display version right on the screen — distinguish old/new versions
+                        // when you suspect your iPhone is running an outdated IPA.
+                        Text("v" + appVersion())
+                            .font(.caption.weight(.semibold))
+                            .foregroundColor(.green.opacity(0.8))
+                        Spacer()
+                        Button(action: { showAPKInstaller = true }) {
+                            Image(systemName: "plus.circle.fill")
+                                .font(.title2)
+                            .foregroundColor(.green)
+                        }
+                    }
+                    .padding()
+                    
+                    if installedApps.isEmpty {
+                        VStack(spacing: 16) {
+                            Spacer()
+                            Image(systemName: "cube.box.fill")
+                                .font(.system(size: 64))
+                                .foregroundColor(.secondary)
+                            Text("No Android Apps Installed")
+                                .font(.headline)
+                            Text("Tap the + button to install an APK")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                            Spacer()
+                        }
+                    } else {
+                        List(installedApps) { app in
+                            HStack(spacing: 12) {
+                                if let icon = app.iconImage {
+                                    Image(uiImage: icon)
+                                        .resizable()
+                                        .aspectRatio(contentMode: .fill)
+                                        .frame(width: 48, height: 48)
+                                        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                                .stroke(Color.white.opacity(0.15), lineWidth: 0.5)
+                                        )
+                                        .shadow(color: .black.opacity(0.3), radius: 4, x: 0, y: 2)
+                                } else {
+                                    ZStack {
+                                        RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                            .fill(LinearGradient(colors: [Color.green.opacity(0.3), Color.teal.opacity(0.2)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                                            .frame(width: 48, height: 48)
+                                            .overlay(
+                                                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                                    .stroke(Color.green.opacity(0.3), lineWidth: 1)
+                                            )
+                                        Image(systemName: "cube.fill")
+                                            .font(.system(size: 22))
+                                            .foregroundColor(.green)
+                                    }
+                                }
+                                
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(app.displayName)
+                                        .font(.headline)
+                                        .foregroundColor(.white)
+                                        .lineLimit(1)
+                                    
+                                    HStack(spacing: 6) {
+                                        Text("v\(app.version)")
+                                            .font(.caption2.bold())
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(Color.green.opacity(0.2))
+                                            .foregroundColor(.green)
+                                            .cornerRadius(6)
+                                    }
+                                }
+                                
+                                Spacer()
+                                
+                                Button(action: {
+                                    session.activeGuestApp = app.id
+                                }) {
+                                    Text("RUN")
+                                        .font(.caption.bold())
+                                        .padding(.horizontal, 16)
+                                        .padding(.vertical, 8)
+                                        .background(Color.green.opacity(0.25))
+                                        .foregroundColor(.green)
+                                        .cornerRadius(16)
+                                }
+                            }
+                            .padding(.vertical, 4)
+                            .listRowBackground(Color(.systemGray6))
+                            .contextMenu {
+                                Button {
+                                    renamingAppId = app.id
+                                    newAppName = app.displayName
+                                    showRenameAlert = true
+                                } label: {
+                                    Label("Rename", systemImage: "pencil")
+                                }
+                                Button(role: .destructive) {
+                                    clearAppCache(name: app.id)
+                                } label: {
+                                    Label("Clear Cache", systemImage: "trash")
+                                }
+                                Button(role: .destructive) {
+                                    deleteApp(name: app.id)
+                                } label: {
+                                    Label("Delete App", systemImage: "xmark.bin")
+                                }
+                            }
+                        }
+                        .onAppear {
+                            // temporary fix for versions before ios 16
+                            UITableView.appearance().backgroundColor = .clear
+                        }
+                    }
+                }
+
+                // Overlay the app deletion process — block interaction while deleting
+                // but still displays phase + % instead of freezing the screen.
+                if let name = deletingApp {
+                    ZStack {
+                        Color.black.opacity(0.65).ignoresSafeArea()
+                        VStack(spacing: 16) {
+                            ProgressView()
+                                .progressViewStyle(.circular)
+                                .scaleEffect(1.4)
+                            Text("Deleting \(name)")
+                                .font(.headline)
+                                .foregroundColor(.white)
+                            Text(deletePhase)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
+                            ProgressView(value: deletePercent, total: 100)
+                                .progressViewStyle(.linear)
+                                .frame(width: 220)
+                            Text("\(Int(deletePercent))%")
+                                .font(.caption2.monospacedDigit())
+                                .foregroundColor(.green)
+                        }
+                        .padding(28)
+                        .background(
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                .fill(Color(.systemGray6).opacity(0.97))
+                        )
+                    }
+                }
+            }
+            .navigationBarHidden(true)
+            .onAppear(perform: loadInstalledApps)
+            .sheet(isPresented: $showAPKInstaller, onDismiss: loadInstalledApps) {
+                APKInstallerView { log in
+                    fullLog = log
+                    showAPKInstaller = false
+                }
+            }
+            .alert("Rename App", isPresented: $showRenameAlert) {
+                TextField("App Name", text: $newAppName)
+                Button("Cancel", role: .cancel) {}
+                Button("Save") {
+                    renameApp(id: renamingAppId, newName: newAppName)
+                }
+            } message: {
+                Text("Enter a new display name for this app.")
+            }
+        }
+    }
+
+    private func loadInstalledApps() {
+        guard let url = androidRootAppsURL else { return }
+        do {
+            let contents = try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey])
+            var items: [AppItem] = []
+            for folder in contents.filter({ $0.hasDirectoryPath }) {
+                var folderName = folder.lastPathComponent
+                var currentFolderURL = folder
+                
+                // 1. Automatically normalize immediately if the directory name has a version underscore (e.g. ru.zdevs.zarchiver_1.0.10)
+                if folderName.contains("_") {
+                    let cleanPkg = String(folderName.split(separator: "_")[0])
+                    if cleanPkg.contains(".") {
+                        let targetURL = url.appendingPathComponent(cleanPkg, isDirectory: true)
+                        if !FileManager.default.fileExists(atPath: targetURL.path) {
+                            try? FileManager.default.moveItem(at: currentFolderURL, to: targetURL)
+                            folderName = cleanPkg
+                            currentFolderURL = targetURL
+                        } else {
+                            try? FileManager.default.removeItem(at: currentFolderURL)
+                            folderName = cleanPkg
+                            currentFolderURL = targetURL
+                        }
+                    }
+                }
+
+                // Read app_info.json if available
+                var infoURL = currentFolderURL.appendingPathComponent("app_info.json")
+                var displayName = prettifyAppName(folderName)
+                var version = extractVersionFromFolderName(folderName) ?? "1.0.0"
+
+                if let infoData = try? Data(contentsOf: infoURL),
+                   let rawObj = try? JSONSerialization.jsonObject(with: infoData),
+                   let json = rawObj as? [String: Any] {
+                    if let realPkg = json["package"] as? String, !realPkg.isEmpty && realPkg != folderName {
+                        let targetURL = url.appendingPathComponent(realPkg, isDirectory: true)
+                        if !FileManager.default.fileExists(atPath: targetURL.path) {
+                            try? FileManager.default.moveItem(at: currentFolderURL, to: targetURL)
+                            folderName = realPkg
+                            currentFolderURL = targetURL
+                            infoURL = currentFolderURL.appendingPathComponent("app_info.json")
+                        }
+                    }
+                    if let label = json["label"] as? String, !label.isEmpty {
+                        if label.contains(".") || label.lowercased().hasSuffix(".apk") {
+                            displayName = prettifyAppName(label)
+                        } else {
+                            displayName = label
+                        }
+                    }
+                    if let ver = json["version"] as? String, !ver.isEmpty && ver != "1.0.0" {
+                        version = ver
+                    }
+                }
+
+                // Version from AndroidManifest.xml is STANDARD SOURCE — app_info.json
+                // may be stale (written from an old version when the AXML parser still had errors → "1.0.0").
+                // Read the binary manifest directly each time the app is listed.
+                if let mfData = try? Data(contentsOf: currentFolderURL.appendingPathComponent("AndroidManifest.xml")),
+                   let mfVer = extractVersionNameFromAxml(mfData), !mfVer.isEmpty {
+                    version = mfVer
+                }
+                
+                // Read app_icon.png if available
+                var iconImg: UIImage? = nil
+                let iconURL = currentFolderURL.appendingPathComponent("app_icon.png")
+                if FileManager.default.fileExists(atPath: iconURL.path) {
+                    iconImg = UIImage(contentsOfFile: iconURL.path)
+                }
+                
+                items.append(AppItem(id: folderName, displayName: displayName, version: version, iconImage: iconImg))
+            }
+            installedApps = items.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+        } catch {
+            print("Failed to load apps: \(error)")
+            installedApps = []
+        }
+    }
+    
+    private func prettifyAppName(_ raw: String) -> String {
+        if raw.isEmpty { return "Android App" }
+        var s = raw
+
+        // 1. Separate package name if any (eg "com.discord" -> "discord")
+        if s.contains(".") {
+            let parts = s.split(separator: ".")
+            var chosen = parts.last
+            let flavorSuffixes: Set<String> = [
+                "google", "android", "store", "play", "release",
+                "debug", "beta", "alpha", "taptap", "bilibili", "amazon", "dist"
+            ]
+            if parts.count > 1, let lastStr = chosen, flavorSuffixes.contains(lastStr.lowercased()) {
+                chosen = parts[parts.count - 2]
+            }
+            if let chosen = chosen {
+                s = String(chosen)
+            }
+        }
+
+        // 2. Remove the .apk extension
+        if s.lowercased().hasSuffix(".apk") {
+            s = String(s.dropLast(4))
+        }
+
+        // The cleanup below derives a readable name from any package or file name. A
+        // table mapping four specific apps to their branded spelling used to sit here,
+        // which mislabelled anything whose name merely contained one of those words.
+
+        // 3. Separate common junk prefixes/suffixes in mod/port APK file names
+        let junkWords: Set<String> = [
+            "apk", "arm64", "arm64v8a", "v8a", "vulkan", "gles", "mod",
+            "signed", "release", "debug", "beta", "alpha", "jakitomzed",
+            "bandishare", "apkpure", "moddroid", "an1", "apkmirror"
+        ]
+        
+        let components = s.split(whereSeparator: { $0 == "-" || $0 == "_" || $0 == " " })
+        var validWords: [String] = []
+        for comp in components {
+            let str = String(comp)
+            let wLower = str.lowercased()
+            if junkWords.contains(wLower) { continue }
+            // Ignore pure numeric version e.g. "5.5.8" or "v202"
+            if str.allSatisfy({ $0.isNumber || $0 == "." }) || (str.hasPrefix("v") && str.dropFirst().allSatisfy({ $0.isNumber || $0 == "." })) {
+                continue
+            }
+            validWords.append(str)
+        }
+        
+        if !validWords.isEmpty {
+            s = validWords.joined(separator: " ")
+        } else {
+            s = s.replacingOccurrences(of: "-", with: " ").replacingOccurrences(of: "_", with: " ")
+        }
+
+        // 4. Capitalize first letter and separate CamelCase (e.g. "rollingsky" -> "Rolling Sky", "Discord" -> "Discord")
+        var result = ""
+        for (i, char) in s.enumerated() {
+            if i > 0 && char.isUppercase && s[s.index(s.startIndex, offsetBy: i - 1)].isLowercase && !result.hasSuffix(" ") {
+                result += " "
+            }
+            result.append(char)
+        }
+
+        return result.capitalized
+    }
+    
+    private func runApp(name: String) {
+        // Re-activate on every launch: the onAppear session can be lost to
+        // interruptions or backgrounding long before the user taps an app,
+        // and an inactive session plays AudioQueue output silently.
+        activateAudioSession()
+        guard let cString = kudroid_run_apk(name) else {
+            fullLog = "[kudroid_core] ERROR: null result from kudroid_run_apk"
+            return
+        }
+        fullLog = String(cString: cString)
+        free(UnsafeMutablePointer(mutating: cString))
+    }
+    
+    private func clearAppCache(name: String) {
+        let success = kudroid_clear_app_cache(name)
+        fullLog = success == 1 ? "Cleared cache for \(name)" : "Failed to clear cache for \(name)"
+    }
+    
+    private func deleteApp(name: String) {
+        guard deletingApp == nil else { return } // Deleting another app
+        deletingApp = name
+        deletePhase = "Preparing…"
+        deletePercent = 0
+        // [DEBUG UNINSTALL] marks the start — watchdog below
+        // Use it to detect frozen deletions (stuck at 0% with no callbacks).
+        let start = Date()
+        DispatchQueue.main.async {
+            self.fullLog += "\n[uninstall] START \(name) @ \(start)"
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            final class Ctx {
+                let phase: (String) -> Void
+                let pct: (Double) -> Void
+                init(_ p: @escaping (String) -> Void, _ q: @escaping (Double) -> Void) { phase = p; pct = q }
+            }
+            let ctx = Ctx({ text in
+                DispatchQueue.main.async { self.deletePhase = text }
+            }, { v in
+                DispatchQueue.main.async {
+                    self.deletePercent = v
+                    self.deleteCbCount += 1
+                }
+            })
+            let cb: @convention(c) (UnsafePointer<CChar>?, Int32, UnsafeMutableRawPointer?) -> Void = {
+                phaseC, percent, ud in
+                guard let raw = ud else { return }
+                let ctx = Unmanaged<Ctx>.fromOpaque(raw).takeUnretainedValue()
+                let text = phaseC.map { String(cString: $0) } ?? ""
+                ctx.phase(text)
+                ctx.pct(Double(percent))
+            }
+            let opaque = Unmanaged.passRetained(ctx).toOpaque()
+
+            // [DEBUG] watchdog: if after 15 seconds there is NO callback from native
+            // (not counting percent because 1% = ~22MB for large apps) → native stream
+            // Almost certainly stuck. Runs on main queue to read @State safely.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 15) {
+                if self.deletingApp == name && self.deleteCbCount == 0 {
+                    self.fullLog += "\n[uninstall] ⚠️ WATCHDOG: no callback after 15s — native thread likely STUCK (permission or filesystem)"
+                    self.deletePhase = "Stuck? (>15s, no activity)"
+                }
+            }
+
+            let success = kudroid_delete_app_progress(name, cb, opaque)
+            Unmanaged<Ctx>.fromOpaque(opaque).release()
+            // [DEBUG] pull the native-side trace into the Swift log for viewing/copying
+            // (also saved to kudroid_uninstall_debug.txt in Documents).
+            if let cTrace = kudroid_uninstall_debug_log() {
+                let trace = String(cString: cTrace)
+                free(UnsafeMutablePointer(mutating: cTrace))
+                DispatchQueue.main.async { self.fullLog += "\n" + trace }
+            }
+            let elapsed = Int(Date().timeIntervalSince(start))
+            DispatchQueue.main.async {
+                self.fullLog += success == 1
+                    ? "\n[uninstall] DONE \(name) in \(elapsed)s"
+                    : "\n[uninstall] FAILED \(name) after \(elapsed)s"
+                self.deletingApp = nil
+                self.loadInstalledApps()
+            }
+        }
+    }
+    
+    private func renameApp(id: String, newName: String) {
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let root = androidRootAppsURL else { return }
+        let infoURL = root.appendingPathComponent(id).appendingPathComponent("app_info.json")
+        var json: [String: Any] = [:]
+        if let data = try? Data(contentsOf: infoURL),
+           let rawObj = try? JSONSerialization.jsonObject(with: data),
+           let existing = rawObj as? [String: Any] {
+            json = existing
+        }
+        json["label"] = trimmed
+        if let outData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) {
+            try? outData.write(to: infoURL)
+        }
+        loadInstalledApps()
+    }
+}
+
+// mark: - application permission management tab (PermissionsView)
+struct PermissionGroupItem: Identifiable {
+    var id: String { key }
+    let key: String
+    let displayName: String
+    let description: String
+    var granted: Bool
+}
+
+struct PermissionsView: View {
+    @State private var installedApps: [AppItem] = []
+    @State private var appPermissions: [String: [PermissionGroupItem]] = [:]
+    @State private var expandedAppIds: Set<String> = []
+    @State private var searchText: String = ""
+    
+    private var androidRootAppsURL: URL? {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("android_root/data/app", isDirectory: true)
+    }
+
+    private var filteredApps: [AppItem] {
+        if searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return installedApps
+        }
+        return installedApps.filter {
+            $0.displayName.localizedCaseInsensitiveContains(searchText) ||
+            $0.id.localizedCaseInsensitiveContains(searchText)
+        }
+    }
+
+    var body: some View {
+        NavigationView {
+            ZStack {
+                Color.black.ignoresSafeArea()
+                
+                VStack(spacing: 0) {
+                    // Title
+                    HStack {
+                        Image(systemName: "lock.shield.fill")
+                            .font(.title)
+                            .foregroundColor(.green)
+                        Text("App Permissions")
+                            .font(.title2.bold())
+                        Spacer()
+                    }
+                    .padding(.horizontal)
+                    .padding(.top, 12)
+                    .padding(.bottom, 8)
+                    
+                    // Search bar
+                    HStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundColor(.secondary)
+                        TextField("Search installed apps...", text: $searchText)
+                            .font(.subheadline)
+                            .foregroundColor(.white)
+                            .autocapitalization(.none)
+                            .disableAutocorrection(true)
+                        
+                        if !searchText.isEmpty {
+                            Button(action: { searchText = "" }) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                    .padding(10)
+                    .background(Color(.systemGray6))
+                    .cornerRadius(10)
+                    .padding(.horizontal)
+                    .padding(.bottom, 8)
+                    
+                    if installedApps.isEmpty {
+                        VStack(spacing: 16) {
+                            Spacer()
+                            Image(systemName: "shield.slash")
+                                .font(.system(size: 64))
+                                .foregroundColor(.secondary)
+                            Text("No Installed Apps Found")
+                                .font(.headline)
+                            Text("Install apps from the Apps tab to configure permissions.")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.center)
+                                .padding(.horizontal)
+                            Spacer()
+                        }
+                    } else if filteredApps.isEmpty {
+                        VStack(spacing: 12) {
+                            Spacer()
+                            Image(systemName: "magnifyingglass")
+                                .font(.system(size: 48))
+                                .foregroundColor(.secondary)
+                            Text("No matching apps found")
+                                .font(.headline)
+                                .foregroundColor(.secondary)
+                            Spacer()
+                        }
+                    } else {
+                        ScrollView {
+                            LazyVStack(spacing: 10) {
+                                ForEach(filteredApps) { app in
+                                    appPermissionCard(app: app)
+                                }
+                            }
+                            .padding(.horizontal)
+                            .padding(.bottom, 20)
+                        }
+                    }
+                }
+            }
+            .navigationBarHidden(true)
+            .onAppear(perform: loadData)
+        }
+    }
+    
+    private func appPermissionCard(app: AppItem) -> some View {
+        let isExpanded = expandedAppIds.contains(app.id)
+        let groups = appPermissions[app.id] ?? []
+        let grantedCount = groups.filter({ $0.granted }).count
+        
+        return VStack(spacing: 0) {
+            // Header click to open/close
+            Button(action: {
+                withAnimation(.easeInOut(duration: 0.22)) {
+                    if isExpanded {
+                        expandedAppIds.remove(app.id)
+                    } else {
+                        expandedAppIds.insert(app.id)
+                    }
+                }
+            }) {
+                HStack(spacing: 12) {
+                    if let icon = app.iconImage {
+                        Image(uiImage: icon)
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                            .frame(width: 40, height: 40)
+                            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    } else {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                .fill(Color.green.opacity(0.2))
+                                .frame(width: 40, height: 40)
+                            Image(systemName: "cube.fill")
+                                .font(.system(size: 18))
+                                .foregroundColor(.green)
+                        }
+                    }
+                    
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(app.displayName)
+                            .font(.headline)
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                        
+                        Text("\(grantedCount)/\(groups.count) permissions granted")
+                            .font(.caption2)
+                            .foregroundColor(grantedCount > 0 ? .green : .secondary)
+                    }
+                    
+                    Spacer()
+                    
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.caption.bold())
+                        .foregroundColor(.secondary)
+                        .padding(6)
+                }
+                .padding(12)
+                .background(Color(.systemGray6))
+            }
+            .buttonStyle(PlainButtonStyle())
+            
+            // List of permissions (appears when expanded)
+            if isExpanded {
+                VStack(spacing: 0) {
+                    Divider().background(Color.white.opacity(0.1))
+                    
+                    ForEach(groups) { group in
+                        VStack(spacing: 0) {
+                            HStack {
+                                HStack(spacing: 8) {
+                                    Image(systemName: iconForGroup(group.key))
+                                        .foregroundColor(.green)
+                                        .frame(width: 22)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(group.displayName)
+                                            .font(.subheadline.bold())
+                                            .foregroundColor(.white)
+                                        Text(group.description)
+                                            .font(.caption2)
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
+                                
+                                Spacer()
+                                
+                                Toggle("", isOn: Binding(
+                                    get: { group.granted },
+                                    set: { newValue in
+                                        togglePermission(appId: app.id, groupKey: group.key, granted: newValue)
+                                    }
+                                ))
+                                .labelsHidden()
+                                .toggleStyle(SwitchToggleStyle(tint: .green))
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 10)
+                            
+                            if group.id != groups.last?.id {
+                                Divider()
+                                    .background(Color.white.opacity(0.05))
+                                    .padding(.leading, 44)
+                            }
+                        }
+                    }
+                    
+                    // Quick action button Grant All / Revoke All at the foot of the Card
+                    HStack {
+                        Button(action: {
+                            revokeAll(appId: app.id)
+                        }) {
+                            Text("Revoke All")
+                                .font(.caption.bold())
+                                .foregroundColor(.red.opacity(0.8))
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(Color.red.opacity(0.15))
+                                .cornerRadius(8)
+                        }
+                        
+                        Spacer()
+                        
+                        Button(action: {
+                            grantAll(appId: app.id)
+                        }) {
+                            Text("Grant All")
+                                .font(.caption.bold())
+                                .foregroundColor(.green)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(Color.green.opacity(0.2))
+                                .cornerRadius(8)
+                        }
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(Color.white.opacity(0.02))
+                }
+                .background(Color(.systemGray6).opacity(0.6))
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(isExpanded ? Color.green.opacity(0.3) : Color.white.opacity(0.08), lineWidth: 1)
+        )
+    }
+    
+    private func iconForGroup(_ key: String) -> String {
+        switch key {
+        case "storage": return "internaldrive.fill"
+        case "network": return "network"
+        case "camera": return "camera.fill"
+        case "microphone": return "mic.fill"
+        case "location": return "location.fill"
+        case "bluetooth": return "gamecontroller.fill"
+        default: return "checkmark.shield.fill"
+        }
+    }
+    
+    private func loadData() {
+        loadInstalledApps()
+        for app in installedApps {
+            loadPermissionsForApp(appId: app.id)
+        }
+    }
+    
+    private func loadInstalledApps() {
+        guard let url = androidRootAppsURL else { return }
+        do {
+            let contents = try FileManager.default.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey])
+            var items: [AppItem] = []
+            for folder in contents.filter({ $0.hasDirectoryPath }) {
+                let folderName = folder.lastPathComponent
+                var displayName = folderName
+                var version = "1.0.0"
+                let infoURL = folder.appendingPathComponent("app_info.json")
+                if let infoData = try? Data(contentsOf: infoURL),
+                   let rawObj = try? JSONSerialization.jsonObject(with: infoData),
+                   let json = rawObj as? [String: Any] {
+                    if let label = json["label"] as? String, !label.isEmpty {
+                        displayName = label
+                    }
+                    if let ver = json["version"] as? String, !ver.isEmpty {
+                        version = ver
+                    }
+                }
+                var iconImg: UIImage? = nil
+                let iconURL = folder.appendingPathComponent("app_icon.png")
+                if FileManager.default.fileExists(atPath: iconURL.path) {
+                    iconImg = UIImage(contentsOfFile: iconURL.path)
+                }
+                items.append(AppItem(id: folderName, displayName: displayName, version: version, iconImage: iconImg))
+            }
+            installedApps = items.sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
+        } catch {
+            installedApps = []
+        }
+    }
+    
+    private func loadPermissionsForApp(appId: String) {
+        let defaultGroups = [
+            PermissionGroupItem(key: "storage", displayName: "Storage Access", description: "Read & write files, SD card (/sdcard/)", granted: kudroid_is_group_granted(appId, "storage") == 1),
+            PermissionGroupItem(key: "network", displayName: "Internet & Network", description: "Access Wi-Fi and mobile networks", granted: kudroid_is_group_granted(appId, "network") == 1),
+            PermissionGroupItem(key: "camera", displayName: "Camera", description: "Take pictures and record video", granted: kudroid_is_group_granted(appId, "camera") == 1),
+            PermissionGroupItem(key: "microphone", displayName: "Microphone & Audio", description: "Record voice and audio", granted: kudroid_is_group_granted(appId, "microphone") == 1),
+            PermissionGroupItem(key: "location", displayName: "Location", description: "Access GPS and location", granted: kudroid_is_group_granted(appId, "location") == 1),
+            PermissionGroupItem(key: "bluetooth", displayName: "Bluetooth & Gamepads", description: "Connect controllers and gamepads", granted: kudroid_is_group_granted(appId, "bluetooth") == 1)
+        ]
+        appPermissions[appId] = defaultGroups
+    }
+    
+    private func togglePermission(appId: String, groupKey: String, granted: Bool) {
+        kudroid_set_group_permission(appId, groupKey, granted ? 1 : 0)
+        if var list = appPermissions[appId] {
+            for i in 0..<list.count {
+                if list[i].key == groupKey {
+                    list[i].granted = granted
+                }
+            }
+            appPermissions[appId] = list
+        }
+    }
+    
+    private func grantAll(appId: String) {
+        kudroid_grant_all_permissions(appId)
+        loadPermissionsForApp(appId: appId)
+    }
+
+    private func revokeAll(appId: String) {
+        let groups = appPermissions[appId] ?? []
+        for group in groups {
+            kudroid_set_group_permission(appId, group.key, 0)
+        }
+        loadPermissionsForApp(appId: appId)
+    }
+}
+
+// mark: - debug tab (shortened DebugView keeps only KDB & Live Terminal Log)
+struct DebugView: View {
+    @Binding var fullLog: String
+    @Binding var jitStatus: String
+    @State private var showCopyAlert = false
+    @State private var jniTraceOn = false
+    @State private var kdbServerIP: String = UserDefaults.standard.string(forKey: "kdb_server_ip") ?? ""
+    @State private var isKdbConnected: Bool = false
+
+    private var previewLog: String {
+        let lines = fullLog.components(separatedBy: "\n")
+        if lines.count <= 35 { return fullLog }
+        return lines.suffix(35).joined(separator: "\n")
+    }
+
+    var body: some View {
+        NavigationView {
+            ZStack {
+                Color.black.ignoresSafeArea()
+
+                VStack(spacing: 12) {
+                    // Remote KDB Bridge connection bar
+                    HStack(spacing: 8) {
+                        Image(systemName: isKdbConnected ? "antenna.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right.slash")
+                            .foregroundColor(isKdbConnected ? .green : .gray)
+                        TextField("KDB Server IP (e.g. 192.168.1.5:8080)", text: $kdbServerIP)
+                            .font(.caption.monospaced())
+                            .textFieldStyle(.roundedBorder)
+                            .autocapitalization(.none)
+                            .disableAutocorrection(true)
+                        
+                        Button(isKdbConnected ? "Disconnect" : "Connect") {
+                            UserDefaults.standard.set(kdbServerIP, forKey: "kdb_server_ip")
+                            if isKdbConnected {
+                                RemoteDebugClient.shared.disconnect()
+                            } else {
+                                RemoteDebugClient.shared.connect(host: kdbServerIP)
+                            }
+                        }
+                        .font(.caption.bold())
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(isKdbConnected ? Color.red.opacity(0.25) : Color.green.opacity(0.25))
+                        .foregroundColor(isKdbConnected ? .red : .green)
+                        .cornerRadius(8)
+                    }
+                    .padding(.horizontal)
+                    .onAppear {
+                        RemoteDebugClient.shared.onConnectionStatusChanged = { connected in
+                            isKdbConnected = connected
+                        }
+                    }
+
+                    HStack {
+                        Text("Live Terminal Log")
+                            .font(.headline)
+                            .foregroundColor(.white)
+                        Spacer()
+                        // Per-JNI-call tracing. Off by default: thousands of
+                        // lines a second cost frames. Toggle takes effect
+                        // immediately, no rebuild, no env var.
+                        Toggle("JNI", isOn: $jniTraceOn)
+                            .font(.caption)
+                            .toggleStyle(.switch)
+                            .onChange(of: jniTraceOn) { on in
+                                kudroid_log_set_jni(on ? 1 : 0)
+                            }
+                            .onAppear {
+                                jniTraceOn = kudroid_log_get_jni() != 0
+                            }
+                        Label(jitStatus, systemImage: jitStatus.contains("Enabled") ? "bolt.fill" : "bolt.slash.fill")
+                            .font(.caption)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(jitStatus.contains("Enabled") ? Color.green.opacity(0.2) : Color.red.opacity(0.2))
+                            .foregroundColor(jitStatus.contains("Enabled") ? .green : .red)
+                            .cornerRadius(8)
+                    }
+                    .padding(.horizontal)
+                    
+                    ScrollView {
+                        Text(previewLog)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.green)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(12)
+                    }
+                    .frame(maxHeight: .infinity)
+                    .background(Color(.systemGray6))
+                    .cornerRadius(12)
+                    .padding(.horizontal)
+                    
+                    // Log operation button (Copy Log & Clear Log)
+                    HStack(spacing: 12) {
+                        Button(action: {
+                            UIPasteboard.general.string = fullLog
+                            showCopyAlert = true
+                        }) {
+                            HStack {
+                                Image(systemName: "doc.on.doc.fill")
+                                Text("Copy Log")
+                            }
+                            .font(.subheadline.bold())
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(Color.green.opacity(0.2))
+                            .foregroundColor(.green)
+                            .cornerRadius(10)
+                        }
+                        
+                        Button(action: {
+                            kudroid_clear_all_logs()
+                            fullLog = "[kudroid_core] Log cleared."
+                        }) {
+                            HStack {
+                                Image(systemName: "trash.fill")
+                                Text("Clear Log")
+                            }
+                            .font(.subheadline.bold())
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(Color.red.opacity(0.2))
+                            .foregroundColor(.red)
+                            .cornerRadius(10)
+                        }
+                    }
+                    .padding(.horizontal)
+                    .padding(.bottom, 8)
+                }
+            }
+            .navigationBarHidden(true)
+            .onAppear {
+                // JIT permission can arrive after launch (StikDebug attaches
+                // mid-run), so re-ask instead of keeping the startup verdict.
+                jitStatus = runJitStatus()
+            }
+            .alert("Copied!", isPresented: $showCopyAlert) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text("Full log (\(fullLog.count) chars) copied to clipboard.")
+            }
+        }
+    }
+}
+
+// mark: - native connector support functions
+
+/// Turn on audio session playback for CoreAudio (AudioQueue in AudioShim) to play
+/// is audible — without an active session, iOS is silent.
+func activateAudioSession() {
+    let session = AVAudioSession.sharedInstance()
+    // Build runs with -swift-version 4 (CMake's default when enable_language(Swift)).
+    // In this mode NS_TYPED_EXTENSIBLE_ENUM of ObjC (AVAudioSession.Category / Mode)
+    // imported as raw NSString typealias → no member .playback/.default,
+    // param only accepts String. Use raw constant string (correct ObjC value) —
+    // compiles in Swift 4 mode; If you later upgrade to Swift 5, change back
+    // AVAudioSession.Category.playback / AVAudioSession.Mode.default.
+    do {
+        // An open microphone recorder needs a record-capable category; reasserting
+        // playback here would cut it off.
+        if kudroid_audio_capture_active() > 0 {
+            try session.setCategory(.playAndRecord,
+                                    mode: .default,
+                                    options: [.mixWithOthers, .allowBluetooth, .defaultToSpeaker])
+        } else {
+            try session.setCategory(.playback,
+                                    mode: .default,
+                                    options: [.mixWithOthers])
+        }
+        try session.setActive(true)
+    } catch {
+        // Never silent: a failed session is exactly the consume-but-silent bug.
+        print("[KuDroidAudio] activateAudioSession failed: \(error)")
+    }
+}
+
+/// Publish the OS authorization of the sensors a guest can ask for, so the guest's
+/// permission checks reflect what iOS will actually allow.
+func refreshHostAuthorizations() {
+    switch AVAudioSession.sharedInstance().recordPermission {
+    case .granted: kudroid_set_host_authorization(0, 1)
+    case .denied: kudroid_set_host_authorization(0, 2)
+    default: kudroid_set_host_authorization(0, 0)
+    }
+    switch AVCaptureDevice.authorizationStatus(for: .video) {
+    case .authorized: kudroid_set_host_authorization(1, 1)
+    case .notDetermined: kudroid_set_host_authorization(1, 0)
+    default: kudroid_set_host_authorization(1, 2)
+    }
+}
+
+/// Ask iOS for the sensors named in `permissions`, then publish the answers.
+private func requestHostAuthorizations(for permissions: [String], completion: @escaping () -> Void) {
+    let pending = DispatchGroup()
+    if permissions.contains("android.permission.RECORD_AUDIO") {
+        pending.enter()
+        AVAudioSession.sharedInstance().requestRecordPermission { granted in
+            kudroid_set_host_authorization(0, granted ? 1 : 2)
+            pending.leave()
+        }
+    }
+    if permissions.contains("android.permission.CAMERA") {
+        pending.enter()
+        AVCaptureDevice.requestAccess(for: .video) { granted in
+            kudroid_set_host_authorization(1, granted ? 1 : 2)
+            pending.leave()
+        }
+    }
+    pending.notify(queue: .main, execute: completion)
+}
+
+/// Read CFBundleShortVersionString from Info.plist (T1.0.0).
+func appVersion() -> String {
+    if let v = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String {
+        return v
+    }
+    return "0.0.0"
+}
+
+func setupLogDir() {
+    // Resolved through the process's container, never hardcoded.
+    //
+    // This is what makes KuDroid work unchanged inside LiveContainer, which runs a
+    // guest app as a dylib in its own process and rewrites HOME/CFFIXED_USER_HOME to
+    // a nested per-guest container before loading it. `urls(for: .documentDirectory)`
+    // goes through those variables, so it yields the guest's own Documents in both
+    // deployments — and every guest path (android_root, the extracted APK, the .so
+    // files) hangs off this one value.
+    if let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+        kudroid_set_log_dir(docs.path)
+        kudroid_set_documents_dir(docs.path)
+        let apkInbox = docs.appendingPathComponent("put_apk_here", isDirectory: true)
+        try? FileManager.default.createDirectory(at: apkInbox, withIntermediateDirectories: true)
+    }
+}
+
+func runJniJvmTest() -> String {
+    // KuART embeds framework.dex in the binary so no jar path is needed.
+    guard let cString = kudroid_test_jvm("") else { return "Error: null result" }
+    let log = String(cString: cString)
+    free(UnsafeMutablePointer(mutating: cString))
+    return log
+}
+
+func runGpuTest() -> String {
+    // note: make sure kudroid_test_gpu is declared in the connection header
+    guard let cString = kudroid_test_gpu() else { return "Error: null result" }
+    let log = String(cString: cString)
+    free(UnsafeMutablePointer(mutating: cString))
+    return log
+}
+
+func runVFSSelfTest() -> String {
+    guard let cString = kudroid_vfs_self_test_log() else { return "Error: null result" }
+    let log = String(cString: cString)
+    free(UnsafeMutablePointer(mutating: cString))
+    return log
+}
+
+func runVFSExtendedTest() -> String {
+    guard let cString = kudroid_vfs_extended_test_log() else { return "Error: null result" }
+    let log = String(cString: cString)
+    free(UnsafeMutablePointer(mutating: cString))
+    return log
+}
+
+func installAPK(at apkURL: URL) -> String {
+    guard let cString = kudroid_install_apk(apkURL.path) else { return "[kudroid_apk] Native installer returned no log" }
+    let log = String(cString: cString)
+    free(UnsafeMutablePointer(mutating: cString))
+    return log
+}
+
+func extractVersionFromFolderName(_ name: String) -> String? {
+    let pattern = #"(\d+[\.\-_]\d+([\.\-_]\d+)*)"#
+    if let regex = try? NSRegularExpression(pattern: pattern, options: []) {
+        let nsString = name as NSString
+        let results = regex.matches(in: name, options: [], range: NSRange(location: 0, length: nsString.length))
+        if let lastMatch = results.last {
+            let matchString = nsString.substring(with: lastMatch.range)
+            let cleaned = matchString.replacingOccurrences(of: "_", with: ".").replacingOccurrences(of: "-", with: ".")
+            return cleaned
+        }
+    }
+    return nil
+}
+
+/// Read versionName from binary AndroidManifest.xml (AXML).
+/// Standard source for display version — app_info.json may be stale.
+/// Minimalist parser: string pool UTF-16/UTF-8 + find attr "versionName" in
+///first START_ELEMENT tag named "manifest".
+func extractVersionNameFromAxml(_ data: Data) -> String? {
+    let bytes = [UInt8](data)
+    guard bytes.count > 40 else { return nil }
+
+    func u16(_ o: Int) -> Int { Int(bytes[o]) | (Int(bytes[o+1]) << 8) }
+    func u32(_ o: Int) -> Int {
+        u16(o) | (u16(o+2) << 16)
+    }
+
+    // File header: type=0x0003 | (headerSize<<16), fileSize.
+    guard u32(0) == 0x00080003 else { return nil }
+
+    // String pool at offset 8: type=0x0001, headerSize=28.
+    let poolOff = 8
+    guard u16(poolOff) == 0x0001 else { return nil }
+    let stringCount = u32(poolOff + 8)
+    let flags = u32(poolOff + 16)
+    let stringsStart = poolOff + u32(poolOff + 20)
+    let isUtf8 = (flags & (1 << 8)) != 0
+
+    var strings: [String] = []
+    strings.reserveCapacity(stringCount)
+    for i in 0..<stringCount {
+        let offEntry = poolOff + 28 + i * 4
+        guard offEntry + 4 <= bytes.count else { break }
+        let strOff = stringsStart + u32(offEntry)
+        guard strOff < bytes.count else { strings.append(""); continue }
+
+        if isUtf8 {
+            var cur = strOff
+            // u8len: 1-2 byte length prefix (number of characters), then byte-length prefix.
+            cur += (bytes[cur] & 0x80) != 0 ? 2 : 1
+            var byteLen = 0
+            if cur < bytes.count {
+                if (bytes[cur] & 0x80) != 0, cur + 1 < bytes.count {
+                    byteLen = (Int(bytes[cur] & 0x7F) << 8) | Int(bytes[cur + 1])
+                    cur += 2
+                } else {
+                    byteLen = Int(bytes[cur])
+                    cur += 1
+                }
+            }
+            guard cur + byteLen <= bytes.count else { strings.append(""); continue }
+            strings.append(String(decoding: bytes[cur..<(cur+byteLen)], as: UTF8.self))
+        } else {
+            var cur = strOff
+            guard cur + 2 <= bytes.count else { strings.append(""); continue }
+            var charLen = u16(cur)
+            cur += 2
+            if (charLen & 0x8000) != 0 {
+                guard cur + 2 <= bytes.count else { strings.append(""); continue }
+                charLen = ((charLen & 0x7FFF) << 16) | u16(cur)
+                cur += 2
+            }
+            var s = ""
+            for _ in 0..<charLen where cur + 2 <= bytes.count {
+                let ch = u16(cur)
+                cur += 2
+                if let scalar = Unicode.Scalar(ch) { s.unicodeScalars.append(scalar) }
+            }
+            strings.append(s)
+        }
+    }
+
+    // Browse chunks to find START_ELEMENT of tag "manifest", read attr versionName.
+    var cur = poolOff + u32(poolOff + 4)
+    // Ignore resource map if present (type 0x0180).
+    if cur + 8 <= bytes.count && u32(cur) == 0x00080180 {
+        cur += u32(cur + 4)
+    }
+    while cur + 8 <= bytes.count {
+        let chunkType = u32(cur)
+        let chunkSize = u32(cur + 4)
+        guard chunkSize >= 8, cur + chunkSize <= bytes.count else { break }
+
+        if chunkType == 0x00100102 { // START_ELEMENT
+            let nameIdx = u32(cur + 20)
+            let tagName = nameIdx < strings.count ? strings[nameIdx] : ""
+            if tagName == "manifest" {
+                let attrStart = u16(cur + 24)
+                let attrSize = u16(cur + 26)
+                let attrCount = u16(cur + 28)
+                // attributeStart counts from the beginning of struct attrExt (= chunk+16).
+                var a = cur + 16 + attrStart
+                for _ in 0..<attrCount where a + attrSize <= cur + chunkSize {
+                    let attrNameIdx = u32(a + 4)
+                    let rawValIdx = u32(a + 8)
+                    let attrName = attrNameIdx < strings.count ? strings[attrNameIdx] : ""
+                    if attrName == "versionName" {
+                        if rawValIdx != 0xFFFFFFFF && rawValIdx < strings.count {
+                            return strings[rawValIdx]
+                        }
+                        // typed value: dataType in a+15, data in a+16.
+                        let dataType = bytes[a + 15]
+                        if dataType == 0x03 { // TYPE_STRING
+                            let dataVal = u32(a + 16)
+                            if dataVal < strings.count { return strings[dataVal] }
+                        }
+                    }
+                    a += attrSize
+                }
+                return nil // manifest is the first tag — if you don't see it, stop
+            }
+        }
+        cur += chunkSize
+    }
+    return nil
+}
+
+// mark: - apk installation interface
+struct APKInstallerView: View {
+    let onInstall: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var apkFiles: [URL] = []
+    @State private var selectedAPK: URL?
+    @State private var status = ""
+    @State private var isInstalling = false
+    @State private var installStep = ""
+    @State private var installedPackages: Set<String> = []
+
+    private var inboxURL: URL? {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("put_apk_here", isDirectory: true)
+    }
+
+    private var androidRootAppsURL: URL? {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("android_root/data/app", isDirectory: true)
+    }
+
+    var body: some View {
+        NavigationView {
+            ZStack {
+                Color.black.ignoresSafeArea()
+                
+                VStack(spacing: 0) {
+                    if let inboxURL {
+                        Text(inboxURL.path)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .textSelection(.enabled)
+                            .padding()
+                    }
+
+                    List(apkFiles, id: \.path) { apk in
+                        Button {
+                            if !isInstalling { selectedAPK = apk }
+                        } label: {
+                            HStack {
+                                Image(systemName: "shippingbox.fill")
+                                    .font(.title2)
+                                    .foregroundColor(.green)
+                                    .padding(.trailing, 4)
+                                
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(apk.lastPathComponent)
+                                        .foregroundColor(.white)
+                                        .lineLimit(1)
+                                    
+                                    HStack(spacing: 6) {
+                                        Text(fileSize(apk))
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                        
+                                        if let badge = apkStatusBadge(for: apk) {
+                                            Text(badge.text)
+                                                .font(.system(size: 9, weight: .black))
+                                                .padding(.horizontal, 6)
+                                                .padding(.vertical, 2)
+                                                .background(badge.isUpdate ? Color.orange.opacity(0.25) : Color.green.opacity(0.25))
+                                                .foregroundColor(badge.isUpdate ? .orange : .green)
+                                                .cornerRadius(4)
+                                        }
+                                    }
+                                }
+                                Spacer()
+                                if selectedAPK == apk {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundColor(.green)
+                                }
+                            }
+                        }
+                        .listRowBackground(Color(.systemGray6))
+                        .disabled(isInstalling)
+                    }
+                    .onAppear {
+                        UITableView.appearance().backgroundColor = .clear
+                    }
+                    .overlay {
+                        if apkFiles.isEmpty {
+                            VStack(spacing: 8) {
+                                Image(systemName: "folder.badge.plus").font(.largeTitle).foregroundColor(.secondary)
+                                Text("Put .apk files in Documents/put_apk_here").multilineTextAlignment(.center).foregroundColor(.white)
+                                Text("Then tap Refresh").font(.caption).foregroundColor(.secondary)
+                            }
+                            .padding()
+                        }
+                    }
+
+                    // Installation status animation frame
+                    if isInstalling {
+                        VStack(spacing: 12) {
+                            ProgressView()
+                                .progressViewStyle(CircularProgressViewStyle(tint: .green))
+                                .scaleEffect(1.3)
+                            
+                            Text(installStep)
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundColor(.green)
+                            
+                            HStack(spacing: 6) {
+                                Image(systemName: "cpu")
+                                    .font(.caption)
+                                    .foregroundColor(.green)
+                                Text("Extracting APK")
+                                    .font(.caption.weight(.medium))
+                                    .foregroundColor(.white)
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .background(Color.green.opacity(0.15))
+                            .cornerRadius(6)
+                            
+                            Text("Extracting assets, parsing package manifest & linking native ARM64 libraries...")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.center)
+                        }
+                        .padding()
+                        .frame(maxWidth: .infinity)
+                        .background(Color(.systemGray6).opacity(0.8))
+                        .cornerRadius(12)
+                        .padding(.horizontal)
+                        .transition(.opacity.combined(with: .scale))
+                    }
+
+                    if !status.isEmpty && !isInstalling {
+                        Text(status).font(.caption).foregroundColor(.red).padding(.horizontal)
+                    }
+
+                    HStack(spacing: 16) {
+                        Button("Refresh") { refresh() }
+                            .buttonStyle(.bordered)
+                            .disabled(isInstalling)
+                        
+                        Button(action: startInstall) {
+                            HStack {
+                                if isInstalling {
+                                    ProgressView()
+                                        .progressViewStyle(CircularProgressViewStyle(tint: .black))
+                                        .padding(.trailing, 4)
+                                    Text("Installing...")
+                                } else if let selectedAPK, let badge = apkStatusBadge(for: selectedAPK) {
+                                    Image(systemName: badge.isUpdate ? "arrow.triangle.2.circlepath" : "arrow.clockwise.circle.fill")
+                                    Text(badge.isUpdate ? "Update App" : "Reinstall App")
+                                } else {
+                                    Image(systemName: "arrow.down.circle.fill")
+                                    Text("Install Selected")
+                                }
+                            }
+                            .font(.body.bold())
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(selectedAPK != nil && (apkStatusBadge(for: selectedAPK!)?.isUpdate ?? false) ? .orange : .green)
+                        .disabled(selectedAPK == nil || isInstalling)
+                    }
+                    .padding()
+                }
+            }
+            .navigationTitle("Install APK")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") { dismiss() }
+                        .foregroundColor(.green)
+                        .disabled(isInstalling)
+                }
+            }
+            .onAppear { refresh() }
+        }
+    }
+
+    private func getInstalledPackage(for url: URL) -> String? {
+        let name = url.deletingPathExtension().lastPathComponent.lowercased()
+        for installed in installedPackages {
+            let lower = installed.lowercased()
+            if lower == name || name.contains(lower) || lower.contains(name) {
+                return installed
+            }
+        }
+        return nil
+    }
+
+    private func apkStatusBadge(for url: URL) -> (text: String, isUpdate: Bool)? {
+        guard let installed = getInstalledPackage(for: url) else { return nil }
+        
+        let apkVer = extractVersionFromFolderName(url.lastPathComponent)
+        let installedVer = extractVersionFromFolderName(installed)
+        
+        if let av = apkVer, let iv = installedVer, av != iv {
+            return ("UPDATE v\(av)", true)
+        }
+        return ("INSTALLED", false)
+    }
+
+    private func startInstall() {
+        guard let selectedAPK else { return }
+        withAnimation {
+            isInstalling = true
+            installStep = "Installing \(selectedAPK.lastPathComponent)..."
+        }
+        
+        DispatchQueue.global(qos: .userInitiated).async {
+            let log = installAPK(at: selectedAPK)
+            DispatchQueue.main.async {
+                withAnimation {
+                    self.isInstalling = false
+                    self.onInstall(log)
+                }
+            }
+        }
+    }
+
+    private func refresh() {
+        guard let inboxURL else {
+            status = "Documents directory unavailable"
+            return
+        }
+        do {
+            try FileManager.default.createDirectory(at: inboxURL, withIntermediateDirectories: true)
+            // Picker-only extension list (the extractor validates zips by content).
+            // "zip" covers APKMirror/SAI bundles like <pkg>.apks.zip.
+            let supportedExtensions = ["apk", "apkm", "xapk", "apks", "zip"]
+            apkFiles = try FileManager.default.contentsOfDirectory(
+                at: inboxURL, includingPropertiesForKeys: [.fileSizeKey], options: [.skipsHiddenFiles]
+            ).filter { supportedExtensions.contains($0.pathExtension.lowercased()) }
+             .sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
+            if let selectedAPK, !apkFiles.contains(selectedAPK) { self.selectedAPK = nil }
+            
+            // Download the list of installed apps to check for updates
+            if let root = androidRootAppsURL,
+               let folders = try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) {
+                installedPackages = Set(folders.map { $0.lastPathComponent })
+            }
+            
+            status = ""
+        } catch {
+            status = "Cannot scan put_apk_here: \(error.localizedDescription)"
+        }
+    }
+
+    private func fileSize(_ url: URL) -> String {
+        let values = try? url.resourceValues(forKeys: [.fileSizeKey])
+        return ByteCountFormatter.string(fromByteCount: Int64(values?.fileSize ?? 0), countStyle: .file)
+    }
+}
+
+// mark: - other native support functions
+func runJitStatus() -> String {
+    guard let cString = kudroid_jit_status() else { return "JIT: Unknown" }
+    let status = String(cString: cString)
+    free(UnsafeMutablePointer(mutating: cString))
+    return status
+}
+
+func runNativeTest(soName: String, testFunction: (UnsafePointer<CChar>?) -> UnsafePointer<CChar>?) -> String {
+    guard let bundledURL = Bundle.main.url(forResource: soName, withExtension: "so") else {
+        return "❌ \(soName).so not found in bundle"
+    }
+    let tmpURL = FileManager.default.temporaryDirectory.appendingPathComponent("\(soName).so")
+    do {
+        if FileManager.default.fileExists(atPath: tmpURL.path) { try FileManager.default.removeItem(at: tmpURL) }
+        try FileManager.default.copyItem(at: bundledURL, to: tmpURL)
+    } catch {
+        return "❌ failed to copy \(soName).so: \(error.localizedDescription)"
+    }
+    guard let cString = tmpURL.path.withCString({ testFunction($0) }) else { return "❌ error: null result" }
+    let log = String(cString: cString)
+    free(UnsafeMutablePointer(mutating: cString))
+    return log
+}
+
+func runBionicExecutionTest() -> String { return runNativeTest(soName: "test_bionic_lib", testFunction: kudroid_bionic_execution_test) }
+func runGpuVulkanSoTest() -> String { return runNativeTest(soName: "test_gpu_vulkan", testFunction: kudroid_gpu_vulkan_so_test) }
+func runGpuOpenglSoTest() -> String { return runNativeTest(soName: "test_gpu_opengl", testFunction: kudroid_gpu_opengl_so_test) }
+func runSyscallSoTest() -> String { return runNativeTest(soName: "test_syscalls", testFunction: kudroid_syscall_so_test) }
+func runJniMassiveTest() -> String { return runNativeTest(soName: "test_jni_massive", testFunction: kudroid_jni_massive_so_test) }
+
+func runMultiElfTest() -> String {
+    guard let consumer = Bundle.main.url(forResource: "libkudroid_consumer", withExtension: "so"),
+          let provider = Bundle.main.url(forResource: "libkudroid_provider", withExtension: "so") else {
+        return "❌ multi-elf provider/consumer libraries are missing from bundle"
+    }
+    let directory = FileManager.default.temporaryDirectory
+    let consumerURL = directory.appendingPathComponent("libkudroid_consumer.so")
+    let providerURL = directory.appendingPathComponent("libkudroid_provider.so")
+    do {
+        for url in [consumerURL, providerURL] {
+            if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
+        }
+        try FileManager.default.copyItem(at: consumer, to: consumerURL)
+        try FileManager.default.copyItem(at: provider, to: providerURL)
+    } catch {
+        return "❌ failed to prepare multi-elf test: \(error.localizedDescription)"
+    }
+    guard let cString = kudroid_multi_elf_test(consumerURL.path, providerURL.path) else { return "❌ error: null result" }
+    let log = String(cString: cString)
+    free(UnsafeMutablePointer(mutating: cString))
+    return log
+}
+
+func saveTestLog(filename: String, content: String) {
+    if let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+        let fileURL = docs.appendingPathComponent(filename)
+        try? content.write(to: fileURL, atomically: true, encoding: .utf8)
+    }
+}
+
+func executeKuDroidTest(name: String) -> (success: Bool, log: String, logFilename: String) {
+    let lower = name.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+    var log = ""
+    var logFile = "test_\(lower).log"
+
+    switch lower {
+    case "gpu", "gpu_native", "shader":
+        log = runGpuTest()
+        logFile = "test_gpu.log"
+
+    case "bionic":
+        log = runBionicExecutionTest()
+        logFile = "test_bionic.log"
+
+    case "jni", "jni_massive":
+        log = runJniMassiveTest()
+        logFile = "test_jni.log"
+
+    case "jvm", "jni_jvm", "kuart":
+        log = runJniJvmTest()
+        logFile = "test_kuart.log"
+
+    case "syscall", "syscalls":
+        log = runSyscallSoTest()
+        logFile = "test_syscall.log"
+
+    case "multi_elf", "linker":
+        log = runMultiElfTest()
+        logFile = "test_multi_elf.log"
+
+    case "opengl_so", "opengl":
+        log = runGpuOpenglSoTest()
+        logFile = "test_opengl_so.log"
+
+    case "vulkan_so", "vulkan":
+        log = runGpuVulkanSoTest()
+        logFile = "test_vulkan_so.log"
+
+    case "vfs":
+        log = runVFSExtendedTest()
+        logFile = "test_vfs.log"
+
+    case "audio", "sound":
+        guard let cString = kudroid_test_audio() else { return (false, "❌ error: null result", "test_audio.log") }
+        log = String(cString: cString)
+        free(UnsafeMutablePointer(mutating: cString))
+        logFile = "test_audio.log"
+
+    case "all":
+        var combined = "=== RUNNING ALL KUDROID ISOLATED SUBSYSTEM TESTS ===\n\n"
+        let tests = ["gpu", "audio", "bionic", "syscall", "vfs", "multi_elf", "jvm", "jni"]
+        for t in tests {
+            combined += "--- TEST: \(t.uppercased()) ---\n"
+            let res = executeKuDroidTest(name: t)
+            combined += res.log + "\n\n"
+        }
+        log = combined
+        logFile = "test_all.log"
+
+    default:
+        log = "❌ Unknown test: '\(name)'. Available: gpu, bionic, jni, kuart, syscall, multi_elf, opengl_so, vulkan_so, vfs, all"
+        logFile = "test_error.log"
+    }
+
+    saveTestLog(filename: logFile, content: log)
+    let isSuccess = !log.contains("❌") && !log.contains("ERROR") && !log.contains("Failed")
+    return (isSuccess, log, logFile)
+}
+
+// mark: - Full screen exclusive executable (Dedicated Clean Container)
+struct DedicatedAppRunnerView: UIViewControllerRepresentable {
+    let appName: String
+    let onCrash: (String, String) -> Void
+
+    func makeUIViewController(context: Context) -> NativeMetalViewController {
+        let vc = NativeMetalViewController(appName: appName, onCrash: onCrash)
+        return vc
+    }
+
+    func updateUIViewController(_ uiViewController: NativeMetalViewController, context: Context) {
+        DispatchQueue.main.async {
+            uiViewController.startAppIfNeeded()
+        }
+    }
+}
+
+private func onKuDroidSoftInputShow(_ flags: Int32) {
+    DispatchQueue.main.async {
+        guard let vc = NativeMetalViewController.sCurrentRunnerVC else { return }
+        NSLog("[KuDroid] guest requested soft keyboard (flags=0x%x)", flags)
+        // The focused field's type decides the layout; a keyboard that is already up
+        // must be rebuilt for a field of a different kind.
+        vc.metalView.applyGuestInputTraits(inputType: kudroid_get_soft_input_type(),
+                                           imeOptions: kudroid_get_soft_input_ime_options())
+        if vc.metalView.isFirstResponder {
+            vc.metalView.reloadInputViews()
+        } else {
+            vc.metalView.becomeFirstResponder()
+        }
+        kudroid_set_soft_input_visible(vc.metalView.isFirstResponder ? 1 : 0)
+    }
+}
+
+// Opens links the guest asks for (browser, mail, phone) in the system handler. Local-file
+// and script schemes are never opened.
+private func onKuDroidOpenURL(_ urlC: UnsafePointer<CChar>?) {
+    guard let urlC = urlC else { return }
+    let text = String(cString: urlC)
+    DispatchQueue.main.async {
+        guard let url = URL(string: text),
+              let scheme = url.scheme?.lowercased(),
+              !["file", "content", "javascript", "data"].contains(scheme) else {
+            NSLog("[KuDroid] refused to open url: %@", text)
+            return
+        }
+        NSLog("[KuDroid] opening url: %@", text)
+        UIApplication.shared.open(url, options: [:], completionHandler: nil)
+    }
+}
+
+private func onKuDroidSoftInputHide() {
+    DispatchQueue.main.async {
+        guard let vc = NativeMetalViewController.sCurrentRunnerVC else { return }
+        NSLog("[KuDroid] guest dismissed soft keyboard")
+        vc.metalView.resignFirstResponder()
+        kudroid_set_soft_input_visible(0)
+    }
+}
+
+private func onKuDroidPermissionPrompt(pkgNameC: UnsafePointer<CChar>?,
+                                      permsCsvC: UnsafePointer<CChar>?,
+                                      reqCode: Int32,
+                                      actHandle: UnsafeMutableRawPointer?) {
+    // Copied now: the C strings are only valid for the duration of this call.
+    let csv = permsCsvC != nil ? String(cString: permsCsvC!) : ""
+    let appTitle = NativeMetalViewController.sCurrentRunnerVC?.appName ?? "Android App"
+    let respond: (Int32) -> Void = { granted in
+        csv.withCString { kudroid_submit_permission_response(actHandle, reqCode, $0, granted) }
+    }
+    DispatchQueue.main.async {
+        let perms = csv.split(separator: ",").map(String.init)
+        // iOS never asks twice: once the user has refused, only Settings can undo it.
+        let refusedByHost = perms.contains {
+            ($0 == "android.permission.RECORD_AUDIO" && kudroid_get_host_authorization(0) == 2) ||
+            ($0 == "android.permission.CAMERA" && kudroid_get_host_authorization(1) == 2)
+        }
+        if refusedByHost {
+            let alert = UIAlertController(
+                title: "Access turned off",
+                message: "\(appTitle) needs the microphone or camera, but access is turned off for KuDroid in iOS Settings.",
+                preferredStyle: .alert
+            )
+            alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in respond(0) })
+            alert.addAction(UIAlertAction(title: "Open Settings", style: .default) { _ in
+                if let url = URL(string: UIApplication.openSettingsURLString) {
+                    UIApplication.shared.open(url)
+                }
+                respond(0)
+            })
+            NativeMetalViewController.sCurrentRunnerVC?.present(alert, animated: true)
+            return
+        }
+        let items = perms.map { p -> String in
+            if p.contains("CAMERA") { return "📷 Camera Access" }
+            if p.contains("AUDIO") || p.contains("RECORD") { return "🎙️ Microphone & Audio" }
+            if p.contains("STORAGE") || p.contains("EXTERNAL") { return "📁 Storage & Files (/sdcard)" }
+            if p.contains("LOCATION") { return "📍 Location (GPS)" }
+            if p.contains("BLUETOOTH") { return "🎮 Bluetooth & Gamepads" }
+            return "🔒 " + (p.components(separatedBy: ".").last ?? p)
+        }
+        let listText = items.isEmpty ? "Permissions" : items.joined(separator: "\n")
+        let alert = UIAlertController(
+            title: "Permission Request",
+            message: "\(appTitle) requests permission to access:\n\n\(listText)\n\nAllow access?",
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "Deny", style: .destructive) { _ in
+            respond(0)
+        })
+        alert.addAction(UIAlertAction(title: "Allow", style: .default) { _ in
+            // The app's grant is not enough: iOS has its own prompt for the mic and camera.
+            requestHostAuthorizations(for: perms) { respond(1) }
+        })
+        NativeMetalViewController.sCurrentRunnerVC?.present(alert, animated: true)
+    }
+}
+
+/// Show a camera preview layer over the running guest's surface, or remove it.
+func kudroidSetGuestPreviewLayer(_ layer: CALayer?) {
+    DispatchQueue.main.async {
+        NativeMetalViewController.sCurrentRunnerVC?.metalView.setGuestPreviewLayer(layer)
+    }
+}
+
+class NativeMetalViewController: UIViewController {
+    let appName: String
+    let onCrash: (String, String) -> Void
+    private var isStarted = false
+    fileprivate var metalView: NativeMetalView!
+    private var crashCheckTimer: Timer?
+    private var keyboardObservers: [NSObjectProtocol] = []
+    private var statusLabel: UILabel!
+    private let motionManager = CMMotionManager()
+    private var lastRequestedOrientation: Int32 = -1
+
+    init(appName: String, onCrash: @escaping (String, String) -> Void) {
+        self.appName = appName
+        self.onCrash = onCrash
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func loadView() {
+        let root = UIView(frame: UIScreen.main.bounds)
+        root.backgroundColor = .black
+        metalView = NativeMetalView(frame: root.bounds)
+        metalView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        root.addSubview(metalView)
+        self.view = root
+    }
+
+    override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
+        let req = kudroid_get_requested_orientation()
+        if req == 0 || req == 6 || req == 8 || req == 11 {
+            return .landscape
+        } else if req == 1 || req == 7 || req == 9 || req == 12 {
+            return .portrait
+        }
+        return .allButUpsideDown
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        activateAudioSession()
+        self.view.backgroundColor = .black
+        metalView.backgroundColor = .black
+
+        // Status line stays hidden until the session ends.
+        statusLabel = UILabel()
+        statusLabel.text = ""
+        statusLabel.alpha = 0.0
+        statusLabel.textColor = UIColor.green.withAlphaComponent(0.8)
+        statusLabel.font = UIFont.monospacedSystemFont(ofSize: 12, weight: .semibold)
+        statusLabel.backgroundColor = UIColor.black.withAlphaComponent(0.6)
+        statusLabel.layer.cornerRadius = 8
+        statusLabel.layer.masksToBounds = true
+        statusLabel.textAlignment = .center
+        statusLabel.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(statusLabel)
+
+        NSLayoutConstraint.activate([
+            statusLabel.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -16),
+            statusLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            statusLabel.heightAnchor.constraint(equalToConstant: 28),
+            statusLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 180)
+        ])
+
+        // Start CoreMotion to transmit sensor data to the KuDroid bridge
+        if motionManager.isAccelerometerAvailable {
+            motionManager.accelerometerUpdateInterval = 0.02 // 50 Hz
+            motionManager.startAccelerometerUpdates(to: .main) { data, _ in
+                guard let data = data else { return }
+                kudroid_inject_sensor_event(1, Float(data.acceleration.x * 9.81), Float(data.acceleration.y * 9.81), Float(data.acceleration.z * 9.81))
+            }
+        }
+        if motionManager.isGyroAvailable {
+            motionManager.gyroUpdateInterval = 0.02
+            motionManager.startGyroUpdates(to: .main) { data, _ in
+                guard let data = data else { return }
+                kudroid_inject_sensor_event(4, Float(data.rotationRate.x), Float(data.rotationRate.y), Float(data.rotationRate.z))
+            }
+        }
+
+        NativeMetalViewController.sCurrentRunnerVC = self
+
+        // Soft keyboard: the guest's InputMethodManager reaches these, and they make
+        // the Metal view first responder so iOS shows the system keyboard. Registered
+        // here rather than in the C++ layer because kudroid_core is a static library
+        // and cannot touch UIKit.
+        kudroid_set_soft_input_callbacks(onKuDroidSoftInputShow, onKuDroidSoftInputHide)
+        kudroid_set_open_url_callback(onKuDroidOpenURL)
+
+        // Track the real keyboard state rather than assuming it followed the request:
+        // iOS can dismiss it on its own (interactive dismiss, scene change), and the
+        // guest reads this to lay out around the keyboard.
+        for token in keyboardObservers {
+            NotificationCenter.default.removeObserver(token)
+        }
+        keyboardObservers = [
+            NotificationCenter.default.addObserver(
+                forName: NSNotification.Name(rawValue: "UIKeyboardDidShowNotification"), object: nil, queue: .main
+            ) { _ in
+                kudroid_set_soft_input_visible(1)
+            },
+            NotificationCenter.default.addObserver(
+                forName: NSNotification.Name(rawValue: "UIKeyboardDidHideNotification"), object: nil, queue: .main
+            ) { _ in
+                kudroid_set_soft_input_visible(0)
+            },
+        ]
+
+        // Set up Permission Request Dialog Callback
+        kudroid_set_permission_prompt_callback(onKuDroidPermissionPrompt)
+        registerKuDroidCameraHost()
+        // The user can change microphone/camera access in Settings while the app is away.
+        refreshHostAuthorizations()
+        keyboardObservers.append(NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { _ in
+            refreshHostAuthorizations()
+        })
+
+        startAppIfNeeded()
+    }
+
+    fileprivate weak static var sCurrentRunnerVC: NativeMetalViewController?
+    private static var isGlobalAppRunning = false
+
+    private func cleanupAndResetOrientation() {
+        UIApplication.shared.isIdleTimerDisabled = false
+        NativeMetalViewController.isGlobalAppRunning = false
+        motionManager.stopAccelerometerUpdates()
+        motionManager.stopGyroUpdates()
+        crashCheckTimer?.invalidate()
+        for token in keyboardObservers {
+            NotificationCenter.default.removeObserver(token)
+        }
+        keyboardObservers = []
+        kudroid_set_soft_input_callbacks(nil, nil)
+        kudroid_set_open_url_callback(nil)
+        metalView?.resignFirstResponder()
+        kudroid_set_soft_input_visible(0)
+        kudroid_stop_app()
+
+        // Force orientation back to portrait
+        if #available(iOS 16.0, *) {
+            if let windowScene = self.view.window?.windowScene {
+                let geometryPreferences = UIWindowScene.GeometryPreferences.iOS(interfaceOrientations: .portrait)
+                windowScene.requestGeometryUpdate(geometryPreferences) { _ in }
+            }
+        } else {
+            UIDevice.current.setValue(UIInterfaceOrientation.portrait.rawValue, forKey: "orientation")
+        }
+    }
+
+    deinit {
+        cleanupAndResetOrientation()
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        if let metalLayer = metalView?.layer as? CAMetalLayer {
+            let scale = UIScreen.main.scale
+            let bounds = view.bounds.size.width > 0 ? view.bounds : UIScreen.main.bounds
+            let targetSize = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+            if metalLayer.drawableSize != targetSize && targetSize.width > 0 && targetSize.height > 0 {
+                metalLayer.drawableSize = targetSize
+                if isStarted {
+                    let unmanaged = Unmanaged.passUnretained(metalLayer)
+                    kudroid_set_metal_layer(unmanaged.toOpaque(), Int32(targetSize.width),
+                                            Int32(targetSize.height), Float(scale))
+                }
+            }
+        }
+        startAppIfNeeded()
+    }
+
+    override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
+        super.viewWillTransition(to: size, with: coordinator)
+        coordinator.animate(alongsideTransition: nil) { [weak self] _ in
+            self?.view.setNeedsLayout()
+            self?.view.layoutIfNeeded()
+        }
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        startAppIfNeeded()
+    }
+
+    func startAppIfNeeded() {
+        guard !isStarted else { return }
+        if NativeMetalViewController.isGlobalAppRunning { return }
+        activateAudioSession()
+        NativeMetalViewController.isGlobalAppRunning = true
+        isStarted = true
+
+        let _ = self.view
+        // By default, No Sleep is enabled (keeps the screen on when playing games)
+        UIApplication.shared.isIdleTimerDisabled = true
+        NSLog("[KuDroid] >>> Launching guest app: %@ (isIdleTimerDisabled = true) <<<", appName)
+
+        let scale = UIScreen.main.scale
+        let bounds = view.bounds.size.width > 0 ? view.bounds : UIScreen.main.bounds
+        let width = Int32(bounds.width * scale)
+        let height = Int32(bounds.height * scale)
+
+        guard let mv = metalView, let metalLayer = mv.layer as? CAMetalLayer else { return }
+
+        if metalLayer.device == nil {
+            metalLayer.device = MTLCreateSystemDefaultDevice()
+        }
+        metalLayer.pixelFormat = .bgra8Unorm
+        metalLayer.framebufferOnly = false
+        metalLayer.allowsNextDrawableTimeout = false
+        metalLayer.maximumDrawableCount = 3
+        metalLayer.presentsWithTransaction = false
+        metalLayer.isOpaque = true
+        metalLayer.contentsScale = scale
+        metalLayer.drawableSize = CGSize(width: Double(width), height: Double(height))
+        let unmanaged = Unmanaged.passUnretained(metalLayer)
+        kudroid_set_metal_layer(unmanaged.toOpaque(), width, height, Float(scale))
+
+        // Timer periodically scans crash status, screen orientation, and No Sleep from the C++ bridge
+        crashCheckTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] timer in
+            guard let self = self else { return }
+            if kudroid_has_crashed() != 0 {
+                timer.invalidate()
+                self.handleCrash()
+                return
+            }
+
+            // Sync No Sleep (Keep Screen On) state from the Android app
+            let keepScreenOn = kudroid_get_keep_screen_on() != 0
+            if UIApplication.shared.isIdleTimerDisabled != keepScreenOn {
+                UIApplication.shared.isIdleTimerDisabled = keepScreenOn
+                NSLog("[KuDroid] Synchronized isIdleTimerDisabled = %@", keepScreenOn ? "true" : "false")
+            }
+
+            // Poll the requested screen orientation from the Android guest app
+            let reqOri = kudroid_get_requested_orientation()
+            if reqOri != self.lastRequestedOrientation {
+                self.lastRequestedOrientation = reqOri
+                // requestGeometryUpdate refuses any orientation the view
+                // controller does not declare (observed: "Requested: portrait;
+                // Supported: landscapeLeft, landscapeRight" — the VC had
+                // already rotated to landscape, so its supported set was the
+                // OLD one and the back-to-portrait request was rejected,
+                // leaving the swap chain in a dead geometry: black screen
+                // with healthy eglSwapBuffers). Announcing the change first
+                // re-evaluates supportedInterfaceOrientations (which reads
+                // the same kudroid_get_requested_orientation value) so the
+                // request and the mask always agree.
+                if #available(iOS 16.0, *) {
+                    self.setNeedsUpdateOfSupportedInterfaceOrientations()
+                }
+                UIViewController.attemptRotationToDeviceOrientation()
+                if reqOri == 0 || reqOri == 6 || reqOri == 8 || reqOri == 11 {
+                    // Landscape
+                    NSLog("[KuDroid] Guest app requested LANDSCAPE orientation (%d)", reqOri)
+                    // Skip when the scene already sits in this geometry: a
+                    // redundant request triggers the guest's pause/resume
+                    // handshake (a 2s Unity pause timeout per occurrence) for
+                    // no visual change. See the portrait branch for the storm
+                    // this stopped.
+                    if let scene = self.view.window?.windowScene,
+                       scene.interfaceOrientation.isLandscape {
+                        // Already landscape: skip the redundant request (and the
+                        // guest pause handshake it triggers).
+                    } else if #available(iOS 16.0, *) {
+                        if let windowScene = self.view.window?.windowScene {
+                            let geometryPreferences = UIWindowScene.GeometryPreferences.iOS(interfaceOrientations: .landscape)
+                            windowScene.requestGeometryUpdate(geometryPreferences) { error in
+                                NSLog("[KuDroid] requestGeometryUpdate landscape error: %@", error.localizedDescription)
+                            }
+                        }
+                    }
+                } else if reqOri == 1 || reqOri == 7 || reqOri == 9 || reqOri == 12 {
+                    // Portrait
+                    NSLog("[KuDroid] Guest app requested PORTRAIT orientation (%d)", reqOri)
+                    // No-op when the guest re-asserts the orientation the app is
+                    // already showing (ULTRAKILL calls setRequestedOrientation on
+                    // every touch-driven UI transition). A second
+                    // requestGeometryUpdate to the current geometry pauses the
+                    // Unity engine for the 2s handshake that follows and then
+                    // times out — the "Timeout (2000 ms) while trying to pause"
+                    // storm at the end of the last run.
+                    if let scene = self.view.window?.windowScene,
+                       scene.interfaceOrientation.isPortrait {
+                        // Already portrait: skip the redundant request (and the
+                        // guest pause handshake it triggers).
+                    } else if #available(iOS 16.0, *) {
+                        if let windowScene = self.view.window?.windowScene {
+                            let geometryPreferences = UIWindowScene.GeometryPreferences.iOS(interfaceOrientations: .portrait)
+                            windowScene.requestGeometryUpdate(geometryPreferences) { error in
+                                NSLog("[KuDroid] requestGeometryUpdate portrait error: %@", error.localizedDescription)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Run Android APK with highest Interactive UI priority, on a thread of its own:
+        // the guest's main thread runs the interpreter and guest static initialisers,
+        // and a GCD worker's 512 KB stack is too small for that.
+        let guestMainThread = Thread { [weak self] in
+            guard let self = self else { return }
+            NSLog("[KuDroid] Starting kudroid_run_apk(%@)...", self.appName)
+            let cString = kudroid_run_apk(self.appName)
+            var logOutput = ""
+            if let cString = cString {
+                logOutput = String(cString: cString)
+                free(UnsafeMutablePointer(mutating: cString))
+            }
+            NSLog("[KuDroid] Finished kudroid_run_apk(%@). Log chars: %ld", self.appName, logOutput.count)
+            DispatchQueue.main.async {
+                self.crashCheckTimer?.invalidate()
+                if kudroid_has_crashed() != 0 {
+                    self.handleCrash(fallbackLog: logOutput)
+                } else {
+                    // App finished without crashing
+                    self.statusLabel.alpha = 1.0
+                    self.statusLabel.text = "Session ended. Close KuDroid from the app switcher."
+                    self.statusLabel.textColor = .yellow
+                }
+            }
+        }
+        guestMainThread.name = "KuDroidGuestMain"
+        guestMainThread.stackSize = 16 * 1024 * 1024
+        guestMainThread.qualityOfService = .userInteractive
+        guestMainThread.start()
+    }
+
+    private func handleCrash(fallbackLog: String = "") {
+        cleanupAndResetOrientation()
+        var tailLog = ""
+        if let cTail = kudroid_get_last_crash_tail() {
+            tailLog = String(cString: cTail)
+            free(UnsafeMutablePointer(mutating: cTail))
+        }
+        kudroid_clear_crash_state()
+        let finalLog = tailLog.isEmpty || tailLog == "No recent crash detected." ? fallbackLog : tailLog
+        onCrash(appName, finalLog)
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        cleanupAndResetOrientation()
+    }
+}
+
+class NativeMetalView: UIView {
+    override class var layerClass: AnyClass {
+        return CAMetalLayer.self
+    }
+
+    // Keyboard traits the guest's focused field asked for; the UITextInputTraits
+    // properties in the UIKeyInput extension read and write these.
+    fileprivate var guestKeyboardType: UIKeyboardType = .default
+    fileprivate var guestReturnKeyType: UIReturnKeyType = .default
+    fileprivate var guestSecureEntry = false
+    fileprivate var guestAutocorrection: UITextAutocorrectionType = .no
+    fileprivate var guestAutocapitalization: UITextAutocapitalizationType = .none
+
+    // Camera preview shown over the guest's surface; kept at the view's size.
+    private var guestPreviewLayer: CALayer?
+
+    fileprivate func setGuestPreviewLayer(_ preview: CALayer?) {
+        if guestPreviewLayer !== preview {
+            guestPreviewLayer?.removeFromSuperlayer()
+            guestPreviewLayer = preview
+            if let preview = preview {
+                preview.zPosition = 1
+                layer.addSublayer(preview)
+            }
+        }
+        guestPreviewLayer?.frame = bounds
+    }
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        setupLayer()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setupLayer()
+    }
+
+    private func setupLayer() {
+        self.isMultipleTouchEnabled = true
+        self.isUserInteractionEnabled = true
+        guard let metalLayer = self.layer as? CAMetalLayer else { return }
+        if metalLayer.device == nil {
+            metalLayer.device = MTLCreateSystemDefaultDevice()
+        }
+        metalLayer.pixelFormat = .bgra8Unorm
+        metalLayer.framebufferOnly = false
+        metalLayer.allowsNextDrawableTimeout = false
+        metalLayer.maximumDrawableCount = 3
+        metalLayer.presentsWithTransaction = false
+        metalLayer.isOpaque = true
+        let scale = UIScreen.main.scale
+        metalLayer.contentsScale = scale
+        let bounds = self.bounds.size.width > 0 ? self.bounds : UIScreen.main.bounds
+        metalLayer.drawableSize = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+    }
+
+    // Last drawable size reported to the guest. layoutSubviews fires on rotation;
+    // without forwarding, the guest renders forever into the launch geometry.
+    private var lastReportedSize: CGSize = .zero
+    // Stable finger identities for the guest (see TouchPointerTracker).
+    private let touchTracker = TouchPointerTracker()
+    // Guest orientation at the last forward. Rotation can arrive with identical
+    // bounds (scale-only change, or a rotate-then-rotate-back between layouts);
+    // the guest still needs the forward because its orientation value changed.
+    private var lastReportedOrientation: Int32 = -1
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guestPreviewLayer?.frame = bounds
+        guard let metalLayer = self.layer as? CAMetalLayer else { return }
+        let scale = UIScreen.main.scale
+        let sz = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+        if sz.width > 0 && sz.height > 0 && metalLayer.drawableSize != sz {
+            metalLayer.drawableSize = sz
+        }
+        let reqOri = kudroid_get_requested_orientation()
+        if sz.width > 0 && sz.height > 0 &&
+            (sz != lastReportedSize || reqOri != lastReportedOrientation) {
+            lastReportedSize = sz
+            lastReportedOrientation = reqOri
+            let unmanaged = Unmanaged.passUnretained(metalLayer)
+            kudroid_set_metal_layer(unmanaged.toOpaque(), Int32(sz.width),
+                                    Int32(sz.height), Float(scale))
+        }
+    }
+
+    /// Forward one callback as one event carrying every live finger.
+    ///
+    /// `action` is the guest action base (0 DOWN, 1 UP, 2 MOVE, 3 CANCEL); the shim picks
+    /// DOWN vs POINTER_DOWN and UP vs POINTER_UP from how many fingers are down. A lifting
+    /// finger stays in the table sent for UP — that is the slot POINTER_UP's index refers
+    /// to — and leaves right after.
+    private func injectTouch(_ touches: Set<UITouch>, action: Int32, event: UIEvent?) {
+        let scale = UIScreen.main.scale
+        // Every live finger, not only the ones this callback names: a MOVE has to carry the
+        // other fingers' positions too, and UIKit reports them all through allTouches.
+        let live = event?.allTouches ?? touches
+        touchTracker.prune(live: live, current: touches)
+        if action == 0 {
+            for touch in touches { _ = touchTracker.begin(touch) }
+        }
+        var entries: [(id: Int32, x: Float, y: Float)] = []
+        entries.reserveCapacity(live.count)
+        for touch in live {
+            guard let id = touchTracker.id(of: touch) else { continue }
+            let location = touch.location(in: self)
+            entries.append((id, Float(location.x * scale), Float(location.y * scale)))
+        }
+        guard !entries.isEmpty else { return }
+        // Pointer 0 is the finger that has been down longest and the action's index refers
+        // to this order, so it must not be left to Set iteration order.
+        entries.sort { $0.id < $1.id }
+        var ids = [Int32]()
+        var xs = [Float]()
+        var ys = [Float]()
+        ids.reserveCapacity(entries.count)
+        xs.reserveCapacity(entries.count)
+        ys.reserveCapacity(entries.count)
+        for entry in entries {
+            ids.append(entry.id)
+            xs.append(entry.x)
+            ys.append(entry.y)
+        }
+        let primary = touches.first.flatMap { touchTracker.id(of: $0) } ?? ids[0]
+        kudroid_inject_touch_batch(action, primary, Int32(ids.count), ids, xs, ys)
+        if action == 1 || action == 3 {
+            for touch in touches { _ = touchTracker.end(touch) }
+        }
+    }
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        injectTouch(touches, action: 0, event: event) // ACTION_DOWN
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        injectTouch(touches, action: 2, event: event) // ACTION_MOVE
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        injectTouch(touches, action: 1, event: event) // ACTION_UP
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        injectTouch(touches, action: 3, event: event) // ACTION_CANCEL
+    }
+}
+
+// MARK: - Soft keyboard
+//
+// UIKeyInput (not UITextInput) bridges the guest IME: iOS reports keystrokes,
+// the guest's InputConnection decides what they mean.
+extension NativeMetalView: UIKeyInput {
+    // The keyboard only appears for a first responder, and a plain UIView refuses.
+    override var canBecomeFirstResponder: Bool { true }
+
+    // Always true. Reporting false makes iOS hide the delete key's repeat behaviour
+    // and, on some versions, suppress backspace entirely — and the host cannot know
+    // whether the guest's buffer is empty without asking across the bridge on every
+    // keystroke. Letting the guest ignore a backspace it cannot apply is cheaper.
+    var hasText: Bool { true }
+
+    func insertText(_ text: String) {
+        // Newline arrives as "\n" from the return key. Passed through unchanged: the
+        // guest's InputConnection decides whether that commits a chat line or inserts
+        // a break, which is not the host's business.
+        text.withCString { kudroid_dispatch_text_input($0) }
+    }
+
+    func deleteBackward() {
+        kudroid_dispatch_delete_backward()
+    }
+
+    // Keyboard traits follow the guest's focused field (see applyGuestInputTraits).
+    // Games render their own text, so iOS must not also draw an insertion caret or
+    // selection over the Metal surface; the traits only shape the keyboard itself.
+    var keyboardType: UIKeyboardType {
+        get { guestKeyboardType }
+        set { guestKeyboardType = newValue }
+    }
+
+    var returnKeyType: UIReturnKeyType {
+        get { guestReturnKeyType }
+        set { guestReturnKeyType = newValue }
+    }
+
+    var isSecureTextEntry: Bool {
+        get { guestSecureEntry }
+        set { guestSecureEntry = newValue }
+    }
+
+    var autocorrectionType: UITextAutocorrectionType {
+        get { guestAutocorrection }
+        set { guestAutocorrection = newValue }
+    }
+
+    var autocapitalizationType: UITextAutocapitalizationType {
+        get { guestAutocapitalization }
+        set { guestAutocapitalization = newValue }
+    }
+
+    var spellCheckingType: UITextSpellCheckingType {
+        get { .no }
+        set { }
+    }
+
+    /// Map the guest field's EditorInfo (inputType / imeOptions) onto UIKit's traits.
+    func applyGuestInputTraits(inputType: Int32, imeOptions: Int32) {
+        let cls = inputType & 0xf
+        let variation = inputType & 0xff0
+        let flags = inputType & 0x00fff000
+
+        var keyboard: UIKeyboardType = .default
+        var secure = false
+        switch cls {
+        case 1:  // text
+            switch variation {
+            case 0x10: keyboard = .URL
+            case 0x20, 0xd0: keyboard = .emailAddress
+            case 0x80, 0xe0: secure = true
+            case 0x90: keyboard = .asciiCapable
+            default: break
+            }
+        case 2:  // number
+            keyboard = (flags & 0x2000) != 0 ? .decimalPad : .numberPad
+            secure = variation == 0x10
+        case 3: keyboard = .phonePad
+        case 4: keyboard = .numbersAndPunctuation
+        default: break
+        }
+
+        var returnKey: UIReturnKeyType = .default
+        switch imeOptions & 0xff {
+        case 2: returnKey = .go
+        case 3: returnKey = .search
+        case 4: returnKey = .send
+        case 5: returnKey = .next
+        case 6: returnKey = .done
+        default: break
+        }
+
+        var capitalization: UITextAutocapitalizationType = .none
+        if cls == 1 {
+            if (flags & 0x1000) != 0 { capitalization = .allCharacters }
+            else if (flags & 0x2000) != 0 { capitalization = .words }
+            else if (flags & 0x4000) != 0 { capitalization = .sentences }
+        }
+
+        guestKeyboardType = keyboard
+        guestReturnKeyType = returnKey
+        guestSecureEntry = secure
+        guestAutocapitalization = capitalization
+        guestAutocorrection = (cls == 1 && (flags & 0x8000) != 0 && !secure) ? .yes : .no
+    }
+}
+
+
+// mark: - Smart Gentle Crash alert modal
+struct CrashAlertView: View {
+    let crashInfo: CrashInfo
+    let onDismiss: () -> Void
+    @State private var copied = false
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.85).ignoresSafeArea()
+            
+            VStack(spacing: 16) {
+                // Header Icon & Title
+                //
+                // Only one case to report now: a launch without JIT is refused before
+                // any guest code runs, so reaching a crash means JIT was enabled and
+                // the fault is KuDroid's — a missing framework API or shim. The old
+                // second branch told the user to go enable JIT, which can no longer
+                // be the explanation.
+                VStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 46))
+                        .foregroundColor(.red)
+
+                    Text("App Crashed")
+                        .font(.title3.bold())
+                        .foregroundColor(.white)
+
+                    Text("App '\(crashInfo.appName)' stopped unexpectedly. This issue is likely caused by missing Android framework APIs or shims.")
+                        .font(.caption)
+                        .foregroundColor(.gray)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 8)
+                }
+                .padding(.top, 8)
+
+                // Log Container (Tail 30 lines)
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Label("Recent Crash Logs (Tail 30 Lines)", systemImage: "terminal")
+                            .font(.caption.bold())
+                            .foregroundColor(.green)
+                        Spacer()
+                        Button(action: {
+                            UIPasteboard.general.string = crashInfo.tailLog
+                            copied = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                                copied = false
+                            }
+                        }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                                Text(copied ? "Copied" : "Copy")
+                            }
+                            .font(.caption.weight(.semibold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .background(Color.white.opacity(0.15))
+                            .cornerRadius(6)
+                        }
+                    }
+
+                    ScrollView(.vertical, showsIndicators: true) {
+                        Text(crashInfo.tailLog.isEmpty ? "No detailed logs available." : crashInfo.tailLog)
+                            .font(.system(size: 11, weight: .regular, design: .monospaced))
+                            .foregroundColor(.green.opacity(0.9))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(10)
+                    }
+                    .frame(maxHeight: 240)
+                    .background(Color.black.opacity(0.7))
+                    .cornerRadius(8)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                    )
+                }
+                .padding(.horizontal)
+
+                // Action Buttons
+                VStack(spacing: 10) {
+                    Button(action: {
+                        UIPasteboard.general.string = crashInfo.tailLog
+                        copied = true
+                        if let url = URL(string: "https://github.com/Lammk/kudroid/issues/new") {
+                            UIApplication.shared.open(url)
+                        }
+                    }) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "link.badge.plus")
+                            Text("Copy Log & Report on GitHub")
+                        }
+                        .font(.subheadline.bold())
+                        .foregroundColor(.black)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(Color.yellow)
+                        .cornerRadius(10)
+                    }
+
+                    Button(action: onDismiss) {
+                        Text("Dismiss")
+                            .font(.headline)
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                            .background(Color.white.opacity(0.2))
+                            .cornerRadius(10)
+                    }
+                }
+                .padding(.horizontal)
+                .padding(.bottom, 8)
+            }
+            .padding(.vertical, 16)
+            .background(Color(UIColor.secondarySystemBackground).opacity(0.3))
+            .background(.ultraThinMaterial)
+            .cornerRadius(20)
+            .overlay(
+                RoundedRectangle(cornerRadius: 20)
+                    .stroke(Color.white.opacity(0.2), lineWidth: 1)
+            )
+            .padding(.horizontal, 20)
+        }
+    }
+}
+
+#Preview {
+    ContentView()
+}
+
+@_cdecl("kudroid_trigger_haptic")
+public func kudroid_trigger_haptic(intensity: Int32) {
+    DispatchQueue.main.async {
+        if intensity == 1 {
+            let generator = UIImpactFeedbackGenerator(style: .light)
+            generator.prepare()
+            generator.impactOccurred()
+        } else if intensity == 2 {
+            let generator = UIImpactFeedbackGenerator(style: .medium)
+            generator.prepare()
+            generator.impactOccurred()
+        } else if intensity >= 3 {
+            let generator = UIImpactFeedbackGenerator(style: .heavy)
+            generator.prepare()
+            generator.impactOccurred()
+        }
+    }
+}
+
+@_cdecl("kudroid_notify_orientation_change")
+public func kudroid_notify_orientation_change(orientation: Int32) {
+    // After a fatal guest fault the teardown is discarding the session. Rotating the
+    // window resizes the guest's surface, and the dead engine answers that by trying
+    // to pause — which is the freeze the user sees instead of the app closing. The
+    // orientation is restored by the next session, which requests its own.
+    if kudroid_has_crashed() != 0 { return }
+    DispatchQueue.main.async {
+        if #available(iOS 16.0, *) {
+            NativeMetalViewController.sCurrentRunnerVC?.setNeedsUpdateOfSupportedInterfaceOrientations()
+        }
+        UIViewController.attemptRotationToDeviceOrientation()
+
+        if orientation == 0 || orientation == 6 || orientation == 8 || orientation == 11 {
+            // Landscape
+            NSLog("[KuDroid] kudroid_notify_orientation_change: LANDSCAPE (%d)", orientation)
+            if #available(iOS 16.0, *) {
+                for scene in UIApplication.shared.connectedScenes {
+                    if let windowScene = scene as? UIWindowScene {
+                        let geometryPreferences = UIWindowScene.GeometryPreferences.iOS(interfaceOrientations: .landscape)
+                        windowScene.requestGeometryUpdate(geometryPreferences) { error in
+                            NSLog("[KuDroid] requestGeometryUpdate landscape error: %@", error.localizedDescription)
+                        }
+                    }
+                }
+            } else {
+                UIDevice.current.setValue(UIInterfaceOrientation.landscapeRight.rawValue, forKey: "orientation")
+                UIViewController.attemptRotationToDeviceOrientation()
+            }
+        } else if orientation == 1 || orientation == 7 || orientation == 9 || orientation == 12 {
+            // Portrait
+            NSLog("[KuDroid] kudroid_notify_orientation_change: PORTRAIT (%d)", orientation)
+            if #available(iOS 16.0, *) {
+                for scene in UIApplication.shared.connectedScenes {
+                    if let windowScene = scene as? UIWindowScene {
+                        let geometryPreferences = UIWindowScene.GeometryPreferences.iOS(interfaceOrientations: .portrait)
+                        windowScene.requestGeometryUpdate(geometryPreferences) { error in
+                            NSLog("[KuDroid] requestGeometryUpdate portrait error: %@", error.localizedDescription)
+                        }
+                    }
+                }
+            } else {
+                UIDevice.current.setValue(UIInterfaceOrientation.portrait.rawValue, forKey: "orientation")
+                UIViewController.attemptRotationToDeviceOrientation()
+            }
+        }
+    }
+}

@@ -1,0 +1,2097 @@
+// test_shims.cpp — host-side regression tests for the guest syscall shims in
+// src/abi/SyscallShim.cpp. Every function here is `extern "C"` and compiles
+// on the Linux host (the Apple-only #ifdef branches are verified by the
+// build-macos CI job instead).
+//
+// Covered regressions:
+//   1. bionic_pthread_once: nested once on a DIFFERENT control word must not
+//      deadlock (old global-mutex impl held one lock across init_routine).
+//   2. bionic_pthread_once: init runs exactly once across many threads.
+//   3. bionic_futex: WAIT/WAKE, EAGAIN on value mismatch, ETIMEDOUT on past
+//      timeout, CMP_REQUEUE precondition, and repeated wait/wake cycles that
+//      exercise the queue erase path (leak fix).
+//   4. bionic_mremap: shrink in place without MREMAP_MAYMOVE succeeds (old
+//      Apple branch always returned ENOMEM without the flag).
+//   5. bionic_sigaction: SA_* flags round-trip through oldact (previously only
+//      SA_SIGINFO was translated on Apple; host passes values straight through).
+#include "kudroid/platform/CpuInfo.h"
+
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <future>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
+
+#include <errno.h>
+#include <fcntl.h>
+#include <pthread.h>
+#include <signal.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <sys/mman.h>
+#include <sched.h>
+#include <semaphore.h>
+#include <sys/socket.h>
+#include <sys/uio.h>
+#include <unistd.h>
+
+
+// ─── Shims under test (extern "C", defined in SyscallShim.cpp) ──────────────
+extern "C" int bionic_pthread_once(int* guest_once, void (*init_routine)(void));
+extern "C" int bionic_futex(uint32_t* uaddr, int futex_op, uint32_t val,
+                            const struct timespec* timeout, uint32_t* uaddr2,
+                            uint32_t val3);
+extern "C" void* bionic_mremap(void* old_address, size_t old_size,
+                               size_t new_size, int flags, void* new_address);
+extern "C" int bionic_sigaction(int signum, const void* act, void* oldact);
+extern "C" int bionic_mprotect(void* addr, size_t len, int prot);
+extern "C" int bionic_munmap(void* addr, size_t len);
+extern "C" int bionic_madvise(void* addr, size_t length, int advice);
+extern "C" long bionic_syscall(long number, ...);
+extern "C" int bionic_sigaltstack(const void* ss, void* oss);
+extern "C" int bionic_sched_getaffinity(pid_t pid, size_t cpusetsize, void* mask);
+extern "C" int bionic_sem_init(sem_t* sem, int pshared, unsigned int value);
+extern "C" int bionic_sem_destroy(sem_t* sem);
+extern "C" int bionic_sem_wait(sem_t* sem);
+extern "C" int bionic_sem_trywait(sem_t* sem);
+extern "C" int bionic_sem_post(sem_t* sem);
+extern "C" int bionic_sem_getvalue(sem_t* sem, int* out);
+extern "C" int bionic_sem_timedwait(sem_t* sem, const struct timespec* abs_timeout);
+extern "C" int bionic_tgkill(int pid, int tid, int sig);
+extern "C" int bionic_pipe2(int pipefd[2], int flags);
+extern "C" int bionic___cxa_guard_acquire(uint64_t* g);
+extern "C" void bionic___cxa_guard_release(uint64_t* g);
+extern "C" void bionic___cxa_guard_abort(uint64_t* g);
+extern "C" void* bionic_ALooper_prepare(int opts);
+extern "C" void* bionic_ALooper_forThread(void);
+extern "C" void bionic_ALooper_acquire(void* looper);
+extern "C" void bionic_ALooper_release(void* looper);
+extern "C" void bionic_ALooper_wake(void* looper);
+extern "C" int bionic_ALooper_pollOnce(int timeoutMillis, int* outFd, int* outEvents,
+                                       void** outData);
+extern "C" void* bionic_dlopen(const char* filename, int flags);
+extern "C" void* bionic_dlsym(void* handle, const char* symbol);
+extern "C" int bionic_dlclose(void* handle);
+extern "C" int bionic_pthread_mutex_init(void* guestMutex, const void* attr);
+extern "C" int bionic_pthread_mutex_lock(void* guestMutex);
+extern "C" int bionic_pthread_mutex_unlock(void* guestMutex);
+extern "C" int bionic_pthread_mutex_trylock(void* guestMutex);
+extern "C" int bionic_pthread_mutex_destroy(void* guestMutex);
+extern "C" int bionic_pthread_mutexattr_init(void* attr);
+extern "C" int bionic_pthread_mutexattr_settype(void* attr, int type);
+extern "C" int bionic_pthread_mutexattr_gettype(void* attr, int* type);
+extern "C" int bionic_pthread_mutexattr_destroy(void* attr);
+extern "C" int bionic_pthread_getattr_np(pthread_t thread, void* attr);
+extern "C" int bionic_pthread_attr_getstack(void* attr, void** stackaddr, size_t* stacksize);
+
+// FORTIFY (__*_chk) wrappers. Each takes the object size the guest's compiler measured
+// for the destination and must not write past it.
+extern "C" void* bionic___memcpy_chk(void* dst, const void* src, size_t n, size_t dst_len);
+extern "C" void* bionic___memmove_chk(void* dst, const void* src, size_t n, size_t dst_len);
+extern "C" void* bionic___memset_chk(void* s, int c, size_t n, size_t s_len);
+extern "C" char* bionic___strncpy_chk(char* dst, const char* src, size_t n, size_t dst_len);
+extern "C" char* bionic___strcpy_chk(char* dst, const char* src, size_t dst_len);
+extern "C" char* bionic___strcat_chk(char* dst, const char* src, size_t dst_len);
+extern "C" int bionic___sprintf_chk(char* s, int flag, size_t slen, const char* format, ...);
+
+// Outbound signal senders and mask operations. Absent from the symbol table until now,
+// which is the whole bug: a guest binding to "raise" got the host's.
+extern "C" int bionic_raise(int sig);
+extern "C" int bionic_kill(pid_t pid, int sig);
+extern "C" int bionic_pthread_kill(pthread_t thread, int sig);
+extern "C" int bionic_tgkill(int pid, int tid, int sig);
+extern "C" int bionic_sigprocmask(int how, const void* set, void* oldset);
+extern "C" int bionic_pthread_sigmask(int how, const void* set, void* oldset);
+extern "C" void* bionic_signal(int sig, void* handler);
+extern "C" int bionic_sigemptyset(void* set);
+extern "C" int bionic_sigfillset(void* set);
+extern "C" int bionic_sigaddset(void* set, int sig);
+extern "C" int bionic_sigdelset(void* set, int sig);
+extern "C" int bionic_sigismember(const void* set, int sig);
+
+struct GuestIfaddrs {
+    GuestIfaddrs* g_next;
+    char* g_name;
+    unsigned g_flags;
+    unsigned char* g_addr;
+    unsigned char* g_netmask;
+    unsigned char* g_broadaddr;
+    void* g_data;
+};
+extern "C" int bionic_getifaddrs(GuestIfaddrs** out);
+extern "C" void bionic_freeifaddrs(GuestIfaddrs* head);
+extern "C" int bionic_bind(int sockfd, const struct sockaddr* addr, socklen_t addrlen);
+extern "C" int bionic_getsockname(int sockfd, struct sockaddr* addr, socklen_t* addrlen);
+extern "C" int bionic_getpeername(int sockfd, struct sockaddr* addr, socklen_t* addrlen);
+
+// The resolver a guest relocation goes through. What it returns for a name is what the
+// guest actually calls, which is the thing these tests have to check.
+namespace kudroid {
+void* resolve_bionic_symbol(const char* name);
+}
+using kudroid::resolve_bionic_symbol;
+
+// Mirror of the bionic arm64 pthread_attr_t the shim writes through. Declared here
+// rather than shared with the shim on purpose: if the shim's field order changes, this
+// test must fail rather than silently follow it.
+struct GuestPthreadAttr {
+    uint32_t flags;
+    uint32_t pad0;
+    void* stack_base;
+    size_t stack_size;
+    size_t guard_size;
+    int32_t sched_policy;
+    int32_t sched_priority;
+};
+
+// Guest library hooks, installed by kudroid_run_apk in production.
+extern "C" void* (*kudroid_guest_library_open)(const char* filename);
+extern "C" void* (*kudroid_guest_library_symbol)(void* handle, const char* symbol);
+extern "C" int (*kudroid_guest_library_owns)(void* handle);
+
+// The guest's sigaction, in bionic's LP64 layout.
+//
+// This mirror used to carry bionic's ILP32 field order — handler first, then mask, then
+// flags — which is what SyscallShim.cpp declared. Both orders are 32 bytes, so the
+// mismatch failed no size check and this test passed while the shim read sa_flags as
+// the handler pointer. On device that installed 0x18000004 (SA_SIGINFO|SA_ONSTACK|
+// SA_RESTART) as ULTRAKILL's SIGSEGV handler and spun the main thread at 100% of a core
+// inside _sigtramp. See tests/test_guest_signals.cpp, which pins the offsets.
+struct android_sigaction {
+    int sa_flags;
+    union {
+        void (*android_sa_handler)(int);
+        void (*android_sa_sigaction)(int, void*, void*);
+    };
+    uint64_t sa_mask;
+    void (*sa_restorer)(void);
+};
+static_assert(sizeof(struct android_sigaction) == 32, "LP64 guest sigaction is 32 bytes");
+static_assert(offsetof(struct android_sigaction, sa_flags) == 0, "sa_flags is first on LP64");
+
+// ─── Host-link stubs ─────────────────────────────────────────────────────────
+// The JNI_CreateJavaVM/classpathJar stub is no longer needed: KuART defines them itself
+// in KuArtRuntime.cpp (Avian has been removed).
+
+// Linux futex command constants (match SyscallShim.cpp).
+#define FUTEX_WAIT           0
+#define FUTEX_WAKE           1
+#define FUTEX_CMP_REQUEUE    4
+#define FUTEX_WAIT_BITSET    9
+#define FUTEX_PRIVATE_FLAG   128
+#define FUTEX_CLOCK_REALTIME 256
+#define MREMAP_MAYMOVE 1
+
+// Guest-visible sa_flags are ALWAYS Linux values (asm-generic/signal.h) — the
+// shim translates them to/from Darwin on Apple. Use the Linux constants here
+// instead of the host's SA_* macros so the test is correct on both hosts.
+#define LINUX_SA_RESTART   0x10000000
+#define LINUX_SA_NODEFER   0x40000000
+#define LINUX_SA_RESETHAND 0x80000000
+
+static int g_failures = 0;
+static int g_checks = 0;
+
+#define CHECK(cond, msg)                                                       \
+    do {                                                                       \
+        ++g_checks;                                                            \
+        if (cond) {                                                            \
+            std::printf("  OK: %s\n", msg);                                    \
+        } else {                                                               \
+            std::printf("  FAIL: %s (line %d)\n", msg, __LINE__);              \
+            ++g_failures;                                                      \
+        }                                                                      \
+    } while (0)
+
+// ─── 1. bionic_pthread_once ─────────────────────────────────────────────────
+
+static std::atomic<int> g_outer_runs{0};
+static std::atomic<int> g_inner_runs{0};
+static int g_once_inner = 0; // guest control word B
+static int g_once_outer = 0; // guest control word A
+
+static void inner_routine(void) {
+    ++g_inner_runs;
+}
+
+static void outer_routine(void) {
+    ++g_outer_runs;
+    // Nested once on a DIFFERENT control word. The old implementation held a
+    // single global mutex across init_routine(), so this re-locked itself and
+    // deadlocked. Must complete now.
+    int r = bionic_pthread_once(&g_once_inner, inner_routine);
+    if (r != 0) g_outer_runs.store(-1000); // poison marker
+}
+
+static void test_pthread_once_nested() {
+    std::printf("[pthread_once] nested once on different control word\n");
+    // Run in a separate thread and bound it with a watchdog so a regression
+    // fails the test instead of hanging the process forever.
+    auto fut = std::async(std::launch::async, [] {
+        return bionic_pthread_once(&g_once_outer, outer_routine);
+    });
+    auto status = fut.wait_for(std::chrono::seconds(5));
+    if (status != std::future_status::ready) {
+        std::printf("  FAIL: nested once DEADLOCKED (timeout after 5s)\n");
+        ++g_failures;
+        ++g_checks;
+        return; // process exit will reap the stuck thread
+    }
+    CHECK(fut.get() == 0, "outer once returns 0");
+    CHECK(g_outer_runs.load() == 1, "outer init ran exactly once");
+    CHECK(g_inner_runs.load() == 1, "inner init ran exactly once");
+    CHECK(bionic_pthread_once(&g_once_outer, outer_routine) == 0,
+          "fast path after completion returns 0");
+}
+
+static void test_pthread_once_concurrent() {
+    std::printf("[pthread_once] init runs exactly once across 8 threads\n");
+    static int once_cw = 0;
+    static std::atomic<int> runs{0};
+    auto worker = [] {
+        for (int i = 0; i < 100; ++i) {
+            bionic_pthread_once(&once_cw, [] { ++runs; });
+        }
+    };
+    std::thread threads[8];
+    for (auto& t : threads) t = std::thread(worker);
+    for (auto& t : threads) t.join();
+    CHECK(runs.load() == 1, "init_routine invoked exactly once total");
+    CHECK(bionic_pthread_once(&once_cw, [] { ++runs; }) == 0,
+          "later callers take fast path");
+}
+
+// ─── 2. bionic_futex ─────────────────────────────────────────────────────────
+
+static std::atomic<bool> g_waiter_ready{false};
+static uint32_t g_futex_word = 0;
+static std::atomic<int> g_wake_result{0};
+
+static void futex_waiter() {
+    // Signal that we are about to park, then wait on word == 0.
+    g_waiter_ready.store(true, std::memory_order_release);
+    int r = bionic_futex(&g_futex_word, FUTEX_WAIT, 0, nullptr, nullptr, 0);
+    g_wake_result.store(r);
+}
+
+static void test_futex_wait_wake() {
+    std::printf("[futex] WAIT/WAKE\n");
+    g_futex_word = 0;
+    g_waiter_ready.store(false);
+    g_wake_result.store(-123);
+    std::thread t(futex_waiter);
+    // Wait for the waiter to park.
+    while (!g_waiter_ready.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    // WAKE with the wrong value present would still wake the queue; use the
+    // normal sequence: mutate word, then wake.
+    g_futex_word = 1;
+    int woken = bionic_futex(&g_futex_word, FUTEX_WAKE, 1, nullptr, nullptr, 0);
+    t.join();
+    CHECK(woken == 1, "WAKE returns 1");
+    CHECK(g_wake_result.load() == 0, "WAIT returns 0 after being woken");
+}
+
+static void test_futex_eagain() {
+    std::printf("[futex] WAIT with mismatched value -> EAGAIN\n");
+    uint32_t word = 42;
+    errno = 0;
+    int r = bionic_futex(&word, FUTEX_WAIT, 41, nullptr, nullptr, 0);
+    CHECK(r == -1 && errno == EAGAIN, "returns -1/EAGAIN without parking");
+}
+
+static void test_futex_etimedout() {
+    std::printf("[futex] WAIT with a tiny relative timeout -> ETIMEDOUT\n");
+    uint32_t word = 0;
+    // FUTEX_WAIT's timeout is RELATIVE, so this asks for 20ms and must time out
+    // after roughly that long.
+    struct timespec relative = {0, 20 * 1000 * 1000};
+    errno = 0;
+    const auto t0 = std::chrono::steady_clock::now();
+    int r = bionic_futex(&word, FUTEX_WAIT, 0, &relative, nullptr, 0);
+    const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - t0).count();
+    CHECK(r == -1 && errno == ETIMEDOUT, "returns -1/ETIMEDOUT");
+    CHECK(waited >= 15, "after actually waiting for the requested interval");
+}
+
+// ─── futex timeout semantics: relative vs absolute ───────────────────────────
+//
+// FUTEX_WAIT takes a RELATIVE timeout; FUTEX_WAIT_BITSET takes an ABSOLUTE
+// deadline. The shim treated both as absolute, subtracting CLOCK_MONOTONIC from
+// whatever the guest passed.
+//
+// On a device that has been up a while that is catastrophic rather than merely
+// wrong. Unity's asset threads call FUTEX_WAIT (op=128) with a few tens of
+// milliseconds, so tv_sec is 0; on a phone six days into its uptime the
+// subtraction produced 0 - 528730 and every wait returned ETIMEDOUT without
+// waiting, so the guest spun in place. ULTRAKILL's AssetGarbageCollectorHelper
+// never got past the prctl that named it, and the log ended there.
+//
+// The host clock is nowhere near zero either, which is what makes these tests able
+// to tell the two interpretations apart at all: a relative 30ms read as an absolute
+// deadline is always in the past.
+
+static void test_futex_wait_timeout_is_relative() {
+    std::printf("[futex] FUTEX_WAIT treats its timeout as relative, not absolute\n");
+
+    uint32_t word = 0;
+    // A wake arrives well within the timeout. Read as an absolute deadline this
+    // would expire instantly and report ETIMEDOUT before the waker ever ran.
+    struct timespec relative = {5, 0};  // 5 seconds, relative
+
+    std::atomic<int> result{-999};
+    std::atomic<int> saved_errno{0};
+    std::thread waiter([&] {
+        errno = 0;
+        result = bionic_futex(&word, FUTEX_WAIT, 0, &relative, nullptr, 0);
+        saved_errno = errno;
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    CHECK(result.load() == -999,
+          "the waiter is still parked 80ms in — an absolute reading would already have "
+          "returned ETIMEDOUT, which is what made Unity spin");
+
+    word = 1;
+    bionic_futex(&word, FUTEX_WAKE, 1, nullptr, nullptr, 0);
+    waiter.join();
+    CHECK(result.load() == 0, "the wake was received and the wait succeeded");
+    CHECK(saved_errno.load() != ETIMEDOUT, "and it was not reported as a timeout");
+}
+
+static void test_futex_wait_relative_zero_does_not_hang() {
+    std::printf("[futex] a zero relative timeout expires at once\n");
+    uint32_t word = 0;
+    struct timespec zero = {0, 0};
+    errno = 0;
+    const auto t0 = std::chrono::steady_clock::now();
+    const int r = bionic_futex(&word, FUTEX_WAIT, 0, &zero, nullptr, 0);
+    const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - t0).count();
+    CHECK(r == -1 && errno == ETIMEDOUT, "a zero timeout is ETIMEDOUT");
+    CHECK(waited < 500, "and returns promptly rather than sleeping");
+}
+
+static void test_futex_wait_rejects_malformed_relative_timeout() {
+    std::printf("[futex] a malformed relative timeout is EINVAL\n");
+    uint32_t word = 0;
+    struct timespec negative = {-1, 0};
+    errno = 0;
+    CHECK(bionic_futex(&word, FUTEX_WAIT, 0, &negative, nullptr, 0) == -1 &&
+              errno == EINVAL,
+          "a negative timeout is rejected, not clamped into a long sleep");
+
+    struct timespec overflow_ns = {0, 1000000000};
+    errno = 0;
+    CHECK(bionic_futex(&word, FUTEX_WAIT, 0, &overflow_ns, nullptr, 0) == -1 &&
+              errno == EINVAL,
+          "tv_nsec >= 1e9 is rejected");
+}
+
+static void test_futex_wait_bitset_timeout_is_absolute() {
+    std::printf("[futex] FUTEX_WAIT_BITSET treats its timeout as an absolute deadline\n");
+
+    uint32_t word = 0;
+
+    // A deadline in the past must expire immediately. Read as relative, {0,0} would
+    // also expire at once — so use a deadline that is clearly past but non-zero, and
+    // pair it with the future-deadline check below, which the two readings cannot
+    // both satisfy.
+    struct timespec past;
+    ::clock_gettime(CLOCK_MONOTONIC, &past);
+    past.tv_sec -= 10;
+    errno = 0;
+    CHECK(bionic_futex(&word, FUTEX_WAIT_BITSET, 0, &past, nullptr, ~0u) == -1 &&
+              errno == ETIMEDOUT,
+          "a deadline ten seconds in the past is ETIMEDOUT");
+
+    // A deadline 60ms in the future must wait about that long. Read as relative this
+    // would be the host's whole uptime — an effectively infinite sleep.
+    struct timespec soon;
+    ::clock_gettime(CLOCK_MONOTONIC, &soon);
+    soon.tv_nsec += 60 * 1000 * 1000;
+    if (soon.tv_nsec >= 1000000000) { soon.tv_sec += 1; soon.tv_nsec -= 1000000000; }
+    errno = 0;
+    const auto t0 = std::chrono::steady_clock::now();
+    const int r = bionic_futex(&word, FUTEX_WAIT_BITSET, 0, &soon, nullptr, ~0u);
+    const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - t0).count();
+    CHECK(r == -1 && errno == ETIMEDOUT, "a near-future deadline times out");
+    CHECK(waited >= 40 && waited < 3000,
+          "after waiting for the deadline rather than for the host's uptime");
+}
+
+static void test_futex_wait_bitset_absolute_wake_still_works() {
+    std::printf("[futex] an absolute deadline still yields to a wake\n");
+
+    uint32_t word = 0;
+    struct timespec deadline;
+    ::clock_gettime(CLOCK_MONOTONIC, &deadline);
+    deadline.tv_sec += 30;  // far enough out that only a wake can end this
+
+    std::atomic<int> result{-999};
+    std::thread waiter([&] {
+        result = bionic_futex(&word, FUTEX_WAIT_BITSET, 0, &deadline, nullptr, ~0u);
+    });
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    CHECK(result.load() == -999, "still waiting on a 30-second deadline");
+
+    word = 1;
+    bionic_futex(&word, FUTEX_WAKE, 1, nullptr, nullptr, 0);
+    waiter.join();
+    CHECK(result.load() == 0, "the wake ended the wait early");
+}
+
+static void test_futex_cmp_requeue_precond() {
+    std::printf("[futex] CMP_REQUEUE with mismatched val3 -> EAGAIN\n");
+    uint32_t word = 7;
+    errno = 0;
+    int r = bionic_futex(&word, FUTEX_CMP_REQUEUE, 1, nullptr, nullptr, 8);
+    CHECK(r == -1 && errno == EAGAIN, "returns -1/EAGAIN when *uaddr != val3");
+}
+
+static void test_futex_wait_wake_cycles() {
+    std::printf("[futex] 500 WAIT/WAKE cycles (queue erase path)\n");
+    for (int i = 0; i < 500; ++i) {
+        uint32_t word = 0;
+        std::atomic<bool> ready{false};
+        std::thread t([&] {
+            ready.store(true, std::memory_order_release);
+            bionic_futex(&word, FUTEX_WAIT, 0, nullptr, nullptr, 0);
+        });
+        while (!ready.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        word = 1;
+        bionic_futex(&word, FUTEX_WAKE, 1, nullptr, nullptr, 0);
+        t.join();
+    }
+    CHECK(true, "no crash/leak in repeated wait/wake");
+}
+
+// ─── 3. bionic_mremap ────────────────────────────────────────────────────────
+
+static void test_mremap_shrink_in_place() {
+    std::printf("[mremap] shrink without MREMAP_MAYMOVE\n");
+    size_t page = static_cast<size_t>(::sysconf(_SC_PAGESIZE));
+    void* p = ::mmap(nullptr, page * 3, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    CHECK(p != MAP_FAILED, "mmap 3 pages");
+    if (p == MAP_FAILED) return;
+    std::memset(p, 0xAB, page * 3);
+    errno = 0;
+    void* shrunk = bionic_mremap(p, page * 3, page, 0, nullptr);
+    if (shrunk == MAP_FAILED) {
+        std::printf("  INFO: shrink failed errno=%d (unexpected on Linux)\n",
+                    errno);
+        ++g_failures;
+        ++g_checks;
+    } else {
+        CHECK(shrunk == p, "shrink keeps the same address");
+        CHECK(static_cast<unsigned char*>(shrunk)[page - 1] == 0xAB,
+              "content preserved in remaining region");
+    }
+    ::munmap(p, page * 3);
+}
+
+static void test_mremap_grow_with_maymove() {
+    std::printf("[mremap] grow with MREMAP_MAYMOVE preserves content\n");
+    size_t page = static_cast<size_t>(::sysconf(_SC_PAGESIZE));
+    void* p = ::mmap(nullptr, page, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) return;
+    std::memset(p, 0xCD, page);
+    errno = 0;
+    void* grown = bionic_mremap(p, page, page * 4, MREMAP_MAYMOVE, nullptr);
+    if (grown == MAP_FAILED) {
+        std::printf("  INFO: grow failed errno=%d\n", errno);
+        ++g_failures;
+        ++g_checks;
+    } else {
+        CHECK(static_cast<unsigned char*>(grown)[page - 1] == 0xCD,
+              "first page content preserved after grow");
+        ::munmap(grown, page * 4);
+    }
+}
+
+static void test_mprotect_unaligned() {
+    std::printf("[mprotect] unaligned range is aligned to host pages\n");
+    const size_t page = static_cast<size_t>(::sysconf(_SC_PAGESIZE));
+    void* p = ::mmap(nullptr, page * 4, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) {
+        std::printf("  INFO: mmap failed errno=%d\n", errno);
+        ++g_failures;
+        ++g_checks;
+        return;
+    }
+    void* target = static_cast<char*>(p) + page + 128;
+    int rc = bionic_mprotect(target, 256, PROT_READ | PROT_WRITE);
+    CHECK(rc == 0, "bionic_mprotect with unaligned address succeeds");
+
+    static_cast<char*>(target)[0] = 0x42;
+    CHECK(static_cast<char*>(target)[0] == 0x42, "unaligned protected range is writable");
+
+    int madv_rc = bionic_madvise(target, 256, 0);
+    CHECK(madv_rc == 0, "bionic_madvise with unaligned address succeeds");
+
+    int unmap_rc = bionic_munmap(p, page * 4);
+    CHECK(unmap_rc == 0, "bionic_munmap succeeds");
+}
+
+// ─── 4. bionic_sigaction ─────────────────────────────────────────────────────
+
+static void test_sigaction_flag_roundtrip() {
+    std::printf("[sigaction] SA_* flags round-trip through oldact\n");
+    struct android_sigaction act;
+    std::memset(&act, 0, sizeof(act));
+    act.android_sa_handler = SIG_IGN;
+    // Guest-visible flags are Linux values regardless of host: on Linux they
+    // pass straight through, on Apple the shim translates them.
+    act.sa_flags = LINUX_SA_RESTART | LINUX_SA_NODEFER | LINUX_SA_RESETHAND;
+    // SIGUSR1 deliberately: it is a signal KuDroid does not own, so this exercises the
+    // path that really installs a host handler. Guest SIGUSR1 is 10, which on Darwin is
+    // SIGBUS — hence the translation, and hence why passing the number through would
+    // have handed this test's SIG_IGN to KuDroid's own fault handling.
+    if (::bionic_sigaction(10 /* guest SIGUSR1 */, &act, nullptr) != 0) {
+        std::printf("  FAIL: bionic_sigaction set failed errno=%d\n", errno);
+        ++g_failures;
+        ++g_checks;
+        return;
+    }
+    struct android_sigaction old;
+    std::memset(&old, 0, sizeof(old));
+    CHECK(::bionic_sigaction(10, nullptr, &old) == 0,
+          "query succeeds");
+    CHECK((old.sa_flags & LINUX_SA_RESTART) != 0, "SA_RESTART preserved");
+    CHECK((old.sa_flags & LINUX_SA_NODEFER) != 0, "SA_NODEFER preserved");
+    CHECK((old.sa_flags & LINUX_SA_RESETHAND) != 0, "SA_RESETHAND preserved");
+    CHECK(old.android_sa_handler == SIG_IGN,
+          "and the handler comes back from the handler field, not from the flags");
+
+    // Restore default so we don't leave the process in a weird state.
+    struct android_sigaction dfl;
+    std::memset(&dfl, 0, sizeof(dfl));
+    dfl.android_sa_handler = SIG_DFL;
+    dfl.sa_flags = 0;
+    ::bionic_sigaction(10, &dfl, nullptr);
+}
+
+// ─── syscall() mappings: bionic_syscall must understand fixed ARM64 NUMBERS, not
+// must be the arch host number (x86_64 Linux: gettid=186/futex=202/pvm=310). ───────
+// Guest always uses Linux ARM64 syscall number.
+#define GUEST_SYS_gettid 178
+#define GUEST_SYS_futex 98
+#define GUEST_SYS_process_vm_readv 270
+#define GUEST_SYS_sigaltstack 132
+#define GUEST_SYS_sched_getaffinity 123
+#define FUTEX_WAIT_PRIVATE 128
+#define FUTEX_WAKE_PRIVATE 129
+
+static void test_syscall_mappings() {
+    std::printf("[syscall] raw Linux-arm64 numbers routed correctly\n");
+
+    // gettid(178): unique per thread (guard static of libc++abi depends).
+    const long mainTid = bionic_syscall(GUEST_SYS_gettid);
+    CHECK(mainTid > 0, "gettid(178) > 0");
+    long otherTid = 0;
+    std::thread t([&] { otherTid = bionic_syscall(GUEST_SYS_gettid); });
+    t.join();
+    CHECK(otherTid != mainTid, "gettid(178) unique per thread");
+
+    // sigaltstack(132): this is also the first direct Linux ARM64 SVC observed
+    // from a guest thread on iOS. Querying the current stack exercises the
+    // mapping without changing the host signal stack.
+    stack_t current_stack{};
+    errno = 0;
+    CHECK(bionic_syscall(GUEST_SYS_sigaltstack, nullptr, &current_stack) == 0,
+          "sigaltstack(132) query is routed by the Linux ARM64 number");
+    errno = 0;
+    CHECK(bionic_sigaltstack(reinterpret_cast<const stack_t*>(0x4e), nullptr) == -1 &&
+              errno == EFAULT,
+          "sigaltstack rejects an invalid guest pointer with EFAULT");
+
+    // tgkill: registry tid -> pthread_t (write when gettid) must be found.
+    CHECK(bionic_tgkill(::getpid(), static_cast<int>(mainTid), 0) == 0,
+          "tgkill(pid, self tid, 0) == 0");
+
+    // process_vm_readv(270) self-read: fbjni probe reads 8 bytes then compares magic.
+    uint64_t magic = 0x1122334455667788ULL;
+    uint64_t local = 0;
+    struct iovec local_iov = { &local, sizeof(local) };
+    struct iovec remote_iov = { &magic, sizeof(magic) };
+    const long nread = bionic_syscall(GUEST_SYS_process_vm_readv,
+                                      static_cast<int>(::getpid()),
+                                      &local_iov, 1UL, &remote_iov, 1UL, 0UL);
+    CHECK(nread == 8 && local == magic, "process_vm_readv(270) self: 8 bytes");
+    errno = 0;
+    CHECK(bionic_syscall(GUEST_SYS_process_vm_readv,
+                         static_cast<int>(::getpid()) + 12345,
+                         &local_iov, 1UL, &remote_iov, 1UL, 0UL) == -1,
+          "process_vm_readv(270) foreign pid -> error");
+
+    // futex via raw syscall(98) (libc++ __libcpp_atomic_wait uses this route).
+    static uint32_t futex_word = 0;
+    std::atomic<bool> waiter_ready{false};
+    std::atomic<bool> waiter_done{false};
+    std::thread waiter([&] {
+        waiter_ready = true;
+        bionic_syscall(GUEST_SYS_futex, &futex_word, FUTEX_WAIT_PRIVATE, 0U,
+                       (void*)nullptr, (void*)nullptr, 0U);
+        waiter_done = true;
+    });
+    while (!waiter_ready) std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    futex_word = 1;
+    const long woken = bionic_syscall(GUEST_SYS_futex, &futex_word,
+                                      FUTEX_WAKE_PRIVATE, 1U,
+                                      (void*)nullptr, (void*)nullptr, 0U);
+    waiter.join();
+    CHECK(woken == 1, "futex(98) wake returns 1");
+    CHECK(waiter_done.load(), "futex(98) wait returned after wake");
+
+    // pipe2 (macOS not available; emulation using pipe + fcntl).
+    int fds[2] = {-1, -1};
+    CHECK(bionic_pipe2(fds, 0x80000 /*O_CLOEXEC*/) == 0, "pipe2 O_CLOEXEC ok");
+    if (fds[0] >= 0) {
+        CHECK((::fcntl(fds[0], F_GETFD) & FD_CLOEXEC) != 0, "pipe2 set CLOEXEC");
+        ::close(fds[0]); ::close(fds[1]);
+    }
+}
+
+// ─── process_vm_readv: reserved memory must be refused, not read ─────────────
+//
+// The shim answers a probe whose entire purpose is "is this address safe to touch?", so a
+// wrong yes is not a wrong answer, it is a crash — and the crash lands inside memcpy with
+// a fault address that belongs to the guest, which is what made it hard to place.
+//
+// It used to check only whether the address was MAPPED. A PROT_NONE reservation is
+// mapped; Unity makes hundreds of gigabytes of them at startup (eleven consecutive
+// `mmap(len=536854528, prot=0x0)` calls in the captured ULTRAKILL log), libunity's crash
+// reporter probed one, this said yes, and the copy took a fault inside _platform_memmove.
+//
+// These cases run on BOTH hosts deliberately. On Linux the calls go to the real kernel,
+// so the expectations here are the kernel's own behaviour rather than this shim's opinion
+// of it; on Apple the same expectations are met by the Mach region walk. That is what
+// makes the parity meaningful — the Apple path is being held to a contract the kernel
+// demonstrably satisfies, not to one invented alongside it.
+static void test_process_vm_readv_rejects_inaccessible_memory() {
+    std::printf("[process_vm_readv] reserved and read-only memory is refused\n");
+
+    const size_t page = static_cast<size_t>(::sysconf(_SC_PAGESIZE));
+    uint64_t magic = 0x1122334455667788ULL;
+
+    // A PROT_NONE reservation: mapped, and fatal to read.
+    void* reserved = ::mmap(nullptr, page * 2, PROT_NONE,
+                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    CHECK(reserved != MAP_FAILED, "a PROT_NONE reservation can be created");
+    if (reserved != MAP_FAILED) {
+        uint64_t out = 0;
+        struct iovec local = { &out, sizeof(out) };
+        struct iovec remote = { reserved, sizeof(out) };
+        errno = 0;
+        const long rc = bionic_syscall(GUEST_SYS_process_vm_readv,
+                                       static_cast<int>(::getpid()),
+                                       &local, 1UL, &remote, 1UL, 0UL);
+        CHECK(rc == -1 && errno == EFAULT,
+              "reading a PROT_NONE reservation fails with EFAULT instead of faulting");
+        CHECK(out == 0, "nothing was copied out of it");
+    }
+
+    // A read-only DESTINATION. The source is fine; the write side is not, and this shim
+    // performs that write. Unchecked before, and just as fatal as the read side.
+    void* readonly = ::mmap(nullptr, page, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    CHECK(readonly != MAP_FAILED, "a read-only page can be created");
+    if (readonly != MAP_FAILED) {
+        struct iovec local = { readonly, sizeof(magic) };
+        struct iovec remote = { &magic, sizeof(magic) };
+        errno = 0;
+        const long rc = bionic_syscall(GUEST_SYS_process_vm_readv,
+                                       static_cast<int>(::getpid()),
+                                       &local, 1UL, &remote, 1UL, 0UL);
+        CHECK(rc == -1 && errno == EFAULT,
+              "a read-only destination fails with EFAULT instead of faulting on the store");
+        ::munmap(readonly, page);
+    }
+
+    // A range that STRADDLES committed memory and the reservation after it. The kernel
+    // copies the accessible prefix and reports that length with no error, so the shim
+    // must too: refusing outright would tell a guest whose probe merely runs off the end
+    // of a region that the memory is unreadable when the first half is fine.
+    if (reserved != MAP_FAILED) {
+        char* base = static_cast<char*>(reserved);
+        CHECK(::mprotect(base, page, PROT_READ | PROT_WRITE) == 0,
+              "the first page of the reservation can be committed");
+        std::memset(base, 0xC5, page);
+
+        unsigned char out[16] = {0};
+        const size_t offset = page - 6;  // 6 readable bytes, then PROT_NONE
+        struct iovec local = { out, sizeof(out) };
+        struct iovec remote = { base + offset, sizeof(out) };
+        errno = 0;
+        const long rc = bionic_syscall(GUEST_SYS_process_vm_readv,
+                                       static_cast<int>(::getpid()),
+                                       &local, 1UL, &remote, 1UL, 0UL);
+        CHECK(rc == 6, "a straddling read copies the accessible prefix and reports it");
+        CHECK(out[0] == 0xC5 && out[5] == 0xC5, "the prefix that was copied is the real data");
+        CHECK(out[6] == 0, "nothing past the accessible prefix was written");
+        ::munmap(reserved, page * 2);
+    }
+
+    // The ordinary case still works, which is the point of having the shim at all.
+    uint64_t out = 0;
+    struct iovec local = { &out, sizeof(out) };
+    struct iovec remote = { &magic, sizeof(magic) };
+    const long rc = bionic_syscall(GUEST_SYS_process_vm_readv,
+                                   static_cast<int>(::getpid()),
+                                   &local, 1UL, &remote, 1UL, 0UL);
+    CHECK(rc == 8 && out == magic, "a readable range is still copied in full");
+}
+
+// ─── sched_getaffinity: raw syscall vs wrapper ───────────────────────────────
+//
+// The two have OPPOSITE success conventions, and conflating them silently produces
+// an empty CPU set rather than an error.
+//
+// The raw syscall returns the number of bytes written. bionic's wrapper uses that
+// count to zero the remainder of the caller's set:
+//
+//     int rc = __sched_getaffinity(pid, size, set);
+//     if (rc == -1) return -1;
+//     if ((size_t)rc < size) memset((char*)set + rc, 0, size - rc);
+//     return 0;
+//
+// so a raw syscall that returns 0 makes bionic clear the WHOLE mask. Unity then
+// reported "Cores = 0" and "0 big (mask: 0x0), 0 little (mask: 0x0)" and sized its
+// job system from an empty set.
+
+static void test_sched_getaffinity_raw_returns_byte_count() {
+    std::printf("[sched_getaffinity] raw syscall returns bytes written\n");
+
+    // The expected mask comes from the topology, not from a literal.
+    //
+    // These checks used to assert exactly eight CPUs, which is what the shim hardcoded —
+    // so the test agreed with the shim and both were wrong about every device that does
+    // not have eight cores. A test that repeats the implementation's constant cannot
+    // catch the implementation being wrong; test_cpu_info.cpp pins the topology itself,
+    // and this pins that the raw syscall reports it.
+    const uint32_t cores = kudroid::query_cpu_topology().total_cores;
+    const unsigned long expected = static_cast<unsigned long>(kudroid::cpu_online_mask());
+
+    unsigned long mask = 0;
+    const long rc = bionic_syscall(GUEST_SYS_sched_getaffinity, 0, sizeof(mask), &mask);
+    CHECK(rc == static_cast<long>(sizeof(mask)),
+          "raw syscall(123) returns sizeof(mask), not 0");
+    CHECK(mask != 0, "the mask is not empty");
+    CHECK(mask == expected, "the mask matches the device topology");
+    CHECK(__builtin_popcountl(mask) == static_cast<int>(cores),
+          "one bit per online core");
+
+    // A guest asking for fewer bytes than a word must get exactly that many, or
+    // bionic's memset of the "remainder" would run off the end of its buffer.
+    unsigned char small[2] = {0xAA, 0xAA};
+    const long small_rc = bionic_syscall(GUEST_SYS_sched_getaffinity, 0, sizeof(small), &small);
+    CHECK(small_rc == static_cast<long>(sizeof(small)),
+          "a 2-byte set reports 2 bytes written");
+    CHECK(small[0] == static_cast<unsigned char>(expected & 0xFF),
+          "the low byte carries the low eight CPUs of the mask");
+
+    // Reproduce what bionic does with the return value: whatever it clears, the
+    // result must still describe a non-empty set.
+    unsigned long emulated[4] = {0, 0, 0, 0};
+    const long n = bionic_syscall(GUEST_SYS_sched_getaffinity, 0, sizeof(emulated), &emulated);
+    CHECK(n > 0, "a larger set still succeeds");
+    if (n > 0 && static_cast<size_t>(n) < sizeof(emulated)) {
+        std::memset(reinterpret_cast<char*>(emulated) + n, 0, sizeof(emulated) - n);
+    }
+    CHECK(emulated[0] != 0,
+          "after bionic zeroes the remainder the set is still non-empty — the bug that "
+          "made Unity see zero cores");
+
+    errno = 0;
+    CHECK(bionic_syscall(GUEST_SYS_sched_getaffinity, 0, sizeof(mask), nullptr) == -1,
+          "a null mask pointer is an error, not a silent success");
+}
+
+// cpu_set_t, CPU_COUNT and CPU_ISSET are glibc extensions and do not exist on
+// Apple, so the set is inspected as raw bytes instead. That is also closer to
+// what the guest sees: bionic's cpu_set_t is a flat little-endian bitmap, so CPU
+// n lives in bit (n % 8) of byte (n / 8) regardless of the host's own struct.
+namespace {
+
+constexpr size_t kGuestCpuSetBytes = 128;  // bionic's CPU_SETSIZE / 8
+
+bool guest_cpu_isset(const unsigned char* set, unsigned cpu) {
+    return (set[cpu / 8] >> (cpu % 8)) & 1u;
+}
+
+unsigned guest_cpu_count(const unsigned char* set, size_t bytes) {
+    unsigned n = 0;
+    for (size_t i = 0; i < bytes; ++i) {
+        n += static_cast<unsigned>(__builtin_popcount(set[i]));
+    }
+    return n;
+}
+
+}  // namespace
+
+static void test_sched_getaffinity_wrapper_returns_zero() {
+    std::printf("[sched_getaffinity] wrapper returns 0 on success\n");
+
+    const uint32_t cores = kudroid::query_cpu_topology().total_cores;
+
+    unsigned char set[kGuestCpuSetBytes];
+    std::memset(set, 0, sizeof(set));
+    CHECK(bionic_sched_getaffinity(0, sizeof(set), set) == 0,
+          "the wrapper reports success as 0");
+    CHECK(guest_cpu_count(set, sizeof(set)) == cores,
+          "the wrapper fills in one bit per online core");
+    CHECK(guest_cpu_isset(set, 0), "CPU 0 is set, so pinning to the first CPU works");
+    CHECK(guest_cpu_isset(set, cores - 1), "the highest online CPU is set");
+    // Nothing beyond the core count may be claimed: a guest pinning to a CPU the device
+    // does not have gets EINVAL from the real kernel and confusion from this one.
+    CHECK(!guest_cpu_isset(set, cores), "no CPU past the core count is claimed");
+
+    errno = 0;
+    CHECK(bionic_sched_getaffinity(0, 0, set) == -1 && errno == EINVAL,
+          "a zero-sized set is rejected with EINVAL");
+    errno = 0;
+    CHECK(bionic_sched_getaffinity(0, sizeof(set), nullptr) == -1 && errno == EINVAL,
+          "a null set is rejected with EINVAL");
+}
+
+// ─── POSIX unnamed semaphores ────────────────────────────────────────────────
+//
+// Darwin declares sem_init/sem_wait/sem_post/sem_destroy but does not implement
+// them: each returns -1/ENOSYS. Only sem_open works. Unshimmed, a guest call fell
+// through to libSystem and failed, so a "wait" did not wait and a "post" woke
+// nobody.
+//
+// libunity.so imports exactly those four. Unity spawns a helper thread, names it,
+// then blocks on a semaphore for the spawner's handshake. With sem_wait failing
+// immediately the handshake could never complete, and the log stopped dead on
+// prctl(PR_SET_NAME, "AssetGarbageCollectorHelper") with no mention of a semaphore.
+//
+// These run on the Linux host, where the host's own sem_* DO work — which is the
+// point: the shim must be exercised, not the host, so every call here goes through
+// bionic_sem_*.
+
+static void test_sem_counting_semantics() {
+    std::printf("[semaphore] init/post/wait counting\n");
+
+    sem_t sem;
+    std::memset(&sem, 0, sizeof(sem));
+    CHECK(bionic_sem_init(&sem, 0, 0) == 0, "sem_init to 0 succeeds");
+
+    int value = -1;
+    CHECK(bionic_sem_getvalue(&sem, &value) == 0 && value == 0, "starts at 0");
+
+    // A wait on a zero semaphore must block, so it cannot be called here. trywait
+    // is the observable equivalent.
+    errno = 0;
+    CHECK(bionic_sem_trywait(&sem) == -1 && errno == EAGAIN,
+          "trywait on an empty semaphore reports EAGAIN rather than succeeding");
+
+    CHECK(bionic_sem_post(&sem) == 0, "post succeeds");
+    CHECK(bionic_sem_getvalue(&sem, &value) == 0 && value == 1, "post raised the count");
+    CHECK(bionic_sem_wait(&sem) == 0, "wait takes the posted token without blocking");
+    CHECK(bionic_sem_getvalue(&sem, &value) == 0 && value == 0, "and consumed it");
+
+    // Counting, not binary: three posts must permit three waits.
+    for (int i = 0; i < 3; ++i) bionic_sem_post(&sem);
+    CHECK(bionic_sem_getvalue(&sem, &value) == 0 && value == 3, "three posts count to 3");
+    CHECK(bionic_sem_wait(&sem) == 0 && bionic_sem_wait(&sem) == 0 &&
+              bionic_sem_wait(&sem) == 0,
+          "three waits all succeed");
+    errno = 0;
+    CHECK(bionic_sem_trywait(&sem) == -1 && errno == EAGAIN, "the fourth finds it empty");
+
+    CHECK(bionic_sem_init(&sem, 0, 5) == 0, "re-init at the same address");
+    CHECK(bionic_sem_getvalue(&sem, &value) == 0 && value == 5,
+          "replaces the old state rather than adding to it");
+
+    bionic_sem_destroy(&sem);
+}
+
+// The handshake Unity actually performs, and the reason the log stopped.
+static void test_sem_blocks_until_posted() {
+    std::printf("[semaphore] wait blocks until another thread posts\n");
+
+    sem_t sem;
+    std::memset(&sem, 0, sizeof(sem));
+    bionic_sem_init(&sem, 0, 0);
+
+    std::atomic<bool> waiter_returned{false};
+    std::atomic<bool> waiter_started{false};
+
+    std::thread waiter([&] {
+        waiter_started = true;
+        if (bionic_sem_wait(&sem) == 0) waiter_returned = true;
+    });
+
+    while (!waiter_started.load()) std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    CHECK(!waiter_returned.load(),
+          "the waiter is still parked — a sem_wait that returns immediately is the bug "
+          "that let Unity's helper thread race past its handshake");
+
+    bionic_sem_post(&sem);
+    waiter.join();
+    CHECK(waiter_returned.load(), "posting released it");
+
+    bionic_sem_destroy(&sem);
+}
+
+// Two threads, both waiting: one post must release exactly one of them.
+static void test_sem_post_releases_one_waiter() {
+    std::printf("[semaphore] one post releases exactly one waiter\n");
+
+    sem_t sem;
+    std::memset(&sem, 0, sizeof(sem));
+    bionic_sem_init(&sem, 0, 0);
+
+    std::atomic<int> released{0};
+    std::atomic<int> started{0};
+    std::thread a([&] { ++started; if (bionic_sem_wait(&sem) == 0) ++released; });
+    std::thread b([&] { ++started; if (bionic_sem_wait(&sem) == 0) ++released; });
+
+    while (started.load() < 2) std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    bionic_sem_post(&sem);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    CHECK(released.load() == 1, "exactly one waiter woke");
+
+    bionic_sem_post(&sem);
+    a.join();
+    b.join();
+    CHECK(released.load() == 2, "the second post released the other");
+
+    bionic_sem_destroy(&sem);
+}
+
+// A semaphore that was never sem_init'd. An engine that uses one to hand work
+// between job workers — wait, post, wait, post, with no init through the PLT —
+// met a condition-variable wait on an object initialised to 0, so the waiter
+// parked and the poster, waiting on the same shape, never ran. Every worker
+// stopped at once. The uninitialised path yields a bounded window first, so a
+// handshake that is already satisfied returns immediately and one that is not
+// still finds its post.
+static void test_sem_uninitialised_yields_instead_of_parking() {
+    std::printf("[semaphore] uninitialised semaphore yields instead of parking forever\n");
+
+    // Post first, then wait: on a semaphore we never saw initialised this must
+    // succeed, because the token is there. A plain condition-variable wait here
+    // would never be woken and this check would hang.
+    sem_t sem;
+    std::memset(&sem, 0, sizeof(sem));
+    CHECK(bionic_sem_post(&sem) == 0, "post on an uninitialised semaphore succeeds");
+    const auto t0 = std::chrono::steady_clock::now();
+    CHECK(bionic_sem_wait(&sem) == 0, "wait takes the token instead of parking");
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - t0).count();
+    char took[64];
+    std::snprintf(took, sizeof(took), "and returns promptly (took %lldms)",
+                  static_cast<long long>(ms));
+    CHECK(ms < 200, took);
+
+    // A post that arrives while the waiter is yielding must still be seen: the
+    // waiter must not have given up before the producer ran.
+    CHECK(bionic_sem_post(&sem) == 0, "second post succeeds");
+    CHECK(bionic_sem_wait(&sem) == 0, "the token is consumed");
+
+    bionic_sem_destroy(&sem);
+}
+
+static void test_sem_timedwait_deadline() {
+    std::printf("[semaphore] timedwait honours its absolute deadline\n");
+
+    sem_t sem;
+    std::memset(&sem, 0, sizeof(sem));
+    bionic_sem_init(&sem, 0, 0);
+
+    // An expired deadline on an empty semaphore is ETIMEDOUT, not a spin. The old
+    // implementation called the host ::sem_trywait on the guest's sem_t, which on
+    // Darwin fails ENOSYS on the first iteration and then busy-loops to the deadline.
+    struct timespec past;
+    ::clock_gettime(CLOCK_REALTIME, &past);
+    past.tv_sec -= 1;
+    errno = 0;
+    const auto t0 = std::chrono::steady_clock::now();
+    CHECK(bionic_sem_timedwait(&sem, &past) == -1 && errno == 110 /* guest ETIMEDOUT */,
+          "an already-expired deadline reports ETIMEDOUT");
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - t0).count();
+    CHECK(elapsed < 100, "and returns at once rather than spinning to it");
+
+    // An available token must be taken even when the deadline has passed.
+    bionic_sem_post(&sem);
+    CHECK(bionic_sem_timedwait(&sem, &past) == 0,
+          "an expired deadline still takes a token that is already available");
+
+    // A live deadline blocks, then times out.
+    struct timespec soon;
+    ::clock_gettime(CLOCK_REALTIME, &soon);
+    soon.tv_nsec += 120 * 1000 * 1000;
+    if (soon.tv_nsec >= 1000000000) { soon.tv_sec += 1; soon.tv_nsec -= 1000000000; }
+    errno = 0;
+    const auto t1 = std::chrono::steady_clock::now();
+    CHECK(bionic_sem_timedwait(&sem, &soon) == -1 && errno == 110 /* guest ETIMEDOUT */,
+          "a future deadline on an empty semaphore times out");
+    const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - t1).count();
+    CHECK(waited >= 100, "after actually waiting for it");
+
+    bionic_sem_destroy(&sem);
+}
+
+// Destroying a semaphore with a thread parked on it must not leave that thread
+// blocked forever: during shutdown that turns an exit into a hang.
+static void test_sem_destroy_releases_waiters() {
+    std::printf("[semaphore] destroy releases a parked waiter\n");
+
+    sem_t sem;
+    std::memset(&sem, 0, sizeof(sem));
+    bionic_sem_init(&sem, 0, 0);
+
+    std::atomic<bool> returned{false};
+    std::atomic<bool> started{false};
+    std::thread waiter([&] {
+        started = true;
+        bionic_sem_wait(&sem);
+        returned = true;
+    });
+
+    while (!started.load()) std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    CHECK(!returned.load(), "the waiter is parked");
+
+    bionic_sem_destroy(&sem);
+    waiter.join();
+    CHECK(returned.load(), "destroy woke it instead of leaving it blocked at shutdown");
+}
+
+static void test_sem_rejects_null() {
+    std::printf("[semaphore] null arguments are rejected\n");
+    errno = 0;
+    CHECK(bionic_sem_init(nullptr, 0, 0) == -1 && errno == EINVAL, "sem_init(null)");
+    errno = 0;
+    CHECK(bionic_sem_wait(nullptr) == -1 && errno == EINVAL, "sem_wait(null)");
+    errno = 0;
+    CHECK(bionic_sem_post(nullptr) == -1 && errno == EINVAL, "sem_post(null)");
+    errno = 0;
+    CHECK(bionic_sem_destroy(nullptr) == -1 && errno == EINVAL, "sem_destroy(null)");
+    sem_t sem;
+    std::memset(&sem, 0, sizeof(sem));
+    bionic_sem_init(&sem, 0, 0);
+    errno = 0;
+    CHECK(bionic_sem_getvalue(&sem, nullptr) == -1 && errno == EINVAL,
+          "sem_getvalue with a null out pointer");
+    bionic_sem_destroy(&sem);
+}
+
+// ─── __cxa_guard shim (recursion-tolerant) ──────────────────────────────────
+
+static void test_guard_acquire_release() {
+    uint64_t guard = 0;
+    CHECK(bionic___cxa_guard_acquire(&guard) == 1, "guard: first acquire claims (returns 1)");
+    const uint8_t* g = reinterpret_cast<const uint8_t*>(&guard);
+    CHECK((g[0] & 0x1) == 0, "guard: done bit clear while in-progress");
+    CHECK((g[1] & 0x2) != 0, "guard: in-progress bit set after claim");
+    CHECK(*reinterpret_cast<const uint32_t*>(g + 4) != 0, "guard: tid stored");
+    bionic___cxa_guard_release(&guard);
+    CHECK((g[0] & 0x1) != 0, "guard: done bit set after release");
+    CHECK((g[1] & 0x2) == 0, "guard: in-progress cleared after release");
+    CHECK(bionic___cxa_guard_acquire(&guard) == 0, "guard: acquire after done returns 0");
+}
+
+static void test_guard_same_tid_recursion_tolerated() {
+    // Replay Discord crash: same thread re-enter guard is in-progress.
+    // Shim must NOT abort — clear + return 1 (re-init).
+    uint64_t guard = 0;
+    CHECK(bionic___cxa_guard_acquire(&guard) == 1, "guard-rec: outer claim");
+    const uint8_t* g = reinterpret_cast<const uint8_t*>(&guard);
+    CHECK((g[1] & 0x2) != 0, "guard-rec: in-progress before recursion");
+
+    // Critical re-enter — previously abort("recursive initialization").
+    const int inner = bionic___cxa_guard_acquire(&guard);
+    CHECK(inner == 1, "guard-rec: same-tid re-enter returns 1 (no abort)");
+    CHECK((g[1] & 0x2) == 0, "guard-rec: in-progress cleared before re-claim");
+    CHECK(*reinterpret_cast<const uint32_t*>(g + 4) == 0, "guard-rec: tid cleared");
+
+    // Inner claim again (re-init) then release → done.
+    CHECK(bionic___cxa_guard_acquire(&guard) == 1, "guard-rec: inner re-claim");
+    bionic___cxa_guard_release(&guard);
+    CHECK((g[0] & 0x1) != 0, "guard-rec: done after inner release");
+
+    // If inner init is FAIL (guard_abort), then the state is clean and someone can retry.
+    uint64_t g2 = 0;
+    CHECK(bionic___cxa_guard_acquire(&g2) == 1, "guard-rec: claim g2");
+    CHECK(bionic___cxa_guard_acquire(&g2) == 1, "guard-rec: recursion on g2 tolerated");
+    bionic___cxa_guard_abort(&g2);
+    CHECK((g2 & 0xff) == 0, "guard-rec: abort clears in-progress+tid, done stays 0");
+    CHECK(bionic___cxa_guard_acquire(&g2) == 1, "guard-rec: retry after abort claims again");
+    bionic___cxa_guard_release(&g2);
+}
+
+static void test_guard_recursion_loop_cut() {
+    // Init recursively forever (missing class on classpath) → after 8 right shims
+    // returns 0 (pretend done) instead of infinite re-init (hang). Guard uses static to
+    // Stable address (no stack-slot reuse from previous test).
+    static uint64_t s_guard = 0;
+    uint64_t& guard = s_guard;
+    int first = -1, ninth = -1;
+    for (int i = 1; i <= 12; ++i) {
+        const int r = bionic___cxa_guard_acquire(&guard); // claim (in-progress)
+        if (first < 0) first = r;
+        const int r2 = bionic___cxa_guard_acquire(&guard); // same-tid recursion
+        if (i == 9) ninth = r2;
+        bionic___cxa_guard_abort(&guard); // init fail → clean guard for next round
+        if (r2 == 0) break; // loop cut
+    }
+    CHECK(first == 1, "guard-cut: first claim");
+    CHECK(ninth == 0, "guard-cut: recursion #9 returns 0 (loop cut, no hang)");
+}
+
+static void test_guard_cross_thread_wait() {
+    // Thread A claim keeps guard; Thread B waits (spins) until A releases → B feels done.
+    uint64_t guard = 0;
+    std::atomic<bool> b_ready{false}, b_done{false};
+    CHECK(bionic___cxa_guard_acquire(&guard) == 1, "guard-wait: A claims");
+    std::thread t([&] {
+        b_ready = true;
+        const int r = bionic___cxa_guard_acquire(&guard);
+        b_done = (r == 0); // B only continues when done
+    });
+    while (!b_ready.load()) std::this_thread::yield();
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    CHECK(!b_done.load(), "guard-wait: B blocked while A holds");
+    bionic___cxa_guard_release(&guard);
+    t.join();
+    CHECK(b_done.load(), "guard-wait: B unblocked after release (returns 0 = done)");
+}
+
+// ─── 6. guest library dlopen/dlsym/dlclose ──────────────────────────────────
+//
+// A guest .so LibraryManager already mapped gets its own handle rather than the
+// shared DUMMY_HANDLE. The reason is resolution scope: dlsym on DUMMY_HANDLE
+// searches every loaded guest library and returns the first match, so a caller that
+// deliberately opened one library gets another's function whenever both export the
+// same name. AGDK's GameActivity is that caller — it dlopens the .so named by
+// android.app.lib_name and reads its entry points out of that handle.
+//
+// The hooks are installed by kudroid_run_apk in production; here they are installed
+// directly, because what needs proving is the shim's routing and — above all — that
+// bionic_dlclose does NOT hand a guest handle to ::dlclose. That pointer belongs to
+// LibraryManager, and the host loader would dereference it as its own.
+
+static int g_guest_open_calls = 0;
+static int g_guest_symbol_calls = 0;
+static const char* g_guest_last_open = nullptr;
+
+// Stands in for an ElfLoader. Only its address is used.
+static int g_fake_guest_library = 0;
+#define FAKE_GUEST_HANDLE (static_cast<void*>(&g_fake_guest_library))
+static int g_fake_guest_symbol = 0;
+#define FAKE_GUEST_SYMBOL (static_cast<void*>(&g_fake_guest_symbol))
+
+static void* fake_guest_open(const char* filename) {
+    ++g_guest_open_calls;
+    g_guest_last_open = filename;
+    if (filename != nullptr && std::strstr(filename, "libguestprobe.so") != nullptr) {
+        return FAKE_GUEST_HANDLE;
+    }
+    return nullptr;
+}
+
+static void* fake_guest_symbol(void* handle, const char* symbol) {
+    ++g_guest_symbol_calls;
+    if (handle != FAKE_GUEST_HANDLE) return nullptr;
+    if (symbol != nullptr && std::strcmp(symbol, "guest_only_entry") == 0) {
+        return FAKE_GUEST_SYMBOL;
+    }
+    return nullptr;
+}
+
+static int fake_guest_owns(void* handle) {
+    return handle == FAKE_GUEST_HANDLE ? 1 : 0;
+}
+
+// ALooper_forThread must never return null.
+//
+// Android's main thread always has a looper — ActivityThread prepares one before any
+// activity exists — so native code treats a null as fatal rather than as something to
+// prepare around. AGDK's initializeNativeCode did exactly that: it aborted with
+// "Unable to retrieve native ALooper", which surfaced as an UnsatisfiedLinkError during
+// onCreate and left the app on a black screen with no crash to read.
+//
+// KuART's main loop is Java and never called ALooper_prepare, so forThread() had nothing
+// to return. Creating on demand is what fixes it, and this pins the property rather than
+// the implementation: whoever asks first gets a looper.
+static void test_alooper_never_null() {
+    void* first = bionic_ALooper_forThread();
+    CHECK(first != nullptr,
+          "ALooper_forThread returns a looper without a prior prepare");
+
+    // The same looper every time: guest code stores the pointer and compares it later,
+    // and a second instance would silently split fd registrations between two loopers.
+    CHECK(bionic_ALooper_forThread() == first,
+          "ALooper_forThread is stable across calls");
+    CHECK(bionic_ALooper_prepare(0) == first,
+          "ALooper_prepare returns the same main looper");
+
+    // An unbalanced release must not destroy the main looper. Guest code releases what it
+    // did not acquire, and on Android the main looper simply outlives it; freeing here
+    // would leave a dangling pointer for any thread already inside pollOnce, faulting far
+    // from the release that caused it.
+    bionic_ALooper_release(first);
+    bionic_ALooper_release(first);
+    bionic_ALooper_release(first);
+    CHECK(bionic_ALooper_forThread() == first,
+          "the main looper survives more releases than acquires");
+
+    bionic_ALooper_acquire(first);
+    bionic_ALooper_release(first);
+    CHECK(bionic_ALooper_forThread() == first,
+          "a balanced acquire/release leaves it alive");
+}
+
+// A wake must release a thread parked in pollOnce(-1): teardown joins workers
+// parked exactly there, and a no-op wake wedged nativeDone forever.
+static void test_alooper_wake_releases_poll() {
+    void* looper = bionic_ALooper_forThread();
+    CHECK(bionic_ALooper_pollOnce(0, nullptr, nullptr, nullptr) == -2,
+          "pollOnce(0) on an idle looper times out immediately");
+
+    std::atomic<int> result{-99};
+    std::thread waiter([&] {
+        result.store(bionic_ALooper_pollOnce(-1, nullptr, nullptr, nullptr));
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    bionic_ALooper_wake(looper);
+    waiter.join();
+    CHECK(result.load() == -3, "wake during pollOnce(-1) returns ALOOPER_POLL_WAKE");
+
+    CHECK(bionic_ALooper_pollOnce(0, nullptr, nullptr, nullptr) == -2,
+          "the wake is drained, the next poll times out again");
+}
+
+static void test_guest_library_handles() {
+    std::printf("[dlfcn] guest .so gets its own handle\n");
+
+    kudroid_guest_library_open = &fake_guest_open;
+    kudroid_guest_library_symbol = &fake_guest_symbol;
+    kudroid_guest_library_owns = &fake_guest_owns;
+
+    // A guest library resolves to its own handle, not the shared dummy one.
+    void* h = bionic_dlopen("/data/app/com.example/lib/arm64-v8a/libguestprobe.so", 0);
+    CHECK(h == FAKE_GUEST_HANDLE, "dlopen of a guest .so returns its own handle");
+    CHECK(g_guest_open_calls == 1, "the guest open hook was consulted");
+
+    // dlsym on that handle reaches the guest library.
+    CHECK(bionic_dlsym(h, "guest_only_entry") == FAKE_GUEST_SYMBOL,
+          "dlsym on a guest handle resolves within that library");
+
+    // A symbol the guest library does not export must not silently come back from
+    // somewhere else via that handle. "malloc" exists in the host process, so this
+    // is the case that catches a fallthrough: the guest hook returns null and the
+    // host path answers, which is correct for dlsym semantics but must be reached
+    // through the fallback and not attributed to the guest handle.
+    g_guest_symbol_calls = 0;
+    (void)bionic_dlsym(h, "malloc");
+    CHECK(g_guest_symbol_calls == 1,
+          "an unexported symbol asks the guest library first, then falls back");
+
+    // A library that is NOT a loaded guest .so still gets the dummy handle, so the
+    // existing behaviour for libc.so/libm.so is unchanged.
+    void* dummy = bionic_dlopen("libnotaguestlibrary_kudroid.so", 0);
+    CHECK(dummy != nullptr && dummy != FAKE_GUEST_HANDLE,
+          "a non-guest library still resolves to the dummy handle");
+
+    // The one that would crash: ::dlclose on a pointer the host loader never issued.
+    CHECK(bionic_dlclose(FAKE_GUEST_HANDLE) == 0,
+          "dlclose of a guest handle succeeds without reaching the host loader");
+
+    kudroid_guest_library_open = nullptr;
+    kudroid_guest_library_symbol = nullptr;
+    kudroid_guest_library_owns = nullptr;
+
+    // With no hook installed the shim must behave exactly as before.
+    void* before = bionic_dlopen("libguestprobe.so", 0);
+    CHECK(before != FAKE_GUEST_HANDLE,
+          "without the hook a guest name falls back to the dummy handle");
+}
+
+// ─── dl_iterate_phdr ─────────────────────────────────────────────────────────
+//
+// This used to return 0 unconditionally, described as a "safe stub". It was not safe: a
+// guest's statically linked libc++abi — which every NDK app ships — locates its exception
+// tables by walking dl_iterate_phdr for PT_GNU_EH_FRAME. Reporting no modules means
+// _Unwind_RaiseException finds no FDE for the throwing frame and calls std::terminate, so
+// every C++ `throw` inside a guest library aborts the process.
+//
+// On device that appeared as four frames of libc++_shared.so above abort() with no
+// exception message, immediately after GameActivity_register — which reads as the game
+// crashing rather than a shim returning the wrong answer.
+
+extern "C" void kudroid_register_guest_module(void* base, size_t size, const char* path);
+extern "C" void kudroid_register_guest_phdrs(void* base, const void* phdrs,
+                                             unsigned short phnum);
+extern "C" int bionic_dl_iterate_phdr(int (*callback)(void* info, size_t size, void* data),
+                                      void* data);
+
+// The prefix of bionic's dl_phdr_info that any unwinder reads.
+struct TestDlPhdrInfo {
+    uintptr_t      dlpi_addr;
+    const char*    dlpi_name;
+    const void*    dlpi_phdr;
+    unsigned short dlpi_phnum;
+};
+
+namespace {
+
+struct PhdrVisit {
+    int calls = 0;
+    bool sawModule = false;
+    uintptr_t addr = 0;
+    const void* phdr = nullptr;
+    unsigned short phnum = 0;
+    std::string name;
+    size_t reportedSize = 0;
+    // Stop the walk when this module is seen, to check the contract's early exit.
+    const char* stopAt = nullptr;
+};
+
+int visitPhdrs(void* info, size_t size, void* data) {
+    auto* visit = static_cast<PhdrVisit*>(data);
+    auto* phdrInfo = static_cast<const TestDlPhdrInfo*>(info);
+    ++visit->calls;
+    visit->reportedSize = size;
+    if (phdrInfo->dlpi_name != nullptr &&
+        std::strstr(phdrInfo->dlpi_name, "test_phdr_module.so") != nullptr) {
+        visit->sawModule = true;
+        visit->addr = phdrInfo->dlpi_addr;
+        visit->phdr = phdrInfo->dlpi_phdr;
+        visit->phnum = phdrInfo->dlpi_phnum;
+        visit->name = phdrInfo->dlpi_name;
+    }
+    if (visit->stopAt != nullptr && phdrInfo->dlpi_name != nullptr &&
+        std::strstr(phdrInfo->dlpi_name, visit->stopAt) != nullptr) {
+        return 7;  // any non-zero: the unwinder returns non-zero once it finds its module
+    }
+    return 0;
+}
+
+} // namespace
+
+void test_dl_iterate_phdr_reports_guest_modules() {
+    // Stand-in for a mapped image. Only the addresses are compared, so the contents do not
+    // matter — what is under test is whether the registration is reported at all.
+    alignas(8) static unsigned char fakeImage[256] = {};
+    void* base = fakeImage;
+    const void* phdrs = fakeImage + 64;
+
+    kudroid_register_guest_module(base, sizeof(fakeImage), "/fake/lib/test_phdr_module.so");
+    kudroid_register_guest_phdrs(base, phdrs, 5);
+
+    PhdrVisit visit;
+    const int result = bionic_dl_iterate_phdr(&visitPhdrs, &visit);
+
+    CHECK(result == 0, "a walk with no early exit returns 0");
+    CHECK(visit.calls >= 1, "the callback runs — the stub never called it at all");
+    CHECK(visit.sawModule, "a registered guest module is reported");
+    CHECK(visit.addr == reinterpret_cast<uintptr_t>(base),
+          "dlpi_addr is the module's load bias");
+    CHECK(visit.phdr == phdrs, "dlpi_phdr is the registered header table");
+    CHECK(visit.phnum == 5, "dlpi_phnum is the registered count");
+    CHECK(visit.name == "/fake/lib/test_phdr_module.so", "dlpi_name is the module path");
+    // The size must match the struct bionic passes, or a guest reading the later fields
+    // walks off the end of ours.
+    CHECK(visit.reportedSize >= sizeof(TestDlPhdrInfo),
+          "the reported size covers the fields an unwinder reads");
+
+    // Non-zero from the callback stops the walk and becomes the return value. An unwinder
+    // relies on this the moment it finds the module holding the PC.
+    PhdrVisit stopping;
+    stopping.stopAt = "test_phdr_module.so";
+    const int stopped = bionic_dl_iterate_phdr(&visitPhdrs, &stopping);
+    CHECK(stopped == 7, "a non-zero callback result stops the walk and is returned");
+}
+
+void test_dl_iterate_phdr_skips_modules_without_headers() {
+    // A module registered for crash symbolication but whose headers were never recorded
+    // must not be reported with a null table — an unwinder would dereference it.
+    alignas(8) static unsigned char headerless[64] = {};
+    kudroid_register_guest_module(headerless, sizeof(headerless),
+                                 "/fake/lib/test_headerless.so");
+
+    struct Seen {
+        bool headerless = false;
+        bool nullTable = false;
+    } seen;
+
+    auto visitor = [](void* info, size_t, void* data) -> int {
+        auto* phdrInfo = static_cast<const TestDlPhdrInfo*>(info);
+        auto* s = static_cast<Seen*>(data);
+        if (phdrInfo->dlpi_phdr == nullptr || phdrInfo->dlpi_phnum == 0) {
+            s->nullTable = true;
+        }
+        if (phdrInfo->dlpi_name != nullptr &&
+            std::strstr(phdrInfo->dlpi_name, "test_headerless.so") != nullptr) {
+            s->headerless = true;
+        }
+        return 0;
+    };
+
+    bionic_dl_iterate_phdr(visitor, &seen);
+    CHECK(!seen.headerless, "a module with no registered headers is skipped");
+    CHECK(!seen.nullTable, "no module is reported with a null header table");
+}
+
+// ─── guest mutex kinds ───────────────────────────────────────────────────────
+// A guest pthread_mutex_t built by PTHREAD_RECURSIVE_MUTEX_INITIALIZER never
+// reaches pthread_mutex_init, so the shim first sees it at pthread_mutex_lock and
+// must recover its kind from the control word. Bionic stores the kind in bits
+// 14-15 of the first 32-bit word.
+//
+// Getting this wrong is not a subtle degradation: the guest's second re-entrant
+// lock blocks forever on a non-recursive host mutex, which presents as a native
+// method that entered and never returned, with no output of its own.
+
+// Guest pthread_mutex_t is 4 bytes on bionic arm64, but allocate the full 40-byte
+// bionic pthread_mutex_t footprint so nothing the shim reads lands out of bounds.
+struct GuestMutex {
+    uint32_t control;
+    unsigned char reserved[36];
+};
+
+static constexpr uint32_t kBionicRecursiveInit = 1u << 14;
+static constexpr uint32_t kBionicErrorcheckInit = 2u << 14;
+
+// Bound every lock that is expected to succeed: a regression here hangs rather
+// than fails, and a hung test tells you far less than a failing one.
+template <typename Fn>
+static bool completes_within(Fn&& fn, int timeout_ms) {
+    auto fut = std::async(std::launch::async, std::forward<Fn>(fn));
+    return fut.wait_for(std::chrono::milliseconds(timeout_ms)) ==
+           std::future_status::ready;
+}
+
+static void test_static_recursive_mutex_relocks() {
+    std::printf("[mutex] static recursive initializer survives lazy creation\n");
+    // Deliberately NOT passed to bionic_pthread_mutex_init — that is the whole
+    // point. The shim has to infer the kind on first lock.
+    static GuestMutex guest = {kBionicRecursiveInit, {}};
+
+    // Lock AND unlock on the same thread: a recursive mutex is owned by the thread
+    // that locked it, so unlocking from elsewhere is EPERM and would be testing
+    // the wrong thing.
+    int inner_unlock = -1;
+    int outer_unlock = -1;
+    const bool done = completes_within([&] {
+        if (bionic_pthread_mutex_lock(&guest) != 0) return false;
+        if (bionic_pthread_mutex_lock(&guest) != 0) return false;
+        inner_unlock = bionic_pthread_mutex_unlock(&guest);
+        outer_unlock = bionic_pthread_mutex_unlock(&guest);
+        return true;
+    }, 2000);
+    CHECK(done, "a recursive static mutex re-locks instead of deadlocking");
+    CHECK(inner_unlock == 0, "inner unlock succeeds");
+    CHECK(outer_unlock == 0, "outer unlock succeeds");
+    bionic_pthread_mutex_destroy(&guest);
+}
+
+static void test_static_normal_mutex_reports_deadlock() {
+    std::printf("[mutex] static normal initializer reports self-deadlock\n");
+    static GuestMutex guest = {0, {}};
+
+    // A NORMAL mutex re-locked by its owner is undefined behaviour in POSIX and a
+    // permanent hang in practice. Returning EDEADLK runs the guest's error path
+    // instead of losing the thread, and keeps the failure visible in the log.
+    int second = 0;
+    const bool done = completes_within([&second] {
+        if (bionic_pthread_mutex_lock(&guest) != 0) return false;
+        second = bionic_pthread_mutex_lock(&guest);
+        bionic_pthread_mutex_unlock(&guest);
+        return true;
+    }, 2000);
+    CHECK(done, "re-locking a normal mutex returns instead of blocking forever");
+    CHECK(second == EDEADLK, "the second lock reports EDEADLK");
+    bionic_pthread_mutex_destroy(&guest);
+}
+
+static void test_mutexattr_init_clears_stale_kind() {
+    std::printf("[mutex] mutexattr_init clears a stale kind\n");
+    // A guest declares pthread_mutexattr_t on the stack; init must not leave
+    // whatever was in that frame to be read as the mutex kind.
+    uint32_t attr = 0xFFFFFFFFu;
+    CHECK(bionic_pthread_mutexattr_init(&attr) == 0, "mutexattr_init succeeds");
+    int kind = -1;
+    CHECK(bionic_pthread_mutexattr_gettype(&attr, &kind) == 0, "gettype succeeds");
+    CHECK(kind == 0, "the kind is NORMAL, not garbage from the caller's stack");
+
+    static GuestMutex guest = {0, {}};
+    CHECK(bionic_pthread_mutex_init(&guest, &attr) == 0, "mutex_init with the cleared attr succeeds");
+    int second = 0;
+    const bool done = completes_within([&second] {
+        if (bionic_pthread_mutex_lock(&guest) != 0) return false;
+        second = bionic_pthread_mutex_lock(&guest);
+        bionic_pthread_mutex_unlock(&guest);
+        return true;
+    }, 2000);
+    CHECK(done && second == EDEADLK, "a mutex built from the cleared attr is not recursive");
+    bionic_pthread_mutex_destroy(&guest);
+    bionic_pthread_mutexattr_destroy(&attr);
+}
+
+static void test_mutexattr_settype_recursive_is_honoured() {
+    std::printf("[mutex] mutexattr_settype(RECURSIVE) reaches the host mutex\n");
+    uint32_t attr = 0;
+    bionic_pthread_mutexattr_init(&attr);
+    CHECK(bionic_pthread_mutexattr_settype(&attr, 1 /* RECURSIVE */) == 0,
+          "settype(RECURSIVE) succeeds");
+    int kind = -1;
+    bionic_pthread_mutexattr_gettype(&attr, &kind);
+    CHECK(kind == 1, "gettype reads back RECURSIVE");
+
+    static GuestMutex guest = {0, {}};
+    CHECK(bionic_pthread_mutex_init(&guest, &attr) == 0, "mutex_init(RECURSIVE) succeeds");
+    const bool done = completes_within([] {
+        if (bionic_pthread_mutex_lock(&guest) != 0) return false;
+        if (bionic_pthread_mutex_lock(&guest) != 0) return false;
+        bionic_pthread_mutex_unlock(&guest);
+        bionic_pthread_mutex_unlock(&guest);
+        return true;
+    }, 2000);
+    CHECK(done, "an explicitly recursive mutex re-locks");
+    bionic_pthread_mutex_destroy(&guest);
+    bionic_pthread_mutexattr_destroy(&attr);
+}
+
+static void test_mutex_reinit_replaces_mapping() {
+    std::printf("[mutex] re-init replaces the host mutex rather than leaking it\n");
+    static GuestMutex guest = {0, {}};
+
+    // First init: NORMAL. Lock and unlock so the mapping is definitely live.
+    uint32_t normal = 0;
+    bionic_pthread_mutexattr_init(&normal);
+    CHECK(bionic_pthread_mutex_init(&guest, &normal) == 0, "first init succeeds");
+    CHECK(bionic_pthread_mutex_lock(&guest) == 0, "lock after first init succeeds");
+    CHECK(bionic_pthread_mutex_unlock(&guest) == 0, "unlock after first init succeeds");
+
+    // Re-init the SAME guest address as RECURSIVE. The new kind must take effect;
+    // if the old mapping were kept, the re-lock below would deadlock.
+    uint32_t recursive = 0;
+    bionic_pthread_mutexattr_init(&recursive);
+    bionic_pthread_mutexattr_settype(&recursive, 1);
+    CHECK(bionic_pthread_mutex_init(&guest, &recursive) == 0, "re-init succeeds");
+    const bool done = completes_within([] {
+        if (bionic_pthread_mutex_lock(&guest) != 0) return false;
+        if (bionic_pthread_mutex_lock(&guest) != 0) return false;
+        bionic_pthread_mutex_unlock(&guest);
+        bionic_pthread_mutex_unlock(&guest);
+        return true;
+    }, 2000);
+    CHECK(done, "the re-initialised kind is the one in effect");
+    bionic_pthread_mutex_destroy(&guest);
+    bionic_pthread_mutexattr_destroy(&normal);
+    bionic_pthread_mutexattr_destroy(&recursive);
+}
+
+static void test_mutex_shared_between_threads() {
+    std::printf("[mutex] a guest mutex still excludes a second thread\n");
+    // The trylock fast path must not turn a real lock into a no-op: two threads
+    // incrementing under the same guest mutex must not lose an update.
+    static GuestMutex guest = {0, {}};
+    uint32_t attr = 0;
+    bionic_pthread_mutexattr_init(&attr);
+    bionic_pthread_mutex_init(&guest, &attr);
+
+    constexpr int kThreads = 4;
+    constexpr int kIterations = 2000;
+    long counter = 0;  // deliberately not atomic — the mutex is what protects it
+    std::atomic<bool> lock_error{false};
+
+    auto worker = [&] {
+        for (int i = 0; i < kIterations; ++i) {
+            if (bionic_pthread_mutex_lock(&guest) != 0) { lock_error = true; return; }
+            ++counter;
+            if (bionic_pthread_mutex_unlock(&guest) != 0) { lock_error = true; return; }
+        }
+    };
+
+    std::vector<std::thread> threads;
+    threads.reserve(kThreads);
+    for (int i = 0; i < kThreads; ++i) threads.emplace_back(worker);
+    for (auto& t : threads) t.join();
+
+    CHECK(!lock_error.load(), "every lock and unlock reported success");
+    CHECK(counter == static_cast<long>(kThreads) * kIterations,
+          "no increment was lost — the mutex provides real exclusion");
+    bionic_pthread_mutex_destroy(&guest);
+    bionic_pthread_mutexattr_destroy(&attr);
+}
+
+// ─── pthread_getattr_np stack bounds ────────────────────────────────────────
+
+// bionic's stack_base is the LOWEST address of the stack. Every guest that asks for
+// its own bounds computes the far end as stack_base + stack_size, so returning the
+// highest address instead describes a region entirely above the real stack — and the
+// guest then reads or writes there.
+//
+// This is host-independent by construction: the check is that the reported region
+// actually CONTAINS a local variable of the calling thread. On Darwin the shim has to
+// subtract the size from pthread_get_stackaddr_np to satisfy it, on Linux
+// pthread_attr_getstack already answers with the low address. Both are the same
+// assertion, which is the point — the two platforms had drifted apart on exactly this.
+static void test_getattr_np_stack_base_is_the_low_address() {
+    std::printf("[pthread] getattr_np reports stack_base as the LOW address\n");
+
+    GuestPthreadAttr attr;
+    std::memset(&attr, 0xAA, sizeof(attr));  // detect fields never written
+    CHECK(bionic_pthread_getattr_np(pthread_self(), &attr) == 0,
+          "getattr_np succeeds for the calling thread");
+    CHECK(attr.stack_size > 0, "a non-zero stack size is reported");
+    CHECK(attr.stack_base != nullptr, "a non-null stack base is reported");
+
+    char* const low = static_cast<char*>(attr.stack_base);
+    char* const high = low + attr.stack_size;
+
+    int local = 0;
+    char* const probe = reinterpret_cast<char*>(&local);
+    CHECK(probe >= low && probe < high,
+          "the reported [base, base+size) contains a local of this very thread");
+
+    // The specific inversion this guards against: stack_base == the high address, which
+    // puts every byte of the reported region above the stack rather than inside it.
+    CHECK(probe >= low,
+          "stack_base is not ABOVE the caller's frame (the Darwin stackaddr inversion)");
+
+    // getattr_np must also agree with what attr_getstack hands back, since that is the
+    // call a guest actually makes to read the fields.
+    void* out_base = nullptr;
+    size_t out_size = 0;
+    CHECK(bionic_pthread_attr_getstack(&attr, &out_base, &out_size) == 0,
+          "attr_getstack succeeds on the filled attr");
+    CHECK(out_base == attr.stack_base && out_size == attr.stack_size,
+          "attr_getstack returns the same bounds getattr_np recorded");
+}
+
+// A fresh thread, because the main thread's stack is the process stack and is reported
+// through a different path on some platforms — a conversion that is right only there is
+// not right.
+static void test_getattr_np_stack_base_on_a_fresh_thread() {
+    std::printf("[pthread] getattr_np bounds are correct on a spawned thread too\n");
+    std::atomic<bool> contains{false};
+    std::atomic<bool> called_ok{false};
+    std::atomic<size_t> size_seen{0};
+
+    std::thread worker([&] {
+        GuestPthreadAttr attr;
+        std::memset(&attr, 0, sizeof(attr));
+        if (bionic_pthread_getattr_np(pthread_self(), &attr) != 0) return;
+        called_ok = true;
+        size_seen = attr.stack_size;
+        char* const low = static_cast<char*>(attr.stack_base);
+        int local = 0;
+        char* const probe = reinterpret_cast<char*>(&local);
+        contains = (attr.stack_base != nullptr && attr.stack_size > 0 &&
+                    probe >= low && probe < low + attr.stack_size);
+    });
+    worker.join();
+
+    CHECK(called_ok.load(), "getattr_np succeeds on the spawned thread");
+    CHECK(size_seen.load() > 0, "a non-zero stack size is reported there");
+    CHECK(contains.load(),
+          "the spawned thread's own frame lies inside its reported bounds");
+}
+
+// ─── the outbound signal symbols are actually IN the table ───────────────────
+//
+// The bug was not a wrong implementation, it was an absent one. raise, kill and
+// pthread_kill had no entry in kSyscallSymbols, so resolve_bionic_symbol fell through to
+// dlsym(RTLD_DEFAULT) and the guest's Linux signal number went to the host libc
+// untranslated — while sigaction, which IS in the table, translated it on the way in.
+//
+// A test that only exercises bionic_raise() would pass with the entry missing, because it
+// calls the function directly. What has to be checked is the binding: what does a guest
+// relocating against "raise" actually get?
+static void test_outbound_signal_symbols_resolve_to_the_shim() {
+    std::printf("[signal] the outbound senders resolve to KuDroid, not the host libc\n");
+
+    struct Probe { const char* name; void* shim; };
+    const Probe probes[] = {
+        {"raise",           reinterpret_cast<void*>(&bionic_raise)},
+        {"kill",            reinterpret_cast<void*>(&bionic_kill)},
+        {"pthread_kill",    reinterpret_cast<void*>(&bionic_pthread_kill)},
+        {"tgkill",          reinterpret_cast<void*>(&bionic_tgkill)},
+        {"sigprocmask",     reinterpret_cast<void*>(&bionic_sigprocmask)},
+        {"pthread_sigmask", reinterpret_cast<void*>(&bionic_pthread_sigmask)},
+        {"signal",          reinterpret_cast<void*>(&bionic_signal)},
+        {"sigaddset",       reinterpret_cast<void*>(&bionic_sigaddset)},
+        {"sigismember",     reinterpret_cast<void*>(&bionic_sigismember)},
+    };
+
+    for (const Probe& p : probes) {
+        void* const bound = resolve_bionic_symbol(p.name);
+        const bool is_shim = (bound == p.shim);
+        // CHECK takes a const char* (it goes to printf), so the message is built into a
+        // buffer rather than passed as a std::string.
+        char msg[160];
+        std::snprintf(msg, sizeof(msg),
+                      "a guest binding to %s reaches KuDroid's translating version",
+                      p.name);
+        CHECK(is_shim, msg);
+    }
+
+    // And the inbound side, for contrast: it was already correct, and if it ever stops
+    // being in the table the asymmetry comes back from the other direction.
+    CHECK(resolve_bionic_symbol("sigaction") == reinterpret_cast<void*>(&bionic_sigaction),
+          "sigaction is still bound to the shim too — both directions or neither");
+}
+
+// The guest's sigset_t operations work on the GUEST's bit numbering.
+//
+// bionic's sigset_t on LP64 is a bare 64-bit word where bit (n-1) is Linux signal n. The
+// host's macros number their bits by HOST signal, so binding these to the host mixes two
+// numbering schemes inside one word — and sigprocmask would then translate a mask that
+// was already in host terms.
+static void test_guest_sigset_operations_use_linux_bit_positions() {
+    std::printf("[signal] sigaddset/sigismember use the guest's bit positions\n");
+
+    uint64_t set = 0;
+    CHECK(bionic_sigemptyset(&set) == 0 && set == 0, "sigemptyset zeroes the word");
+
+    // Linux SIGPWR is 30, so its bit is 29. That is the signal Mono uses for SIG_SUSPEND.
+    CHECK(bionic_sigaddset(&set, 30) == 0, "sigaddset(30) succeeds");
+    CHECK(set == (1ull << 29), "bit 29 is set — position (n-1), the guest's convention");
+    CHECK(bionic_sigismember(&set, 30) == 1, "sigismember(30) reports it present");
+    CHECK(bionic_sigismember(&set, 29) == 0, "and the neighbouring signal is not");
+
+    CHECK(bionic_sigdelset(&set, 30) == 0 && set == 0, "sigdelset removes it again");
+
+    CHECK(bionic_sigfillset(&set) == 0 && set == ~0ull, "sigfillset sets every bit");
+
+    // Out of range must be refused rather than shifting by an absurd amount.
+    errno = 0;
+    CHECK(bionic_sigaddset(&set, 0) == -1 && errno == EINVAL, "signal 0 is not a set member");
+    errno = 0;
+    CHECK(bionic_sigaddset(&set, 65) == -1 && errno == EINVAL, "signal 65 is out of range");
+    errno = 0;
+    CHECK(bionic_sigaddset(nullptr, 10) == -1 && errno == EINVAL, "a null set is rejected");
+}
+
+// ─── bionic_mmap: file-backed offset alignment ──────────────────────────────
+//
+// Guest code aligns mmap offsets to the 4 KiB Linux page. On a 16 KiB-page host
+// (arm64 Darwin) an offset that is only a 4 KiB multiple is not a host multiple,
+// and a raw mmap answers EINVAL — which downstream reads as "no bytes", the silent
+// end of a content stream. The shim aligns the offset down and shifts the returned
+// pointer, so the guest still reads the bytes it asked for. On a 4 KiB host no
+// repair is ever needed; the Android behaviour must be left alone.
+extern "C" void* bionic_mmap(void* addr, size_t length, int prot, int flags, int fd,
+                             off_t offset);
+
+void test_mmap_file_backed_subpage_offset() {
+    std::printf("[mmap] file-backed mapping at a non-host-page-multiple offset\n");
+    const long page = ::sysconf(_SC_PAGESIZE);
+
+    // A 1 MiB file of recognizable bytes, so a wrong offset reads as wrong data.
+    const std::string path = "/tmp/kudroid_mmap_test_" + std::to_string(::getpid()) + ".bin";
+    std::vector<char> data(1024 * 1024);
+    for (size_t i = 0; i < data.size(); ++i) {
+        data[i] = static_cast<char>(i & 0xFF);
+    }
+    {
+        std::FILE* f = std::fopen(path.c_str(), "wb");
+        CHECK(f != nullptr, "temp file opens");
+        if (f != nullptr) {
+            std::fwrite(data.data(), 1, data.size(), f);
+            std::fclose(f);
+        }
+    }
+    const int fd = ::open(path.c_str(), O_RDONLY);
+    CHECK(fd >= 0, "temp file opens for reading");
+    if (fd < 0) {
+        std::remove(path.c_str());
+        return;
+    }
+
+    // First bytes of the file at offset 4096 are 0x00 0x10 — byte[i] of the file is
+    // (offset + i) & 0xFF, so byte[1] of a 1 MiB file at 4096 is (4097 & 0xFF) = 1.
+    if (page == 4096) {
+        void* p = bionic_mmap(nullptr, 4096, PROT_READ, MAP_PRIVATE, fd, 4096);
+        CHECK(p != MAP_FAILED, "4 KiB host: page-multiple offset maps as on Android");
+        if (p != MAP_FAILED) {
+            const unsigned char* bytes = static_cast<const unsigned char*>(p);
+            CHECK(bytes[0] == 0x00 && bytes[1] == 0x01,
+                  "and the first bytes are the file's bytes at that offset");
+            ::munmap(p, 4096);
+        }
+        ::close(fd);
+        std::remove(path.c_str());
+        return;
+    }
+
+    // 16 KiB host: offset 4096 is a host multiple too, so step to one that is a
+    // Linux multiple but not one here: page + 4096.
+    const off_t off = static_cast<off_t>(page) + 4096;
+    void* p = bionic_mmap(nullptr, 4096, PROT_READ, MAP_PRIVATE, fd, off);
+    CHECK(p != MAP_FAILED,
+          "a 4 KiB-aligned guest offset maps instead of EINVAL — a raw call fails on "
+          "16 KiB hosts, which is where the content stream went silent");
+    if (p != MAP_FAILED) {
+        const unsigned char* bytes = static_cast<const unsigned char*>(p);
+        CHECK(bytes[0] == (static_cast<unsigned>(off) & 0xFF) &&
+                  bytes[1] == (static_cast<unsigned>(off + 1) & 0xFF),
+              "and the pointer is shifted so the guest reads the bytes it asked for");
+        long sum = 0;
+        for (size_t i = 0; i < 4096; ++i) {
+            sum += bytes[i];
+        }
+        CHECK(sum >= 0, "the whole requested range is readable");
+        ::munmap(p, 4096);
+    }
+
+    // The Android rule that must not regress: a host-page-multiple offset is served
+    // unshifted, byte for byte.
+    void* q = bionic_mmap(nullptr, 4096, PROT_READ, MAP_PRIVATE, fd, page);
+    CHECK(q != MAP_FAILED, "a host-page-multiple offset still maps plainly");
+    if (q != MAP_FAILED) {
+        const unsigned char* bytes = static_cast<const unsigned char*>(q);
+        CHECK(bytes[0] == (static_cast<unsigned>(page) & 0xFF) &&
+                  bytes[1] == (static_cast<unsigned>(page + 1) & 0xFF),
+              "with no shift: the byte at offset == page reads first");
+        ::munmap(q, 4096);
+    }
+
+    ::close(fd);
+    std::remove(path.c_str());
+}
+
+void test_bionic_getifaddrs() {
+    GuestIfaddrs* addrs = nullptr;
+    int rc = bionic_getifaddrs(&addrs);
+    CHECK(rc == 0, "bionic_getifaddrs succeeds");
+    int count = 0;
+    for (GuestIfaddrs* it = addrs; it != nullptr; it = it->g_next) {
+        ++count;
+        if (it->g_addr) {
+            unsigned short fam = static_cast<unsigned short>(it->g_addr[0]) |
+                                 (static_cast<unsigned short>(it->g_addr[1]) << 8);
+            CHECK(fam == 2 || fam == 10, "ifaddr family is strictly AF_INET or AF_INET6");
+        }
+    }
+    bionic_freeifaddrs(addrs);
+}
+
+void test_socket_symbols() {
+    CHECK(resolve_bionic_symbol("socket") != nullptr, "socket resolves to shim");
+    CHECK(resolve_bionic_symbol("bind") != nullptr, "bind resolves to shim");
+    CHECK(resolve_bionic_symbol("connect") != nullptr, "connect resolves to shim");
+    CHECK(resolve_bionic_symbol("getsockname") != nullptr, "getsockname resolves to shim");
+    CHECK(resolve_bionic_symbol("getpeername") != nullptr, "getpeername resolves to shim");
+    CHECK(resolve_bionic_symbol("getifaddrs") != nullptr, "getifaddrs resolves to shim");
+    CHECK(resolve_bionic_symbol("freeifaddrs") != nullptr, "freeifaddrs resolves to shim");
+}
+
+// ─── main ────────────────────────────────────────────────────────────────────────
+
+// ─── FORTIFY wrappers stop at the declared destination size ─────────────────
+//
+// Each of these is handed the destination's object size as measured by the guest's
+// compiler. They used to log the overflow and then perform it anyway, which writes past
+// that object and corrupts the guest heap — the crash then surfaces somewhere unrelated.
+// (size_t)-1 is what the compiler passes when it cannot size the destination at all (a
+// trailing flexible-array member, an unknown pointer), and must stay a pass-through so a
+// legitimate copy is not truncated.
+static void test_fortify_wrappers_clamp_to_the_declared_bound() {
+    struct Buf {
+        char dst[8];
+        char canary[8];
+    };
+    const char* kLong = "0123456789abcdef";
+    const size_t kUnknown = static_cast<size_t>(-1);
+
+    {
+        Buf b;
+        std::memset(&b, 0x7F, sizeof(b));
+        bionic___strcpy_chk(b.dst, kLong, sizeof(b.dst));
+        CHECK(std::strlen(b.dst) == sizeof(b.dst) - 1, "strcpy_chk stops one short of the bound");
+        CHECK(std::memcmp(b.dst, kLong, sizeof(b.dst) - 1) == 0, "and keeps the leading bytes");
+        CHECK(b.canary[0] == 0x7F, "and writes nothing past the destination");
+    }
+    {
+        Buf b;
+        std::memset(&b, 0x7F, sizeof(b));
+        std::strcpy(b.dst, "ab");
+        bionic___strcat_chk(b.dst, kLong, sizeof(b.dst));
+        CHECK(std::strncmp(b.dst, "ab01234", sizeof(b.dst) - 1) == 0, "strcat_chk appends what fits");
+        CHECK(b.canary[0] == 0x7F, "strcat_chk writes nothing past the destination");
+    }
+    {
+        Buf b;
+        std::memset(&b, 0x7F, sizeof(b));
+        bionic___strncpy_chk(b.dst, kLong, sizeof(kLong) + 1, sizeof(b.dst));
+        CHECK(b.canary[0] == 0x7F, "strncpy_chk writes nothing past the destination");
+    }
+    {
+        Buf b;
+        std::memset(&b, 0x7F, sizeof(b));
+        bionic___memcpy_chk(b.dst, kLong, 16, sizeof(b.dst));
+        CHECK(std::memcmp(b.dst, kLong, sizeof(b.dst)) == 0, "memcpy_chk copies up to the bound");
+        CHECK(b.canary[0] == 0x7F, "memcpy_chk leaves the byte after the destination alone");
+    }
+    {
+        Buf b;
+        std::memset(&b, 0x7F, sizeof(b));
+        bionic___memmove_chk(b.dst, kLong, 16, sizeof(b.dst));
+        CHECK(std::memcmp(b.dst, kLong, sizeof(b.dst)) == 0, "memmove_chk copies up to the bound");
+        CHECK(b.canary[0] == 0x7F, "memmove_chk leaves the byte after the destination alone");
+    }
+    {
+        Buf b;
+        std::memset(&b, 0x7F, sizeof(b));
+        bionic___memset_chk(b.dst, 0x11, 16, sizeof(b.dst));
+        CHECK(b.dst[7] == 0x11, "memset_chk fills up to the bound");
+        CHECK(b.canary[0] == 0x7F, "memset_chk writes nothing past the destination");
+    }
+    {
+        // Unknown bound: the copy the guest asked for must arrive intact.
+        char big[64];
+        bionic___strcpy_chk(big, kLong, kUnknown);
+        CHECK(std::strcmp(big, kLong) == 0, "strcpy_chk passes an unknown bound through");
+        char fmt[64];
+        const int n = bionic___sprintf_chk(fmt, 0, kUnknown, "%s=%d", "k", 42);
+        CHECK(n == 4 && std::strcmp(fmt, "k=42") == 0,
+              "sprintf_chk with an unknown bound still formats");
+    }
+}
+
+// bionic's timeval carries 64-bit fields. The host's microseconds field is 32 bits, so
+// a host gettimeofday left the upper half of the guest's tv_usec as stack garbage; a
+// caller reading it as 64 bits saw time shifted by multiples of 4295 seconds.
+extern "C" int bionic_gettimeofday(void* tv, void* tz);
+extern "C" int bionic_clock_getres(int clock_id, struct timespec* res);
+static void test_gettimeofday_fills_both_64_bit_fields() {
+    std::printf("[time] gettimeofday writes full 64-bit seconds and microseconds\n");
+    int64_t buf[2] = {0x7777777777777777ll, 0x7777777777777777ll};  // poisoned
+    CHECK(bionic_gettimeofday(buf, nullptr) == 0, "the call succeeds");
+    CHECK(buf[1] >= 0 && buf[1] < 1000000, "tv_usec is a real microsecond count, no stale upper half");
+    CHECK(buf[0] > 1600000000ll && buf[0] < 4000000000ll, "tv_sec is a plausible epoch time");
+    int32_t zone[2] = {0x5555, 0x5555};
+    CHECK(bionic_gettimeofday(buf, zone) == 0 && zone[0] == 0 && zone[1] == 0,
+          "the obsolete timezone argument is filled, not left uninitialised");
+    CHECK(bionic_gettimeofday(nullptr, nullptr) == 0, "a null timeval is accepted");
+
+    struct timespec res{};
+    CHECK(bionic_clock_getres(1 /* CLOCK_MONOTONIC */, &res) == 0,
+          "clock_getres succeeds for the guest's CLOCK_MONOTONIC id");
+    CHECK(res.tv_sec == 0 && res.tv_nsec > 0, "and reports a non-zero resolution");
+}
+
+// Linux MADV_DONTNEED hands back zero pages; allocators decommit with it and recommit
+// expecting zeros. Darwin's version keeps the data, so the shim has to supply the zeroes.
+static void test_madvise_dontneed_zero_fills() {
+    std::printf("[madvise] DONTNEED discards private anonymous pages\n");
+    constexpr size_t kLen = 4u << 20;
+    void* region = bionic_mmap(nullptr, kLen, 0x3 /* RW */, 0x22 /* PRIVATE|ANON */, -1, 0);
+    CHECK(region != MAP_FAILED, "anonymous region maps");
+    if (region == MAP_FAILED) return;
+    unsigned char* bytes = static_cast<unsigned char*>(region);
+    std::memset(bytes, 0xAB, kLen);
+
+    // Interior of the range, whole host pages at both ends.
+    const size_t host_page = static_cast<size_t>(::sysconf(_SC_PAGESIZE));
+    const size_t kOffset = 2 * host_page;
+    const size_t kSpan = kLen - 4 * host_page;
+    CHECK(bionic_madvise(bytes + kOffset, kSpan, 4 /* Linux MADV_DONTNEED */) == 0,
+          "madvise(DONTNEED) succeeds");
+    bool zeroed = true;
+    for (size_t i = kOffset; i < kOffset + kSpan; ++i) {
+        if (bytes[i] != 0) { zeroed = false; break; }
+    }
+    CHECK(zeroed, "the discarded range reads back as zeros");
+    CHECK(bytes[0] == 0xAB && bytes[kOffset - 1] == 0xAB,
+          "bytes before the range are untouched");
+    CHECK(bytes[kOffset + kSpan] == 0xAB && bytes[kLen - 1] == 0xAB,
+          "bytes after the range are untouched");
+
+    // Decommit then recommit, the way a virtual allocator does.
+    std::memset(bytes, 0xCD, kLen);
+    CHECK(bionic_mprotect(bytes, kLen, 0) == 0, "range decommitted");
+    CHECK(bionic_madvise(bytes, kLen, 4) == 0, "DONTNEED on the PROT_NONE range succeeds");
+    CHECK(bionic_mprotect(bytes, kLen, 0x3) == 0, "range recommitted");
+    bool clean = true;
+    for (size_t i = 0; i < kLen; i += 4096) {
+        if (bytes[i] != 0) { clean = false; break; }
+    }
+    CHECK(clean, "recommitted pages carry no stale data");
+    bionic_munmap(region, kLen);
+}
+
+int main() {
+    std::printf("=== SyscallShim host tests ===\n");
+    test_bionic_getifaddrs();
+    test_socket_symbols();
+    test_pthread_once_nested();
+    test_pthread_once_concurrent();
+    test_futex_wait_wake();
+    test_futex_eagain();
+    test_futex_etimedout();
+    test_futex_wait_timeout_is_relative();
+    test_futex_wait_relative_zero_does_not_hang();
+    test_futex_wait_rejects_malformed_relative_timeout();
+    test_futex_wait_bitset_timeout_is_absolute();
+    test_futex_wait_bitset_absolute_wake_still_works();
+    test_futex_cmp_requeue_precond();
+    test_futex_wait_wake_cycles();
+    test_syscall_mappings();
+    test_process_vm_readv_rejects_inaccessible_memory();
+    test_sched_getaffinity_raw_returns_byte_count();
+    test_sched_getaffinity_wrapper_returns_zero();
+    test_sem_counting_semantics();
+    test_sem_blocks_until_posted();
+    test_sem_post_releases_one_waiter();
+    test_sem_uninitialised_yields_instead_of_parking();
+    test_sem_timedwait_deadline();
+    test_sem_destroy_releases_waiters();
+    test_sem_rejects_null();
+    test_mremap_shrink_in_place();
+    test_mremap_grow_with_maymove();
+    test_mprotect_unaligned();
+    test_sigaction_flag_roundtrip();
+    test_guard_acquire_release();
+    test_guard_same_tid_recursion_tolerated();
+    test_guard_cross_thread_wait();
+    test_guard_recursion_loop_cut();
+    test_alooper_never_null();
+    test_alooper_wake_releases_poll();
+    test_guest_library_handles();
+    test_dl_iterate_phdr_reports_guest_modules();
+    test_dl_iterate_phdr_skips_modules_without_headers();
+    test_static_recursive_mutex_relocks();
+    test_static_normal_mutex_reports_deadlock();
+    test_mutexattr_init_clears_stale_kind();
+    test_mutexattr_settype_recursive_is_honoured();
+    test_mutex_reinit_replaces_mapping();
+    test_mutex_shared_between_threads();
+    test_getattr_np_stack_base_is_the_low_address();
+    test_getattr_np_stack_base_on_a_fresh_thread();
+    test_outbound_signal_symbols_resolve_to_the_shim();
+    test_guest_sigset_operations_use_linux_bit_positions();
+    test_mmap_file_backed_subpage_offset();
+    test_fortify_wrappers_clamp_to_the_declared_bound();
+    test_madvise_dontneed_zero_fills();
+    test_gettimeofday_fills_both_64_bit_fields();
+    std::printf("=== %d checks, %d failures ===\n", g_checks, g_failures);
+    return g_failures == 0 ? 0 : 1;
+}
