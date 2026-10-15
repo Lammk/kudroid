@@ -266,6 +266,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
         XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY ""
         XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED "NO"
         XCODE_ATTRIBUTE_DEVELOPMENT_TEAM ""
+        # Without it the Xcode generator compiles in the oldest Swift mode, where
+        # AVAudioSession/UIApplication APIs have their pre-Swift-4 names.
+        XCODE_ATTRIBUTE_SWIFT_VERSION "5.0"
         XCODE_ATTRIBUTE_SWIFT_OBJC_BRIDGING_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/ios-app/KuDroidShell/kudroid_bridge.h"
         XCODE_ATTRIBUTE_LD_RUNPATH_SEARCH_PATHS "@executable_path/Frameworks"
         XCODE_ATTRIBUTE_FRAMEWORK_SEARCH_PATHS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ANGLE/lib/ios-arm64 ${CMAKE_CURRENT_SOURCE_DIR}/third_party/MoltenVK/MoltenVK/dynamic/MoltenVK.xcframework/ios-arm64"
@@ -636,7 +639,10 @@ else()
 
     # java.net HTTP/TLS scenarios: Java test classes dexed against the framework, driven by a
     # native harness that provides the servers.
-    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/test_kuart_netjava.cpp")
+    # They compile against the framework classes and need the pinned d8, so a build that
+    # cannot rebuild the framework (no third_party/d8) skips them instead of failing.
+    if(Java_FOUND AND KUDROID_D8_JAR AND
+       EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/test_kuart_netjava.cpp")
         set(KUART_JAVA_TEST_SOURCES
             ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/TestSupport.java
             ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/HttpTests.java
