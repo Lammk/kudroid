@@ -14,7 +14,7 @@ public class AudioManager {
     public static final int MODE_IN_COMMUNICATION = 3;
 
     public AudioManager() {}
-    public int getStreamVolume(int streamType) { return 10; }
+    public int getStreamVolume(int streamType) { return 15; }
     public int getStreamMaxVolume(int streamType) { return 15; }
     public int getStreamMinVolume(int streamType) { return 0; }
     public boolean isMusicActive() { return false; }

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(KuDroid LANGUAGES CXX ASM)
+project(KuDroid LANGUAGES C CXX ASM)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -24,6 +24,20 @@ execute_process(
 if(NOT KUDROID_GIT_HASH)
     set(KUDROID_GIT_HASH "UNKNOWN")
 endif()
+execute_process(
+    COMMAND git -C ${CMAKE_CURRENT_SOURCE_DIR} diff --quiet HEAD
+    RESULT_VARIABLE KUDROID_GIT_DIRTY
+    ERROR_QUIET
+)
+if(KUDROID_GIT_DIRTY EQUAL 1)
+    set(KUDROID_GIT_HASH "${KUDROID_GIT_HASH}+dirty")
+endif()
+
+# Time of this configure (every build runs one). The compiler's __TIME__ only moves when
+# the file holding the stamp is recompiled, so it cannot tell a fresh build from a stale one.
+string(TIMESTAMP KUDROID_BUILD_TIME "%Y-%m-%dT%H:%M:%S")
+set_source_files_properties(src/bridge/BridgeState.cpp PROPERTIES
+    COMPILE_DEFINITIONS "KUDROID_BUILD_TIME=\"${KUDROID_BUILD_TIME}\"")
 
 # The framework DEX header (382k lines) is generated, not tracked: fresh
 # clones embed the pinned framework/build/framework.dex on first configure.
@@ -98,6 +112,7 @@ endif()
 
 # truncated AOSP ART libdexfile (third_party/art_dex) — KuART base.
 add_subdirectory(third_party/art_dex)
+include(cmake/MediaCodecs.cmake)
 
 add_library(kudroid_core STATIC
     src/APKExtractor.cpp
@@ -119,6 +134,10 @@ add_library(kudroid_core STATIC
     src/platform/CameraShim.cpp
     src/platform/NetworkState.cpp
     src/platform/MediaShim.cpp
+    src/platform/SurfaceTextureHost.cpp
+    src/platform/MediaPlayerHost.cpp
+    src/platform/MediaContainer.cpp
+    src/platform/MediaDecoder.cpp
     src/platform/GraphicsShim.cpp
     # AChoreographer + ANativeWindow_setFrameRate. Kept out of GraphicsShim.cpp
     # because it owns a thread and a set of pipes, and nothing else in there does.
@@ -180,7 +199,7 @@ add_library(kudroid_core STATIC
 find_package(ZLIB REQUIRED)
 add_dependencies(kudroid_core kudroid_framework_dex)
 target_link_libraries(kudroid_core PRIVATE ZLIB::ZLIB)
-target_link_libraries(kudroid_core PUBLIC art_dex)
+target_link_libraries(kudroid_core PUBLIC art_dex kudroid_vpx kudroid_vorbis)
 
 # TLS for java.net: SecureTransport on Apple, OpenSSL on a Linux host (where it is exercised by
 # the tests); a host with neither builds a stub that reports TLS as unavailable.
@@ -252,10 +271,15 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
         ios-app/KuDroidShell/RemoteDebugClient.swift
         ios-app/KuDroidShell/IOSDiagnostics.swift
         ios-app/KuDroidShell/CameraBridge.swift
+        ios-app/KuDroidShell/MediaPlayerBridge.swift
+        ios-app/KuDroidShell/SensorBridge.swift
         ios-app/KuDroidShell/NetworkBridge.swift
         ios-app/KuDroidShell/kudroid_bridge.h
+        ios-app/KuDroidShell/THIRD_PARTY_NOTICES.txt
     )
 
+    set_source_files_properties(ios-app/KuDroidShell/THIRD_PARTY_NOTICES.txt
+        PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
     set_target_properties(KuDroidShell PROPERTIES
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/ios-app/Info.plist.in"
         MACOSX_BUNDLE_BUNDLE_NAME "KuDroid"
@@ -310,6 +334,26 @@ else()
         )
         target_link_libraries(test_shims PRIVATE kudroid_core)
         target_include_directories(test_shims PRIVATE include)
+    endif()
+
+    # NDK media extraction and decoding.
+    add_executable(test_surface_texture tests/test_surface_texture.cpp
+        src/platform/SurfaceTextureHost.cpp src/platform/MediaShim.cpp
+        src/platform/MediaContainer.cpp src/platform/MediaDecoder.cpp)
+    target_include_directories(test_surface_texture PRIVATE include)
+    target_link_libraries(test_surface_texture PRIVATE kudroid_vpx kudroid_vorbis)
+    if(UNIX AND NOT APPLE)
+        add_executable(test_surface_texture_egl tests/test_surface_texture_egl.cpp
+            src/platform/SurfaceTextureHost.cpp)
+        target_include_directories(test_surface_texture_egl PRIVATE include third_party/ANGLE/include)
+        target_link_libraries(test_surface_texture_egl PRIVATE ${CMAKE_DL_LIBS})
+    endif()
+
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_media.cpp")
+        find_package(Threads REQUIRED)
+        add_executable(test_media tests/test_media.cpp)
+        target_link_libraries(test_media PRIVATE kudroid_core Threads::Threads)
+        target_include_directories(test_media PRIVATE include)
     endif()
 
     if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_net_shims.cpp")
@@ -393,6 +437,10 @@ else()
         target_link_libraries(test_frame_pacer PRIVATE kudroid_core)
         target_include_directories(test_frame_pacer PRIVATE include)
     endif()
+
+    add_executable(test_native_looper tests/test_native_looper.cpp)
+    target_link_libraries(test_native_looper PRIVATE kudroid_core)
+    target_include_directories(test_native_looper PRIVATE include)
 
     # Multi-finger input. The pointer table used to be a fixed array, so a batch wider
     # than it was clamped and the guest read another finger's position at the indices past
@@ -646,7 +694,9 @@ else()
         set(KUART_JAVA_TEST_SOURCES
             ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/TestSupport.java
             ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/HttpTests.java
-            ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/TlsTests.java)
+            ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/TlsTests.java
+            ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/LooperTests.java
+            ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/MediaApiTests.java)
         set(KUART_JAVA_TEST_DEX "${CMAKE_BINARY_DIR}/kuart_java_tests.dex")
         add_custom_command(OUTPUT "${KUART_JAVA_TEST_DEX}"
             COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/build-java-test.sh "${KUART_JAVA_TEST_DEX}" ${KUART_JAVA_TEST_SOURCES}
@@ -658,6 +708,12 @@ else()
         target_include_directories(test_kuart_netjava PRIVATE include kuart-tests)
         target_compile_definitions(test_kuart_netjava PRIVATE KUART_JAVA_TEST_DEX="${KUART_JAVA_TEST_DEX}")
         add_dependencies(test_kuart_netjava kuart_java_tests_dex)
+
+        add_executable(test_kuart_looper kuart-tests/test_kuart_looper.cpp)
+        target_link_libraries(test_kuart_looper PRIVATE kudroid_core art_dex)
+        target_include_directories(test_kuart_looper PRIVATE include kuart-tests)
+        target_compile_definitions(test_kuart_looper PRIVATE KUART_JAVA_TEST_DEX="${KUART_JAVA_TEST_DEX}")
+        add_dependencies(test_kuart_looper kuart_java_tests_dex)
     endif()
 
     foreach(kuart_test IN ITEMS test_kuart_runtime test_kuart_choreographer)

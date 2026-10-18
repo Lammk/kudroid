@@ -27,10 +27,15 @@ trap 'rm -rf "$OUT"' EXIT
     -c -o "$OUT/GuestVarargs.o" \
     "$ROOT_DIR/src/abi/GuestVarargs.cpp"
 
-"$CC" -O2 -ffreestanding -nostdlib -fno-stack-protector -static \
+"$CXX" -O2 -std=c++17 -ffreestanding -fno-exceptions -fno-rtti -fno-stack-protector \
+    -I "$ROOT_DIR/include" \
+    -c -o "$OUT/printf_packing.o" \
+    "$ROOT_DIR/kuart-tests/arm64_printf_packing_test.cpp"
+
+"$CC" -O2 -ffreestanding -nostdlib -fno-stack-protector -static -Wl,-e,main \
     -o "$OUT/arm64_vararg_test" \
     "$ROOT_DIR/kuart-tests/arm64_vararg_test.c" \
     "$ROOT_DIR/src/bionic_log_trampoline.S" \
-    "$OUT/GuestVarargs.o"
+    "$OUT/GuestVarargs.o" "$OUT/printf_packing.o"
 
 "$QEMU" "$OUT/arm64_vararg_test"

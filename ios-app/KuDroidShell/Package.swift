@@ -30,8 +30,11 @@ let package = Package(
                 "RemoteDebugClient.swift",
                 "IOSDiagnostics.swift",
                 "CameraBridge.swift",
+                "MediaPlayerBridge.swift",
+                "SensorBridge.swift",
                 "NetworkBridge.swift",
             ],
+            resources: [.copy("THIRD_PARTY_NOTICES.txt")],
             swiftSettings: [
                 .unsafeFlags([
                     "-swift-version", "5",
@@ -42,6 +45,7 @@ let package = Package(
             linkerSettings: [
                 .linkedLibrary("kudroid_core_combined"),
                 .linkedLibrary("z"),
+                .linkedLibrary("resolv"),
                 .linkedLibrary("c++"),
                 .linkedFramework("Metal"),
                 .linkedFramework("QuartzCore"),

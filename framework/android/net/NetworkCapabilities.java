@@ -24,6 +24,24 @@ public final class NetworkCapabilities implements Parcelable {
     private long mTransports;
 
     public NetworkCapabilities() {}
+    public NetworkCapabilities(NetworkCapabilities other) {
+        if (other == null) throw new NullPointerException("capabilities");
+        mCapabilities = other.mCapabilities;
+        mTransports = other.mTransports;
+    }
+    private static long bit(int value) {
+        if (value < 0 || value >= 64) throw new IllegalArgumentException("Invalid network capability or transport");
+        return 1L << value;
+    }
+    public NetworkCapabilities addCapability(int capability) { mCapabilities |= bit(capability); return this; }
+    public NetworkCapabilities removeCapability(int capability) { mCapabilities &= ~bit(capability); return this; }
+    public NetworkCapabilities addTransportType(int transport) { mTransports |= bit(transport); return this; }
+    public NetworkCapabilities removeTransportType(int transport) { mTransports &= ~bit(transport); return this; }
+    public NetworkCapabilities clearAll() { mCapabilities = 0; mTransports = 0; return this; }
+    boolean satisfiedBy(NetworkCapabilities available) {
+        return available != null && (mCapabilities & available.mCapabilities) == mCapabilities &&
+                (mTransports == 0 || (mTransports & available.mTransports) != 0);
+    }
 
     /** The capabilities of the host's default network. */
     static NetworkCapabilities forPath(int transportType, boolean metered) {

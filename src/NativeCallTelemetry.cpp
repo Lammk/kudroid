@@ -22,6 +22,7 @@ extern "C" void kudroid_persistent_breadcrumb(const char* line);
 // SyscallShim: monotonic-ns of the last tracked I/O byte (read/pread/write).
 extern "C" uint64_t io_last_activity_ns();
 extern "C" uint64_t kudroid_last_frame_presented_ns();
+extern "C" uint64_t kudroid_run_started_ns();
 
 namespace kudroid {
 namespace {
@@ -329,6 +330,15 @@ void watchdog_main() {
     int frame_silence_seq = 0;
     uint64_t frame_silence_last_ns = 0;
 
+    // Startup-silence trigger. The frame-silence trigger needs a first swap to
+    // compare against, so a launch where the engine wedges during init — after the
+    // surface callbacks, before the first present — produced no sample and no trace
+    // of where it stood. A healthy boot presents its first frame about a second
+    // after the run starts, so silence from the run start without any present means
+    // the boot itself is stuck. Samples only; a false positive costs one dump.
+    constexpr uint64_t kStartupSilenceAfterMs = 8000;
+    int startup_silence_seq = 0;
+
     // Set once a fatal signal has been seen, so the announcement is made exactly once
     // while the loop itself keeps running.
     bool fatal_announced = false;
@@ -448,6 +458,38 @@ void watchdog_main() {
                     frame_silence_seq = 0;
                     frame_silence_last_ns = lastSwap;
                 }
+            }
+        }
+
+        // Startup-silence check: the run has never presented a frame (see the
+        // declaration above). Baseline is the run start, not this thread's start, so
+        // a relaunch in the same process measures its own boot.
+        {
+            const uint64_t lastSwap = kudroid_last_frame_presented_ns();
+            const uint64_t runStart = kudroid_run_started_ns();
+            const uint64_t nowNs = static_cast<uint64_t>(
+                std::chrono::steady_clock::now().time_since_epoch().count());
+            if (lastSwap == 0 && runStart != 0 && nowNs > runStart) {
+                const uint64_t silentMs = (nowNs - runStart) / 1000000ull;
+                if (silentMs >= kStartupSilenceAfterMs) {
+                    if (startup_silence_seq < 3 ||
+                        silentMs >= kStartupSilenceAfterMs + 10000ull * (startup_silence_seq - 2)) {
+                        ++startup_silence_seq;
+                        char reason[96];
+                        std::snprintf(reason, sizeof(reason), "startup-no-frame-%llums",
+                                      static_cast<unsigned long long>(silentMs));
+                        thread_sample_report(reason);
+                        if (startup_silence_seq <= 2) {
+                            std::fprintf(stderr,
+                                         "[KuDroidWatchdog] startup-no-frame %llums — "
+                                         "thread dump written to native_breadcrumbs.log\n",
+                                         static_cast<unsigned long long>(silentMs));
+                        }
+                    }
+                }
+            } else if (lastSwap != 0) {
+                // A frame exists; the frame-silence trigger owns the run from here.
+                startup_silence_seq = 0;
             }
         }
 

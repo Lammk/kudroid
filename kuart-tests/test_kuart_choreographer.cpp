@@ -12,11 +12,14 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "dex_builder.h"
+
+extern "C" int bionic_clock_gettime(int clock_id, struct timespec* ts);
 
 namespace {
 
@@ -333,7 +336,7 @@ void test_frame_time_is_monotonic_nanos() {
     }
 
     struct timespec ts {};
-    ::clock_gettime(CLOCK_MONOTONIC, &ts);
+    bionic_clock_gettime(1, &ts);
     const int64_t before =
         static_cast<int64_t>(ts.tv_sec) * 1000000000ll + static_cast<int64_t>(ts.tv_nsec);
 
@@ -341,7 +344,7 @@ void test_frame_time_is_monotonic_nanos() {
     if (!CallVirtual(instance.l, "getFrameTimeNanos", "()J", {}, &t, "getFrameTimeNanos")) {
         return;
     }
-    ::clock_gettime(CLOCK_MONOTONIC, &ts);
+    bionic_clock_gettime(1, &ts);
     const int64_t after =
         static_cast<int64_t>(ts.tv_sec) * 1000000000ll + static_cast<int64_t>(ts.tv_nsec);
 
@@ -459,7 +462,7 @@ void test_posted_callback_reaches_java(DexObject* callback, DexField* last_frame
     }
 
     struct timespec ts {};
-    ::clock_gettime(CLOCK_MONOTONIC, &ts);
+    bionic_clock_gettime(1, &ts);
     const int64_t before =
         static_cast<int64_t>(ts.tv_sec) * 1000000000ll + static_cast<int64_t>(ts.tv_nsec);
 
@@ -480,7 +483,7 @@ void test_posted_callback_reaches_java(DexObject* callback, DexField* last_frame
           "back into the interpreter");
 
     const int64_t seen = cb_class->static_values[last_frame_time->offset_or_slot].j;
-    ::clock_gettime(CLOCK_MONOTONIC, &ts);
+    bionic_clock_gettime(1, &ts);
     const int64_t after =
         static_cast<int64_t>(ts.tv_sec) * 1000000000ll + static_cast<int64_t>(ts.tv_nsec);
     Check(seen >= before && seen <= after,

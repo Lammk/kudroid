@@ -91,6 +91,8 @@ int vfs_chown(const char* path, uid_t owner, gid_t group);
 int vfs_unlink(const char* path);
 int vfs_remove(const char* path);
 int vfs_rename(const char* oldPath, const char* newPath);
+// rename(2) on paths already remapped; never removes the destination before the move succeeds.
+int vfs_rename_resolved(const char* src, const char* dst);
 int vfs_mkdir(const char* path, mode_t mode);
 int vfs_rmdir(const char* path);
 DIR* vfs_opendir(const char* path);

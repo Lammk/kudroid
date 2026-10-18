@@ -5,6 +5,7 @@
 // reaches, which translate for the host. Results are non-negative on success and
 // -errno on failure. A blocking call drops the VM lock so other Java threads keep running.
 #include "kudroid/kuart/LibCore.h"
+#include "kudroid/abi/SocketAbi.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -252,7 +253,11 @@ int DoResolve(const std::string& host, DexArray* out) {
     const int capacity = out->length / 17;
     int count = 0;
     std::vector<std::vector<uint8_t>> seen;
+#if defined(__APPLE__)
+    for (auto* ai = reinterpret_cast<kudroid::GuestAddrinfo*>(res); ai != nullptr && count < capacity; ai = ai->ai_next) {
+#else
     for (struct addrinfo* ai = res; ai != nullptr && count < capacity; ai = ai->ai_next) {
+#endif
         if (ai->ai_addr == nullptr) continue;
         const uint8_t* sa = reinterpret_cast<const uint8_t*>(ai->ai_addr);
         std::vector<uint8_t> entry(17, 0);

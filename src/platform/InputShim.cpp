@@ -1,5 +1,10 @@
 #include "kudroid/platform/InputShim.h"
 #include "kudroid/platform/NativeTouchGate.h"
+#include "kudroid/platform/GuestClock.h"
+#include "kudroid/platform/SensorHost.h"
+#include <algorithm>
+#include <map>
+#include <memory>
 #include <cstdint>
 #include <cstdio>
 #include <new>
@@ -15,6 +20,9 @@
 // Declared in SyscallShim.cpp.
 extern "C" int bionic_ALooper_addFd(void* looper, int fd, int ident, int events,
                                     void* callback, void* data);
+extern "C" void bionic_ALooper_acquire(void*);
+extern "C" void bionic_ALooper_release(void*);
+extern "C" int bionic_ALooper_removeFd(void*, int);
 extern "C" void bionic_ALooper_markInputPipe(void* looper, int fd);
 
 // The MessageQueue wake slot lives in NativeLooper.cpp (see the note there for
@@ -31,6 +39,8 @@ namespace {
 struct PointerCoord {
     float x = 0.0f;
     float y = 0.0f;
+    float dx = 0.0f;
+    float dy = 0.0f;
     int32_t id = 0;
 };
 
@@ -56,6 +66,8 @@ struct PointerSlot {
     int32_t id = 0;
     float x = 0.0f;
     float y = 0.0f;
+    float lastX = 0.0f;
+    float lastY = 0.0f;
 };
 static std::vector<PointerSlot> g_activePointers;
 
@@ -229,8 +241,7 @@ static void buildTouchEventLocked(int32_t baseAction, int32_t primaryId, int32_t
     ev.type = 2;  // AINPUT_EVENT_TYPE_MOTION
     ev.x = primaryX;
     ev.y = primaryY;
-    ev.eventTime = static_cast<int64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count());
+    ev.eventTime = guest_monotonic_ns();
     ev.source = 0x0002;  // AINPUT_SOURCE_TOUCHSCREEN
 
     // How many fingers are down right now. This — not the producer's pointer id — decides
@@ -255,6 +266,8 @@ static void buildTouchEventLocked(int32_t baseAction, int32_t primaryId, int32_t
         coord.id = slot.id;
         coord.x = slot.x;
         coord.y = slot.y;
+        coord.dx = slot.x - slot.lastX;
+        coord.dy = slot.y - slot.lastY;
         ev.pointers.push_back(coord);
     }
     // A producer reporting more fingers than the table tracks (a gesture that began before
@@ -265,9 +278,15 @@ static void buildTouchEventLocked(int32_t baseAction, int32_t primaryId, int32_t
         coord.id = static_cast<int32_t>(ev.pointers.size());
         coord.x = primaryX;
         coord.y = primaryY;
+        coord.dx = 0.0f;
+        coord.dy = 0.0f;
         ev.pointers.push_back(coord);
     }
     ev.pointerCount = static_cast<int32_t>(ev.pointers.size());
+    if (!ev.pointers.empty()) {
+        ev.x = ev.pointers[0].x;
+        ev.y = ev.pointers[0].y;
+    }
     if (actionPointerIndex >= ev.pointerCount) actionPointerIndex = 0;
 
     // Android's action for this sample. The index is the pointer's slot in the array
@@ -389,14 +408,20 @@ extern "C" void kudroid_inject_touch_event_multi(float x, float y, int32_t actio
                 fresh.id = pointerId;
                 fresh.x = x;
                 fresh.y = y;
+                fresh.lastX = x;
+                fresh.lastY = y;
                 g_activePointers.push_back(fresh);
             } else {
+                slot->lastX = slot->x;
+                slot->lastY = slot->y;
                 slot->x = x;
                 slot->y = y;
             }
         } else if (baseAction == 2) {
             // MOVE: update position of moving pointer
             if (PointerSlot* slot = findPointerSlot(pointerId)) {
+                slot->lastX = slot->x;
+                slot->lastY = slot->y;
                 slot->x = x;
                 slot->y = y;
             }
@@ -436,26 +461,49 @@ extern "C" void kudroid_inject_touch_batch(int32_t action, int32_t primaryId, in
                                            const int32_t* ids, const float* xs, const float* ys) {
     const uint64_t inject_start = touch_now_ns();
     const int32_t baseAction = action & 0xff;
+    if (baseAction == 3) {
+        // CANCEL means the host revoked the gesture; bounded so a flood cannot spam the log.
+        static std::atomic<int> s_cancels{0};
+        if (s_cancels.fetch_add(1, std::memory_order_relaxed) < 40) {
+            std::fprintf(stderr, "%s[KuDroidTouch] CANCEL pointers=%d\n", kudroid_trace_stamp(),
+                         static_cast<int>(count));
+        }
+    }
     BionicInputEvent ev;
     {
         std::lock_guard<std::mutex> lock(g_inputQueue.mtx);
         if (count < 1) count = 1;
-        // The batch *is* the live finger set: replacing the table wholesale is what makes
-        // each event self-consistent, with no drift from a mutation the event never saw.
-        g_activePointers.clear();
+        std::vector<PointerSlot> nextPointers;
         if (ids != nullptr && xs != nullptr && ys != nullptr) {
-            g_activePointers.reserve(static_cast<size_t>(count));
+            nextPointers.reserve(static_cast<size_t>(count));
             for (int32_t i = 0; i < count; ++i) {
                 PointerSlot slot;
                 slot.active = true;
                 slot.id = ids[i];
                 slot.x = xs[i];
                 slot.y = ys[i];
-                g_activePointers.push_back(slot);
+                if (PointerSlot* prev = findPointerSlot(ids[i])) {
+                    slot.lastX = prev->x;
+                    slot.lastY = prev->y;
+                } else {
+                    slot.lastX = xs[i];
+                    slot.lastY = ys[i];
+                }
+                nextPointers.push_back(slot);
             }
         }
-        const float primaryX = xs != nullptr ? xs[0] : 0.0f;
-        const float primaryY = ys != nullptr ? ys[0] : 0.0f;
+        g_activePointers = std::move(nextPointers);
+        float primaryX = 0.0f;
+        float primaryY = 0.0f;
+        if (ids != nullptr && xs != nullptr && ys != nullptr) {
+            for (int32_t i = 0; i < count; ++i) {
+                if (ids[i] == primaryId) {
+                    primaryX = xs[i];
+                    primaryY = ys[i];
+                    break;
+                }
+            }
+        }
         buildTouchEventLocked(baseAction, primaryId, count, primaryX, primaryY, ev);
 
         if (baseAction == 3) {
@@ -672,6 +720,45 @@ extern "C" float bionic_AMotionEvent_getHistoricalPressure(const void* event, si
     return 1.0f;
 }
 
+extern "C" float bionic_AMotionEvent_getAxisValue(const void* event, int32_t axis, size_t pointer_index) {
+    if (!event) return 0.0f;
+    const auto* ev = static_cast<const BionicInputEvent*>(event);
+    switch (axis) {
+        case 0: /* AMOTION_EVENT_AXIS_X */
+            return bionic_AMotionEvent_getX(event, pointer_index);
+        case 1: /* AMOTION_EVENT_AXIS_Y */
+            return bionic_AMotionEvent_getY(event, pointer_index);
+        case 2: /* AMOTION_EVENT_AXIS_PRESSURE */
+            return bionic_AMotionEvent_getPressure(event, pointer_index);
+        case 3: /* AMOTION_EVENT_AXIS_SIZE */
+            return 1.0f;
+        case 8: /* AMOTION_EVENT_AXIS_ORIENTATION */
+            return 0.0f;
+        case 27: /* AMOTION_EVENT_AXIS_RELATIVE_X */
+            if (pointer_index < ev->pointers.size()) {
+                return ev->pointers[pointer_index].dx;
+            }
+            return 0.0f;
+        case 28: /* AMOTION_EVENT_AXIS_RELATIVE_Y */
+            if (pointer_index < ev->pointers.size()) {
+                return ev->pointers[pointer_index].dy;
+            }
+            return 0.0f;
+        default:
+            return 0.0f;
+    }
+}
+
+extern "C" float bionic_AMotionEvent_getHistoricalAxisValue(const void* event, int32_t axis, size_t pointer_index, size_t history_index) {
+    (void)history_index;
+    return bionic_AMotionEvent_getAxisValue(event, axis, pointer_index);
+}
+
+extern "C" float bionic_AMotionEvent_getOrientation(const void* event, size_t pointer_index) {
+    (void)event; (void)pointer_index;
+    return 0.0f;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // AKeyEvent shims
 // ─────────────────────────────────────────────────────────────────────────────
@@ -710,141 +797,273 @@ extern "C" int64_t bionic_AKeyEvent_getEventTime(const void* event) {
 // Bionic ASensorManager shims (Real sensor bridge from iOS CoreMotion)
 // ─────────────────────────────────────────────────────────────────────────────
 
-struct ASensorVector {
-    float x;
-    float y;
-    float z;
-    int8_t status;
-    uint8_t reserved[3];
-};
-
 struct ASensorEvent {
-    int32_t version;
-    int32_t sensor;
-    int32_t type;
-    int32_t reserved0;
+    int32_t version, sensor, type, reserved0;
     int64_t timestamp;
-    union {
-        float data[16];
-        ASensorVector vector;
-        ASensorVector acceleration;
-    };
+    float data[16];
     int32_t reserved1[4];
 };
+static_assert(sizeof(ASensorEvent) == 104, "ASensorEvent ABI");
 
-struct DummySensor {
-    int type;
-    const char* name;
-    const char* vendor;
+struct HostSensor { int type; const char* name; };
+static HostSensor g_sensors[] = {
+    {1, "Accelerometer"}, {2, "Magnetic field"}, {4, "Gyroscope"},
+    {9, "Gravity"}, {10, "Linear acceleration"}
 };
+static HostSensor* g_sensorList[5]{};
 
-static DummySensor g_sensorAccel = {1, "iOS Accelerometer", "Apple"};
-static DummySensor g_sensorGyro = {4, "iOS Gyroscope", "Apple"};
-static DummySensor g_sensorOrient = {3, "iOS Orientation Sensor", "Apple"};
-static DummySensor* g_sensorList[3] = {&g_sensorAccel, &g_sensorGyro, &g_sensorOrient};
-
+struct SensorQueue {
+    int pipe[2]{-1, -1};
+    void* looper = nullptr;
+    std::map<int, int> rates;
+    int64_t last[16]{};
+    std::deque<ASensorEvent> events;
+};
 static std::mutex g_sensorMutex;
-static std::vector<ASensorEvent> g_sensorEventQueue;
+static std::mutex g_sensorConfigMutex;
+static std::map<void*, std::unique_ptr<SensorQueue>> g_sensorQueues;
+static ASensorEvent g_sensorSamples[16]{};
+static int g_javaSensorRates[16]{};
+static uint32_t g_sensorAvailable = 0;
+static KuDroidSensorHost g_sensorHost{};
 
-extern "C" void kudroid_inject_sensor_event(int sensorType, float x, float y, float z) {
-    ASensorEvent ev;
-    memset(&ev, 0, sizeof(ev));
-    ev.version = sizeof(ASensorEvent);
-    ev.sensor = sensorType;
-    ev.type = sensorType;
-    ev.timestamp = std::chrono::duration_cast<std::chrono::nanoseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
-    ev.acceleration.x = x;
-    ev.acceleration.y = y;
-    ev.acceleration.z = z;
-    ev.acceleration.status = 3; // SENSOR_STATUS_ACCURACY_HIGH
-
-    {
-        std::lock_guard<std::mutex> lock(g_sensorMutex);
-        if (g_sensorEventQueue.size() < 64) {
-            g_sensorEventQueue.push_back(ev);
-        }
-    }
-}
-
-extern "C" void* bionic_ASensorManager_getInstance() {
-    static int dummyManager = 1;
-    return &dummyManager;
-}
-
-extern "C" void* bionic_ASensorManager_createEventQueue(void* manager, void* looper, int ident, void* callback, void* data) {
-    (void)manager; (void)looper; (void)ident; (void)callback; (void)data;
-    static int dummyQueue = 1;
-    return &dummyQueue;
-}
-
-extern "C" int bionic_ASensorManager_destroyEventQueue(void* manager, void* queue) {
-    (void)manager; (void)queue; return 0;
-}
-
-extern "C" int bionic_ASensorManager_getSensorList(void* manager, void** list) {
-    (void)manager;
-    if (list) {
-        *list = g_sensorList;
-    }
-    return 3;
-}
-
-extern "C" void* bionic_ASensorManager_getDefaultSensor(void* manager, int type) {
-    (void)manager;
-    if (type == 1) return &g_sensorAccel;
-    if (type == 4) return &g_sensorGyro;
-    if (type == 3) return &g_sensorOrient;
-    // Unknown sensor: NULL, not the accelerometer. Returning a sensor that is
-    // not there makes the guest configure and wait on data that never comes.
+static HostSensor* sensor_from_handle(void* handle) {
+    for (auto& sensor : g_sensors) if (handle == &sensor) return &sensor;
     return nullptr;
 }
 
-extern "C" int bionic_ASensorEventQueue_enableSensor(void* queue, void* sensor) { (void)queue; (void)sensor; return 0; }
-extern "C" int bionic_ASensorEventQueue_disableSensor(void* queue, void* sensor) { (void)queue; (void)sensor; return 0; }
-extern "C" int bionic_ASensorEventQueue_setEventRate(void* queue, void* sensor, int32_t usec) { (void)queue; (void)sensor; (void)usec; return 0; }
-extern "C" int bionic_ASensorEventQueue_hasEvents(void* queue) {
-    (void)queue;
-    std::lock_guard<std::mutex> lock(g_sensorMutex);
-    return g_sensorEventQueue.empty() ? 0 : 1;
+// Serialize configuration so a stale enable cannot overtake a disable.
+static void configure_sensor_rates() {
+    std::lock_guard<std::mutex> configLock(g_sensorConfigMutex);
+    int rates[16]{};
+    KuDroidSensorHost host;
+    {
+        std::lock_guard<std::mutex> lock(g_sensorMutex);
+        host = g_sensorHost;
+        std::copy(std::begin(g_javaSensorRates), std::end(g_javaSensorRates), rates);
+        for (const auto& entry : g_sensorQueues) {
+            for (const auto& rate : entry.second->rates) {
+                if (rates[rate.first] == 0 || rate.second < rates[rate.first]) rates[rate.first] = rate.second;
+            }
+        }
+    }
+    if (host.configure) for (const auto& sensor : g_sensors) host.configure(sensor.type, rates[sensor.type]);
 }
 
-extern "C" ssize_t bionic_ASensorEventQueue_getEvents(void* queue, void* events, size_t count) {
-    (void)queue;
-    if (!events || count == 0) return 0;
-    // The guest declares its ASensorEvent layout by sizeof: a size mismatch
-    // here is a buffer overflow on their side, so serve nothing instead.
-    // NDK sizeof(ASensorEvent) is 104.
-    if (count > 1024) count = 1024;
-    std::lock_guard<std::mutex> lock(g_sensorMutex);
-    size_t num = std::min(count, g_sensorEventQueue.size());
-    if (num > 0) {
-        ASensorEvent* dst = static_cast<ASensorEvent*>(events);
-        for (size_t i = 0; i < num; ++i) {
-            dst[i] = g_sensorEventQueue[i];
-        }
-        g_sensorEventQueue.erase(g_sensorEventQueue.begin(), g_sensorEventQueue.begin() + num);
+extern "C" void kudroid_set_sensor_host(const KuDroidSensorHost* host, uint32_t availableTypes) {
+    {
+        std::lock_guard<std::mutex> lock(g_sensorMutex);
+        g_sensorHost = host ? *host : KuDroidSensorHost{};
+        g_sensorAvailable = host ? availableTypes : 0;
     }
-    return num;
+    configure_sensor_rates();
+}
+
+extern "C" int32_t kudroid_sensor_available(int32_t type) {
+    std::lock_guard<std::mutex> lock(g_sensorMutex);
+    return type > 0 && type < 16 && (g_sensorAvailable & (1u << type)) != 0;
+}
+
+extern "C" void kudroid_sensor_java_configure(int32_t type, int32_t periodUs) {
+    if (type <= 0 || type >= 16) return;
+    {
+        std::lock_guard<std::mutex> lock(g_sensorMutex);
+        g_javaSensorRates[type] = periodUs > 0 ? std::max(5000, periodUs) : 0;
+    }
+    configure_sensor_rates();
+}
+
+extern "C" int64_t kudroid_sensor_read(int32_t type, float* values, int32_t count) {
+    if (type <= 0 || type >= 16 || !values || count <= 0) return 0;
+    std::lock_guard<std::mutex> lock(g_sensorMutex);
+    const auto& sample = g_sensorSamples[type];
+    std::copy_n(sample.data, std::min(count, 16), values);
+    return sample.timestamp;
+}
+
+extern "C" void kudroid_inject_sensor_sample(int32_t type, const float* values, int32_t count) {
+    if (type <= 0 || type >= 16 || !values || count <= 0 || count > 16) return;
+    ASensorEvent event{};
+    event.version = sizeof(event);
+    event.sensor = event.type = type;
+    event.timestamp = guest_clock_ns(7);
+    std::copy_n(values, count, event.data);
+    // Accuracy follows the three-axis vector in the NDK union.
+    if (count == 3) reinterpret_cast<int8_t*>(event.data)[12] = 3;
+    std::lock_guard<std::mutex> lock(g_sensorMutex);
+    if (!(g_sensorAvailable & (1u << type))) return;
+    g_sensorSamples[type] = event;
+    for (auto& entry : g_sensorQueues) {
+        auto& queue = *entry.second;
+        auto rate = queue.rates.find(type);
+        if (rate == queue.rates.end() || event.timestamp - queue.last[type] < int64_t(rate->second) * 1000) continue;
+        queue.last[type] = event.timestamp;
+        const bool wasEmpty = queue.events.empty();
+        if (queue.events.size() == 256) queue.events.pop_front();
+        queue.events.push_back(event);
+        if (wasEmpty) {
+            const uint8_t wake = 1;
+            ssize_t written;
+            do { written = ::write(queue.pipe[1], &wake, 1); } while (written < 0 && errno == EINTR);
+        }
+    }
+}
+
+extern "C" void kudroid_inject_sensor_event(int type, float x, float y, float z) {
+    const float values[] = {x, y, z};
+    kudroid_inject_sensor_sample(type, values, 3);
+}
+
+extern "C" void* bionic_ASensorManager_getInstance() { static int manager; return &manager; }
+extern "C" void* bionic_ASensorManager_getInstanceForPackage(const char*) { return bionic_ASensorManager_getInstance(); }
+
+extern "C" void* bionic_ASensorManager_createEventQueue(void*, void* looper, int ident, void* callback, void* data) {
+    if (!looper || (!callback && ident < 0)) return nullptr;
+    auto queue = std::make_unique<SensorQueue>();
+    if (::pipe(queue->pipe) != 0) return nullptr;
+    for (int fd : queue->pipe) {
+        const int flags = ::fcntl(fd, F_GETFL);
+        if (flags < 0 || ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0 ||
+            ::fcntl(fd, F_SETFD, FD_CLOEXEC) < 0) {
+            ::close(queue->pipe[0]); ::close(queue->pipe[1]);
+            return nullptr;
+        }
+    }
+    queue->looper = looper;
+    bionic_ALooper_acquire(looper);
+    if (bionic_ALooper_addFd(looper, queue->pipe[0], ident, 1, callback, data) != 1) {
+        ::close(queue->pipe[0]); ::close(queue->pipe[1]);
+        bionic_ALooper_release(looper);
+        return nullptr;
+    }
+    void* handle = queue.get();
+    std::lock_guard<std::mutex> lock(g_sensorMutex);
+    g_sensorQueues.emplace(handle, std::move(queue));
+    return handle;
+}
+
+extern "C" int bionic_ASensorManager_destroyEventQueue(void*, void* handle) {
+    std::unique_ptr<SensorQueue> queue;
+    {
+        std::lock_guard<std::mutex> lock(g_sensorMutex);
+        auto found = g_sensorQueues.find(handle);
+        if (found == g_sensorQueues.end()) return -22;
+        queue = std::move(found->second);
+        g_sensorQueues.erase(found);
+    }
+    bionic_ALooper_removeFd(queue->looper, queue->pipe[0]);
+    ::close(queue->pipe[0]); ::close(queue->pipe[1]);
+    bionic_ALooper_release(queue->looper);
+    configure_sensor_rates();
+    return 0;
+}
+
+extern "C" int bionic_ASensorManager_getSensorList(void*, void** list) {
+    std::lock_guard<std::mutex> lock(g_sensorMutex);
+    int count = 0;
+    for (auto& sensor : g_sensors) if (g_sensorAvailable & (1u << sensor.type)) g_sensorList[count++] = &sensor;
+    if (list) *list = g_sensorList;
+    return count;
+}
+
+extern "C" void* bionic_ASensorManager_getDefaultSensor(void*, int type) {
+    if (!kudroid_sensor_available(type)) return nullptr;
+    for (auto& sensor : g_sensors) if (sensor.type == type) return &sensor;
+    return nullptr;
+}
+
+extern "C" int bionic_ASensorEventQueue_enableSensor(void* handle, void* sensorHandle) {
+    auto* sensor = sensor_from_handle(sensorHandle);
+    if (!sensor || !kudroid_sensor_available(sensor->type)) return -22;
+    {
+        std::lock_guard<std::mutex> lock(g_sensorMutex);
+        auto found = g_sensorQueues.find(handle);
+        if (found == g_sensorQueues.end()) return -22;
+        found->second->rates.emplace(sensor->type, 200000);
+    }
+    configure_sensor_rates();
+    return 0;
+}
+
+extern "C" int bionic_ASensorEventQueue_disableSensor(void* handle, void* sensorHandle) {
+    auto* sensor = sensor_from_handle(sensorHandle);
+    if (!sensor) return -22;
+    {
+        std::lock_guard<std::mutex> lock(g_sensorMutex);
+        auto found = g_sensorQueues.find(handle);
+        if (found == g_sensorQueues.end()) return -22;
+        found->second->rates.erase(sensor->type);
+    }
+    configure_sensor_rates();
+    return 0;
+}
+
+extern "C" int bionic_ASensorEventQueue_setEventRate(void* handle, void* sensorHandle, int32_t usec) {
+    auto* sensor = sensor_from_handle(sensorHandle);
+    if (!sensor || usec < 0) return -22;
+    {
+        std::lock_guard<std::mutex> lock(g_sensorMutex);
+        auto found = g_sensorQueues.find(handle);
+        if (found == g_sensorQueues.end() || !found->second->rates.count(sensor->type)) return -22;
+        found->second->rates[sensor->type] = std::max(5000, usec);
+    }
+    configure_sensor_rates();
+    return 0;
+}
+
+extern "C" int bionic_ASensorEventQueue_hasEvents(void* handle) {
+    std::lock_guard<std::mutex> lock(g_sensorMutex);
+    auto found = g_sensorQueues.find(handle);
+    return found == g_sensorQueues.end() ? -22 : !found->second->events.empty();
+}
+
+extern "C" ssize_t bionic_ASensorEventQueue_getEvents(void* handle, void* events, size_t count) {
+    if (!events || !count) return 0;
+    std::lock_guard<std::mutex> lock(g_sensorMutex);
+    auto found = g_sensorQueues.find(handle);
+    if (found == g_sensorQueues.end()) return -22;
+    auto& queue = *found->second;
+    const size_t size = std::min(count, queue.events.size());
+    for (size_t i = 0; i < size; ++i) {
+        static_cast<ASensorEvent*>(events)[i] = queue.events.front();
+        queue.events.pop_front();
+    }
+    if (queue.events.empty()) {
+        uint8_t bytes[32];
+        ssize_t readCount;
+        do { readCount = ::read(queue.pipe[0], bytes, sizeof(bytes)); }
+        while (readCount > 0 || (readCount < 0 && errno == EINTR));
+    }
+    return static_cast<ssize_t>(size);
+}
+
+extern "C" void kudroid_sensor_reset() {
+    std::vector<void*> queues;
+    {
+        std::lock_guard<std::mutex> lock(g_sensorMutex);
+        std::fill(std::begin(g_javaSensorRates), std::end(g_javaSensorRates), 0);
+        std::fill(std::begin(g_sensorSamples), std::end(g_sensorSamples), ASensorEvent{});
+        for (const auto& entry : g_sensorQueues) queues.push_back(entry.first);
+    }
+    for (void* queue : queues) bionic_ASensorManager_destroyEventQueue(nullptr, queue);
+    configure_sensor_rates();
 }
 
 extern "C" const char* bionic_ASensor_getName(void* sensor) {
-    if (!sensor) return "Unknown";
-    return static_cast<DummySensor*>(sensor)->name;
+    auto* value = sensor_from_handle(sensor);
+    return value ? value->name : "Unknown";
 }
-extern "C" const char* bionic_ASensor_getVendor(void* sensor) {
-    if (!sensor) return "Apple";
-    return static_cast<DummySensor*>(sensor)->vendor;
-}
+extern "C" const char* bionic_ASensor_getVendor(void*) { return "Host"; }
 extern "C" int bionic_ASensor_getType(void* sensor) {
-    if (!sensor) return 1;
-    return static_cast<DummySensor*>(sensor)->type;
+    auto* value = sensor_from_handle(sensor);
+    return value ? value->type : 0;
 }
-extern "C" float bionic_ASensor_getResolution(void* sensor) { (void)sensor; return 0.001f; }
-extern "C" int bionic_ASensor_getMinDelay(void* sensor) { (void)sensor; return 10000; }
+extern "C" float bionic_ASensor_getResolution(void*) { return 0.001f; }
+extern "C" int bionic_ASensor_getMinDelay(void*) { return 5000; }
 
 const SymbolEntry kInputSymbols[] = {
     // Sensor Symbols
+    {"ASensorManager_getInstanceForPackage", reinterpret_cast<void*>(&bionic_ASensorManager_getInstanceForPackage)},
     {"ASensorManager_getInstance", reinterpret_cast<void*>(&bionic_ASensorManager_getInstance)},
     {"ASensorManager_createEventQueue", reinterpret_cast<void*>(&bionic_ASensorManager_createEventQueue)},
     {"ASensorManager_destroyEventQueue", reinterpret_cast<void*>(&bionic_ASensorManager_destroyEventQueue)},
@@ -893,6 +1112,9 @@ const SymbolEntry kInputSymbols[] = {
     {"AMotionEvent_getHistoricalX", reinterpret_cast<void*>(&bionic_AMotionEvent_getHistoricalX)},
     {"AMotionEvent_getHistoricalY", reinterpret_cast<void*>(&bionic_AMotionEvent_getHistoricalY)},
     {"AMotionEvent_getHistoricalPressure", reinterpret_cast<void*>(&bionic_AMotionEvent_getHistoricalPressure)},
+    {"AMotionEvent_getAxisValue", reinterpret_cast<void*>(&bionic_AMotionEvent_getAxisValue)},
+    {"AMotionEvent_getHistoricalAxisValue", reinterpret_cast<void*>(&bionic_AMotionEvent_getHistoricalAxisValue)},
+    {"AMotionEvent_getOrientation", reinterpret_cast<void*>(&bionic_AMotionEvent_getOrientation)},
 
     // KeyEvent Symbols
     {"AKeyEvent_getAction", reinterpret_cast<void*>(&bionic_AKeyEvent_getAction)},

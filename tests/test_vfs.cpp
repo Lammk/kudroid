@@ -333,6 +333,64 @@ void TestFileIo() {
               std::filesystem::path(root).parent_path().parent_path() /
               "kudroid_escape_probe.txt"),
           "a write through an escaping path does not reach outside the root");
+
+    // rename() with a missing source must leave the destination untouched: the
+    // unlink-then-copy fallback used to delete the previous file first, so a failed
+    // save (temp file never created) destroyed the last good settings file.
+    const char* dstPath = "/data/data/com.kudroid.test/files/rename_dst.txt";
+    FILE* dst = kudroid::vfs_fopen(dstPath, "w");
+    if (dst != nullptr) {
+        std::fputs("OLD", dst);
+        std::fclose(dst);
+    }
+    Check(kudroid::vfs_rename("/data/data/com.kudroid.test/files/rename_missing.txt", dstPath) != 0,
+          "vfs_rename fails when the source does not exist");
+    Check(kudroid::vfs_access(dstPath, F_OK) == 0,
+          "the destination survives a rename with a missing source");
+    FILE* kept = kudroid::vfs_fopen(dstPath, "r");
+    char keptData[8] = {};
+    if (kept != nullptr) {
+        if (!std::fgets(keptData, sizeof(keptData), kept)) keptData[0] = '\0';
+        std::fclose(kept);
+    }
+    Check(std::strcmp(keptData, "OLD") == 0, "the destination keeps its previous contents");
+
+    FILE* src = kudroid::vfs_fopen("/data/data/com.kudroid.test/files/rename_src.txt", "w");
+    if (src != nullptr) {
+        std::fputs("NEW", src);
+        std::fclose(src);
+    }
+    Check(kudroid::vfs_rename("/data/data/com.kudroid.test/files/rename_src.txt", dstPath) == 0,
+          "vfs_rename still succeeds for an existing source");
+    FILE* moved = kudroid::vfs_fopen(dstPath, "r");
+    char movedData[8] = {};
+    if (moved != nullptr) {
+        if (!std::fgets(movedData, sizeof(movedData), moved)) movedData[0] = '\0';
+        std::fclose(moved);
+    }
+    Check(std::strcmp(movedData, "NEW") == 0, "the destination now holds the source contents");
+    Check(kudroid::vfs_access("/data/data/com.kudroid.test/files/rename_src.txt", F_OK) != 0,
+          "the source is gone after a successful rename");
+
+    // A destination whose parent directory is missing is created for a real move...
+    FILE* nested = kudroid::vfs_fopen("/data/data/com.kudroid.test/files/rename_nested_src.txt", "w");
+    if (nested != nullptr) {
+        std::fputs("NESTED", nested);
+        std::fclose(nested);
+    }
+    Check(kudroid::vfs_rename("/data/data/com.kudroid.test/files/rename_nested_src.txt",
+                              "/data/data/com.kudroid.test/files/rename_newdir/sub/moved.txt") == 0,
+          "vfs_rename creates a missing destination directory for an existing source");
+    Check(kudroid::vfs_access("/data/data/com.kudroid.test/files/rename_newdir/sub/moved.txt", F_OK) == 0,
+          "and the file lands there");
+    // ...but a missing source leaves nothing behind, directories included.
+    Check(kudroid::vfs_rename("/data/data/com.kudroid.test/files/rename_none.txt",
+                              "/data/data/com.kudroid.test/files/rename_ghost/x.txt") != 0,
+          "vfs_rename of a missing source into a missing directory fails");
+    Check(kudroid::vfs_access("/data/data/com.kudroid.test/files/rename_ghost", F_OK) != 0,
+          "and creates no directory");
+    Check(kudroid::vfs_access(dstPath, F_OK) == 0,
+          "an unrelated earlier file is untouched by the failed rename");
 }
 
 // ── jar: URL → entry inside the archive ZIP ─────────────────────────────────

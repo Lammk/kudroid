@@ -74,8 +74,18 @@ public:
         // positions while bounding dispatches to gesture boundaries. The fold needs
         // the same pointer set on both sides — a MOVE that gained or lost a finger is
         // a different gesture state and is enqueued instead.
+        bool samePointers = !events_.empty() && events_.back().pointerCount == pointerCount;
+        if (samePointers) {
+            const auto& previousIds = events_.back().pointerIds;
+            for (int i = 0; i < pointerCount; ++i) {
+                if (previousIds[i] != (haveTable ? ids[i] : i)) {
+                    samePointers = false;
+                    break;
+                }
+            }
+        }
         if ((action & 0xff) == 2 && !events_.empty() &&
-            (events_.back().action & 0xff) == 2 && events_.back().pointerCount == pointerCount) {
+            (events_.back().action & 0xff) == 2 && samePointers) {
             Event& back = events_.back();
             if (haveTable) {
                 back.pointerIds.resize(static_cast<size_t>(pointerCount));
@@ -157,7 +167,7 @@ public:
                 // Peek and swallow any consecutive MOVEs with the same pointer count.
                 while (!events_.empty()) {
                     const Event& next = events_.front();
-                    if ((next.action & 0xff) == 2 && next.pointerCount == ev.pointerCount) {
+                    if ((next.action & 0xff) == 2 && next.pointerIds == ev.pointerIds) {
                         ev = std::move(events_.front());
                         events_.pop_front();
                     } else {

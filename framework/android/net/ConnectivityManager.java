@@ -2,6 +2,7 @@ package android.net;
 
 import android.os.Handler;
 import android.os.Looper;
+import android.os.HandlerThread;
 import java.util.ArrayList;
 
 /**
@@ -36,10 +37,18 @@ public class ConnectivityManager {
     private static final class Registration {
         final NetworkCallback callback;
         final Handler handler;
+        final NetworkRequest request;
+        volatile boolean active = true;
+        int announcedState;
+        boolean everAvailable;
 
-        Registration(NetworkCallback callback, Handler handler) {
+        Registration(NetworkCallback callback, Handler handler, NetworkRequest request) {
             this.callback = callback;
             this.handler = handler;
+            this.request = request;
+        }
+        boolean matches(int state) {
+            return connected(state) && (request == null || request.canBeSatisfiedBy(capabilities(state)));
         }
     }
 
@@ -47,7 +56,8 @@ public class ConnectivityManager {
     private static native int nativeTakeChange();
 
     private static final ArrayList<Registration> sRegistrations = new ArrayList<Registration>();
-    private static int sLastState = -1;
+    private static Handler sCallbackHandler;
+    private static Network sBoundNetwork;
 
     public ConnectivityManager() {}
 
@@ -94,7 +104,7 @@ public class ConnectivityManager {
     }
 
     public NetworkInfo[] getAllNetworkInfo() {
-        return new NetworkInfo[] { getNetworkInfo(TYPE_MOBILE), getNetworkInfo(TYPE_WIFI) };
+        return new NetworkInfo[] { getNetworkInfo(TYPE_MOBILE), getNetworkInfo(TYPE_WIFI), getNetworkInfo(TYPE_ETHERNET) };
     }
 
     public Network getActiveNetwork() { return network(nativeState()); }
@@ -126,106 +136,111 @@ public class ConnectivityManager {
                 : RESTRICT_BACKGROUND_STATUS_DISABLED;
     }
 
-    public boolean bindProcessToNetwork(Network network) { return true; }
-    public Network getBoundNetworkForProcess() { return getActiveNetwork(); }
+    public boolean bindProcessToNetwork(Network network) {
+        if (network != null && !network.equals(getActiveNetwork())) return false;
+        sBoundNetwork = network;
+        return true;
+    }
+    public Network getBoundNetworkForProcess() { return sBoundNetwork; }
     public void reportNetworkConnectivity(Network network, boolean hasConnectivity) {}
 
-    public void registerDefaultNetworkCallback(NetworkCallback networkCallback) {
-        registerDefaultNetworkCallback(networkCallback, null);
+    private static Handler callbackHandler() {
+        synchronized (sRegistrations) {
+            if (sCallbackHandler == null) {
+                HandlerThread thread = new HandlerThread("ConnectivityCallbacks");
+                thread.start();
+                sCallbackHandler = new Handler(thread.getLooper());
+            }
+            return sCallbackHandler;
+        }
     }
 
-    public void registerDefaultNetworkCallback(NetworkCallback networkCallback, Handler handler) {
-        if (networkCallback == null) return;
-        final Handler target = handler != null ? handler : new Handler(Looper.getMainLooper());
-        final Registration registration = new Registration(networkCallback, target);
+    private static Registration register(NetworkRequest request, NetworkCallback callback, Handler handler) {
+        if (callback == null) throw new NullPointerException("network callback");
+        final Registration registration = new Registration(callback, handler == null ? callbackHandler() : handler, request);
         synchronized (sRegistrations) {
+            for (Registration existing : sRegistrations) {
+                if (existing.callback == callback) throw new IllegalArgumentException("Callback is already registered");
+            }
             sRegistrations.add(registration);
-            if (sLastState == -1) sLastState = nativeState();
+            update(registration, nativeState());
         }
-        // A callback registered while online is told about the current network.
-        final int state = nativeState();
-        if (connected(state)) announce(registration, state);
+        return registration;
     }
-
-    public void registerNetworkCallback(NetworkRequest request, NetworkCallback networkCallback) {
-        registerDefaultNetworkCallback(networkCallback, null);
+    public void registerDefaultNetworkCallback(NetworkCallback callback) { register(null, callback, null); }
+    public void registerDefaultNetworkCallback(NetworkCallback callback, Handler handler) { register(null, callback, handler); }
+    public void registerNetworkCallback(NetworkRequest request, NetworkCallback callback) { registerNetworkCallback(request, callback, null); }
+    public void registerNetworkCallback(NetworkRequest request, NetworkCallback callback, Handler handler) {
+        if (request == null) throw new NullPointerException("network request");
+        register(request, callback, handler);
     }
-
-    public void registerNetworkCallback(NetworkRequest request, NetworkCallback networkCallback,
-                                        Handler handler) {
-        registerDefaultNetworkCallback(networkCallback, handler);
-    }
-
-    public void requestNetwork(NetworkRequest request, NetworkCallback networkCallback) {
-        registerDefaultNetworkCallback(networkCallback, null);
-    }
-
-    public void unregisterNetworkCallback(NetworkCallback networkCallback) {
-        if (networkCallback == null) return;
-        synchronized (sRegistrations) {
-            for (int i = sRegistrations.size() - 1; i >= 0; i--) {
-                if (sRegistrations.get(i).callback == networkCallback) sRegistrations.remove(i);
+    public void requestNetwork(NetworkRequest request, NetworkCallback callback) { registerNetworkCallback(request, callback); }
+    public void requestNetwork(NetworkRequest request, NetworkCallback callback, Handler handler) { registerNetworkCallback(request, callback, handler); }
+    public void requestNetwork(NetworkRequest request, NetworkCallback callback, int timeoutMs) { requestNetwork(request, callback, null, timeoutMs); }
+    public void requestNetwork(NetworkRequest request, NetworkCallback callback, Handler handler, int timeoutMs) {
+        if (request == null) throw new NullPointerException("network request");
+        if (timeoutMs <= 0) throw new IllegalArgumentException("Timeout must be positive");
+        final Registration registration = register(request, callback, handler);
+        registration.handler.postDelayed(new Runnable() {
+            public void run() {
+                synchronized (sRegistrations) {
+                    if (!registration.active || registration.everAvailable) return;
+                    registration.active = false;
+                    sRegistrations.remove(registration);
+                }
+                registration.callback.onUnavailable();
             }
-        }
+        }, timeoutMs);
     }
-
-    private static void announce(final Registration registration, final int state) {
-        registration.handler.post(new Runnable() {
-            @Override public void run() {
-                try {
-                    final Network network = network(state);
-                    registration.callback.onAvailable(network);
-                    registration.callback.onCapabilitiesChanged(network, capabilities(state));
-                    registration.callback.onLinkPropertiesChanged(network, new LinkProperties());
-                } catch (Throwable t) {
-                    android.util.Log.e("ConnectivityManager", "network callback failed: " + t);
+    public void unregisterNetworkCallback(NetworkCallback callback) {
+        if (callback == null) throw new NullPointerException("network callback");
+        synchronized (sRegistrations) {
+            for (int i = sRegistrations.size() - 1; i >= 0; --i) {
+                Registration registration = sRegistrations.get(i);
+                if (registration.callback == callback) {
+                    registration.active = false;
+                    sRegistrations.remove(i);
                 }
             }
-        });
-    }
-
-    private static void lost(final Registration registration, final int state) {
-        registration.handler.post(new Runnable() {
-            @Override public void run() {
-                try {
-                    registration.callback.onLost(new Network(100 + type(state)));
-                } catch (Throwable t) {
-                    android.util.Log.e("ConnectivityManager", "network callback failed: " + t);
-                }
-            }
-        });
-    }
-
-    /** Tells registered callbacks what changed; runs on the main Looper after the host reported. */
-    public static void dispatchNetworkChange() {
-        if (nativeTakeChange() == 0) return;
-        final int now = nativeState();
-        final Registration[] registrations;
-        final int before;
-        synchronized (sRegistrations) {
-            before = sLastState == -1 ? now : sLastState;
-            sLastState = now;
-            registrations = sRegistrations.toArray(new Registration[sRegistrations.size()]);
         }
-        for (Registration registration : registrations) {
-            if (connected(before) && (!connected(now) || type(before) != type(now))) {
-                lost(registration, before);
-            }
-            if (connected(now) && (!connected(before) || type(before) != type(now))) {
-                announce(registration, now);
-            } else if (connected(now) && metered(before) != metered(now)) {
-                final Registration r = registration;
-                final int state = now;
-                r.handler.post(new Runnable() {
-                    @Override public void run() {
-                        try {
-                            r.callback.onCapabilitiesChanged(network(state), capabilities(state));
-                        } catch (Throwable t) {
-                            android.util.Log.e("ConnectivityManager", "network callback failed: " + t);
-                        }
+    }
+
+    // Capture each transition before another path update arrives.
+    private static void update(final Registration registration, final int now) {
+        final int before = registration.announcedState;
+        final boolean matches = registration.matches(now);
+        if (connected(before) && (!matches || type(before) != type(now))) {
+            registration.handler.post(new Runnable() {
+                public void run() {
+                    if (registration.active) registration.callback.onLost(network(before));
+                }
+            });
+        }
+        if (matches) {
+            final boolean added = !connected(before) || type(before) != type(now);
+            registration.everAvailable = true;
+            if (added || before != now) {
+                registration.handler.post(new Runnable() {
+                    public void run() {
+                        if (!registration.active) return;
+                        Network current = network(now);
+                        if (added) registration.callback.onAvailable(current);
+                        if (!registration.active) return;
+                        registration.callback.onCapabilitiesChanged(current, capabilities(now));
+                        if (added && registration.active) registration.callback.onLinkPropertiesChanged(current, new LinkProperties());
+                        if (added && registration.active) registration.callback.onBlockedStatusChanged(current, false);
                     }
                 });
             }
+        }
+        registration.announcedState = matches ? now : 0;
+    }
+
+    public static void dispatchNetworkChange() {
+        if (nativeTakeChange() == 0) return;
+        synchronized (sRegistrations) {
+            int state = nativeState();
+            for (Registration registration : sRegistrations) update(registration, state);
         }
     }
 }

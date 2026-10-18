@@ -26,29 +26,6 @@ extern const char* g_kudroid_log_dir_ptr __attribute__((weak));
 #include <AudioToolbox/AudioToolbox.h>
 #include <objc/runtime.h>
 #include <objc/message.h>
-
-static void apple_ensure_audio_session_active() {
-    static std::atomic<bool> s_done{false};
-    if (s_done.exchange(true)) return;
-    Class cls = objc_getClass("AVAudioSession");
-    if (!cls) return;
-    SEL selShared = sel_registerName("sharedInstance");
-    id session = reinterpret_cast<id (*)(Class, SEL)>(objc_msgSend)(cls, selShared);
-    if (!session) return;
-
-    Class strCls = objc_getClass("NSString");
-    SEL selUtf8 = sel_registerName("stringWithUTF8String:");
-    id catStr = reinterpret_cast<id (*)(Class, SEL, const char*)>(objc_msgSend)(
-        strCls, selUtf8, "AVAudioSessionCategoryPlayback");
-
-    SEL selSetCat = sel_registerName("setCategory:withOptions:error:");
-    reinterpret_cast<BOOL (*)(id, SEL, id, unsigned long, void*)>(objc_msgSend)(
-        session, selSetCat, catStr, 1UL /* AVAudioSessionCategoryOptionMixWithOthers */, nullptr);
-
-    SEL selSetActive = sel_registerName("setActive:error:");
-    reinterpret_cast<BOOL (*)(id, SEL, BOOL, void*)>(objc_msgSend)(
-        session, selSetActive, YES, nullptr);
-}
 #endif
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -105,14 +82,12 @@ constexpr double kBlockingFillSeconds = 0.08;
 // Raw PCM capture cap (seconds of source audio) for KUDROID_AUDIO_DUMP.
 constexpr uint64_t kDumpMaxSeconds = 10;
 
-// On by default and bounded (first kDumpMaxSeconds of at most kDumpMaxFiles tracks): a
-// captured run can then tell a clean source from one already distorted upstream of
-// the ring and the output queue. KUDROID_AUDIO_DUMP=0 turns it off.
+// PCM dumps require an explicit diagnostic opt-in.
 constexpr int kDumpMaxFiles = 3;
 static bool audio_dump_enabled() {
     static const bool enabled = [] {
         const char* v = std::getenv("KUDROID_AUDIO_DUMP");
-        return !(v && *v == '0');
+        return v && std::strcmp(v, "1") == 0;
     }();
     return enabled;
 }
@@ -172,12 +147,15 @@ struct AudioPlayer {
     void* aqUserData = nullptr;
     size_t aqBufferFrames[kAudioQueueNumBuffers] = {};
     uint64_t aqBufferGeneration[kAudioQueueNumBuffers] = {};
+    bool aqResetting = false;
+    bool aqNeedsReset = false;
 #endif
 };
 
 static std::mutex g_players_mtx;
 static std::unordered_map<void*, std::shared_ptr<AudioPlayer>> g_players;
 static thread_local AudioPlayer* g_audioCallbackPlayer = nullptr;
+static std::atomic<bool> g_hostAudioSuspended{false};
 
 static std::unique_lock<std::mutex> player_control_lock(AudioPlayer* p) {
     std::unique_lock<std::mutex> lock(p->controlMtx, std::defer_lock);
@@ -191,6 +169,24 @@ static std::shared_ptr<AudioPlayer> find_player(void* iface) {
     auto it = g_players.find(iface);
     return it != g_players.end() ? it->second : nullptr;
 }
+
+#if defined(__APPLE__)
+static bool apple_activate_audio_session() {
+    Class cls = objc_getClass("AVAudioSession");
+    if (!cls) return false;
+    SEL selShared = sel_registerName("sharedInstance");
+    id session = reinterpret_cast<id (*)(Class, SEL)>(objc_msgSend)(cls, selShared);
+    if (!session) return false;
+    SEL selSetActive = sel_registerName("setActive:error:");
+    const BOOL active = reinterpret_cast<BOOL (*)(id, SEL, BOOL, void*)>(objc_msgSend)(
+        session, selSetActive, YES, nullptr);
+    if (!active) std::fprintf(stderr, "[KuDroidAudio] session activation failed\n");
+    return active;
+}
+#else
+extern "C" void kudroid_audio_session_suspend(void) {}
+extern "C" void kudroid_audio_session_resume(void) {}
+#endif
 
 static uint32_t player_bytes_per_frame(const AudioPlayer* p) {
     const uint32_t ch = (p->channels > 0 && p->channels <= 8) ? p->channels : 2;
@@ -209,7 +205,9 @@ struct AudioRead {
 // Called with the ring mutex held.
 static AudioRead player_read_pcm(AudioPlayer* p, int16_t* out, size_t wanted) {
     AudioRead r;
-    if (p->shutdown || p->playState != SL_PLAYSTATE_PLAYING) return r;
+    r.generation = p->generation;
+    if (p->shutdown || p->playState != SL_PLAYSTATE_PLAYING ||
+        g_hostAudioSuspended.load(std::memory_order_acquire)) return r;
     r.frames = std::min(p->ringCount, wanted);
     const size_t ch = p->channels;
     if (out && r.frames) {
@@ -290,7 +288,7 @@ static void audio_queue_output_cb(void* userData, AudioQueueRef aq, AudioQueueBu
     auto* out = static_cast<int16_t*>(buffer->mAudioData);
     {
         std::lock_guard<std::mutex> lock(p->mtx);
-        if (p->shutdown) return;
+        if (p->shutdown || p->aqResetting) return;
         for (int i = 0; i < kAudioQueueNumBuffers; ++i) {
             if (p->aqBuffers[i] != buffer) continue;
             if (p->aqBufferGeneration[i] == p->generation) {
@@ -339,7 +337,9 @@ static void audio_queue_output_cb(void* userData, AudioQueueRef aq, AudioQueueBu
     if (st != noErr) {
         std::lock_guard<std::mutex> lock(p->mtx);
         if (!p->shutdown && p->generation == read.generation) {
-            p->outputError = -1;
+            p->aqNeedsReset = true;
+            if (!p->aqResetting && !g_hostAudioSuspended.load(std::memory_order_acquire) &&
+                st != kAudioQueueErr_EnqueueDuringReset) p->outputError = -1;
             p->cv.notify_all();
             std::fprintf(stderr, "[KuDroidAudio] enqueue failed status=%d\n", static_cast<int>(st));
         }
@@ -351,7 +351,8 @@ static void audio_queue_output_cb(void* userData, AudioQueueRef aq, AudioQueueBu
 static bool open_audio_queue(AudioPlayer* p) {
     if (p->shutdown) return false;
     if (p->aq) return true;
-    apple_ensure_audio_session_active();
+    if (g_hostAudioSuspended.load(std::memory_order_acquire)) return true;
+    if (!apple_activate_audio_session()) return false;
     AudioStreamBasicDescription asbd = {};
     // CoreAudio converts the source sample rate to the hardware rate.
     asbd.mSampleRate = p->sampleRate;
@@ -373,7 +374,7 @@ static bool open_audio_queue(AudioPlayer* p) {
     if (st == noErr && p->aq) {
         {
             std::lock_guard<std::mutex> lock(p->mtx);
-            p->ring.assign(kRingBufferFrames * p->channels, 0);
+            if (p->ring.empty()) p->ring.assign(kRingBufferFrames * p->channels, 0);
         }
         const UInt32 bytes = static_cast<UInt32>(kAudioQueueFramesPerBuffer * p->channels * 2);
         for (int i = 0; i < kAudioQueueNumBuffers && st == noErr; ++i) {
@@ -381,10 +382,12 @@ static bool open_audio_queue(AudioPlayer* p) {
             if (st != noErr) break;
             std::memset(p->aqBuffers[i]->mAudioData, 0, bytes);
             p->aqBuffers[i]->mAudioDataByteSize = bytes;
+            p->aqBufferGeneration[i] = p->generation;
             st = AudioQueueEnqueueBuffer(p->aq, p->aqBuffers[i], 0, nullptr);
         }
         if (st == noErr) st = AudioQueueSetParameter(p->aq, kAudioQueueParam_Volume, p->volume);
-        if (st == noErr && p->playState == SL_PLAYSTATE_PLAYING) {
+        if (st == noErr && p->playState == SL_PLAYSTATE_PLAYING &&
+            !g_hostAudioSuspended.load(std::memory_order_acquire)) {
             st = AudioQueueStart(p->aq, nullptr);
             p->started = st == noErr;
         }
@@ -531,7 +534,8 @@ static int32_t player_write_pcm(AudioPlayer* p, const void* data, uint32_t sizeB
                 : kRingBufferFrames;
         const size_t room = fillLimit > p->ringCount ? fillLimit - p->ringCount : 0;
         if (!room) {
-            if (!blocking || p->playState != SL_PLAYSTATE_PLAYING) break;
+            if (!blocking || p->playState != SL_PLAYSTATE_PLAYING ||
+                g_hostAudioSuspended.load(std::memory_order_acquire)) break;
             if (timeoutNanos >= 0) {
                 if (p->cv.wait_until(lock, deadline) == std::cv_status::timeout) break;
             } else p->cv.wait(lock);
@@ -581,21 +585,105 @@ static void reset_audio_ring(AudioPlayer* p) {
 #if defined(__APPLE__)
 static OSStatus reset_audio_output(AudioPlayer* p) {
     if (!p->aq) return noErr;
+    {
+        std::lock_guard<std::mutex> lock(p->mtx);
+        p->aqResetting = true;
+        p->aqNeedsReset = true;
+    }
+    p->started = false;
     OSStatus st = AudioQueueStop(p->aq, true);
-    if (st != noErr) return st;
-    st = AudioQueueReset(p->aq);
-    if (st != noErr) return st;
-    for (int i = 0; i < kAudioQueueNumBuffers; ++i) {
+    if (st == noErr) st = AudioQueueReset(p->aq);
+    for (int i = 0; i < kAudioQueueNumBuffers && st == noErr; ++i) {
         auto* buffer = p->aqBuffers[i];
         p->aqBufferFrames[i] = 0;
         p->aqBufferGeneration[i] = p->generation;
         std::memset(buffer->mAudioData, 0, buffer->mAudioDataBytesCapacity);
         buffer->mAudioDataByteSize = buffer->mAudioDataBytesCapacity;
         st = AudioQueueEnqueueBuffer(p->aq, buffer, 0, nullptr);
-        if (st != noErr) return st;
     }
-    p->started = false;
-    return noErr;
+    {
+        std::lock_guard<std::mutex> lock(p->mtx);
+        p->aqResetting = false;
+        p->aqNeedsReset = st != noErr;
+    }
+    return st;
+}
+
+// Called with the control mutex held.
+static OSStatus start_audio_output(AudioPlayer* p) {
+    if (g_hostAudioSuspended.load(std::memory_order_acquire)) return noErr;
+    bool needsReset;
+    {
+        std::lock_guard<std::mutex> lock(p->mtx);
+        needsReset = p->aqNeedsReset || p->outputError != 0;
+    }
+    OSStatus st = needsReset ? reset_audio_output(p) : noErr;
+    if (st == noErr) {
+        {
+            std::lock_guard<std::mutex> lock(p->mtx);
+            p->outputError = 0;
+        }
+        st = AudioQueueStart(p->aq, nullptr);
+    }
+    p->started = st == noErr;
+    if (st != noErr) {
+        std::lock_guard<std::mutex> lock(p->mtx);
+        p->outputError = -1;
+        p->aqNeedsReset = true;
+        std::fprintf(stderr, "[KuDroidAudio] output restart failed status=%d\n", static_cast<int>(st));
+    }
+    p->cv.notify_all();
+    return st;
+}
+
+static std::vector<std::shared_ptr<AudioPlayer>> snapshot_audio_players() {
+    std::lock_guard<std::mutex> lock(g_players_mtx);
+    std::vector<std::shared_ptr<AudioPlayer>> players;
+    players.reserve(g_players.size());
+    for (const auto& kv : g_players) players.push_back(kv.second);
+    return players;
+}
+
+extern "C" void kudroid_audio_session_suspend(void) {
+    g_hostAudioSuspended.store(true, std::memory_order_release);
+    size_t paused = 0;
+    for (const auto& p : snapshot_audio_players()) {
+        auto control = player_control_lock(p.get());
+        if (!control.owns_lock()) continue;
+        if (p->aq && p->started) {
+            ++paused;
+            const OSStatus st = AudioQueuePause(p->aq);
+            if (st != noErr) {
+                std::lock_guard<std::mutex> lock(p->mtx);
+                p->aqNeedsReset = true;
+                std::fprintf(stderr, "[KuDroidAudio] output pause failed status=%d\n", static_cast<int>(st));
+            }
+        }
+        p->started = false;
+        {
+            std::lock_guard<std::mutex> lock(p->mtx);
+            p->cv.notify_all();
+        }
+    }
+    std::fprintf(stderr, "[KuDroidAudio] session suspended outputs=%zu\n", paused);
+}
+
+extern "C" void kudroid_audio_session_resume(void) {
+    if (!apple_activate_audio_session()) return;
+    g_hostAudioSuspended.store(false, std::memory_order_release);
+    size_t resumed = 0;
+    for (const auto& p : snapshot_audio_players()) {
+        auto control = player_control_lock(p.get());
+        if (!control.owns_lock()) continue;
+        {
+            std::lock_guard<std::mutex> lock(p->mtx);
+            if (p->shutdown || p->playState != SL_PLAYSTATE_PLAYING) continue;
+        }
+        if (p->aq) {
+            if (start_audio_output(p.get()) == noErr) ++resumed;
+        } else if (open_audio_queue(p.get()) && p->started) ++resumed;
+    }
+    std::fprintf(stderr, "[KuDroidAudio] session resumed outputs=%zu\n", resumed);
 }
 #endif
 
@@ -611,10 +699,14 @@ static int32_t set_player_state(AudioPlayer* p, uint32_t state, bool reset = fal
     }
 #if defined(__APPLE__)
     if (p->aq) {
-        const OSStatus st = reset ? reset_audio_output(p) :
-            state == SL_PLAYSTATE_PLAYING ? (p->started ? noErr : AudioQueueStart(p->aq, nullptr)) :
-                                           (p->started ? AudioQueuePause(p->aq) : noErr);
-        p->started = state == SL_PLAYSTATE_PLAYING && st == noErr;
+        OSStatus st = reset ? reset_audio_output(p) : noErr;
+        if (st == noErr && state == SL_PLAYSTATE_PLAYING &&
+            !g_hostAudioSuspended.load(std::memory_order_acquire)) {
+            st = start_audio_output(p);
+        } else {
+            if (st == noErr && p->started) st = AudioQueuePause(p->aq);
+            p->started = false;
+        }
         if (st != noErr) {
             std::lock_guard<std::mutex> lock(p->mtx);
             p->outputError = -1;
@@ -824,8 +916,13 @@ extern "C" SLresult bionic_slVolumeSetVolumeLevel(SLVolumeItf self, int32_t mill
 }
 
 extern "C" SLresult bionic_slVolumeGetVolumeLevel(SLVolumeItf self, int32_t* pLevel) {
-    (void)self;
-    if (pLevel) *pLevel = 0;
+    auto player = find_player(self);
+    if (!player) return SL_RESULT_PARAMETER_INVALID;
+    if (pLevel) {
+        const float lin = player->volume;
+        if (lin <= 0.0f) *pLevel = -9600;
+        else *pLevel = static_cast<int32_t>(std::round(2000.0f * std::log10(lin)));
+    }
     return SL_RESULT_SUCCESS;
 }
 

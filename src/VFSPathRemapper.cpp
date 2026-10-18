@@ -2325,20 +2325,31 @@ size_t vfs_fread(void* buf, size_t size, size_t count, FILE* stream) {
             return 0;
         }
         const off_t cur_pos = g_apkStreamPos[sid].load(std::memory_order_relaxed);
-        ssize_t rd = 0;
+        size_t total_read = 0;
+        char* out_buf = static_cast<char*>(buf);
         if (fd >= 0) {
-            rd = ::pread(fd, buf, total_want, cur_pos);
-        }
-        if (rd < 0) {
-            g_apkStreamErr[sid].store(1, std::memory_order_relaxed);
-            n = 0;
-        } else {
-            if (static_cast<size_t>(rd) < total_want) {
-                g_apkStreamEof[sid].store(1, std::memory_order_relaxed);
+            while (total_read < total_want) {
+                const ssize_t rd = ::pread(fd, out_buf + total_read, total_want - total_read,
+                                          cur_pos + static_cast<off_t>(total_read));
+                if (rd < 0) {
+                    if (errno == EINTR) continue;
+                    g_apkStreamErr[sid].store(1, std::memory_order_relaxed);
+                    break;
+                }
+                if (rd == 0) {
+                    g_apkStreamEof[sid].store(1, std::memory_order_relaxed);
+                    break;
+                }
+                total_read += static_cast<size_t>(rd);
             }
-            g_apkStreamPos[sid].store(cur_pos + rd, std::memory_order_relaxed);
-            n = static_cast<size_t>(rd) / size;
+        } else {
+            // No descriptor behind the stream: an error, not a quiet zero a caller could
+            // loop on forever waiting for EOF.
+            g_apkStreamErr[sid].store(1, std::memory_order_relaxed);
+            errno = EBADF;
         }
+        g_apkStreamPos[sid].store(cur_pos + static_cast<off_t>(total_read), std::memory_order_relaxed);
+        n = total_read / size;
     } else {
         n = std::fread(buf, size, count, stream);
     }
@@ -3024,15 +3035,11 @@ int vfs_feof(FILE* stream) {
     if (!stream) return 0;
     const int sid = apk_stream_id(stream);
     if (sid >= 0) {
-        // Under the stream lock so the flag and the position come from one op:
-        // read separately, a read that has just set eof can be seen before its
-        // position update lands.
         std::lock_guard<std::mutex> slock(g_apkStreamMtx[sid]);
+        const off_t size = g_apkStreamSize[sid].load(std::memory_order_relaxed);
+        const off_t pos = g_apkStreamPos[sid].load(std::memory_order_relaxed);
         return (g_apkStreamEof[sid].load(std::memory_order_relaxed) ||
-                g_apkStreamPos[sid].load(std::memory_order_relaxed) >=
-                    g_apkStreamSize[sid].load(std::memory_order_relaxed))
-                   ? 1
-                   : 0;
+                (size > 0 && pos >= size)) ? 1 : 0;
     }
     return std::feof(stream);
 }
@@ -3230,9 +3237,46 @@ int vfs_chown(const char* path, uid_t owner, gid_t group) {
 }
 int vfs_unlink(const char* path) { return ::unlink(VFSPathRemapper::getInstance().remap(path).c_str()); }
 int vfs_remove(const char* path) { return std::remove(VFSPathRemapper::getInstance().remap(path).c_str()); }
+// rename(2) on paths that are already remapped. POSIX replaces an existing destination
+// atomically, so nothing is deleted first: a failed move leaves the previous file in place.
+// Only what rename cannot do itself is handled:
+//  - a destination whose parent directory is missing (the source exists, so it is the parent);
+//  - a move across file systems (EXDEV): the copy lands beside the destination and is renamed
+//    into place, so the destination is never seen half written.
+int vfs_rename_resolved(const char* src, const char* dst) {
+    if (std::rename(src, dst) == 0) return 0;
+    const int err = errno;
+    struct stat st;
+    if (::lstat(src, &st) != 0) {
+        // Nothing to move: the destination stays untouched and no directory is created.
+        errno = err;
+        return -1;
+    }
+    if (err == ENOENT) {
+        const std::filesystem::path parent = std::filesystem::path(dst).parent_path();
+        std::error_code ec;
+        if (!parent.empty()) std::filesystem::create_directories(parent, ec);
+        if (!parent.empty() && !ec && std::rename(src, dst) == 0) return 0;
+        errno = err;
+        return -1;
+    }
+    if (err == EXDEV && S_ISREG(st.st_mode)) {
+        const std::string staged = std::string(dst) + ".kudroid-move";
+        std::error_code ec;
+        std::filesystem::copy_file(src, staged, std::filesystem::copy_options::overwrite_existing, ec);
+        if (!ec && std::rename(staged.c_str(), dst) == 0) {
+            ::unlink(src);
+            return 0;
+        }
+        ::unlink(staged.c_str());
+    }
+    errno = err;
+    return -1;
+}
+
 int vfs_rename(const char* oldPath, const char* newPath) {
     const auto& remapper = VFSPathRemapper::getInstance();
-    return std::rename(remapper.remap(oldPath).c_str(), remapper.remap(newPath).c_str());
+    return vfs_rename_resolved(remapper.remap(oldPath).c_str(), remapper.remap(newPath).c_str());
 }
 
 int vfs_mkdir(const char* path, mode_t mode) {

@@ -52,7 +52,21 @@ struct GuestVarargs {
 // zero writes nothing at all, not even a terminator.
 size_t FormatGuestVarargs(char* out, size_t size, const char* format,
                           const GuestVarargs* registers, unsigned firstGpIndex,
+                          unsigned firstFpIndex = 0, const char* errorMessage = nullptr);
+
+// Pack printf arguments into Darwin arm64's eight-byte variadic stack slots.
+bool PackGuestPrintfArguments(const char* format, const GuestVarargs* registers,
+                             unsigned firstGpIndex, unsigned firstFpIndex,
+                             uint64_t* slots, size_t capacity, size_t* count);
+bool PackGuestPrintfArguments(const wchar_t* format, const GuestVarargs* registers,
+                             unsigned firstGpIndex, unsigned firstFpIndex,
+                             uint64_t* slots, size_t capacity, size_t* count);
+
+#if defined(__APPLE__) && defined(__aarch64__)
+int FormatGuestWideVarargs(wchar_t* out, size_t size, const wchar_t* format,
+                          const GuestVarargs* registers, unsigned firstGpIndex,
                           unsigned firstFpIndex = 0);
+#endif
 
 // A guest's va_list, as AAPCS64 defines it (§B.4, "va_list type").
 //

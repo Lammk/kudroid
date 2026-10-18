@@ -872,6 +872,26 @@ void test_leaf_routine_after_adrp_is_split_off() {
           "its x18 define and use are renamed");
 }
 
+// A tail call hands the callee this function's return address, so x30 is live up to it. With
+// every other scratch register busy, the allocator's last resort used to be x30: the
+// function then tail-called with a data value in x30 and the callee "returned" into it.
+void test_tail_call_keeps_return_address_register() {
+    std::printf("[rewrite] x30 is not borrowed in a function that ends in a tail call\n");
+    std::vector<std::uint32_t> code;
+    code.push_back(0x8B010000u | (1u << 16) | (0u << 5) | 18u);  // add x18, x0, x1
+    for (unsigned r = 0; r <= 15; ++r) {
+        code.push_back(0x91000000u | (r << 5) | r);  // add xN, xN, #0 (every candidate busy)
+    }
+    code.push_back(0x91001240u);  // add x0, x18, #4 (the use)
+    code.push_back(0x14000100u);  // b +0x400: out of the function, a tail call
+    const std::uint32_t def = code[0];
+    SynthElf elf(code, false);
+    const auto st = elf.run();
+    Check(elf.word(0) != (def & ~31u | 30u), "x30 did not become the replacement");
+    Check(st.rewritten == 0 && elf.word(0) == def,
+          "the function is left for the virtual-x18 path, bytes untouched");
+}
+
 void test_loop_preserves_live_mask() {
     std::printf("[rewrite] backward edges preserve live replacement candidates\n");
     std::vector<std::uint32_t> code;
@@ -1065,6 +1085,7 @@ int main(int argc, char** argv) {
     test_loop_preserves_live_mask();
     test_multiply_add_accumulator_renamed();
     test_leaf_routine_after_adrp_is_split_off();
+    test_tail_call_keeps_return_address_register();
     test_simd_immediate_forms_do_not_block_rewrite();
     test_window_exit_keeps_registers_live();
     test_branch_definitions_share_replacement();

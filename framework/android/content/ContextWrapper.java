@@ -37,7 +37,15 @@ public class ContextWrapper extends Context {
     public File getDatabasePath(String name) { return mBase != null ? mBase.getDatabasePath(name) : new File("/data/data/com.kudroid.app/databases/" + name); }
     public File getCodeCacheDir() { return mBase != null ? mBase.getCodeCacheDir() : new File("/data/data/com.kudroid.app/code_cache"); }
     public File getNoBackupFilesDir() { return mBase != null ? mBase.getNoBackupFilesDir() : new File("/data/data/com.kudroid.app/no_backup"); }
-    public SharedPreferences getSharedPreferences(String name, int mode) { return mBase != null ? mBase.getSharedPreferences(name, mode) : new SharedPreferencesImpl(name); }
+    public SharedPreferences getSharedPreferences(String name, int mode) {
+        if (mBase != null) return mBase.getSharedPreferences(name, mode);
+        Context app = getApplicationContext();
+        if (app != null && app != this) return app.getSharedPreferences(name, mode);
+        String pkg = getPackageName();
+        File dir = new File("/data/data/" + (pkg != null ? pkg : "com.kudroid.app") + "/shared_prefs");
+        if (!dir.exists()) dir.mkdirs();
+        return new SharedPreferencesImpl(name, dir);
+    }
     public Object getSystemService(String name) { return mBase != null ? mBase.getSystemService(name) : super.getSystemService(name); }
     // The Class overload has to delegate too, or a wrapped Context answers the two
     // overloads from different objects. Activity is a ContextWrapper, so this is the

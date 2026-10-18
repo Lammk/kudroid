@@ -43,14 +43,19 @@
 #include "kudroid/platform/AudioShim.h"
 #include "kudroid/platform/AudioCapture.h"
 #include "kudroid/platform/CameraShim.h"
+#include "kudroid/platform/MediaPlayerHost.h"
+#include "kudroid/platform/SurfaceTextureHost.h"
+#include "kudroid/platform/SensorHost.h"
 #include "kudroid/platform/NetworkState.h"
 #include "kudroid/platform/FramePacer.h"
+#include "kudroid/platform/GuestClock.h"
 #include "kudroid/platform/JavaCanvasRenderer.h"
 #include "kudroid/platform/GraphicsShim.h"
 #include "kudroid/KuArtRuntime.h"
 
 // Native side of MessageQueue's AOSP-style wake primitive and Looper-touch
 // drain (implemented in platform/InputShim.cpp and KuArtRuntime.cpp).
+extern "C" void kudroid_console_init_nonblocking(void);
 extern "C" int64_t kudroid_looper_init(void);
 extern "C" void kudroid_looper_poll(int64_t ptr, int64_t timeout_millis);
 extern "C" void kudroid_looper_wake(int64_t ptr);
@@ -1680,10 +1685,7 @@ bool Invoke_java_lang_System(Interpreter* interp, const char* name, const DexVal
         return true;
     }
     if (std::strcmp(name, "nanoTime") == 0) {
-        auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                      std::chrono::steady_clock::now().time_since_epoch())
-                      .count();
-        *result = DexValue::Long(ns);
+        *result = DexValue::Long(guest_monotonic_ns());
         return true;
     }
     if (std::strcmp(name, "identityHashCode") == 0) {
@@ -2456,9 +2458,9 @@ bool Invoke_java_io_File(Interpreter* interp, const char* name, const DexValue* 
         // /data/data would move a container file to a path outside it and fail.
         const std::string dest = RemapJavaPath(GetFilePath(num_args > 1 ? args[1] : DexValue()));
         int rc = -1;
-        {
+        if (!dest.empty()) {
             VmLockRelease unlocked;
-            if (!dest.empty()) rc = std::rename(path.c_str(), dest.c_str());
+            rc = kudroid::vfs_rename_resolved(path.c_str(), dest.c_str());
         }
         *result = DexValue::Int(rc == 0 ? 1 : 0);
         return true;
@@ -2679,6 +2681,8 @@ bool Invoke_java_io_PrintStream(Interpreter* /*interp*/, const char* name, const
         if (arr != nullptr) {
             uint8_t* buf = reinterpret_cast<uint8_t*>(arr + 1);
             VmLockRelease unlocked;
+            // Console output must never block the thread that produced it.
+            kudroid_console_init_nonblocking();
             write(fd == 2 ? STDERR_FILENO : STDOUT_FILENO, buf, static_cast<size_t>(arr->length));
         }
         return true;
@@ -3244,10 +3248,7 @@ bool Invoke_android_view_Choreographer(Interpreter* interp, const char* name,
             *result = DexValue::Long(in_frame);
             return true;
         }
-        struct timespec ts {};
-        ::clock_gettime(CLOCK_MONOTONIC, &ts);
-        *result = DexValue::Long(static_cast<int64_t>(ts.tv_sec) * 1000000000ll +
-                                 static_cast<int64_t>(ts.tv_nsec));
+        *result = DexValue::Long(guest_monotonic_ns());
         return true;
     }
     return false;
@@ -3263,6 +3264,30 @@ bool Invoke_keep_screen_on(Interpreter* /*interp*/, const char* name, const DexV
 }
 
 // AudioTrack forwards to the host AudioShim queue.
+bool Invoke_android_media_MediaPlayer(const char* name, const DexValue* args,
+                                     size_t count, DexValue* result) {
+    if (std::strcmp(name, "nativeCreate") == 0) {
+        VmLockRelease unlocked;
+        *result = DexValue::Long(kudroid_media_player_create());
+        return true;
+    }
+    if (std::strcmp(name, "nativeSource") == 0 && count == 5) {
+        const std::string path = args[1].l ? GetStringUtf8(args[1]) : "";
+        const bool hasPath = args[1].l != nullptr;
+        VmLockRelease unlocked;
+        *result = DexValue::Int(kudroid_media_player_source(args[0].j,
+            hasPath ? path.c_str() : nullptr, args[2].i, args[3].j, args[4].j));
+        return true;
+    }
+    if (std::strcmp(name, "nativeCommand") == 0 && count == 4) {
+        VmLockRelease unlocked;
+        *result = DexValue::Long(kudroid_media_player_command(args[0].j, args[1].i,
+                                                            args[2].d, args[3].d));
+        return true;
+    }
+    return false;
+}
+
 bool Invoke_android_media_AudioTrack(Interpreter* interp, const char* name,
                                      const DexValue* args, size_t num_args,
                                      DexValue* result) {
@@ -3982,6 +4007,7 @@ bool Invoke_android_os_MessageQueue(Interpreter* /*interp*/, const char* name,
             kuart_surface_drain_pending();
             kuart_camera_drain_pending();
             kuart_network_drain_pending();
+            kuart_media_drain_pending();
             kuart_host_events_drain();
             kuart_touch_drain_pending();
         }
@@ -3999,6 +4025,23 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
     if (std::strcmp(desc, "Ljava/lang/Object;") == 0) return Invoke_java_lang_Object(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/lang/Class;") == 0) return Invoke_java_lang_Class(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/lang/System;") == 0) return Invoke_java_lang_System(interp, name, args, num_args, result);
+    if (std::strcmp(desc, "Landroid/os/SystemClock;") == 0) {
+        if (std::strcmp(name, "uptimeMillis") == 0) {
+            *result = DexValue::Long(guest_monotonic_ns() / 1000000ll);
+            return true;
+        }
+        if (std::strcmp(name, "currentThreadTimeMillis") == 0) {
+            *result = DexValue::Long(guest_clock_ns(3) / 1000000ll);
+            return true;
+        }
+        if (std::strcmp(name, "elapsedRealtime") == 0 ||
+            std::strcmp(name, "elapsedRealtimeNanos") == 0) {
+            const int64_t ns = guest_clock_ns(7);
+            *result = DexValue::Long(std::strcmp(name, "elapsedRealtime") == 0
+                                        ? ns / 1000000ll : ns);
+            return true;
+        }
+    }
     if (std::strcmp(desc, "Ljava/lang/Math;") == 0) return Invoke_java_lang_Math(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/lang/Float;") == 0) return Invoke_java_lang_Float(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/lang/Double;") == 0) return Invoke_java_lang_Double(interp, name, args, num_args, result);
@@ -4080,6 +4123,21 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
     if (std::strcmp(desc, "Landroid/hardware/Camera;") == 0) {
         return Invoke_android_hardware_Camera(interp, name, args, num_args, result);
     }
+    if (std::strcmp(desc, "Landroid/graphics/SurfaceTexture;") == 0) {
+        if (std::strcmp(name, "nativeCreate") == 0 && num_args == 2) {
+            kudroid_surface_texture_create(args[0].i, static_cast<unsigned>(args[1].i));
+        } else if (std::strcmp(name, "nativeRelease") == 0 && num_args == 1) {
+            kudroid_surface_texture_release(args[0].i);
+        } else if (std::strcmp(name, "nativeAttach") == 0 && num_args == 2) {
+            kudroid_surface_texture_attach(args[0].i, static_cast<unsigned>(args[1].i));
+        } else if (std::strcmp(name, "nativeDetach") == 0 && num_args == 1) {
+            kudroid_surface_texture_detach(args[0].i);
+        } else if (std::strcmp(name, "nativeUpdate") == 0 && num_args == 1) {
+            VmLockRelease unlocked;
+            *result = DexValue::Long(kudroid_surface_texture_update(args[0].i));
+        } else return false;
+        return true;
+    }
     if (std::strcmp(desc, "Landroid/graphics/Bitmap;") == 0) {
         return Invoke_android_graphics_Bitmap(interp, name, args, num_args, result);
     }
@@ -4096,6 +4154,27 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
         return Invoke_libcore_io_KuZlib(interp, name, args, num_args, result);
     }
     // AudioTrack is the Java audio path used by FMOD.
+    if (std::strcmp(desc, "Landroid/media/MediaPlayer;") == 0) {
+        return Invoke_android_media_MediaPlayer(name, args, num_args, result);
+    }
+    if (std::strcmp(desc, "Landroid/hardware/SensorManager;") == 0) {
+        if (std::strcmp(name, "nativeAvailable") == 0 && num_args == 1) {
+            *result = DexValue::Int(kudroid_sensor_available(args[0].i));
+            return true;
+        }
+        if (std::strcmp(name, "nativeConfigure") == 0 && num_args == 2) {
+            VmLockRelease unlocked;
+            kudroid_sensor_java_configure(args[0].i, args[1].i);
+            return true;
+        }
+        if (std::strcmp(name, "nativeRead") == 0 && num_args == 2) {
+            auto* output = reinterpret_cast<DexArray*>(args[1].l);
+            *result = DexValue::Long(output ? kudroid_sensor_read(args[0].i,
+                reinterpret_cast<float*>(output->Data()), output->length) : 0);
+            return true;
+        }
+        return false;
+    }
     if (std::strcmp(desc, "Landroid/media/AudioTrack;") == 0) {
         return Invoke_android_media_AudioTrack(interp, name, args, num_args, result);
     }

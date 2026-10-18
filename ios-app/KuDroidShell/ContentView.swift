@@ -988,33 +988,74 @@ struct DebugView: View {
 
 // mark: - native connector support functions
 
-/// Turn on audio session playback for CoreAudio (AudioQueue in AudioShim) to play
-/// is audible — without an active session, iOS is silent.
-func activateAudioSession() {
-    let session = AVAudioSession.sharedInstance()
-    // Build runs with -swift-version 4 (CMake's default when enable_language(Swift)).
-    // In this mode NS_TYPED_EXTENSIBLE_ENUM of ObjC (AVAudioSession.Category / Mode)
-    // imported as raw NSString typealias → no member .playback/.default,
-    // param only accepts String. Use raw constant string (correct ObjC value) —
-    // compiles in Swift 4 mode; If you later upgrade to Swift 5, change back
-    // AVAudioSession.Category.playback / AVAudioSession.Mode.default.
-    do {
-        // An open microphone recorder needs a record-capable category; reasserting
-        // playback here would cut it off.
-        if kudroid_audio_capture_active() > 0 {
-            try session.setCategory(.playAndRecord,
-                                    mode: .default,
-                                    options: [.mixWithOthers, .allowBluetooth, .defaultToSpeaker])
-        } else {
-            try session.setCategory(.playback,
-                                    mode: .default,
-                                    options: [.mixWithOthers])
-        }
-        try session.setActive(true)
-    } catch {
-        // Never silent: a failed session is exactly the consume-but-silent bug.
-        print("[KuDroidAudio] activateAudioSession failed: \(error)")
+private final class AudioSessionLifecycle {
+    static let shared = AudioSessionLifecycle()
+    private var observers: [NSObjectProtocol] = []
+    private var inactive = false
+    private var interrupted = false
+
+    private init() {
+        let center = NotificationCenter.default
+        observers = [
+            center.addObserver(forName: UIApplication.willResignActiveNotification,
+                               object: nil, queue: .main) { [weak self] _ in
+                self?.inactive = true
+                kudroid_audio_session_suspend()
+            },
+            center.addObserver(forName: UIApplication.didBecomeActiveNotification,
+                               object: nil, queue: .main) { [weak self] _ in
+                guard let self = self else { return }
+                self.inactive = false
+                // A suspended process may never receive the interruption end event.
+                self.interrupted = false
+                self.resume()
+            },
+            center.addObserver(forName: AVAudioSession.interruptionNotification,
+                               object: AVAudioSession.sharedInstance(), queue: .main) { [weak self] notification in
+                guard let self = self,
+                      let value = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                      let type = AVAudioSession.InterruptionType(rawValue: value) else { return }
+                switch type {
+                case .began:
+                    self.interrupted = true
+                    kudroid_audio_session_suspend()
+                case .ended:
+                    self.interrupted = false
+                    self.resume()
+                @unknown default:
+                    break
+                }
+            }
+        ]
     }
+
+    @discardableResult
+    func activate() -> Bool {
+        guard !inactive && !interrupted else { return false }
+        let session = AVAudioSession.sharedInstance()
+        do {
+            if kudroid_audio_capture_active() > 0 {
+                try session.setCategory(.playAndRecord, mode: .default,
+                                        options: [.mixWithOthers, .allowBluetoothHFP, .defaultToSpeaker])
+            } else {
+                try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+            }
+            try session.setActive(true)
+            return true
+        } catch {
+            print("[KuDroidAudio] session activation failed: \(error)")
+            return false
+        }
+    }
+
+    private func resume() {
+        guard activate() else { return }
+        kudroid_audio_session_resume()
+    }
+}
+
+func activateAudioSession() {
+    AudioSessionLifecycle.shared.activate()
 }
 
 /// Publish the OS authorization of the sensors a guest can ask for, so the guest's
@@ -1744,6 +1785,10 @@ func kudroidSetGuestPreviewLayer(_ layer: CALayer?) {
     }
 }
 
+func kudroidSetGuestVideoLayer(_ handle: Int64, _ layer: CALayer?) {
+    NativeMetalViewController.sCurrentRunnerVC?.metalView.setGuestVideoLayer(handle, layer)
+}
+
 class NativeMetalViewController: UIViewController {
     let appName: String
     let onCrash: (String, String) -> Void
@@ -1751,8 +1796,10 @@ class NativeMetalViewController: UIViewController {
     fileprivate var metalView: NativeMetalView!
     private var crashCheckTimer: Timer?
     private var keyboardObservers: [NSObjectProtocol] = []
+    // True while the guest Activity was paused because iOS resigned active; gates
+    // the matching resume so a fresh didBecomeActive never re-enters launch state.
+    private var guestPausedForBackground = false
     private var statusLabel: UILabel!
-    private let motionManager = CMMotionManager()
     private var lastRequestedOrientation: Int32 = -1
 
     init(appName: String, onCrash: @escaping (String, String) -> Void) {
@@ -1784,6 +1831,14 @@ class NativeMetalViewController: UIViewController {
         return .allButUpsideDown
     }
 
+    override var preferredScreenEdgesDeferringSystemGestures: UIRectEdge {
+        return .all
+    }
+
+    override var prefersHomeIndicatorAutoHidden: Bool {
+        return true
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         activateAudioSession()
@@ -1810,21 +1865,7 @@ class NativeMetalViewController: UIViewController {
             statusLabel.widthAnchor.constraint(greaterThanOrEqualToConstant: 180)
         ])
 
-        // Start CoreMotion to transmit sensor data to the KuDroid bridge
-        if motionManager.isAccelerometerAvailable {
-            motionManager.accelerometerUpdateInterval = 0.02 // 50 Hz
-            motionManager.startAccelerometerUpdates(to: .main) { data, _ in
-                guard let data = data else { return }
-                kudroid_inject_sensor_event(1, Float(data.acceleration.x * 9.81), Float(data.acceleration.y * 9.81), Float(data.acceleration.z * 9.81))
-            }
-        }
-        if motionManager.isGyroAvailable {
-            motionManager.gyroUpdateInterval = 0.02
-            motionManager.startGyroUpdates(to: .main) { data, _ in
-                guard let data = data else { return }
-                kudroid_inject_sensor_event(4, Float(data.rotationRate.x), Float(data.rotationRate.y), Float(data.rotationRate.z))
-            }
-        }
+        KuDroidSensorBridge.shared.register()
 
         NativeMetalViewController.sCurrentRunnerVC = self
 
@@ -1857,12 +1898,28 @@ class NativeMetalViewController: UIViewController {
         // Set up Permission Request Dialog Callback
         kudroid_set_permission_prompt_callback(onKuDroidPermissionPrompt)
         registerKuDroidCameraHost()
+        registerKuDroidMediaPlayerHost()
         // The user can change microphone/camera access in Settings while the app is away.
-        refreshHostAuthorizations()
         keyboardObservers.append(NotificationCenter.default.addObserver(
             forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
-        ) { _ in
+        ) { [weak self] _ in
             refreshHostAuthorizations()
+            self?.metalView?.setNeedsLayout()
+            if let self = self, self.guestPausedForBackground {
+                self.guestPausedForBackground = false
+                kudroid_send_lifecycle_event(102)
+            }
+        })
+        // Android delivers onPause/onResume with app foreground; iOS must mirror it or
+        // Unity never runs OnApplicationPause, so save-on-pause paths (settings commit)
+        // never execute and the engine keeps pumping frames into a suspended process.
+        keyboardObservers.append(NotificationCenter.default.addObserver(
+            forName: UIApplication.willResignActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self = self, self.isStarted else { return }
+            self.metalView?.cancelActiveTouches()
+            self.guestPausedForBackground = true
+            kudroid_send_lifecycle_event(101)
         })
 
         startAppIfNeeded()
@@ -1874,8 +1931,7 @@ class NativeMetalViewController: UIViewController {
     private func cleanupAndResetOrientation() {
         UIApplication.shared.isIdleTimerDisabled = false
         NativeMetalViewController.isGlobalAppRunning = false
-        motionManager.stopAccelerometerUpdates()
-        motionManager.stopGyroUpdates()
+        KuDroidSensorBridge.shared.stop()
         crashCheckTimer?.invalidate()
         for token in keyboardObservers {
             NotificationCenter.default.removeObserver(token)
@@ -1883,6 +1939,7 @@ class NativeMetalViewController: UIViewController {
         keyboardObservers = []
         kudroid_set_soft_input_callbacks(nil, nil)
         kudroid_set_open_url_callback(nil)
+        metalView?.cancelActiveTouches()
         metalView?.resignFirstResponder()
         kudroid_set_soft_input_visible(0)
         kudroid_stop_app()
@@ -2095,7 +2152,7 @@ class NativeMetalViewController: UIViewController {
     }
 }
 
-class NativeMetalView: UIView {
+class NativeMetalView: GuestTouchView {
     override class var layerClass: AnyClass {
         return CAMetalLayer.self
     }
@@ -2110,6 +2167,19 @@ class NativeMetalView: UIView {
 
     // Camera preview shown over the guest's surface; kept at the view's size.
     private var guestPreviewLayer: CALayer?
+    private var guestVideoLayers: [Int64: CALayer] = [:]
+
+    fileprivate func setGuestVideoLayer(_ handle: Int64, _ video: CALayer?) {
+        if guestVideoLayers[handle] !== video {
+            guestVideoLayers[handle]?.removeFromSuperlayer()
+            guestVideoLayers[handle] = video
+            if let video = video {
+                video.zPosition = 2
+                video.frame = bounds
+                layer.addSublayer(video)
+            }
+        }
+    }
 
     fileprivate func setGuestPreviewLayer(_ preview: CALayer?) {
         if guestPreviewLayer !== preview {
@@ -2155,8 +2225,6 @@ class NativeMetalView: UIView {
     // Last drawable size reported to the guest. layoutSubviews fires on rotation;
     // without forwarding, the guest renders forever into the launch geometry.
     private var lastReportedSize: CGSize = .zero
-    // Stable finger identities for the guest (see TouchPointerTracker).
-    private let touchTracker = TouchPointerTracker()
     // Guest orientation at the last forward. Rotation can arrive with identical
     // bounds (scale-only change, or a rotate-then-rotate-back between layouts);
     // the guest still needs the forward because its orientation value changed.
@@ -2165,6 +2233,7 @@ class NativeMetalView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         guestPreviewLayer?.frame = bounds
+        for video in guestVideoLayers.values { video.frame = bounds }
         guard let metalLayer = self.layer as? CAMetalLayer else { return }
         let scale = UIScreen.main.scale
         let sz = CGSize(width: bounds.width * scale, height: bounds.height * scale)
@@ -2182,65 +2251,7 @@ class NativeMetalView: UIView {
         }
     }
 
-    /// Forward one callback as one event carrying every live finger.
-    ///
-    /// `action` is the guest action base (0 DOWN, 1 UP, 2 MOVE, 3 CANCEL); the shim picks
-    /// DOWN vs POINTER_DOWN and UP vs POINTER_UP from how many fingers are down. A lifting
-    /// finger stays in the table sent for UP — that is the slot POINTER_UP's index refers
-    /// to — and leaves right after.
-    private func injectTouch(_ touches: Set<UITouch>, action: Int32, event: UIEvent?) {
-        let scale = UIScreen.main.scale
-        // Every live finger, not only the ones this callback names: a MOVE has to carry the
-        // other fingers' positions too, and UIKit reports them all through allTouches.
-        let live = event?.allTouches ?? touches
-        touchTracker.prune(live: live, current: touches)
-        if action == 0 {
-            for touch in touches { _ = touchTracker.begin(touch) }
-        }
-        var entries: [(id: Int32, x: Float, y: Float)] = []
-        entries.reserveCapacity(live.count)
-        for touch in live {
-            guard let id = touchTracker.id(of: touch) else { continue }
-            let location = touch.location(in: self)
-            entries.append((id, Float(location.x * scale), Float(location.y * scale)))
-        }
-        guard !entries.isEmpty else { return }
-        // Pointer 0 is the finger that has been down longest and the action's index refers
-        // to this order, so it must not be left to Set iteration order.
-        entries.sort { $0.id < $1.id }
-        var ids = [Int32]()
-        var xs = [Float]()
-        var ys = [Float]()
-        ids.reserveCapacity(entries.count)
-        xs.reserveCapacity(entries.count)
-        ys.reserveCapacity(entries.count)
-        for entry in entries {
-            ids.append(entry.id)
-            xs.append(entry.x)
-            ys.append(entry.y)
-        }
-        let primary = touches.first.flatMap { touchTracker.id(of: $0) } ?? ids[0]
-        kudroid_inject_touch_batch(action, primary, Int32(ids.count), ids, xs, ys)
-        if action == 1 || action == 3 {
-            for touch in touches { _ = touchTracker.end(touch) }
-        }
-    }
 
-    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        injectTouch(touches, action: 0, event: event) // ACTION_DOWN
-    }
-
-    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-        injectTouch(touches, action: 2, event: event) // ACTION_MOVE
-    }
-
-    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        injectTouch(touches, action: 1, event: event) // ACTION_UP
-    }
-
-    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-        injectTouch(touches, action: 3, event: event) // ACTION_CANCEL
-    }
 }
 
 // MARK: - Soft keyboard

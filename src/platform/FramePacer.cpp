@@ -30,6 +30,7 @@
 
 #include "kudroid/BionicShim.h"
 #include "kudroid/Log.h"
+#include "kudroid/platform/GuestClock.h"
 
 #include <atomic>
 #include <cerrno>
@@ -53,14 +54,13 @@
 #include <objc/runtime.h>
 #endif
 
-// The process-wide looper, from SyscallShim. A Choreographer's wake pipe is
-// registered with it so a frame callback can run on a guest thread — Android
-// dispatches Choreographer callbacks through the Looper of the thread that
-// registered them, and a guest callback may touch state that only exists there.
+// Native frame callbacks run through their owner's looper.
 extern "C" void* bionic_ALooper_forThread(void);
 extern "C" int bionic_ALooper_addFd(void* looper, int fd, int ident, int events,
                                     void* callback, void* data);
 extern "C" int bionic_ALooper_removeFd(void* looper, int fd);
+extern "C" void bionic_ALooper_acquire(void* looper);
+extern "C" void bionic_ALooper_release(void* looper);
 
 namespace kudroid {
 namespace {
@@ -100,20 +100,9 @@ void paceLog(const char* fmt, ...) {
     ::kudroid::log::write(::kudroid::log::kDebug, "KuDroidPace", "%s", buf);
 }
 
-// CLOCK_MONOTONIC, deliberately, and not steady_clock.
-//
-// frameTimeNanos must sit on the same timeline the guest reads for itself. Android's
-// Choreographer reports System.nanoTime(), which is CLOCK_MONOTONIC, and the guest
-// gets that value through bionic_clock_gettime(CLOCK_MONOTONIC) — mapped to Darwin
-// clock 6. steady_clock on Darwin is mach_absolute_time, which does not advance
-// across sleep: a frame pacer subtracting one from the other computes a delta that
-// jumps by however long the device slept, then either stalls on a deadline in the
-// past or floods frames trying to catch up.
+// Frame callbacks and guest deadlines must share the same clock.
 uint64_t mono_ns() {
-    struct timespec ts {};
-    if (::clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
-    return static_cast<uint64_t>(ts.tv_sec) * 1000000000ull +
-           static_cast<uint64_t>(ts.tv_nsec);
+    return static_cast<uint64_t>(guest_monotonic_ns());
 }
 
 uint64_t self_thread_id() {
@@ -159,6 +148,8 @@ struct Choreographer {
 
     int wake_pipe[2] = {-1, -1};
     bool pipe_registered = false;
+    void* owner_looper = nullptr;
+    bool native_only = false;
     // due_ns of the most recent callback this instance dispatched. The re-post
     // alignment in post_frame_callback reads it so a guest that re-posts from inside
     // a late callback lands on the next frame boundary instead of a full interval
@@ -218,6 +209,7 @@ PacerState& state() {
 }
 
 thread_local Choreographer* t_instance = nullptr;
+thread_local Choreographer* t_native_instance = nullptr;
 
 // The frame timestamp being dispatched on this thread, 0 when not in a callback.
 //
@@ -347,9 +339,9 @@ void ensure_pipe_locked(Choreographer* c) {
     ::fcntl(fds[1], F_SETFL, ::fcntl(fds[1], F_GETFL, 0) | O_NONBLOCK);
     c->wake_pipe[0] = fds[0];
     c->wake_pipe[1] = fds[1];
-}// Invoked by bionic_ALooper_pollAll on whichever guest thread is polling. `data` is
-// the instance, so the right queue is drained no matter which thread woke up —
-// KuDroid has one process-wide looper, so the poller is not necessarily the poster.
+}
+
+// Invoked by the owner's native looper.
 int frame_pipe_looper_callback(int fd, int events, void* data) {
     (void)fd;
 
@@ -368,15 +360,21 @@ int frame_pipe_looper_callback(int fd, int events, void* data) {
 
 void register_pipe_locked(Choreographer* c) {
     if (c->pipe_registered || c->wake_pipe[0] < 0) return;
+    if (c->owner_thread.load(std::memory_order_relaxed) != self_thread_id()) return;
     void* looper = bionic_ALooper_forThread();
     if (looper == nullptr) return;
-    bionic_ALooper_addFd(looper, c->wake_pipe[0], kFrameLooperIdent, kLooperEventInput,
-                         reinterpret_cast<void*>(&frame_pipe_looper_callback), c);
+    if (bionic_ALooper_addFd(looper, c->wake_pipe[0], kFrameLooperIdent, kLooperEventInput,
+                            reinterpret_cast<void*>(&frame_pipe_looper_callback), c) != 1) return;
+    bionic_ALooper_acquire(looper);
+    c->owner_looper = looper;
     c->pipe_registered = true;
 }
 
-Choreographer* acquire_instance() {
-    if (t_instance != nullptr) return t_instance;
+Choreographer* acquire_instance(bool native = false) {
+    Choreographer*& instance = native ? t_native_instance : t_instance;
+    if (instance != nullptr &&
+        instance->owner_thread.load(std::memory_order_relaxed) == self_thread_id()) return instance;
+    instance = nullptr;
     Choreographer* chosen = nullptr;
     for (int i = 0; i < kMaxInstances; ++i) {
         bool expected = false;
@@ -388,21 +386,20 @@ Choreographer* acquire_instance() {
             break;
         }
     }
-    if (chosen == nullptr) chosen = &state().shared;
-    t_instance = chosen;
-    // Register the wake pipe with the looper of the thread that OWNS this instance,
-    // not the thread that happens to post. The pipe is what the owner's poll wakes
-    // on, so it must live in the owner's looper: posting happens on guest render
-    // threads whose looper nothing ever polls. KuDroid's looper is process-wide
-    // today, so this is currently a no-op — but if it ever becomes per-thread the
-    // old placement would starve the poller while direct mode watched the frames
-    // go by.
+    if (chosen == nullptr) {
+        if (native) return nullptr;
+        chosen = &state().shared;
+    }
+    instance = chosen;
+    // Register on the owner before another thread can post to this instance.
     {
         std::lock_guard<std::mutex> lock(chosen->mtx);
+        chosen->native_only = native;
+        chosen->last_due_ns = 0;
         ensure_pipe_locked(chosen);
         register_pipe_locked(chosen);
     }
-    return t_instance;
+    return instance;
 }
 
 void drain_pipe(Choreographer* c) {
@@ -423,6 +420,12 @@ void drain_pipe(Choreographer* c) {
 // would deadlock against a lock held across the call.
 int dispatch_instance(Choreographer* c) {
     if (c == nullptr) return 0;
+    {
+        std::lock_guard<std::mutex> lock(c->mtx);
+        if (c->native_only && c->owner_thread.load(std::memory_order_relaxed) != self_thread_id()) {
+            return 0;
+        }
+    }
     drain_pipe(c);
 
     const uint64_t now = mono_ns();
@@ -517,16 +520,18 @@ void pacer_main() {
                             e.nudged = true;
                             wake_needed = true;
                         }
-                        if (now >= e.due_ns + grace) deliver_now = true;
-                        const uint64_t at = e.due_ns + grace;
-                        if (earliest == 0 || at < earliest) earliest = at;
+                        if (!c->native_only) {
+                            if (now >= e.due_ns + grace) deliver_now = true;
+                            const uint64_t at = e.due_ns + grace;
+                            if (earliest == 0 || at < earliest) earliest = at;
+                        }
                     } else if (earliest == 0 || e.due_ns < earliest) {
                         earliest = e.due_ns;
                     }
                 }
                 // No pipe means the looper path does not exist for this instance, so
                 // there is nothing to wait for.
-                if (c->wake_pipe[0] < 0 && wake_needed) deliver_now = true;
+                if (!c->native_only && c->wake_pipe[0] < 0 && wake_needed) deliver_now = true;
             }
 
             if (wake_needed && c->wake_pipe[1] >= 0) {
@@ -676,6 +681,37 @@ void* frame_pacer_instance_for_this_thread() {
     return acquire_instance();
 }
 
+void* frame_pacer_native_instance_for_this_thread() {
+    start_vsync_query();
+    return acquire_instance(true);
+}
+
+void frame_pacer_release_native_thread() {
+    Choreographer* c = t_native_instance;
+    if (c == nullptr) return;
+    {
+        std::lock_guard<std::mutex> lock(c->mtx);
+        if (c->owner_thread.load(std::memory_order_relaxed) != self_thread_id()) {
+            t_native_instance = nullptr;
+            return;
+        }
+        c->frame_callbacks.clear();
+        c->refresh_callbacks.clear();
+        c->pending.store(0, std::memory_order_release);
+        if (c->owner_looper != nullptr) {
+            bionic_ALooper_removeFd(c->owner_looper, c->wake_pipe[0]);
+            bionic_ALooper_release(c->owner_looper);
+            c->owner_looper = nullptr;
+        }
+        c->pipe_registered = false;
+        c->last_due_ns = 0;
+        c->owner_thread.store(0, std::memory_order_relaxed);
+        c->claimed.store(false, std::memory_order_release);
+    }
+    t_native_instance = nullptr;
+    wake_pacer();
+}
+
 void frame_pacer_post(void* instance, void* callback, void* data, uint64_t delay_ns) {
     auto* c = instance != nullptr ? static_cast<Choreographer*>(instance) : acquire_instance();
     post_frame_callback(c, callback, data, delay_ns);
@@ -776,9 +812,7 @@ int frame_pacer_pending_count() {
 }
 
 int frame_pacer_dispatch_due() {
-    Choreographer* c = t_instance;
-    if (c == nullptr) return 0;
-    const int ran = dispatch_instance(c);
+    const int ran = dispatch_instance(t_instance) + dispatch_instance(t_native_instance);
     if (ran > 0) {
         g_looper_deliveries.fetch_add(static_cast<uint64_t>(ran), std::memory_order_relaxed);
     }
@@ -814,10 +848,10 @@ void frame_pacer_reset_for_relaunch() {
         c->refresh_callbacks.clear();
         c->pending.store(0, std::memory_order_release);
         if (c->wake_pipe[0] >= 0) {
-            if (c->pipe_registered) {
-                if (void* looper = bionic_ALooper_forThread()) {
-                    bionic_ALooper_removeFd(looper, c->wake_pipe[0]);
-                }
+            if (c->owner_looper != nullptr) {
+                bionic_ALooper_removeFd(c->owner_looper, c->wake_pipe[0]);
+                bionic_ALooper_release(c->owner_looper);
+                c->owner_looper = nullptr;
             }
             ::close(c->wake_pipe[0]);
             ::close(c->wake_pipe[1]);
@@ -825,10 +859,13 @@ void frame_pacer_reset_for_relaunch() {
             c->wake_pipe[1] = -1;
         }
         c->pipe_registered = false;
+        c->native_only = false;
+        c->last_due_ns = 0;
         c->owner_thread.store(0, std::memory_order_relaxed);
         c->claimed.store(false, std::memory_order_release);
     }
     t_instance = nullptr;
+    t_native_instance = nullptr;
     g_requested_period_ns.store(0, std::memory_order_relaxed);
     g_looper_deliveries.store(0, std::memory_order_relaxed);
     g_direct_deliveries.store(0, std::memory_order_relaxed);
@@ -854,7 +891,7 @@ extern "C" void* bionic_AChoreographer_getInstance(void) {
     // reads to a guest as "this thread cannot receive frames", and Unity's pacer thread
     // answered that by exiting immediately, leaving its render thread parked on a
     // condition variable for the rest of the session.
-    return kudroid::frame_pacer_instance_for_this_thread();
+    return kudroid::frame_pacer_native_instance_for_this_thread();
 }
 
 extern "C" void bionic_AChoreographer_postFrameCallback(void* choreographer, void* callback,

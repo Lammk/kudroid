@@ -970,8 +970,13 @@ long rewriteRange(std::uint32_t* code, std::size_t nwords, X18Stats& st,
             // Whatever the code past a window exit reads is live here: the
             // argument registers for a tail call out of a whole function,
             // anything at all when the window is only a slice of one.
+            //
+            // A tail call also hands the callee this function's return address, and
+            // x8 may carry its indirect-result pointer: x30 and x8 are live there.
+            // Without x30 the allocator's last resort could park a value in it and
+            // the callee would return into that value.
             if (exitsWindow(words.data(), nwords, i))
-                touches[i].uses |= complete ? 0xFFu : 0x7FFFFFFFu;
+                touches[i].uses |= complete ? (0x1FFu | (1u << 30)) : 0x7FFFFFFFu;
             succEdge(words.data(), nwords, i, next[i], complete, nullptr);
         }
         for (std::size_t j : next[i]) previous[j].push_back(i);

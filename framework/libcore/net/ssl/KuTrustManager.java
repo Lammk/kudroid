@@ -1,10 +1,15 @@
 package libcore.net.ssl;
 
 import java.io.ByteArrayOutputStream;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.security.cert.Certificate;
+import java.security.cert.CertificateFactory;
 import java.security.cert.CertificateEncodingException;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
 import java.util.List;
+import java.util.Collection;
 import javax.net.ssl.X509TrustManager;
 import libcore.io.KuTls;
 
@@ -12,6 +17,7 @@ import libcore.io.KuTls;
 public final class KuTrustManager implements X509TrustManager {
     private static final KuTrustManager PLATFORM = new KuTrustManager(null);
     private static final X509Certificate[] NONE = new X509Certificate[0];
+    private static X509Certificate[] platformIssuers;
 
     private final byte[] anchors;
     private final X509Certificate[] anchorCerts;
@@ -71,6 +77,24 @@ public final class KuTrustManager implements X509TrustManager {
 
     @Override
     public X509Certificate[] getAcceptedIssuers() {
-        return anchorCerts != null ? anchorCerts.clone() : NONE;
+        return anchorCerts != null ? anchorCerts.clone() : acceptedPlatformIssuers().clone();
+    }
+
+    private static synchronized X509Certificate[] acceptedPlatformIssuers() {
+        if (platformIssuers != null) return platformIssuers;
+        try (FileInputStream input = new FileInputStream("/system/etc/security/cacerts/cacert.pem")) {
+            Collection<? extends Certificate> certificates = CertificateFactory.getInstance("X.509").generateCertificates(input);
+            X509Certificate[] roots = new X509Certificate[certificates.size()];
+            int index = 0;
+            for (Certificate certificate : certificates) roots[index++] = (X509Certificate) certificate;
+            platformIssuers = roots;
+        } catch (IOException error) {
+            android.util.Log.e("KuTrustManager", "Cannot read trusted roots: " + error);
+            platformIssuers = NONE;
+        } catch (CertificateException error) {
+            android.util.Log.e("KuTrustManager", "Cannot parse trusted roots: " + error);
+            platformIssuers = NONE;
+        }
+        return platformIssuers;
     }
 }

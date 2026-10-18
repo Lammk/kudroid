@@ -67,6 +67,7 @@ void kudroid_fault_state_reset_for_app(void);
 void kudroid_note_render_thread(void);
 void kudroid_note_frame_presented(void);
 uint64_t kudroid_last_frame_presented_ns(void);
+uint64_t kudroid_run_started_ns(void);
 void kudroid_frame_presented_reset(void);
 }
 
