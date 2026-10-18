@@ -16,6 +16,8 @@ public class Surface {
     public static final int ROTATION_3 = 3;
 
     public long mNativeObject = 0;
+    /** Id of the SurfaceTexture this Surface feeds, 0 for a screen surface. Read natively. */
+    public int mSurfaceTextureId = 0;
     private boolean mValid = true;
     private int mWidth;
     private int mHeight;
@@ -26,6 +28,15 @@ public class Surface {
 
     public Surface(long nativeObject) {
         this.mNativeObject = nativeObject;
+        this.mValid = true;
+    }
+
+    /** A Surface whose buffers go to {@code surfaceTexture}. */
+    public Surface(android.graphics.SurfaceTexture surfaceTexture) {
+        if (surfaceTexture == null) {
+            throw new IllegalArgumentException("surfaceTexture must not be null");
+        }
+        this.mSurfaceTextureId = surfaceTexture.getKuDroidId();
         this.mValid = true;
     }
 

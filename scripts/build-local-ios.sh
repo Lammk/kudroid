@@ -75,6 +75,9 @@ llvm-ar -M << AR_EOF
 create ios-app/KuDroidShell/libs/libkudroid_core_combined.a
 addlib build-ios/libkudroid_core.a
 addlib build-ios/third_party/art_dex/libart_dex.a
+addlib build-ios/_deps/libvpx-build/libvpx.a
+addlib build-ios/libkudroid_vorbis.a
+addlib build-ios/_deps/ogg-build/libogg.a
 save
 end
 AR_EOF

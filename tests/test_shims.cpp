@@ -20,6 +20,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <future>
 #include <string>
 #include <thread>
@@ -38,6 +39,8 @@
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <unistd.h>
+
+extern "C" int bionic_clock_gettime(int clock_id, struct timespec* ts);
 
 
 // ─── Shims under test (extern "C", defined in SyscallShim.cpp) ──────────────
@@ -61,6 +64,18 @@ extern "C" int bionic_sem_trywait(sem_t* sem);
 extern "C" int bionic_sem_post(sem_t* sem);
 extern "C" int bionic_sem_getvalue(sem_t* sem, int* out);
 extern "C" int bionic_sem_timedwait(sem_t* sem, const struct timespec* abs_timeout);
+extern "C" int kudroid_page_range_inward(uintptr_t addr, size_t len, size_t page, uintptr_t* out_start,
+                                         uintptr_t* out_len);
+extern "C" int bionic_pthread_condattr_init(void* attr);
+extern "C" int bionic_pthread_condattr_setclock(void* attr, int clock_id);
+extern "C" int bionic_pthread_cond_init(void* cond, const void* attr);
+extern "C" int bionic_pthread_cond_destroy(void* cond);
+extern "C" int bionic_pthread_cond_timedwait(void* cond, void* mutex, const struct timespec* abstime);
+extern "C" int bionic_pthread_cond_signal(void* cond);
+extern "C" int bionic_pthread_mutex_init(void* mutex, const void* attr);
+extern "C" int bionic_pthread_mutex_lock(void* mutex);
+extern "C" int bionic_pthread_mutex_unlock(void* mutex);
+extern "C" int bionic_pthread_mutex_destroy(void* mutex);
 extern "C" int bionic_tgkill(int pid, int tid, int sig);
 extern "C" int bionic_pipe2(int pipefd[2], int flags);
 extern "C" int bionic___cxa_guard_acquire(uint64_t* g);
@@ -405,7 +420,7 @@ static void test_futex_wait_bitset_timeout_is_absolute() {
     // pair it with the future-deadline check below, which the two readings cannot
     // both satisfy.
     struct timespec past;
-    ::clock_gettime(CLOCK_MONOTONIC, &past);
+    bionic_clock_gettime(1, &past);
     past.tv_sec -= 10;
     errno = 0;
     CHECK(bionic_futex(&word, FUTEX_WAIT_BITSET, 0, &past, nullptr, ~0u) == -1 &&
@@ -415,7 +430,7 @@ static void test_futex_wait_bitset_timeout_is_absolute() {
     // A deadline 60ms in the future must wait about that long. Read as relative this
     // would be the host's whole uptime — an effectively infinite sleep.
     struct timespec soon;
-    ::clock_gettime(CLOCK_MONOTONIC, &soon);
+    bionic_clock_gettime(1, &soon);
     soon.tv_nsec += 60 * 1000 * 1000;
     if (soon.tv_nsec >= 1000000000) { soon.tv_sec += 1; soon.tv_nsec -= 1000000000; }
     errno = 0;
@@ -433,7 +448,7 @@ static void test_futex_wait_bitset_absolute_wake_still_works() {
 
     uint32_t word = 0;
     struct timespec deadline;
-    ::clock_gettime(CLOCK_MONOTONIC, &deadline);
+    bionic_clock_gettime(1, &deadline);
     deadline.tv_sec += 30;  // far enough out that only a wake can end this
 
     std::atomic<int> result{-999};
@@ -1011,6 +1026,108 @@ static void test_sem_uninitialised_yields_instead_of_parking() {
     bionic_sem_destroy(&sem);
 }
 
+// Bionic-sized (64-byte) opaque guest objects.
+struct GuestSyncBlock { uint64_t words[8]; };
+
+static void test_cond_timedwait_clock() {
+    std::printf("[condvar] timedwait measures its deadline on the clock the condvar was made with\n");
+
+    GuestSyncBlock mutex{}, monoCond{}, realCond{};
+    uint64_t monoAttr = 0, realAttr = 0;
+    bionic_pthread_mutex_init(&mutex, nullptr);
+    bionic_pthread_condattr_init(&monoAttr);
+    CHECK(bionic_pthread_condattr_setclock(&monoAttr, 1) == 0, "CLOCK_MONOTONIC is accepted");
+    CHECK(bionic_pthread_condattr_setclock(&monoAttr, 99) != 0, "an unknown clock is rejected");
+    bionic_pthread_condattr_init(&realAttr);
+    CHECK(bionic_pthread_condattr_setclock(&realAttr, 0) == 0, "CLOCK_REALTIME is accepted");
+    bionic_pthread_cond_init(&monoCond, &monoAttr);
+    bionic_pthread_cond_init(&realCond, &realAttr);
+
+    // A monotonic deadline 120 ms ahead must be waited for. On the wall clock the same number
+    // is decades in the past, so a shim that ignores the clock times out at once.
+    struct timespec deadline;
+    bionic_clock_gettime(1, &deadline);
+    deadline.tv_nsec += 120 * 1000 * 1000;
+    if (deadline.tv_nsec >= 1000000000) { deadline.tv_sec += 1; deadline.tv_nsec -= 1000000000; }
+    bionic_pthread_mutex_lock(&mutex);
+    errno = 0;
+    auto t0 = std::chrono::steady_clock::now();
+    int rc = bionic_pthread_cond_timedwait(&monoCond, &mutex, &deadline);
+    auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(
+                      std::chrono::steady_clock::now() - t0).count();
+    bionic_pthread_mutex_unlock(&mutex);
+    CHECK(rc == 110 /* guest ETIMEDOUT */, "a monotonic condvar times out with ETIMEDOUT");
+    CHECK(waited >= 100 && waited < 1000, "after waiting for the monotonic deadline");
+
+    // A monotonic deadline that has already passed returns at once.
+    bionic_clock_gettime(1, &deadline);
+    deadline.tv_sec -= 1;
+    bionic_pthread_mutex_lock(&mutex);
+    t0 = std::chrono::steady_clock::now();
+    rc = bionic_pthread_cond_timedwait(&monoCond, &mutex, &deadline);
+    waited = std::chrono::duration_cast<std::chrono::milliseconds>(
+                 std::chrono::steady_clock::now() - t0).count();
+    bionic_pthread_mutex_unlock(&mutex);
+    CHECK(rc == 110 && waited < 100, "an expired monotonic deadline does not block");
+
+    // A default condvar keeps the wall clock.
+    ::clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_nsec += 120 * 1000 * 1000;
+    if (deadline.tv_nsec >= 1000000000) { deadline.tv_sec += 1; deadline.tv_nsec -= 1000000000; }
+    bionic_pthread_mutex_lock(&mutex);
+    t0 = std::chrono::steady_clock::now();
+    rc = bionic_pthread_cond_timedwait(&realCond, &mutex, &deadline);
+    waited = std::chrono::duration_cast<std::chrono::milliseconds>(
+                 std::chrono::steady_clock::now() - t0).count();
+    bionic_pthread_mutex_unlock(&mutex);
+    CHECK(rc == 110 && waited >= 100 && waited < 1000, "a realtime condvar waits for its wall-clock deadline");
+
+    // A signal wakes a monotonic wait well before a far deadline.
+    bionic_clock_gettime(1, &deadline);
+    deadline.tv_sec += 30;
+    std::thread signaller([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        bionic_pthread_mutex_lock(&mutex);
+        bionic_pthread_cond_signal(&monoCond);
+        bionic_pthread_mutex_unlock(&mutex);
+    });
+    bionic_pthread_mutex_lock(&mutex);
+    t0 = std::chrono::steady_clock::now();
+    rc = bionic_pthread_cond_timedwait(&monoCond, &mutex, &deadline);
+    waited = std::chrono::duration_cast<std::chrono::milliseconds>(
+                 std::chrono::steady_clock::now() - t0).count();
+    bionic_pthread_mutex_unlock(&mutex);
+    signaller.join();
+    CHECK(rc == 0 && waited < 5000, "a signal wakes a monotonic wait long before its deadline");
+
+    bionic_pthread_cond_destroy(&monoCond);
+    bionic_pthread_cond_destroy(&realCond);
+    bionic_pthread_mutex_destroy(&mutex);
+}
+
+static void test_page_range_inward() {
+    std::printf("[memory] guest ranges shrink to the host pages they own\n");
+    uintptr_t start = 0, len = 0;
+    // A 4 KB guest range inside one 16 KB host page owns no whole page.
+    CHECK(kudroid_page_range_inward(16384 + 4096, 4096, 16384, &start, &len) == 0,
+          "a sub-page range owns nothing");
+    CHECK(kudroid_page_range_inward(16384, 16384, 16384, &start, &len) == 1 && start == 16384 &&
+              len == 16384,
+          "an aligned page is owned whole");
+    // 4096..45056 touches three host pages but owns only the middle one.
+    CHECK(kudroid_page_range_inward(4096, 40960, 16384, &start, &len) == 1 && start == 16384 &&
+              len == 16384,
+          "the shared end pages are left out");
+    CHECK(kudroid_page_range_inward(0, 65536, 16384, &start, &len) == 1 && start == 0 &&
+              len == 65536,
+          "a fully aligned range is kept intact");
+    CHECK(kudroid_page_range_inward(16384, 0, 16384, &start, &len) == 0, "an empty range owns nothing");
+    CHECK(kudroid_page_range_inward(16384, 4096, 12000, &start, &len) == 0,
+          "a page size that is not a power of two is rejected");
+    CHECK(kudroid_page_range_inward(UINTPTR_MAX - 100, 4096, 16384, &start, &len) == 0,
+          "a range that wraps the address space is rejected");
+}
+
 static void test_sem_timedwait_deadline() {
     std::printf("[semaphore] timedwait honours its absolute deadline\n");
 
@@ -1267,20 +1384,22 @@ static void test_alooper_never_null() {
 // A wake must release a thread parked in pollOnce(-1): teardown joins workers
 // parked exactly there, and a no-op wake wedged nativeDone forever.
 static void test_alooper_wake_releases_poll() {
-    void* looper = bionic_ALooper_forThread();
-    CHECK(bionic_ALooper_pollOnce(0, nullptr, nullptr, nullptr) == -2,
+    bionic_ALooper_forThread();
+    CHECK(bionic_ALooper_pollOnce(0, nullptr, nullptr, nullptr) == -3,
           "pollOnce(0) on an idle looper times out immediately");
 
     std::atomic<int> result{-99};
+    std::atomic<void*> looper{nullptr};
     std::thread waiter([&] {
+        looper.store(bionic_ALooper_forThread(), std::memory_order_release);
         result.store(bionic_ALooper_pollOnce(-1, nullptr, nullptr, nullptr));
     });
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    bionic_ALooper_wake(looper);
+    while (looper.load(std::memory_order_acquire) == nullptr) std::this_thread::yield();
+    bionic_ALooper_wake(looper.load(std::memory_order_acquire));
     waiter.join();
-    CHECK(result.load() == -3, "wake during pollOnce(-1) returns ALOOPER_POLL_WAKE");
+    CHECK(result.load() == -1, "wake during pollOnce(-1) returns ALOOPER_POLL_WAKE");
 
-    CHECK(bionic_ALooper_pollOnce(0, nullptr, nullptr, nullptr) == -2,
+    CHECK(bionic_ALooper_pollOnce(0, nullptr, nullptr, nullptr) == -3,
           "the wake is drained, the next poll times out again");
 }
 
@@ -1800,6 +1919,40 @@ static void test_guest_sigset_operations_use_linux_bit_positions() {
 extern "C" void* bionic_mmap(void* addr, size_t length, int prot, int flags, int fd,
                              off_t offset);
 
+void test_mmap_advisory_hints_and_noreplace() {
+    const size_t page = static_cast<size_t>(::sysconf(_SC_PAGESIZE));
+    auto* owner = static_cast<unsigned char*>(::mmap(nullptr, page, PROT_READ | PROT_WRITE,
+                                                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0));
+    CHECK(owner != MAP_FAILED, "allocate owner mapping");
+    if (owner == MAP_FAILED) return;
+    owner[0] = 0x6a;
+    void* hinted = bionic_mmap(owner, page, PROT_READ | PROT_WRITE, 0x22, -1, 0);
+    CHECK(hinted != MAP_FAILED && hinted != owner, "advisory hint never replaces live memory");
+    CHECK(owner[0] == 0x6a, "advisory hint preserves existing contents");
+    if (hinted != MAP_FAILED && hinted != owner) ::munmap(hinted, page);
+    errno = 0;
+    void* exclusive = bionic_mmap(owner, page, PROT_READ | PROT_WRITE, 0x100022, -1, 0);
+    CHECK(exclusive == MAP_FAILED && errno == EEXIST, "NOREPLACE rejects an occupied address");
+    CHECK(owner[0] == 0x6a, "NOREPLACE preserves existing contents");
+    if (exclusive != MAP_FAILED && exclusive != owner) ::munmap(exclusive, page);
+    ::munmap(owner, page);
+
+    void* reserved = ::mmap(nullptr, page, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    CHECK(reserved != MAP_FAILED, "allocate inaccessible reservation");
+    if (reserved == MAP_FAILED) return;
+    hinted = bionic_mmap(reserved, page, PROT_READ | PROT_WRITE, 0x22, -1, 0);
+    CHECK(hinted != MAP_FAILED && hinted != reserved, "PROT_NONE reservations still occupy their address");
+    if (hinted != MAP_FAILED && hinted != reserved) ::munmap(hinted, page);
+    errno = 0;
+    exclusive = bionic_mmap(reserved, page, PROT_READ | PROT_WRITE, 0x100022, -1, 0);
+    CHECK(exclusive == MAP_FAILED && errno == EEXIST, "NOREPLACE also rejects PROT_NONE reservations");
+    if (exclusive != MAP_FAILED && exclusive != reserved) ::munmap(exclusive, page);
+    ::munmap(reserved, page);
+    exclusive = bionic_mmap(reserved, page, PROT_READ | PROT_WRITE, 0x100022, -1, 0);
+    CHECK(exclusive == reserved, "NOREPLACE claims an available address exactly");
+    if (exclusive != MAP_FAILED) ::munmap(exclusive, page);
+}
+
 void test_mmap_file_backed_subpage_offset() {
     std::printf("[mmap] file-backed mapping at a non-host-page-multiple offset\n");
     const long page = ::sysconf(_SC_PAGESIZE);
@@ -1998,6 +2151,56 @@ static void test_gettimeofday_fills_both_64_bit_fields() {
     CHECK(res.tv_sec == 0 && res.tv_nsec > 0, "and reports a non-zero resolution");
 }
 
+extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
+
+// A console nobody reads must not park the thread that logs to it: that thread holds the
+// log lock, and on device it was the GL thread, so the whole frame loop stopped with it.
+static void test_console_write_does_not_block_on_full_pipe() {
+    std::printf("[console] logging to an undrained stdout pipe drops lines instead of blocking\n");
+    int fds[2];
+    CHECK(::pipe(fds) == 0, "pipe created");
+    const int savedOut = ::dup(STDOUT_FILENO);
+    std::fflush(stdout);
+    ::dup2(fds[1], STDOUT_FILENO);
+
+    std::atomic<bool> finished{false};
+    std::thread writer([&] {
+        // Distinct lines (identical consecutive ones fold into one), several times the
+        // pipe's capacity, with no reader.
+        char line[400];
+        for (int i = 0; i < 4000; ++i) {
+            std::memset(line, 'x', sizeof(line));
+            std::snprintf(line, sizeof(line), "console-test %d ", i);
+            line[std::strlen(line)] = 'x';
+            line[350] = '\0';
+            kudroid_android_log_message(4, "ConsoleTest", line);
+        }
+        finished.store(true);
+    });
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!finished.load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    const bool done = finished.load();
+    if (done) writer.join();
+
+    ::dup2(savedOut, STDOUT_FILENO);  // restore before reporting
+    ::close(savedOut);
+    if (!done) {
+        // Unblock the stuck writer so the test process can exit.
+        char drain[4096];
+        ::fcntl(fds[0], F_SETFL, ::fcntl(fds[0], F_GETFL) | O_NONBLOCK);
+        while (!finished.load()) {
+            while (::read(fds[0], drain, sizeof(drain)) > 0) {}
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        writer.join();
+    }
+    ::close(fds[0]);
+    ::close(fds[1]);
+    CHECK(done, "4000 writes into a full, undrained pipe all return");
+}
+
 // Linux MADV_DONTNEED hands back zero pages; allocators decommit with it and recommit
 // expecting zeros. Darwin's version keeps the data, so the shim has to supply the zeroes.
 static void test_madvise_dontneed_zero_fills() {
@@ -2063,6 +2266,8 @@ int main() {
     test_sem_post_releases_one_waiter();
     test_sem_uninitialised_yields_instead_of_parking();
     test_sem_timedwait_deadline();
+    test_cond_timedwait_clock();
+    test_page_range_inward();
     test_sem_destroy_releases_waiters();
     test_sem_rejects_null();
     test_mremap_shrink_in_place();
@@ -2089,9 +2294,11 @@ int main() {
     test_outbound_signal_symbols_resolve_to_the_shim();
     test_guest_sigset_operations_use_linux_bit_positions();
     test_mmap_file_backed_subpage_offset();
+    test_mmap_advisory_hints_and_noreplace();
     test_fortify_wrappers_clamp_to_the_declared_bound();
     test_madvise_dontneed_zero_fills();
     test_gettimeofday_fills_both_64_bit_fields();
+    test_console_write_does_not_block_on_full_pipe();
     std::printf("=== %d checks, %d failures ===\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

@@ -129,6 +129,9 @@ void kuart_camera_drain_pending(void);
 // Tell the guest the host's network path changed. Main Looper thread only.
 void kuart_network_drain_pending(void);
 
+// Tell SurfaceTextures that a media codec rendered a frame to them. Main Looper thread only.
+void kuart_media_drain_pending(void);
+
 // Apply queued keyboard input and permission results. Main Looper thread only.
 void kuart_host_events_drain(void);
 

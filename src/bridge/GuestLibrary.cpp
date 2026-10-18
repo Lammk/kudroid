@@ -318,6 +318,8 @@ int guestLibraryOwns(void* handle) {
 extern "C" void kudroid_gpu_note_run_end(void);
 extern "C" void kudroid_audio_capture_release_all(void);
 extern "C" void kudroid_camera_reset(void);
+extern "C" void kudroid_media_player_reset(void);
+extern "C" void kudroid_sensor_reset(void);
 
 extern "C" const char* kudroid_run_apk(const char* appName) {
     const ApkRunStartResult start = begin_apk_run(std::chrono::milliseconds(1000));
@@ -1205,6 +1207,8 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                         kudroid_gpu_note_run_end();
                         kudroid_audio_capture_release_all();
                         kudroid_camera_reset();
+                        kudroid_media_player_reset();
+                        kudroid_sensor_reset();
                         kudroid::blocking_wait_reset_for_test();
                     }
                 }

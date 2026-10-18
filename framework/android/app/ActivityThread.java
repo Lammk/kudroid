@@ -310,6 +310,9 @@ public final class ActivityThread {
             if (maskedAction == MotionEvent.ACTION_UP || maskedAction == MotionEvent.ACTION_CANCEL) {
                 sLastDownTime = 0;
             }
+            // A MOVE may only fold into a MOVE queued after the last non-MOVE event; folding
+            // across a DOWN/UP would apply a newer pointer set before that transition.
+            if (maskedAction != MotionEvent.ACTION_MOVE) sPendingMoveMsg = null;
             if (maskedAction == MotionEvent.ACTION_MOVE && sPendingMoveMsg != null
                     && sPendingMoveMsg.obj instanceof MotionEvent) {
                 // A MOVE is still queued: fold the newest sample into it and skip
@@ -943,6 +946,9 @@ public final class ActivityThread {
                 if (!mInitialActivity.isResumed()) mInitialActivity.performResume();
                 mInitialActivity.renderViewHierarchy();
                 dispatchSurfaceCallbacks(mInitialActivity);
+                if (!mInitialActivity.hasWindowFocus()) {
+                    mInitialActivity.performWindowFocusChanged(true);
+                }
             }
         } catch (Throwable t) {
             t.printStackTrace();

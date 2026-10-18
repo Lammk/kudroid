@@ -4,6 +4,13 @@
 
 typedef unsigned long long u64;
 typedef unsigned long size_t;
+extern int kudroid_test_printf_packing(void);
+
+void* memset(void* dst, int value, size_t count) {
+    volatile unsigned char* bytes = (volatile unsigned char*)dst;
+    for (size_t i = 0; i < count; ++i) bytes[i] = (unsigned char)value;
+    return dst;
+}
 
 /* The trampolines, as the shim table exposes them. Declared variadic so the compiler
  * emits a normal AAPCS64 variadic call — exactly what guest code does. */
@@ -22,6 +29,7 @@ extern int kudroid_fprintf_trampoline(void* stream, const char* fmt, ...);
 extern int kudroid_printf_trampoline(const char* fmt, ...);
 extern int kudroid_fprintf_chk_trampoline(void* stream, int flag, const char* fmt, ...);
 extern int kudroid_printf_chk_trampoline(int flag, const char* fmt, ...);
+extern void kudroid_syslog_trampoline(int priority, const char* fmt, ...);
 
 /* The va_list path, declared the way a guest declares __android_log_vprint.
  *
@@ -78,6 +86,15 @@ void kudroid_guest_stdio_write(void* stream, const char* data, size_t len) {
         ++g_sink_len;
     }
     g_sink[g_sink_len] = '\0';
+}
+
+static int g_syslog_priority;
+const char* kudroid_guest_syslog_error(void) { return "test error"; }
+void kudroid_guest_syslog_write(int priority, const char* message) {
+    g_syslog_priority = priority;
+    size_t len = 0;
+    while (message[len]) ++len;
+    kudroid_guest_stdio_write(0, message, len);
 }
 
 /* The JNI variadic handlers, stubbed.
@@ -562,6 +579,15 @@ static void RunScanChecks(void) {
 int main(void) {
     char buf[512];
 
+    Check(kudroid_test_printf_packing() == 0, "printf stack packing and binary128 conversion");
+    kudroid_snprintf_trampoline(buf, sizeof(buf), "%.1Lf %d", 1.5L, 7);
+    CheckText(buf, "1.5 7", "binary128 register argument preserves its value");
+    kudroid_snprintf_trampoline(buf, sizeof(buf),
+        "%d %d %d %d %d %d %.1Lf %.1Lf %.1Lf %.1Lf %.1Lf %.1Lf %.1Lf %.1Lf %.1Lf",
+        1, 2, 3, 4, 5, 6, 1.5L, 2.5L, 3.5L, 4.5L, 5.5L, 6.5L, 7.5L, 8.5L, 9.5L);
+    CheckText(buf, "1 2 3 4 5 6 1.5 2.5 3.5 4.5 5.5 6.5 7.5 8.5 9.5",
+              "binary128 stack arguments retain sixteen-byte alignment");
+
     puts_("-- integer varargs in x0-x7 --\n");
 
     /* One integer: the simplest case, and the one that failed loudest — a count printed
@@ -705,6 +731,11 @@ int main(void) {
     RunVaListChecks(buf, sizeof(buf));
     RunStdioChecks();
     RunScanChecks();
+    kudroid_syslog_trampoline(3, "%s %d %.1f %m", "frame", 7, 2.5);
+    CheckText(g_sink, "frame 7 2.5 test error", "syslog reads guest registers and errno text");
+    Check(g_syslog_priority == 3, "syslog preserves priority");
+    kudroid_syslog_trampoline(4, "%d %d %d %d %d %d %s", 1, 2, 3, 4, 5, 6, "end");
+    CheckText(g_sink, "1 2 3 4 5 6 end", "syslog crosses register overflow boundary");
 
     puts_("\n");
     if (failures == 0) {

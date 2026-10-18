@@ -60,6 +60,9 @@ KUDROID_C_SYMBOL(\name):
 KUDROID_VARARG_TRAMPOLINE kudroid_android_log_print_trampoline, kudroid_android_log_print_from_registers
 KUDROID_VARARG_TRAMPOLINE kudroid_snprintf_trampoline, kudroid_snprintf_from_registers
 KUDROID_VARARG_TRAMPOLINE kudroid_sprintf_trampoline, kudroid_sprintf_from_registers
+#if defined(__APPLE__)
+KUDROID_VARARG_TRAMPOLINE kudroid_swprintf_trampoline, kudroid_swprintf_from_registers
+#endif
 KUDROID_VARARG_TRAMPOLINE kudroid_log_assert_trampoline, kudroid_log_assert_from_registers
 KUDROID_VARARG_TRAMPOLINE kudroid_snprintf_chk_trampoline, kudroid_snprintf_chk_from_registers
 KUDROID_VARARG_TRAMPOLINE kudroid_sprintf_chk_trampoline, kudroid_sprintf_chk_from_registers
@@ -67,6 +70,7 @@ KUDROID_VARARG_TRAMPOLINE kudroid_fprintf_trampoline, kudroid_fprintf_from_regis
 KUDROID_VARARG_TRAMPOLINE kudroid_printf_trampoline, kudroid_printf_from_registers
 KUDROID_VARARG_TRAMPOLINE kudroid_fprintf_chk_trampoline, kudroid_fprintf_chk_from_registers
 KUDROID_VARARG_TRAMPOLINE kudroid_printf_chk_trampoline, kudroid_printf_chk_from_registers
+KUDROID_VARARG_TRAMPOLINE kudroid_syslog_trampoline, kudroid_syslog_from_registers
 /* scanf takes OUTPUT pointers as its varargs, so the same capture is needed for the
  * opposite reason: not to read the arguments correctly, but to write through the right
  * addresses. Forwarding to the host's sscanf made it store to stack words that were never

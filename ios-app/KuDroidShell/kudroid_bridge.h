@@ -1,7 +1,10 @@
-#pragma once
+#ifndef KUDROID_BRIDGE_H
+#define KUDROID_BRIDGE_H
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "../../include/kudroid/platform/MediaPlayerHost.h"
+#include "../../include/kudroid/platform/SensorHost.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -302,6 +305,12 @@ int kudroid_camera_has_pending(void);
 // 1 Wi-Fi, 9 Ethernet. Keep identical to include/kudroid/platform/NetworkState.h.
 void kudroid_set_network_state(int connected, int transport, int metered, int constrained);
 
+// Preserve guest play states across host focus and audio interruptions.
+void kudroid_audio_session_resume(void);
+void kudroid_audio_session_suspend(void);
+
 #ifdef __cplusplus
 }
 #endif
+
+#endif // KUDROID_BRIDGE_H

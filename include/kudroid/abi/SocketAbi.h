@@ -16,6 +16,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+struct sockaddr;
+
 namespace kudroid {
 
 // Darwin errno -> the Linux number a guest compares against. Values with no Linux
@@ -55,7 +57,20 @@ struct DarwinFlock {
 void FlockToHost(const LinuxFlock& guest, DarwinFlock* host);
 void FlockToGuest(const DarwinFlock& host, LinuxFlock* guest);
 
-// getaddrinfo hints->ai_flags. Only AI_NUMERICSERV differs (0x8 there, 0x1000 here).
+// struct addrinfo as laid out by Bionic LP64:
+// ai_canonname is at offset 24, ai_addr is at offset 32.
+struct GuestAddrinfo {
+    int ai_flags;
+    int ai_family;
+    int ai_socktype;
+    int ai_protocol;
+    uint32_t ai_addrlen;
+    char* ai_canonname;
+    struct sockaddr* ai_addr;
+    struct GuestAddrinfo* ai_next;
+};
+
+// getaddrinfo hints->ai_flags: translates Linux AI_* flags to Darwin.
 int AddrInfoFlagsToHost(int guestFlags);
 
 // struct hostent, as both sides' LP64 headers lay it out.

@@ -54,6 +54,10 @@ typedef struct kudroid_vm_region_extended_info {
 #ifdef __cplusplus
 extern "C" {
 #endif
+kern_return_t mach_vm_allocate(vm_map_t target_task,
+                               mach_vm_address_t *address,
+                               mach_vm_size_t size,
+                               int flags);
 kern_return_t mach_vm_region(vm_map_t target_task,
                              mach_vm_address_t *address,
                              mach_vm_size_t *size,

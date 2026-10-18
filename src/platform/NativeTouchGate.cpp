@@ -22,9 +22,8 @@ namespace {
 std::atomic<int> g_used{0};
 std::atomic<long long> g_windowStart{0};
 
-// 2 moves per 8 ms is ~250/s: every sample of a 120 Hz drag passes through, and
-// a flood still cannot buy more than that many dispatches.
-constexpr int kMaxMovesPerWindow = 2;
+// High move budget per 8 ms window to prevent dropping multi-finger drag updates.
+constexpr int kMaxMovesPerWindow = 16;
 constexpr long long kWindowNs = 8000000;  // 8 ms
 
 long long steady_now_ns() {

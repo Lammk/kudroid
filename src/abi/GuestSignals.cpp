@@ -358,10 +358,17 @@ thread_local uintptr_t t_depth_frame[2] = {0, 0};
 // __builtin_frame_address(0) would be the direct way to ask, but at -O3 the frame pointer
 // may be omitted and it is then not required to answer usefully. The address of a local
 // is always in the current frame.
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wreturn-stack-address"
+#endif
 __attribute__((noinline)) uintptr_t current_frame_position() {
     volatile char probe = 0;
     return reinterpret_cast<uintptr_t>(&probe);
 }
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 
 }  // namespace
 

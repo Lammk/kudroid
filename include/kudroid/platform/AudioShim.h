@@ -26,6 +26,9 @@ const SymbolEntry* get_audio_symbols(size_t* count);
 // straight through.
 extern "C" {
 
+void kudroid_audio_session_resume(void);
+void kudroid_audio_session_suspend(void);
+
 // Minimum workable buffer in bytes, or 0 if the parameters make no sense.
 //
 // `encoding` < 0 is a second query rather than a format: it asks for the device's

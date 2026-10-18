@@ -29,6 +29,23 @@ namespace kuart {
 
 namespace {
 
+bool should_journal_native(const DexMethod* method, uint64_t now_ns) {
+    struct Sample {
+        const DexMethod* method = nullptr;
+        unsigned initial = 0;
+        uint64_t last_ns = 0;
+    };
+    static thread_local Sample samples[64];
+    Sample& sample = samples[(reinterpret_cast<uintptr_t>(method) >> 4) % 64];
+    if (sample.method != method) sample = {method, 0, 0};
+    if (sample.initial < 8 || now_ns - sample.last_ns >= 1000000000ULL) {
+        if (sample.initial < 8) ++sample.initial;
+        sample.last_ns = now_ns;
+        return true;
+    }
+    return false;
+}
+
 // jobject is an opaque handle; KuART directly uses the DexObject pointer as a handle. Board
 // local/global refs are only for lifetime management, not for address translation - so
 // Decode ch  l  m t cast.  n gi n h n ART (d ng indirect reference table) v
@@ -449,9 +466,7 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
     if (method->native_fn == nullptr) return result;
     const LocalRefScope local_refs;
 
-    // This breadcrumb is deliberately emitted before entering guest code.  A
-    // SIGKILL does not run the crash handler, so the last durable line in the
-    // Android log is often the only evidence of the operation in progress.
+    // Journal startup calls and periodic samples; telemetry tracks every active call.
     const char* owner = (method->declaring_class != nullptr &&
                          method->declaring_class->descriptor != nullptr)
                             ? method->declaring_class->descriptor : "?";
@@ -471,19 +486,14 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
     const auto native_start = std::chrono::steady_clock::now();
     KLOGJNI("KuARTNative", "enter class=%s method=%s sig=%s args=%zu vm_depth=%d",
             owner, method_name, method_sig, num_args, VmLockDepth());
-    // Breadcrumbs: one synchronous unbuffered write() each into a single
-    // process-wide O_APPEND file, so they cost a syscall per record and
-    // serialize every thread in the process on that inode. The enter/exit pair
-    // is what a crash investigation needs and it is always written. The three
-    // stage labels around the trampoline are the redundant middle of that pair
-    // and are gated on KUDROID_TRACE_HOT (Log.h), which takes it from six
-    // writes per native call to two. The memory snapshots ride along with the
-    // pair, so query_system_memory() stays on the same two calls it was on
-    // before, rather than four.
     const bool hotTrace = log::trace_hot();
+    const bool journal = hotTrace || log::jni_enabled() ||
+        should_journal_native(method, static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                native_start.time_since_epoch()).count()));
     char breadcrumb[2048];
     breadcrumb[0] = '\0';
-    {
+    if (journal) {
         const SystemMemory memory_before = query_system_memory();
         std::snprintf(breadcrumb, sizeof(breadcrumb),
                       "native-enter class=%s method=%s sig=%s args=%zu vm_depth=%d footprint=%llu process_headroom=%llu available=%llu low_memory=%d",
@@ -637,7 +647,7 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
         std::chrono::steady_clock::now() - native_start).count();
     KLOGJNI("KuARTNative", "exit class=%s method=%s sig=%s duration_ms=%lld vm_depth=%d",
             owner, method_name, method_sig, static_cast<long long>(native_ms), VmLockDepth());
-    {
+    if (journal || native_ms >= 50) {
         const SystemMemory memory_after = query_system_memory();
         std::snprintf(breadcrumb, sizeof(breadcrumb),
                       "native-exit class=%s method=%s sig=%s duration_ms=%lld vm_depth=%d footprint=%llu process_headroom=%llu available=%llu low_memory=%d",

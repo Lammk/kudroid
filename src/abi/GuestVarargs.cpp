@@ -1,8 +1,14 @@
 #include "kudroid/abi/GuestVarargs.h"
 
-// No libc and no <string>: this file is compiled twice — once into kudroid_core, and once
-// freestanding for the arm64 qemu test that is the only thing able to prove it correct.
-// The one exception is double formatting, which is done by hand below for the same reason.
+#if defined(__APPLE__) && defined(__aarch64__)
+#include <cerrno>
+#include <cstdarg>
+#include <cstdio>
+#include <cwchar>
+#endif
+
+// Argument decoding is shared with the freestanding AAPCS64 harness.
+// Darwin formatting uses libc after repacking the guest arguments.
 
 namespace kudroid {
 namespace {
@@ -90,11 +96,7 @@ void PutInteger(Sink& sink, uint64_t value, unsigned base, bool upper,
     }
 }
 
-// Fixed-point formatting for %f, by hand.
-//
-// Only %f is supported; %e and %g fall back to it. A game's log line wants "%.2f" and
-// gets it, which is the case worth handling — and doing it here rather than calling the
-// host's snprintf keeps this file free of libc so the freestanding test can build it.
+// Fixed-point fallback for the freestanding formatter.
 void PutDouble(Sink& sink, double value, int precision) {
     if (precision < 0) precision = 6;
     if (precision > 17) precision = 17;
@@ -138,6 +140,40 @@ void PutDouble(Sink& sink, double value, int precision) {
 // one shared overflow area — that is what AAPCS64 specifies. The mistake to avoid is a
 // single counter for both, which misformats any line mixing "%d" and "%f"; a game logging
 // "frame %d at %f" hits it every frame.
+double Binary128ToDouble(uint64_t low, uint64_t high) {
+    const uint64_t sign = high & (uint64_t{1} << 63);
+    const unsigned exponent = static_cast<unsigned>((high >> 48) & 0x7fff);
+    uint64_t bits = sign;
+    if (exponent == 0x7fff) {
+        bits |= uint64_t{0x7ff} << 52;
+        if (low || (high & 0xffffffffffffULL)) bits |= uint64_t{1} << 51;
+    } else if (exponent != 0) {
+        int e = static_cast<int>(exponent) - 16383;
+        if (e > 1023) {
+            bits |= uint64_t{0x7ff} << 52;
+        } else if (e >= -1075) {
+            const unsigned shift = 60 + (e < -1022 ? static_cast<unsigned>(-1022 - e) : 0);
+            const __uint128_t significand =
+                (static_cast<__uint128_t>((high & 0xffffffffffffULL) | (uint64_t{1} << 48)) << 64) | low;
+            uint64_t rounded = static_cast<uint64_t>(significand >> shift);
+            const __uint128_t remainder = significand & ((__uint128_t{1} << shift) - 1);
+            const __uint128_t half = __uint128_t{1} << (shift - 1);
+            if (remainder > half || (remainder == half && (rounded & 1))) ++rounded;
+            if (e < -1022) {
+                bits |= rounded;
+            } else {
+                if (rounded == (uint64_t{1} << 53)) { rounded >>= 1; ++e; }
+                bits |= e > 1023 ? (uint64_t{0x7ff} << 52)
+                                : (static_cast<uint64_t>(e + 1023) << 52) |
+                                      (rounded & 0xfffffffffffffULL);
+            }
+        }
+    }
+    double value;
+    __builtin_memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
 class Cursor {
 public:
     Cursor(const GuestVarargs* registers, unsigned firstGpIndex, unsigned firstFpIndex)
@@ -165,12 +201,32 @@ public:
         return value;
     }
 
+    double NextLongDouble() {
+        if (registers_ == nullptr) return 0;
+        uint64_t low, high;
+        if (fpIndex_ < 8) {
+            low = registers_->fp[fpIndex_ * 2];
+            high = registers_->fp[fpIndex_ * 2 + 1];
+            ++fpIndex_;
+        } else {
+            // AAPCS64 aligns spilled binary128 values to sixteen bytes.
+            if (registers_->overflow != nullptr) {
+                const uintptr_t base = reinterpret_cast<uintptr_t>(registers_->overflow);
+                const uintptr_t at = (base + overflowIndex_ * 8 + 15) & ~uintptr_t{15};
+                overflowIndex_ = static_cast<unsigned>((at - base) / 8);
+            }
+            low = NextOverflow();
+            high = NextOverflow();
+        }
+        return Binary128ToDouble(low, high);
+    }
+
 private:
     uint64_t NextOverflow() {
         // Bounded: a format string with more conversions than the call had arguments would
         // otherwise walk off the stack. Guest format strings are guest data and cannot be
         // assumed to match the call.
-        const unsigned kMaxOverflowSlots = 32;
+        const unsigned kMaxOverflowSlots = 256;
         if (registers_->overflow == nullptr || overflowIndex_ >= kMaxOverflowSlots) return 0;
         return registers_->overflow[overflowIndex_++];
     }
@@ -180,6 +236,91 @@ private:
     unsigned fpIndex_;
     unsigned overflowIndex_ = 0;
 };
+
+enum class PrintfArgument { None, General, Double, LongDouble };
+
+template <typename Char>
+bool PackPrintf(const Char* format, const GuestVarargs* registers,
+                unsigned firstGpIndex, unsigned firstFpIndex,
+                uint64_t* slots, size_t capacity, size_t* count) {
+    if (!format || !slots || !count) return false;
+    *count = 0;
+    constexpr unsigned kMaxArguments = 128;
+    PrintfArgument kinds[kMaxArguments]{};
+    unsigned next = 1;
+    unsigned maximum = 0;
+    auto digit = [](Char c) { return c >= '0' && c <= '9'; };
+    auto position = [&](const Char*& p) {
+        const Char* q = p;
+        unsigned value = 0;
+        while (digit(*q)) {
+            if (value <= kMaxArguments) value = value * 10 + static_cast<unsigned>(*q - '0');
+            ++q;
+        }
+        if (q != p && *q == '$') { p = q + 1; return value; }
+        return 0u;
+    };
+    auto argument = [&](unsigned index, PrintfArgument kind) {
+        if (index == 0) index = next++;
+        if (index == 0 || index > kMaxArguments || index > capacity) return false;
+        if (kinds[index - 1] != PrintfArgument::None && kinds[index - 1] != kind) return false;
+        kinds[index - 1] = kind;
+        if (index > maximum) maximum = index;
+        return true;
+    };
+    for (const Char* p = format; *p; ++p) {
+        if (*p != '%') continue;
+        ++p;
+        if (*p == '%') continue;
+        const unsigned index = position(p);
+        while (*p == '-' || *p == '+' || *p == ' ' || *p == '#' || *p == '0' || *p == '\'') ++p;
+        if (*p == '*') {
+            ++p;
+            if (!argument(position(p), PrintfArgument::General)) return false;
+        } else {
+            while (digit(*p)) ++p;
+        }
+        if (*p == '.') {
+            ++p;
+            if (*p == '*') {
+                ++p;
+                if (!argument(position(p), PrintfArgument::General)) return false;
+            } else {
+                while (digit(*p)) ++p;
+            }
+        }
+        bool wideFloat = false;
+        if (*p == 'L') { wideFloat = true; ++p; }
+        else if (*p == 'h' || *p == 'l') {
+            const Char length = *p++;
+            if (*p == length) ++p;
+        } else if (*p == 'j' || *p == 'z' || *p == 't' || *p == 'q') ++p;
+        switch (*p) {
+            case 'f': case 'F': case 'e': case 'E':
+            case 'g': case 'G': case 'a': case 'A':
+                if (!argument(index, wideFloat ? PrintfArgument::LongDouble : PrintfArgument::Double)) return false;
+                break;
+            case 'd': case 'i': case 'u': case 'o': case 'x': case 'X':
+            case 'c': case 'C': case 's': case 'S': case 'p': case 'n':
+                if (!argument(index, PrintfArgument::General)) return false;
+                break;
+            default:
+                return false;
+        }
+    }
+    Cursor args(registers, firstGpIndex, firstFpIndex);
+    for (unsigned i = 0; i < maximum; ++i) {
+        if (kinds[i] == PrintfArgument::None) return false;
+        if (kinds[i] == PrintfArgument::General) slots[i] = args.NextInt();
+        else {
+            const double value = kinds[i] == PrintfArgument::LongDouble
+                                     ? args.NextLongDouble() : args.NextDouble();
+            __builtin_memcpy(slots + i, &value, sizeof(value));
+        }
+    }
+    *count = maximum;
+    return true;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Scanning, which is the same ABI problem with the consequences reversed.
@@ -626,14 +767,60 @@ int ScanGuestVarargsFrom(int (*peek)(void*), void (*advance)(void*), void* state
     return assigned;
 }
 
-size_t FormatGuestVarargs(char* out, size_t size, const char* format,
+bool PackGuestPrintfArguments(const char* format, const GuestVarargs* registers,
+                             unsigned firstGpIndex, unsigned firstFpIndex,
+                             uint64_t* slots, size_t capacity, size_t* count) {
+    return PackPrintf(format, registers, firstGpIndex, firstFpIndex, slots, capacity, count);
+}
+
+bool PackGuestPrintfArguments(const wchar_t* format, const GuestVarargs* registers,
+                             unsigned firstGpIndex, unsigned firstFpIndex,
+                             uint64_t* slots, size_t capacity, size_t* count) {
+    return PackPrintf(format, registers, firstGpIndex, firstFpIndex, slots, capacity, count);
+}
+
+#if defined(__APPLE__) && defined(__aarch64__)
+int FormatGuestWideVarargs(wchar_t* out, size_t size, const wchar_t* format,
                           const GuestVarargs* registers, unsigned firstGpIndex,
                           unsigned firstFpIndex) {
+    alignas(16) uint64_t slots[128]{};
+    size_t count = 0;
+    if (!PackGuestPrintfArguments(format, registers, firstGpIndex, firstFpIndex,
+                                  slots, 128, &count)) {
+        if (out && size) out[0] = L'\0';
+        errno = EINVAL;
+        return -1;
+    }
+    va_list ap = reinterpret_cast<char*>(slots);
+    return ::vswprintf(out, size, format, ap);
+}
+
+extern "C" int kudroid_swprintf_from_registers(const uint64_t* frame) {
+    const auto* args = reinterpret_cast<const GuestVarargs*>(frame);
+    return FormatGuestWideVarargs(reinterpret_cast<wchar_t*>(args->gp[0]),
+                                  args->gp[1], reinterpret_cast<const wchar_t*>(args->gp[2]),
+                                  args, 3);
+}
+#endif
+
+size_t FormatGuestVarargs(char* out, size_t size, const char* format,
+                          const GuestVarargs* registers, unsigned firstGpIndex,
+                          unsigned firstFpIndex, const char* errorMessage) {
     Sink sink(out, size);
     if (format == nullptr) {
         sink.Terminate();
         return 0;
     }
+#if defined(__APPLE__) && defined(__aarch64__)
+    alignas(16) uint64_t slots[128]{};
+    size_t count = 0;
+    if (PackGuestPrintfArguments(format, registers, firstGpIndex, firstFpIndex,
+                                 slots, 128, &count)) {
+        va_list ap = reinterpret_cast<char*>(slots);
+        const int result = ::vsnprintf(out, size, format, ap);
+        return result < 0 ? 0 : static_cast<size_t>(result);
+    }
+#endif
     Cursor args(registers, firstGpIndex, firstFpIndex);
 
     for (const char* cursor = format; *cursor != '\0'; ++cursor) {
@@ -706,6 +893,7 @@ size_t FormatGuestVarargs(char* out, size_t size, const char* format,
         // for every negative value. Only `l`, `ll`, `z`, `j` and `t` denote a 64-bit
         // argument.
         bool isLong = false;
+        bool isLongDouble = false;
         for (;;) {
             if (*cursor == 'l') {
                 isLong = true;   // 'll' is still 64-bit, so a second 'l' changes nothing
@@ -713,10 +901,10 @@ size_t FormatGuestVarargs(char* out, size_t size, const char* format,
             } else if (*cursor == 'z' || *cursor == 'j' || *cursor == 't') {
                 isLong = true;
                 ++cursor;
-            } else if (*cursor == 'h' || *cursor == 'L') {
-                // 'h'/'hh' are promoted to int when passed variadically, so they are
-                // 32-bit like the default; 'L' applies to long double, which is not
-                // supported here and falls through to the double path.
+            } else if (*cursor == 'L') {
+                isLongDouble = true;
+                ++cursor;
+            } else if (*cursor == 'h') {
                 ++cursor;
             } else {
                 break;
@@ -761,13 +949,16 @@ size_t FormatGuestVarargs(char* out, size_t size, const char* format,
             case 'c':
                 sink.Put(static_cast<char>(args.NextInt() & 0xFF));
                 break;
+            case 'm':
+                sink.PutCString(errorMessage != nullptr ? errorMessage : "<unsupported:%m>");
+                break;
             case 'f':
             case 'F':
             case 'e':
             case 'E':
             case 'g':
             case 'G':
-                PutDouble(sink, args.NextDouble(), precision);
+                PutDouble(sink, isLongDouble ? args.NextLongDouble() : args.NextDouble(), precision);
                 break;
             case 's': {
                 const char* text = reinterpret_cast<const char*>(args.NextInt());
@@ -946,6 +1137,17 @@ extern "C" int kudroid_sprintf_chk_from_registers(const uint64_t* frame) {
 // passed them in registers: a "%s" printed the bytes of a stack pointer. Formatting is
 // done here; the stream write is the shim's, because it needs <cstdio>.
 extern "C" void kudroid_guest_stdio_write(void* stream, const char* data, size_t len);
+extern "C" void kudroid_guest_syslog_write(int priority, const char* message);
+extern "C" const char* kudroid_guest_syslog_error();
+
+extern "C" void kudroid_syslog_from_registers(const uint64_t* frame) {
+    const auto* registers = reinterpret_cast<const kudroid::GuestVarargs*>(frame);
+    char message[2048];
+    kudroid::FormatGuestVarargs(message, sizeof(message),
+        reinterpret_cast<const char*>(registers->gp[1]), registers, 2, 0,
+        kudroid_guest_syslog_error());
+    kudroid_guest_syslog_write(static_cast<int>(registers->gp[0]), message);
+}
 
 namespace {
 int PrintGuestToStream(void* stream, const char* format, const kudroid::GuestVarargs* registers,

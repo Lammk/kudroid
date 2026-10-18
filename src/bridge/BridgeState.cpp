@@ -255,21 +255,33 @@ extern "C" void kudroid_note_render_thread(void) {
 // guest cannot lie about this one — no swaps for seconds means the frame loop
 // is dead no matter what any other timestamp says.
 static std::atomic<uint64_t> g_lastSwapNs{0};
+// When the current run began (same clock as g_lastSwapNs). The watchdog's
+// startup-silence trigger needs a per-run baseline: a launch that never reaches
+// its first present has no lastSwap to compare against, and the process start
+// is not it when a second run follows an install in the same process.
+static std::atomic<uint64_t> g_runStartNs{0};
+
+static uint64_t steady_now_ns() {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+}
 
 extern "C" void kudroid_note_frame_presented(void) {
-    g_lastSwapNs.store(
-        static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(
-                std::chrono::steady_clock::now().time_since_epoch())
-                .count()),
-        std::memory_order_relaxed);
+    g_lastSwapNs.store(steady_now_ns(), std::memory_order_relaxed);
 }
 
 extern "C" uint64_t kudroid_last_frame_presented_ns(void) {
     return g_lastSwapNs.load(std::memory_order_relaxed);
 }
 
+extern "C" uint64_t kudroid_run_started_ns(void) {
+    return g_runStartNs.load(std::memory_order_relaxed);
+}
+
 extern "C" void kudroid_frame_presented_reset(void) {
+    g_runStartNs.store(steady_now_ns(), std::memory_order_relaxed);
     g_lastSwapNs.store(0, std::memory_order_relaxed);
 }
 
@@ -424,7 +436,13 @@ void appendTestHeader(std::string& log, const char* test, const char* path) {
 // the installed build version.
 extern "C" const char* kudroid_build_stamp(void) {
     static const char kStamp[] =
-        "kudroid_core vT1.0.0 " __DATE__ " " __TIME__ " "
+        "kudroid_core vT1.0.0 "
+#ifdef KUDROID_BUILD_TIME
+        KUDROID_BUILD_TIME
+#else
+        __DATE__ " " __TIME__
+#endif
+        " "
 #ifdef KUDROID_GIT_HASH
         KUDROID_GIT_HASH
 #else

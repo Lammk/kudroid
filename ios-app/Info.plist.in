@@ -69,6 +69,8 @@
     <string>KuDroid needs camera access for guest Android applications.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>KuDroid needs microphone access for guest Android applications and audio recording.</string>
+    <key>NSMotionUsageDescription</key>
+    <string>Guest Android applications can use motion sensors for tilt and movement controls.</string>
     <key>NSPhotoLibraryUsageDescription</key>
     <string>KuDroid needs photo library access to import/export media files with Android apps.</string>
     <key>NSBluetoothAlwaysUsageDescription</key>

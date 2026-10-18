@@ -188,12 +188,29 @@ public class ViewGroup extends View implements ViewParent {
                     return true;
                 }
             }
+        } else if (action == MotionEvent.ACTION_POINTER_DOWN) {
+            final int pIdx = event.getActionIndex();
+            final float px = event.getX(pIdx) + mScrollX;
+            final float py = event.getY(pIdx) + mScrollY;
+            for (int i = mChildCount - 1; i >= 0; --i) {
+                View child = mChildren[i];
+                if (child == null || !child.isShown() || px < child.getLeft() ||
+                    px >= child.getRight() || py < child.getTop() || py >= child.getBottom()) continue;
+                if (dispatchToChild(child, event)) {
+                    return true;
+                }
+            }
+            if (mTouchTarget != null && dispatchToChild(mTouchTarget, event)) {
+                return true;
+            }
         } else if (mTouchTarget != null) {
             View child = mTouchTarget;
             if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
                 mTouchTarget = null;
             }
-            return dispatchToChild(child, event);
+            if (dispatchToChild(child, event)) {
+                return true;
+            }
         }
         return super.dispatchTouchEvent(event);
     }

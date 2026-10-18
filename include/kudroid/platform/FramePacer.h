@@ -95,6 +95,8 @@ namespace kudroid {
 // The state lives in an anonymous namespace inside FramePacer.cpp so nothing else
 // can reach into it. These are the only doors.
 void* frame_pacer_instance_for_this_thread();
+void* frame_pacer_native_instance_for_this_thread();
+void frame_pacer_release_native_thread();
 void frame_pacer_post(void* instance, void* callback, void* data, uint64_t delay_ns);
 void frame_pacer_add_refresh_callback(void* instance, void* callback, void* data);
 void frame_pacer_remove_refresh_callback(void* instance, void* callback, void* data);

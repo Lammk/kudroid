@@ -2,20 +2,18 @@
 
 #include <cstddef>
 
+extern "C" {
+// Frames a media codec rendered to a SurfaceTexture, queued by the codec thread and
+// taken by the main Looper, which tells the Java texture. Returns 0 when none are left.
+void kudroid_media_frame_post(int textureId, long long timestampNs);
+int kudroid_media_frame_take(int* textureId, long long* timestampNs);
+}
+
 namespace kudroid {
 
 struct SymbolEntry;
 
-// NDK media stack (libmediandk / libandroid tracing): ATrace, AMediaFormat,
-// AMediaDataSource, AMediaExtractor, AMediaCodec.
-//
-// Games reach this through Unity's VideoPlayer (cutscenes, animated menus).
-// Previously every one of these resolved to the universal dummy (returned 0),
-// so AMediaExtractor_new "succeeded" with a null handle and the first real call
-// dereferenced it. This provides honest semantics instead: a working
-// AMediaFormat key-value store, valid opaque handles, and an extractor that
-// reports zero tracks, so playback fails cleanly (error callback) instead of
-// crashing. No decoding is attempted — that needs a platform media pipeline.
+// NDK media extraction and CPU buffer decoding for VP8/Vorbis.
 const SymbolEntry* get_media_symbols(size_t* count);
 
 } // namespace kudroid

@@ -26,7 +26,7 @@ std::uint16_t read16(const std::vector<std::uint8_t>& d, std::size_t o) { return
 std::uint32_t read32(const std::vector<std::uint8_t>& d, std::size_t o) {
     return d[o] | (d[o + 1] << 8) | (d[o + 2] << 16) | (d[o + 3] << 24);
 }
-bool hasBytes(const std::vector<std::uint8_t>& d, std::size_t o, std::size_t n) { return o <= d.size() && n <= d.size() - o; }
+[[maybe_unused]] bool hasBytes(const std::vector<std::uint8_t>& d, std::size_t o, std::size_t n) { return o <= d.size() && n <= d.size() - o; }
 bool inflateRaw(const std::uint8_t* input, std::size_t inputSize, std::vector<std::uint8_t>& output) {
     if (output.empty()) return true;
 
@@ -364,7 +364,7 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
     // Diagnostics: The actual manifest of some APK repacks has been parsed and is empty
     // no clue — log enough for remote debugging via logs/.
     if (data.size() < 32 || read32(data, 0) != 0x00080003) {
-        char magic[64];
+        char magic[128];
         std::snprintf(magic, sizeof(magic),
                       "[kudroid_axml] reject: size=%zu magic=0x%02x%02x%02x%02x (expect 0x00080003)",
                       data.size(),

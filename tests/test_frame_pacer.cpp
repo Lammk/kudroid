@@ -35,6 +35,8 @@
 #include <thread>
 #include <vector>
 
+extern "C" int bionic_clock_gettime(int clock_id, struct timespec* ts);
+
 extern "C" {
 void* bionic_AChoreographer_getInstance(void);
 void bionic_AChoreographer_postFrameCallback(void* c, void* cb, void* data);
@@ -48,6 +50,7 @@ void bionic_AChoreographer_unregisterRefreshRateCallback(void* c, void* cb, void
 int32_t bionic_ANativeWindow_setFrameRate(void* window, float rate, int8_t compat);
 int32_t bionic_ANativeWindow_setFrameRateWithChangeStrategy(void* w, float r, int8_t c,
                                                             int8_t s);
+int bionic_ALooper_pollOnce(int timeout, int*, int*, void**);
 }
 
 namespace kudroid {
@@ -156,6 +159,7 @@ bool wait_until(Fn&& done, int timeout_ms = 2000) {
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     while (std::chrono::steady_clock::now() < deadline) {
+        bionic_ALooper_pollOnce(0, nullptr, nullptr, nullptr);
         if (done()) return true;
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
@@ -164,7 +168,7 @@ bool wait_until(Fn&& done, int timeout_ms = 2000) {
 
 uint64_t mono_now_ns() {
     struct timespec ts {};
-    ::clock_gettime(CLOCK_MONOTONIC, &ts);
+    bionic_clock_gettime(1, &ts);
     return static_cast<uint64_t>(ts.tv_sec) * 1000000000ull +
            static_cast<uint64_t>(ts.tv_nsec);
 }
@@ -330,12 +334,7 @@ void test_delayed_callback_waits() {
               " ms >= 75)");
 }
 
-// frameTimeNanos has to be on CLOCK_MONOTONIC, because that is the clock the guest
-// reads for itself through clock_gettime and System.nanoTime. Reporting
-// mach_absolute_time instead — which is what steady_clock is on Darwin, and which
-// does not advance across sleep — gives a guest two timelines that drift apart by
-// however long the device slept, and a pacer subtracting one from the other then
-// either stalls on a deadline in the past or floods frames catching up.
+// Frame timestamps must match the clock exposed to the guest.
 void test_frame_time_is_on_clock_monotonic() {
     std::printf("[choreographer] frameTimeNanos is CLOCK_MONOTONIC, the clock the guest reads\n");
     reset();
@@ -548,6 +547,7 @@ void test_frames_arrive_on_several_threads() {
             };
             bionic_AChoreographer_postFrameCallback(c, reinterpret_cast<void*>(&Local::cb),
                                                     &delivered);
+            wait_until([&] { return delivered.load(std::memory_order_acquire) >= kThreads; });
         });
     }
     for (std::thread& t : threads) t.join();
@@ -618,6 +618,7 @@ void test_the_64bit_forms_behave_the_same() {
           "postFrameCallback64 delivers");
 
     reset();
+    c = bionic_AChoreographer_getInstance();
     bionic_AChoreographer_postFrameCallbackDelayed64(
         c, reinterpret_cast<void*>(&frame_callback), nullptr, 10);
     Check(wait_until([] { return g_frames.calls.load(std::memory_order_acquire) >= 1; },

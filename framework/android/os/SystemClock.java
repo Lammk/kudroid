@@ -10,9 +10,8 @@ public final class SystemClock {
         }
     }
     public static boolean setCurrentTimeMillis(long millis) { return false; }
-    // Monotonic: wall-clock jumps (NTP, user) must not move timers.
-    public static long uptimeMillis() { return System.nanoTime() / 1000000L; }
-    public static long elapsedRealtime() { return System.nanoTime() / 1000000L; }
-    public static long elapsedRealtimeNanos() { return System.nanoTime(); }
-    public static long currentThreadTimeMillis() { return System.nanoTime() / 1000000L; }
+    public static native long uptimeMillis();
+    public static native long elapsedRealtime();
+    public static native long elapsedRealtimeNanos();
+    public static native long currentThreadTimeMillis();
 }

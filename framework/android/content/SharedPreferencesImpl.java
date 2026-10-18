@@ -513,6 +513,10 @@ public class SharedPreferencesImpl implements SharedPreferences {
                 os = null;
                 saved = temp.renameTo(mFile);
                 if (!saved) {
+                    if (mFile.exists()) mFile.delete();
+                    saved = temp.renameTo(mFile);
+                }
+                if (!saved) {
                     android.util.Log.e("SharedPreferences", "could not replace " + mFile.getPath());
                     return false;
                 }

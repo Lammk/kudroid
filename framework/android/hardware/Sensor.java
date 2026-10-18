@@ -1,6 +1,8 @@
 package android.hardware;
 
 public final class Sensor {
+    public static final int TYPE_ALL = -1;
+    public static final int TYPE_GAME_ROTATION_VECTOR = 15;
     public static final int TYPE_ACCELEROMETER = 1;
     public static final int TYPE_MAGNETIC_FIELD = 2;
     public static final int TYPE_ORIENTATION = 3;
@@ -20,5 +22,8 @@ public final class Sensor {
     public float getMaximumRange() { return 100.0f; }
     public float getResolution() { return 0.01f; }
     public float getPower() { return 0.1f; }
-    public int getMinDelay() { return 10000; }
+    public int getMinDelay() { return 5000; }
+    public boolean isWakeUpSensor() { return false; }
+    public String getVendor() { return "Host"; }
+    public int getVersion() { return 1; }
 }

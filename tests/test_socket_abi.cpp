@@ -84,10 +84,18 @@ int main() {
     Check(back.l_type == 2 && back.l_start == 100 && back.l_len == 50, "F_UNLCK comes back as Linux's");
     Check(sizeof(LinuxFlock) == 32 && sizeof(DarwinFlock) == 24, "the structs have each platform's size");
 
-    Check(AddrInfoFlagsToHost(0x8) == 0x1000, "AI_NUMERICSERV moves to Darwin's value");
-    Check(AddrInfoFlagsToHost(0x1 | 0x4 | 0x400) == (0x1 | 0x4 | 0x400),
-          "AI_PASSIVE, AI_NUMERICHOST and AI_ADDRCONFIG keep their numbers");
-    Check(AddrInfoFlagsToHost(0x8 | 0x2) == (0x1000 | 0x2), "flags combine");
+    Check(sizeof(GuestAddrinfo) == 48, "GuestAddrinfo has Linux LP64 size 48");
+    Check(offsetof(GuestAddrinfo, ai_canonname) == 24, "GuestAddrinfo ai_canonname is at offset 24 (before ai_addr)");
+    Check(offsetof(GuestAddrinfo, ai_addr) == 32, "GuestAddrinfo ai_addr is at offset 32");
+    Check(offsetof(GuestAddrinfo, ai_next) == 40, "GuestAddrinfo ai_next is at offset 40");
+
+    Check(AddrInfoFlagsToHost(0x400) == 0x1000, "Linux AI_NUMERICSERV (0x400) moves to Darwin 0x1000");
+    Check(AddrInfoFlagsToHost(0x8) == 0x800, "Linux AI_V4MAPPED (0x8) moves to Darwin 0x800");
+    Check(AddrInfoFlagsToHost(0x10) == 0x100, "Linux AI_ALL (0x10) moves to Darwin 0x100");
+    Check(AddrInfoFlagsToHost(0x20) == 0x400, "Linux AI_ADDRCONFIG (0x20) moves to Darwin 0x400");
+    Check(AddrInfoFlagsToHost(0x1 | 0x2 | 0x4) == (0x1 | 0x2 | 0x4),
+          "AI_PASSIVE, AI_CANONNAME, and AI_NUMERICHOST keep their values");
+    Check(AddrInfoFlagsToHost(0x400 | 0x2) == (0x1000 | 0x2), "flags combine");
 
     {
         char name[] = "example.test";

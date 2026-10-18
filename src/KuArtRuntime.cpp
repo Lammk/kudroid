@@ -19,6 +19,8 @@
 #include "kudroid/platform/CameraShim.h"
 #include "kudroid/platform/FramePacer.h"
 #include "kudroid/platform/NetworkState.h"
+#include "kudroid/platform/MediaShim.h"
+#include "kudroid/platform/MediaPlayerHost.h"
 #include "kudroid/kuart/VmLock.h"
 
 #include "dex/dex_file-inl.h"
@@ -368,6 +370,22 @@ DexArray* NewStringArray(const char* const* items, int count) {
 }
 
 }  // namespace
+
+// Announce frames the media codecs rendered to their SurfaceTextures. Main Looper thread only.
+extern "C" void kuart_media_drain_pending(void) {
+    int64_t player = 0;
+    int32_t event = 0, extra = 0;
+    while (kudroid_media_player_take(&player, &event, &extra)) {
+        const DexValue args[3] = {DexValue::Long(player), DexValue::Int(event), DexValue::Int(extra)};
+        CallFrameworkStatic("Landroid/media/MediaPlayer;", "notifyEvent", "(JII)V", args, 3);
+    }
+    int texture_id = 0;
+    long long timestamp_ns = 0;
+    while (kudroid_media_frame_take(&texture_id, &timestamp_ns)) {
+        const DexValue args[2] = {DexValue::Int(texture_id), DexValue::Long(timestamp_ns)};
+        CallFrameworkStatic("Landroid/graphics/SurfaceTexture;", "notifyFrameAvailable", "(IJ)V", args, 2);
+    }
+}
 
 extern "C" void kuart_set_log_callback(void (*cb)(const char*)) { g_log_cb = cb; }
 

@@ -105,6 +105,8 @@ public final class MotionEvent extends InputEvent {
     private final int[] mPointerIds;
     private final float[] mPointerXs;
     private final float[] mPointerYs;
+    private final float[] mPointerDeltasX;
+    private final float[] mPointerDeltasY;
 
     private MotionEvent(long downTime, long eventTime, int action, float x, float y, int pointerCount) {
         mDownTime = downTime;
@@ -117,10 +119,14 @@ public final class MotionEvent extends InputEvent {
         mPointerIds = new int[pointerCount];
         mPointerXs = new float[pointerCount];
         mPointerYs = new float[pointerCount];
+        mPointerDeltasX = new float[pointerCount];
+        mPointerDeltasY = new float[pointerCount];
         for (int i = 0; i < pointerCount; i++) {
             mPointerIds[i] = i;
             mPointerXs[i] = x;
             mPointerYs[i] = y;
+            mPointerDeltasX[i] = 0.0f;
+            mPointerDeltasY[i] = 0.0f;
         }
     }
 
@@ -190,6 +196,8 @@ public final class MotionEvent extends InputEvent {
             ev.mPointerIds[i] = other.mPointerIds[i];
             ev.mPointerXs[i] = other.mPointerXs[i];
             ev.mPointerYs[i] = other.mPointerYs[i];
+            ev.mPointerDeltasX[i] = other.mPointerDeltasX[i];
+            ev.mPointerDeltasY[i] = other.mPointerDeltasY[i];
         }
         ev.mOffsetX = other.mOffsetX;
         ev.mOffsetY = other.mOffsetY;
@@ -213,6 +221,8 @@ public final class MotionEvent extends InputEvent {
      * never on one already dispatched.
      */
     public void updateCoalescedMove(float x, float y, long eventTime) {
+        mPointerDeltasX[0] += (x - mX);
+        mPointerDeltasY[0] += (y - mY);
         mX = x;
         mY = y;
         mPointerXs[0] = x;
@@ -235,7 +245,11 @@ public final class MotionEvent extends InputEvent {
         }
         if (pointerCount != mPointerCount) return false;
         for (int i = 0; i < pointerCount; i++) {
-            mPointerIds[i] = ids[i];
+            if (mPointerIds[i] != ids[i]) return false;
+        }
+        for (int i = 0; i < pointerCount; i++) {
+            mPointerDeltasX[i] += (xs[i] - mPointerXs[i]);
+            mPointerDeltasY[i] += (ys[i] - mPointerYs[i]);
             mPointerXs[i] = xs[i];
             mPointerYs[i] = ys[i];
         }
@@ -504,11 +518,14 @@ public final class MotionEvent extends InputEvent {
     }
 
     public float getAxisValue(int axis, int pointerIndex) {
+        int idx = clampIndex(pointerIndex);
         switch (axis) {
-            case AXIS_X: return getX(pointerIndex);
-            case AXIS_Y: return getY(pointerIndex);
+            case AXIS_X: return getX(idx);
+            case AXIS_Y: return getY(idx);
             case AXIS_PRESSURE: return 1.0f;
             case AXIS_SIZE: return 1.0f;
+            case AXIS_RELATIVE_X: return mPointerDeltasX != null ? mPointerDeltasX[idx] : 0.0f;
+            case AXIS_RELATIVE_Y: return mPointerDeltasY != null ? mPointerDeltasY[idx] : 0.0f;
             default: return 0.0f;
         }
     }

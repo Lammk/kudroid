@@ -208,11 +208,20 @@ void FlockToGuest(const DarwinFlock& h, LinuxFlock* g) {
     g->l_pid = h.l_pid;
 }
 
+static_assert(offsetof(GuestAddrinfo, ai_canonname) == 24, "GuestAddrinfo ai_canonname offset");
+static_assert(offsetof(GuestAddrinfo, ai_addr) == 32, "GuestAddrinfo ai_addr offset");
+static_assert(offsetof(GuestAddrinfo, ai_next) == 40, "GuestAddrinfo ai_next offset");
+static_assert(sizeof(GuestAddrinfo) == 48, "GuestAddrinfo size");
+
 int AddrInfoFlagsToHost(int f) {
-    constexpr int kGuestNumericServ = 0x8;
-    constexpr int kHostNumericServ = 0x1000;
-    int host = f & ~kGuestNumericServ;
-    if (f & kGuestNumericServ) host |= kHostNumericServ;
+    int host = 0;
+    if (f & 0x1) host |= 0x0001;    // AI_PASSIVE
+    if (f & 0x2) host |= 0x0002;    // AI_CANONNAME
+    if (f & 0x4) host |= 0x0004;    // AI_NUMERICHOST
+    if (f & 0x8) host |= 0x0800;    // Linux AI_V4MAPPED (0x8) -> Darwin AI_V4MAPPED (0x800)
+    if (f & 0x10) host |= 0x0100;   // Linux AI_ALL (0x10) -> Darwin AI_ALL (0x100)
+    if (f & 0x20) host |= 0x0400;   // Linux AI_ADDRCONFIG (0x20) -> Darwin AI_ADDRCONFIG (0x400)
+    if (f & 0x400) host |= 0x1000;  // Linux AI_NUMERICSERV (0x400) -> Darwin AI_NUMERICSERV (0x1000)
     return host;
 }
 

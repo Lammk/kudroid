@@ -431,7 +431,7 @@ void PrintProt(const char* what, const void* addr) {
 // True when the region's MAX protection includes execute — the honest "this page
 // can ever be fetched" answer. A succeeded mprotect does not imply it (it can be
 // silently clamped), but max_protection cannot lie.
-bool RegionMaxExec(const void* addr) {
+[[maybe_unused]] bool RegionMaxExec(const void* addr) {
     vm_prot_t max = 0;
     return RegionProt(addr, nullptr, &max) && (max & VM_PROT_EXECUTE) != 0;
 }

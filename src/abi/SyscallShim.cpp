@@ -10,6 +10,7 @@
 #include "kudroid/DeviceProfile.h"
 #include "kudroid/platform/BundledFramework.h"
 #include "kudroid/platform/GraphicsShim.h"
+#include "kudroid/platform/GuestClock.h"
 #include "kudroid/platform/InputShim.h"
 #include "kudroid/platform/AudioShim.h"
 #include "kudroid/platform/MediaShim.h"
@@ -34,6 +35,8 @@
 #include <sys/uio.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
+#include <syslog.h>
+#include "kudroid/platform/FramePacer.h"
 #if defined(__linux__)
 #include <sys/inotify.h>
 #include <sys/signalfd.h>
@@ -43,9 +46,14 @@
 #include <chrono>
 #include <algorithm>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <net/if.h>
+#if defined(__APPLE__)
+#include <resolv.h>
+#endif
 #include <condition_variable>
 #include <limits.h>
 #if defined(__APPLE__)
@@ -154,7 +162,9 @@ extern "C" void kudroid_set_app_permissions_json(const char* packageName, const 
 struct android_epoll_event {
     uint32_t events;
     uint64_t data;
-} __attribute__((packed));
+};
+static_assert(sizeof(android_epoll_event) == 16, "android_epoll_event size must match LP64");
+static_assert(offsetof(android_epoll_event, data) == 8, "android_epoll_event data offset must match LP64");
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
@@ -217,18 +227,25 @@ void appendUnsigned(std::string& output, uint64_t value, unsigned base) {
 static std::mutex g_logAndroidMutex;
 extern "C" void kudroid_persistent_breadcrumb(const char* line);
 
-// Console sink: never block on a full pipe whose reader has stalled. A blocked
-// write here would hold the log lock and freeze every thread that logs.
-// Each chunk stays under PIPE_BUF so a writable poll guarantees a non-blocking
-// write; a not-ready console drops the rest of the line.
+// Console sink: never block on a full pipe whose reader has stalled. stdout is the launcher's pipe or pty when the app is started with a console attached.
+// If nothing drains it, a write blocks forever, and the thread blocked here holds the log
+// mutex: a GL thread that logs a call then stalls the whole frame loop. The descriptor is
+// kept non-blocking (checked per call, since it can be replaced), so a full console drops
+// the line instead.
+extern "C" void kudroid_console_init_nonblocking(void) {
+    const int flags = ::fcntl(STDOUT_FILENO, F_GETFL);
+    if (flags >= 0 && (flags & O_NONBLOCK) == 0) {
+        ::fcntl(STDOUT_FILENO, F_SETFL, flags | O_NONBLOCK);
+    }
+}
+
 static void console_write_nonblocking(const char* data, size_t len) {
     constexpr size_t kChunk = 480;
+    kudroid_console_init_nonblocking();
     while (len > 0) {
-        struct pollfd pfd = {STDOUT_FILENO, POLLOUT, 0};
-        if (::poll(&pfd, 1, 0) <= 0 || (pfd.revents & POLLOUT) == 0) return;
         const size_t n = len < kChunk ? len : kChunk;
         const ssize_t w = ::write(STDOUT_FILENO, data, n);
-        if (w <= 0) return;
+        if (w <= 0) return;  // EAGAIN (console full), EPIPE or error: drop the rest
         data += w;
         len -= static_cast<size_t>(w);
     }
@@ -308,6 +325,10 @@ static uint64_t log_line_hash(const std::string& s) {
 static thread_local bool t_inLogMessage = false;
 
 int logAndroidMessage(int priority, const char* tag, const std::string& message) {
+    if (message.find("BoxCollider does not support negative scale") != std::string::npos ||
+        message.find("The effective box size has been forced positive") != std::string::npos) {
+        return 0;
+    }
     if (t_inLogMessage || kudroid::guest_async_handler_active()) return 0;
     if (!lock_log_bounded(g_logAndroidMutex)) return 0;
     std::lock_guard<std::mutex> lock(g_logAndroidMutex, std::adopt_lock);
@@ -506,12 +527,25 @@ extern "C" int kudroid_android_log_print_trampoline();
 // freestanding arm64 test can link them without dragging in this file.
 extern "C" int kudroid_snprintf_trampoline();
 extern "C" int kudroid_sprintf_trampoline();
+#if defined(__APPLE__) && defined(__aarch64__)
+extern "C" int kudroid_swprintf_trampoline();
+extern "C" int bionic_vswprintf(wchar_t* out, size_t size, const wchar_t* format, va_list ap) {
+    GuestVarargs registers{};
+    unsigned gp = 0, fp = 0;
+    if (!GuestVarargsFromVaList(ap, &registers, &gp, &fp)) {
+        errno = EINVAL;
+        return -1;
+    }
+    return FormatGuestWideVarargs(out, size, format, &registers, gp, fp);
+}
+#endif
 extern "C" int kudroid_snprintf_chk_trampoline();
 extern "C" int kudroid_sprintf_chk_trampoline();
 extern "C" int kudroid_fprintf_trampoline();
 extern "C" int kudroid_printf_trampoline();
 extern "C" int kudroid_fprintf_chk_trampoline();
 extern "C" int kudroid_printf_chk_trampoline();
+extern "C" void kudroid_syslog_trampoline();
 
 // Stream sink for the fprintf/printf handlers in GuestVarargs.cpp. A null stream is stdout.
 extern "C" void kudroid_guest_stdio_write(void* stream, const char* data, size_t len) {
@@ -691,14 +725,23 @@ static inline void* create_mutex_obj(int kind) {
     return host;
 }
 
+// A guest condition variable maps to a host one plus the clock its absolute timeouts are
+// measured on. Bionic reads that clock from the attribute given to pthread_cond_init
+// (CLOCK_REALTIME by default); the host condition only understands the wall clock, so
+// timeouts on a monotonic condition are converted when the wait starts.
+struct HostCond {
+    pthread_cond_t cond;
+    std::atomic<bool> monotonic{false};
+};
+
 static inline void* create_sync_obj(int type) {
     if (type == SYNC_MUTEX) {
         return create_mutex_obj(BIONIC_MUTEX_NORMAL);
     } else if (type == SYNC_COND) {
-        auto* hostCond = static_cast<pthread_cond_t*>(std::malloc(sizeof(pthread_cond_t)));
+        auto* hostCond = new (std::nothrow) HostCond();
         if (!hostCond) return nullptr;
-        if (::pthread_cond_init(hostCond, nullptr) != 0) {
-            std::free(hostCond);
+        if (::pthread_cond_init(&hostCond->cond, nullptr) != 0) {
+            delete hostCond;
             return nullptr;
         }
         return hostCond;
@@ -722,8 +765,13 @@ static inline void destroy_sync_obj(void* host_obj, int type) {
         delete host;
         return;
     }
-    if (type == SYNC_COND) ::pthread_cond_destroy(static_cast<pthread_cond_t*>(host_obj));
-    else if (type == SYNC_RWLOCK) ::pthread_rwlock_destroy(static_cast<pthread_rwlock_t*>(host_obj));
+    if (type == SYNC_COND) {
+        auto* host = static_cast<HostCond*>(host_obj);
+        ::pthread_cond_destroy(&host->cond);
+        delete host;
+        return;
+    }
+    if (type == SYNC_RWLOCK) ::pthread_rwlock_destroy(static_cast<pthread_rwlock_t*>(host_obj));
     std::free(host_obj);
 }
 
@@ -838,11 +886,20 @@ extern "C" int bionic_pthread_mutex_init(void* guestMutex, const void* attr) {
     return 0;
 }
 
+// Bionic stores a condition attribute's clock in bit 1 of its first word
+// (0 = CLOCK_REALTIME, 1 = CLOCK_MONOTONIC).
+static constexpr uint32_t kBionicCondClockMonotonic = 2u;
+
 extern "C" int bionic_pthread_cond_init(void* cond, const void* attr) {
-    (void)attr;
     if (!cond) return EINVAL;
     void* hostCond = create_sync_obj(SYNC_COND);
     if (!hostCond) return guest_errno(EAGAIN);
+    if (attr != nullptr) {
+        uint32_t word = 0;
+        std::memcpy(&word, attr, sizeof(word));
+        static_cast<HostCond*>(hostCond)->monotonic.store((word & kBionicCondClockMonotonic) != 0,
+                                                          std::memory_order_relaxed);
+    }
 
     register_sync(cond, hostCond, SYNC_COND);
     return 0;
@@ -931,12 +988,17 @@ extern "C" int bionic_pthread_mutex_destroy(void* guestMutex) {
 }
 
 // --- Cond and Rwlock Wrappers ---
+static inline HostCond* host_cond_for(void* guestCond) {
+    return static_cast<HostCond*>(get_or_init_sync(guestCond, SYNC_COND));
+}
+
 extern "C" int bionic_pthread_cond_destroy(void* cond) {
     destroy_sync(cond, SYNC_COND);
     return 0;
 }
 extern "C" int bionic_pthread_cond_wait(void* cond, void* mutex) {
-    pthread_cond_t* hostCond = static_cast<pthread_cond_t*>(get_or_init_sync(cond, SYNC_COND));
+    HostCond* hostCondObj = host_cond_for(cond);
+    pthread_cond_t* hostCond = hostCondObj ? &hostCondObj->cond : nullptr;
     HostMutex* host = host_mutex_for(mutex);
     if (!hostCond || !host) return EINVAL;
     // pthread_cond_wait releases the mutex while blocked, so this thread stops
@@ -954,28 +1016,31 @@ extern "C" int bionic_pthread_cond_wait(void* cond, void* mutex) {
     return result;
 }
 extern "C" int bionic_pthread_cond_timedwait(void* cond, void* mutex, const struct timespec* abstime) {
-    pthread_cond_t* hostCond = static_cast<pthread_cond_t*>(get_or_init_sync(cond, SYNC_COND));
+    HostCond* hostCondObj = host_cond_for(cond);
+    pthread_cond_t* hostCond = hostCondObj ? &hostCondObj->cond : nullptr;
     HostMutex* host = host_mutex_for(mutex);
     if (!hostCond || !host) return EINVAL;
-    // TEMP DIAGNOSTIC: guest-vs-host clock domain for absolute timeouts.
-    // A mismatch makes every timed wait fire instantly or sleep forever.
-    {
-        static std::atomic<int> s_logged{0};
-        struct timespec rt{}, mo{};
-        clock_gettime(CLOCK_REALTIME, &rt);
-        clock_gettime(CLOCK_MONOTONIC, &mo);
-        const long long ab = abstime != nullptr
-                                 ? static_cast<long long>(abstime->tv_sec)
-                                 : -1;
-        const bool past_realtime = abstime != nullptr && ab < (long long)rt.tv_sec;
-        const int n = s_logged.load();
-        if (n < 5 || (past_realtime && n < 25)) {
-            ++s_logged;
-            std::fprintf(stderr,
-                         "[KuDroidSync] timedwait abstime=%lld rt_now=%lld mo_now=%lld %s\n",
-                         ab, (long long)rt.tv_sec, (long long)mo.tv_sec,
-                         past_realtime ? "PAST-REALTIME-INSTANT-TIMEOUT" : "ok");
-        }
+    if (abstime == nullptr) return EINVAL;
+    // The host condition measures absolute time on the wall clock. A monotonic guest
+    // condition hands over a CLOCK_MONOTONIC instant, which on the wall clock is decades
+    // in the past: every wait would time out at once and its caller would spin.
+    struct timespec deadline = *abstime;
+    if (hostCondObj->monotonic.load(std::memory_order_relaxed)) {
+        struct timespec mono{}, wall{};
+        clock_gettime(kudroid::host_clock_for_guest(1), &mono);
+        clock_gettime(CLOCK_REALTIME, &wall);
+        long long sec = static_cast<long long>(abstime->tv_sec) - mono.tv_sec;
+        long long nsec = static_cast<long long>(abstime->tv_nsec) - mono.tv_nsec;
+        // Bound the distance so the sum below cannot overflow time_t.
+        constexpr long long kMaxAheadSec = 1ll << 31;
+        if (sec > kMaxAheadSec) sec = kMaxAheadSec;
+        if (sec < -kMaxAheadSec) sec = -kMaxAheadSec;
+        sec += wall.tv_sec;
+        nsec += wall.tv_nsec;
+        while (nsec >= 1000000000ll) { nsec -= 1000000000ll; ++sec; }
+        while (nsec < 0) { nsec += 1000000000ll; --sec; }
+        deadline.tv_sec = static_cast<time_t>(sec);
+        deadline.tv_nsec = static_cast<long>(nsec);
     }
     const bool track = host->track_owner;
     if (track) host->owner.store(0, std::memory_order_relaxed);
@@ -983,7 +1048,7 @@ extern "C" int bionic_pthread_cond_timedwait(void* cond, void* mutex, const stru
     const int result = [&] {
         const BlockingWaitScope tracked(WaitKind::kConditionTimed, cond,
                                         guest_return_address(6));
-        return ::pthread_cond_timedwait(hostCond, &host->mutex, abstime);
+        return ::pthread_cond_timedwait(hostCond, &host->mutex, &deadline);
     }();
     sync_diag("cond-timedwait-return", cond, mutex, result);
     // The mutex is reacquired on timeout too, so ownership is restored either way.
@@ -991,13 +1056,15 @@ extern "C" int bionic_pthread_cond_timedwait(void* cond, void* mutex, const stru
     return result != 0 ? guest_errno(result) : 0;
 }
 extern "C" int bionic_pthread_cond_signal(void* cond) {
-    pthread_cond_t* hostCond = static_cast<pthread_cond_t*>(get_or_init_sync(cond, SYNC_COND));
+    HostCond* hostCondObj = host_cond_for(cond);
+    pthread_cond_t* hostCond = hostCondObj ? &hostCondObj->cond : nullptr;
     const int result = hostCond ? ::pthread_cond_signal(hostCond) : -1;
     sync_diag("cond-signal", cond, nullptr, result);
     return result;
 }
 extern "C" int bionic_pthread_cond_broadcast(void* cond) {
-    pthread_cond_t* hostCond = static_cast<pthread_cond_t*>(get_or_init_sync(cond, SYNC_COND));
+    HostCond* hostCondObj = host_cond_for(cond);
+    pthread_cond_t* hostCond = hostCondObj ? &hostCondObj->cond : nullptr;
     const int result = hostCond ? ::pthread_cond_broadcast(hostCond) : -1;
     sync_diag("cond-broadcast", cond, nullptr, result);
     return result;
@@ -1586,10 +1653,11 @@ void log_mmap_result(void* result, size_t length, int prot, int flags, int fd,
 }
 
 #if defined(__APPLE__)
-static bool can_use_fixed_placement(uintptr_t start, size_t length) {
+static bool host_range_query(uintptr_t start, size_t length, bool* out_mapped, int* out_prot) {
     if (start == 0 || length == 0) return false;
     uintptr_t curr = start;
     const uintptr_t target_end = start + length;
+    int common_prot = -1;
     while (curr < target_end) {
         mach_vm_address_t region_addr = static_cast<mach_vm_address_t>(curr);
         mach_vm_size_t sz = 0;
@@ -1600,23 +1668,26 @@ static bool can_use_fixed_placement(uintptr_t start, size_t length) {
             mach_task_self(), &region_addr, &sz, KUDROID_VM_REGION_BASIC_INFO_64_FLAVOR,
             reinterpret_cast<vm_region_info_t>(&info), &count, &obj);
         if (obj != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), obj);
-        if (kr != KERN_SUCCESS) {
+        if (kr != KERN_SUCCESS || region_addr > curr) {
+            if (out_mapped) *out_mapped = false;
+            if (out_prot) *out_prot = 0;
             return true;
         }
-        if (region_addr > curr) {
-            if (region_addr >= target_end) return true;
-            curr = static_cast<uintptr_t>(region_addr);
-        }
-        if (info.protection != VM_PROT_NONE) {
-            return false;
-        }
-        if (sz == 0) return false;
-        const uintptr_t region_end = static_cast<uintptr_t>(region_addr + sz);
-        if (region_end <= curr) return false;
-        curr = region_end;
+        int p = 0;
+        if (info.protection & VM_PROT_READ) p |= PROT_READ;
+        if (info.protection & VM_PROT_WRITE) p |= PROT_WRITE;
+        if (info.protection & VM_PROT_EXECUTE) p |= PROT_EXEC;
+        if (common_prot == -1) common_prot = p;
+        else if (common_prot != p) common_prot = -2;
+        if (sz == 0 || region_addr + sz <= curr) return false;
+        curr = static_cast<uintptr_t>(region_addr + sz);
     }
+    if (out_mapped) *out_mapped = true;
+    if (out_prot) *out_prot = common_prot;
     return true;
 }
+
+
 #endif
 }  // namespace
 
@@ -1683,10 +1754,13 @@ extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int
     const int clean_flags = flags & ~(LINUX_ONLY_MAP_FLAGS | 0xFC000000);
 
     int darwin_flags = 0;
-    if (clean_flags & LINUX_MAP_SHARED)          darwin_flags |= MAP_SHARED;
-    if (clean_flags & LINUX_MAP_PRIVATE)         darwin_flags |= MAP_PRIVATE;
-    if (clean_flags & LINUX_MAP_FIXED)           darwin_flags |= MAP_FIXED;
-    if (clean_flags & LINUX_MAP_SHARED_VALIDATE) darwin_flags |= MAP_SHARED;
+    switch (clean_flags & LINUX_MAP_SHARED_VALIDATE) {
+        case LINUX_MAP_SHARED:
+        case LINUX_MAP_SHARED_VALIDATE: darwin_flags |= MAP_SHARED; break;
+        case LINUX_MAP_PRIVATE: darwin_flags |= MAP_PRIVATE; break;
+        default: errno = EINVAL; return MAP_FAILED;
+    }
+    if ((clean_flags & LINUX_MAP_FIXED) && !fixed_noreplace) darwin_flags |= MAP_FIXED;
 
     int darwin_fd = fd;
     if (clean_flags & LINUX_MAP_ANONYMOUS) {
@@ -1695,26 +1769,65 @@ extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int
     }
 
     void* const orig_addr = addr;
+    const size_t orig_len = length;
     const long host_page = ::sysconf(_SC_PAGESIZE);
     const uintptr_t page_mask = (host_page > 0 ? static_cast<uintptr_t>(host_page) : 16384u) - 1;
-
-    // Honor address hint for anonymous allocations if target range is unmapped or PROT_NONE reservation
-    if (darwin_fd < 0 && addr != nullptr && !(darwin_flags & MAP_FIXED)) {
-        const uintptr_t uaddr = reinterpret_cast<uintptr_t>(addr);
-        const uintptr_t aligned_start = uaddr & ~page_mask;
-        const uintptr_t aligned_end = (uaddr + length + page_mask) & ~page_mask;
-        const size_t aligned_len = static_cast<size_t>(aligned_end - aligned_start);
-        if (can_use_fixed_placement(aligned_start, aligned_len)) {
-            darwin_flags |= MAP_FIXED;
-            addr = reinterpret_cast<void*>(aligned_start);
-            length = aligned_len;
-        } else if (fixed_noreplace) {
-            errno = EEXIST;
-            log_mmap_result(MAP_FAILED, length, prot, flags, fd, offset, addr);
+    mach_vm_address_t exclusive_base = 0;
+    mach_vm_size_t exclusive_length = 0;
+    if (fixed_noreplace) {
+        const uintptr_t requested = reinterpret_cast<uintptr_t>(orig_addr);
+        const size_t bias = requested & page_mask;
+        if ((requested & 4095u) || orig_len == 0 || orig_len > SIZE_MAX - bias ||
+            (darwin_fd >= 0 && (offset < 0 || (static_cast<uint64_t>(offset) & page_mask) != bias))) {
+            errno = EINVAL;
             return MAP_FAILED;
+        }
+        exclusive_base = requested & ~page_mask;
+        exclusive_length = orig_len + bias;
+        // Claim the address atomically before replacing only our own reservation.
+        const kern_return_t kr = mach_vm_allocate(mach_task_self(), &exclusive_base,
+                                                  exclusive_length, VM_FLAGS_FIXED);
+        if (kr != KERN_SUCCESS) {
+            errno = kr == KERN_NO_SPACE ? EEXIST : kr == KERN_INVALID_ADDRESS ? EINVAL : ENOMEM;
+            return MAP_FAILED;
+        }
+        addr = reinterpret_cast<void*>(exclusive_base);
+        if (darwin_fd < 0) length = static_cast<size_t>(exclusive_length);
+        darwin_flags |= MAP_FIXED;
+    }
+    auto validate_noreplace = [&](void* mapped) {
+        if (mapped == MAP_FAILED && fixed_noreplace) {
+            const int failure = errno;
+            mach_vm_deallocate(mach_task_self(), exclusive_base, exclusive_length);
+            errno = failure;
+        }
+        return mapped;
+    };
+
+    // Check if the host page range is already mapped. On Apple Silicon (16KB page),
+    // calling host ::mmap(..., MAP_FIXED) on an already mapped page wipes the entire 16KB
+    // page with zeros, destroying neighboring 4KB allocations in the same host page.
+    if (darwin_fd < 0 && (darwin_flags & MAP_FIXED) && orig_addr != nullptr && !fixed_noreplace) {
+        const uintptr_t uaddr = reinterpret_cast<uintptr_t>(orig_addr);
+        const uintptr_t aligned_start = uaddr & ~page_mask;
+        const uintptr_t aligned_end = (uaddr + orig_len + page_mask) & ~page_mask;
+        const size_t aligned_len = static_cast<size_t>(aligned_end - aligned_start);
+
+        bool is_mapped = false;
+        int cur_prot = 0;
+        if (host_range_query(aligned_start, aligned_len, &is_mapped, &cur_prot) && is_mapped) {
+            if ((cur_prot & prot) != prot) {
+                ::mprotect(reinterpret_cast<void*>(aligned_start), aligned_len, cur_prot | prot);
+            }
+            if (prot & PROT_WRITE) {
+                std::memset(const_cast<void*>(orig_addr), 0, orig_len);
+            }
+            log_mmap_result(orig_addr, orig_len, prot, flags, fd, offset, orig_addr);
+            return const_cast<void*>(orig_addr);
         }
     }
 
+    // Advisory hints never replace existing mappings, including PROT_NONE reservations.
     // Align unaligned MAP_FIXED anonymous mapping to host page size.
     if (darwin_fd < 0 && (darwin_flags & MAP_FIXED) && addr != nullptr) {
         const uintptr_t uaddr = reinterpret_cast<uintptr_t>(addr);
@@ -1744,6 +1857,7 @@ extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int
             const off_t delta = offset - aligned;
             void* p = ::mmap(addr, static_cast<size_t>(delta) + length, prot, darwin_flags,
                              darwin_fd, aligned);
+            p = validate_noreplace(p);
             log_mmap_result(p, length, prot, flags, fd, offset, addr);
             if (p == MAP_FAILED) {
                 if (kudroid_fd_is_apk(darwin_fd)) {
@@ -1777,6 +1891,7 @@ extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int
     }
     if (darwin_fd >= 0 && offset == 0 && length > 0) {
         void* p = ::mmap(addr, length, prot, darwin_flags, darwin_fd, offset);
+        p = validate_noreplace(p);
         log_mmap_result(p, length, prot, flags, fd, offset, addr);
         if (p != MAP_FAILED && kudroid_fd_is_apk(darwin_fd)) {
             static std::atomic<int> s_mmapZero{0};
@@ -1799,6 +1914,7 @@ extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int
     }
     {
         void* p = ::mmap(addr, length, prot, darwin_flags, darwin_fd, offset);
+        p = validate_noreplace(p);
         // A failing commit inside Unity's reserved heap is invisible today: the
         // caller only sees a null/short allocation later, which then surfaces as
         // a null structure (e.g. the pointer array a worker writes into). Log
@@ -1830,13 +1946,81 @@ static inline void align_range_to_host_page(void* addr, size_t len, void*& out_a
     out_len = static_cast<size_t>(aligned_end - aligned_start);
 }
 
+// Whole host pages inside [addr, addr + len): the part of a guest range that can be given
+// to an operation applying to host pages (munmap, advisory hints). The guest sees 4 KB
+// pages; the host's are larger, so a range's end pages are shared with whatever lives
+// beside it, and acting on them damages that neighbour.
+extern "C" int kudroid_page_range_inward(uintptr_t addr, size_t len, size_t page,
+                                         uintptr_t* out_start, uintptr_t* out_len) {
+    if (page == 0 || (page & (page - 1)) != 0 || len == 0 || addr > UINTPTR_MAX - len) return 0;
+    const uintptr_t mask = static_cast<uintptr_t>(page) - 1;
+    const uintptr_t start = (addr + mask) & ~mask;
+    const uintptr_t end = (addr + len) & ~mask;
+    if (end <= start) return 0;
+    if (out_start != nullptr) *out_start = start;
+    if (out_len != nullptr) *out_len = end - start;
+    return 1;
+}
+
+#if defined(__APPLE__)
+// Protection of the host page holding `addr`, or -1 when it is not mapped.
+static int host_page_protection(uintptr_t addr) {
+    vm_address_t region_addr = static_cast<vm_address_t>(addr);
+    vm_size_t region_size = 0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t object_name = MACH_PORT_NULL;
+    if (vm_region_64(mach_task_self(), &region_addr, &region_size, VM_REGION_BASIC_INFO_64,
+                     reinterpret_cast<vm_region_info_t>(&info), &count,
+                     &object_name) != KERN_SUCCESS) {
+        return -1;
+    }
+    if (static_cast<uintptr_t>(region_addr) > addr) return -1;
+    return static_cast<int>(info.protection);
+}
+
+// mprotect on guest (4 KB) ranges over host (16 KB) pages. Whole pages inside the range take
+// the new protection. An end page shared with a neighbour only takes it when that does not
+// remove access: a guard or decommit of one guest page must not turn the live page next to it
+// inaccessible. Granting access on a shared page is harmless, so it is applied.
+static int mprotect_host_pages(uintptr_t addr, size_t len, int prot) {
+    const uintptr_t host_page = static_cast<uintptr_t>(::sysconf(_SC_PAGESIZE));
+    const uintptr_t mask = host_page - 1;
+    const uintptr_t end = addr + len;
+    const uintptr_t first = addr & ~mask;
+    const uintptr_t last = (end - 1) & ~mask;
+    int result = 0;
+    for (uintptr_t page = first; page <= last; page += host_page) {
+        const bool whole = page >= addr && page + host_page <= end;
+        if (!whole) {
+            const int current = host_page_protection(page);
+            if (current >= 0 && (current & ~prot & (PROT_READ | PROT_WRITE | PROT_EXEC)) != 0) {
+                continue;  // would strip access from bytes outside the guest's range
+            }
+        }
+        // Coalesce whole pages into one call.
+        uintptr_t run_end = page + host_page;
+        if (whole) {
+            while (run_end + host_page <= end && run_end <= last) run_end += host_page;
+        }
+        if (::mprotect(reinterpret_cast<void*>(page), run_end - page, prot) != 0) result = -1;
+        page = run_end - host_page;
+    }
+    return result;
+}
+#endif
+
 extern "C" int bionic_mprotect(void *addr, size_t len, int prot) {
     if (!addr || len == 0) return 0;
     void* aligned_addr = nullptr;
     size_t aligned_len = 0;
     align_range_to_host_page(addr, len, aligned_addr, aligned_len);
 
+#if defined(__APPLE__)
+    int r = mprotect_host_pages(reinterpret_cast<uintptr_t>(addr), len, prot);
+#else
     int r = ::mprotect(aligned_addr, aligned_len, prot);
+#endif
     const bool quiet = kudroid::guest_async_handler_active();
 #if defined(__APPLE__)
     if (r != 0 && (prot & PROT_EXEC)) {
@@ -1883,19 +2067,16 @@ extern "C" int bionic_mprotect(void *addr, size_t len, int prot) {
 
 extern "C" int bionic_munmap(void *addr, size_t len) {
     if (!addr || len == 0) return 0;
+    // Only whole host pages are returned. The partial pages at either end hold whatever
+    // the guest placed beside this range; unmapping them, or hinting that their contents
+    // are reclaimable, would zero or fault live neighbouring data.
     const long host_page = ::sysconf(_SC_PAGESIZE);
-    const uintptr_t page_mask = (host_page > 0 ? static_cast<uintptr_t>(host_page) : 16384u) - 1;
-    const uintptr_t uaddr = reinterpret_cast<uintptr_t>(addr);
-    const uintptr_t inward_start = (uaddr + page_mask) & ~page_mask;
-    const uintptr_t inward_end = (uaddr + len) & ~page_mask;
-    if (inward_end > inward_start) {
-        ::munmap(reinterpret_cast<void*>(inward_start), inward_end - inward_start);
+    uintptr_t start = 0, span = 0;
+    if (kudroid_page_range_inward(reinterpret_cast<uintptr_t>(addr), len,
+                                  host_page > 0 ? static_cast<size_t>(host_page) : 16384u,
+                                  &start, &span)) {
+        ::munmap(reinterpret_cast<void*>(start), span);
     }
-#if defined(__APPLE__)
-    ::madvise(addr, len, MADV_FREE_REUSABLE);
-#else
-    ::madvise(addr, len, MADV_DONTNEED);
-#endif
     return 0;
 }
 
@@ -1996,6 +2177,19 @@ extern "C" int bionic_madvise(void *addr, size_t length, int advice) {
     } else {
         return 0;
     }
+    // Advice that lets the kernel reclaim (MADV_FREE) must only reach pages the range owns
+    // outright; a partial end page also holds a neighbour's live bytes. The other hints are
+    // harmless on a shared page and keep the outward rounding.
+    if (host_advice == MADV_FREE) {
+        const long host_page = ::sysconf(_SC_PAGESIZE);
+        uintptr_t start = 0, span = 0;
+        if (kudroid_page_range_inward(reinterpret_cast<uintptr_t>(addr), length,
+                                      host_page > 0 ? static_cast<size_t>(host_page) : 16384u,
+                                      &start, &span)) {
+            ::madvise(reinterpret_cast<void*>(start), span, host_advice);
+        }
+        return 0;
+    }
     void* aligned_addr = nullptr;
     size_t aligned_len = 0;
     align_range_to_host_page(addr, length, aligned_addr, aligned_len);
@@ -2016,21 +2210,7 @@ extern "C" int bionic_clock_gettime(int clock_id, struct timespec *tp) {
         errno = EFAULT;
         return -1;
     }
-    int darwin_clock_id = clock_id;
-#ifdef __APPLE__
-    switch(clock_id) {
-        case 0: darwin_clock_id = 0; break; // CLOCK_REALTIME
-        case 1: darwin_clock_id = 6; break; // CLOCK_MONOTONIC (Darwin 6)
-        case 2: darwin_clock_id = 12; break; // CLOCK_PROCESS_CPUTIME_ID
-        case 3: darwin_clock_id = 16; break; // CLOCK_THREAD_CPUTIME_ID
-        case 4: darwin_clock_id = 4; break; // CLOCK_MONOTONIC_RAW
-        case 7: darwin_clock_id = 6; break; // CLOCK_BOOTTIME -> MONOTONIC
-        case 5: darwin_clock_id = 0; break; // CLOCK_REALTIME_COARSE -> REALTIME
-        case 6: darwin_clock_id = 6; break; // CLOCK_MONOTONIC_COARSE -> MONOTONIC
-        default: darwin_clock_id = 6; break; // Default fallback to MONOTONIC
-    }
-#endif
-    return ::clock_gettime(static_cast<clockid_t>(darwin_clock_id), tp);
+    return ::clock_gettime(kudroid::host_clock_for_guest(clock_id), tp);
 }
 
 extern "C" int bionic_clock_gettime64(int clock_id, struct timespec *tp) {
@@ -2041,22 +2221,8 @@ extern "C" int bionic_clock_gettime64(int clock_id, struct timespec *tp) {
 // Linux id the host rejects, and runtime code that probes CLOCK_MONOTONIC support
 // through it concluded there was none and timed itself from the wall clock instead.
 extern "C" int bionic_clock_getres(int clock_id, struct timespec* res) {
-    int darwin_clock_id = clock_id;
-#ifdef __APPLE__
-    switch (clock_id) {
-        case 0: darwin_clock_id = 0; break;    // CLOCK_REALTIME
-        case 2: darwin_clock_id = 12; break;   // CLOCK_PROCESS_CPUTIME_ID
-        case 3: darwin_clock_id = 16; break;   // CLOCK_THREAD_CPUTIME_ID
-        case 4: darwin_clock_id = 4; break;    // CLOCK_MONOTONIC_RAW
-        case 5: darwin_clock_id = 0; break;    // CLOCK_REALTIME_COARSE
-        default: darwin_clock_id = 6; break;   // MONOTONIC, MONOTONIC_COARSE, BOOTTIME, ...
-    }
-#endif
     struct timespec host{};
-    if (::clock_getres(static_cast<clockid_t>(darwin_clock_id), &host) != 0) {
-        host.tv_sec = 0;
-        host.tv_nsec = 1000;  // a clock the host cannot size still has a usable tick
-    }
+    if (::clock_getres(kudroid::host_clock_for_guest(clock_id), &host) != 0) return -1;
     if (res) *res = host;
     return 0;
 }
@@ -2517,12 +2683,41 @@ static bool linux_to_darwin_sockaddr(const struct sockaddr* src, socklen_t srcle
         *dstlen = 28;
         return true;
     } else if (fam == 1) {
-        out[0] = static_cast<unsigned char>(std::min<socklen_t>(srclen, sizeof(*dst)));
-        out[1] = AF_UNIX;
-        if (srclen > 2) {
-            std::memcpy(out + 2, b + 2, std::min<size_t>(srclen - 2, sizeof(*dst) - 2));
+        struct sockaddr_un* s = reinterpret_cast<struct sockaddr_un*>(dst);
+        size_t n = srclen > 2 ? srclen - 2 : 0;
+        const char* gp = reinterpret_cast<const char*>(b) + 2;
+        char path[1024];
+        bool abstract = (n > 0 && gp[0] == 0);
+        if (abstract) {
+            size_t m = (n - 1 < sizeof(path) - 1) ? n - 1 : sizeof(path) - 1;
+            std::memcpy(path, gp + 1, m);
+            path[m] = '\0';
+        } else {
+            size_t m = strnlen(gp, n);
+            if (m > sizeof(path) - 1) m = sizeof(path) - 1;
+            std::memcpy(path, gp, m);
+            path[m] = '\0';
         }
-        *dstlen = out[0];
+        if (abstract || std::strlen(path) > sizeof(s->sun_path) - 1) {
+            uint64_t h = 1469598103934665603ull;
+            for (const char* q = path; *q; ++q) {
+                h = (h ^ static_cast<uint8_t>(*q)) * 1099511628211ull;
+            }
+            const char* tmp = std::getenv("TMPDIR");
+            if (!tmp || !*tmp || std::strlen(tmp) > sizeof(s->sun_path) - 22) tmp = "/tmp";
+            char dir[300];
+            std::snprintf(dir, sizeof(dir), "%s%ss", tmp, tmp[std::strlen(tmp) - 1] == '/' ? "" : "/");
+            mkdir(dir, 0700);
+            std::snprintf(path, sizeof(path), "%s/%c%016llx", dir, abstract ? 'a' : 'p',
+                          static_cast<unsigned long long>(h));
+        }
+        n = std::strlen(path);
+        if (n > sizeof(s->sun_path) - 1) n = sizeof(s->sun_path) - 1;
+        std::memcpy(s->sun_path, path, n);
+        s->sun_path[n] = '\0';
+        s->sun_family = AF_UNIX;
+        s->sun_len = static_cast<uint8_t>(2 + n + 1);
+        *dstlen = s->sun_len;
         return true;
     }
     return false;
@@ -2536,6 +2731,7 @@ static void darwin_to_linux_sockaddr(const struct sockaddr* src, socklen_t srcle
     const unsigned fam = s[1];
     if (fam == AF_INET) {
         socklen_t copy_len = std::min<socklen_t>(*dstlen, 16);
+        std::memset(dst, 0, *dstlen);
         d[0] = 2;
         d[1] = 0;
         if (copy_len > 2) {
@@ -2544,14 +2740,28 @@ static void darwin_to_linux_sockaddr(const struct sockaddr* src, socklen_t srcle
         *dstlen = 16;
     } else if (fam == AF_INET6) {
         socklen_t copy_len = std::min<socklen_t>(*dstlen, 28);
+        std::memset(dst, 0, *dstlen);
         d[0] = 10;
         d[1] = 0;
         if (copy_len > 2) {
             std::memcpy(d + 2, s + 2, copy_len - 2);
         }
         *dstlen = 28;
+    } else if (fam == AF_UNIX) {
+        const struct sockaddr_un* un = reinterpret_cast<const struct sockaddr_un*>(src);
+        size_t n = strnlen(un->sun_path, sizeof(un->sun_path));
+        std::memset(dst, 0, *dstlen);
+        d[0] = 1;
+        d[1] = 0;
+        socklen_t need = static_cast<socklen_t>(2 + n + 1);
+        if (*dstlen > 2) {
+            size_t copy = std::min<size_t>(n, *dstlen - 2);
+            std::memcpy(d + 2, un->sun_path, copy);
+        }
+        *dstlen = need;
     } else {
         socklen_t copy_len = std::min<socklen_t>(*dstlen, srclen);
+        std::memset(dst, 0, *dstlen);
         d[0] = static_cast<unsigned char>(fam);
         d[1] = 0;
         if (copy_len > 2) {
@@ -3293,10 +3503,18 @@ extern "C" int bionic_bind(int sockfd, const struct sockaddr* addr, socklen_t ad
     struct sockaddr_storage ss;
     socklen_t sslen = sizeof(ss);
     if (linux_to_darwin_sockaddr(addr, addrlen, &ss, &sslen)) {
+        if (ss.ss_family == AF_UNIX) {
+            const char* sp = reinterpret_cast<struct sockaddr_un*>(&ss)->sun_path;
+            struct stat st;
+            if (::stat(sp, &st) == 0 && S_ISSOCK(st.st_mode)) ::unlink(sp);
+        }
         return net_result(::bind(sockfd, reinterpret_cast<const struct sockaddr*>(&ss), sslen));
     }
-#endif
+    errno = EAFNOSUPPORT;
+    return net_result(-1);
+#else
     return net_result(::bind(sockfd, addr, addrlen));
+#endif
 }
 
 extern "C" int bionic_getsockname(int sockfd, struct sockaddr* addr, socklen_t* addrlen) {
@@ -3329,54 +3547,33 @@ extern "C" int bionic_getpeername(int sockfd, struct sockaddr* addr, socklen_t* 
 
 extern "C" int bionic_connect(int sockfd, const struct sockaddr* addr,
                               socklen_t addrlen) {
-    // AF_INET layout is POSIX-fixed: family u16 @0, port BE u16 @2, ip @4.
-    // Linux and Darwin differ in the family header (Darwin has sa_len first),
-    // and Linux AF_INET6 (10) differs from Darwin AF_INET6 (30).
     char dst[64] = {'?'};
-#if defined(__APPLE__)
-    unsigned char host4[16] = {0};
-    unsigned char host6[28] = {0};
-#endif
-    const struct sockaddr* useAddr = addr;
-    socklen_t useLen = addrlen;
     if (addr != nullptr && addrlen >= 2) {
         const unsigned char* b = reinterpret_cast<const unsigned char*>(addr);
-        const unsigned fam = static_cast<unsigned>(b[0]) |
-                             (static_cast<unsigned>(b[1]) << 8);
+        const unsigned fam = static_cast<unsigned>(b[0]) | (static_cast<unsigned>(b[1]) << 8);
         if (fam == 2 && addrlen >= 8) {
-            const unsigned port = (static_cast<unsigned>(b[2]) << 8) |
-                                  static_cast<unsigned>(b[3]);
-            std::snprintf(dst, sizeof(dst), "%u.%u.%u.%u:%u", b[4], b[5], b[6],
-                          b[7], port);
-#if defined(__APPLE__)
-            host4[0] = 16;
-            host4[1] = AF_INET;
-            std::memcpy(host4 + 2, b + 2, 6);
-            useAddr = reinterpret_cast<const struct sockaddr*>(host4);
-            useLen = 16;
-#endif
+            const unsigned port = (static_cast<unsigned>(b[2]) << 8) | static_cast<unsigned>(b[3]);
+            std::snprintf(dst, sizeof(dst), "%u.%u.%u.%u:%u", b[4], b[5], b[6], b[7], port);
         } else if (fam == 10 && addrlen >= 24) {
             char ipbuf[INET6_ADDRSTRLEN] = {'?'};
             ::inet_ntop(AF_INET6, b + 8, ipbuf, sizeof(ipbuf));
-            const unsigned port = (static_cast<unsigned>(b[2]) << 8) |
-                                  static_cast<unsigned>(b[3]);
+            const unsigned port = (static_cast<unsigned>(b[2]) << 8) | static_cast<unsigned>(b[3]);
             std::snprintf(dst, sizeof(dst), "[%s]:%u", ipbuf, port);
-#if defined(__APPLE__)
-            if (addrlen >= 28) {
-                host6[0] = 28;
-                host6[1] = AF_INET6;
-                std::memcpy(host6 + 2, b + 2, 26);
-                useAddr = reinterpret_cast<const struct sockaddr*>(host6);
-                useLen = 28;
-            }
-#endif
         } else {
             std::snprintf(dst, sizeof(dst), "family=%u", fam);
         }
-    } else if (addr == nullptr) {
-        std::snprintf(dst, sizeof(dst), "<null>");
     }
-    const int ret = ::connect(sockfd, useAddr, useLen);
+#if defined(__APPLE__)
+    struct sockaddr_storage ss;
+    socklen_t sslen = sizeof(ss);
+    if (!linux_to_darwin_sockaddr(addr, addrlen, &ss, &sslen)) {
+        errno = EAFNOSUPPORT;
+        return net_result(-1);
+    }
+    const int ret = ::connect(sockfd, reinterpret_cast<const struct sockaddr*>(&ss), sslen);
+#else
+    const int ret = ::connect(sockfd, addr, addrlen);
+#endif
     std::fprintf(stderr, "[KuDroidNet] connect(%s) -> %d (%s)\n", dst, ret,
                  ret == 0 ? "OK" : std::strerror(errno));
     return net_result(ret);
@@ -3388,8 +3585,10 @@ extern "C" int bionic_setsockopt(int fd, int level, int name, const void* value,
 #if defined(__APPLE__)
     int hostLevel = 0, hostName = 0;
     if (!kudroid::SocketOptionToHost(level, name, &hostLevel, &hostName)) {
-        errno = ENOPROTOOPT;
-        return net_result(-1);
+        // Unknown or Linux-specific socket option: accept and ignore (return 0)
+        // just like Husk. Returning -1 with ENOPROTOOPT breaks libraries like
+        // libcurl, okhttp, and mono when they set SO_BINDTODEVICE, SO_MARK, etc.
+        return 0;
     }
     return net_result(::setsockopt(fd, hostLevel, hostName, value, len));
 #else
@@ -3538,6 +3737,20 @@ extern "C" ssize_t bionic_recvfrom(int fd, void* buf, size_t len, int flags,
 #else
     return ::recvfrom(fd, buf, len, flags, addr, addrlen);
 #endif
+}
+
+extern "C" ssize_t bionic___sendto_chk(int fd, const void* buf, size_t len, size_t buflen,
+                                       int flags, const struct sockaddr* addr,
+                                       socklen_t addrlen) {
+    (void)buflen;
+    return bionic_sendto(fd, buf, len, flags, addr, addrlen);
+}
+
+extern "C" ssize_t bionic___recvfrom_chk(int fd, void* buf, size_t len, size_t buflen,
+                                         int flags, struct sockaddr* addr,
+                                         socklen_t* addrlen) {
+    (void)buflen;
+    return bionic_recvfrom(fd, buf, len, flags, addr, addrlen);
 }
 
 extern "C" int bionic_accept4(int fd, struct sockaddr* addr, socklen_t* addrlen, int flags) {
@@ -3872,63 +4085,100 @@ extern "C" int bionic_inet_pton(int af, const char* src, void* dst) {
 extern "C" int bionic_getaddrinfo(const char* node, const char* service,
                                   const struct addrinfo* hints,
                                   struct addrinfo** res) {
+    if (res == nullptr) return EAI_NONAME;
+    *res = nullptr;
+
     struct addrinfo host_hints;
-    const struct addrinfo* use_hints = hints;
+    const struct addrinfo* use_hints = nullptr;
     if (hints != nullptr) {
-        std::memcpy(&host_hints, hints, sizeof(host_hints));
-        host_hints.ai_family = guest_to_host_af(hints->ai_family);
+        std::memset(&host_hints, 0, sizeof(host_hints));
         host_hints.ai_flags = kudroid::AddrInfoFlagsToHost(hints->ai_flags);
+        host_hints.ai_family = guest_to_host_af(hints->ai_family);
+        host_hints.ai_socktype = hints->ai_socktype & 0xF;
+        host_hints.ai_protocol = hints->ai_protocol;
         use_hints = &host_hints;
     }
-    const int ret = getaddrinfo(node, service, use_hints, res);
+
+    struct addrinfo* dres = nullptr;
+    const int ret = ::getaddrinfo(node, service, use_hints, &dres);
     std::fprintf(stderr, "[KuDroidNet] getaddrinfo(%s,%s) -> %d (%s)\n",
                  node ? node : "<null>", service ? service : "<null>", ret,
                  ret == 0 ? "OK" : gai_strerror(ret));
 #if defined(__APPLE__)
-    // Back-translate results to Linux layout in place (same sizes: 16/28):
-    // the guest reads ai_family/sockaddr as Linux, and Darwin values (family
-    // 30, sa_len header) poison connect/inet_ntop downstream.
-    if (ret == 0 && res != nullptr) {
-        for (struct addrinfo* ai = *res; ai != nullptr; ai = ai->ai_next) {
-            unsigned char* sa =
-                reinterpret_cast<unsigned char*>(ai->ai_addr);
-            if (sa == nullptr) continue;
-            if (ai->ai_family == 30) {  // AF_INET6 Darwin -> Linux
-                sa[0] = 10;
-                sa[1] = 0;
-                ai->ai_family = 10;
-            } else if (ai->ai_family == 2) {  // AF_INET: drop sa_len
-                sa[0] = 2;
-                sa[1] = 0;
-            }
+    if (ret != 0) return ret;
+
+    kudroid::GuestAddrinfo* head = nullptr;
+    kudroid::GuestAddrinfo** tail = &head;
+    for (struct addrinfo* a = dres; a != nullptr; a = a->ai_next) {
+        if (a->ai_family != AF_INET && a->ai_family != AF_INET6 && a->ai_family != AF_UNIX) continue;
+        const size_t canon_len = a->ai_canonname ? std::strlen(a->ai_canonname) + 1 : 0;
+        uint8_t* blk = reinterpret_cast<uint8_t*>(std::calloc(1, sizeof(kudroid::GuestAddrinfo) + 128 + canon_len));
+        if (!blk) continue;
+        auto* g = reinterpret_cast<kudroid::GuestAddrinfo*>(blk);
+        g->ai_flags = 0;
+        g->ai_family = (a->ai_family == AF_INET6 ? 10 : (a->ai_family == AF_INET ? 2 : a->ai_family));
+        g->ai_socktype = a->ai_socktype;
+        g->ai_protocol = a->ai_protocol;
+
+        auto* sa = reinterpret_cast<struct sockaddr*>(blk + sizeof(kudroid::GuestAddrinfo));
+        socklen_t sa_cap = 128;
+        darwin_to_linux_sockaddr(a->ai_addr, a->ai_addrlen, sa, &sa_cap);
+        g->ai_addr = sa;
+        g->ai_addrlen = sa_cap;
+
+        if (canon_len > 0) {
+            char* canon = reinterpret_cast<char*>(blk + sizeof(kudroid::GuestAddrinfo) + 128);
+            std::memcpy(canon, a->ai_canonname, canon_len);
+            g->ai_canonname = canon;
         }
+
+        *tail = g;
+        tail = &g->ai_next;
     }
-#endif
+    ::freeaddrinfo(dres);
+    if (!head) return EAI_NONAME;
+    *res = reinterpret_cast<struct addrinfo*>(head);
+    return 0;
+#else
+    *res = dres;
     return ret;
+#endif
+}
+
+extern "C" int bionic_android_getaddrinfofornet(const char* node, const char* service,
+                                               const struct addrinfo* hints,
+                                               unsigned netid, unsigned mark,
+                                               struct addrinfo** res) {
+    (void)netid;
+    (void)mark;
+    return bionic_getaddrinfo(node, service, hints, res);
 }
 
 extern "C" void bionic_freeaddrinfo(struct addrinfo* res) {
 #if defined(__APPLE__)
-    if (res != nullptr) {
-        for (struct addrinfo* ai = res; ai != nullptr; ai = ai->ai_next) {
-            unsigned char* sa = reinterpret_cast<unsigned char*>(ai->ai_addr);
-            if (sa == nullptr) continue;
-            if (ai->ai_family == 10) {  // AF_INET6 Linux -> Darwin
-                sa[0] = 28;
-                sa[1] = 30; // Darwin AF_INET6
-                ai->ai_family = 30;
-            } else if (ai->ai_family == 2) {  // AF_INET
-                sa[0] = 16;
-                sa[1] = 2;
-                ai->ai_family = 2;
-            }
-        }
+    auto* g = reinterpret_cast<kudroid::GuestAddrinfo*>(res);
+    while (g != nullptr) {
+        auto* next = g->ai_next;
+        std::free(g);
+        g = next;
     }
-#endif
+#else
     if (res != nullptr) {
         ::freeaddrinfo(res);
     }
+#endif
 }
+
+extern "C" const char* bionic_gai_strerror(int errcode) {
+    return ::gai_strerror(errcode);
+}
+
+extern "C" unsigned int bionic_if_nametoindex(const char* ifname) {
+    return ::if_nametoindex(ifname);
+}
+
+extern "C" uint16_t bionic_htons(uint16_t v) { return __builtin_bswap16(v); }
+extern "C" uint32_t bionic_htonl(uint32_t v) { return __builtin_bswap32(v); }
 
 // getifaddrs with Linux layout: Darwin also reports AF_LINK/AF_SYSTEM
 // entries whose sockaddr Unity's enumerator feeds to inet_ntop, producing
@@ -4039,7 +4289,10 @@ extern "C" void bionic_freeifaddrs(GuestIfaddrs* head) {
 
 extern "C" ssize_t bionic_pread64(int fd, void* buf, size_t count, off_t offset) {
     const auto t0 = std::chrono::steady_clock::now();
-    const ssize_t ret = ::pread(fd, buf, count, offset);
+    ssize_t ret;
+    do {
+        ret = ::pread(fd, buf, count, offset);
+    } while (ret < 0 && errno == EINTR);
     const long long ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                              std::chrono::steady_clock::now() - t0)
                              .count();
@@ -4158,7 +4411,7 @@ extern "C" int bionic_clock_nanosleep(int clock_id, int flags, const struct time
     if (flags & 1) { // TIMER_ABSTIME
         struct timespec now;
         // Absolute deadlines run on the caller's clock, not always REALTIME.
-        ::clock_gettime(static_cast<clockid_t>(clock_id), &now);
+        if (bionic_clock_gettime(clock_id, &now) != 0) return errno;
         r.tv_sec -= now.tv_sec;
         r.tv_nsec -= now.tv_nsec;
         if (r.tv_nsec < 0) { r.tv_sec -= 1; r.tv_nsec += 1000000000; }
@@ -4875,7 +5128,7 @@ extern "C" int bionic_futex(uint32_t *uaddr, int futex_op, uint32_t val, const s
             // The clock only matters for an absolute deadline. FUTEX_CLOCK_REALTIME
             // selects CLOCK_REALTIME; without it the deadline is CLOCK_MONOTONIC.
             const bool realtime = (futex_op & FUTEX_CLOCK_REALTIME) != 0;
-            const clockid_t deadline_clock = realtime ? CLOCK_REALTIME : CLOCK_MONOTONIC;
+            const clockid_t deadline_clock = kudroid::host_clock_for_guest(realtime ? 0 : 1);
 
             const BlockingWaitScope tracked(WaitKind::kFutexTimed, uaddr,
                                             guest_return_address(6));
@@ -5551,7 +5804,12 @@ extern "C" int bionic_epoll_pwait(int epfd, void* events_ptr, int maxevents, int
     return bionic_epoll_wait(epfd, events_ptr, maxevents, timeout);
 }
 
-extern "C" int bionic_pthread_condattr_init(void* attr) { (void)attr; return 0; }
+extern "C" int bionic_pthread_condattr_init(void* attr) {
+    if (!attr) return EINVAL;
+    const uint32_t word = 0;
+    std::memcpy(attr, &word, sizeof(word));
+    return 0;
+}
 extern "C" int bionic_pthread_condattr_destroy(void* attr) { (void)attr; return 0; }
 extern "C" int bionic_pthread_mutexattr_init(void* attr) {
     // Must clear the kind bits. A guest typically declares pthread_mutexattr_t on
@@ -6080,9 +6338,49 @@ const KudroidProp* findProp(const char* name) {
 }
 } // namespace
 
+int kudroid_get_dns_servers(char out[][64], int max) {
+    int n = 0;
+#if defined(__APPLE__)
+    struct __res_state st;
+    std::memset(&st, 0, sizeof(st));
+    if (res_ninit(&st) == 0) {
+        union res_sockaddr_union addrs[8];
+        int got = res_getservers(&st, addrs, 8);
+        for (int i = 0; i < got && n < max; ++i) {
+            if (addrs[i].sin.sin_family == AF_INET) {
+                ::inet_ntop(AF_INET, &addrs[i].sin.sin_addr, out[n], 64);
+            } else if (addrs[i].sin6.sin6_family == AF_INET6) {
+                ::inet_ntop(AF_INET6, &addrs[i].sin6.sin6_addr, out[n], 64);
+            } else {
+                continue;
+            }
+            if (out[n][0]) ++n;
+        }
+        res_ndestroy(&st);
+    }
+#endif
+    static const char* const fallback[] = {"1.1.1.1", "8.8.8.8"};
+    for (int i = 0; i < 2 && n < max; ++i) {
+        std::snprintf(out[n++], 64, "%s", fallback[i]);
+    }
+    return n;
+}
+
 extern "C" int bionic_system_property_get(const char* name, char* value) {
     if (!name || !value) return 0;
     value[0] = '\0';
+    if (std::strcmp(name, "net.dns1") == 0 || std::strcmp(name, "net.dns2") == 0 ||
+        std::strcmp(name, "net.dns3") == 0 || std::strcmp(name, "net.dns4") == 0) {
+        char servers[4][64];
+        int count = kudroid_get_dns_servers(servers, 4);
+        int idx = name[7] - '1';
+        if (idx >= 0 && idx < count) {
+            std::strncpy(value, servers[idx], 92);
+            value[91] = '\0';
+            return static_cast<int>(std::strlen(value));
+        }
+        return 0;
+    }
     const KudroidProp* p = findProp(name);
     if (!p) return 0;
     std::strcpy(value, p->value);
@@ -6328,6 +6626,51 @@ extern "C" int bionic_fscanf(FILE* stream, const char* format, ...) {
 }
 #endif
 
+extern "C" const char* kudroid_guest_syslog_error() {
+    const int saved = errno;
+    const char* message = std::strerror(saved);
+    errno = saved;
+    return message;
+}
+
+extern "C" void kudroid_guest_syslog_write(int priority, const char* message) {
+    const int saved = errno;
+    ::syslog(priority, "%s", message);
+    const int severity = priority & LOG_PRIMASK;
+    const int androidPriority = severity <= LOG_ERR ? 6 :
+        (severity == LOG_WARNING ? 5 : (severity <= LOG_INFO ? 4 : 3));
+    logAndroidMessage(androidPriority, "syslog", message);
+    errno = saved;
+}
+
+extern "C" void bionic_vsyslog(int priority, const char* format, va_list ap) {
+    const int saved = errno;
+    char message[2048];
+#if defined(__aarch64__)
+    kudroid::GuestVarargs registers;
+    unsigned gp = 0, fp = 0;
+    if (!kudroid::GuestVarargsFromVaList(guestVaListPointer(ap), &registers, &gp, &fp)) {
+        errno = saved;
+        return;
+    }
+    kudroid::FormatGuestVarargs(message, sizeof(message), format, &registers, gp, fp,
+                               std::strerror(saved));
+#else
+    std::vsnprintf(message, sizeof(message), format, ap);
+#endif
+    kudroid_guest_syslog_write(priority, message);
+    errno = saved;
+}
+
+#if !defined(__aarch64__)
+extern "C" void bionic_syslog(int priority, const char* format, ...) {
+    va_list ap;
+    va_start(ap, format);
+    bionic_vsyslog(priority, format, ap);
+    va_end(ap);
+}
+#endif
+
 extern "C" int bionic_android_log_write(int prio, const char* tag, const char* text) {
     // Routed through logAndroidMessage rather than stderr alone so a guest that logs via
     // __android_log_write lands in kudroid_android_logs.txt and the crash buffer with
@@ -6403,8 +6746,13 @@ const unsigned short* g_ctype_ptr = &g_bionic_ctype_[1];
 // pthread_condattr_setclock — set clock for condition variable
 // ============================================================================
 extern "C" int bionic_pthread_condattr_setclock(void* attr, int clock_id) {
-    (void)attr; (void)clock_id;
-    return 0; // success, silently ignore (Darwin uses CLOCK_REALTIME always)
+    // Guest clock ids: 0 = CLOCK_REALTIME, 1 = CLOCK_MONOTONIC. Anything else is rejected.
+    if (!attr || (clock_id != 0 && clock_id != 1)) return EINVAL;
+    uint32_t word = 0;
+    std::memcpy(&word, attr, sizeof(word));
+    word = clock_id == 1 ? (word | kBionicCondClockMonotonic) : (word & ~kBionicCondClockMonotonic);
+    std::memcpy(attr, &word, sizeof(word));
+    return 0;
 }
 
 // ============================================================================
@@ -6724,296 +7072,236 @@ struct ALooperFd {
     int fd;
     int ident;
     int events;
-    void* callback; // ALooper_callbackFunc
+    void* callback;
     void* data;
-    bool isInputPipe; // fd is AInputQueue wake pipe (drained when readable)
+    bool isInputPipe = false;
+    uint64_t sequence;
 };
 
 struct ALooper {
     std::vector<ALooperFd> fds;
     std::mutex mtx;
-    int refCount;
-    // Wake pipe: ALooper_wake writes a byte so a thread parked in poll(-1)
-    // returns ALOOPER_POLL_WAKE instead of sleeping through teardown joins.
+    unsigned refCount = 1;
+    bool attached = true;
+    uint64_t nextSequence = 1;
     int wakePipe[2] = {-1, -1};
-    bool wakeReady = false;
+
+    ~ALooper() {
+        for (int fd : wakePipe) if (fd >= 0) ::close(fd);
+    }
 };
 
-static ALooper* g_mainLooper = nullptr;
 static std::mutex g_looperMtx;
 
-// Create the main thread's looper if it does not exist yet, and return it.
-//
-// Android's main thread always has a looper: ActivityThread prepares one before any
-// activity is created, so by the time native code runs ALooper_forThread() cannot fail.
-// KuART's main loop is Java (Looper.loop() in ActivityThread) and never touched the native
-// ALooper, so forThread() returned null and AGDK's initializeNativeCode aborted with
-// "Unable to retrieve native ALooper" — an UnsatisfiedLinkError that stopped onCreate
-// before a surface existed, leaving the app on a black screen with no crash.
-//
-// Created on demand rather than at startup so a process that never loads native code does
-// not carry one, and so this holds whichever thread asks first — which is the main thread,
-// because that is where the activity is created.
-static ALooper* GetOrCreateMainLooper() {
-    std::lock_guard<std::mutex> lock(g_looperMtx);
-    if (g_mainLooper == nullptr) {
-        g_mainLooper = new ALooper();
-        // One reference for the looper's own existence. Android's main looper is never
-        // released, and ALooper_release() deletes at zero — without this an acquire/release
-        // pair from guest code would free the main looper and turn every later
-        // forThread() into a dangling pointer rather than a null one.
-        g_mainLooper->refCount = 1;
+static void release_looper(ALooper* looper, bool detach = false) {
+    bool destroy = false;
+    {
+        std::lock_guard<std::mutex> lock(g_looperMtx);
+        if (detach) looper->attached = false;
+        if (looper->refCount > (looper->attached ? 1u : 0u)) {
+            destroy = --looper->refCount == 0;
+        }
     }
-    return g_mainLooper;
+    if (destroy) delete looper;
+}
+
+struct LooperThreadState {
+    ALooper* looper = nullptr;
+    ~LooperThreadState() {
+        if (looper == nullptr) return;
+        kudroid::frame_pacer_release_native_thread();
+        release_looper(looper, true);
+    }
+};
+static thread_local LooperThreadState t_looper;
+
+// Lazy creation also supplies the native peer of an interpreted Java looper.
+static ALooper* GetOrCreateThreadLooper() {
+    if (t_looper.looper != nullptr) return t_looper.looper;
+    auto* looper = new (std::nothrow) ALooper();
+    if (looper == nullptr) return nullptr;
+    if (::pipe(looper->wakePipe) != 0) {
+        delete looper;
+        return nullptr;
+    }
+    for (int fd : looper->wakePipe) {
+        const int flags = ::fcntl(fd, F_GETFL);
+        if (flags < 0 || ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) {
+            delete looper;
+            return nullptr;
+        }
+        ::fcntl(fd, F_SETFD, FD_CLOEXEC);
+    }
+    t_looper.looper = looper;
+    return looper;
 }
 
 extern "C" void* bionic_ALooper_prepare(int opts) {
     (void)opts;
-    ALooper* looper = GetOrCreateMainLooper();
-    std::lock_guard<std::mutex> lock(g_looperMtx);
-    looper->refCount++;
-    return looper;
+    return GetOrCreateThreadLooper();
 }
 
-// The looper for the calling thread, creating the main one if nothing has yet.
-//
-// Returning null here is what broke AGDK. Android guarantees a looper on the main thread,
-// so guest code treats null as a fatal error rather than something to prepare around.
 extern "C" void* bionic_ALooper_forThread() {
-    return GetOrCreateMainLooper();
+    return GetOrCreateThreadLooper();
 }
 
 extern "C" void bionic_ALooper_acquire(void* looper) {
-    if (!looper) return;
-    ALooper* l = static_cast<ALooper*>(looper);
+    if (looper == nullptr) return;
     std::lock_guard<std::mutex> lock(g_looperMtx);
-    l->refCount++;
+    ++static_cast<ALooper*>(looper)->refCount;
 }
 
 extern "C" void bionic_ALooper_release(void* looper) {
-    if (!looper) return;
-    ALooper* l = static_cast<ALooper*>(looper);
-    std::lock_guard<std::mutex> lock(g_looperMtx);
-    // The main looper outlives every reference to it, as it does on Android: its baseline
-    // reference is never released. Deleting it on an unbalanced release from guest code
-    // would leave g_mainLooper dangling for any thread already inside pollOnce, and the
-    // fault would appear far from the release that caused it.
-    if (l == g_mainLooper) {
-        if (l->refCount > 1) --l->refCount;
-        return;
-    }
-    if (--l->refCount <= 0) {
-        delete l;
-    }
+    if (looper != nullptr) release_looper(static_cast<ALooper*>(looper));
+}
+
+extern "C" void bionic_ALooper_wake(void* looper) {
+    auto* l = static_cast<ALooper*>(looper);
+    if (l == nullptr) return;
+    const uint8_t byte = 1;
+    while (::write(l->wakePipe[1], &byte, 1) < 0 && errno == EINTR) {}
 }
 
 extern "C" int bionic_ALooper_addFd(void* looper, int fd, int ident, int events,
                                     void* callback, void* data) {
-    if (!looper || fd < 0) return -1;
-    ALooper* l = static_cast<ALooper*>(looper);
-    std::lock_guard<std::mutex> lock(l->mtx);
-    // Replace existing entry for this fd.
-    for (auto& f : l->fds) {
-        if (f.fd == fd) {
-            f.ident = ident;
-            f.events = events;
-            f.callback = callback;
-            f.data = data;
-            return 1;
-        }
+    if (looper == nullptr || fd < 0 || (callback == nullptr && ident < 0)) return -1;
+    auto* l = static_cast<ALooper*>(looper);
+    {
+        std::lock_guard<std::mutex> lock(l->mtx);
+        ALooperFd entry{fd, ident, events, callback, data, false, l->nextSequence++};
+        auto existing = std::find_if(l->fds.begin(), l->fds.end(),
+                                      [fd](const ALooperFd& f) { return f.fd == fd; });
+        if (existing != l->fds.end()) *existing = entry;
+        else l->fds.push_back(entry);
     }
-    ALooperFd nf;
-    nf.fd = fd;
-    nf.ident = ident;
-    nf.events = events;
-    nf.callback = callback;
-    nf.data = data;
-    nf.isInputPipe = false;
-    l->fds.push_back(nf);
+    bionic_ALooper_wake(l);
     return 1;
 }
 
-// Mark fd as AInputQueue wake pipe — bionic_AInputQueue_attachLooper
-// called after registering pipe with looper, ensuring pollAll drains it to prevent busy loops.
 extern "C" void bionic_ALooper_markInputPipe(void* looper, int fd) {
-    if (!looper || fd < 0) return;
-    ALooper* l = static_cast<ALooper*>(looper);
+    if (looper == nullptr || fd < 0) return;
+    auto* l = static_cast<ALooper*>(looper);
     std::lock_guard<std::mutex> lock(l->mtx);
     for (auto& f : l->fds) {
-        if (f.fd == fd) {
-            f.isInputPipe = true;
-            return;
-        }
+        if (f.fd == fd) { f.isInputPipe = true; break; }
     }
 }
 
 extern "C" int bionic_ALooper_removeFd(void* looper, int fd) {
-    if (!looper || fd < 0) return -1;
-    ALooper* l = static_cast<ALooper*>(looper);
-    std::lock_guard<std::mutex> lock(l->mtx);
-    for (size_t i = 0; i < l->fds.size(); ++i) {
-        if (l->fds[i].fd == fd) {
-            l->fds.erase(l->fds.begin() + i);
-            return 1;
-        }
-    }
-    return 0;
-}
-
-extern "C" void bionic_ALooper_wake(void* looper) {
-    auto* l = static_cast<ALooper*>(looper != nullptr ? looper : g_mainLooper);
-    if (l == nullptr) return;
-    int wfd = -1;
+    if (looper == nullptr || fd < 0) return -1;
+    auto* l = static_cast<ALooper*>(looper);
+    bool removed = false;
     {
         std::lock_guard<std::mutex> lock(l->mtx);
-        if (l->wakeReady) wfd = l->wakePipe[1];
+        auto existing = std::find_if(l->fds.begin(), l->fds.end(),
+                                      [fd](const ALooperFd& f) { return f.fd == fd; });
+        if (existing != l->fds.end()) {
+            l->fds.erase(existing);
+            removed = true;
+        }
     }
-    if (wfd < 0) return;
-    // Non-blocking: a wake landing on an already-awake looper is not an error.
-    const uint8_t byte = 1;
-    (void)::write(wfd, &byte, 1);
+    if (removed) bionic_ALooper_wake(l);
+    return removed ? 1 : 0;
 }
 
-// Poll for events. Returns the ident of the first ready fd, or ALOOPER_POLL_TIMEOUT (-2)
-// on timeout, ALOOPER_POLL_ERROR (-1) on error, ALOOPER_POLL_WAKE (-3) on wake.
-extern "C" int bionic_ALooper_pollAll(int timeoutMillis, int* outFd, int* outEvents, void** outData);
-extern "C" int bionic_ALooper_pollOnce(int timeoutMillis, int* outFd, int* outEvents, void** outData) {
-    return bionic_ALooper_pollAll(timeoutMillis, outFd, outEvents, outData);
-}
-
-extern "C" int bionic_ALooper_pollAll(int timeoutMillis, int* outFd, int* outEvents, void** outData) {
-    ALooper* l;
-    {
-        std::lock_guard<std::mutex> lock(g_looperMtx);
-        l = g_mainLooper;
-    }
-    if (!l) return -1;
-
-    // Build pollfd array.
-    std::vector<struct pollfd> pfds;
+static int PollLooperOnce(int timeoutMillis, int* outFd, int* outEvents,
+                          void** outData, bool* wasWoken) {
+    constexpr int kWake = -1, kCallback = -2, kTimeout = -3, kError = -4;
+    *wasWoken = false;
+    ALooper* l = t_looper.looper;
+    if (l == nullptr) return kError;
+    if (outFd) *outFd = 0;
+    if (outEvents) *outEvents = 0;
+    if (outData) *outData = nullptr;
     std::vector<ALooperFd> snapshot;
     {
         std::lock_guard<std::mutex> lock(l->mtx);
         snapshot = l->fds;
     }
+    std::vector<struct pollfd> pfds;
     for (const auto& f : snapshot) {
-        struct pollfd pfd;
-        pfd.fd = f.fd;
-        pfd.events = 0;
-        if (f.events & ALOOPER_EVENT_INPUT) pfd.events |= POLLIN;
-        if (f.events & ALOOPER_EVENT_OUTPUT) pfd.events |= POLLOUT;
-        pfd.revents = 0;
-        pfds.push_back(pfd);
+        short events = 0;
+        if (f.events & ALOOPER_EVENT_INPUT) events |= POLLIN;
+        if (f.events & ALOOPER_EVENT_OUTPUT) events |= POLLOUT;
+        pfds.push_back({f.fd, events, 0});
     }
-
-    // Wake pipe first: with it ready there is always something to wait on, so
-    // poll(-1) parks until wake instead of returning instantly with no fds.
-    if (!l->wakeReady) {
-        int fds[2] = {-1, -1};
-        if (::pipe(fds) == 0) {
-            for (int i = 0; i < 2; ++i) {
-                const int fl = ::fcntl(fds[i], F_GETFL);
-                if (fl >= 0) ::fcntl(fds[i], F_SETFL, fl | O_NONBLOCK);
-            }
-            l->wakePipe[0] = fds[0];
-            l->wakePipe[1] = fds[1];
-            l->wakeReady = true;
-        }
-    }
-    if (pfds.empty() && !l->wakeReady) {
-        // No fds registered and no wake pipe; sleep for the timeout.
-        if (timeoutMillis > 0) {
-            struct timespec ts;
-            ts.tv_sec = timeoutMillis / 1000;
-            ts.tv_nsec = (timeoutMillis % 1000) * 1000000;
-            const BlockingWaitScope tracked(WaitKind::kLooperPoll, l,
-                                            guest_return_address(6));
-            blocking_wait_note_budget(static_cast<uint64_t>(timeoutMillis));
-            nanosleep(&ts, nullptr);
-        }
-        return -2; // ALOOPER_POLL_TIMEOUT
-    }
-
-    int wakeIndex = -1;
-    if (l->wakeReady) {
-        struct pollfd wfd;
-        wfd.fd = l->wakePipe[0];
-        wfd.events = POLLIN;
-        wfd.revents = 0;
-        wakeIndex = static_cast<int>(pfds.size());
-        pfds.push_back(wfd);
-    }
-
-    // nfds_t is unsigned int on Darwin — clamp to avoid truncation.
-    const nfds_t nfds = pfds.size() > static_cast<size_t>(INT_MAX)
-                           ? static_cast<nfds_t>(INT_MAX)
-                           : static_cast<nfds_t>(pfds.size());
-    int ret = 0;
+    pfds.push_back({l->wakePipe[0], POLLIN, 0});
+    int ready;
     {
-        const BlockingWaitScope tracked(WaitKind::kLooperPoll, l,
-                                        guest_return_address(6));
-        if (timeoutMillis >= 0) {
-            blocking_wait_note_budget(static_cast<uint64_t>(timeoutMillis));
-        }
-        ret = ::poll(pfds.data(), nfds, timeoutMillis);
+        const BlockingWaitScope tracked(WaitKind::kLooperPoll, l, guest_return_address(6));
+        if (timeoutMillis >= 0) blocking_wait_note_budget(static_cast<uint64_t>(timeoutMillis));
+        ready = ::poll(pfds.data(), static_cast<nfds_t>(pfds.size()), timeoutMillis);
     }
-    if (ret < 0) return -1; // ALOOPER_POLL_ERROR
-    if (ret == 0) return -2; // ALOOPER_POLL_TIMEOUT
-
-    // Woken: drain and report, so the waker never has to wake twice.
-    if (wakeIndex >= 0 && (pfds[static_cast<size_t>(wakeIndex)].revents & POLLIN) != 0) {
-        uint8_t drain[64];
-        while (::read(l->wakePipe[0], drain, sizeof(drain)) > 0) {
-        }
-        return -3; // ALOOPER_POLL_WAKE
+    if (ready < 0) return errno == EINTR ? kWake : kError;
+    if (ready == 0) return kTimeout;
+    if (pfds.back().revents != 0) {
+        *wasWoken = true;
+        uint8_t bytes[64];
+        while (::read(l->wakePipe[0], bytes, sizeof(bytes)) > 0) {}
     }
-
-    // Find the first ready fd.
-    for (size_t i = 0; i < pfds.size(); ++i) {
+    bool called = false;
+    int ident = kWake;
+    for (size_t i = 0; i < snapshot.size(); ++i) {
         if (pfds[i].revents == 0) continue;
-
-        const int ev = [&]() {
-            int e = 0;
-            if (pfds[i].revents & POLLIN) e |= ALOOPER_EVENT_INPUT;
-            if (pfds[i].revents & POLLOUT) e |= ALOOPER_EVENT_OUTPUT;
-            if (pfds[i].revents & POLLERR) e |= ALOOPER_EVENT_ERROR;
-            if (pfds[i].revents & POLLHUP) e |= ALOOPER_EVENT_HANGUP;
-            if (pfds[i].revents & POLLNVAL) e |= ALOOPER_EVENT_INVALID;
-            return e;
-        }();
-
-        // Drain AInputQueue wake pipe to prevent looper busy looping on unread pipe.
-        // Created with O_NONBLOCK: drain until EAGAIN to prevent blocking.
-        if (snapshot[i].isInputPipe && (pfds[i].revents & (POLLIN | POLLHUP))) {
-            char drainBuf[4096];
-            for (int drainIters = 0; drainIters < (1 << 20); ++drainIters) {
-                const ssize_t n = ::read(snapshot[i].fd, drainBuf, sizeof(drainBuf));
-                if (n <= 0) break; // EAGAIN or empty
-            }
+        const auto& f = snapshot[i];
+        {
+            std::lock_guard<std::mutex> lock(l->mtx);
+            const auto current = std::find_if(l->fds.begin(), l->fds.end(),
+                [&f](const ALooperFd& entry) { return entry.sequence == f.sequence; });
+            if (current == l->fds.end()) continue;
         }
-
-        // Execute looper callback (return 0 unregisters fd).
-        if (snapshot[i].callback) {
-            const int keep = reinterpret_cast<int (*)(int, int, void*)>(snapshot[i].callback)(
-                snapshot[i].fd, ev, snapshot[i].data);
+        int events = 0;
+        if (pfds[i].revents & POLLIN) events |= ALOOPER_EVENT_INPUT;
+        if (pfds[i].revents & POLLOUT) events |= ALOOPER_EVENT_OUTPUT;
+        if (pfds[i].revents & POLLERR) events |= ALOOPER_EVENT_ERROR;
+        if (pfds[i].revents & POLLHUP) events |= ALOOPER_EVENT_HANGUP;
+        if (pfds[i].revents & POLLNVAL) events |= ALOOPER_EVENT_INVALID;
+        if (f.isInputPipe && (pfds[i].revents & (POLLIN | POLLHUP))) {
+            char bytes[4096];
+            while (::read(f.fd, bytes, sizeof(bytes)) > 0) {}
+        }
+        if (f.callback != nullptr) {
+            const int keep = reinterpret_cast<int (*)(int, int, void*)>(f.callback)(
+                f.fd, events, f.data);
+            called = true;
             if (keep == 0) {
                 std::lock_guard<std::mutex> lock(l->mtx);
-                for (size_t k = 0; k < l->fds.size(); ++k) {
-                    if (l->fds[k].fd == snapshot[i].fd) {
-                        l->fds.erase(l->fds.begin() + k);
-                        break;
-                    }
-                }
+                const auto current = std::find_if(l->fds.begin(), l->fds.end(),
+                    [&f](const ALooperFd& entry) { return entry.sequence == f.sequence; });
+                if (current != l->fds.end()) l->fds.erase(current);
             }
-            return -4; // ALOOPER_POLL_CALLBACK
+        } else if (ident < 0) {
+            ident = f.ident;
+            if (outFd) *outFd = f.fd;
+            if (outEvents) *outEvents = events;
+            if (outData) *outData = f.data;
         }
-
-        if (outFd) *outFd = pfds[i].fd;
-        if (outEvents) *outEvents = ev;
-        if (outData) *outData = snapshot[i].data;
-        return snapshot[i].ident;
     }
-    return -2; // ALOOPER_POLL_TIMEOUT
+    return ident >= 0 ? ident : (called ? kCallback : kWake);
+}
+
+extern "C" int bionic_ALooper_pollOnce(int timeoutMillis, int* outFd, int* outEvents,
+                                       void** outData) {
+    bool wasWoken;
+    return PollLooperOnce(timeoutMillis, outFd, outEvents, outData, &wasWoken);
+}
+
+extern "C" int bionic_ALooper_pollAll(int timeoutMillis, int* outFd, int* outEvents,
+                                      void** outData) {
+    const auto start = std::chrono::steady_clock::now();
+    int remaining = timeoutMillis;
+    for (;;) {
+        bool wasWoken;
+        const int result = PollLooperOnce(remaining, outFd, outEvents, outData, &wasWoken);
+        if (result != -2) return result;
+        if (wasWoken) return -1;
+        if (timeoutMillis >= 0) {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - start).count();
+            if (elapsed >= timeoutMillis) return -3;
+            remaining = timeoutMillis - static_cast<int>(elapsed);
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -7986,6 +8274,10 @@ const SymbolEntry kSyscallSymbols[] = {
 #if defined(__aarch64__)
     {"snprintf", reinterpret_cast<void*>(&kudroid_snprintf_trampoline)},
     {"sprintf", reinterpret_cast<void*>(&kudroid_sprintf_trampoline)},
+#if defined(__APPLE__)
+    {"swprintf", reinterpret_cast<void*>(&kudroid_swprintf_trampoline)},
+    {"vswprintf", reinterpret_cast<void*>(&bionic_vswprintf)},
+#endif
     {"fprintf", reinterpret_cast<void*>(&kudroid_fprintf_trampoline)},
     {"printf", reinterpret_cast<void*>(&kudroid_printf_trampoline)},
     {"__fprintf_chk", reinterpret_cast<void*>(&kudroid_fprintf_chk_trampoline)},
@@ -8019,7 +8311,9 @@ const SymbolEntry kSyscallSymbols[] = {
     {"send", reinterpret_cast<void*>(&bionic_send)},
     {"recv", reinterpret_cast<void*>(&bionic_recv)},
     {"sendto", reinterpret_cast<void*>(&bionic_sendto)},
+    {"__sendto_chk", reinterpret_cast<void*>(&bionic___sendto_chk)},
     {"recvfrom", reinterpret_cast<void*>(&bionic_recvfrom)},
+    {"__recvfrom_chk", reinterpret_cast<void*>(&bionic___recvfrom_chk)},
     {"accept", reinterpret_cast<void*>(&bionic_accept)},
     {"accept4", reinterpret_cast<void*>(&bionic_accept4)},
     {"listen", reinterpret_cast<void*>(&bionic_listen)},
@@ -8031,7 +8325,17 @@ const SymbolEntry kSyscallSymbols[] = {
     {"sendmmsg", reinterpret_cast<void*>(&bionic_sendmmsg)},
     {"recvmmsg", reinterpret_cast<void*>(&bionic_recvmmsg)},
     {"getaddrinfo", reinterpret_cast<void*>(&bionic_getaddrinfo)},
+    {"android_getaddrinfofornet", reinterpret_cast<void*>(&bionic_android_getaddrinfofornet)},
     {"freeaddrinfo", reinterpret_cast<void*>(&bionic_freeaddrinfo)},
+    {"gai_strerror", reinterpret_cast<void*>(&bionic_gai_strerror)},
+    {"if_nametoindex", reinterpret_cast<void*>(&bionic_if_nametoindex)},
+    {"inet_addr", reinterpret_cast<void*>(&::inet_addr)},
+    {"inet_aton", reinterpret_cast<void*>(&::inet_aton)},
+    {"inet_ntoa", reinterpret_cast<void*>(&::inet_ntoa)},
+    {"htons", reinterpret_cast<void*>(&bionic_htons)},
+    {"ntohs", reinterpret_cast<void*>(&bionic_htons)},
+    {"htonl", reinterpret_cast<void*>(&bionic_htonl)},
+    {"ntohl", reinterpret_cast<void*>(&bionic_htonl)},
     {"getifaddrs", reinterpret_cast<void*>(&bionic_getifaddrs)},
     {"freeifaddrs", reinterpret_cast<void*>(&bionic_freeifaddrs)},
     {"inet_ntop", reinterpret_cast<void*>(&bionic_inet_ntop)},
@@ -8352,6 +8656,12 @@ const SymbolEntry kSyscallSymbols[] = {
     {"vfprintf", reinterpret_cast<void*>(&bionic_vfprintf)},
     {"vprintf", reinterpret_cast<void*>(&bionic_vprintf)},
     {"vasprintf", reinterpret_cast<void*>(&bionic_vasprintf)},
+#if defined(__aarch64__)
+    {"syslog", reinterpret_cast<void*>(&kudroid_syslog_trampoline)},
+#else
+    {"syslog", reinterpret_cast<void*>(&bionic_syslog)},
+#endif
+    {"vsyslog", reinterpret_cast<void*>(&bionic_vsyslog)},
     // The scanf family. These were absent too, and reaching the host implementation is
     // worse here than for printf: scanf WRITES through its varargs. Minecraft's UUID parse
     // passes eleven output pointers, and the host took five of them from stack words that

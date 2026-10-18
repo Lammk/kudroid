@@ -1232,17 +1232,26 @@ static bool kudroid_try_skip_fault(int /*sig*/, siginfo_t* info, void* ucontext)
         !fault_addr_is_nullish(faultAddr) && unmapped_addr_is_store_safe(faultAddr);
     if (!fault_addr_is_nullish(faultAddr) && !storeDropEligible) return false;
     if (!fault_skip_load_store(uc, faultAddr, &newPc, &isLoad)) return false;
-    // Only the admitted shapes proceed: a nullish load/store, or a genuinely
-    // unmapped store. A nullish address can never be store-drop (the helper
-    // refuses it), so a fabricated-zero load never hides inside this gate.
-    if (!fault_addr_is_nullish(faultAddr) && isLoad) return false;
+    // Allow unmapped loads when the instruction immediately following the load
+    // is a conditional zero-test/branch (tbz/cbz/tbnz/cbnz) on the destination register.
+    bool loadZeroTestSafe = false;
+    if (!fault_addr_is_nullish(faultAddr) && isLoad && (faultPc & 0xFFFu) + 4 < 0x1000u) {
+        const uint32_t currentInsn = *reinterpret_cast<const uint32_t*>(faultPc);
+        const unsigned rt = currentInsn & 31;
+        const uint32_t next = *reinterpret_cast<const uint32_t*>(faultPc + 4);
+        if (((next & 0x7e000000) == 0x36000000 || (next & 0x7e000000) == 0x34000000) &&
+            (next & 31) == rt) {
+            loadZeroTestSafe = true;
+        }
+    }
+    if (!fault_addr_is_nullish(faultAddr) && isLoad && !loadZeroTestSafe) return false;
     arm_thread_state64_set_pc_fptr(uc->uc_mcontext->__ss,
                                    reinterpret_cast<void*>(newPc));
     char mark[256];
     const int n = snprintf(mark, sizeof(mark),
                            "fault-skipped kind=%s fault_addr=0x%llx resumed_at_pc=0x%llx",
                            (fault_addr_is_nullish(faultAddr) ? "null-page"
-                                                             : "store-unmapped"),
+                                                             : (loadZeroTestSafe ? "load-zerotest" : "store-unmapped")),
                            (unsigned long long)faultAddr,
                            (unsigned long long)newPc);
     if (n > 0) kudroid_persistent_breadcrumb(mark);
@@ -1295,7 +1304,7 @@ static bool kudroid_try_skip_fault(int /*sig*/, siginfo_t* info, void* ucontext)
     // A store drop is the one recovery that changes neither register nor memory,
     // so this note is its only trace: it lets crashHandler report a fault
     // arriving from the same loop as the pair it is (see store_drop_report).
-    if (!fault_addr_is_nullish(faultAddr)) {
+    if (!fault_addr_is_nullish(faultAddr) && !isLoad) {
         store_drop_note(currentThreadIdForCrash(), faultPc);
     }
     return true;
@@ -2296,6 +2305,39 @@ host_fatal_path:;
                             (unsigned long long)stack[i + 2],
                             (unsigned long long)stack[i + 3]);
                         crashWriteLine(fd, sigline, n, sizeof(sigline));
+                    }
+                }
+
+                // Guest return addresses among the words around sp, resolved to module+offset.
+                // When a function returns through a corrupted frame, pc and lr are data and
+                // the callers are only recoverable from what is left on the stack, including
+                // the words just below sp that the dump above does not cover.
+                {
+                    const kudroid::StackBounds bounds = kudroid::query_thread_stack_bounds();
+                    const uintptr_t spv = static_cast<uintptr_t>(sp);
+                    if (bounds.valid && (spv & 0x7) == 0 && spv >= bounds.low &&
+                        spv < bounds.high) {
+                        constexpr uintptr_t kBelow = 0x400;
+                        constexpr uintptr_t kAbove = 0x1800;
+                        uintptr_t from = spv > bounds.low + kBelow ? spv - kBelow : bounds.low;
+                        uintptr_t to = spv + kAbove < bounds.high ? spv + kAbove : bounds.high;
+                        (void)!write(fd, "\n--- stack scan (guest code pointers) ---\n", 43);
+                        int printed = 0;
+                        for (uintptr_t a = from & ~uintptr_t(7); a + 8 <= to && printed < 40;
+                             a += 8) {
+                            const uint64_t v = *reinterpret_cast<const uint64_t*>(a);
+                            char where[256];
+                            if (v < 0x100000 ||
+                                !kudroid::kudroid_lookup_guest_module(reinterpret_cast<void*>(v),
+                                                                      where, sizeof(where))) {
+                                continue;
+                            }
+                            int n = snprintf(sigline, sizeof(sigline), "sp%+05ld: %016llx %s\n",
+                                             static_cast<long>(a) - static_cast<long>(spv),
+                                             (unsigned long long)v, where);
+                            crashWriteLine(fd, sigline, n, sizeof(sigline));
+                            ++printed;
+                        }
                     }
                 }
 
