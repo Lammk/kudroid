@@ -32,6 +32,12 @@ jobs:
         with:
           key: ${{ runner.os }}-kuart
 
+      - name: Cache codec downloads
+        uses: actions/cache@v4
+        with:
+          path: third_party/downloads
+          key: media-codecs-${{ hashFiles('cmake/MediaCodecs.cmake') }}
+
       - name: Configure
         run: |
           rm -rf build
@@ -110,6 +116,12 @@ jobs:
       - name: Clean stale CMake cache
         run: rm -rf build build-ios build-test
 
+      - name: Cache codec downloads
+        uses: actions/cache@v4
+        with:
+          path: third_party/downloads
+          key: media-codecs-${{ hashFiles('cmake/MediaCodecs.cmake') }}
+
       - name: Configure
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
@@ -133,6 +145,12 @@ jobs:
 
       - name: Clean stale CMake cache
         run: rm -rf build build-ios build-test
+
+      - name: Cache codec downloads
+        uses: actions/cache@v4
+        with:
+          path: third_party/downloads
+          key: media-codecs-${{ hashFiles('cmake/MediaCodecs.cmake') }}
 
       - name: Configure (ARM64)
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
@@ -271,6 +289,12 @@ jobs:
 
       - name: Clean stale CMake cache
         run: rm -rf build build-ios build-test
+
+      - name: Cache codec downloads
+        uses: actions/cache@v4
+        with:
+          path: third_party/downloads
+          key: media-codecs-${{ hashFiles('cmake/MediaCodecs.cmake') }}
 
       - name: Build kudroid_core static library (iOS ARM64)
         run: |
