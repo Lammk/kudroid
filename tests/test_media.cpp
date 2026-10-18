@@ -1,5 +1,4 @@
-// Host-side test for the NDK media layer: a synthetic WebM goes through the extractor and the
-// placeholder codec, the way a player drives them.
+// Exercise container extraction and real VP8/Vorbis buffer decoding.
 
 #include "kudroid/platform/MediaShim.h"
 #include "kudroid/platform/ShimDefs.h"
@@ -162,7 +161,7 @@ using GetI32Fn = bool (*)(void*, const char*, int32_t*);
 using GetI64Fn = bool (*)(void*, const char*, int64_t*);
 using GetStrFn = bool (*)(void*, const char*, const char**);
 using GetBufFn = bool (*)(void*, const char*, void**, size_t*);
-using ReadFn = int (*)(void*, uint8_t*, size_t);
+using ReadFn = ssize_t (*)(void*, uint8_t*, size_t);
 using TrackIdxFn = int (*)(void*);
 using TimeFn = int64_t (*)(void*);
 using FlagsFn = uint32_t (*)(void*);
@@ -172,10 +171,10 @@ using DeleteFn = int (*)(void*);
 using CodecNewFn = void* (*)(const char*);
 using ConfigureFn = int (*)(void*, const void*, void*, void*, uint32_t);
 using CodecOpFn = int (*)(void*);
-using DequeueInFn = int (*)(void*, int64_t);
+using DequeueInFn = ssize_t (*)(void*, int64_t);
 using InBufFn = uint8_t* (*)(void*, size_t, size_t*);
 using QueueFn = int (*)(void*, size_t, int64_t, size_t, uint64_t, uint32_t);
-using DequeueOutFn = int (*)(void*, void*, int64_t);
+using DequeueOutFn = ssize_t (*)(void*, void*, int64_t);
 using ReleaseFn = int (*)(void*, size_t, bool);
 using OutFormatFn = void* (*)(void*);
 
@@ -263,10 +262,9 @@ int main() {
     CHECK(videoSeen == kVideoFrames);
     CHECK(audioSeen == kAudioPackets);
     CHECK(sampleTrack(ex) == -1 && readSample(ex, buf.data(), buf.size()) == -1);
-    // The last sample sits at 1980 ms of real time, 247 ms on the compressed clock.
-    CHECK(endTime > 200000 && endTime < 300000);
+    CHECK(endTime == 1980000);
 
-    // Seeking to the compressed clock's 100 ms lands on the keyframe at or before 800 ms real.
+    // Seek timestamps use the container clock without compression.
     CHECK(seekTo(ex, 100000, 0) == 0);
     CHECK(sampleTrack(ex) >= 0);
     CHECK(sampleTime(ex) <= 100000);
@@ -287,114 +285,107 @@ int main() {
     auto outBuf = Fnc<InBufFn>("AMediaCodec_getOutputBuffer");
     auto codecDelete = Fnc<DeleteFn>("AMediaCodec_delete");
 
-    void* vc = codecNew("video/x-vnd.on2.vp8");
-    CHECK(configure(vc, nullptr, nullptr, nullptr, 0) == 0);
-    CHECK(start(vc) == 0);
-    CHECK(dequeueOut(vc, nullptr, 0) == -1);  // nothing queued yet
+    const int fixtureFd = open(KUDROID_TEST_MEDIA_FILE, O_RDONLY);
+    CHECK(fixtureFd >= 0);
+    if (fixtureFd < 0) return 1;
+    for (size_t track = 0; track < 2; ++track) {
+        void* fixture = extNew();
+        CHECK(setFd(fixture, fixtureFd, 0, 0) == 0);
+        CHECK(count(fixture) == 2 && select(fixture, track) == 0);
+        void* format = trackFormat(fixture, track);
+        CHECK(format != nullptr && getStr(format, "mime", &mime));
+        void* codec = codecNew(mime);
+        CHECK(codec != nullptr);
+        CHECK(configure(codec, nullptr, nullptr, nullptr, 0) != 0);
+        CHECK(configure(codec, format, nullptr, nullptr, 0) == 0);
+        fmtDelete(format);
+        CHECK(start(codec) == 0);
+        CHECK(dequeueOut(codec, nullptr, 20000) == -1);
 
-    int produced = 0, delivered = 0;
-    bool sawFormat = false, sawEos = false;
-    int64_t lastPts = -1;
-    for (int i = 0; i < 40 && !sawEos; ++i) {
-        // feed
-        int in;
-        while ((in = dequeueIn(vc, 0)) >= 0) {
-            size_t cap = 0;
-            uint8_t* b = inBuf(vc, static_cast<size_t>(in), &cap);
-            CHECK(b != nullptr && cap >= 1000);
-            const bool last = produced == 9;
-            CHECK(queue(vc, static_cast<size_t>(in), 0, 100, static_cast<uint64_t>(produced) * 4000,
-                        last ? 4u : (produced == 0 ? 1u : 0u)) == 0);
-            ++produced;
-            if (last) break;
-        }
-        // drain
-        BufferInfo info{};
-        int out;
-        while ((out = dequeueOut(vc, &info, 0)) != -1) {
-            if (out == -2) {
-                CHECK(!sawFormat);
-                sawFormat = true;
-                void* f = outFormat(vc);
-                int32_t ow = 0;
-                CHECK(f != nullptr && getI32(f, "width", &ow));
-                fmtDelete(f);
-                continue;
+        bool inputEos = false, outputEos = false, sawFormat = false;
+        bool nonzeroPcm = false;
+        int delivered = 0;
+        int64_t pcmFrames = 0, firstPts = -1, lastPts = -1;
+        for (int iteration = 0; iteration < 500 && !outputEos; ++iteration) {
+            const ssize_t input = inputEos ? -1 : dequeueIn(codec, 0);
+            if (input >= 0) {
+                size_t capacity = 0;
+                uint8_t* bytes = inBuf(codec, static_cast<size_t>(input), &capacity);
+                CHECK(bytes != nullptr);
+                const bool last = sampleTrack(fixture) < 0;
+                const ssize_t size = last ? 0 : readSample(fixture, bytes, capacity);
+                CHECK(size >= 0);
+                if (size < 0) break;
+                const int64_t pts = last ? lastPts + 1 : sampleTime(fixture);
+                CHECK(pts >= 0);
+                CHECK(queue(codec, static_cast<size_t>(input), 0, static_cast<size_t>(size),
+                            static_cast<uint64_t>(pts), last ? 4u : sampleFlags(fixture)) == 0);
+                if (last) inputEos = true;
+                else advance(fixture);
             }
-            CHECK(sawFormat);
-            // A surface-bound frame carries no payload but must still hand out a buffer.
-            size_t frameCap = 0;
-            CHECK(outBuf(vc, static_cast<size_t>(out), &frameCap) != nullptr);
-            if ((info.flags & 4) != 0) {
-                sawEos = true;
-            } else {
-                CHECK(info.presentationTimeUs > lastPts);
-                lastPts = info.presentationTimeUs;
-                ++delivered;
+            BufferInfo info{};
+            ssize_t output;
+            while ((output = dequeueOut(codec, &info, 0)) != -1) {
+                if (output == -2) {
+                    CHECK(!sawFormat);
+                    sawFormat = true;
+                    void* decodedFormat = outFormat(codec);
+                    int32_t first = 0, second = 0;
+                    if (track == 0) {
+                        int32_t color = 0;
+                        CHECK(getI32(decodedFormat, "width", &first) && first == 16);
+                        CHECK(getI32(decodedFormat, "height", &second) && second == 16);
+                        CHECK(getI32(decodedFormat, "color-format", &color) && color == 19);
+                    } else {
+                        CHECK(getI32(decodedFormat, "sample-rate", &first) && first == 48000);
+                        CHECK(getI32(decodedFormat, "channel-count", &second) && second == 2);
+                    }
+                    fmtDelete(decodedFormat);
+                    continue;
+                }
+                CHECK(output >= 0 && sawFormat);
+                if (output < 0) break;
+                if (info.size > 0) {
+                    size_t capacity = 0;
+                    const uint8_t* bytes = outBuf(codec, static_cast<size_t>(output), &capacity);
+                    CHECK(bytes != nullptr && capacity == static_cast<size_t>(info.size));
+                    CHECK(info.presentationTimeUs > lastPts);
+                    if (firstPts < 0) firstPts = info.presentationTimeUs;
+                    lastPts = info.presentationTimeUs;
+                    if (track == 0) {
+                        CHECK(capacity == 16 * 16 * 3 / 2);
+                        if (bytes && capacity == 384) {
+                            CHECK(std::abs(int(bytes[0]) - 81) <= 2);
+                            CHECK(std::abs(int(bytes[256]) - 90) <= 2);
+                            CHECK(std::abs(int(bytes[320]) - 240) <= 2);
+                        }
+                    } else {
+                        CHECK(capacity % 4 == 0);
+                        pcmFrames += static_cast<int64_t>(capacity / 4);
+                        for (size_t i = 0; bytes && i < capacity; ++i) nonzeroPcm |= bytes[i] != 0;
+                    }
+                    ++delivered;
+                }
+                if (info.flags & 4) outputEos = true;
+                CHECK(release(codec, static_cast<size_t>(output), false) == 0);
+                CHECK(release(codec, static_cast<size_t>(output), false) != 0);
             }
-            CHECK(release(vc, static_cast<size_t>(out), true) == 0);
         }
+        CHECK(inputEos && outputEos && sawFormat);
+        if (track == 0) {
+            CHECK(delivered == 10);
+            CHECK(firstPts >= 0 && lastPts >= 360000 && lastPts < 410000);
+        } else {
+            CHECK(nonzeroPcm && delivered > 0);
+            CHECK(pcmFrames >= 19200 - 2048 && pcmFrames <= 19200 + 2048);
+            CHECK(firstPts == 0);
+        }
+        CHECK(stop(codec) == 0);
+        CHECK(dequeueIn(codec, 0) == -1);
+        codecDelete(codec);
+        extDelete(fixture);
     }
-    CHECK(sawEos);
-    CHECK(delivered == 10);
-    CHECK(release(vc, 0, true) != 0);  // not outstanding
-    CHECK(stop(vc) == 0);
-    CHECK(dequeueIn(vc, 0) == -1);  // stopped
-    codecDelete(vc);
-
-    // ── codec: audio ────────────────────────────────────────────────────────
-    void* ac = codecNew("audio/vorbis");
-    CHECK(configure(ac, nullptr, nullptr, nullptr, 0) == 0);
-    CHECK(start(ac) == 0);
-    // 40 packets, 2500 us apart on the compressed clock (20 ms / 8), then EOS.
-    int sent = 0;
-    int64_t pcmFrames = 0;
-    bool audioEos = false, audioFormat = false;
-    int64_t firstPts = -1;
-    for (int i = 0; i < 200 && !audioEos; ++i) {
-        int in;
-        while (sent <= 40 && (in = dequeueIn(ac, 0)) >= 0) {
-            CHECK(inBuf(ac, static_cast<size_t>(in), nullptr) != nullptr);
-            const bool last = sent == 40;
-            CHECK(queue(ac, static_cast<size_t>(in), 0, 50, static_cast<uint64_t>(sent) * 2500,
-                        last ? 4u : 0u) == 0);
-            ++sent;
-        }
-        BufferInfo info{};
-        int out;
-        while ((out = dequeueOut(ac, &info, 0)) != -1) {
-            if (out == -2) {
-                void* f = outFormat(ac);
-                int32_t r = 0, c = 0;
-                CHECK(getI32(f, "sample-rate", &r) && r == 48000 && getI32(f, "channel-count", &c) && c == 2);
-                fmtDelete(f);
-                audioFormat = true;
-                continue;
-            }
-            if ((info.flags & 4) != 0) {
-                audioEos = true;
-            } else {
-                size_t size = 0;
-                const uint8_t* data = outBuf(ac, static_cast<size_t>(out), &size);
-                CHECK(data != nullptr && static_cast<int32_t>(size) == info.size && size % 4 == 0);
-                for (size_t k = 0; k < size; ++k) CHECK(data[k] == 0);
-                pcmFrames += static_cast<int64_t>(size) / 4;
-                if (firstPts < 0) firstPts = info.presentationTimeUs;
-            }
-            CHECK(release(ac, static_cast<size_t>(out), false) == 0);
-        }
-    }
-    CHECK(audioFormat && audioEos);
-    // 41 packets spanning 41 * 2500 us at 48 kHz, to within a frame of rounding.
-    CHECK(pcmFrames >= 4900 && pcmFrames <= 4940);
-    CHECK(firstPts == 0);
-    codecDelete(ac);
-
-    // Blocking dequeue returns once the codec is stopped from another thread's point of view.
-    void* idle = codecNew("video/x-vnd.on2.vp8");
-    CHECK(start(idle) == 0);
-    CHECK(dequeueOut(idle, nullptr, 20000) == -1);
-    codecDelete(idle);
+    close(fixtureFd);
 
     // Frame queue.
     int id = 0;

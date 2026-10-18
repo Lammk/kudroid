@@ -36,6 +36,7 @@ Interpreter* g_interp = nullptr;
 
 constexpr int kTypeMobile = 0;
 constexpr int kTypeWifi = 1;
+constexpr int kTypeEthernet = 9;
 
 void Check(bool condition, const char* message) {
     ++g_checks;
@@ -100,8 +101,16 @@ void test_network() {
     DexValue v;
 
     Check(CallVirtual(cm, "getAllNetworkInfo", "()[Landroid/net/NetworkInfo;", {}, &v) &&
-              v.l != nullptr && reinterpret_cast<DexArray*>(v.l)->length == 2,
+              v.l != nullptr && reinterpret_cast<DexArray*>(v.l)->length == 3,
           "getAllNetworkInfo exists and returns the supported types");
+    DexArray* supported = reinterpret_cast<DexArray*>(v.l);
+    if (supported != nullptr && supported->length == 3) {
+        const int types[] = {kTypeMobile, kTypeWifi, kTypeEthernet};
+        for (int i = 0; i < 3; ++i) {
+            Check(Int(supported->Get<DexObject*>(i), "getType", "()I") == types[i],
+                  "each supported network type has its own entry");
+        }
+    }
 
     // Default: a host that reports nothing is assumed to be online over Wi-Fi.
     CallVirtual(cm, "getActiveNetworkInfo", "()Landroid/net/NetworkInfo;", {}, &v);
