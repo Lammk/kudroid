@@ -232,23 +232,44 @@ extern "C" void kudroid_persistent_breadcrumb(const char* line);
 // mutex: a GL thread that logs a call then stalls the whole frame loop. The descriptor is
 // kept non-blocking (checked per call, since it can be replaced), so a full console drops
 // the line instead.
-extern "C" void kudroid_console_init_nonblocking(void) {
-    const int flags = ::fcntl(STDOUT_FILENO, F_GETFL);
+static int g_hostConsoleFd = -1;
+static std::once_flag g_hostConsoleOnce;
+
+static void set_console_nonblocking(int fd) {
+    const int flags = ::fcntl(fd, F_GETFL);
     if (flags >= 0 && (flags & O_NONBLOCK) == 0) {
-        ::fcntl(STDOUT_FILENO, F_SETFL, flags | O_NONBLOCK);
+        ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
     }
 }
 
-static void console_write_nonblocking(const char* data, size_t len) {
+static void init_host_console() {
+    // Keep host diagnostics outside any guest stdout capture pipe.
+    std::call_once(g_hostConsoleOnce, [] {
+        g_hostConsoleFd = ::fcntl(STDOUT_FILENO, F_DUPFD_CLOEXEC, 3);
+    });
+}
+
+extern "C" void kudroid_console_init_nonblocking(void) {
+    init_host_console();
+    set_console_nonblocking(STDOUT_FILENO);
+}
+
+static void write_console_fd(int fd, const char* data, size_t len) {
+    if (fd < 0) return;
     constexpr size_t kChunk = 480;
-    kudroid_console_init_nonblocking();
+    set_console_nonblocking(fd);
     while (len > 0) {
         const size_t n = len < kChunk ? len : kChunk;
-        const ssize_t w = ::write(STDOUT_FILENO, data, n);
+        const ssize_t w = ::write(fd, data, n);
         if (w <= 0) return;  // EAGAIN (console full), EPIPE or error: drop the rest
         data += w;
         len -= static_cast<size_t>(w);
     }
+}
+
+static void console_write_nonblocking(const char* data, size_t len) {
+    kudroid_console_init_nonblocking();
+    write_console_fd(STDOUT_FILENO, data, len);
 }
 
 // Bounded wait for the log lock. A sink that wedges while holding it must not
@@ -417,6 +438,7 @@ static void android_log_close_cached_fd() {
 }
 
 extern "C" void kudroid_android_log_force_reopen(void) {
+    init_host_console();
     std::lock_guard<std::mutex> lock(g_logAndroidMutex);
     android_log_close_cached_fd();
     g_logRepeatSlots.clear();
@@ -458,7 +480,8 @@ static void emit_android_log_line(int priority, const char* tag, const std::stri
                 cn = sizeof(console_line) - 1;
                 console_line[cn - 1] = '\n';
             }
-            console_write_nonblocking(console_line, static_cast<size_t>(cn));
+            init_host_console();
+            write_console_fd(g_hostConsoleFd, console_line, static_cast<size_t>(cn));
         }
     }
     

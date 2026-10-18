@@ -1730,7 +1730,7 @@ bool Invoke_java_lang_System(Interpreter* interp, const char* name, const DexVal
         std::memmove(dst_data, src_data, static_cast<size_t>(length) * elem_size);
         return true;
     }
-    if (std::strcmp(name, "getProperty") == 0) {
+    if (std::strcmp(name, "getProperty") == 0 || std::strcmp(name, "getProperty0") == 0) {
         const std::string key = GetStringUtf8(args[0]);
         // Only the properties Android code actually reads; anything else is null
         // so callers fall back to their own defaults.

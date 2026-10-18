@@ -10,7 +10,7 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 TOOLS_DIR="${ANGLE_TOOLS_DIR:-$ROOT_DIR/third_party/build-tools}"
 SOURCE_DIR="${ANGLE_SOURCE_DIR:-$ROOT_DIR/third_party/angle-src}"
 OUTPUT_DIR="${ANGLE_OUTPUT_DIR:-$ROOT_DIR/third_party/ANGLE}"
-ANGLE_REF="${ANGLE_REF:-be80ce591a481c12d60c50d6040d40c035b40a2b}"
+ANGLE_REF="${ANGLE_REF:-b82a564646a26535ccedfa7a69134c0fd6654ac2}"
 DEPOT_TOOLS="$TOOLS_DIR/depot_tools"
 BUILD_DIR="$SOURCE_DIR/out/ios-arm64-vulkan"
 
@@ -34,6 +34,7 @@ if ! git cat-file -e "$ANGLE_REF^{commit}" 2>/dev/null; then
     git fetch --depth=1 origin "$ANGLE_REF"
 fi
 git checkout -B pinned-angle "$ANGLE_REF"
+ANGLE_COMMIT="$(git rev-parse HEAD)"
 python3 scripts/bootstrap.py
 gclient sync --no-history --shallow --reset --force
 
@@ -132,33 +133,44 @@ extra_cflags="-Wno-unsafe-buffer-usage"'
 
 autoninja -C "$BUILD_DIR" libEGL libGLESv2
 
+# Stage fresh libraries so restored cache aliases cannot survive an upgrade.
+INSTALL_DIR="$(mktemp -d "$OUTPUT_DIR/lib/ios-arm64.XXXXXX")"
+trap 'rm -rf "$INSTALL_DIR"' EXIT
+
 cp -R include/EGL include/GLES include/GLES2 include/GLES3 include/KHR "$OUTPUT_DIR/include/"
 
 # angle on ios produces .framework packages
 if [[ -d "$BUILD_DIR/libEGL.framework" ]]; then
-    cp -R "$BUILD_DIR/libEGL.framework" "$OUTPUT_DIR/lib/ios-arm64/"
+    cp -R "$BUILD_DIR/libEGL.framework" "$INSTALL_DIR/"
 fi
 if [[ -d "$BUILD_DIR/libGLESv2.framework" ]]; then
-    cp -R "$BUILD_DIR/libGLESv2.framework" "$OUTPUT_DIR/lib/ios-arm64/"
+    cp -R "$BUILD_DIR/libGLESv2.framework" "$INSTALL_DIR/"
 fi
 
 # also collect any libegl/libglesv2 .a or .dylib
-find "$BUILD_DIR" -type f \( -name 'libEGL.a' -o -name 'libGLESv2.a' -o -name 'libEGL.dylib' -o -name 'libGLESv2.dylib' \) -exec cp {} "$OUTPUT_DIR/lib/ios-arm64/" \;
+find "$BUILD_DIR" -type f \( -name 'libEGL.a' -o -name 'libGLESv2.a' -o -name 'libEGL.dylib' -o -name 'libGLESv2.dylib' \) -exec cp {} "$INSTALL_DIR/" \;
 
 # if framework binaries exist, ensure libegl.dylib and libglesv2.dylib exist for -legl / -lglesv2 link steps
-if [[ -f "$OUTPUT_DIR/lib/ios-arm64/libEGL.framework/libEGL" && ! -f "$OUTPUT_DIR/lib/ios-arm64/libEGL.dylib" && ! -f "$OUTPUT_DIR/lib/ios-arm64/libEGL.a" ]]; then
-    cp "$OUTPUT_DIR/lib/ios-arm64/libEGL.framework/libEGL" "$OUTPUT_DIR/lib/ios-arm64/libEGL.dylib"
+if [[ -f "$INSTALL_DIR/libEGL.framework/libEGL" && ! -f "$INSTALL_DIR/libEGL.dylib" && ! -f "$INSTALL_DIR/libEGL.a" ]]; then
+    cp "$INSTALL_DIR/libEGL.framework/libEGL" "$INSTALL_DIR/libEGL.dylib"
 fi
-if [[ -f "$OUTPUT_DIR/lib/ios-arm64/libGLESv2.framework/libGLESv2" && ! -f "$OUTPUT_DIR/lib/ios-arm64/libGLESv2.dylib" && ! -f "$OUTPUT_DIR/lib/ios-arm64/libGLESv2.a" ]]; then
-    cp "$OUTPUT_DIR/lib/ios-arm64/libGLESv2.framework/libGLESv2" "$OUTPUT_DIR/lib/ios-arm64/libGLESv2.dylib"
+if [[ -f "$INSTALL_DIR/libGLESv2.framework/libGLESv2" && ! -f "$INSTALL_DIR/libGLESv2.dylib" && ! -f "$INSTALL_DIR/libGLESv2.a" ]]; then
+    cp "$INSTALL_DIR/libGLESv2.framework/libGLESv2" "$INSTALL_DIR/libGLESv2.dylib"
 fi
 
 popd >/dev/null
 
-if [[ ! -e "$OUTPUT_DIR/lib/ios-arm64/libEGL.framework" && ! -f "$OUTPUT_DIR/lib/ios-arm64/libEGL.a" && ! -f "$OUTPUT_DIR/lib/ios-arm64/libEGL.dylib" ]]; then
-    echo "ERROR: ANGLE build finished but libEGL/libGLESv2 output was not found." >&2
-    exit 1
-fi
+for library in libEGL libGLESv2; do
+    if [[ ! -f "$INSTALL_DIR/$library.framework/$library" && ! -f "$INSTALL_DIR/$library.a" && ! -f "$INSTALL_DIR/$library.dylib" ]]; then
+        echo "ERROR: ANGLE build finished but $library output was not found." >&2
+        exit 1
+    fi
+done
+
+printf '%s\n' "$ANGLE_COMMIT" > "$INSTALL_DIR/ANGLE_REVISION"
+rm -rf "$OUTPUT_DIR/lib/ios-arm64"
+mv "$INSTALL_DIR" "$OUTPUT_DIR/lib/ios-arm64"
+trap - EXIT
 
 echo "ANGLE iOS ARM64 installed at: $OUTPUT_DIR"
 ls -la "$OUTPUT_DIR/lib/ios-arm64/"

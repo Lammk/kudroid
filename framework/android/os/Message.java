@@ -30,6 +30,7 @@ public final class Message {
 
     Message next; // package-private so MessageQueue can access it
     boolean inUse = false;
+    private boolean asynchronous;
 
     public Message() {}
 
@@ -115,6 +116,7 @@ public final class Message {
             m.obj = orig.obj;
             m.target = orig.target;
             m.callback = orig.callback;
+            m.asynchronous = orig.asynchronous;
         }
         return m;
     }
@@ -157,6 +159,14 @@ public final class Message {
         return when;
     }
 
+    public boolean isAsynchronous() {
+        return asynchronous;
+    }
+
+    public void setAsynchronous(boolean async) {
+        asynchronous = async;
+    }
+
     /**
      * return this message to the pool.
      */
@@ -169,6 +179,7 @@ public final class Message {
         this.callback = null;
         this.when = 0;
         this.inUse = false;
+        this.asynchronous = false;
         synchronized (sPoolSync) {
             if (sPoolSize < MAX_POOL_SIZE) {
                 this.next = sPool;
