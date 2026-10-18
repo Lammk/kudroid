@@ -342,7 +342,7 @@ else()
         src/platform/MediaContainer.cpp src/platform/MediaDecoder.cpp)
     target_include_directories(test_surface_texture PRIVATE include)
     target_link_libraries(test_surface_texture PRIVATE kudroid_vpx kudroid_vorbis)
-    if(UNIX AND NOT APPLE)
+    if(UNIX AND NOT APPLE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ANGLE/include/EGL/egl.h")
         add_executable(test_surface_texture_egl tests/test_surface_texture_egl.cpp
             src/platform/SurfaceTextureHost.cpp)
         target_include_directories(test_surface_texture_egl PRIVATE include third_party/ANGLE/include)
