@@ -64,6 +64,8 @@ namespace {
 // 64: the log stays a presence detector without taxing every draw. Pass
 // KUDROID_GPU_LOG_ALL=1 to restore the full stream for a session.
 static std::atomic<int> g_gpuLogCount{0};
+static std::atomic<unsigned> g_materialAuditCount{0};
+static std::atomic<unsigned> g_materialAuditEpoch{0};
 static bool gpu_log_all() {
     static const bool all = [] {
         const char* env = std::getenv("KUDROID_GPU_LOG_ALL");
@@ -1628,6 +1630,8 @@ extern "C" uint32_t bionic_vkSurfaceCaps(void* phys, void* surface, void* caps) 
 // Run-end reset: present/acquire numbering restarts so the next run's log
 // starts at #1 instead of continuing the previous run's sequence.
 extern "C" void kudroid_gpu_note_run_end(void) {
+    g_materialAuditCount.store(0, std::memory_order_relaxed);
+    g_materialAuditEpoch.fetch_add(1, std::memory_order_relaxed);
     s_presentCount.store(0, std::memory_order_relaxed);
     s_acquireCount.store(0, std::memory_order_relaxed);
     std::vector<void*> vkHosts;
@@ -2555,7 +2559,7 @@ extern "C" void bionic_glMemoryBarrier(unsigned int barriers) {
 }
 
 extern "C" void bionic_glBindImageTexture(unsigned int unit, unsigned int texture, int level,
-                                          unsigned char layered, int layer,
+                                          unsigned int layered, int layer,
                                           unsigned int access, unsigned int format) {
     typedef void (*PFN)(unsigned int, unsigned int, int, unsigned char, int,
                         unsigned int, unsigned int);
@@ -2563,7 +2567,7 @@ extern "C" void bionic_glBindImageTexture(unsigned int unit, unsigned int textur
     if (!f) { EGL_FORWARD_ERR("glBindImageTexture", ""); return; }
     gpuLog("glBindImageTexture(unit=%u texture=%u level=%d layered=%u layer=%d)",
            unit, texture, level, layered, layer);
-    f(unit, texture, level, layered, layer, access, format);
+    f(unit, texture, level, static_cast<unsigned char>(layered), layer, access, format);
 }
 
 extern "C" void bionic_glFramebufferParameteri(unsigned int target, unsigned int pname, int param) {
@@ -2730,6 +2734,103 @@ extern "C" void bionic_glGetProgramiv(unsigned int program, unsigned int pname, 
     gpuLog("glGetProgramiv(prog=%u pname=0x%x param=%d)", program, pname, params ? *params : 0);
 }
 
+namespace {
+struct MaterialAudit {
+    unsigned epoch = ~0u;
+    bool pending = false;
+    void* context = nullptr;
+    unsigned selected = 0;
+    std::unordered_map<void*, std::unordered_set<unsigned>> programs;
+};
+thread_local MaterialAudit materialAudit;
+
+void select_material_audit(unsigned program) {
+    materialAudit.pending = false;
+    if (!program || g_materialAuditCount.load(std::memory_order_relaxed) >= 96) return;
+    const unsigned epoch = g_materialAuditEpoch.load(std::memory_order_relaxed);
+    if (materialAudit.epoch != epoch) {
+        materialAudit.programs.clear();
+        materialAudit.epoch = epoch;
+    }
+    using Current = void* (*)();
+    static auto current = reinterpret_cast<Current>(get_egl_func("eglGetCurrentContext"));
+    if (current) {
+        materialAudit.context = current();
+        materialAudit.selected = program;
+        materialAudit.pending = !materialAudit.programs[materialAudit.context].count(program);
+    }
+}
+
+// Query each program once at its first draw, after render state has been applied.
+void audit_material_draw() {
+    if (!materialAudit.pending) return;
+    materialAudit.pending = false;
+    materialAudit.programs[materialAudit.context].insert(materialAudit.selected);
+    if (g_materialAuditCount.fetch_add(1, std::memory_order_relaxed) >= 96) return;
+    using String = const char* (*)(unsigned);
+    auto strings = reinterpret_cast<String>(GL_FUNC_CACHED("glGetString"));
+    const char* version = strings ? strings(0x1f02 /* GL_VERSION */) : nullptr;
+    if (!version || !std::strstr(version, "OpenGL ES 3.")) return;
+    using Integer = void (*)(unsigned, int*);
+    using Program = void (*)(unsigned, unsigned, int*);
+    using Uniform = void (*)(unsigned, unsigned, int, int*, int*, unsigned*, char*);
+    using Attachment = void (*)(unsigned, unsigned, unsigned, int*);
+    using Enabled = unsigned char (*)(unsigned);
+    auto integer = reinterpret_cast<Integer>(GL_FUNC_CACHED("glGetIntegerv"));
+    auto program = reinterpret_cast<Program>(GL_FUNC_CACHED("glGetProgramiv"));
+    auto uniform = reinterpret_cast<Uniform>(GL_FUNC_CACHED("glGetActiveUniform"));
+    auto attachment = reinterpret_cast<Attachment>(GL_FUNC_CACHED("glGetFramebufferAttachmentParameteriv"));
+    auto enabled = reinterpret_cast<Enabled>(GL_FUNC_CACHED("glIsEnabled"));
+    if (!integer || !program || !uniform || !attachment || !enabled) return;
+    int id = 0, framebuffer = 0, count = 0, maximum = 0;
+    integer(0x8b8d /* GL_CURRENT_PROGRAM */, &id);
+    if (!id) return;
+    integer(0x8ca6 /* GL_DRAW_FRAMEBUFFER_BINDING */, &framebuffer);
+    program(id, 0x8b86 /* GL_ACTIVE_UNIFORMS */, &count);
+    program(id, 0x8b87 /* GL_ACTIVE_UNIFORM_MAX_LENGTH */, &maximum);
+    int mask[4] = {}, source = 0, destination = 0;
+    integer(0x0c23 /* GL_COLOR_WRITEMASK */, mask);
+    integer(0x80c9 /* GL_BLEND_SRC_RGB */, &source);
+    integer(0x80c8 /* GL_BLEND_DST_RGB */, &destination);
+    std::string names;
+    if (maximum > 0 && maximum <= 65536) {
+        std::vector<char> name(static_cast<size_t>(maximum), '\0');
+        for (int i = 0; i < std::min(count, 16); ++i) {
+            int length = 0, size = 0;
+            unsigned type = 0;
+            uniform(id, i, maximum, &length, &size, &type, name.data());
+            name.back() = '\0';
+            if (!names.empty()) names += ',';
+            names.append(name.data(), std::min(std::strlen(name.data()), size_t{64}));
+            if (names.size() >= 384) break;
+        }
+    }
+    std::string targets;
+    if (framebuffer) {
+        int buffers = 0, colors = 0;
+        integer(0x8824 /* GL_MAX_DRAW_BUFFERS */, &buffers);
+        integer(0x8cdf /* GL_MAX_COLOR_ATTACHMENTS */, &colors);
+        for (int i = 0; i < std::min(buffers, 4); ++i) {
+            int buffer = 0, object = 0, type = 0, bits[4] = {};
+            integer(0x8825u + i /* GL_DRAW_BUFFER0 */, &buffer);
+            if (buffer < 0x8ce0 || buffer >= 0x8ce0 + colors) continue;
+            attachment(0x8ca9 /* GL_DRAW_FRAMEBUFFER */, buffer, 0x8cd0, &object);
+            if (!object) continue;
+            attachment(0x8ca9, buffer, 0x8211 /* GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE */, &type);
+            for (int c = 0; c < 4; ++c) attachment(0x8ca9, buffer, 0x8212u + c, &bits[c]);
+            char value[112];
+            std::snprintf(value, sizeof(value), " out%d(type=0x%x bits=%d/%d/%d/%d)",
+                          i, type, bits[0], bits[1], bits[2], bits[3]);
+            targets += value;
+        }
+    }
+    KLOG(kInfo, "KuDroidGPU", "GL material program=%d blend=%u factors=0x%x/0x%x mask=%d%d%d%d fbo=%d uniforms=%d [%s]%s",
+         id, static_cast<unsigned>(enabled(0x0be2 /* GL_BLEND */)),
+         source, destination, mask[0], mask[1], mask[2], mask[3], framebuffer,
+         count, names.c_str(), targets.c_str());
+}
+} // namespace
+
 extern "C" void bionic_glUseProgram(unsigned int program) {
     typedef void (*PFN)(unsigned int);
     auto f = (PFN)GL_FUNC_CACHED("glUseProgram");
@@ -2737,6 +2838,7 @@ extern "C" void bionic_glUseProgram(unsigned int program) {
     gpuLog("glUseProgram(prog=%u)", program);
     f(program);
     surface_texture::use_program(program);
+    select_material_audit(program);
 }
 
 extern "C" int bionic_glGetAttribLocation(unsigned int program, const char* name) {
@@ -2755,7 +2857,7 @@ extern "C" void bionic_glEnableVertexAttribArray(unsigned int index) {
     f(index);
 }
 
-extern "C" void bionic_glVertexAttribPointer(unsigned int index, int size, unsigned int type, unsigned char normalized, int stride, const void* pointer) {
+extern "C" void bionic_glVertexAttribPointer(unsigned int index, int size, unsigned int type, unsigned int normalized, int stride, const void* pointer) {
     typedef void (*PFN)(unsigned int, int, unsigned int, unsigned char, int, const void*);
     auto f = (PFN)GL_FUNC_CACHED("glVertexAttribPointer");
     if (!f) { EGL_FORWARD_ERR("glVertexAttribPointer", ""); return; }
@@ -2765,7 +2867,7 @@ extern "C" void bionic_glVertexAttribPointer(unsigned int index, int size, unsig
     if (gpu_log_all()) {
         gpuLog("glVertexAttribPointer(index=%u size=%d stride=%d ptr=%p)", index, size, stride, pointer);
     }
-    f(index, size, type, normalized, stride, pointer);
+    f(index, size, type, static_cast<unsigned char>(normalized), stride, pointer);
 }
 
 extern "C" void bionic_glClearColor(float red, float green, float blue, float alpha) {
@@ -2789,6 +2891,7 @@ extern "C" void bionic_glDrawArrays(unsigned int mode, int first, int count) {
     auto f = (PFN)GL_FUNC_CACHED("glDrawArrays");
     if (!f) { EGL_FORWARD_ERR("glDrawArrays", ""); return; }
     ++g_drawCalls;
+    audit_material_draw();
     gpuLog("glDrawArrays(mode=0x%x first=%d count=%d): calling ANGLE...", mode, first, count);
 #if defined(__APPLE__)
     void* pool = objc_autoreleasePoolPush();
@@ -2933,6 +3036,7 @@ extern "C" void bionic_glDrawElements(unsigned int mode, int count, unsigned int
     auto f = (PFN)GL_FUNC_CACHED("glDrawElements");
     if (!f) return;
     ++g_drawCalls;
+    audit_material_draw();
 #if defined(__APPLE__)
     void* pool = objc_autoreleasePoolPush();
     f(mode, count, type, indices);
@@ -2998,6 +3102,8 @@ extern "C" void bionic_glDeleteFramebuffers(int n, const unsigned int* framebuff
 extern "C" void bionic_glFramebufferTexture2D(unsigned int target, unsigned int attachment, unsigned int textarget, unsigned int texture, int level) {
     typedef void (*PFN)(unsigned int, unsigned int, unsigned int, unsigned int, int);
     auto f = (PFN)GL_FUNC_CACHED("glFramebufferTexture2D");
+    // External images use RGBA 2D storage in the host context.
+    if (textarget == 0x8d65 /* GL_TEXTURE_EXTERNAL_OES */) textarget = 0x0de1;
     if (f) f(target, attachment, textarget, texture, level);
 }
 extern "C" unsigned int bionic_glCheckFramebufferStatus(unsigned int target) {
@@ -3123,20 +3229,20 @@ extern "C" void bionic_glUniform4iv(int location, int count, const int* value) {
     auto f = (PFN)GL_FUNC_CACHED("glUniform4iv");
     if (f) f(location, count, value);
 }
-extern "C" void bionic_glUniformMatrix2fv(int location, int count, unsigned char transpose, const float* value) {
+extern "C" void bionic_glUniformMatrix2fv(int location, int count, unsigned int transpose, const float* value) {
     typedef void (*PFN)(int, int, unsigned char, const float*);
     auto f = (PFN)GL_FUNC_CACHED("glUniformMatrix2fv");
-    if (f) f(location, count, transpose, value);
+    if (f) f(location, count, static_cast<unsigned char>(transpose), value);
 }
-extern "C" void bionic_glUniformMatrix3fv(int location, int count, unsigned char transpose, const float* value) {
+extern "C" void bionic_glUniformMatrix3fv(int location, int count, unsigned int transpose, const float* value) {
     typedef void (*PFN)(int, int, unsigned char, const float*);
     auto f = (PFN)GL_FUNC_CACHED("glUniformMatrix3fv");
-    if (f) f(location, count, transpose, value);
+    if (f) f(location, count, static_cast<unsigned char>(transpose), value);
 }
-extern "C" void bionic_glUniformMatrix4fv(int location, int count, unsigned char transpose, const float* value) {
+extern "C" void bionic_glUniformMatrix4fv(int location, int count, unsigned int transpose, const float* value) {
     typedef void (*PFN)(int, int, unsigned char, const float*);
     auto f = (PFN)GL_FUNC_CACHED("glUniformMatrix4fv");
-    if (f) f(location, count, transpose, value);
+    if (f) f(location, count, static_cast<unsigned char>(transpose), value);
 }
 
 // ── Render States & Capabilities ────────────────────────────────────────────
@@ -3181,10 +3287,10 @@ extern "C" void bionic_glDepthFunc(unsigned int func) {
     auto f = (PFN)GL_FUNC_CACHED("glDepthFunc");
     if (f) f(func);
 }
-extern "C" void bionic_glDepthMask(unsigned char flag) {
+extern "C" void bionic_glDepthMask(unsigned int flag) {
     typedef void (*PFN)(unsigned char);
     auto f = (PFN)GL_FUNC_CACHED("glDepthMask");
-    if (f) f(flag);
+    if (f) f(static_cast<unsigned char>(flag));
 }
 extern "C" void bionic_glCullFace(unsigned int mode) {
     typedef void (*PFN)(unsigned int);
@@ -3201,10 +3307,11 @@ extern "C" void bionic_glScissor(int x, int y, int width, int height) {
     auto f = (PFN)GL_FUNC_CACHED("glScissor");
     if (f) f(x, y, width, height);
 }
-extern "C" void bionic_glColorMask(unsigned char red, unsigned char green, unsigned char blue, unsigned char alpha) {
+extern "C" void bionic_glColorMask(unsigned int red, unsigned int green, unsigned int blue, unsigned int alpha) {
     typedef void (*PFN)(unsigned char, unsigned char, unsigned char, unsigned char);
     auto f = (PFN)GL_FUNC_CACHED("glColorMask");
-    if (f) f(red, green, blue, alpha);
+    if (f) f(static_cast<unsigned char>(red), static_cast<unsigned char>(green),
+             static_cast<unsigned char>(blue), static_cast<unsigned char>(alpha));
 }
 extern "C" void bionic_glFlush(void) {
     typedef void (*PFN)(void);
@@ -3349,7 +3456,7 @@ extern "C" void bionic_glDetachShader(unsigned int program, unsigned int shader)
         surface_texture::DrawScope external; \
         using Fn = void (*) parameters; \
         auto f = reinterpret_cast<Fn>(GL_FUNC_CACHED(#name)); \
-        if (f) { ++g_drawCalls; f arguments; } \
+        if (f) { ++g_drawCalls; audit_material_draw(); f arguments; } \
     }
 EXTERNAL_DRAW(glDrawArraysInstanced, (unsigned mode, int first, int count, int instances), (mode, first, count, instances))
 EXTERNAL_DRAW(glDrawArraysInstancedANGLE, (unsigned mode, int first, int count, int instances), (mode, first, count, instances))
@@ -3636,7 +3743,19 @@ extern "C" void bionic_glEndTransformFeedback(void) {
     if (f) f();
 }
 
+// Receive guest GLboolean registers at full width before calling the host ABI.
+#define GL_BOOLEAN_ENTRY(name, guest, host, arguments) \
+    extern "C" void bionic_##name guest { \
+        using Fn = void (*) host; \
+        if (auto f = reinterpret_cast<Fn>(GL_FUNC_CACHED(#name))) f arguments; \
+    }
+#include "GraphicsBooleanEntries.inc"
+#undef GL_BOOLEAN_ENTRY
+
 const SymbolEntry kGraphicsSymbols[] = {
+#define GL_BOOLEAN_ENTRY(name, guest, host, arguments) {#name, reinterpret_cast<void*>(&bionic_##name)},
+#include "GraphicsBooleanEntries.inc"
+#undef GL_BOOLEAN_ENTRY
     {"ANativeWindow_fromSurface", reinterpret_cast<void*>(&bionic_ANativeWindow_fromSurface)},
     {"ANativeWindow_getWidth", reinterpret_cast<void*>(&bionic_ANativeWindow_getWidth)},
     {"ANativeWindow_getHeight", reinterpret_cast<void*>(&bionic_ANativeWindow_getHeight)},

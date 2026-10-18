@@ -18,22 +18,38 @@ public final class System {
 
     public static native int identityHashCode(Object o);
 
-    public static native String getProperty(String key);
+    private static native String getProperty0(String key);
+
+    private static java.util.Properties properties;
+
+    public static String getProperty(String key) {
+        checkPropertyKey(key);
+        return getProperties().getProperty(key);
+    }
+
+    public static String setProperty(String key, String value) {
+        checkPropertyKey(key);
+        if (value == null) throw new NullPointerException("value == null");
+        return (String) getProperties().setProperty(key, value);
+    }
+
+    public static String clearProperty(String key) {
+        checkPropertyKey(key);
+        return (String) getProperties().remove(key);
+    }
+
+    private static void checkPropertyKey(String key) {
+        if (key == null) throw new NullPointerException("key == null");
+        if (key.length() == 0) throw new IllegalArgumentException("key is empty");
+    }
 
     public static native String getenv(String name);
 
     public static native void exit(int status);
 
-    /**
-     * Live properties built from the same keys as the native getProperty
-     * table (see LibCore Invoke_java_lang_System); unknown keys read null
-     * and are skipped because Hashtable forbids null values.
-     *
-     * This used to be absent entirely, so the runtime auto-stubbed it with a
-     * null return — and UnityPlayer.getNetworkProxySettings then threw NPE on
-     * getProperty. An empty-but-real Properties is what callers expect.
-     */
-    public static java.util.Properties getProperties() {
+    // Share mutable guest properties, seeded once from native defaults.
+    public static synchronized java.util.Properties getProperties() {
+        if (properties != null) return properties;
         java.util.Properties p = new java.util.Properties();
         String[] keys = {
             "line.separator", "file.separator", "path.separator",
@@ -45,12 +61,13 @@ public final class System {
             "file.encoding",
         };
         for (int i = 0; i < keys.length; i++) {
-            String v = getProperty(keys[i]);
+            String v = getProperty0(keys[i]);
             if (v != null) {
                 p.setProperty(keys[i], v);
             }
         }
-        return p;
+        properties = p;
+        return properties;
     }
 
     public static void gc() {

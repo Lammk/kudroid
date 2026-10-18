@@ -10,8 +10,16 @@ public final class Executors {
     }
 
     public static ExecutorService newFixedThreadPool(int nThreads) {
+        if (nThreads <= 0) throw new IllegalArgumentException("nThreads <= 0");
         return new ThreadPoolExecutor(nThreads, nThreads, 0L, TimeUnit.MILLISECONDS,
                 new LinkedBlockingQueue<Runnable>());
+    }
+
+    public static ExecutorService newFixedThreadPool(int nThreads, ThreadFactory factory) {
+        if (nThreads <= 0) throw new IllegalArgumentException("nThreads <= 0");
+        if (factory == null) throw new NullPointerException("threadFactory == null");
+        return new ThreadPoolExecutor(nThreads, nThreads, 0L, TimeUnit.MILLISECONDS,
+                new LinkedBlockingQueue<Runnable>(), factory);
     }
 
     public static ExecutorService newCachedThreadPool() {

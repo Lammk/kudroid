@@ -10,6 +10,7 @@ public class Handler {
     private final Looper mLooper;
     private final MessageQueue mQueue;
     private final Callback mCallback;
+    private final boolean mAsynchronous;
 
     /**
      * callback interface for message handling.
@@ -58,6 +59,10 @@ public class Handler {
      * constructor with an explicit iterator and callback.
      */
     public Handler(Looper looper, Callback callback) {
+        this(looper, callback, false);
+    }
+
+    public Handler(Looper looper, Callback callback, boolean async) {
         if (looper == null) {
             looper = Looper.myLooper();
             if (looper == null) {
@@ -67,6 +72,18 @@ public class Handler {
         mLooper = looper;
         mQueue = (looper != null) ? looper.getQueue() : null;
         mCallback = callback;
+        mAsynchronous = async;
+    }
+
+    public static Handler createAsync(Looper looper) {
+        if (looper == null) throw new NullPointerException("looper == null");
+        return new Handler(looper, null, true);
+    }
+
+    public static Handler createAsync(Looper looper, Callback callback) {
+        if (looper == null) throw new NullPointerException("looper == null");
+        if (callback == null) throw new NullPointerException("callback == null");
+        return new Handler(looper, callback, true);
     }
 
     /**
@@ -206,6 +223,7 @@ public class Handler {
 
     private boolean enqueueMessage(MessageQueue queue, Message msg, long uptimeMillis) {
         msg.target = this;
+        if (mAsynchronous) msg.setAsynchronous(true);
         return queue.enqueueMessage(msg, uptimeMillis);
     }
 
