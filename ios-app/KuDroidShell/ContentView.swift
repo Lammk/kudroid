@@ -1036,7 +1036,7 @@ private final class AudioSessionLifecycle {
         do {
             if kudroid_audio_capture_active() > 0 {
                 try session.setCategory(.playAndRecord, mode: .default,
-                                        options: [.mixWithOthers, .allowBluetoothHFP, .defaultToSpeaker])
+                                        options: [.mixWithOthers, .allowBluetooth, .defaultToSpeaker])
             } else {
                 try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
             }

@@ -30,14 +30,27 @@ static void check(bool value, const char* message) {
 
 static char logged[2048];
 static int loggedPriority;
-extern "C" void syslog(int priority, const char* format, ...) {
+static void captureSyslog(int priority, const char* format, va_list args) {
     loggedPriority = priority;
-    va_list args;
-    va_start(args, format);
     std::vsnprintf(logged, sizeof(logged), format, args);
-    va_end(args);
     errno = ENOSPC;
 }
+extern "C" void syslog(int priority, const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    captureSyslog(priority, format, args);
+    va_end(args);
+}
+
+#if defined(__GLIBC__)
+// Fortified libc headers redirect syslog calls to this entry point.
+extern "C" void __syslog_chk(int priority, int, const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    captureSyslog(priority, format, args);
+    va_end(args);
+}
+#endif
 
 struct FrameContext {
     std::atomic<int> calls{0};

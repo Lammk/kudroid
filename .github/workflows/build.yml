@@ -25,7 +25,7 @@ jobs:
         run: |
           sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30
           sudo apt-get install -y --no-install-recommends cmake g++ ccache zlib1g-dev \
-            gcc-aarch64-linux-gnu qemu-user-static
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu qemu-user-static
 
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
@@ -70,7 +70,7 @@ jobs:
             [ -f "$t" ] || continue
             count=$((count + 1))
             echo "──────── $t ────────"
-            if ./"$t"; then echo "PASS $t"; else echo "FAIL $t"; fail=1; fi
+            if timeout 60 ./"$t"; then echo "PASS $t"; else echo "FAIL $t"; fail=1; fi
           done
           echo "ran $count test binaries"
           # No tests found means the discovery above broke, which must not look like success.
@@ -81,19 +81,19 @@ jobs:
       # which the native x86-64 test above cannot reach. Skips itself cleanly if
       # the cross toolchain is missing.
       - name: Verify AAPCS64 JNI trampoline (arm64 under qemu)
-        run: ./scripts/test-trampoline-arm64.sh
+        run: timeout 120 ./scripts/test-trampoline-arm64.sh
 
       # Guest varargs arrive in x0-x7/v0-v7 under Linux AAPCS64 but on the stack under
       # Apple's arm64 ABI, so a shimmed snprintf that forwards to the host reads the wrong
       # place and prints plausible garbage. Nothing on x86-64 can see that.
       - name: Verify guest vararg trampolines (arm64 under qemu)
-        run: ./scripts/test-vararg-arm64.sh
+        run: timeout 120 ./scripts/test-vararg-arm64.sh
 
       # The golden-byte test above proves the JIT encoder matches GNU as; this runs the
       # generated code so a sequence that is validly encoded but computes the wrong
       # value is caught too. Skips itself cleanly without the cross toolchain.
       - name: Execute JIT-generated code (arm64 under qemu)
-        run: ./scripts/test-jit-arm64.sh
+        run: timeout 120 ./scripts/test-jit-arm64.sh
 
   build-linux:
     runs-on: ubuntu-latest

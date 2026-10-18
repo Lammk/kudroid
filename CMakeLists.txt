@@ -242,6 +242,7 @@ target_include_directories(kudroid_core PUBLIC
 # which reference these symbols.
 if(APPLE)
     target_link_libraries(kudroid_core PUBLIC
+        resolv
         "-framework AudioToolbox"
         "-framework CoreFoundation"
         "-framework Foundation"
@@ -352,6 +353,8 @@ else()
     if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_media.cpp")
         find_package(Threads REQUIRED)
         add_executable(test_media tests/test_media.cpp)
+        target_compile_definitions(test_media PRIVATE
+            KUDROID_TEST_MEDIA_FILE="${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/vp8-vorbis.webm")
         target_link_libraries(test_media PRIVATE kudroid_core Threads::Threads)
         target_include_directories(test_media PRIVATE include)
     endif()
