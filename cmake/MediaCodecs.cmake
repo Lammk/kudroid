@@ -1,5 +1,13 @@
-function(kudroid_unpack_codec name hash)
+function(kudroid_unpack_codec name hash url)
     set(archive "${CMAKE_SOURCE_DIR}/third_party/downloads/${name}.tar.gz")
+    if(NOT EXISTS "${archive}")
+        file(MAKE_DIRECTORY "${CMAKE_SOURCE_DIR}/third_party/downloads")
+        message(STATUS "Downloading ${name}.tar.gz from ${url}...")
+        file(DOWNLOAD "${url}" "${archive}"
+            EXPECTED_HASH SHA256=${hash}
+            SHOW_PROGRESS
+            TLS_VERIFY ON)
+    endif()
     file(SHA256 "${archive}" actual)
     if(NOT actual STREQUAL hash)
         message(FATAL_ERROR "Invalid source archive: ${name}")
@@ -9,9 +17,12 @@ function(kudroid_unpack_codec name hash)
     endif()
 endfunction()
 
-kudroid_unpack_codec(libvpx-1.15.2 26fcd3db88045dee380e581862a6ef106f49b74b6396ee95c2993a260b4636aa)
-kudroid_unpack_codec(libogg-1.3.6 83e6704730683d004d20e21b8f7f55dcb3383cdf84c0daedf30bde175f774638)
-kudroid_unpack_codec(libvorbis-1.3.7 0e982409a9c3fc82ee06e08205b1355e5c6aa4c36bca58146ef399621b0ce5ab)
+kudroid_unpack_codec(libvpx-1.15.2 26fcd3db88045dee380e581862a6ef106f49b74b6396ee95c2993a260b4636aa
+    "https://github.com/webmproject/libvpx/archive/refs/tags/v1.15.2.tar.gz")
+kudroid_unpack_codec(libogg-1.3.6 83e6704730683d004d20e21b8f7f55dcb3383cdf84c0daedf30bde175f774638
+    "https://downloads.xiph.org/releases/ogg/libogg-1.3.6.tar.gz")
+kudroid_unpack_codec(libvorbis-1.3.7 0e982409a9c3fc82ee06e08205b1355e5c6aa4c36bca58146ef399621b0ce5ab
+    "https://downloads.xiph.org/releases/vorbis/libvorbis-1.3.7.tar.gz")
 
 set(BUILD_TESTING OFF CACHE BOOL "Build dependency tests")
 add_subdirectory("${CMAKE_BINARY_DIR}/_deps/libogg-1.3.6" "${CMAKE_BINARY_DIR}/_deps/ogg-build" EXCLUDE_FROM_ALL)
@@ -38,9 +49,15 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
     set(vpx_options --enable-neon --disable-neon-asm --disable-neon-dotprod
         --disable-neon-i8mm --disable-sve --disable-sve2)
 endif()
-find_program(KUDROID_MAKE make REQUIRED)
-find_program(KUDROID_CODEC_CC clang REQUIRED)
-find_program(KUDROID_CODEC_CXX clang++ REQUIRED)
+find_program(KUDROID_MAKE NAMES gmake make REQUIRED)
+find_program(KUDROID_CODEC_CC NAMES clang gcc cc)
+if(NOT KUDROID_CODEC_CC)
+    set(KUDROID_CODEC_CC "${CMAKE_C_COMPILER}")
+endif()
+find_program(KUDROID_CODEC_CXX NAMES clang++ g++ c++)
+if(NOT KUDROID_CODEC_CXX)
+    set(KUDROID_CODEC_CXX "${CMAKE_CXX_COMPILER}")
+endif()
 add_custom_command(OUTPUT "${vpx_build}/libvpx.a"
     COMMAND "${CMAKE_COMMAND}" -E env
         "CC=${KUDROID_CODEC_CC}" "CXX=${KUDROID_CODEC_CXX}" "AR=${CMAKE_AR}"
