@@ -40,9 +40,13 @@ set(vpx_build "${CMAKE_BINARY_DIR}/_deps/libvpx-build")
 file(MAKE_DIRECTORY "${vpx_build}")
 set(vpx_platform generic-gnu)
 set(vpx_options --disable-neon)
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$")
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    set(vpx_platform arm64-darwin-gcc)
+    set(vpx_options --enable-neon --disable-neon-asm --disable-neon-dotprod
+        --disable-neon-i8mm --disable-sve --disable-sve2)
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64)$" OR (APPLE AND CMAKE_OSX_ARCHITECTURES MATCHES "arm64"))
     if(APPLE)
-        set(vpx_platform arm64-darwin-gcc)
+        set(vpx_platform arm64-darwin20-gcc)
     else()
         set(vpx_platform arm64-linux-gcc)
     endif()
@@ -64,6 +68,8 @@ add_custom_command(OUTPUT "${vpx_build}/libvpx.a"
         "CFLAGS=${CMAKE_C_FLAGS} -O3 -fPIC" "CXXFLAGS=${CMAKE_CXX_FLAGS} -O3 -fPIC"
         "LDFLAGS=${CMAKE_EXE_LINKER_FLAGS}"
         bash "${vpx_source}/configure" "--target=${vpx_platform}" --enable-external-build
+        "--extra-cflags=-I${vpx_build} -I${vpx_source}"
+        "--extra-cxxflags=-I${vpx_build} -I${vpx_source}"
         --disable-runtime-cpu-detect --disable-vp9 --disable-vp8-encoder --enable-vp8-decoder
         --disable-examples --disable-tools --disable-docs --disable-unit-tests
         --disable-shared --enable-static --enable-pic ${vpx_options}
