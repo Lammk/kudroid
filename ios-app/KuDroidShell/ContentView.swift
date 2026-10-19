@@ -1076,8 +1076,10 @@ private final class AudioSessionLifecycle {
         let session = AVAudioSession.sharedInstance()
         do {
             if kudroid_audio_capture_active() > 0 {
+                // Bluetooth HFP option (0x4): the enum case was renamed across SDKs, so use the raw value.
+                let bluetoothHFP = AVAudioSession.CategoryOptions(rawValue: 0x4)
                 try session.setCategory(.playAndRecord, mode: .default,
-                                        options: [.mixWithOthers, .allowBluetoothHFP, .defaultToSpeaker])
+                                        options: [.mixWithOthers, bluetoothHFP, .defaultToSpeaker])
             } else {
                 try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
             }
