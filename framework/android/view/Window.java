@@ -215,6 +215,8 @@ public class Window {
     public boolean measureAndLayout() {
         if (!hasSurface()) return false;
         DecorView decor = ensureDecorView();
+        // The first traversal attaches the hierarchy to the window before measuring it.
+        ((View) decor).dispatchAttachedToWindow();
         final int widthSpec = View.MeasureSpec.makeMeasureSpec(mWidth, View.MeasureSpec.EXACTLY);
         final int heightSpec = View.MeasureSpec.makeMeasureSpec(mHeight, View.MeasureSpec.EXACTLY);
         decor.measure(widthSpec, heightSpec);

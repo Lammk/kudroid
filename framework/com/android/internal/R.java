@@ -24,6 +24,1422 @@ public final class R {
     public static final class attr {
         private attr() {}
         public static final int theme = 0x01010000;
+        public static final int label = 0x01010001;
+        public static final int icon = 0x01010002;
+        public static final int name = 0x01010003;
+        public static final int manageSpaceActivity = 0x01010004;
+        public static final int allowClearUserData = 0x01010005;
+        public static final int permission = 0x01010006;
+        public static final int readPermission = 0x01010007;
+        public static final int writePermission = 0x01010008;
+        public static final int protectionLevel = 0x01010009;
+        public static final int permissionGroup = 0x0101000a;
+        public static final int sharedUserId = 0x0101000b;
+        public static final int hasCode = 0x0101000c;
+        public static final int persistent = 0x0101000d;
+        public static final int enabled = 0x0101000e;
+        public static final int debuggable = 0x0101000f;
+        public static final int exported = 0x01010010;
+        public static final int process = 0x01010011;
+        public static final int taskAffinity = 0x01010012;
+        public static final int multiprocess = 0x01010013;
+        public static final int finishOnTaskLaunch = 0x01010014;
+        public static final int clearTaskOnLaunch = 0x01010015;
+        public static final int stateNotNeeded = 0x01010016;
+        public static final int excludeFromRecents = 0x01010017;
+        public static final int authorities = 0x01010018;
+        public static final int syncable = 0x01010019;
+        public static final int initOrder = 0x0101001a;
+        public static final int grantUriPermissions = 0x0101001b;
+        public static final int priority = 0x0101001c;
+        public static final int launchMode = 0x0101001d;
+        public static final int screenOrientation = 0x0101001e;
+        public static final int configChanges = 0x0101001f;
+        public static final int description = 0x01010020;
+        public static final int targetPackage = 0x01010021;
+        public static final int handleProfiling = 0x01010022;
+        public static final int functionalTest = 0x01010023;
+        public static final int value = 0x01010024;
+        public static final int resource = 0x01010025;
+        public static final int mimeType = 0x01010026;
+        public static final int scheme = 0x01010027;
+        public static final int host = 0x01010028;
+        public static final int port = 0x01010029;
+        public static final int path = 0x0101002a;
+        public static final int pathPrefix = 0x0101002b;
+        public static final int pathPattern = 0x0101002c;
+        public static final int action = 0x0101002d;
+        public static final int data = 0x0101002e;
+        public static final int targetClass = 0x0101002f;
+        public static final int colorForeground = 0x01010030;
+        public static final int colorBackground = 0x01010031;
+        public static final int backgroundDimAmount = 0x01010032;
+        public static final int disabledAlpha = 0x01010033;
+        public static final int textAppearance = 0x01010034;
+        public static final int textAppearanceInverse = 0x01010035;
+        public static final int textColorPrimary = 0x01010036;
+        public static final int textColorPrimaryDisableOnly = 0x01010037;
+        public static final int textColorSecondary = 0x01010038;
+        public static final int textColorPrimaryInverse = 0x01010039;
+        public static final int textColorSecondaryInverse = 0x0101003a;
+        public static final int textColorPrimaryNoDisable = 0x0101003b;
+        public static final int textColorSecondaryNoDisable = 0x0101003c;
+        public static final int textColorPrimaryInverseNoDisable = 0x0101003d;
+        public static final int textColorSecondaryInverseNoDisable = 0x0101003e;
+        public static final int textColorHintInverse = 0x0101003f;
+        public static final int textAppearanceLarge = 0x01010040;
+        public static final int textAppearanceMedium = 0x01010041;
+        public static final int textAppearanceSmall = 0x01010042;
+        public static final int textAppearanceLargeInverse = 0x01010043;
+        public static final int textAppearanceMediumInverse = 0x01010044;
+        public static final int textAppearanceSmallInverse = 0x01010045;
+        public static final int textCheckMark = 0x01010046;
+        public static final int textCheckMarkInverse = 0x01010047;
+        public static final int buttonStyle = 0x01010048;
+        public static final int buttonStyleSmall = 0x01010049;
+        public static final int buttonStyleInset = 0x0101004a;
+        public static final int buttonStyleToggle = 0x0101004b;
+        public static final int galleryItemBackground = 0x0101004c;
+        public static final int listPreferredItemHeight = 0x0101004d;
+        public static final int expandableListPreferredItemPaddingLeft = 0x0101004e;
+        public static final int expandableListPreferredChildPaddingLeft = 0x0101004f;
+        public static final int expandableListPreferredItemIndicatorLeft = 0x01010050;
+        public static final int expandableListPreferredItemIndicatorRight = 0x01010051;
+        public static final int expandableListPreferredChildIndicatorLeft = 0x01010052;
+        public static final int expandableListPreferredChildIndicatorRight = 0x01010053;
+        public static final int windowBackground = 0x01010054;
+        public static final int windowFrame = 0x01010055;
+        public static final int windowNoTitle = 0x01010056;
+        public static final int windowIsFloating = 0x01010057;
+        public static final int windowIsTranslucent = 0x01010058;
+        public static final int windowContentOverlay = 0x01010059;
+        public static final int windowTitleSize = 0x0101005a;
+        public static final int windowTitleStyle = 0x0101005b;
+        public static final int windowTitleBackgroundStyle = 0x0101005c;
+        public static final int alertDialogStyle = 0x0101005d;
+        public static final int panelBackground = 0x0101005e;
+        public static final int panelFullBackground = 0x0101005f;
+        public static final int panelColorForeground = 0x01010060;
+        public static final int panelColorBackground = 0x01010061;
+        public static final int panelTextAppearance = 0x01010062;
+        public static final int scrollbarSize = 0x01010063;
+        public static final int scrollbarThumbHorizontal = 0x01010064;
+        public static final int scrollbarThumbVertical = 0x01010065;
+        public static final int scrollbarTrackHorizontal = 0x01010066;
+        public static final int scrollbarTrackVertical = 0x01010067;
+        public static final int scrollbarAlwaysDrawHorizontalTrack = 0x01010068;
+        public static final int scrollbarAlwaysDrawVerticalTrack = 0x01010069;
+        public static final int absListViewStyle = 0x0101006a;
+        public static final int autoCompleteTextViewStyle = 0x0101006b;
+        public static final int checkboxStyle = 0x0101006c;
+        public static final int dropDownListViewStyle = 0x0101006d;
+        public static final int editTextStyle = 0x0101006e;
+        public static final int expandableListViewStyle = 0x0101006f;
+        public static final int galleryStyle = 0x01010070;
+        public static final int gridViewStyle = 0x01010071;
+        public static final int imageButtonStyle = 0x01010072;
+        public static final int imageWellStyle = 0x01010073;
+        public static final int listViewStyle = 0x01010074;
+        public static final int listViewWhiteStyle = 0x01010075;
+        public static final int popupWindowStyle = 0x01010076;
+        public static final int progressBarStyle = 0x01010077;
+        public static final int progressBarStyleHorizontal = 0x01010078;
+        public static final int progressBarStyleSmall = 0x01010079;
+        public static final int progressBarStyleLarge = 0x0101007a;
+        public static final int seekBarStyle = 0x0101007b;
+        public static final int ratingBarStyle = 0x0101007c;
+        public static final int ratingBarStyleSmall = 0x0101007d;
+        public static final int radioButtonStyle = 0x0101007e;
+        public static final int scrollbarStyle = 0x0101007f;
+        public static final int scrollViewStyle = 0x01010080;
+        public static final int spinnerStyle = 0x01010081;
+        public static final int starStyle = 0x01010082;
+        public static final int tabWidgetStyle = 0x01010083;
+        public static final int textViewStyle = 0x01010084;
+        public static final int webViewStyle = 0x01010085;
+        public static final int dropDownItemStyle = 0x01010086;
+        public static final int spinnerDropDownItemStyle = 0x01010087;
+        public static final int dropDownHintAppearance = 0x01010088;
+        public static final int spinnerItemStyle = 0x01010089;
+        public static final int mapViewStyle = 0x0101008a;
+        public static final int preferenceScreenStyle = 0x0101008b;
+        public static final int preferenceCategoryStyle = 0x0101008c;
+        public static final int preferenceInformationStyle = 0x0101008d;
+        public static final int preferenceStyle = 0x0101008e;
+        public static final int checkBoxPreferenceStyle = 0x0101008f;
+        public static final int yesNoPreferenceStyle = 0x01010090;
+        public static final int dialogPreferenceStyle = 0x01010091;
+        public static final int editTextPreferenceStyle = 0x01010092;
+        public static final int ringtonePreferenceStyle = 0x01010093;
+        public static final int preferenceLayoutChild = 0x01010094;
+        public static final int textSize = 0x01010095;
+        public static final int typeface = 0x01010096;
+        public static final int textStyle = 0x01010097;
+        public static final int textColor = 0x01010098;
+        public static final int textColorHighlight = 0x01010099;
+        public static final int textColorHint = 0x0101009a;
+        public static final int textColorLink = 0x0101009b;
+        public static final int state_focused = 0x0101009c;
+        public static final int state_window_focused = 0x0101009d;
+        public static final int state_enabled = 0x0101009e;
+        public static final int state_checkable = 0x0101009f;
+        public static final int state_checked = 0x010100a0;
+        public static final int state_selected = 0x010100a1;
+        public static final int state_active = 0x010100a2;
+        public static final int state_single = 0x010100a3;
+        public static final int state_first = 0x010100a4;
+        public static final int state_middle = 0x010100a5;
+        public static final int state_last = 0x010100a6;
+        public static final int state_pressed = 0x010100a7;
+        public static final int state_expanded = 0x010100a8;
+        public static final int state_empty = 0x010100a9;
+        public static final int state_above_anchor = 0x010100aa;
+        public static final int ellipsize = 0x010100ab;
+        public static final int x = 0x010100ac;
+        public static final int y = 0x010100ad;
+        public static final int windowAnimationStyle = 0x010100ae;
+        public static final int gravity = 0x010100af;
+        public static final int autoLink = 0x010100b0;
+        public static final int linksClickable = 0x010100b1;
+        public static final int entries = 0x010100b2;
+        public static final int layout_gravity = 0x010100b3;
+        public static final int windowEnterAnimation = 0x010100b4;
+        public static final int windowExitAnimation = 0x010100b5;
+        public static final int windowShowAnimation = 0x010100b6;
+        public static final int windowHideAnimation = 0x010100b7;
+        public static final int activityOpenEnterAnimation = 0x010100b8;
+        public static final int activityOpenExitAnimation = 0x010100b9;
+        public static final int activityCloseEnterAnimation = 0x010100ba;
+        public static final int activityCloseExitAnimation = 0x010100bb;
+        public static final int taskOpenEnterAnimation = 0x010100bc;
+        public static final int taskOpenExitAnimation = 0x010100bd;
+        public static final int taskCloseEnterAnimation = 0x010100be;
+        public static final int taskCloseExitAnimation = 0x010100bf;
+        public static final int taskToFrontEnterAnimation = 0x010100c0;
+        public static final int taskToFrontExitAnimation = 0x010100c1;
+        public static final int taskToBackEnterAnimation = 0x010100c2;
+        public static final int taskToBackExitAnimation = 0x010100c3;
+        public static final int orientation = 0x010100c4;
+        public static final int keycode = 0x010100c5;
+        public static final int fullDark = 0x010100c6;
+        public static final int topDark = 0x010100c7;
+        public static final int centerDark = 0x010100c8;
+        public static final int bottomDark = 0x010100c9;
+        public static final int fullBright = 0x010100ca;
+        public static final int topBright = 0x010100cb;
+        public static final int centerBright = 0x010100cc;
+        public static final int bottomBright = 0x010100cd;
+        public static final int bottomMedium = 0x010100ce;
+        public static final int centerMedium = 0x010100cf;
+        public static final int id = 0x010100d0;
+        public static final int tag = 0x010100d1;
+        public static final int scrollX = 0x010100d2;
+        public static final int scrollY = 0x010100d3;
+        public static final int background = 0x010100d4;
+        public static final int padding = 0x010100d5;
+        public static final int paddingLeft = 0x010100d6;
+        public static final int paddingTop = 0x010100d7;
+        public static final int paddingRight = 0x010100d8;
+        public static final int paddingBottom = 0x010100d9;
+        public static final int focusable = 0x010100da;
+        public static final int focusableInTouchMode = 0x010100db;
+        public static final int visibility = 0x010100dc;
+        public static final int fitsSystemWindows = 0x010100dd;
+        public static final int scrollbars = 0x010100de;
+        public static final int fadingEdge = 0x010100df;
+        public static final int fadingEdgeLength = 0x010100e0;
+        public static final int nextFocusLeft = 0x010100e1;
+        public static final int nextFocusRight = 0x010100e2;
+        public static final int nextFocusUp = 0x010100e3;
+        public static final int nextFocusDown = 0x010100e4;
+        public static final int clickable = 0x010100e5;
+        public static final int longClickable = 0x010100e6;
+        public static final int saveEnabled = 0x010100e7;
+        public static final int drawingCacheQuality = 0x010100e8;
+        public static final int duplicateParentState = 0x010100e9;
+        public static final int clipChildren = 0x010100ea;
+        public static final int clipToPadding = 0x010100eb;
+        public static final int layoutAnimation = 0x010100ec;
+        public static final int animationCache = 0x010100ed;
+        public static final int persistentDrawingCache = 0x010100ee;
+        public static final int alwaysDrawnWithCache = 0x010100ef;
+        public static final int addStatesFromChildren = 0x010100f0;
+        public static final int descendantFocusability = 0x010100f1;
+        public static final int layout = 0x010100f2;
+        public static final int inflatedId = 0x010100f3;
+        public static final int layout_width = 0x010100f4;
+        public static final int layout_height = 0x010100f5;
+        public static final int layout_margin = 0x010100f6;
+        public static final int layout_marginLeft = 0x010100f7;
+        public static final int layout_marginTop = 0x010100f8;
+        public static final int layout_marginRight = 0x010100f9;
+        public static final int layout_marginBottom = 0x010100fa;
+        public static final int listSelector = 0x010100fb;
+        public static final int drawSelectorOnTop = 0x010100fc;
+        public static final int stackFromBottom = 0x010100fd;
+        public static final int scrollingCache = 0x010100fe;
+        public static final int textFilterEnabled = 0x010100ff;
+        public static final int transcriptMode = 0x01010100;
+        public static final int cacheColorHint = 0x01010101;
+        public static final int dial = 0x01010102;
+        public static final int hand_hour = 0x01010103;
+        public static final int hand_minute = 0x01010104;
+        public static final int format = 0x01010105;
+        public static final int checked = 0x01010106;
+        public static final int button = 0x01010107;
+        public static final int checkMark = 0x01010108;
+        public static final int foreground = 0x01010109;
+        public static final int measureAllChildren = 0x0101010a;
+        public static final int groupIndicator = 0x0101010b;
+        public static final int childIndicator = 0x0101010c;
+        public static final int indicatorLeft = 0x0101010d;
+        public static final int indicatorRight = 0x0101010e;
+        public static final int childIndicatorLeft = 0x0101010f;
+        public static final int childIndicatorRight = 0x01010110;
+        public static final int childDivider = 0x01010111;
+        public static final int animationDuration = 0x01010112;
+        public static final int spacing = 0x01010113;
+        public static final int horizontalSpacing = 0x01010114;
+        public static final int verticalSpacing = 0x01010115;
+        public static final int stretchMode = 0x01010116;
+        public static final int columnWidth = 0x01010117;
+        public static final int numColumns = 0x01010118;
+        public static final int src = 0x01010119;
+        public static final int antialias = 0x0101011a;
+        public static final int filter = 0x0101011b;
+        public static final int dither = 0x0101011c;
+        public static final int scaleType = 0x0101011d;
+        public static final int adjustViewBounds = 0x0101011e;
+        public static final int maxWidth = 0x0101011f;
+        public static final int maxHeight = 0x01010120;
+        public static final int tint = 0x01010121;
+        public static final int baselineAlignBottom = 0x01010122;
+        public static final int cropToPadding = 0x01010123;
+        public static final int textOn = 0x01010124;
+        public static final int textOff = 0x01010125;
+        public static final int baselineAligned = 0x01010126;
+        public static final int baselineAlignedChildIndex = 0x01010127;
+        public static final int weightSum = 0x01010128;
+        public static final int divider = 0x01010129;
+        public static final int dividerHeight = 0x0101012a;
+        public static final int choiceMode = 0x0101012b;
+        public static final int itemTextAppearance = 0x0101012c;
+        public static final int horizontalDivider = 0x0101012d;
+        public static final int verticalDivider = 0x0101012e;
+        public static final int headerBackground = 0x0101012f;
+        public static final int itemBackground = 0x01010130;
+        public static final int itemIconDisabledAlpha = 0x01010131;
+        public static final int rowHeight = 0x01010132;
+        public static final int maxRows = 0x01010133;
+        public static final int maxItemsPerRow = 0x01010134;
+        public static final int moreIcon = 0x01010135;
+        public static final int max = 0x01010136;
+        public static final int progress = 0x01010137;
+        public static final int secondaryProgress = 0x01010138;
+        public static final int indeterminate = 0x01010139;
+        public static final int indeterminateOnly = 0x0101013a;
+        public static final int indeterminateDrawable = 0x0101013b;
+        public static final int progressDrawable = 0x0101013c;
+        public static final int indeterminateDuration = 0x0101013d;
+        public static final int indeterminateBehavior = 0x0101013e;
+        public static final int minWidth = 0x0101013f;
+        public static final int minHeight = 0x01010140;
+        public static final int interpolator = 0x01010141;
+        public static final int thumb = 0x01010142;
+        public static final int thumbOffset = 0x01010143;
+        public static final int numStars = 0x01010144;
+        public static final int rating = 0x01010145;
+        public static final int stepSize = 0x01010146;
+        public static final int isIndicator = 0x01010147;
+        public static final int checkedButton = 0x01010148;
+        public static final int stretchColumns = 0x01010149;
+        public static final int shrinkColumns = 0x0101014a;
+        public static final int collapseColumns = 0x0101014b;
+        public static final int layout_column = 0x0101014c;
+        public static final int layout_span = 0x0101014d;
+        public static final int bufferType = 0x0101014e;
+        public static final int text = 0x0101014f;
+        public static final int hint = 0x01010150;
+        public static final int textScaleX = 0x01010151;
+        public static final int cursorVisible = 0x01010152;
+        public static final int maxLines = 0x01010153;
+        public static final int lines = 0x01010154;
+        public static final int height = 0x01010155;
+        public static final int minLines = 0x01010156;
+        public static final int maxEms = 0x01010157;
+        public static final int ems = 0x01010158;
+        public static final int width = 0x01010159;
+        public static final int minEms = 0x0101015a;
+        public static final int scrollHorizontally = 0x0101015b;
+        public static final int password = 0x0101015c;
+        public static final int singleLine = 0x0101015d;
+        public static final int selectAllOnFocus = 0x0101015e;
+        public static final int includeFontPadding = 0x0101015f;
+        public static final int maxLength = 0x01010160;
+        public static final int shadowColor = 0x01010161;
+        public static final int shadowDx = 0x01010162;
+        public static final int shadowDy = 0x01010163;
+        public static final int shadowRadius = 0x01010164;
+        public static final int numeric = 0x01010165;
+        public static final int digits = 0x01010166;
+        public static final int phoneNumber = 0x01010167;
+        public static final int inputMethod = 0x01010168;
+        public static final int capitalize = 0x01010169;
+        public static final int autoText = 0x0101016a;
+        public static final int editable = 0x0101016b;
+        public static final int freezesText = 0x0101016c;
+        public static final int drawableTop = 0x0101016d;
+        public static final int drawableBottom = 0x0101016e;
+        public static final int drawableLeft = 0x0101016f;
+        public static final int drawableRight = 0x01010170;
+        public static final int drawablePadding = 0x01010171;
+        public static final int completionHint = 0x01010172;
+        public static final int completionHintView = 0x01010173;
+        public static final int completionThreshold = 0x01010174;
+        public static final int dropDownSelector = 0x01010175;
+        public static final int popupBackground = 0x01010176;
+        public static final int inAnimation = 0x01010177;
+        public static final int outAnimation = 0x01010178;
+        public static final int flipInterval = 0x01010179;
+        public static final int fillViewport = 0x0101017a;
+        public static final int prompt = 0x0101017b;
+        public static final int startYear = 0x0101017c;
+        public static final int endYear = 0x0101017d;
+        public static final int mode = 0x0101017e;
+        public static final int layout_x = 0x0101017f;
+        public static final int layout_y = 0x01010180;
+        public static final int layout_weight = 0x01010181;
+        public static final int layout_toLeftOf = 0x01010182;
+        public static final int layout_toRightOf = 0x01010183;
+        public static final int layout_above = 0x01010184;
+        public static final int layout_below = 0x01010185;
+        public static final int layout_alignBaseline = 0x01010186;
+        public static final int layout_alignLeft = 0x01010187;
+        public static final int layout_alignTop = 0x01010188;
+        public static final int layout_alignRight = 0x01010189;
+        public static final int layout_alignBottom = 0x0101018a;
+        public static final int layout_alignParentLeft = 0x0101018b;
+        public static final int layout_alignParentTop = 0x0101018c;
+        public static final int layout_alignParentRight = 0x0101018d;
+        public static final int layout_alignParentBottom = 0x0101018e;
+        public static final int layout_centerInParent = 0x0101018f;
+        public static final int layout_centerHorizontal = 0x01010190;
+        public static final int layout_centerVertical = 0x01010191;
+        public static final int layout_alignWithParentIfMissing = 0x01010192;
+        public static final int layout_scale = 0x01010193;
+        public static final int visible = 0x01010194;
+        public static final int variablePadding = 0x01010195;
+        public static final int constantSize = 0x01010196;
+        public static final int oneshot = 0x01010197;
+        public static final int duration = 0x01010198;
+        public static final int drawable = 0x01010199;
+        public static final int shape = 0x0101019a;
+        public static final int innerRadiusRatio = 0x0101019b;
+        public static final int thicknessRatio = 0x0101019c;
+        public static final int startColor = 0x0101019d;
+        public static final int endColor = 0x0101019e;
+        public static final int useLevel = 0x0101019f;
+        public static final int angle = 0x010101a0;
+        public static final int type = 0x010101a1;
+        public static final int centerX = 0x010101a2;
+        public static final int centerY = 0x010101a3;
+        public static final int gradientRadius = 0x010101a4;
+        public static final int color = 0x010101a5;
+        public static final int dashWidth = 0x010101a6;
+        public static final int dashGap = 0x010101a7;
+        public static final int radius = 0x010101a8;
+        public static final int topLeftRadius = 0x010101a9;
+        public static final int topRightRadius = 0x010101aa;
+        public static final int bottomLeftRadius = 0x010101ab;
+        public static final int bottomRightRadius = 0x010101ac;
+        public static final int left = 0x010101ad;
+        public static final int top = 0x010101ae;
+        public static final int right = 0x010101af;
+        public static final int bottom = 0x010101b0;
+        public static final int minLevel = 0x010101b1;
+        public static final int maxLevel = 0x010101b2;
+        public static final int fromDegrees = 0x010101b3;
+        public static final int toDegrees = 0x010101b4;
+        public static final int pivotX = 0x010101b5;
+        public static final int pivotY = 0x010101b6;
+        public static final int insetLeft = 0x010101b7;
+        public static final int insetRight = 0x010101b8;
+        public static final int insetTop = 0x010101b9;
+        public static final int insetBottom = 0x010101ba;
+        public static final int shareInterpolator = 0x010101bb;
+        public static final int fillBefore = 0x010101bc;
+        public static final int fillAfter = 0x010101bd;
+        public static final int startOffset = 0x010101be;
+        public static final int repeatCount = 0x010101bf;
+        public static final int repeatMode = 0x010101c0;
+        public static final int zAdjustment = 0x010101c1;
+        public static final int fromXScale = 0x010101c2;
+        public static final int toXScale = 0x010101c3;
+        public static final int fromYScale = 0x010101c4;
+        public static final int toYScale = 0x010101c5;
+        public static final int fromXDelta = 0x010101c6;
+        public static final int toXDelta = 0x010101c7;
+        public static final int fromYDelta = 0x010101c8;
+        public static final int toYDelta = 0x010101c9;
+        public static final int fromAlpha = 0x010101ca;
+        public static final int toAlpha = 0x010101cb;
+        public static final int delay = 0x010101cc;
+        public static final int animation = 0x010101cd;
+        public static final int animationOrder = 0x010101ce;
+        public static final int columnDelay = 0x010101cf;
+        public static final int rowDelay = 0x010101d0;
+        public static final int direction = 0x010101d1;
+        public static final int directionPriority = 0x010101d2;
+        public static final int factor = 0x010101d3;
+        public static final int cycles = 0x010101d4;
+        public static final int searchMode = 0x010101d5;
+        public static final int searchSuggestAuthority = 0x010101d6;
+        public static final int searchSuggestPath = 0x010101d7;
+        public static final int searchSuggestSelection = 0x010101d8;
+        public static final int searchSuggestIntentAction = 0x010101d9;
+        public static final int searchSuggestIntentData = 0x010101da;
+        public static final int queryActionMsg = 0x010101db;
+        public static final int suggestActionMsg = 0x010101dc;
+        public static final int suggestActionMsgColumn = 0x010101dd;
+        public static final int menuCategory = 0x010101de;
+        public static final int orderInCategory = 0x010101df;
+        public static final int checkableBehavior = 0x010101e0;
+        public static final int title = 0x010101e1;
+        public static final int titleCondensed = 0x010101e2;
+        public static final int alphabeticShortcut = 0x010101e3;
+        public static final int numericShortcut = 0x010101e4;
+        public static final int checkable = 0x010101e5;
+        public static final int selectable = 0x010101e6;
+        public static final int orderingFromXml = 0x010101e7;
+        public static final int key = 0x010101e8;
+        public static final int summary = 0x010101e9;
+        public static final int order = 0x010101ea;
+        public static final int widgetLayout = 0x010101eb;
+        public static final int dependency = 0x010101ec;
+        public static final int defaultValue = 0x010101ed;
+        public static final int shouldDisableView = 0x010101ee;
+        public static final int summaryOn = 0x010101ef;
+        public static final int summaryOff = 0x010101f0;
+        public static final int disableDependentsState = 0x010101f1;
+        public static final int dialogTitle = 0x010101f2;
+        public static final int dialogMessage = 0x010101f3;
+        public static final int dialogIcon = 0x010101f4;
+        public static final int positiveButtonText = 0x010101f5;
+        public static final int negativeButtonText = 0x010101f6;
+        public static final int dialogLayout = 0x010101f7;
+        public static final int entryValues = 0x010101f8;
+        public static final int ringtoneType = 0x010101f9;
+        public static final int showDefault = 0x010101fa;
+        public static final int showSilent = 0x010101fb;
+        public static final int scaleWidth = 0x010101fc;
+        public static final int scaleHeight = 0x010101fd;
+        public static final int scaleGravity = 0x010101fe;
+        public static final int ignoreGravity = 0x010101ff;
+        public static final int foregroundGravity = 0x01010200;
+        public static final int tileMode = 0x01010201;
+        public static final int targetActivity = 0x01010202;
+        public static final int alwaysRetainTaskState = 0x01010203;
+        public static final int allowTaskReparenting = 0x01010204;
+        public static final int searchButtonText = 0x01010205;
+        public static final int colorForegroundInverse = 0x01010206;
+        public static final int textAppearanceButton = 0x01010207;
+        public static final int listSeparatorTextViewStyle = 0x01010208;
+        public static final int streamType = 0x01010209;
+        public static final int clipOrientation = 0x0101020a;
+        public static final int centerColor = 0x0101020b;
+        public static final int minSdkVersion = 0x0101020c;
+        public static final int windowFullscreen = 0x0101020d;
+        public static final int unselectedAlpha = 0x0101020e;
+        public static final int progressBarStyleSmallTitle = 0x0101020f;
+        public static final int ratingBarStyleIndicator = 0x01010210;
+        public static final int apiKey = 0x01010211;
+        public static final int textColorTertiary = 0x01010212;
+        public static final int textColorTertiaryInverse = 0x01010213;
+        public static final int listDivider = 0x01010214;
+        public static final int soundEffectsEnabled = 0x01010215;
+        public static final int keepScreenOn = 0x01010216;
+        public static final int lineSpacingExtra = 0x01010217;
+        public static final int lineSpacingMultiplier = 0x01010218;
+        public static final int listChoiceIndicatorSingle = 0x01010219;
+        public static final int listChoiceIndicatorMultiple = 0x0101021a;
+        public static final int versionCode = 0x0101021b;
+        public static final int versionName = 0x0101021c;
+        public static final int marqueeRepeatLimit = 0x0101021d;
+        public static final int windowNoDisplay = 0x0101021e;
+        public static final int backgroundDimEnabled = 0x0101021f;
+        public static final int inputType = 0x01010220;
+        public static final int isDefault = 0x01010221;
+        public static final int windowDisablePreview = 0x01010222;
+        public static final int privateImeOptions = 0x01010223;
+        public static final int editorExtras = 0x01010224;
+        public static final int settingsActivity = 0x01010225;
+        public static final int fastScrollEnabled = 0x01010226;
+        public static final int reqTouchScreen = 0x01010227;
+        public static final int reqKeyboardType = 0x01010228;
+        public static final int reqHardKeyboard = 0x01010229;
+        public static final int reqNavigation = 0x0101022a;
+        public static final int windowSoftInputMode = 0x0101022b;
+        public static final int imeFullscreenBackground = 0x0101022c;
+        public static final int noHistory = 0x0101022d;
+        public static final int headerDividersEnabled = 0x0101022e;
+        public static final int footerDividersEnabled = 0x0101022f;
+        public static final int candidatesTextStyleSpans = 0x01010230;
+        public static final int smoothScrollbar = 0x01010231;
+        public static final int reqFiveWayNav = 0x01010232;
+        public static final int keyBackground = 0x01010233;
+        public static final int keyTextSize = 0x01010234;
+        public static final int labelTextSize = 0x01010235;
+        public static final int keyTextColor = 0x01010236;
+        public static final int keyPreviewLayout = 0x01010237;
+        public static final int keyPreviewOffset = 0x01010238;
+        public static final int keyPreviewHeight = 0x01010239;
+        public static final int verticalCorrection = 0x0101023a;
+        public static final int popupLayout = 0x0101023b;
+        public static final int state_long_pressable = 0x0101023c;
+        public static final int keyWidth = 0x0101023d;
+        public static final int keyHeight = 0x0101023e;
+        public static final int horizontalGap = 0x0101023f;
+        public static final int verticalGap = 0x01010240;
+        public static final int rowEdgeFlags = 0x01010241;
+        public static final int codes = 0x01010242;
+        public static final int popupKeyboard = 0x01010243;
+        public static final int popupCharacters = 0x01010244;
+        public static final int keyEdgeFlags = 0x01010245;
+        public static final int isModifier = 0x01010246;
+        public static final int isSticky = 0x01010247;
+        public static final int isRepeatable = 0x01010248;
+        public static final int iconPreview = 0x01010249;
+        public static final int keyOutputText = 0x0101024a;
+        public static final int keyLabel = 0x0101024b;
+        public static final int keyIcon = 0x0101024c;
+        public static final int keyboardMode = 0x0101024d;
+        public static final int isScrollContainer = 0x0101024e;
+        public static final int fillEnabled = 0x0101024f;
+        public static final int updatePeriodMillis = 0x01010250;
+        public static final int initialLayout = 0x01010251;
+        public static final int voiceSearchMode = 0x01010252;
+        public static final int voiceLanguageModel = 0x01010253;
+        public static final int voicePromptText = 0x01010254;
+        public static final int voiceLanguage = 0x01010255;
+        public static final int voiceMaxResults = 0x01010256;
+        public static final int bottomOffset = 0x01010257;
+        public static final int topOffset = 0x01010258;
+        public static final int allowSingleTap = 0x01010259;
+        public static final int handle = 0x0101025a;
+        public static final int content = 0x0101025b;
+        public static final int animateOnClick = 0x0101025c;
+        public static final int configure = 0x0101025d;
+        public static final int hapticFeedbackEnabled = 0x0101025e;
+        public static final int innerRadius = 0x0101025f;
+        public static final int thickness = 0x01010260;
+        public static final int sharedUserLabel = 0x01010261;
+        public static final int dropDownWidth = 0x01010262;
+        public static final int dropDownAnchor = 0x01010263;
+        public static final int imeOptions = 0x01010264;
+        public static final int imeActionLabel = 0x01010265;
+        public static final int imeActionId = 0x01010266;
+        public static final int imeExtractEnterAnimation = 0x01010268;
+        public static final int imeExtractExitAnimation = 0x01010269;
+        public static final int tension = 0x0101026a;
+        public static final int extraTension = 0x0101026b;
+        public static final int anyDensity = 0x0101026c;
+        public static final int searchSuggestThreshold = 0x0101026d;
+        public static final int includeInGlobalSearch = 0x0101026e;
+        public static final int onClick = 0x0101026f;
+        public static final int targetSdkVersion = 0x01010270;
+        public static final int maxSdkVersion = 0x01010271;
+        public static final int testOnly = 0x01010272;
+        public static final int contentDescription = 0x01010273;
+        public static final int gestureStrokeWidth = 0x01010274;
+        public static final int gestureColor = 0x01010275;
+        public static final int uncertainGestureColor = 0x01010276;
+        public static final int fadeOffset = 0x01010277;
+        public static final int fadeDuration = 0x01010278;
+        public static final int gestureStrokeType = 0x01010279;
+        public static final int gestureStrokeLengthThreshold = 0x0101027a;
+        public static final int gestureStrokeSquarenessThreshold = 0x0101027b;
+        public static final int gestureStrokeAngleThreshold = 0x0101027c;
+        public static final int eventsInterceptionEnabled = 0x0101027d;
+        public static final int fadeEnabled = 0x0101027e;
+        public static final int backupAgent = 0x0101027f;
+        public static final int allowBackup = 0x01010280;
+        public static final int glEsVersion = 0x01010281;
+        public static final int queryAfterZeroResults = 0x01010282;
+        public static final int dropDownHeight = 0x01010283;
+        public static final int smallScreens = 0x01010284;
+        public static final int normalScreens = 0x01010285;
+        public static final int largeScreens = 0x01010286;
+        public static final int progressBarStyleInverse = 0x01010287;
+        public static final int progressBarStyleSmallInverse = 0x01010288;
+        public static final int progressBarStyleLargeInverse = 0x01010289;
+        public static final int searchSettingsDescription = 0x0101028a;
+        public static final int textColorPrimaryInverseDisableOnly = 0x0101028b;
+        public static final int autoUrlDetect = 0x0101028c;
+        public static final int resizeable = 0x0101028d;
+        public static final int required = 0x0101028e;
+        public static final int accountType = 0x0101028f;
+        public static final int contentAuthority = 0x01010290;
+        public static final int userVisible = 0x01010291;
+        public static final int windowShowWallpaper = 0x01010292;
+        public static final int wallpaperOpenEnterAnimation = 0x01010293;
+        public static final int wallpaperOpenExitAnimation = 0x01010294;
+        public static final int wallpaperCloseEnterAnimation = 0x01010295;
+        public static final int wallpaperCloseExitAnimation = 0x01010296;
+        public static final int wallpaperIntraOpenEnterAnimation = 0x01010297;
+        public static final int wallpaperIntraOpenExitAnimation = 0x01010298;
+        public static final int wallpaperIntraCloseEnterAnimation = 0x01010299;
+        public static final int wallpaperIntraCloseExitAnimation = 0x0101029a;
+        public static final int supportsUploading = 0x0101029b;
+        public static final int killAfterRestore = 0x0101029c;
+        public static final int restoreNeedsApplication = 0x0101029d;
+        public static final int smallIcon = 0x0101029e;
+        public static final int accountPreferences = 0x0101029f;
+        public static final int textAppearanceSearchResultSubtitle = 0x010102a0;
+        public static final int textAppearanceSearchResultTitle = 0x010102a1;
+        public static final int summaryColumn = 0x010102a2;
+        public static final int detailColumn = 0x010102a3;
+        public static final int detailSocialSummary = 0x010102a4;
+        public static final int thumbnail = 0x010102a5;
+        public static final int detachWallpaper = 0x010102a6;
+        public static final int finishOnCloseSystemDialogs = 0x010102a7;
+        public static final int scrollbarFadeDuration = 0x010102a8;
+        public static final int scrollbarDefaultDelayBeforeFade = 0x010102a9;
+        public static final int fadeScrollbars = 0x010102aa;
+        public static final int colorBackgroundCacheHint = 0x010102ab;
+        public static final int dropDownHorizontalOffset = 0x010102ac;
+        public static final int dropDownVerticalOffset = 0x010102ad;
+        public static final int quickContactBadgeStyleWindowSmall = 0x010102ae;
+        public static final int quickContactBadgeStyleWindowMedium = 0x010102af;
+        public static final int quickContactBadgeStyleWindowLarge = 0x010102b0;
+        public static final int quickContactBadgeStyleSmallWindowSmall = 0x010102b1;
+        public static final int quickContactBadgeStyleSmallWindowMedium = 0x010102b2;
+        public static final int quickContactBadgeStyleSmallWindowLarge = 0x010102b3;
+        public static final int author = 0x010102b4;
+        public static final int autoStart = 0x010102b5;
+        public static final int expandableListViewWhiteStyle = 0x010102b6;
+        public static final int installLocation = 0x010102b7;
+        public static final int vmSafeMode = 0x010102b8;
+        public static final int webTextViewStyle = 0x010102b9;
+        public static final int restoreAnyVersion = 0x010102ba;
+        public static final int tabStripLeft = 0x010102bb;
+        public static final int tabStripRight = 0x010102bc;
+        public static final int tabStripEnabled = 0x010102bd;
+        public static final int logo = 0x010102be;
+        public static final int xlargeScreens = 0x010102bf;
+        public static final int immersive = 0x010102c0;
+        public static final int overScrollMode = 0x010102c1;
+        public static final int overScrollHeader = 0x010102c2;
+        public static final int overScrollFooter = 0x010102c3;
+        public static final int filterTouchesWhenObscured = 0x010102c4;
+        public static final int textSelectHandleLeft = 0x010102c5;
+        public static final int textSelectHandleRight = 0x010102c6;
+        public static final int textSelectHandle = 0x010102c7;
+        public static final int textSelectHandleWindowStyle = 0x010102c8;
+        public static final int popupAnimationStyle = 0x010102c9;
+        public static final int screenSize = 0x010102ca;
+        public static final int screenDensity = 0x010102cb;
+        public static final int allContactsName = 0x010102cc;
+        public static final int windowActionBar = 0x010102cd;
+        public static final int actionBarStyle = 0x010102ce;
+        public static final int navigationMode = 0x010102cf;
+        public static final int displayOptions = 0x010102d0;
+        public static final int subtitle = 0x010102d1;
+        public static final int customNavigationLayout = 0x010102d2;
+        public static final int hardwareAccelerated = 0x010102d3;
+        public static final int measureWithLargestChild = 0x010102d4;
+        public static final int animateFirstView = 0x010102d5;
+        public static final int dropDownSpinnerStyle = 0x010102d6;
+        public static final int actionDropDownStyle = 0x010102d7;
+        public static final int actionButtonStyle = 0x010102d8;
+        public static final int showAsAction = 0x010102d9;
+        public static final int previewImage = 0x010102da;
+        public static final int actionModeBackground = 0x010102db;
+        public static final int actionModeCloseDrawable = 0x010102dc;
+        public static final int windowActionModeOverlay = 0x010102dd;
+        public static final int valueFrom = 0x010102de;
+        public static final int valueTo = 0x010102df;
+        public static final int valueType = 0x010102e0;
+        public static final int propertyName = 0x010102e1;
+        public static final int ordering = 0x010102e2;
+        public static final int fragment = 0x010102e3;
+        public static final int windowActionBarOverlay = 0x010102e4;
+        public static final int fragmentOpenEnterAnimation = 0x010102e5;
+        public static final int fragmentOpenExitAnimation = 0x010102e6;
+        public static final int fragmentCloseEnterAnimation = 0x010102e7;
+        public static final int fragmentCloseExitAnimation = 0x010102e8;
+        public static final int fragmentFadeEnterAnimation = 0x010102e9;
+        public static final int fragmentFadeExitAnimation = 0x010102ea;
+        public static final int actionBarSize = 0x010102eb;
+        public static final int imeSubtypeLocale = 0x010102ec;
+        public static final int imeSubtypeMode = 0x010102ed;
+        public static final int imeSubtypeExtraValue = 0x010102ee;
+        public static final int splitMotionEvents = 0x010102ef;
+        public static final int listChoiceBackgroundIndicator = 0x010102f0;
+        public static final int spinnerMode = 0x010102f1;
+        public static final int animateLayoutChanges = 0x010102f2;
+        public static final int actionBarTabStyle = 0x010102f3;
+        public static final int actionBarTabBarStyle = 0x010102f4;
+        public static final int actionBarTabTextStyle = 0x010102f5;
+        public static final int actionOverflowButtonStyle = 0x010102f6;
+        public static final int actionModeCloseButtonStyle = 0x010102f7;
+        public static final int titleTextStyle = 0x010102f8;
+        public static final int subtitleTextStyle = 0x010102f9;
+        public static final int iconifiedByDefault = 0x010102fa;
+        public static final int actionLayout = 0x010102fb;
+        public static final int actionViewClass = 0x010102fc;
+        public static final int activatedBackgroundIndicator = 0x010102fd;
+        public static final int state_activated = 0x010102fe;
+        public static final int listPopupWindowStyle = 0x010102ff;
+        public static final int popupMenuStyle = 0x01010300;
+        public static final int textAppearanceLargePopupMenu = 0x01010301;
+        public static final int textAppearanceSmallPopupMenu = 0x01010302;
+        public static final int breadCrumbTitle = 0x01010303;
+        public static final int breadCrumbShortTitle = 0x01010304;
+        public static final int listDividerAlertDialog = 0x01010305;
+        public static final int textColorAlertDialogListItem = 0x01010306;
+        public static final int loopViews = 0x01010307;
+        public static final int dialogTheme = 0x01010308;
+        public static final int alertDialogTheme = 0x01010309;
+        public static final int dividerVertical = 0x0101030a;
+        public static final int homeAsUpIndicator = 0x0101030b;
+        public static final int enterFadeDuration = 0x0101030c;
+        public static final int exitFadeDuration = 0x0101030d;
+        public static final int selectableItemBackground = 0x0101030e;
+        public static final int autoAdvanceViewId = 0x0101030f;
+        public static final int useIntrinsicSizeAsMinimum = 0x01010310;
+        public static final int actionModeCutDrawable = 0x01010311;
+        public static final int actionModeCopyDrawable = 0x01010312;
+        public static final int actionModePasteDrawable = 0x01010313;
+        public static final int textEditPasteWindowLayout = 0x01010314;
+        public static final int textEditNoPasteWindowLayout = 0x01010315;
+        public static final int textIsSelectable = 0x01010316;
+        public static final int windowEnableSplitTouch = 0x01010317;
+        public static final int indeterminateProgressStyle = 0x01010318;
+        public static final int progressBarPadding = 0x01010319;
+        public static final int animationResolution = 0x0101031a;
+        public static final int state_accelerated = 0x0101031b;
+        public static final int baseline = 0x0101031c;
+        public static final int homeLayout = 0x0101031d;
+        public static final int opacity = 0x0101031e;
+        public static final int alpha = 0x0101031f;
+        public static final int transformPivotX = 0x01010320;
+        public static final int transformPivotY = 0x01010321;
+        public static final int translationX = 0x01010322;
+        public static final int translationY = 0x01010323;
+        public static final int scaleX = 0x01010324;
+        public static final int scaleY = 0x01010325;
+        public static final int rotation = 0x01010326;
+        public static final int rotationX = 0x01010327;
+        public static final int rotationY = 0x01010328;
+        public static final int showDividers = 0x01010329;
+        public static final int dividerPadding = 0x0101032a;
+        public static final int borderlessButtonStyle = 0x0101032b;
+        public static final int dividerHorizontal = 0x0101032c;
+        public static final int itemPadding = 0x0101032d;
+        public static final int buttonBarStyle = 0x0101032e;
+        public static final int buttonBarButtonStyle = 0x0101032f;
+        public static final int segmentedButtonStyle = 0x01010330;
+        public static final int staticWallpaperPreview = 0x01010331;
+        public static final int allowParallelSyncs = 0x01010332;
+        public static final int isAlwaysSyncable = 0x01010333;
+        public static final int verticalScrollbarPosition = 0x01010334;
+        public static final int fastScrollAlwaysVisible = 0x01010335;
+        public static final int fastScrollThumbDrawable = 0x01010336;
+        public static final int fastScrollPreviewBackgroundLeft = 0x01010337;
+        public static final int fastScrollPreviewBackgroundRight = 0x01010338;
+        public static final int fastScrollTrackDrawable = 0x01010339;
+        public static final int fastScrollOverlayPosition = 0x0101033a;
+        public static final int customTokens = 0x0101033b;
+        public static final int nextFocusForward = 0x0101033c;
+        public static final int firstDayOfWeek = 0x0101033d;
+        public static final int showWeekNumber = 0x0101033e;
+        public static final int minDate = 0x0101033f;
+        public static final int maxDate = 0x01010340;
+        public static final int shownWeekCount = 0x01010341;
+        public static final int selectedWeekBackgroundColor = 0x01010342;
+        public static final int focusedMonthDateColor = 0x01010343;
+        public static final int unfocusedMonthDateColor = 0x01010344;
+        public static final int weekNumberColor = 0x01010345;
+        public static final int weekSeparatorLineColor = 0x01010346;
+        public static final int selectedDateVerticalBar = 0x01010347;
+        public static final int weekDayTextAppearance = 0x01010348;
+        public static final int dateTextAppearance = 0x01010349;
+        public static final int solidColor = 0x0101034a;
+        public static final int spinnersShown = 0x0101034b;
+        public static final int calendarViewShown = 0x0101034c;
+        public static final int state_multiline = 0x0101034d;
+        public static final int detailsElementBackground = 0x0101034e;
+        public static final int textColorHighlightInverse = 0x0101034f;
+        public static final int textColorLinkInverse = 0x01010350;
+        public static final int editTextColor = 0x01010351;
+        public static final int editTextBackground = 0x01010352;
+        public static final int horizontalScrollViewStyle = 0x01010353;
+        public static final int layerType = 0x01010354;
+        public static final int alertDialogIcon = 0x01010355;
+        public static final int windowMinWidthMajor = 0x01010356;
+        public static final int windowMinWidthMinor = 0x01010357;
+        public static final int queryHint = 0x01010358;
+        public static final int fastScrollTextColor = 0x01010359;
+        public static final int largeHeap = 0x0101035a;
+        public static final int windowCloseOnTouchOutside = 0x0101035b;
+        public static final int datePickerStyle = 0x0101035c;
+        public static final int calendarViewStyle = 0x0101035d;
+        public static final int textEditSidePasteWindowLayout = 0x0101035e;
+        public static final int textEditSideNoPasteWindowLayout = 0x0101035f;
+        public static final int actionMenuTextAppearance = 0x01010360;
+        public static final int actionMenuTextColor = 0x01010361;
+        public static final int textCursorDrawable = 0x01010362;
+        public static final int resizeMode = 0x01010363;
+        public static final int requiresSmallestWidthDp = 0x01010364;
+        public static final int compatibleWidthLimitDp = 0x01010365;
+        public static final int largestWidthLimitDp = 0x01010366;
+        public static final int state_hovered = 0x01010367;
+        public static final int state_drag_can_accept = 0x01010368;
+        public static final int state_drag_hovered = 0x01010369;
+        public static final int stopWithTask = 0x0101036a;
+        public static final int switchTextOn = 0x0101036b;
+        public static final int switchTextOff = 0x0101036c;
+        public static final int switchPreferenceStyle = 0x0101036d;
+        public static final int switchTextAppearance = 0x0101036e;
+        public static final int track = 0x0101036f;
+        public static final int switchMinWidth = 0x01010370;
+        public static final int switchPadding = 0x01010371;
+        public static final int thumbTextPadding = 0x01010372;
+        public static final int textSuggestionsWindowStyle = 0x01010373;
+        public static final int textEditSuggestionItemLayout = 0x01010374;
+        public static final int rowCount = 0x01010375;
+        public static final int rowOrderPreserved = 0x01010376;
+        public static final int columnCount = 0x01010377;
+        public static final int columnOrderPreserved = 0x01010378;
+        public static final int useDefaultMargins = 0x01010379;
+        public static final int alignmentMode = 0x0101037a;
+        public static final int layout_row = 0x0101037b;
+        public static final int layout_rowSpan = 0x0101037c;
+        public static final int layout_columnSpan = 0x0101037d;
+        public static final int actionModeSelectAllDrawable = 0x0101037e;
+        public static final int isAuxiliary = 0x0101037f;
+        public static final int accessibilityEventTypes = 0x01010380;
+        public static final int packageNames = 0x01010381;
+        public static final int accessibilityFeedbackType = 0x01010382;
+        public static final int notificationTimeout = 0x01010383;
+        public static final int accessibilityFlags = 0x01010384;
+        public static final int canRetrieveWindowContent = 0x01010385;
+        public static final int listPreferredItemHeightLarge = 0x01010386;
+        public static final int listPreferredItemHeightSmall = 0x01010387;
+        public static final int actionBarSplitStyle = 0x01010388;
+        public static final int actionProviderClass = 0x01010389;
+        public static final int backgroundStacked = 0x0101038a;
+        public static final int backgroundSplit = 0x0101038b;
+        public static final int textAllCaps = 0x0101038c;
+        public static final int colorPressedHighlight = 0x0101038d;
+        public static final int colorLongPressedHighlight = 0x0101038e;
+        public static final int colorFocusedHighlight = 0x0101038f;
+        public static final int colorActivatedHighlight = 0x01010390;
+        public static final int colorMultiSelectHighlight = 0x01010391;
+        public static final int drawableStart = 0x01010392;
+        public static final int drawableEnd = 0x01010393;
+        public static final int actionModeStyle = 0x01010394;
+        public static final int minResizeWidth = 0x01010395;
+        public static final int minResizeHeight = 0x01010396;
+        public static final int actionBarWidgetTheme = 0x01010397;
+        public static final int uiOptions = 0x01010398;
+        public static final int subtypeLocale = 0x01010399;
+        public static final int subtypeExtraValue = 0x0101039a;
+        public static final int actionBarDivider = 0x0101039b;
+        public static final int actionBarItemBackground = 0x0101039c;
+        public static final int actionModeSplitBackground = 0x0101039d;
+        public static final int textAppearanceListItem = 0x0101039e;
+        public static final int textAppearanceListItemSmall = 0x0101039f;
+        public static final int targetDescriptions = 0x010103a0;
+        public static final int directionDescriptions = 0x010103a1;
+        public static final int overridesImplicitlyEnabledSubtype = 0x010103a2;
+        public static final int listPreferredItemPaddingLeft = 0x010103a3;
+        public static final int listPreferredItemPaddingRight = 0x010103a4;
+        public static final int requiresFadingEdge = 0x010103a5;
+        public static final int publicKey = 0x010103a6;
+        public static final int parentActivityName = 0x010103a7;
+        public static final int isolatedProcess = 0x010103a9;
+        public static final int importantForAccessibility = 0x010103aa;
+        public static final int keyboardLayout = 0x010103ab;
+        public static final int fontFamily = 0x010103ac;
+        public static final int mediaRouteButtonStyle = 0x010103ad;
+        public static final int mediaRouteTypes = 0x010103ae;
+        public static final int supportsRtl = 0x010103af;
+        public static final int textDirection = 0x010103b0;
+        public static final int textAlignment = 0x010103b1;
+        public static final int layoutDirection = 0x010103b2;
+        public static final int paddingStart = 0x010103b3;
+        public static final int paddingEnd = 0x010103b4;
+        public static final int layout_marginStart = 0x010103b5;
+        public static final int layout_marginEnd = 0x010103b6;
+        public static final int layout_toStartOf = 0x010103b7;
+        public static final int layout_toEndOf = 0x010103b8;
+        public static final int layout_alignStart = 0x010103b9;
+        public static final int layout_alignEnd = 0x010103ba;
+        public static final int layout_alignParentStart = 0x010103bb;
+        public static final int layout_alignParentEnd = 0x010103bc;
+        public static final int listPreferredItemPaddingStart = 0x010103bd;
+        public static final int listPreferredItemPaddingEnd = 0x010103be;
+        public static final int singleUser = 0x010103bf;
+        public static final int presentationTheme = 0x010103c0;
+        public static final int subtypeId = 0x010103c1;
+        public static final int initialKeyguardLayout = 0x010103c2;
+        public static final int widgetCategory = 0x010103c4;
+        public static final int permissionGroupFlags = 0x010103c5;
+        public static final int labelFor = 0x010103c6;
+        public static final int permissionFlags = 0x010103c7;
+        public static final int checkedTextViewStyle = 0x010103c8;
+        public static final int showOnLockScreen = 0x010103c9;
+        public static final int format12Hour = 0x010103ca;
+        public static final int format24Hour = 0x010103cb;
+        public static final int timeZone = 0x010103cc;
+        public static final int mipMap = 0x010103cd;
+        public static final int mirrorForRtl = 0x010103ce;
+        public static final int windowOverscan = 0x010103cf;
+        public static final int requiredForAllUsers = 0x010103d0;
+        public static final int indicatorStart = 0x010103d1;
+        public static final int indicatorEnd = 0x010103d2;
+        public static final int childIndicatorStart = 0x010103d3;
+        public static final int childIndicatorEnd = 0x010103d4;
+        public static final int restrictedAccountType = 0x010103d5;
+        public static final int requiredAccountType = 0x010103d6;
+        public static final int canRequestTouchExplorationMode = 0x010103d7;
+        public static final int canRequestEnhancedWebAccessibility = 0x010103d8;
+        public static final int canRequestFilterKeyEvents = 0x010103d9;
+        public static final int layoutMode = 0x010103da;
+        public static final int keySet = 0x010103db;
+        public static final int targetId = 0x010103dc;
+        public static final int fromScene = 0x010103dd;
+        public static final int toScene = 0x010103de;
+        public static final int transition = 0x010103df;
+        public static final int transitionOrdering = 0x010103e0;
+        public static final int fadingMode = 0x010103e1;
+        public static final int startDelay = 0x010103e2;
+        public static final int ssp = 0x010103e3;
+        public static final int sspPrefix = 0x010103e4;
+        public static final int sspPattern = 0x010103e5;
+        public static final int addPrintersActivity = 0x010103e6;
+        public static final int vendor = 0x010103e7;
+        public static final int category = 0x010103e8;
+        public static final int isAsciiCapable = 0x010103e9;
+        public static final int autoMirrored = 0x010103ea;
+        public static final int supportsSwitchingToNextInputMethod = 0x010103eb;
+        public static final int requireDeviceUnlock = 0x010103ec;
+        public static final int apduServiceBanner = 0x010103ed;
+        public static final int accessibilityLiveRegion = 0x010103ee;
+        public static final int windowTranslucentStatus = 0x010103ef;
+        public static final int windowTranslucentNavigation = 0x010103f0;
+        public static final int advancedPrintOptionsActivity = 0x010103f1;
+        public static final int banner = 0x010103f2;
+        public static final int windowSwipeToDismiss = 0x010103f3;
+        public static final int isGame = 0x010103f4;
+        public static final int allowEmbedded = 0x010103f5;
+        public static final int setupActivity = 0x010103f6;
+        public static final int fastScrollStyle = 0x010103f7;
+        public static final int windowContentTransitions = 0x010103f8;
+        public static final int windowContentTransitionManager = 0x010103f9;
+        public static final int translationZ = 0x010103fa;
+        public static final int tintMode = 0x010103fb;
+        public static final int controlX1 = 0x010103fc;
+        public static final int controlY1 = 0x010103fd;
+        public static final int controlX2 = 0x010103fe;
+        public static final int controlY2 = 0x010103ff;
+        public static final int transitionName = 0x01010400;
+        public static final int transitionGroup = 0x01010401;
+        public static final int viewportWidth = 0x01010402;
+        public static final int viewportHeight = 0x01010403;
+        public static final int fillColor = 0x01010404;
+        public static final int pathData = 0x01010405;
+        public static final int strokeColor = 0x01010406;
+        public static final int strokeWidth = 0x01010407;
+        public static final int trimPathStart = 0x01010408;
+        public static final int trimPathEnd = 0x01010409;
+        public static final int trimPathOffset = 0x0101040a;
+        public static final int strokeLineCap = 0x0101040b;
+        public static final int strokeLineJoin = 0x0101040c;
+        public static final int strokeMiterLimit = 0x0101040d;
+        public static final int colorControlNormal = 0x01010429;
+        public static final int colorControlActivated = 0x0101042a;
+        public static final int colorButtonNormal = 0x0101042b;
+        public static final int colorControlHighlight = 0x0101042c;
+        public static final int persistableMode = 0x0101042d;
+        public static final int titleTextAppearance = 0x0101042e;
+        public static final int subtitleTextAppearance = 0x0101042f;
+        public static final int slideEdge = 0x01010430;
+        public static final int actionBarTheme = 0x01010431;
+        public static final int textAppearanceListItemSecondary = 0x01010432;
+        public static final int colorPrimary = 0x01010433;
+        public static final int colorPrimaryDark = 0x01010434;
+        public static final int colorAccent = 0x01010435;
+        public static final int nestedScrollingEnabled = 0x01010436;
+        public static final int windowEnterTransition = 0x01010437;
+        public static final int windowExitTransition = 0x01010438;
+        public static final int windowSharedElementEnterTransition = 0x01010439;
+        public static final int windowSharedElementExitTransition = 0x0101043a;
+        public static final int windowAllowReturnTransitionOverlap = 0x0101043b;
+        public static final int windowAllowEnterTransitionOverlap = 0x0101043c;
+        public static final int sessionService = 0x0101043d;
+        public static final int stackViewStyle = 0x0101043e;
+        public static final int switchStyle = 0x0101043f;
+        public static final int elevation = 0x01010440;
+        public static final int excludeId = 0x01010441;
+        public static final int excludeClass = 0x01010442;
+        public static final int hideOnContentScroll = 0x01010443;
+        public static final int actionOverflowMenuStyle = 0x01010444;
+        public static final int documentLaunchMode = 0x01010445;
+        public static final int maxRecents = 0x01010446;
+        public static final int autoRemoveFromRecents = 0x01010447;
+        public static final int stateListAnimator = 0x01010448;
+        public static final int toId = 0x01010449;
+        public static final int fromId = 0x0101044a;
+        public static final int reversible = 0x0101044b;
+        public static final int splitTrack = 0x0101044c;
+        public static final int targetName = 0x0101044d;
+        public static final int excludeName = 0x0101044e;
+        public static final int matchOrder = 0x0101044f;
+        public static final int windowDrawsSystemBarBackgrounds = 0x01010450;
+        public static final int statusBarColor = 0x01010451;
+        public static final int navigationBarColor = 0x01010452;
+        public static final int contentInsetStart = 0x01010453;
+        public static final int contentInsetEnd = 0x01010454;
+        public static final int contentInsetLeft = 0x01010455;
+        public static final int contentInsetRight = 0x01010456;
+        public static final int paddingMode = 0x01010457;
+        public static final int layout_rowWeight = 0x01010458;
+        public static final int layout_columnWeight = 0x01010459;
+        public static final int translateX = 0x0101045a;
+        public static final int translateY = 0x0101045b;
+        public static final int selectableItemBackgroundBorderless = 0x0101045c;
+        public static final int elegantTextHeight = 0x0101045d;
+        public static final int searchKeyphraseId = 0x0101045e;
+        public static final int searchKeyphrase = 0x0101045f;
+        public static final int searchKeyphraseSupportedLocales = 0x01010460;
+        public static final int windowTransitionBackgroundFadeDuration = 0x01010461;
+        public static final int overlapAnchor = 0x01010462;
+        public static final int progressTint = 0x01010463;
+        public static final int progressTintMode = 0x01010464;
+        public static final int progressBackgroundTint = 0x01010465;
+        public static final int progressBackgroundTintMode = 0x01010466;
+        public static final int secondaryProgressTint = 0x01010467;
+        public static final int secondaryProgressTintMode = 0x01010468;
+        public static final int indeterminateTint = 0x01010469;
+        public static final int indeterminateTintMode = 0x0101046a;
+        public static final int backgroundTint = 0x0101046b;
+        public static final int backgroundTintMode = 0x0101046c;
+        public static final int foregroundTint = 0x0101046d;
+        public static final int foregroundTintMode = 0x0101046e;
+        public static final int buttonTint = 0x0101046f;
+        public static final int buttonTintMode = 0x01010470;
+        public static final int thumbTint = 0x01010471;
+        public static final int thumbTintMode = 0x01010472;
+        public static final int fullBackupOnly = 0x01010473;
+        public static final int propertyXName = 0x01010474;
+        public static final int propertyYName = 0x01010475;
+        public static final int relinquishTaskIdentity = 0x01010476;
+        public static final int tileModeX = 0x01010477;
+        public static final int tileModeY = 0x01010478;
+        public static final int actionModeShareDrawable = 0x01010479;
+        public static final int actionModeFindDrawable = 0x0101047a;
+        public static final int actionModeWebSearchDrawable = 0x0101047b;
+        public static final int transitionVisibilityMode = 0x0101047c;
+        public static final int minimumHorizontalAngle = 0x0101047d;
+        public static final int minimumVerticalAngle = 0x0101047e;
+        public static final int maximumAngle = 0x0101047f;
+        public static final int searchViewStyle = 0x01010480;
+        public static final int closeIcon = 0x01010481;
+        public static final int goIcon = 0x01010482;
+        public static final int searchIcon = 0x01010483;
+        public static final int voiceIcon = 0x01010484;
+        public static final int commitIcon = 0x01010485;
+        public static final int suggestionRowLayout = 0x01010486;
+        public static final int queryBackground = 0x01010487;
+        public static final int submitBackground = 0x01010488;
+        public static final int buttonBarPositiveButtonStyle = 0x01010489;
+        public static final int buttonBarNeutralButtonStyle = 0x0101048a;
+        public static final int buttonBarNegativeButtonStyle = 0x0101048b;
+        public static final int popupElevation = 0x0101048c;
+        public static final int actionBarPopupTheme = 0x0101048d;
+        public static final int multiArch = 0x0101048e;
+        public static final int touchscreenBlocksFocus = 0x0101048f;
+        public static final int windowElevation = 0x01010490;
+        public static final int launchTaskBehindTargetAnimation = 0x01010491;
+        public static final int launchTaskBehindSourceAnimation = 0x01010492;
+        public static final int restrictionType = 0x01010493;
+        public static final int dayOfWeekBackground = 0x01010494;
+        public static final int dayOfWeekTextAppearance = 0x01010495;
+        public static final int headerMonthTextAppearance = 0x01010496;
+        public static final int headerDayOfMonthTextAppearance = 0x01010497;
+        public static final int headerYearTextAppearance = 0x01010498;
+        public static final int yearListItemTextAppearance = 0x01010499;
+        public static final int yearListSelectorColor = 0x0101049a;
+        public static final int calendarTextColor = 0x0101049b;
+        public static final int recognitionService = 0x0101049c;
+        public static final int timePickerStyle = 0x0101049d;
+        public static final int timePickerDialogTheme = 0x0101049e;
+        public static final int headerTimeTextAppearance = 0x0101049f;
+        public static final int headerAmPmTextAppearance = 0x010104a0;
+        public static final int numbersTextColor = 0x010104a1;
+        public static final int numbersBackgroundColor = 0x010104a2;
+        public static final int numbersSelectorColor = 0x010104a3;
+        public static final int amPmTextColor = 0x010104a4;
+        public static final int amPmBackgroundColor = 0x010104a5;
+        public static final int searchKeyphraseRecognitionFlags = 0x010104a6;
+        public static final int checkMarkTint = 0x010104a7;
+        public static final int checkMarkTintMode = 0x010104a8;
+        public static final int popupTheme = 0x010104a9;
+        public static final int toolbarStyle = 0x010104aa;
+        public static final int windowClipToOutline = 0x010104ab;
+        public static final int datePickerDialogTheme = 0x010104ac;
+        public static final int showText = 0x010104ad;
+        public static final int windowReturnTransition = 0x010104ae;
+        public static final int windowReenterTransition = 0x010104af;
+        public static final int windowSharedElementReturnTransition = 0x010104b0;
+        public static final int windowSharedElementReenterTransition = 0x010104b1;
+        public static final int resumeWhilePausing = 0x010104b2;
+        public static final int datePickerMode = 0x010104b3;
+        public static final int timePickerMode = 0x010104b4;
+        public static final int inset = 0x010104b5;
+        public static final int letterSpacing = 0x010104b6;
+        public static final int fontFeatureSettings = 0x010104b7;
+        public static final int outlineProvider = 0x010104b8;
+        public static final int contentAgeHint = 0x010104b9;
+        public static final int country = 0x010104ba;
+        public static final int windowSharedElementsUseOverlay = 0x010104bb;
+        public static final int reparent = 0x010104bc;
+        public static final int reparentWithOverlay = 0x010104bd;
+        public static final int ambientShadowAlpha = 0x010104be;
+        public static final int spotShadowAlpha = 0x010104bf;
+        public static final int navigationIcon = 0x010104c0;
+        public static final int navigationContentDescription = 0x010104c1;
+        public static final int fragmentExitTransition = 0x010104c2;
+        public static final int fragmentEnterTransition = 0x010104c3;
+        public static final int fragmentSharedElementEnterTransition = 0x010104c4;
+        public static final int fragmentReturnTransition = 0x010104c5;
+        public static final int fragmentSharedElementReturnTransition = 0x010104c6;
+        public static final int fragmentReenterTransition = 0x010104c7;
+        public static final int fragmentAllowEnterTransitionOverlap = 0x010104c8;
+        public static final int fragmentAllowReturnTransitionOverlap = 0x010104c9;
+        public static final int patternPathData = 0x010104ca;
+        public static final int strokeAlpha = 0x010104cb;
+        public static final int fillAlpha = 0x010104cc;
+        public static final int windowActivityTransitions = 0x010104cd;
+        public static final int colorEdgeEffect = 0x010104ce;
+        public static final int resizeClip = 0x010104cf;
+        public static final int collapseContentDescription = 0x010104d0;
+        public static final int accessibilityTraversalBefore = 0x010104d1;
+        public static final int accessibilityTraversalAfter = 0x010104d2;
+        public static final int dialogPreferredPadding = 0x010104d3;
+        public static final int searchHintIcon = 0x010104d4;
+        public static final int revisionCode = 0x010104d5;
+        public static final int drawableTint = 0x010104d6;
+        public static final int drawableTintMode = 0x010104d7;
+        public static final int fraction = 0x010104d8;
+        public static final int trackTint = 0x010104d9;
+        public static final int trackTintMode = 0x010104da;
+        public static final int start = 0x010104db;
+        public static final int end = 0x010104dc;
+        public static final int breakStrategy = 0x010104dd;
+        public static final int hyphenationFrequency = 0x010104de;
+        public static final int allowUndo = 0x010104df;
+        public static final int windowLightStatusBar = 0x010104e0;
+        public static final int numbersInnerTextColor = 0x010104e1;
+        public static final int colorBackgroundFloating = 0x010104e2;
+        public static final int titleTextColor = 0x010104e3;
+        public static final int subtitleTextColor = 0x010104e4;
+        public static final int thumbPosition = 0x010104e5;
+        public static final int scrollIndicators = 0x010104e6;
+        public static final int contextClickable = 0x010104e7;
+        public static final int fingerprintAuthDrawable = 0x010104e8;
+        public static final int logoDescription = 0x010104e9;
+        public static final int extractNativeLibs = 0x010104ea;
+        public static final int fullBackupContent = 0x010104eb;
+        public static final int usesCleartextTraffic = 0x010104ec;
+        public static final int lockTaskMode = 0x010104ed;
+        public static final int autoVerify = 0x010104ee;
+        public static final int showForAllUsers = 0x010104ef;
+        public static final int supportsAssist = 0x010104f0;
+        public static final int supportsLaunchVoiceAssistFromKeyguard = 0x010104f1;
+        public static final int listMenuViewStyle = 0x010104f2;
+        public static final int subMenuArrow = 0x010104f3;
+        public static final int defaultWidth = 0x010104f4;
+        public static final int defaultHeight = 0x010104f5;
+        public static final int resizeableActivity = 0x010104f6;
+        public static final int supportsPictureInPicture = 0x010104f7;
+        public static final int titleMargin = 0x010104f8;
+        public static final int titleMarginStart = 0x010104f9;
+        public static final int titleMarginEnd = 0x010104fa;
+        public static final int titleMarginTop = 0x010104fb;
+        public static final int titleMarginBottom = 0x010104fc;
+        public static final int maxButtonHeight = 0x010104fd;
+        public static final int buttonGravity = 0x010104fe;
+        public static final int collapseIcon = 0x010104ff;
+        public static final int level = 0x01010500;
+        public static final int contextPopupMenuStyle = 0x01010501;
+        public static final int textAppearancePopupMenuHeader = 0x01010502;
+        public static final int windowBackgroundFallback = 0x01010503;
+        public static final int defaultToDeviceProtectedStorage = 0x01010504;
+        public static final int directBootAware = 0x01010505;
+        public static final int preferenceFragmentStyle = 0x01010506;
+        public static final int canControlMagnification = 0x01010507;
+        public static final int languageTag = 0x01010508;
+        public static final int pointerIcon = 0x01010509;
+        public static final int tickMark = 0x0101050a;
+        public static final int tickMarkTint = 0x0101050b;
+        public static final int tickMarkTintMode = 0x0101050c;
+        public static final int canPerformGestures = 0x0101050d;
+        public static final int externalService = 0x0101050e;
+        public static final int supportsLocalInteraction = 0x0101050f;
+        public static final int startX = 0x01010510;
+        public static final int startY = 0x01010511;
+        public static final int endX = 0x01010512;
+        public static final int endY = 0x01010513;
+        public static final int offset = 0x01010514;
+        public static final int use32bitAbi = 0x01010515;
+        public static final int bitmap = 0x01010516;
+        public static final int hotSpotX = 0x01010517;
+        public static final int hotSpotY = 0x01010518;
+        public static final int version = 0x01010519;
+        public static final int backupInForeground = 0x0101051a;
+        public static final int countDown = 0x0101051b;
+        public static final int canRecord = 0x0101051c;
+        public static final int tunerCount = 0x0101051d;
+        public static final int fillType = 0x0101051e;
+        public static final int popupEnterTransition = 0x0101051f;
+        public static final int popupExitTransition = 0x01010520;
+        public static final int forceHasOverlappingRendering = 0x01010521;
+        public static final int contentInsetStartWithNavigation = 0x01010522;
+        public static final int contentInsetEndWithActions = 0x01010523;
+        public static final int numberPickerStyle = 0x01010524;
+        public static final int enableVrMode = 0x01010525;
+        public static final int hash = 0x01010526;
+        public static final int networkSecurityConfig = 0x01010527;
+        public static final int shortcutId = 0x01010528;
+        public static final int shortcutShortLabel = 0x01010529;
+        public static final int shortcutLongLabel = 0x0101052a;
+        public static final int shortcutDisabledMessage = 0x0101052b;
+        public static final int roundIcon = 0x0101052c;
+        public static final int contextUri = 0x0101052d;
+        public static final int contextDescription = 0x0101052e;
+        public static final int showMetadataInPreview = 0x0101052f;
+        public static final int colorSecondary = 0x01010530;
+        public static final int visibleToInstantApps = 0x01010531;
+        public static final int font = 0x01010532;
+        public static final int fontWeight = 0x01010533;
+        public static final int tooltipText = 0x01010534;
+        public static final int autoSizeTextType = 0x01010535;
+        public static final int autoSizeStepGranularity = 0x01010536;
+        public static final int autoSizePresetSizes = 0x01010537;
+        public static final int autoSizeMinTextSize = 0x01010538;
+        public static final int min = 0x01010539;
+        public static final int rotationAnimation = 0x0101053a;
+        public static final int layout_marginHorizontal = 0x0101053b;
+        public static final int layout_marginVertical = 0x0101053c;
+        public static final int paddingHorizontal = 0x0101053d;
+        public static final int paddingVertical = 0x0101053e;
+        public static final int fontStyle = 0x0101053f;
+        public static final int keyboardNavigationCluster = 0x01010540;
+        public static final int targetProcesses = 0x01010541;
+        public static final int nextClusterForward = 0x01010542;
+        public static final int colorError = 0x01010543;
+        public static final int focusedByDefault = 0x01010544;
+        public static final int appCategory = 0x01010545;
+        public static final int autoSizeMaxTextSize = 0x01010546;
+        public static final int recreateOnConfigChanges = 0x01010547;
+        public static final int certDigest = 0x01010548;
+        public static final int splitName = 0x01010549;
+        public static final int colorMode = 0x0101054a;
+        public static final int isolatedSplits = 0x0101054b;
+        public static final int targetSandboxVersion = 0x0101054c;
+        public static final int canRequestFingerprintGestures = 0x0101054d;
+        public static final int alphabeticModifiers = 0x0101054e;
+        public static final int numericModifiers = 0x0101054f;
+        public static final int fontProviderAuthority = 0x01010550;
+        public static final int fontProviderQuery = 0x01010551;
+        public static final int primaryContentAlpha = 0x01010552;
+        public static final int secondaryContentAlpha = 0x01010553;
+        public static final int requiredFeature = 0x01010554;
+        public static final int requiredNotFeature = 0x01010555;
+        public static final int autofillHints = 0x01010556;
+        public static final int fontProviderPackage = 0x01010557;
+        public static final int importantForAutofill = 0x01010558;
+        public static final int recycleEnabled = 0x01010559;
+        public static final int isStatic = 0x0101055a;
+        public static final int isFeatureSplit = 0x0101055b;
+        public static final int singleLineTitle = 0x0101055c;
+        public static final int fontProviderCerts = 0x0101055d;
+        public static final int iconTint = 0x0101055e;
+        public static final int iconTintMode = 0x0101055f;
+        public static final int maxAspectRatio = 0x01010560;
+        public static final int iconSpaceReserved = 0x01010561;
+        public static final int defaultFocusHighlightEnabled = 0x01010562;
+        public static final int persistentWhenFeatureAvailable = 0x01010563;
+        public static final int windowSplashscreenContent = 0x01010564;
+        public static final int requiredSystemPropertyName = 0x01010565;
+        public static final int requiredSystemPropertyValue = 0x01010566;
+        public static final int justificationMode = 0x01010567;
+        public static final int autofilledHighlight = 0x01010568;
+        public static final int showWhenLocked = 0x01010569;
+        public static final int turnScreenOn = 0x0101056a;
+        public static final int classLoader = 0x0101056b;
+        public static final int windowLightNavigationBar = 0x0101056c;
+        public static final int navigationBarDividerColor = 0x0101056d;
+        public static final int cantSaveState = 0x0101056e;
+        public static final int ttcIndex = 0x0101056f;
+        public static final int fontVariationSettings = 0x01010570;
+        public static final int dialogCornerRadius = 0x01010571;
+        public static final int compileSdkVersion = 0x01010572;
+        public static final int compileSdkVersionCodename = 0x01010573;
+        public static final int screenReaderFocusable = 0x01010574;
+        public static final int buttonCornerRadius = 0x01010575;
+        public static final int versionCodeMajor = 0x01010576;
+        public static final int versionMajor = 0x01010577;
+        public static final int isVrOnly = 0x01010578;
+        public static final int widgetFeatures = 0x01010579;
+        public static final int appComponentFactory = 0x0101057a;
+        public static final int fallbackLineSpacing = 0x0101057b;
+        public static final int accessibilityPaneTitle = 0x0101057c;
+        public static final int firstBaselineToTopHeight = 0x0101057d;
+        public static final int lastBaselineToBottomHeight = 0x0101057e;
+        public static final int lineHeight = 0x0101057f;
+        public static final int accessibilityHeading = 0x01010580;
+        public static final int outlineSpotShadowColor = 0x01010581;
+        public static final int outlineAmbientShadowColor = 0x01010582;
+        public static final int maxLongVersionCode = 0x01010583;
+        public static final int userRestriction = 0x01010584;
+        public static final int textFontWeight = 0x01010585;
+        public static final int windowLayoutInDisplayCutoutMode = 0x01010586;
+        public static final int packageType = 0x01010587;
+        public static final int opticalInsetLeft = 0x01010588;
+        public static final int opticalInsetTop = 0x01010589;
+        public static final int opticalInsetRight = 0x0101058a;
+        public static final int opticalInsetBottom = 0x0101058b;
+        public static final int forceDarkAllowed = 0x0101058c;
+        public static final int supportsAmbientMode = 0x0101058d;
+        public static final int usesNonSdkApi = 0x0101058e;
+        public static final int nonInteractiveUiTimeout = 0x0101058f;
+        public static final int isLightTheme = 0x01010590;
+        public static final int isSplitRequired = 0x01010591;
+        public static final int textLocale = 0x01010592;
+        public static final int settingsSliceUri = 0x01010593;
+        public static final int shell = 0x01010594;
+        public static final int interactiveUiTimeout = 0x01010595;
+        public static final int supportsMultipleDisplays = 0x01010596;
+        public static final int useAppZygote = 0x01010597;
+        public static final int selectionDividerHeight = 0x01010598;
+        public static final int foregroundServiceType = 0x01010599;
+        public static final int hasFragileUserData = 0x0101059a;
+        public static final int minAspectRatio = 0x0101059b;
+        public static final int inheritShowWhenLocked = 0x0101059c;
+        public static final int zygotePreloadName = 0x0101059d;
+        public static final int useEmbeddedDex = 0x0101059e;
+        public static final int forceUriPermissions = 0x0101059f;
+        public static final int allowClearUserDataOnFailedRestore = 0x01010600;
+        public static final int allowAudioPlaybackCapture = 0x01010601;
+        public static final int secureElementName = 0x01010602;
+        public static final int requestLegacyExternalStorage = 0x01010603;
+        public static final int enforceStatusBarContrast = 0x01010604;
+        public static final int enforceNavigationBarContrast = 0x01010605;
+        public static final int identifier = 0x01010606;
     }
 
     public static final class styleable {
@@ -1386,5 +2802,597 @@ public final class R {
             0x0101017a,  // fillViewport
         };
         public static final int ScrollView_fillViewport = 0;
+
+        public static final int[] ViewDrawableStates = {
+            0x0101009c,  // state_focused
+            0x0101009d,  // state_window_focused
+            0x0101009e,  // state_enabled
+            0x010100a1,  // state_selected
+            0x010100a7,  // state_pressed
+            0x010102fe,  // state_activated
+            0x0101031b,  // state_accelerated
+            0x01010367,  // state_hovered
+            0x01010368,  // state_drag_can_accept
+            0x01010369,  // state_drag_hovered
+        };
+        public static final int ViewDrawableStates_state_focused = 0;
+        public static final int ViewDrawableStates_state_window_focused = 1;
+        public static final int ViewDrawableStates_state_enabled = 2;
+        public static final int ViewDrawableStates_state_selected = 3;
+        public static final int ViewDrawableStates_state_pressed = 4;
+        public static final int ViewDrawableStates_state_activated = 5;
+        public static final int ViewDrawableStates_state_accelerated = 6;
+        public static final int ViewDrawableStates_state_hovered = 7;
+        public static final int ViewDrawableStates_state_drag_can_accept = 8;
+        public static final int ViewDrawableStates_state_drag_hovered = 9;
+
+        public static final int[] DrawableStates = {
+            0x0101009c,  // state_focused
+            0x0101009d,  // state_window_focused
+            0x0101009e,  // state_enabled
+            0x0101009f,  // state_checkable
+            0x010100a0,  // state_checked
+            0x010100a1,  // state_selected
+            0x010100a2,  // state_active
+            0x010100a3,  // state_single
+            0x010100a4,  // state_first
+            0x010100a5,  // state_middle
+            0x010100a6,  // state_last
+            0x010100a7,  // state_pressed
+            0x010102fe,  // state_activated
+            0x0101031b,  // state_accelerated
+            0x01010367,  // state_hovered
+            0x01010368,  // state_drag_can_accept
+            0x01010369,  // state_drag_hovered
+        };
+        public static final int DrawableStates_state_focused = 0;
+        public static final int DrawableStates_state_window_focused = 1;
+        public static final int DrawableStates_state_enabled = 2;
+        public static final int DrawableStates_state_checkable = 3;
+        public static final int DrawableStates_state_checked = 4;
+        public static final int DrawableStates_state_selected = 5;
+        public static final int DrawableStates_state_active = 6;
+        public static final int DrawableStates_state_single = 7;
+        public static final int DrawableStates_state_first = 8;
+        public static final int DrawableStates_state_middle = 9;
+        public static final int DrawableStates_state_last = 10;
+        public static final int DrawableStates_state_pressed = 11;
+        public static final int DrawableStates_state_activated = 12;
+        public static final int DrawableStates_state_accelerated = 13;
+        public static final int DrawableStates_state_hovered = 14;
+        public static final int DrawableStates_state_drag_can_accept = 15;
+        public static final int DrawableStates_state_drag_hovered = 16;
+
+        public static final int[] Drawable = {
+            0x01010194,  // visible
+            0x010103ea,  // autoMirrored
+        };
+        public static final int Drawable_visible = 0;
+        public static final int Drawable_autoMirrored = 1;
+
+        public static final int[] DrawableWrapper = {
+            0x01010199,  // drawable
+        };
+        public static final int DrawableWrapper_drawable = 0;
+
+        public static final int[] DrawableCorners = {
+            0x010101a8,  // radius
+            0x010101a9,  // topLeftRadius
+            0x010101aa,  // topRightRadius
+            0x010101ab,  // bottomLeftRadius
+            0x010101ac,  // bottomRightRadius
+        };
+        public static final int DrawableCorners_radius = 0;
+        public static final int DrawableCorners_topLeftRadius = 1;
+        public static final int DrawableCorners_topRightRadius = 2;
+        public static final int DrawableCorners_bottomLeftRadius = 3;
+        public static final int DrawableCorners_bottomRightRadius = 4;
+
+        public static final int[] StateListDrawable = {
+            0x0101011c,  // dither
+            0x01010194,  // visible
+            0x01010195,  // variablePadding
+            0x01010196,  // constantSize
+            0x0101030c,  // enterFadeDuration
+            0x0101030d,  // exitFadeDuration
+            0x010103ea,  // autoMirrored
+        };
+        public static final int StateListDrawable_dither = 0;
+        public static final int StateListDrawable_visible = 1;
+        public static final int StateListDrawable_variablePadding = 2;
+        public static final int StateListDrawable_constantSize = 3;
+        public static final int StateListDrawable_enterFadeDuration = 4;
+        public static final int StateListDrawable_exitFadeDuration = 5;
+        public static final int StateListDrawable_autoMirrored = 6;
+
+        public static final int[] StateListDrawableItem = {
+            0x01010199,  // drawable
+        };
+        public static final int StateListDrawableItem_drawable = 0;
+
+        public static final int[] ColorDrawable = {
+            0x010101a5,  // color
+        };
+        public static final int ColorDrawable_color = 0;
+
+        public static final int[] BitmapDrawable = {
+            0x010100af,  // gravity
+            0x01010119,  // src
+            0x0101011a,  // antialias
+            0x0101011b,  // filter
+            0x0101011c,  // dither
+            0x01010121,  // tint
+            0x01010201,  // tileMode
+            0x0101031f,  // alpha
+            0x010103cd,  // mipMap
+            0x010103ea,  // autoMirrored
+            0x010103fb,  // tintMode
+            0x01010477,  // tileModeX
+            0x01010478,  // tileModeY
+        };
+        public static final int BitmapDrawable_gravity = 0;
+        public static final int BitmapDrawable_src = 1;
+        public static final int BitmapDrawable_antialias = 2;
+        public static final int BitmapDrawable_filter = 3;
+        public static final int BitmapDrawable_dither = 4;
+        public static final int BitmapDrawable_tint = 5;
+        public static final int BitmapDrawable_tileMode = 6;
+        public static final int BitmapDrawable_alpha = 7;
+        public static final int BitmapDrawable_mipMap = 8;
+        public static final int BitmapDrawable_autoMirrored = 9;
+        public static final int BitmapDrawable_tintMode = 10;
+        public static final int BitmapDrawable_tileModeX = 11;
+        public static final int BitmapDrawable_tileModeY = 12;
+
+        public static final int[] NinePatchDrawable = {
+            0x01010119,  // src
+            0x0101011c,  // dither
+            0x01010121,  // tint
+            0x0101031f,  // alpha
+            0x010103ea,  // autoMirrored
+            0x010103fb,  // tintMode
+        };
+        public static final int NinePatchDrawable_src = 0;
+        public static final int NinePatchDrawable_dither = 1;
+        public static final int NinePatchDrawable_tint = 2;
+        public static final int NinePatchDrawable_alpha = 3;
+        public static final int NinePatchDrawable_autoMirrored = 4;
+        public static final int NinePatchDrawable_tintMode = 5;
+
+        public static final int[] ShapeDrawable = {
+            0x0101011c,  // dither
+            0x01010121,  // tint
+            0x01010155,  // height
+            0x01010159,  // width
+            0x010101a5,  // color
+            0x010103fb,  // tintMode
+        };
+        public static final int ShapeDrawable_dither = 0;
+        public static final int ShapeDrawable_tint = 1;
+        public static final int ShapeDrawable_height = 2;
+        public static final int ShapeDrawable_width = 3;
+        public static final int ShapeDrawable_color = 4;
+        public static final int ShapeDrawable_tintMode = 5;
+
+        public static final int[] GradientDrawable = {
+            0x0101011c,  // dither
+            0x01010121,  // tint
+            0x01010194,  // visible
+            0x0101019a,  // shape
+            0x0101019b,  // innerRadiusRatio
+            0x0101019c,  // thicknessRatio
+            0x0101019f,  // useLevel
+            0x0101025f,  // innerRadius
+            0x01010260,  // thickness
+            0x010103fb,  // tintMode
+            0x01010588,  // opticalInsetLeft
+            0x01010589,  // opticalInsetTop
+            0x0101058a,  // opticalInsetRight
+            0x0101058b,  // opticalInsetBottom
+        };
+        public static final int GradientDrawable_dither = 0;
+        public static final int GradientDrawable_tint = 1;
+        public static final int GradientDrawable_visible = 2;
+        public static final int GradientDrawable_shape = 3;
+        public static final int GradientDrawable_innerRadiusRatio = 4;
+        public static final int GradientDrawable_thicknessRatio = 5;
+        public static final int GradientDrawable_useLevel = 6;
+        public static final int GradientDrawable_innerRadius = 7;
+        public static final int GradientDrawable_thickness = 8;
+        public static final int GradientDrawable_tintMode = 9;
+        public static final int GradientDrawable_opticalInsetLeft = 10;
+        public static final int GradientDrawable_opticalInsetTop = 11;
+        public static final int GradientDrawable_opticalInsetRight = 12;
+        public static final int GradientDrawable_opticalInsetBottom = 13;
+
+        public static final int[] GradientDrawableSize = {
+            0x01010155,  // height
+            0x01010159,  // width
+        };
+        public static final int GradientDrawableSize_height = 0;
+        public static final int GradientDrawableSize_width = 1;
+
+        public static final int[] GradientDrawableGradient = {
+            0x0101019d,  // startColor
+            0x0101019e,  // endColor
+            0x0101019f,  // useLevel
+            0x010101a0,  // angle
+            0x010101a1,  // type
+            0x010101a2,  // centerX
+            0x010101a3,  // centerY
+            0x010101a4,  // gradientRadius
+            0x0101020b,  // centerColor
+        };
+        public static final int GradientDrawableGradient_startColor = 0;
+        public static final int GradientDrawableGradient_endColor = 1;
+        public static final int GradientDrawableGradient_useLevel = 2;
+        public static final int GradientDrawableGradient_angle = 3;
+        public static final int GradientDrawableGradient_type = 4;
+        public static final int GradientDrawableGradient_centerX = 5;
+        public static final int GradientDrawableGradient_centerY = 6;
+        public static final int GradientDrawableGradient_gradientRadius = 7;
+        public static final int GradientDrawableGradient_centerColor = 8;
+
+        public static final int[] GradientDrawableSolid = {
+            0x010101a5,  // color
+        };
+        public static final int GradientDrawableSolid_color = 0;
+
+        public static final int[] GradientDrawableStroke = {
+            0x01010159,  // width
+            0x010101a5,  // color
+            0x010101a6,  // dashWidth
+            0x010101a7,  // dashGap
+        };
+        public static final int GradientDrawableStroke_width = 0;
+        public static final int GradientDrawableStroke_color = 1;
+        public static final int GradientDrawableStroke_dashWidth = 2;
+        public static final int GradientDrawableStroke_dashGap = 3;
+
+        public static final int[] GradientDrawablePadding = {
+            0x010101ad,  // left
+            0x010101ae,  // top
+            0x010101af,  // right
+            0x010101b0,  // bottom
+        };
+        public static final int GradientDrawablePadding_left = 0;
+        public static final int GradientDrawablePadding_top = 1;
+        public static final int GradientDrawablePadding_right = 2;
+        public static final int GradientDrawablePadding_bottom = 3;
+
+        public static final int[] InsetDrawable = {
+            0x01010194,  // visible
+            0x01010199,  // drawable
+            0x010101b7,  // insetLeft
+            0x010101b8,  // insetRight
+            0x010101b9,  // insetTop
+            0x010101ba,  // insetBottom
+            0x010104b5,  // inset
+        };
+        public static final int InsetDrawable_visible = 0;
+        public static final int InsetDrawable_drawable = 1;
+        public static final int InsetDrawable_insetLeft = 2;
+        public static final int InsetDrawable_insetRight = 3;
+        public static final int InsetDrawable_insetTop = 4;
+        public static final int InsetDrawable_insetBottom = 5;
+        public static final int InsetDrawable_inset = 6;
+
+        public static final int[] ClipDrawable = {
+            0x010100af,  // gravity
+            0x01010199,  // drawable
+            0x0101020a,  // clipOrientation
+        };
+        public static final int ClipDrawable_gravity = 0;
+        public static final int ClipDrawable_drawable = 1;
+        public static final int ClipDrawable_clipOrientation = 2;
+
+        public static final int[] ScaleDrawable = {
+            0x01010199,  // drawable
+            0x010101fc,  // scaleWidth
+            0x010101fd,  // scaleHeight
+            0x010101fe,  // scaleGravity
+            0x01010310,  // useIntrinsicSizeAsMinimum
+            0x01010500,  // level
+        };
+        public static final int ScaleDrawable_drawable = 0;
+        public static final int ScaleDrawable_scaleWidth = 1;
+        public static final int ScaleDrawable_scaleHeight = 2;
+        public static final int ScaleDrawable_scaleGravity = 3;
+        public static final int ScaleDrawable_useIntrinsicSizeAsMinimum = 4;
+        public static final int ScaleDrawable_level = 5;
+
+        public static final int[] RotateDrawable = {
+            0x01010194,  // visible
+            0x01010199,  // drawable
+            0x010101b3,  // fromDegrees
+            0x010101b4,  // toDegrees
+            0x010101b5,  // pivotX
+            0x010101b6,  // pivotY
+        };
+        public static final int RotateDrawable_visible = 0;
+        public static final int RotateDrawable_drawable = 1;
+        public static final int RotateDrawable_fromDegrees = 2;
+        public static final int RotateDrawable_toDegrees = 3;
+        public static final int RotateDrawable_pivotX = 4;
+        public static final int RotateDrawable_pivotY = 5;
+
+        public static final int[] LayerDrawable = {
+            0x010100d6,  // paddingLeft
+            0x010100d7,  // paddingTop
+            0x010100d8,  // paddingRight
+            0x010100d9,  // paddingBottom
+            0x0101031e,  // opacity
+            0x010103b3,  // paddingStart
+            0x010103b4,  // paddingEnd
+            0x010103ea,  // autoMirrored
+            0x01010457,  // paddingMode
+        };
+        public static final int LayerDrawable_paddingLeft = 0;
+        public static final int LayerDrawable_paddingTop = 1;
+        public static final int LayerDrawable_paddingRight = 2;
+        public static final int LayerDrawable_paddingBottom = 3;
+        public static final int LayerDrawable_opacity = 4;
+        public static final int LayerDrawable_paddingStart = 5;
+        public static final int LayerDrawable_paddingEnd = 6;
+        public static final int LayerDrawable_autoMirrored = 7;
+        public static final int LayerDrawable_paddingMode = 8;
+
+        public static final int[] LayerDrawableItem = {
+            0x010100af,  // gravity
+            0x010100d0,  // id
+            0x01010155,  // height
+            0x01010159,  // width
+            0x01010199,  // drawable
+            0x010101ad,  // left
+            0x010101ae,  // top
+            0x010101af,  // right
+            0x010101b0,  // bottom
+            0x010104db,  // start
+            0x010104dc,  // end
+        };
+        public static final int LayerDrawableItem_gravity = 0;
+        public static final int LayerDrawableItem_id = 1;
+        public static final int LayerDrawableItem_height = 2;
+        public static final int LayerDrawableItem_width = 3;
+        public static final int LayerDrawableItem_drawable = 4;
+        public static final int LayerDrawableItem_left = 5;
+        public static final int LayerDrawableItem_top = 6;
+        public static final int LayerDrawableItem_right = 7;
+        public static final int LayerDrawableItem_bottom = 8;
+        public static final int LayerDrawableItem_start = 9;
+        public static final int LayerDrawableItem_end = 10;
+
+        public static final int[] RippleDrawable = {
+            0x010101a5,  // color
+            0x010101a8,  // radius
+        };
+        public static final int RippleDrawable_color = 0;
+        public static final int RippleDrawable_radius = 1;
+
+        public static final int[] AnimatedStateListDrawableItem = {
+            0x010100d0,  // id
+            0x01010199,  // drawable
+        };
+        public static final int AnimatedStateListDrawableItem_id = 0;
+        public static final int AnimatedStateListDrawableItem_drawable = 1;
+
+        public static final int[] AnimatedStateListDrawableTransition = {
+            0x01010199,  // drawable
+            0x01010449,  // toId
+            0x0101044a,  // fromId
+            0x0101044b,  // reversible
+        };
+        public static final int AnimatedStateListDrawableTransition_drawable = 0;
+        public static final int AnimatedStateListDrawableTransition_toId = 1;
+        public static final int AnimatedStateListDrawableTransition_fromId = 2;
+        public static final int AnimatedStateListDrawableTransition_reversible = 3;
+
+        public static final int[] AccelerateInterpolator = {
+            0x010101d3,  // factor
+        };
+        public static final int AccelerateInterpolator_factor = 0;
+
+        public static final int[] DecelerateInterpolator = {
+            0x010101d3,  // factor
+        };
+        public static final int DecelerateInterpolator_factor = 0;
+
+        public static final int[] CycleInterpolator = {
+            0x010101d4,  // cycles
+        };
+        public static final int CycleInterpolator_cycles = 0;
+
+        public static final int[] AnticipateInterpolator = {
+            0x0101026a,  // tension
+        };
+        public static final int AnticipateInterpolator_tension = 0;
+
+        public static final int[] OvershootInterpolator = {
+            0x0101026a,  // tension
+        };
+        public static final int OvershootInterpolator_tension = 0;
+
+        public static final int[] AnticipateOvershootInterpolator = {
+            0x0101026a,  // tension
+            0x0101026b,  // extraTension
+        };
+        public static final int AnticipateOvershootInterpolator_tension = 0;
+        public static final int AnticipateOvershootInterpolator_extraTension = 1;
+
+        public static final int[] PathInterpolator = {
+            0x010103fc,  // controlX1
+            0x010103fd,  // controlY1
+            0x010103fe,  // controlX2
+            0x010103ff,  // controlY2
+            0x01010405,  // pathData
+        };
+        public static final int PathInterpolator_controlX1 = 0;
+        public static final int PathInterpolator_controlY1 = 1;
+        public static final int PathInterpolator_controlX2 = 2;
+        public static final int PathInterpolator_controlY2 = 3;
+        public static final int PathInterpolator_pathData = 4;
+
+        public static final int[] Animator = {
+            0x01010141,  // interpolator
+            0x01010198,  // duration
+            0x010101be,  // startOffset
+            0x010101bf,  // repeatCount
+            0x010101c0,  // repeatMode
+            0x010102de,  // valueFrom
+            0x010102df,  // valueTo
+            0x010102e0,  // valueType
+        };
+        public static final int Animator_interpolator = 0;
+        public static final int Animator_duration = 1;
+        public static final int Animator_startOffset = 2;
+        public static final int Animator_repeatCount = 3;
+        public static final int Animator_repeatMode = 4;
+        public static final int Animator_valueFrom = 5;
+        public static final int Animator_valueTo = 6;
+        public static final int Animator_valueType = 7;
+
+        public static final int[] PropertyValuesHolder = {
+            0x010102de,  // valueFrom
+            0x010102df,  // valueTo
+            0x010102e0,  // valueType
+            0x010102e1,  // propertyName
+        };
+        public static final int PropertyValuesHolder_valueFrom = 0;
+        public static final int PropertyValuesHolder_valueTo = 1;
+        public static final int PropertyValuesHolder_valueType = 2;
+        public static final int PropertyValuesHolder_propertyName = 3;
+
+        public static final int[] Keyframe = {
+            0x01010024,  // value
+            0x01010141,  // interpolator
+            0x010102e0,  // valueType
+            0x010104d8,  // fraction
+        };
+        public static final int Keyframe_value = 0;
+        public static final int Keyframe_interpolator = 1;
+        public static final int Keyframe_valueType = 2;
+        public static final int Keyframe_fraction = 3;
+
+        public static final int[] AnimatorSet = {
+            0x010102e2,  // ordering
+        };
+        public static final int AnimatorSet_ordering = 0;
+
+        public static final int[] PropertyAnimator = {
+            0x010102e1,  // propertyName
+            0x01010405,  // pathData
+            0x01010474,  // propertyXName
+            0x01010475,  // propertyYName
+        };
+        public static final int PropertyAnimator_propertyName = 0;
+        public static final int PropertyAnimator_pathData = 1;
+        public static final int PropertyAnimator_propertyXName = 2;
+        public static final int PropertyAnimator_propertyYName = 3;
+
+        public static final int[] Animation = {
+            0x010100d4,  // background
+            0x01010141,  // interpolator
+            0x01010198,  // duration
+            0x010101bc,  // fillBefore
+            0x010101bd,  // fillAfter
+            0x010101be,  // startOffset
+            0x010101bf,  // repeatCount
+            0x010101c0,  // repeatMode
+            0x010101c1,  // zAdjustment
+            0x0101024f,  // fillEnabled
+            0x010102a6,  // detachWallpaper
+        };
+        public static final int Animation_background = 0;
+        public static final int Animation_interpolator = 1;
+        public static final int Animation_duration = 2;
+        public static final int Animation_fillBefore = 3;
+        public static final int Animation_fillAfter = 4;
+        public static final int Animation_startOffset = 5;
+        public static final int Animation_repeatCount = 6;
+        public static final int Animation_repeatMode = 7;
+        public static final int Animation_zAdjustment = 8;
+        public static final int Animation_fillEnabled = 9;
+        public static final int Animation_detachWallpaper = 10;
+
+        public static final int[] AnimationSet = {
+            0x01010198,  // duration
+            0x010101bb,  // shareInterpolator
+            0x010101bc,  // fillBefore
+            0x010101bd,  // fillAfter
+            0x010101be,  // startOffset
+            0x010101c0,  // repeatMode
+        };
+        public static final int AnimationSet_duration = 0;
+        public static final int AnimationSet_shareInterpolator = 1;
+        public static final int AnimationSet_fillBefore = 2;
+        public static final int AnimationSet_fillAfter = 3;
+        public static final int AnimationSet_startOffset = 4;
+        public static final int AnimationSet_repeatMode = 5;
+
+        public static final int[] TranslateAnimation = {
+            0x010101c6,  // fromXDelta
+            0x010101c7,  // toXDelta
+            0x010101c8,  // fromYDelta
+            0x010101c9,  // toYDelta
+        };
+        public static final int TranslateAnimation_fromXDelta = 0;
+        public static final int TranslateAnimation_toXDelta = 1;
+        public static final int TranslateAnimation_fromYDelta = 2;
+        public static final int TranslateAnimation_toYDelta = 3;
+
+        public static final int[] RotateAnimation = {
+            0x010101b3,  // fromDegrees
+            0x010101b4,  // toDegrees
+            0x010101b5,  // pivotX
+            0x010101b6,  // pivotY
+        };
+        public static final int RotateAnimation_fromDegrees = 0;
+        public static final int RotateAnimation_toDegrees = 1;
+        public static final int RotateAnimation_pivotX = 2;
+        public static final int RotateAnimation_pivotY = 3;
+
+        public static final int[] ScaleAnimation = {
+            0x010101b5,  // pivotX
+            0x010101b6,  // pivotY
+            0x010101c2,  // fromXScale
+            0x010101c3,  // toXScale
+            0x010101c4,  // fromYScale
+            0x010101c5,  // toYScale
+        };
+        public static final int ScaleAnimation_pivotX = 0;
+        public static final int ScaleAnimation_pivotY = 1;
+        public static final int ScaleAnimation_fromXScale = 2;
+        public static final int ScaleAnimation_toXScale = 3;
+        public static final int ScaleAnimation_fromYScale = 4;
+        public static final int ScaleAnimation_toYScale = 5;
+
+        public static final int[] AlphaAnimation = {
+            0x010101ca,  // fromAlpha
+            0x010101cb,  // toAlpha
+        };
+        public static final int AlphaAnimation_fromAlpha = 0;
+        public static final int AlphaAnimation_toAlpha = 1;
+
+        public static final int[] LayoutAnimation = {
+            0x01010141,  // interpolator
+            0x010101cc,  // delay
+            0x010101cd,  // animation
+            0x010101ce,  // animationOrder
+        };
+        public static final int LayoutAnimation_interpolator = 0;
+        public static final int LayoutAnimation_delay = 1;
+        public static final int LayoutAnimation_animation = 2;
+        public static final int LayoutAnimation_animationOrder = 3;
+
+        public static final int[] GridLayoutAnimation = {
+            0x010101cf,  // columnDelay
+            0x010101d0,  // rowDelay
+            0x010101d1,  // direction
+            0x010101d2,  // directionPriority
+        };
+        public static final int GridLayoutAnimation_columnDelay = 0;
+        public static final int GridLayoutAnimation_rowDelay = 1;
+        public static final int GridLayoutAnimation_direction = 2;
+        public static final int GridLayoutAnimation_directionPriority = 3;
     }
 }

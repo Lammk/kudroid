@@ -74,6 +74,105 @@ public final class Choreographer {
         sThreadInstance.remove();
     }
 
+    public static final int CALLBACK_INPUT = 0;
+    public static final int CALLBACK_ANIMATION = 1;
+    public static final int CALLBACK_INSETS_ANIMATION = 2;
+    public static final int CALLBACK_TRAVERSAL = 3;
+    public static final int CALLBACK_COMMIT = 4;
+
+    private static final long DEFAULT_FRAME_DELAY_MS = 10L;
+    private static volatile long sFrameDelay = DEFAULT_FRAME_DELAY_MS;
+
+    /** A Runnable posted through postCallback and the frame callback that delivers it. */
+    private static final class PostedAction {
+        final int type;
+        final Runnable action;
+        final Object token;
+        final FrameCallback delivery;
+
+        PostedAction(int type, Runnable action, Object token, FrameCallback delivery) {
+            this.type = type;
+            this.action = action;
+            this.token = token;
+            this.delivery = delivery;
+        }
+    }
+
+    private final java.util.ArrayList<PostedAction> mPosted = new java.util.ArrayList<PostedAction>();
+
+    public static long getFrameDelay() {
+        return sFrameDelay;
+    }
+
+    public static void setFrameDelay(long frameDelay) {
+        sFrameDelay = frameDelay;
+    }
+
+    public void postCallback(int callbackType, Runnable action, Object token) {
+        postCallbackDelayed(callbackType, action, token, 0L);
+    }
+
+    /**
+     * Run {@code action} on the next frame, after any delay. Commit callbacks run once the
+     * frame's own callbacks have finished, so they are queued behind the current message.
+     */
+    public void postCallbackDelayed(int callbackType, final Runnable action, Object token,
+            long delayMillis) {
+        if (action == null) {
+            throw new IllegalArgumentException("action must not be null");
+        }
+        if (callbackType < CALLBACK_INPUT || callbackType > CALLBACK_COMMIT) {
+            throw new IllegalArgumentException("callbackType is invalid");
+        }
+        final PostedAction[] holder = new PostedAction[1];
+        FrameCallback delivery = new FrameCallback() {
+            public void doFrame(long frameTimeNanos) {
+                synchronized (Choreographer.this) {
+                    // Already cancelled by removeCallbacks.
+                    if (!mPosted.remove(holder[0])) {
+                        return;
+                    }
+                }
+                action.run();
+            }
+        };
+        holder[0] = new PostedAction(callbackType, action, token, delivery);
+        synchronized (this) {
+            mPosted.add(holder[0]);
+        }
+        if (callbackType == CALLBACK_COMMIT) {
+            android.os.Looper looper = android.os.Looper.myLooper();
+            if (looper != null) {
+                final FrameCallback commit = delivery;
+                new android.os.Handler(looper).post(new Runnable() {
+                    public void run() {
+                        commit.doFrame(getFrameTimeNanos());
+                    }
+                });
+                return;
+            }
+        }
+        postFrameCallbackDelayed(delivery, delayMillis);
+    }
+
+    /** Cancel actions posted with postCallback; a null action or token matches any. */
+    public void removeCallbacks(int callbackType, Runnable action, Object token) {
+        java.util.ArrayList<FrameCallback> removed = new java.util.ArrayList<FrameCallback>();
+        synchronized (this) {
+            for (int i = mPosted.size() - 1; i >= 0; i--) {
+                PostedAction p = mPosted.get(i);
+                if (p.type == callbackType && (action == null || p.action == action)
+                        && (token == null || p.token == token)) {
+                    removed.add(p.delivery);
+                    mPosted.remove(i);
+                }
+            }
+        }
+        for (int i = 0; i < removed.size(); i++) {
+            removeFrameCallback(removed.get(i));
+        }
+    }
+
     /** Run {@code callback} once, on the next frame. */
     public void postFrameCallback(FrameCallback callback) {
         postFrameCallbackDelayed(callback, 0L);

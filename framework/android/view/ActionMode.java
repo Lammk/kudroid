@@ -4,6 +4,10 @@ package android.view;
  * android.view.ActionMode — contextual toolbar action mode.
  */
 public abstract class ActionMode {
+    public static final int TYPE_PRIMARY = 0;
+    public static final int TYPE_FLOATING = 1;
+    public static final int DEFAULT_HIDE_DURATION = -1;
+
     /**
      * ActionMode lifecycle callback.
      */

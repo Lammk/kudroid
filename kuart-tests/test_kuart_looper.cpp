@@ -59,7 +59,8 @@ int main() {
     interp.set_instruction_limit(8000ull * 1000ull * 1000ull);
 
     for (const char* name : {"LLooperTests;", "LMediaApiTests;", "LThrowableTests;",
-                             "LFrameworkResourceTests;", "LInflaterTests;"}) {
+                             "LFrameworkResourceTests;", "LInflaterTests;",
+                             "LFrameworkApiTests;"}) {
         std::printf("[%s]\n", name);
         DexClass* klass = linker.FindClass(name);
         if (klass == nullptr || !interp.EnsureInitialized(klass)) {

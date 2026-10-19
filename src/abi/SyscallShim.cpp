@@ -28,6 +28,7 @@
 #include <poll.h>
 #include <sys/ioctl.h>
 #include <sched.h>
+#include <search.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
@@ -4657,6 +4658,218 @@ extern "C" int bionic_sched_getscheduler(pid_t pid) {
     return 0; // SCHED_OTHER
 }
 
+// ---- Linux libc entry points the host libc lacks. ----
+
+// posix_fadvise: an access-pattern hint. The only thing to apply on this host is read-ahead;
+// the descriptor and arguments are still validated as POSIX requires.
+extern "C" int bionic_posix_fadvise(int fd, off_t offset, off_t len, int advice) {
+    // Linux advice values: NORMAL 0, RANDOM 1, SEQUENTIAL 2, WILLNEED 3, DONTNEED 4, NOREUSE 5.
+    if (offset < 0 || len < 0 || advice < 0 || advice > 5) return EINVAL;
+    struct stat st;
+    if (::fstat(fd, &st) != 0) return errno;
+    if (S_ISFIFO(st.st_mode)) return ESPIPE;
+#if defined(__APPLE__)
+    if (advice == 1 || advice == 2 || advice == 3) {
+        ::fcntl(fd, F_RDAHEAD, advice == 1 ? 0 : 1);
+    }
+#endif
+    return 0;
+}
+
+// posix_fallocate: guarantee the range exists, growing the file when it ends past EOF.
+// Returns an error number rather than -1, as POSIX specifies.
+extern "C" int bionic_posix_fallocate(int fd, off_t offset, off_t len) {
+    if (offset < 0 || len <= 0) return EINVAL;
+    struct stat st;
+    if (::fstat(fd, &st) != 0) return errno;
+    if (S_ISDIR(st.st_mode)) return EISDIR;
+    if (!S_ISREG(st.st_mode)) return ENODEV;
+    off_t end = 0;
+    if (__builtin_add_overflow(offset, len, &end)) return EFBIG;
+    if (end <= st.st_size) return 0;
+#if defined(__APPLE__)
+    // Reserve the space first so ENOSPC is reported now instead of at write time.
+    fstore_t store = {F_ALLOCATEALL, F_PEOFPOSMODE, 0, end - st.st_size, 0};
+    if (::fcntl(fd, F_PREALLOCATE, &store) == -1 && errno == ENOSPC) return ENOSPC;
+#endif
+    if (::ftruncate(fd, end) != 0) return errno;
+    return 0;
+}
+
+// vmsplice: with no page-gifting on this host it degrades to the copying form, which is a
+// plain writev/readv on the pipe end.
+extern "C" ssize_t bionic_vmsplice(int fd, const struct iovec* iov, unsigned long nr_segs,
+                                   unsigned int flags) {
+    (void)flags;
+    if (iov == nullptr && nr_segs != 0) { errno = EFAULT; return -1; }
+    if (nr_segs > static_cast<unsigned long>(IOV_MAX)) { errno = EINVAL; return -1; }
+    struct stat st;
+    if (::fstat(fd, &st) != 0) return -1;
+    if (!S_ISFIFO(st.st_mode)) { errno = EBADF; return -1; }
+    const int access = ::fcntl(fd, F_GETFL) & O_ACCMODE;
+    return access == O_RDONLY ? ::readv(fd, iov, static_cast<int>(nr_segs))
+                              : ::writev(fd, iov, static_cast<int>(nr_segs));
+}
+
+// sched_setscheduler / sched_getparam: app processes cannot use real-time policies (the
+// platform refuses with EPERM), and every other policy is time-sharing with priority 0.
+extern "C" int bionic_sched_getparam(pid_t pid, void* param) {
+    if (param == nullptr || pid < 0) { errno = EINVAL; return -1; }
+    *static_cast<int*>(param) = 0;
+    return 0;
+}
+
+extern "C" int bionic_sched_setscheduler(pid_t pid, int policy, const void* param) {
+    if (param == nullptr || pid < 0) { errno = EINVAL; return -1; }
+    const int priority = *static_cast<const int*>(param);
+    constexpr int kResetOnFork = 0x40000000;
+    switch (policy & ~kResetOnFork) {
+        case 0: // SCHED_OTHER
+        case 3: // SCHED_BATCH
+        case 5: // SCHED_IDLE
+            if (priority != 0) { errno = EINVAL; return -1; }
+            return 0;
+        case 1: // SCHED_FIFO
+        case 2: // SCHED_RR
+            if (priority < 1 || priority > 99) { errno = EINVAL; return -1; }
+            errno = EPERM;
+            return -1;
+        default:
+            errno = EINVAL;
+            return -1;
+    }
+}
+
+// mkstemp: the template is a guest path, so it goes through the VFS like open(); the six
+// generated characters are copied back to the guest's own template.
+extern "C" int bionic_mkstemp(char* tmpl) {
+    if (tmpl == nullptr) { errno = EINVAL; return -1; }
+    const std::string remapped = kudroid::VFSPathRemapper::getInstance().remap(tmpl);
+    std::vector<char> work(remapped.begin(), remapped.end());
+    work.push_back('\0');
+    const int fd = ::mkstemp(work.data());
+    if (fd >= 0) {
+        const size_t guestLen = std::strlen(tmpl);
+        const size_t hostLen = work.size() - 1;
+        if (guestLen >= 6 && hostLen >= 6) {
+            std::memcpy(tmpl + guestLen - 6, work.data() + hostLen - 6, 6);
+        }
+    }
+    return fd;
+}
+
+// tdestroy: free every node of a tsearch tree, giving each key to free_node first.
+extern "C" void bionic_tdestroy(void* root, void (*free_node)(void*)) {
+    if (root == nullptr) return;
+#if defined(__APPLE__)
+    // Nodes cannot be freed while twalk is still reading them, so collect them first. A node is
+    // reported once, as a leaf or at its end-order visit, and its first member is the key.
+    thread_local std::vector<const void*>* collected = nullptr;
+    std::vector<const void*> nodes;
+    std::vector<const void*>* previous = collected;
+    collected = &nodes;
+    ::twalk(root, [](const void* node, VISIT which, int) {
+        if (which == endorder || which == leaf) collected->push_back(node);
+    });
+    collected = previous;
+    for (const void* node : nodes) {
+        if (free_node != nullptr) free_node(*static_cast<void* const*>(node));
+        ::free(const_cast<void*>(node));
+    }
+#else
+    ::tdestroy(root, free_node);
+#endif
+}
+
+// ---- mntent: mount table iteration over a (VFS-mapped) text file. ----
+
+struct GuestMntent {
+    char* mnt_fsname;
+    char* mnt_dir;
+    char* mnt_type;
+    char* mnt_opts;
+    int mnt_freq;
+    int mnt_passno;
+};
+
+// Decodes "\040"-style octal escapes in place.
+static void mntent_unescape(char* field) {
+    char* out = field;
+    for (const char* in = field; *in != '\0';) {
+        if (in[0] == '\\' && in[1] >= '0' && in[1] <= '3' && in[2] >= '0' && in[2] <= '7' &&
+            in[3] >= '0' && in[3] <= '7') {
+            *out++ = static_cast<char>(((in[1] - '0') << 6) | ((in[2] - '0') << 3) | (in[3] - '0'));
+            in += 4;
+        } else {
+            *out++ = *in++;
+        }
+    }
+    *out = '\0';
+}
+
+// Splits one fstab/mtab line into `ent` (pointing into `line`). False for blank and comment
+// lines or lines with fewer than the four mandatory fields.
+extern "C" bool kudroid_parse_mntent_line(char* line, GuestMntent* ent) {
+    size_t n = std::strlen(line);
+    while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = '\0';
+    char* p = line;
+    while (*p == ' ' || *p == '\t') ++p;
+    if (*p == '\0' || *p == '#') return false;
+    char* fields[4] = {nullptr, nullptr, nullptr, nullptr};
+    for (int i = 0; i < 4; ++i) {
+        while (*p == ' ' || *p == '\t') ++p;
+        if (*p == '\0') return false;
+        fields[i] = p;
+        while (*p != '\0' && *p != ' ' && *p != '\t') ++p;
+        if (*p != '\0') *p++ = '\0';
+        mntent_unescape(fields[i]);
+    }
+    int numbers[2] = {0, 0};
+    for (int i = 0; i < 2; ++i) {
+        while (*p == ' ' || *p == '\t') ++p;
+        if (*p == '\0') break;
+        char* end = nullptr;
+        numbers[i] = static_cast<int>(std::strtol(p, &end, 10));
+        if (end == p) break;
+        p = end;
+    }
+    ent->mnt_fsname = fields[0];
+    ent->mnt_dir = fields[1];
+    ent->mnt_type = fields[2];
+    ent->mnt_opts = fields[3];
+    ent->mnt_freq = numbers[0];
+    ent->mnt_passno = numbers[1];
+    return true;
+}
+
+extern "C" void* bionic_setmntent(const char* path, const char* mode) {
+    if (path == nullptr || mode == nullptr) { errno = EINVAL; return nullptr; }
+    const std::string remapped = kudroid::VFSPathRemapper::getInstance().remap(path);
+    return ::fopen(remapped.c_str(), mode);
+}
+
+extern "C" GuestMntent* bionic_getmntent_r(void* stream, GuestMntent* ent, char* buf, int buflen) {
+    FILE* fp = static_cast<FILE*>(stream);
+    if (fp == nullptr || ent == nullptr || buf == nullptr || buflen <= 1) return nullptr;
+    while (::fgets(buf, buflen, fp) != nullptr) {
+        const size_t len = std::strlen(buf);
+        if (len + 1 == static_cast<size_t>(buflen) && buf[len - 1] != '\n') {
+            // The line did not fit; drop the rest of it rather than parse a fragment.
+            int c;
+            while ((c = ::fgetc(fp)) != EOF && c != '\n') {
+            }
+            continue;
+        }
+        if (kudroid_parse_mntent_line(buf, ent)) return ent;
+    }
+    return nullptr;
+}
+
+extern "C" int bionic_endmntent(void* stream) {
+    if (stream != nullptr) ::fclose(static_cast<FILE*>(stream));
+    return 1;
+}
+
 extern "C" void bionic___assert2(const char* file, int line, const char* function, const char* message) {
     char buf[512];
     snprintf(buf, sizeof(buf), "ASSERTION FAILED in %s (%s:%d): %s",
@@ -8534,6 +8747,19 @@ const SymbolEntry kSyscallSymbols[] = {
     {"tgkill", reinterpret_cast<void*>(&bionic_tgkill)},
     {"sendfile", reinterpret_cast<void*>(&bionic_sendfile)},
     {"sched_getscheduler", reinterpret_cast<void*>(&bionic_sched_getscheduler)},
+    {"sched_setscheduler", reinterpret_cast<void*>(&bionic_sched_setscheduler)},
+    {"sched_getparam", reinterpret_cast<void*>(&bionic_sched_getparam)},
+    {"posix_fadvise", reinterpret_cast<void*>(&bionic_posix_fadvise)},
+    {"posix_fadvise64", reinterpret_cast<void*>(&bionic_posix_fadvise)},
+    {"posix_fallocate", reinterpret_cast<void*>(&bionic_posix_fallocate)},
+    {"posix_fallocate64", reinterpret_cast<void*>(&bionic_posix_fallocate)},
+    {"vmsplice", reinterpret_cast<void*>(&bionic_vmsplice)},
+    {"tdestroy", reinterpret_cast<void*>(&bionic_tdestroy)},
+    {"mkstemp", reinterpret_cast<void*>(&bionic_mkstemp)},
+    {"mkstemp64", reinterpret_cast<void*>(&bionic_mkstemp)},
+    {"setmntent", reinterpret_cast<void*>(&bionic_setmntent)},
+    {"getmntent_r", reinterpret_cast<void*>(&bionic_getmntent_r)},
+    {"endmntent", reinterpret_cast<void*>(&bionic_endmntent)},
     {"omp_in_parallel", reinterpret_cast<void*>(&bionic_omp_in_parallel)},
     {"__strchr_chk", reinterpret_cast<void*>(&bionic___strchr_chk)},
     {"__strncpy_chk2", reinterpret_cast<void*>(&bionic___strncpy_chk2)},

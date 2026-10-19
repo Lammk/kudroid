@@ -9,7 +9,7 @@ import android.content.ContextWrapper;
  * base class for the application. for kudroid minimal framework, this class
  * provides oncreate lifecycle callback.
  */
-public class Application extends ContextWrapper {
+public class Application extends ContextWrapper implements android.content.ComponentCallbacks2 {
     public Application() {
         super(null);
     }
@@ -24,12 +24,50 @@ public class Application extends ContextWrapper {
      * is called when the application is low on memory.
      */
     public void onLowMemory() {
+        for (android.content.ComponentCallbacks c : callbacksSnapshot()) {
+            c.onLowMemory();
+        }
+    }
+
+    public void onConfigurationChanged(android.content.res.Configuration newConfig) {
+        for (android.content.ComponentCallbacks c : callbacksSnapshot()) {
+            c.onConfigurationChanged(newConfig);
+        }
     }
 
     /**
      * is called when the application is reduced to memory.
      */
     public void onTrimMemory(int level) {
+        for (android.content.ComponentCallbacks c : callbacksSnapshot()) {
+            if (c instanceof android.content.ComponentCallbacks2) {
+                ((android.content.ComponentCallbacks2) c).onTrimMemory(level);
+            }
+        }
+    }
+
+    private final java.util.ArrayList<android.content.ComponentCallbacks> mComponentCallbacks =
+            new java.util.ArrayList<android.content.ComponentCallbacks>();
+
+    private android.content.ComponentCallbacks[] callbacksSnapshot() {
+        synchronized (mComponentCallbacks) {
+            return mComponentCallbacks.toArray(
+                    new android.content.ComponentCallbacks[mComponentCallbacks.size()]);
+        }
+    }
+
+    @Override
+    public void registerComponentCallbacks(android.content.ComponentCallbacks callback) {
+        synchronized (mComponentCallbacks) {
+            mComponentCallbacks.add(callback);
+        }
+    }
+
+    @Override
+    public void unregisterComponentCallbacks(android.content.ComponentCallbacks callback) {
+        synchronized (mComponentCallbacks) {
+            mComponentCallbacks.remove(callback);
+        }
     }
 
     /**

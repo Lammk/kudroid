@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate framework/com/android/internal/R.java: the framework's own styleable arrays.
+"""Generate framework/com/android/internal/R.java: the framework's own attr ids and styleable arrays.
 
 Input : <aosp>/core/res/res/values/{attrs.xml,public.xml}  (AOSP android-10.0.0_r47, Apache-2.0)
 Output: com.android.internal.R.styleable with, for each requested <declare-styleable>, the
@@ -22,6 +22,19 @@ STYLEABLES = [
     "ViewGroup_Layout", "ViewGroup_MarginLayout", "FrameLayout", "FrameLayout_Layout",
     "LinearLayout", "LinearLayout_Layout", "RelativeLayout", "RelativeLayout_Layout",
     "TextView", "ImageView", "ProgressBar", "CompoundButton", "ScrollView",
+    "ViewDrawableStates", "DrawableStates", "Drawable", "DrawableWrapper", "DrawableCorners",
+    "StateListDrawable", "StateListDrawableItem", "ColorDrawable", "BitmapDrawable",
+    "NinePatchDrawable", "ShapeDrawable", "GradientDrawable", "GradientDrawableSize",
+    "GradientDrawableGradient", "GradientDrawableSolid", "GradientDrawableStroke",
+    "GradientDrawablePadding", "InsetDrawable", "ClipDrawable", "ScaleDrawable", "RotateDrawable",
+    "LayerDrawable", "LayerDrawableItem", "RippleDrawable", "AnimatedStateListDrawableItem",
+    "AnimatedStateListDrawableTransition",
+    "AccelerateInterpolator", "DecelerateInterpolator", "CycleInterpolator",
+    "AnticipateInterpolator", "OvershootInterpolator", "AnticipateOvershootInterpolator",
+    "PathInterpolator",
+    "Animator", "PropertyValuesHolder", "Keyframe", "AnimatorSet", "PropertyAnimator",
+    "Animation", "AnimationSet", "TranslateAnimation", "RotateAnimation", "ScaleAnimation",
+    "AlphaAnimation", "LayoutAnimation", "GridLayoutAnimation",
 ]
 
 
@@ -83,7 +96,9 @@ def main():
     w("")
     w("    public static final class attr {")
     w("        private attr() {}")
-    w("        public static final int theme = 0x%08x;" % public["theme"])
+    for attr_name, rid in sorted(public.items(), key=lambda kv: (kv[1], kv[0])):
+        if attr_name.isidentifier():
+            w("        public static final int %s = 0x%08x;" % (attr_name, rid))
     w("    }")
     w("")
     w("    public static final class styleable {")

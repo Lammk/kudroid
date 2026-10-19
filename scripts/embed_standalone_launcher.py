@@ -64,7 +64,8 @@ def embed_ipa(path):
 
 
 if __name__ == '__main__':
-    path = Path(sys.argv[1]).resolve()
+    # Xcode-generated commands may pass build-setting variables unexpanded.
+    path = Path(os.path.expandvars(sys.argv[1])).resolve()
     if path.is_dir():
         embed_app(path)
     else:
