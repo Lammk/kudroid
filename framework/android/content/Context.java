@@ -466,6 +466,55 @@ public abstract class Context {
     public Intent registerReceiver(BroadcastReceiver receiver, IntentFilter filter) { return null; }
     public void unregisterReceiver(BroadcastReceiver receiver) {}
     public void sendBroadcast(Intent intent) {}
+    public void registerComponentCallbacks(ComponentCallbacks callback) {}
+    public void unregisterComponentCallbacks(ComponentCallbacks callback) {}
+
+    /** Flags for bindService. */
+    public static final int BIND_AUTO_CREATE = 0x0001;
+    public static final int BIND_DEBUG_UNBIND = 0x0002;
+    public static final int BIND_NOT_FOREGROUND = 0x0004;
+    public static final int BIND_ABOVE_CLIENT = 0x0008;
+    public static final int BIND_ALLOW_OOM_MANAGEMENT = 0x0010;
+    public static final int BIND_WAIVE_PRIORITY = 0x0020;
+    public static final int BIND_IMPORTANT = 0x0040;
+    public static final int BIND_ADJUST_WITH_ACTIVITY = 0x0080;
+
+    /**
+     * Starts a service named by an explicit component. Returns the component, or null when
+     * the intent does not name one this process can run.
+     */
+    public ComponentName startService(Intent service) {
+        final android.app.ActivityThread thread = android.app.ActivityThread.currentActivityThread();
+        return thread != null ? thread.startServiceFromApp(service, getApplicationContext()) : null;
+    }
+
+    public ComponentName startForegroundService(Intent service) {
+        return startService(service);
+    }
+
+    public boolean stopService(Intent service) {
+        final android.app.ActivityThread thread = android.app.ActivityThread.currentActivityThread();
+        return thread != null && thread.stopServiceFromApp(service);
+    }
+
+    public boolean bindService(Intent service, ServiceConnection conn, int flags) {
+        final android.app.ActivityThread thread = android.app.ActivityThread.currentActivityThread();
+        return thread != null
+                && thread.bindServiceFromApp(service, conn, flags, getApplicationContext());
+    }
+
+    public boolean bindService(Intent service, int flags, java.util.concurrent.Executor executor,
+            ServiceConnection conn) {
+        return bindService(service, conn, flags);
+    }
+
+    public void unbindService(ServiceConnection conn) {
+        final android.app.ActivityThread thread = android.app.ActivityThread.currentActivityThread();
+        if (thread != null) {
+            thread.unbindServiceFromApp(conn);
+        }
+    }
+
     public void startActivity(Intent intent) {}
     public void startActivity(Intent intent, Bundle options) {}
     public Context getApplicationContext() { return this; }

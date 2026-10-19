@@ -5,5 +5,8 @@ package android.graphics;
  * "transfer-modes" in the drawing pipeline.
  */
 public class Xfermode {
+    /** Native blend mode value, as BlendMode stores it. */
+    int porterDuffMode;
+
     public Xfermode() {}
 }

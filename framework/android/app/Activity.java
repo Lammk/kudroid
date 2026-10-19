@@ -10,7 +10,7 @@ import android.os.Bundle;
  * provides the lifecycle callbacks expected by the original games. for framework
  * kudroid's minimum, lifecycle methods are no-op that apps can override.
  */
-public class Activity extends ContextThemeWrapper implements android.view.Window.Callback, android.view.KeyEvent.Callback {
+public class Activity extends ContextThemeWrapper implements android.view.Window.Callback, android.view.KeyEvent.Callback, android.content.ComponentCallbacks2 {
     public static final int RESULT_CANCELED = 0;
     public static final int RESULT_OK = -1;
     public static final int RESULT_FIRST_USER = 1;
@@ -474,6 +474,12 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
      * instead of being recreated, which is the only mode KuDroid offers.
      */
     public void onConfigurationChanged(android.content.res.Configuration newConfig) {
+    }
+
+    public void onLowMemory() {
+    }
+
+    public void onTrimMemory(int level) {
     }
 
     /** Called before each user interaction; apps use it to reset idle timers. */

@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -2798,6 +2799,108 @@ bool Invoke_java_io_FileOutputStream(Interpreter* /*interp*/, const char* name, 
     return false;
 }
 
+// java.io.RandomAccessFile: every native is static, args[0] is the path or descriptor.
+bool Invoke_java_io_RandomAccessFile(Interpreter* /*interp*/, const char* name, const DexValue* args,
+                                     size_t /*num_args*/, DexValue* result) {
+    if (std::strcmp(name, "openNative") == 0) {
+        // Failure codes are coarse and platform independent: -1 other, -2 missing,
+        // -3 access denied, -4 directory.
+        const std::string path = RemapJavaPath(GetStringUtf8(args[0]));
+        const bool write = args[1].i != 0;
+        int fd = -1;
+        int err = 0;
+        if (!path.empty()) {
+            VmLockRelease unlocked;
+            fd = open(path.c_str(), write ? (O_RDWR | O_CREAT) : O_RDONLY, 0644);
+            err = errno;
+            if (fd >= 0) {
+                struct stat st;
+                if (fstat(fd, &st) == 0 && S_ISDIR(st.st_mode)) {
+                    close(fd);
+                    fd = -1;
+                    err = EISDIR;
+                }
+            }
+        } else {
+            err = ENOENT;
+        }
+        if (fd < 0) {
+            fd = err == ENOENT ? -2 : (err == EACCES || err == EPERM) ? -3 : err == EISDIR ? -4 : -1;
+        }
+        *result = DexValue::Int(fd);
+        return true;
+    }
+    const int fd = args[0].i;
+    if (std::strcmp(name, "readNative") == 0 || std::strcmp(name, "writeNative") == 0) {
+        auto* arr = reinterpret_cast<DexArray*>(args[1].l);
+        const int32_t off = args[2].i;
+        const int32_t len = args[3].i;
+        if (fd < 0 || arr == nullptr || off < 0 || len < 0 || off > arr->length ||
+            len > arr->length - off) {
+            *result = DexValue::Int(-1);
+            return true;
+        }
+        uint8_t* buf = reinterpret_cast<uint8_t*>(arr + 1) + off;
+        ssize_t n;
+        {
+            VmLockRelease unlocked;
+            n = name[0] == 'r' ? read(fd, buf, static_cast<size_t>(len))
+                               : write(fd, buf, static_cast<size_t>(len));
+        }
+        *result = DexValue::Int(static_cast<int32_t>(n));
+        return true;
+    }
+    if (std::strcmp(name, "seekNative") == 0) {
+        off_t pos = -1;
+        if (fd >= 0) {
+            VmLockRelease unlocked;
+            pos = lseek(fd, static_cast<off_t>(args[1].j), SEEK_SET);
+        }
+        *result = DexValue::Long(pos);
+        return true;
+    }
+    if (std::strcmp(name, "positionNative") == 0) {
+        off_t pos = -1;
+        if (fd >= 0) {
+            VmLockRelease unlocked;
+            pos = lseek(fd, 0, SEEK_CUR);
+        }
+        *result = DexValue::Long(pos);
+        return true;
+    }
+    if (std::strcmp(name, "lengthNative") == 0) {
+        struct stat st;
+        int rc = -1;
+        if (fd >= 0) {
+            VmLockRelease unlocked;
+            rc = fstat(fd, &st);
+        }
+        *result = DexValue::Long(rc == 0 ? static_cast<int64_t>(st.st_size) : -1);
+        return true;
+    }
+    if (std::strcmp(name, "setLengthNative") == 0) {
+        int rc = -1;
+        if (fd >= 0) {
+            VmLockRelease unlocked;
+            rc = ftruncate(fd, static_cast<off_t>(args[1].j));
+        }
+        *result = DexValue::Int(rc == 0 ? 0 : -1);
+        return true;
+    }
+    if (std::strcmp(name, "syncNative") == 0) {
+        if (fd >= 0) {
+            VmLockRelease unlocked;
+            fsync(fd);
+        }
+        return true;
+    }
+    if (std::strcmp(name, "closeNative") == 0) {
+        if (fd >= 0) close(fd);
+        return true;
+    }
+    return false;
+}
+
 bool Invoke_java_io_PrintStream(Interpreter* /*interp*/, const char* name, const DexValue* args,
                                 size_t /*num_args*/, DexValue* /*result*/) {
     if (std::strcmp(name, "writeNative") == 0) {
@@ -4318,6 +4421,7 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
     if (std::strcmp(desc, "Ljava/io/File;") == 0) return Invoke_java_io_File(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/io/FileInputStream;") == 0) return Invoke_java_io_FileInputStream(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/io/FileOutputStream;") == 0) return Invoke_java_io_FileOutputStream(interp, name, args, num_args, result);
+    if (std::strcmp(desc, "Ljava/io/RandomAccessFile;") == 0) return Invoke_java_io_RandomAccessFile(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/io/PrintStream;") == 0) return Invoke_java_io_PrintStream(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/util/TimeZone;") == 0) return Invoke_java_util_TimeZone(interp, name, args, num_args, result);
     // Direct buffers need a real backing store for native access.

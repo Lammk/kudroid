@@ -29,6 +29,11 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <search.h>
+#include <filesystem>
+#include <string>
+#include "kudroid/VFSPathRemapper.h"
+#include <sys/stat.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stddef.h>
@@ -142,6 +147,30 @@ extern "C" void bionic_freeifaddrs(GuestIfaddrs* head);
 extern "C" int bionic_bind(int sockfd, const struct sockaddr* addr, socklen_t addrlen);
 extern "C" int bionic_getsockname(int sockfd, struct sockaddr* addr, socklen_t* addrlen);
 extern "C" int bionic_getpeername(int sockfd, struct sockaddr* addr, socklen_t* addrlen);
+
+
+// Linux libc entry points the host lacks, supplied by the shim.
+struct GuestMntentView {
+    char* mnt_fsname;
+    char* mnt_dir;
+    char* mnt_type;
+    char* mnt_opts;
+    int mnt_freq;
+    int mnt_passno;
+};
+extern "C" int bionic_posix_fadvise(int fd, off_t offset, off_t len, int advice);
+extern "C" int bionic_posix_fallocate(int fd, off_t offset, off_t len);
+extern "C" ssize_t bionic_vmsplice(int fd, const struct iovec* iov, unsigned long nr_segs,
+                                   unsigned int flags);
+extern "C" int bionic_sched_getparam(pid_t pid, void* param);
+extern "C" int bionic_sched_setscheduler(pid_t pid, int policy, const void* param);
+extern "C" int bionic_mkstemp(char* tmpl);
+extern "C" void bionic_tdestroy(void* root, void (*free_node)(void*));
+extern "C" void* bionic_setmntent(const char* path, const char* mode);
+extern "C" GuestMntentView* bionic_getmntent_r(void* stream, GuestMntentView* ent, char* buf,
+                                               int buflen);
+extern "C" int bionic_endmntent(void* stream);
+extern "C" bool kudroid_parse_mntent_line(char* line, GuestMntentView* ent);
 
 // The resolver a guest relocation goes through. What it returns for a name is what the
 // guest actually calls, which is the thing these tests have to check.
@@ -2241,6 +2270,172 @@ static void test_madvise_dontneed_zero_fills() {
     bionic_munmap(region, kLen);
 }
 
+
+static int g_destroyed_keys = 0;
+static void count_destroyed_key(void* key) {
+    g_destroyed_keys += *static_cast<int*>(key);
+}
+
+static int compare_ints(const void* a, const void* b) {
+    return *static_cast<const int*>(a) - *static_cast<const int*>(b);
+}
+
+static void test_posix_fadvise_validates_arguments() {
+    char path[] = "/tmp/kudroid_fadvise_XXXXXX";
+    const int fd = mkstemp(path);
+    CHECK(fd >= 0, "temp file");
+    CHECK(bionic_posix_fadvise(fd, 0, 0, 2) == 0, "SEQUENTIAL on a regular file succeeds");
+    CHECK(bionic_posix_fadvise(fd, 0, 0, 9) == EINVAL, "unknown advice is EINVAL");
+    CHECK(bionic_posix_fadvise(fd, -1, 0, 0) == EINVAL, "negative offset is EINVAL");
+    CHECK(bionic_posix_fadvise(-1, 0, 0, 0) == EBADF, "bad descriptor is EBADF");
+    int pipefd[2];
+    CHECK(pipe(pipefd) == 0, "pipe");
+    CHECK(bionic_posix_fadvise(pipefd[0], 0, 0, 0) == ESPIPE, "pipe is ESPIPE");
+    close(pipefd[0]);
+    close(pipefd[1]);
+    close(fd);
+    unlink(path);
+}
+
+static void test_posix_fallocate_extends_and_reports_errors() {
+    char path[] = "/tmp/kudroid_fallocate_XXXXXX";
+    const int fd = mkstemp(path);
+    CHECK(fd >= 0, "temp file");
+    CHECK(bionic_posix_fallocate(fd, 0, 4096) == 0, "allocating past EOF succeeds");
+    struct stat st;
+    CHECK(fstat(fd, &st) == 0 && st.st_size == 4096, "file grew to offset+len");
+    CHECK(bionic_posix_fallocate(fd, 100, 10) == 0, "a range inside the file succeeds");
+    CHECK(fstat(fd, &st) == 0 && st.st_size == 4096, "an inside range does not shrink or grow");
+    CHECK(bionic_posix_fallocate(fd, 0, 0) == EINVAL, "zero length is EINVAL");
+    CHECK(bionic_posix_fallocate(fd, -1, 8) == EINVAL, "negative offset is EINVAL");
+    CHECK(bionic_posix_fallocate(-1, 0, 8) == EBADF, "bad descriptor is EBADF");
+    int pipefd[2];
+    CHECK(pipe(pipefd) == 0, "pipe");
+    CHECK(bionic_posix_fallocate(pipefd[1], 0, 8) == ENODEV, "non-regular file is ENODEV");
+    close(pipefd[0]);
+    close(pipefd[1]);
+    const int dirfd = open("/tmp", O_RDONLY);
+    CHECK(bionic_posix_fallocate(dirfd, 0, 8) == EISDIR, "directory is EISDIR");
+    close(dirfd);
+    close(fd);
+    unlink(path);
+}
+
+static void test_vmsplice_copies_through_a_pipe() {
+    int pipefd[2];
+    CHECK(pipe(pipefd) == 0, "pipe");
+    char out[] = "gifted";
+    struct iovec iov = {out, 6};
+    CHECK(bionic_vmsplice(pipefd[1], &iov, 1, 0) == 6, "write end takes the bytes");
+    char in[8] = {};
+    struct iovec iin = {in, 6};
+    CHECK(bionic_vmsplice(pipefd[0], &iin, 1, 0) == 6, "read end hands them back");
+    CHECK(std::memcmp(in, "gifted", 6) == 0, "bytes round-trip");
+    const int file = open("/dev/null", O_WRONLY);
+    errno = 0;
+    CHECK(bionic_vmsplice(file, &iov, 1, 0) == -1 && errno == EBADF, "non-pipe is EBADF");
+    close(file);
+    close(pipefd[0]);
+    close(pipefd[1]);
+}
+
+static void test_sched_policy_shims_follow_app_permissions() {
+    int param = 7;
+    CHECK(bionic_sched_getparam(0, &param) == 0 && param == 0, "getparam reports priority 0");
+    param = 0;
+    CHECK(bionic_sched_setscheduler(0, 0, &param) == 0, "SCHED_OTHER priority 0 is accepted");
+    param = 3;
+    errno = 0;
+    CHECK(bionic_sched_setscheduler(0, 0, &param) == -1 && errno == EINVAL,
+          "SCHED_OTHER with a priority is EINVAL");
+    param = 10;
+    errno = 0;
+    CHECK(bionic_sched_setscheduler(0, 1, &param) == -1 && errno == EPERM,
+          "SCHED_FIFO is refused with EPERM");
+    param = 0;
+    errno = 0;
+    CHECK(bionic_sched_setscheduler(0, 1, &param) == -1 && errno == EINVAL,
+          "SCHED_FIFO priority 0 is EINVAL");
+    errno = 0;
+    CHECK(bionic_sched_setscheduler(0, 99, &param) == -1 && errno == EINVAL,
+          "unknown policy is EINVAL");
+}
+
+static void test_mkstemp_fills_the_guest_template() {
+    char tmpl[] = "/tmp/kudroid_mkstemp_XXXXXX";
+    const int fd = bionic_mkstemp(tmpl);
+    CHECK(fd >= 0, "mkstemp succeeds");
+    CHECK(std::strcmp(tmpl + std::strlen(tmpl) - 6, "XXXXXX") != 0, "placeholder was replaced");
+    // The shim opens the file through the VFS, so that is where it lives on the host.
+    const std::string hostPath = kudroid::VFSPathRemapper::getInstance().remap(tmpl);
+    CHECK(access(hostPath.c_str(), F_OK) == 0, "the file named by the template exists");
+    close(fd);
+    unlink(hostPath.c_str());
+    char bad[] = "/tmp/kudroid_mkstemp_bad";
+    errno = 0;
+    CHECK(bionic_mkstemp(bad) == -1 && errno == EINVAL, "template without XXXXXX is EINVAL");
+}
+
+static void test_tdestroy_visits_every_key_once() {
+    int keys[5] = {3, 1, 4, 15, 9};
+    void* root = nullptr;
+    for (int& k : keys) {
+        CHECK(tsearch(&k, &root, compare_ints) != nullptr, "tsearch");
+    }
+    g_destroyed_keys = 0;
+    bionic_tdestroy(root, count_destroyed_key);
+    CHECK(g_destroyed_keys == 3 + 1 + 4 + 15 + 9, "free_node saw each key exactly once");
+    bionic_tdestroy(nullptr, count_destroyed_key);
+    CHECK(g_destroyed_keys == 32, "an empty tree calls nothing");
+}
+
+static void test_mntent_parsing() {
+    char line[] = "/dev/block/vold/public:1 /storage/my\\040card vfat rw,nosuid 0 2\n";
+    GuestMntentView ent = {};
+    CHECK(kudroid_parse_mntent_line(line, &ent), "a full line parses");
+    CHECK(std::strcmp(ent.mnt_fsname, "/dev/block/vold/public:1") == 0, "fsname");
+    CHECK(std::strcmp(ent.mnt_dir, "/storage/my card") == 0, "octal escape is decoded");
+    CHECK(std::strcmp(ent.mnt_type, "vfat") == 0, "type");
+    CHECK(std::strcmp(ent.mnt_opts, "rw,nosuid") == 0, "options");
+    CHECK(ent.mnt_freq == 0 && ent.mnt_passno == 2, "freq and passno");
+
+    char shortLine[] = "proc /proc proc rw\n";
+    CHECK(kudroid_parse_mntent_line(shortLine, &ent) && ent.mnt_freq == 0 && ent.mnt_passno == 0,
+          "freq/passno are optional");
+    char comment[] = "# not an entry\n";
+    CHECK(!kudroid_parse_mntent_line(comment, &ent), "comment is skipped");
+    char blank[] = "   \n";
+    CHECK(!kudroid_parse_mntent_line(blank, &ent), "blank line is skipped");
+    char truncated[] = "proc /proc proc\n";
+    CHECK(!kudroid_parse_mntent_line(truncated, &ent), "fewer than four fields is rejected");
+}
+
+static void test_mntent_iteration_over_a_file() {
+    const char* guestPath = "/tmp/kudroid_mounts_test";
+    const std::string hostPath = kudroid::VFSPathRemapper::getInstance().remap(guestPath);
+    std::filesystem::create_directories(std::filesystem::path(hostPath).parent_path());
+    const int fd = open(hostPath.c_str(), O_CREAT | O_TRUNC | O_WRONLY, 0644);
+    CHECK(fd >= 0, "mounts file created");
+    const char content[] = "# header\nproc /proc proc rw 0 0\n\nsysfs /sys sysfs rw 0 0\n";
+    CHECK(write(fd, content, sizeof(content) - 1) == static_cast<ssize_t>(sizeof(content) - 1),
+          "write mounts");
+    close(fd);
+    void* stream = bionic_setmntent(guestPath, "r");
+    CHECK(stream != nullptr, "setmntent opens the file");
+    GuestMntentView ent = {};
+    char buf[256];
+    int count = 0;
+    while (stream != nullptr && bionic_getmntent_r(stream, &ent, buf, sizeof(buf)) != nullptr) {
+        if (count == 0) CHECK(std::strcmp(ent.mnt_dir, "/proc") == 0, "first entry");
+        if (count == 1) CHECK(std::strcmp(ent.mnt_dir, "/sys") == 0, "second entry");
+        ++count;
+    }
+    CHECK(count == 2, "comments and blanks are not entries");
+    CHECK(bionic_endmntent(stream) == 1, "endmntent reports success");
+    CHECK(bionic_setmntent("/nonexistent/kudroid/mounts", "r") == nullptr, "missing file is null");
+    unlink(hostPath.c_str());
+}
+
 int main() {
     std::printf("=== SyscallShim host tests ===\n");
     test_bionic_getifaddrs();
@@ -2299,6 +2494,14 @@ int main() {
     test_madvise_dontneed_zero_fills();
     test_gettimeofday_fills_both_64_bit_fields();
     test_console_write_does_not_block_on_full_pipe();
+    test_posix_fadvise_validates_arguments();
+    test_posix_fallocate_extends_and_reports_errors();
+    test_vmsplice_copies_through_a_pipe();
+    test_sched_policy_shims_follow_app_permissions();
+    test_mkstemp_fills_the_guest_template();
+    test_tdestroy_visits_every_key_once();
+    test_mntent_parsing();
+    test_mntent_iteration_over_a_file();
     std::printf("=== %d checks, %d failures ===\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

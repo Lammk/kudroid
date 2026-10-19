@@ -714,6 +714,7 @@ else()
             ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/AxmlBuilder.java
             ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/InflaterTests.java
             ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/StyleTests.java
+            ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/FrameworkApiTests.java
             ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/kdtest/CustomView.java
             ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/kdtest/CustomGroup.java
             ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/kdtest/NoAttrsView.java)

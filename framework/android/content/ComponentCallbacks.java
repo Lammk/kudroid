@@ -1,5 +1,7 @@
 package android.content;
 
-/** Stub automatically generated for android.content.ComponentCallbacks */
 public interface ComponentCallbacks {
+    void onConfigurationChanged(android.content.res.Configuration newConfig);
+
+    void onLowMemory();
 }

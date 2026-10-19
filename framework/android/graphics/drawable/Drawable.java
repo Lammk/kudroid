@@ -20,7 +20,26 @@ public abstract class Drawable {
      * forgets its bounds draws in the wrong place or not at all.
      */
     public void setBounds(int left, int top, int right, int bottom) {
-        mBounds.set(left, top, right, bottom);
+        if (mBounds.left != left || mBounds.top != top || mBounds.right != right
+                || mBounds.bottom != bottom) {
+            if (!mBounds.isEmpty()) {
+                // Invalidate the old bounds before they change.
+                invalidateSelf();
+            }
+            mBounds.set(left, top, right, bottom);
+            onBoundsChange(mBounds);
+        }
+    }
+
+    protected void onBoundsChange(android.graphics.Rect bounds) {
+    }
+
+    public final void copyBounds(android.graphics.Rect bounds) {
+        bounds.set(mBounds);
+    }
+
+    public android.graphics.Rect getDirtyBounds() {
+        return getBounds();
     }
 
     public void setBounds(android.graphics.Rect bounds) {
@@ -73,6 +92,11 @@ public abstract class Drawable {
     public void setAlpha(int alpha) {
     }
 
+    /** The alpha last set; fully opaque unless a subclass tracks it. */
+    public int getAlpha() {
+        return 0xFF;
+    }
+
     /**
      * set the drawable's color filter.
      */
@@ -116,6 +140,124 @@ public abstract class Drawable {
     public void setTintMode(android.graphics.PorterDuff.Mode mode) {}
     public android.graphics.ColorFilter getColorFilter() { return null; }
     public void clearColorFilter() { setColorFilter(null); }
+
+    public void setColorFilter(int color, android.graphics.PorterDuff.Mode mode) {
+        setColorFilter(new android.graphics.PorterDuffColorFilter(color, mode));
+    }
+
+    public void setTintBlendMode(android.graphics.BlendMode blendMode) {
+        setTintMode(android.graphics.BlendMode.blendModeToPorterDuffMode(blendMode));
+    }
+
+    private boolean mVisible = true;
+    private int mLevel;
+    private boolean mAutoMirrored;
+    private boolean mFilterBitmap;
+    private int mLayoutDirection;
+    private final android.graphics.Rect mHotspotBounds = new android.graphics.Rect();
+
+    /** Sets visibility; returns whether it changed. */
+    public boolean setVisible(boolean visible, boolean restart) {
+        final boolean changed = mVisible != visible;
+        if (changed) {
+            mVisible = visible;
+            invalidateSelf();
+        }
+        return changed;
+    }
+
+    public final boolean isVisible() {
+        return mVisible;
+    }
+
+    /** Jump any animation to its end state. */
+    public void jumpToCurrentState() {
+    }
+
+    public void setHotspot(float x, float y) {
+    }
+
+    public void setHotspotBounds(int left, int top, int right, int bottom) {
+        mHotspotBounds.set(left, top, right, bottom);
+    }
+
+    public void getHotspotBounds(android.graphics.Rect outRect) {
+        outRect.set(mHotspotBounds);
+    }
+
+    /** Fills padding with the drawable's own padding; false when it has none. */
+    public boolean getPadding(android.graphics.Rect padding) {
+        padding.set(0, 0, 0, 0);
+        return false;
+    }
+
+    public final boolean setLevel(int level) {
+        if (mLevel != level) {
+            mLevel = level;
+            return onLevelChange(level);
+        }
+        return false;
+    }
+
+    public final int getLevel() {
+        return mLevel;
+    }
+
+    protected boolean onLevelChange(int level) {
+        return false;
+    }
+
+    public void setAutoMirrored(boolean mirrored) {
+        mAutoMirrored = mirrored;
+    }
+
+    public boolean isAutoMirrored() {
+        return mAutoMirrored;
+    }
+
+    public void setFilterBitmap(boolean filter) {
+        mFilterBitmap = filter;
+    }
+
+    public boolean isFilterBitmap() {
+        return mFilterBitmap;
+    }
+
+    public void setDither(boolean dither) {
+    }
+
+    public final boolean setLayoutDirection(int layoutDirection) {
+        if (mLayoutDirection != layoutDirection) {
+            mLayoutDirection = layoutDirection;
+            return onLayoutDirectionChanged(layoutDirection);
+        }
+        return false;
+    }
+
+    public int getLayoutDirection() {
+        return mLayoutDirection;
+    }
+
+    public boolean onLayoutDirectionChanged(int layoutDirection) {
+        return false;
+    }
+
+    public boolean canApplyTheme() {
+        return false;
+    }
+
+    public void applyTheme(android.content.res.Resources.Theme t) {
+    }
+
+    public boolean isProjected() {
+        return false;
+    }
+
+    /** Describes the drawable's shape for outline-based clipping and shadows. */
+    public void getOutline(android.graphics.Outline outline) {
+        outline.setRect(getBounds());
+        outline.setAlpha(0);
+    }
 
 
     public static class ConstantState {

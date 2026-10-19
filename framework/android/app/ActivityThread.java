@@ -1096,4 +1096,248 @@ public final class ActivityThread {
         } catch (Throwable ignored) {}
         sCurrentActivityThread = null;
     }
+
+    // ------------------------------------------------------------------------------------
+    // Services. There is one process, so the "service manager" is a table of live instances
+    // driven from the main thread: start/stop/bind requests are posted to it, and the
+    // lifecycle callbacks run there as they would on Android.
+
+    private static final class ServiceRecord {
+        final String className;
+        final Service service;
+        boolean started;
+        android.os.IBinder binder;
+        android.content.Intent bindIntent;
+        android.content.ComponentName component;
+        final java.util.ArrayList<android.content.ServiceConnection> connections =
+                new java.util.ArrayList<android.content.ServiceConnection>();
+
+        ServiceRecord(String className, Service service) {
+            this.className = className;
+            this.service = service;
+        }
+    }
+
+    private final java.util.HashMap<String, ServiceRecord> mServiceRecords =
+            new java.util.HashMap<String, ServiceRecord>();
+    private final java.util.HashMap<android.content.ServiceConnection, String> mConnectionTargets =
+            new java.util.HashMap<android.content.ServiceConnection, String>();
+
+    private static String serviceClassName(android.content.Intent intent) {
+        final android.content.ComponentName c = intent != null ? intent.getComponent() : null;
+        return c != null ? c.getClassName() : null;
+    }
+
+    private void postToMain(Runnable r) {
+        if (mH != null) {
+            mH.post(r);
+        } else {
+            r.run();
+        }
+    }
+
+    /** Creates the service and runs onCreate(), or returns the existing instance. */
+    private ServiceRecord ensureService(String className, android.content.Intent intent) {
+        ServiceRecord record;
+        synchronized (mServiceRecords) {
+            record = mServiceRecords.get(className);
+        }
+        if (record != null) {
+            return record;
+        }
+        Service service;
+        try {
+            if (mComponentFactory != null) {
+                service = mComponentFactory.instantiateService(
+                        ClassLoader.getSystemClassLoader(), className, intent);
+            } else {
+                Object instance = Class.forName(className).newInstance();
+                service = instance instanceof Service ? (Service) instance : null;
+            }
+        } catch (Throwable t) {
+            noteFrameworkGap(t);
+            android.util.Log.e("ActivityThread",
+                    "Service '" + className + "' could not be created: " + describeChain(t));
+            return null;
+        }
+        if (service == null) {
+            android.util.Log.e("ActivityThread", "'" + className + "' is not a Service");
+            return null;
+        }
+        record = new ServiceRecord(className, service);
+        record.component = intent.getComponent();
+        service.attach(new ApplicationContext(), this, className, mApplication);
+        synchronized (mServiceRecords) {
+            mServiceRecords.put(className, record);
+        }
+        try {
+            service.onCreate();
+        } catch (Throwable t) {
+            noteFrameworkGap(t);
+            android.util.Log.e("ActivityThread",
+                    "Service.onCreate() failed for " + className + ": " + describeChain(t));
+        }
+        return record;
+    }
+
+    private void destroyServiceIfIdle(ServiceRecord record) {
+        if (record.started || !record.connections.isEmpty()) {
+            return;
+        }
+        synchronized (mServiceRecords) {
+            mServiceRecords.remove(record.className);
+        }
+        try {
+            record.service.onDestroy();
+        } catch (Throwable t) {
+            android.util.Log.e("ActivityThread",
+                    "Service.onDestroy() failed for " + record.className + ": " + describeChain(t));
+        }
+    }
+
+    /** Context.startService: only intents that name their component can be resolved. */
+    public android.content.ComponentName startServiceFromApp(final android.content.Intent intent,
+            android.content.Context context) {
+        final String className = serviceClassName(intent);
+        if (className == null) {
+            android.util.Log.w("ActivityThread",
+                    "startService needs an explicit component; implicit intent ignored: " + intent);
+            return null;
+        }
+        postToMain(new Runnable() {
+            public void run() {
+                final ServiceRecord record = ensureService(className, intent);
+                if (record == null) {
+                    return;
+                }
+                record.started = true;
+                final int startId = record.service.nextStartId();
+                try {
+                    record.service.onStartCommand(intent, 0, startId);
+                } catch (Throwable t) {
+                    noteFrameworkGap(t);
+                    android.util.Log.e("ActivityThread", "Service.onStartCommand() failed for "
+                            + className + ": " + describeChain(t));
+                }
+            }
+        });
+        return intent.getComponent();
+    }
+
+    public boolean stopServiceFromApp(android.content.Intent intent) {
+        final String className = serviceClassName(intent);
+        if (className == null) {
+            return false;
+        }
+        final boolean running;
+        synchronized (mServiceRecords) {
+            running = mServiceRecords.containsKey(className);
+        }
+        postToMain(new Runnable() {
+            public void run() {
+                final ServiceRecord record = mServiceRecords.get(className);
+                if (record != null) {
+                    record.started = false;
+                    destroyServiceIfIdle(record);
+                }
+            }
+        });
+        return running;
+    }
+
+    /** Service.stopSelf: stops the service if startId is the latest start (or -1). */
+    boolean stopServiceSelf(final Service service, int startId) {
+        final boolean latest = startId < 0 || startId == service.lastStartId();
+        if (latest) {
+            postToMain(new Runnable() {
+                public void run() {
+                    final ServiceRecord record = mServiceRecords.get(service.getClassNameInternal());
+                    if (record != null) {
+                        record.started = false;
+                        destroyServiceIfIdle(record);
+                    }
+                }
+            });
+        }
+        return latest;
+    }
+
+    public boolean bindServiceFromApp(final android.content.Intent intent,
+            final android.content.ServiceConnection conn, final int flags,
+            android.content.Context context) {
+        final String className = serviceClassName(intent);
+        if (className == null || conn == null) {
+            return false;
+        }
+        synchronized (mServiceRecords) {
+            mConnectionTargets.put(conn, className);
+        }
+        postToMain(new Runnable() {
+            public void run() {
+                ServiceRecord record = mServiceRecords.get(className);
+                if (record == null && (flags & android.content.Context.BIND_AUTO_CREATE) == 0) {
+                    return;
+                }
+                if (record == null) {
+                    record = ensureService(className, intent);
+                }
+                if (record == null) {
+                    return;
+                }
+                final boolean first = record.connections.isEmpty();
+                record.connections.add(conn);
+                if (first) {
+                    record.bindIntent = intent;
+                    try {
+                        record.binder = record.service.onBind(intent);
+                    } catch (Throwable t) {
+                        noteFrameworkGap(t);
+                        android.util.Log.e("ActivityThread", "Service.onBind() failed for "
+                                + className + ": " + describeChain(t));
+                        record.binder = null;
+                    }
+                }
+                final android.content.ComponentName name = intent.getComponent();
+                try {
+                    if (record.binder != null) {
+                        conn.onServiceConnected(name, record.binder);
+                    } else {
+                        conn.onNullBinding(name);
+                    }
+                } catch (Throwable t) {
+                    android.util.Log.e("ActivityThread", "ServiceConnection callback failed for "
+                            + className + ": " + describeChain(t));
+                }
+            }
+        });
+        return true;
+    }
+
+    public void unbindServiceFromApp(final android.content.ServiceConnection conn) {
+        final String className;
+        synchronized (mServiceRecords) {
+            className = mConnectionTargets.remove(conn);
+        }
+        if (className == null) {
+            throw new IllegalArgumentException("Service not registered: " + conn);
+        }
+        postToMain(new Runnable() {
+            public void run() {
+                final ServiceRecord record = mServiceRecords.get(className);
+                if (record == null || !record.connections.remove(conn)) {
+                    return;
+                }
+                if (record.connections.isEmpty()) {
+                    try {
+                        record.service.onUnbind(record.bindIntent);
+                    } catch (Throwable t) {
+                        android.util.Log.e("ActivityThread", "Service.onUnbind() failed for "
+                                + className + ": " + describeChain(t));
+                    }
+                    record.binder = null;
+                    destroyServiceIfIdle(record);
+                }
+            }
+        });
+    }
 }

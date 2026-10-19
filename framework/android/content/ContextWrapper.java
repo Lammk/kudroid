@@ -19,6 +19,22 @@ public class ContextWrapper extends Context {
     }
     public Context getBaseContext() { return mBase; }
     @Override
+    public ComponentName startService(Intent service) { return mBase != null ? mBase.startService(service) : super.startService(service); }
+    @Override
+    public ComponentName startForegroundService(Intent service) { return mBase != null ? mBase.startForegroundService(service) : super.startForegroundService(service); }
+    @Override
+    public boolean stopService(Intent service) { return mBase != null ? mBase.stopService(service) : super.stopService(service); }
+    @Override
+    public boolean bindService(Intent service, ServiceConnection conn, int flags) { return mBase != null ? mBase.bindService(service, conn, flags) : super.bindService(service, conn, flags); }
+    @Override
+    public boolean bindService(Intent service, int flags, java.util.concurrent.Executor executor, ServiceConnection conn) { return mBase != null ? mBase.bindService(service, flags, executor, conn) : super.bindService(service, flags, executor, conn); }
+    @Override
+    public void unbindService(ServiceConnection conn) { if (mBase != null) mBase.unbindService(conn); else super.unbindService(conn); }
+    @Override
+    public void registerComponentCallbacks(ComponentCallbacks callback) { if (mBase != null) mBase.registerComponentCallbacks(callback); }
+    @Override
+    public void unregisterComponentCallbacks(ComponentCallbacks callback) { if (mBase != null) mBase.unregisterComponentCallbacks(callback); }
+    @Override
     public Context createConfigurationContext(android.content.res.Configuration configuration) {
         return mBase.createConfigurationContext(configuration);
     }
