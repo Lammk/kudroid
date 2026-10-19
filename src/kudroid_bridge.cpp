@@ -112,22 +112,19 @@ extern "C" void kudroid_ios_diagnostic_memory(const char* phase) {
 #endif
 }
 
-extern "C" void kudroid_set_log_dir(const char* dir) {
-    if (!dir) return;
+extern "C" void kudroid_set_log_paths(const char* dir, const char* logDirectory) {
+    if (!dir || !*dir || !logDirectory || !*logDirectory) return;
     // Setup is once per process and directory. The host re-runs it every time its
     // root view appears, and by then guest threads are reading the paths it would
     // rewrite and the files it would reopen.
     static std::mutex s_setupMutex;
     std::lock_guard<std::mutex> setupLock(s_setupMutex);
-    if (g_logDir[0] != '\0' && std::strcmp(g_docsDir, dir) == 0) return;
+    if (std::strcmp(g_docsDir, dir) == 0 && std::strcmp(g_logDir, logDirectory) == 0) return;
     // Recorded before installCrashHandlers below: the fatal-path park needs
     // the main thread to wake it with SIGUSR2 when a worker dies reported.
     crashNoteMainThread();
 
-    // The host passes Documents; logs go into a subdirectory of it. Keeping the two
-    // apart is the whole point — Documents also holds put_apk_here/, android_root/,
-    // extracted_apk/ and micro_tests/, and eight log files scattered among them made
-    // the directory hard to read and "which files are the logs" a thing to remember.
+    // Keep data and diagnostic locations independently configurable.
     strncpy(g_docsDir, dir, sizeof(g_docsDir) - 1);
     g_docsDir[sizeof(g_docsDir) - 1] = '\0';
 
@@ -135,7 +132,7 @@ extern "C" void kudroid_set_log_dir(const char* dir) {
     // name nothing, and every log file then fails to open. Keep the whole Documents
     // directory in that case, the same fallback used when the subdirectory cannot be
     // created below.
-    const int logDirLen = snprintf(g_logDir, sizeof(g_logDir), "%s/logs", g_docsDir);
+    const int logDirLen = snprintf(g_logDir, sizeof(g_logDir), "%s", logDirectory);
     if (logDirLen < 0 || static_cast<size_t>(logDirLen) >= sizeof(g_logDir)) {
         strncpy(g_logDir, g_docsDir, sizeof(g_logDir) - 1);
         g_logDir[sizeof(g_logDir) - 1] = '\0';
@@ -186,6 +183,12 @@ extern "C" void kudroid_set_log_dir(const char* dir) {
             ::close(fd);
         }
     }
+}
+
+extern "C" void kudroid_set_log_dir(const char* dir) {
+    if (!dir || !*dir) return;
+    const std::string logs = std::string(dir) + "/logs";
+    kudroid_set_log_paths(dir, logs.c_str());
 }
 
 // Debug-tab toggle for per-JNI-call tracing (replaces the TEMP-DEBUG hardcode
@@ -279,16 +282,17 @@ extern "C" void kudroid_clear_all_logs(void) {
     kuart_set_missing_class_log_path(classesLogPath.c_str());
 }
 
-extern "C" void kudroid_set_documents_dir(const char* dir) {
+static void configure_documents_dir(const char* dir, bool flatRoot) {
     if (dir && dir[0] != '\0') {
         // Once per directory: the remapper's root is read by guest threads without a
         // lock, and re-applying it also resets the pseudo-files under it.
         static std::mutex s_documentsMutex;
         static std::string s_appliedDir;
         std::lock_guard<std::mutex> documentsLock(s_documentsMutex);
-        if (s_appliedDir == dir) return;
-        s_appliedDir = dir;
-        kudroid::VFSPathRemapper::getInstance().setDocumentsDirectory(dir);
+        const std::string key = std::string(dir) + (flatRoot ? ":flat" : ":android");
+        if (s_appliedDir == key) return;
+        s_appliedDir = key;
+        kudroid::VFSPathRemapper::getInstance(false).setDocumentsDirectory(dir, flatRoot);
         kudroid::PermissionManager::getInstance().init(dir);
 
         if (g_docsDir[0] == '\0') {
@@ -306,4 +310,12 @@ extern "C" void kudroid_set_documents_dir(const char* dir) {
             kuart_set_missing_class_log_path(classesLogPath.c_str());
         }
     }
+}
+
+extern "C" void kudroid_set_documents_dir(const char* dir) {
+    configure_documents_dir(dir, false);
+}
+
+extern "C" void kudroid_set_standalone_root(const char* dir) {
+    configure_documents_dir(dir, true);
 }

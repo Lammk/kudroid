@@ -238,9 +238,18 @@ bool Wait(DexObject* obj, int64_t millis, int32_t nanos) {
         if (millis <= 0 && nanos <= 0) {
             g_monitor_cv.wait(lock, notified);
         } else {
-            const auto timeout = std::chrono::milliseconds(millis) +
-                                 std::chrono::nanoseconds(nanos);
-            g_monitor_cv.wait_for(lock, timeout, notified);
+            const auto now = std::chrono::steady_clock::now();
+            const auto maximum = std::chrono::steady_clock::time_point::max();
+            const auto remaining = maximum - now;
+            const int64_t max_millis =
+                std::chrono::duration_cast<std::chrono::milliseconds>(remaining).count();
+            auto deadline = maximum;
+            if (millis < max_millis) {
+                const auto timeout = std::chrono::milliseconds(millis) +
+                                     std::chrono::nanoseconds(nanos);
+                if (timeout < remaining) deadline = now + timeout;
+            }
+            g_monitor_cv.wait_until(lock, deadline, notified);
         }
 
         g_monitor_cv.wait(lock, [obj] { return obj->lock_owner_tid == 0; });

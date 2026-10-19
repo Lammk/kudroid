@@ -1,6 +1,7 @@
 package android.content.res;
 
-/** Stub automatically generated for android.content.res.XmlResourceParser */
-public class XmlResourceParser {
-    public XmlResourceParser() {}
+public interface XmlResourceParser extends org.xmlpull.v1.XmlPullParser,
+        android.util.AttributeSet, AutoCloseable {
+    void close();
+    android.util.TypedValue getAttributeTypedValue(int index);
 }

@@ -35,8 +35,31 @@ struct ResourceTableAnalysis {
     uint64_t skipped_entries = 0;
 };
 
+struct ResourceScalar {
+    uint8_t type = 0;
+    uint32_t data = 0;
+    uint32_t resource_id = 0;
+    std::string text;
+};
+struct ResourceStyleConfig {
+    std::string locale;
+    int ui_mode = 0;
+    int sdk = 0;
+    int width_dp = 0;
+    int height_dp = 0;
+    int orientation = 0;
+};
+bool resource_get_style(uint32_t id, const ResourceStyleConfig& config,
+                        std::map<uint32_t, ResourceScalar>* attributes);
+bool resource_get_value(uint32_t id, const std::string& locale, bool resolve,
+                        ResourceScalar* value);
+bool resource_get_pool_string(uint32_t index, std::string* value);
+
 bool resource_get_identifier(const std::string& name, const std::string& type,
                              const std::string& package, uint32_t* id);
+// package, type and entry name of a resource id; framework ids report package "android".
+bool resource_get_name(uint32_t id, std::string* package, std::string* type,
+                       std::string* entry);
 bool resource_get_string(uint32_t id, const std::string& locale, std::string* value);
 bool resource_get_color(uint32_t id, const std::string& locale, uint32_t* value);
 void reset_resource_table_cache();

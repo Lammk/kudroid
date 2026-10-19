@@ -13,9 +13,9 @@ namespace kudroid {
 
 class VFSPathRemapper {
 public:
-    static VFSPathRemapper& getInstance();
+    static VFSPathRemapper& getInstance(bool initializeTree = true);
 
-    void setDocumentsDirectory(const std::string& documentsDirectory);
+    void setDocumentsDirectory(const std::string& documentsDirectory, bool flatRoot = false);
     [[nodiscard]] std::string remap(const char* originalPath) const;
     [[nodiscard]] const std::string& androidRoot() const { return androidRoot_; }
 

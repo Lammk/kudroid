@@ -30,6 +30,53 @@ public final class Long extends Number implements Comparable<Long> {
         return new Long(parseLong(s));
     }
 
+    public static Long decode(String s) {
+        if (s == null) throw new NullPointerException("s");
+        int length = s.length();
+        if (length == 0) throw new NumberFormatException("empty string");
+        int index = 0;
+        boolean negative = s.charAt(0) == '-';
+        if (negative || s.charAt(0) == '+') index++;
+        int radix = 10;
+        if (index + 1 < length && s.charAt(index) == '0' &&
+                (s.charAt(index + 1) == 'x' || s.charAt(index + 1) == 'X')) {
+            radix = 16;
+            index += 2;
+        } else if (index < length && s.charAt(index) == '#') {
+            radix = 16;
+            index++;
+        } else if (index + 1 < length && s.charAt(index) == '0') {
+            radix = 8;
+            index++;
+        }
+        if (index == length || s.charAt(index) == '-' || s.charAt(index) == '+') {
+            throw new NumberFormatException(s);
+        }
+        String digits = s.substring(index);
+        return valueOf(parseLong(negative ? "-" + digits : digits, radix));
+    }
+
+    public static Long getLong(String name) {
+        return getLong(name, (Long) null);
+    }
+
+    public static Long getLong(String name, long defaultValue) {
+        Long result = getLong(name, (Long) null);
+        return result == null ? valueOf(defaultValue) : result;
+    }
+
+    public static Long getLong(String name, Long defaultValue) {
+        String property;
+        try { property = System.getProperty(name); }
+        catch (IllegalArgumentException e) { return defaultValue; }
+        catch (NullPointerException e) { return defaultValue; }
+        if (property != null) {
+            try { return decode(property); }
+            catch (NumberFormatException e) {}
+        }
+        return defaultValue;
+    }
+
     public int intValue() {
         return (int) value;
     }

@@ -74,10 +74,27 @@ public class SystemPackageManager extends PackageManager {
         }
     }
 
+    private static int sApplicationTheme;
+    private static final java.util.HashMap<String, Integer> sActivityThemes = new java.util.HashMap<>();
+
+    public static synchronized void registerTheme(String component, int theme) {
+        if (component == null || component.isEmpty()) sApplicationTheme = theme;
+        else sActivityThemes.put(component, theme);
+    }
+
+    public static synchronized int getRegisteredApplicationTheme() { return sApplicationTheme; }
+
+    private static synchronized int activityTheme(String component) {
+        Integer theme = sActivityThemes.get(component);
+        return theme == null ? 0 : theme;
+    }
+
     /** Register the package name and activity list the manifest declared. */
     public static synchronized void registerPackage(String packageName, String[] activities) {
         if (packageName != null) sPackageName = packageName;
         sActivities.clear();
+        sApplicationTheme = 0;
+        sActivityThemes.clear();
         if (activities != null) {
             for (String a : activities) {
                 if (a != null && !a.isEmpty()) sActivities.add(a);
@@ -153,6 +170,7 @@ public class SystemPackageManager extends PackageManager {
         // whose symptom (metaData present but empty) is indistinguishable from the
         // manifest not declaring anything.
         ai.metaData = metaDataFor(null);
+        ai.theme = sPackageName.equals(packageName) ? getRegisteredApplicationTheme() : 0;
         return ai;
     }
 
@@ -180,6 +198,7 @@ public class SystemPackageManager extends PackageManager {
         ai.packageName = component.getPackageName() != null
                 ? component.getPackageName() : sPackageName;
         ai.metaData = metaDataFor(className);
+        ai.theme = activityTheme(className);
         ai.exported = true;
         ai.enabled = true;
         try {
@@ -223,6 +242,12 @@ public class SystemPackageManager extends PackageManager {
     @Override
     public boolean hasSystemFeature(String name) {
         if (name == null) {
+            return false;
+        }
+        // The host exposes touch input rather than a television interface.
+        if (name.equals("android.software.leanback") ||
+                name.equals("android.software.leanback_only") ||
+                name.equals("android.hardware.type.television")) {
             return false;
         }
         // No input hardware is reachable; see android.hardware.input.InputManager, which

@@ -48,6 +48,12 @@ void kudroid_clear_all_logs(void);
 
 /// sets the documents directory used by vfspathremapper.
 void kudroid_set_documents_dir(const char* dir);
+void kudroid_set_standalone_root(const char* dir);
+void kudroid_set_log_paths(const char* documents, const char* logs);
+int kudroid_debugger_attached(void);
+int kudroid_has_jit_entitlement(void);
+int kudroid_export_extract(const char* apk, const char* target, char** error);
+int kudroid_export_archive(const char* directory, const char* output, char** error);
 
 int kudroid_is_jit_enabled(void);
 

@@ -153,6 +153,14 @@ extern "C" const char* kudroid_install_apk(const char* apkPath) {
 #include <unistd.h>
 #include <libkern/OSCacheControl.h>
 #include <TargetConditionals.h>
+#include <CoreFoundation/CoreFoundation.h>
+#if __has_include(<Security/SecTask.h>)
+#include <Security/SecTask.h>
+#else
+struct __SecTask;
+extern "C" __SecTask* SecTaskCreateFromSelf(CFAllocatorRef) __attribute__((weak_import));
+extern "C" CFTypeRef SecTaskCopyValueForEntitlement(__SecTask*, CFStringRef, CFErrorRef*) __attribute__((weak_import));
+#endif
 
 // csops() is a private but stable API for code-signing status.
 extern "C" int csops(pid_t pid, unsigned int ops, void* useraddr, size_t usersize);
@@ -163,6 +171,33 @@ extern "C" int csops(pid_t pid, unsigned int ops, void* useraddr, size_t usersiz
 #define CS_DEBUGGED 0x10000000
 #endif
 #endif
+
+// Read the debugger flag without probing executable memory.
+extern "C" int kudroid_debugger_attached(void) {
+#if defined(__APPLE__)
+    unsigned int flags = 0;
+    return csops(getpid(), CS_OPS_STATUS, &flags, sizeof(flags)) == 0 &&
+           (flags & CS_DEBUGGED) != 0;
+#else
+    return 1;
+#endif
+}
+
+extern "C" int kudroid_has_jit_entitlement(void) {
+#if defined(__APPLE__)
+    if (!SecTaskCreateFromSelf || !SecTaskCopyValueForEntitlement) return 0;
+    auto task = SecTaskCreateFromSelf(kCFAllocatorDefault);
+    if (!task) return 0;
+    CFTypeRef value = SecTaskCopyValueForEntitlement(task, CFSTR("dynamic-codesigning"), nullptr);
+    const bool allowed = value && CFGetTypeID(value) == CFBooleanGetTypeID() &&
+                         CFBooleanGetValue(static_cast<CFBooleanRef>(value));
+    if (value) CFRelease(value);
+    CFRelease(task);
+    return allowed ? 1 : 0;
+#else
+    return 0;
+#endif
+}
 
 // Return 1 when JIT memory is available, 0 otherwise.
 extern "C" int kudroid_is_jit_enabled(void) {

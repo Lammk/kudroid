@@ -2014,11 +2014,22 @@ extern "C" EGLBoolean bionic_eglGetConfigs(EGLDisplay dpy, EGLConfig* configs,
     return r;
 }
 
+// Logs the requested context version; does not touch the EGL error state.
+static void log_context_request(const EGLint* attribs) {
+    int major = 1, minor = 0;
+    for (int i = 0; attribs && i < 64 && attribs[i] != 0x3038 /* EGL_NONE */; i += 2) {
+        if (attribs[i] == 0x3098 /* EGL_CONTEXT_MAJOR_VERSION */) major = attribs[i + 1];
+        else if (attribs[i] == 0x30FB /* EGL_CONTEXT_MINOR_VERSION */) minor = attribs[i + 1];
+    }
+    gpuLog("eglCreateContext: requested ES %d.%d", major, minor);
+}
+
 extern "C" EGLContext bionic_eglCreateContext(EGLDisplay dpy, EGLConfig config,
                                               EGLContext share_context,
                                               const EGLint* attrib_list) {
     auto f = eglFn<EGLContext(EGLDisplay, EGLConfig, EGLContext, const EGLint*)>("eglCreateContext");
     if (!f) { EGL_FORWARD_ERR("eglCreateContext", ""); return EGL_NO_CONTEXT; }
+    log_context_request(attrib_list);
     gpuLog("eglCreateContext: calling ANGLE...");
     EGLContext ctx = f(dpy, config, share_context, attrib_list);
     gpuLog("eglCreateContext -> %p", (void*)ctx);

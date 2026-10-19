@@ -41,4 +41,19 @@ public interface AttributeSet {
      * returns a float property.
      */
     float getAttributeFloatValue(String namespace, String name, float defaultValue);
+    String getPositionDescription();
+    int getAttributeNameResource(int index);
+    int getAttributeListValue(String namespace, String name, String[] options, int defaultValue);
+    int getAttributeListValue(int index, String[] options, int defaultValue);
+    boolean getAttributeBooleanValue(int index, boolean defaultValue);
+    int getAttributeResourceValue(String namespace, String name, int defaultValue);
+    int getAttributeResourceValue(int index, int defaultValue);
+    int getAttributeIntValue(int index, int defaultValue);
+    int getAttributeUnsignedIntValue(String namespace, String name, int defaultValue);
+    int getAttributeUnsignedIntValue(int index, int defaultValue);
+    float getAttributeFloatValue(int index, float defaultValue);
+    String getIdAttribute();
+    String getClassAttribute();
+    int getIdAttributeResourceValue(int defaultValue);
+    int getStyleAttribute();
 }

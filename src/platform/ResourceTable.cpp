@@ -1,4 +1,5 @@
 #include "kudroid/ResourceTable.h"
+#include "kudroid/FrameworkResources.h"
 #include "kudroid/platform/AssetShim.h"
 
 #include <algorithm>
@@ -373,11 +374,24 @@ void FinalizeAnalysis(ParserAnalysis* state) {
     }
 }
 
+struct ResourceBag {
+    uint32_t parent = 0;
+    bool selectable = true;
+    std::string locale;
+    uint16_t sdk = 0, smallest_width = 0, width = 0, height = 0;
+    uint8_t ui_mode = 0, orientation = 0;
+    std::map<uint32_t, ResourceScalar> attributes;
+};
+
 struct ResourceTable {
     std::vector<std::string> globalStrings;
     std::unordered_map<uint32_t, std::vector<ResourceValue>> values;
     std::unordered_map<std::string, uint32_t> identifiers;
     std::string defaultPackage;
+    std::unordered_map<uint32_t, std::vector<ResourceBag>> bags;
+    // id -> "package:type/entry", built from `identifiers` on first use.
+    mutable std::once_flag reverseOnce;
+    mutable std::unordered_map<uint32_t, std::string> reverseNames;
     bool parse(const std::vector<uint8_t>& bytes, ParserAnalysis* analysis = nullptr);
     const ResourceValue* select(uint32_t id, const std::string& locale) const;
     bool getString(uint32_t id, const std::string& locale, std::string* out, unsigned depth = 0) const;
@@ -454,33 +468,65 @@ bool ParseTypeChunk(const std::vector<uint8_t>& bytes, size_t base, size_t packa
         }
 
         if ((entryFlags & kEntryFlagComplex) != 0) {
-            if (analysis == nullptr) continue;
             if (entrySize < 16) {
-                ++analysis->result->skipped_entries;
                 MarkMalformed(analysis, "complex resource entry header is truncated");
                 continue;
             }
             const uint32_t mapCount = U32(bytes.data() + entry + 12);
             const size_t mapStart = entry + entrySize;
             if (mapCount > 1'000'000 || mapCount > (chunkEnd - mapStart) / 12u) {
-                ++analysis->result->skipped_entries;
                 MarkMalformed(analysis, "complex resource map array is out of bounds");
                 continue;
             }
-            ++analysis->result->complex_entries;
-            ++analysis->result->skipped_entries;
+            if (analysis != nullptr) {
+                ++analysis->result->complex_entries;
+                ++analysis->result->skipped_entries;
+            }
+            ResourceBag bag;
+            bag.parent = U32(bytes.data() + entry + 8);
+            bag.locale = locale;
+            const uint8_t* config = bytes.data() + base + 20;
+            for (size_t at = 4; at < configSize; ++at) {
+                const bool supported = (at >= 8 && at <= 12) || (at >= 24 && at <= 25)
+                        || (at >= 29 && at <= 35);
+                if (!supported && config[at] != 0) bag.selectable = false;
+            }
+            if (ConfigHas(configSize, 29, 1) && (config[29] & 0xc0) != 0) bag.selectable = false;
+            bag.sdk = ConfigU16(config, configSize, 24);
+            bag.smallest_width = ConfigU16(config, configSize, 30);
+            bag.width = ConfigU16(config, configSize, 32);
+            bag.height = ConfigU16(config, configSize, 34);
+            if (ConfigHas(configSize, 29, 1)) bag.ui_mode = config[29];
+            if (ConfigHas(configSize, 12, 1)) bag.orientation = config[12];
+            bool valid = true;
             for (uint32_t mapIndex = 0; mapIndex < mapCount; ++mapIndex) {
-                const size_t valueOffset = mapStart + static_cast<size_t>(mapIndex) * 12u + 4u;
-                const uint8_t* value = bytes.data() + valueOffset;
-                const uint16_t valueSize = U16(value);
-                if (valueSize != 8) {
+                const size_t mapOffset = mapStart + static_cast<size_t>(mapIndex) * 12u;
+                const uint8_t* value = bytes.data() + mapOffset + 4u;
+                if (U16(value) != 8) {
                     MarkMalformed(analysis, "complex resource map value is truncated");
+                    valid = false;
                     continue;
                 }
                 AddValueType(analysis, value[3]);
-                ++analysis->result->complex_map_values;
-                if (value[3] == kTypeString && U32(value + 4) >= globalStrings.size())
-                    MarkMalformed(analysis, "complex resource string value index is out of range");
+                if (analysis != nullptr) ++analysis->result->complex_map_values;
+                ResourceScalar scalar;
+                scalar.type = value[3];
+                scalar.data = U32(value + 4);
+                if (scalar.type == kTypeString) {
+                    if (scalar.data >= globalStrings.size()) {
+                        MarkMalformed(analysis, "complex resource string value index is out of range");
+                        valid = false;
+                        continue;
+                    }
+                    scalar.text = globalStrings[scalar.data];
+                }
+                bag.attributes[U32(bytes.data() + mapOffset)] = std::move(scalar);
+            }
+            if (valid && typeNames[typeNameIndex] == "style") {
+                table->bags[id].push_back(std::move(bag));
+                const std::string suffix = ":" + typeNames[typeNameIndex] + "/" + keyNames[keyIndex];
+                table->identifiers[packageName + suffix] = id;
+                table->identifiers["*" + suffix] = id;
             }
             continue;
         }
@@ -731,24 +777,191 @@ bool resource_analyze_bytes(const uint8_t* bytes, size_t size,
     return true;
 }
 
+bool resource_get_pool_string(uint32_t index, std::string* value) {
+    const auto table = LoadTable();
+    if (!table || value == nullptr || index >= table->globalStrings.size()) return false;
+    *value = table->globalStrings[index];
+    return true;
+}
+
+// A reference may cross tables (an app color aliasing @android:color/white), so each hop
+// picks the table that owns the id. Framework ids need no application table at all.
+bool resource_get_value(uint32_t id, const std::string& locale, bool resolve,
+                        ResourceScalar* value) {
+    if (value == nullptr) return false;
+    const auto table = LoadTable();
+    std::set<uint32_t> seen;
+    while (seen.insert(id).second && seen.size() <= 64) {
+        uint8_t type = 0;
+        uint32_t data = 0;
+        std::string text;
+        if (framework_resource_is_id(id)) {
+            if (framework_resource_string(id, &text)) type = kTypeString;
+            else if (!framework_resource_scalar(id, &type, &data)) return false;
+        } else {
+            if (!table) return false;
+            const ResourceValue* scalar = table->select(id, locale);
+            if (scalar == nullptr) return false;
+            type = scalar->type;
+            data = scalar->data;
+            if (type == kTypeString && data < table->globalStrings.size())
+                text = table->globalStrings[data];
+        }
+        if (resolve && type == kTypeReference && data != 0) {
+            id = data;
+            continue;
+        }
+        *value = ResourceScalar{};
+        value->type = type;
+        value->data = data;
+        value->resource_id = id;
+        value->text = std::move(text);
+        return true;
+    }
+    return false;
+}
+
+bool resource_get_style(uint32_t id, const ResourceStyleConfig& config,
+                        std::map<uint32_t, ResourceScalar>* attributes) {
+    const auto table = LoadTable();
+    if (!table || attributes == nullptr) return false;
+    std::vector<const ResourceBag*> chain;
+    std::set<uint32_t> seen;
+    const std::string wanted = NormalizeLocale(config.locale);
+    while (id != 0) {
+        if (!seen.insert(id).second || seen.size() > 64) return false;
+        const auto found = table->bags.find(id);
+        if (found == table->bags.end()) {
+            const ResourceValue* alias = table->select(id, config.locale);
+            if (alias != nullptr && alias->type == kTypeReference) { id = alias->data; continue; }
+            // Framework parents can be absent from an application resource table.
+            if (!chain.empty() && (id >> 24) == 1) break;
+            return false;
+        }
+        const ResourceBag* best = nullptr;
+        std::vector<int> best_rank;
+        for (const ResourceBag& bag : found->second) {
+            if (!bag.selectable) continue;
+            const std::string locale = NormalizeLocale(bag.locale);
+            int language = 0;
+            if (!locale.empty()) {
+                if (locale == wanted) language = 2;
+                else if (locale.size() == 2 && wanted.size() >= 2 && wanted.compare(0, 2, locale) == 0) language = 1;
+                else continue;
+            }
+            if (bag.sdk > config.sdk || bag.smallest_width > std::min(config.width_dp, config.height_dp)
+                    || bag.width > config.width_dp || bag.height > config.height_dp
+                    || (bag.orientation != 0 && bag.orientation != config.orientation)
+                    || ((bag.ui_mode & 0x0f) != 0 && (bag.ui_mode & 0x0f) != (config.ui_mode & 0x0f))
+                    || ((bag.ui_mode & 0x30) != 0 && (bag.ui_mode & 0x30) != (config.ui_mode & 0x30))) continue;
+            std::vector<int> rank{language, bag.smallest_width, bag.width, bag.height,
+                                  bag.orientation != 0, (bag.ui_mode & 0x0f) != 0,
+                                  (bag.ui_mode & 0x30) != 0, bag.sdk};
+            if (best == nullptr || rank > best_rank) { best = &bag; best_rank = std::move(rank); }
+        }
+        if (best == nullptr) return false;
+        chain.push_back(best);
+        id = best->parent;
+    }
+    if (chain.empty()) return false;
+    attributes->clear();
+    for (auto bag = chain.rbegin(); bag != chain.rend(); ++bag) {
+        for (const auto& attribute : (*bag)->attributes) (*attributes)[attribute.first] = attribute.second;
+    }
+    return true;
+}
+
+// Resources.getIdentifier: the name is "[package:][type/]entry"; defType and defPackage
+// fill in whatever the name leaves out. "android" selects the framework table.
 bool resource_get_identifier(const std::string& name, const std::string& type,
                              const std::string& package, uint32_t* id) {
-    if (id == nullptr || name.empty() || type.empty()) return false;
+    if (id == nullptr || name.empty()) return false;
+    std::string entry = name, wantedType = type, wantedPackage = package;
+    const size_t slash = entry.find('/');
+    const size_t colon = entry.find(':');
+    if (slash != std::string::npos) {
+        std::string head = entry.substr(0, slash);
+        entry = entry.substr(slash + 1);
+        const size_t headColon = head.find(':');
+        if (headColon != std::string::npos) {
+            wantedPackage = head.substr(0, headColon);
+            wantedType = head.substr(headColon + 1);
+        } else {
+            wantedType = head;
+        }
+    } else if (colon != std::string::npos) {
+        wantedPackage = entry.substr(0, colon);
+        entry = entry.substr(colon + 1);
+    }
+    if (entry.empty() || wantedType.empty()) return false;
+    if (wantedPackage == "android") return framework_resource_find(wantedType, entry, id);
     const auto table = LoadTable();
     if (!table) return false;
-    const std::string packageName = package.empty() ? table->defaultPackage : package;
-    const auto found = table->identifiers.find(packageName + ":" + type + "/" + name);
+    const std::string packageName = wantedPackage.empty() ? table->defaultPackage : wantedPackage;
+    const auto found = table->identifiers.find(packageName + ":" + wantedType + "/" + entry);
     if (found == table->identifiers.end()) return false;
     *id = found->second;
     return true;
 }
-bool resource_get_string(uint32_t id, const std::string& locale, std::string* value) {
-    const auto table = LoadTable();
-    return table && table->getString(id, locale, value);
+
+bool resource_get_name(uint32_t id, std::string* package, std::string* type,
+                       std::string* entry) {
+    std::string typeName, entryName;
+    if (framework_resource_is_id(id)) {
+        if (!framework_resource_name(id, &typeName, &entryName)) return false;
+        if (package != nullptr) *package = "android";
+    } else {
+        const auto table = LoadTable();
+        if (!table) return false;
+        std::call_once(table->reverseOnce, [&table] {
+            for (const auto& named : table->identifiers) {
+                // "*:type/name" is the package-less alias of the entry; skip it.
+                if (named.first.compare(0, 2, "*:") == 0) continue;
+                table->reverseNames.emplace(named.second, named.first);
+            }
+        });
+        const auto found = table->reverseNames.find(id);
+        if (found == table->reverseNames.end()) return false;
+        const std::string& full = found->second;  // package:type/entry
+        const size_t colon = full.find(':');
+        const size_t slash = full.find('/');
+        if (colon == std::string::npos || slash == std::string::npos || slash < colon) return false;
+        if (package != nullptr) *package = full.substr(0, colon);
+        typeName = full.substr(colon + 1, slash - colon - 1);
+        entryName = full.substr(slash + 1);
+    }
+    if (type != nullptr) *type = typeName;
+    if (entry != nullptr) *entry = entryName;
+    return true;
 }
+
+bool resource_get_string(uint32_t id, const std::string& locale, std::string* value) {
+    ResourceScalar scalar;
+    if (value == nullptr || !resource_get_value(id, locale, true, &scalar) ||
+        scalar.type != kTypeString) return false;
+    *value = scalar.text;
+    return true;
+}
+
 bool resource_get_color(uint32_t id, const std::string& locale, uint32_t* value) {
-    const auto table = LoadTable();
-    return table && table->getColor(id, locale, value);
+    ResourceScalar scalar;
+    if (value == nullptr || !resource_get_value(id, locale, true, &scalar)) return false;
+    if (scalar.type == kTypeColorArgb8) {
+        *value = scalar.data;
+    } else if (scalar.type == kTypeColorRgb8) {
+        *value = scalar.data | 0xff000000u;
+    } else if (scalar.type == kTypeColorArgb4) {
+        const uint32_t a = (scalar.data >> 12) & 0xf, r = (scalar.data >> 8) & 0xf;
+        const uint32_t g = (scalar.data >> 4) & 0xf, b = scalar.data & 0xf;
+        *value = ((a * 17) << 24) | ((r * 17) << 16) | ((g * 17) << 8) | (b * 17);
+    } else if (scalar.type == kTypeColorRgb4) {
+        const uint32_t r = (scalar.data >> 8) & 0xf, g = (scalar.data >> 4) & 0xf;
+        const uint32_t b = scalar.data & 0xf;
+        *value = 0xff000000u | ((r * 17) << 16) | ((g * 17) << 8) | (b * 17);
+    } else {
+        return false;
+    }
+    return true;
 }
 void reset_resource_table_cache() {
     std::lock_guard<std::mutex> lock(g_tableMutex);

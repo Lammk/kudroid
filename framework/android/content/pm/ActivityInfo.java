@@ -60,6 +60,10 @@ public class ActivityInfo implements Parcelable {
     public static final int SCREEN_ORIENTATION_LOCKED = 14;
 
     public ActivityInfo() {}
+    public final int getThemeResource() {
+        return theme != 0 ? theme : applicationInfo != null ? applicationInfo.theme : 0;
+    }
+
     public int describeContents() { return 0; }
     public void writeToParcel(Parcel dest, int flags) {}
 }

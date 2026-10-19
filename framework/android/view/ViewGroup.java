@@ -9,6 +9,11 @@ import android.content.Context;
  * Provides basic child management.
  */
 public class ViewGroup extends View implements ViewParent {
+    @Override
+    protected void dispatchCancelPendingInputEvents() {
+        super.dispatchCancelPendingInputEvents();
+        for (int i = 0; i < getChildCount(); i++) getChildAt(i).dispatchCancelPendingInputEvents();
+    }
     // protected so subclasses in this package tree can iterate children directly.
     protected View[] mChildren;
     protected int mChildCount = 0;
@@ -31,41 +36,248 @@ public class ViewGroup extends View implements ViewParent {
     public ViewGroup(Context context, android.util.AttributeSet attrs, int defStyleAttr, int defStyleRes) {
         super(context, attrs, defStyleAttr, defStyleRes);
         mChildren = new View[16];
+        if (context != null && (attrs != null || defStyleAttr != 0 || defStyleRes != 0)) {
+            final android.content.res.TypedArray a = context.obtainStyledAttributes(
+                    attrs, com.android.internal.R.styleable.ViewGroup, defStyleAttr, defStyleRes);
+            try {
+                final int n = a.getIndexCount();
+                for (int i = 0; i < n; i++) {
+                    final int attr = a.getIndex(i);
+                    if (attr == com.android.internal.R.styleable.ViewGroup_clipChildren) {
+                        mClipChildren = a.getBoolean(attr, true);
+                    } else if (attr == com.android.internal.R.styleable.ViewGroup_clipToPadding) {
+                        mClipToPadding = a.getBoolean(attr, true);
+                    } else if (attr == com.android.internal.R.styleable.ViewGroup_descendantFocusability) {
+                        mDescendantFocusability = a.getInt(attr, FOCUS_BEFORE_DESCENDANTS);
+                    }
+                }
+            } finally {
+                a.recycle();
+            }
+        }
     }
 
-    /**
-     * add a child view.
-     */
+    public static final int FOCUS_BEFORE_DESCENDANTS = 0x20000;
+    public static final int FOCUS_AFTER_DESCENDANTS = 0x40000;
+    public static final int FOCUS_BLOCK_DESCENDANTS = 0x60000;
+
+    private boolean mClipChildren = true;
+    private boolean mClipToPadding = true;
+    private int mDescendantFocusability = FOCUS_BEFORE_DESCENDANTS;
+    private OnHierarchyChangeListener mOnHierarchyChangeListener;
+
+    public boolean getClipChildren() { return mClipChildren; }
+    public void setClipChildren(boolean clipChildren) { mClipChildren = clipChildren; }
+    public boolean getClipToPadding() { return mClipToPadding; }
+    public void setClipToPadding(boolean clipToPadding) { mClipToPadding = clipToPadding; }
+    public int getDescendantFocusability() { return mDescendantFocusability; }
+    public void setDescendantFocusability(int focusability) { mDescendantFocusability = focusability; }
+
+    public void setOnHierarchyChangeListener(OnHierarchyChangeListener listener) {
+        mOnHierarchyChangeListener = listener;
+    }
+
+    /** True when this group takes over the gesture instead of its children. */
+    public boolean onInterceptTouchEvent(MotionEvent ev) {
+        return false;
+    }
+
+    // LayoutParams generation.
+
+    protected LayoutParams generateDefaultLayoutParams() {
+        return new LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
+    }
+
+    public LayoutParams generateLayoutParams(android.util.AttributeSet attrs) {
+        return new LayoutParams(getContext(), attrs);
+    }
+
+    protected LayoutParams generateLayoutParams(LayoutParams p) {
+        return p;
+    }
+
+    protected boolean checkLayoutParams(LayoutParams p) {
+        return p != null;
+    }
+
+    // Measuring children.
+
+    protected void measureChildren(int widthMeasureSpec, int heightMeasureSpec) {
+        for (int i = 0; i < mChildCount; i++) {
+            final View child = mChildren[i];
+            if (child != null && child.getVisibility() != GONE) {
+                measureChild(child, widthMeasureSpec, heightMeasureSpec);
+            }
+        }
+    }
+
+    protected void measureChild(View child, int parentWidthMeasureSpec, int parentHeightMeasureSpec) {
+        final LayoutParams lp = child.getLayoutParams();
+        final int childWidthMeasureSpec = getChildMeasureSpec(parentWidthMeasureSpec,
+                mPaddingLeft + mPaddingRight, lp.width);
+        final int childHeightMeasureSpec = getChildMeasureSpec(parentHeightMeasureSpec,
+                mPaddingTop + mPaddingBottom, lp.height);
+        child.measure(childWidthMeasureSpec, childHeightMeasureSpec);
+    }
+
+    protected void measureChildWithMargins(View child, int parentWidthMeasureSpec, int widthUsed,
+            int parentHeightMeasureSpec, int heightUsed) {
+        final MarginLayoutParams lp = (MarginLayoutParams) child.getLayoutParams();
+        final int childWidthMeasureSpec = getChildMeasureSpec(parentWidthMeasureSpec,
+                mPaddingLeft + mPaddingRight + lp.leftMargin + lp.rightMargin + widthUsed, lp.width);
+        final int childHeightMeasureSpec = getChildMeasureSpec(parentHeightMeasureSpec,
+                mPaddingTop + mPaddingBottom + lp.topMargin + lp.bottomMargin + heightUsed, lp.height);
+        child.measure(childWidthMeasureSpec, childHeightMeasureSpec);
+    }
+
+    /** The spec a child gets from its parent's spec, padding and requested dimension. */
+    public static int getChildMeasureSpec(int spec, int padding, int childDimension) {
+        final int specMode = MeasureSpec.getMode(spec);
+        final int specSize = MeasureSpec.getSize(spec);
+        final int size = Math.max(0, specSize - padding);
+        int resultSize = 0;
+        int resultMode = 0;
+        switch (specMode) {
+            case MeasureSpec.EXACTLY:
+                if (childDimension >= 0) {
+                    resultSize = childDimension;
+                    resultMode = MeasureSpec.EXACTLY;
+                } else if (childDimension == LayoutParams.MATCH_PARENT) {
+                    resultSize = size;
+                    resultMode = MeasureSpec.EXACTLY;
+                } else if (childDimension == LayoutParams.WRAP_CONTENT) {
+                    resultSize = size;
+                    resultMode = MeasureSpec.AT_MOST;
+                }
+                break;
+            case MeasureSpec.AT_MOST:
+                if (childDimension >= 0) {
+                    resultSize = childDimension;
+                    resultMode = MeasureSpec.EXACTLY;
+                } else if (childDimension == LayoutParams.MATCH_PARENT
+                        || childDimension == LayoutParams.WRAP_CONTENT) {
+                    resultSize = size;
+                    resultMode = MeasureSpec.AT_MOST;
+                }
+                break;
+            case MeasureSpec.UNSPECIFIED:
+                if (childDimension >= 0) {
+                    resultSize = childDimension;
+                    resultMode = MeasureSpec.EXACTLY;
+                } else if (childDimension == LayoutParams.MATCH_PARENT
+                        || childDimension == LayoutParams.WRAP_CONTENT) {
+                    resultSize = size;
+                    resultMode = MeasureSpec.UNSPECIFIED;
+                }
+                break;
+        }
+        return MeasureSpec.makeMeasureSpec(resultSize, resultMode);
+    }
+
+    /** Add a child at the end, with its own LayoutParams or this group's defaults. */
     public void addView(View child) {
+        addView(child, -1);
+    }
+
+    public void addView(View child, int index) {
+        if (child == null) {
+            throw new IllegalArgumentException("Cannot add a null child view to a ViewGroup");
+        }
+        LayoutParams params = child.getLayoutParams();
+        if (params == null) {
+            params = generateDefaultLayoutParams();
+            if (params == null) {
+                throw new IllegalArgumentException("generateDefaultLayoutParams() cannot return null");
+            }
+        }
+        addView(child, index, params);
+    }
+
+    public void addView(View child, int width, int height) {
+        final LayoutParams params = generateDefaultLayoutParams();
+        params.width = width;
+        params.height = height;
+        addView(child, -1, params);
+    }
+
+    public void addView(View child, LayoutParams params) {
+        addView(child, -1, params);
+    }
+
+    public void addView(View child, int index, LayoutParams params) {
+        if (child == null) {
+            throw new IllegalArgumentException("Cannot add a null child view to a ViewGroup");
+        }
+        addViewInner(child, index, params);
+        requestLayout();
+        invalidate();
+    }
+
+    private void addViewInner(View child, int index, LayoutParams params) {
+        if (child.getParent() != null) {
+            throw new IllegalStateException("The specified child already has a parent. "
+                    + "You must call removeView() on the child's parent first.");
+        }
+        if (!checkLayoutParams(params)) params = generateLayoutParams(params);
+        child.setLayoutParamsNoRequest(params);
+        if (index < 0 || index > mChildCount) index = mChildCount;
         if (mChildCount >= mChildren.length) {
             View[] bigger = new View[mChildren.length * 2];
             System.arraycopy(mChildren, 0, bigger, 0, mChildren.length);
             mChildren = bigger;
         }
-        mChildren[mChildCount++] = child;
+        System.arraycopy(mChildren, index, mChildren, index + 1, mChildCount - index);
+        mChildren[index] = child;
+        mChildCount++;
         child.setParent(this);
+        onViewAdded(child);
     }
 
-    /**
-     * add a child view with layout parameters.
-     */
-    public void addView(View child, LayoutParams params) {
-        addView(child);
-    }
-
-    /**
-     * delete a child view.
-     */
-    public void removeView(View view) {
-        for (int i = 0; i < mChildCount; i++) {
-            if (mChildren[i] == view) {
-                System.arraycopy(mChildren, i + 1, mChildren, i, mChildCount - i - 1);
-                mChildCount--;
-                mChildren[mChildCount] = null;
-                view.setParent(null);
-                return;
-            }
+    public void onViewAdded(View child) {
+        if (mOnHierarchyChangeListener != null) {
+            mOnHierarchyChangeListener.onChildViewAdded(this, child);
         }
+    }
+
+    public void onViewRemoved(View child) {
+        if (mOnHierarchyChangeListener != null) {
+            mOnHierarchyChangeListener.onChildViewRemoved(this, child);
+        }
+    }
+
+    private void removeViewInternal(int index) {
+        final View view = mChildren[index];
+        System.arraycopy(mChildren, index + 1, mChildren, index, mChildCount - index - 1);
+        mChildCount--;
+        mChildren[mChildCount] = null;
+        view.setParent(null);
+        onViewRemoved(view);
+    }
+
+    /** delete a child view. */
+    public void removeView(View view) {
+        final int index = indexOfChild(view);
+        if (index >= 0) {
+            removeViewInternal(index);
+            requestLayout();
+            invalidate();
+        }
+    }
+
+    public void removeViewInLayout(View view) {
+        final int index = indexOfChild(view);
+        if (index >= 0) removeViewInternal(index);
+    }
+
+    public void removeViews(int start, int count) {
+        if (count <= 0) return;
+        final int end = Math.min(mChildCount, start + count);
+        if (start < 0 || start >= mChildCount) {
+            throw new IndexOutOfBoundsException();
+        }
+        for (int i = end - 1; i >= start; i--) removeViewInternal(i);
+        requestLayout();
+        invalidate();
     }
 
     public int indexOfChild(View child) {
@@ -76,30 +288,33 @@ public class ViewGroup extends View implements ViewParent {
     }
 
     public void removeViewAt(int index) {
-        if (index < 0 || index >= mChildCount) return;
-        View view = mChildren[index];
-        System.arraycopy(mChildren, index + 1, mChildren, index, mChildCount - index - 1);
-        mChildCount--;
-        mChildren[mChildCount] = null;
-        if (view != null) view.setParent(null);
+        if (index < 0 || index >= mChildCount) {
+            throw new IndexOutOfBoundsException("index=" + index + " count=" + mChildCount);
+        }
+        removeViewInternal(index);
+        requestLayout();
+        invalidate();
     }
 
     public void bringChildToFront(View child) {
         int index = indexOfChild(child);
-        if (index >= 0) {
-            removeViewAt(index);
-            addView(child);
+        if (index >= 0 && index != mChildCount - 1) {
+            System.arraycopy(mChildren, index + 1, mChildren, index, mChildCount - index - 1);
+            mChildren[mChildCount - 1] = child;
+            requestLayout();
+            invalidate();
         }
     }
 
-    /**
-     * delete all child views.
-     */
+    /** delete all child views. */
     public void removeAllViews() {
-        for (int i = 0; i < mChildCount; i++) {
-            mChildren[i].setParent(null);
-        }
-        mChildCount = 0;
+        for (int i = mChildCount - 1; i >= 0; i--) removeViewInternal(i);
+        requestLayout();
+        invalidate();
+    }
+
+    public void removeAllViewsInLayout() {
+        for (int i = mChildCount - 1; i >= 0; i--) removeViewInternal(i);
     }
 
     /**
@@ -121,6 +336,7 @@ public class ViewGroup extends View implements ViewParent {
      * find a child view by id.
      */
     public View findViewById(int id) {
+        if (id == NO_ID) return null;
         if (getId() == id) return this;
         for (int i = 0; i < mChildCount; i++) {
             View child = mChildren[i];
@@ -128,6 +344,23 @@ public class ViewGroup extends View implements ViewParent {
             if (child.getId() == id) return child;
             View found = child.findViewById(id);
             if (found != null) return found;
+        }
+        return null;
+    }
+
+    public View findViewWithTag(Object tag) {
+        if (tag == null) return null;
+        if (tag.equals(getTag())) return this;
+        for (int i = 0; i < mChildCount; i++) {
+            final View found = mChildren[i].findViewWithTag(tag);
+            if (found != null) return found;
+        }
+        return null;
+    }
+
+    public View getFocusedChild() {
+        for (int i = 0; i < mChildCount; i++) {
+            if (mChildren[i].hasFocus()) return mChildren[i];
         }
         return null;
     }
@@ -176,6 +409,12 @@ public class ViewGroup extends View implements ViewParent {
         if (!isShown() || event == null) return false;
         final int action = event.getActionMasked();
         if (action == MotionEvent.ACTION_DOWN) {
+            if (mTouchTarget != null) {
+                MotionEvent cancel = MotionEvent.obtain(event);
+                cancel.setAction(MotionEvent.ACTION_CANCEL);
+                try { dispatchToChild(mTouchTarget, cancel); }
+                finally { cancel.recycle(); }
+            }
             mTouchTarget = null;
             final float x = event.getX() + mScrollX;
             final float y = event.getY() + mScrollY;
@@ -188,29 +427,13 @@ public class ViewGroup extends View implements ViewParent {
                     return true;
                 }
             }
-        } else if (action == MotionEvent.ACTION_POINTER_DOWN) {
-            final int pIdx = event.getActionIndex();
-            final float px = event.getX(pIdx) + mScrollX;
-            final float py = event.getY(pIdx) + mScrollY;
-            for (int i = mChildCount - 1; i >= 0; --i) {
-                View child = mChildren[i];
-                if (child == null || !child.isShown() || px < child.getLeft() ||
-                    px >= child.getRight() || py < child.getTop() || py >= child.getBottom()) continue;
-                if (dispatchToChild(child, event)) {
-                    return true;
-                }
-            }
-            if (mTouchTarget != null && dispatchToChild(mTouchTarget, event)) {
-                return true;
-            }
         } else if (mTouchTarget != null) {
+            // An unsplit gesture keeps every pointer with its original child.
             View child = mTouchTarget;
             if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
                 mTouchTarget = null;
             }
-            if (dispatchToChild(child, event)) {
-                return true;
-            }
+            return dispatchToChild(child, event);
         }
         return super.dispatchTouchEvent(event);
     }
@@ -244,20 +467,25 @@ public class ViewGroup extends View implements ViewParent {
      * layout parameters for a view.
      */
     public static class LayoutParams {
-        /**
-         * Sizing sentinels.
-         *
-         * These were missing, so any app passing MATCH_PARENT/WRAP_CONTENT — which is
-         * how nearly every programmatic addView() call sizes a child — hit
-         * NoSuchFieldError. The values are the AOSP ones and app code compares
-         * against them directly, so they cannot be renumbered.
-         */
+        /** Sizing sentinels; the values are Android's and apps compare against them. */
         public static final int FILL_PARENT = -1;
         public static final int MATCH_PARENT = -1;
         public static final int WRAP_CONTENT = -2;
 
         public int width;
         public int height;
+
+        /** Read layout_width and layout_height from XML. */
+        public LayoutParams(Context c, android.util.AttributeSet attrs) {
+            final android.content.res.TypedArray a = c.obtainStyledAttributes(attrs,
+                    com.android.internal.R.styleable.ViewGroup_Layout);
+            try {
+                setBaseAttributes(a, com.android.internal.R.styleable.ViewGroup_Layout_layout_width,
+                        com.android.internal.R.styleable.ViewGroup_Layout_layout_height);
+            } finally {
+                a.recycle();
+            }
+        }
 
         public LayoutParams() {
             this(WRAP_CONTENT, WRAP_CONTENT);
@@ -272,6 +500,14 @@ public class ViewGroup extends View implements ViewParent {
             this.width = source != null ? source.width : WRAP_CONTENT;
             this.height = source != null ? source.height : WRAP_CONTENT;
         }
+
+        protected void setBaseAttributes(android.content.res.TypedArray a, int widthAttr, int heightAttr) {
+            width = a.getLayoutDimension(widthAttr, "layout_width");
+            height = a.getLayoutDimension(heightAttr, "layout_height");
+        }
+
+        public void resolveLayoutDirection(int layoutDirection) {
+        }
     }
 
     /**
@@ -283,12 +519,53 @@ public class ViewGroup extends View implements ViewParent {
         public int rightMargin;
         public int bottomMargin;
 
+        public MarginLayoutParams(Context c, android.util.AttributeSet attrs) {
+            super();
+            final android.content.res.TypedArray a = c.obtainStyledAttributes(attrs,
+                    com.android.internal.R.styleable.ViewGroup_MarginLayout);
+            try {
+                setBaseAttributes(a,
+                        com.android.internal.R.styleable.ViewGroup_MarginLayout_layout_width,
+                        com.android.internal.R.styleable.ViewGroup_MarginLayout_layout_height);
+                final int margin = a.getDimensionPixelSize(
+                        com.android.internal.R.styleable.ViewGroup_MarginLayout_layout_margin, -1);
+                if (margin >= 0) {
+                    leftMargin = topMargin = rightMargin = bottomMargin = margin;
+                } else {
+                    final int start = a.getDimensionPixelSize(
+                            com.android.internal.R.styleable.ViewGroup_MarginLayout_layout_marginStart, -1);
+                    final int end = a.getDimensionPixelSize(
+                            com.android.internal.R.styleable.ViewGroup_MarginLayout_layout_marginEnd, -1);
+                    final int left = a.getDimensionPixelSize(
+                            com.android.internal.R.styleable.ViewGroup_MarginLayout_layout_marginLeft, -1);
+                    final int right = a.getDimensionPixelSize(
+                            com.android.internal.R.styleable.ViewGroup_MarginLayout_layout_marginRight, -1);
+                    leftMargin = left >= 0 ? left : Math.max(start, 0);
+                    rightMargin = right >= 0 ? right : Math.max(end, 0);
+                    topMargin = Math.max(a.getDimensionPixelSize(
+                            com.android.internal.R.styleable.ViewGroup_MarginLayout_layout_marginTop, 0), 0);
+                    bottomMargin = Math.max(a.getDimensionPixelSize(
+                            com.android.internal.R.styleable.ViewGroup_MarginLayout_layout_marginBottom, 0), 0);
+                }
+            } finally {
+                a.recycle();
+            }
+        }
+
         public MarginLayoutParams() {
             super();
         }
 
         public MarginLayoutParams(int width, int height) {
             super(width, height);
+        }
+
+        public MarginLayoutParams(MarginLayoutParams source) {
+            super(source);
+            this.leftMargin = source.leftMargin;
+            this.topMargin = source.topMargin;
+            this.rightMargin = source.rightMargin;
+            this.bottomMargin = source.bottomMargin;
         }
 
         public MarginLayoutParams(LayoutParams source) {
@@ -306,9 +583,12 @@ public class ViewGroup extends View implements ViewParent {
         public int getMarginStart() { return leftMargin; }
         public void setMarginEnd(int end) { rightMargin = end; }
         public int getMarginEnd() { return rightMargin; }
+        public boolean isMarginRelative() { return false; }
     }
 
     public interface OnHierarchyChangeListener {
+        void onChildViewAdded(View parent, View child);
+        void onChildViewRemoved(View parent, View child);
     }
 
     // ViewParent.

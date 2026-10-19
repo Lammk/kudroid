@@ -30,7 +30,7 @@ public:
 
     // Register a DEX file for class lookup.
     bool AddDexFile(const uint8_t* bytes, size_t size, const std::string& location,
-                    std::string* error_msg = nullptr);
+                    std::string* error_msg = nullptr, bool boot_class_path = false);
 
     // Find class by descriptor ("Lcom/foo/Bar;", "[I", "I"). Returns nullptr if missing.
     DexClass* FindClass(const char* descriptor);
@@ -172,6 +172,7 @@ private:
 
     DexHeap heap_;
     std::vector<std::unique_ptr<const art::DexFile>> dex_files_;
+    std::unordered_set<const art::DexFile*> boot_dex_files_;
     std::unordered_map<std::string, DexClass*> classes_;
     std::unordered_map<std::string, DexString*> strings_;
     std::unordered_map<DexObject*, DexClass*> class_objects_;

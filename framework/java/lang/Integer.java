@@ -29,6 +29,33 @@ public final class Integer extends Number implements Comparable<Integer> {
         return new Integer(parseInt(s));
     }
 
+    public static Integer decode(String s) {
+        long decoded = Long.decode(s).longValue();
+        if (decoded < MIN_VALUE || decoded > MAX_VALUE) throw new NumberFormatException(s);
+        return valueOf((int) decoded);
+    }
+
+    public static Integer getInteger(String name) {
+        return getInteger(name, (Integer) null);
+    }
+
+    public static Integer getInteger(String name, int defaultValue) {
+        Integer result = getInteger(name, (Integer) null);
+        return result == null ? valueOf(defaultValue) : result;
+    }
+
+    public static Integer getInteger(String name, Integer defaultValue) {
+        String property;
+        try { property = System.getProperty(name); }
+        catch (IllegalArgumentException e) { return defaultValue; }
+        catch (NullPointerException e) { return defaultValue; }
+        if (property != null) {
+            try { return decode(property); }
+            catch (NumberFormatException e) {}
+        }
+        return defaultValue;
+    }
+
     public int intValue() {
         return value;
     }

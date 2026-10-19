@@ -96,6 +96,14 @@ public class Window {
      * set content view.
      */
     public void setContentView(int layoutResID) {
+        final FrameLayout content = contentParent();
+        content.removeAllViews();
+        getLayoutInflater().inflate(layoutResID, content);
+        mContentView = content;
+    }
+
+    public LayoutInflater getLayoutInflater() {
+        return LayoutInflater.from(mContext);
     }
 
     /**
@@ -160,7 +168,6 @@ public class Window {
     }
 
     public View findViewById(int id) {
-        if (id == android.R.id.content || id == 0x01020002) return contentParent();
         return ensureDecorView().findViewById(id);
     }
 

@@ -18,6 +18,11 @@ public class ContextWrapper extends Context {
         mBase = base;
     }
     public Context getBaseContext() { return mBase; }
+    @Override
+    public Context createConfigurationContext(android.content.res.Configuration configuration) {
+        return mBase.createConfigurationContext(configuration);
+    }
+
     public AssetManager getAssets() { return mBase != null ? mBase.getAssets() : new AssetManager(); }
     public Resources getResources() { return mBase != null ? mBase.getResources() : new Resources(); }
     public PackageManager getPackageManager() { return mBase != null ? mBase.getPackageManager() : new SystemPackageManager(); }

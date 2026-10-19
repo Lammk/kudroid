@@ -10,6 +10,13 @@
 extern "C" {
 #endif
 
+void kudroid_set_standalone_root(const char* dir);
+void kudroid_set_log_paths(const char* documents, const char* logs);
+int kudroid_debugger_attached(void);
+int kudroid_has_jit_entitlement(void);
+int kudroid_export_extract(const char* apk, const char* target, char** error);
+int kudroid_export_archive(const char* directory, const char* output, char** error);
+
 ///self-test entry point for kudroid_core library.
 /// returns 0 on success, non-zero on failure.
 int kudroid_self_test(void);

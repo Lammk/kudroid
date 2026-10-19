@@ -124,6 +124,7 @@ add_library(kudroid_core STATIC
     src/elf_x18.cpp
     src/library_manager.cpp
     src/platform/InputShim.cpp
+    src/platform/ArchiveExport.cpp
     src/platform/NativeTouchGate.cpp
     # MessageQueue's native wake slot. Separate file: it needs <condition_variable>,
     # which must not share a translation unit with jni.h's <stdio.h> (glibc 13
@@ -149,10 +150,12 @@ add_library(kudroid_core STATIC
     src/abi/GuestSignals.cpp
     src/platform/AssetShim.cpp
     src/platform/ResourceTable.cpp
+    src/platform/FrameworkResources.cpp
     src/platform/ResourceCompat.cpp
     src/platform/BundledFramework.cpp
     src/platform/FmodVorbisFallback.cpp
     src/platform/JavaCanvasRenderer.cpp
+    src/platform/VectorRasterizer.cpp
     src/bridge/BridgeState.cpp
     src/bridge/BridgeShared.cpp
     src/bridge/CrashHandling.cpp
@@ -269,6 +272,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
     add_executable(KuDroidShell MACOSX_BUNDLE
         ios-app/KuDroidShell/KuDroidApp.swift
         ios-app/KuDroidShell/ContentView.swift
+        ios-app/KuDroidShell/APKExport.swift
+        ios-app/KuDroidShell/ReverseHistory.swift
         ios-app/KuDroidShell/RemoteDebugClient.swift
         ios-app/KuDroidShell/IOSDiagnostics.swift
         ios-app/KuDroidShell/CameraBridge.swift
@@ -281,6 +286,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
 
     set_source_files_properties(ios-app/KuDroidShell/THIRD_PARTY_NOTICES.txt
         PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+    add_custom_command(TARGET KuDroidShell POST_BUILD
+        COMMAND python3 "${CMAKE_CURRENT_SOURCE_DIR}/scripts/embed_standalone_launcher.py"
+            "$<TARGET_BUNDLE_DIR:KuDroidShell>"
+        VERBATIM)
     set_target_properties(KuDroidShell PROPERTIES
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/ios-app/Info.plist.in"
         MACOSX_BUNDLE_BUNDLE_NAME "KuDroid"
@@ -699,7 +708,15 @@ else()
             ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/HttpTests.java
             ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/TlsTests.java
             ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/LooperTests.java
-            ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/MediaApiTests.java)
+            ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/MediaApiTests.java
+            ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/ThrowableTests.java
+            ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/FrameworkResourceTests.java
+            ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/AxmlBuilder.java
+            ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/InflaterTests.java
+            ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/StyleTests.java
+            ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/kdtest/CustomView.java
+            ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/kdtest/CustomGroup.java
+            ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/java/kdtest/NoAttrsView.java)
         set(KUART_JAVA_TEST_DEX "${CMAKE_BINARY_DIR}/kuart_java_tests.dex")
         add_custom_command(OUTPUT "${KUART_JAVA_TEST_DEX}"
             COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/kuart-tests/build-java-test.sh "${KUART_JAVA_TEST_DEX}" ${KUART_JAVA_TEST_SOURCES}
@@ -717,6 +734,12 @@ else()
         target_include_directories(test_kuart_looper PRIVATE include kuart-tests)
         target_compile_definitions(test_kuart_looper PRIVATE KUART_JAVA_TEST_DEX="${KUART_JAVA_TEST_DEX}")
         add_dependencies(test_kuart_looper kuart_java_tests_dex)
+
+        add_executable(test_kuart_styles kuart-tests/test_kuart_styles.cpp)
+        target_link_libraries(test_kuart_styles PRIVATE kudroid_core art_dex)
+        target_include_directories(test_kuart_styles PRIVATE include kuart-tests)
+        target_compile_definitions(test_kuart_styles PRIVATE KUART_JAVA_TEST_DEX="${KUART_JAVA_TEST_DEX}")
+        add_dependencies(test_kuart_styles kuart_java_tests_dex)
     endif()
 
     foreach(kuart_test IN ITEMS test_kuart_runtime test_kuart_choreographer)

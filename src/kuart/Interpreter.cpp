@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <map>
@@ -10,6 +11,8 @@
 #include <mutex>
 #include <set>
 #include <tuple>
+#include <unordered_map>
+#include <vector>
 
 #include "dex/code_item_accessors-inl.h"
 #include "dex/dex_file_exception_helpers.h"
@@ -102,6 +105,7 @@ void ClearResolveCaches() {
     std::lock_guard<std::mutex> lock(g_stubMethodMtx);
     g_stubMethods.clear();
     g_loggedMissingMethods.clear();
+    Interpreter::ClearBacktraceCaches();
 }
 
 thread_local DexObject* Interpreter::pending_exception_ = nullptr;
@@ -109,6 +113,168 @@ thread_local size_t Interpreter::depth_ = 0;
 thread_local uint64_t Interpreter::instructions_executed_ = 0;
 thread_local std::vector<Interpreter::StackSlot> Interpreter::call_stack_;
 thread_local std::string Interpreter::pending_exception_trace_;
+
+namespace {
+
+// The heap has no GC, so every captured backtrace is permanent. Identical stacks share
+// one array, depth is capped, and capture degrades then stops as the budget fills.
+constexpr size_t kBacktraceMaxFrames = 64;
+constexpr size_t kBacktraceReducedFrames = 8;
+constexpr size_t kBacktraceSoftBytes = 8u << 20;
+constexpr size_t kBacktraceHardBytes = 16u << 20;
+
+struct BacktraceCache {
+    std::mutex mtx;
+    // FNV-1a of the frame words -> interned backtraces with that hash.
+    std::unordered_map<uint64_t, std::vector<DexArray*>> interned;
+    // Backtrace -> its StackTraceElement[].
+    std::unordered_map<const DexArray*, DexArray*> elements;
+    size_t bytes = 0;
+    bool budget_logged = false;
+};
+
+BacktraceCache& Backtraces() {
+    static BacktraceCache cache;
+    return cache;
+}
+
+}  // namespace
+
+void Interpreter::ClearBacktraceCaches() {
+    BacktraceCache& cache = Backtraces();
+    std::lock_guard<std::mutex> lock(cache.mtx);
+    cache.interned.clear();
+    cache.elements.clear();
+    cache.bytes = 0;
+    cache.budget_logged = false;
+}
+
+DexArray* Interpreter::CaptureBacktrace(bool skip_throwable) {
+    if (linker_ == nullptr) return nullptr;
+    size_t top = call_stack_.size();
+    if (skip_throwable) {
+        const DexClass* throwable = linker_->FindClass("Ljava/lang/Throwable;");
+        while (throwable != nullptr && top > 0) {
+            const DexMethod* m = call_stack_[top - 1].method;
+            if (m == nullptr || m->declaring_class == nullptr ||
+                !m->declaring_class->IsSubClassOf(throwable)) break;
+            --top;
+        }
+    }
+
+    BacktraceCache& cache = Backtraces();
+    std::lock_guard<std::mutex> lock(cache.mtx);
+    if (cache.bytes >= kBacktraceHardBytes) {
+        if (!cache.budget_logged) {
+            cache.budget_logged = true;
+            std::fprintf(stderr, "[KuART][STACKTRACE] backtrace budget exhausted\n");
+        }
+        return nullptr;
+    }
+    const size_t cap = cache.bytes >= kBacktraceSoftBytes ? kBacktraceReducedFrames
+                                                          : kBacktraceMaxFrames;
+    int64_t words[2 * kBacktraceMaxFrames];
+    size_t n = 0;
+    for (; top > 0 && n < cap; --top, ++n) {
+        const StackSlot& slot = call_stack_[top - 1];
+        words[2 * n] = static_cast<int64_t>(reinterpret_cast<intptr_t>(slot.method));
+        words[2 * n + 1] = slot.frame != nullptr ? slot.frame->dex_pc() : 0;
+    }
+    if (n == 0) return nullptr;
+
+    uint64_t hash = 1469598103934665603ull;
+    for (size_t i = 0; i < 2 * n; ++i) {
+        hash = (hash ^ static_cast<uint64_t>(words[i])) * 1099511628211ull;
+    }
+    std::vector<DexArray*>& bucket = cache.interned[hash];
+    for (DexArray* existing : bucket) {
+        if (existing->length == static_cast<int32_t>(2 * n) &&
+            std::memcmp(existing->Data(), words, 2 * n * sizeof(int64_t)) == 0) {
+            return existing;
+        }
+    }
+    DexClass* klass = linker_->FindClass("[J");
+    DexArray* array = klass != nullptr ? linker_->AllocArray(klass, static_cast<int32_t>(2 * n))
+                                       : nullptr;
+    if (array == nullptr) return nullptr;
+    std::memcpy(array->Data(), words, 2 * n * sizeof(int64_t));
+    cache.bytes += sizeof(DexArray) + 2 * n * sizeof(int64_t);
+    bucket.push_back(array);
+    return array;
+}
+
+DexArray* Interpreter::MaterializeBacktrace(DexArray* backtrace) {
+    if (backtrace == nullptr || linker_ == nullptr) return nullptr;
+    BacktraceCache& cache = Backtraces();
+    {
+        std::lock_guard<std::mutex> lock(cache.mtx);
+        const auto it = cache.elements.find(backtrace);
+        if (it != cache.elements.end()) return it->second;
+    }
+    DexClass* element_class = linker_->FindClass("Ljava/lang/StackTraceElement;");
+    if (element_class == nullptr) return nullptr;
+    const DexField* f_class = element_class->FindInstanceField("declaringClass", "Ljava/lang/String;");
+    const DexField* f_method = element_class->FindInstanceField("methodName", "Ljava/lang/String;");
+    const DexField* f_file = element_class->FindInstanceField("fileName", "Ljava/lang/String;");
+    const DexField* f_line = element_class->FindInstanceField("lineNumber", "I");
+    if (f_class == nullptr || f_method == nullptr || f_file == nullptr || f_line == nullptr) {
+        return nullptr;
+    }
+
+    std::vector<DexObject*> items;
+    items.reserve(static_cast<size_t>(backtrace->length) / 2);
+    for (int32_t i = 0; i + 1 < backtrace->length; i += 2) {
+        const auto* method = reinterpret_cast<const DexMethod*>(
+            static_cast<intptr_t>(backtrace->Get<int64_t>(i)));
+        const uint32_t dex_pc = static_cast<uint32_t>(backtrace->Get<int64_t>(i + 1));
+        DexObject* element = linker_->AllocObject(element_class);
+        if (element == nullptr) return nullptr;
+        const char* source = nullptr;
+        int32_t line = -1;
+        std::string class_name = "?";
+        const char* method_name = "?";
+        if (method != nullptr) {
+            if (method->declaring_class != nullptr) class_name = method->declaring_class->PrettyName();
+            if (method->name != nullptr) method_name = method->name;
+            if (method->dex_file != nullptr && method->declaring_class != nullptr &&
+                method->declaring_class->class_def != nullptr) {
+                source = method->dex_file->GetSourceFile(*method->declaring_class->class_def);
+            }
+            uint32_t found = 0;
+            if (method->dex_file != nullptr && method->code_item != nullptr) {
+                art::CodeItemDebugInfoAccessor accessor(*method->dex_file, method->code_item,
+                                                        method->dex_method_index);
+                if (accessor.GetLineNumForPc(dex_pc, &found)) line = static_cast<int32_t>(found);
+            }
+        }
+        element->SetField<DexObject*>(f_class->offset_or_slot, linker_->InternString(class_name.c_str()));
+        element->SetField<DexObject*>(f_method->offset_or_slot, linker_->InternString(method_name));
+        element->SetField<DexObject*>(f_file->offset_or_slot,
+                                      source != nullptr ? linker_->InternString(source) : nullptr);
+        element->SetField<int32_t>(f_line->offset_or_slot, line);
+        items.push_back(element);
+    }
+    DexArray* array = LibCoreNewRefArray(linker_, "[Ljava/lang/StackTraceElement;", items);
+    if (array == nullptr) return nullptr;
+    std::lock_guard<std::mutex> lock(cache.mtx);
+    cache.elements.emplace(backtrace, array);
+    return array;
+}
+
+void Interpreter::InitNativeThrowable(DexObject* exception, const char* message) {
+    if (exception == nullptr || exception->clazz == nullptr || linker_ == nullptr) return;
+    if (message != nullptr && message[0] != '\0') {
+        const DexField* f_msg = exception->clazz->FindInstanceField("message", "Ljava/lang/String;");
+        if (f_msg != nullptr) {
+            exception->SetField<DexObject*>(f_msg->offset_or_slot, linker_->NewString(message));
+        }
+    }
+    const DexField* f_backtrace = exception->clazz->FindInstanceField("backtrace", "Ljava/lang/Object;");
+    if (f_backtrace == nullptr) return;
+    if (DexArray* backtrace = CaptureBacktrace(false)) {
+        exception->SetField<DexObject*>(f_backtrace->offset_or_slot, backtrace);
+    }
+}
 
 namespace {
 
@@ -216,16 +382,22 @@ void Interpreter::ThrowException(const char* descriptor, const std::string& mess
 
     // Record only; the owner logs caught vs uncaught later.
     std::fprintf(stderr, "[KuART][EXCEPTION] %s: %s\n", descriptor, message.c_str());
+    if (std::strcmp(descriptor, "Ljava/lang/StackOverflowError;") == 0) {
+        size_t end = 0;
+        for (int line = 0; line < 24 && end < pending_exception_trace_.size(); ++line) {
+            const size_t next = pending_exception_trace_.find('\n', end);
+            end = next == std::string::npos ? pending_exception_trace_.size() : next + 1;
+        }
+        std::fprintf(stderr, "[KuART][STACK-OVERFLOW]\n%.*s", static_cast<int>(end),
+                     pending_exception_trace_.c_str());
+    }
+
 
     DexClass* klass = linker_ != nullptr ? linker_->FindClass(descriptor) : nullptr;
     if (klass != nullptr) {
         pending_exception_ = linker_->AllocObject(klass);
-        if (pending_exception_ != nullptr && !message.empty()) {
-            const DexField* f_msg = klass->FindInstanceField("message", "Ljava/lang/String;");
-            if (f_msg != nullptr) {
-                DexObject* msgObj = reinterpret_cast<DexObject*>(linker_->NewString(message.c_str()));
-                pending_exception_->SetField<DexObject*>(f_msg->offset_or_slot, msgObj);
-            }
+        if (pending_exception_ != nullptr) {
+            InitNativeThrowable(pending_exception_, message.c_str());
         }
     }
     if (pending_exception_ == nullptr) {

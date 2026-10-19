@@ -34,6 +34,39 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
     private boolean mResumed = false;
     private Thread mUiThread;
     private android.os.Handler mUiHandler;
+    private final FragmentManager mFragments = new FragmentManager(this);
+    private final ActivityLifecycleDispatcher mLifecycleCallbacks = new ActivityLifecycleDispatcher();
+
+    public FragmentManager getFragmentManager() {
+        return mFragments;
+    }
+
+    public Object getLastNonConfigurationInstance() {
+        return null;
+    }
+
+    public void registerActivityLifecycleCallbacks(Application.ActivityLifecycleCallbacks callback) {
+        mLifecycleCallbacks.add(callback);
+    }
+
+    public void unregisterActivityLifecycleCallbacks(Application.ActivityLifecycleCallbacks callback) {
+        mLifecycleCallbacks.remove(callback);
+    }
+
+    private void dispatchLifecycle(int event, int phase, Bundle state) {
+        Application application = getApplication();
+        boolean reverse = event >= ActivityLifecycleDispatcher.PAUSED;
+        boolean applicationFirst = phase == ActivityLifecycleDispatcher.PRE
+                || (!reverse && phase == ActivityLifecycleDispatcher.NORMAL);
+        if (applicationFirst && application != null) {
+            application.lifecycleCallbacks.dispatch(this, event, phase, state, false);
+        }
+        mLifecycleCallbacks.dispatch(this, event, phase, state, reverse);
+        if (!applicationFirst && application != null) {
+            application.lifecycleCallbacks.dispatch(this, event, phase, state, false);
+        }
+    }
+
 
     public Activity() {
     }
@@ -78,36 +111,43 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
      * is called when the activity is first created.
      */
     protected void onCreate(Bundle savedInstanceState) {
+        mFragments.dispatchState(1, savedInstanceState);
+        dispatchLifecycle(ActivityLifecycleDispatcher.CREATED, ActivityLifecycleDispatcher.NORMAL, savedInstanceState);
     }
 
     /**
      * is called when the activity is about to become visible.
      */
     protected void onStart() {
+        dispatchLifecycle(ActivityLifecycleDispatcher.STARTED, ActivityLifecycleDispatcher.NORMAL, null);
     }
 
     /**
      * called when the activity is visible.
      */
     protected void onResume() {
+        dispatchLifecycle(ActivityLifecycleDispatcher.RESUMED, ActivityLifecycleDispatcher.NORMAL, null);
     }
 
     /**
      * is called when the prepare operation is paused.
      */
     protected void onPause() {
+        dispatchLifecycle(ActivityLifecycleDispatcher.PAUSED, ActivityLifecycleDispatcher.NORMAL, null);
     }
 
     /**
      * is called when the activity is no longer visible.
      */
     protected void onStop() {
+        dispatchLifecycle(ActivityLifecycleDispatcher.STOPPED, ActivityLifecycleDispatcher.NORMAL, null);
     }
 
     /**
      * is called before the activity is destroyed.
      */
     protected void onDestroy() {
+        dispatchLifecycle(ActivityLifecycleDispatcher.DESTROYED, ActivityLifecycleDispatcher.NORMAL, null);
     }
 
     /**
@@ -138,32 +178,57 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
      * is called when the activity is created (called by the framework).
      */
     public void performCreate(Bundle savedInstanceState) {
+        mFragments.noteStateNotSaved();
+        dispatchLifecycle(ActivityLifecycleDispatcher.CREATED, ActivityLifecycleDispatcher.PRE, savedInstanceState);
         mCreated = true;
         onCreate(savedInstanceState);
+        mFragments.dispatchState(2, savedInstanceState);
+        dispatchLifecycle(ActivityLifecycleDispatcher.CREATED, ActivityLifecycleDispatcher.POST, savedInstanceState);
     }
 
     /**
      * is called when the activity is started (called by the framework).
      */
     public void performStart() {
+        mFragments.noteStateNotSaved();
+        dispatchLifecycle(ActivityLifecycleDispatcher.STARTED, ActivityLifecycleDispatcher.PRE, null);
+        mFragments.executePendingTransactions();
         mStarted = true;
         onStart();
+        mFragments.dispatchState(3, null);
+        dispatchLifecycle(ActivityLifecycleDispatcher.STARTED, ActivityLifecycleDispatcher.POST, null);
     }
 
     /**
      * is called when the operation is resumed (called by the framework).
      */
     public void performResume() {
+        mFragments.noteStateNotSaved();
+        dispatchLifecycle(ActivityLifecycleDispatcher.RESUMED, ActivityLifecycleDispatcher.PRE, null);
+        mFragments.executePendingTransactions();
         mResumed = true;
         onResume();
+        mFragments.dispatchState(4, null);
+        dispatchLifecycle(ActivityLifecycleDispatcher.RESUMED, ActivityLifecycleDispatcher.POST, null);
     }
 
     /**
      * is called when the activity is paused (called by the framework).
      */
     public void performPause() {
+        dispatchLifecycle(ActivityLifecycleDispatcher.PAUSED, ActivityLifecycleDispatcher.PRE, null);
+        mFragments.dispatchState(3, null);
         mResumed = false;
         onPause();
+        dispatchLifecycle(ActivityLifecycleDispatcher.PAUSED, ActivityLifecycleDispatcher.POST, null);
+    }
+
+    public void performSaveInstanceState(Bundle outState) {
+        dispatchLifecycle(ActivityLifecycleDispatcher.SAVEINSTANCESTATE, ActivityLifecycleDispatcher.PRE, outState);
+        onSaveInstanceState(outState);
+        mFragments.markStateSaved();
+        dispatchLifecycle(ActivityLifecycleDispatcher.SAVEINSTANCESTATE, ActivityLifecycleDispatcher.NORMAL, outState);
+        dispatchLifecycle(ActivityLifecycleDispatcher.SAVEINSTANCESTATE, ActivityLifecycleDispatcher.POST, outState);
     }
 
     private boolean mHasWindowFocus;
@@ -190,17 +255,23 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
      * is called when the activity is stopped (called by the framework).
      */
     public void performStop() {
+        dispatchLifecycle(ActivityLifecycleDispatcher.STOPPED, ActivityLifecycleDispatcher.PRE, null);
+        mFragments.dispatchState(2, null);
         mStarted = false;
         onStop();
+        dispatchLifecycle(ActivityLifecycleDispatcher.STOPPED, ActivityLifecycleDispatcher.POST, null);
     }
 
     /**
      * is called when the activity is destroyed (called by the framework).
      */
     public void performDestroy() {
+        dispatchLifecycle(ActivityLifecycleDispatcher.DESTROYED, ActivityLifecycleDispatcher.PRE, null);
         mCreated = false;
         mDestroyed = true;
+        mFragments.destroy();
         onDestroy();
+        dispatchLifecycle(ActivityLifecycleDispatcher.DESTROYED, ActivityLifecycleDispatcher.POST, null);
     }
 
     /**
@@ -598,10 +669,15 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
      * {@link #setContentView(android.view.View)} and are unaffected.
      */
     public void setContentView(int layoutResID) {
-        android.util.Log.w("Activity",
-                "setContentView(0x" + Integer.toHexString(layoutResID) +
-                ") ignored: XML layout inflation is not implemented, so no view tree" +
-                " was created. Views built in code still work.");
+        getWindow().setContentView(layoutResID);
+        mContentView = getWindow().getContentView();
+        if (mResumed) {
+            renderViewHierarchy();
+            ActivityThread at = ActivityThread.currentActivityThread();
+            if (at != null) {
+                at.dispatchSurfaceCallbacks(this);
+            }
+        }
     }
 
     /**
@@ -661,14 +737,6 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
      * find a view by id.
      */
     public android.view.View findViewById(int id) {
-        if (id == android.R.id.content || id == 0x01020002) {
-            return getWindow().findViewById(id);
-        }
-        if (mContentView != null) {
-            if (mContentView.getId() == id) return mContentView;
-            android.view.View v = mContentView.findViewById(id);
-            if (v != null) return v;
-        }
         return getWindow().findViewById(id);
     }
 
@@ -680,7 +748,7 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
         if (win != null && win.superDispatchTouchEvent(event)) {
             return true;
         }
-        if (mContentView != null && mContentView.dispatchTouchEvent(event)) {
+        if (getContentView() != null && getContentView().dispatchTouchEvent(event)) {
             return true;
         }
         return onTouchEvent(event);
@@ -690,8 +758,10 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
         return false;
     }
 
+    // The content view the window holds; a library that installs its own decor through
+    // Window.setContentView never goes through this Activity's setContentView.
     public android.view.View getContentView() {
-        return mContentView;
+        return mContentView != null ? mContentView : getWindow().getContentView();
     }
 
     public String getCallingPackage() {
@@ -757,6 +827,7 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
             }
 
             canvas.drawColor(0xFF181818);
+            decor.getViewTreeObserver().dispatchOnDraw();
             decor.draw(canvas);
             canvas.flush();
         } catch (Throwable t) {
@@ -790,7 +861,7 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
             @Override
             public void run() {
                 synchronized (Activity.this) { mRenderPending = false; }
-                if (!containsSurfaceView(mContentView)) renderViewHierarchy();
+                if (!containsSurfaceView(getContentView())) renderViewHierarchy();
             }
         }, 16);
     }
@@ -821,14 +892,14 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
                 @Override
                 public void run() {
                     action.run();
-                    if (!containsSurfaceView(mContentView)) {
+                    if (!containsSurfaceView(getContentView())) {
                         renderViewHierarchy();
                     }
                 }
             });
         } else {
             action.run();
-            if (!containsSurfaceView(mContentView)) {
+            if (!containsSurfaceView(getContentView())) {
                 renderViewHierarchy();
             }
         }

@@ -12,16 +12,58 @@ import android.view.ViewGroup;
  * inflating a layout got a blank screen.
  */
 public class FrameLayout extends ViewGroup {
+    private boolean mMeasureAllChildren;
+
     public FrameLayout(Context context) {
-        super(context);
+        this(context, null);
     }
 
     public FrameLayout(Context context, android.util.AttributeSet attrs) {
-        super(context);
+        this(context, attrs, 0);
     }
 
     public FrameLayout(Context context, android.util.AttributeSet attrs, int defStyleAttr) {
-        super(context);
+        this(context, attrs, defStyleAttr, 0);
+    }
+
+    public FrameLayout(Context context, android.util.AttributeSet attrs, int defStyleAttr,
+            int defStyleRes) {
+        super(context, attrs, defStyleAttr, defStyleRes);
+        if (context != null && (attrs != null || defStyleAttr != 0 || defStyleRes != 0)) {
+            final android.content.res.TypedArray a = context.obtainStyledAttributes(attrs,
+                    com.android.internal.R.styleable.FrameLayout, defStyleAttr, defStyleRes);
+            try {
+                mMeasureAllChildren = a.getBoolean(
+                        com.android.internal.R.styleable.FrameLayout_measureAllChildren, false);
+            } finally {
+                a.recycle();
+            }
+        }
+    }
+
+    public boolean getMeasureAllChildren() { return mMeasureAllChildren; }
+    public void setMeasureAllChildren(boolean measureAll) { mMeasureAllChildren = measureAll; }
+
+    @Override
+    protected LayoutParams generateDefaultLayoutParams() {
+        return new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT);
+    }
+
+    @Override
+    public ViewGroup.LayoutParams generateLayoutParams(android.util.AttributeSet attrs) {
+        return new LayoutParams(getContext(), attrs);
+    }
+
+    @Override
+    protected ViewGroup.LayoutParams generateLayoutParams(ViewGroup.LayoutParams p) {
+        if (p instanceof LayoutParams) return new LayoutParams((LayoutParams) p);
+        if (p instanceof ViewGroup.MarginLayoutParams) return new LayoutParams((ViewGroup.MarginLayoutParams) p);
+        return new LayoutParams(p);
+    }
+
+    @Override
+    protected boolean checkLayoutParams(ViewGroup.LayoutParams p) {
+        return p instanceof LayoutParams;
     }
 
     @Override
@@ -63,10 +105,20 @@ public class FrameLayout extends ViewGroup {
 
     /** FrameLayout child parameters; extends MarginLayoutParams so margins exist. */
     public static class LayoutParams extends ViewGroup.MarginLayoutParams {
-        public int gravity = -1;
+        public static final int UNSPECIFIED_GRAVITY = -1;
 
-        public LayoutParams() {
-            super();
+        public int gravity = UNSPECIFIED_GRAVITY;
+
+        public LayoutParams(Context c, android.util.AttributeSet attrs) {
+            super(c, attrs);
+            final android.content.res.TypedArray a = c.obtainStyledAttributes(attrs,
+                    com.android.internal.R.styleable.FrameLayout_Layout);
+            try {
+                gravity = a.getInt(com.android.internal.R.styleable.FrameLayout_Layout_layout_gravity,
+                        UNSPECIFIED_GRAVITY);
+            } finally {
+                a.recycle();
+            }
         }
 
         public LayoutParams(int width, int height) {
@@ -80,6 +132,15 @@ public class FrameLayout extends ViewGroup {
 
         public LayoutParams(ViewGroup.LayoutParams source) {
             super(source);
+        }
+
+        public LayoutParams(ViewGroup.MarginLayoutParams source) {
+            super(source);
+        }
+
+        public LayoutParams(LayoutParams source) {
+            super((ViewGroup.MarginLayoutParams) source);
+            this.gravity = source.gravity;
         }
     }
 }

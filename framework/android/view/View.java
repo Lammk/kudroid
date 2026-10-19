@@ -19,6 +19,9 @@ public class View implements KeyEvent.Callback {
     /** view visibility: disappears. */
     public static final int GONE = 8;
 
+    /** Used to mark a View that has no ID. */
+    public static final int NO_ID = -1;
+
     /** measurement specification mode: not specified. */
     public static final int UNSPECIFIED = 0;
     /** measurement specification mode: exact. */
@@ -51,6 +54,32 @@ public class View implements KeyEvent.Callback {
     private int mMeasuredHeight;
     protected int mScrollX = 0;
     protected int mScrollY = 0;
+    protected int mPaddingLeft;
+    protected int mPaddingTop;
+    protected int mPaddingRight;
+    protected int mPaddingBottom;
+    private int mMinWidth;
+    private int mMinHeight;
+    private boolean mEnabled = true;
+    private android.graphics.drawable.Drawable mForeground;
+    private boolean mClickable;
+    private boolean mLongClickable;
+    private boolean mFocusable = true;
+    private boolean mFocusableInTouchMode;
+    private boolean mSelected;
+    private boolean mPressed;
+    private boolean mActivated;
+    private float mAlpha = 1.0f;
+    private float mTranslationX;
+    private float mTranslationY;
+    private float mTranslationZ;
+    private float mElevation;
+    private float mScaleX = 1.0f;
+    private float mScaleY = 1.0f;
+    private float mRotation;
+    private float mPivotX;
+    private float mPivotY;
+    private boolean mPivotSet;
 
     /** Android long press threshold (ViewConfiguration.getLongPressTimeout). */
     private static final long LONG_PRESS_TIMEOUT = 500L;
@@ -189,6 +218,186 @@ public class View implements KeyEvent.Callback {
 
     public View(Context context, android.util.AttributeSet attrs, int defStyleAttr, int defStyleRes) {
         mContext = context;
+        // A programmatic view (no attributes, no default style) has nothing to read.
+        if (context != null && (attrs != null || defStyleAttr != 0 || defStyleRes != 0)) {
+            final android.content.res.TypedArray a = context.obtainStyledAttributes(
+                    attrs, com.android.internal.R.styleable.View, defStyleAttr, defStyleRes);
+            try {
+                applyViewAttributes(a);
+            } finally {
+                a.recycle();
+            }
+        }
+    }
+
+    // The View styleable: what XML and styles may set on every view.
+    private void applyViewAttributes(android.content.res.TypedArray a) {
+        int leftPadding = -1, topPadding = -1, rightPadding = -1, bottomPadding = -1;
+        int padding = -1, paddingHorizontal = -1, paddingVertical = -1;
+        int startPadding = -1, endPadding = -1;
+        boolean fitsSystemWindows = false;
+        final int n = a.getIndexCount();
+        for (int i = 0; i < n; i++) {
+            final int attr = a.getIndex(i);
+            switch (attr) {
+                case com.android.internal.R.styleable.View_background:
+                    setBackground(a.getDrawable(attr));
+                    break;
+                case com.android.internal.R.styleable.View_padding:
+                    padding = a.getDimensionPixelSize(attr, -1);
+                    break;
+                case com.android.internal.R.styleable.View_paddingHorizontal:
+                    paddingHorizontal = a.getDimensionPixelSize(attr, -1);
+                    break;
+                case com.android.internal.R.styleable.View_paddingVertical:
+                    paddingVertical = a.getDimensionPixelSize(attr, -1);
+                    break;
+                case com.android.internal.R.styleable.View_paddingLeft:
+                    leftPadding = a.getDimensionPixelSize(attr, -1);
+                    break;
+                case com.android.internal.R.styleable.View_paddingTop:
+                    topPadding = a.getDimensionPixelSize(attr, -1);
+                    break;
+                case com.android.internal.R.styleable.View_paddingRight:
+                    rightPadding = a.getDimensionPixelSize(attr, -1);
+                    break;
+                case com.android.internal.R.styleable.View_paddingBottom:
+                    bottomPadding = a.getDimensionPixelSize(attr, -1);
+                    break;
+                case com.android.internal.R.styleable.View_paddingStart:
+                    startPadding = a.getDimensionPixelSize(attr, -1);
+                    break;
+                case com.android.internal.R.styleable.View_paddingEnd:
+                    endPadding = a.getDimensionPixelSize(attr, -1);
+                    break;
+                case com.android.internal.R.styleable.View_id:
+                    mId = a.getResourceId(attr, NO_ID);
+                    break;
+                case com.android.internal.R.styleable.View_tag:
+                    mTag = a.getText(attr);
+                    break;
+                case com.android.internal.R.styleable.View_visibility:
+                    mVisibility = a.getInt(attr, VISIBLE);
+                    break;
+                case com.android.internal.R.styleable.View_minWidth:
+                    mMinWidth = a.getDimensionPixelSize(attr, 0);
+                    break;
+                case com.android.internal.R.styleable.View_minHeight:
+                    mMinHeight = a.getDimensionPixelSize(attr, 0);
+                    break;
+                case com.android.internal.R.styleable.View_foreground:
+                    mForeground = a.getDrawable(attr);
+                    break;
+                case com.android.internal.R.styleable.View_clickable:
+                    mClickable = a.getBoolean(attr, false);
+                    break;
+                case com.android.internal.R.styleable.View_longClickable:
+                    mLongClickable = a.getBoolean(attr, false);
+                    break;
+                case com.android.internal.R.styleable.View_focusable:
+                    mFocusable = a.getBoolean(attr, true);
+                    break;
+                case com.android.internal.R.styleable.View_focusableInTouchMode:
+                    mFocusableInTouchMode = a.getBoolean(attr, false);
+                    break;
+                case com.android.internal.R.styleable.View_fitsSystemWindows:
+                    fitsSystemWindows = a.getBoolean(attr, false);
+                    break;
+                case com.android.internal.R.styleable.View_keepScreenOn:
+                    mKeepScreenOn = a.getBoolean(attr, false);
+                    break;
+                case com.android.internal.R.styleable.View_contentDescription:
+                    mContentDescription = a.getText(attr);
+                    break;
+                case com.android.internal.R.styleable.View_alpha:
+                    mAlpha = a.getFloat(attr, 1.0f);
+                    break;
+                case com.android.internal.R.styleable.View_elevation:
+                    mElevation = a.getDimension(attr, 0f);
+                    break;
+                case com.android.internal.R.styleable.View_translationX:
+                    mTranslationX = a.getDimension(attr, 0f);
+                    break;
+                case com.android.internal.R.styleable.View_translationY:
+                    mTranslationY = a.getDimension(attr, 0f);
+                    break;
+                case com.android.internal.R.styleable.View_translationZ:
+                    mTranslationZ = a.getDimension(attr, 0f);
+                    break;
+                case com.android.internal.R.styleable.View_scaleX:
+                    mScaleX = a.getFloat(attr, 1.0f);
+                    break;
+                case com.android.internal.R.styleable.View_scaleY:
+                    mScaleY = a.getFloat(attr, 1.0f);
+                    break;
+                case com.android.internal.R.styleable.View_rotation:
+                    mRotation = a.getFloat(attr, 0f);
+                    break;
+                case com.android.internal.R.styleable.View_onClick:
+                    final String handlerName = a.getString(attr);
+                    if (handlerName != null) setOnClickListener(new DeclaredOnClickListener(this, handlerName));
+                    break;
+                default:
+                    break;
+            }
+        }
+        if (padding >= 0) {
+            leftPadding = topPadding = rightPadding = bottomPadding = padding;
+        }
+        if (paddingHorizontal >= 0) leftPadding = rightPadding = paddingHorizontal;
+        if (paddingVertical >= 0) topPadding = bottomPadding = paddingVertical;
+        if (startPadding >= 0) leftPadding = startPadding;
+        if (endPadding >= 0) rightPadding = endPadding;
+        mPaddingLeft = leftPadding >= 0 ? leftPadding : mPaddingLeft;
+        mPaddingTop = topPadding >= 0 ? topPadding : mPaddingTop;
+        mPaddingRight = rightPadding >= 0 ? rightPadding : mPaddingRight;
+        mPaddingBottom = bottomPadding >= 0 ? bottomPadding : mPaddingBottom;
+        if (fitsSystemWindows) mFitsSystemWindows = true;
+    }
+
+    // android:onClick="method": resolved against the view's context when first clicked.
+    private static final class DeclaredOnClickListener implements OnClickListener {
+        private final View mHostView;
+        private final String mMethodName;
+        private java.lang.reflect.Method mResolvedMethod;
+        private Context mResolvedContext;
+
+        DeclaredOnClickListener(View hostView, String methodName) {
+            mHostView = hostView;
+            mMethodName = methodName;
+        }
+
+        @Override
+        public void onClick(View v) {
+            if (mResolvedMethod == null) resolveMethod(mHostView.getContext());
+            try {
+                mResolvedMethod.invoke(mResolvedContext, v);
+            } catch (IllegalAccessException e) {
+                throw new IllegalStateException("Could not execute non-public method of the activity", e);
+            } catch (java.lang.reflect.InvocationTargetException e) {
+                throw new IllegalStateException("Could not execute method of the activity", e);
+            }
+        }
+
+        private void resolveMethod(Context context) {
+            while (context != null) {
+                try {
+                    java.lang.reflect.Method method = context.getClass().getMethod(mMethodName, View.class);
+                    if (method != null) {
+                        mResolvedMethod = method;
+                        mResolvedContext = context;
+                        return;
+                    }
+                } catch (NoSuchMethodException e) {
+                    // Try the wrapped context next.
+                }
+                context = context instanceof android.content.ContextWrapper
+                        ? ((android.content.ContextWrapper) context).getBaseContext() : null;
+            }
+            throw new IllegalStateException("Could not find method " + mMethodName
+                    + "(View) in a parent or ancestor Context for android:onClick attribute defined on view "
+                    + mHostView.getClass());
+        }
     }
 
     /**
@@ -213,8 +422,17 @@ public class View implements KeyEvent.Callback {
     }
 
     public View findViewById(int id) {
-        if (mId == id) return this;
-        return null;
+        if (id == NO_ID) return null;
+        return mId == id ? this : null;
+    }
+
+    public View findViewWithTag(Object tag) {
+        if (tag == null) return null;
+        return tag.equals(mTag) ? this : null;
+    }
+
+    /** Called after this view and all its children have been inflated from XML. */
+    protected void onFinishInflate() {
     }
 
     public View getRootView() {
@@ -386,10 +604,12 @@ public class View implements KeyEvent.Callback {
      * set up click listener.
      */
     public void setOnClickListener(OnClickListener l) {
+        if (!mClickable) mClickable = true;
         mOnClickListener = l;
     }
 
     public void setOnLongClickListener(OnLongClickListener l) {
+        if (!mLongClickable) mLongClickable = true;
         mOnLongClickListener = l;
     }
 
@@ -406,11 +626,27 @@ public class View implements KeyEvent.Callback {
     }
 
     public boolean isClickable() {
-        return mOnClickListener != null;
+        return mClickable;
+    }
+
+    public void setClickable(boolean clickable) {
+        mClickable = clickable;
     }
 
     public boolean isLongClickable() {
-        return mOnLongClickListener != null;
+        return mLongClickable;
+    }
+
+    public void setLongClickable(boolean longClickable) {
+        mLongClickable = longClickable;
+    }
+
+    public boolean hasOnClickListeners() {
+        return mOnClickListener != null;
+    }
+
+    public boolean callOnClick() {
+        return performClick();
     }
 
     public boolean hasFocus() {
@@ -535,8 +771,14 @@ public class View implements KeyEvent.Callback {
     }
 
     public void setLayoutParams(ViewGroup.LayoutParams params) {
+        if (params == null) throw new NullPointerException("Layout parameters cannot be null");
         mLayoutParams = params;
         requestLayout();
+    }
+
+    /** Assign layout parameters without scheduling a layout (the parent does that once). */
+    void setLayoutParamsNoRequest(ViewGroup.LayoutParams params) {
+        mLayoutParams = params;
     }
 
     // IME attachment.
@@ -564,13 +806,20 @@ public class View implements KeyEvent.Callback {
     }
 
     public boolean isFocusable() {
-        return true;
+        return mFocusable;
     }
 
     public void setFocusable(boolean focusable) {
+        mFocusable = focusable;
+    }
+
+    public boolean isFocusableInTouchMode() {
+        return mFocusableInTouchMode;
     }
 
     public void setFocusableInTouchMode(boolean focusable) {
+        mFocusableInTouchMode = focusable;
+        if (focusable) mFocusable = true;
     }
 
     /**
@@ -613,7 +862,7 @@ public class View implements KeyEvent.Callback {
         if (action == MotionEvent.ACTION_DOWN) {
             mTouchDownTime = android.os.SystemClock.uptimeMillis();
             mLongClickFired = false;
-            return mOnClickListener != null || mOnLongClickListener != null;
+            return mClickable || mLongClickable;
         }
         if (action == MotionEvent.ACTION_MOVE) {
             if (!mLongClickFired && mOnLongClickListener != null && mTouchDownTime > 0 &&
@@ -621,7 +870,7 @@ public class View implements KeyEvent.Callback {
                 mLongClickFired = true;
                 return performLongClick();
             }
-            return mOnClickListener != null || mOnLongClickListener != null;
+            return mClickable || mLongClickable;
         }
         if (action == MotionEvent.ACTION_UP) {
             final long held = mTouchDownTime > 0
@@ -635,9 +884,9 @@ public class View implements KeyEvent.Callback {
                 performClick();
                 return true;
             }
-            return mOnLongClickListener != null;
+            return mLongClickable;
         }
-        return mOnClickListener != null || mOnLongClickListener != null;
+        return mClickable || mLongClickable;
     }
 
     /**
@@ -855,7 +1104,25 @@ public class View implements KeyEvent.Callback {
      * sets the view's padding.
      */
     public void setPadding(int left, int top, int right, int bottom) {
+        final boolean changed = mPaddingLeft != left || mPaddingTop != top
+                || mPaddingRight != right || mPaddingBottom != bottom;
+        mPaddingLeft = left;
+        mPaddingTop = top;
+        mPaddingRight = right;
+        mPaddingBottom = bottom;
+        if (changed) requestLayout();
     }
+
+    public void setPaddingRelative(int start, int top, int end, int bottom) {
+        setPadding(start, top, end, bottom);
+    }
+
+    public int getPaddingLeft() { return mPaddingLeft; }
+    public int getPaddingTop() { return mPaddingTop; }
+    public int getPaddingRight() { return mPaddingRight; }
+    public int getPaddingBottom() { return mPaddingBottom; }
+    public int getPaddingStart() { return mPaddingLeft; }
+    public int getPaddingEnd() { return mPaddingRight; }
 
     /**
      * invalidate the view.
@@ -909,10 +1176,20 @@ public class View implements KeyEvent.Callback {
     }
 
     /** Remove queued instances of a Runnable posted through this View. */
-    public void removeCallbacks(Runnable action) {
-        if (action == null) return;
+    public boolean removeCallbacks(Runnable action) {
+        if (action == null) return false;
         android.os.Handler handler = getRunQueue();
         if (handler != null) handler.removeCallbacks(action);
+        return true;
+    }
+
+    public final void cancelPendingInputEvents() { dispatchCancelPendingInputEvents(); }
+
+    protected void dispatchCancelPendingInputEvents() { onCancelPendingInputEvents(); }
+
+    public void onCancelPendingInputEvents() {
+        mTouchDownTime = 0;
+        mLongClickFired = false;
     }
 
     // Tags.
@@ -1021,6 +1298,10 @@ public class View implements KeyEvent.Callback {
         mFitsSystemWindows = fitSystemWindows;
     }
 
+    public boolean getFitsSystemWindows() {
+        return mFitsSystemWindows;
+    }
+
     private boolean mKeepScreenOn = false;
     private static native void setKeepScreenOnNative(boolean keepOn);
 
@@ -1066,5 +1347,148 @@ public class View implements KeyEvent.Callback {
     public void saveAttributeDataForStyleable(Context context, int[] styleable,
             android.util.AttributeSet set, android.content.res.TypedArray attrs,
             int defStyleAttr, int defStyleRes) {
+    }
+
+    // State flags. They are stored and reported; dispatching them to drawables comes with
+    // drawable support.
+
+    public android.graphics.drawable.Drawable getForeground() { return mForeground; }
+    public void setForeground(android.graphics.drawable.Drawable foreground) {
+        mForeground = foreground;
+        invalidate();
+    }
+
+    public boolean isEnabled() { return mEnabled; }
+    public void setEnabled(boolean enabled) {
+        if (mEnabled == enabled) return;
+        mEnabled = enabled;
+        invalidate();
+    }
+    public boolean isSelected() { return mSelected; }
+    public void setSelected(boolean selected) {
+        if (mSelected == selected) return;
+        mSelected = selected;
+        invalidate();
+    }
+    public boolean isPressed() { return mPressed; }
+    public void setPressed(boolean pressed) {
+        if (mPressed == pressed) return;
+        mPressed = pressed;
+        invalidate();
+    }
+    public boolean isActivated() { return mActivated; }
+    public void setActivated(boolean activated) {
+        if (mActivated == activated) return;
+        mActivated = activated;
+        invalidate();
+    }
+
+    // Property transforms are stored for getters and animators; drawing does not apply them.
+    public float getAlpha() { return mAlpha; }
+    public void setAlpha(float alpha) { mAlpha = alpha; invalidate(); }
+    public float getTranslationX() { return mTranslationX; }
+    public void setTranslationX(float v) { mTranslationX = v; invalidate(); }
+    public float getTranslationY() { return mTranslationY; }
+    public void setTranslationY(float v) { mTranslationY = v; invalidate(); }
+    public float getTranslationZ() { return mTranslationZ; }
+    public void setTranslationZ(float v) { mTranslationZ = v; invalidate(); }
+    public float getElevation() { return mElevation; }
+    public void setElevation(float v) { mElevation = v; }
+    public float getScaleX() { return mScaleX; }
+    public void setScaleX(float v) { mScaleX = v; invalidate(); }
+    public float getScaleY() { return mScaleY; }
+    public void setScaleY(float v) { mScaleY = v; invalidate(); }
+    public float getRotation() { return mRotation; }
+    public void setRotation(float v) { mRotation = v; invalidate(); }
+    public float getPivotX() { return mPivotSet ? mPivotX : getWidth() / 2f; }
+    public void setPivotX(float v) { mPivotX = v; mPivotSet = true; }
+    public float getPivotY() { return mPivotSet ? mPivotY : getHeight() / 2f; }
+    public void setPivotY(float v) { mPivotY = v; mPivotSet = true; }
+    public float getX() { return mLeft + mTranslationX; }
+    public float getY() { return mTop + mTranslationY; }
+
+    // Measurement helpers.
+
+    public static final int MEASURED_SIZE_MASK = 0x00ffffff;
+    public static final int MEASURED_STATE_MASK = 0xff000000;
+    public static final int MEASURED_HEIGHT_STATE_SHIFT = 16;
+    public static final int MEASURED_STATE_TOO_SMALL = 0x01000000;
+
+    public int getMinimumWidth() { return mMinWidth; }
+    public int getMinimumHeight() { return mMinHeight; }
+    public void setMinimumWidth(int minWidth) { mMinWidth = minWidth; requestLayout(); }
+    public void setMinimumHeight(int minHeight) { mMinHeight = minHeight; requestLayout(); }
+
+    protected int getSuggestedMinimumWidth() {
+        return mBackground == null ? mMinWidth : Math.max(mMinWidth, mBackground.getMinimumWidth());
+    }
+
+    protected int getSuggestedMinimumHeight() {
+        return mBackground == null ? mMinHeight : Math.max(mMinHeight, mBackground.getMinimumHeight());
+    }
+
+    public static int resolveSize(int size, int measureSpec) {
+        return resolveSizeAndState(size, measureSpec, 0) & MEASURED_SIZE_MASK;
+    }
+
+    public static int resolveSizeAndState(int size, int measureSpec, int childMeasuredState) {
+        final int specMode = MeasureSpec.getMode(measureSpec);
+        final int specSize = MeasureSpec.getSize(measureSpec);
+        final int result;
+        switch (specMode) {
+            case MeasureSpec.AT_MOST:
+                if (specSize < size) {
+                    result = specSize | MEASURED_STATE_TOO_SMALL;
+                } else {
+                    result = size;
+                }
+                break;
+            case MeasureSpec.EXACTLY:
+                result = specSize;
+                break;
+            case MeasureSpec.UNSPECIFIED:
+            default:
+                result = size;
+        }
+        return result | (childMeasuredState & MEASURED_STATE_MASK);
+    }
+
+    public static int combineMeasuredStates(int curState, int newState) {
+        return curState | newState;
+    }
+
+    public final int getMeasuredState() {
+        return (mMeasuredWidth & MEASURED_STATE_MASK)
+                | ((mMeasuredHeight >> MEASURED_HEIGHT_STATE_SHIFT)
+                & (MEASURED_STATE_MASK >> MEASURED_HEIGHT_STATE_SHIFT));
+    }
+
+    /** Mark this view as needing layout without asking ancestors. */
+    public void forceLayout() {
+        mLaidOut = false;
+    }
+
+    // Posting.
+
+    public void postInvalidate() {
+        post(new Runnable() { public void run() { invalidate(); } });
+    }
+
+    public void postOnAnimation(Runnable action) {
+        post(action);
+    }
+
+    public void postOnAnimationDelayed(Runnable action, long delayMillis) {
+        postDelayed(action, delayMillis);
+    }
+
+    // Layout direction: left-to-right only.
+    public static final int LAYOUT_DIRECTION_LTR = 0;
+    public static final int LAYOUT_DIRECTION_RTL = 1;
+    public int getLayoutDirection() { return LAYOUT_DIRECTION_LTR; }
+    public boolean isLayoutRtl() { return false; }
+
+    public void setBackgroundResource(int resid) {
+        setBackground(resid == 0 ? null : getContext().getResources().getDrawable(resid, getContext().getTheme()));
     }
 }

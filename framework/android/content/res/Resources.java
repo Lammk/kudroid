@@ -23,8 +23,23 @@ public class Resources {
     private final Theme mTheme = new Theme(this);
 
     private static native int nativeGetIdentifier(String name, String type, String packageName);
+    private static native String nativeGetResourceName(int id);
     private static native String nativeGetString(int id, String locale);
     private static native int nativeGetColor(int id, String locale);
+    private static native byte[] nativeReadResource(String path);
+
+    private static native int[] nativeGetStyle(int id, String locale, int uiMode,
+                                               int sdk, int width, int height, int orientation);
+    private static native String nativeGetPoolString(int index);
+    private static native boolean nativeGetValue(int id, String locale, TypedValue output, boolean resolve);
+
+    private String localeName() {
+        return mConfiguration.locale != null ? mConfiguration.locale.toString() : "";
+    }
+
+    boolean loadValue(int id, TypedValue output, boolean resolve) {
+        return nativeGetValue(id, localeName(), output, resolve);
+    }
 
     public Resources() {
         this(new AssetManager(), null, null);
@@ -39,7 +54,20 @@ public class Resources {
             try { new Display().getMetrics(mMetrics); } catch (Throwable ignored) {}
         }
         if (config != null) mConfiguration.setTo(config);
-        else deriveConfiguration(mConfiguration, mMetrics);
+        else {
+            mConfiguration.setToDefaults();
+            mConfiguration.locale = java.util.Locale.getDefault();
+            mConfiguration.touchscreen = Configuration.TOUCHSCREEN_FINGER;
+            mConfiguration.keyboard = Configuration.KEYBOARD_NOKEYS;
+            mConfiguration.keyboardHidden = Configuration.KEYBOARDHIDDEN_YES;
+            mConfiguration.hardKeyboardHidden = Configuration.HARDKEYBOARDHIDDEN_YES;
+            mConfiguration.navigation = Configuration.NAVIGATION_NONAV;
+            mConfiguration.navigationHidden = Configuration.NAVIGATIONHIDDEN_YES;
+            mConfiguration.screenLayout = Configuration.SCREENLAYOUT_SIZE_NORMAL;
+            mConfiguration.uiMode = Configuration.UI_MODE_TYPE_NORMAL | Configuration.UI_MODE_NIGHT_NO;
+            mConfiguration.colorMode = Configuration.COLOR_MODE_WIDE_COLOR_GAMUT_NO | Configuration.COLOR_MODE_HDR_NO;
+            deriveConfiguration(mConfiguration, mMetrics);
+        }
     }
     public static Resources getSystem() { return new Resources(); }
     public DisplayMetrics getDisplayMetrics() { return mMetrics; }
@@ -68,75 +96,176 @@ public class Resources {
     }
     public CharSequence[] getTextArray(int id) { return new CharSequence[0]; }
     public int[] getIntArray(int id) { return new int[0]; }
+    // The name is "[package:][type/]entry"; defType and defPackage supply what it omits,
+    // and a numeric string is taken as the id itself.
     public int getIdentifier(String name, String defType, String defPackage) {
-        return nativeGetIdentifier(name, defType, defPackage);
+        if (name == null) throw new NullPointerException("name is null");
+        try {
+            return Integer.parseInt(name);
+        } catch (NumberFormatException ignored) {
+        }
+        return nativeGetIdentifier(name, defType != null ? defType : "",
+                defPackage != null ? defPackage : "");
     }
     public int getColor(int id) {
         String locale = mConfiguration.locale != null ? mConfiguration.locale.toString() : "";
         return nativeGetColor(id, locale);
     }
-    public int getColor(int id, Theme theme) { return getColor(id); }
-    public ColorStateList getColorStateList(int id) { return null; }
-    public ColorStateList getColorStateList(int id, Theme theme) { return null; }
-    public float getDimension(int id) { return 0.0f; }
-    public int getDimensionPixelSize(int id) { return 0; }
-    public int getDimensionPixelOffset(int id) { return 0; }
-    public boolean getBoolean(int id) { return false; }
-    public int getInteger(int id) { return 0; }
-    public float getFraction(int id, int base, int pbase) { return 0.0f; }
+    public int getColor(int id, Theme theme) {
+        TypedValue value = new TypedValue();
+        if (loadValue(id, value, true) && value.type == TypedValue.TYPE_STRING) {
+            ColorStateList list = getColorStateList(id, theme);
+            if (list != null) return list.getDefaultColor();
+        }
+        return getColor(id);
+    }
+    // A plain color, or a color selector read from its XML file; null when the id is unknown
+    // or is not a color resource.
+    public ColorStateList getColorStateList(int id) {
+        return getColorStateList(id, null);
+    }
+
+    public ColorStateList getColorStateList(int id, Theme theme) {
+        TypedValue value = new TypedValue();
+        if (!loadValue(id, value, true)) return null;
+        if (value.type >= TypedValue.TYPE_FIRST_COLOR_INT
+                && value.type <= TypedValue.TYPE_LAST_COLOR_INT) {
+            return ColorStateList.valueOf(value.data);
+        }
+        if (value.type == TypedValue.TYPE_STRING && value.string != null
+                && value.string.toString().endsWith(".xml")) {
+            XmlResourceParser parser = getXml(id);
+            try {
+                return ColorStateList.createFromXml(this, parser, theme);
+            } catch (org.xmlpull.v1.XmlPullParserException | java.io.IOException e) {
+                throw new NotFoundException("Invalid color state list " + value.string + ": "
+                        + e.getMessage());
+            } finally {
+                parser.close();
+            }
+        }
+        return null;
+    }
+
+    private TypedValue valueOf(int id, int type) throws NotFoundException {
+        TypedValue value = new TypedValue();
+        getValue(id, value, true);
+        if (type == TypedValue.TYPE_FIRST_INT
+                ? value.type >= TypedValue.TYPE_FIRST_INT && value.type <= TypedValue.TYPE_LAST_INT
+                : value.type == type) {
+            return value;
+        }
+        throw new NotFoundException("Resource ID #0x" + Integer.toHexString(id)
+                + " type #0x" + Integer.toHexString(value.type) + " is not valid");
+    }
+    public float getDimension(int id) throws NotFoundException {
+        return TypedValue.complexToDimension(valueOf(id, TypedValue.TYPE_DIMENSION).data, mMetrics);
+    }
+    public int getDimensionPixelSize(int id) throws NotFoundException {
+        return TypedValue.complexToDimensionPixelSize(
+                valueOf(id, TypedValue.TYPE_DIMENSION).data, mMetrics);
+    }
+    public int getDimensionPixelOffset(int id) throws NotFoundException {
+        return TypedValue.complexToDimensionPixelOffset(
+                valueOf(id, TypedValue.TYPE_DIMENSION).data, mMetrics);
+    }
+    public boolean getBoolean(int id) throws NotFoundException {
+        return valueOf(id, TypedValue.TYPE_FIRST_INT).data != 0;
+    }
+    public int getInteger(int id) throws NotFoundException {
+        return valueOf(id, TypedValue.TYPE_FIRST_INT).data;
+    }
+    public float getFraction(int id, int base, int pbase) throws NotFoundException {
+        return TypedValue.complexToFraction(
+                valueOf(id, TypedValue.TYPE_FRACTION).data, base, pbase);
+    }
     public InputStream openRawResource(int id) { return new ByteArrayInputStream(new byte[0]); }
     public InputStream openRawResource(int id, TypedValue value) {
         return new ByteArrayInputStream(new byte[0]);
     }
     public AssetFileDescriptor openRawResourceFd(int id) { return null; }
 
-    public android.graphics.drawable.Drawable getDrawable(int id) { return null; }
-    public android.graphics.drawable.Drawable getDrawable(int id, Theme theme) { return null; }
+    public android.graphics.drawable.Drawable getDrawable(int id) { return getDrawable(id, null); }
+    public android.graphics.drawable.Drawable getDrawable(int id, Theme theme) {
+        TypedValue value = new TypedValue(); getValue(id, value, true);
+        if (value.type >= 28 && value.type <= 31)
+            return new android.graphics.drawable.ColorDrawable(value.data);
+        if (value.type != TypedValue.TYPE_STRING || value.string == null)
+            throw new NotFoundException("Invalid drawable resource 0x" + Integer.toHexString(id));
+        String path = value.string.toString();
+        if (!path.endsWith(".xml"))
+            throw new NotFoundException("Unsupported bitmap drawable " + path);
+        XmlResourceParser parser = getXml(id);
+        try {
+            while (parser.next() != org.xmlpull.v1.XmlPullParser.START_TAG &&
+                    parser.getEventType() != org.xmlpull.v1.XmlPullParser.END_DOCUMENT) {}
+            if ("vector".equals(parser.getName())) {
+                android.graphics.drawable.VectorDrawable drawable =
+                        android.graphics.drawable.VectorDrawable.create(this, parser, theme);
+                android.util.Log.d("Resources", "Loaded vector 0x" + Integer.toHexString(id) + " " + path);
+                return drawable;
+            }
+            throw new NotFoundException("Unsupported drawable element " + parser.getName());
+        } catch (org.xmlpull.v1.XmlPullParserException | java.io.IOException e) {
+            throw new NotFoundException("Invalid drawable XML " + path + ": " + e.getMessage());
+        } finally { parser.close(); }
+    }
 
-    /**
-     * Resource name lookup.
-     *
-     * KuDroid does not parse compiled resources, so nothing can be named. Android
-     * throws NotFoundException for an unknown id and callers are written for that;
-     * returning a made-up name would be worse, since these end up in log messages
-     * and crash reports that then point at a resource that does not exist.
-     */
+    // "package:type/entry", from the application table or the framework table.
     public String getResourceName(int resid) throws NotFoundException {
-        throw new NotFoundException("resource id 0x" + Integer.toHexString(resid));
+        String name = nativeGetResourceName(resid);
+        if (name == null) {
+            throw new NotFoundException("Unable to find resource ID #0x" + Integer.toHexString(resid));
+        }
+        return name;
     }
 
     public String getResourceTypeName(int resid) throws NotFoundException {
-        throw new NotFoundException("resource id 0x" + Integer.toHexString(resid));
+        String name = getResourceName(resid);
+        return name.substring(name.indexOf(':') + 1, name.indexOf('/'));
     }
 
     public String getResourceEntryName(int resid) throws NotFoundException {
-        throw new NotFoundException("resource id 0x" + Integer.toHexString(resid));
+        String name = getResourceName(resid);
+        return name.substring(name.indexOf('/') + 1);
     }
 
     public String getResourcePackageName(int resid) throws NotFoundException {
-        throw new NotFoundException("resource id 0x" + Integer.toHexString(resid));
+        String name = getResourceName(resid);
+        return name.substring(0, name.indexOf(':'));
     }
 
     public void getValue(int id, TypedValue outValue, boolean resolveRefs)
             throws NotFoundException {
-        if (outValue != null) outValue.type = TypedValue.TYPE_NULL;
+        if (outValue == null) throw new NullPointerException();
+        if (!loadValue(id, outValue, resolveRefs))
+            throw new NotFoundException("resource id 0x" + Integer.toHexString(id));
     }
 
     public void getValue(String name, TypedValue outValue, boolean resolveRefs)
             throws NotFoundException {
-        if (outValue != null) outValue.type = TypedValue.TYPE_NULL;
+        int id = getIdentifier(name, "string", null);
+        getValue(id, outValue, resolveRefs);
     }
 
     public XmlResourceParser getXml(int id) throws NotFoundException {
-        return new XmlResourceParser();
+        TypedValue value = new TypedValue(); getValue(id, value, true);
+        if (value.type != TypedValue.TYPE_STRING || value.string == null)
+            throw new NotFoundException("Not an XML resource 0x" + Integer.toHexString(id));
+        byte[] data = nativeReadResource(value.string.toString());
+        if (data == null) throw new NotFoundException("Missing XML " + value.string);
+        try { return new CompiledXmlResourceParser(data); }
+        catch (org.xmlpull.v1.XmlPullParserException e) {
+            throw new NotFoundException("Invalid XML " + value.string + ": " + e.getMessage());
+        }
     }
 
     public XmlResourceParser getLayout(int id) throws NotFoundException {
-        return new XmlResourceParser();
+        return getXml(id);
     }
 
     public XmlResourceParser getAnimation(int id) throws NotFoundException {
-        return new XmlResourceParser();
+        return getXml(id);
     }
 
     /** The theme this Resources hands out; never null, so callers can chain. */
@@ -150,8 +279,155 @@ public class Resources {
      */
     public Theme getDefaultTheme() { return mTheme; }
 
+    // XML attributes and the element's style attribute only; there is no theme here.
     public TypedArray obtainAttributes(AttributeSet set, int[] attrs) {
-        return new TypedArray(this, attrs);
+        if (attrs == null) throw new NullPointerException();
+        return resolveStyledAttributes(null, set, attrs, 0, 0);
+    }
+
+    /** Flattened style: (attr id, type, data) triples in ascending attr id order. */
+    private static final class StyleData {
+        final int[] data;
+        StyleData(int[] data) { this.data = data; }
+        int indexOf(int attr) {
+            int lo = 0, hi = data.length / 3 - 1;
+            while (lo <= hi) {
+                int mid = (lo + hi) >>> 1;
+                int key = data[mid * 3];
+                if (key < attr) lo = mid + 1;
+                else if (key > attr) hi = mid - 1;
+                else return mid;
+            }
+            return -1;
+        }
+    }
+
+    private final java.util.HashMap<Integer, StyleData> mStyleCache = new java.util.HashMap<>();
+
+    private StyleData styleData(int id) {
+        synchronized (mStyleCache) {
+            StyleData cached = mStyleCache.get(id);
+            if (cached != null) return cached;
+        }
+        int[] data = nativeGetStyle(id, localeName(), mConfiguration.uiMode,
+                android.os.Build.VERSION.SDK_INT, mConfiguration.screenWidthDp,
+                mConfiguration.screenHeightDp, mConfiguration.orientation);
+        if (data == null) return null;
+        StyleData built = new StyleData(data);
+        synchronized (mStyleCache) { mStyleCache.put(id, built); }
+        return built;
+    }
+
+    /** Copy the style item for `attr` into `out`; false when the style has none. */
+    private boolean styleValue(StyleData style, int attr, TypedValue out) {
+        if (style == null) return false;
+        int index = style.indexOf(attr);
+        if (index < 0) return false;
+        out.type = style.data[index * 3 + 1];
+        out.data = style.data[index * 3 + 2];
+        out.resourceId = 0;
+        out.string = null;
+        out.assetCookie = 1;
+        if (out.type == TypedValue.TYPE_STRING) out.string = nativeGetPoolString(out.data);
+        return true;
+    }
+
+    /** XML attribute `attr` of the element `set` is positioned on, typed. */
+    private static boolean xmlValue(AttributeSet set, int attr, TypedValue out) {
+        if (set instanceof CompiledXmlResourceParser) {
+            CompiledXmlResourceParser parser = (CompiledXmlResourceParser) set;
+            int index = parser.indexOfAttributeResource(attr);
+            if (index < 0) return false;
+            TypedValue typed = parser.getAttributeTypedValue(index);
+            if (typed == null) return false;
+            out.setTo(typed);
+            return true;
+        }
+        // Any other AttributeSet: recover what its string accessors give.
+        for (int i = 0, n = set.getAttributeCount(); i < n; i++) {
+            if (set.getAttributeNameResource(i) != attr) continue;
+            int reference = set.getAttributeResourceValue(i, 0);
+            if (reference != 0) {
+                out.type = TypedValue.TYPE_REFERENCE; out.data = reference; return true;
+            }
+            String text = set.getAttributeValue(i);
+            if (text == null) return false;
+            out.string = text; out.type = TypedValue.TYPE_STRING; out.data = 0;
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * obtainStyledAttributes with Android's precedence: an attribute set directly in the
+     * XML wins over the element's style="" attribute, then the theme's default style
+     * attribute, then the default style resource, and last the theme itself.
+     */
+    TypedArray resolveStyledAttributes(Theme theme, AttributeSet set, int[] attrs,
+            int defStyleAttr, int defStyleRes) {
+        final int count = attrs.length;
+        final TypedValue[] values = new TypedValue[count];
+        int defStyle = defStyleRes;
+        if (defStyleAttr != 0 && theme != null) {
+            TypedValue style = theme.lookupAttribute(defStyleAttr);
+            if (style != null && style.type == TypedValue.TYPE_REFERENCE) defStyle = style.data;
+        }
+        StyleData defBag = defStyle != 0 ? styleData(defStyle) : null;
+        StyleData xmlBag = null;
+        if (set != null) {
+            int xmlStyle = set.getStyleAttribute();
+            if (xmlStyle != 0) xmlBag = styleData(xmlStyle);
+        }
+        for (int i = 0; i < count; i++) {
+            final int attr = attrs[i];
+            TypedValue v = new TypedValue();
+            boolean found = set != null && xmlValue(set, attr, v);
+            if (!found) found = styleValue(xmlBag, attr, v);
+            if (!found) found = styleValue(defBag, attr, v);
+            if (!found && theme != null) {
+                TypedValue fromTheme = theme.lookupAttribute(attr);
+                if (fromTheme != null) { v.setTo(fromTheme); found = true; }
+            }
+            values[i] = found ? resolveStyled(theme, v) : v;
+        }
+        return new TypedArray(this, attrs, values, theme, set);
+    }
+
+    /** Follow ?attr and @ref chains the way AttributeResolution does. */
+    private TypedValue resolveStyled(Theme theme, TypedValue value) {
+        TypedValue current = value;
+        for (int depth = 0; depth < 32; depth++) {
+            if (current.type == TypedValue.TYPE_ATTRIBUTE) {
+                TypedValue next = theme != null ? theme.lookupAttribute(current.data) : null;
+                if (next == null) return nullValue();
+                current = next;
+                continue;
+            }
+            if (current.type == TypedValue.TYPE_REFERENCE) {
+                if (current.data == 0) return nullValue();
+                TypedValue resolved = new TypedValue();
+                if (!loadValue(current.data, resolved, true)) {
+                    // Not something a table can resolve (a file-backed framework resource):
+                    // keep the reference so getResourceId still answers.
+                    TypedValue kept = new TypedValue();
+                    kept.setTo(current);
+                    kept.resourceId = current.data;
+                    return kept;
+                }
+                if (resolved.type == TypedValue.TYPE_ATTRIBUTE) { current = resolved; continue; }
+                if (resolved.resourceId == 0) resolved.resourceId = current.data;
+                return resolved;
+            }
+            return current;
+        }
+        return nullValue();
+    }
+
+    private static TypedValue nullValue() {
+        TypedValue v = new TypedValue();
+        v.type = TypedValue.TYPE_NULL;
+        v.data = TypedValue.DATA_NULL_UNDEFINED;
+        return v;
     }
 
     public TypedArray obtainTypedArray(int id) throws NotFoundException {
@@ -162,6 +438,7 @@ public class Resources {
         if (metrics != null) mMetrics.setTo(metrics);
         if (config != null) mConfiguration.setTo(config);
         else if (metrics != null) deriveConfiguration(mConfiguration, mMetrics);
+        synchronized (mStyleCache) { mStyleCache.clear(); }
     }
 
     private static void deriveConfiguration(Configuration out, DisplayMetrics metrics) {
@@ -179,78 +456,110 @@ public class Resources {
 
     public final void flushLayoutCache() {}
 
-    /**
-     * A resolved theme.
-     *
-     * This class did not exist, so {@code Activity.getTheme()} was auto-stubbed to
-     * null and anything calling through it died with a NullPointerException. That is
-     * not an edge case: androidx.core.splashscreen calls
-     * {@code getTheme().resolveAttribute(...)} from its install() path, which apps
-     * invoke as the first statement of onCreate, and every AppCompat activity calls
-     * {@code getTheme().obtainStyledAttributes(...)} while inflating.
-     *
-     * KuDroid resolves no attributes, so resolveAttribute() reports failure and
-     * obtainStyledAttributes() returns an empty TypedArray. Both are states real
-     * Android produces for an attribute absent from the current theme, so callers
-     * already handle them — unlike a null theme, which nothing handles.
-     */
     public static final class Theme {
-
         private final Resources mResources;
+        private final java.util.HashMap<Integer, TypedValue> attributes = new java.util.HashMap<>();
 
-        Theme() { mResources = null; }
-
+        Theme() { this(null); }
         Theme(Resources resources) { mResources = resources; }
+        public Resources getResources() { return mResources != null ? mResources : Resources.getSystem(); }
 
-        public Resources getResources() {
-            return mResources != null ? mResources : Resources.getSystem();
+        private TypedValue resolveValue(TypedValue input, boolean resolveRefs) {
+            if (input == null) return null;
+            TypedValue value = new TypedValue();
+            value.setTo(input);
+            java.util.HashSet<Integer> visited = new java.util.HashSet<>();
+            for (int depth = 0; depth < 64; depth++) {
+                if (value.type == TypedValue.TYPE_ATTRIBUTE) {
+                    if (!visited.add(value.data)) return null;
+                    TypedValue next = attributes.get(value.data);
+                    if (next == null) return null;
+                    value.setTo(next);
+                    continue;
+                }
+                if (value.type == TypedValue.TYPE_REFERENCE && value.data == 0) {
+                    value.type = TypedValue.TYPE_NULL;
+                    value.resourceId = 0;
+                    return value;
+                }
+                if (resolveRefs && value.type == TypedValue.TYPE_REFERENCE) {
+                    TypedValue resolved = new TypedValue();
+                    if (getResources().loadValue(value.data, resolved, true)) {
+                        value.setTo(resolved);
+                        if (value.type == TypedValue.TYPE_ATTRIBUTE) continue;
+                    }
+                }
+                return value;
+            }
+            return null;
         }
 
-        /**
-         * Look up an attribute in this theme.
-         *
-         * Returns false — not found — and leaves outValue as TYPE_NULL. Callers test
-         * the return value before reading, which is exactly why reporting failure is
-         * safe and claiming success would not be.
-         */
-        public boolean resolveAttribute(int resid, TypedValue outValue, boolean resolveRefs) {
-            if (outValue != null) {
-                outValue.type = TypedValue.TYPE_NULL;
-                outValue.data = TypedValue.DATA_NULL_UNDEFINED;
-                outValue.resourceId = 0;
-                outValue.string = null;
+        public synchronized boolean resolveAttribute(int id, TypedValue output, boolean resolveRefs) {
+            if (output == null) throw new NullPointerException();
+            TypedValue value = resolveValue(attributes.get(id), resolveRefs);
+            if (value == null) { output.setTo(new TypedValue()); return false; }
+            output.setTo(value);
+            return value.type != TypedValue.TYPE_NULL;
+        }
+
+        /** The theme's own value for `attr`, with ?attr chains followed; null when unset. */
+        synchronized TypedValue lookupAttribute(int attr) {
+            TypedValue value = attributes.get(attr);
+            for (int depth = 0; value != null && value.type == TypedValue.TYPE_ATTRIBUTE; depth++) {
+                if (depth >= 32) return null;
+                value = attributes.get(value.data);
             }
-            return false;
+            return value;
         }
 
         public TypedArray obtainStyledAttributes(int[] attrs) {
-            return new TypedArray(mResources, attrs);
+            if (attrs == null) throw new NullPointerException();
+            return getResources().resolveStyledAttributes(this, null, attrs, 0, 0);
         }
 
-        public TypedArray obtainStyledAttributes(int resid, int[] attrs)
-                throws NotFoundException {
-            return new TypedArray(mResources, attrs);
+        public TypedArray obtainStyledAttributes(int resid, int[] attrs) {
+            if (attrs == null) throw new NullPointerException();
+            return getResources().resolveStyledAttributes(this, null, attrs, 0, resid);
         }
 
-        public TypedArray obtainStyledAttributes(AttributeSet set, int[] attrs,
-                                                 int defStyleAttr, int defStyleRes) {
-            return new TypedArray(mResources, attrs);
+        public TypedArray obtainStyledAttributes(AttributeSet set, int[] attrs, int defStyleAttr, int defStyleRes) {
+            if (attrs == null) throw new NullPointerException();
+            return getResources().resolveStyledAttributes(this, set, attrs, defStyleAttr, defStyleRes);
         }
 
-        public void applyStyle(int resId, boolean force) {}
+        public synchronized void applyStyle(int id, boolean force) {
+            Resources resources = getResources();
+            StyleData style = resources.styleData(id);
+            if (style == null) {
+                android.util.Log.w("Resources", "Missing style 0x" + Integer.toHexString(id));
+                return;
+            }
+            int[] data = style.data;
+            for (int i = 0; i + 2 < data.length; i += 3) {
+                TypedValue old = attributes.get(data[i]);
+                if (!force && old != null && old.type != TypedValue.TYPE_NULL) continue;
+                TypedValue value = new TypedValue();
+                resources.styleValue(style, data[i], value);
+                attributes.put(data[i], value);
+            }
+        }
 
-        public void setTo(Theme other) {}
-
+        public void setTo(Theme other) {
+            if (other == null) throw new NullPointerException();
+            if (other == this) return;
+            java.util.HashMap<Integer, TypedValue> copy = new java.util.HashMap<>();
+            synchronized (other) {
+                for (java.util.Map.Entry<Integer, TypedValue> entry : other.attributes.entrySet()) {
+                    TypedValue value = new TypedValue(); value.setTo(entry.getValue());
+                    copy.put(entry.getKey(), value);
+                }
+            }
+            synchronized (this) { attributes.clear(); attributes.putAll(copy); }
+        }
         public int getChangingConfigurations() { return 0; }
-
         public void dump(int priority, String tag, String prefix) {}
-
         public void rebase() {}
-
-        @Override
-        public String toString() {
-            return "Resources$Theme{}";
-        }
+        public String toString() { return "Resources$Theme{attributes=" + attributes.size() + "}"; }
     }
 
     public static class NotFoundException extends RuntimeException {

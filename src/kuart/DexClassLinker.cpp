@@ -43,6 +43,20 @@ bool IsPrimitiveDescriptor(const char* d) {
     }
 }
 
+bool IsPlatformDescriptor(const char* descriptor) {
+    if (std::strncmp(descriptor, "Landroid/support/", 17) == 0 ||
+        std::strncmp(descriptor, "Landroid/arch/", 14) == 0) return false;
+    static const char* prefixes[] = {
+        "Landroid/", "Ljava/", "Ljavax/", "Ldalvik/", "Lsun/", "Llibcore/",
+        "Lcom/android/", "Lorg/apache/harmony/", "Lorg/w3c/dom/",
+        "Lorg/xml/sax/", "Lorg/xmlpull/", "Lorg/json/"
+    };
+    for (const char* prefix : prefixes) {
+        if (std::strncmp(descriptor, prefix, std::strlen(prefix)) == 0) return true;
+    }
+    return false;
+}
+
 // Missing-class log path set by KuArtRuntime; absolute so tests do not litter CWD.
 std::mutex g_missing_class_log_mtx;
 std::vector<std::string> g_missing_class_log_paths;
@@ -104,7 +118,8 @@ DexClassLinker::DexClassLinker() = default;
 DexClassLinker::~DexClassLinker() = default;
 
 bool DexClassLinker::AddDexFile(const uint8_t* bytes, size_t size,
-                                const std::string& location, std::string* error_msg) {
+                                const std::string& location, std::string* error_msg,
+                                bool boot_class_path) {
     const art::DexFileLoader loader;
     std::string local_error;
     std::unique_ptr<const art::DexFile> dex_file = loader.Open(
@@ -115,6 +130,7 @@ bool DexClassLinker::AddDexFile(const uint8_t* bytes, size_t size,
         if (error_msg != nullptr) *error_msg = last_error_;
         return false;
     }
+    if (boot_class_path) boot_dex_files_.insert(dex_file.get());
     dex_files_.push_back(std::move(dex_file));
     return true;
 }
@@ -187,17 +203,23 @@ DexClass* DexClassLinker::FindClass(const char* descriptor) {
         return nullptr;
     }
 
-    for (const auto& dex_file : dex_files_) {
-        const art::dex::TypeId* type_id = dex_file->FindTypeId(descriptor);
-        if (type_id == nullptr) continue;
-        const art::dex::TypeIndex type_idx = dex_file->GetIndexForTypeId(*type_id);
-        const art::dex::ClassDef* class_def = dex_file->FindClassDef(type_idx);
-        if (class_def == nullptr) continue;
+    // Bundled libraries take precedence over optional framework copies.
+    const bool bundledLibrary = !IsPlatformDescriptor(descriptor);
+    for (int pass = 0; pass < 2; ++pass) {
+        const bool wantBoot = bundledLibrary ? pass == 1 : pass == 0;
+        for (const auto& dex_file : dex_files_) {
+            if ((boot_dex_files_.count(dex_file.get()) != 0) != wantBoot) continue;
+            const art::dex::TypeId* type_id = dex_file->FindTypeId(descriptor);
+            if (type_id == nullptr) continue;
+            const art::dex::TypeIndex type_idx = dex_file->GetIndexForTypeId(*type_id);
+            const art::dex::ClassDef* class_def = dex_file->FindClassDef(type_idx);
+            if (class_def == nullptr) continue;
 
-        loading_.push_back(descriptor);
-        DexClass* klass = LoadClassFromDexFile(*dex_file, *class_def, descriptor);
-        loading_.pop_back();
-        return klass;
+            loading_.push_back(descriptor);
+            DexClass* klass = LoadClassFromDexFile(*dex_file, *class_def, descriptor);
+            loading_.pop_back();
+            return klass;
+        }
     }
 
     // Auto-stub missing boot-classpath classes only; app classes must still fail.

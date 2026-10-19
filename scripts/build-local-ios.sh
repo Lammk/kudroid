@@ -92,6 +92,7 @@ if [ "${DO_RUN}" = true ]; then
 else
     xtool dev build --ipa -c "${CONFIG}"
     IPA_PATH="${ROOT_DIR}/ios-app/KuDroidShell/xtool/KuDroidShell.ipa"
+    python3 "${ROOT_DIR}/scripts/embed_standalone_launcher.py" "${IPA_PATH}"
     echo ""
     echo "========================================================"
     echo " BUILD SUCCESSFUL!"

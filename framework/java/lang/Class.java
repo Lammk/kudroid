@@ -35,6 +35,13 @@ public final class Class<T> {
 
     public native boolean isAssignableFrom(Class<?> other);
 
+    /** This class cast to a subclass of `clazz`, or ClassCastException. */
+    @SuppressWarnings("unchecked")
+    public <U> Class<? extends U> asSubclass(Class<U> clazz) {
+        if (clazz.isAssignableFrom(this)) return (Class<? extends U>) this;
+        throw new ClassCastException(this.toString());
+    }
+
     public native T newInstance() throws InstantiationException, IllegalAccessException;
 
     public native ClassLoader getClassLoader();

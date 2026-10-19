@@ -240,9 +240,15 @@ void JavaCanvasRenderer::drawBitmap(const uint32_t* pixels, int width, int heigh
             int px = dstX + sx;
             if (px >= 0 && px < width_) {
                 uint32_t argb = srcRow[sx];
-                if ((argb >> 24) > 0) {
-                    dstRow[px] = argb_to_rgba(argb);
-                }
+                const uint32_t alpha = argb >> 24;
+                if (alpha == 0) continue;
+                if (alpha == 255) { dstRow[px] = argb_to_rgba(argb); continue; }
+                const uint32_t dst = dstRow[px], inverse = 255 - alpha;
+                const uint32_t r = (((argb >> 16) & 255) * alpha + (dst & 255) * inverse + 127) / 255;
+                const uint32_t g = (((argb >> 8) & 255) * alpha + ((dst >> 8) & 255) * inverse + 127) / 255;
+                const uint32_t b = ((argb & 255) * alpha + ((dst >> 16) & 255) * inverse + 127) / 255;
+                const uint32_t a = alpha + ((dst >> 24) * inverse + 127) / 255;
+                dstRow[px] = a << 24 | b << 16 | g << 8 | r;
             }
         }
     }

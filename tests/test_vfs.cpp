@@ -632,6 +632,36 @@ void TestZipIndex(const std::string& root) {
     }
     Check(!kudroid::zip_stat_entry(junkPath, "anything", nullptr, nullptr, nullptr),
           "a non-zip file stats as missing");
+
+    // Entries that differ only by case are distinct (shortened resource paths such as
+    // res/hq.xml and res/HQ.xml). An exact name must never resolve to its case twin.
+    const std::string twinPath = (apkDir / "twins.apk").string();
+    {
+        const std::vector<uint8_t> twins = build_store_zip({
+            {"res/HQ.xml", "UPPER-ENTRY"},
+            {"res/hq.xml", "lower"},
+        });
+        std::ofstream out(twinPath, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(twins.data()),
+                  static_cast<std::streamsize>(twins.size()));
+    }
+    auto readAt = [&](uint64_t at, uint64_t n) {
+        std::ifstream in(twinPath, std::ios::binary);
+        in.seekg(static_cast<std::streamoff>(at));
+        std::string buf(static_cast<size_t>(n), '\0');
+        in.read(buf.data(), static_cast<std::streamsize>(n));
+        return buf;
+    };
+    uint64_t lowerOff = 0, lowerSize = 0, upperOff = 0, upperSize = 0, foldOff = 0;
+    Check(kudroid::zip_stat_entry(twinPath, "res/hq.xml", &lowerOff, &lowerSize, nullptr) &&
+              lowerSize == 5 && readAt(lowerOff, lowerSize) == "lower",
+          "an exact name resolves to its own entry, not the earlier case twin");
+    Check(kudroid::zip_stat_entry(twinPath, "res/HQ.xml", &upperOff, &upperSize, nullptr) &&
+              upperSize == 11 && readAt(upperOff, upperSize) == "UPPER-ENTRY",
+          "the case twin resolves to its own entry too");
+    Check(kudroid::zip_stat_entry(twinPath, "RES/Hq.xml", &foldOff, nullptr, nullptr) &&
+              foldOff == upperOff,
+          "a name with no exact match still falls back to the first case-folded entry");
 }
 
 // vfs_fopen caches ONE open file description for base.apk and hands every

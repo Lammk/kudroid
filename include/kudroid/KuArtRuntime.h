@@ -77,6 +77,9 @@ void kuart_register_package(const char* package_name,
                             const char* const* activities,
                             int activity_count);
 
+// An empty component names the application theme.
+void kuart_register_theme(const char* component_name, unsigned int resource_id);
+
 // Manifest version + install times. All fall back when unparseable.
 void kuart_register_package_info(const char* package_name, int version_code,
                                  const char* version_name,

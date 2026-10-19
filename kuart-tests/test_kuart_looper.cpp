@@ -58,7 +58,8 @@ int main() {
     interp.set_jni_env(&jni);
     interp.set_instruction_limit(8000ull * 1000ull * 1000ull);
 
-    for (const char* name : {"LLooperTests;", "LMediaApiTests;"}) {
+    for (const char* name : {"LLooperTests;", "LMediaApiTests;", "LThrowableTests;",
+                             "LFrameworkResourceTests;", "LInflaterTests;"}) {
         std::printf("[%s]\n", name);
         DexClass* klass = linker.FindClass(name);
         if (klass == nullptr || !interp.EnsureInitialized(klass)) {

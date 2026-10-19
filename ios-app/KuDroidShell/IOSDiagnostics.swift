@@ -39,7 +39,8 @@ final class IOSDiagnostics: NSObject, MXMetricManagerSubscriber {
     private func diagnosticsURL() -> URL {
         let documents = FileManager.default.urls(for: .documentDirectory,
                                                   in: .userDomainMask)[0]
-        let base = documents.appendingPathComponent("logs", isDirectory: true)
+        let base = StandaloneConfiguration.isStandalone ? StandaloneStorage.logs
+            : documents.appendingPathComponent("logs", isDirectory: true)
         try? FileManager.default.createDirectory(at: base,
                                                  withIntermediateDirectories: true)
         return base.appendingPathComponent("ios_diagnostics.log")
