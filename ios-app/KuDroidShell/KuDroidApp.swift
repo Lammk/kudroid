@@ -302,6 +302,10 @@ struct KuDroidApp: App {
     @StateObject private var session = AppSession()
 
     init() {
+        if StandaloneConfiguration.isStandalone,
+           let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+            kudroid_set_log_paths(documents.path, StandaloneStorage.logs.path)
+        }
         IOSDiagnostics.shared.start()
         IOSDiagnostics.shared.applicationPhase("app-init")
         activateAudioSession()
@@ -311,7 +315,10 @@ struct KuDroidApp: App {
     var body: some Scene {
         WindowGroup {
             ZStack {
-                if !session.activeGuestApp.isEmpty {
+                if StandaloneConfiguration.isStandalone {
+                    StandaloneGuestView()
+                        .modifier(GuestEdgeGestures())
+                } else if !session.activeGuestApp.isEmpty {
                     DedicatedAppRunnerView(
                         appName: session.activeGuestApp,
                         onCrash: { appName, tailLog in

@@ -5,6 +5,7 @@
 #include "GuestLibrary.h"
 #include "CrashInternal.h"
 #include "kudroid/KuArtRuntime.h"
+#include "kudroid/ResourceTable.h"
 #include "kudroid/elf_loader.hpp"
 #include "kudroid/BionicShim.h"
 #include "kudroid/NativeCallTelemetry.h"
@@ -1148,6 +1149,29 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                                         ? "1.0.0"
                                         : manifestInfo.versionName.c_str(),
                                     nowMs, nowMs);
+                            }
+
+                            const auto resolveTheme = [&](std::string reference) -> uint32_t {
+                                if (reference.empty()) return 0;
+                                if (reference.front() == '@') reference.erase(0, 1);
+                                if (reference.empty() || reference.front() == '-') return 0;
+                                if (reference.front() >= '0' && reference.front() <= '9') {
+                                    try {
+                                        size_t consumed = 0;
+                                        const auto number = std::stoull(reference, &consumed, 0);
+                                        if (consumed == reference.size() && number <= 0xffffffffull)
+                                            return static_cast<uint32_t>(number);
+                                    } catch (...) {}
+                                    return 0;
+                                }
+                                uint32_t id = 0;
+                                kudroid::resource_get_identifier(reference, "style", pkgName, &id);
+                                return id;
+                            };
+                            kuart_register_theme("", resolveTheme(manifestInfo.applicationTheme));
+                            for (const auto& activity : manifestInfo.activities) {
+                                if (!activity.theme.empty())
+                                    kuart_register_theme(activity.name.c_str(), resolveTheme(activity.theme));
                             }
 
                             // Registers keys/values as parallel arrays; the storage has

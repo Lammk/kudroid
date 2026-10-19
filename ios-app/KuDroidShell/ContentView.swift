@@ -5,6 +5,8 @@ import AVFoundation
 import Metal
 import QuartzCore
 import CoreMotion
+import Combine
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     @State private var fullLog = "KuDroid Core Status"
@@ -25,6 +27,10 @@ struct ContentView: View {
             DebugView(fullLog: $fullLog, jitStatus: $jitStatus)
                 .tabItem {
                     Label("Debug", systemImage: "terminal.fill")
+                }
+            ReverseView()
+                .tabItem {
+                    Label("Reverse", systemImage: "arrow.triangle.2.circlepath")
                 }
         }
         .preferredColorScheme(.dark)
@@ -48,7 +54,8 @@ struct AppsView: View {
     @EnvironmentObject private var session: AppSession
     @Binding var fullLog: String
     @State private var installedApps: [AppItem] = []
-    @State private var showAPKInstaller = false
+    @State private var showAPKPicker = false
+    @StateObject private var installer = APKInstallModel()
     @State private var showRenameAlert = false
     // App deletion status — shows progress instead of freeze UI.
     @State private var deletingApp: String? = nil
@@ -84,11 +91,13 @@ struct AppsView: View {
                             .font(.caption.weight(.semibold))
                             .foregroundColor(.green.opacity(0.8))
                         Spacer()
-                        Button(action: { showAPKInstaller = true }) {
+                        Button(action: { showAPKPicker = true }) {
                             Image(systemName: "plus.circle.fill")
                                 .font(.title2)
                             .foregroundColor(.green)
                         }
+                        .accessibilityLabel("Install APK")
+                        .disabled(installer.busy)
                     }
                     .padding()
                     
@@ -194,6 +203,18 @@ struct AppsView: View {
                     }
                 }
 
+                if installer.busy {
+                    Color.black.opacity(0.65).ignoresSafeArea()
+                    VStack(spacing: 16) {
+                        ProgressView()
+                        Text(installer.stage).multilineTextAlignment(.center)
+                    }
+                    .padding(28)
+                    .background(Color(.systemGray6))
+                    .cornerRadius(18)
+                    .padding()
+                }
+
                 // Overlay the app deletion process — block interaction while deleting
                 // but still displays phase + % instead of freezing the screen.
                 if let name = deletingApp {
@@ -227,12 +248,20 @@ struct AppsView: View {
             }
             .navigationBarHidden(true)
             .onAppear(perform: loadInstalledApps)
-            .sheet(isPresented: $showAPKInstaller, onDismiss: loadInstalledApps) {
-                APKInstallerView { log in
-                    fullLog = log
-                    showAPKInstaller = false
+            .fileImporter(isPresented: $showAPKPicker, allowedContentTypes: APKFileTypes.supported) { result in
+                switch result {
+                case .success(let url): installer.install(url)
+                case .failure(let error): installer.report(error.localizedDescription)
                 }
             }
+            .onReceive(installer.$result) { log in
+                guard let log = log else { return }
+                fullLog = log
+                loadInstalledApps()
+            }
+            .alert("Could not install APK", isPresented: $installer.showError) {
+                Button("OK", role: .cancel) {}
+            } message: { Text(installer.error) }
             .alert("Rename App", isPresented: $showRenameAlert) {
                 TextField("App Name", text: $newAppName)
                 Button("Cancel", role: .cancel) {}
@@ -843,6 +872,7 @@ struct PermissionsView: View {
 
 // mark: - debug tab (shortened DebugView keeps only KDB & Live Terminal Log)
 struct DebugView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @Binding var fullLog: String
     @Binding var jitStatus: String
     @State private var showCopyAlert = false
@@ -891,6 +921,14 @@ struct DebugView: View {
                     .onAppear {
                         RemoteDebugClient.shared.onConnectionStatusChanged = { connected in
                             isKdbConnected = connected
+                        }
+                    }
+
+                    if ProcessInfo.processInfo.operatingSystemVersion.majorVersion < 26 {
+                        Button("Enable JIT with TrollStore") {
+                            JITActivation.openTrollStore { opened in
+                                if !opened { fullLog = "Could not open TrollStore." }
+                            }
                         }
                     }
 
@@ -977,6 +1015,9 @@ struct DebugView: View {
                 // mid-run), so re-ask instead of keeping the startup verdict.
                 jitStatus = runJitStatus()
             }
+            .onChange(of: scenePhase) { phase in
+                if phase == .active { jitStatus = runJitStatus() }
+            }
             .alert("Copied!", isPresented: $showCopyAlert) {
                 Button("OK", role: .cancel) {}
             } message: {
@@ -1036,7 +1077,7 @@ private final class AudioSessionLifecycle {
         do {
             if kudroid_audio_capture_active() > 0 {
                 try session.setCategory(.playAndRecord, mode: .default,
-                                        options: [.mixWithOthers, .allowBluetooth, .defaultToSpeaker])
+                                        options: [.mixWithOthers, .allowBluetoothHFP, .defaultToSpeaker])
             } else {
                 try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
             }
@@ -1113,8 +1154,17 @@ func setupLogDir() {
     if let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
         kudroid_set_log_dir(docs.path)
         kudroid_set_documents_dir(docs.path)
-        let apkInbox = docs.appendingPathComponent("put_apk_here", isDirectory: true)
-        try? FileManager.default.createDirectory(at: apkInbox, withIntermediateDirectories: true)
+        let legacy = docs.appendingPathComponent("put_apk_here", isDirectory: true)
+        if FileManager.default.fileExists(atPath: legacy.path) {
+            do {
+                if try FileManager.default.contentsOfDirectory(atPath: legacy.path).isEmpty {
+                    try FileManager.default.removeItem(at: legacy)
+                } else {
+                    let archive = docs.appendingPathComponent("APK Archive-" + UUID().uuidString, isDirectory: true)
+                    try FileManager.default.moveItem(at: legacy, to: archive)
+                }
+            } catch { NSLog("APK folder migration failed: %@", error.localizedDescription) }
+        }
     }
 }
 
@@ -1282,251 +1332,45 @@ func extractVersionNameFromAxml(_ data: Data) -> String? {
     return nil
 }
 
-// mark: - apk installation interface
-struct APKInstallerView: View {
-    let onInstall: (String) -> Void
-    @Environment(\.dismiss) private var dismiss
-    @State private var apkFiles: [URL] = []
-    @State private var selectedAPK: URL?
-    @State private var status = ""
-    @State private var isInstalling = false
-    @State private var installStep = ""
-    @State private var installedPackages: Set<String> = []
+// Copy provider files before handing them to the native installer.
+final class APKInstallModel: ObservableObject {
+    @Published var busy = false
+    @Published var stage = ""
+    @Published var result: String?
+    @Published var showError = false
+    @Published var error = ""
+    private let worker = DispatchQueue(label: "kudroid.install", qos: .userInitiated)
 
-    private var inboxURL: URL? {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("put_apk_here", isDirectory: true)
+    func report(_ message: String) {
+        error = message
+        showError = true
     }
 
-    private var androidRootAppsURL: URL? {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("android_root/data/app", isDirectory: true)
-    }
-
-    var body: some View {
-        NavigationView {
-            ZStack {
-                Color.black.ignoresSafeArea()
-                
-                VStack(spacing: 0) {
-                    if let inboxURL {
-                        Text(inboxURL.path)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(.secondary)
-                            .textSelection(.enabled)
-                            .padding()
-                    }
-
-                    List(apkFiles, id: \.path) { apk in
-                        Button {
-                            if !isInstalling { selectedAPK = apk }
-                        } label: {
-                            HStack {
-                                Image(systemName: "shippingbox.fill")
-                                    .font(.title2)
-                                    .foregroundColor(.green)
-                                    .padding(.trailing, 4)
-                                
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(apk.lastPathComponent)
-                                        .foregroundColor(.white)
-                                        .lineLimit(1)
-                                    
-                                    HStack(spacing: 6) {
-                                        Text(fileSize(apk))
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                        
-                                        if let badge = apkStatusBadge(for: apk) {
-                                            Text(badge.text)
-                                                .font(.system(size: 9, weight: .black))
-                                                .padding(.horizontal, 6)
-                                                .padding(.vertical, 2)
-                                                .background(badge.isUpdate ? Color.orange.opacity(0.25) : Color.green.opacity(0.25))
-                                                .foregroundColor(badge.isUpdate ? .orange : .green)
-                                                .cornerRadius(4)
-                                        }
-                                    }
-                                }
-                                Spacer()
-                                if selectedAPK == apk {
-                                    Image(systemName: "checkmark.circle.fill")
-                                        .foregroundColor(.green)
-                                }
-                            }
-                        }
-                        .listRowBackground(Color(.systemGray6))
-                        .disabled(isInstalling)
-                    }
-                    .onAppear {
-                        UITableView.appearance().backgroundColor = .clear
-                    }
-                    .overlay {
-                        if apkFiles.isEmpty {
-                            VStack(spacing: 8) {
-                                Image(systemName: "folder.badge.plus").font(.largeTitle).foregroundColor(.secondary)
-                                Text("Put .apk files in Documents/put_apk_here").multilineTextAlignment(.center).foregroundColor(.white)
-                                Text("Then tap Refresh").font(.caption).foregroundColor(.secondary)
-                            }
-                            .padding()
-                        }
-                    }
-
-                    // Installation status animation frame
-                    if isInstalling {
-                        VStack(spacing: 12) {
-                            ProgressView()
-                                .progressViewStyle(CircularProgressViewStyle(tint: .green))
-                                .scaleEffect(1.3)
-                            
-                            Text(installStep)
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundColor(.green)
-                            
-                            HStack(spacing: 6) {
-                                Image(systemName: "cpu")
-                                    .font(.caption)
-                                    .foregroundColor(.green)
-                                Text("Extracting APK")
-                                    .font(.caption.weight(.medium))
-                                    .foregroundColor(.white)
-                            }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 4)
-                            .background(Color.green.opacity(0.15))
-                            .cornerRadius(6)
-                            
-                            Text("Extracting assets, parsing package manifest & linking native ARM64 libraries...")
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
-                                .multilineTextAlignment(.center)
-                        }
-                        .padding()
-                        .frame(maxWidth: .infinity)
-                        .background(Color(.systemGray6).opacity(0.8))
-                        .cornerRadius(12)
-                        .padding(.horizontal)
-                        .transition(.opacity.combined(with: .scale))
-                    }
-
-                    if !status.isEmpty && !isInstalling {
-                        Text(status).font(.caption).foregroundColor(.red).padding(.horizontal)
-                    }
-
-                    HStack(spacing: 16) {
-                        Button("Refresh") { refresh() }
-                            .buttonStyle(.bordered)
-                            .disabled(isInstalling)
-                        
-                        Button(action: startInstall) {
-                            HStack {
-                                if isInstalling {
-                                    ProgressView()
-                                        .progressViewStyle(CircularProgressViewStyle(tint: .black))
-                                        .padding(.trailing, 4)
-                                    Text("Installing...")
-                                } else if let selectedAPK, let badge = apkStatusBadge(for: selectedAPK) {
-                                    Image(systemName: badge.isUpdate ? "arrow.triangle.2.circlepath" : "arrow.clockwise.circle.fill")
-                                    Text(badge.isUpdate ? "Update App" : "Reinstall App")
-                                } else {
-                                    Image(systemName: "arrow.down.circle.fill")
-                                    Text("Install Selected")
-                                }
-                            }
-                            .font(.body.bold())
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(selectedAPK != nil && (apkStatusBadge(for: selectedAPK!)?.isUpdate ?? false) ? .orange : .green)
-                        .disabled(selectedAPK == nil || isInstalling)
-                    }
-                    .padding()
+    func install(_ url: URL) {
+        guard !busy else { return }
+        busy = true
+        result = nil
+        stage = "Installing " + url.lastPathComponent + "…"
+        let access = url.startAccessingSecurityScopedResource()
+        worker.async {
+            defer { if access { url.stopAccessingSecurityScopedResource() } }
+            let fm = FileManager.default
+            let work = fm.temporaryDirectory.appendingPathComponent("Install-" + UUID().uuidString)
+            defer { try? fm.removeItem(at: work) }
+            do {
+                try fm.createDirectory(at: work, withIntermediateDirectories: true)
+                let local = work.appendingPathComponent(url.lastPathComponent)
+                try fm.copyItem(at: url, to: local)
+                let log = installAPK(at: local)
+                DispatchQueue.main.async {
+                    self.busy = false
+                    self.result = log
+                    if log.contains("ERROR") { self.report(log) }
                 }
-            }
-            .navigationTitle("Install APK")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") { dismiss() }
-                        .foregroundColor(.green)
-                        .disabled(isInstalling)
-                }
-            }
-            .onAppear { refresh() }
-        }
-    }
-
-    private func getInstalledPackage(for url: URL) -> String? {
-        let name = url.deletingPathExtension().lastPathComponent.lowercased()
-        for installed in installedPackages {
-            let lower = installed.lowercased()
-            if lower == name || name.contains(lower) || lower.contains(name) {
-                return installed
+            } catch {
+                DispatchQueue.main.async { self.busy = false; self.report(error.localizedDescription) }
             }
         }
-        return nil
-    }
-
-    private func apkStatusBadge(for url: URL) -> (text: String, isUpdate: Bool)? {
-        guard let installed = getInstalledPackage(for: url) else { return nil }
-        
-        let apkVer = extractVersionFromFolderName(url.lastPathComponent)
-        let installedVer = extractVersionFromFolderName(installed)
-        
-        if let av = apkVer, let iv = installedVer, av != iv {
-            return ("UPDATE v\(av)", true)
-        }
-        return ("INSTALLED", false)
-    }
-
-    private func startInstall() {
-        guard let selectedAPK else { return }
-        withAnimation {
-            isInstalling = true
-            installStep = "Installing \(selectedAPK.lastPathComponent)..."
-        }
-        
-        DispatchQueue.global(qos: .userInitiated).async {
-            let log = installAPK(at: selectedAPK)
-            DispatchQueue.main.async {
-                withAnimation {
-                    self.isInstalling = false
-                    self.onInstall(log)
-                }
-            }
-        }
-    }
-
-    private func refresh() {
-        guard let inboxURL else {
-            status = "Documents directory unavailable"
-            return
-        }
-        do {
-            try FileManager.default.createDirectory(at: inboxURL, withIntermediateDirectories: true)
-            // Picker-only extension list (the extractor validates zips by content).
-            // "zip" covers APKMirror/SAI bundles like <pkg>.apks.zip.
-            let supportedExtensions = ["apk", "apkm", "xapk", "apks", "zip"]
-            apkFiles = try FileManager.default.contentsOfDirectory(
-                at: inboxURL, includingPropertiesForKeys: [.fileSizeKey], options: [.skipsHiddenFiles]
-            ).filter { supportedExtensions.contains($0.pathExtension.lowercased()) }
-             .sorted { $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent) == .orderedAscending }
-            if let selectedAPK, !apkFiles.contains(selectedAPK) { self.selectedAPK = nil }
-            
-            // Download the list of installed apps to check for updates
-            if let root = androidRootAppsURL,
-               let folders = try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) {
-                installedPackages = Set(folders.map { $0.lastPathComponent })
-            }
-            
-            status = ""
-        } catch {
-            status = "Cannot scan put_apk_here: \(error.localizedDescription)"
-        }
-    }
-
-    private func fileSize(_ url: URL) -> String {
-        let values = try? url.resourceValues(forKeys: [.fileSizeKey])
-        return ByteCountFormatter.string(fromByteCount: Int64(values?.fileSize ?? 0), countStyle: .file)
     }
 }
 

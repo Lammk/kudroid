@@ -227,11 +227,10 @@ std::string normalizePathString(std::string_view path) {
 
 } // namespace
 
-VFSPathRemapper& VFSPathRemapper::getInstance() {
+VFSPathRemapper& VFSPathRemapper::getInstance(bool initializeTree) {
     static VFSPathRemapper instance;
-    // Cheap after the first call: initialize() returns the cached result. Kept here so
-    // that whichever vfs_* function runs first still finds the tree in place.
-    (void)instance.initialize();
+    // Root configuration must precede the first directory-tree creation.
+    if (initializeTree) (void)instance.initialize();
     return instance;
 }
 
@@ -323,11 +322,11 @@ VFSPathRemapper::VFSPathRemapper()
     : documentsDirectory_(defaultDocumentsDirectory()),
       androidRoot_(documentsDirectory_ + "/android_root") {}
 
-void VFSPathRemapper::setDocumentsDirectory(const std::string& documentsDirectory) {
+void VFSPathRemapper::setDocumentsDirectory(const std::string& documentsDirectory, bool flatRoot) {
     {
         std::lock_guard<std::mutex> lock(initMutex_);
         documentsDirectory_ = documentsDirectory;
-        androidRoot_ = documentsDirectory_ + "/android_root";
+        androidRoot_ = flatRoot ? documentsDirectory_ : documentsDirectory_ + "/android_root";
         // The tree has to be built under the new root, so the previous run does not
         // count. Swift calls this after the container path is known, which is normally
         // before any guest file access.
@@ -1072,7 +1071,11 @@ struct ZipEntryMeta {
     uint16_t compressionMethod = 0;
 };
 struct ZipArchiveIndex {
+    // Exact entry names. Names that differ only by case are distinct entries
+    // (shortened resource paths rely on it), so every one is kept.
     std::unordered_map<std::string, ZipEntryMeta> entries;
+    // Case-folded fallback for lookups with no exact match; first occurrence wins.
+    std::unordered_map<std::string, ZipEntryMeta> folded;
     // Directory prefix ("assets/shaders/") -> immediate child names, exactly the slice
     // zip_list_dir_entries serves. Built alongside the entry map so listings are free.
     std::unordered_map<std::string, std::vector<std::string>> dirChildren;
@@ -1117,8 +1120,8 @@ static bool zip_entry_containing(const std::shared_ptr<const ZipArchiveIndex>& i
     return found;
 }
 
-// Entry names are matched case-insensitively below, so names reaching the index are
-// lower-cased too; dirChildren keys are lower-cased prefixes, values keep original case.
+// Lookups try the exact name first, then the case-folded one; dirChildren keys are
+// lower-cased prefixes, values keep original case.
 ZipArchiveIndex build_zip_index(std::FILE* f) {
     ZipArchiveIndex index;
     if (std::fseek(f, 0, SEEK_END) != 0) return index;
@@ -1136,6 +1139,7 @@ ZipArchiveIndex build_zip_index(std::FILE* f) {
         return index;
     }
     index.entries.reserve(total_entries * 2 + 1);
+    index.folded.reserve(total_entries * 2 + 1);
 
     if (::fseeko(f, static_cast<off_t>(cd_offset), SEEK_SET) != 0) return index;
     for (uint16_t n = 0; n < total_entries; ++n) {
@@ -1173,7 +1177,8 @@ ZipArchiveIndex build_zip_index(std::FILE* f) {
         }
 
         // First occurrence wins, matching the old sequential walk's first match.
-        index.entries.try_emplace(zip_index_key(name), meta);
+        index.entries.try_emplace(name, meta);
+        index.folded.try_emplace(zip_index_key(name), meta);
         if (is_dir) {
             std::string dir = name.substr(0, name.size() - 1);
             if (!dir.empty()) {
@@ -1224,11 +1229,17 @@ bool zip_stat_entry(const std::string& archivePath, const std::string& entry,
                     uint64_t* outOffset, uint64_t* outSize, uint16_t* outMethod) {
     const auto index = get_or_build_zip_index(archivePath);
     if (!index) return false;
-    const auto it = index->entries.find(zip_index_key(entry));
-    if (it == index->entries.end()) return false;
-    if (outOffset) *outOffset = it->second.payloadOffset;
-    if (outSize) *outSize = it->second.uncompressedSize;
-    if (outMethod) *outMethod = it->second.compressionMethod;
+    const ZipEntryMeta* meta = nullptr;
+    if (const auto it = index->entries.find(entry); it != index->entries.end()) {
+        meta = &it->second;
+    } else if (const auto fit = index->folded.find(zip_index_key(entry));
+               fit != index->folded.end()) {
+        meta = &fit->second;
+    }
+    if (meta == nullptr) return false;
+    if (outOffset) *outOffset = meta->payloadOffset;
+    if (outSize) *outSize = meta->uncompressedSize;
+    if (outMethod) *outMethod = meta->compressionMethod;
     return true;
 }
 

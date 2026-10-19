@@ -49,6 +49,18 @@ public abstract class Drawable {
         return 0;
     }
 
+    /** The smallest width the drawable can be drawn at: its intrinsic width, or 0. */
+    public int getMinimumWidth() {
+        final int width = getIntrinsicWidth();
+        return width > 0 ? width : 0;
+    }
+
+    /** The smallest height the drawable can be drawn at: its intrinsic height, or 0. */
+    public int getMinimumHeight() {
+        final int height = getIntrinsicHeight();
+        return height > 0 ? height : 0;
+    }
+
     /**
      * draw drawable onto a canvas.
      */
@@ -74,11 +86,44 @@ public abstract class Drawable {
         return android.graphics.PixelFormat.OPAQUE;
     }
 
+    private int[] state = new int[0];
+    private int changingConfigurations;
+    private Callback callback;
     public interface Callback {
+        void invalidateDrawable(Drawable who);
+        void scheduleDrawable(Drawable who, Runnable what, long when);
+        void unscheduleDrawable(Drawable who, Runnable what);
     }
+    public void setCallback(Callback value) { callback = value; }
+    public Callback getCallback() { return callback; }
+    public void invalidateSelf() { if (callback != null) callback.invalidateDrawable(this); }
+    public void scheduleSelf(Runnable what, long when) { if (callback != null) callback.scheduleDrawable(this, what, when); }
+    public void unscheduleSelf(Runnable what) { if (callback != null) callback.unscheduleDrawable(this, what); }
+    public Drawable mutate() { return this; }
+    public ConstantState getConstantState() { return null; }
+    public void setChangingConfigurations(int value) { changingConfigurations = value; }
+    public int getChangingConfigurations() { return changingConfigurations; }
+    public int[] getState() { return state; }
+    public boolean setState(int[] value) {
+        int[] next = value == null ? new int[0] : value;
+        if (java.util.Arrays.equals(state, next)) return false;
+        state = next.clone(); return onStateChange(state);
+    }
+    protected boolean onStateChange(int[] value) { return false; }
+    public boolean isStateful() { return false; }
+    public void setTint(int color) { setTintList(android.content.res.ColorStateList.valueOf(color)); }
+    public void setTintList(android.content.res.ColorStateList tint) {}
+    public void setTintMode(android.graphics.PorterDuff.Mode mode) {}
+    public android.graphics.ColorFilter getColorFilter() { return null; }
+    public void clearColorFilter() { setColorFilter(null); }
+
 
     public static class ConstantState {
         public ConstantState() {}
+        public Drawable newDrawable() { throw new UnsupportedOperationException(); }
+        public Drawable newDrawable(android.content.res.Resources resources) { return newDrawable(); }
+        public Drawable newDrawable(android.content.res.Resources resources, android.content.res.Resources.Theme theme) { return newDrawable(resources); }
+        public int getChangingConfigurations() { return 0; }
     }
 
 }

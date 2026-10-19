@@ -26,6 +26,7 @@ struct MetaDataEntry {
 // One <activity> / <activity-alias> declared in AndroidManifest.xml.
 struct ActivityEntry {
     std::string name;          // fully qualified, leading '.' already expanded
+    std::string theme;
     bool isLauncher = false;   // has intent-filter MAIN + LAUNCHER
     bool isExported = false;   // android:exported="true", or implied by a filter
     bool isAlias = false;      // came from <activity-alias>
@@ -46,6 +47,7 @@ struct ManifestInfo {
     std::string appLabel;
     std::string mainActivity; // activity has intent-filter MAIN+LAUNCHER
     std::string appClass;     // android:name on <application>, if any
+    std::string applicationTheme;
 
     // android:appComponentFactory on <application>. Android instantiates this
     // class before any component and routes every Application/Activity/Service/
@@ -116,7 +118,8 @@ public:
     // Unpack the container: get the related APKs (base + arm64 + config not
     // ABI), include their lib/assets/dex/manifest in targetDirectory.
     static bool extract_bundle(const std::string& containerPath,
-                               const std::string& targetDirectory);
+                               const std::string& targetDirectory,
+                               const std::string& expansionDirectory = "");
 
     // Extract standard Android Application Package ID from APK/Bundle
     static std::string get_package_name(const std::string& apkPath);

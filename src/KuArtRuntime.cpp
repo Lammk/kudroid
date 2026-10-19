@@ -143,8 +143,8 @@ bool ReadFile(const std::filesystem::path& path, std::vector<uint8_t>* out) {
 // all, so it can never be chosen even as a last resort. The list used to carry
 // "Lcom/unity3d/", which owns com.unity3d.player.UnityPlayerActivity — the declared
 // launcher of essentially every Unity game — and a blanket "Lorg/", which removes
-// every app published under org.* (org.videolan.vlc, org.telegram.messenger). Both
-// made the DEX-scan fallback find zero candidates for whole categories of app.
+// every app published under org.*. Both made the DEX-scan fallback find zero
+// candidates for whole categories of app.
 //
 // Third-party SDK packages are deliberately NOT excluded here. They are handled by
 // the scoring pass in kudroid_bridge.cpp, which can rank them last while still
@@ -429,11 +429,10 @@ extern "C" int kuart_init(const char* app_dir) {
         kudroid::kuart::DexClassLinker::SetMissingClassLogPath(log_path.c_str());
     }
 
-    // Embedded framework.dex must be loaded BEFORE the app's DEX: FindClass comes in order
-    // Additionally, the class of the app referencing android/* will find the framework immediately.
+    // Mark the platform DEX separately from application libraries.
     std::string error;
     if (!rt->linker.AddDexFile(g_framework_dex_bytes, g_framework_dex_size,
-                               "framework.dex", &error)) {
+                               "framework.dex", &error, /*boot_class_path=*/true)) {
         SetError("Failed to load embedded framework.dex: " + error);
         return 0;
     }
@@ -696,6 +695,19 @@ extern "C" void kuart_register_package(const char* package_name,
     };
     CallFrameworkStatic("Landroid/content/pm/SystemPackageManager;", "registerPackage",
                         "(Ljava/lang/String;[Ljava/lang/String;)V", args, 2);
+}
+
+extern "C" void kuart_register_theme(const char* component_name, unsigned int resource_id) {
+    if (g_rt == nullptr || !g_rt->ready) return;
+    DexObject* component = reinterpret_cast<DexObject*>(g_rt->linker.NewString(
+            component_name != nullptr ? component_name : ""));
+    if (component == nullptr) {
+        SetError("kuart_register_theme: string allocation failed");
+        return;
+    }
+    const DexValue args[2] = {DexValue::Ref(component), DexValue::Int(static_cast<int32_t>(resource_id))};
+    CallFrameworkStatic("Landroid/content/pm/SystemPackageManager;", "registerTheme",
+                        "(Ljava/lang/String;I)V", args, 2);
 }
 
 extern "C" void kuart_register_package_info(const char* package_name, int version_code,

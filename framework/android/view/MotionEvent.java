@@ -85,10 +85,8 @@ public final class MotionEvent extends InputEvent {
     private static final int TOUCHSCREEN_DEVICE_ID = 1;
 
     private final long mDownTime;
-    private final int mAction;
-    // Mutable on purpose: ActivityThread.postTouchEvent coalesces a drag by updating the
-    // pending MOVE in place instead of queueing 60-120 messages/s. mDownTime/mAction
-    // stay final — only the latest finger positions and time move.
+    private int mAction;
+    // Pending MOVE events retain the latest positions and event time.
     private float mX;
     private float mY;
     private float mOffsetX;
@@ -213,6 +211,10 @@ public final class MotionEvent extends InputEvent {
             mPointerXs[i] += dx;
             mPointerYs[i] += dy;
         }
+    }
+
+    public void setAction(int action) {
+        mAction = action;
     }
 
     /**

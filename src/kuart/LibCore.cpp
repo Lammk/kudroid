@@ -1,3 +1,5 @@
+#include "kudroid/platform/VectorRasterizer.h"
+#include <fstream>
 #include "kudroid/kuart/LibCore.h"
 
 #include <algorithm>
@@ -2318,6 +2320,120 @@ DexObject* MainThreadObject(Interpreter* interp) {
     return main_thread;
 }
 
+DexObject* CurrentThreadObject(Interpreter* interp) {
+    return t_current_thread != nullptr ? t_current_thread : MainThreadObject(interp);
+}
+
+DexObject* ThreadParkLock(Interpreter* interp, DexObject* thread) {
+    DexObject* lock = GetRefField(thread, "parkLock", "Ljava/lang/Object;");
+    if (lock == nullptr) {
+        DexClass* klass = interp->linker()->FindClass("Ljava/lang/Object;");
+        lock = klass != nullptr ? interp->linker()->AllocObject(klass) : nullptr;
+        if (lock == nullptr) {
+            interp->ThrowException("Ljava/lang/OutOfMemoryError;", "thread park lock");
+            return nullptr;
+        }
+        SetRefField(thread, "parkLock", "Ljava/lang/Object;", lock);
+    }
+    return lock;
+}
+
+bool ThreadIsInterrupted(DexObject* thread) {
+    DexField* field = thread->clazz->FindInstanceField("interrupted", "Z");
+    return field != nullptr && thread->GetField<uint8_t>(field->offset_or_slot) != 0;
+}
+
+void UnparkThread(Interpreter* interp, DexObject* thread) {
+    if (thread == nullptr) return;
+    DexObject* lock = ThreadParkLock(interp, thread);
+    if (lock == nullptr) return;
+    Monitor::Enter(lock);
+    SetLongField(thread, "parkPermit", 1);
+    Monitor::Notify(lock, true);
+    Monitor::Exit(lock);
+}
+
+void ParkThread(Interpreter* interp, bool absolute, int64_t time,
+                DexObject* blocker, bool publish_blocker) {
+    if (!absolute && time < 0) return;
+    DexObject* thread = CurrentThreadObject(interp);
+    if (thread == nullptr) return;
+    DexObject* lock = ThreadParkLock(interp, thread);
+    if (lock == nullptr) return;
+    Monitor::Enter(lock);
+    // Use a private monitor so parking retains every caller-owned monitor.
+    struct MonitorExit {
+        DexObject* lock;
+        ~MonitorExit() { Monitor::Exit(lock); }
+    } release{lock};
+    if (GetLongField(thread, "parkPermit") != 0) {
+        SetLongField(thread, "parkPermit", 0);
+        return;
+    }
+    if (ThreadIsInterrupted(thread)) return;
+    int64_t millis = time / 1000000;
+    int32_t nanos = static_cast<int32_t>(time % 1000000);
+    if (absolute) {
+        const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        if (time <= now) return;
+        millis = time - now;
+        nanos = 0;
+    }
+    if (publish_blocker) SetRefField(thread, "parkBlocker", "Ljava/lang/Object;", blocker);
+    // Record the first blocking stack on each worker for startup diagnostics.
+    static thread_local bool traced = false;
+    if (!traced) {
+        traced = true;
+        const std::string stack = interp->BuildStackTrace();
+        std::fprintf(stderr, "[KuART][PARK] first wait absolute=%d time=%lld\n%s",
+                     absolute ? 1 : 0, static_cast<long long>(time), stack.c_str());
+    }
+    Monitor::Wait(lock, millis, nanos);
+    SetLongField(thread, "parkPermit", 0);
+    if (publish_blocker) SetRefField(thread, "parkBlocker", "Ljava/lang/Object;", nullptr);
+}
+
+bool Invoke_java_util_concurrent_locks_LockSupport(Interpreter* interp, const char* name,
+                                                   const DexValue* args, DexValue* result) {
+    if (std::strcmp(name, "nativePark") == 0) {
+        ParkThread(interp, args[2].i != 0, args[3].j, args[0].l, args[1].i != 0);
+        return true;
+    }
+    if (std::strcmp(name, "unpark") == 0) {
+        UnparkThread(interp, args[0].l);
+        return true;
+    }
+    if (std::strcmp(name, "getBlocker") == 0) {
+        if (args[0].l == nullptr) {
+            interp->ThrowException("Ljava/lang/NullPointerException;", "thread == null");
+        } else {
+            result->l = GetRefField(args[0].l, "parkBlocker", "Ljava/lang/Object;");
+        }
+        return true;
+    }
+    if (std::strcmp(name, "setCurrentBlocker") == 0) {
+        SetRefField(CurrentThreadObject(interp), "parkBlocker", "Ljava/lang/Object;", args[0].l);
+        return true;
+    }
+    return false;
+}
+
+// Throwable stack traces. nativeFillInStackTrace runs inside Throwable.fillInStackTrace,
+// so the capture skips the exception's own constructor frames.
+bool Invoke_java_lang_Throwable(Interpreter* interp, const char* name, const DexValue* args,
+                                DexValue* result) {
+    if (std::strcmp(name, "nativeFillInStackTrace") == 0) {
+        result->l = interp->CaptureBacktrace(true);
+        return true;
+    }
+    if (std::strcmp(name, "nativeGetStackTrace") == 0) {
+        result->l = interp->MaterializeBacktrace(reinterpret_cast<DexArray*>(args[0].l));
+        return true;
+    }
+    return false;
+}
+
 bool Invoke_java_lang_Thread(Interpreter* interp, const char* name, const DexValue* args,
                              size_t num_args, DexValue* result) {
     if (std::strcmp(name, "currentThread") == 0) {
@@ -2338,6 +2454,15 @@ bool Invoke_java_lang_Thread(Interpreter* interp, const char* name, const DexVal
     if (std::strcmp(name, "yield") == 0) {
         VmLockRelease unlocked;
         std::this_thread::yield();
+        return true;
+    }
+    if (std::strcmp(name, "nativeInterrupt") == 0) {
+        DexObject* lock = GetRefField(args[0].l, "parkLock", "Ljava/lang/Object;");
+        if (lock != nullptr) {
+            Monitor::Enter(lock);
+            Monitor::Notify(lock, true);
+            Monitor::Exit(lock);
+        }
         return true;
     }
     if (std::strcmp(name, "nativeStart") == 0) {
@@ -3606,7 +3731,7 @@ bool Invoke_dalvik_system_BaseDexClassLoader(Interpreter* interp, const char* na
 void LibCoreSetLoadLibraryCallback(LoadLibraryCallback cb) {
     g_load_lib_cb = cb;
 }
-bool Invoke_sun_misc_Unsafe(Interpreter* /*interp*/, const char* name, const DexValue* args,
+bool Invoke_sun_misc_Unsafe(Interpreter* interp, const char* name, const DexValue* args,
                             size_t num_args, DexValue* result) {
     if (std::strcmp(name, "objectFieldOffset") == 0) {
         DexObject* field_obj = num_args > 1 ? args[1].l : nullptr;
@@ -3742,7 +3867,12 @@ bool Invoke_sun_misc_Unsafe(Interpreter* /*interp*/, const char* name, const Dex
         }
         return true;
     }
-    if (std::strcmp(name, "park") == 0 || std::strcmp(name, "unpark") == 0) {
+    if (std::strcmp(name, "park") == 0) {
+        ParkThread(interp, args[1].i != 0, args[2].j, nullptr, false);
+        return true;
+    }
+    if (std::strcmp(name, "unpark") == 0) {
+        UnparkThread(interp, args[1].l);
         return true;
     }
     return false;
@@ -3914,15 +4044,127 @@ bool Invoke_android_content_res_AssetManager(Interpreter* interp, const char* na
     return false;
 }
 
+extern "C" int kudroid_package_resolve_bytes(const char* entry, char** outPath,
+                                               int64_t* outOffset, int64_t* outLength);
+
+bool Invoke_VectorDrawable(Interpreter* interp, const char* name, const DexValue* args,
+                           size_t num_args, DexValue* result) {
+    if (std::strcmp(name, "nativeRasterize") != 0 || num_args < 7) return false;
+    result->l = nullptr;
+    auto* paths = reinterpret_cast<DexArray*>(args[0].l);
+    auto* commands = reinterpret_cast<DexArray*>(args[1].l);
+    auto* colors = reinterpret_cast<DexArray*>(args[2].l);
+    const int width = args[3].i, height = args[4].i;
+    const int64_t count = static_cast<int64_t>(width) * height;
+    if (paths == nullptr || commands == nullptr || colors == nullptr ||
+        width <= 0 || height <= 0 || count > 16 * 1024 * 1024 ||
+        paths->length <= 0 || paths->length > 65536 ||
+        static_cast<int64_t>(paths->length) * 16 != commands->length ||
+        static_cast<int64_t>(paths->length) * 2 != colors->length) return true;
+    std::vector<std::string> text;
+    text.reserve(paths->length);
+    for (int32_t i = 0; i < paths->length; ++i) {
+        DexValue value; value.l = paths->Get<DexObject*>(i);
+        text.emplace_back(GetStringUtf8(value));
+    }
+    DexClass* klass = interp->linker()->FindClass("[I");
+    DexArray* output = klass ? interp->linker()->AllocArray(klass, static_cast<int32_t>(count)) : nullptr;
+    if (!output) { interp->ThrowException("Ljava/lang/OutOfMemoryError;", "vector bitmap"); return true; }
+    if (kudroid::rasterize_vector(text, reinterpret_cast<const float*>(commands->Data()),
+            reinterpret_cast<const uint32_t*>(colors->Data()), width, height,
+            args[5].f, args[6].f, reinterpret_cast<uint32_t*>(output->Data()))) result->l = output;
+    return true;
+}
+
 bool Invoke_android_content_res_Resources(Interpreter* interp, const char* name,
                                           const DexValue* args, size_t num_args,
                                           DexValue* result) {
+    if (std::strcmp(name, "nativeReadResource") == 0 && num_args >= 1) {
+        result->l = nullptr;
+        char* path = nullptr; int64_t offset = 0, length = 0;
+        if (kudroid_package_resolve_bytes(GetStringUtf8(args[0]), &path, &offset, &length) <= 0 ||
+            path == nullptr || offset < 0 || length <= 0 || length > 16 * 1024 * 1024) {
+            std::free(path); return true;
+        }
+        std::ifstream stream(path, std::ios::binary); std::free(path);
+        if (!stream || !stream.seekg(offset, std::ios::beg)) return true;
+        std::vector<char> bytes(static_cast<size_t>(length));
+        if (!stream.read(bytes.data(), static_cast<std::streamsize>(bytes.size()))) return true;
+        result->l = NewByteArray(interp->linker(), bytes.data(), bytes.size());
+        return true;
+    }
+    if (std::strcmp(name, "nativeGetStyle") == 0 && num_args >= 7) {
+        kudroid::ResourceStyleConfig config;
+        config.locale = GetStringUtf8(args[1]);
+        config.ui_mode = args[2].i;
+        config.sdk = args[3].i;
+        config.width_dp = args[4].i;
+        config.height_dp = args[5].i;
+        config.orientation = args[6].i;
+        std::map<uint32_t, kudroid::ResourceScalar> attributes;
+        if (!kudroid::resource_get_style(static_cast<uint32_t>(args[0].i), config, &attributes)) {
+            result->l = nullptr;
+            return true;
+        }
+        DexClass* klass = interp->linker()->FindClass("[I");
+        DexArray* array = klass != nullptr ? interp->linker()->AllocArray(
+                klass, static_cast<int32_t>(attributes.size() * 3)) : nullptr;
+        if (array == nullptr) {
+            interp->ThrowException("Ljava/lang/OutOfMemoryError;", "style attributes");
+            return true;
+        }
+        int32_t index = 0;
+        for (const auto& [id, value] : attributes) {
+            array->Set<int32_t>(index++, static_cast<int32_t>(id));
+            array->Set<int32_t>(index++, value.type);
+            array->Set<int32_t>(index++, static_cast<int32_t>(value.data));
+        }
+        result->l = array;
+        return true;
+    }
+    if (std::strcmp(name, "nativeGetPoolString") == 0 && num_args >= 1) {
+        std::string text;
+        result->l = kudroid::resource_get_pool_string(static_cast<uint32_t>(args[0].i), &text)
+                ? interp->linker()->NewString(text.c_str()) : nullptr;
+        return true;
+    }
+    if (std::strcmp(name, "nativeGetValue") == 0 && num_args >= 4) {
+        kudroid::ResourceScalar value;
+        DexObject* output = args[2].l;
+        const bool found = output != nullptr && kudroid::resource_get_value(
+                static_cast<uint32_t>(args[0].i), GetStringUtf8(args[1]), args[3].i != 0, &value);
+        if (found) {
+            auto set = [output](const char* field, uint32_t data) {
+                if (DexField* f = output->clazz->FindInstanceField(field, "I"))
+                    output->SetField<int32_t>(f->offset_or_slot, static_cast<int32_t>(data));
+            };
+            set("type", value.type); set("data", value.data); set("resourceId", value.resource_id);
+            set("assetCookie", 1);
+            SetRefField(output, "string", "Ljava/lang/CharSequence;", value.type == 3
+                    ? interp->linker()->NewString(value.text.c_str()) : nullptr);
+        }
+        *result = DexValue::Int(found ? 1 : 0);
+        return true;
+    }
     if (std::strcmp(name, "nativeGetIdentifier") == 0) {
         if (num_args < 3) { *result = DexValue::Int(0); return true; }
         uint32_t id = 0;
         const bool found = kudroid::resource_get_identifier(
                 GetStringUtf8(args[0]), GetStringUtf8(args[1]), GetStringUtf8(args[2]), &id);
         *result = DexValue::Int(found ? static_cast<int32_t>(id) : 0);
+        return true;
+    }
+    if (std::strcmp(name, "nativeGetResourceName") == 0) {
+        // "package:type/entry", or null for an id no table knows.
+        std::string package, type, entry;
+        if (interp == nullptr || interp->linker() == nullptr || num_args < 1 ||
+            !kudroid::resource_get_name(static_cast<uint32_t>(args[0].i), &package, &type,
+                                        &entry)) {
+            result->l = nullptr;
+            return true;
+        }
+        const std::string full = package + ":" + type + "/" + entry;
+        result->l = reinterpret_cast<DexObject*>(interp->linker()->NewString(full.c_str()));
         return true;
     }
     if (std::strcmp(name, "nativeGetString") == 0) {
@@ -4047,6 +4289,10 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
     if (std::strcmp(desc, "Ljava/lang/Double;") == 0) return Invoke_java_lang_Double(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/lang/String;") == 0) return Invoke_java_lang_String(interp, method, name, args, num_args, result);
     if (std::strcmp(desc, "Ljava/lang/Thread;") == 0) return Invoke_java_lang_Thread(interp, name, args, num_args, result);
+    if (std::strcmp(desc, "Ljava/lang/Throwable;") == 0) return Invoke_java_lang_Throwable(interp, name, args, result);
+    if (std::strcmp(desc, "Ljava/util/concurrent/locks/LockSupport;") == 0) {
+        return Invoke_java_util_concurrent_locks_LockSupport(interp, name, args, result);
+    }
     if (std::strcmp(desc, "Ljava/lang/Runtime;") == 0) {
         // Runtime owns both loadLibrary/load and the heap figures; memory first so
         // totalMemory/freeMemory report the device rather than a constant.
@@ -4099,6 +4345,8 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
     }
 
     if (std::strcmp(desc, "Landroid/util/Log;") == 0) return Invoke_android_util_Log(interp, name, args, num_args, result);
+    if (std::strcmp(desc, "Landroid/graphics/drawable/VectorDrawable;") == 0)
+        return Invoke_VectorDrawable(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Landroid/graphics/Canvas;") == 0) return Invoke_android_graphics_Canvas(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Landroid/app/Activity;") == 0) return Invoke_android_app_Activity(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Landroid/app/ActivityThread;") == 0) {
@@ -4209,6 +4457,7 @@ bool LibCoreHasMethod(const DexMethod* method) {
             std::strcmp(desc, "Ldalvik/system/BaseDexClassLoader;") == 0 ||
             std::strcmp(desc, "Landroid/util/Log;") == 0 ||
             std::strcmp(desc, "Landroid/graphics/Canvas;") == 0 ||
+            std::strcmp(desc, "Landroid/graphics/drawable/VectorDrawable;") == 0 ||
             std::strcmp(desc, "Landroid/app/Activity;") == 0 ||
             std::strcmp(desc, "Landroid/app/ActivityManager;") == 0 ||
             std::strcmp(desc, "Landroid/os/Debug;") == 0 ||

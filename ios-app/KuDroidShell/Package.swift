@@ -27,6 +27,8 @@ let package = Package(
             sources: [
                 "KuDroidApp.swift",
                 "ContentView.swift",
+                "APKExport.swift",
+                "ReverseHistory.swift",
                 "RemoteDebugClient.swift",
                 "IOSDiagnostics.swift",
                 "CameraBridge.swift",
@@ -37,7 +39,6 @@ let package = Package(
             resources: [.copy("THIRD_PARTY_NOTICES.txt")],
             swiftSettings: [
                 .unsafeFlags([
-                    "-swift-version", "5",
                     "-import-objc-header", "\(packageDir)/kudroid_bridge.h",
                     "-I", "\(packageDir)"
                 ]),
@@ -74,5 +75,6 @@ let package = Package(
             name: "libGLESv2",
             path: "../../third_party/ANGLE/lib/libGLESv2.xcframework"
         ),
-    ]
+    ],
+    swiftLanguageModes: [.v5]
 )

@@ -27,7 +27,10 @@ public class Thread implements Runnable {
     private boolean daemon;
     private boolean started;
     private boolean finished;
-    private boolean interrupted;
+    private volatile boolean interrupted;
+    private Object parkLock;
+    private Object parkBlocker;
+    private long parkPermit;
     private UncaughtExceptionHandler handler;
 
     /** pthread_t pointer held by native; 0 = not running yet. */
@@ -140,6 +143,7 @@ public class Thread implements Runnable {
 
     public void interrupt() {
         interrupted = true;
+        nativeInterrupt();
     }
 
     public boolean isInterrupted() {
@@ -189,8 +193,17 @@ public class Thread implements Runnable {
         return null;
     }
 
+    // Only the calling thread's stack is readable: frames are per-thread VM state.
     public StackTraceElement[] getStackTrace() {
-        return new StackTraceElement[0];
+        if (this != currentThread()) return new StackTraceElement[0];
+        StackTraceElement[] here = new Throwable().getStackTrace();
+        // Android's layout is [0]=VMStack.getThreadStackTrace, [1]=Thread.getStackTrace,
+        // [2]=caller; callers index into it to find who called them.
+        StackTraceElement[] trace = new StackTraceElement[here.length + 1];
+        trace[0] = new StackTraceElement("dalvik.system.VMStack", "getThreadStackTrace",
+                "VMStack.java", -2);
+        System.arraycopy(here, 0, trace, 1, here.length);
+        return trace;
     }
 
     public ClassLoader getContextClassLoader() {
@@ -223,6 +236,7 @@ public class Thread implements Runnable {
     public static native void yield();
 
     public static void dumpStack() {
+        new Exception("Stack trace").printStackTrace();
     }
 
     public static int activeCount() {
@@ -230,4 +244,6 @@ public class Thread implements Runnable {
     }
 
     private native void nativeStart();
+
+    private native void nativeInterrupt();
 }

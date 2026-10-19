@@ -645,9 +645,10 @@ void test_view_post_uses_main_queue() {
         view, "postDelayed", "(Ljava/lang/Runnable;J)Z",
         {DexValue::Ref(quit), DexValue::Long(60)}, &delayed);
     Check(delayed_api && delayed.i != 0, "View.postDelayed accepts delayed work");
-    const bool removed = CallVirtual(view, "removeCallbacks", "(Ljava/lang/Runnable;)V",
-                                     {DexValue::Ref(quit)});
-    Check(removed, "View.removeCallbacks removes the delayed Runnable");
+    DexValue removed_result;
+    const bool removed = CallVirtual(view, "removeCallbacks", "(Ljava/lang/Runnable;)Z",
+                                     {DexValue::Ref(quit)}, &removed_result);
+    Check(removed && removed_result.i != 0, "View.removeCallbacks removes the delayed Runnable");
     DexObject* queue = QueueObject(main_looper);
     DexField* messages_field = queue != nullptr
                                    ? queue->clazz->FindInstanceField(

@@ -15,6 +15,7 @@
 
 #include "kudroid/kuart/DexClass.h"
 #include "kudroid/kuart/DexFrame.h"
+#include "kudroid/kuart/DexObject.h"
 #include "kudroid/kuart/DexValue.h"
 #include "kudroid/kuart/JitCompiler.h"
 #include "kudroid/kuart/OatFile.h"
@@ -46,6 +47,21 @@ public:
         pending_exception_trace_.clear();
     }
     void SetPendingException(DexObject* ex) { pending_exception_ = ex; }
+
+    // Java stack traces for Throwable.
+    //
+    // A backtrace is a long[] of (DexMethod*, dex_pc) pairs, innermost frame first,
+    // deduplicated per linker: exceptions that repeat from one place cost no extra heap
+    // (the heap has no GC). `skip_throwable` drops the leading frames that belong to the
+    // exception's own constructor chain, as ART does. Null when over the heap budget.
+    DexArray* CaptureBacktrace(bool skip_throwable);
+    // StackTraceElement[] for a backtrace from CaptureBacktrace; cached per backtrace.
+    DexArray* MaterializeBacktrace(DexArray* backtrace);
+    // Give an exception created by native code (no Throwable.<init> ran) its message
+    // and the backtrace of the native throw site. No-op if Throwable lacks the fields.
+    void InitNativeThrowable(DexObject* exception, const char* message);
+    // Drop the backtrace caches; their keys are pointers into a heap that is going away.
+    static void ClearBacktraceCaches();
 
     // Stack trace captured when the in-flight exception was thrown. Empty when the
     // exception came from native code (JNI Throw) rather than from bytecode.

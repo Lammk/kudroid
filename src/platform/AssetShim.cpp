@@ -79,8 +79,13 @@ extern "C" int kudroid_package_resolve_bytes(const char* entry, char** outPath,
     if (outPath) *outPath = nullptr;
     if (outOffset) *outOffset = 0;
     if (outLength) *outLength = 0;
-    if (entry == nullptr || entry[0] == '\0' || std::strchr(entry, '/') != nullptr ||
+    if (entry == nullptr || entry[0] == '\0' || entry[0] == '/' ||
         std::strchr(entry, '\\') != nullptr) return 0;
+    const std::filesystem::path relative(entry);
+    for (const auto& part : relative) {
+        if (part == "." || part == "..") return 0;
+    }
+    if (relative.has_parent_path() && std::strncmp(entry, "res/", 4) != 0) return 0;
 
     const std::string assetsDir = kudroid::kudroid_get_assets_dir_cpp();
     if (assetsDir.empty()) return 0;

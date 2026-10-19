@@ -18,17 +18,68 @@ public class LinearLayout extends ViewGroup {
 
     private int mOrientation = VERTICAL;
     private int mGravity = 0;
+    private float mWeightSum = -1.0f;
+    private boolean mBaselineAligned = true;
 
     public LinearLayout(Context context) {
-        super(context);
+        this(context, null);
     }
 
     public LinearLayout(Context context, android.util.AttributeSet attrs) {
-        super(context);
+        this(context, attrs, 0);
     }
 
     public LinearLayout(Context context, android.util.AttributeSet attrs, int defStyleAttr) {
-        super(context);
+        this(context, attrs, defStyleAttr, 0);
+    }
+
+    public LinearLayout(Context context, android.util.AttributeSet attrs, int defStyleAttr,
+            int defStyleRes) {
+        super(context, attrs, defStyleAttr, defStyleRes);
+        if (context != null && (attrs != null || defStyleAttr != 0 || defStyleRes != 0)) {
+            final android.content.res.TypedArray a = context.obtainStyledAttributes(attrs,
+                    com.android.internal.R.styleable.LinearLayout, defStyleAttr, defStyleRes);
+            try {
+                final int index = a.getInt(com.android.internal.R.styleable.LinearLayout_orientation, -1);
+                if (index >= 0) mOrientation = index;
+                mGravity = a.getInt(com.android.internal.R.styleable.LinearLayout_gravity, mGravity);
+                mBaselineAligned = a.getBoolean(
+                        com.android.internal.R.styleable.LinearLayout_baselineAligned, true);
+                mWeightSum = a.getFloat(com.android.internal.R.styleable.LinearLayout_weightSum, -1.0f);
+            } finally {
+                a.recycle();
+            }
+        }
+    }
+
+    public float getWeightSum() { return mWeightSum; }
+    public void setWeightSum(float weightSum) { mWeightSum = Math.max(0.0f, weightSum); }
+    public boolean isBaselineAligned() { return mBaselineAligned; }
+    public void setBaselineAligned(boolean baselineAligned) { mBaselineAligned = baselineAligned; }
+
+    @Override
+    protected LayoutParams generateDefaultLayoutParams() {
+        if (mOrientation == HORIZONTAL) {
+            return new LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT);
+        }
+        return new LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT);
+    }
+
+    @Override
+    public ViewGroup.LayoutParams generateLayoutParams(android.util.AttributeSet attrs) {
+        return new LayoutParams(getContext(), attrs);
+    }
+
+    @Override
+    protected ViewGroup.LayoutParams generateLayoutParams(ViewGroup.LayoutParams p) {
+        if (p instanceof LayoutParams) return new LayoutParams((LayoutParams) p);
+        if (p instanceof ViewGroup.MarginLayoutParams) return new LayoutParams((ViewGroup.MarginLayoutParams) p);
+        return new LayoutParams(p);
+    }
+
+    @Override
+    protected boolean checkLayoutParams(ViewGroup.LayoutParams p) {
+        return p instanceof LayoutParams;
     }
 
     /**
@@ -152,6 +203,18 @@ public class LinearLayout extends ViewGroup {
         /** Per-child gravity override, or -1 to inherit the parent's. */
         public int gravity = -1;
 
+        public LayoutParams(Context c, android.util.AttributeSet attrs) {
+            super(c, attrs);
+            final android.content.res.TypedArray a = c.obtainStyledAttributes(attrs,
+                    com.android.internal.R.styleable.LinearLayout_Layout);
+            try {
+                weight = a.getFloat(com.android.internal.R.styleable.LinearLayout_Layout_layout_weight, 0);
+                gravity = a.getInt(com.android.internal.R.styleable.LinearLayout_Layout_layout_gravity, -1);
+            } finally {
+                a.recycle();
+            }
+        }
+
         public LayoutParams() {
             super(ViewGroup.LayoutParams.MATCH_PARENT,
                   ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -168,6 +231,16 @@ public class LinearLayout extends ViewGroup {
 
         public LayoutParams(ViewGroup.LayoutParams source) {
             super(source);
+        }
+
+        public LayoutParams(ViewGroup.MarginLayoutParams source) {
+            super(source);
+        }
+
+        public LayoutParams(LayoutParams source) {
+            super((ViewGroup.MarginLayoutParams) source);
+            this.weight = source.weight;
+            this.gravity = source.gravity;
         }
     }
 

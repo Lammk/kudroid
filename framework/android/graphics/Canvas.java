@@ -131,8 +131,23 @@ public class Canvas {
             int dx = (int) (left + mTranslateX), dy = (int) (top + mTranslateY);
             int[] source = bitmap.getPixels();
             if (bitmap == mBitmap) source = source.clone();
-            mBitmap.setPixels(source, 0, bitmap.getWidth(), dx, dy, bitmap.getWidth(),
-                    bitmap.getHeight());
+            int sw = bitmap.getWidth(), sh = bitmap.getHeight();
+            int[] target = mBitmap.getPixels();
+            int leftClip = Math.max(0, -dx), rightClip = Math.min(sw, mWidth - dx);
+            int topClip = Math.max(0, -dy), bottomClip = Math.min(sh, mHeight - dy);
+            for (int y = topClip; y < bottomClip; y++) for (int x = leftClip; x < rightClip; x++) {
+                int src = source[y * sw + x], sa = src >>> 24;
+                if (sa == 0) continue;
+                int at = (dy + y) * mWidth + dx + x;
+                if (sa == 255) { target[at] = src; continue; }
+                int dst = target[at], da = dst >>> 24, inverse = 255 - sa;
+                int denominator = sa * 255 + da * inverse;
+                int a = (denominator + 127) / 255;
+                int r = (((src >> 16) & 255) * sa * 255 + ((dst >> 16) & 255) * da * inverse + denominator / 2) / denominator;
+                int g = (((src >> 8) & 255) * sa * 255 + ((dst >> 8) & 255) * da * inverse + denominator / 2) / denominator;
+                int b = ((src & 255) * sa * 255 + (dst & 255) * da * inverse + denominator / 2) / denominator;
+                target[at] = a << 24 | r << 16 | g << 8 | b;
+            }
             return;
         }
         int[] pixels = bitmap.getPixels();

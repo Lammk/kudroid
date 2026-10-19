@@ -16,6 +16,7 @@ import java.io.InputStream;
 import java.io.IOException;
 
 public abstract class Context {
+    private android.view.LayoutInflater mLayoutInflater;
     // File and preference modes. MODE_APPEND is the one with a value that matters here —
     // openFileOutput() below tests for it; the rest are the documented constants apps pass
     // to getSharedPreferences and would otherwise fail to resolve at all.
@@ -81,6 +82,50 @@ public abstract class Context {
     public abstract File getCodeCacheDir();
     public abstract File getNoBackupFilesDir();
 
+    public Context createConfigurationContext(android.content.res.Configuration overrideConfiguration) {
+        return createConfiguredContext(this, overrideConfiguration);
+    }
+
+    private static Context createConfiguredContext(Context base, android.content.res.Configuration overrideConfiguration) {
+        if (overrideConfiguration == null) throw new NullPointerException();
+        final Resources source = base.getResources();
+        android.content.res.Configuration config = new android.content.res.Configuration(source.getConfiguration());
+        config.updateFrom(overrideConfiguration);
+        android.util.DisplayMetrics metrics = new android.util.DisplayMetrics();
+        metrics.setTo(source.getDisplayMetrics());
+        if (config.densityDpi > 0) {
+            metrics.densityDpi = config.densityDpi;
+            metrics.density = config.densityDpi / 160.0f;
+        }
+        metrics.scaledDensity = metrics.density * config.fontScale;
+        final Resources resources = new Resources(source.getAssets(), metrics, config);
+        return new ContextWrapper(base) {
+            @Override
+            public Context createConfigurationContext(android.content.res.Configuration configuration) {
+                return createConfiguredContext(this, configuration);
+            }
+            private Resources.Theme theme;
+            private android.view.LayoutInflater inflater;
+            public Resources getResources() { return resources; }
+            public AssetManager getAssets() { return resources.getAssets(); }
+            public Resources.Theme getTheme() {
+                if (theme == null) {
+                    theme = resources.newTheme();
+                    theme.setTo(getBaseContext().getTheme());
+                }
+                return theme;
+            }
+            public void setTheme(int id) { getTheme().applyStyle(id, true); }
+            public Object getSystemService(String name) {
+                if (LAYOUT_INFLATER_SERVICE.equals(name)) {
+                    if (inflater == null) inflater = android.view.LayoutInflater.from(getBaseContext()).cloneInContext(this);
+                    return inflater;
+                }
+                return super.getSystemService(name);
+            }
+        };
+    }
+
     public String getPackageCodePath() {
         return "/data/app/" + getPackageName() + "/base.apk";
     }
@@ -108,6 +153,7 @@ public abstract class Context {
         android.content.pm.ApplicationInfo info = new android.content.pm.ApplicationInfo();
         info.packageName = getPackageName();
         info.processName = getPackageName();
+        info.theme = SystemPackageManager.getRegisteredApplicationTheme();
         info.dataDir = "/data/data/" + getPackageName();
         info.sourceDir = getPackageCodePath();
         info.publicSourceDir = getPackageCodePath();
@@ -225,7 +271,10 @@ public abstract class Context {
         if (name == null) return null;
 
         if (name.equals(WINDOW_SERVICE)) return new android.view.WindowManagerImpl();
-        if (name.equals(LAYOUT_INFLATER_SERVICE)) return android.view.LayoutInflater.from(this);
+        if (name.equals(LAYOUT_INFLATER_SERVICE)) {
+            if (mLayoutInflater == null) mLayoutInflater = new android.view.LayoutInflater(this);
+            return mLayoutInflater;
+        }
         if (name.equals(INPUT_METHOD_SERVICE)) return InputMethodManagerHolder.get();
         if (name.equals(SENSOR_SERVICE)) return new SystemSensorManager();
         if (name.equals(AUDIO_SERVICE)) return new android.media.AudioManager();
@@ -468,6 +517,11 @@ public abstract class Context {
     public int getColor(int id) {
         Resources r = getResources();
         return r != null ? r.getColor(id, getTheme()) : 0xFF000000;
+    }
+
+    public android.content.res.ColorStateList getColorStateList(int id) {
+        Resources r = getResources();
+        return r != null ? r.getColorStateList(id, getTheme()) : null;
     }
 
     public boolean isRestricted() { return false; }

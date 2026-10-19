@@ -242,7 +242,7 @@ static void buildTouchEventLocked(int32_t baseAction, int32_t primaryId, int32_t
     ev.x = primaryX;
     ev.y = primaryY;
     ev.eventTime = guest_monotonic_ns();
-    ev.source = 0x0002;  // AINPUT_SOURCE_TOUCHSCREEN
+    ev.source = 0x1002;  // AINPUT_SOURCE_TOUCHSCREEN
 
     // How many fingers are down right now. This — not the producer's pointer id — decides
     // DOWN vs POINTER_DOWN and UP vs POINTER_UP: a finger lifting while another stays down
@@ -313,14 +313,9 @@ static void buildTouchEventLocked(int32_t baseAction, int32_t primaryId, int32_t
     bool replaced = false;
     if (is_move && !g_inputQueue.events.empty()) {
         auto& tail = g_inputQueue.events.back();
-        if (tail.type == 2 && (tail.action & 0xff) == 2) {
-            // The seq is the identity AInputQueue_finishEvent matches by. Keeping it
-            // lets the guest pop this entry when it finishes the copy it holds;
-            // overwriting it with the fresh event's zero left the entry queued, so
-            // every coalesce handed the same MOVE out twice and the queue could not
-            // report itself empty. Folding replaces the sample the guest may already
-            // be holding, which is what coalescing means — the UP that ends a gesture
-            // carries the finger table, so the final position is never lost.
+        if (tail.type == 2 && (tail.action & 0xff) == 2 &&
+            (!g_inputQueue.activeCopy || g_inputQueue.activeCopy->seq != tail.seq)) {
+            // Preserve queue identity and only replace samples not yet handed out.
             const uint64_t seq = tail.seq;
             tail = ev;
             tail.seq = seq;
@@ -469,9 +464,18 @@ extern "C" void kudroid_inject_touch_batch(int32_t action, int32_t primaryId, in
                          static_cast<int>(count));
         }
     }
-    BionicInputEvent ev;
+    BionicInputEvent ev, cancelled;
+    bool cancelPrevious = false;
     {
         std::lock_guard<std::mutex> lock(g_inputQueue.mtx);
+        // A new gesture must close any unfinished prior gesture before reusing ids.
+        if (baseAction == 0 && livePointerCount() > 0) {
+            const auto& first = *std::find_if(g_activePointers.begin(), g_activePointers.end(),
+                                             [](const PointerSlot& p) { return p.active; });
+            buildTouchEventLocked(3, first.id, livePointerCount(), first.x, first.y, cancelled);
+            cancelPrevious = true;
+            g_activePointers.clear();
+        }
         if (count < 1) count = 1;
         std::vector<PointerSlot> nextPointers;
         if (ids != nullptr && xs != nullptr && ys != nullptr) {
@@ -514,6 +518,7 @@ extern "C" void kudroid_inject_touch_batch(int32_t action, int32_t primaryId, in
     }
 
     wakeInputLooper();
+    if (cancelPrevious) forward_touch_to_java_activity(cancelled.action, cancelled);
     const uint64_t forwarded_ns = forward_touch_to_java_activity(ev.action, ev);
     touch_telemetry(touch_now_ns() - inject_start, forwarded_ns);
 }

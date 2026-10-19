@@ -20,6 +20,11 @@
     <true/>
     <key>LSSupportsOpeningDocumentsInPlace</key>
     <true/>
+    <key>LSApplicationQueriesSchemes</key>
+    <array>
+        <string>stikdebug</string>
+        <string>apple-magnifier</string>
+    </array>
     <key>NSLocalNetworkUsageDescription</key>
     <string>KuDroid lets guest Android applications reach devices on your local network.</string>
     <key>NSCameraUsageDescription</key>

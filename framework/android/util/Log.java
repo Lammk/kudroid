@@ -64,22 +64,30 @@ public final class Log {
      * send an error log message with a throwable.
      */
     public static int e(String tag, String msg, Throwable tr) {
-        String full = msg;
-        if (tr != null) {
-            full = msg + "\n" + tr.toString();
-        }
-        return println_native(ERROR, tag, full);
+        return println_native(ERROR, tag, msg + '\n' + getStackTraceString(tr));
     }
 
     /**
      * send a warning log message with a throwable.
      */
     public static int w(String tag, String msg, Throwable tr) {
-        String full = msg;
-        if (tr != null) {
-            full = msg + "\n" + tr.toString();
-        }
-        return println_native(WARN, tag, full);
+        return println_native(WARN, tag, msg + '\n' + getStackTraceString(tr));
+    }
+
+    public static int w(String tag, Throwable tr) {
+        return println_native(WARN, tag, getStackTraceString(tr));
+    }
+
+    public static int v(String tag, String msg, Throwable tr) {
+        return println_native(VERBOSE, tag, msg + '\n' + getStackTraceString(tr));
+    }
+
+    public static int d(String tag, String msg, Throwable tr) {
+        return println_native(DEBUG, tag, msg + '\n' + getStackTraceString(tr));
+    }
+
+    public static int i(String tag, String msg, Throwable tr) {
+        return println_native(INFO, tag, msg + '\n' + getStackTraceString(tr));
     }
 
     /**
@@ -97,22 +105,21 @@ public final class Log {
 
     /**
      * Format a Throwable the way Log does, for callers that log it themselves.
+     *
+     * Like Android, a trace that has an UnknownHostException in its cause chain is
+     * suppressed: it only says the network is down and would drown the log.
      */
     public static String getStackTraceString(Throwable tr) {
         if (tr == null) return "";
-        StringBuilder sb = new StringBuilder();
-        sb.append(tr.toString());
-        StackTraceElement[] trace = tr.getStackTrace();
-        if (trace != null) {
-            for (StackTraceElement e : trace) {
-                sb.append("\n\tat ").append(e.toString());
-            }
+        for (Throwable t = tr; t != null; t = t.getCause()) {
+            if (t instanceof java.net.UnknownHostException) return "";
+            if (t.getCause() == t) break;
         }
-        for (Throwable c = tr.getCause(); c != null; c = c.getCause()) {
-            sb.append("\nCaused by: ").append(c.toString());
-            if (c.getCause() == c) break;
-        }
-        return sb.toString();
+        java.io.StringWriter sw = new java.io.StringWriter();
+        java.io.PrintWriter pw = new java.io.PrintWriter(sw);
+        tr.printStackTrace(pw);
+        pw.flush();
+        return sw.toString();
     }
 
     public static int println(int priority, String tag, String msg) {

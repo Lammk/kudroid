@@ -17,6 +17,42 @@ public class ContextThemeWrapper extends ContextWrapper {
 
     private int mThemeResource;
     private Resources.Theme mTheme;
+    private android.view.LayoutInflater mInflater;
+    private Resources mResources;
+    private android.content.res.Configuration mOverrideConfiguration;
+
+    public void applyOverrideConfiguration(android.content.res.Configuration config) {
+        if (mResources != null) throw new IllegalStateException("Resources already accessed");
+        if (mOverrideConfiguration != null) throw new IllegalStateException("Override configuration already set");
+        mOverrideConfiguration = new android.content.res.Configuration(config);
+    }
+
+    @Override
+    public Resources getResources() {
+        if (mResources == null) {
+            Context base = getBaseContext();
+            mResources = mOverrideConfiguration == null ? super.getResources()
+                    : base.createConfigurationContext(mOverrideConfiguration).getResources();
+        }
+        return mResources;
+    }
+
+    @Override
+    public android.content.res.AssetManager getAssets() { return getResources().getAssets(); }
+
+
+    @Override
+    public Object getSystemService(String name) {
+        if (Context.LAYOUT_INFLATER_SERVICE.equals(name)) {
+            if (mInflater == null) {
+                Context base = getBaseContext();
+                mInflater = base == null ? new android.view.LayoutInflater(this)
+                        : android.view.LayoutInflater.from(base).cloneInContext(this);
+            }
+            return mInflater;
+        }
+        return super.getSystemService(name);
+    }
 
     public ContextThemeWrapper() {
         super(null);
@@ -40,9 +76,7 @@ public class ContextThemeWrapper extends ContextWrapper {
     public void setTheme(int resid) {
         if (mThemeResource == resid) return;
         mThemeResource = resid;
-        // Drop the cached theme so the next getTheme() rebuilds with the new style,
-        // matching AOSP; keeping it would silently ignore the change.
-        mTheme = null;
+        if (mTheme != null) onApplyThemeResource(mTheme, resid, false);
     }
 
     public int getThemeResId() {
@@ -55,11 +89,14 @@ public class ContextThemeWrapper extends ContextWrapper {
         Resources r = getResources();
         if (r == null) r = Resources.getSystem();
         mTheme = r.newTheme();
-        if (mThemeResource != 0) mTheme.applyStyle(mThemeResource, true);
+        Context base = getBaseContext();
+        if (base != null) mTheme.setTo(base.getTheme());
+        if (mThemeResource != 0) onApplyThemeResource(mTheme, mThemeResource, true);
         return mTheme;
     }
 
     /** Hook AOSP calls before the theme is first used; subclasses override it. */
     protected void onApplyThemeResource(Resources.Theme theme, int resid, boolean first) {
+        theme.applyStyle(resid, true);
     }
 }

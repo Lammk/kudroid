@@ -361,13 +361,7 @@ public final class ActivityThread {
             String threadName = (t != null ? t.getName() : "unknown");
             android.util.Log.e("KuDroidCrashHandler", "=== UNCAUGHT JAVA EXCEPTION on thread [" + threadName + "] ===");
             if (e != null) {
-                android.util.Log.e("KuDroidCrashHandler", e.getClass().getName() + ": " + e.getMessage());
-                StackTraceElement[] trace = e.getStackTrace();
-                if (trace != null) {
-                    for (StackTraceElement ste : trace) {
-                        android.util.Log.e("KuDroidCrashHandler", "    at " + ste.toString());
-                    }
-                }
+                android.util.Log.e("KuDroidCrashHandler", "uncaught exception", e);
             }
             android.util.Log.e("KuDroidCrashHandler", "=======================================================");
         }
@@ -723,9 +717,7 @@ public final class ActivityThread {
                 }
                 // The Activity is a Context and needs the same base as the
                 // Application, or every path it derives points somewhere else.
-                try {
-                    mInitialActivity.attach(new ApplicationContext());
-                } catch (Throwable ignored) {}
+                attachActivity(mInitialActivity, clazz.getName());
                 android.util.Log.i("ActivityThread", "Calling performCreate()...");
                 mInitialActivity.performCreate(null);
                 android.util.Log.i("ActivityThread", "Calling performStart()...");
@@ -751,17 +743,7 @@ public final class ActivityThread {
                 }
                 android.util.Log.i("ActivityThread", "Activity launch complete.");
             } catch (Throwable t) {
-                android.util.Log.e("ActivityThread", "NON-FATAL in Activity lifecycle: " + t.toString());
-                for (Throwable c = t.getCause(); c != null; c = c.getCause()) {
-                    android.util.Log.e("ActivityThread", "  caused by: " + c.toString());
-                    if (c.getCause() == c) break;
-                }
-                StackTraceElement[] trace = t.getStackTrace();
-                if (trace != null) {
-                    for (StackTraceElement ste : trace) {
-                        android.util.Log.e("ActivityThread", "    at " + ste.toString());
-                    }
-                }
+                android.util.Log.e("ActivityThread", "NON-FATAL in Activity lifecycle", t);
                 final String gap = frameworkGapOf(t);
                 if (gap != null) {
                     if (!mFrameworkGaps.contains(gap)) mFrameworkGaps.add(gap);
@@ -1042,9 +1024,7 @@ public final class ActivityThread {
                     } else {
                         next = (Activity) nextClass.newInstance();
                     }
-                    try {
-                        next.attach(new ApplicationContext());
-                    } catch (Throwable ignored) {}
+                    attachActivity(next, resolvedTarget);
                     mInitialActivity = next;
                     mInitialActivityName = resolvedTarget;
                     next.performCreate(null);
@@ -1055,7 +1035,15 @@ public final class ActivityThread {
                     next.performWindowFocusChanged(true);
                     android.util.Log.i("ActivityThread", "Target Activity transitioned successfully: " + resolvedTarget);
                 } catch (Throwable t) {
-                    android.util.Log.e("ActivityThread", "Failed to start activity " + resolvedTarget + ": " + t);
+                    android.util.Log.e("ActivityThread", "Failed to start activity " + resolvedTarget, t);
+                    final String gap = frameworkGapOf(t);
+                    if (gap != null && !mFrameworkGaps.contains(gap)) mFrameworkGaps.add(gap);
+                    // The previous activity is already stopped, so without a view of its
+                    // own the screen would stay blank; say what stopped it instead.
+                    if (mInitialActivity == null || mInitialActivity.getContentView() == null) {
+                        mInitialActivity = new Activity();
+                        showDiagnosticScreen(mInitialActivity, resolvedTarget, t);
+                    }
                 }
             }
         };
@@ -1064,6 +1052,17 @@ public final class ActivityThread {
         } else {
             r.run();
         }
+    }
+
+    private void attachActivity(Activity activity, String className)
+            throws android.content.pm.PackageManager.NameNotFoundException {
+        ApplicationContext base = new ApplicationContext();
+        android.content.pm.ActivityInfo info = base.getPackageManager().getActivityInfo(
+                new android.content.ComponentName(base.getPackageName(), className), 0);
+        activity.attach(base);
+        int theme = info.getThemeResource();
+        if (theme != 0) activity.setTheme(theme);
+        android.util.Log.d("ActivityThread", "Activity theme 0x" + Integer.toHexString(theme) + " component=" + className);
     }
 
     private void handleDestroyActivity() {

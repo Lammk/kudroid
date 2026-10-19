@@ -64,6 +64,26 @@ public class ApplicationContext extends Context {
         return getPackageCodePath();
     }
 
+    private Resources.Theme mTheme;
+    private int mThemeResource;
+
+    @Override
+    public Resources.Theme getTheme() {
+        if (mTheme == null) {
+            mTheme = getResources().newTheme();
+            int id = mThemeResource != 0 ? mThemeResource : SystemPackageManager.getRegisteredApplicationTheme();
+            if (id != 0) mTheme.applyStyle(id, true);
+        }
+        return mTheme;
+    }
+
+    @Override
+    public void setTheme(int id) {
+        if (id == mThemeResource) return;
+        mThemeResource = id;
+        if (mTheme != null && id != 0) mTheme.applyStyle(id, true);
+    }
+
     @Override
     public AssetManager getAssets() {
         if (mAssets == null) mAssets = new AssetManager();

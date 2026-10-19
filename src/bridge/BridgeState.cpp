@@ -32,21 +32,8 @@
 
 extern "C" int kudroid_android_log_message(int priority, const char* tag, const char* message);
 
-// The host passes one directory (its Documents) through kudroid_set_log_dir().
-// Normal logs are written as files; crashes are signal-based, so no C++ exception
-// fires and the signal handler is what catches them — it flushes the log buffer to
-// disk using only async-signal-safe calls before re-raising.
-//
-// Two directories, deliberately distinct:
-//
-//   g_docsDir - the app's Documents. Where installed apps, extracted APKs and the
-//               VFS root live; the host hands this in.
-//   g_logDir  - g_docsDir + "/logs". Every diagnostic file goes here.
-//
-// They used to be the same, so eight log files sat among put_apk_here/, android_root/,
-// micro_tests/ and extracted_apk/ at the top level of Documents. Nothing about that
-// was wrong, only unreadable — and it made "pull the logs" a matter of knowing which
-// eight of a dozen entries were logs.
+// The host selects independent data and diagnostic roots.
+// Standalone diagnostics live outside the user-visible Documents directory.
 char g_docsDir[1024] = {0};
 char g_logDir[1024] = {0};
 const char* g_kudroid_log_dir_ptr = g_logDir;

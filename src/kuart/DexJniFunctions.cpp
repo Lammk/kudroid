@@ -200,6 +200,7 @@ jint JNICALL ThrowNew(JNIEnv* env, jclass clazz, const char* msg) {
     if (k == nullptr) return JNI_ERR;
     DexObject* ex = self->linker()->AllocObject(k);
     if (ex == nullptr) return JNI_ERR;
+    if (self->interpreter() != nullptr) self->interpreter()->InitNativeThrowable(ex, msg);
     self->SetPendingException(ex);
     self->set_last_error(k->PrettyName() + ": " + (msg != nullptr ? msg : ""));
     if (JnibridgeTraceActive()) {

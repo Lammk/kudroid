@@ -18,7 +18,7 @@
 
 namespace kudroid {
 namespace {
-std::string gLastError;
+thread_local std::string gLastError;
 void apkLog(const std::string& message) { std::fprintf(stderr, "[kudroid_apk] %s\n", message.c_str()); }
 
 // Helpers over an in-memory buffer (extract_apk loads the whole file).
@@ -400,6 +400,7 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
     std::string currentActivity;   // name of the <activity>/<activity-alias> being browsed
     std::string aliasTarget;       // targetActivity of <activity-alias>
     std::string currentOrientationStr;
+    std::string currentTheme;
     int currentOrientation = -1;
     bool inIntentFilter = false;
     bool sawActionMain = false;
@@ -435,6 +436,7 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
             if (e.name != name) continue;
             // Same activity seen again (multiple intent-filter blocks): merge.
             e.isLauncher = e.isLauncher || (sawActionMain && sawCategoryLauncher);
+            if (!isAlias && e.theme.empty()) e.theme = currentTheme;
             e.isExported = e.isExported || currentExported || sawAnyIntentFilter;
             if (e.screenOrientation == -1 && currentOrientation != -1) {
                 e.screenOrientation = currentOrientation;
@@ -451,6 +453,7 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
         }
         ActivityEntry e;
         e.name = name;
+        if (!isAlias) e.theme = currentTheme;
         e.isLauncher = sawActionMain && sawCategoryLauncher;
         // An activity with an intent-filter is implicitly exported unless it says
         // otherwise, which is how the launcher can start it.
@@ -502,6 +505,7 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
                     currentActivity.clear();
                     aliasTarget.clear();
                     currentOrientationStr.clear();
+                    currentTheme.clear();
                     currentOrientation = -1;
                     sawActionMain = false;
                     sawCategoryLauncher = false;
@@ -569,6 +573,7 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
                         if (attrName == "versionName" && info.versionName.empty()) info.versionName = attrVal;
                         if (attrName == "versionCode" && info.versionCode.empty()) info.versionCode = attrVal;
                     } else if (tagName == "application") {
+                        if (attrName == "theme") info.applicationTheme = attrVal;
                         if (attrName == "label" && info.appLabel.empty() && !attrVal.empty()) info.appLabel = attrVal;
                         // android:name on <application> is the custom Application
                         // subclass; Android instantiates it before any Activity.
@@ -600,6 +605,8 @@ static ManifestInfo parseAxml(const std::vector<std::uint8_t>& data) {
                             currentExportedSet = true;
                             // Boolean attributes arrive as "true"/"false" or as an int 0/1.
                             currentExported = (attrVal == "true" || attrVal == "1");
+                        } else if (attrName == "theme" && tagName == "activity") {
+                            currentTheme = attrVal;
                         } else if (attrName == "screenOrientation") {
                             currentOrientationStr = attrVal;
                             auto parseOrientationString = [](const std::string& str) -> int {
@@ -1291,7 +1298,8 @@ bool APKExtractor::is_bundle_container(const std::string& path) {
     return false;
 }
 
-bool APKExtractor::extract_bundle(const std::string& containerPath, const std::string& targetDirectory) {
+bool APKExtractor::extract_bundle(const std::string& containerPath, const std::string& targetDirectory,
+                                  const std::string& expansionDirectory) {
     gLastError.clear();
     std::ifstream f(containerPath, std::ios::binary);
     if (!f) { gLastError = "Cannot open bundle container: " + containerPath; apkLog(gLastError); return false; }
@@ -1389,7 +1397,8 @@ bool APKExtractor::extract_bundle(const std::string& containerPath, const std::s
     // targetDirectory = <androidRoot>/data/app/<appName> → androidRoot 3 levels above.
     const auto androidRoot = std::filesystem::path(targetDirectory).parent_path().parent_path().parent_path();
     const std::string appName = std::filesystem::path(targetDirectory).filename().string();
-    const auto obbRoot = androidRoot / "sdcard/Android/obb";
+    const auto obbRoot = expansionDirectory.empty()
+        ? androidRoot / "sdcard/Android/obb" : std::filesystem::path(expansionDirectory);
 
     for (const auto& e : allEntries) {
         if (!endsWithCi(e.name, ".obb")) continue;
@@ -1410,7 +1419,7 @@ bool APKExtractor::extract_bundle(const std::string& containerPath, const std::s
             pkg = rel.substr(0, slash);
         }
         // Package names are [A-Za-z0-9._]+ — anything else is a traversal attempt.
-        if (pkg.empty() ||
+        if (pkg.empty() || pkg == "." || pkg == ".." ||
             pkg.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._") !=
                 std::string::npos) {
             gLastError = "Refusing suspicious OBB package: " + pkg;
@@ -1515,6 +1524,7 @@ ManifestInfo APKExtractor::parse_manifest_text(const char* data, std::size_t siz
     bool sawAnyIntentFilter = false;
     bool inIntentFilter = false;
     std::string currentExported;
+    std::string currentTheme;
 
     auto commit = [&](const std::string& name) {
         if (info.mainActivity.empty() && !name.empty() && sawActionMain && sawCategoryLauncher) {
@@ -1529,11 +1539,13 @@ ManifestInfo APKExtractor::parse_manifest_text(const char* data, std::size_t siz
         for (ActivityEntry& e : info.activities) {
             if (e.name != name) continue;
             e.isLauncher = e.isLauncher || (sawActionMain && sawCategoryLauncher);
+            if (!isAlias && e.theme.empty()) e.theme = currentTheme;
             e.isExported = e.isExported || (currentExported == "true") || sawAnyIntentFilter;
             return;
         }
         ActivityEntry e;
         e.name = name;
+        if (!isAlias) e.theme = currentTheme;
         e.isLauncher = sawActionMain && sawCategoryLauncher;
         e.isExported = currentExported.empty() ? sawAnyIntentFilter : (currentExported == "true");
         e.isAlias = isAlias;
@@ -1562,6 +1574,7 @@ ManifestInfo APKExtractor::parse_manifest_text(const char* data, std::size_t siz
                 currentActivity = extractXmlAttr(tag, "name");
                 aliasTarget = extractXmlAttr(tag, "targetActivity");
                 currentExported = extractXmlAttr(tag, "exported");
+                currentTheme = tagName == "activity" ? extractXmlAttr(tag, "theme") : "";
                 sawActionMain = false;
                 sawCategoryLauncher = false;
                 sawAnyIntentFilter = false;
@@ -1591,6 +1604,7 @@ ManifestInfo APKExtractor::parse_manifest_text(const char* data, std::size_t siz
             inIntentFilter = !isClose;
             if (!isClose) sawAnyIntentFilter = true;
         } else if (tagName == "application") {
+            if (!isClose) info.applicationTheme = extractXmlAttr(tag, "theme");
             if (!isClose && info.appClass.empty()) {
                 info.appClass = extractXmlAttr(tag, "name");
             }

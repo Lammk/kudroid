@@ -377,15 +377,6 @@ public class TextView extends View {
                              resolveSize(wantHeight, heightMeasureSpec));
     }
 
-    /** Clamp a desired size against the parent's constraint. */
-    private static int resolveSize(int want, int measureSpec) {
-        final int mode = MeasureSpec.getMode(measureSpec);
-        final int size = MeasureSpec.getSize(measureSpec);
-        if (mode == MeasureSpec.EXACTLY) return size;
-        if (mode == MeasureSpec.AT_MOST) return Math.min(want, size);
-        return want;
-    }
-
     /** Gap between baselines as a multiple of text size, matching Android's default. */
     private static final float LINE_SPACING = 1.35f;
 
