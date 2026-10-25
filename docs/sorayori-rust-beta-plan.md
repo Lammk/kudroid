@@ -679,3 +679,72 @@ Java_studio_sakayori_sorayori_Rust_shouldOverride
 - Dex định nghĩa sẵn toàn bộ vỏ: `studio.sakayori.sorayori.{MainActivity, TauriActivity,
   WryActivity, RustWebView, RustWebViewClient, RustWebChromeClient, Ipc, Rust}`,
   `app.tauri.*` (plugin framework + geolocation), Jackson, AndroidX, Play Services location.
+
+---
+
+## 12. Bổ sung 2026-10-25 — đính chính scope + những gì nhánh này ĐÃ code
+
+### 12.1 Đính chính scope (theo yêu cầu của chủ dự án)
+
+Mục tiêu của nhánh **không phải** "chạy riêng Sorayori". Mục tiêu là **KuDroid hỗ trợ cả
+một lớp ngôn ngữ/công nghệ**: app hybrid mà lõi nằm trong WebView và/hoặc `.so` Rust —
+Tauri, Cordova, Capacitor, app WebView thuần, và mọi app dùng `android.webkit` +
+`android.location` theo cách thông thường. Sorayori chỉ là **ca tham chiếu** để đo bề mặt
+API (mục 3), không có dòng code nào trong nhánh này hardcode cho riêng nó: không tên
+package, không scheme riêng, không handle riêng.
+
+Cũng đính chính 2 điểm trong chính plan này (đọc lại source `master` kỹ hơn khi bắt tay code):
+- **epoll/eventfd/ALooper/AConfiguration/__android_log_write/__register_atfork ĐÃ có sẵn**
+  trong `master` (`SyscallShim.cpp` ~9.000 dòng, bảng 834 symbol; `AssetShim.cpp` cho
+  AConfiguration). epoll trên Apple đã được dịch sang kqueue (kể cả EPOLLET/ONESHOT),
+  eventfd giả lập bằng loopback socket. Mục 5 của plan viết khi chưa đọc hết source —
+  phần việc "phải viết epoll shim" là **thừa**; bề mặt ELF cho hồ sơ `.so` Rust về cơ bản
+  đã đủ, phần POSIX còn lại resolve qua host dlsym của Darwin.
+- `__sF`: `BionicShim.cpp` đã có comment giải thích — Darwin cũng export `__sF` và resolver
+  bind thẳng sang host, không cần giả lập layout như mục 5.2 lo ngại.
+
+### 12.2 Đã code trong nhánh này
+
+| Lớp | File | Nội dung |
+|---|---|---|
+| Host bridge C++ | `include/kudroid/platform/WebViewHost.h`, `src/platform/WebViewHost.cpp` | Registry theo handle, hàng đợi sự kiện host→guest, nav-state đồng bộ, waiter chặn request (begin/await/respond + body hai chiều), vtable host theo mẫu `KuDroidSensorHost` |
+| Host bridge C++ | `include/kudroid/platform/LocationHost.h`, `src/platform/LocationHost.cpp` | Subscription theo handle, hàng đợi fix, last-known toàn cục, vtable CoreLocation |
+| Runtime | `src/kuart/LibCore.cpp` | `Invoke_android_webkit_WebView` (22 native), `Invoke_android_location_LocationManager` (6 native), route + `LibCoreHasMethod` |
+| Framework Java | `framework/android/webkit/WebView.java` | Viết lại toàn bộ: load/eval/JS-interface (reflection + `@JavascriptInterface`), poll sự kiện trên main Looper, dispatch client, interception qua `shouldInterceptRequest` (đọc body request, trả status/mime/body), settings đẩy xuống host |
+| Framework Java | `WebViewClient.java`, `WebChromeClient.java`, `WebSettings.java`, `WebResourceRequest.java`, `WebResourceError.java` | Bổ sung các overload/API mà hybrid runtime override: `shouldInterceptRequest`, `shouldOverrideUrlLoading(WebResourceRequest)`, `onGeolocationPermissionsShowPrompt`, `onPermissionRequest`, `onShowFileChooser`, JsResult/JsPromptResult… |
+| Framework Java | `PermissionRequest.java`, `GeolocationPermissions.java`, `JsResult.java`, `JsPromptResult.java` (mới) | Class còn thiếu mà Tauri/WebChromeClient tham chiếu |
+| Framework Java | `CookieManager.java` | Từ no-op thành kho cookie in-memory thật (set/get theo host) |
+| Framework Java | `framework/android/location/LocationManager.java` | Viết lại: subscription thật qua LocationHost, `getCurrentLocation`, `requestSingleUpdate`, poll+deliver đúng Looper của listener. **Bỏ tọa độ giả** 37.4220,-122.0841 mà bản stub cũ trả — bản cũ nói dối mọi app dùng nó |
+| Shell iOS | `ios-app/KuDroidShell/WebViewBridge.swift` | WKWebView theo handle: delegate đầy đủ, fetch/XHR shim ở document-start cho host `ipc.localhost`/`asset.localhost`, navigation chính bị chặn qua guest, scheme ngoài → mở app ngoài, geo/media permission |
+| Shell iOS | `ios-app/KuDroidShell/LocationBridge.swift` | CLLocationManager: 1 nguồn cho mọi subscription, lọc minTime, one-shot, trạng thái authorization → `services_enabled` |
+| Shell iOS | `ContentView.swift`, `kudroid_bridge.h` | Đăng ký 2 bridge cạnh SensorBridge; include header mới |
+| Build/test | `CMakeLists.txt`, `tests/test_hybrid_hosts.cpp` | Thêm 2 source vào `kudroid_core`; test host cho event queue/intercept round-trip/pass/timeout/location |
+
+### 12.3 Kiểm chứng đã làm (không cần thiết bị)
+
+- `tests/test_hybrid_hosts.cpp`: build + chạy xanh toàn bộ (event queue thứ tự, intercept
+  round-trip kèm body POST và trường hợp buffer nhỏ phải lấy 2 lần, pass, timeout, location encode).
+- Hai file host mới compile bằng chính build system của dự án (CMake object target của `kudroid_core`).
+- `LibCore.cpp`: qua `g++ -fsyntax-only` với include của dự án.
+- Framework Java (webkit + location + toàn bộ dependency kéo theo): `javac --release 8` sạch.
+- **Chưa kiểm chứng được trong môi trường này** (nói thẳng): Swift chưa qua swiftc (môi trường
+  không có Xcode); link trọn `kudroid_core` ở VM này gãy ở **libvpx** (third-party C build bằng
+  cờ của clang trong khi VM chỉ có gcc) — lỗi có từ trước, không liên quan nhánh này, CI của repo
+  dùng toolchain đúng sẽ là nơi xác nhận cuối. Chạy thật trên máy iOS vẫn là bước của chủ dự án.
+
+### 12.4 Khoảng trống còn lại của lớp hybrid (việc tiếp theo, theo thứ tự)
+
+1. `shouldOverrideUrlLoading` cho link thường: hiện shell tự quyết (scheme ngoài → mở ngoài);
+   chưa hỏi guest Java một cách đồng bộ vì WKNavigationDelegate không chờ được guest main thread
+   mà khôngเสี่ยง deadlock. Cần cơ chế quyết định bất đồng bộ + cache quyết định theo URL.
+2. `loadUrl(url, headers)`: chưa có kênh header xuống host — headers đang bị bỏ qua.
+3. `addJavascriptInterface`: bản bridge là message 1 chiều, **không có giá trị trả về đồng bộ**
+   như Android. Runtime nào cần sync-return phải đi qua interception (như Tauri/Cordova hiện đại).
+4. Scheme tùy biến do guest đăng ký động (vd `myapp://`): WKURLSchemeHandler phải khai tại lúc
+   tạo WKWebView; cần API cho guest khai scheme trước khi create + tạo lại view khi scheme thay đổi.
+5. File chooser: host iOS xử lý `<input type=file>` nguyên bản; `onShowFileChooser` của guest
+   mới được thông báo, chưa nhận được file chọn. Cần cầu UIDocumentPicker khi guest yêu cầu sở hữu luồng.
+6. Geolocation per-origin: quyết định của `GeolocationPermissions.Callback` phía guest đang là
+   advisory — quyền thật do CoreLocation của host quyết (đúng mô hình quyền-của-host ở mục 6.5).
+7. Cookie: CookieManager phía Java là in-memory; cookie của chính WKWebView do
+   WKWebsiteDataStore quản — hai kho chưa đồng bộ hai chiều.
