@@ -149,6 +149,8 @@ add_library(kudroid_core STATIC
     src/abi/BlockingWaitRegistry.cpp
     src/abi/GuestSignals.cpp
     src/platform/AssetShim.cpp
+    src/platform/WebViewHost.cpp
+    src/platform/LocationHost.cpp
     src/platform/ResourceTable.cpp
     src/platform/FrameworkResources.cpp
     src/platform/ResourceCompat.cpp
@@ -372,6 +374,14 @@ else()
         add_executable(test_net_shims tests/test_net_shims.cpp)
         target_link_libraries(test_net_shims PRIVATE kudroid_core)
         target_include_directories(test_net_shims PRIVATE include)
+    endif()
+
+    # Host-side test for the hybrid-app bridges (WebViewHost + LocationHost):
+    # event queue, interception waiter round-trip, fix queue — no device.
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/test_hybrid_hosts.cpp")
+        add_executable(test_hybrid_hosts tests/test_hybrid_hosts.cpp)
+        target_link_libraries(test_hybrid_hosts PRIVATE kudroid_core Threads::Threads)
+        target_include_directories(test_hybrid_hosts PRIVATE include)
     endif()
 
     # Host-side test for AndroidManifest.xml (AXML) LAUNCHER-activity parsing.

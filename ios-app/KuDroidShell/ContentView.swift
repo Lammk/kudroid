@@ -1712,6 +1712,8 @@ class NativeMetalViewController: UIViewController {
         ])
 
         KuDroidSensorBridge.shared.register()
+        KuDroidWebViewBridge.shared.register()
+        KuDroidLocationBridge.shared.register()
 
         NativeMetalViewController.sCurrentRunnerVC = self
 

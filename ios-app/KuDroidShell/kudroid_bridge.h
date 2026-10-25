@@ -5,6 +5,8 @@
 #include <stdint.h>
 #include "../../include/kudroid/platform/MediaPlayerHost.h"
 #include "../../include/kudroid/platform/SensorHost.h"
+#include "../../include/kudroid/platform/WebViewHost.h"
+#include "../../include/kudroid/platform/LocationHost.h"
 
 #ifdef __cplusplus
 extern "C" {

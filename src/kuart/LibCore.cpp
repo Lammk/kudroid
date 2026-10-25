@@ -49,6 +49,8 @@
 #include "kudroid/platform/MediaPlayerHost.h"
 #include "kudroid/platform/SurfaceTextureHost.h"
 #include "kudroid/platform/SensorHost.h"
+#include "kudroid/platform/WebViewHost.h"
+#include "kudroid/platform/LocationHost.h"
 #include "kudroid/platform/NetworkState.h"
 #include "kudroid/platform/FramePacer.h"
 #include "kudroid/platform/GuestClock.h"
@@ -3002,6 +3004,177 @@ bool Invoke_android_graphics_Canvas(Interpreter* /*interp*/, const char* name, c
     return false;
 }
 
+// android.webkit.WebView natives — the hybrid-app surface (Tauri/Cordova/
+// Capacitor/plain WebView apps). All real work lives in the platform
+// WebViewHost (src/platform/WebViewHost.cpp); the guest Java class owns the
+// Android-facing state and dispatches host events to its clients. These are
+// static natives: args are exactly the declared parameters, in order.
+bool Invoke_android_webkit_WebView(Interpreter* interp, const char* name, const DexValue* args,
+                                   size_t num_args, DexValue* result) {
+    if (std::strcmp(name, "nativeCreate") == 0) {
+        const int64_t handle = num_args > 0 ? args[0].j : 0;
+        const std::string config = num_args > 1 ? GetStringUtf8(args[1]) : "{}";
+        kudroid::webview::Create(handle, config);
+        return true;
+    }
+    if (std::strcmp(name, "nativeApplySettings") == 0) {
+        kudroid::webview::ApplySettings(args[0].j, GetStringUtf8(args[1]));
+        return true;
+    }
+    if (std::strcmp(name, "nativeDestroy") == 0) {
+        kudroid::webview::Destroy(num_args > 0 ? args[0].j : 0);
+        return true;
+    }
+    if (std::strcmp(name, "nativeLoadUrl") == 0) {
+        kudroid::webview::LoadUrl(args[0].j, GetStringUtf8(args[1]));
+        return true;
+    }
+    if (std::strcmp(name, "nativeLoadData") == 0) {
+        kudroid::webview::LoadData(args[0].j, GetStringUtf8(args[1]), GetStringUtf8(args[2]),
+                                   GetStringUtf8(args[3]));
+        return true;
+    }
+    if (std::strcmp(name, "nativeEval") == 0) {
+        kudroid::webview::EvalJs(args[0].j, args[1].j, GetStringUtf8(args[2]));
+        return true;
+    }
+    if (std::strcmp(name, "nativeSetFrame") == 0) {
+        kudroid::webview::SetFrame(args[0].j, args[1].i, args[2].i, args[3].i, args[4].i);
+        return true;
+    }
+    if (std::strcmp(name, "nativeSetVisible") == 0) {
+        kudroid::webview::SetVisible(args[0].j, args[1].i != 0);
+        return true;
+    }
+    if (std::strcmp(name, "nativeGoBack") == 0) {
+        kudroid::webview::GoBack(args[0].j);
+        return true;
+    }
+    if (std::strcmp(name, "nativeGoForward") == 0) {
+        kudroid::webview::GoForward(args[0].j);
+        return true;
+    }
+    if (std::strcmp(name, "nativeReload") == 0) {
+        kudroid::webview::Reload(args[0].j);
+        return true;
+    }
+    if (std::strcmp(name, "nativeStopLoading") == 0) {
+        kudroid::webview::StopLoading(args[0].j);
+        return true;
+    }
+    if (std::strcmp(name, "nativeFlushStorage") == 0) {
+        kudroid::webview::FlushStorage(args[0].j);
+        return true;
+    }
+    if (std::strcmp(name, "nativeCanGoBack") == 0) {
+        *result = DexValue::Int(kudroid::webview::CanGoBack(args[0].j) ? 1 : 0);
+        return true;
+    }
+    if (std::strcmp(name, "nativeCanGoForward") == 0) {
+        *result = DexValue::Int(kudroid::webview::CanGoForward(args[0].j) ? 1 : 0);
+        return true;
+    }
+    if (std::strcmp(name, "nativeGetUrl") == 0) {
+        const std::string url = kudroid::webview::CurrentUrl(args[0].j);
+        result->l = interp->linker()->NewString(url.c_str());
+        return true;
+    }
+    if (std::strcmp(name, "nativeSetIntercept") == 0) {
+        kudroid::webview::SetInterceptEnabled(args[0].j, args[1].i != 0);
+        return true;
+    }
+    if (std::strcmp(name, "nativePollEvent") == 0) {
+        const std::string event = kudroid::webview::PollEvent(args[0].j);
+        result->l = event.empty() ? nullptr : interp->linker()->NewString(event.c_str());
+        return true;
+    }
+    if (std::strcmp(name, "nativeRespond") == 0) {
+        // (long requestId, boolean pass, int status, String mime, byte[] body)
+        std::vector<uint8_t> body;
+        if (num_args > 4 && args[4].l != nullptr) {
+            auto* arr = reinterpret_cast<DexArray*>(args[4].l);
+            const auto* bytes = reinterpret_cast<const uint8_t*>(arr->Data());
+            body.assign(bytes, bytes + arr->length);
+        }
+        kudroid::webview::Respond(args[0].j, args[1].i != 0, args[2].i,
+                                  GetStringUtf8(args[3]), body);
+        return true;
+    }
+    if (std::strcmp(name, "nativeInterceptBody") == 0) {
+        std::vector<uint8_t> body;
+        if (!kudroid::webview::InterceptBody(args[0].j, &body)) {
+            result->l = nullptr;
+            return true;
+        }
+        DexClass* array_class = interp->linker()->FindClass("[B");
+        auto* arr = array_class != nullptr
+                        ? interp->linker()->AllocArray(array_class,
+                                                       static_cast<int32_t>(body.size()))
+                        : nullptr;
+        if (arr != nullptr && !body.empty()) {
+            std::memcpy(arr->Data(), body.data(), body.size());
+        }
+        result->l = arr;
+        return true;
+    }
+    if (std::strcmp(name, "nativeInterceptInfo") == 0) {
+        // Returns "<method>\t<url>\t<headersJson>\t<isMainFrame>" for a request.
+        std::string method, url, headers;
+        bool mainFrame = false;
+        if (!kudroid::webview::InterceptInfo(args[0].j, &method, &url, &headers, &mainFrame)) {
+            result->l = nullptr;
+            return true;
+        }
+        const std::string joined = method + "\t" + url + "\t" + headers + "\t" +
+                                   (mainFrame ? "1" : "0");
+        result->l = interp->linker()->NewString(joined.c_str());
+        return true;
+    }
+    return false;
+}
+
+// android.location.LocationManager natives — subscription handles are minted
+// by the guest Java class; fixes are encoded by LocationHost::Encode and
+// parsed back into android.location.Location objects on the Java side.
+bool Invoke_android_location_LocationManager(Interpreter* interp, const char* name,
+                                             const DexValue* args, size_t /*num_args*/,
+                                             DexValue* result) {
+    if (std::strcmp(name, "nativeLocStart") == 0) {
+        kudroid::location::Start(args[0].j, args[1].j,
+                                 static_cast<float>(args[2].f));
+        return true;
+    }
+    if (std::strcmp(name, "nativeLocStop") == 0) {
+        kudroid::location::Stop(args[0].j);
+        return true;
+    }
+    if (std::strcmp(name, "nativeLocSingle") == 0) {
+        kudroid::location::RequestSingle(args[0].j);
+        return true;
+    }
+    if (std::strcmp(name, "nativeLocEnabled") == 0) {
+        *result = DexValue::Int(kudroid::location::ServicesEnabled() ? 1 : 0);
+        return true;
+    }
+    if (std::strcmp(name, "nativeLocPoll") == 0) {
+        kudroid::location::Fix fix;
+        result->l = kudroid::location::PollFix(args[0].j, &fix)
+                        ? interp->linker()->NewString(
+                              kudroid::location::Encode(fix).c_str())
+                        : nullptr;
+        return true;
+    }
+    if (std::strcmp(name, "nativeLocLastKnown") == 0) {
+        kudroid::location::Fix fix;
+        result->l = kudroid::location::LastKnown(&fix)
+                        ? interp->linker()->NewString(
+                              kudroid::location::Encode(fix).c_str())
+                        : nullptr;
+        return true;
+    }
+    return false;
+}
+
 bool Invoke_android_app_ActivityThread(Interpreter* /*interp*/, const char* name,
                                          const DexValue* /*args*/, size_t /*num_args*/,
                                          DexValue* /*result*/) {
@@ -4452,6 +4625,8 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
     if (std::strcmp(desc, "Landroid/graphics/drawable/VectorDrawable;") == 0)
         return Invoke_VectorDrawable(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Landroid/graphics/Canvas;") == 0) return Invoke_android_graphics_Canvas(interp, name, args, num_args, result);
+    if (std::strcmp(desc, "Landroid/webkit/WebView;") == 0) return Invoke_android_webkit_WebView(interp, name, args, num_args, result);
+    if (std::strcmp(desc, "Landroid/location/LocationManager;") == 0) return Invoke_android_location_LocationManager(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Landroid/app/Activity;") == 0) return Invoke_android_app_Activity(interp, name, args, num_args, result);
     if (std::strcmp(desc, "Landroid/app/ActivityThread;") == 0) {
         return Invoke_android_app_ActivityThread(interp, name, args, num_args, result);
@@ -4561,6 +4736,8 @@ bool LibCoreHasMethod(const DexMethod* method) {
             std::strcmp(desc, "Ldalvik/system/BaseDexClassLoader;") == 0 ||
             std::strcmp(desc, "Landroid/util/Log;") == 0 ||
             std::strcmp(desc, "Landroid/graphics/Canvas;") == 0 ||
+            std::strcmp(desc, "Landroid/webkit/WebView;") == 0 ||
+            std::strcmp(desc, "Landroid/location/LocationManager;") == 0 ||
             std::strcmp(desc, "Landroid/graphics/drawable/VectorDrawable;") == 0 ||
             std::strcmp(desc, "Landroid/app/Activity;") == 0 ||
             std::strcmp(desc, "Landroid/app/ActivityManager;") == 0 ||
