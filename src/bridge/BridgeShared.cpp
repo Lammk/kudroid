@@ -8,6 +8,7 @@ char g_lastCrashTail[16384] = {0};
 pthread_t g_mainThread = 0;
 
 std::atomic<bool> s_isApkRunning{false};
+std::atomic<bool> s_guestRuntimeUsed{false};
 std::atomic<bool> s_stopping{false};
 std::mutex s_runStateMutex;
 std::condition_variable s_runStateCv;

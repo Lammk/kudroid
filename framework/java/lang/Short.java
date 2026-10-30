@@ -71,6 +71,14 @@ public final class Short extends Number implements Comparable<Short> {
     }
 
     public static short parseShort(String s) {
-        return (short) Integer.parseInt(s);
+        return parseShort(s, 10);
+    }
+
+    public static short parseShort(String s, int radix) {
+        int i = Integer.parseInt(s, radix);
+        if (i < MIN_VALUE || i > MAX_VALUE) {
+            throw new NumberFormatException("Value out of range for short: \"" + s + "\"");
+        }
+        return (short) i;
     }
 }

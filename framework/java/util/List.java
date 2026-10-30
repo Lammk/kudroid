@@ -17,4 +17,16 @@ public interface List<E> extends Collection<E> {
     List<E> subList(int fromIndex, int toIndex);
 
     ListIterator<E> listIterator();
+
+    /** Iterate from {@code index}; implementations that can seek override this. */
+    default ListIterator<E> listIterator(int index) {
+        if (index < 0 || index > size()) {
+            throw new IndexOutOfBoundsException("index: " + index + ", size: " + size());
+        }
+        ListIterator<E> it = listIterator();
+        for (int i = 0; i < index; i++) {
+            it.next();
+        }
+        return it;
+    }
 }

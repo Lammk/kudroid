@@ -48,12 +48,31 @@ struct ResourceStyleConfig {
     int width_dp = 0;
     int height_dp = 0;
     int orientation = 0;
+    int smallest_width_dp = 0;
+    int density = 0;
+    int screen_layout = 0;
+    int color_mode = 0;
 };
 bool resource_get_style(uint32_t id, const ResourceStyleConfig& config,
                         std::map<uint32_t, ResourceScalar>* attributes);
 bool resource_get_value(uint32_t id, const std::string& locale, bool resolve,
                         ResourceScalar* value);
+bool resource_get_value(uint32_t id, const ResourceStyleConfig& config, bool resolve,
+                        ResourceScalar* value);
 bool resource_get_pool_string(uint32_t index, std::string* value);
+bool resource_resolve_strings(const std::vector<uint8_t>& bytes,
+                              const std::vector<std::string>& references,
+                              const std::string& locale, std::vector<std::string>* values);
+
+// Every file path a reference resolves to across all configurations. Resource
+// shrinking can rename res/ files, so the manifest's icon reference is the only
+// reliable way to find the right bitmap.
+bool resource_resolve_file_paths(const std::vector<uint8_t>& bytes,
+                                 const std::string& reference,
+                                 std::vector<std::string>* paths,
+                                 uint32_t* resource_id);
+bool resource_id_file_paths(const std::vector<uint8_t>& bytes, uint32_t resource_id,
+                            std::vector<std::string>* paths);
 
 bool resource_get_identifier(const std::string& name, const std::string& type,
                              const std::string& package, uint32_t* id);

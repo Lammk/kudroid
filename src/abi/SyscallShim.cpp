@@ -8,6 +8,8 @@
 #include "kudroid/debug/FrameWalk.h"
 #include "kudroid/elf_loader.hpp"
 #include "kudroid/DeviceProfile.h"
+#include "kudroid/ExecMemory.h"
+#include "kudroid/Log.h"
 #include "kudroid/platform/BundledFramework.h"
 #include "kudroid/platform/GraphicsShim.h"
 #include "kudroid/platform/GuestClock.h"
@@ -38,6 +40,9 @@
 #include <sys/resource.h>
 #include <syslog.h>
 #include "kudroid/platform/FramePacer.h"
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#endif
 #if defined(__linux__)
 #include <sys/inotify.h>
 #include <sys/signalfd.h>
@@ -61,6 +66,7 @@
 #include <mach/mach.h>
 #include <mach/vm_region.h>
 #include <malloc/malloc.h>
+#include <libkern/OSCacheControl.h>
 #include "kudroid/MachVmDecls.h"
 #else
 #include <malloc.h>
@@ -570,6 +576,12 @@ extern "C" int kudroid_printf_trampoline();
 extern "C" int kudroid_fprintf_chk_trampoline();
 extern "C" int kudroid_printf_chk_trampoline();
 extern "C" void kudroid_syslog_trampoline();
+extern "C" int kudroid_asprintf_trampoline();
+extern "C" int kudroid_asprintf_chk_trampoline();
+extern "C" int kudroid_dprintf_trampoline();
+extern "C" int kudroid_dprintf_chk_trampoline();
+extern "C" int kudroid_log_buf_print_trampoline();
+extern "C" void kudroid_syslog_chk_trampoline();
 
 // Stream sink for the fprintf/printf handlers in GuestVarargs.cpp. A null stream is stdout.
 extern "C" void kudroid_guest_stdio_write(void* stream, const char* data, size_t len) {
@@ -1386,6 +1398,7 @@ extern "C" bool kudroid_audio_thread(void);
 extern "C" int kudroid_fd_is_apk(int fd);
 static std::atomic<int> g_audioFdOpsEarly{0};
 static bool audio_open_trace_take() {
+    if (!kudroid::log::trace_hot()) return false;
     if (g_audioFdOpsEarly.load(std::memory_order_relaxed) >= 200) return false;
     if (!kudroid_audio_thread()) return false;
     g_audioFdOpsEarly.fetch_add(1, std::memory_order_relaxed);
@@ -1483,21 +1496,38 @@ struct bionic_stat64 {
     uint32_t __unused5;
 };
 
+static int guest_stat_at(int dirfd, const char* pathname, struct stat* output, int flags) {
+    constexpr int noFollow = 0x100;
+    constexpr int noAutomount = 0x800;
+    constexpr int emptyPath = 0x1000;
+    if (!pathname || !output) { errno = EFAULT; return -1; }
+    if (flags & ~(noFollow | noAutomount | emptyPath)) { errno = EINVAL; return -1; }
+    const int hostDirfd = translate_linux_dirfd(dirfd);
+    if (*pathname == '\0') {
+        if (!(flags & emptyPath)) { errno = ENOENT; return -1; }
+        return hostDirfd == AT_FDCWD ? ::stat(".", output) : ::fstat(hostDirfd, output);
+    }
+    const std::string mapped = at_path_needs_remap(dirfd, pathname)
+        ? kudroid::VFSPathRemapper::getInstance().remap(pathname) : std::string(pathname);
+    const int hostFlags = (flags & noFollow) ? AT_SYMLINK_NOFOLLOW : 0;
+    const int result = ::fstatat(hostDirfd, mapped.c_str(), output, hostFlags);
+    if (result != 0) {
+        const int savedErrno = errno;
+        static std::atomic<unsigned> samples{0};
+        if (samples.fetch_add(1, std::memory_order_relaxed) < 24) {
+            logAndroidMessage(5, "KuDroidVFS", "directory-stat failed fd=" + std::to_string(dirfd)
+                + " path=" + pathname + " flags=" + std::to_string(flags) + " errno=" + std::to_string(savedErrno));
+        }
+        errno = savedErrno;
+    }
+    return result;
+}
+
 extern "C" int bionic_newfstatat(int dirfd, const char* pathname, struct bionic_stat64* statbuf, int flags) {
-    if (!statbuf) return -1;
+    if (!statbuf) { errno = EFAULT; return -1; }
     struct stat host_st;
     memset(&host_st, 0, sizeof(host_st));
-    int res = 0;
-    const int host_dirfd = translate_linux_dirfd(dirfd);
-    if (pathname && *pathname) {
-        const std::string remapped =
-            at_path_needs_remap(dirfd, pathname)
-                ? kudroid::VFSPathRemapper::getInstance().remap(pathname)
-                : std::string(pathname);
-        res = ::fstatat(host_dirfd, remapped.c_str(), &host_st, flags);
-    } else {
-        res = ::fstat(dirfd, &host_st);
-    }
+    const int res = guest_stat_at(dirfd, pathname, &host_st, flags);
     if (res != 0) return res;
 
     memset(statbuf, 0, sizeof(*statbuf));
@@ -1642,6 +1672,7 @@ namespace {
 void log_mmap_result(void* result, size_t length, int prot, int flags, int fd,
                      off_t offset, const void* requested) {
     if (kudroid::guest_async_handler_active()) return;
+    const int saved_errno = errno;
     if (result == MAP_FAILED) {
         static std::atomic<int> n{0};
         if (n.fetch_add(1, std::memory_order_relaxed) < 40) {
@@ -1649,8 +1680,9 @@ void log_mmap_result(void* result, size_t length, int prot, int flags, int fd,
                          "[KuDroidMmap] FAIL len=%zu prot=0x%x flags=0x%x fd=%d off=%lld "
                          "req=%p errno=%d (%s)\n",
                          length, prot, flags, fd, static_cast<long long>(offset), requested,
-                         errno, std::strerror(errno));
+                         saved_errno, std::strerror(saved_errno));
         }
+        errno = saved_errno;
         return;
     }
     // Success: surface what matters for placement — file-backed maps and the big
@@ -1667,21 +1699,28 @@ void log_mmap_result(void* result, size_t length, int prot, int flags, int fd,
         auto& n = big ? n_big : n_small;
         const int cap = big ? 2000 : 120;
         if (n.fetch_add(1, std::memory_order_relaxed) < cap) {
+            char current[4] = "???", maximum[4] = "???";
+#if defined(__APPLE__)
+            kudroid::QueryRegionProt(result, current, maximum);
+#endif
             std::fprintf(stderr,
                          "[KuDroidMmap] ok len=%zu prot=0x%x flags=0x%x fd=%d off=%lld "
-                         "req=%p -> %p\n",
+                         "req=%p -> %p cur=%s max=%s\n",
                          length, prot, flags, fd, static_cast<long long>(offset), requested,
-                         result);
+                         result, current, maximum);
         }
     }
+    errno = saved_errno;
 }
 
 #if defined(__APPLE__)
-static bool host_range_query(uintptr_t start, size_t length, bool* out_mapped, int* out_prot) {
-    if (start == 0 || length == 0) return false;
+static bool host_range_query(uintptr_t start, size_t length, bool* out_mapped, int* out_prot,
+                             int* out_maximum = nullptr) {
+    if (start == 0 || length == 0 || start > UINTPTR_MAX - length) return false;
     uintptr_t curr = start;
     const uintptr_t target_end = start + length;
     int common_prot = -1;
+    int maximum = VM_PROT_ALL;
     while (curr < target_end) {
         mach_vm_address_t region_addr = static_cast<mach_vm_address_t>(curr);
         mach_vm_size_t sz = 0;
@@ -1695,6 +1734,7 @@ static bool host_range_query(uintptr_t start, size_t length, bool* out_mapped, i
         if (kr != KERN_SUCCESS || region_addr > curr) {
             if (out_mapped) *out_mapped = false;
             if (out_prot) *out_prot = 0;
+            if (out_maximum) *out_maximum = 0;
             return true;
         }
         int p = 0;
@@ -1703,17 +1743,21 @@ static bool host_range_query(uintptr_t start, size_t length, bool* out_mapped, i
         if (info.protection & VM_PROT_EXECUTE) p |= PROT_EXEC;
         if (common_prot == -1) common_prot = p;
         else if (common_prot != p) common_prot = -2;
+        maximum &= info.max_protection;
         if (sz == 0 || region_addr + sz <= curr) return false;
         curr = static_cast<uintptr_t>(region_addr + sz);
     }
     if (out_mapped) *out_mapped = true;
     if (out_prot) *out_prot = common_prot;
+    if (out_maximum) *out_maximum = maximum;
     return true;
 }
 
 
 #endif
 }  // namespace
+
+extern "C" int bionic_mprotect(void *addr, size_t len, int prot);
 
 // Memory mapping wrappers to strip Linux specific flags
 extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset) {
@@ -1790,12 +1834,89 @@ extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int
     if (clean_flags & LINUX_MAP_ANONYMOUS) {
         darwin_flags |= MAP_ANON;
         darwin_fd = -1;  // Darwin requires fd == -1 for anonymous mappings
+        if (prot & PROT_EXEC) {
+            darwin_flags |= MAP_JIT;
+        }
     }
 
     void* const orig_addr = addr;
     const size_t orig_len = length;
     const long host_page = ::sysconf(_SC_PAGESIZE);
     const uintptr_t page_mask = (host_page > 0 ? static_cast<uintptr_t>(host_page) : 16384u) - 1;
+
+    if (length == 0 || length > SIZE_MAX - page_mask ||
+        ((darwin_flags & MAP_FIXED) &&
+         reinterpret_cast<uintptr_t>(addr) > UINTPTR_MAX - length - page_mask)) {
+        errno = length == 0 ? EINVAL : ENOMEM;
+        return MAP_FAILED;
+    }
+
+    if ((darwin_flags & MAP_FIXED) &&
+        kudroid::ExecMemory::GuestMemoryOverlaps(addr, length)) {
+        void* write = kudroid::ExecMemory::GuestWritePointer(addr, length);
+        if (!write || !(clean_flags & LINUX_MAP_ANONYMOUS) ||
+            darwin_fd >= 0 || (darwin_flags & MAP_SHARED)) {
+            errno = ENOTSUP;
+            return MAP_FAILED;
+        }
+        // Preserve prepared backing and neighbouring guest bytes.
+        if (bionic_mprotect(addr, length, prot) != 0) return MAP_FAILED;
+        std::memset(write, 0, length);
+        if (prot & PROT_EXEC) sys_icache_invalidate(addr, length);
+        log_mmap_result(addr, length, prot, flags, fd, offset, addr);
+        return addr;
+    }
+
+    if (darwin_fd < 0 && (clean_flags & LINUX_MAP_ANONYMOUS) &&
+        (darwin_flags & MAP_PRIVATE) &&
+        !(clean_flags & (LINUX_MAP_FIXED | LINUX_MAP_FIXED_NOREPLACE)) &&
+        (prot == PROT_NONE || (prot & PROT_EXEC)) &&
+        kudroid::ExecMemory::GuestReservationsAvailable()) {
+        void* p = kudroid::ExecMemory::AllocateGuest(length, prot);
+        if (p != MAP_FAILED && bionic_mprotect(p, length, prot) != 0) p = MAP_FAILED;
+        log_mmap_result(p, length, prot, flags, fd, offset, addr);
+        return p;
+    }
+
+    // Reserve explicit maximum permissions before any guest code is stored.
+    if (darwin_fd < 0 && prot == PROT_NONE &&
+        (darwin_flags & MAP_PRIVATE) && (clean_flags & LINUX_MAP_ANONYMOUS) &&
+        !(clean_flags & LINUX_MAP_FIXED) &&
+        !fixed_noreplace && length > 0 && !quiet && !kudroid::ExecMemory::TxmPresent()) {
+        mach_vm_address_t vm_addr = addr ? reinterpret_cast<mach_vm_address_t>(addr) : 0;
+        const kern_return_t kr_map = mach_vm_map(
+            mach_task_self(), &vm_addr, length, 0, VM_FLAGS_ANYWHERE,
+            MACH_PORT_NULL, 0, FALSE, VM_PROT_NONE, VM_PROT_ALL, VM_INHERIT_DEFAULT);
+        if (kr_map == KERN_SUCCESS) {
+            void* p_vm = reinterpret_cast<void*>(static_cast<uintptr_t>(vm_addr));
+            bool mapped = false;
+            int current = 0, maximum = 0;
+            if (host_range_query(vm_addr, length, &mapped, &current, &maximum) &&
+                mapped && current == PROT_NONE && (maximum & VM_PROT_ALL) == VM_PROT_ALL) {
+                if (!quiet) std::fprintf(stderr, "[KuDroidMmap] executable reservation source=mach\n");
+                log_mmap_result(p_vm, length, prot, flags, fd, offset, addr);
+                return p_vm;
+            }
+            mach_vm_deallocate(mach_task_self(), vm_addr, length);
+        }
+
+        void* p = ::mmap(addr, length, PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANON | MAP_JIT, -1, 0);
+        if (p != MAP_FAILED) {
+            bool mapped = false;
+            int current = 0, maximum = 0;
+            if (::mprotect(p, length, PROT_NONE) == 0 &&
+                host_range_query(reinterpret_cast<uintptr_t>(p), length,
+                                 &mapped, &current, &maximum) && mapped &&
+                current == PROT_NONE && (maximum & VM_PROT_ALL) == VM_PROT_ALL) {
+                if (!quiet) std::fprintf(stderr, "[KuDroidMmap] executable reservation source=map-jit\n");
+                log_mmap_result(p, length, prot, flags, fd, offset, addr);
+                return p;
+            }
+            ::munmap(p, length);
+        }
+        if (!quiet) std::fprintf(stderr, "[KuDroidMmap] executable reservation unavailable; reserving data pages\n");
+    }
     mach_vm_address_t exclusive_base = 0;
     mach_vm_size_t exclusive_length = 0;
     if (fixed_noreplace) {
@@ -1840,12 +1961,9 @@ extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int
         bool is_mapped = false;
         int cur_prot = 0;
         if (host_range_query(aligned_start, aligned_len, &is_mapped, &cur_prot) && is_mapped) {
-            if ((cur_prot & prot) != prot) {
-                ::mprotect(reinterpret_cast<void*>(aligned_start), aligned_len, cur_prot | prot);
-            }
-            if (prot & PROT_WRITE) {
-                std::memset(const_cast<void*>(orig_addr), 0, orig_len);
-            }
+            if (bionic_mprotect(orig_addr, orig_len, PROT_READ | PROT_WRITE) != 0) return MAP_FAILED;
+            std::memset(orig_addr, 0, orig_len);
+            if (bionic_mprotect(orig_addr, orig_len, prot) != 0) return MAP_FAILED;
             log_mmap_result(orig_addr, orig_len, prot, flags, fd, offset, orig_addr);
             return const_cast<void*>(orig_addr);
         }
@@ -1944,6 +2062,15 @@ extern "C" void* bionic_mmap(void *addr, size_t length, int prot, int flags, int
         // a null structure (e.g. the pointer array a worker writes into). Log
         // the actual failure here so the allocator, not the crash, is the clue.
         log_mmap_result(p, length, prot, flags, fd, offset, addr);
+#if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__))
+        if (p != MAP_FAILED && (prot & PROT_EXEC)) {
+            sys_icache_invalidate(p, length);
+            if (auto fn = reinterpret_cast<void(*)(int)>(::dlsym(RTLD_DEFAULT, "pthread_jit_write_protect_np"))) {
+                fn(1);
+                asm volatile("isb sy" ::: "memory");
+            }
+        }
+#endif
         if (p != MAP_FAILED && (darwin_flags & MAP_FIXED) && orig_addr != nullptr) {
             return const_cast<void*>(orig_addr);
         }
@@ -1988,19 +2115,37 @@ extern "C" int kudroid_page_range_inward(uintptr_t addr, size_t len, size_t page
 
 #if defined(__APPLE__)
 // Protection of the host page holding `addr`, or -1 when it is not mapped.
-static int host_page_protection(uintptr_t addr) {
+static int host_page_protection(uintptr_t addr, int* maximum = nullptr) {
     vm_address_t region_addr = static_cast<vm_address_t>(addr);
     vm_size_t region_size = 0;
     vm_region_basic_info_data_64_t info;
     mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
     mach_port_t object_name = MACH_PORT_NULL;
-    if (vm_region_64(mach_task_self(), &region_addr, &region_size, VM_REGION_BASIC_INFO_64,
-                     reinterpret_cast<vm_region_info_t>(&info), &count,
-                     &object_name) != KERN_SUCCESS) {
+    const kern_return_t result = vm_region_64(
+        mach_task_self(), &region_addr, &region_size, VM_REGION_BASIC_INFO_64,
+        reinterpret_cast<vm_region_info_t>(&info), &count, &object_name);
+    if (object_name != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), object_name);
+    if (result != KERN_SUCCESS) {
         return -1;
     }
     if (static_cast<uintptr_t>(region_addr) > addr) return -1;
+    if (maximum) *maximum = static_cast<int>(info.max_protection);
     return static_cast<int>(info.protection);
+}
+
+static bool host_range_has_protection(uintptr_t addr, size_t len, int prot) {
+    const size_t page = static_cast<size_t>(::sysconf(_SC_PAGESIZE));
+    for (size_t offset = 0; offset < len; offset += page) {
+        int maximum = 0;
+        const int current = host_page_protection(addr + offset, &maximum);
+        if (current < 0) { errno = ENOMEM; return false; }
+        if ((current & prot) != prot || (maximum & prot) != prot ||
+            (prot == PROT_NONE && current != PROT_NONE)) {
+            errno = EACCES;
+            return false;
+        }
+    }
+    return true;
 }
 
 // mprotect on guest (4 KB) ranges over host (16 KB) pages. Whole pages inside the range take
@@ -2013,13 +2158,14 @@ static int mprotect_host_pages(uintptr_t addr, size_t len, int prot) {
     const uintptr_t end = addr + len;
     const uintptr_t first = addr & ~mask;
     const uintptr_t last = (end - 1) & ~mask;
-    int result = 0;
     for (uintptr_t page = first; page <= last; page += host_page) {
         const bool whole = page >= addr && page + host_page <= end;
+        int effective_prot = prot;
         if (!whole) {
             const int current = host_page_protection(page);
-            if (current >= 0 && (current & ~prot & (PROT_READ | PROT_WRITE | PROT_EXEC)) != 0) {
-                continue;  // would strip access from bytes outside the guest's range
+            if (current >= 0) {
+                effective_prot |= current;
+                if (effective_prot == current) continue;
             }
         }
         // Coalesce whole pages into one call.
@@ -2027,39 +2173,41 @@ static int mprotect_host_pages(uintptr_t addr, size_t len, int prot) {
         if (whole) {
             while (run_end + host_page <= end && run_end <= last) run_end += host_page;
         }
-        if (::mprotect(reinterpret_cast<void*>(page), run_end - page, prot) != 0) result = -1;
+        if (::mprotect(reinterpret_cast<void*>(page), run_end - page, effective_prot) != 0 ||
+            !host_range_has_protection(page, run_end - page, effective_prot)) return -1;
         page = run_end - host_page;
     }
-    return result;
+    return 0;
 }
 #endif
 
 extern "C" int bionic_mprotect(void *addr, size_t len, int prot) {
-    if (!addr || len == 0) return 0;
+    if (len == 0) return 0;
+    const uintptr_t address = reinterpret_cast<uintptr_t>(addr);
+    const size_t host_page = static_cast<size_t>(::sysconf(_SC_PAGESIZE));
+    if (!addr || len > SIZE_MAX - (host_page - 1) ||
+        address > UINTPTR_MAX - len - (host_page - 1)) {
+        errno = ENOMEM;
+        return -1;
+    }
     void* aligned_addr = nullptr;
     size_t aligned_len = 0;
     align_range_to_host_page(addr, len, aligned_addr, aligned_len);
 
 #if defined(__APPLE__)
     int r = mprotect_host_pages(reinterpret_cast<uintptr_t>(addr), len, prot);
+    if (r == 0 && (prot & PROT_EXEC)) {
+        sys_icache_invalidate(aligned_addr, aligned_len);
+    }
 #else
     int r = ::mprotect(aligned_addr, aligned_len, prot);
-#endif
-    const bool quiet = kudroid::guest_async_handler_active();
-#if defined(__APPLE__)
-    if (r != 0 && (prot & PROT_EXEC)) {
-        static std::once_flag once;
-        std::call_once(once, [] {
-            logAndroidMessage(6, "KuDroidSyscall",
-                              "mprotect(PROT_EXEC) refused: this process has no JIT"
-                              " permission (no CS_DEBUGGED, no allow-jit entitlement)."
-                              " Guest code that generates machine code at runtime"
-                              " cannot run. Under LiveContainer, enable JIT.");
-        });
-        errno = EPERM;
-        return -1;
+    if (r == 0 && (prot & PROT_EXEC)) {
+        __builtin___clear_cache(reinterpret_cast<char*>(aligned_addr),
+                                reinterpret_cast<char*>(aligned_addr) + aligned_len);
     }
 #endif
+    const int saved_errno = errno;
+    const bool quiet = kudroid::guest_async_handler_active();
     if (quiet) {
         // see bionic_mmap
     } else if (r != 0) {
@@ -2070,7 +2218,7 @@ extern "C" int bionic_mprotect(void *addr, size_t len, int prot) {
             ++s_mprotFail;
             std::fprintf(stderr,
                          "[KuDroidMmap] mprotect FAILED addr=%p len=%zu prot=0x%x errno=%d (%s)\n",
-                         aligned_addr, aligned_len, prot, errno, std::strerror(errno));
+                         aligned_addr, aligned_len, prot, saved_errno, std::strerror(saved_errno));
         }
     } else if ((prot & PROT_WRITE) && aligned_len >= (1u << 20)) {
         // A successful big RW commit answers the other half of the same
@@ -2086,11 +2234,28 @@ extern "C" int bionic_mprotect(void *addr, size_t len, int prot) {
                          aligned_addr, aligned_len, prot);
         }
     }
+    if (!quiet && (prot & PROT_EXEC)) {
+        char current[4] = "???", maximum[4] = "???";
+        kudroid::QueryRegionProt(addr, current, maximum);
+        std::fprintf(stderr,
+                     "[KuDroidMmap] mprotect EXEC addr=%p len=%zu prot=0x%x ret=%d errno=%d cur=%s max=%s\n",
+                     addr, len, prot, r, r == 0 ? 0 : saved_errno, current, maximum);
+    }
+    errno = saved_errno;
     return r;
 }
 
 extern "C" int bionic_munmap(void *addr, size_t len) {
     if (!addr || len == 0) return 0;
+#if defined(__APPLE__)
+    if (kudroid::ExecMemory::GuestMemoryOverlaps(addr, len)) {
+        void* write = kudroid::ExecMemory::GuestWritePointer(addr, len);
+        if (!write) { errno = EINVAL; return -1; }
+        if (bionic_mprotect(addr, len, PROT_NONE) != 0) return -1;
+        std::memset(write, 0, len);
+        return 0;
+    }
+#endif
     // Only whole host pages are returned. The partial pages at either end hold whatever
     // the guest placed beside this range; unmapping them, or hinting that their contents
     // are reclaimable, would zero or fault live neighbouring data.
@@ -2107,15 +2272,9 @@ extern "C" int bionic_munmap(void *addr, size_t len) {
 #ifdef __APPLE__
 static size_t prot_prefix_len(uintptr_t addr, size_t len, vm_prot_t required);
 
-// Linux MADV_DONTNEED discards private anonymous pages: the next read sees zeros. Darwin's
-// MADV_DONTNEED is only advisory and keeps the contents. Allocators decommit with
-// `mprotect(PROT_NONE)` + `madvise(DONTNEED)` and recommit with mprotect(RW), expecting
-// zero-filled memory; on Darwin they read their old data back as live fields.
-//
-// Whole host pages inside the range are replaced by fresh anonymous pages; the partial
-// pages at either end are zeroed in place. File-backed and shared regions keep the
-// advisory call.
-static void linux_madv_dontneed(void* addr, size_t length) {
+// Zero private anonymous pages without replacing mappings or losing their capabilities.
+// File-backed and shared ranges retain the host advisory operation.
+static int linux_madv_dontneed(void* addr, size_t length) {
     const long host_page = ::sysconf(_SC_PAGESIZE);
     const uintptr_t page_mask = (host_page > 0 ? static_cast<uintptr_t>(host_page) : 16384u) - 1;
     const uintptr_t begin = reinterpret_cast<uintptr_t>(addr);
@@ -2130,7 +2289,7 @@ static void linux_madv_dontneed(void* addr, size_t length) {
     };
     if (inner_end <= inner_begin) {
         zero_edge(begin, finish);
-        return;
+        return 0;
     }
     zero_edge(begin, inner_begin);
     zero_edge(inner_end, finish);
@@ -2146,11 +2305,12 @@ static void linux_madv_dontneed(void* addr, size_t length) {
                            KUDROID_VM_REGION_BASIC_INFO_64_FLAVOR,
                            reinterpret_cast<vm_region_info_t>(&basic), &basic_count,
                            &object) != KERN_SUCCESS) {
-            return;
+            errno = ENOMEM;
+            return -1;
         }
         if (object != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), object);
-        if (region_addr >= inner_end) return;
-        if (region_addr > cur) cur = static_cast<uintptr_t>(region_addr);  // unmapped gap
+        if (region_addr > cur || region_addr >= inner_end) { errno = ENOMEM; return -1; }
+        object = MACH_PORT_NULL;
 
         kudroid_vm_region_extended_info_t ext{};
         mach_msg_type_number_t ext_count = KUDROID_VM_REGION_EXTENDED_INFO_COUNT;
@@ -2162,18 +2322,48 @@ static void linux_madv_dontneed(void* addr, size_t length) {
                            reinterpret_cast<vm_region_info_t>(&ext), &ext_count,
                            &object) == KERN_SUCCESS;
         if (object != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), object);
+        if (!have_ext) { errno = ENOMEM; return -1; }
 
         uintptr_t seg_end = static_cast<uintptr_t>(region_addr + region_size);
         if (seg_end > inner_end) seg_end = inner_end;
         const bool anonymous_private = !basic.shared && have_ext && !ext.external_pager;
         if (anonymous_private && seg_end > cur) {
-            ::mmap(reinterpret_cast<void*>(cur), seg_end - cur, basic.protection,
-                   MAP_FIXED | MAP_PRIVATE | MAP_ANON, -1, 0);
+            const vm_prot_t writable = VM_PROT_READ | VM_PROT_WRITE;
+            const bool change = (basic.protection & writable) != writable;
+            if (change &&
+                mach_vm_protect(mach_task_self(), cur, seg_end - cur, FALSE,
+                                writable) != KERN_SUCCESS) {
+                errno = EACCES;
+                return -1;
+            }
+            bool mapped = false;
+            int current = 0, maximum = 0;
+            const bool can_zero = host_range_query(cur, seg_end - cur, &mapped,
+                                                   &current, &maximum) && mapped &&
+                                  (current & writable) == writable &&
+                                  (maximum & basic.max_protection) == basic.max_protection;
+            if (can_zero) std::memset(reinterpret_cast<void*>(cur), 0, seg_end - cur);
+            const kern_return_t restored = change
+                ? mach_vm_protect(mach_task_self(), cur, seg_end - cur, FALSE, basic.protection)
+                : KERN_SUCCESS;
+            const bool intact = restored == KERN_SUCCESS &&
+                host_range_query(cur, seg_end - cur, &mapped, &current, &maximum) && mapped &&
+                (current & VM_PROT_ALL) == (basic.protection & VM_PROT_ALL) &&
+                (maximum & basic.max_protection) == basic.max_protection;
+            if (!can_zero || !intact) {
+                errno = EACCES;
+                return -1;
+            }
+            if (basic.protection & VM_PROT_EXECUTE) {
+                sys_icache_invalidate(reinterpret_cast<void*>(cur), seg_end - cur);
+            }
         } else if (seg_end > cur) {
-            ::madvise(reinterpret_cast<void*>(cur), seg_end - cur, MADV_DONTNEED);
+            if (::madvise(reinterpret_cast<void*>(cur), seg_end - cur, MADV_DONTNEED) != 0) return -1;
         }
+        if (seg_end <= cur) { errno = ENOMEM; return -1; }
         cur = seg_end;
     }
+    return 0;
 }
 #endif
 
@@ -2181,14 +2371,30 @@ static void linux_madv_dontneed(void* addr, size_t length) {
 // Darwin's 8 is MADV_FREE_REUSE), so the value is translated, not forwarded.
 // Pure hints with no Darwin counterpart succeed without doing anything.
 extern "C" int bionic_madvise(void *addr, size_t length, int advice) {
-    if (!addr || length == 0) return 0;
+    if (length == 0) return 0;
+    if (!addr) { errno = ENOMEM; return -1; }
+    const size_t page = kudroid::ExecMemory::PageSize();
+    if (length > SIZE_MAX - (page - 1) ||
+        reinterpret_cast<uintptr_t>(addr) > UINTPTR_MAX - length - (page - 1)) {
+        errno = EINVAL;
+        return -1;
+    }
     constexpr int kLinuxMadvDontneed = 4;
     constexpr int kLinuxMadvFree = 8;
     constexpr int kLinuxMadvRemove = 9;
 #ifdef __APPLE__
+    if (kudroid::ExecMemory::GuestMemoryOverlaps(addr, length)) {
+        void* write = kudroid::ExecMemory::GuestWritePointer(addr, length);
+        if (!write) { errno = ENOMEM; return -1; }
+        if (advice == kLinuxMadvDontneed) {
+            std::memset(write, 0, length);
+            return 0;
+        }
+        // Reclaim hints must retain debugger-prepared backing.
+        if (advice == kLinuxMadvFree) return 0;
+    }
     if (advice == kLinuxMadvDontneed) {
-        linux_madv_dontneed(addr, length);
-        return 0;
+        return linux_madv_dontneed(addr, length);
     }
     int host_advice;
     if (advice >= 0 && advice <= 3) {
@@ -2268,6 +2474,34 @@ extern "C" int bionic_gettimeofday(void* tv, void* tz) {
         const int32_t zone[2] = {0, 0};  // struct timezone is obsolete; report UTC, no DST
         std::memcpy(tz, zone, sizeof(zone));
     }
+    return 0;
+}
+
+extern "C" int bionic___isfinite(double d) { return std::isfinite(d) ? 1 : 0; }
+extern "C" int bionic___isfinitef(float f) { return std::isfinite(f) ? 1 : 0; }
+extern "C" int bionic___isfinitel(long double ld) { return std::isfinite(ld) ? 1 : 0; }
+
+extern "C" int bionic_timer_create(int clockid, void* sevp, void** timerid) {
+    (void)clockid; (void)sevp;
+    if (!timerid) { errno = EINVAL; return -1; }
+    static uintptr_t s_timerId = 0x1000;
+    *timerid = reinterpret_cast<void*>(++s_timerId);
+    return 0;
+}
+
+extern "C" int bionic_timer_settime(void* timerid, int flags, const void* new_value, void* old_value) {
+    (void)timerid; (void)flags; (void)new_value; (void)old_value;
+    return 0;
+}
+
+extern "C" int bionic_timer_gettime(void* timerid, void* curr_value) {
+    (void)timerid;
+    if (curr_value) std::memset(curr_value, 0, sizeof(struct timespec) * 2);
+    return 0;
+}
+
+extern "C" int bionic_timer_delete(void* timerid) {
+    (void)timerid;
     return 0;
 }
 
@@ -2811,6 +3045,7 @@ extern "C" bool kudroid_audio_thread(void);
 static std::atomic<int> g_audioFdOps{0};
 constexpr int kAudioFdOpBudget = 1500;
 static bool audio_fd_trace_take() {
+    if (!kudroid::log::trace_hot()) return false;
     if (g_audioFdOps.load(std::memory_order_relaxed) >= kAudioFdOpBudget) return false;
     if (!kudroid_audio_thread()) return false;
     g_audioFdOps.fetch_add(1, std::memory_order_relaxed);
@@ -3158,7 +3393,7 @@ extern "C" long bionic_syscall(long number, uintptr_t a1, uintptr_t a2, uintptr_
             return bionic_mprotect(reinterpret_cast<void*>(a1), static_cast<size_t>(a2), static_cast<int>(a3));
 
         case 233: // madvise
-            return ::madvise(reinterpret_cast<void*>(a1), static_cast<size_t>(a2), static_cast<int>(a3));
+            return bionic_madvise(reinterpret_cast<void*>(a1), static_cast<size_t>(a2), static_cast<int>(a3));
 
         case 242: // accept4
             return bionic_accept4(static_cast<int>(a1), reinterpret_cast<struct sockaddr*>(a2), reinterpret_cast<socklen_t*>(a3), static_cast<int>(a4));
@@ -3393,11 +3628,26 @@ static bool net_trace_take() {
     return left.fetch_sub(1, std::memory_order_relaxed) > 0;
 }
 
+static void net_trace_vector_io(const char* operation, int fd, size_t vectors, ssize_t result) {
+    const int savedErrno = errno;
+    if (net_fd(fd) && net_trace_take()) {
+        std::fprintf(stderr, "[KuDroidNet] %s fd=%d vectors=%zu -> %zd errno=%d\n",
+                     operation, fd, vectors, result, result < 0 ? savedErrno : 0);
+    }
+    errno = savedErrno;
+}
+
 extern "C" ssize_t bionic_read(int fd, void* buf, size_t count) {
     const ssize_t ret = ::read(fd, buf, count);
     const int hostErr = errno;
     if (ret > 0) {
-        io_volume_add(std::string(fd_path(fd)), static_cast<uint64_t>(ret), "read");
+        const std::string path = fd_path(fd);
+        io_volume_add(path, static_cast<uint64_t>(ret), "read");
+        if (path == "/dev/urandom" || path == "/dev/random") {
+            static std::atomic<int> entropyReads{0};
+            if (entropyReads.fetch_add(1, std::memory_order_relaxed) < 16)
+                std::fprintf(stderr, "[KuDroidNet] entropy read fd=%d count=%zu -> %zd\n", fd, count, ret);
+        }
         // Trace the APK itself: Unity's zip-reader drains base.apk through raw
         // read() (1793 ops / 46MB in one session with zero pread64 traffic),
         // and no per-op trace existed here — the widest remaining blind spot
@@ -3446,12 +3696,12 @@ extern "C" ssize_t bionic_write(int fd, const void* buf, size_t count) {
 extern "C" int bionic_poll(struct pollfd* fds, unsigned long nfds, int timeout) {
     const int rc = ::poll(fds, static_cast<nfds_t>(nfds), timeout);
     const int hostErr = errno;
-    if (fds != nullptr && nfds > 0 && net_fd(fds[0].fd) && (rc != 0 || timeout >= 1000) &&
+    if (fds != nullptr && nfds > 0 && (net_fd(fds[0].fd) || rc < 0) && (rc != 0 || timeout >= 1000) &&
         net_trace_take()) {
         std::fprintf(stderr,
-                     "[KuDroidNet] poll n=%lu fd=%d ev=0x%x timeout=%d -> %d rev=0x%x\n", nfds,
+                     "[KuDroidNet] poll n=%lu fd=%d ev=0x%x timeout=%d -> %d rev=0x%x errno=%d\n", nfds,
                      fds[0].fd, static_cast<unsigned>(fds[0].events), timeout, rc,
-                     static_cast<unsigned>(fds[0].revents));
+                     static_cast<unsigned>(fds[0].revents), rc < 0 ? hostErr : 0);
     }
     errno = hostErr;
     return net_result(rc);
@@ -3610,7 +3860,6 @@ extern "C" int bionic_setsockopt(int fd, int level, int name, const void* value,
     int hostLevel = 0, hostName = 0;
     if (!kudroid::SocketOptionToHost(level, name, &hostLevel, &hostName)) {
         // Unknown or Linux-specific socket option: accept and ignore (return 0)
-        // just like Husk. Returning -1 with ENOPROTOOPT breaks libraries like
         // libcurl, okhttp, and mono when they set SO_BINDTODEVICE, SO_MARK, etc.
         return 0;
     }
@@ -3842,14 +4091,20 @@ extern "C" int bionic_socketpair(int domain, int type, int protocol, int sv[2]) 
 // Name resolution in reverse. The caller's sockaddr is Linux-shaped.
 extern "C" int bionic_getnameinfo(const struct sockaddr* sa, socklen_t salen, char* host,
                                   socklen_t hostlen, char* serv, socklen_t servlen, int flags) {
+    if (sa == nullptr) return 5;
 #if defined(__APPLE__)
     struct sockaddr_storage ss;
     socklen_t sslen = sizeof(ss);
-    if (sa == nullptr || !linux_to_darwin_sockaddr(sa, salen, &ss, &sslen)) return EAI_FAMILY;
-    return ::getnameinfo(reinterpret_cast<const struct sockaddr*>(&ss), sslen, host, hostlen,
-                         serv, servlen, flags);
+    if (!linux_to_darwin_sockaddr(sa, salen, &ss, &sslen)) return 5;
+    const int rc = ::getnameinfo(reinterpret_cast<const struct sockaddr*>(&ss), sslen, host,
+                                  hostlen, serv, servlen, flags);
+    if (rc == EAI_SYSTEM) errno = guest_errno(errno);
+    return rc;
 #else
-    return ::getnameinfo(sa, salen, host, hostlen, serv, servlen, flags);
+    const int hostFlags = kudroid::NameInfoFlagsToLinux(flags);
+    if (hostFlags < 0) return 3;
+    return kudroid::AddrInfoErrorToGuest(::getnameinfo(sa, salen, host, hostlen, serv, servlen,
+                                                       hostFlags));
 #endif
 }
 
@@ -3948,11 +4203,13 @@ extern "C" int bionic_pselect(int nfds, void* readfds, void* writefds, void* exc
 
 extern "C" ssize_t bionic_readv(int fd, const struct iovec* iov, int iovcnt) {
     const ssize_t rc = ::readv(fd, iov, iovcnt);
+    net_trace_vector_io("readv", fd, static_cast<size_t>(std::max(0, iovcnt)), rc);
     return net_result(rc);
 }
 
 extern "C" ssize_t bionic_writev(int fd, const struct iovec* iov, int iovcnt) {
     const ssize_t rc = ::writev(fd, iov, iovcnt);
+    net_trace_vector_io("writev", fd, static_cast<size_t>(std::max(0, iovcnt)), rc);
     return net_result(rc);
 }
 
@@ -4022,7 +4279,9 @@ extern "C" ssize_t bionic_sendmsg(int fd, const GuestMsghdr* g, int flags) {
 #endif
     h.msg_iov = g->msg_iov;
     h.msg_iovlen = static_cast<decltype(h.msg_iovlen)>(g->msg_iovlen);
-    return net_result(::sendmsg(fd, &h, guest_msg_flags_to_host(flags)));
+    const ssize_t rc = ::sendmsg(fd, &h, guest_msg_flags_to_host(flags));
+    net_trace_vector_io("sendmsg", fd, g->msg_iovlen, rc);
+    return net_result(rc);
 }
 
 extern "C" ssize_t bionic_recvmsg(int fd, GuestMsghdr* g, int flags) {
@@ -4046,6 +4305,7 @@ extern "C" ssize_t bionic_recvmsg(int fd, GuestMsghdr* g, int flags) {
     h.msg_iovlen = static_cast<decltype(h.msg_iovlen)>(g->msg_iovlen);
 
     const ssize_t rc = ::recvmsg(fd, &h, guest_msg_flags_to_host(flags));
+    net_trace_vector_io("recvmsg", fd, g->msg_iovlen, rc);
     if (rc >= 0) {
 #if defined(__APPLE__)
         if (g->msg_name && g->msg_namelen > 0) {
@@ -4107,29 +4367,39 @@ extern "C" int bionic_inet_pton(int af, const char* src, void* dst) {
 }
 
 extern "C" int bionic_getaddrinfo(const char* node, const char* service,
-                                  const struct addrinfo* hints,
-                                  struct addrinfo** res) {
-    if (res == nullptr) return EAI_NONAME;
+                                  const kudroid::GuestAddrinfo* hints,
+                                  kudroid::GuestAddrinfo** res) {
+    if (res == nullptr) return 8;
     *res = nullptr;
 
-    struct addrinfo host_hints;
-    const struct addrinfo* use_hints = nullptr;
+    struct addrinfo host_hints{};
     if (hints != nullptr) {
-        std::memset(&host_hints, 0, sizeof(host_hints));
+#if defined(__APPLE__)
         host_hints.ai_flags = kudroid::AddrInfoFlagsToHost(hints->ai_flags);
+#else
+        host_hints.ai_flags = kudroid::AddrInfoFlagsToLinux(hints->ai_flags);
+#endif
+        if (host_hints.ai_flags < 0) return 3;
         host_hints.ai_family = guest_to_host_af(hints->ai_family);
         host_hints.ai_socktype = hints->ai_socktype & 0xF;
         host_hints.ai_protocol = hints->ai_protocol;
-        use_hints = &host_hints;
     }
 
     struct addrinfo* dres = nullptr;
-    const int ret = ::getaddrinfo(node, service, use_hints, &dres);
+    const int ret = ::getaddrinfo(node, service, &host_hints, &dres);
+    const int saved_errno = errno;
     std::fprintf(stderr, "[KuDroidNet] getaddrinfo(%s,%s) -> %d (%s)\n",
                  node ? node : "<null>", service ? service : "<null>", ret,
                  ret == 0 ? "OK" : gai_strerror(ret));
 #if defined(__APPLE__)
-    if (ret != 0) return ret;
+    const int guest_result = ret;
+#else
+    const int guest_result = kudroid::AddrInfoErrorToGuest(ret);
+#endif
+    if (guest_result != 0) {
+        if (guest_result == 11) errno = guest_errno(saved_errno);
+        return guest_result;
+    }
 
     kudroid::GuestAddrinfo* head = nullptr;
     kudroid::GuestAddrinfo** tail = &head;
@@ -4137,18 +4407,31 @@ extern "C" int bionic_getaddrinfo(const char* node, const char* service,
         if (a->ai_family != AF_INET && a->ai_family != AF_INET6 && a->ai_family != AF_UNIX) continue;
         const size_t canon_len = a->ai_canonname ? std::strlen(a->ai_canonname) + 1 : 0;
         uint8_t* blk = reinterpret_cast<uint8_t*>(std::calloc(1, sizeof(kudroid::GuestAddrinfo) + 128 + canon_len));
-        if (!blk) continue;
+        if (!blk) {
+            while (head != nullptr) {
+                auto* next = head->ai_next;
+                std::free(head);
+                head = next;
+            }
+            ::freeaddrinfo(dres);
+            return 6;
+        }
         auto* g = reinterpret_cast<kudroid::GuestAddrinfo*>(blk);
-        g->ai_flags = 0;
+        g->ai_flags = hints != nullptr ? hints->ai_flags : 0;
         g->ai_family = (a->ai_family == AF_INET6 ? 10 : (a->ai_family == AF_INET ? 2 : a->ai_family));
         g->ai_socktype = a->ai_socktype;
         g->ai_protocol = a->ai_protocol;
 
         auto* sa = reinterpret_cast<struct sockaddr*>(blk + sizeof(kudroid::GuestAddrinfo));
+#if defined(__APPLE__)
         socklen_t sa_cap = 128;
         darwin_to_linux_sockaddr(a->ai_addr, a->ai_addrlen, sa, &sa_cap);
-        g->ai_addr = sa;
         g->ai_addrlen = sa_cap;
+#else
+        std::memcpy(sa, a->ai_addr, a->ai_addrlen);
+        g->ai_addrlen = a->ai_addrlen;
+#endif
+        g->ai_addr = sa;
 
         if (canon_len > 0) {
             char* canon = reinterpret_cast<char*>(blk + sizeof(kudroid::GuestAddrinfo) + 128);
@@ -4160,40 +4443,33 @@ extern "C" int bionic_getaddrinfo(const char* node, const char* service,
         tail = &g->ai_next;
     }
     ::freeaddrinfo(dres);
-    if (!head) return EAI_NONAME;
-    *res = reinterpret_cast<struct addrinfo*>(head);
+    if (!head) return 8;
+    *res = head;
     return 0;
-#else
-    *res = dres;
-    return ret;
-#endif
 }
 
 extern "C" int bionic_android_getaddrinfofornet(const char* node, const char* service,
-                                               const struct addrinfo* hints,
+                                               const kudroid::GuestAddrinfo* hints,
                                                unsigned netid, unsigned mark,
-                                               struct addrinfo** res) {
+                                               kudroid::GuestAddrinfo** res) {
     (void)netid;
     (void)mark;
     return bionic_getaddrinfo(node, service, hints, res);
 }
 
-extern "C" void bionic_freeaddrinfo(struct addrinfo* res) {
-#if defined(__APPLE__)
-    auto* g = reinterpret_cast<kudroid::GuestAddrinfo*>(res);
+extern "C" void bionic_freeaddrinfo(kudroid::GuestAddrinfo* res) {
+    auto* g = res;
     while (g != nullptr) {
         auto* next = g->ai_next;
         std::free(g);
         g = next;
     }
-#else
-    if (res != nullptr) {
-        ::freeaddrinfo(res);
-    }
-#endif
 }
 
 extern "C" const char* bionic_gai_strerror(int errcode) {
+#if !defined(__APPLE__)
+    errcode = kudroid::AddrInfoErrorToLinux(errcode);
+#endif
     return ::gai_strerror(errcode);
 }
 
@@ -4917,6 +5193,94 @@ extern "C" int kudroid_log_assert_from_registers(const uint64_t* frame) {
     reportGuestAssert(cond, tag, message);
     return 0;  // not reached: reportGuestAssert aborts
 }
+
+extern "C" const char* kudroid_guest_syslog_error();
+extern "C" void kudroid_guest_syslog_write(int priority, const char* message);
+
+// Format a guest varargs call into a malloc'd string the guest later free()s.
+static int allocGuestFormatted(char** strp, const char* format, const GuestVarargs* registers,
+                               unsigned firstGpIndex) {
+    if (strp == nullptr) return -1;
+    const char* fmt = format != nullptr ? format : "";
+    // Format once to learn the length, then again into a buffer that fits.
+    char probe[1024];
+    const size_t needed = FormatGuestVarargs(probe, sizeof(probe), fmt, registers, firstGpIndex);
+    char* buffer = static_cast<char*>(std::malloc(needed + 1));
+    if (buffer == nullptr) { *strp = nullptr; return -1; }
+    if (needed < sizeof(probe)) {
+        __builtin_memcpy(buffer, probe, needed + 1);
+    } else {
+        FormatGuestVarargs(buffer, needed + 1, fmt, registers, firstGpIndex);
+    }
+    *strp = buffer;
+    return static_cast<int>(needed);
+}
+
+// Write a formatted string to a descriptor through the shim's own write, so guest fds map
+// the way they do for write().
+static int writeGuestFormatted(int fd, const char* format, const GuestVarargs* registers,
+                               unsigned firstGpIndex) {
+    char* text = nullptr;
+    const int length = allocGuestFormatted(&text, format, registers, firstGpIndex);
+    if (length < 0 || text == nullptr) return -1;
+    size_t done = 0;
+    while (done < static_cast<size_t>(length)) {
+        const ssize_t n = bionic_write(fd, text + done, static_cast<size_t>(length) - done);
+        if (n <= 0) { std::free(text); return -1; }
+        done += static_cast<size_t>(n);
+    }
+    std::free(text);
+    return length;
+}
+
+// asprintf(strp, format, ...)
+extern "C" int kudroid_asprintf_from_registers(const uint64_t* frame) {
+    const auto* registers = reinterpret_cast<const GuestVarargs*>(frame);
+    return allocGuestFormatted(reinterpret_cast<char**>(registers->gp[0]),
+                               reinterpret_cast<const char*>(registers->gp[1]), registers, 2);
+}
+
+// __asprintf_chk(strp, flag, format, ...)
+extern "C" int kudroid_asprintf_chk_from_registers(const uint64_t* frame) {
+    const auto* registers = reinterpret_cast<const GuestVarargs*>(frame);
+    return allocGuestFormatted(reinterpret_cast<char**>(registers->gp[0]),
+                               reinterpret_cast<const char*>(registers->gp[2]), registers, 3);
+}
+
+// dprintf(fd, format, ...)
+extern "C" int kudroid_dprintf_from_registers(const uint64_t* frame) {
+    const auto* registers = reinterpret_cast<const GuestVarargs*>(frame);
+    return writeGuestFormatted(static_cast<int>(registers->gp[0]),
+                               reinterpret_cast<const char*>(registers->gp[1]), registers, 2);
+}
+
+// __dprintf_chk(fd, flag, format, ...)
+extern "C" int kudroid_dprintf_chk_from_registers(const uint64_t* frame) {
+    const auto* registers = reinterpret_cast<const GuestVarargs*>(frame);
+    return writeGuestFormatted(static_cast<int>(registers->gp[0]),
+                               reinterpret_cast<const char*>(registers->gp[2]), registers, 3);
+}
+
+// __android_log_buf_print(bufID, priority, tag, format, ...)
+extern "C" int kudroid_log_buf_print_from_registers(const uint64_t* frame) {
+    const auto* registers = reinterpret_cast<const GuestVarargs*>(frame);
+    const int priority = static_cast<int>(registers->gp[1]);
+    const char* tag = reinterpret_cast<const char*>(registers->gp[2]);
+    const char* format = reinterpret_cast<const char*>(registers->gp[3]);
+    char message[1024];
+    FormatGuestVarargs(message, sizeof(message), format != nullptr ? format : "", registers, 4);
+    return logAndroidMessage(priority, tag, message);
+}
+
+// __syslog_chk(priority, flag, format, ...)
+extern "C" void kudroid_syslog_chk_from_registers(const uint64_t* frame) {
+    const auto* registers = reinterpret_cast<const GuestVarargs*>(frame);
+    char message[2048];
+    FormatGuestVarargs(message, sizeof(message),
+                       reinterpret_cast<const char*>(registers->gp[2]), registers, 3, 0,
+                       kudroid_guest_syslog_error());
+    kudroid_guest_syslog_write(static_cast<int>(registers->gp[0]), message);
+}
 #else
 extern "C" void bionic___android_log_assert(const char* cond, const char* tag, const char* fmt, ...) {
     char buf[512];
@@ -5004,6 +5368,12 @@ extern "C" void* bionic_mremap(void *old_address, size_t old_size, size_t new_si
     return ::mremap(old_address, old_size, new_size, flags, new_address);
 #else
     (void)new_address;
+    if (kudroid::ExecMemory::GuestMemoryOverlaps(old_address, old_size)) {
+        // Prepared code cannot move to an unprepared address.
+        if (new_size <= old_size && !(flags & MREMAP_FIXED)) return old_address;
+        errno = ENOMEM;
+        return MAP_FAILED;
+    }
     // No mremap on Darwin; emulate Linux semantics:
     if (new_size == old_size) return old_address; // no-op
     if (flags & (MREMAP_MAYMOVE | MREMAP_FIXED)) {
@@ -5067,6 +5437,12 @@ extern "C" ssize_t bionic_getrandom(void *buf, size_t buflen, unsigned int flags
 #ifdef __APPLE__
     // arc4random_buf is the preferred secure random source on Apple platforms.
     arc4random_buf(buf, buflen);
+    static std::atomic<int> entropyCalls{0};
+    if (entropyCalls.fetch_add(1, std::memory_order_relaxed) < 16) {
+        const int savedErrno = errno;
+        std::fprintf(stderr, "[KuDroidNet] getrandom count=%zu flags=0x%x -> %zu\n", buflen, flags, buflen);
+        errno = savedErrno;
+    }
     return static_cast<ssize_t>(buflen);
 #else
     int fd = ::open("/dev/urandom", O_RDONLY);
@@ -6425,6 +6801,94 @@ bool bionic_handle_jit26_trap(void* ucontext) {
 #endif
     return false;
 }
+
+bool bionic_handle_sysreg_trap(void* ucontext) {
+    (void)ucontext;
+#if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__))
+    if (!ucontext) return false;
+    ucontext_t* uc = static_cast<ucontext_t*>(ucontext);
+    uintptr_t pc_val = uc->uc_mcontext->__ss.__pc;
+    if ((pc_val & 3) != 0) return false;
+    uint32_t* pc = reinterpret_cast<uint32_t*>(pc_val);
+    const uint32_t inst = *pc;
+
+    // ARM64 system instructions: MRS / MSR encoding
+    if ((inst & 0xFFC00000) == 0xD5000000) {
+        if ((inst & 0x00200000) == 0) {
+            // MSR write to restricted system register: step over
+            uc->uc_mcontext->__ss.__pc += 4;
+            return true;
+        }
+
+        const uint32_t sysreg = inst & 0xFFFFFFE0;
+        const uint32_t rt = inst & 0x1F;
+        uint64_t val = 0;
+
+        switch (sysreg) {
+            case 0xD53B0020: { // CTR_EL0 (Cache Type Register)
+                static uint64_t s_ctrVal = 0;
+                if (s_ctrVal == 0) {
+                    size_t line_size = 64;
+                    size_t len = sizeof(line_size);
+                    if (sysctlbyname("hw.cachelinesize", &line_size, &len, nullptr, 0) != 0 || line_size == 0) {
+                        line_size = 64;
+                    }
+                    uint32_t words = static_cast<uint32_t>(line_size / 4);
+                    uint32_t log2_words = 0;
+                    while ((1u << log2_words) < words) {
+                        log2_words++;
+                    }
+                    if (log2_words < 3) log2_words = 3;
+                    if (log2_words > 6) log2_words = 6;
+                    s_ctrVal = (1ULL << 31) |
+                               (static_cast<uint64_t>(log2_words) << 24) |
+                               (static_cast<uint64_t>(log2_words) << 20) |
+                               (static_cast<uint64_t>(log2_words) << 16) |
+                               (3ULL << 14) |
+                               (static_cast<uint64_t>(log2_words));
+                }
+                val = s_ctrVal;
+                break;
+            }
+            case 0xD53B00E0: // DCZID_EL0 (Data Cache Zero ID)
+                val = 0x00000004ULL;
+                break;
+            case 0xD5380000: // MIDR_EL1 (Main ID)
+                val = 0x410FD030ULL;
+                break;
+            case 0xD53800A0: // MPIDR_EL1 (Multiprocessor Affinity)
+                val = 0x80000000ULL;
+                break;
+            case 0xD53800C0: // REVIDR_EL1
+                val = 0ULL;
+                break;
+            case 0xD5380400: // ID_AA64PFR0_EL1
+                val = 0x0000000000001111ULL;
+                break;
+            case 0xD5380600: // ID_AA64ISAR0_EL1
+                val = 0x00011120ULL;
+                break;
+            case 0xD5380620: // ID_AA64ISAR1_EL1
+                val = 0ULL;
+                break;
+            default:
+                val = 0ULL;
+                break;
+        }
+
+        if (rt < 29) {
+            uc->uc_mcontext->__ss.__x[rt] = val;
+        } else if (rt == 29) {
+            uc->uc_mcontext->__ss.__fp = val;
+        } else if (rt == 30) {
+            uc->uc_mcontext->__ss.__lr = val;
+        }
+        uc->uc_mcontext->__ss.__pc += 4;
+        return true;
+    }
+#endif
+    return false;
+}
 } // namespace kudroid
 
 namespace kudroid {
@@ -6720,6 +7184,30 @@ extern "C" int bionic_vasprintf(char** strp, const char* format, va_list ap) {
     return static_cast<int>(needed);
 }
 
+extern "C" int bionic___vasprintf_chk(char** strp, int flag, const char* format, va_list ap) {
+    (void)flag;
+    return bionic_vasprintf(strp, format, ap);
+}
+
+extern "C" int bionic_vdprintf(int fd, const char* format, va_list ap) {
+    char* text = nullptr;
+    if (bionic_vasprintf(&text, format, ap) < 0 || text == nullptr) return -1;
+    const size_t length = std::strlen(text);
+    size_t done = 0;
+    while (done < length) {
+        const ssize_t n = bionic_write(fd, text + done, length - done);
+        if (n <= 0) { std::free(text); return -1; }
+        done += static_cast<size_t>(n);
+    }
+    std::free(text);
+    return static_cast<int>(length);
+}
+
+extern "C" int bionic___vdprintf_chk(int fd, int flag, const char* format, va_list ap) {
+    (void)flag;
+    return bionic_vdprintf(fd, format, ap);
+}
+
 extern "C" int bionic___vsnprintf_chk(char* s, size_t maxlen, int flag, size_t slen,
                                       const char* format, va_list ap) {
     (void)flag; (void)slen;
@@ -6826,6 +7314,20 @@ extern "C" int bionic_vasprintf(char** strp, const char* format, va_list ap) {
     return ::vasprintf(strp, format, ap);
 }
 
+extern "C" int bionic___vasprintf_chk(char** strp, int flag, const char* format, va_list ap) {
+    (void)flag;
+    return ::vasprintf(strp, format, ap);
+}
+
+extern "C" int bionic_vdprintf(int fd, const char* format, va_list ap) {
+    return ::vdprintf(fd, format, ap);
+}
+
+extern "C" int bionic___vdprintf_chk(int fd, int flag, const char* format, va_list ap) {
+    (void)flag;
+    return ::vdprintf(fd, format, ap);
+}
+
 extern "C" int bionic___vsnprintf_chk(char* s, size_t maxlen, int flag, size_t slen,
                                       const char* format, va_list ap) {
     (void)flag; (void)slen;
@@ -6896,6 +7398,11 @@ extern "C" void bionic_vsyslog(int priority, const char* format, va_list ap) {
 #endif
     kudroid_guest_syslog_write(priority, message);
     errno = saved;
+}
+
+extern "C" void bionic___vsyslog_chk(int priority, int flag, const char* format, va_list ap) {
+    (void)flag;
+    bionic_vsyslog(priority, format, ap);
 }
 
 #if !defined(__aarch64__)
@@ -7268,22 +7775,11 @@ static void fill_statx_from_stat(struct GuestStatx* sx, const struct stat& st) {
 }
 
 extern "C" int bionic_statx(int dirfd, const char* pathname, int flags, unsigned mask, void* statxbuf) {
-    (void)mask;
     if (!pathname || !statxbuf) { errno = EFAULT; return -1; }
+    constexpr int syncFlags = 0x6000;
+    if ((flags & syncFlags) == syncFlags || (mask & 0x80000000u)) { errno = EINVAL; return -1; }
     struct stat st;
-    int rc;
-    const int atflags = (flags & AT_SYMLINK_NOFOLLOW) ? AT_SYMLINK_NOFOLLOW : 0;
-    if (at_path_needs_remap(dirfd, pathname)) {
-        // Remapped absolute path: stat it directly.
-        const std::string path = kudroid::VFSPathRemapper::getInstance().remap(pathname);
-        rc = ::fstatat(AT_FDCWD, path.c_str(), &st, atflags);
-    } else {
-        // Native dirfd-relative lookup. The old code resolved dirfd through
-        // /proc/self/fd, which does not exist on iOS, so every dirfd-relative
-        // statx failed with ENOENT. fstatat takes the dirfd directly.
-        const int host_dirfd = translate_linux_dirfd(dirfd);
-        rc = ::fstatat(host_dirfd, pathname, &st, atflags);
-    }
+    const int rc = guest_stat_at(dirfd, pathname, &st, flags & ~syncFlags);
     if (rc != 0) return -1; // errno already set
     fill_statx_from_stat(static_cast<GuestStatx*>(statxbuf), st);
     return 0;
@@ -7310,7 +7806,6 @@ struct ALooperFd {
     int events;
     void* callback;
     void* data;
-    bool isInputPipe = false;
     uint64_t sequence;
 };
 
@@ -7404,7 +7899,7 @@ extern "C" int bionic_ALooper_addFd(void* looper, int fd, int ident, int events,
     auto* l = static_cast<ALooper*>(looper);
     {
         std::lock_guard<std::mutex> lock(l->mtx);
-        ALooperFd entry{fd, ident, events, callback, data, false, l->nextSequence++};
+        ALooperFd entry{fd, ident, events, callback, data, l->nextSequence++};
         auto existing = std::find_if(l->fds.begin(), l->fds.end(),
                                       [fd](const ALooperFd& f) { return f.fd == fd; });
         if (existing != l->fds.end()) *existing = entry;
@@ -7412,15 +7907,6 @@ extern "C" int bionic_ALooper_addFd(void* looper, int fd, int ident, int events,
     }
     bionic_ALooper_wake(l);
     return 1;
-}
-
-extern "C" void bionic_ALooper_markInputPipe(void* looper, int fd) {
-    if (looper == nullptr || fd < 0) return;
-    auto* l = static_cast<ALooper*>(looper);
-    std::lock_guard<std::mutex> lock(l->mtx);
-    for (auto& f : l->fds) {
-        if (f.fd == fd) { f.isInputPipe = true; break; }
-    }
 }
 
 extern "C" int bionic_ALooper_removeFd(void* looper, int fd) {
@@ -7492,10 +7978,6 @@ static int PollLooperOnce(int timeoutMillis, int* outFd, int* outEvents,
         if (pfds[i].revents & POLLERR) events |= ALOOPER_EVENT_ERROR;
         if (pfds[i].revents & POLLHUP) events |= ALOOPER_EVENT_HANGUP;
         if (pfds[i].revents & POLLNVAL) events |= ALOOPER_EVENT_INVALID;
-        if (f.isInputPipe && (pfds[i].revents & (POLLIN | POLLHUP))) {
-            char bytes[4096];
-            while (::read(f.fd, bytes, sizeof(bytes)) > 0) {}
-        }
         if (f.callback != nullptr) {
             const int keep = reinterpret_cast<int (*)(int, int, void*)>(f.callback)(
                 f.fd, events, f.data);
@@ -8518,6 +9000,12 @@ const SymbolEntry kSyscallSymbols[] = {
     {"printf", reinterpret_cast<void*>(&kudroid_printf_trampoline)},
     {"__fprintf_chk", reinterpret_cast<void*>(&kudroid_fprintf_chk_trampoline)},
     {"__printf_chk", reinterpret_cast<void*>(&kudroid_printf_chk_trampoline)},
+    {"asprintf", reinterpret_cast<void*>(&kudroid_asprintf_trampoline)},
+    {"__asprintf_chk", reinterpret_cast<void*>(&kudroid_asprintf_chk_trampoline)},
+    {"dprintf", reinterpret_cast<void*>(&kudroid_dprintf_trampoline)},
+    {"__dprintf_chk", reinterpret_cast<void*>(&kudroid_dprintf_chk_trampoline)},
+    {"__android_log_buf_print", reinterpret_cast<void*>(&kudroid_log_buf_print_trampoline)},
+    {"__syslog_chk", reinterpret_cast<void*>(&kudroid_syslog_chk_trampoline)},
 #else
     {"snprintf", reinterpret_cast<void*>(&snprintf)},
     {"sprintf", reinterpret_cast<void*>(&sprintf)},
@@ -8642,6 +9130,14 @@ const SymbolEntry kSyscallSymbols[] = {
     {"clock_gettime64", reinterpret_cast<void*>(&bionic_clock_gettime64)},
     {"gettimeofday", reinterpret_cast<void*>(&bionic_gettimeofday)},
     {"clock_getres", reinterpret_cast<void*>(&bionic_clock_getres)},
+    {"timer_create", reinterpret_cast<void*>(&bionic_timer_create)},
+    {"timer_settime", reinterpret_cast<void*>(&bionic_timer_settime)},
+    {"timer_gettime", reinterpret_cast<void*>(&bionic_timer_gettime)},
+    {"timer_delete", reinterpret_cast<void*>(&bionic_timer_delete)},
+    {"__isfinite", reinterpret_cast<void*>(&bionic___isfinite)},
+    {"__isfinitef", reinterpret_cast<void*>(&bionic___isfinitef)},
+    {"__isfinitel", reinterpret_cast<void*>(&bionic___isfinitel)},
+    {"isfinite", reinterpret_cast<void*>(&bionic___isfinite)},
     {"ashmem_create_region", reinterpret_cast<void*>(&bionic_ashmem_create_region)},
     {"ashmem_set_prot_region", reinterpret_cast<void*>(&bionic_ashmem_set_prot_region)},
     {"ashmem_set_name", reinterpret_cast<void*>(&bionic_ashmem_set_name)},
@@ -8809,7 +9305,7 @@ const SymbolEntry kSyscallSymbols[] = {
     {"exp2f", reinterpret_cast<void*>(&exp2f)},
     {"expm1", reinterpret_cast<void*>(static_cast<double(*)(double)>(&expm1))},
     {"expm1f", reinterpret_cast<void*>(&expm1f)},
-    {"log", reinterpret_cast<void*>(static_cast<double(*)(double)>(&log))},
+    {"log", reinterpret_cast<void*>(static_cast<double(*)(double)>(&::log))},
     {"logf", reinterpret_cast<void*>(&logf)},
     {"log2", reinterpret_cast<void*>(static_cast<double(*)(double)>(&log2))},
     {"log2f", reinterpret_cast<void*>(&log2f)},
@@ -8905,12 +9401,16 @@ const SymbolEntry kSyscallSymbols[] = {
     {"vfprintf", reinterpret_cast<void*>(&bionic_vfprintf)},
     {"vprintf", reinterpret_cast<void*>(&bionic_vprintf)},
     {"vasprintf", reinterpret_cast<void*>(&bionic_vasprintf)},
+    {"__vasprintf_chk", reinterpret_cast<void*>(&bionic___vasprintf_chk)},
+    {"vdprintf", reinterpret_cast<void*>(&bionic_vdprintf)},
+    {"__vdprintf_chk", reinterpret_cast<void*>(&bionic___vdprintf_chk)},
 #if defined(__aarch64__)
     {"syslog", reinterpret_cast<void*>(&kudroid_syslog_trampoline)},
 #else
     {"syslog", reinterpret_cast<void*>(&bionic_syslog)},
 #endif
     {"vsyslog", reinterpret_cast<void*>(&bionic_vsyslog)},
+    {"__vsyslog_chk", reinterpret_cast<void*>(&bionic___vsyslog_chk)},
     // The scanf family. These were absent too, and reaching the host implementation is
     // worse here than for printf: scanf WRITES through its varargs. Minecraft's UUID parse
     // passes eleven output pointers, and the host took five of them from stack words that

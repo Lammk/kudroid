@@ -60,7 +60,7 @@ int main() {
 
     for (const char* name : {"LLooperTests;", "LMediaApiTests;", "LThrowableTests;",
                              "LFrameworkResourceTests;", "LInflaterTests;",
-                             "LFrameworkApiTests;"}) {
+                             "LFrameworkApiTests;", "LNumberFormatTests;"}) {
         std::printf("[%s]\n", name);
         DexClass* klass = linker.FindClass(name);
         if (klass == nullptr || !interp.EnsureInitialized(klass)) {

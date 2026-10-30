@@ -45,11 +45,54 @@ public class Window {
     private SurfaceHolder.Callback mActivitySurfaceCallback;
     private final Surface mSurface = new Surface();
     private SurfaceHolder mSurfaceHolder;
+    private View mAttachedDecor;
+    private static native void nativeGetSafeAreaInsets(int[] edges);
+    private final int[] mSafeAreaEdges = new int[4];
+    private WindowInsets mRootInsets;
+    private boolean mApplyInsets = true;
+    private boolean mHostSurfaceContent;
+
+    public WindowInsets getRootWindowInsets() { return mRootInsets; }
+    void requestApplyInsets() { mApplyInsets = true; scheduleTraversal(); }
 
     /** The root of a Window's view hierarchy. */
     public static class DecorView extends FrameLayout {
+        private Window mWindow;
+
         public DecorView(Context context) {
             super(context);
+        }
+
+        void setWindow(Window window) {
+            mWindow = window;
+            ((View) this).setTraversalWindow(window);
+        }
+
+        @Override public WindowInsets onApplyWindowInsets(WindowInsets insets) {
+            // Host-backed rendering occupies the full framebuffer, including its origin.
+            if (mWindow != null && mWindow.mHostSurfaceContent) {
+                setPadding(0, 0, 0, 0);
+                return insets;
+            }
+            int visibility = getSystemUiVisibility();
+            int top = (visibility & SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN) == 0 ? insets.getSystemWindowInsetTop() : 0;
+            int left = 0, right = 0, bottom = 0;
+            if ((visibility & SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION) == 0) {
+                left = insets.getSystemWindowInsetLeft(); right = insets.getSystemWindowInsetRight();
+                bottom = insets.getSystemWindowInsetBottom();
+            }
+            if (mWindow != null && (mWindow.getFlags() & WindowManager.LayoutParams.FLAG_FULLSCREEN) != 0) top = 0;
+            setPadding(left, top, right, bottom);
+            return insets.inset(left, top, right, bottom);
+        }
+    }
+
+    /** Ask the owning Activity for another frame; dialogs have no surface of their own. */
+    void scheduleTraversal() {
+        if (mCallback instanceof android.app.Activity) {
+            ((android.app.Activity) mCallback).requestRender();
+        } else if (mContext instanceof android.app.Activity) {
+            ((android.app.Activity) mContext).requestRender();
         }
     }
 
@@ -174,6 +217,7 @@ public class Window {
     private DecorView ensureDecorView() {
         if (mDecorView == null) {
             mDecorView = new DecorView(mContext);
+            mDecorView.setWindow(this);
             mDecorView.setLayoutParams(new ViewGroup.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
             mContentParent = new FrameLayout(mContext);
@@ -181,8 +225,34 @@ public class Window {
             mContentParent.setLayoutParams(new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
             mDecorView.addView(mContentParent);
+            final android.graphics.drawable.Drawable background =
+                    mBackgroundDrawable != null ? mBackgroundDrawable : themeWindowBackground();
+            if (background != null) mDecorView.setBackgroundDrawable(background);
         }
         return mDecorView;
+    }
+
+    private android.graphics.drawable.Drawable mBackgroundDrawable;
+
+    /** The theme's windowBackground, which paints the decor under all content. */
+    private android.graphics.drawable.Drawable themeWindowBackground() {
+        try {
+            final android.content.res.Resources.Theme theme = mContext.getTheme();
+            final android.util.TypedValue value = new android.util.TypedValue();
+            if (theme == null || !theme.resolveAttribute(
+                    com.android.internal.R.attr.windowBackground, value, true)) {
+                return null;
+            }
+            if (value.type >= android.util.TypedValue.TYPE_FIRST_COLOR_INT
+                    && value.type <= android.util.TypedValue.TYPE_LAST_COLOR_INT) {
+                return new android.graphics.drawable.ColorDrawable(value.data);
+            }
+            if (value.resourceId != 0) {
+                return mContext.getResources().getDrawable(value.resourceId, theme);
+            }
+        } catch (RuntimeException ignored) {
+        }
+        return null;
     }
 
     private FrameLayout contentParent() {
@@ -196,7 +266,7 @@ public class Window {
         mSurfaceReady = ready;
         mWidth = ready ? width : 0;
         mHeight = ready ? height : 0;
-        if (!ready && mSurfaceCreated) dispatchSurfaceDestroyed();
+        if (!ready && (mSurfaceCreated || mAttachedDecor != null)) dispatchSurfaceDestroyed();
     }
 
     public int getWidth() {
@@ -211,12 +281,70 @@ public class Window {
         return mSurfaceReady && mWidth > 0 && mHeight > 0;
     }
 
+    private int mLaidWidth;
+    private int mLaidHeight;
+    private long mDrawingTime;
+
+    public void beginDrawFrame() { mDrawingTime = android.os.SystemClock.uptimeMillis(); }
+    public long getDrawingTime() { return mDrawingTime; }
+
+    private static boolean containsHostSurface(View view) {
+        if (view == null || view.getVisibility() == View.GONE) return false;
+        if (view instanceof SurfaceView) return true;
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                if (containsHostSurface(group.getChildAt(i))) return true;
+            }
+        }
+        return false;
+    }
+
     /** Measure and lay out the full decor hierarchy at the actual surface size. */
     public boolean measureAndLayout() {
         if (!hasSurface()) return false;
-        DecorView decor = ensureDecorView();
+        View decor = getDecorView();
+        if (decor == null) return false;
+        if (mAttachedDecor != decor || decor.isLayoutRequested()) {
+            boolean hostSurface = containsHostSurface(decor);
+            if (mHostSurfaceContent != hostSurface) {
+                mHostSurfaceContent = hostSurface;
+                mApplyInsets = true;
+            }
+        }
+        if (mAttachedDecor != decor) {
+            if (mAttachedDecor != null) {
+                mAttachedDecor.setTraversalWindow(null);
+                mAttachedDecor.dispatchDetachedFromWindow();
+            }
+            mAttachedDecor = decor;
+            decor.setTraversalWindow(this);
+            mLaidWidth = mLaidHeight = 0;
+            mApplyInsets = true;
+        }
         // The first traversal attaches the hierarchy to the window before measuring it.
-        ((View) decor).dispatchAttachedToWindow();
+        decor.dispatchAttachedToWindow();
+        nativeGetSafeAreaInsets(mSafeAreaEdges);
+        if (mRootInsets == null || mRootInsets.getSystemWindowInsetLeft() != mSafeAreaEdges[0]
+                || mRootInsets.getSystemWindowInsetTop() != mSafeAreaEdges[1]
+                || mRootInsets.getSystemWindowInsetRight() != mSafeAreaEdges[2]
+                || mRootInsets.getSystemWindowInsetBottom() != mSafeAreaEdges[3]) {
+            android.graphics.Insets edges = android.graphics.Insets.of(mSafeAreaEdges[0], mSafeAreaEdges[1],
+                    mSafeAreaEdges[2], mSafeAreaEdges[3]);
+            mRootInsets = new WindowInsets.Builder().setSystemWindowInsets(edges).setStableInsets(edges)
+                    .setSystemGestureInsets(edges).setMandatorySystemGestureInsets(edges)
+                    .setVisible(WindowInsets.Type.systemBars(), true).build();
+            mApplyInsets = true;
+        }
+        if (mApplyInsets) {
+            mApplyInsets = false;
+            decor.dispatchApplyWindowInsets(mRootInsets);
+        }
+        // Nothing asked for a relayout and the surface is unchanged: the last layout stands.
+        if (decor.isLaidOut() && !decor.isLayoutRequested()
+                && mLaidWidth == mWidth && mLaidHeight == mHeight) return true;
+        mLaidWidth = mWidth;
+        mLaidHeight = mHeight;
         final int widthSpec = View.MeasureSpec.makeMeasureSpec(mWidth, View.MeasureSpec.EXACTLY);
         final int heightSpec = View.MeasureSpec.makeMeasureSpec(mHeight, View.MeasureSpec.EXACTLY);
         decor.measure(widthSpec, heightSpec);
@@ -227,7 +355,8 @@ public class Window {
     /** Deliver the current real Window surface state to Window callbacks. */
     public void dispatchSurfaceReady() {
         if (!hasSurface()) return;
-        DecorView decor = ensureDecorView();
+        View decor = getDecorView();
+        if (decor == null) return;
         if (!decor.isLaidOut() || decor.getWidth() != mWidth || decor.getHeight() != mHeight) return;
         mSurface.setSurfaceSize(mWidth, mHeight);
         SurfaceCallbackState[] callbacks;
@@ -240,6 +369,12 @@ public class Window {
 
     /** Deliver Window-surface destruction before the Activity is destroyed. */
     public void dispatchSurfaceDestroyed() {
+        if (mAttachedDecor != null) {
+            mAttachedDecor.setTraversalWindow(null);
+            mAttachedDecor.dispatchDetachedFromWindow();
+            mAttachedDecor = null;
+            mLaidWidth = mLaidHeight = 0;
+        }
         SurfaceCallbackState[] callbacks;
         synchronized (mSurfaceLock) {
             if (!mSurfaceCreated) {
@@ -353,7 +488,9 @@ public class Window {
      * set window flags.
      */
     public void setFlags(int flags, int mask) {
+        int oldFlags = mFlags;
         mFlags = (mFlags & ~mask) | (flags & mask);
+        if (((oldFlags ^ mFlags) & WindowManager.LayoutParams.FLAG_FULLSCREEN) != 0) requestApplyInsets();
         if ((mask & WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) != 0) {
             try {
                 setKeepScreenOnNative((mFlags & WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) != 0);
@@ -365,24 +502,14 @@ public class Window {
      * added a window flag.
      */
     public void addFlags(int flags) {
-        mFlags |= flags;
-        if ((flags & WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) != 0) {
-            try {
-                setKeepScreenOnNative(true);
-            } catch (Throwable ignored) {}
-        }
+        setFlags(flags, flags);
     }
 
     /**
      * remove a window flag.
      */
     public void clearFlags(int flags) {
-        mFlags &= ~flags;
-        if ((flags & WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) != 0) {
-            try {
-                setKeepScreenOnNative(false);
-            } catch (Throwable ignored) {}
-        }
+        setFlags(0, flags);
     }
 
     /**
@@ -396,6 +523,12 @@ public class Window {
      * set window background.
      */
     public void setBackgroundDrawable(android.graphics.drawable.Drawable drawable) {
+        mBackgroundDrawable = drawable;
+        if (mDecorView != null) mDecorView.setBackgroundDrawable(drawable);
+    }
+
+    public void setBackgroundDrawableResource(int resId) {
+        setBackgroundDrawable(resId != 0 ? mContext.getResources().getDrawable(resId, mContext.getTheme()) : null);
     }
 
     /**
@@ -476,6 +609,28 @@ public class Window {
         return mAttributes;
     }
 
+    private WindowManager mWindowManager;
+
+    public WindowManager getWindowManager() {
+        if (mWindowManager == null) {
+            if (mContext != null) {
+                mWindowManager = (WindowManager) mContext.getSystemService(Context.WINDOW_SERVICE);
+            }
+            if (mWindowManager == null) {
+                mWindowManager = new WindowManagerImpl();
+            }
+        }
+        return mWindowManager;
+    }
+
+    public void setWindowManager(WindowManager wm, android.os.IBinder appToken, String appName) {
+        setWindowManager(wm, appToken, appName, false);
+    }
+
+    public void setWindowManager(WindowManager wm, android.os.IBinder appToken, String appName, boolean hardwareAccelerated) {
+        mWindowManager = wm;
+    }
+
     public void setAttributes(WindowManager.LayoutParams params) {
         mAttributes = params;
     }
@@ -494,10 +649,62 @@ public class Window {
      * owns the status bar. Present because apps set them during theme setup and a missing
      * method there stops the Activity before it draws anything.
      */
+    private int mStatusBarColor = 0xFF000000;
+    private int mNavigationBarColor = 0xFF000000;
+
     public void setStatusBarColor(int color) {
+        mStatusBarColor = color;
+    }
+
+    public int getStatusBarColor() {
+        return mStatusBarColor;
     }
 
     public void setNavigationBarColor(int color) {
+        mNavigationBarColor = color;
+    }
+
+    public int getNavigationBarColor() {
+        return mNavigationBarColor;
+    }
+
+    public void setDimAmount(float amount) {
+        getAttributes().dimAmount = amount;
+    }
+
+    public void setWindowAnimations(int resId) {
+        getAttributes().windowAnimations = resId;
+    }
+
+    public void setGravity(int gravity) {
+        getAttributes().gravity = gravity;
+    }
+
+    public void setType(int type) {
+        getAttributes().type = type;
+    }
+
+    public void setElevation(float elevation) {
+    }
+
+    public void setClipToOutline(boolean clipToOutline) {
+    }
+
+    public void setCloseOnTouchOutside(boolean close) {
+    }
+
+    public void setCloseOnTouchOutsideIfNotSet(boolean close) {
+    }
+
+    public boolean isFloating() {
+        return false;
+    }
+
+    public void takeKeyEvents(boolean get) {
+    }
+
+    public View getCurrentFocus() {
+        return mDecorView != null ? mDecorView.findFocus() : null;
     }
 
     public void setStatusBarContrastEnforced(boolean enforced) {
@@ -560,8 +767,12 @@ public class Window {
     public interface OnFrameMetricsAvailableListener {
     }
 
+    private final KeyEvent.DispatcherState mKeyDispatcherState = new KeyEvent.DispatcherState();
+
+    public KeyEvent.DispatcherState getKeyDispatcherState() { return mKeyDispatcherState; }
+
     public boolean superDispatchKeyEvent(KeyEvent event) {
-        ViewGroup decor = ensureDecorView();
+        View decor = getDecorView();
         if (decor != null) {
             return decor.dispatchKeyEvent(event);
         }
@@ -569,10 +780,41 @@ public class Window {
     }
 
     public boolean superDispatchTouchEvent(MotionEvent event) {
-        ViewGroup decor = ensureDecorView();
+        View decor = getDecorView();
         if (decor != null) {
             return decor.dispatchTouchEvent(event);
         }
         return false;
+    }
+
+    private com.android.internal.view.menu.MenuBuilder mOptionsMenu;
+
+    public com.android.internal.view.menu.MenuBuilder getOptionsMenu() {
+        if (mOptionsMenu == null) {
+            mOptionsMenu = new com.android.internal.view.menu.MenuBuilder(mContext);
+        }
+        return mOptionsMenu;
+    }
+
+    public void invalidatePanelMenu(final int featureId) {
+        if (mCallback != null) {
+            final com.android.internal.view.menu.MenuBuilder menu =
+                    (featureId == FEATURE_OPTIONS_PANEL) ? getOptionsMenu() : null;
+            View decor = peekDecorView();
+            Runnable r = new Runnable() {
+                @Override
+                public void run() {
+                    if (mCallback != null) {
+                        mCallback.onCreatePanelMenu(featureId, menu);
+                        mCallback.onPreparePanel(featureId, null, menu);
+                    }
+                }
+            };
+            if (decor != null) {
+                decor.post(r);
+            } else {
+                r.run();
+            }
+        }
     }
 }

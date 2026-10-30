@@ -585,6 +585,7 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
     uint64_t fp[kJniFpRegs] = {0};
     unsigned ngp = 0;
     unsigned nfp = 0;
+    std::vector<uint64_t> stack_args;
 
     gp[ngp++] = reinterpret_cast<uint64_t>(env());
     gp[ngp++] = reinterpret_cast<uint64_t>(self);
@@ -594,42 +595,43 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
         switch (*p) {
             case 'F':
             case 'D':
-                if (nfp >= kJniFpRegs) goto too_many_args;
                 // A 'F' lives in the low 32 bits of its slot, which is what the
                 // callee reads as s<N>; DexValue::Float already zeroes the rest.
-                fp[nfp++] = args[arg_index].raw;
+                if (nfp < kJniFpRegs) {
+                    fp[nfp++] = args[arg_index].raw;
+                } else {
+                    // Guest AAPCS64 uses one 8-byte slot per stack argument.
+                    stack_args.push_back(args[arg_index].raw);
+                }
                 break;
             case 'J':
-                if (ngp >= kJniGpRegs) goto too_many_args;
-                gp[ngp++] = static_cast<uint64_t>(args[arg_index].j);
+                if (ngp < kJniGpRegs) {
+                    gp[ngp++] = static_cast<uint64_t>(args[arg_index].j);
+                } else {
+                    stack_args.push_back(static_cast<uint64_t>(args[arg_index].j));
+                }
                 break;
             case 'L':
             case '[':
-                if (ngp >= kJniGpRegs) goto too_many_args;
-                gp[ngp++] = reinterpret_cast<uint64_t>(args[arg_index].l);
+                if (ngp < kJniGpRegs) {
+                    gp[ngp++] = reinterpret_cast<uint64_t>(args[arg_index].l);
+                } else {
+                    stack_args.push_back(
+                        reinterpret_cast<uint64_t>(args[arg_index].l));
+                }
                 break;
             default:
-                if (ngp >= kJniGpRegs) goto too_many_args;
                 // Narrow integer types are passed zero/sign-extended to 32 bits
                 // then widened; the callee only looks at w<N>.
-                gp[ngp++] = static_cast<uint64_t>(
-                    static_cast<uint32_t>(args[arg_index].i));
+                if (ngp < kJniGpRegs) {
+                    gp[ngp++] = static_cast<uint64_t>(
+                        static_cast<uint32_t>(args[arg_index].i));
+                } else {
+                    stack_args.push_back(static_cast<uint64_t>(
+                        static_cast<uint32_t>(args[arg_index].i)));
+                }
                 break;
         }
-        continue;
-    too_many_args:
-        // Throw for stack-passed args; silently returning 0 hides failures.
-        if (interpreter_ != nullptr) {
-            interpreter_->ThrowException(
-                "Ljava/lang/UnsatisfiedLinkError;",
-                std::string("native method needs stack-passed arguments, not supported: ") +
-                    (method->name != nullptr ? method->name : "?"));
-        }
-        last_error_ = std::string("native method needs stack-passed arguments: ") +
-                      (method->name != nullptr ? method->name : "?");
-        native_call_stage("unsupported-stack-args");
-        native_call_exit();
-        return result;
     }
 
     uint64_t fp_ret = 0;
@@ -639,7 +641,13 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
         if (hotTrace) native_call_stage("before-vm-release");
         VmLockRelease unlocked;
         if (hotTrace) native_call_stage("before-trampoline");
-        ret = kudroid_jni_call(method->native_fn, gp, ngp, fp, nfp, &fp_ret);
+        if (stack_args.empty()) {
+            ret = kudroid_jni_call(method->native_fn, gp, ngp, fp, nfp, &fp_ret);
+        } else {
+            ret = kudroid_jni_call_stack(method->native_fn, gp, ngp, fp, nfp, &fp_ret,
+                                         stack_args.data(),
+                                         static_cast<unsigned>(stack_args.size()));
+        }
         if (hotTrace) native_call_stage("after-trampoline");
     }
 
@@ -650,12 +658,12 @@ DexValue DexJniEnv::CallNative(DexMethod* method, const DexValue* args, size_t n
     if (journal || native_ms >= 50) {
         const SystemMemory memory_after = query_system_memory();
         std::snprintf(breadcrumb, sizeof(breadcrumb),
-                      "native-exit class=%s method=%s sig=%s duration_ms=%lld vm_depth=%d footprint=%llu process_headroom=%llu available=%llu low_memory=%d",
+                      "native-exit class=%s method=%s sig=%s duration_ms=%lld vm_depth=%d footprint=%llu process_headroom=%llu available=%llu low_memory=%d boolean=%d",
                       owner, method_name, method_sig, static_cast<long long>(native_ms), VmLockDepth(),
                       static_cast<unsigned long long>(memory_after.process_resident_bytes),
                       static_cast<unsigned long long>(memory_after.process_available_bytes),
                       static_cast<unsigned long long>(memory_after.available_bytes),
-                      memory_after.low_memory ? 1 : 0);
+                      memory_after.low_memory ? 1 : 0, shorty[0] == 'Z' ? (ret != 0 ? 1 : 0) : -1);
         kudroid_persistent_breadcrumb(breadcrumb);
         if (hotTrace) native_call_stage("before-result-decode");
     }

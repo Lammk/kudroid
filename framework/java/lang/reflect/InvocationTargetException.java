@@ -1,6 +1,6 @@
 package java.lang.reflect;
 
-public class InvocationTargetException extends Exception {
+public class InvocationTargetException extends ReflectiveOperationException {
 
     private final Throwable target;
 

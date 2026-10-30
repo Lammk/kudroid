@@ -6,9 +6,12 @@
 #include "kudroid/kuart/DexClassLinker.h"
 #include "kudroid/kuart/Interpreter.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <thread>
+#include <vector>
 
 #include "dex_builder.h"
 
@@ -105,6 +108,7 @@ struct Specs {
     MethodSpec call_virtual;   // static: call sum() via Point param
     MethodSpec call_static;    // static: call addTwo()
     MethodSpec add_two;        // static helper
+    MethodSpec bad_static_x;   // static: invoke-static on the instance method getX()
     MethodSpec instance_check; // static: instance-of
     MethodSpec npe_test;       // static: iget on null
     MethodSpec oob_test;       // static: out-of-range aget
@@ -159,6 +163,13 @@ struct Specs {
         call_static.name = "callStatic";
         call_static.return_type = "I";
         call_static.access_flags = 0x9;
+
+        // Deliberately invokes an instance method with invoke-static. The runtime
+        // must reject the receiver-convention mismatch instead of shifting args.
+        bad_static_x.name = "badStaticX";
+        bad_static_x.return_type = "I";
+        bad_static_x.params = {"LPoint;"};
+        bad_static_x.access_flags = 0x9;
 
         instance_check.name = "instanceCheck";
         instance_check.return_type = "I";
@@ -219,16 +230,120 @@ std::vector<ClassSpec> BuildClasses(const Specs& s) {
     t.extra_types = {"[I"};
     t.direct_methods = {s.make_point,     s.read_x,       s.array_ops,
                         s.static_ops,    s.call_virtual, s.add_two,
-                        s.call_static,   s.instance_check, s.npe_test,
-                        s.oob_test,      s.string_test};
+                        s.call_static,   s.bad_static_x, s.instance_check,
+                        s.npe_test,      s.oob_test,     s.string_test};
 
     return {object, string, point, point3d, t};
+}
+
+void ClassInitializationTests() {
+    ClassSpec object;
+    object.descriptor = "Ljava/lang/Object;";
+    object.superclass = "";
+    ClassSpec base;
+    base.descriptor = "LInitBase;";
+    FieldSpec count{"count", "I", 0x9};
+    FieldSpec sentinel{"sentinel", "Ljava/lang/Object;", 0x9};
+    base.static_fields = {count, sentinel};
+    MethodSpec clinit;
+    clinit.name = "<clinit>";
+    clinit.access_flags = 0x10008;
+    clinit.registers_size = 1;
+    base.direct_methods = {clinit};
+    ClassSpec child;
+    child.descriptor = "LInitChild;";
+    child.superclass = base.descriptor;
+    ClassSpec grandchild;
+    grandchild.descriptor = "LInitGrandchild;";
+    grandchild.superclass = child.descriptor;
+    ClassSpec own;
+    own.descriptor = "LInitOwn;";
+    own.superclass = base.descriptor;
+    own.static_fields = {count};
+    own.direct_methods = {clinit};
+
+    DexBuilder indices;
+    indices.Build({object, base, child, grandchild, own});
+    auto increment = [&](const std::string& descriptor) {
+        std::vector<uint16_t> code;
+        auto field = static_cast<uint16_t>(indices.FieldIndexOf(descriptor, count));
+        Op21c(&code, kOpSget, 0, field);
+        Op22b(&code, kOpAddIntLit8, 0, 0, 1);
+        Op21c(&code, kOpSput, 0, field);
+        return code;
+    };
+    auto code = increment(base.descriptor);
+    Op21c(&code, kOpNewInstance, 0,
+          static_cast<uint16_t>(indices.TypeIndexOf(object.descriptor)));
+    Op21c(&code, 0x69, 0,
+          static_cast<uint16_t>(indices.FieldIndexOf(base.descriptor, sentinel)));
+    code.push_back(kOpReturnVoid);
+    base.direct_methods[0].code = code;
+    code = increment(own.descriptor);
+    code.push_back(kOpReturnVoid);
+    own.direct_methods[0].code = code;
+    DexBuilder builder;
+    auto dex = builder.Build({object, base, child, grandchild, own});
+    kudroid::kuart::DexClassLinker linker;
+    std::string error;
+    if (!linker.AddDexFile(dex.data(), dex.size(), "initialization.dex", &error)) {
+        Check(false, "load class initialization regression: " + error);
+        return;
+    }
+    kudroid::kuart::Interpreter interp(&linker);
+    auto* b = linker.FindClass(base.descriptor.c_str());
+    auto* c = linker.FindClass(child.descriptor.c_str());
+    auto* g = linker.FindClass(grandchild.descriptor.c_str());
+    auto* o = linker.FindClass(own.descriptor.c_str());
+    if (b == nullptr || c == nullptr || g == nullptr || o == nullptr) {
+        Check(false, "resolve class initialization hierarchy");
+        return;
+    }
+    Check(interp.EnsureInitialized(b), "initialize base class");
+    auto* count_field = b->FindStaticField("count", "I");
+    auto* sentinel_field = b->FindStaticField("sentinel", "Ljava/lang/Object;");
+    auto* original = b->static_values[sentinel_field->offset_or_slot].l;
+    Check(original != nullptr, "base initializer creates its sentinel");
+    Check(interp.EnsureInitialized(c) && interp.EnsureInitialized(g),
+          "initialize descendants without declared initializers");
+    Check(b->static_values[count_field->offset_or_slot].i == 1,
+          "descendants do not replay the base initializer");
+    Check(b->static_values[sentinel_field->offset_or_slot].l == original,
+          "descendant initialization preserves static sentinel identity");
+    Check(interp.EnsureInitialized(o) && interp.EnsureInitialized(o),
+          "initialize a descendant with its own initializer twice");
+    auto* own_count = o->FindStaticField("count", "I");
+    Check(o->static_values[own_count->offset_or_slot].i == 1 &&
+                  b->static_values[count_field->offset_or_slot].i == 1,
+          "each declared initializer runs once");
+    kudroid::kuart::DexClassLinker failed_linker;
+    if (!failed_linker.AddDexFile(dex.data(), dex.size(), "failed-initialization.dex", &error)) {
+        Check(false, "load failed initialization regression: " + error);
+        return;
+    }
+    auto* failed_parent = failed_linker.FindClass(base.descriptor.c_str());
+    auto* failed_child = failed_linker.FindClass(own.descriptor.c_str());
+    if (failed_parent == nullptr || failed_child == nullptr) {
+        Check(false, "resolve failed initialization hierarchy");
+        return;
+    }
+    failed_parent->status = kudroid::kuart::DexClass::Status::kError;
+    failed_parent->initialization_started.store(true);
+    Check(!failed_linker.LinkClass(failed_parent) &&
+                  failed_parent->status == kudroid::kuart::DexClass::Status::kError,
+          "linking does not reset a failed class");
+    kudroid::kuart::Interpreter isolated(&failed_linker);
+    Check(!isolated.EnsureInitialized(failed_child) &&
+                  failed_child->status == kudroid::kuart::DexClass::Status::kError &&
+                  failed_parent->status == kudroid::kuart::DexClass::Status::kError,
+          "parent initialization failure prevents child initialization");
 }
 
 }  // namespace
 
 int main() {
     std::printf("=== KuART Interpreter 3b: object/field/array/invoke ===\n");
+    ClassInitializationTests();
 
     // Pass 1: learn indices
     // "hello" and "[I" appear only in bytecode, so the builder cannot collect them;
@@ -254,6 +369,8 @@ int main() {
         static_cast<uint16_t>(index_builder.MethodIndexOf("LT;", probe.add_two));
     const uint16_t kMethodPointCtor =
         static_cast<uint16_t>(index_builder.MethodIndexOf("LPoint;", probe.point_ctor));
+    const uint16_t kMethodGetX =
+        static_cast<uint16_t>(index_builder.MethodIndexOf("LPoint;", probe.point_get_x));
     const uint16_t kStringHello =
         static_cast<uint16_t>(index_builder.StringIndexOf("hello"));
 
@@ -384,6 +501,16 @@ int main() {
         s.call_static.registers_size = 3;
         s.call_static.ins_size = 0;
     }
+    // T.badStaticX(Point p) { return Point.getX(p); }  -- static opcode, instance method
+    {
+        std::vector<uint16_t> c;
+        Op35c(&c, kOpInvokeStatic, kMethodGetX, {1});
+        c.push_back(Op11x(kOpMoveResult, 0));
+        c.push_back(Op11x(kOpReturn, 0));
+        s.bad_static_x.code = c;
+        s.bad_static_x.registers_size = 2;
+        s.bad_static_x.ins_size = 1;
+    }
     // T.instanceCheck(Point p) { return (p instanceof Point3D) ? 1 : 0; }
     {
         std::vector<uint16_t> c;
@@ -439,6 +566,29 @@ Check(builder.TypeIndexOf("LPoint;") == kPointType, "index  n  nh gi a hai l t b
         return 1;
     }
 
+    // Concurrent first lookups of one descriptor must converge on one DexClass.
+    {
+        constexpr int kThreads = 8;
+        std::vector<kudroid::kuart::DexClass*> found(kThreads, nullptr);
+        std::atomic<int> ready{0};
+        std::atomic<bool> go{false};
+        std::vector<std::thread> threads;
+        threads.reserve(kThreads);
+        for (int i = 0; i < kThreads; ++i) {
+            threads.emplace_back([&, i] {
+                ready.fetch_add(1);
+                while (!go.load(std::memory_order_acquire)) std::this_thread::yield();
+                found[i] = linker.FindClass("LPoint3D;");
+            });
+        }
+        while (ready.load() != kThreads) std::this_thread::yield();
+        go.store(true, std::memory_order_release);
+        for (auto& th : threads) th.join();
+        bool same = found[0] != nullptr;
+        for (int i = 1; i < kThreads; ++i) same = same && found[i] == found[0];
+        Check(same, "concurrent FindClass returns one class instance");
+    }
+
     kudroid::kuart::DexClass* t = linker.FindClass("LT;");
     kudroid::kuart::DexClass* point = linker.FindClass("LPoint;");
     kudroid::kuart::DexClass* point3d = linker.FindClass("LPoint3D;");
@@ -466,6 +616,13 @@ std::printf("  FAIL not found %s%s\n", name, sig);
 Check(p.l != nullptr, "makePoint tr  object kh c null");
 Check(p.l != nullptr && p.l->clazz == point, "object c  class l  Point");
 Check(call("readX", "(LPoint;)I", {p}).i == 7, "readX  c  ng field   iput");
+    Check(call("readX", "(LPoint;)I", {p}).i == 7, "cached instance field retains its value");
+    const DexValue unrelated = DexValue::Ref(linker.AllocObject(t));
+    call("readX", "(LPoint;)I", {unrelated});
+    Check(interp.HasPendingException(), "cached field rejects an unrelated receiver class");
+    Check(interp.HasPendingException() &&
+              interp.DescribePendingException().find("NoSuchFieldError") != std::string::npos,
+          "cached field preserves receiver validation errors");
 
     // invoke-virtual + correct dispatch
     Check(call("callVirtual", "(LPoint;)I", {p}).i == 42, "callVirtual(Point) == 7+35 == 42");
@@ -489,6 +646,21 @@ Check(fx != nullptr && fy != nullptr && fz != nullptr, "Point3D th y c  x,y k  t
 
     // ── invoke-static ──
     Check(call("callStatic", "()I", {}).i == 42, "callStatic() == 20+22 == 42");
+
+    // invoke-static must not run an instance method with shifted arguments.
+    {
+        interp.ClearPendingException();
+        kudroid::kuart::DexMethod* m = t->FindDirectMethod("badStaticX", "(LPoint;)I");
+        if (m == nullptr) {
+            Check(false, "badStaticX resolved");
+        } else {
+            interp.Execute(m, &p, 1);
+            Check(interp.HasPendingException(), "invoke-static on an instance method throws");
+            Check(interp.last_error().find("NoSuchMethodError") != std::string::npos,
+                  "the failure is a NoSuchMethodError: " + interp.last_error());
+            interp.ClearPendingException();
+        }
+    }
 
     // array
     Check(call("arrayOps", "(I)I", {DexValue::Int(10)}).i == 13,
@@ -543,6 +715,27 @@ Check(interp.HasPendingException(), "aget ngo i d i n m exception");
 
     std::printf("heap: %zu bytes, %zu class\n", linker.heap().BytesAllocated(),
                 linker.NumLoadedClasses());
+
+    // Resolution results must stay inside their runtime across heap reuse.
+    bool isolated = true;
+    for (int run = 0; run < 8; ++run) {
+        kudroid::kuart::DexClassLinker next_linker;
+        isolated = isolated && next_linker.AddDexFile(dex.data(), dex.size(), "next.dex", &error);
+        kudroid::kuart::Interpreter next_interp(&next_linker);
+        auto* owner = next_linker.FindClass("LT;");
+        auto* make = owner != nullptr ? owner->FindDirectMethod("makePoint", "(II)LPoint;") : nullptr;
+        DexValue values[] = {DexValue::Int(run + 10), DexValue::Int(run + 20)};
+        const DexValue created = next_interp.Execute(make, values, 2);
+        isolated = isolated && !next_interp.HasPendingException() && created.l != nullptr
+                && created.l->clazz == next_linker.FindClass("LPoint;");
+        auto* read = owner != nullptr ? owner->FindDirectMethod("readX", "(LPoint;)I") : nullptr;
+        const DexValue x = next_interp.Execute(read, &created, 1);
+        isolated = isolated && !next_interp.HasPendingException() && x.i == run + 10;
+        next_interp.ClearPendingException();
+    }
+    Check(isolated, "cached types, fields and methods remain isolated after runtime recreation");
+    Check(call("readX", "(LPoint;)I", {p}).i == 7,
+          "another runtime shutdown cannot change the original runtime field result");
 
     if (g_failures == 0) {
         std::printf("=== KuART Interpreter 3b test PASSED ===\n");

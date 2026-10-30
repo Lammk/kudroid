@@ -84,6 +84,17 @@ kern_return_t mach_vm_protect(vm_map_t target_task,
 kern_return_t mach_vm_deallocate(vm_map_t target_task,
                                  mach_vm_address_t address,
                                  mach_vm_size_t size);
+kern_return_t mach_vm_map(vm_map_t target_task,
+                          mach_vm_address_t *address,
+                          mach_vm_size_t size,
+                          mach_vm_offset_t mask,
+                          int flags,
+                          mach_port_t port,
+                          memory_object_offset_t offset,
+                          boolean_t copy,
+                          vm_prot_t cur_protection,
+                          vm_prot_t max_protection,
+                          vm_inherit_t inheritance);
 #ifdef __cplusplus
 }
 #endif

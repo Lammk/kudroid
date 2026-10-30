@@ -1,13 +1,7 @@
 package android.text;
 
-/**
- * android.text.Editable — CharSequence can be edited in place.
- *
- * Android declares Editable extends CharSequence, GetChars, Spannable,
- *Appendable. KuDroid doesn't have Span yet so it's CharSequence + Appendable —
- * enough for plain text editing app (ZArchiver rename/password dialog).
- */
-public interface Editable extends CharSequence, Appendable {
+/** Mutable text with span and character access. */
+public interface Editable extends GetChars, Spannable, Appendable {
     Editable replace(int st, int en, CharSequence source, int start, int end);
 
     Editable replace(int st, int en, CharSequence text);
@@ -25,6 +19,7 @@ public interface Editable extends CharSequence, Appendable {
     Editable append(char text);
 
     void clear();
+    void clearSpans();
 
     /**
      * Filters every insertion has to pass through.

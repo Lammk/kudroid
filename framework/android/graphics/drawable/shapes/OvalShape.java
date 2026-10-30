@@ -1,6 +1,13 @@
 package android.graphics.drawable.shapes;
 
-/** Automatically generated stub for android.graphics.drawable.shapes.OvalShape */
-public class OvalShape {
+import android.graphics.Canvas;
+import android.graphics.Paint;
+
+public class OvalShape extends RectShape {
     public OvalShape() {}
+
+    @Override
+    public void draw(Canvas canvas, Paint paint) {
+        canvas.drawOval(rect(), paint);
+    }
 }

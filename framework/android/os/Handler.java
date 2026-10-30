@@ -42,6 +42,14 @@ public class Handler {
     private static Looper findLooper() {
         Looper looper = Looper.myLooper();
         if (looper == null) {
+            Looper main = Looper.getMainLooper();
+            if (main != null && (Thread.currentThread() == main.getThread() || "main".equals(Thread.currentThread().getName()))) {
+                return main;
+            }
+            if ("main".equals(Thread.currentThread().getName())) {
+                Looper.prepareMainLooper();
+                return Looper.myLooper();
+            }
             throw new RuntimeException("Can't create handler inside thread "
                     + Thread.currentThread() + " that has not called Looper.prepare()");
         }
@@ -233,6 +241,18 @@ public class Handler {
 
     public final void removeCallbacks(Runnable r, Object token) {
         mQueue.removeCallbacks(this, r, token);
+    }
+
+    public final boolean hasMessages(int what) {
+        return mQueue.hasMessages(this, what, null);
+    }
+
+    public final boolean hasMessages(int what, Object object) {
+        return mQueue.hasMessages(this, what, object);
+    }
+
+    public final boolean hasCallbacks(Runnable r) {
+        return mQueue.hasCallbacks(this, r);
     }
 
     public final void removeMessages(int what) {

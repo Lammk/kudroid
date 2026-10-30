@@ -30,6 +30,8 @@
 #if defined(__APPLE__)
 #include <mach/mach.h>
 #include <mach/thread_status.h>
+#include <libkern/OSCacheControl.h>
+#include "kudroid/MachVmDecls.h"
 #include <exception>
 extern "C" {
 extern void* objc_msgSend(void* self, void* op, ...);
@@ -1477,6 +1479,14 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
         if (kudroid::bionic_handle_tpidr_trap(ucontext)) {
             return; // handled successfully, resuming execution!
         }
+        if (kudroid::bionic_handle_sysreg_trap(ucontext)) {
+            static std::atomic<int> s_sysregTrapEmulated{0};
+            if (s_sysregTrapEmulated.load() < 5) {
+                ++s_sysregTrapEmulated;
+                signal_safe_log("KuDroidTrap", "SIGTRAP emulated as ARM64 sysreg");
+            }
+            return;
+        }
         if (kudroid::bionic_handle_fmod_vorbis_trap(ucontext)) {
             return;
         }
@@ -1514,6 +1524,14 @@ static void crashHandler(int sig, siginfo_t* info, void* ucontext) {
             if (s_illEmulated.load() < 5) {
                 ++s_illEmulated;
                 signal_safe_log("KuDroidTrap", "SIGILL emulated as TPIDR");
+            }
+            return;
+        }
+        if (kudroid::bionic_handle_sysreg_trap(ucontext)) {
+            static std::atomic<int> s_sysregIllEmulated{0};
+            if (s_sysregIllEmulated.load() < 5) {
+                ++s_sysregIllEmulated;
+                signal_safe_log("KuDroidTrap", "SIGILL emulated as ARM64 sysreg");
             }
             return;
         }

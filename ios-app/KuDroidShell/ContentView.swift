@@ -10,7 +10,7 @@ import UniformTypeIdentifiers
 
 struct ContentView: View {
     @State private var fullLog = "KuDroid Core Status"
-    @State private var jitStatus = "JIT: Unknown"
+    @ObservedObject private var dataReset = AppDataResetModel.shared
     
     var body: some View {
         TabView {
@@ -24,19 +24,19 @@ struct ContentView: View {
                     Label("Permissions", systemImage: "lock.shield.fill")
                 }
             
-            DebugView(fullLog: $fullLog, jitStatus: $jitStatus)
-                .tabItem {
-                    Label("Debug", systemImage: "terminal.fill")
-                }
             ReverseView()
                 .tabItem {
                     Label("Reverse", systemImage: "arrow.triangle.2.circlepath")
                 }
+            ShellSettingsView()
+                .tabItem { Label("Settings", systemImage: "gearshape") }
         }
-        .preferredColorScheme(.dark)
+        .tint(ShellStyle.ink)
+        .alert("App Data", isPresented: Binding(get: { AppDataResetModel.shared.message != nil }, set: { if !$0 { AppDataResetModel.shared.message = nil } })) {
+            Button("OK", role: .cancel) { AppDataResetModel.shared.message = nil }
+        } message: { Text(AppDataResetModel.shared.message ?? "") }
         .onAppear {
             setupLogDir()
-            jitStatus = runJitStatus()
             activateAudioSession()
         }
     }
@@ -55,7 +55,12 @@ struct AppsView: View {
     @Binding var fullLog: String
     @State private var installedApps: [AppItem] = []
     @State private var showAPKPicker = false
-    @StateObject private var installer = APKInstallModel()
+    @ObservedObject private var installer = APKInstallModel.shared
+    @ObservedObject private var dataReset = AppDataResetModel.shared
+    @State private var reverseApp: AppItem?
+    @State private var shortcutApp: AppItem?
+    @State private var resetApp: AppItem?
+    @State private var showDataReset = false
     @State private var showRenameAlert = false
     // App deletion status — shows progress instead of freeze UI.
     @State private var deletingApp: String? = nil
@@ -75,41 +80,41 @@ struct AppsView: View {
     var body: some View {
         NavigationView {
             ZStack {
-                Color.black.ignoresSafeArea()
+                ShellStyle.background.ignoresSafeArea()
                 
                 VStack(spacing: 0) {
-                    // title
-                    HStack {
-                        Image(systemName: "cpu")
-                            .font(.title)
-                            .foregroundColor(.green)
-                        Text("KuDroid")
-                            .font(.title2.bold())
-                        // Display version right on the screen — distinguish old/new versions
-                        // when you suspect your iPhone is running an outdated IPA.
-                        Text("v" + appVersion())
-                            .font(.caption.weight(.semibold))
-                            .foregroundColor(.green.opacity(0.8))
+                    HStack(alignment: .center, spacing: 20) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Kudroid")
+                                .font(.system(size: 34, weight: .bold, design: .rounded))
+                                .tracking(-1)
+                            Text("YOUR ANDROID LIBRARY")
+                                .font(.system(size: 10, weight: .semibold))
+                                .tracking(2).foregroundColor(.secondary)
+                        }
                         Spacer()
-                        Button(action: { showAPKPicker = true }) {
-                            Image(systemName: "plus.circle.fill")
-                                .font(.title2)
-                            .foregroundColor(.green)
+                        Button { showAPKPicker = true } label: {
+                            Image(systemName: "plus")
+                                .font(.system(size: 21, weight: .medium))
+                                .frame(width: 48, height: 48)
+                                .foregroundColor(ShellStyle.inverse)
+                                .background(ShellStyle.ink)
+                                .clipShape(Circle())
                         }
                         .accessibilityLabel("Install APK")
                         .disabled(installer.busy)
                     }
-                    .padding()
-                    
+                    .padding(.horizontal, 24).padding(.top, 20).padding(.bottom, 14)
+
                     if installedApps.isEmpty {
                         VStack(spacing: 16) {
                             Spacer()
                             Image(systemName: "cube.box.fill")
-                                .font(.system(size: 64))
+                                .font(.system(size: 56, weight: .ultraLight))
                                 .foregroundColor(.secondary)
-                            Text("No Android Apps Installed")
+                            Text("Your library starts here")
                                 .font(.headline)
-                            Text("Tap the + button to install an APK")
+                            Text("Install an APK to bring your Android apps here.")
                                 .font(.subheadline)
                                 .foregroundColor(.secondary)
                             Spacer()
@@ -125,28 +130,28 @@ struct AppsView: View {
                                         .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
                                         .overlay(
                                             RoundedRectangle(cornerRadius: 11, style: .continuous)
-                                                .stroke(Color.white.opacity(0.15), lineWidth: 0.5)
+                                                .stroke(ShellStyle.ink.opacity(0.15), lineWidth: 0.5)
                                         )
                                         .shadow(color: .black.opacity(0.3), radius: 4, x: 0, y: 2)
                                 } else {
                                     ZStack {
                                         RoundedRectangle(cornerRadius: 11, style: .continuous)
-                                            .fill(LinearGradient(colors: [Color.green.opacity(0.3), Color.teal.opacity(0.2)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                                            .fill(ShellStyle.ink.opacity(0.06))
                                             .frame(width: 48, height: 48)
                                             .overlay(
                                                 RoundedRectangle(cornerRadius: 11, style: .continuous)
-                                                    .stroke(Color.green.opacity(0.3), lineWidth: 1)
+                                                    .stroke(ShellStyle.ink.opacity(0.3), lineWidth: 1)
                                             )
                                         Image(systemName: "cube.fill")
                                             .font(.system(size: 22))
-                                            .foregroundColor(.green)
+                                            .foregroundColor(.primary)
                                     }
                                 }
                                 
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text(app.displayName)
                                         .font(.headline)
-                                        .foregroundColor(.white)
+                                        .foregroundColor(.primary)
                                         .lineLimit(1)
                                     
                                     HStack(spacing: 6) {
@@ -154,8 +159,8 @@ struct AppsView: View {
                                             .font(.caption2.bold())
                                             .padding(.horizontal, 6)
                                             .padding(.vertical, 2)
-                                            .background(Color.green.opacity(0.2))
-                                            .foregroundColor(.green)
+                                            .background(ShellStyle.ink.opacity(0.2))
+                                            .foregroundColor(.primary)
                                             .cornerRadius(6)
                                     }
                                 }
@@ -163,56 +168,69 @@ struct AppsView: View {
                                 Spacer()
                                 
                                 Button(action: {
-                                    session.activeGuestApp = app.id
+                                    if dataReset.canLaunch(app.id) { session.activeGuestApp = app.id }
                                 }) {
-                                    Text("RUN")
+                                    Text(dataReset.pending.contains(app.id) ? "Pending" : "Open")
                                         .font(.caption.bold())
                                         .padding(.horizontal, 16)
                                         .padding(.vertical, 8)
-                                        .background(Color.green.opacity(0.25))
-                                        .foregroundColor(.green)
+                                        .background(ShellStyle.ink)
+                                        .foregroundColor(ShellStyle.inverse)
                                         .cornerRadius(16)
+                                }.disabled(!dataReset.canLaunch(app.id))
+                                .buttonStyle(.borderless)
+                                Menu {
+                                    Button { reverseApp = app } label: {
+                                        Label("Reverse app", systemImage: "arrow.triangle.2.circlepath")
+                                    }
+                                    Button { shortcutApp = app } label: {
+                                        Label("Create a home shortcut", systemImage: "plus.app")
+                                    }
+                                    Button(role: .destructive) {
+                                        resetApp = app
+                                        showDataReset = true
+                                    } label: {
+                                        Label("Delete all app data", systemImage: "trash.slash")
+                                    }
+                                    Button {
+                                        renamingAppId = app.id
+                                        newAppName = app.displayName
+                                        showRenameAlert = true
+                                    } label: {
+                                        Label("Rename", systemImage: "pencil")
+                                    }
+                                    Button(role: .destructive) {
+                                        clearAppCache(name: app.id)
+                                    } label: {
+                                        Label("Clear Cache", systemImage: "trash")
+                                    }
+                                    Button(role: .destructive) {
+                                        deleteApp(name: app.id)
+                                    } label: {
+                                        Label("Delete App", systemImage: "xmark.bin")
+                                    }
+                                } label: {
+                                    Image(systemName: "ellipsis")
+                                        .font(.system(size: 18, weight: .semibold))
+                                        .frame(width: 44, height: 44)
+                                        .contentShape(Rectangle())
                                 }
+                                .buttonStyle(.borderless)
+                                .accessibilityLabel("Actions for " + app.displayName)
                             }
-                            .padding(.vertical, 4)
-                            .listRowBackground(Color(.systemGray6))
-                            .contextMenu {
-                                Button {
-                                    renamingAppId = app.id
-                                    newAppName = app.displayName
-                                    showRenameAlert = true
-                                } label: {
-                                    Label("Rename", systemImage: "pencil")
-                                }
-                                Button(role: .destructive) {
-                                    clearAppCache(name: app.id)
-                                } label: {
-                                    Label("Clear Cache", systemImage: "trash")
-                                }
-                                Button(role: .destructive) {
-                                    deleteApp(name: app.id)
-                                } label: {
-                                    Label("Delete App", systemImage: "xmark.bin")
-                                }
-                            }
+                            .padding(.vertical, 12)
+                            .background(ImmediateScrollTouches().allowsHitTesting(false))
+                            .listRowBackground(ShellStyle.surface)
                         }
+                        .listStyle(.insetGrouped)
                         .onAppear {
-                            // temporary fix for versions before ios 16
+                            DispatchQueue.global(qos: .userInitiated).async {
+                                _ = kudroid_is_jit_enabled()
+                            }
+                            // Keep the grouped background visible.
                             UITableView.appearance().backgroundColor = .clear
                         }
                     }
-                }
-
-                if installer.busy {
-                    Color.black.opacity(0.65).ignoresSafeArea()
-                    VStack(spacing: 16) {
-                        ProgressView()
-                        Text(installer.stage).multilineTextAlignment(.center)
-                    }
-                    .padding(28)
-                    .background(Color(.systemGray6))
-                    .cornerRadius(18)
-                    .padding()
                 }
 
                 // Overlay the app deletion process — block interaction while deleting
@@ -226,7 +244,7 @@ struct AppsView: View {
                                 .scaleEffect(1.4)
                             Text("Deleting \(name)")
                                 .font(.headline)
-                                .foregroundColor(.white)
+                                .foregroundColor(.primary)
                             Text(deletePhase)
                                 .font(.caption)
                                 .foregroundColor(.secondary)
@@ -236,32 +254,43 @@ struct AppsView: View {
                                 .frame(width: 220)
                             Text("\(Int(deletePercent))%")
                                 .font(.caption2.monospacedDigit())
-                                .foregroundColor(.green)
+                                .foregroundColor(.primary)
                         }
                         .padding(28)
                         .background(
                             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                                .fill(Color(.systemGray6).opacity(0.97))
+                                .fill(ShellStyle.surface.opacity(0.97))
                         )
                     }
                 }
             }
             .navigationBarHidden(true)
             .onAppear(perform: loadInstalledApps)
+            .sheet(item: $reverseApp) { app in
+                ReverseView(installedAppID: app.id, installedName: app.displayName)
+            }
+            .sheet(item: $shortcutApp) { app in HomeShortcutView(app: app) }
+            .alert("Delete all app data?", isPresented: $showDataReset) {
+                Button("Cancel", role: .cancel) { resetApp = nil }
+                Button("Delete Data", role: .destructive) {
+                    if let app = resetApp { dataReset.request(app) }
+                    resetApp = nil
+                }
+            } message: {
+                Text("This deletes saves, settings, accounts and cache for \(resetApp?.displayName ?? "this app"). The installed app stays. If a restart is needed, deletion finishes when KuDroid reopens.")
+            }
             .fileImporter(isPresented: $showAPKPicker, allowedContentTypes: APKFileTypes.supported) { result in
                 switch result {
                 case .success(let url): installer.install(url)
                 case .failure(let error): installer.report(error.localizedDescription)
                 }
             }
+            .onReceive(installer.$busy) { busy in session.libraryBusy = busy || deletingApp != nil }
             .onReceive(installer.$result) { log in
                 guard let log = log else { return }
                 fullLog = log
                 loadInstalledApps()
             }
-            .alert("Could not install APK", isPresented: $installer.showError) {
-                Button("OK", role: .cancel) {}
-            } message: { Text(installer.error) }
             .alert("Rename App", isPresented: $showRenameAlert) {
                 TextField("App Name", text: $newAppName)
                 Button("Cancel", role: .cancel) {}
@@ -441,6 +470,8 @@ struct AppsView: View {
     private func deleteApp(name: String) {
         guard deletingApp == nil else { return } // Deleting another app
         deletingApp = name
+        session.libraryDeletionInProgress = true
+        session.libraryBusy = true
         deletePhase = "Preparing…"
         deletePercent = 0
         // [DEBUG UNINSTALL] marks the start — watchdog below
@@ -497,7 +528,10 @@ struct AppsView: View {
                 self.fullLog += success == 1
                     ? "\n[uninstall] DONE \(name) in \(elapsed)s"
                     : "\n[uninstall] FAILED \(name) after \(elapsed)s"
+                if success == 1 { self.dataReset.forget(name) }
                 self.deletingApp = nil
+                self.session.libraryDeletionInProgress = false
+                self.session.libraryBusy = self.installer.busy
                 self.loadInstalledApps()
             }
         }
@@ -554,14 +588,14 @@ struct PermissionsView: View {
     var body: some View {
         NavigationView {
             ZStack {
-                Color.black.ignoresSafeArea()
+                ShellStyle.background.ignoresSafeArea()
                 
                 VStack(spacing: 0) {
                     // Title
                     HStack {
                         Image(systemName: "lock.shield.fill")
                             .font(.title)
-                            .foregroundColor(.green)
+                            .foregroundColor(.primary)
                         Text("App Permissions")
                             .font(.title2.bold())
                         Spacer()
@@ -576,7 +610,7 @@ struct PermissionsView: View {
                             .foregroundColor(.secondary)
                         TextField("Search installed apps...", text: $searchText)
                             .font(.subheadline)
-                            .foregroundColor(.white)
+                            .foregroundColor(.primary)
                             .autocapitalization(.none)
                             .disableAutocorrection(true)
                         
@@ -588,7 +622,7 @@ struct PermissionsView: View {
                         }
                     }
                     .padding(10)
-                    .background(Color(.systemGray6))
+                    .background(ShellStyle.surface)
                     .cornerRadius(10)
                     .padding(.horizontal)
                     .padding(.bottom, 8)
@@ -663,23 +697,23 @@ struct PermissionsView: View {
                     } else {
                         ZStack {
                             RoundedRectangle(cornerRadius: 9, style: .continuous)
-                                .fill(Color.green.opacity(0.2))
+                                .fill(ShellStyle.ink.opacity(0.2))
                                 .frame(width: 40, height: 40)
                             Image(systemName: "cube.fill")
                                 .font(.system(size: 18))
-                                .foregroundColor(.green)
+                                .foregroundColor(.primary)
                         }
                     }
                     
                     VStack(alignment: .leading, spacing: 2) {
                         Text(app.displayName)
                             .font(.headline)
-                            .foregroundColor(.white)
+                            .foregroundColor(.primary)
                             .lineLimit(1)
                         
                         Text("\(grantedCount)/\(groups.count) permissions granted")
                             .font(.caption2)
-                            .foregroundColor(grantedCount > 0 ? .green : .secondary)
+                            .foregroundColor(grantedCount > 0 ? .primary : .secondary)
                     }
                     
                     Spacer()
@@ -690,26 +724,26 @@ struct PermissionsView: View {
                         .padding(6)
                 }
                 .padding(12)
-                .background(Color(.systemGray6))
+                .background(ShellStyle.surface)
             }
             .buttonStyle(PlainButtonStyle())
             
             // List of permissions (appears when expanded)
             if isExpanded {
                 VStack(spacing: 0) {
-                    Divider().background(Color.white.opacity(0.1))
+                    Divider().background(ShellStyle.ink.opacity(0.1))
                     
                     ForEach(groups) { group in
                         VStack(spacing: 0) {
                             HStack {
                                 HStack(spacing: 8) {
                                     Image(systemName: iconForGroup(group.key))
-                                        .foregroundColor(.green)
+                                        .foregroundColor(.primary)
                                         .frame(width: 22)
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text(group.displayName)
                                             .font(.subheadline.bold())
-                                            .foregroundColor(.white)
+                                            .foregroundColor(.primary)
                                         Text(group.description)
                                             .font(.caption2)
                                             .foregroundColor(.secondary)
@@ -725,14 +759,14 @@ struct PermissionsView: View {
                                     }
                                 ))
                                 .labelsHidden()
-                                .toggleStyle(SwitchToggleStyle(tint: .green))
+                                .toggleStyle(SwitchToggleStyle(tint: ShellStyle.ink))
                             }
                             .padding(.horizontal, 14)
                             .padding(.vertical, 10)
                             
                             if group.id != groups.last?.id {
                                 Divider()
-                                    .background(Color.white.opacity(0.05))
+                                    .background(ShellStyle.ink.opacity(0.05))
                                     .padding(.leading, 44)
                             }
                         }
@@ -759,24 +793,24 @@ struct PermissionsView: View {
                         }) {
                             Text("Grant All")
                                 .font(.caption.bold())
-                                .foregroundColor(.green)
+                                .foregroundColor(.primary)
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 6)
-                                .background(Color.green.opacity(0.2))
+                                .background(ShellStyle.ink.opacity(0.2))
                                 .cornerRadius(8)
                         }
                     }
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
-                    .background(Color.white.opacity(0.02))
+                    .background(ShellStyle.ink.opacity(0.02))
                 }
-                .background(Color(.systemGray6).opacity(0.6))
+                .background(ShellStyle.surface.opacity(0.6))
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(isExpanded ? Color.green.opacity(0.3) : Color.white.opacity(0.08), lineWidth: 1)
+                .stroke(ShellStyle.line, lineWidth: 1)
         )
     }
     
@@ -867,163 +901,6 @@ struct PermissionsView: View {
             kudroid_set_group_permission(appId, group.key, 0)
         }
         loadPermissionsForApp(appId: appId)
-    }
-}
-
-// mark: - debug tab (shortened DebugView keeps only KDB & Live Terminal Log)
-struct DebugView: View {
-    @Environment(\.scenePhase) private var scenePhase
-    @Binding var fullLog: String
-    @Binding var jitStatus: String
-    @State private var showCopyAlert = false
-    @State private var jniTraceOn = false
-    @State private var kdbServerIP: String = UserDefaults.standard.string(forKey: "kdb_server_ip") ?? ""
-    @State private var isKdbConnected: Bool = false
-
-    private var previewLog: String {
-        let lines = fullLog.components(separatedBy: "\n")
-        if lines.count <= 35 { return fullLog }
-        return lines.suffix(35).joined(separator: "\n")
-    }
-
-    var body: some View {
-        NavigationView {
-            ZStack {
-                Color.black.ignoresSafeArea()
-
-                VStack(spacing: 12) {
-                    // Remote KDB Bridge connection bar
-                    HStack(spacing: 8) {
-                        Image(systemName: isKdbConnected ? "antenna.radiowaves.left.and.right" : "antenna.radiowaves.left.and.right.slash")
-                            .foregroundColor(isKdbConnected ? .green : .gray)
-                        TextField("KDB Server IP (e.g. 192.168.1.5:8080)", text: $kdbServerIP)
-                            .font(.caption.monospaced())
-                            .textFieldStyle(.roundedBorder)
-                            .autocapitalization(.none)
-                            .disableAutocorrection(true)
-                        
-                        Button(isKdbConnected ? "Disconnect" : "Connect") {
-                            UserDefaults.standard.set(kdbServerIP, forKey: "kdb_server_ip")
-                            if isKdbConnected {
-                                RemoteDebugClient.shared.disconnect()
-                            } else {
-                                RemoteDebugClient.shared.connect(host: kdbServerIP)
-                            }
-                        }
-                        .font(.caption.bold())
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(isKdbConnected ? Color.red.opacity(0.25) : Color.green.opacity(0.25))
-                        .foregroundColor(isKdbConnected ? .red : .green)
-                        .cornerRadius(8)
-                    }
-                    .padding(.horizontal)
-                    .onAppear {
-                        RemoteDebugClient.shared.onConnectionStatusChanged = { connected in
-                            isKdbConnected = connected
-                        }
-                    }
-
-                    if ProcessInfo.processInfo.operatingSystemVersion.majorVersion < 26 {
-                        Button("Enable JIT with TrollStore") {
-                            JITActivation.openTrollStore { opened in
-                                if !opened { fullLog = "Could not open TrollStore." }
-                            }
-                        }
-                    }
-
-                    HStack {
-                        Text("Live Terminal Log")
-                            .font(.headline)
-                            .foregroundColor(.white)
-                        Spacer()
-                        // Per-JNI-call tracing. Off by default: thousands of
-                        // lines a second cost frames. Toggle takes effect
-                        // immediately, no rebuild, no env var.
-                        Toggle("JNI", isOn: $jniTraceOn)
-                            .font(.caption)
-                            .toggleStyle(.switch)
-                            .onChange(of: jniTraceOn) { on in
-                                kudroid_log_set_jni(on ? 1 : 0)
-                            }
-                            .onAppear {
-                                jniTraceOn = kudroid_log_get_jni() != 0
-                            }
-                        Label(jitStatus, systemImage: jitStatus.contains("Enabled") ? "bolt.fill" : "bolt.slash.fill")
-                            .font(.caption)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(jitStatus.contains("Enabled") ? Color.green.opacity(0.2) : Color.red.opacity(0.2))
-                            .foregroundColor(jitStatus.contains("Enabled") ? .green : .red)
-                            .cornerRadius(8)
-                    }
-                    .padding(.horizontal)
-                    
-                    ScrollView {
-                        Text(previewLog)
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundColor(.green)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(12)
-                    }
-                    .frame(maxHeight: .infinity)
-                    .background(Color(.systemGray6))
-                    .cornerRadius(12)
-                    .padding(.horizontal)
-                    
-                    // Log operation button (Copy Log & Clear Log)
-                    HStack(spacing: 12) {
-                        Button(action: {
-                            UIPasteboard.general.string = fullLog
-                            showCopyAlert = true
-                        }) {
-                            HStack {
-                                Image(systemName: "doc.on.doc.fill")
-                                Text("Copy Log")
-                            }
-                            .font(.subheadline.bold())
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 10)
-                            .background(Color.green.opacity(0.2))
-                            .foregroundColor(.green)
-                            .cornerRadius(10)
-                        }
-                        
-                        Button(action: {
-                            kudroid_clear_all_logs()
-                            fullLog = "[kudroid_core] Log cleared."
-                        }) {
-                            HStack {
-                                Image(systemName: "trash.fill")
-                                Text("Clear Log")
-                            }
-                            .font(.subheadline.bold())
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 10)
-                            .background(Color.red.opacity(0.2))
-                            .foregroundColor(.red)
-                            .cornerRadius(10)
-                        }
-                    }
-                    .padding(.horizontal)
-                    .padding(.bottom, 8)
-                }
-            }
-            .navigationBarHidden(true)
-            .onAppear {
-                // JIT permission can arrive after launch (StikDebug attaches
-                // mid-run), so re-ask instead of keeping the startup verdict.
-                jitStatus = runJitStatus()
-            }
-            .onChange(of: scenePhase) { phase in
-                if phase == .active { jitStatus = runJitStatus() }
-            }
-            .alert("Copied!", isPresented: $showCopyAlert) {
-                Button("OK", role: .cancel) {}
-            } message: {
-                Text("Full log (\(fullLog.count) chars) copied to clipboard.")
-            }
-        }
     }
 }
 
@@ -1136,7 +1013,7 @@ private func requestHostAuthorizations(for permissions: [String], completion: @e
     pending.notify(queue: .main, execute: completion)
 }
 
-/// Read CFBundleShortVersionString from Info.plist (T1.0.0).
+/// Read the bundle display version.
 func appVersion() -> String {
     if let v = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String {
         return v
@@ -1336,6 +1213,7 @@ func extractVersionNameFromAxml(_ data: Data) -> String? {
 
 // Copy provider files before handing them to the native installer.
 final class APKInstallModel: ObservableObject {
+    static let shared = APKInstallModel()
     @Published var busy = false
     @Published var stage = ""
     @Published var result: String?
@@ -1348,8 +1226,8 @@ final class APKInstallModel: ObservableObject {
         showError = true
     }
 
-    func install(_ url: URL) {
-        guard !busy else { return }
+    func install(_ url: URL, completion: (() -> Void)? = nil) {
+        guard !busy else { completion?(); return }
         busy = true
         result = nil
         stage = "Installing " + url.lastPathComponent + "…"
@@ -1368,9 +1246,10 @@ final class APKInstallModel: ObservableObject {
                     self.busy = false
                     self.result = log
                     if log.contains("ERROR") { self.report(log) }
+                    completion?()
                 }
             } catch {
-                DispatchQueue.main.async { self.busy = false; self.report(error.localizedDescription) }
+                DispatchQueue.main.async { self.busy = false; self.report(error.localizedDescription); completion?() }
             }
         }
     }
@@ -1510,9 +1389,16 @@ func executeKuDroidTest(name: String) -> (success: Bool, log: String, logFilenam
 struct DedicatedAppRunnerView: UIViewControllerRepresentable {
     let appName: String
     let onCrash: (String, String) -> Void
+    var onEnded: (() -> Void)? = nil
+
+    init(appName: String, onEnded: (() -> Void)? = nil, onCrash: @escaping (String, String) -> Void) {
+        self.appName = appName
+        self.onEnded = onEnded
+        self.onCrash = onCrash
+    }
 
     func makeUIViewController(context: Context) -> NativeMetalViewController {
-        let vc = NativeMetalViewController(appName: appName, onCrash: onCrash)
+        let vc = NativeMetalViewController(appName: appName, onCrash: onCrash, onEnded: onEnded)
         return vc
     }
 
@@ -1638,7 +1524,9 @@ func kudroidSetGuestVideoLayer(_ handle: Int64, _ layer: CALayer?) {
 class NativeMetalViewController: UIViewController {
     let appName: String
     let onCrash: (String, String) -> Void
+    private let onEnded: (() -> Void)?
     private var isStarted = false
+    private var didCleanup = false
     fileprivate var metalView: NativeMetalView!
     private var crashCheckTimer: Timer?
     private var keyboardObservers: [NSObjectProtocol] = []
@@ -1648,9 +1536,10 @@ class NativeMetalViewController: UIViewController {
     private var statusLabel: UILabel!
     private var lastRequestedOrientation: Int32 = -1
 
-    init(appName: String, onCrash: @escaping (String, String) -> Void) {
+    init(appName: String, onCrash: @escaping (String, String) -> Void, onEnded: (() -> Void)? = nil) {
         self.appName = appName
         self.onCrash = onCrash
+        self.onEnded = onEnded
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -1685,8 +1574,30 @@ class NativeMetalViewController: UIViewController {
         return true
     }
 
+    override var prefersStatusBarHidden: Bool { true }
+
+    private func syncDarkMode() {
+        if #available(iOS 13.0, *) {
+            let systemStyle = view.window?.windowScene?.screen.traitCollection.userInterfaceStyle
+                ?? UIScreen.main.traitCollection.userInterfaceStyle
+            let style = systemStyle == .unspecified ? traitCollection.userInterfaceStyle : systemStyle
+            kudroid_set_dark_mode(style == .dark ? 1 : 0)
+        }
+    }
+
+    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+        syncDarkMode()
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        syncDarkMode()
+    }
+
     override func viewDidLoad() {
         super.viewDidLoad()
+        syncDarkMode()
         activateAudioSession()
         self.view.backgroundColor = .black
         metalView.backgroundColor = .black
@@ -1775,6 +1686,11 @@ class NativeMetalViewController: UIViewController {
     private static var isGlobalAppRunning = false
 
     private func cleanupAndResetOrientation() {
+        guard !didCleanup else { return }
+        didCleanup = true
+        if NativeMetalViewController.sCurrentRunnerVC === self {
+            NativeMetalViewController.sCurrentRunnerVC = nil
+        }
         UIApplication.shared.isIdleTimerDisabled = false
         NativeMetalViewController.isGlobalAppRunning = false
         KuDroidSensorBridge.shared.stop()
@@ -1808,9 +1724,9 @@ class NativeMetalViewController: UIViewController {
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         if let metalLayer = metalView?.layer as? CAMetalLayer {
-            let scale = UIScreen.main.scale
-            let bounds = view.bounds.size.width > 0 ? view.bounds : UIScreen.main.bounds
-            let targetSize = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+            let scale = metalView.guestDisplayScale
+            metalLayer.contentsScale = scale
+            let targetSize = metalView.guestDrawableSize
             if metalLayer.drawableSize != targetSize && targetSize.width > 0 && targetSize.height > 0 {
                 metalLayer.drawableSize = targetSize
                 if isStarted {
@@ -1837,23 +1753,25 @@ class NativeMetalViewController: UIViewController {
     }
 
     func startAppIfNeeded() {
+        guard !didCleanup else { return }
         guard !isStarted else { return }
         if NativeMetalViewController.isGlobalAppRunning { return }
+        loadViewIfNeeded()
+        guard !didCleanup, !isStarted, !NativeMetalViewController.isGlobalAppRunning,
+              let mv = metalView, let metalLayer = mv.layer as? CAMetalLayer else { return }
+        let scale = mv.guestDisplayScale
+        let size = mv.guestDrawableSize
+        guard size.width > 0, size.height > 0 else { return }
         activateAudioSession()
         NativeMetalViewController.isGlobalAppRunning = true
         isStarted = true
 
-        let _ = self.view
         // By default, No Sleep is enabled (keeps the screen on when playing games)
         UIApplication.shared.isIdleTimerDisabled = true
         NSLog("[KuDroid] >>> Launching guest app: %@ (isIdleTimerDisabled = true) <<<", appName)
 
-        let scale = UIScreen.main.scale
-        let bounds = view.bounds.size.width > 0 ? view.bounds : UIScreen.main.bounds
-        let width = Int32(bounds.width * scale)
-        let height = Int32(bounds.height * scale)
-
-        guard let mv = metalView, let metalLayer = mv.layer as? CAMetalLayer else { return }
+        let width = Int32(size.width)
+        let height = Int32(size.height)
 
         if metalLayer.device == nil {
             metalLayer.device = MTLCreateSystemDefaultDevice()
@@ -1963,10 +1881,16 @@ class NativeMetalViewController: UIViewController {
             }
             NSLog("[KuDroid] Finished kudroid_run_apk(%@). Log chars: %ld", self.appName, logOutput.count)
             DispatchQueue.main.async {
+                guard !self.didCleanup else { return }
                 self.crashCheckTimer?.invalidate()
                 if kudroid_has_crashed() != 0 {
                     self.handleCrash(fallbackLog: logOutput)
                 } else {
+                    if let onEnded = self.onEnded {
+                        self.cleanupAndResetOrientation()
+                        onEnded()
+                        return
+                    }
                     // App finished without crashing
                     self.statusLabel.alpha = 1.0
                     self.statusLabel.text = "Session ended. Close KuDroid from the app switcher."
@@ -2062,10 +1986,9 @@ class NativeMetalView: GuestTouchView {
         metalLayer.maximumDrawableCount = 3
         metalLayer.presentsWithTransaction = false
         metalLayer.isOpaque = true
-        let scale = UIScreen.main.scale
+        let scale = guestDisplayScale
         metalLayer.contentsScale = scale
-        let bounds = self.bounds.size.width > 0 ? self.bounds : UIScreen.main.bounds
-        metalLayer.drawableSize = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+        metalLayer.drawableSize = guestDrawableSize
     }
 
     // Last drawable size reported to the guest. layoutSubviews fires on rotation;
@@ -2075,22 +1998,25 @@ class NativeMetalView: GuestTouchView {
     // bounds (scale-only change, or a rotate-then-rotate-back between layouts);
     // the guest still needs the forward because its orientation value changed.
     private var lastReportedOrientation: Int32 = -1
+    private var lastReportedScale: CGFloat = 0
 
     override func layoutSubviews() {
         super.layoutSubviews()
         guestPreviewLayer?.frame = bounds
         for video in guestVideoLayers.values { video.frame = bounds }
         guard let metalLayer = self.layer as? CAMetalLayer else { return }
-        let scale = UIScreen.main.scale
-        let sz = CGSize(width: bounds.width * scale, height: bounds.height * scale)
+        let scale = guestDisplayScale
+        metalLayer.contentsScale = scale
+        let sz = guestDrawableSize
         if sz.width > 0 && sz.height > 0 && metalLayer.drawableSize != sz {
             metalLayer.drawableSize = sz
         }
         let reqOri = kudroid_get_requested_orientation()
         if sz.width > 0 && sz.height > 0 &&
-            (sz != lastReportedSize || reqOri != lastReportedOrientation) {
+            (sz != lastReportedSize || reqOri != lastReportedOrientation || scale != lastReportedScale) {
             lastReportedSize = sz
             lastReportedOrientation = reqOri
+            lastReportedScale = scale
             let unmanaged = Unmanaged.passUnretained(metalLayer)
             kudroid_set_metal_layer(unmanaged.toOpaque(), Int32(sz.width),
                                     Int32(sz.height), Float(scale))
@@ -2209,128 +2135,33 @@ extension NativeMetalView: UIKeyInput {
 }
 
 
-// mark: - Smart Gentle Crash alert modal
+// Present guest termination without exposing runtime logs.
 struct CrashAlertView: View {
     let crashInfo: CrashInfo
     let onDismiss: () -> Void
-    @State private var copied = false
 
     var body: some View {
         ZStack {
-            Color.black.opacity(0.85).ignoresSafeArea()
-            
-            VStack(spacing: 16) {
-                // Header Icon & Title
-                //
-                // Only one case to report now: a launch without JIT is refused before
-                // any guest code runs, so reaching a crash means JIT was enabled and
-                // the fault is KuDroid's — a missing framework API or shim. The old
-                // second branch told the user to go enable JIT, which can no longer
-                // be the explanation.
-                VStack(spacing: 8) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 46))
-                        .foregroundColor(.red)
-
-                    Text("App Crashed")
-                        .font(.title3.bold())
-                        .foregroundColor(.white)
-
-                    Text("App '\(crashInfo.appName)' stopped unexpectedly. This issue is likely caused by missing Android framework APIs or shims.")
-                        .font(.caption)
-                        .foregroundColor(.gray)
-                        .multilineTextAlignment(.center)
-                        .padding(.horizontal, 8)
-                }
-                .padding(.top, 8)
-
-                // Log Container (Tail 30 lines)
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Label("Recent Crash Logs (Tail 30 Lines)", systemImage: "terminal")
-                            .font(.caption.bold())
-                            .foregroundColor(.green)
-                        Spacer()
-                        Button(action: {
-                            UIPasteboard.general.string = crashInfo.tailLog
-                            copied = true
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                                copied = false
-                            }
-                        }) {
-                            HStack(spacing: 4) {
-                                Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                                Text(copied ? "Copied" : "Copy")
-                            }
-                            .font(.caption.weight(.semibold))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 4)
-                            .background(Color.white.opacity(0.15))
-                            .cornerRadius(6)
-                        }
-                    }
-
-                    ScrollView(.vertical, showsIndicators: true) {
-                        Text(crashInfo.tailLog.isEmpty ? "No detailed logs available." : crashInfo.tailLog)
-                            .font(.system(size: 11, weight: .regular, design: .monospaced))
-                            .foregroundColor(.green.opacity(0.9))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(10)
-                    }
-                    .frame(maxHeight: 240)
-                    .background(Color.black.opacity(0.7))
-                    .cornerRadius(8)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(Color.white.opacity(0.1), lineWidth: 1)
-                    )
-                }
-                .padding(.horizontal)
-
-                // Action Buttons
-                VStack(spacing: 10) {
-                    Button(action: {
-                        UIPasteboard.general.string = crashInfo.tailLog
-                        copied = true
-                        if let url = URL(string: "https://github.com/Lammk/kudroid/issues/new") {
-                            UIApplication.shared.open(url)
-                        }
-                    }) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "link.badge.plus")
-                            Text("Copy Log & Report on GitHub")
-                        }
-                        .font(.subheadline.bold())
-                        .foregroundColor(.black)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
-                        .background(Color.yellow)
-                        .cornerRadius(10)
-                    }
-
-                    Button(action: onDismiss) {
-                        Text("Dismiss")
-                            .font(.headline)
-                            .foregroundColor(.white)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 12)
-                            .background(Color.white.opacity(0.2))
-                            .cornerRadius(10)
-                    }
-                }
-                .padding(.horizontal)
-                .padding(.bottom, 8)
+            Color.black.opacity(0.5).ignoresSafeArea()
+            VStack(alignment: .leading, spacing: 20) {
+                Image(systemName: "app.badge")
+                    .font(.system(size: 32, weight: .light))
+                Text("App stopped")
+                    .font(.title2.bold())
+                Text("\(crashInfo.appName) closed unexpectedly.")
+                    .font(.subheadline).foregroundColor(.secondary)
+                Button(action: onDismiss) {
+                    Text("Return to library")
+                        .font(.headline).frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(ShellStyle.ink).foregroundColor(ShellStyle.inverse)
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }.buttonStyle(.plain)
             }
-            .padding(.vertical, 16)
-            .background(Color(UIColor.secondarySystemBackground).opacity(0.3))
-            .background(.ultraThinMaterial)
-            .cornerRadius(20)
-            .overlay(
-                RoundedRectangle(cornerRadius: 20)
-                    .stroke(Color.white.opacity(0.2), lineWidth: 1)
-            )
-            .padding(.horizontal, 20)
+            .padding(28).frame(maxWidth: 380, alignment: .leading)
+            .background(ShellStyle.surface)
+            .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+            .padding(24)
         }
     }
 }

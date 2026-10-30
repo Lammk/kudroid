@@ -50,6 +50,7 @@ void kudroid_clear_all_logs(void);
 void kudroid_set_documents_dir(const char* dir);
 void kudroid_set_standalone_root(const char* dir);
 void kudroid_set_log_paths(const char* documents, const char* logs);
+void kudroid_set_thermal_status(int status);
 int kudroid_debugger_attached(void);
 int kudroid_has_jit_entitlement(void);
 int kudroid_export_extract(const char* apk, const char* target, char** error);
@@ -60,6 +61,12 @@ int kudroid_is_jit_enabled(void);
 /// set and get required screen orientation from Activity (0=Landscape, 1=Portrait, -1=Unspecified)
 void kudroid_set_requested_orientation(int orientation);
 int kudroid_get_requested_orientation(void);
+
+/// synchronize host dark mode state with guest app (1=Dark, 0=Light)
+void kudroid_set_dark_mode(int is_dark);
+int kudroid_get_dark_mode(void);
+void kudroid_set_safe_area_insets(int left, int top, int right, int bottom);
+void kudroid_get_safe_area_insets(int* edges);
 
 ///transfer sensor data (Accelerometer/Gyroscope/Orientation) from iOS CoreMotion to guest app
 void kudroid_inject_sensor_event(int sensorType, float x, float y, float z);
@@ -119,7 +126,11 @@ const char* kudroid_run_apk(const char* appName);
 
 /// clears an application's internal cache folders.
 /// returns 1 on success, 0 on failure.
+/// Read package identity/icon into an isolated directory; error text is malloc-owned.
+int kudroid_preview_apk(const char* apk, const char* target, const char* locale, char** error);
 int kudroid_clear_app_cache(const char* package_name);
+/// Clear private data, preserving installation files. 1=done, 2=restart required, 0=failed.
+int kudroid_clear_app_data(const char* package_name);
 
 /// completely delete an installed app and its data.
 /// returns 1 on success, 0 on failure.

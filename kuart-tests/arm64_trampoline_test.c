@@ -7,6 +7,9 @@ typedef unsigned int u32;
 
 extern u64 kudroid_jni_call(const void* fn, const u64* gp, unsigned ngp,
                             const u64* fp, unsigned nfp, u64* fp_ret);
+extern u64 kudroid_jni_call_stack(const void* fn, const u64* gp, unsigned ngp,
+                                  const u64* fp, unsigned nfp, u64* fp_ret,
+                                  const u64* stack, unsigned nstack);
 
 static long sys_write(int fd, const void* buf, unsigned long n) {
     register long x8 __asm__("x8") = 64;      /* __NR_write */
@@ -61,6 +64,15 @@ int six_ints(void* e, void* c, int a, int b, int cc, int d, int ee, int f) {
 float eight_f(void* e, void* c, float a, float b, float cc, float d,
               float ee, float f, float g, float h) {
     (void)e;(void)c; return a + b + cc + d + ee + f + g + h;
+}
+/* 7 ints after env+cls: the last one is the first stack slot. */
+int seven_ints(void* e, void* c, int a, int b, int cc, int d, int ee, int f, int g) {
+    (void)e;(void)c; return a + b + cc + d + ee + f + g;
+}
+/* 9 floats: the ninth is the first stack slot, FP registers are full. */
+float nine_f(void* e, void* c, float a, float b, float cc, float d,
+             float ee, float f, float g, float h, float i) {
+    (void)e;(void)c; return a + b + cc + d + ee + f + g + h + i;
 }
 void* ptr_id(void* e, void* c, void* p) { (void)e;(void)c; return p; }
 
@@ -126,6 +138,24 @@ void _start(void) {
     kudroid_jni_call((void*)&eight_f, gp, 2, fp, 8, &fpret);
     Check(NearF(AsF(fpret), 36.0f),
           "eight_f(1..8) -> 36.0f (all 8 FP registers v0-v7, GP nearly empty)");
+
+    {
+        u64 stack[1];
+        reset(); for (int i = 0; i < 6; ++i) gp[2 + i] = (u64)(i + 1);
+        stack[0] = 7;
+        Check((int)kudroid_jni_call_stack((void*)&seven_ints, gp, 8, fp, 0,
+                                          &fpret, stack, 1) == 28,
+              "seven_ints(1..7) -> 28 (7th int on the stack)");
+    }
+
+    {
+        u64 stack[1];
+        reset(); for (int i = 0; i < 8; ++i) fp[i] = FBits((float)(i + 1));
+        stack[0] = FBits(9.0f);
+        kudroid_jni_call_stack((void*)&nine_f, gp, 2, fp, 8, &fpret, stack, 1);
+        Check(NearF(AsF(fpret), 45.0f),
+              "nine_f(1..9) -> 45.0f (9th float on the stack)");
+    }
 
     reset(); gp[2] = (u64)(void*)fake_env;
     Check(kudroid_jni_call((void*)&ptr_id, gp, 3, fp, 0, &fpret) == (u64)(void*)fake_env,

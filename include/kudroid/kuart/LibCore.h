@@ -26,6 +26,9 @@ bool LibCoreInvoke(Interpreter* interp, const DexMethod* method, const DexValue*
 // Whether `method` has a libcore implementation; used to fail early with UnsatisfiedLinkError.
 bool LibCoreHasMethod(const DexMethod* method);
 
+// Discard queued callback contexts after the frame scheduler stops.
+size_t LibCoreDiscardFrameCallbacks(Interpreter* interp);
+
 // libcore.io.KuNet natives (src/kuart/LibNet.cpp): the sockets and DNS behind java.net.
 bool Invoke_libcore_io_KuNet(Interpreter* interp, const char* name, const DexValue* args,
                              size_t num_args, DexValue* result);

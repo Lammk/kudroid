@@ -2707,6 +2707,49 @@ public final class R {
         public static final int TextView_textFontWeight = 95;
         public static final int TextView_textLocale = 96;
 
+        public static final int[] TextAppearance = {
+            0x01010095,  // textSize
+            0x01010096,  // typeface
+            0x01010097,  // textStyle
+            0x01010098,  // textColor
+            0x01010099,  // textColorHighlight
+            0x0101009a,  // textColorHint
+            0x0101009b,  // textColorLink
+            0x01010161,  // shadowColor
+            0x01010162,  // shadowDx
+            0x01010163,  // shadowDy
+            0x01010164,  // shadowRadius
+            0x0101038c,  // textAllCaps
+            0x010103ac,  // fontFamily
+            0x0101045d,  // elegantTextHeight
+            0x010104b6,  // letterSpacing
+            0x010104b7,  // fontFeatureSettings
+            0x01010570,  // fontVariationSettings
+            0x0101057b,  // fallbackLineSpacing
+            0x01010585,  // textFontWeight
+            0x01010592,  // textLocale
+        };
+        public static final int TextAppearance_textSize = 0;
+        public static final int TextAppearance_typeface = 1;
+        public static final int TextAppearance_textStyle = 2;
+        public static final int TextAppearance_textColor = 3;
+        public static final int TextAppearance_textColorHighlight = 4;
+        public static final int TextAppearance_textColorHint = 5;
+        public static final int TextAppearance_textColorLink = 6;
+        public static final int TextAppearance_shadowColor = 7;
+        public static final int TextAppearance_shadowDx = 8;
+        public static final int TextAppearance_shadowDy = 9;
+        public static final int TextAppearance_shadowRadius = 10;
+        public static final int TextAppearance_textAllCaps = 11;
+        public static final int TextAppearance_fontFamily = 12;
+        public static final int TextAppearance_elegantTextHeight = 13;
+        public static final int TextAppearance_letterSpacing = 14;
+        public static final int TextAppearance_fontFeatureSettings = 15;
+        public static final int TextAppearance_fontVariationSettings = 16;
+        public static final int TextAppearance_fallbackLineSpacing = 17;
+        public static final int TextAppearance_textFontWeight = 18;
+        public static final int TextAppearance_textLocale = 19;
+
         public static final int[] ImageView = {
             0x01010119,  // src
             0x0101011d,  // scaleType

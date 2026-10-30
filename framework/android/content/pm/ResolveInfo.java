@@ -5,6 +5,11 @@ import android.os.Parcelable;
 
 public class ResolveInfo implements Parcelable {
     public ActivityInfo activityInfo;
+    public ServiceInfo serviceInfo;
+    public int specificIndex = -1;
+    public int priority;
+    public int preferredOrder;
+    public boolean isDefault;
     public ResolveInfo() {}
     public int describeContents() { return 0; }
     public void writeToParcel(Parcel dest, int flags) {}

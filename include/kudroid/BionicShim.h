@@ -58,6 +58,10 @@ bool bionic_handle_tpidr_trap(void* ucontext);
 // operation as unprepared (x0 = 0). Returns true if handled.
 bool bionic_handle_jit26_trap(void* ucontext);
 
+// Handle SIGILL/SIGTRAP from ARM64 MRS/MSR system register instructions restricted at EL0.
+// Returns true if handled.
+bool bionic_handle_sysreg_trap(void* ucontext);
+
 } // namespace kudroid
 
 #endif

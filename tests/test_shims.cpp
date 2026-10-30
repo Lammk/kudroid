@@ -18,6 +18,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -46,6 +47,8 @@
 #include <unistd.h>
 
 extern "C" int bionic_clock_gettime(int clock_id, struct timespec* ts);
+extern "C" int bionic_newfstatat(int dirfd, const char* path, void* output, int flags);
+extern "C" int bionic_statx(int dirfd, const char* path, int flags, unsigned mask, void* output);
 
 
 // ─── Shims under test (extern "C", defined in SyscallShim.cpp) ──────────────
@@ -57,6 +60,8 @@ extern "C" void* bionic_mremap(void* old_address, size_t old_size,
                                size_t new_size, int flags, void* new_address);
 extern "C" int bionic_sigaction(int signum, const void* act, void* oldact);
 extern "C" int bionic_mprotect(void* addr, size_t len, int prot);
+extern "C" void* bionic_mmap(void* addr, size_t length, int prot, int flags, int fd,
+                              off_t offset);
 extern "C" int bionic_munmap(void* addr, size_t len);
 extern "C" int bionic_madvise(void* addr, size_t length, int advice);
 extern "C" long bionic_syscall(long number, ...);
@@ -71,6 +76,8 @@ extern "C" int bionic_sem_getvalue(sem_t* sem, int* out);
 extern "C" int bionic_sem_timedwait(sem_t* sem, const struct timespec* abs_timeout);
 extern "C" int kudroid_page_range_inward(uintptr_t addr, size_t len, size_t page, uintptr_t* out_start,
                                          uintptr_t* out_len);
+extern "C" int bionic_vdprintf(int fd, const char* format, va_list ap);
+extern "C" int bionic___vasprintf_chk(char** strp, int flag, const char* format, va_list ap);
 extern "C" int bionic_pthread_condattr_init(void* attr);
 extern "C" int bionic_pthread_condattr_setclock(void* attr, int clock_id);
 extern "C" int bionic_pthread_cond_init(void* cond, const void* attr);
@@ -589,6 +596,108 @@ static void test_mprotect_unaligned() {
 
     int unmap_rc = bionic_munmap(p, page * 4);
     CHECK(unmap_rc == 0, "bionic_munmap succeeds");
+}
+
+static void test_guest_executable_reservation() {
+    std::printf("[mprotect] reserved code keeps its address and bytes\n");
+    const size_t page = static_cast<size_t>(::sysconf(_SC_PAGESIZE));
+    void* reserved = bionic_mmap(nullptr, page * 3, PROT_NONE, 0x22, -1, 0);
+    CHECK(reserved != MAP_FAILED, "anonymous code reservation succeeds");
+    if (reserved == MAP_FAILED) return;
+    auto* code = static_cast<unsigned char*>(reserved) + page;
+    const bool committed = bionic_mmap(code, page, PROT_READ | PROT_WRITE, 0x32, -1, 0) == code;
+    CHECK(committed,
+          "fixed writable commit preserves the reserved address");
+    if (!committed) { bionic_munmap(reserved, page * 3); return; }
+#if defined(__aarch64__) || defined(__arm64__)
+    const uint32_t instructions[] = {0x52800540u, 0xd65f03c0u};
+    const uint32_t selfAddress[] = {0x10000000u, 0xd65f03c0u};
+#elif defined(__x86_64__)
+    const unsigned char instructions[] = {0xb8, 42, 0, 0, 0, 0xc3};
+    const unsigned char selfAddress[] = {0x48, 0x8d, 0x05, 0xf9, 0xff, 0xff, 0xff, 0xc3};
+#else
+    const unsigned char instructions[] = {42};
+#endif
+    std::memcpy(code, instructions, sizeof(instructions));
+#if defined(__aarch64__) || defined(__arm64__) || defined(__x86_64__)
+    std::memcpy(code + 32, selfAddress, sizeof(selfAddress));
+#endif
+    const int rx = bionic_mprotect(code, page, PROT_READ | PROT_EXEC);
+    CHECK(rx == 0, "reserved writable code becomes executable");
+    if (rx == 0) {
+        CHECK(std::memcmp(code, instructions, sizeof(instructions)) == 0,
+              "executable transition preserves code bytes");
+#if defined(__aarch64__) || defined(__arm64__) || defined(__x86_64__)
+        CHECK(reinterpret_cast<int(*)()>(code)() == 42,
+              "generated code executes at its original address");
+        CHECK(reinterpret_cast<void*(*)()>(code + 32)() == code + 32,
+              "PC-relative code observes the original guest address");
+#endif
+        CHECK(bionic_mprotect(code, page, PROT_READ | PROT_WRITE) == 0,
+              "executable page can return to writable state");
+        CHECK(std::memcmp(code, instructions, sizeof(instructions)) == 0,
+              "writable transition preserves code bytes");
+    }
+    CHECK(bionic_mprotect(code, page, PROT_NONE) == 0, "code page decommits");
+    CHECK(bionic_madvise(code, page, 4) == 0, "discard of reserved code succeeds");
+    CHECK(bionic_mprotect(code, page, PROT_READ | PROT_WRITE) == 0,
+          "discarded code page recommits");
+    CHECK(code[0] == 0 && code[page - 1] == 0, "discarded code backing is zero-filled");
+    for (int cycle = 0; cycle < 2; ++cycle) {
+        std::memcpy(code, instructions, sizeof(instructions));
+        const int executable = bionic_mprotect(code, page, PROT_READ | PROT_EXEC);
+        CHECK(executable == 0, "recommitted code retains executable capability");
+#if defined(__aarch64__) || defined(__arm64__) || defined(__x86_64__)
+        if (executable == 0) CHECK(reinterpret_cast<int(*)()>(code)() == 42,
+                                  "regenerated code executes after discard");
+#endif
+        CHECK(bionic_mprotect(code, page, PROT_NONE) == 0, "regenerated code decommits");
+        const long discarded = cycle == 0 ? bionic_madvise(code, page, 4)
+            : bionic_syscall(233, code, page, 4L, 0L, 0L, 0L);
+        CHECK(discarded == 0, "symbol and raw syscall discard both succeed");
+        CHECK(bionic_mprotect(code, page, PROT_READ | PROT_WRITE) == 0,
+              "repeated discard recommits");
+        CHECK(code[0] == 0 && code[page - 1] == 0, "repeated discard clears the backing");
+    }
+    CHECK(bionic_munmap(reserved, page * 3) == 0, "code reservation releases");
+}
+
+static void test_mprotect_invalid_range() {
+    std::printf("[mprotect] invalid ranges return failures\n");
+    errno = 0;
+    CHECK(bionic_mprotect(nullptr, 4096, PROT_READ) == -1 && errno == ENOMEM,
+          "nonempty unmapped null range fails with ENOMEM");
+    errno = 0;
+    CHECK(bionic_mprotect(reinterpret_cast<void*>(UINTPTR_MAX - 4095), 8192,
+                          PROT_READ) == -1 && errno == ENOMEM,
+          "overflowing range fails with ENOMEM");
+    CHECK(bionic_mprotect(nullptr, 0, PROT_READ) == 0, "empty protection range succeeds");
+}
+
+static void test_mprotect_does_not_drop_write() {
+    std::printf("[mprotect] denied writable execution is reported as failure\n");
+    const size_t page = static_cast<size_t>(::sysconf(_SC_PAGESIZE));
+    char path[] = "/tmp/kudroid-exec-permissions-XXXXXX";
+    int fd = ::mkstemp(path);
+    CHECK(fd >= 0, "protection test file opens");
+    if (fd < 0) return;
+    const int sized = ::ftruncate(fd, static_cast<off_t>(page));
+    ::close(fd);
+    fd = ::open(path, O_RDONLY);
+    ::unlink(path);
+    CHECK(sized == 0 && fd >= 0, "read-only backing is ready");
+    if (sized != 0 || fd < 0) { if (fd >= 0) ::close(fd); return; }
+    void* p = ::mmap(nullptr, page, PROT_READ, MAP_SHARED, fd, 0);
+    ::close(fd);
+    CHECK(p != MAP_FAILED, "read-only shared page maps");
+    if (p == MAP_FAILED) return;
+    errno = 0;
+    CHECK(bionic_mprotect(p, page, PROT_READ | PROT_WRITE | PROT_EXEC) == -1 &&
+              errno == EACCES,
+          "RWX denial retains EACCES instead of succeeding as RX");
+    CHECK(static_cast<const unsigned char*>(p)[0] == 0,
+          "failed protection change retains readable backing");
+    ::munmap(p, page);
 }
 
 // ─── 4. bionic_sigaction ─────────────────────────────────────────────────────
@@ -2321,6 +2430,47 @@ static void test_posix_fallocate_extends_and_reports_errors() {
     unlink(path);
 }
 
+static int call_vdprintf(int fd, const char* format, ...) {
+    va_list ap;
+    va_start(ap, format);
+    const int n = bionic_vdprintf(fd, format, ap);
+    va_end(ap);
+    return n;
+}
+
+static int call_vasprintf_chk(char** out, const char* format, ...) {
+    va_list ap;
+    va_start(ap, format);
+    const int n = bionic___vasprintf_chk(out, 1, format, ap);
+    va_end(ap);
+    return n;
+}
+
+static void test_dprintf_and_asprintf_family() {
+    std::printf("[printf] vdprintf / __vasprintf_chk format and deliver\n");
+    int pipefd[2];
+    CHECK(pipe(pipefd) == 0, "pipe");
+    CHECK(call_vdprintf(pipefd[1], "%s-%d", "abc", 42) == 6, "vdprintf reports the length");
+    char in[16] = {};
+    CHECK(read(pipefd[0], in, sizeof(in) - 1) == 6 && std::strcmp(in, "abc-42") == 0,
+          "vdprintf writes the formatted text to the descriptor");
+    close(pipefd[0]);
+    close(pipefd[1]);
+
+    char* text = nullptr;
+    CHECK(call_vasprintf_chk(&text, "%s/%d", "x", 7) == 3 && text != nullptr &&
+          std::strcmp(text, "x/7") == 0, "__vasprintf_chk allocates the formatted string");
+    std::free(text);
+#if defined(__aarch64__)
+    // A variadic call cannot reach the host function: the host reads its arguments from
+    // the stack while the guest left them in registers.
+    CHECK(resolve_bionic_symbol("asprintf") != reinterpret_cast<void*>(&asprintf),
+          "asprintf is routed through the register-capturing trampoline");
+    CHECK(resolve_bionic_symbol("dprintf") != reinterpret_cast<void*>(&dprintf),
+          "dprintf is routed through the register-capturing trampoline");
+#endif
+}
+
 static void test_vmsplice_copies_through_a_pipe() {
     int pipefd[2];
     CHECK(pipe(pipefd) == 0, "pipe");
@@ -2436,6 +2586,46 @@ static void test_mntent_iteration_over_a_file() {
     unlink(hostPath.c_str());
 }
 
+static void test_directory_stat_contracts() {
+    const auto folder = std::filesystem::temp_directory_path() /
+        ("kudroid_directory_stat_" + std::to_string(getpid()));
+    std::filesystem::create_directories(folder / "child");
+    std::filesystem::create_directory_symlink("child", folder / "link");
+    const int fd = open(folder.c_str(), O_RDONLY | O_DIRECTORY);
+    CHECK(fd >= 0, "directory fixture opens");
+    if (fd < 0) return;
+    alignas(8) unsigned char output[256] = {};
+    auto mode = [&] { uint32_t value; memcpy(&value, output + 16, 4); return value; };
+    CHECK(bionic_newfstatat(fd, "child", output, 0) == 0 && S_ISDIR(mode()),
+          "native directory-relative lookup exposes Android stat mode");
+    CHECK(bionic_newfstatat(fd, "link", output, 0x100) == 0 && S_ISLNK(mode()),
+          "Android no-follow flag stats the link");
+    errno = 0;
+    CHECK(bionic_newfstatat(fd, "", output, 0) < 0 && errno == ENOENT,
+          "empty fstatat path requires AT_EMPTY_PATH");
+    CHECK(bionic_newfstatat(fd, "", output, 0x1000) == 0 && S_ISDIR(mode()),
+          "AT_EMPTY_PATH stats the open directory");
+    errno = 0;
+    CHECK(bionic_newfstatat(fd, nullptr, output, 0) < 0 && errno == EFAULT,
+          "null fstatat pathname reports EFAULT");
+    errno = 0;
+    CHECK(bionic_newfstatat(fd, "child", output, 0x40000000) < 0 && errno == EINVAL,
+          "unsupported fstatat flags report EINVAL");
+    errno = 0;
+    CHECK(bionic_newfstatat(fd, "child", nullptr, 0) < 0 && errno == EFAULT,
+          "null fstatat output reports EFAULT");
+    CHECK(bionic_statx(fd, "link", 0x100, 0x7ff, output) == 0
+          && (output[28] | output[29] << 8) == (S_IFLNK | 0777),
+          "statx translates Android no-follow flags");
+    CHECK(bionic_statx(fd, "", 0x1000, 0x7ff, output) == 0,
+          "statx AT_EMPTY_PATH stats an open descriptor");
+    errno = 0;
+    CHECK(bionic_statx(fd, "child", 0x6000, 0x7ff, output) < 0 && errno == EINVAL,
+          "statx rejects conflicting sync modes");
+    close(fd);
+    std::filesystem::remove_all(folder);
+}
+
 int main() {
     std::printf("=== SyscallShim host tests ===\n");
     test_bionic_getifaddrs();
@@ -2468,6 +2658,9 @@ int main() {
     test_mremap_shrink_in_place();
     test_mremap_grow_with_maymove();
     test_mprotect_unaligned();
+    test_guest_executable_reservation();
+    test_mprotect_invalid_range();
+    test_mprotect_does_not_drop_write();
     test_sigaction_flag_roundtrip();
     test_guard_acquire_release();
     test_guard_same_tid_recursion_tolerated();
@@ -2496,12 +2689,14 @@ int main() {
     test_console_write_does_not_block_on_full_pipe();
     test_posix_fadvise_validates_arguments();
     test_posix_fallocate_extends_and_reports_errors();
+    test_dprintf_and_asprintf_family();
     test_vmsplice_copies_through_a_pipe();
     test_sched_policy_shims_follow_app_permissions();
     test_mkstemp_fills_the_guest_template();
     test_tdestroy_visits_every_key_once();
     test_mntent_parsing();
     test_mntent_iteration_over_a_file();
+    test_directory_stat_contracts();
     std::printf("=== %d checks, %d failures ===\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }

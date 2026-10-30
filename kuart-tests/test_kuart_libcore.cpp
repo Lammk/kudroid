@@ -179,9 +179,17 @@ std::vector<ClassSpec> BuildClasses() {
         Native("nativeGetAssetsDir", "Ljava/lang/String;", {}, true),
     };
 
+    ClassSpec bitmap;
+    bitmap.descriptor = "Landroid/graphics/Bitmap;";
+    bitmap.direct_methods = {
+        Native("nativeFill", "V", {"[I", "I"}, true),
+        Native("nativeFillRect", "V", {"[I", "I", "I", "I", "I", "I", "I"}, true),
+        Native("nativeCopyPixels", "V", {"[I", "I", "[B", "I"}, true),
+    };
+
     return {object, string,  class_class, system,    math, dbl,
             flt,    integer, point,       throwable, monitor_state, dbb,
-            assets};
+            assets, bitmap};
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -572,6 +580,72 @@ void TestAssetManager(Vm& vm) {
     Check(dir.l != nullptr, "nativeGetAssetsDir() returns a string (empty when unset)");
 }
 
+void TestBitmapBounds(Vm& vm) {
+    std::printf("-- bitmap native ranges --\n");
+    auto* source = vm.linker.AllocArray(vm.linker.FindClass("[I"), 1);
+    auto* empty = vm.linker.AllocArray(vm.linker.FindClass("[I"), 0);
+    auto* target = vm.linker.AllocArray(vm.linker.FindClass("[B"), 64);
+    Check(source && empty && target, "bitmap fixtures allocate");
+    if (!source || !empty || !target) return;
+    source->Set<uint32_t>(0, 0x80402010);
+    // Keep physical padding to detect writes beyond the logical destination length.
+    target->length = 8;
+    auto copy = [&](DexArray* input, int config, int offset) {
+        vm.Call("Landroid/graphics/Bitmap;", "nativeCopyPixels",
+                {DexValue::Ref(input), DexValue::Int(config), DexValue::Ref(target), DexValue::Int(offset)});
+    };
+    std::memset(target->Data(), 0x5a, 64);
+    copy(source, 0, 9);
+    Check(vm.interp.HasPendingException(), "pixel copy rejects an offset beyond the destination");
+    bool intact = true;
+    for (int index = 0; index < 64; ++index) intact &= target->Data()[index] == 0x5a;
+    Check(intact, "rejected pixel copy preserves destination and guard bytes");
+    copy(empty, 0, 9);
+    Check(vm.interp.HasPendingException(), "empty pixel copy still validates its offset");
+    copy(empty, 0, 8);
+    Check(!vm.interp.HasPendingException(), "empty pixel copy accepts the exact end offset");
+    copy(source, 0, -1);
+    Check(vm.interp.HasPendingException(), "pixel copy rejects a negative offset");
+    copy(source, 0, 5);
+    Check(vm.interp.HasPendingException(), "pixel copy rejects a partial destination pixel");
+    copy(source, -1, 0);
+    Check(vm.interp.HasPendingException(), "pixel copy rejects a negative configuration");
+    copy(source, 4, 0);
+    Check(vm.interp.HasPendingException(), "pixel copy rejects an unsupported configuration");
+    copy(source, 0, 4);
+    Check(!vm.interp.HasPendingException() && target->Data()[4] == 0x20
+              && target->Data()[5] == 0x10 && target->Data()[6] == 0x08 && target->Data()[7] == 0x80,
+          "pixel copy writes one premultiplied pixel up to the destination end");
+    Check(target->Data()[3] == 0x5a && target->Data()[8] == 0x5a,
+          "valid pixel copy preserves bytes before and after its range");
+    copy(source, 1, 7);
+    Check(!vm.interp.HasPendingException() && target->Data()[7] == 0x80,
+          "alpha-only copy respects its one-byte range");
+    copy(source, 2, 6);
+    Check(!vm.interp.HasPendingException() && target->Data()[6] == 0x02 && target->Data()[7] == 0x41,
+          "RGB565 copy respects its two-byte range");
+    copy(source, 3, 6);
+    Check(!vm.interp.HasPendingException() && target->Data()[6] == 0x10 && target->Data()[7] == 0x82,
+          "ARGB4444 copy respects its two-byte range");
+    Check(source->Get<uint32_t>(0) == 0x80402010, "pixel copies preserve source pixels");
+
+    auto* pixels = vm.linker.AllocArray(vm.linker.FindClass("[I"), 4);
+    if (!pixels) return;
+    vm.Call("Landroid/graphics/Bitmap;", "nativeFill", {DexValue::Ref(pixels), DexValue::Int(0xff000000)});
+    vm.Call("Landroid/graphics/Bitmap;", "nativeFillRect",
+            {DexValue::Ref(pixels), DexValue::Int(2), DexValue::Int(1), DexValue::Int(1),
+             DexValue::Int(2), DexValue::Int(2), DexValue::Int(0xffff0000)});
+    Check(!vm.interp.HasPendingException() && pixels->Get<uint32_t>(3) == 0xffff0000
+              && pixels->Get<uint32_t>(2) == 0xff000000,
+          "rectangle fill accepts the exact final pixel without spilling");
+    vm.Call("Landroid/graphics/Bitmap;", "nativeFillRect",
+            {DexValue::Ref(pixels), DexValue::Int(2), DexValue::Int(0), DexValue::Int(0),
+             DexValue::Int(2), DexValue::Int(3), DexValue::Int(0xffffffff)});
+    Check(vm.interp.HasPendingException() && pixels->Get<uint32_t>(3) == 0xffff0000,
+          "rectangle fill rejects a row beyond the array before writing");
+    vm.interp.ClearPendingException();
+}
+
 }  // namespace
 
 int main() {
@@ -595,6 +669,7 @@ int main() {
     TestMonitors(vm);
     TestDirectByteBuffer(vm);
     TestAssetManager(vm);
+    TestBitmapBounds(vm);
 
     if (g_failures == 0) {
         std::printf("=== KuART libcore natives PASSED ===\n");

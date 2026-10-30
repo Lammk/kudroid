@@ -9,7 +9,15 @@ public class RadioGroup extends LinearLayout {
     private int mCheckedId = -1;
     private OnCheckedChangeListener mOnCheckedChangeListener;
 
-    public RadioGroup(Context context) { super(context); }
+    public RadioGroup(Context context) { this(context, null); }
+    public RadioGroup(Context context, android.util.AttributeSet attrs) { this(context, attrs, 0); }
+    public RadioGroup(Context context, android.util.AttributeSet attrs, int defStyleAttr) {
+        this(context, attrs, defStyleAttr, 0);
+    }
+    public RadioGroup(Context context, android.util.AttributeSet attrs, int defStyleAttr,
+            int defStyleRes) {
+        super(context, attrs, defStyleAttr, defStyleRes);
+    }
     public void check(int id) {
         mCheckedId = id;
         if (mOnCheckedChangeListener != null) mOnCheckedChangeListener.onCheckedChanged(this, mCheckedId);

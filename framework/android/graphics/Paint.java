@@ -39,20 +39,26 @@ public class Paint {
     }
 
     public Paint(Paint paint) {
-        if (paint != null) {
-            mColor = paint.mColor;
-            mStyle = paint.mStyle;
-            mStrokeWidth = paint.mStrokeWidth;
-            mTextSize = paint.mTextSize;
-            mTextAlign = paint.mTextAlign;
-            mAntiAlias = paint.mAntiAlias;
-            mTypeface = paint.mTypeface;
-            mColorFilter = paint.mColorFilter;
-            mShadowRadius = paint.mShadowRadius;
-            mShadowDx = paint.mShadowDx;
-            mShadowDy = paint.mShadowDy;
-            mShadowColor = paint.mShadowColor;
-        }
+        if (paint != null) set(paint);
+    }
+
+    /** Copy every drawing attribute of |src| into this paint. */
+    public void set(Paint src) {
+        if (src == this || src == null) return;
+        mColor = src.mColor;
+        mStyle = src.mStyle;
+        mEnumStyle = src.mEnumStyle;
+        mEnumAlign = src.mEnumAlign;
+        mStrokeWidth = src.mStrokeWidth;
+        mTextSize = src.mTextSize;
+        mTextAlign = src.mTextAlign;
+        mAntiAlias = src.mAntiAlias;
+        mTypeface = src.mTypeface;
+        mColorFilter = src.mColorFilter;
+        mShadowRadius = src.mShadowRadius;
+        mShadowDx = src.mShadowDx;
+        mShadowDy = src.mShadowDy;
+        mShadowColor = src.mShadowColor;
     }
 
     public void setColor(int color) {
@@ -82,9 +88,15 @@ public class Paint {
 
     public void setStyle(int style) {
         mStyle = style;
+        mEnumStyle = style == STYLE_STROKE ? Style.STROKE
+                : style == STYLE_FILL_AND_STROKE ? Style.FILL_AND_STROKE : Style.FILL;
     }
 
-    public int getStyle() {
+    public Style getStyle() {
+        return mEnumStyle;
+    }
+
+    public int getStyleInt() {
         return mStyle;
     }
 
@@ -106,9 +118,14 @@ public class Paint {
 
     public void setTextAlign(int align) {
         mTextAlign = align;
+        mEnumAlign = align == 1 ? Align.CENTER : align == 2 ? Align.RIGHT : Align.LEFT;
     }
 
-    public int getTextAlign() {
+    public Align getTextAlign() {
+        return mEnumAlign;
+    }
+
+    public int getTextAlignInt() {
         return mTextAlign;
     }
 
@@ -130,8 +147,17 @@ public class Paint {
         return mTypeface;
     }
 
-    public void setColorFilter(ColorFilter colorFilter) {
+    public ColorFilter setColorFilter(ColorFilter colorFilter) {
         mColorFilter = colorFilter;
+        return colorFilter;
+    }
+
+    public int getAlpha() {
+        return mColor >>> 24;
+    }
+
+    public void setAlpha(int a) {
+        mColor = ((a & 255) << 24) | (mColor & 0x00FFFFFF);
     }
 
     public ColorFilter getColorFilter() {
@@ -337,8 +363,10 @@ public class Paint {
         return mShader;
     }
 
-    public void setXfermode(Xfermode xfermode) {
+    public Xfermode setXfermode(Xfermode xfermode) {
+        Xfermode previous = mXfermode;
         mXfermode = xfermode;
+        return previous;
     }
 
     public Xfermode getXfermode() {

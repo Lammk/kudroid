@@ -26,6 +26,15 @@ public final class KeyCharacterMap {
         return new KeyCharacterMap(id);
     }
 
+    public static boolean deviceHasKey(int keyCode) {
+        return false;
+    }
+
+    public static boolean[] deviceHasKeys(int[] keyCodes) {
+        if (keyCodes == null) return new boolean[0];
+        return new boolean[keyCodes.length];
+    }
+
     public int getId() {
         return mId;
     }
@@ -66,6 +75,7 @@ public final class KeyCharacterMap {
         public static final int META_LENGTH = 4;
         public char displayLabel;
         public char number;
-        public char[] chars = new char[META_LENGTH];
+        public char[] meta = new char[META_LENGTH];
+        public char[] chars = meta;
     }
 }

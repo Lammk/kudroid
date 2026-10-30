@@ -23,17 +23,21 @@
 // timing: what a guest is entitled to conclude from each return value. The one that
 // would have caught the original bug is the first, and it is one line.
 #include "kudroid/platform/FramePacer.h"
+#include "kudroid/kuart/VmLock.h"
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
+#include "kudroid/KuArtRuntime.h"
 
 extern "C" int bionic_clock_gettime(int clock_id, struct timespec* ts);
 
@@ -662,6 +666,140 @@ void test_process_exits_cleanly_without_a_reset() {
               "in-process test still passes either way");
 }
 
+struct HeldFrame {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool entered = false;
+    bool release = false;
+    bool finished = false;
+    int runtime_alive = -1;
+};
+
+void held_frame_callback(int64_t, void* raw) {
+    auto& frame = *static_cast<HeldFrame*>(raw);
+    {
+        std::unique_lock<std::mutex> lock(frame.mutex);
+        frame.entered = true;
+        frame.cv.notify_all();
+        frame.cv.wait(lock, [&] { return frame.release; });
+    }
+    kudroid::kuart::VmLockGuard guard;
+    std::lock_guard<std::mutex> lock(frame.mutex);
+    frame.runtime_alive = kuart_is_ready();
+    frame.finished = true;
+    frame.cv.notify_all();
+}
+
+void test_reset_waits_for_active_callback() {
+    std::printf("[shutdown] reset awaits callback completion before clearing scheduler state\n");
+    reset();
+    Check(kuart_init(nullptr) != 0, "runtime for active-callback teardown initializes");
+    HeldFrame frame;
+    void* instance = nullptr;
+    std::thread owner([&] {
+        instance = kudroid::frame_pacer_instance_for_this_thread();
+        kudroid::frame_pacer_post(instance, reinterpret_cast<void*>(&held_frame_callback), &frame, 0);
+    });
+    owner.join();
+    bool entered;
+    {
+        std::unique_lock<std::mutex> lock(frame.mutex);
+        entered = frame.cv.wait_for(lock, std::chrono::seconds(3), [&] { return frame.entered; });
+    }
+    Check(entered, "fallback worker enters the held callback");
+    std::mutex done_mutex;
+    std::condition_variable done_cv;
+    bool done = false;
+    int restored_depth = 0;
+    std::thread stop([&] {
+        kudroid::kuart::VmLockGuard guard;
+        kuart_shutdown();
+        restored_depth = kudroid::kuart::VmLockDepth();
+        std::lock_guard<std::mutex> lock(done_mutex);
+        done = true;
+        done_cv.notify_all();
+    });
+    {
+        std::unique_lock<std::mutex> lock(done_mutex);
+        Check(!done_cv.wait_for(lock, std::chrono::milliseconds(2400), [&] { return done; }),
+              "reset cannot return while a callback outlives the former stop budget");
+    }
+    kudroid::frame_pacer_post(instance, reinterpret_cast<void*>(&frame_callback), nullptr, 0);
+    Check(frame_pacer_pending_count() == 0, "stopping scheduler rejects concurrent frame posts");
+    bionic_AChoreographer_registerRefreshRateCallback(instance, reinterpret_cast<void*>(&refresh_callback), nullptr);
+    Check(g_refresh.calls.load(std::memory_order_acquire) == 0,
+          "stopping scheduler rejects new refresh callback invocations");
+    {
+        std::lock_guard<std::mutex> lock(frame.mutex);
+        frame.release = true;
+        frame.cv.notify_all();
+    }
+    stop.join();
+    {
+        std::unique_lock<std::mutex> lock(frame.mutex);
+        Check(frame.cv.wait_for(lock, std::chrono::seconds(3), [&] { return frame.finished; })
+                  && frame.runtime_alive == 1,
+              "active frame retains a live runtime until its callback completes");
+    }
+    Check(restored_depth == 1, "shutdown restores caller VM ownership after waiting");
+    Check(done && frame_pacer_pending_count() == 0, "reset completes once the active callback returns");
+    reset();
+}
+
+void test_reset_waits_for_native_callback(bool refresh) {
+    std::printf("[shutdown] reset awaits native %s callbacks\n", refresh ? "refresh" : "owner Looper");
+    reset();
+    Check(kuart_init(nullptr) != 0, "runtime for owner-callback teardown initializes");
+    HeldFrame frame;
+    std::thread owner([&] {
+        void* c = bionic_AChoreographer_getInstance();
+        if (refresh) {
+            bionic_AChoreographer_registerRefreshRateCallback(c, reinterpret_cast<void*>(&held_frame_callback), &frame);
+            return;
+        }
+        bionic_AChoreographer_postFrameCallback(c, reinterpret_cast<void*>(&held_frame_callback), &frame);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (std::chrono::steady_clock::now() < deadline) {
+            bionic_ALooper_pollOnce(100, nullptr, nullptr, nullptr);
+            std::lock_guard<std::mutex> lock(frame.mutex);
+            if (frame.finished) return;
+        }
+    });
+    {
+        std::unique_lock<std::mutex> lock(frame.mutex);
+        Check(frame.cv.wait_for(lock, std::chrono::seconds(3), [&] { return frame.entered; }),
+              "native caller enters the held callback");
+    }
+    std::mutex done_mutex;
+    std::condition_variable done_cv;
+    bool done = false;
+    int restored_depth = 0;
+    std::thread stop([&] {
+        kudroid::kuart::VmLockGuard guard;
+        kuart_shutdown();
+        restored_depth = kudroid::kuart::VmLockDepth();
+        std::lock_guard<std::mutex> lock(done_mutex);
+        done = true;
+        done_cv.notify_all();
+    });
+    {
+        std::unique_lock<std::mutex> lock(done_mutex);
+        Check(!done_cv.wait_for(lock, std::chrono::milliseconds(30), [&] { return done; }),
+              "reset cannot return while the native caller is inside a callback");
+    }
+    {
+        std::lock_guard<std::mutex> lock(frame.mutex);
+        frame.release = true;
+        frame.cv.notify_all();
+    }
+    owner.join();
+    stop.join();
+    Check(frame.finished && frame.runtime_alive == 1,
+          "owner callback retains a live runtime until it completes");
+    Check(done && restored_depth == 1, "owner-callback shutdown completes and restores VM ownership");
+    reset();
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -700,6 +838,9 @@ int main(int argc, char** argv) {
     test_null_arguments_are_survivable();
     test_the_64bit_forms_behave_the_same();
     test_process_exits_cleanly_without_a_reset();
+    test_reset_waits_for_active_callback();
+    test_reset_waits_for_native_callback(false);
+    test_reset_waits_for_native_callback(true);
 
     frame_pacer_reset_for_test();
 

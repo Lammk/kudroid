@@ -27,6 +27,7 @@
 // exactly what it was written to do, and the failure surfaced as a hang in a
 // condition variable several layers away from the cause.
 #include "kudroid/platform/FramePacer.h"
+#include "kudroid/kuart/VmLock.h"
 
 #include "kudroid/BionicShim.h"
 #include "kudroid/Log.h"
@@ -190,8 +191,10 @@ struct PacerState {
 
     std::mutex mtx;
     std::condition_variable cv;
+    std::mutex reset_mutex;
     bool started = false;
     bool stop = false;
+    unsigned active_dispatches = 0;
     // Bumped on every post/stop: the scan-then-wait below drops the mutex in
     // between, so a bare wait() could sleep through a wake that landed in the
     // gap. Predicate waits on this version cannot lose it.
@@ -207,6 +210,29 @@ PacerState& state() {
     static PacerState* s = new PacerState();
     return *s;
 }
+
+// Track guest callbacks on both the worker and owner Loopers during teardown.
+class ActiveDispatch {
+public:
+    ActiveDispatch() {
+        std::lock_guard<std::mutex> lock(state().mtx);
+        if (state().stop) return;
+        ++state().active_dispatches;
+        active_ = true;
+    }
+    ~ActiveDispatch() {
+        if (!active_) return;
+        std::lock_guard<std::mutex> lock(state().mtx);
+        --state().active_dispatches;
+        state().cv.notify_all();
+    }
+    explicit operator bool() const { return active_; }
+    ActiveDispatch(const ActiveDispatch&) = delete;
+    ActiveDispatch& operator=(const ActiveDispatch&) = delete;
+
+private:
+    bool active_ = false;
+};
 
 thread_local Choreographer* t_instance = nullptr;
 thread_local Choreographer* t_native_instance = nullptr;
@@ -371,6 +397,8 @@ void register_pipe_locked(Choreographer* c) {
 }
 
 Choreographer* acquire_instance(bool native = false) {
+    std::lock_guard<std::mutex> state_lock(state().mtx);
+    if (state().stop) return nullptr;
     Choreographer*& instance = native ? t_native_instance : t_instance;
     if (instance != nullptr &&
         instance->owner_thread.load(std::memory_order_relaxed) == self_thread_id()) return instance;
@@ -420,6 +448,8 @@ void drain_pipe(Choreographer* c) {
 // would deadlock against a lock held across the call.
 int dispatch_instance(Choreographer* c) {
     if (c == nullptr) return 0;
+    ActiveDispatch active;
+    if (!active) return 0;
     {
         std::lock_guard<std::mutex> lock(c->mtx);
         if (c->native_only && c->owner_thread.load(std::memory_order_relaxed) != self_thread_id()) {
@@ -483,7 +513,11 @@ void pacer_main() {
     // Cleared on every exit path, so the test seam can wait for this thread to be gone
     // before closing the pipes it reads.
     struct RunningFlag {
-        ~RunningFlag() { state().running.store(false, std::memory_order_release); }
+        ~RunningFlag() {
+            std::lock_guard<std::mutex> lock(state().mtx);
+            state().running.store(false, std::memory_order_release);
+            state().cv.notify_all();
+        }
     } running_flag;
 
     while (true) {
@@ -603,8 +637,7 @@ void pacer_main() {
     }
 }
 
-void start_pacer_once() {
-    std::lock_guard<std::mutex> lock(state().mtx);
+void start_pacer_locked() {
     if (state().started) return;
     state().started = true;
     state().stop = false;
@@ -619,9 +652,11 @@ void wake_pacer() {
 }
 
 void post_frame_callback(Choreographer* c, void* callback, void* data, uint64_t delay_ns) {
-    if (callback == nullptr) return;
+    if (c == nullptr || callback == nullptr) return;
     start_vsync_query();
     {
+        std::lock_guard<std::mutex> state_lock(state().mtx);
+        if (state().stop) return;
         std::lock_guard<std::mutex> lock(c->mtx);
         ensure_pipe_locked(c);
         register_pipe_locked(c);
@@ -663,9 +698,10 @@ void post_frame_callback(Choreographer* c, void* callback, void* data, uint64_t 
         c->frame_callbacks.push_back(e);
         c->pending.store(static_cast<unsigned>(c->frame_callbacks.size()),
                          std::memory_order_release);
+        start_pacer_locked();
+        ++state().post_seq;
+        state().cv.notify_all();
     }
-    start_pacer_once();
-    wake_pacer();
     pacer_telemetry(false);
 }
 
@@ -719,7 +755,10 @@ void frame_pacer_post(void* instance, void* callback, void* data, uint64_t delay
 
 void frame_pacer_add_refresh_callback(void* instance, void* callback, void* data) {
     if (callback == nullptr) return;
+    ActiveDispatch active;
+    if (!active) return;
     auto* c = instance != nullptr ? static_cast<Choreographer*>(instance) : acquire_instance();
+    if (c == nullptr) return;
     {
         std::lock_guard<std::mutex> lock(c->mtx);
         RefreshCallbackEntry e;
@@ -737,6 +776,7 @@ void frame_pacer_add_refresh_callback(void* instance, void* callback, void* data
 
 void frame_pacer_remove_refresh_callback(void* instance, void* callback, void* data) {
     auto* c = instance != nullptr ? static_cast<Choreographer*>(instance) : acquire_instance();
+    if (c == nullptr) return;
     std::lock_guard<std::mutex> lock(c->mtx);
     for (size_t i = 0; i < c->refresh_callbacks.size(); ++i) {
         // Android matches on the (callback, data) pair, so the same function registered
@@ -823,22 +863,16 @@ int frame_pacer_dispatch_due() {
 // relaunch path (kuart_shutdown): without it the detached thread keeps
 // dispatching the dead runtime's callbacks into the next app.
 void frame_pacer_reset_for_relaunch() {
+    kuart::VmLockRelease unlocked;
+    std::lock_guard<std::mutex> reset_lock(state().reset_mutex);
     {
-        std::lock_guard<std::mutex> lock(state().mtx);
+        std::unique_lock<std::mutex> lock(state().mtx);
         state().stop = true;
-    }
-    state().cv.notify_all();
-    // Wait for the thread to actually be gone before touching the pipes below: it is
-    // detached, so there is no join, and closing a descriptor it is still reading would
-    // be a use-after-close inside the pacer.
-    for (int i = 0; i < 2000 && state().running.load(std::memory_order_acquire); ++i) {
         state().cv.notify_all();
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-    {
-        std::lock_guard<std::mutex> lock(state().mtx);
-        state().started = false;
-        state().stop = false;
+        // All callback dispatchers must finish before their state can be cleared.
+        state().cv.wait(lock, [] {
+            return !state().running.load(std::memory_order_acquire) && state().active_dispatches == 0;
+        });
     }
 
     for (int i = 0; i <= kMaxInstances; ++i) {
@@ -874,6 +908,11 @@ void frame_pacer_reset_for_relaunch() {
     g_direct_missed.store(0, std::memory_order_relaxed);
     g_first_direct_ns.store(0, std::memory_order_relaxed);
     g_last_telemetry_ms.store(0, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(state().mtx);
+        state().started = false;
+        state().stop = false;
+    }
 }
 
 void frame_pacer_reset_for_test() { frame_pacer_reset_for_relaunch(); }

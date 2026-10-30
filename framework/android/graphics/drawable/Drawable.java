@@ -22,10 +22,6 @@ public abstract class Drawable {
     public void setBounds(int left, int top, int right, int bottom) {
         if (mBounds.left != left || mBounds.top != top || mBounds.right != right
                 || mBounds.bottom != bottom) {
-            if (!mBounds.isEmpty()) {
-                // Invalidate the old bounds before they change.
-                invalidateSelf();
-            }
             mBounds.set(left, top, right, bottom);
             onBoundsChange(mBounds);
         }
@@ -138,6 +134,17 @@ public abstract class Drawable {
     public void setTint(int color) { setTintList(android.content.res.ColorStateList.valueOf(color)); }
     public void setTintList(android.content.res.ColorStateList tint) {}
     public void setTintMode(android.graphics.PorterDuff.Mode mode) {}
+    public static android.graphics.PorterDuff.Mode parseTintMode(int value, android.graphics.PorterDuff.Mode defaultMode) {
+        switch (value) {
+            case 3: return android.graphics.PorterDuff.Mode.SRC_OVER;
+            case 5: return android.graphics.PorterDuff.Mode.SRC_IN;
+            case 9: return android.graphics.PorterDuff.Mode.SRC_ATOP;
+            case 14: return android.graphics.PorterDuff.Mode.MULTIPLY;
+            case 15: return android.graphics.PorterDuff.Mode.SCREEN;
+            case 16: return android.graphics.PorterDuff.Mode.ADD;
+            default: return defaultMode;
+        }
+    }
     public android.graphics.ColorFilter getColorFilter() { return null; }
     public void clearColorFilter() { setColorFilter(null); }
 

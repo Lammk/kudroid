@@ -199,4 +199,14 @@ public class ApplicationContext extends Context {
         } catch (Throwable ignored) {}
         return dir;
     }
+
+    @Override
+    public Context createPackageContext(String packageName, int flags)
+            throws PackageManager.NameNotFoundException {
+        if (packageName == null || packageName.isEmpty() ||
+            packageName.equals(mPackageName) || "android".equals(packageName)) {
+            return this;
+        }
+        throw new PackageManager.NameNotFoundException(packageName);
+    }
 }

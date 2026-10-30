@@ -65,7 +65,58 @@ public class SystemPackageManager extends PackageManager {
         final int n = Math.min(keys.length, values.length);
         for (int i = 0; i < n; ++i) {
             if (keys[i] == null || keys[i].isEmpty()) continue;
-            bundle.putString(keys[i], values[i] != null ? values[i] : "");
+            String v = values[i] != null ? values[i] : "";
+            if ("true".equalsIgnoreCase(v)) {
+                bundle.putBoolean(keys[i], true);
+            } else if ("false".equalsIgnoreCase(v)) {
+                bundle.putBoolean(keys[i], false);
+            } else if (v.startsWith("@0x") || (v.startsWith("@") && v.length() > 1 && Character.isDigit(v.charAt(1)))) {
+                try {
+                    String num = v.startsWith("@0x") ? v.substring(3) : v.substring(1);
+                    int resId = (int) Long.parseLong(num, v.startsWith("@0x") ? 16 : 10);
+                    bundle.putInt(keys[i], resId);
+                } catch (Exception ignored) {
+                    bundle.putString(keys[i], v);
+                }
+            } else {
+                boolean isNumber = false;
+                boolean isFloat = false;
+                if (!v.isEmpty()) {
+                    int dots = 0;
+                    int start = (v.charAt(0) == '-' || v.charAt(0) == '+') ? 1 : 0;
+                    if (start < v.length()) {
+                        isNumber = true;
+                        for (int k = start; k < v.length(); k++) {
+                            char c = v.charAt(k);
+                            if (c == '.') {
+                                dots++;
+                                if (dots > 1) { isNumber = false; break; }
+                            } else if (c < '0' || c > '9') {
+                                isNumber = false;
+                                break;
+                            }
+                        }
+                        if (isNumber && dots == 1 && v.length() > start + 1) {
+                            isFloat = true;
+                        } else if (dots > 0) {
+                            isNumber = false;
+                        }
+                    }
+                }
+                if (isNumber) {
+                    try {
+                        if (isFloat) {
+                            bundle.putFloat(keys[i], Float.parseFloat(v));
+                        } else {
+                            bundle.putInt(keys[i], Integer.parseInt(v));
+                        }
+                    } catch (NumberFormatException notNumber) {
+                        bundle.putString(keys[i], v);
+                    }
+                } else {
+                    bundle.putString(keys[i], v);
+                }
+            }
         }
         if (componentName == null || componentName.isEmpty()) {
             sApplicationMetaData = bundle;

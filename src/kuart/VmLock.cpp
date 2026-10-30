@@ -4,9 +4,11 @@
 #include <chrono>
 #include <condition_variable>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <pthread.h>
 #include <thread>
+#include <unordered_map>
 #if !defined(__APPLE__)
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -20,18 +22,7 @@ namespace kuart {
 
 namespace {
 
-// FIFO recursive mutex.
-//
-// The VM lock used to be a std::recursive_mutex, which is not fair: an owner that
-// releases and immediately re-acquires (which the JNI downcall path does around every
-// native, and the FramePacer does every frame) can barge ahead of a parked waiter
-// indefinitely. The single touch-dispatch worker therefore queued behind the render
-// loop and the lag grew with load. Queuing waiters in arrival order bounds that wait.
-//
-// Uncontended acquire and same-thread recursion stay on the fast path (no allocation,
-// no condition variable); only genuine cross-thread contention allocates a queue slot.
-// Ownership is per-thread and recursive; unlock() is only honoured for the owner, and
-// releasing the last level wakes exactly the thread at the head of the queue.
+// Recursive ownership with FIFO handoff to one waiting thread.
 class FairRecursiveMutex {
 public:
     void lock() {
@@ -46,11 +37,10 @@ public:
             ++count_;
             return;
         }
-        // Arrival order: the tail of the queue is served last. A barging lock() cannot
-        // jump a non-empty queue because the first test requires waiters_ to be empty.
-        waiters_.push_back(self);
-        cv_.wait(lock, [this, &self] {
-            return count_ == 0 && !waiters_.empty() && waiters_.front() == self;
+        Waiter waiter;
+        waiters_.push_back(&waiter);
+        waiter.cv.wait(lock, [this, &waiter] {
+            return count_ == 0 && !waiters_.empty() && waiters_.front() == &waiter;
         });
         waiters_.pop_front();
         owner_ = self;
@@ -62,16 +52,16 @@ public:
         if (count_ == 0 || owner_ != std::this_thread::get_id()) return;
         if (--count_ == 0) {
             owner_ = std::thread::id{};
-            cv_.notify_all();
+            if (!waiters_.empty()) waiters_.front()->cv.notify_one();
         }
     }
 
 private:
     std::mutex m_;
-    std::condition_variable cv_;
+    struct Waiter { std::condition_variable cv; };
     std::thread::id owner_{};
     int count_ = 0;
-    std::deque<std::thread::id> waiters_;
+    std::deque<Waiter*> waiters_;
 };
 
 FairRecursiveMutex g_vm_lock;
@@ -81,7 +71,26 @@ thread_local int t_vm_lock_depth = 0;
 
 // One mutex for all monitors; VM lock already serializes bytecode.
 std::mutex g_monitor_mutex;
-std::condition_variable g_monitor_cv;
+struct WaitTicket {
+    std::condition_variable cv;
+    bool notified = false;
+};
+struct MonitorState {
+    std::condition_variable entry_cv;
+    size_t users = 0;
+    std::deque<WaitTicket*> waits;
+};
+std::unordered_map<DexObject*, std::shared_ptr<MonitorState>> g_monitor_states;
+
+std::shared_ptr<MonitorState> monitor_state(DexObject* obj) {
+    auto& state = g_monitor_states[obj];
+    if (!state) state = std::make_shared<MonitorState>();
+    return state;
+}
+
+void release_monitor_state(DexObject* obj, const std::shared_ptr<MonitorState>& state) {
+    if (--state->users == 0) g_monitor_states.erase(obj);
+}
 
 thread_local uint32_t t_thread_id = 0;
 
@@ -162,6 +171,7 @@ void Enter(DexObject* obj) {
     if (obj == nullptr) return;
     const uint32_t self = SelfThreadId();
 
+    std::shared_ptr<MonitorState> state;
     {
         std::unique_lock<std::mutex> lock(g_monitor_mutex);
         if (obj->lock_owner_tid == self) {
@@ -173,19 +183,24 @@ void Enter(DexObject* obj) {
             obj->lock_count = 1;
             return;
         }
+        state = monitor_state(obj);
+        ++state->users;
+        ++g_monitorWaiters;
     }
 
     // Contended: owner releases it only by running bytecode.
     // Tracked since parked waits here are otherwise invisible.
-    VmLockRelease unlocked;
-    const BlockingWaitScope tracked(WaitKind::kJavaMonitor, obj, guest_return_address(6));
-    std::unique_lock<std::mutex> lock(g_monitor_mutex);
-    blocking_wait_note_owner(os_tid_for(obj->lock_owner_tid));
-    ++g_monitorWaiters;
-    g_monitor_cv.wait(lock, [obj] { return obj->lock_owner_tid == 0; });
+    {
+        VmLockRelease unlocked;
+        const BlockingWaitScope tracked(WaitKind::kJavaMonitor, obj, guest_return_address(6));
+        std::unique_lock<std::mutex> lock(g_monitor_mutex);
+        blocking_wait_note_owner(os_tid_for(obj->lock_owner_tid));
+        state->entry_cv.wait(lock, [obj] { return obj->lock_owner_tid == 0; });
+        obj->lock_owner_tid = self;
+        obj->lock_count = 1;
+        release_monitor_state(obj, state);
+    }
     --g_monitorWaiters;
-    obj->lock_owner_tid = self;
-    obj->lock_count = 1;
 }
 
 bool Exit(DexObject* obj) {
@@ -196,8 +211,8 @@ bool Exit(DexObject* obj) {
     if (obj->lock_owner_tid != self || obj->lock_count == 0) return false;
     if (--obj->lock_count == 0) {
         obj->lock_owner_tid = 0;
-        lock.unlock();
-        g_monitor_cv.notify_all();
+        auto state = g_monitor_states.find(obj);
+        if (state != g_monitor_states.end()) state->second->entry_cv.notify_one();
     }
     return true;
 }
@@ -207,20 +222,22 @@ bool Wait(DexObject* obj, int64_t millis, int32_t nanos) {
     const uint32_t self = SelfThreadId();
 
     uint32_t saved_count;
-    // Capture BEFORE releasing: a notify landing between the release above and
-    // the wait below must still wake us. Sampling after re-lock (the old code)
-    // lost exactly that notify and hung indefinite waits forever.
-    uint32_t seq_at_release;
+    WaitTicket ticket;
+    std::shared_ptr<MonitorState> state;
     {
         std::unique_lock<std::mutex> lock(g_monitor_mutex);
         if (obj->lock_owner_tid != self || obj->lock_count == 0) return false;
         // wait() releases the monitor fully and restores depth on return.
         saved_count = obj->lock_count;
-        seq_at_release = obj->notify_seq;
+        state = monitor_state(obj);
+        ++state->users;
+        ++g_monitorWaiters;
+        // Register before releasing ownership so notifications cannot be lost.
+        state->waits.push_back(&ticket);
         obj->lock_owner_tid = 0;
         obj->lock_count = 0;
+        state->entry_cv.notify_one();
     }
-    g_monitor_cv.notify_all();
 
     {
         VmLockRelease unlocked;
@@ -232,11 +249,9 @@ bool Wait(DexObject* obj, int64_t millis, int32_t nanos) {
         }
         std::unique_lock<std::mutex> lock(g_monitor_mutex);
 
-        // Wake on notify or free monitor; spurious wakeups re-check.
-        auto notified = [obj, seq_at_release] { return obj->notify_seq != seq_at_release; };
-        ++g_monitorWaiters;
+        auto notified = [&ticket] { return ticket.notified; };
         if (millis <= 0 && nanos <= 0) {
-            g_monitor_cv.wait(lock, notified);
+            ticket.cv.wait(lock, notified);
         } else {
             const auto now = std::chrono::steady_clock::now();
             const auto maximum = std::chrono::steady_clock::time_point::max();
@@ -249,28 +264,38 @@ bool Wait(DexObject* obj, int64_t millis, int32_t nanos) {
                                      std::chrono::nanoseconds(nanos);
                 if (timeout < remaining) deadline = now + timeout;
             }
-            g_monitor_cv.wait_until(lock, deadline, notified);
+            ticket.cv.wait_until(lock, deadline, notified);
         }
-
-        g_monitor_cv.wait(lock, [obj] { return obj->lock_owner_tid == 0; });
-        --g_monitorWaiters;
+        for (auto it = state->waits.begin(); it != state->waits.end(); ++it) {
+            if (*it == &ticket) { state->waits.erase(it); break; }
+        }
+        state->entry_cv.wait(lock, [obj] { return obj->lock_owner_tid == 0; });
         obj->lock_owner_tid = self;
         obj->lock_count = saved_count;
+        release_monitor_state(obj, state);
     }
+    --g_monitorWaiters;
     return true;
 }
 
-bool Notify(DexObject* obj, bool /*all*/) {
+bool Notify(DexObject* obj, bool all) {
     if (obj == nullptr) return false;
     const uint32_t self = SelfThreadId();
 
     {
         std::unique_lock<std::mutex> lock(g_monitor_mutex);
         if (obj->lock_owner_tid != self || obj->lock_count == 0) return false;
-        // One counter for notify/notifyAll; waiters re-check anyway.
         ++obj->notify_seq;
+        auto state = g_monitor_states.find(obj);
+        if (state != g_monitor_states.end()) {
+            for (WaitTicket* ticket : state->second->waits) {
+                if (ticket->notified) continue;
+                ticket->notified = true;
+                ticket->cv.notify_one();
+                if (!all) break;
+            }
+        }
     }
-    g_monitor_cv.notify_all();
     return true;
 }
 

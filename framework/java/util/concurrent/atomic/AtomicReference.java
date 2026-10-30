@@ -1,5 +1,8 @@
 package java.util.concurrent.atomic;
 
+import java.util.function.BinaryOperator;
+import java.util.function.UnaryOperator;
+
 public class AtomicReference<V> {
 
     private volatile V value;
@@ -15,11 +18,11 @@ public class AtomicReference<V> {
         return value;
     }
 
-    public final void set(V newValue) {
+    public final synchronized void set(V newValue) {
         value = newValue;
     }
 
-    public final void lazySet(V newValue) {
+    public final synchronized void lazySet(V newValue) {
         value = newValue;
     }
 
@@ -43,5 +46,56 @@ public class AtomicReference<V> {
 
     public String toString() {
         return String.valueOf(value);
+    }
+
+    public final V getAndUpdate(UnaryOperator<V> f) {
+        V prev, next;
+        do {
+            prev = get();
+            next = f.apply(prev);
+        } while (!compareAndSet(prev, next));
+        return prev;
+    }
+
+    public final V updateAndGet(UnaryOperator<V> f) {
+        V prev, next;
+        do {
+            prev = get();
+            next = f.apply(prev);
+        } while (!compareAndSet(prev, next));
+        return next;
+    }
+
+    public final V getAndAccumulate(V x, BinaryOperator<V> f) {
+        V prev, next;
+        do {
+            prev = get();
+            next = f.apply(prev, x);
+        } while (!compareAndSet(prev, next));
+        return prev;
+    }
+
+    public final V accumulateAndGet(V x, BinaryOperator<V> f) {
+        V prev, next;
+        do {
+            prev = get();
+            next = f.apply(prev, x);
+        } while (!compareAndSet(prev, next));
+        return next;
+    }
+
+    public final V getPlain() { return get(); }
+    public final void setPlain(V newValue) { set(newValue); }
+    public final V getOpaque() { return get(); }
+    public final void setOpaque(V newValue) { set(newValue); }
+    public final V getAcquire() { return get(); }
+    public final void setRelease(V newValue) { set(newValue); }
+    public final synchronized V compareAndExchange(V expect, V update) {
+        V witness = get();
+        if (witness == expect) set(update);
+        return witness;
+    }
+    public final boolean weakCompareAndSetPlain(V expect, V update) {
+        return compareAndSet(expect, update);
     }
 }

@@ -506,6 +506,40 @@ extern "C" int kudroid_clear_app_cache(const char* package_name) {
     return success;
 }
 
+// Clear only private storage; retained workers require a fresh process.
+extern "C" int kudroid_clear_app_data(const char* package_name) {
+    if (!package_name || !*package_name || std::strcmp(package_name, ".") == 0 ||
+        std::strcmp(package_name, "..") == 0) return 0;
+    for (const unsigned char* p = reinterpret_cast<const unsigned char*>(package_name); *p; ++p) {
+        if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+              (*p >= '0' && *p <= '9') || *p == '_' || *p == '-' || *p == '.')) return 0;
+    }
+    if (begin_apk_run(std::chrono::milliseconds(0)) != ApkRunStartResult::Acquired) return 2;
+    struct Release { ~Release() { complete_apk_run(); } } release;
+    if (s_guestRuntimeUsed.load() || s_libsResident.load()) return 2;
+    namespace fs = std::filesystem;
+    const fs::path root(kudroid::VFSPathRemapper::getInstance().androidRoot());
+    std::error_code ec;
+    if (root.empty() || !fs::is_directory(root / "data/app" / package_name, ec) || ec) return 0;
+    for (const char* directory : {"data/data", "sdcard/Android/data"}) {
+        fs::path parent = root;
+        bool missing = false;
+        for (const auto& component : fs::path(directory)) {
+            parent /= component;
+            const auto status = fs::symlink_status(parent, ec);
+            if (ec == std::errc::no_such_file_or_directory || (!ec && !fs::exists(status))) {
+                ec.clear(); missing = true; break;
+            }
+            if (ec || !fs::is_directory(status) || fs::is_symlink(status)) return 0;
+        }
+        if (missing) continue;
+        fs::remove_all(parent / package_name, ec);
+        if (ec) return 0;
+    }
+    ++s_installGeneration;
+    return 1;
+}
+
 extern "C" int kudroid_delete_app(const char* package_name);
 
 // Uninstall app with step-by-step progress callback (UTF-8 phase description, percent 0-100).

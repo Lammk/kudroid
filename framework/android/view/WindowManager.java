@@ -24,7 +24,13 @@ public class WindowManager {
         return new Display();
     }
 
+    public void addView(View view, ViewGroup.LayoutParams params) {
+    }
+
     public void addView(View view, WindowManager.LayoutParams params) {
+    }
+
+    public void updateViewLayout(View view, ViewGroup.LayoutParams params) {
     }
 
     public void updateViewLayout(View view, WindowManager.LayoutParams params) {

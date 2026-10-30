@@ -111,6 +111,15 @@ public class ViewGroup extends View implements ViewParent {
         }
     }
 
+    @Override
+    public boolean resolveRtlPropertiesIfNeeded() {
+        final boolean changed = super.resolveRtlPropertiesIfNeeded();
+        if (changed && mChildren != null) {
+            for (int i = 0; i < mChildCount; i++) mChildren[i].resolveRtlPropertiesIfNeeded();
+        }
+        return changed;
+    }
+
     protected void measureChild(View child, int parentWidthMeasureSpec, int parentHeightMeasureSpec) {
         final LayoutParams lp = child.getLayoutParams();
         final int childWidthMeasureSpec = getChildMeasureSpec(parentWidthMeasureSpec,
@@ -410,11 +419,16 @@ public class ViewGroup extends View implements ViewParent {
         }
     }
 
+    protected static final int FLAG_DISALLOW_INTERCEPT = 0x80000;
+    protected int mGroupFlags;
+
     @Override
     public boolean dispatchTouchEvent(MotionEvent event) {
         if (!isShown() || event == null) return false;
-        final int action = event.getActionMasked();
-        if (action == MotionEvent.ACTION_DOWN) {
+        final int action = event.getAction();
+        final int actionMasked = event.getActionMasked();
+
+        if (actionMasked == MotionEvent.ACTION_DOWN) {
             if (mTouchTarget != null) {
                 MotionEvent cancel = MotionEvent.obtain(event);
                 cancel.setAction(MotionEvent.ACTION_CANCEL);
@@ -422,51 +436,144 @@ public class ViewGroup extends View implements ViewParent {
                 finally { cancel.recycle(); }
             }
             mTouchTarget = null;
-            final float x = event.getX() + mScrollX;
-            final float y = event.getY() + mScrollY;
+            mGroupFlags &= ~FLAG_DISALLOW_INTERCEPT;
+        }
+
+        final boolean intercepted;
+        if (actionMasked == MotionEvent.ACTION_DOWN || mTouchTarget != null) {
+            final boolean disallowIntercept = (mGroupFlags & FLAG_DISALLOW_INTERCEPT) != 0;
+            if (!disallowIntercept) {
+                intercepted = onInterceptTouchEvent(event);
+                event.setAction(action);
+            } else {
+                intercepted = false;
+            }
+        } else {
+            intercepted = true;
+        }
+
+        if (!intercepted && actionMasked == MotionEvent.ACTION_DOWN) {
+            final View[] ordered = buildOrderedChildList();
             for (int i = mChildCount - 1; i >= 0; --i) {
-                View child = mChildren[i];
-                if (child == null || !child.isShown() || x < child.getLeft() ||
-                    x >= child.getRight() || y < child.getTop() || y >= child.getBottom()) continue;
+                View child = ordered != null ? ordered[i] : mChildren[i];
+                if (child == null || !child.isShown() || child.getVisibility() != VISIBLE ||
+                    !isTransformedTouchPointInView(event.getX(), event.getY(), child, null)) {
+                    continue;
+                }
                 if (dispatchToChild(child, event)) {
                     mTouchTarget = child;
                     return true;
                 }
             }
-        } else if (mTouchTarget != null) {
-            // An unsplit gesture keeps every pointer with its original child.
-            View child = mTouchTarget;
-            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
-                mTouchTarget = null;
-            }
-            return dispatchToChild(child, event);
         }
-        return super.dispatchTouchEvent(event);
+
+        if (mTouchTarget == null) {
+            return super.dispatchTouchEvent(event);
+        }
+
+        if (intercepted) {
+            MotionEvent cancel = MotionEvent.obtain(event);
+            cancel.setAction(MotionEvent.ACTION_CANCEL);
+            try { dispatchToChild(mTouchTarget, cancel); }
+            finally { cancel.recycle(); }
+            mTouchTarget = null;
+            return super.dispatchTouchEvent(event);
+        }
+
+        View child = mTouchTarget;
+        if (actionMasked == MotionEvent.ACTION_UP || actionMasked == MotionEvent.ACTION_CANCEL) {
+            mTouchTarget = null;
+        }
+        return dispatchToChild(child, event);
     }
 
     private boolean dispatchToChild(View child, MotionEvent event) {
         MotionEvent local = MotionEvent.obtain(event);
-        local.offsetLocation(mScrollX - child.getLeft(), mScrollY - child.getTop());
         try {
+            local.offsetLocation(mScrollX - child.getLeft(), mScrollY - child.getTop());
+            if (!child.hasIdentityMatrix() && event.getActionMasked() != MotionEvent.ACTION_CANCEL) {
+                android.graphics.Matrix inverse = new android.graphics.Matrix();
+                if (!child.getMatrix().invert(inverse)) return false;
+                local.transform(inverse);
+            }
             return child.dispatchTouchEvent(local);
         } finally {
             local.recycle();
         }
     }
 
-    @Override
-    public void draw(android.graphics.Canvas canvas) {
-        super.draw(canvas);
-        dispatchDraw(canvas);
+    protected boolean isTransformedTouchPointInView(float x, float y, View child,
+            android.graphics.PointF outLocalPoint) {
+        x += mScrollX - child.getLeft();
+        y += mScrollY - child.getTop();
+        if (!child.hasIdentityMatrix()) {
+            android.graphics.Matrix inverse = new android.graphics.Matrix();
+            if (!child.getMatrix().invert(inverse)) return false;
+            float[] point = {x, y};
+            inverse.mapPoints(point);
+            x = point[0]; y = point[1];
+        }
+        boolean inside = x >= 0 && x < child.getWidth() && y >= 0 && y < child.getHeight();
+        if (inside && outLocalPoint != null) outLocalPoint.set(x, y);
+        return inside;
     }
 
+    private ViewGroupOverlay mGroupOverlay;
+
+    @Override
+    public ViewGroupOverlay getOverlay() {
+        if (mGroupOverlay == null) mGroupOverlay = new ViewGroupOverlay(this);
+        return mGroupOverlay;
+    }
+
+    /**
+     * Draws the visible children, lower Z first (stable) unless the group supplies its own
+     * order.
+     */
+    @Override
     protected void dispatchDraw(android.graphics.Canvas canvas) {
-        for (int i = 0; i < mChildCount; i++) {
-            View child = mChildren[i];
-            if (child != null && child.isShown()) {
-                child.draw(canvas);
+        final int count = mChildCount;
+        final View[] order = buildOrderedChildList();
+        final long drawingTime = getDrawingTime();
+        for (int i = 0; i < count; i++) {
+            final View child = order != null ? order[i] : mChildren[i];
+            if (child != null && child.getVisibility() == VISIBLE) {
+                drawChild(canvas, child, drawingTime);
             }
         }
+    }
+
+    // Drawing and hit testing use the same stable child order.
+    private View[] buildOrderedChildList() {
+        final int count = mChildCount;
+        final boolean custom = isChildrenDrawingOrderEnabled();
+        boolean zOrdered = false;
+        for (int i = 0; i < count && !zOrdered; i++) {
+            final View child = mChildren[i];
+            if (child != null && child.getZ() != 0f) zOrdered = true;
+        }
+        View[] order = null;
+        if (custom || zOrdered) {
+            order = new View[count];
+            for (int i = 0; i < count; i++) {
+                final int index = custom ? getChildDrawingOrder(count, i) : i;
+                order[i] = mChildren[index];
+            }
+            if (zOrdered) {
+                // Insertion sort keeps equal-Z children in tree order.
+                for (int i = 1; i < count; i++) {
+                    final View v = order[i];
+                    final float z = v != null ? v.getZ() : 0f;
+                    int j = i - 1;
+                    while (j >= 0 && order[j] != null && order[j].getZ() > z) {
+                        order[j + 1] = order[j];
+                        j--;
+                    }
+                    order[j + 1] = v;
+                }
+            }
+        }
+        return order;
     }
 
     /**
@@ -528,6 +635,8 @@ public class ViewGroup extends View implements ViewParent {
         public int topMargin;
         public int rightMargin;
         public int bottomMargin;
+        private int mStartMargin = Integer.MIN_VALUE, mEndMargin = Integer.MIN_VALUE;
+        private int mMarginDirection;
 
         public MarginLayoutParams(Context c, android.util.AttributeSet attrs) {
             super();
@@ -542,16 +651,16 @@ public class ViewGroup extends View implements ViewParent {
                 if (margin >= 0) {
                     leftMargin = topMargin = rightMargin = bottomMargin = margin;
                 } else {
-                    final int start = a.getDimensionPixelSize(
-                            com.android.internal.R.styleable.ViewGroup_MarginLayout_layout_marginStart, -1);
-                    final int end = a.getDimensionPixelSize(
-                            com.android.internal.R.styleable.ViewGroup_MarginLayout_layout_marginEnd, -1);
+                    mStartMargin = a.getDimensionPixelSize(
+                            com.android.internal.R.styleable.ViewGroup_MarginLayout_layout_marginStart, Integer.MIN_VALUE);
+                    mEndMargin = a.getDimensionPixelSize(
+                            com.android.internal.R.styleable.ViewGroup_MarginLayout_layout_marginEnd, Integer.MIN_VALUE);
                     final int left = a.getDimensionPixelSize(
                             com.android.internal.R.styleable.ViewGroup_MarginLayout_layout_marginLeft, -1);
                     final int right = a.getDimensionPixelSize(
                             com.android.internal.R.styleable.ViewGroup_MarginLayout_layout_marginRight, -1);
-                    leftMargin = left >= 0 ? left : Math.max(start, 0);
-                    rightMargin = right >= 0 ? right : Math.max(end, 0);
+                    leftMargin = left >= 0 ? left : 0;
+                    rightMargin = right >= 0 ? right : 0;
                     topMargin = Math.max(a.getDimensionPixelSize(
                             com.android.internal.R.styleable.ViewGroup_MarginLayout_layout_marginTop, 0), 0);
                     bottomMargin = Math.max(a.getDimensionPixelSize(
@@ -576,6 +685,9 @@ public class ViewGroup extends View implements ViewParent {
             this.topMargin = source.topMargin;
             this.rightMargin = source.rightMargin;
             this.bottomMargin = source.bottomMargin;
+            this.mStartMargin = source.mStartMargin;
+            this.mEndMargin = source.mEndMargin;
+            this.mMarginDirection = source.mMarginDirection;
         }
 
         public MarginLayoutParams(LayoutParams source) {
@@ -589,11 +701,32 @@ public class ViewGroup extends View implements ViewParent {
             bottomMargin = bottom;
         }
 
-        public void setMarginStart(int start) { leftMargin = start; }
-        public int getMarginStart() { return leftMargin; }
-        public void setMarginEnd(int end) { rightMargin = end; }
-        public int getMarginEnd() { return rightMargin; }
-        public boolean isMarginRelative() { return false; }
+        public void setMarginStart(int start) { mStartMargin = start; }
+        public int getMarginStart() {
+            return mStartMargin != Integer.MIN_VALUE ? mStartMargin
+                    : (mMarginDirection == LAYOUT_DIRECTION_RTL ? rightMargin : leftMargin);
+        }
+        public void setMarginEnd(int end) { mEndMargin = end; }
+        public int getMarginEnd() {
+            return mEndMargin != Integer.MIN_VALUE ? mEndMargin
+                    : (mMarginDirection == LAYOUT_DIRECTION_RTL ? leftMargin : rightMargin);
+        }
+        public boolean isMarginRelative() {
+            return mStartMargin != Integer.MIN_VALUE || mEndMargin != Integer.MIN_VALUE;
+        }
+        public void setLayoutDirection(int direction) {
+            if (direction == LAYOUT_DIRECTION_LTR || direction == LAYOUT_DIRECTION_RTL)
+                mMarginDirection = direction;
+        }
+        public int getLayoutDirection() { return mMarginDirection; }
+        @Override public void resolveLayoutDirection(int direction) {
+            setLayoutDirection(direction);
+            if (!isMarginRelative()) return;
+            int start = mStartMargin != Integer.MIN_VALUE ? mStartMargin : 0;
+            int end = mEndMargin != Integer.MIN_VALUE ? mEndMargin : 0;
+            leftMargin = mMarginDirection == LAYOUT_DIRECTION_RTL ? end : start;
+            rightMargin = mMarginDirection == LAYOUT_DIRECTION_RTL ? start : end;
+        }
     }
 
     public interface OnHierarchyChangeListener {
@@ -625,6 +758,18 @@ public class ViewGroup extends View implements ViewParent {
      */
     @Override
     public void requestDisallowInterceptTouchEvent(boolean disallowIntercept) {
+        if (disallowIntercept == ((mGroupFlags & FLAG_DISALLOW_INTERCEPT) != 0)) {
+            return;
+        }
+        if (disallowIntercept) {
+            mGroupFlags |= FLAG_DISALLOW_INTERCEPT;
+        } else {
+            mGroupFlags &= ~FLAG_DISALLOW_INTERCEPT;
+        }
+        ViewParent parent = getParent();
+        if (parent != null) {
+            parent.requestDisallowInterceptTouchEvent(disallowIntercept);
+        }
     }
 
     @Override
@@ -766,6 +911,10 @@ public class ViewGroup extends View implements ViewParent {
     @Override
     public WindowInsets dispatchApplyWindowInsets(WindowInsets insets) {
         insets = super.dispatchApplyWindowInsets(insets);
+        if (getContext().getApplicationInfo().targetSdkVersion >= 29) {
+            for (int i = 0; i < mChildCount; i++) mChildren[i].dispatchApplyWindowInsets(insets);
+            return insets;
+        }
         if (insets != null && !insets.isConsumed()) {
             for (int i = 0; i < mChildCount; i++) {
                 insets = mChildren[i].dispatchApplyWindowInsets(insets);
@@ -1080,8 +1229,7 @@ public class ViewGroup extends View implements ViewParent {
     }
 
     protected boolean drawChild(android.graphics.Canvas canvas, View child, long drawingTime) {
-        child.draw(canvas);
-        return false;
+        return child.draw(canvas, this, drawingTime);
     }
 
     protected boolean getChildStaticTransformationEnabled() {

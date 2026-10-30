@@ -32,6 +32,7 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
     private boolean mCreated = false;
     private boolean mStarted = false;
     private boolean mResumed = false;
+    private boolean mFullyDrawnReported = false;
     private Thread mUiThread;
     private android.os.Handler mUiHandler;
     private final FragmentManager mFragments = new FragmentManager(this);
@@ -70,6 +71,14 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
 
     public Activity() {
     }
+
+    public void reportFullyDrawn() {
+        if (mFullyDrawnReported) return;
+        mFullyDrawnReported = true;
+        nativeReportFullyDrawn(getClass().getName());
+    }
+
+    private static native void nativeReportFullyDrawn(String className);
 
     /**
      * Give the Activity its base Context.
@@ -156,6 +165,8 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
     protected void onRestart() {
     }
 
+    public final void performRestart() { onRestart(); }
+
     protected void onSaveInstanceState(Bundle outState) {
     }
 
@@ -184,6 +195,14 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
         onCreate(savedInstanceState);
         mFragments.dispatchState(2, savedInstanceState);
         dispatchLifecycle(ActivityLifecycleDispatcher.CREATED, ActivityLifecycleDispatcher.POST, savedInstanceState);
+        onPostCreate(savedInstanceState);
+    }
+
+    protected void onPostCreate(Bundle savedInstanceState) {
+    }
+
+    public void onPostCreate(Bundle savedInstanceState, android.os.PersistableBundle persistentState) {
+        onPostCreate(savedInstanceState);
     }
 
     /**
@@ -210,6 +229,12 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
         onResume();
         mFragments.dispatchState(4, null);
         dispatchLifecycle(ActivityLifecycleDispatcher.RESUMED, ActivityLifecycleDispatcher.POST, null);
+        onPostResume();
+        initOptionsMenuIfNeeded();
+        requestRender();
+    }
+
+    protected void onPostResume() {
     }
 
     /**
@@ -303,7 +328,9 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
      * end of operation.
      */
     public void finish() {
+        if (mFinishing) return;
         mFinishing = true;
+        ActivityThread.finishActivity(this);
     }
 
     public void finishAfterTransition() {
@@ -339,6 +366,8 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
         return mChangingConfigurations;
     }
 
+    public int getChangingConfigurations() { return 0; }
+
     /** An Activity started by another Activity, which KuDroid never does. */
     public boolean isChild() {
         return false;
@@ -354,19 +383,7 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
         if (win != null && win.superDispatchKeyEvent(event)) {
             return true;
         }
-        final android.view.View decor = (win != null) ? win.peekDecorView() : null;
-        if (event.dispatch(this, decor != null ? decor.getKeyDispatcherState() : null, this)) {
-            return true;
-        }
-        final android.view.View focus = getCurrentFocus();
-        if (focus != null && focus.dispatchKeyEvent(event)) return true;
-        if (event.getAction() == android.view.KeyEvent.ACTION_DOWN) {
-            return onKeyDown(event.getKeyCode(), event);
-        }
-        if (event.getAction() == android.view.KeyEvent.ACTION_UP) {
-            return onKeyUp(event.getKeyCode(), event);
-        }
-        return false;
+        return event.dispatch(this, win != null ? win.getKeyDispatcherState() : null, this);
     }
 
     /** Shortcut keys (Ctrl+X and friends), which KuDroid does not synthesise. */
@@ -375,6 +392,10 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
     }
 
     public boolean onKeyDown(int keyCode, android.view.KeyEvent event) {
+        if (keyCode == android.view.KeyEvent.KEYCODE_BACK) {
+            event.startTracking();
+            return true;
+        }
         return false;
     }
 
@@ -383,7 +404,7 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
     }
 
     public boolean onKeyUp(int keyCode, android.view.KeyEvent event) {
-        if (keyCode == android.view.KeyEvent.KEYCODE_BACK) {
+        if (keyCode == android.view.KeyEvent.KEYCODE_BACK && event.isTracking() && !event.isCanceled()) {
             onBackPressed();
             return true;
         }
@@ -411,19 +432,37 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
     }
 
     public boolean onCreatePanelMenu(int featureId, android.view.Menu menu) {
-        return false;
+        return featureId == android.view.Window.FEATURE_OPTIONS_PANEL && onCreateOptionsMenu(menu);
     }
 
     public boolean onPreparePanel(int featureId, android.view.View view, android.view.Menu menu) {
+        if (featureId == android.view.Window.FEATURE_OPTIONS_PANEL && menu != null) {
+            return onPrepareOptionsMenu(menu);
+        }
         return true;
     }
 
-    public boolean onMenuOpened(int featureId, android.view.Menu menu) {
+    public boolean onCreateOptionsMenu(android.view.Menu menu) {
+        return true;
+    }
+
+    public boolean onPrepareOptionsMenu(android.view.Menu menu) {
         return true;
     }
 
     public boolean onMenuItemSelected(int featureId, android.view.MenuItem item) {
+        if (featureId == android.view.Window.FEATURE_OPTIONS_PANEL) {
+            return onOptionsItemSelected(item);
+        }
         return false;
+    }
+
+    public boolean onOptionsItemSelected(android.view.MenuItem item) {
+        return false;
+    }
+
+    public boolean onMenuOpened(int featureId, android.view.Menu menu) {
+        return true;
     }
 
     public void onWindowAttributesChanged(android.view.WindowManager.LayoutParams attrs) {
@@ -492,6 +531,10 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
      * Read from the content view's hierarchy rather than tracked here, so it cannot fall out
      * of step with what the views themselves believe.
      */
+    public android.view.MenuInflater getMenuInflater() {
+        return new android.view.MenuInflater(this);
+    }
+
     public android.view.View getCurrentFocus() {
         final android.view.View root = getContentView();
         return root != null ? findFocusIn(root) : null;
@@ -569,6 +612,9 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
      * postponeEnterTransition() crashes instead of simply not animating.
      */
     public void invalidateOptionsMenu() {
+        if (mWindow != null) {
+            mWindow.invalidatePanelMenu(android.view.Window.FEATURE_OPTIONS_PANEL);
+        }
     }
 
     public void postponeEnterTransition() {
@@ -814,15 +860,93 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
      * (which this used to do) left every child at 0,0,0,0 and drew the whole tree on
      * top of itself in the top-left corner.
      */
+    private int mFrameCount;
+
+    /** Writes the laid-out hierarchy to the log, so a blank screen can be diagnosed from it. */
+    private void logViewTree(android.view.View root) {
+        final StringBuilder sb = new StringBuilder("view tree after frame " + mFrameCount + ":\n");
+        dumpView(root, 0, sb, new int[] {300});
+        android.util.Log.i("ViewTree", sb.toString());
+    }
+
+    private void dumpView(android.view.View v, int depth, StringBuilder sb, int[] budget) {
+        if (budget[0]-- <= 0) return;
+        for (int i = 0; i < depth; i++) sb.append("  ");
+        sb.append(v.getClass().getName());
+        if (v.getId() != android.view.View.NO_ID) {
+            String name = null;
+            try {
+                name = v.getResources().getResourceEntryName(v.getId());
+            } catch (RuntimeException ignored) {
+            }
+            sb.append(" #").append(name != null ? name : Integer.toHexString(v.getId()));
+        }
+        sb.append(" [").append(v.getLeft()).append(',').append(v.getTop()).append(',')
+                .append(v.getRight()).append(',').append(v.getBottom()).append(']');
+        if (v.getVisibility() != android.view.View.VISIBLE) sb.append(" vis=").append(v.getVisibility());
+        if (v.getAlpha() != 1f) sb.append(" alpha=").append(v.getAlpha());
+        if (v.getBackground() != null) sb.append(" bg=").append(v.getBackground().getClass().getSimpleName());
+        if (v instanceof android.widget.TextView) {
+            final CharSequence text = ((android.widget.TextView) v).getText();
+            if (text != null && text.length() > 0) {
+                sb.append(" text=\"").append(text.length() > 30 ? text.subSequence(0, 30) : text).append('"');
+            }
+        }
+        sb.append('\n');
+        if (v instanceof android.view.ViewGroup) {
+            final android.view.ViewGroup g = (android.view.ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) dumpView(g.getChildAt(i), depth + 1, sb, budget);
+        }
+    }
+
+    private boolean mRendering;
+    private boolean mRenderAgain;
+    private int mBusyFrames;
+
     public void renderViewHierarchy() {
+        mRendering = true;
         try {
+            renderFrame();
+        } finally {
+            mRendering = false;
+            if (mRenderAgain) {
+                // A view asked for another frame while this one was drawing.
+                mRenderAgain = false;
+                mBusyFrames++;
+                requestRender();
+            } else {
+                mBusyFrames = 0;
+            }
+        }
+    }
+
+    private boolean mOptionsMenuInitialized;
+
+    public void initOptionsMenuIfNeeded() {
+        if (!mOptionsMenuInitialized && mWindow != null) {
+            mOptionsMenuInitialized = true;
+            if (mWindow.getCallback() != null) {
+                android.view.Menu menu = mWindow.getOptionsMenu();
+                mWindow.getCallback().onCreatePanelMenu(android.view.Window.FEATURE_OPTIONS_PANEL, menu);
+                mWindow.getCallback().onPreparePanel(android.view.Window.FEATURE_OPTIONS_PANEL, null, menu);
+            }
+        }
+    }
+
+    private void renderFrame() {
+        try {
+            final long start = System.nanoTime();
+            final long queueDelay = mQueuedFrameAtNanos == 0 ? 0 : Math.max(0, start - mQueuedFrameAtNanos);
+            mQueuedFrameAtNanos = 0;
             android.graphics.Canvas canvas = new android.graphics.Canvas();
             final int width = canvas.getWidth();
             final int height = canvas.getHeight();
 
             android.view.Window window = getWindow();
             window.updateSurfaceSize(width, height, android.graphics.Canvas.isSurfaceReady());
+            initOptionsMenuIfNeeded();
             if (!window.measureAndLayout()) return;
+            final long laidOut = System.nanoTime();
             android.view.View decor = window.getDecorView();
             if (decor == null) return;
 
@@ -833,9 +957,14 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
             }
 
             canvas.drawColor(0xFF181818);
+            window.beginDrawFrame();
             decor.getViewTreeObserver().dispatchOnDraw();
             decor.draw(canvas);
+            final long drawn = System.nanoTime();
             canvas.flush();
+            nativeReportFrameTimings(queueDelay, laidOut - start, drawn - laidOut, System.nanoTime() - drawn);
+            mFrameCount++;
+            if (mFrameCount == 2 || mFrameCount == 40) logViewTree(decor);
         } catch (Throwable t) {
             t.printStackTrace();
         }
@@ -849,8 +978,16 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
      * has a SurfaceView is left alone: it draws itself.
      */
     private boolean mRenderPending;
+    private long mQueuedFrameAtNanos;
+    private static native void nativeReportFrameTimings(long queueNanos, long layoutNanos,
+            long drawNanos, long submitNanos);
 
     public void requestRender() {
+        if (!mResumed || containsSurfaceView(getContentView())) return;
+        if (mRendering) {
+            mRenderAgain = true;
+            return;
+        }
         final android.os.Looper mainLooper = android.os.Looper.getMainLooper();
         if (mainLooper == null) return;
         final android.os.Handler handler;
@@ -861,12 +998,14 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
                 mUiThread = mainLooper.getThread();
             }
             mRenderPending = true;
+            mQueuedFrameAtNanos = System.nanoTime() + 16000000L;
             handler = mUiHandler;
         }
         handler.postDelayed(new Runnable() {
             @Override
             public void run() {
                 synchronized (Activity.this) { mRenderPending = false; }
+                if (!mResumed) return;
                 if (!containsSurfaceView(getContentView())) renderViewHierarchy();
             }
         }, 16);
@@ -899,14 +1038,14 @@ public class Activity extends ContextThemeWrapper implements android.view.Window
                 public void run() {
                     action.run();
                     if (!containsSurfaceView(getContentView())) {
-                        renderViewHierarchy();
+                        requestRender();
                     }
                 }
             });
         } else {
             action.run();
             if (!containsSurfaceView(getContentView())) {
-                renderViewHierarchy();
+                requestRender();
             }
         }
     }

@@ -92,6 +92,15 @@ public class FileInputStream extends InputStream {
         return fd;
     }
 
+    private java.nio.channels.FileChannel channel;
+
+    public java.nio.channels.FileChannel getChannel() {
+        synchronized (this) {
+            if (channel == null) channel = new StreamFileChannel(this, null, path);
+            return channel;
+        }
+    }
+
     public void close() throws IOException {
         // Guarded: close() is routinely called twice (explicitly and from a finally block),
         // and closing a descriptor twice can close an unrelated file that reused the number.

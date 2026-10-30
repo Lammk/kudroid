@@ -33,6 +33,7 @@ public final class InflaterTests {
         try { errors(); } catch (Throwable t) { TestSupport.fail("errors", t); }
         try { frameworkReference(); } catch (Throwable t) { TestSupport.fail("frameworkReference", t); }
         try { colorStateList(); } catch (Throwable t) { TestSupport.fail("colorStateList", t); }
+        try { vectorColors(); } catch (Throwable t) { TestSupport.fail("vectorColors", t); }
         return TestSupport.report.toString();
     }
 
@@ -111,7 +112,7 @@ public final class InflaterTests {
                 .attr(attrId(R.styleable.View, R.styleable.View_paddingLeft), "paddingLeft",
                         AxmlBuilder.TYPE_DIMENSION, 12 << 8)
                 .attr(attrId(R.styleable.View, R.styleable.View_visibility), "visibility",
-                        AxmlBuilder.TYPE_INT_DEC, View.INVISIBLE)
+                        AxmlBuilder.TYPE_INT_DEC, 1)
                 .attrString(attrId(R.styleable.View, R.styleable.View_tag), "tag", "root-tag")
                 .attr(attrId(R.styleable.View, R.styleable.View_clickable), "clickable",
                         AxmlBuilder.TYPE_INT_BOOLEAN, -1)
@@ -477,5 +478,48 @@ public final class InflaterTests {
         android.content.res.ColorStateList disabled = android.content.res.ColorStateList.createFromXml(
                 new Resources(), new CompiledXmlResourceParser(one.build()), null);
         check(disabled.getColorForState(new int[0], 0) == 0x80808080, "android:alpha scales the color's alpha");
+    }
+
+    static void vectorColors() throws Exception {
+        final int colorId = 0x7f060123;
+        final int pressed = 0x010100a7;
+        final android.content.res.ColorStateList list = new android.content.res.ColorStateList(
+                new int[][] {new int[] {pressed}, new int[0]},
+                new int[] {0xff112233, 0xff445566});
+        final Resources.Theme theme = new Resources().newTheme();
+        Resources resources = new Resources() {
+            @Override public void getValue(int id, android.util.TypedValue out, boolean resolve) {
+                if (id != colorId) throw new NotFoundException("unexpected color id");
+                out.type = android.util.TypedValue.TYPE_STRING;
+                out.string = "res/color/states.xml";
+                out.resourceId = colorId;
+            }
+            @Override public android.content.res.ColorStateList getColorStateList(int id, Resources.Theme t) {
+                check(id == colorId && t == theme, "vector color keeps resource identity and theme");
+                return list;
+            }
+        };
+        AxmlBuilder b = new AxmlBuilder().start("vector")
+                .attr(0x01010159, "width", AxmlBuilder.TYPE_INT_DEC, 24)
+                .attr(0x01010155, "height", AxmlBuilder.TYPE_INT_DEC, 24)
+                .attr(0x01010402, "viewportWidth", AxmlBuilder.TYPE_FLOAT, Float.floatToIntBits(24))
+                .attr(0x01010403, "viewportHeight", AxmlBuilder.TYPE_FLOAT, Float.floatToIntBits(24));
+        b.start("path").attrString(0x01010405, "pathData", "M0,0 L24,0 L24,24 Z")
+                .attr(0x01010404, "fillColor", AxmlBuilder.TYPE_REFERENCE, colorId).end().end();
+        XmlResourceParser parser = parse(b);
+        parser.next();
+        android.graphics.drawable.VectorDrawable vector =
+                android.graphics.drawable.VectorDrawable.create(resources, parser, theme);
+        parser.close();
+        check(vector.isStateful(), "vector preserves a stateful fill selector");
+        check(vector.setState(new int[] {pressed}), "pressed state changes vector color");
+        check(!vector.setState(new int[] {pressed}), "unchanged state avoids rerasterization");
+        check(vector.setState(new int[0]), "vector restores its default fill");
+        android.graphics.drawable.VectorDrawable tinted = new android.graphics.drawable.VectorDrawable();
+        tinted.setTintList(list);
+        check(tinted.isStateful() && tinted.setState(new int[] {pressed}),
+                "vector tint selector tracks drawable state");
+        tinted.setTint(0xff778899);
+        check(!tinted.isStateful(), "a constant tint replaces the selector");
     }
 }

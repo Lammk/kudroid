@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace kudroid {
 
@@ -11,8 +12,9 @@ namespace kudroid {
 // application's resources.arsc never contains them, because framework-res is not shipped.
 //
 // Covered: default-configuration color/dimen/integer/bool/fraction scalars, a few public
-// strings, and the name of every public resource. File-backed resources (drawables,
-// layouts) and styles have a name and an id but no value here.
+// strings, the name of every public resource, and the framework themes/styles (public
+// attrs with scalar or reference values). File-backed resources (drawables, layouts) have a
+// name and an id but no value here.
 
 // package 0x01 with a non-zero type byte; 0x0100xxxx are internal bag keys, not resources.
 inline bool framework_resource_is_id(uint32_t id) {
@@ -23,6 +25,8 @@ inline bool framework_resource_is_id(uint32_t id) {
 bool framework_resource_scalar(uint32_t id, uint8_t* type, uint32_t* data);
 // Default-locale text of a string entry.
 bool framework_resource_string(uint32_t id, std::string* text);
+// Parent id and (attr, type, data) triples of a framework style; false for other ids.
+bool framework_resource_style(uint32_t id, uint32_t* parent, std::vector<uint32_t>* triples);
 // "color", "white" for 0x0106000b.
 bool framework_resource_name(uint32_t id, std::string* type, std::string* entry);
 // Inverse of framework_resource_name.

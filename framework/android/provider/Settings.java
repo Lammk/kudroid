@@ -21,6 +21,12 @@ public final class Settings {
 
     public static final class System {
         public static final Uri CONTENT_URI = Uri.parse("content://settings/system");
+        public static final Uri DEFAULT_NOTIFICATION_URI =
+                Uri.parse("content://settings/system/notification_sound");
+        public static final Uri DEFAULT_RINGTONE_URI =
+                Uri.parse("content://settings/system/ringtone");
+        public static final Uri DEFAULT_ALARM_ALERT_URI =
+                Uri.parse("content://settings/system/alarm_alert");
         public static final String ANDROID_ID = "android_id";
         public static String getString(ContentResolver resolver, String name) {
             if (ANDROID_ID.equals(name)) {

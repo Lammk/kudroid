@@ -155,11 +155,31 @@ constexpr uint32_t kStyleTheme = 0x7f010000, kStyleDef = 0x7f010001, kStyleXml =
 
 uint32_t Px(uint32_t value) { return value << 8; }  // TYPE_DIMENSION, px unit
 
+std::vector<uint8_t> Variant(uint32_t index, uint8_t type, uint32_t data,
+                             uint16_t sw = 0, uint8_t night = 0, uint8_t orientation = 0,
+                             uint16_t sdk = 0, uint16_t density = 0) {
+    std::vector<uint32_t> keys(index + 1, 6);
+    std::vector<std::pair<uint8_t, uint32_t>> values(index + 1, {type, data});
+    auto chunk = SimpleTypeChunk(3, keys, values);
+    chunk.insert(chunk.begin() + 24, 32, 0);
+    Patch16(&chunk, 2, 56);
+    Patch32(&chunk, 4, static_cast<uint32_t>(chunk.size()));
+    Patch32(&chunk, 16, 56 + (index + 1) * 4);
+    Patch32(&chunk, 20, 36);
+    chunk[32] = orientation;
+    Patch16(&chunk, 34, density);
+    Patch16(&chunk, 44, sdk);
+    chunk[49] = night;
+    Patch16(&chunk, 50, sw);
+    for (uint32_t i = 0; i < index; ++i) Patch32(&chunk, 56 + i * 4, 0xffffffff);
+    return chunk;
+}
+
 std::vector<uint8_t> ResourceTable() {
-    const std::vector<uint8_t> globalStrings = StringPool({"unused"});
-    const std::vector<uint8_t> typeStrings = StringPool({"style", "color"});
+    const std::vector<uint8_t> globalStrings = StringPool({"unused", "day", "night", "res/day.xml", "res/night.xml"});
+    const std::vector<uint8_t> typeStrings = StringPool({"style", "color", "qualified"});
     const std::vector<uint8_t> keyStrings =
-            StringPool({"Theme", "DefStyle", "XmlStyle", "ResStyle", "Child", "accent"});
+            StringPool({"Theme", "DefStyle", "XmlStyle", "ResStyle", "Child", "accent", "variant"});
     const std::vector<uint8_t> styles = StyleTypeChunk(1, {
         {0, 0, {{kDefStyleAttr, kRef, kStyleDef}, {kMinHeight, kDimension, Px(33)},
                 {kPaddingTop, kDimension, Px(7)}, {kPadAttr, kDimension, Px(11)}}},
@@ -171,6 +191,13 @@ std::vector<uint8_t> ResourceTable() {
         {4, kStyleDef, {{kMinWidth, kDimension, Px(21)}}},
     });
     const std::vector<uint8_t> colors = SimpleTypeChunk(2, {5}, {{kColor, 0xff336699}});
+    auto nightStyle = StyleTypeChunk(1, {{0, 0, {{kPaddingTop, kDimension, Px(17)}}}});
+    nightStyle.insert(nightStyle.begin() + 24, 32, 0);
+    Patch16(&nightStyle, 2, 56);
+    Patch32(&nightStyle, 4, static_cast<uint32_t>(nightStyle.size()));
+    Patch32(&nightStyle, 16, 60);
+    Patch32(&nightStyle, 20, 36);
+    nightStyle[49] = 0x20;
 
     std::vector<uint8_t> package;
     U16(&package, 0x0200);
@@ -190,6 +217,23 @@ std::vector<uint8_t> ResourceTable() {
     package.insert(package.end(), keyStrings.begin(), keyStrings.end());
     package.insert(package.end(), styles.begin(), styles.end());
     package.insert(package.end(), colors.begin(), colors.end());
+    package.insert(package.end(), nightStyle.begin(), nightStyle.end());
+    const std::vector<std::vector<uint8_t>> variants = {
+        Variant(0, 0x12, 0), Variant(0, 0x12, 1, 600),
+        Variant(1, kColor, 0xffeeeeee), Variant(1, kColor, 0xff111111, 0, 0x20),
+        Variant(2, kIntDec, 1), Variant(2, kIntDec, 2, 0, 0, 2),
+        Variant(3, kIntDec, 28), Variant(3, kIntDec, 99, 0, 0, 0, 99),
+        Variant(4, kRef, 0x7f030001),
+        Variant(5, kIntDec, 160, 0, 0, 0, 0, 160),
+        Variant(5, kIntDec, 480, 0, 0, 0, 0, 480),
+        Variant(6, 3, 1), Variant(6, 3, 2, 0, 0x20),
+        Variant(7, 3, 3), Variant(7, 3, 4, 0, 0x20),
+        Variant(8, kIntDec, 160, 0, 0, 0, 0, 160),
+        Variant(8, kIntDec, 240, 0, 0, 0, 0, 240),
+        Variant(9, kIntDec, 480, 0, 0, 0, 0, 480),
+        Variant(9, kIntDec, 65534, 0, 0, 0, 0, 65534)
+    };
+    for (const auto& variant : variants) package.insert(package.end(), variant.begin(), variant.end());
     Patch32(&package, 4, static_cast<uint32_t>(package.size()));
 
     std::vector<uint8_t> table;

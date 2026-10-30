@@ -50,6 +50,7 @@ private:
 
     std::string documentsDirectory_;
     std::string androidRoot_;
+    std::string canonicalRoot_;
     std::string packageName_;
 
     mutable std::mutex initMutex_;

@@ -39,6 +39,10 @@ public interface MenuItem {
 
     CharSequence getTitle();
 
+    MenuItem setTitleCondensed(CharSequence title);
+
+    CharSequence getTitleCondensed();
+
     MenuItem setVisible(boolean visible);
 
     boolean isVisible();
@@ -67,9 +71,23 @@ public interface MenuItem {
 
     MenuItem setActionView(View view);
 
+    MenuItem setActionView(int resId);
+
     View getActionView();
 
+    MenuItem setActionProvider(ActionProvider actionProvider);
+
+    ActionProvider getActionProvider();
+
     MenuItem setOnMenuItemClickListener(OnMenuItemClickListener listener);
+
+    MenuItem setOnActionExpandListener(OnActionExpandListener listener);
+
+    boolean expandActionView();
+
+    boolean collapseActionView();
+
+    boolean isActionViewExpanded();
 
     boolean hasSubMenu();
 

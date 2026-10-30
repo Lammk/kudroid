@@ -14,18 +14,25 @@ namespace kuart {
 
 class DexFrame {
 public:
+    // Most methods use far fewer registers than this. Keeping them inline avoids one
+    // heap allocation per Java call, which dominates the cost of small methods.
+    static constexpr size_t kInlineRegisters = 32;
+
     explicit DexFrame(const DexMethod* method)
-        : method_(method), registers_(method != nullptr ? method->registers_size : 0) {}
+        : method_(method),
+          register_count_(method != nullptr ? method->registers_size : 0) {
+        if (register_count_ > kInlineRegisters) registers_.resize(register_count_);
+    }
 
     const DexMethod* method() const { return method_; }
 
-    size_t NumRegisters() const { return registers_.size(); }
+    size_t NumRegisters() const { return register_count_; }
 
     DexValue Get(uint32_t vreg) const {
-        return vreg < registers_.size() ? registers_[vreg] : DexValue();
+        return vreg < register_count_ ? registers()[vreg] : DexValue();
     }
     void Set(uint32_t vreg, DexValue v) {
-        if (vreg < registers_.size()) registers_[vreg] = v;
+        if (vreg < register_count_) registers()[vreg] = v;
     }
 
     // The register array itself, for compiled code.
@@ -34,8 +41,12 @@ public:
     // keeping them in machine registers, which is what lets compiled code and the
     // interpreter share a frame: either can run at any instruction boundary and see the
     // state the other left.
-    DexValue* registers() { return registers_.data(); }
-    const DexValue* registers() const { return registers_.data(); }
+    DexValue* registers() {
+        return register_count_ <= kInlineRegisters ? inline_registers_ : registers_.data();
+    }
+    const DexValue* registers() const {
+        return register_count_ <= kInlineRegisters ? inline_registers_ : registers_.data();
+    }
 
     int32_t GetInt(uint32_t vreg) const { return Get(vreg).i; }
     int64_t GetLong(uint32_t vreg) const { return Get(vreg).j; }
@@ -53,7 +64,7 @@ public:
     // `this` for instance methods.
     uint32_t FirstArgRegister() const {
         if (method_ == nullptr) return 0;
-        const uint32_t regs = method_->registers_size;
+        const uint32_t regs = register_count_;
         const uint32_t ins = method_->ins_size;
         return regs >= ins ? regs - ins : 0;
     }
@@ -75,6 +86,8 @@ public:
 
 private:
     const DexMethod* method_ = nullptr;
+    uint32_t register_count_ = 0;
+    DexValue inline_registers_[kInlineRegisters];
     std::vector<DexValue> registers_;
     DexValue result_;
     uint32_t dex_pc_ = 0;

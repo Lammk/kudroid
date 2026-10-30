@@ -22,6 +22,7 @@
 #include "kudroid/platform/MediaShim.h"
 #include "kudroid/platform/MediaPlayerHost.h"
 #include "kudroid/kuart/VmLock.h"
+#include "kudroid/platform/ThermalShim.h"
 
 #include "dex/dex_file-inl.h"
 
@@ -75,6 +76,7 @@ struct Runtime {
 
 Runtime* g_rt = nullptr;
 std::atomic<bool> g_surfaceChangePending{false};
+std::atomic<int> g_pendingDarkMode{-1};
 std::mutex g_mtx;
 std::string g_current_app_dir;
 void (*g_log_cb)(const char*) = nullptr;
@@ -244,6 +246,19 @@ bool EnsureTouchBuffers(int count) {
 }
 }  // namespace
 
+extern "C" void kuart_post_dark_mode(int is_dark) {
+    g_pendingDarkMode.store(is_dark != 0 ? 1 : 0, std::memory_order_release);
+    kudroid_looper_wake_main();
+}
+
+extern "C" void kuart_dark_mode_drain_pending(void) {
+    if (g_rt == nullptr || !g_rt->ready) return;
+    const int mode = g_pendingDarkMode.exchange(-1, std::memory_order_acq_rel);
+    if (mode < 0) return;
+    DexValue arg = DexValue::Int(mode);
+    CallActivityThreadStatic("postDarkModeChanged", "(Z)V", &arg, 1);
+}
+
 extern "C" void kuart_post_surface_changed(void) {
     g_surfaceChangePending.store(true, std::memory_order_release);
     kudroid_looper_wake_main();
@@ -404,19 +419,15 @@ extern "C" void kuart_set_missing_class_log_path(const char* path) {
 }
 
 extern "C" int kuart_init(const char* app_dir) {
-    std::lock_guard<std::mutex> lock(g_mtx);
+    std::unique_lock<std::mutex> lock(g_mtx);
     const std::string requested_dir = (app_dir != nullptr) ? app_dir : "";
-    if (g_rt != nullptr && g_rt->ready) {
+    while (g_rt != nullptr && g_rt->ready) {
         if (requested_dir.empty() || requested_dir == g_current_app_dir) {
             return 1;
         }
-        TouchQueue().reset(false);
-        // Same slot hazard as kuart_shutdown: the previous run's looper may
-        // still be parked in nativePollOnce on a dead runtime.
-        kudroid_looper_reset_main();
-        delete g_rt;
-        g_rt = nullptr;
-        g_current_app_dir.clear();
+        lock.unlock();
+        kuart_shutdown();
+        lock.lock();
     }
 
     auto rt = std::make_unique<Runtime>();
@@ -523,6 +534,8 @@ extern "C" int kuart_init(const char* app_dir) {
 }
 
 extern "C" void kuart_shutdown(void) {
+    kudroid_thermal_reset();
+    kudroid::frame_pacer_reset_for_relaunch();
     TouchQueue().reset(false);
     // Touch injection wakes the global main slot; clear it before freeing the
     // runtime so a crashed run's still-parked looper can never wake into it.
@@ -534,7 +547,11 @@ extern "C" void kuart_shutdown(void) {
          ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
+    kudroid::kuart::VmLockGuard guard;
     std::lock_guard<std::mutex> lock(g_mtx);
+    if (g_rt != nullptr) {
+        kudroid::kuart::LibCoreDiscardFrameCallbacks(g_rt->interpreter.get());
+    }
     if (g_rt != nullptr && !g_rt->oat_path.empty() && !g_rt->oat.empty()) {
         // Save what this run learned. A failure is not worth reporting as an error: the
         // consequence is a slower start next time, not a broken one.
@@ -550,10 +567,6 @@ extern "C" void kuart_shutdown(void) {
     delete g_rt;
     g_rt = nullptr;
     g_current_app_dir.clear();
-    // The pacer thread outlives the runtime by design (detached); without a
-    // full stop here it keeps dispatching the dead runtime's callbacks —
-    // freed DexObjects — into whatever app launches next.
-    kudroid::frame_pacer_reset_for_relaunch();
     // ResolveMethod's stub cache is keyed by DexClass* of the dead heap:
     // serving it to the next app is a use-after-free. Drop it with the heap.
     kudroid::kuart::ClearResolveCaches();
@@ -832,10 +845,13 @@ extern "C" void kuart_post_touch_event_ex(int action, int pointerCount, const in
 namespace {
 
 struct HostEvent {
-    enum Kind { kText, kBackspace, kPermission } kind;
+    enum Kind { kText, kBackspace, kPermission, kKey } kind;
     int code = 0;
     std::string first;
     std::string second;
+    int action = 0;
+    int64_t downTime = 0;
+    int64_t eventTime = 0;
 };
 
 std::mutex g_hostEventMutex;
@@ -860,6 +876,14 @@ extern "C" void kuart_dispatch_delete_backward(void) {
     PushHostEvent({HostEvent::kBackspace, 0, std::string(), std::string()});
 }
 
+extern "C" void kuart_dispatch_key_event(int action, int keyCode, int64_t downTimeNanos, int64_t eventTimeNanos) {
+    HostEvent event{HostEvent::kKey, keyCode, {}, {}};
+    event.action = action;
+    event.downTime = downTimeNanos / 1000000ll;
+    event.eventTime = eventTimeNanos / 1000000ll;
+    PushHostEvent(std::move(event));
+}
+
 extern "C" void kuart_dispatch_permission_result(int requestCode, const char* permissionsCsv,
                                                  const char* resultsCsv) {
     if (permissionsCsv == nullptr || resultsCsv == nullptr) return;
@@ -875,6 +899,12 @@ extern "C" void kuart_host_events_drain(void) {
     }
     for (const HostEvent& event : events) {
         switch (event.kind) {
+            case HostEvent::kKey: {
+                const DexValue args[4] = { DexValue::Int(event.action), DexValue::Int(event.code),
+                    DexValue::Long(event.downTime), DexValue::Long(event.eventTime) };
+                CallActivityThreadStatic("postKeyEvent", "(IIJJ)V", args, 4);
+                break;
+            }
             case HostEvent::kText: {
                 const DexValue arg = DexValue::Ref(
                     reinterpret_cast<DexObject*>(g_rt->linker.NewString(event.first.c_str())));

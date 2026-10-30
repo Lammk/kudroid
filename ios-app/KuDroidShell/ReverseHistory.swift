@@ -178,7 +178,7 @@ struct ReverseHistoryView: View {
                 }
                 ForEach(model.items, id: \.id) { item in
                     HStack(spacing: 12) {
-                        Image(systemName: "shippingbox.fill").foregroundColor(.green)
+                        Image(systemName: "shippingbox.fill").foregroundColor(.primary)
                         VStack(alignment: .leading, spacing: 4) {
                             Text(item.name).font(.headline).lineLimit(2)
                             if let metadata = item.metadata {
@@ -233,7 +233,6 @@ struct ReverseHistoryView: View {
             } message: { Text(model.error ?? "") }
         }
         .navigationViewStyle(.stack)
-        .preferredColorScheme(.dark)
         .sheet(item: $sharing, onDismiss: { model.reload() }) { item in IPAActivitySheet(url: item.url) }
     }
 }

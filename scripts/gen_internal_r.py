@@ -21,7 +21,7 @@ STYLEABLES = [
     "Theme", "Window", "View", "ViewTag", "Include", "ViewGroup", "ViewStub",
     "ViewGroup_Layout", "ViewGroup_MarginLayout", "FrameLayout", "FrameLayout_Layout",
     "LinearLayout", "LinearLayout_Layout", "RelativeLayout", "RelativeLayout_Layout",
-    "TextView", "ImageView", "ProgressBar", "CompoundButton", "ScrollView",
+    "TextView", "TextAppearance", "ImageView", "ProgressBar", "CompoundButton", "ScrollView",
     "ViewDrawableStates", "DrawableStates", "Drawable", "DrawableWrapper", "DrawableCorners",
     "StateListDrawable", "StateListDrawableItem", "ColorDrawable", "BitmapDrawable",
     "NinePatchDrawable", "ShapeDrawable", "GradientDrawable", "GradientDrawableSize",

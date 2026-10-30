@@ -11,6 +11,8 @@
 #include "kudroid/APKExtractor.h"
 #include "kudroid/ExecMemory.h"
 #include "kudroid/Log.h"
+#include "kudroid/platform/InputShim.h"
+#include "kudroid/platform/GuestClock.h"
 
 #include <atomic>
 #include <chrono>
@@ -72,6 +74,10 @@ extern "C" const char* kudroid_install_apk(const char* apkPath) {
             if (!(std::isalnum(static_cast<unsigned char>(character)) || character == '_' || character == '-' || character == '.')) {
                 character = '_';
             }
+        }
+        if (pkgId.empty() || pkgId == "." || pkgId == "..") {
+            log += "[kudroid_apk] ERROR: invalid package directory name\n";
+            return strdup(log.c_str());
         }
         auto& remapper = kudroid::VFSPathRemapper::getInstance();
         const std::filesystem::path appDir = std::filesystem::path(remapper.androidRoot()) /
@@ -305,6 +311,42 @@ extern "C" void kudroid_set_requested_orientation(int orientation) {
 
 extern "C" int kudroid_get_requested_orientation(void) {
     return g_requestedOrientation.load();
+}
+
+static std::atomic<int> g_isDarkMode{0};
+extern "C" void kuart_post_dark_mode(int is_dark);
+
+extern "C" void kudroid_set_dark_mode(int is_dark) {
+    const int val = is_dark != 0 ? 1 : 0;
+    const int prev = g_isDarkMode.exchange(val);
+    if (prev != val) {
+        fprintf(stderr, "[KuDroidCore] System dark mode changed: %d\n", val);
+        kuart_post_dark_mode(val);
+    }
+}
+
+extern "C" int kudroid_get_dark_mode(void) {
+    return g_isDarkMode.load();
+}
+
+namespace {
+std::mutex g_safeAreaMutex;
+int g_safeAreaEdges[4] = {};
+}
+
+extern "C" void kudroid_set_safe_area_insets(int left, int top, int right, int bottom) {
+    const int edges[4] = {std::max(0, left), std::max(0, top), std::max(0, right), std::max(0, bottom)};
+    {
+        std::lock_guard<std::mutex> lock(g_safeAreaMutex);
+        if (std::memcmp(edges, g_safeAreaEdges, sizeof(edges)) == 0) return;
+        std::memcpy(g_safeAreaEdges, edges, sizeof(edges));
+    }
+    kuart_post_surface_changed();
+}
+
+extern "C" void kudroid_get_safe_area_insets(int* edges) {
+    std::lock_guard<std::mutex> lock(g_safeAreaMutex);
+    std::memcpy(edges, g_safeAreaEdges, sizeof(g_safeAreaEdges));
 }
 
 extern "C" JNIEXPORT void JNICALL Java_android_app_Activity_setRequestedOrientation_1native(JNIEnv* env, jclass clazz, jint orientation) {

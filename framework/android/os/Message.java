@@ -16,6 +16,8 @@ public final class Message {
     public int arg2;
     /** arbitrary object to send to the destination. */
     public Object obj;
+    /** Where a reply to this message should be sent. */
+    public Messenger replyTo;
     /** handler will handle this message. */
     public Handler target;
     /** optional callback runnable executed on dispatch. */

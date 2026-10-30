@@ -71,6 +71,10 @@ public final class Configuration implements Parcelable, Comparable<Configuration
     public static final int SCREENLAYOUT_LONG_MASK = 0x30;
     public static final int SCREENLAYOUT_LONG_NO = 0x10;
     public static final int SCREENLAYOUT_LONG_YES = 0x20;
+    public static final int SCREENLAYOUT_LAYOUTDIR_UNDEFINED = 0x00;
+    public static final int SCREENLAYOUT_LAYOUTDIR_LTR = 0x40;
+    public static final int SCREENLAYOUT_LAYOUTDIR_RTL = 0x80;
+    public static final int SCREENLAYOUT_LAYOUTDIR_MASK = 0xc0;
 
     public static final int SCREENLAYOUT_ROUND_UNDEFINED = 0x00;
     public static final int SCREENLAYOUT_ROUND_MASK = 0x300;

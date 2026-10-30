@@ -6,7 +6,11 @@ class ByteArrayBuffer extends ByteBuffer {
     }
 
     ByteArrayBuffer(byte[] array, int offset, int length, boolean isReadOnly) {
-        super(0, length, array, offset);
+        super(0, array.length, array, 0);
+        if (offset < 0 || length < 0 || offset > array.length - length)
+            throw new IndexOutOfBoundsException();
+        position(offset);
+        limit(offset + length);
         this.isReadOnly = isReadOnly;
     }
 

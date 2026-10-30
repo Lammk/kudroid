@@ -79,7 +79,18 @@ public class Intent implements android.os.Parcelable, Cloneable {
 
     public Intent setData(android.net.Uri data) {
         mData = data;
+        mType = null;
         return this;
+    }
+
+    public String getScheme() { return mData != null ? mData.getScheme() : null; }
+    public String resolveType(Context context) { return resolveType(context.getContentResolver()); }
+    public String resolveType(ContentResolver resolver) {
+        if (mType != null) return mType;
+        return mData != null && "content".equals(mData.getScheme()) ? resolver.getType(mData) : null;
+    }
+    public String resolveTypeIfNeeded(ContentResolver resolver) {
+        return mComponent != null ? mType : resolveType(resolver);
     }
 
     public Intent setClass(Context packageContext, Class<?> cls) {
@@ -264,6 +275,7 @@ public class Intent implements android.os.Parcelable, Cloneable {
     public static final String CATEGORY_HOME = "android.intent.category.HOME";
     public static final String CATEGORY_BROWSABLE = "android.intent.category.BROWSABLE";
 
+    public static final int FLAG_ACTIVITY_NO_HISTORY = 0x40000000;
     public static final int FLAG_ACTIVITY_NEW_TASK = 0x10000000;
     public static final int FLAG_ACTIVITY_SINGLE_TOP = 0x20000000;
     public static final int FLAG_ACTIVITY_CLEAR_TOP = 0x04000000;
@@ -316,6 +328,36 @@ public class Intent implements android.os.Parcelable, Cloneable {
         return mExtras != null ? (T) mExtras.getParcelable(name) : null;
     }
 
+    public <T extends android.os.Parcelable> java.util.ArrayList<T> getParcelableArrayListExtra(String name) {
+        return mExtras != null ? mExtras.<T>getParcelableArrayList(name) : null;
+    }
+
+    public Intent putParcelableArrayListExtra(String name, java.util.ArrayList<? extends android.os.Parcelable> value) {
+        if (mExtras == null) mExtras = new Bundle();
+        mExtras.putParcelableArrayList(name, value);
+        return this;
+    }
+
+    public java.util.ArrayList<String> getStringArrayListExtra(String name) {
+        return mExtras != null ? mExtras.getStringArrayList(name) : null;
+    }
+
+    public Intent putStringArrayListExtra(String name, java.util.ArrayList<String> value) {
+        if (mExtras == null) mExtras = new Bundle();
+        mExtras.putStringArrayList(name, value);
+        return this;
+    }
+
+    public java.util.ArrayList<Integer> getIntegerArrayListExtra(String name) {
+        return mExtras != null ? mExtras.getIntegerArrayList(name) : null;
+    }
+
+    public Intent putIntegerArrayListExtra(String name, java.util.ArrayList<Integer> value) {
+        if (mExtras == null) mExtras = new Bundle();
+        mExtras.putIntegerArrayList(name, value);
+        return this;
+    }
+
     public java.io.Serializable getSerializableExtra(String name) {
         return mExtras != null ? mExtras.getSerializable(name) : null;
     }
@@ -351,6 +393,7 @@ public class Intent implements android.os.Parcelable, Cloneable {
 
     public Intent setType(String type) {
         mType = type;
+        mData = null;
         return this;
     }
 

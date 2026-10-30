@@ -98,7 +98,9 @@ public:
     // Low enough that a loop reaches it during startup, high enough that the thousands
     // of methods called once or twice — class initialisers, getters, framework glue —
     // are never compiled. Compiling those costs more than interpreting them.
-    static constexpr uint32_t kJitThreshold = 64;
+    // Compile on first execution. Methods the compiler cannot handle are still
+    // interpreted, but no supported method pays an interpretation warm-up first.
+    static constexpr uint32_t kJitThreshold = 0;
 
     // Throw exception by class descriptor.
     void ThrowException(const char* descriptor, const std::string& message);
@@ -193,7 +195,8 @@ private:
 
     DexClass* ResolveClass(const DexMethod* context, uint32_t type_idx);
     DexField* ResolveField(const DexMethod* context, uint32_t field_idx, bool is_static);
-    DexMethod* ResolveMethod(const DexMethod* context, uint32_t method_idx);
+    DexMethod* ResolveMethod(const DexMethod* context, uint32_t method_idx, bool is_static,
+                             bool exact_owner = false);
 
     // Instance-field safety: the object's class must be the field's class or a
     // subclass, and [off, off+width) must lie inside the object. A stale or
@@ -294,6 +297,8 @@ private:
 // are keyed by the dying heap's DexClass* and would use-after-free the next
 // app's method table.
 void ClearResolveCaches();
+// Invalidate thread-local resolutions before a class loader releases its classes.
+void ClearFastResolutionCaches();
 
 }  // namespace kuart
 }  // namespace kudroid

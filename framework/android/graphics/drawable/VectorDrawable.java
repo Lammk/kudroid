@@ -1,6 +1,7 @@
 package android.graphics.drawable;
 
 import android.content.res.Resources;
+import android.content.res.ColorStateList;
 import android.content.res.XmlResourceParser;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
@@ -15,12 +16,15 @@ public class VectorDrawable extends Drawable {
     private static final int STRIDE = 16;
     private final ArrayList<String> paths = new ArrayList<>();
     private final ArrayList<float[]> commands = new ArrayList<>();
-    private final ArrayList<Integer> colors = new ArrayList<>();
+    private final ArrayList<ColorStateList> colors = new ArrayList<>();
     private float viewportWidth, viewportHeight, rootAlpha = 1;
     private int width, height, alpha = 255;
     private Bitmap cache;
     private int cacheWidth, cacheHeight;
-    private Integer tint;
+    private ColorStateList tint;
+    private android.graphics.PorterDuff.Mode tintMode = android.graphics.PorterDuff.Mode.SRC_IN;
+    private android.graphics.ColorFilter colorFilter;
+    private final android.graphics.Paint paint = new android.graphics.Paint();
 
     private static native int[] nativeRasterize(String[] paths, float[] commands, int[] colors,
             int width, int height, float viewportWidth, float viewportHeight);
@@ -52,11 +56,17 @@ public class VectorDrawable extends Drawable {
         if (v.type >= 16 && v.type <= 31) return v.data;
         throw new Resources.NotFoundException("Invalid numeric vector attribute " + name);
     }
-    private static int color(Resources r, Resources.Theme theme, XmlResourceParser p, String name, int def) {
+    private static ColorStateList color(Resources r, Resources.Theme theme, XmlResourceParser p, String name, int def) {
         TypedValue v = value(r, theme, p, name);
-        if (v == null || v.type == TypedValue.TYPE_NULL || (v.type == 1 && v.data == 0)) return def;
-        if (v.type >= 28 && v.type <= 31) return v.data;
-        throw new Resources.NotFoundException("Unsupported vector color " + name);
+        if (v == null || v.type == TypedValue.TYPE_NULL || (v.type == 1 && v.data == 0))
+            return ColorStateList.valueOf(def);
+        if (v.type >= 28 && v.type <= 31) return ColorStateList.valueOf(v.data);
+        if (v.resourceId != 0) {
+            ColorStateList list = r.getColorStateList(v.resourceId, theme);
+            if (list != null) return list;
+        }
+        throw new Resources.NotFoundException("Unsupported vector color " + name +
+                " type=" + v.type + " resource=0x" + Integer.toHexString(v.resourceId));
     }
     public static VectorDrawable create(Resources r, XmlResourceParser p, Resources.Theme theme)
             throws XmlPullParserException, java.io.IOException {
@@ -67,8 +77,7 @@ public class VectorDrawable extends Drawable {
         v.width = Math.round(number(r, theme, p, "width", 0));
         v.height = Math.round(number(r, theme, p, "height", 0));
         v.rootAlpha = number(r, theme, p, "alpha", 1);
-        TypedValue tint = value(r, theme, p, "tint");
-        if (tint != null && tint.type >= 28 && tint.type <= 31) v.tint = tint.data;
+        if (value(r, theme, p, "tint") != null) v.tint = color(r, theme, p, "tint", 0);
         if (!(v.viewportWidth > 0) || !(v.viewportHeight > 0) ||
                 Float.isInfinite(v.viewportWidth) || Float.isInfinite(v.viewportHeight) ||
                 v.width <= 0 || v.height <= 0) throw new XmlPullParserException("Invalid vector size");
@@ -76,7 +85,7 @@ public class VectorDrawable extends Drawable {
         while (p.next() != XmlPullParser.END_DOCUMENT) {
             if (p.getEventType() == XmlPullParser.END_TAG) {
                 if (p.getDepth() == depth) break;
-                if ("group".equals(p.getName())) v.add(null, new float[]{3}, 0, 0);
+                if ("group".equals(p.getName())) v.add(null, new float[]{3}, null, null);
                 continue;
             }
             if (p.getEventType() != XmlPullParser.START_TAG) continue;
@@ -90,7 +99,7 @@ public class VectorDrawable extends Drawable {
                 float c = (float) Math.cos(radians), s = (float) Math.sin(radians);
                 float a = c * sx, b = s * sx, cc = -s * sy, d = c * sy;
                 v.add(null, new float[]{2, a, b, cc, d, tx + px - a * px - cc * py,
-                        ty + py - b * px - d * py}, 0, 0);
+                        ty + py - b * px - d * py}, null, null);
             } else if ("path".equals(tag) || "clip-path".equals(tag)) {
                 if ("path".equals(tag)) pathCount++;
                 TypedValue data = value(r, theme, p, "pathData");
@@ -114,7 +123,7 @@ public class VectorDrawable extends Drawable {
         if (pathCount == 0) throw new XmlPullParserException("Vector has no paths");
         return v;
     }
-    private void add(String path, float[] c, int fill, int stroke) {
+    private void add(String path, float[] c, ColorStateList fill, ColorStateList stroke) {
         float[] command = new float[STRIDE]; System.arraycopy(c, 0, command, 0, c.length);
         commands.add(command); paths.add(path); colors.add(fill); colors.add(stroke);
     }
@@ -122,10 +131,32 @@ public class VectorDrawable extends Drawable {
     @Override public int getIntrinsicHeight() { return height; }
     @Override public void setAlpha(int value) { alpha = Math.max(0, Math.min(255, value)); cache = null; invalidateSelf(); }
     public int getAlpha() { return alpha; }
-    @Override public void setTint(int color) { tint = color; cache = null; invalidateSelf(); }
-    @Override public void setTintList(android.content.res.ColorStateList list) {
-        tint = list == null ? null : list.getColorForState(getState(), list.getDefaultColor());
-        cache = null; invalidateSelf();
+    @Override public void setTint(int color) { setTintList(ColorStateList.valueOf(color)); }
+    @Override public void setTintList(ColorStateList list) {
+        tint = list;
+        invalidateSelf();
+    }
+    @Override public void setTintMode(android.graphics.PorterDuff.Mode mode) { tintMode = mode; invalidateSelf(); }
+    @Override public void setColorFilter(android.graphics.ColorFilter filter) { colorFilter = filter; invalidateSelf(); }
+    @Override public android.graphics.ColorFilter getColorFilter() { return colorFilter; }
+    @Override public boolean isStateful() {
+        if (tint != null && tint.isStateful()) return true;
+        for (ColorStateList list : colors) if (list != null && list.isStateful()) return true;
+        return false;
+    }
+    private int[] colorState = new int[0];
+    private static int stateColor(ColorStateList list, int[] state) {
+        return list == null ? 0 : list.getColorForState(state, list.getDefaultColor());
+    }
+    @Override protected boolean onStateChange(int[] state) {
+        boolean tintChanged = stateColor(tint, colorState) != stateColor(tint, state);
+        boolean changed = false;
+        for (ColorStateList list : colors)
+            changed |= stateColor(list, colorState) != stateColor(list, state);
+        colorState = state.clone();
+        if (changed) cache = null;
+        if (changed || tintChanged) invalidateSelf();
+        return changed || tintChanged;
     }
     @Override public void draw(Canvas canvas) {
         Rect bounds = getBounds(); int w = bounds.width(), h = bounds.height();
@@ -134,19 +165,21 @@ public class VectorDrawable extends Drawable {
             float[] operations = new float[commands.size() * STRIDE];
             int[] argb = new int[colors.size()];
             for (int i = 0; i < commands.size(); i++) System.arraycopy(commands.get(i), 0, operations, i * STRIDE, STRIDE);
-            for (int i = 0; i < argb.length; i++) argb[i] = colors.get(i);
+            for (int i = 0; i < argb.length; i++) argb[i] = stateColor(colors.get(i), getState());
             int[] pixels = nativeRasterize(paths.toArray(new String[paths.size()]), operations, argb,
                     w, h, viewportWidth, viewportHeight);
             if (pixels == null) throw new Resources.NotFoundException("Cannot rasterize vector drawable");
             for (int i = 0; i < pixels.length; i++) {
                 int pixel = pixels[i];
                 int a = Math.round((pixel >>> 24) * Math.max(0, Math.min(1, rootAlpha)) * alpha / 255);
-                if (tint != null) a = a * (tint >>> 24) / 255;
-                pixels[i] = (a << 24) | ((tint != null ? tint : pixel) & 0xffffff);
+                pixels[i] = (a << 24) | (pixel & 0xffffff);
             }
             cache = Bitmap.createBitmap(pixels, w, h, Bitmap.Config.ARGB_8888);
             cacheWidth = w; cacheHeight = h;
         }
-        canvas.drawBitmap(cache, bounds.left, bounds.top, null);
+        paint.setColorFilter(colorFilter != null ? colorFilter
+                : tint != null && tintMode != null ? new android.graphics.PorterDuffColorFilter(
+                        stateColor(tint, getState()), tintMode) : null);
+        canvas.drawBitmap(cache, bounds.left, bounds.top, paint);
     }
 }

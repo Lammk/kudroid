@@ -24,6 +24,8 @@ public final class Looper {
         if (current != null) {
             if (current.mQueue.isQuitting()) {
                 sThreadLocal.remove();
+            } else if (current == sMainLooper) {
+                return;
             } else {
                 throw new RuntimeException("Only one Looper may be created per thread");
             }
@@ -34,7 +36,7 @@ public final class Looper {
                     if (sThreadLocal.get() == sMainLooper) sThreadLocal.remove();
                     sMainLooper = null;
                 } else {
-                    throw new IllegalStateException("The main Looper has already been prepared.");
+                    return;
                 }
             }
             prepare(false);
@@ -105,4 +107,5 @@ public final class Looper {
     }
     public Thread getThread() { return mThread; }
     public MessageQueue getQueue() { return mQueue; }
+    public boolean isQuitting() { return mQueue != null && mQueue.isQuitting(); }
 }

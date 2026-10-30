@@ -62,6 +62,9 @@ public final class MotionEvent extends InputEvent {
     public static final int TOOL_TYPE_MOUSE = 3;
     public static final int TOOL_TYPE_ERASER = 4;
 
+    public static final int FLAG_IS_GENERATED_GESTURE = 0x8;
+    public static final int BUTTON_STYLUS_PRIMARY = 0x20;
+    public static final int BUTTON_STYLUS_SECONDARY = 0x40;
     public static final int BUTTON_PRIMARY = 1;
     public static final int BUTTON_SECONDARY = 2;
     public static final int BUTTON_TERTIARY = 4;
@@ -91,6 +94,8 @@ public final class MotionEvent extends InputEvent {
     private float mY;
     private float mOffsetX;
     private float mOffsetY;
+    private float[] mRawXs;
+    private float[] mRawYs;
     private long mEventTime;
     private final int mPointerCount;
     // Per-pointer state, one entry per index in the event's pointer array.
@@ -199,6 +204,8 @@ public final class MotionEvent extends InputEvent {
         }
         ev.mOffsetX = other.mOffsetX;
         ev.mOffsetY = other.mOffsetY;
+        ev.mRawXs = other.mRawXs == null ? null : other.mRawXs.clone();
+        ev.mRawYs = other.mRawYs == null ? null : other.mRawYs.clone();
         return ev;
     }
 
@@ -215,6 +222,32 @@ public final class MotionEvent extends InputEvent {
 
     public void setAction(int action) {
         mAction = action;
+    }
+
+    /** Transform local pointer coordinates while retaining raw screen coordinates. */
+    public void transform(android.graphics.Matrix matrix) {
+        if (matrix == null) throw new IllegalArgumentException("matrix must not be null");
+        if (mRawXs == null) {
+            mRawXs = new float[mPointerCount];
+            mRawYs = new float[mPointerCount];
+            for (int i = 0; i < mPointerCount; i++) {
+                mRawXs[i] = mPointerXs[i] - mOffsetX;
+                mRawYs[i] = mPointerYs[i] - mOffsetY;
+            }
+        }
+        float[] points = new float[mPointerCount * 2];
+        float[] deltas = new float[mPointerCount * 2];
+        for (int i = 0; i < mPointerCount; i++) {
+            points[i * 2] = mPointerXs[i]; points[i * 2 + 1] = mPointerYs[i];
+            deltas[i * 2] = mPointerDeltasX[i]; deltas[i * 2 + 1] = mPointerDeltasY[i];
+        }
+        matrix.mapPoints(points);
+        matrix.mapVectors(deltas);
+        for (int i = 0; i < mPointerCount; i++) {
+            mPointerXs[i] = points[i * 2]; mPointerYs[i] = points[i * 2 + 1];
+            mPointerDeltasX[i] = deltas[i * 2]; mPointerDeltasY[i] = deltas[i * 2 + 1];
+        }
+        mX = mPointerXs[0]; mY = mPointerYs[0];
     }
 
     /**
@@ -317,19 +350,19 @@ public final class MotionEvent extends InputEvent {
 
     /** Coordinates before translation into a child view. */
     public float getRawX() {
-        return mX - mOffsetX;
+        return getRawX(0);
     }
 
     public float getRawY() {
-        return mY - mOffsetY;
+        return getRawY(0);
     }
 
     public float getRawX(int pointerIndex) {
-        return getX(pointerIndex) - mOffsetX;
+        return mRawXs == null ? getX(pointerIndex) - mOffsetX : mRawXs[pointerIndex];
     }
 
     public float getRawY(int pointerIndex) {
-        return getY(pointerIndex) - mOffsetY;
+        return mRawYs == null ? getY(pointerIndex) - mOffsetY : mRawYs[pointerIndex];
     }
 
     /**

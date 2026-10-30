@@ -26,6 +26,8 @@ extern pthread_t g_mainThread;
 // ── AppLifecycle state, shared with GuestLibrary ─────────────────────────────
 // One in-flight run at a time: set by kudroid_run_apk, read by install/stop.
 extern std::atomic<bool> s_isApkRunning;
+// Private data can be reset only before guest threads have used this process.
+extern std::atomic<bool> s_guestRuntimeUsed;
 // Cooperative stop flag: poll loops check it and bail out early.
 extern std::atomic<bool> s_stopping;
 enum class ApkRunStartResult {

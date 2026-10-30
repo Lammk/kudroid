@@ -9,9 +9,17 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 JAVAC="${JAVA_HOME:+$JAVA_HOME/bin/}javac"
 JAVA="${JAVA_HOME:+$JAVA_HOME/bin/}java"
-"$JAVAC" -encoding UTF-8 -nowarn -source 8 -target 8 \
-    -bootclasspath "$ROOT/framework/build/classes" -d "$TMP/classes" "$@" 2>&1 | grep -v '^Note:\|warning:' || true
+if ! "$JAVAC" -encoding UTF-8 -nowarn -source 8 -target 8 \
+    -bootclasspath "$ROOT/framework/build/classes" -d "$TMP/classes" "$@" > "$TMP/javac.log" 2>&1; then
+    cat "$TMP/javac.log" >&2
+    exit 1
+fi
+sed '/^Note:/d; /warning:/d' "$TMP/javac.log"
 mkdir -p "$TMP/out"
-"$JAVA" -cp "$ROOT/third_party/d8/r8.jar" com.android.tools.r8.D8 --min-api 29 \
-    --output "$TMP/out" $(find "$TMP/classes" -name '*.class') 2>&1 | grep -v '^Warning\|^Info' || true
+if ! "$JAVA" -cp "$ROOT/third_party/d8/r8.jar" com.android.tools.r8.D8 --min-api 29 \
+    --output "$TMP/out" $(find "$TMP/classes" -name '*.class') > "$TMP/d8.log" 2>&1; then
+    cat "$TMP/d8.log" >&2
+    exit 1
+fi
+sed '/^Warning/d; /^Info/d' "$TMP/d8.log"
 mv "$TMP/out/classes.dex" "$OUT"

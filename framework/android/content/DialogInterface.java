@@ -59,8 +59,7 @@ public interface DialogInterface {
      */
     void cancel();
 
-    public static class OnMultiChoiceClickListener {
-        public OnMultiChoiceClickListener() {}
+    public interface OnMultiChoiceClickListener {
+        void onClick(DialogInterface dialog, int which, boolean isChecked);
     }
-
 }

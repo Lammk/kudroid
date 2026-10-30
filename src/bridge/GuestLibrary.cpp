@@ -16,8 +16,10 @@
 #include "kudroid/DeviceProfile.h"
 #include "kudroid/platform/AssetShim.h"
 #include "kudroid/platform/InputShim.h"
+#include "kudroid/platform/ThermalShim.h"
 #include "kudroid/platform/FramePacer.h"
 #include "kudroid/Log.h"
+#include "kudroid/ExecMemory.h"
 
 #include <cstdio>
 #include <chrono>
@@ -335,6 +337,7 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
 
     struct RunCompletionGuard {
         ~RunCompletionGuard() {
+            kudroid_thermal_reset();
             kudroid_looper_reset_main();
             kudroid::frame_pacer_reset_for_relaunch();
             complete_apk_run();
@@ -358,10 +361,12 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
     // measure THIS run's presents, not the previous session's last swap.
     kudroid_frame_presented_reset();
 
+    s_guestRuntimeUsed.store(true);
     kudroid::native_run_begin();
     kudroid::native_phase("apk-run-enter");
 
     std::string log;
+    kudroid_boot_mark("jit-prepare-start");
     appendTestHeader(log, "Run APK Native Libraries", appName);
     kudroid::bionic_shim_reset_trace();
 
@@ -398,6 +403,8 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
         return strdup(log.c_str());
     }
 
+    kudroid::ExecMemory::LogState();
+    kudroid_boot_mark("jit-ready");
     log += "[kudroid_core] Phase: init LibraryManager\n";
 
     if (!appName || !*appName) {
@@ -492,6 +499,8 @@ extern "C" const char* kudroid_run_apk(const char* appName) {
                 }
             }
         }
+
+        kudroid_boot_mark("manifest-ready");
 
         // Android standard environment variables
         ::setenv("ANDROID_ROOT", "/system", 1);

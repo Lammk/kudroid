@@ -1,5 +1,8 @@
 package java.util.concurrent.atomic;
 
+import java.util.function.IntUnaryOperator;
+import java.util.function.IntBinaryOperator;
+
 public class AtomicInteger extends Number {
 
     private volatile int value;
@@ -15,11 +18,11 @@ public class AtomicInteger extends Number {
         return value;
     }
 
-    public final void set(int newValue) {
+    public final synchronized void set(int newValue) {
         value = newValue;
     }
 
-    public final void lazySet(int newValue) {
+    public final synchronized void lazySet(int newValue) {
         value = newValue;
     }
 
@@ -86,5 +89,56 @@ public class AtomicInteger extends Number {
 
     public String toString() {
         return Integer.toString(value);
+    }
+
+    public final int getAndUpdate(IntUnaryOperator f) {
+        int prev, next;
+        do {
+            prev = get();
+            next = f.applyAsInt(prev);
+        } while (!compareAndSet(prev, next));
+        return prev;
+    }
+
+    public final int updateAndGet(IntUnaryOperator f) {
+        int prev, next;
+        do {
+            prev = get();
+            next = f.applyAsInt(prev);
+        } while (!compareAndSet(prev, next));
+        return next;
+    }
+
+    public final int getAndAccumulate(int x, IntBinaryOperator f) {
+        int prev, next;
+        do {
+            prev = get();
+            next = f.applyAsInt(prev, x);
+        } while (!compareAndSet(prev, next));
+        return prev;
+    }
+
+    public final int accumulateAndGet(int x, IntBinaryOperator f) {
+        int prev, next;
+        do {
+            prev = get();
+            next = f.applyAsInt(prev, x);
+        } while (!compareAndSet(prev, next));
+        return next;
+    }
+
+    public final int getPlain() { return get(); }
+    public final void setPlain(int newValue) { set(newValue); }
+    public final int getOpaque() { return get(); }
+    public final void setOpaque(int newValue) { set(newValue); }
+    public final int getAcquire() { return get(); }
+    public final void setRelease(int newValue) { set(newValue); }
+    public final synchronized int compareAndExchange(int expect, int update) {
+        int witness = get();
+        if (witness == expect) set(update);
+        return witness;
+    }
+    public final boolean weakCompareAndSetPlain(int expect, int update) {
+        return compareAndSet(expect, update);
     }
 }
